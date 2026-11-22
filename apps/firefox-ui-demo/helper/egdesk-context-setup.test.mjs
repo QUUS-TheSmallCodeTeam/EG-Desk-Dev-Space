@@ -171,6 +171,20 @@ test('a finished plan becomes a proposal the person confirms; a changed plan nee
   assert.equal((await run('v2 배포안', 'completed', 0.6)).result.status, 'uncertain')
 })
 
+test('an exact top tie in transition kind does not produce a timeline proposal', async () => {
+  const { client } = fakeClient(question => question.name === 'plan'
+    ? { type: 'choice', choice: 'v2 배포안', confidence: 0.95,
+      probabilities: [{ value: 'v2 배포안', probability: 0.95 }, { value: 'no listed plan', probability: 0.05 }] }
+    : { type: 'choice', choice: 'completed', confidence: 0.95,
+      probabilities: [{ value: 'completed', probability: 0.5 }, { value: 'cancelled', probability: 0.5 }] })
+  const result = await planTimelineTransition({ message: 'v2 배포 상태가 바뀌었어.',
+    openItems: [{ id: 'v2', title: 'v2 배포안', timeSlice: 'planned' }], client })
+  assert.equal(result.status, 'uncertain')
+  assert.equal(result.receipt.plan.state, 'accepted')
+  assert.deepEqual(result.receipt.kind, { value: 'completed', confidence: 0.95, state: 'uncertain' })
+  assert.equal(result.proposal, undefined)
+})
+
 test('branch save offer and activity row', async () => {
   const { client } = fakeClient(() => predicate(0.8))
   assert.deepEqual(await judgeBranchSave({ message: 'm', answerText: 'a', client }), { status: 'ready', offer: true, probability: 0.8, usage: USAGE })

@@ -9,7 +9,7 @@ const USAGE = Object.freeze({ inputTokens: 300, cachedTokens: 0, cacheWriteToken
 const element = (ref, role, label, extra = {}) => ({ ref, role, label, tag: role === 'link' ? 'a' : role === 'button' ? 'button' : 'input', href: '', value: '', disabled: false, ...extra })
 const REPORTS = 'https://example.com/reports'
 const Q3 = 'https://example.com/reports/2026q3'
-function page(url, elements, text = ['Reports']) { return { url, revision: 1, text, interactiveElements: elements, viewport: { width: 1280, height: 800 } } }
+function page(url, elements, text = ['Reports']) { return { url, documentId: 'fixture-doc', revision: 1, text, interactiveElements: elements, viewport: { width: 1280, height: 800 } } }
 const LIST_PAGE = page(REPORTS, [
   element('el_1', 'link', '2026 3분기 보고서', { href: Q3, bounds: { x: 10, y: 20, width: 120, height: 18 } }),
   element('el_2', 'link', '외부 사이트', { href: 'https://other.org/x' }),
@@ -105,10 +105,12 @@ test('a field nobody filled goes back as needs_free_text; with the value it fill
   const second = tools([searchPage, { ...searchPage, interactiveElements: [element('el_5', 'search', '검색', { value: '3분기 보고서' }), element('el_10', 'button', '검색 실행')] }])
   const { client, calls: asked } = pick('[B1] 검색 실행')
   const result = await runBrowserReflex({ cardId: 'card-1', goal: '3분기 보고서 검색', values: { '[F1] 검색': '3분기 보고서' }, callTool: second.callTool, client })
-  // The exact field name filled without a decision; the button needs an expected effect, so the model gets a suggestion.
+  // The supplied field fills only after classifying this observation; the button still needs an expected effect.
   assert.equal(second.calls[1].name, 'egdesk_browser_fill')
   assert.equal(second.calls[1].args.text, '3분기 보고서')
-  assert.equal(asked.length, 1)
+  assert.equal(asked.length, 2) // one page decision per fresh observation, no mapping request for an exact name
+  assert.equal(result.steps[0].decision.pageState, 'content')
+  assert.deepEqual(second.calls[1].args.postcondition, { kind: 'target-value', value: '3분기 보고서' })
   assert.equal(result.outcome, 'escalated')
   assert.equal(result.reason, 'press_needs_expected_effect')
   assert.equal(result.suggestion.ref, 'el_10')
@@ -118,17 +120,62 @@ test('named values are matched to fields one to one by the decision model', asyn
   const form = page('https://example.com/contact', [element('f_1', 'textbox', '이름'), element('f_2', 'email', '이메일')])
   const filled = { ...form, interactiveElements: [element('f_1', 'textbox', '이름', { value: '차민수' }), element('f_2', 'email', '이메일', { value: 'a@b.c' })] }
   const { calls, callTool } = tools([form, form, filled])
-  const { client, calls: asked } = decisions((question) => {
+  const { client, calls: asked } = decisions((question, request) => {
     if (question.name === 'field_0') return { type: 'choice', choice: '[F1] 이름', confidence: 0.9, probabilities: [{ value: '[F1] 이름', probability: 0.9 }, { value: '[F2] 이메일', probability: 0.05 }] }
     if (question.name === 'field_1') return { type: 'choice', choice: '[F2] 이메일', confidence: 0.92, probabilities: [{ value: '[F2] 이메일', probability: 0.92 }, { value: '[F1] 이름', probability: 0.04 }] }
-    if (question.name === 'next_step') return choice('goal_met')
+    const evidence = request.input[1].content
+    const filledName = evidence.includes('filled [F1]'), filledEmail = evidence.includes('filled [F2]')
+    if (question.name === 'next_step') return choice(filledEmail ? 'goal_met' : filledName ? '[F2] 이메일' : '[F1] 이름')
     if (question.name === 'page_state') return choice('content')
-    return { type: 'predicate', probability: 0.9 }
+    return { type: 'predicate', probability: filledEmail ? 0.9 : 0.1 }
   })
   const result = await runBrowserReflex({ cardId: 'card-1', goal: '문의 양식 채우기', values: { 성명: '차민수', 메일: 'a@b.c' }, callTool, client })
   assert.equal(result.outcome, 'done')
   assert.deepEqual(calls.filter(call => call.name === 'egdesk_browser_fill').map(call => [call.args.ref, call.args.text]), [['f_1', '차민수'], ['f_2', 'a@b.c']])
   assert.equal(asked.filter(request => request.questions[0].name === 'field_0').length, 1) // mapped once, reused
+})
+
+test('field assignments own distinct observed controls and do not retarget ambiguous labels', async () => {
+  const exact = '[F1] Name', backup = '[F2] Backup', indistinct = '[F2] Name', none = 'no matching field'
+  const first = element('f1', 'textbox', 'Name'), second = element('f2', 'textbox', 'Backup')
+  const sameLabel = element('f2', 'textbox', 'Name'), sameRef = element('f1', 'textbox', 'Backup')
+  async function fill(values, snapshots, mapAnswer) {
+    const { calls, callTool } = tools(snapshots.map(elements => page(REPORTS, elements)))
+    const { client, calls: asked } = decisions(question => {
+      if (question.name.startsWith('field_')) return mapAnswer(question)
+      if (question.name === 'page_state') return choice('content')
+      if (question.name === 'next_step') return choice(exact)
+      return { type: 'predicate', probability: .1 }
+    })
+    const result = await runBrowserReflex({ cardId: 'fixture', goal: 'Copy supplied values', values, callTool, client })
+    assert.equal(result.outcome, 'needs_free_text')
+    assert.ok(result.steps.every(step => step.decision?.kind === 'act' && step.decision?.pageState === 'content'))
+    const writes = calls.filter(call => call.name === 'egdesk_browser_fill').map(call => [call.args.ref, call.args.text])
+    const offers = asked.flatMap(request => request.questions.filter(question => question.name.startsWith('field_'))
+      .map(question => question.choices.map(option => option.value)))
+    return { writes, offers, unmatched: JSON.parse(reflexResultForModel(result)).unmatchedValues ?? [] }
+  }
+  const rank = (declared, rows) => ({ type: 'choice', choice: declared, confidence: .98,
+    probabilities: rows.map(([value, probability]) => ({ value, probability })) })
+  for (const values of [{ [exact]: 'explicit', alias: 'other' }, { alias: 'other', [exact]: 'explicit' }]) {
+    assert.deepEqual(await fill(values, [[first]], () => choice(exact)),
+      { writes: [['f1', 'explicit']], offers: [], unmatched: ['alias'] })
+  }
+  const values = { [exact]: 'explicit', alias: 'other' }
+  assert.deepEqual(await fill(values, [[first, second]], question => question.choices.some(option => option.value === exact)
+    ? rank(exact, [[exact, .95], [backup, .04], [none, .01]]) : rank(backup, [[backup, .91], [none, .09]])),
+  { writes: [['f1', 'explicit'], ['f2', 'other']], offers: [[backup, none]], unmatched: [] })
+  assert.deepEqual(await fill(values, [[first, second]], () => rank(none, [[none, .96], [backup, .04]])),
+    { writes: [['f1', 'explicit']], offers: [[backup, none]], unmatched: ['alias'] })
+  assert.deepEqual(await fill(values, [[first, sameRef]], () => choice(backup)),
+    { writes: [['f1', 'explicit']], offers: [], unmatched: ['alias'] })
+  assert.deepEqual(await fill({ earlier: 'lower', later: 'higher' }, [[first, sameRef]], question => question.name === 'field_0'
+    ? rank(exact, [[exact, .86], [none, .14]]) : rank(backup, [[backup, .94], [none, .06]])),
+  { writes: [['f1', 'higher']], offers: [[exact, backup, none], [exact, backup, none]], unmatched: ['earlier'] })
+  assert.deepEqual(await fill({ alias: 'other' }, [[first, sameLabel]], () => rank(exact, [[exact, .5], [indistinct, .5]])),
+    { writes: [], offers: [[exact, indistinct, none]], unmatched: ['alias'] })
+  assert.deepEqual(await fill({ [exact]: 'explicit', [indistinct]: 'other' }, [[first, sameLabel], [sameLabel, first]]),
+    { writes: [['f1', 'explicit']], offers: [], unmatched: [indistinct] })
 })
 
 test('sign-in walls hand off, uncertainty escalates, a dead decision model falls back', async () => {
@@ -174,3 +221,119 @@ test('the appended tool spec does not touch existing browser tool schemas', () =
   const text = reflexResultForModel({ outcome: 'escalated', reason: 'uncertain', ranked: [{ value: 'a', probability: 0.5 }], steps: [{}, {}], decisions: 2 })
   assert.deepEqual(JSON.parse(text), { outcome: 'escalated', reason: 'uncertain', ranked: [{ value: 'a', probability: 0.5 }], steps: 2, decisions: 2 })
 })
+
+for (const [state, text, confidence, outcome, key] of [
+  ['login_required', 'Sign in to continue', 0.98, 'handoff', '[F1] Email'],
+  ['login_required', 'Sign in to continue', 0.98, 'handoff', 'contact'],
+  ['two_factor_required', 'Verification required', 0.98, 'handoff', '[F1] Email'],
+  ['bot_check', 'Human verification required', 0.98, 'handoff', '[F1] Email'],
+  ['sensitive_flow', 'Checkout: complete payment', 0.98, 'handoff', '[F1] Email'],
+  ['content', 'Unclear form context', 0.51, 'escalated', '[F1] Email'],
+]) {
+  test(`pending caller text is never filled for ${state} (${key})`, async () => {
+    const { callTool, calls } = tools([page('https://example.invalid/form', [element('f_1', 'email', 'Email')], [text])])
+    const { client, calls: asked } = decisions(question => {
+      if (question.name === 'page_state') return choice(state, confidence)
+      if (question.name === 'next_step' || question.name === 'field_0') return choice('[F1] Email')
+      return { type: 'predicate', probability: 0.1 }
+    })
+    const result = await runBrowserReflex({ cardId: 'c', goal: 'Check this form', values: { [key]: 'fixture-only' },
+      maxSteps: 2, callTool, client })
+    assert.deepEqual(calls.map(call => call.name), ['egdesk_browser_observe'], 'classified observation must precede any action')
+    assert.deepEqual(asked.map(request => request.questions[0].name), ['next_step'], 'blocked or uncertain observations never enter field mapping')
+    assert.equal(result.outcome, outcome)
+  })
+}
+
+for (const phase of ['page_state', 'field_0']) {
+  test(`aborting during ${phase} drops a deferred answer before dispatch`, async () => {
+    const controller = new AbortController()
+    const { callTool, calls } = tools([page('https://example.invalid/form', [element('f_1', 'email', 'Email')])])
+    const stub = decisions(question => {
+      if (question.name === phase) controller.abort()
+      if (question.name === 'page_state') return choice('content')
+      if (question.name === 'next_step' || question.name === 'field_0') return choice('[F1] Email')
+      return { type: 'predicate', probability: 0.1 }
+    })
+    const result = await runBrowserReflex({ cardId: 'c', goal: 'Fill public form', values: { contact: 'fixture-only' },
+      signal: controller.signal, callTool, client: stub.client })
+    assert.equal(result.outcome, 'aborted')
+    assert.deepEqual(calls.map(call => call.name), ['egdesk_browser_observe'])
+  })
+}
+
+test('a stale guarded fill is refused and not retried against another observation', async () => {
+  const snap = page('https://example.invalid/form', [element('f_1', 'email', 'Email')])
+  const observed = tools([snap]), attempts = [], effects = []
+  let liveRevision = 1
+  const { client } = decisions(question => {
+    if (question.name === 'page_state') { liveRevision = 2; return choice('content') }
+    if (question.name === 'next_step') return choice('[F1] Email')
+    return { type: 'predicate', probability: 0.1 }
+  })
+  const callTool = async (name, args) => {
+    if (name === 'egdesk_browser_observe') return observed.callTool(name, args)
+    attempts.push({ name, args })
+    if (args.expectedRevision !== liveRevision) throw Object.assign(new Error('stale fixture'), { code: 'BROWSER_OBSERVATION_STALE' })
+    effects.push(name)
+    return { status: 'postcondition-observed' }
+  }
+  const result = await runBrowserReflex({ cardId: 'c', goal: 'Fill public form', values: { '[F1] Email': 'fixture-only' }, callTool, client })
+  assert.deepEqual([result.outcome, result.reason, result.code], ['escalated', 'tool_failed', 'BROWSER_OBSERVATION_STALE'])
+  assert.deepEqual(attempts.map(({ name, args }) => [name, args.observationId, args.expectedRevision, args.ref]), [
+    ['egdesk_browser_fill', 'obs-1', 1, 'f_1'],
+  ])
+  assert.equal(observed.calls.length, 1)
+  assert.deepEqual(effects, [])
+})
+
+for (const variant of ['handoff', 'ordinary', 'changed ref', 'changed URL', 'changed document', 'missing document']) {
+  test(`one exact and one mapped value stay in scope: ${variant}`, async () => {
+    const exact = '[F1] Name', second = '[F2] Topic'
+    const form = page('https://example.invalid/form', [element('f_1', 'textbox', 'Name'), element('f_2', 'textbox', 'Topic')], ['Public form'])
+    if (variant === 'missing document') delete form.documentId
+    const writes = new Map(), actions = [], observed = []
+    let live = form
+    const callTool = async (name, args) => {
+      if (name === 'egdesk_browser_observe') {
+        const revision = observed.length + 1
+        const snapshot = { ...live, revision, interactiveElements: live.interactiveElements.map(field => ({ ...field, value: writes.get(field.ref) ?? '' })) }
+        observed.push(snapshot)
+        return { observationId: `obs-${revision}`, snapshot }
+      }
+      actions.push({ name, args })
+      assert.equal(name, 'egdesk_browser_fill')
+      const snapshot = observed.at(-1)
+      assert.equal(args.observationId, `obs-${snapshot.revision}`)
+      assert.equal(args.expectedRevision, snapshot.revision)
+      assert.deepEqual(args.expectedTarget, expectedTargetOf(snapshot.interactiveElements.find(field => field.ref === args.ref)))
+      assert.deepEqual(args.postcondition, { kind: 'target-value', value: args.text })
+      writes.set(args.ref, args.text)
+      if (variant === 'handoff') live = { ...form, text: ['Human sign-in required'] }
+      if (variant === 'changed ref') live = { ...form, interactiveElements: [form.interactiveElements[0], element('f_3', 'textbox', 'Topic')] }
+      if (variant === 'changed URL') live = { ...form, url: 'https://example.invalid/other-form' }
+      if (variant === 'changed document') live = { ...form, documentId: 'replacement-doc' }
+      return { status: 'postcondition-observed' }
+    }
+    const { client, calls: asked } = decisions(question => {
+      if (question.name === 'field_0') return choice(second)
+      if (question.name === 'page_state') return choice(live === form || variant !== 'handoff' ? 'content' : 'login_required')
+      if (question.name === 'next_step') return choice(writes.size === 2 ? 'goal_met' : writes.size === 1 ? second : exact)
+      return { type: 'predicate', probability: writes.size === 2 ? .98 : .1 }
+    })
+    const result = await runBrowserReflex({ cardId: 'fixture', goal: 'Copy public form values', values: { [exact]: 'first-value', subject: 'second-value' }, callTool, client })
+    const ordinary = variant === 'ordinary'
+    const expected = ordinary ? [['f_1', 'first-value'], ['f_2', 'second-value']] : [['f_1', 'first-value']]
+    assert.deepEqual(actions.map(({ name, args }) => [name, args.ref, args.text]), expected.map(row => ['egdesk_browser_fill', ...row]))
+    assert.deepEqual([...writes], expected)
+    assert.equal(result.outcome, ordinary ? 'done' : variant === 'handoff' ? 'handoff' : 'needs_free_text')
+    assert.equal(result.steps.length, ordinary ? 3 : 2)
+    assert.deepEqual(result.steps[0].mapping.assigned, { subject: second }, 'second value was actually bound before the first approved write')
+    assert.equal(result.steps[0].decision.pageState, 'content')
+    assert.equal(result.steps[1].decision.pageState, variant === 'handoff' ? 'login_required' : 'content')
+    if (!ordinary) assert.deepEqual(result.steps[1].actions, [])
+    if (!ordinary && variant !== 'handoff') assert.deepEqual(result.unmatchedValues, ['subject'])
+    assert.deepEqual(asked.map(request => request.questions[0].name), ordinary ? ['next_step', 'field_0', 'next_step', 'next_step'] : ['next_step', 'field_0', 'next_step'])
+    assert.deepEqual(asked[1].questions[0].choices.map(option => option.value), [second, 'no matching field'])
+  })
+}

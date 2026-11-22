@@ -7,7 +7,7 @@ const box = (x, y, width, height) => ({ x, y, width, height });
 const defer = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const card = (id, x, y, extra = {}) => ({ id, title: `private ${id}`, rect: box(x,y,442,258), visible:true, canRead:true,
   revision:'lease:v1', kind:'자료', movable:true, pinned:false, maySendDescriptor:true, zIndex:21, body:'private body', ...extra });
-function harness({mode = 'on', transport, mutate} = {}) {
+function harness({mode = 'on', transport, mutate, render} = {}) {
   let scene = { ready:true, revision:'profile/board/layout', viewport:box(22,40,900,490), camera:{x:40,y:36,zoom:1,minZoom:.01,maxZoom:4},
     cards:[card('private-A',10,10),card('private-B',490,10),card('extra',700,386,{rect:box(700,386,100,80)}),
       card('hidden',12,14,{visible:false}),card('forbidden',12,14,{canRead:false})], obstacles:[],
@@ -20,6 +20,7 @@ function harness({mode = 'on', transport, mutate} = {}) {
     options:['keep','overview',...(body.items.some(c=>c.focus)? ['focus']:[]),
       ...(body.wide && body.tall && body.items.length===2 && body.items.every(c=>c.movable)? ['pair']:[])] }});
   const api = createPresentationController({now:()=>time, read:key=>key==='board' ? scene : null,
+    render,
     dismiss:o=>dismissals.push(o), commit:(key,data)=>{
       commits.push({key,...structuredClone(data)});
       if (data.camera) Object.assign(scene.camera,data.camera);
@@ -171,3 +172,85 @@ test('late local movement removes preview and undo rather than overwriting newer
   scene.cards[0].rect.x+=7; api.open('board'); assert.equal(api.view().undo,false); assert.equal(api.undo(),false);
   assert.equal(commits.length,1);
 });
+
+for (const scenario of ['on', 'advisory', 'expired', 'stale']) {
+  test(`reviewed synthetic pair vs operator keep: ${scenario}`, async t => {
+    const mode = scenario === 'advisory' ? 'advisory' : 'on';
+    const gate = defer(), views = [];
+    const h = harness({mode, transport: path => path === paths.run ? gate.promise : undefined,
+      render: v => views.push(structuredClone(v))});
+    const {api, scene, commits, calls} = h;
+    t.after(() => api.close());
+    const initial = structuredClone(scene);
+    const keep = {option:'keep', framing:null, camera:null, targets:[]};
+    // Fixed world-plane oracles for this fixture, not DOM positions or values read from the plan.
+    const pair = {option:'pair', framing:null, camera:null, targets:[
+      {id:'private-A', rect:box(-10,124,430,250)}, {id:'private-B', rect:box(444,124,430,250)},
+    ]};
+    const assertNoWrite = (expected = initial) => {
+      assert.deepEqual(commits, [], 'fake host received no commits');
+      assert.deepEqual(scene, expected, 'host fixture geometry, camera, stacking and bodies are unchanged');
+    };
+    assert.equal(api.open('board'), true);
+    api.choose('keep'); // Explicit operator preselection, never choose pair manually in this test.
+    await api.prepare('synthetic comparison fixture');
+    assert.deepEqual(calls.map(c => c.path), [paths.prepare]);
+    assert.equal(api.view().phase, 'review');
+    assert.equal(api.view().choice, 'keep');
+    assert.deepEqual(api.view().plan, keep);
+    assert.ok(api.view().packet.questions[0].choices.some(c => c.value === '선택한 두 장 나란히 비교'));
+    assertNoWrite();
+
+    const pending = api.confirm();
+    assert.equal(api.view().phase, 'run');
+    assert.deepEqual(calls.map(c => c.path), [paths.prepare, paths.run]);
+    assert.deepEqual(api.view().plan, keep);
+    assert.equal(api.apply(), false, 'cannot apply while the reviewed result is pending');
+    assertNoWrite();
+    if (scenario === 'expired') h.time = 60_000; // Expire in flight, not before confirm.
+    if (scenario === 'stale') scene.cards[1].rect.x += 7; // No explicit sync before reply.
+    const beforeReply = structuredClone(scene);
+    gate.resolve(mode === 'advisory' ? {status:'advisory-only', suggestion:'pair'} : {status:'preview', preview:'pair'});
+    await pending;
+    assertNoWrite(beforeReply);
+
+    if (scenario !== 'on') {
+      if (scenario === 'stale') {
+        assert.equal(api.view(), null);
+        assert.equal(api.apply(), false);
+      } else {
+        assert.equal(api.view().phase, '');
+        assert.equal(api.view().choice, 'keep');
+        assert.deepEqual(api.view().plan, keep);
+        assert.equal(api.view().suggestion, scenario === 'advisory' ? 'pair' : null);
+        assert.equal(api.apply(), true, 'still applies keep as a no-op');
+      }
+      assert.deepEqual(calls.map(c => c.path), ['expired','stale'].includes(scenario)
+        ? [paths.prepare, paths.run, paths.cancel] : [paths.prepare, paths.run]);
+      assert.ok(views.every(v => v.choice === 'keep'), 'no replacement preview reached the fake render hook');
+      assertNoWrite(beforeReply);
+      return;
+    }
+
+    assert.equal(api.view().phase, '');
+    assert.equal(api.view().choice, 'pair', 'the reviewed reply replaces the operator preview only in on mode');
+    assert.deepEqual(api.view().plan, pair);
+    assert.deepEqual(views.at(-1).plan, pair, 'fake render hook receives the replacement plan');
+    assertNoWrite();
+    assert.equal(api.apply(), true);
+    assert.deepEqual(commits, [{key:'board', camera:null, targets:pair.targets}]);
+    const applied = structuredClone(initial);
+    for (const {id, rect} of pair.targets) applied.cards.find(c => c.id === id).rect = rect;
+    assert.deepEqual(scene, applied, 'only the two selected rectangles changed');
+
+    assert.equal(api.open('board'), true);
+    assert.equal(api.view().undo, true);
+    assert.equal(api.undo(), true);
+    assert.deepEqual(commits, [{key:'board', camera:null, targets:pair.targets},
+      {key:'board', camera:null, targets:initial.cards.slice(0, 2).map(({id, rect}) => ({id, rect}))}]);
+    assert.deepEqual(scene, initial);
+    assert.equal(api.open('board'), true);
+    assert.equal(api.undo(), false);
+    assert.equal(commits.length, 2);
+  });
+}

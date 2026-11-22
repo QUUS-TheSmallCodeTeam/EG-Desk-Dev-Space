@@ -369,6 +369,135 @@ test('everyday DM opt-in excludes plans as facts, assistant echo as a witness, m
   const late=await w.ask('다시 볼래?'); assert.ok(rotated);assert.deepEqual(recorded(late.packet),[]);assert.doesNotMatch(late.packet,/표지판|원인은 추정/)
 })
 
+
+test('scoped speech GAP: Korean speech consent separates Decisions wire and native context', async t => {
+  const w = await newWorld(t)
+  const pre = '동의 전에는 종이배를 접었어.'
+  const prior = '민지가 파란 이름표를 놓았다고 했어. 내일 화분을 살펴볼 예정이야.'
+  const reply = '파란 이름표는 민지에게 들은 말이고, 화분 확인은 계획이에요.'
+  const ask = '방금 말한 내용을 다시 알려 줄래?'
+  const missing = '이전 발언이 첨부되지 않았어요.'
+  const title = '화분 관리표', summary = '창가 화분 점검 기준', body = '화분 점검표는 금요일에 갱신해요.'
+  const wires = []
+  let beforeResponse = null
+  // Deterministic in-process Decisions answer adapter. No native engine or network.
+  const installAdapter = () => {
+    w.chat.decisionContext.client = createDecisionClient({
+      endpoint: 'https://synthetic-offline.invalid/v1/decisions', model: 'synthetic-in-process',
+      getApiKey: () => 'synthetic-not-a-real-key',
+      fetchImpl: async (_url, init) => {
+        const request = JSON.parse(init.body)
+        wires.push({ raw: init.body, request })
+        const recall = request.input.at(-1).content === 'Message:\n' + ask
+        const labels = recall ? { source: ['unknown'], form: ['question'], time: ['unknown'] }
+          : { source: ['attributed_report', 'unspecified'], form: ['assertion', 'plan'], time: ['past_unspecified', 'future_anchored'] }
+        const answers = request.questions.map(q => {
+          const { name, type } = q
+          if (type === 'predicate') return { name, type, probability: name === 'rel_0' || (name === 'rel_recall' && recall) ? 0.99 : 0.01 }
+          const axis = /^speech_(source|form|time)_(\d+)$/.exec(name)
+          const choice = axis ? labels[axis[1]][Number(axis[2])] : name === 'answer_type' ? 'answer' : 'not_time_specific'
+          return { name, type, choice, confidence: 0.99, probabilities: [
+            { value: choice, probability: 0.99 }, { value: q.choices.find(c => c.value !== choice).value, probability: 0.01 },
+          ] }
+        })
+        return { ok: true, status: 200, text: async () => {
+          beforeResponse?.()
+          return JSON.stringify({ model: 'synthetic-in-process', answers })
+        } }
+      },
+    })
+  }
+  installAdapter()
+  assert.equal(w.evidence.speechGrant(w.scope()), null)
+  assert.ok(!(await w.ask(pre)).none)
+  // An ordinary authorized item ensures advisory has a packet it could install.
+  let ordinaryLoads = 0
+  w.hooks.stageHistory = ({ list }) => [...list, { id: 'fixture:plant', kind: 'document', title, summary, loadText: () => { ordinaryLoads++; return body } }]
+  const contextOnlyReply = packet => ({ text: recorded(packet).find(x => x.quote === prior)?.quote || missing, fields: null })
+  const base = ['answer_type', 'time_intent', 'rel_0']
+  const labels0 = ['speech_source_0', 'speech_form_0', 'speech_time_0']
+  const recallNames = [...base, ...labels0, 'rel_recall']
+  const assertWire = ({ raw, request }, message, names) => {
+    assert.deepEqual(request.questions.map(q => q.name), names)
+    assert.equal(request.input.length, 3, 'rules, ordinary catalog, and only the current message')
+    assert.deepEqual(request.input[2], { role: 'user', content: 'Message:\n' + message })
+    for (const sent of [title, summary]) assert.ok(raw.includes(sent), sent)
+    for (const withheld of [pre, reply, body, 'conversation:recent', '이 DM에서 허용한 최근 발언']) assert.ok(!raw.includes(withheld), withheld)
+    for (const span of prior.split('. ').map(s => s.replace(/\.$/, ''))) {
+      assert.equal(raw.includes(span), message === prior, 'neither prior span can carry over to another message')
+    }
+  }
+  const exercise = async (mode, names) => {
+    w.mode = mode; w.hooks.reply = contextOnlyReply
+    const before = wires.length, loads = ordinaryLoads
+    const turn = await w.ask(ask)
+    assert.equal(ordinaryLoads - loads, mode === 'off' ? 0 : 1, 'advisory assembles ordinary context without installing it')
+    assert.ok(!turn.none)
+    assert.equal(wires.length - before, names ? 1 : 0)
+    const wire = wires[before]
+    if (names) assertWire(wire, ask, names)
+    return { turn, wire }
+  }
+  const plain = await exercise('on', base)
+  assert.ok(plain.turn.params.additionalContext?.egdesk_decision_context?.value.includes(body))
+  assert.deepEqual(recorded(plain.turn.packet), [])
+  assert.doesNotMatch(plain.turn.packet, /fallible semantic labels/)
+
+  const grant = w.evidence.enableSpeech(w.scope())
+  assert.ok(grant)
+  const seed = async generation => {
+    w.hooks.reply = () => ({ text: reply, fields: null })
+    const before = wires.length
+    const turn = await w.ask(prior)
+    assert.ok(!turn.none)
+    assert.equal(wires.length - before, 1)
+    assertWire(wires[before], prior, [...base, ...labels0, 'speech_source_1', 'speech_form_1', 'speech_time_1', 'rel_recall'])
+    assert.deepEqual(recorded(turn.packet), [])
+    assert.deepEqual(w.evidence.recentSpeech(w.scope(), generation).map(r => r.role), ['user', 'assistant'])
+  }
+  await seed(grant)
+  for (const [mode, names] of [['off', null], ['advisory', base]]) {
+    const { turn, wire } = await exercise(mode, names)
+    assert.equal(w.evidence.speechGrant(w.scope()), grant, 'an active grant does not override the mode')
+    assert.equal(turn.params.additionalContext?.egdesk_decision_context, undefined)
+    if (wire) assert.equal(wire.raw, plain.wire.raw, 'advisory cannot observe the now-populated private history')
+  }
+  const allowed = await exercise('on', recallNames)
+  assert.ok(allowed.turn.packet.includes(body))
+  assert.match(allowed.turn.packet, /fallible semantic labels by UTF-16 offsets/)
+  const rows = recorded(allowed.turn.packet)
+  assert.deepEqual(rows.map(r => [r.role, r.quote, r.verification]), [['user', prior, 'utterance-only'], ['assistant', reply, 'utterance-only']])
+  assert.deepEqual(rows[0].interpretations.map(i => [i.source, i.form, i.time]), [['attributed_report', 'assertion', 'past_unspecified'], ['unspecified', 'plan', 'future_anchored']])
+  assert.deepEqual(rows[1].interpretations, [])
+  assert.ok(!allowed.turn.packet.includes(pre))
+  assert.equal(allowed.turn.text, prior, 'the in-process reply uses installed speech, not native session history')
+
+  let rotated = null
+  beforeResponse = () => { if (w.evidence.disableSpeech(w.scope(), grant)) rotated = w.evidence.enableSpeech(w.scope()) }
+  const during = await exercise('on', recallNames)
+  beforeResponse = null
+  assert.ok(rotated && rotated !== grant)
+  assert.equal(during.wire.raw, allowed.wire.raw)
+  assert.ok(during.turn.packet.includes(body))
+  assert.doesNotMatch(during.turn.packet, /fallible semantic labels/)
+  assert.deepEqual(recorded(during.turn.packet), [])
+  assert.equal(during.turn.text, missing)
+
+  await seed(rotated)
+  w.restart(); installAdapter()
+  let revoked = false
+  const beforeResume = wires.length
+  w.hooks.onNative = method => {
+    if (!revoked && method === 'thread/resume' && wires.length > beforeResume) revoked = w.evidence.disableSpeech(w.scope(), rotated)
+  }
+  const late = await exercise('on', recallNames)
+  assert.equal(revoked, true)
+  assert.equal(late.wire.raw, allowed.wire.raw)
+  assert.equal(late.turn.params.additionalContext?.egdesk_decision_context, undefined, 'post-assembly revocation drops the guarded packet')
+  assert.equal(late.turn.text, missing)
+  assert.deepEqual(w.errors, [])
+})
+
 // Historical prototype installed in the harness ONLY. The separately tested
 // production topic path below does not use this file selector or the fixture's picker.
 // Real components: chat send + final ingestion + reopen, scoped original speech, immutable
