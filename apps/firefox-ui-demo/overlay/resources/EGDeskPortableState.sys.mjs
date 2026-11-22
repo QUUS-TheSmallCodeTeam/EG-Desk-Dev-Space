@@ -67,9 +67,23 @@ export function portableSourceFromExport(file) {
   const name = file?.fileRef?.exportFile;
   return typeof name === 'string' && name ? { kind: 'export', fileName: name, fileRef: { exportFile: name } } : null;
 }
+// IOUtils.read can return bytes from a different Gecko realm. Intrinsic getters
+// check internal slots, not constructor identity or a spoofable object tag.
+const typedArrayProto = Object.getPrototypeOf(Uint8Array.prototype);
+const typedArrayBrand = Object.getOwnPropertyDescriptor(typedArrayProto, Symbol.toStringTag).get;
+const typedArrayByteLength = Object.getOwnPropertyDescriptor(typedArrayProto, 'byteLength').get;
+const arrayBufferByteLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get;
 export function portableSourceFromBytes(fileName, bytes) {
-  const data = bytes instanceof Uint8Array ? bytes : bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : null;
-  if (!data || !data.length) return null;
+  let data;
+  try {
+    const octets = typedArrayBrand.call(bytes) === 'Uint8Array';
+    const length = octets ? typedArrayByteLength.call(bytes) : arrayBufferByteLength.call(bytes);
+    if (!length || length > PORTABLE_MAX_FILE_BYTES) return null;
+    if (octets) {
+      data = new Uint8Array(length);
+      Uint8Array.prototype.set.call(data, bytes);
+    } else data = new Uint8Array(bytes);
+  } catch { return null; }
   return { kind: 'file', fileName: typeof fileName === 'string' && fileName ? fileName : `파일${PORTABLE_EXTENSION}`, bytes: data.length, bundle: bytesToBase64(data) };
 }
 const sourceBody = source => source.kind === 'export' ? { fileRef: source.fileRef } : { bundle: source.bundle };

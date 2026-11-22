@@ -63,6 +63,10 @@ const LOCAL_KEYS = new Set(['recoverybackupkey', 'localhistorybackupkey'])
 const DESK_NULLS = new Set([...ACCOUNT_KEYS, ...LOCAL_KEYS])
 const CHAT_NULLS = new Set([...ACCOUNT_KEYS, ...LOCAL_KEYS, ...NATIVE_KEYS])
 const keyName = key => key.toLowerCase().replace(/[_-]/g, '')
+const isLocalBrowserUri = value => {
+  if (typeof value !== 'string') return false
+  try { return new URL(value).protocol === 'file:' } catch { return /^file:/i.test(value.trim()) }
+}
 
 function fail(code, message, httpStatus = 400, extra = {}) {
   throw Object.assign(new Error(message), { code, httpStatus }, extra)
@@ -112,6 +116,16 @@ function sanitizeTree(value, { nulls, maskText }, counts, depth = 0) {
   if (browserIdentityRequired) {
     if (!plain(copy.sourceRef)) define(copy, 'sourceRef', {})
     define(copy.sourceRef, 'browserIdentityRequired', true)
+  }
+  // Local Browser locations are references to the source machine, never grants
+  // to navigate the recipient's filesystem. Blank both recognized navigation
+  // fields rather than letting one fall back to an old local reference.
+  if (value.type === 'browser' && [value.runtimeState?.uri, value.sourceRef?.uri].some(isLocalBrowserUri)) {
+    if (!plain(copy.runtimeState)) define(copy, 'runtimeState', {})
+    if (!plain(copy.sourceRef)) define(copy, 'sourceRef', {})
+    define(copy.runtimeState, 'uri', 'about:blank')
+    define(copy.sourceRef, 'uri', 'about:blank')
+    counts.privateFields++
   }
   return copy
 }
