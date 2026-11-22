@@ -1045,6 +1045,8 @@ TPM이나 Native Messaging을 모든 플랫폼의 필수 조건으로 만들지 
 하드웨어 출처 attestation도 구분한다. 새 인프라·클라우드·SSO·계정 도입이나 외부
 전송은 이 설계만으로 승인되지 않는다.
 
+**목표: 조직 전용 마스터와 서버 경유 원격 세션.** 조직 개설자는 자신이 관리하는 기존 AWS 환경이나 온프레미스 인프라를 선택해 연결한다. 설치 툴킷은 승인된 환경에서 서버 소프트웨어의 선행 조건 준비·설치·기동 및 동작 검증을 가능한 한 자동화해 조직의 논리적 권위 서비스인 마스터 EG-Desk를 준비한다. 새 클라우드 자원의 구매·프로비저닝, 과금 또는 네트워크 공개를 자동으로 승인하거나 수행한다는 뜻은 아니다. 호스트 준비(서버 동작, 인증, 의도한 외부 접속 경로에서의 도달성)와 엔드포인트 준비(사무실 실행 호스트와 원격 클라이언트의 등록·승인·연결)는 별도로 확인한다. 비공개 온프레미스라면 승인된 VPN으로 도달성을 검증한다. 개설자는 구성원을 조직에 초대하며, 조직 가입·Board 접근·원격 화면 보기·원격 입력/제어는 서로 별도 권한이다. 사무실 실행 호스트와 집·출장지·모바일 클라이언트가 다른 네트워크에 있어도 원격 세션의 제어와 허용된 미디어는 해당 조직 서버 측을 경유한다. 마스터의 권위 서비스와 같은 조직 경계에 있는 별도 미디어 중계 프로세스를 사용할 수 있다. 클라이언트 인바운드 포트 개방이나 직접 P2P에 의존하지 않으며, [일반 원격 전송의 P2P 경로](#impl-e24-remote-transport)는 이 조직 경로의 기본값이 아니다. 이 항목은 [조직 사용 목표 흐름](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-org-use)의 계약이며 설치 툴킷·조직 가입·원격 세션의 구현이나 배포를 뜻하지 않는다. 호스팅·비용·보존·외부 데이터 전송의 미결 정책과 집행 승인은 [HUM-REMOTE-001](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-remote-001)을 따른다.
+
 **공유 설정과 일회 위임.** 설정 사본의 검토·활성화는 별도 Agent를 만드는 일이다. 계정 자격, 기기에 묶인 실행 계정 식별자, 원 Agent의 이력·DM은 전달하지 않는다. 파일로 검토를 요청할 때는 공개 질문·발췌와 원 요청/회신의 대응만 공유한다. 원래 Board에 회신을 반영하는 행위는 별도다. 한 번의 Board Agent 질문 권한은 열람이나 직원 신원 증명이 아니다. 소유자가 유효한 Board·Agent 버전·공개 범위를 확인하고 실행해야 하며 외부 선별·생성·비용 승인도 대체하지 못한다. 사람 초대·Board 권한 수락·철회와 기기 제어권은 각각 별도 경계다. [현재 사용자 경로](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-share)
 
 <a id="tech-board-cross-agent"></a>
@@ -2760,7 +2762,7 @@ accept commit 전후 단절, 중복 탭, 늦은 취소, 전달 링크·계정 �
 
 신원·기기 인증은 선택된 배치에서 지원·검증된 방법과 보호 저장소의 device key/token을 사용한다. OAuth를 사용하는 경로는 외부 브라우저 Authorization Code+PKCE와 issuer·subject·audience·nonce를 검증하고, 공개 client refresh token에 rotation 또는 sender constraint를 적용한다. 새 조직 SSO 도입을 모든 배치의 전제로 삼지 않는다. 통신의 추천 기준선은 제어·중지 전용 WSS, 사건 WSS, 객체 HTTPS, 영상 WebRTC, 소실 가능한 커서 DataChannel의 분리다. 동등한 구현은 같은 권한·중지·격리 조건을 검증한다. [RFC 8252](https://www.rfc-editor.org/info/rfc8252/), [RFC 9700](https://www.rfc-editor.org/info/rfc9700/), [RFC 8831](https://www.rfc-editor.org/rfc/rfc8831.html).
 
-P2P 실패는 승인된 TURN, 수신자 증가로 source 송신 한계를 넘으면 허용된 SFU adapter로 처리한다. 새로운 전송 주체·지역·비용 범위를 넘는 fallback은 하지 않는다. 경로가 없으면 원격 관찰 불가이며 독립 로컬 업무는 계속한다.
+직접 P2P를 선택한 경로에서는 실패 시 승인된 TURN, 수신자 증가로 source 송신 한계를 넘으면 허용된 SFU adapter로 처리한다. [조직 서버 경유 목표](#tech-org-execution)는 직접 P2P를 전제로 하지 않는다. 새로운 전송 주체·지역·비용 범위를 넘는 fallback은 하지 않는다. 경로가 없으면 원격 관찰 불가이며 독립 로컬 업무는 계속한다.
 
 명령에는 ID·run/task·target·device generation·observation revision·grant/lease epoch·deadline을 붙인다. 초기 시험값은 heartbeat 2초·host 단조시계 TTL 6초다. 이는 grant 기간 기본값이 아니다. cancel tombstone·epoch·host 입력 차단·진행 중 행동·ACK를 기록한다. 단절·TTL만으로 process 종료나 외부 효과 취소를 입증하지 않는다.
 
