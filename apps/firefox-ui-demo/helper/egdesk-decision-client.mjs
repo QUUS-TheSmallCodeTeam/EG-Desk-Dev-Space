@@ -15,6 +15,7 @@
 // decide: read-only judgements may retry once; an action choice must observe
 // again and ask a fresh question instead.
 
+import { Buffer } from 'node:buffer'
 import { createHmac } from 'node:crypto'
 
 // Private, domain-separated recipient identity. Never a renderer DTO, cache key or request field.
@@ -191,9 +192,60 @@ export function normalizeDecisionResponse(body, questions) {
   return { answers: Object.freeze(answers), model: typeof body.model === 'string' ? body.model : null, usage: normalizeUsage(body.usage) }
 }
 
-async function readBody(response) {
-  const text = await response.text()
-  if (text.length > RESPONSE_MAX_BYTES) throw new DecisionError('bad_response', 'Decision response is too large')
+function oversizedResponse() {
+  return new DecisionError('bad_response', 'Decision response is too large')
+}
+
+async function readBody(response, signal) {
+  let text
+  const body = response.body
+  if (typeof body?.getReader !== 'function') {
+    // Legacy text-only adapters have already materialized the string before
+    // we can check it. This still bounds parsing by its actual UTF-8 size.
+    text = await response.text()
+    if (Buffer.byteLength(text, 'utf8') > RESPONSE_MAX_BYTES) throw oversizedResponse()
+  } else {
+    // Count the bytes actually delivered by fetch (after content decoding),
+    // not Content-Length, which may describe another size or be absent.
+    const reader = body.getReader()
+    let cancelled = false
+    let complete = false
+    const cancel = () => {
+      if (cancelled) return
+      cancelled = true
+      // Don't let blocked cleanup or a cancel rejection mask the outcome.
+      try { void reader.cancel().catch(() => {}) } catch {}
+    }
+    let bytes = new Uint8Array(0)
+    let size = 0
+    signal.addEventListener('abort', cancel, { once: true })
+    try {
+      signal.throwIfAborted()
+      for (;;) {
+        const { done, value } = await reader.read()
+        signal.throwIfAborted()
+        if (done) { complete = true; break }
+        const nextSize = size + value.byteLength
+        if (nextSize > RESPONSE_MAX_BYTES) throw oversizedResponse()
+        if (nextSize > bytes.length) {
+          // Bounded contiguous storage avoids retaining a list of tiny chunks.
+          const next = new Uint8Array(Math.min(RESPONSE_MAX_BYTES, Math.max(8192, bytes.length * 2, nextSize)))
+          next.set(bytes.subarray(0, size))
+          bytes = next
+        }
+        bytes.set(value, size)
+        size = nextSize
+      }
+    } finally {
+      signal.removeEventListener('abort', cancel)
+      if (!complete) cancel()
+      reader.releaseLock()
+    }
+    // Treat bad encoding like malformed JSON: never accept replacement
+    // characters as provider data, but preserve a non-2xx HTTP classification.
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, size)) }
+    catch { return null }
+  }
   try { return JSON.parse(text) } catch { return null }
 }
 
@@ -250,7 +302,7 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
         headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }, body: wire })
       // A server can send headers promptly and then stall the body. Keep the
       // timeout and the caller's cancellation wired until the response is read.
-      try { parsed = await readBody(response) }
+      try { parsed = await readBody(response, controller.signal) }
       catch (error) { throw error instanceof DecisionError ? error : new DecisionError('bad_response', 'The decision response could not be read') }
     } catch (error) {
       if (denied) throw new DecisionError('evidence_unavailable', 'The scoped history transfer is no longer authorized')

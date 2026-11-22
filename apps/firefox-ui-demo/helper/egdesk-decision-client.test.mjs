@@ -101,6 +101,117 @@ test('a broken success body is a bad_response', async () => {
   }
 })
 
+const BODY_LIMIT = 4 * 1024 * 1024
+const BODY_REQUEST = { input: 'Toy response', questions: [QUESTIONS[0]] }
+const bodyPrefix = Buffer.from('{"answers":[{"type":"predicate","name":"damaged","probability":0.9}],"toy":"')
+const bodySuffix = Buffer.from('"}')
+
+function paddedBody(bytes) {
+  const remaining = bytes - bodyPrefix.length - bodySuffix.length
+  return Buffer.concat([bodyPrefix, Buffer.from('가'.repeat(Math.floor(remaining / 3))),
+    Buffer.alloc(remaining % 3, 0x61), bodySuffix])
+}
+
+function chunkedBody(chunks, { status = 200, length, onCancel } = {}) {
+  return new Response(new ReadableStream({
+    pull(controller) {
+      if (chunks.length) controller.enqueue(chunks.shift())
+      else controller.close()
+    },
+    cancel: onCancel,
+  }, { highWaterMark: 0 }), { status, headers: length === undefined ? {} : { 'content-length': length } })
+}
+
+function decideBody(fetchImpl, options = {}) {
+  const client = createDecisionClient({ getApiKey: () => KEY, fetchImpl })
+  return client.decide({ ...BODY_REQUEST, ...options })
+}
+
+test('accepts exactly 4 MiB of chunked UTF-8, including a split multibyte character and misleading length', async t => {
+  const bytes = paddedBody(BODY_LIMIT)
+  assert.equal(bytes.length, BODY_LIMIT)
+  for (const length of [undefined, '1', String(BODY_LIMIT + 1)]) await t.test(String(length), async () => {
+    const response = chunkedBody([bytes.subarray(0, bodyPrefix.length + 1), bytes.subarray(bodyPrefix.length + 1, 1_000_000),
+      bytes.subarray(1_000_000)], { length })
+    response.text = () => { assert.fail('a standard Response must be streamed, never materialized with text()') }
+    const result = await decideBody(async () => response)
+    assert.deepEqual(result.answers.damaged, { type: 'predicate', probability: 0.9 })
+    assert.equal(response.body.locked, false)
+  })
+})
+
+test('rejects one byte over 4 MiB regardless of length header and promptly cancels without waiting for cancel', async t => {
+  const bytes = paddedBody(BODY_LIMIT + 1)
+  assert.equal(bytes.length, BODY_LIMIT + 1)
+  assert.ok(bytes.toString('utf8').length < BODY_LIMIT)
+  for (const length of [undefined, '1', String(BODY_LIMIT)]) await t.test(String(length), async () => {
+    let cancelled = 0
+    const unread = Buffer.from(' ')
+    const chunks = [bytes.subarray(0, BODY_LIMIT), bytes.subarray(BODY_LIMIT), unread]
+    const response = chunkedBody(chunks, { length, onCancel() {
+      cancelled++
+      return new Promise(() => {}) // Underlying cleanup may not settle promptly.
+    } })
+    await assert.rejects(decideBody(async () => response), { code: 'bad_response', retryable: false, message: 'Decision response is too large' })
+    assert.equal(cancelled, 1)
+    assert.deepEqual(chunks, [unread])
+    assert.equal(response.body.locked, false)
+  })
+})
+
+test('rejects invalid UTF-8 instead of silently replacing bytes inside valid JSON', async () => {
+  for (const invalid of [Buffer.from([0xc3, 0x28]), Buffer.from([0xc0, 0xaf])]) {
+    const response = chunkedBody([bodyPrefix, invalid, bodySuffix])
+    await assert.rejects(decideBody(async () => response), { code: 'bad_response', retryable: false })
+    assert.equal(response.body.locked, false)
+  }
+  const pendingSequence = chunkedBody([Buffer.from('{"toy":"'), Buffer.from([0xe2, 0x82])])
+  await assert.rejects(decideBody(async () => pendingSequence), { code: 'bad_response', retryable: false })
+})
+
+test('legacy text-only adapters still get an actual UTF-8 byte cap', async () => {
+  const accepted = paddedBody(BODY_LIMIT).toString('utf8')
+  const rejected = paddedBody(BODY_LIMIT + 1).toString('utf8')
+  const result = await decideBody(async () => respond(200, accepted))
+  assert.equal(result.answers.damaged.probability, 0.9)
+  await assert.rejects(decideBody(async () => respond(200, rejected)), { code: 'bad_response', retryable: false })
+})
+
+test('400 stays invalid_request for a normal provider error or unparseable error body', async () => {
+  const ordinary = chunkedBody([Buffer.from('{"error":{"code":"invalid_value"}}')], { status: 400 })
+  await assert.rejects(decideBody(async () => ordinary), { code: 'invalid_request', status: 400, apiCode: 'invalid_value', retryable: false })
+  const malformed = chunkedBody([Buffer.from('not JSON')], { status: 400 })
+  await assert.rejects(decideBody(async () => malformed), { code: 'invalid_request', status: 400, apiCode: null, retryable: false })
+  const invalidEncoding = chunkedBody([Buffer.from('{"error":{"code":"overwritten'), Buffer.from([0xff]), Buffer.from('"}}')], { status: 400 })
+  await assert.rejects(decideBody(async () => invalidEncoding), { code: 'invalid_request', status: 400, apiCode: null, retryable: false })
+})
+
+test('timeout and caller abort cancel a stalled response body without waiting for the stream', async t => {
+  for (const code of ['timeout', 'aborted']) await t.test(code, async () => {
+    const external = new AbortController()
+    let cancelled = 0
+    let requested
+    const started = new Promise(resolve => { requested = resolve })
+    const response = new Response(new ReadableStream({
+      pull() { requested(); return new Promise(() => {}) },
+      cancel() { cancelled++; return new Promise(() => {}) },
+    }, { highWaterMark: 0 }))
+    const pending = decideBody(async (url, init) => {
+      // Let the old implementation fail promptly rather than hanging the red run.
+      response.text = () => new Promise((_, reject) => {
+        requested()
+        init.signal.addEventListener('abort', () => reject(new Error('mock text read aborted')), { once: true })
+      })
+      return response
+    }, { timeoutMs: code === 'timeout' ? 100 : 1500, signal: external.signal })
+    await started
+    if (code === 'aborted') external.abort()
+    await assert.rejects(pending, { code, retryable: code === 'timeout' })
+    assert.equal(cancelled, 1)
+    assert.equal(response.body.locked, false)
+  })
+})
+
 test('a slow provider times out, an outside abort cancels and a network failure is unreachable', async () => {
   let sent = 0
   // Like fetch: rejects at once for an aborted signal, otherwise waits for the abort.
