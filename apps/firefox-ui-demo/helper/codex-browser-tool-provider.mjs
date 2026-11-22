@@ -64,6 +64,14 @@ function reflexStepError(text) {
 const PUBLIC_INPUT_ROUTES = new Set(['dom-click-no-pointerdown', 'dom-scroll-api', 'dom-keyboard-event',
   'dom-value-setter', 'dom-editor-replace', 'chrome-load-uri', 'chrome-history', 'trusted-pointer', 'trusted-text-input'])
 
+// Process-local evidence, not part of the native tool response or public Activity.
+const reflexHandoffs = new WeakMap()
+const cancelledBrowserRuns = new WeakSet()
+export function isCurrentBrowserReflexHandoff(response, run, event) {
+  const handoff = reflexHandoffs.get(response)
+  return handoff?.run === run && handoff.event === event && !cancelledBrowserRuns.has(run)
+}
+
 export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaReady = () => true, fixtureQa = null, decision = null, runReflex = runBrowserReflex, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey }) }) {
   if (!transport || typeof transport.hasClient !== 'function' || typeof getOwnerKey !== 'function') throw new TypeError('Browser provider requires a bounded UI transport and account identity')
   let resetting = 0
@@ -276,9 +284,13 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
         const failure = classifyPublicToolError(error, { browser: true })
         return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: failure }) }] }
       }
-      return { success: result?.outcome !== 'invalid', contentItems: [{ type: 'inputText', text: reflexResultForModel(result || {}) }] }
+      const response = { success: result?.outcome !== 'invalid', contentItems: [{ type: 'inputText', text: reflexResultForModel(result || {}) }] }
+      if (result?.outcome === 'handoff') reflexHandoffs.set(response, { run, event })
+      return response
     },
     async cancelRun(run) {
+      // Fence notices immediately, even while the stop RPC or UI cleanup is pending.
+      cancelledBrowserRuns.add(run)
       fixtureAttestations.delete(run.answerId)
       if (run.browserBinding?.cards?.length) this.runtime.emit(run, 'browser.cancel.requested', {
         originalProviderId: this.providerId, namespace: null, bridgeEpoch: this.runtime.currentEpoch?.() ?? null,

@@ -390,7 +390,9 @@ export function createJointPresentation(h) {
     const title = make('h2', v.overall?'빠른 책상 정리':'내 화면 구성', { id: 'egd-joint-presentation-title', tabindex: '-1', ...control('title') });
     const header = make('header', null);
     header.append(title, button('닫기', 'close', () => api.close({ restoreFocus: true })));
-    const help = make('p', '캔버스의 점선은 미리보기입니다. 적용해도 다른 사람의 화면은 바뀌지 않습니다.');
+    const help = make('p', v.overall && key === '@desk'
+      ? '공동 보드에서 열람 권한이 있어 화면에 표시된 자료와 이 기기에 저장된 개인 메모 중 정리 조건을 충족하는 항목만 대상입니다. 브라우저·채팅·터미널 창은 자동으로 정리하지 않습니다. 점선은 미리보기이며, 적용은 내 화면의 시점과 배치에만 반영됩니다. 외부 사진 추천은 선택 사항입니다. 사진을 확인하고 별도로 전송을 승인해야 외부로 보냅니다.'
+      : '캔버스의 점선은 미리보기입니다. 적용해도 다른 사람의 화면은 바뀌지 않습니다.');
     const cards = make('fieldset', null, { ...test('cards') });
     cards.append(legend(`대상 자료 (${markers.length}장 선택)`));
     const rows = make('div', null, { class: 'egd-joint-presentation-cards' });

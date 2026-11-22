@@ -88,6 +88,69 @@ test('overview and designated focus compute ghost camera frame and do not commit
   api.open('board'); assert.equal(api.undo(),true); assert.deepEqual(scene,initial);
 });
 
+const EMPTY_DESK_NOTICE = '정리 조건을 충족하는 공동 보드 자료나 이 기기에 저장된 개인 메모가 없습니다. 브라우저·채팅·터미널 창은 자동 정리 대상이 아닙니다.';
+const DESK_HELP = '공동 보드에서 열람 권한이 있어 화면에 표시된 자료와 이 기기에 저장된 개인 메모 중 정리 조건을 충족하는 항목만 대상입니다. 브라우저·채팅·터미널 창은 자동으로 정리하지 않습니다. 점선은 미리보기이며, 적용은 내 화면의 시점과 배치에만 반영됩니다. 외부 사진 추천은 선택 사항입니다. 사진을 확인하고 별도로 전송을 승인해야 외부로 보냅니다.';
+const BOARD_HELP = '캔버스의 점선은 미리보기입니다. 적용해도 다른 사람의 화면은 바뀌지 않습니다.';
+
+// Synthetic element tree and status stub only: no layout engine, photo capture or HTTP.
+async function deskCopyHost({mixed = false} = {}) {
+  const {createWorkbenchArrange} = await import('../overlay/resources/EGDeskWorkbenchArrange.sys.mjs');
+  const notices = [], requests = [];
+  let doc;
+  function node(tag, id = '', x = 0) {
+    const kids = [], attrs = new Map();
+    const rect = {x,y:20,width:250,height:160,left:x,right:x+250,top:20,bottom:180};
+    return {tag,id,kids,rect,dataset:{},style:{setProperty(){}},classList:{contains:()=>false},isConnected:true,
+      setAttribute:(k,v)=>attrs.set(k,v),getAttribute:k=>attrs.get(k),hasAttribute:k=>attrs.has(k),
+      addEventListener(){},append(...ns){kids.push(...ns);},replaceChildren(...ns){kids.splice(0,kids.length,...ns);},
+      querySelector:()=>null,contains:()=>false,focus(){doc.activeElement=this;},remove(){this.isConnected=false;},
+      matches:()=>true,getBoundingClientRect:()=>rect,getClientRects:()=>[rect]};
+  }
+  const root = node('root'), canvas = node('canvas');
+  const tools = ['browser','chat','terminal'].map((name,i)=>node('card',name,50+i*275));
+  const board = node('card','board-view',50), memo = node('card','memo-view',350);
+  board.dataset = {projectionId:'p',jointItem:'item',jointLease:'lease',jointVersion:'1'};
+  memo._memoRecord = {id:'memo',seq:1,text:'synthetic',updatedAt:1};
+  const nodes = mixed ? [board,memo,...tools] : tools;
+  doc = {documentElement:root,createElementNS:(_ns, tag)=>node(tag),getElementById:id=>nodes.find(n=>n.id===id),
+    querySelectorAll:sel=>sel==='.egd-memo-card' ? (mixed ? [memo] : []) : nodes};
+  const p = {id:'p',jointAccess:'epoch',members:[{sourceId:'item',viewId:board.id}]};
+  const workbench = createWorkbenchArrange({document:doc,window:{innerWidth:1000,innerHeight:700,addEventListener(){},removeEventListener(){},
+    setInterval:()=>1,clearInterval(){},getComputedStyle:()=>({visibility:'visible'})}, canvas:()=>canvas, moving:()=>false, context:()=>null,
+    safe:()=>({left:0,top:0,right:1000,bottom:700,width:1000,height:700}),camera:()=>({x:0,y:0,zoom:1,minZoom:.1,maxZoom:4}),
+    projections:()=>mixed?[p]:[], meta:()=>({board:{epoch:'epoch',cards:[{id:'item',access:'lease',version:1,own:true,title:'합성 보드 자료'}]}}),
+    geometry:n=>({...n.rect,zIndex:1}),notice:text=>notices.push(text),
+    http:async (method,path)=>{requests.push([method,path]);return {status:200,body:{configured:true,model:'gpt-6-luna',mode:'on'}};}});
+  const texts = n => n.kids.filter(child=>child.isConnected).flatMap(child=>[child.textContent,...texts(child)]).filter(Boolean);
+  return {workbench,notices,requests,root,canvas,texts:()=>texts(root)};
+}
+
+test('L-01 empty Desk tells the operator its scope and opens no review', async () => {
+  const {workbench,notices,requests,root,canvas} = await deskCopyHost();
+  await workbench.open('@desk');
+  assert.deepEqual(notices,[EMPTY_DESK_NOTICE]);
+  assert.deepEqual(root.kids,[]);
+  assert.deepEqual(canvas.kids,[]);
+  assert.deepEqual(requests,[['GET','/decision/status']]); // Local config lookup only; no decision POST.
+});
+
+test('L-01 mixed Desk lists eligible synthetic material and memo, with Desk-only help', async t => {
+  const {workbench,notices,requests,texts} = await deskCopyHost({mixed:true});
+  t.after(()=>workbench.close());
+  await workbench.open('@desk');
+  assert.deepEqual(notices,[]);
+  assert.ok(texts().includes('대상 자료 (2장 선택)'));
+  assert.ok(texts().includes('1 · 합성 보드 자료'));
+  assert.ok(texts().includes('2 · 개인 메모 1'));
+  assert.ok(texts().includes(DESK_HELP));
+  assert.ok(!texts().includes('외부 전송 내용 확인'));
+  assert.deepEqual(requests,[['GET','/decision/status']]);
+  await workbench.open('p');
+  assert.ok(texts().includes(BOARD_HELP));
+  assert.ok(!texts().includes(DESK_HELP));
+  assert.deepEqual(requests,[['GET','/decision/status'],['GET','/decision/status']]);
+});
+
 test('off and unknown authority are manual; lack of descriptor grant does not silently submit subset', async () => {
   for(const config of [{mode:'off'},{mode:'unknown'},{mutate:s=>s.decision.available=false},{mutate:s=>s.cards[0].maySendDescriptor=false}]) {
     const {api,calls} = harness(config); api.open('board'); assert.equal(api.view().canPrepare,false);

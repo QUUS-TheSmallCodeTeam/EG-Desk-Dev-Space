@@ -26,6 +26,7 @@ import { publicEpochMs } from './codex-account-usage.mjs'
 // provider's Card, same-site, focus and wait-budget checks on every call.
 import { BROWSER_INTERACTION_TOOL_NAMES as BROWSER_STEP_TOOL_NAMES, BROWSER_READ_TOOL_NAMES } from './egdesk-browser-tool-runtime.mjs'
 import { BROWSER_REFLEX_TOOL_NAME } from './egdesk-browser-reflex.mjs'
+import { isCurrentBrowserReflexHandoff } from './codex-browser-tool-provider.mjs'
 // The reflex only runs interaction steps, so it is visible and callable exactly
 // where interaction tools are, and only when the Browser provider lists it.
 const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze([...BROWSER_STEP_TOOL_NAMES, BROWSER_REFLEX_TOOL_NAME])
@@ -720,6 +721,7 @@ export class CodexChatRuntime {
     this.boardNativeSpeakers = new Map() // native CID → immutable Board speaker, separate from the mutable room preference
     this.profiles = profiles
     this.dynamicRequestProviders = new Map()
+    this.browserReflexNoticeIds = new WeakMap()
     this.respond = (id, result, error, slot) => {
       if (result && typeof result.success === 'boolean' && Array.isArray(result.contentItems)) {
         const pending = this.dynamicRequestProviders.get(id)
@@ -1123,6 +1125,7 @@ export class CodexChatRuntime {
     // block the ordered native notification queue.
     const epoch = this.runEpoch(run)
     const current = () => epoch === this.runEpoch(run) && this.runConnected(run) && run.status === 'inProgress'
+    const pending = this.dynamicRequestProviders.get(event.rpcId)
     void Promise.resolve().then(() => current() ? provider.dispatch(run, event) : null).then(response => {
       if (response == null) return
       if (!current()) return
@@ -1133,7 +1136,14 @@ export class CodexChatRuntime {
           (item.type === 'inputAudio' && typeof item.audioUrl === 'string')
         )) && JSON.stringify(response).length <= 8 * 1024 * 1024
       if (!valid) throw chatError('INVALID_TOOL_RESPONSE', 'Tool provider returned an invalid native response', 500)
-      this.respond(event.rpcId, response)
+      const reflex = provider.providerId === 'egdesk-browser' && event.tool === BROWSER_REFLEX_TOOL_NAME && !event.namespace
+      const bound = reflex && pending?.run === run && pending.provider === provider && pending.epoch === epoch &&
+        this.dynamicRequestProviders.get(event.rpcId) === pending
+      const replied = this.respond(event.rpcId, response)
+      if (bound && replied !== false && current() && this.runs.get(runKey(event.threadId, event.turnId)) === run &&
+          this.ownedRuns.has(run) && isCurrentBrowserReflexHandoff(response, run, event)) {
+        this.noteBrowserReflexHandoff(run, event.callId)
+      }
     }).catch(error => {
       if (!current()) return
       const failure = classifyPublicToolError(error)
@@ -4580,6 +4590,19 @@ export class CodexChatRuntime {
       if (notice) this.put(run, 'activities', notice)
       if (approved.length || notice) this.discardTopicAnswer(guard, approved.length ? 'released' : 'rejected')
     }
+  }
+
+  noteBrowserReflexHandoff(run, callId) {
+    if (!callId) return
+    const id = 'host:browser-reflex-handoff:' + createHash('sha256').update(callId, 'utf16le').digest('hex')
+    let seen = this.browserReflexNoticeIds.get(run)
+    if (!seen) this.browserReflexNoticeIds.set(run, seen = new Set())
+    if (seen.has(id)) return
+    seen.add(id)
+    const activity = { id, kind: 'hostNotice', title: '브라우저에서 직접 확인이 필요합니다', status: 'completed',
+      detail: { text: '자동 브라우저 작업을 멈췄습니다. 필요한 확인은 브라우저 카드에서 직접 진행하세요.' } }
+    this.put(run, 'activities', activity)
+    this.emit(run, 'activity.completed', { activity }, activity.id)
   }
 
   rejectTopicAnswer(run) {

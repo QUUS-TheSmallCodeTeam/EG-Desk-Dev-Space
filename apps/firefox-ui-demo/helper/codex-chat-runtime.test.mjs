@@ -533,7 +533,7 @@ test('Browser specs are pre-registered so a later selected Card uses the same na
   assert.equal(h.replies[1][2].code, -32601)
 })
 
-function selectedBrowserTurnFixture() {
+function selectedBrowserTurnFixture(reflex = {}) {
   const actions = []
   const transport = { runs: new Map(), hasClient: id => id === 'selected-ui',
     bindRun() {}, unbindRun() {}, reset() {} }
@@ -547,13 +547,77 @@ function selectedBrowserTurnFixture() {
         postcondition: { matched: true }, externalEffectVerified: false } },
     cancelRun: async () => [], reset: async () => [],
   }
-  const provider = createCodexBrowserToolProvider({ transport, service, getOwnerKey: () => 'codex:account-selected' })
+  const provider = createCodexBrowserToolProvider({ transport, service, getOwnerKey: () => 'codex:account-selected', ...reflex })
   const source = { id: 'selected-source', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
     sourceRef: { viewId: 'selected-card', uri: 'https://example.test/owned-page' },
     browserToolIdentity: { cardEpoch: 'selected-epoch' },
     browserToolSelection: { token: 'one-time-selected-token', threadId: 'selected-chat' } }
   return { provider, source, actions }
 }
+
+test('B-11 Browser reflex handoff publishes one fixed host Activity through the live reply binding', async () => {
+  const url = 'https://private.invalid/redact-me'
+  const goal = 'PRIVATE_GOAL'
+  const handoff = { outcome: 'handoff', url, pageState: 'sign_in', reason: 'PRIVATE_REASON' }
+  let completeReflex, acknowledgeStop
+  const deferredReflex = new Promise(resolve => { completeReflex = resolve })
+  const deferredStop = new Promise(resolve => { acknowledgeStop = resolve })
+  let next = handoff, reflexCalls = 0
+  const f = selectedBrowserTurnFixture({ decision: { mode: () => 'on', configured: () => true },
+    runReflex: async () => { reflexCalls++; return next } })
+  const h = qaHarness({ toolProviders: [f.provider], request: async method => {
+    if (method === 'turn/interrupt') return deferredStop
+  } })
+  const run = await h.chat.send({ message: 'Review this selected Card', clientThreadId: 'selected-chat',
+    executionPolicy: { mode: 'browserBounded' }, selectedSources: [f.source], browserTransportId: 'selected-ui' })
+  const tool = 'egdesk_browser_reflex'
+  assert.ok(h.calls.find(call => call.method === 'thread/start').params.dynamicTools.some(spec => spec.name === tool))
+  const flush = () => new Promise(resolve => setImmediate(resolve))
+  const invoke = async (id, callId, turnId = run.runId) => {
+    await h.chat.handleServerRequest({ id, method: 'item/tool/call', params: { threadId: run.conversationId, turnId, callId, tool,
+      arguments: { cardId: 'selected-card', goal } } })
+    await flush()
+  }
+  const notices = () => h.events.filter(e => e.event === 'activity.completed' && e.details?.activity?.kind === 'hostNotice')
+  const readback = () => h.chat.snapshot(run.conversationId).runs.find(x => x.runId === run.runId).activities
+  await invoke('wrong-run', 'foreign', 'other-run')
+  assert.equal(reflexCalls, 0)
+  await invoke('first', 'same-call')
+  await invoke('replayed', 'same-call')
+  await h.item(run, { id: 'same-call', type: 'dynamicToolCall', tool, status: 'completed' })
+  assert.equal(notices().length, 1)
+  const [event] = notices(), { activity } = event.details
+  assert.equal(event.runId, run.runId)
+  assert.deepEqual(activity, { id: activity.id, kind: 'hostNotice', status: 'completed', title: '브라우저에서 직접 확인이 필요합니다',
+    detail: { text: '자동 브라우저 작업을 멈췄습니다. 필요한 확인은 브라우저 카드에서 직접 진행하세요.' } })
+  assert.match(activity.id, /^host:browser-reflex-handoff:[a-f0-9]{64}$/)
+  assert.deepEqual(readback().find(a => a.id === activity.id), activity)
+  assert.equal(readback().find(a => a.id === 'same-call')?.kind, 'dynamicToolCall')
+  assert.doesNotMatch(JSON.stringify(event.details), /PRIVATE_|private\.invalid|selected-card|same-call/)
+  for (const id of ['first', 'replayed']) {
+    const output = h.replies.find(r => r[0] === id)?.[1]
+    assert.deepEqual(Object.keys(output), ['success', 'contentItems'])
+    assert.deepEqual(JSON.parse(output.contentItems[0].text), { ...handoff, steps: 0, decisions: 0 })
+  }
+
+  next = { outcome: 'done' }
+  await invoke('normal', 'normal-call')
+  assert.equal(JSON.parse(h.replies.find(r => r[0] === 'normal')[1].contentItems[0].text).outcome, 'done')
+  assert.equal(notices().length, 1)
+  next = deferredReflex
+  await invoke('cancelled', 'late-call')
+  const stopped = h.chat.interrupt({ conversationId: run.conversationId, runId: run.runId })
+  try {
+    await flush()
+    completeReflex(handoff)
+    await flush()
+    assert.equal(readback().filter(a => a.kind === 'hostNotice').length, 1)
+    assert.equal(notices().length, 1, 'cancel fences the notice before native stop acknowledgment')
+  } finally { acknowledgeStop({}); await stopped }
+  await h.finish(run, 'interrupted')
+  assert.equal(reflexCalls, 4)
+  assert.deepEqual(f.actions, [], 'the notice dispatches no Browser action')
+})
 
 test('selected Browser interaction belongs to one native run despite inherited safe thread policy', async () => {
   const f = selectedBrowserTurnFixture(), h = qaHarness({ toolProviders: [f.provider] })
