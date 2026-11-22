@@ -1473,6 +1473,10 @@ Ontology 버전, 검증된 전환, 수락된 증거, Agent 출력,
 
 **조직을 만드는 사람의 경로(목표, 미구현):** 자기 EG-Desk에서 조직 만들기 → 조직 소유 AWS·온프레미스 환경 지정 → 내장 툴킷으로 EG-Desk 협업 기능 준비와 접속 점검 → 개설자가 첫 구성원 초대 → 상대가 자기 기기에서 조직을 확인하고 가입 → 허용된 Board 열기. 조직 초대는 Board 초대와 다르다. 화면을 보려면 대상 기기와 별도 보기 권한을 확인하며, 입력 제어는 따로 허가한다. 사무실 호스트와 재택·출장 기기의 네트워크가 달라도 어떤 경로에서 실제 화면을 받았는지 확인한다. 조직 서버의 권한 확인과 영상 중계를 같은 일로 취급하지 않는다. 직접 전송과 조직 중계의 선택은 미결이다. [조직 연결 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-org-setup).
 
+<a id="atlas-org-workspace-data"></a>
+
+**화면을 캡처하지 않고 공용 Board에서 일하기.** 예를 들어 지우는 공개받은 ‘출고 협업’ 전표를 자기 Desk에서 열고, 허가된 선행 자료와 명시적으로 적용된 공용 위치를 본 뒤 전표 제공자에게 회신을 보낸다. 다시 열면 그 시점에 허용된 카드·관계·회신만 볼 수 있고, 회수된 카드는 돌아오지 않는다. 제공자의 화면 픽셀은 한 장도 캡처하지 않는다. 각자의 화면 배치·카메라, 보내지 않은 초안, 사이트 로그인 쿠키는 공유하지 않는다. 현재 공용 Board는 [Node·SQLite 협업 서비스와 클라이언트의 권한별 최신 상태 재조회](../../apps/firefox-ui-demo/docs/JOINT_BOARD_RUNTIME.md)로 이 같은 작업을 지원한다. 조직 멤버십, 파일 참조·버전 자료 전체의 제공, 접속 표시·커서, 라이브 미디어·원격 제어까지 구현됐다는 뜻은 아니다. 화면 보기와 입력 제어는 Board 공유와 다른 권한이고, 오디오는 미래 예시다. [공유 작업공간 데이터 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-org-workspace-data).
+
 **별도 배포 로드맵:** 모니터와 그래픽 로그인이 없는 Linux에서 EG-Desk 자체를 기동·재기동한다. 조직 개설의 필수 단계가 아니다. [헤드리스 Linux 계약](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-headless-linux-track).
 
 <a id="atlas-shared-card-agents"></a>
