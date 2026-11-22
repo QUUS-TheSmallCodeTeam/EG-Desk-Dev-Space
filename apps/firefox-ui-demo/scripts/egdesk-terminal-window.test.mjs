@@ -561,3 +561,38 @@ test('Terminal ownership begins only at authenticated API readiness, and never r
     } finally { h.restore(); }
   }
 });
+
+// Exercise the managed iframe's real parent transport, not an unrestricted
+// test fetch. File checks use this route before preparing and dispatching PTY input.
+test('managed Terminal can verify the exact bound File project without widening File transport', async () => {
+  const requests = [];
+  let transport, identity = 0;
+  const h = await terminalWindow({ options: { activate: false, reveal: false },
+    api: { configureLocal(fn) { transport = fn; } }, windowOverrides: {
+      crypto: { randomUUID: () => 'id-' + (++identity) },
+      fetch: async (url, init) => { requests.push({url, init}); return {ok: true}; },
+    } });
+  const origin = 'http://127.0.0.1:39218';
+  const url = origin + '/v1/files/projects/open';
+  const request = { method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({boardId:'board-a', expectedProjectId:'project-a', expectedRootId:'root-a'}), signal: new AbortController().signal };
+  try {
+    h.message({type:'terminal-api-ready'}, {source:null});
+    assert.equal(requests.length, 0, 'parent queues no action on connect');
+    for (const [target, init] of [[url, {...request, method:'GET'}], [url, undefined],
+      [url + '?extra=1', request], [url + '/', request], [url + '#extra', request],
+      [origin + '/v1/files/projects/scripts', request], [origin + '/v1/files/projects/attach', request],
+      [origin + '/v1/files/save', request], ['http://localhost:39218/v1/files/projects/open', request],
+      ['http://127.0.0.1:39219/v1/files/projects/open', request], ['https://untrusted.test/v1/files/projects/open', request]]) {
+      assert.throws(() => transport(target, init), /Invalid terminal transport/);
+    }
+    assert.equal(requests.length, 0);
+    for (let phase = 0; phase < 2; phase++) await transport(url, request);
+    assert.deepEqual(requests, Array.from({length:2}, () => ({url, init:{...request, redirect:'error',
+      headers:{...request.headers, 'X-EGDesk-Terminal-Owner':'id-1', 'X-EGDesk-Terminal-View':'id-2'}}})));
+    h.unload();
+    assert.match(requests.at(-1).url, /\/terminal\/close-local-scope$/);
+    assert.throws(() => transport(url, request), /Invalid terminal transport/);
+    assert.equal(requests.length, 3);
+  } finally { h.restore(); }
+});
