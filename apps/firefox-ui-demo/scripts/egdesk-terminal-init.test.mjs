@@ -636,7 +636,8 @@ test('project run verifies the attached Board and only PTY output completes its 
   request.boardId = 'later-selected-board'; request.script.command = 'other command';
   let completed = false; void pending.then(() => { completed = true; });
   await settle(); await settle();
-  assert.deepEqual(h.requests.find(item => item.route === '/v1/files/projects/open').body, { boardId: 'board-a' });
+  assert.deepEqual(h.requests.filter(item => item.route === '/v1/files/projects/open').map(item => item.body),
+    Array.from({ length: 2 }, () => ({ boardId: 'board-a', expectedProjectId: 'project-a', expectedRootId: 'root-a' })));
   const line = h.scriptWrites()[0].body.data, nonce = runNonce(line);
   assert.equal(h.api.inputRevision(), 0, 'owned script dispatch is distinct from human input');
   assert.ok(nonce); assert.match(line, /cd -- '\/verified\/project'/); assert.match(line, /eval 'npm test'/);

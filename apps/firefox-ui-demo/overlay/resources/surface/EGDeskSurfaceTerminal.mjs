@@ -71,8 +71,11 @@ export function createTerminalZone(deps) {
     TERMINAL_REENTRY_UNCONFIRMED: '연결 여부를 확인하지 못했습니다. 같은 창에서 다시 시도하세요.',
   };
   function terminalTransport(view, url, init) {
-    if (!scope || !url.startsWith(bridgeOrigin + '/terminal/') || !/^\/terminal\/[a-z-]+$/.test(url.slice(bridgeOrigin.length))) throw new Error('Invalid terminal transport');
-    return window.fetch(url, { ...init, headers: { ...init?.headers,
+    // A managed File check must revalidate the Board/project/root in this
+    // terminal before sending PTY input. Allow only its exact local lookup.
+    const projectLookup = !scopeClosed && url === bridgeOrigin + '/v1/files/projects/open' && init?.method === 'POST';
+    if (!scope || (!projectLookup && (!url.startsWith(bridgeOrigin + '/terminal/') || !/^\/terminal\/[a-z-]+$/.test(url.slice(bridgeOrigin.length))))) throw new Error('Invalid terminal transport');
+    return window.fetch(url, { ...init, ...(projectLookup ? { redirect: 'error' } : {}), headers: { ...init?.headers,
       'X-EGDesk-Terminal-Owner': scope, 'X-EGDesk-Terminal-View': view } });
   }
   function closeScope() {

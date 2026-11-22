@@ -417,10 +417,14 @@
     const current = () => activeScript === runContext && !runContext.cancelled && connected && !unloaded && !closeRequested
       && ptyId === runContext.sessionId && connectionGeneration === runContext.generation && inputRevision === runContext.inputRevision;
     activeScript = runContext;
+    // Expected IDs bind the existing live root; the helper must not reconnect
+    // or authorize a replacement during either verification.
+    const verifyProject = () => postTerminal('/v1/files/projects/open',
+      { boardId, expectedProjectId: projectId, expectedRootId: rootId }, { timeoutMs: 5000 });
     try {
       // Resolve authority from the existing helper-owned Board association.
       // A display path supplied by the File renderer is never executable input.
-      const packet = await postTerminal('/v1/files/projects/open', { boardId }, { timeoutMs: 5000 });
+      const packet = await verifyProject();
       const project = packet.ok === true ? packet.result?.project : null;
       if (!current()) fail('TERMINAL_INPUT_STALE', '터미널 연결이 바뀌었거나 사용자 입력이 발생해 검사를 시작하지 않았습니다.');
       if (project?.status !== 'connected' || project.projectId !== projectId || project.rootId !== rootId
@@ -440,7 +444,7 @@
             // The queue may have waited behind human input. Revalidate at its
             // dispatch point, then fence again before the transport call.
             try {
-              const fresh = await postTerminal('/v1/files/projects/open', { boardId }, { timeoutMs: 5000 });
+              const fresh = await verifyProject();
               const checked = fresh.ok === true ? fresh.result?.project : null;
               return checked?.status === 'connected' && checked.projectId === projectId && checked.rootId === rootId && checked.displayPath === cwd
                 && checked.scripts?.some(saved => saved.id === script.id && saved.name === script.name && saved.command === script.command)
