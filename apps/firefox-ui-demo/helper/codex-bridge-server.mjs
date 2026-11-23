@@ -432,6 +432,7 @@ const chat = new CodexChatRuntime({
   // Decision model context setup before each ordinary turn; nothing runs while
   // the mode is 'off' (default) or no key is saved.
   decisionContext: {
+    settingsGeneration: () => browserDecisionGeneration,
     mode: () => bridgeSettings.decisionContext.mode,
     configured: () => decisionCredentials.getApiKey() !== null,
     client: decisionClient,
@@ -501,27 +502,9 @@ const handleHostControlHttp = createHostControlHttpHandler(hostControl, { port: 
 // Board arrangement gets a separate guarded client over the same isolated Decisions key and budget.
 const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credentials: decisionCredentials,
   getMode: () => bridgeSettings.decisionContext.mode, budget: decisionBudget, port: BRIDGE_PORT })
-// Invalidate at the mutation itself, not after an awaited HTTP operation. Old grants
-// stay revoked even if mode is switched off and back on or a key revision collides.
-const revokeBoardAfter = operation => (...args) => {
-  const ok = operation(...args)
-  if (ok === true) handleBoardPresentationHttp.invalidate()
-  return ok
-}
-const decisionSettingsCredentials = {
-  get status() { return decisionCredentials.status },
-  get writable() { return decisionCredentials.writable },
-  getApiKey: () => decisionCredentials.getApiKey(), hint: () => decisionCredentials.hint(), savedAt: () => decisionCredentials.savedAt(),
-  save: revokeBoardAfter(key => decisionCredentials.save(key)), clear: revokeBoardAfter(() => decisionCredentials.clear()),
-}
-const decisionMode = bridgeSettings.decisionContext
-const decisionSettingsMode = {
-  get mode() { return decisionMode.mode }, get saved() { return decisionMode.saved }, get persisted() { return decisionMode.persisted },
-  save: revokeBoardAfter(mode => decisionMode.save(mode)),
-}
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
-const handleDecisionHttp = createDecisionHttpHandler({ store: decisionSettingsCredentials, verifyKey: key => decisionClient.verifyKey(key),
-  budget: decisionBudget, model: decisionClient.model, mode: decisionSettingsMode, port: BRIDGE_PORT,
+const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
+  budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT, boardPresentation: handleBoardPresentationHttp,
   onSettingsChanged: () => { browserDecisionGeneration++ } })
 const handleOntologyHttp = createOntologyHttpHandler({ binding: () => ontologyBinding, store: ensureOntologyStore, runtime: sqliteRuntime, port: BRIDGE_PORT })
 const handleMemoryEvidenceHttp = createMemoryEvidenceHttpHandler({ port: BRIDGE_PORT,

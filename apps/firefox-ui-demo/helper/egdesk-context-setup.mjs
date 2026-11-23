@@ -233,12 +233,20 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
   ]
   const receipt = { useCase: 'context.setup', catalogHash, candidates: list.length, trimmed: normalized.length - list.length,
     questionCount: questions.length, thresholds }
+  // Once history enters a request, every verdict may depend on it. The
+  // entire batch keeps the authority it was built with; never reclassify
+  // or salvage ordinary judgments from a revoked private batch.
+  const speechCurrent = () => !activeSpeech || speech.allowed()
+  const privateBatchCurrent = () => !topicQuestions.length || (liveTopic.allowed() && speechCurrent())
+  const guardSpeech = activeSpeech && !topicQuestions.length && typeof speech.modeActive === 'function'
+  const modeStopped = () => guardSpeech && !speech.modeActive()
+  let speechDispatched = activeSpeech
   let result, discardJudgments = false
   const emptyJudgments = { answers: {}, latencyMs: 0, usage: null, model: null }
   try {
     if (liveTopic && !liveTopic.allowed()) throw new DecisionError('evidence_unavailable', 'Scoped history is unavailable')
-    result = !classify ? { answers: {}, latencyMs: 0, usage: null, model: null } : await client.decide({
-      ...(topicQuestions.length ? { authorizeDispatch: liveTopic.authorizeDispatch } : {}),
+    const request = {
+      ...(topicQuestions.length ? { authorizeDispatch: recipient => speechCurrent() && liveTopic.authorizeDispatch(recipient) } : {}),
       input: [
         { role: 'developer', content: CONTEXT_RULES },
         { role: 'user', content: [{ type: 'input_text', text: `Catalog:\n${catalog}`, prompt_cache_breakpoint: { mode: 'explicit' } }] },
@@ -246,16 +254,35 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
         { role: 'user', content: `Message:\n${activeSpeech || topicQuestions.length ? message : message.trim()}` },
       ],
       questions, promptCacheKey: cacheKey(cacheScope, catalogHash), timeoutMs, signal,
-    })
+    }
+    if (guardSpeech) request.beforeDispatch = () => {
+      if (modeStopped()) return null
+      if (speech.allowed()) return request
+      speechDispatched = false
+      if (!list.length) return null
+      // Local speech opt-out is not a withdrawal of the ordinary request.
+      const ordinary = questions.slice(0, 2 + list.length)
+      receipt.questionCount = ordinary.length
+      return { ...request, questions: ordinary,
+        input: [...request.input.slice(0, -1), { role: 'user', content: `Message:\n${message.trim()}` }] }
+    }
+    result = classify ? await client.decide(request) : emptyJudgments
   } catch (error) {
+    if (modeStopped()) return skipped('mode_changed')
     const reason = failureCode(error)
-    if (!topicQuestions.length) return { status: 'fallback', reason, answerType: null, timeIntent: null, selected: [], extraContext: {}, latencyMs: null, model: null,
-      receipt: { ...receipt, outcome: 'fallback', reason } }
-    result = emptyJudgments; discardJudgments = true
+    if (!topicQuestions.length) {
+      if (guardSpeech && !speechDispatched && !list.length) {
+        if (!localLookup) return { ...skipped('no_candidates'), ...(cold ? { topicRoute: cold } : {}) }
+        result = emptyJudgments
+        receipt.questionCount = 0
+      } else return { status: 'fallback', reason, answerType: null, timeIntent: null, selected: [], extraContext: {}, latencyMs: null, model: null,
+        receipt: { ...receipt, outcome: 'fallback', reason } }
+    } else { result = emptyJudgments; discardJudgments = true }
   }
+  if (modeStopped()) return skipped('mode_changed')
   // Other answers in the batch can also reflect its history. Discard all derived
   // scores if the grant/recipient or verified occurrences changed in flight.
-  const topicRoute = cold || (!discardJudgments && topicQuestions.length && liveTopic.allowed() ? liveTopic.plan.resolve(result.answers) : null)
+  const topicRoute = cold || (!discardJudgments && topicQuestions.length && privateBatchCurrent() ? liveTopic.plan.resolve(result.answers) : null)
   if (topicQuestions.length && !topicRoute) { result = emptyJudgments; discardJudgments = true }
   const independentFile = row => row.reason === 'mandatory' && row.candidate.mayRead &&
     (row.candidate.id === 'memory-lookup:0' || /^memory-selection:[0-9]+$/.test(row.candidate.id))
@@ -269,7 +296,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     return { candidate, probability: verdict.probability, reason, unknown: verdict.state === 'unknown' }
   })
   if (localLookup) scored.push({ candidate: localLookup, probability: null, reason: 'mandatory', unknown: false })
-  if (localSpeech && activeSpeech) {
+  if (localSpeech && speechDispatched && speech.allowed()) {
     const recall = readPredicate(result.answers, 'rel_recall', thresholds.relevant)
     if (recall.state === 'yes') scored.push({ candidate: localSpeech, probability: recall.probability, reason: 'scored', unknown: false })
   }
@@ -296,8 +323,9 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
       mayDispatch: () => safe.every(item => mayRead(item.candidate)),
       noteSent: () => { for (const item of safe) { try { item.candidate.noteSent?.() } catch {} } } }
   }
-  if (discardJudgments) return withoutTopic()
-  const withSpeech = activeSpeech && speech.allowed()
+  if (discardJudgments || !privateBatchCurrent()) return withoutTopic()
+  if (modeStopped()) return skipped('mode_changed')
+  const withSpeech = speechDispatched && speech.allowed()
   const interpretations = withSpeech ? speechInterpretations(result.answers, speech.segments) : null
   const speechRule = withSpeech ? '\n' + SPEECH_RULES + '\nQuestion clock: ' + (anchor ? anchor.toISOString() + ' (UTC offset minutes ' + (-anchor.getTimezoneOffset()) + ')' : 'unknown')
     + '. Current user message: fallible semantic labels by UTF-16 offsets in its exact text: ' + JSON.stringify(interpretations) : ''
@@ -313,8 +341,8 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     // Process-local only; never copy callbacks or grant handles into receipts/history.
     ...(withSpeech ? { speechInterpretations: interpretations } : {}),
     ...(topicRoute ? { topicRoute } : {}),
-    ...(topicQuestions.length ? { privateTopicBatch: true, withoutTopic } : {}),
-    ...(guarded.length || withSpeech || topicQuestions.length ? { mayDispatch: () => (!topicQuestions.length || liveTopic.allowed()) && (!withSpeech || speech.allowed()) && guarded.every(item => mayRead(item.candidate)),
+    ...(topicQuestions.length ? { privateTopicBatch: true, withoutTopic, privateBatchCurrent } : {}),
+    ...(guarded.length || withSpeech || topicQuestions.length || guardSpeech ? { mayDispatch: () => !modeStopped() && privateBatchCurrent() && (!withSpeech || speech.allowed()) && guarded.every(item => mayRead(item.candidate)),
       noteSent: () => { for (const { candidate } of guarded) { try { candidate.noteSent?.() } catch {} } } } : {}),
     extraContext: packet ? { [DECISION_CONTEXT_KEY]: packet } : {},
     latencyMs: result.latencyMs,

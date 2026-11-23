@@ -236,6 +236,8 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     }
   }
 
+  // Public authority epoch; never expose the credential binding or its secret.
+  handle.settingsRevision = () => createHmac('sha256', bindingKey).update('egdesk:board-settings:v1').digest('hex')
   handle.invalidate = () => {
     bindingKey = randomBytes(32)
     for (const ticket of pending.keys()) discard(ticket)

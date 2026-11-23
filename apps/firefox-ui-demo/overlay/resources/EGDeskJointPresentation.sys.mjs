@@ -11,6 +11,15 @@ const DESTINATION = 'https://api.openai.com/v1/decisions';
 const KINDS = new Set(['업무 전표', '메모', '자료', '상태표']);
 const TICKET = /^[0-9a-f]{48}$/;
 const modeOK = m => m === 'on' || m === 'advisory';
+export async function readPresentationDecision(http) {
+  try {
+    const {status, body} = await http('GET', '/decision/status', undefined, {timeoutMs:350});
+    if (status === 200 && body?.configured === true && body.model === MODEL && modeOK(body.mode) &&
+        typeof body.boardRevision === 'string' && /^[a-f0-9]{64}$/.test(body.boardRevision))
+      return { available:true, mode:body.mode, revision:body.boardRevision };
+  } catch {}
+  return null;
+}
 const numeric = Number.isFinite;
 const validRect = r => !!r && [r.x, r.y, r.width, r.height].every(numeric) && r.width > 0 && r.height > 0;
 const rect = ({ x, y, width, height }) => ({ x, y, width, height });
@@ -19,6 +28,7 @@ const bottom = r => r.y + r.height;
 const overlaps = (a, b) => a.x < right(b) && right(a) > b.x && a.y < bottom(b) && bottom(a) > b.y;
 const inside = (a, b) => a.x >= b.x && a.y >= b.y && right(a) <= right(b) && bottom(a) <= bottom(b);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const sameLayout = (a, b) => !!a && !!b && same({...a, decision:null}, {...b, decision:null});
 const expand = (r, n) => ({ x: r.x - n, y: r.y - n, width: r.width + 2 * n, height: r.height + 2 * n });
 const cover = rs => { const x = Math.min(...rs.map(r => r.x)), y = Math.min(...rs.map(r => r.y));
   return { x, y, width: Math.max(...rs.map(right)) - x, height: Math.max(...rs.map(bottom)) - y }; };
@@ -131,6 +141,7 @@ const normalizeCue = cue => {
 export function createPresentationController(h) {
   let active = null, undo = null;
   const now = h.now || (() => performance.now());
+  const checkAtHost = !!(h.readDecision || h.verifyDecisionAuthority);
   function read(key) { try { return snapshot(h.read(key)); } catch { return null; } }
   function cancelTicket(ticket, request) {
     if (!TICKET.test(ticket || '')) return;
@@ -158,7 +169,7 @@ export function createPresentationController(h) {
   function sync() {
     const a = active;
     const current = a ? read(a.key) : undo ? read(undo.key) : null;
-    if (undo && !(same(undo.snapshot, a?.key === undo.key || !a ? current : read(undo.key)))) undo = null;
+    if (undo && !sameLayout(undo.snapshot, a?.key === undo.key || !a ? current : read(undo.key))) undo = null;
     if (a && !same(a.snapshot, current)) { close({ reason: 'Board 상태가 바뀌어 미리보기를 닫았습니다.' }); return false; }
     return !!a;
   }
@@ -166,7 +177,7 @@ export function createPresentationController(h) {
   const choices=a=>{if(a.plans)return a.plans;const cards=selected(a),out={};for(const k of ['keep','overview','focus','pair','front'])out[k]=presentationPlan(a.snapshot,cards,a.focusId,k);if(a.snapshot.overall)Object.assign(out,worksitePlans(a.snapshot,cards,a.focusId));return a.plans=out;};
   function descriptor(a) {
     const cards = selected(a);
-    if (!a.snapshot.decision || typeof h.request !== 'function' || !cards.length || cards.length > 12 ||
+    if (a.decisionBlocked || !a.snapshot.decision || typeof h.request !== 'function' || !cards.length || cards.length > 12 ||
         cards.some(c => !c.maySendDescriptor || !c.kind)) return null;
     const items = cards.map(c => ({ kind: c.kind, focus: c.id === a.focusId, movable: canMove(c) }));
     const wide = isWide(a.snapshot), tall = isTall(a.snapshot);
@@ -182,7 +193,7 @@ export function createPresentationController(h) {
     const a = active, all = choices(a), job = a.job;
     return { cards: a.snapshot.cards, viewport: a.snapshot.viewport, zoom: a.snapshot.camera.zoom, selected: [...a.ids],
       focusId: a.focusId, choice: a.choice, options: Object.keys(all).filter(k => all[k]), plan: all[a.choice],
-      undo: undo?.key === a.key, decision: a.snapshot.decision?.mode || null,
+      undo: undo?.key === a.key, decision: a.decisionBlocked ? null : a.snapshot.decision?.mode || null,
       canPrepare: !!descriptor(a), overall:a.snapshot.overall, localMs:a.localMs, photo:a.job?.phase==='review'?a.job.photo:null, phase: job?.phase || '', packet: job?.phase === 'review' ? job.packet : null,
       suggestion: a.suggestion, message: a.message };
   }
@@ -207,21 +218,41 @@ export function createPresentationController(h) {
     discard(a);
     if (checked) a.ids.add(id); else a.ids.delete(id);a.plans=null;
     a.focusId = a.ids.has(a.focusId) ? a.focusId : selected(a)[0]?.id ?? null;
-    a.choice = 'keep'; a.message = ''; emit();
+    a.modelChoice = null; a.choice = 'keep'; a.message = ''; emit();
   }
   function focus(id) {
     if (!sync() || !active.ids.has(id) || active.focusId === id) return;
-    discard(active);active.plans=null; active.focusId = id; active.choice = 'keep'; active.message = ''; emit();
+    discard(active);active.plans=null; active.focusId = id; active.modelChoice = null; active.choice = 'keep'; active.message = ''; emit();
   }
   function choose(option) {
     if (!sync() || !Object.hasOwn(PRESENTATION_OPTIONS, option) || !choices(active)[option]) return;
-    discard(active); active.choice = option; active.message = ''; emit();
+    discard(active); active.modelChoice = null; active.choice = option; active.message = ''; emit();
   }
   function expire(a, job) {
     if (active !== a || a.job !== job) return;
     discard(a); a.message = '검토 시간이 끝났습니다. 수동으로 구성을 고를 수 있습니다.'; emit();
   }
   const live = (a, job) => active === a && a.job === job && sync();
+  // A legal wire enum is not a grant to preview or commit a different scene.
+  async function checkDecision(a, job) {
+    if (!live(a, job)) return false;
+    const ids = selected(a).map(c => c.id);
+    let valid = false;
+    try {
+      if (!h.verifyDecisionAuthority || await h.verifyDecisionAuthority(a.key, ids) === true) {
+        const settings = h.readDecision ? await h.readDecision() : a.snapshot.decision;
+        valid = settings?.mode === a.snapshot.decision.mode && settings?.revision === a.snapshot.decision.revision;
+      }
+    } catch {}
+    if (!live(a, job)) return false;
+    if (valid) return true;
+    discard(a);
+    if (a.modelChoice) { a.choice = a.modelChoice.previous; a.modelChoice = null; }
+    a.decisionBlocked = true;
+    a.message = '결정 모델 설정이나 자료 권한이 바뀌었습니다. 수동으로 정리하거나 새로 검토하세요.';
+    emit();
+    return false;
+  }
   async function prepare(cue) {
     if (!sync() || active.job) return;
     const a = active, dto = descriptor(a), text = normalizeCue(cue);
@@ -236,8 +267,9 @@ export function createPresentationController(h) {
         options=[...options.filter(k=>k!=='pair'||feasible.pair),...(front&&feasible.front?['front']:[]),...extra];const shot=measured.photo;send={...send,items:send.items.map((c,i)=>({...c,scene:scenes[i]})),visual:{image:shot.image,width:shot.width,height:shot.height,composition,candidates:extra,allowPair:!!feasible.pair}};
         // A local obstacle can rule out a base plan. This is not data to send about the private obstacle.
         if(options.some(k=>!feasible[k])){throw Error('impossible-option');}job.scene=JSON.stringify(scenes);job.photo=shot.image;job.original=shot.image;}
+      if (checkAtHost && !await checkDecision(a, job)) return;
       const data = await job.request(PRESENTATION_DECISION_PATHS.prepare, { cue: text, ...send }, { signal: job.controller.signal });
-      if (!live(a, job)) { cancelTicket(data?.ticket, job.request); return; }
+      if (!live(a, job) || (checkAtHost && !await checkDecision(a, job))) { cancelTicket(data?.ticket, job.request); return; }
       const p = data?.preview;
       const canonicalItems = send.items.map((c, i) => ({ slot: String.fromCharCode(65 + i), ...c }));
       job.ticket = data?.ticket;
@@ -265,13 +297,20 @@ export function createPresentationController(h) {
     if (job?.phase !== 'review') return;
     if (now() >= job.expires) { expire(a, job); return; }
     if(a.snapshot.overall){job.phase='recheck';emit();const m=await h.measure(a.key,selected(a).map(c=>c.id),{photo:true});if(!live(a,job))return;if(!m||m.photo?.image!==job.original||JSON.stringify(m.scene)!==job.scene){discard(a);a.message='측정한 장면이 바뀌어 전송하지 않았습니다.';emit();return;}}
+    if (checkAtHost) {
+      job.phase = 'recheck'; emit();
+      if (!await checkDecision(a, job) || !live(a, job)) return;
+      if (now() >= job.expires) { expire(a, job); return; }
+    }
     job.phase = 'run'; job.packet = null;job.photo=null; emit();
     try {
       const data = await job.request(PRESENTATION_DECISION_PATHS.run, { ticket: job.ticket, confirm: true }, { signal: job.controller.signal });
+      if (checkAtHost && !await checkDecision(a, job)) return;
       if (!live(a, job)) return;
       if (now() >= job.expires) { expire(a, job); return; }
       clearTimeout(job.timer); a.job = null;
       if (a.snapshot.decision.mode === 'on' && data?.status === 'preview' && job.options.includes(data.preview) && choices(a)[data.preview]) {
+        a.modelChoice = { previous:a.modelChoice?.previous ?? a.choice, expires:job.expires };
         a.choice = data.preview; a.message = '제안한 구성을 미리 보는 중입니다. 아직 적용하지 않았습니다.';
       } else if (a.snapshot.decision.mode === 'advisory' && data?.status === 'advisory-only' && job.options.includes(data.suggestion)) {
         a.suggestion = data.suggestion; a.message = '참고 제안입니다. 미리보기는 바꾸지 않았습니다.';
@@ -286,8 +325,25 @@ export function createPresentationController(h) {
     discard(active); active.message = ''; emit();
   }
   function apply() {
-    if (!sync()) return false;
-    const a = active, plan = choices(a)[a.choice];
+    if (!sync() || active.job) return false;
+    const a = active;
+    if (a.modelChoice && checkAtHost) return applyRecommendation(a);
+    return applyPlan(a);
+  }
+  async function applyRecommendation(a) {
+    const model = a.modelChoice;
+    const job = { phase:'apply-check', controller:new AbortController() };
+    a.job = job; emit();
+    if (!await checkDecision(a, job) || !live(a, job)) return false;
+    a.job = null;
+    if (now() >= model.expires) {
+      a.choice = model.previous; a.modelChoice = null;
+      a.message = '검토 시간이 끝났습니다. 수동으로 구성을 고를 수 있습니다.'; emit(); return false;
+    }
+    return applyPlan(a);
+  }
+  function applyPlan(a) {
+    const plan = choices(a)[a.choice];
     if (!plan || a.job) return false;
     if (plan.option === 'keep') { close({ restoreFocus: true }); return true; }
     const before = { camera: plan.camera ? { x: a.snapshot.camera.x, y: a.snapshot.camera.y, zoom: a.snapshot.camera.zoom } : null,
@@ -304,7 +360,7 @@ export function createPresentationController(h) {
     if (!sync() || !undo || active.key !== undo.key || active.job) return false;
     const record = undo;
     close({ restoreFocus: true, forgetUndo: true });
-    return same(record.snapshot, read(record.key)) && h.commit(record.key, record.before) === true;
+    return sameLayout(record.snapshot, read(record.key)) && h.commit(record.key, record.before) === true;
   }
   return { open, close, sync, view, select, focus, choose, prepare, confirm, cancelDecision, apply, undo: undoOnce };
 }

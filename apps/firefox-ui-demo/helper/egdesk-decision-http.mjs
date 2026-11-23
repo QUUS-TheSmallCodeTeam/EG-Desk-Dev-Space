@@ -19,12 +19,15 @@ const BODY_LIMIT = 4096
 const ROUTES = new Set(['/decision/status', '/decision/credential', '/decision/mode'])
 
 // mode: the bridge-settings adapter { mode, saved, persisted, save(mode) } (optional).
-// Notify synchronously after a successful mutation, before returning its status.
-export function createDecisionHttpHandler({ store, verifyKey, budget = null, model = null, mode = null, modes = ['off', 'advisory', 'on'], port = 39218, onSettingsChanged = () => {} } = {}) {
+// Revoke Board grants synchronously after each successful save, before returning status.
+// onSettingsChanged is the existing notifier for the other Decisions surfaces.
+export function createDecisionHttpHandler({ store, verifyKey, budget = null, model = null, mode = null, modes = ['off', 'advisory', 'on'], port = 39218, onSettingsChanged = () => {}, boardPresentation = null } = {}) {
   if (!store || typeof verifyKey !== 'function') throw new TypeError('store and verifyKey are required')
   const modeStatus = () => (mode ? { mode: mode.mode, saved: mode.saved, persisted: mode.persisted, modes: [...modes] } : null)
   const status = () => ({ configured: store.getApiKey() !== null, store: store.status, keyHint: store.hint(), savedAt: store.savedAt(),
-    model, budget: budget ? budget.snapshot() : null, mode: mode ? mode.mode : null })
+    model,
+    ...(boardPresentation ? { boardRevision: boardPresentation.settingsRevision() } : {}),
+    budget: budget ? budget.snapshot() : null, mode: mode ? mode.mode : null })
   return async (req, res, url) => {
     if (!ROUTES.has(url.pathname)) return false
     if (!guardBridgeRequest(req, port)) { sendJson(res, 403, { error: 'Trusted loopback origin is required', code: 'DECISION_LOOPBACK_REQUIRED' }); return true }
@@ -38,6 +41,7 @@ export function createDecisionHttpHandler({ store, verifyKey, budget = null, mod
         const previousMode = mode.mode
         if (mode.save(body.mode) !== true) sendJson(res, 500, { error: 'The decision mode could not be saved', code: 'DECISION_MODE_NOT_SAVED', ...modeStatus() })
         else {
+          boardPresentation?.invalidate()
           if (mode.mode !== previousMode) onSettingsChanged()
           sendJson(res, 200, modeStatus())
         }
@@ -59,12 +63,14 @@ export function createDecisionHttpHandler({ store, verifyKey, budget = null, mod
         }
         if (!store.save(body.apiKey)) { sendJson(res, 500, { error: 'The key could not be saved', code: 'DECISION_STORE_FAILED' }); return true }
         // A successful save is a fresh credential even when key and savedAt match.
+        boardPresentation?.invalidate()
         onSettingsChanged()
         sendJson(res, 200, { ...status(), verification: verified.status })
         return true
       }
       if (req.method === 'DELETE') {
         if (store.clear()) {
+          boardPresentation?.invalidate()
           onSettingsChanged()
           sendJson(res, 200, status())
         }

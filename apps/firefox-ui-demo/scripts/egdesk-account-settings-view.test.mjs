@@ -346,6 +346,8 @@ test('decision model section: unknown offline, key hint only, Korean verificatio
   assert.equal(View.decisionSettingsView({ configured: false, store: 'unavailable', mode: 'off' }, { connected: true }).canSave, false);
   assert.equal(View.decisionVerificationText('verified'), '확인됨');
   assert.match(View.decisionVerificationText('no_credit'), /^크레딧 없음/);
+  assert.equal(View.decisionVerificationText('rate_limited'), '요청 한도에 걸림 · 키는 저장했습니다. 잠시 뒤 다시 시도하세요.');
+
   assert.equal(View.decisionVerificationText('invalid_key'), '키가 올바르지 않습니다');
   assert.match(View.decisionVerificationText('model_unavailable'), /쓸 수 없습니다/);
   assert.match(View.decisionVerificationText('unreachable'), /연결하지 못했습니다/);

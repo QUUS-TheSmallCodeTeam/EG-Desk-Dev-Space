@@ -7,7 +7,7 @@ const box = (x, y, width, height) => ({ x, y, width, height });
 const defer = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const card = (id, x, y, extra = {}) => ({ id, title: `private ${id}`, rect: box(x,y,442,258), visible:true, canRead:true,
   revision:'lease:v1', kind:'자료', movable:true, pinned:false, maySendDescriptor:true, zIndex:21, body:'private body', ...extra });
-function harness({mode = 'on', transport, mutate, render} = {}) {
+function harness({mode = 'on', transport, mutate, render, readDecision, verifyDecisionAuthority} = {}) {
   let scene = { ready:true, revision:'profile/board/layout', viewport:box(22,40,900,490), camera:{x:40,y:36,zoom:1,minZoom:.01,maxZoom:4},
     cards:[card('private-A',10,10),card('private-B',490,10),card('extra',700,386,{rect:box(700,386,100,80)}),
       card('hidden',12,14,{visible:false}),card('forbidden',12,14,{canRead:false})], obstacles:[],
@@ -20,7 +20,7 @@ function harness({mode = 'on', transport, mutate, render} = {}) {
     options:['keep','overview',...(body.items.some(c=>c.focus)? ['focus']:[]),
       ...(body.wide && body.tall && body.items.length===2 && body.items.every(c=>c.movable)? ['pair']:[])] }});
   const api = createPresentationController({now:()=>time, read:key=>key==='board' ? scene : null,
-    render,
+    render, readDecision, verifyDecisionAuthority,
     dismiss:o=>dismissals.push(o), commit:(key,data)=>{
       commits.push({key,...structuredClone(data)});
       if (data.camera) Object.assign(scene.camera,data.camera);
@@ -120,7 +120,7 @@ async function deskCopyHost({mixed = false} = {}) {
     safe:()=>({left:0,top:0,right:1000,bottom:700,width:1000,height:700}),camera:()=>({x:0,y:0,zoom:1,minZoom:.1,maxZoom:4}),
     projections:()=>mixed?[p]:[], meta:()=>({board:{epoch:'epoch',cards:[{id:'item',access:'lease',version:1,own:true,title:'합성 보드 자료'}]}}),
     geometry:n=>({...n.rect,zIndex:1}),notice:text=>notices.push(text),
-    http:async (method,path)=>{requests.push([method,path]);return {status:200,body:{configured:true,model:'gpt-6-luna',mode:'on'}};}});
+    http:async (method,path)=>{requests.push([method,path]);return {status:200,body:{configured:true,model:'gpt-6-luna',mode:'on',boardRevision:'a'.repeat(64)}};}});
   const texts = n => n.kids.filter(child=>child.isConnected).flatMap(child=>[child.textContent,...texts(child)]).filter(Boolean);
   return {workbench,notices,requests,root,canvas,texts:()=>texts(root)};
 }
@@ -317,3 +317,146 @@ for (const scenario of ['on', 'advisory', 'expired', 'stale']) {
     assert.equal(commits.length, 2);
   });
 }
+
+// Production request handlers with only the request/response transport, stores and provider faked.
+// Hold the UI delivery separately from the provider so HTTP may already have emitted a legal enum.
+test('Board HTTP → Desk: live grants only, no resurrection of approved or returned recommendations', async t => {
+  const { EventEmitter } = await import('node:events');
+  const { Readable } = await import('node:stream');
+  const { createBoardPresentationHttpHandler } = await import('../helper/egdesk-board-presentation-http.mjs');
+  const { createDecisionHttpHandler } = await import('../helper/egdesk-decision-http.mjs');
+  const { createDecisionBudget, DECISION_MODEL } = await import('../helper/egdesk-decision-client.mjs');
+  const presentation = await import('../overlay/resources/EGDeskJointPresentation.sys.mjs');
+  const pair = '선택한 두 장 나란히 비교', keep = '현재 배치 유지';
+  for (const scenario of ['fresh on', 'off/on after review', 'same key after review', 'grant lost after review',
+    'off/on while provider pending', 'off/on after legal reply', 'same key after legal reply',
+    'grant lost after legal reply', 'off/on between preview and apply', 'same key between preview and apply',
+    'grant lost between preview and apply', 'manual placement and Undo without model', 'advisory']) {
+    await t.test(scenario, async t => {
+      const key = 'synthetic-fixture-not-a-provider-key';
+      let savedKey = key, savedMode = scenario === 'advisory' ? 'advisory' : 'on', providerGate, uiGate;
+      let grant = true, h;
+      const provider = [], inputs = [], renders = [];
+      const runnerEntered = defer(), emitted = defer();
+      const store = { status:'configured', writable:true, getApiKey:()=>savedKey, savedAt:()=>17, hint:()=>null,
+        save:k=>{ savedKey=k; return true; }, clear:()=>{ savedKey=null; return true; } };
+      const mode = { get mode(){ return savedMode; }, saved:true, persisted:true,
+        save:m=>{ savedMode=m; return true; } };
+      const board = createBoardPresentationHttpHandler({credentials:store, getMode:()=>mode.mode,
+        budget:createDecisionBudget({monthlyInputTokenCap:100}), fetchImpl:async (_endpoint, init)=>{
+          provider.push(JSON.parse(init.body)); runnerEntered.resolve();
+          if (providerGate) await providerGate.promise;
+          return Response.json({ answers:[{name:'board_view', type:'choice', choice:pair, confidence:.94,
+            probabilities:[{value:pair, probability:.94},{value:keep, probability:.06}]}], usage:{input_tokens:10} });
+        }});
+      const settings = createDecisionHttpHandler({store, mode, model:DECISION_MODEL, verifyKey:async ()=>({status:'verified'}),
+        boardPresentation:board, // bridge's production connector
+        onSettingsChanged:()=>{ if (!board.settingsRevision) board.invalidate(); } }); // compatibility with pre-fix bridge wrappers
+      const http = async (method, path, body) => {
+        const req = Object.assign(Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]),
+          {url:path,method,headers:{host:'127.0.0.1:39218',origin:'chrome://browser','content-type':'application/json'}});
+        const res = Object.assign(new EventEmitter(), {
+          writeHead(status) { this.status=status; }, end(json) { this.body=JSON.parse(json); this.writableEnded=true; },
+        });
+        const url = new URL(path, 'http://127.0.0.1:39218');
+        assert.equal(await settings(req,res,url) || await board(req,res,url),true);
+        assert.equal(res.status,200);
+        return {status:res.status,body:res.body};
+      };
+      const readDecision = () => presentation.readPresentationDecision?.(http);
+      const status = await http('GET','/decision/status');
+      h = harness({mode:savedMode, render:v=>renders.push(v.choice),
+        mutate:s=>{ s.decision.revision=status.body.boardRevision ?? 'baseline'; },
+        transport:async (path, dto)=>{
+          if(path!==paths.cancel) inputs.push(path);
+          const {body} = await http('POST',path,dto);
+          if(path===paths.run){emitted.resolve(body); if(uiGate) await uiGate.promise;}
+          return body;
+        }, readDecision, verifyDecisionAuthority:async ()=>{
+          // Represents a live grant projection that has not polled yet.
+          if(!grant) h.scene.cards[0].maySendDescriptor=false;
+          return grant;
+        }});
+      t.after(()=>{ providerGate?.resolve(); uiGate?.resolve(); h.api.close(); board.invalidate(); });
+      const flip = async () => {
+        if(scenario.startsWith('off/on')) {
+          await http('POST','/decision/mode',{mode:'off'});
+          await http('POST','/decision/mode',{mode:'on'});
+        } else if(scenario.startsWith('same key')) {
+          const again=await http('POST','/decision/credential',{apiKey:key});
+          assert.equal(again.body.savedAt,status.body.savedAt,'deliberate same-timestamp save');
+        } else if(scenario.startsWith('grant lost')) grant=false;
+      };
+      const {api,scene,commits} = h;
+      assert.equal(api.open('board'),true);
+      if(scenario.startsWith('manual')) {
+        const original=structuredClone(scene.cards.map(c=>c.rect));
+        await http('POST','/decision/mode',{mode:'off'});
+        scene.decision=null;
+        assert.ok(api.open('board')); api.choose('pair');
+        assert.equal(await api.apply(),true); assert.equal(commits.length,1);
+        await http('POST','/decision/mode',{mode:'on'});
+        scene.decision={available:true,mode:'on',revision:(await http('GET','/decision/status')).body.boardRevision ?? 'baseline'};
+        assert.ok(api.open('board')); assert.equal(api.undo(),true);
+        assert.deepEqual(scene.cards.map(c=>c.rect),original);
+        assert.equal(commits.length,2); assert.deepEqual(inputs,[]); assert.deepEqual(provider,[]);
+        return;
+      }
+      await api.prepare('두 합성 자료 비교');
+      assert.equal(api.view().phase,'review');
+      assert.equal(api.view().choice,'keep');
+      assert.equal(provider.length,0);
+      if(scenario.endsWith('after review')) {
+        await flip();
+        await api.confirm();
+        assert.equal(provider.length,0,'old approval dispatched no model input');
+        assert.deepEqual(inputs,[paths.prepare],'no extra run POST');
+      } else if(scenario.endsWith('while provider pending')) {
+        providerGate=defer(); const pending=api.confirm(); await runnerEntered.promise;
+        await flip(); providerGate.resolve(); await pending;
+        assert.deepEqual(await emitted.promise,{status:'manual'});
+        assert.equal(provider.length,1);
+      } else if(scenario.endsWith('after legal reply')) {
+        uiGate=defer(); const pending=api.confirm();
+        assert.deepEqual(await emitted.promise,{status:'preview',preview:'pair'});
+        await flip(); uiGate.resolve(); await pending;
+        assert.equal(provider.length,1);
+      } else {
+        await api.confirm();
+        assert.equal(provider.length,1);
+        if(scenario.endsWith('between preview and apply')) {
+          assert.equal(api.view().choice,'pair');
+          await flip();
+          assert.equal(await api.apply(),false,'a previously rendered model choice is not an apply grant');
+        }
+      }
+      assert.equal(commits.length,0,'no implicit geometry write');
+      if(scenario==='fresh on') {
+        assert.equal(api.view().choice,'pair');
+        assert.equal(await api.apply(),true);
+        assert.equal(commits.length,1);
+      } else if(scenario==='advisory') {
+        assert.deepEqual(await emitted.promise,{status:'advisory-only',suggestion:'pair'});
+        assert.equal(api.view().choice,'keep'); assert.equal(api.view().suggestion,'pair');
+        assert.equal(await api.apply(),true); assert.equal(commits.length,0);
+      } else {
+        assert.notEqual(api.view()?.choice,'pair','old enum is not presented or retained');
+        if(!scenario.endsWith('between preview and apply')) assert.ok(!renders.includes('pair'));
+        assert.equal(commits.length,0);
+        const sent = provider.length;
+        grant=true; scene.cards[0].maySendDescriptor=true;
+        scene.decision.revision=(await http('GET','/decision/status')).body.boardRevision ?? 'baseline';
+        assert.ok(api.open('board')); await api.prepare('새 승인으로 두 합성 자료 비교'); await api.confirm();
+        assert.equal(provider.length,sent+1); assert.equal(api.view().choice,'pair');
+        assert.equal(await api.apply(),true); assert.equal(commits.length,1);
+      }
+      for(const packet of provider) {
+        assert.equal(packet.model,DECISION_MODEL);
+        assert.equal(packet.input[0].content.length,2);
+        assert.ok(packet.input[0].content.every(p=>p.type!=='input_image'));
+        assert.equal(packet.questions[0].name,'board_view');
+        assert.doesNotMatch(JSON.stringify(packet),/private-A|private-B|private body/);
+      }
+    });
+  }
+});

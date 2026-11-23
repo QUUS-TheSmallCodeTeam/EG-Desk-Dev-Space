@@ -254,7 +254,7 @@ async function readBody(response, signal) {
  *   getApiKey: () => string | null | Promise<string | null>
  *   budget: optional createDecisionBudget() result; a request is refused with
  *     budget_exceeded when the monthly input-token cap is reached.
- * client.decide({ input, questions, promptCacheKey?, safetyIdentifier?, timeoutMs?, signal? })
+ * client.decide({ input, questions, promptCacheKey?, safetyIdentifier?, timeoutMs?, signal?, beforeDispatch? })
  *   → { answers, model, usage, latencyMs }   throws DecisionError
  * client.verifyKey(apiKey, { timeoutMs?, signal? }) → { status: 'verified' | 'not_verified' | DecisionError code, retryable }
  */
@@ -328,7 +328,11 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
     async decide(request = {}) {
       const apiKey = await getApiKey()
       if (!nonEmptyText(apiKey)) throw new DecisionError('not_configured', 'No decision model API key is saved')
-      return post(apiKey, request, request)
+      // Choose at most a narrower request after the key lookup, before serialization.
+      // The policy callback is synchronous and never receives the credential.
+      const dispatch = request.beforeDispatch ? request.beforeDispatch() : request
+      if (!dispatch) throw new DecisionError('aborted', 'The decision request was cancelled before dispatch')
+      return post(apiKey, dispatch, request)
     },
     async verifyKey(apiKey, options = {}) {
       if (!nonEmptyText(apiKey)) return { status: 'invalid_key', retryable: false }

@@ -2540,7 +2540,9 @@ export class CodexChatRuntime {
       if (!run) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
       if (topicRoute && intake.current()) {
         const { topic, parent, needs } = topicRoute // discard the plaintext packet at this boundary
-        this.topicRuns.set(run, { final: null, commit: final => intake.commit({ topic, parent, needs }, final) })
+        const current = decision.result.privateBatchCurrent
+        this.topicRuns.set(run, { final: null, commit: final =>
+          (!current || current()) && intake.commit({ topic, parent, needs }, final) })
       }
       // The turn has the shared copies now; they are not attached again.
       if (context.peerDispatch && !bounded) this.bindBoardPeerRun(context.peerDispatch, context, run, epoch)
@@ -4044,10 +4046,12 @@ export class CodexChatRuntime {
       const evidence = setup.memoryEvidence, recipient = dm.topicRecipient(), first = evidence?.topicState(dm.scope)
       if (!recipient || !first || first.recipient !== recipient || first.conversationId !== cid || first.turns.length >= SESSION_TOPIC_LIMITS.rows) return null
       const { generation, revision } = first
+      const settingsGeneration = setup.settingsGeneration?.()
       const sourceScope = { clientThreadId: thread, conversationId: cid, agentId, ownerHash: context.ownerHash }
       if (ownerHash(dm.scope.ownerKey) !== context.ownerHash) return null
       const state = () => { try {
-        if (!this.storeHealthy || setup.mode() !== 'on' || setup.configured() !== true || dm.topicRecipient() !== recipient ||
+        if (!this.storeHealthy || this.decisionContext !== setup || setup.settingsGeneration?.() !== settingsGeneration ||
+            setup.mode() !== 'on' || setup.configured() !== true || dm.topicRecipient() !== recipient ||
             this.store.getAcceptedText(thread, context.requestId) !== body.message) return null
         context.checkBoard?.()
         const x = evidence.topicState(dm.scope)
@@ -4096,10 +4100,15 @@ export class CodexChatRuntime {
       if (!cid || !profile || !context.localMessageId || !context.localRunId || !this.storeHealthy || context.channelKind !== 'direct' || context.stateless ||
           context.board || body.boardId != null || Object.hasOwn(context,'boardActor') || typeof this.store?.speechSource !== 'function') return null
       const dm = this.memoryDmAuthority({ clientThreadId: thread, conversationId: cid, expectedProfileId: profile })
-      const evidence = this.decisionContext.memoryEvidence, gen = evidence?.speechGrant?.(dm.scope)
+      const setup = this.decisionContext, generation = setup.settingsGeneration?.()
+      const evidence = setup.memoryEvidence, gen = evidence?.speechGrant?.(dm.scope)
       if (!gen) return null
+      const modeActive = () => { try {
+        return this.decisionContext === setup && setup.settingsGeneration?.() === generation &&
+          setup.mode() === 'on' && setup.configured() === true
+      } catch { return false } }
       const allowed = () => { try {
-        if (signal.aborted || !this.storeHealthy || this.decisionContext.mode() !== 'on' || this.decisionContext.configured() !== true) return false
+        if (signal.aborted || !this.storeHealthy || !modeActive()) return false
         dm.assertCurrent(); context.checkBoard?.()
         return evidence.speechGrant(dm.scope) === gen
       } catch { return false } }
@@ -4113,7 +4122,7 @@ export class CodexChatRuntime {
           spokenAt: new Date(s.spokenAt).toISOString(), offsetMinutes: r.offsetMinutes, sequence: s.seq,
           verification: 'utterance-only', interpretations: r.interpretations }
       }
-      return { allowed, segments: speechSegments(body.message), candidate: () => {
+      return { allowed, modeActive, segments: speechSegments(body.message), candidate: () => {
         if (!allowed()) return null
         const refs = evidence.recentSpeech(dm.scope, gen)
         if (!refs?.length) return null

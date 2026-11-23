@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
-import { mkdtemp, rm, chmod, readdir, readFile } from 'node:fs/promises'
+import { mkdtemp, rm, chmod, readdir, readFile, writeFile } from 'node:fs/promises'
 import { ImmutableContextStore } from './egdesk-context-store.mjs'
 import { MemoryEvidenceStore } from './egdesk-memory-evidence.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
@@ -42,7 +42,7 @@ function derive(packet, style) {
 
 async function newWorld(t, { count, out } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-memev-qa-')); await chmod(dir, 0o700)
-  const w = { dir, requestN: 0, clock: 1_000_000, turns: [], collected: [], events: [], legacy: [], decisionInputs: [], errors: [], threads: 0, turnN: 0, hooks: {}, mode: 'on', conv: {}, handles: {}, fx: fixtures({ count, out }) }
+  const w = { dir, requestN: 0, clock: 1_000_000, turns: [], collected: [], events: [], legacy: [], decisionInputs: [], errors: [], threads: 0, turnN: 0, hooks: {}, mode: 'on', settingsGeneration: 0, conv: {}, handles: {}, fx: fixtures({ count, out }) }
   const boot = () => {
     w.captures = new ImmutableContextStore({ dataDir: path.join(dir, 'state'), allowedRoots: [dir], now: () => w.clock })
     w.evidence = new MemoryEvidenceStore({ dataDir: path.join(dir, 'state'), captures: w.captures, now: () => w.clock })
@@ -66,6 +66,7 @@ async function newWorld(t, { count, out } = {}) {
         const timing = { threadId: params.threadId, turnId: id }
         if (w.hooks.manualAnswer) { w.fixtureRun = timing; return { turn: { id, status: 'inProgress', items: [] } } }
         setTimeout(async () => {
+          await w.hooks.beforeMockFinal?.()
           const n = (m, p) => chat.handleNotification({ method: m, params: p })
           await n('item/started', { ...timing, item: { id: `w${id}`, type: 'agentMessage', phase: 'commentary', text: '' } })
           await n('item/completed', { ...timing, item: { id: `w${id}`, type: 'agentMessage', phase: 'commentary', text: `NATIVE_WORK_NOTE ${id}` } })
@@ -81,7 +82,7 @@ async function newWorld(t, { count, out } = {}) {
         return { turn: { id, status: 'inProgress', items: [] } }
       },
       respond: () => {}, emit: e => w.events.push(e), emitLegacy: e => w.legacy.push(e), verifyFile: async () => null,
-      decisionContext: { mode: () => w.mode, configured: () => true, budgetMs: 5000, memoryEvidence: w.evidence,
+      decisionContext: { mode: () => w.mode, settingsGeneration: () => w.settingsGeneration, configured: () => true, budgetMs: 5000, memoryEvidence: w.evidence,
         topicRecipient: () => w.hooks.topicRecipient?.() ?? null,
         client: { model: 'synthetic-decision', async decide(request) {
           w.decisionInputs.push(JSON.stringify(request.input)); await w.hooks.duringDecide?.(request)
@@ -497,6 +498,208 @@ test('scoped speech GAP: Korean speech consent separates Decisions wire and nati
   assert.equal(late.turn.text, missing)
   assert.deepEqual(w.errors, [])
 })
+
+// Local QA only: same ordinary Codex DM setup, one previously successful pair,
+// no topic grant/recipient. Only the semantic mock and explicit revocations vary.
+const W3_REPORT = '지난번에 한 말과 비교해 보면, 하린이 달그림 상자를 옮겼다고 들었어.'
+const W3_PLAN = '내일 내가 은모래 표지를 살펴볼 예정이야.'
+const W3_CURRENT = `${W3_REPORT} ${W3_PLAN}`
+const W3_PRIOR = '이전표식-보랏빛: 하린이 물결 상자를 남겼다고 했어. 다음 날 하늬 표지를 살펴볼 예정이야.'
+const W3_REPLY = '반대인용-초록빛: 물결 상자가 없다는 말도 있었지만 확인하지 않았어요.'
+const W3_TITLE = '소품 배치 지침', W3_SUMMARY = '창작 무대의 소품 관리 기준', W3_BODY = '각 소품의 상태는 무대 일지에서 따로 확인한다.'
+const W3_BASE = ['answer_type', 'time_intent', 'rel_0']
+const W3_AUGMENTED = [...W3_BASE, ...[0, 1].flatMap(i => ['source', 'form', 'time'].map(axis => `speech_${axis}_${i}`)), 'rel_recall']
+const W3_RIGHT = [['attributed_report', 'assertion', 'past_unspecified'], ['unspecified', 'plan', 'future_anchored']]
+// Deliberately contradictory output, not a second interpretation of the Korean.
+const W3_WRONG = [['self_reported_observation', 'assertion', 'past_unspecified'], ['unspecified', 'assertion', 'past_unspecified']]
+const currentLabels = packet => {
+  const marker = 'Current user message: fallible semantic labels by UTF-16 offsets in its exact text: '
+  const line = packet.split('\n').find(s => s.includes(marker))
+  return line ? JSON.parse(line.slice(line.indexOf(marker) + marker.length)) : null
+}
+
+async function w3Case(t, { consider = true, optedIn = true, recall = true, labels = W3_RIGHT, phase, change, resume = false, mode = 'on', replay } = {}) {
+  const w = await newWorld(t)
+  const checkedTurn = async (message, opts) => {
+    const at = w.turns.length
+    const turn = await w.ask(message, null, opts)
+    assert.ok(!turn.none, `missing turn/start: ${turn.error || 'no native RPC'}`)
+    assert.deepEqual(w.turns.slice(at), [turn], 'exactly one recorded mock turn/start')
+    assert.deepEqual(turn.params.input, [{ type: 'text', text: message, text_elements: [] }])
+    assert.equal(w.rows().at(-1)[1], turn.text, 'mock public answer completed')
+    return turn
+  }
+  w.mode = 'off'
+  await checkedTurn('합성 소품 이야기를 시작해.') // establish the verified ordinary DM
+  w.mode = 'on'
+  const grant = optedIn ? w.evidence.enableSpeech(w.scope()) : null
+  if (optedIn) assert.ok(grant)
+  w.hooks.choice = speechChoice
+  w.hooks.reply = () => ({ text: W3_REPLY, fields: null })
+  await checkedTurn(W3_PRIOR)
+  assert.equal(w.evidence.topicState(w.scope()), null, 'no topic/history recipient grant')
+  if (optedIn) assert.deepEqual(w.evidence.recentSpeech(w.scope(), grant).map(r => r.role), ['user', 'assistant'])
+  else assert.equal(w.evidence.speechGrant(w.scope()), null)
+  w.mode = mode
+  const wires = [], hits = []
+  let loads = 0
+  let permit
+  const wait = new Promise(resolve => { permit = resolve })
+  let entered
+  const pending = new Promise(resolve => { entered = resolve })
+  const checkpoint = async where => { hits.push(where); if (phase === where) { entered(); await wait } }
+  w.hooks.stageHistory = ({ list }) => consider ? [...list, {
+    id: 'w3:stage-props', kind: 'document', title: W3_TITLE, summary: W3_SUMMARY,
+    loadText: () => { loads++; return W3_BODY },
+  }] : list
+  w.chat.decisionContext.client = createDecisionClient({
+    endpoint: 'https://w3-fixture.invalid/v1/decisions',
+    getApiKey: async () => { await checkpoint('key'); return 'offline-w3-fixture-only' },
+    fetchImpl: async (url, init) => {
+      assert.equal(url, 'https://w3-fixture.invalid/v1/decisions')
+      assert.equal(init.method, 'POST')
+      const body = JSON.parse(init.body)
+      wires.push({ body, raw: init.body }) // No headers or key are captured.
+      if (replay) {
+        const digest = createHash('sha256').update(init.body, 'utf8').digest('hex')
+        assert.equal(digest, replay.approvedDigest, 'replay is bound to the exact reviewed product request')
+        return { ok: true, status: 200, text: async () => { await checkpoint('response'); return replay.responseText } }
+      }
+      const answers = body.questions.map(q => {
+        if (q.type === 'predicate') return { name: q.name, type: q.type, probability: q.name === 'rel_0' || (q.name === 'rel_recall' && recall) ? 0.99 : 0.01 }
+        const axis = /^speech_(source|form|time)_(\d+)$/.exec(q.name)
+        const choice = axis ? labels[Number(axis[2])][['source', 'form', 'time'].indexOf(axis[1])]
+          : q.name === 'answer_type' ? 'answer' : 'not_time_specific'
+        assert.ok(q.choices.some(c => c.value === choice), `unrecognized choice ${choice}`)
+        return { name: q.name, type: q.type, choice, confidence: 0.99, probabilities: [
+          { value: choice, probability: 0.99 }, { value: q.choices.find(c => c.value !== choice).value, probability: 0.01 },
+        ] }
+      })
+      return { ok: true, status: 200, text: async () => {
+        await checkpoint('response')
+        return JSON.stringify({ model: 'synthetic-w3-qa-response', answers })
+      } }
+    },
+  })
+  w.hooks.reply = packet => ({ text: recorded(packet).length ? '이전 발언은 인용으로만 받았어요.' : '첨부된 이전 발언은 없어요.', fields: null })
+  const inFlight = checkedTurn(W3_CURRENT)
+  if (phase) {
+    try {
+      await Promise.race([pending, inFlight.then(() => assert.fail(`did not reach ${phase}`))])
+      assert.equal(wires.length, phase === 'response' ? 1 : 0, 'prove the change straddles actual HTTP dispatch')
+      if (change === 'off') {
+        w.mode = 'off'; w.settingsGeneration++
+        if (resume) { w.mode = 'on'; w.settingsGeneration++ }
+      } else {
+        assert.ok(w.evidence.disableSpeech(w.scope(), grant))
+        if (resume) assert.notEqual(w.evidence.enableSpeech(w.scope()), grant)
+      }
+    } finally { permit() }
+  }
+  const turn = await inFlight
+  assert.deepEqual(w.errors, [])
+  for (const { body, raw } of wires) {
+    assert.deepEqual(Object.keys(body).sort(), ['input', 'model', 'prompt_cache_key', 'questions'])
+    assert.equal(body.input.length, 3, 'only rules, an ordinary catalog, and the current message')
+    assert.deepEqual(body.input.at(-1), { role: 'user', content: `Message:\n${W3_CURRENT}` })
+    assert.ok(raw.includes(W3_TITLE) && raw.includes(W3_SUMMARY))
+    for (const withheld of [W3_PRIOR, W3_REPLY, '이전표식-보랏빛', '반대인용-초록빛', W3_BODY, 'conversation:recent', 'topic_route', 'topic_need_', 'session_topic_graph', 'authorization', 'Bearer', 'offline-w3-fixture-only', 'synthetic-memev-qa', OWNER, DM]) assert.ok(!raw.includes(withheld), `unexpected wire marker: ${withheld}`)
+  }
+  assert.deepEqual(hits, wires.length ? ['key', 'response'] : phase === 'key' ? ['key'] : [])
+  return { turn, wires, loads, async fresh() { return checkedTurn(W3_CURRENT) } }
+}
+
+const w3Questions = result => result.wires.map(w => w.body.questions.map(q => q.name))
+const w3Types = turn => currentLabels(turn.packet)?.map(({ source, form, time }) => [source, form, time])
+const w3Context = turn => turn.params.additionalContext?.egdesk_decision_context
+
+test('W3 QA: identical Korean wire and history; only mocked speech/recall answers change the native input', async t => {
+  const yes = await w3Case(t)
+  const no = await w3Case(t, { recall: false, labels: W3_WRONG })
+  assert.deepEqual(w3Questions(yes), [W3_AUGMENTED])
+  assert.deepEqual(w3Questions(no), [W3_AUGMENTED])
+  assert.equal(yes.wires[0].raw, no.wires[0].raw, 'byte-identical request; history and mock verdicts were not sent')
+  for (const { turn, loads } of [yes, no]) {
+    assert.equal(loads, 1)
+    assert.equal(w3Context(turn).kind, 'application')
+    assert.ok(w3Context(turn).value.includes(W3_BODY))
+    assert.deepEqual(currentLabels(turn.packet).map(({ start, end }) => W3_CURRENT.slice(start, end)), [W3_REPORT, W3_PLAN])
+  }
+  assert.deepEqual(w3Types(yes.turn), W3_RIGHT)
+  assert.deepEqual(w3Types(no.turn), W3_WRONG, 'typed labels apply to the current text, not past quotations; they are fallible')
+  assert.deepEqual(recorded(yes.turn.packet).map(r => [r.role, r.speaker, r.quote, r.verification]), [
+    ['user', 'user-in-this-DM', W3_PRIOR, 'utterance-only'], ['assistant', 'this-Agent', W3_REPLY, 'utterance-only'],
+  ])
+  assert.deepEqual(recorded(no.turn.packet), [])
+  assert.doesNotMatch(no.turn.packet, /이전표식-보랏빛|반대인용-초록빛/)
+  assert.notEqual(yes.turn.text, no.turn.text)
+  if (process.env.W3_REPLAY_RESPONSE) {
+    const approvedDigest = process.env.W3_APPROVED_DIGEST
+    assert.match(approvedDigest ?? '', /^[0-9a-f]{64}$/)
+    const responseText = await readFile(process.env.W3_REPLAY_RESPONSE, 'utf8')
+    const replay = await w3Case(t, { replay: { approvedDigest, responseText } })
+    assert.deepEqual(w3Questions(replay), [W3_AUGMENTED])
+    assert.equal(replay.wires[0].raw, yes.wires[0].raw)
+    t.diagnostic(`separate offline replay native input: ${JSON.stringify({ labels: w3Types(replay.turn) ?? null,
+      quoteRoles: recorded(replay.turn.packet).map(r => r.role), ordinary: replay.turn.packet.includes(W3_BODY) })}`)
+  }
+  const dir = process.env.W3_CANDIDATE_DIR
+  if (dir) {
+    const bytes = Buffer.from(yes.wires[0].raw, 'utf8')
+    await writeFile(path.join(dir, 'w3-qa-wire.utf8.json'), bytes, { flag: 'wx', mode: 0o600 })
+    await writeFile(path.join(dir, 'w3-qa-wire.sha256'), `${createHash('sha256').update(bytes).digest('hex')}  w3-qa-wire.utf8.json\n`, { flag: 'wx', mode: 0o600 })
+  }
+})
+
+test('W3 QA: zero initial candidates, generic Decision1 without opt-in, and off are separate', async t => {
+  const zero = await w3Case(t, { consider: false, optedIn: false })
+  const generic = await w3Case(t, { optedIn: false })
+  const off = await w3Case(t, { mode: 'off' })
+  for (const result of [zero, off]) {
+    assert.deepEqual(w3Questions(result), [])
+    assert.equal(result.loads, 0)
+    assert.equal(w3Context(result.turn), undefined)
+  }
+  assert.deepEqual(w3Questions(generic), [W3_BASE])
+  assert.equal(generic.loads, 1)
+  assert.ok(w3Context(generic.turn).value.includes(W3_BODY))
+  for (const { turn } of [zero, generic, off]) {
+    assert.equal(currentLabels(turn.packet), null)
+    assert.deepEqual(recorded(turn.packet), [])
+  }
+})
+
+for (const phase of ['key', 'response']) for (const change of ['withdraw grant', 'off']) {
+  test(`W3 QA: ${change} while ${phase} is pending`, async t => {
+    const result = await w3Case(t, { phase, change })
+    assert.deepEqual(w3Questions(result), phase === 'response' ? [W3_AUGMENTED] : change === 'off' ? [] : [W3_BASE])
+    assert.equal(currentLabels(result.turn.packet), null)
+    assert.deepEqual(recorded(result.turn.packet), [])
+    assert.doesNotMatch(result.turn.packet, /이전표식-보랏빛|반대인용-초록빛/)
+    if (change === 'off') {
+      assert.equal(result.loads, 0)
+      assert.equal(w3Context(result.turn), undefined)
+    } else {
+      assert.equal(result.loads, 1)
+      assert.ok(w3Context(result.turn).value.includes(W3_BODY), 'ordinary context remains usable after local speech opt-out')
+    }
+  })
+}
+
+for (const phase of ['key', 'response']) for (const change of ['withdraw grant', 'off']) {
+  test(`W3 QA: ${change} then re-enable while ${phase} is pending does not revive the old batch`, async t => {
+    const result = await w3Case(t, { phase, change, resume: true })
+    assert.deepEqual(w3Questions(result), phase === 'response' ? [W3_AUGMENTED] : change === 'off' ? [] : [W3_BASE])
+    assert.equal(currentLabels(result.turn.packet), null)
+    assert.deepEqual(recorded(result.turn.packet), [])
+    assert.equal(result.loads, change === 'off' ? 0 : 1)
+    const before = result.wires.length
+    const fresh = await result.fresh()
+    assert.deepEqual(w3Questions(result).slice(before), [W3_AUGMENTED])
+    assert.deepEqual(w3Types(fresh), W3_RIGHT)
+    assert.equal(recorded(fresh.packet).length, change === 'off' ? 2 : 0, 'mode re-enable preserves the grant; a new grant cannot revive old history')
+  })
+}
 
 // Historical prototype installed in the harness ONLY. The separately tested
 // production topic path below does not use this file selector or the fixture's picker.
@@ -1342,3 +1545,158 @@ test('scoped grounding: an unresolved dispatch cannot restore an uncorrelated na
   assert.ok(restored.runs.at(-1).activities.some(a => a.id === HOST_ANSWER))
   await assertNoGroundingDraft(w, 'turn-lost')
 })
+// Mixed batch: in-memory mock key/recipient and entirely invented speech; the
+// product client serializes every target POST. No real credential or transport.
+const MIX_INDEPENDENT = ['독립표식-별가루: 종이 장식은 따로 보관할 계획이야.', '독립반대-푸른실: 종이 장식이 없다는 말도 들었어요.']
+const MIX_ROOT = ['주제표식-은종: 창작 무대 소품을 정하자.', '종이 달 모형을 무대에 두기로 했어요.']
+const MIX_FRESH = ['새 무대 배경을 정하자.', '새 무대 배경을 논의했어요.']
+const MIX_REPLY = '첨부 여부와 별개로 합성 답변을 마쳤어요.'
+const MIX_KEY = 'mixed-offline-placeholder-only'
+async function mixedBatch(t, { phase, mutation, pinned = false, fresh = false, topicOnly = false } = {}) {
+  const w = await newWorld(t)
+  const completed = async (text, reply, handle) => {
+    w.hooks.reply = packet => ({ text: reply ?? MIX_REPLY, fields: null })
+    const n = w.turns.length
+    const turn = await w.ask(text, handle)
+    assert.ok(!turn.none, `normal Codex DM did not reach turn/start: ${turn.error || 'no native RPC'}`)
+    assert.deepEqual(w.turns.slice(n), [turn], 'one recorded turn/start')
+    assert.deepEqual(turn.params.input, [{ type: 'text', text, text_elements: [] }])
+    assert.equal(w.rows().at(-1)[1], reply ?? MIX_REPLY)
+    return turn
+  }
+  await completed('새 합성 무대 이야기부터 시작하자.')
+  let grant = topicOnly ? null : w.evidence.enableSpeech(w.scope())
+  if (!topicOnly) assert.ok(grant)
+  w.hooks.choice = speechChoice
+  await completed(...MIX_INDEPENDENT)
+  w.recipient = TOPIC_RECIPIENT
+  w.hooks.topicRecipient = () => w.recipient
+  const initial = topicEnable(w)
+  await completed(...MIX_ROOT)
+  assertTopicAppend(w, initial, MIX_ROOT)
+  const graph = topicState(w)
+  const handle = pinned ? (await w.bindStandard()).handle : null
+  if (!topicOnly) assert.equal(w.evidence.recentSpeech(w.scope(), grant).length, 4)
+  if (phase === 'native') w.restart()
+
+  const posts = [], phases = []
+  let loadOrdinary = 0, keyCount = 0, release, reached
+  let holding = true
+  const latch = new Promise(resolve => { reached = resolve })
+  const barrier = new Promise(resolve => { release = resolve })
+  const wait = async here => {
+    phases.push(here)
+    if (holding && phase === here) { reached(); await barrier }
+  }
+  w.hooks.onNative = method => { if (method === 'thread/resume') return wait('native') }
+  w.hooks.beforeMockFinal = () => wait('terminal')
+  w.hooks.stageHistory = ({ list }) => [...list, { id: 'mixed:ordinary', kind: 'document', title: W3_TITLE, summary: W3_SUMMARY,
+    loadText: () => { loadOrdinary++; return W3_BODY } }]
+  w.chat.decisionContext.client = createDecisionClient({
+    endpoint: 'https://mixed-fixture.invalid/v1/decisions',
+    getApiKey: async () => { keyCount++; await wait('key'); return MIX_KEY },
+    recipientForKey: key => key === MIX_KEY ? w.recipient : null,
+    fetchImpl: async (_url, init) => {
+      assert.equal(init.method, 'POST')
+      const body = JSON.parse(init.body)
+      posts.push({ raw: init.body, body }) // never capture auth headers
+      const answers = body.questions.map(q => {
+        if (q.type === 'predicate') return { name: q.name, type: q.type, probability: /^rel_|^topic_need_/.test(q.name) ? .99 : .01 }
+        if (q.name === 'topic_route') return chosenAnswer(q, 'continue_p0')
+        const m = /^speech_(source|form|time)_(\d+)$/.exec(q.name)
+        const choice = m ? W3_RIGHT[Number(m[2])]?.[['source', 'form', 'time'].indexOf(m[1])] || 'unknown' : q.name === 'time_intent' ? 'not_time_specific' : 'answer'
+        const answer = chosenAnswer(q, choice)
+        if (m) answer.probabilities.push({ value: q.choices.find(c => c.value !== choice).value, probability: .04 })
+        return answer
+      })
+      return { ok: true, status: 200, text: async () => { await wait('response'); return JSON.stringify({ answers, model: 'mixed-mock-response' }) } }
+    },
+  })
+  const run = completed(W3_CURRENT, MIX_REPLY, handle)
+  if (phase) {
+    try {
+      await Promise.race([latch, run.then(() => assert.fail(`did not reach ${phase}`))])
+      assert.equal(posts.length, phase === 'key' ? 0 : 1, 'mutation is on the specified side of target POST')
+      assert.equal(w.turns.some(turn => turn.params.input[0].text === W3_CURRENT), phase === 'terminal')
+      const clock = w.clock, key = MIX_KEY, recipient = w.recipient
+      if (mutation === 'off-on') { w.mode = 'off'; w.settingsGeneration++; w.mode = 'on'; w.settingsGeneration++ }
+      if (mutation === 'same-key/time resave') w.settingsGeneration++ // same synchronous signal used by successful credential save; no actual save/verification
+      if (mutation === 'speech revoked' || mutation === 'speech rotated') {
+        assert.ok(w.evidence.disableSpeech(w.scope(), grant))
+        if (mutation === 'speech rotated') grant = w.evidence.enableSpeech(w.scope())
+        assert.deepEqual(topicState(w), graph, 'speech withdrawal does not revoke the independent topic grant')
+      }
+      if (mutation === 'topic revoked') {
+        assert.ok(w.evidence.clearTopic(w.scope()))
+        assert.equal(topicState(w), null)
+        assert.equal(w.evidence.speechGrant(w.scope()), grant, 'topic withdrawal does not revoke speech')
+      }
+      assert.equal(w.clock, clock); assert.equal(MIX_KEY, key); assert.equal(w.recipient, recipient)
+    } finally { holding = false; release() }
+  }
+  const turn = await run
+  assert.equal(keyCount, 1, 'no private retry or decomposed request')
+  assert.deepEqual(phases.filter(p => p === 'response'), posts.length ? ['response'] : [])
+  const shouldPost = phase !== 'key'
+  assert.equal(posts.length, +shouldPost, 'target POST count')
+  if (shouldPost) {
+    const [post] = posts
+    const names = post.body.questions.map(q => q.name)
+    assert.deepEqual(names.filter(n => /^speech_|^rel_recall$/.test(n)), topicOnly ? [] : W3_AUGMENTED.slice(W3_BASE.length))
+    assert.ok(names.includes('rel_0'))
+    assert.deepEqual(decisionNames(post.body), ['topic_route', 'topic_need_0'])
+    assert.deepEqual(topicWireHistory(post.body).pairs.map(p => [p.u, p.a]), [MIX_ROOT])
+    for (const privateText of [...MIX_INDEPENDENT, '독립표식-별가루', '독립반대-푸른실', MIX_KEY]) assert.ok(!post.raw.includes(privateText), 'independent local speech / credentials did not enter mixed wire')
+  }
+  if (!phase) {
+    assert.ok(liveEvidence(turn.packet))
+    assert.deepEqual(w3Types(turn), W3_RIGHT)
+    assert.deepEqual(recorded(turn.packet).map(r => r.quote), [...MIX_INDEPENDENT, ...MIX_ROOT])
+    assert.equal(loadOrdinary, 1)
+    assertTopicAppend(w, graph, [W3_CURRENT, MIX_REPLY])
+  } else if (phase === 'terminal') {
+    assert.ok(liveEvidence(turn.packet), 'already dispatched native prompt cannot be undone')
+    assert.deepEqual(w3Types(turn), W3_RIGHT)
+    assert.equal(loadOrdinary, 1)
+    assert.deepEqual(topicState(w), graph, 'private-batch revocation still prevents the durable append')
+  } else {
+    assert.equal(liveEvidence(turn.packet), undefined, 'no stale topic consumption')
+    assert.equal(currentLabels(turn.packet), null, 'no stale typed speech')
+    assert.deepEqual(recorded(turn.packet), [])
+    assert.ok(!turn.packet.includes(W3_BODY), 'no generic judgments derived from the private batch')
+    assert.ok(!turn.packet.includes(MIX_ROOT[0]))
+    if (pinned) {
+      assert.match(turn.packet, /COUNT item=A qty=30/, 'explicit independent pinned source remains attached')
+      assert.doesNotMatch(turn.packet, /SENSITIVE_NEIGHBOR_TOKEN|UNTRUSTED_LABEL/)
+    }
+    else assert.equal(w3Context(turn), undefined)
+    assert.equal(loadOrdinary, phase === 'native' ? 1 : 0)
+    assert.deepEqual(topicState(w), mutation === 'topic revoked' ? null : graph, 'no topic append from the rejected batch')
+  }
+  if (fresh) {
+    if (grant === null || !w.evidence.speechGrant(w.scope())) grant = w.evidence.enableSpeech(w.scope())
+    // Existing adjacency forbids guessing after a completed unindexed pair.
+    // Establish fresh, explicitly consented history rather than healing a gap.
+    if (topicState(w)) assert.ok(w.evidence.clearTopic(w.scope()))
+    const empty = topicEnable(w)
+    await completed(...MIX_FRESH)
+    assertTopicAppend(w, empty, MIX_FRESH)
+    const rooted = topicState(w), oldPosts = posts.length
+    const next = await completed(W3_CURRENT)
+    assert.equal(posts.length - oldPosts, 1, 'new valid mixed request')
+    assert.deepEqual(topicWireHistory(posts.at(-1).body).pairs.map(p => [p.u, p.a]), [MIX_FRESH])
+    assert.deepEqual(w3Types(next), W3_RIGHT)
+    assert.ok(liveEvidence(next.packet))
+    assertTopicAppend(w, rooted, [W3_CURRENT, MIX_REPLY])
+  }
+  assert.deepEqual(w.errors, [])
+}
+
+test('W3 v2 mixed: both grants authorize exactly one POST and one append', t => mixedBatch(t))
+for (const [phase, mutation, pinned, fresh, topicOnly] of [
+  ['key', 'speech revoked', true], ['key', 'speech rotated'], ['key', 'topic revoked'], ['key', 'off-on', true], ['key', 'same-key/time resave'],
+  ['response', 'speech revoked', true], ['response', 'speech rotated'], ['response', 'topic revoked'], ['response', 'off-on', true, true], ['response', 'same-key/time resave'],
+  ['response', 'off-on', false, false, true], ['native', 'speech rotated', true], ['native', 'off-on', true],
+  ['terminal', 'speech rotated'], ['terminal', 'off-on'],
+]) test(`W3 v2 ${topicOnly ? 'topic-only' : 'mixed'}: ${mutation} while ${phase} pending${pinned ? ' with explicit pin' : ''}${fresh ? ', then fresh grant' : ''}`,
+  t => mixedBatch(t, { phase, mutation, pinned, fresh, topicOnly }))
