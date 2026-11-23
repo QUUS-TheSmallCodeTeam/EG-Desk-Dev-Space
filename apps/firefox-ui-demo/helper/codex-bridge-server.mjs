@@ -302,9 +302,13 @@ contexts = new ContextRuntime({
 })
 for (const root of pendingFileRoots.values()) contexts.noteRoot(root)
 const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState) })
+// Browser-only transfer generation; restored settings never revive older work.
+let browserDecisionGeneration = 0
 const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.qaReadOnly && appServerReady, fixtureQa: fixtureBrowserQaFromEnv(process.env),
   // DECISION_MODEL_CONTEXT_SETUP.md §3.3: egdesk_browser_reflex only with a key and mode 'on'.
-  decision: { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null, client: decisionClient } })
+  decision: { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null,
+    recipient: () => recipientForDecisionKey(decisionCredentials.getApiKey(), undefined, decisionClient.model),
+    generation: () => browserDecisionGeneration, client: decisionClient } })
 // egdesk_propose_plan on ordinary threads: plans wait for approval in the
 // workflow runtime opened below (null until then, so the tool answers unavailable).
 const planProvider = createPlanToolProvider({ plans: () => workflow?.plans ?? null, schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
@@ -517,7 +521,8 @@ const decisionSettingsMode = {
 }
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
 const handleDecisionHttp = createDecisionHttpHandler({ store: decisionSettingsCredentials, verifyKey: key => decisionClient.verifyKey(key),
-  budget: decisionBudget, model: decisionClient.model, mode: decisionSettingsMode, port: BRIDGE_PORT })
+  budget: decisionBudget, model: decisionClient.model, mode: decisionSettingsMode, port: BRIDGE_PORT,
+  onSettingsChanged: () => { browserDecisionGeneration++ } })
 const handleOntologyHttp = createOntologyHttpHandler({ binding: () => ontologyBinding, store: ensureOntologyStore, runtime: sqliteRuntime, port: BRIDGE_PORT })
 const handleMemoryEvidenceHttp = createMemoryEvidenceHttpHandler({ port: BRIDGE_PORT,
   ensureAuth: hints => ensureChatAuth(hints, { allowIsolated: true, requireClientPair: true }),

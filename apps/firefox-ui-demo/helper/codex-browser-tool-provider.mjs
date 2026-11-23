@@ -262,6 +262,23 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
         return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { code: 'BROWSER_REFLEX_UNAVAILABLE', message: 'The Browser reflex is not enabled' } }) }] }
       }
       const args = event.arguments && typeof event.arguments === 'object' ? event.arguments : {}
+      // Snapshot the existing recipient/run scope; do not adopt a replacement
+      // credential or Browser binding while an observation is pending.
+      const currentRecipient = () => {
+        try { return reflexEnabled(decision) ? decision.recipient?.() ?? null : null }
+        catch { return null }
+      }
+      const recipient = currentRecipient()
+      const generation = decision.generation?.()
+      const binding = transport.runs.get(run.runId)
+      const card = run.browserBinding?.cards?.find(item => item.cardId === args.cardId)
+      const isDecisionCurrent = () => Boolean(recipient && binding && !resetting &&
+        !cancelledBrowserRuns.has(run) && run.status === 'inProgress' && run.executionPolicy?.mode === BROWSER_BOUNDED &&
+        binding.ownerKey === getOwnerKey() && binding.clientThreadId === run.clientThreadId &&
+        transport.runs.get(run.runId) === binding && transport.hasClient(binding.transportId) &&
+        card?.permission === 'interact' && run.browserBinding?.cards?.includes(card) && currentRecipient() === recipient &&
+        Number.isSafeInteger(generation) && decision.generation?.() === generation)
+      const authorizeDispatch = selectedRecipient => selectedRecipient === recipient && isDecisionCurrent()
       let step = 0
       const callTool = async (name, toolArgs) => {
         if (typeof name !== 'string' || !name.startsWith('egdesk_browser_') || name === BROWSER_REFLEX_TOOL_NAME) {
@@ -279,7 +296,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
         result = await runReflex({ cardId: args.cardId, goal: args.goal,
           ...(args.values !== undefined ? { values: args.values } : {}),
           ...(args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}),
-          callTool, client: decision.client || null })
+          callTool, client: decision.client || null, authorizeDispatch, isDecisionCurrent })
       } catch (error) {
         const failure = classifyPublicToolError(error, { browser: true })
         return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: failure }) }] }

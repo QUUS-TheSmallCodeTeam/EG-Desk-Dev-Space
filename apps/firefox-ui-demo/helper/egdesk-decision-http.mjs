@@ -19,7 +19,8 @@ const BODY_LIMIT = 4096
 const ROUTES = new Set(['/decision/status', '/decision/credential', '/decision/mode'])
 
 // mode: the bridge-settings adapter { mode, saved, persisted, save(mode) } (optional).
-export function createDecisionHttpHandler({ store, verifyKey, budget = null, model = null, mode = null, modes = ['off', 'advisory', 'on'], port = 39218 } = {}) {
+// Notify synchronously after a successful mutation, before returning its status.
+export function createDecisionHttpHandler({ store, verifyKey, budget = null, model = null, mode = null, modes = ['off', 'advisory', 'on'], port = 39218, onSettingsChanged = () => {} } = {}) {
   if (!store || typeof verifyKey !== 'function') throw new TypeError('store and verifyKey are required')
   const modeStatus = () => (mode ? { mode: mode.mode, saved: mode.saved, persisted: mode.persisted, modes: [...modes] } : null)
   const status = () => ({ configured: store.getApiKey() !== null, store: store.status, keyHint: store.hint(), savedAt: store.savedAt(),
@@ -34,8 +35,12 @@ export function createDecisionHttpHandler({ store, verifyKey, budget = null, mod
         if (req.method !== 'POST') { sendJson(res, 405, { error: 'Use GET or POST for the decision mode', code: 'METHOD_NOT_ALLOWED' }); return true }
         const body = await readJsonBody(req, { maxBytes: BODY_LIMIT })
         if (!modes.includes(body?.mode)) { sendJson(res, 400, { error: 'mode must be off, advisory or on', code: 'DECISION_MODE_INVALID' }); return true }
+        const previousMode = mode.mode
         if (mode.save(body.mode) !== true) sendJson(res, 500, { error: 'The decision mode could not be saved', code: 'DECISION_MODE_NOT_SAVED', ...modeStatus() })
-        else sendJson(res, 200, modeStatus())
+        else {
+          if (mode.mode !== previousMode) onSettingsChanged()
+          sendJson(res, 200, modeStatus())
+        }
         return true
       }
       if (url.pathname === '/decision/status') {
@@ -53,11 +58,16 @@ export function createDecisionHttpHandler({ store, verifyKey, budget = null, mod
           return true
         }
         if (!store.save(body.apiKey)) { sendJson(res, 500, { error: 'The key could not be saved', code: 'DECISION_STORE_FAILED' }); return true }
+        // A successful save is a fresh credential even when key and savedAt match.
+        onSettingsChanged()
         sendJson(res, 200, { ...status(), verification: verified.status })
         return true
       }
       if (req.method === 'DELETE') {
-        if (store.clear()) sendJson(res, 200, status())
+        if (store.clear()) {
+          onSettingsChanged()
+          sendJson(res, 200, status())
+        }
         else sendJson(res, 500, { error: 'The key could not be removed', code: 'DECISION_STORE_FAILED' })
         return true
       }

@@ -48,9 +48,9 @@ async function newWorld(t, { count, out } = {}) {
     w.evidence = new MemoryEvidenceStore({ dataDir: path.join(dir, 'state'), captures: w.captures, now: () => w.clock })
     w.store = openChatStore({ dataDir: path.join(dir, 'chat'), ownerScope: 'synthetic-memev-qa' })
     const chat = new CodexChatRuntime({
-      now: () => w.clock, store: w.store, requireStore: true, getOwnerKey: () => OWNER, profiles, resolveProjectWorkspace: async () => null,
+      now: () => w.clock, store: w.store, requireStore: true, getOwnerKey: () => w.hooks.answerOwner?.() ?? OWNER, profiles, resolveProjectWorkspace: async () => null,
       request: async (method, params) => {
-        await w.hooks.onNative?.(method)
+        await w.hooks.onNative?.(method, params)
         if (method === 'thread/start') return { thread: { id: `thread-${++w.threads}` }, cwd: '/work', model: 'synthetic' }
         if (method === 'thread/resume') return { thread: { id: params.threadId, turns: w.hooks.restoreTurns || [] }, cwd: '/work' }
         if (method === 'config/read') return { config: { developer_instructions: null } }
@@ -654,7 +654,7 @@ function decideLiveTopic(body) {
   const history = topicWireHistory(body)
   const current = body.input.at(-1).content.replace(/^Message:\n/u, '')
   const find = matcher => history?.pairs.find(p => matcher.test(p.u))
-  const root = find(/^서가 목록부터 만들자\./u), branch = find(/^서가에서 대여 계산을/u)
+  const root = find(/^서가 목록부터 만들자[.!]/u), branch = find(/^서가에서 대여 계산을/u)
   const correction = find(CORRECTION)
   const split = /^서가에서 .+ 별도로 다루자\.$/u.test(current)
   const back = /^대여 계산으로 돌아가자\./u.test(current)
@@ -944,15 +944,21 @@ test('production topics: off, advisory, other thread, changed recipient and clea
 // supply synthetic model responses, timing, and one harmless scored candidate.
 const MIXED_SCORE_LABEL = 'MIXED_SCORE_LABEL'
 const MIXED_SCORE_VALUE = 'MIXED_SCORE_VALUE: must never reach native on a dropped batch'
-for (const [phase, hasFileGrant] of [['abstain', true], ['abstain', false], ['resume revoke', true], ['resume rekey', true]]) {
-  test(`production topics: mixed batch ${phase} keeps only independently granted file evidence (grant=${hasFileGrant})`, async t => {
+for (const [phase, hasFileGrant, changedAnswerOwner = false] of [
+  ['abstain', true], ['abstain', false], ['resume revoke', true],
+  ['resume rekey', true], ['resume rekey', false], ['resume rekey', true, true],
+]) {
+  const behavior = changedAnswerOwner ? 'does not start with a changed answer owner' : 'keeps only independently granted file evidence'
+  test(`production topics: mixed batch ${phase} ${behavior} (grant=${hasFileGrant})`, async t => {
     const w = await withLiveRoot(t)
-    const initial = topicState(w), { handle } = await w.bindStandard()
+    const initial = topicState(w), { handle, caps } = await w.bindStandard()
     if (!hasFileGrant) assert.ok(w.evidence.revoke(w.scope(), handle))
     delete w.hooks.reply // stock answer is derived only from received file lines
     w.hooks.stageHistory = ({ list }) => [...list, { id:'ordinary-scored', kind:'document', title:MIXED_SCORE_LABEL,
       timeSlice:'present', summary:'Optional reference', loadText:() => MIXED_SCORE_VALUE }]
-    let scored = 0, resumed = 0
+    let scored = 0, resumed = 0, newGeneration
+    const nativeThread = w.conv[DM], beforeTurns = w.turns.length
+    const requestId = `r-${w.requestN + 1}`
     w.hooks.topicResponse = ({ body, answers }) => {
       const catalog = body.input.flatMap(m => Array.isArray(m.content) ? m.content.map(c => c.text || '') : []).join('\n')
       const index = catalog.match(/^#(\d+) \| [^\n]*\bMIXED_SCORE_LABEL\b/m)?.[1]
@@ -962,14 +968,21 @@ for (const [phase, hasFileGrant] of [['abstain', true], ['abstain', false], ['re
     }
     if (phase !== 'abstain') {
       w.restart()
-      w.hooks.onNative = method => {
+      w.hooks.onNative = (method, params) => {
         if (method !== 'thread/resume' || resumed) return
         resumed++
-        w.evidence.clearTopic(w.scope())
+        assert.equal(params.threadId, nativeThread)
+        assert.equal(w.turns.length, beforeTurns)
+        assert.ok(w.evidence.clearTopic(w.scope()))
+        assert.equal(topicState(w), null)
         if (phase === 'resume rekey') {
           w.recipient = OTHER_RECIPIENT; w.transportRecipient = OTHER_RECIPIENT
-          w.evidence.enableTopic(w.scope(), w.conv[DM], OTHER_RECIPIENT, w.store.topicBoundary(DM))
+          newGeneration = topicEnable(w)
+          assert.notEqual(newGeneration.generation, initial.generation)
         }
+        // Only this no-start control changes trusted answer identity; rotating
+        // just the Decisions recipient above never changes the file authority.
+        if (changedAnswerOwner) w.hooks.answerOwner = () => 'codex:synthetic:other-owner'
       }
     }
     const n = w.liveAttempts.length
@@ -979,21 +992,71 @@ for (const [phase, hasFileGrant] of [['abstain', true], ['abstain', false], ['re
     assertTopicDecision(w, n, LIVE_CHILD[0], [LIVE_ROOT])
     assert.equal(scored, 1, 'the discarded mixed batch actually voted yes on an optional item')
     if (phase !== 'abstain') assert.equal(resumed, 1, 'revocation/rekey ran during native resume')
-    assertNoLiveTopicPrompt(turn)
-    assert.ok(!turn.packet.includes(MIXED_SCORE_LABEL) && !turn.packet.includes(MIXED_SCORE_VALUE))
-    if (hasFileGrant) {
-      assert.ok(hasPinned(turn)); assert.equal(turn.text, '지금 28개예요.')
-      assert.deepEqual(turn.fields.sources.map(s => s.relation), ['counted','posted','coverage'])
-      assert.doesNotMatch(turn.packet, /SENSITIVE_NEIGHBOR_TOKEN|COPY item|UNTRUSTED_LABEL|memrow:/)
+    const outcome = w.store.getRequest({ clientThreadId:DM, requestId }).outcome
+    assert.equal(w.evidence.isActive(w.scope(), handle), hasFileGrant, 'topic rotation must not change the file grant')
+    if (changedAnswerOwner) {
+      assert.equal(turn.none, true)
+      assert.equal(turn.error, 'ACCOUNT_CHANGED')
+      assert.equal(w.turns.length, beforeTurns, 'no mock turn/start for the changed answer owner')
+      assert.equal(outcome.accepted, false)
+      assert.equal(w.evidence.isActive({ ...w.scope(), ownerKey:w.hooks.answerOwner() }, handle), false)
+      delete w.hooks.answerOwner
     } else {
-      noPinned(turn); assert.equal(turn.text, '알 수 없어요.')
+      assertNoLiveTopicPrompt(turn)
+      assert.deepEqual(w.turns.slice(beforeTurns), [turn], 'exactly one mock turn/start on the same DM')
+      assert.equal(turn.params.threadId, nativeThread)
+      assert.equal(turn.params.clientUserMessageId, requestId)
+      assert.equal(outcome.accepted, true); assert.equal(outcome.dispatchStatus, 'confirmed')
+      assert.equal(w.store.getLatestRun(DM).status, 'completed')
+      const wire = JSON.stringify(turn.params)
+      assert.ok(!wire.includes(LIVE_ROOT[0]) && !wire.includes(LIVE_ROOT[1]))
+      assert.doesNotMatch(wire, /session_topic_evidence|MIXED_SCORE_LABEL|MIXED_SCORE_VALUE|SENSITIVE_NEIGHBOR_TOKEN|COPY item|UNTRUSTED_LABEL|memrow:/)
+      if (hasFileGrant) {
+        const entry = turn.params.additionalContext?.egdesk_decision_context
+        assert.equal(entry?.kind, 'application')
+        const pin = (key, file) => ({ ...caps[key], startLine:2, endLine:2, text:w.fx[file][1] })
+        assert.deepEqual(parsePacketObjects(entry.value), [{ version:1,
+          ledger:pin('ledger', 'ledger.jsonl'), sources:[
+            { ...pin('count', 'count.jsonl'), relation:'counted', knowledgeKind:'reported-observation' },
+            { ...pin('post', 'post.jsonl'), relation:'posted', knowledgeKind:'posted-record' },
+            { ...pin('cover', 'cover.jsonl'), relation:'coverage', knowledgeKind:'coverage-assertion' },
+          ], verification:{ confirmed:'source-revision-and-lines', independentlyObservedPhysicalState:false },
+        }])
+        assert.equal(turn.text, '지금 28개예요.')
+      } else {
+        assert.equal(turn.params.additionalContext?.egdesk_decision_context, undefined)
+        noPinned(turn); assert.equal(turn.text, '알 수 없어요.')
+      }
+      assert.equal(w.rows().at(-1)[1], turn.text)
     }
-    if (phase === 'abstain') assert.deepEqual(topicState(w)?.turns, initial.turns)
-    else if (phase === 'resume revoke') assert.equal(topicState(w), null)
-    else {
-      assert.notEqual(topicState(w)?.generation, initial.generation)
-      assert.equal(topicState(w)?.recipient, OTHER_RECIPIENT)
-      assert.deepEqual(topicState(w)?.turns, [])
+    if (phase === 'abstain') assert.deepEqual(topicState(w), initial)
+    else if (phase === 'resume revoke') {
+      assert.equal(topicState(w), null)
+      w.restart(); assert.equal(topicState(w), null)
+    } else {
+      assert.deepEqual(topicState(w), newGeneration, 'the racing turn cannot append an old route to the new grant')
+      delete w.hooks.onNative; delete w.hooks.stageHistory; delete w.hooks.topicResponse
+      w.restart(); assert.deepEqual(topicState(w), newGeneration)
+      const newRoot = ['서가 목록부터 만들자! 새 세대의 새 목록만.', '새 서가를 열었어요.']
+      const freshChild = ['서가에서 새 대여 규칙을 별도로 다루자.', '새 규칙을 따로 기록했어요.']
+      const newWires = w.liveWires.length
+      assertNoLiveTopicPrompt(await topicSay(w, newRoot))
+      assert.equal(w.liveWires.length, newWires, 'new generation starts cold')
+      const root = assertTopicAppend(w, newGeneration, newRoot)
+      assert.equal(root.topic, root.key); assert.equal(root.parent, null); assert.deepEqual(root.needs, [])
+      const rooted = topicState(w), followAttempt = w.liveAttempts.length
+      const branch = await topicSay(w, freshChild)
+      assert.ok(!branch.none)
+      const { serialized } = assertTopicDecision(w, followAttempt, freshChild[0], [newRoot])
+      assert.deepEqual(liveEvidence(branch.packet)?.path.map(p => [p.userText, p.assistantText]), [newRoot])
+      for (const quote of LIVE_ROOT) {
+        assert.ok(!serialized.includes(quote))
+        assert.ok(!branch.packet.includes(quote))
+      }
+      const relation = assertTopicAppend(w, rooted, freshChild)
+      assert.equal(relation.topic, relation.key); assert.equal(relation.parent, root.key); assert.deepEqual(relation.needs, [])
+      const persisted = topicState(w)
+      w.restart(); assert.deepEqual(topicState(w), persisted)
     }
     assertLivePublic(w)
   })

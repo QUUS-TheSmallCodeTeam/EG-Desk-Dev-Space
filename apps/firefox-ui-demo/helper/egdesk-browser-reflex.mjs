@@ -202,7 +202,7 @@ const REFLEX_RULES = [
  * controls), page_state and goal_met. Throws DecisionError.
  * → { kind: 'act'|'scroll'|'wait'|'done'|'free_text'|'handoff'|'blocked'|'uncertain', option?, pageState, next, goalMet, ranked, usage, latencyMs }
  */
-export async function decideReflexStep({ goal, snapshot, options, history = [], pendingValues = [], client, thresholds, timeoutMs, signal }) {
+export async function decideReflexStep({ goal, snapshot, options, history = [], pendingValues = [], client, thresholds, timeoutMs, signal, authorizeDispatch }) {
   const choices = [...options.map(option => ({ value: option.value, ...(option.description ? { description: option.description } : {}) })), ...tableOptions(REFLEX_CONTROLS)]
   const evidence = [
     `Goal: ${goal}`, `URL: ${snapshot.url}`,
@@ -217,7 +217,7 @@ export async function decideReflexStep({ goal, snapshot, options, history = [], 
       choiceQuestion('page_state', 'What state is the page in?', tableOptions(REFLEX_PAGE_STATES)),
       predicateQuestion('goal_met', 'Does the current page already satisfy the goal?'),
     ],
-    timeoutMs, signal,
+    timeoutMs, signal, authorizeDispatch,
   })
   const pageState = readChoice(result.answers, 'page_state', { minConfidence: thresholds.pageState })
   const goalMet = readPredicate(result.answers, 'goal_met', thresholds.done)
@@ -247,7 +247,7 @@ const fieldRef = option => option.item?.element?.ref ?? option.value
  * question per key, then a greedy assignment by probability.
  * → { assigned: Map<key, optionValue>, unmatched: key[], usage }
  */
-export async function mapValuesToFields({ keys, fieldOptions, snapshot, client, thresholds, timeoutMs, signal }) {
+export async function mapValuesToFields({ keys, fieldOptions, snapshot, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
   if (!fieldOptions.length) return { assigned: new Map(), unmatched: keys, usage: null }
   const byValue = new Map(fieldOptions.map(option => [option.value, option]))
   const choices = [...fieldOptions.map(option => ({ value: option.value, ...(option.description ? { description: option.description } : {}) })),
@@ -256,7 +256,7 @@ export async function mapValuesToFields({ keys, fieldOptions, snapshot, client, 
     input: [{ role: 'developer', content: 'You match named values to the text fields of one web page.' },
       { role: 'user', content: `URL: ${snapshot.url}\n\nVisible text:\n${visibleText(snapshot) || '(none)'}` }],
     questions: keys.map((key, index) => choiceQuestion(`field_${index}`, `Which text field should hold the value named "${compactText(key, 80)}"?`, choices)),
-    timeoutMs, signal,
+    timeoutMs, signal, authorizeDispatch,
   })
   const pairs = []
   keys.forEach((key, index) => {
@@ -307,7 +307,7 @@ const failure = error => (error instanceof DecisionError ? error.code : 'unreach
  * → { outcome, reason?, steps, ... } — see the module header for outcomes.
  */
 export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
-  thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal } = {}) {
+  thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent } = {}) {
   const invalid = validateReflexArgs({ cardId, goal, ...(values && Object.keys(values).length ? { values } : {}), maxSteps })
   if (invalid) return { outcome: 'invalid', reason: invalid, steps: [] }
   if (typeof callTool !== 'function') throw new TypeError('callTool must be a function')
@@ -358,9 +358,10 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
 
     let decision
     try {
-      decision = await decideReflexStep({ goal, snapshot, options, history, pendingValues: [...pending.keys()], client, thresholds, timeoutMs, signal })
+      decision = await decideReflexStep({ goal, snapshot, options, history, pendingValues: [...pending.keys()], client, thresholds, timeoutMs, signal, authorizeDispatch })
     } catch (error) { return signal?.aborted ? finish('aborted') : finish('fallback', { reason: failure(error) }) }
     if (signal?.aborted) return finish('aborted')
+    if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
     entry.decision = { kind: decision.kind, pageState: decision.pageState, next: decision.next, goalMet: decision.goalMet,
       usage: decision.usage, latencyMs: Math.round(decision.latencyMs) }
 
@@ -392,8 +393,9 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
         if (named.length) {
           try {
             const available = fields.filter(option => !reserved.has(fieldRef(option)))
-            const mapping = await mapValuesToFields({ keys: named, fieldOptions: available, snapshot, client, thresholds, timeoutMs, signal })
+            const mapping = await mapValuesToFields({ keys: named, fieldOptions: available, snapshot, client, thresholds, timeoutMs, signal, authorizeDispatch })
             if (signal?.aborted) return finish('aborted')
+            if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
             entry.mapping = { assigned: Object.fromEntries(mapping.assigned), unmatched: mapping.unmatched, usage: mapping.usage }
             for (const [key, value] of mapping.assigned) bind(key, byValue.get(value))
             mapping.unmatched.forEach(key => unmatched.add(key))
