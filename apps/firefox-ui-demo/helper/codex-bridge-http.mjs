@@ -84,6 +84,37 @@ const LOCAL_WRITES = new Set(['/chat/rooms/agent'])
 
 export function createChatHttpHandler(chat, ensureAuth, history = chat) {
   return async (req, res, url) => {
+    if (url.pathname === '/chat/choice') {
+      if (!guardBridgeRequest(req)) sendJson(res, 403, { code: 'CHAT_CHOICE_SCOPE' })
+      else if (req.method !== 'POST') sendJson(res, 405, { code: 'METHOD_NOT_ALLOWED' })
+      else if (url.search || typeof chat.chatChoice !== 'function') sendJson(res, 400, { code: 'CHAT_CHOICE_INVALID' })
+      else {
+        const controller = new AbortController()
+        const cancel = () => controller.abort()
+        const closed = () => controller.signal.aborted || req.aborted || res.destroyed
+        req.once?.('aborted', cancel)
+        // IncomingMessage 'close' also fires after normal body consumption;
+        // cancellation belongs to an aborted read or the outgoing response closing.
+        res.once?.('close', cancel)
+        try {
+          if (closed()) return true
+          const body = await readJsonBody(req, { maxBytes: 16 * 1024 })
+          if (closed()) return true
+          // This path does not use ensureAuth: it must not prepare any engine.
+          const result = await chat.chatChoice(body, { signal: controller.signal })
+          if (!closed()) sendJson(res, 200, result)
+        } catch (error) {
+          if (closed()) return true
+          const code = ['CHAT_CHOICE_INVALID', 'CHAT_CHOICE_SCOPE', 'CHAT_CHOICE_DUPLICATE', 'BODY_TOO_LARGE', 'CONTENT_TYPE', 'INVALID_JSON'].includes(error?.code) ? error.code : null
+          if (code) sendJson(res, error.httpStatus || 400, { code })
+          else sendJson(res, 200, { status: 'manual' })
+        } finally {
+          req.removeListener?.('aborted', cancel)
+          res.removeListener?.('close', cancel)
+        }
+      }
+      return true
+    }
     const routes = new Set(Object.keys(CHAT_ACTIONS))
     if ((req.method === 'GET' && ['/chat/history/threads', '/chat/history'].includes(url.pathname)) ||
         (req.method === 'POST' && url.pathname === '/chat/history/import')) {

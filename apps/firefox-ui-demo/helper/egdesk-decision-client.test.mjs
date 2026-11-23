@@ -579,3 +579,34 @@ test('an authorized upstream failure is not retried or charged; successful topic
   assert.equal(verify.body.input, 'EG-Desk key check')
   assert.deepEqual(verify.body.questions.map(q => q.name), ['key_check'])
 })
+
+test('a reviewed single choice rejects ambiguous raw answers without changing the decision wire or other readers', async () => {
+  const q = { name: 'route', type: 'choice', instructions: 'Choose one listed alternative.', choices: [{ value: 'a' }, { value: 'b' }] }
+  const safe = { name: q.name, type: 'choice', choice: 'a', confidence: .96, probabilities: [{ value: 'a', probability: .97 }, { value: 'b', probability: .03 }] }
+  const budget = createDecisionBudget({}); const wires = []; let answers
+  const client = createDecisionClient({ getApiKey: () => 'local-fixture', budget, fetchImpl: async (_url, init) => {
+    wires.push(JSON.parse(init.body)); return Response.json({ answers, usage: { input_tokens: 3 } })
+  } })
+  const form = { input: 'A choice between public examples', questions: [q] }
+  const strict = () => client.decide({ ...form, strictChoiceResponse: true })
+  for (const invalid of [
+    [{ ...safe, name: undefined }], [safe, safe], [safe, { name: 'other', type: 'refusal' }], [],
+    [{ ...safe, type: 'predicate' }], [{ ...safe, choice: 'outside' }], [{ ...safe, confidence: 1.1 }],
+    [{ ...safe, probabilities: [...safe.probabilities, { value: 'outside', probability: 0 }] }],
+    [{ ...safe, probabilities: [...safe.probabilities, { value: 'b', probability: '0' }] }],
+    [{ ...safe, probabilities: [safe.probabilities[0], safe.probabilities[0]] }],
+    [{ ...safe, probabilities: [{ value: 'b', probability: 1 }] }],
+  ]) {
+    answers = invalid; const before = wires.length
+    await assert.rejects(strict(), error => error instanceof DecisionError && error.code === 'bad_response' && !error.retryable)
+    assert.equal(wires.length, before + 1); assert.equal(budget.snapshot().inputTokens, wires.length * 3)
+  }
+  answers = [safe]; assert.equal((await strict()).answers.route.choice, 'a')
+  answers = [{ name: q.name, type: 'refusal' }]; assert.equal((await strict()).answers.route.type, 'refusal')
+  answers = [{ ...safe, name: undefined }, { name: 'extra', type: 'refusal' }]
+  assert.equal((await client.decide(form)).answers.route.choice, 'a', 'other readers keep positional normalization')
+  assert.deepEqual(wires[0], wires.at(-1)); assert.equal(Object.hasOwn(wires[0], 'strictChoiceResponse'), false)
+  const before = wires.length
+  await assert.rejects(client.decide({ input: form.input, questions: [q, { ...q, name: 'second' }], strictChoiceResponse: true }), { code: 'invalid_request' })
+  assert.equal(wires.length, before); assert.equal(budget.snapshot().inputTokens, before * 3)
+})

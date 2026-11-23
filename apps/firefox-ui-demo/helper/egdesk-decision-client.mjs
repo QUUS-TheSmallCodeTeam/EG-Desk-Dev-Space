@@ -192,6 +192,26 @@ export function normalizeDecisionResponse(body, questions) {
   return { answers: Object.freeze(answers), model: typeof body.model === 'string' ? body.model : null, usage: normalizeUsage(body.usage) }
 }
 
+// A reviewed single recommendation must not be reconstructed by the tolerant
+// positional/row filtering used by other multi-question readers. Accept partial
+// distributions here; the caller must still account for unseen probability mass.
+function validSingleChoiceResponse(body, q) {
+  if (!Array.isArray(body?.answers) || body.answers.length !== 1) return false
+  const a = body.answers[0]
+  if (!record(a) || a.name !== q.name) return false
+  if (a.type === 'refusal') return true
+  if (a.type !== 'choice' || !probability(a.confidence) || !Array.isArray(a.probabilities) ||
+      !a.probabilities.length || a.probabilities.length > q.choices.length) return false
+  const allowed = new Set(q.choices.map(c => choiceKey(c.value))), seen = new Set()
+  for (const row of a.probabilities) {
+    if (!record(row) || !probability(row.probability)) return false
+    const key = choiceKey(row.value)
+    if (!allowed.has(key) || seen.has(key)) return false
+    seen.add(key)
+  }
+  return seen.has(choiceKey(a.choice))
+}
+
 function oversizedResponse() {
   return new DecisionError('bad_response', 'Decision response is too large')
 }
@@ -263,8 +283,11 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
   if (typeof getApiKey !== 'function') throw new TypeError('getApiKey must be a function')
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be a function')
 
-  async function post(apiKey, { input, questions, promptCacheKey = null, safetyIdentifier = null }, { timeoutMs: limit = timeoutMs, signal, authorizeDispatch } = {}) {
+  async function post(apiKey, { input, questions, promptCacheKey = null, safetyIdentifier = null }, { timeoutMs: limit = timeoutMs, signal, authorizeDispatch, strictChoiceResponse = false } = {}) {
     validateDecisionRequest({ input, questions, promptCacheKey, safetyIdentifier })
+    if (strictChoiceResponse === true && (questions.length !== 1 || questions[0].type !== 'choice')) {
+      throw new DecisionError('invalid_request', 'A reviewed selection needs exactly one choice question')
+    }
     if (budget && !budget.canSpend()) throw new DecisionError('budget_exceeded', 'The local decision budget for this month is used up')
     const body = { model, input, questions, ...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
       ...(safetyIdentifier ? { safety_identifier: safetyIdentifier } : {}) }
@@ -317,6 +340,11 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
     if (!response.ok) {
       const failure = classifyDecisionFailure(response.status, parsed)
       throw new DecisionError(failure.code, `Decision request failed (${failure.code})`, { status: response.status, retryable: failure.retryable, apiCode: failure.apiCode })
+    }
+    if (strictChoiceResponse === true && !validSingleChoiceResponse(parsed, questions[0])) {
+      // The paid HTTP exchange already happened, even when its selection is unusable.
+      budget?.record(normalizeUsage(parsed?.usage))
+      throw new DecisionError('bad_response', 'Decision response did not match the reviewed choices')
     }
     const normalized = normalizeDecisionResponse(parsed, questions)
     budget?.record(normalized.usage)

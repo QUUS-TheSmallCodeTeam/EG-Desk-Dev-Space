@@ -228,6 +228,12 @@ const decisionCredentials = openDecisionCredentialStore({ dataDir: path.join(dat
 const decisionBudget = createDecisionBudget({})
 const recipientForDecisionKey = (key, endpoint, model) => decisionTopicRecipient(key, decisionCredentials.savedAt(), endpoint, model)
 const decisionClient = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget, recipientForKey: recipientForDecisionKey })
+const recipientForCodexDecisions = ({ engineId, engineProfileId, ownerKey }) => {
+  if (engineId !== 'codex') return null
+  const auth = !engineProfileId || engineProfileId === CODEX_ENGINE_PROFILE_ID ? authState : codexProfileServers.snapshot(engineProfileId)?.auth
+  if (auth?.isLoggedIn !== true || auth.authMode !== 'chatgpt' || publicAuthIdentityKey(auth) !== ownerKey) return null
+  return recipientForDecisionKey(decisionCredentials.getApiKey(), undefined, decisionClient.model)
+}
 // SUB-11 Engine Profiles: the shared CLI logins plus EG-Desk-owned login
 // folders (<appData>/settings/engines/<id>, 0700). Claude runs the active
 // one (CLAUDE_CONFIG_DIR); an owned Codex account uses its own app-server.
@@ -436,12 +442,9 @@ const chat = new CodexChatRuntime({
     mode: () => bridgeSettings.decisionContext.mode,
     configured: () => decisionCredentials.getApiKey() !== null,
     client: decisionClient,
-    topicRecipient: ({ engineId, engineProfileId, ownerKey }) => {
-      if (engineId !== 'codex') return null
-      const auth = !engineProfileId || engineProfileId === CODEX_ENGINE_PROFILE_ID ? authState : codexProfileServers.snapshot(engineProfileId)?.auth
-      if (auth?.isLoggedIn !== true || auth.authMode !== 'chatgpt' || publicAuthIdentityKey(auth) !== ownerKey) return null
-      return recipientForDecisionKey(decisionCredentials.getApiKey(), undefined, decisionClient.model)
-    },
+    topicRecipient: recipientForCodexDecisions,
+    recipientForChatChoice: recipientForCodexDecisions,
+    reviewRevision: () => handleBoardPresentationHttp.settingsRevision(),
     get memoryEvidence() { return getMemoryEvidence() },
     collect: async ({ body, context, memoryEvidenceFor, speech }) => (await collectDecisionCandidates({ body, memoryEvidenceFor, speech, clientThreadId: context.clientThreadId,
       excludeMessageId: context.localMessageId, chatStore, deskStore, ontologyStore: ensureOntologyStore })).candidates,
@@ -957,6 +960,8 @@ const bridgeServer = createServer(async (req, res) => {
     return
   }
   const route = url.pathname
+  // The paid closed-choice route is POST-only, including at the server's preflight boundary.
+  if (route === '/chat/choice' && await handleChatHttp(req, res, url)) return
   // Private management has its own POST-only contract, including preflight.
   if (route.startsWith('/memory-evidence/') && await handleMemoryEvidenceHttp(req, res, url)) return
 
@@ -1046,7 +1051,7 @@ const bridgeServer = createServer(async (req, res) => {
       chat: chat.snapshot(),
       capabilities: {
         auth: ['status', 'start', 'cancel', 'signout', 'usage', 'device-code'],
-        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', 'stateless', 'fork', ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
+        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', 'stateless', 'fork', 'choice', ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
         context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
         profiles: profileStore ? ['local-store', 'revisions', 'run-binding'] : ['local-store-unavailable'],

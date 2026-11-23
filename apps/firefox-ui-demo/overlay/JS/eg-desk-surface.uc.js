@@ -12642,6 +12642,194 @@
   // CHAT-10: Board Thread members and the '초대' list (pure view models).
   const ThreadMembers = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskThreadMembers.sys.mjs');
 
+  // R1: ephemeral composer supplement. The ordinary send handler never enters
+  // this controller, and this controller has no native send or form action.
+  function chatChoiceExplanationDraft({ question, options }, index) {
+    const labels = options.map((option, i) => `${i + 1}. ${option}`);
+    return ['아래 질문과 보기만 놓고, 표시된 추천이 적절한지 독립적으로 비교해 주세요. 실제 추천 모델의 내부 판단 근거는 알 수 없으니 재현했다고 말하지 말고, 선택하거나 실행하지 마세요.',
+      '', `질문: ${question}`, ...labels, `EG-Desk 추천: ${labels[index]}`].join('\n');
+  }
+
+  function mountChatChoiceComposer({ el, readMode, postChoice, makeController, makeRequestId }) {
+    const button = (key, label, onclick) => el('button', { type: 'button', data: { testid: `chat-choice-${key}` }, onclick }, label);
+    const plain = (tag, text, props = {}) => { const node = el(tag, props); node.textContent = text; return node; };
+    // Keep these line/duplicate rules in sync with egdesk-chat-choice.mjs.
+    const forbidden = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u;
+    const normalizeLine = (value, limit) => {
+      if (typeof value !== 'string' || value.length > limit || forbidden.test(value)) return null;
+      const line = value.normalize('NFC').trim();
+      return line.length > 0 && line.length <= limit && !forbidden.test(line) ? line : null;
+    };
+    const duplicateKey = line => line.toLowerCase().normalize('NFC').replace(/\p{Zs}+/gu, ' ');
+    const readReview = item => {
+      const question = normalizeLine(item.scope.question, 500);
+      if (!question) return { error: '질문은 보이지 않는 문자나 줄바꿈 없이 한 줄(최대 500자)로 입력해 주세요.' };
+      if (item.options.length < 2 || item.options.length > 8) return { error: '보기를 2~8개 입력해 주세요.' };
+      const options = [], seen = new Set();
+      for (const [i, raw] of item.options.entries()) {
+        const line = normalizeLine(raw, 120);
+        if (!line) return { error: `보기 ${i + 1}을(를) 보이지 않는 문자나 줄바꿈 없이 한 줄(최대 120자)로 입력해 주세요.` };
+        const key = duplicateKey(line);
+        if (seen.has(key)) return { error: '같은 보기가 있습니다. 대소문자와 공백 차이만 있는 보기도 중복입니다.' };
+        seen.add(key);
+        options.push(line);
+      }
+      return { snapshot: Object.freeze({ question, options: Object.freeze(options) }) };
+    };
+    const modeProof = status => status?.mode === 'on' && status.configured === true && /^[a-f0-9]{64}$/.test(status.boardRevision || '')
+      ? status.boardRevision : null;
+    const manualText = '추천을 표시할 수 없습니다. 직접 판단해 주세요. 작성 중인 메시지는 그대로입니다.';
+    let binding = null, entry = null;
+    const panel = el('section', { 'aria-label': '보기 추천', data: { testid: 'chat-choice-panel' },
+      style: 'max-height:40vh;overflow:auto;overflow-wrap:anywhere;padding:6px;' });
+    const questionHint = plain('p', '보기 추천에 쓰는 질문은 보이지 않는 문자나 줄바꿈 없이 한 줄(최대 500자)이어야 합니다.',
+      { class: 'egd-codex-send-blocked', data: { testid: 'chat-choice-question-hint' } });
+    questionHint.hidden = true;
+    const trigger = button('open', '보기 추천', () => {
+      const scope = currentScope();
+      if (entry || !scope || !normalizeLine(scope.question, 500)) return;
+      entry = { scope, phase: 'edit', options: ['', ''], controller: makeController() };
+      paint();
+      panel.querySelector('[data-testid="chat-choice-option"]')?.focus();
+    });
+    const currentScope = () => binding?.input.isConnected ? binding.readScope() : null;
+    const current = item => {
+      const scope = currentScope();
+      return !!scope && entry === item && !item.controller.signal.aborted
+        && scope.key === item.scope.key && scope.question === item.scope.question;
+    };
+    const reset = () => {
+      entry?.controller.abort(); entry = null;
+      // Drop both the editable option nodes and all rendered result text.
+      panel.replaceChildren(); panel.hidden = true;
+    };
+    const sync = () => {
+      if (entry && !current(entry)) reset();
+      const scope = currentScope();
+      trigger.hidden = !scope || !!entry;
+      trigger.disabled = !normalizeLine(scope?.question, 500);
+      questionHint.hidden = !scope?.question || !trigger.disabled || !!entry;
+      trigger.title = '작성창 질문 한 줄(최대 500자)과 직접 입력한 보기만 추천에 사용';
+    };
+    const cancel = () => { reset(); sync(); trigger.focus(); };
+    const useManual = item => { item.phase = 'manual'; paint(); };
+    const checkMode = async item => {
+      try { return modeProof(await readMode(item.controller.signal)); } catch { return null; }
+    };
+    const review = async item => {
+      if (!current(item) || item.phase !== 'edit') return;
+      const { snapshot } = readReview(item);
+      if (!snapshot) return;
+      // Keep the raw composer value only for the current-scope guard. Once
+      // reviewed, all review, dispatch and result paths use this snapshot.
+      item.review = snapshot;
+      item.phase = 'checking'; paint();
+      // The complete question/options are already rendered. Read settings
+      // metadata only, without sending the question, options or key to any API.
+      const proof = await checkMode(item);
+      if (!current(item)) return sync();
+      if (!proof) return useManual(item);
+      item.mode = proof; item.phase = 'review'; paint();
+      panel.querySelector('[data-testid="chat-choice-confirm"]')?.focus();
+    };
+    const confirm = async item => {
+      if (!current(item) || item.phase !== 'review') return;
+      item.phase = 'checkingConfirm'; paint();
+      // Another window may have changed the key or mode after review. The
+      // runtime compares this same generation again at the provider boundary.
+      const confirmProof = await checkMode(item);
+      if (!current(item)) return sync();
+      if (confirmProof !== item.mode) return useManual(item);
+      item.phase = 'pending'; paint();
+      const { clientThreadId, conversationId, profileId } = item.scope;
+      const { question, options } = item.review;
+      let reply;
+      try {
+        reply = await postChoice({ clientThreadId, conversationId, profileId,
+          requestId: makeRequestId(), question, options: [...options], confirm: true, reviewRevision: item.mode }, item.controller.signal);
+      } catch { /* Manual without exposing errors or retrying. */ }
+      if (!current(item)) return sync();
+      if (reply?.status !== 'recommended' || !Number.isInteger(reply.index) || !Object.hasOwn(options, reply.index)) return useManual(item);
+      const proof = await checkMode(item);
+      if (!current(item)) return sync();
+      if (proof !== item.mode) return useManual(item);
+      item.index = reply.index; item.phase = 'recommended'; paint();
+    };
+    const explain = async item => {
+      if (!current(item) || item.phase !== 'recommended') return;
+      item.phase = 'explaining'; paint();
+      const proof = await checkMode(item);
+      if (!current(item)) return sync();
+      if (proof !== item.mode) return useManual(item);
+      const { input, setDraft } = binding;
+      const draft = chatChoiceExplanationDraft(item.review, item.index);
+      reset();
+      input.value = draft;
+      setDraft(draft); // Editable draft only; the existing [보내기] is still required.
+      sync();
+    };
+    const paint = () => {
+      sync();
+      if (!entry) return;
+      const item = entry;
+      panel.hidden = false;
+      const close = button('cancel', item.phase === 'manual' ? '닫기' : '취소', cancel);
+      if (item.phase === 'edit') {
+        const reviewButton = button('review', '질문과 보기 검토', () => { void review(item); });
+        const validation = plain('p', '', { role: 'status', data: { testid: 'chat-choice-validation' } });
+        const validate = () => {
+          const { error } = readReview(item);
+          reviewButton.disabled = !!error;
+          validation.textContent = error || '';
+          validation.hidden = !error;
+        };
+        const fields = item.options.map((value, index) => {
+          const label = `보기 ${index + 1}`;
+          const field = el('textarea', { rows: '1', 'aria-label': label, data: { testid: 'chat-choice-option' }, oninput: () => {
+            if (!current(item) || item.phase !== 'edit') return;
+            item.options[index] = field.value; validate();
+          } });
+          field.value = value;
+          return el('li', {}, el('label', {}, label, field), item.options.length > 2 ? button('remove', '삭제', () => {
+            if (!current(item) || item.phase !== 'edit') return;
+            item.options.splice(index, 1); paint();
+          }) : null);
+        });
+        const add = item.options.length < 8 ? button('add', '보기 추가', () => {
+          if (!current(item) || item.phase !== 'edit' || item.options.length >= 8) return;
+          item.options.push(''); paint();
+          panel.querySelector('li:last-child textarea')?.focus();
+        }) : null;
+        validate();
+        const children = [plain('p', '보기 2~8개를 직접 입력하세요. 한 줄, 각각 최대 120자.'),
+          plain('p', `질문: ${item.scope.question}`), el('ol', {}, ...fields), add, validation, reviewButton, close];
+        panel.replaceChildren(...children.filter(Boolean));
+        return;
+      }
+      if (item.phase === 'manual') {
+        panel.replaceChildren(plain('p', manualText, { role: 'status' }), close);
+        return;
+      }
+      const { question, options } = item.review;
+      const exactText = { style: 'white-space:pre-wrap;' };
+      const content = [plain('p', `질문: ${question}`, exactText), el('ol', {}, ...options.map(option => plain('li', option, exactText)))];
+      if (['checking', 'review', 'checkingConfirm'].includes(item.phase)) {
+        content.push(plain('p', '수신처: OpenAI Decisions · 저장한 API 키 사용. 사용량에 따라 API 비용이 청구됩니다. 위 질문과 보기만 보내며, 채팅 기록이나 자료는 보내지 않습니다.'));
+        if (item.phase === 'review') content.push(button('confirm', '질문과 보기만 보내기', () => { void confirm(item); }));
+        else content.push(plain('p', '저장된 모드와 키 확인 중…', { role: 'status' }));
+      } else if (item.phase === 'pending') {
+        content.push(plain('p', '추천을 기다리는 중… 이미 보낸 요청은 취소해도 회수되지 않습니다.', { role: 'status' }));
+      } else {
+        content.push(plain('p', `EG-Desk 추천: ${options[item.index]} · 실행하지 않음`, { ...exactText, role: 'status', data: { testid: 'chat-choice-result' } }),
+          plain('p', '이 화면에만 표시되는 추천입니다. Agent 답변이나 모델의 실제 판단 근거가 아닙니다.'));
+        if (item.phase === 'recommended') content.push(button('explain', '이유 묻기', () => { void explain(item); }));
+      }
+      panel.replaceChildren(...content, close);
+    };
+    reset();
+    return { trigger, panel, questionHint, attach: next => { binding = next; }, sync, reset, dispose: () => { reset(); binding = null; } };
+  }
+
   function mountCodexHUD(body, codexBridge, options = {}) {
     let unsubscribe = null;
     let composerObserver = null;
@@ -12654,6 +12842,12 @@
     let sendNoticeDetailsThreadId = null;
     const composerViewport = createChatComposerViewport();
     const taskAnswerReveal = createChatTaskAnswerReveal(body);
+    const choice = mountChatChoiceComposer({ el,
+      readMode: signal => codexBridge.readChatChoiceMode(signal),
+      postChoice: (dto, signal) => codexBridge.postChatChoice(dto, signal),
+      makeController: () => new window.AbortController(),
+      makeRequestId: () => `choice-${Date.now()}-${window.crypto.randomUUID()}`,
+    });
     let focusOpenedRoom = false;
     // A render that puts focus back on the composer is not a new look at it.
     let restoringComposerFocus = false;
@@ -12770,6 +12964,7 @@
     body.addEventListener('pointerdown', onComposerViewportGesture, true);
 
     const render = (codex) => {
+      choice.sync();
       if (compositionInProgress) {
         deferredCodex = codex;
         return;
@@ -14302,6 +14497,7 @@
             let boardPreview = null;
             let boardCompositionEnded = -Infinity;
             const submitComposer = () => {
+              choice.reset(); choice.sync();
               const boardSubmittedValue = input.value;
               if (!compositionInProgress && !boardInputState?.composing.size) void codexBridge.sendMessage({ manualOwner,
                 ...(boardPreview && { boardPreviewKey: boardPreview.key, boardLiveDraftCurrent: () => !input.isConnected || input.value === boardSubmittedValue }) });
@@ -14367,11 +14563,21 @@
                 : invalidProject ? CHAT_REQUEST_PROJECT_INVALID : roomProjectBlock || readiness.reason
                   || (activeThread.preparingInput ? '첨부를 준비하는 중입니다.' : codex.isSending ? '요청을 보내는 중입니다.' : '보내기'));
             };
+            choice.attach({ input, readScope: () => !compositionInProgress && body.isConnected
+              ? codexBridge.chatChoiceScope(activeThread.id, input.value) : null,
+              setDraft: draft => {
+                codexBridge.setDraft(draft, activeThread.id);
+                restoringComposerFocus = true;
+                try { input.focus({ preventScroll: true }); } finally { restoringComposerFocus = false; }
+                resizeComposer(false);
+              },
+            });
             input.addEventListener('input', ev => {
               composerViewport.cancel(input);
               blockedSend.textContent = '';
               if (boardDestination && ev.isComposing) beginBoardComposition();
               if (!boardDestination || !boardInputState.composing.has(input)) codexBridge.setDraft(input.value, activeThread.id);
+              choice.sync();
               resizeComposer(false);
             });
             // Enter sends as in a messenger (Ctrl/⌘+Enter too); Shift+Enter keeps the
@@ -14391,13 +14597,14 @@
               }
               submitComposer();
             });
-            input.addEventListener('compositionstart', () => { composerViewport.cancel(input); compositionInProgress = true; if (boardDestination) beginBoardComposition(); });
+            input.addEventListener('compositionstart', () => { composerViewport.cancel(input); compositionInProgress = true; choice.sync(); if (boardDestination) beginBoardComposition(); });
             input.addEventListener('compositionend', () => {
               compositionInProgress = false;
               boardCompositionEnded = Date.now();
               if (boardDestination) finishBoardComposition?.();
               composerViewport.cancel(input);
               codexBridge.setDraft(input.value, activeThread.id);
+              choice.sync();
               resizeComposer(false);
               if (deferredCodex) {
                 const next = deferredCodex;
@@ -14434,16 +14641,19 @@
             return el('div', { class: 'egd-codex-footer' },
               buildContextSuggestions(activeThread, codexBridge),
               boardDestination?.node,
+              choice.panel,
               el('div', { class: 'egd-codex-input-row' },
                 buildChatInputTray(activeThread, codexBridge),
                 input,
                 el('div', { class: 'egd-codex-compose-actions' },
                   el('span', { class: 'egd-codex-compose-hint', 'aria-hidden': 'true' }, 'Enter 전송 · Shift+Enter 줄바꿈'),
                   stopButton,
+                  choice.trigger,
                   sendButton,
                 ),
               ),
               blockedSend,
+              choice.questionHint,
               mention?.menu,
             );
           })()
@@ -14474,7 +14684,9 @@
         );
         contentChildren.push(mainPane);
       }
+      if (!allowComposer) choice.dispose();
       body.appendChild(el('div', { class: shellClasses }, ...contentChildren));
+      choice.sync();
       const currentNotices = body.querySelector('[data-testid="chat-notices"]');
       if (currentNotices && noticeScroll?.threadId === currentNotices.dataset.threadId) currentNotices.scrollTop = noticeScroll.top;
       taskAnswerReveal.restoreLayout();
@@ -14562,6 +14774,7 @@
       deferredCodex = null;
       pendingMessageScroll = null;
       newMessageNotice = null;
+      choice.dispose();
       composerViewport.dispose();
       taskAnswerReveal.dispose();
       body.removeEventListener('keydown', onMessageScrollGesture, true);
@@ -14656,6 +14869,7 @@
     let taskAnswers = null;
     const refreshing = new Map();
     const resumedNativeBindings = new Set();
+    let choiceSettingsGeneration = 0, choiceSettingsWriting = 0;
     let memoryEvidence = null; // One user-opened chrome panel per window; never serialized.
     // Track only live reads/intents. A changed identity stays invalid even if
     // it later changes back to the same visible values (ABA).
@@ -16932,20 +17146,61 @@
           throw error;
         }
       },
+      chatChoiceScope(threadId, question) {
+        const codex = state.codex, thread = getCodexThreadById(codex, threadId);
+        if (choiceSettingsWriting || !thread || codex.activeThreadId !== threadId || codex.hudView !== 'conversation'
+            || thread.type !== 'dm' || thread.engineId !== 'codex' || thread.profileEnabled !== true
+            || thread.stateless || thread.startStateless || thread.executionBounded || thread.retainedNativeBinding
+            || !ChatState.chatThreadReadiness(thread, codex).ready || !ChatState.canResumeNativeThread(thread, codex.authStatus, codex)
+            || (codex.authStatus?.access?.state != null && codex.authStatus.access.state !== 'ok')
+            || threadBusy(thread) || getCodexThreadDraft(codex, threadId) !== question) return null;
+        const clientThreadId = ChatState.clientThreadBinding(thread), conversationId = thread.conversationId;
+        const profileId = thread.agentProfileId, profile = codexThreadAgentProfile(thread);
+        // Only the known built-in templates are admitted, never imported or
+        // user-created Agents. A stale/missing revision cannot opt in.
+        if (!clientThreadId || !conversationId || !Object.hasOwn(CODEX_AGENT_PROFILES, profileId)
+            || profile.id !== profileId || profile.origin !== 'template' || !Number.isSafeInteger(profile.revision)
+            || profile.revision < 1 || thread.agent && (thread.agent.profileId !== profileId || thread.agent.revision !== profile.revision)) return null;
+        const project = chatRoomProjectState(thread);
+        const activeCard = state.activeEntityId ? document.getElementById(state.activeEntityId) : null;
+        const hasActiveContext = !!(state.activeEntityId && !activeCard) || !!activeCard?.matches('.egd-file-card, .egd-browser-card, .egd-canvas-shape');
+        const hasContextQueue = value => value != null && (!Array.isArray(value) || value.length > 0);
+        if (hasActiveContext || hasContextQueue(thread.inputSources) || hasContextQueue(thread.briefingInputs) || thread.requestProjectTarget != null
+            || thread.cwd != null || project?.status !== 'ready' || project.value?.status !== 'none'
+            || project.value?.inheritance || project.value?.override || chatProjectDraftActions.has(threadId)
+            || state.contextSuggest?.byThread?.[threadId]?.picked?.length
+            || ChatState.runsForThread(protocol, thread).some(run => run.pendingApprovals?.length || ChatState.pendingUserInputCount(run))) return null;
+        const account = ChatState.codexAccountKey(codex.authStatus);
+        const owner = manualOwnerIdentity(threadId);
+        if (!account || !owner) return null;
+        return { clientThreadId, conversationId, profileId, question, key: JSON.stringify([
+          threadId, codex.activityRoomGeneration || 0, state.canvasSelectionRevision || 0, clientThreadId, conversationId, owner,
+          profileId, profile.revision, choiceSettingsGeneration, codex.threadDraftRevisions[threadId] || 0,
+          thread.agent?.revision ?? null, thread.toolMode, thread.systemPrompt, codex.authStatus?.access?.state ?? null,
+        ]) };
+      },
+      readChatChoiceMode(signal) { return fetchJson('/decision/status', { method: 'GET', signal, cache: 'no-store' }); },
+      postChatChoice(dto, signal) { return fetchJson('/chat/choice', { method: 'POST', signal, body: JSON.stringify(dto) }); },
       // Settings '결정 모델 · OpenAI Decisions': only the /decision/* routes.
       // A refusal carries its code and the provider's verification status.
       async decisionRequest(path, { method = 'GET', body } = {}) {
         if (!/^\/decision\/(?:status|credential|mode)$/.test(path)) throw new Error('Invalid decision path');
-        const response = await fetch(`http://127.0.0.1:39218${path}`, { method, headers: { 'Content-Type': 'application/json' },
-          ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-        let payload = null;
-        try { payload = await response.json(); } catch {}
-        if (!response.ok) {
-          throw Object.assign(new Error(typeof payload?.error === 'string' ? payload.error : `${response.status}`), {
-            status: response.status, code: typeof payload?.code === 'string' ? payload.code : null,
-            verification: typeof payload?.verification === 'string' ? payload.verification : null });
+        const changing = method !== 'GET';
+        if (changing) { choiceSettingsGeneration++; choiceSettingsWriting++; emit(); }
+        try {
+          const response = await fetch(`http://127.0.0.1:39218${path}`, { method, headers: { 'Content-Type': 'application/json' },
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+          let payload = null;
+          try { payload = await response.json(); } catch {}
+          if (!response.ok) {
+            throw Object.assign(new Error(typeof payload?.error === 'string' ? payload.error : `${response.status}`), {
+              status: response.status, code: typeof payload?.code === 'string' ? payload.code : null,
+              verification: typeof payload?.verification === 'string' ? payload.verification : null });
+          }
+          return payload;
+        } finally {
+          if (changing) { choiceSettingsGeneration++; choiceSettingsWriting--; emit(); }
         }
-        return payload;
       },
       createProfileTransferScope() {
         const token = epochScope.begin('codex');

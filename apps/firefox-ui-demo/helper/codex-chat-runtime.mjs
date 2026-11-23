@@ -8,6 +8,8 @@ import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { specManifestEntries, verifiedManifestOwners } from './codex-native-tool-manifest.mjs'
 import { nativeQaCommandReceipt, validateQaCommandNonce, validateQaOutputMarkers } from './codex-qa-command-receipt.mjs'
 import { MAX_COMPOSED } from './egdesk-profile-store.mjs'
+import { runChatChoice, validateChatChoice } from './egdesk-chat-choice.mjs'
+import { DEFAULT_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { browserRefusal, ceilingAllowsBrowserTool, ceilingAllowsComputerTool, ceilingApprovalRefusal, ceilingBrowserSelection, ceilingNarrows, ceilingReportNotices, CEILING_MESSAGES, computerRefusal, effectiveToolCeiling, liveBrowserSelected, loadCeilingThreadOverrides, mergeCeilingOverrides, recordedToolCeiling, verifyCeilingNativeThread } from './codex-chat-tool-ceiling.mjs'
 import { HOST_CONTROL_POLICIES, HOST_LEASE_CODES, requiresHostControl } from './egdesk-host-lease.mjs'
 import { COMPUTER_ADAPTER_CODES, refusedResult } from './egdesk-computer-adapter.mjs'
@@ -37,6 +39,9 @@ import { TOPIC_ANSWER_LIMIT, TOPIC_ANSWER_HOLD_MS, topicAnswerContradiction } fr
 import { speechSegments } from './egdesk-speech-grounding.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
+// Reviewed requests expire after two minutes; only canonical v4 UUID IDs are accepted.
+const CHOICE_REQUEST_WINDOW_MS = 120_000
+const CHOICE_REQUEST_ID = /^choice-([1-9][0-9]{0,14})-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const TERMINAL = new Set(['completed', 'interrupted', 'failed'])
 const ITEM_STATUS = new Set(['inProgress', 'completed', 'failed', 'declined'])
 const MAX_RUNS = 32
@@ -764,6 +769,9 @@ export class CodexChatRuntime {
     this.topicIntakes = new WeakMap() // accepted local request -> prospective generation, never copied to checkpoints
     this.topicRuns = new WeakMap() // live turn -> routing refs until one confirmed final + successful terminal event
     this.decisionContext = decisionContext
+    this.choiceRequests = new Map() // requestId → expiry and fingerprint, never text or result
+    this.choiceClock = 0 // wall-clock high water; an expired ID cannot revive after a clock adjustment
+    this.activeChoices = new Set()
     this.toolProviders = [...(contexts ? [contexts] : []), ...toolProviders]
     this.threadToolOwners = new Map()
     this.threadToolManifests = new Map()
@@ -2043,7 +2051,7 @@ export class CodexChatRuntime {
     }
   }
 
-  readNativeBinding(clientThreadId, conversationId) {
+  readNativeBinding(clientThreadId, conversationId, observeEvent) {
     let afterSeq = 0
     let recorded = null
     let executionPolicy = null
@@ -2059,6 +2067,7 @@ export class CodexChatRuntime {
     for (let page = 0; page < 1000; page++) {
       const result = this.store.listEvents(clientThreadId, { afterSeq, limit: 500 })
       for (const event of result.events || []) {
+        observeEvent?.(event)
         if (event.event === 'board.routed' || event.event === 'run.started' && event.details?.board) historicalBoard = true
         // Older named Board bindings can be recovered only if every dispatched local turn
         // has a matching start under the same saved persona and room. Never trust today's Lead.
@@ -4200,6 +4209,150 @@ export class CodexChatRuntime {
       } catch { return null }
     }
     return read
+  }
+
+  // No engine startup, native readiness RPC, transcript write or memory lookup.
+  // An existing verified user dispatch is proof of DM provenance, not input to Decisions.
+  chatChoiceScope({ clientThreadId, conversationId, profileId }) {
+    const deny = () => { throw chatError('CHAT_CHOICE_SCOPE', 'No verified idle Codex Agent DM for this request', 403) }
+    try {
+      const store = this.assertStore()
+      const thread = store.getConversation(clientThreadId)
+      if (thread?.conversationId !== conversationId || !thread.localConversationId || thread.engineId !== 'codex' ||
+          !thread.engineProfileId || thread.agent?.profileId !== profileId || thread.stateless || thread.forkedFrom ||
+          this.isSavedBoardTarget(clientThreadId) || this.conversationBusy(conversationId) ||
+          this.locks.has(`client:${clientThreadId}`) || this.threads.get(conversationId)?.executionPolicy ||
+          [this.pendingApprovals, this.pendingUserInputs].some(map => [...map.values()].some(item =>
+            item.conversationId === conversationId && ['pending', 'replySent'].includes(item.status)))) deny()
+      let accepted, completed, lastSeq = 0
+      const binding = this.readNativeBinding(clientThreadId, conversationId, event => {
+        lastSeq = event.seq
+        if (event.event === 'message.accepted') {
+          accepted = { requestId: event.requestId, localMessageId: event.localMessageId, ts: event.ts, role: event.details?.message?.role }
+          completed = null
+        } else if (event.event === 'run.completed' && accepted && event.requestId === accepted.requestId && event.details?.status === 'completed') {
+          completed = { runId: event.runId, localRunId: event.localRunId }
+        }
+      })
+      if (binding.recordedEngine !== 'codex' || binding.recordedProfile !== thread.engineProfileId ||
+          binding.executionPolicy || binding.session?.stateless || binding.session?.forkedFrom ||
+          this.directChatBindings.get(conversationId) !== clientThreadId || this.boardNativeSpeakers.has(conversationId)) deny()
+      this.assertNativeAccount(clientThreadId, conversationId, 'codex', binding)
+      const profile = this.resolveProfile({ profileId, profileRevision: thread.agent.revision ?? undefined })
+      if (profile?.binding?.profileId !== profileId || (profile.model && profile.model.engine !== 'codex') ||
+          (profile.model?.engineProfileId && profile.model.engineProfileId !== binding.recordedProfile)) deny()
+      const run = store.getLatestRun(clientThreadId)
+      if (!run?.requestId || !run.runId || !run.localRunId || run.status !== 'completed' || run.conversationId !== conversationId ||
+          run.board || run.stateless || run.forkedFrom || run.executionPolicy || run.engine?.id !== 'codex' ||
+          run.engine.engineProfileId !== binding.recordedProfile || run.profileBinding?.profileId !== profileId ||
+          run.profileBinding.revision !== profile.binding.revision || run.profileBinding.hash !== profile.binding.hash ||
+          run.pendingApprovals?.some(item => ['pending', 'replySent'].includes(item.status)) ||
+          run.pendingUserInputs?.some(item => ['pending', 'replySent'].includes(item.status)) ||
+          accepted?.requestId !== run.requestId || accepted.role !== 'user' || !accepted.localMessageId ||
+          completed?.runId !== run.runId || completed.localRunId !== run.localRunId) deny()
+      const receipt = store.getRequest({ clientThreadId, requestId: run.requestId })
+      const outcome = receipt?.outcome
+      const audience = store.getNativeAudience(conversationId)
+      if (receipt?.localMessageId !== accepted.localMessageId || receipt.acceptedAt !== accepted.ts ||
+          outcome?.accepted !== true || outcome.dispatchStatus !== 'confirmed' || outcome.conversationId !== conversationId ||
+          outcome.runId !== run.runId || outcome.localRunId !== run.localRunId || outcome.accountIdentity?.status !== 'verified' ||
+          outcome.accountIdentity.ownerHash !== binding.recorded || (audience !== null && audience !== profileId)) deny()
+      const authority = this.contextAuthority({ clientThreadId, conversationId }, { engineId: 'codex', engineProfileId: binding.recordedProfile })
+      if (ownerHash(authority.ownerKey) !== binding.recorded) deny()
+      const revision = JSON.stringify([thread.localConversationId, thread.agent, profile.binding, binding.recorded, binding.recordedProfile,
+        authority.epoch, lastSeq, run.runId, run.localRunId, accepted.localMessageId, audience])
+      return { authority, revision }
+    } catch { deny() }
+  }
+
+  async chatChoice(body, { signal } = {}) {
+    const keys = ['clientThreadId', 'conversationId', 'profileId', 'requestId', 'question', 'options', 'confirm', 'reviewRevision']
+    const id = value => !!idText(value)?.trim() && value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value)
+    const bad = () => { throw chatError('CHAT_CHOICE_INVALID', 'Expected one reviewed question and two to eight public options', 400) }
+    if (!body || Object.keys(body).length !== keys.length || !keys.every(key => Object.hasOwn(body, key)) ||
+        body.confirm !== true || ![body.clientThreadId, body.conversationId, body.profileId, body.requestId].every(id) ||
+        typeof body.reviewRevision !== 'string' || !/^[a-f0-9]{64}$/.test(body.reviewRevision)) bad()
+    const match = CHOICE_REQUEST_ID.exec(body.requestId)
+    if (!match) bad()
+    const createdAt = Number(match[1]), expiresAt = createdAt + CHOICE_REQUEST_WINDOW_MS
+    const { reviewRevision } = body
+    const manual = Object.freeze({ status: 'manual' })
+    const currentTime = () => {
+      const now = this.now()
+      this.choiceClock = Math.max(this.choiceClock, now)
+      return now
+    }
+    if (createdAt > currentTime() || expiresAt <= this.choiceClock || signal?.aborted) return manual
+    const choice = validateChatChoice(body)
+    if (!choice || choice.question !== body.question || choice.options.length !== body.options.length ||
+        choice.options.some((option, index) => option !== body.options[index]) ||
+        [choice.question, ...choice.options].some(text => publicText(text) !== text)) bad()
+    const ids = { clientThreadId: body.clientThreadId, conversationId: body.conversationId, profileId: body.profileId }
+    const scoped = this.chatChoiceScope(ids)
+    const fingerprint = createHash('sha256').update(JSON.stringify([ids, reviewRevision, body.question, body.options])).digest('hex')
+    for (const [requestId, record] of this.choiceRequests) {
+      if (record.expiresAt <= this.choiceClock) this.choiceRequests.delete(requestId)
+    }
+    const prior = this.choiceRequests.get(body.requestId)
+    if (prior) {
+      if (prior.fingerprint !== fingerprint) throw chatError('CHAT_CHOICE_DUPLICATE', 'Choice request ID was already used', 409)
+      return manual // One-time receipt; neither retry nor return a potentially stale recommendation.
+    }
+    // Keep every admitted ID until expiry. A full live window fails closed without eviction.
+    if (this.choiceRequests.size >= 256) return manual
+    this.choiceRequests.set(body.requestId, { fingerprint, expiresAt })
+    if (this.activeChoices.size >= 4 || this.activeChoices.has(ids.conversationId)) return manual
+
+    const setup = this.decisionContext
+    const controller = new AbortController()
+    const choiceSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
+    // Foreground choice and ordinary turn context use different deadlines.
+    const configuredBudget = setup?.choiceBudgetMs
+    const limit = Number.isSafeInteger(configuredBudget) && configuredBudget > 0
+      ? Math.min(DEFAULT_DECISION_TIMEOUT_MS, configuredBudget) : DEFAULT_DECISION_TIMEOUT_MS
+    const deadline = performance.now() + limit
+    const remaining = () => deadline - performance.now()
+    let generation, recipient, timer
+    try {
+      if (!setup?.client?.decide || typeof setup.settingsGeneration !== 'function' || typeof setup.recipientForChatChoice !== 'function' ||
+          choiceSignal.aborted || setup.reviewRevision?.() !== reviewRevision || setup.mode() !== 'on' || setup.configured() !== true) return manual
+      generation = setup.settingsGeneration()
+      if (!Number.isSafeInteger(generation)) return manual
+      recipient = setup.recipientForChatChoice(scoped.authority)
+      if (typeof recipient !== 'string' || !/^[a-f0-9]{64}$/.test(recipient)) return manual
+      const isCurrent = () => {
+        try {
+          currentTime()
+          return !choiceSignal.aborted && expiresAt > this.choiceClock && remaining() > 0 && this.decisionContext === setup &&
+            setup.reviewRevision() === reviewRevision && setup.settingsGeneration() === generation && setup.mode() === 'on' && setup.configured() === true &&
+            this.chatChoiceScope(ids).revision === scoped.revision && setup.recipientForChatChoice(scoped.authority) === recipient && remaining() > 0
+        } catch { return false }
+      }
+      let dispatched = false
+      const client = { decide: async request => {
+        if (dispatched || !isCurrent()) throw new Error('Choice dispatch unavailable')
+        dispatched = true
+        return setup.client.decide({ ...request, signal: choiceSignal,
+          timeoutMs: Math.max(1, Math.min(Math.ceil(remaining()), request.timeoutMs ?? limit)),
+          // The real client invokes this with the recipient of the key it actually
+          // loaded, after intervention points and immediately before its only POST.
+          authorizeDispatch: actual => actual === recipient && isCurrent() &&
+            (request.authorizeDispatch === undefined || request.authorizeDispatch(actual) === true) && remaining() > 0 })
+      } }
+      this.activeChoices.add(ids.conversationId)
+      const expired = new Promise(resolve => {
+        timer = this.setTimer(() => { controller.abort(); resolve(manual) }, Math.max(1, Math.ceil(remaining())))
+      })
+      const result = await Promise.race([runChatChoice({ ...choice, client, isCurrent, signal: choiceSignal }), expired])
+      return result?.status === 'recommended' && Number.isSafeInteger(result.index) &&
+        result.index >= 0 && result.index < choice.options.length && isCurrent()
+        ? { status: 'recommended', index: result.index } : manual
+    } catch { return manual }
+    finally {
+      if (timer != null) this.clearTimer(timer)
+      controller.abort()
+      this.activeChoices.delete(ids.conversationId)
+    }
   }
 
   // Trusted origin-management scope, independent of a client-supplied profile or channel label.
