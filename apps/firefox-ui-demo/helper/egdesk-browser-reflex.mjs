@@ -505,6 +505,9 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     if (signal?.aborted) return finish('aborted')
     if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
     entry.decision = { kind: decision.kind, pageState: decision.pageState, next: decision.next, goalMet: decision.goalMet,
+      // c18: the numbers the calibration log keeps per step (the page-state predicates, the top two probabilities, how many values were offered)
+      pageChecks: decision.pageChecks ?? null, top: decision.ranked?.[0]?.probability ?? null, second: decision.ranked?.[1]?.probability ?? null,
+      options: decision.next?.by === 'code' ? null : options.length + Object.keys(REFLEX_CONTROLS).length,
       usage: decision.usage, latencyMs: Math.round(decision.latencyMs) }
 
     // A decided link leaves this page: supplied values are not typed into a page
