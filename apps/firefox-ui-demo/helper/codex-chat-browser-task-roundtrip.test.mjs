@@ -410,7 +410,7 @@ test('S3 page-changed override through the runtime: memory names a choice that i
 })
 
 // ---- heartbeat in the real wiring: a browser-task turn is eligible to speak, one mechanism, completed messages only ----
-test('H1 a slow wording turn: the heartbeat speaks (one completed message), never opens an in-run question; then the question, the reply, the same task, the report', async t => {
+test('H1 a slow wording turn of the task\'s question: nothing is proposed or posted while the question is worded (c19: the question supersedes any wait message); then the question, the reply, the same task, the report', async t => {
   const w = world(t, { virtual: true })
   await w.send(MSG)
   const hb = w.chat.heartbeatFor(DM)
@@ -420,29 +420,23 @@ test('H1 a slow wording turn: the heartbeat speaks (one completed message), neve
   await w.notify('item/started', { ...w.timing(), item: { id: 'note-1', type: 'agentMessage', phase: 'commentary', text: '' } })
   await w.notify('item/completed', { ...w.timing(), item: { id: 'note-1', type: 'agentMessage', phase: 'commentary', text: '어느 사업자인지 먼저 물어봐야 할까?' } })
   await w.advance(26000)
-  assert.ok(w.flowAsked.length >= 1, 'the bounded browser-task turn is asked about at a beat')
-  assert.ok(w.flowAsked.every(a => !a.offered.includes('ask_missing')), 'the task question is never opened as an in-run question')
-  assert.deepEqual(w.posted(), [WAIT_TEXT], 'one intermediate message, completed')
-  assert.equal(w.forkPrompts.length, 1, 'written by the subjective model on a private fork')
+  // owner decision (Main, c18 review): a task that stopped for the person supersedes every wait message, also during a slow wording turn
+  assert.deepEqual([w.flowAsked.length, w.posted(), w.forkPrompts.length], [0, [], 0], 'no beat question, no message, no writer while the question is worded')
   assert.equal(w.calls.some(c => c.method === 'turn/steer'), false)
-  assert.deepEqual(w.acts, [], 'speaking never acts on the page')
+  assert.deepEqual(w.acts, [], 'nothing acts on the page')
   const question = await w.subjective()
   // the question is posted and the run is held open: now the person really is awaited, and the heartbeat says nothing more
   assert.deepEqual([hb.state, hb.facts().phase, hb.facts().sources.browser_task.phase, hb.facts().sources.browser_task.waitingOnUser], ['running', 'waiting_user', 'waiting_user', true])
-  assert.deepEqual(w.posted(), [WAIT_TEXT, question])
-  const askedBefore = w.flowAsked.length
+  assert.deepEqual(w.posted(), [question])
   await w.advance(60000)
-  assert.deepEqual([w.flowAsked.length, w.posted().length], [askedBefore, 2], 'a minute of waiting for the person: no request, no message')
+  assert.deepEqual([w.flowAsked.length, w.posted().length], [0, 1], 'a minute of waiting for the person: no request, no message')
   assert.equal((await w.send('두 번째 사업자로')).inRun, true)
   assert.deepEqual([w.note().status, w.acts.length], ['done', 2])
   const report = await w.subjective()
   // L3 c13: the heartbeat belongs to the conversation's live session. After the run ended it goes on at the idle tempo (it idles out by itself); the run itself is completed.
   assert.deepEqual([hb.state, hb.tempo, hb.stopReason ?? null, w.runs().length, w.runs()[0].status], ['running', 'idle', null, 1, 'completed'])
-  assert.deepEqual(w.history(), [['user', MSG], ['assistant', WAIT_TEXT], ['assistant', question], ['user', '두 번째 사업자로'], ['assistant', report]])
-  assert.equal(w.deltas().length, 3, 'three assistant messages, each in one piece')
-  // L3 c15: the judge reads the run's own text; never an address, a path or numbers read from the page. L8 c18 (owner decision, Main
-  // 2026-11-25): the browser task's own facts go along, the card's host only as page_text (allowed for this run) on its own line.
-  pageFree(w.flowAsked.map(a => a.facts).join('\n'))
+  assert.deepEqual(w.history(), [['user', MSG], ['assistant', question], ['user', '두 번째 사업자로'], ['assistant', report]])
+  assert.equal(w.deltas().length, 2, 'two assistant messages, each in one piece')
 })
 
 test('H2 held mode off: the heartbeat still beats with the task facts but cannot speak; the wording turn streams as before', async t => {
@@ -626,22 +620,25 @@ const replayAllOn = (choices, evidence, url, ctx) => {
 const family = d => (d.names.some(n => n.includes('__')) ? 'beat' : /^(claim_|present_)/.test(d.q) ? 'check' : d.q === 'browser_entry' ? 'entry' : d.q === 'task_resume' ? 'resume' : d.names.includes('next_step') ? 'step' : d.q)
 const count = list => list.reduce((m, d) => (m[family(d)] = (m[family(d)] || 0) + 1, m), {})
 
-test('B1 c18 product path, s10 replayed: the note judgment, the writer and the check all see the task\'s goal, host, steps and its last closed outcome', async t => {
-  const w = world(t, { virtual: true, pick: replayAllOn })
+test('B1 c18/c19 product path, s10 -> s11 replayed: nothing is judged while the question is worded; mid-loop the judge and the writer see the task\'s goal, host, steps and last closed outcome', async t => {
+  const slow = gate()
+  const w = world(t, { virtual: true, pick: replayAllOn, actGate: n => (n === 1 ? slow.promise : null) })
   await w.send(MSG)
   assert.deepEqual([w.note().status, w.note().code, w.note().candidates], ['need_context', 'choice_needed', ['사업자 123-45-67890', '사업자 987-65-43210']], 's10 (0.70, below the bar) asks which, by code')
   await w.advance(26000)
+  assert.deepEqual([w.flowAsked.length, w.posted()], [0, []], 'c19: the question supersedes a wait message')
+  const question = await w.subjective()
+  await w.send('두 번째 사업자로', { wait: false }); await w.settle()
+  await w.advance(16000)
   const facts = w.flowAsked.at(-1).facts
-  assert.match(facts, /- The task in the browser: 1 page step so far; it stopped to ask the person which of several options they mean\./)
+  assert.match(facts, /- The task in the browser: \d+ page steps? so far; /)
   assert.match(facts, /- The browser task's goal, as the person asked it: "거래처 포털에서 이번 달 세금계산서 내려받아줘"/)
   assert.match(facts, /- It works on the site portal\.example\.test\./)
   pageFree(facts)
-  // the writer is told the same, and the posted message is checked against the same facts (so a sentence naming the portal can pass)
-  assert.match(w.forkPrompts.at(-1), /The task in the browser: 1 page step so far; it stopped to ask the person which of several options they mean\. The browser task's goal, as the person asked it: "거래처 포털에서 이번 달 세금계산서 내려받아줘" It works on the site portal\.example\.test\. You may say what the task is doing/)
-  // (the check's evidence is built by messageEvidence with the same brief: asserted in egdesk-browser-heartbeat-brief.test.mjs; this wait
-  // message names nothing concrete, so the check sends no request here)
-  assert.deepEqual(w.posted(), [WAIT_TEXT])
-  t.diagnostic(JSON.stringify({ beforeQuestion: count(w.decisions) }))
+  // the writer is told the same (and the check's evidence is built from the same lines: egdesk-browser-heartbeat-brief.test.mjs)
+  assert.match(w.forkPrompts.at(-1), /The browser task's goal, as the person asked it: "거래처 포털에서 이번 달 세금계산서 내려받아줘" It works on the site portal\.example\.test\. You may say what the task is doing/)
+  assert.deepEqual(w.posted(), [question, WAIT_TEXT])
+  slow.open(); await w.chat.browserRunIdle()
 })
 
 test('B2 c18 product path, s10 -> s11 replayed: requests per task, and mid-loop the judge reads the new step and the last opened link', async t => {
@@ -667,7 +664,7 @@ test('B2 c18 product path, s10 -> s11 replayed: requests per task, and mid-loop 
   assert.deepEqual(w.posted(), [question, WAIT_TEXT, report].filter(Boolean).slice(0, w.posted().length))
 })
 
-// The four ways a task stops for the person, each with its own page (and answers): no wait message lands on top of the question.
+// The four ways a task stops for the person, each with its own page (and answers): no wait message is proposed, written or posted.
 const STOPS = [
   ['choice_needed', `${O}/invoices`, replayAllOn],
   ['confirm_needed', `${O}/single`, choices => ({ answer: { name: 'next_step', type: 'choice', choice: 'needs_user_context', confidence: 0.9, probabilities: [{ value: 'needs_user_context', probability: 0.9 }, { value: choices.find(c => /^\[L1\]/.test(c.value)).value, probability: 0.05 }] } })],
@@ -675,19 +672,30 @@ const STOPS = [
   ['page_unclear', `${O}/invoices`, () => ({ next: 'blocked', ps: pageStateWire('content', 0.5) })],
 ]
 for (const [code, start, pick] of STOPS) {
-  test(`B3 c18 ${code}: a wait message written while the question is worded is dropped once the question is posted; then silence until the reply`, async t => {
-    const held = gate()
-    const w = world(t, { virtual: true, start, pick, writerGate: held })
-    w.holdWriter(true)
+  test(`B3 c19 ${code}: while the question is worded and after it is posted, no beat question, no writer, no wait message`, async t => {
+    const w = world(t, { virtual: true, start, pick })
     await w.send(MSG)
     assert.equal(w.note().code, code)
-    await w.advance(26000) // a beat asks; the writer turn is held open
-    assert.ok(w.forkPrompts.length >= 1, 'a wait message is being written')
-    const question = await w.subjective({ skipFlowIdle: true }) // the question reaches the person first (the held writer is not awaited)
-    held.open(); w.holdWriter(false); await w.settle(); await w.chat.flowIdle()
-    assert.deepEqual(w.posted(), [question], 'nothing posted on top of the question')
-    const asked = w.flowAsked.length
+    await w.advance(26000)
+    assert.deepEqual([w.flowAsked.length, w.forkPrompts.length, w.posted()], [0, 0, []])
+    const question = await w.subjective()
     await w.advance(60000)
-    assert.deepEqual([w.flowAsked.length, w.posted().length], [asked, 1], 'and nothing asked or said while the person is awaited')
+    assert.deepEqual([w.flowAsked.length, w.forkPrompts.length, w.posted()], [0, 0, [question]])
   })
 }
+
+test('B4 c19 a wait message begun while the task ran is dropped when the task stops for the person before it is posted', async t => {
+  const slow = gate(), held = gate()
+  // after the reply: /invoices -> [L2] (held in flight), then on /biz/2 the task stops to ask again
+  const pick = (choices, evidence, url, ctx) => (/\/biz\/2/.test(url) ? { answer: { name: 'next_step', type: 'choice', choice: 'needs_user_context', confidence: 0.9, probabilities: [{ value: 'needs_user_context', probability: 0.9 }, { value: choices.find(c => /^\[L1\]/.test(c.value)).value, probability: 0.05 }] } } : replayAllOn(choices, evidence, url, ctx))
+  const w = world(t, { virtual: true, pick, actGate: n => (n === 1 ? slow.promise : null), writerGate: held })
+  await w.send(MSG); const question = await w.subjective()
+  w.holdWriter(true)
+  await w.send('두 번째 사업자로', { wait: false }); await w.settle()
+  await w.advance(16000)
+  assert.ok(w.forkPrompts.length >= 1, 'a wait message is being written while the task runs')
+  slow.open(); await w.chat.browserRunIdle()
+  assert.equal(w.note().code, 'confirm_needed', 'the task stopped for the person again (one candidate left on /biz/2)')
+  held.open(); w.holdWriter(false); await w.settle(); await w.chat.flowIdle()
+  assert.deepEqual(w.posted(), [question], 'the begun wait message is not posted on top of the task\'s stop')
+})

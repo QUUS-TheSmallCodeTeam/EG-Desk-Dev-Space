@@ -251,6 +251,8 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
         judgments.push({ q: name, would: !Number.isFinite(p) ? 'unknown' : p >= t.pageState ? 'act' : p <= 1 - t.pageState ? 'none' : 'hold', p: Number.isFinite(p) ? p : null, threshold: t.pageState })
       }
       if (Number.isFinite(d.goalMet)) judgments.push({ q: 'goal_met', would: d.goalMet >= t.done ? 'act' : 'none', p: d.goalMet, threshold: t.done })
+      // c19: the same-thing predicates of a code-decided step (one per candidate; decided yes >= done, decided no <= 1 - done)
+      ;(Array.isArray(d.next?.same) ? d.next.same : []).forEach((p, i) => judgments.push({ q: `same_${i}`, would: !Number.isFinite(p) ? 'unknown' : p >= t.done ? 'act' : p <= 1 - t.done ? 'none' : 'hold', p: Number.isFinite(p) ? p : null, threshold: t.done }))
       note(null, { feature: 'browser_reflex', mode: 'on', candidates: Number.isSafeInteger(d.options) ? d.options : null, judgments })
     }
   }

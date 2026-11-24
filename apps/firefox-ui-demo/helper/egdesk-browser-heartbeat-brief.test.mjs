@@ -103,3 +103,15 @@ test('calibration (owner decision 5): one record per step with the next-step cho
   assert.deepEqual(steps.map(s => [s.judgments[0].would, s.judgments[0].confidence, s.judgments[0].options]), [['act', 0.97, 6], ['hold', 0.88, 7]])
   assert.doesNotMatch(JSON.stringify(w.raw.slice(1)), /세금|사업자|portal|example|https?:|\/invoices|\/home/, 'the raw step records hold nothing of the page')
 })
+
+test('c19 calibration: the same-thing predicates of a code-decided step are logged as same_0.. (closed names; owner decision 3)', async () => {
+  const raw = []
+  const steps = [{ decision: { kind: 'act', next: { value: null, by: 'code', recorded: 'maybe', same: [0.95, 0.04] }, pageChecks: Object.fromEntries(PAGE_STATE_CHECKS.map(c => [c.name, 0.02])), goalMet: 0.02, options: null } }]
+  const provider = { directEntryEnabled: () => true, reflexScope: () => ({ client: { decide: async r => ({ answers: { browser_entry: pick(r.questions[0].choices[0].value) } }) }, authorizeDispatch: () => true, isDecisionCurrent: () => true }),
+    runDirectTask: async () => ({ outcome: 'done', steps: steps.map(s => ({ ...s, url: `${O}/x`, actions: [] })), state: null }) }
+  const entry = createDirectBrowserEntry({ provider, store: createBrowserTaskStore(), calibration: { record: r => raw.push(r) } })
+  await entry.handle({ run: { runId: 'r', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm', message: GOAL, hosts: { card: 'portal.example.test' } })
+  const step = normalizeEntry(raw[1], Date.parse('2026-11-25T00:00:00Z'))
+  assert.deepEqual(step.judgments.map(j => j.q), [...PAGE_STATE_CHECKS.map(c => c.name), 'goal_met', 'same_0', 'same_1'], 'no next_step (not asked); the two same-thing predicates')
+  assert.deepEqual(step.judgments.slice(-2).map(j => [j.would, j.p, j.threshold]), [['act', 0.95, 0.85], ['none', 0.04, 0.85]])
+})
