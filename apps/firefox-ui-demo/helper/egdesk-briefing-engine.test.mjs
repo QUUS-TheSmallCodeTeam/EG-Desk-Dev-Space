@@ -186,7 +186,8 @@ test('held answers: the final answer is posted once, complete, before the run en
     for (const q of request.questions) {
       const pick = q.type === 'choice' ? (q.choices.find(c => c.value === 'supported') ?? q.choices[0]).value : null
       answers[q.name] = q.type === 'choice' ? { type: 'choice', choice: pick, confidence: .95, probabilities: [{ value: pick, probability: .96 }, { value: q.choices.find(c => c.value !== pick).value, probability: .02 }] }
-        : { type: 'predicate', probability: /^rel_/.test(q.name) ? .95 : .03 }
+        // L3 c18: the draft check asks yes/no per sentence by default; sup_N is its "supported" (picked above for the choice design)
+        : { type: 'predicate', probability: /^(rel|sup)_/.test(q.name) ? .95 : .03 }
     }
     return { answers, model: 'mock', usage: { inputTokens: 5 }, latencyMs: 3 }
   } }
