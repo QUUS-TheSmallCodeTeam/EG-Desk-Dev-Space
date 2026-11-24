@@ -73,7 +73,8 @@ export function isCurrentBrowserReflexHandoff(response, run, event) {
   return handoff?.run === run && handoff.event === event && !cancelledBrowserRuns.has(run)
 }
 
-export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaReady = () => true, fixtureQa = null, decision = null, runReflex = runBrowserReflex, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey }) }) {
+// `ownerKeyFor(engineProfileId)` (L1 c24): the account of the slot running the room; default = the one sign-in `getOwnerKey()` answers, as before.
+export function createCodexBrowserToolProvider({ transport, getOwnerKey, ownerKeyFor = () => getOwnerKey(), schemaReady = () => true, fixtureQa = null, decision = null, runReflex = runBrowserReflex, service = createBrowserToolService({ sendToUi: request => transport.sendToUi(request), getOwnerKey, ownerKeyFor }) }) {
   if (!transport || typeof transport.hasClient !== 'function' || typeof getOwnerKey !== 'function') throw new TypeError('Browser provider requires a bounded UI transport and account identity')
   let resetting = 0
   const fixtureAttestations = new Map()
@@ -131,7 +132,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
         throw chatError('BROWSER_FIXTURE_UNAVAILABLE', 'Fixture Browser QA requires the exact opted-in local fixture and an interaction selection', 403)
       }
       let selection
-      try { selection = service.prepare({ selectedSources, ownerKey: getOwnerKey() }) }
+      try { selection = service.prepare({ selectedSources, ownerKey: ownerKeyFor(route?.engineProfileId), engineProfileId: route?.engineProfileId }) }
       catch (error) { const failure = classifyPublicToolError(error, { browser: true }); throw chatError(failure.code, failure.message, 400) }
       return { selection, transportId, policy, interactionRequested }
     },
@@ -153,7 +154,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
     async bindRun(run, prepared) {
       if (!prepared) return
       if (resetting) throw chatError('BROWSER_RESET_PENDING', 'Browser authority is still being revoked', 409)
-      transport.bindRun(run.runId, run.clientThreadId, prepared.transportId)
+      transport.bindRun(run.runId, run.clientThreadId, prepared.transportId, prepared.selection?.engineProfileId)
       try {
         const receipt = await service.bind(run, prepared.selection)
         run.browserBinding = { cards: receipt.cards.map(card => {
@@ -173,7 +174,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
     async adoptRun(run, prepared, preRun) {
       if (!prepared || !preRun) return
       if (resetting) throw chatError('BROWSER_RESET_PENDING', 'Browser authority is still being revoked', 409)
-      transport.bindRun(run.runId, run.clientThreadId, prepared.transportId)
+      transport.bindRun(run.runId, run.clientThreadId, prepared.transportId, prepared.selection?.engineProfileId)
       try {
         service.adopt(preRun, run)
         run.browserBinding = { cards: (preRun.browserBinding?.cards || []).map(card => ({ ...card })) }
@@ -295,7 +296,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
       const card = run.browserBinding?.cards?.find(item => item.cardId === cardId)
       const isDecisionCurrent = () => Boolean(recipient && binding && !resetting &&
         !cancelledBrowserRuns.has(run) && run.status === 'inProgress' && run.executionPolicy?.mode === BROWSER_BOUNDED &&
-        binding.ownerKey === getOwnerKey() && binding.clientThreadId === run.clientThreadId &&
+        binding.ownerKey === ownerKeyFor(binding.engineProfileId) && binding.clientThreadId === run.clientThreadId &&
         transport.runs.get(run.runId) === binding && transport.hasClient(binding.transportId) &&
         card?.permission === 'interact' && run.browserBinding?.cards?.includes(card) && currentRecipient() === recipient &&
         Number.isSafeInteger(generation) && decision.generation?.() === generation)

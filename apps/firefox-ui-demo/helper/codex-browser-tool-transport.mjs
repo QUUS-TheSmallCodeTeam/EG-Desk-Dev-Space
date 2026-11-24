@@ -16,10 +16,10 @@ const badCallId = request => Object.hasOwn(request, 'callId') && !short(request.
 // One SSE client, one run and one native Browser request are bound together.
 // A response from another window or a stale stream cannot satisfy the call.
 export class BrowserToolTransport {
-  constructor({ getOwnerKey, now = Date.now, clock = () => performance.timeOrigin + performance.now(),
+  constructor({ getOwnerKey, ownerKeyFor = () => getOwnerKey(), now = Date.now, clock = () => performance.timeOrigin + performance.now(),
     setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
     if (typeof getOwnerKey !== 'function') throw new TypeError('Current owner key is required')
-    Object.assign(this, { getOwnerKey, now, clock, setTimer, clearTimer })
+    Object.assign(this, { getOwnerKey, ownerKeyFor, now, clock, setTimer, clearTimer })
     this.clients = new Map()
     this.runs = new Map()
     this.pending = new Map()
@@ -44,13 +44,13 @@ export class BrowserToolTransport {
     for (const [runId, entry] of this.runs) if (entry.transportId === transportId) this.runs.delete(runId)
   }
 
-  bindRun(runId, clientThreadId, transportId) {
-    const ownerKey = this.getOwnerKey()
+  bindRun(runId, clientThreadId, transportId, engineProfileId) {
+    const ownerKey = this.ownerKeyFor(engineProfileId)
     if (!short(runId, 300) || !short(clientThreadId) || !short(ownerKey, 256) || !this.hasClient(transportId)) {
       throw fail('BROWSER_UI_UNAVAILABLE', 'A selected, connected Browser UI stream is required')
     }
     if (this.runs.has(runId)) throw fail('BROWSER_RUN_BOUND', 'Browser run already has a UI stream')
-    this.runs.set(runId, { transportId, clientThreadId, ownerKey })
+    this.runs.set(runId, { transportId, clientThreadId, ownerKey, ...(engineProfileId ? { engineProfileId } : {}) })
   }
 
   unbindRun(runId) {
@@ -74,7 +74,7 @@ export class BrowserToolTransport {
     }
     const bound = this.runs.get(request.runId)
     const client = bound && this.clients.get(bound.transportId)
-    if (!client || client.closed || bound.ownerKey !== this.getOwnerKey() || bound.clientThreadId !== request.clientThreadId) {
+    if (!client || client.closed || bound.ownerKey !== this.ownerKeyFor(bound.engineProfileId) || bound.clientThreadId !== request.clientThreadId) {
       throw fail('BROWSER_UI_UNAVAILABLE', 'Bound Browser UI stream, Chat thread or account is unavailable')
     }
     if ([...this.pending.values()].some(entry => entry.requestId === request.requestId) || this.pending.size >= 64) {
@@ -88,7 +88,7 @@ export class BrowserToolTransport {
     return new Promise((resolve, reject) => {
       // Capture the binding generation, not just a reusable run ID.
       const entry = { requestId: request.requestId, wireRequestId, runId: request.runId, runBinding: bound, transportId: bound.transportId,
-        ownerKey: bound.ownerKey, deadlineMs: request.deadlineMs, resolve, reject, timer: null,
+        ownerKey: bound.ownerKey, ...(bound.engineProfileId ? { engineProfileId: bound.engineProfileId } : {}), deadlineMs: request.deadlineMs, resolve, reject, timer: null,
         sent: { ...(Object.hasOwn(request, 'seq') ? { seq: request.seq } : {}),
           ...(Object.hasOwn(request, 'sentAtMs') ? { sentAtMs: request.sentAtMs } : {}) } }
       const timer = this.setTimer(() => {
@@ -112,7 +112,7 @@ export class BrowserToolTransport {
     const requestId = response?.requestId
     const entry = this.pending.get(requestId)
     if (!short(transportId) || !short(requestId) || !entry || entry.transportId !== transportId ||
-        !this.hasClient(transportId) || entry.ownerKey !== this.getOwnerKey() ||
+        !this.hasClient(transportId) || entry.ownerKey !== this.ownerKeyFor(entry.engineProfileId) ||
         this.runs.get(entry.runId) !== entry.runBinding) {
       throw fail('BROWSER_UI_RESPONSE_STALE', 'No matching Browser request is awaiting this UI response')
     }

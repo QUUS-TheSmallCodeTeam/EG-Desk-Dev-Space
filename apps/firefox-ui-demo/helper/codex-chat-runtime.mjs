@@ -103,6 +103,13 @@ export const CONTINUITY_MAX_PAGES = 20
 // deprecated `thread/compacted` notification. Either one means the answering model may no longer hold what was delivered to it.
 // `thread/reverted` (Codex 0.171 schema, ThreadRevertedNotification): the thread's durable history was replaced by the prefix before one turn;
 // what later turns delivered (and their replies) is gone from it as well (L7 c24).
+// A stable key of what a resume sends and verifies under (L7 c27): the merged overrides, the policy, the shell switch, computer control and the ceiling.
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`
+  return JSON.stringify(value ?? null)
+}
+export const resumeKey = spec => createHash('sha256').update(stableJson(spec)).digest('hex')
 export function compactionSignal(message) {
   const p = message?.params
   if (!p || !idText(p.threadId)) return null
@@ -745,7 +752,7 @@ function cleanNotification(method, p, engineId = 'codex') {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null }) {
+  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], agentReloadReuse = false, expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer, monotonicNow })
     if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
     this.resolveProjectWorkspace = resolveProjectWorkspace
@@ -866,6 +873,9 @@ export class CodexChatRuntime {
     this.commandGateRuns = new Set() // in-flight command gate assessments (never awaited by an approval card)
     // c18: { mode() → 'off'|'on', neutralFolder() → absolute EG-Desk-owned empty folder }; absent = off
     this.ownTools = ownTools
+    // L7 c27 (developer flag EGDESK_AGENT_RELOAD_REUSE=on in the bridge, default off): an Agent-profile turn on a thread this process has loaded skips the
+    // per-turn detach + resume when the resume parameters it would send are byte-identical to those the thread was last loaded with and verified under.
+    this.agentReloadReuse = agentReloadReuse === true
     // L1 c21 (owner decision, provisional; flag roomAccount.mode() === 'on', default off): a room keeps its own AI account; an explicit switch
     // continues the same room on another account (see switchRoomAccount).
     this.roomAccount = roomAccount
@@ -2683,24 +2693,63 @@ export class CodexChatRuntime {
       const computerOffApplied = this.threads.get(cid)?.computerControl === 'off'
       const computerReload = !bounded && engine.id === 'codex' && (computerOff ? !computerOffApplied : computerOffApplied)
       const mustReload = (bounded && !justRestored) || body.profileEnabled === true || body.profileEnabled === false || Boolean(context.profileRun) || computerReload
-      if (mustReload && this.loadedThreads.has(cid)) {
-        const detached = await engine.releaseThread(cid, slot)
-        this.loadedThreads.delete(cid)
-        if (!['unsubscribed', 'notLoaded'].includes(detached?.status)) throw chatError('PROFILE_TRANSITION_UNAVAILABLE', 'Could not detach this native thread for a profile change', 409)
-      }
-      if (!this.loadedThreads.has(cid)) {
-        // A saved profile always reloads the thread, so a changed ceiling is re-applied here.
+      // The exact resume the reload below would send, and a key of it. A saved profile's ceiling overrides are read from the engine's current
+      // configuration (sandbox mode, the MCP servers it lists), so they are computed each time, never remembered; only their result is compared.
+      const prepareResume = async () => {
         const extra = ceilingNarrows(ceiling) ? await ceilingOverrides() : null
         const computerExtra = computerOff ? await this.computerControlOffOverrides(overrides.cwd || this.threads.get(cid)?.cwd || null, request) : null
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
-        // A bounded thread resumed with the ceiling's shell_tool false must read it back off.
-        const resumed = await this.restoreThread(cid, context.clientThreadId, mergeCeilingOverrides(mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), ownTools ? await this.ownToolsThreadOverrides(request, neutralFolder, overrides, context) : null), { policy, shellOff: Boolean(extra) && ceiling?.terminal === 'none', beforeResume })
-        if (!bounded) context.ceilingNotices.push(...ceilingReportNotices(ceiling, await verifyCeilingNativeThread(request, ceiling, resumed, cid)))
-        if (computerExtra) {
-          await this.verifyComputerControl(cid, computerExtra, request)
-          this.threads.get(cid).computerControl = 'off'
+        const merged = mergeCeilingOverrides(mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), ownTools ? await this.ownToolsThreadOverrides(request, neutralFolder, overrides, context) : null)
+        if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409) // the own-tools overrides above are read from the engine
+        const shellOff = Boolean(extra) && ceiling?.terminal === 'none'
+        return { extra, computerExtra, merged, shellOff, key: resumeKey({ merged, policy, shellOff, computerOff, ceiling }) }
+      }
+      // L7 c27 (flag agentReloadReuse): the thread is loaded, the reload is only the per-turn profile reload (never QA, never after a restart: those
+      // have no loaded thread or are bounded), and the thread was last loaded AND verified under exactly these parameters: nothing the ceiling
+      // depends on changed, so detaching and resuming would put the thread in the state it already has. The verification is not skipped: the
+      // ceiling is verified again on this turn, against the sandbox the last resume reported and the thread's live MCP and feature lists.
+      let prepared = null, reused = false
+      if (mustReload && this.loadedThreads.has(cid) && this.agentReloadReuse && !bounded && engine.id === 'codex' && !justRestored) {
+        prepared = await prepareResume()
+        const applied = this.threads.get(cid)?.appliedResume
+        reused = applied?.key === prepared.key
+      }
+      if (reused) {
+        // A failed verification here (the engine's thread drifted from what was applied) is not an answer yet: the thread is detached and loaded
+        // again below, and that load is verified like any other (it refuses if the drift is still there).
+        try {
+          const applied = this.threads.get(cid).appliedResume
+          const notices = ceilingReportNotices(ceiling, await verifyCeilingNativeThread(request, ceiling, { sandbox: applied.sandbox }, cid))
+          if (prepared.computerExtra) await this.verifyComputerControl(cid, prepared.computerExtra, request)
+          context.ceilingNotices.push(...notices)
+        } catch (error) {
+          if (epoch !== this.epochOf(engine.id, slot)) throw error
+          reused = false
         }
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
+      }
+      if (reused) {
+        // nothing to load
+      } else {
+        if (mustReload && this.loadedThreads.has(cid)) {
+          const detached = await engine.releaseThread(cid, slot)
+          this.loadedThreads.delete(cid)
+          if (!['unsubscribed', 'notLoaded'].includes(detached?.status)) throw chatError('PROFILE_TRANSITION_UNAVAILABLE', 'Could not detach this native thread for a profile change', 409)
+        }
+        if (!this.loadedThreads.has(cid)) {
+          // A saved profile always reloads the thread, so a changed ceiling is re-applied here.
+          const { computerExtra, merged, shellOff, key } = prepared ?? await prepareResume()
+          // A bounded thread resumed with the ceiling's shell_tool false must read it back off.
+          const resumed = await this.restoreThread(cid, context.clientThreadId, merged, { policy, shellOff, beforeResume })
+          if (!bounded) context.ceilingNotices.push(...ceilingReportNotices(ceiling, await verifyCeilingNativeThread(request, ceiling, resumed, cid)))
+          if (computerExtra) {
+            await this.verifyComputerControl(cid, computerExtra, request)
+            this.threads.get(cid).computerControl = 'off'
+          }
+          if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
+          // remembered only after every check passed: a failed verification leaves nothing to reuse, so the next turn reloads
+          if (this.agentReloadReuse && !bounded && engine.id === 'codex') this.threads.get(cid).appliedResume = { key, sandbox: resumed?.sandbox ?? null }
+        }
       }
       if (skipFirstResume) assertNoActiveRun() // the history was hydrated by the reload above, not before it
       if (bounded) this.persistExecutionPolicy(context, cid)
