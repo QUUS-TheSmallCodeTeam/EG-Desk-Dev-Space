@@ -22,6 +22,11 @@ export const FLOW_LIMITS = Object.freeze({
   maxMessages: 3,
   // Pointer messages (a finished result or a pending decision waits somewhere for a person): one per attention fact, two per window.
   maxPointers: 2,
+  // A pointer that had nowhere to go (the person has no live conversation of their own, or is away) is held for that person and
+  // offered in the next run of a conversation that is theirs alone. Kept for 15 minutes, the same bound after which a session
+  // without its person is given up (HEARTBEAT_LIMITS.idleStopMs); at most 8 at a time, one per source fact. The held fact keeps who
+  // and what, never where: a direction is relative to what the person was looking at then.
+  heldAttentionMs: 900_000, maxHeldAttention: 8,
   // Decision requests: at most one per 10 s (two beats) unless a kind became possible that was never offered in this run, and six
   // per run. A request is one small choice: 0.25-0.6 s warm, about 1.3-1.6 s after a long idle, so six cost at most a few seconds.
   evalGapMs: 10_000, maxEvals: 6,
@@ -60,6 +65,7 @@ export const FLOW_KINDS = Object.freeze([
 export const WAIT_LABELS = Object.freeze({
   command_waiting_input: 'a command is waiting for input',
   browser_task_waiting_person: 'the task in the browser is waiting for the person',
+  browser_task_preparing_question: 'a question to the person about the task in the browser is being prepared',
   command_running: 'a command is still running',
   browser_task_running: 'a task in the browser is still going',
   objective_step: 'an automatic step is still going',
@@ -75,7 +81,9 @@ export function waitSummary(heartbeatFacts) {
     if (typeof row.waitingOn === 'string') add(row.waitingOn, row.waitingOnMs)
     if (row.terminal === 'waiting') add('command_waiting_input', row.quietMs)
     else if (row.terminal === 'running' || (row.phase === 'tool_running' && Number.isFinite(row.runningMs))) add('command_running', row.runningMs)
-    if (row.task === 'need_context' || row.task === 'cannot_proceed') add('browser_task_waiting_person', null)
+    // The browser task's row (egdesk-heartbeat-providers.mjs browserTaskRow): waiting_user | handing_off | running.
+    if (row.task === 'waiting_user' || row.task === 'need_context' || row.task === 'cannot_proceed') add('browser_task_waiting_person', null)
+    else if (row.task === 'handing_off') add('browser_task_preparing_question', null)
     else if (row.task === 'running') add('browser_task_running', null)
     if (Number.isSafeInteger(row.placementsPending) && row.placementsPending > 0) add('placement_pending', null)
   }
@@ -97,9 +105,20 @@ export function attentionOf(heartbeatFacts) {
     let kind = row.attention, who = row.attentionFor, where = row.attentionWhere, distance = row.attentionDistance
     if (kind === undefined && row.pointerPending === true) { kind = row.pointerNeeds === 'owner_action' ? 'approval' : 'result'; who = row.pointerFor; where = row.pointerWhere; distance = row.pointerDistance }
     if (!ATTENTION_KINDS.includes(kind) || !ATTENTION_FOR.includes(who)) continue
+    // The placement runtime says 'none' for the direction of something already in view and puts 'in_view' in the distance: one meaning here.
+    if (distance === 'in_view') where = 'in_view'
     return { provider, kind, who, where: ATTENTION_WHERE.includes(where) ? where : 'none', distance: ATTENTION_DISTANCE.includes(distance) ? distance : null, signature: `${provider}:${kind}:${who}` }
   }
   return null
+}
+
+/**
+ * The message question's facts for a session whose run has ended (idle tempo): nothing of a run is offered, only a pointer.
+ * heartbeatFacts: the beat's facts; audience: audienceFacts(...) of the conversation; pointer: { attention, pointed, pointers, pointerTarget }.
+ */
+export function idleFlowFacts({ heartbeatFacts, audience = null, pointer = {} }) {
+  return { idle: true, sent: 0, stepsSinceLast: 0, question: null, waitExplained: false, pendingQuestion: heartbeatFacts.pendingQuestion === true, reasoningOpen: false, blocked: true,
+    elapsedMs: heartbeatFacts.sinceUserMs, sinceLastMs: heartbeatFacts.sincePostedMs, audience, waits: [], ...pointer }
 }
 
 /**
@@ -221,6 +240,8 @@ export function flowQuestion(facts, options) {
       ...(waits[1] ? { also_waiting_on: waits[1].what } : {}),
       // Something that needs a person's attention somewhere on the desk (closed labels from the provider).
       ...(at && options.includes('pointer') ? { attention_kind: at.kind, attention_for: at.who, attention_where: at.where, ...(at.distance ? { attention_distance: at.distance } : {}),
+        // A fact that was held for this person until their own conversation became live again: how long it has waited.
+        ...(Number.isFinite(at.heldMs) ? { attention_waiting_seconds: Math.round(at.heldMs / 1000) } : {}),
         attention_person_in_this_conversation: facts.pointerTarget === 'here' } : {}),
       ...(a ? { waiting_person: a.waiting, waiting_person_present: a.addresseePresent === null ? 'unknown' : a.addresseePresent ? 'yes' : 'no',
         ...(a.addresseeIdleMs !== null ? { waiting_person_idle_seconds: Math.round(a.addresseeIdleMs / 1000) } : {}) } : {}) } }

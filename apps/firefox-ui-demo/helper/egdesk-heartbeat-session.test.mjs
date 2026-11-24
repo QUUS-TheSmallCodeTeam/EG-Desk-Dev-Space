@@ -1,6 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { HEARTBEAT_LIMITS, createHeartbeat, createHeartbeats } from './egdesk-heartbeat.mjs'
+import { Readable } from 'node:stream'
+import { readFileSync } from 'node:fs'
+import { HEARTBEAT_LIMITS, createHeartbeat, createHeartbeats, createWindowWatch } from './egdesk-heartbeat.mjs'
+import { browserTaskRow } from './egdesk-heartbeat-providers.mjs'
+import { createChatHttpHandler } from './codex-bridge-http.mjs'
 import { FLOW_LIMITS, WAIT_LABELS, attentionOf, enumerateOptions, pointerPrompt, pointerRoute, waitSummary, writerPrompt } from './egdesk-conversation-flow.mjs'
 import { world } from './egdesk-heartbeat-flow.fixture.mjs'
 
@@ -111,13 +115,20 @@ test('waitSummary: provider facts become closed labels with seconds; nothing els
   assert.deepEqual(waitSummary({ phase: 'thinking', stepsRunning: 0, sources: {} }), [])
   const prompt = writerPrompt('explain_wait', { elapsedMs: 45_000, waits: [{ what: 'command_running', seconds: 42 }] })
   assert.match(prompt, /a command is still running \(about 42 seconds so far\)/)
-  assert.equal(Object.keys(WAIT_LABELS).length, 7)
+  // The browser task's own row (browserTaskRow): running, wording its question, waiting for the person.
+  assert.deepEqual(waitSummary(facts({ browser_task: browserTaskRow({ active: true, status: 'running', stepsDone: 3, stepsRemaining: 21 }) })), [{ what: 'browser_task_running', seconds: null }])
+  assert.deepEqual(waitSummary(facts({ browser_task: browserTaskRow({ active: true, status: 'paused', asked: false, stepsDone: 3, stepsRemaining: 21 }) })), [{ what: 'browser_task_preparing_question', seconds: null }])
+  assert.deepEqual(waitSummary(facts({ browser_task: browserTaskRow({ active: true, status: 'paused', asked: true, stepsDone: 3, stepsRemaining: 21 }) })), [{ what: 'browser_task_waiting_person', seconds: null }])
+  assert.equal(Object.keys(WAIT_LABELS).length, 8)
 })
 
 test('attentionOf: the provider\'s attention fact as closed fields (who, where, kind); the placement runtime\'s field names are read as the same fact', () => {
   const placement = { placementsPending: 0, placementsDecided: 2, pointerPending: true, pointerWhere: 'right', pointerDistance: 'very_far', pointerFor: 'owner', pointerNeeds: 'owner_action' }
   assert.deepEqual(attentionOf({ sources: { work_placement: placement } }), { provider: 'work_placement', kind: 'approval', who: 'owner', where: 'right', distance: 'very_far', signature: 'work_placement:approval:owner' })
   assert.equal(attentionOf({ sources: { work_placement: { ...placement, pointerPending: false } } }), null)
+  // Already in view: the placement runtime sends direction 'none' with distance 'in_view'; the writer must not be told "elsewhere".
+  const inView = attentionOf({ sources: { work_placement: { ...placement, pointerWhere: 'none', pointerDistance: 'in_view', pointerNeeds: 'review' } } })
+  assert.deepEqual([inView.kind, inView.where, inView.distance], ['result', 'in_view', 'in_view']); assert.match(pointerPrompt(inView), /It is inside what they are looking at on the desk\./)
   assert.deepEqual(attentionOf({ sources: { tasks: { attention: 'question', attentionFor: 'requester', attentionWhere: 'somewhere_odd' } } }), { provider: 'tasks', kind: 'question', who: 'requester', where: 'none', distance: null, signature: 'tasks:question:requester' })
   assert.equal(attentionOf({ sources: { tasks: { attention: 'result', attentionFor: 'everyone' } } }), null, 'who must be the owner or the requester')
   const prompt = pointerPrompt({ kind: 'approval', who: 'owner', where: 'right', distance: 'very_far' })
@@ -300,4 +311,116 @@ test('simulation 4b: the pointer is being written when the new run starts — it
   await w.advance(40_000); await second.final('요약했습니다.')
   assert.deepEqual(second.assistant(), ['조사를 마쳤습니다.', POINTER, '요약했습니다.'])
   assert.equal(w.events.filter(e => e.event === 'message.completed' && e.details?.text === POINTER).length, 1)
+})
+
+// ---- cycle 14: the close signal, the window going away, and a pointer with nowhere to go ----
+
+function post(handler, path, body) {
+  const req = Readable.from([Buffer.from(JSON.stringify(body))])
+  Object.assign(req, { method: 'POST', url: path, headers: { host: '127.0.0.1:39218', 'content-type': 'application/json' }, socket: { remoteAddress: '127.0.0.1' } })
+  const res = { headers: {}, setHeader(key, value) { this.headers[key] = value }, writeHead(status, headers) { this.status = status; Object.assign(this.headers, headers) }, end(text) { this.body = text ? JSON.parse(text) : null } }
+  return handler(req, res, new URL(`http://127.0.0.1:39218${path}`)).then(handled => ({ handled, status: res.status, body: res.body }))
+}
+
+test('POST /chat/session/close: an idle session ends at once; a working one ends with its run instead of idling; no engine account check', async t => {
+  const w = world(t)
+  let auth = 0
+  const handler = createChatHttpHandler(w.chat, async () => { auth++; throw Object.assign(new Error('login'), { code: 'LOGIN_REQUIRED', httpStatus: 401 }) })
+  const idle = await w.dm('dm-a'); await w.advance(6000); await idle.final('끝.')
+  const closed = await post(handler, '/chat/session/close', { clientThreadId: 'dm-a' })
+  assert.deepEqual([closed.handled, closed.status, closed.body], [true, 200, { accepted: true, closed: true }])
+  assert.deepEqual([idle.hb.state, idle.hb.stopReason, w.chat.heartbeatFor('dm-a')], ['stopped', 'closed', null])
+  assert.deepEqual((await post(handler, '/chat/session/close', { clientThreadId: 'dm-a' })).body, { accepted: true, closed: false }, 'nothing live: still accepted')
+  const bad = await post(handler, '/chat/session/close', {})
+  assert.deepEqual([bad.status, bad.body.code], [400, 'INVALID_SESSION_CLOSE'])
+  // Closed while the run works: the run and its heartbeat go on; at the end the session stops instead of idling.
+  const busy = await w.dm('dm-b'); await w.advance(6000)
+  assert.deepEqual((await post(handler, '/chat/session/close', { clientThreadId: 'dm-b' })).body, { accepted: true, closed: false, afterRun: true })
+  assert.deepEqual([busy.hb.state, busy.hb.tempo], ['running', 'active'])
+  await w.advance(5000); assert.equal(busy.hb.beats, 2, 'still beating for the run')
+  await busy.final('끝났습니다.')
+  assert.deepEqual([busy.hb.state, busy.hb.stopReason, busy.assistant(), w.timers.length], ['stopped', 'closed', ['끝났습니다.'], 0])
+  // A message after the close opens the conversation again: that run's session idles as usual.
+  const again = await w.dm('dm-c'); await w.advance(2000)
+  await post(handler, '/chat/session/close', { clientThreadId: 'dm-c' }); await again.final('하나.')
+  const reopened = await w.dm('dm-c', '다시', { requestId: 'req-2', conversationId: again.r.conversationId }); await reopened.final('둘.')
+  assert.deepEqual([reopened.hb.state, reopened.hb.tempo], ['running', 'idle'])
+  assert.equal(auth, 0)
+})
+
+test('the window goes away: after 10 s without an event stream idle sessions end and a working run keeps its heartbeat; a reload within the grace changes nothing', async t => {
+  const c = clockwork(); let gone = 0
+  const watch = createWindowWatch({ ...c, onGone: () => gone++ })
+  watch.arrived(); watch.arrived(); watch.left(1); assert.equal(watch.waiting, false, 'another stream is still open')
+  watch.left(0); assert.equal(watch.waiting, true); c.advance(1500); watch.arrived() // a reload
+  c.advance(60_000); assert.deepEqual([gone, c.pending()], [0, 0])
+  watch.left(0); watch.left(0); c.advance(9999); assert.equal(gone, 0); c.advance(1); assert.deepEqual([gone, watch.waiting, c.pending()], [1, false, 0])
+  // The bridge wires it to its event streams and to the runtime (the bridge is a process entry point; its source is read here).
+  const bridge = readFileSync(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  assert.match(bridge, /const windowWatch = createWindowWatch\(\{ onGone: \(\) => chat\.closeIdleSessions\(\) \}\)/)
+  assert.match(bridge, /onClose: \(\) => \{ clients\.delete\(client\); windowWatch\.left\(clients\.size\);/); assert.match(bridge, /clients\.add\(client\); windowWatch\.arrived\(\)/)
+  const w = world(t)
+  const idle = await w.dm('dm-idle'); await w.advance(6000); await idle.final('끝.')
+  const busy = await w.dm('dm-busy'); await w.advance(6000)
+  assert.equal(w.chat.closeIdleSessions(), 1)
+  assert.deepEqual([idle.hb.stopReason, busy.hb.state, busy.hb.tempo, w.chat.heartbeats.size], ['closed', 'running', 'active', 1])
+  await busy.final('끝.')
+})
+
+const HELD_AUDIENCE = { 'dm-task': { requester: 'm-jin', owner: 'self', participants: ['m-jin'] }, 'dm-owner': { requester: 'self', owner: 'self', participants: ['self'] },
+  'room': { requester: 'self', owner: 'self', participants: ['self', 'm-ha'] } }
+async function holdOne(w) {
+  const m = await w.dm('dm-task', '분기 보고서 초안을 만들어 주세요'); await w.advance(4000); await m.final('보고서 초안을 만들었습니다.')
+  const placement = placementProvider(m.hb)
+  placement.pointer = { pointerWhere: 'left', pointerDistance: 'far', pointerFor: 'owner', pointerNeeds: 'review' }
+  m.hb.nudge(); await w.advance(S.nudgeMs)
+  return { m, placement }
+}
+
+test('a pointer with nowhere to go is held for that person and delivered once in the next run of their own conversation, without its direction', async t => {
+  const rows = [{ member: 'self', self: true, active: true, lastInputAgeMs: 1000 }], acks = []
+  const w = pointerWorld(t, { rows, acks, audience: HELD_AUDIENCE })
+  const { m, placement } = await holdOne(w)
+  assert.deepEqual([w.requests.flow, w.chat.heldAttention.length, m.assistant().length], [0, 1, 1], 'no conversation of the owner is live: no request, the fact is held')
+  assert.deepEqual(Object.keys(w.chat.heldAttention[0]).sort(), ['at', 'id', 'kind', 'member', 'provider', 'signature', 'sourceKey'], 'who and what, never where')
+  await w.advance(120_000); placement.pointer = null // the placement runtime withdraws its own fact after 120 s
+  // Never into a conversation someone else takes part in.
+  const room = await w.dm('room', '회의 정리해 주세요'); await w.advance(12_000); await room.final('정리했습니다.')
+  assert.deepEqual([room.assistant(), w.chat.heldAttention.length, w.requests.flow], [['정리했습니다.'], 1, 0], 'not offered there: not even a request')
+  // Three minutes after it was held the owner writes in their own conversation.
+  await w.advance(44_000)
+  const o = await w.dm('dm-owner', '예산표 정리해 주세요'); await w.advance(5000) // the first beat of this run
+  assert.deepEqual(o.assistant(), [POINTER])
+  const asked = w.beatRequests.at(-1).input.join('\n')
+  assert.match(asked, /attention_kind: result/); assert.match(asked, /attention_for: requester/); assert.match(asked, /attention_where: none/)
+  assert.match(asked, /attention_waiting_seconds: 18[0-9]/); assert.match(asked, /work_in_progress: yes/)
+  assert.match(w.forkPrompts.at(-1), /It is elsewhere on the desk\./)
+  for (const text of [asked, w.forkPrompts.at(-1)]) assert.doesNotMatch(text, /m-jin|보고서|left/)
+  assert.deepEqual([w.chat.heldAttention.length, acks], [0, [{ key: 'dm-task', provider: 'work_placement' }]], 'delivered: dropped, and the source is told')
+  await w.advance(40_000); await o.final('정리했습니다.')
+  assert.deepEqual(o.assistant(), [POINTER, '정리했습니다.']); assert.equal(w.events.filter(e => e.event === 'message.completed' && e.details?.text === POINTER).length, 1)
+  assert.deepEqual(m.assistant(), ['보고서 초안을 만들었습니다.'])
+})
+
+test('held attention is bounded: gone after 15 minutes, at most 8, one per source fact; an owner who was away gets it when they are back', async t => {
+  const rows = [{ member: 'self', self: true, active: false, lastInputAgeMs: 400_000 }]
+  const w = pointerWorld(t, { rows, audience: HELD_AUDIENCE })
+  const { m } = await holdOne(w)
+  await w.advance(20_000); m.hb.nudge(); await w.advance(S.nudgeMs)
+  assert.deepEqual([w.chat.heldAttention.length, w.requests.flow], [1, 0], 'the owner is away: held once, however many beats see it')
+  rows[0] = { member: 'self', self: true, active: true, lastInputAgeMs: 500 }
+  const o = await w.dm('dm-owner', '돌아왔어요'); await w.advance(5000)
+  assert.deepEqual(o.assistant(), [POINTER]); await o.final('네.')
+  // The bound.
+  const late = pointerWorld(t, { rows: [{ member: 'self', self: true, active: true, lastInputAgeMs: 500 }], audience: HELD_AUDIENCE })
+  await holdOne(late)
+  await late.advance(FLOW_LIMITS.heldAttentionMs)
+  const l = await late.dm('dm-owner', '예산표'); await late.advance(12_000)
+  assert.deepEqual([l.assistant(), late.chat.heldAttention.length, late.requests.flow], [[], 0, 0], 'after 15 minutes it is not brought up any more')
+  await l.final('네.')
+  const many = pointerWorld(t, { rows: [], audience: {} })
+  const subject = n => ({ key: `k${n}`, conversationId: `c${n}`, run: null, pointed: new Set() })
+  for (let n = 0; n < 12; n++) many.chat.holdAttention(subject(n), { provider: 'work_placement', kind: 'result', who: 'owner', signature: 'work_placement:result:owner' })
+  assert.equal(many.chat.holdAttention(subject(11), { provider: 'work_placement', kind: 'result', who: 'owner', signature: 'work_placement:result:owner' }), false)
+  assert.deepEqual([many.chat.heldAttention.length, many.chat.heldAttention[0].sourceKey], [FLOW_LIMITS.maxHeldAttention, 'k4'])
 })

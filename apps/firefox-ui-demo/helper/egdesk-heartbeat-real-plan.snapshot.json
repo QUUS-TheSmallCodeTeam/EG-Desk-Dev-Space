@@ -1,0 +1,262 @@
+{
+ "set": "heartbeat-c14",
+ "tokenCeiling": 9217,
+ "passRule": "Pass: every hard expectation holds (an expected action also needs confidence >= 0.75, the product's own acceptance bar). Soft expectations are reported as findings and never fail the set. No retries; one request per pattern.",
+ "requests": [
+  {
+   "id": "need-quick-3s",
+   "file": "requests/need-quick-3s.json",
+   "sha256": "f60130156a225c0d683e20086fec9ae0a2944ad6b77426a22421edcfe5090e17",
+   "estInputTokens": 453,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "none",
+     "severity": "hard",
+     "note": "Control: three seconds in, a judge that does not stay silent cannot be trusted at any later moment."
+    }
+   ]
+  },
+  {
+   "id": "need-thinking-12s",
+   "file": "requests/need-thinking-12s.json",
+   "sha256": "bdf315bb239bdc6ff15e8a0c3da22a9b07e69ba8cbec751075899c21cf70aee0",
+   "estInputTokens": 454,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "none",
+     "severity": "soft",
+     "note": "Reasoning is visibly going on and no step has run: the design waits until 20 s."
+    }
+   ]
+  },
+  {
+   "id": "need-thinking-20s",
+   "file": "requests/need-thinking-20s.json",
+   "sha256": "205d5d8302c0cfe7cd04e68cfd0ecb507118be0357ab44dae6fbe840b6d608ec",
+   "estInputTokens": 454,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "explain_wait",
+     "minConfidence": 0.75,
+     "severity": "soft",
+     "note": "Twenty seconds without a word to the person is twice the attention limit the design rests on."
+    }
+   ]
+  },
+  {
+   "id": "need-command-40s",
+   "file": "requests/need-command-40s.json",
+   "sha256": "0b97e6832bbb772fbc6e9c42641cd41f7938a79e84a4e6d08edef834d0924bad",
+   "estInputTokens": 471,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "explain_wait",
+     "minConfidence": 0.75,
+     "severity": "hard",
+     "note": "The case the wait message exists for: a long command, and the person has heard nothing for 40 s."
+    }
+   ]
+  },
+  {
+   "id": "need-objective-40s",
+   "file": "requests/need-objective-40s.json",
+   "sha256": "8836f68e22c4887c28aa654ea22a9a6f9f36de8376858a55f7b1932b8afbce65",
+   "estInputTokens": 463,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "explain_wait",
+     "minConfidence": 0.75,
+     "severity": "hard",
+     "note": "A multi-step task that will clearly go on: the person should hear that it is under way."
+    }
+   ]
+  },
+  {
+   "id": "need-missing-10s",
+   "file": "requests/need-missing-10s.json",
+   "sha256": "b0d3b1ef61da26071323e5d2d32d665470124e96ffd84dbc0d3106a0922a4dc9",
+   "estInputTokens": 492,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "ask_missing",
+     "minConfidence": 0.75,
+     "severity": "hard",
+     "note": "The early question exists for this: asking now saves the person a wasted wait."
+    }
+   ]
+  },
+  {
+   "id": "need-silence-25s",
+   "file": "requests/need-silence-25s.json",
+   "sha256": "80524a6988cd48cb0f840a2390e24da004d9866e21e4843fb1ee8e4a78104d57",
+   "estInputTokens": 498,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "oneOf": [
+      "stalled",
+      "explain_wait"
+     ],
+     "severity": "hard",
+     "note": "True silence: the person must be told something (either kind posts the same line when the engine cannot write)."
+    },
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "stalled",
+     "minConfidence": 0.75,
+     "severity": "soft",
+     "note": "The kind that names the situation."
+    }
+   ]
+  },
+  {
+   "id": "need-reasoning-70s",
+   "file": "requests/need-reasoning-70s.json",
+   "sha256": "2fc7b034196c5fd2502b16ef30405aebb244a97b607160095b54f14dc981947e",
+   "estInputTokens": 499,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "oneOf": [
+      "explain_wait",
+      "stalled"
+     ],
+     "severity": "hard",
+     "note": "Seventy seconds without a word: the person must be told something, whichever kind."
+    },
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "explain_wait",
+     "minConfidence": 0.75,
+     "severity": "soft",
+     "note": "Reasoning is known to be in progress, so this is a long wait rather than a stall."
+    }
+   ]
+  },
+  {
+   "id": "need-just-posted-8s",
+   "file": "requests/need-just-posted-8s.json",
+   "sha256": "319f35ec1f19a005c28d0ab57edc96d5453a68f099f56e666d4dc4ab18ed1601",
+   "estInputTokens": 457,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "none",
+     "severity": "soft",
+     "note": "Eight seconds after speaking, a progress note is noise."
+    }
+   ]
+  },
+  {
+   "id": "pointer-owner-elsewhere",
+   "file": "requests/pointer-owner-elsewhere.json",
+   "sha256": "e343ae181c742dbb5b09f3f7d22476894c743eb36abef728c8e80d107ebeb599",
+   "estInputTokens": 524,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "pointer",
+     "minConfidence": 0.75,
+     "severity": "hard",
+     "note": "The pointer exists for this: nothing is moved, so the message is the only way the owner learns of it."
+    }
+   ]
+  },
+  {
+   "id": "pointer-requester-present",
+   "file": "requests/pointer-requester-present.json",
+   "sha256": "186ee6980b77cc86a96fb838385ca0aae73531ad3d957cb95c88f1eb27f9f52d",
+   "estInputTokens": 528,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "pointer",
+     "minConfidence": 0.75,
+     "severity": "hard",
+     "note": "The requester is waiting right here and nothing was moved into their view."
+    }
+   ]
+  },
+  {
+   "id": "pointer-in-view",
+   "file": "requests/pointer-in-view.json",
+   "sha256": "198bea3118e6f6ce7a7431a33f2228425eb497aedaee2578e3c0d36bbdcab462",
+   "estInputTokens": 529,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "none",
+     "severity": "soft",
+     "note": "It is in front of them: a message telling them where it is adds nothing."
+    }
+   ]
+  },
+  {
+   "id": "pointer-nobody-waiting",
+   "file": "requests/pointer-nobody-waiting.json",
+   "sha256": "2c685af3b62a82c18060031ab7bf42912e90cb752521e8fbaaaea5dc72f5e80a",
+   "estInputTokens": 504,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "none",
+     "severity": "soft",
+     "note": "Nobody is there to read it."
+    }
+   ]
+  },
+  {
+   "id": "pointer-new-run",
+   "file": "requests/pointer-new-run.json",
+   "sha256": "226935957f72727195f5d2a685bae9550f151c1207c4bd4c024d065efe3cd5cc",
+   "estInputTokens": 528,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "pointer",
+     "minConfidence": 0.75,
+     "severity": "soft",
+     "note": "They are here and writing; telling them now costs one line."
+    }
+   ]
+  },
+  {
+   "id": "pointer-held-3min",
+   "file": "requests/pointer-held-3min.json",
+   "sha256": "017079640d40e7a678f12184f0ba670f18d782d6b2836fde41e499fdd89d046c",
+   "estInputTokens": 519,
+   "expect": [
+    {
+     "name": "message__need",
+     "kind": "choice",
+     "equals": "pointer",
+     "minConfidence": 0.75,
+     "severity": "soft",
+     "note": "It is the first chance to tell them, and three minutes is recent."
+    }
+   ]
+  }
+ ]
+}

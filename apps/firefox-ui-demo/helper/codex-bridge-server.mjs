@@ -49,6 +49,7 @@ import { createBoardPresentationHttpHandler } from './egdesk-board-presentation-
 import { briefingDeps } from './egdesk-briefing-engine.mjs'
 import { createWorkPlacement, createWorkPlacementHttpHandler } from './egdesk-work-placement.mjs'
 import { createPresenceMirror, createPresenceMirrorHttpHandler } from './egdesk-presence-mirror.mjs'
+import { createWindowWatch } from './egdesk-heartbeat.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 import { MemoryEvidenceStore } from './egdesk-memory-evidence.mjs'
 import { createMemoryEvidenceHttpHandler } from './egdesk-memory-http.mjs'
@@ -565,6 +566,9 @@ const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credent
 // canvas enumerated. Off unless EGDESK_WORK_PLACEMENT=advisory (and the Decisions mode is advisory or on, and the chrome's egdesk.workPlacement is "advisory"); it
 // records what it would choose and changes nothing on the canvas.
 const workPlacement = createWorkPlacement({ client: decisionClient, mode: () => bridgeSettings.decisionContext.mode, enabled: () => process.env.EGDESK_WORK_PLACEMENT === 'advisory', calibrationLog: decisionCalibrationLog })
+// The window's event streams (/events): when the last one has been gone for 10 s, nobody can read a message, so idle live sessions end
+// (a working run keeps its heartbeat). A single conversation that is closed is told by the surface: POST /chat/session/close.
+const windowWatch = createWindowWatch({ onGone: () => chat.closeIdleSessions() })
 const handleWorkPlacementHttp = createWorkPlacementHttpHandler({ placement: workPlacement, heartbeatFor: key => chat.heartbeatFor(key), port: BRIDGE_PORT })
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
 const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
@@ -1060,9 +1064,9 @@ const bridgeServer = createServer(async (req, res) => {
     let browserTransportId = null
     const client = new BoundedSseClient(res, {
       chatProtocol: url.searchParams.get('chatProtocol') === '2' ? 2 : 1,
-      onClose: () => { clients.delete(client); if (browserTransportId) browserTransport.closeClient(browserTransportId) },
+      onClose: () => { clients.delete(client); windowWatch.left(clients.size); if (browserTransportId) browserTransport.closeClient(browserTransportId) },
     })
-    clients.add(client)
+    clients.add(client); windowWatch.arrived()
     if (client.chatProtocol === 2) browserTransportId = browserTransport.registerClient(client)
     client.send(`retry: 1000\nevent: ready\ndata: ${JSON.stringify({ ok: true, streamId: chat.streamId, seq: chat.seq, resyncRequired: true, ...(browserTransportId ? { browserTransportId } : {}) })}\n\n`)
     return
