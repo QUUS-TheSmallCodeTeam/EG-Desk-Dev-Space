@@ -124,7 +124,7 @@
                     "body": {
                       "type": "string",
                       "minLength": 1,
-                      "maxLength": 4000
+                      "maxLength": 8000
                     },
                     "time": {
                       "enum": [
@@ -366,6 +366,16 @@
                         },
                         "noDuplicates": {
                           "const": true
+                        },
+                        "minKeyChars": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 200000
+                        },
+                        "merged": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 12
                         }
                       }
                     },
