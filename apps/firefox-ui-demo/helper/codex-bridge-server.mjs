@@ -36,6 +36,7 @@ import { openDeskStore } from './egdesk-desk-store.mjs'
 import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
 import { createDecisionBudget, createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
+import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { createBoardPresentationHttpHandler } from './egdesk-board-presentation-http.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
@@ -223,9 +224,14 @@ const bridgeSettings = openBridgeSettings({ dataDir: path.join(dataDir, 'setting
 // Decision model (DECISION_MODEL_CONTEXT_SETUP.md): the OpenAI key lives in its
 // own 0600 file in the same private settings directory (never in .egdesk
 // exports); the mode is the bridge setting decisionContext ('off' unless chosen).
-// No local monthly cap until the owner picks one (§5.4). Never throws.
+// No local monthly cap until the owner picks one (§5.4). Never throws. The
+// month's input-token tally (and a cap, once chosen) is kept in its own 0600
+// file beside the key so a restart does not reset the local guard; the key is
+// never written there.
 const decisionCredentials = openDecisionCredentialStore({ dataDir: path.join(dataDir, 'settings') })
-const decisionBudget = createDecisionBudget({})
+const decisionBudgetStore = openDecisionBudgetStore({ dataDir: path.join(dataDir, 'settings') })
+const decisionBudget = createDecisionBudget({ monthlyInputTokenCap: decisionBudgetStore.state?.cap ?? null, initial: decisionBudgetStore.state,
+  onChange: state => { decisionBudgetStore.save(state) } })
 const recipientForDecisionKey = (key, endpoint, model) => decisionTopicRecipient(key, decisionCredentials.savedAt(), endpoint, model)
 const decisionClient = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget, recipientForKey: recipientForDecisionKey })
 const recipientForCodexDecisions = ({ engineId, engineProfileId, ownerKey }) => {

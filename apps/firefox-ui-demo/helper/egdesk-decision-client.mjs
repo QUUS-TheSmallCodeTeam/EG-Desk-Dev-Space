@@ -388,18 +388,26 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
  * organization's credit balance without an admin key, so it counts the input
  * tokens it spent. A cap of null means no local cap.
  * budget.canSpend() / budget.record(usage) / budget.snapshot() → { month, inputTokens, cap }
+ * budget.setCap(positiveInteger | null): the owner's choice; null removes the cap.
+ * onChange(state) runs after every change of the tally or cap so a store can keep
+ * it across restarts (egdesk-decision-budget-store.mjs); its failure never reaches a caller.
  */
-export function createDecisionBudget({ monthlyInputTokenCap = null, now = Date.now, initial = null } = {}) {
+export function createDecisionBudget({ monthlyInputTokenCap = null, now = Date.now, initial = null, onChange = null } = {}) {
   if (monthlyInputTokenCap !== null && !(Number.isSafeInteger(monthlyInputTokenCap) && monthlyInputTokenCap > 0)) {
     throw new TypeError('monthlyInputTokenCap must be a positive integer or null')
   }
   const monthOf = time => { const date = new Date(time); return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}` }
   let month = record(initial) && typeof initial.month === 'string' ? initial.month : monthOf(now())
   let inputTokens = record(initial) ? count(initial.inputTokens) : 0
-  const roll = () => { const current = monthOf(now()); if (current !== month) { month = current; inputTokens = 0 } }
+  const changed = () => { if (typeof onChange === 'function') { try { onChange({ month, inputTokens, cap: monthlyInputTokenCap }) } catch {} } }
+  const roll = () => { const current = monthOf(now()); if (current !== month) { month = current; inputTokens = 0; return true } return false }
   return Object.freeze({
     canSpend() { roll(); return monthlyInputTokenCap === null || inputTokens < monthlyInputTokenCap },
-    record(usage) { roll(); inputTokens += count(usage?.inputTokens) },
+    record(usage) { const rolled = roll(); const spent = count(usage?.inputTokens); inputTokens += spent; if (rolled || spent > 0) changed() },
     snapshot() { roll(); return Object.freeze({ month, inputTokens, cap: monthlyInputTokenCap }) },
+    setCap(cap) {
+      if (cap !== null && !(Number.isSafeInteger(cap) && cap > 0)) throw new TypeError('cap must be a positive integer or null')
+      roll(); monthlyInputTokenCap = cap; changed()
+    },
   })
 }
