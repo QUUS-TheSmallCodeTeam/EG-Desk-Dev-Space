@@ -302,3 +302,27 @@ test('C10 flag off by default: the bridge-style config with no flag never fetche
   assert.deepEqual(w.decisions, []); assert.equal(x.log.length, 0); assert.deepEqual(w.acts, [])
   assert.equal(allNative(w), allNative(baseline))
 })
+
+// L3/C11: with the heartbeat flag on, the pre-turn task loop feeds the conversation's heartbeat read-only facts. Everything the
+// entry does and everything the native engine receives is identical to the run without the flag.
+test('C11 on + heartbeat: the task loop feeds step count and waiting state to the heartbeat; native input and browser actions are unchanged', { timeout: 20000 }, async () => {
+  const base = build({ entryMode: 'on' }); await base.send(MSG)
+  const w = build({ entryMode: 'on' })
+  w.h.chat.decisionContext.conversationFlow = { mode: () => 'on' }
+  const first = await w.send(MSG)
+  try {
+    const sameTask = text => text.replace(/bt_[0-9a-f]{12}/g, 'bt') // the task id is random per task
+    assert.equal(sameTask(native(w)), sameTask(native(base)), 'identical native bytes with the heartbeat on (apart from the random task id)')
+    assert.deepEqual(w.decisions, base.decisions); assert.deepEqual(w.acts, base.acts); assert.deepEqual(w.uiKinds.map(k => k.kind), base.uiKinds.map(k => k.kind))
+    const hb = w.h.chat.heartbeatFor('selected-chat')
+    assert.equal(hb.state, 'running')
+    const facts = hb.facts()
+    assert.equal(facts.phase, 'waiting_user')
+    assert.deepEqual(facts.sources.browser_task, { active: true, phase: 'waiting_user', waitingOnUser: true, stepsDone: 1, stepBudgetLeft: 23, task: 'need_context' })
+    assert.doesNotMatch(JSON.stringify(facts), /세금|portal|example|사업자/)
+    assert.equal(base.h.chat.heartbeatFor('selected-chat'), null, 'no heartbeat without the flag')
+    w.h.finish(first)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.deepEqual([hb.state, hb.stopReason, w.h.chat.heartbeats.size], ['stopped', 'run_end', 0])
+  } finally { w.h.chat.heartbeats.stopAll('restart') }
+})

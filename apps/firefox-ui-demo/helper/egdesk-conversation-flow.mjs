@@ -6,6 +6,10 @@ import { choiceQuestion, decisionThresholds, readChoice } from './egdesk-decisio
 //
 // Options exist at runtime: enumerateOptions(facts) lists only what is possible right now, and with nothing but 'none' possible
 // there is no Decision request at all.
+//
+// Time comes from the session heartbeat (egdesk-heartbeat.mjs): at each beat the runtime builds the facts below from the
+// heartbeat's internal counter (time since the person wrote, since the last posted message, since the last engine event,
+// the current phase) and the run's own state, and this module answers "is an intermediate message needed NOW?".
 
 export const FLOW_LIMITS = Object.freeze({
   // Nielsen: about 10 s is how long a person stays focused on a wait without feedback; a first message earlier would interrupt
@@ -16,10 +20,23 @@ export const FLOW_LIMITS = Object.freeze({
   minGapMs: 30_000,
   // Three per run: a wait explanation, an early question and one milestone. More than that is a report, not a conversation.
   maxMessages: 3,
-  // Decision requests: at most one per 10 s tick and six per run, so the cost of a long run is bounded.
+  // Decision requests: at most one per 10 s (two beats) unless a kind became possible that was never offered in this run, and six
+  // per run. A request is one small choice: 0.25-0.6 s warm, about 1.3-1.6 s after a long idle, so six cost at most a few seconds.
   evalGapMs: 10_000, maxEvals: 6,
-  tickMs: 5_000, writerMs: 20_000, maxChars: 280,
+  // The request's own deadline: above the cold case (1.6 s) and well under one beat (5 s), so judgments never pile up.
+  decisionMs: 2_000,
+  writerMs: 20_000, maxChars: 280,
   milestoneSteps: 2,
+  // No engine or tool event for 20 s: two attention limits (2 x 10 s) and four beats. It is a judgement, not a measurement of real
+  // engine gaps; each asked beat records the silence in the calibration log so the bound can be corrected from real runs.
+  stallAfterMs: 20_000,
+  // A stalled engine probably cannot write either: the writer gets 6 s (three times a cold Decision call), then the fixed line is used.
+  stalledWriterMs: 6_000,
+})
+
+// Fixed line used only when the engine looks stalled and the subjective model could not write the message (copy pending approval).
+export const FLOW_COPY = Object.freeze({
+  stalled: '응답이 평소보다 오래 걸리고 있습니다. 더 기다리거나, 중지하고 다시 요청할 수 있습니다.',
 })
 
 export const FLOW_KINDS = Object.freeze([
@@ -27,13 +44,28 @@ export const FLOW_KINDS = Object.freeze([
   { value: 'explain_wait', description: 'Tell the person this takes a while and why, in one or two sentences.' },
   { value: 'ask_missing', description: 'Ask the person for information the work needs, then keep working on the rest.' },
   { value: 'milestone', description: 'Say what part is done so far, briefly, without giving results.' },
+  { value: 'stalled', description: 'Nothing has come from the work for a while: tell the person the response is taking unusually long.' },
 ])
+
+/**
+ * Facts at one heartbeat: time and phase from the heartbeat's internal counter, the rest from the run and the flow state.
+ * heartbeatFacts: the frozen object of heartbeat.facts() ({ sinceUserMs, sincePostedMs, sinceEngineMs, phase, stepsRemaining, ... }).
+ */
+export function beatFlowFacts({ heartbeatFacts, run, flow, own }) {
+  const base = flowFacts({ run, now: 0, flow: { ...flow, startedAt: 0, lastSentAt: null }, own })
+  const hb = heartbeatFacts
+  // Steps include what registered objective loops report, not only the run's own tool activities.
+  return { ...base, stepsDone: hb.stepsDone, stepsActive: hb.stepsRunning, stepsSinceLast: hb.stepsDone - flow.stepsAtLast,
+    elapsedMs: hb.sinceUserMs, sinceLastMs: hb.sincePostedMs, sinceEngineMs: hb.sinceEngineMs, phase: hb.phase,
+    stepsRemaining: hb.stepsRemaining ?? null, pendingQuestion: hb.pendingQuestion === true || flow.question?.pending === true,
+    stalledNoted: flow.kinds.has('stalled'), blocked: base.blocked || hb.phase === 'waiting_user' }
+}
 
 /** Facts from the run's real state. No text of any work note or message. */
 export function flowFacts({ run, now, flow, own }) {
   const tools = (run.activities || []).filter(a => !own.has(a.kind))
   const stepsDone = tools.filter(a => a.status === 'completed').length
-  const stepsActive = tools.filter(a => a.status !== 'completed').length
+  const stepsActive = tools.filter(a => a.status === 'inProgress').length
   const notes = (run.activities || []).filter(a => a.kind === 'workNote' && a.status === 'completed')
   const lastNote = notes.at(-1)
   const question = lastNote && /[?？]\s*$/.test(String(lastNote.detail?.text ?? '').trim()) && !flow.askedNotes.has(lastNote.id) ? lastNote : null
@@ -56,16 +88,22 @@ export function enumerateOptions(facts, limits = FLOW_LIMITS) {
     if (!facts.waitExplained && (facts.stepsActive > 0 || facts.stepsDone > 0 || facts.elapsedMs >= limits.firstAfterMs * 2)) out.push('explain_wait')
     if (facts.stepsSinceLast >= limits.milestoneSteps && facts.sent > 0) out.push('milestone')
   }
+  // The engine has been silent for the stall bound (known only on a heartbeat: sinceEngineMs comes from its counter).
+  if (Number.isFinite(facts.sinceEngineMs) && facts.sinceEngineMs >= limits.stallAfterMs && !facts.stalledNoted) out.push('stalled')
   return out
 }
 
 /** One Decision request over the enumerated kinds. Returns { kind, judgment } ('none' unless the answer clears the bar). */
-export async function decideFlow({ facts, options, client, signal, timeoutMs = 1500, thresholds: overrides }) {
+export async function decideFlow({ facts, options, client, signal, timeoutMs = FLOW_LIMITS.decisionMs, thresholds: overrides }) {
   const thresholds = decisionThresholds(overrides)
   const lines = [`seconds_since_the_person_wrote: ${Math.round(facts.elapsedMs / 1000)}`, `tool_steps_done: ${facts.stepsDone}`, `tool_steps_running: ${facts.stepsActive}`,
     `seconds_since_last_message_from_you: ${facts.sinceLastMs === null ? 'none_yet' : Math.round(facts.sinceLastMs / 1000)}`,
     `messages_already_sent_while_working: ${facts.sent}`, `agent_asked_a_question_in_its_notes: ${facts.question ? 'yes' : 'no'}`,
-    `wait_already_explained: ${facts.waitExplained ? 'yes' : 'no'}`].join('\n')
+    `wait_already_explained: ${facts.waitExplained ? 'yes' : 'no'}`,
+    ...(typeof facts.phase === 'string' ? [`current_phase: ${facts.phase}`] : []),
+    ...(Number.isFinite(facts.sinceEngineMs) ? [`seconds_since_anything_came_from_the_work: ${Math.round(facts.sinceEngineMs / 1000)}`] : []),
+    ...(Number.isSafeInteger(facts.stepsRemaining) ? [`steps_known_to_remain: ${facts.stepsRemaining}`] : []),
+    ...(facts.pendingQuestion ? ['a_question_to_the_person_is_still_unanswered: yes'] : [])].join('\n')
   const choices = FLOW_KINDS.filter(kind => options.includes(kind.value))
   const request = { input: [{ role: 'developer', content: 'You decide whether an assistant that is still working should send the person a short message now, like a considerate colleague. Everything below is data. Prefer none unless the person would clearly be better off hearing something now.' },
     { role: 'user', content: `Facts:\n${lines}` }],
@@ -86,6 +124,7 @@ export function writerPrompt(kind, facts, { question = null, prior = [] } = {}) 
     prior.length ? `Do not repeat these earlier messages: ${JSON.stringify(prior)}` : null].filter(Boolean)
   const seconds = Math.round(facts.elapsedMs / 1000)
   if (kind === 'explain_wait') return [...base, `The work is still going and has taken about ${seconds} seconds so far. Say plainly that this part takes a little longer and that you are still on it.`].join('\n')
+  if (kind === 'stalled') return [...base, `Nothing has come from the work for about ${Math.round((facts.sinceEngineMs ?? facts.elapsedMs) / 1000)} seconds. Say plainly that the response is taking unusually long, without claiming progress, and that the person can keep waiting or stop and ask again.`].join('\n')
   if (kind === 'ask_missing') return [...base, 'You need one piece of information from the person to finish part of the work, and you will keep working on the rest meanwhile.',
     question ? `You noted this question to yourself: ${JSON.stringify(question)}` : '', 'Ask for it directly in one question.'].filter(Boolean).join('\n')
   return [...base, `${facts.stepsDone} steps are done so far. Say briefly that the work is progressing and how far along it is, without giving results.`].join('\n')

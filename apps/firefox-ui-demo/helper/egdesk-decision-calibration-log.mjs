@@ -32,6 +32,20 @@ const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed'
 // Turn memory (advisory): where in the session the turn was, what the fetch did, and how long each stage took.
 // Draft check (advisory): what the check would have done to the posted answer, and what it would fall back to without a revision.
 const CHECKS = new Set(['would_pass', 'would_revise', 'would_trim', 'would_ask'])
+// Heartbeat (conversation flow): what was chosen at an asked beat, who wrote a posted message, and the beat's facts as
+// whole seconds and small counts. Durations only, never a clock time.
+const FLOW_KINDS = new Set(['none', 'explain_wait', 'ask_missing', 'milestone', 'stalled'])
+const POSTED = new Set(['none', 'model', 'fallback'])
+const BEAT_PHASES = new Set(['thinking', 'tool_running', 'waiting_user', 'objective_step'])
+const seconds = value => (Number.isFinite(value) && value >= 0 ? Math.min(3600, Math.round(value / 1000)) : null)
+function beat(raw) {
+  if (!record(raw)) return null
+  const out = {}
+  put(out, 'n', count(raw.n, 9999)); put(out, 'phase', word(BEAT_PHASES, raw.phase))
+  put(out, 'sinceUserS', seconds(raw.sinceUserMs)); put(out, 'sincePostedS', seconds(raw.sincePostedMs)); put(out, 'sinceEngineS', seconds(raw.sinceEngineMs))
+  put(out, 'stepsDone', count(raw.stepsDone, 999)); put(out, 'stepsRunning', count(raw.stepsRunning, 99)); put(out, 'decisionMs', ms(raw.decisionMs))
+  return Object.keys(out).length ? out : null
+}
 const POSITIONS = new Set(['first', 'mid'])
 const MEMORY = new Set(['ran', 'skipped', 'partial', 'fallback', 'empty'])
 const ms = value => (Number.isFinite(value) && value >= 0 ? Math.min(120000, Math.round(value / 10) * 10) : null)
@@ -116,6 +130,7 @@ export function normalizeEntry(raw, now = Date.now()) {
     for (const key of ['items', 'opaque', 'sentences', 'terms']) put(counts, key, count(raw.evidence[key], 99))
     if (Object.keys(counts).length) entry.evidence = counts
   }
+  put(entry, 'flow', word(FLOW_KINDS, raw.flow)); put(entry, 'posted', word(POSTED, raw.posted)); put(entry, 'beat', beat(raw.beat))
   put(entry, 'position', word(POSITIONS, raw.position)); put(entry, 'memory', word(MEMORY, raw.memory)); put(entry, 'timing', timing(raw.timing))
   put(entry, 'fallback', word(FALLBACK, raw.fallback)); put(entry, 'attached', typeof raw.attached === 'boolean' ? raw.attached : null)
   return entry

@@ -42,7 +42,7 @@ function world(t, { flags = { held: true, flow: true }, candidates = [], writer 
     return judge(request)
   } }
   const chat = new CodexChatRuntime({
-    store, requireStore: true, getOwnerKey: () => 'test-account', now: () => clock,
+    store, requireStore: true, getOwnerKey: () => 'test-account', now: () => clock, monotonicNow: () => clock, // the heartbeat's counter follows the virtual clock
     setTimer: (fn, ms) => { const timer = { id: ++timerId, fn, at: clock + ms }; timers.push(timer); return timer },
     clearTimer: timer => { const i = timers.indexOf(timer); if (i >= 0) timers.splice(i, 1) },
     getBoardPeerContract: () => (steerOk ? 'c'.repeat(64) : null),
