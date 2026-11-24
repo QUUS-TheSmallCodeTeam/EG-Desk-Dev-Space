@@ -7,7 +7,7 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import * as BriefingHost from '../overlay/resources/EGDeskBriefingHost.sys.mjs'
 import { validBriefing } from '../overlay/resources/EGDeskBriefingState.sys.mjs'
-import { BRIEFING_ENGINE_LIMITS, briefingDeps, componentPrompt, createBriefingEngine, designPrompt, parseEngineJson, redesignPrompt, shapeDesign } from './egdesk-briefing-engine.mjs'
+import { BRIEFING_CHROME_WAIT_MS, BRIEFING_ENGINE_LIMITS, BRIEFING_FILL_EFFORT, briefingDeps, componentPrompt, createBriefingEngine, designPrompt, parseEngineJson, redesignPrompt, shapeDesign } from './egdesk-briefing-engine.mjs'
 import { resolveDesign, enumerateBriefingFacts } from './egdesk-briefing-flow.mjs'
 import { REPORT, design, designWithNew, reuseScript, scene, harness } from './egdesk-briefing-publish.support.mjs'
 import { rig } from '../scripts/egdesk-briefing-rig.support.mjs'
@@ -230,8 +230,8 @@ test('bridge wiring: the server mounts briefingDeps behind EGDESK_BRIEFING_FLOW;
   const server = readFileSync(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   assert.match(server, /briefing: briefingDeps\(\{ chat, contexts, enabled: process\.env\.EGDESK_BRIEFING_FLOW === 'on', order: process\.env\.EGDESK_BRIEFING_ORDER === 'design-first' \? 'design-first' : 'skeleton',\n[^\n]*\n    fillCheck: process\.env\.EGDESK_BRIEFING_FILL_CHECK === 'facts' \? 'facts' : 'all',\n[^\n]*\n    coverage: process\.env\.EGDESK_BRIEFING_COVERAGE === 'board' \? 'board' : 'facts',\n[^\n]*\n    outputSchema: process\.env\.EGDESK_BRIEFING_OUTPUT_SCHEMA === 'on' \? 'on' : 'off' \}\)/)
   assert.equal(briefingDeps({ chat: {}, contexts: {} }).order, 'skeleton', 'the default order is skeleton-first'); assert.equal(briefingDeps({ chat: {}, contexts: {}, order: 'design-first' }).order, 'design-first')
-  assert.match(surface, /timeoutMs: flowMode === 'on' \? 150000 : 20000/)
-  assert.ok(BRIEFING_ENGINE_LIMITS.totalMs + 5 * 4000 < 150000, 'private turns plus the judgments fit inside the chrome wait')
+  assert.match(surface, new RegExp(`timeoutMs: flowMode === 'on' \\? ${BRIEFING_CHROME_WAIT_MS} : 20000`))
+  assert.ok(BRIEFING_ENGINE_LIMITS.totalMs + 5 * 4000 < BRIEFING_CHROME_WAIT_MS, 'private turns plus the judgments fit inside the chrome wait'); assert.ok(BRIEFING_CHROME_WAIT_MS < 300_000, 'under Firefox\'s default response timeout of 300 s (assumed default)')
 })
 
 test('c32: the briefing\'s private turns ask chat.internalText with preamble:false (a fresh ephemeral thread must see the prompt alone), with and without the output schema', async () => {

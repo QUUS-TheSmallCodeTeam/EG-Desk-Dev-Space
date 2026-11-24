@@ -4411,7 +4411,7 @@
       if (!body) return;
       briefingObserved.add(key);
       if (briefingObserved.size > 200) briefingObserved.delete(briefingObserved.values().next().value);
-      void deskStoreRequest('POST', '/decision/briefing-observe', body, { timeoutMs: flowMode === 'on' ? 150000 : 20000 }).then(reply => offerBriefingRetrieval(reply?.body)).catch(() => {});
+      void deskStoreRequest('POST', '/decision/briefing-observe', body, { timeoutMs: flowMode === 'on' ? 290000 : 20000 }).then(reply => offerBriefingRetrieval(reply?.body)).catch(() => {});
     } catch { /* observing never affects the answer or the canvas */ }
   }
 

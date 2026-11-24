@@ -27,10 +27,11 @@ const block = (text, label, next) => JSON.parse(new RegExp(`${label}:\\n(.*)\\n\
 function fillFrom(prompt) {
   const guide = block(prompt, 'Design guide \\(decided; do not change it\\)', 'Materials'), materials = block(prompt, 'Materials', 'Rules')
   const line = (alias, max = 90) => String(materials.find(m => m.alias === alias)?.text ?? '').slice(0, max)
-  const rowFor = (fields, alias) => Object.fromEntries(fields.map(f => [f.name, f.type === 'material' ? alias : line(alias, f.max ?? 40) || f.name]))
+  // c35: a model that follows the compact request writes null for a field marked "copy" (the code copies the material's own words) and no fallback sentence
+  const rowFor = (fields, alias) => Object.fromEntries(fields.map(f => [f.name, f.type === 'material' ? alias : f.copy === true ? null : line(alias, f.max ?? 40) || f.name]))
   const slot = (s, item) => (s.type === 'text' ? line(item.materials[0], s.max ?? 60) || s.name : s.type === 'material' ? item.materials[s.name === 'right' ? 1 : 0] ?? item.materials[0]
     : item.materials.slice(0, s.max ?? 6).map(alias => rowFor(s.of, alias)))
-  return { title: '진행 정리', unfillable: [], items: Object.fromEntries(guide.items.map(i => [i.id, { text: line(i.materials[0], 200) || i.id, fallback: '카드를 열어 보세요.', slots: Object.fromEntries(i.slots.map(s => [s.name, slot(s, i)])) }])) }
+  return { title: '진행 정리', unfillable: [], items: Object.fromEntries(guide.items.map(i => [i.id, { text: line(i.materials[0], 80) || i.id, ...(i.step?.some(st => st.name === 'fallback') ? { fallback: '카드를 열어 보세요.' } : {}), slots: Object.fromEntries(i.slots.map(s => [s.name, slot(s, i)])) }])) }
 }
 const FILL_PLAN = (mode = 'json') => ({ steps: [], finalFor: text => { const fill = JSON.stringify(fillFrom(text)); return mode === 'fenced' ? `Here you go:\n\`\`\`json\n${fill}\n\`\`\`` : mode === 'prose' ? 'I could not make a board of this.' : fill } })
 const fakeFor = mode => ({ turns: [
