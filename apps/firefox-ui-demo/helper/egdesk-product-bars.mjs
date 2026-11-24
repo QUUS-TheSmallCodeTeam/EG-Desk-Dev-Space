@@ -9,7 +9,7 @@ import { DEFAULT_DECISION_THRESHOLDS as T } from './egdesk-decision-questions.mj
 import { DRAFT_CHECK_THRESHOLDS } from './egdesk-draft-check.mjs'
 import { BEAT_PREDICATE_YES } from './egdesk-heartbeat-judge.mjs'
 import { CONFIRM_BARS } from './egdesk-record-confirmation.mjs'
-import { SPEECH_PREDICATE_BARS, SPEECH_THRESHOLDS } from './egdesk-speech-grounding.mjs'
+import { SPEECH_PREDICATE_BARS, SPEECH_SPLIT_BARS, SPEECH_THRESHOLDS } from './egdesk-speech-grounding.mjs'
 import { RISK_PREDICATE_NO } from './egdesk-terminal-command-gate.mjs'
 import { NO as TERNARY_NO, YES as TERNARY_YES } from './egdesk-wiki-reconstruction.mjs'
 import { PLACEMENT_PREDICATE_YES } from './egdesk-work-placement.mjs'
@@ -46,6 +46,8 @@ export const PRODUCT_BARS = Object.freeze([
   [/^write-target-about-v1$|^utterance-threshold-v1\//, /^tw_status$/, choice(T.choice, T.margin, 'egdesk-turn-memory.mjs judgeWriteAbout readChoice .75 / .2')],
   [/^(heartbeat-c14|l4-work-placement)$/, /.*/, choice(T.choice, T.margin, 'retired c14 designs: DEFAULT_DECISION_THRESHOLDS choice / margin (assumed)')],
   [/^l4-briefing-skeleton$/, /^(place|part_P#|next)$/, choice(T.choice, T.margin, 'retired c14 skeleton: choice .75 / margin .2')],
+  [/^action-relevance-v\d+$/, /^rel_#$/, single(T.relevant, 'egdesk-context-setup.mjs (via egdesk-decision-questions.mjs relevant): a candidate is attached iff p >= relevant (L7 c20 action wording)')],
+  [/^axis-split-v\d+/, /^speechs_/, three(SPEECH_SPLIT_BARS.yes, SPEECH_SPLIT_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_SPLIT_BARS (split-isolated design, L7 c20): yes >= yes, no <= no, between undecided')],
   // legacy (c8-era, 11/22-11/24) families
   [/-11(22|23|24)$/, /^speechp_/, three(SPEECH_PREDICATE_BARS.yes, SPEECH_PREDICATE_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_PREDICATE_BARS')],
   [/-11(22|23|24)$/, /^(tn_|tw_link|tw_about|pg_|op_)/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO')],
