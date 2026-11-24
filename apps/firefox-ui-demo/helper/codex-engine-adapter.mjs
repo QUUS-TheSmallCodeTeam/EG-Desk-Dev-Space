@@ -149,6 +149,7 @@ export function createCodexEngineAdapter({ request, respond, getOwnerKey = () =>
       return typeof proof === 'string' && /^[a-f0-9]{64}$/.test(proof) ? proof : null
     } catch { return null }
   }
+  const deleteAllowed = id => (shared(id) ? getThreadDelete(id) === true : profiles?.capabilities?.(id)?.threadDelete === true)
   const summary = () => describe ? describe() : describeCodexEngine({ ready: ready(), models: models() })
   return {
     id: CODEX_ENGINE_ID,
@@ -173,10 +174,14 @@ export function createCodexEngineAdapter({ request, respond, getOwnerKey = () =>
     },
     interruptTurn: (threadId, turnId, id) => call('turn/interrupt', { threadId, turnId }, id),
     // thread/delete only where the connected binary's generated schema has it (getThreadDelete, from the schema probe); else refused.
-    threadDeleteSupported: id => { try { return ready(id) && getThreadDelete(id) === true } catch { return false } },
+    // L1 c22: the shared server answers from the shared binary's probe; a profile's server from ITS OWN binary's probe (profiles.capabilities), so the
+    // delete goes to the app-server that owns the thread and only when that binary has thread/delete.
+    threadDeleteSupported: id => { try { return ready(id) && deleteAllowed(id) } catch { return false } },
+    // What the app-server of this slot can do per its own binary: { version, dynamicTools, ephemeral, turnSteer, threadDelete }, or null (shared: the bridge's own probe)
+    slotCapabilities: id => { try { return shared(id) ? null : profiles?.capabilities?.(id) ?? null } catch { return null } },
     deleteThread(threadId, id) {
       let supported = false
-      try { supported = ready(id) && getThreadDelete(id) === true } catch { supported = false }
+      try { supported = ready(id) && deleteAllowed(id) } catch { supported = false }
       if (!supported) throw chatError('THREAD_DELETE_UNSUPPORTED', 'This Codex cannot delete a thread', 409)
       return call('thread/delete', { threadId }, id)
     },

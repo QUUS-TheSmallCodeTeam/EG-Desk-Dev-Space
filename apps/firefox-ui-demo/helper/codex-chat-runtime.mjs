@@ -1020,7 +1020,21 @@ export class CodexChatRuntime {
   }
 
   engineOwnerHash(engineId, engineProfileId = null) { return ownerHash(this.engineOwnerKey(engineId, engineProfileId)) }
-  threadEngineProfile(conversationId) { return this.threadEngineProfiles.get(conversationId) || null }
+  threadEngineProfile(conversationId) { return this.threadEngineProfiles.get(conversationId) || this.leftThreadProfile(conversationId) }
+  // L1 c22: a native thread its room left for another account (a switch, EGDESK_ROOM_ACCOUNT) keeps the account it ran on, also after a restart, when
+  // nothing is live for it: its steer, interrupt, late callbacks and delete go to THAT account's app-server. Remembered per thread (negatives too);
+  // switchRoomAccount refreshes it.
+  leftThreadProfile(conversationId) {
+    if (!this.store?.segmentOf || typeof conversationId !== 'string' || !conversationId) return null
+    this.leftThreadSlots ??= new Map()
+    if (!this.leftThreadSlots.has(conversationId)) {
+      let slot = null
+      try { slot = this.store.segmentOf(conversationId)?.engineProfileId ?? null } catch { slot = null }
+      this.leftThreadSlots.set(conversationId, slot)
+      while (this.leftThreadSlots.size > 512) this.leftThreadSlots.delete(this.leftThreadSlots.keys().next().value)
+    }
+    return this.leftThreadSlots.get(conversationId)
+  }
   operationSlot(engineId, engineProfileId) { return engineProfileId && this.slotAdapter(engineId) ? engineProfileId : undefined }
   threadOperationSlot(conversationId) { return this.operationSlot(this.threadEngine(conversationId), this.threadEngineProfile(conversationId)) }
   scopedRequest(slot) { return slot ? (method, params) => this.request(method, params, slot) : this.request }
@@ -1131,7 +1145,7 @@ export class CodexChatRuntime {
     let memoryOwnerKey = null
     try { memoryOwnerKey = this.store.roomMemoryOwnerKey?.(room) ?? (from ? this.engineOwnerKey(engineId, thread.engineProfileId || null) : null) } catch { memoryOwnerKey = null }
     const switched = this.store.switchRoomAccount({ clientThreadId: room, engineProfileId: slot, memoryOwnerKey })
-    if (from) { this.roomSwitches.set(room, { from }); const left = this.threads.get(from); if (left) left.roomSwitchedAway = true }
+    if (from) { this.roomSwitches.set(room, { from }); const left = this.threads.get(from); if (left) left.roomSwitchedAway = true; this.leftThreadSlots?.delete(from) }
     return { status: 'switched', clientThreadId: room, engineProfileId: slot, previous: switched.previous }
   }
   // The room's first native thread on its new account: what belongs to the room and was keyed by the old native thread comes along.
@@ -5366,6 +5380,9 @@ export class CodexChatRuntime {
       const thread = this.store?.getConversation?.(key)
       if (typeof thread?.conversationId === 'string' && thread.conversationId) { native.add(thread.conversationId); storedEngine = thread.engineId ?? null; storedProfile = thread.engineProfileId ?? null }
     } catch { /* not stored */ }
+    // L1 c22: the native threads this room left for another account stay with the account they ran on: each is deleted on its own app-server
+    const leftThreads = new Map()
+    try { for (const seg of this.store?.roomSegments?.(key) ?? []) { native.add(seg.conversationId); leftThreads.set(seg.conversationId, seg) } } catch { /* none */ }
     for (const run of this.runs.values()) if (run?.clientThreadId === key && typeof run.conversationId === 'string' && run.conversationId) native.add(run.conversationId)
     const hb = this.heartbeats.get(key), subject = hb ? this.heartbeatSubjects.get(hb) : null
     if (typeof subject?.conversationId === 'string' && subject.conversationId) native.add(subject.conversationId)
@@ -5403,8 +5420,9 @@ export class CodexChatRuntime {
     // otherwise, or when it fails, the result says that history remains with that engine.
     for (const cid of native) {
       // The engine that holds this thread: the live binding, else the stored one (after a restart nothing is live).
-      const live = this.threadEngines.has(cid), engineId = live ? this.threadEngine(cid) : storedEngine ?? 'codex'
-      const engine = this.engines.get(engineId), slot = live ? this.threadOperationSlot(cid) : this.operationSlot(engineId, storedProfile)
+      const left = leftThreads.get(cid)
+      const live = this.threadEngines.has(cid), engineId = live ? this.threadEngine(cid) : left?.engineId ?? storedEngine ?? 'codex'
+      const engine = this.engines.get(engineId), slot = live ? this.threadOperationSlot(cid) : this.operationSlot(engineId, left ? left.engineProfileId : storedProfile)
       let state = 'remains', reason = 'unsupported'
       try {
         if (typeof engine?.deleteThread === 'function' && engine.threadDeleteSupported?.(slot) === true) {

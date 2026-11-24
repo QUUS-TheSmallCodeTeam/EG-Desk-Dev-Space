@@ -733,7 +733,11 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       const previous = db.prepare('PRAGMA secure_delete').get().secure_delete
       db.exec('PRAGMA secure_delete=ON')
       try {
-        const rows = tx(() => CONVERSATION_TABLES.reduce((n, table) => n + Number(db.prepare(`DELETE FROM ${table} WHERE local_conversation_id=?`).run(id).changes), 0))
+        const rows = tx(() => {
+          const n = CONVERSATION_TABLES.reduce((count, table) => count + Number(db.prepare(`DELETE FROM ${table} WHERE local_conversation_id=?`).run(id).changes), 0)
+          // L1 c22: the room's account segments go with it (the table exists only after a switch)
+          return n + (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='room_account_segments'").get() ? Number(db.prepare('DELETE FROM room_account_segments WHERE local_conversation_id=?').run(id).changes) : 0)
+        })
         try { db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() } catch { /* a reader holds the WAL: it is truncated at the next checkpoint */ }
         return { deleted: true, rows, backups: scrubBackups(filename, key) }
       } finally { db.exec(`PRAGMA secure_delete=${previous ? 'ON' : 'OFF'}`) }
@@ -940,6 +944,22 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
         db.prepare('UPDATE threads SET conversation_id=NULL, engine_profile_id=? WHERE local_conversation_id=?').run(slot, row.local_conversation_id)
         return { clientThreadId: row.client_thread_id, engineProfileId: slot, previous: { conversationId: row.conversation_id ?? null, engineProfileId: row.engine_profile_id ?? null } }
       })
+    },
+    /** L1 c22: the native threads a room LEFT when it changed accounts, with the engine and account each ran on: [{ conversationId, engineId, engineProfileId }]. */
+    roomSegments(clientThreadId) {
+      ensureOpen()
+      const row = requireThread(clientThreadId)
+      if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='room_account_segments'").get()) return []
+      return db.prepare('SELECT conversation_id, engine_id, engine_profile_id FROM room_account_segments WHERE local_conversation_id=? AND conversation_id IS NOT NULL ORDER BY seq').all(row.local_conversation_id)
+        .map(r => ({ conversationId: r.conversation_id, engineId: r.engine_id ?? null, engineProfileId: r.engine_profile_id ?? null }))
+    },
+    /** L1 c22: a native thread some room left for another account -> { clientThreadId, engineId, engineProfileId } (the account it ran on), else null. */
+    segmentOf(conversationId) {
+      ensureOpen()
+      const id = identifier(conversationId, 'conversationId')
+      if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='room_account_segments'").get()) return null
+      const r = db.prepare('SELECT s.engine_id, s.engine_profile_id, t.client_thread_id FROM room_account_segments s JOIN threads t ON t.local_conversation_id=s.local_conversation_id WHERE s.conversation_id=? ORDER BY s.seq LIMIT 1').get(id)
+      return r ? { clientThreadId: r.client_thread_id, engineId: r.engine_id ?? null, engineProfileId: r.engine_profile_id ?? null } : null
     },
     /** The account a room's EG-Desk memory was written under, when the room changed accounts; else null (the current one applies). */
     roomMemoryOwnerKey(clientThreadId) {

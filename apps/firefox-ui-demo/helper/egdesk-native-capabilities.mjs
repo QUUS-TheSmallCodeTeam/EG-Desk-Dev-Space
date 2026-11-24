@@ -1,4 +1,4 @@
-import { accessSync, constants, realpathSync } from 'node:fs'
+import { accessSync, constants, realpathSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
@@ -203,5 +203,35 @@ export function inspectNativeCapabilities({ executable, env = process.env, cwd =
     binaryFingerprint: contextContract ? binaryFingerprint : null,
     schemaFingerprint: contextContract ? proof.schemaFingerprint : null,
     contractFingerprint,
+  }
+}
+
+/**
+ * What one Codex binary can do, as the generated schema of THAT binary says (L1 c22): dynamicTools (the Context contract), ephemeral (thread/start's
+ * `ephemeral`, part of the same contract), turnSteer (the verified peer-input contract of turn/steer) and threadDelete. Each binary is probed on its
+ * own (a profile's app-server may run another build than the shared one) and remembered by path, size and modification time, so a replaced binary is
+ * probed again. A probe that fails is not remembered. Nothing here is inherited from another binary.
+ */
+export function capabilitiesOf(native) {
+  if (!native || typeof native !== 'object') return null
+  return Object.freeze({
+    version: typeof native.version === 'string' ? native.version : null,
+    dynamicTools: native.dynamicTools === true, ephemeral: native.schemaMatch === true,
+    turnSteer: typeof native.boardPeerContract === 'string' && native.boardPeerContract.length > 0, threadDelete: native.threadDelete === true,
+    boardPeerContract: typeof native.boardPeerContract === 'string' ? native.boardPeerContract : null,
+    executable: native.executable ?? null,
+  })
+}
+export function createNativeCapabilityCache({ inspect = inspectNativeCapabilities, stat = statSync, env = process.env, cwd = process.cwd() } = {}) {
+  const seen = new Map()
+  return function forExecutable(executable) {
+    if (typeof executable !== 'string' || !executable) return null
+    let key = null
+    try { const s = stat(executable); key = `${executable}\0${s.size}\0${Math.round(s.mtimeMs)}` } catch { return null }
+    if (seen.has(key)) return seen.get(key)
+    let caps = null
+    try { caps = capabilitiesOf(inspect({ executable, env, cwd })) } catch { caps = null }
+    if (caps) { seen.set(key, caps); while (seen.size > 16) seen.delete(seen.keys().next().value) }
+    return caps
   }
 }
