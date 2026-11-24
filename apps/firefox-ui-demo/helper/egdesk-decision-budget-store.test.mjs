@@ -108,3 +108,13 @@ test('deleting the key keeps the tally; the file never carries the key; cap bloc
   for (const name of fs.readdirSync(dir)) assert.ok(!fs.readFileSync(path.join(dir, name), 'utf8').includes(KEY) || name.startsWith('egdesk-decision-credential'))
   assert.ok(!fs.readdirSync(dir).includes('egdesk-decision-credential.json'))
 })
+
+test('a clock set back keeps the persisted later-month tally across restarts', () => {
+  const dir = tmp()
+  const dec = () => Date.parse('2026-12-05T00:00:00Z')
+  const a = wire(dir, dec); a.budget.setCap(500); a.budget.record({ inputTokens: 500 })
+  const b = wire(dir, JAN) // restart with the clock reading November
+  assert.deepEqual({ ...b.budget.snapshot() }, { month: '2026-12', inputTokens: 500, cap: 500 })
+  assert.equal(b.budget.canSpend(), false)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, DECISION_BUDGET_FILE), 'utf8')).inputTokens, 500)
+})

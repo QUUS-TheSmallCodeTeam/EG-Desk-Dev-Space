@@ -37,11 +37,16 @@ const NAME_MAX = 120
 const RESPONSE_MAX_BYTES = 4 * 1024 * 1024
 export const DEFAULT_DECISION_TIMEOUT_MS = 1500
 export const DECISION_ERROR_CODES = Object.freeze(['not_configured', 'invalid_request', 'invalid_key', 'no_credit',
-  'rate_limited', 'model_unavailable', 'server_error', 'bad_response', 'timeout', 'aborted', 'unreachable', 'budget_exceeded', 'evidence_unavailable'])
+  'spend_limit_reached', 'rate_limited', 'model_unavailable', 'server_error', 'bad_response', 'timeout', 'aborted', 'unreachable', 'budget_exceeded', 'evidence_unavailable'])
 // 429 bodies that mean the organization has no usable balance, not a rate limit.
 // credit_balance_exhausted: ChatGPT subscription API credits used up.
 // insufficient_quota: the long-standing OpenAI code for an exhausted quota.
 const NO_CREDIT_CODES = new Set(['credit_balance_exhausted', 'insufficient_quota'])
+// 429 bodies from a spend or usage limit (a hard spend limit the owner set, or the
+// OpenAI-assigned monthly usage limit). The key works; traffic resumes only after
+// the limit is raised or removed, or the monthly cycle resets, so retrying is pointless.
+// Some of these carry type insufficient_quota, so the code is checked before the type.
+const SPEND_LIMIT_CODES = new Set(['organization_spend_limit_exceeded', 'project_spend_limit_exceeded', 'organization_usage_limit_exceeded'])
 const QUESTION_TYPES = new Set(['predicate', 'choice', 'score'])
 
 export class DecisionError extends Error {
@@ -69,7 +74,9 @@ export function classifyDecisionFailure(status, body) {
   const apiCode = record(body?.error) ? (body.error.code ?? body.error.type ?? null) : null
   if (status === 401) return { code: 'invalid_key', retryable: false, apiCode }
   if (status === 429) {
-    return NO_CREDIT_CODES.has(apiCode) ? { code: 'no_credit', retryable: false, apiCode } : { code: 'rate_limited', retryable: true, apiCode }
+    const code = record(body?.error) ? body.error.code : null, type = record(body?.error) ? body.error.type : null
+    if (SPEND_LIMIT_CODES.has(code) || SPEND_LIMIT_CODES.has(type)) return { code: 'spend_limit_reached', retryable: false, apiCode }
+    return NO_CREDIT_CODES.has(code) || NO_CREDIT_CODES.has(type) ? { code: 'no_credit', retryable: false, apiCode } : { code: 'rate_limited', retryable: true, apiCode }
   }
   if (status === 403 || status === 404) return { code: 'model_unavailable', retryable: false, apiCode }
   if (status >= 500) return { code: 'server_error', retryable: true, apiCode }
@@ -400,7 +407,9 @@ export function createDecisionBudget({ monthlyInputTokenCap = null, now = Date.n
   let month = record(initial) && typeof initial.month === 'string' ? initial.month : monthOf(now())
   let inputTokens = record(initial) ? count(initial.inputTokens) : 0
   const changed = () => { if (typeof onChange === 'function') { try { onChange({ month, inputTokens, cap: monthlyInputTokenCap }) } catch {} } }
-  const roll = () => { const current = monthOf(now()); if (current !== month) { month = current; inputTokens = 0; return true } return false }
+  // Forward only: a later month resets the tally; a clock that reads an earlier month than
+  // the stored one (clock set back, wrong time at boot) keeps the stored tally and month.
+  const roll = () => { const current = monthOf(now()); if (current > month) { month = current; inputTokens = 0; return true } return false }
   return Object.freeze({
     canSpend() { roll(); return monthlyInputTokenCap === null || inputTokens < monthlyInputTokenCap },
     record(usage) { const rolled = roll(); const spent = count(usage?.inputTokens); inputTokens += spent; if (rolled || spent > 0) changed() },

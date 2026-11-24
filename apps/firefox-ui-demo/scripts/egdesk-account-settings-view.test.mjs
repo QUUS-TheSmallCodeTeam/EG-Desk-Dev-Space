@@ -469,3 +469,8 @@ test('account-add form localizes blank validation and focuses the named field be
   assert.ok(!unsupported.some(node => node.tag === 'form' || node.tag === 'input'));
   assert.ok(unsupported.some(node => node.children.some(text => typeof text === 'string' && text.includes('추가해 로그인할 수 없습니다'))));
 });
+
+test('a spend or usage limit is told apart from a missing balance and from a rate limit', () => {
+  assert.match(View.decisionVerificationText('spend_limit_reached'), /^지출·사용 한도에 도달/);
+  assert.doesNotMatch(View.decisionVerificationText('spend_limit_reached'), /잠시 뒤 다시 시도/);
+});

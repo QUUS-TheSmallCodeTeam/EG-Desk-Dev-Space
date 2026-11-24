@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { DECISIONS_ENDPOINT, DECISION_MODEL, DecisionError, createDecisionBudget, createDecisionClient, decisionTopicRecipient, validateDecisionRequest } from './egdesk-decision-client.mjs'
+import { DECISIONS_ENDPOINT, DECISION_ERROR_CODES, DECISION_MODEL, DecisionError, createDecisionBudget, createDecisionClient, decisionTopicRecipient, validateDecisionRequest } from './egdesk-decision-client.mjs'
 
 const KEY = 'sk-proj-TESTKEY-0123456789abcdefWXYZ'
 
@@ -609,4 +609,40 @@ test('a reviewed single choice rejects ambiguous raw answers without changing th
   const before = wires.length
   await assert.rejects(client.decide({ input: form.input, questions: [q, { ...q, name: 'second' }], strictChoiceResponse: true }), { code: 'invalid_request' })
   assert.equal(wires.length, before); assert.equal(budget.snapshot().inputTokens, before * 3)
+})
+
+test('spend and usage limit 429s are non-retryable spend_limit_reached with the provider code kept; plain rate limits stay retryable', async () => {
+  const { classifyDecisionFailure } = await import('./egdesk-decision-client.mjs')
+  for (const [error, expected] of [
+    [{ code: 'organization_spend_limit_exceeded', type: 'insufficient_quota' }, 'spend_limit_reached'],
+    [{ code: 'project_spend_limit_exceeded', type: 'insufficient_quota' }, 'spend_limit_reached'],
+    [{ code: 'project_spend_limit_exceeded' }, 'spend_limit_reached'],
+    [{ code: 'organization_usage_limit_exceeded', type: 'insufficient_quota' }, 'spend_limit_reached'],
+    [{ code: 'credit_balance_exhausted', type: 'insufficient_quota' }, 'no_credit'],
+    [{ code: null, type: 'insufficient_quota' }, 'no_credit'],
+    [{ code: 'rate_limit_exceeded', type: 'requests' }, 'rate_limited'],
+    [{ code: 'slow_down', type: 'rate_limit_error' }, 'rate_limited'],
+  ]) {
+    const result = classifyDecisionFailure(429, { error })
+    assert.equal(result.code, expected, JSON.stringify(error))
+    assert.equal(result.retryable, expected === 'rate_limited', JSON.stringify(error))
+    assert.equal(result.apiCode, error.code ?? error.type)
+  }
+  assert.ok(DECISION_ERROR_CODES.includes('spend_limit_reached'))
+  const { fetchImpl } = fakeFetch(() => respond(429, { error: { code: 'project_spend_limit_exceeded', type: 'insufficient_quota' } }))
+  const client = createDecisionClient({ getApiKey: () => KEY, fetchImpl })
+  await assert.rejects(client.decide({ input: 'x', questions: [QUESTIONS[0]] }), e => e.code === 'spend_limit_reached' && e.retryable === false && e.apiCode === 'project_spend_limit_exceeded')
+})
+
+test('the month roll is forward only: a later month resets, an earlier clock keeps the stored tally', () => {
+  let time = Date.parse('2026-12-10T00:00:00Z')
+  const budget = createDecisionBudget({ monthlyInputTokenCap: 100, now: () => time, initial: { month: '2026-12', inputTokens: 100 } })
+  time = Date.parse('2026-11-30T23:59:59Z') // clock set back
+  assert.deepEqual({ ...budget.snapshot() }, { month: '2026-12', inputTokens: 100, cap: 100 })
+  assert.equal(budget.canSpend(), false)
+  budget.record({ inputTokens: 5 })
+  assert.equal(budget.snapshot().inputTokens, 105)
+  time = Date.parse('2027-01-01T00:00:00Z') // a later month resets
+  assert.deepEqual({ ...budget.snapshot() }, { month: '2027-01', inputTokens: 0, cap: 100 })
+  assert.equal(budget.canSpend(), true)
 })
