@@ -360,7 +360,9 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const turnMemoryConfig = createTurnMemoryConfig({ settings, ontologyStore, ...turnMemoryFlagsFromEnv(FLAG), getAdapter: () => wikiAdapter ??= createWikiAdapter({ writes: openWikiWrites({ dataDir: settingsDir, log() {} }) }) })
     if (options.decisions) await settings.turnMemory.save(memoryHook.mode ?? 'advisory') // memory hook
     if (memoryHook.mode === 'on') turnMemoryConfig.eligible = memoryHook.eligible // memory hook: turn memory also on this conversation's one-time thread
-    wiring = createOwnToolsWiring({ env: { ...FLAG, PATH: env.PATH ?? '', HOME: env.HOME ?? '' }, dataDir, spawn: loggedRunnerSpawn, getChat: () => chat, inspect: createGitTargetInspector(), ...(deps.gitStatus ? { gitStatus: deps.gitStatus } : {}), ...(deps.killGroupRunner ? { killGroup: deps.killGroupRunner } : {}) })
+    // EG-Desk's own model and effort (EGDESK_CODEX_MODEL / EGDESK_CODEX_EFFORT, as the bridge reads them) reach the wiring from the shell the check runs in:
+    // that is how the check exercises the path where no request names a model (--model / --effort still win, as a request does)
+    wiring = createOwnToolsWiring({ env: { ...FLAG, PATH: env.PATH ?? '', HOME: env.HOME ?? '', ...Object.fromEntries(['EGDESK_CODEX_MODEL', 'EGDESK_CODEX_EFFORT'].filter(k => typeof env[k] === 'string').map(k => [k, env[k]])) }, dataDir, spawn: loggedRunnerSpawn, getChat: () => chat, inspect: createGitTargetInspector(), ...(deps.gitStatus ? { gitStatus: deps.gitStatus } : {}), ...(deps.killGroupRunner ? { killGroup: deps.killGroupRunner } : {}) })
     const terminalGateConfig = ['advisory', 'on'].includes(FLAG.EGDESK_TERMINAL_GATE) ? { mode: () => FLAG.EGDESK_TERMINAL_GATE, inspect: createGitTargetInspector(), method: FLAG.EGDESK_TERMINAL_GATE_METHOD === 'score' ? 'score' : 'predicates' } : null
     const recipient = () => (KEY ? decisionTopicRecipient(KEY, 1, undefined, client.model) : null)
     let warmed = false

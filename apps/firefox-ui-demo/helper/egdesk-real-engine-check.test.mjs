@@ -564,3 +564,20 @@ test('extensions: one small registration point; a module sees the composed runti
   const plain = world(t, { turns: [{ steps: [], final: 'a' }, { steps: [], final: 'b' }] })
   assert.equal(only(await runCheck(plain.options, asScripts(script), plain.deps)).extensions, undefined, 'no extension: nothing added to the record')
 })
+
+test('EG-Desk\'s own model and effort (env) are what an own-tools thread runs with when nothing in the request names one; --model and --effort win', async t => {
+  const script = { set: 'real-engine-own-model-v1', conversations: [{ id: 'own-model', turns: [{ say: 'hi', expect: { posted: true } }] }] }
+  const turnParams = w => wireLog(w).find(m => m.dir === 'in' && m.method === 'turn/start').params
+  const w = world(t, { turns: [{ steps: [], final: 'a' }] })
+  w.deps.env = { ...w.deps.env, EGDESK_CODEX_MODEL: 'egdesk-model', EGDESK_CODEX_EFFORT: 'low' }
+  assert.equal(only(await runCheck(w.options, asScripts(script), w.deps)).ok, true)
+  assert.equal(turnParams(w).model, 'egdesk-model'); assert.equal(turnParams(w).effort, 'low')
+  assert.equal(wireLog(w).find(m => m.dir === 'in' && m.method === 'thread/start').params.model, 'egdesk-model')
+  const asked = world(t, { turns: [{ steps: [], final: 'a' }] }, { model: 'asked-model', effort: 'high' })
+  asked.deps.env = { ...asked.deps.env, EGDESK_CODEX_MODEL: 'egdesk-model', EGDESK_CODEX_EFFORT: 'low' }
+  assert.equal(only(await runCheck(asked.options, asScripts(script), asked.deps)).ok, true)
+  assert.equal(turnParams(asked).model, 'asked-model'); assert.equal(turnParams(asked).effort, 'high')
+  const none = world(t, { turns: [{ steps: [], final: 'a' }] })
+  assert.equal(only(await runCheck(none.options, asScripts(script), none.deps)).ok, true)
+  assert.equal(turnParams(none).model, undefined, 'nothing configured by EG-Desk: the engine\'s own default (reported as a gap)')
+})
