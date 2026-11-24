@@ -23,14 +23,14 @@ async function step(snapshot, { answers = defaults, priorRun = prior(), goal = G
   const result = await runBrowserReflex({ cardId: 'card', goal, callTool, client, maxSteps: 1, priorRun, userContext })
   return { result, sent, acts, navigated: acts.filter(a => a.name === 'egdesk_browser_navigate').map(a => new URL(a.url).pathname) }
 }
-const ans = (pageState = 'content', goalMet = 0.02, same = []) => ({ page_state: { type: 'choice', choice: pageState, confidence: 0.98, probabilities: [{ value: pageState, probability: 0.98 }] },
+const ans = (pageState = 'content', goalMet = 0.02, same = []) => ({ ...pageStateAnswers(pageState, 0.98),
   goal_met: { type: 'predicate', probability: goalMet }, ...Object.fromEntries(same.map((p, i) => [`same_${i}`, { type: 'predicate', probability: p }])) })
 const defaults = () => ans()
 const modelPick = value => () => ({ ...ans(), next_step: { type: 'choice', choice: value, confidence: 0.95, probabilities: [{ value, probability: 0.95 }] } })
 
 test('one match: code takes the recorded step with no "which" question; page state and goal are still asked; normalisation is NFKC, case and spacing only', async () => {
   const s = await step(page(BASE))
-  assert.deepEqual(s.sent.map(r => r.names), [['page_state', 'goal_met']])
+  assert.deepEqual(s.sent.map(r => r.names), [[...PS_NAMES, 'goal_met']])
   assert.deepEqual(s.navigated, ['/biz/2'])
   assert.doesNotMatch(s.sent[0].text, /Stored memory|History \(earlier run|987-65-43210"/, 'the code-decided request carries no record and no memory packet')
   // full-width digits and extra spaces are the same label; a different number is not
@@ -49,19 +49,19 @@ test('one match still passes the element and href guards: a recorded label that 
   assert.deepEqual([submit.result.outcome, submit.acts.length], ['needs_user_context', 0])
 })
 
-test('the page state and goal still rule the code-decided step: a person-only state hands over, a met goal is done, an undecided state does not act', async () => {
+test('the page state and goal still rule the code-decided step: a person-only state hands over, a met goal is done, an undecided state asks the person', async () => {
   const hand = await step(page(BASE), { answers: () => ans('login_required') })
   assert.deepEqual([hand.result.outcome, hand.acts.length], ['handoff', 0])
   const done = await step(page(BASE), { answers: () => ans('content', 0.95) })
   assert.deepEqual([done.result.outcome, done.acts.length], ['done', 0])
-  const unsure = await step(page(BASE), { answers: () => ({ ...ans(), page_state: { type: 'choice', choice: 'content', confidence: 0.5, probabilities: [{ value: 'content', probability: 0.55 }, { value: 'error_page', probability: 0.4 }] } }) })
-  assert.deepEqual([unsure.result.outcome, unsure.result.reason, unsure.acts.length], ['escalated', 'uncertain', 0])
+  const unsure = await step(page(BASE), { answers: () => ({ ...ans(), ...pageStateAnswers('content', 0.5) }) })
+  assert.deepEqual([unsure.result.outcome, unsure.acts.length], ['page_unclear', 0], 'undecided page state: the person looks, nothing is taken')
 })
 
 test('no match: code pauses with the page\'s candidates that look like the recorded one (the which comes from code); no which-question', async () => {
   const changed = page([biz('b1', '사업자 555-11-22222', 1), biz('b2', '사업자 444-33-55555', 2), el('h1', 'link', '도움말', { href: `${O}/help` })])
   const s = await step(changed)
-  assert.deepEqual(s.sent.map(r => r.names), [['page_state', 'goal_met']])
+  assert.deepEqual(s.sent.map(r => r.names), [[...PS_NAMES, 'goal_met']])
   assert.deepEqual([s.result.outcome, s.result.candidates, s.acts.length], ['needs_user_context', ['[L1] 사업자 555-11-22222', '[L2] 사업자 444-33-55555'], 0])
   // nothing alike on the page: every offered element is a candidate
   const other = await step(page([el('h1', 'link', '도움말', { href: `${O}/help` }), el('n1', 'link', '공지사항', { href: `${O}/notice` })]))
@@ -77,7 +77,7 @@ test('several matches: the person decides among them; nothing is taken', async (
 test('renamed with the same number: one predicate per candidate, quoting only that option and the recorded choice; exactly one decided yes is taken', async () => {
   const renamed = page([biz('b1', '다라무역 (123-45-67890)', 1), biz('b2', '가나상사 (987-65-43210)', 2)])
   const yes = await step(renamed, { answers: () => ans('content', 0.02, [0.95]) })
-  assert.deepEqual(yes.sent.map(r => r.names), [['page_state', 'goal_met', 'same_0']], 'only the candidate carrying the recorded number is asked about')
+  assert.deepEqual(yes.sent.map(r => r.names), [[...PS_NAMES, 'goal_met', 'same_0']], 'only the candidate carrying the recorded number is asked about')
   const q = yes.sent[0].questions.find(x => x.name === 'same_0')
   assert.equal(q.type, 'predicate')
   assert.match(q.instructions, /^Is this option, "가나상사 \(987-65-43210\)", the same thing as the recorded choice, "사업자 987-65-43210"\?$/)
@@ -105,7 +105,7 @@ test('the current request overrides the record: a reply in this task, a request 
   assert.match(reworded.sent[0].text, /it is listed now as \[L2\] 사업자 987-65-43210/, 'the history is still evidence for the model')
   // a different request that names the recorded number is code's
   const sameNumber = await step(page(BASE), { goal: '987-65-43210 세금계산서 받아줘' })
-  assert.deepEqual([sameNumber.sent[0].names, sameNumber.navigated], [['page_state', 'goal_met'], ['/biz/2']])
+  assert.deepEqual([sameNumber.sent[0].names, sameNumber.navigated], [[...PS_NAMES, 'goal_met'], ['/biz/2']])
 })
 
 test('after the person answers on a changed page, the reply decides (before c16 the gone choice forced a question on every pick)', async () => {
@@ -129,6 +129,7 @@ import { createDecisionClient } from './egdesk-decision-client.mjs'
 import { decideRecordedStep } from './egdesk-browser-reflex.mjs'
 import { decisionThresholds } from './egdesk-decision-questions.mjs'
 import { estimateTokens } from './egdesk-memory-real-plan.mjs'
+import { PS_NAMES, pageStateAnswers, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
 test('census (b): of 12 page shapes 8 stop by the rule; 3 of them (push 2FA x2, a check-box captcha) would have carried a person-state label; one request costs ~0.5k tokens (1,573 bytes)', async () => {
   const rows = census()
   assert.equal(rows.length, 12)
@@ -141,4 +142,17 @@ test('census (b): of 12 page shapes 8 stop by the rule; 3 of them (push 2FA x2, 
   await decideRecordedStep({ goal: GOAL, snapshot, recorded: { kind: 'none', candidates: [] }, client, thresholds: decisionThresholds() }).catch(() => null)
   const tokens = estimateTokens(1, 1, bytes)
   assert.ok(bytes > 1000 && tokens > 400 && tokens < 600, `${bytes} bytes, ~${tokens} tokens`)
+})
+
+test('the general memory packet is step evidence only when no record was parsed from it (c16, R1: the record\'s facts arrive as History lines)', async () => {
+  const PACKET = 'Stored page: 거래처 포털 메모 (synthetic)'
+  const without = await step(page(BASE, undefined, '/other'), { priorRun: null, answers: modelPick('[L2] 사업자 987-65-43210') })
+  assert.doesNotMatch(without.sent[0].text, /Stored memory/)
+  const run = async priorRun => { const sent = []
+    const client = { decide: async request => { sent.push(request.input.map(m => m.content).join('\n')); return { answers: { ...ans(), next_step: { type: 'choice', choice: 'blocked', confidence: 0.9, probabilities: [{ value: 'blocked', probability: 0.9 }] } }, usage: null, latencyMs: 1 } } }
+    const callTool = async name => (name === 'egdesk_browser_observe' ? { observationId: 'o1', snapshot: page(BASE, undefined, '/other') } : { status: 'ok' })
+    await runBrowserReflex({ cardId: 'card', goal: GOAL, callTool, client, maxSteps: 1, priorRun, memoryPacket: PACKET }); return sent[0] }
+  assert.match(await run(null), /Stored memory fetched for this turn[^]*거래처 포털 메모/)
+  const withRecord = await run(prior())
+  assert.doesNotMatch(withRecord, /Stored memory|거래처 포털 메모/); assert.match(withRecord, /History \(earlier run of this task/)
 })

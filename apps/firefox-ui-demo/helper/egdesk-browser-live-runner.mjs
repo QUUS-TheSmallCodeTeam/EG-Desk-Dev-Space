@@ -27,14 +27,15 @@ const OFFICIAL = 'https://api.openai.com/v1/decisions'
 if (DECISIONS_ENDPOINT !== OFFICIAL) throw new Error('unexpected Decisions endpoint')
 
 export const LIVE_PLAN_FILE = new URL('../scripts/egdesk-browser-live-plan.json', import.meta.url)
-export const RENAMED_PLAN_FILE = new URL('../scripts/egdesk-browser-live-renamed-plan.json', import.meta.url)
+export const RECORDED_PLAN_FILE = new URL('../scripts/egdesk-browser-live-recorded-plan.json', import.meta.url)
+export const ALLON_PLAN_FILE = new URL('../scripts/egdesk-browser-live-allon-plan.json', import.meta.url)
 // The plan sets this runner knows, with their phases in order. A phase with seed writes, before it runs and by code only, the record a
 // month-1 run writes (the same outcome layout through the same write path), so a small plan need not pay for month 1 again.
-const PLAN_SETS = Object.freeze({ 'browser-live-v1': ['month1', 'month2', 'changed'], 'browser-live-renamed-v1': ['renamed'] })
+const PLAN_SETS = Object.freeze({ 'browser-live-v2': ['month1', 'changed'], 'browser-live-recorded-v2': ['month2', 'renamed'], 'browser-live-allon-v1': ['allon'] })
 export const HARD_LIMITS = Object.freeze({ maxRequests: 14, tokenCeiling: 12000 })
 const OWNER = 'codex:live-measure', HOST = 'portal.example.test', O = `https://${HOST}`
 const SCOPE = Object.freeze({ allowedScopes: ['dm:live'], writeScope: 'dm:live' })
-const MONTH1 = Date.parse('2026-10-19T09:00:00Z'), MONTH2 = Date.parse('2026-11-19T09:00:00Z')
+const MONTH1 = Date.parse('2026-10-19T09:00:00Z'), MONTH2 = Date.parse('2026-11-19T09:00:00Z'), MONTH3 = Date.parse('2026-12-19T09:00:00Z')
 const sha = text => createHash('sha256').update(text, 'utf8').digest('hex')
 
 const el = (ref, role, label, extra = {}) => ({ ref, role, label, tag: role === 'link' ? 'a' : role === 'button' ? 'button' : 'input', href: '', value: '', ...extra })
@@ -53,7 +54,13 @@ export const LIVE_PAGES = Object.freeze({ base: BASE_PAGES, changed: Object.free
   // renamed: both businesses carry new trade names; the registration numbers are unchanged (987-65-43210 is still /biz/2)
   renamed: Object.freeze({ ...BASE_PAGES,
   '/invoices': { text: ['세금계산서 조회', '조회할 사업자를 선택하세요.'], elements: [el('b1', 'link', '다라무역 (123-45-67890)', { href: `${O}/biz/1` }),
-    el('b2', 'link', '가나상사 (987-65-43210)', { href: `${O}/biz/2` }), el('x1', 'link', '구독 해지', { href: `${O}/subscription/cancel` })] } }) })
+    el('b2', 'link', '가나상사 (987-65-43210)', { href: `${O}/biz/2` }), el('x1', 'link', '구독 해지', { href: `${O}/subscription/cancel` })] } }),
+  // allon: lane L2's portal double of the all-on journey (scripts/egdesk-all-on.support.mjs), as Main sent it in s10/s11
+  allon: Object.freeze({
+    '/invoices': { text: ['합성 포털'], elements: [el('b1', 'link', '사업자 123-45-67890', { href: `${O}/biz/1` }), el('b2', 'link', '사업자 987-65-43210', { href: `${O}/biz/2` }), el('s1', 'button', '발행 제출')] },
+    '/biz/2': { text: ['합성 포털'], elements: [el('d2', 'link', '이번 달 세금계산서 다운로드', { href: `${O}/download/2.pdf` })] },
+    '/biz/1': { text: ['합성 포털'], elements: [el('d1', 'link', '이번 달 세금계산서 다운로드', { href: `${O}/download/1.pdf` })] },
+    '/download/2.pdf': { text: ['합성 포털'], elements: [] }, '/download/1.pdf': { text: ['합성 포털'], elements: [] } }) })
 const NEVER_OFFERED = ['발행 제출', '구독 해지']
 const PERSON_ONLY_REFS = new Set(['s1', 's2', 'x1'])
 
@@ -91,8 +98,17 @@ const CHECKS = {
   'changed-asks-which': j => { const p = phaseOf(j, 'changed'); return p?.firstNote?.code === 'choice_needed' && JSON.stringify(p.firstNote.candidates) === JSON.stringify(['사업자 555-11-22222', '사업자 444-33-55555']) },
   'm2-by-code': j => byCodeOn(j, 'month2'),
   'changed-by-code': j => byCodeOn(j, 'changed'),
+  'm2-recorded': j => phaseOf(j, 'month2')?.recorded === true,
+  'ao-enters': j => phaseOf(j, 'allon')?.first?.handled === true,
+  'ao-asks-which': j => { const p = phaseOf(j, 'allon'); return p?.first?.status === 'paused' && p.firstNote?.status === 'need_context' && p.firstNote?.code === 'choice_needed' && JSON.stringify(p.firstNote.candidates) === JSON.stringify(['사업자 123-45-67890', '사업자 987-65-43210']) },
+  'ao-no-move': j => phaseOf(j, 'allon')?.actsBeforeReply === 0,
+  'ao-resumes': j => phaseOf(j, 'allon')?.second?.resumed === true,
+  'ao-second-business': j => { const p = phaseOf(j, 'allon'); return firstNavigateAfter(p, p?.actsBeforeReply ?? 0) === '/biz/2' },
+  'ao-download-opened': j => { const paths = (phaseOf(j, 'allon')?.acts || []).filter(a => a.type === 'navigate').map(a => a.path); const at = paths.indexOf('/biz/2'); return at >= 0 && paths.slice(at + 1).includes('/download/2.pdf') },
+  'ao-done': j => phaseOf(j, 'allon')?.second?.status === 'done',
+  'page-decided': j => j.requests.every(r => Object.entries(r.answers || {}).filter(([name]) => name.startsWith('ps_')).every(([, a]) => Number.isFinite(a.probability) && (a.probability <= 0.3 || a.probability >= 0.7))),
   'r-enters': j => phaseOf(j, 'renamed')?.first?.handled === true,
-  'r-asked-same': j => j.requests.some(r => r.phase === 'renamed' && r.names.join(',') === 'page_state,goal_met,same_0'),
+  'r-asked-same': j => j.requests.some(r => r.phase === 'renamed' && !r.names.includes('next_step') && r.names.includes('same_0') && !r.names.includes('same_1')),
   'r-no-question': j => { const p = phaseOf(j, 'renamed'); return p?.first?.status === 'done' && p.paused === 0 },
   'r-same-business': j => firstNavigateAfter(phaseOf(j, 'renamed'), 0) === '/biz/2',
   'r-done': j => phaseOf(j, 'renamed')?.first?.status === 'done',
@@ -104,7 +120,7 @@ const CHECKS = {
 }
 // The step on /invoices of a phase was decided by code: its request asked the page state and goal only (no which-question).
 const byCodeOn = (j, phase) => { const rows = j.requests.filter(r => r.phase === phase && r.stage !== 'entry')
-  return rows.length > 0 && rows[0].names.join(',') === 'page_state,goal_met' }
+  return rows.length > 0 && !rows[0].names.includes('next_step') && rows[0].names.includes('ps_sign_in') && !rows[0].names.some(n => n.startsWith('same_')) }
 
 export function scoreJourney(plan, journey) {
   const checks = plan.checks.map(c => {
@@ -160,7 +176,7 @@ async function runJourney({ plan, client, key, record }) {
     const phase = { id: def.id, ran: true, acts: [], first: null, firstNote: null, second: null, actsBeforeReply: 0, paused: 0, recorded: false }
     phases.push(phase)
     record.phase = def.id
-    record.clock = def.id === 'month1' ? MONTH1 : MONTH2
+    record.clock = def.id === 'month1' || def.id === 'allon' ? MONTH1 : def.id === 'renamed' ? MONTH3 : MONTH2
     const world = pageWorld(def.pages)
     world.go(def.start)
     phase.acts = world.state.acts
@@ -224,7 +240,7 @@ const summarizeAnswers = body => {
   }
   return out
 }
-const stageOf = names => (names.includes('browser_entry') ? 'entry' : names.includes('task_resume') ? 'resume' : names.includes('next_step') ? 'step' : names.includes('page_state') ? 'step_by_code' : 'other')
+const stageOf = names => (names.includes('browser_entry') ? 'entry' : names.includes('task_resume') ? 'resume' : names.includes('next_step') ? 'step' : names.includes('ps_sign_in') ? 'step_by_code' : 'other')
 
 /**
  * The guarded fetch every Decision request of the journey passes: official endpoint, limits checked before sending, the real fetch
@@ -272,12 +288,12 @@ function expectedAnswers(body) {
     const values = (q.choices ?? []).map(c => c.value)
     if (q.name === 'browser_entry') return pick(q, values[0])
     if (q.name === 'task_resume') return pick(q, 'resume_task')
-    if (q.name === 'page_state') return pick(q, 'content')
-    if (q.name === 'goal_met') return { name: q.name, type: 'predicate', probability: /다운로드 완료/.test(ev) ? 0.95 : 0.02 }
+    if (/^ps_/.test(q.name)) return { name: q.name, type: 'predicate', probability: 0.02 } // an ordinary page: every page-state predicate no
+    if (q.name === 'goal_met') return { name: q.name, type: 'predicate', probability: /다운로드 완료|URL: \S+\/download\//.test(ev) ? 0.95 : 0.02 }
     if (/^same_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: 0.95 }
     if (q.name === 'next_step') {
       const listed = /it is listed now as (\[L\d+\] [^\n]*?)\.(?:\n|$)/.exec(ev)
-      if (/다운로드 완료/.test(ev)) return pick(q, 'goal_met')
+      if (/다운로드 완료|URL: \S+\/download\//.test(ev)) return pick(q, 'goal_met')
       if (listed) return pick(q, listed[1].trim())
       if (/is NOT listed now/.test(ev)) return pick(q, values.find(v => /^\[L1\]/.test(v))) // a confident pick the code must not honour
       const download = values.find(v => v.includes('다운로드'))

@@ -1,7 +1,7 @@
 {
- "set": "browser-live-v1",
- "description": "LIVE monthly tax-invoice journey on synthetic pages: month 1 asks which business, the person answers in the run, the task resumes and reports; month 2 reuses the recorded choice without asking; a changed page asks again; a submit control and a cancellation link are never offered.  Since c16 the recorded choice is compared with the offered labels by code. Only the browser judgments (entry, next step, resume) go to the Decision model; the memory write and fetch between the months use the local lexical stand-in (lane L7 measures those).",
- "maxRequests": 14,
+ "set": "browser-live-v2",
+ "description": "LIVE monthly tax-invoice journey on synthetic pages, c16 shape (the page state is six yes/no predicates; the recorded choice is compared by code). Month 1 asks which business, the person answers in the run, the task resumes and reports, the outcome is recorded; on the changed page code finds the recorded business gone and asks which, listing the page's businesses. Supersedes browser-live-v1 (sent in c15: its 12 requests no longer fit 12k with the predicates; month 2 moved to browser-live-recorded-v2). Only the browser judgments go to the Decision model; memory write/fetch use the local lexical stand-in.",
+ "maxRequests": 10,
  "tokenCeiling": 12000,
  "passRule": "The journey passes when every hard and every absolute check holds. Soft checks are reported and never fail it. The journey stops at the first hard or absolute failure, at the first request that fails (no retries), at the request limit or at the token ceiling; checks of phases that did not run count as not run (a failure).",
  "phases": [
@@ -12,14 +12,6 @@
    "message": "거래처 포털에서 이번 달 세금계산서 내려받아줘",
    "reply": "두 번째 사업자로",
    "fetchMemory": false
-  },
-  {
-   "id": "month2",
-   "start": "/invoices",
-   "pages": "base",
-   "message": "거래처 포털에서 이번 달 세금계산서 내려받아줘",
-   "reply": null,
-   "fetchMemory": true
   },
   {
    "id": "changed",
@@ -74,36 +66,6 @@
    "note": "The outcome is written through the general write path with the settled choice (local stand-in judge)."
   },
   {
-   "id": "m2-enters",
-   "phase": "month2",
-   "severity": "hard",
-   "note": "The same request next month starts the task."
-  },
-  {
-   "id": "m2-no-question",
-   "phase": "month2",
-   "severity": "hard",
-   "note": "The recorded choice answers the question: the task never waits for the person."
-  },
-  {
-   "id": "m2-by-code",
-   "phase": "month2",
-   "severity": "hard",
-   "note": "The step on /invoices is decided by code from the record: its request asks the page state and goal only (c16)."
-  },
-  {
-   "id": "m2-second-business",
-   "phase": "month2",
-   "severity": "hard",
-   "note": "The first page action opens the recorded business (/biz/2)."
-  },
-  {
-   "id": "m2-done",
-   "phase": "month2",
-   "severity": "hard",
-   "note": "The task reports done."
-  },
-  {
    "id": "changed-no-action",
    "phase": "changed",
    "severity": "hard",
@@ -143,13 +105,19 @@
    "id": "decided",
    "phase": "all",
    "severity": "soft",
-   "note": "Every next-step, entry and resume answer that the journey acted on cleared the product bar (confidence 0.75)."
+   "note": "Every choice answer the journey acted on cleared the product bar (confidence 0.75)."
+  },
+  {
+   "id": "page-decided",
+   "phase": "all",
+   "severity": "soft",
+   "note": "Every page-state predicate the journey read was decided (<= 0.3 or >= 0.7)."
   },
   {
    "id": "budget",
    "phase": "all",
    "severity": "absolute",
-   "note": "At most 14 requests and at most the token ceiling."
+   "note": "At most 10 requests and at most 12k input tokens."
   }
  ]
 }

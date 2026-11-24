@@ -10,6 +10,7 @@ import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
 import { createBrowserEntryConfig } from './egdesk-browser-entry-wiring.mjs'
 import { createTurnMemoryConfig } from './egdesk-turn-memory-wiring.mjs'
 import { mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
+import { PS_NAMES, pageStateAnswers, pageStateProbabilities, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
 
 // L8/C9: the direct browser entry inside the REAL chat runtime (CodexChatRuntime.send), flag decisionContext.browserEntry.mode():
 //   absent / 'off'  -> native input byte-identical to today
@@ -69,6 +70,7 @@ function build({ entryMode, hang = false, withClient = true, outcomes = null, fa
     recipientForKey: (value, endpoint, model) => decisionTopicRecipient(value, 1, endpoint, model), getApiKey: async () => KEY,
     fetchImpl: async (_e, { body, signal }) => {
       const wire = JSON.parse(body), q0 = wire.questions[0], evidence = wire.input[1].content
+      const stepQ = wire.questions.find(q => q.name === 'next_step') ?? (q0.choices ? q0 : { choices: [] }) // c16: a code-decided step asks no next_step
       decisions.push({ q: q0.name, image: /image/i.test(body) }); timeline.push(`decide:${q0.name}`)
       if (hang) await new Promise((_, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }))
       if (q0.name === 'browser_entry') {
@@ -81,12 +83,12 @@ function build({ entryMode, hang = false, withClient = true, outcomes = null, fa
       if (/\/download\//.test(url)) { next = 'goal_met'; goalMet = 0.95 }
       else if (url.endsWith('/invoices')) {
         const listed = /it is listed now as (\[L\d+\] [^\n]*?)\.(?:\n|$)/.exec(evidence)
-        next = listed ? listed[1].trim() : /두 번째/.test(ctx) ? starts(q0.choices, '987-65') : 'needs_user_context'
+        next = listed ? listed[1].trim() : /두 번째/.test(ctx) ? starts(stepQ.choices, '987-65') : 'needs_user_context'
       }
-      else next = starts(q0.choices, '다운로드')
+      else next = starts(stepQ.choices, '다운로드')
       const answer = choice('next_step', next, 0.95)
-      if (next === 'needs_user_context') answer.probabilities.push({ value: starts(q0.choices, '123-45'), probability: 0.02 }, { value: starts(q0.choices, '987-65'), probability: 0.02 })
-      return { ok: true, text: async () => JSON.stringify({ answers: [answer, choice('page_state', 'content', 0.95), { name: 'goal_met', type: 'predicate', probability: goalMet }] }) }
+      if (next === 'needs_user_context') answer.probabilities.push({ value: starts(stepQ.choices, '123-45'), probability: 0.02 }, { value: starts(stepQ.choices, '987-65'), probability: 0.02 })
+      return { ok: true, text: async () => JSON.stringify({ answers: [answer, ...pageStateWire('content'), { name: 'goal_met', type: 'predicate', probability: goalMet }] }) }
     },
   })
   const transport = { runs: new Map(), hasClient: id => id === 'ui',
@@ -288,8 +290,8 @@ test('C10 end to end: advisory records only; month 1 asks and persists the outco
   const note2 = JSON.parse(w2.h.calls.find(c => c.method === 'turn/start').params.additionalContext.egdesk_browser_task.value).egdesk_browser_task
   assert.deepEqual([note2.status, note2.code], ['done', undefined])
   assert.deepEqual(w2.acts.map(x => [x.type, x.url]), [['navigate', `${O}/biz/2`], ['navigate', `${O}/download/2.pdf`]])
-  // c16: on /invoices the recorded choice is taken by code; that request asks page_state and goal_met, never "which" (4 requests, as before)
-  assert.deepEqual(w2.decisions.reduce((m, d) => (m[d.q] = (m[d.q] || 0) + 1, m), {}), { browser_entry: 1, page_state: 1, next_step: 2 })
+  // c16: on /invoices the recorded choice is taken by code; that request asks the page-state predicates and goal_met, never "which" (4 requests, as before)
+  assert.deepEqual(w2.decisions.reduce((m, d) => (m[d.q] = (m[d.q] || 0) + 1, m), {}), { browser_entry: 1, ps_sign_in: 1, next_step: 2 })
   assert.equal(w2.acts.filter(x => x.type === 'fill' || x.ref === 's1').length, 0)
   assert.ok(m2.log.length >= 1, 'the general memory feature ran its own Decisions calls')
   await new Promise(resolve => setTimeout(resolve, 50))
@@ -380,6 +382,6 @@ test('C14 turn memory on + onePacket + at-page: the browser hook still gets last
   assert.deepEqual([note.status, w2.acts.map(a => a.url)], ['done', [`${O}/biz/2`, `${O}/download/2.pdf`]], 'no question: the record answered it')
   // the general turn-memory packet and the one-packet merge are for ordinary turns: a bounded browser turn gets neither
   assert.deepEqual(Object.keys(turn.additionalContext).filter(k => /memory|decision|context/i.test(k)), [])
-  // c16: on /invoices the recorded choice is taken by code; that request asks page_state and goal_met, never "which" (4 requests, as before)
-  assert.deepEqual(w2.decisions.reduce((m, d) => (m[d.q] = (m[d.q] || 0) + 1, m), {}), { browser_entry: 1, page_state: 1, next_step: 2 })
+  // c16: on /invoices the recorded choice is taken by code; that request asks the page-state predicates and goal_met, never "which" (4 requests, as before)
+  assert.deepEqual(w2.decisions.reduce((m, d) => (m[d.q] = (m[d.q] || 0) + 1, m), {}), { browser_entry: 1, ps_sign_in: 1, next_step: 2 })
 })

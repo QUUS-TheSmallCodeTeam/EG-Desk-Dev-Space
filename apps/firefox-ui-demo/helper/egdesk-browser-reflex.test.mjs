@@ -5,6 +5,7 @@ import { DecisionError } from './egdesk-decision-client.mjs'
 import { BROWSER_REFLEX_TOOL_NAME, BROWSER_REFLEX_TOOL_SPEC, buildReflexCandidates, expectedTargetOf, reflexActionArgs, reflexResultForModel,
   runBrowserReflex, validateReflexArgs } from './egdesk-browser-reflex.mjs'
 
+import { PS_NAMES, pageStateAnswers } from './egdesk-browser-page-state.fixture.mjs'
 const USAGE = Object.freeze({ inputTokens: 300, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0, totalTokens: 300 })
 const element = (ref, role, label, extra = {}) => ({ ref, role, label, tag: role === 'link' ? 'a' : role === 'button' ? 'button' : 'input', href: '', value: '', disabled: false, ...extra })
 const REPORTS = 'https://example.com/reports'
@@ -43,7 +44,13 @@ function decisions(answerFor) {
   return { calls, client: { async decide(request) {
     calls.push(request)
     const answers = Object.create(null)
-    for (const question of request.questions) answers[question.name] = answerFor(question, request)
+    // c16: the page state is asked as predicates; a double written for the old choice answers it once, translated per predicate
+    let state = null
+    for (const question of request.questions) {
+      if (!question.name.startsWith('ps_')) { answers[question.name] = answerFor(question, request); continue }
+      state ??= answerFor({ name: 'page_state', type: 'choice' }, request)
+      answers[question.name] = state?.type === 'choice' ? pageStateAnswers(state.choice, state.confidence)[question.name] : state
+    }
     return { answers, model: 'gpt-6-luna', usage: USAGE, latencyMs: 110 }
   } } }
 }
@@ -90,7 +97,7 @@ test('the decision model follows a link and stops when the goal is met, with no 
   // The gated and off-site elements were never offered to the model.
   const offered = asked[0].questions[0].choices.map(item => item.value)
   assert.ok(!offered.some(value => /Pay now|외부 사이트|비밀번호/.test(value)))
-  assert.deepEqual(asked[0].questions.map(question => question.name), ['next_step', 'page_state', 'goal_met'])
+  assert.deepEqual(asked[0].questions.map(question => question.name), ['next_step', ...PS_NAMES, 'goal_met'])
 })
 
 test('a field nobody filled goes back as needs_free_text; with the value it fills and escalates the button', async () => {
@@ -228,7 +235,8 @@ for (const [state, text, confidence, outcome, key] of [
   ['two_factor_required', 'Verification required', 0.98, 'handoff', '[F1] Email'],
   ['bot_check', 'Human verification required', 0.98, 'handoff', '[F1] Email'],
   ['sensitive_flow', 'Checkout: complete payment', 0.98, 'handoff', '[F1] Email'],
-  ['content', 'Unclear form context', 0.51, 'escalated', '[F1] Email'],
+  // c16: an undecided page state asks the person to look at the page (page_unclear), it no longer ends as "uncertain"
+  ['content', 'Unclear form context', 0.51, 'page_unclear', '[F1] Email'],
 ]) {
   test(`pending caller text is never filled for ${state} (${key})`, async () => {
     const { callTool, calls } = tools([page('https://example.invalid/form', [element('f_1', 'email', 'Email')], [text])])

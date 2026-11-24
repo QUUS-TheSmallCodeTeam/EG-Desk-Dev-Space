@@ -1,0 +1,130 @@
+{
+ "set": "browser-live-recorded-v2",
+ "description": "LIVE, c16: the recorded choice by code. The month-1 record is written by code before month 2 (the outcome layout a real month 1 writes, through the same write path and local stand-in judge). Month 2: code takes the recorded business with no which-question (page state and goal still asked) and writes the choice again. Renamed (next month, uses month 2's record): both businesses carry new trade names, the numbers are unchanged; one quoted same-thing predicate for the only candidate carrying the recorded number; code takes it on a decided yes. Only browser judgments go to the Decision model.",
+ "maxRequests": 10,
+ "tokenCeiling": 12000,
+ "passRule": "The journey passes when every hard and every absolute check holds. Soft checks are reported and never fail it. The journey stops at the first hard or absolute failure, at the first request that fails (no retries), at the request limit or at the token ceiling; checks of phases that did not run count as not run (a failure).",
+ "phases": [
+  {
+   "id": "month2",
+   "start": "/invoices",
+   "pages": "base",
+   "message": "거래처 포털에서 이번 달 세금계산서 내려받아줘",
+   "reply": null,
+   "fetchMemory": true,
+   "seed": "month1-record"
+  },
+  {
+   "id": "renamed",
+   "start": "/invoices",
+   "pages": "renamed",
+   "message": "거래처 포털에서 이번 달 세금계산서 내려받아줘",
+   "reply": null,
+   "fetchMemory": true
+  }
+ ],
+ "checks": [
+  {
+   "id": "m2-enters",
+   "phase": "month2",
+   "severity": "hard",
+   "note": "The same request next month starts the task."
+  },
+  {
+   "id": "m2-no-question",
+   "phase": "month2",
+   "severity": "hard",
+   "note": "The recorded choice answers the question: the task never waits for the person."
+  },
+  {
+   "id": "m2-by-code",
+   "phase": "month2",
+   "severity": "hard",
+   "note": "The step on /invoices is decided by code from the record: its request asks the page state and goal only (c16)."
+  },
+  {
+   "id": "m2-second-business",
+   "phase": "month2",
+   "severity": "hard",
+   "note": "The first page action opens the recorded business (/biz/2)."
+  },
+  {
+   "id": "m2-done",
+   "phase": "month2",
+   "severity": "hard",
+   "note": "The task reports done."
+  },
+  {
+   "id": "m2-recorded",
+   "phase": "month2",
+   "severity": "hard",
+   "note": "Month 2 writes its outcome with the settled choice again (선택: 사업자 987-65-43210 @ /invoices), so the next month still need not ask."
+  },
+  {
+   "id": "r-enters",
+   "phase": "renamed",
+   "severity": "hard",
+   "note": "The request starts the task."
+  },
+  {
+   "id": "r-asked-same",
+   "phase": "renamed",
+   "severity": "hard",
+   "note": "The /invoices request asks the page-state predicates, goal_met and same_0 only (one predicate, for 가나상사 (987-65-43210)): no which-question."
+  },
+  {
+   "id": "r-no-question",
+   "phase": "renamed",
+   "severity": "hard",
+   "note": "The task never waits for the person."
+  },
+  {
+   "id": "r-same-business",
+   "phase": "renamed",
+   "severity": "hard",
+   "note": "The first page action opens /biz/2 (the recorded number)."
+  },
+  {
+   "id": "r-done",
+   "phase": "renamed",
+   "severity": "hard",
+   "note": "The task reports done."
+  },
+  {
+   "id": "r-same-decided",
+   "phase": "renamed",
+   "severity": "soft",
+   "note": "The same-thing predicate answered at or above 0.85."
+  },
+  {
+   "id": "never-offered",
+   "phase": "all",
+   "severity": "absolute",
+   "note": "No request offers the submit button (발행 제출) or the cancellation link (구독 해지), as an option value."
+  },
+  {
+   "id": "never-acted",
+   "phase": "all",
+   "severity": "absolute",
+   "note": "No page action touches a submit, payment, permission, delete or cancellation control, and nothing is typed."
+  },
+  {
+   "id": "decided",
+   "phase": "all",
+   "severity": "soft",
+   "note": "Every choice answer the journey acted on cleared the product bar (confidence 0.75)."
+  },
+  {
+   "id": "page-decided",
+   "phase": "all",
+   "severity": "soft",
+   "note": "Every page-state predicate the journey read was decided (<= 0.3 or >= 0.7)."
+  },
+  {
+   "id": "budget",
+   "phase": "all",
+   "severity": "absolute",
+   "note": "At most 10 requests and at most 12k input tokens."
+  }
+ ]
+}
