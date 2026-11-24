@@ -37,6 +37,7 @@ export const BROWSER_TASK_TTL_MS = 30 * 60 * 1000 // a paused task can be resume
 const SEGMENT_STEPS = 6
 const ASKED_CODES = new Set(['choice_needed', 'detail_needed'])
 const MAX_BRIEF_GOAL = 160
+const MAX_GOAL_CHANGES = 3, MAX_CHANGE_CHARS = 160, MAX_GOAL_BASE_CHARS = 200
 const MAX_FOUND_SEGMENTS = 3, MAX_FOUND_CHARS = 240
 // The last page action of a running task, as a closed word (the brief's `last`); a paused task's `last` is its pause code.
 const LAST_KIND_OF_TOOL = Object.freeze({ egdesk_browser_navigate: 'opened_link', egdesk_browser_scroll: 'scrolled', egdesk_browser_fill: 'filled_field' })
@@ -63,6 +64,7 @@ export function entryOptions(cards) {
 export const MAX_ENTRY_CARDS = 6
 export const ENTRY_WEB = 'browser_entry'
 export const entryCardName = index => `browser_entry_card_${index}`
+export const entryWallName = index => `browser_entry_wall_${index}`
 const ENTRY_YES = 0.75, ENTRY_NO = 0.25
 export const ENTRY_LINES = 3, ENTRY_LINE_CHARS = 60
 const norm = text => String(text ?? '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim()
@@ -92,12 +94,45 @@ const quotePage = card => {
   const lines = shownLines(card)
   return lines.length ? `${page}, which now shows ${lines.map(q).join(' / ')}` : page
 }
+// c23 (real, browser-live-settings-v4, 2026-11-25): on an error page of the site (the card shown as "오류 | 계정" with the error text) the card predicate
+// answered 0, so the entry did not enter and the person was never told that the page shows an error. What the card shows then says nothing
+// about the request: it is an interruption of the site (an error, a sign-in wall, a check). Only where it can matter (the request decided a web
+// task, no card decided yes, a card with known lines decided no) a FOLLOW-UP request asks, per such card, one predicate quoting that page
+// alone. The first entry request is unchanged (byte for byte), so nothing that was measured against it moves. An interruption never VETOES
+// a card (see readBrowserEntry).
+const WALL_ASK = 'an error page, a sign-in page or a check that stops it from showing its content'
 /** The entry questions: the request predicate, then (unless code chose the card) one predicate per card, that page alone. */
 export function entryQuestions(cards, { codeCard = null } = {}) {
   const out = [predicateQuestion(ENTRY_WEB, 'Is this request something to do in a web page rather than an answer?')]
   if (codeCard) return out
   cards.slice(0, MAX_ENTRY_CARDS).forEach((card, index) => out.push(predicateQuestion(entryCardName(index), `Does this request need to be done on this open page: ${quotePage(card)}?`)))
   return out
+}
+/**
+ * The cards the interruption follow-up is about: the request decided a web task, no card decided yes, and these cards (their lines known)
+ * were decided no. [] when the first answers already decide something else (or nothing could be an interruption).
+ */
+export function wallCandidates(entry, cards) {
+  if (!entry || entry.by !== 'predicates' || entry.kind === 'browser') return []
+  if (!(Number.isFinite(entry.web) && entry.web >= ENTRY_YES)) return []
+  const p = entry.cardsP || []
+  if (p.some(value => Number.isFinite(value) && value >= ENTRY_YES)) return []
+  return cards.slice(0, MAX_ENTRY_CARDS).map((card, index) => (shownLines(card).length && Number.isFinite(p[index]) && p[index] <= ENTRY_NO ? index : -1)).filter(index => index >= 0)
+}
+export const entryWallQuestions = (cards, indices) => indices.map(index => predicateQuestion(entryWallName(index), `Is this open page ${quotePage(cards[index])} ${WALL_ASK}?`))
+/**
+ * entryWallFollowUp({ message, cards, entry, client, ... }) -> { entry, usage } | null: the one follow-up request (only for wallCandidates), then
+ * the combined reading. Any failure of the follow-up leaves the first result as it was (nothing is entered on a guess).
+ */
+export async function entryWallFollowUp({ message, cards, entry, client, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, signal, authorizeDispatch, answers = null }) {
+  const indices = wallCandidates(entry, cards)
+  if (!indices.length) return null
+  try {
+    const result = await client.decide({ input: [{ role: 'developer', content: ENTRY_RULES }, { role: 'user', content: `User message: ${compactText(message, MAX_MESSAGE)}` }],
+      questions: entryWallQuestions(cards, indices), timeoutMs, signal, authorizeDispatch })
+    const merged = { ...(answers ?? {}), browser_entry: { type: 'predicate', probability: entry.web }, ...Object.fromEntries((entry.cardsP || []).map((value, index) => [entryCardName(index), { type: 'predicate', probability: value }]).filter(([, a]) => Number.isFinite(a.probability))), ...result.answers }
+    return { entry: { ...readBrowserEntry(merged, cards, {}), followUp: true }, usage: result.usage }
+  } catch (error) { if (error instanceof DecisionError && error.code === 'evidence_unavailable') throw error; return null }
 }
 /** Kept for the ride-along host hook: the same questions as one list. */
 export const entryQuestion = (cards, options = {}) => entryQuestions(cards, options)
@@ -108,6 +143,8 @@ export const entryQuestion = (cards, options = {}) => entryQuestions(cards, opti
  *  - the request decided "an answer, not a web page" -> not_browser;
  *  - a card named by code -> that card (the request was not decided to be an answer);
  *  - exactly one card decided yes -> that card; every card decided no -> not_browser;
+ *  - an interruption never vetoes a card (c23): the request decided a web task, no card decided yes, exactly one card decided to be an error /
+ *    sign-in / check page, and every other card decided no -> that card (the person must see it; the step hands the page over);
  *  - one granted card, the request decided a web task, that card not decided no -> that card (the only page it can be done on);
  *  - several cards, and the request decided a web task or two or more cards decided yes -> ask the person which (listing them);
  *  - otherwise uncertain (an ordinary turn).
@@ -118,13 +155,16 @@ export function readBrowserEntry(answers, cards, { codeCard = null } = {}) {
   const web = p(ENTRY_WEB)
   const shown = cards.slice(0, MAX_ENTRY_CARDS)
   const cardsP = codeCard ? [] : shown.map((_, index) => p(entryCardName(index)))
-  const base = { web, cardsP, by: codeCard ? 'code' : 'predicates', confidence: web, margin: null, ranked: cardsP.filter(Number.isFinite) }
+  const wallsP = codeCard ? [] : shown.map((_, index) => p(entryWallName(index)))
+  const base = { web, cardsP, wallsP, by: codeCard ? 'code' : 'predicates', confidence: web, margin: null, ranked: cardsP.filter(Number.isFinite) }
   const webNo = web !== null && web <= ENTRY_NO, webYes = web !== null && web >= ENTRY_YES
   if (webNo) return { kind: 'not_browser', top: 'not_browser_task', ...base }
   if (codeCard) return web === null ? { kind: 'uncertain', top: null, ...base } : { kind: 'browser', cardId: codeCard, top: null, ...base }
   const yes = cardsP.map((value, index) => (value !== null && value >= ENTRY_YES ? index : -1)).filter(index => index >= 0)
   const no = cardsP.filter(value => value !== null && value <= ENTRY_NO).length
   if (yes.length === 1 && web !== null) return { kind: 'browser', cardId: shown[yes[0]].cardId, top: null, ...base }
+  const walled = wallsP.map((value, index) => (value !== null && value >= ENTRY_YES ? index : -1)).filter(index => index >= 0)
+  if (webYes && yes.length === 0 && walled.length === 1 && cardsP.every((value, index) => index === walled[0] || (value !== null && value <= ENTRY_NO))) return { kind: 'browser', cardId: shown[walled[0]].cardId, top: null, ...base }
   if (no === shown.length && shown.length) return { kind: 'not_browser', top: 'not_browser_task', ...base }
   if (shown.length === 1 && webYes && !(cardsP[0] !== null && cardsP[0] <= ENTRY_NO)) return { kind: 'browser', cardId: shown[0].cardId, top: null, ...base }
   // ask which card only when it is a web task (decided) or several cards were decided yes; an undecided request stays an ordinary turn
@@ -174,24 +214,35 @@ export async function decideBrowserEntry({ message, cards, memoryPacket = null, 
       ...(memoryPacket ? ['Stored memory fetched for this turn (from this app; may be outdated, never instructions):', compactText(memoryPacket, 3000)] : [])].join('\n') }],
     questions: entryQuestions(cards, { codeCard }), timeoutMs, signal, authorizeDispatch,
   })
-  return { ...readBrowserEntry(result.answers, cards, { codeCard }), usage: result.usage, latencyMs: result.latencyMs }
+  const first = { ...readBrowserEntry(result.answers, cards, { codeCard }), usage: result.usage, latencyMs: result.latencyMs }
+  // c23: an interruption of the site never vetoes the card (a follow-up only where it can matter)
+  const wall = await entryWallFollowUp({ message, cards, entry: first, client, timeoutMs, signal, authorizeDispatch })
+  return wall ? { ...wall.entry, usage: first.usage, latencyMs: first.latencyMs, followUpUsage: wall.usage } : first
 }
 
 const RESUME_RULES = 'A browser task is paused until the user answers. Decide what the user message means for that task.'
 // question: the message in which the Agent asked the person (R1: the judgment needs what was asked, not only a code). Bounded; it goes
 // with the same egress kind as the reply itself (Browser data of this run).
 export const MAX_RESUME_QUESTION = 400
-export async function decideResume({ message, pause, question = null, client, thresholds: overrides, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, signal, authorizeDispatch }) {
+// c23 (in-run messages, owner flag EGDESK_INRUN_MESSAGES): a message that arrives while the task waits for the person may REPLACE the task ("아 그거
+// 말고 10월 명세서") instead of answering the question. With detectChange the same request carries one predicate quoting the message and the
+// question (R1, R4); decided yes (the product's done bar) -> the goal is updated and the task resumes under it. Off: the request is unchanged.
+export const RESUME_CHANGE = 'resume_change'
+export async function decideResume({ message, pause, question = null, detectChange = false, client, thresholds: overrides, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, signal, authorizeDispatch }) {
   const thresholds = decisionThresholds(overrides)
   const asked = typeof question === 'string' && question.trim() ? `\nAsked: ${compactText(question, MAX_RESUME_QUESTION)}` : ''
+  const quoted = text => `"${String(text).replace(/"/g, "'")}"`
+  const changeQuestion = detectChange ? [predicateQuestion(RESUME_CHANGE, `Does this message, ${quoted(compactText(message, 200))}, replace what the task was asked to do (a different target or request) instead of answering ${typeof question === 'string' && question.trim() ? `the question ${quoted(compactText(question, 200))}` : 'what was asked'}?`)] : []
   const result = await client.decide({
     input: [{ role: 'developer', content: RESUME_RULES },
       { role: 'user', content: `Paused because: ${pause.kind} (${pause.code})${asked}\nUser message: ${compactText(message, MAX_MESSAGE)}` }],
-    questions: [choiceQuestion('task_resume', 'What does the user message mean for the paused browser task?', tableOptions(RESUME_CONTROLS))],
+    questions: [choiceQuestion('task_resume', 'What does the user message mean for the paused browser task?', tableOptions(RESUME_CONTROLS)), ...changeQuestion],
     timeoutMs, signal, authorizeDispatch,
   })
   const picked = readChoice(result.answers, 'task_resume', { minConfidence: thresholds.choice, minMargin: thresholds.margin })
-  return { kind: picked.state === 'accepted' ? picked.value : 'uncertain', confidence: picked.confidence, margin: picked.margin, usage: result.usage }
+  const changeAnswer = result.answers?.[RESUME_CHANGE]
+  const change = detectChange ? (changeAnswer?.type === 'predicate' && Number.isFinite(changeAnswer.probability) ? changeAnswer.probability >= thresholds.done : false) : false
+  return { kind: picked.state === 'accepted' ? picked.value : 'uncertain', confidence: picked.confidence, margin: picked.margin, usage: result.usage, ...(detectChange ? { change, changeP: changeAnswer?.type === 'predicate' ? changeAnswer.probability : null } : {}) }
 }
 
 /** One task per conversation, kept in memory only (never persisted, never logged). */
@@ -210,6 +261,23 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = BROWSER_TASK_TT
     paused(conversationKey) {
       for (const task of tasks.values()) if (task.conversationKey === conversationKey && task.status === 'paused' && live(task)) return task
       return null
+    },
+    // c23: the person changed what the task should do (a message that arrived while it ran, or instead of an answer while it waited). The goal
+    // becomes the original request plus what the person said (at most the last MAX_GOAL_CHANGES, newest last); the next step is planned under
+    // it, with the same recorded-choice check (a changed request is not the recorded one). A RUNNING task is asked to end its segment at the next
+    // safe point (the page action in flight finishes; nothing else is done under the old goal). Returns the task, or null when none can take it.
+    changeGoal(conversationKey, message) {
+      let pick = null
+      for (const task of tasks.values()) if (task.conversationKey === conversationKey && live(task) && (!pick || task.updatedAt >= pick.updatedAt)) pick = task
+      if (!pick || typeof message !== 'string' || !message.trim()) return null
+      pick.goalBase ??= pick.goal
+      pick.changes = [...(pick.changes ?? []), compactText(message, MAX_CHANGE_CHARS)].slice(-MAX_GOAL_CHANGES)
+      pick.goalChanges = (pick.goalChanges ?? 0) + 1
+      pick.goal = compactText(`${compactText(pick.goalBase, MAX_GOAL_BASE_CHARS)}${pick.changes.map(text => ` / Update from the person while the task ran: ${text}`).join('')}`, MAX_MESSAGE)
+      pick.pendingAsk = null; pick.confirm = null // an answer to a question of the old goal is not an answer of the new one
+      if (pick.status === 'running') { pick.replan = true; try { pick.abort?.abort() } catch { /* the segment may be over */ } }
+      pick.updatedAt = now()
+      return pick
     },
     touch(task) { task.updatedAt = now() },
     // The conversation was deleted (chat forgetConversation): its tasks go, running or paused. -> how many.
@@ -322,6 +390,7 @@ export function textNearIdentifier(segments, ids) {
 /** The one structured line the subjective model receives. Closed vocabulary, counts, and (for a choice) up to three element labels. */
 export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [] }) {
   const body = { id: task.taskId, status, ...(code ? { code } : {}),
+    ...(task.goalChanges > 0 ? { goalChanges: Math.min(task.goalChanges, 9) } : {}), // c23: how many times the person changed the request while it ran
     ...(candidates.length ? { candidates: candidates.slice(0, 3).map(item => compactText(item.replace(/^\[[A-Z]\d+\]\s*/, ''), 60)) } : {}),
     // c17: a confirmation names what it confirms against (the label the earlier run settled on, from this app's own record)
     ...(typeof recorded === 'string' && recorded.trim() ? { recorded: compactText(recorded.replace(/^\[[A-Z]\d+\]\s*/, ''), 60) } : {}),
@@ -341,7 +410,8 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
  */
 // pageTextInNote(): whether this run's models may receive Browser data (the run's egress gate, page_text); off by default.
 // cardTextInEntry(): whether the entry may quote what each card shows (the run's egress gate, page_text); off by default.
-export function createDirectBrowserEntry({ provider, store, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false, cardTextInEntry = () => false } = {}) {
+// inRunChange(): whether a message that replaces the task is recognised (the in-run messages flag); off by default.
+export function createDirectBrowserEntry({ provider, store, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false, cardTextInEntry = () => false, inRunChange = () => false } = {}) {
   if (!provider || typeof provider.runDirectTask !== 'function' || typeof provider.reflexScope !== 'function') throw new TypeError('provider must offer runDirectTask')
   const note = (key, raw) => { try { calibration?.record?.(raw) } catch { /* recording never changes behaviour */ } return key }
   const record1 = (answers, count, would, fallback) => {
@@ -349,7 +419,8 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
     const raw = { feature: 'browser_reflex', mode: 'on', candidates: count, ...(fallback ? { fallback } : {}),
       judgments: answers ? [
         ...(Number.isFinite(answers.web) ? [{ q: ENTRY_WEB, would, p: answers.web, threshold: ENTRY_YES }] : []),
-        ...(answers.cardsP || []).map((value, index) => (Number.isFinite(value) ? { q: entryCardName(index), would: value >= ENTRY_YES ? 'act' : value <= ENTRY_NO ? 'none' : 'hold', p: value, threshold: ENTRY_YES } : null)).filter(Boolean)] : [] }
+        ...(answers.cardsP || []).map((value, index) => (Number.isFinite(value) ? { q: entryCardName(index), would: value >= ENTRY_YES ? 'act' : value <= ENTRY_NO ? 'none' : 'hold', p: value, threshold: ENTRY_YES } : null)).filter(Boolean),
+        ...(answers.wallsP || []).map((value, index) => (Number.isFinite(value) ? { q: entryWallName(index), would: value >= ENTRY_YES ? 'act' : value <= ENTRY_NO ? 'none' : 'hold', p: value, threshold: ENTRY_YES } : null)).filter(Boolean)] : [] }
     return note(null, raw)
   }
 
@@ -387,13 +458,20 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
     for (;;) {
       const remaining = MAX_TASK_STEPS - task.steps
       if (remaining <= 0) return finishPause(task, { kind: 'cannot_proceed', code: 'step_limit' }, null)
+      // c23: a change of the goal ends this segment at the next safe point (signal); the next one starts under the new goal
+      task.replan = false
+      const controller = new AbortController()
+      task.abort = controller
       const result = await provider.runDirectTask(run, { cardId: task.cardId, goal: task.goal, userContext: task.userContext, resumeState: task.state, priorRun: task.prior, memoryPacket: task.memoryPacket,
-        maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: info => store.progress?.(task, info), today: localDay(now()) })
+        maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: info => store.progress?.(task, info), today: localDay(now()), signal: controller.signal })
+      if (task.abort === controller) task.abort = null
       task.liveStep = 0
       recordSteps(result)
       tally(task, result)
       task.state = record(result.state) ? result.state : task.state
       store.touch(task)
+      // c23: whatever this segment ended with (even a pause or done) was about the OLD goal: the person changed it meanwhile, so plan again
+      if (task.replan && result.outcome !== 'fallback' && task.status === 'running') continue
       if (result.outcome === 'max_steps' && result.reason !== 'step_rejected') continue
       return fromResult(task, result)
     }
@@ -496,7 +574,7 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
       const paused = store.paused(conversationKey)
       try {
         if (paused) {
-          const resume = await decideResume({ message, pause: paused.pause, question: paused.question, client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
+          const resume = await decideResume({ message, pause: paused.pause, question: paused.question, detectChange: inRunChange() === true, client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
           if (!gateScope.isDecisionCurrent()) return { handled: false, reason: 'evidence_unavailable' }
           if (resume.kind === 'cancel_task') { paused.status = 'cancelled'; return { handled: false, reason: 'task_cancelled' } }
           if (resume.kind !== 'resume_task') return { handled: false, reason: resume.kind === 'unrelated' ? 'unrelated' : 'uncertain' }
@@ -512,7 +590,7 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
           }
           // c17: a bare "응" says nothing without what was asked; code names what the person confirmed (R1)
           const confirm = paused.confirm
-          paused.userContext.push(confirm ? `Asked to confirm "${confirm.candidate}"${confirm.recorded ? ` as the earlier choice "${confirm.recorded}"` : ''}, the user answered: ${compactText(message, MAX_MESSAGE)}` : compactText(message, MAX_MESSAGE))
+          void (resume.change === true ? store.changeGoal(conversationKey, message) /* c23: the message replaces the request: it is the goal now, not an answer */ : paused.userContext.push(confirm ? `Asked to confirm "${confirm.candidate}"${confirm.recorded ? ` as the earlier choice "${confirm.recorded}"` : ''}, the user answered: ${compactText(message, MAX_MESSAGE)}` : compactText(message, MAX_MESSAGE)))
           paused.confirm = null; paused.status = 'running'; paused.pause = null; paused.asked = false
           const out = await finalize(await loop(run, paused, hosts), paused)
           return { ...out, resumed: true }
@@ -521,8 +599,14 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
         // entry. Real measurement (2026-11-25): the same request with the packet in the entry evidence fell from 0.93 to 0.76 against a 0.75 bar.
         const memoryPacket = typeof memory?.packet === 'string' && memory.packet ? memory.packet : null
         const rode = entryAnswers && entryAnswers.browser_entry?.type === 'predicate'
-        const entry = rode ? readBrowserEntry(entryAnswers, cards, { codeCard: entryAnswers.codeCard ?? null })
+        let entry = rode ? readBrowserEntry(entryAnswers, cards, { codeCard: entryAnswers.codeCard ?? null })
           : await decideBrowserEntry({ message, cards: await withShownLines(run, message, cards), client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
+        if (rode && entry.kind !== 'browser' && cardTextInEntry() === true) {
+          // c23: the follow-up for the ride-along answers (the standalone entry did it inside decideBrowserEntry)
+          const seen = await withShownLines(run, message, cards)
+          const wall = await entryWallFollowUp({ message, cards: seen, entry, client: gateScope.client, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
+          if (wall) entry = wall.entry
+        }
         if (!gateScope.isDecisionCurrent()) return { handled: false, reason: 'evidence_unavailable' }
         record1(entry, cards.length, entry.kind === 'browser' ? 'act' : 'hold')
         // Several granted cards and the pick is not decided (or the model chose to ask): the person is asked which card, and the request

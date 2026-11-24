@@ -12,6 +12,7 @@ import { triageTurn } from './egdesk-turn-memory.mjs'
 import { mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { PS_NAMES, pageStateAnswers, pageStateProbabilities, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
 import { entryAnswersOf, entryWire, isEntryQuestion } from './egdesk-browser-entry.fixture.mjs'
+import { createBrowserTaskStore, createDirectBrowserEntry } from './egdesk-browser-task.mjs'
 const STEP = `decide:${['next_step', ...PS_NAMES, 'goal_met'].join('+')}`
 
 // L8/C11: the objective browser loop <-> chat round trip in the 'on' path of the REAL chat runtime under completed-messages-only
@@ -50,7 +51,7 @@ const pageFree = text => {
   assert.doesNotMatch(text, /https?:|\/invoices|\/biz\/|\/download|\d{3}-\d{2}-\d{5}/, 'no address, path or page numbers')
   assert.doesNotMatch(text.replace(/^- It works on the site portal\.example\.test\.$/gm, ''), /portal\.example|example\.test/, 'the host only on its own page_text line')
 }
-function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {}, pick = null, patch = null, virtual = false, actGate = null, writerGate = null } = {}) {
+function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {}, pick = null, patch = null, virtual = false, actGate = null, writerGate = null, inRun = false, person = null } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-c11-')); chmodSync(dir, 0o700)
   const store = openChatStore({ dataDir: dir, ownerScope: 'synthetic-c11' })
   t.after(() => { store.close(); rmSync(dir, { recursive: true, force: true }) })
@@ -58,7 +59,7 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
   patch?.(pages)
   const events = [], calls = [], replies = [], decisions = [], acts = [], uiKinds = [], factsDuringActs = [], timeline = []
   let docSeq = 1, turnCount = 0, threadCount = 0, chat = null, clock = 5_000_000, forks = 0, failTurn = false
-  const timers = [], flowAsked = [], forkPrompts = [], turnIds = [], sends = []
+  const timers = [], flowAsked = [], forkPrompts = [], turnIds = [], sends = [], personAsked = [], resumeAsked = []
   let cur = { url: start, documentId: 'doc1', revision: 1 }
   const snap = () => ({ cardId: 'card', documentId: cur.documentId, revision: cur.revision, url: cur.url, readyState: 'complete', text: ['합성 포털'],
     viewport: { width: 300, height: 200, devicePixelRatio: 1 }, interactiveElements: pages[cur.url] })
@@ -72,6 +73,12 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
       // c20: the entry predicates (the request, and one per card)
       const entryAnswer = q => { const msg = /(?:User message: |Message:\n)(.*)/.exec(text)?.[1] ?? ''
         return entryWire([q], { web: /세금계산서/.test(msg) ? 0.95 : 0.05 })[0] }
+      if (names.includes('message__person_status')) { // c23: the three questions about a message the person sent while the task works
+        personAsked.push({ names, text })
+        const said = person ? person(text) : {}
+        const answers = wire.questions.map(q => ({ name: q.name, type: 'predicate', probability: (said[q.name.replace(/^message__person_/, '')] === true) ? 0.95 : 0.03 }))
+        return { ok: true, text: async () => JSON.stringify({ answers }) }
+      }
       if (names.some(name => name.includes('__'))) { // one heartbeat request for every question proposed at this beat (provider__name)
         // L3 c15: the message judgment is asked as yes/no questions (message__ask / __pointer / __note / __stalled) and code derives the kind.
         // This mock keeps its old policy (a wait message when one is possible, else a stall notice) and reports the kinds the questions stand for.
@@ -95,7 +102,9 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
       }
       if (q0.name === 'browser_entry') return { ok: true, text: async () => JSON.stringify({ answers: wire.questions.map(entryAnswer) }) }
       if (q0.name === 'task_resume') { const msg = /User message: (.*)/.exec(text)?.[1] ?? ''
-        return { ok: true, text: async () => JSON.stringify({ answers: [choice('task_resume', /취소/.test(msg) ? 'cancel_task' : /점심/.test(msg) ? 'unrelated' : 'resume_task', 0.95)] }) } }
+        resumeAsked.push({ names, text })
+        const change = wire.questions.find(q => q.name === 'resume_change') // c23: only with the in-run flag
+        return { ok: true, text: async () => JSON.stringify({ answers: [choice('task_resume', /취소/.test(msg) ? 'cancel_task' : /점심/.test(msg) ? 'unrelated' : 'resume_task', 0.95), ...(change ? [{ name: 'resume_change', type: 'predicate', probability: person && person(msg).change === true ? 0.95 : 0.03 }] : [])] }) } }
       const evidence = wire.input[1].content
       const url = /URL: (\S+)/.exec(evidence)?.[1], ctx = /Context the user gave in the chat \(not page text\):\n([\s\S]*?)\n\n/.exec(evidence)?.[1] ?? ''
       let next, goalMet = 0, pageState = 'content', full = null, psWire = null
@@ -165,7 +174,7 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
       throw new Error(`Unexpected method: ${method}`)
     },
     decisionContext: { mode: () => 'on', configured: () => true, client, calibrationLog: { record: () => ({}), complete() {} },
-      ...(held ? { draftCheck: { mode: () => 'on' } } : {}), ...(flow ? { conversationFlow: { mode: () => 'on' } } : {}),
+      ...(held ? { draftCheck: { mode: () => 'on' } } : {}), ...(flow ? { conversationFlow: { mode: () => 'on' } } : {}), ...(inRun ? { inRunMessages: { mode: () => 'on' } } : {}),
       browserEntry: { mode: () => 'on', ...entry, ...(entry.memory ? { memory: async args => { memoryCalls.push(1); return entry.memory(args) } } : {}) } },
   })
   chat.setConnection(true)
@@ -177,7 +186,7 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
   const notify = (method, params) => chat.handleNotification({ method, params })
   let holdingWriter = false // c18: while a test holds the writer turn, settling must not wait for the flow job it holds
   const settle = async () => { for (let i = 0; i < 8; i++) { if (!holdingWriter) await chat.flowIdle(); await new Promise(r => setTimeout(r, 3)) } }
-  const w = { flowAsked, forkPrompts, timers, settle, holdWriter(on) { holdingWriter = on === true },
+  const w = { flowAsked, forkPrompts, timers, settle, personAsked, resumeAsked, holdWriter(on) { holdingWriter = on === true },
     async advance(ms, { settleEvery = 1 } = {}) { const end = clock + ms; let fired = 0
       for (;;) { timers.sort((a, b) => a.at - b.at); const next = timers[0]; if (!next || next.at > end) break; timers.shift(); clock = next.at; next.fn(); if (++fired % settleEvery === 0) await settle(); else await new Promise(r => setImmediate(r)) }
       clock = end; await settle() },
@@ -710,4 +719,158 @@ test('C5 c22 ride-along through the runtime quotes what the card shows, exactly 
   assert.match(rideCard, /which now shows "합성 포털"\?/)
   assert.equal(rideCard, aloneCard, 'the same quoting on both paths')
   assert.deepEqual(ride.decisions[0].names.slice(-2), ['browser_entry', 'browser_entry_card_0'])
+})
+
+// ---- L8 c23: in-run messages for browser tasks (EGDESK_INRUN_MESSAGES; lane L2's contract: inRunMessageTo, pendingInRunMessages, settleInRunMessage) ----
+// While the objective loop works inside the held-open run the heartbeat's three questions decide: stop -> the run is stopped (nothing more is
+// acted: the page action in flight finishes, every later step is fenced); change -> the goal is updated and the next step is planned under it
+// (the loop ends its segment at the next safe point); status -> one checked progress note. A message not judged a change stays pending.
+const goalLine = evidence => /^Goal: (.*)$/m.exec(evidence)?.[1] ?? ''
+const INRUN_PICK = (choices, evidence, url, ctx) => {
+  const goal = goalLine(evidence)
+  if (/\/download\//.test(url)) return { next: 'goal_met', goalMet: 0.95 }
+  if (/\/biz\/2/.test(url)) return starts(choices, /지난 달/.test(goal) ? '지난 달' : '이번 달')
+  if (/\/invoices/.test(url)) return /두 번째/.test(ctx + goal) ? starts(choices, '987-65') : 'needs_user_context'
+  return 'blocked'
+}
+const withPrevMonth = p => {
+  p[`${O}/biz/2`] = [el('d2', 'link', '이번 달 세금계산서 다운로드', { href: `${O}/download/2.pdf` }), el('d2p', 'link', '지난 달 세금계산서 다운로드', { href: `${O}/download/2p.pdf` })]
+  p[`${O}/download/2p.pdf`] = []
+}
+const CHANGE_MSG = '아 그거 말고 지난 달 걸로', STOP_MSG = '그만해, 취소할게', STATUS_MSG = '지금 어디까지 했어?', CHATTER = '고마워'
+const sayings = text => ({ change: text.includes('그거 말고'), stop: text.includes('그만해'), status: text.includes('어디까지') })
+const inRunWorld = (t, extra = {}) => world(t, { virtual: true, inRun: true, pick: INRUN_PICK, patch: withPrevMonth, person: sayings, ...extra })
+async function toLoop(w) { // the question asked, the person's answer taken in the run: the objective loop is working inside the run
+  await w.send(MSG); const question = await w.subjective()
+  await w.send('두 번째 사업자로', { wait: false }); await w.settle()
+  return { question, runId: w.runs()[0].runId }
+}
+const sendInRun = (w, runId, message) => w.send(message, { wait: false, extra: { inRunMessageTo: runId } })
+
+test('I1 a CHANGE arriving during a navigation: the goal is updated, the navigation in flight finishes, the next step is planned under the new goal (nothing of the old goal is done after it)', async t => {
+  const slow = gate()
+  const w = inRunWorld(t, { actGate: n => (n === 1 ? slow.promise : null) })
+  const { runId } = await toLoop(w)
+  assert.deepEqual(w.acts.map(a => a.url), [`${O}/biz/2`], 'the first navigation is in flight, inside the run')
+  const out = await sendInRun(w, runId, CHANGE_MSG)
+  assert.deepEqual([out.accepted, out.inRun], [true, true])
+  await w.advance(16000)
+  assert.equal(w.personAsked.length, 1, 'one beat request about the message')
+  assert.deepEqual(w.personAsked[0].names, ['message__person_status', 'message__person_change', 'message__person_stop'])
+  assert.equal(w.acts.length, 1, 'nothing else is acted while the navigation is in flight')
+  slow.open(); await w.chat.browserRunIdle()
+  assert.deepEqual(w.acts.map(a => a.url), [`${O}/biz/2`, `${O}/download/2p.pdf`], 'planned under the new goal: last month\'s, never this month\'s')
+  const note = w.note()
+  assert.deepEqual([note.status, note.goalChanges], ['done', 1])
+  assert.equal(w.chat.flowRuns.get([...w.chat.runs.values()][0]).personJudged.get(w.sends.at(-1).requestId), 'steer')
+  const step = w.decisions.filter(d => d.names.includes('next_step')).at(-2)
+  assert.match(step.input, /Goal: 거래처 포털에서 이번 달 세금계산서 내려받아줘 \/ Update from the person while the task ran: 아 그거 말고 지난 달 걸로/)
+})
+
+test('I2 a STOP arriving during a navigation: the run stops at the safe point; the page action in flight finishes; nothing more is acted', async t => {
+  const slow = gate()
+  const w = inRunWorld(t, { actGate: n => (n === 1 ? slow.promise : null) })
+  const { runId } = await toLoop(w)
+  assert.equal(w.acts.length, 1)
+  await sendInRun(w, runId, STOP_MSG)
+  await w.advance(16000)
+  assert.equal(w.runs()[0].status, 'interrupted', 'stopped through the same path as the stop button')
+  slow.open(); await w.settle(); await w.chat.browserRunIdle()
+  assert.deepEqual(w.acts.map(a => a.url), [`${O}/biz/2`], 'only the navigation that was already in flight; no later step')
+  assert.equal(w.turnIds.length, 1, 'no native turn started for a stopped task')
+  assert.ok(w.history().some(([role, text]) => role === 'user' && text === STOP_MSG), 'the message stays in the conversation')
+})
+
+test('I3 a CHANGE arriving during a person step (the task waits for the answer): the message replaces the request instead of answering; the task resumes under the new goal', async t => {
+  const w = inRunWorld(t)
+  await w.send(MSG); await w.subjective()
+  assert.ok(w.runs()[0].replyOpen?.messageId, 'the task waits for the person')
+  const out = await w.send('아 그거 말고 지난 달 걸로, 두 번째 사업자로')
+  assert.equal(out.inRun, true)
+  assert.deepEqual(w.resumeAsked.at(-1).names, ['task_resume', 'resume_change'])
+  assert.match(w.resumeAsked.at(-1).text, /Asked: 사업자가 둘입니다/)
+  const change = w.decisions.at(-1) // (the request that carried the predicate is the resume request)
+  const resume = w.resumeAsked.at(-1)
+  assert.ok(resume.text.includes('아 그거 말고 지난 달 걸로, 두 번째 사업자로'))
+  assert.deepEqual(w.acts.map(a => a.url), [`${O}/biz/2`, `${O}/download/2p.pdf`], 'the new goal (the second business, last month) decided the steps')
+  const note = w.note()
+  assert.deepEqual([note.status, note.goalChanges], ['done', 1])
+  const step = w.decisions.filter(d => d.names.includes('next_step')).at(-1)
+  assert.doesNotMatch(step.input, /Context the user gave in the chat/, 'the replacing message is the goal now, not an answer in the context')
+})
+
+test('I3b the same message with the flag off: the request is the c22 one (no change predicate) and the message is an answer in the context', async t => {
+  const w = inRunWorld(t, { inRun: false })
+  await w.send(MSG); await w.subjective()
+  await w.send('아 그거 말고 지난 달 걸로, 두 번째 사업자로')
+  assert.deepEqual(w.resumeAsked.at(-1).names, ['task_resume'])
+  assert.equal(w.note().goalChanges, undefined)
+})
+
+test('I4 a STATUS question during the loop: one checked progress note, nothing acted differently, the message settled as a reply', async t => {
+  const slow = gate()
+  const w = inRunWorld(t, { actGate: n => (n === 1 ? slow.promise : null) })
+  const { runId, question } = await toLoop(w)
+  const out = await sendInRun(w, runId, STATUS_MSG)
+  await w.advance(16000)
+  assert.equal(w.posted().filter(text => text === WAIT_TEXT).length, 1, 'one progress note, completed and checked')
+  assert.equal(w.chat.flowRuns.get([...w.chat.runs.values()][0]).personJudged.get(out.requestId), 'reply')
+  assert.match(w.forkPrompts.at(-1), /The task in the browser: \d+ page steps? so far/)
+  slow.open(); await w.chat.browserRunIdle()
+  assert.deepEqual(w.acts.map(a => a.url), [`${O}/biz/2`, `${O}/download/2.pdf`], 'the task went on as it was')
+  assert.equal(w.note().goalChanges, undefined)
+  assert.deepEqual(w.posted().slice(0, 1), [question])
+})
+
+test('I5 a message not judged a change (chatter, or a judge that did not answer yes) neither steers the task nor stops it; it stays pending and goes on with the next turn', async t => {
+  const slow = gate()
+  const w = inRunWorld(t, { actGate: n => (n === 1 ? slow.promise : null) })
+  const { runId } = await toLoop(w)
+  const out = await sendInRun(w, runId, CHATTER)
+  await w.advance(16000)
+  assert.equal(w.chat.flowRuns.get([...w.chat.runs.values()][0]).personJudged.get(out.requestId), 'failed', 'settle left it pending (the contract\'s "failed"): it was not judged a change')
+  slow.open(); await w.chat.browserRunIdle()
+  assert.deepEqual(w.acts.map(a => a.url), [`${O}/biz/2`, `${O}/download/2.pdf`], 'the task is untouched')
+  assert.equal(w.note().goalChanges, undefined)
+  await w.subjective()
+  assert.deepEqual(w.chat.carriedInRun.get(DM), [CHATTER], 'never lost: carried into the conversation\'s next turn')
+})
+
+test('I6 flag off: a message named for the working browser run is refused before anything is stored', async t => {
+  const slow = gate()
+  const w = inRunWorld(t, { inRun: false, actGate: n => (n === 1 ? slow.promise : null) })
+  const { runId } = await toLoop(w)
+  await assert.rejects(sendInRun(w, runId, CHANGE_MSG), error => error.code === 'INRUN_MESSAGE_UNAVAILABLE')
+  assert.equal(w.personAsked.length, 0)
+  slow.open(); await w.chat.browserRunIdle()
+})
+
+test('I7 the store: a change composes the goal from the original request and what the person said (bounded, newest last), resets an old answer, and a running task re-plans', async () => {
+  const store = createBrowserTaskStore()
+  const task = store.create({ conversationKey: 'dm', cardId: 'card', goal: '이번 달 명세서 내려받아줘' })
+  task.pendingAsk = 'choice_needed'
+  assert.equal(store.changeGoal('other', 'x'), null, 'no task in that conversation')
+  const aborts = []; task.abort = { abort: () => aborts.push(1) }
+  assert.equal(store.changeGoal('dm', '지난 달로'), task)
+  assert.deepEqual([task.goal, task.goalChanges, task.replan, task.pendingAsk, aborts.length], ['이번 달 명세서 내려받아줘 / Update from the person while the task ran: 지난 달로', 1, true, null, 1])
+  for (const text of ['아니 11월', '아니 12월', '아니 1월']) store.changeGoal('dm', text)
+  assert.equal(task.changes.length, 3); assert.equal(task.goalChanges, 4)
+  assert.doesNotMatch(task.goal, /지난 달로/, 'only the last three changes stay')
+  assert.ok(task.goal.length <= 500)
+  assert.equal(store.changeGoal('dm', '   '), null)
+  task.status = 'done'; assert.equal(store.changeGoal('dm', 'late'), null, 'a finished task takes no change')
+})
+
+test('I8 the loop: a change between or during segments is planned again under the new goal, whatever the old segment ended with (done included)', async () => {
+  const store = createBrowserTaskStore(), goals = []
+  const provider = { directEntryEnabled: () => true, reflexScope: () => ({ client: { decide: async r => ({ answers: Object.fromEntries(r.questions.map(q => [q.name, { type: 'predicate', probability: 0.95 }])) }) }, isDecisionCurrent: () => true }),
+    async runDirectTask(_run, args) {
+      goals.push(args.goal)
+      if (goals.length === 1) { store.changeGoal('dm', '지난 달로'); return { outcome: 'done', steps: [{ url: 'https://portal.example.test/x', actions: [] }], state: null } } // the change arrived as the segment ended
+      return { outcome: 'done', steps: [{ url: 'https://portal.example.test/y', actions: [] }], state: null } } }
+  const entry = createDirectBrowserEntry({ provider, store })
+  const out = await entry.handle({ run: { runId: 'r', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm', message: '세금계산서 내려받아줘', hosts: { card: 'portal.example.test' } })
+  assert.deepEqual([out.status, goals.length], ['done', 2])
+  assert.equal(goals[0], '세금계산서 내려받아줘'); assert.match(goals[1], /Update from the person while the task ran: 지난 달로/)
+  assert.equal(JSON.parse(out.note).egdesk_browser_task.goalChanges, 1)
 })

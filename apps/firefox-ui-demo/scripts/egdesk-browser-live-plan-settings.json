@@ -1,7 +1,7 @@
 {
- "set": "browser-live-settings-v4",
- "description": "LIVE, c22 re-run of (c) after v3 (entry fixed: request 0.90, card 1.0 with the shown lines; the first step then chose scroll_more at 0.56). The toggle is never an option (the loop has no action for it) and v3's step evidence did not say it existed. Now the step names the controls only the person may operate, quoted, and asks one predicate per control (\"Is this control, \\\"마케팅 정보 알림\\\" (switch, now \\\"on\\\"), the one this request asks to change?\"); a decided yes makes the step the person's (human_step, the control named in the note). No bound is changed. Within 6k: the toggle page and the error page; the tab path (se-changed, ~4k alone) is left for a separate send.",
- "maxRequests": 6,
+ "set": "browser-live-settings-v5",
+ "description": "LIVE, c23 re-run of (c), after v4 (sent 2026-11-25: base PASSED with the person-only controls inside the step request, person_target_0 1.0; the error page FAILED at the entry, card predicate 0). Two changes, neither lowers a bound: (1) the step request is the v3 body again (the controls are no longer carried in every step: that moved the statement step from 0.92 to 0.39); only when the step found no way forward (here scroll_more or blocked) a follow-up request names the controls only the person may operate and asks one quoted predicate per control (decided yes -> human_step, the control named); (2) on the error page the entry follows up with one predicate per card decided no (is this open page an error page, a sign-in page or a check?): an interruption never vetoes the card, so the person is told the page shows an error. Within 6k: the toggle page and the error page; the tab path is left for a separate send.",
+ "maxRequests": 7,
  "tokenCeiling": 6000,
  "passRule": "The journey passes when every hard and every absolute check holds. Soft checks are reported and never fail it. The journey stops at the first hard or absolute failure, at the first request that fails (no retries), at the request limit or at the token ceiling; checks of phases that did not run count as not run (a failure).",
  "phases": [
@@ -101,7 +101,7 @@
    "id": "budget",
    "phase": "all",
    "severity": "absolute",
-   "note": "At most 6 requests and at most 6k input tokens."
+   "note": "At most 7 requests and at most 6k input tokens."
   }
  ]
 }

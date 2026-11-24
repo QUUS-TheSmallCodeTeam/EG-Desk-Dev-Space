@@ -5193,7 +5193,9 @@ export class CodexChatRuntime {
         // c20: the finished task's status text goes into the note only where this run's models may receive Browser data
         pageTextInNote: () => { try { return this.decisionEgressFor(run).allows('page_text') === true } catch { return false } },
         // c21: the entry quotes the first lines each card shows, under the same gate
-        cardTextInEntry: () => { try { return this.decisionEgressFor(run).allows('page_text') === true } catch { return false } } })
+        cardTextInEntry: () => { try { return this.decisionEgressFor(run).allows('page_text') === true } catch { return false } },
+        // c23: with in-run messages on, a message that replaces the task is recognised (the same flag, EGDESK_INRUN_MESSAGES)
+        inRunChange: () => this.inRunMessagesOn() })
       const out = await entry.handle({ run, conversationKey: hold.key, message, hosts: hold.hosts, titles: hold.titles || {} })
       if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
     } catch { note = null; handedOff = false }
@@ -5343,7 +5345,8 @@ export class CodexChatRuntime {
         // c20: the finished task's status text goes into the note only where this run's models may receive Browser data
         pageTextInNote: () => { try { return this.decisionEgressFor(preRun).allows('page_text') === true } catch { return false } },
         // c21: the entry quotes the first lines each card shows, under the same gate
-        cardTextInEntry: () => { try { return this.decisionEgressFor(preRun).allows('page_text') === true } catch { return false } } })
+        cardTextInEntry: () => { try { return this.decisionEgressFor(preRun).allows('page_text') === true } catch { return false } },
+        inRunChange: () => this.inRunMessagesOn() })
       const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), titles: this.browserEntryTitles(body), memory, entryAnswers })
       if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
     } catch { note = null; handedOff = false }
@@ -5894,7 +5897,7 @@ export class CodexChatRuntime {
       const said = new Set(verdicts.filter(v => v.accepted && v.value === 'yes').map(v => v.name))
       const action = personDecision(said)
       if (subject) subject.derived = action
-      return this.trackFlowJob(this.decidePersonMessage(run, flow, person, action, personFacts))
+      return this.trackFlowJob(this.decidePersonMessage(run, flow, person, action, personFacts, said.has('person_change') && !said.has('person_stop')))
     }
     const facts = flow.pendingFacts, options = flow.pendingOptions ?? []
     flow.pendingFacts = null; flow.pendingOptions = null
@@ -6064,7 +6067,7 @@ export class CodexChatRuntime {
   // message); code decides (personDecision) and settles it through lane L2's settleInRunMessage: 'interrupt' (stop), 'steer' (change, and the
   // safe default for anything else or a failed judgment), or 'reply' after one checked progress reply was posted (status only). A message
   // whose round never concluded is steered at the next beat. A settle that fails leaves it pending; lane L2 carries it into the next turn.
-  async decidePersonMessage(run, flow, person, action, facts) {
+  async decidePersonMessage(run, flow, person, action, facts, judgedChange = false) {
     // Returns the closed word for the beat's record: 'model' when a reply was posted, else 'none' (what was settled is personJudged's value).
     (flow.personJudged ??= new Map()).set(person.requestId, 'deciding')
     let settled = null, posted = 'none'
@@ -6072,7 +6075,7 @@ export class CodexChatRuntime {
       posted = await this.postIntermediate(run, flow, 'reply_status', { ...facts, personMessage: person.text })
       if (posted !== 'none') settled = await this.settleInRunMessage(run, person.requestId, 'reply')
     }
-    if (settled === null && run.status === 'inProgress') settled = await this.settleInRunMessage(run, person.requestId, action === 'stop' ? 'interrupt' : 'steer')
+    if (settled === null && run.status === 'inProgress') settled = await this.settleInRunMessage(run, person.requestId, action === 'stop' ? 'interrupt' : 'steer', { judged: judgedChange === true })
     flow.personJudged.set(person.requestId, settled ?? 'none')
     return posted
   }
@@ -6114,13 +6117,14 @@ export class CodexChatRuntime {
   //      words before the new message (turn/start input). Deleting the conversation drops it.
   inRunMessagesOn() { try { return this.decisionContext?.inRunMessages?.mode?.() === 'on' } catch { return false } }
 
-  // The one working run of this conversation that can take a message now: a live native turn (not a held-open browser task), not stopping.
+  // The one working run of this conversation that can take a message now: a live native turn, or (c23) a held-open browser run whose objective loop
+  // works inside it; not a run that waits for the person's reply (that message is the reply) and not stopping.
   inRunMessageRun(clientThreadId, conversationId) {
     if (!clientThreadId) return null
     const working = [...this.runs.values()].filter(run => run.clientThreadId === clientThreadId && run.status === 'inProgress' && (!conversationId || run.conversationId === conversationId))
     if (working.length !== 1) return null
     const run = working[0], held = this.browserRunHolds.get(run)
-    return run.stopRequested || (held && held.phase !== 'turn') ? null : run
+    return run.stopRequested || (held && held.phase !== 'turn' && held.phase !== 'working') ? null : run
   }
 
   acceptInRunMessage(run, body) {
@@ -6142,13 +6146,18 @@ export class CodexChatRuntime {
     return (this.inRunMessageQueue.get(run) ?? []).filter(entry => entry.state === 'pending').map(({ requestId, text, at }) => Object.freeze({ requestId, text, at }))
   }
 
-  async settleInRunMessage(run, requestId, decision) {
+  async settleInRunMessage(run, requestId, decision, { judged = true } = {}) {
     const entry = (this.inRunMessageQueue.get(run) ?? []).find(row => row.requestId === requestId)
     if (!entry || entry.state !== 'pending' || run.status !== 'inProgress' || !['reply', 'steer', 'interrupt'].includes(decision)) return null
     if (decision === 'reply') { entry.state = 'reply'; return 'reply' }
     entry.state = 'settling'
     try {
-      if (decision === 'steer') {
+      const held = this.browserRunHolds.get(run)
+      if (decision === 'steer' && held?.phase === 'working') {
+        // c23: no native turn is live: the message changes the objective task (its goal; the next step is planned under it). Only a message the
+        // heartbeat judged a change does that; any other (an unjudged default, a judge that failed) stays pending and goes on with the person's next turn.
+        if (!judged || !this.browserTaskStore?.changeGoal(held.key, entry.text)) throw new Error('not a change of the task')
+      } else if (decision === 'steer') {
         const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId), proof = engine?.boardPeerContract?.(slot)
         if (!proof || typeof engine.steerTurn !== 'function') throw new Error('no steer contract')
         const response = await engine.steerTurn({ threadId: run.conversationId, expectedTurnId: run.runId, clientUserMessageId: requestId,

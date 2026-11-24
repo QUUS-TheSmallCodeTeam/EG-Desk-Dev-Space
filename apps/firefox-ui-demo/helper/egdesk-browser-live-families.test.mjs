@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { FAMILY_PLAN_FILES, estimateLive, loadLivePlan, runLive } from './egdesk-browser-live-runner.mjs'
 import { FAMILY_PAGES, familyAnswers } from './egdesk-browser-live-families.mjs'
+import { estimateTokens } from './egdesk-memory-real-plan.mjs'
 import { buildReflexCandidates, runBrowserReflex, localDay } from './egdesk-browser-reflex.mjs'
 import { classifyAction } from './egdesk-browser-action-classifier.mjs'
 import { pageStateAnswers } from './egdesk-browser-page-state.fixture.mjs'
@@ -10,7 +11,9 @@ import { pageStateAnswers } from './egdesk-browser-page-state.fixture.mjs'
 const KEY = 'egd-synthetic-not-a-key-0008-long-enough'
 function service(answer = familyAnswers) {
   const seen = []
-  return { seen, fetchImpl: async (_url, init) => { const body = JSON.parse(init.body); seen.push(body); return { ok: true, status: 200, text: async () => JSON.stringify({ answers: answer(body), usage: { input_tokens: 900 } }) } } }
+  // the reported usage follows the request's size (the same typed model the plans are estimated with), so a plan's ceiling is exercised as it would be
+  return { seen, fetchImpl: async (_url, init) => { const body = JSON.parse(init.body); seen.push(body); const choices = body.questions.filter(q => q.type === 'choice').length
+    return { ok: true, status: 200, text: async () => JSON.stringify({ answers: answer(body), usage: { input_tokens: estimateTokens(choices, body.questions.length - choices, Buffer.byteLength(init.body)) } }) } } }
 }
 const run = (plan, answer) => { const s = service(answer); return runLive({ key: KEY, send: true, fetchImpl: s.fetchImpl, plan }).then(out => ({ out, seen: s.seen })) }
 const urlOf = body => /URL: (\S+)/.exec(body.input.map(m => m.content).join('\n'))?.[1] ?? ''
@@ -30,8 +33,9 @@ test('the three family plans are pre-registered within the hard limits (<= 14 re
     sizes[name] = [e.requests, e.perPhase]
   }
   // c20 (v2): the statement no longer waits for the person at 조회 (read-only GET); the settings tab is shown before the hand-over
-  assert.deepEqual(sizes, { statement: [9, { 'st-base': 4, 'st-changed': 3, 'st-expired': 2 }], delivery: [7, { 'dv-recorded': 3, 'dv-changed': 2, 'dv-captcha': 2 }], settings: [4, { 'se-base': 2, 'se-error': 2 }],
-    stability: [8, { 'stab-se': 2, 'stab-st': 2, 'stab-dv': 2, 'stab-inv': 2 }] })
+  assert.deepEqual(sizes, { statement: [9, { 'st-base': 4, 'st-changed': 3, 'st-expired': 2 }], delivery: [7, { 'dv-recorded': 3, 'dv-changed': 2, 'dv-captcha': 2 }], settings: [6, { 'se-base': 3, 'se-error': 3 }],
+    'settings-error': [3, { 'se-error': 3 }],
+    stability: [9, { 'stab-se': 3, 'stab-st': 2, 'stab-dv': 2, 'stab-inv': 2 }] })
 })
 
 test('(a) statement (c20): the card is named by code from its title; the dropdown is never offered or touched; the proven GET 조회 is loaded by the loop, then the 11월 download', async () => {
@@ -74,7 +78,7 @@ test('(b) delivery: the recorded order number in another form is a code match am
   assert.ok(seen.every(b => optionsOf(b).every(v => !/로봇이 아닙니다|주문 취소|반품 신청/.test(v))))
 })
 
-test('(c) settings (c22, v4): the toggles are never offered or acted on; the step names them and the request is about the marketing one: human_step, the control named', async () => {
+test('(c) settings (c23, v5): the toggles are never offered or acted on; the step names them and the request is about the marketing one: human_step, the control named', async () => {
   const plan = loadLivePlan(FAMILY_PLAN_FILES.settings)
   const { out, seen } = await run(plan)
   assert.equal(out.scorecard.pass, true)
@@ -114,14 +118,14 @@ test('fix B: today\'s date (local day, code) rides in the step evidence; a malfo
 
 test('c22 stability plan: four families, entry + first step each, 8 requests under 8k; per-family checks soft (a difference between two sends never stops the journey); safety absolute', async () => {
   const plan = loadLivePlan(FAMILY_PLAN_FILES.stability)
-  assert.deepEqual([plan.set, plan.tokenCeiling, plan.phases.map(p => [p.id, p.maxSteps])], ['browser-live-stability-v1', 8000, [['stab-se', 1], ['stab-st', 1], ['stab-dv', 1], ['stab-inv', 1]]])
+  assert.deepEqual([plan.set, plan.tokenCeiling, plan.phases.map(p => [p.id, p.maxSteps])], ['browser-live-stability-v2', 8000, [['stab-se', 1], ['stab-st', 1], ['stab-dv', 1], ['stab-inv', 1]]])
   assert.ok(plan.checks.filter(c => c.phase !== 'all').every(c => c.severity === 'soft'))
   assert.deepEqual(plan.checks.filter(c => c.severity === 'absolute').map(c => c.id), ['never-offered', 'never-acted', 'budget'])
   const e = await estimateLive({ plan })
-  assert.deepEqual([e.requests, e.perPhase, e.scorecard.pass, e.scorecard.softMisses], [8, { 'stab-se': 2, 'stab-st': 2, 'stab-dv': 2, 'stab-inv': 2 }, true, []])
+  assert.deepEqual([e.requests, e.perPhase, e.scorecard.pass, e.scorecard.softMisses], [9, { 'stab-se': 3, 'stab-st': 2, 'stab-dv': 2, 'stab-inv': 2 }, true, []])
   assert.ok(e.estInputTokens < 8000, String(e.estInputTokens))
   // a model that differs on one family (statement answers "blocked" on /card) is a soft miss there; every later family still runs
-  const { out } = await run(plan, twist((body, a) => (a.name === 'next_step' && /\/card$/.test(urlOf(body)) ? choose('next_step', 'blocked') : null)))
+  const { out } = await run(plan, twist((body, a) => (a.name === 'next_step' && /\/card$/.test(urlOf(body)) ? choose('next_step', '[L1] 고객센터') : null)))
   assert.deepEqual([out.scorecard.pass, out.scorecard.softMisses, out.phases.map(p => p.ran)], [true, ['stab-st-get'], [true, true, true, true]])
   assert.ok(out.requests.every(r => r.sha256 && r.answers), 'each request keeps its sha256 and answers for the comparison of two sends')
 })
