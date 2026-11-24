@@ -1,0 +1,163 @@
+{
+  "set": "action-relevance-v1",
+  "tokenCeiling": 5000,
+  "productBars": {
+    "rel_#": {
+      "yes": 0.5,
+      "no": 0.49,
+      "source": "egdesk-decision-questions.mjs decisionThresholds relevant 0.5: an item is attached at >= .5 (relevantStrict .8 for a planned item under a present-only question), not below"
+    }
+  },
+  "passRule": "Both hard checks pass: nothing of the catalog reaches the bar for the test-run request; the design record still does for the design question. Built by the product (all-on journey, scripted model, offline) with EGDESK_CONTEXT_RELEVANCE=action.",
+  "requests": [
+    {
+      "id": "s4-action",
+      "file": "requests/s4-action.json",
+      "sha256": "34add3bf5e37510ec07a165f5b3b54a2a52c995efcdb68d7074cb32d2b8912c3",
+      "estInputTokens": 2569,
+      "expect": [
+        {
+          "name": "rel_0",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "hard",
+          "note": "A사 견적 요청 접수: a test-run request needs no record of this catalog (real v3 without the rule: 배포 계획 .56, 헬스체크 .69)"
+        },
+        {
+          "name": "rel_1",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "hard",
+          "note": "A사 견적서 v1 발송: a test-run request needs no record of this catalog (real v3 without the rule: 배포 계획 .56, 헬스체크 .69)"
+        },
+        {
+          "name": "rel_2",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "hard",
+          "note": "A사 단가 협의 메모: a test-run request needs no record of this catalog (real v3 without the rule: 배포 계획 .56, 헬스체크 .69)"
+        },
+        {
+          "name": "rel_3",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "hard",
+          "note": "A사 견적서 v2 수정 계획: a test-run request needs no record of this catalog (real v3 without the rule: 배포 계획 .56, 헬스체크 .69)"
+        },
+        {
+          "name": "rel_4",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "hard",
+          "note": "A사 건 결정 메모: a test-run request needs no record of this catalog (real v3 without the rule: 배포 계획 .56, 헬스체크 .69)"
+        },
+        {
+          "name": "rel_5",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "hard",
+          "note": "PostgreSQL 전환 설계: a test-run request needs no record of this catalog (real v3 without the rule: 배포 계획 .56, 헬스체크 .69)"
+        },
+        {
+          "name": "rel_6",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "hard",
+          "note": "PostgreSQL 마이그레이션 배포 계획: a test-run request needs no record of this catalog (real v3 without the rule: 배포 계획 .56, 헬스체크 .69)"
+        },
+        {
+          "name": "rel_7",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "hard",
+          "note": "헬스체크 3종 체크리스트: a test-run request needs no record of this catalog (real v3 without the rule: 배포 계획 .56, 헬스체크 .69)"
+        },
+        {
+          "name": "rel_8",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "hard",
+          "note": "현재 SQLite 스키마(운영): a test-run request needs no record of this catalog (real v3 without the rule: 배포 계획 .56, 헬스체크 .69)"
+        },
+        {
+          "name": "rel_9",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "hard",
+          "note": "배포 후 후속 체크리스트: a test-run request needs no record of this catalog (real v3 without the rule: 배포 계획 .56, 헬스체크 .69)"
+        },
+        {
+          "name": "rel_10",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "hard",
+          "note": "롤백 절차: a test-run request needs no record of this catalog (real v3 without the rule: 배포 계획 .56, 헬스체크 .69)"
+        },
+        {
+          "name": "rel_11",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "hard",
+          "note": "전환 벤치마크 결과: a test-run request needs no record of this catalog (real v3 without the rule: 배포 계획 .56, 헬스체크 .69)"
+        }
+      ]
+    },
+    {
+      "id": "s3b-control",
+      "file": "requests/s3b-control.json",
+      "sha256": "1014a51a36ed76e2e48ba9bae89643016119ac0e3760c6457aefa916716f6b6b",
+      "estInputTokens": 1730,
+      "expect": [
+        {
+          "name": "rel_0",
+          "kind": "predicate",
+          "min": 0.5,
+          "severity": "hard",
+          "note": "the design record is what the question asks for (real v3: 1.0)"
+        },
+        {
+          "name": "rel_1",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "soft",
+          "note": "PostgreSQL 마이그레이션 배포 계획: not asked for"
+        },
+        {
+          "name": "rel_2",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "soft",
+          "note": "헬스체크 3종 체크리스트: not asked for"
+        },
+        {
+          "name": "rel_3",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "soft",
+          "note": "현재 SQLite 스키마(운영): not asked for"
+        },
+        {
+          "name": "rel_4",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "soft",
+          "note": "배포 후 후속 체크리스트: not asked for"
+        },
+        {
+          "name": "rel_5",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "soft",
+          "note": "롤백 절차: not asked for"
+        },
+        {
+          "name": "rel_6",
+          "kind": "predicate",
+          "max": 0.49,
+          "severity": "soft",
+          "note": "전환 벤치마크 결과: not asked for"
+        }
+      ]
+    }
+  ]
+}
