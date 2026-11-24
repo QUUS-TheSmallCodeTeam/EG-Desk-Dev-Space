@@ -8,7 +8,7 @@ import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { specManifestEntries, verifiedManifestOwners } from './codex-native-tool-manifest.mjs'
 import { nativeQaCommandReceipt, validateQaCommandNonce, validateQaOutputMarkers } from './codex-qa-command-receipt.mjs'
 import { MAX_COMPOSED } from './egdesk-profile-store.mjs'
-import { runChatChoice, validateChatChoice } from './egdesk-chat-choice.mjs'
+import { chatChoiceManual, runChatChoice, validateChatChoice } from './egdesk-chat-choice.mjs'
 import { DEFAULT_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { browserRefusal, ceilingAllowsBrowserTool, ceilingAllowsComputerTool, ceilingApprovalRefusal, ceilingBrowserSelection, ceilingNarrows, ceilingReportNotices, CEILING_MESSAGES, computerRefusal, effectiveToolCeiling, liveBrowserSelected, loadCeilingThreadOverrides, mergeCeilingOverrides, recordedToolCeiling, verifyCeilingNativeThread } from './codex-chat-tool-ceiling.mjs'
 import { HOST_CONTROL_POLICIES, HOST_LEASE_CODES, requiresHostControl } from './egdesk-host-lease.mjs'
@@ -4341,12 +4341,13 @@ export class CodexChatRuntime {
       } }
       this.activeChoices.add(ids.conversationId)
       const expired = new Promise(resolve => {
-        timer = this.setTimer(() => { controller.abort(); resolve(manual) }, Math.max(1, Math.ceil(remaining())))
+        timer = this.setTimer(() => { controller.abort(); resolve(chatChoiceManual('timeout')) }, Math.max(1, Math.ceil(remaining())))
       })
       const result = await Promise.race([runChatChoice({ ...choice, client, isCurrent, signal: choiceSignal }), expired])
       return result?.status === 'recommended' && Number.isSafeInteger(result.index) &&
         result.index >= 0 && result.index < choice.options.length && isCurrent()
-        ? { status: 'recommended', index: result.index } : manual
+        ? { status: 'recommended', index: result.index }
+        : result?.status === 'manual' ? chatChoiceManual(result.reason) : manual
     } catch { return manual }
     finally {
       if (timer != null) this.clearTimer(timer)

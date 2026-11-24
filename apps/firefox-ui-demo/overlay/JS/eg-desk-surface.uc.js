@@ -12650,6 +12650,13 @@
       '', `질문: ${question}`, ...labels, `EG-Desk 추천: ${labels[index]}`].join('\n');
   }
 
+  // The decision model gave no pick (abstain / near-tie / low confidence). Same rules as the
+  // explanation draft: local, editable text only; the ordinary [보내기] is still required.
+  function chatChoiceAskDraft({ question, options }) {
+    return ['아래 질문과 보기만 놓고 어느 쪽이 적절한지 비교해 주세요. EG-Desk 결정 모델은 추천을 내지 않았으니 그 판단을 가정하지 말고, 선택하거나 실행하지 마세요.',
+      '', `질문: ${question}`, ...options.map((option, i) => `${i + 1}. ${option}`)].join('\n');
+  }
+
   function openChatChoiceSettings(reason) {
     try {
       const card = spawnSettingsCard({ tab: 'account' });
@@ -12706,6 +12713,25 @@
       return null;
     };
     const manualText = '추천을 표시할 수 없습니다. 직접 판단해 주세요. 작성 중인 메시지는 그대로입니다.';
+    // Fixed outcome table keyed by the bridge's closed reason enum. retry: the same request may succeed
+    // later; ask: the model could not pick, so offer a draft to the Agent; settings: fix the key first.
+    // Text says what happened and the next step; probabilities are never shown (uncalibrated numbers read as certainty).
+    const outcomes = Object.freeze({
+      abstain: { text: '결정 모델이 추천을 내지 않았습니다. 질문이 모호하거나 맞는 보기가 없다고 판단했습니다.', ask: true },
+      unclear: { text: '결정 모델이 보기 사이에서 하나를 가려내지 못했습니다. 두 보기 이상이 비슷하게 맞다고 봤습니다.', ask: true },
+      low_confidence: { text: '결정 모델이 확신하지 못해 추천을 내지 않았습니다.', ask: true },
+      bad_response: { text: '결정 모델의 답이 보기와 맞지 않아 추천으로 쓰지 않았습니다.' },
+      no_credit: { text: 'OpenAI API 크레딧이 부족해 추천을 받지 못했습니다. OpenAI 결제 설정에서 크레딧을 확인해 주세요.' },
+      rate_limited: { text: 'OpenAI가 요청을 잠시 제한했습니다. 잠시 뒤 다시 시도할 수 있습니다.', retry: true },
+      timeout: { text: '제한 시간 안에 추천이 도착하지 않았습니다. 다시 시도할 수 있습니다.', retry: true },
+      budget_exceeded: { text: '이번 달 EG-Desk 결정 모델 사용 한도에 도달해 요청을 보내지 않았습니다.' },
+      invalid_key: { text: 'OpenAI가 저장한 API 키를 받아들이지 않았습니다. 설정에서 키를 확인해 주세요.', settings: true },
+      not_configured: { text: '저장한 API 키가 없습니다. 설정에서 키를 저장해 주세요.', settings: true },
+      unreachable: { text: 'OpenAI Decisions에 연결하지 못했습니다. 네트워크를 확인한 뒤 다시 시도할 수 있습니다.', retry: true },
+      server_error: { text: 'OpenAI 서버 오류로 추천을 받지 못했습니다. 잠시 뒤 다시 시도할 수 있습니다.', retry: true },
+      model_unavailable: { text: '이 키로 결정 모델을 쓸 수 없습니다. 설정과 OpenAI 계정의 모델 접근 권한을 확인해 주세요.', settings: true },
+    });
+    const outcomeOf = reason => typeof reason === 'string' && Object.hasOwn(outcomes, reason) ? outcomes[reason] : null;
     let binding = null, entry = null, savedEdits = null, listEdits = null;
     const panel = el('section', { 'aria-label': '보기 추천', data: { testid: 'chat-choice-panel' },
       style: 'max-height:40vh;overflow:auto;overflow-wrap:anywhere;padding:6px;' });
@@ -12760,7 +12786,44 @@
       trigger.title = '작성창 질문 한 줄(최대 500자)과 직접 입력한 보기만 추천에 사용';
     };
     const cancel = (edits = null) => { reset(); savedEdits = edits; sync(); trigger.focus(); };
-    const useManual = item => { item.phase = 'manual'; paint(); };
+    const useManual = (item, reason = null) => {
+      item.phase = 'manual'; item.reason = outcomeOf(reason) ? reason : null; paint();
+      // The button that had focus (confirm) is gone: put focus on the first way forward.
+      for (const key of ['retry', 'settings', 'ask', 'edit', 'cancel']) {
+        const target = panel.querySelector(`[data-testid="chat-choice-${key}"]`);
+        if (target) { target.focus(); break; }
+      }
+    };
+    // Back to the editor with the reviewed options intact (nothing is cleared on error).
+    const editAgain = item => {
+      if (!current(item) || item.phase !== 'manual') return sync();
+      item.phase = 'edit'; item.reason = null; item.reviewed = true; delete item.mode; paint();
+      panel.querySelector('[data-testid="chat-choice-option"]')?.focus();
+    };
+    // Retry re-enters review: the destination notice and [질문과 보기만 보내기] are shown again, so
+    // every send after a failure is a fresh explicit confirmation, never automatic.
+    const retry = item => {
+      if (!current(item) || item.phase !== 'manual' || !outcomeOf(item.reason)?.retry) return sync();
+      item.phase = 'edit'; item.reason = null; void review(item);
+    };
+    const askAgent = item => {
+      if (!current(item) || item.phase !== 'manual' || !outcomeOf(item.reason)?.ask) return sync();
+      const { input, setDraft } = binding;
+      const draft = chatChoiceAskDraft(item.review);
+      reset();
+      input.value = draft;
+      setDraft(draft); // Editable draft only; the existing [보내기] is still required.
+      sync();
+    };
+    const openKeySettings = item => {
+      if (!current(item) || item.phase !== 'manual' || typeof openSettings !== 'function') return sync();
+      const { editKey, question } = item.scope;
+      const options = [...item.options];
+      reset(); // Drop approval and its signal before navigation; keep only the raw options.
+      if (editKey) savedEdits = { key: editKey, question, options };
+      sync();
+      openSettings('key');
+    };
     const readStatus = async item => {
       try { return await readMode(item.controller.signal); } catch { return null; }
     };
@@ -12810,11 +12873,14 @@
           requestId: makeRequestId(), question, options: [...options], confirm: true, reviewRevision: item.mode }, item.controller.signal);
       } catch { /* Manual without exposing errors or retrying. */ }
       if (!current(item)) return sync();
-      if (reply?.status !== 'recommended' || !Number.isInteger(reply.index) || !Object.hasOwn(options, reply.index)) return useManual(item);
+      if (reply?.status !== 'recommended' || !Number.isInteger(reply.index) || !Object.hasOwn(options, reply.index)) {
+        return useManual(item, reply?.status === 'manual' ? reply.reason : null);
+      }
       const proof = await checkMode(item);
       if (!current(item)) return sync();
       if (proof !== item.mode) return useManual(item);
       item.index = reply.index; item.phase = 'recommended'; paint();
+      panel.querySelector('[data-testid="chat-choice-explain"]')?.focus();
     };
     const explain = async item => {
       if (!current(item) || item.phase !== 'recommended') return;
@@ -12898,6 +12964,16 @@
         return;
       }
       if (item.phase === 'manual' || item.phase === 'statusUnavailable') {
+        const known = item.phase === 'manual' ? outcomeOf(item.reason) : null;
+        if (known) {
+          panel.replaceChildren(...[plain('p', known.text, { role: 'status', data: { testid: 'chat-choice-outcome' } }),
+            plain('p', '[질문·보기 수정]으로 입력한 보기를 그대로 이어서 고칠 수 있습니다. Agent 대화로는 아무것도 보내지 않았고, 작성 중인 메시지도 그대로입니다.'),
+            known.retry ? button('retry', '같은 질문으로 다시 검토', () => retry(item)) : null,
+            known.settings && typeof openSettings === 'function' ? button('settings', '계정 설정 열기', () => openKeySettings(item)) : null,
+            known.ask ? button('ask', 'Agent에게 물어보기 (초안 작성)', () => askAgent(item)) : null,
+            button('edit', '질문·보기 수정', () => editAgain(item)), close].filter(Boolean));
+          return;
+        }
         const text = item.phase === 'statusUnavailable'
           ? '결정 모델 설정을 확인하지 못해 질문과 보기를 보내지 않았습니다. 작성 중인 메시지는 그대로입니다.'
           : manualText;
