@@ -7,6 +7,7 @@ import { validDecisionApiKey } from './egdesk-decision-credential.mjs'
 //   DELETE /decision/credential  → removes the saved key
 //   GET    /decision/mode        → { mode, saved, persisted, modes }
 //   POST   /decision/mode        { mode: 'off'|'advisory'|'on' } → saves the choice
+//   POST   /decision/warmup      { reason: 'composer' } → { action, why? } (c18, only when the idle warm-up is wired; closed words only; 404 otherwise)
 // status also carries mode (null when no mode setting is wired).
 // Same loopback/Origin guard as the other bridge routes. The key is accepted
 // only in a POST body, is never echoed, and no response or log contains it.
@@ -18,22 +19,32 @@ import { validDecisionApiKey } from './egdesk-decision-credential.mjs'
 
 const SAVE_ON = new Set(['verified', 'no_credit', 'spend_limit_reached', 'rate_limited'])
 const BODY_LIMIT = 4096
-const ROUTES = new Set(['/decision/status', '/decision/credential', '/decision/mode'])
+const ROUTES = new Set(['/decision/status', '/decision/credential', '/decision/mode', '/decision/warmup'])
 
 // mode: the bridge-settings adapter { mode, saved, persisted, save(mode) } (optional).
 // Revoke Board grants synchronously after each successful save, before returning status.
 // onSettingsChanged is the existing notifier for the other Decisions surfaces.
-export function createDecisionHttpHandler({ store, verifyKey, budget = null, model = null, mode = null, modes = ['off', 'advisory', 'on'], port = 39218, onSettingsChanged = () => {}, boardPresentation = null } = {}) {
+export function createDecisionHttpHandler({ store, verifyKey, budget = null, model = null, mode = null, modes = ['off', 'advisory', 'on'], port = 39218, onSettingsChanged = () => {}, boardPresentation = null, warmup = null } = {}) {
   if (!store || typeof verifyKey !== 'function') throw new TypeError('store and verifyKey are required')
   const modeStatus = () => (mode ? { mode: mode.mode, saved: mode.saved, persisted: mode.persisted, modes: [...modes] } : null)
   const status = () => ({ configured: store.getApiKey() !== null, store: store.status, keyHint: store.hint(), savedAt: store.savedAt(),
     model,
     ...(boardPresentation ? { boardRevision: boardPresentation.settingsRevision() } : {}),
+    ...(warmup ? { warmup: warmup.stats() } : {}),
     budget: budget ? budget.snapshot() : null, mode: mode ? mode.mode : null })
   return async (req, res, url) => {
     if (!ROUTES.has(url.pathname)) return false
     if (!guardBridgeRequest(req, port)) { sendJson(res, 403, { error: 'Trusted loopback origin is required', code: 'DECISION_LOOPBACK_REQUIRED' }); return true }
     try {
+      if (url.pathname === '/decision/warmup') {
+        if (!warmup) { sendJson(res, 404, { error: 'Not found' }); return true }
+        if (req.method !== 'POST') { sendJson(res, 405, { error: 'Use POST for the warm-up signal', code: 'METHOD_NOT_ALLOWED' }); return true }
+        const body = await readJsonBody(req, { maxBytes: 256 })
+        // only the closed word; the composer's text never comes here and is not read if it did
+        if (body?.reason !== 'composer') { sendJson(res, 400, { error: 'reason must be composer', code: 'DECISION_WARMUP_REASON' }); return true }
+        sendJson(res, 200, warmup.trigger('composer'))
+        return true
+      }
       if (url.pathname === '/decision/mode') {
         if (!mode) { sendJson(res, 404, { error: 'Not found' }); return true }
         if (req.method === 'GET') { sendJson(res, 200, modeStatus()); return true }
