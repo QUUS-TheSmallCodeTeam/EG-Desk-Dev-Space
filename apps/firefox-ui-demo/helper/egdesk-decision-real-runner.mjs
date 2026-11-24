@@ -61,7 +61,25 @@ const record = value => value !== null && typeof value === 'object' && !Array.is
 const unit = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
 const plausibleKey = key => typeof key === 'string' && key.length >= 20 && !/\s/.test(key)
 // Typed input-token model solved from real requests of 2026-11-24 (egdesk-memory-real-plan.mjs). Only a cross-check of declared estimates.
+// LEGACY byte model (loadPlan's `independentEst`), kept because plan builders' committed estimates and their tests are tied to it.
+// The runner's corrected estimate is `fittedEst` (estimateBodyTokens), which the dry run prints and checks against the ceiling. Measured against 358 distinct real bodies (2026-11-25):
+// mean -3.2%, but Korean-heavy bodies (> 10% non-ASCII characters) -10.7% on average and down to -30%; 26 of those 49 exceeded the
+// estimate x 1.10. New plans should declare estimateBodyTokens(text) instead.
 export const independentEstimate = (choiceQuestions, predicateQuestions, bytes) => Math.round(56.5 * choiceQuestions + 134.8 * predicateQuestions + 0.1983 * bytes)
+
+// The runner's independent input-token estimate (cycle L6-16): least squares on every real result whose exact body we have (358 distinct
+// bodies, 58 sets, 2026-11-22..25), per question type and per ASCII / non-ASCII character of the body text. Leave-one-set-out error:
+// median |error| 1.8%, Korean-heavy bodies mean 0.0%; per plan (set) the worst under-estimate is -7.6%, so the 1.10 margin covered every
+// set. Lane L4's independent fit (132 per question, .223 per ASCII, .984 per non-ASCII) agrees on the character weights.
+// Known residual: terminal-log bodies (dense ASCII symbols) run up to 25% above it; score questions cost about 100 tokens less than this.
+export const TOKEN_MODEL = Object.freeze({ choice: 27.85, predicate: 124.63, ascii: 0.224, nonAscii: 0.9482, margin: 1.10 })
+export function estimateBodyTokens(text) {
+  const body = JSON.parse(text), questions = Array.isArray(body?.questions) ? body.questions : []
+  let ascii = 0, nonAscii = 0
+  for (const ch of text) { if (ch.codePointAt(0) <= 127) ascii++; else nonAscii++ }
+  const choice = questions.filter(q => q?.type === 'choice').length
+  return Math.round(TOKEN_MODEL.choice * choice + TOKEN_MODEL.predicate * (questions.length - choice) + TOKEN_MODEL.ascii * ascii + TOKEN_MODEL.nonAscii * nonAscii)
+}
 
 class PlanError extends Error { constructor(message) { super(message); this.name = 'PlanError' } }
 const bad = message => { throw new PlanError(message) }
@@ -76,9 +94,15 @@ function checkExpectation(raw, where, questions) {
   if (raw.kind === 'predicate') {
     if (question.type !== 'predicate') bad(`${where} ${raw.name}: expected a predicate but the question is ${question.type}`)
     const hasMin = raw.min !== undefined, hasMax = raw.max !== undefined
-    if (!hasMin && !hasMax) bad(`${where} ${raw.name}: a predicate expectation needs min and/or max`)
+    // c16 (L4): "notDecidedNo": true passes when p is ABOVE the plan's declared product "no" bar for this family, i.e. the product would not act
+    // on "no" (an undecided fact does not block; only p <= the no bar does). Resolved against productBars when the plan is loaded.
+    if (raw.notDecidedNo !== undefined && raw.notDecidedNo !== true) bad(`${where} ${raw.name}: notDecidedNo must be true when present`)
+    const notNo = raw.notDecidedNo === true
+    // It stands alone: min would say more than "not no", and max is the decided-no claim this check exists to avoid.
+    if (notNo && (hasMin || hasMax)) bad(`${where} ${raw.name}: notDecidedNo stands alone (no min or max)`)
+    if (!hasMin && !hasMax && !notNo) bad(`${where} ${raw.name}: a predicate expectation needs min and/or max, or notDecidedNo`)
     if ((hasMin && !unit(raw.min)) || (hasMax && !unit(raw.max)) || (hasMin && hasMax && raw.min > raw.max)) bad(`${where} ${raw.name}: min/max must be probabilities with min <= max`)
-    return { ...base, ...(hasMin ? { min: raw.min } : {}), ...(hasMax ? { max: raw.max } : {}) }
+    return { ...base, ...(hasMin ? { min: raw.min } : {}), ...(hasMax ? { max: raw.max } : {}), ...(notNo ? { notDecidedNo: true } : {}) }
   }
   if (raw.kind === 'choice') {
     if (question.type !== 'choice') bad(`${where} ${raw.name}: expected a choice but the question is ${question.type}`)
@@ -166,18 +190,23 @@ export function loadPlan(planFile) {
     if (!grouping.ok && item.diagnostic !== true) bad(`${item.id}: grouped questions do not each carry their own item (${grouping.families.filter(f => f.problems.length).map(f => `${f.family}: ${[...new Set(f.problems.map(x => x.problem))].join('/')}`).join('; ')}); fix the request, or mark it "diagnostic": true if it reproduces the defect on purpose`)
     const counts = { choice: body.questions.filter(q => q.type === 'choice').length, predicate: body.questions.filter(q => q.type === 'predicate').length, score: body.questions.filter(q => q.type === 'score').length }
     const text = bytes.toString('utf8')
-    return { id: item.id, file: item.file, sha256: item.sha256, bytes, estInputTokens: item.estInputTokens, independentEst: independentEstimate(counts.choice, counts.predicate + counts.score, bytes.length),
+    return { id: item.id, file: item.file, sha256: item.sha256, bytes, estInputTokens: item.estInputTokens, independentEst: independentEstimate(counts.choice, counts.predicate + counts.score, bytes.length), fittedEst: estimateBodyTokens(text),
       questions: body.questions, counts, images: (text.match(/"type"\s*:\s*"input_image"/g) || []).length, expect, recordOnly, diagnostic: item.diagnostic === true, groupingOk: grouping.ok, waitBeforeMs: item.waitBeforeMs ?? 0 }
   })
   if (raw.transport !== undefined && raw.transport !== 'product') bad('transport must be "product" when present')
   const totalWaitMs = requests.reduce((sum, r) => sum + r.waitBeforeMs, 0)
   if (totalWaitMs > REAL_RUN_LIMITS.maxTotalWaitMs) bad(`the waits add up to ${totalWaitMs} ms, over ${REAL_RUN_LIMITS.maxTotalWaitMs}`)
   const productBars = checkProductBars(raw.productBars)
+  for (const r of requests) for (const e of r.expect) if (e.notDecidedNo) {
+    const bar = productBars?.[familyOf(e.name)] ?? productBars?.[`*${e.kind}`]
+    if (bar?.no === undefined) bad(`${r.id} ${e.name}: notDecidedNo needs a declared product "no" bar for family ${familyOf(e.name)} (productBars)`)
+    e.above = bar.no
+  }
   if (productBars) {
     const problems = requests.flatMap(r => r.expect.filter(e => e.severity === 'hard' && !e.diagnostic).map(e => lintExpectation(e, r, productBars)).filter(Boolean).map(text => `${r.id} ${text}`))
     if (problems.length) bad(`hard checks looser than the declared product bars (mark a deliberate one "diagnostic": true): ${problems.join('; ')}`)
   }
-  const totals = { requests: requests.length, estInputTokens: requests.reduce((sum, r) => sum + r.estInputTokens, 0), independentEst: requests.reduce((sum, r) => sum + r.independentEst, 0),
+  const totals = { requests: requests.length, estInputTokens: requests.reduce((sum, r) => sum + r.estInputTokens, 0), independentEst: requests.reduce((sum, r) => sum + r.independentEst, 0), fittedEst: requests.reduce((sum, r) => sum + r.fittedEst, 0),
     bytes: requests.reduce((sum, r) => sum + r.bytes.length, 0) }
   return { set: raw.set, tokenCeiling: raw.tokenCeiling, passRule: raw.passRule, dir, requests, totals: { ...totals, waitMs: totalWaitMs }, productBars, transport: raw.transport ?? null,
     diagnostic: requests.reduce((n, r) => n + r.expect.filter(e => e.diagnostic).length, 0) }
@@ -206,6 +235,7 @@ export function lintExpectation(e, request, productBars) {
   if (e.kind === 'predicate') {
     if (e.min !== undefined) { if (bar.yes === undefined) return `${at}: no "yes" bar declared`; if (e.min < bar.yes) return `${at}: min ${e.min} < product yes bar ${bar.yes}` }
     if (e.max !== undefined) { if (bar.no === undefined) return `${at}: no "no" bar declared`; if (e.max > bar.no) return `${at}: max ${e.max} > product no bar ${bar.no}` }
+    if (e.notDecidedNo) { if (bar.no === undefined) return `${at}: no "no" bar declared`; if (!(e.above >= bar.no)) return `${at}: notDecidedNo above ${e.above ?? 'none'} < product no bar ${bar.no}` }
     return null
   }
   if (e.kind === 'choice') {
@@ -229,7 +259,7 @@ export function lintExpectation(e, request, productBars) {
 
 export function planTable(plan) {
   return plan.requests.map(r => ({ id: r.id, bytes: r.bytes.length, sha: r.sha256.slice(0, 12), choice: r.counts.choice, predicate: r.counts.predicate, score: r.counts.score, images: r.images,
-    estInputTokens: r.estInputTokens, independentEst: r.independentEst, recordOnly: r.recordOnly, ...(r.waitBeforeMs ? { waitBeforeMs: r.waitBeforeMs } : {}), ...(r.diagnostic ? { diagnostic: true } : {}), ...(r.groupingOk ? {} : { groupingLint: 'fails' }), hard: r.expect.filter(e => e.severity === 'hard').length, soft: r.expect.filter(e => e.severity === 'soft').length }))
+    estInputTokens: r.estInputTokens, independentEst: r.independentEst, fittedEst: r.fittedEst, recordOnly: r.recordOnly, ...(r.waitBeforeMs ? { waitBeforeMs: r.waitBeforeMs } : {}), ...(r.diagnostic ? { diagnostic: true } : {}), ...(r.groupingOk ? {} : { groupingLint: 'fails' }), hard: r.expect.filter(e => e.severity === 'hard').length, soft: r.expect.filter(e => e.severity === 'soft').length }))
 }
 
 /** What the answer says about one expectation. observed carries what a later threshold analysis needs: probability, or choice + top/second/margin/N. */
@@ -238,8 +268,10 @@ export function scoreExpectation(expectation, answer) {
   if (expectation.kind === 'predicate') {
     if (answer?.type !== 'predicate') return { ...out, pass: false, observed: { state: answer?.type ?? 'missing' } }
     const p = answer.probability
+    if (expectation.notDecidedNo && !Number.isFinite(expectation.above)) throw new TypeError(`${expectation.name}: notDecidedNo was not resolved against a product no bar`)
     return { ...out, ...(expectation.min !== undefined ? { min: expectation.min } : {}), ...(expectation.max !== undefined ? { max: expectation.max } : {}),
-      pass: (expectation.min === undefined || p >= expectation.min) && (expectation.max === undefined || p <= expectation.max), observed: { probability: p } }
+      ...(expectation.notDecidedNo ? { notDecidedNo: true, above: expectation.above } : {}),
+      pass: (expectation.min === undefined || p >= expectation.min) && (expectation.max === undefined || p <= expectation.max) && (!expectation.notDecidedNo || p > expectation.above), observed: { probability: p } }
   }
   if (expectation.kind === 'score') {
     if (answer?.type !== 'score') return { ...out, pass: false, observed: { state: answer?.type ?? 'missing' } }
@@ -392,8 +424,9 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
   }
   const send = flag('--send')
   print(JSON.stringify({ set: plan.set, mode: send ? 'send' : 'dry_run', endpoint: OFFICIAL, requests: plan.totals.requests, bytes: plan.totals.bytes, estInputTokens: plan.totals.estInputTokens,
-    independentEst: plan.totals.independentEst, tokenCeiling: plan.tokenCeiling, withinCeiling: plan.totals.estInputTokens <= plan.tokenCeiling,
-    ...(plan.totals.independentEst > plan.totals.estInputTokens * 1.5 ? { warning: 'declared estimates are much lower than the independent estimate' } : {}),
+    independentEst: plan.totals.independentEst, fittedEst: plan.totals.fittedEst, fittedWithMargin: Math.round(plan.totals.fittedEst * TOKEN_MODEL.margin), tokenCeiling: plan.tokenCeiling, withinCeiling: plan.totals.estInputTokens <= plan.tokenCeiling,
+    ...(plan.totals.fittedEst * TOKEN_MODEL.margin > plan.tokenCeiling ? { warning: `the fitted estimate x ${TOKEN_MODEL.margin} (${Math.round(plan.totals.fittedEst * TOKEN_MODEL.margin)}) is over the token ceiling: the run may stop before its last request` }
+      : plan.totals.fittedEst > plan.totals.estInputTokens * TOKEN_MODEL.margin ? { warning: 'declared estimates are lower than the fitted estimate by more than the margin' } : {}),
     ...(plan.totals.waitMs ? { waitMs: plan.totals.waitMs } : {}), ...(plan.transport ? { transport: plan.transport } : {}), passRule: plan.passRule }))
   for (const row of planTable(plan)) print(JSON.stringify(row))
   print(JSON.stringify(plan.productBars ? { productBars: 'declared and checked', families: Object.keys(plan.productBars), diagnosticChecks: plan.diagnostic }

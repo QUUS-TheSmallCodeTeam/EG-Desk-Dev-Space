@@ -54,3 +54,9 @@ test('product bars: every hard predicate/choice check of every committed plan ha
   assert.ok(plans.length >= 10)
   assert.deepEqual([...new Set(missing)], [])
 })
+
+test('productHolds: a notDecidedNo row (expect "not-no") holds when p is above the product no bar, whatever the yes bar', () => {
+  const row = p => ({ set: 'l4-briefing-coverage-facts', q: 'onboard_F2', kind: 'predicate', expect: 'not-no', p })
+  const no = barFor(row(0)).noAt
+  assert.deepEqual([no - 0.01, no, no + 0.01, 0.5, 0.99, NaN].map(p => productHolds(row(p))), [false, false, true, true, true, false])
+})
