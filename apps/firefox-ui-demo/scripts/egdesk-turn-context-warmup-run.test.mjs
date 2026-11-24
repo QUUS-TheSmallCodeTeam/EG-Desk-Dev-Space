@@ -190,3 +190,41 @@ test('--set size: the two body-size points use the same 10-minute rule, their ow
     io = capture(); assert.equal(await main(['--status', '--results', resultsFile], opts(io)), 2)
   } finally { rmSync(h, { recursive: true, force: true }) }
 })
+
+test('--set sep: N1 swaps to a new transport for its last request, Y1 sits 10 minutes with an 11-minute socket cap, an interleaved send is flagged, and the reading comes out of the results file', async () => {
+  const h = home(), env = { HOME: h, OPENAI_API_KEY: KEY }, stampFile = path.join(h, SEND_STAMP_FILE), resultsFile = path.join(h, 'turn-context-warmup-sep-results.json')
+  try {
+    assert.deepEqual(KINDS.sep.order, ['N1', 'N2', 'Y1']); assert.match(pointPlanFile('Y1', KINDS.sep), /turn-context-warmup-sep\/Y1\/plan\.json$/)
+    let clock = Date.parse('2026-11-25T04:00:00Z')
+    const now = () => clock, log = [], made = [], closed = []
+    const createTransport = opts => { const t = { id: made.length + 1, opts, sent: 0 }; made.push(t); const net = mockNetwork(log, 200); return { fetch: (url, init) => { t.sent++; return net(url, init) }, warm: () => false, close: () => closed.push(t.id) } }
+    const opts = io => ({ env, now, createTransport, sleep: async ms => { clock += ms }, ...io })
+    await main(['--stamp-now'], opts(capture())); clock += MIN_IDLE_MS
+    // N1: three requests, the last on a new transport (the first is closed at the swap, the second at the end)
+    let io = capture(); assert.equal(await main(['--set', 'sep', '--point', 'N1', '--send'], opts(io)), 0)
+    assert.equal(log.length, 3); assert.deepEqual(made.map(t => [t.sent, t.opts.idleMs ?? null]), [[2, null], [1, null]]); assert.deepEqual(closed, [1, 2])
+    const r1 = JSON.parse(readFileSync(resultsFile, 'utf8')); assert.equal(r1.set, 'turn-context-warmup-sep-v1'); assert.equal(r1.points.N1.results.fresh.freshSocket, true); assert.equal(r1.points.N1.results.same.waitedMs, 1000)
+    made.length = 0; closed.length = 0; clock += MIN_IDLE_MS
+    // Y1: the 10-minute wait goes through the plan's wait cap, the transport gets the plan's idle cap; nothing swaps
+    const before = clock
+    io = capture(); assert.equal(await main(['--set', 'sep', '--point', 'Y1', '--send'], opts(io)), 0)
+    assert.equal(clock - before, 600000, 'the pause was taken (fake clock)')
+    assert.deepEqual(made.map(t => [t.sent, t.opts.idleMs]), [[2, 660000]], 'one transport, 11-minute idle cap, both requests'); assert.deepEqual(closed, [1])
+    const r2 = JSON.parse(readFileSync(resultsFile, 'utf8')); assert.equal(r2.points.Y1.results.after.waitedMs, 600000); assert.equal(r2.points.Y1.interleaved, undefined)
+    // an interleaved send during the wait is flagged
+    const h2 = home(), env2 = { HOME: h2, OPENAI_API_KEY: KEY }, stamp2 = path.join(h2, SEND_STAMP_FILE)
+    try {
+      let c2 = Date.parse('2026-11-25T05:00:00Z'); const now2 = () => c2
+      const sleepIntrudes = async ms => { c2 += ms; writeSendStamp(stamp2, { startedAt: new Date(c2).toISOString(), endedAt: new Date(c2).toISOString(), runner: 'decision-real-measure other' }) }
+      await main(['--stamp-now'], { env: env2, now: now2, ...capture() }); c2 += MIN_IDLE_MS
+      await main(['--set', 'sep', '--point', 'Y1', '--send'], { env: env2, now: now2, createTransport, sleep: sleepIntrudes, ...capture() })
+      assert.equal(JSON.parse(readFileSync(path.join(h2, 'turn-context-warmup-sep-results.json'), 'utf8')).points.Y1.interleaved, true)
+    } finally { rmSync(h2, { recursive: true, force: true }) }
+    // analysis: N2 is not in yet -> incomplete, with the runs that are
+    io = capture(); await main(['--set', 'sep', '--analyze'], opts(io))
+    const an = JSON.parse(io.out.join('')); assert.equal(an.reading, 'incomplete'); assert.deepEqual(an.points, ['N1', 'Y1']); assert.ok(an.runs.N1 && an.runs.Y1 && an.runs.N2 === null)
+    io = capture(); await main(['--set', 'sep', '--status'], opts(io)); const st = JSON.parse(io.out.join('')); assert.deepEqual([st.next, st.remaining], ['N2', ['N2']])
+    // a sep results file is not a warm-up results file
+    io = capture(); assert.equal(await main(['--status', '--results', resultsFile], opts(io)), 2)
+  } finally { rmSync(h, { recursive: true, force: true }) }
+})

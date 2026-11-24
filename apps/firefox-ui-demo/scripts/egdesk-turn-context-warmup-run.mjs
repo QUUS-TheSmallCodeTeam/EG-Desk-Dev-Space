@@ -7,7 +7,7 @@
 //   node scripts/egdesk-turn-context-warmup-run.mjs --point A1 [--results F]          dry run: says whether the point may run now; sends nothing
 //   OPENAI_API_KEY=... node scripts/egdesk-turn-context-warmup-run.mjs --point A1 --send [--results F]    the point, if allowed
 //   node scripts/egdesk-turn-context-warmup-run.mjs --analyze [--results F]          the registered reading (analyzeWarmup) over the points done
-//   (add --set size for the body-size probe, points S1 and S2, results <HOME>/turn-context-warmup-size-results.json; run after the six points)
+//   (add --set sep for the separating probe, points N1 N2 Y1 (Y1 sits idle for 10 minutes inside the run: send nothing else meanwhile); --set size for the body-size probe, points S1 and S2, results <HOME>/turn-context-warmup-size-results.json; run after the six points)
 //   node scripts/egdesk-turn-context-warmup-run.mjs --stamp-now [--at ISO]            writes the shared stamp (now, or a known earlier send made by a
 //                                                                                    runner that did not stamp; never moves an existing stamp back); sends nothing
 //
@@ -22,7 +22,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { EXIT, loadPlan, runPlan, transportPhases } from '../helper/egdesk-decision-real-runner.mjs'
 import { createDecisionTransport } from '../helper/egdesk-decision-transport.mjs'
 import { readSendStamp, sendStampPath, stampingFetch, writeSendStamp } from '../helper/egdesk-decision-send-stamp.mjs'
-import { SIZE_DIR, SIZE_SET, WARMUP_DIR, WARMUP_SET, analyzeSize, analyzeWarmup } from '../helper/egdesk-turn-context-latency-plan.mjs'
+import { SEP_DIR, SEP_SET, SIZE_DIR, SIZE_SET, WARMUP_DIR, WARMUP_SET, analyzeSeparation, analyzeSize, analyzeWarmup } from '../helper/egdesk-turn-context-latency-plan.mjs'
 
 export const WARMUP_POINTS = Object.freeze({ A1: 'A-rep1', B1: 'B-rep1', C1: 'C-rep1', A2: 'A-rep2', B2: 'B-rep2', C2: 'C-rep2' })
 export const POINT_ORDER = Object.freeze(Object.keys(WARMUP_POINTS))
@@ -31,7 +31,9 @@ export const POINT_ORDER = Object.freeze(Object.keys(WARMUP_POINTS))
 export const WARMUP_KIND = Object.freeze({ name: 'warmup', set: WARMUP_SET, dir: WARMUP_DIR, points: WARMUP_POINTS, order: POINT_ORDER, file: 'turn-context-warmup-results.json', analyze: analyzeWarmup })
 export const SIZE_POINTS = Object.freeze({ S1: 'S1-small', S2: 'S2-large' })
 export const SIZE_KIND = Object.freeze({ name: 'size', set: SIZE_SET, dir: SIZE_DIR, points: SIZE_POINTS, order: Object.freeze(Object.keys(SIZE_POINTS)), file: 'turn-context-warmup-size-results.json', analyze: analyzeSize })
-export const KINDS = Object.freeze({ warmup: WARMUP_KIND, size: SIZE_KIND })
+export const SEP_POINTS = Object.freeze({ N1: 'N1', N2: 'N2', Y1: 'Y1' })
+export const SEP_KIND = Object.freeze({ name: 'sep', set: SEP_SET, dir: SEP_DIR, points: SEP_POINTS, order: Object.freeze(Object.keys(SEP_POINTS)), file: 'turn-context-warmup-sep-results.json', analyze: analyzeSeparation })
+export const KINDS = Object.freeze({ warmup: WARMUP_KIND, size: SIZE_KIND, sep: SEP_KIND })
 export const MIN_IDLE_MS = 10 * 60_000
 const APP = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 export const pointPlanFile = (point, K = WARMUP_KIND) => path.join(APP, K.dir, K.points[point], 'plan.json')
@@ -74,7 +76,7 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
   const bad = args.find((a, i) => a.startsWith('--') ? !known.has(a) : !['--point', '--results', '--at', '--set'].includes(args[i - 1]))
   const modes = ['--status', '--point', '--analyze', '--stamp-now'].filter(flag)
   if (bad || modes.length !== 1 || (flag('--send') && !flag('--point')) || (flag('--point') && !valueOf('--point')) || (flag('--results') && !valueOf('--results')) || (flag('--at') && (!flag('--stamp-now') || !valueOf('--at'))) || (flag('--set') && !Object.hasOwn(KINDS, valueOf('--set') ?? ''))) {
-    printError('usage: egdesk-turn-context-warmup-run.mjs --status | --point A1|B1|C1|A2|B2|C2 [--send] | --analyze | --stamp-now   [--set warmup|size] [--results file]  (--set size: points S1, S2)'); return EXIT.usage
+    printError('usage: egdesk-turn-context-warmup-run.mjs --status | --point A1|B1|C1|A2|B2|C2 [--send] | --analyze | --stamp-now   [--set warmup|size] [--results file]  (--set size: points S1, S2; --set sep: points N1, N2, Y1)'); return EXIT.usage
   }
   const K = KINDS[valueOf('--set') ?? 'warmup']
   const stampFile = sendStampPath(env), resultsFile = valueOf('--results') ?? defaultResultsFile(env, K)
@@ -98,29 +100,32 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
   const outOfOrder = gate.ok && K.order.find(p => !results.points[p]) !== point
   // the size points belong after the six warm-up points: a note, not a refusal (the owner of the run decides)
   let sixFirst = null
-  if (K.name === 'size' && !flag('--results')) { try { sixFirst = Object.keys(readResults(defaultResultsFile(env, WARMUP_KIND), WARMUP_KIND).points).length } catch { sixFirst = null } }
+  if (K.name !== 'warmup' && !flag('--results')) { try { sixFirst = Object.keys(readResults(defaultResultsFile(env, WARMUP_KIND), WARMUP_KIND).points).length } catch { sixFirst = null } }
   print(JSON.stringify({ point, set: K.name, plan: Object.hasOwn(K.points, point) ? path.relative(APP, pointPlanFile(point, K)) : null, mode: flag('--send') ? 'send' : 'dry_run', allowed: gate.ok,
     ...(gate.ok ? {} : { why: gate.reason }), idleSeconds: gate.idleMs == null ? null : Math.floor(gate.idleMs / 1000), stamp: stampFile, results: resultsFile,
     ...(outOfOrder ? { note: `registered order is ${K.order.join(' ')}; ${point} runs before ${K.order.find(p => !results.points[p])}` } : {}),
-    ...(sixFirst !== null && sixFirst < 6 ? { note2: `only ${sixFirst} of the 6 warm-up points are in; the size probe is planned for after them` } : {}) }))
+    ...(sixFirst !== null && sixFirst < 6 ? { note2: `only ${sixFirst} of the 6 warm-up points are in; the ${K.name} probe is planned for after them` } : {}) }))
   if (!gate.ok) return EXIT.stopped
   if (!flag('--send')) return EXIT.ok
   const plan = loadPlan(pointPlanFile(point, K))
   // the idle rule, read once more right before the first byte leaves (another runner may have sent while the plan was loading)
   const again = pointGate(point, { results, stamp: readSendStamp(stampFile), nowMs: now() }, K)
   if (!again.ok) { printError(`refused: ${again.reason}`); return EXIT.stopped }
-  const marks = [], transport = createTransport({ trace: mark => marks.push(mark) })
+  const marks = []
+  const makeTransport = () => createTransport({ trace: mark => marks.push(mark), ...(plan.transportIdleMs ? { idleMs: plan.transportIdleMs } : {}) })
+  let transport = makeTransport()
+  const swap = () => { try { transport?.close?.() } catch { /* nothing to close */ } transport = makeTransport() } // a freshSocket request gets a new transport
   const startedAt = new Date(now()).toISOString()
   // Another runner's stamp newer than this point's start means something else was sent during the point: read before each of this point's
   // requests, at the end of each (onForeign: the stamp on disk is not the one this request wrote) and once after. A foreign send whose stamp
   // was overwritten by this point's own start write before any of these reads is not seen.
   let interleaved = false
   const foreign = () => { try { const s = readSendStamp(stampFile); if (s && !s.runner.startsWith(`warmup-run ${point}`) && s.lastAt >= Date.parse(startedAt)) interleaved = true } catch { interleaved = true } }
-  const inner = stampingFetch(transport.fetch ?? fetchImpl, { file: stampFile, runner: `warmup-run ${point}`, now: () => new Date(now()), onForeign: () => { interleaved = true } })
+  const inner = stampingFetch((url, init) => (transport.fetch ?? fetchImpl)(url, init), { file: stampFile, runner: `warmup-run ${point}`, now: () => new Date(now()), onForeign: () => { interleaved = true } })
   let outcome
   try {
     outcome = await runPlan({ plan, key: env.OPENAI_API_KEY ?? null, send: true, fetchImpl: (url, init) => { foreign(); return inner(url, init) },
-      ...(transport?.warm ? { warm: () => transport.warm(), annotate: () => transportPhases(marks.splice(0)) } : {}), ...(sleep ? { sleep } : {}) })
+      ...(transport?.warm ? { warm: () => transport.warm(), annotate: () => transportPhases(marks.splice(0)), beforeRequest: swap } : {}), ...(sleep ? { sleep } : {}) })
   } finally { try { transport?.close?.() } catch { /* nothing to close */ } }
   if (outcome.stoppedBecause === 'no_key') { printError('OPENAI_API_KEY is not set (or not a plausible key); nothing was sent'); return EXIT.noKey }
   foreign()
