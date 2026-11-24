@@ -17,6 +17,16 @@
 //   turn's own expectations cover the whole window of both. A message the run no longer takes (it ended before afterMs) fails the turn's
 //   implicit check "sent_while_running".
 import { MEMORY_EXPECT_SCHEMA, MEMORY_SCHEMA, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
+// action turns (c23, agreed with lane L3): { action: "interrupt" | "steer" | "delete", afterMs?, say?, expect? } instead of a message.
+//   interrupt  the person presses stop on the PREVIOUS turn's run, afterMs after that turn started (chat.interrupt). Give the previous turn
+//              expect.turnStatus "interrupted" (and posted false: only completed agent messages are posted).
+//   steer      a plain turn/steer of `say` into the previous turn's working run, through the product's engine adapter with the steer contract
+//              of the binary (refused with no_steer_contract when it has none). Not the person-message path; use whileRunning for that.
+//   delete     the person deletes the conversation after the previous turn ended (chat.forgetConversation); expect.conversationGone. A later
+//              message turn starts a NEW conversation (new thread, nothing remembered).
+//   interrupt and steer follow a plain message turn (not a whileRunning or action turn); a message turn takes at most one follow-up. An action turn
+//   cannot be first, takes no approve and no whileRunning; steer needs say; interrupt and delete take no say; afterMs (0..120000) only for
+//   interrupt and steer. Implicit check "action_taken" on interrupt and steer turns.
 export const SCRIPT_SET = /^real-engine-[a-z0-9][a-z0-9-]{0,40}-v\d{1,3}$/
 export const CONVERSATION_ID = /^[a-z0-9][a-z0-9-]{0,39}$/
 export const FLAG_NAME = /^EGDESK_[A-Z0-9_]{1,48}$/
@@ -28,8 +38,11 @@ export const IN_RUN_FLAG = 'EGDESK_INRUN_MESSAGES'
 export const LIMITS = Object.freeze({ whileRunningMs: 120_000, conversations: 8, turns: 12, files: 32, pathChars: 200, contentBytes: 64 * 1024, sayChars: 4000, approvals: 4, strings: 16, stringChars: 400 })
 // the scripted person's answers (test input, never product copy)
 export const APPROVER_TEXT = Object.freeze({ yes: '응, 그 명령 실행해 줘', no: '아니, 그건 실행하지 마' })
-export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'memory'])
+export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'conversationGone', 'memory', 'briefing', 'commandsRanIncludes', 'commandsRanExcludes'])
+export const ACTIONS = Object.freeze(['interrupt', 'steer', 'delete'])
 
+// `expect.briefing` belongs to the briefing hook (helper/egdesk-real-engine-briefing-hook.mjs): its shape and its checks live there (registered in helper/egdesk-real-engine-hooks.mjs)
+import { BRIEFING_EXPECT_SCHEMA, checkBriefingExpect, validateBriefingExpect } from './egdesk-real-engine-briefing-hook.mjs'
 const str = (max, extra = {}) => ({ type: 'string', minLength: 1, maxLength: max, ...extra })
 const strings = { type: 'array', maxItems: LIMITS.strings, items: str(LIMITS.stringChars) }
 export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
@@ -48,9 +61,11 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
         flags: { type: 'object', propertyNames: { pattern: FLAG_NAME.source, not: { enum: [...RESERVED_FLAGS] } }, additionalProperties: { type: 'string', pattern: FLAG_VALUE.source } },
         memory: MEMORY_SCHEMA,
         turns: { type: 'array', minItems: 1, maxItems: LIMITS.turns, items: {
-          type: 'object', additionalProperties: false, required: ['say'],
+          type: 'object', additionalProperties: false, anyOf: [{ required: ['say'] }, { required: ['action'] }],
           properties: {
             say: str(LIMITS.sayChars),
+            action: { enum: [...ACTIONS] },
+            afterMs: { type: 'integer', minimum: 0, maximum: LIMITS.whileRunningMs },
             approve: { type: 'array', maxItems: LIMITS.approvals, items: { enum: ['yes', 'no'] } },
             whileRunning: { type: 'object', additionalProperties: false, required: ['afterMs'], properties: { afterMs: { type: 'integer', minimum: 0, maximum: LIMITS.whileRunningMs } } },
             expect: { type: 'object', additionalProperties: false, properties: {
@@ -62,11 +77,15 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
               noNativeTools: { const: true },
               asked: { type: 'integer', minimum: 0, maximum: LIMITS.approvals },
               commandsRan: { type: 'array', maxItems: LIMITS.strings, items: { type: 'string', minLength: 1, maxLength: 2000 } },
+              commandsRanIncludes: strings,
+              commandsRanExcludes: strings,
               files: { type: 'object', maxProperties: LIMITS.files, additionalProperties: { type: ['string', 'null'], maxLength: LIMITS.contentBytes } },
               undoRecords: { type: 'integer', minimum: 0, maximum: 50 },
               turnStatus: { enum: ['completed', 'failed', 'interrupted'] },
               compacted: { type: 'boolean' },
+              conversationGone: { type: 'boolean' },
               memory: MEMORY_EXPECT_SCHEMA,
+              briefing: BRIEFING_EXPECT_SCHEMA,
             } },
           } } },
       } } },
@@ -134,7 +153,27 @@ export function validateEngineScript(value) {
     for (const [ti, turn] of turns.entries()) {
       const tt = `${at}.turns[${ti}]`
       if (!isObject(turn)) { bad(tt, 'an object'); continue }
-      only(turn, ['say', 'approve', 'whileRunning', 'expect'], tt)
+      only(turn, ['say', 'approve', 'whileRunning', 'action', 'afterMs', 'expect'], tt)
+      const prev = turns[ti - 1]
+      if (turn.action !== undefined) {
+        if (!ACTIONS.includes(turn.action)) bad(`${tt}.action`, `one of ${ACTIONS.join(', ')}`)
+        else {
+          if (ti === 0) bad(`${tt}.action`, 'cannot be the first turn')
+          if (turn.whileRunning !== undefined) bad(`${tt}.whileRunning`, 'an action turn is not also a whileRunning turn')
+          if (turn.approve?.length) bad(`${tt}.approve`, 'an action turn takes no approve')
+          if (turn.action === 'steer') { if (typeof turn.say !== 'string' || !turn.say.trim() || turn.say.length > LIMITS.sayChars) bad(`${tt}.say`, `steer needs a string of 1-${LIMITS.sayChars} characters`) }
+          else if (turn.say !== undefined) bad(`${tt}.say`, `${turn.action} takes no say`)
+          if (turn.action === 'delete') { if (turn.afterMs !== undefined) bad(`${tt}.afterMs`, 'delete takes no afterMs') }
+          else {
+            if (turn.afterMs !== undefined && !(Number.isInteger(turn.afterMs) && turn.afterMs >= 0 && turn.afterMs <= LIMITS.whileRunningMs)) bad(`${tt}.afterMs`, `an integer 0-${LIMITS.whileRunningMs}`)
+            if (ti > 0 && (prev?.whileRunning !== undefined || prev?.action !== undefined)) bad(`${tt}.action`, `${turn.action} must follow a plain message turn (not a whileRunning or action turn)`)
+          }
+        }
+      } else {
+        if (turn.afterMs !== undefined) bad(`${tt}.afterMs`, 'only an interrupt or steer action takes afterMs')
+        if (typeof turn.say !== 'string' || !turn.say.trim() || turn.say.length > LIMITS.sayChars) bad(`${tt}.say`, `a string of 1-${LIMITS.sayChars} characters`)
+      }
+      if (ti > 0 && (turn.whileRunning !== undefined) && prev?.action !== undefined) bad(`${tt}.whileRunning`, 'cannot follow an action turn')
       if (turn.whileRunning !== undefined) {
         const w = turn.whileRunning
         if (!isObject(w)) bad(`${tt}.whileRunning`, 'an object { afterMs }')
@@ -147,7 +186,6 @@ export function validateEngineScript(value) {
         if (turn.approve?.length) bad(`${tt}.approve`, 'a whileRunning turn takes no approve')
         if (!isObject(conv.flags) || conv.flags[IN_RUN_FLAG] !== 'on') bad(`${tt}.whileRunning`, `needs flags.${IN_RUN_FLAG} = "on" in this conversation`)
       }
-      if (typeof turn.say !== 'string' || !turn.say.trim() || turn.say.length > LIMITS.sayChars) bad(`${tt}.say`, `a string of 1-${LIMITS.sayChars} characters`)
       if (turn.approve !== undefined && (!Array.isArray(turn.approve) || turn.approve.length > LIMITS.approvals || turn.approve.some(a => a !== 'yes' && a !== 'no'))) bad(`${tt}.approve`, `at most ${LIMITS.approvals} of "yes" / "no"`)
       const e = turn.expect
       if (e === undefined) continue
@@ -155,9 +193,10 @@ export function validateEngineScript(value) {
       only(e, EXPECT_KEYS, `${tt}.expect`)
       if (e.toolCalls !== undefined && (!Array.isArray(e.toolCalls) || e.toolCalls.length > LIMITS.strings || e.toolCalls.some(n => typeof n !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(n)))) bad(`${tt}.expect.toolCalls`, 'tool names')
       for (const k of ['noToolCalls', 'noNativeTools']) if (e[k] !== undefined && e[k] !== true) bad(`${tt}.expect.${k}`, 'true')
-      for (const k of ['posted', 'compacted']) if (e[k] !== undefined && typeof e[k] !== 'boolean') bad(`${tt}.expect.${k}`, 'a boolean')
+      for (const k of ['posted', 'compacted', 'conversationGone']) if (e[k] !== undefined && typeof e[k] !== 'boolean') bad(`${tt}.expect.${k}`, 'a boolean')
       for (const k of ['answerIncludes', 'answerExcludes']) if (e[k] !== undefined) textList(e[k], `${tt}.expect.${k}`)
       if (e.commandsRan !== undefined) textList(e.commandsRan, `${tt}.expect.commandsRan`, 2000)
+      for (const k of ['commandsRanIncludes', 'commandsRanExcludes']) if (e[k] !== undefined) textList(e[k], `${tt}.expect.${k}`)
       if (e.asked !== undefined && !(Number.isInteger(e.asked) && e.asked >= 0 && e.asked <= LIMITS.approvals)) bad(`${tt}.expect.asked`, `an integer 0-${LIMITS.approvals}`)
       if (e.undoRecords !== undefined && !(Number.isInteger(e.undoRecords) && e.undoRecords >= 0 && e.undoRecords <= 50)) bad(`${tt}.expect.undoRecords`, 'an integer 0-50')
       if (e.turnStatus !== undefined && !['completed', 'failed', 'interrupted'].includes(e.turnStatus)) bad(`${tt}.expect.turnStatus`, 'completed / failed / interrupted')
@@ -165,6 +204,10 @@ export function validateEngineScript(value) {
       if (e.memory !== undefined) {
         for (const why of validateMemoryExpect(e.memory, conv.memory, `${tt}.expect.memory`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
         if (turn.whileRunning !== undefined) bad(`${tt}.expect.memory`, 'not checked on a whileRunning turn (the memory window is the scripted turn)')
+      }
+      if (e.briefing !== undefined) {
+        for (const why of validateBriefingExpect(e.briefing)) bad(`${tt}.expect.briefing`, why)
+        if (conv.flags?.EGDESK_BRIEFING_FLOW !== 'on') bad(`${tt}.expect.briefing`, 'needs flags.EGDESK_BRIEFING_FLOW = "on" in this conversation')
       }
       if (e.files !== undefined) {
         if (!isObject(e.files) || Object.keys(e.files).length > LIMITS.files) bad(`${tt}.expect.files`, 'an object')
@@ -202,6 +245,9 @@ export function checkTurnExpectations(expect = {}, record = {}) {
     const n = record.native ?? {}
     put('noNativeTools', !(n.commandExecution > 0) && !(n.fileChange > 0) && !(n.approvals > 0), { commandExecution: n.commandExecution ?? 0, fileChange: n.fileChange ?? 0, approvals: n.approvals ?? 0 })
   }
+  // substring rules for a model that may batch commands: every listed string occurs in some command that ran / none occurs in any
+  if (expect.commandsRanIncludes) { const missing = expect.commandsRanIncludes.filter(x => !(record.commandsRan ?? []).some(c => c.includes(x))); put('commandsRanIncludes', missing.length === 0, { missing }) }
+  if (expect.commandsRanExcludes) { const found = expect.commandsRanExcludes.filter(x => (record.commandsRan ?? []).some(c => c.includes(x))); put('commandsRanExcludes', found.length === 0, { found }) }
   if (expect.asked !== undefined) put('asked', record.asked === expect.asked, { asked: record.asked ?? null })
   if (expect.commandsRan) put('commandsRan', JSON.stringify(record.commandsRan ?? []) === JSON.stringify(expect.commandsRan), { ran: record.commandsRan ?? [] })
   if (expect.files) {
@@ -210,6 +256,8 @@ export function checkTurnExpectations(expect = {}, record = {}) {
   }
   if (expect.undoRecords !== undefined) put('undoRecords', Number.isInteger(record.undoRecords) && record.undoRecords >= expect.undoRecords, { undoRecords: record.undoRecords ?? null })
   if (expect.turnStatus) put('turnStatus', record.turnStatus === expect.turnStatus, { turnStatus: record.turnStatus ?? null })
+  if (expect.conversationGone !== undefined) put('conversationGone', (record.conversationGone === true) === expect.conversationGone, { conversationGone: record.conversationGone === true })
   if (expect.compacted !== undefined) put('compacted', (record.compacted === true) === expect.compacted, { compacted: record.compacted === true })
+  if (expect.briefing !== undefined) out.push(...checkBriefingExpect(expect.briefing, record.hooks?.briefing ?? null))
   return out
 }

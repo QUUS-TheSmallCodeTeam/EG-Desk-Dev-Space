@@ -89,8 +89,9 @@ const q = text => `"${String(text).replace(/"/g, "'")}"`
 // 0.19 (decided no), so the entry, as designed, did not enter. Nothing said what the page shows. R1: the card's predicate also quotes the
 // first lines the card shows now (its heading and the next lines, each quoted on its own), where the run may receive page text.
 const shownLines = card => (Array.isArray(card.shows) ? card.shows : []).map(line => compactText(String(line ?? ''), ENTRY_LINE_CHARS)).filter(Boolean).slice(0, ENTRY_LINES)
+const quoteIdentity = card => (card.title ? `${q(compactText(card.title, 80))} at ${q(compactText(card.host, 60) || 'an unknown host')}` : `the page at ${q(compactText(card.host, 60) || 'an unknown host')}`)
 const quotePage = card => {
-  const page = card.title ? `${q(compactText(card.title, 80))} at ${q(compactText(card.host, 60) || 'an unknown host')}` : `the page at ${q(compactText(card.host, 60) || 'an unknown host')}`
+  const page = quoteIdentity(card)
   const lines = shownLines(card)
   return lines.length ? `${page}, which now shows ${lines.map(q).join(' / ')}` : page
 }
@@ -119,7 +120,14 @@ export function wallCandidates(entry, cards) {
   if (p.some(value => Number.isFinite(value) && value >= ENTRY_YES)) return []
   return cards.slice(0, MAX_ENTRY_CARDS).map((card, index) => (shownLines(card).length && Number.isFinite(p[index]) && p[index] <= ENTRY_NO ? index : -1)).filter(index => index >= 0)
 }
-export const entryWallQuestions = (cards, indices) => indices.map(index => predicateQuestion(entryWallName(index), `Is this open page ${quotePage(cards[index])} ${WALL_ASK}?`))
+// c24 (real, browser-live-settings-error-v1, 2026-11-25): the follow-up's one predicate came back as a REFUSAL (no probability, 61 input tokens against 419 for
+// the first request). The page it asked about was only inside the question; the evidence it carried was the user message, which the question is not about.
+// Every other judgment of a page (the step's page-state predicates) has the page in the evidence and asks about it; this one now does the same: the
+// evidence lists the open page(s) with the lines they show (each quoted on its own, R4), the question names the page by its title and host.
+export const entryWallQuestions = (cards, indices) => indices.map(index => predicateQuestion(entryWallName(index), `Is this open page ${quoteIdentity(cards[index])} ${WALL_ASK}?`))
+export const entryWallEvidence = (message, cards, indices) => [`User message: ${compactText(message, MAX_MESSAGE)}`, '',
+  `What the open page${indices.length > 1 ? 's' : ''} show${indices.length > 1 ? '' : 's'} now (the first lines):`,
+  ...indices.map(index => `- ${quoteIdentity(cards[index])} shows ${shownLines(cards[index]).map(q).join(' / ')}`)].join('\n')
 /**
  * entryWallFollowUp({ message, cards, entry, client, ... }) -> { entry, usage } | null: the one follow-up request (only for wallCandidates), then
  * the combined reading. Any failure of the follow-up leaves the first result as it was (nothing is entered on a guess).
@@ -128,7 +136,7 @@ export async function entryWallFollowUp({ message, cards, entry, client, timeout
   const indices = wallCandidates(entry, cards)
   if (!indices.length) return null
   try {
-    const result = await client.decide({ input: [{ role: 'developer', content: ENTRY_RULES }, { role: 'user', content: `User message: ${compactText(message, MAX_MESSAGE)}` }],
+    const result = await client.decide({ input: [{ role: 'developer', content: ENTRY_RULES }, { role: 'user', content: entryWallEvidence(message, cards, indices) }],
       questions: entryWallQuestions(cards, indices), timeoutMs, signal, authorizeDispatch })
     const merged = { ...(answers ?? {}), browser_entry: { type: 'predicate', probability: entry.web }, ...Object.fromEntries((entry.cardsP || []).map((value, index) => [entryCardName(index), { type: 'predicate', probability: value }]).filter(([, a]) => Number.isFinite(a.probability))), ...result.answers }
     return { entry: { ...readBrowserEntry(merged, cards, {}), followUp: true }, usage: result.usage }

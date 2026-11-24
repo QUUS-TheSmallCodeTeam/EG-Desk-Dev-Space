@@ -10,6 +10,12 @@
 //   { version, person: { mcpServers: [{ name, tools: [..] }], hooks: n, features: { name: bool }, instructionSources: [path] },
 //     turns: [ { match?: "text the person's message contains", steps: [ step ], status?: "completed"|"failed", final?: "text", error?: "text" } ],
 //     forkTurns?: [ … same … ] }
+//   refuseEditsUnlessInstructed: models what Main's check-1 saw on the real 0.171 (a hypothesis, not a fact about every build): a thread whose
+//     <permissions instructions> block is on, or that was never told its egdesk_* tools act with EG-Desk's permissions, answers an edit request with
+//     "the filesystem is read-only" and calls no tool.
+//   A turn may carry steerFinal: the final text when a turn/steer arrived while it ran (the model followed the steer). An interrupt ends the running turn
+//   as Main saw on 0.171: turn/completed "interrupted", no completed agent message for a partial text.
+//   (in-process scripts only) turn.finalFor(inputText, params) → the final text, instead of `final`
 //   step: { agentMessage: "text", phase? } | { toolCall: { tool, arguments } } | { nativeCommand: { command, cwd } } | { compaction: true }
 //         | { usage: { input, cached, output, reasoning } } | { errorNotification: "text" } | { delayMs: n }
 import fs from 'node:fs'
@@ -25,7 +31,7 @@ const MESSAGE_PHASES = { commentary: 'commentary', final: 'final_answer' }
 export function runFakeAppServer({ script, input = process.stdin, output = process.stdout, log = null, home = '/fake/codex-home', env = {}, exit = code => process.exit(code), stderr = process.stderr } = {}) {
   const logLine = entry => { if (log) fs.appendFileSync(log, `${JSON.stringify(entry)}\n`) }
   const person = { mcpServers: [], hooks: 0, features: {}, instructionSources: [], ...(script.person ?? {}) }
-  const threads = new Map(), used = new Set(), usedFork = new Set(), pending = new Map()
+  const threads = new Map(), used = new Set(), usedFork = new Set(), pending = new Map(), running = new Map() // turnId -> { threadId, interrupted, steers: [text] }
   let nextThread = 0, nextTurn = 0, nextItem = 0, nextServerRequest = 100
   const send = message => { output.write(`${JSON.stringify(message)}\n`); logLine({ dir: 'out', ...message }) }
   let exitCode = 0
@@ -60,14 +66,24 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
     send({ id, method, params })
   })
 
-  async function runTurn(threadId, turnId, plan) {
+  async function runTurn(threadId, turnId, plan, state) {
     const thread = threads.get(threadId), items = []
+    if (script.refuseEditsUnlessInstructed === true && (plan.steps ?? []).some(step => step.toolCall?.tool === 'egdesk_edit_file') &&
+        !(thread.developerInstructions.includes('egdesk_edit_file') && thread.config?.include_permissions_instructions === false)) {
+      plan = { steps: [], final: 'The edit was not applied because this session\'s filesystem permissions are read-only.' }
+    }
     const turn = status => ({ id: turnId, items: [], status })
     notify('turn/started', { threadId, turn: turn('inProgress') })
     const user = { type: 'userMessage', id: itemId(), content: [{ type: 'text', text: thread.lastText, text_elements: [] }] }
     notify('item/started', { threadId, turnId, startedAtMs: Date.now(), item: user }); notify('item/completed', { threadId, turnId, completedAtMs: Date.now(), item: user }); items.push(user)
+    // the state was registered when turn/start was answered: an interrupt or steer that arrives before the first step finds the turn
+    state.emit = text => { const item = { type: 'userMessage', id: itemId(), content: [{ type: 'text', text, text_elements: [] }] }; notify('item/started', { threadId, turnId, startedAtMs: Date.now(), item }); notify('item/completed', { threadId, turnId, completedAtMs: Date.now(), item }); items.push(item) }
+    for (const text of state.early ?? []) state.emit(text)
+    const wait = async ms => { for (let left = ms; left > 0 && !state.interrupted; left -= 20) await sleep(Math.min(20, left)) }
     for (const step of plan.steps ?? []) {
-      if (step.delayMs) await sleep(step.delayMs)
+      if (state.interrupted) break
+      if (step.delayMs) await wait(step.delayMs)
+      if (state.interrupted) break
       if (step.agentMessage !== undefined) {
         const item = { type: 'agentMessage', id: itemId(), text: step.agentMessage, phase: MESSAGE_PHASES[step.phase ?? 'commentary'] ?? step.phase }
         notify('item/started', { threadId, turnId, startedAtMs: Date.now(), item: { ...item, text: '' } }); notify('item/completed', { threadId, turnId, completedAtMs: Date.now(), item }); items.push(item)
@@ -102,8 +118,11 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
       }
       if (step.errorNotification) notify('error', { threadId, turnId, error: { message: step.errorNotification, codexErrorInfo: null, additionalDetails: null }, willRetry: false })
     }
-    if (plan.status !== 'failed' && plan.final !== undefined) {
-      const item = { type: 'agentMessage', id: itemId(), text: plan.final, phase: 'final_answer' }
+    running.delete(turnId)
+    if (state.interrupted) { notify('turn/completed', { threadId, turn: { ...turn('interrupted') } }); return }
+    const finalText = state.steers.length && plan.steerFinal !== undefined ? plan.steerFinal : plan.final
+    if (plan.status !== 'failed' && finalText !== undefined) {
+      const item = { type: 'agentMessage', id: itemId(), text: finalText, phase: 'final_answer' }
       notify('item/started', { threadId, turnId, startedAtMs: Date.now(), item: { ...item, text: '' } }); notify('item/completed', { threadId, turnId, completedAtMs: Date.now(), item }); items.push(item)
     }
     const status = plan.status ?? 'completed'
@@ -114,7 +133,7 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
     initialize: (id) => result(id, 'initialize', { userAgent: `codex_cli_rs/${script.version ?? FAKE_VERSION} (Mac OS 26.0.0; arm64) fake`, codexHome: script.home || env.CODEX_HOME || home, platformFamily: 'unix', platformOs: 'macos' }),
     'thread/start': (id, params) => {
       const threadId = `thr-${++nextThread}`
-      threads.set(threadId, { id: threadId, cwd: params.cwd ?? '/fake/cwd', config: params.config ?? {}, ephemeral: params.ephemeral === true, dynamicTools: (params.dynamicTools ?? []).map(t => t.name) })
+      threads.set(threadId, { id: threadId, cwd: params.cwd ?? '/fake/cwd', config: params.config ?? {}, developerInstructions: params.developerInstructions ?? '', ephemeral: params.ephemeral === true, dynamicTools: (params.dynamicTools ?? []).map(t => t.name) })
       result(id, 'thread/start', { thread: threadObject(threadId, { ...params, ephemeral: script.reportEphemeral === false ? false : params.ephemeral }), cwd: params.cwd ?? '/fake/cwd', model: script.model ?? 'fake-model', modelProvider: 'openai', reasoningEffort: script.effort ?? 'low',
         approvalPolicy: params.approvalPolicy ?? 'never', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false }, instructionSources: effective(threads.get(threadId)).sources })
       // like the real binary (Main's 0.171 finding): every MCP server that will be active starts when the thread starts
@@ -129,13 +148,30 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
       const thread = threads.get(params.threadId)
       if (!thread) return send({ id, error: { code: -32600, message: `thread not found: ${params.threadId}` } })
       thread.lastText = textOf(params)
-      const plan = (thread.fork ? chooseTurn(script.forkTurns ?? [], usedFork, thread.lastText) : chooseTurn(script.turns ?? [], used, thread.lastText)) ?? { steps: [], final: '(the fake has no script for this turn)' }
+      let plan = (thread.fork ? chooseTurn(script.forkTurns ?? [], usedFork, thread.lastText) : chooseTurn(script.turns ?? [], used, thread.lastText)) ?? { steps: [], final: '(the fake has no script for this turn)' }
+      // finalFor(inputText, params): the final message as a function of the turn's input (a script object passed in-process only; a JSON script cannot hold a function). c31: the
+      // briefing's fill answers a guide that the product builds at run time, so a fake model must read it from the prompt.
+      if (typeof plan.finalFor === 'function') plan = { ...plan, final: plan.finalFor(thread.lastText, params) }
       const turnId = `turn-${++nextTurn}`
       result(id, 'turn/start', { turn: { id: turnId, items: [], status: 'inProgress' } })
-      setImmediate(() => { runTurn(params.threadId, turnId, plan).catch(error => fail('turn run', [String(error?.message ?? error)])) })
+      const state = { threadId: params.threadId, interrupted: false, steers: [], emit: null }
+      running.set(turnId, state)
+      setImmediate(() => { runTurn(params.threadId, turnId, plan, state).catch(error => fail('turn run', [String(error?.message ?? error)])) })
     },
     'thread/unsubscribe': (id) => result(id, 'thread/unsubscribe', { status: 'unsubscribed' }),
-    'turn/interrupt': (id) => result(id, 'turn/interrupt', {}),
+    'turn/interrupt': (id, params) => {
+      const state = running.get(params.turnId)
+      if (!state || state.threadId !== params.threadId) return result(id, 'turn/interrupt', {}) // nothing running: acknowledged, nothing happens
+      state.interrupted = true
+      result(id, 'turn/interrupt', {})
+    },
+    'turn/steer': (id, params) => {
+      const state = running.get(params.expectedTurnId)
+      if (!state || state.threadId !== params.threadId) return send({ id, error: { code: -32600, message: 'expected turn is not the active turn' } })
+      const text = (params.input ?? []).filter(i => i?.type === 'text').map(i => i.text).join('\n')
+      state.steers.push(text); if (state.emit) state.emit(text); else (state.early ??= []).push(text)
+      result(id, 'turn/steer', { turnId: params.expectedTurnId })
+    },
     'config/read': (id) => result(id, 'config/read', { config: {}, origins: {}, layers: (person.mcpServers.some(s => !s.pluginId) ? [{ name: { type: 'user', file: `${env.CODEX_HOME || home}/config.toml` }, version: 'v1', config: { mcp_servers: Object.fromEntries(person.mcpServers.filter(s => !s.pluginId).map(s => [s.name, { command: 'fake-server' }])) } }] : []) }),
     'mcpServerStatus/list': (id, params) => {
       const view = params.threadId && threads.get(params.threadId) ? effective(threads.get(params.threadId)).servers : person.mcpServers

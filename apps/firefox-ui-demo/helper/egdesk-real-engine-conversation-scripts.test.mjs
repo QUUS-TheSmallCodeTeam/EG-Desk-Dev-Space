@@ -12,7 +12,7 @@ const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scrip
 const SCRIPT_SET = /^real-engine-[a-z0-9][a-z0-9-]{0,40}-v\d{1,3}$/, ID = /^[a-z0-9][a-z0-9-]{0,39}$/, FLAG = /^EGDESK_[A-Z0-9_]{1,48}$/, VALUE = /^[a-z0-9_-]{1,24}$/
 const RESERVED = ['EGDESK_CODEX_BIN', 'EGDESK_DATA_DIR', 'EGDESK_CODEX_MODEL', 'EGDESK_CODEX_EFFORT', 'EGDESK_CODEX_DISABLE_MEMORIES', 'EGDESK_CLAUDE_BIN']
 const EXPECT_KEYS = ['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted']
-const OURS = ['correction', 'why-stopped', 'terse-yes', 'topic-return']
+const OURS = ['correction', 'why-stopped', 'terse-yes', 'topic-return', 'conditional-yes', 'pause']
 const load = name => JSON.parse(readFileSync(path.join(dir, `real-engine-${name}-v1.json`), 'utf8'))
 
 test('the four scripts exist, follow the real-engine script format, and use only known keys and flags', () => {
@@ -43,9 +43,9 @@ test('whileRunning: only on a later turn, with a bounded afterMs, and only in a 
     assert.deepEqual(Object.keys(turn.whileRunning), ['afterMs']); assert.ok(Number.isInteger(turn.whileRunning.afterMs) && turn.whileRunning.afterMs >= 0 && turn.whileRunning.afterMs <= 120_000)
     assert.ok(i >= 1, 'sent while the PREVIOUS turn runs: never the first turn')
     assert.equal(conv.flags?.EGDESK_INRUN_MESSAGES, 'on')
-    assert.ok(conv.turns[i - 1].expect?.commandsRan?.length, 'the previous turn is a command that is still running when this one is sent')
+    assert.ok(/sleep \d+/.test(conv.turns[i - 1].say), 'the previous turn is a command that is still running when this one is sent')
   })
-  assert.equal(seen, 1, 'exactly the why-stopped conversation')
+  assert.equal(seen, 2, 'the why-stopped and the pause conversations')
   const why = load('why-stopped').conversations[0]
   assert.equal(why.turns[1].say, '아니 지금 왜 멈췄니?'); assert.equal(why.turns[1].whileRunning.afterMs, 4000)
   assert.ok(why.turns[0].say.includes('sleep 15'), 'the command outlasts the 4 s')
@@ -65,6 +65,19 @@ test('the patterns: the correction, the terse yes after a proposal, the topic re
   assert.match(r.turns[2].say, /^아까 그거 다시/)
   assert.deepEqual([r.turns[2].expect.answerIncludes, r.turns[2].expect.answerExcludes], [['12월 20일'], ['1월 15일']], 'the first file\'s date, never the second\'s')
   assert.ok(r.folder['notes/quote-a.md'].includes('12월 20일') && r.folder['notes/ship-b.md'].includes('1월 15일'))
+})
+
+test('c24 patterns: the conditional approval is checked by marker files (the skipped step stays absent), the pause ends the first turn interrupted without claiming it finished', () => {
+  const c = load('conditional-yes').conversations[0]
+  assert.equal(c.turns[1].say, '응 근데 테스트는 빼고')
+  assert.deepEqual(c.turns[0].expect.files, { 'build.done': null, 'test.done': null, 'deploy.done': null }, 'nothing runs before the approval')
+  assert.deepEqual(c.turns[1].expect.files, { 'build.done': 'ok', 'test.done': null, 'deploy.done': 'ok' })
+  assert.ok(Object.values(c.folder).join('\n').split('\n').filter(Boolean).length === 3 && c.folder['notes/steps.md'].includes('test.done'))
+  const p = load('pause').conversations[0]
+  assert.deepEqual(p.flags, load('why-stopped').conversations[0].flags, 'the same flags as the why-stopped conversation')
+  assert.equal(p.turns[1].say, '아니 잠깐, 그거 하지 마'); assert.equal(p.turns[1].whileRunning.afterMs, 4000); assert.ok(p.turns[0].say.includes('sleep 15'))
+  assert.equal(p.turns[0].expect.turnStatus, 'interrupted'); assert.deepEqual(p.turns[0].expect.answerExcludes, ['cleanup-finished']); assert.equal(p.turns[0].expect.posted, undefined, 'a preamble may have been posted')
+  assert.deepEqual(p.turns[2].expect.answerExcludes, ['cleanup-finished']); assert.equal(p.turns[2].expect.turnStatus, 'completed')
 })
 
 test('no secret, address, phone number or real-looking identifier in any script', () => {

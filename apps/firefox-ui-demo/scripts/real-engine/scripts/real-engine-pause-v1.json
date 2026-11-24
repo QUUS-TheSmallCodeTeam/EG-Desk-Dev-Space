@@ -1,0 +1,52 @@
+{
+  "set": "real-engine-pause-v1",
+  "description": "Pattern: a pause typed while a long command runs (\"아니 잠깐, 그거 하지 마\"). Needs the decision composition (--decisions with a key) and the same flags as real-engine-why-stopped-v1. The second turn carries whileRunning (sent 4 s after the first turn started); the heartbeat reads it as a request to stop and settles it as an interrupt, so the first turn ends interrupted and never claims the command finished. The third turn asks how it went and must not claim it finished. Pattern taken from the person's real turns (masked); expectations are code checks only.",
+  "conversations": [
+    {
+      "id": "pause",
+      "flags": {
+        "EGDESK_INRUN_MESSAGES": "on",
+        "EGDESK_CONVERSATION_FLOW": "on",
+        "EGDESK_DRAFT_CHECK": "on"
+      },
+      "folder": {
+        "README.md": "scratch folder for the real-engine check\n"
+      },
+      "turns": [
+        {
+          "say": "다음 명령을 실행하고, 끝나면 알려 줘: sleep 15 && echo cleanup-finished",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "answerExcludes": [
+              "cleanup-finished"
+            ],
+            "noNativeTools": true,
+            "turnStatus": "interrupted"
+          }
+        },
+        {
+          "say": "아니 잠깐, 그거 하지 마",
+          "whileRunning": {
+            "afterMs": 4000
+          },
+          "expect": {
+            "noNativeTools": true
+          }
+        },
+        {
+          "say": "방금 하던 거 어떻게 됐어?",
+          "expect": {
+            "answerExcludes": [
+              "cleanup-finished"
+            ],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}

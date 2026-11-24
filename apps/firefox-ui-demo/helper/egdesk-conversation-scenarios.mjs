@@ -21,7 +21,11 @@ import { createHash } from 'node:crypto'
 import { TYPE_NAMES } from './egdesk-conversation-examples.mjs'
 
 export const SCENARIO_KINDS = Object.freeze({
-  triage_recall: { types: ['referential'], count: 2, cue: /아까|방금|전에|지난번|다시/, family: 'memory_triage', expect: [{ name: 'tn_recall', kind: 'predicate', min: 0.8, severity: 'hard', note: 'the person points back to something earlier' }] },
+  // c24 (lane L7, c25): the product's rule is tn_need (the stored pages are fetched); tn_recall is not a skip condition. The c20 expectation "tn_recall
+  // >= .8, hard" was wrong for a turn that asks about one earlier thing ("오전 6시에 작업 중지 예약 걸었지?": need .99, recall .13, and the product fetches).
+  triage_recall: { types: ['referential'], count: 2, cue: /아까|방금|전에|지난번|다시/, family: 'memory_triage', expect: [{ name: 'tn_need', kind: 'predicate', min: 0.8, severity: 'hard', note: 'the product fetches for a turn that points back to something earlier (need), whether or not it counts as a recall' },
+    { name: 'tn_recall', kind: 'predicate', min: 0.8, severity: 'soft', note: 'a request to bring the earlier thing back (a summary); a check of one earlier fact is not' }] },
+  triage_check_earlier: { types: ['check_earlier'], v2: true, family: 'memory_triage', expect: [{ name: 'tn_need', kind: 'predicate', min: 0.8, severity: 'hard', note: 'a yes/no check of an earlier action: the product fetches the record (measured need .99)' }] },
   triage_correction: { types: ['correction', 'instruction_change'], count: 2, family: 'memory_triage', expect: [{ name: 'tn_courtesy', kind: 'predicate', max: 0.2, severity: 'hard', note: 'a correction is not small talk' }] },
   triage_approval: { types: ['approval', 'ambiguous'], family: 'memory_triage', expect: [{ name: 'tn_courtesy', kind: 'predicate', max: 0.2, severity: 'soft', note: 'a go-ahead of the assistant\'s proposal decides something; whether the product question counts it as an acknowledgement is what is measured' }] },
   triage_praise: { types: ['praise'], family: 'memory_triage', expect: [{ name: 'tn_courtesy', kind: 'predicate', min: 0.8, severity: 'soft', note: 'praise only, when the turn carries no request (soft: real praise often does)' }] },
@@ -44,7 +48,7 @@ export const SCENARIO_PRODUCT_BARS = Object.freeze({
   message__note: { yes: 0.8, no: 0.2, source: 'helper/egdesk-heartbeat-judge.mjs BEAT_PREDICATE_YES .8' },
   answer_type: { minConfidence: 0.75, source: 'helper/egdesk-decision-questions.mjs DEFAULT_DECISION_THRESHOLDS.choice .75' },
   'rc_stated_#': { yes: 0.8, no: 0.2, source: 'CONFIRM_BARS' }, message__person_status: { yes: 0.8, no: 0.2, source: 'BEAT_PREDICATE_YES .8' },
-  message__person_change: { yes: 0.8, no: 0.2, source: 'BEAT_PREDICATE_YES .8' }, message__person_stop: { yes: 0.8, no: 0.2, source: 'BEAT_PREDICATE_YES .8' }, 'rc_confirms_#': { yes: 0.8, no: 0.2, source: 'CONFIRM_BARS' },
+  tn_need: { yes: 0.8, no: 0.2, source: 'turn memory triage yes/no bar' }, message__person_change: { yes: 0.8, no: 0.2, source: 'BEAT_PREDICATE_YES .8' }, message__person_stop: { yes: 0.8, no: 0.2, source: 'BEAT_PREDICATE_YES .8' }, 'rc_confirms_#': { yes: 0.8, no: 0.2, source: 'CONFIRM_BARS' },
 })
 // The one pending note of confirm_unstated (synthetic: the harness's public wiki page "PostgreSQL 이전"), never mentioned by the real reply.
 export const UNSTATED_NOTE = Object.freeze({ title: 'PostgreSQL 이전', status: 'done' })

@@ -232,3 +232,59 @@ test('material the run\'s models may not receive is never sent: the provider\'s 
     assert.equal(quiet.requests.length, 0); other.stop('run_end')
   }
 })
+
+// ---- c24 (Main): a message the person sent is judged at the next beat whatever the ask gap, the back-off, the ask budget or the nudge limit say ----
+// Those bounds are for what the assistant offers unprompted. A question is `solicited` when it is about something the person just sent.
+const judgeLog = () => { const asked = []; return { asked, judge: async ({ beat, questions }) => { asked.push({ at: beat.internalMs, names: questions.map(q => q.name) }); return Object.fromEntries(questions.map(q => [q.wire, { value: q.none, accepted: true }])) } } }
+const askAlways = (name, solicited = false) => ({ propose: () => [{ name, type: 'predicate', instructions: `Question ${name}?`, ...(solicited ? { solicited: true } : {}) }], onVerdict: () => 'none' })
+const person = { pending: [] }
+// The same question name for every message, as the product's person questions are: from the second message on the option is not "never offered".
+const personProvider = { propose: () => (person.pending.length ? (person.pending.splice(0, 1), [{ name: 'person_stop', type: 'predicate', instructions: 'Does this message ask to stop?', solicited: true, topic: 'person_message' }]) : null), onVerdict: () => 'none' }
+
+test('solicited: a person\'s message is asked at the next beat, inside the ask gap, past the back-off and past the ask budget; the unsolicited bounds are unchanged', async () => {
+  const c = clockwork(), hb = createHeartbeat({ ...c }), { asked, judge } = judgeLog()
+  person.pending = []
+  hb.setJudge(judge); hb.register('note', askAlways('wait')); hb.register('person', personProvider)
+  hb.start({ sinceMs: 0 })
+  await c.advance(5_000)            // beat 1: the unsolicited question is asked at once (a never-offered option)
+  assert.deepEqual(asked.map(a => a.names), [['wait']])
+  await c.advance(5_000)            // beat 2 at 10 s: the same option again is held to the ask gap (all-"none" back-off doubles it)
+  assert.equal(asked.length, 1, 'inside the gap nothing unsolicited is asked')
+  person.pending = ['stop1']; assert.equal(hb.nudge({ solicited: true }), true)
+  await c.advance(500)
+  assert.deepEqual(asked.at(-1), { at: 10_500, names: ['person_stop'] }, 'the person\'s message is asked 0.5 s after it arrived, alone')
+  assert.equal(asked.length, 2)
+  // right after, another message: the once-per-5-s nudge limit does not apply to it
+  person.pending = ['stop2']; await c.advance(100)
+  assert.equal(hb.nudge({ solicited: false }), false, 'the unsolicited nudge is still held to once per 5 s')
+  assert.equal(hb.nudge({ solicited: true }), true, 'a solicited nudge is not')
+  await c.advance(500)
+  assert.deepEqual(asked.at(-1), { at: 11_100, names: ['person_stop'] }, 'the second message too, though the same question was asked 0.6 s before (not "never offered") and inside the gap')
+  assert.equal(asked.length, 3)
+  // what the assistant offers on its own keeps its own timing: asked at 5 s (all-"none"), so the same question is due 20 s later, at 25 s; the two
+  // person rounds counted neither as asks nor in the all-"none" back-off
+  await c.advance(25_000)
+  assert.deepEqual(asked.filter(a => a.names[0] === 'wait').map(a => a.at), [5_000, 25_000])
+})
+
+test('solicited: past the ask budget (maxAsks) a message is still judged; a nudge that met a round in flight takes the next beat when the round ends', async () => {
+  const c = clockwork(), hb = createHeartbeat({ ...c }), { asked } = judgeLog()
+  let release = null, gate = new Promise(r => { release = r }), held = false
+  const judge = async ({ beat, questions }) => { asked.push({ at: beat.internalMs, names: questions.map(q => q.name) }); if (questions[0].name === 'person_stop' && !held) { held = true; await gate }
+    return Object.fromEntries(questions.map(q => [q.wire, { value: q.none, accepted: true }])) }
+  person.pending = []
+  hb.setJudge(judge); hb.register('note', { propose: beat => [{ name: `wait_${beat.beat}`, type: 'predicate', instructions: 'A new question each beat?' }], onVerdict: () => 'none' }); hb.register('person', personProvider)
+  hb.start({ sinceMs: 0 })
+  await c.advance(5_000 * (HEARTBEAT_LIMITS.maxAsks + 1))
+  const unsolicitedAsks = asked.filter(a => a.names[0].startsWith('wait_')).length
+  assert.equal(unsolicitedAsks, HEARTBEAT_LIMITS.maxAsks, 'the ask budget for unprompted questions is spent')
+  person.pending = ['slow']; hb.nudge({ solicited: true }); await c.advance(500)
+  assert.deepEqual(asked.at(-1).names, ['person_stop'], 'past the budget, the message is still asked')
+  // a second message while that round is in flight: its solicited nudge is remembered
+  person.pending = ['next']; assert.equal(hb.nudge({ solicited: true }), true)
+  const inFlight = asked.length
+  await c.advance(600); assert.equal(asked.length, inFlight, 'the round is still in flight: one judged round at a time')
+  release(); await c.advance(0); await c.advance(500)
+  assert.equal(asked.length, inFlight + 1); assert.deepEqual(asked.at(-1).names, ['person_stop'], 'asked 0.5 s after the round ended, not at the next grid beat')
+  assert.ok(asked.at(-1).at % 5000 !== 0, 'off the 5 s grid')
+})

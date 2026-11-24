@@ -14,14 +14,14 @@ import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { DECISION_KEY_ENV, loadScripts, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { REAL_ENGINE_SCRIPT_SCHEMA, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createMemoryHook, memoryGraph, memoryNeedsDecisions, pagesIn, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
-import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryRecallScript, RETENTION } from './egdesk-memory-real-engine-scripts.mjs'
+import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryRecallScript, RETENTION } from './egdesk-memory-real-engine-scripts.mjs'
 import { candidatesFromOntologyGraph } from './egdesk-context-setup.mjs'
 
 const app = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scriptFile = name => path.join(app, 'scripts', 'real-engine', 'scripts', `real-engine-${name}${/-v\d+$/.test(name) ? '' : '-v1'}.json`)
 
 test('the committed scripts are what the builders produce, validate, and need the Decision model', () => {
-  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script]]) {
+  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script]]) {
     const committed = JSON.parse(fs.readFileSync(scriptFile(name), 'utf8'))
     assert.deepEqual(committed, JSON.parse(JSON.stringify(build())))
     assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })
@@ -75,6 +75,10 @@ test('pagesIn: a body is a page or item block; a reference line is not a body', 
   const onlyRef = { egdesk_turn_memory: { kind: 'application', value: '[page id=ontology:backup/retention rev=bb already delivered earlier in this thread, unchanged; content not re-sent]' } }
   assert.deepEqual(pagesIn(onlyRef), { bodies: [], refs: ['backup/retention'], keys: ['egdesk_turn_memory'], copies: {} })
   assert.deepEqual(pagesIn(undefined), { bodies: [], refs: [], keys: [], copies: {} })
+  // one packet: the memory part of the merged packet names the page without repeating its body
+  const merged = { egdesk_decision_context: { value: '[item id=ontology:backup/retention kind=timeline]\nbody\n\n[page id=ontology:backup/retention time=past rev=aa via=scan]\n[content not repeated here: this page is among the selected items above]' } }
+  assert.deepEqual(pagesIn(merged), { bodies: ['backup/retention'], refs: [], keys: ['egdesk_decision_context'], copies: { 'backup/retention': 1 } })
+  assert.deepEqual(pagesIn({ k: { value: '[page id=ontology:x rev=1 via=scan]\n[content not repeated here: this page is among the selected items above]' } }).refs, ['x'])
 })
 
 test('the hook: attached, notAttached and noResends are judged on what turn/start carried; a re-sent body fails noResends, a reference does not', () => {
@@ -127,7 +131,6 @@ test('end to end (fake engine): the recall script passes when the product attach
   const w = world(t, { turns: [{ steps: [], final: '보관 기간은 47일로 정했습니다.' }] })
   const result = await runCheck(w.options, asScripts(buildMemoryRecallScript()), w.deps)
   const rec = result.records[0], turn = rec.turns[0]
-  if (process.env.L7_DEBUG) console.log('DBG', JSON.stringify({ calls: w.decisionCalls, turn: turn.memory, decisions: turn.subTurns.map(s => s.decisions) }))
   assert.equal(rec.aborted, null, rec.abortDetail)
   assert.deepEqual(turn.memory.attached.includes(RETENTION.id), true, JSON.stringify(turn.memory))
   assert.deepEqual(turn.memory.attached.filter(id => id.startsWith('office/') || id.startsWith('lunch/')), [])
@@ -142,7 +145,6 @@ test('end to end (fake engine): the held script passes with the held-record prun
   const rec = (await runCheck(w.options, asScripts(buildMemoryHeldScript()), w.deps)).records[0]
   assert.equal(rec.aborted, null, rec.abortDetail)
   const [t1, t2] = rec.turns
-  if (process.env.L7_DEBUG) console.log('DBG', JSON.stringify([t1.memory, t2.memory]))
   assert.deepEqual(t1.memory.attached.includes(RETENTION.id), true)
   assert.ok(t1.memory.keys.includes('egdesk_turn_memory'), 'turn memory ran on the one-time thread (the check opts in for memory mode on)')
   assert.deepEqual(t2.memory.resent, [])
@@ -194,4 +196,29 @@ test('held-v2: turn 1 must not volunteer the later fact (checked by code), turn 
   const w2 = world(t, { turns: [{ steps: [], final: '47일이고, 47일이 지나면 자동 삭제합니다.' }, { steps: [], final: '자동 삭제합니다.' }] })
   const rec2 = (await runCheck(w2.options, asScripts(buildMemoryHeldV2Script()), w2.deps)).records[0]
   assert.equal(rec2.turns[0].ok, false); assert.equal(rec2.turns[0].expectations.find(e => e.check === 'answerExcludes').ok, false); assert.equal(rec2.ok, false)
+})
+
+test('noDuplicates: a page whose body is in two keys of one turn fails it; one body passes; validation takes only true', () => {
+  const hook = createMemoryHook({ mode: 'on', pages: [{ id: 'a', title: 'A', body: 'x' }] })
+  hook.beginTurn()
+  hook.observe('turn/start', { additionalContext: { egdesk_decision_context: { value: '[item id=ontology:a kind=timeline]\nx' }, egdesk_turn_memory: { value: '[page id=ontology:a rev=1 via=scan]\nx' } } })
+  const twice = hook.finishTurn({ noDuplicates: true }); assert.equal(twice.expectations[0].ok, false); assert.deepEqual(twice.expectations[0].detail.twice, ['a'])
+  hook.beginTurn(); hook.observe('turn/start', { additionalContext: { egdesk_decision_context: { value: '[item id=ontology:a kind=timeline]\nx' } } })
+  assert.equal(hook.finishTurn({ noDuplicates: true }).expectations[0].ok, true)
+  const memory = { pages: [{ id: 'a', title: 'A', body: 'x' }] }
+  assert.deepEqual(validateMemoryExpect({ noDuplicates: true }, memory), []); assert.match(validateMemoryExpect({ noDuplicates: false }, memory).join(), /true/)
+})
+
+test('end to end (fake engine): held-v3 (one packet, no same body twice in a turn) passes; the same conversation without the one-packet flag fails turn 1 on noDuplicates', async t => {
+  const fake = { turns: [{ steps: [], final: '47일입니다.' }, { steps: [], final: '47일이 지나면 자동 삭제하기로 했습니다.' }] }
+  const w = world(t, fake)
+  const rec = (await runCheck(w.options, asScripts(buildMemoryHeldV3Script()), w.deps)).records[0]
+  assert.equal(rec.aborted, null, rec.abortDetail)
+  assert.equal(rec.ok, true, JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok))))
+  assert.equal(rec.turns[0].memory.duplicatesInTurn, 0); assert.deepEqual(rec.turns[1].memory.resent, [])
+  const w2 = world(t, fake)
+  const script = buildMemoryHeldV3Script(); script.conversations[0].flags = { EGDESK_TURN_MEMORY_PRUNE_HELD: 'on' }
+  const rec2 = (await runCheck(w2.options, asScripts(script), w2.deps)).records[0]
+  assert.equal(rec2.turns[0].expectations.find(e => e.check === 'memory.noDuplicates').ok, false)
+  assert.equal(rec2.turns[0].ok, false); assert.equal(rec2.ok, false)
 })

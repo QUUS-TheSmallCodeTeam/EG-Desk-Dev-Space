@@ -7,6 +7,7 @@
 export const MEMORY_RECALL_SET = 'real-engine-memory-recall-v1'
 export const MEMORY_HELD_SET = 'real-engine-memory-held-v1'
 export const MEMORY_HELD_V2_SET = 'real-engine-memory-held-v2'
+export const MEMORY_HELD_V3_SET = 'real-engine-memory-held-v3'
 export const RETENTION = Object.freeze({ id: 'backup/retention', title: '서버 백업 보관 기간 결정', time: 'past', status: 'done', days: '47',
   body: '11월 5일 점검 회의에서 서버 백업 보관 기간을 47일로 정했다. 47일이 지나면 자동 삭제하고, 월 1회 복원 시험을 한다.' })
 export const DECOYS = Object.freeze([
@@ -36,6 +37,17 @@ export function buildMemoryHeldV2Script() {
         expect: { memory: { attached: [RETENTION.id], notAttached: DECOYS.map(d => d.id) }, posted: true, answerIncludes: [RETENTION.days], answerExcludes: ['자동 삭제'], noNativeTools: true, turnStatus: 'completed' } },
       conv.turns[1],
     ] }] }
+}
+
+// held-v3 (c27, Main's decision after the real run): held-v2 with the one-packet option (EGDESK_TURN_MEMORY_ONE_PACKET=on) and the expectation that no page has its
+// body twice within one turn. The real run showed the product default (selection item + memory packet) sending the first turn's page twice. Each turn: attached /
+// not attached as in v2, noResends on turn 2, and noDuplicates on both turns.
+export function buildMemoryHeldV3Script() {
+  const v2 = buildMemoryHeldV2Script(), conv = v2.conversations[0]
+  return { set: MEMORY_HELD_V3_SET,
+    description: 'Pattern: held-v2 (the page already in the conversation is not sent again, and the answer comes from it) with the one-packet option on: the selection and the memory loop share one packet, so no page may have its body twice in one turn (noDuplicates), on top of the v2 expectations (turn 1 does not volunteer the later fact; turn 2 re-sends nothing and holds 자동 삭제). Needs --decisions. Expectations by code.',
+    conversations: [{ ...conv, id: 'memory-held-v3', flags: { EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', EGDESK_TURN_MEMORY_ONE_PACKET: 'on' },
+      turns: conv.turns.map(turn => ({ ...turn, expect: { ...turn.expect, memory: { ...turn.expect.memory, noDuplicates: true } } })) }] }
 }
 
 export function buildMemoryHeldScript() {

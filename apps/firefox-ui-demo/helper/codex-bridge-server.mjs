@@ -393,6 +393,8 @@ const codexEngine = createCodexEngineAdapter({
   isReady: () => appServerReady,
   getModels: () => modelCatalog.snapshot(),
   getBoardPeerContract: () => appServerReady ? nativeCapabilities.boardPeerContract : null,
+  // c23: a plain message may be steered into a working turn when this binary's own generated schema says so (no version pin)
+  getSteerContract: () => appServerReady ? nativeCapabilities.steerContract : null,
   // thread/delete: the shared app-server only, when its binary's generated schema has it (egdesk-native-capabilities threadDelete). A profile's
   // own app-server is not proven here; deleting a conversation there records that the engine history remains (L2 c18).
   getThreadDelete: id => (id == null || id === CODEX_ENGINE_PROFILE_ID) && appServerReady && nativeCapabilities.threadDelete === true,
@@ -485,6 +487,7 @@ const terminalGateConfig = ['advisory', 'on'].includes(process.env.EGDESK_TERMIN
 // A message typed while a run works is accepted into that run and handed to the session heartbeat (codex-chat-runtime.mjs, "Messages while a
 // run works"). Developer flag, default off: without it the composer waits for the turn and the runtime refuses such a message, as before.
 const IN_RUN_MESSAGES_ENABLED = process.env.EGDESK_INRUN_MESSAGES === 'on'
+const agentReloadReuse = process.env.EGDESK_AGENT_RELOAD_REUSE === 'on' // developer flag, default off (L7 c27)
 const chat = new CodexChatRuntime({
   localCapacity,
   engines: engineRegistry,
@@ -494,7 +497,7 @@ const chat = new CodexChatRuntime({
   toolProviders: [browserProvider, planProvider, annotationProvider].concat(ownToolsWiring ? ownToolsWiring.toolProviders : []),
   ...(ownToolsWiring ? { ownTools: ownToolsWiring.ownTools } : {}),
   // developer flag, default off (L7 c27): an Agent-profile turn on a loaded thread skips the per-turn detach + resume while its resume parameters are unchanged
-  ...(process.env.EGDESK_AGENT_RELOAD_REUSE === 'on' ? { agentReloadReuse: true } : {}),
+  ...(agentReloadReuse ? { agentReloadReuse: true } : {}),
   // L1 c21 (owner decision, provisional): a room keeps its account; an explicit switch continues the same room. Off unless EGDESK_ROOM_ACCOUNT=on.
   roomAccount: { mode: () => (process.env.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') },
   store: chatStore,

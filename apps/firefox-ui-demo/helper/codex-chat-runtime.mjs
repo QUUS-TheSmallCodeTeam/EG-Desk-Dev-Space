@@ -16,7 +16,7 @@ import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress
 import { COMMAND_GATE_TIMEOUT_MS, assessCommand, classifyCommand, sessionRuleCoversFloor } from './egdesk-terminal-command-gate.mjs'
 import { ENGINE_VERSION_NOTICE, checkEngineVersion } from './egdesk-codex-version-pin.mjs'
 import { pureEngineThreadOverrides } from './egdesk-command-executor.mjs'
-import { loadOwnToolsIsolation } from './egdesk-own-tools-isolation.mjs'
+import { composeOwnToolsInstructions, loadOwnToolsIsolation } from './egdesk-own-tools-isolation.mjs'
 import { shadowCommand, shadowFileChange } from './egdesk-own-tools-shadow.mjs'
 // c18 own tools: every turn of such a thread is read-only with no approval prompts, so Codex's apply_patch can neither write nor ask.
 const OWN_TOOLS_TURN_OVERRIDES = Object.freeze({ approvalPolicy: 'never', sandboxPolicy: Object.freeze({ type: 'readOnly', networkAccess: false }) })
@@ -752,7 +752,7 @@ function cleanNotification(method, p, engineId = 'codex') {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], agentReloadReuse = false, expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null }) {
+  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], agentReloadReuse = false, expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer, monotonicNow })
     if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
     this.resolveProjectWorkspace = resolveProjectWorkspace
@@ -800,7 +800,7 @@ export class CodexChatRuntime {
     // given request/respond become the Codex adapter, which calls them with
     // the same methods and params as before.
     this.engines = engines instanceof EngineRegistry ? engines : new EngineRegistry()
-    if (!(engines instanceof EngineRegistry)) for (const adapter of engines || [createCodexEngineAdapter({ request, respond, getBoardPeerContract, getThreadDelete })]) this.engines.register(adapter)
+    if (!(engines instanceof EngineRegistry)) for (const adapter of engines || [createCodexEngineAdapter({ request, respond, getBoardPeerContract, getSteerContract, getThreadDelete })]) this.engines.register(adapter)
     const codex = this.engines.get('codex')
     if (typeof codex?.request !== 'function') throw chatError('INVALID_ENGINE_ADAPTER', 'The Codex engine adapter is required', 500)
     // Codex-only escape hatch (config/read, bounded-QA proofs).
@@ -2189,7 +2189,36 @@ export class CodexChatRuntime {
     if (body.model !== undefined || body.effort !== undefined) return { model: body.model, effort: body.effort, source: 'request' }
     const agent = profileRun?.model
     if (agent && agent.engine === engineId && agent.modelId) return { model: agent.modelId, effort: agent.effort ?? undefined, source: 'agent' }
+    // c23 (owner rule U11: profile, account, folder and screen combine independently; EG-Desk inherits nothing from Codex's config but the login):
+    // an own-tools thread that names no model uses EG-Desk's own (ownTools.profile(): EGDESK_CODEX_MODEL / EGDESK_CODEX_EFFORT), not the
+    // model and effort in the person's config.toml. Request > Agent > EG-Desk; bounded (QA) sends are untouched.
+    const own = engineId === 'codex' && !requestedExecutionPolicy(body.executionPolicy) ? this.ownToolsSelection() : null
+    if (own) return { model: own.model, effort: own.effort, source: 'egdesk' }
     return { model: undefined, effort: undefined, source: null }
+  }
+
+  ownToolsSelection() {
+    try {
+      if (!this.ownToolsOn()) return null
+      const chosen = this.ownTools?.profile?.()
+      const model = typeof chosen?.model === 'string' && chosen.model.trim() ? chosen.model : undefined, effort = typeof chosen?.effort === 'string' && chosen.effort.trim() ? chosen.effort : undefined
+      return model === undefined && effort === undefined ? null : { model, effort }
+    } catch { return null }
+  }
+
+  /**
+   * c22/c23: what an own-tools thread is started or resumed with besides its tools: the pure-engine switches, the isolation from the person's own
+   * Codex setup, the environments candidate, and EG-Desk's developer instructions (the Agent's own first). The same overrides for a new thread
+   * and for every resume, so a restored conversation is as pure as a new one.
+   */
+  async ownToolsThreadOverrides(request, neutralFolder, base, context) {
+    const own = mergeCeilingOverrides({}, pureEngineThreadOverrides())
+    const isolation = await loadOwnToolsIsolation(request, neutralFolder)
+    mergeCeilingOverrides(own, isolation.overrides)
+    context.ownToolsIsolation = isolation.mcp
+    try { if (this.ownTools?.environments?.() === 'none') own.environments = [] } catch { /* the flag only adds */ }
+    own.developerInstructions = composeOwnToolsInstructions(base?.developerInstructions)
+    return own
   }
 
   threadOverrides(body, profileRun = null, selection = null) {
@@ -2624,7 +2653,12 @@ export class CodexChatRuntime {
       // or when no reload follows, this resume is the one that hydrates and nothing changes.
       const reloadCertain = justRestored && !bounded && engine.id === 'codex' && (body.profileEnabled === true || body.profileEnabled === false || Boolean(context.profileRun) || computerOff)
       const skipFirstResume = reloadCertain && Boolean(overrides.cwd)
-      if (justRestored && !skipFirstResume) await this.restoreThread(cid, context.clientThreadId, qaOverrides || {}, { policy, beforeResume })
+      if (justRestored && !skipFirstResume) {
+        // c23: a restored own-tools thread is resumed as pure as a new one (the pure switches, the isolation, EG-Desk's instructions)
+        const ownRestore = ownTools ? await this.ownToolsThreadOverrides(request, neutralFolder, null, context) : null
+        if (ownRestore && epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
+        await this.restoreThread(cid, context.clientThreadId, ownRestore ? mergeCeilingOverrides({ ...(qaOverrides || {}) }, ownRestore) : qaOverrides || {}, { policy, beforeResume })
+      }
       const assertNoActiveRun = () => {
         if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
           throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
@@ -2634,7 +2668,7 @@ export class CodexChatRuntime {
       if (body.profileEnabled === true || body.profileEnabled === false) {
         // Ordinary instructions come from Codex config; an engine without the
         // Codex escape hatch has none, so profile-off sends no instructions.
-        if (body.profileEnabled === false && typeof engine.request !== 'function') overrides.developerInstructions = ''
+        if (body.profileEnabled === false && (typeof engine.request !== 'function' || ownTools)) overrides.developerInstructions = '' // own tools: nothing of the person's Codex config
         else if (body.profileEnabled === false) {
           // Read only the effective ordinary instruction setting, never expose
           // the config payload. Null/absent means an explicit empty override.
@@ -2664,7 +2698,8 @@ export class CodexChatRuntime {
         const extra = ceilingNarrows(ceiling) ? await ceilingOverrides() : null
         const computerExtra = computerOff ? await this.computerControlOffOverrides(overrides.cwd || this.threads.get(cid)?.cwd || null, request) : null
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
-        const merged = mergeCeilingOverrides(mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), ownTools ? pureEngineThreadOverrides() : null)
+        const merged = mergeCeilingOverrides(mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), ownTools ? await this.ownToolsThreadOverrides(request, neutralFolder, overrides, context) : null)
+        if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409) // the own-tools overrides above are read from the engine
         const shellOff = Boolean(extra) && ceiling?.terminal === 'none'
         return { extra, computerExtra, merged, shellOff, key: resumeKey({ merged, policy, shellOff, computerOff, ceiling }) }
       }
@@ -2733,15 +2768,11 @@ export class CodexChatRuntime {
         mergeCeilingOverrides(overrides, computerExtra.overrides)
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       }
-      if (ownTools) mergeCeilingOverrides(overrides, pureEngineThreadOverrides())
-      // c22: nothing from the person's own Codex setup (MCP servers, plugins, apps, hooks, skills, memories, sub-agents) rides into an
-      // own-tools thread (egdesk-own-tools-isolation.mjs). An unreadable MCP inventory leaves the feature switches only (mcp 'unchecked').
+      // c22/c23: Codex as a pure model engine: its own tools off, nothing from the person's own Codex setup, EG-Desk's instructions.
       if (ownTools) {
-        const isolation = await loadOwnToolsIsolation(request, neutralFolder)
+        const own = await this.ownToolsThreadOverrides(request, neutralFolder, overrides, context)
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
-        mergeCeilingOverrides(overrides, isolation.overrides)
-        context.ownToolsIsolation = isolation.mcp
-        try { if (this.ownTools?.environments?.() === 'none') overrides.environments = [] } catch { /* the flag only adds */ }
+        mergeCeilingOverrides(overrides, own)
       }
       await assertWorkspaceCurrent()
       assertPreparationActive()
@@ -5660,6 +5691,8 @@ export class CodexChatRuntime {
       // message question never opens an in-run question there: the task's own question is this turn's message (see holdRunForBrowserReply).
       const flow = { heartbeat: hb, held, canSpeak: (held && context.holdOnly !== true) || (this.flowSpeakers.has(hb) && this.draftCheckMode() === 'on'), taskTurn: context.browserTaskTurn === true, sent: [], kinds: new Set(), askedNotes: new Set(), stepsAtLast: 0,
         closed: false, question: null, startedAt: 0, lastSentAt: null, pendingFacts: null,
+        // c24: when this run began, on the heartbeat's own clock (the work's age; sinceUserMs restarts at every message the person sends into the run)
+        runStartedMs: typeof hb.internalMs === 'function' ? hb.internalMs() : null,
         audience: () => this.flowAudience(run), reasoningOpen: () => (this.heartbeatReasoning.get(hb)?.size ?? 0) > 0 }
       this.flowRuns.set(run, flow)
       const subject = this.heartbeatSubjects.get(hb)
@@ -6152,7 +6185,7 @@ export class CodexChatRuntime {
     const requestId = idText(body.requestId), message = typeof body.message === 'string' ? body.message : ''
     if (!flow?.question?.pending || !store || !requestId || !message.trim() || message.length > 16384) throw chatError('INVALID_REQUEST', 'This reply cannot be added to the running turn', 400)
     const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
-    const proof = engine?.boardPeerContract?.(slot)
+    const proof = engine?.steerContract?.(slot) ?? engine?.boardPeerContract?.(slot)
     if (!proof || typeof engine.steerTurn !== 'function') throw chatError('INRUN_REPLY_UNAVAILABLE', 'This engine cannot take a reply while it works', 409)
     const clientUserMessageId = requestId
     flow.question.pending = false // one reply per question; a second message waits for the turn like any other
@@ -6202,7 +6235,7 @@ export class CodexChatRuntime {
     const flow = this.flowRuns.get(run)
     const entry = { requestId, text: message, at: this.now(), state: 'pending', localMessageId: this.recordInRunReply(run, flow ?? {}, requestId, message) }
     queue.push(entry)
-    try { flow?.heartbeat?.nudge?.() } catch { /* timing hint only */ }
+    try { flow?.heartbeat?.nudge?.({ solicited: true }) } catch { /* timing hint only */ } // L3 c24: a person's message is judged at the next beat, not held to the nudge limit
     return answer(entry)
   }
 
@@ -6222,7 +6255,7 @@ export class CodexChatRuntime {
         // heartbeat judged a change does that; any other (an unjudged default, a judge that failed) stays pending and goes on with the person's next turn.
         if (!judged || !this.browserTaskStore?.changeGoal(held.key, entry.text)) throw new Error('not a change of the task')
       } else if (decision === 'steer') {
-        const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId), proof = engine?.boardPeerContract?.(slot)
+        const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId), proof = engine?.steerContract?.(slot) ?? engine?.boardPeerContract?.(slot)
         if (!proof || typeof engine.steerTurn !== 'function') throw new Error('no steer contract')
         const response = await engine.steerTurn({ threadId: run.conversationId, expectedTurnId: run.runId, clientUserMessageId: requestId,
           input: [{ type: 'text', text: entry.text, text_elements: [] }] }, slot, proof)

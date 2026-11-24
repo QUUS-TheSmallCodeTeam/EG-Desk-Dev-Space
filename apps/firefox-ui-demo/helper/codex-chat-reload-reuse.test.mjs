@@ -8,6 +8,7 @@ import { rm } from 'node:fs/promises'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { normalizeProfileBody, openProfileStore } from './egdesk-profile-store.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
+import { OWN_TOOLS_INSTRUCTIONS } from './egdesk-own-tools-isolation.mjs'
 
 const body = (extra = {}) => ({
   name: '리서치', avatar: { kind: 'initial', value: 'R' }, role: '자료 조사 담당',
@@ -42,7 +43,7 @@ const computerServers = [
 // A native fake whose reported sandbox, feature switches and MCP catalog follow
 // the requested thread settings, like Codex: a turned-off plugin's server is
 // gone from that thread's list; other servers stay connected.
-function harness({ profiles, sandboxMode = 'workspace-write', toolProviders, request: custom, servers = [], agentReloadReuse = false } = {}) {
+function harness({ profiles, sandboxMode = 'workspace-write', toolProviders, request: custom, servers = [], agentReloadReuse = false, ownTools = null } = {}) {
   const calls = [], events = [], replies = []
   let threads = 0, turns = 0
   const threadConfig = new Map()
@@ -90,7 +91,7 @@ function harness({ profiles, sandboxMode = 'workspace-write', toolProviders, req
       return answer !== undefined ? answer : defaults(method, params)
     },
     respond: (...args) => replies.push(args), emit: event => events.push(event), verifyFile: async () => null,
-    profiles, toolProviders, agentReloadReuse,
+    profiles, toolProviders, agentReloadReuse, ...(ownTools ? { ownTools } : {}),
   })
   chat.setConnection(true)
   const approval = (run, id, params) => chat.handleServerRequest({ id, method: 'item/commandExecution/requestApproval',
@@ -232,6 +233,66 @@ test('bounded (read-only QA) threads are never reused: they reload on every turn
 test('the bridge passes agentReloadReuse only with EGDESK_AGENT_RELOAD_REUSE=on (default off)', async () => {
   const { readFileSync } = await import('node:fs')
   const source = readFileSync(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
-  assert.match(source, /\.\.\.\(process\.env\.EGDESK_AGENT_RELOAD_REUSE === 'on' \? \{ agentReloadReuse: true \} : \{\}\),/)
+  assert.match(source, /const agentReloadReuse = process\.env\.EGDESK_AGENT_RELOAD_REUSE === 'on'/)
+  assert.match(source, /\.\.\.\(agentReloadReuse \? \{ agentReloadReuse: true \} : \{\}\),/)
   assert.equal(new CodexChatRuntime({ request: async () => ({}), respond() {}, emit() {}, verifyFile: async () => null }).agentReloadReuse, false)
+})
+
+// ---- own-tools threads (L5 c23: a resumed own-tools thread gets the same pure-engine switches, isolation and EG-Desk instructions as a new one) ----
+const NEUTRAL = '/egdesk-own-tools-empty-folder'
+const ownToolsState = () => { const state = { mode: 'on', environments: undefined }; return { state, ownTools: { mode: () => state.mode, neutralFolder: () => NEUTRAL, environments: () => state.environments } } }
+const lastResume = (h, from = 0) => h.calls.slice(from).filter(call => call.method === 'thread/resume').at(-1)?.params
+
+test('own tools: a resume (reload or restart) carries the own-tools overrides, and the reuse key covers them', async t => {
+  const own = ownToolsState()
+  const p = profileStore(t), id = p.add({ toolCeiling: TERMINAL_NONE })
+  const h = harness({ profiles: p.profiles, agentReloadReuse: true, ownTools: own.ownTools })
+  const t1 = await turn(h, id, null, 'first', { cwd: '/real/folder' }), cid = t1.run.conversationId
+  const t2 = await turn(h, id, cid, 'second')
+  const r = lastResume(h, t2.from)
+  assert.equal(r.sandbox, 'read-only'); assert.equal(r.config.features.shell_tool, false); assert.equal(r.config.features.hooks, false)
+  assert.match(r.developerInstructions, new RegExp(OWN_TOOLS_INSTRUCTIONS.slice(0, 30).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.equal(resumes(h, (await turn(h, id, cid)).from), 0, 'unchanged own-tools overrides: reused')
+  // the environments candidate changes what the own-tools overrides contain: reload with it
+  own.state.environments = 'none'
+  const env = await turn(h, id, cid)
+  assert.equal(resumes(h, env.from), 1); assert.deepEqual(lastResume(h, env.from).environments, [])
+  assert.equal(resumes(h, (await turn(h, id, cid)).from), 0)
+  // own tools switched off: the resume no longer carries them (and the key changed)
+  own.state.mode = 'off'
+  const off = await turn(h, id, cid)
+  assert.equal(resumes(h, off.from), 1); assert.equal(Object.hasOwn(lastResume(h, off.from), 'environments'), false)
+})
+
+test('own tools: an MCP server the engine lists now is disabled by the isolation overrides, and that change forces a reload', async t => {
+  const servers = [], own = ownToolsState()
+  const p = profileStore(t), id = p.add()
+  const h = harness({ profiles: p.profiles, agentReloadReuse: true, ownTools: own.ownTools, servers })
+  const t1 = await turn(h, id, null, 'first', { cwd: '/real/folder' }), cid = t1.run.conversationId
+  await turn(h, id, cid); assert.equal(resumes(h, (await turn(h, id, cid)).from), 0)
+  servers.push({ name: 'fresh-server', tools: { go: {} } })
+  const changed = await turn(h, id, cid)
+  assert.equal(resumes(h, changed.from), 1)
+  assert.equal(lastResume(h, changed.from).config.mcp_servers['fresh-server'].enabled, false)
+  assert.equal(resumes(h, (await turn(h, id, cid)).from), 0)
+})
+
+test('own tools: a restarted process resumes the thread with the own-tools overrides (L5 c23 kept), in ONE resume', async t => {
+  const own = ownToolsState()
+  const p = profileStore(t), id = p.add({ toolCeiling: TERMINAL_NONE })
+  const h = harness({ profiles: p.profiles, agentReloadReuse: true, ownTools: own.ownTools })
+  const t1 = await turn(h, id, null, 'first', { cwd: '/real/folder' }), cid = t1.run.conversationId
+  h.chat.loadedThreads.clear(); h.chat.threads.clear()
+  const restarted = await turn(h, id, cid, 'after restart', { cwd: '/real/folder' })
+  assert.equal(resumes(h, restarted.from), 1)
+  const r = lastResume(h, restarted.from)
+  assert.equal(r.config.features.shell_tool, false); assert.match(r.developerInstructions, /EG-Desk/)
+})
+
+test('own tools with the flag off: unchanged behaviour (every turn reloads with the own-tools overrides)', async t => {
+  const own = ownToolsState()
+  const p = profileStore(t), id = p.add({ toolCeiling: TERMINAL_NONE })
+  const h = harness({ profiles: p.profiles, ownTools: own.ownTools })
+  const t1 = await turn(h, id, null, 'first', { cwd: '/real/folder' }), cid = t1.run.conversationId
+  for (let n = 2; n <= 3; n++) { const x = await turn(h, id, cid); assert.equal(resumes(h, x.from), 1); assert.equal(lastResume(h, x.from).config.features.hooks, false) }
 })

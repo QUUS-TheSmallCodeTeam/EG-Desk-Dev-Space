@@ -139,7 +139,7 @@ export function verifyNativeSchemaDirectory(directory) {
     readOnly(turn)?.properties?.type?.enum?.includes('readOnly') &&
     readOnly(turn)?.properties?.networkAccess?.type === 'boolean')
   return { contextContract, qaContract, schemaFingerprint: digest.digest('hex'), boardPeerSchemaFingerprint: optionalBoardPeerFingerprint(directory),
-    threadDeleteSchemaFingerprint: optionalThreadDeleteFingerprint(directory) }
+    threadDeleteSchemaFingerprint: optionalThreadDeleteFingerprint(directory), turnSteerSchemaFingerprint: optionalTurnSteerFingerprint(directory) }
 }
 
 // thread/delete (Codex app-server, e.g. 0.171): the request is in the client request union, its params are exactly { threadId: string }
@@ -149,6 +149,37 @@ export function verifyThreadDeleteSchema(request, params, response) {
   return Boolean(listed && params?.title === 'ThreadDeleteParams' && params.type === 'object' && requires(params, 'threadId') && params.required.length === 1 &&
     params.properties?.threadId?.type === 'string' && Object.keys(params.properties).length === 1 && response?.title === 'ThreadDeleteResponse' && response.type === 'object')
 }
+// turn/steer by schema capability (c23; Main's smoke-3 proved turn/steer { threadId, expectedTurnId, input } -> { turnId } on the official 0.171, whose
+// generated schema also passes verifyBoardPeerSchema; the version pin, not the schema, kept the steer contract to 0.162.1). A message steered into the
+// working turn needs only this: the request is in the client request union; its params require nothing beyond threadId, expectedTurnId and input
+// (clientUserMessageId and the rest optional), threadId and expectedTurnId are strings, input is an array whose text variant is { type: 'text', text,
+// text_elements }; the response requires turnId (string). No additionalContext: a plain message is not the board's untrusted peer input.
+export function verifyTurnSteerSchema(request, params, response) {
+  const listed = (request?.oneOf ?? request?.anyOf ?? []).some(item => item?.properties?.method?.enum?.length === 1 && item.properties.method.enum[0] === 'turn/steer')
+  const p = params?.properties ?? {}
+  const resolve = s => { const name = s?.$ref?.match(/^#\/definitions\/([A-Za-z0-9_]+)$/)?.[1]; return name ? params.definitions?.[name] : s }
+  const hasType = (s, type) => s?.type === type || (Array.isArray(s?.type) && s.type.includes(type))
+  const text = resolve(p.input?.items)?.oneOf?.find(x => x.properties?.type?.enum?.length === 1 && x.properties.type.enum[0] === 'text')
+  return Boolean(listed && params?.title === 'TurnSteerParams' && params.type === 'object' && requires(params, 'threadId', 'input', 'expectedTurnId')
+    && params.required.every(k => ['threadId', 'input', 'expectedTurnId'].includes(k))
+    && hasType(p.threadId, 'string') && hasType(p.expectedTurnId, 'string') && (p.clientUserMessageId === undefined || hasType(p.clientUserMessageId, 'string'))
+    && p.input?.type === 'array' && requires(text, 'type', 'text') && hasType(text.properties?.text, 'string') && text.properties?.text_elements?.type === 'array'
+    && text.required.every(k => ['type', 'text', 'text_elements'].includes(k))
+    && response?.title === 'TurnSteerResponse' && requires(response, 'turnId') && hasType(response.properties?.turnId, 'string'))
+}
+export function optionalTurnSteerFingerprint(directory) {
+  try {
+    const digest = createHash('sha256')
+    const schemas = ['ClientRequest.json', 'v2/TurnSteerParams.json', 'v2/TurnSteerResponse.json'].map(name => {
+      const filename = path.join(directory, name), stat = lstatSync(filename)
+      if (!stat.isFile() || stat.size > 5 * 1024 * 1024) throw Error('invalid optional schema')
+      const bytes = readFileSync(filename); digest.update(name).update('\0').update(bytes).update('\0')
+      return JSON.parse(bytes.toString('utf8'))
+    })
+    return verifyTurnSteerSchema(...schemas) ? digest.digest('hex') : null
+  } catch { return null }
+}
+
 function optionalThreadDeleteFingerprint(directory) {
   try {
     const digest = createHash('sha256')
@@ -171,6 +202,19 @@ export function probeThreadDeleteSchema({ executable, env, cwd, run }) {
       env, cwd, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
     })
     return result.status === 0 ? optionalThreadDeleteFingerprint(directory) : null
+  } catch { return null }
+  finally { rmSync(directory, { recursive: true, force: true }) }
+}
+
+// Only the optional turn/steer contract, for any identified binary version (a steer capability of THIS binary's generated schema; it grants nothing
+// else). Returns the turn/steer fingerprint or null.
+export function probeTurnSteerSchema({ executable, env, cwd, run }) {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'egdesk-native-schema-'))
+  try {
+    const result = run(executable, ['app-server', 'generate-json-schema', '--experimental', '--out', directory], {
+      env, cwd, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return result.status === 0 ? optionalTurnSteerFingerprint(directory) : null
   } catch { return null }
   finally { rmSync(directory, { recursive: true, force: true }) }
 }

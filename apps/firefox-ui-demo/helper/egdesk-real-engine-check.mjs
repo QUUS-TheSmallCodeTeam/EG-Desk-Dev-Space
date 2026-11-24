@@ -33,10 +33,12 @@ import { createTurnMemoryConfig, turnMemoryFlagsFromEnv } from './egdesk-turn-me
 import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 import { createGitTargetInspector } from './egdesk-terminal-git-facts.mjs'
+import { createDecisionActivity, createDecisionWarmup, warmupConfigFromEnv } from './egdesk-decision-warmup.mjs'
 import { parseCodexUserAgent } from './egdesk-codex-version-pin.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { APPROVER_TEXT, checkTurnExpectations, folderPathProblem, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createMemoryHook, memoryNeedsDecisions } from './egdesk-real-engine-memory.mjs' // memory hook (L7 c26)
+import { CHECK_HOOKS, hookDecisionFlags, hookFlags } from './egdesk-real-engine-hooks.mjs'
 
 export const DECISION_KEY_ENV = 'EGDESK_REAL_CHECK_DECISION_KEY'
 export const CHILD_ENV_ALLOW = Object.freeze(['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TMPDIR', 'SHELL'])
@@ -45,18 +47,25 @@ export const KILL_GRACE_MS = 2000
 // Flags a conversation gets when --decisions is on and its script names none of its own (a script's flags are added to these, never replaced):
 // the product's advisory draft check (records only; the posted answer is the model's own) and the command gate. Every other flag is off.
 // flags that do something only when the Decision model answers: without --decisions a script that sets one would pass or fail for the wrong reason
-export const DECISION_DEPENDENT_FLAGS = Object.freeze(['EGDESK_DRAFT_CHECK', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_TERMINAL_GATE'])
+export const DECISION_DEPENDENT_FLAGS = Object.freeze(['EGDESK_DRAFT_CHECK', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_TERMINAL_GATE', 'EGDESK_DECISION_WARMUP', ...hookDecisionFlags()])
 export const DEFAULT_DECISION_FLAGS = Object.freeze({ EGDESK_DRAFT_CHECK: 'advisory' })
 // The bridge's decisionContext keys and the developer flags behind them that this composition reproduces. A test compares this list with
 // codex-bridge-server.mjs, so a key or flag the bridge gains and this composition lacks fails loudly instead of being silently absent.
 export const BRIDGE_COMPOSITION = Object.freeze({
-  keys: ['settingsGeneration', 'mode', 'configured', 'client', 'budgetMs', 'coldBudgetMs', 'warm', 'inRunMessages', 'calibrationLog', 'turnMemory', 'browserEntry', 'draftCheck', 'conversationFlow',
+  // decisionContext keys the bridge sets, and the developer flags behind them, that this composition reproduces
+  keys: ['settingsGeneration', 'mode', 'configured', 'client', 'budgetMs', 'coldBudgetMs', 'warm', 'warmup', 'inRunMessages', 'calibrationLog', 'turnMemory', 'browserEntry', 'draftCheck', 'conversationFlow',
     'relevanceRules', 'commandJudge', 'terminalGate', 'workingMemory', 'topicRecipient', 'recipientForChatChoice', 'reviewRevision', 'memoryEvidence', 'collect'],
+  // top-level options of the bridge's new CodexChatRuntime({ … }) that this composition passes (request / respond / toolProviders etc. are the check's own)
+  runtimeKeys: ['contexts', 'toolProviders', 'ownToolsWiring', 'roomAccount', 'store', 'requireStore', 'getOwnerKey', 'emit', 'emitLegacy', 'agentReloadReuse'],
   flags: ['EGDESK_DRAFT_CHECK', 'EGDESK_DRAFT_CHECK_DESIGN', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_TERMINAL_GATE', 'EGDESK_TERMINAL_GATE_METHOD',
-    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES'],
-  // present in the bridge, deliberately not reproduced here (reason in the report): the Browser Card and the Desk's presence need a window; the idle
-  // warm-up (c18, EGDESK_DECISION_WARMUP, off) only matters to the Decisions endpoint and this check runs with Decisions off
-  notReproduced: { keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration', 'warmup'], flags: ['EGDESK_PRESENCE', 'EGDESK_BROWSER_ENTRY', 'EGDESK_WORK_PLACEMENT', 'EGDESK_BRIEFING_FLOW', 'EGDESK_HUD_ROUTING'] },
+    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP', 'EGDESK_AGENT_RELOAD_REUSE', ...hookFlags()],
+  // present in the bridge, deliberately not reproduced: each needs a window, the Desk, a store this check does not open, or another lane's module
+  notReproduced: {
+    keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration'],
+    runtimeKeys: ['localCapacity', 'engines', 'resolveProjectWorkspace', 'resolveRunProjectOrigin', 'expectedProcessConfiguration', 'qaReady', 'getNativeContractFingerprint', 'profiles', 'mcpServerKind', 'computerControlStore', 'onComputerControlChange', 'hostLease'],
+    flags: ['EGDESK_PRESENCE', 'EGDESK_BROWSER_ENTRY', 'EGDESK_WORK_PLACEMENT', 'EGDESK_BRIEFING_ORDER', 'EGDESK_BRIEFING_FILL_CHECK', 'EGDESK_BRIEFING_COVERAGE', // the briefing flow and its output schema are reproduced by the hook (hookFlags)
+           'EGDESK_HUD_ROUTING', 'EGDESK_TERMINAL_JUDGE', 'EGDESK_CONTEXT_ROOTS', 'EGDESK_FIREFOX_PROFILE', 'EGDESK_CLAUDE_READER', 'EGDESK_CLAUDE_DELETE_SESSION', 'EGDESK_CHAT_CHOICE'],
+  },
 })
 
 const usage = message => Object.assign(new Error(message), { code: 'usage' })
@@ -236,6 +245,8 @@ export async function runConversation({ options, set, conversation, deps = {} })
   writeScratch(scratch, conversation.folder)
   const flags = { ...(options.decisions ? DEFAULT_DECISION_FLAGS : {}), ...(conversation.flags ?? {}), EGDESK_OWN_TOOLS: 'on' }
   const FLAG = { ...flags }
+  const hooks = CHECK_HOOKS.filter(h => h.active(FLAG)) // features registered in helper/egdesk-real-engine-hooks.mjs (the briefing flow, ...); attached once the runtime exists
+  let attached = []
   const rec = { set, id: conversation.id, flags: FLAG, scratch, startedAt: new Date().toISOString(), phases: {}, requests: [], engine: null, isolation: null, mcpStartup: { starting: 0, ready: 0, failed: 0, other: 0 }, turns: [], aborted: null, ok: false }
   const t0 = performance.now()
   const runnerLog = []
@@ -340,7 +351,11 @@ export async function runConversation({ options, set, conversation, deps = {} })
       turnNow.decisions.push(row); decisionCall.push(row)
       return response
     }
-    const client = options.decisions ? createDecisionClient({ getApiKey: async () => KEY, fetchImpl, recipientForKey: (v, endpoint, model) => decisionTopicRecipient(v, 1, endpoint, model), budget: createDecisionBudget({ monthlyInputTokenCap: 5_000_000 }) }) : null
+    // idle warm-up, as the bridge wires it (flag EGDESK_DECISION_WARMUP, default off: nothing below exists)
+    const warmupConfig = warmupConfigFromEnv(FLAG)
+    const activity = options.decisions && warmupConfig.mode !== 'off' ? createDecisionActivity({ idleMs: warmupConfig.idleMs }) : null
+    const client = options.decisions ? createDecisionClient({ getApiKey: async () => KEY, fetchImpl: activity ? activity.wrap(fetchImpl) : fetchImpl, recipientForKey: (v, endpoint, model) => decisionTopicRecipient(v, 1, endpoint, model), budget: createDecisionBudget({ monthlyInputTokenCap: 5_000_000 }) }) : null
+    const warmup = client && activity ? createDecisionWarmup({ client, activity, mode: () => warmupConfig.mode, decisionsMode: () => 'on', hasKey: () => Boolean(KEY), idleMs: warmupConfig.idleMs, joinMs: warmupConfig.joinMs }) : null
     const OWNER = `codex:real-engine-check`
     const contexts = new ContextRuntime({ store: new ImmutableContextStore({ dataDir: path.join(dataDir, 'context'), allowedRoots: [scratch] }), getOwnerKey: () => OWNER })
     let wikiAdapter = null
@@ -348,7 +363,9 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const turnMemoryConfig = createTurnMemoryConfig({ settings, ontologyStore, ...turnMemoryFlagsFromEnv(FLAG), getAdapter: () => wikiAdapter ??= createWikiAdapter({ writes: openWikiWrites({ dataDir: settingsDir, log() {} }) }) })
     if (options.decisions) await settings.turnMemory.save(memoryHook.mode ?? 'advisory') // memory hook
     if (memoryHook.mode === 'on') turnMemoryConfig.eligible = memoryHook.eligible // memory hook: turn memory also on this conversation's one-time thread
-    wiring = createOwnToolsWiring({ env: { ...FLAG, PATH: env.PATH ?? '', HOME: env.HOME ?? '' }, dataDir, spawn: loggedRunnerSpawn, getChat: () => chat, inspect: createGitTargetInspector(), ...(deps.gitStatus ? { gitStatus: deps.gitStatus } : {}), ...(deps.killGroupRunner ? { killGroup: deps.killGroupRunner } : {}) })
+    // EG-Desk's own model and effort (EGDESK_CODEX_MODEL / EGDESK_CODEX_EFFORT, as the bridge reads them) reach the wiring from the shell the check runs in:
+    // that is how the check exercises the path where no request names a model (--model / --effort still win, as a request does)
+    wiring = createOwnToolsWiring({ env: { ...FLAG, PATH: env.PATH ?? '', HOME: env.HOME ?? '', ...Object.fromEntries(['EGDESK_CODEX_MODEL', 'EGDESK_CODEX_EFFORT'].filter(k => typeof env[k] === 'string').map(k => [k, env[k]])) }, dataDir, spawn: loggedRunnerSpawn, getChat: () => chat, inspect: createGitTargetInspector(), ...(deps.gitStatus ? { gitStatus: deps.gitStatus } : {}), ...(deps.killGroupRunner ? { killGroup: deps.killGroupRunner } : {}) })
     const terminalGateConfig = ['advisory', 'on'].includes(FLAG.EGDESK_TERMINAL_GATE) ? { mode: () => FLAG.EGDESK_TERMINAL_GATE, inspect: createGitTargetInspector(), method: FLAG.EGDESK_TERMINAL_GATE_METHOD === 'score' ? 'score' : 'predicates' } : null
     const recipient = () => (KEY ? decisionTopicRecipient(KEY, 1, undefined, client.model) : null)
     let warmed = false
@@ -356,6 +373,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       settingsGeneration: () => 0, mode: () => (options.decisions ? 'on' : 'off'), configured: () => options.decisions, client,
       budgetMs: TURN_CONTEXT_BUDGET_MS, coldBudgetMs: TURN_CONTEXT_COLD_BUDGET_MS, warm: () => warmed || (warmed = decisionCall.some(r => r.status === 200)),
       ...(FLAG.EGDESK_CONTEXT_RELEVANCE === 'action' ? { relevanceRules: 'action' } : {}),
+      ...(warmup ? { warmup } : {}),
       ...(FLAG.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}),
       calibrationLog, turnMemory: turnMemoryConfig,
       ...(['advisory', 'on'].includes(FLAG.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => FLAG.EGDESK_DRAFT_CHECK, design: () => (FLAG.EGDESK_DRAFT_CHECK_DESIGN === 'choice' ? 'choice' : 'predicates') } } : {}),
@@ -370,16 +388,32 @@ export async function runConversation({ options, set, conversation, deps = {} })
     // verified (inspectNativeCapabilities → boardPeerContract). The check reads the same thing from the given binary (it runs the binary's
     // --version and schema generation, as the bridge does at start) and records it; without a contract the message stays pending and is carried.
     let nativeContract = null
-    if (FLAG.EGDESK_INRUN_MESSAGES === 'on') {
+    const needsNative = FLAG.EGDESK_INRUN_MESSAGES === 'on' || conversation.turns.some(t => t.action === 'steer' || t.action === 'delete')
+    if (needsNative) {
       try { nativeContract = (deps.inspectNative ?? inspectNativeCapabilities)({ executable: options.codexBin, env: childEnv(options, env), cwd: dataDir }) } catch { nativeContract = null }
-      rec.engine.nativeContract = { version: nativeContract?.version ?? null, schemaMatch: nativeContract?.schemaMatch === true, boardPeerContract: typeof nativeContract?.boardPeerContract === 'string' }
+      rec.engine.nativeContract = { version: nativeContract?.version ?? null, schemaMatch: nativeContract?.schemaMatch === true, boardPeerContract: typeof nativeContract?.boardPeerContract === 'string', steerContract: typeof nativeContract?.steerContract === 'string', threadDelete: nativeContract?.threadDelete === true }
     }
     chat = new CodexChatRuntime({ request, respond,
-      ...(FLAG.EGDESK_INRUN_MESSAGES === 'on' ? { getBoardPeerContract: () => nativeContract?.boardPeerContract ?? null } : {}), emit: () => {}, emitLegacy: () => {}, store, requireStore: true, contexts, getOwnerKey: () => OWNER, verifyFile: async () => null, resolveProjectWorkspace: async () => null,
-      toolProviders: wiring.toolProviders, ownTools: wiring.ownTools, decisionContext })
+      ...(needsNative ? { getBoardPeerContract: () => nativeContract?.boardPeerContract ?? null, getSteerContract: () => nativeContract?.steerContract ?? null, getThreadDelete: () => nativeContract?.threadDelete === true } : {}), emit: () => {}, emitLegacy: () => {}, store, requireStore: true, contexts, getOwnerKey: () => OWNER, verifyFile: async () => null, resolveProjectWorkspace: async () => null,
+      ...(FLAG.EGDESK_AGENT_RELOAD_REUSE === 'on' ? { agentReloadReuse: true } : {}), // inert without an Agent-profile conversation (L7 c27)
+      toolProviders: wiring.toolProviders, ownTools: wiring.ownTools, decisionContext,
+      roomAccount: { mode: () => (FLAG.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') } })
     chat.setConnection(true)
     try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
+    attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog }))
     rec.phases.composedMs = ms(t0)
+    // The one registration point for another lane's module (the briefing hook, memory seeding): deps.extensions = [{ name, setup(ctx) → { afterTurn?(record, info), finish?() } }].
+    // setup runs once the runtime is composed; afterTurn after every scripted turn record; finish at the end of the conversation (its value is kept in
+    // rec.extensions[name]). An extension that throws is recorded as { error } and never stops the check or changes a turn's verdict.
+    const extensions = []
+    for (const ext of deps.extensions ?? []) {
+      try { extensions.push({ name: String(ext.name).slice(0, 40), api: await ext.setup?.({ conversation, options, chat, store, wiring, client, calibrationLog, dataDir, scratch, flags: FLAG, rec, request }) ?? {} }) }
+      catch (error) { (rec.extensions ??= {})[String(ext?.name).slice(0, 40)] = { error: clip(error?.code ?? error?.message ?? 'error', 100) } }
+    }
+    const pushTurn = async record => {
+      rec.turns.push(record)
+      for (const { name, api } of extensions) { try { await api.afterTurn?.(record, { conversation, index: rec.turns.length - 1 }) } catch (error) { (rec.extensions ??= {})[name] = { error: clip(error?.code ?? error?.message ?? 'error', 100) } } }
+    }
 
     // ---- the scripted turns ----
     let clientThreadId = `check-${conversation.id}`, requestSeq = 0, nativeThread = null, first = true, seen = 0
@@ -389,7 +423,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const beginTurn = async text => {
       resetTurnNow(); runnerLog.length = 0
       const started = performance.now()
-      const run = await chat.send({ message: text, clientThreadId, requestId: `req-${++requestSeq}`, cwd: scratch, ...(first ? { stateless: true } : { conversationId: nativeThread }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
+      const run = await chat.send({ message: text, clientThreadId, requestId: `req-${++requestSeq}`, cwd: scratch, ...Object.assign({}, ...attached.map(a => a.sendExtra?.() ?? {})), ...(first ? { stateless: true } : { conversationId: nativeThread }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
       first = false; nativeThread = run.conversationId
       return { run, started }
     }
@@ -410,6 +444,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const sendInRun = async (ctx, text, afterMs) => {
       const wait = afterMs - (performance.now() - ctx.started)
       if (wait > 0) await sleep(wait)
+      while (performance.now() - ctx.started < afterMs) await sleep(1) // a timer may fire a millisecond early: never act before afterMs
       const mark = { afterMs, sentAtMs: ms(ctx.started), tools: turnNow.toolCalls.size, ran: runnerLog.length, posted: assistantTexts().length, accepted: false, error: null }
       try { const out = await chat.send({ clientThreadId, conversationId: nativeThread, message: text, requestId: `req-${++requestSeq}`, inRunMessageTo: ctx.run.runId }); mark.accepted = out?.accepted === true && out?.inRun === true } catch (error) { mark.error = String(error?.code ?? 'error').slice(0, 60) }
       return mark
@@ -418,14 +453,54 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const readFiles = turn => Object.fromEntries(Object.keys(turn.expect?.files ?? {}).map(p => [p, readScratchFile(scratch, p)]))
     const undoCount = () => wiring.files?.undoRecords?.({ conversationId: nativeThread })?.length ?? 0
 
+    // an engine-level action on the previous turn's working run, afterMs after that turn started (the person's own message is whileRunning, above)
+    const engineAction = async (kind, ctx, step) => {
+      const afterMs = step.afterMs ?? 0
+      const wait = afterMs - (performance.now() - ctx.started)
+      if (wait > 0) await sleep(wait)
+      while (performance.now() - ctx.started < afterMs) await sleep(1) // a timer may fire a millisecond early: never act before afterMs
+      const mark = { afterMs, sentAtMs: ms(ctx.started), tools: turnNow.toolCalls.size, ran: runnerLog.length, posted: assistantTexts().length, accepted: false, error: null }
+      try {
+        if (kind === 'interrupt') mark.accepted = (await chat.interrupt({ conversationId: nativeThread, runId: ctx.run.runId }))?.accepted === true
+        else {
+          // the product's own steer path: its engine adapter, with the proof of this binary's steer contract
+          const engine = chat.engineOf(nativeThread), slot = chat.threadOperationSlot(nativeThread)
+          const proof = engine?.steerContract?.(slot) ?? engine?.boardPeerContract?.(slot)
+          if (!proof) mark.error = 'no_steer_contract'
+          else mark.accepted = (await engine.steerTurn({ threadId: nativeThread, expectedTurnId: ctx.run.runId, clientUserMessageId: `steer-${++requestSeq}`, input: [{ type: 'text', text: step.say, text_elements: [] }] }, slot, proof))?.turnId === ctx.run.runId
+        }
+      } catch (error) { mark.error = String(error?.code ?? error?.message ?? 'error').slice(0, 60) }
+      return mark
+    }
+    // the person deletes the conversation (the surface's delete: forgetConversation); the next message turn starts a new one
+    let generation = 0
+    const deleteTurn = async (index, turn) => {
+      const key = clientThreadId
+      let out = null, error = null
+      try { out = await chat.forgetConversation({ clientThreadId: key }) } catch (e) { error = String(e?.code ?? e?.message ?? 'error').slice(0, 60) }
+      let stored = null, messages = null
+      try { stored = Boolean(store.getConversation?.(key)) } catch { stored = null }
+      // a conversation the store no longer knows has no message list: listing it throws, which is the answer (0 messages)
+      try { messages = store.listMessages(key, { limit: 5 }).messages.length } catch { messages = stored === false ? 0 : null }
+      const gone = stored === false && messages === 0
+      const summary = out ? { stored, messages, interrupted: out.interrupted ?? 0, history: out.history ?? null, engineHistory: (out.engineHistory ?? []).map(h => ({ state: h.state, reason: h.reason ?? null })) } : null
+      const expectations = [{ check: 'action_taken', ok: out?.accepted === true, detail: { error } }, ...checkTurnExpectations(turn.expect ?? {}, { conversationGone: gone, posted: [], toolCalls: [], native: { commandExecution: 0, fileChange: 0, approvals: 0 } })]
+      await pushTurn({ index: index + 1, action: 'delete', approve: [], subTurns: [{ action: 'delete', accepted: out?.accepted === true, error, conversationGone: gone, summary }], posted: [], asked: 0, undoRecords: undoCount(), expectations, ok: expectations.every(e => e.ok) })
+      clientThreadId = `check-${conversation.id}-${++generation}`; nativeThread = null; first = true; seen = 0
+    }
+
     for (let index = 0; index < conversation.turns.length; index++) {
       if (rec.aborted || closed) break
-      const turn = conversation.turns[index], next = conversation.turns[index + 1], withMessage = next?.whileRunning !== undefined
+      const turn = conversation.turns[index], next = conversation.turns[index + 1]
+      if (turn.action === 'delete') { await deleteTurn(index, turn); continue }
+      // a message turn takes at most one follow-up: a person's message typed into the run (whileRunning), or an engine-level interrupt / steer
+      const follow = next?.whileRunning !== undefined ? 'message' : (next?.action === 'interrupt' || next?.action === 'steer') ? next.action : null, withMessage = follow !== null
       const sub = [], ledger = wiring.ledger
       let asked = 0, mark = null
       memoryHook.beginTurn() // memory hook
       const ctx = await beginTurn(turn.say)
-      if (withMessage) mark = await sendInRun(ctx, next.say, next.whileRunning.afterMs)
+      if (follow === 'message') mark = await sendInRun(ctx, next.say, next.whileRunning.afterMs)
+      else if (follow) mark = await engineAction(follow, ctx, next)
       sub.push(await finishTurn(ctx))
       for (const answer of turn.approve ?? []) {
         if (rec.aborted || closed || !nativeThread) break
@@ -438,26 +513,31 @@ export async function runConversation({ options, set, conversation, deps = {} })
       const texts = assistantTexts()
       const posted = texts.slice(seen) // the whole window of this turn (and of the message typed into it)
       seen = texts.length
+      // a registered feature that has an `expect.<name>` entry in this turn runs now, after the answer is posted, and leaves its record
+      const hookRecords = {}
+      for (const a of attached) if (turn.expect?.[a.name] !== undefined && a.afterTurn) hookRecords[a.name] = await a.afterTurn({ run: sub.at(-1).run, say: turn.say, answer: posted.at(-1) ?? null, turnIndex: index + 1 })
       const flat = {
-        toolCalls: sub.flatMap(s => s.toolCalls), native: sumNative(sub), posted, asked, commandsRan: sub.flatMap(s => s.commandsRan), files: readFiles(turn), undoRecords: undoCount(),
+        hooks: hookRecords, toolCalls: sub.flatMap(s => s.toolCalls), native: sumNative(sub), posted, asked, commandsRan: sub.flatMap(s => s.commandsRan), files: readFiles(turn), undoRecords: undoCount(),
         turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted),
       }
       const memory = memoryHook.finishTurn(turn.expect?.memory) // memory hook
       const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...memory.expectations]
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
-      rec.turns.push({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
+      await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
-        posted, asked, undoRecords: flat.undoRecords, ...(memory.record ? { memory: memory.record } : {}), expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
+        ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, asked, undoRecords: flat.undoRecords, ...(memory.record ? { memory: memory.record } : {}), expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {
         // the message typed into the run: what happened after it was sent
         const prev = sub[0], after = texts.slice(mark.posted)
         const flat2 = { toolCalls: prev.toolCalls.slice(mark.tools), native: prev.native, posted: after, asked, commandsRan: prev.commandsRan.slice(mark.ran), files: readFiles(next), undoRecords: undoCount(), turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted) }
-        const expect2 = [{ check: 'sent_while_running', ok: mark.accepted, detail: { afterMs: mark.afterMs, sentAtMs: mark.sentAtMs, error: mark.error } }, ...checkTurnExpectations(next.expect ?? {}, flat2)]
-        rec.turns.push({ index: index + 2, say: clip(next.say, 200), approve: [], whileRunning: { afterMs: mark.afterMs }, subTurns: [{ whileRunning: true, accepted: mark.accepted, error: mark.error, sentAtMs: mark.sentAtMs }],
+        const implicit = follow === 'message' ? 'sent_while_running' : 'action_taken'
+        const expect2 = [{ check: implicit, ok: mark.accepted, detail: { afterMs: mark.afterMs, sentAtMs: mark.sentAtMs, error: mark.error } }, ...checkTurnExpectations(next.expect ?? {}, flat2)]
+        await pushTurn({ index: index + 2, say: clip(next.say ?? '', 200), approve: [], ...(follow === 'message' ? { whileRunning: { afterMs: mark.afterMs } } : { action: follow, afterMs: mark.afterMs }), subTurns: [{ ...(follow === 'message' ? { whileRunning: true } : { action: follow }), accepted: mark.accepted, error: mark.error, sentAtMs: mark.sentAtMs }],
           posted: after, asked, undoRecords: flat2.undoRecords, expectations: expect2, ok: expect2.every(e => e.ok) && !sub.some(failedRun) })
         index++
       }
     }
+    for (const { name, api } of extensions) { try { const value = await api.finish?.(); if (value !== undefined) (rec.extensions ??= {})[name] = value } catch (error) { (rec.extensions ??= {})[name] = { error: clip(error?.code ?? error?.message ?? 'error', 100) } } }
     rec.ok = !rec.aborted && !closed && rec.turns.length === conversation.turns.length && rec.turns.every(t => t.ok)
     rec.decisionCalls = decisionCall.length
   } catch (error) {
