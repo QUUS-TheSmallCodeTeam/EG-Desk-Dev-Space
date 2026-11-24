@@ -151,3 +151,20 @@ test('a conversation without expect.briefing never runs the hook: no fork turn, 
   assert.equal(rec.turns[0].ok, true); assert.equal(rec.turns[0].hooks, undefined); assert.equal(w.wire().filter(m => m.method === 'thread/fork').length, 0)
   assert.equal(briefingHook.active({ EGDESK_BRIEFING_FLOW: 'on' }), true); assert.equal(briefingHook.active({}), false); assert.equal(briefingHook.active({ EGDESK_BRIEFING_FLOW: 'advisory' }), false)
 })
+
+// ---- c32: what Main's check-3 saw on the real 0.171 (thread/fork on an ephemeral source fails -32600 "no rollout found") ----
+test('check-3 reproduced: the fake refuses a fork of the ephemeral answer thread; the record keeps the place stages, the Decision numbers and the refused requests, so a chat-only outcome never hides its cause', async t => {
+  const w = world(t, { ...fakeFor('json'), refuseEphemeralFork: true })
+  const script = buildBoardScript(); script.conversations.length = 1
+  const rec = (await runCheck(w.options, asScripts(script), w.deps)).records[0]
+  const b = rec.turns[0].hooks.briefing
+  assert.equal(rec.aborted, null)
+  assert.deepEqual([b.outcome, b.reason], ['fallback-chat', 'fill-invalid'])
+  assert.deepEqual(b.flow.stages, ['place', 'fit']); assert.equal(b.flow.fillTurns, 2)
+  assert.deepEqual(b.forkErrors, ['thread/fork:-32600', 'thread/fork:-32600']); assert.deepEqual(b.forkRequests.map(r => r.method), ['thread/fork', 'thread/fork'])
+  assert.ok(b.decisions[0].p.combines >= 0.9 && Object.values(b.decisions[0].p).every(v => typeof v === 'number'), 'the place judgment says: board')
+  // the failed outcome expectation names the reason, the stages and the refused requests
+  const failed = rec.turns[0].expectations.find(e => e.check === 'briefing.outcome')
+  assert.equal(failed.ok, false); assert.deepEqual([failed.detail.reason, failed.detail.stages, failed.detail.forkErrors], ['fill-invalid', ['place', 'fit'], ['thread/fork:-32600', 'thread/fork:-32600']])
+  assert.equal(w.stderrLines.length, 0)
+})
