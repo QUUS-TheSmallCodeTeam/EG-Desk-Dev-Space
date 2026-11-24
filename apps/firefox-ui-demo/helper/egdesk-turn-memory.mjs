@@ -361,7 +361,9 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
         if (wiki.pages.has(id)) return { status: 'conflict', reason: 'page_exists' }
         // messageRef: the person's words already live in the chat store under this reference, so the page keeps the reference, not another copy.
         const viaRef = typeof messageRef === 'string' && messageRef.trim() !== ''
-        const raw = { id, title: compactText(message, 40), body: message, revision: '1', ...(viaRef ? { ref: messageRef } : {}), time: { slice: proposal.time.slice },
+        // time.at only where the proposer knows the date of the event itself (a Browser task's run); an utterance's event date is never computed.
+        const at = typeof proposal.time.at === 'string' && /^\d{4}-\d{2}-\d{2}/.test(proposal.time.at) && !Number.isNaN(Date.parse(proposal.time.at)) ? proposal.time.at : null
+        const raw = { id, title: compactText(message, 40), body: message, revision: '1', ...(viaRef ? { ref: messageRef } : {}), time: { slice: proposal.time.slice, ...(at ? { at } : {}) },
           provenance: { kind: provenance.kind, by: provenance.kind === 'agent_note' ? 'browser_task' : 'user', ...(provenance.basis ? { basis: provenance.basis } : {}) }, status: STATUS.has(proposal.status) ? proposal.status : 'unknown',
           scope: scope?.writeScope ?? null, ...(typeof proposal.spokenAt === 'string' ? { spokenAt: proposal.spokenAt } : {}), links }
         if (typeof persist === 'function') persist({ kind: 'page', page: raw, viaRef })
@@ -519,6 +521,8 @@ const materialKind = page => (typeof page.ref === 'string' && page.ref.startsWit
 // A random secret of this process: material keys cannot be computed outside it and change when the bridge restarts.
 const MATERIAL_SECRET = randomBytes(32)
 const materialKey = id => createHmac('sha256', MATERIAL_SECRET).update(id).digest('hex').slice(0, 32)
+const dateOf = value => (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value) && !Number.isNaN(Date.parse(value)) ? value.slice(0, 10) : null)
+const acceptedAt = page => (Array.isArray(page.statusReadings) ? page.statusReadings.filter(r => r?.state === 'accepted' && r.status === page.status).at(-1)?.confirmedAt ?? null : null)
 const bounded = (value, fallback, low, high) => (Number.isSafeInteger(value) ? Math.min(high, Math.max(low, value)) : fallback)
 
 // The pages of one turn's materials, in order: this turn's packet first (when it was attached), then the held ones. Permission per page.
@@ -570,6 +574,8 @@ export function memoryEvidence(result, wiki, { scope = null, attached = true, ch
  *   held true:  the answering model already holds the page from an earlier turn of this thread (a real delivery receipt whose revision and
  *               content still match). It says NOTHING about whether the page matters for this message: nobody judged that.
  *   alias:      M1..Mn, valid inside this array only. No page id, reference, revision, score or probability leaves through here.
+ *   recordedAt: YYYY-MM-DD when the record was made (a written page's creation, an utterance's time), when known. statusAt: YYYY-MM-DD when
+ *               the person confirmed its current status (a promoted reading). Both only when recorded; never computed from text.
  *   status:     the recorded status. statusReading: the judge's fallible reading of the record (present only when one was accepted).
  *               statusPending: a reported status waiting for the person's confirmation. Neither is verification nor write permission.
  *   links:      between two listed materials only (toAlias always resolves). Recorded, outgoing: same_task | follows_from | decided_in |
@@ -599,6 +605,8 @@ export function memoryMaterials(result, wiki, { scope = null, attached = true, e
         time: Object.freeze({ slice: page.time.slice, at: typeof page.time.at === 'string' ? page.time.at.slice(0, 10) : null }),
         provenance: Object.freeze({ kind: page.provenance.kind, by: page.provenance.by ?? null, basis: page.provenance.basis ?? null }),
         status: page.status, ...(!held && typeof pick?.statusRead === 'string' ? { statusReading: pick.statusRead } : {}), ...(typeof pending === 'string' ? { statusPending: pending } : {}),
+        // recordedAt: when the record was made (a written page's creation, an utterance's time); statusAt: when its status was confirmed by the person
+        ...(dateOf(page.spokenAt) ? { recordedAt: dateOf(page.spokenAt) } : {}), ...(dateOf(acceptedAt(page)) ? { statusAt: dateOf(acceptedAt(page)) } : {}),
         title: compactText(page.title, MATERIAL_LIMITS.titleChars), excerpt: page.body.length > chars ? `${page.body.slice(0, chars).trimEnd()} […]` : page.body,
         links: Object.freeze(links), held }, 'key', { value: materialKey(page.id), enumerable: false }))
     }))

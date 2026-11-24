@@ -128,7 +128,8 @@ export function createOutcomeToOntology({ wiki, writer, scope = null, enabled = 
       if (egress && (!egress.allows('browser_task_record') || !egress.allows('memory_page'))) return { status: 'unavailable', reason: 'egress' }
       try {
         const at = Number.isFinite(now()) ? new Date(now()).toISOString() : null
-        const proposal = { op: 'new_page', time: { slice: 'past' }, status: candidate.outcome?.status === 'done' ? 'done' : 'unknown', provenance: { kind: 'agent_note' }, links: [], spokenAt: at }
+        // the task ran today: the date of the event is known to code (the day of the outcome record)
+        const proposal = { op: 'new_page', time: { slice: 'past', ...(at ? { at: at.slice(0, 10) } : {}) }, status: candidate.outcome?.status === 'done' ? 'done' : 'unknown', provenance: { kind: 'agent_note' }, links: [], spokenAt: at }
         const applied = writer.apply(proposal, { message: candidate.text, scope, operationId: `${OUTCOME_OPERATION_PREFIX}${candidate.taskId}${candidate.outcome?.status === 'stuck' ? '-stuck' : ''}` })
         return { status: applied.status, ...(applied.reason ? { reason: applied.reason } : {}), ...(applied.pageId ? { pageId: applied.pageId } : {}) }
       } catch { return { status: 'unavailable' } }

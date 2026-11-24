@@ -113,7 +113,7 @@ function storedPage(raw) {
   if (!hasBody && !hasRef) return null
   if (!REVISION_OK.test(String(raw.revision ?? '')) || !SLICE_SET.has(raw.time?.slice) || !KIND_SET.has(raw.provenance?.kind)) return null
   return { id: raw.id, title: clip(raw.title, 160), ...(hasBody && !hasRef ? { body: clip(raw.body, WRITES_LIMITS.body) } : {}), ...(hasRef ? { ref: clip(raw.ref, 300) } : {}),
-    revision: String(raw.revision), time: { slice: raw.time.slice },
+    revision: String(raw.revision), time: { slice: raw.time.slice, ...(typeof raw.time.at === 'string' && /^\d{4}-\d{2}-\d{2}/.test(raw.time.at) && !Number.isNaN(Date.parse(raw.time.at)) ? { at: raw.time.at } : {}) },
     provenance: { kind: raw.provenance.kind, ...(typeof raw.provenance.by === 'string' ? { by: clip(raw.provenance.by, 60) } : {}), ...(PROVENANCE_BASES.includes(raw.provenance.basis) ? { basis: raw.provenance.basis } : {}) },
     status: SOURCE_STATUSES.has(raw.status) ? raw.status : 'unknown', scope: typeof raw.scope === 'string' ? raw.scope : null,
     ...(typeof raw.spokenAt === 'string' && !Number.isNaN(Date.parse(raw.spokenAt)) ? { spokenAt: raw.spokenAt } : {}),
