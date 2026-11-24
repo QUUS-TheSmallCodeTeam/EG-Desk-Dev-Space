@@ -37,6 +37,12 @@ export function usableReceipts(delivered, position, threadKey) {
   return ok ? delivered : { usable: false, pages: {}, threadKey: threadKey ?? null }
 }
 
+// Held pages by title only, or (heldDigest) with their status and the start of their content, so "does the held material already cover this"
+// can actually be judged. With titles alone the judge cannot know what a title leaves out (real run: "그럼 롤백 조건은?" got need 0.02
+// although the rollback page was not held).
+const heldBlock = (titles, digest) => (Array.isArray(digest) && digest.length
+  ? digest.map(h => `- ${compactText(h.title, 120)} | status=${h.status}\n  ${compactText(h.excerpt, 200)}`).join('\n')
+  : titles.length ? titles.map(t => `- ${compactText(t, 120)}`).join('\n') : '(nothing)')
 const TRIAGE_RULES = 'You are a system judge deciding what stored memory a turn needs. Judge only from the message, the list of what the answering model already holds, and any live conversation shown. Never invent anything.'
 /**
  * One small call, no page content, three independent yes/no questions:
@@ -44,16 +50,16 @@ const TRIAGE_RULES = 'You are a system judge deciding what stored memory a turn 
  *    the first real run answered "does it need stored material?" with 1.0 for "고마워", so the skip no longer rests on that question)
  *  - tn_need: does it ask for or report something the held pages do not already cover?
  *  - tn_record: is it worth keeping as a record?
- * The fetch is skipped only on a decided courtesy "yes" or a decided need "no". Undecided or failed answers still fetch.
+ * The fetch is skipped only on a decided courtesy "yes" (or, when the host opts in with skipOnNeed, a decided need "no"). Undecided or failed answers still fetch.
  */
-export async function triageTurn({ message, heldTitles = [], live = null, client, askedAt = null, signal, timeoutMs = 2000 } = {}) {
+export async function triageTurn({ message, heldTitles = [], heldDigest = null, live = null, client, askedAt = null, signal, timeoutMs = 2000 } = {}) {
   const questions = [
     predicateQuestion('tn_courtesy', 'Is the message only a courtesy: thanks, a greeting, an acknowledgement or other social small talk, with no question, request, report or decision in it?'),
     predicateQuestion('tn_need', 'Does the message ask for, or report, something that the held pages and the conversation do not already cover, so that stored notes or documents beyond the held ones would improve the answer?'),
     predicateQuestion('tn_record', 'Does this message state something worth keeping as a record: a new fact, a decision, a plan, or a change in the status of something already recorded? Greetings, thanks, small talk and pure questions are not.'),
   ]
   const input = [{ role: 'developer', content: TRIAGE_RULES },
-    { role: 'user', content: `Held in the answering model's context:\n${heldTitles.length ? heldTitles.map(t => `- ${compactText(t, 120)}`).join('\n') : '(nothing)'}` },
+    { role: 'user', content: `Held in the answering model's context:\n${heldBlock(heldTitles, heldDigest)}` },
     ...(typeof live === 'string' && live.trim() ? [{ role: 'user', content: `Live conversation (recent turns, bounded):\n${live.slice(-3000)}` }] : []),
     { role: 'user', content: `${clockLine(askedAt)}\nMessage:\n${message}` }]
   try {
@@ -80,6 +86,12 @@ export function recordFromLabels(label) {
   const kind = source === 'attributed_report' ? 'reported_by_other' : 'utterance'
   const basis = PROVENANCE_BASES.includes(source) ? source : null
   return { slice, status, provenance: { kind, by: 'user', ...(basis ? { basis } : {}) }, form, recordable: form !== 'question' }
+}
+
+/** Labels of one utterance (one entry per sentence) merged the same way the write judgment merges them, and the page attributes they give. */
+export function mergeSpeechLabels(interpretations) {
+  const labels = mergedLabels(interpretations)
+  return { labels, record: recordFromLabels(labels) }
 }
 
 function mergedLabels(interpretations) {
@@ -141,7 +153,8 @@ const STATUS = new Set(['plan', 'done'])
 const SLICES = new Set(['past', 'present', 'planned', 'hypothetical'])
 // agent_note: the host's own record (a finished browser task), not something the person said; stored with by: 'browser_task'.
 const KINDS = new Set(['utterance', 'reported_by_other', 'agent_note'])
-const nextRevision = revision => (/^\d+$/.test(revision) ? String(Number(revision) + 1) : `${revision}+1`)
+// Numeric revisions count up; any other revision (a store's own hash) gets a ".rN" counter, which stays inside the wiki's revision alphabet.
+const nextRevision = revision => (/^\d+$/.test(revision) ? String(Number(revision) + 1) : /\.r\d+$/.test(revision) ? revision.replace(/\.r(\d+)$/, (_, n) => `.r${Number(n) + 1}`) : `${revision}.r1`)
 const fingerprint = (proposal, message) => sha256Hex(JSON.stringify([proposal, createHash('sha256').update(String(message ?? '')).digest('hex')]))
 
 /**
@@ -152,10 +165,10 @@ const fingerprint = (proposal, message) => sha256Hex(JSON.stringify([proposal, c
  * it becomes the status only if the host's acceptStatus policy says so. The body of a new page is the person's own
  * message text, supplied by the host; the judge never writes text.
  */
-export function createWikiWriter(wiki, { enabled = false, canWrite = () => false, acceptStatus = () => false, idFor = null } = {}) {
+export function createWikiWriter(wiki, { enabled = false, canWrite = () => false, acceptStatus = () => false, idFor = null, persist = null } = {}) {
   const done = new Map()
   return {
-    apply(proposal, { message = null, scope = null, operationId = null } = {}) {
+    apply(proposal, { message = null, messageRef = null, scope = null, operationId = null } = {}) {
       if (enabled !== true) return { status: 'disabled' }
       if (!record(proposal) || !OPS.has(proposal.op)) return { status: 'invalid' }
       if (proposal.op === 'none') return { status: 'noop' }
@@ -176,7 +189,11 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
           const reading = { status: proposal.proposedStatus, state: 'pending', basis: provenance.basis ?? null, ...(typeof proposal.spokenAt === 'string' ? { spokenAt: proposal.spokenAt } : {}) }
           const revision = nextRevision(page.revision)
           const promote = acceptStatus({ page, reading: { ...reading }, scope }) === true
-          wiki.patch(page.id, { statusReadings: [...page.statusReadings, promote ? { ...reading, state: 'accepted' } : reading], revision, ...(promote ? { status: reading.status } : {}) })
+          const stored = promote ? { ...reading, state: 'accepted' } : reading
+          // Persist first: a store that cannot keep the reading means nothing changed.
+          if (typeof persist === 'function') persist({ kind: 'reading', pageId: page.id, sourceRevision: page.revision.replace(/\.r\d+$/, ''), reading: stored, revision })
+          const patched = wiki.patch(page.id, { statusReadings: [...page.statusReadings, stored], revision, ...(promote ? { status: reading.status } : {}) })
+          if (!patched) return { status: 'invalid', reason: 'write_failed' }
           return finish({ status: promote ? 'status_updated' : 'recorded_pending', pageId: page.id, revision })
         }
         // new_page
@@ -185,10 +202,15 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
         const id = typeof idFor === 'function' ? idFor({ operationId, scope })
           : provenance.kind === 'agent_note' && operationId.startsWith('browser-task:') ? `browser-task/${operationId.slice(13).replace(/[^A-Za-z0-9._-]/g, '-')}` : `memo/${sha256Hex(key).slice(0, 16)}`
         const links = (Array.isArray(proposal.links) ? proposal.links : []).filter(l => record(l) && wiki.pages.has(l.to) && allowsPage(wiki.pages.get(l.to), scope))
-        const page = wiki.add({ id, title: compactText(message, 40), body: message, revision: '1', time: { slice: proposal.time.slice },
+        if (wiki.pages.has(id)) return { status: 'conflict', reason: 'page_exists' }
+        // messageRef: the person's words already live in the chat store under this reference, so the page keeps the reference, not another copy.
+        const viaRef = typeof messageRef === 'string' && messageRef.trim() !== ''
+        const raw = { id, title: compactText(message, 40), body: message, revision: '1', ...(viaRef ? { ref: messageRef } : {}), time: { slice: proposal.time.slice },
           provenance: { kind: provenance.kind, by: provenance.kind === 'agent_note' ? 'browser_task' : 'user', ...(provenance.basis ? { basis: provenance.basis } : {}) }, status: STATUS.has(proposal.status) ? proposal.status : 'unknown',
-          scope: scope?.writeScope ?? null, ...(typeof proposal.spokenAt === 'string' ? { spokenAt: proposal.spokenAt } : {}), links })
-        if (!page) return { status: 'conflict', reason: 'page_exists' }
+          scope: scope?.writeScope ?? null, ...(typeof proposal.spokenAt === 'string' ? { spokenAt: proposal.spokenAt } : {}), links }
+        if (typeof persist === 'function') persist({ kind: 'page', page: raw, viaRef })
+        const page = wiki.add(raw)
+        if (!page) return { status: 'invalid', reason: 'write_failed' }
         return finish({ status: 'stored', pageId: page.id, revision: page.revision })
       } catch { return { status: 'invalid', reason: 'write_failed' } }
     },
@@ -201,16 +223,18 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
  * -> { position, triage, memory, packet, nextDelivered(), judgeWrite() -> Promise<{ proposal, receipt }> | null }
  * judgeWrite is a thunk so the host can run it after the answer started: the packet does not depend on it.
  */
-export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, signal } = {}) {
+export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = false, heldExcerpts = false, signal } = {}) {
   const pos = position?.kind === 'mid' ? position : { kind: 'first', reason: position?.reason ?? 'unspecified' }
   const receipts = usableReceipts(delivered, pos, threadKey)
   const heldPages = Object.keys(receipts.pages ?? {}).map(id => wiki.pages.get(id)).filter(p => p && allowsPage(p, scope))
-  const triageCall = () => triageTurn({ message, heldTitles: heldPages.map(p => p.title), live: pos.kind === 'mid' ? live : null, client, askedAt, signal })
+  const heldDigest = heldExcerpts === true ? heldPages.map(p => ({ title: p.title, status: p.status, excerpt: p.body })) : null
+  const triageCall = () => triageTurn({ message, heldTitles: heldPages.map(p => p.title), heldDigest, live: pos.kind === 'mid' ? live : null, client, askedAt, signal })
   let triage, memory
   if (pos.kind === 'mid') {
     triage = await triageCall()
-    // Only a decided courtesy "yes" or a decided need "no" skips the fetch; undecided or failed triage still fetches.
-    memory = triage.courtesy.state === 'yes' || triage.need.state === 'no' ? { status: 'skipped', reason: 'nothing_needed', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [] }, nextDelivered: () => receipts }
+    // Only a decided courtesy "yes" skips the fetch. A decided need "no" skips it only when the host opted in (skipOnNeed): a wrong skip
+    // loses material, a needless fetch only costs tokens, and the first real T4 run showed a wrong need "no" from titles alone.
+    memory = triage.courtesy.state === 'yes' || (skipOnNeed === true && triage.need.state === 'no') ? { status: 'skipped', reason: 'nothing_needed', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [] }, nextDelivered: () => receipts }
       : await reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget, signal, mode: 'next', live })
   } else {
     ;[triage, memory] = await Promise.all([ontologyWrite ? triageCall() : Promise.resolve(null),

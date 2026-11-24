@@ -2623,7 +2623,7 @@ export class CodexChatRuntime {
         }
       }
       if (decision) this.noteDecisionContext(run, decision)
-      if (memoryPosition) this.startTurnMemoryAdvisory(run, body, context, memoryPosition, performance.now() - memoryClock) // after dispatch, in the background: never delays or changes the turn
+      if (memoryPosition) this.startTurnMemoryAdvisory(run, body, context, memoryPosition, performance.now() - memoryClock, { speech: decision?.speech ?? null, topic: this.topicIntakes.get(context) ?? null }) // after dispatch, in the background: never delays or changes the turn
       // Notifications can precede the RPC response. Only the returned turn ID
       // may inherit this request's correlation; other turns remain unclaimed.
       while (pending.buffer.length) await this.apply(pending.buffer.shift())
@@ -4117,7 +4117,18 @@ export class CodexChatRuntime {
         return p && hash(p.user.quote) === r.user.hash && hash(p.assistant.quote) === r.assistant.hash ? p : null
       }
       const current = () => Boolean(state())
-      return { current, prepare: (signal, inBudget) => { try {
+      // The verified completed pairs (text, hashes and the topic graph) for the wiki adapter; null when anything fails to verify.
+      const turns = (signal, inBudget) => { try {
+        const x = !signal?.aborted && (!inBudget || inBudget()) && state(); if (!x) return null
+        const out = []
+        for (const r of x.turns) {
+          const p = read(r); if (!p) return null
+          out.push({ key: r.key, topic: r.topic, parent: r.parent, needs: r.needs, userText: p.user.quote, assistantText: p.assistant.quote,
+            userHash: r.user.hash, assistantHash: r.assistant.hash, seq: r.assistant.seq, ...(Number.isFinite(p.user.spokenAt) ? { spokenAt: new Date(p.user.spokenAt).toISOString() } : {}) })
+        }
+        return out
+      } catch { return null } }
+      return { current, turns, prepare: (signal, inBudget) => { try {
         const x = !signal.aborted && inBudget() && state(); if (!x) return null
         const turns = []
         for (const r of x.turns) {
@@ -4173,7 +4184,18 @@ export class CodexChatRuntime {
           verification: 'utterance-only', interpretations: r.interpretations }
       }
       // Internal flag (setup.speechDesign); only the listed alternative designs change anything, every other value is the current design.
-      return { allowed, modeActive, segments: speechSegments(body.message), design: ['predicates', 'axes-isolated', 'predicates-isolated'].includes(setup.speechDesign) ? setup.speechDesign : 'axes', candidate: () => {
+      // Recent utterances of this consenting DM, each verified against the chat store (the wiki adapter turns them into pages; nothing is kept).
+      const records = () => {
+        if (!allowed()) return []
+        const refs = evidence.recentSpeech(dm.scope, gen)
+        const out = []
+        for (const r of (refs || []).slice(-12)) {
+          const rec = materialize(r); if (!rec) return [] // never a partial chain after an unverified substitution
+          out.push({ localMessageId: r.localMessageId, role: rec.role, quote: rec.quote, spokenAt: rec.spokenAt, sequence: rec.sequence, hash: r.hash, interpretations: rec.interpretations })
+        }
+        return out
+      }
+      return { allowed, modeActive, records, segments: speechSegments(body.message), design: ['predicates', 'axes-isolated', 'predicates-isolated'].includes(setup.speechDesign) ? setup.speechDesign : 'axes', candidate: () => {
         if (!allowed()) return null
         const refs = evidence.recentSpeech(dm.scope, gen)
         if (!refs?.length) return null
@@ -4530,21 +4552,21 @@ export class CodexChatRuntime {
 
   turnMemoryIdle() { return Promise.allSettled([...this.turnMemoryRuns]) }
 
-  startTurnMemoryAdvisory(run, body, context, position, prepMs = null) {
+  startTurnMemoryAdvisory(run, body, context, position, prepMs = null, sources = null) {
     try {
       const setup = this.decisionContext, tm = setup?.turnMemory
       if (!tm || !setup.client || typeof tm.wiki !== 'function' || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return
       const eligible = typeof tm.eligible === 'function' ? tm.eligible({ body, context }) === true : context.channelKind === 'direct' && !context.stateless && !context.board
       if (!eligible) return
-      const job = this.runTurnMemoryAdvisory(run, body, context, position, prepMs).catch(() => {})
+      const job = this.runTurnMemoryAdvisory(run, body, context, position, prepMs, sources).catch(() => {})
       this.turnMemoryRuns.add(job)
       void job.finally(() => this.turnMemoryRuns.delete(job))
     } catch { /* memory must never affect the turn */ }
   }
 
-  async runTurnMemoryAdvisory(run, body, context, position, prepMs = null) {
+  async runTurnMemoryAdvisory(run, body, context, position, prepMs = null, sources = null) {
     const setup = this.decisionContext, tm = setup.turnMemory
-    const wiki = await tm.wiki({ body, context })
+    const wiki = await tm.wiki({ body, context, sources })
     if (!wiki?.pages) return
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), Number.isSafeInteger(tm.deadlineMs) && tm.deadlineMs > 0 ? tm.deadlineMs : 15000)
     timer.unref?.()
@@ -4561,7 +4583,7 @@ export class CodexChatRuntime {
       const threadKey = run.conversationId
       const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position, threadKey,
         scope: typeof tm.scope === 'function' ? await tm.scope({ body, context }) : null, live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null,
-        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, signal: controller.signal })
+        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed === true, heldExcerpts: tm.heldExcerpts === true, signal: controller.signal })
       const judged = result.judgeWrite ? await result.judgeWrite() : null
       if (typeof threadKey === 'string' && threadKey) {
         this.turnMemoryShadow.set(threadKey, result.nextDelivered())

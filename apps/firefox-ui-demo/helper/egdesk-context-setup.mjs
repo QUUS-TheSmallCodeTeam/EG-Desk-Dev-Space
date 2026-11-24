@@ -607,22 +607,43 @@ export function decisionContextActivity({ answerId, selected = [], latencyMs = n
 const ONTOLOGY_SLICES = Object.freeze({ past: 'past', present: 'present', future: 'planned', planned: 'planned', hypothetical: 'hypothetical' })
 
 /**
+ * The wiki link type for an ontology relation name. Closed and conservative: a relation that does not clearly mean
+ * replacement, continuation, decision or membership is only "refers_to", never a stronger claim.
+ */
+export function linkTypeForRelation(relation) {
+  const r = String(relation ?? '').toLowerCase()
+  if (/supersed|replac|obsolet/.test(r)) return 'supersedes'
+  if (/decid|approv|resolv/.test(r)) return 'decided_in'
+  if (/continu|follow|deriv|next|after|result|implement/.test(r)) return 'follows_from'
+  if (/same|part_of|member|belong|contain|child|group/.test(r)) return 'same_task'
+  return 'refers_to'
+}
+
+/**
  * candidatesFromOntologyGraph(graph) → candidates
  * Maps the ontology graph (OntologyStore.readGraph() / graph.json) to context
  * candidates: snapshots and the nodes that belong to them become timeline
  * items (ontology 'future' → planned); other nodes become documents whose full
- * text is the node body.
+ * text is the node body. Graph edges and snapshot continuations come along as typed `links`.
  */
 export function candidatesFromOntologyGraph(graph) {
   const out = []
+  // Edges are kept as typed links (they used to be dropped). They only point between candidates that exist.
+  const linksOf = new Map()
+  const addLink = (from, type, to) => { if (!linksOf.has(from)) linksOf.set(from, []); linksOf.get(from).push({ type, to }) }
+  for (const edge of Array.isArray(graph?.edges) ? graph.edges : []) {
+    if (record(edge) && typeof edge.source === 'string' && typeof edge.target === 'string') addLink(`ontology:${edge.source}`, linkTypeForRelation(edge.relation), `ontology:${edge.target}`)
+  }
   for (const snapshot of Array.isArray(graph?.snapshots) ? graph.snapshots : []) {
     if (!record(snapshot) || typeof snapshot.snapshotId !== 'string') continue
+    if (typeof snapshot.continuesFrom === 'string') addLink(`ontology-snapshot:${snapshot.snapshotId}`, 'follows_from', `ontology-snapshot:${snapshot.continuesFrom}`)
     out.push({ id: `ontology-snapshot:${snapshot.snapshotId}`, kind: 'timeline', title: snapshot.label || snapshot.snapshotId,
       timeSlice: ONTOLOGY_SLICES[snapshot.timeSlice] || 'unknown', status: typeof snapshot.status === 'string' ? snapshot.status : null,
       branchId: snapshot.snapshotId, sourceRef: typeof snapshot.sourcePath === 'string' ? snapshot.sourcePath : null })
   }
   for (const node of Array.isArray(graph?.nodes) ? graph.nodes : []) {
     if (!record(node) || typeof node.id !== 'string') continue
+    if (typeof node.snapshotId === 'string') addLink(`ontology:${node.id}`, 'same_task', `ontology-snapshot:${node.snapshotId}`)
     const body = typeof node.body === 'string' && node.body.trim() ? node.body : null
     out.push({ id: `ontology:${node.id}`, kind: node.timeSlice ? 'timeline' : 'document', title: node.label || node.id,
       summary: typeof node.summary === 'string' ? node.summary : '',
@@ -632,6 +653,11 @@ export function candidatesFromOntologyGraph(graph) {
       aliases: [...(Array.isArray(node.aliases) ? node.aliases : []), ...(Array.isArray(node.abbreviations) ? node.abbreviations : [])],
       sourceRef: typeof node.path === 'string' ? node.path : null,
       ...(body ? { loadText: () => body } : {}) })
+  }
+  const known = new Set(out.map(c => c.id))
+  for (const c of out) {
+    const links = (linksOf.get(c.id) ?? []).filter(l => known.has(l.to) && l.to !== c.id)
+    if (links.length) c.links = links // additive; the decision catalog ignores it
   }
   return out
 }
