@@ -206,9 +206,9 @@ const TRAITS = ['compare', 'sequence', 'open_items', 'single']
 //   single      fact_M#     does this material state a concrete fact?
 // A part whose only way of showing is a card already on the board for it (provenance or title, computed) is reused without a question.
 export const FIT_KINDS = Object.freeze({ compare: 'aspect', sequence: 'happened', open_items: 'todo', single: 'fact' })
-const STAGE_KINDS = { place: ['several', 'one_sentence', 'about', 'same'], fit: ['aspect', 'happened', 'todo', 'fact'], order: ['before'], fill_check: ['slot', 'step'] }
+const STAGE_KINDS = { place: ['several', 'one_sentence', 'combines', 'about', 'same'], fit: ['aspect', 'happened', 'todo', 'fact'], order: ['before'], fill_check: ['slot', 'step'] }
 const SHOW = { compare: 'how these two versions differ', sequence: 'what happened across these materials, in date order', open_items: 'what is still not done in these materials', single: 'this one material' }
-export const questionName = q => (q.kind === 'several' || q.kind === 'one_sentence' ? q.kind : q.kind === 'about' ? `about_${q.material}` : q.kind === 'same' ? `same_${q.materials[0]}_${q.materials[1]}` : q.kind === 'aspect' ? `aspect_${q.part}` : ['happened', 'todo', 'fact'].includes(q.kind) ? `${q.kind}_${q.material}` : q.kind === 'before' ? `before_${q.first.part}_${q.second.part}`
+export const questionName = q => (q.kind === 'several' || q.kind === 'one_sentence' || q.kind === 'combines' ? q.kind : q.kind === 'about' ? `about_${q.material}` : q.kind === 'same' ? `same_${q.materials[0]}_${q.materials[1]}` : q.kind === 'aspect' ? `aspect_${q.part}` : ['happened', 'todo', 'fact'].includes(q.kind) ? `${q.kind}_${q.material}` : q.kind === 'before' ? `before_${q.first.part}_${q.second.part}`
   : q.kind === 'slot' ? `slot_${q.part}_r${q.row}${q.side ? `_${q.side}` : ''}` : `step_${q.part}`)
 
 /** The closed object for one judgment, re-validated here (the bridge route is reachable from the chrome): unknown fields, aliases, components or stages refuse the whole request. */
@@ -217,6 +217,7 @@ export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
     if (!exactKeys(raw, ['stage', 'request', 'materials', 'cards', 'questions'], ['answer']) || !SKELETON_STAGES.includes(raw.stage) || !plain(raw.request, SKELETON_LIMITS.requestMax)) return null
     // the answer being laid out, for the place request only (a request like "정리해줘" refers to it)
     if (raw.answer !== undefined && (raw.stage !== 'place' || !plain(raw.answer, SKELETON_LIMITS.answerMax))) return null
+    if (raw.questions?.some?.(q => q?.kind === 'combines') && raw.answer === undefined) return null // the content question needs the answer it quotes
     if (!Array.isArray(raw.materials) || !raw.materials.length || raw.materials.length > SKELETON_LIMITS.maxMaterials || !Array.isArray(raw.cards) || raw.cards.length > BRIEFING_LIMITS.maxCandidates ||
         !Array.isArray(raw.questions) || !raw.questions.length || raw.questions.length > SKELETON_LIMITS.maxQuestions) return null
     const mats = new Set(), cards = new Set()
@@ -239,7 +240,7 @@ export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
     const questions = raw.questions.map(q => {
       if (!isObj(q) || !STAGE_KINDS[raw.stage].includes(q.kind)) throw 0
       let out
-      if (q.kind === 'several' || q.kind === 'one_sentence') { if (!exactKeys(q, ['kind'])) throw 0; out = { kind: q.kind } }
+      if (q.kind === 'several' || q.kind === 'one_sentence' || q.kind === 'combines') { if (!exactKeys(q, ['kind'])) throw 0; out = { kind: q.kind } }
       else if (q.kind === 'about') { if (!exactKeys(q, ['kind', 'material']) || !mats.has(q.material)) throw 0; out = { kind: 'about', material: q.material } }
       else if (q.kind === 'same') { if (!exactKeys(q, ['kind', 'materials']) || !Array.isArray(q.materials) || q.materials.length !== 2 || q.materials[0] === q.materials[1] || !q.materials.every(a => mats.has(a))) throw 0; out = { kind: 'same', materials: [...q.materials] } }
       else if (q.kind === 'aspect') { if (!exactKeys(q, ['kind', 'part', 'materials']) || !PART_ALIAS.test(q.part) || !Array.isArray(q.materials) || q.materials.length !== 2 || q.materials[0] === q.materials[1] || !q.materials.every(a => mats.has(a))) throw 0; out = { kind: 'aspect', part: q.part, materials: [...q.materials] } }
@@ -285,6 +286,8 @@ function questionText(q, c, catalog) {
   const mat = a => c.materials.find(m => m.alias === a)
   if (q.kind === 'several') return 'To answer this request well, does the person need to see several of the listed materials together: side by side (for example two versions against each other) or one after another (for example what happened in order)?'
   if (q.kind === 'one_sentence') return 'Is this request fully answered by one short sentence or a single fact (for example one number, one date, or yes or no)?'
+  // Cycle 18: with the answer at hand, ask about its CONTENT, not its length ("방금 그 내용 정리해줘" asks to organise an answer that is itself one sentence: real .72).
+  if (q.kind === 'combines') return `The assistant's answer, quoted exactly as a JSON string: ${JSON.stringify(c.answer ?? '')}. Does this answer combine several separate facts from different materials (dates, versions, steps) that would be easier to follow laid out side by side or in order?`
   if (q.kind === 'aspect') return `Two materials, each quoted as JSON: ${q.materials.map(a => quoteMaterial(mat(a))).join('; ')}. Do both of these materials state a value for at least one same aspect (for example a price in each, or a date in each)?`
   if (q.kind === 'happened') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material state something that happened or was decided (an action, an event or a decision)?`
   if (q.kind === 'todo') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. According to this material, is something not done yet or still to happen?`
@@ -337,6 +340,11 @@ export const SKELETON_JUDGE = createSkeletonJudge()
 const isYes = p => typeof p === 'number' && p >= SKELETON_BARS.yes, isNo = p => typeof p === 'number' && p <= SKELETON_BARS.no
 /** Board only when several materials are needed together AND one sentence would not do. Anything undecided stays in the bubble. */
 export function decidePlace(answers) {
+  // With the answer quoted (cycle 18): board = several yes AND the answer combines several facts from different materials (yes); a no on either is the bubble.
+  if (answers && Object.hasOwn(answers, 'combines')) {
+    if (isYes(answers.several) && isYes(answers.combines)) return { value: 'board', reason: null }
+    return { value: 'bubble', reason: isNo(answers.several) || isNo(answers.combines) ? 'judged-bubble' : 'placement-undecided' }
+  }
   if (isYes(answers?.one_sentence)) return { value: 'bubble', reason: 'judged-bubble' }
   if (isYes(answers?.several) && isNo(answers?.one_sentence)) return { value: 'board', reason: null }
   return { value: 'bubble', reason: isNo(answers?.several) ? 'judged-bubble' : 'placement-undecided' }
@@ -598,7 +606,8 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
   // (a) bubble or board (two predicates), and in the same request what code cannot resolve about the materials: is each linked group what the request asks about,
   // and are the unresolved title-sharing pairs versions of one thing. One request instead of three; every question quotes its own material.
   const relevance = relevanceQuestions(scene.materials), pairs = versionCandidates(scene.materials)
-  const placed = await ask('place', [{ kind: 'several' }, { kind: 'one_sentence' }, ...relevance.map(q => ({ kind: 'about', material: q.material })), ...pairs.map(materials => ({ kind: 'same', materials }))])
+  // the content question when the answer is at hand; the length question only without it (the earlier path)
+  const placed = await ask('place', [{ kind: 'several' }, { kind: said ? 'combines' : 'one_sentence' }, ...relevance.map(q => ({ kind: 'about', material: q.material })), ...pairs.map(materials => ({ kind: 'same', materials }))])
   if (placed.unavailable) return unavailable(placed, false)
   if (placed.advisory !== undefined) {
     const fits0 = fitQuestions(scene)
