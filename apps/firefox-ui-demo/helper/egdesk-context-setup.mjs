@@ -331,6 +331,17 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
       mayDispatch: () => safe.every(item => mayRead(item.candidate)),
       noteSent: () => { for (const item of safe) { try { item.candidate.noteSent?.() } catch {} } } }
   }
+  // Only what the person named or the app pinned, without any model judgment: what stays when the
+  // mode or key changes after the answer but before the turn is sent.
+  const localOnly = () => {
+    const safe = fileItems.filter(item => mayRead(item.candidate))
+    if (!safe.length) return skipped('evidence_unavailable')
+    const guardedSafe = safe.filter(item => item.candidate.mayRead)
+    return { status: 'ready', selected: selectedSummary(safe), receipt: null,
+      extraContext: { [DECISION_CONTEXT_KEY]: [PACKET_HEAD + evidenceRule, ...safe.map(item => item.block)].join('\n\n') },
+      ...(guardedSafe.length ? { mayDispatch: () => guardedSafe.every(item => mayRead(item.candidate)),
+        noteSent: () => { for (const item of guardedSafe) { try { item.candidate.noteSent?.() } catch {} } } } : {}) }
+  }
   if (discardJudgments || !privateBatchCurrent()) return withoutTopic()
   if (modeStopped()) return skipped('mode_changed')
   const withSpeech = speechDispatched && speech.allowed()
@@ -357,6 +368,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     ...(topicQuestions.length ? { privateTopicBatch: true, withoutTopic, privateBatchCurrent } : {}),
     ...(guarded.length || withSpeech || topicQuestions.length || guardSpeech ? { mayDispatch: () => !modeStopped() && privateBatchCurrent() && (!withSpeech || speech.allowed()) && guarded.every(item => mayRead(item.candidate)),
       noteSent: () => { for (const { candidate } of guarded) { try { candidate.noteSent?.() } catch {} } } } : {}),
+    localOnly,
     extraContext: packet ? { [DECISION_CONTEXT_KEY]: packet } : {},
     latencyMs: result.latencyMs,
     model: result.model,
