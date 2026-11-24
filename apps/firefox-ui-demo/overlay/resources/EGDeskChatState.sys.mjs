@@ -622,6 +622,30 @@ export function keptTasksOnDefaultSwitch(codex, pref) {
   return { taskBoard: codex.taskBoard, taskContinue: codex.taskContinue ?? null, taskApproval: codex.taskApproval ?? null,
     taskResume: codex.taskResume ?? null, planProposals: codex.planProposals };
 }
+// ---- L1 c24 (U11, owner decision: a room's checks use the ROOM's account). Behind the room-account flag: codex.roomAccountMode === 'on' (the window
+// mirrors pref egdesk.roomAccount; a plain object without it is "off"), default off, and then every function below answers exactly as the default
+// sign-in did before. A room on another Codex engine profile that the window knows is keyed to THAT profile's account.
+export const roomAccountModeOn = codex => codex?.roomAccountMode === 'on';
+const roomOnSlot = (thread, codex) => roomAccountModeOn(codex) && codexRoomOnOtherProfile(thread, codex);
+/**
+ * roomAccountScope(thread, codex) -> { accountKey, cachedAccountKey, access, slot }
+ *   accountKey        the key the room's input/receipt/evidence checks compare against (null: not signed in on that room's account)
+ *   cachedAccountKey  what the window cached for that account (the default's cache, or the profile's own key: it has no separate cache)
+ *   access            the default account's access state, or null for a profile room (the default's quota state is not its own)
+ */
+export function roomAccountScope(thread, codex) {
+  if (roomOnSlot(thread, codex)) {
+    const key = codexSlotAccountKey(thread.engineProfileId, codex);
+    return Object.freeze({ accountKey: key, cachedAccountKey: key, access: null, slot: true });
+  }
+  return Object.freeze({ accountKey: codexAccountKey(codex?.authStatus), cachedAccountKey: codex?.codexAccountKey ?? null, access: codex?.authStatus?.access?.state, slot: false });
+}
+/** The account part of a change signature: the default sign-in's parts, or (a profile room) that profile's own key and sign-in state. */
+export function roomAccountParts(thread, codex, defaultParts) {
+  if (!roomOnSlot(thread, codex)) return defaultParts;
+  const profile = codexSlotProfile(thread.engineProfileId, codex);
+  return ['room-slot', thread.engineProfileId, codexSlotAccountKey(thread.engineProfileId, codex), profile?.auth?.status ?? null];
+}
 export function knownCodexAccountKey(key) {
   if (typeof key !== 'string' || !key.startsWith('codex:')) return false;
   const [, mode, ...identity] = key.split(':');
@@ -726,9 +750,10 @@ export function settleReconciledRequests(state, clientThreadId, snapshot) {
 function ensureStream(state, id) {
   return state.streams[id] ||= { seen: {}, checkpoints: {}, seq: -1, generation: ++state.streamGeneration };
 }
-export function registerChatRequest(state, request, authStatus, engineId = 'codex') {
+export function registerChatRequest(state, request, authStatus, engineId = 'codex', accountKey) {
+  // L1 c24: accountKey (when given) is the room's own account key (roomAccountScope); without it, the default sign-in's, as before
   state.requests[request.requestId] = { ...request, ...(engineId === 'claude' ? { engineId } : {}),
-    accountKey: engineId === 'claude' ? null : codexAccountKey(authStatus), status: 'submitting' };
+    accountKey: engineId === 'claude' ? null : accountKey !== undefined ? accountKey : codexAccountKey(authStatus), status: 'submitting' };
 }
 const REQUEST_PROJECT_TARGET_IDS = ['boardId', 'projectId', 'rootId'];
 const REQUEST_PROJECT_TARGET_PRESENTATION = ['title', 'displayPath'];
@@ -841,10 +866,12 @@ export function buildChatRequest(thread, message, requestId, runtime = {}) {
   }
   return body;
 }
-export function contextCapabilitiesForRequest(thread, auth, sourceIds = []) {
+export function contextCapabilitiesForRequest(thread, auth, sourceIds = [], codex = null) {
   // Plain legacy conversations must not require tools never registered on that
   // native thread. An explicit context request never silently replaces it.
-  return sourceIds.length || (codexAccountKey(auth) && (!thread.conversationId || thread.contextToolsAvailable === true))
+  // L1 c24: with the room-account flag the sign-in that counts is the room's own (codex given), else the default's as before
+  const signedIn = codex ? roomAccountScope(thread, codex).accountKey : codexAccountKey(auth);
+  return sourceIds.length || (signedIn && (!thread.conversationId || thread.contextToolsAvailable === true))
     ? { read: true, reader: true, publishBriefing: true } : null;
 }
 
