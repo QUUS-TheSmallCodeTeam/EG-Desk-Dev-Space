@@ -13,7 +13,7 @@ export const WANTED = Object.freeze([
   ['notification', 'turn/started', 'ServerNotification.json'], ['notification', 'turn/completed', 'ServerNotification.json'],
   ['notification', 'item/started', 'ServerNotification.json'], ['notification', 'item/completed', 'ServerNotification.json'],
   ['notification', 'thread/tokenUsage/updated', 'ServerNotification.json'], ['notification', 'thread/compacted', 'ServerNotification.json'],
-  ['notification', 'error', 'ServerNotification.json'],
+  ['notification', 'error', 'ServerNotification.json'], ['notification', 'mcpServer/startupStatus/updated', 'ServerNotification.json'],
   ['serverRequest', 'item/tool/call', 'ServerRequest.json'], ['serverRequest', 'item/commandExecution/requestApproval', 'ServerRequest.json'],
   ['serverRequest', 'item/fileChange/requestApproval', 'ServerRequest.json'],
   ['clientRequest', 'initialize', 'ClientRequest.json'], ['clientRequest', 'thread/start', 'ClientRequest.json'], ['clientRequest', 'turn/start', 'ClientRequest.json'],

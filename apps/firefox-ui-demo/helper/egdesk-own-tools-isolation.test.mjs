@@ -87,3 +87,19 @@ test('the read-back reports counts and Codex feature names only', async () => {
   const none = await readOwnToolsIsolation(async () => { throw new Error('x') }, { threadId: 't' })
   assert.deepEqual([none.mcpServers, none.featuresNotOff, none.hooks, none.instructionSources], ['unreadable', 'unreadable', 'unreadable', 'unreported'])
 })
+
+test('environments: [] is added only when the developer flag asks for it', async t => {
+  const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-own-isolation-env-'))
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }))
+  const real = path.join(base, 'project'), empty = path.join(base, 'engine-folder')
+  fs.mkdirSync(real); fs.mkdirSync(empty)
+  for (const environments of [undefined, () => 'none', () => 'other']) {
+    const a = appServer()
+    const chat = new CodexChatRuntime({ request: a.request, respond: () => {}, emit: () => {}, emitLegacy: () => {}, verifyFile: async () => null, ownTools: { mode: () => 'on', neutralFolder: () => empty, ...(environments ? { environments } : {}) } })
+    chat.setConnection(true)
+    await chat.send({ message: 'hello', clientThreadId: 'ui', requestId: 'r1', cwd: real })
+    const start = a.calls.find(([m]) => m === 'thread/start')[1]
+    if (environments?.() === 'none') assert.deepEqual(start.environments, [])
+    else assert.equal('environments' in start, false)
+  }
+})

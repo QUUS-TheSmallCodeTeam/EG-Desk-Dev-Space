@@ -2600,6 +2600,7 @@ export class CodexChatRuntime {
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
         mergeCeilingOverrides(overrides, isolation.overrides)
         context.ownToolsIsolation = isolation.mcp
+        try { if (this.ownTools?.environments?.() === 'none') overrides.environments = [] } catch { /* the flag only adds */ }
       }
       await assertWorkspaceCurrent()
       assertPreparationActive()

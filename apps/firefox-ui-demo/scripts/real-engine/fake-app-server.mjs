@@ -20,13 +20,16 @@ import { validateMessage } from '../../helper/egdesk-app-server-protocol.mjs'
 export const FAKE_VERSION = '0.171.0-alpha.13'
 const MESSAGE_PHASES = { commentary: 'commentary', final: 'final_answer' }
 
-export function runFakeAppServer({ script, input = process.stdin, output = process.stdout, log = null, home = '/fake/codex-home', env = {} } = {}) {
+// exit(code): what ends the fake. The process entry below passes process.exit; a test that runs the fake in-process passes its own.
+// stderr: where the schema-error line goes.
+export function runFakeAppServer({ script, input = process.stdin, output = process.stdout, log = null, home = '/fake/codex-home', env = {}, exit = code => process.exit(code), stderr = process.stderr } = {}) {
   const logLine = entry => { if (log) fs.appendFileSync(log, `${JSON.stringify(entry)}\n`) }
   const person = { mcpServers: [], hooks: 0, features: {}, instructionSources: [], ...(script.person ?? {}) }
   const threads = new Map(), used = new Set(), usedFork = new Set(), pending = new Map()
   let nextThread = 0, nextTurn = 0, nextItem = 0, nextServerRequest = 100
   const send = message => { output.write(`${JSON.stringify(message)}\n`); logLine({ dir: 'out', ...message }) }
-  const fail = (what, errors) => { process.stderr.write(`fake app-server: ${what} is off the 0.171 schema: ${errors.slice(0, 3).join('; ')}\n`); logLine({ dir: 'schema_error', what, errors }); process.exitCode = 3; setImmediate(() => process.exit(3)) }
+  let exitCode = 0
+  const fail = (what, errors) => { stderr.write(`fake app-server: ${what} is off the 0.171 schema: ${errors.slice(0, 3).join('; ')}\n`); logLine({ dir: 'schema_error', what, errors }); exitCode = 3; setImmediate(() => exit(3)) }
   const notify = (method, params) => { const errors = validateMessage('notification', method, params); if (errors.length) return fail(`notification ${method}`, errors); send({ method, params }) }
   const result = (id, method, value) => { const errors = validateMessage('result', method, value); if (errors.length) return fail(`result of ${method}`, errors); send({ id, result: value }) }
   const itemId = () => `item-${++nextItem}`
@@ -34,10 +37,10 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
   const textOf = params => (params.input ?? []).filter(i => i?.type === 'text').map(i => i.text).join('\n')
 
   const effective = thread => {
-    const cfg = thread.config ?? {}
-    const off = name => cfg.mcp_servers?.[name]?.enabled === false
+    const cfg = script.ignoreConfig === true ? {} : (thread.config ?? {}) // ignoreConfig: a binary that does not honour the keys (the check must be able to see that)
+    const off = (name, pluginId) => cfg.mcp_servers?.[name]?.enabled === false || (pluginId && cfg.plugins?.[pluginId]?.enabled === false)
     const featureOn = name => (cfg.features?.[name] !== undefined ? cfg.features[name] !== false : person.features[name] !== false)
-    const servers = person.mcpServers.filter(s => !off(s.name))
+    const servers = person.mcpServers.filter(s => !off(s.name, s.pluginId))
     const sources = cfg.project_doc_max_bytes === 0 ? [] : person.instructionSources
     return { servers, hooks: featureOn('hooks') ? person.hooks : 0, features: { ...person.features, ...Object.fromEntries(Object.entries(cfg.features ?? {}).filter(([, v]) => typeof v === 'boolean')) }, sources }
   }
@@ -83,7 +86,7 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
         const id = itemId(), cwd = step.nativeCommand.cwd ?? thread.cwd
         const base = { type: 'commandExecution', id, command: step.nativeCommand.command, commandActions: [], cwd }
         notify('item/started', { threadId, turnId, startedAtMs: Date.now(), item: { ...base, status: 'inProgress' } })
-        const answer = await serverRequest('item/commandExecution/requestApproval', { threadId, turnId, itemId: id, command: step.nativeCommand.command, cwd })
+        const answer = await serverRequest('item/commandExecution/requestApproval', { threadId, turnId, itemId: id, startedAtMs: Date.now(), command: step.nativeCommand.command, cwd })
         const accepted = typeof answer?.result?.decision === 'string' && answer.result.decision.startsWith('accept')
         const done = { ...base, status: accepted ? 'completed' : 'declined' }
         notify('item/completed', { threadId, turnId, completedAtMs: Date.now(), item: done }); items.push(done)
@@ -108,12 +111,14 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
   }
 
   const handlers = {
-    initialize: (id) => result(id, 'initialize', { userAgent: `codex_cli_rs/${script.version ?? FAKE_VERSION} (Mac OS 26.0.0; arm64) fake`, codexHome: env.CODEX_HOME || home, platformFamily: 'unix', platformOs: 'macos' }),
+    initialize: (id) => result(id, 'initialize', { userAgent: `codex_cli_rs/${script.version ?? FAKE_VERSION} (Mac OS 26.0.0; arm64) fake`, codexHome: script.home || env.CODEX_HOME || home, platformFamily: 'unix', platformOs: 'macos' }),
     'thread/start': (id, params) => {
       const threadId = `thr-${++nextThread}`
       threads.set(threadId, { id: threadId, cwd: params.cwd ?? '/fake/cwd', config: params.config ?? {}, ephemeral: params.ephemeral === true, dynamicTools: (params.dynamicTools ?? []).map(t => t.name) })
-      result(id, 'thread/start', { thread: threadObject(threadId, params), cwd: params.cwd ?? '/fake/cwd', model: script.model ?? 'fake-model', modelProvider: 'openai', reasoningEffort: script.effort ?? 'low',
+      result(id, 'thread/start', { thread: threadObject(threadId, { ...params, ephemeral: script.reportEphemeral === false ? false : params.ephemeral }), cwd: params.cwd ?? '/fake/cwd', model: script.model ?? 'fake-model', modelProvider: 'openai', reasoningEffort: script.effort ?? 'low',
         approvalPolicy: params.approvalPolicy ?? 'never', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false }, instructionSources: effective(threads.get(threadId)).sources })
+      // like the real binary (Main's 0.171 finding): every MCP server that will be active starts when the thread starts
+      for (const server of effective(threads.get(threadId)).servers) for (const status of ['starting', 'ready']) notify('mcpServer/startupStatus/updated', { threadId, name: server.name, status, error: null })
     },
     'thread/fork': (id, params) => {
       const threadId = `fork-${++nextThread}`, parent = threads.get(params.threadId)
@@ -131,10 +136,10 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
     },
     'thread/unsubscribe': (id) => result(id, 'thread/unsubscribe', { status: 'unsubscribed' }),
     'turn/interrupt': (id) => result(id, 'turn/interrupt', {}),
-    'config/read': (id) => result(id, 'config/read', { config: {}, origins: {}, layers: (person.mcpServers.length ? [{ name: { type: 'user', file: `${env.CODEX_HOME || home}/config.toml` }, version: 'v1', config: { mcp_servers: Object.fromEntries(person.mcpServers.map(s => [s.name, { command: 'fake-server' }])) } }] : []) }),
+    'config/read': (id) => result(id, 'config/read', { config: {}, origins: {}, layers: (person.mcpServers.some(s => !s.pluginId) ? [{ name: { type: 'user', file: `${env.CODEX_HOME || home}/config.toml` }, version: 'v1', config: { mcp_servers: Object.fromEntries(person.mcpServers.filter(s => !s.pluginId).map(s => [s.name, { command: 'fake-server' }])) } }] : []) }),
     'mcpServerStatus/list': (id, params) => {
       const view = params.threadId && threads.get(params.threadId) ? effective(threads.get(params.threadId)).servers : person.mcpServers
-      result(id, 'mcpServerStatus/list', { data: view.map(s => ({ name: s.name, tools: Object.fromEntries((s.tools ?? []).map(t => [t, { name: t, inputSchema: {} }])), resources: [], resourceTemplates: [], authStatus: 'unsupported' })), nextCursor: null })
+      result(id, 'mcpServerStatus/list', { data: view.map(s => ({ name: s.name, ...(s.pluginId ? { pluginId: s.pluginId } : {}), tools: Object.fromEntries((s.tools ?? []).map(t => [t, { name: t, inputSchema: {} }])), resources: [], resourceTemplates: [], authStatus: 'unsupported' })), nextCursor: null })
     },
     'experimentalFeature/list': (id, params) => {
       const features = params.threadId && threads.get(params.threadId) ? effective(threads.get(params.threadId)).features : person.features
@@ -142,7 +147,7 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
     },
     'hooks/list': (id, params) => {
       const n = params.threadId && threads.get(params.threadId) ? effective(threads.get(params.threadId)).hooks : person.hooks
-      result(id, 'hooks/list', { data: [{ cwd: '/fake/cwd', errors: [], warnings: [], hooks: Array.from({ length: n }, (_, i) => ({ key: `hook-${i}`, eventName: 'preToolUse', handlerType: 'command', isManaged: false, source: 'user', sourcePath: '/fake/hooks.json', displayOrder: i, enabled: true, timeoutSec: 5, trustStatus: 'trusted', currentHash: 'x' })) }] })
+      result(id, 'hooks/list', { data: [{ cwd: '/fake/cwd', errors: [], warnings: [], hooks: Array.from({ length: n }, (_, i) => ({ key: `hook-${i}`, eventName: 'preToolUse', handlerType: 'command', command: 'fake-hook', isManaged: false, source: 'user', sourcePath: '/fake/hooks.json', displayOrder: i, enabled: true, timeoutSec: 5, trustStatus: 'trusted', currentHash: 'x' })) }] })
     },
   }
   const threadObject = (threadId, params) => ({ id: threadId, ephemeral: params.ephemeral === true, sessionId: threadId, projectId: null, forkedFromId: null, preview: '', modelProvider: 'openai', createdAt: 0, updatedAt: 0, status: { type: 'idle' }, path: null, cwd: params.cwd ?? '/fake/cwd',
@@ -161,11 +166,11 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
     if (errors.length) { logLine({ dir: 'client_off_schema', method: message.method, errors }); return send({ id: message.id, error: { code: -32602, message: `invalid params for ${message.method}: ${errors.slice(0, 3).join('; ')}` } }) }
     handler(message.id, message.params ?? {})
   })
-  rl.on('close', () => setTimeout(() => process.exit(process.exitCode ?? 0), 20))
+  rl.on('close', () => setTimeout(() => exit(exitCode), 20))
   return { close: () => rl.close() }
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1])) {
+if (process.argv[1] && fs.existsSync(process.argv[1]) && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1])) {
   const scriptPath = process.env.EGDESK_FAKE_APP_SERVER_SCRIPT
   const script = scriptPath ? JSON.parse(fs.readFileSync(scriptPath, 'utf8')) : {}
   if (process.argv.includes('--version')) { console.log(`codex-cli ${script.version ?? FAKE_VERSION}`); process.exit(0) }

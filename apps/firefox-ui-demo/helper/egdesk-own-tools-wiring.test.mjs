@@ -56,3 +56,10 @@ test('on: the providers share one ledger; the gate config keeps the person\'s fl
   assert.match(bridge, /\.\.\.\(ownToolsWiring && !ownToolsWiring\.shadow \? \{ terminalGate: ownToolsWiring\.terminalGate\(terminalGateConfig\) \} : terminalGateConfig \? \{ terminalGate: terminalGateConfig \} : \{\}\),/,
     'off: exactly the c11 terminal gate configuration as before')
 })
+
+test('c22: the environments flag shows up on the wiring only when set to "none"', () => {
+  const make = extra => createOwnToolsWiring({ env: { EGDESK_OWN_TOOLS: 'on', PATH: '/usr/bin', ...extra }, dataDir: createPrivateQaTempDirectory('egdesk-wiring-env-'), spawn: () => { throw new Error('not in this test') }, getChat: () => null })
+  assert.equal(make({}).ownTools.environments, undefined)
+  assert.equal(make({ EGDESK_OWN_TOOLS_ENVIRONMENTS: 'on' }).ownTools.environments, undefined)
+  assert.equal(make({ EGDESK_OWN_TOOLS_ENVIRONMENTS: 'none' }).ownTools.environments(), 'none')
+})

@@ -72,7 +72,9 @@ export function createOwnToolsWiring({ env = process.env, dataDir, spawn, getCha
   const files = createFileToolsProvider({ mode: () => 'on', ledger, workspaceOf, inspect })
   return {
     ledger, executor, files, toolProviders: [executor, files],
-    ownTools: { mode: () => 'on', neutralFolder: () => prepareEngineFolder(dataDir) },
+    // c22: EGDESK_OWN_TOOLS_ENVIRONMENTS=none (developer flag, default unset) also starts the thread with environments: [] ("disables environment access" in the
+    // 0.171 ThreadStartParams). A candidate for keeping the person's MCP servers and Codex's own exec environment away; not confirmed on a real binary.
+    ownTools: { mode: () => 'on', neutralFolder: () => prepareEngineFolder(dataDir), ...(env?.EGDESK_OWN_TOOLS_ENVIRONMENTS === 'none' ? { environments: () => 'none' } : {}) },
     // the executor's judgement needs the command gate on (predicates through the run's egress) and the ledger for replies and turns
     terminalGate: base => ({ ...(base ?? { inspect }), mode: base?.mode ?? (() => 'on'), hookBroker: ledger }),
   }
