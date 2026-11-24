@@ -137,7 +137,9 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     if (!entry || active || res.destroyed || now() >= entry.expiresAt) return MANUAL
     const { prepared, outbound, expiresAt, packetBytes } = entry
     const matches = state => state.mode === prepared.mode && state.binding === prepared.binding
-    if (!matches(authority())) return MANUAL
+    const gate = authority()
+    // Name the one refusal the user can act on (the local monthly cap); every other mismatch stays a plain manual.
+    if (!matches(gate)) return gate.mode === prepared.mode && gate.reason === 'budget-exceeded' ? { status: 'manual', reason: 'budget_exceeded' } : MANUAL
 
     const controller = new AbortController()
     const abort = () => controller.abort()
@@ -170,7 +172,9 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     } catch (error) {
       // Do not echo provider errors, details, answers, or credentials. No retry.
       if (authorized && FAILURES.has(error?.code)) calibrate(prepared, null, null, error.code)
-      return MANUAL
+      // A closed reason word only (never provider text): the screen can say what happened, as the DM chooser does.
+      const reason = FAILURES.has(error?.code) ? (error.code === 'timeout' && error.dispatched === false ? 'timeout_unsent' : error.code) : null
+      return reason ? { status: 'manual', reason } : MANUAL
     } finally {
       clearTimeout(timer)
       res.off('close', abort)

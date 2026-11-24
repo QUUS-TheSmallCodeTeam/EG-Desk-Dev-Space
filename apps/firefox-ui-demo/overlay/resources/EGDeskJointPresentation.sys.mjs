@@ -34,6 +34,20 @@ const undoStillValid = (u, now) => !!u && !!now &&
   u.before.targets.every(({ id }) => { const a = u.snapshot.cards.find(c => c.id === id), c = now.cards.find(c => c.id === id);
     return !!a && !!c && same(a.rect, c.rect) && a.z === c.z; }) &&
   (!u.before.camera || same(['x', 'y', 'zoom'].map(k => u.snapshot.camera[k]), ['x', 'y', 'zoom'].map(k => now.camera[k])));
+// What a failed request says on screen: the same sentences the DM chooser shows for the same closed reasons (surface chat-choice outcomes).
+const FAILURE_NOTES = Object.freeze({
+  no_credit: 'OpenAI API 크레딧이 부족해 추천을 받지 못했습니다. OpenAI 결제 설정에서 크레딧을 확인해 주세요.',
+  rate_limited: 'OpenAI가 요청을 잠시 제한했습니다. 잠시 뒤 다시 시도할 수 있습니다.',
+  timeout: '제한 시간 안에 추천이 도착하지 않았습니다. 요청은 이미 보냈으므로 비용이 청구될 수 있고, 다시 시도하면 요청을 한 번 더 보냅니다.',
+  timeout_unsent: '제한 시간 안에 요청을 보내지 못해 아무것도 전송하지 않았습니다. 비용은 없습니다. 다시 시도할 수 있습니다.',
+  budget_exceeded: '이번 달 EG-Desk 결정 모델 사용 한도에 도달해 요청을 보내지 않았습니다.',
+  spend_limit_reached: 'OpenAI의 지출·사용 한도에 도달해 추천을 받지 못했습니다. OpenAI에서 한도를 올리거나 다음 달 초기화 뒤에 쓸 수 있습니다.',
+  invalid_key: 'OpenAI가 저장한 API 키를 받아들이지 않았습니다. 설정에서 키를 확인해 주세요.',
+  unreachable: 'OpenAI Decisions에 연결하지 못했습니다. 네트워크를 확인한 뒤 다시 시도할 수 있습니다.',
+  server_error: 'OpenAI 서버 오류로 추천을 받지 못했습니다. 잠시 뒤 다시 시도할 수 있습니다.',
+  model_unavailable: '이 키로 결정 모델을 쓸 수 없습니다. 설정과 OpenAI 계정의 모델 접근 권한을 확인해 주세요.',
+  bad_response: '결정 모델의 답이 보기와 맞지 않아 추천으로 쓰지 않았습니다.',
+});
 const RESULT_TTL_MS = 60_000; // how long a returned preview may be applied; starts when the preview appears
 const expand = (r, n) => ({ x: r.x - n, y: r.y - n, width: r.width + 2 * n, height: r.height + 2 * n });
 const cover = rs => { const x = Math.min(...rs.map(r => r.x)), y = Math.min(...rs.map(r => r.y));
@@ -284,7 +298,7 @@ export function createPresentationController(h) {
           p?.cue !== text || p.wide !== send.wide || p.tall !== send.tall || !same(p.options, options) ||
           !Array.isArray(p.items) || p.items.length !== canonicalItems.length ||
           !p.items.every((item,i)=>item&&Object.keys(item).length===Object.keys(canonicalItems[i]).length&&Object.entries(canonicalItems[i]).every(([k,v])=>same(item[k],v)))) {
-        discard(a); a.message = '외부 제안을 사용할 수 없습니다. 수동으로 구성을 고르세요.'; emit(); return;
+        discard(a); a.message = data?.status === 'disabled' && data.reason === 'budget-exceeded' ? FAILURE_NOTES.budget_exceeded : '외부 제안을 사용할 수 없습니다. 수동으로 구성을 고르세요.'; emit(); return;
       }
       job.options = [...p.options];
       if(a.snapshot.overall){const packet=p.packet,parts=packet?.input?.[0]?.content,photo=parts?.find(x=>x.type==='input_image');const equalPhoto=job.photo===photo?.image_url||await h.equalPixels?.(job.photo,photo?.image_url);if(!live(a,job))return;if(packet?.model!==MODEL||!Array.isArray(parts)||parts.length!==3||parts[0]?.text!==text||!equalPhoto||photo?.detail!=='low'||packet.questions?.length!==1||!Array.isArray(packet.questions[0].choices)||!same(packet.questions[0].choices.map(x=>x.value),p.options.map(k=>PRESENTATION_OPTIONS[k]))){discard(a);a.message='검토 자료가 실제 요청과 일치하지 않아 전송하지 않았습니다.';emit();return;}job.photo=photo.image_url;job.packet=packet;}else job.packet=decisionReviewPacket(p);
@@ -327,7 +341,7 @@ export function createPresentationController(h) {
         }
       } else if (a.snapshot.decision.mode === 'advisory' && data?.status === 'advisory-only' && job.options.includes(data.suggestion)) {
         a.suggestion = data.suggestion; a.message = '참고 제안입니다. 미리보기는 바꾸지 않았습니다.';
-      } else a.message = '사용할 제안이 없습니다. 수동으로 구성을 고르세요.';
+      } else a.message = data?.status === 'manual' && typeof data.reason === 'string' && Object.hasOwn(FAILURE_NOTES, data.reason) ? FAILURE_NOTES[data.reason] : '사용할 제안이 없습니다. 수동으로 구성을 고르세요.';
       emit();
     } catch {
       if (live(a, job)) { discard(a); a.message = '제안을 받지 못했습니다. 다시 보내지 않았습니다.'; emit(); }
