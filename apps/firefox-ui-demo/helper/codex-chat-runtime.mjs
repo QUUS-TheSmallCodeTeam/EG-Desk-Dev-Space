@@ -81,6 +81,7 @@ export function answerEvidence(turn, facts) {
 // c19: how many records of the last check of a conversation the next check of it may reuse.
 export const EARLIER_EVIDENCE_LIMIT = 4
 export const POSTED_ANSWER_KEY = 'egdesk_posted_answer'
+import { STOPPED_COMMAND_KEY, stoppedCommandBlock, stoppedCommandEvidence, stoppedCommandFact } from './egdesk-stopped-command.mjs' // c26: the command the person stopped, told to the next turn once
 // c19 (owner decision: no fixed fallback): 'withheld' = nothing could be posted; the next turn is told the person saw no answer.
 export const POSTED_OUTCOMES = Object.freeze(['revised', 'certain_part', 'withheld'])
 export function postedAnswerBlock({ outcome, posted }) {
@@ -752,6 +753,7 @@ function cleanNotification(method, p, engineId = 'codex') {
   return null
 }
 
+const INTERNAL_WORD = /^[A-Za-z][A-Za-z0-9._:-]{0,63}$/ // an effort or a model name a caller may pick for an internal turn (the engine rejects what it does not know)
 export class CodexChatRuntime {
   constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], agentReloadReuse = false, expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer, monotonicNow })
@@ -866,6 +868,7 @@ export class CodexChatRuntime {
     this.heartbeatReasoning = new WeakMap() // heartbeat -> ids of reasoning items the engine has started and not finished
     this.heartbeatSubjects = new WeakMap() // heartbeat -> { run, flow, context }: what its judge and its record speak for
     this.flowSpeakers = new WeakSet() // heartbeats whose run was opted in to intermediate messages without a held answer
+    this.roomSelections = new Map() // conversation id -> { model, effort, source } the room's own selection of its last dispatch (request or Agent), for its internal turns
     this.isolationMemo = null // { key: engine folder, at, value }: the isolation read of the last own-tools thread start (c25: a fresh internal thread reuses it)
     this.freshInternalCache = new Map() // conversationId -> { at, value }: the thread/start overrides of a fresh internal thread (c24)
     this.internalTurns = createInternalTurns({ setTimer: (fn, ms) => this.setTimer(fn, ms), clearTimer: handle => this.clearTimer(handle) }) // short private fork turns (draft revision, intermediate messages); never a run
@@ -901,6 +904,7 @@ export class CodexChatRuntime {
     this.deletedConversations = new Set() // clientThreadId of a conversation the person deleted (forgetConversation): its runs say nothing more
     this.inRunMessageQueue = new WeakMap() // run -> [{ requestId, localMessageId, text, at, state }]: messages typed while it works (inRunMessages flag)
     this.carriedInRun = new Map() // clientThreadId -> [text]: messages its run ended without acting on; they open the next turn's input
+    this.stoppedCommands = new Map() // clientThreadId -> the fact of the command the person stopped (consumed by the next turn)
     this.postedInstead = new Map() // clientThreadId -> { outcome, posted }: the answer the person saw instead of the Agent's draft (consumed by the next turn)
     this.draftOutcomes = new WeakMap() // run -> the draft check's outcome for its answer
     this.draftCheckTurns = new WeakMap() // run -> what the model had this turn, for the check after the answer is posted
@@ -2591,8 +2595,11 @@ export class CodexChatRuntime {
     // The person saw something else than the Agent's last draft in this conversation: the Agent is told, once (consumed here).
     const postedInstead = !bounded ? this.postedInstead.get(context.clientThreadId) ?? null : null
     if (postedInstead) this.postedInstead.delete(context.clientThreadId)
+    // c26: the engine never got the result of a command the person stopped (its turn was interrupted): the next turn is told, once
+    const stoppedCommand = !bounded ? this.stoppedCommands.get(context.clientThreadId) ?? null : null
+    if (stoppedCommand) { this.stoppedCommands.delete(context.clientThreadId); context.stoppedCommand = stoppedCommand }
     const extraContext = bounded ? {} : { ...(context.extraContext || {}), ...decisionExtra, ...channel, ...(shares.length ? { egdesk_shared_messages: sharedMessagesBlock(shares) } : {}),
-      ...(postedInstead ? { [POSTED_ANSWER_KEY]: postedAnswerBlock(postedInstead) } : {}) }
+      ...(postedInstead ? { [POSTED_ANSWER_KEY]: postedAnswerBlock(postedInstead) } : {}), ...(stoppedCommand ? { [STOPPED_COMMAND_KEY]: stoppedCommandBlock(stoppedCommand) } : {}) }
     const toolContext = this.additionalToolContext(preparedProviders)
     if (Object.keys(extraContext).some(key => toolContext && Object.hasOwn(toolContext, key))) throw chatError('INVALID_TOOL_PROVIDER', 'Tool providers returned conflicting native context keys', 500)
     const additionalContext = Object.keys(extraContext).length
@@ -2819,6 +2826,10 @@ export class CodexChatRuntime {
       if (context.browserToolsRegistered) this.browserRegisteredThreads.add(cid)
       if (bounded) Object.assign(this.threads.get(cid), { executionPolicy: policy, qaReceipt })
       context.conversationId = cid
+      if (selection.model !== undefined || selection.effort !== undefined) { // c25: the room's own pick, for its internal turns
+        this.roomSelections.delete(cid); this.roomSelections.set(cid, { model: selection.model, effort: selection.effort, source: selection.source })
+        while (this.roomSelections.size > 64) this.roomSelections.delete(this.roomSelections.keys().next().value)
+      }
       if (this.store) this.persistNativeBinding(context, cid)
       if (context.channelKind === 'direct') this.directChatBindings.set(cid, context.clientThreadId)
       if (Object.hasOwn(context, 'boardActor')) this.boardNativeSpeakers.set(cid, { clientThreadId: context.clientThreadId, profileId: context.boardActor })
@@ -5583,6 +5594,7 @@ export class CodexChatRuntime {
     if (hb && hb.state !== 'stopped') { this.stopHeartbeat(hb, 'deleted'); out.heartbeat = true }
     for (const [threadId, live] of [...this.heartbeatThreads]) if (native.has(threadId) || (hb && live === hb)) this.heartbeatThreads.delete(threadId)
     out.postedNote = this.postedInstead.delete(key)
+    this.stoppedCommands.delete(key)
     out.carriedMessages = this.carriedInRun.get(key)?.length ?? 0; this.carriedInRun.delete(key)
     const held = this.heldAttention?.length ?? 0
     this.heldAttention = (this.heldAttention ?? []).filter(row => row.sourceKey !== key && !native.has(row.sourceKey))
@@ -6105,18 +6117,42 @@ export class CodexChatRuntime {
   // message; everything else is in the caller's own text (the heartbeat writer's facts and prior messages, the draft check's draft, the briefing's answer,
   // guide and materials). overrides(): the pure-engine switches (no shell, exec, image, web), read-only, never asking, nothing of the person's own MCP
   // servers, plugins, hooks or skills, the parent's folder and model; it carries no tools (internal turns never act). Cached per conversation for 5 min.
-  internalFresh(run, { preamble = true } = {}) {
+  internalFresh(run, { preamble = true, effort, model } = {}) {
+    const selected = this.internalSelection(run, { effort, model })
     const cid = run.conversationId, person = preamble === false ? '' : String(this.runUserText(run) ?? '').replace(/\s+/g, ' ').trim().slice(0, 800)
     return {
       preamble: person ? `Context: the person's last message to you was ${JSON.stringify(person)}.` : '',
-      overrides: () => this.freshInternalOverrides(run),
-      effort: this.threads.get(cid)?.effort || undefined,
+      overrides: () => this.freshInternalOverrides(run, selected),
+      model: selected.model, effort: selected.effort, source: selected.source,
     }
   }
 
-  async freshInternalOverrides(run) {
+  /**
+   * c25: the model and effort of this room's internal turns (draft revision, heartbeat writer, briefing fill). The room's own pick wins as one selection: what the send named
+   * (request) or the Agent's saved model; then EG-Desk's own setting (EGDESK_CODEX_MODEL / _EFFORT, with own tools on); then what the thread runs with, which is the
+   * engine's default. Source says which: request | agent | egdesk | engine | null. Model and effort travel together: a selection that names one does not borrow the other
+   * from a lower layer.
+   */
+  internalSelection(run, explicit = {}) {
+    const wantEffort = typeof explicit?.effort === 'string' && INTERNAL_WORD.test(explicit.effort) ? explicit.effort : null
+    const wantModel = typeof explicit?.model === 'string' && INTERNAL_WORD.test(explicit.model) ? explicit.model : null
+    const base = this.internalSelectionBase(run)
+    return wantEffort || wantModel ? { model: wantModel ?? base.model, effort: wantEffort ?? base.effort, source: 'explicit' } : base
+  }
+
+  internalSelectionBase(run) {
+    const cid = run?.conversationId, room = cid ? this.roomSelections.get(cid) : null, thread = cid ? this.threads.get(cid) : null
+    const named = pick => pick && (pick.model !== undefined || pick.effort !== undefined) ? pick : null
+    const own = this.ownToolsSelection()
+    const layer = (room && room.source !== 'egdesk' ? named(room) : null) ?? named(own && { ...own, source: 'egdesk' }) ?? (room ? named(room) : null)
+    if (layer) return { model: layer.model ?? thread?.model ?? null, effort: layer.effort ?? thread?.effort ?? null, source: layer.source ?? null }
+    return { model: thread?.model ?? null, effort: thread?.effort ?? null, source: thread?.model || thread?.effort ? 'engine' : null }
+  }
+
+  async freshInternalOverrides(run, selected = null) {
     const cid = run.conversationId, hit = this.freshInternalCache.get(cid)
-    if (hit && this.now() - hit.at < 300_000) return structuredClone(hit.value)
+    const model = (selected ?? this.internalSelection(run)).model // the selection is read each time; only the isolation read is cached
+    if (hit && this.now() - hit.at < 300_000) return { ...structuredClone(hit.value), ...(model ? { model } : {}) }
     const slot = this.threadOperationSlot(cid), thread = this.threads.get(cid)
     const base = mergeCeilingOverrides({}, pureEngineThreadOverrides())
     const cwd = thread?.cwd ?? this.ownNeutralFolder() ?? null
@@ -6125,8 +6161,8 @@ export class CodexChatRuntime {
     const isolation = reused ? { overrides: structuredClone(reused) } : await loadOwnToolsIsolation(this.scopedRequest(slot), cwd)
     mergeCeilingOverrides(base, isolation.overrides)
     if (cwd) base.cwd = cwd
-    if (thread?.model) base.model = thread.model
     this.freshInternalCache.set(cid, { at: this.now(), value: structuredClone(base) })
+    if (model) base.model = model
     while (this.freshInternalCache.size > 32) this.freshInternalCache.delete(this.freshInternalCache.keys().next().value)
     return base
   }
@@ -6515,11 +6551,13 @@ export class CodexChatRuntime {
     try { const engine = this.engineOf(run.conversationId); return engine?.capabilities?.(this.threadOperationSlot(run.conversationId))?.has('threadFork') === true } catch { return false }
   }
   // preamble: false = the fresh thread (an ephemeral room) gets the caller's text and nothing else: the briefing fill is guide + materials only on purpose (L4).
-  async internalText(run, text, { timeoutMs = 20_000, signal = null, outputSchema = null, preamble = true } = {}) {
+  // effort / model (c25, L4): an explicit pick of the caller for this turn (a word such as low, medium, high; anything else is ignored); it wins over the room's selection,
+  // EG-Desk's own setting and the thread's. onStart({ via, model, effort, source }): what the turn runs with, for the caller's trace; the result of internalTurns.run carries the same.
+  async internalText(run, text, { timeoutMs = 20_000, signal = null, outputSchema = null, preamble = true, effort, model, onStart = null } = {}) {
     try {
       if (!this.canInternalTurn(run)) return null
       // outputSchema (cycle 30, briefing flag): the turn's final message is constrained by it; absent, the turn is exactly what it was.
-      const out = await this.internalTurns.run({ engine: this.engineOf(run.conversationId), slot: this.threadOperationSlot(run.conversationId), parentThreadId: run.conversationId, signal, timeoutMs, text, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run, { preamble }), ...(outputSchema ? { outputSchema } : {}) })
+      const out = await this.internalTurns.run({ engine: this.engineOf(run.conversationId), slot: this.threadOperationSlot(run.conversationId), parentThreadId: run.conversationId, signal, timeoutMs, text, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run, { preamble, effort, model }), ...(typeof onStart === 'function' ? { onStart } : {}), ...(outputSchema ? { outputSchema } : {}) })
       return out.text || null
     } catch { return null }
   }
@@ -6584,6 +6622,10 @@ export class CodexChatRuntime {
   noteOwnCommand(run, record) {
     try {
       if (!run || !record) return
+      try { // c26: a stopped command is remembered for the next turn; any later command of the conversation that was not stopped replaces it (then the engine saw that result)
+        const fact = stoppedCommandFact(record), key = run.clientThreadId
+        if (key) { this.stoppedCommands.delete(key); if (fact) { this.stoppedCommands.set(key, fact); while (this.stoppedCommands.size > 64) this.stoppedCommands.delete(this.stoppedCommands.keys().next().value) } }
+      } catch { /* the note is advisory */ }
       const summary = record.health?.summary ?? null
       run.ownCommandLast = Object.freeze({ stopped: record.stopped === true, exitCode: Number.isSafeInteger(record.exitCode) ? record.exitCode : null, durationMs: Number.isFinite(record.durationMs) ? record.durationMs : null,
         health: record.health?.health ?? null, healthReasons: record.health?.reasons ?? [], summary: summary ? Object.freeze({ ...summary, line: String(summary.line).slice(0, 300) }) : null,
@@ -6899,8 +6941,10 @@ export class CodexChatRuntime {
       // Application blocks that rode along this turn (shared messages and the like): the model saw them, the checker may not.
       // The browser task's note and the note of what the person saw are known text (answerFactsEvidence / the posted-answer note), not content-free blocks.
       const browserNote = typeof context.browserTaskNote === 'string' ? context.browserTaskNote : null
-      const refs = extraKeys.filter(key => !(key === 'egdesk_browser_task' && browserNote) && key !== POSTED_ANSWER_KEY).slice(0, 4).map((key, i) => ({ id: `ctx${i + 1}`, kind: 'context', time: 'unknown', source: 'application', opaque: true }))
-      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...refs], memory: memoryItems, userText: typeof body.message === 'string' ? body.message : '', browserNote, late })
+      const refs = extraKeys.filter(key => !(key === 'egdesk_browser_task' && browserNote) && key !== POSTED_ANSWER_KEY && key !== STOPPED_COMMAND_KEY).slice(0, 4).map((key, i) => ({ id: `ctx${i + 1}`, kind: 'context', time: 'unknown', source: 'application', opaque: true }))
+      // c26: the command the person stopped, told to this turn: known text for the check (its output only where the run's models may receive terminal data)
+      const stoppedEvidence = context.stoppedCommand ? [stoppedCommandEvidence(context.stoppedCommand, { outputAllowed: this.decisionEgressFor(run).allows('terminal_output') })] : []
+      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...stoppedEvidence, ...refs], memory: memoryItems, userText: typeof body.message === 'string' ? body.message : '', browserNote, late })
     } catch { /* the check must never affect the turn */ }
   }
 

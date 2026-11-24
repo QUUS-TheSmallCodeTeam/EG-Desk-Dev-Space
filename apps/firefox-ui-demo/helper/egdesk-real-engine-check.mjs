@@ -493,7 +493,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const runPrivate = chat.internalTurns.run.bind(chat.internalTurns)
     chat.internalTurns.run = async args => {
       const began = performance.now()
-      try { const out = await runPrivate(args); turnNow.internal.push({ via: out.via ?? null, ms: ms(began), chars: out.text.length, text: clip(out.text, 400), schema: Boolean(args.outputSchema), preamble: out.via === 'fresh' && Boolean(args.fresh?.preamble) }); return out }
+      try { const out = await runPrivate(args); turnNow.internal.push({ via: out.via ?? null, ms: ms(began), chars: out.text.length, model: out.model ?? null, effort: out.effort ?? null, source: out.source ?? null, text: clip(out.text, 400), schema: Boolean(args.outputSchema), preamble: out.via === 'fresh' && Boolean(args.fresh?.preamble) }); return out }
       catch (error) { turnNow.internal.push({ ms: ms(began), error: String(error?.code ?? 'error').slice(0, 60), message: clip(error?.message ?? '', 200) }); throw error }
     }
     const composeWriter = chat.writeChecked.bind(chat)
