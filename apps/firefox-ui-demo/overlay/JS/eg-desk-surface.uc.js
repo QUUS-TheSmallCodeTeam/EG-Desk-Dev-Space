@@ -22451,7 +22451,8 @@
       const view = AccountSettingsView.decisionSettingsView(decision.status, { connected: state.codex.connected });
       const busy = decision.busy;
       const input = el('input', { type: 'password', class: 'egd-settings-decision-input', autocomplete: 'off', spellcheck: 'false',
-        placeholder: 'sk-proj-…', 'aria-label': 'OpenAI API 키', 'aria-describedby': decision.outcome?.phase === 'error' ? 'egd-settings-decision-result' : null, disabled: !view.canSave || busy ? 'true' : null, data: { testid: 'settings-decision-key' },
+        placeholder: 'sk-proj-…', 'aria-label': 'OpenAI API 키', disabled: !view.canSave || busy ? 'true' : null, data: { testid: 'settings-decision-key' },
+        'aria-describedby': decision.outcome?.phase === 'error' ? 'egd-settings-decision-result' : null,
         onkeydown: (event) => { if (event.key === 'Enter') { event.preventDefault(); void saveDecisionKey(input); } } });
       return el('section', { class: 'egd-settings-section egd-settings-decision', 'aria-label': AccountSettingsView.DECISION_SECTION_TITLE,
         data: { testid: 'settings-decision', state: view.status, mode: view.mode || 'unknown' } },
