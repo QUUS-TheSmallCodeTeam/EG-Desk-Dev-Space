@@ -89,3 +89,29 @@ test('warm-up probe: six runs (A cold, B warm-up + 1 s, C warm-up + 10 s; two re
   assert.equal(analyzeWarmup(runs(320, 300, 290)).reading, 'inconclusive: the idle tail did not occur in A')
   assert.equal(analyzeWarmup({}).reading, 'incomplete')
 })
+
+test('warm-up reading while points are still missing: the readings still possible, and the one already fixed (c18)', async () => {
+  const { WARMUP_RUNS, analyzeWarmup } = await import('./egdesk-turn-context-latency-plan.mjs')
+  const point = (ms, warm) => ({ measured: { elapsedMs: ms, openaiProcessingMs: '200', reusedSocket: warm === true }, ...(warm !== undefined ? { warmup: { elapsedMs: 1500 } } : {}) })
+  const some = obj => Object.fromEntries(Object.entries(obj).map(([k, v]) => [WARMUP_RUNS.find(([d]) => d.startsWith(k.slice(0, 1)) && d.endsWith(k.slice(1)))[0], v]))
+  // nothing in: all four readings are possible
+  const none = analyzeWarmup({})
+  assert.equal(none.reading, 'incomplete'); assert.equal(none.pointsIn, 0); assert.equal(none.decidedAlready, null); assert.equal(none.possibleReadings.length, 4)
+  // the real state at c18 start: A1 slow (1,812 ms), B1 fast (324 ms)
+  const live = analyzeWarmup(some({ 'A-rep1': point(1812), 'B-rep1': point(324, true) }))
+  assert.equal(live.pointsIn, 2); assert.equal(live.decidedAlready, null)
+  assert.ok(!live.possibleReadings.includes('inconclusive: the idle tail did not occur in A'), 'A was slow once: the tail occurred')
+  assert.deepEqual(live.possibleReadings.sort(), ['warm-up does not help', 'warm-up works', 'warm-up works with lead time (10 s, not 1 s)'].sort())
+  // C1 slow fixes "does not help", whatever A2, B2, C2 show
+  const slowC = analyzeWarmup(some({ 'A-rep1': point(1812), 'B-rep1': point(324, true), 'C-rep1': point(900, true) }))
+  assert.equal(slowC.decidedAlready, 'warm-up does not help'); assert.equal(slowC.reading, 'incomplete')
+  // C1 fast: still open (A2 may be fast, C2 may be slow, B2 may be slow)
+  const fastC = analyzeWarmup(some({ 'A-rep1': point(1812), 'B-rep1': point(324, true), 'C-rep1': point(300, true) }))
+  assert.equal(fastC.decidedAlready, null); assert.equal(fastC.possibleReadings.length, 3)
+  // both A fast: inconclusive can only be overturned by nothing: A fast twice fixes it
+  const inconclusive = analyzeWarmup(some({ 'A-rep1': point(300), 'A-rep2': point(310) }))
+  assert.equal(inconclusive.decidedAlready, 'inconclusive: the idle tail did not occur in A')
+  // all six in: decided, and equal to the reading
+  const all = analyzeWarmup(some({ 'A-rep1': point(1812), 'B-rep1': point(324, true), 'C-rep1': point(300, true), 'A-rep2': point(1500), 'B-rep2': point(310, true), 'C-rep2': point(320, true) }))
+  assert.equal(all.reading, 'warm-up works'); assert.equal(all.decidedAlready, 'warm-up works'); assert.equal(all.pointsIn, 6)
+})

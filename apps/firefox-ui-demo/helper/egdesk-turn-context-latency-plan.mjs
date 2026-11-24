@@ -205,10 +205,24 @@ export function analyzeWarmup(byRun) {
   const slow = r => r && r.elapsedMs > BUDGETS.warm
   const pick = c => [runs[`${c}-rep1`], runs[`${c}-rep2`]]
   const [A, B, C] = ['A', 'B', 'C'].map(pick)
-  const reading = [...A, ...B, ...C].some(r => !r) ? 'incomplete'
-    : !A.some(slow) ? 'inconclusive: the idle tail did not occur in A'
-      : C.some(slow) ? 'warm-up does not help'
-        : B.some(slow) ? 'warm-up works with lead time (10 s, not 1 s)'
+  // The registered readings as a function of which measured requests were slow (true) or fast (false); null = that point is not in yet.
+  const readingOf = (a, b, c) => [...a, ...b, ...c].some(v => v === null) ? 'incomplete'
+    : !a.some(Boolean) ? 'inconclusive: the idle tail did not occur in A'
+      : c.some(Boolean) ? 'warm-up does not help'
+        : b.some(Boolean) ? 'warm-up works with lead time (10 s, not 1 s)'
           : 'warm-up works'
-  return { runs, reading }
+  const flags = list => list.map(r => (r ? slow(r) : null))
+  const [fa, fb, fc] = [flags(A), flags(B), flags(C)]
+  const reading = readingOf(fa, fb, fc)
+  // c18: which registered readings are still possible given the points that are in (every missing point tried both ways), and the reading
+  // when only one is left. "A slow once and C slow once" already fixes 'warm-up does not help', whatever the remaining points show.
+  const missing = [...fa, ...fb, ...fc].map((v, i) => (v === null ? i : -1)).filter(i => i >= 0)
+  const possible = new Set()
+  for (let mask = 0; mask < (1 << missing.length); mask++) {
+    const all = [...fa, ...fb, ...fc]
+    missing.forEach((idx, bit) => { all[idx] = Boolean(mask & (1 << bit)) })
+    possible.add(readingOf(all.slice(0, 2), all.slice(2, 4), all.slice(4, 6)))
+  }
+  const possibleReadings = [...possible]
+  return { runs, reading, pointsIn: 6 - missing.length, possibleReadings, decidedAlready: possibleReadings.length === 1 ? possibleReadings[0] : null }
 }
