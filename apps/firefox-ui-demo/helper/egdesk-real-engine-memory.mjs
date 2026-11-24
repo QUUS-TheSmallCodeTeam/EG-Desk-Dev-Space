@@ -100,12 +100,12 @@ export function memoryGraph(memory) {
 /** Pages in a turn/start additionalContext: { bodies: [short ids], refs: [short ids], keys: [names], copies: { id: number of bodies } }. A reference line is no body. */
 export function pagesIn(additionalContext) {
   const bodies = new Set(), refs = new Set(), keys = []
-  if (!isObject(additionalContext)) return { bodies: [], refs: [], keys, copies: {}, keyChars: {}, merged: [] }
-  const copies = {}, keyChars = {}, merged = new Set()
+  if (!isObject(additionalContext)) return { bodies: [], refs: [], keys, copies: {}, keyChars: {}, keyBytes: {}, merged: [] }
+  const copies = {}, keyChars = {}, keyBytes = {}, merged = new Set()
   for (const [key, entry] of Object.entries(additionalContext)) {
     keys.push(key)
     const text = typeof entry === 'string' ? entry : typeof entry?.value === 'string' ? entry.value : ''
-    keyChars[key] = text.length
+    keyChars[key] = text.length; keyBytes[key] = Buffer.byteLength(text, 'utf8')
     for (const m of text.matchAll(BLOCK)) {
       const id = m[2].startsWith(PREFIX) ? m[2].slice(PREFIX.length) : m[2]
       // A reference is a page block with no body: the header says it was delivered earlier in this thread, or (one packet, the memory part of a merged
@@ -115,7 +115,7 @@ export function pagesIn(additionalContext) {
       if (m[1] === 'page' && (/already delivered earlier in this thread/.test(m[3]) || /^\s*\[content not repeated here/.test(followedBy))) refs.add(id); else { bodies.add(id); copies[id] = (copies[id] ?? 0) + 1 }
     }
   }
-  return { bodies: [...bodies].sort(), refs: [...refs].filter(id => !bodies.has(id)).sort(), keys, copies, keyChars, merged: [...merged].filter(id => bodies.has(id)).sort() }
+  return { bodies: [...bodies].sort(), refs: [...refs].filter(id => !bodies.has(id)).sort(), keys, copies, keyChars, keyBytes, merged: [...merged].filter(id => bodies.has(id)).sort() }
 }
 
 /** Scripts whose memory only works through the Decision model (the pages are picked and judged by it). */
@@ -132,8 +132,8 @@ export const memoryNeedsDecisions = conversation => Boolean(conversation?.memory
 export function createMemoryHook(memory) {
   const enabled = isObject(memory) && Array.isArray(memory.pages)
   const delivered = new Set()
-  let current = { bodies: new Set(), refs: new Set(), keys: new Set(), starts: 0, duplicatesInTurn: 0, copies: {}, maxKeyChars: 0, merged: new Set() }
-  const fresh = () => ({ bodies: new Set(), refs: new Set(), keys: new Set(), starts: 0, duplicatesInTurn: 0, copies: {}, maxKeyChars: 0, merged: new Set() })
+  let current = { bodies: new Set(), refs: new Set(), keys: new Set(), starts: 0, duplicatesInTurn: 0, copies: {}, maxKeyChars: 0, keyBytes: {}, merged: new Set() }
+  const fresh = () => ({ bodies: new Set(), refs: new Set(), keys: new Set(), starts: 0, duplicatesInTurn: 0, copies: {}, maxKeyChars: 0, keyBytes: {}, merged: new Set() })
   return {
     enabled,
     mode: enabled ? (memory.mode ?? 'advisory') : null,
@@ -150,6 +150,7 @@ export function createMemoryHook(memory) {
       for (const id of seen.refs) current.refs.add(id)
       for (const id of seen.merged) current.merged.add(id)
       current.maxKeyChars = Math.max(current.maxKeyChars, ...Object.values(seen.keyChars), 0)
+      for (const [k, n] of Object.entries(seen.keyBytes)) current.keyBytes[k] = Math.max(current.keyBytes[k] ?? 0, n)
       for (const key of seen.keys) current.keys.add(key)
     },
     beginTurn() { current = fresh() },
@@ -157,7 +158,7 @@ export function createMemoryHook(memory) {
       if (!enabled) return { record: null, expectations: [] }
       const bodies = [...current.bodies].sort(), refs = [...current.refs].sort()
       const resent = bodies.filter(id => delivered.has(id))
-      const record = { starts: current.starts, keys: [...current.keys].sort(), attached: bodies, referenced: refs, resent, duplicatesInTurn: current.duplicatesInTurn, deliveredBefore: [...delivered].sort(), maxKeyChars: current.maxKeyChars, merged: [...current.merged].sort() }
+      const record = { starts: current.starts, keys: [...current.keys].sort(), attached: bodies, referenced: refs, resent, duplicatesInTurn: current.duplicatesInTurn, deliveredBefore: [...delivered].sort(), maxKeyChars: current.maxKeyChars, keyBytes: { ...current.keyBytes }, merged: [...current.merged].sort() }
       const expectations = [], put = (check, ok, detail) => expectations.push({ check, ok: ok === true, detail })
       if (expectMemory?.attached) { const missing = expectMemory.attached.filter(id => !current.bodies.has(id)); put('memory.attached', missing.length === 0, { missing, attached: bodies }) }
       if (expectMemory?.notAttached) { const found = expectMemory.notAttached.filter(id => current.bodies.has(id)); put('memory.notAttached', found.length === 0, { found, attached: bodies }) }

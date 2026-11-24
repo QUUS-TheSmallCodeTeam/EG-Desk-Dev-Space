@@ -24,6 +24,9 @@ export function scoreMemoryRecord(record) {
       index: turn.index, say: clip(turn.say, 80),
       memory: memory ? { attached: memory.attached, referenced: memory.referenced, resent: memory.resent, keys: memory.keys, duplicatesInTurn: memory.duplicatesInTurn, turnMemoryRan: memory.keys.includes('egdesk_turn_memory'), selectionRan: memory.keys.includes('egdesk_decision_context') } : null,
       decisions: decisionNumbers(turn), answer: clip(turn.posted?.at(-1) ?? null, 240),
+      // what was sent and what the engine counted (c31: a key the engine cuts shows as a small input growth and missing facts in the answer)
+      sizes: { maxKeyChars: memory?.maxKeyChars ?? null, keyBytes: memory?.keyBytes ?? null, engineInput: turn.subTurns?.at(-1)?.usage?.input ?? null, engineCached: turn.subTurns?.at(-1)?.usage?.cached ?? null,
+        answerMissing: (turn.expectations ?? []).find(e => e.check === 'answerIncludes')?.detail?.missing ?? [] },
       latencyMs: turn.subTurns?.[0]?.latencyMs ?? null, status: turn.subTurns?.at(-1)?.status ?? null, checks, ok: turn.ok === true,
     }
   })
@@ -42,5 +45,6 @@ export function formatScore(score) {
     const m = t.memory ?? {}
     lines.push(`| ${t.index} | ${(m.attached ?? []).join(', ') || '-'} | ${(m.referenced ?? []).join(', ') || '-'} | ${(m.resent ?? []).join(', ') || '-'} | ${m.duplicatesInTurn ?? 0} | ${[m.selectionRan ? 'selection' : null, m.turnMemoryRan ? 'memory' : null].filter(Boolean).join('+') || '-'} | ${JSON.stringify(t.decisions.selection.rel)} | ${JSON.stringify(t.decisions.triage)} | ${JSON.stringify(t.decisions.scan)} | ${t.answer ?? '-'} | ${t.checks.map(c => `${c.ok ? 'ok' : 'FAIL'} ${c.check}`).join('; ')} |`)
   }
+  for (const t of score.turns) lines.push(`turn ${t.index}: key chars ${t.sizes?.maxKeyChars ?? '?'}, key bytes ${JSON.stringify(t.sizes?.keyBytes ?? {})}, engine input ${t.sizes?.engineInput ?? '?'} (cached ${t.sizes?.engineCached ?? '?'}), answer missing ${JSON.stringify(t.sizes?.answerMissing ?? [])}`)
   return lines.join('\n')
 }
