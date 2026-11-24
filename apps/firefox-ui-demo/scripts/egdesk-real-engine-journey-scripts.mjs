@@ -25,6 +25,8 @@ import { validateEngineScript } from '../helper/egdesk-real-engine-script.mjs'
 const here = path.dirname(fileURLToPath(import.meta.url))
 export const SCRIPTS_DIR = path.join(here, 'real-engine', 'scripts')
 export const MEMORY_SET = 'real-engine-journey-memory-v1', NUDGES_SET = 'real-engine-journey-nudges-v1'
+// c27: v2 of both (v1 stays as committed): what changed in the product since c21 is in the comments above each v2 builder and in reports/l2-c27.md
+export const MEMORY_SET_V2 = 'real-engine-journey-memory-v2', NUDGES_SET_V2 = 'real-engine-journey-nudges-v2'
 
 // ---- the journey's synthetic world: the A사 quote pages and the PostgreSQL migration pages (scripts/egdesk-all-on.support.mjs GRAPH) ----
 const JOURNEY_PAGES = SYNTHETIC_PAGES.filter(p => /^(quote\/a-|db\/pg-|db\/sqlite)/.test(p.id) && !p.scope)
@@ -82,8 +84,39 @@ function nudgeConversations() {
   ]
 }
 
+// ---- v2 (c27): the same journey steps with what the product gained since c21 ----
+// memory-v2: the conversation is an Agent-profile DIRECT room with the draft check ON (the room the product's check judges: in v1 the check never ran, draftCheck.rows was empty), so the
+//   four answers are read by the real check and the posting outcome (as_written / revised / certain_part / withheld) is in each turn's record (expect.rewrite, c23 label + c26 hook);
+//   the person must get an answer each time (answered), and no number outside the records reaches the person. L7's candidate defaults are ON as the owner will see them: one packet
+//   (no page body twice: noDuplicates), selection held, and the split engine context (maxKeyBytes 4000, c31/c33). Needs --decisions and --persisted-with-cleanup (a direct room is not one-time).
+const MEMORY_FLAGS_V2 = { EGDESK_CONTEXT_RELEVANCE: 'action', EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', EGDESK_TURN_MEMORY_KEEP_LATE: 'on', EGDESK_TURN_MEMORY_ONE_PACKET: 'on', EGDESK_TURN_MEMORY_SELECTION_HELD: 'on',
+  EGDESK_TURN_MEMORY_ENGINE_CONTEXT: 'split', EGDESK_TURN_MEMORY_ENGINE_BYTES: '4000' }
+const JOURNEY_AGENT = { name: '견적 담당', role: '견적과 전환 작업 확인', tone: 'concise', expertise: ['견적', '데이터베이스'],
+  instructions: '사람이 묻는 내용을 기록에 근거해 한국어로 짧게 답한다. 이미 끝난 단계와 앞으로 할 단계를 구분해서 말하고, 기록에 없는 것은 말하지 않는다.' }
+const answered = { rewrite: { answered: true, neverShown: { numbers: true } } }
+function memoryConversationV2() {
+  const base = memoryConversation().turns, keep = { noDuplicates: true, maxKeyBytes: 4000 }
+  return { id: 'journey-memory', agentProfile: structuredClone(JOURNEY_AGENT), draftCheck: { mode: 'on' }, flags: MEMORY_FLAGS_V2, memory: { mode: 'on', pages: journeyMemoryPages() },
+    turns: base.map(t => ({ say: t.say, expect: { ...t.expect, memory: { ...t.expect.memory, ...keep }, ...answered } })) }
+}
+
+// nudges-v2: the same three conversations after L5 c25-c27 and L3 c26. The binary's steer contract is recognised on 0.171 now (the change IS steered on the real install: a record whose
+// engine.nativeContract.steerContract is false would make journey-change fail on its steer count, and says why); EG-Desk stops the command itself and gives the next turn the stopped-command
+// fact (cancelRun, stopSettled): journey-stop gets a third turn asking what happened to the command, which must not claim its output or say it cannot tell; the status nudge must
+// post BOTH the reply and the final answer (postedMin 2, as L3 c26 made why-stopped require: a final answer alone no longer passes). A message typed into the run is not an answer to be
+// read by the draft check; the flags are as in v1.
+const STOPPED_ASK = '방금 그 명령은 끝까지 실행된 거야, 아니면 중간에 멈춘 거야?'
+function nudgeConversationsV2() {
+  const [status, change, stop] = nudgeConversations()
+  status.turns[1].expect = { ...status.turns[1].expect, postedMin: 2 }
+  stop.turns.push({ say: STOPPED_ASK, expect: { posted: true, answerExcludes: ['never-printed', '확인할 수 없', '확인되지 않', '알 수 없'], noNativeTools: true, turnStatus: 'completed' } })
+  return [status, change, stop]
+}
+
 const DESCRIPTIONS = {
   [MEMORY_SET]: 'The all-on journey\'s memory steps (L2 c21) with the journey\'s own synthetic pages seeded: s1 the A사 quote question, s2 the follow-up, s3b the PostgreSQL design recall, s9 the "deployment finished" remark. Needs --decisions with a key (the Decision model picks and reads the pages). Expectations are code checks on what the product sent the engine (memory.attached / notAttached / noResends) and on the posted answer (answerIncludes / answerExcludes). s9 asks only that nothing is sent twice and no quote page comes (the journey\'s soft "the plan is brought" accepts a page already held, which expect.memory cannot say).',
+  [MEMORY_SET_V2]: 'The all-on journey\'s memory steps, v2 (L2 c27): the same four steps and seeded pages as v1, now in an Agent-profile direct room with the draft check ON (so the real check reads the four answers and the posting outcome is recorded), with L7\'s candidate defaults on (one packet, selection held, split engine context): no page body twice, no key over 4,000 bytes, an answer posted each time, no number outside the records. Needs --decisions and --persisted-with-cleanup.',
+  [NUDGES_SET_V2]: 'The all-on journey\'s in-run message steps, v2 (L2 c27): the three conversations of v1 after the steer contract became recognised on 0.171 and the product learned to stop the command itself: the status nudge must post both the reply and the final answer; the stop is followed by a third turn that asks what happened to the command (it must not claim the output, nor say it cannot tell). One long command per conversation as in v1. Needs --decisions.',
   [NUDGES_SET]: 'The all-on journey\'s in-run message steps (L2 c21), one long command per conversation, the journey\'s pages seeded so that no page may be attached for an action request: journey-status (s4 + s4n: "why did it stop" 12 s in; the command is not interrupted, finishes, one short reply), journey-change (s4c: a change is steered into the working turn; needs the steer contract of the binary: on 0.171 the product recognizes it only for 0.162.1, so there the expectation fails with steerContract false in its detail), journey-stop (s12: the stop interrupts the turn once, the turn ends interrupted well before the command would have, EG-Desk stops the command process itself (commandStopped: today the own-tools executor passes the command runner no abort signal and has no cancelRun, so the expectation fails on a real engine until it does), the Agent posts no answer). Needs --decisions with a key: EGDESK_INRUN_MESSAGES, EGDESK_CONVERSATION_FLOW and EGDESK_DRAFT_CHECK=on.',
 }
 
@@ -92,6 +125,8 @@ export function buildJourneyScripts() {
   const scripts = {
     [MEMORY_SET]: { set: MEMORY_SET, description: DESCRIPTIONS[MEMORY_SET], conversations: [memoryConversation()] },
     [NUDGES_SET]: { set: NUDGES_SET, description: DESCRIPTIONS[NUDGES_SET], conversations: nudgeConversations() },
+    [MEMORY_SET_V2]: { set: MEMORY_SET_V2, description: DESCRIPTIONS[MEMORY_SET_V2], conversations: [memoryConversationV2()] },
+    [NUDGES_SET_V2]: { set: NUDGES_SET_V2, description: DESCRIPTIONS[NUDGES_SET_V2], conversations: nudgeConversationsV2() },
   }
   for (const script of Object.values(scripts)) { const verdict = validateEngineScript(script); if (!verdict.ok) throw new Error(`${script.set}: ${verdict.errors.join('; ')}`) }
   return scripts

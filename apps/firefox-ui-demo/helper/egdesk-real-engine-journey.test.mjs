@@ -9,11 +9,11 @@ import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { ENGINE_EXPECT_SCHEMA, createJourneyHook, messageCounts, validateEngineExpect } from './egdesk-real-engine-journey.mjs'
-import { REAL_ENGINE_SCRIPT_SCHEMA, validateEngineScript } from './egdesk-real-engine-script.mjs'
+import { REAL_ENGINE_SCRIPT_SCHEMA, checkTurnExpectations, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { GRAPH } from '../scripts/egdesk-all-on.support.mjs'
 import { SAYS } from '../scripts/egdesk-all-on-live-measure.mjs'
-import { DB_IDS, MEMORY_SET, NUDGES_SET, QUOTE_IDS, SCRIPTS_DIR, buildJourneyScripts, journeyMemoryPages, scriptText } from '../scripts/egdesk-real-engine-journey-scripts.mjs'
-import { MEMORY_FAKE, commandFake, costOf, fastScript, journeyWorld, runJourneyConversation } from '../scripts/egdesk-real-engine-journey.support.mjs'
+import { DB_IDS, MEMORY_SET, MEMORY_SET_V2, NUDGES_SET, NUDGES_SET_V2, QUOTE_IDS, SCRIPTS_DIR, buildJourneyScripts, journeyMemoryPages, scriptText } from '../scripts/egdesk-real-engine-journey-scripts.mjs'
+import { MEMORY_FAKE, commandFake, costOf, fastScript, journeyWorld, ruleJudge, runJourneyConversation } from '../scripts/egdesk-real-engine-journey.support.mjs'
 import { secretsIn } from './egdesk-secret-mask.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -195,4 +195,65 @@ test('the fast copy changes only the timings: every other part of a script is th
     assert.deepEqual(restFast, restReal); assert.deepEqual([a === undefined, b === undefined], [a === undefined, a === undefined]); if (a) assert.equal(b.afterMs, 1200)
   }
   assert.deepEqual(fast.conversations.map(c => c.memory), real.conversations.map(c => c.memory))
+})
+
+// ---- c27: v2 of both sets (v1 stays as committed) ----
+test('v2 sets: v1 is untouched; v2 is v1 plus what changed (an Agent room with the draft check on and the posting outcome for memory; the postedMin and the stopped-command question for the nudges)', () => {
+  const built = buildJourneyScripts()
+  assert.deepEqual(Object.keys(built), [MEMORY_SET, NUDGES_SET, MEMORY_SET_V2, NUDGES_SET_V2])
+  for (const [set, script] of Object.entries(built)) assert.equal(fs.readFileSync(path.join(SCRIPTS_DIR, `${set}.json`), 'utf8'), scriptText(script), set)
+  const v1m = load(MEMORY_SET).conversations[0], v2m = load(MEMORY_SET_V2).conversations[0]
+  assert.equal(v1m.agentProfile, undefined, 'v1 keeps its ordinary room'); assert.ok(v2m.agentProfile.instructions); assert.deepEqual(v2m.draftCheck, { mode: 'on' }); assert.deepEqual(v2m.memory, v1m.memory)
+  assert.deepEqual(v2m.turns.map(t => t.say), v1m.turns.map(t => t.say))
+  for (const [i, t] of v2m.turns.entries()) {
+    assert.deepEqual(t.expect.rewrite, { answered: true, neverShown: { numbers: true } }); assert.equal(t.expect.memory.noDuplicates, true); assert.equal(t.expect.memory.maxKeyBytes, 4000)
+    const { rewrite, ...rest } = t.expect; const { noDuplicates, maxKeyBytes, ...memory } = rest.memory
+    assert.deepEqual({ ...rest, memory }, v1m.turns[i].expect, `turn ${i + 1}: every v1 expectation kept`)
+  }
+  assert.deepEqual([v2m.flags.EGDESK_TURN_MEMORY_ONE_PACKET, v2m.flags.EGDESK_TURN_MEMORY_ENGINE_CONTEXT, v2m.flags.EGDESK_TURN_MEMORY_ENGINE_BYTES, v2m.flags.EGDESK_TURN_MEMORY_SELECTION_HELD], ['on', 'split', '4000', 'on'])
+  const v1n = load(NUDGES_SET).conversations, v2n = load(NUDGES_SET_V2).conversations
+  assert.deepEqual(v2n.map(c => c.id), v1n.map(c => c.id)); assert.deepEqual(v2n.map(c => c.flags), v1n.map(c => c.flags)); assert.deepEqual(v2n[1], v1n[1], 'journey-change is unchanged')
+  assert.deepEqual(v2n[0].turns[1].expect, { ...v1n[0].turns[1].expect, postedMin: 2 }); assert.deepEqual(v2n[0].turns[0], v1n[0].turns[0])
+  assert.deepEqual(v2n[2].turns.slice(0, 2), v1n[2].turns); assert.equal(v2n[2].turns.length, 3); assert.match(v2n[2].turns[2].say, /끝까지 실행된 거야/); assert.deepEqual(v2n[2].turns[2].expect.answerExcludes.slice(0, 1), ['never-printed'])
+  for (const set of [MEMORY_SET_V2, NUDGES_SET_V2]) { assert.deepEqual(validateEngineScript(load(set)), { ok: true, errors: [] }, set); assert.deepEqual(secretsIn(fs.readFileSync(path.join(SCRIPTS_DIR, `${set}.json`), 'utf8')), [], set) }
+})
+
+const rewriteOf = rec => rec.turns.map(t => t.rewrite)
+test('memory-v2: the four steps pass on the fake in an Agent room with the draft check on: the check ran each time, every answer posted as written, no page twice, the engine context within its bytes', async t => {
+  const script = load(MEMORY_SET_V2), w = journeyWorld(t, MEMORY_FAKE, { persisted: true })
+  const rec = await runJourneyConversation(w, script, 'journey-memory')
+  assert.equal(rec.aborted, null, rec.abortDetail); assert.deepEqual(failed(rec), [], JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok)))); assert.equal(rec.ok, true)
+  assert.deepEqual(rec.cleanup.failures, []); assert.equal(rec.cleanup.verifiedGone, rec.cleanup.persisted)
+  assert.deepEqual(rewriteOf(rec).map(r => [r.checked, r.finding, r.posted, r.nothingRemains]), [[true, false, 'as_written', false], [true, false, 'as_written', false], [true, false, 'as_written', false], [true, false, 'as_written', false]])
+  assert.ok(rec.turns.every(x => x.draftCheck.rows.length >= 1), 'in v1 the check never ran in this conversation: rows were empty')
+  assert.ok(rec.turns.every(x => x.memory.duplicatesInTurn === 0))
+  // one packet: where the selection and the memory both attach (s1, s3b) the pages ride under the selection's key and there is no separate memory key
+  for (const i of [0, 2]) { assert.ok(rec.turns[i].memory.keys.includes('egdesk_decision_context') && !rec.turns[i].memory.keys.includes('egdesk_turn_memory'), JSON.stringify(rec.turns[i].memory.keys)); assert.ok(rec.turns[i].memory.merged.length > 0) }
+  // the same steps in the ordinary room (v1) never reached the check: its rows were empty
+  const v1 = await runJourneyConversation(journeyWorld(t, MEMORY_FAKE), load(MEMORY_SET), 'journey-memory')
+  assert.ok(v1.turns.every(x => x.draftCheck.rows.length === 0))
+})
+
+test('memory-v2: a check that finds the (correct) answer wrong and a rewrite that keeps it leaves nothing: the person gets no answer, and v2 says so by code (answered and posted fail)', async t => {
+  const w = journeyWorld(t, { turns: MEMORY_FAKE.turns, forkTurns: [{ steps: [], final: MEMORY_FAKE.turns[0].final }] }, { persisted: true, judge: ruleJudge(s => (s.includes('12,800') ? { support: 0.02 } : null)) })
+  const rec = await runJourneyConversation(w, load(MEMORY_SET_V2), 'journey-memory')
+  assert.deepEqual([rec.turns[0].rewrite.posted, rec.turns[0].rewrite.nothingRemains, rec.turns[0].posted], ['withheld', true, []])
+  assert.ok(failed(rec).includes('1:rewrite.answered') && failed(rec).includes('1:posted'), failed(rec).join())
+})
+
+test('nudges-v2 journey-status: the reply and the final answer are both posted (postedMin 2); an answer-only run fails it by code', async t => {
+  const script = fastScript(load(NUDGES_SET_V2)), w = journeyWorld(t, commandFake({ command: 'sleep 20 && echo tests-passed-40', final: '테스트가 모두 통과했습니다. tests-passed-40' }))
+  const rec = await runJourneyConversation(w, script, 'journey-status')
+  assert.equal(rec.aborted, null, rec.abortDetail); assert.deepEqual(failed(rec), [], JSON.stringify(rec.turns.flatMap(x => x.expectations.filter(e => !e.ok))))
+  assert.ok(rec.turns[1].expectations.some(e => e.check === 'postedMin' && e.ok), 'the in-run turn counted two posted messages')
+  // a run that posts only its final answer (no reply to the question) fails the same expectation by code
+  assert.deepEqual(checkTurnExpectations(load(NUDGES_SET_V2).conversations[0].turns[1].expect, { posted: ['테스트가 모두 통과했습니다.'] }).filter(c => c.check === 'postedMin').map(c => c.ok), [false])
+})
+
+test('nudges-v2 journey-stop: after the stop a third turn asks what happened to the command; an answer that tells the truth passes, one that claims the output or cannot tell fails by code', async t => {
+  const run = async then => runJourneyConversation(journeyWorld(t, commandFake({ command: 'sleep 40 && echo never-printed', final: 'never-printed', then: [then] })), fastScript(load(NUDGES_SET_V2)), 'journey-stop')
+  const good = await run('중간에 멈췄습니다. 끝까지 실행되지는 않았습니다.')
+  assert.equal(good.aborted, null, good.abortDetail); assert.deepEqual(failed(good), [], JSON.stringify(good.turns.flatMap(x => x.expectations.filter(e => !e.ok)))); assert.equal(good.turns.length, 3)
+  assert.deepEqual((await run('끝까지 실행되어 never-printed 가 출력되었습니다.')).turns[2].expectations.filter(e => !e.ok).map(e => e.check), ['answerExcludes'])
+  assert.deepEqual((await run('끝까지 실행됐는지 확인할 수 없습니다.')).turns[2].expectations.filter(e => !e.ok).map(e => e.check), ['answerExcludes'])
 })

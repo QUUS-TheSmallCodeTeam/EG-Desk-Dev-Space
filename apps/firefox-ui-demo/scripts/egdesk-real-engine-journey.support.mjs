@@ -32,8 +32,9 @@ export const MEMORY_FAKE = Object.freeze({ turns: [
 const writerNotes = Array.from({ length: 8 }, () => ({ steps: [], final: '명령이 아직 실행 중이에요. 끝나는 대로 알려 드릴게요.' }))
 
 /** The fake model's turns for one long-command conversation: it runs the command through EG-Desk's tool, then answers with what the command printed. */
-export function commandFake({ command, final, steerFinal = undefined, delayMs = 0 }) {
-  return { turns: [{ steps: [...(delayMs ? [{ delayMs }] : []), { toolCall: { tool: 'egdesk_run_command', arguments: { command } } }], final, ...(steerFinal !== undefined ? { steerFinal } : {}) }], forkTurns: writerNotes }
+export function commandFake({ command, final, steerFinal = undefined, delayMs = 0, then = [] }) {
+  // then: the finals of later scripted turns (c27: the question after a stop)
+  return { turns: [{ steps: [...(delayMs ? [{ delayMs }] : []), { toolCall: { tool: 'egdesk_run_command', arguments: { command } } }], final, ...(steerFinal !== undefined ? { steerFinal } : {}) }, ...then.map(text => ({ steps: [], final: text }))], forkTurns: writerNotes }
 }
 
 const sleepMs = command => { const m = /sleep (\d+)/.exec(command); return m ? Number(m[1]) : 0 }
