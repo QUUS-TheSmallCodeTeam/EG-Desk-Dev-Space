@@ -60,4 +60,11 @@ registerExpectKeys({ briefing: { schema: BRIEFING_EXPECT_SCHEMA,
 
 // ---- slot L6 ----
 
-// ---- slot L8 ----
+// ---- L8: browser answer (a code-built finished or handed-over browser-task note fed into a turn; expect.browserAnswer checks the REAL answering model's reply by code) ----
+import { BROWSER_ANSWER_EXPECT_SCHEMA, BROWSER_TASK_SCHEMA, createBrowserAnswerHook, validateBrowserAnswerExpect, validateBrowserTask } from './egdesk-real-engine-browser-answer-hook.mjs'
+registerTurnFields({ browserTask: { schema: BROWSER_TASK_SCHEMA, validate: (value, { turn, path, bad }) => {
+  for (const why of validateBrowserTask(value, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
+  if (turn.action !== undefined || turn.whileRunning !== undefined) bad(path, 'only a plain message turn carries a task note')
+} } })
+registerExpectKeys({ browserAnswer: { schema: BROWSER_ANSWER_EXPECT_SCHEMA, validate: (value, { turn, path, bad }) => { for (const why of validateBrowserAnswerExpect(value, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('browserAnswer', () => createBrowserAnswerHook())

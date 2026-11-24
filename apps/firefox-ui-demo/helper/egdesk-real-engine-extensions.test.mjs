@@ -13,7 +13,7 @@ const turnEntry = REAL_ENGINE_SCRIPT_SCHEMA.properties.conversations.items.prope
 const script = expect => ({ set: 'real-engine-ext-v1', conversations: [{ id: 'c', turns: [{ say: 'hi', expect }] }] })
 
 test('the lanes\' keys are registered, not listed in the core: the same keys, schemas and validators as before the move', () => {
-  assert.deepEqual(registeredExpectKeys(), ['collab', 'memory', 'engine', 'briefing']); assert.deepEqual(registeredConversationFields(), ['memory']); assert.deepEqual(registeredTurnHookNames(), ['collab', 'memory', 'journey']); assert.deepEqual(registeredTurnFields(), ['from'])
+  assert.deepEqual(registeredExpectKeys(), ['collab', 'memory', 'engine', 'briefing', 'browserAnswer']); assert.deepEqual(registeredConversationFields(), ['memory']); assert.deepEqual(registeredTurnHookNames(), ['collab', 'memory', 'journey', 'browserAnswer']); assert.deepEqual(registeredTurnFields(), ['from', 'browserTask'])
   for (const k of ['engine', 'memory', 'briefing']) { assert.ok(EXPECT_KEYS.includes(k)); assert.ok(turnEntry[k]) }
   const core = fs.readFileSync(path.join(here, 'egdesk-real-engine-script.mjs'), 'utf8') + fs.readFileSync(path.join(here, 'egdesk-real-engine-check.mjs'), 'utf8')
   for (const lane of ['egdesk-real-engine-memory.mjs', 'egdesk-real-engine-journey.mjs', 'egdesk-real-engine-briefing-hook.mjs']) assert.ok(!core.includes(`from './${lane}'`) || lane === 'egdesk-real-engine-memory.mjs', `${lane} is not imported by the core`)
