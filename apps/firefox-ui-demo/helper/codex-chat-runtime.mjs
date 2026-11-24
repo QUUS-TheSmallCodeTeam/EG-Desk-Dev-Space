@@ -15,6 +15,9 @@ import { TERMINAL_STATES } from './egdesk-terminal-judge.mjs'
 import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { COMMAND_GATE_TIMEOUT_MS, assessCommand, classifyCommand, sessionRuleCoversFloor } from './egdesk-terminal-command-gate.mjs'
 import { ENGINE_VERSION_NOTICE, checkEngineVersion } from './egdesk-codex-version-pin.mjs'
+import { pureEngineThreadOverrides } from './egdesk-command-executor.mjs'
+// c18 own tools: every turn of such a thread is read-only with no approval prompts, so Codex's apply_patch can neither write nor ask.
+const OWN_TOOLS_TURN_OVERRIDES = Object.freeze({ approvalPolicy: 'never', sandboxPolicy: Object.freeze({ type: 'readOnly', networkAccess: false }) })
 const SHARED_CODEX_PROFILE = CODEX_ENGINE_PROFILE_ID // the shared app-server's slot (codex-engine-adapter.mjs)
 import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
 import { createSpillRereadCounter, gateRuntimeToolResult, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
@@ -731,7 +734,7 @@ function cleanNotification(method, p, engineId = 'codex') {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now() }) {
+  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer, monotonicNow })
     if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
     this.resolveProjectWorkspace = resolveProjectWorkspace
@@ -848,6 +851,9 @@ export class CodexChatRuntime {
     this.flowJobs = new Set()
     this.draftCheckRuns = new Set() // in-flight advisory draft checks (never awaited by a turn)
     this.commandGateRuns = new Set() // in-flight command gate assessments (never awaited by an approval card)
+    // c18: { mode() → 'off'|'on', neutralFolder() → absolute EG-Desk-owned empty folder }; absent = off
+    this.ownTools = ownTools
+    this.ownFolders = new Map() // conversationId → the real folder EG-Desk's tools use (never given to Codex in own-tools mode)
     this.engineVersionChecks = new Map() // Codex app-server session (shared or a profile id) → { status, version, noted, scope }
     this.commandGateAsked = new Set() // answerId:itemId of engine commands that came with an approval request (bounded)
     this.workingMemoryTallies = new WeakMap() // run -> counts of tool results the working-memory gate changed (for one activity row)
@@ -2382,6 +2388,16 @@ export class CodexChatRuntime {
     const policy = context.executionPolicy
     const qa = policy === READ_ONLY_QA
     const bounded = qa || policy === BROWSER_BOUNDED || policy === FIXTURE_BROWSER_QA
+    // c18 (flag ownTools, default off): Codex as a pure model engine. Its thread runs in an EG-Desk-owned empty folder with its own
+    // command, image and web tools off and a read-only, never-asking sandbox; the real folder is known only to EG-Desk's tools.
+    const ownTools = !bounded && engine.id === 'codex' && this.ownToolsOn()
+    let ownFolder = null, neutralFolder = null
+    if (ownTools) {
+      neutralFolder = this.ownNeutralFolder()
+      if (!neutralFolder) throw Object.assign(chatError('OWN_TOOLS_UNAVAILABLE', 'EG-Desk tools are on but no engine folder is prepared; no message was sent', 503), { definite: true })
+      ownFolder = workspace?.absolutePath ?? this.ownFolders.get(context.conversationId) ?? (overrides.cwd && overrides.cwd !== neutralFolder ? overrides.cwd : null)
+      overrides.cwd = neutralFolder
+    }
     // AGENT-04: the Agent's tool ceiling narrows this run; it never widens it.
     const ceiling = context.profileRun?.toolCeiling || null
     if (ceilingNarrows(ceiling) && engine.id !== 'codex') throw chatError('PROFILE_CEILING_UNSUPPORTED', 'This AI engine cannot enforce the Agent tool limits yet', 409)
@@ -2536,7 +2552,7 @@ export class CodexChatRuntime {
         const computerExtra = computerOff ? await this.computerControlOffOverrides(overrides.cwd || this.threads.get(cid)?.cwd || null, request) : null
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
         // A bounded thread resumed with the ceiling's shell_tool false must read it back off.
-        const resumed = await this.restoreThread(cid, context.clientThreadId, mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), { policy, shellOff: Boolean(extra) && ceiling?.terminal === 'none', beforeResume })
+        const resumed = await this.restoreThread(cid, context.clientThreadId, mergeCeilingOverrides(mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), ownTools ? pureEngineThreadOverrides() : null), { policy, shellOff: Boolean(extra) && ceiling?.terminal === 'none', beforeResume })
         if (!bounded) context.ceilingNotices.push(...ceilingReportNotices(ceiling, await verifyCeilingNativeThread(request, ceiling, resumed, cid)))
         if (computerExtra) {
           await this.verifyComputerControl(cid, computerExtra, request)
@@ -2561,13 +2577,14 @@ export class CodexChatRuntime {
         mergeCeilingOverrides(overrides, computerExtra.overrides)
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       }
+      if (ownTools) mergeCeilingOverrides(overrides, pureEngineThreadOverrides())
       await assertWorkspaceCurrent()
       assertPreparationActive()
       const result = await engine.startThread(overrides, slot)
       if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       cid = result?.thread?.id
       if (!idText(cid)) throw chatError('INVALID_THREAD_RESPONSE', 'Codex did not return a thread ID', 502)
-      if (workspace && (result.cwd || result.thread?.cwd) !== workspace.absolutePath) throw Object.assign(chatError('PROJECT_WORKSPACE_UNVERIFIED', 'The AI engine did not confirm the associated working folder; no message was sent', 409), { definite: true })
+      if (workspace && (result.cwd || result.thread?.cwd) !== (ownTools ? neutralFolder : workspace.absolutePath)) throw Object.assign(chatError('PROJECT_WORKSPACE_UNVERIFIED', 'The AI engine did not confirm the associated working folder; no message was sent', 409), { definite: true })
       // Never call a thread one-time when the engine says it saved it.
       if (context.stateless && result.thread.ephemeral === false) throw chatError('STATELESS_UNVERIFIED', 'The AI engine saved this conversation; it was not bound as one-time', 502)
       if (this.threadEngines.has(cid) || this.store?.getConversationByNative?.(cid)) throw chatError('THREAD_MISMATCH', 'The engine returned an already bound thread ID', 502)
@@ -2732,6 +2749,7 @@ export class CodexChatRuntime {
         input: [{ type: 'text', text: body.message, text_elements: [] }],
         clientUserMessageId: context.requestId,
         ...(bounded ? QA_TURN_OVERRIDES : {}),
+        ...(ownTools ? OWN_TOOLS_TURN_OVERRIDES : {}),
         ...(turnAdditionalContext ? { additionalContext: turnAdditionalContext } : {}),
         ...(overrides.cwd ? { cwd: overrides.cwd } : {}),
         ...(overrides.model ? { model: overrides.model } : {}),
@@ -2745,7 +2763,7 @@ export class CodexChatRuntime {
       }
       // Update only after an accepted turn, never on a Board switch or while
       // a previous run is active. Its existing run snapshot keeps its cwd.
-      if (workspace) this.threads.get(cid).cwd = workspace.absolutePath
+      if (workspace) this.threads.get(cid).cwd = ownTools ? neutralFolder : workspace.absolutePath
       if (this.store) {
         try {
           this.store.bindNative({ clientThreadId: context.clientThreadId, conversationId: cid, localRunId: context.localRunId, runId: result?.turn?.id })
@@ -2770,6 +2788,7 @@ export class CodexChatRuntime {
       const run = this.ensureRun(cid, result?.turn?.id, context)
       if (!run) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
       try { this.gateHookBroker()?.turnStarted({ conversationId: cid, turnId: run.runId }) } catch { /* the gate hook never affects a turn */ }
+      if (ownTools) { run.ownTools = true; run.ownFolder = ownFolder; if (ownFolder) this.ownFolders.set(cid, ownFolder) }
       if (topicRoute && intake.current()) {
         const { topic, parent, needs } = topicRoute // discard the plaintext packet at this boundary
         const current = decision.result.privateBatchCurrent
@@ -4104,6 +4123,11 @@ export class CodexChatRuntime {
       run.error = publicError('Native read-only QA requested an approval; it was declined', 'QA_SCOPE_VIOLATION')
       this.emit(run, 'run.unavailable', { status: run.status, error: run.error })
       void this.engineOf(run.conversationId).interruptTurn(run.conversationId, run.runId, this.threadOperationSlot(run.conversationId)).catch(() => {})
+      return
+    }
+    // c18: in own-tools mode every command and file change goes through EG-Desk's tools; a native request is declined, never accepted.
+    if (run.ownTools && ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval'].includes(event.nativeMethod)) {
+      this.respond(event.rpcId, { decision: 'decline' }, undefined, this.threadOperationSlot(event.threadId))
       return
     }
     if (event.nativeMethod === USER_INPUT_METHOD) return this.receiveUserInput(run, event)
@@ -6050,6 +6074,11 @@ export class CodexChatRuntime {
   }
 
   commandGateIdle() { return Promise.allSettled([...this.commandGateRuns]) }
+
+  ownToolsOn() { try { return this.ownTools?.mode?.() === 'on' } catch { return false } }
+  ownNeutralFolder() { try { const folder = this.ownTools?.neutralFolder?.(); return typeof folder === 'string' && path.isAbsolute(folder) && !folder.includes('\0') ? folder : null } catch { return null } }
+  /** The folder EG-Desk's own tools use for a run: the real folder in own-tools mode, otherwise the thread's folder. */
+  runFolder(run) { return run?.ownTools ? run.ownFolder ?? null : this.threads.get(run?.conversationId)?.cwd ?? null }
 
   // ---- Engine version against the hook's source check (c15). A new app-server connection is a new session: it records at most once. ----
   // One session per Codex app-server connection: the shared one (engineProfileId absent or codex-default) and each per-profile one
