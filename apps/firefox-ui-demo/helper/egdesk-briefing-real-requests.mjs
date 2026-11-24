@@ -3,7 +3,8 @@
 // - sameWindowPairs(requests, pages): a request is paired only with material dated on the request's own day (the record of that time); none -> dropped, said so
 // - replayable(text): the wording names no subject of its own (every word is generic summary/progress vocabulary), so it can be asked over another day's record
 //   without implying a context it does not have ("최신 업데이트 내역 정리해봐줘" yes; "swarm 시스템은 어디까지 동작하는거지?" no)
-const SUMMARY = /정리(?:해|좀|해줘|해봐|해 ?줘|해주)|요약|비교|진행 ?상황|현황|뭐가 바뀌|무엇이 바뀌|바뀐 ?(?:점|것)|변경 ?(?:사항|내역)|업데이트 ?내역|어디까지|진척|status|summar|compare|progress/i
+// cycle 29: '요약본' (a summary COPY, a noun) is not a request to summarise
+const SUMMARY = /정리(?:해|좀|해줘|해봐|해 ?줘|해주)|요약(?!본)|비교|진행 ?상황|현황|뭐가 바뀌|무엇이 바뀌|바뀐 ?(?:점|것)|변경 ?(?:사항|내역)|업데이트 ?내역|어디까지|진척|status|summar|compare|progress/i
 // imperatives that are not a briefing request even when a summary word occurs ("푸시해줘", "삭제…정리해줘" are actions on files)
 const ACTION = /푸시|push|삭제|지워|커밋해|다듬어|반영해|올려|설치|저장해|확인해서/i
 const ONE_FACT = /(?:언제|몇\s?(?:개|번|시|건|명|%)?|얼마|어디서|어디에|누가)/

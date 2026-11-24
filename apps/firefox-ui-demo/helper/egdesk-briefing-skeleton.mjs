@@ -660,9 +660,31 @@ export function answerFacts(answer) {
   const facts = factSentences(answer)
   return { facts: facts.slice(0, SKELETON_LIMITS.maxFacts), cut: Math.max(0, facts.length - SKELETON_LIMITS.maxFacts) }
 }
+// Cycle 29 (real answers are markdown): the answer's own structure first - one unit per bullet, numbered item, heading or table row (the header row and the
+// separator row of a table are not facts; a row's cells are joined by " · "), emphasis and code marks removed - then sentences within each unit.
+// Plain text (no line structure) is split as before.
+export function answerUnits(answer) {
+  const raw = String(answer ?? '').normalize('NFC').slice(0, SKELETON_LIMITS.answerMax)
+  if (!/\n/.test(raw)) return [raw]
+  const out = [], lines = raw.split(/\n/)
+  for (let i = 0; i < lines.length; i++) {
+    let l = lines[i].trim()
+    if (!l || /^```/.test(l) || /^#{1,6}\s/.test(l)) continue // a heading names a section, it states no fact
+    if (/[:：]\s*(?:\*\*)?$/.test(l)) continue // a lead-in ("…정리:") introduces what follows, it states no fact
+    if (/^(?:\*\*|__)[^*_]+(?:\*\*|__)$/.test(l)) continue // a line that is only a bold label names a section, it states no fact
+    if (/^\|.*\|\s*$/.test(l)) {
+      if (/^\|[\s:|-]+\|$/.test(l)) continue // separator row
+      if (/^\|[\s:|-]+\|$/.test((lines[i + 1] ?? '').trim())) continue // header row (the next line is the separator)
+      l = l.replace(/^\||\|$/g, '').split('|').map(c => c.trim()).filter(Boolean).join(' · ')
+    }
+    l = l.replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, '').replace(/\*\*|__|`/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').trim()
+    if (l) out.push(l)
+  }
+  return out
+}
 function factSentences(answer) {
   const anchored = t => { const a = factAnchors(t); return a.dates.length + a.versions.length + a.amounts.length > 0 }
-  const out = clean(answer, SKELETON_LIMITS.answerMax).split(/(?<=[.!?。])\s+/).flatMap(sentence => {
+  const out = answerUnits(answer).map(u => clean(u, SKELETON_LIMITS.answerMax)).join('\n').split(/\n|(?<=[.!?。])\s+/).flatMap(sentence => {
     const clauses = sentence.split(/[,;]\s+/).map(t => t.trim()).filter(Boolean)
     return clauses.length > 1 && clauses.every(anchored) ? clauses : [sentence.trim()]
   })
@@ -765,7 +787,7 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
   // Code drops what the request does not ask about (decided no or undecided) and adds the version pairs the judge confirmed; the scene is built again from that.
   const relevant = new Set(relevance.filter(q => isYes(placed.answers[`about_${q.material}`])).flatMap(q => q.covers))
   // (cycle 27) and what the answer itself cites stays, whatever relevance said; recorded apart
-  const citedOnly = (said ? answerCited(said, scene.materials) : []).filter(a => !relevant.has(a)), kept = new Set(scene.materials.map(m => m.alias).filter(a => relevant.has(a) || citedOnly.includes(a)))
+  const citedOnly = (said ? answerCited(answer, scene.materials) : []).filter(a => !relevant.has(a)), kept = new Set(scene.materials.map(m => m.alias).filter(a => relevant.has(a) || citedOnly.includes(a)))
   const dropped0 = scene.materials.filter(m => !kept.has(m.alias)).map(m => m.alias), versions = pairs.filter(([a, b]) => isYes(placed.answers[`same_${a}_${b}`]))
   relevanceOut = { kept: [...kept], dropped: dropped0, versions, ...(citedOnly.length ? { cited: citedOnly } : {}) }
   const place = decidePlace(placed.answers, { relevant: kept.size })
@@ -912,7 +934,7 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     }
   } else {
     const keptMats = scene.materials.filter(m => kept.has(m.alias))
-    const split = said ? answerFacts(said) : { facts: keptMats.slice(0, SKELETON_LIMITS.maxFacts).map(m => clean(m.text.split(/(?<=[.!?。])\s+/)[0], SKELETON_LIMITS.factMax)).filter(Boolean), cut: Math.max(0, keptMats.length - SKELETON_LIMITS.maxFacts) }
+    const split = said ? answerFacts(answer) : { facts: keptMats.slice(0, SKELETON_LIMITS.maxFacts).map(m => clean(m.text.split(/(?<=[.!?。])\s+/)[0], SKELETON_LIMITS.factMax)).filter(Boolean), cut: Math.max(0, keptMats.length - SKELETON_LIMITS.maxFacts) }
     const facts = split.facts.map((text, i) => ({ id: `F${i + 1}`, text, cites: said ? factCites(text, keptMats) : [keptMats[i].alias], p: null }))
     Object.assign(coverage, { from: said ? 'answer' : 'materials', facts, cut: split.cut, missing: [], unshowable: [] })
     const askFacts = async list => { coverage.asked++; const r0 = await ask('coverage', list.map(f => ({ kind: 'onboard', fact: f.id, text: f.text })), { board: boardView() })
