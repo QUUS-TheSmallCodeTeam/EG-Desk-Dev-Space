@@ -6,7 +6,7 @@ import { createDecisionClient, DECISIONS_ENDPOINT, DECISION_MODEL, FOREGROUND_DE
 import { DEFAULT_DECISION_THRESHOLDS } from './egdesk-decision-questions.mjs'
 import { normalizeBoardPresentationScene, prepareBoardPresentation, readBoardPresentation } from './egdesk-board-presentation-plan.mjs'
 import { canvasCheckCalibrationEntry, prepareCanvasDesignCheck, readCanvasDesignCheck } from './egdesk-canvas-design-check.mjs'
-import { completeBriefingArgs, runBriefingFlow, briefingCheckCalibrationEntry, briefingReuseCalibrationEntry, placementCalibrationEntry, prepareBriefingCheck, prepareBriefingPlacement, prepareBriefingReuse, readBriefingCheck, readBriefingPlacement, readBriefingReuse } from './egdesk-briefing-flow.mjs'
+import { completeBriefingArgs, continuedBriefingOutput, runBriefingFlow, briefingCheckCalibrationEntry, briefingReuseCalibrationEntry, placementCalibrationEntry, prepareBriefingCheck, prepareBriefingPlacement, prepareBriefingReuse, readBriefingCheck, readBriefingPlacement, readBriefingReuse } from './egdesk-briefing-flow.mjs'
 import { runSkeletonFlow, SKELETON_JUDGE } from './egdesk-briefing-skeleton.mjs'
 import { attachBoardVisual, MAX_BOARD_VISUAL_IMAGE_CHARS, validateBoardVisual } from './egdesk-board-visual-packet.mjs'
 
@@ -310,19 +310,28 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
         if (typeof drafted?.markdown !== 'string' || !drafted.markdown.trim() || typeof briefing.publishOutput !== 'function') throw new Error('component')
         drafts.push({ component, markdown: drafted.markdown })
       }
-      const created = {}
+      const created = {}, used = new Set(), replaced = new Set()
       for (const { component, markdown } of drafts) {
-        const published = await briefing.publishOutput(answerRun, { title: component.title, markdown, outputKey: `briefing-${randomBytes(5).toString('hex')}` })
+        // Cycle 22: the same part of the same matter continues its earlier output (next version, same outputKey); anything else is a new output as before.
+        const earlier = continuedBriefingOutput(briefingBindings, component, answerRun.conversationId, used)
+        const published = await briefing.publishOutput(answerRun, { title: component.title, markdown, outputKey: earlier?.outputKey ?? `briefing-${randomBytes(5).toString('hex')}` })
         created[component.alias] = { outputId: published.output.id }
+        used.add(published.output.outputKey)
+        if (earlier && published.output.outputKey === earlier.outputKey && published.output.previousId) replaced.add(published.output.previousId)
         if (Array.isArray(component.materialKeys) && component.materialKeys.length) {
-          briefingBindings.set(published.output.id, { keys: [...component.materialKeys], trait: component.trait, component: component.component })
+          briefingBindings.set(published.output.id, { keys: [...component.materialKeys], trait: component.trait, component: component.component, outputKey: published.output.outputKey, conversationId: answerRun.conversationId })
           if (briefingBindings.size > 500) briefingBindings.delete(briefingBindings.keys().next().value)
         }
       }
       const args = completeBriefingArgs(out, created)
       if (!args) throw new Error('args')
       const proposed = await briefing.propose(answerRun, args)
-      return { ...summary, outcome: 'presented', briefingId: proposed.id, steps: proposed.steps.length, newComponents: out.newComponents.length, retrievals: out.retrievals.map(r => ({ viewId: r.id })) }
+      // The card on the board that still shows a replaced version is the Agent's own stale output: offered for folding in this same reply (only a proposal the person
+      // applies on their own screen), unless the briefing points at it, it is folded already, or it is not the Agent's own.
+      const pointed = new Set(args.steps.flatMap(step => step.targets.map(target => target.viewId).filter(Boolean)))
+      const stale = list.filter(c => replaced.has(c.ref?.outputId) && c.owner === 'agent' && c.onBoard && c.visibility !== 'collapsed' && !pointed.has(c.id)).map(c => c.id)
+      const retrievals = [...new Set([...out.retrievals.map(r => r.id), ...stale])].map(viewId => ({ viewId }))
+      return { ...summary, outcome: 'presented', briefingId: proposed.id, steps: proposed.steps.length, newComponents: out.newComponents.length, retrievals }
     } catch { return { ...summary, outcome: 'fallback-chat', reason: 'publish-failed' } }
   }
   async function observeRoute(req, res) {

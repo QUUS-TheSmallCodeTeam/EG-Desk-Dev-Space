@@ -392,6 +392,23 @@ export function constraintFrom(reply, enumeration, parts) {
 const constraintView = (c, parts) => ({ reuse: [...c.reuse], retire: [...c.retire], newAllowed: [...c.newAllowed].map(([part, label]) => ({ part, label })), maxNew: c.newAllowed.size, parts: parts.map(x => ({ part: x.alias, label: x.label })) })
 /** retrievalPlan(retrievals) -> the plan the presentation controller previews (offerRetrieval): fold these cards on the user's own screen. */
 export const retrievalPlan = retrievals => ({ option: 'retrieval', collapse: retrievals.map(r => ({ id: r.id, value: true })) })
+/**
+ * Cycle 22 ("recall your own stale output"): the output a new briefing component continues. A component built by the skeleton (materialKeys, trait, component) for
+ * the same matter as an earlier briefing's card of this conversation (same trait and component, at least one shared material key) publishes the NEXT VERSION of that
+ * earlier output (its outputKey) instead of a new one, so the existing supersede path marks the earlier card on the canvas, and the earlier card can be offered
+ * for folding. bindings: outputId -> { keys, trait, component, outputKey, conversationId } (the bridge's memory of what it built); used: the outputKeys this
+ * briefing has already published (two parts of one briefing never share one). -> { outputId, outputKey } of the most recent match, or null.
+ */
+export function continuedBriefingOutput(bindings, component, conversationId, used = new Set()) {
+  const keys = Array.isArray(component?.materialKeys) ? component.materialKeys : []
+  if (!keys.length || !component.trait || !component.component || typeof conversationId !== 'string' || !conversationId || !bindings?.entries) return null
+  let found = null
+  for (const [outputId, b] of bindings.entries()) {
+    if (b?.conversationId === conversationId && b.trait === component.trait && b.component === component.component && typeof b.outputKey === 'string' && !used.has(b.outputKey)
+        && Array.isArray(b.keys) && b.keys.some(k => keys.includes(k))) found = { outputId, outputKey: b.outputKey }
+  }
+  return found
+}
 /** completeBriefingArgs(result, created) -> the publish arguments including the steps that waited for a new component; created: { N1: { artifactId | sourceId } } (the host created it). */
 export function completeBriefingArgs(outcome, created = {}) {
   const result = outcome.plan ?? outcome // a flow outcome ('presented') or its plan

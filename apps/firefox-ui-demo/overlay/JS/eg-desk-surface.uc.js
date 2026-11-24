@@ -4366,7 +4366,13 @@
   // the desk arrangement panel (never opened for them, no focus taken); there it is a preview they can apply or leave, with undo and Cmd+Z like any arrangement.
   function offerBriefingRetrieval(reply) {
     if (reply?.outcome !== 'presented' || !Array.isArray(reply.retrievals)) return;
-    const collapse = reply.retrievals.map(item => item?.viewId).filter(id => typeof id === 'string' && document.getElementById(id)?.classList?.contains('egd-result-card')).map(id => ({ id, value: true }));
+    // Cycle 22: the reply can arrive up to 150 s after the answer. Offer only while the flag is still "on", and only cards that are still this Agent's own result
+    // cards on this screen, not on a shared Board and not folded already (the person may have moved on in the meantime).
+    if (BriefingHost.briefingFlowMode(readSurfacePref(BriefingHost.BRIEFING_FLOW_PREF)) !== 'on') return;
+    const collapse = reply.retrievals.map(item => item?.viewId).filter(id => typeof id === 'string').map(id => document.getElementById(id))
+      .filter(card => card?.isConnected && card.classList?.contains('egd-result-card') && !card.dataset?.jointManaged && !card.classList.contains('egd-card-collapsed')
+        && card._resultRecord?.provenance?.creator === 'agent')
+      .map(card => ({ id: card.id, value: true }));
     if (!collapse.length) return;
     state.briefingRetrievalOffer = { option: 'retrieval', collapse };
     boardNotice('오래된 결과 카드를 접는 정리 제안이 있습니다. 책상 빠른 정리를 열면 미리 볼 수 있습니다.');  // copy pending approval
