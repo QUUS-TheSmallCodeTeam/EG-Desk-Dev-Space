@@ -131,9 +131,10 @@ test('the stratified sample (c20): the controls in every chunk, labelled example
   assert.equal(new Set(ids.filter(id => id.startsWith('ex-'))).size, ids.filter(id => id.startsWith('ex-')).length, 'each candidate once')
 })
 
-test('c22: the referential and re-ask questions ask what they mean (one condition each), and a subset request carries only those questions', () => {
-  assert.match(INTERACTION_TYPES.referential.q, /only by pointing at it .* A turn that names what it is about is not\./)
-  assert.match(INTERACTION_TYPES.reask.q, /could not understand or could not see something the assistant said or showed, and ask for it to be explained or shown again\?$/)
+test('c23: the referential and re-ask questions are one concrete condition each, and a subset request carries only those questions', () => {
+  assert.equal(INTERACTION_TYPES.referential.q, 'Does the turn contain a word that stands in for something said or shown earlier instead of naming it (for example "that", "this", "the above", "just now", "the earlier one", or the Korean 그거, 이거, 위, 방금, 아까)?')
+  assert.equal(INTERACTION_TYPES.reask.q, 'Does the person say in this turn that they did not understand something, or could not see something, that the assistant said or showed?')
+  for (const type of ['referential', 'reask']) assert.ok(!/\band\b.*\band\b.*\bor\b.*\bnot\b/i.test('') && !/ask for it/.test(INTERACTION_TYPES[type].q), 'the cause, never the request, in the re-ask question')
   const body = labelRequest({ id: 'x', prev: { text: '진행할까요?' }, user: { text: '방금 그 내용 정리해줘' } }, DECISION_MODEL, { types: ['referential', 'reask'] })
   assert.deepEqual(body.questions.map(q => q.name), ['conv_referential', 'conv_reask'])
 })

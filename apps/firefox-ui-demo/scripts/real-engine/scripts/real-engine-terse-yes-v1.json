@@ -1,0 +1,48 @@
+{
+  "set": "real-engine-terse-yes-v1",
+  "description": "Pattern: \"ㅇㅇ\" after the assistant asked what to do. The first turn asks the assistant to say which items it would delete and not to change the file yet; the second turn is the person's terse \"ㅇㅇ\", which must be read as a go-ahead for exactly what was proposed. Pattern taken from the person's real turns (masked); the folder is synthetic. The approver is not used: the scripted \"ㅇㅇ\" is the person's own turn. Expectations are code checks only.",
+  "conversations": [
+    {
+      "id": "terse-yes",
+      "folder": {
+        "notes/todo.md": "- [x] 견적서 보내기\n- [ ] 일정 확인\n- [x] 폴더 정리\n"
+      },
+      "turns": [
+        {
+          "say": "notes/todo.md 에서 완료된([x]) 항목을 지우려고 해. 파일은 아직 바꾸지 말고, 어떤 항목을 지울지만 먼저 알려 줘.",
+          "expect": {
+            "toolCalls": [
+              "egdesk_read_file"
+            ],
+            "answerIncludes": [
+              "견적서 보내기",
+              "폴더 정리"
+            ],
+            "files": {
+              "notes/todo.md": "- [x] 견적서 보내기\n- [ ] 일정 확인\n- [x] 폴더 정리\n"
+            },
+            "undoRecords": 0,
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "ㅇㅇ",
+          "expect": {
+            "toolCalls": [
+              "egdesk_edit_file"
+            ],
+            "files": {
+              "notes/todo.md": "- [ ] 일정 확인\n"
+            },
+            "undoRecords": 1,
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}
