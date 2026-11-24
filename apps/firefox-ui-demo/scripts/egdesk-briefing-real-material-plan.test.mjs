@@ -78,3 +78,16 @@ test('cycle 26 faithful fill: an assignment line with more items than the card h
   assert.equal(open.slots.lines.length, 6, 'the card holds six rows'); assert.equal(open.slots.title, '11-24 22:58 8개 레인 동시 실행', 'the total the material states, as it writes it')
   const board = readFileSync(path.join(root, 'plan', 'requests', 'today-coverage.json'), 'utf8'); assert.ok(board.includes('11-24 22:58 8개 레인 동시 실행'), 'the total is on the board the coverage question quotes')
 })
+
+test('cycle 28: a spec that declares seeds (real conversation wording) carries the owner-approved declaration into the plan; none declared, none written', async t => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'egd-c28-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const loop = path.join(root, 'loop'); mkdirSync(path.join(loop, 'reports'), { recursive: true })
+  writeFileSync(path.join(loop, 'LEDGER.md'), ['# 원장', '- 11-24 22:50 L7 c19(e930372) 병합 → int/c14 c680638.', '- 11-24 22:52 사용자 결정: 고정 문장 전부 제거.'].join('\n'))
+  buildMaterials(['--loop', loop, '--out', path.join(root, 'm'), '--year', '2026', '--year-basis', 'synthetic fixture'])
+  const spec = seeds => ({ set: 's', tokenCeiling: 99999, passRule: 's', ...(seeds ? { seeds } : {}), requests: [{ id: 'r', request: '최신 업데이트 내역 정리해봐줘.', answer: '22:50 L7 c19가 병합되었습니다. 22:52 사용자가 고정 문장을 전부 빼기로 결정했습니다.', select: { rule: 'newest-ledger', n: 2 }, expect: { place: [{ match: 'combines', severity: 'hard', yes: true, note: 'x' }] } }] })
+  writeFileSync(path.join(root, 'with.json'), JSON.stringify(spec([{ id: 'conversation-examples', privacy: 'owner-approved', extra: 'dropped' }]))); writeFileSync(path.join(root, 'without.json'), JSON.stringify(spec(null)))
+  const withSeeds = (await buildPlan(['--pages', path.join(root, 'm', 'pages.json'), '--spec', path.join(root, 'with.json'), '--out', path.join(root, 'p1')])).plan
+  const without = (await buildPlan(['--pages', path.join(root, 'm', 'pages.json'), '--spec', path.join(root, 'without.json'), '--out', path.join(root, 'p2')])).plan
+  assert.deepEqual(withSeeds.seeds, [{ id: 'conversation-examples', privacy: 'owner-approved' }]); assert.equal(without.seeds, undefined)
+  assert.equal(loadPlan(path.join(root, 'p1', 'plan.json')).requests.length, 1, 'the runner loads it (its seed guard reads the declaration)')
+})
