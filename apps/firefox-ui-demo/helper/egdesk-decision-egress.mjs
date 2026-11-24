@@ -11,6 +11,7 @@ import { DecisionError } from './egdesk-decision-client.mjs'
 // `mode` (off / advisory / on) and the saved key stay what they were: they decide whether Decisions is used at all.
 export const EGRESS_KINDS = Object.freeze({
   terminal_output: Object.freeze({ data: 'terminal', governedBy: 'Agent tool ceiling: terminal (none = no terminal output reaches any model)' }),
+  command_output: Object.freeze({ data: Object.freeze(['terminal', 'run']), governedBy: 'Output of commands this run\'s own engine executed, which the run\'s model already receives: Agent tool ceiling terminal (none = the Agent runs no commands) and a live run. A Terminal card\'s output is NOT this kind' }),
   terminal_command: Object.freeze({ data: 'terminal', governedBy: 'Agent tool ceiling: terminal (none = the Agent runs no commands, so none are scored)' }),
   page_text: Object.freeze({ data: 'browser', governedBy: 'Agent tool ceiling: browser (none = no page text) and this run\'s selected Browser Card grant' }),
   browser_task_record: Object.freeze({ data: 'browser', governedBy: 'Agent tool ceiling: browser and this run\'s selected Browser Card grant (records of the Browser task)' }),
@@ -58,7 +59,10 @@ export function createEgressGate(permissions) {
   const perms = permissions && typeof permissions === 'object' ? permissions : {}
   const allows = kind => {
     const entry = Object.hasOwn(EGRESS_KINDS, kind) ? EGRESS_KINDS[kind] : null
-    return !!entry && DATA_CLASSES.includes(entry.data) && perms[entry.data] === true
+    if (!entry) return false
+    // A kind may need more than one class (all of them).
+    const classes = Array.isArray(entry.data) ? entry.data : [entry.data]
+    return classes.length > 0 && classes.every(name => DATA_CLASSES.includes(name) && perms[name] === true)
   }
   const refuse = () => new DecisionError('evidence_unavailable', 'This kind of data is not allowed for models in this run, so it is not sent to the decision model either')
   return Object.freeze({
@@ -96,7 +100,7 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-draft-check.mjs': ['draft_text'],
   'egdesk-heartbeat-judge.mjs': ['run_facts', 'plus the kinds a heartbeat question declares, each checked by the run\'s gate before it is sent'],
   'egdesk-terminal-command-gate.mjs': ['terminal_command'],
-  'egdesk-terminal-judge.mjs': ['terminal_output'],
+  'egdesk-terminal-judge.mjs': ['terminal_output', 'command_output'],
   'egdesk-memory-live-runner.mjs': ['memory_page: measurement tool; the public synthetic wiki only, through guardClient'],
   'egdesk-turn-memory.mjs': ['memory_page', 'topic_history'],
   'egdesk-wiki-reconstruction.mjs': ['memory_page'],

@@ -13,6 +13,7 @@ import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { DRAFT_CHECK_LIMITS, checkDraft } from './egdesk-draft-check.mjs'
 import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { COMMAND_GATE_TIMEOUT_MS, assessCommand, classifyCommand } from './egdesk-terminal-command-gate.mjs'
+import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
 import { homedir } from 'node:os'
 import { createInternalTurns } from './codex-internal-turn.mjs'
 import { FLOW_COPY, FLOW_LIMITS, audienceFacts, beatFlowFacts, cleanIntermediate, enumerateOptions, flowQuestion, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
@@ -813,6 +814,15 @@ export class CodexChatRuntime {
     this.flowJobs = new Set()
     this.draftCheckRuns = new Set() // in-flight advisory draft checks (never awaited by a turn)
     this.commandGateRuns = new Set() // in-flight command gate assessments (never awaited by an approval card)
+    // Advisory state judge on the engine's own command executions (egdesk-engine-command-watch.mjs). Inert unless decisionContext.commandJudge.mode() is 'advisory'.
+    this.commandJudgeRuns = new Map() // run key (answerId) -> run, for the run's egress gate
+    this.commandJudgeBeats = new WeakMap() // heartbeat -> { runKey } (one listener per heartbeat)
+    const self = this
+    this.engineCommands = createEngineCommandWatch({ flag: () => this.commandJudgeMode(), monotonicNow: () => this.monotonicNow(),
+      setTimer: (fn, ms) => this.setTimer(fn, ms), clearTimer: handle => this.clearTimer(handle),
+      decision: { mode: () => this.decisionContext?.mode?.(), configured: () => this.decisionContext?.configured?.(), get client() { return self.decisionContext?.client ?? null }, get calibrationLog() { return self.decisionContext?.calibrationLog ?? null } },
+      readOutput: (key, itemId) => this.runOutputs.commandOutput(key, itemId),
+      egressFor: key => { const run = this.commandJudgeRuns.get(key); return run && !TERMINAL.has(run.status) ? this.decisionEgressFor(run) : null } })
     this.draftCheckTurns = new WeakMap() // run -> what the model had this turn, for the check after the answer is posted
     this.draftCheckSeen = new WeakMap() // run -> final-answer item ids already handed to the check
     this.turnMemoryRuns = new Set() // in-flight advisory memory jobs (never awaited by a turn)
@@ -3866,6 +3876,7 @@ export class CodexChatRuntime {
       return
     }
     if (event.privateOutput) this.keepRunOutput(run, event)
+    this.observeEngineCommand(run, event)
     if (OUTPUT_METHODS.has(event.method)) return
     if (event.method === 'approval') return this.receiveApproval(run, event)
     if (event.method === 'dynamic') {
@@ -5132,6 +5143,46 @@ export class CodexChatRuntime {
   decisionEgressFor(run, { memoryScope = {}, canvasMaySend = false } = {}) {
     return createEgressGate(modelDataPermissions({ toolCeiling: run?.toolCeiling ?? null, browserGranted: Boolean(run?.browserBinding?.cards?.length), canvasMaySend, memoryScope, runActive: Boolean(run) }))
   }
+
+  // ---- Advisory state judge on the engine's own commands (flag decisionContext.commandJudge = { mode(): 'off'|'advisory' }, default off). ----
+  // The engine's commandExecution items are observed where their output is already kept for the screen (keepRunOutput): started, output
+  // arrived, completed. Nothing is emitted, answered, typed or injected; what the system WOULD do is recorded, and read-only command facts
+  // are offered to the conversation's heartbeat when there is one. Never throws and never delays the event.
+  commandJudgeMode() {
+    try { return this.decisionContext?.commandJudge?.mode?.() === 'advisory' ? 'advisory' : 'off' } catch { return 'off' }
+  }
+
+  observeEngineCommand(run, event) {
+    try {
+      if (this.commandJudgeMode() !== 'advisory') return
+      const key = run.answerId
+      if (event.method === 'item/commandExecution/outputDelta') { if (this.commandJudgeRuns.has(key)) this.engineCommands.output({ runKey: key, itemId: event.itemId }); return }
+      const item = event.item
+      if (item?.type !== 'commandExecution' || (event.method !== 'item/started' && event.method !== 'item/completed')) return
+      const engine = this.threadEngine(run.conversationId) === 'claude' ? 'claude' : 'codex'
+      if (!this.commandJudgeRuns.has(key)) {
+        this.commandJudgeRuns.set(key, run)
+        while (this.commandJudgeRuns.size > 32) { const oldest = this.commandJudgeRuns.keys().next().value; this.commandJudgeRuns.delete(oldest); this.engineCommands.forget(oldest) }
+      }
+      if (event.method === 'item/started') this.engineCommands.started({ runKey: key, itemId: item.id, engine })
+      else this.engineCommands.completed({ runKey: key, itemId: item.id, exitCode: item.exitCode, status: item.status, engine })
+      this.feedCommandHeartbeat(run)
+    } catch { /* the judge never affects the run */ }
+  }
+
+  // The run's command facts join its conversation's heartbeat (one provider, one beat listener per heartbeat).
+  feedCommandHeartbeat(run) {
+    const hb = this.heartbeatThreads.get(run.conversationId)
+    if (!hb || hb.state === 'stopped') return
+    const fed = this.commandJudgeBeats.get(hb)
+    if (fed) { fed.runKey = run.answerId; return }
+    const slot = { runKey: run.answerId }
+    this.commandJudgeBeats.set(hb, slot)
+    hb.register('engine_commands', () => this.engineCommands.facts(slot.runKey))
+    hb.subscribe(() => { this.engineCommands.beat(slot.runKey) })
+  }
+
+  commandJudgeIdle() { return this.engineCommands.idle() }
 
   // ---- Command gate before an engine approval (Codex commandExecution/requestApproval; Claude can_use_tool arrives as the same request). ----
   // Config: decisionContext.terminalGate = { mode(): 'off'|'advisory'|'on', inspect?({ cwd, paths }) → { targets, git }, home?, deadlineMs? (at most 4 s) }. Absent or any other mode: off,

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { enumerateLogBlocks, judgeTerminalState, pickRelevantBlocks, stateResponse } from './egdesk-terminal-judge.mjs'
+import { enumerateLogBlocks, judgeTerminalState, pickRelevantBlocks, stateResponse, terminalFactRow } from './egdesk-terminal-judge.mjs'
 
 // Terminal state judge, wired next to the run watch (egdesk-terminal-run-watch.mjs).
 //
@@ -231,10 +231,11 @@ export function createTerminalStateWatch({ runWatch, flag = () => 'off', decisio
     terminalFacts() {
       if (flagNow() === 'off') return Object.freeze([])
       const at = now()
-      return Object.freeze([...sessions].map(([sessionId, entry]) => Object.freeze({ sessionId, alive: entry.exit === null, exitCode: entry.exit?.exitCode ?? null,
-        quietMs: Math.max(0, at - (entry.lastOutputAt ?? entry.startedAt)), lastOutputAt: entry.lastOutputAt, lastInputAt: entry.lastInputAt, tailChars: entry.tail.length,
-        agentOwned: owned(sessionId), runBound: gateOf(sessionId) !== null,
-        judged: entry.judged ? Object.freeze({ state: entry.judged.state, source: entry.judged.source, would: entry.judged.would, at: entry.judged.at }) : null })))
+      // One row shape for every terminal-like source (terminalFactRow in egdesk-terminal-judge.mjs), plus which session it is.
+      return Object.freeze([...sessions].map(([sessionId, entry]) => Object.freeze({ sessionId,
+        ...terminalFactRow({ kind: 'card', running: entry.exit === null, state: entry.judged?.state ?? null, source: entry.judged?.source ?? null, would: entry.judged?.would ?? null,
+          runningMs: at - entry.startedAt, quietMs: at - (entry.lastOutputAt ?? entry.startedAt), exitCode: entry.exit?.exitCode ?? null }),
+        agentOwned: owned(sessionId), runBound: gateOf(sessionId) !== null })))
     },
     /** Content-free trail of settled checks (most recent last), for tests and diagnostics. */
     advisories: () => trail.slice(),

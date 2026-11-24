@@ -476,6 +476,8 @@ const chat = new CodexChatRuntime({
     ...(['advisory', 'on'].includes(process.env.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => process.env.EGDESK_DRAFT_CHECK } } : {}),
     // Live-session heartbeat (egdesk-heartbeat.mjs) and, with EGDESK_DRAFT_CHECK=on (held, checked messages), intermediate messages while a run works. Developer flag, default off.
     ...(process.env.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on' } } : {}),
+    // Advisory state judge on the engine's own command executions: developer flag EGDESK_COMMAND_JUDGE=advisory, default off. Records only.
+    ...(process.env.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
     // Command gate before an engine approval card: developer flag EGDESK_TERMINAL_GATE=advisory|on, default off. It never answers an approval.
     ...(['advisory', 'on'].includes(process.env.EGDESK_TERMINAL_GATE) ? { terminalGate: { mode: () => process.env.EGDESK_TERMINAL_GATE, inspect: createGitTargetInspector() } } : {}),
     topicRecipient: recipientForCodexDecisions,

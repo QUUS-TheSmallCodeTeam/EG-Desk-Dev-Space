@@ -1,5 +1,5 @@
 import { MAX_TASK_STEPS } from './egdesk-browser-task.mjs'
-import { TERMINAL_STATE_NAMES, runObjectiveLoop } from './egdesk-terminal-judge.mjs'
+import { TERMINAL_STATE_NAMES, runObjectiveLoop, terminalFactRow } from './egdesk-terminal-judge.mjs'
 
 // Read-only fact providers that let the objective loops feed a heartbeat (egdesk-heartbeat.mjs). They observe; they never
 // change what a loop does, decides or returns: every wrapped call passes its arguments and its result through untouched, and an
@@ -38,8 +38,6 @@ export function feedBrowserTask(heartbeat, store) {
 
 // ---- Terminal objective loop (egdesk-terminal-judge.mjs) ----
 
-const WAITING_STATES = new Set(['waiting_yn_input', 'waiting_password', 'need_user_context'])
-
 /** deps that behave exactly like `deps` while recording where the loop is. Returns { deps, facts() }. */
 export function observeTerminalLoop(deps) {
   const seen = { started: false, polls: 0, state: null, waiting: false, repairs: 0, done: false }
@@ -57,9 +55,9 @@ export function observeTerminalLoop(deps) {
   }
   const facts = () => {
     if (seen.done) return null
-    const waiting = seen.waiting || WAITING_STATES.has(seen.state)
-    return { active: true, phase: waiting ? 'waiting_user' : 'objective_step', waitingOnUser: waiting, stepsDone: seen.polls, repairs: seen.repairs,
-      terminal: !seen.started ? 'gate' : waiting ? 'waiting' : 'running', ...(seen.state ? { terminalState: seen.state } : {}) }
+    // The one terminal fact-row shape (terminalFactRow), shared with the engine-command and Terminal-card facts; this loop adds its own counts.
+    const { active, phase, waitingOnUser, terminal, terminalState } = terminalFactRow({ kind: 'objective', running: true, started: seen.started, asking: seen.waiting, state: seen.state })
+    return { active, phase, waitingOnUser, stepsDone: seen.polls, repairs: seen.repairs, terminal, ...(terminalState ? { terminalState } : {}) }
   }
   return { deps: observed, facts, finish() { seen.done = true } }
 }
