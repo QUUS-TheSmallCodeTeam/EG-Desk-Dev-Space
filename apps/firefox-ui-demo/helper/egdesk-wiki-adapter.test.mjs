@@ -279,3 +279,35 @@ test('ontology nodes keep the date and status they record (and only those): at -
   assert.deepEqual(by('c').time, { slice: 'past' }, 'a date that is not a recorded ISO date is not taken, and none is read from the text')
   assert.equal(by('d').status, 'done', 'a snapshot\'s status comes first')
 })
+
+test('dates recorded where the writer creates or promotes: a written page keeps its creation time, a browser task its run date (time.at), a promoted status its confirmation date; the materials carry them', async () => {
+  const { memoryMaterials, prepareTurnMemory } = await import('./egdesk-turn-memory.mjs')
+  const { createOutcomeToOntology, outcomeCandidate } = await import('./egdesk-browser-task-memory.mjs')
+  const dataDir = await tmpDir(), writes = openWikiWrites({ dataDir, log: quiet }), adapter = createWikiAdapter({ writes })
+  const ctx = { clientThreadId: 'thread-1' }, scope = adapter.scopeFor(ctx)
+  const graph = { snapshots: [], edges: [], nodes: [{ id: 'plan', label: 'PostgreSQL 마이그레이션 배포 계획', body: '12월 첫째 주에 전환 배포할 예정이다.', timeSlice: 'future', status: 'plan' }] }
+  let wiki = await adapter.snapshot({ context: ctx, graph })
+  const writer = () => adapter.writerFor(wiki, { enabled: true, canWrite: () => true })
+  // a written page (agent_note, so it keeps its own body): creation time recorded as spokenAt
+  assert.equal(writer().apply({ op: 'new_page', time: { slice: 'past' }, status: 'done', provenance: { kind: 'agent_note' }, links: [], spokenAt: '2026-11-20T03:00:00.000Z' }, { message: '배포 리허설을 마쳤다.', scope, operationId: 'w1' }).status, 'stored')
+  // a browser task outcome: the run date is the event date
+  wiki = await adapter.snapshot({ context: ctx, graph })
+  const task = outcomeCandidate({ taskId: 'bt_0123456789ab', goal: '세금계산서 내려받기', host: 'portal.example.test', now: Date.parse('2026-11-21T09:00:00Z'), outcome: { status: 'done' } })
+  assert.equal((await createOutcomeToOntology({ wiki, writer: writer(), scope, enabled: true, now: () => Date.parse('2026-11-21T09:00:00Z') }).write(task)).status, 'stored')
+  // a status reading, then the person's confirmation
+  wiki = await adapter.snapshot({ context: ctx, graph })
+  const plan = wiki.pages.get('ontology:plan')
+  assert.equal(writer().apply({ op: 'update_status', pageId: plan.id, baseRevision: plan.revision, proposedStatus: 'done', time: { slice: 'past' }, provenance: { kind: 'utterance' }, spokenAt: '2026-11-22T01:00:00.000Z' }, { scope, operationId: 'w2' }).status, 'recorded_pending')
+  wiki = await adapter.snapshot({ context: ctx, graph })
+  assert.equal(writer().promote('ontology:plan', { scope, confirmation: { by: 'user', at: '2026-11-23T02:00:00.000Z' }, operationId: 'p1' }).status, 'status_updated')
+  wiki = await adapter.snapshot({ context: ctx, graph })
+  // through the materials of a first turn that holds them all
+  const ids = [...wiki.pages.keys()]
+  const result = { memory: { status: 'ready', delivered: Object.fromEntries(ids.map(id => [id, true])), picks: [] }, held: [] }
+  const rows = memoryMaterials(result, wiki, { scope })
+  const by = start => rows.find(r => r.title.startsWith(start))
+  assert.deepEqual([by('배포 리허설').recordedAt, by('배포 리허설').time.at], ['2026-11-20', null])
+  assert.deepEqual([by('브라우저 작업 기록').time.at, by('브라우저 작업 기록').recordedAt], ['2026-11-21', '2026-11-21'])
+  assert.deepEqual([by('PostgreSQL').status, by('PostgreSQL').statusAt, by('PostgreSQL').statusPending], ['done', '2026-11-23', undefined])
+  void prepareTurnMemory
+})

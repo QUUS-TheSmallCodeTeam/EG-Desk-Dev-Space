@@ -50,12 +50,21 @@ export const CATALOG_LIMIT = 80
 const catalogBlock = list => (list.length ? list.slice(0, CATALOG_LIMIT).map(p => `- ${compactText(p.title, 90)} | time=${p.time} | status=${p.status}`).join('\n') + (list.length > CATALOG_LIMIT ? `\n(${list.length - CATALOG_LIMIT} more stored pages are not listed)` : '') : '(none)')
 /**
  * The one rule that decides whether the mid-session fetch is skipped, from a triage result (also applied by the measurement scorer to real answers).
- * A decided courtesy "yes" skips. A decided need "no" skips only when the held content AND the complete list of other stored pages were shown and
- * recall is a decided "no". Anything else fetches.
+ * A decided courtesy "yes" skips. A decided need "no" skips when the conversation already holds pages, their content was shown to the triage,
+ * and the complete list of the other stored pages was shown: no new material is needed, and the held pages are what the turn refers to.
+ * Anything else fetches (an undecided need, nothing held, an incomplete list).
+ * Recall no longer overrides a decided need "no" (L7 c18). Pointing back to something said IN this conversation is not a memory fetch, and the
+ * scan cannot tell what "그 내용" is without the conversation (real all-on run 2026-11-25, s2 "방금 그 내용 정리해줘": need 0, recall 0.96 ->
+ * fetched; the scan then picked unrelated PostgreSQL pages at 0.90 / 0.98, and still 0.80 / 0.66 when told which held pages the previous
+ * reply was given with). In every real mid-session triage with the current inputs (9), a decided need "no" was never wrong; where material
+ * was missing (a-mid, j-mid) need was 1 although recall was high too. legacyRecall: true is the c11 rule, for the scorer of measurements
+ * that were made under it.
  */
-export function triageSkipsFetch(triage, { skipOnNeed = true, heldExcerpts = true } = {}) {
+export function triageSkipsFetch(triage, { skipOnNeed = true, heldExcerpts = true, legacyRecall = false } = {}) {
   if (triage?.courtesy?.state === 'yes') return true
-  return skipOnNeed !== false && heldExcerpts !== false && triage?.catalog?.complete === true && triage?.recall?.state === 'no' && triage?.need?.state === 'no'
+  if (skipOnNeed === false || heldExcerpts === false || triage?.catalog?.complete !== true || triage?.need?.state !== 'no') return false
+  if (legacyRecall === true) return triage?.recall?.state === 'no'
+  return Number.isSafeInteger(triage?.held) && triage.held > 0
 }
 const TRIAGE_RULES = ['You are a system judge deciding what stored memory a turn needs. Judge only from the message, the list of what the answering model already holds, the titles of the stored pages that are not held, and any live conversation shown. Never invent anything.',
   'A title tells you the topic of a stored page, not everything in it. The held list shows the start of each held page.'].join('\n')
@@ -92,6 +101,7 @@ export async function triageTurn({ message, heldTitles = [], heldDigest = null, 
     const result = await client.decide({ input, questions, timeoutMs, signal })
     return { status: 'ready', courtesy: ternary(result.answers?.tn_courtesy), need: ternary(result.answers?.tn_need), recall: ternary(result.answers?.tn_recall), record: ternary(result.answers?.tn_record),
       catalog: Array.isArray(stored) ? { listed: Math.min(stored.length, CATALOG_LIMIT), complete: stored.length <= CATALOG_LIMIT } : null, usage: result.usage ?? null,
+      held: Array.isArray(heldTitles) ? heldTitles.length : 0, // how many held pages the triage was shown (the skip rule needs at least one)
       ...(riders.length ? { extra: Object.fromEntries(riders.map(q => [q.name, result.answers?.[q.name] ?? { type: 'missing' }])) } : {}) }
   } catch (error) { return { status: 'fallback', reason: error?.code ?? 'unreachable', courtesy: { state: 'unknown', p: null }, need: { state: 'unknown', p: null }, recall: { state: 'unknown', p: null }, record: { state: 'unknown', p: null }, catalog: null, usage: null } }
 }
@@ -351,7 +361,9 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
         if (wiki.pages.has(id)) return { status: 'conflict', reason: 'page_exists' }
         // messageRef: the person's words already live in the chat store under this reference, so the page keeps the reference, not another copy.
         const viaRef = typeof messageRef === 'string' && messageRef.trim() !== ''
-        const raw = { id, title: compactText(message, 40), body: message, revision: '1', ...(viaRef ? { ref: messageRef } : {}), time: { slice: proposal.time.slice },
+        // time.at only where the proposer knows the date of the event itself (a Browser task's run); an utterance's event date is never computed.
+        const at = typeof proposal.time.at === 'string' && /^\d{4}-\d{2}-\d{2}/.test(proposal.time.at) && !Number.isNaN(Date.parse(proposal.time.at)) ? proposal.time.at : null
+        const raw = { id, title: compactText(message, 40), body: message, revision: '1', ...(viaRef ? { ref: messageRef } : {}), time: { slice: proposal.time.slice, ...(at ? { at } : {}) },
           provenance: { kind: provenance.kind, by: provenance.kind === 'agent_note' ? 'browser_task' : 'user', ...(provenance.basis ? { basis: provenance.basis } : {}) }, status: STATUS.has(proposal.status) ? proposal.status : 'unknown',
           scope: scope?.writeScope ?? null, ...(typeof proposal.spokenAt === 'string' ? { spokenAt: proposal.spokenAt } : {}), links }
         if (typeof persist === 'function') persist({ kind: 'page', page: raw, viaRef })
@@ -509,6 +521,8 @@ const materialKind = page => (typeof page.ref === 'string' && page.ref.startsWit
 // A random secret of this process: material keys cannot be computed outside it and change when the bridge restarts.
 const MATERIAL_SECRET = randomBytes(32)
 const materialKey = id => createHmac('sha256', MATERIAL_SECRET).update(id).digest('hex').slice(0, 32)
+const dateOf = value => (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value) && !Number.isNaN(Date.parse(value)) ? value.slice(0, 10) : null)
+const acceptedAt = page => (Array.isArray(page.statusReadings) ? page.statusReadings.filter(r => r?.state === 'accepted' && r.status === page.status).at(-1)?.confirmedAt ?? null : null)
 const bounded = (value, fallback, low, high) => (Number.isSafeInteger(value) ? Math.min(high, Math.max(low, value)) : fallback)
 
 // The pages of one turn's materials, in order: this turn's packet first (when it was attached), then the held ones. Permission per page.
@@ -560,6 +574,8 @@ export function memoryEvidence(result, wiki, { scope = null, attached = true, ch
  *   held true:  the answering model already holds the page from an earlier turn of this thread (a real delivery receipt whose revision and
  *               content still match). It says NOTHING about whether the page matters for this message: nobody judged that.
  *   alias:      M1..Mn, valid inside this array only. No page id, reference, revision, score or probability leaves through here.
+ *   recordedAt: YYYY-MM-DD when the record was made (a written page's creation, an utterance's time), when known. statusAt: YYYY-MM-DD when
+ *               the person confirmed its current status (a promoted reading). Both only when recorded; never computed from text.
  *   status:     the recorded status. statusReading: the judge's fallible reading of the record (present only when one was accepted).
  *               statusPending: a reported status waiting for the person's confirmation. Neither is verification nor write permission.
  *   links:      between two listed materials only (toAlias always resolves). Recorded, outgoing: same_task | follows_from | decided_in |
@@ -589,6 +605,8 @@ export function memoryMaterials(result, wiki, { scope = null, attached = true, e
         time: Object.freeze({ slice: page.time.slice, at: typeof page.time.at === 'string' ? page.time.at.slice(0, 10) : null }),
         provenance: Object.freeze({ kind: page.provenance.kind, by: page.provenance.by ?? null, basis: page.provenance.basis ?? null }),
         status: page.status, ...(!held && typeof pick?.statusRead === 'string' ? { statusReading: pick.statusRead } : {}), ...(typeof pending === 'string' ? { statusPending: pending } : {}),
+        // recordedAt: when the record was made (a written page's creation, an utterance's time); statusAt: when its status was confirmed by the person
+        ...(dateOf(page.spokenAt) ? { recordedAt: dateOf(page.spokenAt) } : {}), ...(dateOf(acceptedAt(page)) ? { statusAt: dateOf(acceptedAt(page)) } : {}),
         title: compactText(page.title, MATERIAL_LIMITS.titleChars), excerpt: page.body.length > chars ? `${page.body.slice(0, chars).trimEnd()} […]` : page.body,
         links: Object.freeze(links), held }, 'key', { value: materialKey(page.id), enumerable: false }))
     }))

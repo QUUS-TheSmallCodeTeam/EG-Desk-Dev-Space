@@ -42,3 +42,54 @@ test('product path: a referential follow-up\'s memory loop is told which held pa
   const rows = w.chat.memoryMaterialsFor(w.chat.runFor(sent))
   assert.ok(rows.length && rows.every(r => r.held && r.title.startsWith('A사')), rows.map(r => `${r.title}:${r.held}`).join(', '))
 })
+
+// ---- L7 c18: a referential follow-up with a decided need "no" fetches nothing; a genuine recall still fetches ----
+import { scriptedDecisions } from './egdesk-all-on.support.mjs'
+// The real answers of 2026-11-25 for this turn: the s2 triage of the all-on run, and the s2 scan Main sent in c17 (with the previous-reply line).
+const S2_TRIAGE = { tn_courtesy: 0, tn_need: 0, tn_recall: 0.96, tn_record: 0 }
+const S2_SCAN = { pg_0: 0.02, pg_1: 0.8, pg_2: 0.66, pg_3: 0.26, pg_4: 0.27, pg_5: 0.03, pg_6: 0.05 }
+const p = probability => ({ type: 'predicate', probability })
+function replayingTransport(overrides) {
+  const scripted = scriptedDecisions()
+  return async ({ wire }) => {
+    const answers = await scripted.answer(wire), names = wire.questions.map(q => q.name), message = /Message:\n([\s\S]*?)(?:"|$)/.exec(JSON.stringify(wire.input).replace(/\\n/g, '\n'))?.[1] ?? ''
+    // the scripted answers are in wire form (a list of { name, ... }); the real values replace those of the same name
+    for (const [when, values] of overrides) if (when(names, message)) for (const [name, v] of Object.entries(values)) {
+      if (!names.includes(name)) continue
+      const i = answers.findIndex(x => x?.name === name), real = { name, ...p(v) }
+      if (i >= 0) answers[i] = real; else answers.push(real)
+    }
+    return { status: 200, json: { answers, usage: { input_tokens: 10 } } }
+  }
+}
+const isTriage = names => names.includes('tn_need'), isScan = names => names.some(n => n.startsWith('pg_'))
+
+test('c18 product path: "방금 그 내용 정리해줘" with the real triage (need 0, recall 0.96) asks no scan and attaches no page; the held A사 pages are its materials', async t => {
+  const transport = replayingTransport([[(n, m) => isTriage(n) && m.includes('방금 그 내용'), S2_TRIAGE], [(n, m) => isScan(n) && m.includes('방금 그 내용'), S2_SCAN]])
+  const w = allOnWorld(t, { transport })
+  await w.settings.turnMemory.save('on')
+  w.step('m1'); await w.send(QUOTE); await w.idle(); await w.advance(3000); await w.answer('A사 견적은 v1 발송 후 v2 수정 계획 단계입니다.'); await w.idle()
+  w.step('m2'); const sent = await w.send('방금 그 내용 정리해줘'); await w.idle()
+  const features = w.decisionsIn('m2').map(d => d.feature)
+  assert.ok(features.includes('memory_triage') && !features.includes('memory_fetch'), `no scan: ${features}`)
+  const start = w.turnStarts().at(-1).params
+  assert.doesNotMatch(JSON.stringify(start.additionalContext), /PostgreSQL|헬스체크/, 'no PostgreSQL page reaches the answering model')
+  const rows = w.chat.memoryMaterialsFor(w.chat.runFor(sent))
+  assert.ok(rows.length >= 3 && rows.every(r => r.held && r.title.startsWith('A사')), rows.map(r => `${r.title}:${r.held}`).join(', '))
+})
+
+test('c18 product path: the same real answers under the c11 rule (recall overrides need) would fetch and attach the PostgreSQL plan; a genuine recall still fetches under c18', async t => {
+  const { triageSkipsFetch } = await import('../helper/egdesk-turn-memory.mjs')
+  const t2 = { courtesy: { state: 'no', p: 0 }, need: { state: 'no', p: 0 }, recall: { state: 'yes', p: 0.96 }, catalog: { complete: true }, held: 5 }
+  assert.deepEqual([triageSkipsFetch(t2), triageSkipsFetch(t2, { legacyRecall: true })], [true, false], 'c18 skips; the c11 rule fetched')
+  assert.equal(triageSkipsFetch({ ...t2, held: 0 }), false, 'nothing held: a decided need "no" alone does not skip')
+  assert.equal(triageSkipsFetch({ ...t2, need: { state: 'unknown', p: 0.5 } }), false, 'an undecided need fetches')
+  // a genuine recall about another matter, in the same conversation. Its triage values are ASSUMED to follow the real pattern of a-mid and
+  // j-mid (need 1 with recall high, 2026-11-24): nobody has measured this message.
+  const transport = replayingTransport([[(n, m) => isTriage(n) && m.includes('지난달 PG'), { tn_courtesy: 0, tn_need: 1, tn_recall: 1, tn_record: 0 }]])
+  const w = allOnWorld(t, { transport })
+  await w.settings.turnMemory.save('on')
+  w.step('m1'); await w.send(QUOTE); await w.idle(); await w.advance(3000); await w.answer('A사 견적은 v1 발송 후 v2 수정 계획 단계입니다.'); await w.idle()
+  w.step('m2'); await w.send('지난달 PG 마이그레이션 결정 뭐였지?'); await w.idle()
+  assert.ok(w.decisionsIn('m2').some(d => d.feature === 'memory_fetch'), 'a recall of material that is not held is fetched')
+})

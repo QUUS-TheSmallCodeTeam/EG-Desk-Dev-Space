@@ -164,7 +164,8 @@ export function scoreRun(def, planRun, results, wiki) {
       add('hard', 'triage courtesy is decided and as pre-registered', c.state === def.hard.triage.courtesy, `p=${c.p}`)
       add('hard', 'triage record is decided and as pre-registered', rec.state === def.hard.triage.record, `p=${rec.p}`)
       const catalogComplete = JSON.stringify(request.body.input).includes('Stored pages that are not held (titles only):') && !JSON.stringify(request.body.input).includes('more stored pages are not listed')
-      const skips = triageSkipsFetch({ courtesy: c, need: n, recall: state(a.tn_recall), catalog: { complete: catalogComplete } })
+      // the c11 rule: these runs were measured and scored under it
+      const skips = triageSkipsFetch({ courtesy: c, need: n, recall: state(a.tn_recall), catalog: { complete: catalogComplete } }, { legacyRecall: true })
       if (def.hard.triage.needNotNo) add('hard', 'triage does not skip the fetch (the rule applied to the answers; a wrong skip loses material)', !skips, `need=${n.p} recall=${state(a.tn_recall).p} skip=${skips}`)
       if (def.hard.triage.needNotNo) add('soft', 'triage need is not a decided "no"', n.state !== 'no', `p=${n.p}`)
       if (def.soft.triageNeed) add('soft', 'triage need is a decided yes', n.state === def.soft.triageNeed, `p=${n.p}`)
