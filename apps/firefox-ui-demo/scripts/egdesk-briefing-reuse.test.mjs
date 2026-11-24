@@ -3,6 +3,7 @@
 // those findings; the flow check loop runs as before; retrievals are proposals applied on the user's own screen (fold) with undo / Cmd+Z.
 // Mounted: production handler (new /decision/briefing-reuse route), Decisions client + shared budget, real calibration log, the support world
 // (real surface history, WorkbenchArrange and presentation controller on six real board cards). Fakes: DOM, provider (synthetic), the subjective model.
+import { lintGroupedRequest } from '../helper/egdesk-decision-grouping.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as WorkbenchArrange from '../overlay/resources/EGDeskWorkbenchArrange.sys.mjs';
@@ -72,6 +73,7 @@ test('parts: heading sections with the components that already cover them', asyn
 const dtoFor = async () => { const b = await board(); const e = enumerateBriefingFacts({ report: REPORT, candidates: b.candidates, currentAnswerId: CUR }); const parts = enumerateReportParts(REPORT, e.targets); return { b, e, parts, dto: reuseDto(e, parts) }; };
 test('reuse judge packet: a choice per component (retrieve only where the runtime offers it), a predicate per part, no id, path or coordinate', async () => {
   const { dto } = await dtoFor(); const p = prepareBriefingReuse({ mode: 'on', binding: 'b', dto });
+  { const lint = lintGroupedRequest(p.packet); assert.equal(lint.ok, true, JSON.stringify(lint.families)); assert.deepEqual(lint.families.map(f => f.family), ['component_T#', 'new_P#']) } // each component / part question names its own item
   assert.deepEqual(p.packet.questions.map(q => q.name), ['component_T1', 'component_T2', 'component_T3', 'component_T4', 'component_T5', 'component_T6', 'new_P1', 'new_P2', 'new_P3']);
   const opts = n => p.packet.questions.find(q => q.name === n).choices.map(c => c.value);
   assert.deepEqual(opts('component_T3'), ['reuse', 'irrelevant', 'retrieve']); for (const n of ['component_T1', 'component_T4', 'component_T5']) assert.deepEqual(opts(n), ['reuse', 'irrelevant'], n);

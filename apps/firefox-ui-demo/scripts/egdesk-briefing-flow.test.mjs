@@ -4,6 +4,7 @@
 // "where"; findings loop back to the subjective model (max 2 revisions); then the briefing is presented, or the chat answer stays with a note.
 // Mounted: the production Board/Decisions HTTP handler (new briefing routes), Decisions client + shared budget, the real calibration log, the support
 // world (real controller/WorkbenchArrange geometry for the board facts). Fakes: DOM, provider fetch (synthetic key, no network), the subjective model.
+import { lintGroupedRequest } from '../helper/egdesk-decision-grouping.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
@@ -231,6 +232,7 @@ test('closed wire shapes: the check DTO refuses extra fields, unknown items and 
   const out = []; await runBriefingFlow({ report: REPORT, candidates: b.candidates, decide: { placement: { prepare: async () => ({ status: 'prepared', preview: {}, ticket: 't' }), run: async () => ({ status: 'board' }), cancel: async () => ({}) },
     check: { prepare: async dto => { out.push(dto); return { status: 'disabled', reason: 'x' }; }, run: async () => ({}), cancel: async () => ({}) } }, engine: async () => design0() });
   const dto = out[0]; assert.ok(normalizeBriefingCheckDto(dto)); assert.ok(prepareBriefingCheck({ mode: 'on', binding: 'b', dto }).packet.questions.length > 3);
+  { const lint = lintGroupedRequest(prepareBriefingCheck({ mode: 'on', binding: 'b', dto }).packet); assert.equal(lint.ok, true, JSON.stringify(lint.families)) } // grouped issue_ questions each carry their own item
   for (const bad of [{ ...dto, extra: 1 }, { ...dto, items: [{ ...dto.items[0], name: 'free' }] }, { ...dto, items: [{ ...dto.items[0], aliases: ['S9'] }] }, { ...dto, steps: [{ ...dto.steps[0], id: 's1' }, ...dto.steps.slice(1)] },
     { ...dto, targets: [{ alias: 'T1', kind: 'source', label: 'ok', sourceId: 'leak' }, ...dto.targets.slice(1)] }]) assert.equal(normalizeBriefingCheckDto(bad), null);
   void checks;

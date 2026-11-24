@@ -179,7 +179,8 @@ export async function buildContaminationPlan() {
         if (!text.includes(firstText)) throw new Error(`${family}-${suffix}: the target is not quoted`)
         const id = `${family}-${suffix}`
         requests.push({ id, family, layout: suffix, targetSide, target: names[0], items: items.map(([side, x], i) => ({ name: names[i], side, why: x.why })), bytes, body,
-          spec: { id, file: `requests/${id}.json`, sha256: sha(bytes), estInputTokens: est(bytes), expect: expectFor(family, f.bar, items, names) } })
+          // The same-matter grouped bodies reproduce L1's c12 construction on purpose (the grouped-question lint fails them): marked diagnostic.
+          spec: { id, file: `requests/${id}.json`, sha256: sha(bytes), estInputTokens: est(bytes), ...(family === 'same-matter' && items.length > 1 ? { diagnostic: true } : {}), expect: expectFor(family, f.bar, items, names) } })
       }
     }
   } finally { for (const fn of cleanups) fn() }

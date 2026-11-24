@@ -81,3 +81,21 @@ test('grouping lint: builders asked directly (turn context catalog, draft check,
   for (const body of captured) { const r = lintGroupedRequest(body); assert.equal(r.ok, true, JSON.stringify(r.families.filter(f => f.problems.length))); r.families.forEach(f => families.add(f.family)) }
   for (const family of ['rel_#', 'claim_#', 'present_#', 'log_b#', 'wm_b#', 'wm_need_b#']) assert.ok(families.has(family), `${family} was linted (got ${[...families].join(',')})`)
 })
+
+test('grouping lint: the browser reflex (same_#, field_#) and session topic (topic_need_#) builders, through their own code', async () => {
+  const captured = []
+  const client = { async decide(request) { captured.push(request); return { answers: {}, latencyMs: 0 } } }
+  const { decideRecordedStep, mapValuesToFields } = await import('./egdesk-browser-reflex.mjs')
+  const { decisionThresholds } = await import('./egdesk-decision-questions.mjs')
+  const snapshot = { url: 'https://shop.example/checkout', text: '배송지 입력\n받는 분 이름\n연락처\n주소' }
+  await decideRecordedStep({ goal: '배송지 입력', snapshot, client, thresholds: decisionThresholds(),
+    recorded: { kind: 'maybe', maybe: [{ value: '[L1] 기본 배송지' }, { value: '[L2] 회사 배송지' }, { value: '[L3] 새 배송지 추가' }], item: { chose: '기본 배송지 사용' } } }).catch(() => null)
+  await mapValuesToFields({ keys: ['받는 분 이름', '연락처', '주소'], fieldOptions: [{ value: '[F1] 이름' }, { value: '[F2] 전화번호' }, { value: '[F3] 주소 입력' }], snapshot, client, thresholds: decisionThresholds() }).catch(() => null)
+  const { planSessionTopic } = await import('./egdesk-session-topic.mjs')
+  const row = (key, extra = {}) => ({ key, topic: key, parent: null, needs: [], userText: `${key} 질문`, assistantText: `${key} 답`, ...extra })
+  const topic = planSessionTopic({ turns: [row('a'), row('b', { parent: 'a', needs: ['a'] }), row('c')], currentKey: 'next' })
+  captured.push({ input: topic.input, questions: topic.questions })
+  const families = new Map()
+  for (const body of captured) { const r = lintGroupedRequest(body); assert.equal(r.ok, true, JSON.stringify(r.families.filter(f => f.problems.length))); r.families.forEach(f => families.set(f.family, f.kind)) }
+  assert.deepEqual([families.get('same_#'), families.get('field_#'), families.get('topic_need_#')], ['inline', 'inline', 'reference'])
+})
