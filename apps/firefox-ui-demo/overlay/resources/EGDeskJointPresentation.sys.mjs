@@ -2,7 +2,7 @@ import {worksitePlans} from './EGDeskAdjacentWorkbench.sys.mjs';
 import {overallPlans,describeComposition} from './EGDeskCompositionChoice.sys.mjs';
 // Privileged Joint Board preview. No preferences, network primitives or direct card mutations.
 export const PRESENTATION_OPTIONS = Object.freeze({ keep: '현재 배치 유지', overview: '선택 자료 전체 보기',
-  focus: '지정 자료 한 장에 집중', pair: '선택한 두 장 나란히 비교',front:'지정 자료만 앞으로',redesign:'재배치 제안',tidy:'자리를 살려 전체 정돈',handoff:'업무 순서대로 인계 보기',workbench:'주 작업과 참고 자료 함께 보기' });
+  focus: '지정 자료 한 장에 집중', pair: '선택한 두 장 나란히 비교',front:'지정 자료만 앞으로',redesign:'재배치 제안',retrieval:'오래된 결과 접기',tidy:'자리를 살려 전체 정돈',handoff:'업무 순서대로 인계 보기',workbench:'주 작업과 참고 자료 함께 보기' });
 export const PRESENTATION_DECISION_PATHS = Object.freeze(Object.fromEntries(['prepare', 'run', 'cancel']
   .map(k => [k, `/decision/board-presentation/${k}`])));
 const QUESTION = '요청의 목적에 맞는 내 화면 구성 한 가지를 고르세요. 근거가 없으면 현재 배치 유지입니다. 자료 내용 추론이나 권한 변경은 하지 마세요.';
@@ -33,7 +33,8 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const undoStillValid = (u, now) => !!u && !!now &&
   u.before.targets.every(({ id }) => { const a = u.snapshot.cards.find(c => c.id === id), c = now.cards.find(c => c.id === id);
     return !!a && !!c && same(a.rect, c.rect) && a.z === c.z; }) &&
-  (!u.before.camera || same(['x', 'y', 'zoom'].map(k => u.snapshot.camera[k]), ['x', 'y', 'zoom'].map(k => now.camera[k])));
+  (!u.before.camera || same(['x', 'y', 'zoom'].map(k => u.snapshot.camera[k]), ['x', 'y', 'zoom'].map(k => now.camera[k]))) &&
+  (u.before.collapse || []).every(({ id, applied }) => now.cards.find(c => c.id === id)?.collapsed === applied);
 // What a failed request says on screen: the same sentences the DM chooser shows for the same closed reasons (surface chat-choice outcomes).
 const FAILURE_NOTES = Object.freeze({
   no_credit: 'OpenAI API 크레딧이 부족해 추천을 받지 못했습니다. OpenAI 결제 설정에서 크레딧을 확인해 주세요.',
@@ -133,7 +134,7 @@ function snapshot(raw) {
     .flatMap(c => {
       if (seen.has(c.id)) return [];
       seen.add(c.id);
-      return [{ id: c.id, revision: c.revision, rect: rect(c.rect),z:Number.isFinite(c.z)?c.z:0,inFrame:c.inFrame!==false, title: String(c.title || '자료'),
+      return [{ id: c.id, collapsed: c.collapsed === true, revision: c.revision, rect: rect(c.rect),z:Number.isFinite(c.z)?c.z:0,inFrame:c.inFrame!==false, title: String(c.title || '자료'),
         kind: KINDS.has(c.kind) ? c.kind : null, maySendDescriptor: c.maySendDescriptor === true,
         movable: c.movable === true, pinned: c.pinned !== false,
         minWidth: numeric(c.minWidth) && c.minWidth > 0 ? c.minWidth : 230,
@@ -222,7 +223,7 @@ export function createPresentationController(h) {
   function designScene(key) {
     const s = read(key);
     return s ? { viewport: s.viewport, camera: s.camera, topZ: s.topZ, obstacles: s.obstacles, links: s.links,
-      cards: s.cards.map(c => ({ id: c.id, rect: c.rect, z: c.z, kind: c.kind, maySendDescriptor: c.maySendDescriptor, movable: c.movable, pinned: c.pinned, inFrame: c.inFrame, minWidth: c.minWidth, minHeight: c.minHeight })) } : null;
+      cards: s.cards.map(c => ({ id: c.id, rect: c.rect, z: c.z, kind: c.kind, maySendDescriptor: c.maySendDescriptor, movable: c.movable, pinned: c.pinned, inFrame: c.inFrame, collapsed: c.collapsed === true, minWidth: c.minWidth, minHeight: c.minHeight })) } : null;
   }
   // Canvas design check, write side: an already validated redesign (EGDeskCanvasRedesign) becomes ONE preview choice. It is treated like any model
   // result: nothing moves until the user applies it, and apply re-checks mode, key and grants and the time window, then uses the same commit / undo / history.
@@ -234,6 +235,18 @@ export function createPresentationController(h) {
     a.redesign = { expires: now() + RESULT_TTL_MS };
     if (a.snapshot.decision) a.modelChoice = { previous: a.modelChoice?.previous ?? a.choice, expires: a.redesign.expires };
     a.choice = 'redesign'; a.message = '제안한 구성을 미리 보는 중입니다. 아직 적용하지 않았습니다.'; emit();
+    return true;
+  }
+  // A retrieval proposal (EGDeskBriefing reuse judgment): fold stale outputs this Agent made for an earlier answer. Personal screen only: one preview
+  // choice, applied through the same commit / undo / history with the same apply-time authority; nothing is deleted and no shared Board data is written.
+  function offerRetrieval(plan) {
+    if (!active || !sync() || active.job || plan?.option !== 'retrieval' || !Array.isArray(plan.collapse) || !plan.collapse.length) return false;
+    const a = active, byId = new Map(a.snapshot.cards.map(c => [c.id, c]));
+    if (!plan.collapse.every(x => byId.get(x.id) && byId.get(x.id).collapsed !== true && x.value === true) || new Set(plan.collapse.map(x => x.id)).size !== plan.collapse.length) return false;
+    a.plans = { ...choices(a), retrieval: { option: 'retrieval', camera: null, framing: null, targets: [], collapse: plan.collapse.map(x => ({ id: x.id, value: true })) } };
+    a.retrieval = { expires: now() + RESULT_TTL_MS };
+    if (a.snapshot.decision) a.modelChoice = { previous: a.modelChoice?.previous ?? a.choice, expires: a.retrieval.expires };
+    a.choice = 'retrieval'; a.message = '제안한 구성을 미리 보는 중입니다. 아직 적용하지 않았습니다.'; emit();
     return true;
   }
   function open(key, preferredId = null) {
@@ -266,7 +279,7 @@ export function createPresentationController(h) {
     if (!sync() || !Object.hasOwn(PRESENTATION_OPTIONS, option) || !choices(active)[option]) return;
     discard(active); active.modelChoice = null; active.choice = option; active.message = '';
     // A model-originated redesign keeps its apply-time authority and time window whichever way the user steps between previews.
-    if (option === 'redesign' && active.redesign && active.snapshot.decision) active.modelChoice = { previous: 'keep', expires: active.redesign.expires };
+    if ((option === 'redesign' || option === 'retrieval') && active[option] && active.snapshot.decision) active.modelChoice = { previous: 'keep', expires: active[option].expires };
     emit();
   }
   function expire(a, job) {
@@ -395,12 +408,13 @@ export function createPresentationController(h) {
     if (!plan || a.job) return false;
     if (plan.option === 'keep') { close({ restoreFocus: true }); return true; }
     const before = { camera: plan.camera ? { x: a.snapshot.camera.x, y: a.snapshot.camera.y, zoom: a.snapshot.camera.zoom } : null,
-      targets: plan.targets.map(({id,z})=>{const c=a.snapshot.cards.find(c=>c.id===id);return {id,rect:rect(c.rect),...(Number.isFinite(z)?{z:c.z}:{})};}) };
-    const { camera, targets } = plan, key = a.key;
+      targets: plan.targets.map(({id,z})=>{const c=a.snapshot.cards.find(c=>c.id===id);return {id,rect:rect(c.rect),...(Number.isFinite(z)?{z:c.z}:{})};}),
+      ...(plan.collapse?.length ? { collapse: plan.collapse.map(({ id, value }) => ({ id, value: a.snapshot.cards.find(c => c.id === id)?.collapsed === true, applied: value })) } : {}) };
+    const { camera, targets } = plan, key = a.key, collapse = plan.collapse || [];
     // Dismiss first: camera/geometry host notifications cannot invalidate a committing panel.
     close({ restoreFocus: true });
     const token = `arrange-${++applied}`;
-    if (!same(a.snapshot, read(key)) || h.commit(key, { camera, targets }, { kind: 'apply', token }) !== true) {
+    if (!same(a.snapshot, read(key)) || h.commit(key, { camera, targets, ...(collapse.length ? { collapse } : {}) }, { kind: 'apply', token }) !== true) {
       h.notice?.('화면이 바뀌어 적용하지 않았습니다. 아무것도 옮기지 않았습니다.');
       return false;
     }
@@ -421,7 +435,7 @@ export function createPresentationController(h) {
   }
   // The global Undo/Redo reverted or re-applied this Apply: the panel's own inverse no longer describes the screen.
   const forgetUndo = token => { if (undo && undo.token === token) undo = null; };
-  return { open, close, sync, view, select, focus, choose, prepare, confirm, cancelDecision, apply, undo: undoOnce, forgetUndo, designScene, offerRedesign };
+  return { open, close, sync, view, select, focus, choose, prepare, confirm, cancelDecision, apply, undo: undoOnce, forgetUndo, designScene, offerRedesign, offerRetrieval };
 }
 
 // Firefox chrome UI: real HTML controls, modeless, with an independent, non-hit-testable world layer.
@@ -531,7 +545,7 @@ export function createJointPresentation(h) {
     const choices = make('fieldset', null, { ...test('choices') });
     choices.append(legend('로컬 미리보기'));
     for (const [option, label] of Object.entries(PRESENTATION_OPTIONS)) {
-      if (option === 'redesign' && !v.options.includes('redesign')) continue; // exists only while a validated redesign is on offer
+      if ((option === 'redesign' || option === 'retrieval') && !v.options.includes(option)) continue; // exist only while a validated proposal is on offer
       const row = make('label', null, { class: 'egd-joint-presentation-choice' });
       const radio = make('input', null, { type: 'radio', name: 'joint-presentation-option', value: option, ...control(option) });
       radio.disabled = !v.options.includes(option); radio.checked = option === v.choice;
@@ -543,7 +557,7 @@ export function createJointPresentation(h) {
       { role: 'status', ...test('status') });
     if (!status.textContent) status.hidden = true;
     const actions = make('footer', null);
-    const applyText = ({redesign:'내 화면에 적용',front:'이 자료만 앞으로',tidy:'내 책상 정돈 적용',handoff:'내 화면에 인계 순서 적용',workbench:'내 작업 공간에 적용', pair: '두 장을 내 화면에 배치', overview: '내 카메라에 적용', focus: '내 카메라에 적용' })[v.choice] || '변경 없이 닫기';
+    const applyText = ({redesign:'내 화면에 적용',retrieval:'내 화면에 적용',front:'이 자료만 앞으로',tidy:'내 책상 정돈 적용',handoff:'내 화면에 인계 순서 적용',workbench:'내 작업 공간에 적용', pair: '두 장을 내 화면에 배치', overview: '내 카메라에 적용', focus: '내 카메라에 적용' })[v.choice] || '변경 없이 닫기';
     const apply = button(applyText, 'apply', () => api.apply());
     apply.disabled = !!v.phase;
     actions.append(apply, button('취소', 'cancel', () => api.close({ restoreFocus: true })));
@@ -606,5 +620,6 @@ export function createJointPresentation(h) {
     forgetUndo(token) { api.forgetUndo(token); },
     designScene(boardKey) { return api.designScene(boardKey); },
     offerRedesign(plan) { return api.offerRedesign(plan); },
+    offerRetrieval(plan) { return api.offerRetrieval(plan); },
   };
 }

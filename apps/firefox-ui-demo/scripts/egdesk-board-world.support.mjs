@@ -18,7 +18,7 @@ class Node {
   constructor(tag, attrs = {}) { this.tag = tag; this.attrs = { ...attrs }; this.kids = []; this.listeners = {}; this.dataset = {}; this.isConnected = true;
     this.style = { setProperty() {} }; this.parentNode = null; this.hidden = false; this.checked = false; this.disabled = false; this.value = ''; this._text = ''; }
   get id() { return this.attrs.id; } set id(v) { this.attrs.id = v; }
-  get classList() { const c = () => String(this.attrs.class || '').split(/\s+/); return { contains: x => c().includes(x), add: x => { this.attrs.class = [...c(), x].join(' '); } }; }
+  get classList() { const c = () => String(this.attrs.class || '').split(/\s+/); return { contains: x => c().includes(x), add: x => { this.attrs.class = [...new Set([...c(), x])].join(' '); }, remove: x => { this.attrs.class = c().filter(y => y !== x).join(' '); } }; }
   get textContent() { return this._text + this.kids.map(k => k.textContent ?? '').join(''); } set textContent(v) { this._text = v; this.kids = []; }
   setAttribute(k, v) { this.attrs[k] = String(v); } getAttribute(k) { return this.attrs[k] ?? null; } hasAttribute(k) { return k in this.attrs; } removeAttribute(k) { delete this.attrs[k]; }
   append(...n) { for (const x of n) { x.parentNode = this; this.kids.push(x); } } appendChild(n) { this.append(n); }
@@ -53,6 +53,8 @@ export function world({ WorkbenchArrange, http, grant, spec = DEFAULT_SPEC }) {
     querySelectorAll: sel => sel === '.egd-memo-card' ? [] : layer.kids.filter(k => k.isConnected && k.matches('.egd-canvas-card')) };
   const mk = (id, rect, z, data) => { const n = new Node('div', { id, class: 'egd-canvas-card ' + (data ? '' : 'egd-browser-card') }); n.ownerDoc = doc; Object.assign(n.dataset, data || {});
     layer.append(n); poses.set(id, { ...rect, zIndex: z });
+    // like the surface's windows: a fold is a class on the card, set through card._setWindowCollapsed (quiet = no dirty mark of its own)
+    n._setWindowCollapsed = (v) => { if (v) n.classList.add('egd-card-collapsed'); else n.classList.remove('egd-card-collapsed'); return !!v; };
     n.getBoundingClientRect = () => { const p = poses.get(id); return { x: p.x, y: p.y, width: p.width, height: p.height, left: p.x, top: p.y, right: p.x + p.width, bottom: p.y + p.height }; }; return n; };
   const jd = (item, access) => ({ projectionId: 'proj1', jointItem: item, jointLease: access, jointVersion: '1', jointManaged: 'card' });
   // world coordinates include the projection offset; the stored pose is relative to it (pose() subtracts it)
@@ -102,6 +104,7 @@ export function world({ WorkbenchArrange, http, grant, spec = DEFAULT_SPEC }) {
     assert.ok(state.canvasLayoutHistory.record({ label: 'move', items: [{ id, before, after: { ...before, x: before.x + dx } }] })); applyPersistentEntityGeometry(doc.getElementById(id), { x: before.x + dx }); real.markDirty?.(); JD.recordPose(doc.getElementById(id)); };
   // Persisted layout must equal what is on screen for both Board cards (the non-Board card C is not part of the pose store).
   const persistedMatchesScreen = () => JSON.stringify(reloaded()) === JSON.stringify(seen().cards.filter(c => spec.cards.some(x => x.id === c[0])));
-  return { state, poses, notices, httpLog, fetches, JD, doc, control, ui, seen, reloaded, key, arrangeWith, panelUndo, manualMove, persistedMatchesScreen, prefWrites: () => prefWrites, sessionSaves: () => sessionSaves, pref: () => prefText, real };
+  const collapsedIds = () => [...layer.kids].filter(k => k.isConnected && k.classList.contains('egd-card-collapsed')).map(k => k.id);
+  return { collapsedIds, state, poses, notices, httpLog, fetches, JD, doc, control, ui, seen, reloaded, key, arrangeWith, panelUndo, manualMove, persistedMatchesScreen, prefWrites: () => prefWrites, sessionSaves: () => sessionSaves, pref: () => prefText, real };
 }
 

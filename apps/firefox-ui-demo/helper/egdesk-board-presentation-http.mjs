@@ -5,7 +5,7 @@ import { createDecisionClient, DECISIONS_ENDPOINT, DECISION_MODEL, FOREGROUND_DE
 import { DEFAULT_DECISION_THRESHOLDS } from './egdesk-decision-questions.mjs'
 import { normalizeBoardPresentationScene, prepareBoardPresentation, readBoardPresentation } from './egdesk-board-presentation-plan.mjs'
 import { canvasCheckCalibrationEntry, prepareCanvasDesignCheck, readCanvasDesignCheck } from './egdesk-canvas-design-check.mjs'
-import { briefingCheckCalibrationEntry, placementCalibrationEntry, prepareBriefingCheck, prepareBriefingPlacement, readBriefingCheck, readBriefingPlacement } from './egdesk-briefing-flow.mjs'
+import { briefingCheckCalibrationEntry, briefingReuseCalibrationEntry, placementCalibrationEntry, prepareBriefingCheck, prepareBriefingPlacement, prepareBriefingReuse, readBriefingCheck, readBriefingPlacement, readBriefingReuse } from './egdesk-briefing-flow.mjs'
 import { attachBoardVisual, MAX_BOARD_VISUAL_IMAGE_CHARS, validateBoardVisual } from './egdesk-board-visual-packet.mjs'
 
 const ROOT = '/decision/board-presentation'
@@ -17,6 +17,7 @@ const JUDGES = Object.freeze({
   '/decision/canvas-check': { prepare: prepareCanvasDesignCheck, read: readCanvasDesignCheck, entry: canvasCheckCalibrationEntry },
   '/decision/briefing-placement': { prepare: prepareBriefingPlacement, read: readBriefingPlacement, entry: placementCalibrationEntry },
   '/decision/briefing-check': { prepare: prepareBriefingCheck, read: readBriefingCheck, entry: briefingCheckCalibrationEntry },
+  '/decision/briefing-reuse': { prepare: prepareBriefingReuse, read: readBriefingReuse, entry: briefingReuseCalibrationEntry },
 })
 const JUDGE_ROUTES = new Map(Object.entries(JUDGES).flatMap(([root, judge]) => ['prepare', 'run', 'cancel'].map(action => [`${root}/${action}`, { action, judge }])))
 const CHECK_MAX_BODY_BYTES = 16384
