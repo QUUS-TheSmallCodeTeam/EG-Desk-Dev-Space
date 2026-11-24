@@ -63,6 +63,20 @@ test('the room\'s plan follows ITS account: the default changing is no matter, a
   assert.throws(() => f.runtime.plans.view(plan.planId), { code: 'PLAN_NOT_FOUND' }, 'the room moved to the default account: the plan of the old account stays with it')
 })
 
+test('the default sign-in changing while a profile room\'s step is being sent does not end its delegation (the scope does not move with the default)', async t => {
+  const f = await fixture(t, { defaultOwner: 'email:a@example.test' })
+  f.runtime.observeAuth({ signedIn: true, accountKey: 'codex:chatgpt:a' })
+  const originalSend = f.chat.send
+  f.chat.send = async body => { f.w.defaultOwner = 'email:c@example.test'; f.runtime.observeAuth({ signedIn: true, accountKey: 'codex:chatgpt:c' }); return originalSend(body) }
+  const work = await f.runtime.plans.propose({ run: f.run('conv-w', WORK), args: PLAN })
+  await f.runtime.plans.approve(work.planId)
+  for (let i = 0; i < 300 && !f.w.sends.length; i++) await delay(5)
+  await delay(50)
+  const attempt = f.runtime.adapter.getState(work.graphId).attempts[0]
+  assert.equal(attempt?.phase, 'accepted', 'the native send was accepted under the room\'s scope (not ended by the default account changing mid-send)')
+  assert.equal(f.w.sends.length, 1)
+})
+
 test('the default room is unchanged: it needs the default sign-in to plan, and a profile account does not matter to it; the two kinds never see each other\'s plans', async t => {
   const f = await fixture(t, { defaultOwner: null })
   await assert.rejects(f.runtime.plans.propose({ run: f.run('conv-d', MAIN), args: PLAN }), { code: 'TASK_AUTHORITY' })
