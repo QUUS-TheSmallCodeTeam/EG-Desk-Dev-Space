@@ -10,7 +10,7 @@ import path from 'node:path'
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
 import { DECISIONS_ENDPOINT, DECISION_MODEL } from '../helper/egdesk-decision-client.mjs'
 import { allOnWorld, scriptedDecisions } from './egdesk-all-on.support.mjs'
-import { CHECK_NAMES, DEFAULT_CAPS, OWNERS, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, PLAN_FILE_V6, PLAN_FILE_V7, SCRIPT_FILE, STEPS, createMeasureTransport, loadJourneyPlan, main, runJourney } from './egdesk-all-on-live-measure.mjs'
+import { CHECK_NAMES, DEFAULT_CAPS, OWNERS, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, PLAN_FILE_V6, PLAN_FILE_V7, PLAN_FILE_V8, SCRIPT_FILE, STEPS, createMeasureTransport, loadJourneyPlan, main, runJourney } from './egdesk-all-on-live-measure.mjs'
 
 const KEY = 'sk-synthetic-not-a-key-l2c11-000000000001'
 const CORE = STEPS.filter(s => s.since === undefined)
@@ -137,8 +137,8 @@ test('guard: every body of the run came from the product client; a body handed t
 
 test('guard (static): the script and its plan build no request and know no question name, so a change of request shape needs no change here', async () => {
   // v1: its whole text. v2: what the script reads (ids, checks, arguments); its 'predicted' prose quotes the c16 evidence by question name.
-  const v2 = JSON.parse(readFileSync(PLAN_FILE_V2, 'utf8')), v3 = JSON.parse(readFileSync(PLAN_FILE_V3, 'utf8')), v4 = JSON.parse(readFileSync(PLAN_FILE_V4, 'utf8')), v5 = JSON.parse(readFileSync(PLAN_FILE_V5, 'utf8')), v6 = JSON.parse(readFileSync(PLAN_FILE_V6, 'utf8')), v7 = JSON.parse(readFileSync(PLAN_FILE_V7, 'utf8'))
-  const source = readFileSync(SCRIPT_FILE, 'utf8'), plan = readFileSync(PLAN_FILE, 'utf8') + JSON.stringify([...v2.steps, ...v3.steps, ...v4.steps, ...v5.steps, ...v6.steps, ...v7.steps, { id: 'world', caps: null, expect: [{ id: 'env', check: null, args: v4.world }, { id: 'env5', check: null, args: v5.world }, { id: 'env6', check: null, args: v6.world }, { id: 'env7', check: null, args: v7.world }] }].map(s => ({ id: s.id, caps: s.caps, expect: s.expect.map(e => ({ id: e.id, check: e.check, args: e.args ?? null })) })))
+  const v2 = JSON.parse(readFileSync(PLAN_FILE_V2, 'utf8')), v3 = JSON.parse(readFileSync(PLAN_FILE_V3, 'utf8')), v4 = JSON.parse(readFileSync(PLAN_FILE_V4, 'utf8')), v5 = JSON.parse(readFileSync(PLAN_FILE_V5, 'utf8')), v6 = JSON.parse(readFileSync(PLAN_FILE_V6, 'utf8')), v7 = JSON.parse(readFileSync(PLAN_FILE_V7, 'utf8')), v8 = JSON.parse(readFileSync(PLAN_FILE_V8, 'utf8'))
+  const source = readFileSync(SCRIPT_FILE, 'utf8'), plan = readFileSync(PLAN_FILE, 'utf8') + JSON.stringify([...v2.steps, ...v3.steps, ...v4.steps, ...v5.steps, ...v6.steps, ...v7.steps, ...v8.steps, { id: 'world', caps: null, expect: [{ id: 'env', check: null, args: v4.world }, { id: 'env5', check: null, args: v5.world }, { id: 'env6', check: null, args: v6.world }, { id: 'env7', check: null, args: v7.world }, { id: 'env8', check: null, args: v8.world }] }].map(s => ({ id: s.id, caps: s.caps, expect: s.expect.map(e => ({ id: e.id, check: e.check, args: e.args ?? null })) })))
   const imports = [...source.matchAll(/^import .* from '([^']+)'/gm)].map(m => m[1]).sort()
   // c17 (L6): the shared last-send stamp wraps the fetch handed in on --send; it builds no request and knows no question.
   assert.deepEqual(imports, ['../helper/egdesk-decision-client.mjs', '../helper/egdesk-decision-real-runner.mjs', '../helper/egdesk-decision-send-stamp.mjs', '../overlay/resources/EGDeskBriefingHost.sys.mjs',
