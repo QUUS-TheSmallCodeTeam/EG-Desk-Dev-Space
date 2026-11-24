@@ -72,7 +72,7 @@ export function compactionSignal(message) {
 const FLOW_OWN_KINDS = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
 import { SPEECH_AT_PAGE, speechSegments } from './egdesk-speech-grounding.mjs'
 import { deriveTurnPosition, memoryMaterials, prepareTurnMemory } from './egdesk-turn-memory.mjs'
-import { createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry } from './egdesk-browser-task.mjs'
+import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, entryQuestion, readBrowserEntry } from './egdesk-browser-task.mjs'
 import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection } from './egdesk-wiki-reconstruction.mjs'
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
@@ -840,6 +840,9 @@ export class CodexChatRuntime {
     this.browserEntryRuns = new Set() // in-flight advisory entry jobs (never awaited by a turn)
     this.browserEntryShadow = new Map() // runId -> what the advisory entry decision WOULD have done; in memory only, bounded
     this.browserTaskStore = null // lazy: objective browser tasks of the direct entry ('on' only)
+    this.browserRunHolds = new WeakMap() // run -> a browser-task run that stays open across its question, the in-run reply and the report turn
+    this.browserRunJobs = new Set() // in-run resumes of the objective loop (never awaited by a request)
+    this.turnAliases = new Map() // runKey(thread, later native turn) -> the run id that turn continues (a held-open browser-task run)
     this.compactedThreads = new Set() // native threads whose context the engine said was compacted (see compactionSignal); bounded
     this.topicAnswerGuards = new WeakMap() // private, bounded proof; never checkpointed
     this.topicIntakes = new WeakMap() // accepted local request -> prospective generation, never copied to checkpoints
@@ -2645,6 +2648,10 @@ export class CodexChatRuntime {
       // Direct browser entry, 'on' (flag decisionContext.browserEntry.mode() === 'on', default off): the objective loop runs on a pre-turn
       // binding BEFORE the native turn exists, and the subjective model gets only the closed note. Any failure here means an ordinary turn.
       if (bounded && policy === BROWSER_BOUNDED && browserInteractionRequested && this.browserEntryMode() === 'on') browserPre = await this.runBrowserEntryOn(body, context, preparedProviders)
+      // Completed messages only (the held-answer mode, decisionContext.draftCheck 'on'): the subjective model's message for a browser task
+      // (its question to the person, or its final report) is held and posted once, like any held answer. No second mechanism: the same
+      // guard, settle point and post. The draft check itself stays ineligible for a bounded turn, so the original text is posted.
+      if (browserPre?.note && this.browserTaskHoldEligible()) { context.draftHold = pending.draftHold = true; context.browserTaskTurn = true }
       const browserTaskContext = browserPre?.note ? { egdesk_browser_task: { kind: 'application', value: browserPre.note } } : null
       // Re-checked at the last moment: the mode, every page's permission and the key must still hold, or nothing is attached.
       const memoryPacket = memoryReady && this.turnMemoryMayDispatch(memoryTurn, additionalContext) ? memoryTurn.result.packet : null
@@ -2725,7 +2732,16 @@ export class CodexChatRuntime {
       run.parentTurnConfiguration = readerConfiguration
       this.emit(run, 'run.configuration', { configuration: readerConfiguration })
       for (const provider of preparedProviders.keys()) {
-        if (browserPre && provider === browserPre.provider) { await this.callProvider(provider, 'adoptRun', run, preparedProviders.get(provider), browserPre.preRun); browserPre.adopted = true; continue }
+        if (browserPre && provider === browserPre.provider) {
+          await this.callProvider(provider, 'adoptRun', run, preparedProviders.get(provider), browserPre.preRun); browserPre.adopted = true
+          // A browser-task turn in the live-session mode (held messages + heartbeat + a store for in-run replies): this run may stay open
+          // after its question so the reply resumes the task INSIDE the run (see holdRunForBrowserReply). Everything a later native turn
+          // of the same run needs is kept here; nothing is decided yet.
+          if (context.browserTaskTurn === true && context.heartbeat && this.store) this.browserRunHolds.set(run, { phase: 'turn', turnId: run.runId, questionId: null, timer: null, cancelled: false, handedOff: browserPre.handedOff === true,
+            engine, slot, epoch, key: context.clientThreadId || cid, hosts: this.browserEntryHosts(body), additionalContext: additionalContext || null,
+            base: { threadId: cid, ...QA_TURN_OVERRIDES, ...(overrides.cwd ? { cwd: overrides.cwd } : {}), ...(overrides.model ? { model: overrides.model } : {}), ...(effort !== undefined ? { effort } : {}) } })
+          continue
+        }
         await this.callProvider(provider, 'bindRun', run, preparedProviders.get(provider), readerConfiguration, provider === this.contexts ? contextAuthority : undefined)
       }
       if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
@@ -3105,7 +3121,16 @@ export class CodexChatRuntime {
     if (TERMINAL.has(run.status)) return { accepted: false, alreadyTerminal: true, conversationId: run.conversationId, runId: run.runId, status: run.status }
     for (const provider of this.toolProviders) provider.cancelRun?.(run)
     if (run.stopRequested) return { accepted: true, stopRequested: true, conversationId: run.conversationId, runId: run.runId }
-    await this.engineOf(run.conversationId).interruptTurn(run.conversationId, run.runId, this.threadOperationSlot(run.conversationId))
+    // A held-open browser-task run has no live native turn while it waits for the reply or while the objective loop works: it is stopped here.
+    const held = this.browserRunHolds.get(run)
+    if (held && held.phase !== 'turn') {
+      held.cancelled = true
+      run.stopRequested = true
+      this.emit(run, 'run.stop_requested', { stopRequested: true, status: run.status })
+      await this.finish(run, { id: run.runId, status: 'interrupted', items: [], error: null, itemsView: 'full' })
+      return { accepted: true, stopRequested: true, conversationId: run.conversationId, runId: run.runId }
+    }
+    await this.engineOf(run.conversationId).interruptTurn(run.conversationId, held?.turnId || run.runId, this.threadOperationSlot(run.conversationId))
     run.stopRequested = true
     this.emit(run, 'run.stop_requested', { stopRequested: true, status: run.status })
     return { accepted: true, stopRequested: true, conversationId: run.conversationId, runId: run.runId }
@@ -3811,6 +3836,7 @@ export class CodexChatRuntime {
     // Anything that comes from the engine for a live conversation moves the "last engine event" mark on its heartbeat's clock.
     // A child Agent's events count for its parent conversation (the conversation's own events are marked on arrival, see markEngineActivity).
     if (this.heartbeatThreads.size && event.parentThreadId && !this.heartbeatThreads.has(event.threadId)) this.heartbeatThreads.get(event.parentThreadId)?.mark('engine', 'tool')
+    if (this.turnAliases.size && event.turnId) { const to = this.turnAliases.get(runKey(event.threadId, event.turnId)); if (to) event.turnId = to }
     const pending = this.pendingStarts.get(event.threadId) || this.pendingResumes.get(event.threadId)
     const live = this.runs.get(runKey(event.threadId, event.turnId))
     const heldNow = live ? this.heldGuard(live) : null
@@ -4715,6 +4741,130 @@ export class CodexChatRuntime {
 
   browserEntryIdle() { return Promise.allSettled([...this.browserEntryRuns]) }
 
+  // The same gate as held answers, without the per-turn eligibility (a browser-task turn is bounded): the held mode is on and Decisions is usable.
+  browserTaskHoldEligible() {
+    try {
+      const setup = this.decisionContext
+      return this.draftCheckMode() === 'on' && Boolean(setup?.client) && ['advisory', 'on'].includes(setup.mode?.()) && setup.configured?.() === true
+    } catch { return false }
+  }
+
+  // ---- A browser-task run that stays open (live-session mode: held messages + heartbeat + in-run reply) ----
+  // The objective loop runs before the first native turn (there is nothing to say yet). From its first hand-off on, the run exists:
+  //   native turn 1 words the question (one completed message) -> the run stays open with run.replyOpen -> the person's reply comes
+  //   INTO the run -> the objective loop resumes inside the run (the heartbeat may speak: allowIntermediateMessages) -> native turn 2 of
+  //   the same thread, started with the person's reply as its user message and the closed note, words the report (one completed message)
+  //   -> the run ends. Every sentence is written by the subjective model in its own thread; the run is the only thing that spans.
+  browserRunIdle() { return Promise.allSettled([...this.browserRunJobs]) }
+
+  holdRunForBrowserReply(run, turn) {
+    const hold = this.browserRunHolds.get(run)
+    if (!hold || hold.cancelled) return false
+    if (hold.phase !== 'turn') return true // waiting or working: a late completion of an earlier turn changes nothing
+    if (turn?.id && hold.turnId && turn.id !== hold.turnId && turn.id !== run.runId) return true
+    // Only the turn that worded a hand-off (the task's question or its "cannot proceed") leaves a reply open. A turn that worded the
+    // report, or that answered a reply the task did not take, ends the run.
+    if (hold.handedOff !== true) return false
+    try {
+      const flow = this.flowRuns.get(run), task = this.browserTaskStore?.paused(hold.key) ?? null
+      const question = [...run.messages].reverse().find(m => m.role === 'assistant' && m.status === 'complete' && !flow?.sent.some(row => row.id === m.id))
+      if (!flow || !task || !this.store || run.status !== 'inProgress' || !question || question.id === hold.questionId || this.heartbeatMode() !== 'on' || !this.browserTaskHoldEligible()) return false
+      hold.phase = 'waiting'; hold.questionId = question.id
+      this.browserTaskStore.markAsked(task, true)
+      flow.closed = false; flow.question = { id: question.id, pending: true }
+      try { flow.heartbeat.resume() } catch { /* the heartbeat may have reached its own limit */ }
+      this.setReplyOpen(run, question.id)
+      // The wait is bounded by how long the task itself can be resumed; after that the run ends normally and a later message resumes the task as a new turn.
+      hold.timer = this.setTimer(() => { void this.endBrowserReplyWait(run, hold) }, BROWSER_TASK_TTL_MS)
+      hold.timer?.unref?.()
+      return true
+    } catch { return false }
+  }
+
+  releaseBrowserRunHold(run) {
+    const hold = this.browserRunHolds.get(run)
+    if (!hold) return
+    if (hold.timer != null) { try { this.clearTimer(hold.timer) } catch { /* ignore */ } hold.timer = null }
+    for (const [key, to] of this.turnAliases) if (to === run.runId && key.startsWith(`${run.conversationId}/`)) this.turnAliases.delete(key)
+    this.browserRunHolds.delete(run)
+  }
+
+  async endBrowserReplyWait(run, hold) {
+    if (this.browserRunHolds.get(run) !== hold) return
+    if (hold.phase !== 'waiting' || run.status !== 'inProgress') { if (run.status !== 'inProgress') this.releaseBrowserRunHold(run); return } // the run ended another way (disconnect, account change)
+    hold.cancelled = true
+    try { await this.finish(run, { id: run.runId, status: 'completed', items: [], error: null, itemsView: 'full' }) } catch { /* ignore */ }
+  }
+
+  // The person's message while the run waits: it is recorded as the reply in this run, and the objective loop resumes inside the run.
+  async answerBrowserTaskReply(run, body) {
+    const hold = this.browserRunHolds.get(run), flow = this.flowRuns.get(run)
+    const requestId = idText(body.requestId), message = typeof body.message === 'string' ? body.message : ''
+    if (!hold || hold.phase !== 'waiting' || !flow?.question?.pending || !this.store || !requestId || !message.trim() || message.length > 16384) throw chatError('INVALID_REQUEST', 'This reply cannot be added to the running turn', 400)
+    if (hold.timer != null) { this.clearTimer(hold.timer); hold.timer = null }
+    hold.phase = 'working'
+    flow.question.pending = false
+    const localMessageId = this.recordInRunReply(run, flow, requestId, message)
+    this.setReplyOpen(run, null)
+    const job = this.resumeBrowserTaskInRun(run, hold, { requestId, message }).catch(() => {})
+    this.browserRunJobs.add(job)
+    void job.finally(() => this.browserRunJobs.delete(job))
+    return { accepted: true, durable: true, inRun: true, requestId, clientThreadId: run.clientThreadId, conversationId: run.conversationId, runId: run.runId, localMessageId }
+  }
+
+  async resumeBrowserTaskInRun(run, hold, { requestId, message }) {
+    let note = null, handedOff = false
+    try {
+      // The loop now works inside a live run: this run may post completed intermediate messages at a beat (nothing else about it changes).
+      this.allowIntermediateMessages(hold.key)
+      const cfg = this.decisionContext?.browserEntry, provider = this.browserToolProvider()
+      const entry = createDirectBrowserEntry({ provider, store: this.browserTaskStore, outcomeSink: typeof cfg?.outcomeSink === 'function' ? cfg.outcomeSink : null, now: this.now,
+        calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null })
+      const out = await entry.handle({ run, conversationKey: hold.key, message, hosts: hold.hosts })
+      if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
+    } catch { note = null; handedOff = false }
+    hold.handedOff = handedOff
+    if (hold.cancelled || this.browserRunHolds.get(run) !== hold || run.status !== 'inProgress') return
+    await this.continueBrowserRunTurn(run, hold, { requestId, message, note })
+  }
+
+  // The next native turn of the same run: the person's reply is its user message, the closed note (if the task took the reply) rides as
+  // application context, and its answer is held and posted once like the first turn's. Its events are this run's events (turnAliases).
+  async continueBrowserRunTurn(run, hold, { requestId, message, note }) {
+    const cid = run.conversationId, { engine, slot } = hold
+    const fail = error => this.finish(run, { id: run.runId, status: 'failed', items: [], error: publicError(error, 'TURN_START_FAILED', engine.id), itemsView: 'full' })
+    if (this.epochOf(engine.id, slot) !== hold.epoch) { hold.cancelled = true; await fail(chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)); return }
+    this.channelOutput.set(run, { notes: new Set(), held: new Map(), overflow: false, submittedText: undefined })
+    if (this.browserTaskHoldEligible()) this.startTopicAnswerGuard(run, 'draft')
+    const pending = { conversationId: cid, buffer: [], draftHold: this.heldGuard(run) !== null }
+    this.pendingStarts.set(cid, pending)
+    try {
+      const context = note ? { ...(hold.additionalContext || {}), egdesk_browser_task: { kind: 'application', value: note } } : hold.additionalContext
+      const result = await engine.startTurn({ ...hold.base, input: [{ type: 'text', text: message, text_elements: [] }], clientUserMessageId: requestId, ...(context ? { additionalContext: context } : {}) }, slot)
+      const turnId = idText(result?.turn?.id)
+      if (!turnId) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
+      if (hold.cancelled || run.status !== 'inProgress') { await engine.interruptTurn(cid, turnId, slot).catch(() => {}); return }
+      hold.phase = 'turn'; hold.turnId = turnId
+      this.turnAliases.set(runKey(cid, turnId), run.runId)
+      const buffered = pending.buffer.splice(0)
+      this.pendingStarts.delete(cid)
+      for (const event of buffered) { if (event.turnId === turnId) event.turnId = run.runId; await this.apply(event) }
+      if (TERMINAL.has(result.turn.status) && !TERMINAL.has(run.status)) await this.finish(run, safeTurn(result.turn, engine.id))
+    } catch (error) {
+      hold.cancelled = true
+      await fail(error)
+    } finally { if (this.pendingStarts.get(cid) === pending) this.pendingStarts.delete(cid) }
+  }
+
+  /**
+   * Read-only progress facts of this conversation's objective browser task, for the heartbeat (it decides; nothing here posts or acts).
+   * → null | { taskId, status: 'running'|'paused'|'done'|'cancelled', active, phase: 'objective_step'|'waiting_user'|null, stepsDone, stepsRemaining,
+   *            waitingOnUser, waitingKind, waitingCode, actions: { fill, navigate, scroll }, lastActionAgeMs, ageMs, idleMs } — numbers and closed words only.
+   */
+  browserTaskFacts(clientThreadId) {
+    try { return typeof clientThreadId === 'string' && clientThreadId && this.browserTaskStore ? this.browserTaskStore.facts(clientThreadId) : null } catch { return null }
+  }
+
   browserToolProvider() { return this.toolProviders.find(provider => provider.providerId === 'egdesk-browser') || null }
 
   browserEntryHosts(body) {
@@ -4768,20 +4918,35 @@ export class CodexChatRuntime {
     const id = `pre-${context.requestId}`
     const preRun = { runId: id, answerId: id, clientThreadId: context.clientThreadId, status: 'inProgress', executionPolicy: { mode: BROWSER_BOUNDED }, quiet: true }
     await this.callProvider(provider, 'bindRun', preRun, prepared) // a refusal here is a refusal before the native turn starts
-    let note = null
+    let note = null, handedOff = false
     try {
       if (!this.browserTaskStore) this.browserTaskStore = createBrowserTaskStore({ now: this.now })
       // A paused task of this conversation resumes with the packet it already holds: no second fetch for the user's answer.
       const resuming = this.browserTaskStore.paused(context.clientThreadId) !== null
-      const memory = typeof cfg.memory === 'function' && !resuming ? await cfg.memory({ body, context, client: this.decisionContext?.client ?? null, askedAt: context.askedAt ?? this.now(), position: this.turnPosition(context) }) : null
+      // Cost option (cfg.entryAnswers, absent by default): a host that already sends a turn-start request (the memory triage) appends the
+      // entry question to it and returns the answers, so the entry decision costs no request of its own. Card host names leave only when
+      // this run's models may receive Browser data. A message that is then not a browser task fetches no memory at all.
+      // What these hooks send follows the run's own model permissions (the one egress gate): card host names as Browser data, memory pages as memory.
+      const egress = this.decisionEgressFor(preRun), rawClient = this.decisionContext?.client ?? null
+      const guarded = kinds => (rawClient ? egress.guardClient(rawClient, kinds) : null)
+      let entryAnswers = null
+      if (!resuming && typeof cfg.entryAnswers === 'function' && egress.allows('page_text')) {
+        const hostsByCard = this.browserEntryHosts(body)
+        const cards = (preRun.browserBinding?.cards || []).filter(card => card.permission === 'interact').map(card => ({ cardId: card.cardId, host: hostsByCard[card.cardId] || '' }))
+        try { const answers = cards.length ? await cfg.entryAnswers({ body, context, question: entryQuestion(cards), client: guarded(['page_text']) }) : null
+          if (answers && ['choice', 'refusal'].includes(answers.browser_entry?.type)) entryAnswers = { browser_entry: answers.browser_entry, kind: readBrowserEntry(answers, cards).kind }
+        } catch { entryAnswers = null }
+      }
+      const skipMemory = resuming || (entryAnswers !== null && entryAnswers.kind !== 'browser')
+      const memory = typeof cfg.memory === 'function' && !skipMemory ? await cfg.memory({ body, context, client: guarded(['memory_page']), egress, askedAt: context.askedAt ?? this.now(), position: this.turnPosition(context) }) : null
       // Read-only: the task loop's step count and waiting state feed this conversation's heartbeat; the store behaves exactly as before.
-      const feed = context.heartbeat ? feedBrowserTask(context.heartbeat, this.browserTaskStore) : null
-      const entry = createDirectBrowserEntry({ provider, store: feed ? feed.store : this.browserTaskStore, outcomeSink: typeof cfg.outcomeSink === 'function' ? cfg.outcomeSink : null, now: this.now,
+      if (context.heartbeat) feedBrowserTask(context.heartbeat, this.browserTaskStore, context.clientThreadId)
+      const entry = createDirectBrowserEntry({ provider, store: this.browserTaskStore, outcomeSink: typeof cfg.outcomeSink === 'function' ? cfg.outcomeSink : null, now: this.now,
         calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null })
-      const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), memory })
-      if (out?.handled === true && typeof out.note === 'string') note = out.note
-    } catch { note = null }
-    return { preRun, provider, note, adopted: false }
+      const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), memory, entryAnswers })
+      if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
+    } catch { note = null; handedOff = false }
+    return { preRun, provider, note, handedOff, adopted: false }
   }
 
   // ---- Intermediate messages while a run works (flag decisionContext.conversationFlow = { mode(): 'off'|'on' }, default off). ----
@@ -4917,7 +5082,9 @@ export class CodexChatRuntime {
       const hb = context.heartbeat
       if (!hb || hb.state === 'stopped') return
       const held = context.draftHold === true
-      const flow = { heartbeat: hb, held, canSpeak: held || (this.flowSpeakers.has(hb) && this.draftCheckMode() === 'on'), sent: [], kinds: new Set(), askedNotes: new Set(), stepsAtLast: 0,
+      // taskTurn: this turn words a browser task's note (its question or report). The heartbeat may speak in it like in any held turn, but the
+      // message question never opens an in-run question there: the task's own question is this turn's message (see holdRunForBrowserReply).
+      const flow = { heartbeat: hb, held, canSpeak: held || (this.flowSpeakers.has(hb) && this.draftCheckMode() === 'on'), taskTurn: context.browserTaskTurn === true, sent: [], kinds: new Set(), askedNotes: new Set(), stepsAtLast: 0,
         closed: false, question: null, startedAt: 0, lastSentAt: null, pendingFacts: null,
         audience: () => this.flowAudience(run), reasoningOpen: () => (this.heartbeatReasoning.get(hb)?.size ?? 0) > 0 }
       this.flowRuns.set(run, flow)
@@ -5031,7 +5198,7 @@ export class CodexChatRuntime {
     if (flow.closed || run.status !== 'inProgress' || !flow.canSpeak || this.finalAnswerBegun(run, flow)) return null
     if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return null
     const facts = { ...beatFlowFacts({ heartbeatFacts: beat.facts, run, flow, own: FLOW_OWN_KINDS }), ...(subject ? this.pointerFacts(subject, beat.facts) : {}) }
-    const options = enumerateOptions(facts)
+    const options = enumerateOptions(facts).filter(kind => !(flow.taskTurn && kind === 'ask_missing'))
     if (options.length < 2) return null
     flow.pendingFacts = facts
     return flowQuestion(facts, options)
@@ -5168,6 +5335,7 @@ export class CodexChatRuntime {
   // The person answered the early question while the run kept working: the reply becomes a normal local user message and is
   // steered into the same native turn (the verified turn/steer contract). Without that contract nothing is changed.
   async answerEarlyQuestion(run, body) {
+    if (this.browserRunHolds.get(run)?.phase === 'waiting') return this.answerBrowserTaskReply(run, body) // the reply belongs to the objective task, not to a native turn
     const flow = this.flowRuns.get(run), store = this.store
     const requestId = idText(body.requestId), message = typeof body.message === 'string' ? body.message : ''
     if (!flow?.question?.pending || !store || !requestId || !message.trim() || message.length > 16384) throw chatError('INVALID_REQUEST', 'This reply cannot be added to the running turn', 400)
@@ -5182,7 +5350,15 @@ export class CodexChatRuntime {
         input: [{ type: 'text', text: message, text_elements: [] }] }, slot, proof)
     } catch (error) { flow.question.pending = true; throw chatError('INRUN_REPLY_UNAVAILABLE', 'The running turn did not take the reply', 409) }
     if (response?.turnId !== run.runId) { flow.question.pending = true; throw chatError('INRUN_REPLY_UNAVAILABLE', 'The running turn did not take the reply', 409) }
-    const localMessageId = localId('msg', run.clientThreadId, requestId)
+    const localMessageId = this.recordInRunReply(run, flow, requestId, message)
+    this.setReplyOpen(run, null)
+    return { accepted: true, durable: true, inRun: true, requestId, clientThreadId: run.clientThreadId, conversationId: run.conversationId, runId: run.runId, localMessageId }
+  }
+
+  // An in-run reply becomes a normal local user message of the run (one place for both reply paths: steered into a working native
+  // turn, or handed to the objective browser task of a held-open run). Returns the local message id.
+  recordInRunReply(run, flow, requestId, message) {
+    const store = this.store, localMessageId = localId('msg', run.clientThreadId, requestId)
     try {
       store.acceptRequest({ clientThreadId: run.clientThreadId, requestId, fingerprint: createHash('sha256').update(message).digest('hex'), ts: this.now(), localMessageId,
         message: { messageId: null, clientId: requestId, role: 'user', text: publicText(message, message.length), phase: null, status: 'accepted', localRunId: run.localRunId, requestId } })
@@ -5195,8 +5371,7 @@ export class CodexChatRuntime {
     this.put(run, 'messages', row)
     this.emit(run, 'message.completed', { ...row }, row.id)
     flow.heartbeat?.mark('user')
-    this.setReplyOpen(run, null)
-    return { accepted: true, durable: true, inRun: true, requestId, clientThreadId: run.clientThreadId, conversationId: run.conversationId, runId: run.runId, localMessageId }
+    return localMessageId
   }
 
   // ---- Held answers, on mode (flag decisionContext.draftCheck.mode() === 'on', default off) ----
@@ -6519,6 +6694,9 @@ export class CodexChatRuntime {
       if (raw !== undefined) await this.applyItem(run, { id: message.id, type: 'agentMessage', text: raw, phase: message.phase }, true)
     }
     if (epoch !== this.runEpoch(run)) return
+    // A browser-task run whose task now waits for the person stays open: the reply comes into this run and resumes the task in it.
+    if (turn.status === 'completed' && this.holdRunForBrowserReply(run, turn)) return
+    this.releaseBrowserRunHold(run)
     run.status = turn.status
     this.stopConversationFlow(run, turn.status === 'interrupted' ? 'cancel' : 'run_end')
     this.completeCalibration(run)

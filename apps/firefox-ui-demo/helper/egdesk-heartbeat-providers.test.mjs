@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHeartbeat } from './egdesk-heartbeat.mjs'
-import { browserTaskFacts, feedBrowserTask, observeTerminalLoop, runTerminalLoopWithHeartbeat } from './egdesk-heartbeat-providers.mjs'
+import { browserTaskRow, feedBrowserTask, observeTerminalLoop, runTerminalLoopWithHeartbeat } from './egdesk-heartbeat-providers.mjs'
 import { createBrowserTaskStore, createDirectBrowserEntry } from './egdesk-browser-task.mjs'
 import { runObjectiveLoop } from './egdesk-terminal-judge.mjs'
 
@@ -72,27 +72,32 @@ function browserWorld(store) {
   return { entry, run, calls, gate }
 }
 
-test('browser task loop: the observed store changes nothing; the heartbeat sees the step count while it runs and waiting on the person when it pauses', async () => {
+test('browser task loop: feeding a heartbeat changes nothing; it sees the step count while the loop runs and the hand-off when it pauses (one provider: the store facts)', async () => {
   const plain = browserWorld(createBrowserTaskStore()); plain.gate.resolve()
   const expected = await plain.entry.handle({ run: plain.run, conversationKey: 'dm', message: '세금계산서 내려받아줘', hosts: { card: 'portal.example.test' } })
   const hb = createHeartbeat({ monotonicNow: () => 0, setTimer: () => ({}), clearTimer() {} }); hb.start()
   const real = createBrowserTaskStore()
-  const feed = feedBrowserTask(hb, real)
+  const feed = feedBrowserTask(hb, real, 'dm')
+  assert.equal(feed.store, real, 'the store is used as is; nothing wraps it')
   const w = browserWorld(feed.store)
   const pending = w.entry.handle({ run: w.run, conversationKey: 'dm', message: '세금계산서 내려받아줘', hosts: { card: 'portal.example.test' } })
   for (let i = 0; i < 20 && w.calls.length < 2; i++) await new Promise(r => setTimeout(r, 1))
   const during = hb.facts()
   assert.deepEqual([during.phase, during.stepsDone], ['objective_step', 3])
-  assert.deepEqual(during.sources.browser_task, { active: true, phase: 'objective_step', waitingOnUser: false, stepsDone: 3, stepBudgetLeft: 21, task: 'running' })
+  assert.deepEqual(during.sources.browser_task, { active: true, phase: 'objective_step', waitingOnUser: false, stepsDone: 3, stepsRemaining: 21, task: 'running', awaiting: null, awaitingCode: null, lastActionAgeMs: null, idleMs: during.sources.browser_task.idleMs })
+  assert.equal(during.stepsRemaining, 21, 'the heartbeat understands the remaining step budget')
   w.gate.resolve()
   const got = await pending
   const strip = out => ({ ...out, taskId: 'bt', note: String(out.note).replace(/bt_[0-9a-f]+/g, 'bt') })
   assert.deepEqual(strip(got), strip(expected)); assert.deepEqual(w.calls, plain.calls)
   assert.equal(got.status, 'paused'); assert.equal(feed.store.size, real.size)
   const after = hb.facts()
-  assert.equal(after.phase, 'waiting_user')
-  assert.deepEqual(after.sources.browser_task, { active: true, phase: 'waiting_user', waitingOnUser: true, stepsDone: 4, stepBudgetLeft: 20, task: 'need_context' })
+  // Paused inside a live heartbeat = handed off to the subjective model, which is still wording the question: the person is not awaited yet.
+  assert.equal(after.phase, 'thinking')
+  assert.deepEqual(after.sources.browser_task, { active: true, phase: 'handing_off', waitingOnUser: false, stepsDone: 4, stepsRemaining: 20, task: 'handing_off', awaiting: 'need_context', awaitingCode: 'choice_needed', lastActionAgeMs: null, idleMs: after.sources.browser_task.idleMs })
+  assert.deepEqual([real.facts('dm').waitingOnUser, real.facts('dm').phase], [true, 'waiting_user'], 'the task itself does wait for the person; only the heartbeat row is about the live turn')
   assert.ok(!JSON.stringify([during, after]).includes('세금') && !JSON.stringify([during, after]).includes('portal'), 'no goal, host or page text in the facts')
-  assert.equal(browserTaskFacts({ status: 'done', steps: 2 }), null); assert.equal(browserTaskFacts(null), null)
+  assert.equal(browserTaskRow({ status: 'done', active: false, stepsDone: 2 }), null); assert.equal(browserTaskRow(null), null)
+  assert.equal(feedBrowserTask(hb, real, 'other-dm').facts(), null, 'another conversation has no task')
   feed.unregister(); assert.deepEqual(hb.facts().sources, {})
 })

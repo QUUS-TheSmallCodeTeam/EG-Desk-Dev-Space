@@ -70,7 +70,10 @@ const TRIAGE_RULES = ['You are a system judge deciding what stored memory a turn
  * The fetch is skipped on a decided courtesy "yes", or on a decided need "no" only when the held content AND the complete list of the other stored
  * pages were shown and recall is a decided "no". Undecided or failed answers, a truncated list or a recall request always fetch.
  */
-export async function triageTurn({ message, heldTitles = [], heldDigest = null, stored = null, live = null, client, askedAt = null, signal, timeoutMs = 2000 } = {}) {
+export async function triageTurn({ message, heldTitles = [], heldDigest = null, stored = null, live = null, client, askedAt = null, signal, timeoutMs = 2000, extraQuestions = [] } = {}) {
+  // extraQuestions: self-contained questions of another turn-start judgment (the browser entry) that ride on this one request. They are
+  // appended AFTER the triage questions, never named tn_*, and their answers are returned untouched in `extra`; the triage reading ignores them.
+  const riders = (Array.isArray(extraQuestions) ? extraQuestions : []).filter(q => q && typeof q.name === 'string' && !q.name.startsWith('tn_')).slice(0, 2)
   const questions = [
     predicateQuestion('tn_courtesy', 'Is the message only a courtesy: thanks, a greeting, an acknowledgement or other social small talk, with no question, request, report or decision in it?'),
     predicateQuestion('tn_need', Array.isArray(stored)
@@ -78,6 +81,7 @@ export async function triageTurn({ message, heldTitles = [], heldDigest = null, 
       : 'Does the message ask for, or report, something that the held pages and the conversation do not already cover, so that stored notes or documents beyond the held ones would improve the answer?'),
     ...(Array.isArray(stored) ? [predicateQuestion('tn_recall', 'Does the message point back to something discussed or worked on earlier (for example by saying "earlier", "last time" or "again") and ask for it to be recalled, summarized or re-organized, rather than ask for one new fact or one narrow detail?')] : []),
     predicateQuestion('tn_record', 'Does this message state something worth keeping as a record: a new fact, a decision, a plan, or a change in the status of something already recorded? Greetings, thanks, small talk and pure questions are not.'),
+    ...riders,
   ]
   const input = [{ role: 'developer', content: TRIAGE_RULES },
     { role: 'user', content: `Held in the answering model's context:\n${heldBlock(heldTitles, heldDigest)}` },
@@ -87,7 +91,8 @@ export async function triageTurn({ message, heldTitles = [], heldDigest = null, 
   try {
     const result = await client.decide({ input, questions, timeoutMs, signal })
     return { status: 'ready', courtesy: ternary(result.answers?.tn_courtesy), need: ternary(result.answers?.tn_need), recall: ternary(result.answers?.tn_recall), record: ternary(result.answers?.tn_record),
-      catalog: Array.isArray(stored) ? { listed: Math.min(stored.length, CATALOG_LIMIT), complete: stored.length <= CATALOG_LIMIT } : null, usage: result.usage ?? null }
+      catalog: Array.isArray(stored) ? { listed: Math.min(stored.length, CATALOG_LIMIT), complete: stored.length <= CATALOG_LIMIT } : null, usage: result.usage ?? null,
+      ...(riders.length ? { extra: Object.fromEntries(riders.map(q => [q.name, result.answers?.[q.name] ?? { type: 'missing' }])) } : {}) }
   } catch (error) { return { status: 'fallback', reason: error?.code ?? 'unreachable', courtesy: { state: 'unknown', p: null }, need: { state: 'unknown', p: null }, recall: { state: 'unknown', p: null }, record: { state: 'unknown', p: null }, catalog: null, usage: null } }
 }
 
@@ -285,7 +290,7 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
  * packetFirst (optional, first turn only): return as soon as the packet is ready; the triage that only decides recording keeps running and is
  *   awaited inside judgeWrite (triage is then null in the result and `triageLater` is its promise). It is not bound by the packet deadline.
  */
-export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK } = {}) {
+export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [] } = {}) {
   // The deadline is ONE point on ONE clock, fixed here. Everything below asks that clock; a timer only wakes the wait up.
   const deadlineAt = Number.isFinite(deadlineMs) ? clock.now() + Math.max(0, deadlineMs) : null
   const remaining = () => (deadlineAt === null ? null : Math.max(0, deadlineAt - clock.now()))
@@ -303,7 +308,7 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
   // A triage that gates the fetch (mid-session) is bound by the packet deadline; one that only decides recording (first turn) is not.
   // Without a deadline the old 2 s limit stays. A cold first request took 1.6-2.2 s in the real runs, so a deadline run allows up to 4 s.
   const triageTimeout = () => (remaining() === null ? 2000 : pos.kind === 'mid' ? Math.max(1, Math.min(4000, Math.ceil(remaining()))) : 4000)
-  const triageCall = () => triageTurn({ message, heldTitles: heldPages.map(p => p.title), heldDigest, stored, live: pos.kind === 'mid' ? live : null, client, askedAt, signal, timeoutMs: triageTimeout() })
+  const triageCall = () => triageTurn({ message, heldTitles: heldPages.map(p => p.title), heldDigest, stored, live: pos.kind === 'mid' ? live : null, client, askedAt, signal, timeoutMs: triageTimeout(), extraQuestions })
   let triage, memory, triageLater = null
   if (pos.kind === 'mid') {
     // Under a deadline: a triage that cannot be asked in what is left, or has not answered when the clock reaches the deadline, is cut. The
