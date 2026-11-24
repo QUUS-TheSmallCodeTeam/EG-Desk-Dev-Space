@@ -28,18 +28,30 @@ const area = r => r.width * r.height
 const overlapArea = (a, b) => Math.max(0, Math.min(right(a), right(b)) - Math.max(a.x, b.x)) * Math.max(0, Math.min(bottom(a), bottom(b)) - Math.max(a.y, b.y))
 const finiteRect = r => !!r && [r.x, r.y, r.width, r.height].every(Number.isFinite) && r.width > 0 && r.height > 0
 
+// What the runtime knows about an already rendered component: who made it, for which answer, whether a newer output replaced it, whether it is stale, how it shows now.
+// Unknown provenance is treated as the user's own: only a component this Agent made for an EARLIER answer, now superseded or stale and still shown, can be retrieved.
+const OWNERS = new Set(['agent', 'user', 'shared']), VISIBILITY = new Set(['visible', 'collapsed', 'offscreen'])
+function componentFacts(c, currentAnswerId) {
+  const owner = OWNERS.has(c.owner) ? c.owner : 'user', visibility = VISIBILITY.has(c.visibility) ? c.visibility : 'visible'
+  const earlier = owner === 'agent' && typeof c.createdForAnswer === 'string' && !!c.createdForAnswer && !!currentAnswerId && c.createdForAnswer !== currentAnswerId
+  const origin = owner === 'agent' ? (earlier ? 'agent-earlier' : 'agent-current') : owner
+  const superseded = c.superseded === true, stale = c.stale === true
+  return { owner, origin, superseded, stale, visibility, retrievable: c.onBoard === true && origin === 'agent-earlier' && (superseded || stale) && visibility !== 'collapsed' }
+}
+
 // ---------------- 1. facts from the real board: what the report points at, and whether it exists there ----------------
 /**
  * enumerateBriefingFacts({ report, candidates }) -> { facts, targets, boardFeasible, idOf, aliasOf }
  * candidates: [{ id, ref:{ sourceId | artifactId }, kind:'source'|'artifact'|'output', label, gist?, onBoard, maySend, rect? }] from the host (bound context
  * plus the open canvas views). Only candidates the user may send count at all. A target is "referenced" when the report text names its label.
  */
-export function enumerateBriefingFacts({ report = '', candidates = [] } = {}) {
+export function enumerateBriefingFacts({ report = '', candidates = [], currentAnswerId = null } = {}) {
   const text = String(report ?? ''), lines = text.split('\n')
   const usable = (Array.isArray(candidates) ? candidates : []).filter(c => c && typeof c.id === 'string' && KINDS.has(c.kind) && c.maySend === true && typeof c.label === 'string' && c.label.trim().length >= 3 && c.ref && typeof c.ref === 'object').slice(0, BRIEFING_LIMITS.maxCandidates)
   const lower = text.toLowerCase()
   const targets = usable.map((c, i) => ({ alias: 'T' + (i + 1), id: c.id, ref: c.ref, kind: c.kind, label: clean(c.label, BRIEFING_LIMITS.labelMax), ...(c.gist ? { gist: clean(c.gist, BRIEFING_LIMITS.gistMax) } : {}),
-    onBoard: c.onBoard === true, referenced: lower.includes(c.label.trim().toLowerCase()), ...(finiteRect(c.rect) ? { rect: { x: c.rect.x, y: c.rect.y, width: c.rect.width, height: c.rect.height } } : {}) }))
+    onBoard: c.onBoard === true, referenced: lower.includes(c.label.trim().toLowerCase()), ...(finiteRect(c.rect) ? { rect: { x: c.rect.x, y: c.rect.y, width: c.rect.width, height: c.rect.height } } : {}),
+    ...componentFacts(c, currentAnswerId) }))
   const n = v => Math.min(99999, v)
   const facts = { chars: n(text.length), lines: n(lines.filter(l => l.trim()).length), listItems: n(lines.filter(l => /^\s*(?:[-*+]|\d+[.)])\s+\S/.test(l)).length),
     headings: n(lines.filter(l => /^\s{0,3}#{1,6}\s+\S/.test(l)).length), tableRows: n(lines.filter(l => /^\s*\|.+\|\s*$/.test(l)).length),
@@ -80,26 +92,28 @@ export function placementCalibrationEntry(prepared, answers, result) {
 }
 
 // ---------------- 3. hand-off to the subjective model, and its design resolved against the runtime ----------------
-export function buildDesignRequest({ enumeration }) {
-  return { kind: 'briefing_design', facts: enumeration.facts,
-    targets: enumeration.targets.filter(t => t.onBoard).map(t => ({ alias: t.alias, kind: t.kind, label: t.label, ...(t.gist ? { gist: t.gist } : {}), referenced: t.referenced })),
+export function buildDesignRequest({ enumeration, constraint = null, parts = [] }) {
+  const offered = constraint ? enumeration.targets.filter(t => constraint.reuse.has(t.alias)) : enumeration.targets.filter(t => t.onBoard)
+  return { kind: 'briefing_design', facts: enumeration.facts, ...(constraint ? constraintView(constraint, parts) : {}),
+    targets: offered.map(t => ({ alias: t.alias, kind: t.kind, label: t.label, ...(t.gist ? { gist: t.gist } : {}), referenced: t.referenced })),
     limits: { maxSteps: BRIEFING_LIMITS.maxSteps, maxTargetsPerStep: BRIEFING_MAX_TARGETS, textMax: BRIEFING_LIMITS.textMax },
-    reply: 'Return { title, steps: [{ text, targets: [alias], emphasis?: "spotlight"|"outline", fallback }] }: ordered steps, each pointing at 1-6 listed board targets, with a short explanation a first-time reader can follow.' }
+    reply: 'Return { title, steps: [{ text, targets: [alias], emphasis?: "spotlight"|"outline", fallback }] }: ordered steps, each pointing at 1-6 listed board targets, with a short explanation a first-time reader can follow.' +
+      (constraint ? ' Reuse first: use every listed target; never target anything else. A new component is allowed only for a listed newAllowed part: put "new:<part>" in the step targets and describe it in newComponents: [{ part, title, summary }].' : '') }
 }
-export function buildRedesignRequest({ status, result, previous, revision, remaining, invalid = null }) {
-  if (invalid) return { kind: 'briefing_redesign', revision, remaining, invalid, previous }
-  if (status === 'inconclusive') return { kind: 'briefing_redesign_inconclusive', revision, remaining, previous, note: 'The system judge could not decide whether this briefing flow is sound. Make the explanations and their targets more specific.' }
-  return { kind: 'briefing_redesign', revision, remaining, understandable: result.understandable, findings: result.findings.map(f => ({ item: f.item, ...(f.scope ? { scope: f.scope } : {}), aliases: [...f.aliases], p: f.p })), where: result.where ? { ...result.where } : null, previous }
+export function buildRedesignRequest({ status, result, previous, revision, remaining, invalid = null, extra = {} }) {
+  if (invalid) return { kind: 'briefing_redesign', revision, remaining, invalid, previous, ...extra }
+  if (status === 'inconclusive') return { kind: 'briefing_redesign_inconclusive', revision, remaining, previous, ...extra, note: 'The system judge could not decide whether this briefing flow is sound. Make the explanations and their targets more specific.' }
+  return { kind: 'briefing_redesign', revision, remaining, understandable: result.understandable, findings: result.findings.map(f => ({ item: f.item, ...(f.scope ? { scope: f.scope } : {}), aliases: [...f.aliases], p: f.p })), where: result.where ? { ...result.where } : null, previous, ...extra }
 }
 /** resolveDesign(design, enumeration) -> { ok:true, steps, publishArgs } | { ok:false, reason }. publishArgs fits egdesk_publish_briefing_multi. */
-export function resolveDesign(design, enumeration) {
+export function resolveDesign(design, enumeration, { constraint = null } = {}) {
   const fail = reason => ({ ok: false, reason })
   const title = typeof design?.title === 'string' ? clean(design.title, BRIEFING_LIMITS.titleMax) : ''
   const list = design?.steps
   if (!title) return fail('no-title')
   if (!Array.isArray(list) || !list.length) return fail('no-steps')
   if (list.length > BRIEFING_LIMITS.maxSteps) return fail('too-many-steps')
-  const byAlias = new Map(enumeration.targets.map(t => [t.alias, t])), steps = []
+  const byAlias = new Map(enumeration.targets.map(t => [t.alias, t])), steps = [], newTokens = new Map()
   for (const [i, s] of list.entries()) {
     const text = typeof s?.text === 'string' ? s.text.trim() : ''
     if (!text) return fail('empty-text')
@@ -109,17 +123,45 @@ export function resolveDesign(design, enumeration) {
     if (!Array.isArray(s.targets) || !s.targets.length) return fail('no-targets')
     if (s.targets.length > BRIEFING_MAX_TARGETS) return fail('too-many-targets')
     if (new Set(s.targets).size !== s.targets.length) return fail('duplicate-target')
-    for (const a of s.targets) { const t = byAlias.get(a); if (!t) return fail('unknown-target'); if (!t.onBoard) return fail('off-board-target') }
-    steps.push({ alias: 'S' + (i + 1), id: 's' + (i + 1), text, fallback: clean(s.fallback, 400), ...(s.emphasis ? { emphasis: s.emphasis } : {}), targets: [...s.targets] })
+    const resolvedTargets = []
+    for (const a of s.targets) {
+      if (constraint && typeof a === 'string' && a.startsWith('new:')) {
+        const part = a.slice(4)
+        if (!constraint.newAllowed.has(part)) return fail('new-not-allowed')
+        if (newTokens.has(part)) return fail('new-duplicate')
+        newTokens.set(part, { alias: 'N' + (newTokens.size + 1), stepId: 's' + (i + 1) }); resolvedTargets.push(newTokens.get(part).alias); continue
+      }
+      const t = byAlias.get(a); if (!t) return fail('unknown-target'); if (!t.onBoard) return fail('off-board-target')
+      if (constraint && !constraint.reuse.has(a)) return fail('not-reusable-target')
+      resolvedTargets.push(a)
+    }
+    steps.push({ alias: 'S' + (i + 1), id: 's' + (i + 1), text, fallback: clean(s.fallback, 400), ...(s.emphasis ? { emphasis: s.emphasis } : {}), targets: resolvedTargets })
   }
-  const publishArgs = { title, steps: steps.map(s => ({ id: s.id, text: s.text, fallback: s.fallback, ...(s.emphasis ? { emphasis: s.emphasis } : {}), targets: s.targets.map(a => ({ ...byAlias.get(a).ref })) })) }
+  const newComponents = [], newTargets = []
+  if (constraint) {
+    const used = new Set(steps.flatMap(s => s.targets))
+    for (const a of constraint.reuse) if (!used.has(a)) return fail('reuse-unused')
+    const specs = Array.isArray(design?.newComponents) ? design.newComponents : []
+    if (specs.some(n => !newTokens.has(n?.part))) return fail(specs.some(n => !constraint.newAllowed.has(n?.part)) ? 'new-not-allowed' : 'new-unreferenced')
+    for (const [part, token] of newTokens) {
+      const spec = specs.find(n => n.part === part), titleText = clean(spec?.title, BRIEFING_LIMITS.labelMax), summary = clean(spec?.summary, BRIEFING_LIMITS.gistMax)
+      if (!titleText || !summary) return fail('new-missing-spec')
+      newComponents.push({ alias: token.alias, part, title: titleText, summary, stepId: token.stepId })
+      newTargets.push({ alias: token.alias, id: null, ref: null, kind: 'output', label: titleText, gist: summary, onBoard: false, referenced: false, planned: true })
+    }
+  }
+  // Steps that point only at a component that does not exist yet wait for it: the host creates the component first, then completeBriefingArgs() finishes them.
+  const refsOf = s => s.targets.filter(a => !a.startsWith('N')).map(a => ({ ...byAlias.get(a).ref }))
+  const stepSpecs = steps.map(s => ({ id: s.id, text: s.text, fallback: s.fallback, ...(s.emphasis ? { emphasis: s.emphasis } : {}), refs: refsOf(s), news: s.targets.filter(a => a.startsWith('N')) }))
+  const publishArgs = { title, steps: stepSpecs.filter(s => s.refs.length).map(s => ({ id: s.id, text: s.text, fallback: s.fallback, ...(s.emphasis ? { emphasis: s.emphasis } : {}), targets: s.refs })) }
+  if (!publishArgs.steps.length) return fail('only-new')
   if (!validBriefing({ id: 'proposal', title, steps: publishArgs.steps })) return fail('invalid-briefing')
-  return { ok: true, steps, publishArgs }
+  return { ok: true, steps, publishArgs, stepSpecs, title, newComponents, newTargets, pendingSteps: stepSpecs.filter(s => !s.refs.length).map(s => s.id) }
 }
 
 // ---------------- 4. the flow check: items enumerated per step from the design and the board ----------------
 /** enumerateBriefingChecks(steps, enumeration, { links, viewport }) -> { items, locations }. items: [{ key, name, scope, aliases, measure:{ count } }] */
-export function enumerateBriefingChecks(steps, enumeration, { links = [], viewport = null } = {}) {
+export function enumerateBriefingChecks(steps, enumeration, { links = [], viewport = null, coverSet = null } = {}) {
   const byAlias = new Map(enumeration.targets.map(t => [t.alias, t])), items = []
   const add = (name, scope, aliases) => { const unique = [...new Set(aliases)]; if (unique.length) items.push({ key: scope ? `${name}_${scope}` : name, name, scope, aliases: unique, measure: { count: unique.length } }) }
   for (const s of steps) {
@@ -127,7 +169,7 @@ export function enumerateBriefingChecks(steps, enumeration, { links = [], viewpo
     if (s.targets.some(a => byAlias.get(a)?.gist)) add('explanation_mismatch', s.alias, [s.alias, ...s.targets])
   }
   const covered = new Set(steps.flatMap(s => s.targets))
-  add('uncovered_target', null, enumeration.targets.filter(t => t.referenced && t.onBoard && !covered.has(t.alias)).map(t => t.alias))
+  add('uncovered_target', null, enumeration.targets.filter(t => (coverSet ? coverSet.has(t.alias) : t.referenced && t.onBoard) && !covered.has(t.alias)).map(t => t.alias))
   const firstStep = new Map(); steps.forEach((s, i) => s.targets.forEach(a => { if (!firstStep.has(a)) firstStep.set(a, i) }))
   const order = []
   for (const e of links) {
@@ -161,7 +203,7 @@ export function briefingCheckDto(steps, enumeration, checks, { title } = {}) {
     targets: enumeration.targets.filter(t => used.has(t.alias)).map(t => ({ alias: t.alias, kind: t.kind, label: t.label, ...(t.gist ? { gist: t.gist } : {}) })),
     items: checks.items.map(i => ({ name: i.name, ...(i.scope ? { scope: i.scope } : {}), aliases: [...i.aliases], measure: { count: i.measure.count } })) }
 }
-const STEP_ALIAS = /^S[1-8]$/, TARGET_ALIAS = /^T(?:[1-9]|1[0-2])$/
+const STEP_ALIAS = /^S[1-8]$/, TARGET_ALIAS = /^(?:T(?:[1-9]|1[0-2])|N[1-3])$/
 export function normalizeBriefingCheckDto(raw) {
   try {
     if (!exactKeys(raw, ['purpose', 'steps', 'targets', 'items']) || !plain(raw.purpose, BRIEFING_LIMITS.titleMax)) return null
@@ -235,20 +277,142 @@ export function briefingCheckCalibrationEntry(prepared, answers, result) {
       { q: 'choice', would: result.where ? 'accept' : 'reject', top: rows[0]?.probability, second: rows[1]?.probability, p: where?.confidence, threshold: BRIEFING_BARS.placement, minMargin: BRIEFING_BARS.margin, kind: 'board' }] }
 }
 
-// ---------------- 5. the bounded flow ----------------
+// ---------------- 5. reuse, retrieval and "is a new component needed": the judge over the components already rendered ----------------
+// Today's models keep generating new things. Before any design, the runtime lists what is ALREADY on the board (opaque aliases T#, with owner, the answer it was
+// made for, superseded/stale, visibility) and the parts of the report (P#, with the components that already cover them), and the judge answers closed questions:
+// per component reuse / retrieve / irrelevant, per part "is a new component required?". RETRIEVE exists as an option only for a component this Agent made for an EARLIER
+// answer that is now superseded or stale and still shown; user-made and shared components never get it. A retrieval is a proposal to fold the card on the user's own
+// screen (apply/undo/Cmd+Z); nothing is deleted and no shared Board data is written.
+export const REUSE_BARS = Object.freeze({ component: .75, margin: .2, newRequired: .7 }) // placeholders until calibrated
+export const MAX_REPORT_PARTS = 6
+const ORIGINS = new Set(['agent-earlier', 'agent-current', 'user', 'shared'])
+const PART_ALIAS = /^P[1-6]$/
+
+/** enumerateReportParts(report, targets) -> [{ alias, label, chars, coveredBy:[T#] }]: heading sections (else paragraphs) of at least 20 characters, with the on-board components each names. */
+export function enumerateReportParts(report, targets = []) {
+  const lines = String(report ?? '').split('\n'), blocks = [], heading = l => /^\s{0,3}#{1,6}\s+\S/.test(l), headed = lines.some(heading)
+  let cur = null
+  const start = label => { cur = { label, lines: [] }; blocks.push(cur) }
+  for (const l of lines) {
+    if (headed) { if (heading(l)) { start(l.replace(/^\s{0,3}#{1,6}\s+/, '')); continue } if (!cur) { if (!l.trim()) continue; start(l) } cur.lines.push(l) }
+    else { if (!l.trim()) { cur = null; continue } if (!cur) start(l); cur.lines.push(l) }
+  }
+  const comps = targets.filter(t => t.onBoard)
+  return blocks.map(b => ({ label: clean(b.label.replace(/^[-*+\d.)\s]+/, ''), BRIEFING_LIMITS.labelMax), body: `${b.label}\n${b.lines.join('\n')}`.toLowerCase(), chars: Math.min(99999, `${b.label}\n${b.lines.join('\n')}`.length) }))
+    .filter(b => b.chars >= 20 && b.label).slice(0, MAX_REPORT_PARTS)
+    .map((b, i) => ({ alias: 'P' + (i + 1), label: b.label, chars: b.chars, coveredBy: comps.filter(t => b.body.includes(t.label.toLowerCase())).map(t => t.alias) }))
+}
+const retrievableOf = c => c.origin === 'agent-earlier' && (c.stale || c.superseded) && c.visibility !== 'collapsed'
+
+/** reuseDto(enumeration, parts) -> the closed object for the reuse judge. Only components the user may send are in it (they are the only candidates). */
+export function reuseDto(enumeration, parts) {
+  return { components: enumeration.targets.filter(t => t.onBoard).map(t => ({ alias: t.alias, kind: t.kind, origin: t.origin, stale: t.stale, superseded: t.superseded, visibility: t.visibility, retrievable: t.retrievable,
+      label: t.label, ...(t.gist ? { gist: t.gist } : {}) })),
+    parts: parts.map(x => ({ alias: x.alias, label: x.label, chars: x.chars, coveredBy: [...x.coveredBy] })) }
+}
+export function normalizeReuseDto(raw) {
+  try {
+    if (!exactKeys(raw, ['components', 'parts']) || !Array.isArray(raw.components) || !raw.components.length || raw.components.length > BRIEFING_LIMITS.maxCandidates || !Array.isArray(raw.parts) || raw.parts.length > MAX_REPORT_PARTS) return null
+    const declared = new Set()
+    const components = raw.components.map(c => {
+      const keys = Object.hasOwn(c ?? {}, 'gist') ? ['alias', 'kind', 'origin', 'stale', 'superseded', 'visibility', 'retrievable', 'label', 'gist'] : ['alias', 'kind', 'origin', 'stale', 'superseded', 'visibility', 'retrievable', 'label']
+      if (!exactKeys(c, keys) || !TARGET_ALIAS.test(c.alias) || c.alias.startsWith('N') || declared.has(c.alias) || !KINDS.has(c.kind) || !ORIGINS.has(c.origin) || typeof c.stale !== 'boolean' || typeof c.superseded !== 'boolean' ||
+          !VISIBILITY.has(c.visibility) || typeof c.retrievable !== 'boolean' || !plain(c.label, BRIEFING_LIMITS.labelMax) || (Object.hasOwn(c, 'gist') && !plain(c.gist, BRIEFING_LIMITS.gistMax))) throw 0
+      // The retrieve option is a closed rule of the system, not a claim of the chrome: it must follow from the facts.
+      if (c.retrievable !== retrievableOf(c)) throw 0
+      declared.add(c.alias); return { alias: c.alias, kind: c.kind, origin: c.origin, stale: c.stale, superseded: c.superseded, visibility: c.visibility, retrievable: c.retrievable, label: c.label, ...(Object.hasOwn(c, 'gist') ? { gist: c.gist } : {}) }
+    })
+    const seen = new Set()
+    const parts = raw.parts.map(x => {
+      if (!exactKeys(x, ['alias', 'label', 'chars', 'coveredBy']) || !PART_ALIAS.test(x.alias) || seen.has(x.alias) || !plain(x.label, BRIEFING_LIMITS.labelMax) || !Number.isInteger(x.chars) || x.chars < 0 || x.chars > 99999 ||
+          !Array.isArray(x.coveredBy) || new Set(x.coveredBy).size !== x.coveredBy.length || !x.coveredBy.every(a => declared.has(a))) throw 0
+      seen.add(x.alias); return { alias: x.alias, label: x.label, chars: x.chars, coveredBy: [...x.coveredBy] }
+    })
+    return { components, parts }
+  } catch { return null }
+}
+const roleText = 'Judge only from the listed facts. Never choose retrieve unless it is offered.'
+export function prepareBriefingReuse({ mode = 'off', binding = '', dto } = {}) {
+  const manual = { status: 'manual', packet: null }
+  if (!binding || !['advisory', 'on'].includes(mode)) return manual
+  const c = normalizeReuseDto(dto)
+  if (!c) return manual
+  const questions = [
+    ...c.components.map(x => choiceQuestion(`component_${x.alias}`, `What is the role of this existing board component (${x.alias}, a ${x.kind} made by ${x.origin}) for the final report? reuse = point a briefing step at it; irrelevant = the report does not need it${x.retrievable ? '; retrieve = it is an outdated output the agent made for an earlier answer, fold it away' : ''}. ${roleText}`,
+      [{ value: 'reuse', description: 'use it as a briefing target' }, { value: 'irrelevant', description: 'not needed for this report' }, ...(x.retrievable ? [{ value: 'retrieve', description: 'outdated output of an earlier answer: fold it away on the user screen' }] : [])])),
+    ...c.parts.map(x => predicateQuestion(`new_${x.alias}`, `Is a NEW board component required to show part ${x.alias} of the report? Answer yes only if none of the existing components ${x.coveredBy.length ? `(covering it: ${x.coveredBy.join(', ')})` : '(none covers it by name)'} can show it. ${roleText}`)),
+  ]
+  const packet = { input: [{ role: 'user', content: [{ type: 'input_text', text: 'Existing board components and the parts of a final report. Reuse existing components before anything new is made.' }, { type: 'input_json', data: c }] }], questions }
+  return { status: 'prepared', kind: 'briefing-reuse', mode, binding, dto: c, options: c.components.map(x => x.alias), packet }
+}
+/** readBriefingReuse: per component reuse | retrieve (only if offered) | irrelevant | undecided (unsure); per part newRequired. An unusable answer makes the whole reading manual. */
+export function readBriefingReuse(prepared, answers, currentBinding) {
+  const base = { status: 'manual', verdict: 'manual', components: [], parts: [] }
+  if (prepared?.status !== 'prepared' || prepared.kind !== 'briefing-reuse' || currentBinding !== prepared.binding) return base
+  const components = [], parts = []
+  for (const x of prepared.dto.components) {
+    const r = readChoice(answers, `component_${x.alias}`, { minConfidence: REUSE_BARS.component, minMargin: REUSE_BARS.margin })
+    if (r.state === 'unknown' || !['reuse', 'irrelevant', 'retrieve'].includes(r.value)) return base
+    const allowed = r.value !== 'retrieve' || x.retrievable
+    components.push({ alias: x.alias, decision: r.state === 'accepted' && allowed ? r.value : 'undecided', p: r.confidence })
+  }
+  for (const x of prepared.dto.parts) {
+    const r = readPredicate(answers, `new_${x.alias}`, REUSE_BARS.newRequired)
+    if (r.probability === null) return base
+    parts.push({ alias: x.alias, newRequired: r.state === 'yes', p: r.probability })
+  }
+  return { status: 'ok', verdict: 'ok', components, parts, reply: { status: 'ok', components, parts } }
+}
+export function briefingReuseCalibrationEntry(prepared, answers, result) {
+  const dec = new Map(result.components.map(c => [c.alias, c.decision])), np = new Map(result.parts.map(x => [x.alias, x.newRequired]))
+  const WOULD = { reuse: 'attach', retrieve: 'act', irrelevant: 'skip', undecided: 'hold' }
+  return { feature: 'board_arrangement', mode: prepared.mode, candidates: prepared.dto.components.length, attached: prepared.mode === 'on' && result.status === 'ok' && result.components.some(c => c.decision === 'reuse'),
+    judgments: [...prepared.dto.components.map(x => { const a = answers?.[`component_${x.alias}`], rows = Array.isArray(a?.probabilities) ? a.probabilities : []
+        return { q: 'choice', would: WOULD[dec.get(x.alias)] ?? 'unknown', top: rows[0]?.probability, second: rows[1]?.probability, p: a?.confidence, threshold: REUSE_BARS.component, minMargin: REUSE_BARS.margin, kind: 'board' } }),
+      ...prepared.dto.parts.map(x => ({ q: 'relevance', would: np.get(x.alias) ? 'accept' : 'reject', p: answers?.[`new_${x.alias}`]?.probability, threshold: REUSE_BARS.newRequired, kind: 'board' }))] }
+}
+/** What the design may use, from the judge's reading: reuse set, retire list (code re-checks eligibility), parts where a new component is allowed (never where a reused component already covers it). */
+export function constraintFrom(reply, enumeration, parts) {
+  const byAlias = new Map(enumeration.targets.map(t => [t.alias, t]))
+  const reuse = new Set(reply.components.filter(c => c.decision === 'reuse' && byAlias.get(c.alias)?.onBoard).map(c => c.alias))
+  const retire = reply.components.filter(c => c.decision === 'retrieve' && byAlias.get(c.alias)?.retrievable === true && !reuse.has(c.alias)).map(c => c.alias)
+  const newAllowed = new Map(), newBlocked = []
+  for (const x of reply.parts) {
+    if (!x.newRequired) continue
+    const part = parts.find(q => q.alias === x.alias)
+    if (!part || part.coveredBy.some(a => reuse.has(a))) { newBlocked.push(x.alias); continue }
+    newAllowed.set(x.alias, part.label)
+  }
+  return { reuse, retire, newAllowed, newBlocked }
+}
+const constraintView = (c, parts) => ({ reuse: [...c.reuse], retire: [...c.retire], newAllowed: [...c.newAllowed].map(([part, label]) => ({ part, label })), maxNew: c.newAllowed.size, parts: parts.map(x => ({ part: x.alias, label: x.label })) })
+/** retrievalPlan(retrievals) -> the plan the presentation controller previews (offerRetrieval): fold these cards on the user's own screen. */
+export const retrievalPlan = retrievals => ({ option: 'retrieval', collapse: retrievals.map(r => ({ id: r.id, value: true })) })
+/** completeBriefingArgs(result, created) -> the publish arguments including the steps that waited for a new component; created: { N1: { artifactId | sourceId } } (the host created it). */
+export function completeBriefingArgs(outcome, created = {}) {
+  const result = outcome.plan ?? outcome // a flow outcome ('presented') or its plan
+  const steps = result.stepSpecs.map(s => ({ id: s.id, text: s.text, fallback: s.fallback, ...(s.emphasis ? { emphasis: s.emphasis } : {}), targets: [...s.refs, ...s.news.map(a => created[a]).filter(Boolean)] }))
+  if (steps.some(s => !s.targets.length)) return null
+  const args = { title: result.title, steps }
+  return validBriefing({ id: 'proposal', title: args.title, steps }) ? args : null
+}
+
+// ---------------- 6. the bounded flow ----------------
 /**
- * runBriefingFlow({ report, candidates, links, viewport, decide, engine, allow, limits }) -> one of
+ * runBriefingFlow({ report, candidates, currentAnswerId, links, viewport, decide, engine, allow, limits }) -> one of
  *   { status:'bubble', reason }                       the report stays in the chat message (no design request was made)
  *   { status:'advisory-only', verdict }               recorded only; behaves as a chat message
- *   { status:'presented', publishArgs, revisions }    a briefing that passed the flow check; the host publishes it as a proposal through the existing tool
+ *   { status:'presented', publishArgs, newComponents, retrievals, revisions }   a briefing that passed the flow check, built reuse-first; the host publishes it as a proposal
+ *                                                     through the existing tool, creates the (0..n) allowed new components first, and offers the retrievals on the user's screen
  *   { status:'fallback-chat', reason, revisions }     the chat answer plus a note: the briefing did not pass within the bound
- * decide: { placement, check } each { prepare(dto), run(ticket), cancel(ticket) } (bridge routes); engine(request) -> design | null (the subjective model);
+ * decide: { placement, reuse?, check } each { prepare(dto), run(ticket), cancel(ticket) } (bridge routes); engine(request) -> design | null (the subjective model);
  * allow(kind, preview) -> true when sending that exact packet is permitted (standing mode-on consent or the user's review). Bound: maxRevisions redesigns.
+ * Without decide.reuse the flow behaves as before (every board target is a candidate); with it, the design is reuse-first.
  */
-export async function runBriefingFlow({ report, candidates, links = [], viewport = null, decide, engine, allow = async () => true, limits = {} }) {
+export async function runBriefingFlow({ report, candidates, currentAnswerId = null, links = [], viewport = null, decide, engine, allow = async () => true, limits = {} }) {
   const maxRevisions = Number.isInteger(limits.maxRevisions) ? Math.max(0, Math.min(limits.maxRevisions, 3)) : BRIEFING_LIMITS.maxRevisions
   const stats = { judgeRequests: 0, designRounds: 0 }
-  const enumeration = enumerateBriefingFacts({ report, candidates })
+  const enumeration = enumerateBriefingFacts({ report, candidates, currentAnswerId })
   if (!enumeration.boardFeasible) return { status: 'bubble', reason: 'no-board-targets', requested: false, stats }
   const ask = async (route, kind, dto) => {
     const prepared = await route.prepare(dto)
@@ -261,23 +425,40 @@ export async function runBriefingFlow({ report, candidates, links = [], viewport
   if (placed.unavailable) return { status: 'bubble', reason: placed.unavailable === 'declined' ? 'declined' : 'judge-unavailable', detail: placed.unavailable, requested: false, stats }
   if (placed.reply?.status === 'advisory-only') return { status: 'advisory-only', verdict: placed.reply.verdict, requested: true, stats }
   if (placed.reply?.status !== 'board') return { status: 'bubble', reason: placed.reply?.status === 'bubble' ? 'judged-bubble' : 'placement-undecided', requested: true, stats }
-  let request = buildDesignRequest({ enumeration }), previous = null, revision = 0, last = null
+  let constraint = null, parts = []
+  if (decide.reuse) {
+    parts = enumerateReportParts(report, enumeration.targets)
+    const judged = await ask(decide.reuse, 'briefing-reuse', reuseDto(enumeration, parts))
+    if (judged.unavailable) return { status: 'fallback-chat', reason: 'judge-unavailable', detail: judged.unavailable, revisions: 0, stats }
+    if (judged.reply?.status === 'advisory-only') return { status: 'advisory-only', verdict: judged.reply.verdict, requested: true, stats }
+    if (judged.reply?.status !== 'ok') return { status: 'fallback-chat', reason: 'judge-unavailable', detail: judged.reply?.reason ?? judged.reply?.status ?? 'manual', revisions: 0, stats }
+    constraint = constraintFrom(judged.reply, enumeration, parts)
+    if (!constraint.reuse.size && !constraint.newAllowed.size) return { status: 'fallback-chat', reason: 'nothing-to-reuse', revisions: 0, stats }
+  }
+  const extra = constraint ? constraintView(constraint, parts) : {}
+  let request = buildDesignRequest({ enumeration, constraint, parts }), previous = null, revision = 0, last = null
   for (;;) {
     stats.designRounds++
-    const resolved = resolveDesign(await engine(request), enumeration)
+    const resolved = resolveDesign(await engine(request), enumeration, { constraint })
     if (!resolved.ok) {
       if (revision >= maxRevisions) return { status: 'fallback-chat', reason: 'design-invalid', detail: resolved.reason, revisions: revision, stats }
-      revision++; request = buildRedesignRequest({ invalid: resolved.reason, previous, revision, remaining: maxRevisions - revision }); continue
+      revision++; request = buildRedesignRequest({ invalid: resolved.reason, previous, revision, remaining: maxRevisions - revision, extra }); continue
     }
     previous = resolved.steps.map(s => ({ alias: s.alias, text: s.text, targets: s.targets }))
-    const checks = enumerateBriefingChecks(resolved.steps, enumeration, { links, viewport })
-    const dto = briefingCheckDto(resolved.steps, enumeration, checks, { title: resolved.publishArgs.title })
+    const forCheck = resolved.newTargets.length ? { ...enumeration, targets: [...enumeration.targets, ...resolved.newTargets] } : enumeration
+    const checks = enumerateBriefingChecks(resolved.steps, forCheck, { links, viewport, coverSet: constraint?.reuse ?? null })
+    const dto = briefingCheckDto(resolved.steps, forCheck, checks, { title: resolved.publishArgs.title })
     const judged = dto ? await ask(decide.check, 'briefing-check', dto) : { unavailable: 'nothing-to-check' }
     if (judged.unavailable) return { status: 'fallback-chat', reason: 'judge-unavailable', detail: judged.unavailable, revisions: revision, stats }
     last = judged.reply
-    if (last?.status === 'ok') return { status: 'presented', publishArgs: resolved.publishArgs, revisions: revision, checks: checks.items.map(i => i.key), stats }
+    if (last?.status === 'ok') {
+      const retrievals = constraint ? constraint.retire.map(a => { const t = enumeration.targets.find(x => x.alias === a); return { alias: a, id: t.id, ref: t.ref } }) : []
+      return { status: 'presented', publishArgs: resolved.publishArgs, plan: { title: resolved.title, stepSpecs: resolved.stepSpecs, pendingSteps: resolved.pendingSteps }, newComponents: resolved.newComponents, retrievals,
+        reuse: constraint ? { reuse: [...constraint.reuse], retire: [...constraint.retire], newAllowed: [...constraint.newAllowed.keys()], newBlocked: constraint.newBlocked } : null,
+        revisions: revision, checks: checks.items.map(i => i.key), stats }
+    }
     if (last?.status !== 'findings' && last?.status !== 'inconclusive') return { status: 'fallback-chat', reason: 'judge-unavailable', detail: last?.reason ?? last?.status ?? 'manual', revisions: revision, stats }
     if (revision >= maxRevisions) return { status: 'fallback-chat', reason: last.status === 'findings' ? 'check-not-passed' : 'check-inconclusive', revisions: revision, stats }
-    revision++; request = buildRedesignRequest({ status: last.status, result: last, previous, revision, remaining: maxRevisions - revision })
+    revision++; request = buildRedesignRequest({ status: last.status, result: last, previous, revision, remaining: maxRevisions - revision, extra })
   }
 }
