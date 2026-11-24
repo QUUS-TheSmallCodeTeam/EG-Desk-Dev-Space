@@ -63,7 +63,7 @@ for (const mode of ['off', 'advisory', 'on']) for (const [name, s] of Object.ent
     assert.equal(entries.length, 1)
     const [entry] = entries
     t.diagnostic('ENTRY ' + JSON.stringify(entry))
-    assert.deepEqual([entry.feature, entry.mode, entry.candidates], ['turn_context', mode, 3])
+    assert.deepEqual([entry.feature, entry.mode, entry.candidates], ['board_reply', mode, 3])
     assert.equal(entry.outcome.run, 'completed', 'the run outcome is stored once the ask finishes')
     if (s.fallback) {
       assert.equal(entry.fallback, s.fallback)

@@ -117,7 +117,9 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
         ...(fallback ? { fallback, judgments: [] } : {
           attached: prepared.mode === 'on' && result?.status === 'preview',
           judgments: [{ q: 'choice', would: accepted ? 'accept' : 'reject', top: rows[0]?.probability, second: rows[1]?.probability,
-            p: a?.confidence, threshold: DEFAULT_DECISION_THRESHOLDS.choice, minMargin: DEFAULT_DECISION_THRESHOLDS.margin }] }) })
+            p: a?.confidence, confidence: a?.confidence, options: prepared.options.length,
+            margin: Number.isFinite(rows[0]?.probability) && Number.isFinite(rows[1]?.probability) ? rows[0].probability - rows[1].probability : undefined,
+            threshold: DEFAULT_DECISION_THRESHOLDS.choice, minMargin: DEFAULT_DECISION_THRESHOLDS.margin }] }) })
     } catch { /* recording must never affect the reply */ }
   }
 
