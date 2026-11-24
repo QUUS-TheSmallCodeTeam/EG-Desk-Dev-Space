@@ -25,7 +25,7 @@ export const MAX_BYTES = 192 * 1024
 export const RETENTION_DAYS = 30
 const MAX_JUDGMENTS = 64
 
-const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check', 'turn_memory'])
+const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check', 'turn_memory', 'conversation_flow'])
 const MODES = new Set(['advisory', 'on'])
 const QUESTIONS = new Set(['answer_type', 'time_intent', 'relevance', 'speech_axis', 'speech_predicate', 'recall', 'topic_route', 'choice', 'next_step', 'page_state', 'goal_met', 'terminal_state', 'terminal_risk', 'log_block', 'claim_support', 'claim_present', 'term_internal', 'triage_courtesy', 'triage_need', 'triage_record', 'write_target'])
 const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed', 'none', 'act', 'hold', 'fetch'])

@@ -11,6 +11,8 @@ import { MAX_COMPOSED } from './egdesk-profile-store.mjs'
 import { CHAT_CHOICE_BAR, chatChoiceManual, runChatChoice, validateChatChoice } from './egdesk-chat-choice.mjs'
 import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { DRAFT_CHECK_LIMITS, checkDraft } from './egdesk-draft-check.mjs'
+import { createInternalTurns } from './codex-internal-turn.mjs'
+import { FLOW_LIMITS, cleanIntermediate, decideFlow, enumerateOptions, flowFacts, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
 import { browserRefusal, ceilingAllowsBrowserTool, ceilingAllowsComputerTool, ceilingApprovalRefusal, ceilingBrowserSelection, ceilingNarrows, ceilingReportNotices, CEILING_MESSAGES, computerRefusal, effectiveToolCeiling, liveBrowserSelected, loadCeilingThreadOverrides, mergeCeilingOverrides, recordedToolCeiling, verifyCeilingNativeThread } from './codex-chat-tool-ceiling.mjs'
 import { HOST_CONTROL_POLICIES, HOST_LEASE_CODES, requiresHostControl } from './egdesk-host-lease.mjs'
 import { COMPUTER_ADAPTER_CODES, refusedResult } from './egdesk-computer-adapter.mjs'
@@ -37,6 +39,10 @@ const BROWSER_INTERACTION_TOOL_NAMES = Object.freeze([...BROWSER_STEP_TOOL_NAMES
 const FIXTURE_BROWSER_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egdesk_browser_click', 'egdesk_browser_fill'])
 import { planSessionTopic, SESSION_TOPIC_LIMITS } from './egdesk-session-topic.mjs'
 import { TOPIC_ANSWER_LIMIT, TOPIC_ANSWER_HOLD_MS, topicAnswerContradiction } from './egdesk-topic-answer-grounding.mjs'
+// Held draft answer: the longest a completed final answer waits for its turn to end, and the most text held (the original is posted beyond either).
+const DRAFT_HOLD_RELEASE_MS = 20_000
+const DRAFT_HOLD_LIMIT = 256 * 1024
+const FLOW_OWN_KINDS = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
 import { speechSegments } from './egdesk-speech-grounding.mjs'
 import { deriveTurnPosition, prepareTurnMemory } from './egdesk-turn-memory.mjs'
 import { createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry } from './egdesk-browser-task.mjs'
@@ -771,6 +777,9 @@ export class CodexChatRuntime {
     // { mode(): 'off'|'advisory'|'on', configured(): boolean, client, collect({ body, context }) → candidates, budgetMs? } or null.
     this.speechRuns = new WeakMap() // private runtime-only grants; never projected onto public runs
     this.calibrationRuns = new WeakMap() // run -> content-free calibration entry id; process-local
+    this.internalTurns = createInternalTurns() // short private fork turns (draft revision, intermediate messages); never a run
+    this.flowRuns = new WeakMap() // run -> intermediate-message state (flag decisionContext.conversationFlow, default off)
+    this.flowJobs = new Set()
     this.draftCheckRuns = new Set() // in-flight advisory draft checks (never awaited by a turn)
     this.draftCheckTurns = new WeakMap() // run -> what the model had this turn, for the check after the answer is posted
     this.draftCheckSeen = new WeakMap() // run -> final-answer item ids already handed to the check
@@ -1419,7 +1428,7 @@ export class CodexChatRuntime {
       // A child Agent can outlive its parent turn; its last state is now unknown.
       this.updateSubAgentRows(run, (run.subAgents || []).filter(row => !SUBAGENT_DONE.has(row.state) && row.state !== 'unknown').map(row => ({ threadId: row.threadId, state: 'unknown', nativeStatus: null })), true)
       const guarded = this.topicAnswerGuards.get(run)
-      if (guarded?.state === 'holding') this.discardTopicAnswer(guarded, 'restart')
+      if (guarded?.state === 'holding') { if (guarded.kind === 'draft') void this.releaseDraftOriginal(run, guarded); else this.discardTopicAnswer(guarded, 'restart') }
       if (TERMINAL.has(run.status)) continue
       this.closeHeldOutput(run, processLost ? 'failed' : 'unknown')
       run.status = processLost ? 'failed' : 'unknown'
@@ -1557,6 +1566,7 @@ export class CodexChatRuntime {
     // The current setting and a history checkpoint do not establish that evidence.
     if (announce && owned && context?.computerControl) run.computerControl = { policy: context.computerControl.policy }
     if (context?.topicAnswerGuard === true) this.startTopicAnswerGuard(run)
+    else if (context?.draftHold === true) this.startTopicAnswerGuard(run, 'draft')
     this.channelOutput.set(run, { notes: new Set(), held: new Map(), overflow: false, submittedText: context?.submittedText })
     this.runs.set(key, run)
     if (owned) this.ownedRuns.add(run)
@@ -1587,6 +1597,9 @@ export class CodexChatRuntime {
   // { board: run.board attribution + block, blocks: { key: text } } — extra
   // turn context from sendBoard / reassignSubAgent.
   async send(body, internal = null) {
+    // A reply to an early question the run asked while it keeps working goes into that same run (flag decisionContext.conversationFlow).
+    const inRun = internal ? null : this.openEarlyQuestion(idText(body?.clientThreadId) || idText(body?.thread?.id), idText(body?.conversationId))
+    if (inRun) return this.answerEarlyQuestion(inRun, body)
     validateChatCwd(body)
     if (this.requireStore) this.assertStore()
     const requestedEngineId = this.requestedEngine(body)
@@ -2487,6 +2500,8 @@ export class CodexChatRuntime {
       ? { ...nativePolicyReceipt, browserEffects: 'selected-card-observe-click-fill-this-run' }
       : nativePolicyReceipt
     if (bounded && !verifiedPolicyReceipt) throw chatError('QA_POLICY_UNVERIFIED', 'Verified bounded policy receipt was lost before turn/start', 502)
+    // Held, completed answers (flag decisionContext.draftCheck.mode() === 'on', default off): the final answer is posted only once, after the check.
+    context.draftHold = !bounded && this.draftHoldEligible(body, context)
     const pending = { ...context, conversationId: cid, buffer: [] }
     this.pendingStarts.set(cid, pending)
     let turnStartAttempted = false
@@ -2642,6 +2657,7 @@ export class CodexChatRuntime {
       }
       if (decision) this.noteDecisionContext(run, decision)
       this.noteDraftCheckTurn(run, body, context, decision, bounded, Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'))
+      this.startConversationFlow(run, body, context)
       if (memoryPosition) this.startTurnMemoryAdvisory(run, body, context, memoryPosition, performance.now() - memoryClock, { speech: decision?.speech ?? null, topic: this.topicIntakes.get(context) ?? null }) // after dispatch, in the background: never delays or changes the turn
       if (bounded && policy === BROWSER_BOUNDED && browserInteractionRequested && this.browserEntryMode() === 'advisory') this.startBrowserEntryAdvisory(run, body, context) // same: record only
       // Notifications can precede the RPC response. Only the returned turn ID
@@ -3629,6 +3645,7 @@ export class CodexChatRuntime {
   }
 
   handleNotification(message, engineId, slot) {
+    if (this.internalTurns.feed(message)) return Promise.resolve() // a private fork turn, not a run
     const inbound = this.inboundEventRoute(message, engineId, slot)
     if (!this.eventRouteMatches(inbound)) return Promise.resolve()
     const event = cleanNotification(message.method, message.params, engineId || this.threadEngine(idText(message.params?.threadId)))
@@ -3650,6 +3667,10 @@ export class CodexChatRuntime {
   }
 
   handleServerRequest(message, engineId, slot) {
+    if (this.internalTurns.declines(message)) { // the private fork may not act: every request is refused
+      this.respond(message.id, null, { code: -32000, message: 'Not available in a private turn' }, slot || this.threadOperationSlot(idText(message.params?.threadId)))
+      return Promise.resolve()
+    }
     const inbound = this.inboundEventRoute(message, engineId, slot)
     if (!this.eventRouteMatches(inbound)) return Promise.resolve()
     const p = message.params || {}
@@ -3690,9 +3711,13 @@ export class CodexChatRuntime {
   enqueue(event) {
     const pending = this.pendingStarts.get(event.threadId) || this.pendingResumes.get(event.threadId)
     const live = this.runs.get(runKey(event.threadId, event.turnId))
-    if (pending?.topicAnswerGuard || (live && this.topicAnswerGuards.has(live))) {
+    const heldNow = live ? this.heldGuard(live) : null
+    if (pending?.topicAnswerGuard || pending?.draftHold || heldNow) {
       const notes = live && this.channelOutput.get(live).notes
       if (event.method === 'item/agentMessage/delta' && !notes?.has(event.itemId)) return Promise.resolve()
+    }
+    if (pending?.topicAnswerGuard || (live && this.topicAnswerGuards.has(live) && this.topicAnswerGuards.get(live).kind !== 'draft')) {
+      const notes = live && this.channelOutput.get(live).notes
       const bound = (item, ceiling, start = false) => item?.type === 'agentMessage' && item.phase !== 'commentary' && (start || item.text.length > ceiling)
         ? { ...item, text: '', truncated: !start || item.truncated } : item
       if (event.item) event.item = bound(event.item, TOPIC_ANSWER_LIMIT, event.method === 'item/started')
@@ -4639,6 +4664,219 @@ export class CodexChatRuntime {
     return { preRun, provider, note, adopted: false }
   }
 
+  // ---- Intermediate messages while a run works (flag decisionContext.conversationFlow = { mode(): 'off'|'on' }, default off). ----
+  // Needs the held-answer mode: every posted message, intermediate or final, is a completed, checked message. A tick every few seconds builds
+  // runtime facts (elapsed time, tool steps, an Agent question in its notes), lists the kinds that are possible right now, and only then asks
+  // the Decision model one choice. The subjective model writes the message on a private fork; the run itself is never touched.
+  conversationFlowMode() {
+    try { return this.decisionContext?.conversationFlow?.mode?.() === 'on' && this.draftCheckMode() === 'on' ? 'on' : 'off' } catch { return 'off' }
+  }
+
+  startConversationFlow(run, body, context) {
+    try {
+      if (this.conversationFlowMode() !== 'on' || context.draftHold !== true) return
+      const flow = { startedAt: context.askedAt ?? this.now(), sent: [], kinds: new Set(), askedNotes: new Set(), lastSentAt: null, stepsAtLast: 0,
+        evals: 0, requests: 0, lastEvalAt: -Infinity, busy: false, closed: false, timer: null, question: null }
+      this.flowRuns.set(run, flow)
+      this.scheduleFlowTick(run, flow)
+    } catch { /* never affects the turn */ }
+  }
+
+  scheduleFlowTick(run, flow) {
+    if (flow.closed) return
+    flow.timer = this.setTimer(() => this.flowTick(run, flow), FLOW_LIMITS.tickMs)
+    flow.timer?.unref?.()
+  }
+
+  stopConversationFlow(run) {
+    const flow = this.flowRuns.get(run)
+    if (!flow || flow.closed) return
+    flow.closed = true
+    if (flow.timer != null) this.clearTimer(flow.timer)
+  }
+
+  flowTick(run, flow) {
+    flow.timer = null
+    if (flow.closed) return
+    if (run.status !== 'inProgress' || this.heldGuard(run)?.state === 'checking') { this.stopConversationFlow(run); return }
+    if (flow.busy) { this.scheduleFlowTick(run, flow); return }
+    flow.busy = true
+    const job = this.flowEvaluate(run, flow).catch(() => {}).finally(() => { flow.busy = false; this.scheduleFlowTick(run, flow) })
+    this.flowJobs.add(job)
+    void job.finally(() => this.flowJobs.delete(job))
+  }
+
+  flowIdle() { return Promise.allSettled([...this.flowJobs]) }
+
+  async flowEvaluate(run, flow) {
+    const setup = this.decisionContext
+    if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return
+    const now = this.now()
+    const facts = flowFacts({ run, now, flow, own: FLOW_OWN_KINDS })
+    facts.blocked ||= Boolean(run.pendingUserInputs?.length)
+    const options = enumerateOptions(facts)
+    if (options.length < 2 || flow.evals >= FLOW_LIMITS.maxEvals || now - flow.lastEvalAt < FLOW_LIMITS.evalGapMs) return
+    flow.evals++; flow.lastEvalAt = now; flow.requests++
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), DRAFT_CHECK_LIMITS.firstCheckMs)
+    timer.unref?.()
+    let verdict
+    try { verdict = await decideFlow({ facts, options, client: setup.client, signal: controller.signal, timeoutMs: DRAFT_CHECK_LIMITS.firstCheckMs }) }
+    catch { return } finally { clearTimeout(timer) }
+    try { setup.calibrationLog?.record?.({ feature: 'conversation_flow', mode: 'on', attached: verdict.kind !== 'none', judgments: [verdict.judgment], candidates: options.length }) } catch { /* ignore */ }
+    if (verdict.kind === 'none' || flow.closed || run.status !== 'inProgress') return
+    const text = await this.writeIntermediate(run, flow, verdict.kind, facts)
+    if (!text || flow.closed || run.status !== 'inProgress' || this.heldGuard(run)?.state === 'checking') return
+    const id = `egdesk-flow:${randomUUID()}`
+    await this.applyItem(run, { id, type: 'agentMessage', phase: null, text, completionConfirmed: true }, true, true, true)
+    flow.sent.push({ id, text, kind: verdict.kind, at: now }); flow.kinds.add(verdict.kind); flow.lastSentAt = this.now(); flow.stepsAtLast = facts.stepsDone
+    if (verdict.kind === 'ask_missing') { flow.question = { id, pending: true, at: now }; if (facts.question) flow.askedNotes.add(facts.question.id) }
+  }
+
+  async writeIntermediate(run, flow, kind, facts) {
+    try {
+      const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
+      if (!engine?.capabilities?.(slot)?.has('threadFork')) return null
+      const note = kind === 'ask_missing' && facts.question ? run.activities.find(a => a.id === facts.question.id)?.detail?.text ?? null : null
+      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, timeoutMs: FLOW_LIMITS.writerMs,
+        text: writerPrompt(kind, facts, { question: note, prior: flow.sent.map(row => row.text) }) })
+      const text = cleanIntermediate(out.text)
+      if (!text || flow.sent.some(row => row.text === text)) return null
+      // Checked like any posted message; there is no revision for a short note: a message that fails is not posted.
+      const setup = this.decisionContext, turn = this.draftCheckTurns.get(run)
+      if (!turn || turn.skip) return text
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), DRAFT_CHECK_LIMITS.firstCheckMs)
+      timer.unref?.()
+      try {
+        const checked = await Promise.race([checkDraft({ draft: text, evidence: turn.evidence, userText: turn.userText, mode: 'on', client: setup.client, revise: null, signal: controller.signal }),
+          new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))])
+        return checked && checked.text === text ? text : null
+      } finally { clearTimeout(timer); controller.abort() }
+    } catch { return null }
+  }
+
+  openEarlyQuestion(clientThreadId, conversationId) {
+    if (!clientThreadId) return null
+    for (const run of this.runs.values()) {
+      if (run.clientThreadId !== clientThreadId || run.status !== 'inProgress' || (conversationId && run.conversationId !== conversationId)) continue
+      const flow = this.flowRuns.get(run)
+      if (flow && !flow.closed && flow.question?.pending) return run
+    }
+    return null
+  }
+
+  // The person answered the early question while the run kept working: the reply becomes a normal local user message and is
+  // steered into the same native turn (the verified turn/steer contract). Without that contract nothing is changed.
+  async answerEarlyQuestion(run, body) {
+    const flow = this.flowRuns.get(run), store = this.store
+    const requestId = idText(body.requestId), message = typeof body.message === 'string' ? body.message : ''
+    if (!flow?.question?.pending || !store || !requestId || !message.trim() || message.length > 16384) throw chatError('INVALID_REQUEST', 'This reply cannot be added to the running turn', 400)
+    const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
+    const proof = engine?.boardPeerContract?.(slot)
+    if (!proof || typeof engine.steerTurn !== 'function') throw chatError('INRUN_REPLY_UNAVAILABLE', 'This engine cannot take a reply while it works', 409)
+    const clientUserMessageId = requestId
+    flow.question.pending = false // one reply per question; a second message waits for the turn like any other
+    let response
+    try {
+      response = await engine.steerTurn({ threadId: run.conversationId, expectedTurnId: run.runId, clientUserMessageId,
+        input: [{ type: 'text', text: message, text_elements: [] }] }, slot, proof)
+    } catch (error) { flow.question.pending = true; throw chatError('INRUN_REPLY_UNAVAILABLE', 'The running turn did not take the reply', 409) }
+    if (response?.turnId !== run.runId) { flow.question.pending = true; throw chatError('INRUN_REPLY_UNAVAILABLE', 'The running turn did not take the reply', 409) }
+    const localMessageId = localId('msg', run.clientThreadId, requestId)
+    try {
+      store.acceptRequest({ clientThreadId: run.clientThreadId, requestId, fingerprint: createHash('sha256').update(message).digest('hex'), ts: this.now(), localMessageId,
+        message: { messageId: null, clientId: requestId, role: 'user', text: publicText(message, message.length), phase: null, status: 'accepted', localRunId: run.localRunId, requestId } })
+      const prior = run.requestId ? store.getRequest({ clientThreadId: run.clientThreadId, requestId: run.requestId })?.outcome : null
+      store.recordRequestOutcome({ clientThreadId: run.clientThreadId, requestId, ts: this.now(),
+        outcome: { ...(prior || {}), accepted: true, dispatchStatus: 'confirmed', conversationId: run.conversationId, runId: run.runId, localRunId: run.localRunId } })
+    } catch { this.storeHealthy = false }
+    const row = { id: `egdesk-reply:${requestId}`, messageId: `egdesk-reply:${requestId}`, clientId: requestId, role: 'user', text: publicText(message, message.length), phase: null,
+      status: 'complete', localMessageId, createdAt: this.now() }
+    this.put(run, 'messages', row)
+    this.emit(run, 'message.completed', { ...row }, row.id)
+    return { accepted: true, durable: true, inRun: true, requestId, clientThreadId: run.clientThreadId, conversationId: run.conversationId, runId: run.runId, localMessageId }
+  }
+
+  // ---- Held answers, on mode (flag decisionContext.draftCheck.mode() === 'on', default off) ----
+  // The final answer is held (no stream, no partial) while the working bubble shows; at the end of the turn it is checked once, revised
+  // once on a private fork if needed, and posted as one completed message. Any failure, a timeout or a settings change posts the original.
+  async releaseDraftOriginal(run, guard) {
+    if (!guard || guard.state !== 'holding') return
+    clearTimeout(guard.timer)
+    guard.state = 'passthrough'
+    const items = [...guard.items.values()]
+    guard.items.clear()
+    for (const item of items) { try { await this.applyItem(run, item, true, true, true) } catch { /* ignore */ } }
+  }
+
+  async settleDraftAnswer(run, status, guard) {
+    if (guard.state !== 'holding') return
+    guard.state = 'checking'
+    clearTimeout(guard.timer)
+    this.stopConversationFlow(run)
+    const items = [...guard.items.values()]
+    const setup = this.decisionContext
+    const texts = items.map(item => item.text)
+    try {
+      if (status === 'completed' && items.length === 1 && items[0].text.trim()) {
+        const generation = typeof setup?.settingsGeneration === 'function' ? setup.settingsGeneration() : null
+        const checked = await this.checkHeldDraft(run, items[0].text)
+        // The owner may have changed the mode or key meanwhile: then the check's result is not acted on.
+        const current = this.draftCheckMode() === 'on' && ['advisory', 'on'].includes(setup?.mode?.()) && setup?.configured?.() === true &&
+          (generation === null || typeof setup.settingsGeneration !== 'function' || setup.settingsGeneration() === generation)
+        if (checked && current && checked !== items[0].text) texts[0] = checked
+      }
+    } catch { /* the original is posted */ }
+    const flow = this.flowRuns.get(run)
+    if (flow?.sent.length && texts.length === 1) texts[0] = withoutRepeats(texts[0], flow.sent.map(row => row.text))
+    guard.state = 'released'
+    guard.items.clear()
+    items.forEach((item, i) => { item.text = texts[i] })
+    for (const item of items) await this.applyItem(run, item, true, true, true)
+  }
+
+  // Returns the text to post (the original when nothing changed or anything failed).
+  async checkHeldDraft(run, text) {
+    const setup = this.decisionContext, dc = setup?.draftCheck, turn = this.draftCheckTurns.get(run)
+    if (!turn || turn.skip || !setup?.client) return null
+    const limit = Number.isSafeInteger(dc?.holdMs) && dc.holdMs > 0 ? dc.holdMs : DRAFT_CHECK_LIMITS.holdMs
+    const controller = new AbortController(), t0 = performance.now()
+    const timer = setTimeout(() => controller.abort(), limit)
+    timer.unref?.()
+    const own = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
+    const tools = (run.activities || []).filter(a => !own.has(a.kind)).slice(0, 8)
+      .map((a, i) => ({ id: `tool${i + 1}`, kind: 'tool', time: 'present', status: typeof a.status === 'string' ? a.status : null, source: `tool:${a.kind}`, opaque: true }))
+    let vocabulary = []
+    try { vocabulary = (await dc?.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
+    const revise = ({ draft, note }) => this.reviseOnFork(run, draft, note, controller.signal)
+    const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))
+    const check = checkDraft({ draft: text, evidence: [...turn.evidence, ...tools], userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
+      mode: 'on', client: setup.client, revise, signal: controller.signal })
+    void check.catch(() => {})
+    try {
+      const result = await Promise.race([check, aborted])
+      const totalMs = performance.now() - t0
+      const log = setup.calibrationLog
+      try {
+        log?.record?.(result ? { ...result.calibration, mode: 'on', ...(result.verdict ? { check: result.verdict.check, ifUnrevised: result.verdict.ifUnrevised } : {}),
+          evidence: result.stats ? { items: result.stats.items, opaque: result.stats.opaque, sentences: result.stats.sentences, terms: result.stats.terms } : undefined,
+          timing: { totalMs, calls: result.calls, withinBudget: totalMs <= DRAFT_CHECK_LIMITS.firstCheckMs } }
+          : { feature: 'draft_check', mode: 'on', attached: false, judgments: [], fallback: 'timeout', timing: { totalMs, calls: null } })
+      } catch { /* recording never affects posting */ }
+      return result && typeof result.text === 'string' && result.text.trim() ? result.text : null
+    } finally { clearTimeout(timer); controller.abort() }
+  }
+
+  // The subjective model's one revision, on a private fork of the conversation. Null when the fork cannot run or fails.
+  async reviseOnFork(run, draft, note, signal) {
+    try {
+      const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
+      if (!engine?.capabilities?.(slot)?.has('threadFork')) return null
+      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, signal, timeoutMs: 25_000,
+        text: `Here is your draft answer to the person's last message:\n\n${draft}\n\n${note}\n\nReply with only the revised answer text.` })
+      return out.text || null
+    } catch { return null }
+  }
+
   // ---- Advisory draft check (egdesk-draft-check.mjs). Record only: the posted answer is never held, changed or delayed. ----
   // Config: decisionContext.draftCheck = { mode(): 'off'|'advisory', eligible?({ body, context }), internalVocabulary?({ run }) → string[], deadlineMs? }. Absent, or any
   // mode other than 'advisory', means off. 'on' (hold, revise, post) is deliberately not implemented: it belongs at settleTopicAnswer
@@ -4646,14 +4884,14 @@ export class CodexChatRuntime {
   // DM turn without guarded evidence is checked; what leaves the machine is the posted sentences plus catalog text that already went to
   // the decision model; tool outputs are sent as content-free references only.
   draftCheckMode() {
-    try { return this.decisionContext?.draftCheck?.mode?.() === 'advisory' ? 'advisory' : 'off' } catch { return 'off' }
+    try { const mode = this.decisionContext?.draftCheck?.mode?.(); return mode === 'advisory' || mode === 'on' ? mode : 'off' } catch { return 'off' }
   }
 
   draftCheckIdle() { return Promise.allSettled([...this.draftCheckRuns]) }
 
   noteDraftCheckTurn(run, body, context, decision, bounded, extraKeys = []) {
     try {
-      if (this.draftCheckMode() !== 'advisory') return
+      if (this.draftCheckMode() === 'off') return
       const dc = this.decisionContext?.draftCheck
       const eligible = !bounded && (typeof dc?.eligible === 'function' ? dc.eligible({ body, context }) === true
         : context.channelKind === 'direct' && !context.stateless && !context.board && body.boardId == null)
@@ -5118,9 +5356,27 @@ export class CodexChatRuntime {
     c.held.clear()
   }
 
-  startTopicAnswerGuard(run) {
-    const guard = { state: 'holding', items: new Map(), finalIds: new Set(), size: 0, until: this.now() + TOPIC_ANSWER_HOLD_MS }
+  // A held draft answer is not a topic guard: it has no expiry measured from the run's start (a long run is normal), never shows the
+  // rejection notice, and is released as the original on any failure. kind 'draft' keeps the same hold/settle points.
+  heldGuard(run) {
+    const guard = this.topicAnswerGuards.get(run)
+    return guard && (guard.kind !== 'draft' || guard.state === 'holding' || guard.state === 'checking') ? guard : null
+  }
+
+  draftHoldEligible(body, context) {
+    try {
+      if (this.draftCheckMode() !== 'on') return false
+      const setup = this.decisionContext, dc = setup?.draftCheck
+      if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return false
+      if (typeof dc?.eligible === 'function') return dc.eligible({ body, context }) === true
+      return context.channelKind === 'direct' && !context.stateless && !context.board && body.boardId == null && !context.topicAnswerGuard
+    } catch { return false }
+  }
+
+  startTopicAnswerGuard(run, kind = 'topic') {
+    const guard = { kind, state: 'holding', items: new Map(), finalIds: new Set(), size: 0, until: this.now() + TOPIC_ANSWER_HOLD_MS }
     this.topicAnswerGuards.set(run, guard)
+    if (kind === 'draft') return
     const ref = new WeakRef(run)
     guard.timer = setTimeout(() => {
       const live = ref.deref()
@@ -5181,14 +5437,23 @@ export class CodexChatRuntime {
   holdTopicAnswer(run, item, authoritative, snapshot = false) {
     const guard = this.topicAnswerGuards.get(run)
     if (guard.state !== 'holding') return
-    if (this.now() >= guard.until) { this.discardTopicAnswer(guard, 'expired'); return }
+    const draft = guard.kind === 'draft'
+    if (!draft && this.now() >= guard.until) { this.discardTopicAnswer(guard, 'expired'); return }
     if (item.phase !== 'final_answer' && !guard.finalIds.has(item.id)) return
-    if (guard.finalIds.size >= 8 && !guard.finalIds.has(item.id)) { this.discardTopicAnswer(guard, 'overflow'); return }
+    if (guard.finalIds.size >= (draft ? 16 : 8) && !guard.finalIds.has(item.id)) { if (draft) this.releaseDraftOriginal(run, guard); else this.discardTopicAnswer(guard, 'overflow'); return }
     guard.finalIds.add(item.id)
+    if (draft && !guard.timer) {
+      // The turn normally ends right after its final item. If it does not, the original is posted rather than held for ever.
+      const ref = new WeakRef(run)
+      guard.timer = setTimeout(() => { const live = ref.deref(); if (live) void this.releaseDraftOriginal(live, guard) }, DRAFT_HOLD_RELEASE_MS)
+      guard.timer.unref?.()
+    }
     if (!authoritative) return // no starts or deltas retained
     const prior = guard.items.get(item.id)
     if (snapshot && item.text === '' && !item.truncated) return // summary or omitted body
-    if (item.truncated || (prior && prior.text !== item.text) || guard.size + (prior ? 0 : item.text.length) > TOPIC_ANSWER_LIMIT) {
+    if (draft) {
+      if (item.truncated || (prior && prior.text !== item.text) || guard.size + (prior ? 0 : item.text.length) > DRAFT_HOLD_LIMIT) { void this.releaseDraftOriginal(run, guard); return }
+    } else if (item.truncated || (prior && prior.text !== item.text) || guard.size + (prior ? 0 : item.text.length) > TOPIC_ANSWER_LIMIT) {
       this.discardTopicAnswer(guard, 'overflow'); return
     }
     if (!prior) { guard.items.set(item.id, { ...item, phase: 'final_answer' }); guard.size += item.text.length }
@@ -5198,6 +5463,7 @@ export class CodexChatRuntime {
   async settleTopicAnswer(run, status) {
     const guard = this.topicAnswerGuards.get(run)
     if (!guard || guard.state === 'released' || guard.state === 'rejected') return
+    if (guard.kind === 'draft') return this.settleDraftAnswer(run, status, guard)
     if (status !== 'completed' || guard.state !== 'holding' || this.now() >= guard.until) return this.rejectTopicAnswer(run)
     const items = [...guard.items.values()]
     if (!items.length || guard.finalIds.size !== items.length || items.some(item => !item.text.trim())) return // bounded late item/completed
@@ -5208,7 +5474,7 @@ export class CodexChatRuntime {
   }
 
   messageDelta(run, itemId, delta) {
-    if (this.topicAnswerGuards.has(run) && !this.channelOutput.get(run).notes.has(itemId)) return
+    if (this.heldGuard(run) && !this.channelOutput.get(run).notes.has(itemId)) return
     const message = run.messages.find(m => m.id === itemId)
     const channel = this.channelOutput.get(run)
     if (message?.completionConfirmed) return
@@ -5265,12 +5531,15 @@ export class CodexChatRuntime {
         if (announce) this.emit(run, completed ? 'activity.completed' : 'activity.started', { activity: a }, item.id)
         return
       }
-      if (this.topicAnswerGuards.has(run) && !approvedTopicAnswer) {
-        if (announce) {
-          this.holdTopicAnswer(run, item, item.completionConfirmed === true)
+      const held = this.heldGuard(run)
+      if (held && !approvedTopicAnswer) {
+        if (!announce) return
+        this.holdTopicAnswer(run, item, item.completionConfirmed === true)
+        // A draft hold that was released (too long, too many items) lets this item through as an ordinary message.
+        if (!(held.kind === 'draft' && held.state === 'passthrough')) {
           if (completed && TERMINAL.has(run.status)) await this.settleTopicAnswer(run, run.status)
+          return
         }
-        return
       }
       staged = channel.held.get(item.id) || ''
       const priorPhase = run.messages.find(m => m.id === item.id)?.phase
@@ -5432,8 +5701,8 @@ export class CodexChatRuntime {
   async finish(run, turn) {
     const epoch = this.runEpoch(run)
     if (TERMINAL.has(run.status) && run.error?.origin !== 'bridge') return
-    const guard = this.topicAnswerGuards.get(run)
-    if (guard?.state === 'holding' && turn.truncated) this.discardTopicAnswer(guard, 'overflow')
+    const guard = this.heldGuard(run)
+    if (guard?.state === 'holding' && turn.truncated) { if (guard.kind === 'draft') await this.releaseDraftOriginal(run, guard); else this.discardTopicAnswer(guard, 'overflow') }
     for (const item of turn.items) {
       if (guard && item.type === 'agentMessage' && (item.phase === 'final_answer' || guard.finalIds?.has(item.id) ||
           item.phase !== 'commentary' && !this.channelOutput.get(run).notes.has(item.id))) {
@@ -5452,6 +5721,7 @@ export class CodexChatRuntime {
     }
     if (epoch !== this.runEpoch(run)) return
     run.status = turn.status
+    this.stopConversationFlow(run)
     this.completeCalibration(run)
     for (const provider of this.toolProviders) provider.cancelRun?.(run)
     run.stopConfirmed = turn.status === 'interrupted'
