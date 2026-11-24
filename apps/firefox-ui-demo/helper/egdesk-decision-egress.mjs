@@ -15,6 +15,7 @@ export const EGRESS_KINDS = Object.freeze({
   page_text: Object.freeze({ data: 'browser', governedBy: 'Agent tool ceiling: browser (none = no page text) and this run\'s selected Browser Card grant' }),
   browser_task_record: Object.freeze({ data: 'browser', governedBy: 'Agent tool ceiling: browser and this run\'s selected Browser Card grant (records of the Browser task)' }),
   canvas_text: Object.freeze({ data: 'canvas', governedBy: 'Per-card maySend (host-computed: may this card go to a model) for step texts and card labels' }),
+  run_facts: Object.freeze({ data: 'run', governedBy: 'This run\'s own state as numbers and closed labels only (elapsed time, tool step counts, whether the Agent asked a question); never text of the run, the person or a model' }),
   draft_text: Object.freeze({ data: 'run', governedBy: 'The run\'s own evidence: catalog items only by the kinds the model itself received; tool outputs stay content-free references' }),
   memory_page: Object.freeze({ data: 'memory', governedBy: 'Memory scope of this DM/Agent (allowsPage: the page\'s own guard plus the scope the answering model may read)' }),
   speech_history: Object.freeze({ data: 'speech', governedBy: 'Per-DM speech reuse consent (the same consent that lets the answering model see past utterances)' }),
@@ -78,13 +79,14 @@ export function createEgressGate(permissions) {
 
 /** Every file that sends a Decision request and the kinds it may declare. A new call site must be added here (a test scans the code). */
 export const EGRESS_SITES = Object.freeze({
-  'codex-chat-runtime.mjs': ['speech_history', 'topic_history', 'memory_page', 'draft_text', 'page_text', 'browser_task_record'],
+  'codex-chat-runtime.mjs': ['speech_history', 'topic_history', 'memory_page', 'draft_text', 'run_facts', 'page_text', 'browser_task_record'],
   'egdesk-board-presentation-http.mjs': ['canvas_text', 'board_arrangement: explicit owner confirm, coarse descriptors only'],
   'egdesk-board-agent-context.mjs': ['board_excerpt: NOT yet unified - still the owner\'s per-request screening choice (see the c6 report)'],
   'egdesk-chat-choice.mjs': ['dm_chooser: the user\'s own typed question and options, confirmed in the panel'],
   'egdesk-browser-reflex.mjs': ['page_text'],
   'egdesk-browser-task.mjs': ['page_text'],
   'egdesk-context-setup.mjs': ['speech_history', 'topic_history', 'memory_page'],
+  'egdesk-conversation-flow.mjs': ['run_facts'],
   'egdesk-draft-check.mjs': ['draft_text'],
   'egdesk-terminal-command-gate.mjs': ['terminal_command'],
   'egdesk-terminal-judge.mjs': ['terminal_output'],

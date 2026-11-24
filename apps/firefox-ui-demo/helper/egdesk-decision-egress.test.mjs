@@ -10,6 +10,7 @@ import { createEgressGate, EGRESS_KINDS, EGRESS_SITES, modelDataPermissions } fr
 import { assessCommand } from './egdesk-terminal-command-gate.mjs'
 import { judgeTerminalState } from './egdesk-terminal-judge.mjs'
 import { checkDraft } from './egdesk-draft-check.mjs'
+import { decideFlow, enumerateOptions, flowFacts } from './egdesk-conversation-flow.mjs'
 import { createOutcomeToOntology } from './egdesk-browser-task-memory.mjs'
 import { decideBrowserEntry } from './egdesk-browser-task.mjs'
 import { reconstructMemory } from './egdesk-wiki-reconstruction.mjs'
@@ -90,6 +91,24 @@ test('draft_text: allowed -> the sentences and permitted catalog items are sent;
   const q = provider()
   const refused = await checkDraft({ draft, evidence, mode: 'advisory', client: q.client, egress: createEgressGate(modelDataPermissions({ runActive: false })) })
   assert.equal(q.requests.length, 0); assert.equal(refused.outcome, 'unchecked'); assert.equal(refused.text, draft)
+})
+
+test('run_facts (conversation flow): numbers and closed labels only; allowed while a run is active; no run -> 0 requests and the usual fallback', async () => {
+  const own = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
+  const run = { status: 'inProgress', pendingApprovals: [], activities: [
+    { id: 'n1', kind: 'workNote', status: 'completed', detail: { text: 'zeta-synthetic-note 어느 환경인가요?' } },
+    { id: 'c1', kind: 'commandExecution', status: 'completed', title: 'zeta-synthetic-command', detail: { command: 'zeta-synthetic-command' } }] }
+  const flow = { startedAt: 0, sent: [], kinds: new Set(), askedNotes: new Set(), lastSentAt: null, stepsAtLast: 0 }
+  const facts = flowFacts({ run, now: 20_000, flow, own })
+  const options = enumerateOptions(facts)
+  assert.ok(options.length > 1)
+  const p = provider()
+  await decideFlow({ facts, options, client: gate({}).guardClient(p.client, ['run_facts']) })
+  assert.equal(p.requests.length, 1); assert.equal(p.carrying('zeta-synthetic'), 0, 'no text of the run reaches the decision model')
+  assert.ok(p.requests[0].includes('agent_asked_a_question_in_its_notes: yes'))
+  const q = provider()
+  await assert.rejects(decideFlow({ facts, options, client: createEgressGate(modelDataPermissions({ runActive: false })).guardClient(q.client, ['run_facts']) }), e => e.code === 'evidence_unavailable')
+  assert.equal(q.requests.length, 0)
 })
 
 test('page_text: allowed -> the Card list is sent; ceiling browser none or no Card grant -> 0 requests and the usual fallback', async () => {
