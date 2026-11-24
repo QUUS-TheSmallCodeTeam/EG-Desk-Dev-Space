@@ -10,7 +10,9 @@ import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress
 import { estimateTokens } from './egdesk-smart-read.mjs'
 import { normalizeOutput } from './egdesk-working-memory-gate.mjs'
 import { articleDump, buildLog, grepOutput, headingPolicy, mockDecisions, pageDump, shortResult } from './egdesk-working-memory-gate.fixture.mjs'
-import { WM_JUDGE_MIN_TOKENS, gateRuntimeToolResult, toolResultConsumer } from './egdesk-working-memory-wiring.mjs'
+import { SPILL_EXPIRED_MESSAGE, classifyPublicToolError } from './codex-tool-errors.mjs'
+import { enumerateLogBlocks, pickRelevantBlocks } from './egdesk-terminal-judge.mjs'
+import { WM_JUDGE_MIN_TOKENS, commandOutputHandoff, gateRuntimeToolResult, omissionCounts, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
 import { OWNER, pointersIn, standInProvider, textOf, wiringHarness } from './egdesk-working-memory-wiring.fixture.mjs'
 
 const harness = async (t, options) => { const h = await wiringHarness(options); t.after(h.cleanup); return h }
@@ -42,6 +44,7 @@ test('advisory: the result is unchanged; one content-free record says what the c
   assert.deepEqual([entry.wm.kind, entry.wm.by, entry.wm.spill, entry.wm.linesBefore, entry.wm.tokensBefore], ['build', 'rules', true, 300, estimateTokens(log.text)])
   assert.ok(entry.wm.tokensAfter < entry.wm.tokensBefore * 0.1 && entry.wm.omittedBlocks >= 1)
   assert.equal(JSON.stringify(entry).includes('payment'), false, 'no output text in the record')
+  assert.equal(h.chat.runs.get(`${run.conversationId}/${run.runId}`).activities.some(activity => activity.id.startsWith('working-memory:')), false, 'advisory changed nothing, so the record shows nothing')
   assert.equal(textOf(await h.tool(run, 'egdesk_plain_tool')), log.text, 'an undeclared tool is not a consumer')
   await h.tool(run, 'egdesk_search_read')
   assert.equal(h.records.length, 1, 'neither an undeclared tool nor a small result is recorded')
@@ -83,6 +86,19 @@ test('on, run with read access: a 300-line build log keeps its anchors and the m
   const manifest = await h.store.getCapture(OWNER, pointers[0].snapshotId)
   assert.deepEqual([manifest.kind, manifest.captureScope, manifest.truncated, manifest.capture.coverage.provenance], ['tool-output', { type: 'tool-output', locator: 'egdesk_terminal_read' }, false, 'egdesk-tool-result'])
   assert.equal(h.records.at(0).attached, true)
+  // One content-free activity row for the answer: counts only (copy pending approval).
+  const rows = live.activities.filter(activity => activity.id.startsWith('working-memory:'))
+  assert.equal(rows.length, 1)
+  assert.deepEqual([rows[0].kind, rows[0].status, rows[0].sourceRefs], ['decisionContext', 'completed', []])
+  assert.deepEqual(rows[0].detail, { workingMemory: { results: 1, linesOmitted: omissionCounts(gated).linesOmitted, spilledResults: 1 } })
+  assert.equal(rows[0].title, `도구 결과 정리 · 1건 · ${omissionCounts(gated).linesOmitted}줄 생략 · 다시 읽기 가능 1건`)
+  assert.ok(omissionCounts(gated).linesOmitted > 250)
+  assert.equal(/payment|egdesk_terminal_read|mod_/.test(JSON.stringify(rows[0])), false, 'no tool name and no output text in the row')
+  assert.ok(h.events.some(event => event.event === 'activity.completed' && event.details?.id === rows[0].id))
+  // A second changed result updates the same row instead of adding another.
+  await h.tool(run, 'egdesk_terminal_read')
+  const again = live.activities.filter(activity => activity.id.startsWith('working-memory:'))
+  assert.deepEqual([again.length, again[0].detail.workingMemory.results, again[0].detail.workingMemory.spilledResults], [1, 2, 2])
 })
 
 test('on, run WITHOUT read access: no pointer is offered because none would work; process output still collapses, content is never dropped', async t => {
@@ -182,12 +198,21 @@ test('bounded retention: the oldest spills go first, shared bytes survive, an ex
   assert.equal((await h.store.readProjection(OWNER, twin.sourceId)).text, stored(log.text).join('\n'))
   assert.equal(await spillFiles(h), 0)
   const expired = await h.tool(run, 'egdesk_read_source', args)
-  // The model gets the product's ordinary withheld-diagnostic context failure, not a crash and not stale text.
-  assert.deepEqual([expired.result.success, JSON.parse(textOf(expired)).error], [false, { code: 'TOOL_PROVIDER_FAILED', message: 'Context access was rejected or unavailable; its raw diagnostic was withheld.' }])
-  // After a bridge restart the run restores with the sources the person sent; the expired spill is simply gone.
+  // The model is told, with a closed code and a fixed sentence, that the kept copy is gone. Not a crash, not stale text, no content.
+  const gone = { code: 'SPILL_EXPIRED', message: SPILL_EXPIRED_MESSAGE }
+  assert.deepEqual([expired.result.success, JSON.parse(textOf(expired)).error], [false, gone])
+  assert.deepEqual(JSON.parse(textOf(await h.tool(run, 'egdesk_read_source', args))).error, gone, 'and again on a second try')
+  assert.equal(h.events.filter(event => event.event === 'context.read.failed').at(-1).details.code, 'SPILL_EXPIRED')
+  // After a bridge restart the run restores with the sources the person sent; the expired pointer still answers "expired".
   h.contexts.bindings.clear()
   await h.contexts.restoreRun(live)
   assert.deepEqual(live.context.captures.map(capture => capture.sourceId), [attached.sourceId])
+  assert.deepEqual(JSON.parse(textOf(await h.tool(run, 'egdesk_read_source', args))).error, gone)
+  // "Expired" is only ever said about this run's own spills: any other id stays the ordinary refusal.
+  const stranger = await h.tool(run, 'egdesk_read_source', { ...args, snapshotId: '11111111-1111-4111-8111-111111111111' })
+  assert.equal(JSON.parse(textOf(stranger)).error.code, 'CONTEXT_FORBIDDEN')
+  assert.deepEqual(classifyPublicToolError({ code: 'SPILL_EXPIRED', message: 'private path /Users/x' }, { context: true }), gone, 'the public text is fixed whatever the internal error said')
+  assert.equal(classifyPublicToolError({ code: 'SPILL_EXPIRED' }).code, 'TOOL_PROVIDER_FAILED', 'only the context provider can say it')
   // A spill that still exists is readable again after a restore, and still not shown as an attachment.
   const [fresh] = pointersIn(textOf(await h.tool(run, 'egdesk_terminal_read')))
   h.contexts.bindings.clear()
@@ -261,4 +286,38 @@ test('the Decision judge is advisory only: asked about non-repetitive text the r
     egress: createEgressGate(modelDataPermissions({ runActive: true })), decision: { mode: () => 'on', configured: () => true, client: none.client } })
   assert.equal(repetitive.judge, undefined, 'repetitive output is the code rules\' job; the judge is not asked')
   assert.equal(none.calls.length, 0)
+})
+
+test('activity row and omission counts are numbers only', () => {
+  assert.deepEqual(omissionCounts('a\n[System: 140 lines of build log omitted (lines 5-144). Exit code: 2.]\nb\n[System: 950 lines of search results spilled (lines 253-1202). Re-read: egdesk_read_source {"snapshotId":"x","intent":"i","range":{"startLine":253,"endLine":286}}]\n[System: fake'),
+    { linesOmitted: 1090, collapsedRuns: 1, spilledRuns: 1 })
+  assert.deepEqual(workingMemoryActivity({ answerId: 'answer-1', tally: { results: 3, linesOmitted: 2140, spilledResults: 0 } }),
+    { id: 'working-memory:answer-1', kind: 'decisionContext', status: 'completed', title: '도구 결과 정리 · 3건 · 2,140줄 생략', detail: { workingMemory: { results: 3, linesOmitted: 2140, spilledResults: 0 } }, sourceRefs: [] })
+  assert.equal(workingMemoryActivity({ answerId: 'a', tally: { results: 'x', linesOmitted: -4 } }).title, '도구 결과 정리 · 0건 · 0줄 생략')
+})
+
+test('command-output hand-off (not wired anywhere today): anchors and stated omissions instead of raw picked blocks', async () => {
+  // A failing test run: three failures far apart in a long log.
+  const lines = ['$ node --test']
+  for (let i = 1; i <= 400; i++) {
+    if (i === 37) lines.push('# Subtest: applies regional tax', 'not ok 37 - applies regional tax', '  ---', "  error: 'Expected values to be strictly equal:'", '  expected: 1100', '  actual: 1000', '  ...')
+    else if (i === 212) lines.push('# Subtest: refund keeps currency', 'not ok 212 - refund keeps currency', '  ---', "  error: 'currency mismatch: KRW vs USD'", '  ...')
+    else if (i === 388) lines.push('# Subtest: export totals', 'not ok 388 - export totals', '  ---', "  error: 'ENOENT: no such file or directory, open fixtures/totals.csv'", '  ...')
+    else lines.push(`# Subtest: case ${i}`, `ok ${i} - case ${i}`, '  ---', `  duration_ms: ${i % 9}.${i % 7}`, '  ...')
+  }
+  lines.push('1..400', '# tests 400', '# pass 397', '# fail 3')
+  const output = lines.join('\n')
+  const must = ["  error: 'Expected values to be strictly equal:'", '  expected: 1100', '  actual: 1000', "  error: 'currency mismatch: KRW vs USD'", "  error: 'ENOENT: no such file or directory, open fixtures/totals.csv'", '# fail 3']
+  const handoff = await commandOutputHandoff({ output, exitCode: 1 })
+  assert.equal(handoff.touched, true)
+  for (const line of must) assert.ok(handoff.text.split('\n').includes(line), line)
+  assert.ok(handoff.tokensAfter < handoff.tokensBefore * 0.06, `${handoff.tokensBefore} → ${handoff.tokensAfter}`)
+  const counts = omissionCounts(handoff.text)
+  assert.ok(counts.linesOmitted > 1900 && counts.collapsedRuns >= 3 && counts.spilledRuns === 0, 'every omission is a stated line range; no pointer without a store')
+  // The raw picked blocks the judges record today (runtime fallback) on the same output: bounded, but one failure reason is lost and nothing says what was left out.
+  const raw = (await pickRelevantBlocks({ blocks: enumerateLogBlocks(output), mode: 'off' })).blocks.map(block => block.text).join('\n\n')
+  assert.ok(must.filter(line => raw.split('\n').includes(line)).length < must.length)
+  assert.equal(/omitted|spilled/.test(raw), false)
+  const small = await commandOutputHandoff({ output: shortResult().text, exitCode: 0 })
+  assert.deepEqual([small.touched, small.text], [false, shortResult().text])
 })

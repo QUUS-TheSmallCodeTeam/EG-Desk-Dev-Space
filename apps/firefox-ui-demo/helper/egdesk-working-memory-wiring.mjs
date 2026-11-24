@@ -66,12 +66,50 @@ export async function gateRuntimeToolResult({ response, flag, provider, tool, na
   const plan = gated.plan || gated.shadow?.plan || []
   const tokensAfter = gated.touched ? gated.tokensAfter : gated.shadow?.tokensAfter ?? gated.tokensBefore
   const report = { kind: consumer.kind, by: plan.some(row => row.action !== 'inject_full') ? 'rules' : 'none', blocks: plan.length, omittedBlocks: plan.filter(row => row.action !== 'inject_full').length,
-    linesBefore: target.text.split('\n').length, tokensBefore: gated.tokensBefore, tokensAfter, spill: canSpill, ...(overLimit ? { overLimit: true } : {}) }
+    linesBefore: target.text.split('\n').length, tokensBefore: gated.tokensBefore, tokensAfter, spill: canSpill, ...(overLimit ? { overLimit: true } : {}),
+    ...(gated.touched ? omissionCounts(toolResponseText(gated.response, consumer.jsonTextArray).text) : {}) }
   if (gated.reason !== 'below_threshold') {
     try { calibrationLog?.record?.({ feature: 'working_memory', mode: flag, judgments: [], attached: gated.touched === true, candidates: plan.length, wm: report }) } catch { /* recording never changes a result */ }
   }
   const judge = adviseOnProse({ text: target.text, consumer, goal, paths, egress, decision, calibrationLog, limits })
   return { response: gated.touched ? gated.response : response, touched: gated.touched === true, reason: gated.reason ?? null, report, ...(gated.spillId ? { spillId: gated.spillId } : {}), ...(judge ? { judge } : {}) }
+}
+
+/** Counts read back from the fixed lines of a gated text: how many lines were left out, in how many collapsed and spilled runs. Numbers only. */
+export function omissionCounts(text) {
+  let linesOmitted = 0, collapsedRuns = 0, spilledRuns = 0
+  for (const line of String(text ?? '').split('\n')) {
+    const match = /^\[System: (\d+) lines of [a-z -]+ (omitted|spilled) \(lines \d+-\d+\)\./.exec(line)
+    if (!match) continue
+    linesOmitted += Number(match[1])
+    if (match[2] === 'spilled') spilledRuns++; else collapsedRuns++
+  }
+  return { linesOmitted, collapsedRuns, spilledRuns }
+}
+
+/**
+ * workingMemoryActivity({ answerId, tally }) → one activity row for the run's record: counts only, no tool name, no text.
+ * tally: { results, linesOmitted, spilledResults }. Korean copy is a PROPOSAL pending the owner's approval.
+ */
+export function workingMemoryActivity({ answerId, tally }) {
+  const n = value => (Number.isSafeInteger(value) && value >= 0 ? value : 0)
+  const results = n(tally?.results), lines = n(tally?.linesOmitted), spilled = n(tally?.spilledResults)
+  return { id: `working-memory:${String(answerId).slice(0, 80)}`, kind: 'decisionContext', status: 'completed',
+    title: `도구 결과 정리 · ${results}건 · ${lines.toLocaleString('en-US')}줄 생략${spilled ? ` · 다시 읽기 가능 ${spilled}건` : ''}`,
+    detail: { workingMemory: { results, linesOmitted: lines, spilledResults: spilled } }, sourceRefs: [] }
+}
+
+/**
+ * commandOutputHandoff({ output, exitCode?, goal?, paths?, spill?, limits? }) → { text, touched, tokensBefore, tokensAfter, spillId? }
+ * The text a subjective model would receive when the system hands it a failed command's output to repair. No such hand-off is
+ * wired today (the engine-command and Terminal-card judges only RECORD that they would repair); this is what one should use
+ * instead of raw picked blocks: anchors verbatim (the command line, error lines with context, edited paths, the summary), every
+ * omission stated as a fixed line with its line range, and a re-read pointer when `spill` can really store the output.
+ * Code rules only; no Decision call. A small output is returned unchanged.
+ */
+export async function commandOutputHandoff({ output, exitCode = null, goal = '', paths = [], spill = null, limits = WM_LIMITS } = {}) {
+  const gated = await gateToolOutput({ text: output, kind: 'terminal', exitCode, goal, paths, mode: 'on', enabled: true, rules: true, client: null, spill, limits })
+  return { text: gated.text, touched: gated.touched, tokensBefore: gated.tokensBefore, tokensAfter: gated.tokensAfter, ...(gated.spillId ? { spillId: gated.spillId } : {}) }
 }
 
 // The advisory Decision judge. Never awaited by the tool result; it only writes a calibration record.
