@@ -759,10 +759,10 @@ export class ContextRuntime {
     const spillRecords = records.filter(record => record.toolOutput === true)
     if (spillRecords.length) records.splice(0, records.length, ...records.filter(record => record.toolOutput !== true))
     if (!records.length) return
-    const spills = []
+    const spills = [], expiredSpills = new Set()
     for (const id of new Set(spillRecords.flatMap(record => record.sourceIds))) {
       try { const spill = await this.store.getCapture(ownerKey, id); if (spill.kind === 'tool-output') spills.push(spill) }
-      catch (error) { if (error.code !== 'CONTEXT_NOT_FOUND') throw error }
+      catch (error) { if (error.code !== 'CONTEXT_NOT_FOUND') throw error; expiredSpills.add(id) }
     }
     const sourceIds = [...new Set(records.flatMap(record => record.sourceIds))]
     const captures = []
@@ -781,7 +781,7 @@ export class ContextRuntime {
     // Metadata only: the markdown body stays in its blob until the screen opens it.
     const outputs = (await this.store.listOutputs(ownerKey, matchesRun)).sort((a, b) => a.createdAt - b.createdAt)
     this.assertAuthority(authority)
-    const binding = { ...records[0], authority, ownerKey, sourceIds: [...sourceIds, ...spills.map(spill => spill.sourceId)], captures, spills, bindingId: records[0].id, controllers: new Set() }
+    const binding = { ...records[0], authority, ownerKey, sourceIds: [...sourceIds, ...spills.map(spill => spill.sourceId)], captures, spills, expiredSpills, bindingId: records[0].id, controllers: new Set() }
     for (const controller of previous?.controllers || []) controller.abort()
     this.bindings.set(this.bindingKey(run), binding)
     const resolver = records.find(record => record.resolver)?.resolver
@@ -1233,7 +1233,20 @@ export class ContextRuntime {
         }
         else {
           this.assertBound(run, 'read')
+          // A pointer of THIS run whose spilled result has passed its retention bound: say so with a closed code, so the model can
+          // tell "gone" from "not allowed". Known only for ids this run itself spilled; anything else stays CONTEXT_FORBIDDEN.
+          if (binding.expiredSpills?.has(args.snapshotId)) reject('SPILL_EXPIRED', 'The spilled tool result is no longer kept', 410)
           if (!binding.sourceIds.includes(args.snapshotId)) reject('CONTEXT_FORBIDDEN', 'Source is not selected for this run', 403)
+          if (binding.spills?.some(spill => spill.sourceId === args.snapshotId)) {
+            try { await this.store.getCapture(binding.ownerKey, args.snapshotId) } catch (error) {
+              if (error.code !== 'CONTEXT_NOT_FOUND') throw error
+              binding.spills = binding.spills.filter(spill => spill.sourceId !== args.snapshotId)
+              binding.sourceIds = binding.sourceIds.filter(id => id !== args.snapshotId)
+              ;(binding.expiredSpills ||= new Set()).add(args.snapshotId)
+              reject('SPILL_EXPIRED', 'The spilled tool result is no longer kept', 410)
+            }
+            assertActive()
+          }
           const readId = randomUUID()
           this.runtime.emit(run, 'context.read.started', { readId, sourceId: args.snapshotId })
           const environment = this.readEnvironment(binding.authority, run, binding.readerConfiguration)

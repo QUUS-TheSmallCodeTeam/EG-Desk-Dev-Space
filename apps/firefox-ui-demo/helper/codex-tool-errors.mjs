@@ -33,6 +33,8 @@ const CONTEXT_CODES = new Set([
   // provider diagnostics, input text, account information and capacity data.
   'ENGINE_CAPACITY_UNKNOWN', 'ENGINE_CONTEXT_CONFIGURATION_ERROR',
   'CONTEXT_CAPACITY_REQUIRED', 'PACKET_ADMISSION_REQUIRED',
+  // Working-memory gate: the pointer names a spilled tool result whose bounded retention ended (closed code, no content).
+  'SPILL_EXPIRED',
   // CHAT-08: egdesk_publish_output per-answer cap (fixed message, no content).
   'OUTPUT_LIMIT',
   'PACKET_CORRUPT', 'READ_CANCELLED',
@@ -46,7 +48,11 @@ const CONTEXT_CODES = new Set([
   'RESOLVER_CHOICE_UNCAPTURED', 'RESOLVER_CHOICE_UNKNOWN',
 ])
 
+// Fixed text for the model: it says only that the kept copy is gone and what it can do. Nothing of the result, tool or path.
+export const SPILL_EXPIRED_MESSAGE = 'The spilled tool result this pointer names is no longer kept. Run the tool again if you still need those lines.'
+
 export function classifyPublicToolError(error, { browser = false, context = false } = {}) {
+  if (context && error?.code === 'SPILL_EXPIRED') return { code: 'SPILL_EXPIRED', message: SPILL_EXPIRED_MESSAGE }
   if (context) return {
     code: CONTEXT_CODES.has(error?.code) ? error.code : 'TOOL_PROVIDER_FAILED',
     message: 'Context access was rejected or unavailable; its raw diagnostic was withheld.',
