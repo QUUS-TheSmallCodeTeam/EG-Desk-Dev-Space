@@ -332,7 +332,7 @@ test('the person\'s own MCP servers, plugins and instruction files do not reach 
   assert.deepEqual(seen.mcpStartup, { starting: 3, ready: 3, failed: 0, other: 0 })
 })
 
-test('the composition reproduces the bridge: every decisionContext key and developer flag of codex-bridge-server.mjs is covered or listed as not reproduced', () => {
+test('the composition reproduces the bridge: every decisionContext key, runtime option and developer flag of codex-bridge-server.mjs is covered or listed as not reproduced', () => {
   const bridge = fs.readFileSync(path.join(here, 'codex-bridge-server.mjs'), 'utf8')
   const start = bridge.indexOf('  decisionContext: {'), end = bridge.indexOf('\n  },\n})', start)
   assert.ok(start > 0 && end > start, 'the bridge\'s decisionContext block was found')
@@ -340,10 +340,21 @@ test('the composition reproduces the bridge: every decisionContext key and devel
   const keys = new Set([...block.matchAll(/^ {4}(?:\.\.\.\([^\n]*?\{ ([a-zA-Z]+)[:,]|get ([a-zA-Z]+)\(\)|([a-zA-Z]+)[:,])/gm)].map(m => m[1] ?? m[2] ?? m[3]))
   const covered = new Set([...BRIDGE_COMPOSITION.keys, ...BRIDGE_COMPOSITION.notReproduced.keys])
   for (const key of keys) assert.ok(covered.has(key), `the bridge's decisionContext has "${key}" and the real-engine check neither reproduces nor lists it`)
-  const flags = new Set([...block.matchAll(/process\.env\.(EGDESK_[A-Z_]+)/g)].map(m => m[1]))
+  // the runtime's own options (the lines between "new CodexChatRuntime({" and "decisionContext: {")
+  const open = bridge.indexOf('const chat = new CodexChatRuntime({'), runtimeBlock = bridge.slice(open, start)
+  const runtimeKeys = new Set([...runtimeBlock.matchAll(/^ {2}(?:\.\.\.\(([a-zA-Z]+)|([a-zA-Z]+)[:,])/gm)].map(m => m[1] ?? m[2]))
+  assert.ok(runtimeKeys.size >= 10, 'the runtime options were found: ' + [...runtimeKeys].join(','))
+  const coveredRuntime = new Set([...BRIDGE_COMPOSITION.runtimeKeys, ...BRIDGE_COMPOSITION.notReproduced.runtimeKeys])
+  for (const key of runtimeKeys) assert.ok(coveredRuntime.has(key), `the bridge passes "${key}" to CodexChatRuntime and the real-engine check neither reproduces nor lists it`)
+  // every developer flag the bridge file reads, wherever it reads it
+  const flags = new Set([...bridge.matchAll(/process\.env\.(EGDESK_[A-Z0-9_]+)/g)].map(m => m[1]))
   const coveredFlags = new Set([...BRIDGE_COMPOSITION.flags, ...BRIDGE_COMPOSITION.notReproduced.flags])
-  for (const flag of flags) assert.ok(coveredFlags.has(flag), `the bridge reads ${flag} in decisionContext; the real-engine check does not list it`)
-  // the bridge's own tools wiring is the same module
+  for (const flag of flags) assert.ok(coveredFlags.has(flag), `the bridge reads ${flag}; the real-engine check does not list it`)
+  // the lists carry nothing the bridge does not have (a stale entry would hide a missing one)
+  for (const key of BRIDGE_COMPOSITION.notReproduced.keys) assert.ok(keys.has(key) || block.includes(key), 'stale entry: ' + key)
+  for (const key of BRIDGE_COMPOSITION.notReproduced.runtimeKeys) assert.ok(runtimeKeys.has(key), 'stale entry: ' + key)
+  // the warm-up flag is read in the helper the bridge calls, not in the bridge file
+  assert.match(bridge, /warmupConfigFromEnv\(process\.env\)/)
   assert.match(bridge, /createOwnToolsWiring\(/)
 })
 

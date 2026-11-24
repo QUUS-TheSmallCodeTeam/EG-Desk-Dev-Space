@@ -33,6 +33,7 @@ import { createTurnMemoryConfig, turnMemoryFlagsFromEnv } from './egdesk-turn-me
 import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 import { createGitTargetInspector } from './egdesk-terminal-git-facts.mjs'
+import { createDecisionActivity, createDecisionWarmup, warmupConfigFromEnv } from './egdesk-decision-warmup.mjs'
 import { parseCodexUserAgent } from './egdesk-codex-version-pin.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { APPROVER_TEXT, checkTurnExpectations, folderPathProblem, validateEngineScript } from './egdesk-real-engine-script.mjs'
@@ -44,17 +45,25 @@ export const KILL_GRACE_MS = 2000
 // Flags a conversation gets when --decisions is on and its script names none of its own (a script's flags are added to these, never replaced):
 // the product's advisory draft check (records only; the posted answer is the model's own) and the command gate. Every other flag is off.
 // flags that do something only when the Decision model answers: without --decisions a script that sets one would pass or fail for the wrong reason
-export const DECISION_DEPENDENT_FLAGS = Object.freeze(['EGDESK_DRAFT_CHECK', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_TERMINAL_GATE'])
+export const DECISION_DEPENDENT_FLAGS = Object.freeze(['EGDESK_DRAFT_CHECK', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_TERMINAL_GATE', 'EGDESK_DECISION_WARMUP'])
 export const DEFAULT_DECISION_FLAGS = Object.freeze({ EGDESK_DRAFT_CHECK: 'advisory' })
 // The bridge's decisionContext keys and the developer flags behind them that this composition reproduces. A test compares this list with
 // codex-bridge-server.mjs, so a key or flag the bridge gains and this composition lacks fails loudly instead of being silently absent.
 export const BRIDGE_COMPOSITION = Object.freeze({
-  keys: ['settingsGeneration', 'mode', 'configured', 'client', 'budgetMs', 'coldBudgetMs', 'warm', 'inRunMessages', 'calibrationLog', 'turnMemory', 'browserEntry', 'draftCheck', 'conversationFlow',
+  // decisionContext keys the bridge sets, and the developer flags behind them, that this composition reproduces
+  keys: ['settingsGeneration', 'mode', 'configured', 'client', 'budgetMs', 'coldBudgetMs', 'warm', 'warmup', 'inRunMessages', 'calibrationLog', 'turnMemory', 'browserEntry', 'draftCheck', 'conversationFlow',
     'relevanceRules', 'commandJudge', 'terminalGate', 'workingMemory', 'topicRecipient', 'recipientForChatChoice', 'reviewRevision', 'memoryEvidence', 'collect'],
+  // top-level options of the bridge's new CodexChatRuntime({ … }) that this composition passes (request / respond / toolProviders etc. are the check's own)
+  runtimeKeys: ['contexts', 'toolProviders', 'ownToolsWiring', 'roomAccount', 'store', 'requireStore', 'getOwnerKey', 'emit', 'emitLegacy'],
   flags: ['EGDESK_DRAFT_CHECK', 'EGDESK_DRAFT_CHECK_DESIGN', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_TERMINAL_GATE', 'EGDESK_TERMINAL_GATE_METHOD',
-    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES'],
-  // present in the bridge, deliberately not reproduced here (reason in the report): the Browser Card and the Desk's presence need a window
-  notReproduced: { keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration'], flags: ['EGDESK_PRESENCE', 'EGDESK_BROWSER_ENTRY', 'EGDESK_WORK_PLACEMENT', 'EGDESK_BRIEFING_FLOW', 'EGDESK_HUD_ROUTING'] },
+    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP'],
+  // present in the bridge, deliberately not reproduced: each needs a window, the Desk, a store this check does not open, or another lane's module
+  notReproduced: {
+    keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration'],
+    runtimeKeys: ['localCapacity', 'engines', 'resolveProjectWorkspace', 'resolveRunProjectOrigin', 'expectedProcessConfiguration', 'qaReady', 'getNativeContractFingerprint', 'profiles', 'mcpServerKind', 'computerControlStore', 'onComputerControlChange', 'hostLease'],
+    flags: ['EGDESK_PRESENCE', 'EGDESK_BROWSER_ENTRY', 'EGDESK_WORK_PLACEMENT', 'EGDESK_BRIEFING_FLOW', 'EGDESK_BRIEFING_ORDER', 'EGDESK_BRIEFING_FILL_CHECK', 'EGDESK_BRIEFING_COVERAGE', 'EGDESK_BRIEFING_OUTPUT_SCHEMA',
+      'EGDESK_HUD_ROUTING', 'EGDESK_TERMINAL_JUDGE', 'EGDESK_CONTEXT_ROOTS', 'EGDESK_FIREFOX_PROFILE', 'EGDESK_CLAUDE_READER', 'EGDESK_CLAUDE_DELETE_SESSION', 'EGDESK_CHAT_CHOICE'],
+  },
 })
 
 const usage = message => Object.assign(new Error(message), { code: 'usage' })
@@ -334,7 +343,11 @@ export async function runConversation({ options, set, conversation, deps = {} })
       turnNow.decisions.push(row); decisionCall.push(row)
       return response
     }
-    const client = options.decisions ? createDecisionClient({ getApiKey: async () => KEY, fetchImpl, recipientForKey: (v, endpoint, model) => decisionTopicRecipient(v, 1, endpoint, model), budget: createDecisionBudget({ monthlyInputTokenCap: 5_000_000 }) }) : null
+    // idle warm-up, as the bridge wires it (flag EGDESK_DECISION_WARMUP, default off: nothing below exists)
+    const warmupConfig = warmupConfigFromEnv(FLAG)
+    const activity = options.decisions && warmupConfig.mode !== 'off' ? createDecisionActivity({ idleMs: warmupConfig.idleMs }) : null
+    const client = options.decisions ? createDecisionClient({ getApiKey: async () => KEY, fetchImpl: activity ? activity.wrap(fetchImpl) : fetchImpl, recipientForKey: (v, endpoint, model) => decisionTopicRecipient(v, 1, endpoint, model), budget: createDecisionBudget({ monthlyInputTokenCap: 5_000_000 }) }) : null
+    const warmup = client && activity ? createDecisionWarmup({ client, activity, mode: () => warmupConfig.mode, decisionsMode: () => 'on', hasKey: () => Boolean(KEY), idleMs: warmupConfig.idleMs, joinMs: warmupConfig.joinMs }) : null
     const OWNER = `codex:real-engine-check`
     const contexts = new ContextRuntime({ store: new ImmutableContextStore({ dataDir: path.join(dataDir, 'context'), allowedRoots: [scratch] }), getOwnerKey: () => OWNER })
     let wikiAdapter = null
@@ -349,6 +362,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       settingsGeneration: () => 0, mode: () => (options.decisions ? 'on' : 'off'), configured: () => options.decisions, client,
       budgetMs: TURN_CONTEXT_BUDGET_MS, coldBudgetMs: TURN_CONTEXT_COLD_BUDGET_MS, warm: () => warmed || (warmed = decisionCall.some(r => r.status === 200)),
       ...(FLAG.EGDESK_CONTEXT_RELEVANCE === 'action' ? { relevanceRules: 'action' } : {}),
+      ...(warmup ? { warmup } : {}),
       ...(FLAG.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}),
       calibrationLog, turnMemory: turnMemoryConfig,
       ...(['advisory', 'on'].includes(FLAG.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => FLAG.EGDESK_DRAFT_CHECK, design: () => (FLAG.EGDESK_DRAFT_CHECK_DESIGN === 'choice' ? 'choice' : 'predicates') } } : {}),
@@ -369,7 +383,8 @@ export async function runConversation({ options, set, conversation, deps = {} })
     }
     chat = new CodexChatRuntime({ request, respond,
       ...(FLAG.EGDESK_INRUN_MESSAGES === 'on' ? { getBoardPeerContract: () => nativeContract?.boardPeerContract ?? null } : {}), emit: () => {}, emitLegacy: () => {}, store, requireStore: true, contexts, getOwnerKey: () => OWNER, verifyFile: async () => null, resolveProjectWorkspace: async () => null,
-      toolProviders: wiring.toolProviders, ownTools: wiring.ownTools, decisionContext })
+      toolProviders: wiring.toolProviders, ownTools: wiring.ownTools, decisionContext,
+      roomAccount: { mode: () => (FLAG.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') } })
     chat.setConnection(true)
     try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
     rec.phases.composedMs = ms(t0)
