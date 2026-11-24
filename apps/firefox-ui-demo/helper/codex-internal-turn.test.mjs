@@ -40,7 +40,7 @@ const kinds = engine => engine.calls.map(c => c[0])
 test('a persisted parent forks exactly as before: no fresh thread, the fork carries the turn, the fork is released', async () => {
   const turns = createInternalTurns(), engine = mockEngine(turns)
   const out = await turns.run({ engine, slot: 's', parentThreadId: 'parent', text: 'write it', parentEphemeral: false, fresh: FRESH })
-  assert.deepEqual(out, { text: 'answer to: write it'.slice(-0) && out.text, via: 'fork' }); assert.match(out.text, /^answer to: /)
+  assert.deepEqual(out, { text: out.text, via: 'fork', model: null, effort: 'low', source: null }); assert.match(out.text, /^answer to: /)
   assert.deepEqual(kinds(engine), ['fork', 'turn', 'release'])
   assert.deepEqual(engine.calls[0][1], { threadId: 'parent', excludeTurns: true, ephemeral: true })
   assert.equal(engine.calls[1][1].input[0].text, 'write it', 'no preamble on a fork: it has the history')
@@ -99,7 +99,7 @@ test('the fresh thread is declined like a fork: its tool and approval requests a
 })
 
 // ---- the runtime's three callers (heartbeat writer, draft revision, briefing fill) ride on it ----
-function runtimeOn(t, { refuseFork = true } = {}) {
+function runtimeOn(t, { refuseFork = true, profile = () => ({ model: 'egdesk-model', effort: 'low' }) } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-internal-turn-'))
   t.after(() => fs.rmSync(base, { recursive: true, force: true }))
   const real = path.join(base, 'project'), empty = path.join(base, 'engine-folder'); fs.mkdirSync(real); fs.mkdirSync(empty)
@@ -124,7 +124,7 @@ function runtimeOn(t, { refuseFork = true } = {}) {
   const store = openChatStore({ dataDir: path.join(base, 'chat'), ownerScope: 'internal-turn' })
   t.after(() => { try { store.close() } catch {} })
   chat = new CodexChatRuntime({ request, respond: () => {}, emit: () => {}, emitLegacy: () => {}, verifyFile: async () => null, store, requireStore: true, getOwnerKey: () => 'codex:internal-turn-test', decisionContext: { mode: () => 'off', configured: () => false, client: null },
-    ownTools: { mode: () => 'on', neutralFolder: () => empty, profile: () => ({ model: 'egdesk-model', effort: 'low' }) } })
+    ownTools: { mode: () => 'on', neutralFolder: () => empty, profile } })
   chat.setConnection(true)
   return { chat, calls, real, empty, of: m => calls.filter(([x]) => x === m).map(([, p]) => p) }
 }
@@ -135,6 +135,8 @@ test('the runtime: an ephemeral room\'s internal text (the briefing fill\'s path
   const text = await w.chat.internalText(run, 'DESIGN GUIDE', { timeoutMs: 3000, outputSchema: { type: 'object' } })
   assert.equal(text, 'internal answer for thr-2')
   assert.equal(w.of('thread/fork').length, 0, 'an ephemeral source is never forked')
+  // the room's thread start already read the person's MCP inventory (1-2 s on the real 0.171): the first internal thread reuses it, it does not read it again
+  assert.equal(w.of('config/read').length, 1); assert.equal(w.calls.filter(([m]) => m === 'mcpServerStatus/list').length, 1)
   const [, fresh] = w.of('thread/start')
   assert.equal(fresh.ephemeral, true); assert.equal(fresh.sandbox, 'read-only'); assert.equal(fresh.approvalPolicy, 'never'); assert.equal(fresh.cwd, w.empty, 'the parent\'s engine folder, never the real one')
   assert.equal(fresh.config.features.shell_tool, false); assert.equal(fresh.config.features.hooks, false); assert.deepEqual(fresh.config.mcp_servers, { 'my-notes': { enabled: false } })
@@ -204,4 +206,53 @@ test('own-tools posted answers link the real file, not the engine\'s empty folde
   verified.length = 0
   const off = make('off'), plain = await off.send({ message: 'edit', clientThreadId: 'ui', requestId: 'r1', cwd: real })
   assert.ok((await answer(off, plain)).messages.find(m => m.role === 'assistant').text.includes(`${empty}/app.js`), 'not an own-tools run: untouched')
+})
+
+// ---- c25: the model and effort of internal turns (Main's check-9: briefing fill turns of 20-30 s at the engine's default, highest effort; forkTrace said null, null) ----
+test('internal turns: the selection is sent on a fork only when it is an explicit pick; the result and onStart say what the turn ran with; a throwing observer changes nothing', async () => {
+  const turns = createInternalTurns(), seen = []
+  const engine = mockEngine(turns)
+  const out = await turns.run({ engine, slot: 's', parentThreadId: 'parent', text: 'x', fresh: { ...FRESH, model: 'm-egdesk', effort: 'low', source: 'egdesk' }, onStart: v => { seen.push(v); throw new Error('observer bug') } })
+  assert.deepEqual([out.via, out.model, out.effort, out.source], ['fork', 'm-egdesk', 'low', 'egdesk']); assert.deepEqual(seen, [{ via: 'fork', model: 'm-egdesk', effort: 'low', source: 'egdesk' }])
+  assert.deepEqual([engine.calls[1][1].model, engine.calls[1][1].effort], ['m-egdesk', 'low'], 'a fork carries the explicit selection on its turn')
+  const plain = mockEngine(turns), res = await turns.run({ engine: plain, slot: 's', parentThreadId: 'parent', text: 'x', fresh: { ...FRESH, model: 'm-thread', effort: 'xhigh', source: 'engine' } })
+  assert.deepEqual([res.model, res.effort, res.source], ['m-thread', 'xhigh', 'engine'], 'recorded')
+  assert.equal('model' in plain.calls[1][1] || 'effort' in plain.calls[1][1], false, 'a fork with no explicit pick inherits the thread\'s: nothing sent')
+  const fresh = mockEngine(turns), r3 = await turns.run({ engine: fresh, slot: 's', parentThreadId: 'parent', text: 'x', parentEphemeral: true, fresh: { ...FRESH, model: 'm-thread', effort: 'xhigh', source: 'engine' } })
+  assert.deepEqual([r3.via, fresh.calls[1][1].model, fresh.calls[1][1].effort], ['fresh', 'm-thread', 'xhigh'], 'a fresh thread always sends what it runs with')
+})
+
+test('the runtime: internal turns run with EG-Desk\'s own model and effort; the room\'s own pick wins; an explicit option wins over both; unknown words are ignored; what ran is reported', async t => {
+  const w = runtimeOn(t)
+  const run = w.chat.runFor(await w.chat.send({ message: 'Summarise', clientThreadId: 'ui', requestId: 'r1', cwd: w.real, stateless: true }))
+  const started = []
+  assert.equal(await w.chat.internalText(run, 'FILL', { timeoutMs: 3000, onStart: v => started.push(v) }), 'internal answer for thr-2')
+  assert.equal(w.of('thread/start').at(-1).model, 'egdesk-model'); assert.equal(w.of('turn/start').at(-1).effort, 'low', 'the fresh thread\'s turn names EG-Desk\'s effort')
+  assert.deepEqual(started, [{ via: 'fresh', model: 'egdesk-model', effort: 'low', source: 'egdesk' }])
+  // explicit: the effort of the caller (the briefing fill), the model stays EG-Desk's; the cached isolation does not pin the model
+  await w.chat.internalText(run, 'FILL', { timeoutMs: 3000, effort: 'minimal', onStart: v => started.push(v) })
+  assert.equal(w.of('turn/start').at(-1).effort, 'minimal'); assert.equal(w.of('thread/start').at(-1).model, 'egdesk-model'); assert.deepEqual(started.at(-1), { via: 'fresh', model: 'egdesk-model', effort: 'minimal', source: 'explicit' })
+  await w.chat.internalText(run, 'FILL', { timeoutMs: 3000, effort: 'high; rm -rf', model: 'not a model' })
+  assert.equal(w.of('turn/start').at(-1).effort, 'low', 'an unusable word is ignored'); assert.equal(w.of('thread/start').at(-1).model, 'egdesk-model')
+  await w.chat.internalText(run, 'FILL', { timeoutMs: 3000, model: 'caller-model' })
+  assert.equal(w.of('thread/start').at(-1).model, 'caller-model'); assert.equal(w.of('turn/start').at(-1).effort, 'low')
+  // the room's own pick (a request): it wins over EG-Desk's setting, for the fresh thread and for the draft revision
+  const own = runtimeOn(t), picked = own.chat.runFor(await own.chat.send({ message: 'Summarise', clientThreadId: 'ui', requestId: 'r1', cwd: own.real, stateless: true, model: 'room-model', effort: 'high' }))
+  await own.chat.internalText(picked, 'FILL', { timeoutMs: 3000 })
+  assert.equal(own.of('thread/start').at(-1).model, 'room-model'); assert.equal(own.of('turn/start').at(-1).effort, 'high')
+  assert.equal(await own.chat.reviseOnFork(picked, 'draft', 'shorter'), 'internal answer for thr-3'); assert.equal(own.of('turn/start').at(-1).effort, 'high')
+})
+
+test('the runtime: a persisted room\'s fork carries EG-Desk\'s effort and model on its turn; with no setting anywhere it inherits and the record says "engine"', async t => {
+  const keep = runtimeOn(t, { refuseFork: false })
+  const kept = keep.chat.runFor(await keep.chat.send({ message: 'Fix', clientThreadId: 'ui', requestId: 'r1', cwd: keep.real }))
+  const started = []
+  assert.equal(await keep.chat.internalText(kept, 'x', { timeoutMs: 3000, onStart: v => started.push(v) }), 'internal answer for fork-2')
+  assert.deepEqual([keep.of('turn/start').at(-1).model, keep.of('turn/start').at(-1).effort], ['egdesk-model', 'low']); assert.deepEqual(started, [{ via: 'fork', model: 'egdesk-model', effort: 'low', source: 'egdesk' }])
+  const none = runtimeOn(t, { refuseFork: false, profile: () => ({}) })
+  const run = none.chat.runFor(await none.chat.send({ message: 'Fix', clientThreadId: 'ui', requestId: 'r1', cwd: none.real }))
+  const seen = []
+  assert.equal(await none.chat.internalText(run, 'x', { timeoutMs: 3000, onStart: v => seen.push(v) }), 'internal answer for fork-2')
+  assert.equal(seen[0].source, 'engine'); assert.equal(seen[0].model, 'engine-default-model')
+  assert.equal('model' in none.of('turn/start').at(-1) || 'effort' in none.of('turn/start').at(-1), false, 'nothing explicit: nothing sent')
 })

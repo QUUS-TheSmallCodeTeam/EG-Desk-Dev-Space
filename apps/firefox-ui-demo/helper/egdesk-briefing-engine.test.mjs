@@ -7,7 +7,7 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import * as BriefingHost from '../overlay/resources/EGDeskBriefingHost.sys.mjs'
 import { validBriefing } from '../overlay/resources/EGDeskBriefingState.sys.mjs'
-import { BRIEFING_ENGINE_LIMITS, briefingDeps, componentPrompt, createBriefingEngine, designPrompt, parseEngineJson, redesignPrompt, shapeDesign } from './egdesk-briefing-engine.mjs'
+import { BRIEFING_CHROME_WAIT_MS, BRIEFING_ENGINE_LIMITS, BRIEFING_FILL_EFFORT, briefingDeps, componentPrompt, createBriefingEngine, designPrompt, parseEngineJson, redesignPrompt, shapeDesign } from './egdesk-briefing-engine.mjs'
 import { resolveDesign, enumerateBriefingFacts } from './egdesk-briefing-flow.mjs'
 import { REPORT, design, designWithNew, reuseScript, scene, harness } from './egdesk-briefing-publish.support.mjs'
 import { rig } from '../scripts/egdesk-briefing-rig.support.mjs'
@@ -230,8 +230,8 @@ test('bridge wiring: the server mounts briefingDeps behind EGDESK_BRIEFING_FLOW;
   const server = readFileSync(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   assert.match(server, /briefing: briefingDeps\(\{ chat, contexts, enabled: process\.env\.EGDESK_BRIEFING_FLOW === 'on', order: process\.env\.EGDESK_BRIEFING_ORDER === 'design-first' \? 'design-first' : 'skeleton',\n[^\n]*\n    fillCheck: process\.env\.EGDESK_BRIEFING_FILL_CHECK === 'facts' \? 'facts' : 'all',\n[^\n]*\n    coverage: process\.env\.EGDESK_BRIEFING_COVERAGE === 'board' \? 'board' : 'facts',\n[^\n]*\n    outputSchema: process\.env\.EGDESK_BRIEFING_OUTPUT_SCHEMA === 'on' \? 'on' : 'off' \}\)/)
   assert.equal(briefingDeps({ chat: {}, contexts: {} }).order, 'skeleton', 'the default order is skeleton-first'); assert.equal(briefingDeps({ chat: {}, contexts: {}, order: 'design-first' }).order, 'design-first')
-  assert.match(surface, /timeoutMs: flowMode === 'on' \? 150000 : 20000/)
-  assert.ok(BRIEFING_ENGINE_LIMITS.totalMs + 5 * 4000 < 150000, 'private turns plus the judgments fit inside the chrome wait')
+  assert.match(surface, new RegExp(`timeoutMs: flowMode === 'on' \\? ${BRIEFING_CHROME_WAIT_MS} : 20000`))
+  assert.ok(BRIEFING_ENGINE_LIMITS.totalMs + 5 * 4000 < BRIEFING_CHROME_WAIT_MS, 'private turns plus the judgments fit inside the chrome wait'); assert.ok(BRIEFING_CHROME_WAIT_MS < 300_000, 'under Firefox\'s default response timeout of 300 s (assumed default)')
 })
 
 test('c32: the briefing\'s private turns ask chat.internalText with preamble:false (a fresh ephemeral thread must see the prompt alone), with and without the output schema', async () => {
@@ -241,5 +241,39 @@ test('c32: the briefing\'s private turns ask chat.internalText with preamble:fal
     const engine = briefingDeps({ chat, contexts: {}, enabled: true, outputSchema }).engineFor({ id: 'run-1' }, { report: 'a' })
     await engine({ kind: 'briefing_component', title: 't', summary: 's' })
   }
-  assert.equal(calls.length, 2); assert.ok(calls.every(c => c.options.preamble === false && c.run.id === 'run-1' && Number.isFinite(c.options.timeoutMs)))
+  assert.equal(calls.length, 2); assert.ok(calls.every(c => c.options.preamble === false && c.run.id === 'run-1' && Number.isFinite(c.options.timeoutMs) && c.options.effort === BRIEFING_FILL_EFFORT))
+})
+
+test('c34: engine.lastFailure() tells a timeout (nothing came back before its allotted time) from an unusable reply, an empty turn and a refused one; null after a usable reply', async () => {
+  let clock = 0
+  const seen = []
+  const engine = createBriefingEngine({ now: () => clock, limits: { maxTurns: 4, turnMs: 30_000, totalMs: 100_000 }, runText: async (prompt, options) => { seen.push(options.timeoutMs); const r = replies.shift(); clock += r.ms; return r.reply } })
+  const replies = [{ ms: 30_400, reply: null }, { ms: 200, reply: null }, { ms: 500, reply: 'prose, not an object' }, { ms: 500, reply: '{"title":"t","items":{}}' }]
+  const request = { kind: 'briefing_fill', guide: { items: [] }, materials: [] }
+  assert.equal(engine.lastFailure(), null)
+  assert.equal(await engine(request), null); assert.equal(engine.lastFailure(), 'timeout', 'null after the whole allotted time')
+  assert.equal(await engine(request), null); assert.equal(engine.lastFailure(), 'no-reply', 'null at once: the turn failed, it did not time out')
+  assert.equal(await engine(request), null); assert.equal(engine.lastFailure(), 'unusable', 'a reply that is not the asked JSON')
+  assert.notEqual(await engine(request), null); assert.equal(engine.lastFailure(), null)
+  assert.equal(await engine(request), null); assert.equal(engine.lastFailure(), 'refused', 'the turn bound')
+  assert.deepEqual(Object.keys(engine.stats()), ['turns', 'refused', 'elapsedMs'], 'stats are as before; the reason is a separate accessor')
+  assert.ok(seen.every(ms => ms <= 30_000))
+})
+
+test('c35: the private turn limit and the flow budget come from the measured real times (check-9: 20.9 s and 28.7 s per card, a 2-card whole fill over 30 s); the chrome waits longer than the budget and less than 300 s', () => {
+  const measuredCardMs = 30_000
+  assert.ok(BRIEFING_ENGINE_LIMITS.turnMs >= 60_000, 'a private turn gets at least a minute')
+  assert.ok(BRIEFING_ENGINE_LIMITS.turnMs >= 3 * measuredCardMs, 'a whole fill of three cards at the measured pace fits one turn')
+  assert.ok(BRIEFING_ENGINE_LIMITS.totalMs >= BRIEFING_ENGINE_LIMITS.turnMs + 3 * measuredCardMs + 60_000, 'one whole fill, one round of pieces (three cards) and one rewrite fit the budget')
+  assert.ok(BRIEFING_ENGINE_LIMITS.totalMs + 5 * 4000 < BRIEFING_CHROME_WAIT_MS && BRIEFING_CHROME_WAIT_MS < 300_000)
+})
+
+test('c35: the fill and the component turns ask for the briefing\'s own effort; a design turn does not; an engine built without an effort sends no effort key (as before)', async () => {
+  const sent = []
+  const make = effort => createBriefingEngine({ effort, runText: async (prompt, options) => { sent.push(options); return '{"title":"t","items":{}}' } })
+  const withEffort = make(BRIEFING_FILL_EFFORT), without = make(null)
+  await withEffort({ kind: 'briefing_fill', guide: { items: [] }, materials: [] }); await withEffort({ kind: 'briefing_component', title: 't', summary: 's' }); await withEffort({ kind: 'briefing_design', targets: [], reuse: [], retire: [], newAllowed: [], maxNew: 0 })
+  await without({ kind: 'briefing_fill', guide: { items: [] }, materials: [] })
+  assert.deepEqual(sent.map(o => o.effort ?? null), ['low', 'low', null, null]); assert.deepEqual(Object.keys(sent[3]), ['timeoutMs'])
+  assert.equal(BRIEFING_FILL_EFFORT, 'low')
 })

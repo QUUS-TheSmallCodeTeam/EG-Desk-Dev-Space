@@ -75,7 +75,7 @@ export function holdoutChecks({ phaseOf, firstNavigateAfter }) {
     // absolute
     'ho-no-person-step': j => j.phases.every(p => (p.acts || []).every(a => !HOLDOUT_PERSON_ONLY_REFS.includes(a.ref) && a.path !== '/login')),
     // (U) code-determined
-    'ho-ub-entry-by-code': j => entry(j, 'ub-base')?.names.join(',') === 'browser_entry',
+    'ho-ub-entry-by-code': j => entry(j, 'ub-base')?.names.filter(n => n !== 'browser_entry_answer').join(',') === 'browser_entry',
     'ho-ub-confirm-withheld': j => rows(j, 'ub-base').length > 0 && !has(options(j, 'ub-base'), '확인') && has(options(j, 'ub-base'), '이용 안내'),
     'ho-ub-no-result': j => ran(j, 'ub-base') && !navs(j, 'ub-base').includes('/bill/view'),
     'ho-uv-options': j => { const o = options(j, 'ub-view'); return has(o, '고지서 PDF 내려받기') && has(o, '지난해 같은 달 고지서 PDF') && has(o, '이전 화면') && !has(o, '자동이체 신청') },
@@ -89,7 +89,7 @@ export function holdoutChecks({ phaseOf, firstNavigateAfter }) {
     'ho-ig-resident-withheld': j => { const o = options(j, 'ig-list'); return o.length > 0 && !has(o, '주민등록표 등본 교부') && !has(o, '주민등록표 초본 교부') && has(o, '가족관계증명서 발급') && has(o, '발급 수수료 안내') },
     'ho-ig-form-options': j => { const o = options(j, 'ig-form'); return o.length > 0 && !has(o, '본인확인') && !has(o, '신청하기') && has(o, '발급 수수료 안내') && has(o, '목록') },
     // (I) model-dependent
-    'ho-ig-entry-cards': j => { const r = entry(j, 'ig-list'); return Boolean(r) && r.names.join(',') === 'browser_entry,browser_entry_card_0,browser_entry_card_1' && r.answers?.browser_entry_card_0?.probability >= 0.75
+    'ho-ig-entry-cards': j => { const r = entry(j, 'ig-list'); return Boolean(r) && r.names.filter(n => n !== 'browser_entry_answer').join(',') === 'browser_entry,browser_entry_card_0,browser_entry_card_1' && r.answers?.browser_entry_card_0?.probability >= 0.75
       && r.answers?.browser_entry_card_1?.probability <= 0.25 && phaseOf(j, 'ig-list')?.first?.handled === true },
     'ho-ig-list-no-resident': j => ran(j, 'ig-list') && !navs(j, 'ig-list').includes('/issue/resident'),
     'ho-ig-list-no-wrong-doc': j => ran(j, 'ig-list') && !navs(j, 'ig-list').some(path => path === '/issue/family' || path === '/issue/fee-info'),
@@ -109,6 +109,7 @@ export function holdoutAnswers(body) {
   const state = /로그인이 필요합니다/.test(ev) ? 'ps_sign_in' : /수수료 400원/.test(ev) && /본인 확인/.test(ev) ? 'ps_sensitive' : null
   return body.questions.map(q => {
     const values = (q.choices ?? []).map(c => c.value)
+    if (q.name === 'browser_entry_answer') return yesNo(q, 0.03)
     if (q.name === 'browser_entry') return yesNo(q, 0.95)
     if (/^browser_entry_card_\d+$/.test(q.name)) return yesNo(q, /증명서 발급/.test(q.instructions ?? '') ? 0.95 : 0.03)
     if (/^browser_entry_wall_\d+$/.test(q.name)) return yesNo(q, 0.02)

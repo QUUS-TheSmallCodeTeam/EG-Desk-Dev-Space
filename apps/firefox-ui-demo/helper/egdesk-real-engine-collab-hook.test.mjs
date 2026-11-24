@@ -10,10 +10,10 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runFakeAppServer } from '../scripts/real-engine/fake-app-server.mjs'
 import { BRIDGE_COMPOSITION, DECISION_DEPENDENT_FLAGS, DECISION_KEY_ENV, preflight, runCheck } from './egdesk-real-engine-check.mjs'
-import { validateEngineScript, checkTurnExpectations } from './egdesk-real-engine-script.mjs'
-import { COLLAB_FLAGS, COLLAB_PEOPLE, attentionScene, checkCollabExpect, collabHook, createCollabWorld, identityLeak, presenceRows, validateCollabExpect } from './egdesk-real-engine-collab-hook.mjs'
+import { validateEngineScript } from './egdesk-real-engine-script.mjs'
+import { COLLAB_DECISION_FLAGS, COLLAB_FLAGS, COLLAB_PEOPLE, attentionScene, checkCollabExpect, createCollabTurnHook, createCollabWorld, identityLeak, presenceRows, validateCollabExpect } from './egdesk-real-engine-collab-hook.mjs'
+import { registeredDecisionFlags, registeredExpectKeys, registeredFlags, registeredTurnFields, registeredTurnHookNames } from './egdesk-real-engine-extensions.mjs'
 import { COLLAB_SAYS, COLLAB_SET, buildCollabScript } from './egdesk-collab-real-engine-script.mjs'
-import { CHECK_HOOKS, hookDecisionFlags, hookFlags } from './egdesk-real-engine-hooks.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
 const tmp = t => { const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-real-engine-collab-')); t.after(() => fs.rmSync(base, { recursive: true, force: true })); return base }
@@ -52,11 +52,12 @@ function world(t, fakeScript, { decisions = true } = {}) {
 
 const asScripts = (...scripts) => scripts.map(script => ({ file: `${script.set}.json`, script }))
 const run = async (t, script, { decisions = true } = {}) => { const w = world(t, fakeScript(), { decisions }); const result = await runCheck(w.options, asScripts(script), w.deps); return { w, result, rec: result.records[0] } }
-const hooksOf = rec => rec.turns.map(turn => turn.hooks?.collab)
+const hooksOf = rec => rec.turns.map(turn => turn.collab)
 
 test('the registration point: the check lists the collaboration flags from the hook, reproduced now and not listed as missing; the committed script is the builder\'s and validates', () => {
-  assert.ok(CHECK_HOOKS.some(h => h.name === 'collab')); for (const flag of COLLAB_FLAGS) assert.ok(hookFlags().includes(flag))
-  assert.ok(hookDecisionFlags().includes('EGDESK_WORK_PLACEMENT')); assert.ok(DECISION_DEPENDENT_FLAGS.includes('EGDESK_WORK_PLACEMENT'))
+  // registered through the check's extension API (a turn field, an expect key, a turn hook, the flags), not listed in the core
+  assert.ok(registeredTurnHookNames().includes('collab') && registeredExpectKeys().includes('collab') && registeredTurnFields().includes('from'))
+  for (const flag of COLLAB_FLAGS) assert.ok(registeredFlags().includes(flag)); assert.deepEqual(registeredDecisionFlags().filter(f => COLLAB_DECISION_FLAGS.includes(f)), ['EGDESK_WORK_PLACEMENT']); assert.ok(DECISION_DEPENDENT_FLAGS.includes('EGDESK_WORK_PLACEMENT'))
   for (const flag of COLLAB_FLAGS) assert.ok(BRIDGE_COMPOSITION.flags.includes(flag) && !BRIDGE_COMPOSITION.notReproduced.flags.includes(flag), `${flag} is reproduced now`)
   const committed = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'real-engine', 'scripts', `${COLLAB_SET}.json`), 'utf8'))
   assert.deepEqual(committed, JSON.parse(JSON.stringify(buildCollabScript()))); assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })
@@ -137,8 +138,6 @@ test('the checks are by code on the record: each one fails on the record that br
   // the scene the hook builds is a valid placement scene with no coordinate in it, and its two outcomes are for the two people
   const scene = attentionScene(); assert.equal(JSON.stringify(scene).includes('"x"'), false); assert.equal(scene.requester, 'M2'); assert.equal(scene.forOwner.forMember, 'M1'); assert.equal(scene.forRequester.forMember, 'M2')
   // the turn expectations go through the script's own checker too
-  assert.equal(checkTurnExpectations({ collab: { requester: 'invited' } }, { hooks: { collab: good } }).every(c => c.ok), true)
-  assert.equal(checkTurnExpectations({ collab: { requester: 'invited' } }, { hooks: {} }).every(c => c.ok), false)
 })
 
 test('the hook\'s timer: presence is posted again every 3 s while the conversation runs, and stops with dispose', async () => {
@@ -153,5 +152,5 @@ test('the identity rule (v4 K2): the member\'s feed alias, the Board id, a scene
   assert.equal(identityLeak(clean), false)
   for (const leak of [COLLAB_PEOPLE.invited.member, COLLAB_PEOPLE.invited.board, '"x":12', '"width": 1200', 'asked by M2', '"M1"']) assert.equal(identityLeak(`${clean} ${leak}`), true, leak)
   const check = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'egdesk-real-engine-check.mjs'), 'utf8')
-  assert.match(check, /for \(const a of attached\) \{ try \{ a\.dispose\?\.\(\) \}/, 'the check stops a hook\'s timers when the conversation ends')
+  for (const call of ['turnHooks.flowOptions({ FLAG, conversation })', 'turnHooks.attach({ chat, contexts, client, store,', 'await turnHooks.beforeSend({ ...hookCtx, turn, index })', 'await turnHooks.afterTurn({ ...hookCtx,', 'turnHooks.dispose()']) assert.ok(check.includes(call), `the check calls ${call}`)
 })

@@ -85,3 +85,29 @@ test('concreteOnly (heartbeat messages, composed from facts of the present): a s
   await checkDraft({ draft: '확인하는 데 시간이 조금 걸리고 있어요.', evidence: facts, mode: 'on', client: all, design: 'choice' })
   assert.equal(all.requests.length, 1, 'without concreteOnly the plain sentence is still asked about (answers, unchanged)')
 })
+
+// c26 (L2 c22 finding, Main HIGH): with turn memory attached the check had the pages AND one opaque reference for the memory key, and an unsupported sentence is ignored while any
+// evidence is opaque: "벤치마크에서 쓰기 지연이 40% 줄었습니다" against a page saying 18% was posted at judge .03. The reference is gone where the pages are evidence; what the
+// checker really cannot read (a guarded page, a page cut for the check, evidence the gate withheld) still keeps the rule off, so a correct sentence is never removed for it.
+const PAGE = { id: 'mem1', kind: 'memory', time: 'past', status: 'unknown', source: 'document', text: '쓰기 지연 벤치마크\n벤치마크 결과 쓰기 지연이 18% 줄었다. 읽기 지연은 변하지 않았다.' }
+test('memory pages as readable evidence: 40% against a page saying 18% is caught; the correct 18% sentence passes', async () => {
+  const wrong = await checkDraft({ draft: '벤치마크에서 쓰기 지연이 40% 줄었습니다.', evidence: [PAGE], mode: 'on', client: client(q => p(q.name.startsWith('sup_') ? 0.03 : 0.04)) })
+  assert.ok(wrong.findings.some(f => f.kind === 'unverified'), 'unsupported with readable evidence'); assert.notEqual(wrong.text, '벤치마크에서 쓰기 지연이 40% 줄었습니다.')
+  const right = await checkDraft({ draft: '벤치마크에서 쓰기 지연이 18% 줄었습니다.', evidence: [PAGE], mode: 'on', client: client(q => p(q.name.startsWith('sup_') ? 0.96 : 0.04)) })
+  assert.deepEqual([right.findings.length, right.text], [0, '벤치마크에서 쓰기 지연이 18% 줄었습니다.'])
+})
+test('what the checker cannot read keeps the rule off: an opaque item, a page cut for the check, evidence the gate withheld', async () => {
+  const wrongSup = () => client(q => p(q.name.startsWith('sup_') ? 0.03 : 0.04)), draft = '벤치마크에서 쓰기 지연이 40% 줄었습니다.'
+  const opaque = await checkDraft({ draft, evidence: [PAGE, { id: 'mem2', kind: 'context', time: 'past', source: 'memory', opaque: true }], mode: 'on', client: wrongSup() })
+  assert.equal(opaque.findings.filter(f => f.kind === 'unverified').length, 0, 'a guarded page the checker cannot read')
+  const long = { ...PAGE, text: `${PAGE.text}\n${'부록 '.repeat(400)}` } // longer than the check's per-item bound: the tail is not seen
+  const cut = await checkDraft({ draft, evidence: [long], mode: 'on', client: wrongSup() })
+  assert.equal(cut.findings.filter(f => f.kind === 'unverified').length, 0, 'a page cut for the check')
+  const many = Array.from({ length: 10 }, (_, i) => ({ ...PAGE, id: `mem${i + 1}`, text: `${PAGE.text} (${i})` })) // more items than the check keeps
+  const left = await checkDraft({ draft, evidence: many, mode: 'on', client: wrongSup() })
+  assert.equal(left.findings.filter(f => f.kind === 'unverified').length, 0, 'pages the item limit left out')
+  const withheld = await checkDraft({ draft, evidence: [PAGE], mode: 'on', client: wrongSup(), egress: { allows: () => true, filterEvidence: items => items.filter(i => i.kind !== 'memory') } })
+  assert.equal(withheld.findings.filter(f => f.kind === 'unverified').length, 0, 'memory the run\'s gate keeps out of the check: the model had it, the checker may not')
+  const readable = await checkDraft({ draft, evidence: [PAGE], mode: 'on', client: wrongSup(), egress: { allows: () => true, filterEvidence: items => items } })
+  assert.ok(readable.findings.some(f => f.kind === 'unverified'), 'the same page where the gate allows it: caught')
+})

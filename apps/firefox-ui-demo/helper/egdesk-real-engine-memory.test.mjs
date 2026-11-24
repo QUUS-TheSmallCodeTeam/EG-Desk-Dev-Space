@@ -14,14 +14,14 @@ import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { DECISION_KEY_ENV, loadScripts, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { REAL_ENGINE_SCRIPT_SCHEMA, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createMemoryHook, memoryGraph, memoryNeedsDecisions, pagesIn, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
-import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryHeldV4Script, buildMemoryRecallScript, PURGE, RETENTION } from './egdesk-memory-real-engine-scripts.mjs'
+import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryHeldV4Script, buildMemoryRecallScript, buildMemoryScaleScript, buildMemoryScaleV2Script, buildMemorySpillProbeScript, SPILL_PROBE_PAGES, PURGE, RETENTION, SCALE_FACTS, SCALE_PAGES } from './egdesk-memory-real-engine-scripts.mjs'
 import { candidatesFromOntologyGraph } from './egdesk-context-setup.mjs'
 
 const app = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scriptFile = name => path.join(app, 'scripts', 'real-engine', 'scripts', `real-engine-${name}${/-v\d+$/.test(name) ? '' : '-v1'}.json`)
 
 test('the committed scripts are what the builders produce, validate, and need the Decision model', () => {
-  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script]]) {
+  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-spill-probe', buildMemorySpillProbeScript]]) {
     const committed = JSON.parse(fs.readFileSync(scriptFile(name), 'utf8'))
     assert.deepEqual(committed, JSON.parse(JSON.stringify(build())))
     assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })
@@ -70,14 +70,14 @@ test('pagesIn: a body is a page or item block; a reference line is not a body', 
     egdesk_decision_context: { kind: 'application', value: '[item id=ontology:backup/retention kind=timeline time=past status=done]\n11월 5일 …' },
     egdesk_turn_memory: { kind: 'application', value: '[page id=ontology:backup/restore-test time=past rev=aa via=scan]\nbody\n\n[page id=ontology:backup/retention rev=bb already delivered earlier in this thread, unchanged; content not re-sent]' },
     egdesk_channel: { kind: 'application', value: 'no pages here' } }
-  assert.deepEqual(pagesIn(ctx), { bodies: ['backup/restore-test', 'backup/retention'].sort(), refs: [], keys: ['egdesk_decision_context', 'egdesk_turn_memory', 'egdesk_channel'], copies: { 'backup/retention': 1, 'backup/restore-test': 1 } }, 'the item block of the retention page is a body')
+  assert.deepEqual(core(pagesIn(ctx)), { bodies: ['backup/restore-test', 'backup/retention'].sort(), refs: [], keys: ['egdesk_decision_context', 'egdesk_turn_memory', 'egdesk_channel'], copies: { 'backup/retention': 1, 'backup/restore-test': 1 } }, 'the item block of the retention page is a body')
   assert.equal(pagesIn({ a: { value: '[item id=ontology:x kind=timeline]' }, b: { value: '[page id=ontology:x rev=1 via=scan]' } }).copies.x, 2, 'a page in both the selection and the memory packet')
   const onlyRef = { egdesk_turn_memory: { kind: 'application', value: '[page id=ontology:backup/retention rev=bb already delivered earlier in this thread, unchanged; content not re-sent]' } }
-  assert.deepEqual(pagesIn(onlyRef), { bodies: [], refs: ['backup/retention'], keys: ['egdesk_turn_memory'], copies: {} })
-  assert.deepEqual(pagesIn(undefined), { bodies: [], refs: [], keys: [], copies: {} })
+  assert.deepEqual(core(pagesIn(onlyRef)), { bodies: [], refs: ['backup/retention'], keys: ['egdesk_turn_memory'], copies: {} })
+  assert.deepEqual(core(pagesIn(undefined)), { bodies: [], refs: [], keys: [], copies: {} })
   // one packet: the memory part of the merged packet names the page without repeating its body
   const merged = { egdesk_decision_context: { value: '[item id=ontology:backup/retention kind=timeline]\nbody\n\n[page id=ontology:backup/retention time=past rev=aa via=scan]\n[content not repeated here: this page is among the selected items above]' } }
-  assert.deepEqual(pagesIn(merged), { bodies: ['backup/retention'], refs: [], keys: ['egdesk_decision_context'], copies: { 'backup/retention': 1 } })
+  assert.deepEqual(core(pagesIn(merged)), { bodies: ['backup/retention'], refs: [], keys: ['egdesk_decision_context'], copies: { 'backup/retention': 1 } })
   assert.deepEqual(pagesIn({ k: { value: '[page id=ontology:x rev=1 via=scan]\n[content not repeated here: this page is among the selected items above]' } }).refs, ['x'])
 })
 
@@ -95,10 +95,11 @@ test('the hook: attached, notAttached and noResends are judged on what turn/star
 })
 
 // ---- the whole check against the fake app-server ----
-function world(t, fakeScript) {
+const core = ({ bodies, refs, keys, copies }) => ({ bodies, refs, keys, copies })
+function world(t, fakeScript, { lexicalScan = false } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-real-engine-memory-'))
   t.after(() => fs.rmSync(base, { recursive: true, force: true }))
-  const out = path.join(base, 'out'), spawns = [], decisionCalls = []
+  const out = path.join(base, 'out'), spawns = [], decisionCalls = [], scanInputs = []
   const spawn = (bin, argv, options) => {
     const stdin = new PassThrough(), stdout = new PassThrough(), stderr = new PassThrough(), child = new EventEmitter()
     Object.assign(child, { pid: 4300 + spawns.length, stdin, stdout, stderr, exitCode: null, signalCode: null, kill: () => true })
@@ -110,6 +111,7 @@ function world(t, fakeScript) {
   const scripted = scriptedDecisions()
   const fetchImpl = async (url, init) => {
     const wire = JSON.parse(init.body); decisionCalls.push(wire.questions.map(q => q.name))
+    if (wire.questions.some(q => /^pg_/.test(q.name))) scanInputs.push(wire.input.map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n'))
     let answers = await scripted.answer(wire)
     // the context selection: the retention line ('보관 기간') is needed when the message is about the backup or the period (turn 2 says only 그 기간), the others are not
     if (wire.questions.some(q => q.name === 'answer_type')) {
@@ -118,14 +120,17 @@ function world(t, fakeScript) {
       answers = answers.map(a => { const m = /^rel_(\d+)$/.exec(a.name); if (!m) return a
         const line = new RegExp(`#${m[1]} \\|[^\\n]*`).exec(flat)?.[0] ?? ''
         // turn 2 of held-v4 asks about a backup past the period: the purge rule is needed; the retention page (held) is too, but it is pruned as held
-        const wanted = /기한을 넘긴/.test(message) ? /백업 파일 정리/.test(line) || /보관 기간 결정/.test(line) : /백업|기간/.test(message) && /보관 기간/.test(line)
+        const wanted = /하늘 프로젝트 문서/.test(message) ? /하늘 프로젝트 문서/.test(line) : /야간 덤프/.test(message) ? /데이터베이스 작업|스토리지 증설/.test(line) : /총 예산/.test(message) ? /개요|네트워크 작업|데이터베이스 작업|스토리지 증설/.test(line) : /본 전환은 이미/.test(message) ? /본 전환 계획|되돌리기/.test(line) : /기한을 넘긴/.test(message) ? /백업 파일 정리/.test(line) || /보관 기간 결정/.test(line) : /백업|기간/.test(message) && /보관 기간/.test(line)
         return { ...a, probability: wanted ? 0.95 : 0.02 } })
     }
+    // scale-v1 turn 2: the planned cut-over and the rollback idea come through the selection; the fake memory scan (lexical) decides no for the others, as a judge
+    // reading the pages would. (A page delivered as a selection item is invisible to the memory loop's held list: see report l7-c30 §3.)
+    if (!lexicalScan && wire.questions.some(q => /^pg_/.test(q.name)) && /본 전환은 이미/.test(JSON.stringify(wire.input))) answers = answers.map(a => (/^pg_/.test(a.name) ? { ...a, probability: 0.02 } : a))
     return Response.json({ answers, usage: { input_tokens: 20, output_tokens: 1 } })
   }
   const options = { mode: 'run', codexBin: '/fake/codex', home: { kind: 'person', dir: null }, scripts: [], out, decisions: true, model: null, effort: null, appServerConfig: [], turnTimeoutMs: 8000, json: false }
   const deps = { spawn, runnerSpawn: () => { throw new Error('no command runs here') }, fetchImpl, killGroup, killGroupRunner: () => {}, gitStatus: async () => null, env: { PATH: '/usr/bin:/bin', HOME: path.join(base, 'home'), [DECISION_KEY_ENV]: 'egd-synthetic-not-a-key-0026' } }
-  return { out, options, deps, decisionCalls, base }
+  return { out, options, deps, decisionCalls, base, scanInputs }
 }
 const asScripts = (...scripts) => scripts.map(script => ({ file: `${script.set}.json`, script }))
 
@@ -235,4 +240,102 @@ test('held-v4: the second fact is on a page turn 1 cannot see; turn 2 fetches it
   const w2 = world(t, { turns: [{ steps: [], final: '47일입니다.' }, { steps: [], final: '삭제합니다.' }] })
   const rec2 = (await runCheck(w2.options, asScripts(buildMemoryHeldV4Script()), w2.deps)).records[0]
   assert.equal(rec2.turns[1].ok, false); assert.equal(rec2.turns[1].expectations.find(e => e.check === 'answerIncludes').ok, false)
+})
+
+test('scale-v1 pages are realistic: 7 pages of 500-2,300 characters, two linked, one decoy; every fact sits in the last fifth of its own page and is on no other page', () => {
+  const script = buildMemoryScaleScript(), conv = script.conversations[0], pages = conv.memory.pages
+  assert.equal(pages.length, 7)
+  for (const p of pages) { assert.ok(p.body.length >= 500 && p.body.length <= 2300, `${p.id}: ${p.body.length} characters`); assert.ok(Buffer.byteLength(p.body) <= 8000) }
+  assert.equal(pages.filter(p => p.links?.length).length, 2); assert.equal(pages.filter(p => /^office\//.test(p.id)).length, 1)
+  assert.ok(pages.some(p => p.time === 'planned') && pages.some(p => p.time === 'hypothetical'))
+  const home = { budget: 'migration/overview', firewall: 'migration/network', dump: 'migration/database', storage: 'migration/storage', cutoverDate: 'migration/cutover', rollbackRate: 'migration/rollback' }
+  for (const [k, fact] of Object.entries(SCALE_FACTS)) {
+    const holders = pages.filter(p => p.body.includes(fact)); assert.deepEqual(holders.map(p => p.id), [home[k]], `${k} is on exactly one page`)
+    assert.ok(holders[0].body.lastIndexOf(fact) >= holders[0].body.length * 0.8, `${k} is in the last fifth of its page`)
+  }
+  const first = conv.turns[0].expect.memory; assert.deepEqual(first.attached.map(id => pages.find(p => p.id === id).body.length > 800), [true, true, true, true])
+  assert.ok(first.minKeyChars <= first.attached.reduce((n, id) => n + pages.find(p => p.id === id).body.length, 0), 'the key bar is below what the four bodies alone hold')
+  assert.deepEqual(validateEngineScript(JSON.parse(JSON.stringify(script))), { ok: true, errors: [] })
+  assert.equal(SCALE_PAGES.length, 7)
+})
+
+test('minKeyChars and merged: judged on what turn/start carried; validation takes integers only', () => {
+  const memory = { pages: [{ id: 'a', title: 'A', body: 'x' }] }
+  const merged = { egdesk_decision_context: { value: '[item id=ontology:a kind=timeline]\n' + 'x'.repeat(500) + '\n\n[page id=ontology:a rev=1 via=scan]\n[content not repeated here: this page is among the selected items above]' } }
+  const hook = createMemoryHook(memory)
+  hook.beginTurn(); hook.observe('turn/start', { additionalContext: merged })
+  const done = hook.finishTurn({ minKeyChars: 400, merged: 1 }); assert.deepEqual(done.expectations.map(e => [e.check, e.ok]), [['memory.minKeyChars', true], ['memory.merged', true]]); assert.deepEqual(done.record.merged, ['a']); assert.ok(done.record.maxKeyChars > 500)
+  hook.beginTurn(); hook.observe('turn/start', { additionalContext: merged })
+  assert.deepEqual(hook.finishTurn({ minKeyChars: 5000, merged: 2 }).expectations.map(e => e.ok), [false, false])
+  hook.beginTurn(); hook.observe('turn/start', { additionalContext: { k: { value: '[item id=ontology:a kind=timeline]\nx\n\n[page id=ontology:a rev=1 via=scan]\nx' } } })
+  assert.equal(hook.finishTurn({ merged: 1 }).expectations[0].ok, false, 'a page whose body is sent twice is not merged')
+  assert.deepEqual(validateMemoryExpect({ minKeyChars: 100, merged: 2 }, memory), [])
+  for (const bad of [{ minKeyChars: 0 }, { minKeyChars: 1.5 }, { merged: 0 }, { merged: '2' }]) assert.ok(validateMemoryExpect(bad, memory).length > 0, JSON.stringify(bad))
+})
+
+test('scale-v1 end to end (fake engine): the right answers pass; a missing tail fact, a plan stated as done, and an idea stated as decided each fail by code', async t => {
+  const f = SCALE_FACTS
+  const good = [{ steps: [], final: `총 예산은 ${f.budget}, 방화벽 규칙 점검은 ${f.firewall} 대리, 야간 덤프는 새벽 ${f.dump}, 스토리지는 ${f.storage}입니다.` }, { steps: [], final: `아직 아닙니다. 본 전환은 ${f.cutoverDate}로 계획만 되어 있고, 오류율이 ${f.rollbackRate}를 넘으면 되돌리는 안은 가정일 뿐입니다.` }]
+  const w = world(t, { turns: good })
+  const rec = (await runCheck(w.options, asScripts(buildMemoryScaleScript()), w.deps)).records[0]
+  assert.equal(rec.aborted, null, rec.abortDetail); assert.equal(rec.ok, true, JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok))))
+  assert.ok(rec.turns[0].memory.maxKeyChars >= 6000, String(rec.turns[0].memory.maxKeyChars)); assert.deepEqual(rec.turns[1].memory.resent, [])
+  const failing = async (turns, turnIndex, check) => {
+    const w2 = world(t, { turns }); const r = (await runCheck(w2.options, asScripts(buildMemoryScaleScript()), w2.deps)).records[0]
+    assert.equal(r.turns[turnIndex].expectations.find(e => e.check === check).ok, false, check); assert.equal(r.ok, false)
+  }
+  await failing([{ steps: [], final: `총 예산은 ${f.budget}, 점검은 ${f.firewall}, 스토리지는 ${f.storage}입니다.` }, good[1]], 0, 'answerIncludes')
+  await failing([good[0], { steps: [], final: `네, 본 전환을 완료했습니다. ${f.cutoverDate}에 했고 오류율 ${f.rollbackRate}를 넘으면 가정입니다.` }], 1, 'answerExcludes')
+  await failing([good[0], { steps: [], final: `아직입니다. ${f.cutoverDate} 예정이고 오류율이 ${f.rollbackRate}를 넘으면 되돌리기로 했습니다.` }], 1, 'answerExcludes')
+})
+
+test('selection-delivered pages are held for the memory loop: turn 2\'s scan lists them as held and does not send them again (the lexical scan picks one of them)', async t => {
+  const f = SCALE_FACTS
+  const turns = [{ steps: [], final: `${f.budget}, ${f.firewall}, ${f.dump}, ${f.storage}` }, { steps: [], final: `${f.cutoverDate} 계획, 오류율 ${f.rollbackRate}를 넘으면 되돌리는 안(가정).` }]
+  const run = async flag => {
+    const w = world(t, { turns }, { lexicalScan: true }), script = buildMemoryScaleScript()
+    if (flag) script.conversations[0].flags = { ...script.conversations[0].flags, EGDESK_TURN_MEMORY_SELECTION_HELD: 'on' }
+    const rec = (await runCheck(w.options, asScripts(script), w.deps)).records[0]
+    assert.equal(rec.aborted, null, rec.abortDetail)
+    return { rec, w }
+  }
+  const off = await run(false)
+  assert.ok(off.rec.turns[1].memory.resent.length > 0, 'without the flag the lexical scan\'s pick is sent again (the behaviour this flag changes)')
+  const { rec, w } = await run(true)
+  assert.deepEqual(rec.turns[1].memory.resent, [], 'no page whose body the engine already holds is sent again')
+  const flat = w.scanInputs.at(-1), [heldPart, pagesPart = ''] = flat.split('\nPages:')
+  const titles = ['서버 이전 프로젝트 개요', '서버 이전: 네트워크 작업 기록', '서버 이전: 데이터베이스 작업 기록', '서버 이전: 스토리지 증설 기록']
+  for (const title of titles) { assert.ok(heldPart.includes(`- ${title} | time=past`), `${title} is in the held list`); assert.ok(!pagesPart.includes(title), `${title} is not offered as a candidate`) }
+})
+
+test('scale-v2 and the spill probe: the committed files equal the builders (checked above); v2 asks for the date, the probe pages carry a code first and a marker last', () => {
+  const v2 = buildMemoryScaleV2Script().conversations[0]
+  assert.match(v2.turns[1].say, /언제로 계획/); assert.deepEqual(v2.turns[0].expect.memory.attached, ['migration/database', 'migration/storage'])
+  const bodies = ['migration/database', 'migration/storage'].map(id => v2.memory.pages.find(p => p.id === id).body.length)
+  assert.ok(bodies[0] + bodies[1] < 2400, 'turn 1 stays under what a 2,500-token entry holds (~1,000 tokens of Korean text plus the packet\'s English)')
+  for (const p of SPILL_PROBE_PAGES) { assert.ok(p.body.startsWith(`하늘 프로젝트 문서 ${p.id.slice(-1)}의 코드명은 ${p.code}이다.`)); assert.ok(p.body.endsWith(`끝 표식은 ${p.end}이다.`)); assert.ok(p.body.length >= 900 && p.body.length <= 1200) }
+  const probe = buildMemorySpillProbeScript()
+  assert.deepEqual(probe.conversations.map(c => c.id), ['probe-n2', 'probe-n4', 'probe-n6', 'probe-n8', 'probe-n4-two-keys'])
+  assert.deepEqual(probe.conversations.map(c => c.turns[0].expect.answerIncludes.length), [4, 8, 12, 16, 8])
+  assert.equal(probe.conversations[4].flags.EGDESK_TURN_MEMORY_ONE_PACKET, undefined)
+})
+
+test('end to end (fake engine): scale-v2 passes with the right answers, and the probe runs five conversations whose expectations are the measurement', async t => {
+  const f = SCALE_FACTS
+  const w = world(t, { turns: [{ steps: [], final: `야간 덤프는 새벽 ${f.dump}, 스토리지는 ${f.storage}입니다.` }, { steps: [], final: `아직 아닙니다. ${f.cutoverDate}로 계획했고, 오류율 ${f.rollbackRate}를 넘으면 되돌리는 안은 가정입니다.` }] })
+  const rec = (await runCheck(w.options, asScripts(buildMemoryScaleV2Script()), w.deps)).records[0]
+  assert.equal(rec.aborted, null, rec.abortDetail); assert.equal(rec.ok, true, JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok))))
+  const all = SPILL_PROBE_PAGES.slice(0, 8).flatMap(p => [p.code, p.end]).join(' ')
+  const w2 = world(t, { turns: Array.from({ length: 5 }, () => ({ steps: [], final: all })) })
+  const probe = await runCheck(w2.options, asScripts(buildMemorySpillProbeScript()), w2.deps)
+  assert.equal(probe.records.length, 5); for (const r of probe.records) { assert.equal(r.aborted, null, r.abortDetail); assert.equal(r.turns[0].ok, true, `${r.id}: ${JSON.stringify(r.turns[0].expectations.filter(e => !e.ok))}`) }
+})
+
+test('the scorer reports what was sent and what the engine counted, and which asked facts the answer lacks', async () => {
+  const { scoreMemoryRecord, formatScore } = await import('./egdesk-real-engine-memory-score.mjs')
+  const rec = { set: 'real-engine-memory-scale-v1', id: 'x', ok: false, turns: [{ index: 1, say: 's', ok: false, posted: ['a'], memory: { attached: ['a'], referenced: [], resent: [], keys: ['egdesk_decision_context'], duplicatesInTurn: 0, maxKeyChars: 8520, keyBytes: { egdesk_decision_context: 20000 } },
+    subTurns: [{ usage: { input: 14982, cached: 14848 }, status: 'completed' }], expectations: [{ check: 'answerIncludes', ok: false, detail: { missing: ['4,730만 원'] } }] }] }
+  const score = scoreMemoryRecord(rec)
+  assert.deepEqual(score.turns[0].sizes, { maxKeyChars: 8520, keyBytes: { egdesk_decision_context: 20000 }, engineInput: 14982, engineCached: 14848, answerMissing: ['4,730만 원'] })
+  assert.match(formatScore(score), /engine input 14982 \(cached 14848\), answer missing \["4,730만 원"\]/)
 })

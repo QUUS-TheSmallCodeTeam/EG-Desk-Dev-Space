@@ -71,6 +71,8 @@ export function createCommandExecutorProvider({ mode = () => 'off', ledger = nul
   const on = () => { try { return mode() === 'on' } catch { return false } }
   const facts = (run, row) => { try { onFacts(run, row) } catch { /* facts are advisory */ } }
   const calls = new Map()
+  const running = new Map() // run key -> Set of AbortController: commands that are running now (c25: the person stopping the run stops them)
+  const runKey = run => String(run?.answerId ?? run?.runId ?? '')
   return {
     providerId: COMMAND_EXECUTOR_PROVIDER_ID,
     runtime: null,
@@ -81,6 +83,15 @@ export function createCommandExecutorProvider({ mode = () => 'off', ledger = nul
       const work = this.execute(run, event)
       if (event?.callId) { calls.set(key, work); while (calls.size > 256) calls.delete(calls.keys().next().value) }
       return work
+    },
+    /**
+     * c25 (owner decision: the person's "stop" stops the command): the runtime calls this when a run is interrupted, ends or is deleted. Every command this run has
+     * running gets an abort signal: the runner sends SIGTERM to the process group, then SIGKILL after its grace period, exactly as for the time limit.
+     */
+    cancelRun(run) {
+      const set = running.get(runKey(run))
+      if (!set) return
+      for (const controller of [...set]) { try { controller.abort() } catch { /* already aborted */ } }
     },
     async execute(run, event) {
       if (event?.namespace || event?.tool !== COMMAND_TOOL_NAME) return respond(false, { error: { code: 'COMMAND_TOOL_UNKNOWN' } })
@@ -105,33 +116,44 @@ export function createCommandExecutorProvider({ mode = () => 'off', ledger = nul
       }
       if (!decision || (decision.decision !== 'allow' && decision.decision !== 'none')) return respond(false, { error: { code: 'COMMAND_GATE_UNAVAILABLE' } })
       if (typeof runner !== 'function') return respond(false, { error: { code: 'COMMAND_RUNNER_UNAVAILABLE' } })
+      // the person stopped the run while the command waited for the gate: nothing is started
+      if (run?.stopRequested === true) { facts(run, terminalFactRow({ kind: 'engine', running: false, started: false })); return respond(true, { status: 'stopped', stopped: true, executed: false }) }
       const timeoutMs = Number.isSafeInteger(args.timeoutMs) && args.timeoutMs > 0 ? Math.min(args.timeoutMs, L.maxTimeoutMs) : L.timeoutMs
       facts(run, terminalFactRow({ kind: 'engine', running: true, runningMs: 0 }))
       let result, output = null
       try { output = outputFor(run) } catch { output = null }
       // the runner enforces the hard limit itself (SIGTERM, then SIGKILL); a soft notice only updates the facts
-      try { result = await runner({ command, cwd, timeoutMs, itemId: `egdesk-cmd:${event.callId ?? ''}`, output, approved: decision.decision === 'allow',
+      const controller = new AbortController(), key = runKey(run)
+      if (!running.has(key)) running.set(key, new Set())
+      running.get(key).add(controller)
+      try { result = await runner({ command, cwd, timeoutMs, signal: controller.signal, itemId: `egdesk-cmd:${event.callId ?? ''}`, output, approved: decision.decision === 'allow',
         onFacts: row => { if (row?.softNotice) facts(run, terminalFactRow({ kind: 'engine', running: true, runningMs: row.runningMs })) } }) }
       catch { facts(run, terminalFactRow({ kind: 'engine', running: false })); return respond(false, { error: { code: 'COMMAND_RUN_FAILED' } }) }
+      finally { const set = running.get(key); set?.delete(controller); if (set && set.size === 0) running.delete(key) }
+      const stopped = result?.aborted === true || (controller.signal.aborted && result?.exitCode === null && result?.timedOut !== true)
       const exitCode = Number.isSafeInteger(result?.exitCode) ? result.exitCode : null
       const tailText = [result?.stdout, result?.stderr].filter(t => typeof t === 'string' && t).join('\n')
       const askRun = typeof ask === 'function' ? request => ask(run, request) : null
       let health = null, worktree = null
-      try { health = await judgeHealth({ exitCode: result?.timedOut ? null : exitCode, output: tailText, command, ask: askRun }) } catch { health = null }
+      // a stopped command is never judged by its output: whatever it printed before it was stopped says nothing about whether it worked
+      if (stopped) health = { health: 'unknown', reasons: ['stopped'], summary: null }
+      else try { health = await judgeHealth({ exitCode: result?.timedOut ? null : exitCode, output: tailText, command, ask: askRun }) } catch { health = null }
       if (typeof gitStatus === 'function') {
         let porcelain = null
         try { porcelain = await gitStatus(cwd) } catch { porcelain = null }
         try { worktree = await judgeWorktree({ porcelain: typeof porcelain === 'string' ? porcelain : null, output: tailText, command, ask: askRun }) } catch { worktree = null }
       }
-      try { onConditions(run, { exitCode, durationMs: Number.isFinite(result?.durationMs) ? result.durationMs : null, health, worktree }) } catch { /* facts are advisory */ }
+      try { onConditions(run, { exitCode, durationMs: Number.isFinite(result?.durationMs) ? result.durationMs : null, health, worktree, ...(stopped ? { stopped: true, command: command.slice(0, 300), signal: typeof result?.signal === 'string' ? result.signal : null, outputTail: tailText.slice(-1000) } : {}) }) } catch { /* facts are advisory */ }
       // the c10 row keeps runningMs only while running; the ended row adds how long it ran (an extra field, the row shape is unchanged)
-      facts(run, { ...terminalFactRow({ kind: 'engine', running: false, exitCode }), ...(Number.isFinite(result?.durationMs) ? { durationMs: result.durationMs } : {}) })
+      facts(run, { ...terminalFactRow({ kind: 'engine', running: false, exitCode }), ...(Number.isFinite(result?.durationMs) ? { durationMs: result.durationMs } : {}), ...(stopped ? { stopped: true } : {}) })
       const out = tail(result?.stdout, L.outputChars), err = tail(result?.stderr, Math.floor(L.outputChars / 3))
       const conditions = {
         ...(health ? { health: health.health, healthReasons: health.reasons } : {}),
         ...(health?.summary ? { tests: { runner: health.summary.runner, passed: health.summary.passed, failed: health.summary.failed, total: health.summary.total, line: health.summary.line } } : {}),
         ...(worktree ? { worktree: { state: worktree.state, ...(Number.isSafeInteger(worktree.conflicts) ? { conflicts: worktree.conflicts, uncommitted: worktree.uncommitted, untracked: worktree.untracked } : {}) } } : {}),
       }
+      if (stopped) return respond(true, { status: 'stopped', stopped: true, executed: true, approvedOnce: decision.decision === 'allow', exitCode, signal: typeof result?.signal === 'string' ? result.signal : null, ...conditions,
+        ...(Number.isFinite(result?.durationMs) ? { durationMs: result.durationMs } : {}), stdout: out.text, stderr: err.text, truncated: out.truncated || err.truncated })
       return respond(true, { status: 'ran', approvedOnce: decision.decision === 'allow', exitCode, timedOut: result?.timedOut === true, ...conditions,
         ...(Number.isFinite(result?.durationMs) ? { durationMs: result.durationMs } : {}),
         stdout: out.text, stderr: err.text, truncated: out.truncated || err.truncated })

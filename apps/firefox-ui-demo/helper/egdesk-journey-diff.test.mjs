@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { ANSWER_MOVE, FAMILY_FILES, FAMILY_SYMBOLS, buildDiffReport, definitionRegex, diffLines, familyFiles, flattenBody, formatReport, hintsOf, pickaxeText } from './egdesk-journey-diff.mjs'
+import { ANSWER_MOVE, FAMILY_FILES, drawsOf, FAMILY_SYMBOLS, buildDiffReport, definitionRegex, diffLines, familyFiles, flattenBody, formatReport, hintsOf, pickaxeText } from './egdesk-journey-diff.mjs'
 import { EXIT, run } from '../scripts/egdesk-journey-diff.mjs'
 import { BODY_ANCHOR, findPlanFile, instrument, replay } from '../scripts/egdesk-journey-replay-driver.mjs'
 import { loadJourneyPlan, resultsPayload, runJourney } from '../scripts/egdesk-all-on-live-measure.mjs'
@@ -235,4 +235,26 @@ test('the replay driver, end to end on the current tree: a dry run of the journe
   // a results file whose plan the checkout does not have is refused
   const other = await replay({ checkout: path.join(app, '..', '..'), results: { ...results, plan: { sha256: '0'.repeat(64) } } })
   assert.equal(other.error, 'plan_missing')
+})
+
+// ---- draws ----
+test('drawsOf: bodies identical to the old run are counted per family and checked for identical answers; changed bodies and new steps are fresh', () => {
+  const row = (family, names, sha256, ps) => ({ family, questions: names, sha256, answers: ps.map((p, i) => ({ name: names[i], type: 'predicate', probability: p })) })
+  const oldR = { steps: [{ id: 's1', requests: [row('draft_check', ['a'], 'h1', [0.4]), row('heartbeat', ['b'], 'h2', [0.1])] }, { id: 's2', requests: [row('draft_check', ['a'], 'h3', [0.2])] }] }
+  const newR = { steps: [{ id: 's1', requests: [row('draft_check', ['a'], 'h1', [0.4]), row('heartbeat', ['b'], 'h9', [0.1])] }, { id: 's2', requests: [row('draft_check', ['a'], 'h3', [0.5])] }, { id: 's3', requests: [row('draft_check', ['a'], 'h1', [0.4])] }] }
+  const d = drawsOf(oldR, newR)
+  assert.deepEqual([d.requests, d.identical, d.fresh, d.freshInNewSteps], [4, 2, 2, 1], 'the same sha in a new step is fresh: the step is new')
+  assert.deepEqual([d.identicalAnswersSame, d.identicalAnswersDiffer], [1, 1], 'the s2 twin has the same body but a different answer: reported, not hidden')
+  assert.deepEqual(d.byFamily, { draft_check: { requests: 3, identical: 2, fresh: 1 }, heartbeat: { requests: 1, identical: 0, fresh: 1 } })
+  assert.deepEqual(drawsOf(null, null), { requests: 0, identical: 0, fresh: 0, freshInNewSteps: 0, identicalAnswersSame: 0, identicalAnswersDiffer: 0, byFamily: {} })
+})
+
+test('the report carries the draws line: identical share, whether the identical bodies had identical answers, and the fresh requests by family', () => {
+  const w = world()
+  const report = buildDiffReport({ ...w })
+  const lines = formatReport(report)
+  const line = lines.find(l => l.startsWith('draws: '))
+  assert.ok(line, lines.slice(0, 6).join(' / '))
+  assert.match(line, /^draws: \d+ of \d+ request bodies are byte-identical to the old run \(answers (identical in all of them|identical in \d+, different in \d+)\); fresh by family: /)
+  assert.equal(report.draws.requests, w.new.results.steps.reduce((n, s) => n + s.requests.length, 0))
 })

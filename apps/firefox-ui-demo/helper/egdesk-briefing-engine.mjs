@@ -8,7 +8,14 @@
 
 import { outputSchemaFor, stripNulls, violation } from './egdesk-briefing-output-schema.mjs'
 
-export const BRIEFING_ENGINE_LIMITS = Object.freeze({ turnMs: 30_000, totalMs: 100_000, maxTurns: 6, replyMax: 16_000, componentMax: 8_000, reportMax: 20_000 })
+// Cycle 35, from Main's real runs (check-9, Codex 0.171, a fresh internal thread, low-effort app-server): one card of the fill took 20.9 s and 28.7 s (output 785 / 1,299 tokens, reasoning
+// 632 / 886), the whole fill of 2 cards did not finish in 30 s. The board is published AFTER the person already has the chat answer and nothing about it is shown while it is being
+// made, so it may take longer: a private turn gets 90 s (a whole 2-3 card fill at the measured pace, with room), and the whole flow's private turns 240 s (one whole fill, one round
+// of pieces and one rewrite). The chrome waits 290 s for the answer to /decision/briefing-observe (overlay/JS/eg-desk-surface.uc.js), under Firefox's default 300 s response timeout
+// (an assumption about the default, not verified in this build); BRIEFING_CHROME_WAIT_MS names it here and a test pins that the surface uses it.
+export const BRIEFING_CHROME_WAIT_MS = 290_000
+export const BRIEFING_FILL_EFFORT = 'low' // closed word; the private fill / component turns reason little: the materials and the guide say what to write
+export const BRIEFING_ENGINE_LIMITS = Object.freeze({ turnMs: 90_000, totalMs: 240_000, maxTurns: 6, replyMax: 16_000, componentMax: 8_000, reportMax: 20_000 })
 const MAX_STEPS = 20, MAX_TARGETS = 12, MAX_NEW = 6
 const text = (value, max) => typeof value === 'string' ? value.slice(0, max) : undefined
 
@@ -64,10 +71,12 @@ export function componentPrompt(request, report = '') {
 // no board, no instruction to design. The model returns slot data; code validates it against the slot schemas and builds the components.
 const FILL_FRAME = 'You are filling in the data of an Answer Briefing whose design is already decided. This is private preparation. Do not use tools. Do not address the person. ' +
   'Reply with exactly one JSON object and nothing else.'
-const FILL_SHAPE = '{"title": string, "items": {"<item id>": {"text": string, "fallback": string, "slots": {"<slot name>": value}}}, "unfillable": [{"item": "<item id>", "slot": "<slot name>", "reason": string}]}'
-const FILL_RULES = [
+const FILL_SHAPE_FULL = '{"title": string, "items": {"<item id>": {"text": string, "fallback": string, "slots": {"<slot name>": value}}}, "unfillable": [{"item": "<item id>", "slot": "<slot name>", "reason": string}]}'
+// c35: the compact shape (no fallback sentence: the request's guide does not list one)
+const FILL_SHAPE_COMPACT = FILL_SHAPE_FULL.replace('"fallback": string, ', '')
+const FILL_RULES_BASE = [
   'Fill every listed item and only the listed items: do not add an item, a step, a component, a slot or a field.',
-  'Each item has "text" (the step explanation, saying only what the item shows) and "fallback" (one sentence for when it cannot be shown), plus the slots its component lists.',
+  '@@ITEM_RULE@@',
   'A text slot is a string no longer than its "max". A material slot is one of the item\'s material aliases. A list slot is an array of rows with exactly the listed fields, between "min" and "max" rows.',
   'Use ONLY what the materials say. If the materials do not contain the data for a slot, do not invent it: leave that slot out and report it in "unfillable".',
   'Where a line or value restates something a material says, keep its actors, qualifiers, amounts and dates exactly as the material has them: who does it, under what condition, how much, by when (for example write "팀장 승인 후 견적서 v2 발송", not "승인 후 견적서 v2 발송").',
@@ -75,12 +84,26 @@ const FILL_RULES = [
   'If a material lists more items than a list slot has rows, list the first ones and put the total the material states in that item\'s title slot, as the material writes it.',
   'Write every text in the language of the materials.',
 ].join('\n')
+
+// c35: the item rule depends on what the request's guide lists. Compact (the default for a request built by fillRequest): "text" is ONE SHORT PHRASE (the step explanation, at
+// most 80 characters, saying what the item shows without repeating what its slots show), no fallback sentence. A guide that still lists a fallback (an older request) is
+// asked for it as before. A line field marked "copy" may be null: the code copies the cited material's own date / sentences, exactly, so the model does not retype them.
+const wantsFallback = request => (request?.guide?.items ?? []).some(i => (i.step ?? []).some(s => s.name === 'fallback'))
+const hasCopy = request => (request?.guide?.items ?? []).some(i => (i.slots ?? []).some(s => (s.of ?? []).some(f => f.copy === true)))
+const itemRule = request => (wantsFallback(request)
+  ? 'Each item has "text" (the step explanation, saying only what the item shows) and "fallback" (one sentence for when it cannot be shown), plus the slots its component lists.'
+  : 'Each item has "text" (the step explanation: one short phrase of at most 80 characters that says what the item shows, without repeating what its slots show), plus the slots its component lists.')
+const COPY_RULE = 'A list field marked "copy": true may be null: use null whenever the line should show what the material it cites says, as that material writes it (its date as the label, its own sentences as the text). The code copies it exactly, so do not retype it; write a value only where the line must say something shorter or different.'
+const fillRules = request => FILL_RULES_BASE.replace('@@ITEM_RULE@@', itemRule(request)) + (hasCopy(request) ? `\n${COPY_RULE}` : '')
 export function fillPrompt(request) {
   // A rewrite after the check: closed words only for what was not supported by its material ("P2 line 2", "P1 explanation"); never the reviewer's text.
   const rejected = Array.isArray(request?.rejected) ? request.rejected.filter(w => typeof w === 'string' && /^P[1-6] (?:explanation|line \d{1,2}|row \d{1,2} (?:left|right))$/.test(w)).slice(0, 24) : []
+  // Cycle 34 (owner rule U5, one bounded re-design round): the materials whose statements the board must ALSO carry, by alias only (never the answer's text).
+  const cover = Array.isArray(request?.cover) ? request.cover.filter(a => typeof a === 'string' && /^M\d{1,2}$/.test(a)).slice(0, 12) : []
   const scope = (Array.isArray(request?.only) && request.only.length ? `Fill only these items again: ${request.only.join(', ')}.\n` : '') +
-    (rejected.length ? `A check found these parts of your previous data not supported by the material they cite: ${rejected.join('; ')}. Write them again from what the material says, keeping its actors, qualifiers, amounts and dates exactly, or report the slot as unfillable.\n` : '') + (request?.only?.length || rejected.length ? '\n' : '')
-  return `${FILL_FRAME}\n\n${scope}${dataBlock('Design guide (decided; do not change it)', request?.guide ?? null)}\n\n${dataBlock('Materials', request?.materials ?? [])}\n\nRules:\n${FILL_RULES}\n\nJSON shape: ${FILL_SHAPE}`
+    (cover.length ? `A check found that the board does not yet show everything these materials state: ${cover.join(', ')}. Write the listed items so that they carry every id, number, date, name and condition those materials state, as the material writes it.\n` : '') +
+    (rejected.length ? `A check found these parts of your previous data not supported by the material they cite: ${rejected.join('; ')}. Write them again from what the material says, keeping its actors, qualifiers, amounts and dates exactly, or report the slot as unfillable.\n` : '') + (request?.only?.length || rejected.length || cover.length ? '\n' : '')
+  return `${FILL_FRAME}\n\n${scope}${dataBlock('Design guide (decided; do not change it)', request?.guide ?? null)}\n\n${dataBlock('Materials', request?.materials ?? [])}\n\nRules:\n${fillRules(request)}\n\nJSON shape: ${wantsFallback(request) || !request?.guide ? FILL_SHAPE_FULL : FILL_SHAPE_COMPACT}`
 }
 const unfence = value => { const m = /^\s*```[a-zA-Z]*\n([\s\S]*?)\n```\s*$/.exec(value); return (m ? m[1] : value).trim() }
 
@@ -90,17 +113,20 @@ const unfence = value => { const m = /^\s*```[a-zA-Z]*\n([\s\S]*?)\n```\s*$/.exe
  *   outputSchema === true: a fill / design request is sent with its schema; the reply is checked against it here (a reply that does not fit is null, as a reply that does not parse).
  * engine.stats() → { turns, elapsedMs, refused } (content-free; plus schemaInvalid when outputSchema is on).
  */
-export function createBriefingEngine({ runText, report = '', now = Date.now, limits = {}, outputSchema = false } = {}) {
+export function createBriefingEngine({ runText, report = '', now = Date.now, limits = {}, outputSchema = false, effort = null } = {}) {
   if (typeof runText !== 'function') throw new TypeError('runText is required')
   const L = { ...BRIEFING_ENGINE_LIMITS, ...Object.fromEntries(Object.entries(limits).filter(([k, v]) => Object.hasOwn(BRIEFING_ENGINE_LIMITS, k) && Number.isFinite(v) && v > 0)) }
   const answer = typeof report === 'string' ? report.slice(0, L.reportMax) : ''
   const started = now()
-  let turns = 0, refused = 0, schemaInvalid = 0
-  const ask = async (prompt, schema = null) => {
+  let turns = 0, refused = 0, schemaInvalid = 0, last = null
+  const ask = async (prompt, schema = null, kindEffort = null) => {
     const left = L.totalMs - (now() - started)
-    if (turns >= L.maxTurns || left <= 0) { refused++; return null }
+    if (turns >= L.maxTurns || left <= 0) { refused++; last = 'refused'; return null }
     turns++
-    try { const reply = await runText(prompt, { timeoutMs: Math.max(1, Math.min(L.turnMs, left)), ...(schema ? { outputSchema: schema } : {}) }); return typeof reply === 'string' && reply.length <= L.replyMax ? reply : null } catch { return null }
+    // Cycle 34: a null reply that came back only when its allotted time was up is a TIMEOUT (c33's check-7: two fill turns of 30.4 s each, no reply); asking the same
+    // thing again will not help, and the flow reads it through engine.lastFailure().
+    const allotted = Math.max(1, Math.min(L.turnMs, left)), at = now()
+    try { const reply = await runText(prompt, { timeoutMs: allotted, ...(schema ? { outputSchema: schema } : {}), ...(kindEffort ? { effort: kindEffort } : {}) }); if (typeof reply === 'string' && reply.length <= L.replyMax) return reply; last = reply === null || reply === undefined ? (now() - at >= allotted - 250 ? 'timeout' : 'no-reply') : 'unusable'; return null } catch { last = now() - at >= allotted - 250 ? 'timeout' : 'no-reply'; return null }
   }
   // The schema of a request (null when off or for a kind that is not constrained). A request that cannot be described is asked without one, as with the flag off.
   const schemaOf = request => { if (outputSchema !== true) return null; try { return outputSchemaFor(request) } catch { return null } }
@@ -111,26 +137,29 @@ export function createBriefingEngine({ runText, report = '', now = Date.now, lim
     if (value === null || violation(value, schema)) { schemaInvalid++; return null }
     return stripNulls(kind, value)
   }
-  const engine = async request => {
+  const run = async request => {
     const kind = request?.kind
     const schema = schemaOf(request)
     if (schema) {
       const prompt = kind === 'briefing_fill' ? fillPrompt(request) : kind === 'briefing_design' ? designPrompt(request, answer) : redesignPrompt(request, answer)
-      const reply = await ask(prompt, schema)
+      const reply = await ask(prompt, schema, kind === 'briefing_fill' ? effort : null)
       if (typeof reply !== 'string') return null
       const value = constrained(reply, schema, kind)
       return value && kind !== 'briefing_fill' ? shapeDesign(value) : value
     }
     if (kind === 'briefing_design') return shapeDesign(parseEngineJson(await ask(designPrompt(request, answer)), L.replyMax))
     if (kind === 'briefing_redesign' || kind === 'briefing_redesign_inconclusive') return shapeDesign(parseEngineJson(await ask(redesignPrompt(request, answer)), L.replyMax))
-    if (kind === 'briefing_fill') return parseEngineJson(await ask(fillPrompt(request)), L.replyMax)
+    if (kind === 'briefing_fill') return parseEngineJson(await ask(fillPrompt(request), null, effort), L.replyMax)
     if (kind === 'briefing_component') {
-      const reply = await ask(componentPrompt(request, answer))
+      const reply = await ask(componentPrompt(request, answer), null, effort)
       const markdown = typeof reply === 'string' ? unfence(reply).slice(0, L.componentMax) : ''
       return markdown ? { markdown } : null
     }
     return null
   }
+  // The reason the last request produced nothing usable: 'timeout' | 'no-reply' | 'refused' (turn or time bound) | 'unusable' (a reply, but not the asked shape); null after a usable one.
+  const engine = async request => { last = null; const out = await run(request); if (out === null || out === undefined) last ??= 'unusable'; else last = null; return out }
+  engine.lastFailure = () => last
   engine.stats = () => ({ turns, refused, elapsedMs: Math.max(0, now() - started), ...(outputSchema === true ? { schemaInvalid } : {}) })
   return engine
 }
@@ -155,7 +184,7 @@ export function briefingDeps({ chat, contexts, enabled = false, limits, order = 
     // c32: preamble:false. The private turn may run on a FRESH ephemeral thread (an ephemeral answer thread cannot be forked on Codex 0.171); that thread must see exactly this
     // prompt (guide + materials, or the design prompt that carries the answer itself), never a context line added by the runtime.
     engineFor: (run, { report = '' } = {}) => (enabled === true && chat.canInternalTurn(run)
-      ? createBriefingEngine({ runText: (prompt, options) => chat.internalText(run, prompt, { ...options, preamble: false }), report, limits, outputSchema: outputSchema === 'on' }) : null),
+      ? createBriefingEngine({ runText: (prompt, options) => chat.internalText(run, prompt, { ...options, preamble: false }), report, limits, outputSchema: outputSchema === 'on', effort: BRIEFING_FILL_EFFORT }) : null),
     runFor: ids => chat.runFor(ids),
     propose: (run, args) => contexts.proposeBriefing(run, args),
     publishOutput: (run, args) => contexts.publishOutput(run, args),

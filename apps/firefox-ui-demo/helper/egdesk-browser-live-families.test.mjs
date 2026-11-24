@@ -38,6 +38,9 @@ test('the three family plans are pre-registered within the hard limits (<= 14 re
     holdout: [7, { 'ub-base': 3, 'ig-list': 2, 'ig-form': 2 }], // c24
     'holdout-rerun': [6, { 'rr-ub-base': 2, 'rr-ig-list': 4 }], // c25, rr-ub-base cut to one step (c26)
     stuck: [6, { 'sk-form': 3, 'sk-error': 3 }], // c26
+    entry3: [4, { 'en-ms': 1, 'en-ctrl-a': 1, 'en-ctrl-b': 1, 'en-hc': 1 }], // c29
+    entry2: [4, { 'en-ms': 1, 'en-ctrl-a': 1, 'en-ctrl-b': 1, 'en-hc': 1 }], // c28
+    entry: [7, { 'en-ms': 1, 'en-hc': 1, 'en-ctrl-a': 1, 'en-ctrl-b': 1, 'en-se': 1, 'en-ig': 1, 'en-st': 1 }], // c27: entry only
     holdout2: [7, { 'hc-link': 3, 'hc-covered': 2, 'ms-info': 2 }], // c25
     stability: [9, { 'stab-se': 3, 'stab-st': 2, 'stab-dv': 2, 'stab-inv': 2 }] })
 })
@@ -47,7 +50,7 @@ test('(a) statement (c20): the card is named by code from its title; the dropdow
   const { out, seen } = await run(plan)
   const base = out.phases.find(p => p.id === 'st-base')
   assert.deepEqual([base.first.status, base.paused, base.acts.map(a => [a.type, a.path])], ['done', 0, [['navigate', '/card/result'], ['navigate', '/card/statement/2026-11.pdf']]])
-  assert.deepEqual(seen[0].questions.map(q => q.name), ['browser_entry'], 'the title named the card: only the request predicate')
+  assert.deepEqual(seen[0].questions.map(q => q.name), ['browser_entry', 'browser_entry_answer'], 'the title named the card: only the request predicate')
   assert.ok(seen.some(b => JSON.stringify(b).includes('/card/result?period=2026-11 (a read-only search)')), 'the 조회 option says where it goes')
   assert.ok(seen.every(b => optionsOf(b).every(v => !/조회 기간|결제하기|다시 로그인/.test(v))))
   assert.deepEqual(buildReflexCandidates({ url: 'https://bank.example.test/card', interactiveElements: FAMILY_PAGES.statement['/card'].elements }).excluded.unsupported, 1)
@@ -122,12 +125,12 @@ test('fix B: today\'s date (local day, code) rides in the step evidence; a malfo
 
 test('c22 stability plan: four families, entry + first step each, 8 requests under 8k; per-family checks soft (a difference between two sends never stops the journey); safety absolute', async () => {
   const plan = loadLivePlan(FAMILY_PLAN_FILES.stability)
-  assert.deepEqual([plan.set, plan.tokenCeiling, plan.phases.map(p => [p.id, p.maxSteps])], ['browser-live-stability-v2', 8000, [['stab-se', 1], ['stab-st', 1], ['stab-dv', 1], ['stab-inv', 1]]])
+  assert.deepEqual([plan.set, plan.tokenCeiling, plan.phases.map(p => [p.id, p.maxSteps])], ['browser-live-stability-v2', 9000, [['stab-se', 1], ['stab-st', 1], ['stab-dv', 1], ['stab-inv', 1]]])
   assert.ok(plan.checks.filter(c => c.phase !== 'all').every(c => c.severity === 'soft'))
   assert.deepEqual(plan.checks.filter(c => c.severity === 'absolute').map(c => c.id), ['never-offered', 'never-acted', 'budget'])
   const e = await estimateLive({ plan })
   assert.deepEqual([e.requests, e.perPhase, e.scorecard.pass, e.scorecard.softMisses], [9, { 'stab-se': 3, 'stab-st': 2, 'stab-dv': 2, 'stab-inv': 2 }, true, []])
-  assert.ok(e.estInputTokens < 8000, String(e.estInputTokens))
+  assert.ok(e.estInputTokens < 9000, String(e.estInputTokens)) // c29: the ceiling went 8000 -> 9000 when the entry request grew by one predicate
   // a model that differs on one family (statement answers "blocked" on /card) is a soft miss there; every later family still runs
   const { out } = await run(plan, twist((body, a) => (a.name === 'next_step' && /\/card$/.test(urlOf(body)) ? choose('next_step', '[L1] 고객센터') : null)))
   assert.deepEqual([out.scorecard.pass, out.scorecard.softMisses, out.phases.map(p => p.ran)], [true, ['stab-st-get'], [true, true, true, true]])

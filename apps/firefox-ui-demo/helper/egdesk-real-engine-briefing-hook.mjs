@@ -97,7 +97,8 @@ export const briefingHook = Object.freeze({
   flags: BRIEFING_FLAGS,
   decisionDependent: Object.freeze(['EGDESK_BRIEFING_FLOW']),
   active: FLAG => FLAG?.EGDESK_BRIEFING_FLOW === 'on',
-  attach({ chat, contexts, FLAG, conversation, fetchImpl, key, calibrationLog, requestLog = [], limits = {} }) {
+  attach({ chat, contexts, FLAG, conversation, fetchImpl, key, calibrationLog, requestLog = [], limits = {} } = {}) {
+    limits ??= {}
     const L = { ...BRIEFING_LIMITS, ...limits }
     const schema = FLAG.EGDESK_BRIEFING_OUTPUT_SCHEMA === 'on'
     const forkCalls = [], published = [], engines = [], proposed = [], decisions = []
@@ -113,10 +114,41 @@ export const briefingHook = Object.freeze({
       } }
     const recContexts = { publishOutput: async (run, args) => { published.push({ title: clip(args.title, 200), markdown: clip(args.markdown, 8000) }); return contexts.publishOutput(run, args) },
       proposeBriefing: async (run, args) => { const out = await contexts.proposeBriefing(run, args); proposed.push({ id: out?.id ?? null, steps: (out?.steps ?? []).map(s => ({ id: s.id, text: clip(s.text, 600) })) }); return out } }
-    const deps = briefingDeps({ chat: recChat, contexts: recContexts, enabled: true, outputSchema: schema ? 'on' : 'off',
+    const deps = briefingDeps({ chat: recChat, contexts: recContexts, enabled: true, ...(L.engine ? { limits: L.engine } : {}), outputSchema: schema ? 'on' : 'off',
       order: FLAG.EGDESK_BRIEFING_ORDER === 'design-first' ? 'design-first' : 'skeleton', fillCheck: FLAG.EGDESK_BRIEFING_FILL_CHECK === 'facts' ? 'facts' : 'all', coverage: FLAG.EGDESK_BRIEFING_COVERAGE === 'board' ? 'board' : 'facts' })
-    const engineFor = deps.engineFor
-    deps.engineFor = (run, options) => { const engine = engineFor(run, options); if (engine) engines.push(engine); return engine }
+    const engineFor = deps.engineFor, engineCalls = []
+    // each request of the engine, with why it gave nothing (the engine's lastFailure: timeout | no-reply | refused | unusable) and what it asked (kind, only, cover)
+    deps.engineFor = (run, options) => {
+      const engine = engineFor(run, options)
+      if (!engine) return engine
+      const wrapped = async request => { const started = Date.now(), out = await engine(request); engineCalls.push({ kind: String(request?.kind ?? '').slice(0, 40), only: Array.isArray(request?.only) ? request.only.slice(0, 8) : null, cover: Array.isArray(request?.cover) ? request.cover.slice(0, 12) : null, ok: out !== null && out !== undefined, ms: Date.now() - started, failure: engine.lastFailure?.() ?? null }); return out }
+      wrapped.stats = engine.stats; wrapped.lastFailure = engine.lastFailure
+      engines.push(wrapped); return wrapped
+    }
+    // what each private turn did inside the runtime (c34): its time, how it ended (an error code, or via fork | fresh), the kinds of item the engine produced, the last token usage;
+    // c35: the model and the effort it ran at and where they came from (explicit | request | agent | egdesk | engine), and the prompt size
+    const trace = []
+    let live = null
+    const internal = chat.internalTurns
+    if (internal && typeof internal.run === 'function' && typeof internal.feed === 'function') {
+      const run0 = internal.run.bind(internal), feed0 = internal.feed.bind(internal)
+      internal.feed = message => {
+        const handled = feed0(message)
+        if (handled && live) {
+          const now = Date.now() - live.startedAt; live.firstMs ??= now; live.lastMs = now; live.notifications++
+          if (message.method === 'item/completed') { const type = String(message.params?.item?.type ?? '?').slice(0, 40); live.items[type] = (live.items[type] ?? 0) + 1 }
+          else if (message.method === 'thread/tokenUsage/updated') { const u = message.params?.tokenUsage?.last; if (u) live.usage = { input: u.inputTokens ?? null, output: u.outputTokens ?? null, reasoning: u.reasoningOutputTokens ?? null } }
+          else if (message.method === 'error') live.error = clip(message.params?.error?.message, 200)
+          else if (message.method === 'turn/completed') live.status = String(message.params?.turn?.status ?? '?').slice(0, 20)
+        }
+        return handled
+      }
+      internal.run = async args => {
+        const entry = { schema: Boolean(args?.outputSchema), timeoutMs: args?.timeoutMs ?? null, startedAt: Date.now(), ms: null, via: null, model: null, effort: null, source: null, promptChars: String(args?.text ?? '').length, code: null, status: null, firstMs: null, lastMs: null, notifications: 0, items: {}, usage: null }
+        live = entry; trace.push(entry)
+        try { const out = await run0(args); entry.via = out?.via ?? null; entry.model = out?.model ?? null; entry.effort = out?.effort ?? null; entry.source = out?.source ?? null; return out } catch (error) { entry.code = String(error?.code ?? error?.name ?? 'error').slice(0, 40); throw error } finally { entry.ms = Date.now() - entry.startedAt; delete entry.startedAt; if (live === entry) live = null }
+      }
+    }
     const decisionFetch = async (url, init) => {
       const started = Date.now(); let names = []
       try { names = (JSON.parse(String(init?.body ?? '{}')).questions ?? []).map(q => q.name) } catch {}
@@ -138,9 +170,9 @@ export const briefingHook = Object.freeze({
       sendExtra: () => ({ contextCapabilities: { read: true, reader: true, publishBriefing: true } }),
       async afterTurn({ run, say, answer, turnIndex = 0 }) {
         const started = Date.now()
-        const mark = { requests: requestLog.length, forks: forkCalls.length, published: published.length, proposed: proposed.length, engines: engines.length, decisions: decisions.length }
+        const mark = { trace: trace.length, calls: engineCalls.length, requests: requestLog.length, forks: forkCalls.length, published: published.length, proposed: proposed.length, engines: engines.length, decisions: decisions.length }
         const base = { turnIndex, request: clip(say, 200), schemaFlag: schema, year: L.year, viewport: L.viewport, materialsFrom: null, materials: 0, outcome: null, reason: null }
-        const none = reason => ({ ...base, outcome: 'skipped', reason, forkRequests: [], forkErrors: [], forkReplies: [], flow: null, forkTurns: 0, forkSchemaTurns: 0, schemaInvalid: null, published: [], steps: [], decisions: [], wallMs: 0 })
+        const none = reason => ({ ...base, outcome: 'skipped', reason, forkRequests: [], forkErrors: [], forkReplies: [], forkTrace: [], engineCalls: [], flow: null, forkTurns: 0, forkSchemaTurns: 0, schemaInvalid: null, published: [], steps: [], decisions: [], wallMs: 0 })
         if (typeof answer !== 'string' || !answer.trim()) return none('no-answer')
         const body = BriefingHost.observeRequest({ mode: 'on', report: answer, answerId: run.answerId ?? null, conversationId: run.conversationId ?? null, runId: run.runId ?? null, candidates: [], request: say, viewport: L.viewport })
         if (!body) return none('nothing-to-observe')
@@ -156,6 +188,9 @@ export const briefingHook = Object.freeze({
           flow: summary ? { status: summary.status ?? null, stages: summary.stages ?? [], judgeRequests: summary.judgeRequests ?? 0, fillTurns: summary.fillTurns ?? 0 } : null,
           // forkRequests: every thread/fork, thread/start and turn/start the briefing's private turns sent, with the error code of a refusal
           forkRequests: requests, forkErrors: requests.filter(r => r.error).map(r => `${r.method}:${r.error}`),
+          // forkTrace: per private turn, its time and ending (c34: a null reply says whether it timed out), the kinds of item it produced and its last token usage;
+          // engineCalls: per engine request, what it asked (kind, only, cover) and why it gave nothing
+          forkTrace: trace.slice(mark.trace), engineCalls: engineCalls.slice(mark.calls),
           // forkReplies: what each private turn answered (null = nothing usable), the board-design model's own words
           forkReplies: forks.map(f => f.reply),
           forkTurns: forks.length, forkSchemaTurns: forks.filter(f => f.schema).length, engineStats: stats ? { turns: stats.turns, refused: stats.refused, elapsedMs: stats.elapsedMs } : null,

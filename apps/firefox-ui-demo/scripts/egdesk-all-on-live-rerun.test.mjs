@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
 import { scriptedDecisions } from './egdesk-all-on.support.mjs'
-import { CHECK_FUNCTIONS, LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, PLAN_FILE_V6, PLAN_FILE_V7, STEPS, diffJourneys, faithfulRevision, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
+import { CHECK_FUNCTIONS, DEFAULT_CAPS, LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, PLAN_FILE_V6, PLAN_FILE_V7, PLAN_FILE_V8, STEPS, diffJourneys, faithfulRevision, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
 
 const KEY = 'sk-synthetic-not-a-key-l2c12-000000000002'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -380,7 +380,7 @@ const V7_NEW = [['s3b.on-topic', 'hard', 'L3'], ['s3b.not-off-topic', 'hard', 'L
   ['s12.no-command-shown', 'hard', 'L3'], ['s12.not-carried', 'hard', 'L2'], ['s12.system-messages', 'soft', 'L3']]
 test('plan v7: pinned, based on v6 by hash, every v6 expectation verbatim, the world as v6 plus faithful wording, the two new steps and the listed additions', () => {
   const bytes = readFileSync(PLAN_FILE_V7), raw = JSON.parse(bytes.toString('utf8')), v6 = JSON.parse(readFileSync(PLAN_FILE_V6, 'utf8'))
-  assert.equal(sha256(bytes), REGISTERED_PLAN_V7_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V7)
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V7_SHA256)
   assert.equal(raw.version, 7); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V6)))
   assert.deepEqual({ ...raw.world, wording: undefined, note: undefined }, { ...v6.world, wording: undefined, note: undefined }); assert.equal(raw.world.wording, 'faithful')
   assert.deepEqual(raw.steps.map(s => s.id).filter(id => !['s4c-change-nudge', 's12-stop-nudge'].includes(id)), v6.steps.map(s => s.id))
@@ -460,4 +460,60 @@ test('v7 dry run with the switch: what the scripted world shows about the new st
   const v6 = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V6), fetchImpl: noNet, switches: ['action-relevance'] })
   const verdicts = r => r.steps.flatMap(s => s.checks).filter(c => !V7_NEW.some(([id]) => id === c.id)).map(c => [c.id, c.pass])
   assert.deepEqual(verdicts(run), verdicts(v6))
+})
+
+// ---- plan v8 (cycle 22) ----
+const REGISTERED_PLAN_V8_SHA256 = '33740f2ec5cc230f94be6c5c62b1b4113bbe4ddab469327e64f72502588a34ee'
+const V8_NEW = [['s1.no-duplicate-bodies', 'hard', 'L7'], ['s1.no-memory-key', 'hard', 'L7'], ['s3b.no-duplicate-bodies', 'hard', 'L7'], ['s3b.no-memory-key', 'hard', 'L7'],
+  ['s13.fetched', 'hard', 'L7'], ['s13.claim-withheld', 'hard', 'L3'], ['s13.nothing-posted', 'hard', 'L3'], ['s13.claim-never-shown', 'hard', 'L3'], ['s13.run-ended', 'hard', 'L2'],
+  ['s14.told', 'hard', 'L3'], ['s14.no-repeat', 'hard', 'L7'], ['s14.held-known', 'hard', 'L7'], ['s14.one-answer', 'hard', 'L2'], ['s14.answer', 'hard', 'L3']]
+test('plan v8: pinned, based on v7 by hash, every v7 expectation verbatim, the world with the one-packet switch, two new steps at the end and the listed additions', () => {
+  const bytes = readFileSync(PLAN_FILE_V8), raw = JSON.parse(bytes.toString('utf8')), v7 = JSON.parse(readFileSync(PLAN_FILE_V7, 'utf8'))
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V8_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V8)
+  assert.equal(raw.version, 8); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V7)))
+  assert.deepEqual(Object.keys(raw.world.switches), [...Object.keys(v7.world.switches), 'one-packet'])
+  assert.deepEqual({ ...raw.world, switches: undefined }, { ...v7.world, switches: undefined }); assert.equal(raw.world.switches['one-packet'].env.EGDESK_TURN_MEMORY_ONE_PACKET, 'on')
+  assert.deepEqual(raw.steps.map(s => s.id), [...v7.steps.map(s => s.id), 's13-withheld', 's14-after-withheld'])
+  for (const step of v7.steps) {
+    const now = raw.steps.find(s => s.id === step.id)
+    assert.deepEqual(now.caps, step.caps); assert.deepEqual(now.expect.slice(0, step.expect.length), step.expect, `${step.id}: every v7 expectation verbatim`)
+  }
+  const added = raw.steps.flatMap(s => s.expect).filter(e => !v7.steps.flatMap(x => x.expect).some(x => x.id === e.id))
+  assert.deepEqual(added.map(e => [e.id, e.severity, e.owner]), V8_NEW)
+  assert.ok(added.every(e => typeof e.predicted === 'string' && e.predicted.length > 0), 'every new expectation says what is predicted')
+  assert.deepEqual(added.filter(e => e.when?.switch === 'one-packet').map(e => e.id), V8_NEW.slice(0, 4).map(([id]) => id), 'only the four packet expectations wait for the switch')
+})
+
+test('v8 checks on made-up steps: each one fails when what it guards goes wrong', () => {
+  const C = CHECK_FUNCTIONS, step = over => ({ id: 'x', room: 'dm-all-on', requests: [], seen: { newMessages: [], packets: [], calibration: [] }, ...over })
+  const rec = (check, ifUnrevised, attached) => ({ feature: 'draft_check', mode: 'on', check, ifUnrevised, attached, judgments: [] })
+  const asked = n => Array.from({ length: n }, () => ({ family: 'draft_check' }))
+  const args = { check: 'would_revise', ifUnrevised: 'would_withhold', requests: 2 }
+  assert.equal(C.draftCheckRecord({ step: step({ requests: asked(2), seen: { calibration: [rec('would_revise', 'would_withhold', true)] } }), args }).pass, true)
+  assert.equal(C.draftCheckRecord({ step: step({ requests: asked(1), seen: { calibration: [rec('would_revise', 'would_withhold', true)] } }), args }).pass, false, 'no second reading')
+  assert.equal(C.draftCheckRecord({ step: step({ requests: asked(2), seen: { calibration: [rec('would_pass', null, false)] } }), args }).pass, false, 'nothing flagged')
+  assert.equal(C.draftCheckRecord({ step: step({ requests: asked(2), seen: { calibration: [rec('would_revise', 'would_post', true)] } }), args }).pass, false, 'a part would have stayed')
+  assert.equal(C.draftCheckRecord({ step: step({ requests: asked(2), seen: { calibration: [] } }), args }).pass, false, 'no record')
+  const packets = copies => step({ seen: { packets: [{ keys: ['egdesk_context', 'egdesk_turn_memory'], copies }], newMessages: [], calibration: [] } })
+  assert.equal(C.packetNoDuplicates({ step: packets({ a: 1, b: 1 }) }).pass, true)
+  assert.equal(C.packetNoDuplicates({ step: packets({ a: 2 }) }).pass, false); assert.equal(C.packetNoDuplicates({ step: step({ seen: { packets: [], newMessages: [], calibration: [] } }) }).pass, false, 'no packet seen is not a pass')
+  assert.equal(C.noContextKey({ step: packets({}), args: { key: 'egdesk_turn_memory' } }).pass, false); assert.equal(C.noContextKey({ step: packets({}), args: { key: 'egdesk_other' } }).pass, true)
+})
+
+test('v8 dry run: both ways of running the scripted world (the packet expectations are judged only under the switch; the withheld path passes by code with the scripted judge)', async () => {
+  const noNet = async () => { throw new Error('no network') }
+  const off = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V8), fetchImpl: noNet, switches: ['action-relevance'], caps: { ...DEFAULT_CAPS, tokenCeiling: 100000 } })
+  const on = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V8), fetchImpl: noNet, switches: ['action-relevance', 'one-packet'], caps: { ...DEFAULT_CAPS, tokenCeiling: 100000 } })
+  const judged = r => r.steps.flatMap(s => s.checks).filter(c => c.severity === 'hard' && c.pass !== null && c.pass !== undefined)
+  const by = (r, id) => r.steps.flatMap(s => s.checks).find(c => c.id === id)
+  for (const [id] of V8_NEW.slice(4)) { assert.equal(by(off, id).pass, true, id); assert.equal(by(on, id).pass, true, id) }
+  for (const [id] of V8_NEW.slice(0, 4)) { assert.equal(by(on, id).pass, true, id); assert.notEqual(by(off, id)?.pass, true, `${id} is not judged without the switch`) }
+  // the only v7 expectation that differs from v7's own dry run is the one v7 already predicted (the scripted judge cannot read the action rule)
+  assert.deepEqual(judged(off).filter(c => c.pass === false).map(c => c.id), ['s4.no-page-for-the-action'])
+  assert.deepEqual(judged(on).filter(c => c.pass === false).map(c => c.id), ['s4.no-page-for-the-action'])
+  const s13 = on.steps.find(s => s.id === 's13-withheld'), s14 = on.steps.find(s => s.id === 's14-after-withheld')
+  // c23: the calibration record says what was posted (a word), so the empty-answer step is scored from the record, not only from the messages
+  const postedOf = (r, id) => r.steps.find(x => x.id === id).seen.calibration.filter(e => e.feature === 'draft_check').map(e => e.posted ?? null)
+  assert.deepEqual(postedOf(on, 's13-withheld'), ['withheld']); assert.deepEqual(postedOf(on, 's14-after-withheld'), ['as_written']); assert.deepEqual(postedOf(on, 's3b-recall'), ['as_written'], 'the scripted judge passes it (the real v7b run revised this answer: tense .86)')
+  assert.deepEqual(s13.seen.newMessages.filter(m => m.role === 'assistant'), []); assert.deepEqual(s14.seen.newMessages.filter(m => m.by === 'agent').map(m => m.text), ['PostgreSQL 전환은 12월 첫째 주에 배포할 예정입니다.'])
 })

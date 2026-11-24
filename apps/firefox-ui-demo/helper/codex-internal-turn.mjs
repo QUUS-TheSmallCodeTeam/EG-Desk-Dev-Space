@@ -38,9 +38,9 @@ export function createInternalTurns({ setTimer = (fn, ms) => setTimeout(fn, ms),
     /** True when a server request came from an internal thread; the caller answers it with a refusal. */
     declines(message) { return live.has(message?.params?.threadId) },
     /** The deadline covers everything, including an engine that never answers the fork or the turn start (a hung engine). */
-    async run({ engine, slot, parentThreadId, text, timeoutMs = 20000, signal = null, outputSchema = null, parentEphemeral = false, fresh = null }) {
+    async run({ engine, slot, parentThreadId, text, timeoutMs = 20000, signal = null, outputSchema = null, parentEphemeral = false, fresh = null, onStart = null }) {
       if (!engine?.forkThread || !engine.startTurn) throw fail('INTERNAL_TURN_UNSUPPORTED', 'Engine cannot run an internal turn')
-      let forkId = null, timer = null, over = false, settle = null, via = 'fork'
+      let forkId = null, timer = null, over = false, settle = null, via = 'fork', selected = { model: null, effort: null, source: null }
       const done = new Promise((resolve, reject) => { settle = { resolve, reject } })
       const parts = []
       const collector = {
@@ -86,10 +86,17 @@ export function createInternalTurns({ setTimer = (fn, ms) => setTimeout(fn, ms),
         forkId = id
         live.set(id, collector)
         // outputSchema (cycle 30, the briefing's flag): Codex TurnStartParams.outputSchema constrains this turn's final message. Absent, the params are exactly as before.
-        await engine.startTurn({ threadId: id, input: [{ type: 'text', text: input, text_elements: [] }], clientUserMessageId: `egdesk-internal:${randomUUID()}`, ...(outputSchema ? { outputSchema } : {}), ...(via === 'fresh' && fresh.effort ? { effort: fresh.effort } : {}) }, slot)
+        // c25: the room's own model and effort (request > Agent > EG-Desk > the engine's default, resolved by the caller) on every internal turn, fork or fresh: a fork inherits
+        // the parent's thread settings, but the effort of a turn is its own (Main's check-9: 20-30 s fill turns ran at the engine's default effort, which was the highest)
+        selected = { model: typeof fresh?.model === 'string' && fresh.model ? fresh.model : null, effort: typeof fresh?.effort === 'string' && fresh.effort ? fresh.effort : null, source: fresh?.source ?? null }
+        // a fork of the room with no explicit pick (source engine/null) already runs with the thread's own settings: nothing to send, the record still says what it ran with
+        const sendSelected = via === 'fresh' || ['explicit', 'request', 'agent', 'egdesk'].includes(selected.source)
+        // onStart({ via, model, effort, source }): what this turn is about to run with (the caller's trace); a throwing observer never affects the turn
+        try { onStart?.({ via, model: selected.model, effort: selected.effort, source: selected.source }) } catch { /* observer only */ }
+        await engine.startTurn({ threadId: id, input: [{ type: 'text', text: input, text_elements: [] }], clientUserMessageId: `egdesk-internal:${randomUUID()}`, ...(outputSchema ? { outputSchema } : {}), ...(sendSelected && selected.model ? { model: selected.model } : {}), ...(sendSelected && selected.effort ? { effort: selected.effort } : {}) }, slot)
       })()
       work.then(() => {}, error => settle.reject(error))
-      try { const text = await done; return { text, via } } finally {
+      try { const text = await done; return { text, via, model: selected.model, effort: selected.effort, source: selected.source } } finally {
         over = true
         clearTimer(timer)
         if (forkId) release(forkId)

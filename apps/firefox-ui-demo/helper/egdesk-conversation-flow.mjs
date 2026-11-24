@@ -345,7 +345,7 @@ function workLines({ run, heartbeatFacts, flow, own, allows, browserTask = null 
   // send command output: the line is what supports the claim); a health the code could not confirm is said to be unconfirmed.
   const ownLast = run?.ownCommandLast
   if (ownLast) {
-    const parts = [`The last command EG-Desk ran ended with exit code ${ownLast.exitCode ?? 'unknown (it did not finish normally)'}`]
+    const parts = [ownLast.stopped ? 'The last command EG-Desk ran was stopped before it finished (the person stopped the run); it did not complete' : `The last command EG-Desk ran ended with exit code ${ownLast.exitCode ?? 'unknown (it did not finish normally)'}`]
     if (ownLast.summary) {
       const counts = `${ownLast.summary.passed} passed, ${ownLast.summary.failed} failed${Number.isSafeInteger(ownLast.summary.total) ? `, ${ownLast.summary.total} in total` : ''}`
       if (allows('command_output')) { kinds.add('command_output'); parts.push(`its test runner's own summary line reads "${oneLine(ownLast.summary.line, 300)}" (${counts})`) }
@@ -402,6 +402,28 @@ export function browserTaskLines(brief, allows = () => false) {
 }
 
 /**
+ * c26 (Main, real engine check-6 why-stopped: the writer's "still running" sentence was dropped by the check): the run's live state as current-time evidence, so a true
+ * present-tense statement about the run is supported and a false one ("it finished") is not. Only what the system knows, in plain words:
+ *   - the run is still in progress as of this beat, and how long ago the assistant began working (workMsOf: the work's age, not the time since the person wrote);
+ *   - when EG-Desk's own command runner is running a command (the dynamic tool egdesk_run_command, in progress): that it is a command, the command line where the run's
+ *     egress allows terminal_command, how long ago it started, and that it has not finished.
+ * The lines are in the message evidence only; the beat questions' material (runContext) is unchanged.
+ */
+export function liveRunLines({ run = null, heartbeatFacts = null, flow = null, allows = () => true } = {}) {
+  if (!heartbeatFacts || run?.status !== 'inProgress') return []
+  const lines = [], work = workMsOf(heartbeatFacts, flow)
+  lines.push(`As of now the run is still in progress${Number.isFinite(work) ? `: the assistant began working ${span(work)} ago` : ''}. Nothing has finished it.`)
+  const running = (run.activities || []).some(a => a.kind === 'dynamicToolCall' && a.status === 'inProgress' && a.detail?.tool === 'egdesk_run_command')
+  const own = run.ownCommandRunning
+  if (running && own) {
+    const command = own.command && allows('terminal_command') ? `the command \`${oneLine(own.command, FLOW_CONTEXT_LIMITS.command)}\`` : 'a command'
+    const since = Number.isFinite(own.startedMs) && Number.isFinite(heartbeatFacts.internalMs) && heartbeatFacts.internalMs >= own.startedMs ? `, started ${span(heartbeatFacts.internalMs - own.startedMs)} ago` : ''
+    lines.push(`The tool egdesk_run_command is the assistant's own command runner. It is running ${command}${since}, and the command has not finished yet.`)
+  }
+  return lines
+}
+
+/**
  * The evidence a heartbeat message is checked against before it is posted: the facts it was composed from, as the runtime holds them.
  * Measured 2026-11-24 (all-on journey, step s4): a wait message checked against the turn's memory pages was blocked (present .90/.91:
  * "it states something as a present fact"), because nothing given to the check said what the run was doing. These items say it.
@@ -420,7 +442,7 @@ export function messageEvidence({ kind, run = null, heartbeatFacts = null, flow 
   if (request) items.push({ id: 'request', kind: 'conversation', time: 'present', source: 'person', text: `The person asked: ${request}` })
   if (heartbeatFacts) {
     const work = workLines({ run: run ?? { activities: [] }, heartbeatFacts, flow, own, allows, browserTask })
-    items.push({ id: 'now', kind: 'run_state', time: 'present', source: 'runtime', text: [`${span(heartbeatFacts.sinceUserMs)} have passed since the person wrote.`, ...workAgeLine(heartbeatFacts, flow), ...work.lines].join('\n') })
+    items.push({ id: 'now', kind: 'run_state', time: 'present', source: 'runtime', text: [`${span(heartbeatFacts.sinceUserMs)} have passed since the person wrote.`, ...workAgeLine(heartbeatFacts, flow), ...work.lines, ...liveRunLines({ run, heartbeatFacts, flow, allows })].join('\n') })
   }
   const noted = oneLine(note, FLOW_CONTEXT_LIMITS.note)
   if (kind === 'ask_missing' && noted) items.push({ id: 'note', kind: 'run_state', time: 'present', source: 'agent', text: `The assistant's note to itself: ${noted}` })

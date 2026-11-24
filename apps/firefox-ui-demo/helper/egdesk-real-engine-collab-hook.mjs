@@ -188,50 +188,54 @@ const COORDINATE = /"(?:x|y|width|height|left|top)"\s*:/
 export const identityLeak = text => text.includes(COLLAB_PEOPLE.invited.member) || text.includes(COLLAB_PEOPLE.invited.board) || COORDINATE.test(text) || /"M[1-8]"|\bM[1-8]\b/.test(text)
 
 // ---- the hook ----
-const worlds = new WeakMap() // conversation (the script's object) -> its world: composed with the chat runtime's flow, then attached
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
+/** The product flag that needs the Decision model (the attention scene's owner question); registered with the others in helper/egdesk-real-engine-registrations.mjs. */
+export const COLLAB_DECISION_FLAGS = Object.freeze(['EGDESK_WORK_PLACEMENT'])
+
 /**
- * The check's registration entry (helper/egdesk-real-engine-hooks.mjs lists it).
- *   active(FLAG)           the conversation's flags say EGDESK_PRESENCE=on
- *   decisionDependent      the attention scene's owner question needs the Decision model: EGDESK_WORK_PLACEMENT=on
- *   conversationFlow(FLAG, conversation) -> the keys the bridge adds to conversationFlow with presence on (presence, audience, attentionPosted)
- *   attach(deps)           deps: { chat, client, FLAG, conversation, ... } -> { name, beforeTurn, afterTurn, dispose }
+ * The collaboration hook of ONE conversation: a registered turn hook (helper/egdesk-real-engine-extensions.mjs registerTurnHooks; registered in helper/egdesk-real-engine-registrations.mjs).
+ * It does nothing unless the conversation's flags say EGDESK_PRESENCE=on.
+ *   flowOptions({ FLAG })        the keys the bridge adds to conversationFlow with presence on (presence, audience, attentionPosted)
+ *   attach(deps)                 the placement runtime over the check's own runtime and Decision client; presence starts being posted
+ *   beforeSend({ turn, state })  who sends this turn, told through the bridge's own routes
+ *   afterTurn({ ..., expect })   for a turn with `expect.collab`: the record (under `collab` in the turn record) and the entry's own checks (by code, on the record)
+ *   dispose()                    presence stops being posted
  */
-export const collabHook = Object.freeze({
-  name: 'collab',
-  flags: COLLAB_FLAGS,
-  decisionDependent: Object.freeze(['EGDESK_WORK_PLACEMENT']),
-  active: FLAG => FLAG?.EGDESK_PRESENCE === 'on',
-  conversationFlow(FLAG, conversation, { world = createCollabWorld() } = {}) {
-    worlds.set(conversation, world)
-    return { presence: world.mirror, audience: ({ run }) => world.audience({ run }), attentionPosted: ({ key, provider }) => { if (provider === 'work_placement') world.placement?.acknowledgePointer(key) } }
-  },
-  attach({ chat, client, store = null, FLAG, conversation, calibrationLog = null, limits = {} }) {
-    const L = { ...COLLAB_LIMITS, ...limits }
-    const world = worlds.get(conversation) ?? createCollabWorld()
-    worlds.set(conversation, world)
-    world.start()
-    const bodies = []     // the Decision requests of the placement runtime (bounded copies)
-    // the placement runtime of the bridge (createWorkPlacement), over the check's own Decision client; every request it makes is recorded on the way through
-    const recordingClient = client ? { ...client, decide: async request => { bodies.push(request); return client.decide(request) } } : null
-    const on = FLAG.EGDESK_WORK_PLACEMENT === 'on' && recordingClient !== null
-    const placement = createWorkPlacement({ client: recordingClient, mode: () => (on ? 'on' : 'off'), enabled: () => on, live: () => on, calibrationLog, contextFor: (key, options) => chat.placementContextFor(key, options) })
-    world.placement = placement
-    const placementHttp = createWorkPlacementHttpHandler({ placement, heartbeatFor: key => chat.heartbeatFor(key) })
-    let last = { from: 'owner', set: null, clientThreadId: null, mark: 0, opted: false }
-    return {
-      name: 'collab',
-      // before a message turn: who sends it (the script's `from`, the owner by default), told through the bridge's own routes
-      async beforeTurn({ turn, clientThreadId, conversationId = null }) {
-        const from = COLLAB_FROM.includes(turn?.from) ? turn.from : 'owner'
-        // The check's one-time threads are not the owner's direct conversation (whose answers the draft check holds and whose flow may speak). Once the room's live session exists (from the
-        // second turn on) it is opted in to the flow's messages, the pointer, as the runtime does for a bounded run, without holding any answer (chat.allowIntermediateMessages, draft check on):
-        // it takes effect for the NEXT run of the session, which is why a script puts a turn of the owner's before the first one that expects a pointer.
-        const opted = chat.allowIntermediateMessages?.(clientThreadId) === true
-        last = { from, set: await world.tell(from, { clientThreadId, conversationId }), clientThreadId, mark: world.flowAudience.length, opted }
-      },
-      async afterTurn({ run, say, answer, turnIndex = 0, expect = {} }) {
+export function createCollabTurnHook(conversation, { world = createCollabWorld() } = {}) {
+  const active = FLAG => FLAG?.EGDESK_PRESENCE === 'on'
+  let chat = null, store = null, L = COLLAB_LIMITS, ready = false, bodies = [], placement = null, placementHttp = null
+  let last = { from: 'owner', set: null, clientThreadId: null, mark: 0, opted: false }
+  return {
+    flowOptions: ({ FLAG }) => (active(FLAG) ? { presence: world.mirror, audience: ({ run }) => world.audience({ run }), attentionPosted: ({ key, provider }) => { if (provider === 'work_placement') world.placement?.acknowledgePointer(key) } } : {}),
+    attach(deps) {
+      const { client, FLAG, calibrationLog = null, limits = {} } = deps
+      if (!active(FLAG)) return
+      chat = deps.chat; store = deps.store ?? null; L = { ...COLLAB_LIMITS, ...(limits?.collab ?? {}) }
+      world.start()
+      bodies = [] // the Decision requests of the placement runtime (bounded copies)
+      // the placement runtime of the bridge (createWorkPlacement), over the check's own Decision client; every request it makes is recorded on the way through
+      const recordingClient = client ? { ...client, decide: async request => { bodies.push(request); return client.decide(request) } } : null
+      const on = FLAG.EGDESK_WORK_PLACEMENT === 'on' && recordingClient !== null
+      placement = createWorkPlacement({ client: recordingClient, mode: () => (on ? 'on' : 'off'), enabled: () => on, live: () => on, calibrationLog, contextFor: (key, options) => chat.placementContextFor(key, options) })
+      world.placement = placement
+      placementHttp = createWorkPlacementHttpHandler({ placement, heartbeatFor: key => chat.heartbeatFor(key) })
+      ready = true
+    },
+    // before a message turn: who sends it (the script's `from`, the owner by default), told through the bridge's own routes
+    async beforeSend({ turn, state }) {
+      if (!ready) return
+      const { clientThreadId, conversationId = null } = state()
+      const from = COLLAB_FROM.includes(turn?.from) ? turn.from : 'owner'
+      // The check's one-time threads are not the owner's direct conversation (whose answers the draft check holds and whose flow may speak). Once the room's live session exists (from the
+      // second turn on) it is opted in to the flow's messages, the pointer, as the runtime does for a bounded run, without holding any answer (chat.allowIntermediateMessages, draft check on):
+      // it takes effect for the NEXT run of the session, which is why a script puts a turn of the owner's before the first one that expects a pointer.
+      const opted = chat.allowIntermediateMessages?.(clientThreadId) === true
+      last = { from, set: await world.tell(from, { clientThreadId, conversationId }), clientThreadId, mark: world.flowAudience.length, opted }
+    },
+    async afterTurn({ run, say, answer, turnIndex = 0, expect: turnExpect }) {
+      const expect = turnExpect?.collab
+      if (!ready || expect === undefined) return null
         const keys = { clientThreadId: run?.clientThreadId ?? last.clientThreadId, conversationId: run?.conversationId ?? null }
         const markBodies = bodies.length
         const rec = { turnIndex, request: clip(say, 200), from: last.from, set: last.set, optedIn: last.opted, audience: null, flowAudience: [], flowAudienceTotal: world.flowAudience.length, ownAnswer: null, attention: null }
@@ -273,9 +277,8 @@ export const collabHook = Object.freeze({
           })
           rec.attention = att
         }
-        return rec
-      },
-      dispose() { world.stop() },
-    }
-  },
-})
+        return { record: rec, expectations: checkCollabExpect(expect, rec) }
+    },
+    dispose() { world.stop() },
+  }
+}

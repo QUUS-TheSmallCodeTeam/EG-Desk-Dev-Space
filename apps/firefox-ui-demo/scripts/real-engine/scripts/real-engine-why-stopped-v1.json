@@ -1,6 +1,6 @@
 {
   "set": "real-engine-why-stopped-v1",
-  "description": "Pattern: \"왜 멈췄니?\" typed while a long command runs. Needs the decision composition (--decisions with a key): EGDESK_INRUN_MESSAGES (a message while the run works), EGDESK_CONVERSATION_FLOW and EGDESK_DRAFT_CHECK=on (held, checked messages). The second turn carries whileRunning: it is sent while the first turn still works (afterMs after that turn started). The command is not interrupted and finishes; a short reply is posted for the question. Expectations are code checks only.",
+  "description": "Pattern: \"왜 멈췄니?\" typed while a long command runs. Needs the decision composition (--decisions with a key): EGDESK_INRUN_MESSAGES (a message while the run works), EGDESK_CONVERSATION_FLOW and EGDESK_DRAFT_CHECK=on (held, checked messages). The second turn carries whileRunning: it is sent while the first turn still works (afterMs after that turn started). The command is not interrupted and finishes; a short reply is posted for the question. c26: the second turn expects the reply as a message of its own, after the question was sent: postedMin 2 (the reply and the final answer) and engine.flowMessages min 1 (the system's own short message); posted:true alone passed on the final answer in Main's check-2, check-6 and check-7w although the reply was dropped by the draft check. Expectations are code checks only.",
   "conversations": [
     {
       "id": "why-stopped",
@@ -37,7 +37,13 @@
           },
           "expect": {
             "noNativeTools": true,
-            "posted": true
+            "posted": true,
+            "postedMin": 2,
+            "engine": {
+              "flowMessages": {
+                "min": 1
+              }
+            }
           }
         }
       ]

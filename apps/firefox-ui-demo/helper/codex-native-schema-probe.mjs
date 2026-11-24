@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { closeSync, lstatSync, mkdtempSync, openSync, readFileSync, readSync, rmSync } from 'node:fs'
+import { closeSync, lstatSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
@@ -44,9 +44,31 @@ function bundledNativePath(executable) {
   return path.join(vendorRoot, target[1], 'bin', process.platform === 'win32' ? 'codex.exe' : 'codex')
 }
 
+// The ChatGPT desktop app's own CLI launcher (c25; Main's check-6 on the person's real install, official 0.171.0-alpha.13): Contents/Resources/codex-cli/bin/codex is a
+// 328-byte /bin/sh script that follows its own symlinks and execs ../CodexCLI.app/Contents/MacOS/codex. Until now every "#!" launcher was refused, which made the
+// binary's schema capabilities (thread/delete, turn/steer) unreadable on exactly the install the person has. It is recognised ONLY when every line of the script is
+// one of the lines of that launcher (any other script stays "Unrecognized Codex launcher"); the native binary it execs is then fingerprinted together with the launcher,
+// so a replaced binary changes the fingerprint.
+const CHATGPT_LAUNCHER_LINES = Object.freeze(new Set([
+  '#!/bin/sh', 'set -eu', 'entry="$0"', 'while [ -L "$entry" ]; do', 'parent=$(CDPATH= cd -P -- "$(dirname -- "$entry")" && pwd)', 'entry=$(readlink "$entry")',
+  'case "$entry" in /*) ;; *) entry="$parent/$entry" ;; esac', 'done', 'bin_dir=$(CDPATH= cd -P -- "$(dirname -- "$entry")" && pwd)',
+  'exec "$bin_dir/../CodexCLI.app/Contents/MacOS/codex" "$@"',
+]))
+function chatgptAppNativePath(executable) {
+  let text = ''
+  try {
+    const fd = openSync(executable, 'r')
+    try { const buffer = Buffer.alloc(4096), count = readSync(fd, buffer, 0, buffer.length, 0); if (count >= buffer.length) return null; text = buffer.subarray(0, count).toString('utf8') } finally { closeSync(fd) }
+  } catch { return null }
+  const lines = text.split('\n').map(line => line.trim()).filter(Boolean)
+  if (lines[0] !== '#!/bin/sh' || lines.filter(line => line.startsWith('exec ')).length !== 1 || !lines.every(line => CHATGPT_LAUNCHER_LINES.has(line))) return null
+  // the launcher's own logic: follow the symlinks of $0 to the last entry; bin_dir is that entry's physical directory
+  return path.join(path.dirname(realpathSync(executable)), '..', 'CodexCLI.app', 'Contents', 'MacOS', 'codex')
+}
+
 export function fingerprintNativeExecutable(executable) {
   const hash = createHash('sha256')
-  const native = bundledNativePath(executable)
+  const native = bundledNativePath(executable) ?? chatgptAppNativePath(executable)
   const firstBytes = Buffer.alloc(2), fd = openSync(executable, 'r')
   try { readSync(fd, firstBytes, 0, 2, 0) } finally { closeSync(fd) }
   if (firstBytes.toString() === '#!' && !native) throw new Error('Unrecognized Codex launcher cannot be fingerprinted')

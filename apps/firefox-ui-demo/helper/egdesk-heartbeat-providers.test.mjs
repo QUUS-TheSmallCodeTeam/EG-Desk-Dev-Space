@@ -62,7 +62,7 @@ function browserWorld(store) {
   ]
   // L8 c20: the entry is yes/no predicates; the double answers every question (a predicate yes, a choice its first value)
   const client = { async decide(request) {
-    return { answers: Object.fromEntries(request.questions.map(q => [q.name, q.type === 'predicate' ? { type: 'predicate', probability: 0.95 }
+    return { answers: Object.fromEntries(request.questions.map(q => [q.name, q.type === 'predicate' ? { type: 'predicate', probability: q.name === 'browser_entry_answer' ? 0.03 : 0.95 }
       : { type: 'choice', choice: q.choices[0].value, confidence: 0.95, probabilities: [{ value: q.choices[0].value, probability: 0.96 }, { value: q.choices[1].value, probability: 0.02 }] }])), usage: null }
   } }
   const provider = { directEntryEnabled: () => true,

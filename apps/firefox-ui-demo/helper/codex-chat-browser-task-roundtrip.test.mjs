@@ -266,7 +266,7 @@ test('R1 one live run: question (completed message) -> run.replyOpen -> in-run r
   assert.equal(w.decisions.filter(d => d.image).length, 0)
   // each objective phase ran before its native turn: the subjective model only ever worded a finished note
   const order = w.timeline.filter(x => /^(decide:|native:turn\/start)/.test(x))
-  assert.deepEqual(order, ['decide:browser_entry+browser_entry_card_0', STEP, 'native:turn/start', 'decide:task_resume',
+  assert.deepEqual(order, ['decide:browser_entry+browser_entry_answer+browser_entry_card_0', STEP, 'native:turn/start', 'decide:task_resume',
     STEP, STEP, STEP, 'native:turn/start'])
   // no intermediate-message job started for a browser-task turn (its reply must reach the task, not an in-run steer)
   assert.equal(w.calls.some(c => c.method === 'thread/fork' || c.method === 'turn/steer' || c.method === 'turn/interrupt'), false, 'the reply is never steered into a native turn: it belongs to the task')
@@ -329,12 +329,12 @@ test('R4 held mode on, not a browser task: the ordinary turn of a Browser conver
 })
 
 // ---- cost: the entry decision riding on a turn-start triage request ----
-const rideHook = { entryAnswers: async ({ body, questions, client }) => (await triageTurn({ message: body.message, client, extraQuestions: questions })).extra ?? null }
+const rideHook = { entryAnswers: async ({ body, questions, evidence, client }) => (await triageTurn({ message: body.message, client, extraQuestions: questions, extraEvidence: evidence })).extra ?? null }
 
 test('C1 ride-along: one turn-start request carries triage + the entry question; no separate entry request; the task runs the same', async t => {
   const alone = world(t); await alone.send(MSG)
   const ride = world(t, { entry: rideHook }); await ride.send(MSG)
-  assert.deepEqual(ride.decisions[0].names, ['tn_courtesy', 'tn_need', 'tn_record', 'browser_entry', 'browser_entry_card_0'], 'c20: the entry predicates ride along')
+  assert.deepEqual(ride.decisions[0].names, ['tn_courtesy', 'tn_need', 'tn_record', 'browser_entry', 'browser_entry_answer', 'browser_entry_card_0'], 'c20/c29: the entry predicates ride along')
   assert.deepEqual(ride.counts(), { tn_courtesy: 1, next_step: 1 }, 'no standalone browser_entry request')
   assert.deepEqual(alone.counts(), { browser_entry: 1, next_step: 1 })
   assert.deepEqual([ride.note().status, ride.note().code], [alone.note().status, alone.note().code])
@@ -394,8 +394,10 @@ test('S1 the classifier vocabulary (logout, leave, allow, order, contract, pay-s
     // c15 code rule: nothing on the page can be chosen and person-only controls were withheld -> the step is the person's, whatever the model would pick.
     assert.equal(note.code, 'human_step', guess)
     assert.equal(w.counts().next_step ?? 0, 0, `${guess}: the step is not even asked`)
-    assert.equal(note.candidates, undefined)
-    assert.doesNotMatch(JSON.stringify(note), /로그아웃|탈퇴|허용|주문|해지|제출|logout|cancel/, 'the note names none of them')
+    // c27 (owner decision, c26; an intended behaviour change, not a weakening: the nothing-can-be-chosen note used to name none of the withheld controls): the person is
+    // told which controls are theirs: the withheld BUTTONS, by their labels, in page order. Withheld links are not controls to operate and stay unnamed.
+    assert.deepEqual(note.candidates, ['알림 허용', '주문하기', '결제 제출'], guess)
+    assert.doesNotMatch(JSON.stringify(note), /로그아웃|탈퇴|해지|logout|cancel/, 'the withheld links are not named')
   }
 })
 
@@ -718,7 +720,7 @@ test('C5 c22 ride-along through the runtime quotes what the card shows, exactly 
   const rideCard = card(ride.decisions[0]), aloneCard = card(alone.decisions[0])
   assert.match(rideCard, /which now shows "합성 포털"\?/)
   assert.equal(rideCard, aloneCard, 'the same quoting on both paths')
-  assert.deepEqual(ride.decisions[0].names.slice(-2), ['browser_entry', 'browser_entry_card_0'])
+  assert.deepEqual(ride.decisions[0].names.slice(-3), ['browser_entry', 'browser_entry_answer', 'browser_entry_card_0'])
 })
 
 // ---- L8 c23: in-run messages for browser tasks (EGDESK_INRUN_MESSAGES; lane L2's contract: inRunMessageTo, pendingInRunMessages, settleInRunMessage) ----
@@ -863,7 +865,7 @@ test('I7 the store: a change composes the goal from the original request and wha
 
 test('I8 the loop: a change between or during segments is planned again under the new goal, whatever the old segment ended with (done included)', async () => {
   const store = createBrowserTaskStore(), goals = []
-  const provider = { directEntryEnabled: () => true, reflexScope: () => ({ client: { decide: async r => ({ answers: Object.fromEntries(r.questions.map(q => [q.name, { type: 'predicate', probability: 0.95 }])) }) }, isDecisionCurrent: () => true }),
+  const provider = { directEntryEnabled: () => true, reflexScope: () => ({ client: { decide: async r => ({ answers: Object.fromEntries(r.questions.map(q => [q.name, { type: 'predicate', probability: q.name === 'browser_entry_answer' ? 0.03 : 0.95 }])) }) }, isDecisionCurrent: () => true }),
     async runDirectTask(_run, args) {
       goals.push(args.goal)
       if (goals.length === 1) { store.changeGoal('dm', '지난 달로'); return { outcome: 'done', steps: [{ url: 'https://portal.example.test/x', actions: [] }], state: null } } // the change arrived as the segment ended

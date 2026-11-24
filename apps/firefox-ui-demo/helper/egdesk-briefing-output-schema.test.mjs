@@ -33,7 +33,14 @@ test('fill schema from the guide: exactly the guide\'s items and their slots, ma
   // a partial fill (rewrite one item) lists only that item
   assert.deepEqual(Object.keys(fillOutputSchema(GUIDE, { only: new Set([GUIDE.items[0].id]) }).properties.items.properties), [GUIDE.items[0].id])
   assert.throws(() => fillOutputSchema({ items: [] }))
-  assert.deepEqual(outputSchemaFor(fillRequest(GUIDE, MATS)), schema, 'the engine\'s request carries the same guide')
+  // c35: the engine's request carries the COMPACT guide (no fallback sentence asked for; a sequence line's label / text may be null = copied from its material)
+  const compact = fillRequest(GUIDE, MATS).guide, small = outputSchemaFor(fillRequest(GUIDE, MATS))
+  assert.deepEqual(small, fillOutputSchema(compact)); assert.deepEqual(schemaProblems(small), [])
+  for (const item of GUIDE.items) assert.deepEqual(Object.keys(small.properties.items.properties[item.id].properties), ['text', 'slots'], 'no fallback in the compact request')
+  assert.deepEqual(Object.keys(schema.properties.items.properties[GUIDE.items[0].id].properties), ['text', 'fallback', 'slots'], 'a guide that lists the fallback is still asked for it')
+  const seqItem = GUIDE.items.find(i => i.shows === 'sequence'), rowOf = sch => sch.properties.items.properties[seqItem.id].properties.slots.properties.lines.anyOf[0].items.properties
+  assert.deepEqual([rowOf(small).label.anyOf?.length, rowOf(small).text.anyOf?.length, rowOf(small).from.type], [2, 2, 'string'], 'a sequence line: label and text may be null, the material is always named')
+  assert.deepEqual([rowOf(schema).label.type, rowOf(schema).text.type], ['string', 'string'], 'the full guide is unchanged')
 })
 test('design schema from the request: the board aliases and "new:<part>" for an allowed part; emphasis a closed word or null; strict subset', () => {
   const request = { kind: 'briefing_design', targets: [{ alias: 'T1' }, { alias: 'T2' }], reuse: ['T1', 'T2'], retire: [], newAllowed: [{ part: 'P3', label: 'Next steps' }], maxNew: 1 }
@@ -73,14 +80,15 @@ test('engine, flag OFF: runText gets exactly { timeoutMs } (no outputSchema key)
   assert.equal(briefingDeps({ chat: {}, contexts: {} }).outputSchema, 'off'); assert.equal(briefingDeps({ chat: {}, contexts: {}, outputSchema: 'on' }).outputSchema, 'on'); assert.equal(briefingDeps({ chat: {}, contexts: {}, outputSchema: 'yes' }).outputSchema, 'off')
 })
 test('engine, flag ON: the same prompt plus the turn\'s outputSchema; a conforming bare JSON message is the fill; invalid, prose-wrapped, fenced, refused or empty messages are null and counted', async () => {
-  const seen = [], replies = [asJson(fillReply())]
+  const noFallback = r => ({ ...r, items: Object.fromEntries(Object.entries(r.items).map(([id, { fallback: _f, ...rest }]) => [id, rest])) }), cr = () => noFallback(fillReply())
+  const seen = [], replies = [asJson(cr())]
   const engine = createBriefingEngine({ outputSchema: true, limits: { maxTurns: 20 }, runText: async (prompt, options) => { seen.push([prompt, options]); return replies.shift() ?? null } })
   const request = fillRequest(GUIDE, MATS), good = await engine(request)
-  assert.deepEqual(seen[0][1].outputSchema, fillOutputSchema(GUIDE)); assert.equal(seen[0][0], fillPrompt(request), 'the prompt does not change: the schema carries the constraint')
+  assert.deepEqual(seen[0][1].outputSchema, fillOutputSchema(request.guide)); assert.equal(seen[0][0], fillPrompt(request), 'the prompt does not change: the schema carries the constraint')
   assert.deepEqual(validateFill(GUIDE, good).ok, true)
   const bad = [
-    asJson({ ...fillReply(), extra: 1 }), `Sure!\n${asJson(fillReply())}`, `\`\`\`json\n${asJson(fillReply())}\n\`\`\``, '죄송하지만 이 요청은 도와드릴 수 없습니다.', '', asJson({ title: 'x', unfillable: [], items: {} }),
-    asJson({ ...fillReply(), items: { ...fillReply().items, P9: { text: 't', fallback: 'f', slots: {} } } })]
+    asJson({ ...cr(), extra: 1 }), `Sure!\n${asJson(cr())}`, `\`\`\`json\n${asJson(cr())}\n\`\`\``, asJson(fillReply()) /* a fallback the compact request never asked for is a field off the schema */, '죄송하지만 이 요청은 도와드릴 수 없습니다.', '', asJson({ title: 'x', unfillable: [], items: {} }),
+    asJson({ ...cr(), items: { ...cr().items, P9: { text: 't', slots: {} } } })]
   for (const reply of bad) { replies.push(reply); assert.equal(await engine(request), null, reply.slice(0, 30)) }
   assert.equal(engine.stats().schemaInvalid, bad.length, 'every message that is not a conforming bare JSON object is counted (an empty final message too)'); assert.equal(engine.stats().turns, 1 + bad.length)
   // a turn that failed (runText null) is null too, and is not a schema failure
@@ -98,4 +106,34 @@ test('engine, flag ON, design-first: the design request carries its schema; a va
   assert.deepEqual(seen[0][1].outputSchema, designOutputSchema(request)); assert.equal(seen[0][0], designPrompt(request, ''))
   assert.equal(await engine(request), null); assert.equal(engine.stats().schemaInvalid, 1)
   assert.ok(BRIEFING_ENGINE_LIMITS.replyMax > 0 && BRIEFING_CATALOG.ids.length === 4)
+})
+
+// ---- c34: the schema must not admit a fill the validator REFUSES (c33's rule: "make the schema and the validator agree") ----
+// A strict schema cannot state a length, a row count, a non-empty string or "left differs from right", so a schema-valid reply can still be short of the limits; the validator
+// reads those as ISSUES of one slot (empty / mismatch), which the flow rewrites or drops one part at a time. What the validator refuses as a whole (validateFill ok:false) must
+// be only what the schema itself states: the shape. Seeded fuzz over schema-valid replies: no whole-reply refusal except a blank title (a string the schema cannot call blank).
+test('differential: every schema-valid fill is read by validateFill (no whole-reply refusal but a blank title); what the schema cannot state surfaces as slot issues only', () => {
+  let seed = 34
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff, pick = list => list[Math.floor(rnd() * list.length)]
+  const schema = fillOutputSchema(GUIDE)
+  const value = (slot, item) => {
+    if (slot.type === 'text') return pick([null, '', ' ', 'x', `${slot.name} 값`, 'y'.repeat((slot.max ?? 40) + 1 + Math.floor(rnd() * 400))])
+    if (slot.type === 'material') return pick([null, ...item.materials])
+    const n = pick([0, 1, 1, 2, 3, (slot.max ?? 6) + 1, (slot.max ?? 6) + 3])
+    return pick([null, Array.from({ length: n }, () => Object.fromEntries(slot.of.map(f => [f.name, f.type === 'material' ? pick(item.materials) : pick(['', 'z', `${f.name} 값`, 'w'.repeat((f.max ?? 40) + 20)])])))])
+  }
+  const titles = ['', 'a', '제목', 't'.repeat(200), `${'긴제목 '.repeat(40)}`]
+  const outcomes = { schemaValid: 0, accepted: 0, blankTitle: 0, issueKinds: new Set(), hard: [] }
+  for (let n = 0; n < 600; n++) {
+    const reply = { title: pick(titles), unfillable: pick([[], [{ item: GUIDE.items[0].id, slot: 'body', reason: 'r' }]]), items: Object.fromEntries(GUIDE.items.map(i => [i.id, { text: pick(['', 't', '설명'.repeat(130)]), fallback: pick(['', 'f']), slots: Object.fromEntries(i.slots.map(s => [s.name, value(s, i)])) }])) }
+    if (violation(reply, schema) !== null) continue
+    outcomes.schemaValid++
+    const read = validateFill(GUIDE, stripNulls('briefing_fill', reply))
+    if (!read.ok) { if (read.reason === 'no-title' && !reply.title.trim()) outcomes.blankTitle++; else outcomes.hard.push(read.reason); continue }
+    outcomes.accepted++; for (const issue of read.issues) outcomes.issueKinds.add(issue.kind)
+    assert.ok(read.title.length <= GUIDE.titleMax, 'a long title is cut, never carried over the limit')
+  }
+  assert.deepEqual(outcomes.hard, [], 'no schema-valid reply is refused as a whole except for a blank title')
+  assert.ok(outcomes.schemaValid >= 550 && outcomes.accepted > 100 && outcomes.blankTitle > 0, JSON.stringify({ ...outcomes, issueKinds: [...outcomes.issueKinds] }))
+  assert.deepEqual([...outcomes.issueKinds].sort(), ['empty', 'mismatch'], 'the inexpressible limits show up as the two slot issues the flow already handles')
 })

@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
 import { runBrowserReflex } from './egdesk-browser-reflex.mjs'
-import { codeEntryCard, createBrowserTaskStore, createDirectBrowserEntry, decideResume, entryQuestions, readBrowserEntry } from './egdesk-browser-task.mjs'
+import { codeEntryCard, createBrowserTaskStore, createDirectBrowserEntry, decideResume, ENTRY_ANSWER_ASK, ENTRY_WEB_ASK, entryQuestions, readBrowserEntry } from './egdesk-browser-task.mjs'
 import { decisionThresholds } from './egdesk-decision-questions.mjs'
 import { PS_NAMES, pageStateAnswers, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
 
@@ -63,7 +63,7 @@ test('R3 the task reports the person-only stop as human_step, with no question t
   const store = createBrowserTaskStore()
   const runDirectTask = async () => ({ outcome: 'escalated', reason: 'human_step', withheld: 2, steps: [{ url: `${O}/subscription`, actions: [], excluded: { gated: 2, sensitive: 0 } }], state: null })
   const written = []
-  const client = { decide: async request => ({ answers: Object.fromEntries(request.questions.map(q => [q.name, { type: 'predicate', probability: 0.95 }])) }) }
+  const client = { decide: async request => ({ answers: Object.fromEntries(request.questions.map(q => [q.name, { type: 'predicate', probability: q.name === 'browser_entry_answer' ? 0.03 : 0.95 }])) }) }
   const entry = createDirectBrowserEntry({ store, outcomeSink: candidate => { written.push(candidate); return { status: 'stored' } },
     provider: { directEntryEnabled: () => true, reflexScope: () => ({ client, authorizeDispatch: () => true, isDecisionCurrent: () => true }), runDirectTask } })
   const out = await entry.handle({ run: { runId: 'r', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm', message: '구독 관리 화면 열어줘', hosts: { card: 'portal.example.test' } })
@@ -101,12 +101,13 @@ test('entry replay: the invoice family still enters; the old evidence alone did 
 test('entry questions: the request predicate always; one per card quoting that page alone by title and host; none when code named the card', () => {
   const cards = [{ cardId: 'a', host: 'shop.example.test', title: '주문 내역 | 쇼핑' }, { cardId: 'b', host: 'account.example.test', title: '' }]
   const qs = entryQuestions(cards)
-  assert.deepEqual(qs.map(q => [q.name, q.type]), [['browser_entry', 'predicate'], ['browser_entry_card_0', 'predicate'], ['browser_entry_card_1', 'predicate']])
-  assert.equal(qs[0].instructions, 'Is this request something to do in a web page rather than an answer?')
-  assert.equal(qs[1].instructions, 'Does this request need to be done on this open page: "주문 내역 | 쇼핑" at "shop.example.test"?')
-  assert.equal(qs[2].instructions, 'Does this request need to be done on this open page: the page at "account.example.test"?')
-  assert.doesNotMatch(qs[1].instructions, /account/, 'one page per predicate')
-  assert.deepEqual(entryQuestions(cards, { codeCard: 'a' }).map(q => q.name), ['browser_entry'])
+  assert.deepEqual(qs.map(q => [q.name, q.type]), [['browser_entry', 'predicate'], ['browser_entry_answer', 'predicate'], ['browser_entry_card_0', 'predicate'], ['browser_entry_card_1', 'predicate']])
+  assert.equal(qs[0].instructions, ENTRY_WEB_ASK) // c27: the question says what counts as a web task (the evidence now lists the open pages)
+  assert.equal(qs[1].instructions, ENTRY_ANSWER_ASK) // c29
+  assert.equal(qs[2].instructions, 'Does this request need to be done on this open page: "주문 내역 | 쇼핑" at "shop.example.test"?')
+  assert.equal(qs[3].instructions, 'Does this request need to be done on this open page: the page at "account.example.test"?')
+  assert.doesNotMatch(qs[2].instructions, /account/, 'one page per predicate')
+  assert.deepEqual(entryQuestions(cards, { codeCard: 'a' }).map(q => q.name), ['browser_entry', 'browser_entry_answer'])
 })
 
 test('code naming is strict: exactly one card; host labels as whole words and not generic; title parts of 4+ characters that are not generic', () => {
@@ -155,7 +156,7 @@ test('a web task on two cards, which one undecided: the person is asked which ca
   const [, resume, again] = w.sent
   assert.match(resume.input[1].content, /Asked: 어느 카드에서 받을까요\?/)
   assert.match(again.input[1].content, /User message: 거기서 이번 달 명세서 내려받아줘\nAsked which card it concerns, the user answered: 거래처 포털 쪽/)
-  assert.deepEqual(again.questions.map(q => q.name), ['browser_entry'], 'the answer named the card (its title): only the request predicate is asked')
+  assert.deepEqual(again.questions.map(q => q.name), ['browser_entry', 'browser_entry_answer'], 'the answer named the card (its title): only the request predicate is asked')
 })
 
 test('which-card asked at most twice, then the ordinary turn; a request not decided a web task never asks', async () => {

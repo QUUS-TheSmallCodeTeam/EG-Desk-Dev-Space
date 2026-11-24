@@ -84,3 +84,252 @@ export function buildMemoryHeldScript() {
           expect: { memory: { noResends: true, notAttached: DECOYS.map(d => d.id) }, posted: true, answerIncludes: ['자동 삭제'], noNativeTools: true, turnStatus: 'completed' } },
       ] }] }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+// scale-v1 (c30): the memory conversation at REALISTIC page sizes, with one packet on. SYNTHETIC pages of a made-up server-migration project: seven pages of 500-2,300
+// characters (an overview, a network page, a database page, a storage page, a cut-over PLAN, a rollback IDEA (hypothetical), one unrelated decoy); two pages carry
+// a link (network -> overview, rollback -> cut-over). It closes the three items c29 left unchecked, each by code on what the product sent and what the real engine said:
+//  1. the reference is followed with many long pages: turn 1 asks for one fact from each of four long pages and every fact sits in the LAST fifth of its page
+//     (answerIncludes), while at least two pages must be in the merged packet as a reference line only (merged: 2): the answer shows the model read the body that
+//     was sent once, not only the reference line;
+//  2. one large additionalContext item is accepted: turn 1's largest key must hold the four bodies (minKeyChars 6000) and the turn must complete and post;
+//  3. the two instruction texts stay apart: turn 2 asks about a PLANNED cut-over and a HYPOTHETICAL rollback in the same merged key as the selection's own time
+//     guidance and the memory part's guidance; the answer must carry the plan's date, the idea's number, and must not state either as done or decided
+//     (answerExcludes; fallible wording, so a failure there is read, not assumed).
+// Needs --decisions. Run: node scripts/egdesk-real-engine-check.mjs --codex-bin <bin> --person-home --decisions --out <dir> --run --script scripts/real-engine/scripts/real-engine-memory-scale-v1.json
+export const MEMORY_SCALE_SET = 'real-engine-memory-scale-v1'
+const P = Object.freeze({
+  overview: 'migration/overview', network: 'migration/network', database: 'migration/database', storage: 'migration/storage',
+  cutover: 'migration/cutover', rollback: 'migration/rollback', decoy: 'office/cafe-rules',
+})
+// Sentences added before each page's last sentence (the page's one fact): they give the pages their realistic length and carry nothing the questions ask for.
+const EXTRA = Object.freeze({
+  overview: [
+    '진행 상황은 묶음별 표로 관리하며, 표의 각 줄에는 서버 이름, 담당자, 시험 이전 날짜, 본 이전 날짜, 상태가 들어간다.',
+    '표는 매주 금요일 오후에 갱신하고, 지연되는 줄은 빨간색으로 표시해 월요일 회의에서 가장 먼저 다룬다.',
+    '기존 서버 12대 가운데 4대는 구입한 지 7년이 넘어 부품을 구하기 어렵기 때문에 첫째 묶음에 넣어 가장 먼저 옮긴다.',
+    '이전하면서 서버 수는 12대에서 가상 서버 18대로 늘어난다. 한 대에 몰려 있던 기능을 나누어 한 곳이 멈춰도 전체가 멈추지 않도록 하기 위해서다.',
+    '가상 서버마다 자원 한도를 정해 두고, 한 시스템이 자원을 독점하지 못하게 한다. 한도는 석 달 사용량을 보고 조정한다.',
+    '문서화는 이전 작업과 같이 한다. 서버마다 설치된 프로그램, 열려 있는 통로, 정기 작업 목록을 한 장짜리 문서로 남긴다.',
+    '이전이 끝난 뒤 한 달은 안정화 기간으로 두고, 이 기간에 생긴 장애는 원인과 조치를 기록해 정기 점검 항목에 반영한다.',
+    '담당자가 휴가나 출장으로 자리를 비우면 같은 갈래의 다른 사람이 이어받을 수 있도록 작업 내용을 공유 문서에 날마다 적는다.',
+    '이전 일정에는 연말 결산 기간과 설 연휴를 피하는 규칙을 넣었다. 회계 시스템은 결산 직전 2주 동안 어떤 변경도 하지 않는다.',
+    '각 묶음의 이전 날짜는 부서장에게 미리 알리고, 부서에서 그날 꼭 필요한 업무가 있으면 한 주 전까지 알려 달라고 요청했다.',
+    '이전 때문에 업무가 멈추는 시간은 묶음마다 최대 3시간으로 잡고, 그 시간을 넘길 것 같으면 책임자가 부서장에게 즉시 알린다.',
+    '장민철 팀장은 격주로 임원 회의에서 진행 상황을 보고하며, 보고 자료는 묶음별 표와 위험 요소 목록 두 장으로 만든다.',
+    '이번 프로젝트에서 새로 정한 규칙은 이전이 끝난 뒤에도 그대로 운영 규칙으로 쓰기로 했고, 운영 규칙 문서에 이미 옮겨 적기 시작했다.',
+    '프로젝트 참여자는 운영팀 여섯 명과 개발팀 두 명, 외주 업체 두 명이고, 개발팀은 응용 프로그램의 접속 설정을 바꾸는 일을 돕는다.',
+    '질문이나 요청은 프로젝트 대화방에 남기도록 하고, 급한 일이 아니면 개인 메시지로 보내지 않기로 했다. 기록을 한곳에 모으기 위해서다.',
+  ],
+  network: [
+    '네트워크 장비의 관리자 계정은 개인별로 만들고, 공용 계정은 쓰지 않는다. 퇴사나 부서 이동이 있으면 그날 안에 권한을 회수한다.',
+    '장비 펌웨어는 설치 전에 최신 안정 버전으로 맞추고, 이전이 끝날 때까지는 새 버전이 나와도 올리지 않는다.',
+    '전용선 두 가닥은 서로 다른 통신사의 선로를 쓰고, 건물 안에서 들어오는 길도 다르게 해 한 번의 공사로 둘이 같이 끊기지 않게 했다.',
+    '데이터센터 안의 장비 연결표는 선 하나하나에 번호표를 붙이고 표로 남겼으며, 외주 업체가 작업한 뒤에는 내부 인력이 표와 실제를 대조한다.',
+    '시험 이전 중에는 가상 서버 사이의 통신이 예상보다 많아 스위치 포트 두 개가 한때 포화 상태가 되었고, 포트를 묶어 대역을 두 배로 늘려 해결했다.',
+    '네트워크 성능은 이전 전후로 같은 방법으로 쟀다. 사내 포털 첫 화면 응답은 평균 0.9초에서 0.6초로 줄었다.',
+    '이전 중 장애에 대비해 임시로 쓸 수 있는 소형 스위치 두 대와 예비 케이블 한 상자를 운영팀 사무실에 따로 두었다.',
+    '손님용 무선망은 업무 대역과 완전히 분리하고, 방문객이 접속하면 하루 뒤 자동으로 접속 권한이 사라지게 설정했다.',
+    '네트워크 갈래의 남은 일은 이름 서버 정리, 모니터링 화면 통합, 그리고 이전이 끝난 뒤의 장비 반납이다.',
+    '모니터링은 장비마다 따로 보던 화면을 하나로 합치고 있다. 새 화면에는 전용선 상태, 스위치 포트 사용률, 방화벽 연결 수가 한눈에 보이도록 넣었다.',
+    '임계값은 처음에는 느슨하게 시작해 두 달 동안 실제 값을 보고 조인다. 처음부터 빡빡하게 잡으면 알림이 너무 많아져 담당자가 무시하게 되기 때문이다.',
+    '알림은 평일 근무 시간에는 사내 메신저로, 야간과 휴일에는 문자 메시지로 간다. 문자 메시지는 당직 담당자 한 명에게만 가고 15분 안에 응답이 없으면 다음 사람에게 넘어간다.',
+    '당직은 운영팀 여섯 명이 일주일씩 돌아가며 서고, 당직 중에 일어난 일은 다음 월요일 회의에서 모두 공유한다.',
+    '케이블 작업은 모두 끝났지만 데이터센터 안 배선 정리는 외주 업체가 한 번 더 와서 묶음 작업을 마무리하기로 했다.',
+    '이전 중 외부 접속 시험에는 협력업체 세 곳이 참여했고, 한 곳은 자체 방화벽 규칙을 고치는 데 이틀이 더 걸려 일정이 조금 미뤄졌다.',
+    '새 장비의 보증 기간은 3년이며, 장비마다 일련번호와 보증 만료일을 자산 목록에 같이 적어 두었다.',
+    '이전 전에 쓰던 장비의 처분은 자산 담당 부서와 협의해야 하고, 저장 장치가 들어 있는 장비는 반드시 자료를 지운 증명서를 받은 뒤에 내보낸다.',
+  ],
+  database: [
+    '데이터베이스 접속 계정은 응용 프로그램마다 따로 만들고 필요한 표에만 권한을 주었다. 이전하면서 쓰지 않는 계정 17개를 정리했다.',
+    '회계 데이터베이스는 크기가 80GB쯤이고 시험 이전에 세 시간 반이 걸렸다. 본 이전에서는 변경분만 마지막에 반영해 한 시간 안에 끝내는 것이 목표다.',
+    '인사 데이터베이스는 개인 정보가 들어 있어 이전 과정의 복사본은 이전이 끝나는 즉시 지우고, 지운 기록을 담당자가 서명해 남긴다.',
+    '주문 데이터베이스는 동시 접속이 많아 새 클러스터의 연결 수 한도를 기존의 두 배로 잡았고, 시험 이전에서 부하를 걸어 한도를 확인했다.',
+    '느린 질의는 이전 전에 미리 찾아 고친다. 시험 이전에서 5초 넘게 걸린 질의 아홉 개의 색인을 새로 만들어 평균 0.4초로 줄였다.',
+    '정기 작업은 이전 전에 목록으로 뽑아 두고, 이전 후에 하나씩 새 서버에서 돌아가는지 확인한다. 빠뜨린 작업은 두 건이 나와 새 서버에 등록했다.',
+    '데이터 검증은 표마다 줄 수와 합계를 이전 전후로 비교하는 방식으로 하며, 달라지는 곳이 있으면 이전을 멈추고 원인을 찾는다.',
+    '검증 결과는 표 이름, 이전 전 줄 수, 이전 후 줄 수, 확인한 사람을 적은 점검표로 남기고, 점검표는 이전이 끝난 뒤에도 1년 동안 보관한다.',
+    '문자 집합과 정렬 방식은 기존 서버와 똑같이 맞추었다. 시험 이전 때 한글 정렬 순서가 달라져 목록 화면의 순서가 바뀌는 문제를 한 번 겪었기 때문이다.',
+    '데이터베이스 점검 창은 매월 둘째 주 일요일 새벽으로 정했으며, 이 시간에는 통계 갱신과 색인 정리 같은 정기 작업만 한다.',
+    '데이터베이스 담당자는 장애 대응 순서를 한 장짜리 문서로 만들어 당직자에게 나누어 주었고, 문서에는 확인할 화면과 연락할 사람이 순서대로 적혀 있다.',
+  ],
+  storage: [
+    '새 저장소는 속도가 다른 두 층으로 나뉜다. 자주 쓰는 자료는 빠른 층에, 가끔 여는 자료는 느린 층에 두고 사용 기록에 따라 자동으로 옮긴다.',
+    '저장소는 디스크 두 개가 동시에 고장나도 자료를 지킬 수 있는 방식으로 묶었고, 고장난 디스크는 새것으로 바꾸면 자동으로 다시 채워진다.',
+    '용량 사용량은 매일 아침 수집해 80%를 넘으면 담당자에게 알림이 가고, 90%를 넘으면 운영팀 전체에 알린다.',
+    '백업 저장소는 서로 다른 건물에 두는 것을 원칙으로 하고, 한 달에 한 번 백업에서 임의의 파일을 골라 실제로 열어 보는 시험을 한다.',
+    '부서별 할당량은 현재 사용량의 1.5배로 시작하고, 반기마다 사용량을 보고 다시 조정한다.',
+    '사용자 개인 폴더는 이번 이전 범위에 넣지 않았다. 개인 폴더는 부서 폴더를 모두 옮긴 뒤에 별도 일정으로 다룬다.',
+    '옮긴 자료는 원본과 크기, 수정 시각, 파일 수를 모두 비교하고, 비교 결과가 모두 같을 때만 원본을 읽기 전용으로 바꾼다.',
+    '파일 서버 주소는 이전 뒤에도 같은 이름으로 접속할 수 있게 별칭을 걸어 두어 사용자가 달라진 것을 느끼지 않도록 한다.',
+  ],
+  cutover: [
+    '전환 전날에는 마지막 점검을 한다. 기존 서버와 새 클러스터의 시간 설정, 인증서 만료일, 백업 상태를 표로 확인하고 서명한다.',
+    '전환 중 연락은 하나의 대화방으로 모으고, 대화방에는 전환 책임자가 단계 시작과 끝을 그때그때 적는다.',
+    '고객에게 보이는 주문 화면은 전환 시간 동안 점검 안내 화면으로 바꾸고, 안내 화면에는 예상 종료 시각을 적는다.',
+    '전환이 끝난 뒤 첫 한 시간은 오류 기록을 5분마다 확인하고, 이상이 없으면 확인 간격을 30분으로 늘린다.',
+    '전환에 필요한 계정과 비밀번호는 전환 사흘 전에 따로 점검해 두고, 전환이 끝나면 임시로 만든 계정을 모두 지운다.',
+    '전환 중 연락이 닿아야 하는 외부 담당자는 벤더 기술 지원 한 명과 통신사 담당자 한 명이며, 두 사람의 연락처는 대화방 맨 위에 고정해 둔다.',
+    '전환 결과 보고서는 단계별 시작과 끝 시각, 발견한 문제, 조치 내용을 한 장에 정리해 이튿날 오전에 공유한다.',
+    '전환 전에 두 번의 모의 연습을 하고, 연습마다 걸린 시간을 재서 실제 일정에 반영한다. 연습에서 가장 오래 걸린 단계는 마지막 변경분 반영이었다.',
+    '전환 당일 식사와 교대 시간표는 미리 짜 두고, 같은 사람이 여섯 시간 넘게 연속으로 작업하지 않도록 한다.',
+    '전환을 시작하기 전에 책임자가 점검표를 읽고 모든 항목이 확인되었을 때만 시작한다. 하나라도 비어 있으면 시작을 미루는 것이 원칙이다.',
+  ],
+  rollback: [
+    '되돌릴 때 새 클러스터에서 그 사이에 들어온 주문은 따로 뽑아 두었다가 기존 서버에 다시 넣어야 하는데, 이 작업에 한 시간쯤 걸릴 것으로 본다.',
+    '이 방법은 아직 시험해 보지 않았고, 시험을 어떻게 할지도 정하지 않았다.',
+    '되돌리기를 하면 사용자에게 두 번째 점검 안내를 보내야 하고, 이때 안내 문구는 전환 때와 다르게 써야 한다는 의견이 나왔다.',
+    '기준 시간과 기준 수치는 본 전환 전에 회의에서 다시 이야기하자는 정도로만 말이 오갔다.',
+    '되돌린 뒤에 같은 날 다시 전환하는 것은 피하고, 원인을 찾은 뒤 다음 주말로 다시 잡는 쪽이 낫다는 이야기도 있었다.',
+    '이 아이디어를 어느 문서에 어떻게 남길지, 누가 되돌리기를 결정할지도 아직 이야기하지 않았다.',
+    '비슷한 사례를 다른 회사에서는 어떻게 했는지 외주 업체에 물어보자는 의견이 있어 메모만 해 두었다.',
+  ],
+  decoy: [
+    '디저트는 오후 2시 이후에 한정 수량으로 나오고, 소진되면 그날은 판매하지 않는다.',
+    '알레르기가 있는 사람은 카운터에서 재료를 물어볼 수 있으며, 재료표는 카운터 옆 게시판에 붙어 있다.',
+    '카페 앞 의자는 외부 손님이 쓸 수 없고 사원증을 찍어야 한다. 분실한 사원증은 총무팀에서 임시 카드를 받을 수 있다.',
+    '원두는 두 달마다 바뀌고, 이번 분기에는 산미가 적은 원두를 쓴다. 디카페인 음료는 따로 표시된 기계에서만 만든다.',
+    '카페 이용 후기는 로비 게시판의 종이나 총무팀 메일로 보낼 수 있고, 총무팀은 한 달에 한 번 후기를 모아 카페 담당자에게 전달한다.',
+  ],
+})
+const withExtra = (key, sentences) => sentences.reduce((all, line, i) => (i === sentences.length - 1 ? [...all, ...EXTRA[key], line] : [...all, line]), []).join(' ')
+export const SCALE_FACTS = Object.freeze({ budget: '4,730만 원', firewall: '한유진', dump: '2시 40분', storage: '38TB', cutoverDate: '12월 9일', rollbackRate: '3%' })
+export const SCALE_PAGES = Object.freeze([
+  { id: P.overview, title: '서버 이전 프로젝트 개요', time: 'past', status: 'done', body: withExtra('overview', [
+    '사내 서버 이전 프로젝트는 낡은 물리 서버 12대를 새 데이터센터의 가상화 클러스터로 옮기는 일이다.',
+    '작업은 10월 둘째 주에 시작했고, 네트워크, 데이터베이스, 스토리지 세 갈래로 나누어 진행한다.',
+    '총괄은 운영팀 장민철 팀장이 맡고, 각 갈래에는 담당자를 한 명씩 두었다.',
+    '매주 월요일 오전 10시에 30분짜리 점검 회의를 열어 진행 상황과 막힌 점을 공유한다.',
+    '회의록은 회의 당일 공유 폴더에 올리고, 결정된 사항은 별도 기록으로 남긴다.',
+    '이전 대상 서버는 업무 영향도에 따라 세 묶음으로 나누었다.',
+    '첫째 묶음은 사내 포털과 문서 서버처럼 중단해도 영향이 작은 것들이고, 둘째 묶음은 회계와 인사 시스템, 셋째 묶음은 고객 주문을 받는 시스템이다.',
+    '묶음 순서는 영향이 작은 것부터 큰 것으로 가기로 했다.',
+    '각 묶음은 본 이전 전에 시험 이전을 한 번 하고, 시험에서 나온 문제를 고친 뒤에 본 이전을 한다.',
+    '본 이전 때는 기존 서버를 최소 2주 동안 끄지 않고 그대로 둔다.',
+    '사용자 안내는 이전 3일 전과 하루 전에 사내 메신저로 보낸다.',
+    '외주 업체는 네트워크 장비 설치와 케이블 작업만 맡고, 설정과 검증은 내부 인력이 한다.',
+    '위험 요소는 주문 시스템의 야간 배치 시간이 겹치는 것, 구형 라이선스가 새 가상화 환경에서 인증되지 않을 가능성, 그리고 외주 일정 지연이다.',
+    '라이선스 문제는 벤더에 문의해 두었고 답을 기다리는 중이다.',
+    '프로젝트 예산은 장비 구입비, 외주 작업비, 예비비를 합쳐 총 4,730만 원으로 승인되었다.']) },
+  { id: P.network, title: '서버 이전: 네트워크 작업 기록', time: 'past', status: 'done', links: [{ to: P.overview, type: 'follows_from' }], body: withExtra('network', [
+    '네트워크 갈래는 새 데이터센터의 스위치 설치, 대역 설계, 방화벽 이전 순서로 진행했다.',
+    '스위치 여섯 대는 10월 셋째 주에 외주 업체가 랙에 설치했고, 이후 설정은 내부에서 했다.',
+    '사무실과 데이터센터 사이는 이중화된 전용선 두 가닥으로 잇고, 한쪽이 끊기면 30초 안에 다른 쪽으로 넘어가도록 시험했다.',
+    '주소 대역은 업무 시스템, 관리용, 손님용 세 개로 나누었다. 업무 시스템 대역 안에서도 주문 시스템은 따로 분리해 다른 시스템이 직접 접근하지 못하게 했다.',
+    '관리용 대역은 운영팀 고정 주소에서만 접속할 수 있고, 접속 기록은 90일 동안 보관한다.',
+    '이름 서버는 기존 것과 새것을 한동안 같이 돌리다가, 모든 묶음의 이전이 끝난 뒤에 기존 것을 내리기로 했다.',
+    '시험 이전 때 사내 포털은 이름 서버 응답이 늦어 처음 접속에서 5초가량 걸렸고, 캐시 시간을 조정해 1초 안으로 줄였다.',
+    '무선 접속 장치 열네 대는 이번 이전 범위에 넣지 않고, 서버 이전이 끝난 뒤 별도 건으로 다루기로 했다.',
+    '장비 설정 파일은 이전 전후로 매번 내려받아 비교하고, 달라진 줄은 회의에서 확인한다.',
+    '방화벽은 기존 규칙 214개를 하나씩 살펴 쓰지 않는 것 61개를 정리하고, 남은 153개를 새 장비로 옮겼다.',
+    '규칙을 옮긴 뒤에는 묶음마다 외부에서 접속 시험을 하고, 막혀야 하는 경로가 막히는지도 같이 확인한다.',
+    '이전 기간 동안 방화벽 규칙을 바꿀 때는 변경 요청서를 먼저 올리고, 담당자 한 명이 더 읽은 뒤에 적용한다.',
+    '긴급 상황에서는 요청서 없이 바꿀 수 있지만, 24시간 안에 사후 요청서를 올려야 한다.',
+    '외부에서 들어오는 접속은 원격 근무용 가상 사설망과 거래처 전용 접속 두 가지만 열어 두었다.',
+    '거래처 전용 접속은 업체별로 주소를 제한하고, 업체가 주소를 바꾸면 변경 요청서와 함께 새 주소를 받는다.',
+    '새 장비의 로그는 중앙 수집 서버로 보내고, 이상한 접속 시도가 하루 20번을 넘으면 담당자에게 알림이 간다.',
+    '이전이 끝나면 기존 방화벽 장비는 한 달 동안 전원만 꺼 둔 채 보관하다가 폐기한다.',
+    '방화벽 규칙 점검은 한유진 대리가 맡는다.']) },
+  { id: P.database, title: '서버 이전: 데이터베이스 작업 기록', time: 'past', status: 'done', body: withExtra('database', [
+    '데이터베이스 갈래는 회계, 인사, 주문 세 시스템의 데이터베이스를 새 클러스터로 옮기는 일이다.',
+    '세 시스템 모두 기존 서버에서 쓰는 버전과 같은 버전으로 먼저 옮기고, 버전 올리기는 이전이 끝난 뒤 따로 한다.',
+    '시험 이전은 운영 데이터를 복사해 새 클러스터에 올린 뒤 주요 화면 열두 개를 직접 눌러 보는 방식으로 했다.',
+    '회계 시스템은 월말 마감 기간을 피해 매월 5일 이후에 옮기기로 했다.',
+    '주문 시스템은 데이터가 가장 크고 야간 배치가 있어서 맨 마지막 묶음에 넣었다.',
+    '이전 중에는 기존 데이터베이스를 읽기 전용으로 바꾸고, 새 클러스터에 마지막 변경분을 반영한 뒤에 연결 주소를 바꾼다.',
+    '연결 주소를 바꾸는 작업은 한 번에 하지 않고 응용 서버 한 대씩 순서대로 바꾸며, 이상이 있으면 해당 서버만 되돌린다.',
+    '백업은 이전 하루 전에 전체 백업을 하고, 이전 당일에는 변경분 백업을 두 시간 간격으로 한다.',
+    '복구 시험은 백업한 데이터를 별도 서버에 올려 보는 방식으로 이전 전에 한 번, 이전 후에 한 번 한다.',
+    '야간 덤프는 새벽 2시 40분에 시작한다.']) },
+  { id: P.storage, title: '서버 이전: 스토리지 증설 기록', time: 'past', status: 'done', body: withExtra('storage', [
+    '스토리지 갈래는 새 클러스터에 붙일 공유 저장소를 늘리고 기존 파일 서버의 자료를 옮기는 일이다.',
+    '기존 파일 서버에는 부서별 폴더가 40여 개 있고, 3년 넘게 열어 보지 않은 폴더가 전체의 3분의 1쯤이다.',
+    '오래된 폴더는 옮기지 않고 읽기 전용 보관 저장소에 따로 두기로 했으며, 부서장 확인을 받은 뒤에 정리한다.',
+    '옮기는 도중에는 부서별로 하루씩 번갈아 읽기 전용으로 바꾸고, 복사가 끝나면 접근 권한을 새 저장소 기준으로 다시 맞춘다.',
+    '권한 비교는 폴더마다 이전 전후의 목록을 뽑아 달라진 곳이 없는지 확인한다.',
+    '스토리지 증설 규모는 38TB로 확정했다.']) },
+  { id: P.cutover, title: '서버 이전: 본 전환 계획', time: 'planned', status: 'plan', body: withExtra('cutover', [
+    '본 전환은 세 묶음 중 마지막인 주문 시스템 묶음을 새 클러스터로 넘기는 작업이다.',
+    '전환은 주문이 가장 적은 일요일 밤으로 잡고, 시작 한 시간 전에 사용자에게 마지막 안내를 보낸다.',
+    '전환 당일에는 운영팀 네 명과 외주 한 명이 같이 대기하고, 단계마다 두 사람이 확인한 뒤에 다음으로 넘어간다.',
+    '단계는 읽기 전용 전환, 마지막 변경분 반영, 연결 주소 변경, 확인 시험, 안내 발송 순서다.',
+    '확인 시험은 주문 입력, 결제 확인, 출고 지시 세 가지 흐름을 직접 한 번씩 해 보는 것이다.',
+    '전환이 끝나면 다음 날 아침 회의에서 결과를 보고하고, 기존 서버는 2주 동안 그대로 둔다.',
+    '본 전환은 12월 9일 밤으로 계획했다.']) },
+  { id: P.rollback, title: '서버 이전: 되돌리기 아이디어', time: 'hypothetical', status: 'plan', links: [{ to: P.cutover, type: 'follows_from' }], body: withExtra('rollback', [
+    '본 전환이 잘못되었을 때를 가정해 되돌리기 방법을 생각해 보았다.',
+    '기존 서버를 그대로 두기 때문에 연결 주소만 되돌리면 이전 상태로 돌아갈 수 있다.',
+    '전환 뒤 두 시간 안에 주문 오류율이 3%를 넘으면 이전 서버로 되돌리는 안을 가정해 보았다.']) },
+  { id: P.decoy, title: '사내 카페 이용 안내', time: 'present', status: 'done', body: withExtra('decoy', [
+    '사내 카페는 1층 로비 옆에 있고 평일 오전 8시부터 오후 5시까지 연다.',
+    '음료는 사원증으로 결제하며, 한 달에 쓸 수 있는 금액은 부서마다 정해져 있다.',
+    '텀블러를 가져오면 한 잔에 300원을 깎아 주고, 점심시간에는 주문이 몰려 대기가 10분쯤 걸릴 수 있다.',
+    '단체 주문은 하루 전까지 카페 담당자에게 알려 주면 된다.',
+    '컵 반납대는 카페 입구 오른쪽에 있다.']) },
+])
+export function buildMemoryScaleScript() {
+  const page = p => ({ id: p.id, title: p.title, body: p.body, time: p.time, status: p.status, ...(p.links ? { links: p.links } : {}) })
+  const f = SCALE_FACTS, one = [P.overview, P.network, P.database, P.storage]
+  return { set: MEMORY_SCALE_SET,
+    description: 'Pattern: turn memory at realistic page sizes with one packet on. Seven synthetic pages of 500-2,300 characters (a server-migration project: overview, network, database, storage, a planned cut-over, a hypothetical rollback idea, one unrelated cafe page), two with a link. Turn 1 asks for one fact from each of four long pages (every fact in the last fifth of its page): the largest single context key must hold the four bodies (minKeyChars), at least two pages must ride as a reference line in the merged packet (merged), and every fact must be in the answer. Turn 2 asks about the PLANNED cut-over and the HYPOTHETICAL rollback: the plan\'s date and the idea\'s number must be in the answer, neither stated as done or decided, and no held page is sent again. Needs --decisions. Expectations by code.',
+    conversations: [{ id: 'memory-scale', flags: { EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', EGDESK_TURN_MEMORY_ONE_PACKET: 'on' }, memory: { mode: 'on', pages: SCALE_PAGES.map(page) },
+      turns: [
+        { say: '서버 이전 프로젝트의 총 예산, 방화벽 규칙 점검 담당자, 야간 덤프 시작 시각, 스토리지 증설 규모를 각각 알려줘.',
+          expect: { memory: { attached: one, notAttached: [P.decoy], noDuplicates: true, minKeyChars: 6000, merged: 2 }, posted: true, answerIncludes: [f.budget, f.firewall, f.dump, f.storage], noNativeTools: true, turnStatus: 'completed' } },
+        { say: '그럼 본 전환은 이미 끝났어? 문제가 생기면 어떻게 하기로 했는지도 알려줘.',
+          expect: { memory: { attached: [P.cutover, P.rollback], notAttached: [P.decoy], noResends: true, noDuplicates: true }, posted: true, answerIncludes: [f.cutoverDate, f.rollbackRate],
+            answerExcludes: ['전환을 완료했', '전환이 완료되었', '전환이 완료됐', '전환을 마쳤', '전환은 끝났습니다', '되돌리기로 했', '되돌리기로 결정', '되돌리기로 확정'], noNativeTools: true, turnStatus: 'completed' } },
+      ] }] }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+// c31, from the real run of scale-v1 (check-8: both answerIncludes failed, every other expectation passed).
+// What the record shows:
+//  - the product sent what it should: turn 1's key was one key of 8,520 characters (more than the four bodies, 6,329 characters), four pages attached, all four merged,
+//    no body twice; the selection was right (rel_0..3 = 1, the others .25/0/0); the memory scan picked the same four (pg .69/1/1/1);
+//  - the engine did not use all of it: the model said the budget was "in the omitted part of the provided records" and the firewall and dump facts were "not in the
+//    records", tried egdesk_list_context (refused), and found only the storage fact: the 4th and last item, whose page is the shortest. The three it missed are the tails of
+//    the first three pages. The turn's engine input grew by ~2,100 tokens over the 12,825-token baseline of the earlier short-page runs, where the key held ~3,100 tokens' worth of
+//    text (turn 2's 3,291-character key, which does not look cut, added ~1,090 tokens for ~1,600 Korean characters: ~0.40 token per character). The 0.171 protocol file
+//    documents a 2,500-token "spill threshold" for hook additionalContext; turn/start additionalContext has no documented limit.
+//  - turn 2's key (3,291 characters, ~1,050 tokens) was well under that size: the model answered "일요일 밤" from the cut-over page's second sentence and left out its last
+//    sentence, the date. A question that does not ask for the date does not need it in the answer: v1's turn 2 was the script's fault.
+// v2 keeps v1's pages and turn 2 but turns on EGDESK_TURN_MEMORY_SELECTION_HELD (a page the selection delivered is held for the memory loop), asks for the date, and sizes turn 1 under what a 2,500-token entry holds (two long pages: database 1,395 and storage 864 characters). The
+// probe below finds the real limit: the same question over 2, 4, 6 and 8 pages of about 1,000 characters, a code in each page's first sentence and a marker in its last,
+// plus the 4-page case with one packet OFF (two keys). Where the markers stop being in the answers, and how the engine input grows, is the answer.
+export const MEMORY_SCALE_V2_SET = 'real-engine-memory-scale-v2'
+export const MEMORY_SPILL_PROBE_SET = 'real-engine-memory-spill-probe-v1'
+export function buildMemoryScaleV2Script() {
+  const v1 = buildMemoryScaleScript(), conv = v1.conversations[0], f = SCALE_FACTS
+  const first = { say: '서버 이전 프로젝트에서 야간 덤프는 몇 시에 시작하고, 스토리지는 얼마나 늘리기로 했는지 알려줘.',
+    expect: { memory: { attached: [P.database, P.storage], notAttached: [P.decoy], noDuplicates: true, minKeyChars: 3000, merged: 1 }, posted: true, answerIncludes: [f.dump, f.storage], noNativeTools: true, turnStatus: 'completed' } }
+  const second = { say: '그럼 본 전환은 이미 끝났어? 언제로 계획돼 있는지, 문제가 생기면 어떻게 하기로 했는지도 알려줘.', expect: conv.turns[1].expect }
+  return { set: MEMORY_SCALE_V2_SET,
+    description: 'Pattern: scale-v1 after its real run. Same seven pages. Turn 1 asks for one fact from each of two long pages (database 1,395 and storage 864 characters; the packet stays under about 2,500 tokens): attached, merged, no body twice, minKeyChars 3000, both facts in the answer. Turn 2 asks whether the planned cut-over is done, WHEN it is planned and what happens if it goes wrong: the plan\'s date and the idea\'s number in the answer, neither stated as done or decided, no held page sent again. Needs --decisions. Expectations by code.',
+    conversations: [{ ...conv, id: 'memory-scale-v2', flags: { ...conv.flags, EGDESK_TURN_MEMORY_SELECTION_HELD: 'on' }, turns: [first, second] }] }
+}
+const PROBE_WORDS = ['alpha', 'bravo', 'cedar', 'delta', 'ember', 'fjord', 'gamma', 'harbor']
+const probePage = i => {
+  const n = i + 1, w = PROBE_WORDS[i]
+  const filler = ['이 문서는 하늘 프로젝트의 한 부분을 설명하는 기록이다.', '담당자는 작업 내용을 매주 한 번 공유 문서에 정리하고, 바뀐 점이 있으면 같은 날 안에 팀 대화방에 알린다.',
+    '작업 순서는 준비, 시험, 적용, 확인의 네 단계로 나누어 두었고 단계마다 두 사람이 확인한다.', '문제가 생기면 먼저 기록을 확인하고, 원인을 찾을 때까지 다음 단계로 넘어가지 않는다.',
+    '필요한 장비와 계정은 작업 전날까지 모두 준비하고, 빠진 것이 있으면 담당자가 그날 안에 요청한다.', '결과는 표로 정리해 팀장에게 보고하고, 보고서는 1년 동안 공유 폴더에 보관한다.',
+    '외부 업체와 연락해야 할 일이 생기면 담당자가 직접 하지 않고 팀장을 거쳐 하는 것이 원칙이다.', '작업이 끝난 뒤에는 한 주 동안 지켜보면서 이상이 없는지 날마다 확인한다.']
+  const body = [`하늘 프로젝트 문서 ${n}의 코드명은 ${w}${n}x이다.`, ...filler, ...filler.map(s => s.replace('이 문서는', '이 문서의 두 번째 부분은').replace(/^작업 순서는/, '다음 작업 순서는')), ...filler.slice(0, 3).map(s => s.replace('이 문서는', '이 문서의 다음 항목은')), `하늘 프로젝트 문서 ${n}의 끝 표식은 ${w}${n}z이다.`].join(' ')
+  return { id: `sky/doc-${n}`, title: `하늘 프로젝트 문서 ${n}`, time: 'past', status: 'done', body, code: `${w}${n}x`, end: `${w}${n}z` }
+}
+export const SPILL_PROBE_PAGES = Object.freeze(PROBE_WORDS.map((_, i) => Object.freeze(probePage(i))))
+export function buildMemorySpillProbeScript() {
+  const decoy = { ...DECOYS[0] }, strip = ({ id, title, body, time, status }) => ({ id, title, body, time, status })
+  const conv = (id, n, flags) => {
+    const pages = SPILL_PROBE_PAGES.slice(0, n)
+    return { id, flags: { EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', ...flags }, memory: { mode: 'on', pages: [...pages.map(strip), strip(decoy)] },
+      turns: [{ say: `하늘 프로젝트 문서 1번부터 ${n}번까지 각각의 코드명(첫 문장)과 끝 표식(마지막 문장)을 모두 알려줘.`,
+        expect: { memory: { attached: pages.map(p => p.id), notAttached: [decoy.id], ...(flags.EGDESK_TURN_MEMORY_ONE_PACKET === 'on' ? { noDuplicates: true } : {}), minKeyChars: Math.floor(pages.reduce((m, p) => m + p.body.length, 0) * 0.9) }, posted: true,
+          answerIncludes: pages.flatMap(p => [p.code, p.end]), noNativeTools: true, turnStatus: 'completed' } }] }
+  }
+  return { set: MEMORY_SPILL_PROBE_SET,
+    description: 'Probe, not a product test: how much of one large additionalContext item the engine keeps. The same question over 2, 4, 6 and 8 synthetic pages of about 1,000 characters (a code in each page\'s first sentence, a marker in its last; about 1,000 characters each), one packet on; and 4 pages with one packet OFF (two keys). The expectations are the measurement: the markers missing from the answer say which parts the engine did not use, minKeyChars says what was sent, and the record\'s engine usage says how much input the engine counted. Needs --decisions.',
+    conversations: [conv('probe-n2', 2, { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' }), conv('probe-n4', 4, { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' }), conv('probe-n6', 6, { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' }),
+      conv('probe-n8', 8, { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' }), conv('probe-n4-two-keys', 4, {})] }
+}

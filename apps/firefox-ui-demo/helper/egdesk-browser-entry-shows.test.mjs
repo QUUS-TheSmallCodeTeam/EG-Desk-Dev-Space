@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
-import { createBrowserTaskStore, createDirectBrowserEntry, entryQuestions, entryWallEvidence, entryWallQuestions, readBrowserEntry, wallCandidates } from './egdesk-browser-task.mjs'
+import { createBrowserTaskStore, createDirectBrowserEntry, ENTRY_ANSWER_ASK, ENTRY_WEB_ASK, entryEvidence, entryQuestions, entryWallEvidence, entryWallQuestions, readBrowserEntry, wallCandidates } from './egdesk-browser-task.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 
 // L8 c21: the settings entry (real, browser-live-settings-v2, 2026-11-25): the request predicate 0.90, the card predicate 0.19, so the
@@ -27,7 +27,13 @@ const sha = text => createHash('sha256').update(text).digest('hex')
 test('off (the default, or the run may not receive page text): the entry body is the real one, byte for byte, and no card is observed', async () => {
   const w = world({ allow: false })
   await w.say(MSG)
-  assert.equal(sha(w.bodies[0]).slice(0, 12), '6b1eb94ef39b')
+  // c27/c29: the request predicate's evidence lists the open pages, its question says what counts, and a second single-condition predicate asks whether the request
+  // is answerable without any open page. The REAL c21 body is still reproduced byte for byte once exactly those changes are taken out: nothing else moved.
+  const body = JSON.parse(w.bodies[0])
+  assert.equal(body.input[1].content, 'User message: 마케팅 알림 꺼줘\nThe pages the user has open:\n- "알림 설정 | 계정" at "account.example.test"')
+  assert.deepEqual(body.questions.slice(0, 2).map(q => [q.name, q.instructions]), [['browser_entry', ENTRY_WEB_ASK], ['browser_entry_answer', ENTRY_ANSWER_ASK]])
+  const c21 = { ...body, input: [body.input[0], { ...body.input[1], content: 'User message: 마케팅 알림 꺼줘' }], questions: [{ ...body.questions[0], instructions: 'Is this request something to do in a web page rather than an answer?' }, body.questions[2]] }
+  assert.equal(sha(JSON.stringify(c21)).slice(0, 12), '6b1eb94ef39b', 'the real c21 body, byte for byte, without the two c27 changes')
   assert.deepEqual(w.observed, [])
 })
 
@@ -39,8 +45,10 @@ test('on: one observation per card (a read, no Decision request); the card predi
   const card = JSON.parse(w.bodies[0]).questions.find(q => q.name === 'browser_entry_card_0')
   assert.equal(card.instructions, 'Does this request need to be done on this open page: "알림 설정 | 계정" at "account.example.test", which now shows "알림 설정" / "마케팅 정보 알림: 켜짐" / "보안 알림: 켜짐"?')
   assert.doesNotMatch(card.instructions, /약관 안내/, 'at most three lines')
-  assert.ok(Buffer.byteLength(w.bodies[0]) - 631 < 200, 'a small addition to the 631-byte body')
-  assert.deepEqual(JSON.parse(w.bodies[0]).questions.map(q => q.name), ['browser_entry', 'browser_entry_card_0'], 'c23: the first entry request is unchanged; the interruption predicate is a follow-up only where it can matter')
+  const off = world({ allow: false }); await off.say(MSG)
+  assert.ok(Buffer.byteLength(w.bodies[0]) - Buffer.byteLength(off.bodies[0]) < 200, 'the card lines are a small addition (the c27 evidence adds the same lines once more)')
+  assert.match(JSON.parse(w.bodies[0]).input[1].content, /\n- "알림 설정 \| 계정" at "account.example.test" shows "알림 설정" \/ "마케팅 정보 알림: 켜짐" \/ "보안 알림: 켜짐"$/, 'c27: the open page and its first lines are evidence for the request predicate')
+  assert.deepEqual(JSON.parse(w.bodies[0]).questions.map(q => q.name), ['browser_entry', 'browser_entry_answer', 'browser_entry_card_0'], 'c23: the first entry request is unchanged; the interruption predicate is a follow-up only where it can matter')
 })
 
 test('the combination as designed: the real 0.90 / 0.19 is "the card is not the place" (not entered); a card decided yes on the page it shows enters', () => {
@@ -54,11 +62,11 @@ test('the combination as designed: the real 0.90 / 0.19 is "the card is not the 
 test('skipped when code named the card (no card question is asked); a card that cannot be observed is quoted by title and host alone; lines are bounded', async () => {
   const named = world({ titles: { card: '마케팅 알림 | 계정' } })
   await named.say('마케팅 알림 꺼줘')
-  assert.deepEqual([named.observed, JSON.parse(named.bodies[0]).questions.map(q => q.name)], [[], ['browser_entry']])
+  assert.deepEqual([named.observed, JSON.parse(named.bodies[0]).questions.map(q => q.name)], [[], ['browser_entry', 'browser_entry_answer']])
   const gone = world({ observe: 'throw' })
   await gone.say(MSG)
-  assert.equal(JSON.parse(gone.bodies[0]).questions[1].instructions, 'Does this request need to be done on this open page: "알림 설정 | 계정" at "account.example.test"?')
-  const long = entryQuestions([{ cardId: 'c', host: 'a.example.test', title: 'T', shows: ['가'.repeat(200), 'x"y'] }])[1].instructions
+  assert.equal(JSON.parse(gone.bodies[0]).questions[2].instructions, 'Does this request need to be done on this open page: "알림 설정 | 계정" at "account.example.test"?')
+  const long = entryQuestions([{ cardId: 'c', host: 'a.example.test', title: 'T', shows: ['가'.repeat(200), 'x"y'] }])[2].instructions
   assert.ok(long.includes(`"${'가'.repeat(59)}…"`) || long.length < 200)
   assert.match(long, /"x'y"/, 'a quote inside a line cannot close the quoted line')
 })
@@ -90,12 +98,12 @@ test('ride-along, on: one observation per card, the same quoting as the standalo
   const client = { decide: async request => { standalone = request.questions; return { answers: {} } } }
   await decideBrowserEntry({ message: MSG, cards: await observeCardLines({ provider: rideProvider(), run: {}, message: MSG, cards: RIDE_CARDS, enabled: true }), client })
   assert.equal(JSON.stringify(ride.questions), JSON.stringify(standalone))
-  assert.match(ride.questions[1].instructions, /which now shows "알림 설정" \/ "마케팅 정보 알림: 켜짐" \/ "보안 알림: 켜짐"\?$/)
+  assert.match(ride.questions[2].instructions, /which now shows "알림 설정" \/ "마케팅 정보 알림: 켜짐" \/ "보안 알림: 켜짐"\?$/)
   const failing = { reflexScope: () => ({ callTool: async () => { throw new Error('gone') } }) }
   assert.equal(JSON.stringify((await rideAlongEntry({ provider: failing, run: {}, message: MSG, cards: RIDE_CARDS, cardText: true })).questions), JSON.stringify(entryQuestions(RIDE_CARDS)), 'a card that cannot be observed: title and host')
   const named = []
   const byCode = await rideAlongEntry({ provider: rideProvider(named), run: {}, message: '알림 설정에서 마케팅 꺼줘', cards: RIDE_CARDS, cardText: true })
-  assert.deepEqual([byCode.codeCard, byCode.questions.map(q => q.name), named], ['card', ['browser_entry'], []])
+  assert.deepEqual([byCode.codeCard, byCode.questions.map(q => q.name), named], ['card', ['browser_entry', 'browser_entry_answer'], []])
 })
 
 // ---- c23: an interruption of the site never vetoes the card (real, browser-live-settings-v4: the error page's card predicate 0) ----
@@ -113,8 +121,8 @@ test('the interruption follow-up: only where it can matter (web task decided, no
   // c24 (real: the follow-up was REFUSED when the page was only inside the question): the question names the page; the lines are the evidence
   assert.equal(qs[0].instructions, 'Is this open page "오류 | 계정" at "account.example.test" an error page, a sign-in page or a check that stops it from showing its content?')
   assert.equal(entryWallEvidence('마케팅 알림 꺼줘', cards, [0]), 'User message: 마케팅 알림 꺼줘\n\nWhat the open page shows now (the first lines):\n- "오류 | 계정" at "account.example.test" shows "일시적인 오류가 발생했습니다." / "잠시 후 다시 시도해 주세요. (오류 500)"')
-  assert.deepEqual(entryQuestions(cards).map(q => q.name), ['browser_entry', 'browser_entry_card_0', 'browser_entry_card_1'], 'the first request has no wall question')
-  assert.deepEqual(entryQuestions(cards, { codeCard: 'a' }).map(q => q.name), ['browser_entry'], 'a card named by code asks nothing about the card, its lines never veto it')
+  assert.deepEqual(entryQuestions(cards).map(q => q.name), ['browser_entry', 'browser_entry_answer', 'browser_entry_card_0', 'browser_entry_card_1'], 'the first request has no wall question')
+  assert.deepEqual(entryQuestions(cards, { codeCard: 'a' }).map(q => q.name), ['browser_entry', 'browser_entry_answer'], 'a card named by code asks nothing about the card, its lines never veto it')
 })
 test('real replay: web task .90, card .00 on an error page; the interruption predicate decides the page is a wall: the card is still the place (one card, or the one wall among cards decided no)', () => {
   const one = [{ cardId: 'card', host: 'account.example.test', title: '오류 | 계정', shows: ERROR_SHOWS }]
@@ -143,7 +151,7 @@ test('through the entry: the follow-up enters an error page and the step hands i
   for (const rode of [false, true]) {
     const wall = await run({ shows: ERROR_SHOWS, card: 0.0, wall: 0.95, rode })
     assert.deepEqual([wall.out.handled, JSON.parse(wall.out.note).egdesk_browser_task.code], [true, 'error_page'], `rode=${rode}`)
-    assert.deepEqual(wall.sent, rode ? [['browser_entry_wall_0']] : [['browser_entry', 'browser_entry_card_0'], ['browser_entry_wall_0']], 'the first request unchanged; one follow-up')
+    assert.deepEqual(wall.sent, rode ? [['browser_entry_wall_0']] : [['browser_entry', 'browser_entry_answer', 'browser_entry_card_0'], ['browser_entry_wall_0']], 'the first request unchanged; one follow-up')
     const other = await run({ shows: ['환율 계산기'], card: 0.0, wall: 0.02, rode })
     assert.deepEqual([other.out.handled, other.out.reason], [false, 'not_browser'], `rode=${rode}`)
   }
@@ -160,4 +168,41 @@ test('through the entry: the follow-up enters an error page and the step hands i
   assert.equal(lintGroupedRequest({ input: followUp.input, questions: followUp.questions }).ok, true)
   const failing = await run({ shows: ERROR_SHOWS, card: 0.0, wall: 0.95 }) // control: the same answers, follow-up working
   assert.equal(failing.out.handled, true)
+})
+
+test('c27: the request predicate sees the open pages (title, site, first lines; a card named by code too); no card, no lines; the question says what counts', async () => {
+  assert.deepEqual(entryEvidence([]), [])
+  assert.deepEqual(entryEvidence([{ cardId: 'a', host: '', title: '' }]), [], 'a card with no identity adds nothing')
+  assert.deepEqual(entryEvidence([{ cardId: 'a', host: 'streamly.example.test', title: '멤버십 관리 | 스트리밍플러스', shows: ['멤버십 관리', '다음 결제일: 2026-12-14'] }, { cardId: 'b', host: 'news.example.test', title: '오늘의 뉴스 | 경제일보' }]),
+    ['The pages the user has open:', '- "멤버십 관리 | 스트리밍플러스" at "streamly.example.test" shows "멤버십 관리" / "다음 결제일: 2026-12-14"', '- "오늘의 뉴스 | 경제일보" at "news.example.test"'])
+  // through the standalone entry: a card named by code (one question) still has its page in the evidence
+  const w = world({ titles: { card: '마이페이지 | 한결병원' }, hosts: { card: 'carehosp.example.test' } })
+  await w.say('한결병원 다음 진료 예약 날짜 알려줘')
+  const body = JSON.parse(w.bodies[0])
+  assert.deepEqual(body.questions.map(q => q.name), ['browser_entry', 'browser_entry_answer'])
+  assert.equal(body.input[1].content, 'User message: 한결병원 다음 진료 예약 날짜 알려줘\nThe pages the user has open:\n- "마이페이지 | 한결병원" at "carehosp.example.test" shows "알림 설정" / "마케팅 정보 알림: 켜짐" / "보안 알림: 켜짐"'.replace(/ shows .*$/, ''), 'named by code: the lines are not read (nothing is observed for it)')
+  assert.deepEqual(w.observed, [])
+  assert.equal(lintGroupedRequest({ input: body.input, questions: body.questions }).ok, true)
+  assert.ok(ENTRY_WEB_ASK.startsWith('Is this request about something that one of the open pages holds or shows, so that doing it means reading from or working in that page?') && ENTRY_WEB_ASK.includes("An account's own data, such as a date, an amount or a status, is held by its page."))
+  assert.ok(ENTRY_ANSWER_ASK.startsWith('Can this be answered from general knowledge or the conversation alone, with no open page?') && ENTRY_ANSWER_ASK.includes('the answering model does not see them'))
+  // the ride-along host receives the same evidence
+  const { rideAlongEntry } = await import('./egdesk-browser-task.mjs')
+  const ride = await rideAlongEntry({ provider: { reflexScope: () => ({ callTool: async () => ({ snapshot: { text: ['멤버십 관리', '다음 결제일: 2026-12-14'] } }) }) }, run: {}, message: '다음 결제일이 언제야?', cards: [{ cardId: 'card', host: 'streamly.example.test', title: '멤버십 관리 | 스트리밍플러스' }], cardText: true })
+  assert.equal(ride.evidence, 'The pages the user has open:\n- "멤버십 관리 | 스트리밍플러스" at "streamly.example.test" shows "멤버십 관리" / "다음 결제일: 2026-12-14"')
+  assert.equal(ride.questions[0].instructions, ENTRY_WEB_ASK)
+})
+
+test('c28: the ride-along host appends the entry evidence after the message (triage request); without it the triage request is byte for byte what it was', async () => {
+  const { triageTurn } = await import('./egdesk-turn-memory.mjs')
+  const bodies = []
+  const client = { decide: async request => { bodies.push(JSON.stringify(request.input)); return { answers: {} } } }
+  await triageTurn({ message: '다음 결제일이 언제야?', client, askedAt: 1 })
+  await triageTurn({ message: '다음 결제일이 언제야?', client, askedAt: 1, extraEvidence: '' })
+  await triageTurn({ message: '다음 결제일이 언제야?', client, askedAt: 1, extraEvidence: '   ' })
+  assert.equal(new Set(bodies.slice(0, 3)).size, 1, 'no evidence: identical requests')
+  const evidence = entryEvidence([{ cardId: 'a', host: 'streamly.example.test', title: '멤버십 관리 | 스트리밍플러스', shows: ['다음 결제일: 2026-12-14'] }]).join('\n')
+  await triageTurn({ message: '다음 결제일이 언제야?', client, askedAt: 1, extraEvidence: evidence })
+  const base = JSON.parse(bodies[0]), withEvidence = JSON.parse(bodies[3])
+  assert.deepEqual(withEvidence.slice(0, base.length), base, 'everything before is unchanged')
+  assert.deepEqual(withEvidence.slice(base.length), [{ role: 'user', content: evidence }], 'one extra user item, after the message')
 })

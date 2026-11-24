@@ -27,10 +27,11 @@ const block = (text, label, next) => JSON.parse(new RegExp(`${label}:\\n(.*)\\n\
 function fillFrom(prompt) {
   const guide = block(prompt, 'Design guide \\(decided; do not change it\\)', 'Materials'), materials = block(prompt, 'Materials', 'Rules')
   const line = (alias, max = 90) => String(materials.find(m => m.alias === alias)?.text ?? '').slice(0, max)
-  const rowFor = (fields, alias) => Object.fromEntries(fields.map(f => [f.name, f.type === 'material' ? alias : line(alias, f.max ?? 40) || f.name]))
+  // c35: a model that follows the compact request writes null for a field marked "copy" (the code copies the material's own words) and no fallback sentence
+  const rowFor = (fields, alias) => Object.fromEntries(fields.map(f => [f.name, f.type === 'material' ? alias : f.copy === true ? null : line(alias, f.max ?? 40) || f.name]))
   const slot = (s, item) => (s.type === 'text' ? line(item.materials[0], s.max ?? 60) || s.name : s.type === 'material' ? item.materials[s.name === 'right' ? 1 : 0] ?? item.materials[0]
     : item.materials.slice(0, s.max ?? 6).map(alias => rowFor(s.of, alias)))
-  return { title: '진행 정리', unfillable: [], items: Object.fromEntries(guide.items.map(i => [i.id, { text: line(i.materials[0], 200) || i.id, fallback: '카드를 열어 보세요.', slots: Object.fromEntries(i.slots.map(s => [s.name, slot(s, i)])) }])) }
+  return { title: '진행 정리', unfillable: [], items: Object.fromEntries(guide.items.map(i => [i.id, { text: line(i.materials[0], 80) || i.id, ...(i.step?.some(st => st.name === 'fallback') ? { fallback: '카드를 열어 보세요.' } : {}), slots: Object.fromEntries(i.slots.map(s => [s.name, slot(s, i)])) }])) }
 }
 const FILL_PLAN = (mode = 'json') => ({ steps: [], finalFor: text => { const fill = JSON.stringify(fillFrom(text)); return mode === 'fenced' ? `Here you go:\n\`\`\`json\n${fill}\n\`\`\`` : mode === 'prose' ? 'I could not make a board of this.' : fill } })
 const fakeFor = mode => ({ turns: [
@@ -62,8 +63,7 @@ const asScripts = (...scripts) => scripts.map(script => ({ file: `${script.set}.
 const turnStarts = w => w.wire().filter(m => m.dir === 'in' && m.method === 'turn/start')
 
 test('the registration point: the check lists the briefing flags and the decision-dependent one from the hook; the committed v2 script validates and is the builder\'s', () => {
-  // the briefing hook, then lane L1's collaboration hook (its flags and its decision-dependent flag are listed beside the briefing's)
-  assert.deepEqual(CHECK_HOOKS.map(h => h.name), ['briefing', 'collab']); assert.deepEqual(hookFlags(), [...BRIEFING_FLAGS, 'EGDESK_PRESENCE', 'EGDESK_WORK_PLACEMENT']); assert.deepEqual(hookDecisionFlags(), ['EGDESK_BRIEFING_FLOW', 'EGDESK_WORK_PLACEMENT'])
+  assert.deepEqual(CHECK_HOOKS.map(h => h.name), ['briefing']); assert.deepEqual(hookFlags(), [...BRIEFING_FLAGS]); assert.deepEqual(hookDecisionFlags(), ['EGDESK_BRIEFING_FLOW'])
   for (const flag of BRIEFING_FLAGS) assert.ok(BRIDGE_COMPOSITION.flags.includes(flag) && !BRIDGE_COMPOSITION.notReproduced.flags.includes(flag), `${flag} is reproduced now, not listed as missing`)
   assert.ok(DECISION_DEPENDENT_FLAGS.includes('EGDESK_BRIEFING_FLOW'))
   const v2 = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'real-engine', 'scripts', 'real-engine-briefing-progress-v2.json'), 'utf8'))
@@ -125,13 +125,13 @@ test('the same fenced reply: schema ON refuses it and counts it (fill-invalid, c
   const w = world(t, fakeFor('fenced'))
   const script = buildBoardScript()
   const [onTurn, offTurn] = script.conversations.map(c => c.turns[0])
-  onTurn.expect.briefing = { outcome: 'fallback-chat', reason: 'fill-invalid', schemaSent: true, schemaInvalid: 2 }
+  onTurn.expect.briefing = { outcome: 'fallback-chat', reason: 'fill-invalid', schemaSent: true, schemaInvalid: 3 } // c34 (U5): the whole fill, its retry, and the first item of the one-by-one round: three replies, three counted
   offTurn.expect.briefing = { outcome: 'presented', schemaSent: false, schemaInvalid: null, factsOnBoard: offTurn.expect.briefing.factsOnBoard }
   assert.deepEqual(validateEngineScript(script), { ok: true, errors: [] })
   const { records } = await runCheck(w.options, asScripts(script), w.deps)
   for (const rec of records) assert.equal(rec.turns[0].ok, true, `${rec.id}: ${JSON.stringify(rec.turns[0].expectations.filter(e => !e.ok))}`)
   const [on, off] = records.map(r => r.turns[0].hooks.briefing)
-  assert.deepEqual([on.forkTurns, on.published.length, on.steps.length], [2, 0, 0]); assert.deepEqual([off.outcome, off.schemaInvalid], ['presented', null])
+  assert.deepEqual([on.forkTurns, on.published.length, on.steps.length], [3, 0, 0]); assert.deepEqual([off.outcome, off.schemaInvalid], ['presented', null])
   assert.deepEqual(w.stderrLines, [])
 })
 
@@ -143,7 +143,7 @@ test('a failing expectation is reported by code (the board was proposed but the 
   const p = world(t, fakeFor('prose')), both = buildBoardScript(); for (const c of both.conversations) c.turns[0].expect.briefing = { outcome: 'fallback-chat', reason: 'fill-invalid' }
   const prose = (await runCheck(p.options, asScripts(both), p.deps)).records
   for (const rec of prose) assert.equal(rec.turns[0].ok, true, `${rec.id}: ${JSON.stringify(rec.turns[0].expectations.filter(e => !e.ok))}`)
-  assert.deepEqual(prose.map(r => r.turns[0].hooks.briefing.schemaInvalid), [2, null])
+  assert.deepEqual(prose.map(r => r.turns[0].hooks.briefing.schemaInvalid), [3, null])
 })
 
 test('a conversation without expect.briefing never runs the hook: no fork turn, no record, and chat.send carries the capabilities only when the flow is on', async t => {
@@ -173,6 +173,9 @@ test('check-3 on the fake that refuses ephemeral forks like 0.171: the fill runs
   assert.equal(fills.length, on.forkTurns + off.forkTurns)
   for (const m of fills) { const text = textOf(m); assert.ok(text.includes('Design guide (decided; do not change it)') && text.includes('Materials:'), 'guide and materials'); for (const absent of ['Context:', BOARD_SAY.slice(0, 12), '<answer>', '커밋 a1b2c3d, 테스트 120건 통과)로']) assert.ok(!text.includes(absent), `no ${absent}`) }
   assert.equal(fills.filter(m => m.params.outputSchema !== undefined).length, on.forkTurns, 'outputSchema goes to the fresh thread\'s turn exactly when the flag is on')
+  // c35: the briefing's private fill turns run at the briefing's own effort (not the person's default), and the trace says so
+  assert.ok(fills.every(m => m.params.effort === 'low'), 'every fill turn/start carries effort low')
+  for (const b of [on, off]) assert.ok(b.forkTrace.every(t => t.effort === 'low' && t.source === 'explicit' && t.via === 'fresh' && t.promptChars > 1000), JSON.stringify(b.forkTrace))
   assert.equal(w.wire().filter(m => m.dir === 'in' && m.method === 'thread/fork').length, 0); assert.deepEqual(w.stderrLines, [])
 })
 
@@ -180,6 +183,7 @@ test('a persisted answer thread still forks (the fallback is only for what canno
   const w = world(t, fakeFor('json'))
   const script = buildBoardScript(); script.conversations.length = 1
   const rec = (await runCheck(w.options, asScripts(script), w.deps)).records[0], b = rec.turns[0].hooks.briefing
+  assert.deepEqual([...new Set(b.forkTrace.map(t => `${t.via}/${t.effort}/${t.source}`))], [`${b.forkTrace[0].via}/low/explicit`], 'the fork path carries the same effort')
   assert.equal(rec.turns[0].ok, true); assert.ok(b.forkRequests.some(r => r.method === 'thread/fork') || startsOf(w).some(m => /private one-off task/.test(m.params?.developerInstructions ?? '')), JSON.stringify(b.forkRequests))
 })
 
@@ -187,9 +191,9 @@ test('a chat-only outcome keeps its cause: an unusable fill on the fresh thread 
   const w = world(t, { ...fakeFor('prose'), refuseEphemeralFork: true })
   const script = buildBoardScript(); script.conversations.length = 1
   const rec = (await runCheck(w.options, asScripts(script), w.deps)).records[0], b = rec.turns[0].hooks.briefing
-  assert.deepEqual([b.outcome, b.reason, b.flow.stages, b.flow.fillTurns], ['fallback-chat', 'fill-invalid', ['place', 'fit', 'order'], 2])
+  assert.deepEqual([b.outcome, b.reason, b.flow.stages, b.flow.fillTurns], ['fallback-chat', 'fill-invalid', ['place', 'fit', 'order'], 3])
   assert.ok(b.decisions[0].p.combines >= 0.9 && Object.values(b.decisions[0].p).every(v => typeof v === 'number'), 'the place judgment: board')
-  assert.equal(b.forkRequests.filter(r => r.method === 'turn/start').length, 2)
+  assert.equal(b.forkRequests.filter(r => r.method === 'turn/start').length, 3, 'whole fill, retry, first piece')
   const failed = rec.turns[0].expectations.find(e => e.check === 'briefing.outcome')
   assert.equal(failed.ok, false); assert.deepEqual([failed.detail.reason, failed.detail.stages], ['fill-invalid', ['place', 'fit', 'order']])
 })
@@ -205,9 +209,11 @@ test('refused forks are recorded by code even when no fallback exists: a thread/
 const CHECK5_ANSWER = '| 날짜 | 진행 상황 | 커밋 ID | 테스트 |\n|---|---|---|---|\n| [11-20](/x/devlog/11-20.md) | 로그인 화면 병합 완료 | `a1b2c3d` | 120건 통과 |\n| [11-22](/x/devlog/11-22.md) | 결제 모듈 병합 완료. 알림 설정 화면은 시안만 확정 | `e4f5a6b` | 98건 통과 |\n| [11-24](/x/devlog/11-24.md) | 검색 화면 착수 | 기록 없음 | 기록 없음 |\n\n기록된 테스트 통과 건수는 합계 **218건**입니다. 11-24 기준 남은 일은 **알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성**입니다.\n\n파일은 변경하지 않았습니다.\n'
 test('c33 cause 1: a table row is ONE fact, even when a cell holds a sentence (check-5 split the 11-22 row at its period into a half with the date and a half with the commit)', () => {
   const { facts, cut } = answerFacts(CHECK5_ANSWER)
-  assert.deepEqual(facts, ['11-20 · 로그인 화면 병합 완료 · a1b2c3d · 120건 통과', '11-22 · 결제 모듈 병합 완료. 알림 설정 화면은 시안만 확정 · e4f5a6b · 98건 통과', '11-24 · 검색 화면 착수 · 기록 없음 · 기록 없음',
+  assert.deepEqual(facts, ['11-20 · 로그인 화면 병합 완료 · a1b2c3d · 120건 통과', '11-22 · 결제 모듈 병합 완료. 알림 설정 화면은 시안만 확정 · e4f5a6b · 98건 통과', '11-24 · 검색 화면 착수',
     '기록된 테스트 통과 건수는 합계 218건입니다.', '11-24 기준 남은 일은 알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성입니다.', '파일은 변경하지 않았습니다.'])
   assert.equal(cut, 0)
+  // c35: a cell that only says "no value" (check-9's "기록 없음") states nothing: the row is the other cells; a cell that says something stays
+  assert.deepEqual(answerFacts('| 날짜 | 상태 | 비고 |\n|---|---|---|\n| 11-24 | 착수 | - |\n| 11-25 | 중단 | 기록 없음 |\n| 11-26 | 완료 | 미정 |\n').facts, ['11-24 · 착수', '11-25 · 중단', '11-26 · 완료 · 미정'])
   // prose is split into sentences as before
   assert.deepEqual(answerFacts('11-20 로그인 화면 병합. 11-22 결제 모듈 병합.\n').facts, ['11-20 로그인 화면 병합.', '11-22 결제 모듈 병합.'])
 })
@@ -230,9 +236,32 @@ test('the record keeps what the private turn wrote and the coverage packet, so a
   const bs = buildBoardScript(); bs.conversations.length = 1
   const rec = (await runCheck(w2.options, asScripts(bs), w2.deps)).records[0], b = rec.turns[0].hooks.briefing
   assert.deepEqual([b.outcome, b.reason], ['fallback-chat', 'not-covered'])
-  assert.deepEqual(b.flow.stages.slice(-2), ['fill_check', 'coverage']); assert.equal(b.forkReplies.length, 1); assert.match(b.forkReplies[0], /진행 중/)
+  assert.deepEqual(b.flow.stages.slice(-2), ['fill_check', 'coverage']); assert.equal(b.forkReplies.length, 2, 'the fill and the one rewrite'); assert.match(b.forkReplies[0], /진행 중/)
+  assert.deepEqual(b.engineCalls.map(c => [c.kind, c.only, c.cover, c.ok, c.failure]), [['briefing_fill', null, null, true, null], ['briefing_fill', ['P1', 'P2'], ['M1', 'M2', 'M3'], true, null]], JSON.stringify(b.engineCalls))
+  assert.ok(b.forkTrace.length === 2 && b.forkTrace.every(t => t.via === 'fresh' && t.status === 'completed' && Number.isFinite(t.ms) && t.items.agentMessage >= 1), JSON.stringify(b.forkTrace))
   const coverage = b.decisions.find(d => d.names.some(n => n.startsWith('onboard_')))
   assert.ok(coverage.input.includes('진행 중'), 'the board as the Decision model saw it'); assert.ok(coverage.input.length <= 3000)
   assert.ok(Object.entries(coverage.p).filter(([n]) => n.startsWith('onboard_')).every(([, v]) => v < .1))
   assert.deepEqual(rec.turns[0].expectations.find(e => e.check === 'briefing.outcome').detail.reason, 'not-covered')
+})
+
+// ---- c34: what Main's check-7 showed (both fill turns of the fresh thread: no reply, 30.4 s each, forkReplies null) ----
+const slowWhole = () => ({ ...fakeFor('json'), refuseEphemeralFork: true, forkTurns: [
+  // a request for the whole guide never answers in time; a request for ONE item ("Fill only these items again: P#.") does
+  ...Array.from({ length: 6 }, () => ({ match: 'Fill only these items again', steps: [], finalFor: FILL_PLAN('json').finalFor })),
+  { steps: [{ delayMs: 900 }], final: 'too late' }, { steps: [{ delayMs: 900 }], final: 'too late' }] })
+test('c34 check-7 reproduced: the whole fill does not come back inside its time (null, a timeout); it is not asked again as it was, ONE round asks the items one by one, both conversations present the board with every fact; the record says it was a timeout', async t => {
+  const w = world(t, slowWhole()); w.deps.hookLimits = { briefing: { engine: { turnMs: 400, totalMs: 60_000 } } }
+  const { records } = await runCheck(w.options, asScripts(buildBoardScript()), w.deps)
+  for (const rec of records) { assert.equal(rec.aborted, null, rec.id); assert.equal(rec.turns[0].ok, true, `${rec.id}: ${JSON.stringify(rec.turns[0].expectations.filter(e => !e.ok))}`) }
+  const [on, off] = records.map(r => r.turns[0].hooks.briefing)
+  for (const b of [on, off]) {
+    assert.deepEqual([b.outcome, b.reason], ['presented', null])
+    assert.deepEqual(b.engineCalls.map(c => [c.only, c.ok, c.failure]), [[null, false, 'timeout'], [['P1'], true, null], [['P2'], true, null]], JSON.stringify(b.engineCalls))
+    assert.equal(b.forkReplies[0], null, 'the whole fill: no reply'); assert.ok(b.forkReplies.slice(1).every(r => typeof r === 'string'))
+    assert.equal(b.forkTrace[0].code, 'INTERNAL_TURN_TIMEOUT'); assert.ok(b.forkTrace[0].ms >= 350 && b.forkTrace[0].ms < 900, String(b.forkTrace[0].ms)); assert.ok(b.forkTrace.slice(1).every(t => t.via === 'fresh' && t.status === 'completed'))
+  }
+  assert.deepEqual([on.schemaInvalid, off.schemaInvalid], [0, null], 'a timeout is not a schema violation')
+  assert.deepEqual(w.stderrLines, [])
+  await new Promise(resolve => setTimeout(resolve, 1000)) // the two late turns of the fake finish before the test ends
 })

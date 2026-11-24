@@ -2,7 +2,9 @@ import { suffixBytes, prefixBytes } from './codex-run-outputs.mjs'
 
 // The runner of EG-Desk's own command tool (c18; used by egdesk-command-executor.mjs). Implemented against a process-spawn interface
 // spawn(file, args, { cwd, env, stdio, detached }) → child { pid, stdout, stderr, on('close'|'error'), kill(signal) } (node:child_process
-// shape); tests use a fake spawn only. It runs only what the executor's approval ledger already let through.
+// shape); tests use a fake spawn only.
+// c25: an abort (the person stopped the run: signal from the executor's cancelRun) ends the command like the timeout does, SIGTERM to the process group, then SIGKILL after the
+// grace period, and the result says aborted:true (not timedOut): a stopped command is never reported as finished. An already-aborted signal spawns nothing. It runs only what the executor's approval ledger already let through.
 //
 //   cwd       the run folder the executor resolved (never the engine's thread folder)
 //   shell     /bin/sh -c <command>: not a login shell, so no profile/rc file adds variables
@@ -69,18 +71,19 @@ export function createCommandRunner({ spawn, env = process.env, killGroup = null
     return new Promise((resolve, reject) => {
       const began = now()
       const facts = row => { try { onFacts(row) } catch { /* advisory */ } }
+      if (signal?.aborted) { resolve({ exitCode: null, signal: null, timedOut: false, aborted: true, softNotice: false, durationMs: 0, stdout: '', stderr: '', truncated: false }); return }
       let child
       try { child = spawn('/bin/sh', ['-c', command], { cwd, env: { ...childEnv }, stdio: ['ignore', 'pipe', 'pipe'], detached: true }) }
       catch (error) { reject(error); return }
       const out = { head: '', tail: '', total: 0, headClosed: false }, err = { head: '', tail: '', total: 0, headClosed: false }
-      let timedOut = false, softNotice = false, done = false, hardTimer = null, graceTimer = null
+      let timedOut = false, aborted = false, softNotice = false, done = false, hardTimer = null, graceTimer = null
       const softTimer = setTimer(() => { softNotice = true; facts({ running: true, runningMs: Math.round(now() - began), softNotice: true }) }, Math.min(L.softNoticeMs, timeoutMs))
       hardTimer = setTimer(() => {
         timedOut = true
         kill(child, 'SIGTERM')
         graceTimer = setTimer(() => kill(child, 'SIGKILL'), L.killGraceMs)
       }, timeoutMs)
-      const onAbort = () => { timedOut = true; kill(child, 'SIGTERM'); graceTimer = graceTimer ?? setTimer(() => kill(child, 'SIGKILL'), L.killGraceMs) }
+      const onAbort = () => { aborted = true; kill(child, 'SIGTERM'); graceTimer = graceTimer ?? setTimer(() => kill(child, 'SIGKILL'), L.killGraceMs) }
       signal?.addEventListener?.('abort', onAbort, { once: true })
       const sink = (state, chunk) => {
         const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')
@@ -99,7 +102,7 @@ export function createCommandRunner({ spawn, env = process.env, killGroup = null
         const durationMs = Math.round(now() - began)
         facts({ running: false, runningMs: durationMs, exitCode: Number.isSafeInteger(exitCode) ? exitCode : null })
         const o = shown(out), e = shown(err)
-        resolve({ exitCode: Number.isSafeInteger(exitCode) ? exitCode : null, signal: typeof sig === 'string' ? sig : null, timedOut, softNotice, durationMs,
+        resolve({ exitCode: Number.isSafeInteger(exitCode) ? exitCode : null, signal: typeof sig === 'string' ? sig : null, timedOut, aborted, softNotice, durationMs,
           stdout: o.text, stderr: e.text, truncated: o.truncated || e.truncated })
       }
       child.on('close', (code, sig) => finish(code, sig))
