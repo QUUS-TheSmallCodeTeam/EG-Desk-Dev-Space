@@ -33,7 +33,7 @@ node helper/egdesk-joint-board-server.mjs serve-tls "$DATA" \
   'https://board.example.org:8443' '0.0.0.0' '/absolute/fullchain.pem' '/absolute/key.pem'
 ```
 
-발급/회전은 로컬 CLI만 가능하다. HTTP에는 `GET /v1/joint/view`, `POST /v1/joint/action` 두 경로만 있다. 쓰기는 계정별 요청 ID, 유효 참여·수신권·내용 버전을 검사하고 트랜잭션으로 처리한다. 키 자동 동기화·자동 등록은 없다. 기본 릴리스 설치기에 이 서비스를 끼워 넣거나 상시 실행시키지 않는다.
+발급/회전은 로컬 CLI만 가능하다. HTTP에는 `GET /v1/joint/view`, `POST /v1/joint/action`이 있고, 로컬(127.0.0.1) 서비스에는 일시 접속 신호용 `POST /v1/joint/presence`가 하나 더 있다. 이 경로는 원장을 쓰지 않고 DB에 아무것도 남기지 않는다(프로세스 메모리, 10초 뒤 비활성·30초 뒤 삭제). 각 참가자가 Board별로 켠 경우에만 내용 없는 값(활성 여부, 입력 후 경과 시간 5초 단위, 보는 영역 사각형, 포커스 카드 ID)을 같은 Board의 현재 참가자에게만 보낸다. 기본값은 꺼짐이다. TLS 서비스에는 운영자가 따로 켜지 않는 한 이 경로가 없다. 쓰기는 계정별 요청 ID, 유효 참여·수신권·내용 버전을 검사하고 트랜잭션으로 처리한다. 키 자동 동기화·자동 등록은 없다. 기본 릴리스 설치기에 이 서비스를 끼워 넣거나 상시 실행시키지 않는다.
 
 ## 구현 결정과 한계
 

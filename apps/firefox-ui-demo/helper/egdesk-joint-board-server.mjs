@@ -6,8 +6,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createJointStore, JointError } from './egdesk-joint-board-store.mjs';
+import { createJointPresence, PRESENCE_LIMITS } from './egdesk-joint-presence.mjs';
 const routeBase = '/v1/joint';
-export function jointHttp(store, { tlsAuthority = null } = {}) {
+// presence: an optional in-memory hub (egdesk-joint-presence.mjs). Without one the route does not exist.
+export function jointHttp(store, { tlsAuthority = null, presence = null } = {}) {
   return async (req, res) => {
     const send = (status, value) => {
       if (!res.writableEnded) {
@@ -34,14 +36,16 @@ export function jointHttp(store, { tlsAuthority = null } = {}) {
       const actor = store.authentic(auth);
       if (!actor) throw new JointError(401, 'authentication');
       if (req.url === routeBase + '/view' && req.method === 'GET') return send(200, store.view(actor));
-      if (req.url !== routeBase + '/action' || req.method !== 'POST') throw new JointError(404, 'unavailable');
+      // Ephemeral presence is its own route: it can never be mistaken for, or replayed as, a ledger action.
+      const signal = !!presence && req.url === routeBase + '/presence';
+      if ((req.url !== routeBase + '/action' && !signal) || req.method !== 'POST') throw new JointError(404, 'unavailable');
       if (!/^application\/json(?:;|$)/i.test(req.headers['content-type'] || ''))
         throw new JointError(415, 'json-required');
       const chunks = [];
       let n = 0;
       for await (const b of req) {
         n += b.length;
-        if (n > 30000) throw new JointError(413, 'too-large');
+        if (n > (signal ? PRESENCE_LIMITS.bodyBytes : 30000)) throw new JointError(413, 'too-large');
         chunks.push(b);
       }
       let data;
@@ -51,6 +55,7 @@ export function jointHttp(store, { tlsAuthority = null } = {}) {
         throw new JointError(400, 'invalid-json');
       }
       if (store.authentic(auth) !== actor) throw new JointError(401, 'authentication');
+      if (signal) return send(200, presence.exchange(actor, data));
       if(data?.action==='appStep'){const controller=new AbortController();const lost=()=>{if(!res.writableEnded)controller.abort();};res.once('close',lost);try{return send(200,await store.stepApp(actor,data,{current:()=>!res.destroyed&&store.authentic(auth)===actor,signal:controller.signal}));}finally{res.off('close',lost);}}
       return send(200, store.mutate(actor, data));
     } catch (e) {
@@ -60,8 +65,10 @@ export function jointHttp(store, { tlsAuthority = null } = {}) {
     }
   };
 }
-export function startJointServer(store, port = 47631) {
-  const h = http.createServer({ requestTimeout: 10000, headersTimeout: 8000 }, jointHttp(store));
+const presenceFor = (store) => (typeof store.presenceAccess === 'function' ? createJointPresence({ access: store.presenceAccess }) : null);
+// The loopback service carries the presence route (members still publish nothing until they opt in).
+export function startJointServer(store, port = 47631, { presence = true } = {}) {
+  const h = http.createServer({ requestTimeout: 10000, headersTimeout: 8000 }, jointHttp(store, { presence: presence ? presenceFor(store) : null }));
   h.maxHeadersCount = 32;
   h.keepAliveTimeout = 1800;
   return new Promise((resolve, reject) => {
@@ -70,7 +77,8 @@ export function startJointServer(store, port = 47631) {
   });
 }
 // Opt-in self-hosting: a public origin never serves plain HTTP. No HTTP service account issuance.
-export function startJointTlsServer(store, { origin, bind, cert, key }) {
+// presence stays off on a network-reachable origin unless the operator passes presence: true (not offered by the CLI).
+export function startJointTlsServer(store, { origin, bind, cert, key, presence = false }) {
   const u = new URL(origin);
   if (
     u.protocol !== 'https:' ||
@@ -84,7 +92,7 @@ export function startJointTlsServer(store, { origin, bind, cert, key }) {
     throw Error('expected a bare HTTPS origin and an explicit bind IP');
   const h = https.createServer(
     { cert, key, minVersion: 'TLSv1.2', requestTimeout: 10000, headersTimeout: 8000 },
-    jointHttp(store, { tlsAuthority: u.host.toLowerCase() }),
+    jointHttp(store, { tlsAuthority: u.host.toLowerCase(), presence: presence === true ? presenceFor(store) : null }),
   );
   h.maxHeadersCount = 32;
   h.keepAliveTimeout = 1800;
