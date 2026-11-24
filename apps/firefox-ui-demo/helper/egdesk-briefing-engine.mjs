@@ -66,13 +66,14 @@ const FILL_RULES = [
   'Each item has "text" (the step explanation, saying only what the item shows) and "fallback" (one sentence for when it cannot be shown), plus the slots its component lists.',
   'A text slot is a string no longer than its "max". A material slot is one of the item\'s material aliases. A list slot is an array of rows with exactly the listed fields, between "min" and "max" rows.',
   'Use ONLY what the materials say. If the materials do not contain the data for a slot, do not invent it: leave that slot out and report it in "unfillable".',
+  'Where a line or value restates something a material says, keep its actors, qualifiers, amounts and dates exactly as the material has them: who does it, under what condition, how much, by when (for example write "팀장 승인 후 견적서 v2 발송", not "승인 후 견적서 v2 발송").',
   'Write every text in the language of the materials.',
 ].join('\n')
 export function fillPrompt(request) {
   // A rewrite after the check: closed words only for what was not supported by its material ("P2 line 2", "P1 explanation"); never the reviewer's text.
   const rejected = Array.isArray(request?.rejected) ? request.rejected.filter(w => typeof w === 'string' && /^P[1-6] (?:explanation|line \d{1,2}|row \d{1,2} (?:left|right))$/.test(w)).slice(0, 24) : []
   const scope = (Array.isArray(request?.only) && request.only.length ? `Fill only these items again: ${request.only.join(', ')}.\n` : '') +
-    (rejected.length ? `A check found these parts of your previous data not supported by the material they cite: ${rejected.join('; ')}. Write them from what the material says, or report the slot as unfillable.\n` : '') + (request?.only?.length || rejected.length ? '\n' : '')
+    (rejected.length ? `A check found these parts of your previous data not supported by the material they cite: ${rejected.join('; ')}. Write them again from what the material says, keeping its actors, qualifiers, amounts and dates exactly, or report the slot as unfillable.\n` : '') + (request?.only?.length || rejected.length ? '\n' : '')
   return `${FILL_FRAME}\n\n${scope}${dataBlock('Design guide (decided; do not change it)', request?.guide ?? null)}\n\n${dataBlock('Materials', request?.materials ?? [])}\n\nRules:\n${FILL_RULES}\n\nJSON shape: ${FILL_SHAPE}`
 }
 const unfence = value => { const m = /^\s*```[a-zA-Z]*\n([\s\S]*?)\n```\s*$/.exec(value); return (m ? m[1] : value).trim() }

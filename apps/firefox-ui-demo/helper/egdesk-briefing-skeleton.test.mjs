@@ -442,7 +442,7 @@ test('mounted, single version: the compare card is never published; two cards an
 test('mounted: bubble, nothing fits, no materials, a model that will not fill -> the chat answer stays, nothing is published; the earlier order is still there behind the switch', async t => {
   const quiet = async (options, expect) => { const s = await mounted(t, options); const before = s.h.events.length, res = await s.R.http('POST', '/decision/briefing-observe', s.body)
     assert.deepEqual([res.body.outcome, res.body.reason, res.body.judgeRequests, res.body.fillTurns], expect, JSON.stringify(res.body)); assert.deepEqual(s.h.events.slice(before).map(e => e.event), [], 'no event of any kind'); return s }
-  await quiet({ script: { one_sentence: .97 } }, ['bubble', 'judged-bubble', 1, 0])
+  await quiet({ script: { combines: .03 } }, ['bubble', 'judged-bubble', 1, 0]) // the mounted path has the answer: the content question decides (cycle 18)
   await quiet({ script: q => (FIT.test(q.name) ? .04 : undefined) }, ['bubble', 'no-component-fits', 2, 0])
   const none = await quiet({ materials: [] }, ['bubble', 'no-materials', 0, 0]); assert.equal(none.decisions.length, 0, 'without materials nothing is asked')
   const prose = await quiet({ forkReply: () => 'I would start with the comparison.' }, ['fallback-chat', 'fill-invalid', 3, 2]); assert.equal(prose.h.forkPrompts.length, 2)
@@ -522,7 +522,7 @@ test('mounted on the REAL turn memory: the materials are what lane L7 attached t
   // THIS request is its own question (cycle 17): one per linked group, quoted with the request. The SCRIPTED Decision model here answers no for the B사 page; whether
   // the real one does is what the re-measure plan checks (hard). The A사 pages are one linked group, so one question covers them.
   assert.equal(res.body.outcome, 'presented', JSON.stringify(res.body)); assert.equal(res.body.order, 'skeleton'); assert.deepEqual([res.body.steps, res.body.newComponents, res.body.fillTurns, res.body.judgeRequests], [3, 3, 1, 4])
-  assert.deepEqual(decisions[0].questions.map(q => q.name), ['several', 'one_sentence', 'about_M1', 'about_M6', 'same_M3_M5'], 'relevance per linked group, and the one unresolved title-sharing pair (두 메모)')
+  assert.deepEqual(decisions[0].questions.map(q => q.name), ['several', 'combines', 'about_M1', 'about_M6', 'same_M3_M5'], 'relevance per linked group, and the one unresolved title-sharing pair (두 메모)')
   assert.ok(decisions[0].questions[3].instructions.startsWith('The person asked, quoted exactly as a JSON string: "A사 견적 건 정리해줘". Material, quoted as JSON: M6 {"title":"B사 견적 요청"'))
   // parts came from the recorded links and dates of the kept pages: v1 against the v2 plan, the dated A사 pages in order, the open plan
   const fit = decisions[1].questions
@@ -568,7 +568,7 @@ test('advisory recording: place and fit are asked and recorded for the finished 
   assert.equal(body.flow, undefined); const events = s.h.events.length
   const res = await R.http('POST', '/decision/briefing-observe', body)
   assert.deepEqual(res.body, { status: 'observed', stages: ['place', 'fit'], outcome: 'advisory-only', judgeRequests: 2, order: 'skeleton', fillTurns: 0 })
-  assert.deepEqual(s.decisions.map(d => d.questions.map(q => q.name).join()), ['several,one_sentence,about_M1,same_M1_M4,same_M2_M4', 'aspect_P1,happened_M1,happened_M2,happened_M3,happened_M4,todo_M2,todo_M4']); assert.equal(s.h.events.length, events, 'no event'); assert.equal(s.h.forkPrompts.length, 0)
+  assert.deepEqual(s.decisions.map(d => d.questions.map(q => q.name).join()), ['several,combines,about_M1,same_M1_M4,same_M2_M4', 'aspect_P1,happened_M1,happened_M2,happened_M3,happened_M4,todo_M2,todo_M4']); assert.equal(s.h.events.length, events, 'no event'); assert.equal(s.h.forkPrompts.length, 0)
   const recorded = R.calibration.entries().filter(e => e.feature === 'answer_briefing'); assert.deepEqual(recorded.map(e => [e.mode, e.judgments.length]), [['advisory', 5], ['advisory', 7]], 'content-free calibration entries of the skeleton judge, in their own family')
   assert.equal(R.calibration.entries().filter(e => e.feature === 'board_arrangement').length, 0, 'nothing of the briefing is filed under the Board arrangement')
   assert.deepEqual((await R.http('POST', '/decision/briefing-observe', { ...body, runId: 'gone' })).body, { status: 'skipped', reason: 'run-gone' })
@@ -704,4 +704,46 @@ test('the place request carries the answer it lays out; a material is quoted onl
   // the answer is optional: without it the request is exactly as before, and it never appears in another stage
   const r2 = await run(ORDER); assert.ok(!r2.judge.calls[0].packet.input[1].content.includes("The assistant's answer")); assert.ok(r2.judge.calls.slice(1).every(c => !JSON.stringify(c.packet).includes('The assistant\'s answer')))
   assert.equal(normalizeSkeletonDto({ stage: 'fit', request: 'x', answer: 'y', materials: [{ alias: 'M1', title: 't', text: '', at: null, status: 'done' }], cards: [], questions: [{ kind: 'fact', material: 'M1' }] }), null, 'the answer only rides in the place request')
+})
+
+// ================= 12. cycle 18: place asks about the answer's content; the fill keeps the source's actors and qualifiers =================
+test('place with the answer at hand: "does the answer combine several separate facts…" instead of "is one sentence enough"; board = several yes AND that yes', async () => {
+  // real c17: r-s3-degraded one_sentence .72 — the answer to organise was itself one sentence
+  const s3 = await run({}, { request: S3_REQUEST, materials: QUOTE, candidates: [], answer: S3_ANSWER })
+  const place = s3.judge.calls[0].packet
+  assert.deepEqual(place.questions.map(q => q.name).slice(0, 2), ['several', 'combines'], 'no length question when the answer is quoted')
+  assert.equal(place.questions[1].instructions, `The assistant's answer, quoted exactly as a JSON string: "${S3_ANSWER}". Does this answer combine several separate facts from different materials (dates, versions, steps) that would be easier to follow laid out side by side or in order?`)
+  assert.equal(s3.out.status, 'presented')
+  // the rule, re-derived: both yes -> board; a decided no on either -> bubble; anything else undecided -> bubble
+  assert.deepEqual(decidePlace({ several: .74, combines: .9 }), { value: 'board', reason: null }, 'the s3 case once the content question says yes')
+  assert.deepEqual(decidePlace({ several: .9, combines: .02 }), { value: 'bubble', reason: 'judged-bubble' }, 'one fact: the bubble')
+  assert.deepEqual(decidePlace({ several: .1, combines: .95 }), { value: 'bubble', reason: 'judged-bubble' }); assert.deepEqual(decidePlace({ several: .9, combines: .5 }), { value: 'bubble', reason: 'placement-undecided' })
+  assert.deepEqual(decidePlace({ several: .9, combines: null }), { value: 'bubble', reason: 'placement-undecided' }, 'a refusal is not a yes')
+  // the fact question with its answer: the content question says one fact -> bubble, one request, nothing written
+  const fact = await run({ combines: .02 }, { request: 'A사 견적서 v1 총액이 얼마였지?', materials: QUOTE, candidates: [], answer: 'A사 견적서 v1의 총액은 1,200만원입니다.' })
+  assert.deepEqual([fact.out.status, fact.out.reason, fact.judge.calls.length, fact.fills.length], ['bubble', 'judged-bubble', 1, 0])
+  // without the answer the earlier length question stays; the content question is refused without the answer it quotes
+  assert.deepEqual((await run(ORDER)).judge.calls[0].names.slice(0, 2), ['several', 'one_sentence'])
+  assert.equal(normalizeSkeletonDto({ stage: 'place', request: 'x', materials: [{ alias: 'M1', title: 't', text: '', at: null, status: 'done' }], cards: [], questions: [{ kind: 'combines' }] }), null)
+})
+test('fill: a line that drops the source\'s actor ("승인 후 견적서 v2 발송" for "팀장 승인 후 발송한다") is caught, rewritten once with the qualifier rule, and the rewritten line is re-checked', async () => {
+  const PLAN = row('M1', 'A사 견적서 v2 수정 계획', '단가 12,200원, 납기 12월 20일로 견적서 v2를 보낼 예정이다. 아직 발송하지 않았다. 팀장 승인 후 발송한다.', null, 'plan')
+  const item = lines => ({ items: { P1: { text: 'v2를 보내려면 팀장 승인과 발송이 남아 있습니다.', fallback: '남은 일 카드를 열어 보세요.', slots: { title: 'A사 견적 남은 일', lines } } } })
+  const omitted = [{ label: '승인', text: '팀장 승인 받기', from: 'M1' }, { label: '발송', text: '승인 후 견적서 v2 발송', from: 'M1' }]
+  const restored = [omitted[0], { label: '발송', text: '팀장 승인 후 견적서 v2 발송', from: 'M1' }]
+  // the real answers of c17 for these two lines on their own: .59 without the actor, .89 with it
+  const judgeLine = q => (q.name === 'slot_P1_r2' ? (q.instructions.includes('"text":"팀장 승인 후 견적서 v2 발송"') ? .89 : q.instructions.includes('"text":"승인 후 견적서 v2 발송"') ? .59 : undefined) : undefined)
+  const ok = await run(judgeLine, { materials: [PLAN], candidates: [], request: 'A사 견적 남은 일 정리해줘', fill: (asked, n) => (n === 1 ? { title: 'A사 견적 남은 일', ...item(omitted) } : item(restored)) })
+  assert.equal(ok.out.status, 'presented', JSON.stringify(ok.out)); assert.deepEqual(ok.out.rejections, [{ part: 'P1', problem: 'unsupported', action: 'rewrite', words: ['P1 line 2'] }])
+  // what the subjective model received the first time and for the rewrite
+  assert.ok(fillPrompt(ok.fills[0]).includes('keep its actors, qualifiers, amounts and dates exactly as the material has them: who does it, under what condition, how much, by when (for example write "팀장 승인 후 견적서 v2 발송", not "승인 후 견적서 v2 발송")'))
+  const rewrite = fillPrompt(ok.fills[1]); assert.deepEqual(ok.fills[1].rejected, ['P1 line 2'])
+  assert.ok(rewrite.includes('not supported by the material they cite: P1 line 2. Write them again from what the material says, keeping its actors, qualifiers, amounts and dates exactly, or report the slot as unfillable.'))
+  // the rewritten line is checked again (the whole part), and it is what is published
+  const recheck = ok.judge.calls.filter(c => c.stage === 'fill_check')
+  assert.equal(recheck.length, 2); assert.ok(recheck[1].packet.questions.find(q => q.name === 'slot_P1_r2').instructions.includes('{"heading":"발송","text":"팀장 승인 후 견적서 v2 발송"}'))
+  assert.equal(ok.out.newComponents[0].markdown, '**승인** 팀장 승인 받기\n**발송** 팀장 승인 후 견적서 v2 발송')
+  // a rewrite that drops the actor again: the part is left out (once is the bound)
+  const again = await run(judgeLine, { materials: [PLAN], candidates: [], request: 'A사 견적 남은 일 정리해줘', fill: (asked, n) => (n === 1 ? { title: 'A사 견적 남은 일', ...item(omitted) } : item(omitted)) })
+  assert.deepEqual([again.out.status, again.out.reason, again.out.stats.fillTurns], ['fallback-chat', 'nothing-left', 2])
 })
