@@ -549,7 +549,8 @@ const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credent
   // Briefing flow, `on` path. Publishing goes through the real context runtime; the design / redesign / new-component text comes from the answer's own model on a
   // private fork (egdesk-briefing-engine.mjs over codex-internal-turn.mjs). Off unless EGDESK_BRIEFING_FLOW=on here AND the chrome's egdesk.briefingFlow is "on" AND
   // the Decisions mode is on; otherwise the route answers 'no-engine' / 'mode' and does nothing. The advisory observe needs none of this.
-  briefing: briefingDeps({ chat, contexts, enabled: process.env.EGDESK_BRIEFING_FLOW === 'on' }) })
+  // Order: the Decision model decides the design guide and the subjective model fills the data (default); EGDESK_BRIEFING_ORDER=design-first keeps the earlier order for comparison.
+  briefing: briefingDeps({ chat, contexts, enabled: process.env.EGDESK_BRIEFING_FLOW === 'on', order: process.env.EGDESK_BRIEFING_ORDER === 'design-first' ? 'design-first' : 'skeleton' }) })
 // Work-surface placement (egdesk-work-placement.mjs): where an Agent's visible work surface should open, judged at the conversation's heartbeat among options the
 // canvas enumerated. Off unless EGDESK_WORK_PLACEMENT=advisory (and the Decisions mode is advisory or on, and the chrome's egdesk.workPlacement is "advisory"); it
 // records what it would choose and changes nothing on the canvas.

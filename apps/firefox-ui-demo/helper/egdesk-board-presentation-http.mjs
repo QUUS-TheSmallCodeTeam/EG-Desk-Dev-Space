@@ -7,6 +7,7 @@ import { DEFAULT_DECISION_THRESHOLDS } from './egdesk-decision-questions.mjs'
 import { normalizeBoardPresentationScene, prepareBoardPresentation, readBoardPresentation } from './egdesk-board-presentation-plan.mjs'
 import { canvasCheckCalibrationEntry, prepareCanvasDesignCheck, readCanvasDesignCheck } from './egdesk-canvas-design-check.mjs'
 import { completeBriefingArgs, runBriefingFlow, briefingCheckCalibrationEntry, briefingReuseCalibrationEntry, placementCalibrationEntry, prepareBriefingCheck, prepareBriefingPlacement, prepareBriefingReuse, readBriefingCheck, readBriefingPlacement, readBriefingReuse } from './egdesk-briefing-flow.mjs'
+import { runSkeletonFlow, SKELETON_JUDGE } from './egdesk-briefing-skeleton.mjs'
 import { attachBoardVisual, MAX_BOARD_VISUAL_IMAGE_CHARS, validateBoardVisual } from './egdesk-board-visual-packet.mjs'
 
 const ROOT = '/decision/board-presentation'
@@ -19,6 +20,8 @@ const JUDGES = Object.freeze({
   '/decision/briefing-placement': { prepare: prepareBriefingPlacement, read: readBriefingPlacement, entry: placementCalibrationEntry },
   '/decision/briefing-check': { prepare: prepareBriefingCheck, read: readBriefingCheck, entry: briefingCheckCalibrationEntry },
   '/decision/briefing-reuse': { prepare: prepareBriefingReuse, read: readBriefingReuse, entry: briefingReuseCalibrationEntry },
+  // Skeleton-first order (cycle 13): one closed request shape for every stage of the design-guide decision (place, parts, order, repair, fill check, re-choose).
+  '/decision/briefing-skeleton': SKELETON_JUDGE,
 })
 const OBSERVE_PATH = '/decision/briefing-observe'
 const OBSERVE_MAX_BODY_BYTES = 65536
@@ -278,18 +281,27 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     const list = observeCandidates(body.candidates)
     // ONE egress mechanism (D2): the Decision model follows the same data-sharing permissions as the other models, through the shared gate. There is no separate consent here:
     // every judgment request of the flow (placement, reuse/retrieve, flow check) is asked of the gate by runBriefingFlow before it is sent.
-    const gate = createEgressGate(modelDataPermissions({ canvasMaySend: list.some(c => c.maySend === true) }))
-    const out = await runBriefingFlow({ report: body.report, candidates: list, egress: gate, currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null,
+    // Skeleton-first (default of the `on` path since cycle 13; briefing.order, set by the bridge's dependency factory): the Decision model decides the design guide from the
+    // component catalog, the turn's materials and the cards already on the board; the subjective model only fills the slots. The request text and the materials are data
+    // the run's own model already had (run / memory classes of the same gate); card labels as before (canvas).
+    const skeleton = live && briefing.order === 'skeleton'
+    const materials = skeleton && typeof briefing.materialsFor === 'function' ? briefing.materialsFor(answerRun) : []
+    const view = body.viewport, viewport = view && [view.x, view.y, view.width, view.height].every(Number.isFinite) && view.width > 0 && view.height > 0 ? { x: view.x, y: view.y, width: view.width, height: view.height } : null
+    const gate = createEgressGate(modelDataPermissions({ canvasMaySend: list.some(c => c.maySend === true), ...(skeleton ? { runActive: true, memoryScope: Array.isArray(materials) && materials.length ? { attachedThisTurn: materials.length } : null } : {}) }))
+    const out = skeleton ? await runSkeletonFlow({ request: typeof body.request === 'string' ? body.request.slice(0, 2000) : '', materials, candidates: list, egress: gate, viewport,
+      currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null, judge: route(JUDGES['/decision/briefing-skeleton']), fill: engine, allow: async () => true })
+      : await runBriefingFlow({ report: body.report, candidates: list, egress: gate, currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null,
       decide: { placement: route(JUDGES['/decision/briefing-placement']), reuse: route(JUDGES['/decision/briefing-reuse']), ...(live ? { check: route(JUDGES['/decision/briefing-check']) } : {}) },
       engine, observeOnly: !live, allow: async () => true })
-    const summary = { status: 'observed', stages: out.stages ?? [], outcome: out.status, judgeRequests: out.stats?.judgeRequests ?? 0, ...(out.reason ? { reason: out.reason } : {}) }
+    const summary = { status: 'observed', stages: out.stages ?? [], outcome: out.status, judgeRequests: out.stats?.judgeRequests ?? 0, ...(out.reason ? { reason: out.reason } : {}), ...(skeleton ? { order: 'skeleton', fillTurns: out.stats?.fillTurns ?? 0 } : {}) }
     if (!live || out.status !== 'presented') return summary
     // Passed the flow check: create the (0..n) allowed new components, then propose through the same validation as the tool. Any failure leaves chat only.
     try {
       // Every new component's text is written first; only when all of them exist is anything published (no half-made set).
       const drafts = []
       for (const component of out.newComponents) {
-        const drafted = await engine({ kind: 'briefing_component', part: component.part, title: component.title, summary: component.summary })
+        // Skeleton-first: the card text was already built by code from validated slot data. Design-first: the model writes it on one more private turn.
+        const drafted = typeof component.markdown === 'string' ? { markdown: component.markdown } : await engine({ kind: 'briefing_component', part: component.part, title: component.title, summary: component.summary })
         if (typeof drafted?.markdown !== 'string' || !drafted.markdown.trim() || typeof briefing.publishOutput !== 'function') throw new Error('component')
         drafts.push({ component, markdown: drafted.markdown })
       }

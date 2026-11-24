@@ -56,6 +56,22 @@ export function componentPrompt(request, report = '') {
     `Reply with only the component content as markdown (no code fence around it, at most ${BRIEFING_ENGINE_LIMITS.componentMax} characters), in the language of your answer.\n\n` +
     `${answerBlock(report)}Component title: ${String(request.title ?? '')}\nIt must cover: ${String(request.summary ?? '')}\nUse only what your answer already says; add no new claims.`
 }
+// Skeleton-first order (cycle 13, egdesk-briefing-skeleton.mjs): the design guide is already decided. This prompt carries ONLY that guide and the materials: no answer text,
+// no board, no instruction to design. The model returns slot data; code validates it against the slot schemas and builds the components.
+const FILL_FRAME = 'You are filling in the data of an Answer Briefing whose design is already decided. This is private preparation. Do not use tools. Do not address the person. ' +
+  'Reply with exactly one JSON object and nothing else.'
+const FILL_SHAPE = '{"title": string, "items": {"<item id>": {"text": string, "fallback": string, "slots": {"<slot name>": value}}}, "unfillable": [{"item": "<item id>", "slot": "<slot name>", "reason": string}]}'
+const FILL_RULES = [
+  'Fill every listed item and only the listed items: do not add an item, a step, a component, a slot or a field.',
+  'Each item has "text" (the step explanation, saying only what the item shows) and "fallback" (one sentence for when it cannot be shown), plus the slots its component lists.',
+  'A text slot is a string no longer than its "max". A material slot is one of the item\'s material aliases. A list slot is an array of rows with exactly the listed fields, between "min" and "max" rows.',
+  'Use ONLY what the materials say. If the materials do not contain the data for a slot, do not invent it: leave that slot out and report it in "unfillable".',
+  'Write every text in the language of the materials.',
+].join('\n')
+export function fillPrompt(request) {
+  const scope = Array.isArray(request?.only) && request.only.length ? `Fill only these items again: ${request.only.join(', ')}.\n\n` : ''
+  return `${FILL_FRAME}\n\n${scope}${dataBlock('Design guide (decided; do not change it)', request?.guide ?? null)}\n\n${dataBlock('Materials', request?.materials ?? [])}\n\nRules:\n${FILL_RULES}\n\nJSON shape: ${FILL_SHAPE}`
+}
 const unfence = value => { const m = /^\s*```[a-zA-Z]*\n([\s\S]*?)\n```\s*$/.exec(value); return (m ? m[1] : value).trim() }
 
 /**
@@ -79,6 +95,7 @@ export function createBriefingEngine({ runText, report = '', now = Date.now, lim
     const kind = request?.kind
     if (kind === 'briefing_design') return shapeDesign(parseEngineJson(await ask(designPrompt(request, answer)), L.replyMax))
     if (kind === 'briefing_redesign' || kind === 'briefing_redesign_inconclusive') return shapeDesign(parseEngineJson(await ask(redesignPrompt(request, answer)), L.replyMax))
+    if (kind === 'briefing_fill') return parseEngineJson(await ask(fillPrompt(request)), L.replyMax)
     if (kind === 'briefing_component') {
       const reply = await ask(componentPrompt(request, answer))
       const markdown = typeof reply === 'string' ? unfence(reply).slice(0, L.componentMax) : ''
@@ -94,8 +111,13 @@ export function createBriefingEngine({ runText, report = '', now = Date.now, lim
  * The bridge's dependencies for the `on` path, in one place so a test mounts exactly what the bridge mounts.
  * enabled === false (the default) leaves the engine out: the route then answers 'no-engine' and does nothing.
  */
-export function briefingDeps({ chat, contexts, enabled = false, limits } = {}) {
+export function briefingDeps({ chat, contexts, enabled = false, limits, order = 'skeleton' } = {}) {
   return {
+    // Which side decides the design. 'skeleton' (default since cycle 13): the Decision model fixes the design guide from the catalog, the subjective model fills the data.
+    // 'design-first': the earlier order (the subjective model designs, the Decision model checks), kept for comparison.
+    order: order === 'design-first' ? 'design-first' : 'skeleton',
+    // The turn's memory materials as data (lane L7: chat.memoryMaterialsFor(run), rows the answering model was given this turn). Absent method or anything unusable = none.
+    materialsFor: run => { try { const rows = chat.memoryMaterialsFor?.(run); return Array.isArray(rows) ? rows : [] } catch { return [] } },
     engineFor: (run, { report = '' } = {}) => (enabled === true && chat.canInternalTurn(run)
       ? createBriefingEngine({ runText: (prompt, options) => chat.internalText(run, prompt, options), report, limits }) : null),
     runFor: ids => chat.runFor(ids),
