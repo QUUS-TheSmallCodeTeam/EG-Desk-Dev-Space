@@ -178,6 +178,11 @@ export function labelRequest(example, model) {
   return { model, input: [{ role: 'developer', content: DEVELOPER }, { role: 'user', content: text }],
     questions: TYPE_NAMES.map(name => ({ type: 'predicate', name: `conv_${name}`, instructions: INTERACTION_TYPES[name].q })), prompt_cache_key: 'conversation-labels' }
 }
+/** readLabelScores(answers) → { [type]: probability | null } (the raw yes probabilities, for picking the strongest examples). */
+export function readLabelScores(answers) {
+  const list = Array.isArray(answers) ? answers : Object.entries(answers ?? {}).map(([name, a]) => ({ name, ...a }))
+  return Object.fromEntries(TYPE_NAMES.map(name => { const p = list.find(x => x.name === `conv_${name}`)?.probability; return [name, typeof p === 'number' ? p : null] }))
+}
 /** readLabels(answers) → { [type]: 'yes' | 'no' | 'unknown' } at LABEL_BAR (a missing or refused answer is unknown, never no). */
 export function readLabels(answers) {
   const list = Array.isArray(answers) ? answers : Object.entries(answers ?? {}).map(([name, a]) => ({ name, ...a }))

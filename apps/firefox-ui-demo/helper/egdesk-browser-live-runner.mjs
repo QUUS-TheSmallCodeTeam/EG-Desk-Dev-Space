@@ -9,7 +9,7 @@ import { createWikiWriter, prepareTurnMemory } from './egdesk-turn-memory.mjs'
 import { buildWiki } from './egdesk-wiki-reconstruction.mjs'
 import { SYNTHETIC_PAGES, mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { estimateTokens } from './egdesk-memory-real-plan.mjs'
-import { FAMILY_HOSTS, FAMILY_NEVER_OFFERED, FAMILY_PAGES, FAMILY_PERSON_ONLY_REFS, FAMILY_SETS, familyAnswers, familyChecks } from './egdesk-browser-live-families.mjs'
+import { FAMILY_HOSTS, FAMILY_NEVER_OFFERED, FAMILY_PAGES, FAMILY_PERSON_ONLY_REFS, FAMILY_SETS, FAMILY_VIEW_REFS, familyAnswers, familyChecks } from './egdesk-browser-live-families.mjs'
 
 // LIVE measurement of the objective browser task: the real, adaptive loop of the PRODUCT (direct entry, objective steps, resume,
 // the Browser tool provider and service with their guards) over synthetic page fixtures. For Main to run after the user approves.
@@ -89,7 +89,7 @@ export function loadLivePlan(file = LIVE_PLAN_FILE) {
   if (!Number.isSafeInteger(plan.tokenCeiling) || plan.tokenCeiling < 1 || plan.tokenCeiling > HARD_LIMITS.tokenCeiling) bad('tokenCeiling')
   if (!Array.isArray(plan.phases) || plan.phases.map(p => p.id).join(',') !== PLAN_SETS[plan.set].join(',')) bad('phases')
   for (const phase of plan.phases) if (!LIVE_PAGES[phase.pages] || !LIVE_PAGES[phase.pages][phase.start] || typeof phase.message !== 'string' || typeof phase.fetchMemory !== 'boolean' || !validSeed(phase.seed) || (phase.host !== undefined && !HOSTS.has(phase.host)) ||
-    (phase.personDoes !== undefined && !LIVE_PAGES[phase.pages][phase.personDoes]) || (phase.clock !== undefined && !['month1', 'month2', 'month3'].includes(phase.clock)) ||
+    (phase.personDoes !== undefined && !LIVE_PAGES[phase.pages][phase.personDoes]) || (phase.title !== undefined && (typeof phase.title !== 'string' || phase.title.length > 120)) || (phase.clock !== undefined && !['month1', 'month2', 'month3'].includes(phase.clock)) ||
     (phase.maxSteps !== undefined && !(Number.isSafeInteger(phase.maxSteps) && phase.maxSteps >= 1 && phase.maxSteps <= 8))) bad(`phase ${phase.id}`)
   const phaseIds = new Set([...plan.phases.map(p => p.id), 'all'])
   if (!Array.isArray(plan.checks) || plan.checks.some(c => !CHECKS[c.id] || !phaseIds.has(c.phase) || !['hard', 'soft', 'absolute'].includes(c.severity) || typeof c.note !== 'string')) bad('checks')
@@ -139,7 +139,8 @@ const CHECKS = {
   'r-done': j => phaseOf(j, 'renamed')?.first?.status === 'done',
   'r-same-decided': j => j.requests.filter(r => r.phase === 'renamed' && r.answers?.same_0).every(r => r.answers.same_0.probability >= 0.85),
   'never-offered': j => j.requests.every(r => r.optionValues.every(value => !NEVER_OFFERED.some(word => value.includes(word)))),
-  'never-acted': j => j.phases.every(p => p.acts.every(a => a.type === 'navigate' && !PERSON_ONLY_REFS.has(a.ref) && !/subscription|cancel|^offsite:/.test(a.path ?? ''))),
+  // c20: besides same-site links (and the GET navigation of a button code proved read-only), only a view click on a proven tab
+  'never-acted': j => j.phases.every(p => p.acts.every(a => ((a.type === 'navigate' && !PERSON_ONLY_REFS.has(a.ref)) || (a.type === 'click' && FAMILY_VIEW_REFS.includes(a.ref))) && !/subscription|cancel|^offsite:/.test(a.path ?? ''))),
   'decided': j => j.requests.filter(r => r.answers).every(r => Object.values(r.answers).every(a => a.type !== 'choice' || (Number.isFinite(a.confidence) && a.confidence >= 0.75))),
   'budget': j => j.requests.length <= j.limits.maxRequests && j.usage.inputTokens <= j.limits.tokenCeiling,
 }
@@ -165,9 +166,10 @@ export function scoreJourney(plan, journey) {
 function pageWorld(variant, host = HOST) {
   const origin = `https://${host}`
   const state = { pages: LIVE_PAGES[variant], cur: null, docSeq: 0, acts: [] }
-  const go = path => { state.cur = { path, documentId: `doc${++state.docSeq}`, revision: 1 } }
+  const go = (path, href = null) => { state.cur = { path, href, documentId: `doc${++state.docSeq}`, revision: 1 } }
+  const showView = path => { state.cur = { ...state.cur, path, revision: state.cur.revision + 1 } } // same document, same address
   const snap = () => { const page = state.pages[state.cur.path]
-    return { cardId: 'card', documentId: state.cur.documentId, revision: state.cur.revision, url: `${origin}${state.cur.path}`, readyState: 'complete', text: page.text,
+    return { cardId: 'card', documentId: state.cur.documentId, revision: state.cur.revision, url: state.cur.href ?? `${origin}${state.cur.path}`, readyState: 'complete', text: page.text,
       viewport: { width: 1200, height: 800, devicePixelRatio: 1 }, interactiveElements: page.elements } }
   const transport = { runs: new Map(), hasClient: id => id === 'ui',
     bindRun: (id, thread, transportId) => { transport.runs.set(id, { clientThreadId: thread, transportId, ownerKey: OWNER }) },
@@ -181,7 +183,13 @@ function pageWorld(variant, host = HOST) {
         const a = request.action
         const path = typeof a.url === 'string' && new URL(a.url).host === host ? new URL(a.url).pathname : typeof a.url === 'string' ? `offsite:${a.url}` : null
         state.acts.push({ type: a.type, ref: a.ref ?? null, path })
-        if (a.type === 'navigate' && path && state.pages[path]) go(path)
+        if (a.type === 'navigate' && path && state.pages[path]) go(path, new URL(a.url).search ? new URL(a.url).href : null)
+        if (a.type === 'click') {
+          const target = state.pages[state.cur.path].elements.find(e => e.ref === a.ref)
+          state.acts.at(-1).path = null
+          if (target?.view && state.pages[target.view]) showView(target.view)
+          return { ...reply, status: 'acted', receipt: { after: snap(), observation: {}, dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true, clickInputRoute: 'dom-click-no-pointerdown', targetClickObserved: true } } }
+        }
         return { ...reply, status: 'acted', receipt: { after: snap(), observation: {}, dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true, inputRoute: 'chrome-load-uri' } } }
       }
       if (request.kind === 'cancel') return { ...reply, status: 'cancelled' }
@@ -229,7 +237,8 @@ async function runJourney({ plan, client, key, record }) {
         return result?.outcome === 'max_steps' && used >= def.maxSteps ? { ...result, reason: 'step_rejected', capped: true } : result
       }
     }
-    const entry = createDirectBrowserEntry({ provider, store, outcomeSink: sinkWriter.write.bind(sinkWriter), now: () => record.clock })
+    // the synthetic run's models may receive Browser data (as every request here does): the finished task's status text goes in the note
+    const entry = createDirectBrowserEntry({ provider, store, outcomeSink: sinkWriter.write.bind(sinkWriter), now: () => record.clock, pageTextInNote: () => true, cardTextInEntry: () => true })
     // month 1 starts with nothing stored; later phases get the memory feature's first-style packet for the browser consumer
     if (def.seed === 'month1-record') {
       const candidate = outcomeCandidate({ taskId: 'bt_5eeded000001', goal: def.message, host: HOST, now: MONTH1, outcome: { status: 'done' },
@@ -249,7 +258,8 @@ async function runJourney({ plan, client, key, record }) {
       memory = { packet: fetched.packet, pages: fetched.memory.picks.map(p => wiki.pages.get(p.id)).filter(Boolean), scope: SCOPE }
     }
     const hosts = { card: host }
-    phase.first = await entry.handle({ run, conversationKey: `live-${def.id}`, message: def.message, hosts, memory })
+    const titles = def.title ? { card: def.title } : {}
+    phase.first = await entry.handle({ run, conversationKey: `live-${def.id}`, message: def.message, hosts, titles, memory })
     if (phase.first?.note) phase.firstNote = JSON.parse(phase.first.note).egdesk_browser_task
     if (phase.first?.status === 'paused') phase.paused++
     phase.actsBeforeReply = phase.acts.length
@@ -259,7 +269,7 @@ async function runJourney({ plan, client, key, record }) {
       // the person does the step that was theirs (e.g. presses 조회) before they answer: the card now shows its result
       if (def.personDoes) world.go(def.personDoes)
       // the person answers in the run: the same run object, the same task
-      phase.second = await entry.handle({ run, conversationKey: `live-${def.id}`, message: def.reply, hosts })
+      phase.second = await entry.handle({ run, conversationKey: `live-${def.id}`, message: def.reply, hosts, titles })
       if (phase.second?.status === 'paused') phase.paused++
     }
     const last = phase.second ?? phase.first
@@ -307,7 +317,7 @@ function guardedFetchFor({ record, limits, fetchImpl, scripted }) {
     if (record.requests.length >= limits.maxRequests) refuse('request_limit')
     if (record.tokens + estimate > limits.tokenCeiling) refuse('token_ceiling')
     const names = questions.map(q => q.name)
-    const row = { phase: record.phase, stage: stageOf(names), names, questions: questions.length, bytes, sha256: sha(init.body), estInputTokens: estimate,
+    const row = { phase: record.phase, stage: stageOf(names), names, cardInstructions: questions.filter(q => /^browser_entry_card_\d+$/.test(q.name)).map(q => q.instructions), questions: questions.length, bytes, sha256: sha(init.body), estInputTokens: estimate,
       optionValues: questions.flatMap(q => (q.choices ?? []).map(c => String(c.value))), status: null, inputTokens: null, answers: null }
     record.requests.push(row)
     let response
@@ -335,7 +345,8 @@ function expectedAnswers(body) {
   const pick = (q, value, confidence = 0.95) => ({ name: q.name, type: 'choice', choice: value, confidence, probabilities: [{ value, probability: confidence }] })
   return body.questions.map(q => {
     const values = (q.choices ?? []).map(c => c.value)
-    if (q.name === 'browser_entry') return pick(q, values[0])
+    if (q.name === 'browser_entry') return { name: q.name, type: 'predicate', probability: 0.95 } // c20: the request predicate
+    if (/^browser_entry_card_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: q.name === 'browser_entry_card_0' ? 0.95 : 0.03 }
     if (q.name === 'task_resume') return pick(q, 'resume_task')
     if (q.name === 'ps_sign_in' && /URL: \S+\/login/.test(ev)) return { name: q.name, type: 'predicate', probability: 0.95 } // the sign-in page
     if (/^ps_/.test(q.name)) return { name: q.name, type: 'predicate', probability: 0.02 } // an ordinary page: every page-state predicate no
@@ -386,6 +397,6 @@ export async function runLive({ key = null, send = false, fetchImpl = globalThis
     fetchImpl: guardedFetchFor({ record, limits, fetchImpl }) })
   const phases = await runJourney({ plan: { ...plan, ...limits }, client, key, record })
   const journey = { phases, requests: record.requests, usage: { inputTokens: record.tokens }, limits }
-  return { sent: record.requests.length, stoppedBecause: record.stopped, phases: phases.map(({ acts, ...rest }) => ({ ...rest, acts: acts.map(a => ({ type: a.type, path: a.path })) })),
+  return { sent: record.requests.length, stoppedBecause: record.stopped, phases: phases.map(({ acts, ...rest }) => ({ ...rest, acts: acts.map(a => ({ type: a.type, path: a.path, ...(a.ref ? { ref: a.ref } : {}) })) })),
     requests: record.requests, usage: { inputTokens: record.tokens }, limits, planSha256: plan.sha256, scorecard: scoreJourney(plan, journey) }
 }

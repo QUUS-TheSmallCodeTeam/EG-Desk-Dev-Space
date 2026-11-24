@@ -4000,8 +4000,9 @@
     const thread = getCodexThreadById(state.codex, session.threadId);
     const route = ChatState.chatContextRequestScope(thread, state.codex);
     if (route.engineId !== 'codex') throw new Error('이 엔진에서는 브리핑 의견 저장을 지원하지 않습니다.');
-    const account = ChatState.codexAccountKey(state.codex.authStatus);
-    if (!thread || !account || state.codex.codexAccountKey !== account || !ChatState.canResumeNativeThread(thread, state.codex.authStatus)
+    // L1 c19: the room's own account (another engine profile's, or the default sign-in the window has cached)
+    const account = ChatState.codexRoomAccountCurrent(thread, state.codex.authStatus, state.codex.codexAccountKey, state.codex);
+    if (!thread || !account || !ChatState.canResumeNativeThread(thread, state.codex.authStatus, state.codex)
         || !route.conversationId || route.conversationId !== session.briefing.conversationId
         || ['conversationId', 'runId', 'answerId'].some(key => !session.identity?.[key] || session.identity[key] !== session.briefing[key])
         || state.codex.activeThreadId !== session.threadId) throw new Error('의견을 저장할 원래 대화와 계정 연결을 확인하지 못했습니다.');
@@ -4016,8 +4017,9 @@
       if (disposed) return false;
       const latest = getCodexThreadById(state.codex, session.threadId), shown = state.codex.briefingSession;
       let same = false;
-      try { same = !token.signal.aborted && epochScope.valid(token) && account === ChatState.codexAccountKey(state.codex.authStatus)
-        && state.codex.codexAccountKey === account && !!latest && ChatState.canResumeNativeThread(latest, state.codex.authStatus)
+      try { same = !token.signal.aborted && epochScope.valid(token) && !!latest
+        && account === ChatState.codexRoomAccountCurrent(latest, state.codex.authStatus, state.codex.codexAccountKey, state.codex)
+        && ChatState.canResumeNativeThread(latest, state.codex.authStatus, state.codex)
         && JSON.stringify(ChatState.chatContextRequestScope(latest, state.codex)) === binding
         && state.codex.activeThreadId === session.threadId
         && (session.preparationScope ? session.preparationScope.current() : (state.codex.activityRoomGeneration || 0) === generation)
@@ -8483,6 +8485,57 @@
     return true;
   }
 
+  // L1 c20, Desk HUD routing (pref egdesk.hudRouting "advisory" | "on"; default off: nothing below runs). Which row of this list is
+  // highlighted: an explicit target by code (no model call), else one yes/no question per row the list already has (the bridge's
+  // /decision/hud-routing), ranked by code. Nothing is run, opened, sent or focused here: on "on" the highlight moves, only while the typed
+  // text is unchanged and the person has not moved it; "advisory" records what it would highlight. Rules: EGDeskHudRouting.sys.mjs.
+  const HudRouting = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskHudRouting.sys.mjs');
+  let hudRoutingTimer = null, hudRoutingSeq = 0;
+  function hudRoutingModeNow() { return HudRouting.hudRoutingMode(readSurfacePref(HudRouting.HUD_ROUTING_PREF)); }
+  function scheduleHudRouting() {
+    if (hudRoutingModeNow() === 'off') return;
+    if (hudRoutingTimer) window.clearTimeout(hudRoutingTimer);
+    const seq = ++hudRoutingSeq;
+    hudRoutingTimer = window.setTimeout(() => { hudRoutingTimer = null; void routeHudQuery(seq); }, HudRouting.HUD_ROUTING_LIMITS.debounceMs);
+  }
+  // An open card's words may go with the question only when its words may leave (a published result card: maySend, as for placement).
+  function hudRowQuote(row) {
+    const card = row?.type === 'card' ? document.getElementById(String(row.key).replace(/^card:/, '')) : null;
+    const record = card?._resultRecord;
+    return record?.title ? { label: record.title, excerpt: String(record.text || '').slice(0, 240) } : null;
+  }
+  async function routeHudQuery(seq) {
+    const mode = hudRoutingModeNow();
+    const q = railSearchQuery(state.railSearch.query);
+    if (mode === 'off' || !q || !state.railSearch.open) return null;
+    const rows = buildRailSearchResults(q);
+    const explicit = HudRouting.explicitRoute(q, rows, { looksLikeNavigation: railSearchLooksLikeNavigation });
+    if (explicit) return suggestHudRow(mode, explicit.key, explicit.rule);
+    const candidates = HudRouting.routingCandidates(rows, { quoteOf: hudRowQuote });
+    if (!candidates) return null;
+    let res = null;
+    try { res = await deskStoreRequest('POST', '/decision/hud-routing', { query: q, candidates: candidates.wire }, { timeoutMs: HudRouting.HUD_ROUTING_LIMITS.waitMs }); } catch { res = null; }
+    // the person typed on, closed the list or another question started: this answer is dropped
+    if (seq !== hudRoutingSeq || railSearchQuery(state.railSearch.query) !== q || !state.railSearch.open) return null;
+    const route = res?.body?.status === 'decided' ? HudRouting.rankRoute(candidates, res.body.answers) : null;
+    return suggestHudRow(mode, route?.key ?? null, route ? 'decision' : (typeof res?.body?.status === 'string' ? res.body.status : 'failed'));
+  }
+  function suggestHudRow(mode, key, rule) {
+    const rows = buildRailSearchResults(state.railSearch.query);
+    const index = key ? rows.findIndex(row => row.key === key) : -1;
+    const apply = mode === 'on' && index >= 0 && index !== state.railSearch.activeIndex && state.railSearch.personMoved !== true && state.railSearch.open === true;
+    // content-free: the rule, the row's type, whether the highlight moved
+    (state.railSearch.routingLog ||= []).push({ rule, type: index >= 0 ? rows[index].type : null, applied: apply });
+    if (state.railSearch.routingLog.length > 50) state.railSearch.routingLog.shift();
+    if (!apply) return null;
+    state.railSearch.suggestion = { previous: state.railSearch.activeIndex, index, at: Date.now() };
+    state.railSearch.activeIndex = index;
+    updateRailSearchActiveRow();
+    return index;
+  }
+
+  state.railSearchEnterIndex = () => HudRouting.hudEnterIndex({ activeIndex: state.railSearch.activeIndex, suggestion: state.railSearch.suggestion, now: Date.now() });
+
   function buildRailSearchAskResult(query) {
     const row = RailSearchView.askRow(query, railSearchAskRecipient());
     return row ? { ...row, execute: () => draftRailSearchAsk(row.threadId, row.text) } : null;
@@ -8624,6 +8677,7 @@
         },
         onmouseenter: () => {
           state.railSearch.activeIndex = index;
+          state.railSearch.personMoved = true; state.railSearch.suggestion = null; // L1 c20: the person's own choice wins
           updateRailSearchActiveRow(panel);
         },
         onclick: (ev) => {
@@ -8697,6 +8751,9 @@
     if (input && input.value !== state.railSearch.query) input.value = state.railSearch.query;
     openRailSearchPanel();
     scheduleRailSearchFiles(state.railSearch.query);
+    // L1 c20: new text, new question; nothing the person chose carries over (pref off: nothing runs)
+    state.railSearch.personMoved = false; state.railSearch.suggestion = null;
+    scheduleHudRouting();
   }
 
   function handleRailSearchKeydown(ev, input) {
@@ -8733,6 +8790,7 @@
       if (!results.length) return;
       const delta = ev.key === 'ArrowDown' ? 1 : -1;
       state.railSearch.query = q;
+      state.railSearch.personMoved = true; state.railSearch.suggestion = null; // L1 c20: the person's own choice wins
       state.railSearch.activeIndex = (state.railSearch.activeIndex + delta + results.length) % results.length;
       openRailSearchPanel();
       ev.preventDefault();
@@ -8757,7 +8815,8 @@
       const results = buildRailSearchResults(q);
       // Ctrl/⌘ Enter goes straight to the request row; plain Enter runs the selected row.
       const ask = ev.metaKey || ev.ctrlKey ? results.find((entry) => entry.type === 'ask') : null;
-      const result = ask || results[state.railSearch.activeIndex] || results[0];
+      // L1 c20: an Enter right after a suggestion moved the highlight runs the row the person saw (pref off: no suggestion, as before)
+      const result = ask || results[state.railSearchEnterIndex?.() ?? state.railSearch.activeIndex] || results[0];
       if (result) {
         executeRailSearchResult(result);
         ev.preventDefault();
@@ -15995,11 +16054,15 @@
       };
     };
     const resetThreadConversations = () => {
-      if (state.codex.threads.some(thread => thread.engineId === 'claude')) {
+      // L1 c19 (Contract §14.1): a Codex room on another engine profile runs on that profile's account, so the DEFAULT sign-in changing
+      // or signing out keeps it: its requests and runs in flight, its binding, and its profile's epoch tokens.
+      const otherProfileRooms = ChatState.codexDefaultSwitchKeeps(state.codex.threads, state.codex);
+      if (state.codex.threads.some(thread => thread.engineId === 'claude') || otherProfileRooms.size) {
         // Codex sign-out/account switching cannot revoke Claude's separate
         // native binding or abort its pending HTTP request with the shared epoch.
-        epochScope.reset('codex');
-        const codexThreads = state.codex.threads.filter(thread => thread.engineId !== 'claude');
+        // With rooms on other Codex profiles only the default profile's (and unrecorded) tokens end.
+        if (otherProfileRooms.size) epochScope.reset('codex', 'codex-default'); else epochScope.reset('codex');
+        const codexThreads = state.codex.threads.filter(thread => thread.engineId !== 'claude' && !otherProfileRooms.has(thread.id));
         const codexIds = new Set(codexThreads.map(thread => thread.id));
         const codexBindings = new Set(codexThreads.map(ChatState.clientThreadBinding));
         const codexConversations = new Set(codexThreads.map(thread => thread.conversationId).filter(Boolean));
@@ -16019,7 +16082,7 @@
         for (const id of codexConversations) refreshing.delete(id);
         for (const id of codexIds) if (state.contextSuggest?.byThread) delete state.contextSuggest.byThread[id];
         resumedNativeBindings.clear();
-        state.codex.threads = state.codex.threads.map(thread => thread.engineId === 'claude' ? thread
+        state.codex.threads = state.codex.threads.map(thread => thread.engineId === 'claude' || otherProfileRooms.has(thread.id) ? thread
           : { ...ChatState.detachNativeThread(thread, state.codex.codexAccountKey, chatBindingNonce()), updatedAt: Date.now() });
         clearBrowserToolTransport({ revoke: true });
         streamReady = false;
@@ -18615,7 +18678,7 @@
       forkAvailability(threadId, fromTurnId = null) {
         const thread = getCodexThreadById(state.codex, threadId);
         return ChatState.chatForkAvailability(thread, {
-          connected: state.codex.connected, auth: state.codex.authStatus, capabilities: state.codex.chatCapabilities,
+          connected: state.codex.connected, auth: state.codex.authStatus, capabilities: state.codex.chatCapabilities, engines: state.codex.engines,
           busy: !!thread && (threadBusy(thread) || forkingThreads.has(thread.id)),
           runs: ChatState.runsForThread(protocol, thread), fromTurnId,
         });

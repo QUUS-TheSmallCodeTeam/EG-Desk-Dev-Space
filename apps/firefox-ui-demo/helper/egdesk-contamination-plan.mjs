@@ -12,6 +12,11 @@ import { independentEstimate } from './egdesk-decision-real-runner.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
 import { memoryMaterials } from './egdesk-turn-memory.mjs'
 import { buildWiki } from './egdesk-wiki-reconstruction.mjs'
+
+// The clock the product-built excerpt bodies see ("Today is <day>" in the screening request, the in-effect day). Pinned so the committed plan is
+// what the code builds on any day (it was the build machine's clock until 2026-11-25, when every rebuild differed). 2026-11-24 is the day the
+// committed bodies were built; noon UTC is the 24th in every time zone from UTC-11 to UTC+11. Recorded in plan.json as askedAt.
+export const CONTAMINATION_ASKED_AT = Date.parse('2026-11-24T12:00:00Z')
 import { SYNTHETIC_PAGES } from './egdesk-wiki-reconstruction.fixture.mjs'
 
 // CONTAMINATION STUDY PLAN (lane L6 cycle 10). Sends nothing, reads no key. Question: does a judged item get a different answer when it
@@ -123,7 +128,7 @@ async function excerptWires(asks) {
   } })
   const draft = createBoardAgentDraftTransport({ readConfig: () => ({ apiKey: 'egd-synthetic-draft-not-a-key-0006', model: 'synthetic-responses-model' }), fetchImpl: async () =>
     Response.json({ object: 'response', status: 'completed', model: 'synthetic-responses-model', output: [{ type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'Synthetic.' }] }] }) })
-  const service = createBoardAgentAskService({ desk, profiles: { get: id => (id === profileId ? profile : null) }, selectContext: selectBoardAgentContext,
+  const service = createBoardAgentAskService({ desk, profiles: { get: id => (id === profileId ? profile : null) }, selectContext: selectBoardAgentContext, now: () => CONTAMINATION_ASKED_AT,
     decisionStatus: () => ({ mode: 'on', model: DECISION_MODEL, bindingId: 'plan-binding', client }), draft })
   const out = []
   try {
@@ -198,7 +203,7 @@ export async function buildContaminationPlan() {
     'slot_P#_r#': { yes: FILL_SLOT.bar.yes, no: Math.round((FILL_SLOT.bar.yes - 0.001) * 1000) / 1000, source: 'egdesk-briefing-skeleton.mjs:19,693 SKELETON_BARS.yes .7: anything below is not support' },
     'c#': { yes: EXCERPT.bar.yes, no: Math.round((EXCERPT.bar.yes - 0.001) * 1000) / 1000, source: 'egdesk-board-agent-context.mjs:4 BOARD_AGENT_RELEVANCE_BAR .6: selected iff p >= .6' },
   }
-  const plan = { set: CONTAMINATION_SET, tokenCeiling: CONTAMINATION_CEILING, productBars,
+  const plan = { set: CONTAMINATION_SET, askedAt: new Date(CONTAMINATION_ASKED_AT).toISOString(), tokenCeiling: CONTAMINATION_CEILING, productBars,
     passRule: 'A study, not a gate: hard checks hold each item to its registered side of its family\'s product bar (same-matter .8 [L1 plan], fill-slot .7 [SKELETON_BARS], excerpt .6 [BOARD_AGENT_RELEVANCE_BAR]); a hard failure is a finding. ' +
       'The outcome per family is read from the TARGET (first question) across A (alone), O (opposite siblings), S (same siblings) with the rules in design.json, registered before sending. ' +
       'Same-matter bodies are hand-built in L1\'s sent shape (builder not on int/c14); the other two families are product-built.',

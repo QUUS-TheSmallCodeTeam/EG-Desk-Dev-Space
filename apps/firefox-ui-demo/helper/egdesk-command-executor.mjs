@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { classifyCommand } from './egdesk-terminal-command-gate.mjs'
 import { terminalFactRow } from './egdesk-terminal-judge.mjs'
+import { judgeHealth, judgeWorktree } from './egdesk-run-conditions.mjs'
 
 // EG-Desk's own command tool (c17 prototype, flag default off). Owner decision (2026-11-25): Codex is used as a pure model engine;
 // running commands, and the approval in front of them, is EG-Desk's own function (as in OpenCode, whose shell tool asks the
@@ -60,8 +61,12 @@ export function executorAssess(runtimeAssess, { home } = {}) {
  *   onFacts(run, row)          terminal facts (terminalFactRow shape). c18: kind 'engine' (the engine asked for this command), so the row
  *                              carries runningMs and exitCode; at the gate asking: true (EG-Desk asks the person itself)
  *   outputFor(run) → { append(itemId, text), complete(itemId) }   the run output store adapter for long output (optional)
+ *   c21 conditions (egdesk-run-conditions.mjs): after a command ends, its build/test health (exit status + the runner's summary line)
+ *   and, with gitStatus(cwd) → porcelain text, the worktree state. ask(run, request) is the auxiliary yes/no predicate on the output tail
+ *   (only when the structured fact is missing; it can only lower health). onConditions(run, record) feeds the runtime's terminal facts.
  */
-export function createCommandExecutorProvider({ mode = () => 'off', ledger = null, workspaceOf = () => null, runner = null, onFacts = () => {}, outputFor = () => null, limits = {} } = {}) {
+export function createCommandExecutorProvider({ mode = () => 'off', ledger = null, workspaceOf = () => null, runner = null, onFacts = () => {}, outputFor = () => null,
+  ask = null, gitStatus = null, onConditions = () => {}, limits = {} } = {}) {
   const L = { ...COMMAND_EXECUTOR_LIMITS, ...limits }
   const on = () => { try { return mode() === 'on' } catch { return false } }
   const facts = (run, row) => { try { onFacts(run, row) } catch { /* facts are advisory */ } }
@@ -109,10 +114,25 @@ export function createCommandExecutorProvider({ mode = () => 'off', ledger = nul
         onFacts: row => { if (row?.softNotice) facts(run, terminalFactRow({ kind: 'engine', running: true, runningMs: row.runningMs })) } }) }
       catch { facts(run, terminalFactRow({ kind: 'engine', running: false })); return respond(false, { error: { code: 'COMMAND_RUN_FAILED' } }) }
       const exitCode = Number.isSafeInteger(result?.exitCode) ? result.exitCode : null
+      const tailText = [result?.stdout, result?.stderr].filter(t => typeof t === 'string' && t).join('\n')
+      const askRun = typeof ask === 'function' ? request => ask(run, request) : null
+      let health = null, worktree = null
+      try { health = await judgeHealth({ exitCode: result?.timedOut ? null : exitCode, output: tailText, command, ask: askRun }) } catch { health = null }
+      if (typeof gitStatus === 'function') {
+        let porcelain = null
+        try { porcelain = await gitStatus(cwd) } catch { porcelain = null }
+        try { worktree = await judgeWorktree({ porcelain: typeof porcelain === 'string' ? porcelain : null, output: tailText, command, ask: askRun }) } catch { worktree = null }
+      }
+      try { onConditions(run, { exitCode, durationMs: Number.isFinite(result?.durationMs) ? result.durationMs : null, health, worktree }) } catch { /* facts are advisory */ }
       // the c10 row keeps runningMs only while running; the ended row adds how long it ran (an extra field, the row shape is unchanged)
       facts(run, { ...terminalFactRow({ kind: 'engine', running: false, exitCode }), ...(Number.isFinite(result?.durationMs) ? { durationMs: result.durationMs } : {}) })
       const out = tail(result?.stdout, L.outputChars), err = tail(result?.stderr, Math.floor(L.outputChars / 3))
-      return respond(true, { status: 'ran', approvedOnce: decision.decision === 'allow', exitCode, timedOut: result?.timedOut === true,
+      const conditions = {
+        ...(health ? { health: health.health, healthReasons: health.reasons } : {}),
+        ...(health?.summary ? { tests: { runner: health.summary.runner, passed: health.summary.passed, failed: health.summary.failed, total: health.summary.total, line: health.summary.line } } : {}),
+        ...(worktree ? { worktree: { state: worktree.state, ...(Number.isSafeInteger(worktree.conflicts) ? { conflicts: worktree.conflicts, uncommitted: worktree.uncommitted, untracked: worktree.untracked } : {}) } } : {}),
+      }
+      return respond(true, { status: 'ran', approvedOnce: decision.decision === 'allow', exitCode, timedOut: result?.timedOut === true, ...conditions,
         ...(Number.isFinite(result?.durationMs) ? { durationMs: result.durationMs } : {}),
         stdout: out.text, stderr: err.text, truncated: out.truncated || err.truncated })
     },

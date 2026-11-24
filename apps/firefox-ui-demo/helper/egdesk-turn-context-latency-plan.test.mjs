@@ -39,3 +39,53 @@ test('latency analysis: budgets per request from the product\'s warm() reading; 
   assert.equal(row(2, 'b-immediate').sent, false)
   assert.deepEqual([out.byCondition['a-first'].n, out.byCondition['a-first'].within800, out.byCondition['a-first'].within1500], [2, 0, 2])
 })
+
+test('idle probe: a realistic ~2.5k-token turn_context body and the smallest one, first after idle and immediately after; ceilings within 8k; the registered readings', async () => {
+  const { IDLE_CEILING, IDLE_DIR, analyzeIdle, buildIdlePlan } = await import('./egdesk-turn-context-latency-plan.mjs')
+  const built = await buildIdlePlan(), idleDir = path.join(dir, '..', path.basename(IDLE_DIR))
+  for (const run of built.runs) {
+    assert.ok(readFileSync(path.join(idleDir, run.dir, 'plan.json')).equals(run.planBytes), `${run.dir}/plan.json is stale`)
+    for (const f of run.files) assert.ok(readFileSync(path.join(idleDir, run.dir, f.file)).equals(f.bytes))
+    const plan = loadPlan(path.join(idleDir, run.dir, 'plan.json'))
+    assert.equal(plan.transport, 'product'); assert.ok(plan.requests.every(r => r.recordOnly && r.groupingOk && r.waitBeforeMs === 0))
+    assert.match(plan.passRule, /at least 10 minutes with no Decisions request/)
+  }
+  assert.ok(built.runs.reduce((s, r) => s + r.plan.tokenCeiling, 0) <= IDLE_CEILING)
+  const a1 = JSON.parse(built.runs[0].files[0].bytes.toString('utf8'))
+  assert.equal(a1.questions.length, 14, 'answer_type, time_intent and 12 relevance questions, as the multiuser first turn')
+  assert.ok(built.runs[0].plan.requests[0].estInputTokens >= 2400 && built.runs[0].plan.requests[0].estInputTokens <= 2800)
+  const r = (ms, srv = 200) => ({ elapsedMs: ms, openaiProcessingMs: String(srv) })
+  const A = { 'A1-realistic-first': r(1100, 600), 'A2-realistic-next': r(290), 'A3-small-next': r(250) }
+  assert.equal(analyzeIdle([A, { 'B1-small-first': r(1000, 550), 'B2-small-next': r(240) }]).reading, 'idle gap explains it, whatever the size')
+  assert.equal(analyzeIdle([A, { 'B1-small-first': r(320), 'B2-small-next': r(240) }]).reading, 'size matters on a cold path')
+  assert.equal(analyzeIdle([{ 'A1-realistic-first': r(330), 'A2-realistic-next': r(290), 'A3-small-next': r(250) }, { 'B1-small-first': r(300), 'B2-small-next': r(240) }]).reading, 'all fast: the tail is intermittent; two samples cannot show it')
+  assert.equal(analyzeIdle([A, {}]).reading, 'incomplete')
+})
+
+test('warm-up probe: six runs (A cold, B warm-up + 1 s, C warm-up + 10 s; two repetitions), record only through the product transport, ceilings within 10k; the registered readings', async () => {
+  const { WARMUP_CEILING, WARMUP_DIR, WARMUP_RUNS, analyzeWarmup, buildWarmupPlan } = await import('./egdesk-turn-context-latency-plan.mjs')
+  const built = await buildWarmupPlan(), wDir = path.join(dir, '..', path.basename(WARMUP_DIR))
+  assert.deepEqual(built.runs.map(r => r.dir), ['A-rep1', 'B-rep1', 'C-rep1', 'A-rep2', 'B-rep2', 'C-rep2'])
+  const bodies = new Set()
+  for (const run of built.runs) {
+    assert.ok(readFileSync(path.join(wDir, run.dir, 'plan.json')).equals(run.planBytes), `${run.dir}/plan.json is stale`)
+    for (const f of run.files) { assert.ok(readFileSync(path.join(wDir, run.dir, f.file)).equals(f.bytes)); bodies.add(f.bytes.toString('utf8')) }
+    const plan = loadPlan(path.join(wDir, run.dir, 'plan.json'))
+    assert.equal(plan.transport, 'product'); assert.match(plan.passRule, /at least 10 minutes with no Decisions request/)
+    assert.ok(plan.requests.every(r => r.recordOnly && r.groupingOk))
+    assert.ok(plan.totals.fittedEst * 1.1 <= plan.tokenCeiling, 'the fitted estimate with its margin fits the run\'s ceiling')
+    const ids = plan.requests.map(r => [r.id, r.waitBeforeMs])
+    if (run.dir.startsWith('A')) assert.deepEqual(ids, [['measured', 0]])
+    if (run.dir.startsWith('B')) assert.deepEqual(ids, [['warmup', 0], ['measured', 1000]])
+    if (run.dir.startsWith('C')) assert.deepEqual(ids, [['warmup', 0], ['measured', 10000]])
+  }
+  assert.equal(bodies.size, 10, 'no two bodies are identical')
+  assert.ok(built.totals.ceilings <= WARMUP_CEILING)
+  const m = (ms, warm) => ({ measured: { elapsedMs: ms, openaiProcessingMs: '200', reusedSocket: warm }, ...(warm !== undefined ? { warmup: { elapsedMs: 1200 } } : {}) })
+  const runs = (a, b, c) => Object.fromEntries(WARMUP_RUNS.map(([d]) => [d, d.startsWith('A') ? m(a) : d.startsWith('B') ? m(b, true) : m(c, true)]))
+  assert.equal(analyzeWarmup(runs(1100, 300, 290)).reading, 'warm-up works')
+  assert.equal(analyzeWarmup(runs(1100, 950, 290)).reading, 'warm-up works with lead time (10 s, not 1 s)')
+  assert.equal(analyzeWarmup(runs(1100, 300, 1000)).reading, 'warm-up does not help')
+  assert.equal(analyzeWarmup(runs(320, 300, 290)).reading, 'inconclusive: the idle tail did not occur in A')
+  assert.equal(analyzeWarmup({}).reading, 'incomplete')
+})

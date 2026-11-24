@@ -52,7 +52,7 @@ export function judge(request, seen, policy = {}, allowed = null) {
 
 // writer(prompt) → the fork writer's text (or a promise of it); attentionPosted: the bridge's hook; flags.commands: the engine-command judge (advisory);
 // tap(request): called with every decision request before the mock answers it.
-export function world(t, { flags = { held: true, flow: true }, fork = 'ok', failTurn = false, presence = null, audience = null, policy = {}, writer = null, attentionPosted = null, tap = null } = {}) {
+export function world(t, { flags = { held: true, flow: true }, fork = 'ok', failTurn = false, presence = null, audience = null, policy = {}, writer = null, attentionPosted = null, tap = null, steer = 'ok' } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-beat-')); chmodSync(dir, 0o700)
   const store = openChatStore({ dataDir: dir, ownerScope: 'synthetic-beat' })
   const log = openCalibrationLog({ dataDir: dir, log() {} })
@@ -106,12 +106,13 @@ export function world(t, { flags = { held: true, flow: true }, fork = 'ok', fail
       }
       if (method === 'turn/start') { if (failTurn) throw Object.assign(new Error('refused'), { code: -32000 }); return { turn: { id: `turn-${++turns}`, status: 'inProgress', items: [] } } }
       if (method === 'turn/interrupt') return {}
+      if (method === 'turn/steer') return { turnId: params.expectedTurnId } // c21: in-run messages handed to the working turn
       assert.fail(`Unexpected native call: ${method}`)
     },
     decisionContext: { mode: () => 'on', configured: () => true, client, budgetMs: 800, calibrationLog: log, collect: async () => [],
       draftCheck: flags.held ? { mode: () => 'on', ...(flags.design ? { design: () => flags.design } : {}) } : undefined,
       ...(flags.commands ? { commandJudge: { mode: () => 'advisory' } } : {}),
-      conversationFlow: flags.flow ? { mode: () => 'on', ...(presence ? { presence } : {}), ...(audience ? { audience } : {}), ...(attentionPosted ? { attentionPosted } : {}) } : undefined },
+      conversationFlow: flags.flow ? { mode: () => 'on', ...(flags.inRun ? { inRunMessages: () => true } : {}), ...(presence ? { presence } : {}), ...(audience ? { audience } : {}), ...(attentionPosted ? { attentionPosted } : {}) } : undefined },
   })
   chat.setConnection(true)
   const n = (m, p) => chat.handleNotification({ method: m, params: p })

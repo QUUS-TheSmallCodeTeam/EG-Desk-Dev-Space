@@ -68,7 +68,9 @@ test('turn memory action rules: the default triage and scan rules are unchanged;
   await triageTurn({ message: '전체 테스트 돌리고 결과 알려줘', heldTitles: ['롤백 절차'], stored: [], client, ruleSet: 'action' })
   assert.ok(!seen[0].input[0].content.includes(ACTION_MEMORY_RULE))
   assert.equal(seen[1].input[0].content, `${seen[0].input[0].content}\n${ACTION_MEMORY_RULE}`)
-  assert.deepEqual(seen[1].questions, seen[0].questions)
+  // c22: the action set also asks tn_action (last of the triage questions); the other questions are unchanged
+  assert.deepEqual(seen[1].questions.filter(q => q.name !== 'tn_action'), seen[0].questions)
+  assert.deepEqual(seen[1].questions.map(q => q.name).filter(n => n === 'tn_action'), ['tn_action'])
   const page = { id: 'p1', title: '롤백 절차', body: '문제가 생기면 30분 안에 되돌린다.', time: { slice: 'present' }, provenance: 'document', status: 'done', revision: 'r1', links: [] }
   const wiki = { pages: new Map([[page.id, page]]) }
   for (const [mode, rules] of [['first', JUDGE_RULES], ['next', NEXT_RULES]]) {
@@ -83,12 +85,13 @@ test('turn memory action rules: the default triage and scan rules are unchanged;
   }
 })
 
-test('memory-action-v1: <= 5k, product bars, every body carries the rule, committed files match', async () => {
-  const { buildMemoryActionPlan } = await import('../scripts/egdesk-memory-action-plan.mjs')
-  const built = await buildMemoryActionPlan()
-  assert.ok(built.est <= 5000)
+test('memory-action-v1 (sent in c24, superseded by v2): the committed bodies as sent, <= 5k, product bars, every body carries the rule', async () => {
+  // The product now adds tn_action to an action-set triage (c22), so v1 is no longer rebuilt byte for byte: its committed files are the record
+  // of what was sent (results: evidence/main-real/c24). memory-action-v2 is the rebuilt plan.
   const dir = new URL('../proofs/decision-real-measure/memory-action/', import.meta.url)
-  assert.ok(readFileSync(new URL('plan.json', dir)).equals(built.planBytes))
-  for (const f of built.files) { assert.ok(readFileSync(new URL(f.file, dir)).equals(f.bytes)); assert.ok(JSON.parse(f.bytes).input[0].content.endsWith(ACTION_MEMORY_RULE)) }
+  const plan = JSON.parse(readFileSync(new URL('plan.json', dir)))
+  assert.ok(plan.requests.reduce((n, r) => n + r.estInputTokens, 0) <= 5000)
+  const { createHash } = await import('node:crypto')
+  for (const r of plan.requests) { const bytes = readFileSync(new URL(r.file, dir)); assert.equal(createHash('sha256').update(bytes).digest('hex'), r.sha256); assert.ok(JSON.parse(bytes).input[0].content.endsWith(ACTION_MEMORY_RULE)) }
   assert.deepEqual(Object.keys(loadPlan(new URL('plan.json', dir).pathname).productBars), ['tn_need', 'pg_#'])
 })

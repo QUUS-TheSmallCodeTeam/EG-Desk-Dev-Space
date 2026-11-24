@@ -331,6 +331,21 @@ function workLines({ run, heartbeatFacts, flow, own, allows, browserTask = null 
   const done = tools.filter(a => a.status === 'completed')
   lines.push(hb.stepsDone > 0 ? `Tool steps finished so far: ${hb.stepsDone}${done.length ? ` (the last one: ${describe(done.at(-1))})` : ''}.` : 'No tool step has finished yet.')
   if (Number.isSafeInteger(hb.stepsRemaining)) lines.push(`The task may take up to ${hb.stepsRemaining} more steps (an upper limit, not a plan).`)
+  // c21: the last command EG-Desk ran itself. "The tests passed" is backed by the runner's own summary line (quoted where the run may
+  // send command output: the line is what supports the claim); a health the code could not confirm is said to be unconfirmed.
+  const ownLast = run?.ownCommandLast
+  if (ownLast) {
+    const parts = [`The last command EG-Desk ran ended with exit code ${ownLast.exitCode ?? 'unknown (it did not finish normally)'}`]
+    if (ownLast.summary) {
+      const counts = `${ownLast.summary.passed} passed, ${ownLast.summary.failed} failed${Number.isSafeInteger(ownLast.summary.total) ? `, ${ownLast.summary.total} in total` : ''}`
+      if (allows('command_output')) { kinds.add('command_output'); parts.push(`its test runner's own summary line reads "${oneLine(ownLast.summary.line, 300)}" (${counts})`) }
+      else parts.push(`its test runner counted ${counts}`)
+    } else if (ownLast.health === 'healthy') parts.push('no test summary was printed')
+    if (ownLast.health === 'unknown') parts.push('whether it fully worked is not confirmed')
+    if (ownLast.worktree?.state === 'conflict') parts.push(`git reports ${ownLast.worktree.conflicts} file${ownLast.worktree.conflicts === 1 ? '' : 's'} in conflict`)
+    else if (ownLast.worktree?.state === 'uncommitted_work') parts.push('the folder has uncommitted changes')
+    lines.push(`${parts.join('; ')}.`)
+  }
   // While a step-by-step task runs outside the engine, the engine's own silence says nothing: the task's last step does.
   const task = hb.sources?.browser_task
   if (task && browserTask) { const brief = browserTaskLines(browserTask, allows); lines.push(...brief.lines); for (const kind of brief.kinds) kinds.add(kind) }
@@ -512,7 +527,35 @@ export function writerPrompt(kind, facts, { question = null, prior = [], task = 
   if (kind === 'stalled') return [...base, `Nothing has come from the work for about ${Math.round((facts.sinceEngineMs ?? facts.elapsedMs) / 1000)} seconds. Say plainly that the response is taking unusually long, without claiming progress, and that the person can keep waiting or stop and ask again.`].join('\n')
   if (kind === 'ask_missing') return [...base, 'You need one piece of information from the person to finish part of the work, and you will keep working on the rest meanwhile.',
     question ? `You noted this question to yourself: ${JSON.stringify(question)}` : '', 'Ask for it directly in one question.'].filter(Boolean).join('\n')
+  // c21: the person asked, while the work runs, what is happening: answer that, from what the system knows, and nothing else.
+  if (kind === 'reply_status') return [...base, `The person just wrote, while you work: ${JSON.stringify(oneLine(facts.personMessage ?? '', IN_RUN_LIMITS.quoteChars))}`,
+    `Answer that briefly and truthfully: the work is still going (about ${seconds} seconds so far, ${facts.stepsDone} steps done) and what it is doing now, from what is given here only.`, waitLine, taskLine].filter(Boolean).join('\n')
   return [...base, `${facts.stepsDone} steps are done so far. Say briefly that the work is progressing and how far along it is, without giving results.`].join('\n')
+}
+
+// ---- A person's message that arrives while the run works (c21; flag decisionContext.conversationFlow.inRunMessages, default off) ----
+// The message becomes a heartbeat fact, quoted on its own (bounded). The beat asks three yes/no questions about it (R1/R2); code decides:
+//   stop yes                         -> 'stop'  (the run is interrupted; the message stays in the conversation)
+//   change yes                       -> 'steer' (the message goes into the working turn, as the person's words)
+//   status yes, change and stop not  -> 'reply' (one short true progress reply, worded by the subjective model and checked)
+//   anything else, or no answer      -> 'steer' (the safe default: the run gets what the person wrote)
+export const IN_RUN_LIMITS = Object.freeze({ quoteChars: 600, pending: 8 })
+export const PERSON_PREDICATES = Object.freeze({
+  status: Object.freeze({ name: 'person_status', type: 'predicate', instructions: 'Does this message ask what is happening, how far along the work is, or why it stopped?' }),
+  change: Object.freeze({ name: 'person_change', type: 'predicate', instructions: 'Does this message change or redirect the task the assistant is doing (a different target, order or way of doing it)?' }),
+  stop: Object.freeze({ name: 'person_stop', type: 'predicate', instructions: 'Does this message ask the assistant to stop or cancel the work?' }),
+})
+/** The questions about one in-run message, each quoting it (R4). */
+export function personPredicates(message) {
+  const quote = { label: 'The person\'s message, sent while the work is running', text: oneLine(message, IN_RUN_LIMITS.quoteChars) }
+  return [PERSON_PREDICATES.status, PERSON_PREDICATES.change, PERSON_PREDICATES.stop].map(q => ({ ...q, quote, kinds: ['run_text'], topic: 'person_message' }))
+}
+/** What code does with the message, from the yes answers (a Set of names). */
+export function personDecision(yes) {
+  if (yes.has('person_stop')) return 'stop'
+  if (yes.has('person_change')) return 'steer'
+  if (yes.has('person_status')) return 'reply'
+  return 'steer'
 }
 
 /** The instruction for a pointer message, from closed labels only. The writer composes the sentence in the person's language. */

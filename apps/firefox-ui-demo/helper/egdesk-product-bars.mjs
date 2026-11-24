@@ -11,6 +11,7 @@ import { BEAT_PREDICATE_YES } from './egdesk-heartbeat-judge.mjs'
 import { CONFIRM_BARS } from './egdesk-record-confirmation.mjs'
 import { SPEECH_PREDICATE_BARS, SPEECH_SPLIT_BARS, SPEECH_THRESHOLDS } from './egdesk-speech-grounding.mjs'
 import { RISK_PREDICATE_NO } from './egdesk-terminal-command-gate.mjs'
+import { CONDITION_NO, CONDITION_YES } from './egdesk-run-conditions.mjs'
 import { NO as TERNARY_NO, YES as TERNARY_YES } from './egdesk-wiki-reconstruction.mjs'
 import { PLACEMENT_PREDICATE_YES } from './egdesk-work-placement.mjs'
 
@@ -33,6 +34,9 @@ export const PRODUCT_BARS = Object.freeze([
   [/^heartbeat-c1[7-9]$|^draft-overcorrection-v\d+$/, /^(tense_#|present_#)$/, single(DRAFT_CHECK_THRESHOLDS.finding, 'egdesk-draft-check.mjs: a finding iff p >= finding')],
   [/^heartbeat-c1[7-9]$/, /^claim_#$/, choice(T.choice, T.margin, 'egdesk-draft-check.mjs readChoice thresholds.choice / margin')],
   [/^command-risk-v2$/, /^risk_/, onlyNo(RISK_PREDICATE_NO, 'egdesk-terminal-command-gate.mjs RISK_PREDICATE_NO: no approval iff p <= bar; otherwise approval')],
+  // c21 condition arbiter: output_reports_problem keeps exit-0 health only at <= no (yes and between lower it to unknown); the two hints
+  // (output_says_listening, output_reports_conflict) are added only at >= yes; a predicate never declares success
+  [/^run-conditions-v\d+$/, /^output_(reports_problem|says_listening|reports_conflict)$/, three(CONDITION_YES, CONDITION_NO, 'egdesk-run-conditions.mjs CONDITION_YES / CONDITION_NO: problem lowers health above no; hints only at yes')],
   [/^command-judgments-v1$/, /^log_b#$/, single(T.relevant, 'egdesk-terminal-judge.mjs readPredicate(th.relevant): attached iff p >= relevant')],
   [/^command-judgments-v1$/, /^terminal_state$/, choice(T.choice, T.margin, 'egdesk-terminal-judge.mjs readChoice th.choice / th.margin')],
   [/^browser-task-v1$/, /^goal_met$/, single(T.done, 'egdesk-browser-reflex.mjs readPredicate(thresholds.done)')],
@@ -47,10 +51,17 @@ export const PRODUCT_BARS = Object.freeze([
   [/^(heartbeat-c14|l4-work-placement)$/, /.*/, choice(T.choice, T.margin, 'retired c14 designs: DEFAULT_DECISION_THRESHOLDS choice / margin (assumed)')],
   [/^l4-briefing-skeleton$/, /^(place|part_P#|next)$/, choice(T.choice, T.margin, 'retired c14 skeleton: choice .75 / margin .2')],
   [/^action-relevance-v\d+$/, /^rel_#$/, single(T.relevant, 'egdesk-context-setup.mjs (via egdesk-decision-questions.mjs relevant): a candidate is attached iff p >= relevant (L7 c20 action wording)')],
+  [/^split-wording-v\d+$/, /^speechs_/, three(SPEECH_SPLIT_BARS.yes, SPEECH_SPLIT_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_SPLIT_BARS (split wording v2, the two-step hybrid second request, L7 c22)')],
+  [/^terse-record-v\d+$/, /^(tn_courtesy|tn_need|tn_record)$/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO (L7 c23 triage with the previous message)')],
+  [/^terse-record-v\d+$/, /^speechs_/, three(SPEECH_SPLIT_BARS.yes, SPEECH_SPLIT_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_SPLIT_BARS (own v3, L7 c23)')],
+  [/^previous-reply-v\d+$/, /^(tn_courtesy|tn_need)$/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO: the triage acts on a decided yes or no (L7 c22, with the previous assistant message)')],
+  [/^memory-action-v2$/, /^(tn_need|tn_action)$/, three(TERNARY_YES, TERNARY_NO, 'egdesk-turn-memory.mjs prepareTurnMemory: a decided tn_action yes fetches no stored page; a decided need no may skip (ternary YES / NO, L7 c22)')],
   [/^axis-hybrid-v\d+$/, /^speechs_/, three(SPEECH_SPLIT_BARS.yes, SPEECH_SPLIT_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_SPLIT_BARS (hybrid-isolated: read only where the axes question does not install, L7 c21)')],
   [/^axis-hybrid-v\d+$/, /^speech_/, choice(SPEECH_THRESHOLDS.confidence, SPEECH_THRESHOLDS.margin, 'egdesk-speech-grounding.mjs SPEECH_THRESHOLDS (hybrid-isolated axes question); pick() never installs unknown', { neverAccepts: ['unknown'] })],
   [/^memory-action-v\d+$/, /^(tn_need|pg_#)$/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO: triageSkipsFetch acts on a decided need no; the scan picks a decided yes (L7 c21 action rules)')],
   [/^axis-split-v\d+/, /^speechs_/, three(SPEECH_SPLIT_BARS.yes, SPEECH_SPLIT_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_SPLIT_BARS (split-isolated design, L7 c20): yes >= yes, no <= no, between undecided')],
+  // labelling study (no product action): a label is read at the general predicate guide (egdesk-conversation-examples.mjs readLabels, .8 / .2)
+  [/^conversation-labels-\d+$/, /^conv_/, three(TERNARY_YES, TERNARY_NO, 'egdesk-conversation-examples.mjs readLabels: a labelling study, no product action')],
   // legacy (c8-era, 11/22-11/24) families
   [/-11(22|23|24)$/, /^speechp_/, three(SPEECH_PREDICATE_BARS.yes, SPEECH_PREDICATE_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_PREDICATE_BARS')],
   [/-11(22|23|24)$/, /^(tn_|tw_link|tw_about|pg_|op_)/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO')],
@@ -72,6 +83,8 @@ export function barFor({ set, q, kind }, { fallback = true } = {}) {
 
 /** Whether a HARD check holds at the product bar. A wrong-install check (whenAccepted) holds unless the product installs a wrong value. */
 export function productHolds(row) {
+  // c16: a runner "notDecidedNo" check (row.expect 'not-no') holds when the product would not act on "no": p above the product no bar.
+  if (row.kind === 'predicate' && row.expect === 'not-no') { const b = barFor(row); return Number.isFinite(row.p) && b?.noAt !== undefined && row.p > b.noAt }
   const v = productVerdict(row)
   return row.whenAccepted ? v !== 'decided-wrong' && v !== 'not-answered' : v === 'decided-correct'
 }

@@ -6,6 +6,7 @@ import { normalizeEntry } from './egdesk-decision-calibration-log.mjs'
 import { outcomeCandidate, parseOutcomeText } from './egdesk-browser-task-memory.mjs'
 import { PAGE_STATE_CHECKS } from './egdesk-browser-reflex.mjs'
 import { pageStateAnswers } from './egdesk-browser-page-state.fixture.mjs'
+import { entryAnswersOf, entryWire, isEntryQuestion } from './egdesk-browser-entry.fixture.mjs'
 
 // L8 c17: a pause with exactly one candidate is a confirmation (confirm_needed), not a "which". Real c16 (browser-live-recorded-v2):
 // the same-thing predicate answered 0.75 and the task paused as choice_needed with ONE candidate, "가나상사 (987-65-43210)".
@@ -39,7 +40,7 @@ function world({ start = '/invoices', same = 0.75 } = {}) {
     sent.push({ names, text })
     const answers = { ...pageStateAnswers('content'), goal_met: { type: 'predicate', probability: /download/.test(text) ? 0.95 : 0.02 } }
     if (names.includes('task_resume')) return { answers: { task_resume: pick('resume_task') } }
-    if (names.includes('browser_entry')) return { answers: { browser_entry: pick(request.questions[0].choices[0].value) } }
+    if (names.includes('browser_entry')) return { answers: entryAnswersOf(request.questions) }
     for (const name of names.filter(n => n.startsWith('same_'))) answers[name] = { type: 'predicate', probability: same }
     if (names.includes('next_step')) {
       const values = request.questions.find(q => q.name === 'next_step').choices.map(c => c.value)

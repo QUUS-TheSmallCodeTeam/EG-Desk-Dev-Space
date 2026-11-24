@@ -21,10 +21,15 @@ export const EGRESS_KINDS = Object.freeze({
   draft_text: Object.freeze({ data: 'run', governedBy: 'The run\'s own evidence: catalog items only by the kinds the model itself received; tool outputs stay content-free references' }),
   memory_page: Object.freeze({ data: 'memory', governedBy: 'Memory scope of this DM/Agent (allowsPage: the page\'s own guard plus the scope the answering model may read)' }),
   speech_history: Object.freeze({ data: 'speech', governedBy: 'Per-DM speech reuse consent (the same consent that lets the answering model see past utterances)' }),
+  previous_reply: Object.freeze({ data: 'thread', governedBy: 'The assistant message right before this turn, which the answering model holds in its own native thread (same thread, completed turns, not compacted; Codex only, where compaction is reported). A bounded excerpt, quoted as data (L7 c22)' }),
   topic_history: Object.freeze({ data: 'topic', governedBy: 'Per-DM topic memory consent (the same consent that lets the answering model see past turns)' }),
+  // L1 c20: the words the person typed into the Desk's search field, before anything was sent. No structure lets ANY model see them (the
+  // field promises to search this device first), and Decisions gets no permission of its own, so this kind is refused by every gate: its
+  // class is not a model data class. It opens only if the owner decides a permission that covers all models (owner decision pending).
+  hud_text: Object.freeze({ data: 'hud', governedBy: 'No model permission covers typed search-field text yet: refused everywhere (owner decision pending)' }),
   board_excerpt: Object.freeze({ data: 'board', governedBy: 'This Board ask itself: the owner chose and confirmed a run that sends the approved public excerpts to the drafting model. An extract-only ask sends them to no model, so not to Decisions either' }),
 })
-const DATA_CLASSES = Object.freeze(['terminal', 'browser', 'canvas', 'run', 'memory', 'speech', 'topic', 'board'])
+const DATA_CLASSES = Object.freeze(['terminal', 'browser', 'canvas', 'run', 'memory', 'speech', 'topic', 'board', 'thread'])
 // Evidence kinds a draft-check catalog may carry, and the data class that already lets a model see them.
 // Items of the decision context packet were already admitted for this run's answering model, so they count as the run's own data.
 // run_state: what the run is doing now, from the runtime's own facts (the heartbeat's material a message was composed from).
@@ -40,8 +45,9 @@ const EVIDENCE_CLASS = Object.freeze({ source: 'run', document: 'run', conversat
  *   speechConsent / topicConsent: per-DM consent states for reusing past utterances / turns
  *   runActive: there is a run whose answer text and evidence the model owns
  *   boardExcerptsToModel: this Board ask sends the owner-approved excerpts to a model (the drafting model of a confirmed draft run)
+ *   threadReply: the answering model holds the previous assistant message in its own live native thread (mid-session, not compacted)
  */
-export function modelDataPermissions({ toolCeiling = null, browserGranted = false, canvasMaySend = false, memoryScope = null, speechConsent = false, topicConsent = false, runActive = false, boardExcerptsToModel = false } = {}) {
+export function modelDataPermissions({ toolCeiling = null, browserGranted = false, canvasMaySend = false, memoryScope = null, speechConsent = false, topicConsent = false, runActive = false, boardExcerptsToModel = false, threadReply = false } = {}) {
   const ceiling = toolCeiling && typeof toolCeiling === 'object' ? toolCeiling : null
   return Object.freeze({
     terminal: ceiling ? ceiling.terminal !== 'none' : true,
@@ -52,6 +58,7 @@ export function modelDataPermissions({ toolCeiling = null, browserGranted = fals
     speech: speechConsent === true,
     topic: topicConsent === true,
     board: boardExcerptsToModel === true,
+    thread: threadReply === true,
   })
 }
 
@@ -88,7 +95,7 @@ export function createEgressGate(permissions) {
 
 /** Every file that sends a Decision request and the kinds it may declare. A new call site must be added here (a test scans the code). */
 export const EGRESS_SITES = Object.freeze({
-  'codex-chat-runtime.mjs': ['speech_history', 'topic_history', 'memory_page', 'draft_text', 'run_facts', 'page_text', 'browser_task_record', 'terminal_command'],
+  'codex-chat-runtime.mjs': ['previous_reply', 'speech_history', 'topic_history', 'memory_page', 'draft_text', 'run_facts', 'page_text', 'browser_task_record', 'terminal_command'],
   'egdesk-board-presentation-http.mjs': ['canvas_text', 'board_arrangement: explicit owner confirm, coarse descriptors only',
     'briefing_judgments: /decision/briefing-placement (counts only), -reuse and -check (card labels, short summaries, step texts) are each asked of the gate with canvas_text by runBriefingFlow before they are sent',
     'briefing_skeleton: /decision/briefing-skeleton (the request of the run and, in the place request, the run\'s own answer as draft_text, the turn\'s memory materials as memory_page, card labels as canvas_text) asked of the gate by runSkeletonFlow before anything is sent; without draft_text nothing is asked, without memory_page there are no materials, without canvas_text no existing card is listed'],
@@ -102,6 +109,8 @@ export const EGRESS_SITES = Object.freeze({
   // request (run_text) and a nearby card's label and excerpt, only for cards the host marked maySend (canvas_text); "does the result need the
   // owner?" quotes the run's own request and answer (run_text). Each is asked of the run's gate (chat runtime placementContextFor) before it is sent.
   'egdesk-work-placement.mjs': ['run_text', 'canvas_text'],
+  // L1 c20 Desk HUD routing: the typed text (hud_text: refused until a permission covering all models exists) and maySend card labels
+  'egdesk-hud-routing.mjs': ['hud_text', 'canvas_text'],
   'egdesk-draft-check.mjs': ['draft_text'],
   'egdesk-heartbeat-judge.mjs': ['run_facts', 'run_text', 'terminal_command', 'plus any other kind a heartbeat question or a provider\'s context declares, each checked by the run\'s gate before it is sent'],
   // Plan builder for the real measurement: the product client with a recording fetch that refuses. Nothing is sent from this file.
@@ -110,8 +119,12 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-terminal-command-gate.mjs': ['terminal_command'],
   // c13 prototype: the person's reply to a command the hook denied (their own message, as the run's model receives it) and that command.
   'egdesk-gate-hook-broker.mjs': ['run_text', 'terminal_command'],
+  // c21: the auxiliary yes/no predicates of the condition arbiter on the output tail of a command EG-Desk ran for the run's engine.
+  'egdesk-own-tools-wiring.mjs': ['command_output'],
+  'egdesk-run-conditions-plan.mjs': ['command_output: plan builder; a capturing fetch that answers locally, nothing is sent'],
   'egdesk-terminal-judge.mjs': ['terminal_output', 'command_output'],
   'egdesk-memory-live-runner.mjs': ['memory_page: measurement tool; the public synthetic wiki only, through guardClient'],
+  'egdesk-conversation-scenarios.mjs': ['run_text: scenario tool (L3 c21); rebuilds the beat\'s in-run person questions as the wire body through a recording fetch that never sends; the masked conversation examples are owner-approved and guarded by helper/egdesk-scenario-seed-guard.mjs'],
   // Measurement tool: drives the real runtime, whose own gates ask every kind before each request; synthetic pages in a temporary directory only.
   'egdesk-memory-journey.mjs': ['memory_page', 'speech_history: measurement tool over the real runtime and its own gates; public synthetic data only'],
   'egdesk-turn-memory.mjs': ['memory_page', 'topic_history'],

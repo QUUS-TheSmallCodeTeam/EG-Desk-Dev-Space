@@ -24,7 +24,7 @@ import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
 import { createSpillRereadCounter, gateRuntimeToolResult, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
 import { homedir } from 'node:os'
 import { createInternalTurns } from './codex-internal-turn.mjs'
-import { attentionOf, audienceFacts, beatFlowFacts, browserTaskLines, cleanIntermediate, deriveFlowKind, enumerateOptions, FLOW_COPY, FLOW_LIMITS, flowPredicates, idleFlowFacts, messageEvidence, pointerDecision, pointerPredicates, pointerPrompt, pointerRoute, rideAlongPredicates, runContext, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
+import { attentionOf, audienceFacts, beatFlowFacts, browserTaskLines, cleanIntermediate, deriveFlowKind, enumerateOptions, FLOW_COPY, FLOW_LIMITS, flowPredicates, idleFlowFacts, messageEvidence, pointerDecision, pointerPredicates, pointerPrompt, pointerRoute, rideAlongPredicates, runContext, withoutRepeats, writerPrompt, personPredicates, personDecision, IN_RUN_LIMITS } from './egdesk-conversation-flow.mjs'
 import { BEAT_JUDGE_TIMEOUT_MS, BEAT_PREDICATE_YES, createBeatJudge } from './egdesk-heartbeat-judge.mjs'
 import { createHeartbeats } from './egdesk-heartbeat.mjs'
 import { feedBrowserTask } from './egdesk-heartbeat-providers.mjs'
@@ -108,9 +108,10 @@ export function compactionSignal(message) {
 const FLOW_OWN_KINDS = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
 import { SPEECH_AT_PAGE, speechSegments } from './egdesk-speech-grounding.mjs'
 import { pruneContextCandidates } from './egdesk-context-pruning.mjs'
+import { previousReplyExcerpt } from './egdesk-previous-reply.mjs'
 import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory, recordStateEvidence } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
-import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, entryQuestion, readBrowserEntry } from './egdesk-browser-task.mjs'
+import { BROWSER_TASK_TTL_MS, codeEntryCard, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, entryQuestions, readBrowserEntry } from './egdesk-browser-task.mjs'
 import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
@@ -859,6 +860,7 @@ export class CodexChatRuntime {
     this.commandGateRuns = new Set() // in-flight command gate assessments (never awaited by an approval card)
     // c18: { mode() → 'off'|'on', neutralFolder() → absolute EG-Desk-owned empty folder }; absent = off
     this.ownTools = ownTools
+    this.ownCommandBeats = new WeakSet() // heartbeats that already carry the own_commands provider
     this.shadowSeen = new Set() // answerId:itemId already judged by the own-tools shadow (bounded)
     this.shadowRuns = new Set()
     this.ownFolders = new Map() // conversationId → the real folder EG-Desk's tools use (never given to Codex in own-tools mode)
@@ -1736,6 +1738,10 @@ export class CodexChatRuntime {
       return this.acceptInRunMessage(working, body)
     }
     if (inRun) return this.answerEarlyQuestion(inRun, body)
+    // c21 (Main: accept a person's message during a run, developer flag, default off): the screen marks a message sent while the run works
+    // (inRunMessage: true, lane L2's surface); it joins the working run as a heartbeat fact instead of being refused (RUN_IN_PROGRESS).
+    const working = !internal && body?.inRunMessage === true && this.inRunMessagesOn() ? this.workingRunFor(idText(body?.clientThreadId) || idText(body?.thread?.id), idText(body?.conversationId)) : null
+    if (working) return this.acceptInRunMessage(working, body)
     validateChatCwd(body)
     if (this.requireStore) this.assertStore()
     const requestedEngineId = this.requestedEngine(body)
@@ -2847,7 +2853,7 @@ export class CodexChatRuntime {
           // after its question so the reply resumes the task INSIDE the run (see holdRunForBrowserReply). Everything a later native turn
           // of the same run needs is kept here; nothing is decided yet.
           if (context.browserTaskTurn === true && context.heartbeat && this.store) this.browserRunHolds.set(run, { phase: 'turn', turnId: run.runId, questionId: null, timer: null, cancelled: false, handedOff: browserPre.handedOff === true,
-            engine, slot, epoch, key: context.clientThreadId || cid, hosts: this.browserEntryHosts(body), additionalContext: additionalContext || null,
+            engine, slot, epoch, key: context.clientThreadId || cid, hosts: this.browserEntryHosts(body), titles: this.browserEntryTitles(body), additionalContext: additionalContext || null,
             base: { threadId: cid, ...QA_TURN_OVERRIDES, ...(overrides.cwd ? { cwd: overrides.cwd } : {}), ...(overrides.model ? { model: overrides.model } : {}), ...(effort !== undefined ? { effort } : {}) } })
           continue
         }
@@ -4389,7 +4395,8 @@ export class CodexChatRuntime {
         sent: this.contextDelivered.get(thread) ?? null, memoryReceipts: this.turnMemoryDelivered.get(thread)?.pages ?? null }) : { kept: Array.isArray(collected) ? collected : [], pruned: [] }
       const topic = mode === 'on' ? this.topicIntakes.get(context)?.prepare(controller.signal, inBudget) : null
       if (controller.signal.aborted || !inBudget()) return { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null }
-      const out = await prepareTurnContext({ message: body.message, candidates, client: setup.client, askedAt, speech, topic,
+      const previousReply = this.previousReplyFor(context, speech)
+      const out = await prepareTurnContext({ message: body.message, candidates, client: setup.client, askedAt, speech, topic, ...(previousReply ? { previousReply } : {}),
         timeoutMs: Math.max(1, Math.ceil(deadline + (keepLate ? LATE_CONTEXT_MS : 0) - performance.now())), signal: controller.signal, cacheScope: 'ctx',
         ...(setup.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
       if (out?.receipt && pruned.length) out.receipt = { ...out.receipt, pruned: { held: pruned.length } } // a count only, never ids
@@ -4420,6 +4427,23 @@ export class CodexChatRuntime {
     let warm = false
     try { warm = typeof setup.warm === 'function' && setup.warm() === true } catch { warm = false }
     return warm ? warmMs : coldMs
+  }
+
+  // The assistant message right before this turn, for the turn memory triage and the context selection (L7 c22, U9; flag
+  // turnMemory.previousReply, bridge EGDESK_TURN_MEMORY_PREVIOUS_REPLY=on, off by default). Only when the egress gate allows the conversation's
+  // own messages for this run: previous_reply (the answering model holds that message in its own live native thread: Codex, mid-session, not
+  // compacted) or speech_history (the DM's speech consent). A bounded excerpt (egdesk-previous-reply.mjs); never more than the answering model has.
+  previousReplyFor(context, speechSource = null) {
+    try {
+      if (this.decisionContext?.turnMemory?.previousReply !== true) return null
+      let speechConsent = false
+      try { speechConsent = speechSource?.allowed?.() === true } catch { speechConsent = false }
+      const threadReply = context.engine?.id === 'codex' && this.turnPosition(context).kind === 'mid'
+      const gate = createEgressGate(modelDataPermissions({ speechConsent, threadReply }))
+      if (!gate.allows('previous_reply') && !gate.allows('speech_history')) return null
+      const last = (this.store?.listMessages?.(context.clientThreadId)?.messages ?? []).filter(m => m.role === 'assistant' && m.status !== 'streaming' && m.status !== 'error').at(-1)
+      return typeof last?.text === 'string' ? previousReplyExcerpt(last.text) : null
+    } catch { return null }
   }
 
   keepLateFlag() {
@@ -5046,8 +5070,12 @@ export class CodexChatRuntime {
       this.allowIntermediateMessages(hold.key)
       const cfg = this.decisionContext?.browserEntry, provider = this.browserToolProvider()
       const entry = createDirectBrowserEntry({ provider, store: this.browserTaskStore, outcomeSink: typeof cfg?.outcomeSink === 'function' ? cfg.outcomeSink : null, now: this.now,
-        calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null })
-      const out = await entry.handle({ run, conversationKey: hold.key, message, hosts: hold.hosts })
+        calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null,
+        // c20: the finished task's status text goes into the note only where this run's models may receive Browser data
+        pageTextInNote: () => { try { return this.decisionEgressFor(run).allows('page_text') === true } catch { return false } },
+        // c21: the entry quotes the first lines each card shows, under the same gate
+        cardTextInEntry: () => { try { return this.decisionEgressFor(run).allows('page_text') === true } catch { return false } } })
+      const out = await entry.handle({ run, conversationKey: hold.key, message, hosts: hold.hosts, titles: hold.titles || {} })
       if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
     } catch { note = null; handedOff = false }
     hold.handedOff = handedOff
@@ -5101,6 +5129,15 @@ export class CodexChatRuntime {
   }
 
   browserToolProvider() { return this.toolProviders.find(provider => provider.providerId === 'egdesk-browser') || null }
+
+  // c20: each selected card's title as the card shows it (the source label), for the entry's per-card question (Browser data, page_text)
+  browserEntryTitles(body) {
+    const titles = {}
+    for (const source of Array.isArray(body?.selectedSources) ? body.selectedSources : []) {
+      if (source?.kind === 'browser' && typeof source?.sourceRef?.viewId === 'string' && typeof source.label === 'string' && source.label.trim()) titles[source.sourceRef.viewId] = source.label.trim().slice(0, 120)
+    }
+    return titles
+  }
 
   browserEntryHosts(body) {
     const hosts = {}
@@ -5166,10 +5203,15 @@ export class CodexChatRuntime {
       const guarded = kinds => (rawClient ? egress.guardClient(rawClient, kinds) : null)
       let entryAnswers = null
       if (!resuming && typeof cfg.entryAnswers === 'function' && egress.allows('page_text')) {
-        const hostsByCard = this.browserEntryHosts(body)
-        const cards = (preRun.browserBinding?.cards || []).filter(card => card.permission === 'interact').map(card => ({ cardId: card.cardId, host: hostsByCard[card.cardId] || '' }))
-        try { const answers = cards.length ? await cfg.entryAnswers({ body, context, question: entryQuestion(cards), client: guarded(['page_text']) }) : null
-          if (answers && ['choice', 'refusal'].includes(answers.browser_entry?.type)) entryAnswers = { browser_entry: answers.browser_entry, kind: readBrowserEntry(answers, cards).kind }
+        const hostsByCard = this.browserEntryHosts(body), titlesByCard = this.browserEntryTitles(body)
+        const cards = (preRun.browserBinding?.cards || []).filter(card => card.permission === 'interact').map(card => ({ cardId: card.cardId, host: hostsByCard[card.cardId] || '', title: titlesByCard[card.cardId] || '' }))
+        // c20: the entry is yes/no predicates (the request; one per card unless code named the card); the host appends all of them
+        const codeCard = codeEntryCard(body.message, cards), questions = entryQuestions(cards, { codeCard })
+        try { const answers = cards.length ? await cfg.entryAnswers({ body, context, questions, question: questions[0], client: guarded(['page_text']) }) : null
+          if (answers && answers.browser_entry?.type === 'predicate') {
+            const picked = Object.fromEntries(questions.map(q => [q.name, answers[q.name]]).filter(([, a]) => a))
+            entryAnswers = { ...picked, codeCard, kind: readBrowserEntry(picked, cards, { codeCard }).kind }
+          }
         } catch { entryAnswers = null }
       }
       const skipMemory = resuming || (entryAnswers !== null && entryAnswers.kind !== 'browser')
@@ -5177,8 +5219,12 @@ export class CodexChatRuntime {
       // Read-only: the task loop's step count and waiting state feed this conversation's heartbeat; the store behaves exactly as before.
       if (context.heartbeat) feedBrowserTask(context.heartbeat, this.browserTaskStore, context.clientThreadId)
       const entry = createDirectBrowserEntry({ provider, store: this.browserTaskStore, outcomeSink: typeof cfg.outcomeSink === 'function' ? cfg.outcomeSink : null, now: this.now,
-        calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null })
-      const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), memory, entryAnswers })
+        calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null,
+        // c20: the finished task's status text goes into the note only where this run's models may receive Browser data
+        pageTextInNote: () => { try { return this.decisionEgressFor(preRun).allows('page_text') === true } catch { return false } },
+        // c21: the entry quotes the first lines each card shows, under the same gate
+        cardTextInEntry: () => { try { return this.decisionEgressFor(preRun).allows('page_text') === true } catch { return false } } })
+      const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), titles: this.browserEntryTitles(body), memory, entryAnswers })
       if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
     } catch { note = null; handedOff = false }
     return { preRun, provider, note, handedOff, adopted: false }
@@ -5633,7 +5679,22 @@ export class CodexChatRuntime {
   // The message question for this beat while the run works, or nothing (a quiet beat costs no request). The request bounds are the heartbeat's.
   flowPropose(run, flow, beat, subject = this.heartbeatSubjects.get(flow.heartbeat)) {
     const setup = this.decisionContext
-    if (flow.closed || run.status !== 'inProgress' || !flow.canSpeak || this.finalAnswerBegun(run, flow)) return null
+    if (flow.closed || run.status !== 'inProgress') return null
+    // c21: a message judged at an earlier beat whose round never concluded is handed to the run (the safe default), not asked again.
+    for (const stale of (flow.personMessages ?? []).filter(m => m.state === 'judging' && m !== flow.pendingPerson)) this.trackFlowJob(this.actOnPersonMessage(run, flow, stale, 'steer', null))
+    const person = (flow.personMessages ?? []).find(m => m.state === 'pending')
+    if (person) {
+      if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) { this.trackFlowJob(this.actOnPersonMessage(run, flow, person, 'steer', null)); return null }
+      // The beat asks about the person's message alone (quoted), with the run's own text as its context where the run's gate allows it.
+      const facts = { ...beatFlowFacts({ heartbeatFacts: beat.facts, run, flow, own: FLOW_OWN_KINDS }), heartbeatFacts: beat.facts }
+      const egress = this.decisionEgressFor(run)
+      const context = runContext({ run, heartbeatFacts: beat.facts, flow, facts, userText: this.runUserText(run), allows: kind => egress.allows(kind), own: FLOW_OWN_KINDS, browserTask: this.browserTaskBrief(run) })
+      person.state = 'judging'
+      flow.pendingPerson = person; flow.pendingFacts = facts; flow.pendingOptions = ['none', 'reply_status']; flow.pendingRide = null
+      const questions = personPredicates(person.text)
+      return context ? { context, questions } : questions
+    }
+    if (!flow.canSpeak || this.finalAnswerBegun(run, flow)) return null
     if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return null
     const facts = { ...beatFlowFacts({ heartbeatFacts: beat.facts, run, flow, own: FLOW_OWN_KINDS }), ...(subject ? this.pointerFacts(subject, beat.facts) : {}), heartbeatFacts: beat.facts }
     // c19 (owner decision): while this run's browser task is paused for the person (its question being worded or posted), the question
@@ -5675,6 +5736,15 @@ export class CodexChatRuntime {
 
   // The verdict for the message question: write, check and post, and say what happened in a closed word for the record.
   flowVerdict(run, flow, { verdicts }, subject = this.heartbeatSubjects.get(flow.heartbeat)) {
+    const person = flow.pendingPerson
+    if (person) {
+      const personFacts = flow.pendingFacts
+      flow.pendingPerson = null; flow.pendingFacts = null; flow.pendingOptions = null
+      const said = new Set(verdicts.filter(v => v.accepted && v.value === 'yes').map(v => v.name))
+      const action = personDecision(said)
+      if (subject) subject.derived = action
+      return this.trackFlowJob(this.actOnPersonMessage(run, flow, person, action, personFacts))
+    }
     const facts = flow.pendingFacts, options = flow.pendingOptions ?? []
     flow.pendingFacts = null; flow.pendingOptions = null
     // The answers are yes/no; code picks the kind (a question first, then a pointer, then a progress note worded by code).
@@ -5836,6 +5906,62 @@ export class CodexChatRuntime {
       if (flow && !flow.closed && flow.question?.pending) return run
     }
     return null
+  }
+
+  // ---- In-run messages (c21; flag decisionContext.conversationFlow.inRunMessages(), default off; bridge EGDESK_IN_RUN_MESSAGES=on, lane L2) ----
+  // Contract with lane L2 (surface and bridge): the screen sends a message typed while its run works with inRunMessage: true (the same
+  // /chat/send body otherwise); the answer is { accepted, inRun: true, held: true, ... }. The message is recorded as the person's message of
+  // that run at once (message.completed); what happens next is decided at the next beat (within 0.5 s, heartbeat.nudge): a short progress
+  // reply (one completed assistant message of the run), the message steered into the working native turn (turn/steer, as the early
+  // question's reply is), or the run stopped (run.stop_requested). Without the flag, or with no working run, nothing changes.
+  inRunMessagesOn() {
+    try { return this.heartbeatMode() === 'on' && this.decisionContext?.conversationFlow?.inRunMessages?.() === true } catch { return false }
+  }
+  workingRunFor(clientThreadId, conversationId) {
+    if (!clientThreadId) return null
+    for (const run of this.runs.values()) {
+      if (run.clientThreadId !== clientThreadId || run.status !== 'inProgress' || (conversationId && run.conversationId !== conversationId)) continue
+      const flow = this.flowRuns.get(run)
+      if (flow && !flow.closed && flow.heartbeat) return run
+    }
+    return null
+  }
+  acceptInRunMessage(run, body) {
+    const flow = this.flowRuns.get(run)
+    const requestId = idText(body.requestId), message = typeof body.message === 'string' ? body.message : ''
+    if (!flow || !this.store || !requestId || !message.trim() || message.length > 16384) throw chatError('INVALID_REQUEST', 'This message cannot be added to the running turn', 400)
+    flow.personMessages ??= []
+    if (flow.personMessages.filter(m => m.state !== 'done').length >= IN_RUN_LIMITS.pending) throw chatError('RUN_IN_PROGRESS', 'The running turn already holds the messages it can take', 409)
+    const localMessageId = this.recordInRunReply(run, flow, requestId, message)
+    flow.personMessages.push({ requestId, text: message, state: 'pending', at: this.now() })
+    try { flow.heartbeat?.nudge?.() } catch { /* the next regular beat takes it */ }
+    return { accepted: true, durable: true, inRun: true, held: true, requestId, clientThreadId: run.clientThreadId, conversationId: run.conversationId, runId: run.runId, localMessageId }
+  }
+  // What code does with the message (personDecision): stop, steer, or reply (falling back to steer when no reply can be posted).
+  async actOnPersonMessage(run, flow, person, action, facts) {
+    person.state = 'done'
+    if (flow.closed || run.status !== 'inProgress') { person.action = 'none'; return 'none' }
+    if (action === 'stop') {
+      person.action = 'stopped'
+      try { await this.interrupt({ conversationId: run.conversationId, runId: run.runId }) } catch { person.action = 'stop_failed' }
+      return 'none'
+    }
+    if (action === 'reply' && facts) {
+      const posted = await this.postIntermediate(run, flow, 'reply_status', { ...facts, personMessage: person.text })
+      if (posted !== 'none') { person.action = 'replied'; return posted }
+    }
+    person.action = (await this.steerPersonMessage(run, person)) ? 'steered' : 'undelivered'
+    return 'none'
+  }
+  async steerPersonMessage(run, person) {
+    try {
+      const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
+      const proof = engine?.boardPeerContract?.(slot)
+      if (!proof || typeof engine.steerTurn !== 'function') return false
+      const response = await engine.steerTurn({ threadId: run.conversationId, expectedTurnId: run.runId, clientUserMessageId: person.requestId,
+        input: [{ type: 'text', text: person.text, text_elements: [] }] }, slot, proof)
+      return response?.turnId === run.runId
+    } catch { return false }
   }
 
   // The person answered the early question while the run kept working: the reply becomes a normal local user message and is
@@ -6174,6 +6300,32 @@ export class CodexChatRuntime {
   }
 
   commandJudgeIdle() { return this.engineCommands.idle() }
+
+  // ---- c21: the conditions of the last command EG-Desk ran itself (egdesk-run-conditions.mjs via the command executor). ----
+  // Kept on the run for the message evidence (the runner's own summary line backs "the tests passed"), and offered to the conversation's
+  // heartbeat as flat facts (numbers, booleans, closed labels; no text), under the heartbeat's facts-only provider contract.
+  noteOwnCommand(run, record) {
+    try {
+      if (!run || !record) return
+      const summary = record.health?.summary ?? null
+      run.ownCommandLast = Object.freeze({ exitCode: Number.isSafeInteger(record.exitCode) ? record.exitCode : null, durationMs: Number.isFinite(record.durationMs) ? record.durationMs : null,
+        health: record.health?.health ?? null, healthReasons: record.health?.reasons ?? [], summary: summary ? Object.freeze({ ...summary, line: String(summary.line).slice(0, 300) }) : null,
+        worktree: record.worktree ? Object.freeze({ ...record.worktree }) : null })
+      const hb = this.heartbeatThreads.get(run.conversationId)
+      if (!hb || hb.state === 'stopped' || this.ownCommandBeats.has(hb)) return
+      hb.register('own_commands', { facts: () => this.ownCommandFacts(run.conversationId) })
+      this.ownCommandBeats.add(hb)
+    } catch { /* facts are advisory */ }
+  }
+
+  ownCommandFacts(conversationId) {
+    const last = [...this.runs.values()].filter(r => r.conversationId === conversationId && r.ownCommandLast).at(-1)?.ownCommandLast
+    if (!last) return null
+    return { ...(last.exitCode !== null ? { exit_code: last.exitCode } : {}), ...(last.durationMs !== null ? { duration_ms: last.durationMs } : {}),
+      ...(last.health ? { health: last.health } : {}), test_summary: Boolean(last.summary),
+      ...(last.summary ? { tests_passed: last.summary.passed, tests_failed: last.summary.failed, ...(Number.isSafeInteger(last.summary.total) ? { tests_total: last.summary.total } : {}) } : {}),
+      ...(last.worktree ? { worktree: last.worktree.state, ...(Number.isSafeInteger(last.worktree.conflicts) ? { conflicts: last.worktree.conflicts, uncommitted: last.worktree.uncommitted } : {}) } : {}) }
+  }
 
   // ---- Working-memory gate at the EG-Desk tool-result boundary (egdesk-working-memory-wiring.mjs). ----
   // Config: decisionContext.workingMemory = { mode(): 'off'|'advisory'|'on' }. Absent or 'off' → null and nothing changes.
@@ -6563,8 +6715,8 @@ export class CodexChatRuntime {
     if (this.turnMemoryConfirmOn()) await this.confirmNotedRecords(turn, body, context, { wiki, baseScope, scope, egress, threadKey })
     const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position: turn.position, threadKey, scope,
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
-      deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock, previous: turn.previous,
-      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(tm.speechDesign === 'split-isolated' || tm.speechDesign === 'hybrid-isolated' ? { speechDesign: tm.speechDesign } : {}),
+      deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock, previous: turn.previous, previousReply: this.previousReplyFor(context, turn.sources?.speech ?? null),
+      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
         ...(this.decisionContext?.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
     // The first turn's recording triage answers on its own time; once it has, the rule knows whether a write judgment can still follow.
     if (result.triageLater) void result.triageLater.then(late => { turn.lateTriage = late ?? { record: { state: 'unknown' } } }, () => { turn.lateTriage = { record: { state: 'unknown' } } })
@@ -6942,7 +7094,7 @@ export class CodexChatRuntime {
       const threadKey = run.conversationId
       const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position, threadKey,
         scope: typeof tm.scope === 'function' ? await (async () => { const base = await tm.scope({ body, context }); return base ? egress.memoryScope(base) : base })() : null, live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null,
-        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal , writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(tm.speechDesign === 'split-isolated' || tm.speechDesign === 'hybrid-isolated' ? { speechDesign: tm.speechDesign } : {}),
+        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal , writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
         ...(this.decisionContext?.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
       const judged = result.judgeWrite ? await result.judgeWrite() : null
       if (typeof threadKey === 'string' && threadKey) {

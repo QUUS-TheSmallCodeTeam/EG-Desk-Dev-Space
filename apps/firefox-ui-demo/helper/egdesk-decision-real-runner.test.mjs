@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { EXIT, independentEstimate, loadPlan, main, planTable, runPlan, scoreExpectation, scoreRequest, writeResults } from './egdesk-decision-real-runner.mjs'
+import { EXIT, TOKEN_MODEL, estimateBodyTokens, independentEstimate, loadPlan, main, planTable, runPlan, scoreExpectation, scoreRequest, writeResults } from './egdesk-decision-real-runner.mjs'
 
 const KEY = 'sk-test-not-a-real-key-0123456789'
 const sha = text => createHash('sha256').update(text).digest('hex')
@@ -68,6 +68,7 @@ test('loadPlan: exact file bytes are hashed and kept; the table shows what would
   assert.equal(plan.requests[0].bytes.toString('utf8'), f.files.a, 'the body is the file, byte for byte (not re-serialised)')
   assert.deepEqual(planTable(plan).map(row => [row.id, row.choice, row.predicate, row.hard, row.soft, row.sha.length]), [['a', 1, 1, 2, 0, 12], ['b', 0, 2, 1, 1, 12], ['c', 1, 0, 0, 1, 12]])
   assert.equal(plan.requests[0].independentEst, independentEstimate(1, 1, Buffer.byteLength(f.files.a)))
+  assert.equal(plan.requests[0].fittedEst, estimateBodyTokens(f.files.a))
   assert.equal(plan.requests[2].expect[0].options, 3)
 })
 
@@ -474,4 +475,61 @@ test('transport "product": a real send goes through the product transport, recor
   assert.deepEqual(transportPhases([{ phase: 'start', t: 10 }, { phase: 'lookup', t: 12 }, { phase: 'connect', t: 50 }, { phase: 'secureConnect', t: 110 }, { phase: 'response', t: 410, reused: false }]),
     { reusedSocket: false, dnsMs: 2, connectMs: 40, tlsMs: 100, responseMs: 400 })
   assert.deepEqual(transportPhases([{ phase: 'start', t: 0 }, { phase: 'response', t: 200, reused: true }]), { reusedSocket: true, responseMs: 200 })
+})
+
+test('independent token estimate: per question type and per ASCII / non-ASCII character; Korean weighs about four ASCII characters; the dry run warns when the margin would pass the ceiling', async () => {
+  const q = [{ type: 'predicate', name: 'a', instructions: 'x' }]
+  const en = JSON.stringify({ model: 'm', input: 'a'.repeat(400), questions: q }), ko = JSON.stringify({ model: 'm', input: '가'.repeat(400), questions: q })
+  assert.ok(estimateBodyTokens(ko) - estimateBodyTokens(en) > 250, 'four hundred Hangul characters cost far more than four hundred ASCII ones')
+  assert.equal(estimateBodyTokens(JSON.stringify({ questions: [] })), Math.round(TOKEN_MODEL.ascii * 16))
+  assert.ok(TOKEN_MODEL.nonAscii / TOKEN_MODEL.ascii > 4 && TOKEN_MODEL.margin === 1.1)
+  // the legacy byte model under-weights Korean: a Hangul character is 3 bytes but about 4 ASCII characters of tokens
+  assert.ok(independentEstimate(0, 1, Buffer.byteLength(ko)) < estimateBodyTokens(ko))
+  const fitted = loadPlan(fixture().planFile).totals.fittedEst
+  const tight = fixture(plan => { plan.tokenCeiling = fitted + 1 })
+  const loaded = loadPlan(tight.planFile)
+  const io = capture()
+  await main([tight.planFile], { env: {}, print: io.print, printError: io.printError })
+  const head = JSON.parse(io.out[0])
+  assert.deepEqual([head.independentEst, head.fittedEst, head.fittedWithMargin], [loaded.totals.independentEst, loaded.totals.fittedEst, Math.round(loaded.totals.fittedEst * TOKEN_MODEL.margin)])
+  assert.ok(loaded.totals.fittedEst * TOKEN_MODEL.margin > loaded.tokenCeiling, 'the fixture is tight')
+  assert.match(head.warning, /fitted estimate x 1.1 \(\d+\) is over the token ceiling/)
+  assert.equal(planTable(loaded)[0].fittedEst, loaded.requests[0].fittedEst)
+})
+
+test('notDecidedNo (c16, L4): passes when p is above the declared product no bar (the product would not act on "no"); resolved from productBars at load; stands alone; refusals', async () => {
+  const bars = { '*predicate': { yes: 0.8, no: 0.2, source: 'unit' }, '*choice': { minConfidence: 0.75, minMargin: 0.2 }, is_q: { yes: 0.7, no: 0.3 } }
+  const withCheck = (extra = {}, planBars = bars) => fixture(plan => {
+    if (planBars) plan.productBars = planBars
+    plan.requests[0].expect[1].minMargin = 0.2
+    plan.requests[1].expect[0] = { name: 'is_question', kind: 'predicate', notDecidedNo: true, severity: 'hard', note: 'undecided does not block', ...extra }
+  })
+  const plan = loadPlan(withCheck().planFile), e = plan.requests[1].expect[0]
+  assert.equal(e.notDecidedNo, true); assert.equal(e.above, 0.2, 'the *predicate no bar')
+  // the boundary: p equal to the no bar is "decided no" (the product blocks at p <= no), so the check fails there; just above passes
+  for (const [p, pass] of [[0.2, false], [0.19, false], [0.21, true], [0.5, true], [0.95, true]]) {
+    const row = scoreExpectation(e, pred('is_question', p))
+    assert.equal(row.pass, pass, `p=${p}`); assert.equal(row.above, 0.2); assert.equal(row.notDecidedNo, true)
+  }
+  assert.equal(scoreExpectation(e, { type: 'choice' }).pass, false, 'an unreadable answer fails')
+  // a family bar wins over the kind bar
+  const fam = fixture(plan => { plan.productBars = { ...bars, is_question: { yes: 0.7, no: 0.3 } }; plan.requests[0].expect[1].minMargin = 0.2
+    plan.requests[1].expect[0] = { name: 'is_question', kind: 'predicate', notDecidedNo: true, severity: 'hard', note: '' } })
+  assert.equal(loadPlan(fam.planFile).requests[1].expect[0].above, 0.3)
+  // refusals: no product bars, no "no" bar, not true, combined with min or max
+  assert.throws(() => loadPlan(withCheck({}, null).planFile), /notDecidedNo needs a declared product "no" bar/)
+  assert.throws(() => loadPlan(withCheck({}, { '*predicate': { yes: 0.8 }, '*choice': { minConfidence: 0.75, minMargin: 0.2 } }).planFile), /notDecidedNo needs a declared product "no" bar/)
+  assert.throws(() => loadPlan(withCheck({ notDecidedNo: false }).planFile), /notDecidedNo must be true/)
+  assert.throws(() => loadPlan(withCheck({ min: 0.5 }).planFile), /notDecidedNo stands alone/)
+  assert.throws(() => loadPlan(withCheck({ max: 0.6 }).planFile), /notDecidedNo stands alone/)
+  // a check without any bound is still refused
+  assert.throws(() => loadPlan(withCheck({ notDecidedNo: undefined }).planFile), /needs min and\/or max, or notDecidedNo/)
+  // scoring an unresolved expectation (not loaded through a plan) is a programming error, never a silent pass
+  assert.throws(() => scoreExpectation({ name: 'x', kind: 'predicate', severity: 'hard', note: '', notDecidedNo: true }, pred('x', 0.9)), /not resolved/)
+  // the request verdict: a hard notDecidedNo miss fails the request; undecided passes it
+  const b = plan.requests[1]
+  const blocked = scoreRequest(b, { status: 200, answers: [pred('is_question', 0.1), pred('is_secret', 0.01)] })
+  assert.deepEqual([blocked.pass, blocked.hardFailures], [false, ['is_question']])
+  const undecided = scoreRequest(b, { status: 200, answers: [pred('is_question', 0.55), pred('is_secret', 0.01)] })
+  assert.deepEqual([undecided.pass, undecided.hardFailures], [true, []])
 })

@@ -30,12 +30,13 @@ async function scenario(t, reply) {
     const child = new EventEmitter()
     Object.assign(child, { pid: 5000 + spawned.length, stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true })
     spawned.push({ command: args[1], cwd: options.cwd, env: options.env, detached: options.detached, file })
-    setImmediate(() => { child.stdout.write(args[1] === 'npm test' ? '2 passing\n' : 'To example.test:demo-app.git\n + abc...def main -> main (forced update)\n'); setImmediate(() => child.emit('close', 0, null)) })
+    setImmediate(() => { child.stdout.write(args[1] === 'npm test' ? '  2 passing (12ms)\n' : 'To example.test:demo-app.git\n + abc...def main -> main (forced update)\n'); setImmediate(() => child.emit('close', 0, null)) })
     return child
   }
   const env = { EGDESK_OWN_TOOLS: 'on', PATH: '/usr/bin:/bin', HOME: '/home/synthetic', SSH_AUTH_SOCK: '/tmp/agent.sock', OPENAI_API_KEY: 'sk-synthetic' }
   let chat = null
-  const wiring = createOwnToolsWiring({ env, dataDir, spawn, getChat: () => chat, killGroup: () => {}, home: '/home/synthetic' })
+  // c21: git status is injected too (no process); after the edits the two files show as modified
+  const wiring = createOwnToolsWiring({ env, dataDir, spawn, getChat: () => chat, killGroup: () => {}, home: '/home/synthetic', gitStatus: async () => ' M src/add.js\n M src/greet.js\n' })
   // the Decision model: harmless content predicates; the person's reply read from what they wrote
   const read = []
   const client = createDecisionClient({ getApiKey: () => 'egd-synthetic-not-a-key-0019', recipientForKey: () => 'a'.repeat(64),
@@ -87,7 +88,10 @@ test('응: edits, tests, the destructive push asked in the chat, run exactly onc
   const s = await scenario(t, '응')
   assert.deepEqual([s.e1.status, s.e1.kind, s.e2.status, s.e2.kind], ['edited', 'update', 'edited', 'update'], 'partial edits run without asking, shown as diffs')
   assert.match(s.e1.diff, /-export const add = \(a, b\) => a - b\n\+export const add = \(a, b\) => a \+ b/)
-  assert.deepEqual([s.tests.status, s.tests.exitCode, s.tests.stdout], ['ran', 0, '2 passing\n'])
+  assert.deepEqual([s.tests.status, s.tests.exitCode, s.tests.stdout], ['ran', 0, '  2 passing (12ms)\n'])
+  // c21: health from the exit status and the runner's own summary line; the worktree from git status
+  assert.deepEqual([s.tests.health, s.tests.healthReasons, s.tests.tests], ['healthy', ['summary_passed'], { runner: 'mocha', passed: 2, failed: 0, total: null, line: '2 passing (12ms)' }])
+  assert.deepEqual(s.tests.worktree, { state: 'uncommitted_work', conflicts: 0, uncommitted: 2, untracked: 0 })
   assert.deepEqual([s.push1.status, s.push1.reasons, s.push1.executed], ['needs_person', ['remote_irreversible'], false])
   assert.deepEqual(s.read, ['응'], 'the person\'s reply was read once, as yes/no')
   assert.deepEqual([s.push2.status, s.push2.approvedOnce, s.push2.exitCode], ['ran', true, 0])

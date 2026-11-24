@@ -14,7 +14,7 @@ import { canvasViewSize, placeCanvasView } from '../overlay/resources/EGDeskSurf
 // (egdesk-briefing-catalog.mjs) and from the cards already on the board (with provenance). Nothing here talks to a network, publishes, moves a camera or writes the
 // Board: the host injects judge{} (bridge route) and fill().
 
-export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, maxFacts: 6, factMax: 300, maxMaterials: 12, maxParts: 6, softSteps: 5, maxRequests: 8, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
+export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, maxFacts: 6, factMax: 300, maxMaterials: 12, usualMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 8, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
 // A predicate counts as yes at or above `yes` and as no at or below `no`; anything between is undecided. Placeholders until calibrated (real predicates of the other features answer near 0 or 1).
 export const SKELETON_BARS = Object.freeze({ yes: .7, no: .3 })
 export const SKELETON_STAGES = Object.freeze(['place', 'fit', 'order', 'fill_check', 'coverage'])
@@ -46,7 +46,9 @@ const fingerprint = m => 't:' + createHash('sha256').update(`${norm(m.title)}|${
  */
 export function normalizeMaterials(rows) {
   const listed = (Array.isArray(rows) ? rows : []).filter(m => isObj(m) && clean(m.title, SKELETON_LIMITS.titleMax)), fresh = listed.filter(m => m.held !== true)
-  const usable = (fresh.length ? fresh : listed).slice(0, SKELETON_LIMITS.maxMaterials)
+  // Cycle 26 (Main): twelve materials only for a long range (more dated materials than the usual eight could hold); otherwise eight, as before c25
+  const pool = fresh.length ? fresh : listed, longRange = pool.slice(0, SKELETON_LIMITS.maxMaterials).filter(m => typeof (m.time?.at ?? m.at) === 'string').length > SKELETON_LIMITS.usualMaterials
+  const usable = pool.slice(0, longRange ? SKELETON_LIMITS.maxMaterials : SKELETON_LIMITS.usualMaterials)
   const idOf = m => (typeof m.alias === 'string' && m.alias ? m.alias : typeof m.id === 'string' ? m.id : null)
   const aliasOf = new Map(usable.map((m, i) => [idOf(m), 'M' + (i + 1)]).filter(([k]) => k !== null))
   return usable.map((m, i) => {
@@ -93,8 +95,23 @@ function withJudgedVersions(mats, pairs) {
 // links those materials as one matter (same task, follows from, decided in, refers to, supersedes), so a request about one of them is about the matter. The group is
 // asked through its first material (the memory loop's own order). Yes keeps the group; no or undecided drops it (the chat answer still has it). A material linked to
 // nothing is asked about by itself.
-export function relevanceQuestions(mats) {
-  return materialGroups(mats).map(group => ({ kind: 'about', material: group[0].alias, covers: group.map(m => m.alias) }))
+// Cycle 26 (Main's position after the c25 real run, where a group asked through its first line - a decision ABOUT L7 c19 - dropped the merge line the request asked for):
+// the representative is picked by CODE: the member whose title names every identifier the request names (a token with a digit: "L7", "c19", "v2"), the one that names
+// them earliest (a line's subject follows its stamp). A group with no such member, or a request that names none, is asked material by material.
+const IDENT = /(?<![A-Za-z0-9])[A-Za-z]*\d+[A-Za-z0-9]*(?![A-Za-z0-9])/g
+export const requestIdentifiers = request => [...new Set([...String(request ?? '').matchAll(IDENT)].map(m => m[0].toLowerCase()))]
+function namedAt(title, idents) {
+  const t = String(title).replace(/^\d{2}-\d{2} \d{2}:\d{2}\s*/, '').toLowerCase(), found = idents.map(id => [...t.matchAll(IDENT)].find(m => m[0] === id)?.index ?? -1)
+  return found.every(i => i >= 0) ? Math.min(...found) : -1
+}
+export function relevanceQuestions(mats, request = '') {
+  const idents = requestIdentifiers(request)
+  return materialGroups(mats).flatMap(group => {
+    if (group.length === 1) return [{ kind: 'about', material: group[0].alias, covers: [group[0].alias] }]
+    const named = idents.length ? group.map(m => ({ m, at: namedAt(m.title, idents) })).filter(x => x.at >= 0).sort((a, b) => a.at - b.at) : []
+    if (named.length) return [{ kind: 'about', material: named[0].m.alias, covers: group.map(m => m.alias) }]
+    return group.map(m => ({ kind: 'about', material: m.alias, covers: [m.alias] }))
+  })
 }
 // Versions (cycle 17). Code resolves what the record says: a version link or a version mark in the titles (versions); any other recorded link between the two
 // (they are related some other way: not versions); different companies in the titles (not versions). What is left is asked, for pairs whose titles share a word of
@@ -640,13 +657,16 @@ export const COVERAGE_MODES = Object.freeze(['facts', 'board'])
  *  each stands alone as a fact; a comma inside a number, "12,800", never splits). A list ("법무 검토, 대표 승인, 최종본 발송") stays one sentence, one fact.
  *  At most SKELETON_LIMITS.maxFacts; the rest are counted (cut), never asked. -> { facts: [text], cut } */
 export function answerFacts(answer) {
+  const facts = factSentences(answer)
+  return { facts: facts.slice(0, SKELETON_LIMITS.maxFacts), cut: Math.max(0, facts.length - SKELETON_LIMITS.maxFacts) }
+}
+function factSentences(answer) {
   const anchored = t => { const a = factAnchors(t); return a.dates.length + a.versions.length + a.amounts.length > 0 }
   const out = clean(answer, SKELETON_LIMITS.answerMax).split(/(?<=[.!?。])\s+/).flatMap(sentence => {
     const clauses = sentence.split(/[,;]\s+/).map(t => t.trim()).filter(Boolean)
     return clauses.length > 1 && clauses.every(anchored) ? clauses : [sentence.trim()]
   })
-  const facts = out.map(t => clean(t, SKELETON_LIMITS.factMax)).filter(Boolean)
-  return { facts: facts.slice(0, SKELETON_LIMITS.maxFacts), cut: Math.max(0, facts.length - SKELETON_LIMITS.maxFacts) }
+  return out.map(t => clean(t, SKELETON_LIMITS.factMax)).filter(Boolean)
 }
 const DATE_ANY = /(?<!\d)(\d{1,2})\s?월\s?(\d{1,2})\s?일|(?<![\d/.])(\d{1,2})[/.](\d{1,2})(?![\d/.])/g
 const AMOUNT = /\d{1,3}(?:,\d{3})+|\d+(?=\s?(?:원|개|%|명|건|대|일간))/g
@@ -668,6 +688,26 @@ export function factCites(text, materials) {
     const marks = [...body.matchAll(new RegExp(VERSION_MARK.source, 'gi'))].map(x => Number(x[1] ?? x[2] ?? x[3]))
     return a.dates.some(d => dateMatches(d, { at: m.at, text: body })) || a.versions.some(n => marks.includes(n)) || a.amounts.some(x => body.includes(x))
   }).map(m => m.alias)
+}
+
+// Cycle 27 (Main, R3): the materials the ANSWER cites stay on the board even when request relevance dropped them, so a fact the answer states is not lost to the chat.
+// Found by code, per fact of the answer (all its sentences, not only the six the coverage asks): its specific anchors - lane-cycle ids ("L7 c19"), version marks,
+// amounts - cite the materials that carry them; a date cites only when the fact has no specific anchor (a date alone is shared by a whole day of records).
+const LANE_CYCLE_ID = /(?<![A-Za-z0-9])([A-Za-z]\d{1,2})\s?(c\d{1,3})(?![A-Za-z0-9])/gi
+const laneCycleIds = t => [...String(t).matchAll(LANE_CYCLE_ID)].map(m => `${m[1]} ${m[2]}`.toLowerCase())
+export function answerCited(answer, materials) {
+  const cited = new Set()
+  for (const fact of factSentences(answer)) {
+    const a = factAnchors(fact), ids = laneCycleIds(fact)
+    const specific = ids.length || a.versions.length || a.amounts.length
+    for (const m of materials) {
+      const body = `${m.title} ${m.text}`
+      const marks = [...body.matchAll(new RegExp(VERSION_MARK.source, 'gi'))].map(x => Number(x[1] ?? x[2] ?? x[3])), own = laneCycleIds(body)
+      const hit = specific ? ids.some(id => own.includes(id)) || a.versions.some(n => marks.includes(n)) || a.amounts.some(x => body.includes(x)) : a.dates.some(d => dateMatches(d, { at: m.at, text: body }))
+      if (hit) cited.add(m.alias)
+    }
+  }
+  return [...cited]
 }
 
 // ---------------- 6. the bounded loop ----------------
@@ -713,7 +753,7 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
   const unavailable = (r, fallback) => (fallback ? done('fallback-chat', { reason: r.unavailable === 'request-bound' ? 'request-bound' : 'judge-unavailable', detail: r.unavailable }) : done('bubble', { reason: r.unavailable === 'declined' ? 'declined' : 'judge-unavailable', detail: r.unavailable, requested: false }))
   // (a) bubble or board (two predicates), and in the same request what code cannot resolve about the materials: is each linked group what the request asks about,
   // and are the unresolved title-sharing pairs versions of one thing. One request instead of three; every question quotes its own material.
-  const relevance = relevanceQuestions(scene.materials), pairs = versionCandidates(scene.materials)
+  const relevance = relevanceQuestions(scene.materials, asked), pairs = versionCandidates(scene.materials)
   // the content question when the answer is at hand; the length question only without it (the earlier path)
   const placed = await ask('place', [...(said ? [{ kind: 'combines' }] : [{ kind: 'several' }, { kind: 'one_sentence' }]), ...relevance.map(q => ({ kind: 'about', material: q.material })), ...pairs.map(materials => ({ kind: 'same', materials }))])
   if (placed.unavailable) return unavailable(placed, false)
@@ -723,9 +763,11 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     return done('advisory-only', { verdict: placed.advisory, requested: true })
   }
   // Code drops what the request does not ask about (decided no or undecided) and adds the version pairs the judge confirmed; the scene is built again from that.
-  const kept = new Set(relevance.filter(q => isYes(placed.answers[`about_${q.material}`])).flatMap(q => q.covers))
+  const relevant = new Set(relevance.filter(q => isYes(placed.answers[`about_${q.material}`])).flatMap(q => q.covers))
+  // (cycle 27) and what the answer itself cites stays, whatever relevance said; recorded apart
+  const citedOnly = (said ? answerCited(said, scene.materials) : []).filter(a => !relevant.has(a)), kept = new Set(scene.materials.map(m => m.alias).filter(a => relevant.has(a) || citedOnly.includes(a)))
   const dropped0 = scene.materials.filter(m => !kept.has(m.alias)).map(m => m.alias), versions = pairs.filter(([a, b]) => isYes(placed.answers[`same_${a}_${b}`]))
-  relevanceOut = { kept: [...kept], dropped: dropped0, versions }
+  relevanceOut = { kept: [...kept], dropped: dropped0, versions, ...(citedOnly.length ? { cited: citedOnly } : {}) }
   const place = decidePlace(placed.answers, { relevant: kept.size })
   if (place.value !== 'board') return done('bubble', { reason: place.reason, requested: true, place: placed.answers })
   if (!kept.size) return done('bubble', { reason: 'not-asked-about', requested: true })

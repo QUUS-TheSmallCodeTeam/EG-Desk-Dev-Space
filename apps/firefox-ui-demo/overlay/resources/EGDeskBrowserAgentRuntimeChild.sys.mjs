@@ -951,7 +951,65 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
       value: this.valueFor(node),
       disabled: this.isDisabled(node),
       bounds: this.roundedBounds(this.viewportRect(node)),
+      ...(this.navigationFacts(node) ? { nav: this.navigationFacts(node) } : {}),
     };
+  }
+
+  // L8 c20: facts the helper's read-only-navigation proof reads for a button (the helper presses one only when they prove a same-site GET
+  // form submission or a client-side view change). Facts only, never a decision; null for anything that is not a button.
+  //   type: the button's type; sensitiveRegion: inside [data-sensitive]/[data-private]; regionLabel: the nearest region's label;
+  //   form: { method, fields: field kinds, sensitive, submitUrl: the exact URL a GET submission loads } (a form submitter only);
+  //   controls: { text } of the panel it controls (aria-controls), for a button outside any form.
+  navigationFacts(node) {
+    try {
+      const tag = String(node.tagName || "").toLowerCase();
+      const inputType = String(node.getAttribute?.("type") || "").toLowerCase();
+      const role = this.roleFor(node);
+      const isButton = tag === "button" || (tag === "input" && ["submit", "button", "image"].includes(inputType)) || role === "button" || role === "tab";
+      if (!isButton) return null;
+      const type = tag === "button" ? (inputType || "submit") : tag === "input" ? inputType : null;
+      const sensitiveRegion = Boolean(node.closest?.("[data-sensitive],[data-private]"));
+      const region = node.closest?.("fieldset,section,form,[role=region],[role=dialog],[aria-label]");
+      const regionLabel = this.compact(region ? (region.getAttribute?.("aria-label") || region.querySelector?.("legend,h1,h2,h3,h4")?.textContent || "") : "", 60);
+      const facts = { type, sensitiveRegion, regionLabel, form: null, controls: null };
+      const form = tag === "button" || tag === "input" ? node.form || null : null;
+      if (form && type !== "button") {
+        const method = String(node.getAttribute?.("formmethod") || form.getAttribute?.("method") || "get").toLowerCase();
+        const fields = [], params = [];
+        let sensitive = false;
+        for (const field of Array.from(form.elements || []).slice(0, 40)) {
+          const ftag = String(field.tagName || "").toLowerCase();
+          const ftype = ftag === "input" ? String(field.getAttribute?.("type") || "text").toLowerCase() : ftag;
+          if (ftype === "password" || ftype === "file" || this.isSensitiveControl(field) || isSensitiveAutocomplete(field.getAttribute?.("autocomplete"))) sensitive = true;
+          fields.push(ftype);
+          const name = field.getAttribute?.("name");
+          if (!name || field.disabled || ["submit", "button", "image", "reset", "file"].includes(ftype)) continue;
+          if ((ftype === "checkbox" || ftype === "radio") && !field.checked) continue;
+          params.push([name, String(field.value ?? "")]);
+        }
+        const own = node.getAttribute?.("name");
+        if (own) params.push([own, String(node.value ?? "")]);
+        let submitUrl = null;
+        if (method === "get" && !sensitive) {
+          const doc = node.ownerDocument;
+          const url = new URL(node.getAttribute?.("formaction") || form.getAttribute?.("action") || doc?.URL || "", doc?.baseURI || doc?.URL);
+          url.search = new URLSearchParams(params).toString();
+          url.hash = "";
+          submitUrl = url.href;
+        }
+        facts.form = { method, fields, sensitive, submitUrl };
+      } else if (!form) {
+        const id = node.getAttribute?.("aria-controls");
+        const panel = id ? node.ownerDocument?.getElementById?.(id) : null;
+        if (panel && !panel.closest?.("[data-sensitive],[data-private]")) {
+          const text = this.compact(panel.querySelector?.("h1,h2,h3,h4,legend,label,p,li")?.textContent || panel.textContent || "", 60);
+          if (text) facts.controls = { text };
+        }
+      }
+      return facts;
+    } catch {
+      return null;
+    }
   }
 
   interactiveElements(doc, limit = 80, scan = this.scanRoots(doc)) {

@@ -1,5 +1,6 @@
 {
   "set": "contamination-v1",
+  "askedAt": "2026-11-24T12:00:00.000Z",
   "tokenCeiling": 10000,
   "productBars": {
     "same_matter_R#": {

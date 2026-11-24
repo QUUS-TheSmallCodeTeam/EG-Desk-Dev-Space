@@ -1,0 +1,25 @@
+{
+  "set": "turn-context-warmup-v1/C-rep2",
+  "tokenCeiling": 1850,
+  "transport": "product",
+  "passRule": "Record only (latency probe). PRECONDITION, not enforced by the runner: start this run only after at least 10 minutes with no Decisions request from this machine. Run order A-rep1, B-rep1, C-rep1, A-rep2, B-rep2, C-rep2. Read the \"measured\" request with scripts/egdesk-turn-context-latency-plan.mjs analyze-warmup.",
+  "requests": [
+    {
+      "id": "warmup",
+      "file": "requests/warmup.json",
+      "sha256": "a6258f51bafc94d83ef654d0a3d3e57ed66f177587deaf0bc653f0725c318548",
+      "estInputTokens": 647,
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "measured",
+      "file": "requests/measured.json",
+      "sha256": "3c35f42ba4aba25b3b255de8560f24ee7960d3beab2650c1ef95bb67e46fcb60",
+      "estInputTokens": 1028,
+      "waitBeforeMs": 10000,
+      "expect": [],
+      "recordOnly": true
+    }
+  ]
+}

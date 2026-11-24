@@ -5,6 +5,7 @@ import { runBrowserReflex, PAGE_STATE_CHECKS } from './egdesk-browser-reflex.mjs
 import { browserTaskLines, messageEvidence, runContext, TASK_LAST, BRIEF_GOAL_LIMIT } from './egdesk-conversation-flow.mjs'
 import { normalizeEntry } from './egdesk-decision-calibration-log.mjs'
 import { pageStateAnswers } from './egdesk-browser-page-state.fixture.mjs'
+import { entryAnswersOf, entryWire, isEntryQuestion } from './egdesk-browser-entry.fixture.mjs'
 
 // L8 c18: what the heartbeat's note judgment is told about a running browser task (R1), under the run's egress gate, and the
 // step-level calibration records (owner decision 5: closed words and numbers only). Synthetic pages, scripted answers; nothing is sent.
@@ -27,7 +28,7 @@ function world({ start = '/home', hold = null } = {}) {
   }
   const client = { decide: async request => {
     const names = request.questions.map(q => q.name), text = request.input.map(m => m.content).join('\n')
-    if (names.includes('browser_entry')) return { answers: { browser_entry: pick(request.questions[0].choices[0].value) } }
+    if (names.includes('browser_entry')) return { answers: entryAnswersOf(request.questions) }
     const values = request.questions.find(q => q.name === 'next_step')?.choices.map(c => c.value) ?? []
     const next = /\/home/.test(text) ? pick('[L1] 세금계산서 조회', 0.97)
       : { ...pick('needs_user_context', 0.88), probabilities: [{ value: 'needs_user_context', probability: 0.9 }, ...values.filter(v => /^\[L\d\]/.test(v)).map(value => ({ value, probability: 0.04 }))] }
@@ -94,7 +95,7 @@ test('calibration (owner decision 5): one record per step with the next-step cho
   const w = world()
   await w.say(GOAL)
   const [entry, ...steps] = w.raw.map(r => normalizeEntry(r, Date.parse('2026-11-25T00:00:00Z')))
-  assert.equal(entry.judgments[0].q, 'choice')
+  assert.equal(entry.judgments[0].q, 'browser_entry', 'c20: the entry predicates')
   assert.equal(steps.length, 2)
   for (const step of steps) {
     assert.deepEqual(step.judgments.map(j => j.q), ['next_step', ...PAGE_STATE_CHECKS.map(c => c.name), 'goal_met'])
@@ -107,7 +108,7 @@ test('calibration (owner decision 5): one record per step with the next-step cho
 test('c19 calibration: the same-thing predicates of a code-decided step are logged as same_0.. (closed names; owner decision 3)', async () => {
   const raw = []
   const steps = [{ decision: { kind: 'act', next: { value: null, by: 'code', recorded: 'maybe', same: [0.95, 0.04] }, pageChecks: Object.fromEntries(PAGE_STATE_CHECKS.map(c => [c.name, 0.02])), goalMet: 0.02, options: null } }]
-  const provider = { directEntryEnabled: () => true, reflexScope: () => ({ client: { decide: async r => ({ answers: { browser_entry: pick(r.questions[0].choices[0].value) } }) }, authorizeDispatch: () => true, isDecisionCurrent: () => true }),
+  const provider = { directEntryEnabled: () => true, reflexScope: () => ({ client: { decide: async r => ({ answers: entryAnswersOf(r.questions) }) }, authorizeDispatch: () => true, isDecisionCurrent: () => true }),
     runDirectTask: async () => ({ outcome: 'done', steps: steps.map(s => ({ ...s, url: `${O}/x`, actions: [] })), state: null }) }
   const entry = createDirectBrowserEntry({ provider, store: createBrowserTaskStore(), calibration: { record: r => raw.push(r) } })
   await entry.handle({ run: { runId: 'r', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm', message: GOAL, hosts: { card: 'portal.example.test' } })

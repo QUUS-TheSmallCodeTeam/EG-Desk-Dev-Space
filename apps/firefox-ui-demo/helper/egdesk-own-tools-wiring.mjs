@@ -1,3 +1,4 @@
+import { execFile as nodeExecFile } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createCommandExecutorProvider, executorAssess } from './egdesk-command-executor.mjs'
@@ -38,7 +39,17 @@ export function processGroupKill(kill = (pid, signal) => process.kill(pid, signa
  *   ownTools, toolProviders, ledger, terminalGate(base) }
  *   getChat() → the CodexChatRuntime (read lazily: the runtime is made after this wiring)
  */
-export function createOwnToolsWiring({ env = process.env, dataDir, spawn, getChat, inspect = null, killGroup = processGroupKill(), home = env?.HOME } = {}) {
+// c21: `git status --porcelain=v1` in the run folder, for the worktree condition (structured; null outside a repository or on any error).
+export function gitPorcelain(execFile = nodeExecFile) {
+  return cwd => new Promise(resolve => {
+    try {
+      execFile('git', ['status', '--porcelain=v1', '--untracked-files=normal'], { cwd, timeout: 1500, maxBuffer: 1024 * 1024, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' } },
+        (error, stdout) => resolve(error ? null : String(stdout)))
+    } catch { resolve(null) }
+  })
+}
+
+export function createOwnToolsWiring({ env = process.env, dataDir, spawn, getChat, inspect = null, killGroup = processGroupKill(), home = env?.HOME, gitStatus = gitPorcelain() } = {}) {
   // shadow: no provider, no ledger, no spawn, no engine folder, no gate change; the runtime only records (codex-chat-runtime observeOwnToolsShadow)
   if (ownToolsShadow(env)) return { shadow: true, toolProviders: [], ownTools: { mode: () => 'shadow', neutralFolder: () => null }, terminalGate: base => base }
   if (!ownToolsEnabled(env)) return null
@@ -48,7 +59,16 @@ export function createOwnToolsWiring({ env = process.env, dataDir, spawn, getCha
   const workspaceOf = run => getChat().runFolder(run)
   const outputFor = run => ({ append: (itemId, text) => getChat().runOutputs.appendCommandOutput(run.answerId, itemId, text),
     complete: itemId => getChat().runOutputs.completeCommand(run.answerId, itemId) })
-  const executor = createCommandExecutorProvider({ mode: () => 'on', ledger, workspaceOf, runner, outputFor })
+  // the auxiliary predicate on a command's output tail: only with the person's Decision mode on (or advisory) and a saved key, and only
+  // where the run may send command output (the output of commands this run's engine asked for, which its model already receives)
+  const ask = async (run, request) => {
+    const chat = getChat(), setup = chat?.decisionContext
+    if (!setup?.client || setup.configured?.() !== true || !['advisory', 'on'].includes(setup.mode?.())) return null
+    if (chat.decisionEgressFor(run).allows('command_output') !== true) return null
+    return setup.client.decide({ ...request, timeoutMs: 1500 })
+  }
+  const executor = createCommandExecutorProvider({ mode: () => 'on', ledger, workspaceOf, runner, outputFor, ask, gitStatus,
+    onConditions: (run, record) => getChat().noteOwnCommand(run, record) })
   const files = createFileToolsProvider({ mode: () => 'on', ledger, workspaceOf, inspect })
   return {
     ledger, executor, files, toolProviders: [executor, files],
