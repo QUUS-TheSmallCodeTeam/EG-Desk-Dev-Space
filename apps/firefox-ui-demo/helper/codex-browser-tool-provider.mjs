@@ -257,11 +257,9 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
     },
     // Each reflex step goes through this provider's own dispatch for the same
     // run with a fresh callId, so grants, the action gate and receipts apply.
-    async dispatchReflex(run, event) {
-      if (!reflexEnabled(decision)) {
-        return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { code: 'BROWSER_REFLEX_UNAVAILABLE', message: 'The Browser reflex is not enabled' } }) }] }
-      }
-      const args = event.arguments && typeof event.arguments === 'object' ? event.arguments : {}
+    // The authority one reflex execution runs under, shared by the model-called tool and the direct chat entry:
+    // the recipient/key, run binding and Card grant are captured once and rechecked at every send.
+    reflexScope(run, event, cardId) {
       // Snapshot the existing recipient/run scope; do not adopt a replacement
       // credential or Browser binding while an observation is pending.
       const currentRecipient = () => {
@@ -271,7 +269,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
       const recipient = currentRecipient()
       const generation = decision.generation?.()
       const binding = transport.runs.get(run.runId)
-      const card = run.browserBinding?.cards?.find(item => item.cardId === args.cardId)
+      const card = run.browserBinding?.cards?.find(item => item.cardId === cardId)
       const isDecisionCurrent = () => Boolean(recipient && binding && !resetting &&
         !cancelledBrowserRuns.has(run) && run.status === 'inProgress' && run.executionPolicy?.mode === BROWSER_BOUNDED &&
         binding.ownerKey === getOwnerKey() && binding.clientThreadId === run.clientThreadId &&
@@ -291,12 +289,22 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
         if (!output?.success) throw reflexStepError(text)
         return JSON.parse(text)
       }
+      return { callTool, authorizeDispatch, isDecisionCurrent, client: decision.client || null }
+    },
+    // Each reflex step goes through this provider's own dispatch for the same
+    // run with a fresh callId, so grants, the action gate and receipts apply.
+    async dispatchReflex(run, event) {
+      if (!reflexEnabled(decision)) {
+        return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: { code: 'BROWSER_REFLEX_UNAVAILABLE', message: 'The Browser reflex is not enabled' } }) }] }
+      }
+      const args = event.arguments && typeof event.arguments === 'object' ? event.arguments : {}
+      const { callTool, authorizeDispatch, isDecisionCurrent, client } = this.reflexScope(run, event, args.cardId)
       let result
       try {
         result = await runReflex({ cardId: args.cardId, goal: args.goal,
           ...(args.values !== undefined ? { values: args.values } : {}),
           ...(args.maxSteps !== undefined ? { maxSteps: args.maxSteps } : {}),
-          callTool, client: decision.client || null, authorizeDispatch, isDecisionCurrent })
+          callTool, client, authorizeDispatch, isDecisionCurrent })
       } catch (error) {
         const failure = classifyPublicToolError(error, { browser: true })
         return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ error: failure }) }] }
@@ -304,6 +312,19 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
       const response = { success: result?.outcome !== 'invalid', contentItems: [{ type: 'inputText', text: reflexResultForModel(result || {}) }] }
       if (result?.outcome === 'handoff') reflexHandoffs.set(response, { run, event })
       return response
+    },
+    // The same gate as the model-called tool: a key and mode 'on'. Off means the direct entry calls nothing.
+    directEntryEnabled() { return reflexEnabled(decision) },
+    // The direct chat entry (egdesk-browser-task.mjs): same authority as the tool, but called by EG-Desk itself with
+    // the user's own message as the goal. Returns the raw reflex result (outcome, steps, state), never the model text.
+    // Reflex and Decisions gating is identical to the tool: mode on and a key, or nothing is called.
+    async runDirectTask(run, { cardId, goal, userContext = [], resumeState = null, maxSteps, callId }) {
+      if (!reflexEnabled(decision)) return { outcome: 'fallback', reason: 'not_configured', steps: [] }
+      const scope = this.reflexScope(run, { callId: callId || 'direct-task', namespace: null }, cardId)
+      const result = await runReflex({ cardId, goal, ...(maxSteps !== undefined ? { maxSteps } : {}), userContext, resumeState,
+        callTool: scope.callTool, client: scope.client, authorizeDispatch: scope.authorizeDispatch, isDecisionCurrent: scope.isDecisionCurrent })
+      if (result?.outcome === 'handoff') reflexHandoffs.set(result, { run, event: { callId: callId || 'direct-task' } })
+      return result
     },
     async cancelRun(run) {
       // Fence notices immediately, even while the stop RPC or UI cleanup is pending.
