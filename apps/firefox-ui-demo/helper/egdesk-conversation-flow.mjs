@@ -512,7 +512,35 @@ export function writerPrompt(kind, facts, { question = null, prior = [], task = 
   if (kind === 'stalled') return [...base, `Nothing has come from the work for about ${Math.round((facts.sinceEngineMs ?? facts.elapsedMs) / 1000)} seconds. Say plainly that the response is taking unusually long, without claiming progress, and that the person can keep waiting or stop and ask again.`].join('\n')
   if (kind === 'ask_missing') return [...base, 'You need one piece of information from the person to finish part of the work, and you will keep working on the rest meanwhile.',
     question ? `You noted this question to yourself: ${JSON.stringify(question)}` : '', 'Ask for it directly in one question.'].filter(Boolean).join('\n')
+  // c21: the person asked, while the work runs, what is happening: answer that, from what the system knows, and nothing else.
+  if (kind === 'reply_status') return [...base, `The person just wrote, while you work: ${JSON.stringify(oneLine(facts.personMessage ?? '', IN_RUN_LIMITS.quoteChars))}`,
+    `Answer that briefly and truthfully: the work is still going (about ${seconds} seconds so far, ${facts.stepsDone} steps done) and what it is doing now, from what is given here only.`, waitLine, taskLine].filter(Boolean).join('\n')
   return [...base, `${facts.stepsDone} steps are done so far. Say briefly that the work is progressing and how far along it is, without giving results.`].join('\n')
+}
+
+// ---- A person's message that arrives while the run works (c21; flag decisionContext.conversationFlow.inRunMessages, default off) ----
+// The message becomes a heartbeat fact, quoted on its own (bounded). The beat asks three yes/no questions about it (R1/R2); code decides:
+//   stop yes                         -> 'stop'  (the run is interrupted; the message stays in the conversation)
+//   change yes                       -> 'steer' (the message goes into the working turn, as the person's words)
+//   status yes, change and stop not  -> 'reply' (one short true progress reply, worded by the subjective model and checked)
+//   anything else, or no answer      -> 'steer' (the safe default: the run gets what the person wrote)
+export const IN_RUN_LIMITS = Object.freeze({ quoteChars: 600, pending: 8 })
+export const PERSON_PREDICATES = Object.freeze({
+  status: Object.freeze({ name: 'person_status', type: 'predicate', instructions: 'Does this message ask what is happening, how far along the work is, or why it stopped?' }),
+  change: Object.freeze({ name: 'person_change', type: 'predicate', instructions: 'Does this message change or redirect the task the assistant is doing (a different target, order or way of doing it)?' }),
+  stop: Object.freeze({ name: 'person_stop', type: 'predicate', instructions: 'Does this message ask the assistant to stop or cancel the work?' }),
+})
+/** The questions about one in-run message, each quoting it (R4). */
+export function personPredicates(message) {
+  const quote = { label: 'The person\'s message, sent while the work is running', text: oneLine(message, IN_RUN_LIMITS.quoteChars) }
+  return [PERSON_PREDICATES.status, PERSON_PREDICATES.change, PERSON_PREDICATES.stop].map(q => ({ ...q, quote, kinds: ['run_text'], topic: 'person_message' }))
+}
+/** What code does with the message, from the yes answers (a Set of names). */
+export function personDecision(yes) {
+  if (yes.has('person_stop')) return 'stop'
+  if (yes.has('person_change')) return 'steer'
+  if (yes.has('person_status')) return 'reply'
+  return 'steer'
 }
 
 /** The instruction for a pointer message, from closed labels only. The writer composes the sentence in the person's language. */
