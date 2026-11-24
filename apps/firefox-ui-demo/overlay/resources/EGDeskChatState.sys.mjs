@@ -569,6 +569,30 @@ export function codexAccountChanged(previousKey, status) {
   if (isProviderIdentity(identity.join(':'), mode)) return false;
   return nextKey !== previousKey;
 }
+// U11 (L1 c18): profile, subscription account, folder and screen combine independently. A room that runs on a non-default Codex engine
+// profile is bound to THAT profile's account, never to this window's default Codex sign-in (Contract §14.1: a Run keeps its
+// engineProfileId; changing the default does not move it). The key is a UI fence like codexAccountKey, never an ownership grant: the
+// helper still checks the profile's owner on every resume. Built from the profile row the bridge reports (signed in, its account email).
+const CODEX_DEFAULT_PROFILE = 'codex-default';
+const codexSlotId = id => (typeof id === 'string' && id.trim() && id !== CODEX_DEFAULT_PROFILE ? id : null);
+// The non-default Codex profile row the bridge lists for this id (every added profile is listed), else null: a profile this window does
+// not know keeps today's default-account check.
+function codexSlotProfile(engineProfileId, context = {}) {
+  const slot = codexSlotId(engineProfileId);
+  if (!slot) return null;
+  const row = engineRows(context.engines).find(entry => entry.id === 'codex');
+  return (Array.isArray(row?.profiles) ? row.profiles : []).find(entry => entry?.id === slot) ?? null;
+}
+export function codexSlotAccountKey(engineProfileId, context = {}) {
+  const profile = codexSlotProfile(engineProfileId, context), slot = profile ? engineProfileId : null;
+  if (!slot) return null;
+  const email = identityText(profile?.auth?.account).toLowerCase();
+  return profile?.auth?.status === 'signedIn' && /^[^\s@]+@[^\s@]+$/.test(email) ? `codex:slot:${slot}:${email}` : null;
+}
+/** The account a Codex room is checked against: its own engine profile's (a non-default profile), else the default sign-in. */
+export function codexRoomAccountKey(thread, authStatus, context = {}) {
+  return codexSlotProfile(thread?.engineProfileId, context) ? codexSlotAccountKey(thread.engineProfileId, context) : codexAccountKey(authStatus);
+}
 export function knownCodexAccountKey(key) {
   if (typeof key !== 'string' || !key.startsWith('codex:')) return false;
   const [, mode, ...identity] = key.split(':');
@@ -606,10 +630,10 @@ export function detachNativeThread(thread, savedAccountKey, nonce) {
     resuming: false, preparingInput: false, sendError: null,
   };
 }
-export function reconcileNativeThread(thread, authStatus) {
+export function reconcileNativeThread(thread, authStatus, context = {}) {
   if (thread.engineId === 'claude') return thread.retainedNativeBinding?.conversationId
     ? detachNativeThread(thread, null, null) : thread;
-  const key = codexAccountKey(authStatus);
+  const key = codexRoomAccountKey(thread, authStatus, context); // L1 c18: the room's own engine profile's account
   const retained = thread.retainedNativeBinding;
   if (!key || !retained || thread.conversationId) return thread;
   if (typeof retained.conversationId === 'string' && retained.conversationId.trim()
@@ -636,15 +660,19 @@ export function canResumeNativeThread(thread, authStatus, context = {}) {
   if (thread?.engineId === 'claude') return !!thread.conversationId && chatThreadReadiness(thread, context).ready;
   return !!thread?.conversationId && thread.bindingState === 'verified'
     && knownCodexAccountKey(thread.bindingAccountKey)
-    && thread.bindingAccountKey === codexAccountKey(authStatus);
+    && thread.bindingAccountKey === codexRoomAccountKey(thread, authStatus, context); // L1 c18: the room's own profile's account
 }
-export function nativeBindingForRun(thread, run) {
+export function nativeBindingForRun(thread, run, context = {}) {
   if (thread.engineId === 'claude') return { bindingAccountKey: null,
     bindingState: run.accountIdentity?.status === 'verified' ? 'server-verified' : 'server-check-required' };
   const established = !!thread.conversationId && thread.conversationId === run.conversationId
     && thread.bindingState === 'verified' && knownCodexAccountKey(thread.bindingAccountKey);
   // Preserve proof for the same native conversation, never borrow it for a new CID.
-  const accountKey = established ? thread.bindingAccountKey : run.accountKey ?? null;
+  // L1 c18: a run on a non-default Codex engine profile binds the room to that profile's account (run.accountKey is the window's
+  // default sign-in, which did not run it); unknown profile account -> unverified, never the default's.
+  const slot = codexSlotProfile(run.engineProfileId || run.engine?.engineProfileId, context) ? (run.engineProfileId || run.engine?.engineProfileId) : null;
+  const accountKey = slot ? (established && thread.bindingAccountKey === codexSlotAccountKey(slot, context) ? thread.bindingAccountKey : codexSlotAccountKey(slot, context))
+    : established ? thread.bindingAccountKey : run.accountKey ?? null;
   return { bindingAccountKey: accountKey, bindingState: knownCodexAccountKey(accountKey) ? 'verified' : 'live-unverified' };
 }
 export function submissionFailureStatus(error) {
@@ -2323,6 +2351,10 @@ export function changedClaudeEngineProfiles(previous, next) {
 export function chatThreadReadiness(thread, context = {}) {
   const engineId = chatThreadEngineId(thread, context);
   const auth = context.authStatus || context.auth;
+  // L1 c18: a room on a non-default Codex engine profile is ready when that profile is signed in (the default sign-in is another account)
+  const slotProfile = engineId === 'codex' ? codexSlotProfile(thread?.engineProfileId, context) : null;
+  if (slotProfile) { const signedIn = slotProfile.auth?.status === 'signedIn';
+    return { engineId, ready: signedIn && context.connected === true, reason: !signedIn ? 'Codex 연결 후 전송할 수 있습니다' : !context.connected ? 'Codex 연결을 확인해 주세요' : null }; }
   if (engineId === 'codex') return { engineId, ready: !!auth?.isLoggedIn && context.connected === true,
     reason: !auth?.isLoggedIn ? 'Codex 연결 후 전송할 수 있습니다' : !context.connected ? 'Codex 연결을 확인해 주세요' : null };
   const row = engineRows(context.engines).find(entry => entry.id === engineId);

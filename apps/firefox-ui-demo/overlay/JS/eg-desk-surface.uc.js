@@ -7181,7 +7181,7 @@
       if (!options.merge && Array.isArray(snapshot.chat?.threads)) {
         state.codex.chatProtocol.unobservedPreviousRun ||= !!snapshot.chat.unobservedPreviousRun;
         state.codex.threads = snapshot.chat.threads.map(thread => ChatState.reconcileNativeThread(
-          ChatState.detachNativeThread({ ...normalizeChatRequestProjectDraft(thread), messages: ChatState.chatSpeechOnly(thread.messages) }, snapshot.chat.codexAccountKey || null, chatBindingNonce()), state.codex.authStatus));
+          ChatState.detachNativeThread({ ...normalizeChatRequestProjectDraft(thread), messages: ChatState.chatSpeechOnly(thread.messages) }, snapshot.chat.codexAccountKey || null, chatBindingNonce()), state.codex.authStatus, state.codex));
         state.codex.activeThreadId = snapshot.chat.activeThreadId;
         state.codex.threadDrafts = { ...snapshot.chat.threadDrafts };
         state.codex.hudView = snapshot.chat.hudView || 'conversation';
@@ -15489,7 +15489,7 @@
       const thread = updateThreadById(threadId, current => ({
         ...current, ...(boardMemberRun ? {} : { conversationId: run.conversationId }), sendError: null,
         ...(!boardMemberRun && (run.engineProfileId || run.engine?.engineProfileId) ? { engineProfileId: run.engineProfileId || run.engine.engineProfileId } : {}),
-        ...(boardMemberRun ? {} : ChatState.nativeBindingForRun(current, run)),
+        ...(boardMemberRun ? {} : ChatState.nativeBindingForRun(current, run, state.codex)),
         contextToolsAvailable: current.contextToolsAvailable === true || Array.isArray(run.contextCaptures),
         messages: (liveEvent ? ChatState.projectRunMessages(current.messages, run)
           : ChatState.mergeLocalChatMessages(current.messages, ChatState.projectRunMessages(current.messages, run))).map(message =>
@@ -15904,7 +15904,7 @@
       }
       if (accountKey) state.codex.codexAccountKey = accountKey;
       Object.assign(state.codex, patch);
-      state.codex.threads = state.codex.threads.map(thread => ChatState.reconcileNativeThread(thread, state.codex.authStatus));
+      state.codex.threads = state.codex.threads.map(thread => ChatState.reconcileNativeThread(thread, state.codex.authStatus, state.codex));
       emit();
     };
 
@@ -16275,7 +16275,7 @@
         localConversationId: summary.localConversationId,
         bindingAccountKey: originalAccountKey,
         retainedNativeBinding: detail.retainedNativeBinding || null,
-      }, null, chatBindingNonce()), state.codex.authStatus);
+      }, null, chatBindingNonce()), state.codex.authStatus, state.codex);
       const placeholder = state.codex.threads.find(thread => thread.id === initialDefaultThreadId);
       if (placeholder && state.codex.threads.length === 1 && !placeholder.messages.length && !placeholder.conversationId
           && !placeholder.localConversationId && !placeholder.inputSources?.length && !placeholder.briefingInputs?.length
