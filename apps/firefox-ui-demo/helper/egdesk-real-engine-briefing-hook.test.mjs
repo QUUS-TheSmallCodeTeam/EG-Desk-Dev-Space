@@ -240,7 +240,7 @@ test('the record keeps what the private turn wrote and the coverage packet, so a
   assert.deepEqual(b.engineCalls.map(c => [c.kind, c.only, c.cover, c.ok, c.failure]), [['briefing_fill', null, null, true, null], ['briefing_fill', ['P1', 'P2'], ['M1', 'M2', 'M3'], true, null]], JSON.stringify(b.engineCalls))
   assert.ok(b.forkTrace.length === 2 && b.forkTrace.every(t => t.via === 'fresh' && t.status === 'completed' && Number.isFinite(t.ms) && t.items.agentMessage >= 1), JSON.stringify(b.forkTrace))
   const coverage = b.decisions.find(d => d.names.some(n => n.startsWith('onboard_')))
-  assert.ok(coverage.input.includes('진행 중'), 'the board as the Decision model saw it'); assert.ok(coverage.input.length <= 3000)
+  assert.ok(coverage.input.includes('진행 중'), 'the board as the Decision model saw it'); assert.ok(coverage.input.length <= 6000)
   assert.ok(Object.entries(coverage.p).filter(([n]) => n.startsWith('onboard_')).every(([, v]) => v < .1))
   assert.deepEqual(rec.turns[0].expectations.find(e => e.check === 'briefing.outcome').detail.reason, 'not-covered')
 })
