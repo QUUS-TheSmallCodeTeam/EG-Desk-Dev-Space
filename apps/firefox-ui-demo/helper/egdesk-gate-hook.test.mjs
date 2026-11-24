@@ -207,9 +207,13 @@ test('runtime: the turn binds the hook; the person\'s next message is read once 
   assert.equal((await broker.check({ sessionId: run2.conversationId, turnId: run2.runId, cwd: CWD, command: 'git push origin main' })).decision, 'deny', 'once')
   assert.equal((await broker.check({ sessionId: run2.conversationId, turnId: run2.runId, cwd: CWD, command: 'git push --force origin main' })).decision, 'deny')
   await h.complete(run2)
+  // run2 denied again, so the next message is read once more (one hop); a turn without a deny leaves nothing waiting
   const settled = h.requests.length
-  await h.chat.send({ message: 'thanks', conversationId: run1.conversationId, requestId: 'r3' })
-  assert.equal(h.requests.length, settled, 'nothing is waiting: an ordinary message is not read')
+  const run3 = await h.chat.send({ message: 'thanks', conversationId: run1.conversationId, requestId: 'r3' })
+  assert.equal(h.requests.length, settled + 1)
+  await h.complete(run3)
+  await h.chat.send({ message: 'and the docs?', conversationId: run1.conversationId, requestId: 'r4' })
+  assert.equal(h.requests.length, settled + 1, 'nothing is waiting: an ordinary message is not read')
 })
 
 test('hook not trusted or not installed: nothing is checked, so the runtime records the unasked command exactly as before (hooked: false)', async t => {
