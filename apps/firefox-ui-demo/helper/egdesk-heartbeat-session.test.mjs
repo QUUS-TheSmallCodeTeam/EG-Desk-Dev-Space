@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 import { HEARTBEAT_LIMITS, createHeartbeat, createHeartbeats, createWindowWatch } from './egdesk-heartbeat.mjs'
 import { browserTaskRow } from './egdesk-heartbeat-providers.mjs'
 import { createChatHttpHandler } from './codex-bridge-http.mjs'
-import { FLOW_LIMITS, WAIT_LABELS, attentionOf, enumerateOptions, pointerPrompt, pointerRoute, waitSummary, writerPrompt } from './egdesk-conversation-flow.mjs'
+import { FLOW_LIMITS, FLOW_PREDICATES, WAIT_LABELS, attentionOf, audienceFacts, deriveFlowKind, enumerateOptions, flowPredicates, idleContext, idleFlowFacts, pointerPrompt, pointerRoute, runContext, waitSummary, writerPrompt } from './egdesk-conversation-flow.mjs'
 import { world } from './egdesk-heartbeat-flow.fixture.mjs'
 
 // The session heartbeat (cycle 13): it lives as long as the conversation's session, across runs, at two tempos; the message
@@ -182,12 +182,15 @@ test('simulation 1: a member\'s task finishes while the owner works elsewhere �
   assert.deepEqual(o.assistant(), ['예산표를 정리했습니다.', POINTER], 'one completed message in the owner\'s conversation')
   assert.deepEqual(m.assistant(), ['보고서 초안을 만들었습니다.'], 'nothing in the member\'s conversation')
   assert.deepEqual(acks, [{ key: 'dm-task', provider: 'work_placement' }]); placement.pointer = null // the placement runtime withdraws its fact
-  // The judgment saw closed labels only; the writer was told where, in fixed words; neither saw the other conversation or a member id.
+  // The judgment read the task's own request and answer (what that run's models have) and where the result is; the writer, in the
+  // owner's conversation, was told where in fixed words. Neither saw a member id or the other conversation's text.
   const asked = w.beatRequests.at(-1).input.join('\n')
-  assert.match(asked, /attention_kind: result/); assert.match(asked, /attention_for: owner/); assert.match(asked, /attention_where: left/); assert.match(asked, /attention_person_in_this_conversation: (false|no)/)
+  assert.match(asked, /A finished result is waiting to the left of what they are looking at on the desk, some way off\. It is for the owner of this task\. They are not in this conversation: the note would go into their own conversation\./)
+  assert.deepEqual(w.beatRequests.at(-1).names, ['message__pointer'], 'one yes/no question; the route was decided by code')
   const prompt = w.forkPrompts.at(-1)
   assert.match(prompt, /to the left of what they are looking at on the desk, some way off/)
-  for (const text of [asked, prompt]) assert.doesNotMatch(text, /m-jin|보고서|예산표|분기/)
+  assert.match(asked, /The person's request:\n"""\n분기 보고서 초안을 만들어 주세요\n"""\n\nThe assistant's answer, already posted:\n"""\n보고서 초안을 만들었습니다\.\n"""/)
+  assert.doesNotMatch(asked, /m-jin|예산표/); assert.doesNotMatch(prompt, /m-jin|보고서|예산표|분기/)
   // Nothing moved: the only events are the message's own, in the owner's conversation; the only native calls are the private fork's.
   const after = w.events.slice(eventsBefore)
   assert.deepEqual([...new Set(after.map(e => `${e.clientThreadId}:${e.event}`))], ['dm-owner:message.started', 'dm-owner:message.delta', 'dm-owner:message.completed'])
@@ -226,7 +229,7 @@ test('simulation 1b: no pointer when the owner is away, has no conversation of t
   assert.deepEqual([shared.requests.flow, c.o.assistant().length], [0, 1], 'someone else takes part there: nothing')
 })
 
-test('simulation 2: tests are still running — the wait message is written from the closed "command running" label, never from the command or its output', async t => {
+test('simulation 2: tests are still running — the judge reads the command line this run\'s models already have, never its output; the writer gets the closed label', async t => {
   const w = world(t, { flags: { held: true, flow: true, commands: true } }), d = await w.dm('dm-tests', '테스트 돌려 주세요')
   await w.advance(1000)
   await d.raw('item/started', { item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test -- --suite=payroll-secret', cwd: '/work', status: 'inProgress', commandActions: [] } })
@@ -235,10 +238,11 @@ test('simulation 2: tests are still running — the wait message is written from
   const row = d.hb.facts().sources.engine_commands
   assert.deepEqual([row.terminal, row.runningMs], ['running', 9000])
   const asked = w.beatRequests.at(-1).input.join('\n')
-  assert.match(asked, /waiting_on: command_running/); assert.match(asked, /waiting_on_seconds: 9/)
+  assert.match(asked, /The assistant is running a command: `npm test -- --suite=payroll-secret` \(running for about 9 seconds; its output shows it is still running\)\./)
+  assert.match(asked, /The person's request:\n"""\n테스트 돌려 주세요\n"""/); assert.deepEqual(w.beatRequests.at(-1).names, ['message__note'])
   const prompt = w.forkPrompts.at(-1)
   assert.match(prompt, /What is being waited on, as far as the system knows: a command is still running \(about 9 seconds so far\)/)
-  for (const text of [asked, prompt]) assert.doesNotMatch(text, /npm|payroll|FAIL|40 tests/)
+  assert.doesNotMatch(asked, /FAIL|40 tests|payroll-secret-case/, 'the command\'s output is not sent'); assert.doesNotMatch(prompt, /npm|payroll|FAIL|40 tests/, 'the writer is told what kind of wait it is, in fixed words')
   assert.equal(d.assistant().length, 1, 'the wait message is posted')
   await d.raw('item/completed', { item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test -- --suite=payroll-secret', cwd: '/work', status: 'completed', exitCode: 0, commandActions: [], aggregatedOutput: 'all passed\n' } })
   await d.final('테스트가 모두 통과했습니다.')
@@ -392,8 +396,8 @@ test('a pointer with nowhere to go is held for that person and delivered once in
   const o = await w.dm('dm-owner', '예산표 정리해 주세요'); await w.advance(5000) // the first beat of this run
   assert.deepEqual(o.assistant(), [POINTER])
   const asked = w.beatRequests.at(-1).input.join('\n')
-  assert.match(asked, /attention_kind: result/); assert.match(asked, /attention_for: requester/); assert.match(asked, /attention_where: none/)
-  assert.match(asked, /attention_waiting_seconds: 18[0-9]/); assert.match(asked, /work_in_progress: yes/)
+  assert.match(asked, /Separately: a finished result from another task has been waiting for this person for about 18[0-9] seconds, elsewhere on the desk\. Nothing was moved into their view and they have not been told\./)
+  assert.match(asked, /The person's request:\n"""\n예산표 정리해 주세요\n"""/)
   assert.match(w.forkPrompts.at(-1), /It is elsewhere on the desk\./)
   for (const text of [asked, w.forkPrompts.at(-1)]) assert.doesNotMatch(text, /m-jin|보고서|left/)
   assert.deepEqual([w.chat.heldAttention.length, acks], [0, [{ key: 'dm-task', provider: 'work_placement' }]], 'delivered: dropped, and the source is told')
@@ -423,4 +427,85 @@ test('held attention is bounded: gone after 15 minutes, at most 8, one per sourc
   for (let n = 0; n < 12; n++) many.chat.holdAttention(subject(n), { provider: 'work_placement', kind: 'result', who: 'owner', signature: 'work_placement:result:owner' })
   assert.equal(many.chat.holdAttention(subject(11), { provider: 'work_placement', kind: 'result', who: 'owner', signature: 'work_placement:result:owner' }), false)
   assert.deepEqual([many.chat.heldAttention.length, many.chat.heldAttention[0].sourceKey], [FLOW_LIMITS.maxHeldAttention, 'k4'])
+})
+
+// ---- cycle 15: the judge reads content and answers yes/no; code derives the kind ----
+
+test('deriveFlowKind: a question first, then a pointer, a stall, a progress note; a yes for a kind that was not possible is ignored; the note question is worded by code', () => {
+  const all = ['none', 'pointer', 'ask_missing', 'explain_wait', 'stalled']
+  assert.equal(deriveFlowKind(new Set(['ask', 'pointer', 'stalled', 'note']), all), 'ask_missing')
+  assert.equal(deriveFlowKind(new Set(['pointer', 'stalled', 'note']), all), 'pointer')
+  assert.equal(deriveFlowKind(new Set(['stalled', 'note']), all), 'stalled')
+  assert.equal(deriveFlowKind(new Set(['note']), all), 'explain_wait')
+  assert.equal(deriveFlowKind(new Set(['note']), ['none', 'milestone']), 'milestone')
+  assert.equal(deriveFlowKind(new Set(['note']), ['none', 'explain_wait', 'milestone']), 'explain_wait')
+  assert.equal(deriveFlowKind(new Set(), all), 'none')
+  assert.equal(deriveFlowKind(new Set(['ask', 'stalled']), ['none', 'explain_wait']), 'none', 'code decided those kinds were not possible: a yes cannot bring them back')
+  // one question per predicate, in a fixed order; the ask question exists only with its quoted note
+  assert.deepEqual(flowPredicates(['none', 'stalled', 'milestone', 'explain_wait', 'pointer', 'ask_missing'], { note: { text: '어느 환경인가요?' } }).map(q => q.name), ['ask', 'pointer', 'stalled', 'note'])
+  assert.deepEqual(flowPredicates(['none', 'ask_missing', 'explain_wait']).map(q => q.name), ['note'])
+  const ask = flowPredicates(['ask_missing'], { note: { text: '어느 환경인가요?' } })[0]
+  assert.deepEqual([ask.type, ask.quote, ask.kinds], ['predicate', { label: 'The assistant\'s latest note to itself', text: '어느 환경인가요?' }, ['run_text']])
+  for (const q of Object.values(FLOW_PREDICATES)) { assert.equal(q.type, 'predicate'); assert.match(q.instructions, /^[\x20-\x7E]{1,300}$/); assert.doesNotMatch(q.instructions, /none|nothing now|do nothing/i) }
+  // what is arithmetic stays code: something already in view is never asked about
+  const base = { sent: 0, blocked: true, sinceLastMs: null, audience: { postable: true }, pointerTarget: 'here', pointed: false, pointers: 0 }
+  assert.deepEqual(enumerateOptions({ ...base, attention: { kind: 'result', where: 'right' } }), ['none', 'pointer'])
+  assert.deepEqual(enumerateOptions({ ...base, attention: { kind: 'result', where: 'in_view' } }), ['none'])
+})
+
+test('runContext / idleContext: the material is sentences plus the person\'s own words; each kind of content only when the run\'s gate allows it; without the run\'s text there is no material at all', () => {
+  const run = { pendingApprovals: [], activities: [{ id: 'n1', kind: 'workNote', status: 'completed', detail: { text: '의존성을 먼저 설치한다.' } },
+    { id: 'c0', kind: 'commandExecution', status: 'completed', detail: { command: 'npm ci' } }, { id: 't1', kind: 'mcpToolCall', status: 'inProgress', detail: { server: 'docs', tool: 'search' } },
+    { id: 'c1', kind: 'commandExecution', status: 'inProgress', detail: { command: `npm test\n -- ${'x'.repeat(300)}` } }] }
+  const flow = { sent: [{ kind: 'explain_wait', text: '조금 걸립니다.', at: 15_000 }], reasoningOpen: () => false }
+  const hb = { internalMs: 45_000, sinceUserMs: 45_000, sinceEngineMs: 1000, phase: 'tool_running', stepsDone: 1, stepsRunning: 2, stepsRemaining: null, sources: { engine_commands: { terminal: 'running', terminalState: 'running_output', runningMs: 20_000 } } }
+  const facts = { audience: audienceFacts({}) }
+  const own = new Set(['workNote'])
+  const open = runContext({ run, heartbeatFacts: hb, flow, facts, userText: '테스트를\n돌려 주세요', own })
+  assert.deepEqual(open.kinds.sort(), ['run_text', 'terminal_command'])
+  assert.match(open.text, /^The person's request:\n"""\n테스트를 돌려 주세요\n"""\n\nNow:\n- 45 seconds have passed since the person wrote\.\n- The assistant is running the tool docs \/ search\.\n- The assistant is running a command: `npm test -- x+…` \(running for about 20 seconds; its output shows it is still running\)\.\n- Tool steps finished so far: 1 \(the last one: a command: `npm ci`\)\./)
+  assert.match(open.text, /- The assistant's latest note to itself: "의존성을 먼저 설치한다\."\n- Waiting for this: the person who asked; whether they are at the desk is not known\.\n\nAlready said to the person while working:\n- 30 seconds ago \(a note that this takes a while\): "조금 걸립니다\."$/)
+  assert.ok(open.text.length < 1200, 'a long command line is cut')
+  const noTerminal = runContext({ run, heartbeatFacts: hb, flow, facts, userText: '테스트를 돌려 주세요', own, allows: kind => kind === 'run_text' })
+  assert.deepEqual(noTerminal.kinds, ['run_text']); assert.doesNotMatch(noTerminal.text, /npm/); assert.match(noTerminal.text, /The assistant is running a command \(running for about 20 seconds/); assert.match(noTerminal.text, /\(the last one: a command\)/)
+  assert.equal(runContext({ run, heartbeatFacts: hb, flow, facts, userText: '테스트를 돌려 주세요', own, allows: () => false }), null)
+  const idle = idleFlowFacts({ heartbeatFacts: { ...hb, idleMs: 9000 }, audience: audienceFacts({}), pointer: { attention: { provider: 'work_placement', kind: 'approval', who: 'owner', where: 'above', distance: 'far' }, pointerTarget: 'here' } })
+  const after = idleContext({ heartbeatFacts: { ...hb, idleMs: 9000 }, facts: idle, userText: '배포해 주세요', answerText: '배포 준비를 마쳤습니다.' })
+  assert.match(after.text, /The assistant's answer, already posted:\n"""\n배포 준비를 마쳤습니다\.\n"""\n\nNow:\n- The work on this request has ended \(9 seconds ago\)\.\n- Something that needs a decision before work can continue is waiting above what they are looking at on the desk, some way off\. It is for the owner of this task\. They take part in this conversation\./)
+  assert.equal(idleContext({ heartbeatFacts: hb, facts: idle, userText: 'x', answerText: 'y', allows: () => false }), null)
+  assert.equal(idleContext({ heartbeatFacts: hb, facts: { ...idle, attention: null }, userText: 'x', answerText: 'y' }), null)
+})
+
+test('in the runtime: the answers are yes/no per question and code picks the kind; a yes below the bar says nothing; the record keeps the derived kind and each probability, never text', async t => {
+  // The mock answers by probability per question (not by picked kind) to exercise the bar and the order.
+  const custom = (t, probabilities) => {
+    const w = world(t, {})
+    const decide = w.chat.decisionContext.client.decide
+    w.chat.decisionContext.client.decide = async request => { const out = await decide(request)
+      if (request.promptCacheKey === 'heartbeat-beat') for (const q of request.questions) if (probabilities[q.name] !== undefined) out.answers[q.name] = { type: 'predicate', probability: probabilities[q.name] }
+      return out }
+    return w
+  }
+  // ask 0.9 and note 0.95 at the same beat: the question to the person wins.
+  const both = custom(t, { message__ask: 0.9, message__note: 0.95 }), a = await both.dm('dm-a', '서비스를 배포해 주세요')
+  await both.advance(4000); await a.tool('s1', 'started'); await both.advance(2000); await a.tool('s1', 'completed'); await both.advance(1000); await a.note('n1', '어느 환경에 배포할까요?'); await both.advance(3000)
+  assert.deepEqual(both.beatRequests.at(-1).names, ['message__ask', 'message__note'])
+  assert.match(both.forkPrompts.at(-1), /You need one piece of information from the person/)
+  const entry = both.flowEntries().at(-1)
+  assert.deepEqual([entry.flow, entry.posted, entry.judgments.map(j => [j.q, j.would, j.p, j.threshold])], ['ask_missing', 'model', [['beat_ask', 'act', 0.9, 0.8], ['beat_note', 'act', 0.95, 0.8]]])
+  assert.ok(!JSON.stringify(both.flowEntries()).includes('배포'), 'no text in the record')
+  await a.final('끝.')
+  // 0.79 is not a yes: nothing is written, nothing is posted.
+  const below = custom(t, { message__note: 0.79 }), b = await below.dm('dm-b')
+  await below.advance(2000); await b.tool('s1', 'started'); await below.advance(8000)
+  assert.deepEqual([below.requests.flow, below.forkPrompts.length, b.assistant().length], [1, 0, 0])
+  assert.deepEqual([below.flowEntries().at(-1).flow, below.flowEntries().at(-1).judgments[0].would], ['none', 'none'])
+  await b.final('끝.')
+  // The run's models may not receive terminal data (Agent ceiling): the same question is asked without the command line.
+  const ceiling = custom(t, { message__note: 0.9 })
+  const run = await ceiling.dm('dm-c', '테스트 돌려 주세요'); const live = [...ceiling.chat.runs.values()].at(-1); live.toolCeiling = { terminal: 'none', browser: 'none' }
+  await ceiling.advance(2000); await run.tool('s1', 'started'); await ceiling.advance(8000)
+  const sent = ceiling.beatRequests.at(-1).input.join('\n')
+  assert.match(sent, /The assistant is running a command\./); assert.doesNotMatch(sent, /`ls`/); assert.equal(run.assistant().length, 1)
+  await run.final('끝.')
 })

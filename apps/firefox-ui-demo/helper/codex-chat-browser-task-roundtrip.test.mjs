@@ -61,9 +61,15 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
       const entryAnswer = q => { const msg = /(?:User message: |Message:\n)(.*)/.exec(text)?.[1] ?? ''
         return choice('browser_entry', /세금계산서/.test(msg) ? starts(q.choices, '[C1]') : 'not_browser_task', 0.95) }
       if (names.some(name => name.includes('__'))) { // one heartbeat request for every question proposed at this beat (provider__name)
-        const answers = wire.questions.map(q => { const values = q.choices.map(c => c.value)
-          const value = q.name === 'message__need' ? (values.includes('explain_wait') ? 'explain_wait' : values.includes('stalled') ? 'stalled' : 'none') : (values.includes('none') ? 'none' : values[0])
-          if (q.name === 'message__need') flowAsked.push({ offered: values, pick: value, facts: text })
+        // L3 c15: the message judgment is asked as yes/no questions (message__ask / __pointer / __note / __stalled) and code derives the kind.
+        // This mock keeps its old policy (a wait message when one is possible, else a stall notice) and reports the kinds the questions stand for.
+        const KIND = { message__pointer: 'pointer', message__ask: 'ask_missing', message__note: 'explain_wait', message__stalled: 'stalled' }
+        const offered = ['none', ...names.filter(name => KIND[name]).map(name => KIND[name])]
+        const picked = offered.includes('explain_wait') ? 'explain_wait' : offered.includes('stalled') ? 'stalled' : 'none'
+        if (offered.length > 1) flowAsked.push({ offered, pick: picked, facts: text })
+        const answers = wire.questions.map(q => { if (q.type === 'predicate') return { name: q.name, type: 'predicate', probability: KIND[q.name] === picked && picked !== 'none' ? 0.97 : 0.03 }
+          const values = q.choices.map(c => c.value)
+          const value = values.includes('none') ? 'none' : values[0]
           return { name: q.name, type: 'choice', choice: value, confidence: 0.95, probabilities: [{ value, probability: 0.96 }, { value: values.find(v => v !== value), probability: 0.02 }] } })
         return { ok: true, text: async () => JSON.stringify({ answers }) }
       }
@@ -414,7 +420,8 @@ test('H1 a slow wording turn: the heartbeat speaks (one completed message), neve
   assert.deepEqual([hb.state, hb.tempo, hb.stopReason ?? null, w.runs().length, w.runs()[0].status], ['running', 'idle', null, 1, 'completed'])
   assert.deepEqual(w.history(), [['user', MSG], ['assistant', WAIT_TEXT], ['assistant', question], ['user', '두 번째 사업자로'], ['assistant', report]])
   assert.equal(w.deltas().length, 3, 'three assistant messages, each in one piece')
-  assert.doesNotMatch(w.flowAsked.map(a => a.facts).join('\n'), /세금|사업자|portal|example|https?:/, 'the heartbeat question carries numbers and closed labels only')
+  // L3 c15: the judge reads the run's own text (the person's request, the Agent's note); nothing of the page (its host, address or the numbers read from it).
+  assert.doesNotMatch(w.flowAsked.map(a => a.facts).join('\n'), /portal|example|https?:|\d{3}-\d{2}-\d{5}/, 'the heartbeat questions carry nothing of the page')
 })
 
 test('H2 held mode off: the heartbeat still beats with the task facts but cannot speak; the wording turn streams as before', async t => {
@@ -443,7 +450,7 @@ test('N1 mid-loop: the resumed loop works inside the run, so a slow step gets on
   assert.deepEqual(w.posted(), [question, WAIT_TEXT], 'the heartbeat spoke during the objective loop: a completed message in the same run')
   assert.ok(w.flowAsked.length >= 1 && w.flowAsked.every(a => !a.offered.includes('ask_missing')))
   assert.match(w.flowAsked.at(-1).facts, /current_phase: objective_step/)
-  assert.doesNotMatch(w.flowAsked.map(a => a.facts).join('\n'), /세금|사업자|portal|example|https?:/)
+  assert.doesNotMatch(w.flowAsked.map(a => a.facts).join('\n'), /portal|example|https?:|\d{3}-\d{2}-\d{5}/)
   slow.open()
   await w.chat.browserRunIdle()
   assert.deepEqual([w.note().status, w.turnIds.length], ['done', 2])

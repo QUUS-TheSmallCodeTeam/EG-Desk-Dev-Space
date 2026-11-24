@@ -391,9 +391,11 @@ test('pointer round trip, post-run, on the real session heartbeat: attention sce
   assert.equal(hb.facts().sources.work_placement.pointerPending, false)
   // what each model saw: closed labels only; the writer was told where in fixed words; no member id, title or coordinate anywhere
   const judged = JSON.stringify(client.calls[0]), asked = w.beatRequests.at(-1).input.join('\n'), prompt = w.forkPrompts.at(-1)
-  assert.match(asked, /attention_kind: approval/); assert.match(asked, /attention_for: owner/); assert.match(asked, /attention_where: right/)
+  // L3 c15: the message judgment reads the task's own request and answer (what that run's models have) and is told where in a sentence.
+  assert.match(asked, /Something that needs a decision before work can continue is waiting to the right of what they are looking at on the desk[^.]*\. It is for the owner of this task\./)
   assert.match(prompt, /to the right of what they are looking at on the desk/)
-  for (const text of [judged, asked, prompt]) assert.doesNotMatch(text, /m-jin|acct-|보고서|예산표|own-doc|5300|"x"/)
+  for (const text of [judged, prompt]) assert.doesNotMatch(text, /m-jin|acct-|보고서|예산표|own-doc|5300|"x"/)
+  assert.doesNotMatch(asked, /m-jin|acct-|예산표|own-doc|5300|"x"/, 'no member id, card id or coordinate, and nothing of the owner\'s other conversation')
   // nothing moved: the canvas is as it was, and the only events are the message's own
   assert.equal(d.snapshot(), canvas); assert.deepEqual([...new Set(w.events.slice(eventsBefore).map(e => `${e.clientThreadId}:${e.event}`))], ['dm-owner:message.started', 'dm-owner:message.delta', 'dm-owner:message.completed'])
   // once: later beats judge nothing more and post nothing more

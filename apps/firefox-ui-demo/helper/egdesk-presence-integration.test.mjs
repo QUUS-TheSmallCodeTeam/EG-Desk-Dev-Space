@@ -199,7 +199,7 @@ test('scenario: owner at A, B (region) asks -> options avoid A and include a spo
     await hb.advance(2000); await d.tool('s1', 'started'); await hb.advance(18_000);
     const seen = d.beats.at(-1).sources.audience;
     assert.deepEqual([seen.waiting, seen.addresseePresent, seen.postable], ['requester', true, true]);
-    assert.match(hb.flowAsked[0].own, /waiting_person: requester\nwaiting_person_present: yes/);
+    assert.match(hb.flowAsked[0].own, /Waiting for this: the person who asked; they are at the desk/); // L3 c15: said in a sentence of the judge's material
     assert.ok(!JSON.stringify([hb.beatRequests, d.beats, hb.flowEntries()]).includes('m-'), 'no presence alias reaches the decision model, the beats or the record');
     await d.final('끝났습니다.');
   }

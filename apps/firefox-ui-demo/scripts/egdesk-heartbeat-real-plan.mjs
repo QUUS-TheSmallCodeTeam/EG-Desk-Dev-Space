@@ -26,7 +26,7 @@ if (out) {
   mkdirSync(path.join(out, 'requests'), { recursive: true })
   for (const r of plan.requests) writeFileSync(path.join(out, r.file), r.body) // exactly the bytes the product would POST; sha256 is of this file
   writeFileSync(path.join(out, 'plan.json'), text)
-  writeFileSync(path.join(out, 'preregistration.json'), `${JSON.stringify(plan.requests.map(r => ({ id: r.id, path: r.path, pattern: r.pattern, ...(r.codeRule ? { codeRule: r.codeRule } : {}), expect: r.expect, ifMissed: r.ifMissed })), null, 1)}\n`)
+  writeFileSync(path.join(out, 'preregistration.json'), `${JSON.stringify(plan.requests.map(r => ({ id: r.id, path: r.path, pattern: r.pattern, ...(r.codeRule ? { codeRule: r.codeRule } : {}), before: r.before, expect: r.expect, ifMissed: r.ifMissed })), null, 1)}\n`)
   console.log(`wrote ${plan.requests.length} requests, plan.json and preregistration.json to ${out}`)
 }
 const check = value('--check')

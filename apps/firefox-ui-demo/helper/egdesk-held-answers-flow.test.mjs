@@ -15,10 +15,12 @@ const PLAN = { id: 'doc:pg', kind: 'document', title: 'PostgreSQL 이전 계획'
 function judge(request) {
   const answers = {}
   for (const q of request.questions) {
-    if (q.name === 'message__need') {
-      const values = q.choices.map(c => c.value)
-      const pick = values.includes('ask_missing') ? 'ask_missing' : values.includes('explain_wait') ? 'explain_wait' : 'none'
-      answers[q.name] = { type: 'choice', choice: pick, confidence: 0.95, probabilities: [{ value: pick, probability: 0.96 }, { value: values.find(v => v !== pick), probability: 0.02 }] }
+    if (/^message__/.test(q.name)) {
+      // The heartbeat's yes/no message questions: a question to the person when one is asked about, else a progress note.
+      const names = request.questions.map(row => row.name)
+      const explained = /\(a note that this takes a while\)/.test(JSON.stringify(request.input)) // then the note question stands for a milestone: declined, as before
+      const pick = names.includes('message__ask') ? 'message__ask' : names.includes('message__note') && !explained ? 'message__note' : null
+      answers[q.name] = { type: 'predicate', probability: q.name === pick ? 0.97 : 0.03 }
     } else if (q.name === 'answer_type' || q.name === 'time_intent') answers[q.name] = { type: 'choice', choice: q.choices[0].value, confidence: 0.9, probabilities: [{ value: q.choices[0].value, probability: 0.9 }] }
     else if (/^claim_/.test(q.name)) answers[q.name] = { type: 'choice', choice: 'supported', confidence: 0.95, probabilities: [{ value: 'supported', probability: 0.96 }, { value: 'insufficient', probability: 0.02 }] }
     else if (/^present_/.test(q.name)) answers[q.name] = { type: 'predicate', probability: /현재 운영 중/.test(JSON.stringify(request.input)) ? 0.93 : 0.03 }

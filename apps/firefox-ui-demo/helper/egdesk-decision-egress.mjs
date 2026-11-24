@@ -18,6 +18,7 @@ export const EGRESS_KINDS = Object.freeze({
   canvas_text: Object.freeze({ data: 'canvas', governedBy: 'Per-card maySend (host-computed: may this card go to a model) for step texts and card labels' }),
   placement_facts: Object.freeze({ data: 'run', governedBy: 'Where a live run\'s work surface could go, as closed words only (option kinds, distance and direction classes, whose view, member aliases, task state); never card titles, text, ids or coordinates' }),
   run_facts: Object.freeze({ data: 'run', governedBy: 'This run\'s own state as numbers and closed labels only (heartbeat elapsed times, the current phase, step counts, whether the Agent asked a question); never text of the run, the person or a model' }),
+  run_text: Object.freeze({ data: 'run', governedBy: 'This run\'s own conversation text, which its model already receives or wrote: the person\'s request, the Agent\'s notes to itself, the names of the tools it runs and the messages already posted in this run (bounded quotes for the heartbeat\'s message questions)' }),
   draft_text: Object.freeze({ data: 'run', governedBy: 'The run\'s own evidence: catalog items only by the kinds the model itself received; tool outputs stay content-free references' }),
   memory_page: Object.freeze({ data: 'memory', governedBy: 'Memory scope of this DM/Agent (allowsPage: the page\'s own guard plus the scope the answering model may read)' }),
   speech_history: Object.freeze({ data: 'speech', governedBy: 'Per-DM speech reuse consent (the same consent that lets the answering model see past utterances)' }),
@@ -99,7 +100,7 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-conversation-flow.mjs': ['run_facts'],
   'egdesk-work-placement.mjs': ['placement_facts'],
   'egdesk-draft-check.mjs': ['draft_text'],
-  'egdesk-heartbeat-judge.mjs': ['run_facts', 'plus the kinds a heartbeat question declares, each checked by the run\'s gate before it is sent'],
+  'egdesk-heartbeat-judge.mjs': ['run_facts', 'run_text', 'terminal_command', 'plus any other kind a heartbeat question or a provider\'s context declares, each checked by the run\'s gate before it is sent'],
   // Plan builder for the real measurement: the product client with a recording fetch that refuses. Nothing is sent from this file.
   'egdesk-heartbeat-real-plan.mjs': ['run_facts: plan builder; a recording fetch that refuses, nothing is sent'],
   'egdesk-terminal-command-gate.mjs': ['terminal_command'],

@@ -123,13 +123,15 @@ export function allOnWorld(t, { on = true, policy = {} } = {}) {
     const names = wire.questions.map(q => q.name), text = (Array.isArray(wire.input) ? wire.input.map(m => flat(m.content)) : [String(wire.input)]).join('\n\n')
     const entry = q => wireChoice('browser_entry', q, /세금계산서/.test(/(?:User message: |Message:\n)(.*)/.exec(text)?.[1] ?? '') ? q.choices.find(c => c.value.includes('[C1]'))?.value ?? 'not_browser_task' : 'not_browser_task')
     if (names.some(n => n.includes('__'))) {
-      return wire.questions.map(q => { const values = q.choices.map(c => c.value)
-        if (q.name === 'message__need') {
-          const num = name => Number(new RegExp(`${name}: (\\d+)`).exec(text)?.[1] ?? 0)
-          const pick = typeof policy.message === 'function' ? policy.message(values, text) : values.includes('pointer') ? 'pointer' : values.includes('stalled') ? 'stalled' : values.includes('ask_missing') ? 'ask_missing'
-            : values.includes('explain_wait') && (num('tool_steps_done') + num('tool_steps_running') > 0 || /waiting_on: command_running/.test(text)) ? 'explain_wait' : 'none'
-          return wireChoice(q.name, q, pick)
-        }
+      // L3 c15: the message judgment is yes/no questions (message__pointer / __ask / __note / __stalled); code derives the kind. The mock keeps
+      // its policy over the kinds those questions stand for and answers yes to the picked kind's question only.
+      const KIND = { message__pointer: 'pointer', message__ask: 'ask_missing', message__note: 'explain_wait', message__stalled: 'stalled' }
+      const kinds = ['none', ...['message__pointer', 'message__ask', 'message__note', 'message__stalled'].filter(name => names.includes(name)).map(name => KIND[name])]
+      const num = name => Number(new RegExp(`${name}: (\\d+)`).exec(text)?.[1] ?? 0)
+      const picked = typeof policy.message === 'function' ? policy.message(kinds, text) : kinds.includes('pointer') ? 'pointer' : kinds.includes('stalled') ? 'stalled' : kinds.includes('ask_missing') ? 'ask_missing'
+        : kinds.includes('explain_wait') && (num('tool_steps_done') + num('tool_steps_running') > 0 || /The assistant is running a command/.test(text)) ? 'explain_wait' : 'none'
+      return wire.questions.map(q => { if (q.type === 'predicate') return { name: q.name, type: 'predicate', probability: KIND[q.name] === picked && picked !== 'none' ? 0.97 : 0.03 }
+        const values = q.choices.map(c => c.value)
         return wireChoice(q.name, q, typeof policy[q.name] === 'function' ? policy[q.name](q, text) : values.includes('none') ? 'none' : values[0]) })
     }
     if (names.some(n => MEMORY_Q.test(n))) { // the lexical stand-in of the memory lane, plus the entry question when it rides the triage request

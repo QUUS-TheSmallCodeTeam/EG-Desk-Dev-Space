@@ -48,10 +48,21 @@
 //      - facts: numbers, booleans and closed labels for the judge, keys /^[a-z][a-z0-9_]{0,63}$/. No text.
 //      - kinds: egress kinds the question needs besides run facts (egdesk-decision-egress.mjs). A question whose kind the run's
 //        models may not receive is dropped alone; the other questions of the beat are still asked.
-//    All questions proposed at a beat ride ONE Decision request (the message question and every provider's questions are
+//    A yes/no question (preferred: measured on real answers, a choice that contains a "do nothing" option collapses onto it):
+//      { name, type: 'predicate', instructions, facts?, quote?: { label, text }, kinds? }
+//      - quote: the one item this question judges, shown on its own under the question (label: fixed English, at most 120
+//        characters; text: at most 800 characters of real content). kinds MUST then name the egress kind of that content.
+//    Shared material for a provider's questions of this beat: propose may return { context: { text, kinds }, questions: [...] }
+//      - context.text: at most 4000 characters, shown once before that provider's questions (what the person asked, what is
+//        happening now, what was already said). context.kinds: the egress kinds of what it quotes. When the run's models may
+//        not receive one of them, the context and all of that provider's questions of the beat are dropped (never sent bare).
+//      - A provider builds less context when a kind is not allowed (ask the run's gate first) instead of declaring a kind it
+//        cannot have: degrade, do not drop.
+//    All questions proposed at a beat ride ONE Decision request (the message questions and every provider's questions are
 //    independent questions of that request). The request bounds below are shared by everyone on the heartbeat.
 //    onVerdict({ beat, verdicts }) receives the verdicts of the provider's OWN questions only:
-//      { name, value, accepted, failed, confidence, margin }  (value is one of the proposed options; `none` unless accepted)
+//      { name, value, accepted, failed, confidence, margin }  (value is one of the proposed options; `none` unless accepted;
+//      for a predicate: 'yes' when its probability reached the judge's bar, else 'no', and `confidence` is that probability)
 //    It may return a closed label saying what it did (kept in the content-free record); it may be async. A provider that
 //    throws, in propose or in onVerdict, is ignored for that beat.
 // 3. Beats.   hb.subscribe(({ beat, internalMs, facts }) => {})   Facts only; verdicts never go to subscribers.
@@ -111,8 +122,35 @@ function sanitize(raw, keyRule = KEY, max = 16) {
 const count = value => (Number.isSafeInteger(value) && value >= 0 ? value : 0)
 
 // A provider's question, rebuilt from a whitelist. Null when it is not a closed-vocabulary question with a real choice.
+const PREDICATE_OPTIONS = Object.freeze([Object.freeze({ value: 'no' }), Object.freeze({ value: 'yes' })])
+const QUOTE_LIMITS = Object.freeze({ label: 120, text: 800, context: 4000 })
+// Real content for the judge: one paragraph of bounded text without control characters (line breaks are kept).
+function boundedText(value, max) {
+  if (typeof value !== 'string') return null
+  const text = value.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, ' ').trim()
+  return text && text.length <= max ? text : null
+}
+const egressKinds = raw => (Array.isArray(raw) ? raw.filter(kind => typeof kind === 'string' && LABEL.test(kind)).slice(0, 6) : [])
+function normalizeContext(raw) {
+  if (raw === null || typeof raw !== 'object') return null
+  const text = boundedText(raw.text, QUOTE_LIMITS.context)
+  return text ? Object.freeze({ text, kinds: Object.freeze(egressKinds(raw.kinds)) }) : null
+}
+
 function normalizeQuestion(provider, raw, maxOptions) {
   if (raw === null || typeof raw !== 'object' || !NAME.test(String(raw.name)) || typeof raw.instructions !== 'string' || !PROMPT.test(raw.instructions)) return null
+  if (raw.type === 'predicate') {
+    let quote = null
+    if (raw.quote !== undefined && raw.quote !== null) {
+      const text = boundedText(raw.quote?.text, QUOTE_LIMITS.text)
+      if (!text || typeof raw.quote.label !== 'string' || !PROMPT.test(raw.quote.label) || raw.quote.label.length > QUOTE_LIMITS.label) return null
+      quote = Object.freeze({ label: raw.quote.label, text })
+    }
+    const kinds = egressKinds(raw.kinds)
+    if (quote && !kinds.length) return null // quoted content always names the egress kind it belongs to
+    return Object.freeze({ provider, name: raw.name, wire: `${provider}__${raw.name}`, type: 'predicate', instructions: raw.instructions, options: PREDICATE_OPTIONS, none: 'no',
+      facts: Object.freeze(sanitize(raw.facts, FACT_KEY, 24) ?? {}), kinds: Object.freeze(kinds), quote })
+  }
   if (!Array.isArray(raw.options) || raw.options.length < 2 || raw.options.length > maxOptions) return null
   const options = []
   for (const option of raw.options) {
@@ -210,16 +248,24 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
   // each provider the verdicts of its own questions. A beat on which nobody proposes costs nothing.
   function round(beat) {
     if (!judge || roundBusy || asks >= lim('maxAsks')) return
-    const questions = []
+    const questions = [], contexts = {}
     for (const [name, provider] of providers) {
       if (!provider.propose || questions.length >= lim('maxQuestions')) continue
       let list = null
       try { list = provider.propose(beat) } catch { list = null }
+      // { context, questions }: material shared by this provider's questions of the beat.
+      if (list !== null && typeof list === 'object' && !Array.isArray(list) && Array.isArray(list.questions)) {
+        const context = normalizeContext(list.context)
+        if (list.context && !context) continue // unusable material: the provider is skipped for this beat rather than asked bare
+        if (context) contexts[name] = context
+        list = list.questions
+      }
       for (const raw of Array.isArray(list) ? list : list ? [list] : []) {
         const question = normalizeQuestion(name, raw, lim('maxOptions'))
         if (question && !questions.some(q => q.wire === question.wire) && questions.length < lim('maxQuestions')) questions.push(question)
       }
     }
+    for (const name of Object.keys(contexts)) if (!questions.some(q => q.provider === name)) delete contexts[name]
     if (!questions.length) return
     const key = (q, o) => `${q.wire}\0${o.value}`
     const fresh = questions.some(q => q.options.some(o => !offered.has(key(q, o))))
@@ -231,7 +277,7 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
     roundCap = setTimer(() => { roundCap = null; roundBusy = false }, lim('roundMs')); roundCap?.unref?.()
     void (async () => {
       let answers = null, failure = null
-      try { answers = await judge({ beat, questions }) } catch (error) { failure = typeof error?.code === 'string' && LABEL.test(error.code) ? error.code : 'unreachable' }
+      try { answers = await judge({ beat, questions, contexts: Object.freeze(contexts) }) } catch (error) { failure = typeof error?.code === 'string' && LABEL.test(error.code) ? error.code : 'unreachable' }
       const decisionMs = Math.max(0, monotonicNow() - asked)
       const verdicts = questions.map(q => {
         const row = answers && typeof answers === 'object' ? answers[q.wire] : null
@@ -253,7 +299,7 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
           } catch { /* a provider never breaks the round */ }
         }))
       }
-      try { onRound?.({ beat, decisionMs, failure, outcomes, questions: verdicts.map(v => ({ provider: v.question.provider, name: v.question.name, options: v.question.options.length, none: v.question.none, verdict: v.verdict })) }) } catch { /* ignore */ }
+      try { onRound?.({ beat, decisionMs, failure, outcomes, questions: verdicts.map(v => ({ provider: v.question.provider, name: v.question.name, type: v.question.type ?? 'choice', options: v.question.options.length, none: v.question.none, verdict: v.verdict })) }) } catch { /* ignore */ }
     })().catch(() => {}).finally(done)
   }
 

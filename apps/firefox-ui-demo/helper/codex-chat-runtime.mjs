@@ -17,8 +17,8 @@ import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
 import { gateRuntimeToolResult, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
 import { homedir } from 'node:os'
 import { createInternalTurns } from './codex-internal-turn.mjs'
-import { FLOW_COPY, FLOW_LIMITS, attentionOf, audienceFacts, beatFlowFacts, cleanIntermediate, enumerateOptions, flowQuestion, idleFlowFacts, pointerPrompt, pointerRoute, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
-import { BEAT_JUDGE_TIMEOUT_MS, createBeatJudge } from './egdesk-heartbeat-judge.mjs'
+import { FLOW_COPY, FLOW_LIMITS, attentionOf, audienceFacts, beatFlowFacts, cleanIntermediate, deriveFlowKind, enumerateOptions, flowPredicates, idleContext, idleFlowFacts, pointerPrompt, pointerRoute, runContext, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
+import { BEAT_JUDGE_TIMEOUT_MS, BEAT_PREDICATE_YES, createBeatJudge } from './egdesk-heartbeat-judge.mjs'
 import { createHeartbeats } from './egdesk-heartbeat.mjs'
 import { feedBrowserTask } from './egdesk-heartbeat-providers.mjs'
 import { browserRefusal, ceilingAllowsBrowserTool, ceilingAllowsComputerTool, ceilingApprovalRefusal, ceilingBrowserSelection, ceilingNarrows, ceilingReportNotices, CEILING_MESSAGES, computerRefusal, effectiveToolCeiling, liveBrowserSelected, loadCeilingThreadOverrides, mergeCeilingOverrides, recordedToolCeiling, verifyCeilingNativeThread } from './codex-chat-tool-ceiling.mjs'
@@ -5189,9 +5189,10 @@ export class CodexChatRuntime {
     subject.proposal = null
     if (proposal?.mode === 'run') return this.flowVerdict(proposal.run, proposal.flow, round, subject)
     if (proposal?.mode !== 'idle') return 'none'
-    const verdict = round.verdicts[0], pending = subject.pendingPointer
+    const verdict = round.verdicts.find(v => v.name === 'pointer'), pending = subject.pendingPointer
     subject.pendingPointer = null
-    if (!verdict?.accepted || verdict.value !== 'pointer' || !pending) return 'none'
+    subject.derived = verdict?.accepted && verdict.value === 'yes' && pending ? 'pointer' : 'none'
+    if (subject.derived !== 'pointer') return 'none'
     return this.trackFlowJob(this.postPointer(subject, pending.attention))
   }
 
@@ -5269,9 +5270,17 @@ export class CodexChatRuntime {
     const facts = idleFlowFacts({ heartbeatFacts: beat.facts, audience: this.sessionAudience(subject).facts, pointer })
     const options = enumerateOptions(facts)
     if (!options.includes('pointer')) return null
+    // The judge reads the ended run's request and answer, as far as this run's models may receive them; without that, nothing is asked.
+    const egress = this.decisionEgressFor(run)
+    const context = idleContext({ heartbeatFacts: beat.facts, facts, userText: this.runUserText(run), answerText: this.runAnswerText(run), allows: kind => egress.allows(kind) })
+    if (!context) return null
     subject.pendingPointer = { attention: pointer.attention }
-    return flowQuestion(facts, options)
+    return { context, questions: flowPredicates(['pointer']) }
   }
+
+  // What the person wrote for this run, and the answer the run posted (its own text, which its model received or wrote).
+  runUserText(run) { return this.draftCheckTurns.get(run)?.userText || run.messages?.find(m => m.role === 'user')?.text || '' }
+  runAnswerText(run) { return [...(run.messages || [])].reverse().find(m => m.role === 'assistant' && m.status === 'complete' && !String(m.id).startsWith('egdesk-flow:'))?.text || '' }
 
   // The message question for this beat while the run works, or nothing (a quiet beat costs no request). The request bounds are the heartbeat's.
   flowPropose(run, flow, beat, subject = this.heartbeatSubjects.get(flow.heartbeat)) {
@@ -5281,18 +5290,29 @@ export class CodexChatRuntime {
     const facts = { ...beatFlowFacts({ heartbeatFacts: beat.facts, run, flow, own: FLOW_OWN_KINDS }), ...(subject ? this.pointerFacts(subject, beat.facts) : {}) }
     const options = enumerateOptions(facts).filter(kind => !(flow.taskTurn && kind === 'ask_missing'))
     if (options.length < 2) return null
-    flow.pendingFacts = facts
-    return flowQuestion(facts, options)
+    // The judge reads what this run's own models receive: the person's request, what the Agent is doing now (the real command line
+    // or tool name where the run's gate allows that kind) and what was already said. Without the run's own text nothing is asked.
+    const egress = this.decisionEgressFor(run)
+    const context = runContext({ run, heartbeatFacts: beat.facts, flow, facts, userText: this.runUserText(run), allows: kind => egress.allows(kind), own: FLOW_OWN_KINDS })
+    if (!context) return null
+    const note = facts.question ? run.activities.find(a => a.id === facts.question.id) : null
+    const questions = flowPredicates(options, { note: note ? { text: note.detail?.text } : null })
+    if (!questions.length) return null
+    flow.pendingFacts = facts; flow.pendingOptions = options
+    return { context, questions }
   }
 
   // The verdict for the message question: write, check and post, and say what happened in a closed word for the record.
   flowVerdict(run, flow, { verdicts }, subject = this.heartbeatSubjects.get(flow.heartbeat)) {
-    const verdict = verdicts[0], facts = flow.pendingFacts
-    flow.pendingFacts = null
-    if (!verdict?.accepted || verdict.value === 'none' || !facts) return 'none'
-    if (verdict.value === 'pointer') return subject && facts.attention ? this.trackFlowJob(this.postPointer(subject, facts.attention)) : 'none'
+    const facts = flow.pendingFacts, options = flow.pendingOptions ?? []
+    flow.pendingFacts = null; flow.pendingOptions = null
+    // The answers are yes/no; code picks the kind (a question first, then a pointer, a stall, a progress note).
+    const kind = facts ? deriveFlowKind(new Set(verdicts.filter(v => v.accepted && v.value === 'yes').map(v => v.name)), options) : 'none'
+    if (subject) subject.derived = kind
+    if (kind === 'none') return 'none'
+    if (kind === 'pointer') return subject && facts.attention ? this.trackFlowJob(this.postPointer(subject, facts.attention)) : 'none'
     if (flow.closed || run.status !== 'inProgress') return 'none'
-    return this.trackFlowJob(this.postIntermediate(run, flow, verdict.value, facts))
+    return this.trackFlowJob(this.postIntermediate(run, flow, kind, facts))
   }
 
   // One Decision request for every question proposed at this beat. Run facts are numbers and closed labels (egress kind run_facts);
@@ -5316,10 +5336,14 @@ export class CodexChatRuntime {
       const posted = summary.outcomes.message ?? 'none'
       const known = ['timeout', 'unreachable', 'bad_response', 'budget_exceeded', 'evidence_unavailable', 'not_configured', 'rate_limited', 'no_credit', 'spend_limit_reached', 'server_error']
       log.record({ feature: 'conversation_flow', mode: 'on', attached: posted !== 'none', candidates: summary.questions.reduce((n, q) => n + q.options, 0), questions: summary.questions.length,
-        judgments: summary.questions.filter(q => !q.verdict.failed && !q.verdict.skipped).map(q => ({ q: 'choice', provider: q.provider, would: q.verdict.value === q.none ? 'none' : 'act',
-          top: q.verdict.top, second: q.verdict.second, confidence: q.verdict.confidence, margin: q.verdict.margin, options: q.options, threshold: 0.75, minMargin: 0.2 })),
+        judgments: summary.questions.filter(q => !q.verdict.failed && !q.verdict.skipped).map(q => (q.type === 'predicate'
+          // A yes/no answer: its probability against the judge's bar; which predicate it was is a closed word.
+          ? { q: q.provider === 'message' ? `beat_${q.name}` : 'choice', provider: q.provider, would: q.verdict.value === 'yes' ? 'act' : 'none', p: q.verdict.confidence, threshold: BEAT_PREDICATE_YES }
+          : { q: 'choice', provider: q.provider, would: q.verdict.value === q.none ? 'none' : 'act',
+            top: q.verdict.top, second: q.verdict.second, confidence: q.verdict.confidence, margin: q.verdict.margin, options: q.options, threshold: 0.75, minMargin: 0.2 })),
         ...(summary.failure ? { fallback: known.includes(summary.failure) ? summary.failure : 'unreachable' } : {}),
-        ...(message ? { flow: message.verdict.failed ? null : message.verdict.value, posted } : {}),
+        // flow: the kind code derived from the answers of the message questions ('none' when none was yes).
+        ...(message ? { flow: summary.questions.filter(q => q.provider === 'message').every(q => q.verdict.failed) ? null : subject.derived ?? 'none', posted } : {}),
         beat: { n: summary.beat.beat, phase: f.phase, sinceUserMs: f.sinceUserMs, sincePostedMs: f.sincePostedMs, sinceEngineMs: f.sinceEngineMs, stepsDone: f.stepsDone, stepsRunning: f.stepsRunning, decisionMs: summary.decisionMs } })
     } catch { /* recording never affects the session */ }
   }
@@ -5337,7 +5361,7 @@ export class CodexChatRuntime {
     if (flow.audience().postable !== true) return 'none'
     const id = `egdesk-flow:${randomUUID()}`
     await this.applyItem(run, { id, type: 'agentMessage', phase: null, text, completionConfirmed: true }, true, true, true)
-    flow.sent.push({ id, text, kind, by }); flow.kinds.add(kind); if (by === 'fallback') flow.kinds.add('stalled')
+    flow.sent.push({ id, text, kind, by, at: flow.heartbeat.internalMs() }); flow.kinds.add(kind); if (by === 'fallback') flow.kinds.add('stalled')
     flow.heartbeat.mark('posted'); flow.stepsAtLast = facts.stepsDone
     if (kind === 'ask_missing') { flow.question = { id, pending: true }; if (facts.question) flow.askedNotes.add(facts.question.id); this.setReplyOpen(run, id) }
     return by
@@ -5394,7 +5418,7 @@ export class CodexChatRuntime {
     if (!carrier || subject.pointed.has(attention.signature)) return 'none'
     const id = `egdesk-flow:${randomUUID()}`
     await this.applyItem(carrier.run, { id, type: 'agentMessage', phase: null, text, completionConfirmed: true }, true, true, true)
-    if (carrier.flow) { carrier.flow.sent.push({ id, text, kind: 'pointer', by: 'model' }); carrier.flow.kinds.add('pointer') }
+    if (carrier.flow) { carrier.flow.sent.push({ id, text, kind: 'pointer', by: 'model', at: carrier.flow.heartbeat.internalMs() }); carrier.flow.kinds.add('pointer') }
     subject.pointed.add(attention.signature); subject.pointers++
     try { this.heartbeats.get(target.key)?.mark('posted') } catch { /* ignore */ }
     // A fact that was held for this person: its source is told. Otherwise the provider itself is told, so it can withdraw its fact

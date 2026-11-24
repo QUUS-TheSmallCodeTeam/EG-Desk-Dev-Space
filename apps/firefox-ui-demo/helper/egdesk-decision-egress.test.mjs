@@ -10,7 +10,8 @@ import { createEgressGate, EGRESS_KINDS, EGRESS_SITES, modelDataPermissions } fr
 import { assessCommand } from './egdesk-terminal-command-gate.mjs'
 import { judgeTerminalState } from './egdesk-terminal-judge.mjs'
 import { checkDraft } from './egdesk-draft-check.mjs'
-import { decideFlow, enumerateOptions, flowFacts } from './egdesk-conversation-flow.mjs'
+import { enumerateOptions, flowFacts, flowPredicates, runContext } from './egdesk-conversation-flow.mjs'
+import { createBeatJudge } from './egdesk-heartbeat-judge.mjs'
 import { createOutcomeToOntology } from './egdesk-browser-task-memory.mjs'
 import { decideBrowserEntry } from './egdesk-browser-task.mjs'
 import { reconstructMemory } from './egdesk-wiki-reconstruction.mjs'
@@ -94,22 +95,39 @@ test('draft_text: allowed -> the sentences and permitted catalog items are sent;
   assert.equal(q.requests.length, 0); assert.equal(refused.outcome, 'unchecked'); assert.equal(refused.text, draft)
 })
 
-test('run_facts (conversation flow): numbers and closed labels only; allowed while a run is active; no run -> 0 requests and the usual fallback', async () => {
+test('run_text / terminal_command (heartbeat message questions): the run\'s own text and command line go only where its models may receive them; less is sent, not more, when a kind is refused; no run -> 0 requests', async () => {
   const own = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
   const run = { status: 'inProgress', pendingApprovals: [], activities: [
     { id: 'n1', kind: 'workNote', status: 'completed', detail: { text: 'zeta-synthetic-note 어느 환경인가요?' } },
-    { id: 'c1', kind: 'commandExecution', status: 'completed', title: 'zeta-synthetic-command', detail: { command: 'zeta-synthetic-command' } }] }
+    { id: 'c1', kind: 'commandExecution', status: 'inProgress', title: 'zeta-synthetic-command', detail: { command: 'zeta-synthetic-command --all' } }] }
   const flow = { startedAt: 0, sent: [], kinds: new Set(), askedNotes: new Set(), lastSentAt: null, stepsAtLast: 0 }
   const facts = flowFacts({ run, now: 20_000, flow, own })
   const options = enumerateOptions(facts)
-  assert.ok(options.length > 1)
-  const p = provider()
-  await decideFlow({ facts, options, client: gate({}).guardClient(p.client, ['run_facts']) })
-  assert.equal(p.requests.length, 1); assert.equal(p.carrying('zeta-synthetic'), 0, 'no text of the run reaches the decision model')
-  assert.ok(p.requests[0].includes('agent_asked_a_question_in_its_notes: yes'))
-  const q = provider()
-  await assert.rejects(decideFlow({ facts, options, client: createEgressGate(modelDataPermissions({ runActive: false })).guardClient(q.client, ['run_facts']) }), e => e.code === 'evidence_unavailable')
-  assert.equal(q.requests.length, 0)
+  assert.ok(options.includes('ask_missing') && options.includes('explain_wait'))
+  const beat = { facts: { internalMs: 20_000, sinceUserMs: 20_000, sincePostedMs: null, sinceEngineMs: 2000, phase: 'tool_running', stepsDone: 0, stepsRunning: 1, stepsRemaining: null, sources: {} } }
+  const ask = async egress => {
+    const p = provider()
+    const context = runContext({ run, heartbeatFacts: beat.facts, flow, facts, userText: 'zeta-synthetic-request 배포해 주세요', allows: kind => egress.allows(kind), own })
+    const questions = context ? flowPredicates(options, { note: { text: run.activities[0].detail.text } }).map(q => ({ ...q, provider: 'message', wire: `message__${q.name}`, options: [{ value: 'no' }, { value: 'yes' }], none: 'no', facts: {}, kinds: q.kinds ?? [], quote: q.quote ?? null })) : []
+    const verdicts = questions.length ? await createBeatJudge({ client: egress.guardClient(p.client, ['run_facts']), allows: kind => egress.allows(kind) })({ beat, questions, contexts: { message: context } }).catch(error => error) : null
+    return { p, context, verdicts }
+  }
+  // An ordinary run: the request, the note and the command line are sent.
+  const open = await ask(gate({ toolCeiling: OPEN }))
+  assert.equal(open.p.requests.length, 1); assert.deepEqual(open.context.kinds.sort(), ['run_text', 'terminal_command'])
+  for (const marker of ['zeta-synthetic-request', 'zeta-synthetic-note', 'zeta-synthetic-command --all']) assert.ok(open.p.carrying(marker) >= 1, marker)
+  // The Agent's models may not receive terminal data: the same questions are asked without the command line.
+  const noTerminal = await ask(gate({ toolCeiling: CEILING_NONE }))
+  assert.equal(noTerminal.p.requests.length, 1); assert.deepEqual(noTerminal.context.kinds, ['run_text'])
+  assert.equal(noTerminal.p.carrying('zeta-synthetic-command'), 0); assert.ok(noTerminal.p.carrying('zeta-synthetic-request') >= 1); assert.ok(noTerminal.p.requests[0].includes('The assistant is running a command.'))
+  // No run whose text a model owns: nothing is built and nothing is sent (never the bare numbers).
+  const none = await ask(createEgressGate(modelDataPermissions({ runActive: false })))
+  assert.equal(none.context, null); assert.equal(none.p.requests.length, 0)
+  // A context that names a kind the run may not have is dropped by the judge together with its questions.
+  const p = provider(), terminalOff = gate({ toolCeiling: CEILING_NONE })
+  const questions = flowPredicates(['none', 'explain_wait']).map(q => ({ ...q, provider: 'message', wire: `message__${q.name}`, options: [{ value: 'no' }, { value: 'yes' }], none: 'no', facts: {}, kinds: [], quote: null }))
+  const skipped = await createBeatJudge({ client: terminalOff.guardClient(p.client, ['run_facts']), allows: kind => terminalOff.allows(kind) })({ beat, questions, contexts: { message: { text: open.context.text, kinds: ['run_text', 'terminal_command'] } } })
+  assert.deepEqual([p.requests.length, skipped.message__note], [0, { value: 'no', accepted: false, skipped: true }])
 })
 
 test('page_text: allowed -> the Card list is sent; ceiling browser none or no Card grant -> 0 requests and the usual fallback', async () => {

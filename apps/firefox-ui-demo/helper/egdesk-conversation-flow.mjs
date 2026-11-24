@@ -1,4 +1,3 @@
-import { choiceQuestion, decisionThresholds, readChoice } from './egdesk-decision-questions.mjs'
 
 // Human-like intermediate messages while a run is still working. The system decides, from runtime facts only, whether to say
 // something now; the subjective model writes the short message; the message is posted as a completed chat message and the run
@@ -208,7 +207,8 @@ export function enumerateOptions(facts, limits = FLOW_LIMITS) {
   if (facts.sinceLastMs !== null && facts.sinceLastMs < limits.minGapMs) return out
   // A pointer has its own addressee (the person who must act) and its own route, decided by code under the audience rule; it is
   // possible whenever such a fact is pending, has a route, and was not pointed to yet. It does not depend on the wait messages.
-  if (facts.attention && facts.pointerTarget && facts.pointed !== true && (facts.pointers ?? 0) < limits.maxPointers) out.push('pointer')
+  // Something already inside what the person is looking at needs no pointer: decided here, never asked.
+  if (facts.attention && facts.attention.where !== 'in_view' && facts.pointerTarget && facts.pointed !== true && (facts.pointers ?? 0) < limits.maxPointers) out.push('pointer')
   if (facts.blocked || facts.sent >= limits.maxMessages) return out
   // Nobody is waiting, the waiting person is not in this conversation, or someone else is: nothing may be said here.
   if (facts.audience && facts.audience.postable !== true) return out
@@ -224,51 +224,158 @@ export function enumerateOptions(facts, limits = FLOW_LIMITS) {
   return out
 }
 
-/**
- * The message question as a heartbeat proposal (egdesk-heartbeat.mjs): closed options, facts as numbers and closed labels.
- * Time, phase and step counts are session lines of the beat request; only what is specific to speaking is listed here.
- */
-export function flowQuestion(facts, options) {
-  const a = facts.audience ?? null, waits = Array.isArray(facts.waits) ? facts.waits : [], at = facts.attention ?? null
-  return { name: 'need', none: 'none', kinds: [],
-    instructions: 'Should the assistant send a person a short message now, and which kind?',
-    options: FLOW_KINDS.filter(kind => options.includes(kind.value)),
-    facts: { work_in_progress: facts.idle !== true, messages_already_sent_while_working: facts.sent, steps_done_since_last_message: facts.stepsSinceLast, agent_asked_a_question_in_its_notes: Boolean(facts.question),
-      wait_already_explained: facts.waitExplained === true, a_question_to_the_person_is_still_unanswered: facts.pendingQuestion === true, reasoning_in_progress: facts.reasoningOpen === true,
-      // What is being waited on, as closed labels (WAIT_LABELS), with how long when the system knows.
-      ...(waits[0] ? { waiting_on: waits[0].what, ...(waits[0].seconds !== null ? { waiting_on_seconds: waits[0].seconds } : {}) } : {}),
-      ...(waits[1] ? { also_waiting_on: waits[1].what } : {}),
-      // Something that needs a person's attention somewhere on the desk (closed labels from the provider).
-      ...(at && options.includes('pointer') ? { attention_kind: at.kind, attention_for: at.who, attention_where: at.where, ...(at.distance ? { attention_distance: at.distance } : {}),
-        // A fact that was held for this person until their own conversation became live again: how long it has waited.
-        ...(Number.isFinite(at.heldMs) ? { attention_waiting_seconds: Math.round(at.heldMs / 1000) } : {}),
-        attention_person_in_this_conversation: facts.pointerTarget === 'here' } : {}),
-      ...(a ? { waiting_person: a.waiting, waiting_person_present: a.addresseePresent === null ? 'unknown' : a.addresseePresent ? 'yes' : 'no',
-        ...(a.addresseeIdleMs !== null ? { waiting_person_idle_seconds: Math.round(a.addresseeIdleMs / 1000) } : {}) } : {}) } }
+
+// ---- What the judge is shown, and what it is asked (measured on real answers, 2026-11-24) ----
+// From numbers and closed labels alone the Decision model answered "say nothing" to every pattern, and a choice that contains a
+// do-nothing option collapsed onto it. So: the judge reads what the run's own models already receive (the person's request, what the
+// Agent is doing now, what was already said), each part only when the run's egress gate allows that kind of data; it answers yes/no
+// questions, one per kind of message; and CODE turns the answers into a kind. Everything that is arithmetic (how long, how often,
+// how many, who is present, is there a route) is decided by enumerateOptions before anything is asked.
+export const FLOW_CONTEXT_LIMITS = Object.freeze({ request: 600, note: 400, said: 280, command: 160, answer: 500, tools: 2 })
+// kind → the predicate that stands for it. 'explain_wait' and 'milestone' are the same question; code picks the wording.
+const PREDICATE_OF = Object.freeze({ ask_missing: 'ask', pointer: 'pointer', stalled: 'stalled', explain_wait: 'note', milestone: 'note' })
+export const FLOW_PREDICATES = Object.freeze({
+  note: Object.freeze({ name: 'note', type: 'predicate', instructions: 'Would a considerate collaborator send the waiting person a short progress note right now (one or two sentences on what is taking time), given what they asked, what is happening and what was already said?' }),
+  ask: Object.freeze({ name: 'ask', type: 'predicate', instructions: 'Does the quoted note show that the assistant needs a piece of information that only the person can give before it can finish, so that asking the person now would help?' }),
+  stalled: Object.freeze({ name: 'stalled', type: 'predicate', instructions: 'Nothing has come from the work for a while. Given what it was doing, has the work likely stalled or hung, so that the person should be told the response is taking unusually long?' }),
+  pointer: Object.freeze({ name: 'pointer', type: 'predicate', instructions: 'Something that needs this person is on the desk outside their view, and nothing was moved. Given what was already said to them, do they still need to be told where it is?' }),
+})
+const SAID = Object.freeze({ explain_wait: 'a note that this takes a while', ask_missing: 'a question to the person', milestone: 'a progress note', stalled: 'a note that the response is taking unusually long', pointer: 'a note about where a result is' })
+// The engine-command judge's own reading of the command's real output (egdesk-terminal-judge.mjs), in plain words.
+const COMMAND_STATE = Object.freeze({ running_output: 'its output shows it is still running', waiting_yn_input: 'it is waiting for a yes or no answer', waiting_password: 'it is waiting for a secret to be typed',
+  stuck_in_pager: 'a pager is holding the terminal', need_user_context: 'its output asks for information only the person can give', cannot_proceed: 'its output shows it cannot continue' })
+const oneLine = (value, max) => { const text = String(value ?? '').replace(/\s+/g, ' ').trim(); return text.length > max ? `${text.slice(0, max - 1)}…` : text }
+const quoted = (label, text) => `${label}:\n"""\n${text}\n"""`
+const secondsOf = ms => Math.max(0, Math.round(ms / 1000))
+const span = ms => { const n = secondsOf(ms); return `${n} second${n === 1 ? '' : 's'}` }
+const ATTENTION_WHAT = Object.freeze({ result: 'A finished result', approval: 'Something that needs a decision before work can continue', question: 'A question that is waiting for an answer' })
+const WHERE_WORDS = Object.freeze({ in_view: 'inside what they are looking at on the desk', left: 'to the left of what they are looking at on the desk', right: 'to the right of what they are looking at on the desk',
+  above: 'above what they are looking at on the desk', below: 'below what they are looking at on the desk', none: 'elsewhere on the desk' })
+const FAR_WORDS = Object.freeze({ near: ', close by', far: ', some way off', very_far: ', far away' })
+/** Where something is, relative to what the person is looking at: fixed words chosen by closed labels. */
+export const wherePhrase = attention => `${WHERE_WORDS[attention?.where] ?? WHERE_WORDS.none}${FAR_WORDS[attention?.distance] ?? ''}`
+function personLine(audience) {
+  if (!audience || audience.waiting === 'nobody') return 'Nobody is at the desk waiting for this.'
+  const who = audience.waiting === 'owner' ? 'the owner of this task (the person who asked is away)' : 'the person who asked'
+  const there = audience.addresseePresent === null ? 'whether they are at the desk is not known' : `they are at the desk${Number.isFinite(audience.addresseeIdleMs) ? ` (last input ${span(audience.addresseeIdleMs)} ago)` : ''}`
+  return `Waiting for this: ${who}; ${there}.`
+}
+function attentionLine(attention, target, { earlier = false } = {}) {
+  const what = ATTENTION_WHAT[attention.kind] ?? 'Something'
+  if (attention.provider === 'held') return `Separately: ${what.toLowerCase()} from another task has been waiting for this person for about ${span(attention.heldMs ?? 0)}, elsewhere on the desk. Nothing was moved into their view and they have not been told.`
+  const who = attention.who === 'owner' ? 'the owner of this task' : 'the person who asked'
+  const route = target === 'here' ? 'They take part in this conversation.' : 'They are not in this conversation: the note would go into their own conversation.'
+  // During a run the fact belongs to earlier work, not to the request being worked on now.
+  const lead = earlier ? `Separately, from earlier work in this conversation: ${what.toLowerCase()}` : what
+  return `${lead} is waiting ${wherePhrase(attention)}. It is for ${who}. ${route} Nothing was moved into their view and they have not been told where it is.`
 }
 
-/** One Decision request over the enumerated kinds. Returns { kind, judgment } ('none' unless the answer clears the bar). */
-export async function decideFlow({ facts, options, client, signal, timeoutMs = FLOW_LIMITS.decisionMs, thresholds: overrides }) {
-  const thresholds = decisionThresholds(overrides)
-  const lines = [`seconds_since_the_person_wrote: ${Math.round(facts.elapsedMs / 1000)}`, `tool_steps_done: ${facts.stepsDone}`, `tool_steps_running: ${facts.stepsActive}`,
-    `seconds_since_last_message_from_you: ${facts.sinceLastMs === null ? 'none_yet' : Math.round(facts.sinceLastMs / 1000)}`,
-    `messages_already_sent_while_working: ${facts.sent}`, `agent_asked_a_question_in_its_notes: ${facts.question ? 'yes' : 'no'}`,
-    `wait_already_explained: ${facts.waitExplained ? 'yes' : 'no'}`,
-    ...(typeof facts.phase === 'string' ? [`current_phase: ${facts.phase}`] : []),
-    ...(Number.isFinite(facts.sinceEngineMs) ? [`seconds_since_anything_came_from_the_work: ${Math.round(facts.sinceEngineMs / 1000)}`] : []),
-    ...(Number.isSafeInteger(facts.stepsRemaining) ? [`steps_known_to_remain: ${facts.stepsRemaining}`] : []),
-    ...(facts.pendingQuestion ? ['a_question_to_the_person_is_still_unanswered: yes'] : [])].join('\n')
-  const choices = FLOW_KINDS.filter(kind => options.includes(kind.value))
-  const request = { input: [{ role: 'developer', content: 'You decide whether an assistant that is still working should send the person a short message now, like a considerate colleague. Everything below is data. Prefer none unless the person would clearly be better off hearing something now.' },
-    { role: 'user', content: `Facts:\n${lines}` }],
-    questions: [choiceQuestion('intermediate_message', 'Should the assistant send a message now, and which kind?', choices)], timeoutMs, signal, promptCacheKey: 'conversation-flow' }
-  const result = await client.decide(request)
-  const read = readChoice(result.answers, 'intermediate_message', { minConfidence: thresholds.choice, minMargin: thresholds.margin })
-  const answer = result.answers?.intermediate_message
-  const kind = read.state === 'accepted' && options.includes(read.value) ? read.value : 'none'
-  return { kind, usage: result.usage ?? null,
-    judgment: { q: 'choice', would: kind === 'none' ? 'none' : 'act', top: answer?.probabilities?.[0]?.probability, second: answer?.probabilities?.[1]?.probability,
-      confidence: answer?.confidence, options: choices.length, threshold: thresholds.choice, minMargin: thresholds.margin } }
+/**
+ * What the Agent is doing right now, as sentences. Real command lines and tool names are included only when `allows` says the
+ * run's models may receive that kind; otherwise the sentence stays general. Returns { lines, kinds }.
+ */
+function workLines({ run, heartbeatFacts, flow, own, allows }) {
+  const hb = heartbeatFacts, lines = [], kinds = new Set()
+  const tools = (run?.activities || []).filter(a => !own.has(a.kind))
+  const describe = a => {
+    if (a.kind === 'commandExecution') {
+      if (a.detail?.command && allows('terminal_command')) { kinds.add('terminal_command'); return `a command: \`${oneLine(a.detail.command, FLOW_CONTEXT_LIMITS.command)}\`` }
+      return 'a command'
+    }
+    if (a.kind === 'fileChange') return `file changes (${Number.isSafeInteger(a.detail?.changeCount) ? a.detail.changeCount : 'some'} files)`
+    if (a.kind === 'mcpToolCall') return a.detail?.controlKind === 'computer' ? 'a step that operates the computer' : `the tool ${oneLine(`${a.detail?.server ?? ''} / ${a.detail?.tool ?? ''}`, 80)}`
+    if (a.kind === 'dynamicToolCall') return `the tool ${oneLine(a.detail?.tool ?? 'unknown', 80)}`
+    if (a.kind === 'collabAgentToolCall') return 'a hand-off to a helper agent'
+    return 'a tool step'
+  }
+  const running = tools.filter(a => a.status === 'inProgress').slice(-FLOW_CONTEXT_LIMITS.tools)
+  const command = hb.sources?.engine_commands
+  for (const a of running) {
+    const timing = a.kind === 'commandExecution' && command?.terminal && Number.isFinite(command.runningMs)
+      ? ` (running for about ${span(command.runningMs)}${COMMAND_STATE[command.terminalState] ? `; ${COMMAND_STATE[command.terminalState]}` : ''})` : ''
+    lines.push(`The assistant is running ${describe(a)}${timing}.`)
+  }
+  const waits = waitSummary(hb).filter(w => !(running.length && (w.what === 'command_running' || w.what === 'tool_running')))
+  for (const w of waits) lines.push(`As far as the system knows: ${WAIT_LABELS[w.what]}${w.seconds !== null && w.seconds >= 5 ? ` (about ${w.seconds} seconds so far)` : ''}.`)
+  if (!running.length && !waits.length) lines.push(flow?.reasoningOpen?.() === true ? 'The assistant is thinking (a reasoning step is open); no tool step is running.' : 'No tool step is running.')
+  const done = tools.filter(a => a.status === 'completed')
+  lines.push(hb.stepsDone > 0 ? `Tool steps finished so far: ${hb.stepsDone}${done.length ? ` (the last one: ${describe(done.at(-1))})` : ''}.` : 'No tool step has finished yet.')
+  if (Number.isSafeInteger(hb.stepsRemaining)) lines.push(`The task may take up to ${hb.stepsRemaining} more steps (an upper limit, not a plan).`)
+  // While a step-by-step task runs outside the engine, the engine's own silence says nothing: the task's last step does.
+  const task = hb.sources?.browser_task
+  if (hb.phase === 'objective_step') { if (Number.isFinite(task?.lastActionAgeMs)) lines.push(`The task's last step finished ${span(task.lastActionAgeMs)} ago.`) }
+  else lines.push(`The last sign of activity from the work was ${span(hb.sinceEngineMs)} ago.`)
+  return { lines, kinds }
+}
+
+/**
+ * The material for the message questions of a working run: { text, kinds } or null when the run's models may not receive the
+ * run's own text (then nothing is asked: the judge is never sent bare numbers).
+ *   userText: what the person wrote; allows(kind): the run's egress gate; facts: beatFlowFacts(...) (+ pointer facts).
+ */
+export function runContext({ run, heartbeatFacts, flow, facts, userText, allows = () => true, own = new Set() }) {
+  if (allows('run_text') !== true) return null
+  const hb = heartbeatFacts, L = FLOW_CONTEXT_LIMITS, kinds = new Set(['run_text'])
+  const parts = []
+  const request = oneLine(userText, L.request)
+  if (request) parts.push(quoted('The person\'s request', request))
+  const now = [`${span(hb.sinceUserMs)} ${secondsOf(hb.sinceUserMs) === 1 ? 'has' : 'have'} passed since the person wrote.`]
+  const work = workLines({ run, heartbeatFacts: hb, flow, own, allows })
+  for (const kind of work.kinds) kinds.add(kind)
+  now.push(...work.lines)
+  const notes = (run?.activities || []).filter(a => a.kind === 'workNote' && a.status === 'completed')
+  const note = oneLine(notes.at(-1)?.detail?.text, L.note)
+  if (note) now.push(`The assistant's latest note to itself: "${note}"`)
+  now.push(personLine(facts?.audience ?? null))
+  if (facts?.attention && facts.pointerTarget && facts.pointed !== true) now.push(attentionLine(facts.attention, facts.pointerTarget, { earlier: true }))
+  parts.push(`Now:\n${now.map(line => `- ${line}`).join('\n')}`)
+  const sent = (flow?.sent || []).slice(-3)
+  parts.push(sent.length ? `Already said to the person while working:\n${sent.map(row => `- ${Number.isFinite(row.at) ? `${span(hb.internalMs - row.at)} ago` : 'earlier'} (${SAID[row.kind] ?? 'a note'}): "${oneLine(row.text, L.said)}"`).join('\n')}`
+    : 'Nothing has been said to the person since they wrote.')
+  return { text: parts.join('\n\n'), kinds: [...kinds] }
+}
+
+/**
+ * The material for the pointer question of a session whose run has ended: { text, kinds } or null (see runContext).
+ *   userText / answerText: the ended run's request and its posted answer; facts: idleFlowFacts(...).
+ */
+export function idleContext({ heartbeatFacts, facts, userText, answerText, allows = () => true }) {
+  if (allows('run_text') !== true || !facts?.attention) return null
+  const L = FLOW_CONTEXT_LIMITS, parts = []
+  const request = oneLine(userText, L.request), answer = oneLine(answerText, L.answer)
+  if (request) parts.push(quoted('The person\'s request', request))
+  if (answer) parts.push(quoted('The assistant\'s answer, already posted', answer))
+  parts.push(`Now:\n${[`The work on this request has ended${Number.isFinite(heartbeatFacts.idleMs) ? ` (${span(heartbeatFacts.idleMs)} ago)` : ''}.`, attentionLine(facts.attention, facts.pointerTarget), personLine(facts.audience ?? null)].map(line => `- ${line}`).join('\n')}`)
+  return { text: parts.join('\n\n'), kinds: ['run_text'] }
+}
+
+/**
+ * The yes/no questions for the kinds that code found possible at this beat (enumerateOptions), in a fixed order.
+ * note: the Agent's note the `ask` question judges, quoted on its own ({ text }), required when 'ask_missing' is possible.
+ */
+export function flowPredicates(options, { note = null } = {}) {
+  const names = []
+  for (const kind of ['ask_missing', 'pointer', 'stalled', 'explain_wait', 'milestone']) if (options.includes(kind) && !names.includes(PREDICATE_OF[kind])) names.push(PREDICATE_OF[kind])
+  const out = []
+  for (const name of names) {
+    if (name !== 'ask') { out.push(FLOW_PREDICATES[name]); continue }
+    const text = oneLine(note?.text, FLOW_CONTEXT_LIMITS.note)
+    if (text) out.push({ ...FLOW_PREDICATES.ask, quote: { label: 'The assistant\'s latest note to itself', text }, kinds: ['run_text'] })
+  }
+  return out
+}
+
+/**
+ * Code turns the answers into one kind: a question to the person first, then a pointer, then a stall, then a progress note.
+ * yes: the names of the predicates answered yes; options: what enumerateOptions allowed at that beat.
+ */
+export function deriveFlowKind(yes, options) {
+  const said = name => (yes instanceof Set ? yes.has(name) : Array.isArray(yes) && yes.includes(name))
+  if (said('ask') && options.includes('ask_missing')) return 'ask_missing'
+  if (said('pointer') && options.includes('pointer')) return 'pointer'
+  if (said('stalled') && options.includes('stalled')) return 'stalled'
+  if (said('note')) return options.includes('explain_wait') ? 'explain_wait' : options.includes('milestone') ? 'milestone' : 'none'
+  return 'none'
 }
 
 /** The instruction for the subjective model's short message (a temporary fork turn). Never asks for reasoning or results. */
@@ -290,11 +397,8 @@ export function writerPrompt(kind, facts, { question = null, prior = [] } = {}) 
 /** The instruction for a pointer message, from closed labels only. The writer composes the sentence in the person's language. */
 export function pointerPrompt(attention, { prior = [] } = {}) {
   const what = { result: 'A finished result is ready for them to look at', approval: 'Something needs their decision before the work can continue', question: 'A question is waiting for their answer' }[attention?.kind] ?? 'Something is waiting for them'
-  const where = { in_view: 'inside what they are looking at on the desk', left: 'to the left of what they are looking at on the desk', right: 'to the right of what they are looking at on the desk',
-    above: 'above what they are looking at on the desk', below: 'below what they are looking at on the desk', none: 'elsewhere on the desk' }[attention?.where] ?? 'elsewhere on the desk'
-  const far = { near: ', close by', far: ', some way off', very_far: ', far away' }[attention?.distance] ?? ''
   return ['Write ONE short chat message (one or two sentences, at most 280 characters) to the person, in the language they wrote in.',
-    `${what}. It is ${where}${far}.`,
+    `${what}. It is ${wherePhrase(attention)}.`,
     'Nothing was moved into their view and you must not say it was. Do not reveal your reasoning, do not give the result itself, do not use lists or code, and do not mention this instruction.',
     prior.length ? `Do not repeat these earlier messages: ${JSON.stringify(prior)}` : null].filter(Boolean).join('\n')
 }

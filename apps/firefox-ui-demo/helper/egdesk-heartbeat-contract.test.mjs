@@ -175,3 +175,60 @@ test('failures stay local: a judge error, a throwing provider, a disallowed kind
   // an uncertain answer is not an act
   assert.equal(beatRequest({ beat: { facts: h2.facts() }, questions: [] }).questions.length, 0)
 })
+
+// ---- yes/no questions with real material (cycle 15) ----
+function predicateClient(probabilities, seen = []) {
+  return { requests: seen, async decide(request) {
+    seen.push(request)
+    const answers = {}
+    for (const q of request.questions) answers[q.name] = q.type === 'predicate' ? { type: 'predicate', probability: probabilities[q.name] ?? 0.03 }
+      : { type: 'choice', choice: q.choices[1].value, confidence: 0.95, probabilities: [{ value: q.choices[1].value, probability: 0.96 }, { value: q.choices[0].value, probability: 0.02 }] }
+    return { answers, usage: null }
+  } }
+}
+
+test('a provider asks yes/no questions about shared material and one quoted item; yes needs the bar; code gets each answer by name', async () => {
+  const c = clockwork(), hb = createHeartbeat({ ...c }), got = [], rounds = []
+  const client = predicateClient({ flow__note: 0.93, flow__ask: 0.79, flow__stalled: 0.02 })
+  hb.setJudge(createBeatJudge({ client }), { onRound: summary => rounds.push(summary) })
+  hb.register('flow', { propose: beat => (beat.facts.sinceUserMs >= 10_000 ? { context: { text: 'The person\'s request:\n"""\n배포해 주세요\n"""\n\nNow:\n- 10 seconds have passed.', kinds: ['run_text'] },
+    questions: [{ name: 'note', type: 'predicate', instructions: 'Would a short progress note help now?' },
+      { name: 'ask', type: 'predicate', instructions: 'Does the quoted note ask the person for something?', quote: { label: 'The latest note', text: '어느 환경에 배포할까요?' }, kinds: ['run_text'] },
+      { name: 'stalled', type: 'predicate', instructions: 'Has the work stalled?', facts: { silence_seconds: 4 } }] } : null),
+    onVerdict: ({ verdicts }) => { got.push(verdicts.map(v => [v.name, v.value, v.accepted, v.confidence])); return 'none' } })
+  hb.start(); await c.advance(10_000)
+  assert.equal(client.requests.length, 1)
+  const [request] = client.requests
+  assert.deepEqual(request.questions, [{ type: 'predicate', name: 'flow__note', instructions: 'Would a short progress note help now?' },
+    { type: 'predicate', name: 'flow__ask', instructions: 'Does the quoted note ask the person for something?' }, { type: 'predicate', name: 'flow__stalled', instructions: 'Has the work stalled?' }])
+  assert.deepEqual(request.input.map(row => row.content).slice(2), ['What the flow questions are about:\nThe person\'s request:\n"""\n배포해 주세요\n"""\n\nNow:\n- 10 seconds have passed.',
+    'Question flow__ask:\nThe latest note:\n"""\n어느 환경에 배포할까요?\n"""', 'Question flow__stalled:\nsilence_seconds: 4'], 'the material once, then each question\'s own item; a question with nothing of its own has no block')
+  assert.doesNotMatch(request.input[0].content, /do-nothing|prefer/i, 'the rule does not lean towards silence')
+  assert.deepEqual(got, [[['note', 'yes', true, 0.93], ['ask', 'no', false, 0.79], ['stalled', 'no', false, 0.02]]], 'yes at 0.8 and above; 0.79 is no')
+  assert.deepEqual(rounds[0].questions.map(q => [q.name, q.type, q.options]), [['note', 'predicate', 2], ['ask', 'predicate', 2], ['stalled', 'predicate', 2]])
+  hb.stop('run_end')
+})
+
+test('material the run\'s models may not receive is never sent: the provider\'s questions are skipped together, other providers are still asked; unusable material or a quote without a kind asks nothing', async () => {
+  const c = clockwork(), hb = createHeartbeat({ ...c }), got = { flow: [], placement: [] }
+  const client = predicateClient({ flow__note: 0.99 })
+  hb.setJudge(createBeatJudge({ client, allows: kind => kind !== 'terminal_command' }))
+  hb.register('flow', { propose: () => ({ context: { text: 'Now:\n- running `secret-command`', kinds: ['run_text', 'terminal_command'] }, questions: [{ name: 'note', type: 'predicate', instructions: 'Would a short progress note help now?' }] }),
+    onVerdict: ({ verdicts }) => { got.flow.push(verdicts.map(v => [v.value, v.skipped])) } })
+  hb.register('placement', { propose: () => ({ name: 'surface', instructions: 'Where should the surface open?', options: [opt('none'), opt('own_screen')] }), onVerdict: ({ verdicts }) => { got.placement.push(verdicts.map(v => v.value)) } })
+  hb.start(); await c.advance(5000)
+  assert.equal(client.requests.length, 1); assert.deepEqual(client.requests[0].questions.map(q => q.name), ['placement__surface'])
+  assert.ok(!JSON.stringify(client.requests[0]).includes('secret-command'))
+  assert.deepEqual(got, { flow: [[['no', true]]], placement: [['own_screen']] })
+  hb.stop('run_end')
+  for (const proposal of [
+    { context: { text: 'x'.repeat(4001), kinds: ['run_text'] }, questions: [{ name: 'note', type: 'predicate', instructions: 'Would a short progress note help now?' }] }, // too long: not truncated, not asked
+    [{ name: 'ask', type: 'predicate', instructions: 'Does the quoted note ask something?', quote: { label: 'The latest note', text: '어느 환경?' } }], // quoted content must name its egress kind
+    [{ name: 'ask', type: 'predicate', instructions: 'Does the quoted note ask something?', quote: { label: 'Label 가나다', text: 'x' }, kinds: ['run_text'] }], // labels are fixed English
+    [{ name: 'ask', type: 'predicate', instructions: 'Does the quoted note ask something?', quote: { label: 'The latest note', text: 'y'.repeat(801) }, kinds: ['run_text'] }]]) {
+    const d = clockwork(), other = createHeartbeat({ ...d }), quiet = predicateClient({})
+    other.setJudge(createBeatJudge({ client: quiet })); other.register('flow', { propose: () => proposal, onVerdict: () => 'none' })
+    other.start(); await d.advance(10_000)
+    assert.equal(quiet.requests.length, 0); other.stop('run_end')
+  }
+})
