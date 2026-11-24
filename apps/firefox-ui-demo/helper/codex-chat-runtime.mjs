@@ -5000,7 +5000,9 @@ export class CodexChatRuntime {
   }
 
   /** The heartbeat of a live conversation (key: the local chat id, else the native thread id), or null. Objective loops register fact providers and subscribe to beats here. */
-  heartbeatFor(key) { return this.heartbeats.get(key) }
+  // By the local chat id, or (L1 c14) by the run's native conversation id: a run's file viewer reports only { runId, conversationId }, and its placement
+  // request must find the same session heartbeat. Read-only.
+  heartbeatFor(key) { return this.heartbeats.get(key) ?? (typeof key === 'string' ? this.heartbeatThreads.get(key) : undefined) }
 
   // The conversation's session heartbeat. It starts when the person's first message is accepted (before any pre-turn objective loop)
   // and is kept across the session's runs: a later message re-activates the same heartbeat, so facts and questions that providers
@@ -5364,14 +5366,14 @@ export class CodexChatRuntime {
   // Work placement (egdesk-work-placement.mjs contextFor): the session's current or last run, its request and posted answer, and its egress gate,
   // so placement's content questions follow the same permissions as the run's other models. Read-only; null when the session has no run.
   placementContextFor(key, { canvasMaySend = false } = {}) {
-    const hb = typeof key === 'string' ? this.heartbeats.get(key) : null
+    const hb = typeof key === 'string' ? this.heartbeatFor(key) : null
     const run = hb ? this.heartbeatSubjects.get(hb)?.run : null
     if (!run) return null
     return { request: this.runUserText(run), answer: run.status === 'inProgress' ? '' : this.runAnswerText(run), egress: this.decisionEgressFor(run, { canvasMaySend: canvasMaySend === true }) }
   }
 
   // What the person wrote for this run, and the answer the run posted (its own text, which its model received or wrote).
-  runUserText(run) { return this.draftCheckTurns.get(run)?.userText || run.messages?.find(m => m.role === 'user')?.text || '' }
+  runUserText(run) { return this.draftCheckTurns.get(run)?.userText || this.runRequestTexts?.get(run) || run.messages?.find(m => m.role === 'user')?.text || '' }
   runAnswerText(run) { return [...(run.messages || [])].reverse().find(m => m.role === 'assistant' && m.status === 'complete' && !String(m.id).startsWith('egdesk-flow:'))?.text || '' }
 
   // The message question for this beat while the run works, or nothing (a quiet beat costs no request). The request bounds are the heartbeat's.
@@ -5868,6 +5870,9 @@ export class CodexChatRuntime {
   draftCheckIdle() { return Promise.allSettled([...this.draftCheckRuns]) }
 
   noteDraftCheckTurn(run, body, context, decision, bounded, extraKeys = [], memoryItems = []) {
+    // L1 c14: what the person wrote for this run, kept whatever the draft check's mode (the heartbeat's and placement's questions read it through
+    // runUserText; with the draft check off it was lost, and those questions had no request to quote). Weakly held: it goes with the run.
+    try { if (typeof body?.message === 'string') (this.runRequestTexts ??= new WeakMap()).set(run, body.message) } catch { /* recording only */ }
     try {
       if (this.draftCheckMode() === 'off') return
       const dc = this.decisionContext?.draftCheck

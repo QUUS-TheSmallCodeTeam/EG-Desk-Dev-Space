@@ -316,7 +316,9 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
     ...(decisionContext ? { decisionContext } : {}),
   })
   chat.setConnection(true)
-  workPlacement = createWorkPlacement({ client, mode: () => state.mode, enabled: () => ['advisory', 'on'].includes(ENV.EGDESK_WORK_PLACEMENT), live: () => ENV.EGDESK_WORK_PLACEMENT === 'on', calibrationLog, now: () => clock })
+  // as the bridge mounts it (codex-bridge-server.mjs), including the run's own request/answer and gate for the content questions (L1 c12)
+  workPlacement = createWorkPlacement({ client, mode: () => state.mode, enabled: () => ['advisory', 'on'].includes(ENV.EGDESK_WORK_PLACEMENT), live: () => ENV.EGDESK_WORK_PLACEMENT === 'on', calibrationLog, now: () => clock,
+    contextFor: (key, options) => chat.placementContextFor(key, options) })
   const chatHttp = createChatHttpHandler(chat, async () => {})
   const placementHttp = createWorkPlacementHttpHandler({ placement: workPlacement, heartbeatFor: key => chat.heartbeatFor(key) })
   // The Board/Decisions handler with the briefing flow, as the bridge mounts it (same key, same budget, same calibration log, same provider).
@@ -346,7 +348,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
   const source = n => ({ id: 'selected-source', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
     sourceRef: { viewId: 'card', profileId: 'fixture', accountId: '', uri: `${PORTAL}/invoices` },
     browserToolIdentity: { cardEpoch: 'epoch', userContextId: 0, engineAccountKey: OWNER, authorityEpoch: 1 }, browserToolSelection: { token: `token-${n}`, threadId: state.thread } })
-  const w = { inflight: () => inflight, clock: () => clock, dir, cwd, chat, store, contexts, client, budget, calibrationLog, settings, turnMemoryConfig, presenceMirror, workPlacement, http, settle, notify,
+  const w = { inflight: () => inflight, clock: () => clock, dir, cwd, chat, store, contexts, client, budget, calibrationLog, settings, turnMemoryConfig, presenceMirror, runRequesters, workPlacement, http, settle, notify,
     events, native, decisions, forkPrompts, acts, steers, replies, anomalies, state, ENV,
     step(name) { step = name }, at: () => clock,
     async advance(ms) {
