@@ -18,20 +18,20 @@ export function createBrowserEntryConfig({ flag = () => 'off', getAdapter, wiki,
   const mode = () => { try { const value = flag(); return value === 'advisory' || value === 'on' ? value : 'off' } catch { return 'off' } }
   return {
     mode,
-    async memory({ body, context, client, askedAt = null } = {}) {
+    async memory({ body, context, client, egress = null, askedAt = null } = {}) {
       if (!client || typeof body?.message !== 'string' || typeof wiki !== 'function') return null
       const adapter = getAdapter(), snapshot = await wiki({ body, context })
       if (!snapshot?.pages) return null
       const scope = adapter.scopeFor(context)
       const result = await prepareTurnMemory({ message: body.message, wiki: snapshot, client, scope, askedAt: askedAt ?? now(), position: { kind: 'first', reason: 'browser_consumer' },
         delivered: null, threadKey: null, ontologyWrite: false })
-      return { packet: result.packet, pages: result.memory.picks.map(pick => snapshot.pages.get(pick.id)).filter(Boolean), scope, wiki: snapshot, client }
+      return { packet: result.packet, pages: result.memory.picks.map(pick => snapshot.pages.get(pick.id)).filter(Boolean), scope, wiki: snapshot, client, egress }
     },
     async outcomeSink(candidate, { memoryPages = [], memory = null } = {}) {
       if (!memory?.wiki || !memory.client) return { status: 'unavailable' }
       const adapter = getAdapter()
       const writer = adapter.writerFor(memory.wiki, { enabled: true, canWrite: ({ op, scope }) => op === 'new_page' && typeof scope?.writeScope === 'string' && scope.writeScope.startsWith('dm:') })
-      return createOutcomeToOntology({ wiki: memory.wiki, client: memory.client, writer, scope: memory.scope, enabled: true, now }).write(candidate, { memoryPages })
+      return createOutcomeToOntology({ wiki: memory.wiki, client: memory.client, writer, scope: memory.scope, enabled: true, now, egress: memory.egress ?? null }).write(candidate, { memoryPages })
     },
   }
 }

@@ -102,7 +102,7 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = TTL_MS, maxTask
       for (const task of tasks.values()) if (task.conversationKey === conversationKey && live(task)) task.status = 'cancelled'
       while (tasks.size >= maxTasks) tasks.delete(tasks.keys().next().value)
       const task = { taskId: `bt_${randomBytes(6).toString('hex')}`, conversationKey, cardId, goal: compactText(goal, MAX_MESSAGE), status: 'running',
-        pause: null, userContext: [], state: null, prior: null, memoryPacket: null, memoryPages: [], memory: null, pendingWrite: null, trail: [], resolved: [], pendingAsk: null, host: '', steps: 0, actions: { fill: 0, navigate: 0, scroll: 0 }, segments: 0, createdAt: now(), updatedAt: now() }
+        pause: null, userContext: [], state: null, prior: null, memoryPacket: null, memoryPages: [], memory: null, pendingWrite: null, trail: [], resolved: [], pendingAsk: null, host: '', steps: 0, actions: { fill: 0, navigate: 0, scroll: 0 }, segments: 0, liveStep: 0, lastActionAt: null, createdAt: now(), updatedAt: now() }
       tasks.set(task.taskId, task)
       return task
     },
@@ -111,6 +111,34 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = TTL_MS, maxTask
       return null
     },
     touch(task) { task.updatedAt = now() },
+    // Read-only progress facts for the heartbeat: numbers and closed words only (no goal, label, host, URL or page text).
+    // The newest task of the conversation that is running or waiting, else the newest finished one inside the TTL; null when none.
+    facts(conversationKey) {
+      let pick = null
+      for (const task of tasks.values()) {
+        if (task.conversationKey !== conversationKey || now() - task.updatedAt > ttlMs) continue
+        const active = task.status === 'running' || task.status === 'paused'
+        if (!pick || (active && !pick.active) || (active === pick.active && task.updatedAt >= pick.task.updatedAt)) pick = { task, active }
+      }
+      if (!pick) return null
+      const task = pick.task, at = now()
+      const waiting = task.status === 'paused' && task.pause?.kind === 'need_context'
+      const blocked = task.status === 'paused' && task.pause?.kind === 'cannot_proceed'
+      const stepsDone = task.steps + (task.status === 'running' ? task.liveStep : 0)
+      // active / phase / waitingOnUser / stepsDone / stepsRemaining use the heartbeat's own fact names, so a provider can return this object as is.
+      return Object.freeze({ taskId: task.taskId, status: task.status, active: pick.active, phase: task.status === 'paused' ? 'waiting_user' : task.status === 'running' ? 'objective_step' : null,
+        stepsDone, stepsRemaining: Math.max(0, MAX_TASK_STEPS - stepsDone),
+        waitingOnUser: waiting || blocked, waitingKind: waiting ? 'need_context' : blocked ? 'cannot_proceed' : null,
+        waitingCode: task.status === 'paused' && typeof task.pause?.code === 'string' && PUBLIC_CODE.test(task.pause.code) ? task.pause.code : null,
+        actions: Object.freeze({ ...task.actions }), lastActionAgeMs: task.lastActionAt === null ? null : Math.max(0, at - task.lastActionAt),
+        ageMs: Math.max(0, at - task.createdAt), idleMs: Math.max(0, at - task.updatedAt) })
+    },
+    // The loop's own observer hook (see runBrowserReflex onStep): never read by the loop.
+    progress(task, { step, action } = {}) {
+      if (Number.isSafeInteger(step)) task.liveStep = step
+      if (typeof action === 'string' && action !== 'egdesk_browser_observe' && action !== 'egdesk_browser_wait') task.lastActionAt = now()
+      task.updatedAt = now()
+    },
     get(taskId) { return tasks.get(taskId) ?? null },
     get size() { return tasks.size },
   }
@@ -171,7 +199,8 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
       const remaining = MAX_TASK_STEPS - task.steps
       if (remaining <= 0) return finishPause(task, { kind: 'cannot_proceed', code: 'step_limit' }, null)
       const result = await provider.runDirectTask(run, { cardId: task.cardId, goal: task.goal, userContext: task.userContext, resumeState: task.state, priorRun: task.prior, memoryPacket: task.memoryPacket,
-        maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}` })
+        maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: info => store.progress?.(task, info) })
+      task.liveStep = 0
       tally(task, result)
       task.state = record(result.state) ? result.state : task.state
       store.touch(task)
@@ -228,7 +257,9 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
   }
 
   return {
-    async handle({ run, conversationKey, message, hosts = {}, memory = null }) {
+    // entryAnswers: normalized answers of a request the host already sent at turn start with entryQuestion(cards) appended
+    // (one request instead of two). When it holds a usable browser_entry answer no separate entry request is made.
+    async handle({ run, conversationKey, message, hosts = {}, memory = null, entryAnswers = null }) {
       if (typeof message !== 'string' || !message.trim()) return { handled: false, reason: 'empty' }
       const cards = (run?.browserBinding?.cards || []).filter(card => card.permission === 'interact').map(card => ({ cardId: card.cardId, host: hosts[card.cardId] || '' }))
       if (!cards.length) return { handled: false, reason: 'no_card' }
@@ -248,7 +279,9 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
         }
         // The turn's memory packet (fetched once by the general memory feature for this turn) is evidence here, not a second fetch.
         const memoryPacket = typeof memory?.packet === 'string' && memory.packet ? memory.packet : null
-        const entry = await decideBrowserEntry({ message, cards, memoryPacket, client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
+        const rode = entryAnswers && ['choice', 'refusal'].includes(entryAnswers.browser_entry?.type)
+        const entry = rode ? readBrowserEntry(entryAnswers, cards, { thresholds })
+          : await decideBrowserEntry({ message, cards, memoryPacket, client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
         if (!gateScope.isDecisionCurrent()) return { handled: false, reason: 'evidence_unavailable' }
         record1({ rows: { top: entry.ranked[0] ?? 0, second: entry.ranked[1] ?? 0, p: entry.confidence ?? 0 } }, cards.length, entry.kind === 'browser' ? 'act' : 'hold')
         if (entry.kind !== 'browser') return { handled: false, reason: entry.kind }

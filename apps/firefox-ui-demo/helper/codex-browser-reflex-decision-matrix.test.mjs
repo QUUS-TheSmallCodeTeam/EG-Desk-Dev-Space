@@ -208,3 +208,27 @@ test('C3-2 a success after a rejection clears the code', async t => {
   const r = await run(t, { next: '[L1]' })
   assert.equal(r.result.outcome, 'max_steps'); assert.equal(r.result.reason, undefined); assert.equal(r.result.code, undefined)
 })
+
+// ---- L8 cycle 11: the c4 classifier vocabulary through the provider path on the merged code ----
+test('C11 vocabulary: session end, account closure, ordering, permission grants, contract cancellation (labels and destinations) are never candidates and never acted on', async t => {
+  const link = (ref, label, href) => ({ ref, label, role: 'link', tag: 'a', href: `https://example.test${href}`, value: '' })
+  const button = (ref, label) => ({ ref, label, role: 'button', tag: 'button', href: '', value: '' })
+  const vocabulary = [link('v1', '로그아웃', '/a'), link('v2', 'Log out', '/b'), link('v3', '회원 탈퇴', '/c'), link('v4', '계정 폐쇄', '/d'), button('v5', '주문하기'), button('v6', '주문 하기'),
+    button('v7', '알림 허용'), button('v8', '위치 허용'), button('v9', '권한 부여'), link('v10', '계약 해지', '/e'), link('v11', '구독 취소', '/f'), button('v12', 'Close my account'),
+    link('v13', '계속', '/logout'), link('v14', '다음', '/account/close'), link('v15', '더 보기', '/order/place'), link('v16', '설정', '/grant/allow'), link('v17', '보기', '/subscriptions/cancel'),
+    link('v18', '확인하기', '/ko/로그아웃'), link('v19', '이동', '/permissions/allow'), link('v20', '열기', '/contract/terminate')]
+  const safe = link('ok', 'Pricing', '/pricing')
+  const { buildReflexCandidates } = await import('./egdesk-browser-reflex.mjs')
+  const built = buildReflexCandidates({ url, revision: 1, interactiveElements: [...vocabulary, safe] })
+  assert.deepEqual(built.options.map(o => o.item.element.ref), ['ok'], 'only the plain link is offered')
+  assert.equal(built.excluded.gated, vocabulary.length)
+  for (const element of vocabulary) {
+    const guess = `[${element.role === 'link' ? 'L' : 'B'}1] ${element.label}`
+    const r = await run(t, { elements: [element, safe], nextAnswer: () => choiceAnswer('next_step', guess, 0.99) })
+    assert.equal(r.m.requests, 0, `${element.label} ${element.href}`)
+    assert.equal(r.m.outcome, 'escalated')
+  }
+  // control: with the same page the plain link is still followed
+  const ok = await run(t, { elements: [...vocabulary, safe], nextAnswer: c => choiceAnswer('next_step', c[0].value, 0.99) })
+  assert.deepEqual(ok.acts.map(a => [a.type, a.url]), [['navigate', 'https://example.test/pricing']])
+})

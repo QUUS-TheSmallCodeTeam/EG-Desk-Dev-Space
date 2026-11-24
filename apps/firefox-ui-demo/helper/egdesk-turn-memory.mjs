@@ -70,7 +70,10 @@ const TRIAGE_RULES = ['You are a system judge deciding what stored memory a turn
  * The fetch is skipped on a decided courtesy "yes", or on a decided need "no" only when the held content AND the complete list of the other stored
  * pages were shown and recall is a decided "no". Undecided or failed answers, a truncated list or a recall request always fetch.
  */
-export async function triageTurn({ message, heldTitles = [], heldDigest = null, stored = null, live = null, client, askedAt = null, signal, timeoutMs = 2000 } = {}) {
+export async function triageTurn({ message, heldTitles = [], heldDigest = null, stored = null, live = null, client, askedAt = null, signal, timeoutMs = 2000, extraQuestions = [] } = {}) {
+  // extraQuestions: self-contained questions of another turn-start judgment (the browser entry) that ride on this one request. They are
+  // appended AFTER the triage questions, never named tn_*, and their answers are returned untouched in `extra`; the triage reading ignores them.
+  const riders = (Array.isArray(extraQuestions) ? extraQuestions : []).filter(q => q && typeof q.name === 'string' && !q.name.startsWith('tn_')).slice(0, 2)
   const questions = [
     predicateQuestion('tn_courtesy', 'Is the message only a courtesy: thanks, a greeting, an acknowledgement or other social small talk, with no question, request, report or decision in it?'),
     predicateQuestion('tn_need', Array.isArray(stored)
@@ -78,6 +81,7 @@ export async function triageTurn({ message, heldTitles = [], heldDigest = null, 
       : 'Does the message ask for, or report, something that the held pages and the conversation do not already cover, so that stored notes or documents beyond the held ones would improve the answer?'),
     ...(Array.isArray(stored) ? [predicateQuestion('tn_recall', 'Does the message point back to something discussed or worked on earlier (for example by saying "earlier", "last time" or "again") and ask for it to be recalled, summarized or re-organized, rather than ask for one new fact or one narrow detail?')] : []),
     predicateQuestion('tn_record', 'Does this message state something worth keeping as a record: a new fact, a decision, a plan, or a change in the status of something already recorded? Greetings, thanks, small talk and pure questions are not.'),
+    ...riders,
   ]
   const input = [{ role: 'developer', content: TRIAGE_RULES },
     { role: 'user', content: `Held in the answering model's context:\n${heldBlock(heldTitles, heldDigest)}` },
@@ -87,7 +91,8 @@ export async function triageTurn({ message, heldTitles = [], heldDigest = null, 
   try {
     const result = await client.decide({ input, questions, timeoutMs, signal })
     return { status: 'ready', courtesy: ternary(result.answers?.tn_courtesy), need: ternary(result.answers?.tn_need), recall: ternary(result.answers?.tn_recall), record: ternary(result.answers?.tn_record),
-      catalog: Array.isArray(stored) ? { listed: Math.min(stored.length, CATALOG_LIMIT), complete: stored.length <= CATALOG_LIMIT } : null, usage: result.usage ?? null }
+      catalog: Array.isArray(stored) ? { listed: Math.min(stored.length, CATALOG_LIMIT), complete: stored.length <= CATALOG_LIMIT } : null, usage: result.usage ?? null,
+      ...(riders.length ? { extra: Object.fromEntries(riders.map(q => [q.name, result.answers?.[q.name] ?? { type: 'missing' }])) } : {}) }
   } catch (error) { return { status: 'fallback', reason: error?.code ?? 'unreachable', courtesy: { state: 'unknown', p: null }, need: { state: 'unknown', p: null }, recall: { state: 'unknown', p: null }, record: { state: 'unknown', p: null }, catalog: null, usage: null } }
 }
 
@@ -280,7 +285,7 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
  * -> { position, triage, memory, packet, nextDelivered(), judgeWrite() -> Promise<{ proposal, receipt }> | null }
  * judgeWrite is a thunk so the host can run it after the answer started: the packet does not depend on it.
  */
-export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal } = {}) {
+export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, extraQuestions = [] } = {}) {
   const pos = position?.kind === 'mid' ? position : { kind: 'first', reason: position?.reason ?? 'unspecified' }
   const receipts = usableReceipts(delivered, pos, threadKey)
   const heldPages = Object.keys(receipts.pages ?? {}).map(id => wiki.pages.get(id)).filter(p => p && allowsPage(p, scope))
@@ -288,7 +293,7 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
   // Mid-session triage also sees what else is stored (titles only). The first-turn triage only decides recording, so it does not carry the list.
   const heldIds = new Set(heldPages.map(p => p.id))
   const stored = pos.kind === 'mid' ? [...wiki.pages.values()].filter(p => !heldIds.has(p.id) && allowsPage(p, scope)).map(p => ({ title: p.title, time: p.time.slice, status: p.status })) : null
-  const triageCall = () => triageTurn({ message, heldTitles: heldPages.map(p => p.title), heldDigest, stored, live: pos.kind === 'mid' ? live : null, client, askedAt, signal })
+  const triageCall = () => triageTurn({ message, heldTitles: heldPages.map(p => p.title), heldDigest, stored, live: pos.kind === 'mid' ? live : null, client, askedAt, signal, extraQuestions })
   let triage, memory
   if (pos.kind === 'mid') {
     triage = await triageCall()

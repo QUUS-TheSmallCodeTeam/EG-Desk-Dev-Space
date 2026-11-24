@@ -332,7 +332,7 @@ const failure = error => (error instanceof DecisionError ? error.code : 'unreach
  * → { outcome, reason?, steps, ... } — see the module header for outcomes.
  */
 export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = DEFAULT_REFLEX_MAX_STEPS, callTool, client,
-  thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null } = {}) {
+  thresholds: overrides, classify, isAllowedUrl, timeoutMs, signal, authorizeDispatch, isDecisionCurrent, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, onStep = null } = {}) {
   const invalid = validateReflexArgs({ cardId, goal, ...(values && Object.keys(values).length ? { values } : {}), maxSteps })
   if (invalid) return { outcome: 'invalid', reason: invalid, steps: [] }
   if (typeof callTool !== 'function') throw new TypeError('callTool must be a function')
@@ -359,10 +359,13 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     ...(unmatched.size ? { unmatchedValues: [...unmatched] } : {}), ...extra })
 
   // One tool call; two consecutive failures with the same code stop the loop.
+  // Read-only observer for progress facts (step number and whether a tool call just succeeded); it cannot change the loop.
+  const observe = (step, action) => { try { onStep?.({ step, ...(action ? { action } : {}) }) } catch { /* an observer never affects the loop */ } }
   async function act(entry, tool, args) {
     try {
       const result = await callTool(tool, args)
       entry.actions.push({ tool, ok: true, status: typeof result?.status === 'string' ? result.status : null })
+      observe(entry.step, tool)
       lastFailure = null
       return { ok: true, result }
     } catch (error) {
@@ -376,6 +379,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
 
   for (let step = 1; step <= maxSteps; step++) {
     if (signal?.aborted) return finish('aborted')
+    observe(step, null)
     let observed
     try { observed = await callTool('egdesk_browser_observe', { cardId }) }
     catch (error) { return finish('escalated', { reason: 'observe_failed', code: typeof error?.code === 'string' ? error.code : null }) }
