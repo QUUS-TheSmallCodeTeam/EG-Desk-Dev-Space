@@ -314,6 +314,7 @@ export function validateReflexArgs(args) {
   return null
 }
 
+const PUBLIC_CODE = /^[A-Z][A-Z0-9_]{2,63}$/
 const failure = error => (error instanceof DecisionError ? error.code : 'unreachable')
 
 /**
@@ -380,7 +381,9 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     entry.decision = { kind: decision.kind, pageState: decision.pageState, next: decision.next, goalMet: decision.goalMet,
       usage: decision.usage, latencyMs: Math.round(decision.latencyMs) }
 
-    if (decision.kind === 'act') {
+    // A decided link leaves this page: supplied values are not typed into a page
+    // that is about to be replaced (§3.3; they stay pending for the next page).
+    if (decision.kind === 'act' && decision.option.item.kind !== 'navigate') {
       const byValue = new Map(fields.map(option => [option.value, option]))
       const { documentId, url } = snapshot
       const hasDocument = (typeof documentId === 'string' && documentId.length > 0) || Number.isSafeInteger(documentId)
@@ -476,7 +479,10 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       }
     }
   }
-  return finish('max_steps')
+  // The last tool call was refused: give the reasoning model its public code
+  // (a fixed BROWSER_* identifier, never page text) so it can adapt.
+  const code = typeof lastFailure === 'string' && PUBLIC_CODE.test(lastFailure) ? lastFailure : null
+  return code ? finish('max_steps', { reason: 'step_rejected', code }) : finish('max_steps')
 }
 
 /**

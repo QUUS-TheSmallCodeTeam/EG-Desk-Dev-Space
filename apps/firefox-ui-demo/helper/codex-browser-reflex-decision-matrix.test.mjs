@@ -52,6 +52,7 @@ async function run(t, { elements = ELEMENTS, next, nextAnswer, pageState = 'cont
   })
   const snapshot = { cardId: 'card', documentId: 'doc', revision: 1, url, text: ['Synthetic shop page'],
     viewport: { width: 300, height: 200, devicePixelRatio: 1 }, interactiveElements: elements }
+  let current = snapshot
   const transport = { runs: new Map(), hasClient: id => id === 'ui',
     bindRun: (id, thread, transportId) => transport.runs.set(id, { clientThreadId: thread, transportId, ownerKey: owner }),
     unbindRun: id => transport.runs.delete(id),
@@ -60,13 +61,14 @@ async function run(t, { elements = ELEMENTS, next, nextAnswer, pageState = 'cont
       const reply = { requestId: request.requestId }
       if (request.kind === 'bind') return { ...reply, status: 'bound', binding: { cardId: 'card', cardEpoch: 'epoch', profileId: 'fixture',
         accountId: '', userContextId: 0, url, engineAccountKey: owner, authorityEpoch: 1 } }
-      if (request.kind === 'observe') return { ...reply, status: 'observed', snapshot }
+      if (request.kind === 'observe') return { ...reply, status: 'observed', snapshot: request.options?.wait ? { ...current, readyState: 'complete', wait: { for: request.options.wait.for, outcome: 'met', elapsedMs: 1 } } : current }
       if (request.kind === 'act') {
         acts.push({ type: request.action?.type, ref: request.action?.ref ?? null, url: request.action?.url ?? null })
         if (uiAct) return { ...reply, ...uiAct(request) }
         const target = request.action?.ref ? elements.find(el => el.ref === request.action.ref) : null
         const after = request.action?.type === 'fill' ? { ...snapshot, interactiveElements: elements.map(el => el.ref === target?.ref ? { ...el, value: request.action.text } : el) }
           : request.action?.type === 'navigate' ? { ...snapshot, url: request.action.url, documentId: 'doc2', revision: 2, interactiveElements: [] } : snapshot
+        if (request.action?.type === 'navigate') current = after
         return { ...reply, status: 'acted', receipt: { after, observation: {},
           dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true, inputRoute: 'dom-value-setter' } } }
       }
@@ -175,4 +177,34 @@ test('(d) fill of a field mapped confidently never submits', async t => {
 test('(d) no matching field: reports needs_free_text/no match, 0 fills', async t => {
   const r = await run(t, { elements: only('el_1'), next: '[L1]', values: { nickname: 'synthetic-value' } })
   assert.equal(r.m.fills, 0)
+})
+
+// ---- L8 cycle 3 ----
+const withField = (...els) => [ELEMENTS[2], ...els]
+test('C3-1 next_step is a same-site link while a value is pending: no fill on the page being left', async t => {
+  const r = await run(t, { elements: withField(ELEMENTS[0]), next: '[L1]', values: { nickname: 'synthetic-value' }, maxSteps: 1 })
+  assert.deepEqual(r.acts.map(a => a.type), ['navigate'])
+  assert.equal(r.m.fills, 0)
+  assert.ok(!r.dispatches.some(d => d.questions[0].startsWith('field_')), 'no field-mapping Decisions request either')
+})
+test('C3-1 control: next_step is the field itself: still fills once', async t => {
+  const r = await run(t, { elements: withField(ELEMENTS[0]), next: '[F1]', values: { nickname: 'synthetic-value' } })
+  assert.deepEqual(r.acts.map(a => a.type), ['fill'])
+})
+test('C3-1 control: next_step is a same-page button (search button): value is still filled first', async t => {
+  const r = await run(t, { elements: withField(ELEMENTS[1]), next: '[B1]', values: { nickname: 'synthetic-value' } })
+  assert.deepEqual(r.acts.map(a => a.type), ['fill'])
+})
+const staleAct = () => ({ status: 'rejected', dispatchPhase: 'not-dispatched', receipt: { dispatchReceipt: { eventDispatched: false, documentStillCurrent: false } }, timing: {} })
+test('C3-2 a rejected final step reaches the reasoning model as a public code, no page text', async t => {
+  const r = await run(t, { next: '[L1]', uiAct: staleAct })
+  assert.equal(r.result.outcome, 'max_steps')
+  assert.equal(r.result.reason, 'step_rejected')
+  assert.equal(r.result.code, 'BROWSER_OBSERVATION_STALE')
+  assert.deepEqual(Object.keys(r.result).sort(), ['code', 'decisions', 'outcome', 'reason', 'steps'])
+  assert.doesNotMatch(JSON.stringify(r.result), /example\.test|pricing|Synthetic shop/)
+})
+test('C3-2 a success after a rejection clears the code', async t => {
+  const r = await run(t, { next: '[L1]' })
+  assert.equal(r.result.outcome, 'max_steps'); assert.equal(r.result.reason, undefined); assert.equal(r.result.code, undefined)
 })
