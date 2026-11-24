@@ -1,5 +1,6 @@
 import { SPEECH_AT_PAGE, SPEECH_RULES, SPEECH_THRESHOLDS, SPEECH_PREDICATE_BARS, SPEECH_PREDICATE_KEYS, speechDesignQuestions, speechDesignInterpretations, speechDesignFamily } from './egdesk-speech-grounding.mjs'
 import { DecisionError } from './egdesk-decision-client.mjs'
+import { previousReplyInput } from './egdesk-previous-reply.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, readPredicate, sha256Hex, tableOptions, uniqueOptions } from './egdesk-decision-questions.mjs'
 
 // Pre-turn context setup with the decision model.
@@ -221,7 +222,7 @@ function cacheKey(scope, hash) {
  * message comes after it.
  */
 export async function prepareTurnContext({ message, candidates = [], client, thresholds: overrides, maxItems = 8, maxChars = 24000,
-  itemChars = 6000, timeoutMs, signal, cacheScope = 'ctx', askedAt = null, speech = null, topic = null, ruleSet = 'default' } = {}) {
+  itemChars = 6000, timeoutMs, signal, cacheScope = 'ctx', askedAt = null, speech = null, topic = null, ruleSet = 'default', previousReply = null } = {}) {
   const thresholds = decisionThresholds(overrides)
   if (!client) return skipped('not_configured')
   if (typeof message !== 'string' || !message.trim()) return skipped('no_message')
@@ -271,6 +272,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
         { role: 'developer', content: rulesFor(ruleSet) },
         { role: 'user', content: [{ type: 'input_text', text: `Catalog:\n${catalog}`, prompt_cache_breakpoint: { mode: 'explicit' } }] },
         ...(topicQuestions.length ? liveTopic.plan.input : []),
+        ...previousReplyInput(previousReply), // only when the host passes it (flag turnMemory.previousReply, egress-gated)
         { role: 'user', content: `Message:\n${activeSpeech || topicQuestions.length ? message : message.trim()}` },
       ],
       questions, promptCacheKey: cacheKey(cacheScope, catalogHash), timeoutMs, signal,

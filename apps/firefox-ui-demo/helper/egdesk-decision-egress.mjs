@@ -21,10 +21,11 @@ export const EGRESS_KINDS = Object.freeze({
   draft_text: Object.freeze({ data: 'run', governedBy: 'The run\'s own evidence: catalog items only by the kinds the model itself received; tool outputs stay content-free references' }),
   memory_page: Object.freeze({ data: 'memory', governedBy: 'Memory scope of this DM/Agent (allowsPage: the page\'s own guard plus the scope the answering model may read)' }),
   speech_history: Object.freeze({ data: 'speech', governedBy: 'Per-DM speech reuse consent (the same consent that lets the answering model see past utterances)' }),
+  previous_reply: Object.freeze({ data: 'thread', governedBy: 'The assistant message right before this turn, which the answering model holds in its own native thread (same thread, completed turns, not compacted; Codex only, where compaction is reported). A bounded excerpt, quoted as data (L7 c22)' }),
   topic_history: Object.freeze({ data: 'topic', governedBy: 'Per-DM topic memory consent (the same consent that lets the answering model see past turns)' }),
   board_excerpt: Object.freeze({ data: 'board', governedBy: 'This Board ask itself: the owner chose and confirmed a run that sends the approved public excerpts to the drafting model. An extract-only ask sends them to no model, so not to Decisions either' }),
 })
-const DATA_CLASSES = Object.freeze(['terminal', 'browser', 'canvas', 'run', 'memory', 'speech', 'topic', 'board'])
+const DATA_CLASSES = Object.freeze(['terminal', 'browser', 'canvas', 'run', 'memory', 'speech', 'topic', 'board', 'thread'])
 // Evidence kinds a draft-check catalog may carry, and the data class that already lets a model see them.
 // Items of the decision context packet were already admitted for this run's answering model, so they count as the run's own data.
 // run_state: what the run is doing now, from the runtime's own facts (the heartbeat's material a message was composed from).
@@ -40,8 +41,9 @@ const EVIDENCE_CLASS = Object.freeze({ source: 'run', document: 'run', conversat
  *   speechConsent / topicConsent: per-DM consent states for reusing past utterances / turns
  *   runActive: there is a run whose answer text and evidence the model owns
  *   boardExcerptsToModel: this Board ask sends the owner-approved excerpts to a model (the drafting model of a confirmed draft run)
+ *   threadReply: the answering model holds the previous assistant message in its own live native thread (mid-session, not compacted)
  */
-export function modelDataPermissions({ toolCeiling = null, browserGranted = false, canvasMaySend = false, memoryScope = null, speechConsent = false, topicConsent = false, runActive = false, boardExcerptsToModel = false } = {}) {
+export function modelDataPermissions({ toolCeiling = null, browserGranted = false, canvasMaySend = false, memoryScope = null, speechConsent = false, topicConsent = false, runActive = false, boardExcerptsToModel = false, threadReply = false } = {}) {
   const ceiling = toolCeiling && typeof toolCeiling === 'object' ? toolCeiling : null
   return Object.freeze({
     terminal: ceiling ? ceiling.terminal !== 'none' : true,
@@ -52,6 +54,7 @@ export function modelDataPermissions({ toolCeiling = null, browserGranted = fals
     speech: speechConsent === true,
     topic: topicConsent === true,
     board: boardExcerptsToModel === true,
+    thread: threadReply === true,
   })
 }
 
@@ -88,7 +91,7 @@ export function createEgressGate(permissions) {
 
 /** Every file that sends a Decision request and the kinds it may declare. A new call site must be added here (a test scans the code). */
 export const EGRESS_SITES = Object.freeze({
-  'codex-chat-runtime.mjs': ['speech_history', 'topic_history', 'memory_page', 'draft_text', 'run_facts', 'page_text', 'browser_task_record', 'terminal_command'],
+  'codex-chat-runtime.mjs': ['previous_reply', 'speech_history', 'topic_history', 'memory_page', 'draft_text', 'run_facts', 'page_text', 'browser_task_record', 'terminal_command'],
   'egdesk-board-presentation-http.mjs': ['canvas_text', 'board_arrangement: explicit owner confirm, coarse descriptors only',
     'briefing_judgments: /decision/briefing-placement (counts only), -reuse and -check (card labels, short summaries, step texts) are each asked of the gate with canvas_text by runBriefingFlow before they are sent',
     'briefing_skeleton: /decision/briefing-skeleton (the request of the run and, in the place request, the run\'s own answer as draft_text, the turn\'s memory materials as memory_page, card labels as canvas_text) asked of the gate by runSkeletonFlow before anything is sent; without draft_text nothing is asked, without memory_page there are no materials, without canvas_text no existing card is listed'],
