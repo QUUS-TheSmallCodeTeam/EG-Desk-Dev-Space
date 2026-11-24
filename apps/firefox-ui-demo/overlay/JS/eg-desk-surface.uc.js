@@ -22417,10 +22417,19 @@
       decision.loading = false; decision.loaded = true;
       redrawDecision();
     };
+    // The section is rebuilt while busy and again when done, which destroys the focused field and drops focus to the
+    // page. When focus was lost that way, put it back on the key field (never steal it from somewhere the person moved to).
     const runDecision = async (work) => {
       if (decision.busy) return;
+      const keyField = () => card.querySelector('[data-testid="settings-decision-key"]');
+      const inSection = () => !!document.activeElement && card.contains(document.activeElement);
+      const hadFocus = inSection();
       decision.busy = true; redrawDecision();
-      try { await work(); } finally { decision.busy = false; redrawDecision(); }
+      try { await work(); } finally {
+        decision.busy = false; redrawDecision();
+        const active = document.activeElement;
+        if (hadFocus && (!active || active === document.body || !active.isConnected)) keyField()?.focus?.({ preventScroll: true });
+      }
     };
     const saveDecisionKey = (input) => runDecision(async () => {
       const apiKey = input.value.trim();
@@ -22443,6 +22452,7 @@
       const busy = decision.busy;
       const input = el('input', { type: 'password', class: 'egd-settings-decision-input', autocomplete: 'off', spellcheck: 'false',
         placeholder: 'sk-proj-…', 'aria-label': 'OpenAI API 키', disabled: !view.canSave || busy ? 'true' : null, data: { testid: 'settings-decision-key' },
+        'aria-describedby': decision.outcome?.phase === 'error' ? 'egd-settings-decision-result' : null,
         onkeydown: (event) => { if (event.key === 'Enter') { event.preventDefault(); void saveDecisionKey(input); } } });
       return el('section', { class: 'egd-settings-section egd-settings-decision', 'aria-label': AccountSettingsView.DECISION_SECTION_TITLE,
         data: { testid: 'settings-decision', state: view.status, mode: view.mode || 'unknown' } },
@@ -22457,7 +22467,7 @@
           el('button', { class: 'egd-settings-btn egd-settings-btn-primary', type: 'button', disabled: !view.canSave || busy ? 'true' : null,
             data: { testid: 'settings-decision-save' }, onclick: () => { void saveDecisionKey(input); } }, busy ? '확인하는 중…' : '확인 후 저장')),
         el('p', { class: 'egd-settings-section-sub' }, view.keyActionNote),
-        decision.outcome ? el('div', { class: `egd-settings-decision-result egd-settings-decision-result-${decision.outcome.phase}`,
+        decision.outcome ? el('div', { id: 'egd-settings-decision-result', class: `egd-settings-decision-result egd-settings-decision-result-${decision.outcome.phase}`,
           role: decision.outcome.phase === 'error' ? 'alert' : 'status', data: { testid: 'settings-decision-result', phase: decision.outcome.phase } }, decision.outcome.text) : null,
         el('div', { class: 'egd-settings-decision-modes', role: 'radiogroup', 'aria-label': '저장된 결정 모델 모드' },
           ...view.modes.map((choice) => el('button', { type: 'button', role: 'radio', 'aria-checked': String(choice.selected),
