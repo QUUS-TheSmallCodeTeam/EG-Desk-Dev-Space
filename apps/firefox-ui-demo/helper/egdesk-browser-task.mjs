@@ -442,6 +442,16 @@ export function pageLines(segments) {
   return out
 }
 
+/**
+ * finishedPageFacts(segments, ids) -> { found, page }: what a finished task's note carries of the page it ended on (c31: one function for the product and for the
+ * real-engine check's code-built notes, so the check feeds the model exactly what the product would). found: the segments located at one of the task's identifiers;
+ * page: only when nothing was located, the page's own first lines (pageLines).
+ */
+export function finishedPageFacts(segments, ids = []) {
+  const found = textNearIdentifier(segments, ids)
+  return { found, page: found.length ? [] : pageLines(segments) }
+}
+
 /** The one structured line the subjective model receives. Closed vocabulary, counts, and (for a choice) up to three element labels. */
 export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [], page = [] }) {
   const body = { id: task.taskId, status, ...(code ? { code } : {}),
@@ -566,8 +576,7 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
       case 'done': {
         task.status = 'done'; task.pause = null; store.touch(task)
         remember(task, { status: 'done' })
-        const found = pageTextInNote() === true ? textNearIdentifier(result.text, taskIdentifiers(task)) : []
-        const page = pageTextInNote() === true && !found.length ? pageLines(result.text) : []
+        const { found, page } = pageTextInNote() === true ? finishedPageFacts(result.text, taskIdentifiers(task)) : { found: [], page: [] }
         return { handled: true, status: 'done', taskId: task.taskId, note: subjectiveNote(task, { status: 'done', found, page }) }
       }
       case 'needs_user_context': {

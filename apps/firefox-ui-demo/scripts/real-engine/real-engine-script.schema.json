@@ -318,6 +318,81 @@
                     "invited"
                   ]
                 },
+                "browserTask": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "status"
+                  ],
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "done",
+                        "cannot_proceed",
+                        "need_context"
+                      ]
+                    },
+                    "code": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 40,
+                      "pattern": "^[a-z][a-z0-9_]{0,39}$"
+                    },
+                    "candidates": {
+                      "type": "array",
+                      "maxItems": 3,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 100
+                      }
+                    },
+                    "pageText": {
+                      "type": "array",
+                      "maxItems": 16,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 400
+                      }
+                    },
+                    "identifiers": {
+                      "type": "array",
+                      "maxItems": 4,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 40
+                      }
+                    },
+                    "steps": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 12
+                    },
+                    "actions": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "fill": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 12
+                        },
+                        "navigate": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 12
+                        },
+                        "scroll": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 12
+                        }
+                      }
+                    }
+                  }
+                },
                 "action": {
                   "enum": [
                     "interrupt",
@@ -736,6 +811,48 @@
                               "minLength": 1,
                               "maxLength": 400
                             }
+                          }
+                        }
+                      }
+                    },
+                    "browserAnswer": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "mentionsDates": {
+                          "type": "array",
+                          "maxItems": 4,
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 10,
+                            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                          }
+                        },
+                        "noInventedDates": {
+                          "const": true
+                        },
+                        "noInventedAmounts": {
+                          "const": true
+                        },
+                        "namesAnyOf": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 6,
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 100
+                          }
+                        },
+                        "namesAllOf": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 6,
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 100
                           }
                         }
                       }
