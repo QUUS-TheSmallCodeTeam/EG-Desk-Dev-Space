@@ -13,7 +13,7 @@ import { CANVAS_VIEW_SIZES } from '../overlay/resources/EGDeskSurfaceState.sys.m
 import { BRIEFING_CATALOG, BRIEFING_RENDERERS, MATERIAL_TRAITS, RESULT_CARD_METRICS, STEP_SLOTS, registerComponent, resultCardCapacity, textLines } from './egdesk-briefing-catalog.mjs'
 import { answerFacts, factAnchors, factCites, COVERAGE_MODES, splitByPeriod, sequenceRows, requestIdentifiers, answerCited } from './egdesk-briefing-skeleton.mjs'
 import { SKELETON_JUDGE, SKELETON_LIMITS, VERSION_PAIRS, relevanceQuestions, versionCandidates, dateIn, dateMatches, fillChecks, fitQuestions, questionName, versionOf, materialGroups, buildGuide, chooseParts, createSkeletonJudge, decidePlace, enumerateSkeleton, fillRequest, layoutSkeleton, normalizeMaterials, normalizeSkeletonDto, orderItems, recordedBefore, runSkeletonFlow, skeletonChecks, validateFill } from './egdesk-briefing-skeleton.mjs'
-import { BRIEFING_ENGINE_LIMITS, briefingDeps, createBriefingEngine, fillPrompt } from './egdesk-briefing-engine.mjs'
+import { BRIEFING_CHROME_WAIT_MS, BRIEFING_ENGINE_LIMITS, briefingDeps, createBriefingEngine, fillPrompt } from './egdesk-briefing-engine.mjs'
 import { completeBriefingArgs, continuedBriefingOutput } from './egdesk-briefing-flow.mjs'
 import { openBriefingBindings } from './egdesk-briefing-bindings.mjs'
 import { fillOutputSchema, violation } from './egdesk-briefing-output-schema.mjs'
@@ -367,7 +367,7 @@ test('after the fill: a slot its material does not support is written again once
   const once = await run(ORDER, { fill: (asked, n) => (n === 1 ? { nonsense: true } : fillReply(asked.guide.items.map(i => i.id))) }); assert.deepEqual([once.out.status, once.out.stats.fillTurns], ['presented', 2])
   const noEngine = await run(ORDER, { fill: null }); assert.deepEqual([noEngine.out.status, noEngine.out.reason], ['fallback-chat', 'fill-invalid'])
   // bounds: at most 6 judgment requests (place, fit, order, check and one re-check per rewrite round) and 3 private turns; slow judgments stop the flow inside the chrome's wait
-  assert.ok(SKELETON_LIMITS.maxRequests >= 3 + SKELETON_LIMITS.fillTurns, 'the request bound covers the longest path'); assert.ok(BRIEFING_ENGINE_LIMITS.totalMs + SKELETON_LIMITS.judgeMs + 4000 < 150000)
+  assert.ok(SKELETON_LIMITS.maxRequests >= 3 + SKELETON_LIMITS.fillTurns, 'the request bound covers the longest path'); assert.ok(BRIEFING_ENGINE_LIMITS.totalMs + SKELETON_LIMITS.judgeMs + 4000 < BRIEFING_CHROME_WAIT_MS)
   let clock = 0; const slow = await run(ORDER, { now: () => (clock += 15_000) }) // every judgment takes 15 s on this clock
   assert.deepEqual([slow.out.status, slow.out.reason, slow.out.stats.judgeRequests, slow.fills.length], ['fallback-chat', 'request-bound', 3, 1])
 })
@@ -1084,14 +1084,14 @@ test('the c25 case: tonight\'s merge line, judged only weakly about "today\'s pr
 
 // ================= 21. cycle 30: the fill turn constrained by outputSchema (flag, default off); fake app-server, no Codex binary =================
 // A model that honours the schema: bare JSON, every listed slot present (null when it has nothing), title, "unfillable" present.
-const schemaFill = prompt => { const f = JSON.parse(autoFill(prompt).replace(/^```json\n|\n```$/g, '')); return JSON.stringify({ title: f.title ?? 'A사 견적 정리', unfillable: [], items: f.items }) }
+const schemaFill = prompt => { const f = JSON.parse(autoFill(prompt).replace(/^```json\n|\n```$/g, '')); return JSON.stringify({ title: f.title ?? 'A사 견적 정리', unfillable: [], items: Object.fromEntries(Object.entries(f.items).map(([id, { fallback: _f, ...rest }]) => [id, rest])) }) } // c35: the compact request does not ask for a fallback sentence
 const guideOfPrompt = prompt => JSON.parse(/Design guide \(decided; do not change it\):\n(.*)\n\nMaterials:/s.exec(prompt)[1])
 test('outputSchema ON, valid: the fork turn is started with the schema built from the guide in its own prompt, and the board is presented', async t => {
   const s = await mounted(t, { forkReply: schemaFill, outputSchema: 'on' })
   const res = await s.R.http('POST', '/decision/briefing-observe', s.body)
   assert.equal(res.body.outcome, 'presented', JSON.stringify(res.body)); assert.equal(s.h.forkParams.length, 1)
   const params = s.h.forkParams[0], guide = guideOfPrompt(s.h.forkPrompts[0])
-  assert.deepEqual(Object.keys(params).sort(), ['clientUserMessageId', 'input', 'outputSchema', 'threadId']); assert.deepEqual(params.outputSchema, fillOutputSchema(guide))
+  assert.deepEqual(Object.keys(params).sort(), ['clientUserMessageId', 'effort', 'input', 'model', 'outputSchema', 'threadId']); assert.equal(params.effort, 'low', 'c35: the briefing\'s own effort'); assert.deepEqual(params.outputSchema, fillOutputSchema(guide))
   assert.equal(violation(JSON.parse(schemaFill(s.h.forkPrompts[0])), params.outputSchema), null, 'the scripted model\'s own message fits the schema it was given')
   assert.equal(s.count('briefing.published'), 1)
 })
@@ -1106,10 +1106,10 @@ test('outputSchema ON, invalid / refused / failed: nothing is published, the cha
     assert.equal(s.h.forkParams.length >= 1 && s.h.forkParams.every(p => p.outputSchema), true, `${name}: every fork turn carried the schema`)
   }
 })
-test('outputSchema OFF (the default): the fork turn is started with exactly the params it had before, and the prompt is the one the flag ON sends', async t => {
+test('outputSchema OFF (the default): the fork turn is started with exactly the params it had before (plus, since c35 and the model/effort resolution of lane L5, the effort of the briefing and the resolved model), and the prompt is the one the flag ON sends', async t => {
   const off = await mounted(t, { forkReply: autoFill }), on = await mounted(t, { forkReply: schemaFill, outputSchema: 'on' })
   assert.equal((await off.R.http('POST', '/decision/briefing-observe', off.body)).body.outcome, 'presented'); await on.R.http('POST', '/decision/briefing-observe', on.body)
-  assert.deepEqual(Object.keys(off.h.forkParams[0]).sort(), ['clientUserMessageId', 'input', 'threadId']); assert.match(off.h.forkParams[0].clientUserMessageId, /^egdesk-internal:/)
+  assert.deepEqual(Object.keys(off.h.forkParams[0]).sort(), ['clientUserMessageId', 'effort', 'input', 'model', 'threadId']); assert.equal(off.h.forkParams[0].effort, 'low' /* c35: the only addition to the params of before */); assert.match(off.h.forkParams[0].clientUserMessageId, /^egdesk-internal:/)
   assert.deepEqual(off.h.forkParams[0].input, [{ type: 'text', text: off.h.forkPrompts[0], text_elements: [] }])
   assert.equal(off.h.forkPrompts[0], on.h.forkPrompts[0], 'the schema does not change the prompt')
   assert.equal(JSON.stringify(off.h.forkParams[0]).includes('outputSchema'), false)
