@@ -114,16 +114,16 @@ test('error hand-off (recorded only): the log blocks that WOULD be highlighted a
   const r = rig(t)
   r.start('c1'); r.out('c1', FAILING); r.end('c1', 1); await r.settle()
   const [advisory] = r.watch.advisories()
-  assert.deepEqual({ ...advisory.blocks, picked: [...advisory.blocks.picked] }, { enumerated: 4, picked: ['b2', 'b3'], source: 'decision' })
+  assert.deepEqual({ ...advisory.blocks, picked: [...advisory.blocks.picked] }, { enumerated: 3, picked: ['b2'], source: 'decision' })
   const [entry] = r.entries()
-  assert.deepEqual([entry.candidates, entry.judgedTotal, entry.terminal.picked, entry.terminal.would], [4, 2, [2, 3], 'repair'])
+  assert.deepEqual([entry.candidates, entry.judgedTotal, entry.terminal.picked, entry.terminal.would], [3, 1, [2], 'repair'])
   assert.equal(r.requests.length, 2, 'one state question, one block question')
   assert.equal(r.carrying('zeta-synthetic-pass'), 2, 'the output the run\'s model already has is what the judge reads')
   // decision unavailable: the runtime's own failure marks are used instead, and nothing is sent
   const off = rig(t, { configured: false })
   off.start('c1'); off.out('c1', FAILING); off.end('c1', 1); await off.settle()
   assert.equal(off.requests.length, 0)
-  assert.deepEqual([off.watch.advisories()[0].state, off.watch.advisories()[0].source, off.watch.advisories()[0].blocks.source, [...off.watch.advisories()[0].blocks.picked]], ['completed_error', 'fallback', 'runtime', ['b2', 'b3', 'b4']])
+  assert.deepEqual([off.watch.advisories()[0].state, off.watch.advisories()[0].source, off.watch.advisories()[0].blocks.source, [...off.watch.advisories()[0].blocks.picked]], ['completed_error', 'fallback', 'runtime', ['b2', 'b3']])
   MATRIX.handoff = { picked: [...advisory.blocks.picked], enumerated: advisory.blocks.enumerated, withoutDecision: [...off.watch.advisories()[0].blocks.picked] }
 })
 

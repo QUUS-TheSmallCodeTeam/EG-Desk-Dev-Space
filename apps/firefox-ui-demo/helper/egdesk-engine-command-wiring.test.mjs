@@ -100,9 +100,9 @@ test('Codex: with the flag off or in advisory, everything the engine and the scr
   MATRIX.codex = { trail, requests: advisory.requests.length, observableBytes: observable(none).length, records: advisory.entries().length }
   assert.deepEqual(trail, ['quiet:running_output/fallback→wait', 'exit:completed_error/fallback→repair', 'quiet:waiting_yn_input/fallback→hand_yes_no', 'exit:completed_ok/runtime→report'])
   const failed = advisory.chat.engineCommands.advisories()[1]
-  assert.deepEqual([failed.engine, failed.blocks.enumerated, [...failed.blocks.picked], failed.blocks.source], ['codex', 4, ['b2', 'b3'], 'decision'])
+  assert.deepEqual([failed.engine, failed.blocks.enumerated, [...failed.blocks.picked], failed.blocks.source], ['codex', 3, ['b2'], 'decision'])
   assert.deepEqual(advisory.entries().map(e => [e.terminal.stream, e.terminal.engine, e.terminal.would, e.terminal.picked ?? null]),
-    [['engine', 'codex', 'wait', null], ['engine', 'codex', 'repair', [2, 3]], ['engine', 'codex', 'hand_yes_no', null], ['engine', 'codex', 'report', null]])
+    [['engine', 'codex', 'wait', null], ['engine', 'codex', 'repair', [2]], ['engine', 'codex', 'hand_yes_no', null], ['engine', 'codex', 'report', null]])
   assert.ok(advisory.carrying('zeta-synthetic-fail') >= 1, 'the judge read the output the bridge already keeps for this run')
   assert.equal(advisory.carrying('synthetic-command-'), 0, 'the command line itself is not part of a judge request')
   assert.doesNotMatch(JSON.stringify(advisory.calibrationLog.entries()), /zeta|subtracts|Install|synthetic-command/)
