@@ -31,7 +31,7 @@ forkTurns: [{ steps: [], final: '소유자 승인이 필요한 견적 비교 결
 /** The scripted Decision model: the owner question is yes for the answer that asks for the owner's approval (read from what it was shown), everything else says no. */
 const decisionFor = (body, q) => (q.name === 'owner_action' ? (/소유자께서 승인/.test(JSON.stringify(body.input)) ? .96 : .03) : .03)
 
-function world(t, fakeScript, { decisions = true } = {}) {
+function world(t, fakeScript, { decisions = true, decisionDelayMs = 0 } = {}) {
   const base = tmp(t), out = path.join(base, 'out'), codexHome = path.join(base, 'codex-home'); fs.mkdirSync(codexHome)
   const spawns = [], decisionBodies = [], stderrLines = []
   const spawn = (bin, argv, options) => {
@@ -43,6 +43,7 @@ function world(t, fakeScript, { decisions = true } = {}) {
   const killGroup = async child => { child.stdin.end(); await new Promise(resolve => { if (child.exitCode != null) return resolve(); child.once('close', resolve); setTimeout(resolve, 500) }); return { signal: 'SIGTERM' } }
   const fetchImpl = async (url, init) => {
     const body = JSON.parse(init.body); decisionBodies.push(body)
+    if (decisionDelayMs && body.questions.some(q => q.name === 'owner_action')) await new Promise(resolve => setTimeout(resolve, decisionDelayMs)) // the real model takes seconds
     return Response.json({ answers: body.questions.map(q => ({ name: q.name, type: 'predicate', probability: decisionFor(body, q) })), usage: { input_tokens: 20 } })
   }
   const options = { mode: 'run', codexBin: '/fake/codex', home: { kind: 'person', dir: null }, scripts: [], out, decisions, model: null, effort: null, appServerConfig: [], turnTimeoutMs: 15000, json: false }
@@ -51,7 +52,7 @@ function world(t, fakeScript, { decisions = true } = {}) {
 }
 
 const asScripts = (...scripts) => scripts.map(script => ({ file: `${script.set}.json`, script }))
-const run = async (t, script, { decisions = true } = {}) => { const w = world(t, fakeScript(), { decisions }); const result = await runCheck(w.options, asScripts(script), w.deps); return { w, result, rec: result.records[0] } }
+const run = async (t, script, { decisions = true, decisionDelayMs = 0 } = {}) => { const w = world(t, fakeScript(), { decisions, decisionDelayMs }); const result = await runCheck(w.options, asScripts(script), w.deps); return { w, result, rec: result.records[0] } }
 const hooksOf = rec => rec.turns.map(turn => turn.collab)
 
 test('the registration point: the check lists the collaboration flags from the hook, reproduced now and not listed as missing; the committed script is the builder\'s and validates', () => {
@@ -153,4 +154,15 @@ test('the identity rule (v4 K2): the member\'s feed alias, the Board id, a scene
   for (const leak of [COLLAB_PEOPLE.invited.member, COLLAB_PEOPLE.invited.board, '"x":12', '"width": 1200', 'asked by M2', '"M1"']) assert.equal(identityLeak(`${clean} ${leak}`), true, leak)
   const check = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'egdesk-real-engine-check.mjs'), 'utf8')
   for (const call of ['turnHooks.flowOptions({ FLAG, conversation })', 'turnHooks.attach({ chat, contexts, client, store,', 'await turnHooks.beforeSend({ ...hookCtx, turn, index })', 'await turnHooks.afterTurn({ ...hookCtx,', 'turnHooks.dispose()']) assert.ok(check.includes(call), `the check calls ${call}`)
+})
+
+test('a slow Decision model (Main\'s first real run: seconds, not instant): the attention scene is still waited for and decided, never read as "unknown" while it is being judged', async t => {
+  const script = buildCollabScript(); script.conversations[0].turns = script.conversations[0].turns.slice(0, 3) // the owner's turn, the owner-needed turn, the requester's turn
+  const { rec } = await run(t, script, { decisionDelayMs: 1500 })
+  assert.equal(rec.aborted, null, rec.abortDetail)
+  const [, owner, info] = hooksOf(rec)
+  for (const [name, turn, branch] of [['owner-needed', owner, 'owner'], ['requester', info, 'requester']]) {
+    assert.equal(turn.attention.result.status, 'decided', `${name}: ${JSON.stringify(turn.attention.result)}`); assert.equal(turn.attention.result.branch, branch)
+  }
+  for (const turn of rec.turns) for (const e of turn.expectations.filter(x => x.check.startsWith('collab.'))) assert.equal(e.ok, true, `${turn.index}: ${e.check} ${JSON.stringify(e.detail)}`)
 })
