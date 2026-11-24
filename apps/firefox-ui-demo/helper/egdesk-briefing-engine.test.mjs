@@ -16,7 +16,8 @@ const surface = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', impo
 const decl = name => { const s = surface.indexOf(`  function ${name}(`); assert.ok(s >= 0, name); return surface.slice(s, surface.indexOf('\n  }', s) + 4) }
 const json = value => '```json\n' + JSON.stringify(value) + '\n```'
 const bodyFor = s => BriefingHost.observeRequest({ mode: 'on', report: REPORT, answerId: s.h.ids.answerId, conversationId: s.h.ids.conversationId, runId: s.h.ids.runId, candidates: BriefingHost.canvasBriefingCandidates(s.cards) })
-const deps = (s, enabled = true) => briefingDeps({ chat: s.h.chat, contexts: s.h.contexts, enabled })
+// These journeys are the EARLIER order (the subjective model designs, the Decision model checks), kept behind the internal switch for comparison (cycle 13 made skeleton-first the default).
+const deps = (s, enabled = true) => briefingDeps({ chat: s.h.chat, contexts: s.h.contexts, enabled, order: 'design-first' })
 const count = (s, event) => s.h.events.filter(e => e.event === event).length
 const index = (s, event, from = 0) => s.h.events.findIndex((e, i) => i >= from && e.event === event)
 
@@ -225,7 +226,8 @@ test('on the screen: the chrome\'s own reducer shows the completed answer first;
 
 test('bridge wiring: the server mounts briefingDeps behind EGDESK_BRIEFING_FLOW; the chrome waits long enough for the bounded flow', () => {
   const server = readFileSync(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
-  assert.match(server, /briefing: briefingDeps\(\{ chat, contexts, enabled: process\.env\.EGDESK_BRIEFING_FLOW === 'on' \}\)/)
+  assert.match(server, /briefing: briefingDeps\(\{ chat, contexts, enabled: process\.env\.EGDESK_BRIEFING_FLOW === 'on', order: process\.env\.EGDESK_BRIEFING_ORDER === 'design-first' \? 'design-first' : 'skeleton' \}\)/)
+  assert.equal(briefingDeps({ chat: {}, contexts: {} }).order, 'skeleton', 'the default order is skeleton-first'); assert.equal(briefingDeps({ chat: {}, contexts: {}, order: 'design-first' }).order, 'design-first')
   assert.match(surface, /timeoutMs: flowMode === 'on' \? 150000 : 20000/)
   assert.ok(BRIEFING_ENGINE_LIMITS.totalMs + 5 * 4000 < 150000, 'private turns plus the judgments fit inside the chrome wait')
 })
