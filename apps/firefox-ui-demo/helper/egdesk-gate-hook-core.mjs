@@ -49,3 +49,13 @@ export async function runGateHook({ stdin, env = {}, fetchImpl = globalThis.fetc
   // no usable answer from the bridge
   return floor.length ? deny(gateNote({ status: 'gate_unavailable', reasons: floor, next: 'tell_user_and_stop' })) : silent()
 }
+
+/** The script's whole body, on a process-like object (stdin: async iterable of chunks; stdout.write; exitCode), so it is testable in-process. */
+export async function gateHookMain(proc, { fetchImpl = globalThis.fetch } = {}) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of proc.stdin) { size += chunk.length; if (size > 1024 * 1024) break; chunks.push(Buffer.from(chunk)) }
+  const out = await runGateHook({ stdin: Buffer.concat(chunks).toString('utf8'), env: proc.env, fetchImpl })
+  if (out.stdout) proc.stdout.write(out.stdout)
+  proc.exitCode = out.exitCode
+}

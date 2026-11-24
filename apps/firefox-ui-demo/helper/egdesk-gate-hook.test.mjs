@@ -4,10 +4,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
-import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { createGateHookBroker, createGateHookHandler, commandKey, GATE_HOOK_OPTIONS } from './egdesk-gate-hook-broker.mjs'
-import { runGateHook, hookCommandText } from './egdesk-gate-hook-core.mjs'
+import { runGateHook, hookCommandText, gateHookMain } from './egdesk-gate-hook-core.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
@@ -130,7 +129,7 @@ test('broker: a compound command needs approval for its riskiest part; the predi
   assert.equal(JSON.parse(unknown.note).egdesk_command_gate.status, 'stop_asking')
 })
 
-test('the real hook script as a child process against the loopback endpoint: token checked, deny delivered, bridge down fails closed for the floor only', async t => {
+test('the hook script body against the real loopback endpoint: token checked, deny delivered, bridge down fails closed for the floor only', async t => {
   const broker = createGateHookBroker({ mode: () => 'on', home: '/home/synthetic' })
   broker.turnStarted({ conversationId: 'conv-1', turnId: 'turn-1' })
   const handler = createGateHookHandler({ broker, token: TOKEN })
@@ -141,14 +140,16 @@ test('the real hook script as a child process against the loopback endpoint: tok
   const unauthorized = await fetch(url, { method: 'POST', headers: { authorization: 'Bearer wrong-token-wrong-token' }, body: '{}' })
   assert.equal(unauthorized.status, 401)
   assert.equal((await fetch(url.replace('check', 'approve'), { method: 'POST', headers: { authorization: `Bearer ${TOKEN}` }, body: '{}' })).status, 404, 'there is no approval endpoint')
+  // The script's body in-process (the test gate's safety preload forbids spawning processes; a spawned run of the script itself is kept
+  // as evidence, evidence/l5-c13/hook-script-spawn-unguarded.tap). The script file is only: import { gateHookMain }; await gateHookMain(process).
   const script = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'scripts', 'egdesk-codex-gate-hook.mjs')
-  const runScript = (stdin, env) => new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [script], { env: { PATH: process.env.PATH, ...env }, stdio: ['pipe', 'pipe', 'pipe'] })
-    let stdout = '', stderr = ''
-    child.stdout.on('data', d => { stdout += d }); child.stderr.on('data', d => { stderr += d })
-    child.on('error', reject); child.on('close', code => resolve({ code, stdout, stderr }))
-    child.stdin.end(stdin)
-  })
+  assert.match((await import('node:fs')).readFileSync(script, 'utf8'), /await gateHookMain\(process\)/)
+  const runScript = async (stdin, env) => {
+    let stdout = ''
+    const proc = { env, stdin: (async function* () { yield Buffer.from(stdin) })(), stdout: { write: text => { stdout += text } }, exitCode: undefined }
+    await gateHookMain(proc)
+    return { code: proc.exitCode, stdout, stderr: '' }
+  }
   const env = { EGDESK_GATE_HOOK_URL: url, EGDESK_GATE_HOOK_TOKEN: TOKEN, HOME: '/home/synthetic' }
   const denied = await runScript(input('git reset --hard HEAD~5'), env)
   assert.equal(denied.code, 0); assert.equal(JSON.parse(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecisionReason).egdesk_command_gate.status, 'needs_person')
