@@ -26,7 +26,12 @@ function readPolicy(body) {
   return { policy, availability };
 }
 
-export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, onAnswer, now = Date.now }) {
+const requesterShape = v => v && typeof v === 'object' && Object.keys(v).length === 2 && typeof v.board === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(v.board) &&
+  typeof v.alias === 'string' && /^m-[0-9a-f]{16}$/.test(v.alias) ? { board: v.board, alias: v.alias } : null;
+const sameRequester = (a, b) => (a === null ? b == null : !!b && a.board === b.board && a.alias === b.alias && Object.keys(b).length === 2);
+// requester(review) -> { board, alias } | null: the presence alias the collaboration service vouched for as the sender of this request (optional).
+// It is carried with the ask (prepare, run, the answer handed on) and never shown or stored here.
+export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, onAnswer, requester = null, now = Date.now }) {
   let active = null;
   const view = () => active?.view || null;
   function update(s, delta) {
@@ -147,10 +152,12 @@ export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, on
     if (!forStep(s, 'choose') || !s.view.policy || s.view.policy.stale) return;
     const { mode, policy, availability } = s.view;
     if (mode === 'draft' && !draftAvailable(availability)) return;
+    let who = null;
+    try { who = typeof requester === 'function' ? requesterShape(requester(s.binding.review)) : null; } catch { who = null; }
     update(s, { step: 'preparing', error: null });
     // Do not abort the prepare response: a ticket that arrives after Escape
     // or a Board change still needs best-effort cancellation, never a run.
-    const p = await call('prepare', { boardId: s.binding.board.id, request: s.binding.review, mode }, true);
+    const p = await call('prepare', { boardId: s.binding.board.id, request: s.binding.review, mode, ...(who ? { requester: who } : {}) }, true);
     if (!forStep(s, 'preparing')) { cancelTicket(p?.ticket); return; }
     if (p?.errorCode === 'BOARD_AGENT_ASK_CODE_INVALID' || p?.errorCode === 'BOARD_AGENT_ASK_CODE_REQUIRED') {
       update(s, { step: 'stopped', error: '이 Board에서 쓸 수 없는 질문 코드입니다. 이미 사용했거나 만료되었을 수 있습니다. 직접 회신은 계속 쓸 수 있습니다.' }); return;
@@ -165,6 +172,7 @@ export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, on
       // model then), and the preview must be able to say which mode applies; an extract run names no Decision model.
       (p.decisionModel !== null && (mode !== 'draft' || !isText(p.decisionModel) || p.provider !== 'openai' || !['on', 'advisory'].includes(p.decisionMode))) ||
       (p.decisionModel === null && p.decisionMode != null) ||
+      !sameRequester(who, p.requester) ||
       (p.policyVersion != null && p.policyVersion !== policy.version)) {
       cancelTicket(p?.ticket);
       update(s, { step: 'stopped', error: stale }); return;
@@ -185,11 +193,12 @@ export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, on
       update(s, { step: 'choose', prepared: null, mode: 'extract', error: '확인 시간이 지났습니다. 다시 준비해 주세요.' }); return;
     }
     const { ticket, mode } = s.view.prepared;
+    const who = requesterShape(s.view.prepared.requester);
     update(s, { step: 'running', error: null });
     // No retry: a timeout or failed response does not prove nothing ran.
     const result = await call('run', { ticket, confirm: true });
     if (!forStep(s, 'running')) return;
-    if (result?.mode !== mode || typeof result.answer !== 'string' || !['local', 'decision', 'draft'].includes(result.source)) {
+    if (result?.mode !== mode || typeof result.answer !== 'string' || !['local', 'decision', 'draft'].includes(result.source) || !sameRequester(who, result.requester)) {
       discard(s);
       update(s, { step: 'stopped', prepared: null, error: '실행 결과를 확인하지 못했습니다. 자동으로 다시 실행하지 않습니다. 이 질문 코드는 이미 사용되었을 수 있습니다. 직접 회신을 쓰거나 새 질문 코드를 받아 다시 시도해 주세요.' }); return;
     }
@@ -197,7 +206,7 @@ export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, on
     const binding = s.binding;
     close();
     const screening = ['decision', 'advisory', 'fallback'].includes(result.screening) ? result.screening : null;
-    onAnswer(binding, { answer: result.answer, mode, source: result.source, ...(screening ? { screening } : {}) });
+    onAnswer(binding, { answer: result.answer, mode, source: result.source, ...(screening ? { screening } : {}), ...(who ? { requester: who } : {}) });
   }
   return { view, open, close, invalidate: () => current(active), pickProfile, editExcerpt, editInstructions, addExcerpt,
     save: () => changePolicy('save'), revoke: () => changePolicy('revoke'), issue: () => changePolicy('issue'), chooseMode, prepare, back, run };

@@ -17,6 +17,13 @@ const MAX_SELECTED = 6 // six reviewed excerpts at ≤1,500 UTF-8 bytes each
 const TONES = ['plain', 'warm', 'concise', 'formal', 'playful']
 const BOARD_ASK_TOOL_CEILING = Object.freeze({ browser: 'none', files: 'none', terminal: 'none', network: 'off', mcp: 'none' })
 const invalid = () => fail('INPUT', 'Invalid Board Agent ask fields')
+const PRESENCE_ALIAS = /^m-[0-9a-f]{16}$/
+function askRequester(value) {
+  if (value === null) return null
+  if (!value || Object.getPrototypeOf(value) !== Object.prototype || Object.keys(value).length !== 2 || typeof value.board !== 'string' || !UUID.test(value.board) ||
+      typeof value.alias !== 'string' || !PRESENCE_ALIAS.test(value.alias)) invalid()
+  return Object.freeze({ board: value.board, alias: value.alias })
+}
 const stale = () => fail('STALE', 'Approval is no longer current; review again', 409)
 const unavailable = () => fail('UNAVAILABLE', 'Board Agent ask is unavailable', 503)
 export class BoardAskError extends Error {
@@ -149,9 +156,12 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
   }
   function prepare(input, { signal } = {}) {
     checkAvailable()
-    shape(input, ['boardId', 'request', 'mode'])
+    shape(input, ['boardId', 'request', 'mode', 'requester'], ['boardId', 'request', 'mode'])
     const { boardId, mode } = input
     if (!['extract', 'draft'].includes(mode)) invalid()
+    // Who asked, as a presence alias the collaboration service vouched for to this Desk (never a name or an account). Optional and opaque:
+    // it is carried with this ask's records only (the ticket in memory, the answers of prepare and run) and is never stored or sent to a model.
+    const requester = Object.hasOwn(input, 'requester') ? askRequester(input.requester) : null
     if (signal?.aborted) stale()
     const request = inspectedRequest(input.request)
     const board = desk.boardAgentAskIdentity(boardId)
@@ -174,7 +184,7 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
     if (pending.size >= MAX_PENDING) fail('BUSY', 'Too many Board ask previews; cancel one or wait', 429)
     const ticket = randomBytes(32).toString('hex')
     const expiresAt = Math.min(now() + TICKET_TTL, policy.codeExpiresAt)
-    const entry = { boardId, board, mode, expiresAt, version: policy.version, codeDigest: policy.codeDigest,
+    const entry = { boardId, board, mode, requester, expiresAt, version: policy.version, codeDigest: policy.codeDigest,
       profileId: policy.profileId, profileHash: active.hash, profileRevision: active.revision, question, requestId, requestDigest,
       excerpts, publicInstructions, replyStyle, decisionMode: d?.mode, decisionModel: d?.model, decisionBinding: d?.bindingId,
       draftModel: f?.model, draftBinding: f?.bindingId }
@@ -184,7 +194,7 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
       provider: f || d ? 'openai' : null, payer: f ? 'Host’s dedicated OpenAI Responses API key' : d ? 'Host’s Decision API key' : null,
       decisionModel: d?.model ?? null, decisionMode: d?.mode ?? null, draftModel: f?.model ?? null,
       decisionPayer: d ? 'Host’s Decision API key' : null, draftPayer: f ? 'Host’s dedicated OpenAI Responses API key' : null,
-      draftInstructions: f ? draftPreview?.(replyStyle, publicInstructions) ?? null : null }
+      draftInstructions: f ? draftPreview?.(replyStyle, publicInstructions) ?? null : null, ...(requester ? { requester: { ...requester } } : {}) }
   }
   function isCurrent(item, consumed) {
     if (closed || item.controller?.signal.aborted || now() >= item.expiresAt) return false
@@ -249,7 +259,7 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
         }
         finalRun = 'completed'
         return { mode: item.mode, answer: parts.join('\n\n'), source: selected?.outcome === 'decision' ? 'decision' : 'local', omittedCount: evidence.length - parts.length,
-          ...(screening ? { screening } : {}) }
+          ...(screening ? { screening } : {}), ...(item.requester ? { requester: { ...item.requester } } : {}) }
       }
       // The preview authorizes an upper bound. Local or Decisions ranking can
       // narrow it; unselected evidence is never sent to the drafting provider.
@@ -258,7 +268,7 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
       if (!current()) stale()
       const answer = result?.answer ?? ''
       finalRun = 'completed'
-      return { mode: item.mode, answer: txt(answer, REVIEW_TEXT_BYTES.answer, { empty: true }), source: 'draft', ...(screening ? { screening } : {}) }
+      return { mode: item.mode, answer: txt(answer, REVIEW_TEXT_BYTES.answer, { empty: true }), source: 'draft', ...(screening ? { screening } : {}), ...(item.requester ? { requester: { ...item.requester } } : {}) }
     } catch (error) {
       if (!current()) stale()
       finalRun = 'failed'

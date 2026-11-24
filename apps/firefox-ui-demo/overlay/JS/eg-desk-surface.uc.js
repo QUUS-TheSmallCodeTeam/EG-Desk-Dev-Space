@@ -9412,6 +9412,15 @@
     // The same rows go to the bridge every 3 s (content-free: aliases, booleans, numbers). Without the bridge flag the route answers 404 and nothing is kept.
     const post = () => { try { const rows = state.presence.snapshot(); if (rows.length) void deskStoreRequest('POST', '/presence/snapshot', { rows }, { timeoutMs: 4000 }).catch(() => {}); } catch { /* optional signal */ } };
     state.presenceMirrorTimer = window.setInterval(post, 3000);
+    // Cycle 10: whose task a run or a request is. An opaque presence alias the collaboration service vouched for; memory only. The placement hook gets the
+    // requester of its run (L4's function and its callers are untouched), the bridge is told for the heartbeat's audience rule, and a Board question request
+    // is announced by the Desk that wrote it and resolved by the Desk that received it. Nothing here runs with the flag off.
+    const joint = () => (typeof jointDesk !== 'undefined' && jointDesk ? jointDesk.presence : null);
+    state.runRequesters = JointPresence.createRunRequesters({ snapshot: () => state.presence.snapshot(), seated: (board, member) => joint()?.seated?.(board, member) === true,
+      post: body => deskStoreRequest('POST', '/presence/requester', body, { timeoutMs: 4000 }) });
+    state.noteWorkSurfacePlacement = state.runRequesters.wrap(state.noteWorkSurfacePlacement);
+    state.requestRequesters = JointPresence.createRequestRequesters({ joint, sha256Hex: async text =>
+      Array.from(new Uint8Array(await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))), byte => byte.toString(16).padStart(2, '0')).join('') });
     return state.presence;
   }
   state.installDeskPresence = installDeskPresence;
@@ -31327,6 +31336,7 @@
       pickFile: ({ signal }) => readPortableFile({ title: '열 검토 요청 또는 회신 파일', maxBytes: ReviewHandoff.REVIEW_MAX_FILE_BYTES, signal }),
       getContext: reviewContext, isContextCurrent: isReviewContextCurrent, getBoard: findReviewBoard, isBoardCurrent: isReviewBoardCurrent,
       store: reviewStore(), onState: renderReviewDialog,
+      onRequestExported: review => { void state.requestRequesters?.exported(review); },
     });
     return reviewFlowRef;
   }
@@ -31356,6 +31366,7 @@
   function renderReviewDialog(view) {
     let panel = document.getElementById('egd-review-dialog');
     if (!view) { panel?.remove(); return; }
+    if (view.step === 'request-inspected' && view.review?.askCode) void state.requestRequesters?.inspected(view.review);
     const typed = panel?.dataset.step === view.step ? Object.fromEntries([...panel.querySelectorAll('[data-field]:not([type=password]), [data-field=askCode]')]
       .map(input => [input.dataset.field, input.type === 'checkbox' ? input.checked : input.value])) : {};
     const focusKey = panel?.dataset.step === view.step && panel.contains(document.activeElement) ? document.activeElement.dataset?.focusKey : null;
@@ -31408,6 +31419,7 @@
           return codexProfileCatalog.status === 'ready' ? codexProfileCatalog.profiles.filter(ChatState.profileRunnable) : [];
         },
         isCurrent: isBoardAgentAskCurrent, onState: renderBoardAgentAsk,
+        requester: review => state.requestRequesters?.of(review) ?? null,
         onAnswer(binding, result) {
           if (isBoardAgentAskCurrent(binding)) reviewFlowRef?.beginAgentReply(binding.review, binding.board.identity, result);
         },

@@ -1,0 +1,157 @@
+{
+  "set": "board-reply-screening-v1",
+  "tokenCeiling": 8000,
+  "passRule": "A request passes when every hard check holds: each clearly relevant excerpt has probability >= 0.6 (the product's bar: it is selected) and each clearly irrelevant excerpt has probability <= 0.599 (below the bar: it is not selected). The set passes when all 3 requests pass. Near-miss and wrong-time/version excerpts are soft checks (expected <= 0.599); soft misses never fail the run and are reported per kind (the note of every check starts with its kind).",
+  "requests": [
+    {
+      "id": "ask-visitor-parking",
+      "file": "requests/ask-visitor-parking.json",
+      "sha256": "d834d80ad04be5d820295bdc03d5193b1418ebaefb2cb1a37dec093003988e5d",
+      "estInputTokens": 1226,
+      "expect": [
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "hard",
+          "note": "irrelevant: canteen menu"
+        },
+        {
+          "name": "c2",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "relevant: where visitors park"
+        },
+        {
+          "name": "c3",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "soft",
+          "note": "near_miss: parking, but staff permits"
+        },
+        {
+          "name": "c4",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "soft",
+          "note": "wrong_time: last year's visitor parking, closed since"
+        },
+        {
+          "name": "c5",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "relevant: the lot's hours on the day"
+        },
+        {
+          "name": "c6",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "hard",
+          "note": "irrelevant: lost property"
+        }
+      ]
+    },
+    {
+      "id": "ask-plan-price-version",
+      "file": "requests/ask-plan-price-version.json",
+      "sha256": "4173926662a11cc646c353313441e9955752bff999121a392b8b31b006b5e99d",
+      "estInputTokens": 1221,
+      "expect": [
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "soft",
+          "note": "wrong_time: the discontinued 2024 version"
+        },
+        {
+          "name": "c2",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "hard",
+          "note": "irrelevant: support hours"
+        },
+        {
+          "name": "c3",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "relevant: the current price and seats"
+        },
+        {
+          "name": "c4",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "soft",
+          "note": "near_miss: another plan's price"
+        },
+        {
+          "name": "c5",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "hard",
+          "note": "irrelevant: blog schedule"
+        },
+        {
+          "name": "c6",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "relevant: what the included seats count"
+        }
+      ]
+    },
+    {
+      "id": "ask-workshop-refund",
+      "file": "requests/ask-workshop-refund.json",
+      "sha256": "2f1c754d1fc547a41ae30f75609186c11b2418530f152301c58b9759caf7cf57",
+      "estInputTokens": 1228,
+      "expect": [
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "relevant: the full-refund deadline"
+        },
+        {
+          "name": "c2",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "soft",
+          "note": "near_miss: same workshop, the sign-up period"
+        },
+        {
+          "name": "c3",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "hard",
+          "note": "irrelevant: library hours"
+        },
+        {
+          "name": "c4",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "soft",
+          "note": "wrong_time: last term's refund rule"
+        },
+        {
+          "name": "c5",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "relevant: what happens after the deadline"
+        },
+        {
+          "name": "c6",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "hard",
+          "note": "irrelevant: car park maintenance"
+        }
+      ]
+    }
+  ]
+}

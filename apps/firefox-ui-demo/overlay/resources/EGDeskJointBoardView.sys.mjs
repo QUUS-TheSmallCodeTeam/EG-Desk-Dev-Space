@@ -987,7 +987,8 @@ export function createUI(h) {
     { once: true },
   );
   return {
-    presence: { snapshot: () => presence.snapshot(), share: (board) => presence.share(board), setShare: (board, level) => presence.setShare(board, level), aliasOn: (board) => presence.aliasOn(board), idle: () => presence.idle() },
+    presence: { snapshot: () => presence.snapshot(), share: (board) => presence.share(board), setShare: (board, level) => presence.setShare(board, level), aliasOn: (board) => presence.aliasOn(board), idle: () => presence.idle(),
+      seated: (board, member) => presence.seated(board, member), claimRequest: (tag) => presence.claimRequest(tag), watchRequest: (tag) => presence.watchRequest(tag), requesterOf: (tag) => presence.requesterOf(tag) },
     audit,structure,inspect,panel,fresh,openMaterials,syncMaterialsControl,presentationBoard(p){const b=api.connected&&p&&getB(p.boardId);return b&&b.epoch===p.jointAccess?{scope:instanceScope,board:b}:null;},
     propose(title) {
       proposalTitle = title || '';

@@ -15,6 +15,24 @@ export const PRESENCE_SHARE_PREF = 'egdesk.jointBoard.presenceShare.v1';
 export const SHARE_LEVELS = Object.freeze(['off', 'active', 'region']);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const alias = /^m-[0-9a-f]{16}$/;
+const tagShape = /^[0-9a-f]{64}$/;
+/**
+ * Requester identity, the bounds on this Desk (memory only, gone when the window closes):
+ *   announceMs  how long the Desk that MADE a request keeps announcing its tag (a request file travels by hand; the owner may open it hours later)
+ *   claimMs     how long the service keeps a claim after the last announcement (the service's own bound, repeated here)
+ *   watchMs     how long the Desk that RECEIVED a request keeps asking who claimed it, counted from when its person opened the file
+ *   runMs       how long a run keeps its requester unless it is cleared earlier
+ */
+export const REQUESTER = Object.freeze({ announceMs: 24 * 60 * 60_000, claimMs: 15 * 60_000, watchMs: 15 * 60_000, runMs: 30 * 60_000, maxTags: 4, maxRuns: 32 });
+/**
+ * The opaque tag of one review request: a hash of its id and digest, which only the holders of that request file know.
+ * It says nothing about the question. sha256Hex(text) -> Promise<hex> is supplied by the host (WebCrypto in the window).
+ */
+export async function requestTag(review, sha256Hex) {
+  if (!review || review.kind !== 'request' || typeof review.requestId !== 'string' || !uuid.test(review.requestId) || typeof review.requestDigest !== 'string' || !tagShape.test(review.requestDigest)) return null;
+  const hex = await sha256Hex(JSON.stringify(['egdesk-ask-requester-v1', review.requestId, review.requestDigest]));
+  return typeof hex === 'string' && tagShape.test(hex) ? hex : null;
+}
 const bad = () => {
   throw Error('invalid-presence');
 };
@@ -28,11 +46,21 @@ const only = (v, keys) =>
 
 /** Whitelist rebuild of a presence answer. Anything else (a name, text, a URL, a pointer) makes the whole answer invalid. */
 export function checkedPresence(raw, board) {
-  only(raw, ['version', 'board', 'self', 'share', 'staleMs', 'expireMs', 'members']);
+  only(raw, ['version', 'board', 'self', 'share', 'staleMs', 'expireMs', 'members', 'resolved']);
+  const resolved = [];
+  if (raw.resolved !== undefined) {
+    if (!Array.isArray(raw.resolved) || raw.resolved.length > REQUESTER.maxTags) bad();
+    for (const row of raw.resolved) {
+      only(row, ['tag', 'member']);
+      if (typeof row.tag !== 'string' || !tagShape.test(row.tag) || typeof row.member !== 'string' || !alias.test(row.member) || row.member === raw.self) bad();
+      resolved.push({ tag: row.tag, member: row.member });
+    }
+  }
   if (raw.version !== 1 || raw.board !== board || !alias.test(raw.self) || !Array.isArray(raw.members) || raw.members.length > PRESENCE.maxMembers) bad();
   const seen = new Set([raw.self]);
   return {
     self: raw.self,
+    resolved,
     members: raw.members.map((m) => {
       only(m, ['member', 'active', 'inputAgeMs', 'ageMs', 'viewport', 'focusCard']);
       if (typeof m.member !== 'string' || !alias.test(m.member) || seen.has(m.member) || typeof m.active !== 'boolean') bad();
@@ -104,6 +132,14 @@ export function createJointPresence({ send, self, boards, cardAlias = () => null
     Object.entries(initialShare && typeof initialShare === 'object' ? initialShare : {}).filter(([k, v]) => uuid.test(k) && SHARE_LEVELS.includes(v)),
   );
   const feeds = new Map(); // board id -> { at, members, self }
+  const claimed = new Map(); // tag -> until (requests this person made and announces on the Boards they share presence on)
+  const watched = new Map(); // tag -> until (requests this person received and asks the service about)
+  const answered = new Map(); // tag -> { board, alias, at } (who the service vouches for)
+  const fresh = (map) => {
+    const time = now();
+    for (const [tag, until] of map) if (until <= time) map.delete(tag);
+    return [...map.keys()].slice(0, REQUESTER.maxTags);
+  };
   const sentAt = new Map();
   const pending = new Set();
   let flight = Promise.resolve();
@@ -125,8 +161,9 @@ export function createJointPresence({ send, self, boards, cardAlias = () => null
   };
   function outgoing(board, me) {
     const mode = level(board.id);
-    if (mode === 'off') return { board: board.id, share: 'off' };
-    const body = { board: board.id, share: mode, inputAgeMs: Math.max(0, Math.round(me.lastInputAgeMs)) };
+    const asking = fresh(watched), mine = fresh(claimed);
+    if (mode === 'off') return { board: board.id, share: 'off', ...(asking.length ? { resolve: asking } : {}) };
+    const body = { board: board.id, share: mode, inputAgeMs: Math.max(0, Math.round(me.lastInputAgeMs)), ...(mine.length ? { claim: mine } : {}), ...(asking.length ? { resolve: asking } : {}) };
     if (mode !== 'region') return body;
     const view = rect(me.viewport),
       region = rect(board.region);
@@ -162,6 +199,7 @@ export function createJointPresence({ send, self, boards, cardAlias = () => null
         try {
           const answer = checkedPresence(await send(outgoing(board, me)), board.id);
           feeds.set(board.id, { at: now(), members: answer.members, self: answer.self });
+          for (const row of answer.resolved) if (watched.has(row.tag)) answered.set(row.tag, { board: board.id, alias: row.member, at: now() });
           done++;
         } catch {
           /* optional signal: keep working without it */
@@ -232,6 +270,33 @@ export function createJointPresence({ send, self, boards, cardAlias = () => null
     aliasOn(board) {
       return feeds.get(board)?.self ?? null;
     },
+    /** Is this alias a member the service currently lists on that Board (a fresh answer names it)? The seat check is the service's. */
+    seated(board, member) {
+      const feed = feeds.get(board);
+      return !!feed && now() - feed.at <= PRESENCE.staleMs && feed.members.some((m) => m.member === member);
+    },
+    /** Announce a request this person made (its opaque tag) on every Board they share presence on, for announceMs. Nothing is sent where sharing is off. */
+    claimRequest(tag) {
+      if (typeof tag !== 'string' || !tagShape.test(tag)) return false;
+      if (claimed.size >= REQUESTER.maxTags && !claimed.has(tag)) claimed.delete(claimed.keys().next().value);
+      claimed.set(tag, now() + REQUESTER.announceMs);
+      return true;
+    },
+    /** Ask the service, at every exchange for watchMs, who claimed a request this person received. */
+    watchRequest(tag) {
+      if (typeof tag !== 'string' || !tagShape.test(tag)) return false;
+      if (watched.size >= REQUESTER.maxTags && !watched.has(tag)) { const oldest = watched.keys().next().value; watched.delete(oldest); answered.delete(oldest); }
+      watched.set(tag, now() + REQUESTER.watchMs);
+      return true;
+    },
+    /** { board, alias } the service vouched for, while that member is still listed on that Board; else null. */
+    requesterOf(tag) {
+      const hit = answered.get(tag);
+      if (!hit || !watched.has(tag)) return null;
+      const feed = feeds.get(hit.board);
+      if (!feed || now() - feed.at > PRESENCE.staleMs || !feed.members.some((m) => m.member === hit.alias)) return null;
+      return { board: hit.board, alias: hit.alias };
+    },
     /** Replace every Board's sharing level at once (a saved choice read after connecting). Does not report back to the host. */
     loadShare(map) {
       share.clear();
@@ -241,6 +306,9 @@ export function createJointPresence({ send, self, boards, cardAlias = () => null
     reset() {
       feeds.clear();
       sentAt.clear();
+      claimed.clear();
+      watched.clear();
+      answered.clear();
     },
   };
 }
@@ -344,4 +412,125 @@ export function createDeskPresence({ single, joint = () => null }) {
       }
     },
   });
+}
+
+/**
+ * Whose task a live run is, for the two consumers of presence on this Desk. Memory only.
+ *   snapshot() -> presence rows of this Desk      seated(board, alias) -> the service lists that alias on that Board right now
+ *   post(body) -> tells the bridge (the heartbeat's audience rule): { clientThreadId, conversationId, requester: { board, alias } | null }
+ * A requester is taken only when the service vouches for the alias on that Board (seated); it is dropped after runMs, when cleared,
+ * and it is handed to the placement runtime only while the alias is in the live snapshot.
+ */
+export function createRunRequesters({ snapshot, seated, post = async () => null, now = Date.now }) {
+  const runs = new Map(); // conversation key -> { board, alias, until }
+  const keysOf = (ref) => [ref?.conversationId, ref?.clientThreadId].filter((k) => typeof k === 'string' && k && k.length <= 256);
+  const find = (ref) => {
+    for (const key of keysOf(ref)) {
+      const hit = runs.get(key);
+      if (hit && hit.until > now()) return hit;
+      if (hit) runs.delete(key);
+    }
+    return null;
+  };
+  const tell = (ref, requester) => {
+    try {
+      void Promise.resolve(post({ clientThreadId: typeof ref?.clientThreadId === 'string' ? ref.clientThreadId : null, conversationId: typeof ref?.conversationId === 'string' ? ref.conversationId : null, requester })).catch(() => {});
+    } catch {
+      /* the window keeps its own record either way */
+    }
+  };
+  const api = {
+    /** set(ref, { board, alias }) for the run that starts in that conversation; set(ref, null) when it ends. Returns whether it was taken. */
+    set(ref, requester) {
+      const keys = keysOf(ref);
+      if (!keys.length) return false;
+      if (requester === null) {
+        for (const key of keys) runs.delete(key);
+        tell(ref, null);
+        return true;
+      }
+      let ok = false;
+      try {
+        ok = typeof requester?.board === 'string' && uuid.test(requester.board) && typeof requester.alias === 'string' && alias.test(requester.alias) && seated(requester.board, requester.alias) === true;
+      } catch {
+        ok = false;
+      }
+      if (!ok) return false;
+      while (runs.size >= REQUESTER.maxRuns) runs.delete(runs.keys().next().value);
+      const entry = { board: requester.board, alias: requester.alias, until: now() + REQUESTER.runMs };
+      for (const key of keys) runs.set(key, entry);
+      tell(ref, { board: entry.board, alias: entry.alias });
+      return true;
+    },
+    /** The requester alias for a work surface of that run, only while that member is in the live snapshot; else null (the local person, as before). */
+    for(ref) {
+      const hit = find(ref);
+      if (!hit) return null;
+      let rows = [];
+      try {
+        rows = snapshot() || [];
+      } catch {
+        rows = [];
+      }
+      return rows.some((row) => row && row.self !== true && row.member === hit.alias) ? hit.alias : null;
+    },
+    /** The placement hook with the requester filled in. The wrapped function and its callers are untouched. */
+    wrap(note) {
+      if (typeof note !== 'function') return note;
+      return (kind, placement, work) => {
+        let who = null;
+        try {
+          who = work && !work.requester ? api.for(work) : null;
+        } catch {
+          who = null;
+        }
+        return note(kind, placement, who ? { ...work, requester: who } : work);
+      };
+    },
+    size: () => runs.size,
+  };
+  return api;
+}
+
+/**
+ * A review request and its requester, on both Desks. joint() -> the joint presence API ({ claimRequest, watchRequest, requesterOf }) or null.
+ *   exported(review)   this person wrote the request file: announce its tag on the Boards they share presence on
+ *   inspected(review)  this person opened a received request: ask the service who claimed it
+ *   of(review)         -> { board, alias } the service vouched for (still listed on that Board), else null
+ * Only the tag (a hash) ever reaches the service; the request's text never does.
+ */
+export function createRequestRequesters({ joint, sha256Hex }) {
+  const tags = new Map(); // requestId/requestDigest -> tag
+  const keyOf = (review) => (review && typeof review.requestId === 'string' && typeof review.requestDigest === 'string' ? review.requestId + '/' + review.requestDigest : null);
+  const withTag = async (review, act) => {
+    const key = keyOf(review);
+    if (!key) return false;
+    let tag = tags.get(key);
+    if (!tag) {
+      tag = await requestTag(review, sha256Hex);
+      if (!tag) return false;
+      tags.set(key, tag);
+      while (tags.size > 16) tags.delete(tags.keys().next().value);
+    }
+    let api = null;
+    try {
+      api = joint();
+    } catch {
+      api = null;
+    }
+    return api ? act(api, tag) === true : false;
+  };
+  return {
+    exported: (review) => withTag(review, (api, tag) => api.claimRequest(tag)).catch(() => false),
+    inspected: (review) => withTag(review, (api, tag) => api.watchRequest(tag)).catch(() => false),
+    of(review) {
+      const tag = tags.get(keyOf(review));
+      if (!tag) return null;
+      try {
+        return joint()?.requesterOf(tag) ?? null;
+      } catch {
+        return null;
+      }
+    },
+  };
 }
