@@ -56,6 +56,9 @@ export const OUTCOMES = {
   rate_limited: { respond: () => json(429, { error: { code: 'rate_limit_exceeded', type: 'rate_limit_error' } }) },
   timeout: { hang: true },
   budget_exceeded: { budget: { canSpend: () => false, record() {} } },
+  // L3's code is not on this branch yet: the real client cannot emit it here, so the client is replaced by a stub that
+  // throws the same shape (name 'DecisionError', closed-set code) that runChatChoice forwards. No provider request is made.
+  spend_limit_reached: { decideError: Object.assign(new Error('synthetic spend limit'), { name: 'DecisionError', code: 'spend_limit_reached', retryable: false }) },
   invalid_key: { respond: () => json(401, { error: { code: 'invalid_api_key' } }) },
   unreachable: { throws: new TypeError('fetch failed') },
   server_error: { respond: () => json(500, { error: { code: 'server_error' } }) },
@@ -90,7 +93,7 @@ function runtime(t, outcome) {
       if (outcome.hang) return new Promise((_, reject) => req.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true }))
       return outcome.respond(body.questions[0])
     } })
-  const decisionContext = { client, mode: () => 'on', configured: () => true, settingsGeneration: () => 1, reviewRevision: () => reviewRevision,
+  const decisionContext = { client: outcome.decideError ? { decide: async () => { throw outcome.decideError } } : client, mode: () => 'on', configured: () => true, settingsGeneration: () => 1, reviewRevision: () => reviewRevision,
     recipientForChatChoice: ({ ownerKey }) => ownerKey === author ? decisionTopicRecipient(state.key, 42) : null }
   const adapter = createCodexEngineAdapter({ request: noNative, respond: noNative, getOwnerKey: () => author, profiles: { ensureReady: noNative } })
   Object.assign(adapter, { ensureReady: noNative, startTurn: noNative })
@@ -210,7 +213,7 @@ for (const name of Object.keys(OUTCOMES)) {
     assert.equal(seen.nativeOps, 0, 'nothing may start or send a native/subscription turn')
     assert.equal(seen.draftsCreated, 0, 'no draft is created without an explicit user click')
     assert.equal(seen.composerValue, question, 'the composer text is untouched')
-    assert.equal(seen.decisionsPosts, name === 'budget_exceeded' ? 0 : 1, 'exactly one Decisions call (zero when the local budget blocks it)')
+    assert.equal(seen.decisionsPosts, ['budget_exceeded', 'spend_limit_reached'].includes(name) ? 0 : 1, 'exactly one Decisions call (zero when the local budget blocks it or the outcome is stubbed)')
     if (name === 'confident') {
       assert.match(seen.text, /EG-Desk 추천: 슬라이드 10장 요약본 · 실행하지 않음/)
       assert.ok(seen.buttons.some(b => b.id === 'explain' && !b.disabled))

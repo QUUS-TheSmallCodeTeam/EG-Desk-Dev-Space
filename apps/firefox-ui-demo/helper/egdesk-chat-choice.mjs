@@ -11,7 +11,7 @@ const MANUAL = Object.freeze({ status: 'manual' })
 //   abstain / unclear / low_confidence: the model answered but could not pick (ambiguous, near-tie, below the bar).
 //   everything else: a DecisionError code from the Decisions client (or a local timeout).
 export const CHOICE_MANUAL_REASONS = Object.freeze(['abstain', 'unclear', 'low_confidence', 'bad_response', 'no_credit', 'rate_limited',
-  'timeout', 'budget_exceeded', 'invalid_key', 'not_configured', 'unreachable', 'server_error', 'model_unavailable'])
+  'timeout', 'budget_exceeded', 'spend_limit_reached', 'invalid_key', 'not_configured', 'unreachable', 'server_error', 'model_unavailable'])
 const REASON_SET = new Set(CHOICE_MANUAL_REASONS)
 const manualWith = reason => typeof reason === 'string' && REASON_SET.has(reason) ? Object.freeze({ status: 'manual', reason }) : MANUAL
 export const chatChoiceManual = manualWith
