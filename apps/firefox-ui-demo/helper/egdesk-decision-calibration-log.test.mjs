@@ -142,3 +142,18 @@ test('a timeout is recorded as a closed fallback word with no numbers invented; 
   assert.equal(off.calibrationLog.entries().length, 0)
   assert.equal(off.files.some(f => f.endsWith(CALIBRATION_FILE)), false)
 })
+
+test('user-visible decision-context activity carries no speech-label count; the internal run receipt and calibration keep it', () => {
+  const emitted = [], put = []
+  const self = { recordCalibration() {}, put: (_r, _k, a) => put.push(a), emit: (_r, _e, a) => emitted.push(a) }
+  const run = { answerId: 'a1' }
+  const speech = { segments: 1, axes: 3, accepted: 2, anchor: '2026-11-23T03:00:00.000Z', recall: { state: 'no', probability: 0.16 } }
+  const result = { status: 'ready', selected: [{ id: 'x', title: 'T', timeSlice: 'present' }], receipt: { outcome: 'ready', speech, dropped: [{ id: 'y', reason: 'over_item_limit' }] },
+    dropped: [] }
+  CodexChatRuntime.prototype.noteDecisionContext.call(self, run, { mode: 'on', result })
+  const row = emitted[0]
+  assert.equal(row.title, '컨텍스트 세팅 · 자료 1개 · 못 붙인 자료 1개')
+  assert.doesNotMatch(JSON.stringify(row), /발언|"speech"|"accepted"/)
+  assert.deepEqual(run.decisionContextReceipt.speech, speech, 'internal receipt keeps it')
+  assert.ok(row.detail.receipt.outcome === 'ready')
+})

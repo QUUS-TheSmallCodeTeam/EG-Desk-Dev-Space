@@ -217,15 +217,15 @@ const speechStub = (message, allowed = () => true) => ({ allowed, modeActive: ()
 const lowSpeech = (name, request) => (/^speech_/.test(name) ? { type: 'choice', choice: 'plan', confidence: 0.16,
   probabilities: [{ value: 'plan', probability: 0.16 }, { value: 'assertion', probability: 0.15 }] } : null)
 
-test('speech trace: an unconfirmed label is withheld, and the receipt/activity say how many labels and what recall verdict, with no text', async () => {
+test('speech trace: an unconfirmed label is withheld; the internal receipt (not the user-visible row) keeps label count and recall verdict, with no text', async () => {
   const message = '내일 살펴볼 예정이야.'
   const { client } = fakeClient((q, r) => lowSpeech(q.name, r) || (q.name === 'rel_recall' ? predicate(0.16) : q.name === 'answer_type' ? choice('answer') : q.name === 'time_intent' ? choice('not_time_specific') : predicate(0.9)))
   const out = await prepareTurnContext({ message, candidates: [...CANDIDATES.slice(0, 1), { id: 'conversation:recent', kind: 'conversation', title: 'recent', timeSlice: 'unknown', mayRead: () => true, loadText: () => '{}' }],
     client, askedAt: Date.UTC(2026, 10, 23, 3), speech: speechStub(message) })
   assert.deepEqual(out.speechInterpretations, [])
   assert.deepEqual(out.receipt.speech, { segments: 1, axes: 3, accepted: 0, anchor: '2026-11-23T03:00:00.000Z', recall: { state: 'no', probability: 0.16 } })
-  const row = decisionContextActivity({ answerId: 'a', selected: out.selected, speech: out.receipt.speech, dropped: out.receipt.dropped })
-  assert.match(row.title, /발언 해석 0\/3개 채택/)
+  const row = decisionContextActivity({ answerId: 'a', selected: out.selected, dropped: out.receipt.dropped })
+  assert.doesNotMatch(JSON.stringify(row), /발언|speech/, 'speech labels are Agent-internal, never in the user-visible row')
   assert.ok(!JSON.stringify(row).includes('살펴볼'))
 })
 
@@ -245,4 +245,27 @@ test('a discarded topic batch keeps a typed-name item but none of the model-scor
   const out = await prepareTurnContext({ message, candidates: CANDIDATES.slice(0, 5), client, topic })
   assert.equal(out.privateTopicBatch, true)
   assert.deepEqual(out.selected.map(s => s.id).sort(), ['pinned'])
+})
+
+test('speech design flag: predicates replace the axis questions end to end; default stays the axes; calibration rows carry numbers only', async () => {
+  const message = '내일 내가 표지를 살펴볼 예정이야.'
+  const decisive = yes => (q) => (q.name === 'answer_type' ? choice('answer') : q.name === 'time_intent' ? choice('not_time_specific')
+    : q.name.startsWith('speechp_') ? predicate(yes.includes(q.name.replace(/^speechp_|_0$/g, '')) ? 1 : 0) : predicate(0.02))
+  const run = async design => {
+    const f = fakeClient(decisive(['plan', 'after', 'anchor_stated']))
+    const out = await prepareTurnContext({ message, candidates: CANDIDATES.slice(0, 1), client: f.client, askedAt: Date.UTC(2026, 10, 23, 3),
+      speech: { ...speechStub(message), ...(design ? { design } : {}) } })
+    return { out, names: f.calls[0].questions.map(q => q.name) }
+  }
+  const flagged = await run('predicates')
+  assert.equal(flagged.names.filter(n => n.startsWith('speechp_')).length, 12)
+  assert.equal(flagged.names.filter(n => n.startsWith('speech_')).length, 0)
+  assert.deepEqual(flagged.out.speechInterpretations, [{ start: 0, end: message.length, source: 'unspecified', form: 'plan', time: 'future_anchored' }])
+  assert.match(flagged.out.extraContext.egdesk_decision_context, /"form":"plan","time":"future_anchored"/)
+  const rows = flagged.out.calibration.judgments.filter(j => j.q === 'speech_predicate')
+  assert.equal(rows.length, 12)
+  assert.deepEqual(rows.find(j => j.pred === 'plan'), { q: 'speech_predicate', would: 'accept', p: 1, threshold: 0.8, minMargin: 0.2, pred: 'plan', seg: 0 })
+  const current = await run(undefined)
+  assert.equal(current.names.filter(n => n.startsWith('speech_')).length, 3)
+  assert.equal(current.names.filter(n => n.startsWith('speechp_')).length, 0)
 })

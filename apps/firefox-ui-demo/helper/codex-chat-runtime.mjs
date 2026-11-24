@@ -4159,7 +4159,8 @@ export class CodexChatRuntime {
           spokenAt: new Date(s.spokenAt).toISOString(), offsetMinutes: r.offsetMinutes, sequence: s.seq,
           verification: 'utterance-only', interpretations: r.interpretations }
       }
-      return { allowed, modeActive, segments: speechSegments(body.message), candidate: () => {
+      // Internal flag (setup.speechDesign); only 'predicates' changes anything, every other value is the current design.
+      return { allowed, modeActive, segments: speechSegments(body.message), design: setup.speechDesign === 'predicates' ? 'predicates' : 'axes', candidate: () => {
         if (!allowed()) return null
         const refs = evidence.recentSpeech(dm.scope, gen)
         if (!refs?.length) return null
@@ -4430,13 +4431,13 @@ export class CodexChatRuntime {
     if (!result || result.status === 'skipped' || result.privateTopicBatch) return
     this.recordCalibration(run, mode, result)
     const activity = decisionContextActivity({ answerId: run.answerId, selected: result.selected || [], latencyMs: result.latencyMs ?? null, model: result.model ?? null,
-      speech: result.receipt?.speech ?? null, dropped: result.receipt?.dropped ?? [] })
+      dropped: result.receipt?.dropped ?? [] })
     const attached = mode === 'on' && result.status === 'ready'
     if (result.status === 'fallback') activity.title = '컨텍스트 세팅 · 결정 모델 응답 없음'
     else if (mode === 'advisory') activity.title = `컨텍스트 세팅(기록만) · 고른 자료 ${(result.selected || []).length}개`
     activity.detail = { ...activity.detail, mode, outcome: result.status, attached, ...(result.reason ? { reason: result.reason } : {}),
-      ...(result.receipt ? { receipt: result.receipt } : {}) }
-    run.decisionContextReceipt = result.receipt || null
+      ...(result.receipt ? { receipt: (({ speech, ...shown }) => shown)(result.receipt) } : {}) }
+    run.decisionContextReceipt = result.receipt || null // internal: keeps the speech trace
     this.put(run, 'activities', activity)
     this.emit(run, 'activity.completed', activity)
   }

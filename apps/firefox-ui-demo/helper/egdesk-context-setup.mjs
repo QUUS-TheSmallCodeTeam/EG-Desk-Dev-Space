@@ -1,4 +1,4 @@
-import { SPEECH_RULES, SPEECH_THRESHOLDS, speechQuestions, speechInterpretations } from './egdesk-speech-grounding.mjs'
+import { SPEECH_RULES, SPEECH_THRESHOLDS, SPEECH_PREDICATE_BARS, SPEECH_PREDICATE_KEYS, speechDesignQuestions, speechDesignInterpretations } from './egdesk-speech-grounding.mjs'
 import { DecisionError } from './egdesk-decision-client.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, readPredicate, sha256Hex, tableOptions, uniqueOptions } from './egdesk-decision-questions.mjs'
 
@@ -212,7 +212,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
   const localLookup = all.find(c => c.id === 'memory-lookup:0' && c.mayRead)
   const normalized = all.filter(c => c.id !== 'conversation:recent' && c.id !== 'memory-lookup:0')
   const activeSpeech = speech?.allowed() === true && Array.isArray(speech.segments)
-  const extraQuestions = activeSpeech ? [...speechQuestions(speech.segments), predicateQuestion('rel_recall', 'Does the current message refer back to earlier remarks, ask for recall or compare with a previous answer? Judge the wording, not whether such material exists.')] : []
+  const extraQuestions = activeSpeech ? [...speechDesignQuestions(speech.design, speech.segments), predicateQuestion('rel_recall', 'Does the current message refer back to earlier remarks, ask for recall or compare with a previous answer? Judge the wording, not whether such material exists.')] : []
   const liveTopic = topic?.allowed() === true ? topic : null
   const topicQuestions = liveTopic?.plan.questions || []
   const cold = liveTopic && !topicQuestions.length ? liveTopic.plan.resolve({}) : null
@@ -345,7 +345,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
   if (discardJudgments || !privateBatchCurrent()) return withoutTopic()
   if (modeStopped()) return skipped('mode_changed')
   const withSpeech = speechDispatched && speech.allowed()
-  const interpretations = withSpeech ? speechInterpretations(result.answers, speech.segments) : null
+  const interpretations = withSpeech ? speechDesignInterpretations(speech.design, result.answers, speech.segments) : null
   const speechRule = withSpeech ? '\n' + SPEECH_RULES + '\nQuestion clock: ' + (anchor ? anchor.toISOString() + ' (UTC offset minutes ' + (-anchor.getTimezoneOffset()) + ')' : 'unknown')
     + '. Current user message: fallible semantic labels by UTF-16 offsets in its exact text: ' + JSON.stringify(interpretations) : ''
   // What the person can inspect: how many labels cleared the bar, and what the recall verdict was. Never any text.
@@ -354,7 +354,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     anchor: anchor ? anchor.toISOString() : null,
     recall: recall ? { state: recall.state, probability: recall.probability } : null } : null
   const calibration = buildCalibration({ answers: result.answers, thresholds, answerType, timeIntent, scored, recall, withSpeech,
-    interpretations, segments: withSpeech ? speech.segments : [], topicRoute, topicQuestions: topicQuestions.length, candidates: list.length, discarded: discardJudgments })
+    interpretations, segments: withSpeech ? speech.segments : [], design: withSpeech && speech.design === 'predicates' ? 'predicates' : 'axes', topicRoute, topicQuestions: topicQuestions.length, candidates: list.length, discarded: discardJudgments })
   const parts = items.length || withSpeech ? [PACKET_HEAD + evidenceRule + speechRule, ...items.map(item => item.block)] : []
   if (topicRoute?.packet) parts.push(topicRoute.packet)
   const packet = parts.join('\n\n') || null
@@ -396,13 +396,21 @@ const topTwo = (answers, name) => {
     return { top: p[0] ?? null, second: p[1] ?? null }
   } catch { return { top: null, second: null } }
 }
-function buildCalibration({ answers, thresholds, answerType, timeIntent, scored, recall, withSpeech, interpretations, segments, topicRoute, topicQuestions, candidates, discarded }) {
+function buildCalibration({ answers, thresholds, answerType, timeIntent, scored, recall, withSpeech, interpretations, segments, design, topicRoute, topicQuestions, candidates, discarded }) {
   const judgments = []
   for (const [q, name, read] of [['answer_type', 'answer_type', answerType], ['time_intent', 'time_intent', timeIntent]]) {
     judgments.push({ q, ...topTwo(answers, name), value: read.value, threshold: thresholds.choice, minMargin: 0, would: read.state === 'accepted' ? 'accept' : 'reject' })
   }
   if (withSpeech) {
     segments.forEach((_, i) => {
+      if (design === 'predicates') {
+        const read = p => (Number.isFinite(p) ? (p >= SPEECH_PREDICATE_BARS.yes ? 'accept' : p <= SPEECH_PREDICATE_BARS.no ? 'reject' : 'unknown') : 'unknown')
+        for (const pred of SPEECH_PREDICATE_KEYS) {
+          const p = answers?.[`speechp_${pred}_${i}`]?.probability
+          judgments.push({ q: 'speech_predicate', pred, seg: i, p, threshold: SPEECH_PREDICATE_BARS.yes, minMargin: SPEECH_PREDICATE_BARS.no, would: read(p) })
+        }
+        return
+      }
       for (const axis of ['source', 'form', 'time']) {
         const accepted = interpretations.find(k => k.start === segments[i].start)?.[axis]
         judgments.push({ q: 'speech_axis', axis, seg: i, ...topTwo(answers, `speech_${axis}_${i}`), threshold: SPEECH_THRESHOLDS.confidence,
@@ -579,16 +587,18 @@ export async function planTimelineTransition({ message, openItems = [], client, 
  * ({ id, kind, status, title, detail, sourceRefs }), so the existing activity
  * record can show what the decision model attached.
  */
-export function decisionContextActivity({ answerId, selected = [], latencyMs = null, model = null, speech = null, dropped = [] } = {}) {
+// Speech labels are Agent-internal context, not something to show the person. They stay in the
+// internal receipt and the calibration record; this row says only which materials the Agent got.
+export function decisionContextActivity({ answerId, selected = [], latencyMs = null, model = null, dropped = [] } = {}) {
   const ids = selected.map(item => item.id).join('\u0000')
   return {
     id: `decision-context-${sha256Hex(`${answerId}\u0000${ids}`).slice(0, 24)}`,
     kind: 'decisionContext', status: 'completed',
     title: (selected.length ? `컨텍스트 세팅 · 자료 ${selected.length}개` : '컨텍스트 세팅 · 붙일 자료 없음') +
-      (speech ? ` · 발언 해석 ${speech.accepted}/${speech.axes}개 채택` : '') + (dropped.length ? ` · 못 붙인 자료 ${dropped.length}개` : ''),
+      (dropped.length ? ` · 못 붙인 자료 ${dropped.length}개` : ''),
     detail: { items: selected.map(item => ({ id: item.id, time: TIME_SLICE_LABELS[item.timeSlice] || TIME_SLICE_LABELS.unknown, title: item.title,
       ...(item.sourceRef ? { source: item.sourceRef } : {}) })),
-    ...(speech ? { speech } : {}), ...(dropped.length ? { dropped } : {}),
+    ...(dropped.length ? { dropped } : {}),
     ...(Number.isFinite(latencyMs) ? { latencyMs: Math.round(latencyMs) } : {}), ...(model ? { model } : {}) },
     sourceRefs: [],
   }
