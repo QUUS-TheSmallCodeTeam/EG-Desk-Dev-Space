@@ -94,7 +94,7 @@ function normalizePrepare(body) {
  * `fetchImpl` and `now` support offline fixtures; production uses fixed defaults.
  */
 export function createBoardPresentationHttpHandler({ credentials, getMode, budget, port = 39218,
-  fetchImpl, now = () => performance.now(), calibrationLog = null, briefing = null } = {}) {
+  fetchImpl, now = () => performance.now(), calibrationLog = null, briefing = null, briefingBindings: persistedBindings = null } = {}) {
   if (typeof credentials?.getApiKey !== 'function' || typeof credentials?.savedAt !== 'function' ||
       typeof getMode !== 'function' || typeof budget?.canSpend !== 'function' ||
       typeof budget?.record !== 'function' || typeof now !== 'function') throw new TypeError('Board Decisions dependencies are required')
@@ -257,9 +257,10 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     })
   }
   const briefingFlows = new Set() // answers whose `on` flow has started (bounded)
-  // What each card this flow published was built from: outputId -> { keys (opaque material keys), trait, component }. In memory only, bounded; it lets a later
-  // answer recognise "this card already shows these materials" by the card's provenance instead of by its title.
-  const briefingBindings = new Map()
+  // What each card this flow published was built from: outputId -> { keys (opaque material keys), trait, component, outputKey, conversationId, version, hash }.
+  // It lets a later answer recognise "this card already shows these materials" by the card's provenance instead of by its title, and continue the version chain.
+  // Cycle 23: the bridge passes a persisted Map (egdesk-briefing-bindings.mjs, its own data dir, ids/keys/hashes only); without it, in memory as before.
+  const briefingBindings = persistedBindings instanceof Map ? persistedBindings : new Map()
   async function observe(body) {
     const mode = getMode(), want = body?.flow === 'on' ? 'on' : 'advisory'
     if (!['advisory', 'on'].includes(mode) || want !== mode) return { status: 'skipped', reason: 'mode' }
@@ -318,8 +319,11 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
         created[component.alias] = { outputId: published.output.id }
         used.add(published.output.outputKey)
         if (earlier && published.output.outputKey === earlier.outputKey && published.output.previousId) replaced.add(published.output.previousId)
+        // Cycle 23: the output a remembered binding names is gone from the store (nothing to continue): that binding goes too.
+        if (earlier && published.output.outputKey === earlier.outputKey && !published.output.previousId) briefingBindings.delete(earlier.outputId)
         if (Array.isArray(component.materialKeys) && component.materialKeys.length) {
-          briefingBindings.set(published.output.id, { keys: [...component.materialKeys], trait: component.trait, component: component.component, outputKey: published.output.outputKey, conversationId: answerRun.conversationId })
+          briefingBindings.set(published.output.id, { keys: [...component.materialKeys], trait: component.trait, component: component.component, outputKey: published.output.outputKey, conversationId: answerRun.conversationId,
+            ...(Number.isSafeInteger(published.output.version) ? { version: published.output.version } : {}), ...(typeof published.output.hash === 'string' ? { hash: published.output.hash } : {}) })
           if (briefingBindings.size > 500) briefingBindings.delete(briefingBindings.keys().next().value)
         }
       }

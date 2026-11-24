@@ -15,6 +15,10 @@ import { answerFacts, factAnchors, factCites, COVERAGE_MODES } from './egdesk-br
 import { SKELETON_JUDGE, SKELETON_LIMITS, VERSION_PAIRS, relevanceQuestions, versionCandidates, dateIn, dateMatches, fillChecks, fitQuestions, questionName, versionOf, materialGroups, buildGuide, chooseParts, createSkeletonJudge, decidePlace, enumerateSkeleton, fillRequest, layoutSkeleton, normalizeMaterials, normalizeSkeletonDto, orderItems, recordedBefore, runSkeletonFlow, skeletonChecks, validateFill } from './egdesk-briefing-skeleton.mjs'
 import { BRIEFING_ENGINE_LIMITS, briefingDeps, createBriefingEngine, fillPrompt } from './egdesk-briefing-engine.mjs'
 import { completeBriefingArgs, continuedBriefingOutput } from './egdesk-briefing-flow.mjs'
+import { openBriefingBindings } from './egdesk-briefing-bindings.mjs'
+import { mkdtempSync, rmSync } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { createEgressGate, EGRESS_SITES, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { harness, toolJson } from './egdesk-briefing-publish.support.mjs'
 import { rig } from '../scripts/egdesk-briefing-rig.support.mjs'
@@ -382,7 +386,7 @@ test('egress: one shared gate; no run -> nothing asked; no memory class -> no ma
 // ================= 7. mounted: the production handler, the real runtime, the answer's own model on a private fork =================
 const thread = { id: 'thread-1', title: 'Room', engineId: 'codex', profileEnabled: true, agentProfileId: 'prof-agent-1' }
 const ANSWER = 'A사 견적은 v1에서 v2 안으로 조정되었고, 11월 14일에 v2로 진행하기로 결정했습니다. 남은 일은 법무 검토, 대표 승인, 최종본 발송입니다.'
-async function mounted(t, { materials = QUOTE, script = ORDER, forkReply, order = undefined, enabled = true } = {}) {
+async function mounted(t, { materials = QUOTE, script = ORDER, forkReply, order = undefined, enabled = true, bindings = undefined } = {}) {
   const h = await harness(t, { forkReply })
   const publish = async (title, markdown, outputKey, id) => toolJson(await h.tool('egdesk_publish_output', { title, markdown, outputKey }, id)).output
   const v1 = await publish('A사 견적서 v1', '# A사 견적서 v1\n총액 1,200만원, 납기 6주', 'a-quote-v1', 'o1')
@@ -396,9 +400,11 @@ async function mounted(t, { materials = QUOTE, script = ORDER, forkReply, order 
   // materialsFor models lane L7's accessor (chat.memoryMaterialsFor, not merged): the rows the answering model was given this turn.
   let current = materials
   const deps = { ...briefingDeps({ chat: h.chat, contexts: h.contexts, enabled, ...(order ? { order } : {}) }), materialsFor: () => current }
-  const R = rig(t, { mode: 'on', handlerOptions: { briefing: deps, fetchImpl: provider } })
+  const R = rig(t, { mode: 'on', handlerOptions: { briefing: deps, fetchImpl: provider, ...(bindings ? { briefingBindings: bindings } : {}) } })
+  // cycle 23: the same bridge started again (a fresh handler) over the same dependencies and the given bindings store
+  const remount = next => rig(t, { mode: 'on', handlerOptions: { briefing: deps, fetchImpl: provider, ...(next ? { briefingBindings: next } : {}) } })
   const body = BriefingHost.observeRequest({ mode: 'on', report: ANSWER, answerId: h.ids.answerId, conversationId: h.ids.conversationId, runId: h.ids.runId, candidates: BriefingHost.canvasBriefingCandidates(cards), request: REQUEST, viewport: VIEW })
-  return { h, R, body, decisions, v1, count: event => h.events.filter(e => e.event === event).length, setMaterials: next => { current = next } }
+  return { h, R, body, decisions, v1, count: event => h.events.filter(e => e.event === event).length, setMaterials: next => { current = next }, remount }
 }
 const fence = value => '```json\n' + JSON.stringify(value) + '\n```'
 const guideIds = prompt => JSON.parse(/Design guide \(decided; do not change it\):\n(.*)\n\nMaterials:/s.exec(prompt)[1]).items.map(i => i.id)
@@ -915,4 +921,65 @@ test('mounted, the second briefing of the same matter: the v2 figures changed ->
   const shownCard = cards[made.findIndex(m => m.outputKey === v2.outputKey)]
   const marked = ChatState.supersedeResultRecord(shownCard.record, v2, { now: 10 })
   assert.equal(marked.provenance.supersededBy.outputId, v2.id); assert.equal(BriefingHost.canvasBriefingCandidates([{ ...shownCard, record: marked }])[0].superseded, true)
+})
+
+// ================= 16. cycle 23: the version chain survives a bridge restart =================
+test('mounted, across a bridge RESTART: the bindings are persisted; the second briefing (on a fresh handler over the reopened store) continues each part\'s output and offers the old cards for folding; without the store it cannot', async t => {
+  const dir = path.join(mkdtempSync(path.join(os.tmpdir(), 'egd-c23-')), 'briefing'); t.after(() => rmSync(path.dirname(dir), { recursive: true, force: true }))
+  const run = async persisted => {
+    const s = await mounted(t, { forkReply: prompt => autoFill(prompt), bindings: persisted ? openBriefingBindings({ dataDir: dir, log: () => {} }) : undefined })
+    const first = await s.R.http('POST', '/decision/briefing-observe', s.body); assert.deepEqual([first.body.outcome, first.body.newComponents], ['presented', 3])
+    const made = s.h.events.filter(e => e.event === 'output.published').slice(-3).map(e => e.details.output)
+    const R2 = s.remount(persisted ? openBriefingBindings({ dataDir: dir, log: () => {} }) : undefined) // the bridge process started again
+    const next = await s.h.chat.send({ message: 'A사 견적 건 다시 정리해줘', requestId: 'req-2', clientThreadId: 'ui', conversationId: s.h.ids.conversationId, cwd: s.h.cwd, contextCapabilities: { read: true, reader: true, publishBriefing: true } })
+    const timing = { threadId: next.conversationId, turnId: next.runId }, notify = (method, params) => s.h.chat.handleNotification({ method, params })
+    await notify('item/completed', { ...timing, item: { id: 'ans2', type: 'agentMessage', phase: 'final_answer', text: ANSWER } }); await notify('turn/completed', { threadId: timing.threadId, turn: { id: timing.turnId, status: 'completed', items: [] } })
+    for (let i = 0; i < 8; i++) await new Promise(res => setTimeout(res, 2))
+    const message = { id: 'm1', conversationId: s.h.ids.conversationId, runId: s.h.ids.runId, answerId: s.h.ids.answerId, createdAt: 1 }
+    const cards = made.map((meta, i) => ({ id: `res-new-${i + 1}`, kind: 'result', rect: r(700 + 600 * i, 120, 560, 560), record: ChatState.publishedOutputCardRecord({ ...thread, conversationId: s.h.ids.conversationId }, message, meta, `# ${meta.title}\n본문`, { now: 3 }) }))
+    s.setMaterials([QUOTE[0], { ...QUOTE[1], time: { ...QUOTE[1].time, at: '2026-11-11' }, excerpt: '총액 1,000만원으로 재조정. 납기 8주. 유지보수 6개월.' }, QUOTE[2], QUOTE[3]])
+    const before = s.h.events.filter(e => e.event === 'output.published').length
+    const body = BriefingHost.observeRequest({ mode: 'on', report: ANSWER, answerId: next.answerId, conversationId: next.conversationId, runId: next.runId, candidates: BriefingHost.canvasBriefingCandidates(cards), request: 'A사 견적 건 다시 정리해줘', viewport: VIEW })
+    const res = await R2.http('POST', '/decision/briefing-observe', body)
+    assert.equal(res.body.outcome, 'presented', JSON.stringify(res.body))
+    return { made, again: s.h.events.filter(e => e.event === 'output.published').slice(before).map(e => e.details.output), retrievals: res.body.retrievals }
+  }
+  const kept = await run(true)
+  for (const o of kept.again) { const prior = kept.made.find(m => m.outputKey === o.outputKey); assert.ok(prior, 'continued after the restart'); assert.deepEqual([o.version, o.previousId], [prior.version + 1, prior.id]) }
+  assert.deepEqual(kept.retrievals.map(x => x.viewId).sort(), kept.again.map(o => `res-new-${kept.made.findIndex(m => m.outputKey === o.outputKey) + 1}`).sort())
+  // the same journey with the in-memory Map of before (lost at the restart): new outputs, no chain, nothing to recall
+  const lost = await run(false)
+  assert.ok(lost.again.every(o => o.version === 1 && !lost.made.some(m => m.outputKey === o.outputKey))); assert.deepEqual(lost.retrievals, [])
+})
+
+test('mounted: a remembered binding whose output is gone from the store (nothing to continue) -> a first version under that key, and the stale binding is dropped', async t => {
+  const dir = path.join(mkdtempSync(path.join(os.tmpdir(), 'egd-c23-')), 'briefing'); t.after(() => rmSync(path.dirname(dir), { recursive: true, force: true }))
+  const store = openBriefingBindings({ dataDir: dir, log: () => {} })
+  const s = await mounted(t, { forkReply: prompt => autoFill(prompt), bindings: store })
+  const keys = normalizeMaterials(QUOTE).map(m => m.key), ghost = '99999999-9999-4999-8999-999999999999'
+  store.set(ghost, { keys: [keys[0], keys[1]], trait: 'compare', component: 'result_compare', outputKey: 'briefing-ghost00001', conversationId: s.h.ids.conversationId, version: 3 })
+  const res = await s.R.http('POST', '/decision/briefing-observe', s.body); assert.equal(res.body.outcome, 'presented', JSON.stringify(res.body))
+  const compare = s.h.events.filter(e => e.event === 'output.published').map(e => e.details.output).find(o => o.outputKey === 'briefing-ghost00001')
+  assert.ok(compare, 'the compare took the remembered key'); assert.deepEqual([compare.version, compare.previousId], [1, null])
+  assert.equal(store.has(ghost), false, 'the binding of the vanished output is gone'); assert.equal(openBriefingBindings({ dataDir: dir, log: () => {} }).has(ghost), false)
+  assert.equal(store.get(compare.id)?.outputKey, 'briefing-ghost00001', 'the new output is remembered instead')
+  assert.deepEqual(res.body.retrievals.filter(x => x.viewId.startsWith('res-new')), [], 'nothing to recall')
+})
+
+// ================= 17. cycle 23: after a failed fill — a partial board, held to the coverage rule =================
+test('a part whose fill fails twice is left out and the parts that passed are still proposed, but only while every fact the answer states is still shown; s3-like: nothing passed -> the chat answer (nothing-left)', async () => {
+  const P3_FAILS = q => (q.name === 'step_P3' ? .05 : undefined) // the open-items explanation is never supported, also after its one rewrite
+  const again = (want, n) => (n === 1 ? fillReply(want.guide.items.map(i => i.id)) : { items: { P3: FILL.P3 } })
+  // the answer states nothing that only the open-items part shows: the board of the parts that passed is proposed
+  const partial = await run(P3_FAILS, { answer: 'A사 견적은 v1에서 v2 안으로 조정되었고, 11월 14일에 v2로 진행하기로 결정했습니다.', fill: again })
+  assert.equal(partial.out.status, 'presented', JSON.stringify(partial.out)); assert.deepEqual(partial.out.guide.items.map(i => i.id), ['P1', 'P2'])
+  assert.deepEqual(partial.out.rejections.map(x => [x.part, x.action, x.words.join()]), [['P3', 'rewrite', 'P3 explanation'], ['P3', 'drop', 'P3 explanation']])
+  assert.deepEqual(partial.out.dropped, [{ part: 'P3', why: 'unsupported', words: ['P3 explanation'] }]); assert.deepEqual(partial.out.stages, ['place', 'fit', 'order', 'fill_check', 'coverage'])
+  assert.deepEqual(partial.out.coverage.missing, [])
+  // the answer states the remaining work, which only the dropped part showed: the coverage check finds it missing; a dropped part is not put back -> the chat answer
+  const missing = await run(q => (q.name === 'onboard_F3' ? .05 : P3_FAILS(q)), { answer: ANSWER, fill: again })
+  assert.deepEqual([missing.out.status, missing.out.reason, missing.out.coverage.missing, missing.out.coverage.redesign], ['fallback-chat', 'not-covered', ['F3'], null])
+  // every part fails (the real all-on s3 run): nothing is left to show
+  const none = await run(q => (/^(?:step|slot)_/.test(q.name) ? .05 : undefined), { answer: ANSWER, fill: (want, n) => (n === 1 ? fillReply(want.guide.items.map(i => i.id)) : fillReply(want.guide.items.map(i => i.id).filter(id => (want.only ?? []).includes(id) || !want.only))) })
+  assert.deepEqual([none.out.status, none.out.reason], ['fallback-chat', 'nothing-left'])
 })
