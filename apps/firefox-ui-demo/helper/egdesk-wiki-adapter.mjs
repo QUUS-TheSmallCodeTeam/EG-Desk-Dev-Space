@@ -45,7 +45,8 @@ export async function pagesFromCandidates(candidates, { max = MAX.candidates, sk
     if (!body.trim()) continue
     const mayRead = typeof c.mayRead === 'function' ? c.mayRead : null
     out.push({ id: safeId(c.id), title: String(c.title ?? c.id), body, revision: sha12(`${c.title}\u0000${body}`),
-      time: { slice: TIME_SLICES.includes(c.timeSlice) ? c.timeSlice : 'unknown' }, provenance: { kind: 'document' }, status: statusOfCandidate(c.status), scope: candidateScope(c, dmScope),
+      // time.at: the date the record itself gives (candidatesFromOntologyGraph passes it only when recorded); the status as the record gives it.
+      time: { slice: TIME_SLICES.includes(c.timeSlice) ? c.timeSlice : 'unknown', ...(typeof c.at === 'string' && !Number.isNaN(Date.parse(c.at)) ? { at: c.at } : {}) }, provenance: { kind: 'document' }, status: statusOfCandidate(c.status), scope: candidateScope(c, dmScope),
       ...(typeof c.sourceRef === 'string' && c.sourceRef ? { ref: c.sourceRef } : {}), ...(mayRead ? { mayRead } : {}),
       links: (Array.isArray(c.links) ? c.links : []).map(l => ({ type: l.type, to: safeId(l.to) })) })
   }

@@ -265,3 +265,17 @@ test('a withdrawn reading: stored as "rejected", it removes the pending reading 
   assert.equal(writer().promote(id, { scope: adapter.scopeFor({ clientThreadId: 'thread-1' }), confirmation: { by: 'user', at: '2026-11-24T08:00:00.000Z' }, operationId: 'p1' }).status, 'status_updated')
   assert.equal((await snap()).pages.get(id).status, 'superseded')
 })
+
+test('ontology nodes keep the date and status they record (and only those): at -> time.at, a node\'s own status when it is outside any snapshot', async () => {
+  const graph = { snapshots: [], edges: [], nodes: [
+    { id: 'a', label: 'A사 견적서 v1 발송', body: 'v1 발송', timeSlice: 'past', at: '2026-11-06', status: 'done' },
+    { id: 'b', label: 'A사 견적서 v2 수정 계획', body: 'v2 예정', timeSlice: 'future', status: 'plan' },
+    { id: 'c', label: '날짜 없는 메모', body: '11월 6일에 무언가', timeSlice: 'past', at: '11월 6일' },
+    { id: 'd', label: '스냅숏 노드', body: 'x', timeSlice: 'present', snapshotStatus: 'observed', status: 'plan' }] }
+  const pages = await pagesFromOntologyGraph(graph)
+  const by = id => pages.find(p => p.id === `ontology:${id}`)
+  assert.deepEqual([by('a').time, by('a').status], [{ slice: 'past', at: '2026-11-06' }, 'done'])
+  assert.deepEqual([by('b').time, by('b').status], [{ slice: 'planned' }, 'plan'])
+  assert.deepEqual(by('c').time, { slice: 'past' }, 'a date that is not a recorded ISO date is not taken, and none is read from the text')
+  assert.equal(by('d').status, 'done', 'a snapshot\'s status comes first')
+})

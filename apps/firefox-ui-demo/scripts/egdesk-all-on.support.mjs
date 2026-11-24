@@ -46,7 +46,8 @@ export const PORTAL = 'https://portal.example.test'
 const SLICE = { past: 'past', present: 'present', planned: 'future', hypothetical: 'hypothetical' }
 const GRAPH_PAGES = SYNTHETIC_PAGES.filter(p => /^(quote\/a-|db\/pg-|db\/sqlite)/.test(p.id) && !p.scope)
 export const GRAPH = { snapshots: [],
-  nodes: GRAPH_PAGES.map(p => ({ id: p.id, label: p.title, body: p.body, timeSlice: SLICE[p.time.slice] ?? 'present' })),
+  // the date and status each synthetic page records travel with its node, as an ontology node records them (at, status; L7 c17)
+  nodes: GRAPH_PAGES.map(p => ({ id: p.id, label: p.title, body: p.body, timeSlice: SLICE[p.time.slice] ?? 'present', ...(p.time.at ? { at: p.time.at } : {}), ...(typeof p.status === 'string' ? { status: p.status } : {}) })),
   edges: GRAPH_PAGES.flatMap(p => (p.links || []).filter(l => GRAPH_PAGES.some(q => q.id === l.to)).map(l => ({ source: p.id, target: l.to, relation: l.type }))) }
 
 // ---- the browser card double (the portal of the browser-task journeys) ----
