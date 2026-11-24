@@ -16,7 +16,7 @@ import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 // - Recording never throws and never changes what a feature does.
 
 export const CALIBRATION_FILE = 'egdesk-decision-calibration.json'
-// Version 2 adds optional fields only (confidence, options, margin, noPick, outcome.next/keptN/removedN, feature board_reply, fallback timeout_unsent).
+// Version 2 adds optional fields only (draft_check outcome.posted, confidence, options, margin, noPick, outcome.next/keptN/removedN, feature board_reply, fallback timeout_unsent).
 // Version 1 files still load. A file from a newer version is left untouched and nothing is written over it.
 export const CALIBRATION_VERSION = 2
 const OLDEST_READABLE = 1
@@ -145,6 +145,9 @@ export const NEXT_LABELS = Object.freeze({
   board_arrangement: Object.freeze(['applied', 'undone', 'rejected', 'kept_own', 'timed_out']),
 })
 const MAX_SMALL = 99
+// What the person was actually shown for one checked answer (draft_check, label arrives when the answer is settled): the Agent's text as written, the one revised text,
+// the unflagged part only, or nothing (every sentence removed). A word, never text. Additive: files without it load as before.
+export const POSTED_LABELS = Object.freeze(['as_written', 'revised', 'certain_part', 'withheld'])
 
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 // Rounding must not move a number across the bar that was applied to it (0.7999999999999999 against 0.8 must stay below).
@@ -240,6 +243,7 @@ function normalizeOutcome(raw, feature = null) {
   put(out, 'run', word(RUN, raw.run)); put(out, 'toolActivities', count(raw.toolActivities, 1000))
   const next = typeof raw.next === 'string' && NEXT_LABELS[feature]?.includes(raw.next) ? raw.next : null
   put(out, 'next', next)
+  if (feature === 'draft_check') put(out, 'posted', typeof raw.posted === 'string' && POSTED_LABELS.includes(raw.posted) ? raw.posted : null)
   // Board reply screening: how many of the Agent's excerpts the owner kept or removed. Small integers only.
   if (feature === 'board_reply') { put(out, 'keptN', count(raw.keptN, MAX_SMALL)); put(out, 'removedN', count(raw.removedN, MAX_SMALL)) }
   return Object.keys(out).length ? out : null

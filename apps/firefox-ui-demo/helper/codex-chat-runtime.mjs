@@ -908,6 +908,7 @@ export class CodexChatRuntime {
     this.stoppedCommands = new Map() // clientThreadId -> the fact of the command the person stopped (consumed by the next turn)
     this.postedInstead = new Map() // clientThreadId -> { outcome, posted }: the answer the person saw instead of the Agent's draft (consumed by the next turn)
     this.draftOutcomes = new WeakMap() // run -> the draft check's outcome for its answer
+    this.draftRecords = new WeakMap() // run -> the calibration handle of the draft check's entry, labelled with what was posted when the answer is settled
     this.draftCheckTurns = new WeakMap() // run -> what the model had this turn, for the check after the answer is posted
     this.draftCheckSeen = new WeakMap() // run -> final-answer item ids already handed to the check
     this.turnMemoryRuns = new Set() // in-flight advisory memory jobs (never awaited by a turn)
@@ -6421,7 +6422,7 @@ export class CodexChatRuntime {
     this.pauseConversationFlow(run) // the final answer is being prepared: nothing else is posted, the counter rests
     const items = [...guard.items.values()]
     const setup = this.decisionContext
-    const texts = items.map(item => item.text)
+    const texts = items.map(item => item.text), originalTexts = [...texts]
     try {
       if (status === 'completed' && items.length === 1 && items[0].text.trim()) {
         const generation = typeof setup?.settingsGeneration === 'function' ? setup.settingsGeneration() : null
@@ -6443,8 +6444,18 @@ export class CodexChatRuntime {
     // withheld (c19): an answer the check emptied is not posted at all (no fixed sentence stands in for it).
     const withheld = items.length === 1 && !String(texts[0]).trim() && String(items[0].text).trim() !== ''
     items.forEach((item, i) => { item.text = texts[i] })
+    // What the person is shown for this checked answer, as a word in the calibration record (the log keeps no text): written by the Agent, revised, only the certain part, or nothing.
+    if (items.length === 1) this.labelPosted(run, withheld ? 'withheld' : texts[0] === originalTexts[0] ? 'as_written' : this.draftOutcomes.get(run) === 'certain_part' ? 'certain_part' : 'revised')
     if (withheld) return
     for (const item of items) await this.applyItem(run, item, true, true, true)
+  }
+
+  // The calibration entry of this run's draft check gets the word for what was posted. Never throws, never changes what is posted; no entry (no check ran) is no label.
+  labelPosted(run, posted) {
+    try {
+      const handle = this.draftRecords.get(run)
+      if (handle) this.decisionContext?.calibrationLog?.complete?.(handle, { posted })
+    } catch { /* recording only */ }
   }
 
   // Returns the text to post (the original when nothing changed or anything failed).
@@ -6470,10 +6481,11 @@ export class CodexChatRuntime {
       const totalMs = performance.now() - t0
       const log = setup.calibrationLog
       try {
-        log?.record?.(result ? { ...result.calibration, mode: 'on', ...(result.verdict ? { check: result.verdict.check, ifUnrevised: result.verdict.ifUnrevised } : {}),
+        const handle = log?.record?.(result ? { ...result.calibration, mode: 'on', ...(result.verdict ? { check: result.verdict.check, ifUnrevised: result.verdict.ifUnrevised } : {}),
           evidence: result.stats ? { items: result.stats.items, opaque: result.stats.opaque, sentences: result.stats.sentences, terms: result.stats.terms } : undefined,
           timing: { totalMs, calls: result.calls, withinBudget: totalMs <= DRAFT_CHECK_LIMITS.firstCheckMs } }
           : { feature: 'draft_check', mode: 'on', attached: false, judgments: [], fallback: 'timeout', timing: { totalMs, calls: null } })
+        if (handle) this.draftRecords.set(run, handle)
       } catch { /* recording never affects posting */ }
       if (result?.outcome) this.draftOutcomes.set(run, result.outcome)
       // L1 c16: which part of what will be posted the answering model wrote (the check's own copy excluded), for readers of the answer's meaning
@@ -6977,7 +6989,7 @@ export class CodexChatRuntime {
     const limit = Number.isSafeInteger(dc.deadlineMs) && dc.deadlineMs > 0 ? dc.deadlineMs : 15000
     const timer = setTimeout(() => controller.abort(), limit)
     timer.unref?.()
-    const record = fields => { try { log?.record?.({ feature: 'draft_check', mode: 'advisory', attached: false, judgments: [], ...fields }) } catch { /* ignore */ } }
+    const record = fields => { try { const handle = log?.record?.({ feature: 'draft_check', mode: 'advisory', attached: false, judgments: [], ...fields }); if (handle) log?.complete?.(handle, { posted: 'as_written' }) } catch { /* ignore */ } }
     try {
       if (turn.skip) { record({ fallback: 'evidence_unavailable' }); return }
       let vocabulary = []

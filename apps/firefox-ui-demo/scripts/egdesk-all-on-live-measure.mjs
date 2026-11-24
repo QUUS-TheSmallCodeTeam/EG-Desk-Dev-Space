@@ -564,7 +564,7 @@ function seenAfter(w, id, before, j) {
     browser: { note: note ? { status: note.status, next: note.next, code: note.code ?? null, candidates: note.candidates ?? [], stepsDone: note.stepsDone ?? null } : null,
       acts: w.acts.slice(before.acts).map(a => ({ type: a.type, url: a.url })) },
     writes: readWrites(w),
-    calibration: w.calibrationLog.entries().slice(before.calibration).map(e => ({ feature: e.feature, mode: e.mode, ...(e.flow !== undefined ? { flow: e.flow } : {}), ...(e.fallback ? { fallback: e.fallback } : {}), ...(typeof e.check === 'string' ? { check: e.check } : {}), ...(typeof e.ifUnrevised === 'string' ? { ifUnrevised: e.ifUnrevised } : {}), ...(typeof e.attached === 'boolean' ? { attached: e.attached } : {}), ...(e.evidence && typeof e.evidence === 'object' ? { evidence: e.evidence } : {}),
+    calibration: w.calibrationLog.entries().slice(before.calibration).map(e => ({ feature: e.feature, mode: e.mode, ...(e.flow !== undefined ? { flow: e.flow } : {}), ...(e.fallback ? { fallback: e.fallback } : {}), ...(typeof e.check === 'string' ? { check: e.check } : {}), ...(typeof e.ifUnrevised === 'string' ? { ifUnrevised: e.ifUnrevised } : {}), ...(typeof e.attached === 'boolean' ? { attached: e.attached } : {}), ...(e.evidence && typeof e.evidence === 'object' ? { evidence: e.evidence } : {}), ...(typeof e.outcome?.posted === 'string' ? { posted: e.outcome.posted } : {}),
       // (cycle 13) the entry's judgments by their logged word and probability, so values such as the memory triage are measured per step
       judgments: (Array.isArray(e.judgments) ? e.judgments : []).filter(x => typeof x?.q === 'string' && Number.isFinite(x.p)).map(x => ({ q: x.q, p: x.p })) })),
   }
