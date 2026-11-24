@@ -137,7 +137,9 @@ test('J1 happy path: both values fill only on the form, 다음 navigates once af
   assert.equal(j.totals.submits, 0); assert.equal(j.totals.clicks, 0); assert.equal(j.totals.images, 0)
   assert.equal(j.cur().url, `${O}/review`)
   assert.ok(j.log.filter(a => a.on.endsWith('/review')).length === 0, 'nothing is acted on the review page')
-  assert.equal(j.results[0].outcome, 'escalated'); assert.equal(j.results[0].reason, 'blocked')
+  // c26: the review page offers nothing that moves forward and holds a withheld submit button: the loop stops as the person's step (the task note already
+  // called this human_step); nothing is acted on there (asserted above)
+  assert.equal(j.results[0].outcome, 'escalated'); assert.equal(j.results[0].reason, 'human_step')
 })
 test('J2 popup/modal page_state mid-way: 0 actions that step, escalated with a public reason, no request reaches another card', async t => {
   const j = await journey(t, { policy: ctx => ctx.step === 3 ? { next: ['[L1]', 0.97], pageState: 'modal_blocking' } : filledOnForm(ctx), popupAtStep: 3, maxSteps: 8 })

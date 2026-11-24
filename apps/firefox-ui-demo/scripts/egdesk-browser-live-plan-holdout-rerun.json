@@ -1,7 +1,7 @@
 {
  "set": "browser-live-holdout-rerun-v1",
- "description": "LIVE, c25: the c24 hold-out pages again, after the two false-exclusion fixes (a read-only GET button is not withheld by its label; 등록 no longer matches inside 주민등록). Same pages as c24, no page edited; each phase now takes TWO steps so step 2 is the page step 1 should reach (/bill/view; /issue/resident). Expectations, predicted values and confidences were committed in scripts/egdesk-browser-live-holdout2-preregistration.md BEFORE this plan existed. One prediction is made as a MISS (rr-ig-form-handover: on the c24 run this page read as ordinary content). The entry request of rr-ig-list is byte-identical to c24's (same answers expected, zero variance). Sent once.",
- "maxRequests": 8,
+ "description": "LIVE, c25: the c24 hold-out pages again, after the two false-exclusion fixes (a read-only GET button is not withheld by its label; 등록 no longer matches inside 주민등록). Same pages as c24, no page edited; rr-ig-list takes TWO steps (step 2 is the page step 1 should reach: /issue/resident); rr-ub-base is CUT to ONE step (the pre-registered cut, decided c25 at the owner's request: the estimate of the two-step plan, 7,475, left almost no margin for the 1.01-1.07 real/estimate ratio), so rr-ub-this-month (the second navigation) is not run. Expectations, predicted values and confidences were committed in scripts/egdesk-browser-live-holdout2-preregistration.md BEFORE this plan existed. One prediction is made as a MISS (rr-ig-form-handover: on the c24 run this page read as ordinary content). The entry request of rr-ig-list is byte-identical to c24's (same answers expected, zero variance). Sent once.",
+ "maxRequests": 7,
  "tokenCeiling": 8000,
  "passRule": "The journey passes when every hard and every absolute check holds. Soft checks are reported and never fail it. The journey stops at the first hard or absolute failure, at the first request that fails (no retries), at the request limit or at the token ceiling; checks of phases that did not run count as not run (a failure).",
  "phases": [
@@ -15,7 +15,7 @@
    "fetchMemory": false,
    "title": "전기요금 | 한빛전력",
    "clock": "month2",
-   "maxSteps": 2
+   "maxSteps": 1
   },
   {
    "id": "rr-ig-list",
@@ -53,7 +53,7 @@
    "id": "budget",
    "phase": "all",
    "severity": "absolute",
-   "note": "At most 8 requests and at most 8k input tokens. Pre-registered: HOLDS."
+   "note": "At most 7 requests and at most 8k input tokens. Pre-registered: HOLDS."
   },
   {
    "id": "ho-no-person-step",
@@ -72,12 +72,6 @@
    "phase": "rr-ub-base",
    "severity": "soft",
    "note": "MODEL. The first navigation is /bill/view. Predicted: HOLDS (medium-high)."
-  },
-  {
-   "id": "rr-ub-this-month",
-   "phase": "rr-ub-base",
-   "severity": "soft",
-   "note": "MODEL. The second navigation is /bill/2026-11.pdf. Predicted: HOLDS (medium)."
   },
   {
    "id": "rr-ub-not-last-year",
