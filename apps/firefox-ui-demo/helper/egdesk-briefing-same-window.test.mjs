@@ -1,9 +1,9 @@
 // L4 cycle 29: same-window cases from the person's own conversation - rules only, on SYNTHETIC turns (the real conversations stay outside the repository).
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { askKind, excluded, finalAnswer, oneFactControl, pickDiverse, sameWindowCase, turnPages } from './egdesk-briefing-same-window.mjs'
+import { askKind, copiedLine, excluded, factPlacement, finalAnswer, oneFactControl, pickDiverse, sameWindowCase, turnPages } from './egdesk-briefing-same-window.mjs'
 import { briefingRequestKind } from './egdesk-briefing-real-requests.mjs'
-import { answerFacts, answerUnits } from './egdesk-briefing-skeleton.mjs'
+import { amountIn, answerCited, answerFacts, answerUnits, factCites, lineTextMax, normalizeMaterials } from './egdesk-briefing-skeleton.mjs'
 import { expectationsFor } from '../scripts/egdesk-briefing-same-window.mjs'
 
 const T = (role, text, line, at = '2026-06-23T12:00:00Z') => ({ role, text, line, at })
@@ -42,12 +42,27 @@ test('the answer\'s own structure (cycle 29): one fact per bullet, numbered item
   assert.deepEqual(answerFacts(md).facts, ['hook 주입 · 10,000 char 고정 · ✗', 'Read 툴 · 2,000줄 · ✓', '주입 10K는 고정입니다.', 'Read는 줄 단위입니다.'])
   assert.deepEqual(answerUnits('줄 바꿈 없는 답입니다. 둘째 문장.'), ['줄 바꿈 없는 답입니다. 둘째 문장.'], 'plain text is split by sentences as before')
 })
-test('expectations are set by code from the materials: a board only when three or more facts cite two or more preceding turns; a cited fact must not be decided absent (notDecidedNo); the control is the bubble', () => {
-  const pages = [{ id: 'p1', title: '사람 06-23 12:00 한도', excerpt: '주입 한도는 10,000 char입니다.', time: { at: '2026-06-23' }, status: 'unknown', links: [] },
-    { id: 'p2', title: 'Agent 06-23 12:01 Read', excerpt: 'Read는 2,000줄까지 읽습니다.', time: { at: '2026-06-23' }, status: 'unknown', links: [] }]
-  const e = expectationsFor({ pages, answer: { text: '주입은 10,000 char 고정입니다. Read는 2,000줄입니다. 줄이 길면 잘립니다. 결론은 v9 기준입니다.' } })
+test('expectations by code from the materials (cycle 30, after the c29 real run): hard only for a VERBATIM carry in the line the fill copies; soft "not shown" only when nothing of the fact is in the turns; a paraphrase or a partial carry is asked and recorded, not registered', () => {
+  const pages = [{ id: 'p1', title: '사람 06-23 12:00 한도', excerpt: '주입 한도는 10,000 char 고정입니다. ' + '가'.repeat(120) + ' Read는 2,000줄까지 읽습니다.', time: { at: '2026-06-23' }, status: 'unknown', links: [] },
+    { id: 'p2', title: 'Agent 06-23 12:01 Read', excerpt: '밤새 한 일은 화면에 빠진 UI 25개 묶음을 채운 것입니다.', time: { at: '2026-06-23' }, status: 'unknown', links: [] }]
+  const answer = '주입 한도는 10,000 char 고정입니다. Read는 2,000줄까지 읽습니다. 결론은 v9 기준입니다. 화면의 UI 25개 묶음을 채우고 고친 것입니다.'
+  const e = expectationsFor({ pages, answer: { text: answer } })
   assert.deepEqual(e.place, [{ match: 'combines', severity: 'hard', yes: true, note: '4 facts, citing 2 preceding turns by code' }])
-  assert.deepEqual(e.coverage.map(x => [x.match, x.severity, x.notDecidedNo ?? null, x.yes ?? null]), [['onboard_F1', 'hard', true, null], ['onboard_F2', 'hard', true, null], ['onboard_F3', 'soft', true, null], ['onboard_F4', 'soft', null, false]])
+  // F1: every token is within the first 90 characters of p1 -> hard. F2: "Read는 2,000줄" is in p1's excerpt but BEYOND the line (the c29 compare F1/F2 case) -> not registered.
+  // F3: nothing of it in the turns -> soft no. F4: a paraphrase of p2 (the c29 summary F1 case, judged .97 though few tokens match) -> not registered.
+  assert.deepEqual(e.coverage.map(x => [x.match, x.severity, x.notDecidedNo ?? null, x.yes ?? null]), [['onboard_F1', 'hard', true, null], ['onboard_F3', 'soft', null, false]])
   assert.equal(expectationsFor({ pages, answer: { text: '주입은 10,000 char 고정입니다.' } }).place[0].severity, 'soft', 'one fact: not pre-registered as a board')
   assert.deepEqual(expectationsFor({}, { control: true }).place, [{ match: 'combines', severity: 'hard', yes: false, note: 'a real one-fact answer: the bubble at the product rule (combines not yes)' }])
+})
+test('factPlacement: a fact is IN THE LINE only when the first lineTextMax characters of a turn carry all of its distinctive tokens; in the excerpt is not enough', () => {
+  assert.equal(lineTextMax(), 90)
+  const page = { id: 'p', excerpt: `네, 주입 한도는 10,000 char 고정입니다. ${'가'.repeat(100)} 그리고 Read는 2,000줄입니다.` }
+  const near = factPlacement('주입 한도 10,000 char 고정', [page]), far = factPlacement('Read는 2,000줄입니다', [page]), none = factPlacement('Bash(jq) 출력은 26K', [page])
+  assert.deepEqual([near.inLine, far.inLine, far.inExcerpt, none.found > 0, copiedLine(page).length], [['p'], [], ['p'], false, 90])
+})
+test('amounts match as whole numbers (cycle 30): a lone "9" no longer cites every text containing the digit 9; a number inside another number or a date is not a match', async () => {
+  assert.equal(amountIn('커밋 161개, 93개 파일, 2026-11-19', '9'), false); assert.equal(amountIn('9개 파일', '9'), true); assert.equal(amountIn('총액 12,800원', '2,800'), false)
+  assert.equal(amountIn('총액 2,800원', '2,800'), true); assert.equal(amountIn('1,200만원', '1,200'), true); assert.equal(amountIn('12,0000', '12,000'), false)
+  const mats = normalizeMaterials([{ alias: 'M1', title: '작업 보고 11-19', excerpt: '커밋 161개, 화면 코드 93개 파일', time: { at: '2026-11-19' }, status: 'done' }, { alias: 'M2', title: '테스트 수리', excerpt: '테스트 9개 파일을 고쳤다.', time: { at: '2026-11-20' }, status: 'done' }])
+  assert.deepEqual(factCites('원래 깨져 있던 테스트 9개 파일을 고쳐 통과시켰습니다.', mats), ['M2'], 'only the material that states 9개'); assert.deepEqual(answerCited('9개 파일을 고쳤습니다.', mats), ['M2'])
 })

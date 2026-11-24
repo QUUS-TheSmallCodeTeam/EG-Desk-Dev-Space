@@ -6347,10 +6347,11 @@ export class CodexChatRuntime {
   canInternalTurn(run) {
     try { const engine = this.engineOf(run.conversationId); return engine?.capabilities?.(this.threadOperationSlot(run.conversationId))?.has('threadFork') === true } catch { return false }
   }
-  async internalText(run, text, { timeoutMs = 20_000, signal = null } = {}) {
+  async internalText(run, text, { timeoutMs = 20_000, signal = null, outputSchema = null } = {}) {
     try {
       if (!this.canInternalTurn(run)) return null
-      const out = await this.internalTurns.run({ engine: this.engineOf(run.conversationId), slot: this.threadOperationSlot(run.conversationId), parentThreadId: run.conversationId, signal, timeoutMs, text })
+      // outputSchema (cycle 30, briefing flag): the turn's final message is constrained by it; absent, the turn is exactly what it was.
+      const out = await this.internalTurns.run({ engine: this.engineOf(run.conversationId), slot: this.threadOperationSlot(run.conversationId), parentThreadId: run.conversationId, signal, timeoutMs, text, ...(outputSchema ? { outputSchema } : {}) })
       return out.text || null
     } catch { return null }
   }

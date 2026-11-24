@@ -35,7 +35,7 @@ export async function harness(t, { forkReply = null, forkOk = true, decisionCont
   let nativeSeq = 0, forks = 0, turns = 0
   const store = new ImmutableContextStore({ dataDir: path.join(dir, 'state'), allowedRoots: [cwd] })
   const contexts = new ContextRuntime({ store, getOwnerKey: () => 'email:a@example.com' })
-  const replies = [], events = [], native = [], forkPrompts = []
+  const replies = [], events = [], native = [], forkPrompts = [], forkParams = []
   let chat
   const notify = (method, params) => chat.handleNotification({ method, params })
   chat = new CodexChatRuntime({ contexts, respond: (id, result, error) => replies.push({ id, result, error }), emit: e => events.push(e), ...(decisionContext ? { decisionContext } : {}),
@@ -47,7 +47,7 @@ export async function harness(t, { forkReply = null, forkOk = true, decisionCont
       if (method === 'thread/fork') { if (!forkOk) throw Object.assign(new Error('no fork'), { code: -32601 }); return { thread: { id: `fork-${++forks}`, forkedFromId: params.threadId } } }
       if (method === 'turn/start' && String(params.threadId).startsWith('fork-')) {
         const prompt = params.input[0].text, index = forkPrompts.length
-        forkPrompts.push(prompt)
+        forkPrompts.push(prompt); forkParams.push(params)
         assert.equal(typeof forkReply, 'function', 'a private fork turn was started but none was expected')
         const text = forkReply(prompt, index), turnId = `fturn-${index + 1}`
         setTimeout(async () => {
@@ -74,7 +74,7 @@ export async function harness(t, { forkReply = null, forkOk = true, decisionCont
     await notify('turn/completed', { threadId: timing.threadId, turn: { id: timing.turnId, status: 'completed', items: [] } })
     for (let i = 0; i < 8; i++) { await chat.draftCheckIdle?.(); await new Promise(res => setTimeout(res, 2)) }
   }
-  return { dir, cwd, store, contexts, chat, events, native, forkPrompts, run, tool, finish, ids: { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId } }
+  return { dir, cwd, store, contexts, chat, events, native, forkPrompts, forkParams, run, tool, finish, ids: { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId } }
 }
 
 const thread = { id: 'thread-1', title: 'Room', engineId: 'codex', profileEnabled: true, agentProfileId: 'prof-agent-1' }

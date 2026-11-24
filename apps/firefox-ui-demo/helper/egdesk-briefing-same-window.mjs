@@ -3,7 +3,7 @@
 // - the request: a real summary / compare / progress request (briefingRequestKind)
 // - the materials: the SAME conversation's message turns before it (the person's and the assistant's), as pages
 // - the answer: the REAL completed assistant answer that followed (the last assistant message before the person's next turn; D1: completed messages only)
-import { answerFacts } from './egdesk-briefing-skeleton.mjs'
+import { answerFacts, lineTextMax } from './egdesk-briefing-skeleton.mjs'
 import { maskSecrets } from './egdesk-secret-mask.mjs'
 import { briefingRequestKind } from './egdesk-briefing-real-requests.mjs'
 
@@ -75,4 +75,20 @@ export function oneFactControl(turns, { maxAnswer = SAME_WINDOW_LIMITS.controlAn
     return { line: turns[i].line, request: { text: squash(mask(turns[i].text)), line: turns[i].line, at: turns[i].at }, answer: { text, line: ans.line, at: ans.at } }
   }
   return null
+}
+
+// Cycle 30 (item 0, c29 coverage F1/F2 and F6 were pre-registered as shown, the board did not carry them): a fact is EXPECTED on the board only when what the
+// faithful fill copies from a cited turn carries all of its distinctive content. A list line holds lineTextMax characters (90) from the START of the turn's text;
+// "the turn contains the number somewhere in its 400-character excerpt" says the material has it, not that the card shows it.
+const norm = t => String(t).toLowerCase().replace(/[\s·*`|_~\-—:.,()]+/g, '')
+/** distinctive tokens of a fact: numbers with their unit, ids and Latin words of 3+ characters, Korean words of 3+ syllables */
+export const distinctiveTokens = fact => [...new Set([...String(fact).matchAll(/[A-Za-z][A-Za-z0-9_/.-]{2,}|\d[\d,.]*\s?[가-힣A-Za-z%]*|[가-힣]{3,}/g)].map(m => norm(m[0])).filter(x => x.length >= 3))]
+/** what the faithful fill copies from a page into one list line */
+export const copiedLine = (page, max = lineTextMax()) => cut(squash(page.excerpt ?? ''), max)
+/** -> { tokens, inLine: the cited pages whose copied line carries every token, inExcerpt: pages whose excerpt does, inTurn: tokens found in the excerpts at all } */
+export function factPlacement(fact, pages) {
+  const tokens = distinctiveTokens(fact)
+  const has = (text, ts) => ts.every(t => norm(text).includes(t))
+  return { tokens: tokens.length, inLine: pages.filter(p => tokens.length && has(copiedLine(p), tokens)).map(p => p.id), inExcerpt: pages.filter(p => tokens.length && has(p.excerpt ?? '', tokens)).map(p => p.id),
+    found: tokens.filter(t => pages.some(p => norm(p.excerpt ?? '').includes(t))).length }
 }

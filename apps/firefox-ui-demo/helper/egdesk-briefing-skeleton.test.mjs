@@ -16,6 +16,7 @@ import { SKELETON_JUDGE, SKELETON_LIMITS, VERSION_PAIRS, relevanceQuestions, ver
 import { BRIEFING_ENGINE_LIMITS, briefingDeps, createBriefingEngine, fillPrompt } from './egdesk-briefing-engine.mjs'
 import { completeBriefingArgs, continuedBriefingOutput } from './egdesk-briefing-flow.mjs'
 import { openBriefingBindings } from './egdesk-briefing-bindings.mjs'
+import { fillOutputSchema, violation } from './egdesk-briefing-output-schema.mjs'
 import { mkdtempSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -386,7 +387,7 @@ test('egress: one shared gate; no run -> nothing asked; no memory class -> no ma
 // ================= 7. mounted: the production handler, the real runtime, the answer's own model on a private fork =================
 const thread = { id: 'thread-1', title: 'Room', engineId: 'codex', profileEnabled: true, agentProfileId: 'prof-agent-1' }
 const ANSWER = 'A사 견적은 v1에서 v2 안으로 조정되었고, 11월 14일에 v2로 진행하기로 결정했습니다. 남은 일은 법무 검토, 대표 승인, 최종본 발송입니다.'
-async function mounted(t, { materials = QUOTE, script = ORDER, forkReply, order = undefined, enabled = true, bindings = undefined } = {}) {
+async function mounted(t, { materials = QUOTE, script = ORDER, forkReply, order = undefined, enabled = true, bindings = undefined, outputSchema = undefined } = {}) {
   const h = await harness(t, { forkReply })
   const publish = async (title, markdown, outputKey, id) => toolJson(await h.tool('egdesk_publish_output', { title, markdown, outputKey }, id)).output
   const v1 = await publish('A사 견적서 v1', '# A사 견적서 v1\n총액 1,200만원, 납기 6주', 'a-quote-v1', 'o1')
@@ -399,7 +400,7 @@ async function mounted(t, { materials = QUOTE, script = ORDER, forkReply, order 
   const provider = async (_url, init) => { const body = JSON.parse(init.body); decisions.push(body); return Response.json({ answers: answersFor(body.questions, script), usage: { input_tokens: 11 } }) }
   // materialsFor models lane L7's accessor (chat.memoryMaterialsFor, not merged): the rows the answering model was given this turn.
   let current = materials
-  const deps = { ...briefingDeps({ chat: h.chat, contexts: h.contexts, enabled, ...(order ? { order } : {}) }), materialsFor: () => current }
+  const deps = { ...briefingDeps({ chat: h.chat, contexts: h.contexts, enabled, ...(order ? { order } : {}), ...(outputSchema ? { outputSchema } : {}) }), materialsFor: () => current }
   const R = rig(t, { mode: 'on', handlerOptions: { briefing: deps, fetchImpl: provider, ...(bindings ? { briefingBindings: bindings } : {}) } })
   // cycle 23: the same bridge started again (a fresh handler) over the same dependencies and the given bindings store
   const remount = next => rig(t, { mode: 'on', handlerOptions: { briefing: deps, fetchImpl: provider, ...(next ? { briefingBindings: next } : {}) } })
@@ -1077,4 +1078,37 @@ test('the c25 case: tonight\'s merge line, judged only weakly about "today\'s pr
   const answer = '22:50 L7 c19가 병합되어 int/c14는 c680638이 되었습니다. 22:52 사용자가 고정 문장을 전부 빼기로 결정했습니다.'
   const out = await run(q => ({ about_M1: .21, about_M3: .05 })[q.name], { materials: LINES, candidates: [], answer, request: '오늘 Decision 루프 진행 상황 정리해줘' })
   assert.deepEqual([out.out.relevance.kept, out.out.relevance.dropped, out.out.relevance.cited], [['M1', 'M2'], ['M3'], ['M1']])
+})
+
+// ================= 21. cycle 30: the fill turn constrained by outputSchema (flag, default off); fake app-server, no Codex binary =================
+// A model that honours the schema: bare JSON, every listed slot present (null when it has nothing), title, "unfillable" present.
+const schemaFill = prompt => { const f = JSON.parse(autoFill(prompt).replace(/^```json\n|\n```$/g, '')); return JSON.stringify({ title: f.title ?? 'A사 견적 정리', unfillable: [], items: f.items }) }
+const guideOfPrompt = prompt => JSON.parse(/Design guide \(decided; do not change it\):\n(.*)\n\nMaterials:/s.exec(prompt)[1])
+test('outputSchema ON, valid: the fork turn is started with the schema built from the guide in its own prompt, and the board is presented', async t => {
+  const s = await mounted(t, { forkReply: schemaFill, outputSchema: 'on' })
+  const res = await s.R.http('POST', '/decision/briefing-observe', s.body)
+  assert.equal(res.body.outcome, 'presented', JSON.stringify(res.body)); assert.equal(s.h.forkParams.length, 1)
+  const params = s.h.forkParams[0], guide = guideOfPrompt(s.h.forkPrompts[0])
+  assert.deepEqual(Object.keys(params).sort(), ['clientUserMessageId', 'input', 'outputSchema', 'threadId']); assert.deepEqual(params.outputSchema, fillOutputSchema(guide))
+  assert.equal(violation(JSON.parse(schemaFill(s.h.forkPrompts[0])), params.outputSchema), null, 'the scripted model\'s own message fits the schema it was given')
+  assert.equal(s.count('briefing.published'), 1)
+})
+test('outputSchema ON, invalid / refused / failed: nothing is published, the chat answer stays (fill-invalid); each counted as its own failure', async t => {
+  const cases = { 'an extra field': prompt => JSON.stringify({ ...JSON.parse(schemaFill(prompt)), extra: 1 }), 'prose around the JSON': prompt => `정리했습니다.\n${schemaFill(prompt)}`,
+    'a slot of another material': prompt => { const f = JSON.parse(schemaFill(prompt)); const item = guideOfPrompt(prompt).items.find(i => i.slots.some(sl => sl.type === 'material')); f.items[item.id].slots[item.slots.find(sl => sl.type === 'material').name] = 'M9'; return JSON.stringify(f) },
+    'a refusal': () => '죄송하지만 이 요청은 도와드릴 수 없습니다.', 'a failed turn': () => null }
+  for (const [name, forkReply] of Object.entries(cases)) {
+    const s = await mounted(t, { forkReply, outputSchema: 'on' }), before = s.count('output.published')
+    const res = await s.R.http('POST', '/decision/briefing-observe', s.body)
+    assert.deepEqual([res.body.outcome, res.body.reason], ['fallback-chat', 'fill-invalid'], name); assert.equal(s.count('output.published'), before, `${name}: no card was published`); assert.equal(s.count('briefing.published'), 0, name)
+    assert.equal(s.h.forkParams.length >= 1 && s.h.forkParams.every(p => p.outputSchema), true, `${name}: every fork turn carried the schema`)
+  }
+})
+test('outputSchema OFF (the default): the fork turn is started with exactly the params it had before, and the prompt is the one the flag ON sends', async t => {
+  const off = await mounted(t, { forkReply: autoFill }), on = await mounted(t, { forkReply: schemaFill, outputSchema: 'on' })
+  assert.equal((await off.R.http('POST', '/decision/briefing-observe', off.body)).body.outcome, 'presented'); await on.R.http('POST', '/decision/briefing-observe', on.body)
+  assert.deepEqual(Object.keys(off.h.forkParams[0]).sort(), ['clientUserMessageId', 'input', 'threadId']); assert.match(off.h.forkParams[0].clientUserMessageId, /^egdesk-internal:/)
+  assert.deepEqual(off.h.forkParams[0].input, [{ type: 'text', text: off.h.forkPrompts[0], text_elements: [] }])
+  assert.equal(off.h.forkPrompts[0], on.h.forkPrompts[0], 'the schema does not change the prompt')
+  assert.equal(JSON.stringify(off.h.forkParams[0]).includes('outputSchema'), false)
 })

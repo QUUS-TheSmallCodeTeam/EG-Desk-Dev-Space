@@ -211,6 +211,11 @@ export function enumerateSkeleton({ materials = [], candidates = [], currentAnsw
   }).filter(part => part.options.length) // a part nothing in the catalog can show is not a part
   return { materials: mats, targets, shows, how, built, parts, retrievable: targets.filter(t => t.retrievable).map(t => t.alias).slice(0, 6), catalog }
 }
+/** How many characters one line of a list card holds: the text field of the catalog's sequence list component (90). */
+export function lineTextMax(catalog = BRIEFING_CATALOG) {
+  const maxes = (catalog.entries ?? []).filter(e => e.suits?.includes('sequence') && e.renderer?.creates).flatMap(e => e.slots.filter(sl => sl.type === 'list').flatMap(sl => sl.of.filter(f => f.name === 'text').map(f => f.max)))
+  return maxes.length ? Math.min(...maxes) : 90
+}
 /** How many rows a sequence card holds: the list slot of the catalog's sequence components (the smallest), else 6. */
 export function sequenceRows(catalog = BRIEFING_CATALOG) {
   const maxes = (catalog.entries ?? []).filter(e => e.suits?.includes('sequence') && e.renderer?.creates).flatMap(e => e.slots.filter(sl => sl.type === 'list').map(sl => sl.max))
@@ -692,6 +697,8 @@ function factSentences(answer) {
 }
 const DATE_ANY = /(?<!\d)(\d{1,2})\s?월\s?(\d{1,2})\s?일|(?<![\d/.])(\d{1,2})[/.](\d{1,2})(?![\d/.])/g
 const AMOUNT = /\d{1,3}(?:,\d{3})+|\d+(?=\s?(?:원|개|%|명|건|대|일간))/g
+/** Cycle 30: an amount is in a text only as a whole number (never inside another number or a date): c29 cited every material containing the digit 9 for "9개 파일". */
+export const amountIn = (text, amount) => new RegExp(`(?<![\\d,.])${String(amount).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\d]|,\\d)`).test(String(text))
 /** What a fact can be told apart by: its dates, version marks and amounts (code-readable anchors). */
 export function factAnchors(text) {
   const t = String(text ?? '')
@@ -708,7 +715,7 @@ export function factCites(text, materials) {
   return materials.filter(m => {
     const body = `${m.title} ${m.text}`
     const marks = [...body.matchAll(new RegExp(VERSION_MARK.source, 'gi'))].map(x => Number(x[1] ?? x[2] ?? x[3]))
-    return a.dates.some(d => dateMatches(d, { at: m.at, text: body })) || a.versions.some(n => marks.includes(n)) || a.amounts.some(x => body.includes(x))
+    return a.dates.some(d => dateMatches(d, { at: m.at, text: body })) || a.versions.some(n => marks.includes(n)) || a.amounts.some(x => amountIn(body, x))
   }).map(m => m.alias)
 }
 
@@ -725,7 +732,7 @@ export function answerCited(answer, materials) {
     for (const m of materials) {
       const body = `${m.title} ${m.text}`
       const marks = [...body.matchAll(new RegExp(VERSION_MARK.source, 'gi'))].map(x => Number(x[1] ?? x[2] ?? x[3])), own = laneCycleIds(body)
-      const hit = specific ? ids.some(id => own.includes(id)) || a.versions.some(n => marks.includes(n)) || a.amounts.some(x => body.includes(x)) : a.dates.some(d => dateMatches(d, { at: m.at, text: body }))
+      const hit = specific ? ids.some(id => own.includes(id)) || a.versions.some(n => marks.includes(n)) || a.amounts.some(x => amountIn(body, x)) : a.dates.some(d => dateMatches(d, { at: m.at, text: body }))
       if (hit) cited.add(m.alias)
     }
   }
