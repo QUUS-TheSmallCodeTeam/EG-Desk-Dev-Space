@@ -22422,10 +22422,12 @@
     // page. When focus was lost that way, put it back on the key field (never steal it from somewhere the person moved to).
     const runDecision = async (work) => {
       if (decision.busy) return;
-      const keyField = () => card.querySelector('[data-testid="settings-decision-key"]');
-      // The card's own document (any window); a harness without a global document simply skips focus repair.
-      const focusDoc = () => card.ownerDocument || globalThis.document;
-      const inSection = () => { const doc = focusDoc(); return !!doc?.activeElement && card.contains(doc.activeElement); };
+      // A slice of this section mounted without the settings card around it (a harness) skips the focus repair.
+      const owner = typeof card === 'undefined' ? null : card;
+      const keyField = () => owner?.querySelector('[data-testid="settings-decision-key"]');
+      // The card's own document (any window).
+      const focusDoc = () => owner ? owner.ownerDocument || globalThis.document : null;
+      const inSection = () => { const doc = focusDoc(); return !!doc?.activeElement && owner.contains(doc.activeElement); };
       const hadFocus = inSection();
       decision.busy = true; redrawDecision();
       try { await work(); } finally {
