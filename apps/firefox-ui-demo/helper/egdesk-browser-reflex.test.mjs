@@ -337,3 +337,18 @@ for (const variant of ['handoff', 'ordinary', 'changed ref', 'changed URL', 'cha
     assert.deepEqual(asked[1].questions[0].choices.map(option => option.value), [second, 'no matching field'])
   })
 }
+
+test('L8: a same-site link is judged by its href words as well as its label; unsafe paths are never candidates', async () => {
+  const { buildReflexCandidates, hrefWords } = await import('./egdesk-browser-reflex.mjs')
+  assert.equal(hrefWords('https://example.com/a-b/c_d?x=%EC%82%AD%EC%A0%9C&y=1'), 'a b c d x 삭제 y 1')
+  assert.equal(hrefWords('not a url'), '')
+  const link = (ref, label, href) => ({ ref, role: 'link', label, tag: 'a', href, value: '' })
+  const snap = { url: 'https://example.com/cart', interactiveElements: [
+    link('a', 'Continue', 'https://example.com/account/delete?id=7'),
+    link('b', 'More', 'https://example.com/checkout/pay'),
+    link('c', 'Plans', 'https://example.com/plans/team'),
+  ] }
+  const { options, excluded } = buildReflexCandidates(snap)
+  assert.deepEqual(options.map(o => o.item.element.ref), ['c'])
+  assert.equal(excluded.gated, 2)
+})
