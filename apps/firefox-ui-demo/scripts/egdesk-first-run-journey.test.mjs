@@ -615,16 +615,29 @@ const settingsEl = (tag, props = {}, ...children) => {
 }
 const textOf = node => node == null ? '' : typeof node === 'string' ? node : Array.isArray(node) ? node.map(textOf).join(' ') : [node.textContent, ...(node.children || []).map(textOf)].filter(Boolean).join(' ')
 
+// The settings card the section closes over (runDecision reads card.querySelector / card.contains / card.ownerDocument and
+// restores focus to the key field when a redraw destroyed the focused node). Nodes know whether they are still in the card's
+// current tree, and focus() moves the card document's activeElement, so the real focus-repair code runs against real state.
 function mountSettingsCard(state, decisionRequest) {
   const code = surfaceSlice('    const decision = { status: null, loaded: false', '    // --- 연결된 도구 (CU-07)')
-  const card = { id: 'egd-settings-card-1', isConnected: true, classList: { contains: () => false }, section: null, _setWindowCollapsed() {},
+  const ownerDocument = { activeElement: null, body: { tag: 'body' } }
+  const inTree = (root, node) => !!root && (root === node || (root.children || []).some(child => child && typeof child === 'object' && inTree(child, node)))
+  const el = (tag, props = {}, ...children) => {
+    const node = settingsEl(tag, props, ...children)
+    Object.defineProperty(node, 'isConnected', { get: () => inTree(card.section, node) })
+    node.focus = () => { ownerDocument.activeElement = node; focusLog.push(props.data?.testid || tag) }
+    return node
+  }
+  const card = { id: 'egd-settings-card-1', classList: { contains: () => false }, section: null, ownerDocument, _setWindowCollapsed() {},
+    get isConnected() { return true },
     render() { this.section = api.renderDecisionModel() }, _settingsShowTab() { this.render() },
+    contains(node) { return inTree(this.section, node) },
     querySelector(selector) {
       if (selector === '[data-testid="settings-tab-account"][aria-selected="true"]') return {}
       if (selector === '[data-testid="settings-decision"]') return this.section
-      return null
+      return this.section ? queryAll(this.section, selector)[0] || null : null
     } }
-  const api = runInNewContext(code + '\n({ renderDecisionModel, decision })', { el: settingsEl, state, AccountSettingsView, activeTab: 'account',
+  const api = runInNewContext(code + '\n({ renderDecisionModel, decision })', { el, state, AccountSettingsView, activeTab: 'account', card,
     bridge: () => ({ decisionRequest }), renderAccountTab: () => card.render() }, { filename: 'eg-desk-surface.uc.js (account decision section)' })
   card.decision = api.decision
   card.render()
@@ -690,9 +703,11 @@ const keyInputOf = card => queryAll(card.section, 'input[type="password"][data-t
 const modeButton = (card, mode) => queryAll(card.section, `button[data-testid="settings-decision-mode"][data-mode="${mode}"]`)[0]
 const resultOf = card => textOf(queryAll(card.section, '[data-testid="settings-decision-result"]')[0])
 const pasteAndSave = async (card, value) => {
+  keyInputOf(card).focus() // the person clicks into the field and pastes
   keyInputOf(card).value = value
   click(queryAll(card.section, 'button[data-testid="settings-decision-save"]')[0])
   await eventually(() => queryAll(card.section, '[data-testid="settings-decision-result"]')[0], 'no verification result shown')
+  await eventually(() => card.ownerDocument.activeElement === keyInputOf(card), 'focus was not restored to the key field after the redraw')
 }
 const turnContextOf = (f, accepted) => {
   const run = f.snapshot(accepted.conversationId).runs.find(r => r.runId === accepted.runId)
