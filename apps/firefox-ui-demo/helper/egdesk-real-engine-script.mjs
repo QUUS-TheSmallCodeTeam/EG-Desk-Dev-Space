@@ -16,7 +16,10 @@
 //   approve. Its expectations cover what happened after it was sent (messages posted after it, tool calls and commands after it); the previous
 //   turn's own expectations cover the whole window of both. A message the run no longer takes (it ended before afterMs) fails the turn's
 //   implicit check "sent_while_running".
+// expect.engine { steers?, interrupts?, steerCarries?, flowMessages?, maxLatencyMs? } (L2 c21, helper/egdesk-real-engine-journey.mjs): what reached the engine (turn/steer,
+//   turn/interrupt) and how many system messages were posted, in the turn's window; on a whileRunning turn, after its message was sent.
 import { MEMORY_EXPECT_SCHEMA, MEMORY_SCHEMA, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
+import { ENGINE_EXPECT_SCHEMA, validateEngineExpect } from './egdesk-real-engine-journey.mjs' // journey hook (L2 c21)
 // action turns (c23, agreed with lane L3): { action: "interrupt" | "steer" | "delete", afterMs?, say?, expect? } instead of a message.
 //   interrupt  the person presses stop on the PREVIOUS turn's run, afterMs after that turn started (chat.interrupt). Give the previous turn
 //              expect.turnStatus "interrupted" (and posted false: only completed agent messages are posted).
@@ -38,7 +41,7 @@ export const IN_RUN_FLAG = 'EGDESK_INRUN_MESSAGES'
 export const LIMITS = Object.freeze({ whileRunningMs: 120_000, conversations: 8, turns: 12, files: 32, pathChars: 200, contentBytes: 64 * 1024, sayChars: 4000, approvals: 4, strings: 16, stringChars: 400 })
 // the scripted person's answers (test input, never product copy)
 export const APPROVER_TEXT = Object.freeze({ yes: '응, 그 명령 실행해 줘', no: '아니, 그건 실행하지 마' })
-export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'conversationGone', 'memory', 'briefing', 'draftCheck', 'commandsRanIncludes', 'commandsRanExcludes'])
+export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'engine', 'conversationGone', 'memory', 'briefing', 'draftCheck', 'commandsRanIncludes', 'commandsRanExcludes'])
 export const ACTIONS = Object.freeze(['interrupt', 'steer', 'delete'])
 
 // `expect.briefing` belongs to the briefing hook (helper/egdesk-real-engine-briefing-hook.mjs): its shape and its checks live there (registered in helper/egdesk-real-engine-hooks.mjs)
@@ -87,6 +90,7 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
               conversationGone: { type: 'boolean' },
               draftCheck: { type: 'object', additionalProperties: false, required: ['ran'], properties: { ran: { type: 'boolean' } } },
               memory: MEMORY_EXPECT_SCHEMA,
+              engine: ENGINE_EXPECT_SCHEMA,
               briefing: BRIEFING_EXPECT_SCHEMA,
             } },
           } } },
@@ -219,6 +223,7 @@ export function validateEngineScript(value) {
         for (const why of validateMemoryExpect(e.memory, conv.memory, `${tt}.expect.memory`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
         if (turn.whileRunning !== undefined) bad(`${tt}.expect.memory`, 'not checked on a whileRunning turn (the memory window is the scripted turn)')
       }
+      if (e.engine !== undefined) for (const why of validateEngineExpect(e.engine, { whileRunning: turn.whileRunning !== undefined }, `${tt}.expect.engine`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
       if (e.draftCheck !== undefined) {
         if (!isObject(e.draftCheck) || Object.keys(e.draftCheck).some(k => k !== 'ran') || typeof e.draftCheck.ran !== 'boolean') bad(`${tt}.expect.draftCheck`, 'an object { ran: boolean }')
         if (!conv.draftCheck && !['advisory', 'on'].includes(conv.flags?.EGDESK_DRAFT_CHECK)) bad(`${tt}.expect.draftCheck`, 'needs conversation.draftCheck (or flags.EGDESK_DRAFT_CHECK) in this conversation')
