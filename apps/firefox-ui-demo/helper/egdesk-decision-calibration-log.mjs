@@ -179,6 +179,8 @@ export function normalizeEntry(raw, now = Date.now()) {
   const list = Array.isArray(raw.judgments) ? raw.judgments.slice(0, MAX_JUDGMENTS).map(judgment).filter(Boolean) : []
   entry.judgments = list
   put(entry, 'candidates', count(raw.candidates, 1000)); put(entry, 'judgedTotal', count(raw.judgedTotal, 1000))
+  // A turn_context answer that came after its budget (kept for the later steps of the turn, never attached): marked, with how late (ms).
+  if (feature === 'turn_context' && raw.late === true) { entry.late = true; put(entry, 'lateMs', count(raw.lateMs, 60000)) }
   put(entry, 'check', word(CHECKS, raw.check)); put(entry, 'ifUnrevised', word(CHECKS, raw.ifUnrevised))
   if (record(raw.evidence)) {
     const counts = {}

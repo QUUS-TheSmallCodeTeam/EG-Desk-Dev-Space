@@ -425,12 +425,13 @@ export function createMeasureTransport({ send = false, key = null, fetchImpl = g
 }
 
 // ---- the journey ----
-export async function runJourney({ plan, send = false, key = null, fetchImpl = globalThis.fetch, caps = DEFAULT_CAPS, now = null, replay = null } = {}) {
+// env: developer flags that differ from the journey's (tests and offline replays only; the CLI passes none).
+export async function runJourney({ plan, send = false, key = null, fetchImpl = globalThis.fetch, caps = DEFAULT_CAPS, now = null, replay = null, env = {} } = {}) {
   const cleanups = [], t = { after: fn => cleanups.push(fn) }
   const { transport, ledger } = createMeasureTransport({ send, key, fetchImpl, caps, plan, now, replay: send === true ? null : replay })
   const steps = []
   try {
-    const w = allOnWorld(t, { transport, settleLimitMs: 60_000 })
+    const w = allOnWorld(t, { transport, settleLimitMs: 60_000, env })
     w.state.wording.wait = waitNote
     await w.settings.turnMemory.save('on')
     const j = { note: {}, sends: [], said: [],
