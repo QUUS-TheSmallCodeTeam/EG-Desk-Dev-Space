@@ -529,5 +529,18 @@ export function createJointStore(path, { now = Date.now, teamApps=null } = {}) {
     try{requireThat(!controller.signal.aborted&&current(),409,'app-interrupted');const reply=await teamApps.step({type:admission.app.type,from:admission.app.state,to:a.to},{signal:controller.signal});transaction(()=>{requireThat(!stopped&&!controller.signal.aborted&&current()&&one('SELECT state FROM appruns WHERE actor=? AND request=?',p,request)?.state==='pending',409,'app-interrupted');const now=appPermit(p,a);requireThat(reply&&reply.type===now.app.type&&reply.state===a.to,503,'app-unavailable');run('UPDATE appitems SET state=?,rev=rev+1 WHERE card=?',reply.state,a.card);run('UPDATE cards SET rev=rev+1 WHERE id=?',a.card);cancelSingle(a.card);run("UPDATE appruns SET state='done' WHERE actor=? AND request=?",p,request);run('INSERT INTO ops VALUES(?,?,?)',p,request,sig);});return view(p);
     }catch(err){if(!stopped)run("UPDATE appruns SET state='interrupted' WHERE actor=? AND request=? AND state='pending'",p,request);if(err instanceof JointError)throw err;if(stopped||controller.signal.aborted||!current())fail(409,'app-interrupted');fail(503,'app-unavailable');}finally{signal?.removeEventListener('abort',abort);pending.delete(k);}}
   function cancelStale(){for(const rec of pending.values()) {try{appPermit(rec.actor,rec.a);}catch{rec.controller.abort();}}}
-  return {issueAccount,authentic,view,mutate(p,a){if(a?.request)requireThat(!one('SELECT 1 FROM appruns WHERE actor=? AND request=?',p,a.request),409,'request-conflict');const v=mutate(p,a);cancelStale();return v;},stepApp,close(){stopped=true;for(const rec of pending.values())rec.controller.abort();db.close();}};
+  // Read-only (SELECT only) check for the ephemeral presence feed: is this person seated on this Board, and which of the
+  // given cards can they see there. It never writes, and presence itself is never stored in this database.
+  function presenceAccess(p, b, cards = []) {
+    if (typeof b !== 'string' || !person(p)) return null;
+    const s = seat(b, p);
+    if (!s) return null;
+    const visible = [];
+    for (const k of Array.isArray(cards) ? cards.slice(0, 64) : []) {
+      const c = typeof k === 'string' ? activeCard(k) : null;
+      if (c && c.board === b && boardAccess(c, p)) visible.push(k);
+    }
+    return { epoch: s.epoch, visible };
+  }
+  return {presenceAccess,issueAccount,authentic,view,mutate(p,a){if(a?.request)requireThat(!one('SELECT 1 FROM appruns WHERE actor=? AND request=?',p,a.request),409,'request-conflict');const v=mutate(p,a);cancelStale();return v;},stepApp,close(){stopped=true;for(const rec of pending.values())rec.controller.abort();db.close();}};
 }

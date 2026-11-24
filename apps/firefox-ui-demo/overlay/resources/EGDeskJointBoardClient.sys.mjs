@@ -272,6 +272,33 @@ export function createJointClient({ request, apply, unavailable, uuid: random, t
       return run('GET');
     },
     refresh: () => run('GET'),
+    // Optional ephemeral signal (EGDeskJointPresence). It is not a Board action: no request id, no view is applied, no
+    // retry, and a failure never closes or resets the shared Board. Only sent while a verified view of this session exists.
+    async presence(body) {
+      if (!session || !verified) throw Error('disconnected');
+      const g = gen,
+        scope = session;
+      let res;
+      try {
+        res = await request(scope.origin + '/v1/joint/presence', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + scope.key, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          redirect: 'error',
+          credentials: 'omit',
+          cache: 'no-store',
+          referrerPolicy: 'no-referrer',
+          signal: timeoutSignal(),
+        });
+      } catch {
+        throw Error('presence-unavailable');
+      }
+      if (g !== gen) throw Error('disconnected');
+      if (!res.ok) throw Error('presence-unavailable');
+      const value = await res.json().catch(() => null);
+      if (g !== gen) throw Error('disconnected');
+      return value;
+    },
     act(input) {
       if (!verified) return Promise.reject(Error('disconnected'));
       return run('POST', { ...input, request: random() });
