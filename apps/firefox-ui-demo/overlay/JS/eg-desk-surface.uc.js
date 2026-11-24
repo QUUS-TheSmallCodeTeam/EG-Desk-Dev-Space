@@ -12713,7 +12713,7 @@
     boardNotice('설정의 계정 화면에서 OpenAI Decisions를 열 수 없습니다. 설정에서 직접 확인해 주세요. 채팅에는 API 키를 입력하지 마세요.');
   }
 
-  function mountChatChoiceComposer({ el, readMode, postChoice, openSettings, makeController, makeRequestId, warm = null }) {
+  function mountChatChoiceComposer({ el, readMode, postChoice, openSettings, makeController, makeRequestId }) {
     const button = (key, label, onclick) => el('button', { type: 'button', data: { testid: `chat-choice-${key}` }, onclick }, label);
     const plain = (tag, text, props = {}) => { const node = el(tag, props); node.textContent = text; return node; };
     // Keep these line/duplicate rules in sync with egdesk-chat-choice.mjs.
@@ -12779,7 +12779,6 @@
     const trigger = button('open', '보기 추천', () => {
       const scope = currentScope();
       if (entry || !scope || !normalizeLine(scope.question, 500)) return;
-      try { warm?.(); } catch { /* content-free warm-up is best effort */ }
       const reviewedEdits = savedEdits && savedEdits.key === scope.editKey && savedEdits.question === scope.question ? savedEdits : null;
       const options = matchesListReturn(scope) ? listEdits.options : reviewedEdits?.options ?? ['', ''];
       savedEdits = null; listEdits = null;
@@ -13083,7 +13082,6 @@
       readMode: signal => codexBridge.readChatChoiceMode(signal),
       openSettings: openChatChoiceSettings,
       postChoice: (dto, signal) => codexBridge.postChatChoice(dto, signal),
-      warm: () => codexBridge.warmDecisionConnection(),
       makeController: () => new window.AbortController(),
       makeRequestId: () => `choice-${Date.now()}-${window.crypto.randomUUID()}`,
     });
@@ -14816,7 +14814,6 @@
               blockedSend.textContent = '';
               if (boardDestination && ev.isComposing) beginBoardComposition();
               if (!boardDestination || !boardInputState.composing.has(input)) codexBridge.setDraft(input.value, activeThread.id);
-              if (!boardDestination && input.value.trim()) { try { window.clearTimeout(input._warmTimer); input._warmTimer = window.setTimeout(() => codexBridge.warmDecisionConnection?.(), 600); } catch { /* warm-up is best effort */ } }
               choice.sync();
               resizeComposer(false);
             });
@@ -17431,17 +17428,6 @@
       },
       readChatChoiceMode(signal) { return fetchJson('/decision/status', { method: 'GET', signal, cache: 'no-store' }); },
       postChatChoice(dto, signal) { return fetchJson('/chat/choice', { method: 'POST', signal, body: JSON.stringify(dto) }); },
-      // Content-free connection warm-up (no body). The bridge decides: only mode on/advisory with a saved key, never off.
-      // Throttled here as well: at most one call per 30 s; failures are ignored.
-      warmDecisionConnection: (() => {
-        let last = 0;
-        return () => {
-          const at = Date.now();
-          if (at - last < 30000) return;
-          last = at;
-          fetchJson('/decision/preconnect', { method: 'POST', body: '{}' }).catch(() => {});
-        };
-      })(),
       // Settings '결정 모델 · OpenAI Decisions': only the /decision/* routes.
       // A refusal carries its code and the provider's verification status.
       async decisionRequest(path, { method = 'GET', body } = {}) {

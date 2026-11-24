@@ -7,7 +7,7 @@ import { decisionThresholds, scoreQuestion } from './egdesk-decision-questions.m
 //      RUNTIME supplies (cwd, what each target is in git, the stated intent). Plain commands make zero Decision requests.
 //   3. The score can only ADD an approval. It never removes one a rule required, and it never replaces the engine's own approval
 //      policy (that policy still runs for whatever this gate lets through).
-//   Mode off, a failed call, no budget, or no consent for the context text: the floor alone decides (today's behaviour).
+//   Mode off, a failed call, no budget, or the run's model permissions not allowing terminal data: the floor alone decides (today's behaviour).
 export const COMMAND_GATE_REASONS = Object.freeze(['unresolved_target', 'protected_target', 'outside_cwd', 'tracked_files', 'dirty_worktree',
   'remote_irreversible', 'privileged', 'remote_script', 'risk_score', 'risk_unsure'])
 export const RISK_LEVELS = Object.freeze([
@@ -87,15 +87,15 @@ export function classifyCommand(command, { cwd, home = '/home/user', inspect = (
 }
 
 /**
- * assessCommand({ command, cwd, intent, mode, client, inspect, git, home, thresholds?, timeoutMs?, signal?, calibration?, consent? })
+ * assessCommand({ command, cwd, intent, mode, client, inspect, git, home, thresholds?, timeoutMs?, signal?, calibration?, egress? })
  *  → { approval: boolean, reasons: string[], source: 'rules'|'decision'|'fallback', requests, score? }
  */
 export async function assessCommand({ command, cwd, intent = '', mode = 'off', client = null, inspect, git, home, thresholds, timeoutMs = COMMAND_GATE_TIMEOUT_MS,
-  signal, calibration = null, consent = () => false } = {}) {
+  signal, calibration = null, egress = null } = {}) {
   const { destructive, floor, targets } = classifyCommand(command, { cwd, inspect, git, home })
   if (floor.length) return { approval: true, reasons: floor, source: 'rules', requests: 0 }
   if (!destructive) return { approval: false, reasons: [], source: 'rules', requests: 0 }
-  if ((mode !== 'advisory' && mode !== 'on') || !client?.decide || consent() !== true) return { approval: false, reasons: [], source: 'fallback', requests: 0 }
+  if ((mode !== 'advisory' && mode !== 'on') || !client?.decide || egress?.allows?.('terminal_command') !== true) return { approval: false, reasons: [], source: 'fallback', requests: 0 }
   const th = decisionThresholds(thresholds)
   let answer
   try {

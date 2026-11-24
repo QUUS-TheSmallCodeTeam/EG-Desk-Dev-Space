@@ -11,6 +11,7 @@ import { MAX_COMPOSED } from './egdesk-profile-store.mjs'
 import { CHAT_CHOICE_BAR, chatChoiceManual, runChatChoice, validateChatChoice } from './egdesk-chat-choice.mjs'
 import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { DRAFT_CHECK_LIMITS, checkDraft } from './egdesk-draft-check.mjs'
+import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { browserRefusal, ceilingAllowsBrowserTool, ceilingAllowsComputerTool, ceilingApprovalRefusal, ceilingBrowserSelection, ceilingNarrows, ceilingReportNotices, CEILING_MESSAGES, computerRefusal, effectiveToolCeiling, liveBrowserSelected, loadCeilingThreadOverrides, mergeCeilingOverrides, recordedToolCeiling, verifyCeilingNativeThread } from './codex-chat-tool-ceiling.mjs'
 import { HOST_CONTROL_POLICIES, HOST_LEASE_CODES, requiresHostControl } from './egdesk-host-lease.mjs'
 import { COMPUTER_ADAPTER_CODES, refusedResult } from './egdesk-computer-adapter.mjs'
@@ -4645,6 +4646,11 @@ export class CodexChatRuntime {
   // (see the c8 report for the exact design). Gates: the Decision mode must be advisory/on with a saved key; only a direct, non-stateless
   // DM turn without guarded evidence is checked; what leaves the machine is the posted sentences plus catalog text that already went to
   // the decision model; tool outputs are sent as content-free references only.
+  // The one egress gate for a run (egdesk-decision-egress.mjs): the decision model receives only what this run's models may receive.
+  decisionEgressFor(run, { memoryScope = {}, canvasMaySend = false } = {}) {
+    return createEgressGate(modelDataPermissions({ toolCeiling: run?.toolCeiling ?? null, browserGranted: Boolean(run?.browserBinding?.cards?.length), canvasMaySend, memoryScope, runActive: Boolean(run) }))
+  }
+
   draftCheckMode() {
     try { return this.decisionContext?.draftCheck?.mode?.() === 'advisory' ? 'advisory' : 'off' } catch { return 'off' }
   }
@@ -4683,13 +4689,13 @@ export class CodexChatRuntime {
       const own = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
       const tools = (run.activities || []).filter(a => !own.has(a.kind)).slice(0, 8)
         .map((a, i) => ({ id: `tool${i + 1}`, kind: 'tool', time: 'present', status: typeof a.status === 'string' ? a.status : null, source: `tool:${a.kind}`, opaque: true }))
-      const job = this.runDraftCheckAdvisory(text, turn, tools).catch(() => {})
+      const job = this.runDraftCheckAdvisory(text, turn, tools, run).catch(() => {})
       this.draftCheckRuns.add(job)
       void job.finally(() => this.draftCheckRuns.delete(job))
     } catch { /* the check must never affect the turn */ }
   }
 
-  async runDraftCheckAdvisory(text, turn, tools) {
+  async runDraftCheckAdvisory(text, turn, tools, run = null) {
     const setup = this.decisionContext, dc = setup.draftCheck, log = setup.calibrationLog
     const controller = new AbortController(), t0 = performance.now()
     const limit = Number.isSafeInteger(dc.deadlineMs) && dc.deadlineMs > 0 ? dc.deadlineMs : 15000
@@ -4702,7 +4708,7 @@ export class CodexChatRuntime {
       try { vocabulary = (await dc.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
       const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))
       const check = checkDraft({ draft: text, evidence: [...turn.evidence, ...tools], userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
-        mode: 'advisory', client: setup.client, signal: controller.signal })
+        mode: 'advisory', client: setup.client, signal: controller.signal, egress: this.decisionEgressFor(run) })
       void check.catch(() => {}) // a check that outlives the deadline must not surface later
       const result = await Promise.race([check, aborted])
       const totalMs = performance.now() - t0
@@ -4743,7 +4749,9 @@ export class CodexChatRuntime {
     timer.unref?.()
     const t0 = performance.now(), spans = []
     // Every Decisions call is timed by stage (triage / fetch / write) so a later 'on' wiring can be sized from real usage.
+    const egress = this.decisionEgressFor(run)
     const client = { decide: async request => {
+      egress.require('memory_page')
       const start = performance.now() - t0
       try { return await setup.client.decide(request) } finally {
         const names = request.questions.map(q => q.name)
@@ -4753,7 +4761,7 @@ export class CodexChatRuntime {
     try {
       const threadKey = run.conversationId
       const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position, threadKey,
-        scope: typeof tm.scope === 'function' ? await tm.scope({ body, context }) : null, live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null,
+        scope: typeof tm.scope === 'function' ? await (async () => { const base = await tm.scope({ body, context }); return base ? egress.memoryScope(base) : base })() : null, live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null,
         delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed === true, heldExcerpts: tm.heldExcerpts === true, signal: controller.signal })
       const judged = result.judgeWrite ? await result.judgeWrite() : null
       if (typeof threadKey === 'string' && threadKey) {

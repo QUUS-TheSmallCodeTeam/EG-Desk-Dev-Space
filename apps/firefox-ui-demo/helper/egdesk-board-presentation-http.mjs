@@ -1,4 +1,5 @@
 import { createHmac, randomBytes } from 'node:crypto'
+import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { performance } from 'node:perf_hooks'
 import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.mjs'
 import { createDecisionClient, DECISIONS_ENDPOINT, DECISION_MODEL, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
@@ -254,7 +255,8 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     if (!body || typeof body.report !== 'string' || !body.report.trim() || body.report.length > 20000) return { status: 'skipped', reason: 'invalid' }
     const sink = { destroyed: false, writableEnded: false, once() {}, off() {} }
     const route = judge => ({ prepare: async dto => prepareJudge(judge, dto).body, run: ticket => run(ticket, sink), cancel: async ticket => { discard(ticket) } })
-    const out = await runBriefingFlow({ report: body.report, candidates: observeCandidates(body.candidates), currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null,
+    const list = observeCandidates(body.candidates)
+    const out = await runBriefingFlow({ report: body.report, candidates: list, egress: createEgressGate(modelDataPermissions({ canvasMaySend: list.some(c => c.maySend === true) })), currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null,
       decide: { placement: route(JUDGES['/decision/briefing-placement']), reuse: route(JUDGES['/decision/briefing-reuse']) }, engine: null, observeOnly: true, allow: async () => true })
     return { status: 'observed', stages: out.stages ?? [], outcome: out.status, judgeRequests: out.stats?.judgeRequests ?? 0 }
   }

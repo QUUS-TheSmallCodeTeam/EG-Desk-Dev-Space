@@ -21,6 +21,7 @@ import { openCalibrationLog } from '../helper/egdesk-decision-calibration-log.mj
 import { BRIEFING_LIMITS, enumerateBriefingChecks, enumerateBriefingFacts, normalizeBriefingCheckDto, normalizePlacementDto, prepareBriefingCheck, prepareBriefingPlacement,
   readBriefingCheck, readBriefingPlacement, resolveDesign, runBriefingFlow } from '../helper/egdesk-briefing-flow.mjs';
 import { world } from './egdesk-board-world.support.mjs';
+import { createEgressGate, modelDataPermissions } from '../helper/egdesk-decision-egress.mjs';
 
 const KEY = 'egd-synthetic-not-a-key-0004';
 const r = (x, y, width, height) => ({ x, y, width, height });
@@ -245,4 +246,16 @@ test('readBriefingCheck: findings need a flawed flow and an item over the bar; m
   assert.deepEqual(read(answers(.1, { explanation_mismatch_S2: .9 }, { value: 'S2', p: .9 })).findings, [{ item: 'explanation_mismatch', scope: 'S2', aliases: ['S2', 'T2'], p: .9 }]);
   assert.equal(read(answers(.95)).status, 'ok'); assert.equal(read(answers(.95, { step_unclear_S1: .9 })).status, 'inconclusive'); assert.equal(read(answers(.5, { step_unclear_S1: .9 })).status, 'inconclusive');
   assert.equal(read(answers(.1, { step_unclear_S1: .4 })).status, 'inconclusive'); assert.equal(read({ ...answers(.1), understandable: { type: 'refusal' } }).status, 'manual'); void full;
+});
+
+test('canvas_text egress: step texts and card labels reach Decisions only where the run\'s models may receive cards (maySend); otherwise 0 requests and the chat answer stays', async t => {
+  const b = await board();
+  const denied = rig(t, { script: () => ({ placement: { value: 'board', p: .93 }, u: .96, issues: {} }) });
+  const out = await runBriefingFlow({ report: REPORT, candidates: b.candidates, links: b.links, viewport: b.viewport, decide: denied.decide,
+    egress: createEgressGate(modelDataPermissions({ canvasMaySend: false })), engine: engineOf([], () => design0()) });
+  assert.equal(out.status, 'bubble'); assert.equal(out.reason, 'declined'); assert.equal(denied.calls.length, 0, 'not one request left');
+  const allowed = rig(t, { script: () => ({ placement: { value: 'board', p: .93 }, u: .96, issues: {} }) });
+  const ok = await runBriefingFlow({ report: REPORT, candidates: b.candidates, links: b.links, viewport: b.viewport, decide: allowed.decide,
+    egress: createEgressGate(modelDataPermissions({ canvasMaySend: true })), engine: engineOf([], () => design0()) });
+  assert.notEqual(ok.reason, 'declined'); assert.ok(allowed.calls.length >= 1, 'allowed: the judge request was sent');
 });

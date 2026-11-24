@@ -121,7 +121,6 @@ async function mount({ mode = 'on', configured = true, savedKey = true } = {}) {
     draft: question,
     fetchJson: async (path, init) => {
       if (path === '/chat/choice') { server.choicePosts++; return { status: 'recommended', index: 0 }; }
-      if (path === '/decision/preconnect') return {};
       if (path === '/decision/status') return statusBody();
       throw Error(`unexpected fetchJson ${path}`);
     },

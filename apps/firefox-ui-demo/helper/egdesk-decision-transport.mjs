@@ -11,42 +11,16 @@ import { Readable } from 'node:stream'
 //  - No automatic retry, ever. node:http never replays a request, and this adapter does not either. A reused
 //    socket that fails is reported as an error; the caller decides (the decision client reports `unreachable`,
 //    dispatched = true, because the request may already have been processed and billed).
-//  - Pre-connect: opens ONE TCP(+TLS) connection and parks it. No HTTP request, header, key or body is ever
-//    written by the warm-up; it takes no credential. The next real request adopts the parked socket.
-//    At most one warm-up per idle period; an unused warm socket is closed after `warmIdleMs`.
 export const DECISION_IDLE_MS = 55_000
 export const DECISION_HINT_MARGIN_MS = 1_000
-export const DECISION_WARM_IDLE_MS = 15_000
 
 const NULL_BODY = new Set([101, 204, 205, 304])
 const abortError = () => Object.assign(new Error('The operation was aborted'), { name: 'AbortError', code: 20 })
 
-export function createDecisionTransport({ idleMs = DECISION_IDLE_MS, warmIdleMs = DECISION_WARM_IDLE_MS, agentOptions = {}, trace = null } = {}) {
-  const stats = { requests: 0, reusedSockets: 0, sockets: 0, warmups: 0, warmupsSkipped: 0, warmAdopted: 0, warmExpired: 0, reusedSocketErrors: 0 }
-  let warm = null // { socket, host, port, onTimeout, onError, onClose }
-  let warmedSinceRequest = false // one warm-up per idle period: reset by a real request
-
-  const dropWarm = (destroy = true) => {
-    if (!warm) return
-    const { socket, onTimeout, onError, onClose } = warm
-    warm = null
-    socket.off('timeout', onTimeout); socket.off('error', onError); socket.off('close', onClose)
-    socket.setTimeout(0)
-    if (destroy) socket.destroy()
-  }
-  const takeWarm = options => {
-    if (!warm || warm.socket.destroyed || warm.host !== options.host || warm.port !== Number(options.port)) return null
-    const { socket } = warm
-    dropWarm(false)
-    socket.ref()
-    stats.warmAdopted++
-    return socket
-  }
-
+export function createDecisionTransport({ idleMs = DECISION_IDLE_MS, agentOptions = {}, trace = null } = {}) {
+  const stats = { requests: 0, reusedSockets: 0, sockets: 0, reusedSocketErrors: 0 }
   const make = Base => class DecisionAgent extends Base {
     createConnection(options, callback) {
-      const adopted = takeWarm(options)
-      if (adopted) return adopted
       stats.sockets++
       return super.createConnection(options, callback)
     }
@@ -63,8 +37,8 @@ export function createDecisionTransport({ idleMs = DECISION_IDLE_MS, warmIdleMs 
   const HttpsAgent = make(https.Agent)
   const HttpAgent = make(http.Agent)
   const agents = {
-    'https:': new HttpsAgent({ keepAlive: true, maxSockets: 4, maxFreeSockets: 2, scheduling: 'lifo', timeout: idleMs, ...agentOptions }),
-    'http:': new HttpAgent({ keepAlive: true, maxSockets: 4, maxFreeSockets: 2, scheduling: 'lifo', timeout: idleMs, ...agentOptions }),
+    'https:': new HttpsAgent({ keepAlive: true, maxSockets: 16, maxFreeSockets: 4, scheduling: 'lifo', timeout: idleMs, ...agentOptions }),
+    'http:': new HttpAgent({ keepAlive: true, maxSockets: 16, maxFreeSockets: 4, scheduling: 'lifo', timeout: idleMs, ...agentOptions }),
   }
   const protocolOf = url => { if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new TypeError('Unsupported protocol'); return url.protocol }
 
@@ -72,7 +46,6 @@ export function createDecisionTransport({ idleMs = DECISION_IDLE_MS, warmIdleMs 
     const url = new URL(String(endpoint)), protocol = protocolOf(url)
     const { signal } = init
     if (signal?.aborted) return Promise.reject(abortError())
-    warmedSinceRequest = false
     stats.requests++
     return new Promise((resolve, reject) => {
       const lib = protocol === 'https:' ? https : http
@@ -97,7 +70,8 @@ export function createDecisionTransport({ idleMs = DECISION_IDLE_MS, warmIdleMs 
       req.on('response', () => mark('response'))
       req.on('error', error => {
         signal?.removeEventListener('abort', onAbort)
-        if (req.reusedSocket) stats.reusedSocketErrors++
+        // Only transport failures count; our own abort/timeout of a pending request is not a stale-socket error.
+        if (req.reusedSocket && !signal?.aborted) stats.reusedSocketErrors++
         // Never replayed here: the body may have reached the server.
         reject(Object.assign(error, { reusedSocket: req.reusedSocket === true }))
       })
@@ -105,29 +79,5 @@ export function createDecisionTransport({ idleMs = DECISION_IDLE_MS, warmIdleMs 
     })
   }
 
-  /** Content-free warm-up. Returns 'warmed' or 'skipped'. Takes no credential and writes nothing to the socket. */
-  function preconnect(endpoint) {
-    const url = new URL(String(endpoint)), protocol = protocolOf(url), agent = agents[protocol]
-    const host = url.hostname, port = Number(url.port || (protocol === 'https:' ? 443 : 80))
-    const parked = Object.values(agent.freeSockets).some(list => list.some(s => !s.destroyed))
-    const busy = Object.values(agent.sockets).some(list => list.length > 0)
-    if (warm || parked || busy || warmedSinceRequest) { stats.warmupsSkipped++; return 'skipped' }
-    warmedSinceRequest = true
-    stats.warmups++
-    const options = { ...agent.options, host, port, servername: protocol === 'https:' && !/^[\d.:]+$/.test(host) ? host : undefined, path: null }
-    options._agentKey = agent.getName(options)
-    let socket
-    try { socket = (protocol === 'https:' ? https.Agent : http.Agent).prototype.createConnection.call(agent, options) } catch { return 'skipped' }
-    stats.sockets++
-    socket.unref()
-    const onTimeout = () => { stats.warmExpired++; dropWarm() }
-    const onError = () => dropWarm()
-    const onClose = () => dropWarm(false)
-    warm = { socket, host, port, onTimeout, onError, onClose }
-    socket.setTimeout(warmIdleMs)
-    socket.on('timeout', onTimeout); socket.on('error', onError); socket.on('close', onClose)
-    return 'warmed'
-  }
-
-  return Object.freeze({ fetch, preconnect, stats: () => ({ ...stats }), close() { dropWarm(); agents['https:'].destroy(); agents['http:'].destroy() } })
+  return Object.freeze({ fetch, stats: () => ({ ...stats }), close() { agents['https:'].destroy(); agents['http:'].destroy() } })
 }
