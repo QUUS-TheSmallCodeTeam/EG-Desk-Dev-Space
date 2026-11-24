@@ -77,6 +77,7 @@ import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { buildCodexAppServerLaunch, createNativeCapabilityCache, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 import { createSlotReadiness, isProfileSlot } from './egdesk-slot-readiness.mjs'
 import { createProfileReaders } from './egdesk-profile-readers.mjs'
+import { createProfileAccessFailures } from './egdesk-profile-access.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
 import { createLocalCapacity } from './egdesk-local-capacity.mjs'
@@ -382,11 +383,13 @@ const modelCatalog = createModelCatalogSync({
 // L1 c22: each profile server's binary is probed on its own (dynamicTools, ephemeral, turn/steer, thread/delete), remembered per binary; nothing is
 // inherited from the shared app-server's probe.
 const profileCapabilityCache = createNativeCapabilityCache()
+// L1 c25 (flag EGDESK_ROOM_ACCOUNT=on): the last access failure (auth, quota, permission) of each profile's own server, as status data per profile
+const profileAccess = createProfileAccessFailures({ enabled: () => process.env.EGDESK_ROOM_ACCOUNT === 'on', authOf: id => codexProfileServers.snapshot(id)?.auth ?? null })
 const codexProfileServers = createCodexProfileAppServers({
   resolveHome: id => engineProfiles.ownedCodexHome(id),
   inspectCapabilities: bin => profileCapabilityCache(bin),
   // L1 c24: a profile's reader (flag) consumes the events of its own read-only child threads; everything else goes on as before
-  onNotification: (id, message) => { if (!profileReaders.handleNotification(id, message)) codexEngine.notify(message, id) },
+  onNotification: (id, message) => { profileAccess.notify(id, message); if (!profileReaders.handleNotification(id, message)) codexEngine.notify(message, id) },
   onServerRequest: (id, message) => { if (!profileReaders.handleServerRequest(id, message)) codexEngine.serverRequest(message, id) },
   onConnection: (id, state) => codexEngine.connection(state, id),
   onChange: () => engineStatus.check(),
@@ -397,7 +400,8 @@ const codexProfileServers = createCodexProfileAppServers({
 const codexEngine = createCodexEngineAdapter({
   request: (method, params) => appServerRequest(method, params),
   respond: nativeRespond,
-  profiles: codexProfileServers,
+  // L1 c25: a turn/start rejection on a profile's server is recorded for THAT profile (flag EGDESK_ROOM_ACCOUNT=on); every other call passes straight through
+  profiles: { ...codexProfileServers, request: (id, method, params) => profileAccess.request(id, method, () => codexProfileServers.request(id, method, params)) },
   getOwnerKey: () => publicAuthIdentityKey(authState),
   isReady: () => appServerReady,
   getModels: () => modelCatalog.snapshot(),
@@ -415,7 +419,10 @@ const codexEngine = createCodexEngineAdapter({
     residentProcesses: (appServerProcess && appServerProcess.exitCode == null ? 1 : 0) + codexProfileServers.residentCount(),
     residentLimit: MAX_ENGINE_PROFILES,
     models: modelCatalog.snapshot(),
-    extraProfiles: engineProfiles.list('codex').filter(row => row.owned).map(row => ({ ...row, ...codexProfileServers.snapshot(row.id) })),
+    extraProfiles: engineProfiles.list('codex').filter(row => row.owned).map(row => {
+      const failure = profileAccess.failureOf(row.id)
+      return { ...row, ...codexProfileServers.snapshot(row.id), ...(failure ? { accessFailure: failure } : {}) }
+    }),
   }),
 })
 // D-S1 (b) (2026-10-24): the installed, unmodified `claude`, one child
