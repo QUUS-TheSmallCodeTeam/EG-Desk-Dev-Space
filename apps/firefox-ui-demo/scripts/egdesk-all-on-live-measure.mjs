@@ -60,14 +60,14 @@ async function agentAnswersTask(w) {
   await agentSays(w, note?.next === 'ask_user_in_chat' ? AGENT_SAYS.ask : note?.status === 'done' ? AGENT_SAYS.got : AGENT_SAYS.stuck)
 }
 // The result card needs its owner, who looks elsewhere; a second member is on the desk. The request body is the chrome builder's (attentionRequest),
-// posted the way the surface posts its placement requests ({ clientThreadId, conversationId, dto }). No surface code sends attention requests yet.
+// posted the way the surface posts its placement requests ({ clientThreadId, conversationId, dto }). No surface code sends this request yet.
 async function resultNeedsOwner(w, j) {
   w.presenceMirror.accept(people())
   const cards = RESULT_CARDS()
   const scene = WP.enumerateWorkScene({ presence: w.presenceMirror.snapshot(), cards,
     tasks: [{ id: 'run-1', state: 'waiting_owner', requester: 'self', waiting: ['self'], ownerMustAct: true, surfaces: [{ kind: 'result', cardId: 'agent-result' }] }] })
-  const attention = WP.attentionRequest(scene, { taskId: 'run-1', cardId: 'agent-result' })
-  j.note.attention = attention ? (await w.http('POST', '/decision/work-placement/request', { clientThreadId: DM, conversationId: w.state.lastOf.get(DM)?.conversationId ?? null, dto: attention.dto })).body : null
+  const built = WP.attentionRequest(scene, { taskId: 'run-1', cardId: 'agent-result' })
+  j.note.ownerRequest = built ? (await w.http('POST', '/decision/work-placement/request', { clientThreadId: DM, conversationId: w.state.lastOf.get(DM)?.conversationId ?? null, dto: built.dto })).body : null
   j.note.cards = cards.map(c => ({ id: c.id, kind: c.kind, creator: c.creator, rect: c.rect }))
   await w.advance(25000); w.presenceMirror.accept(people()); await w.advance(40000); await w.idle()
 }
@@ -253,7 +253,7 @@ function seenAfter(w, id, before, j) {
     runs,
     board: { observe: j.note.briefing && id === 's3-briefing' ? j.note.briefing : null, published: stepEvents.filter(e => e.event === 'briefing.published').length,
       cards: stepEvents.filter(e => e.event === 'output.published').map(e => ({ title: e.details?.output?.title ?? null, zone: 'board' })), parts },
-    placement: { submitted: /^s[78]-/.test(id) ? j.note.attention ?? null : null, cards: /^s[78]-/.test(id) ? j.note.cards ?? [] : [],
+    placement: { submitted: /^s[78]-/.test(id) ? j.note.ownerRequest ?? null : null, cards: /^s[78]-/.test(id) ? j.note.cards ?? [] : [],
       records: w.workPlacement.records().slice(before.records).map(r => ({ kind: r.kind, surface: r.surface, source: r.source, would: r.would })), facts: w.workPlacement.facts(DM) },
     browser: { note: note ? { status: note.status, next: note.next, code: note.code ?? null, candidates: note.candidates ?? [], stepsDone: note.stepsDone ?? null } : null,
       acts: w.acts.slice(before.acts).map(a => ({ type: a.type, url: a.url })) },
@@ -284,7 +284,7 @@ export function bodyFromProduct(stack) {
 }
 const estimateOf = (wire, body) => independentEstimate(wire.questions.filter(q => q.type === 'choice').length, wire.questions.filter(q => q.type !== 'choice').length, Buffer.byteLength(body))
 export function createMeasureTransport({ send = false, key = null, fetchImpl = globalThis.fetch, caps, plan, now = null, scripted = scriptedDecisions() } = {}) {
-  const ledger = { requests: 0, sent: 0, tokens: 0, reportedTokens: 0, byStep: {}, stopped: null, refusedBodies: 0 }
+  const ledger = { requests: 0, sent: 0, tokens: 0, reportedTokens: 0, byStep: {}, stopped: null, refusedBodies: 0, onWire: 0 }
   const stop = (reason, step) => { if (!ledger.stopped) ledger.stopped = { reason, step } }
   const transport = async ({ body, wire, row }) => {
     const refusal = bodyFromProduct(deepStack())
@@ -308,7 +308,18 @@ export function createMeasureTransport({ send = false, key = null, fetchImpl = g
     const one = { set: plan.set, passRule: 'one request of the all-on journey; judged by the pre-registered journey plan', tokenCeiling: caps.tokenCeiling - (ledger.tokens - est),
       totals: { requests: 1, estInputTokens: est, independentEst: est },
       requests: [{ id, bytes: Buffer.from(body, 'utf8'), sha256: row.sha256, questions: wire.questions, expect: [], estInputTokens: est }] }
-    const outcome = await runPlan({ plan: one, key, send: true, fetchImpl, ...(now ? { now } : {}) })
+    // The product sends some requests side by side. A failure is noted the moment the network answers, and no request is handed to the
+    // network once one is noted (a request already on the wire then cannot be recalled; it is recorded with the rest).
+    const network = async (url, init) => {
+      if (ledger.stopped) throw Object.assign(new Error('not sent'), { name: 'StoppedError' })
+      ledger.onWire++
+      try {
+        const response = await fetchImpl(url, init)
+        if (response?.status !== 200) stop(`http_${response?.status}`, step)
+        return response
+      } catch (error) { stop(error?.name === 'AbortError' ? 'timeout' : 'network', step); throw error } finally { ledger.onWire-- }
+    }
+    const outcome = await runPlan({ plan: one, key, send: true, fetchImpl: network, ...(now ? { now } : {}) })
     const result = outcome.results[id] ?? null
     ledger.sent += outcome.sent; row.sent = outcome.sent > 0
     const reported = Number.isFinite(result?.usage?.input_tokens) ? result.usage.input_tokens : null
@@ -317,6 +328,8 @@ export function createMeasureTransport({ send = false, key = null, fetchImpl = g
     if (reported !== null) { ledger.tokens += reported - est; use.tokens += reported - est }
     if (result) row.netElapsedMs = result.elapsedMs
     if (outcome.stoppedBecause) stop(outcome.stoppedBecause, step)
+    // Stopped by another request while this one waited for its turn on the wire: not sent (runPlan reports it as a network error).
+    if (!outcome.sent && result?.error === 'network' && ledger.stopped?.reason !== 'network') row.refused = `stopped:${ledger.stopped.reason}`
     if (!result || result.status === 0) throw Object.assign(new Error('not answered'), { code: outcome.stoppedBecause ?? 'network' })
     return { status: result.status, json: { answers: result.answers, ...(result.usage ? { usage: { input_tokens: result.usage.input_tokens, output_tokens: result.usage.output_tokens } } : {}), ...(result.model ? { model: result.model } : {}) } }
   }
