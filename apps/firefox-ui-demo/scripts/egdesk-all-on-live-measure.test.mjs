@@ -10,9 +10,10 @@ import path from 'node:path'
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
 import { DECISIONS_ENDPOINT, DECISION_MODEL } from '../helper/egdesk-decision-client.mjs'
 import { allOnWorld, scriptedDecisions } from './egdesk-all-on.support.mjs'
-import { CHECK_NAMES, DEFAULT_CAPS, OWNERS, PLAN_FILE, PLAN_FILE_V2, SCRIPT_FILE, STEPS, createMeasureTransport, loadJourneyPlan, main, runJourney } from './egdesk-all-on-live-measure.mjs'
+import { CHECK_NAMES, DEFAULT_CAPS, OWNERS, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, SCRIPT_FILE, STEPS, createMeasureTransport, loadJourneyPlan, main, runJourney } from './egdesk-all-on-live-measure.mjs'
 
 const KEY = 'sk-synthetic-not-a-key-l2c11-000000000001'
+const CORE = STEPS.filter(s => s.since === undefined)
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const tmp = t => { const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-live-measure-')); t.after(() => rmSync(dir, { recursive: true, force: true })); return dir }
 
@@ -54,7 +55,7 @@ const REGISTERED_PLAN_SHA256 = 'eb1ebdb7c34df7f14412fbcc9313b253a69cc89d67cc5450
 test('plan: registered before sending (pinned hash), one entry per journey step, every expectation names a check, a severity and an owning lane', () => {
   assert.equal(sha256(readFileSync(PLAN_FILE)), REGISTERED_PLAN_SHA256)
   const plan = loadJourneyPlan()
-  assert.deepEqual(plan.steps.map(s => s.id), STEPS.map(s => s.id))
+  assert.deepEqual(plan.steps.map(s => s.id), CORE.map(s => s.id), 'v1 lists every core step (steps added later carry `since` and are not part of v1)')
   for (const step of plan.steps) {
     assert.ok(step.expect.some(e => e.severity === 'hard'), `${step.id} has a hard expectation`)
     for (const e of step.expect) { assert.ok(CHECK_NAMES.includes(e.check)); assert.ok(OWNERS.includes(e.owner)); assert.ok(['hard', 'soft'].includes(e.severity)) }
@@ -69,8 +70,8 @@ test('dry run (the default): the journey runs on the scripted answers, the step 
   assert.equal(run.code, EXIT.ok, run.err.join('\n'))
   assert.equal(net.calls.length, 0)
   assert.equal(run.rows[0].mode, 'dry_run')
-  const table = run.rows.slice(1, 1 + STEPS.length)
-  assert.deepEqual(table.map(row => row.step), STEPS.map(s => s.id))
+  const table = run.rows.slice(1, 1 + CORE.length)
+  assert.deepEqual(table.map(row => row.step), CORE.map(s => s.id), 'the default (v1) run runs the core steps only')
   for (const row of table) { assert.equal(row.state, 'done'); assert.equal(typeof row.estInputTokens, 'number'); assert.equal(typeof row.families, 'object') }
   const total = run.rows.at(-1)
   assert.equal(total.sent, 0); assert.ok(total.requests > 0); assert.ok(total.inputTokens > 0 && total.inputTokens <= DEFAULT_CAPS.tokenCeiling, 'the default ceiling covers the dry estimate')
@@ -136,8 +137,8 @@ test('guard: every body of the run came from the product client; a body handed t
 
 test('guard (static): the script and its plan build no request and know no question name, so a change of request shape needs no change here', async () => {
   // v1: its whole text. v2: what the script reads (ids, checks, arguments); its 'predicted' prose quotes the c16 evidence by question name.
-  const v2 = JSON.parse(readFileSync(PLAN_FILE_V2, 'utf8'))
-  const source = readFileSync(SCRIPT_FILE, 'utf8'), plan = readFileSync(PLAN_FILE, 'utf8') + JSON.stringify(v2.steps.map(s => ({ id: s.id, caps: s.caps, expect: s.expect.map(e => ({ id: e.id, check: e.check, args: e.args ?? null })) })))
+  const v2 = JSON.parse(readFileSync(PLAN_FILE_V2, 'utf8')), v3 = JSON.parse(readFileSync(PLAN_FILE_V3, 'utf8'))
+  const source = readFileSync(SCRIPT_FILE, 'utf8'), plan = readFileSync(PLAN_FILE, 'utf8') + JSON.stringify([...v2.steps, ...v3.steps].map(s => ({ id: s.id, caps: s.caps, expect: s.expect.map(e => ({ id: e.id, check: e.check, args: e.args ?? null })) })))
   const imports = [...source.matchAll(/^import .* from '([^']+)'/gm)].map(m => m[1]).sort()
   assert.deepEqual(imports, ['../helper/egdesk-decision-client.mjs', '../helper/egdesk-decision-real-runner.mjs', '../overlay/resources/EGDeskBriefingHost.sys.mjs',
     '../overlay/resources/EGDeskWorkPlacement.sys.mjs', './egdesk-all-on.support.mjs', 'node:crypto', 'node:fs', 'node:path', 'node:url'])

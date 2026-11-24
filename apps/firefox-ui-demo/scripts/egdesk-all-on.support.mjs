@@ -281,7 +281,9 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
     if (/on the desk/.test(prompt)) return state.wording.pointer ?? '결과는 지금 보고 계신 곳 왼쪽 작업 영역에 있습니다. 확인이 필요합니다.'
     if (/ask the person|need one piece of information/.test(prompt)) return state.wording.ask ?? null
     if (/unusually long/.test(prompt)) return state.wording.stalled ?? null
-    return state.wording.wait ?? '확인하는 데 시간이 조금 걸리고 있어요. 곧 이어서 말씀드릴게요.'
+    // wording.wait may be a function of the prompt (a writer that words the note from the facts it was given).
+    const wait = typeof state.wording.wait === 'function' ? state.wording.wait(prompt) : state.wording.wait
+    return wait ?? '확인하는 데 시간이 조금 걸리고 있어요. 곧 이어서 말씀드릴게요.'
   }
   chat = new CodexChatRuntime({
     store, requireStore: true, contexts, getOwnerKey: () => OWNER, toolProviders: [browserProvider], verifyFile: async () => null, resolveProjectWorkspace: async () => null,
