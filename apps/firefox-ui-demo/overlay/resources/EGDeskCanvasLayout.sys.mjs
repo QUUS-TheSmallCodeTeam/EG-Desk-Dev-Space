@@ -327,7 +327,10 @@ export function createLayoutHistory({ limit = LAYOUT_HISTORY_LIMIT, tolerance = 
   let undos = [];
   let redos = [];
 
-  function record({ label = 'move', items = [], groups = null } = {}) {
+  // `extra` ({before, after}, plain JSON owned by the host: e.g. stacking and camera of an arrangement), `token` (host identity of
+  // the step) and `guard(expect)` (host check that the extra is still as the step left it) let one history carry a step whose
+  // effect is more than rects. The history never interprets them.
+  function record({ label = 'move', items = [], groups = null, extra = null, token = null, guard = null } = {}) {
     const byId = new Map();
     for (const item of Array.isArray(items) ? items : []) {
       const id = viewId(item?.id);
@@ -341,8 +344,10 @@ export function createLayoutHistory({ limit = LAYOUT_HISTORY_LIMIT, tolerance = 
     const groupStep = groups && typeof groups === 'object'
       ? { before: normalizeCanvasGroups(groups.before), after: normalizeCanvasGroups(groups.after) } : null;
     const groupsChanged = !!groupStep && JSON.stringify(groupStep.before) !== JSON.stringify(groupStep.after);
-    if (!changed.length && !groupsChanged) return false;
-    undos.push({ label: typeof label === 'string' && LABEL_PATTERN.test(label) ? label : 'move', items: changed, groups: groupsChanged ? groupStep : null });
+    const hostExtra = extra && typeof extra === 'object' && extra.before && extra.after ? JSON.parse(JSON.stringify({ before: extra.before, after: extra.after })) : null;
+    if (!changed.length && !groupsChanged && !hostExtra) return false;
+    undos.push({ label: typeof label === 'string' && LABEL_PATTERN.test(label) ? label : 'move', items: changed, groups: groupsChanged ? groupStep : null,
+      extra: hostExtra, token: token ?? null, guard: typeof guard === 'function' ? guard : null });
     if (undos.length > max) undos = undos.slice(undos.length - max);
     redos = [];
     return true;
@@ -354,9 +359,13 @@ export function createLayoutHistory({ limit = LAYOUT_HISTORY_LIMIT, tolerance = 
     const read = typeof readRect === 'function' ? readRect : () => null;
     const staleIds = entry.items.filter(item => !sameRect(toWorldRect(read(item.id)), item[expect], tolerance)).map(item => item.id);
     if (staleIds.length) return { status: 'stale', label: entry.label, rects: [], staleIds, groups: null };
+    let guarded = true;
+    try { guarded = !entry.guard || entry.guard(expect) === true; } catch { guarded = false; }
+    if (!guarded) return { status: 'stale', label: entry.label, rects: [], staleIds: [], groups: null };
     to.push(entry);
     return {
       status: done, label: entry.label, rects: entry.items.map(item => ({ id: item.id, ...item[apply] })), staleIds: [],
+      extra: entry.extra ? JSON.parse(JSON.stringify(entry.extra[apply])) : null, token: entry.token,
       groups: entry.groups ? entry.groups[apply].map(group => ({ id: group.id, viewIds: [...group.viewIds], ...(group.groupIds ? { groupIds: [...group.groupIds] } : {}) })) : null,
     };
   }
@@ -381,6 +390,14 @@ export function createLayoutHistory({ limit = LAYOUT_HISTORY_LIMIT, tolerance = 
     },
     undo(readRect) { return step(undos, redos, 'after', 'before', readRect, 'undone'); },
     redo(readRect) { return step(redos, undos, 'before', 'after', readRect, 'redone'); },
+    // Identity of the newest undoable step, so a host can tell whether its own step is the latest one.
+    top: () => (undos.length ? { label: undos.at(-1).label, token: undos.at(-1).token } : null),
+    drop(token) {
+      if (token == null) return false;
+      const n = undos.length + redos.length;
+      undos = undos.filter(entry => entry.token !== token); redos = redos.filter(entry => entry.token !== token);
+      return undos.length + redos.length !== n;
+    },
     canUndo: () => undos.length > 0,
     canRedo: () => redos.length > 0,
     size: () => ({ undo: undos.length, redo: redos.length }),

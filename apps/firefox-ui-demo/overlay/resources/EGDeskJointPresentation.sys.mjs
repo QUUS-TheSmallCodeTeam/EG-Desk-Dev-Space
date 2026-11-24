@@ -145,7 +145,7 @@ const normalizeCue = cue => {
 
 // Controller owns a single session and one local inverse. Dependency functions are privileged, synchronous except request.
 export function createPresentationController(h) {
-  let active = null, undo = null;
+  let active = null, undo = null, applied = 0;
   const now = h.now || (() => performance.now());
   const checkAtHost = !!(h.readDecision || h.verifyDecisionAuthority);
   function read(key) { try { return snapshot(h.read(key)); } catch { return null; } }
@@ -364,12 +364,13 @@ export function createPresentationController(h) {
     const { camera, targets } = plan, key = a.key;
     // Dismiss first: camera/geometry host notifications cannot invalidate a committing panel.
     close({ restoreFocus: true });
-    if (!same(a.snapshot, read(key)) || h.commit(key, { camera, targets }) !== true) {
+    const token = `arrange-${++applied}`;
+    if (!same(a.snapshot, read(key)) || h.commit(key, { camera, targets }, { kind: 'apply', token }) !== true) {
       h.notice?.('화면이 바뀌어 적용하지 않았습니다. 아무것도 옮기지 않았습니다.');
       return false;
     }
     const after = read(key);
-    undo = after ? { key, snapshot: after, before } : null;
+    undo = after ? { key, snapshot: after, before, token } : null;
     if (undo) h.notice?.('내 화면에 적용했습니다. 다시 열고 ‘마지막 적용 되돌리기’를 누르면 원래대로 돌아갑니다.');
     return true;
   }
@@ -377,9 +378,15 @@ export function createPresentationController(h) {
     if (!sync() || !undo || active.key !== undo.key || active.job) return false;
     const record = undo;
     close({ restoreFocus: true, forgetUndo: true });
-    return undoStillValid(record, read(record.key)) && h.commit(record.key, record.before) === true;
+    if (!undoStillValid(record, read(record.key))) return false;
+    // The same step lives in the global history: revert it there when it is the newest, otherwise drop it so nothing can undo it twice.
+    let viaHistory = false;
+    try { viaHistory = h.undoApplied?.(record.token) === true; } catch {}
+    return viaHistory || h.commit(record.key, record.before, { kind: 'undo' }) === true;
   }
-  return { open, close, sync, view, select, focus, choose, prepare, confirm, cancelDecision, apply, undo: undoOnce };
+  // The global Undo/Redo reverted or re-applied this Apply: the panel's own inverse no longer describes the screen.
+  const forgetUndo = token => { if (undo && undo.token === token) undo = null; };
+  return { open, close, sync, view, select, focus, choose, prepare, confirm, cancelDecision, apply, undo: undoOnce, forgetUndo };
 }
 
 // Firefox chrome UI: real HTML controls, modeless, with an independent, non-hit-testable world layer.
@@ -560,5 +567,6 @@ export function createJointPresentation(h) {
     close(options) { api.close(options); },
     isOpen(boardKey) { return panel?.isConnected === true && (boardKey === undefined || key === boardKey); },
     handleEscape(ev) { return !!panel && onKey(ev); },
+    forgetUndo(token) { api.forgetUndo(token); },
   };
 }
