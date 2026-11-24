@@ -30,6 +30,8 @@ const MODES = new Set(['advisory', 'on'])
 const QUESTIONS = new Set(['answer_type', 'time_intent', 'relevance', 'speech_axis', 'speech_predicate', 'recall', 'topic_route', 'choice', 'next_step', 'page_state', 'goal_met', 'terminal_state', 'terminal_risk', 'log_block', 'claim_support', 'claim_present', 'term_internal', 'triage_courtesy', 'triage_need', 'triage_record', 'write_target'])
 const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed', 'none', 'act', 'hold', 'fetch'])
 // Turn memory (advisory): where in the session the turn was, what the fetch did, and how long each stage took.
+// Draft check (advisory): what the check would have done to the posted answer, and what it would fall back to without a revision.
+const CHECKS = new Set(['would_pass', 'would_revise', 'would_trim', 'would_ask'])
 const POSITIONS = new Set(['first', 'mid'])
 const MEMORY = new Set(['ran', 'skipped', 'partial', 'fallback', 'empty'])
 const ms = value => (Number.isFinite(value) && value >= 0 ? Math.min(120000, Math.round(value / 10) * 10) : null)
@@ -108,6 +110,12 @@ export function normalizeEntry(raw, now = Date.now()) {
   const list = Array.isArray(raw.judgments) ? raw.judgments.slice(0, MAX_JUDGMENTS).map(judgment).filter(Boolean) : []
   entry.judgments = list
   put(entry, 'candidates', count(raw.candidates, 1000)); put(entry, 'judgedTotal', count(raw.judgedTotal, 1000))
+  put(entry, 'check', word(CHECKS, raw.check)); put(entry, 'ifUnrevised', word(CHECKS, raw.ifUnrevised))
+  if (record(raw.evidence)) {
+    const counts = {}
+    for (const key of ['items', 'opaque', 'sentences', 'terms']) put(counts, key, count(raw.evidence[key], 99))
+    if (Object.keys(counts).length) entry.evidence = counts
+  }
   put(entry, 'position', word(POSITIONS, raw.position)); put(entry, 'memory', word(MEMORY, raw.memory)); put(entry, 'timing', timing(raw.timing))
   put(entry, 'fallback', word(FALLBACK, raw.fallback)); put(entry, 'attached', typeof raw.attached === 'boolean' ? raw.attached : null)
   return entry

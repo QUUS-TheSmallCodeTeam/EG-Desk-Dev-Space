@@ -179,6 +179,11 @@ function selectedSummary(items) {
     status: item.candidate.status, sourceRef: item.candidate.sourceRef, probability: item.probability, reason: item.reason }))
 }
 
+// Process-local list of what was attached, as the draft check's evidence options: time and provenance tags plus the catalog text
+// (title and summary) that already went to the decision model, never the loaded body. guarded marks items that need a grant.
+const draftEvidenceOf = items => items.map(item => ({ id: item.candidate.id, kind: item.candidate.kind, time: item.candidate.timeSlice, status: item.candidate.status,
+  source: item.candidate.sourceRef, text: [item.candidate.title, item.candidate.summary].filter(Boolean).join(' — '), guarded: Boolean(item.candidate.mayRead) }))
+
 const reasonRank = reason => (reason === 'mandatory' ? 0 : reason === 'mentioned' ? 1 : 2)
 
 const CONTEXT_RULES = [
@@ -337,7 +342,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     const safe = fileItems.filter(item => mayRead(item.candidate))
     if (!safe.length) return skipped('evidence_unavailable')
     const guardedSafe = safe.filter(item => item.candidate.mayRead)
-    return { status: 'ready', selected: selectedSummary(safe), receipt: null,
+    return { status: 'ready', selected: selectedSummary(safe), receipt: null, draftEvidence: draftEvidenceOf(safe),
       extraContext: { [DECISION_CONTEXT_KEY]: [PACKET_HEAD + evidenceRule, ...safe.map(item => item.block)].join('\n\n') },
       ...(guardedSafe.length ? { mayDispatch: () => guardedSafe.every(item => mayRead(item.candidate)),
         noteSent: () => { for (const item of guardedSafe) { try { item.candidate.noteSent?.() } catch {} } } } : {}) }
@@ -373,6 +378,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     // Process-local numbers for the calibration record; never part of the receipt, activity or any event.
     calibration,
     localOnly,
+    draftEvidence: draftEvidenceOf(items),
     extraContext: packet ? { [DECISION_CONTEXT_KEY]: packet } : {},
     latencyMs: result.latencyMs,
     model: result.model,
