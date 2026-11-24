@@ -323,6 +323,9 @@ test('C11 on + heartbeat: the task loop feeds step count and waiting state to th
     assert.equal(base.h.chat.heartbeatFor('selected-chat'), null, 'no heartbeat without the flag')
     w.h.finish(first)
     await new Promise(resolve => setImmediate(resolve))
-    assert.deepEqual([hb.state, hb.stopReason, w.h.chat.heartbeats.size], ['stopped', 'run_end', 0])
+    // The run ended; the conversation's session goes on at the idle tempo until it idles out or the conversation is closed.
+    assert.deepEqual([hb.state, hb.tempo, w.h.chat.heartbeats.size], ['running', 'idle', 1])
+    assert.equal(w.h.chat.closeSession('selected-chat'), true)
+    assert.deepEqual([hb.state, hb.stopReason, w.h.chat.heartbeats.size], ['stopped', 'closed', 0])
   } finally { w.h.chat.heartbeats.stopAll('restart') }
 })

@@ -9,6 +9,15 @@ import { A, MID, SLOW, world } from './egdesk-heartbeat-flow.fixture.mjs'
 // The live-session heartbeat inside the real runtime, over a mock engine and a mock decision model, on a virtual clock
 // (egdesk-heartbeat-flow.fixture.mjs): virtual monotonic time and virtual timers drive the beats; no network, no Codex binary.
 
+// After its run the session goes on at the idle tempo and ends by itself: no request while idle, no timer left afterwards.
+async function idleOut(w, d) {
+  const requests = w.requests.flow, beats = d.hb.beats
+  assert.deepEqual([d.hb.state, d.hb.tempo, w.chat.heartbeatFor(d.name) === d.hb], ['running', 'idle', true], 'the run ended; the session goes on at the idle tempo')
+  await w.advance(HEARTBEAT_LIMITS.lingerMs)
+  assert.deepEqual([d.hb.state, d.hb.stopReason, w.chat.heartbeatFor(d.name), w.requests.flow, d.hb.beats - beats], ['stopped', 'idle', null, requests, HEARTBEAT_LIMITS.lingerMs / HEARTBEAT_LIMITS.idleBeatMs],
+    'nothing pending: the idle session ends after the linger time, with no request')
+}
+
 test('40 s multi-step run: 8 beats, 2 decision requests, one wait message, then the final answer; every asked beat is recorded without content', async t => {
   const w = world(t), d = await w.dm('dm-long')
   assert.equal(d.hb.state, 'running')
@@ -26,7 +35,8 @@ test('40 s multi-step run: 8 beats, 2 decision requests, one wait message, then 
   assert.deepEqual(entries.map(e => [e.flow, e.posted, e.beat.n, e.beat.phase, e.beat.sinceUserS, e.attached]), [['explain_wait', 'model', 2, 'tool_running', 10, true], ['none', 'none', 8, 'thinking', 40, false]])
   assert.equal(entries[1].beat.sincePostedS, 30)
   assert.ok(!JSON.stringify(entries).includes('시간이'), 'no message text in the record')
-  assert.deepEqual([d.hb.state, d.hb.stopReason, w.chat.heartbeatFor('dm-long'), w.chat.heartbeats.size, w.timers.length], ['stopped', 'run_end', null, 0, 0])
+  await idleOut(w, d)
+  assert.deepEqual([w.chat.heartbeats.size, w.timers.length, w.flowEntries().length], [0, 0, 2], 'idle beats are not asked and not recorded')
   t.diagnostic(`40 s run: beats=${d.hb.beats} flowRequests=${w.requests.flow} draftChecks=${w.requests.draft} messages=${d.assistant().length} (1 intermediate + final) forkTurns=${w.forkPrompts.length}`)
 })
 
@@ -51,7 +61,7 @@ test('engine silent for 25 s: the heartbeat still beats, the stall is offered at
   assert.deepEqual(d.assistant(), [FLOW_COPY.stalled, '늦어서 죄송합니다. 확인을 마쳤습니다.'])
   const entry = w.flowEntries().at(-1)
   assert.deepEqual([entry.flow, entry.posted, entry.beat.n, entry.beat.phase, entry.beat.sinceEngineS], ['stalled', 'fallback', 5, 'thinking', 24])
-  assert.equal(d.hb.stopReason, 'run_end'); assert.equal(w.timers.length, 0)
+  await idleOut(w, d); assert.equal(w.timers.length, 0)
   t.diagnostic(`silent engine: beats=${d.hb.beats} flowRequests=${w.requests.flow} messages=${d.assistant().length} (fixed line at 31 s + final)`)
 })
 
@@ -92,7 +102,9 @@ test('browser task waiting on the person: the heartbeat beats and reports it, an
 test('quick 3 s answer: no beat, no decision request, no timer left', async t => {
   const w = world(t), d = await w.dm('dm-quick')
   await w.advance(3000); await d.final('네, 알겠습니다.')
-  assert.deepEqual([d.hb.beats, w.requests.flow, d.hb.stopReason, w.timers.length], [0, 0, 'run_end', 0])
+  assert.deepEqual([d.hb.beats, w.requests.flow, d.hb.tempo, w.timers.length], [0, 0, 'idle', 1], 'no beat during the run; one timer: the idle beat')
+  assert.deepEqual(d.assistant(), ['네, 알겠습니다.'])
+  await idleOut(w, d); assert.equal(w.timers.length, 0)
   assert.deepEqual(d.assistant(), ['네, 알겠습니다.'])
 })
 
@@ -111,20 +123,22 @@ test('two runs in different DMs at once: independent heartbeats on their own cou
   assert.deepEqual(w.flowEntries().map(e => [e.beat.n, e.beat.sinceUserS]), [[2, 10], [2, 10]])
   assert.equal(w.chat.heartbeats.size, 2)
   await w.advance(1000); await a.final('A 끝났습니다.')
-  assert.deepEqual([a.hb.state, b.hb.state, w.chat.heartbeats.size], ['stopped', 'running', 1])
+  assert.deepEqual([a.hb.tempo, b.hb.tempo, w.chat.heartbeats.size], ['idle', 'active', 2], 'A\'s run ended: its session idles, B\'s is untouched')
   await w.advance(11000) // 42 s
   assert.equal(a.beats.length, 6); assert.deepEqual(b.beats.map(x => x.at).slice(4), [32000, 37000, 42000])
   await b.final('B 끝났습니다.')
   assert.deepEqual(a.history(), [['user', 'A 작업'], ['assistant', MID], ['assistant', 'A 끝났습니다.']])
   assert.deepEqual(b.history(), [['user', 'B 작업'], ['assistant', MID], ['assistant', 'B 끝났습니다.']])
-  assert.deepEqual([w.chat.heartbeats.size, w.timers.length], [0, 0])
+  await w.advance(HEARTBEAT_LIMITS.lingerMs)
+  assert.deepEqual([a.hb.stopReason, b.hb.stopReason, w.chat.heartbeats.size, w.timers.length, w.requests.flow], ['idle', 'idle', 0, 0, 2])
   t.diagnostic(`two DMs: beats A=${a.beats.length} B=${b.beats.length} flowRequests=${w.requests.flow} messages A=${a.assistant().length} B=${b.assistant().length}`)
 })
 
-test('lifecycle in the runtime: cancel, disconnect, a lost process and a refused turn stop the heartbeat with their reason; a second message leaves a live one alone', async t => {
+test('lifecycle in the runtime: a cancelled run idles the session; disconnect, a lost process and a refused first turn stop the heartbeat with their reason; a second message leaves a live one alone', async t => {
   const cancelled = world(t), c = await cancelled.dm('dm-cancel')
   await cancelled.advance(6000); await c.final(null, 'interrupted')
-  assert.deepEqual([c.hb.state, c.hb.stopReason, c.hb.beats, cancelled.timers.length], ['stopped', 'cancel', 1, 0])
+  assert.deepEqual([c.hb.state, c.hb.tempo, c.hb.beats], ['running', 'idle', 1], 'a cancelled run ends the run, not the session')
+  await idleOut(cancelled, c); assert.equal(cancelled.timers.length, 0)
   const lost = world(t), l = await lost.dm('dm-lost')
   await lost.advance(6000); lost.chat.setConnection(false)
   assert.deepEqual([l.hb.state, l.hb.stopReason], ['stopped', 'disconnect'])
@@ -138,6 +152,9 @@ test('lifecycle in the runtime: cancel, disconnect, a lost process and a refused
   await assert.rejects(busy.chat.send({ clientThreadId: 'dm-busy', profileId: A, replyDestination: 'direct', conversationId: b.r.conversationId, message: '하나 더', requestId: 'req-2' }), { code: 'RUN_IN_PROGRESS' })
   assert.deepEqual([busy.chat.heartbeatFor('dm-busy') === b.hb, b.hb.state, b.hb.beats], [true, 'running', 1])
   await b.final('끝.')
+  // A lost connection also ends a session that is idle after its run.
+  busy.chat.setConnection(false)
+  assert.deepEqual([b.hb.state, b.hb.stopReason, busy.chat.heartbeats.size, busy.timers.length], ['stopped', 'disconnect', 0, 0])
   const refused = world(t, { failTurn: true })
   await assert.rejects(refused.chat.send({ clientThreadId: 'dm-refused', profileId: A, replyDestination: 'direct', message: 'x', requestId: 'r1' }))
   assert.deepEqual([refused.chat.heartbeats.size, refused.timers.length], [0, 0])

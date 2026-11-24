@@ -34,9 +34,9 @@ const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed'
 const CHECKS = new Set(['would_pass', 'would_revise', 'would_trim', 'would_ask'])
 // Heartbeat (conversation flow): what was chosen at an asked beat, who wrote a posted message, and the beat's facts as
 // whole seconds and small counts. Durations only, never a clock time.
-const FLOW_KINDS = new Set(['none', 'explain_wait', 'ask_missing', 'milestone', 'stalled'])
+const FLOW_KINDS = new Set(['none', 'explain_wait', 'ask_missing', 'milestone', 'stalled', 'pointer'])
 const POSTED = new Set(['none', 'model', 'fallback'])
-const BEAT_PHASES = new Set(['thinking', 'tool_running', 'waiting_user', 'objective_step'])
+const BEAT_PHASES = new Set(['thinking', 'tool_running', 'waiting_user', 'objective_step', 'idle'])
 // Who proposed a question at a heartbeat (code names of features, never content). A new provider adds its name here.
 const BEAT_PROVIDERS = new Set(['message', 'placement', 'attention', 'presence', 'browser_task', 'terminal_loop'])
 const seconds = value => (Number.isFinite(value) && value >= 0 ? Math.min(3600, Math.round(value / 1000)) : null)
