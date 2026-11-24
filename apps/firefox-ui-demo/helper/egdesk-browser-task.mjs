@@ -39,6 +39,7 @@ const ASKED_CODES = new Set(['choice_needed', 'detail_needed'])
 const MAX_BRIEF_GOAL = 160
 const MAX_GOAL_CHANGES = 3, MAX_CHANGE_CHARS = 160, MAX_GOAL_BASE_CHARS = 200
 const MAX_FOUND_SEGMENTS = 3, MAX_FOUND_CHARS = 240
+export const MAX_PAGE_LINES = 8, MAX_PAGE_CHARS = 480 // c30: the lines of the page a finished task ends on (bounded), where nothing was located by an identifier
 // The last page action of a running task, as a closed word (the brief's `last`); a paused task's `last` is its pause code.
 const LAST_KIND_OF_TOOL = Object.freeze({ egdesk_browser_navigate: 'opened_link', egdesk_browser_scroll: 'scrolled', egdesk_browser_fill: 'filled_field' })
 const MAX_ENTRY_ASKS = 2 // "which card?" at most twice; then the request goes back to the ordinary turn
@@ -423,8 +424,26 @@ export function textNearIdentifier(segments, ids) {
   return out
 }
 
+/**
+ * pageLines(segments) -> up to MAX_PAGE_LINES visible text segments of the page the task ended on, in page order, MAX_PAGE_CHARS in all.
+ * c30 (real holdout2: the membership request finally entered, and a finished task's note said only "done"): a question whose answer is a fact on the page
+ * ("다음 결제일이 언제야?") has no identifier to locate it, so nothing of the page reached the model that writes the answer. Code does not guess which line
+ * answers (R3: what it can compute it computes, a judgment of meaning is not code's): the model that writes the reply gets the page's own first lines, bounded.
+ */
+export function pageLines(segments) {
+  const out = []
+  let used = 0
+  for (const raw of Array.isArray(segments) ? segments : []) {
+    const text = compactText(String(raw ?? ''), 120)
+    if (!text) continue
+    if (out.length >= MAX_PAGE_LINES || used + text.length > MAX_PAGE_CHARS) break
+    out.push(text); used += text.length
+  }
+  return out
+}
+
 /** The one structured line the subjective model receives. Closed vocabulary, counts, and (for a choice) up to three element labels. */
-export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [] }) {
+export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [], page = [] }) {
   const body = { id: task.taskId, status, ...(code ? { code } : {}),
     ...(task.goalChanges > 0 ? { goalChanges: Math.min(task.goalChanges, 9) } : {}), // c23: how many times the person changed the request while it ran
     ...(candidates.length ? { candidates: candidates.slice(0, 3).map(item => compactText(item.replace(/^\[[A-Z]\d+\]\s*/, ''), 60)) } : {}),
@@ -433,6 +452,8 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
     // c20 (owner decision c19 (3)): on a finished task, the page text code located next to the task's identifier, so the subjective model can
     // report it (page_text; only where the run's models may receive Browser data)
     ...(Array.isArray(found) && found.length ? { found: found.slice(0, MAX_FOUND_SEGMENTS) } : {}),
+    // c30: with no identifier to locate a status by, the page's own first lines (same gate as found)
+    ...(Array.isArray(page) && page.length && !(Array.isArray(found) && found.length) ? { page: page.slice(0, MAX_PAGE_LINES) } : {}),
     ...(typeof detail === 'string' && PUBLIC_CODE.test(detail) ? { detail } : {}),
     stepsDone: task.steps, actions: { ...task.actions } }
   const next = status === 'done' ? 'report_to_user' : status === 'need_context' ? 'ask_user_in_chat' : 'tell_user_and_ask_in_chat'
@@ -546,7 +567,8 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
         task.status = 'done'; task.pause = null; store.touch(task)
         remember(task, { status: 'done' })
         const found = pageTextInNote() === true ? textNearIdentifier(result.text, taskIdentifiers(task)) : []
-        return { handled: true, status: 'done', taskId: task.taskId, note: subjectiveNote(task, { status: 'done', found }) }
+        const page = pageTextInNote() === true && !found.length ? pageLines(result.text) : []
+        return { handled: true, status: 'done', taskId: task.taskId, note: subjectiveNote(task, { status: 'done', found, page }) }
       }
       case 'needs_user_context': {
         const candidates = result.candidates || []
