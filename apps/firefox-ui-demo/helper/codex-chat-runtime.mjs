@@ -5865,7 +5865,9 @@ export class CodexChatRuntime {
     if (turn.late) {
       const waited = await (until ? Promise.race([turn.late, until]) : turn.late)
       if (waited?.skip) return { skip: waited.skip, evidence: [] }
-      if (waited?.evidence?.length) now = { ...turn, evidence: [...waited.evidence, ...turn.evidence] }
+      // Lane L7's noteLateDecisionContext may already have put the same late items into the entry (flag keepLate): never twice.
+      const fresh = (waited?.evidence ?? []).filter(item => !turn.evidence.some(x => x.id === item.id && x.text === item.text))
+      if (fresh.length) now = { ...turn, evidence: [...fresh, ...turn.evidence] }
     }
     const own = answerEvidence(now, tools).filter(item => !item.opaque)
     const earlier = this.earlierEvidence?.get(run.clientThreadId) ?? []

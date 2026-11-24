@@ -309,6 +309,7 @@ test('c19: a turn whose context missed its deadline is checked against the resul
   const w = world(t, { candidates: [PLAN], flags: { held: true, flow: false } }); contextAs(w, 'late')
   const seen = draftRequests(w)
   w.chat.draftTurnEvidence = async (run, turn, tools) => ({ skip: null, evidence: answerEvidence(turn, tools) }) // the c18 reading
+  w.chat.noteLateDecisionContext = () => {} // and without lane L7's late reading (flag keepLate)
   await w.send(); await w.final('PostgreSQL 전환은 v16으로 다음 분기에 할 예정입니다.')
   assert.equal(seen.length, 0)
   assert.notEqual(w.posted().filter(([r]) => r === 'assistant')[0][1], 'PostgreSQL 전환은 v16으로 다음 분기에 할 예정입니다.', 'the c18 reading cuts it')
