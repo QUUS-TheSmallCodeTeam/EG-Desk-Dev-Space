@@ -25,7 +25,7 @@ function riskAnswer(question, data) {
   const score = /node_modules|dist\b/.test(command) ? 0.4 : /reset --hard/.test(command) ? 3.7 : /kill/.test(command) ? 0.8 : 2
   return { name: question.name, type: 'score', score, confidence: 0.93, probabilities: question.levels.map((_, i) => ({ value: String(i), probability: i === Math.round(score) ? 0.9 : 0.025 })) }
 }
-function decisionSetup(t, { flag = null, decisionMode = 'on', configured = true, hang = false, budget = null, dirty = false } = {}) {
+function decisionSetup(t, { flag = null, decisionMode = 'on', configured = true, hang = false, budget = null, dirty = false, deadlineMs } = {}) {
   const root = createPrivateQaTempDirectory('egdesk-terminal-gate-wiring-test-')
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const requests = [], inspected = []
@@ -39,7 +39,7 @@ function decisionSetup(t, { flag = null, decisionMode = 'on', configured = true,
   const calibrationLog = openCalibrationLog({ dataDir: root, log: () => {} })
   const state = { flag, decisionMode, configured }
   const decisionContext = { mode: () => state.decisionMode, configured: () => state.configured, client, calibrationLog,
-    ...(flag ? { terminalGate: { mode: () => state.flag, home: '/home/synthetic',
+    ...(flag ? { terminalGate: { mode: () => state.flag, home: '/home/synthetic', ...(deadlineMs ? { deadlineMs } : {}),
       inspect: async ({ cwd, paths }) => { inspected.push({ cwd, paths }); return { targets: Object.fromEntries(paths.filter(tracked).map(p => [p, tracked(p)])), git: { dirty } } } } } : {}) }
   return { decisionContext, requests, inspected, calibrationLog, state,
     gateEntries: () => calibrationLog.entries().filter(e => e.feature === 'terminal_gate'), carrying: needle => requests.filter(body => body.includes(needle)).length }
@@ -234,6 +234,17 @@ test('flag on can only add: an unavailable score leaves today\'s behaviour, and 
   assert.equal((await a.chat.replyApproval({ ...run, approvalId: scored.approvalId, decision: 'acceptForSession' })).status, 'replySent')
   const ruled = await a.ask(run, 'sudo rm -rf build')
   assert.deepEqual(ruled.choices, ['accept', 'decline', 'cancel'], 'a rule needs no model')
+  // the model never answers: a session grant waits for the gate's own deadline at most, then today's behaviour
+  const s = claudeHarness(t, { flag: 'on', hang: true, deadlineMs: 80 })
+  const run3 = await s.send()
+  s.transports[0].control('permission-slow', { subtype: 'can_use_tool', tool_name: 'Bash', tool_use_id: 'toolu-slow', input: { command: 'git reset --hard HEAD~5' },
+    permission_suggestions: [{ type: 'addRules', behavior: 'allow', rules: [{ toolName: 'Bash', ruleContent: 'synthetic' }], destination: 'userSettings' }] })
+  await s.chat.queue; await tick(); await s.chat.queue
+  const slowCard = s.chat.runs.get(`${run3.conversationId}/${run3.runId}`).pendingApprovals.at(-1)
+  const began = performance.now()
+  assert.equal((await s.chat.replyApproval({ ...run3, approvalId: slowCard.approvalId, decision: 'acceptForSession' })).status, 'replySent')
+  assert.ok(performance.now() - began < 1500, 'bounded by the gate deadline')
+  assert.deepEqual(s.answers(), ['allow+session']); assert.equal(s.gateEntries()[0].fallback, 'timeout')
   // no key: rules only, zero requests
   const k = claudeHarness(t, { flag: 'on', configured: false })
   const run2 = await k.send()

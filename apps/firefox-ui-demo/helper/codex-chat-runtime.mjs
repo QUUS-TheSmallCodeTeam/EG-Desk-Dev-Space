@@ -12,7 +12,7 @@ import { CHAT_CHOICE_BAR, chatChoiceManual, runChatChoice, validateChatChoice } 
 import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { DRAFT_CHECK_LIMITS, checkDraft } from './egdesk-draft-check.mjs'
 import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
-import { assessCommand, classifyCommand } from './egdesk-terminal-command-gate.mjs'
+import { COMMAND_GATE_TIMEOUT_MS, assessCommand, classifyCommand } from './egdesk-terminal-command-gate.mjs'
 import { homedir } from 'node:os'
 import { createInternalTurns } from './codex-internal-turn.mjs'
 import { FLOW_LIMITS, cleanIntermediate, decideFlow, enumerateOptions, flowFacts, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
@@ -4911,7 +4911,7 @@ export class CodexChatRuntime {
   }
 
   // ---- Command gate before an engine approval (Codex commandExecution/requestApproval; Claude can_use_tool arrives as the same request). ----
-  // Config: decisionContext.terminalGate = { mode(): 'off'|'advisory'|'on', inspect?({ cwd, paths }) → { targets, git }, home? }. Absent or any other mode: off,
+  // Config: decisionContext.terminalGate = { mode(): 'off'|'advisory'|'on', inspect?({ cwd, paths }) → { targets, git }, home?, deadlineMs? (at most 4 s) }. Absent or any other mode: off,
   // and nothing below runs. The human approval card is created exactly as before in every mode; this method never answers a request.
   //   advisory: the rule result, the Decision score and whether approval WOULD have been required are recorded (content-free). Nothing changes.
   //   on: additionally, a command the rules or the score mark high risk cannot be approved for the whole session from its card.
@@ -4935,6 +4935,7 @@ export class CodexChatRuntime {
         const inspect = target => (facts?.targets && Object.hasOwn(facts.targets, target) ? facts.targets[target] : { exists: true, trackedFiles: 0, ignored: false, unknown: true })
         let captured = null
         const assessed = await assessCommand({ command, cwd: where, intent: typeof intent === 'string' ? intent : '', mode, client: setup.client, inspect, git: facts?.git ?? null, home,
+          timeoutMs: Number.isSafeInteger(cfg.deadlineMs) && cfg.deadlineMs > 0 ? Math.min(cfg.deadlineMs, COMMAND_GATE_TIMEOUT_MS) : COMMAND_GATE_TIMEOUT_MS,
           egress: this.decisionEgressFor(run), calibration: { record: raw => { captured = raw } } })
         const rule = assessed.source === 'rules' && assessed.approval === true
         const would = assessed.approval === true || assessed.shadow === true
