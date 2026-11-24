@@ -3,7 +3,7 @@ import { createDecisionClient, estimateInputTokens } from './egdesk-decision-cli
 import { compactText, decisionThresholds } from './egdesk-decision-questions.mjs'
 import { REFLEX_CONTROLS, buildReflexCandidates, decideReflexStep, runBrowserReflex } from './egdesk-browser-reflex.mjs'
 import { decideBrowserEntry, decideResume } from './egdesk-browser-task.mjs'
-import { createOutcomeToOntology, outcomeCandidate, priorFromMemory } from './egdesk-browser-task-memory.mjs'
+import { createOutcomeToOntology, outcomeCandidate, priorFacts, priorFromMemory } from './egdesk-browser-task-memory.mjs'
 import { createWikiWriter, prepareTurnMemory } from './egdesk-turn-memory.mjs'
 import { buildWiki } from './egdesk-wiki-reconstruction.mjs'
 import { mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
@@ -66,12 +66,14 @@ async function entryBody(id, { message, cards, memoryPacket = null }) {
   return only(sent, id)
 }
 async function stepBody(id, { snapshot, priorRun = null, memoryPacket = null, unasked = false }) {
-  // unasked: since c15 the product does not ask this step at all (a code rule stops it). The c14 request is rebuilt from the same step
-  // function the loop used, so the plan that was sent stays reproducible byte for byte; the plan test proves the loop now sends nothing.
+  // unasked: since c15 the product does not ask this step at all (a code rule stops it), and since c16 a step on a page where the record
+  // settled the choice is not asked "which" (code compares the labels). The c14 request is rebuilt from the same step function the loop used,
+  // with the same history lines, so the plan that was sent stays reproducible byte for byte.
   if (unasked) {
     const { client, sent } = capture(() => [choice('next_step', 'blocked'), choice('page_state', 'content'), { name: 'goal_met', type: 'predicate', probability: 0 }])
     const { options } = buildReflexCandidates(snapshot)
-    await decideReflexStep({ goal: compactText(TASK, 500), snapshot, options, client, thresholds: decisionThresholds() })
+    const prior = priorRun ? priorFacts(priorRun, snapshot, options) : { lines: [], conflict: false }
+    await decideReflexStep({ goal: compactText(TASK, 500), snapshot, options, priorLines: prior.lines, memoryPacket, historyConflict: prior.conflict, client, thresholds: decisionThresholds() })
     return only(sent, id)
   }
   // The neutral reply stops the loop without any page action: only the first request of the step is of interest.
@@ -139,7 +141,7 @@ export async function buildBrowserRealPlan() {
       soft({ name: 'next_step', kind: 'choice', equals: 'needs_user_context', minConfidence: 0.75 }, 'The fixed "need more context from the user" option, confidently: this is what makes the task ask "which business?". If only this fails the person is still asked, but as "cannot proceed", and the option\'s wording needs work.'),
       hard({ name: 'page_state', kind: 'choice', equals: 'content', minConfidence: 0.7 }, 'An ordinary page.'),
       hard({ name: 'goal_met', kind: 'predicate', max: 0.84 }, 'Not the goal.')] },
-    { id: 'step-two-businesses-prior', stage: 'step', body: await stepBody('step-two-businesses-prior', { snapshot: P.invoices, priorRun: memory.prior, memoryPacket: memory.packet }), expect: [
+    { id: 'step-two-businesses-prior', stage: 'step', body: await stepBody('step-two-businesses-prior', { unasked: true, snapshot: P.invoices, priorRun: memory.prior, memoryPacket: memory.packet }), expect: [
       hard({ name: 'next_step', kind: 'choice', equals: '[L2] 사업자 987-65-43210', minConfidence: 0.75 }, 'The same page with last month\'s record naming the second business: it must be picked without asking. If this fails, a remembered choice cannot be left to the model and the code has to offer the recorded element itself.'),
       hard({ name: 'page_state', kind: 'choice', equals: 'content', minConfidence: 0.7 }, 'An ordinary page.'),
       hard({ name: 'goal_met', kind: 'predicate', max: 0.84 }, 'Not the goal.')] },

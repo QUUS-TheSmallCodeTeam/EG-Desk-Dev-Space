@@ -139,6 +139,59 @@ export function createOutcomeToOntology({ wiki, client, writer, scope = null, en
   }
 }
 
+// ---- the recorded choice, compared by code (R3) ----
+// Real measurement (2026-11-25, plan browser-live-v1): with the record in the evidence the model picked the recorded business at only 0.76
+// (one hundredth above the bar), and on a page where it was gone it answered flat (0.21 / 0.22) without naming the candidates. Whether the
+// recorded label is among the offered labels is a string comparison, so code makes it; the model is asked only whether two labels that
+// differ in form but carry the same identifier (a renamed business with the same number) are the same thing, one candidate per predicate.
+export const MAX_SAME_THING = 3
+const normLabel = text => String(text ?? '').normalize('NFKC').toLowerCase().replace(/^\[[a-z]\d+\]\s*/, '').replace(/\s+/g, ' ').trim()
+/** Identifier-like digit runs of at least 6 digits (registration, account or order numbers), separators removed. */
+export const identifiersOf = text => [...new Set((normLabel(text).match(/\d[\d .-]{4,}\d/g) || []).map(run => run.replace(/\D/g, '')).filter(digits => digits.length >= 6))]
+const wordsOf = text => normLabel(text).replace(/\d[\d .-]{4,}\d/g, ' ').split(/[^\p{L}\p{N}]+/u).filter(word => word.length >= 2)
+const names = (text, option) => {
+  const hay = normLabel(text), label = normLabel(labelKey(option.value)), ids = identifiersOf(text)
+  return (label.length >= 4 && hay.includes(label)) || identifiersOf(option.value).some(id => ids.includes(id))
+}
+
+/**
+ * recordedChoice(prior, snapshot, options, { goal, userContext }) -> null | { kind, item, option?, matches?, maybe?, candidates? }
+ * For the newest "which one?" the earlier run settled on THIS path, compared with the labels offered now:
+ *  - 'one'      exactly one offered label is the recorded label (normalised: NFKC, case, spacing, the [L1] prefix): code takes it.
+ *  - 'several'  more than one offered label is the recorded label: the person decides among them.
+ *  - 'maybe'    no equal label, but 1..MAX_SAME_THING labels carry an identifier of the recorded one: one predicate each.
+ *  - 'none'     nothing offered is, or may be, the recorded choice: the person decides among the page's candidates.
+ * null when nothing was settled on this path, or when the person's words in this task (a reply), or a current request that differs from
+ * the recorded one and does not name the recorded choice, or a request naming another offered element, should be judged instead: then
+ * the step is asked as before (the current request overrides the earlier run).
+ */
+export function recordedChoice(prior, snapshot, options, { goal = '', userContext = [] } = {}) {
+  if (!record(prior)) return null
+  const here = safePath(snapshot?.url || '')
+  const item = [...(prior.resolved || [])].reverse().find(entry => entry.at === here && ASKED.has(entry.asked))
+  if (!item) return null
+  if ((Array.isArray(userContext) ? userContext : []).some(line => typeof line === 'string' && line.trim())) return null
+  const offered = (options || []).filter(option => option.item?.kind !== 'fill')
+  const key = normLabel(item.chose)
+  const matches = offered.filter(option => normLabel(labelKey(option.value)) === key)
+  const ids = identifiersOf(item.chose)
+  const maybe = matches.length ? [] : offered.filter(option => identifiersOf(option.value).some(id => ids.includes(id)))
+  const others = offered.filter(option => !matches.includes(option) && !maybe.includes(option))
+  if (others.some(option => names(goal, option))) return null
+  const sameRequest = normLabel(compactText(goal, 120).replace(/[\r\n]/g, ' ')) === normLabel(prior.goal)
+  const namesRecorded = normLabel(goal).includes(key) || identifiersOf(goal).some(id => ids.includes(id))
+  if (matches.length === 1) return sameRequest || namesRecorded ? { kind: 'one', item, option: matches[0] } : null
+  if (matches.length > 1) return { kind: 'several', item, candidates: matches.map(option => option.value) }
+  if (maybe.length) {
+    if (maybe.length > MAX_SAME_THING) return { kind: 'several', item, candidates: maybe.map(option => option.value) }
+    return sameRequest || namesRecorded ? { kind: 'maybe', item, maybe } : null
+  }
+  if (offered.some(option => names(goal, option))) return null
+  const recordedWords = new Set(wordsOf(item.chose))
+  const alike = offered.filter(option => wordsOf(labelKey(option.value)).some(word => recordedWords.has(word)))
+  return { kind: 'none', item, candidates: (alike.length ? alike : offered).map(option => option.value) }
+}
+
 /**
  * priorFacts(prior, snapshot, options) -> { lines, conflict }
  * Code-computed facts about the earlier run against THIS page: where an earlier "which one?" was settled on this path, is

@@ -178,6 +178,8 @@ const tally = (task, result) => {
     const label = labelKey(step.opened.option)
     task.trail.push({ op: 'open', label, from: safePath(step.url), to: safePath(step.opened.to) })
     if (task.pendingAsk) { task.resolved.push({ asked: task.pendingAsk, chose: label, at: safePath(step.url) }); task.pendingAsk = null }
+    // A choice code took from the record is settled again this run: the new record carries it forward (with today's label).
+    else if (step.opened.recordedAsked) task.resolved.push({ asked: step.opened.recordedAsked, chose: label, at: safePath(step.url) })
   }
   if (!task.host) task.host = hostOf(result.steps?.[0]?.url)
 }

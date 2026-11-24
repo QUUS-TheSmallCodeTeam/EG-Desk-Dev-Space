@@ -288,7 +288,8 @@ test('C10 end to end: advisory records only; month 1 asks and persists the outco
   const note2 = JSON.parse(w2.h.calls.find(c => c.method === 'turn/start').params.additionalContext.egdesk_browser_task.value).egdesk_browser_task
   assert.deepEqual([note2.status, note2.code], ['done', undefined])
   assert.deepEqual(w2.acts.map(x => [x.type, x.url]), [['navigate', `${O}/biz/2`], ['navigate', `${O}/download/2.pdf`]])
-  assert.deepEqual(w2.decisions.reduce((m, d) => (m[d.q] = (m[d.q] || 0) + 1, m), {}), { browser_entry: 1, next_step: 3 })
+  // c16: on /invoices the recorded choice is taken by code; that request asks page_state and goal_met, never "which" (4 requests, as before)
+  assert.deepEqual(w2.decisions.reduce((m, d) => (m[d.q] = (m[d.q] || 0) + 1, m), {}), { browser_entry: 1, page_state: 1, next_step: 2 })
   assert.equal(w2.acts.filter(x => x.type === 'fill' || x.ref === 's1').length, 0)
   assert.ok(m2.log.length >= 1, 'the general memory feature ran its own Decisions calls')
   await new Promise(resolve => setTimeout(resolve, 50))
@@ -379,5 +380,6 @@ test('C14 turn memory on + onePacket + at-page: the browser hook still gets last
   assert.deepEqual([note.status, w2.acts.map(a => a.url)], ['done', [`${O}/biz/2`, `${O}/download/2.pdf`]], 'no question: the record answered it')
   // the general turn-memory packet and the one-packet merge are for ordinary turns: a bounded browser turn gets neither
   assert.deepEqual(Object.keys(turn.additionalContext).filter(k => /memory|decision|context/i.test(k)), [])
-  assert.deepEqual(w2.decisions.reduce((m, d) => (m[d.q] = (m[d.q] || 0) + 1, m), {}), { browser_entry: 1, next_step: 3 })
+  // c16: on /invoices the recorded choice is taken by code; that request asks page_state and goal_met, never "which" (4 requests, as before)
+  assert.deepEqual(w2.decisions.reduce((m, d) => (m[d.q] = (m[d.q] || 0) + 1, m), {}), { browser_entry: 1, page_state: 1, next_step: 2 })
 })

@@ -393,8 +393,9 @@ test('S3 page-changed override through the runtime: memory names a choice that i
   assert.deepEqual([same.note().status, same.acts.map(a => a.url)], ['done', [`${O}/biz/2`, `${O}/download/2.pdf`]])
   const changed = world(t, { entry: { memory }, patch: p => { p[`${O}/invoices`] = p[`${O}/invoices-changed`] } })
   await changed.send(MSG)
-  assert.equal(changed.flags.notListed, 1, 'the step evidence said the earlier choice is not listed')
-  assert.deepEqual([changed.note().status, changed.note().code, changed.acts.length], ['need_context', 'choice_needed', 0], 'the model picked [L1] at 0.95; code asked the person instead')
+  // c16: code compares the recorded label with the labels offered now; it is gone, so the person is asked which, and the model is not
+  assert.equal(changed.flags.notListed, 0, 'no which-question carried the history to the model')
+  assert.deepEqual([changed.note().status, changed.note().code, changed.note().candidates, changed.acts.length], ['need_context', 'choice_needed', ['사업자 555-11-22222', '사업자 444-33-55555'], 0])
 })
 
 // ---- heartbeat in the real wiring: a browser-task turn is eligible to speak, one mechanism, completed messages only ----
