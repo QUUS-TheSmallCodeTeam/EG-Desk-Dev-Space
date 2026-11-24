@@ -3696,6 +3696,37 @@ function resultCardTitle(text, author) {
 }
 
 /** A stored card record, checked and capped (also for one read back from the Desk or a Board), or null. */
+// Canvas provenance (cycle 8): who made a canvas component and for which answer, recorded when the card is created, content-free (ids, kind words and times only),
+// and kept with the card exactly like its position. The card is created by the user's own action (a chip, the keep-as-card button) from something an Agent
+// wrote, so the creator is 'agent'. Anything that has none (older cards, user notes, browsers...) is 'unknown' to the briefing flow and is never retrievable.
+// supersededBy is set when a newer version of the same outputKey arrives in the same room while this card still shows an older one.
+export const PROVENANCE_CREATORS = Object.freeze(['agent', 'user', 'shared']);
+const engineWord = value => typeof value === 'string' && /^[a-z][a-z0-9_-]{0,31}$/.test(value) ? value : null;
+export function resultProvenance(value) {
+  if (!value || typeof value !== 'object' || value.version !== 1 || !PROVENANCE_CREATORS.includes(value.creator)) return null;
+  const published = outputId(value.outputId) && typeof value.outputKey === 'string' && OUTPUT_KEY_PATTERN.test(value.outputKey)
+    && Number.isSafeInteger(value.outputVersion) && value.outputVersion >= 1 ? { outputId: value.outputId, outputKey: value.outputKey, outputVersion: value.outputVersion } : {};
+  const by = value.supersededBy && typeof value.supersededBy === 'object' && outputId(value.supersededBy.outputId) && Number.isSafeInteger(value.supersededBy.version) && value.supersededBy.version >= 1
+    ? { outputId: value.supersededBy.outputId, version: value.supersededBy.version, at: Number.isFinite(value.supersededBy.at) ? value.supersededBy.at : null } : null;
+  return { version: 1, creator: value.creator, agentId: resultRef(value.agentId), engineId: engineWord(value.engineId), runId: resultRef(value.runId), answerId: resultRef(value.answerId),
+    ...published, createdAt: Number.isFinite(value.createdAt) ? value.createdAt : null, supersededBy: by };
+}
+/** The provenance a result card gets when it is created from one answer or one published output of this room's Agent. */
+export function resultCardProvenance(thread, { runId = null, answerId = null, output = null, now = Date.now() } = {}) {
+  const agentId = thread?.profileEnabled === true && isProfileId(thread.agentProfileId) ? thread.agentProfileId : roomAgentRecord(thread?.agent)?.profileId ?? null;
+  return resultProvenance({ version: 1, creator: 'agent', agentId, engineId: thread?.engineId ?? null, runId, answerId,
+    ...(output ? { outputId: output.id, outputKey: output.outputKey, outputVersion: output.version } : {}), createdAt: now, supersededBy: null });
+}
+/** supersedeResultRecord(record, newerOutput) -> the record with supersededBy set, or null when nothing changes (not the same output key and room, not older, already marked at least this new). */
+export function supersedeResultRecord(record, value, { now = Date.now() } = {}) {
+  const newer = publishedOutputRecord(value), p = record?.provenance;
+  if (!newer || !p?.outputKey || p.outputKey !== newer.outputKey || newer.version <= p.outputVersion) return null;
+  const room = record.source?.conversationId || record.source?.threadId;
+  if (room && newer.conversationId && room !== newer.conversationId && room !== record.source?.threadId) return null;
+  if (p.supersededBy && p.supersededBy.version >= newer.version) return null;
+  return { ...record, provenance: { ...p, supersededBy: { outputId: newer.id, version: newer.version, at: now } } };
+}
+
 export function restoreResultCardRecord(value) {
   if (!value || typeof value !== 'object' || value.version !== 1) return null;
   const source = value.source && typeof value.source === 'object' ? value.source : {};
@@ -3722,6 +3753,7 @@ export function restoreResultCardRecord(value) {
       ...published,
     },
     createdAt: Number.isFinite(value.createdAt) ? value.createdAt : null,
+    ...(resultProvenance(value.provenance) ? { provenance: resultProvenance(value.provenance) } : {}),
   };
 }
 
@@ -3744,6 +3776,7 @@ export function publishedOutputCardRecord(thread, message, output, markdown, { a
       outputId: published.id, outputKey: published.outputKey, outputVersion: published.version,
     },
     createdAt: now,
+    provenance: resultCardProvenance(thread, { runId: published.runId || message?.runId || null, answerId: published.answerId || message?.answerId || null, output: published, now }),
   });
 }
 
@@ -3761,6 +3794,7 @@ export function resultCardRecord(thread, message, { author = 'Codex', now = Date
       answeredAt: message.createdAt,
     },
     createdAt: now,
+    provenance: resultCardProvenance(thread, { runId: message.runId || null, answerId: message.answerId || null, now }),
   });
 }
 

@@ -409,7 +409,7 @@ export function completeBriefingArgs(outcome, created = {}) {
  * allow(kind, preview) -> true when sending that exact packet is permitted (standing mode-on consent or the user's review). Bound: maxRevisions redesigns.
  * Without decide.reuse the flow behaves as before (every board target is a candidate); with it, the design is reuse-first.
  */
-export async function runBriefingFlow({ report, candidates, currentAnswerId = null, links = [], viewport = null, decide, engine, allow = async () => true, limits = {} }) {
+export async function runBriefingFlow({ report, candidates, currentAnswerId = null, links = [], viewport = null, decide, engine, allow = async () => true, limits = {}, observeOnly = false }) {
   const maxRevisions = Number.isInteger(limits.maxRevisions) ? Math.max(0, Math.min(limits.maxRevisions, 3)) : BRIEFING_LIMITS.maxRevisions
   const stats = { judgeRequests: 0, designRounds: 0 }
   const enumeration = enumerateBriefingFacts({ report, candidates, currentAnswerId })
@@ -423,8 +423,18 @@ export async function runBriefingFlow({ report, candidates, currentAnswerId = nu
   }
   const placed = await ask(decide.placement, 'placement', { facts: enumeration.facts })
   if (placed.unavailable) return { status: 'bubble', reason: placed.unavailable === 'declined' ? 'declined' : 'judge-unavailable', detail: placed.unavailable, requested: false, stats }
-  if (placed.reply?.status === 'advisory-only') return { status: 'advisory-only', verdict: placed.reply.verdict, requested: true, stats }
+  const stages = ['placement']
+  // Advisory records what the judge would have said, and if it would have gone to the board, also what it would have said about reuse: record only, no design.
+  if (placed.reply?.status === 'advisory-only') {
+    if (placed.reply.verdict === 'board' && decide.reuse) {
+      const parts0 = enumerateReportParts(report, enumeration.targets)
+      const seen = await ask(decide.reuse, 'briefing-reuse', reuseDto(enumeration, parts0))
+      if (!seen.unavailable) stages.push('reuse')
+    }
+    return { status: 'advisory-only', verdict: placed.reply.verdict, stages, requested: true, stats }
+  }
   if (placed.reply?.status !== 'board') return { status: 'bubble', reason: placed.reply?.status === 'bubble' ? 'judged-bubble' : 'placement-undecided', requested: true, stats }
+  if (observeOnly && !decide.reuse) return { status: 'observed', stages, requested: true, stats }
   let constraint = null, parts = []
   if (decide.reuse) {
     parts = enumerateReportParts(report, enumeration.targets)
@@ -432,7 +442,9 @@ export async function runBriefingFlow({ report, candidates, currentAnswerId = nu
     if (judged.unavailable) return { status: 'fallback-chat', reason: 'judge-unavailable', detail: judged.unavailable, revisions: 0, stats }
     if (judged.reply?.status === 'advisory-only') return { status: 'advisory-only', verdict: judged.reply.verdict, requested: true, stats }
     if (judged.reply?.status !== 'ok') return { status: 'fallback-chat', reason: 'judge-unavailable', detail: judged.reply?.reason ?? judged.reply?.status ?? 'manual', revisions: 0, stats }
+    stages.push('reuse')
     constraint = constraintFrom(judged.reply, enumeration, parts)
+    if (observeOnly) return { status: 'observed', stages, requested: true, stats }
     if (!constraint.reuse.size && !constraint.newAllowed.size) return { status: 'fallback-chat', reason: 'nothing-to-reuse', revisions: 0, stats }
   }
   const extra = constraint ? constraintView(constraint, parts) : {}

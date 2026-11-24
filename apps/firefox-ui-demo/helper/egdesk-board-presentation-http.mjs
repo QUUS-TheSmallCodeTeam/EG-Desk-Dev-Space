@@ -5,7 +5,7 @@ import { createDecisionClient, DECISIONS_ENDPOINT, DECISION_MODEL, FOREGROUND_DE
 import { DEFAULT_DECISION_THRESHOLDS } from './egdesk-decision-questions.mjs'
 import { normalizeBoardPresentationScene, prepareBoardPresentation, readBoardPresentation } from './egdesk-board-presentation-plan.mjs'
 import { canvasCheckCalibrationEntry, prepareCanvasDesignCheck, readCanvasDesignCheck } from './egdesk-canvas-design-check.mjs'
-import { briefingCheckCalibrationEntry, briefingReuseCalibrationEntry, placementCalibrationEntry, prepareBriefingCheck, prepareBriefingPlacement, prepareBriefingReuse, readBriefingCheck, readBriefingPlacement, readBriefingReuse } from './egdesk-briefing-flow.mjs'
+import { runBriefingFlow, briefingCheckCalibrationEntry, briefingReuseCalibrationEntry, placementCalibrationEntry, prepareBriefingCheck, prepareBriefingPlacement, prepareBriefingReuse, readBriefingCheck, readBriefingPlacement, readBriefingReuse } from './egdesk-briefing-flow.mjs'
 import { attachBoardVisual, MAX_BOARD_VISUAL_IMAGE_CHARS, validateBoardVisual } from './egdesk-board-visual-packet.mjs'
 
 const ROOT = '/decision/board-presentation'
@@ -19,6 +19,8 @@ const JUDGES = Object.freeze({
   '/decision/briefing-check': { prepare: prepareBriefingCheck, read: readBriefingCheck, entry: briefingCheckCalibrationEntry },
   '/decision/briefing-reuse': { prepare: prepareBriefingReuse, read: readBriefingReuse, entry: briefingReuseCalibrationEntry },
 })
+const OBSERVE_PATH = '/decision/briefing-observe'
+const OBSERVE_MAX_BODY_BYTES = 65536
 const JUDGE_ROUTES = new Map(Object.entries(JUDGES).flatMap(([root, judge]) => ['prepare', 'run', 'cancel'].map(action => [`${root}/${action}`, { action, judge }])))
 const CHECK_MAX_BODY_BYTES = 16384
 const KINDS = new Set(['업무 전표', '메모', '자료', '상태표'])
@@ -213,7 +215,61 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     }
   }
 
+  // One judgment prepared: the closed DTO is validated by the judge itself, the outbound packet is kept with a single-use ticket.
+  function prepareJudge(judge, body) {
+    const { mode, binding, reason } = authority()
+    if (!binding) return { code: 200, body: { status: 'disabled', mode, reason } }
+    const time = now()
+    for (const [token, entry] of pending) if (time >= entry.expiresAt) discard(token)
+    if (pending.size >= MAX_PENDING) return { code: 200, body: { status: 'disabled', mode, reason: 'busy' } }
+    const prepared = judge.prepare({ mode, binding, dto: body })
+    if (prepared.status !== 'prepared') return { code: 400, body: { status: 'manual', reason: 'invalid-request' } }
+    const outbound = { model: client.model, ...prepared.packet }
+    const packetBytes = Buffer.byteLength(JSON.stringify(outbound))
+    if (packetBytes > MAX_PACKET_BYTES || pendingBytes + (active?.packetBytes ?? 0) + packetBytes > MAX_RETAINED_PACKET_BYTES) return { code: 200, body: { status: 'disabled', mode, reason: 'busy' } }
+    const ticket = randomBytes(24).toString('hex')
+    const expiresAt = now() + TTL_MS
+    const timer = setTimeout(() => discard(ticket), TTL_MS)
+    timer.unref()
+    pendingBytes += packetBytes
+    pending.set(ticket, { prepared, outbound, packetBytes, timer, expiresAt, judge })
+    return { code: 200, body: { status: 'prepared', ticket, mode, expiresInMs: TTL_MS, preview: { cue: prepared.dto.purpose ?? '', items: prepared.dto.items ?? [], packet: outbound } } }
+  }
+
+  // Briefing flow, observe only (cycle 8): when the Decisions mode is advisory and the chrome's flag is on, a finished answer's placement and reuse/retrieve judgments
+  // are asked and RECORDED (calibration), nothing else: no design request, no publish, no change anywhere. Any other mode does nothing at all.
+  const OWNER_WORDS = new Set(['agent', 'user', 'shared']), VIS_WORDS = new Set(['visible', 'collapsed', 'offscreen']), KIND_WORDS = new Set(['source', 'artifact', 'output'])
+  function observeCandidates(list) {
+    if (!Array.isArray(list)) return []
+    const text = (v, max) => typeof v === 'string' && v.length <= max ? v : undefined
+    return list.slice(0, 12).flatMap(c => {
+      if (!c || typeof c !== 'object' || typeof c.id !== 'string' || c.id.length > 256 || !KIND_WORDS.has(c.kind) || typeof c.label !== 'string' || c.label.length > 200 || !c.ref || typeof c.ref !== 'object') return []
+      return [{ id: c.id, ref: {}, kind: c.kind, label: c.label, ...(text(c.gist, 400) ? { gist: c.gist } : {}), onBoard: c.onBoard === true, maySend: c.maySend === true,
+        rect: c.rect, owner: OWNER_WORDS.has(c.owner) ? c.owner : undefined, createdForAnswer: text(c.createdForAnswer, 256) ?? null, superseded: c.superseded === true, stale: c.stale === true,
+        visibility: VIS_WORDS.has(c.visibility) ? c.visibility : 'visible' }]
+    })
+  }
+  async function observe(body) {
+    if (getMode() !== 'advisory') return { status: 'skipped', reason: 'mode' }
+    if (!body || typeof body.report !== 'string' || !body.report.trim() || body.report.length > 20000) return { status: 'skipped', reason: 'invalid' }
+    const sink = { destroyed: false, writableEnded: false, once() {}, off() {} }
+    const route = judge => ({ prepare: async dto => prepareJudge(judge, dto).body, run: ticket => run(ticket, sink), cancel: async ticket => { discard(ticket) } })
+    const out = await runBriefingFlow({ report: body.report, candidates: observeCandidates(body.candidates), currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null,
+      decide: { placement: route(JUDGES['/decision/briefing-placement']), reuse: route(JUDGES['/decision/briefing-reuse']) }, engine: null, observeOnly: true, allow: async () => true })
+    return { status: 'observed', stages: out.stages ?? [], outcome: out.status, judgeRequests: out.stats?.judgeRequests ?? 0 }
+  }
+  async function observeRoute(req, res) {
+    const reply = (code, body) => { if (!res.destroyed && !res.writableEnded) sendJson(res, code, body); return true }
+    if (!guardBridgeRequest(req, port)) return reply(403, { status: 'manual', reason: 'loopback-required' })
+    if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); return reply(405, { status: 'manual', reason: 'post-required' }) }
+    if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) return reply(415, { status: 'manual', reason: 'json-required' })
+    let body
+    try { body = await readJsonBody(req, { maxBytes: OBSERVE_MAX_BODY_BYTES }) } catch (error) { return reply(error?.httpStatus === 413 ? 413 : 400, { status: 'manual', reason: 'invalid-request' }) }
+    try { return reply(200, await observe(body)) } catch { return reply(200, { status: 'skipped', reason: 'unavailable' }) }
+  }
+
   const handle = async (req, res, url) => {
+    if (url.pathname === OBSERVE_PATH) return observeRoute(req, res)
     const route = JUDGE_ROUTES.get(url.pathname)
     const action = ACTIONS.get(url.pathname) ?? route?.action
     if (!action) return false
@@ -236,25 +292,7 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     } catch (error) { return reply(error?.httpStatus === 413 ? 413 : 400, { status: 'manual', reason: 'invalid-request' }) }
     if (res.destroyed || res.writableEnded) return true
     try {
-      if (isCheck && action === 'prepare') {
-        const { mode, binding, reason } = authority()
-        if (!binding) return reply(200, { status: 'disabled', mode, reason })
-        const time = now()
-        for (const [token, entry] of pending) if (time >= entry.expiresAt) discard(token)
-        if (pending.size >= MAX_PENDING) return reply(200, { status: 'disabled', mode, reason: 'busy' })
-        const prepared = route.judge.prepare({ mode, binding, dto: body })
-        if (prepared.status !== 'prepared') return reply(400, { status: 'manual', reason: 'invalid-request' })
-        const outbound = { model: client.model, ...prepared.packet }
-        const packetBytes = Buffer.byteLength(JSON.stringify(outbound))
-        if (packetBytes > MAX_PACKET_BYTES || pendingBytes + (active?.packetBytes ?? 0) + packetBytes > MAX_RETAINED_PACKET_BYTES) return reply(200, { status: 'disabled', mode, reason: 'busy' })
-        const ticket = randomBytes(24).toString('hex')
-        const expiresAt = now() + TTL_MS
-        const timer = setTimeout(() => discard(ticket), TTL_MS)
-        timer.unref()
-        pendingBytes += packetBytes
-        pending.set(ticket, { prepared, outbound, packetBytes, timer, expiresAt, judge: route.judge })
-        return reply(200, { status: 'prepared', ticket, mode, expiresInMs: TTL_MS, preview: { cue: prepared.dto.purpose ?? '', items: prepared.dto.items ?? [], packet: outbound } })
-      }
+      if (isCheck && action === 'prepare') { const out = prepareJudge(route.judge, body); return reply(out.code, out.body) }
       if (action === 'prepare') {
         // Reject oversized text, malformed JSON, or non-image padding before PNG work.
         const imageChars = typeof body?.visual?.image === 'string' ? body.visual.image.length : 0
