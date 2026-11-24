@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { writeFileSync } from 'node:fs'
+import { sendStampPath, stampingFetch } from '../helper/egdesk-decision-send-stamp.mjs'
 import { ALLON_PLAN_FILE, FAMILY_PLAN_FILES, HARD_LIMITS, RECORDED_PLAN_FILE, RENAMED_PLAN_FILE, estimateLive, loadLivePlan, runLive } from '../helper/egdesk-browser-live-runner.mjs'
 
 // LIVE browser-task measurement: the product's objective browser loop over synthetic pages, the monthly tax-invoice journey
@@ -22,7 +23,8 @@ const estimate = await estimateLive({ plan })
 console.log(JSON.stringify({ plan: plan.set, planSha256: plan.sha256, note: 'sizes from a scripted stand-in that answers as the plan expects, not a model; the real loop is adaptive',
   estimatedRequests: estimate.requests, perPhase: estimate.perPhase, estimatedInputTokens: estimate.estInputTokens, requestLimit: plan.maxRequests, tokenCeiling: plan.tokenCeiling,
   hardLimits: HARD_LIMITS, standInPasses: estimate.scorecard.pass }))
-const outcome = await runLive({ key: flag('--send') ? process.env.OPENAI_API_KEY ?? null : null, send: flag('--send'), plan })
+const outcome = await runLive({ key: flag('--send') ? process.env.OPENAI_API_KEY ?? null : null, send: flag('--send'), plan,
+  ...(flag('--send') ? { fetchImpl: stampingFetch(globalThis.fetch, { file: sendStampPath(process.env), runner: `browser-live-measure ${plan.set}` }) } : {}) })
 console.log(JSON.stringify({ sent: outcome.sent, stoppedBecause: outcome.stoppedBecause, inputTokens: outcome.usage.inputTokens, limits: outcome.limits }))
 if (outcome.scorecard) {
   console.log(JSON.stringify({ pass: outcome.scorecard.pass, hardFailures: outcome.scorecard.hardFailures, absolute: outcome.scorecard.absolute, softMisses: outcome.scorecard.softMisses,

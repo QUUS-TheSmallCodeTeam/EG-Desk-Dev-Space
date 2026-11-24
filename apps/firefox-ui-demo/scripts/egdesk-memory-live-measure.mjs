@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { writeFileSync } from 'node:fs'
+import { sendStampPath, stampingFetch } from '../helper/egdesk-decision-send-stamp.mjs'
 import { LIVE_LIMITS, LIVE_RUNS, estimateLive, runLive } from '../helper/egdesk-memory-live-runner.mjs'
 
 // LIVE turn-memory measurement: the real adaptive loop against the public synthetic wiki, 3 scenarios x first/mid. Dry run by default.
@@ -10,7 +11,8 @@ import { LIVE_LIMITS, LIVE_RUNS, estimateLive, runLive } from '../helper/egdesk-
 const args = process.argv.slice(2)
 const flag = name => args.includes(name), value = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null }
 // The one place the key is read; both measurements get it only through this object.
-const sending = { key: flag('--send') ? process.env.OPENAI_API_KEY ?? null : null, send: flag('--send') }
+const sending = { key: flag('--send') ? process.env.OPENAI_API_KEY ?? null : null, send: flag('--send'),
+  ...(flag('--send') ? { fetchImpl: stampingFetch(globalThis.fetch, { file: sendStampPath(process.env), runner: 'memory-live-measure' }) } : {}) }
 // --set v2: the journey (real runtime; 'about' + one packet + confirmation; six turns in two sessions; ceiling 30k). Same safety rules.
 if (value('--set') === 'v2') {
   const { JOURNEY_LIMITS, JOURNEY_PASS_RULE, JOURNEY_TURNS, estimateJourney, runJourneyLive } = await import('../helper/egdesk-memory-journey.mjs')

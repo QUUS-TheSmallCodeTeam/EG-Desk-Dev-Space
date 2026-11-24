@@ -30,6 +30,7 @@ import { EXIT, independentEstimate, runPlan } from '../helper/egdesk-decision-re
 import { DECISIONS_ENDPOINT } from '../helper/egdesk-decision-client.mjs'
 import * as WP from '../overlay/resources/EGDeskWorkPlacement.sys.mjs'
 import * as BriefingHost from '../overlay/resources/EGDeskBriefingHost.sys.mjs'
+import { sendStampPath, stampingFetch } from '../helper/egdesk-decision-send-stamp.mjs'
 import { allOnWorld, callerOf, scriptedDecisions, DM } from './egdesk-all-on.support.mjs'
 
 export const PLAN_FILE = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan.json', import.meta.url))
@@ -684,7 +685,7 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
   const switches = args.flatMap((arg, i) => (arg === '--switch' ? [args[i + 1]] : []))
   const unknownSwitch = switches.find(name => !Object.hasOwn(plan.world?.switches ?? {}, name))
   if (unknownSwitch) { printError(`the plan has no switch ${unknownSwitch} (it has: ${Object.keys(plan.world?.switches ?? {}).join(', ') || 'none'})`); return EXIT.usage }
-  const outcome = await runJourney({ plan, send, key, fetchImpl, caps, now, replay: replayRun ? replayAnswers(replayRun.run) : null, switches })
+  const outcome = await runJourney({ plan, send, key, fetchImpl: send ? stampingFetch(fetchImpl, { file: sendStampPath(env), runner: `all-on-live-measure ${plan.set}` }) : fetchImpl, caps, now, replay: replayRun ? replayAnswers(replayRun.run) : null, switches })
   for (const row of stepTable(outcome)) print(JSON.stringify(row))
   const payload = resultsPayload({ outcome, plan, send, caps, replayOf: replayRun ? { file: replayRun.file, sha256: replayRun.sha256, at: replayRun.run.at ?? null } : null })
   if (diffRun) { payload.diffAgainst = { file: diffRun.file, sha256: diffRun.sha256, at: diffRun.run.at ?? null }; payload.diff = diffJourneys(diffRun.run, payload) }
