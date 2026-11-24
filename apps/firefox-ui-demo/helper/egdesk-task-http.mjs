@@ -45,7 +45,8 @@ export function publicGraph(value) {
  *   { graphId, taskId, gateId }.
  * No client execution settings, raw prompt, native approval or receipt endpoint.
  */
-export function createTaskHttpHandler({ graph, adapter, ensureAuth, port = 39218, continueGate = null }) {
+// hintsOfGraph(graphId) (L1 c26): the room a plan's graph belongs to, so its account is the one checked; undefined = the default sign-in, as before.
+export function createTaskHttpHandler({ graph, adapter, ensureAuth, port = 39218, continueGate = null, hintsOfGraph = () => undefined }) {
   if (typeof ensureAuth !== 'function') throw new TypeError('ensureAuth is required');
   function state(graphId) {
     const native = adapter.getState(graphId);
@@ -68,7 +69,7 @@ export function createTaskHttpHandler({ graph, adapter, ensureAuth, port = 39218
         if ([...url.searchParams.keys()].some((key) => key !== 'graphId') || !url.searchParams.get('graphId')) {
           throw nativeTaskError('TASK_HTTP_INPUT', 'graphId is required', 400);
         }
-        await ensureAuth();
+        await ensureAuth(hintsOfGraph(url.searchParams.get('graphId')));
         sendJson(res, 200, state(url.searchParams.get('graphId')));
         return true;
       }
@@ -94,7 +95,7 @@ export function createTaskHttpHandler({ graph, adapter, ensureAuth, port = 39218
       fields(body.scope, SCOPE);
       adapter.assertScope(body.scope, body.boardId);
       if (action !== 'cancel') {
-        await ensureAuth();
+        await ensureAuth(hintsOfGraph(body.scope.graphId));
         adapter.assertScope(body.scope, body.boardId);
       }
       if (action === 'cancel') {
