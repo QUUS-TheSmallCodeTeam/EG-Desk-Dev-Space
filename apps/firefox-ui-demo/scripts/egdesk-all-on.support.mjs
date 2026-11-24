@@ -302,6 +302,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
       if (method === 'turn/steer') { steers.push(params); return { turnId: params.expectedTurnId } }
       if (method === 'turn/start' && String(params.threadId).startsWith('fork-')) {
         const text = forkText(params.input[0].text), turnId = `fturn-${state.forks}-${forkPrompts.length}`
+        forkPrompts.at(-1).text = text // what the scripted subjective model wrote on that fork (null: it wrote nothing)
         setTimeout(async () => {
           if (text != null) await notify('item/completed', { threadId: params.threadId, turnId, item: { id: 'f1', type: 'agentMessage', phase: 'final_answer', text } })
           await notify('turn/completed', { threadId: params.threadId, turn: { id: turnId, status: text == null ? 'failed' : 'completed', items: [] } })
