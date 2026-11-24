@@ -347,3 +347,51 @@ test('whenAccepted: a choice check that fails only on a wrong install at the giv
   const both = fixture(plan => { plan.requests[2].expect = [{ name: 'target', kind: 'choice', oneOf: ['p1'], minConfidence: 0.5, whenAccepted: { minConfidence: 0.85, minMargin: 0.2 }, severity: 'hard', note: 'x' }] })
   assert.throws(() => loadPlan(both.planFile), /either minConfidence or whenAccepted/)
 })
+
+test('productBars: a hard check looser than the declared product bar is refused at load (dry run and send), unless it is marked diagnostic', async () => {
+  const bars = { '*predicate': { yes: 0.8, no: 0.2, source: 'unit' }, '*choice': { minConfidence: 0.75, minMargin: 0.2 } }
+  // a: needs_reply min .8 (ok) and status equals done minConfidence .75 but no minMargin (looser on margin)
+  const loose = fixture(plan => { plan.productBars = bars })
+  assert.throws(() => loadPlan(loose.planFile), /looser than the declared product bars.*status \(status\): minMargin none < product 0.2/)
+  // main refuses it before anything else, in dry run and with --send
+  for (const args of [[loose.planFile], [loose.planFile, '--send']]) {
+    const io = capture(); let calls = 0
+    const code = await main(args, { env: { OPENAI_API_KEY: KEY }, fetchImpl: async () => { calls++; return new Response('{}') }, print: io.print, printError: io.printError })
+    assert.deepEqual([code, calls], [EXIT.usage, 0]); assert.match(io.err.join('\n'), /looser than the declared product bars/)
+  }
+  // the L4 case: several >= .7 against a product yes bar of .8
+  const l4 = fixture(plan => { plan.productBars = bars; plan.requests[0].expect[0].min = 0.7; plan.requests[0].expect[1].minMargin = 0.2 })
+  assert.throws(() => loadPlan(l4.planFile), /needs_reply \(needs_reply\): min 0.7 < product yes bar 0.8/)
+  // max above the no bar
+  const maxLoose = fixture(plan => { plan.productBars = bars; plan.requests[0].expect[1].minMargin = 0.2; plan.requests[1].expect[0].max = 0.5 })
+  assert.throws(() => loadPlan(maxLoose.planFile), /is_question \(is_question\): max 0.5 > product no bar 0.2/)
+  // the same looser check marked diagnostic loads; soft checks are never linted
+  const diag = fixture(plan => { plan.productBars = bars; plan.requests[0].expect[0].min = 0.7; plan.requests[0].expect[0].diagnostic = true; plan.requests[0].expect[1].minMargin = 0.2 })
+  const ok = loadPlan(diag.planFile)
+  assert.equal(ok.diagnostic, 1); assert.equal(ok.requests[0].expect[0].diagnostic, true)
+  // a family bar wins over the kind default; a hard check with no bar at all is refused
+  const fam = fixture(plan => { plan.productBars = { needs_reply: { yes: 0.7 }, '*choice': { minConfidence: 0.75, minMargin: 0.2 }, '*predicate': { yes: 0.8, no: 0.2 } }; plan.requests[0].expect[0].min = 0.7; plan.requests[0].expect[1].minMargin = 0.2 })
+  assert.equal(loadPlan(fam.planFile).productBars.needs_reply.yes, 0.7)
+  const none = fixture(plan => { plan.productBars = { '*choice': { minConfidence: 0.75, minMargin: 0.2 } }; plan.requests[0].expect[1].minMargin = 0.2 })
+  assert.throws(() => loadPlan(none.planFile), /no product bar declared for family needs_reply or kind predicate/)
+  // a whenAccepted wrong-install check at a STRICTER bar than the product's would miss installs: refused
+  const wa = fixture(plan => { plan.productBars = bars; plan.requests[0].expect[1].minMargin = 0.2; plan.requests[2].expect = [{ name: 'target', kind: 'choice', oneOf: ['p1'], whenAccepted: { minConfidence: 0.9, minMargin: 0.2 }, severity: 'hard', note: 'x' }] })
+  assert.throws(() => loadPlan(wa.planFile), /whenAccepted confidence 0.9 > product 0.75/)
+  // malformed bars and flags
+  for (const [mutate, why] of [[p => { p.productBars = { '*predicate': { yes: 0.2, no: 0.8 } } }, /no must be below yes/], [p => { p.productBars = { '*predicate': { bar: 0.8 } } }, /only yes, no/], [p => { p.productBars = {} }, /productBars must be/],
+    [p => { p.requests[0].expect[0].diagnostic = 'yes' }, /diagnostic must be true/]]) assert.throws(() => loadPlan(fixture(mutate).planFile), why)
+  // without productBars nothing is refused, and the runner says the checks were not compared
+  const io = capture()
+  assert.equal(await main([fixture().planFile], { env: {}, fetchImpl: async () => new Response('{}'), print: io.print, printError: io.printError }), EXIT.ok)
+  assert.ok(io.out.some(line => /"productBars":"not declared"/.test(line)))
+})
+
+test('choice minMargin: the product margin (runner-up includes unreported mass) must reach it', () => {
+  const e = { name: 'status', kind: 'choice', equals: 'done', minConfidence: 0.75, minMargin: 0.2, severity: 'hard', note: '', options: 3 }
+  const a = (conf, rows) => ({ type: 'choice', choice: 'done', confidence: conf, probabilities: rows.map(([value, probability]) => ({ value, probability })) })
+  assert.equal(scoreExpectation(e, a(0.8, [['done', 0.85], ['open', 0.1], ['blocked', 0.05]])).pass, true)
+  const narrow = scoreExpectation(e, a(0.8, [['done', 0.55], ['open', 0.4], ['blocked', 0.05]]))
+  assert.deepEqual([narrow.pass, narrow.reason], [false, 'below_min_margin'])
+  assert.equal(scoreExpectation(e, a(0.8, [['done', 0.6], ['open', 0.05]])).pass, true) // .35 unreported: margin .25
+  assert.equal(scoreExpectation(e, a(0.8, [['done', 0.5], ['open', 0.05]])).pass, false) // .45 unreported: margin .05
+})
