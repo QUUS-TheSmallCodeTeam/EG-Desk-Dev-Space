@@ -53,7 +53,8 @@ test('all features on, one session: memory, briefing, a browser task, a long com
   await w.advance(3000); await w.answer(A.tidy); await w.idle(); ui.pump(); close('a2')
   assert.equal(w.subjectiveTurnsIn('a2').main, 1)
   assert.equal(w.history().length, 4, 'one answer bubble for the turn')
-  // Finding A1 (reported, not pinned): with no newly attached material the draft check has nothing to compare with and sends the answer back for a rewrite.
+  // Finding A1 (fixed in L7 c16, pinned by the A1 test in egdesk-all-on-open-findings.test.mjs): the draft check now gets the pages the Agent
+  // already holds as evidence, so the follow-up answer is posted as written. Recorded here for the ledger.
   ledger.findings.A1 = { draftCheckRequests: w.byFeature('a2').draft_check ?? 0, rewriteTurns: w.subjectiveTurnsIn('a2').fork, postedAnswerIsTheAgentsDraft: w.history().at(-1)[1] === A.tidy, posted: w.history().at(-1)[1] }
 
   // ---- a3. the briefing for that answer: design guide from the held materials, one fill turn, published in order ----

@@ -5536,7 +5536,7 @@ export class CodexChatRuntime {
     try { vocabulary = (await dc?.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
     const revise = ({ draft, note }) => this.reviseOnFork(run, draft, note, controller.signal)
     const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))
-    const check = checkDraft({ draft: text, evidence: [...turn.evidence, ...tools], userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
+    const check = checkDraft({ draft: text, evidence: [...turn.evidence, ...(turn.memory ?? []), ...tools], userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
       mode: 'on', client: setup.client, revise, signal: controller.signal, egress: this.decisionEgressFor(run) })
     void check.catch(() => {})
     try {
@@ -5733,7 +5733,7 @@ export class CodexChatRuntime {
       }
       // Application blocks that rode along this turn (shared messages and the like): the model saw them, the checker may not.
       const refs = extraKeys.slice(0, 4).map((key, i) => ({ id: `ctx${i + 1}`, kind: 'context', time: 'unknown', source: 'application', opaque: true }))
-      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...memoryItems, ...refs], userText: typeof body.message === 'string' ? body.message : '' })
+      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...refs], memory: memoryItems, userText: typeof body.message === 'string' ? body.message : '' })
     } catch { /* the check must never affect the turn */ }
   }
 
@@ -5767,7 +5767,7 @@ export class CodexChatRuntime {
       let vocabulary = []
       try { vocabulary = (await dc.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
       const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))
-      const check = checkDraft({ draft: text, evidence: [...turn.evidence, ...tools], userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
+      const check = checkDraft({ draft: text, evidence: [...turn.evidence, ...(turn.memory ?? []), ...tools], userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
         mode: 'advisory', client: setup.client, signal: controller.signal, egress: this.decisionEgressFor(run) })
       void check.catch(() => {}) // a check that outlives the deadline must not surface later
       const result = await Promise.race([check, aborted])
@@ -6005,7 +6005,8 @@ export class CodexChatRuntime {
   }
 
   // The draft check's evidence from turn memory ('on' only): what this turn attached and what the thread already holds, as the run's model has
-  // it at dispatch (see memoryEvidence). Under 'advisory' nothing reached the model, so there is nothing to add.
+  // it at dispatch (see memoryEvidence). Under 'advisory' nothing reached the model, so there is nothing to add. Used by the checks of the
+  // ANSWER only; a heartbeat's intermediate note is about the run, not the memory, and keeps the evidence it had.
   turnMemoryDraftEvidence(turn, attached) {
     try {
       if (!turn?.result || !turn.wiki || this.turnMemoryMode() !== 'on') return []
