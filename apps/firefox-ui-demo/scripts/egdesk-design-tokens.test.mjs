@@ -820,10 +820,13 @@ function chatComposerFixture({ reply, inputSources = [], captureInputs = null } 
   assert.ok(composerStart >= 0 && composerEnd > composerStart, 'production composer event handlers');
   const destinationMount = surfaceScript.match(/^  function mountBoardComposerDestination\([^]*?^  \}/m);
   assert.ok(destinationMount, 'production Board destination mount; not active in this ordinary room');
+  // The production choice composer has its own tests; here it contributes no nodes and records its calls.
+  const choiceCalls = [];
+  const choice = { panel: null, trigger: null, questionHint: null, attach() { choiceCalls.push('attach'); }, sync() { choiceCalls.push('sync'); }, reset() { choiceCalls.push('reset'); } };
   const composer = compileFunction(`${destinationMount[0]}\nlet compositionInProgress = false, deferredCodex = null;\n${surfaceScript.slice(composerStart, composerEnd)}\nreturn { input, sendButton, manualOwner, blockedSend };`,
-    ['activeThread', 'codex', 'ChatState', 'el', 'deskIcon', 'getCodexThreadDraft', 'composerViewport', 'codexBridge', 'body', 'activeIdentity'])(
-    activeThread, state.codex, ChatState, el, name => ({ icon: name }), draft, { cancel() {} }, codexBridge, {}, { composerLabel: '메시지 입력: 합성 방' });
-  return { ...composer, state, protocol, reservations, requests, owners, notices, pending: () => pending };
+    ['activeThread', 'codex', 'ChatState', 'el', 'deskIcon', 'getCodexThreadDraft', 'composerViewport', 'codexBridge', 'body', 'activeIdentity', 'choice'])(
+    activeThread, state.codex, ChatState, el, name => ({ icon: name }), draft, { cancel() {} }, codexBridge, {}, { composerLabel: '메시지 입력: 합성 방' }, choice);
+  return { ...composer, choiceCalls, state, protocol, reservations, requests, owners, notices, pending: () => pending };
 }
 
 test('approved Chat refinement keeps accessible composer and real HUD actions', () => {
@@ -866,6 +869,8 @@ test('the actual composer button and keyboard handlers dispatch once with their 
     const result = await h.pending();
     assert.equal(result.accepted, true);
     assert.equal(h.owners.length, 1);
+    assert.deepEqual(h.choiceCalls.filter(call => call === 'reset'), ['reset'],
+      'an ordinary send resets the choice composer exactly once, so a sent question never leaves an old [보기 추천] panel behind');
     const { threadId, binding, roomGeneration, current, release } = h.owners[0];
     assert.deepEqual({ threadId, binding, roomGeneration }, { threadId: 'room-a', binding: 'wire-a', roomGeneration: 7 });
     assert.equal(typeof current, 'function');
