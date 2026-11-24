@@ -26,7 +26,9 @@ const PAGES = () => ({
   [`${O}/biz/2`]: [el('d2', 'link', '이번 달 세금계산서 다운로드', { href: `${O}/download/2.pdf` }), el('s2', 'button', '발행 제출')],
   [`${O}/biz/1`]: [el('d1', 'link', '이번 달 세금계산서 다운로드', { href: `${O}/download/1.pdf` })],
   [`${O}/download/2.pdf`]: [], [`${O}/download/1.pdf`]: [],
-  [`${O}/otp`]: [el('o2', 'button', '인증 확인')],
+  // A second-factor page as measured for real (c14): the code field (a sensitive field, never a candidate) and the confirm button.
+  [`${O}/otp`]: [el('o1', 'textbox', '인증번호'), el('o2', 'button', '인증 확인')],
+  [`${O}/otp-push`]: [el('o2', 'button', '인증 확인')],
   [`${O}/single`]: [el('b9', 'link', '사업자 111-22-33333', { href: `${O}/biz/2` })],
   // the c4 classifier vocabulary, as labels and as destinations behind a harmless label
   [`${O}/danger`]: [el('g1', 'link', '로그아웃', { href: `${O}/session/end` }), el('g2', 'link', '회원 탈퇴', { href: `${O}/members/leave` }), el('g3', 'button', '알림 허용'),
@@ -57,7 +59,7 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
     fetchImpl: async (_e, { body }) => {
       const wire = JSON.parse(body), names = wire.questions.map(q => q.name), q0 = wire.questions[0]
       const text = wire.input.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n\n')
-      decisions.push({ q: q0.name, names, bytes: Buffer.byteLength(body), image: /input_image|image_url/.test(body) }); timeline.push(`decide:${names.join('+')}`)
+      decisions.push({ q: q0.name, names, bytes: Buffer.byteLength(body), image: /input_image|image_url/.test(body), input: text }); timeline.push(`decide:${names.join('+')}`)
       const entryAnswer = q => { const msg = /(?:User message: |Message:\n)(.*)/.exec(text)?.[1] ?? ''
         return choice('browser_entry', /세금계산서/.test(msg) ? starts(q.choices, '[C1]') : 'not_browser_task', 0.95) }
       if (names.some(name => name.includes('__'))) { // one heartbeat request for every question proposed at this beat (provider__name)
@@ -291,13 +293,17 @@ test('R3 contrast, held mode off: the same browser-task turn streams (started + 
   assert.ok(w.deltas().length > 1 && w.deltas().join('') === text, 'streamed fragments')
 })
 
-test('R4 held mode on, not a browser task: an ordinary bounded turn is untouched by this change (still not held)', async t => {
-  const w = world(t)
+// Changed in c15 (U8, all-on finding A6): with the held mode on, every turn of a Browser conversation shows only finished messages.
+test('R4 held mode on, not a browser task: the ordinary turn of a Browser conversation is held too, shown once and whole; the heartbeat does not start speaking there', async t => {
+  const w = world(t, { virtual: true })
   await w.send('오늘 날씨 어때?')
   assert.equal(w.note(), null)
-  const text = await w.subjective()
-  assert.ok(w.deltas().length > 1 && w.deltas().join('') === text, 'bounded turns without a browser task keep their existing behaviour')
+  let early = null
+  const text = await w.subjective({ beforeTurnEnds: () => { early = w.visibleAssistant() } })
+  assert.equal(early, '[]', 'nothing of the answer is visible while the turn works')
+  assert.deepEqual([w.deltas(), w.posted()], [[text], [text]], 'one piece, one completed message')
   assert.equal(w.chat.browserTaskFacts(DM), null)
+  assert.equal(w.flowAsked.length, 0, 'a held ordinary bounded turn is not made a speaker')
 })
 
 // ---- cost: the entry decision riding on a turn-start triage request ----
@@ -363,7 +369,9 @@ test('S1 the classifier vocabulary (logout, leave, allow, order, contract, pay-s
     assert.deepEqual(w.acts, [], `${guess}: 0 action requests`)
     const note = w.note()
     assert.equal(note.status, 'cannot_proceed', guess)
-    assert.equal(note.code, guess === 'blocked' ? 'human_step' : 'uncertain', guess)
+    // c15 code rule: nothing on the page can be chosen and person-only controls were withheld -> the step is the person's, whatever the model would pick.
+    assert.equal(note.code, 'human_step', guess)
+    assert.equal(w.counts().next_step ?? 0, 0, `${guess}: the step is not even asked`)
     assert.equal(note.candidates, undefined)
     assert.doesNotMatch(JSON.stringify(note), /로그아웃|탈퇴|허용|주문|해지|제출|logout|cancel/, 'the note names none of them')
   }
@@ -575,4 +583,20 @@ test('N9 the task that finishes inside the held-open run still hands its content
   assert.match(candidate.text, /선택: 사업자 987-65-43210 @ \/invoices \[choice_needed\]/)
   assert.doesNotMatch(candidate.text, /두 번째|https?:|\?/, 'the reply text and URLs are not in the record')
   assert.equal(w.memoryCalls.length, 1, 'memory was fetched once, for the request; the in-run reply fetches nothing')
+})
+
+// ---- c15: the resume judgment reads the question the Agent actually asked (R1), in both reply paths ----
+test('Q1 the resume request carries the posted question (bounded), in-run and as a next turn; it never carries a page address', async t => {
+  for (const flow of [true, false]) {
+    const w = world(t, { flow })
+    await w.send(MSG)
+    const question = await w.subjective()
+    await w.send('두 번째 사업자로')
+    const resume = w.decisions.find(d => d.q === 'task_resume')
+    assert.ok(resume, `flow=${flow}: a resume judgment was made`)
+    assert.ok(resume.input.includes(`Asked: ${question}`), `flow=${flow}: the question as posted`)
+    assert.match(resume.input, /Paused because: need_context \(choice_needed\)\nAsked: .+\nUser message: 두 번째 사업자로/)
+    assert.doesNotMatch(resume.input, /https?:|example\.test\/|\/invoices/)
+    assert.equal(w.note().status, 'done')
+  }
 })
