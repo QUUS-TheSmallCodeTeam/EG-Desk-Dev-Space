@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
+import { PS_NAMES, pageStateAnswers, pageStateProbabilities, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
 
 // L8/C2 matrix: the real provider + Browser service + runBrowserReflex, with an
 // in-process UI double and a mock Decisions endpoint. Every case counts what
@@ -44,7 +45,7 @@ async function run(t, { elements = ELEMENTS, next, nextAnswer, pageState = 'cont
       const choices = labelOf(wire, 'next_step')
       const answers = [
         nextAnswer ? nextAnswer(choices) : choiceAnswer('next_step', find(choices, next) ?? next, 0.97),
-        choiceAnswer('page_state', pageState, 0.95),
+        ...pageStateWire(pageState),
         { name: 'goal_met', type: 'predicate', probability: goalMet },
       ]
       return { ok: true, text: async () => JSON.stringify({ answers }) }

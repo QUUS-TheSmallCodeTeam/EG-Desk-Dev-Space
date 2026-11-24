@@ -5,6 +5,7 @@ import { createDecisionClient, decisionTopicRecipient } from './egdesk-decision-
 import { normalizeEntry } from './egdesk-decision-calibration-log.mjs'
 import { runBrowserReflex } from './egdesk-browser-reflex.mjs'
 import { createBrowserTaskStore, createDirectBrowserEntry, entryQuestion, readBrowserEntry, subjectiveNote } from './egdesk-browser-task.mjs'
+import { PS_NAMES, pageStateAnswers, pageStateProbabilities, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
 
 // L8/C6: the user's chat message goes straight to an objective browser task; the judge picks only among
 // code-enumerated options plus fixed ones; need-context / cannot-proceed exit to the subjective model (a mock
@@ -49,6 +50,7 @@ async function world(t, { start, mode = 'on', hang = false }) {
     fetchImpl: async (_endpoint, { body, signal }) => {
       const wire = JSON.parse(body)
       const q0 = wire.questions[0], evidence = wire.input[1].content
+      const stepQ = wire.questions.find(q => q.name === 'next_step') ?? (q0.choices ? q0 : { choices: [] }) // c16: a code-decided step asks no next_step
       decisions.push({ q: q0.name, image: /image/i.test(body), choices: q0.choices?.map(c => c.value) })
       if (hang) await new Promise((_, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }))
       if (q0.name === 'browser_entry') {
@@ -62,11 +64,11 @@ async function world(t, { start, mode = 'on', hang = false }) {
         return { ok: true, text: async () => JSON.stringify({ answers: [choice('task_resume', value, 0.95)] }) }
       }
       const url = /URL: (\S+)/.exec(evidence)?.[1]
-      const p = answerNext({ url, evidence, choices: q0.choices })
+      const p = answerNext({ url, evidence, choices: stepQ.choices })
       const nextAnswer = choice('next_step', p.next[0], p.next[1])
-      if (p.next[0] === 'needs_user_context') nextAnswer.probabilities.push({ value: starts(q0.choices, '123-45'), probability: 0.05 }, { value: starts(q0.choices, '987-65'), probability: 0.04 })
+      if (p.next[0] === 'needs_user_context') nextAnswer.probabilities.push({ value: starts(stepQ.choices, '123-45'), probability: 0.05 }, { value: starts(stepQ.choices, '987-65'), probability: 0.04 })
       return { ok: true, text: async () => JSON.stringify({ answers: [nextAnswer,
-        choice('page_state', p.pageState ?? 'content', 0.95), { name: 'goal_met', type: 'predicate', probability: p.goalMet ?? 0 }] }) }
+        ...pageStateWire(p.pageState ?? 'content'), { name: 'goal_met', type: 'predicate', probability: p.goalMet ?? 0 }] }) }
     },
   })
   const transport = { runs: new Map(), hasClient: id => id === 'ui',
@@ -247,13 +249,14 @@ test('resume state: a value filled before the pause is never filled again after 
     recipientForKey: (value, endpoint, model) => decisionTopicRecipient(value, 1, endpoint, model), getApiKey: async () => KEY,
     fetchImpl: async (_e, { body }) => {
       const wire = JSON.parse(body), q0 = wire.questions[0], ev = wire.input[1].content
+      const stepQ = wire.questions.find(q => q.name === 'next_step') ?? (q0.choices ? q0 : { choices: [] }) // c16: a code-decided step asks no next_step
       if (q0.name.startsWith('field_')) {
         return { ok: true, text: async () => JSON.stringify({ answers: wire.questions.map(q => { const k = /named "(.+?)"/.exec(q.instructions)[1]; return choice(q.name, q.choices.find(c => c.value.includes(k)).value, 0.95) }) }) }
       }
       const v = ev.includes('filled [F1]') ? (askUser ? 'needs_user_context' : '[F2] 이메일') : '[F1] 이름'
       const done = ev.includes('filled [F2]')
-      return { ok: true, text: async () => JSON.stringify({ answers: [choice('next_step', done ? 'goal_met' : v === '[F2] 이메일' ? q0.choices.find(c => c.value.startsWith('[F2]')).value : v === '[F1] 이름' ? q0.choices.find(c => c.value.startsWith('[F1]')).value : v, 0.95),
-        choice('page_state', 'content', 0.95), { name: 'goal_met', type: 'predicate', probability: done ? 0.95 : 0 }] }) }
+      return { ok: true, text: async () => JSON.stringify({ answers: [choice('next_step', done ? 'goal_met' : v === '[F2] 이메일' ? stepQ.choices.find(c => c.value.startsWith('[F2]')).value : v === '[F1] 이름' ? stepQ.choices.find(c => c.value.startsWith('[F1]')).value : v, 0.95),
+        ...pageStateWire('content'), { name: 'goal_met', type: 'predicate', probability: done ? 0.95 : 0 }] }) }
     },
   })
   const values = { 이름: '합성이름', 이메일: 'synthetic@example.test' }
@@ -309,8 +312,8 @@ test('C11 the step observer cannot change the loop: a throwing observer and no o
     const calls = []
     const callTool = async (name, args) => { calls.push(name); return name === 'egdesk_browser_observe' ? { observationId: `o${calls.length}`, snapshot: page } : { status: 'ok' } }
     const client = createDecisionClient({ recipientForKey: (value, endpoint, model) => decisionTopicRecipient(value, 1, endpoint, model), getApiKey: async () => KEY,
-      fetchImpl: async (_e, { body }) => { const q0 = JSON.parse(body).questions[0]
-        return { ok: true, text: async () => JSON.stringify({ answers: [choice('next_step', q0.choices[0].value, 0.95), choice('page_state', 'content', 0.95), { name: 'goal_met', type: 'predicate', probability: 0 }] }) } } })
+      fetchImpl: async (_e, { body }) => { const q0 = JSON.parse(body).questions.find(q => q.name === 'next_step') ?? JSON.parse(body).questions[0]
+        return { ok: true, text: async () => JSON.stringify({ answers: [choice('next_step', q0.choices[0].value, 0.95), ...pageStateWire('content'), { name: 'goal_met', type: 'predicate', probability: 0 }] }) } } })
     const { steps, state, ...result } = await runBrowserReflex({ cardId: 'c', goal: 'g', callTool, client, maxSteps: 2, ...(onStep ? { onStep } : {}) })
     return { result, calls, actions: steps.map(s => s.actions) }
   }

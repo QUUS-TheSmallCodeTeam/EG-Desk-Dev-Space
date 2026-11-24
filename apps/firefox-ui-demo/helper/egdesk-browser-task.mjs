@@ -178,6 +178,8 @@ const tally = (task, result) => {
     const label = labelKey(step.opened.option)
     task.trail.push({ op: 'open', label, from: safePath(step.url), to: safePath(step.opened.to) })
     if (task.pendingAsk) { task.resolved.push({ asked: task.pendingAsk, chose: label, at: safePath(step.url) }); task.pendingAsk = null }
+    // A choice code took from the record is settled again this run: the new record carries it forward (with today's label).
+    else if (step.opened.recordedAsked) task.resolved.push({ asked: step.opened.recordedAsked, chose: label, at: safePath(step.url) })
   }
   if (!task.host) task.host = hostOf(result.steps?.[0]?.url)
 }
@@ -242,7 +244,7 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
   function finishPause(task, pause, result, extra = {}) {
     task.status = 'paused'; task.pause = pause; task.question = null; store.touch(task)
     if (pause.kind === 'need_context' && ASKED_CODES.has(pause.code)) task.pendingAsk = pause.code
-    else remember(task, { status: 'stuck', code: pause.code })
+    else if (pause.code !== 'page_unclear') remember(task, { status: 'stuck', code: pause.code }) // a page to look at is a pause, not an outcome
     const status = pause.kind === 'need_context' ? 'need_context' : 'cannot_proceed'
     return { handled: true, status: 'paused', taskId: task.taskId,
       note: subjectiveNote(task, { status, code: pause.code, candidates: extra.candidates, detail: extra.detail }) }
@@ -256,6 +258,8 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
         return { handled: true, status: 'done', taskId: task.taskId, note: subjectiveNote(task, { status: 'done' }) }
       case 'needs_user_context': return finishPause(task, { kind: 'need_context', code: 'choice_needed' }, result, { candidates: result.candidates || [] })
       case 'needs_free_text': return finishPause(task, { kind: 'need_context', code: 'detail_needed' }, result)
+      // c16: the page-state predicates did not decide; the person is asked to look at the page (closed code, worded by the subjective model)
+      case 'page_unclear': return finishPause(task, { kind: 'need_context', code: 'page_unclear' }, result)
       case 'handoff': return finishPause(task, { kind: 'cannot_proceed', code: typeof result.pageState === 'string' ? result.pageState : 'sensitive_flow' }, result)
       case 'escalated': {
         const last = (result.steps || []).at(-1)

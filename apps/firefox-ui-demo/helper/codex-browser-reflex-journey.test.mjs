@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
+import { PS_NAMES, pageStateAnswers, pageStateProbabilities, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
 
 // L8/C5 journey: one multi-step task through the real provider + Browser service +
 // runBrowserReflex, a stateful two-page UI double, and a mock Decisions endpoint.
@@ -59,7 +60,7 @@ async function journey(t, { policy, values = { 이름: '합성이름', 이메일
       const next = starts(choices, prefix) ?? prefix
       const rest = p.runnerUp ? [{ value: starts(choices, p.runnerUp[0]), probability: p.runnerUp[1] }] : []
       return { ok: true, text: async () => JSON.stringify({ answers: [choice('next_step', next, confidence, rest),
-        choice('page_state', p.pageState ?? 'content', 0.95), { name: 'goal_met', type: 'predicate', probability: p.goalMet ?? 0 }] }) }
+        ...pageStateWire(p.pageState ?? 'content'), { name: 'goal_met', type: 'predicate', probability: p.goalMet ?? 0 }] }) }
     },
   })
   const transport = { runs: new Map(), hasClient: id => id === 'ui',

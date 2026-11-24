@@ -4,6 +4,7 @@ import { createDecisionClient } from './egdesk-decision-client.mjs'
 import { runBrowserReflex } from './egdesk-browser-reflex.mjs'
 import { createBrowserTaskStore, createDirectBrowserEntry, decideResume, readBrowserEntry } from './egdesk-browser-task.mjs'
 import { decisionThresholds } from './egdesk-decision-questions.mjs'
+import { PS_NAMES, pageStateAnswers, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
 
 // L8 c15: code rules taken from the first REAL Decision results on the browser task (Main's run of plan browser-task-v1, 2026-11-25,
 // 12/12 hard expectations held). Every answer below is the real answer replayed: value, confidence and the top-two probabilities as
@@ -33,17 +34,17 @@ async function step(snapshot, answers) {
 
 test('R5 page state: a decided two_factor_required hands over whatever next_step says (real: page_state 1.0, next_step needs_user_context 0.31)', async () => {
   const real = () => [choice('next_step', 'needs_user_context', 0.31, [['needs_user_context', 0.45], ['blocked', 0.40]]),
-    choice('page_state', 'two_factor_required', 1.0, [['two_factor_required', 1.0]]), { name: 'goal_met', type: 'predicate', probability: 0.01 }]
+    ...pageStateWire('two_factor_required', 1.0), { name: 'goal_met', type: 'predicate', probability: 0.01 }]
   const { result, sent, actions } = await step(OTP, real)
   assert.deepEqual([result.outcome, result.pageState, sent.length, actions], ['handoff', 'two_factor_required', 1, []])
   // the same hand-over for the other person-only page states, and even if the model confidently picks an element
   for (const state of ['login_required', 'bot_check', 'sensitive_flow']) {
-    const picked = await step(HOME, () => [choice('next_step', '[L1] 세금계산서 조회', 0.99, [['[L1] 세금계산서 조회', 0.99]]), choice('page_state', state, 0.95, [[state, 0.95]]), { name: 'goal_met', type: 'predicate', probability: 0 }])
+    const picked = await step(HOME, () => [choice('next_step', '[L1] 세금계산서 조회', 0.99, [['[L1] 세금계산서 조회', 0.99]]), ...pageStateWire(state, 0.95), { name: 'goal_met', type: 'predicate', probability: 0 }])
     assert.deepEqual([picked.result.outcome, picked.result.pageState, picked.actions], ['handoff', state, []], state)
   }
   // an undecided page state never acts either
-  const unsure = await step(HOME, () => [choice('next_step', '[L1] 세금계산서 조회', 0.99, [['[L1] 세금계산서 조회', 0.99]]), choice('page_state', 'two_factor_required', 0.5, [['two_factor_required', 0.6], ['content', 0.3]]), { name: 'goal_met', type: 'predicate', probability: 0 }])
-  assert.deepEqual([unsure.result.outcome, unsure.result.reason, unsure.actions], ['escalated', 'uncertain', []])
+  const unsure = await step(HOME, () => [choice('next_step', '[L1] 세금계산서 조회', 0.99, [['[L1] 세금계산서 조회', 0.99]]), ...pageStateWire('two_factor_required', 0.5), { name: 'goal_met', type: 'predicate', probability: 0 }])
+  assert.deepEqual([unsure.result.outcome, unsure.actions], ['page_unclear', []], 'c16: undecided asks the person to look at the page')
 })
 
 test('R3 no element offered and person-only controls withheld: code stops with human_step and asks nothing (real, when asked: scroll_more 0.30, top 0.44 / 0.36)', async () => {
@@ -54,7 +55,7 @@ test('R3 no element offered and person-only controls withheld: code stops with h
   // without its page state. With its code field (the page measured for real) it is still asked, and keeps two_factor_required.
   const push = await step(PUSH, () => { throw new Error('must not be asked') })
   assert.deepEqual([push.result.outcome, push.result.reason, push.sent.length], ['escalated', 'human_step', 0])
-  const withField = await step(OTP, () => [choice('next_step', 'blocked', 0.9, [['blocked', 0.9]]), choice('page_state', 'two_factor_required', 1, [['two_factor_required', 1]]), { name: 'goal_met', type: 'predicate', probability: 0 }])
+  const withField = await step(OTP, () => [choice('next_step', 'blocked', 0.9, [['blocked', 0.9]]), ...pageStateWire('two_factor_required', 1), { name: 'goal_met', type: 'predicate', probability: 0 }])
   assert.deepEqual([withField.sent.length, withField.result.pageState], [1, 'two_factor_required'])
 })
 
@@ -144,4 +145,59 @@ test('R1 without the question, two different questions with the same reply make 
   // bounded
   await decideResume({ message: 'x', pause, question: '가'.repeat(5000), client })
   assert.ok(JSON.parse(bodies[4])[1].content.length < 600)
+})
+
+// ---- c16: Main's all-on journey (2026-11-25), s10 and s11, the real answers replayed on lane L2's portal pages ----
+import { PAGE_STATE_CHECKS, readPageState, sameKindCandidates, buildReflexCandidates } from './egdesk-browser-reflex.mjs'
+const AO = text => ['합성 포털']
+const AO_INVOICES = page('/invoices', AO(), [el('b1', 'link', '사업자 123-45-67890', { href: `${O}/biz/1` }), el('b2', 'link', '사업자 987-65-43210', { href: `${O}/biz/2` }), el('s1', 'button', '발행 제출')])
+const AO_BIZ2 = page('/biz/2', AO(), [el('d2', 'link', '이번 달 세금계산서 다운로드', { href: `${O}/download/2.pdf` })])
+const S10_NEXT = choice('next_step', 'needs_user_context', 0.70, [['[L1] 사업자 123-45-67890', 0.05], ['[L2] 사업자 987-65-43210', 0.05], ['scroll_more', 0.04], ['goal_met', 0.01], ['needs_free_text', 0.05], ['needs_user_context', 0.74], ['blocked', 0.06]])
+const ordinary = () => pageStateWire('content', 0.97)
+const goal0 = { name: 'goal_met', type: 'predicate', probability: 0 }
+
+test('s10 real: needs_user_context at 0.70 (below the bar) pauses with both businesses built by code, no action; before c16 it ended "uncertain" with no candidates', async () => {
+  const s = await step(AO_INVOICES, () => [S10_NEXT, ...ordinary(), goal0])
+  assert.deepEqual([s.result.outcome, s.result.candidates, s.actions], ['needs_user_context', ['[L1] 사업자 123-45-67890', '[L2] 사업자 987-65-43210'], []])
+  // an undecided element top with two same-kind elements asks too; with a single element and no ask option it stays "uncertain"
+  const top = await step(AO_INVOICES, () => [choice('next_step', '[L2] 사업자 987-65-43210', 0.6, [['[L2] 사업자 987-65-43210', 0.6], ['[L1] 사업자 123-45-67890', 0.35]]), ...ordinary(), goal0])
+  assert.deepEqual([top.result.outcome, top.result.candidates, top.actions], ['needs_user_context', ['[L1] 사업자 123-45-67890', '[L2] 사업자 987-65-43210'], []])
+  const single = await step(AO_BIZ2, () => [choice('next_step', '[L1] 이번 달 세금계산서 다운로드', 0.6, [['[L1] 이번 달 세금계산서 다운로드', 0.6], ['scroll_more', 0.3]]), ...ordinary(), goal0])
+  assert.deepEqual([single.result.outcome, single.result.reason, single.actions], ['escalated', 'uncertain', []])
+  // a confident needs_user_context also lists the code-built group (the real c15 answer listed them only through its small probabilities)
+  const sure = await step(AO_INVOICES, () => [choice('next_step', 'needs_user_context', 0.89, [['needs_user_context', 0.9], ['blocked', 0.05]]), ...ordinary(), goal0])
+  assert.deepEqual(sure.result.candidates, ['[L1] 사업자 123-45-67890', '[L2] 사업자 987-65-43210'])
+  // the submit button is never a candidate
+  assert.deepEqual(sameKindCandidates(buildReflexCandidates(AO_INVOICES).options), ['[L1] 사업자 123-45-67890', '[L2] 사업자 987-65-43210'])
+})
+
+test('s11 real: the download link at 0.99 is taken when the page-state predicates are decided no (the real page_state choice was content 0.65, a stop)', async () => {
+  const s = await step(AO_BIZ2, () => [choice('next_step', '[L1] 이번 달 세금계산서 다운로드', 0.99, [['[L1] 이번 달 세금계산서 다운로드', 0.99], ['scroll_more', 0.01]]), ...ordinary(), goal0])
+  assert.deepEqual([s.result.outcome, s.actions], ['max_steps', ['egdesk_browser_navigate', 'egdesk_browser_wait']])
+  // undecided predicates: the person is asked to look (page_unclear), nothing is opened
+  const flat = await step(AO_BIZ2, () => [choice('next_step', '[L1] 이번 달 세금계산서 다운로드', 0.99, [['[L1] 이번 달 세금계산서 다운로드', 0.99]]), ...pageStateWire('content', 0.5), goal0])
+  assert.deepEqual([flat.result.outcome, flat.actions], ['page_unclear', []])
+})
+
+test('page-state predicates: any decided yes stops, all decided no is an ordinary page, anything else is undecided; one predicate per state, quoted about this page', () => {
+  const t = 0.7
+  const a = p => Object.fromEntries(PAGE_STATE_CHECKS.map(c => [c.name, { type: 'predicate', probability: p[c.name] ?? 0.02 }]))
+  assert.equal(readPageState(a({}), t).state, 'content')
+  assert.equal(readPageState(a({ ps_code: 0.9 }), t).state, 'two_factor_required')
+  assert.equal(readPageState(a({ ps_code: 0.9, ps_error: 0.5 }), t).state, 'two_factor_required', 'a decided yes wins over an undecided one')
+  assert.equal(readPageState(a({ ps_error: 0.5 }), t).state, null)
+  assert.equal(readPageState(a({ ps_sign_in: 0.31 }), t).state, null, 'just above the "no" bound is undecided')
+  assert.equal(readPageState({ ...a({}), ps_covered: undefined }, t).state, null, 'a missing answer is undecided, never "no"')
+  assert.deepEqual(PAGE_STATE_CHECKS.map(c => c.state), ['login_required', 'two_factor_required', 'bot_check', 'sensitive_flow', 'error_page', 'modal_blocking'])
+  for (const c of PAGE_STATE_CHECKS) assert.match(c.text, /^(Does|Is) (this page|the person|a dialog)/, 'one state per predicate, about this page')
+})
+
+test('loading is read from the snapshot by code: a wait, no request', async () => {
+  let asked = 0
+  const tools = []
+  const loading = { ...HOME, readyState: 'loading' }
+  const callTool = async name => { tools.push(name); return name === 'egdesk_browser_observe' ? { observationId: 'o1', snapshot: loading } : { status: 'ok' } }
+  const client = { decide: async () => { asked++; return { answers: {} } } }
+  const result = await runBrowserReflex({ cardId: 'card', goal: 'x', callTool, client, maxSteps: 1 })
+  assert.deepEqual([asked, tools, result.outcome], [0, ['egdesk_browser_observe', 'egdesk_browser_wait'], 'max_steps'])
 })

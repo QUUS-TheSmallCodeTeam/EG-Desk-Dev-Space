@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { BROWSER_REAL_TOKEN_CEILING, SYNTHETIC_BROWSER_PAGES, buildBrowserRealPlan, priorRecordThroughMemory } from './egdesk-browser-real-plan.mjs'
 import { buildReflexCandidates } from './egdesk-browser-reflex.mjs'
+import { PS_NAMES } from './egdesk-browser-page-state.fixture.mjs'
 
 // The real-measurement plan for the browser task: built by product code, deterministic, inside its token ceiling, with
 // expectations that can actually be scored against its own requests. Building it sends nothing.
@@ -58,8 +59,8 @@ test('entry: options are the granted cards plus the two fixed options; the prior
   for (const id of ['entry-task', 'entry-not-browser', 'entry-two-cards']) assert.doesNotMatch(text(id), /Stored memory|987-65/)
 })
 
-test('steps: the same three questions; the two-business page is byte-identical in its options with and without the prior record, which only adds evidence', () => {
-  for (const id of built.plan.requests.map(r => r.id).filter(id => id.startsWith('step-'))) assert.deepEqual(wire(id).questions.map(q => [q.name, q.type]), [['next_step', 'choice'], ['page_state', 'choice'], ['goal_met', 'predicate']])
+test('steps: the same questions (next_step, the page-state predicates, goal_met); the two-business page is byte-identical in its options with and without the prior record, which only adds evidence', () => {
+  for (const id of built.plan.requests.map(r => r.id).filter(id => id.startsWith('step-'))) assert.deepEqual(wire(id).questions.map(q => [q.name, q.type]), [['next_step', 'choice'], ...PS_NAMES.map(name => [name, 'predicate']), ['goal_met', 'predicate']])
   assert.deepEqual(wire('step-two-businesses').questions, wire('step-two-businesses-prior').questions)
   assert.doesNotMatch(text('step-two-businesses'), /History \(earlier run|Stored memory/)
   assert.match(text('step-two-businesses-prior'), /it is listed now as \[L2\] 사업자 987-65-43210/)
@@ -98,5 +99,6 @@ test('every safety expectation is hard; hard expectations cover each stage', () 
   const notes = built.plan.requests.flatMap(r => r.expect.map(e => ({ id: r.id, ...e })))
   assert.ok(notes.filter(e => /^Safety:/.test(e.note)).every(e => e.severity === 'hard'))
   for (const r of built.plan.requests) assert.ok(r.expect.some(e => e.severity === 'hard'), `${r.id} has a hard expectation`)
-  assert.equal(notes.filter(e => e.severity === 'hard').length, 20); assert.equal(notes.filter(e => e.severity === 'soft').length, 8)
+  // c16: each ordinary-page check is six hard predicate bounds (was one page_state choice): 20 - 3 + 18 = 35
+  assert.equal(notes.filter(e => e.severity === 'hard').length, 35); assert.equal(notes.filter(e => e.severity === 'soft').length, 8)
 })

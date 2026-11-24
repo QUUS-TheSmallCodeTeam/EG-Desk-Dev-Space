@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
+import { PS_NAMES, pageStateAnswers, pageStateProbabilities, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
 
 const marker = 'B10_SYNTHETIC_OBSERVATION'
 const url = 'https://example.test/b10'
@@ -49,7 +50,7 @@ async function scenario(target, change, t) {
       dispatches.push({ question, observation: wire.input[1].content.includes(marker), value: body.includes('synthetic-fill-value') })
       const firstChoice = wire.questions[0].choices[0].value
       const answers = question === 'field_0' ? [choose(question, firstChoice)] : [
-        choose('next_step', target === 'field_0' ? firstChoice : 'goal_met'), choose('page_state', 'content'),
+        choose('next_step', target === 'field_0' ? firstChoice : 'goal_met'), ...pageStateWire('content'),
         { type: 'predicate', name: 'goal_met', probability: target === 'field_0' ? 0 : 1 },
       ]
       if (late && question === target && reads === targetRead) { reached.resolve(); await resume.promise }

@@ -10,6 +10,8 @@ import { createDecisionClient, decisionTopicRecipient } from './egdesk-decision-
 import { outcomeCandidate } from './egdesk-browser-task-memory.mjs'
 import { triageTurn } from './egdesk-turn-memory.mjs'
 import { mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
+import { PS_NAMES, pageStateAnswers, pageStateProbabilities, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
+const STEP = `decide:${['next_step', ...PS_NAMES, 'goal_met'].join('+')}`
 
 // L8/C11: the objective browser loop <-> chat round trip in the 'on' path of the REAL chat runtime under completed-messages-only
 // (the held-answer mode), the read-only progress facts for the heartbeat, the entry decision riding on a turn-start triage request,
@@ -58,6 +60,7 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
     recipientForKey: (value, endpoint, model) => decisionTopicRecipient(value, 1, endpoint, model), getApiKey: async () => KEY,
     fetchImpl: async (_e, { body }) => {
       const wire = JSON.parse(body), names = wire.questions.map(q => q.name), q0 = wire.questions[0]
+      const stepQ = wire.questions.find(q => q.name === 'next_step') ?? (q0.choices ? q0 : { choices: [] }) // c16: a code-decided step asks no next_step
       const text = wire.input.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n\n')
       decisions.push({ q: q0.name, names, bytes: Buffer.byteLength(body), image: /input_image|image_url/.test(body), input: text }); timeline.push(`decide:${names.join('+')}`)
       const entryAnswer = q => { const msg = /(?:User message: |Message:\n)(.*)/.exec(text)?.[1] ?? ''
@@ -91,15 +94,15 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
       let next, goalMet = 0, pageState = 'content'
       if (/is NOT listed now/.test(evidence)) flags.notListed++
       const listed = /it is listed now as (\[L\d+\] [^\n]*?)\.(?:\n|$)/.exec(evidence)
-      if (pick) { const picked = pick(q0.choices, evidence, url, ctx); if (picked && typeof picked === 'object') { next = picked.next; goalMet = picked.goalMet ?? 0 } else next = picked }
+      if (pick) { const picked = pick(stepQ.choices, evidence, url, ctx); if (picked && typeof picked === 'object') { next = picked.next; goalMet = picked.goalMet ?? 0 } else next = picked }
       else if (/\/download\//.test(url)) { next = 'goal_met'; goalMet = 0.95 }
       else if (url.endsWith('/otp')) { next = 'blocked'; pageState = 'two_factor_required' }
-      else if (/\/invoices/.test(url)) next = listed ? listed[1].trim() : /is NOT listed now/.test(evidence) ? q0.choices.map(c => c.value).find(v => /^\[L1\]/.test(v)) : /두 번째/.test(ctx) ? starts(q0.choices, '987-65') : 'needs_user_context'
-      else if (url.endsWith('/single')) next = starts(q0.choices, '111-22')
-      else next = starts(q0.choices, '다운로드') ?? 'blocked'
+      else if (/\/invoices/.test(url)) next = listed ? listed[1].trim() : /is NOT listed now/.test(evidence) ? stepQ.choices.map(c => c.value).find(v => /^\[L1\]/.test(v)) : /두 번째/.test(ctx) ? starts(stepQ.choices, '987-65') : 'needs_user_context'
+      else if (url.endsWith('/single')) next = starts(stepQ.choices, '111-22')
+      else next = starts(stepQ.choices, '다운로드') ?? 'blocked'
       const answer = choice('next_step', next, 0.95)
-      if (next === 'needs_user_context') answer.probabilities.push(...q0.choices.filter(c => /^\[L\d+\]/.test(c.value)).slice(0, 2).map(c => ({ value: c.value, probability: 0.02 })))
-      return { ok: true, text: async () => JSON.stringify({ answers: [answer, choice('page_state', pageState, 0.95), { name: 'goal_met', type: 'predicate', probability: goalMet }] }) }
+      if (next === 'needs_user_context') answer.probabilities.push(...stepQ.choices.filter(c => /^\[L\d+\]/.test(c.value)).slice(0, 2).map(c => ({ value: c.value, probability: 0.02 })))
+      return { ok: true, text: async () => JSON.stringify({ answers: [answer, ...pageStateWire(pageState), { name: 'goal_met', type: 'predicate', probability: goalMet }] }) }
     },
   })
   const transport = { runs: new Map(), hasClient: id => id === 'ui',
@@ -244,8 +247,8 @@ test('R1 one live run: question (completed message) -> run.replyOpen -> in-run r
   assert.equal(w.decisions.filter(d => d.image).length, 0)
   // each objective phase ran before its native turn: the subjective model only ever worded a finished note
   const order = w.timeline.filter(x => /^(decide:|native:turn\/start)/.test(x))
-  assert.deepEqual(order, ['decide:browser_entry', 'decide:next_step+page_state+goal_met', 'native:turn/start', 'decide:task_resume',
-    'decide:next_step+page_state+goal_met', 'decide:next_step+page_state+goal_met', 'decide:next_step+page_state+goal_met', 'native:turn/start'])
+  assert.deepEqual(order, ['decide:browser_entry', STEP, 'native:turn/start', 'decide:task_resume',
+    STEP, STEP, STEP, 'native:turn/start'])
   // no intermediate-message job started for a browser-task turn (its reply must reach the task, not an in-run steer)
   assert.equal(w.calls.some(c => c.method === 'thread/fork' || c.method === 'turn/steer' || c.method === 'turn/interrupt'), false, 'the reply is never steered into a native turn: it belongs to the task')
 
@@ -393,8 +396,9 @@ test('S3 page-changed override through the runtime: memory names a choice that i
   assert.deepEqual([same.note().status, same.acts.map(a => a.url)], ['done', [`${O}/biz/2`, `${O}/download/2.pdf`]])
   const changed = world(t, { entry: { memory }, patch: p => { p[`${O}/invoices`] = p[`${O}/invoices-changed`] } })
   await changed.send(MSG)
-  assert.equal(changed.flags.notListed, 1, 'the step evidence said the earlier choice is not listed')
-  assert.deepEqual([changed.note().status, changed.note().code, changed.acts.length], ['need_context', 'choice_needed', 0], 'the model picked [L1] at 0.95; code asked the person instead')
+  // c16: code compares the recorded label with the labels offered now; it is gone, so the person is asked which, and the model is not
+  assert.equal(changed.flags.notListed, 0, 'no which-question carried the history to the model')
+  assert.deepEqual([changed.note().status, changed.note().code, changed.note().candidates, changed.acts.length], ['need_context', 'choice_needed', ['사업자 555-11-22222', '사업자 444-33-55555'], 0])
 })
 
 // ---- heartbeat in the real wiring: a browser-task turn is eligible to speak, one mechanism, completed messages only ----

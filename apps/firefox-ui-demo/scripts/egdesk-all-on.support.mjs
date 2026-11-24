@@ -35,6 +35,7 @@ import { createBoardPresentationHttpHandler } from '../helper/egdesk-board-prese
 import { briefingDeps } from '../helper/egdesk-briefing-engine.mjs'
 import { collectDecisionCandidates } from '../helper/egdesk-decision-candidates.mjs'
 import { SYNTHETIC_PAGES, mockJudge } from '../helper/egdesk-wiki-reconstruction.fixture.mjs'
+import { PS_NAMES } from '../helper/egdesk-browser-page-state.fixture.mjs'
 
 export const KEY = 'egd-synthetic-not-a-key-0009'
 export const OWNER = 'codex:fixture-owner'
@@ -146,7 +147,8 @@ export function scriptedDecisions({ policy = {} } = {}) {
       else next = starts('다운로드') ?? 'blocked'
       const a = { name: 'next_step', type: 'choice', choice: next, confidence: 0.95, probabilities: [{ value: next, probability: 0.95 }] }
       if (next === 'needs_user_context') a.probabilities.push(...q0.choices.filter(c => /^\[L\d+\]/.test(c.value)).slice(0, 2).map(c => ({ value: c.value, probability: 0.02 })))
-      return [a, { name: 'page_state', type: 'choice', choice: 'content', confidence: 0.95, probabilities: [{ value: 'content', probability: 0.95 }] }, { name: 'goal_met', type: 'predicate', probability: goalMet }]
+      // L8 c16: the product asks the page state as predicates; the double answers them as an ordinary page (all decided no)
+      return [a, ...PS_NAMES.map(name => ({ name, type: 'predicate', probability: 0.02 })), { name: 'page_state', type: 'choice', choice: 'content', confidence: 0.95, probabilities: [{ value: 'content', probability: 0.95 }] }, { name: 'goal_met', type: 'predicate', probability: goalMet }]
     }
     // Turn-context selection (the earlier Decision feature): a catalog item is needed when it is about the thing the message names.
     const topic = names.includes('answer_type') ? text.slice(text.lastIndexOf('Message:\n') + 9) : ''

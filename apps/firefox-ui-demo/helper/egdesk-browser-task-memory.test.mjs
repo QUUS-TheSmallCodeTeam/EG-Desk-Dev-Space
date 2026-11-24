@@ -9,6 +9,7 @@ import { createOutcomeToOntology, outcomeCandidate, parseOutcomeText, priorFromM
 import { buildWiki } from './egdesk-wiki-reconstruction.mjs'
 import { SYNTHETIC_PAGES, mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { createWikiWriter, prepareTurnMemory } from './egdesk-turn-memory.mjs'
+import { PS_NAMES, pageStateAnswers, pageStateProbabilities, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
 
 // L8/C6: the user's chat message goes straight to an objective browser task; the judge picks only among
 // code-enumerated options plus fixed ones; need-context / cannot-proceed exit to the subjective model (a mock
@@ -58,6 +59,7 @@ async function world(t, { start, mode = 'on', hang = false, memory = null, sink 
     fetchImpl: async (_endpoint, { body, signal }) => {
       const wire = JSON.parse(body)
       const q0 = wire.questions[0], evidence = wire.input[1].content
+      const stepQ = wire.questions.find(q => q.name === 'next_step') ?? (q0.choices ? q0 : { choices: [] }) // c16: a code-decided step asks no next_step
       decisions.push({ q: q0.name, body, image: /image/i.test(body), choices: q0.choices?.map(c => c.value) })
       if (hang) await new Promise((_, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }))
       if (q0.name === 'browser_entry') {
@@ -71,11 +73,11 @@ async function world(t, { start, mode = 'on', hang = false, memory = null, sink 
         return { ok: true, text: async () => JSON.stringify({ answers: [choice('task_resume', value, 0.95)] }) }
       }
       const url = /URL: (\S+)/.exec(evidence)?.[1]
-      const p = answerNext({ url, evidence, choices: q0.choices })
+      const p = answerNext({ url, evidence, choices: stepQ.choices })
       const nextAnswer = choice('next_step', p.next[0], p.next[1])
-      if (p.next[0] === 'needs_user_context') nextAnswer.probabilities.push({ value: starts(q0.choices, '123-45'), probability: 0.05 }, { value: starts(q0.choices, '987-65'), probability: 0.04 })
+      if (p.next[0] === 'needs_user_context') nextAnswer.probabilities.push({ value: starts(stepQ.choices, '123-45'), probability: 0.05 }, { value: starts(stepQ.choices, '987-65'), probability: 0.04 })
       return { ok: true, text: async () => JSON.stringify({ answers: [nextAnswer,
-        choice('page_state', p.pageState ?? 'content', 0.95), { name: 'goal_met', type: 'predicate', probability: p.goalMet ?? 0 }] }) }
+        ...pageStateWire(p.pageState ?? 'content'), { name: 'goal_met', type: 'predicate', probability: p.goalMet ?? 0 }] }) }
     },
   })
   const transport = { runs: new Map(), hasClient: id => id === 'ui',
@@ -210,15 +212,20 @@ test('M3 month 2: the memory feature fetches the record, the browser loop does n
   t.diagnostic(JSON.stringify({ counts: end, acts: w.acts, received: w.engine.received, write: a.out.memoryWrite }))
   assert.equal(a.out.status, 'done'); assert.equal(a.out.resumed, undefined)
   assert.deepEqual(w.acts.map(x => [x.type, x.url]), [['navigate', `${O}/biz/2`], ['navigate', `${O}/download/2.pdf`]])
-  assert.deepEqual(end.byQuestion, { browser_entry: 1, next_step: 3 }, 'no history request of its own')
+  // c16: the recorded choice is taken by code on /invoices; that request asks the page-state predicates and goal_met only (no "which" question)
+  assert.deepEqual(end.byQuestion, { browser_entry: 1, ps_sign_in: 1, next_step: 2 }, 'no history request of its own')
+  const recordedAsk = w.decisions.find(d => d.q === 'ps_sign_in')
+  assert.deepEqual(JSON.parse(recordedAsk.body).questions.map(q => q.name), [...PS_NAMES, 'goal_met'])
   assert.equal(end.subjectiveTurns, 1); assert.equal(end.submits + end.dangerous + end.fills + end.clicks + end.images, 0)
   assert.equal(JSON.parse(w.engine.received[0]).egdesk_browser_task.status, 'done')
   // c15 (real result: the packet lowered the entry from 0.93 to 0.76): the fetched memory is step evidence only, never entry evidence
-  for (const d of w.decisions) assert[d.q === 'browser_entry' ? 'doesNotMatch' : 'match'](d.body, /Stored memory fetched for this turn/)
+  // c16: with a record parsed from the fetched pages the steps get its facts as History lines; the general packet would repeat them
+  for (const d of w.decisions) assert.doesNotMatch(d.body, /Stored memory fetched for this turn/)
+  for (const d of w.decisions.filter(d => d.q === 'next_step')) assert.match(d.body, /History \(earlier run of this task/)
   assert.equal(a.out.memoryWrite.status, 'stored', 'the second outcome is written through the same path')
 })
 
-test('M4 page changed (the earlier choice is not listed): the loop asks the user even though the model picked confidently', async t => {
+test('M4 page changed (the earlier choice is not listed): code asks the person which, listing the page\'s candidates; the model is not asked which', async t => {
   const g = general()
   await month1(t, g)
   const memory = await g.fetchMemory(GOAL1, NOV)
@@ -226,7 +233,8 @@ test('M4 page changed (the earlier choice is not listed): the loop asks the user
   const a = await w.say(GOAL1)
   const note = JSON.parse(w.engine.received[0]).egdesk_browser_task
   assert.deepEqual([a.out.status, note.status, note.code, a.acts], ['paused', 'need_context', 'choice_needed', 0])
-  assert.match(w.decisions.find(d => d.q === 'next_step').body, /NOT listed now/)
+  assert.deepEqual(note.candidates, ['사업자 555-11-22222', '사업자 444-33-55555'], 'the which comes from code: the businesses on the page now')
+  assert.equal(w.decisions.filter(d => d.q === 'next_step').length, 0, 'no which-question to the model (the real answer here was flat: 0.21 / 0.22)')
 })
 
 test('M5 unrelated memory is ignored: other-site task page, a forged page, an unreadable-scope page and unrelated wiki pages never become facts', async t => {
@@ -279,4 +287,21 @@ test('M8 contrast (c6, no memory handed in): next month the same question is ask
   const w = await world(t, { start: `${O}/invoices`, clock: { t: NOV } })
   const a = await w.say(GOAL1)
   assert.deepEqual([a.out.status, JSON.parse(w.engine.received[0]).egdesk_browser_task.code], ['paused', 'choice_needed'])
+})
+
+test('M3b c16: the choice code took from the record is written again, so month 3 still does not ask (month 2 used to write no choice line)', async t => {
+  const g = general()
+  await month1(t, g)
+  const m2memory = await g.fetchMemory(GOAL1, NOV)
+  const w2 = await world(t, { start: `${O}/invoices`, sink: g.sink.write.bind(g.sink), memory: m2memory, clock: { t: NOV } })
+  const b = await w2.say(GOAL1)
+  assert.equal(b.out.memoryWrite.status, 'stored')
+  const page2 = g.wiki.pages.get(b.out.memoryWrite.pageId)
+  assert.deepEqual(parseOutcomeText(page2.body).resolved, [{ asked: 'choice_needed', chose: '사업자 987-65-43210', at: '/invoices' }])
+  const DEC = Date.parse('2026-12-19T09:00:00Z')
+  const m3memory = await g.fetchMemory(GOAL1, DEC)
+  const w3 = await world(t, { start: `${O}/invoices`, sink: g.sink.write.bind(g.sink), memory: m3memory, clock: { t: DEC } })
+  const c = await w3.say(GOAL1)
+  assert.deepEqual([c.out.status, w3.acts.map(x => x.url)], ['done', [`${O}/biz/2`, `${O}/download/2.pdf`]])
+  assert.equal(w3.decisions.filter(d => d.q === 'next_step' && /\/invoices\n/.test(d.body)).length, 0, 'no which-question in month 3 either')
 })

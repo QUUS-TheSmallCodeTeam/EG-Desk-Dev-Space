@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { HARD_LIMITS, LIVE_PAGES, estimateLive, loadLivePlan, runLive, scoreJourney } from './egdesk-browser-live-runner.mjs'
+import { ALLON_PLAN_FILE, HARD_LIMITS, LIVE_PAGES, RECORDED_PLAN_FILE, estimateLive, loadLivePlan, runLive, scoreJourney } from './egdesk-browser-live-runner.mjs'
 
 // L8 c15: the live browser measurement is safe to hand to Main. Nothing here sends: every fetch is a local stand-in.
 const KEY = 'egd-synthetic-not-a-key-0008-long-enough'
@@ -26,10 +26,11 @@ function expected(body) {
     const values = (q.choices ?? []).map(c => c.value)
     if (q.name === 'browser_entry') return pick(q, values[0])
     if (q.name === 'task_resume') return pick(q, 'resume_task')
-    if (q.name === 'page_state') return pick(q, 'content')
-    if (q.name === 'goal_met') return { name: q.name, type: 'predicate', probability: /다운로드 완료/.test(ev) ? 0.95 : 0.02 }
+    if (/^ps_/.test(q.name)) return { name: q.name, type: 'predicate', probability: 0.02 }
+    if (q.name === 'goal_met') return { name: q.name, type: 'predicate', probability: /다운로드 완료|URL: \S+\/download\//.test(ev) ? 0.95 : 0.02 }
+    if (/^same_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: 0.95 }
     const listed = /it is listed now as (\[L\d+\] [^\n]*?)\.(?:\n|$)/.exec(ev)
-    if (/다운로드 완료/.test(ev)) return pick(q, 'goal_met')
+    if (/다운로드 완료|URL: \S+\/download\//.test(ev)) return pick(q, 'goal_met')
     if (listed) return pick(q, listed[1].trim())
     if (/is NOT listed now/.test(ev)) return pick(q, values.find(v => /^\[L1\]/.test(v)))
     const download = values.find(v => v.includes('다운로드'))
@@ -43,12 +44,14 @@ function expected(body) {
 
 test('the plan is pre-registered, within the hard limits, and the runner refuses a plan outside them', () => {
   const plan = loadLivePlan()
-  assert.equal(plan.set, 'browser-live-v1')
+  assert.equal(plan.set, 'browser-live-v2')
   assert.ok(plan.maxRequests <= 14 && plan.tokenCeiling <= 12000)
   assert.deepEqual(HARD_LIMITS, { maxRequests: 14, tokenCeiling: 12000 })
-  assert.deepEqual(plan.phases.map(p => p.id), ['month1', 'month2', 'changed'])
+  assert.deepEqual(plan.phases.map(p => p.id), ['month1', 'changed'])
   const hard = plan.checks.filter(c => c.severity !== 'soft').map(c => c.id)
-  for (const id of ['m1-asks-first', 'm2-no-question', 'changed-no-action', 'never-offered', 'never-acted', 'budget']) assert.ok(hard.includes(id), id)
+  for (const id of ['m1-asks-first', 'changed-no-action', 'changed-asks-which', 'never-offered', 'never-acted', 'budget']) assert.ok(hard.includes(id), id)
+  const recorded = loadLivePlan(RECORDED_PLAN_FILE).checks.filter(c => c.severity !== 'soft').map(c => c.id)
+  for (const id of ['m2-no-question', 'm2-by-code', 'm2-recorded', 'r-asked-same', 'r-no-question', 'never-offered', 'never-acted', 'budget']) assert.ok(recorded.includes(id), id)
   assert.equal(plan.passRule.includes('Soft checks are reported and never fail it'), true)
 })
 
@@ -60,9 +63,9 @@ test('dry run by default: nothing is sent and no key is read; --send without a p
   assert.equal(s.seen.length, 0)
 })
 
-test('the estimate: 12 requests (6 / 4 / 2) under 12k, and the expected journey passes every check', async () => {
+test('the estimate (c16 shape): v2 8 requests (6 / 2), under 12k, and the expected journey passes every check', async () => {
   const e = await estimateLive()
-  assert.deepEqual([e.requests, e.perPhase, e.stoppedBecause], [12, { month1: 6, month2: 4, changed: 2 }, null])
+  assert.deepEqual([e.requests, e.perPhase, e.stoppedBecause], [8, { month1: 6, changed: 2 }, null])
   assert.ok(e.estInputTokens < 12000, String(e.estInputTokens))
   assert.deepEqual([e.scorecard.pass, e.scorecard.hardFailures, e.scorecard.absolute, e.scorecard.softMisses], [true, [], [], []])
 })
@@ -70,16 +73,15 @@ test('the estimate: 12 requests (6 / 4 / 2) under 12k, and the expected journey 
 test('send (stand-in service): official endpoint only, the key only in the Authorization header, never in the result; the journey passes', async () => {
   const s = service()
   const out = await runLive({ key: KEY, send: true, fetchImpl: s.fetchImpl })
-  assert.equal(out.sent, 12); assert.equal(out.stoppedBecause, null)
+  assert.equal(out.sent, 8); assert.equal(out.stoppedBecause, null)
   assert.ok(s.seen.every(r => r.url === OFFICIAL))
   assert.ok(s.seen.every(r => String(r.auth).includes(KEY)), 'the key travels in the header')
   assert.ok(s.seen.every(r => !JSON.stringify(r.body).includes(KEY)), 'never in a body')
   assert.equal(JSON.stringify(out).includes(KEY), false, 'never in the result')
-  assert.equal(out.usage.inputTokens, 12 * 700, 'reported usage is what is counted')
+  assert.equal(out.usage.inputTokens, 8 * 700, 'reported usage is what is counted')
   assert.equal(out.scorecard.pass, true)
-  const m1 = out.phases.find(p => p.id === 'month1'), m2 = out.phases.find(p => p.id === 'month2'), ch = out.phases.find(p => p.id === 'changed')
+  const m1 = out.phases.find(p => p.id === 'month1'), ch = out.phases.find(p => p.id === 'changed')
   assert.deepEqual(m1.acts.map(a => a.path), ['/biz/2', '/download/2.pdf'])
-  assert.deepEqual([m2.paused, m2.acts.map(a => a.path)], [0, ['/biz/2', '/download/2.pdf']])
   assert.deepEqual([ch.firstNote.code, ch.acts], ['choice_needed', []])
   // the resume request carries the question the person was asked (c15) and never a page address
   const resume = s.seen.find(r => r.body.questions[0].name === 'task_resume')
@@ -93,7 +95,7 @@ test('no retries: the first failed request stops the journey; later phases count
   const out = await runLive({ key: KEY, send: true, fetchImpl: s.fetchImpl })
   assert.deepEqual([s.seen.length, out.sent, out.stoppedBecause], [3, 3, 'http_429'])
   assert.equal(out.scorecard.pass, false)
-  assert.ok(out.scorecard.checks.filter(c => c.phase === 'month2').every(c => c.notRun && !c.ok))
+  assert.ok(out.scorecard.checks.filter(c => c.phase === 'changed').every(c => c.notRun && !c.ok))
 })
 
 test('limits are checked before each request: a ceiling the next request would cross sends nothing more', async () => {
@@ -127,4 +129,61 @@ test('a soft miss is reported and does not fail the journey; the pages never con
   assert.ok(card.softMisses.includes('decided'))
   for (const pages of Object.values(LIVE_PAGES)) for (const page of Object.values(pages)) assert.ok(page.elements.every(e => e.role !== 'textbox'))
   assert.match(readFileSync(new URL('../scripts/egdesk-browser-live-measure.mjs', import.meta.url), 'utf8'), /process\.env\.OPENAI_API_KEY/)
+})
+
+// ---- c16: the recorded choice by code and the page-state predicates in the live plans ----
+test('c16 v2: changed-asks-which is hard; the changed-page step on /invoices is decided by code; month 2 lives in the recorded plan', async () => {
+  const plan = loadLivePlan()
+  for (const id of ['changed-asks-which', 'changed-by-code']) assert.equal(plan.checks.find(c => c.id === id).severity, 'hard')
+  const s = service()
+  const out = await runLive({ key: KEY, send: true, fetchImpl: s.fetchImpl })
+  assert.equal(out.scorecard.pass, true)
+  assert.deepEqual(out.phases.find(p => p.id === 'changed').firstNote.candidates, ['사업자 555-11-22222', '사업자 444-33-55555'])
+  assert.equal(s.seen.filter(r => !r.body.questions.some(q => q.name === 'next_step') && r.body.questions.some(q => q.name === 'ps_sign_in')).length, 1)
+})
+
+test('c16 recorded plan: seeded by code through the write path; month 2 by code, written again; renamed via one quoted predicate; 8 requests under 12k', async () => {
+  const plan = loadLivePlan(RECORDED_PLAN_FILE)
+  assert.deepEqual([plan.set, plan.phases.map(p => p.id)], ['browser-live-recorded-v2', ['month2', 'renamed']])
+  const e = await estimateLive({ plan })
+  assert.deepEqual([e.requests, e.perPhase, e.scorecard.pass], [8, { month2: 4, renamed: 4 }, true]); assert.ok(e.estInputTokens < 11000, String(e.estInputTokens))
+  const s = service()
+  const out = await runLive({ key: KEY, send: true, fetchImpl: s.fetchImpl, plan })
+  const [m2, rn] = out.phases
+  assert.deepEqual([out.sent, out.scorecard.pass, m2.seeded, m2.recorded, m2.acts.map(a => a.path), rn.acts.map(a => a.path)], [8, true, 'stored', true, ['/biz/2', '/download/2.pdf'], ['/biz/2', '/download/2.pdf']])
+  const same = s.seen.flatMap(r => r.body.questions).filter(q => q.name.startsWith('same_'))
+  assert.deepEqual(same.map(q => q.instructions), ['Is this option, "가나상사 (987-65-43210)", the same thing as the recorded choice, "사업자 987-65-43210"?'])
+  // an undecided same-thing answer asks the person: hard failures, the journey fails at the renamed phase
+  const unsure = body => expected(body).map(a => (a.name.startsWith('same_') ? { ...a, probability: 0.5 } : a))
+  const asked = await runLive({ key: KEY, send: true, fetchImpl: service({ answer: unsure }).fetchImpl, plan })
+  assert.equal(asked.scorecard.pass, false); assert.ok(asked.scorecard.hardFailures.includes('r-no-question'))
+  assert.deepEqual([asked.phases[1].firstNote.code, asked.phases[1].acts], ['choice_needed', []])
+})
+
+// Main's all-on journey, 2026-11-25 (evidence/main-real/c16-all-on-journey.json): the real next_step answers, replayed as they came.
+const REAL_S10 = [['[L1] 사업자 123-45-67890', 0.05], ['[L2] 사업자 987-65-43210', 0.05], ['scroll_more', 0.04], ['goal_met', 0.01], ['needs_free_text', 0.05], ['needs_user_context', 0.74], ['blocked', 0.06]]
+function realAllOn({ pages = 'no' } = {}) {
+  return body => body.questions.map(q => {
+    const ev = body.input.map(m => m.content).join('\n')
+    if (/^ps_/.test(q.name)) return { name: q.name, type: 'predicate', probability: pages === 'no' ? 0.03 : 0.5 }
+    if (q.name !== 'next_step') return expected(body).find(a => a.name === q.name)
+    if (/URL: \S+\/invoices/.test(ev) && !/두 번째/.test(ev)) return { name: 'next_step', type: 'choice', choice: 'needs_user_context', confidence: 0.70, probabilities: REAL_S10.map(([value, probability]) => ({ value, probability })) } // s10, real
+    if (/URL: \S+\/invoices/.test(ev)) return pick(q, '[L2] 사업자 987-65-43210', 1) // s11 step 1, real 1.0
+    if (/URL: \S+\/biz\/2/.test(ev)) return pick(q, '[L1] 이번 달 세금계산서 다운로드', 0.99) // s11 step 2, real 0.99
+    return expected(body).find(a => a.name === q.name)
+  })
+}
+test('c16 all-on plan: the real s10 answer (needs_user_context 0.70, below the bar) now asks which with both businesses; the s11 page is not a stop', async () => {
+  const plan = loadLivePlan(ALLON_PLAN_FILE)
+  assert.deepEqual([plan.set, plan.phases.map(p => p.id)], ['browser-live-allon-v1', ['allon']])
+  const e = await estimateLive({ plan }); assert.deepEqual([e.requests, e.scorecard.pass], [6, true])
+  const out = await runLive({ key: KEY, send: true, fetchImpl: service({ answer: realAllOn() }).fetchImpl, plan })
+  const p = out.phases[0]
+  assert.deepEqual([p.firstNote.status, p.firstNote.code, p.firstNote.candidates, p.actsBeforeReply], ['need_context', 'choice_needed', ['사업자 123-45-67890', '사업자 987-65-43210'], 0])
+  assert.deepEqual(p.acts.map(a => a.path), ['/biz/2', '/download/2.pdf'])
+  assert.equal(out.scorecard.pass, true)
+  // undecided page-state predicates are not a silent stop either: the person is asked to look (need_context / page_unclear)
+  const flat = await runLive({ key: KEY, send: true, fetchImpl: service({ answer: realAllOn({ pages: 'flat' }) }).fetchImpl, plan })
+  assert.deepEqual([flat.phases[0].firstNote.status, flat.phases[0].firstNote.code, flat.phases[0].acts], ['need_context', 'page_unclear', []])
+  assert.ok(flat.scorecard.hardFailures.includes('ao-asks-which'))
 })
