@@ -12997,7 +12997,8 @@
         const text = item.phase === 'statusUnavailable'
           ? '결정 모델 설정을 확인하지 못해 질문과 보기를 보내지 않았습니다. 작성 중인 메시지는 그대로입니다.'
           : manualText;
-        panel.replaceChildren(plain('p', text, { role: 'status' }), close);
+        // A manual end without a named reason (a check failed, the bridge was unreachable) still lets the user keep editing.
+        panel.replaceChildren(...[plain('p', text, { role: 'status' }), item.phase === 'manual' ? button('edit', '질문·보기 수정', () => editAgain(item)) : null, close].filter(Boolean));
         return;
       }
       const { question, options } = item.review;
