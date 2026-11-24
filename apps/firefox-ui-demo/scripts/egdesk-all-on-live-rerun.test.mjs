@@ -357,13 +357,16 @@ test('plan v6: pinned, based on v5 by hash, every v5 expectation kept (one predi
   assert.deepEqual(added.map(e => [e.id, e.severity, e.owner]), V6_NEW)
 })
 
-test('v6 dry run: the nudge is kept in the run and the command left alone (L2); the reply and its settling are L3\'s (predicted to fail); every other verdict is v5\'s', async () => {
+// L3 c22: the heartbeat side landed (it judges the nudge and settles it with one checked reply), so the four verdicts that were registered as
+// "FAIL until L3's side lands" now pass, and the nudge, settled as 'reply', is no longer carried into the next turn.
+test('v6 dry run: the nudge is kept in the run and the command left alone (L2); L3\'s heartbeat answers it once and settles it (L3 c22); every other verdict is v5\'s', async () => {
   const noNet = async () => { throw new Error('no network') }
   const v6 = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V6), fetchImpl: noNet }), v5 = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V5), fetchImpl: noNet })
   const verdict = (run, id) => run.steps.flatMap(s => s.checks).find(c => c.id === id)
-  assert.deepEqual(V6_NEW.map(([id]) => [id, verdict(v6, id).pass]), [['s4n.kept', true], ['s4n.not-interrupted', true], ['s4n.one-reply', false], ['s4n.reply-says-running', false],
-    ['s4n.no-duplicate-wait', true], ['s4n.heard', false], ['s9.nudge-not-repeated', false]])
-  assert.deepEqual(verdict(v6, 's9.nudge-not-repeated').observed.inputs, [['아니 지금 왜 멈췄니?', 'PostgreSQL 마이그레이션 배포 끝났어']], 'unsettled: carried into the next turn, before the new message')
+  assert.deepEqual(V6_NEW.map(([id]) => [id, verdict(v6, id).pass]), [['s4n.kept', true], ['s4n.not-interrupted', true], ['s4n.one-reply', true], ['s4n.reply-says-running', true],
+    ['s4n.no-duplicate-wait', true], ['s4n.heard', true], ['s9.nudge-not-repeated', true]])
+  assert.deepEqual(verdict(v6, 's4n.one-reply').observed.shown, ['멈춘 게 아니라 명령이 아직 실행 중이에요. 끝나는 대로 알려 드릴게요.'])
+  assert.deepEqual(verdict(v6, 's9.nudge-not-repeated').observed.inputs, [['PostgreSQL 마이그레이션 배포 끝났어']], 'settled as reply: not carried into the next turn')
   const others = run => run.steps.flatMap(s => s.checks).filter(c => !V6_NEW.some(([id]) => id === c.id)).map(c => [c.id, c.pass])
   assert.deepEqual(others(v6), others(v5))
 })
