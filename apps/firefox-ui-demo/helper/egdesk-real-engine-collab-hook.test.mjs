@@ -230,3 +230,24 @@ test('restart, end to end on the fake engine: the room, its account and the invi
   assert.ok(w.wire().some(m => m.dir === 'in' && m.method === 'thread/resume'), 'the new engine was asked to resume the room\'s saved thread')
   assert.equal(rec.cleanup.persisted, rec.cleanup.verifiedGone, 'the persisted threads of both engines are deleted and verified gone'); assert.ok(rec.cleanup.persisted >= 1)
 })
+
+test('restart, record level: roomKept, receiptsClosed and continuity each fail on the record that breaks them', () => {
+  const route = { engineId: 'codex', engineProfileId: 'codex-default' }, row = { clientThreadId: 'room', conversationId: 'thr-1', engineId: 'codex', engineProfileId: null }
+  const before = { route, row, account: 'acct-1', awaiting: true, memoryReceipts: 1, contextReceipts: 1 }
+  const after = { route, row, account: 'acct-1', awaiting: false, memoryReceipts: 0, contextReceipts: 0 }
+  const good = { restart: { before, after } }, want = { roomKept: true, receiptsClosed: true }
+  const failing = rec => checkCollabExpect(want, rec).filter(c => !c.ok).map(c => c.check)
+  assert.deepEqual(failing(good), [])
+  assert.deepEqual(failing({ restart: { before, after: { ...after, route: { ...route, engineProfileId: 'codex-other' } } } }), ['collab.roomKept'], 'another account slot')
+  assert.deepEqual(failing({ restart: { before, after: { ...after, row: { ...row, conversationId: 'thr-2' } } } }), ['collab.roomKept'], 'another engine thread')
+  assert.deepEqual(failing({ restart: { before, after: { ...after, account: 'acct-2' } } }), ['collab.roomKept'], 'another account')
+  assert.deepEqual(failing({ restart: { before: { ...before, account: null }, after: { ...after, account: null } } }), ['collab.roomKept'], 'no account known is not "kept"')
+  assert.deepEqual(failing({ restart: { before, after: { ...after, awaiting: true } } }), ['collab.receiptsClosed'], 'an approval question assumed still open')
+  assert.deepEqual(failing({ restart: { before, after: { ...after, memoryReceipts: 1 } } }), ['collab.receiptsClosed'], 'a receipt carried over')
+  assert.deepEqual(failing({ restart: { before: { ...before, awaiting: false }, after } }), ['collab.receiptsClosed'], 'nothing was pending before: the check proves nothing, so it fails')
+  assert.deepEqual(failing(null), ['collab.ran']); assert.deepEqual(failing({}), ['collab.roomKept', 'collab.receiptsClosed'])
+  const cont = (patch, from = 'owner') => ({ from, audience: { requester: from === 'invited' ? COLLAB_PEOPLE.invited.member : null }, continuity: { sameThread: true, resumes: 1, resumed: true, userMessages: 1, sentOnce: true, asRequester: from, ...patch } })
+  const ok = rec => checkCollabExpect({ continuity: true }, rec)[0].ok
+  assert.equal(ok(cont({})), true); assert.equal(ok(cont({ sameThread: false })), false, 'a new engine thread'); assert.equal(ok(cont({ resumed: false })), false, 'never resumed')
+  assert.equal(ok(cont({ sentOnce: false, userMessages: 2 })), false, 'the message went twice'); assert.equal(ok(cont({ asRequester: 'owner' }, 'invited')), false, 'attributed to someone else'); assert.equal(ok({ from: 'owner' }), false, 'no continuity record')
+})
