@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { DECISION_MODEL } from './egdesk-decision-client.mjs'
 import { independentEstimate } from './egdesk-decision-real-runner.mjs'
-import { SPEECH_SPLIT_BARS, SPEECH_SPLIT_KEYS, speechSegments, speechSplitQuestions, splitLabels } from './egdesk-speech-grounding.mjs'
+import { SPEECH_SPLIT_BARS, SPEECH_SPLIT_KEYS, SPLIT_WORDING_V2_AS_SENT, speechSegments, speechSplitQuestions, splitLabels } from './egdesk-speech-grounding.mjs'
 import { SECOND_LABEL_RULES } from './egdesk-turn-memory.mjs'
 import { clockLine } from './egdesk-wiki-reconstruction.mjs'
 import { SPLIT_LABELS_SHA, expectationsFor } from './egdesk-axis-split-plan.mjs'
@@ -41,7 +41,7 @@ export function buildWordingPlan() {
     const s = SENTENCES.find(x => x.id === id), spans = speechSegments(s.text)
     if (spans.length !== 1) throw new Error(`${id}: not one sentence`)
     const names = new Set(WORDING_CHANGED[axis].map(k => `speechs_${k}_0`))
-    const questions = speechSplitQuestions(spans, s.text, { wording: 'v2' }).filter(q => names.has(q.name))
+    const questions = speechSplitQuestions(spans, s.text, { wording: SPLIT_WORDING_V2_AS_SENT }).filter(q => names.has(q.name))
     const body = { model: DECISION_MODEL, input: [{ role: 'developer', content: SECOND_LABEL_RULES }, { role: 'user', content: `${clockLine(STUDY_ASKED_AT)}\nMessage:\n${s.text}` }], questions }
     const bytes = Buffer.from(JSON.stringify(body), 'utf8'), allowed = s.allowed[axis]
     const expect = expectationsFor(axis, allowed).filter(e => names.has(e.name))

@@ -423,7 +423,10 @@ export const SPLIT_WORDINGS = Object.freeze(['v1', 'v2'])
 // v2 is at least as good as v1 for every changed predicate and loses no guard (c10 was not installed by the split reading under v1 either:
 // own .58, guess .71; under v2 own .16). So 'v2' is v2 for all five. A per-predicate object ({ own: 'v3', ... }) selects a version per key
 // (measurement only); a key it does not name is v1.
-export const SPLIT_WORDING_CHOICE = Object.freeze({ other: 'v2', own: 'v2', guess: 'v2', before: 'v2', now: 'v2' })
+// c24 (Main's rule, terse-record-v1 real, 2026-11-25): own v3 passed both requests (c10 guard .12, c12 target .06; v2 was .16 / .19), so own is v3.
+export const SPLIT_WORDING_CHOICE = Object.freeze({ other: 'v2', own: 'v3', guess: 'v2', before: 'v2', now: 'v2' })
+// The wording split-wording-v2 was sent with (c26): v2 for all five, own included. Kept so that plan rebuilds byte for byte.
+export const SPLIT_WORDING_V2_AS_SENT = Object.freeze({ other: 'v2', own: 'v2', guess: 'v2', before: 'v2', now: 'v2' })
 function splitTable(wording) {
   if (wording === 'v2') wording = SPLIT_WORDING_CHOICE
   if (!wording || typeof wording !== 'object') return split
