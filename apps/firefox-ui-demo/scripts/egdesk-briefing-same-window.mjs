@@ -9,7 +9,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { streamTurns } from '../helper/egdesk-conversation-examples.mjs'
 import { briefingRequestKind } from '../helper/egdesk-briefing-real-requests.mjs'
-import { askKind, excluded, oneFactControl, pickDiverse, sameWindowCase } from '../helper/egdesk-briefing-same-window.mjs'
+import { askKind, excluded, factPlacement, oneFactControl, pickDiverse, sameWindowCase } from '../helper/egdesk-briefing-same-window.mjs'
 import { answerCited, answerFacts, factCites, normalizeMaterials } from '../helper/egdesk-briefing-skeleton.mjs'
 
 /** Pre-registered BY CODE from the materials (never from a judge's answer). */
@@ -17,11 +17,15 @@ export function expectationsFor(c, { control = false } = {}) {
   if (control) return { place: [{ match: 'combines', severity: 'hard', yes: false, note: 'a real one-fact answer: the bubble at the product rule (combines not yes)' }] }
   const mats = normalizeMaterials(c.pages), facts = answerFacts(c.answer.text).facts, cited = answerCited(c.answer.text, mats)
   const board = facts.length >= 3 && cited.length >= 2
-  const coverage = facts.map((f, i) => {
-    const cites = factCites(f, mats)
-    if (cites?.length) return { match: `onboard_F${i + 1}`, severity: 'hard', notDecidedNo: true, note: `cites ${cites.join(',')} by its anchors: copied on the board; the product does not block it` }
-    if (cites && !cites.length) return { match: `onboard_F${i + 1}`, severity: 'soft', yes: false, note: 'anchored, and no preceding turn holds its anchors (it came from work outside the message text): not on the board' }
-    return { match: `onboard_F${i + 1}`, severity: 'soft', notDecidedNo: true, note: 'no code anchor: whether a preceding turn holds it is not known to code' }
+  // Cycle 30: shown = what the faithful fill copies (the first lineTextMax characters of a cited turn) carries ALL of the fact's distinctive content, verbatim. The c29 rule
+  // (a cited turn holds one anchor somewhere in its excerpt) pre-registered facts the card never carried (compare F1/F2, summary F2/F6: judge 0, 0, .10, 0).
+  // Code can only know two things: a verbatim carry (hard: the product does not block it) and a fact none of whose content is in the turns (soft: not shown). A paraphrase
+  // or a partial carry is not decidable by code (the summary's F1, a paraphrased lead, was judged .97 while carrying 2 of 9 tokens): those are asked and RECORDED, not registered.
+  const coverage = facts.flatMap((f, i) => {
+    const place = factPlacement(f, c.pages), cites = factCites(f, mats), name = `onboard_F${i + 1}`
+    if (place.inLine.length) return [{ match: name, severity: 'hard', notDecidedNo: true, note: `every distinctive token of the fact (${place.tokens}) is in the line the fill copies from ${place.inLine.join(',')}: on the board; the product does not block it` }]
+    if (!place.found && !cites?.length) return [{ match: name, severity: 'soft', yes: false, note: 'nothing of the fact is in the preceding turns (it came from work outside the message text): not on the board' }]
+    return []
   })
   return { place: [{ match: 'combines', severity: board ? 'hard' : 'soft', yes: true, note: board ? `${facts.length} facts, citing ${cited.length} preceding turns by code` : `recorded: ${facts.length} facts, citing ${cited.length} preceding turns by code (below the board pre-registration rule)` }],
     coverage }
