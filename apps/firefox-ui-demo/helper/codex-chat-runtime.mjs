@@ -1641,6 +1641,10 @@ export class CodexChatRuntime {
   async send(body, internal = null) {
     // A reply to an early question the run asked while it keeps working goes into that same run (flag decisionContext.conversationFlow).
     const inRun = internal ? null : this.openEarlyQuestion(idText(body?.clientThreadId) || idText(body?.thread?.id), idText(body?.conversationId))
+    // The screen names the run it replies to. If that question is no longer open, refuse before anything is stored or started:
+    // a reply must never turn into a second turn (or a saved message without one).
+    const replyTo = internal || body?.inRunReplyTo === undefined ? null : idText(body.inRunReplyTo) || ''
+    if (replyTo !== null && (!inRun || inRun.runId !== replyTo)) throw chatError('INRUN_REPLY_UNAVAILABLE', 'The running turn is not waiting for a reply', 409)
     if (inRun) return this.answerEarlyQuestion(inRun, body)
     validateChatCwd(body)
     if (this.requireStore) this.assertStore()
@@ -4854,10 +4858,20 @@ export class CodexChatRuntime {
     } catch { /* never affects the turn */ }
   }
 
+  // What the screen needs to know about an open early question: one public field on the run and one event each way (ids only).
+  // While it is set and the run works, a message sent in this DM is taken as the reply (see send / answerEarlyQuestion).
+  setReplyOpen(run, messageId) {
+    const open = typeof messageId === 'string' && messageId.length > 0
+    if (Boolean(run.replyOpen) === open) return
+    run.replyOpen = open ? { messageId } : null
+    if (run.status === 'inProgress') this.emit(run, open ? 'reply.opened' : 'reply.closed', open ? { messageId } : {})
+  }
+
   pauseConversationFlow(run) {
     const flow = this.flowRuns.get(run)
     if (!flow) return
     flow.closed = true
+    this.setReplyOpen(run, null) // a closed flow takes no reply (openEarlyQuestion)
     flow.heartbeat.pause()
   }
 
@@ -4866,6 +4880,7 @@ export class CodexChatRuntime {
     const flow = this.flowRuns.get(run)
     if (!flow) return
     flow.closed = true
+    this.setReplyOpen(run, null)
     this.stopHeartbeat(flow.heartbeat, reason)
   }
 
@@ -4941,7 +4956,7 @@ export class CodexChatRuntime {
     await this.applyItem(run, { id, type: 'agentMessage', phase: null, text, completionConfirmed: true }, true, true, true)
     flow.sent.push({ id, text, kind, by }); flow.kinds.add(kind); if (by === 'fallback') flow.kinds.add('stalled')
     flow.heartbeat.mark('posted'); flow.stepsAtLast = facts.stepsDone
-    if (kind === 'ask_missing') { flow.question = { id, pending: true }; if (facts.question) flow.askedNotes.add(facts.question.id) }
+    if (kind === 'ask_missing') { flow.question = { id, pending: true }; if (facts.question) flow.askedNotes.add(facts.question.id); this.setReplyOpen(run, id) }
     return by
   }
 
@@ -5009,6 +5024,7 @@ export class CodexChatRuntime {
     this.put(run, 'messages', row)
     this.emit(run, 'message.completed', { ...row }, row.id)
     flow.heartbeat?.mark('user')
+    this.setReplyOpen(run, null)
     return { accepted: true, durable: true, inRun: true, requestId, clientThreadId: run.clientThreadId, conversationId: run.conversationId, runId: run.runId, localMessageId }
   }
 
@@ -6025,6 +6041,9 @@ export class CodexChatRuntime {
         createdAt: existing?.createdAt || this.now(),
         ...(assistant && item.text.length > MAX_TEXT ? { projectionTruncated: true } : {}),
         ...(assistant ? { completionConfirmed: item.completionConfirmed === true } : {}),
+        // Rendering option for a line the system wrote itself (not the Agent): shown as a system notice row when set. Only the
+        // runtime's own flow items may carry it; an engine item cannot. Nothing sets it today (see the report: one line switches it).
+        ...(assistant && item.presentation === 'notice' && String(item.id).startsWith('egdesk-flow:') ? { presentation: 'notice' } : {}),
       }
       if (assistant && !completed) {
         const key = `${run.answerId}/${item.id}`
