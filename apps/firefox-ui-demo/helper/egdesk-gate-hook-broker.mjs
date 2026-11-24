@@ -102,11 +102,14 @@ export function createGateHookBroker({ mode = () => 'off', assess = null, home, 
     awaitingReply: conversationId => awaiting.has(conversationId),
     wasChecked: (turnId, command, cwd) => turns.get(turnId)?.checked.has(commandKey(command, cwd)) === true,
     /** The hook's question. Never throws; an unreadable request is 'none' (the hook applies its own floor when it gets no answer). */
-    async check({ sessionId = null, turnId, cwd, command } = {}) {
+    // c18: a caller that judges its own target by code (EG-Desk's file edits) passes `floor` (closed reasons; [] = nothing to ask) and
+    // `identity` (what makes the target exact, e.g. the new content's hash); `command` is then the short description the person's
+    // reply is read against. Without them the command is classified as a shell command, as before.
+    async check({ sessionId = null, turnId, cwd, command, floor: given = null, identity = null } = {}) {
       const m = currentMode()
       if (m === 'off' || typeof command !== 'string' || !command.trim() || command.length > L.commandChars || typeof cwd !== 'string' || !cwd.startsWith('/')) return { decision: 'none' }
       try { onCheck({ conversationId: turns.get(turnId)?.conversationId ?? (typeof sessionId === 'string' ? sessionId : null) }) } catch { /* e.g. the runtime's engine-version notice; never affects the answer */ }
-      const key = commandKey(command, cwd)
+      const key = identity === null ? commandKey(command, cwd) : commandKey(`${command}\u0000${String(identity).slice(0, 200)}`, cwd)
       // a turn the runtime started; or, when the hook is faster than the turn's registration, the turn a reply already approved for
       const turn = (typeof turnId === 'string' && turns.get(turnId)) || (typeof sessionId === 'string' && nextTurn.has(sessionId) ? turnOf(turnId, sessionId) : null)
       if (turn && turn.checked.size < L.keysPerTurn) turn.checked.add(key)
@@ -115,8 +118,9 @@ export function createGateHookBroker({ mode = () => 'off', assess = null, home, 
         note('allowed_once', { mode: m })
         return m === 'on' ? { decision: 'allow' } : { decision: 'none' }
       }
-      const floor = classifyCommand(command, { cwd, home }).floor
+      const floor = Array.isArray(given) ? given.filter(r => typeof r === 'string').slice(0, 6) : classifyCommand(command, { cwd, home }).floor
       let reasons = floor
+      if (!floor.length && Array.isArray(given)) return { decision: 'none' } // the caller's code found nothing to ask about
       if (!floor.length) {
         let assessed = null
         try { assessed = turn?.conversationId && typeof assess === 'function' ? await assess({ conversationId: turn.conversationId, turnId, command, cwd }) : null } catch { assessed = null }

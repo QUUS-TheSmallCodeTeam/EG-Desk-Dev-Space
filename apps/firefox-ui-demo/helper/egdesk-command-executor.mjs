@@ -57,9 +57,11 @@ export function executorAssess(runtimeAssess, { home } = {}) {
  *   ledger                     createGateHookBroker(...) shared with the runtime (terminalGate.hookBroker: turn lifecycle, reply reading)
  *   workspaceOf(run) → '/abs'  the folder EG-Desk resolved for this run (Board/project binding), or null
  *   runner({ command, cwd, timeoutMs, signal }) → { exitCode, stdout, stderr, timedOut }   injected; absent → nothing can run
- *   onFacts(run, row)          terminal facts (terminalFactRow shape, kind 'objective': EG-Desk's own loop asks the person itself)
+ *   onFacts(run, row)          terminal facts (terminalFactRow shape). c18: kind 'engine' (the engine asked for this command), so the row
+ *                              carries runningMs and exitCode; at the gate asking: true (EG-Desk asks the person itself)
+ *   outputFor(run) → { append(itemId, text), complete(itemId) }   the run output store adapter for long output (optional)
  */
-export function createCommandExecutorProvider({ mode = () => 'off', ledger = null, workspaceOf = () => null, runner = null, onFacts = () => {}, limits = {} } = {}) {
+export function createCommandExecutorProvider({ mode = () => 'off', ledger = null, workspaceOf = () => null, runner = null, onFacts = () => {}, outputFor = () => null, limits = {} } = {}) {
   const L = { ...COMMAND_EXECUTOR_LIMITS, ...limits }
   const on = () => { try { return mode() === 'on' } catch { return false } }
   const facts = (run, row) => { try { onFacts(run, row) } catch { /* facts are advisory */ } }
@@ -93,20 +95,25 @@ export function createCommandExecutorProvider({ mode = () => 'off', ledger = nul
       if (decision?.decision === 'deny') {
         let gate = null
         try { gate = JSON.parse(decision.note).egdesk_command_gate } catch { gate = { status: 'needs_person' } }
-        facts(run, terminalFactRow({ kind: 'objective', running: false, started: false, asking: gate.status === 'needs_person' }))
+        facts(run, terminalFactRow({ kind: 'engine', running: false, started: false, asking: gate.status === 'needs_person' }))
         return respond(true, { ...gate, executed: false })
       }
       if (!decision || (decision.decision !== 'allow' && decision.decision !== 'none')) return respond(false, { error: { code: 'COMMAND_GATE_UNAVAILABLE' } })
       if (typeof runner !== 'function') return respond(false, { error: { code: 'COMMAND_RUNNER_UNAVAILABLE' } })
       const timeoutMs = Number.isSafeInteger(args.timeoutMs) && args.timeoutMs > 0 ? Math.min(args.timeoutMs, L.maxTimeoutMs) : L.timeoutMs
-      facts(run, terminalFactRow({ kind: 'objective', running: true }))
-      let result
-      try { result = await runner({ command, cwd, timeoutMs, signal: AbortSignal.timeout(timeoutMs) }) }
-      catch { facts(run, terminalFactRow({ kind: 'objective', running: false })); return respond(false, { error: { code: 'COMMAND_RUN_FAILED' } }) }
+      facts(run, terminalFactRow({ kind: 'engine', running: true, runningMs: 0 }))
+      let result, output = null
+      try { output = outputFor(run) } catch { output = null }
+      // the runner enforces the hard limit itself (SIGTERM, then SIGKILL); a soft notice only updates the facts
+      try { result = await runner({ command, cwd, timeoutMs, itemId: `egdesk-cmd:${event.callId ?? ''}`, output,
+        onFacts: row => { if (row?.softNotice) facts(run, terminalFactRow({ kind: 'engine', running: true, runningMs: row.runningMs })) } }) }
+      catch { facts(run, terminalFactRow({ kind: 'engine', running: false })); return respond(false, { error: { code: 'COMMAND_RUN_FAILED' } }) }
       const exitCode = Number.isSafeInteger(result?.exitCode) ? result.exitCode : null
-      facts(run, terminalFactRow({ kind: 'objective', running: false, exitCode }))
+      // the c10 row keeps runningMs only while running; the ended row adds how long it ran (an extra field, the row shape is unchanged)
+      facts(run, { ...terminalFactRow({ kind: 'engine', running: false, exitCode }), ...(Number.isFinite(result?.durationMs) ? { durationMs: result.durationMs } : {}) })
       const out = tail(result?.stdout, L.outputChars), err = tail(result?.stderr, Math.floor(L.outputChars / 3))
       return respond(true, { status: 'ran', approvedOnce: decision.decision === 'allow', exitCode, timedOut: result?.timedOut === true,
+        ...(Number.isFinite(result?.durationMs) ? { durationMs: result.durationMs } : {}),
         stdout: out.text, stderr: err.text, truncated: out.truncated || err.truncated })
     },
   }
