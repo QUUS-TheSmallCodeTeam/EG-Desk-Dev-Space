@@ -2602,10 +2602,21 @@ export class CodexChatRuntime {
       // Hydrate native history before deciding whether a new turn is safe.
       // This also supplies the historical cwd for profile-off config/read.
       const justRestored = !this.loadedThreads.has(cid)
-      if (justRestored) await this.restoreThread(cid, context.clientThreadId, qaOverrides || {}, { policy, beforeResume })
-      if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
-        throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
+      // Two resumes of one thread in one turn (L7 c26): this first one only hydrates history and learns the historical cwd, and the reload
+      // further below (a saved profile, a profile switch or computer control off: thread/resume cannot change a loaded thread's settings, so it
+      // is detached and resumed again with the ceiling / computer-off / own-tools overrides) hydrates it again. When that reload is certain
+      // and the cwd is already known (the send carries it, and every read of the thread's settings uses it first), this resume has nothing
+      // left to do: it is skipped, and the active-run check below runs once more after the reload, on what that resume hydrated. Without a cwd,
+      // or when no reload follows, this resume is the one that hydrates and nothing changes.
+      const reloadCertain = justRestored && !bounded && engine.id === 'codex' && (body.profileEnabled === true || body.profileEnabled === false || Boolean(context.profileRun) || computerOff)
+      const skipFirstResume = reloadCertain && Boolean(overrides.cwd)
+      if (justRestored && !skipFirstResume) await this.restoreThread(cid, context.clientThreadId, qaOverrides || {}, { policy, beforeResume })
+      const assertNoActiveRun = () => {
+        if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
+          throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
+        }
       }
+      assertNoActiveRun()
       if (body.profileEnabled === true || body.profileEnabled === false) {
         // Ordinary instructions come from Codex config; an engine without the
         // Codex escape hatch has none, so profile-off sends no instructions.
@@ -2652,6 +2663,7 @@ export class CodexChatRuntime {
         }
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
       }
+      if (skipFirstResume) assertNoActiveRun() // the history was hydrated by the reload above, not before it
       if (bounded) this.persistExecutionPolicy(context, cid)
     } else {
       const nativeTools = this.collectToolSpecs(policy, { browserInteraction: browserInteractionRequested, toolCeiling: ceiling, engineId: engine.id, authority: contextAuthority })
