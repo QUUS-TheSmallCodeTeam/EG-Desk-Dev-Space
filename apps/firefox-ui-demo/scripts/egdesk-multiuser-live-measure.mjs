@@ -41,11 +41,13 @@ import * as JP from '../overlay/resources/EGDeskJointPresence.sys.mjs'
 import * as WP from '../overlay/resources/EGDeskWorkPlacement.sys.mjs'
 import * as SurfaceState from '../overlay/resources/EGDeskSurfaceState.sys.mjs'
 import { allOnWorld, DM, scriptedDecisions } from './egdesk-all-on.support.mjs'
+import { DRAFT_CHECK_COPY } from '../helper/egdesk-draft-check.mjs'
 import { createMeasureTransport, diffJourneys, formatDiff, replayAnswers, writeJourneyResults } from './egdesk-all-on-live-measure.mjs'
 
-// v1 (cycle 14, sent 2026-11-24: 22/25) is kept as registered; v2 (cycle 15) is the default.
+// v1 (cycle 14, sent: 22/25) and v2 (cycle 15, sent: 31/32) are kept as registered; v3 (cycle 16) is the default.
 export const PLAN_FILE_V1 = fileURLToPath(new URL('./egdesk-multiuser-live-measure.plan.json', import.meta.url))
-export const PLAN_FILE = fileURLToPath(new URL('./egdesk-multiuser-live-measure.plan-v2.json', import.meta.url))
+export const PLAN_FILE_V2 = fileURLToPath(new URL('./egdesk-multiuser-live-measure.plan-v2.json', import.meta.url))
+export const PLAN_FILE = fileURLToPath(new URL('./egdesk-multiuser-live-measure.plan-v3.json', import.meta.url))
 export const SCRIPT_FILE = fileURLToPath(import.meta.url)
 export const DEFAULT_CAPS = Object.freeze({ tokenCeiling: 20_000, maxRequests: 20 })
 const LIMITS = Object.freeze({ tokenCeilingMax: 20_000, maxRequestsMax: 20 })
@@ -168,6 +170,13 @@ export const CHECKS = {
       // the product quotes the answer on one line (its whitespace collapsed); compare the same way
       const oneLine = text => String(text).replace(/\s+/g, ' ').trim()
       if (args.quotesPostedAnswer) { const posted = step.seen.newMessages.filter(m => m.by === 'agent').map(m => m.text); if (posted.length !== 1 || !oneLine(shared).includes(oneLine(posted[0]))) failed.push('posted_answer') }
+      // v3: the answering model's own sentences of the answer A saw (the posted answer without the draft check's appended copy), and none of that copy
+      if (args.quotesOwnAnswer) {
+        const posted = step.seen.newMessages.filter(m => m.by === 'agent').map(m => m.text)
+        const own = posted.length === 1 ? oneLine(posted[0] === DRAFT_CHECK_COPY.askUser ? '' : posted[0].replace(DRAFT_CHECK_COPY.partial, '')) : null
+        if (own === null || (own && !oneLine(shared).includes(own))) failed.push('own_answer')
+        if (Object.values(DRAFT_CHECK_COPY).some(copy => oneLine(shared).includes(oneLine(copy)))) failed.push('check_copy_quoted')
+      }
       ;(args.cards ?? []).forEach((label, i) => { if (!(w.questions[i]?.instructions.includes(label) && args.cards.every((other, j) => j === i || !w.questions[i].instructions.includes(other)) && !shared.includes(label))) failed.push(`card:${i + 1}`) })
     }
     return { pass: failed.length === 0, observed: { requests: bodies.length, questions: bodies.map(b => JSON.parse(b.text).questions.map(q => q.name)), failed } } },
@@ -368,7 +377,8 @@ export function scriptedScenario() {
       const q = wire.questions.find(x => x.name === a.name)
       if (/^same_matter_R\d$/.test(a.name)) return { name: a.name, type: 'predicate', probability: /A사 견적서 v1/.test(q?.instructions ?? '') ? 0.95 : 0.03 }
       // the owner question, from the quoted result: yes only when it asks the owner to approve or decide something
-      if (a.name === 'owner_action') { const text = (Array.isArray(wire.input) ? wire.input.map(m => m.content) : [String(wire.input)]).join('\n'); return { name: a.name, type: 'predicate', probability: /승인해 주셔야|정해 주세요/.test(text) ? 0.95 : 0.03 } }
+      // (v3) and, as the real model read it in the v2 send (.95), a request to the reader for material ("자료를 알려 주세요") counts as asking the owner too
+      if (a.name === 'owner_action') { const text = (Array.isArray(wire.input) ? wire.input.map(m => m.content) : [String(wire.input)]).join('\n'); return { name: a.name, type: 'predicate', probability: /승인해 주셔야|정해 주세요|자료를 알려 주세요/.test(text) ? 0.95 : 0.03 } }
       return a
     })
   } }

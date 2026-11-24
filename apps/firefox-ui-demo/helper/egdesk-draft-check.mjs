@@ -328,7 +328,10 @@ export async function checkDraft({ draft, evidence = [], userText = '', internal
   const asked = design === 'choice' ? 'choice' : 'predicates'
   const calibration = { feature: 'draft_check', mode: mode === 'advisory' ? 'advisory' : 'on', judgments: [], design: asked }
   let firstState = null
-  const out = (text, outcome, extra = {}) => ({ action: 'post', text, outcome, calls: extra.calls ?? 0, findings: extra.findings ?? [], verdict: verdictOf(firstState),
+  // own (L1 c16): the part of the posted text the answering model wrote, without what this check appended (DRAFT_CHECK_COPY): the whole text unless the
+  // check trimmed the draft and added its partial note (own = the kept part) or replaced it with its own question (own = ''). Readers that judge the
+  // answer's meaning (work placement's "does the result need the owner?") quote only this, never the check's copy.
+  const out = (text, outcome, extra = {}) => ({ action: 'post', text, own: Object.hasOwn(extra, 'own') ? extra.own : text, outcome, calls: extra.calls ?? 0, findings: extra.findings ?? [], verdict: verdictOf(firstState),
     stats: firstState ? { sentences: firstState.claimSpans.length, terms: firstState.terms.length,
       items: proofCount.items, opaque: proofCount.opaque } : null,
     calibration: { ...calibration, ...(extra.fallback ? { fallback: extra.fallback } : {}), attached: text !== draft } })
@@ -375,7 +378,7 @@ export async function checkDraft({ draft, evidence = [], userText = '', internal
 
   function fallbackPost(text, state, callCount, firstFindings) {
     const part = trimmed(state)
-    if (!part.hasClaims) return out(DRAFT_CHECK_COPY.askUser, 'ask_user', { calls: callCount, findings: firstFindings })
-    return out(`${part.text}\n\n${DRAFT_CHECK_COPY.partial}`, 'certain_part', { calls: callCount, findings: firstFindings })
+    if (!part.hasClaims) return out(DRAFT_CHECK_COPY.askUser, 'ask_user', { calls: callCount, findings: firstFindings, own: '' })
+    return out(`${part.text}\n\n${DRAFT_CHECK_COPY.partial}`, 'certain_part', { calls: callCount, findings: firstFindings, own: part.text })
   }
 }
