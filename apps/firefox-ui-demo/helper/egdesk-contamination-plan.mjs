@@ -81,10 +81,11 @@ export const EXCERPT = Object.freeze({
 })
 
 export const FAMILIES = Object.freeze({ 'same-matter': SAME_MATTER, 'fill-slot': FILL_SLOT, excerpt: EXCERPT })
-// The 10k bound does not hold all 18 requests (10,970 estimated). Dropped: the no-target S control (a "no" item among "no" siblings) for
-// same-matter and fill-slot; the S control is kept for every yes target and for the excerpt no target. Both O conditions are kept everywhere:
-// they are the two directions L1 saw (a yes item pulled to no, 2026-11-24 pl-same-matter-report; no items pulled to yes, pl-same-matter-quote).
-export const SKIPPED = Object.freeze({ 'same-matter': ['no-S'], 'fill-slot': ['no-S'], excerpt: [] })
+// The 10k bound does not hold all 18 requests (10,970 estimated), and Korean-heavy bodies ran ~10% above the estimate on 11/24
+// (working-memory plan: 6,430 estimated, 7,069 measured). Dropped in every family: the no-target S control (a "no" item among "no"
+// siblings); the S control is kept for every yes target. Both O conditions are kept everywhere: they are the two directions L1 saw
+// (a yes item pulled to no, 2026-11-24 pl-same-matter-report; no items pulled to yes, pl-same-matter-quote).
+export const SKIPPED = Object.freeze({ 'same-matter': ['no-S'], 'fill-slot': ['no-S'], excerpt: ['no-S'] })
 // The six requests of a family: [id suffix, target side, items with their registered sides].
 export function layouts(f) {
   const Y = f.yesSiblings.map(x => ['yes', x]), N = f.noSiblings.map(x => ['no', x])

@@ -15,9 +15,9 @@ test('contamination plan: committed files are what the code builds today, the ru
   assert.ok(readFileSync(path.join(dir, 'design.json')).equals(built.designBytes), 'design.json is stale')
   for (const f of built.files) assert.ok(readFileSync(path.join(dir, f.file)).equals(f.bytes), `${f.file} is stale`)
   const loaded = loadPlan(path.join(dir, 'plan.json'))
-  assert.equal(loaded.requests.length, 16)
+  assert.equal(loaded.requests.length, 15)
   assert.deepEqual(Object.keys(loaded.productBars), ['same_matter_R#', 'slot_P#_r#', 'c#'], 'the product bars are declared, so the runner has checked no hard check is looser')
-  assert.ok(built.totals.estInputTokens <= CONTAMINATION_CEILING && (loaded.tokenCeiling ?? built.plan.tokenCeiling) === 10000 && built.plan.tokenCeiling === 10000)
+  assert.ok(built.totals.estInputTokens * 1.1 <= CONTAMINATION_CEILING, 'room for a 10% under-estimate') ; assert.ok( (loaded.tokenCeiling ?? built.plan.tokenCeiling) === 10000 && built.plan.tokenCeiling === 10000)
   for (const r of loaded.requests) assert.ok(r.expect.some(e => e.severity === 'hard') && !r.recordOnly)
 })
 

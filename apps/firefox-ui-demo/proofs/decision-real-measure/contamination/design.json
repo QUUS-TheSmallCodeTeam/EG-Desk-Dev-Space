@@ -31,7 +31,9 @@
         "no": 0.2
       },
       "request": "봄 학기 워크숍 참가 신청을 취소하면 언제까지 전액 환불을 받을 수 있나요?",
-      "skipped": []
+      "skipped": [
+        "no-S"
+      ]
     }
   },
   "requests": [
@@ -319,29 +321,6 @@
           "why": "the same deadline for both sign-up routes"
         }
       ]
-    },
-    {
-      "id": "excerpt-no-S",
-      "family": "excerpt",
-      "layout": "no-S",
-      "targetSide": "no",
-      "items": [
-        {
-          "name": "c1",
-          "side": "no",
-          "why": "library hours"
-        },
-        {
-          "name": "c2",
-          "side": "no",
-          "why": "car park maintenance"
-        },
-        {
-          "name": "c3",
-          "side": "no",
-          "why": "canteen menu"
-        }
-      ]
     }
   ],
   "outcomeRules": [
@@ -370,12 +349,12 @@
       "perExtraItemGrouped": 246
     },
     "excerpt": {
-      "groupedOf3": 630,
+      "groupedOf3": 633,
       "aloneOne": 231,
       "splitOf3": 693,
-      "extraTokens": 63,
-      "ratio": 1.1,
-      "perExtraItemGrouped": 200
+      "extraTokens": 60,
+      "ratio": 1.09,
+      "perExtraItemGrouped": 201
     }
   }
 }

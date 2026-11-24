@@ -601,56 +601,6 @@
           "note": "sibling yes: decided (>= .8 / <= .2)"
         }
       ]
-    },
-    {
-      "id": "excerpt-no-S",
-      "file": "requests/excerpt-no-S.json",
-      "sha256": "20002e264df5895d333e58ebe33e503203b78b1fb5faec6279b4c640f3030deb",
-      "estInputTokens": 619,
-      "expect": [
-        {
-          "name": "c1",
-          "kind": "predicate",
-          "max": 0.599,
-          "severity": "hard",
-          "note": "TARGET no: library hours. Hard = on its registered side of the product bar (0.6); a failure is a finding of this study, not a broken run."
-        },
-        {
-          "name": "c1",
-          "kind": "predicate",
-          "max": 0.2,
-          "severity": "soft",
-          "note": "TARGET no: decided (>= .8 / <= .2)"
-        },
-        {
-          "name": "c2",
-          "kind": "predicate",
-          "max": 0.599,
-          "severity": "hard",
-          "note": "sibling no: car park maintenance. Hard = on its registered side of the product bar (0.6); a failure is a finding of this study, not a broken run."
-        },
-        {
-          "name": "c2",
-          "kind": "predicate",
-          "max": 0.2,
-          "severity": "soft",
-          "note": "sibling no: decided (>= .8 / <= .2)"
-        },
-        {
-          "name": "c3",
-          "kind": "predicate",
-          "max": 0.599,
-          "severity": "hard",
-          "note": "sibling no: canteen menu. Hard = on its registered side of the product bar (0.6); a failure is a finding of this study, not a broken run."
-        },
-        {
-          "name": "c3",
-          "kind": "predicate",
-          "max": 0.2,
-          "severity": "soft",
-          "note": "sibling no: decided (>= .8 / <= .2)"
-        }
-      ]
     }
   ]
 }
