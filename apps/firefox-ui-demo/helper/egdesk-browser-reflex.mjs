@@ -239,7 +239,16 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
       continue
     }
     const judged = classify({ mode: 'activate', label: element.label, role: element.role, tag: element.tag, url: snapshot.url })
-    if (judged?.category !== 'none') { excluded.gated++; continue }
+    // c25 (real hold-out, c24): a button the code PROVED to be a read-only GET search was withheld by its label alone ("확인" is submit vocabulary), so a page
+    // whose only way on was that button had none. The label is submit vocabulary for a write; this one writes nothing (readOnlyPress: GET, same site, no
+    // credential or payment field, not in a sensitive region, address words classified). Only a submit judgement by label yields to that proof: pay, grant
+    // and delete words never do, and a POST or a button without the proof stays withheld.
+    const readOnly = kind === 'press' ? readOnlyPress(element, snapshot, { classify, isAllowedUrl }) : null
+    const yieldsToProof = judged?.category === 'submit' && judged.reason === 'submit-vocabulary' && readOnly?.kind === 'get_form'
+    // c25: a same-site LINK is a page change; 등록 in its label (a registering phrase, not the noun inside 주민등록) is no reason to withhold it. The
+    // address words are still classified below; a link to another site is withheld as before.
+    const registerLink = kind === 'navigate' && judged?.category === 'submit' && judged.reason === 'submit-vocabulary' && /등록/.test(judged.term ?? '') && isAllowedUrl(element.href, snapshot)
+    if (judged?.category !== 'none' && !yieldsToProof && !registerLink) { excluded.gated++; continue }
     if (kind === 'navigate') {
       if (!isAllowedUrl(element.href, snapshot)) { excluded.offSite++; continue }
       const words = hrefWords(element.href)
@@ -250,7 +259,6 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
     }
     if (!label) { excluded.unlabeled++; continue }
     counters.press++
-    const readOnly = readOnlyPress(element, snapshot, { classify, isAllowedUrl })
     entries.push({ label: `[B${counters.press}] ${label}`, description: readOnly?.kind === 'get_form' ? `${element.role} on this page; opens ${pathOf(readOnly.url)} (a read-only search)`
       : readOnly?.kind === 'view' ? `${element.role} on this page; shows another part of this page` : `${element.role} on this page`, item: { kind, element, ...(readOnly ? { readOnly } : {}) } })
   }

@@ -774,6 +774,11 @@
     },
   };
   state.codex.activeThreadId = state.codex.threads[0]?.id || null;
+  // L1 c24: the room-account flag as the chat state's own property (ChatState.roomAccountScope and the checks built on it read it): pref egdesk.roomAccount
+  // "on" means a room's input/receipt/evidence checks use the room's account; anything else (the default) keeps the default sign-in. Read fresh on every
+  // access, not enumerable: it is never serialized or copied into a snapshot.
+  Object.defineProperty(state.codex, 'roomAccountMode', { enumerable: false, configurable: true,
+    get: () => { try { return readSurfacePref('egdesk.roomAccount') === 'on' ? 'on' : 'off'; } catch { return 'off'; } } });
 
   function getCodexThreadById(codex, threadId) {
     return codex.threads.find((thread) => thread.id === threadId) || null;
@@ -1499,9 +1504,10 @@
   function createChatTaskAnswers(readCodex, epochScope) {
     const drafts = new Map();
     let binding = null, sequence = 0, changed = false, viewGeneration = 0;
+    // L1 c24: the active room's own account (the default sign-in's parts unless the room is on another profile and the room-account flag is on)
     const accountKey = () => {
-      const codex = readCodex(), auth = codex.authStatus || {};
-      return JSON.stringify([codex.codexAccountKey, auth.accountId, auth.accountEmail, auth.isLoggedIn]);
+      const codex = readCodex(), auth = codex.authStatus || {}, thread = (codex.threads || []).find(row => row.id === codex.activeThreadId);
+      return JSON.stringify(ChatState.roomAccountParts(thread, codex, [codex.codexAccountKey, auth.accountId, auth.accountEmail, auth.isLoggedIn]));
     };
     const context = () => {
       const codex = readCodex(), thread = (codex.threads || []).find(row => row.id === codex.activeThreadId);
@@ -2017,8 +2023,8 @@
     if (!original || ChatState.nativeBindingHeld(original)) return null;
     const binding = ChatState.clientThreadBinding(original);
     const engineId = ChatState.chatThreadEngineId(original, state.codex), profileId = ChatState.chatThreadEngineProfileId(original, state.codex);
-    const accountKey = () => JSON.stringify([state.codex.codexAccountKey, state.codex.authStatus?.accountId,
-      state.codex.authStatus?.accountEmail, state.codex.authStatus?.isLoggedIn]);
+    const accountKey = () => JSON.stringify(ChatState.roomAccountParts(getCodexThreadById(state.codex, threadId), state.codex, [state.codex.codexAccountKey, state.codex.authStatus?.accountId,
+      state.codex.authStatus?.accountEmail, state.codex.authStatus?.isLoggedIn])); // L1 c24: the room's own account
     const account = accountKey();
     const token = epochScope.begin(engineId, profileId);
     return {
@@ -2947,14 +2953,14 @@
       if (!briefingReadReferenceCurrent(shown.threadId, reference, shown.preparationScope)) return false;
       const thread = getCodexThreadById(state.codex, shown.threadId);
       const route = ChatState.chatContextRequestScope(thread, state.codex), origin = reference?.contextScope;
-      const accountKey = ChatState.codexAccountKey(state.codex.authStatus);
-      const access = state.codex.authStatus?.access?.state;
+      const acct = ChatState.roomAccountScope(thread, state.codex), accountKey = acct.accountKey; // L1 c24: the room's own account
+      const access = acct.access;
       if (state.codex.connected !== true || ['permissionDenied', 'authFailed', 'loginRequired', 'loginInProgress'].includes(access)
-          || route.engineId !== 'codex' || !accountKey || state.codex.codexAccountKey !== accountKey
+          || route.engineId !== 'codex' || !accountKey || acct.cachedAccountKey !== accountKey
           || !ChatState.canResumeNativeThread(thread, state.codex.authStatus, state.codex)
           || !origin || ['engineId', 'engineProfileId', 'clientThreadId'].some(key => origin[key] !== route[key])
           || Object.hasOwn(origin, 'conversationId') && origin.conversationId !== route.conversationId) return false;
-      InputContext.inputReadContext(reference, route, { thread, accountKey, cachedAccountKey: state.codex.codexAccountKey });
+      InputContext.inputReadContext(reference, route, { thread, accountKey, cachedAccountKey: acct.cachedAccountKey });
       const key = InputContext.inputEvidenceKey(reference), cardReference = card._inputReference;
       if (!cardReference?.contextScope
           || ['engineId', 'engineProfileId', 'clientThreadId'].some(key => cardReference.contextScope[key] !== route[key])
@@ -3134,8 +3140,9 @@
     try {
       const initial = getCodexThreadById(state.codex, threadId), auth = state.codex.authStatus;
       const claude = ChatState.chatThreadEngineId(initial, state.codex) === 'claude';
-      const accountKey = claude ? ChatState.claudeInputReceiptOwner(initial, state.codex) : ChatState.codexAccountKey(auth);
-      if (!initial || !accountKey || !claude && state.codex.codexAccountKey !== accountKey || state.codex.activeThreadId !== threadId) throw new Error('unverified owner');
+      const acct = ChatState.roomAccountScope(initial, state.codex); // L1 c24: the room's own account
+      const accountKey = claude ? ChatState.claudeInputReceiptOwner(initial, state.codex) : acct.accountKey;
+      if (!initial || !accountKey || !claude && acct.cachedAccountKey !== accountKey || state.codex.activeThreadId !== threadId) throw new Error('unverified owner');
       const base = () => {
         const thread = getCodexThreadById(state.codex, threadId), currentAuth = state.codex.authStatus;
         if (!thread) return null;
@@ -3145,9 +3152,9 @@
           [profile.id, profile.active, profile.auth?.status, profile.auth?.method, profile.auth?.account]);
         return JSON.stringify([thread.id, thread.type, thread.profileEnabled, thread.agentProfileId,
           ChatState.clientThreadBinding(thread), engineId, ChatState.chatThreadEngineProfileId(thread, state.codex),
-          engine?.status, engine?.statusReason, profiles, claude ? ChatState.claudeInputReceiptOwner(thread, state.codex) : [state.codex.codexAccountKey,
+          engine?.status, engine?.statusReason, profiles, claude ? ChatState.claudeInputReceiptOwner(thread, state.codex) : ChatState.roomAccountParts(thread, state.codex, [state.codex.codexAccountKey,
             currentAuth?.accountId, currentAuth?.accountEmail, currentAuth?.authMode, currentAuth?.isLoggedIn,
-            currentAuth?.identityStatus, currentAuth?.access?.state, state.codex.connected],
+            currentAuth?.identityStatus, currentAuth?.access?.state, state.codex.connected]),
           state.codex.activeThreadId, state.codex.activityRoomGeneration || 0]);
       };
       const binding = thread => JSON.stringify([thread.bindingState, thread.bindingAccountKey, thread.retainedNativeBinding || null]);
@@ -3181,13 +3188,14 @@
   // response's user receipt and keep it tied to the submitted request.
   function rememberAcceptedInputReceipt(thread, result, requestId, run) {
     try {
-      const request = state.codex.chatProtocol?.requests?.[requestId], accountKey = ChatState.codexAccountKey(state.codex.authStatus);
+      const acct = ChatState.roomAccountScope(thread, state.codex); // L1 c24: the room's own account (requests are registered with the same key)
+      const request = state.codex.chatProtocol?.requests?.[requestId], accountKey = acct.accountKey;
       const route = ChatState.chatContextRequestScope(thread, state.codex);
       const claude = route.engineId === 'claude', claudeOwner = claude && ChatState.claudeInputReceiptOwner(thread, state.codex);
       const ownerMatches = claude ? !!claudeOwner && request?.engineId === 'claude' && run?.engineId === 'claude'
         && run.engineProfileId === route.engineProfileId && (!result?.engineId || result.engineId === 'claude')
         && (!result?.engineProfileId || result.engineProfileId === route.engineProfileId)
-        : !!accountKey && state.codex.codexAccountKey === accountKey && request?.accountKey === accountKey && run?.accountKey === accountKey;
+        : !!accountKey && acct.cachedAccountKey === accountKey && request?.accountKey === accountKey && run?.accountKey === accountKey;
       if (!thread || !request || !run || result?.accepted !== true || result.durable !== true || result.duplicate === true
           || result.requestId !== requestId || result.clientThreadId !== ChatState.clientThreadBinding(thread)
           || typeof result.localMessageId !== 'string' || !result.localMessageId || !ownerMatches
@@ -3221,13 +3229,14 @@
 
   function acceptedInputReceipt(thread, identity) {
     try {
-      const route = ChatState.chatContextRequestScope(thread, state.codex), accountKey = ChatState.codexAccountKey(state.codex.authStatus);
+      const acct = ChatState.roomAccountScope(thread, state.codex); // L1 c24: the room's own account
+      const route = ChatState.chatContextRequestScope(thread, state.codex), accountKey = acct.accountKey;
       const run = state.codex.chatProtocol?.runs?.[ChatState.runKey(identity.conversationId, identity.runId)];
       const request = run?.requestId && state.codex.chatProtocol?.requests?.[run.requestId];
       const claude = route.engineId === 'claude', claudeOwner = claude && ChatState.claudeInputReceiptOwner(thread, state.codex);
       const ownerMatches = claude ? !!claudeOwner && request?.engineId === 'claude' && run?.engineId === 'claude'
         && run.engineProfileId === route.engineProfileId && request.acceptedInputClaudeOwner === claudeOwner && run.acceptedInputClaudeOwner === claudeOwner
-        : !!accountKey && state.codex.codexAccountKey === accountKey && run?.accountKey === accountKey && request?.accountKey === accountKey;
+        : !!accountKey && acct.cachedAccountKey === accountKey && run?.accountKey === accountKey && request?.accountKey === accountKey;
       if (!run || !request || !ownerMatches || request.status !== 'accepted'
           || run.submissionOwnerCaptured !== true
           || run.requestId !== request.requestId || run.localThreadId !== thread.id || request.localThreadId !== thread.id
@@ -3327,7 +3336,7 @@
   }
 
   function invalidateInputReadOnDenial(threadId, reference, identity, previousPanel) {
-    const accountKey = ChatState.codexAccountKey(state.codex.authStatus);
+    const accountKey = ChatState.roomAccountScope(getCodexThreadById(state.codex, threadId), state.codex).accountKey; // L1 c24: the room's own account
     let changed = false;
     const same = owner => owner?.threadId === threadId && owner.sourceId === reference.sourceId && owner.hash === reference.hash
       && owner.accountKey === accountKey && ['conversationId', 'runId', 'answerId'].every(key => owner[key] === identity?.[key]);
@@ -3347,9 +3356,9 @@
   function briefingReadReferenceCurrent(threadId, reference, scope) {
     try {
       const shown = state.codex.briefingSession, active = getCodexThreadById(state.codex, threadId);
-      const access = state.codex.authStatus?.access?.state, accountKey = ChatState.codexAccountKey(state.codex.authStatus);
+      const acct = ChatState.roomAccountScope(active, state.codex), access = acct.access, accountKey = acct.accountKey; // L1 c24: the room's own account
       if (!shown || shown.threadId !== threadId || shown.preparationScope !== scope || !scope?.current() || !active
-          || state.codex.connected !== true || !accountKey || state.codex.codexAccountKey !== accountKey
+          || state.codex.connected !== true || !accountKey || acct.cachedAccountKey !== accountKey
           || ['permissionDenied', 'authFailed', 'loginRequired', 'loginInProgress'].includes(access)
           || !ChatState.canResumeNativeThread(active, state.codex.authStatus, state.codex)
           || ['conversationId', 'runId', 'answerId'].some(key => !shown.identity?.[key] || shown.briefing?.[key] !== shown.identity[key])) return false;
@@ -3379,21 +3388,21 @@
   function historyReadReferenceCurrent(threadId, reference, receipt) {
     try {
       const thread = getCodexThreadById(state.codex, threadId), auth = state.codex.authStatus;
-      const accountKey = ChatState.codexAccountKey(auth), access = auth?.access?.state;
+      const acct = ChatState.roomAccountScope(thread, state.codex), accountKey = acct.accountKey, access = acct.access; // L1 c24: the room's own account
       if (!thread || state.codex.activeThreadId !== threadId || !ChatState.canResumeNativeThread(thread, auth, state.codex) || !reference?.contextScope
           || !reference.sourceId || reference.snapshotId !== reference.sourceId || !reference.hash
           || ['requestId', 'localMessageId', 'conversationId', 'runId', 'answerId'].some(key => !receipt?.[key])) return false;
       const scope = ChatState.chatContextRequestScope(thread, state.codex), origin = reference.contextScope;
       const claude = scope.engineId === 'claude';
       if (claude ? !ChatState.claudeInputReceiptOwner(thread, state.codex)
-        : scope.engineId !== 'codex' || state.codex.connected !== true || !accountKey || state.codex.codexAccountKey !== accountKey
+        : scope.engineId !== 'codex' || state.codex.connected !== true || !accountKey || acct.cachedAccountKey !== accountKey
           || ['permissionDenied', 'authFailed', 'loginRequired', 'loginInProgress'].includes(access)) return false;
       if (scope.conversationId !== receipt.conversationId
           || ['engineId', 'engineProfileId', 'clientThreadId'].some(key => origin[key] !== scope[key])
           || Object.hasOwn(origin, 'conversationId') && origin.conversationId !== scope.conversationId
           || reference.clientThreadId !== scope.clientThreadId || reference.engine?.engineId !== scope.engineId
           || reference.engine?.engineProfileId !== scope.engineProfileId) return false;
-      InputContext.inputReadContext(reference, scope, { thread, accountKey, cachedAccountKey: state.codex.codexAccountKey });
+      InputContext.inputReadContext(reference, scope, { thread, accountKey, cachedAccountKey: acct.cachedAccountKey });
       const confirmed = acceptedInputReceipt(thread, receipt), identity = ['conversationId', 'runId', 'answerId'];
       if (!confirmed || confirmed.requestId !== receipt.requestId || confirmed.localMessageId !== receipt.localMessageId) return false;
       const messages = (thread.messages || []).filter(row => row.role === 'user' && row.requestId === receipt.requestId
@@ -3410,12 +3419,12 @@
 
   function briefingInputReferences(thread, message) {
     const local = [...(thread.briefingInputs || []), ...(thread.messages || []).flatMap(item => item.inputReferences || [])];
-    const accountKey = ChatState.codexAccountKey(state.codex.authStatus);
+    const acct = ChatState.roomAccountScope(thread, state.codex), accountKey = acct.accountKey; // L1 c24: the room's own account
     let scope = null;
     try { scope = ChatState.chatContextRequestScope(thread, state.codex); } catch {}
     const claude = scope?.engineId === 'claude';
     const eligible = (claude ? !!ChatState.claudeInputReceiptOwner(thread, state.codex)
-      : scope?.engineId === 'codex' && accountKey && state.codex.codexAccountKey === accountKey)
+      : scope?.engineId === 'codex' && accountKey && acct.cachedAccountKey === accountKey)
       && ChatState.canResumeNativeThread(thread, state.codex.authStatus, state.codex)
       && !!message.conversationId && scope.conversationId === message.conversationId;
     // A first-send capture has no native CID yet. It is eligible for a read
@@ -3445,7 +3454,7 @@
             || [reference, item].some(capture => capture.clientThreadId !== origin.clientThreadId
               || capture.engine?.engineId !== origin.engineId || capture.engine?.engineProfileId !== origin.engineProfileId)) return false;
         try {
-          InputContext.inputReadContext(item, scope, { thread, accountKey, cachedAccountKey: state.codex.codexAccountKey });
+          InputContext.inputReadContext(item, scope, { thread, accountKey, cachedAccountKey: acct.cachedAccountKey });
           return true;
         } catch { return false; }
       };
@@ -3526,8 +3535,8 @@
         const latest = getCodexThreadById(state.codex, thread.id);
         if (!latest) return null;
         const route = ChatState.chatContextRequestScope(latest, state.codex);
-        return JSON.stringify([route, route.engineId === 'codex' ? [ChatState.codexAccountKey(state.codex.authStatus),
-          state.codex.codexAccountKey, latest.bindingAccountKey, latest.bindingState, latest.retainedNativeBinding] : null]);
+        return JSON.stringify([route, route.engineId === 'codex' ? [...ChatState.roomAccountParts(latest, state.codex, [ChatState.codexAccountKey(state.codex.authStatus),
+          state.codex.codexAccountKey]), latest.bindingAccountKey, latest.bindingState, latest.retainedNativeBinding] : null]);
       };
       let original;
       try { original = connection(); } catch {}
@@ -4549,8 +4558,8 @@
     const binding = ChatState.clientThreadBinding(original);
     const conversationId = original.conversationId;
     const engineId = ChatState.chatThreadEngineId(original, state.codex), profileId = ChatState.chatThreadEngineProfileId(original, state.codex);
-    const accountKey = () => JSON.stringify([state.codex.codexAccountKey, state.codex.authStatus?.accountId,
-      state.codex.authStatus?.accountEmail, state.codex.authStatus?.isLoggedIn]);
+    const accountKey = () => JSON.stringify(ChatState.roomAccountParts(getCodexThreadById(state.codex, threadId), state.codex, [state.codex.codexAccountKey, state.codex.authStatus?.accountId,
+      state.codex.authStatus?.accountEmail, state.codex.authStatus?.isLoggedIn])); // L1 c24: the room's own account
     const account = accountKey(), token = epochScope.begin(engineId, profileId);
     let disposed = false;
     token.signal.addEventListener('abort', () => { if (!disposed) onInvalidate?.(); }, { once: true });
@@ -12817,7 +12826,7 @@
         && run.conversationId === thread.conversationId && !run.boardMember));
     const browserScope = inheritedBounded || selectedBrowserInputs.length > 0;
     const contextResolution = engine === 'claude' ? null : ChatState.contextResolutionForSend(state.contextSuggest?.byThread?.[thread.id], inputSources,
-      { now: Date.now(), accountKey: ChatState.codexAccountKey(codex.authStatus) || null });
+      { now: Date.now(), accountKey: ChatState.roomAccountScope(thread, codex).accountKey || null }); // L1 c24: the room's own account
     const options = {
       clientThreadId: ChatState.clientThreadBinding(thread), engine, browserScope,
       stateless: ChatState.chatStatelessStartView(thread, codex.chatCapabilities).on,
@@ -15423,8 +15432,8 @@
           thread.bindingState, thread.bindingAccountKey, thread.retainedNativeBinding || null,
           ChatState.chatThreadEngineId(thread, state.codex), ChatState.chatThreadEngineProfileId(thread, state.codex),
           memoAskRuntimeIdentity(thread), ChatState.chatThreadReadiness(thread, state.codex),
-          state.codex.codexAccountKey, auth?.accountId, auth?.accountEmail, auth?.authMode,
-          auth?.isLoggedIn, auth?.identityStatus, state.codex.connected,
+          ...ChatState.roomAccountParts(thread, state.codex, [state.codex.codexAccountKey, auth?.accountId, auth?.accountEmail, auth?.authMode,
+            auth?.isLoggedIn, auth?.identityStatus]), state.codex.connected,
           thread.inputSources || [], thread.briefingInputs || [], thread.requestProjectTarget || null,
           state.contextSuggest?.byThread?.[threadId]?.picked || []]);
       } catch { return null; }
@@ -15443,8 +15452,8 @@
         return JSON.stringify([thread.id, thread.type, thread.profileEnabled, thread.agentProfileId,
           ChatState.clientThreadBinding(thread), thread.conversationId, thread.bindingState, thread.bindingAccountKey,
           thread.retainedNativeBinding || null, engineId, profileId, ChatState.chatThreadReadiness(thread, state.codex),
-          engine?.status, engine?.statusReason, profiles, state.codex.codexAccountKey,
-          auth?.accountId, auth?.accountEmail, auth?.authMode, auth?.isLoggedIn, auth?.identityStatus, state.codex.connected]);
+          engine?.status, engine?.statusReason, profiles, ...ChatState.roomAccountParts(thread, state.codex, [state.codex.codexAccountKey,
+            auth?.accountId, auth?.accountEmail, auth?.authMode, auth?.isLoggedIn, auth?.identityStatus]), state.codex.connected]);
       } catch { return null; }
     };
     const memoWatchIdentity = (threadId, ownerOnly, includeAccess) => {
@@ -15720,7 +15729,7 @@
       try { body = JSON.stringify({ ...collectContextResolverSignals(thread), ...ChatState.chatContextRequestScope(thread, state.codex) }); }
       catch (error) { console.warn(TAG, 'context signals failed', error); return; }
       if (body.length > 60 * 1024) return;
-      const accountKey = ChatState.codexAccountKey(state.codex.authStatus) || null;
+      const accountKey = ChatState.roomAccountScope(thread, state.codex).accountKey || null; // L1 c24: the room's own account
       const previous = store.byThread[threadId];
       const sameAsked = previous?.key === body && previous.accountKey === accountKey;
       if (!force && sameAsked && (previous.status === 'loading'
@@ -17728,7 +17737,7 @@
               || thread.retainedNativeBinding.clientThreadId !== ChatState.clientThreadBinding(thread)
               || thread.retainedNativeBinding.accountKey !== thread.bindingAccountKey)
             || !ChatState.chatThreadReadiness(thread, codex).ready || !ChatState.canResumeNativeThread(thread, codex.authStatus, codex)
-            || (codex.authStatus?.access?.state != null && codex.authStatus.access.state !== 'ok')
+            || (ChatState.roomAccountScope(thread, codex).access != null && ChatState.roomAccountScope(thread, codex).access !== 'ok') // L1 c24: the room's own account state
             || threadBusy(thread) || getCodexThreadDraft(codex, threadId) !== question) return null;
         const clientThreadId = ChatState.clientThreadBinding(thread), conversationId = thread.conversationId;
         const profileId = thread.agentProfileId, profile = codexThreadAgentProfile(thread);
@@ -17746,14 +17755,14 @@
             || project.value?.inheritance || project.value?.override || chatProjectDraftActions.has(threadId)
             || state.contextSuggest?.byThread?.[threadId]?.picked?.length
             || ChatState.runsForThread(protocol, thread).some(run => run.pendingApprovals?.length || ChatState.pendingUserInputCount(run))) return null;
-        const account = ChatState.codexAccountKey(codex.authStatus);
+        const account = ChatState.roomAccountScope(thread, codex).accountKey; // L1 c24: the room's own account
         const owner = manualOwnerIdentity(threadId);
         if (!account || !owner) return null;
         // Unreviewed option edits can survive opening Settings, but approval
         // also observes canvas selection and the Decisions settings generation.
         const editKey = JSON.stringify([threadId, codex.activityRoomGeneration || 0, clientThreadId, conversationId, owner,
           profileId, profile.revision, codex.threadDraftRevisions[threadId] || 0, thread.agent?.revision ?? null,
-          thread.toolMode, thread.systemPrompt, codex.authStatus?.access?.state ?? null]);
+          thread.toolMode, thread.systemPrompt, ChatState.roomAccountScope(thread, codex).access ?? null]);
         return { clientThreadId, conversationId, profileId, question, editKey,
           key: JSON.stringify([editKey, state.canvasSelectionRevision || 0, choiceSettingsGeneration]) };
       },
@@ -17955,7 +17964,7 @@
           const owner = options.briefingScope ? state.codex.briefingSession : null;
           const identity = owner?.identity || options.historyReceipt, briefingId = owner?.briefing?.id || null;
           panel._inputProofScope = { threadId, sourceId: reference.sourceId, hash: reference.hash,
-            accountKey: ChatState.codexAccountKey(state.codex.authStatus), ...identity };
+            accountKey: ChatState.roomAccountScope(getCodexThreadById(state.codex, threadId), state.codex).accountKey, ...identity }; // L1 c24: the room's own account
           const proof = snapshot.delivered ? JSON.stringify(inputDeliveryProof(threadId, reference, identity, briefingId, snapshot.delivered.packetId)) : null;
           const accessAtOpen = state.codex.authStatus?.access?.state;
           if (owner) panel._briefingPresentationId = owner.presentationId;
@@ -18036,8 +18045,8 @@
         const sourceId = snapshot.id, hash = snapshot.hash;
         const snapshotId = reference.snapshotId, referenceScope = JSON.stringify(reference.contextScope || null);
         const activeRoom = state.codex.activeThreadId, roomGeneration = state.codex.activityRoomGeneration || 0;
-        const accountKey = () => JSON.stringify([state.codex.codexAccountKey, ChatState.codexAccountKey(state.codex.authStatus),
-          state.codex.authStatus?.isLoggedIn, state.codex.authStatus?.identityStatus]);
+        const accountKey = () => JSON.stringify(ChatState.roomAccountParts(getCodexThreadById(state.codex, threadId), state.codex, [state.codex.codexAccountKey, ChatState.codexAccountKey(state.codex.authStatus),
+          state.codex.authStatus?.isLoggedIn, state.codex.authStatus?.identityStatus])); // L1 c24: the room's own account
         const account = accountKey();
         const panelCurrent = () => accountKey() === account && state.codex.inputInspectNonce === nonce
           && state.codex.activeThreadId === activeRoom && (state.codex.activityRoomGeneration || 0) === roomGeneration
@@ -18046,9 +18055,9 @@
           && document.getElementById('egd-codex-input-panel') === panel
           && panel.querySelector('[data-testid="chat-input-source-change"]') === node;
         const readContext = () => {
-          const currentThread = getCodexThreadById(state.codex, threadId);
+          const currentThread = getCodexThreadById(state.codex, threadId), acct = ChatState.roomAccountScope(currentThread, state.codex); // L1 c24: the room's own account
           return InputContext.inputReadContext(reference, ChatState.chatContextRequestScope(currentThread, state.codex), {
-            thread: currentThread, accountKey: ChatState.codexAccountKey(state.codex.authStatus), cachedAccountKey: state.codex.codexAccountKey,
+            thread: currentThread, accountKey: acct.accountKey, cachedAccountKey: acct.cachedAccountKey,
           });
         };
         let scope, context;
@@ -18108,9 +18117,9 @@
           if (!options.silent) boardNotice('이 입력의 접수와 대화 연결을 확인하지 못했습니다.'); return null;
         }
         const readContext = () => {
-          const currentThread = getCodexThreadById(state.codex, thread.id);
+          const currentThread = getCodexThreadById(state.codex, thread.id), acct = ChatState.roomAccountScope(currentThread, state.codex); // L1 c24: the room's own account
           return InputContext.inputReadContext(reference, ChatState.chatContextRequestScope(currentThread, state.codex), {
-            thread: currentThread, accountKey: ChatState.codexAccountKey(state.codex.authStatus), cachedAccountKey: state.codex.codexAccountKey,
+            thread: currentThread, accountKey: acct.accountKey, cachedAccountKey: acct.cachedAccountKey,
           });
         };
         let context;
@@ -18220,7 +18229,7 @@
         const identity = () => {
           const latest = getCodexThreadById(state.codex, threadId);
           return latest ? JSON.stringify([ChatState.chatContextRequestScope(latest, state.codex),
-            route.engineId === 'codex' ? [ChatState.codexAccountKey(state.codex.authStatus), state.codex.codexAccountKey,
+            route.engineId === 'codex' ? [...ChatState.roomAccountParts(latest, state.codex, [ChatState.codexAccountKey(state.codex.authStatus), state.codex.codexAccountKey]),
               latest.bindingAccountKey, latest.bindingState, latest.retainedNativeBinding] : null]) : null;
         };
         const original = identity();
@@ -18288,7 +18297,7 @@
               }
             };
             card._briefingEvidenceScope = { threadId, sourceId: reference.sourceId, hash: reference.hash,
-              accountKey: ChatState.codexAccountKey(state.codex.authStatus), ...shown.identity };
+              accountKey: ChatState.roomAccountScope(getCodexThreadById(state.codex, threadId), state.codex).accountKey, ...shown.identity }; // L1 c24: the room's own account
             card._invalidateBriefingEvidence = invalidate;
             const observe = () => {
               if (stopped) return;
@@ -18386,9 +18395,9 @@
         try { unsubscribeDraft = this.subscribe(observeDraft); } catch { watch.dispose(); return null; }
         const dispose = () => { unsubscribeDraft(); watch.dispose(); };
         const build = () => {
-          const thread = getCodexThreadById(state.codex, threadId), account = ChatState.codexAccountKey(state.codex.authStatus);
-          const access = state.codex.authStatus?.access?.state;
-          if (draftChanged || !watch.current(probe) || !ownerCurrent() || !thread || !account || state.codex.codexAccountKey !== account
+          const thread = getCodexThreadById(state.codex, threadId), acct = ChatState.roomAccountScope(thread, state.codex), account = acct.accountKey; // L1 c24: the room's own account
+          const access = acct.access;
+          if (draftChanged || !watch.current(probe) || !ownerCurrent() || !thread || !account || acct.cachedAccountKey !== account
               || state.codex.connected !== true || ['permissionDenied', 'authFailed', 'loginRequired', 'loginInProgress'].includes(access)
               || !ChatState.chatDraftMatches(thread, getCodexThreadDraft(state.codex, threadId), state.codex.threadDraftRevisions[threadId] || 0, draft)
               || JSON.stringify(thread.briefingCommentRefs || []) !== commentSnapshot) return null;
@@ -19434,8 +19443,8 @@
           epochScope.finish(token);
         };
         const projectBinding = ChatState.clientThreadBinding(activeThread), projectProfile = ChatState.chatThreadEngineProfileId(activeThread, state.codex);
-        const projectAccountKey = () => JSON.stringify([state.codex.codexAccountKey, state.codex.authStatus?.accountId,
-          state.codex.authStatus?.accountEmail, state.codex.authStatus?.isLoggedIn]);
+        const projectAccountKey = () => JSON.stringify(ChatState.roomAccountParts(getCodexThreadById(state.codex, activeThread.id), state.codex, [state.codex.codexAccountKey, state.codex.authStatus?.accountId,
+          state.codex.authStatus?.accountEmail, state.codex.authStatus?.isLoggedIn])); // L1 c24: the room's own account
         const projectAccount = projectAccountKey();
         const defaultSendCurrent = () => {
           const current = getCodexThreadById(state.codex, activeThread.id);
@@ -19574,7 +19583,8 @@
           const authorProfile = activeThread.profileEnabled ? codexThreadAgentProfile(activeThread) : null;
           ChatState.registerChatRequest(protocol, { requestId, clientThreadId: ChatState.clientThreadBinding(activeThread), localThreadId: activeThread.id, conversationId: activeThread.conversationId,
             ...(engineId === 'claude' ? { engineProfileId: token.profile } : {}),
-            authorName: authorProfile ? authorProfile.name : engineId === 'claude' ? 'Claude' : 'Codex', ...(authorProfile?.avatar ? { authorAvatar: authorProfile.avatar } : {}) }, state.codex.authStatus, engineId);
+            authorName: authorProfile ? authorProfile.name : engineId === 'claude' ? 'Claude' : 'Codex', ...(authorProfile?.avatar ? { authorAvatar: authorProfile.avatar } : {}) }, state.codex.authStatus, engineId,
+            ChatState.roomAccountScope(activeThread, state.codex).accountKey); // L1 c24: the request carries the room's own account (the default's with the flag off)
           appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', {
             readBy: [SELF_MEMBER], requestId, inputReferences,
           }), { countUnread: false });
@@ -19604,10 +19614,10 @@
           runtimeConfig.contextSnapshotIds = inputReferences.map(reference => reference.snapshotId);
           if (engineId === 'claude' && inputReferences.length) runtimeConfig.expectedContextScope = token.expectedContextScope;
           runtimeConfig.contextCapabilities = engineId === 'claude' ? (inputReferences.length ? token.claudeContextCapabilities : null)
-            : ChatState.contextCapabilitiesForRequest(activeThread, state.codex.authStatus, runtimeConfig.contextSnapshotIds);
+            : ChatState.contextCapabilitiesForRequest(activeThread, state.codex.authStatus, runtimeConfig.contextSnapshotIds, state.codex);
           // CTX-03: the suggestion list this turn answered and the refs taken from it ([] when none).
           runtimeConfig.contextResolution = engineId === 'claude' ? null : ChatState.contextResolutionForSend(state.contextSuggest?.byThread?.[activeThread.id], selectedInputs,
-            { now: Date.now(), accountKey: ChatState.codexAccountKey(state.codex.authStatus) || null });
+            { now: Date.now(), accountKey: ChatState.roomAccountScope(activeThread, state.codex).accountKey || null }); // L1 c24: the room's own account
           if (runtimeConfig.contextResolution?.chosen.length && !runtimeConfig.contextCapabilities) {
             runtimeConfig.contextCapabilities = { read: true, reader: true, publishBriefing: true };
           }

@@ -57,9 +57,9 @@ export const BRIDGE_COMPOSITION = Object.freeze({
   keys: ['settingsGeneration', 'mode', 'configured', 'client', 'budgetMs', 'coldBudgetMs', 'warm', 'warmup', 'inRunMessages', 'calibrationLog', 'turnMemory', 'browserEntry', 'draftCheck', 'conversationFlow',
     'relevanceRules', 'commandJudge', 'terminalGate', 'workingMemory', 'topicRecipient', 'recipientForChatChoice', 'reviewRevision', 'memoryEvidence', 'collect'],
   // top-level options of the bridge's new CodexChatRuntime({ … }) that this composition passes (request / respond / toolProviders etc. are the check's own)
-  runtimeKeys: ['contexts', 'toolProviders', 'ownToolsWiring', 'roomAccount', 'store', 'requireStore', 'getOwnerKey', 'emit', 'emitLegacy'],
+  runtimeKeys: ['contexts', 'toolProviders', 'ownToolsWiring', 'roomAccount', 'store', 'requireStore', 'getOwnerKey', 'emit', 'emitLegacy', 'agentReloadReuse'],
   flags: ['EGDESK_DRAFT_CHECK', 'EGDESK_DRAFT_CHECK_DESIGN', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_TERMINAL_GATE', 'EGDESK_TERMINAL_GATE_METHOD',
-    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP', ...hookFlags()],
+    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP', 'EGDESK_AGENT_RELOAD_REUSE', ...hookFlags()],
   // present in the bridge, deliberately not reproduced: each needs a window, the Desk, a store this check does not open, or another lane's module
   notReproduced: {
     keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration'],
@@ -454,11 +454,12 @@ export async function runConversation({ options, set, conversation, deps = {} })
     }
     chat = new CodexChatRuntime({ request, respond,
       ...(needsNative ? { getBoardPeerContract: () => nativeContract?.boardPeerContract ?? null, getSteerContract: () => nativeContract?.steerContract ?? null, getThreadDelete: () => nativeContract?.threadDelete === true } : {}), emit: () => {}, emitLegacy: () => {}, store, requireStore: true, contexts, getOwnerKey: () => OWNER, verifyFile: async () => null, resolveProjectWorkspace: async () => null,
+      ...(FLAG.EGDESK_AGENT_RELOAD_REUSE === 'on' ? { agentReloadReuse: true } : {}), // inert without an Agent-profile conversation (L7 c27)
       toolProviders: wiring.toolProviders, ownTools: wiring.ownTools, decisionContext,
       roomAccount: { mode: () => (FLAG.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') } })
     chat.setConnection(true)
     try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
-    attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog }))
+    attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests }))
     rec.phases.composedMs = ms(t0)
     // The one registration point for another lane's module (the briefing hook, memory seeding): deps.extensions = [{ name, setup(ctx) → { afterTurn?(record, info), finish?() } }].
     // setup runs once the runtime is composed; afterTurn after every scripted turn record; finish at the end of the conversation (its value is kept in

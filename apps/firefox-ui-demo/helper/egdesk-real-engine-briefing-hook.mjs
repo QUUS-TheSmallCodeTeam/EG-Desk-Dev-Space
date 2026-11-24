@@ -54,7 +54,8 @@ export function checkBriefingExpect(expect, rec) {
   const out = [], put = (check, ok, detail) => out.push({ check: `briefing.${check}`, ok: ok === true, detail })
   if (!rec) return [{ check: 'briefing.ran', ok: false, detail: { why: 'the briefing hook did not run for this turn (flag off, no answer, or the hook is not attached)' } }]
   // 'presented' is the flow's word; the board counts as proposed only when the runtime also took a proposal with steps
-  if (expect.outcome !== undefined) put('outcome', rec.outcome === expect.outcome && (expect.outcome !== 'presented' || (rec.steps ?? []).length > 0), { outcome: rec.outcome, reason: rec.reason ?? null, steps: (rec.steps ?? []).length })
+  // the detail carries the WHY (c32): the reason, the stages the flow ran, the fork requests that failed, so a failed outcome never hides its cause
+  if (expect.outcome !== undefined) put('outcome', rec.outcome === expect.outcome && (expect.outcome !== 'presented' || (rec.steps ?? []).length > 0), { outcome: rec.outcome, reason: rec.reason ?? null, steps: (rec.steps ?? []).length, stages: rec.flow?.stages ?? null, forkErrors: rec.forkErrors ?? null })
   if (expect.reason !== undefined) put('reason', rec.reason === expect.reason, { reason: rec.reason ?? null })
   if (expect.schemaSent !== undefined) put('schemaSent', expect.schemaSent ? rec.forkTurns > 0 && rec.forkSchemaTurns === rec.forkTurns : rec.forkSchemaTurns === 0, { forkTurns: rec.forkTurns, withSchema: rec.forkSchemaTurns })
   if (expect.schemaInvalid !== undefined) put('schemaInvalid', rec.schemaInvalid === expect.schemaInvalid, { schemaInvalid: rec.schemaInvalid ?? null })
@@ -92,7 +93,7 @@ export const briefingHook = Object.freeze({
   flags: BRIEFING_FLAGS,
   decisionDependent: Object.freeze(['EGDESK_BRIEFING_FLOW']),
   active: FLAG => FLAG?.EGDESK_BRIEFING_FLOW === 'on',
-  attach({ chat, contexts, FLAG, conversation, fetchImpl, key, calibrationLog, limits = {} }) {
+  attach({ chat, contexts, FLAG, conversation, fetchImpl, key, calibrationLog, requestLog = [], limits = {} }) {
     const L = { ...BRIEFING_LIMITS, ...limits }
     const schema = FLAG.EGDESK_BRIEFING_OUTPUT_SCHEMA === 'on'
     const forkCalls = [], published = [], engines = [], proposed = [], decisions = []
@@ -115,7 +116,10 @@ export const briefingHook = Object.freeze({
       const started = Date.now(); let names = []
       try { names = (JSON.parse(String(init?.body ?? '{}')).questions ?? []).map(q => q.name) } catch {}
       const response = await fetchImpl(url, init)
-      decisions.push({ names, ms: Date.now() - started, status: response?.status ?? null })
+      // what the Decision model answered, as numbers and closed words only (the check's own row has the same shape)
+      const p = {}
+      try { const body = JSON.parse(await response.clone().text()); for (const a of body.answers ?? []) p[String(a.name ?? '?').slice(0, 60)] = a.type === 'predicate' ? Math.round(a.probability * 100) / 100 : a.type === 'choice' ? String(a.choice ?? '?').slice(0, 40) : String(a.type ?? '?').slice(0, 20) } catch {}
+      decisions.push({ names, ms: Date.now() - started, status: response?.status ?? null, p })
       return response
     }
     const budget = createDecisionBudget({ monthlyInputTokenCap: L.tokenCap })
@@ -126,20 +130,24 @@ export const briefingHook = Object.freeze({
       sendExtra: () => ({ contextCapabilities: { read: true, reader: true, publishBriefing: true } }),
       async afterTurn({ run, say, answer, turnIndex = 0 }) {
         const started = Date.now()
-        const mark = { forks: forkCalls.length, published: published.length, proposed: proposed.length, engines: engines.length, decisions: decisions.length }
+        const mark = { requests: requestLog.length, forks: forkCalls.length, published: published.length, proposed: proposed.length, engines: engines.length, decisions: decisions.length }
         const base = { turnIndex, request: clip(say, 200), schemaFlag: schema, year: L.year, viewport: L.viewport, materialsFrom: null, materials: 0, outcome: null, reason: null }
-        const none = reason => ({ ...base, outcome: 'skipped', reason, forkTurns: 0, forkSchemaTurns: 0, schemaInvalid: null, published: [], steps: [], decisions: [], wallMs: 0 })
+        const none = reason => ({ ...base, outcome: 'skipped', reason, forkRequests: [], forkErrors: [], flow: null, forkTurns: 0, forkSchemaTurns: 0, schemaInvalid: null, published: [], steps: [], decisions: [], wallMs: 0 })
         if (typeof answer !== 'string' || !answer.trim()) return none('no-answer')
         const body = BriefingHost.observeRequest({ mode: 'on', report: answer, answerId: run.answerId ?? null, conversationId: run.conversationId ?? null, runId: run.runId ?? null, candidates: [], request: say, viewport: L.viewport })
         if (!body) return none('nothing-to-observe')
         let summary = null, error = null, timer
         const call = (async () => { const req = localRequest('POST', '/decision/briefing-observe', body), res = localResponse(); await board(req, res, new URL('/decision/briefing-observe', 'http://127.0.0.1:39218')); return res.body })()
         try { summary = await Promise.race([call, new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('briefing timeout'), { code: 'timeout' })), L.timeoutMs) })]) } catch (e) { error = String(e?.code ?? e?.name ?? 'error').slice(0, 40) } finally { clearTimeout(timer) }
+        // the app-server requests this turn's briefing made (the check logs every request with its error code): a refused thread/fork shows here
+        const requests = requestLog.slice(mark.requests).filter(r => /^thread\/(?:fork|start)$|^turn\/start$/.test(r.method)).map(r => ({ method: r.method, ms: r.ms, ...(r.error ? { error: String(r.error).slice(0, 40) } : {}) }))
         const engine = engines.at(-1), stats = engines.length > mark.engines && engine ? engine.stats() : null, forks = forkCalls.slice(mark.forks)
         return { ...base, materialsFrom, materials: materialCount,
           // the observe summary: outcome presented | fallback-chat | bubble (the handler's own words), or a skipped answer
           outcome: summary?.outcome ?? (summary?.status === 'skipped' ? 'skipped' : error ? 'error' : null), reason: summary?.reason ?? error ?? null,
           flow: summary ? { status: summary.status ?? null, stages: summary.stages ?? [], judgeRequests: summary.judgeRequests ?? 0, fillTurns: summary.fillTurns ?? 0 } : null,
+          // forkRequests: every thread/fork, thread/start and turn/start the briefing's private turns sent, with the error code of a refusal
+          forkRequests: requests, forkErrors: requests.filter(r => r.error).map(r => `${r.method}:${r.error}`),
           forkTurns: forks.length, forkSchemaTurns: forks.filter(f => f.schema).length, engineStats: stats ? { turns: stats.turns, refused: stats.refused, elapsedMs: stats.elapsedMs } : null,
           // null when the schema flag is off (the engine does not count it then); an integer when on
           schemaInvalid: schema ? (stats?.schemaInvalid ?? 0) : null,

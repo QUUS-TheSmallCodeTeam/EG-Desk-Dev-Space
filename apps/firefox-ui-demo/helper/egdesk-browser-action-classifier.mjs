@@ -95,11 +95,15 @@ const DELETE_WORDS = vocabulary(
 const SUBMIT_WORDS = vocabulary(
   ['submit', 'send', 'publish', 'post', 'confirm', 'apply', 'sign up', 'register', 'save', 'update', 'create', 'approve',
     'reject', 'agree', 'accept', 'upload', 'share', 'invite', 'reply', 'comment', 'request', 'vote', 'transfer', 'connect'],
-  ['제출', '보내기', '전송', '발송', '게시', '등록', '올리기', '업로드', '확인', '신청', '가입', '저장', '업데이트', '적용',
+  ['제출', '보내기', '전송', '발송', '게시', '올리기', '업로드', '확인', '신청', '가입', '저장', '업데이트', '적용',
     '만들기', '생성', '작성 완료', '수정 완료', '변경 완료', '변경하기', '완료', '승인', '거절', '거부', '반려', '동의',
     '수락', '공유', '초대', '답장', '답글', '투표', '요청',
     '提交', '发送', '发布', '确认', '保存', '更新', '创建', '批准', '拒绝', '驳回'],
 )
+// L8 c25 (real hold-out, c24): 등록 was a submit phrase ANYWHERE in a Korean label, so 주민등록표 등본 교부 (a certificate) was a submission and the
+// link the request named was withheld. 등록 is a submit word only as a word of its own ("등록", "댓글 등록") or in a registering phrase ("등록하기",
+// "등록 완료", "회원등록", "상품 등록"); never inside a longer noun (주민등록, 등록증, 등록번호, 사업자등록증) or an inflection (등록한).
+const REGISTER_SUBMIT = /(?:(?<![가-힣])|(?<=(?:회원|신규|상품|게시물|리뷰|후기|댓글|글|사진|파일)\s*))등록(?:\s*(?:하기|하세요|해\s*주세요|완료|요청)|(?![가-힣]))/
 // L8 C17: signing in is the person's step. A sign-in or single-sign-on control hands the person's identity to this site or to a provider
 // (an SSO link starts an OAuth authorisation that can complete silently when the provider session is open), so it is a grant: it is never
 // offered to the loop. Real finding (c16 census): a page whose only control was "카카오로 로그인" offered it as a candidate.
@@ -260,7 +264,7 @@ function classifyActivate(input, label, role, amount) {
   const search = record(form) && form.search === true
   // A submitter submits its form owner; an unknown owner leans toward a submission.
   if (input.submitter === true && form !== null && !search) return result('submit', 'form-submitter', { source: 'form' })
-  const found = term(SUBMIT_WORDS, label)
+  const found = term(SUBMIT_WORDS, label) ?? term(REGISTER_SUBMIT, label)
   if (found && !search && COOKIE_REJECT.test(label)) return result('none', 'cookie-reject', { source: 'label' })
   if (found && !search) return result('submit', 'submit-vocabulary', { term: found, source: 'label' })
   return result('none', 'no-signal')
