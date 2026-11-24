@@ -41,4 +41,4 @@ export function createWorkbenchArrange(h){const {window:w,document:d}=h;let auth
  function sync(){if(panel.isOpen())panel.sync();else if(pulse){w.clearInterval(pulse);pulse=null;}}
  async function open(key,anchor){const seq=++requestSeq;const start=digest(key);if(!start)return;const cfg=await readDecision();if(seq!==requestSeq||start!==digest(key))return;authority=cfg;if(!panel.open(key,anchor)){h.notice(key==='@desk'?'정리 조건을 충족하는 공동 보드 자료나 이 기기에 저장된 개인 메모가 없습니다. 브라우저·채팅·터미널 창은 자동 정리 대상이 아닙니다.':'정리할 수 있는 창을 찾지 못했습니다.');return;}if(!pulse)pulse=w.setInterval(sync,300);}
  function close(){requestSeq++;panel.close({forgetUndo:true});if(pulse)w.clearInterval(pulse);pulse=null;authority=null;}
- w.addEventListener('resize',sync);w.addEventListener('unload',close,{once:true});return {open,sync,close,escape:panel.handleEscape,restore,forgetUndo:panel.forgetUndo};}
+ w.addEventListener('resize',sync);w.addEventListener('unload',close,{once:true});return {open,sync,close,escape:panel.handleEscape,restore,forgetUndo:panel.forgetUndo,designScene:panel.designScene,offerRedesign:panel.offerRedesign};}

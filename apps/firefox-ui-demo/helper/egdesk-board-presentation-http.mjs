@@ -4,10 +4,15 @@ import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.
 import { createDecisionClient, DECISIONS_ENDPOINT, DECISION_MODEL, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { DEFAULT_DECISION_THRESHOLDS } from './egdesk-decision-questions.mjs'
 import { normalizeBoardPresentationScene, prepareBoardPresentation, readBoardPresentation } from './egdesk-board-presentation-plan.mjs'
+import { canvasCheckCalibrationEntry, prepareCanvasDesignCheck, readCanvasDesignCheck } from './egdesk-canvas-design-check.mjs'
 import { attachBoardVisual, MAX_BOARD_VISUAL_IMAGE_CHARS, validateBoardVisual } from './egdesk-board-visual-packet.mjs'
 
 const ROOT = '/decision/board-presentation'
 const ACTIONS = new Map(['prepare', 'run', 'cancel'].map(action => [`${ROOT}/${action}`, action]))
+// Canvas design check (the Decision model as a system-level judge over runtime-enumerated items): same authority, budget, ticket and deadline rules.
+const CHECK_ROOT = '/decision/canvas-check'
+const CHECK_ACTIONS = new Map(['prepare', 'run', 'cancel'].map(action => [`${CHECK_ROOT}/${action}`, action]))
+const CHECK_MAX_BODY_BYTES = 8192
 const KINDS = new Set(['업무 전표', '메모', '자료', '상태표'])
 const MODES = new Set(['advisory', 'on'])
 const TTL_MS = 60_000
@@ -123,6 +128,16 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     } catch { /* recording must never affect the reply */ }
   }
 
+  function calibrateCheck(prepared, answers, result) {
+    try { calibrationLog?.record?.(canvasCheckCalibrationEntry(prepared, answers, result)) } catch { /* recording must never affect the reply */ }
+  }
+  // What each mode may return from a canvas check. Advisory records the verdict kind and returns no findings; off never reaches here.
+  function checkReply(prepared, result) {
+    if (result.status === 'manual') return MANUAL
+    if (prepared.mode === 'advisory') return { status: 'advisory-only', verdict: result.verdict }
+    return { status: result.status, understandable: result.understandable, findings: result.findings, where: result.where }
+  }
+
   function discard(ticket) {
     const entry = pending.get(ticket)
     if (!entry) return null
@@ -138,6 +153,7 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     const entry = discard(ticket)
     if (!entry || active || res.destroyed || now() >= entry.expiresAt) return MANUAL
     const { prepared, outbound, expiresAt, packetBytes } = entry
+    const isCheck = prepared.kind === 'check'
     const matches = state => state.mode === prepared.mode && state.binding === prepared.binding
     const gate = authority()
     // Name the one refusal the user can act on (the local monthly cap); every other mismatch stays a plain manual.
@@ -166,6 +182,11 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
       }
       const current = authority({ checkBudget: false })
       if (!matches(current)) { calibrate(prepared, null, null, 'mode_changed'); return MANUAL }
+      if (isCheck) {
+        const checked = readCanvasDesignCheck(prepared, answers, current.binding)
+        calibrateCheck(prepared, answers, checked)
+        return checkReply(prepared, checked)
+      }
       const result = readBoardPresentation(prepared, answers, current.binding)
       calibrate(prepared, answers, result)
       if (result.status === 'preview') return { status: 'preview', preview: result.preview }
@@ -185,8 +206,10 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
   }
 
   const handle = async (req, res, url) => {
-    const action = ACTIONS.get(url.pathname)
+    const checkAction = CHECK_ACTIONS.get(url.pathname)
+    const action = ACTIONS.get(url.pathname) ?? checkAction
     if (!action) return false
+    const isCheck = !!checkAction
     const reply = (code, body) => { if (!res.destroyed && !res.writableEnded) sendJson(res, code, body); return true }
     if (!guardBridgeRequest(req, port)) return reply(403, { status: 'manual', reason: 'loopback-required' })
     if (req.method !== 'POST') {
@@ -196,15 +219,34 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     // Reject bodyless/simple requests before reading; query parameters are not a DTO.
     if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) return reply(415, { status: 'manual', reason: 'json-required' })
     if (url.search) return reply(400, { status: 'manual', reason: 'invalid-request' })
-    const limit = action === 'prepare' ? MAX_VISUAL_PREPARE_BYTES : MAX_BODY_BYTES
+    const limit = isCheck ? CHECK_MAX_BODY_BYTES : action === 'prepare' ? MAX_VISUAL_PREPARE_BYTES : MAX_BODY_BYTES
     if (Number(req.headers['content-length']) > limit) return reply(413, { status: 'manual', reason: 'invalid-request' })
     let body, bytes = 0
     try {
-      if (action === 'prepare') ({ body, bytes } = await readPrepareBody(req))
-      else body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES })
+      if (action === 'prepare' && !isCheck) ({ body, bytes } = await readPrepareBody(req))
+      else body = await readJsonBody(req, { maxBytes: isCheck ? CHECK_MAX_BODY_BYTES : MAX_BODY_BYTES })
     } catch (error) { return reply(error?.httpStatus === 413 ? 413 : 400, { status: 'manual', reason: 'invalid-request' }) }
     if (res.destroyed || res.writableEnded) return true
     try {
+      if (isCheck && action === 'prepare') {
+        const { mode, binding, reason } = authority()
+        if (!binding) return reply(200, { status: 'disabled', mode, reason })
+        const time = now()
+        for (const [token, entry] of pending) if (time >= entry.expiresAt) discard(token)
+        if (pending.size >= MAX_PENDING) return reply(200, { status: 'disabled', mode, reason: 'busy' })
+        const prepared = prepareCanvasDesignCheck({ mode, binding, dto: body })
+        if (prepared.status !== 'prepared') return reply(400, { status: 'manual', reason: 'invalid-request' })
+        const outbound = { model: client.model, ...prepared.packet }
+        const packetBytes = Buffer.byteLength(JSON.stringify(outbound))
+        if (packetBytes > MAX_PACKET_BYTES || pendingBytes + (active?.packetBytes ?? 0) + packetBytes > MAX_RETAINED_PACKET_BYTES) return reply(200, { status: 'disabled', mode, reason: 'busy' })
+        const ticket = randomBytes(24).toString('hex')
+        const expiresAt = now() + TTL_MS
+        const timer = setTimeout(() => discard(ticket), TTL_MS)
+        timer.unref()
+        pendingBytes += packetBytes
+        pending.set(ticket, { prepared, outbound, packetBytes, timer, expiresAt })
+        return reply(200, { status: 'prepared', ticket, mode, expiresInMs: TTL_MS, preview: { cue: prepared.dto.purpose, items: prepared.dto.items, packet: outbound } })
+      }
       if (action === 'prepare') {
         // Reject oversized text, malformed JSON, or non-image padding before PNG work.
         const imageChars = typeof body?.visual?.image === 'string' ? body.visual.image.length : 0
