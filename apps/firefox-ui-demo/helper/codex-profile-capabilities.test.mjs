@@ -15,7 +15,7 @@ const PROOF = 'a'.repeat(64)
 const BINARIES = { '/bin/codex-a': { executable: '/bin/codex-a', version: '0.162.1', schemaMatch: true, dynamicTools: true, boardPeerContract: PROOF, threadDelete: true },
   '/bin/codex-b': { executable: '/bin/codex-b', version: '0.150.0', schemaMatch: false, dynamicTools: false, boardPeerContract: null, threadDelete: false } }
 
-function rig({ env = { PATH: '/system/bin', HOME: '/user' }, sharedDelete = false, inspectLog = [], probe = null } = {}) {
+function rig({ env = { PATH: '/system/bin', HOME: '/user' }, sharedDelete = false, inspectLog = [], probe = null, signedOut = [] } = {}) {
   const homes = new Map([[A, { home: '/private/one', identity: 'one' }], [B, { home: '/private/two', identity: 'two' }]])
   const children = [], shared = []
   const binaryOf = id => (id === A ? '/bin/codex-a' : '/bin/codex-b')
@@ -30,7 +30,7 @@ function rig({ env = { PATH: '/system/bin', HOME: '/user' }, sharedDelete = fals
       child.emitRpc = message => child.stdout.write(`${JSON.stringify(message)}\n`)
       child.stdin = new Writable({ write(data, _, done) {
         const message = JSON.parse(data.toString()); child.sent.push(message)
-        if (message.method && message.id) queueMicrotask(() => child.emitRpc({ id: message.id, result: message.method === 'account/read' ? { account: { type: 'chatgpt', email: `${options.env.CODEX_HOME.split('/').pop()}@example.org`, planType: 'plus' } }
+        if (message.method && message.id) queueMicrotask(() => child.emitRpc({ id: message.id, result: message.method === 'account/read' ? { account: signedOut.includes(options.env.CODEX_HOME) ? null : { type: 'chatgpt', email: `${options.env.CODEX_HOME.split('/').pop()}@example.org`, planType: 'plus' } }
           : message.method === 'model/list' ? { data: [], nextCursor: null } : {} }))
         done()
       } })
@@ -129,4 +129,14 @@ test('(c) pure-engine launch overrides: a profile server gets the SAME model/eff
   // what differs, as of this cycle: the shared server runs with the whole bridge environment and its default CODEX_HOME; no server has an mcp_servers override
   for (const args of [shared, profile]) assert.equal(args.some(a => /mcp_servers/.test(a)), false, 'no MCP override on either server yet (lane L5)')
   assert.equal(resolveCodexExecutable.length >= 0, true)
+})
+
+test('(b) a profile whose launch worked but is signed out claims nothing, though its binary probed fine; signing in is what turns the capabilities on', async () => {
+  const inspectLog = [], { pool, adapter } = rig({ signedOut: ['/private/two'], inspectLog, probe: bin => { inspectLog.push(bin); return capabilitiesOf(BINARIES['/bin/codex-a']) } }) // every binary is fully capable: only the sign-in can switch it off
+  await adapter.ensureReady(A)
+  await assert.rejects(adapter.ensureReady(B), { code: 'ENGINE_LOGIN_REQUIRED' })
+  assert.ok(inspectLog.includes('/bin/codex-b'), 'its binary was probed at launch')
+  assert.deepEqual([pool.capabilities(B).threadDelete, pool.capabilities(B).dynamicTools, pool.capabilities(B).turnSteer], [false, false, false])
+  assert.equal(pool.capabilities(A).threadDelete, true)
+  assert.equal(adapter.threadDeleteSupported(B), false)
 })

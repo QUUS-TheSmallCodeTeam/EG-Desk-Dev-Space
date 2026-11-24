@@ -4,6 +4,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { rm } from 'node:fs/promises'
+import { DatabaseSync } from 'node:sqlite'
+import { readdirSync } from 'node:fs'
+import path from 'node:path'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
@@ -12,6 +15,7 @@ const MAIN = 'codex-default', WORK = 'codex-abcdef01'
 const PROOF = { [MAIN]: 'm'.repeat(64), [WORK]: 'w'.repeat(64) }
 async function fixture(t, { deleteCapable = { [MAIN]: true, [WORK]: true } } = {}) {
   const dataDir = createPrivateQaTempDirectory('egdesk-room-routing-')
+  const segmentRows = () => { const file = readdirSync(dataDir, { recursive: true }).find(name => /chat-.*\.sqlite$/.test(String(name))); const db = new DatabaseSync(path.join(dataDir, String(file))); try { return db.prepare('SELECT COUNT(*) AS n FROM room_account_segments').get().n } finally { db.close() } }
   const open = () => openChatStore({ dataDir, ownerScope: 'local-desktop-test' })
   let store = open()
   t.after(async () => { try { store.close() } catch {} await rm(dataDir, { recursive: true, force: true }) })
@@ -45,7 +49,7 @@ async function fixture(t, { deleteCapable = { [MAIN]: true, [WORK]: true } } = {
     turn.status = 'completed'
     return chat.handleNotification({ method: 'turn/completed', params: { threadId: run.conversationId, turn } }, 'codex', slot)
   }
-  return { runtime, complete, log, threads, get store() { return store }, restart() { store.close(); store = open(); return runtime() } }
+  return { runtime, complete, log, threads, segmentRows, get store() { return store }, restart() { store.close(); store = open(); return runtime() } }
 }
 const send = (chat, room, request, extra = {}) => chat.send({ clientThreadId: room, requestId: request, message: request, ...extra })
 
@@ -81,7 +85,8 @@ test('live: deleting the room deletes each native thread on its own account\'s s
   assert.deepEqual(f.log.filter(([op]) => op === 'delete').sort((x, y) => x[2].localeCompare(y[2])), [['delete', MAIN, old.conversationId], ['delete', WORK, fresh.conversationId]].sort((x, y) => x[2].localeCompare(y[2])))
   assert.deepEqual(out.engineHistory.map(r => [r.conversationId, r.state]).sort(), [[old.conversationId, 'deleted'], [fresh.conversationId, 'deleted']].sort())
   assert.equal(f.store.getConversation('room-a'), null)
-  assert.deepEqual(f.store.segmentOf(old.conversationId), null, 'the room\'s segments go with it')
+  assert.deepEqual(f.store.segmentOf(old.conversationId), null)
+  assert.equal(f.segmentRows(), 0, 'the room\'s account segments are gone from the database, not just unreachable')
 })
 
 test('restart: after the runtime restarts nothing is live, yet the old thread still resolves to the old account and delete reaches both servers correctly', async t => {
