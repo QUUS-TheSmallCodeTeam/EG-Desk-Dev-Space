@@ -70,10 +70,11 @@ export function compactionSignal(message) {
 }
 const FLOW_OWN_KINDS = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
 import { speechSegments } from './egdesk-speech-grounding.mjs'
-import { deriveTurnPosition, prepareTurnMemory } from './egdesk-turn-memory.mjs'
+import { deriveTurnPosition, memoryMaterials, prepareTurnMemory } from './egdesk-turn-memory.mjs'
 import { createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry } from './egdesk-browser-task.mjs'
 import { hostOf } from './egdesk-browser-task-memory.mjs'
-import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage } from './egdesk-wiki-reconstruction.mjs'
+import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection } from './egdesk-wiki-reconstruction.mjs'
+import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
 // Reviewed requests expire after two minutes; only canonical v4 UUID IDs are accepted.
@@ -830,6 +831,8 @@ export class CodexChatRuntime {
     this.turnMemoryCalibration = new WeakMap() // run -> calibration handle of the advisory memory entry
     this.turnMemoryDelivered = new Map() // 'on': native thread -> receipts (revision + hash, never text) of pages really attached to its turns; memory only, bounded
     this.turnMemoryWrites = new WeakMap() // 'on': run -> the write judgment to run once its answer completed
+    this.turnMemoryTurns = new WeakMap() // 'on': the turn's request context, and later its run -> that turn's memory state (memoryMaterialsFor)
+    this.turnMemoryLatest = new Map() // 'on': native thread -> the memory state of its latest accepted turn; an older turn's materials are no longer served
     this.turnMemoryWriteReceipts = new WeakMap() // 'on': run -> { proposal, applied } of that write (closed words only)
     this.browserEntryRuns = new Set() // in-flight advisory entry jobs (never awaited by a turn)
     this.browserEntryShadow = new Map() // runId -> what the advisory entry decision WOULD have done; in memory only, bounded
@@ -2637,7 +2640,11 @@ export class CodexChatRuntime {
       const browserTaskContext = browserPre?.note ? { egdesk_browser_task: { kind: 'application', value: browserPre.note } } : null
       // Re-checked at the last moment: the mode, every page's permission and the key must still hold, or nothing is attached.
       const memoryPacket = memoryReady && this.turnMemoryMayDispatch(memoryTurn, additionalContext) ? memoryTurn.result.packet : null
-      const memoryContext = memoryPacket ? { [TURN_MEMORY_KEY]: { kind: 'application', value: memoryPacket } } : null
+      // One packet (flag turnMemory.onePacket, default off): with both features attaching, the memory pages ride under the selection's key and
+      // a page that is already a selected item is not sent a second time. Without the flag, or with only one of the two present, nothing changes.
+      const onePacket = memoryPacket ? this.mergeTurnMemory(memoryTurn, decision, additionalContext) : null
+      const memoryContext = onePacket ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: onePacket.value } }
+        : memoryPacket ? { [TURN_MEMORY_KEY]: { kind: 'application', value: memoryPacket } } : null
       const turnAdditionalContext = browserTaskContext || memoryContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}) } : additionalContext
       turnStartAttempted = context.turnStartAttempted = true
       const result = await engine.startTurn({
@@ -2725,6 +2732,7 @@ export class CodexChatRuntime {
       if (decision) this.noteDecisionContext(run, decision)
       this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...(memoryPacket ? [TURN_MEMORY_KEY] : [])])
       this.startConversationFlow(run, body, context)
+      this.turnMemoryLatest.delete(run.conversationId) // this turn is now the conversation's latest: the previous turn's materials end here
       if (memoryTurn) this.noteTurnMemoryOn(run, body, context, memoryTurn, memoryPacket !== null)
       if (memoryPosition) this.startTurnMemoryAdvisory(run, body, context, memoryPosition, performance.now() - memoryClock, { speech: decision?.speech ?? null, topic: this.topicIntakes.get(context) ?? null }) // after dispatch, in the background: never delays or changes the turn
       if (bounded && policy === BROWSER_BOUNDED && browserInteractionRequested && this.browserEntryMode() === 'advisory') this.startBrowserEntryAdvisory(run, body, context) // same: record only
@@ -5334,6 +5342,7 @@ export class CodexChatRuntime {
       try { speech = this.directSpeech(body, context, controller.signal) } catch { speech = null }
       const turn = { position, capMs, clock, startedAt: clock.now(), controller, spans: [], sources: { speech, topic: this.topicIntakes.get(context) ?? null }, result: null, cut: false }
       turn.promise = this.runTurnMemoryOn(turn, body, context).catch(() => null).finally(() => { turn.finished = true })
+      this.turnMemoryTurns.set(context, turn)
       this.turnMemoryRuns.add(turn.promise)
       void turn.promise.finally(() => this.turnMemoryRuns.delete(turn.promise))
       return turn
@@ -5387,7 +5396,7 @@ export class CodexChatRuntime {
         arm()
       })
       turn.waitedMs = clock.now() - turn.startedAt
-      if (turn.result && Number.isFinite(turn.readyMs) && turn.readyMs < turn.capMs) return true
+      if (turn.result && Number.isFinite(turn.readyMs) && turn.readyMs < turn.capMs) { turn.ready = true; return true }
       // No result yet, or one that arrived after the cap: the turn goes on without it, and whatever is still running is told to stop.
       turn.cut = !turn.finished || Boolean(turn.result)
       turn.result = null
@@ -5406,9 +5415,67 @@ export class CodexChatRuntime {
     } catch { return false }
   }
 
+  /**
+   * The memory materials of ONE turn, as data (see memoryMaterials in egdesk-turn-memory.mjs for the shape and meaning of every field):
+   *   [{ alias, kind, time: { slice, at }, provenance: { kind, by, basis }, status, statusReading?, statusPending?, title, excerpt, links: [{ type, toAlias }], held }]
+   * key: the turn's run, or (before the run exists) the request context this turn was sent with. options: { excerptChars (<= 2400), max (<= 24) }.
+   * Synchronous, never waits, never throws; an empty frozen array when there is nothing or it may not be given:
+   *   turn memory is not 'on' right now, the loop did not finish before its cap, the key is not a turn of this runtime, a later turn of the
+   *   same conversation was accepted since (valid for the turn only), or no listed page may be read now (checked again per page, here).
+   * Before the turn is sent, held:false rows are what WILL be attached if the last check at dispatch passes (memoryMaterialsState says
+   * 'pending'); after it, they are exactly what was attached, and none when the packet was not sent.
+   * This is in-process data for system judges. A caller that sends it to a model must pass its own egress gate (kind memory_page).
+   */
+  memoryMaterialsFor(key, options = {}) {
+    try {
+      const turn = this.turnMemoryView(key)
+      if (!turn) return Object.freeze([])
+      return memoryMaterials(turn.result, turn.wiki, { scope: turn.scope, attached: turn.attached !== false,
+        ...(Number.isSafeInteger(options?.excerptChars) ? { excerptChars: options.excerptChars } : {}), ...(Number.isSafeInteger(options?.max) ? { max: options.max } : {}) })
+    } catch { return Object.freeze([]) }
+  }
+
+  // 'none' | 'pending' (ready, turn not sent yet) | 'attached' | 'not_attached' (the turn went without the packet; only held rows are listed).
+  memoryMaterialsState(key) {
+    try {
+      const turn = this.turnMemoryView(key)
+      return !turn ? 'none' : turn.attached === undefined ? 'pending' : turn.attached ? 'attached' : 'not_attached'
+    } catch { return 'none' }
+  }
+
+  turnMemoryView(key) {
+    const turn = key && typeof key === 'object' ? this.turnMemoryTurns.get(key) : null
+    if (!turn || turn.ready !== true || !turn.result || !turn.wiki || this.turnMemoryMode() !== 'on') return null
+    // Once the turn was accepted it must still be the latest turn of its conversation: a later turn (with or without memory) ends it.
+    if (turn.attached !== undefined && this.turnMemoryLatest.get(turn.threadKey) !== turn) return null
+    return turn
+  }
+
+  // One packet: the memory pages appended to the dispatched selection, under the selection's key. null means "leave both as they are".
+  // Read at the last moment, after every narrowing of the selection: what is merged is exactly what is about to be sent.
+  mergeTurnMemory(turn, decision, additionalContext) {
+    try {
+      const flag = this.decisionContext?.turnMemory?.onePacket
+      if ((typeof flag === 'function' ? flag() : flag) !== true) return null
+      const entry = additionalContext?.[DECISION_CONTEXT_KEY]
+      if (decision?.mode !== 'on' || entry?.kind !== 'application' || typeof entry.value !== 'string') return null
+      const selected = (Array.isArray(decision.result?.selected) ? decision.result.selected : []).map(item => (typeof item?.id === 'string' ? memoryPageId(item.id) : null)).filter(Boolean)
+      const merged = mergeIntoSelection(entry.value, turn.result.memory.packetParts, selected)
+      if (merged) turn.onePacket = { omitted: merged.omitted.length, sameSource: merged.sameSource.length }
+      return merged
+    } catch { return null }
+  }
+
   // After the turn was accepted: receipts of what was really attached, the row the person can inspect, the record, and the pending write.
   noteTurnMemoryOn(run, body, context, turn, attached) {
     try {
+      turn.attached = attached === true
+      this.turnMemoryTurns.set(run, turn)
+      if (typeof run.conversationId === 'string' && run.conversationId) {
+        turn.threadKey = run.conversationId
+        this.turnMemoryLatest.delete(turn.threadKey); this.turnMemoryLatest.set(turn.threadKey, turn)
+        while (this.turnMemoryLatest.size > 50) this.turnMemoryLatest.delete(this.turnMemoryLatest.keys().next().value)
+      }
       const setup = this.decisionContext, result = turn.result, cid = run.conversationId
       if (!result) { // the cap passed first (or the loop could not run): recorded as a closed fallback, nothing else
         setup.calibrationLog?.record({ feature: 'turn_memory', mode: 'on', position: turn.position.kind, attached: false, judgments: [], memory: 'fallback', fallback: turn.cut ? 'timeout' : 'evidence_unavailable',
@@ -5427,7 +5494,8 @@ export class CodexChatRuntime {
         const pages = Object.keys(memory.delivered ?? {}).map(id => turn.wiki.pages.get(id)).filter(Boolean)
         const activity = decisionContextActivity({ answerId: `${run.answerId}\u0000memory`, selected: pages.map(p => ({ id: p.id, title: p.title, timeSlice: p.time.slice, ...(p.ref ? { sourceRef: p.ref } : {}) })) })
         activity.title = `기억 자료 ${pages.length}개` // wording pending the owner's approval
-        activity.detail = { ...activity.detail, feature: 'turnMemory', mode: 'on', position: turn.position.kind, attached: true, ...(memory.partial ? { partial: true } : {}) }
+        activity.detail = { ...activity.detail, feature: 'turnMemory', mode: 'on', position: turn.position.kind, attached: true, ...(memory.partial ? { partial: true } : {}),
+          ...(turn.onePacket ? { onePacket: true, notRepeated: turn.onePacket.omitted, sameSource: turn.onePacket.sameSource } : {}) }
         this.put(run, 'activities', activity)
         this.emit(run, 'activity.completed', activity)
       }

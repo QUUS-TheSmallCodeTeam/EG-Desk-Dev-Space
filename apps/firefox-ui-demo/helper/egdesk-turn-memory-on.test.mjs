@@ -4,6 +4,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { chmod, mkdtemp, readFile, stat } from 'node:fs/promises'
 import { CodexChatRuntime, TURN_MEMORY_CAPS, TURN_MEMORY_KEY, compactionSignal } from './codex-chat-runtime.mjs'
+import { DECISION_CONTEXT_KEY } from './egdesk-context-setup.mjs'
+import { BODY_ELSEWHERE, SAME_SOURCE } from './egdesk-wiki-reconstruction.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 import { buildWiki } from './egdesk-wiki-reconstruction.mjs'
@@ -53,7 +55,7 @@ async function rig({ memoryMode = 'on', decisionMode = 'on', tm = {}, client = n
         x.decides.push({ names, input: req.input.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n') })
         x.timeline.push(names.some(n => n.startsWith('tw_')) ? 'decide:write' : names.some(n => n.startsWith('tn_')) ? 'decide:triage' : 'decide:fetch')
         return (client ?? judge).decide(req)
-      } }, collect: async () => [],
+      } }, collect: async () => (hooks.collect ? hooks.collect() : []),
       turnMemory: memoryMode === null ? undefined : { mode: () => x.memoryMode, wiki: async () => x.wiki, scope: () => SCOPE, writer: (w, o) => createWikiWriter(w, o), ontologyWrite: true, budget: { linksFirst: true }, ...tm, clock: x.clock } } })
   chat.setConnection(true)
   x.chat = chat
@@ -316,4 +318,156 @@ test('engine compaction: receipts are dropped, the next turn reconstructs as a f
     assert.deepEqual(x.memoryEntries().map(e => e.position), ['first', 'first'])
     x.store.close()
   }
+})
+
+// ---- the turn's memory materials as data ----
+test('memoryMaterialsFor: this turn\'s materials as plain data, by run or by request context; valid for the turn only; nothing when off', async () => {
+  const x = await rig({ tm: { ontologyWrite: false } })
+  await x.send(PLAN_Q, 'r1'); await x.done(1)
+  const run1 = x.run(), first = x.chat.memoryMaterialsFor(run1)
+  assert.equal(x.chat.memoryMaterialsState(run1), 'attached')
+  assert.ok(first.length >= 2 && first.every(m => m.held === false) && Object.isFrozen(first) && first.every(Object.isFrozen))
+  assert.deepEqual(Object.keys(first[0]).filter(k => k !== 'statusReading' && k !== 'statusPending'), ['alias', 'kind', 'time', 'provenance', 'status', 'title', 'excerpt', 'links', 'held'])
+  // exactly the pages of the packet, in its order, and no id, reference or revision of any of them
+  const packet = x.packet(0), titles = first.map(m => m.title)
+  assert.deepEqual(titles, [...packet.matchAll(/\[page id=(\S+) /g)].map(m => SYNTHETIC_PAGES.find(p => p.id === m[1]).title))
+  assert.doesNotMatch(JSON.stringify(first), /db\/pg-|rev=|"id"|"ref"|"revision"|probab/)
+  for (const m of first) for (const l of m.links) assert.ok(first.some(o => o.alias === l.toAlias), 'every link resolves inside the list')
+  // bounded on request
+  const small = x.chat.memoryMaterialsFor(run1, { excerptChars: 10, max: 1 })
+  assert.equal(small.length, 1); assert.ok(small[0].excerpt.length <= 10 + 4)
+  assert.ok(x.chat.memoryMaterialsFor(run1, { excerptChars: 1e9, max: 1e9 }).every(m => m.excerpt.length <= 2400 + 4))
+  // the next turn: what it attaches is new, what the thread already holds is marked held; the first turn's materials are no longer served
+  await x.send(DONE, 'r2'); await x.done(2)
+  const run2 = x.run(), second = x.chat.memoryMaterialsFor(run2)
+  assert.deepEqual(x.chat.memoryMaterialsFor(run1), [], 'valid for the turn only')
+  assert.equal(x.chat.memoryMaterialsState(run1), 'none')
+  assert.ok(second.some(m => !m.held) && second.some(m => m.held))
+  assert.deepEqual(second.filter(m => m.held).map(m => m.title).sort(), titles.slice().sort(), 'held = what the first turn really delivered')
+  assert.ok(second.findIndex(m => m.held) > second.findLastIndex(m => !m.held), 'attached rows come first')
+  assert.ok(second.filter(m => m.held).every(m => m.statusReading === undefined), 'no reading is claimed for a page nobody judged this turn')
+  // not a turn of this runtime, or the feature switched off: nothing
+  assert.deepEqual(x.chat.memoryMaterialsFor({}), []); assert.deepEqual(x.chat.memoryMaterialsFor(null), []); assert.equal(x.chat.memoryMaterialsState('x'), 'none')
+  x.memoryMode = 'advisory'
+  assert.deepEqual(x.chat.memoryMaterialsFor(run2), [])
+  x.store.close()
+})
+
+test('memoryMaterialsFor: permission is checked again at every call; a packet that was not sent leaves only held rows; before the turn is sent the state is pending', async () => {
+  let allowed = true
+  const guarded = buildWiki(SYNTHETIC_PAGES.map(p => (p.id === 'db/pg-plan' ? { ...p, mayRead: () => allowed } : p)))
+  const x = await rig({ wiki: guarded, tm: { ontologyWrite: false } })
+  await x.send(PLAN_Q, 'r1'); await x.done(1)
+  const run = x.run(), before = x.chat.memoryMaterialsFor(run)
+  assert.ok(before.some(m => m.title === 'PostgreSQL 마이그레이션 배포 계획'))
+  allowed = false
+  const after = x.chat.memoryMaterialsFor(run)
+  assert.ok(!after.some(m => m.title === 'PostgreSQL 마이그레이션 배포 계획') && after.length === before.length - 1, 'the withdrawn page is gone')
+  for (const m of after) for (const l of m.links) assert.ok(after.some(o => o.alias === l.toAlias), 'and so are links to it')
+  x.store.close()
+  // pending: asked with the request context while turn/start has not returned yet
+  let seen = null
+  const y = await rig({ tm: { ontologyWrite: false } })
+  const original = y.chat.turnMemoryMayDispatch.bind(y.chat)
+  y.chat.turnMemoryMayDispatch = (turn, extra) => { const context = [...[y.lastContext]].filter(Boolean)[0]; seen = { state: y.chat.memoryMaterialsState(context), rows: y.chat.memoryMaterialsFor(context).length }; return original(turn, extra) }
+  const begin = y.chat.beginTurnMemory.bind(y.chat)
+  y.chat.beginTurnMemory = (body, context) => { y.lastContext = context; return begin(body, context) }
+  await y.send(PLAN_Q, 'r1'); await y.done(1)
+  assert.equal(seen.state, 'pending'); assert.ok(seen.rows >= 2)
+  assert.equal(y.chat.memoryMaterialsState(y.lastContext), 'attached')
+  y.store.close()
+  // not sent (the mode was switched off between the loop and the dispatch, then on again): no attached rows are claimed
+  const z = await rig({ tm: { ontologyWrite: false }, hooks: { onThreadStart: r => { r.memoryMode = 'advisory' } } })
+  await z.send(PLAN_Q, 'r1'); await z.done(1)
+  assert.equal(z.packet(0), null)
+  z.memoryMode = 'on'
+  assert.equal(z.chat.memoryMaterialsState(z.run()), 'not_attached'); assert.deepEqual(z.chat.memoryMaterialsFor(z.run()), [])
+  z.store.close()
+})
+
+// ---- one packet: selection and memory together ----
+// A stand-in for the context selection: every listed candidate is judged relevant. Everything else goes to the lexical memory stand-in.
+function selecting() {
+  const judge = mockJudge()
+  return { async decide(req) {
+    if (!req.questions.some(q => q.name === 'answer_type')) return judge.decide(req)
+    const answers = {}
+    for (const q of req.questions) answers[q.name] = q.type === 'choice'
+      ? { type: 'choice', choice: q.name === 'time_intent' ? 'present' : 'answer', confidence: 0.95, probabilities: [{ value: q.name === 'time_intent' ? 'present' : 'answer', probability: 0.95 }, { value: 'browse', probability: 0.02 }] }
+      : { type: 'predicate', probability: 0.95 }
+    return { answers, model: 'syn', usage: { inputTokens: 1 }, latencyMs: 3 }
+  } }
+}
+const page = id => SYNTHETIC_PAGES.find(p => p.id === id)
+// The same records the wiki holds, offered to the context selection as candidates (as the ontology graph is to both features).
+const asCandidate = (id, extra = {}) => ({ id, kind: 'document', title: page(id).title, summary: `${page(id).title} 요약`, timeSlice: page(id).time?.slice ?? 'unknown', loadText: async () => page(id).body, ...extra })
+const count = (text, part) => text.split(part).length - 1
+
+test('one packet (flag): selection and memory ride under ONE key and no page body is sent twice; the selected items are byte-identical to what they were', async () => {
+  const collect = () => [asCandidate('db/pg-plan'), asCandidate('db/pg-health')]
+  const two = await rig({ tm: { ontologyWrite: false }, client: selecting(), hooks: { collect } })
+  await two.send(PLAN_Q, 'r1'); await two.done(1)
+  const selection = two.starts[0].additionalContext[DECISION_CONTEXT_KEY].value, memory = two.packet(0)
+  assert.ok(selection.includes(body('db/pg-plan')) && memory.includes(body('db/pg-plan')), 'without the flag (today): the same body under two keys')
+  const one = await rig({ tm: { ontologyWrite: false, onePacket: true }, client: selecting(), hooks: { collect } })
+  await one.send(PLAN_Q, 'r1'); await one.done(1)
+  const context = one.starts[0].additionalContext
+  assert.equal(Object.hasOwn(context, TURN_MEMORY_KEY), false, 'no second key')
+  const value = context[DECISION_CONTEXT_KEY].value
+  assert.ok(value.startsWith(selection), 'the selected items come first and are byte-identical')
+  const all = Object.values(context).map(entry => entry.value).join('\n')
+  const sent = [...memory.matchAll(/\[page id=(\S+) /g)].map(m => m[1])
+  assert.ok(sent.includes('db/pg-plan') && sent.some(id => !['db/pg-plan', 'db/pg-health'].includes(id)), 'memory picked selected and unselected pages')
+  for (const id of sent) assert.equal(count(all, body(id)), 1, `${id}: its body reaches the model exactly once`)
+  // the page that is also a selected item keeps its header (time, provenance, status reading) and loses only its body
+  assert.match(value, new RegExp(`\\[page id=db/pg-plan [^\\]]*status-recorded=plan[^\\]]*\\]\\n${BODY_ELSEWHERE.replace(/[[\]]/g, '\\$&')}`))
+  assert.equal(count(value, BODY_ELSEWHERE), sent.filter(id => ['db/pg-plan', 'db/pg-health'].includes(id)).length)
+  // everything else in turn/start is what it was
+  const strip = p => JSON.stringify({ ...p, additionalContext: undefined })
+  assert.equal(normalize(strip(one.starts[0])), normalize(strip(two.starts[0])))
+  // receipts and the data accessor still describe what the model holds: every page, attached
+  assert.deepEqual(Object.keys(one.chat.turnMemoryDelivered.get(one.cid).pages).sort(), sent.slice().sort())
+  assert.deepEqual(one.chat.memoryMaterialsFor(one.run()).map(m => m.title), sent.map(id => page(id).title))
+  const row = one.run().activities.find(a => a.detail?.feature === 'turnMemory')
+  assert.deepEqual([row.detail.onePacket, row.detail.notRepeated, row.detail.sameSource], [true, count(value, BODY_ELSEWHERE), 0])
+  for (const r of [two, one]) r.store.close()
+})
+
+test('one packet: a selected item shown in another form (a summary) keeps the memory body once, marked as the same record; with nothing selected the memory packet is unchanged', async () => {
+  // the selection could not load the text and attached the catalog summary; memory has the body
+  const collect = () => [asCandidate('db/pg-plan', { loadText: async () => { throw new Error('unreadable') } })]
+  const x = await rig({ tm: { ontologyWrite: false, onePacket: true }, client: selecting(), hooks: { collect } })
+  await x.send(PLAN_Q, 'r1'); await x.done(1)
+  const value = x.starts[0].additionalContext[DECISION_CONTEXT_KEY].value
+  assert.equal(Object.hasOwn(x.starts[0].additionalContext, TURN_MEMORY_KEY), false)
+  assert.equal(count(value, body('db/pg-plan')), 1, 'the body is there once')
+  assert.ok(value.includes(`${SAME_SOURCE}\n${body('db/pg-plan')}`), 'and says it is the same record as the item above')
+  assert.equal(count(value, BODY_ELSEWHERE), 0)
+  // nothing selected: there is nothing to merge with, the memory packet rides under its own key exactly as without the flag
+  const plain = await rig({ tm: { ontologyWrite: false } })
+  await plain.send(PLAN_Q, 'r1'); await plain.done(1)
+  const alone = await rig({ tm: { ontologyWrite: false, onePacket: true } })
+  await alone.send(PLAN_Q, 'r1'); await alone.done(1)
+  const sameClock = text => normalize(text).replace(/Question clock: \S+/g, 'Question clock: T') // the two rigs asked a few milliseconds apart
+  assert.equal(sameClock(JSON.stringify(alone.starts[0])), sameClock(JSON.stringify(plain.starts[0])))
+  for (const r of [x, plain, alone]) r.store.close()
+})
+
+test('one packet: with turn memory off (or advisory) the flag changes nothing: turn/start is byte-identical with and without it, selection included', async () => {
+  const collect = () => [asCandidate('db/pg-plan'), asCandidate('db/pg-health')]
+  const base = await rig({ memoryMode: null, client: selecting(), hooks: { collect } })
+  await base.send(PLAN_Q, 'r1'); await base.done(1)
+  assert.ok(base.starts[0].additionalContext[DECISION_CONTEXT_KEY].value.includes(body('db/pg-plan')), 'the selection itself is attached')
+  for (const memoryMode of ['off', 'advisory']) {
+    const x = await rig({ memoryMode, tm: { ontologyWrite: false, onePacket: true }, client: selecting(), hooks: { collect } })
+    await x.send(PLAN_Q, 'r1'); await x.done(1)
+    assert.equal(normalize(JSON.stringify(x.starts[0])), normalize(JSON.stringify(base.starts[0])), memoryMode)
+    x.store.close()
+  }
+  // and with the flag off, turn memory on: both keys, as before this change
+  const on = await rig({ tm: { ontologyWrite: false }, client: selecting(), hooks: { collect } })
+  await on.send(PLAN_Q, 'r1'); await on.done(1)
+  assert.deepEqual(Object.keys(on.starts[0].additionalContext).filter(k => k === DECISION_CONTEXT_KEY || k === TURN_MEMORY_KEY).sort(), [DECISION_CONTEXT_KEY, TURN_MEMORY_KEY].sort())
+  assert.equal(on.starts[0].additionalContext[DECISION_CONTEXT_KEY].value, base.starts[0].additionalContext[DECISION_CONTEXT_KEY].value)
+  for (const r of [base, on]) r.store.close()
 })
