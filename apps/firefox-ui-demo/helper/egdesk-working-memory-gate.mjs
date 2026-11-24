@@ -235,24 +235,27 @@ const preview = (own, limits) => {
   return redactTail(picked.map(cut).join('\n'), { tailLines: 12, lineChars: limits.previewLineChars + 1, tailChars: 1200 })
 }
 
-// Two judge designs. 'choice' (the default, unchanged): one N-way choice per block over the runtime's options, previews only.
+// Two judge designs. 'predicates' is the DEFAULT since cycle 11 (real 2026-11-25: 22/22 blocks decided and right, a narrow request kept
+// 1 block of 11, a broad one all 11). 'choice' (the earlier default, never measured for real): one N-way choice per block over the
+// runtime's options, previews only. The gate itself stays off unless its flag is set.
 // 'predicates' (design rules R1/R2/R4 from the 11/24 real measurements): each open block is QUOTED and asked about on its own
 // with one yes/no question, "does the reasoning model need these lines for the person's request?"; the CODE turns the answer
-// into an action (yes: keep verbatim; no: spill with a pointer when the runtime offers it, collapse only process output; undecided: keep).
+// into an action (yes: keep verbatim; no: spill with a pointer when the runtime offers it, else keep; undecided: keep; all no: keep).
 export const WM_JUDGE_DESIGNS = Object.freeze(['choice', 'predicates'])
 const quoteBlock = (own, limits) => {
   const text = redactTail(own.join('\n'), { tailLines: own.length + 1, lineChars: 400, tailChars: Number.MAX_SAFE_INTEGER })
   return text.length > limits.blockQuoteChars ? `${text.slice(0, limits.blockQuoteChars)}\n[… ${text.length - limits.blockQuoteChars} more characters of this block are not shown]` : text
 }
 /** What the code does with a predicate answer for one block. */
-export function predicateAction(block, verdict, kind = 'tool') {
+// Safeguard 1 (cycle 11): a "not needed" answer may only take out lines the model can read again. Without a spill store the block stays
+// whole, whatever its kind (a collapse cannot be undone; repetitive progress output is collapsed by the code rules, not by this judge).
+export function predicateAction(block, verdict) {
   if (verdict.state !== 'no' || verdict.probability > 0.2) return 'inject_full'
-  if (block.options.includes('spill_scratch')) return 'spill_scratch'
-  return (WM_KINDS[kind] || WM_KINDS.tool).errors && block.options.includes('collapse_template') ? 'collapse_template' : 'inject_full'
+  return block.options.includes('spill_scratch') ? 'spill_scratch' : 'inject_full'
 }
 
 /** The one Decision request for a tool output: one question per block that has more than one runtime option. */
-export function buildGateRequest({ lines, blocks, kind, exitCode = null, goal = '', limits = WM_LIMITS, design = 'choice' }) {
+export function buildGateRequest({ lines, blocks, kind, exitCode = null, goal = '', limits = WM_LIMITS, design = 'predicates' }) {
   const asked = blocks.filter(b => b.options.length > 1)
   if (design === 'predicates') {
     const label = (WM_KINDS[kind] || WM_KINDS.tool).label
@@ -290,7 +293,7 @@ function recordEntry(calibration, mode, judgments, blocks, asked, fallback) {
  * `rules: true` lets the deterministic policy act where the Decision model gave no accepted choice (flag, default false).
  */
 export async function gateToolOutput({ text, kind = 'tool', exitCode = null, goal = '', paths = [], mode = 'off', enabled = false, rules = false, client = null,
-  egress = null, spill = null, calibration = null, thresholds, timeoutMs = WM_TIMEOUT_MS, signal, limits = WM_LIMITS, design = 'choice' } = {}) {
+  egress = null, spill = null, calibration = null, thresholds, timeoutMs = WM_TIMEOUT_MS, signal, limits = WM_LIMITS, design = 'predicates' } = {}) {
   const original = String(text ?? '')
   const tokensBefore = estimateTokens(original)
   const same = (reason, extra = {}) => ({ text: original, touched: false, reason, source: 'runtime', requests: 0, tokensBefore, tokensAfter: tokensBefore, ...extra })
@@ -312,15 +315,15 @@ export async function gateToolOutput({ text, kind = 'tool', exitCode = null, goa
   else if (!kindEgress || egress?.allows?.(kindEgress) !== true) fallback = 'evidence_unavailable'
   else {
     const th = decisionThresholds(thresholds)
-    const { asked, request } = buildGateRequest({ lines, blocks, kind, exitCode, goal, limits, design: WM_JUDGE_DESIGNS.includes(design) ? design : 'choice' })
+    const { asked, request } = buildGateRequest({ lines, blocks, kind, exitCode, goal, limits, design: WM_JUDGE_DESIGNS.includes(design) ? design : 'predicates' })
     try {
       requests = 1
       const answer = await client.decide({ ...request, timeoutMs, signal })
-      const judgments = design === 'predicates' ? asked.map(b => {
+      const judgments = design !== 'choice' ? asked.map(b => {
         // yes >= .8 keeps the block, no <= .2 lets the code omit it (predicateAction), anything between keeps it: an undecided block is never dropped.
         const verdict = readPredicate(answer.answers, `wm_need_${b.id}`, 0.8)
         const decidedNo = verdict.state === 'no' && verdict.probability <= 0.2, decidedYes = verdict.state === 'yes'
-        if (decidedYes || decidedNo) { actions[b.id] = predicateAction(b, verdict, kind); decided.add(b.id) }
+        if (decidedYes || decidedNo) { actions[b.id] = predicateAction(b, verdict); decided.add(b.id) }
         return { q: 'wm_block', would: decidedYes || decidedNo ? 'act' : 'hold', ...(decidedYes || decidedNo ? { value: actions[b.id] } : {}), p: verdict.probability ?? undefined, threshold: 0.8, minMargin: 0.2 }
       }) : asked.map(b => {
         const read = readChoice(answer.answers, `wm_${b.id}`, { minConfidence: th.choice, minMargin: th.margin })
@@ -329,7 +332,11 @@ export async function gateToolOutput({ text, kind = 'tool', exitCode = null, goa
         return { q: 'wm_block', would: ok ? 'act' : 'hold', value: ok ? read.value : undefined, top: read.ranked[0]?.probability, second: read.ranked[1]?.probability,
           threshold: th.choice, minMargin: th.margin, confidence: read.confidence ?? undefined, margin: read.margin ?? undefined, options: b.options.length }
       })
-      recordEntry(calibration, mode, judgments, blocks.length, asked.length, null)
+      // Safeguard 2 (cycle 11): every asked block "not needed" is taken as a failed judgment (the tool was called for the request), so
+      // nothing the judge decided is applied: today's behaviour (the code rules when their flag is on, else the whole text).
+      const allNotNeeded = design !== 'choice' && asked.length > 0 && judgments.every(j => Number.isFinite(j.p) && j.p <= 0.2)
+      if (allNotNeeded) { for (const b of asked) { actions[b.id] = 'inject_full'; decided.delete(b.id) } fallback = 'all_not_needed' }
+      recordEntry(calibration, mode, judgments, blocks.length, asked.length, allNotNeeded ? 'all_not_needed' : null)
     } catch (error) {
       fallback = fallbackCode(error)
       recordEntry(calibration, mode, [], blocks.length, open.length, fallback)
@@ -343,7 +350,7 @@ export async function gateToolOutput({ text, kind = 'tool', exitCode = null, goa
   const normalized = lines.join('\n')
   // A dry spill id of the real length keeps the advisory token estimate honest without writing anything.
   const build = spillId => applyActions({ lines, anchors, blocks, actions, kind, exitCode, spillId, limits })
-  const plan = blocks.map(b => ({ id: b.id, lines: b.lineCount, action: actions[b.id], by: decided.has(b.id) ? 'decision' : b.options.length === 1 ? 'runtime' : rules === true ? 'rules' : 'fallback' }))
+  const plan = blocks.map(b => ({ id: b.id, start: b.startLine, end: b.endLine, lines: b.lineCount, action: actions[b.id], by: decided.has(b.id) ? 'decision' : b.options.length === 1 ? 'runtime' : rules === true ? 'rules' : 'fallback' }))
   const planned = build(wantsSpill ? '00000000-0000-4000-8000-000000000000' : null)
   const tokensPlanned = estimateTokens(planned)
   if (!acting) return same(mode === 'advisory' ? 'advisory' : 'flag_off', { source, requests, ...(fallback ? { fallback } : {}), shadow: { plan, tokensAfter: tokensPlanned } })

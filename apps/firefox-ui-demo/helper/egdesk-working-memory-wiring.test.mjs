@@ -7,12 +7,13 @@ import { boundedCallToolResult, callToolResultFromResponse } from './egdesk-clau
 import { MAX_SPILLS_PER_RUN } from './egdesk-context-runtime.mjs'
 import { TOOL_OUTPUT_LIMITS, hashContent } from './egdesk-context-store.mjs'
 import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
+import { normalizeEntry } from './egdesk-decision-calibration-log.mjs'
 import { estimateTokens } from './egdesk-smart-read.mjs'
 import { normalizeOutput } from './egdesk-working-memory-gate.mjs'
 import { articleDump, buildLog, grepOutput, headingPolicy, mockDecisions, pageDump, shortResult } from './egdesk-working-memory-gate.fixture.mjs'
 import { SPILL_EXPIRED_MESSAGE, classifyPublicToolError } from './codex-tool-errors.mjs'
 import { enumerateLogBlocks, pickRelevantBlocks } from './egdesk-terminal-judge.mjs'
-import { WM_JUDGE_MIN_TOKENS, commandOutputHandoff, gateRuntimeToolResult, omissionCounts, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
+import { WM_JUDGE_MIN_TOKENS, commandOutputHandoff, createSpillRereadCounter, gateRuntimeToolResult, omissionCounts, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
 import { OWNER, pointersIn, standInProvider, textOf, wiringHarness } from './egdesk-working-memory-wiring.fixture.mjs'
 
 const harness = async (t, options) => { const h = await wiringHarness(options); t.after(h.cleanup); return h }
@@ -265,7 +266,7 @@ test('the Decision judge is advisory only: asked about non-repetitive text the r
   const egress = createEgressGate(modelDataPermissions({ browserGranted: true, runActive: true }))
   for (const flag of ['advisory', 'on']) {
     const mock = mockDecisions(headingPolicy, { latencyMs: 30 }), records = []
-    const decision = { mode: () => 'advisory', configured: () => true, client: mock.client }
+    const decision = { mode: () => 'advisory', configured: () => true, client: mock.client, judgeDesign: 'choice' } // this mock answers the N-way design
     const result = await gateRuntimeToolResult({ response, flag, provider, tool: 'egdesk_page_read', goal: article.goal, egress, decision, calibrationLog: { record: raw => records.push(raw) } })
     assert.equal(result.response, response, `${flag}: the code rules leave prose alone and the judge changes nothing`)
     assert.equal(records.filter(entry => entry.judgments.length).length, 0, 'the tool result did not wait for the judge')
@@ -320,4 +321,66 @@ test('command-output hand-off (not wired anywhere today): anchors and stated omi
   assert.equal(/omitted|spilled/.test(raw), false)
   const small = await commandOutputHandoff({ output: shortResult().text, exitCode: 0 })
   assert.deepEqual([small.touched, small.text], [false, shortResult().text])
+})
+
+
+test('re-read counter: a spilled block read back is counted, matched with what the advisory judge said about the same lines; numbers only', async () => {
+  const records = []
+  const counter = createSpillRereadCounter({ calibrationLog: { record: raw => { const e = normalizeEntry(raw); if (e) records.push(e) } } })
+  const run = { requestId: 'req-1' }, spillId = '00000000-0000-4000-8000-000000000001'
+  const plan = [{ id: 'b1', start: 1, end: 10, action: 'inject_full' }, { id: 'b2', start: 11, end: 40, action: 'spill_scratch' }, { id: 'b3', start: 41, end: 80, action: 'spill_scratch' }, { id: 'b4', start: 81, end: 90, action: 'spill_scratch' }]
+  const judged = { shadow: { plan: [{ start: 11, end: 40, action: 'spill_scratch', by: 'decision' }, { start: 41, end: 80, action: 'inject_full', by: 'decision' }, { start: 81, end: 90, action: 'inject_full', by: 'rules' }] } }
+  counter.note({ run, spillId, plan, judge: Promise.resolve(judged), mode: 'on' })
+  await new Promise(resolve => setImmediate(resolve))
+  // another object for the same run (the context runtime's) finds the same spill; an unknown spill or run counts nothing
+  assert.deepEqual(counter.read({ run: { requestId: 'req-1' }, sourceId: spillId, range: { startLine: 30, endLine: 45 } }),
+    { rereadBlocks: 2, rereadJudgedNotNeeded: 1, rereadJudgedNeeded: 1, rereadUnjudged: 0, spilledBlocks: 3, rereadWholeSpill: false })
+  assert.equal(counter.read({ run: { requestId: 'req-2' }, sourceId: spillId, range: null }), null)
+  assert.equal(counter.read({ run, sourceId: 'other', range: null }), null)
+  // a read without a range (a query) touches every spilled block; a block the judge did not decide is "unjudged"
+  assert.deepEqual(counter.read({ run, sourceId: spillId, range: null }), { rereadBlocks: 3, rereadJudgedNotNeeded: 1, rereadJudgedNeeded: 1, rereadUnjudged: 1, spilledBlocks: 3, rereadWholeSpill: true })
+  assert.equal(records.length, 2)
+  assert.deepEqual(records[0].wm.reread, { rereadBlocks: 2, rereadJudgedNotNeeded: 1, rereadJudgedNeeded: 1, rereadUnjudged: 0, spilledBlocks: 3, rereadWholeSpill: false })
+  assert.equal(JSON.stringify(records).includes(spillId), false, 'no id in the record')
+  // nothing to count without a spill
+  counter.note({ run, spillId: 'x', plan: [{ id: 'b1', start: 1, end: 3, action: 'inject_full' }] })
+  assert.equal(counter.read({ run, sourceId: 'x' }), null)
+})
+
+test('re-read counter end to end: flag on, the model reads a spill back, and one content-free re-read record is written; flag off sets no hook', async t => {
+  const log = buildLog()
+  const h = await harness(t, { flag: 'on', outputs: { egdesk_terminal_read: log.text } })
+  const { run } = await h.start()
+  const reply = await h.tool(run, 'egdesk_terminal_read')
+  const [first] = pointersIn(textOf(reply))
+  assert.ok(first, 'the log was spilled')
+  const before = h.records.filter(entry => entry.wm?.reread).length
+  const read = await h.tool(run, 'egdesk_read_source', first)
+  assert.equal(read.result.success, true)
+  const rereads = h.records.filter(entry => entry.wm?.reread)
+  assert.equal(rereads.length, before + 1)
+  const rr = rereads.at(-1).wm.reread
+  assert.ok(rr.rereadBlocks >= 1 && rr.rereadUnjudged === rr.rereadBlocks && rr.rereadWholeSpill === false, JSON.stringify(rr))
+  assert.equal(JSON.stringify(rereads).includes(first.snapshotId), false)
+  // the default product (no flag): no hook on the context runtime at all
+  const off = await harness(t, { outputs: { egdesk_terminal_read: log.text } })
+  const started = await off.start()
+  await off.tool(started.run, 'egdesk_terminal_read')
+  assert.equal(off.contexts.onSpillRead, undefined)
+})
+
+test('the advisory judge uses the quoted yes/no design by default; "choice" only when asked', async () => {
+  const article = articleDump()
+  const response = { success: true, contentItems: [{ type: 'inputText', text: article.text }] }
+  const provider = { workingMemory: { egdesk_page_read: { kind: 'page' } } }
+  const egress = createEgressGate(modelDataPermissions({ browserGranted: true, runActive: true }))
+  const seen = []
+  const client = { async decide(request) { seen.push(request); return { answers: {}, latencyMs: 0 } } }
+  for (const judgeDesign of [undefined, 'predicates', 'choice']) {
+    const result = await gateRuntimeToolResult({ response, flag: 'advisory', provider, tool: 'egdesk_page_read', goal: article.goal, egress, decision: { mode: () => 'advisory', configured: () => true, client, ...(judgeDesign ? { judgeDesign } : {}) } })
+    assert.equal(result.response, response)
+    await result.judge
+  }
+  assert.deepEqual(seen.map(r => [...new Set(r.questions.map(q => q.type))]), [['predicate'], ['predicate'], ['choice']])
+  assert.ok(seen[0].input.map(m => m.content).join('\n').includes(article.mustKeep[0]), 'the default design quotes the blocks')
 })

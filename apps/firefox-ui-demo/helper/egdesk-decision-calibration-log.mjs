@@ -122,7 +122,7 @@ const VOCAB = new Set(['answer', 'browse', 'timeline_update', 'action_only', 'pr
   'inject_full', 'collapse_template', 'spill_scratch', 'user_goal', 'current_active_task', 'stale_intermediate_log', 'error_trace_resolved', 'critical_fact'])
 const RUN = new Set(['completed', 'failed', 'interrupted', 'cancelled'])
 const FALLBACK = new Set(['timeout', 'unreachable', 'bad_response', 'no_credit', 'rate_limited', 'budget_exceeded', 'spend_limit_reached', 'invalid_key',
-  'not_configured', 'server_error', 'model_unavailable', 'evidence_unavailable', 'mode_changed', 'no_candidates', 'timeout_unsent'])
+  'not_configured', 'server_error', 'model_unavailable', 'evidence_unavailable', 'mode_changed', 'no_candidates', 'timeout_unsent', 'all_not_needed'])
 // Why a choice produced no pick although the model answered (closed; never free text).
 const NO_PICK = new Set(['abstain', 'unclear', 'low_confidence'])
 // The user's next explicit action after the decision, per feature. A label from another feature's vocabulary is dropped.
@@ -192,6 +192,13 @@ export function normalizeEntry(raw, now = Date.now()) {
     for (const key of ['linesBefore', 'linesAfter', 'tokensBefore', 'tokensAfter']) put(wm, key, count(raw.wm[key], 10_000_000))
     put(wm, 'kind', word(WM_OUTPUT_KINDS, raw.wm.kind)); put(wm, 'by', word(WM_BY, raw.wm.by)); put(wm, 'spill', typeof raw.wm.spill === 'boolean' ? raw.wm.spill : null)
     put(wm, 'overLimit', raw.wm.overLimit === true ? true : null)
+    // the spilled-block re-read counter: counts only
+    if (record(raw.wm.reread)) {
+      const rr = {}
+      for (const key of ['rereadBlocks', 'rereadJudgedNotNeeded', 'rereadJudgedNeeded', 'rereadUnjudged', 'spilledBlocks']) put(rr, key, count(raw.wm.reread[key], 99))
+      put(rr, 'rereadWholeSpill', typeof raw.wm.reread.rereadWholeSpill === 'boolean' ? raw.wm.reread.rereadWholeSpill : null)
+      if (Object.keys(rr).length) wm.reread = rr
+    }
     if (Object.keys(wm).length) entry.wm = wm
   }
   put(entry, 'position', word(POSITIONS, raw.position)); put(entry, 'memory', word(MEMORY, raw.memory)); put(entry, 'timing', timing(raw.timing))
