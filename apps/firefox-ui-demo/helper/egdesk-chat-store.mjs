@@ -680,6 +680,23 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
 
   return {
     createConversation(input) { ensureOpen(); return tx(() => create(input)) },
+    // The person deleted this conversation (surface "완전히 삭제"): every row of it goes, in one transaction, children first. Deleted pages
+    // are overwritten (secure_delete) and the WAL is checkpointed and truncated, so the words do not stay in the database files.
+    // Unknown conversation: { deleted: false }. Migration backups made before this delete are not touched (see the L2 c17 report).
+    deleteConversation(clientThreadId) {
+      ensureOpen()
+      const row = q.thread.get(identifier(clientThreadId, 'clientThreadId'))
+      if (!row) return { deleted: false, rows: 0 }
+      const id = row.local_conversation_id
+      const previous = db.prepare('PRAGMA secure_delete').get().secure_delete
+      db.exec('PRAGMA secure_delete=ON')
+      try {
+        const rows = tx(() => ['event_refs', 'topic_answer_guards', 'events', 'messages', 'runs', 'run_project_origins', 'native_runs', 'native_messages', 'imports', 'room_members', 'requests', 'threads']
+          .reduce((n, table) => n + Number(db.prepare(`DELETE FROM ${table} WHERE local_conversation_id=?`).run(id).changes), 0))
+        try { db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() } catch { /* a reader holds the WAL: it is truncated at the next checkpoint */ }
+        return { deleted: true, rows }
+      } finally { db.exec(`PRAGMA secure_delete=${previous ? 'ON' : 'OFF'}`) }
+    },
     getConversation(clientThreadId) { ensureOpen(); return publicThread(q.thread.get(identifier(clientThreadId, 'clientThreadId'))) },
     // The local conversation bound to one native conversation, or null.
     getConversationByNative(conversationId) {

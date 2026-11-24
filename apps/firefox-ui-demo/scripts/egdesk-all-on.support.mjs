@@ -176,6 +176,13 @@ export function scriptedDecisions({ policy = {} } = {}) {
     // L8 c20: the entry is yes/no predicates (browser_entry: is it a web task; browser_entry_card_N: on this card)
     const isTask = /세금계산서/.test(/(?:User message: |Message:\n)(.*)/.exec(text)?.[1] ?? '')
     const entry = q => ({ name: q.name, type: 'predicate', probability: q.name === 'browser_entry' ? (isTask ? 0.95 : 0.05) : q.name === 'browser_entry_card_0' && isTask ? 0.95 : 0.03 })
+    // L3 c22: the beat's questions about a message the person sent while the run works (each quotes that message alone): the mock reads
+    // the quoted message as a model would (asks what is happening / why it stopped; changes the task; asks to stop).
+    if (names.some(n => /^message__person_/.test(n))) {
+      const said = /The person's message, sent while the work is running:\n"""\n([\s\S]*?)\n"""/.exec(text)?.[1] ?? ''
+      const yes = { message__person_status: /왜|어디까지|뭐 ?하|진행 ?상황|멈췄/.test(said), message__person_change: /말고|대신|부터 해|바꿔/.test(said), message__person_stop: /그만|중지|취소|멈춰/.test(said) }
+      return wire.questions.map(q => ({ name: q.name, type: 'predicate', probability: yes[q.name] ? 0.95 : 0.03 }))
+    }
     if (names.some(n => n.includes('__'))) {
       // L3 c15: the message judgment is yes/no questions (message__pointer / __ask / __note / __stalled); code derives the kind. The mock keeps
       // its policy over the kinds those questions stand for and answers yes to the picked kind's question only.
@@ -325,6 +332,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
     ...(ENV.EGDESK_CONTEXT_RELEVANCE === 'action' ? { relevanceRules: 'action' } : {}), // as the bridge: the selection's 'action' rule set (L7 c20), default off
     ...(ENV.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(ENV.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror, audience: ({ run }) => runRequesters.audience({ run }) } : {}),
       attentionPosted: ({ key, provider: name }) => { if (name === 'work_placement') workPlacement.acknowledgePointer(key) } } } : {}),
+    ...(ENV.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}), // as the bridge: a message typed while the run works (L2 c17), default off
     ...(ENV.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
     ...(['advisory', 'on'].includes(ENV.EGDESK_TERMINAL_GATE) ? { terminalGate: { mode: () => ENV.EGDESK_TERMINAL_GATE, inspect: async () => null } } : {}),
     ...(['advisory', 'on'].includes(ENV.EGDESK_WORKING_MEMORY) ? { workingMemory: { mode: () => ENV.EGDESK_WORKING_MEMORY } } : {}),
@@ -392,6 +400,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
   chat.onForgetConversation('briefing_bindings', ({ conversationIds }) => conversationIds.reduce((n, id) => n + briefingBindings.forgetConversation(id), 0))
   chat.onForgetConversation('run_requesters', ({ clientThreadId, conversationIds }) => (runRequesters.set([clientThreadId, ...conversationIds], null) === 'cleared' ? 1 : 0))
   chat.onForgetConversation('work_placement', ({ clientThreadId, conversationIds }) => workPlacement.forget([clientThreadId, ...conversationIds]))
+  chat.onForgetConversation('pending_readings', ({ clientThreadId }) => turnMemoryConfig.getAdapter().withdrawPendingFrom([clientThreadId]))
   const board = createBoardPresentationHttpHandler({ briefingBindings, credentials: { status: 'configured', writable: true, getApiKey: () => KEY, savedAt: () => 17, hint: () => null }, getMode: () => state.mode, budget, calibrationLog,
     fetchImpl: async (endpoint, init) => { const out = await provider(endpoint, init, 'briefing'); return new Response(await out.text(), { status: out.status, headers: { 'content-type': 'application/json' } }) },
     briefing: briefingDeps({ chat, contexts, enabled: ENV.EGDESK_BRIEFING_FLOW === 'on', order: 'skeleton' }) })
@@ -458,6 +467,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
     byFeature: name => decisions.filter(d => d.step === name).reduce((m, d) => (m[d.feature] = (m[d.feature] || 0) + 1, m), {}),
     subjectiveTurnsIn: name => ({ main: native.filter(c => c.step === name && c.method === 'turn/start' && !String(c.params.threadId).startsWith('fork-')).length,
       fork: native.filter(c => c.step === name && c.method === 'turn/start' && String(c.params.threadId).startsWith('fork-')).length, steer: native.filter(c => c.step === name && c.method === 'turn/steer').length }),
+    interruptsIn: name => native.filter(c => c.step === name && c.method === 'turn/interrupt').length,
     activityRowsIn: name => events.filter(e => e.step === name && e.event === 'activity.completed').map(e => { const a = e.details?.activity ?? e.details; return `${a?.kind}:${a?.title ?? ''}` }),
     eventsIn: name => events.filter(e => e.step === name).map(e => e.event),
   }
