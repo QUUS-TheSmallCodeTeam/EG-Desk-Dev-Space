@@ -100,6 +100,22 @@ const SUBMIT_WORDS = vocabulary(
     '수락', '공유', '초대', '답장', '답글', '투표', '요청',
     '提交', '发送', '发布', '确认', '保存', '更新', '创建', '批准', '拒绝', '驳回'],
 )
+// L8 C17: signing in is the person's step. A sign-in or single-sign-on control hands the person's identity to this site or to a provider
+// (an SSO link starts an OAuth authorisation that can complete silently when the provider session is open), so it is a grant: it is never
+// offered to the loop. Real finding (c16 census): a page whose only control was "카카오로 로그인" offered it as a candidate.
+// A label is a sign-in ACTION only when the whole label is one: "로그인", "로그인하기", "카카오로 로그인", "네이버 아이디로 로그인", "간편 로그인",
+// "Sign in", "Log in with Google", "Continue with Kakao". A label that merely mentions signing in is a link ABOUT it ("로그인 도움말",
+// "로그인이 안 될 때", "Sign-in help", "로그인 정보 수정") and stays offerable: following it opens a page; it signs nobody in.
+// An address is judged fail-closed (as since C4): any whole word login/signin/logon/sso/oauth/로그인 in the path or query is a sign-in
+// destination, accepting that a help page under /help/login-trouble is withheld too.
+const SIGN_IN_PROVIDERS = 'google|apple|facebook|kakao|kakaotalk|naver|github|microsoft|line|twitter|x|payco|toss|카카오톡|카카오|네이버|구글|애플|페이스북|페이코|토스'
+const SIGN_IN_LABEL = new RegExp([
+  `^(?:(?:${SIGN_IN_PROVIDERS})\\s*(?:계정|아이디|id)?\\s*(?:으로|로)?\\s*|간편\\s*|인증서\\s*|휴대폰\\s*|휴대전화\\s*|공동\\s*인증서\\s*|금융\\s*인증서\\s*|sns\\s*)?로그인(?:\\s*하기|하세요|해\\s*주세요|\\s*후\\s*(?:이용|계속)(?:하기)?)?$`,
+  `^(?:sign|log)\\s*-?\\s*(?:in|on)(?:\\s+(?:with|using|via)\\s+(?:${SIGN_IN_PROVIDERS})(?:\\s+account)?|\\s+to\\s+(?:your\\s+|my\\s+)?(?:account|continue))?$`,
+  '^login$',
+  `^continue\\s+with\\s+(?:${SIGN_IN_PROVIDERS})(?:\\s+account)?$`,
+].join('|'), 'iu')
+const SIGN_IN_HREF = /(?:^|\s)(?:log\s?in|sign\s?in|log\s?on|sso|oauth2?|로그인)(?=\s|$)/i
 // A cookie banner's refusal is not a write although "reject"/"거부" is submission vocabulary.
 const COOKIE_REJECT = /cookie|쿠키|^reject\s*all$|^(?:모두|전체)\s*거부$|^(?:拒绝所有|全部拒绝|拒绝全部)$/i
 // Affirmative labels grant access on a consent page; "Allow" alone elsewhere is a cookie banner's.
@@ -163,6 +179,8 @@ function byName(label, amount, url, href = false) {
   // Grant before submit, so a consent form's submit button is a grant.
   if ((found = term(GRANT_WORDS, label))) return result('grant', 'grant-vocabulary', { term: found })
   if (href && (found = term(HREF_GRANT, label))) return result('grant', 'grant-destination', { term: found })
+  if (href && (found = term(SIGN_IN_HREF, label))) return result('grant', 'sign-in-destination', { term: found })
+  if (!href && (found = term(SIGN_IN_LABEL, label.trim().replace(/[.!…]+$/u, '')))) return result('grant', 'sign-in-vocabulary', { term: found })
   if (onConsentPage(url) && (found = term(AFFIRMATIVE, label))) return result('grant', 'consent-affirmative', { term: found })
   if (amount && (found = term(GENERIC_CONFIRM, label))) return result('pay', 'amount-with-confirm', { term: found })
   if ((found = term(DELETE_WORDS, label))) return result('delete', 'delete-vocabulary', { term: found })

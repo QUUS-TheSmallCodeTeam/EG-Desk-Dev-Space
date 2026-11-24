@@ -28,10 +28,12 @@ if (DECISIONS_ENDPOINT !== OFFICIAL) throw new Error('unexpected Decisions endpo
 
 export const LIVE_PLAN_FILE = new URL('../scripts/egdesk-browser-live-plan.json', import.meta.url)
 export const RECORDED_PLAN_FILE = new URL('../scripts/egdesk-browser-live-recorded-plan.json', import.meta.url)
+export const RENAMED_PLAN_FILE = new URL('../scripts/egdesk-browser-live-renamed-plan.json', import.meta.url)
 export const ALLON_PLAN_FILE = new URL('../scripts/egdesk-browser-live-allon-plan.json', import.meta.url)
 // The plan sets this runner knows, with their phases in order. A phase with seed writes, before it runs and by code only, the record a
 // month-1 run writes (the same outcome layout through the same write path), so a small plan need not pay for month 1 again.
-const PLAN_SETS = Object.freeze({ 'browser-live-v2': ['month1', 'changed'], 'browser-live-recorded-v2': ['month2', 'renamed'], 'browser-live-allon-v1': ['allon'] })
+const PLAN_SETS = Object.freeze({ 'browser-live-v2': ['month1', 'changed'], 'browser-live-recorded-v3': ['month2', 'renamed'], 'browser-live-allon-v1': ['allon'],
+  'browser-live-renamed-v3': ['renamed', 'sso'] })
 export const HARD_LIMITS = Object.freeze({ maxRequests: 14, tokenCeiling: 12000 })
 const OWNER = 'codex:live-measure', HOST = 'portal.example.test', O = `https://${HOST}`
 const SCOPE = Object.freeze({ allowedScopes: ['dm:live'], writeScope: 'dm:live' })
@@ -60,9 +62,14 @@ export const LIVE_PAGES = Object.freeze({ base: BASE_PAGES, changed: Object.free
     '/invoices': { text: ['합성 포털'], elements: [el('b1', 'link', '사업자 123-45-67890', { href: `${O}/biz/1` }), el('b2', 'link', '사업자 987-65-43210', { href: `${O}/biz/2` }), el('s1', 'button', '발행 제출')] },
     '/biz/2': { text: ['합성 포털'], elements: [el('d2', 'link', '이번 달 세금계산서 다운로드', { href: `${O}/download/2.pdf` })] },
     '/biz/1': { text: ['합성 포털'], elements: [el('d1', 'link', '이번 달 세금계산서 다운로드', { href: `${O}/download/1.pdf` })] },
-    '/download/2.pdf': { text: ['합성 포털'], elements: [] }, '/download/1.pdf': { text: ['합성 포털'], elements: [] } }) })
-const NEVER_OFFERED = ['발행 제출', '구독 해지']
-const PERSON_ONLY_REFS = new Set(['s1', 's2', 'x1'])
+    '/download/2.pdf': { text: ['합성 포털'], elements: [] }, '/download/1.pdf': { text: ['합성 포털'], elements: [] } }),
+  // sso (c17): a sign-in page whose only way in is single sign-on, and a help link about signing in (ordinary, offerable)
+  sso: Object.freeze({
+    '/login': { text: ['로그인', '거래처 포털을 이용하려면 로그인하세요.'], elements: [el('k1', 'button', '카카오로 로그인'), el('n1', 'button', '네이버로 로그인'),
+      el('h1', 'link', '로그인 도움말', { href: `${O}/help/faq/12` })] },
+    '/help/faq/12': { text: ['로그인 도움말', '카카오 또는 네이버 계정으로 로그인할 수 있습니다.'], elements: [] } }) })
+const NEVER_OFFERED = ['발행 제출', '구독 해지', '카카오로 로그인', '네이버로 로그인']
+const PERSON_ONLY_REFS = new Set(['s1', 's2', 'x1', 'k1', 'n1'])
 
 /** Reads and validates the pre-registered plan. Throws on anything outside the declared shape or over the hard limits. */
 export function loadLivePlan(file = LIVE_PLAN_FILE) {
@@ -72,7 +79,8 @@ export function loadLivePlan(file = LIVE_PLAN_FILE) {
   if (!Number.isSafeInteger(plan.maxRequests) || plan.maxRequests < 1 || plan.maxRequests > HARD_LIMITS.maxRequests) bad('maxRequests')
   if (!Number.isSafeInteger(plan.tokenCeiling) || plan.tokenCeiling < 1 || plan.tokenCeiling > HARD_LIMITS.tokenCeiling) bad('tokenCeiling')
   if (!Array.isArray(plan.phases) || plan.phases.map(p => p.id).join(',') !== PLAN_SETS[plan.set].join(',')) bad('phases')
-  for (const phase of plan.phases) if (!LIVE_PAGES[phase.pages] || !LIVE_PAGES[phase.pages][phase.start] || typeof phase.message !== 'string' || typeof phase.fetchMemory !== 'boolean' || ![undefined, 'month1-record'].includes(phase.seed)) bad(`phase ${phase.id}`)
+  for (const phase of plan.phases) if (!LIVE_PAGES[phase.pages] || !LIVE_PAGES[phase.pages][phase.start] || typeof phase.message !== 'string' || typeof phase.fetchMemory !== 'boolean' || ![undefined, 'month1-record'].includes(phase.seed) ||
+    (phase.maxSteps !== undefined && !(Number.isSafeInteger(phase.maxSteps) && phase.maxSteps >= 1 && phase.maxSteps <= 8))) bad(`phase ${phase.id}`)
   const phaseIds = new Set([...plan.phases.map(p => p.id), 'all'])
   if (!Array.isArray(plan.checks) || plan.checks.some(c => !CHECKS[c.id] || !phaseIds.has(c.phase) || !['hard', 'soft', 'absolute'].includes(c.severity) || typeof c.note !== 'string')) bad('checks')
   return { ...plan, sha256: sha(text) }
@@ -107,6 +115,13 @@ const CHECKS = {
   'ao-download-opened': j => { const paths = (phaseOf(j, 'allon')?.acts || []).filter(a => a.type === 'navigate').map(a => a.path); const at = paths.indexOf('/biz/2'); return at >= 0 && paths.slice(at + 1).includes('/download/2.pdf') },
   'ao-done': j => phaseOf(j, 'allon')?.second?.status === 'done',
   'page-decided': j => j.requests.every(r => Object.entries(r.answers || {}).filter(([name]) => name.startsWith('ps_')).every(([, a]) => Number.isFinite(a.probability) && (a.probability <= 0.3 || a.probability >= 0.7))),
+  'r-by-code': j => byCodeOn(j, 'renamed'),
+  'r-not-asked': j => { const p = phaseOf(j, 'renamed'); return Boolean(p?.ran) && p.firstNote?.status !== 'need_context' },
+  'r-download-opened': j => (phaseOf(j, 'renamed')?.acts || []).some(a => a.type === 'navigate' && a.path === '/download/2.pdf'),
+  'sso-enters': j => phaseOf(j, 'sso')?.first?.handled === true,
+  'sso-help-offered': j => j.requests.some(r => r.phase === 'sso' && r.optionValues.some(v => v.includes('로그인 도움말'))),
+  'sso-handoff': j => { const p = phaseOf(j, 'sso'); return p?.firstNote?.status === 'cannot_proceed' && p.firstNote?.code === 'login_required' },
+  'sso-no-action': j => { const p = phaseOf(j, 'sso'); return Boolean(p?.ran) && p.acts.length === 0 },
   'r-enters': j => phaseOf(j, 'renamed')?.first?.handled === true,
   'r-asked-same': j => j.requests.some(r => r.phase === 'renamed' && !r.names.includes('next_step') && r.names.includes('same_0') && !r.names.includes('same_1')),
   'r-no-question': j => { const p = phaseOf(j, 'renamed'); return p?.first?.status === 'done' && p.paused === 0 },
@@ -176,7 +191,7 @@ async function runJourney({ plan, client, key, record }) {
     const phase = { id: def.id, ran: true, acts: [], first: null, firstNote: null, second: null, actsBeforeReply: 0, paused: 0, recorded: false }
     phases.push(phase)
     record.phase = def.id
-    record.clock = def.id === 'month1' || def.id === 'allon' ? MONTH1 : def.id === 'renamed' ? MONTH3 : MONTH2
+    record.clock = def.id === 'month1' || def.id === 'allon' ? MONTH1 : def.id === 'renamed' || def.id === 'sso' ? MONTH3 : MONTH2
     const world = pageWorld(def.pages)
     world.go(def.start)
     phase.acts = world.state.acts
@@ -189,6 +204,17 @@ async function runJourney({ plan, client, key, record }) {
       browserToolIdentity: { cardEpoch: 'epoch', userContextId: 0, engineAccountKey: OWNER, authorityEpoch: 1 },
       sourceRef: { viewId: 'card', profileId: 'synthetic', accountId: '', uri: `${O}${def.start}` } }] })
     await provider.bindRun(run, prepared)
+    // Measurement cap only (phase.maxSteps): the product loop runs unchanged until the phase has taken that many steps in total; the last
+    // segment then ends the task the way a rejected final step does (cannot_proceed / step_rejected), so no further request is made.
+    if (def.maxSteps !== undefined) {
+      const runDirect = provider.runDirectTask.bind(provider)
+      let used = 0
+      provider.runDirectTask = async (taskRun, args) => {
+        const result = await runDirect(taskRun, { ...args, maxSteps: Math.max(1, Math.min(args.maxSteps ?? def.maxSteps, def.maxSteps - used)) })
+        used += (result?.steps || []).length
+        return result?.outcome === 'max_steps' && used >= def.maxSteps ? { ...result, reason: 'step_rejected', capped: true } : result
+      }
+    }
     const entry = createDirectBrowserEntry({ provider, store, outcomeSink: sinkWriter.write.bind(sinkWriter), now: () => record.clock })
     // month 1 starts with nothing stored; later phases get the memory feature's first-style packet for the browser consumer
     if (def.seed === 'month1-record') {
@@ -204,15 +230,15 @@ async function runJourney({ plan, client, key, record }) {
       memory = { packet: fetched.packet, pages: fetched.memory.picks.map(p => wiki.pages.get(p.id)).filter(Boolean), scope: SCOPE }
     }
     const hosts = { card: HOST }
-    phase.first = await entry.handle({ run, conversationKey: 'live-dm', message: def.message, hosts, memory })
+    phase.first = await entry.handle({ run, conversationKey: `live-${def.id}`, message: def.message, hosts, memory })
     if (phase.first?.note) phase.firstNote = JSON.parse(phase.first.note).egdesk_browser_task
     if (phase.first?.status === 'paused') phase.paused++
     phase.actsBeforeReply = phase.acts.length
     if (def.reply && phase.first?.status === 'paused' && !record.stopped) {
-      const task = store.paused('live-dm')
+      const task = store.paused(`live-${def.id}`)
       store.noteQuestion(task, questionFrom(phase.firstNote))
       // the person answers in the run: the same run object, the same task
-      phase.second = await entry.handle({ run, conversationKey: 'live-dm', message: def.reply, hosts })
+      phase.second = await entry.handle({ run, conversationKey: `live-${def.id}`, message: def.reply, hosts })
       if (phase.second?.status === 'paused') phase.paused++
     }
     const last = phase.second ?? phase.first
@@ -288,6 +314,7 @@ function expectedAnswers(body) {
     const values = (q.choices ?? []).map(c => c.value)
     if (q.name === 'browser_entry') return pick(q, values[0])
     if (q.name === 'task_resume') return pick(q, 'resume_task')
+    if (q.name === 'ps_sign_in' && /URL: \S+\/login/.test(ev)) return { name: q.name, type: 'predicate', probability: 0.95 } // the sign-in page
     if (/^ps_/.test(q.name)) return { name: q.name, type: 'predicate', probability: 0.02 } // an ordinary page: every page-state predicate no
     if (q.name === 'goal_met') return { name: q.name, type: 'predicate', probability: /다운로드 완료|URL: \S+\/download\//.test(ev) ? 0.95 : 0.02 }
     if (/^same_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: 0.95 }

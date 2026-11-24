@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { ALLON_PLAN_FILE, HARD_LIMITS, LIVE_PAGES, RECORDED_PLAN_FILE, estimateLive, loadLivePlan, runLive, scoreJourney } from './egdesk-browser-live-runner.mjs'
+import { ALLON_PLAN_FILE, HARD_LIMITS, LIVE_PAGES, RECORDED_PLAN_FILE, RENAMED_PLAN_FILE, estimateLive, loadLivePlan, runLive, scoreJourney } from './egdesk-browser-live-runner.mjs'
 
 // L8 c15: the live browser measurement is safe to hand to Main. Nothing here sends: every fetch is a local stand-in.
 const KEY = 'egd-synthetic-not-a-key-0008-long-enough'
@@ -26,6 +26,7 @@ function expected(body) {
     const values = (q.choices ?? []).map(c => c.value)
     if (q.name === 'browser_entry') return pick(q, values[0])
     if (q.name === 'task_resume') return pick(q, 'resume_task')
+    if (q.name === 'ps_sign_in' && /URL: \S+\/login/.test(ev)) return { name: q.name, type: 'predicate', probability: 0.95 } // the sign-in page
     if (/^ps_/.test(q.name)) return { name: q.name, type: 'predicate', probability: 0.02 }
     if (q.name === 'goal_met') return { name: q.name, type: 'predicate', probability: /다운로드 완료|URL: \S+\/download\//.test(ev) ? 0.95 : 0.02 }
     if (/^same_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: 0.95 }
@@ -51,7 +52,7 @@ test('the plan is pre-registered, within the hard limits, and the runner refuses
   const hard = plan.checks.filter(c => c.severity !== 'soft').map(c => c.id)
   for (const id of ['m1-asks-first', 'changed-no-action', 'changed-asks-which', 'never-offered', 'never-acted', 'budget']) assert.ok(hard.includes(id), id)
   const recorded = loadLivePlan(RECORDED_PLAN_FILE).checks.filter(c => c.severity !== 'soft').map(c => c.id)
-  for (const id of ['m2-no-question', 'm2-by-code', 'm2-recorded', 'r-asked-same', 'r-no-question', 'never-offered', 'never-acted', 'budget']) assert.ok(recorded.includes(id), id)
+  for (const id of ['m2-no-question', 'm2-by-code', 'm2-recorded', 'r-by-code', 'r-no-question', 'never-offered', 'never-acted', 'budget']) assert.ok(recorded.includes(id), id)
   assert.equal(plan.passRule.includes('Soft checks are reported and never fail it'), true)
 })
 
@@ -142,22 +143,37 @@ test('c16 v2: changed-asks-which is hard; the changed-page step on /invoices is 
   assert.equal(s.seen.filter(r => !r.body.questions.some(q => q.name === 'next_step') && r.body.questions.some(q => q.name === 'ps_sign_in')).length, 1)
 })
 
-test('c16 recorded plan: seeded by code through the write path; month 2 by code, written again; renamed via one quoted predicate; 8 requests under 12k', async () => {
+test('c17 recorded plan v3: seeded by code; month 2 by code and written again; renamed by the same registration number, no predicate; 8 requests under 12k', async () => {
   const plan = loadLivePlan(RECORDED_PLAN_FILE)
-  assert.deepEqual([plan.set, plan.phases.map(p => p.id)], ['browser-live-recorded-v2', ['month2', 'renamed']])
+  assert.deepEqual([plan.set, plan.phases.map(p => p.id)], ['browser-live-recorded-v3', ['month2', 'renamed']])
+  assert.ok(plan.checks.some(c => c.id === 'r-by-code' && c.severity === 'hard')); assert.ok(!plan.checks.some(c => c.id === 'r-asked-same'))
   const e = await estimateLive({ plan })
   assert.deepEqual([e.requests, e.perPhase, e.scorecard.pass], [8, { month2: 4, renamed: 4 }, true]); assert.ok(e.estInputTokens < 11000, String(e.estInputTokens))
   const s = service()
   const out = await runLive({ key: KEY, send: true, fetchImpl: s.fetchImpl, plan })
   const [m2, rn] = out.phases
   assert.deepEqual([out.sent, out.scorecard.pass, m2.seeded, m2.recorded, m2.acts.map(a => a.path), rn.acts.map(a => a.path)], [8, true, 'stored', true, ['/biz/2', '/download/2.pdf'], ['/biz/2', '/download/2.pdf']])
-  const same = s.seen.flatMap(r => r.body.questions).filter(q => q.name.startsWith('same_'))
-  assert.deepEqual(same.map(q => q.instructions), ['Is this option, "가나상사 (987-65-43210)", the same thing as the recorded choice, "사업자 987-65-43210"?'])
-  // an undecided same-thing answer asks the person: hard failures, the journey fails at the renamed phase
-  const unsure = body => expected(body).map(a => (a.name.startsWith('same_') ? { ...a, probability: 0.5 } : a))
-  const asked = await runLive({ key: KEY, send: true, fetchImpl: service({ answer: unsure }).fetchImpl, plan })
-  assert.equal(asked.scorecard.pass, false); assert.ok(asked.scorecard.hardFailures.includes('r-no-question'))
-  assert.deepEqual([asked.phases[1].firstNote.code, asked.phases[1].acts], ['choice_needed', []])
+  assert.equal(s.seen.flatMap(r => r.body.questions).filter(q => q.name.startsWith('same_')).length, 0, 'an identical registration number is never asked about')
+})
+
+test('c17 renamed plan v3 (the re-measure): 5 requests under 6k; renamed by code within the 2-step cap; the SSO buttons are never offered, the help link is, the page is handed over', async () => {
+  const plan = loadLivePlan(RENAMED_PLAN_FILE)
+  assert.deepEqual([plan.set, plan.maxRequests, plan.tokenCeiling, plan.phases.map(p => [p.id, p.maxSteps])], ['browser-live-renamed-v3', 6, 6000, [['renamed', 2], ['sso', 1]]])
+  const e = await estimateLive({ plan })
+  assert.deepEqual([e.requests, e.perPhase, e.scorecard.pass], [5, { renamed: 3, sso: 2 }, true]); assert.ok(e.estInputTokens < 6000, String(e.estInputTokens))
+  const s = service()
+  const out = await runLive({ key: KEY, send: true, fetchImpl: s.fetchImpl, plan })
+  const [rn, sso] = out.phases
+  assert.deepEqual([out.sent, out.scorecard.pass, rn.acts.map(a => a.path), rn.firstNote.code], [5, true, ['/biz/2', '/download/2.pdf'], 'step_rejected'])
+  assert.deepEqual([sso.firstNote.status, sso.firstNote.code, sso.acts], ['cannot_proceed', 'login_required', []])
+  const ssoStep = s.seen.find(r => r.body.questions.some(q => q.name === 'next_step') && /URL: \S+\/login/.test(r.body.input[1].content))
+  const values = ssoStep.body.questions.find(q => q.name === 'next_step').choices.map(c => c.value)
+  assert.ok(values.includes('[L1] 로그인 도움말')); assert.ok(values.every(v => !/카카오로 로그인|네이버로 로그인/.test(v)))
+  // a sign-in page the predicates do not decide is not a silent stop: the person is asked to look (and the hard handoff check fails)
+  const unsure = body => expected(body).map(a => (a.name === 'ps_sign_in' && /URL: \S+\/login/.test(body.input[1].content) ? { ...a, probability: 0.5 } : a))
+  const flat = await runLive({ key: KEY, send: true, fetchImpl: service({ answer: unsure }).fetchImpl, plan })
+  assert.deepEqual([flat.phases[1].firstNote.status, flat.phases[1].firstNote.code, flat.phases[1].acts], ['need_context', 'page_unclear', []])
+  assert.ok(flat.scorecard.hardFailures.includes('sso-handoff'))
 })
 
 // Main's all-on journey, 2026-11-25 (evidence/main-real/c16-all-on-journey.json): the real next_step answers, replayed as they came.

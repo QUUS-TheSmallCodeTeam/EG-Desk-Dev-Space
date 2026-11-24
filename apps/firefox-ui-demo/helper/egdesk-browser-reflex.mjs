@@ -581,7 +581,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       case 'user_context': {
         // The fixed "need more context from the user" option: the candidates are the listed elements that were most likely.
         const listed = new Set(options.map(option => option.value))
-        if (decision.candidates) return finish('needs_user_context', { candidates: decision.candidates.filter(value => listed.has(value)), recorded: entry.rule })
+        if (decision.candidates) return finish('needs_user_context', { candidates: decision.candidates.filter(value => listed.has(value)), recorded: entry.rule, ...(recorded ? { recordedLabel: compactText(recorded.item.chose, 60) } : {}) })
         return finish('needs_user_context', { candidates: decision.ranked.map(row => row.value).filter(value => listed.has(value)) })
       }
       case 'wait': {

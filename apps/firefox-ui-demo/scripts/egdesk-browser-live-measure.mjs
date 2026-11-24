@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import { writeFileSync } from 'node:fs'
-import { ALLON_PLAN_FILE, HARD_LIMITS, RECORDED_PLAN_FILE, estimateLive, loadLivePlan, runLive } from '../helper/egdesk-browser-live-runner.mjs'
+import { ALLON_PLAN_FILE, HARD_LIMITS, RECORDED_PLAN_FILE, RENAMED_PLAN_FILE, estimateLive, loadLivePlan, runLive } from '../helper/egdesk-browser-live-runner.mjs'
 
 // LIVE browser-task measurement: the product's objective browser loop over synthetic pages, the monthly tax-invoice journey
 // pre-registered in scripts/egdesk-browser-live-plan.json. Dry run by default.
-//   node scripts/egdesk-browser-live-measure.mjs [--plan recorded|allon]                          # dry run: prints the plan and its size, sends nothing
-//   plans: default browser-live-v2 (month 1 + changed page), recorded = browser-live-recorded-v2 (month 2 + renamed business),
+//   node scripts/egdesk-browser-live-measure.mjs [--plan recorded|allon|renamed]                          # dry run: prints the plan and its size, sends nothing
+//   plans: default browser-live-v2 (month 1 + changed page), recorded = browser-live-recorded-v3 (month 2 + renamed business), renamed = browser-live-renamed-v3 (c17 re-measure: renamed + SSO page),
 //   allon = browser-live-allon-v1 (Main's all-on s10/s11 pages)
 //   OPENAI_API_KEY=... node scripts/egdesk-browser-live-measure.mjs --send [--out results.json]    # real, after approval
 // The key is read from OPENAI_API_KEY only and is never printed or written. No retries; the first failed request, the request limit
@@ -13,8 +13,8 @@ import { ALLON_PLAN_FILE, HARD_LIMITS, RECORDED_PLAN_FILE, estimateLive, loadLiv
 const args = process.argv.slice(2)
 const flag = name => args.includes(name), value = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null }
 const planName = value('--plan')
-const PLAN_FILES = { recorded: RECORDED_PLAN_FILE, allon: ALLON_PLAN_FILE }
-if (planName !== null && !PLAN_FILES[planName]) { console.error('unknown --plan (recorded | allon)'); process.exit(2) }
+const PLAN_FILES = { recorded: RECORDED_PLAN_FILE, allon: ALLON_PLAN_FILE, renamed: RENAMED_PLAN_FILE }
+if (planName !== null && !PLAN_FILES[planName]) { console.error('unknown --plan (recorded | allon | renamed)'); process.exit(2) }
 const plan = planName ? loadLivePlan(PLAN_FILES[planName]) : loadLivePlan()
 console.table(plan.checks.map(c => ({ check: c.id, phase: c.phase, severity: c.severity })))
 const estimate = await estimateLive({ plan })

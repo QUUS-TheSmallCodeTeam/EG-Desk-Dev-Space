@@ -142,24 +142,50 @@ export function createOutcomeToOntology({ wiki, client, writer, scope = null, en
 // ---- the recorded choice, compared by code (R3) ----
 // Real measurement (2026-11-25, plan browser-live-v1): with the record in the evidence the model picked the recorded business at only 0.76
 // (one hundredth above the bar), and on a page where it was gone it answered flat (0.21 / 0.22) without naming the candidates. Whether the
-// recorded label is among the offered labels is a string comparison, so code makes it; the model is asked only whether two labels that
-// differ in form but carry the same identifier (a renamed business with the same number) are the same thing, one candidate per predicate.
+// recorded label is among the offered labels is a string comparison, so code makes it.
+// c17 (real, plan browser-live-recorded-v2, 2026-11-25): asked whether "가나상사 (987-65-43210)" is the same thing as "사업자 987-65-43210",
+// the model answered 0.75, undecided, and the task paused. An identical long identifier in both labels is a fact code can compare: it is a
+// code match. The same-thing predicate stays only for label pairs without identifiers on both sides (one candidate per predicate, R4).
 export const MAX_SAME_THING = 3
+export const MIN_IDENTIFIER_DIGITS = 8
 const normLabel = text => String(text ?? '').normalize('NFKC').toLowerCase().replace(/^\[[a-z]\d+\]\s*/, '').replace(/\s+/g, ' ').trim()
-/** Identifier-like digit runs of at least 6 digits (registration, account or order numbers), separators removed. */
-export const identifiersOf = text => [...new Set((normLabel(text).match(/\d[\d .-]{4,}\d/g) || []).map(run => run.replace(/\D/g, '')).filter(digits => digits.length >= 6))]
-const wordsOf = text => normLabel(text).replace(/\d[\d .-]{4,}\d/g, ' ').split(/[^\p{L}\p{N}]+/u).filter(word => word.length >= 2)
+// A digit run joined only by "-" or "." (never by spaces, so two numbers side by side never merge into one).
+const DIGIT_RUN = /\d+(?:[-.]\d+)*/g
+// A calendar date is not an identifier: 2026-11-19, 2026.11.19, 20261119 (year 1900-2099, a real month and day).
+const isDate = run => {
+  const parts = run.split(/[-.]/)
+  const [y, m, d] = parts.length === 3 ? parts : /^\d{8}$/.test(run) ? [run.slice(0, 4), run.slice(4, 6), run.slice(6)] : []
+  return y !== undefined && /^(?:19|20)\d\d$/.test(y) && +m >= 1 && +m <= 12 && +d >= 1 && +d <= 31
+}
+/**
+ * identifiersOf(text) -> the long identifiers in a label: digit runs of at least MIN_IDENTIFIER_DIGITS digits once the separators are
+ * removed (a registration, account or order number), never a date. Compared whole: a prefix, a suffix or a part is a different number.
+ */
+export const identifiersOf = text => [...new Set((normLabel(text).match(DIGIT_RUN) || []).filter(run => !isDate(run)).map(run => run.replace(/\D/g, '')).filter(digits => digits.length >= MIN_IDENTIFIER_DIGITS))]
+const wordsOf = text => normLabel(text).replace(DIGIT_RUN, ' ').split(/[^\p{L}\p{N}]+/u).filter(word => word.length >= 2)
 const names = (text, option) => {
   const hay = normLabel(text), label = normLabel(labelKey(option.value)), ids = identifiersOf(text)
   return (label.length >= 4 && hay.includes(label)) || identifiersOf(option.value).some(id => ids.includes(id))
 }
+/**
+ * sameByCode(recorded, label) -> 'same' | 'different' | 'unknown' (code facts only):
+ *  'same'      the labels are equal once normalised, or both carry long identifiers and share one;
+ *  'different' both carry long identifiers and share none (two registration numbers that differ are two businesses);
+ *  'unknown'   at least one side has no long identifier; whether they are the same thing is a judgment, asked only when they share a word.
+ */
+export function sameByCode(recorded, label) {
+  if (normLabel(recorded) === normLabel(labelKey(label))) return 'same'
+  const a = identifiersOf(recorded), b = identifiersOf(label)
+  if (a.length && b.length) return a.some(id => b.includes(id)) ? 'same' : 'different'
+  return 'unknown'
+}
 
 /**
- * recordedChoice(prior, snapshot, options, { goal, userContext }) -> null | { kind, item, option?, matches?, maybe?, candidates? }
- * For the newest "which one?" the earlier run settled on THIS path, compared with the labels offered now:
- *  - 'one'      exactly one offered label is the recorded label (normalised: NFKC, case, spacing, the [L1] prefix): code takes it.
- *  - 'several'  more than one offered label is the recorded label: the person decides among them.
- *  - 'maybe'    no equal label, but 1..MAX_SAME_THING labels carry an identifier of the recorded one: one predicate each.
+ * recordedChoice(prior, snapshot, options, { goal, userContext }) -> null | { kind, item, option?, by?, maybe?, candidates? }
+ * For the newest "which one?" the earlier run settled on THIS path, compared with the labels offered now (sameByCode):
+ *  - 'one'      exactly one offered label is the same by code (equal label, or the same long identifier): code takes it (by: label|identifier).
+ *  - 'several'  more than one is the same by code: the person decides among them.
+ *  - 'maybe'    none is the same by code, and 1..MAX_SAME_THING labels without an identifier on both sides share a word with it: one predicate each.
  *  - 'none'     nothing offered is, or may be, the recorded choice: the person decides among the page's candidates.
  * null when nothing was settled on this path, or when the person's words in this task (a reply), or a current request that differs from
  * the recorded one and does not name the recorded choice, or a request naming another offered element, should be judged instead: then
@@ -173,22 +199,27 @@ export function recordedChoice(prior, snapshot, options, { goal = '', userContex
   if ((Array.isArray(userContext) ? userContext : []).some(line => typeof line === 'string' && line.trim())) return null
   const offered = (options || []).filter(option => option.item?.kind !== 'fill')
   const key = normLabel(item.chose)
-  const matches = offered.filter(option => normLabel(labelKey(option.value)) === key)
-  const ids = identifiersOf(item.chose)
-  const maybe = matches.length ? [] : offered.filter(option => identifiersOf(option.value).some(id => ids.includes(id)))
+  const verdict = new Map(offered.map(option => [option, sameByCode(item.chose, option.value)]))
+  const matches = offered.filter(option => verdict.get(option) === 'same')
+  const recordedWords = new Set(wordsOf(item.chose))
+  const sharesWord = option => wordsOf(labelKey(option.value)).some(word => recordedWords.has(word))
+  const maybe = matches.length ? [] : offered.filter(option => verdict.get(option) === 'unknown' && sharesWord(option))
   const others = offered.filter(option => !matches.includes(option) && !maybe.includes(option))
   if (others.some(option => names(goal, option))) return null
+  const ids = identifiersOf(item.chose)
   const sameRequest = normLabel(compactText(goal, 120).replace(/[\r\n]/g, ' ')) === normLabel(prior.goal)
   const namesRecorded = normLabel(goal).includes(key) || identifiersOf(goal).some(id => ids.includes(id))
-  if (matches.length === 1) return sameRequest || namesRecorded ? { kind: 'one', item, option: matches[0] } : null
+  if (matches.length === 1) {
+    const by = normLabel(labelKey(matches[0].value)) === key ? 'label' : 'identifier'
+    return sameRequest || namesRecorded ? { kind: 'one', item, option: matches[0], by } : null
+  }
   if (matches.length > 1) return { kind: 'several', item, candidates: matches.map(option => option.value) }
   if (maybe.length) {
     if (maybe.length > MAX_SAME_THING) return { kind: 'several', item, candidates: maybe.map(option => option.value) }
     return sameRequest || namesRecorded ? { kind: 'maybe', item, maybe } : null
   }
   if (offered.some(option => names(goal, option))) return null
-  const recordedWords = new Set(wordsOf(item.chose))
-  const alike = offered.filter(option => wordsOf(labelKey(option.value)).some(word => recordedWords.has(word)))
+  const alike = offered.filter(sharesWord)
   return { kind: 'none', item, candidates: (alike.length ? alike : offered).map(option => option.value) }
 }
 

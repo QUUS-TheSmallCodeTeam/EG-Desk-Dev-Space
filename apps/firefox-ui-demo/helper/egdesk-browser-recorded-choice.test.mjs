@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { runBrowserReflex, buildReflexCandidates } from './egdesk-browser-reflex.mjs'
-import { identifiersOf, recordedChoice } from './egdesk-browser-task-memory.mjs'
+import { MIN_IDENTIFIER_DIGITS, identifiersOf, recordedChoice, sameByCode } from './egdesk-browser-task-memory.mjs'
 
 // L8 c16: the recorded choice is compared by code (R3). Real measurement 2026-11-25 (browser-live-v1): with the record as evidence the
 // model picked the recorded business at 0.76 (top .79 / .05), one hundredth above the bar; on a page where it was gone it answered flat
@@ -74,27 +74,71 @@ test('several matches: the person decides among them; nothing is taken', async (
   assert.deepEqual([s.result.outcome, s.result.candidates, s.acts.length], ['needs_user_context', ['[L1] 사업자 987-65-43210', '[L2] 사업자 987-65-43210'], 0])
 })
 
-test('renamed with the same number: one predicate per candidate, quoting only that option and the recorded choice; exactly one decided yes is taken', async () => {
+test('c17 renamed with the same registration number: a code match, no question (real c16: the same-thing predicate answered 0.75, undecided)', async () => {
   const renamed = page([biz('b1', '다라무역 (123-45-67890)', 1), biz('b2', '가나상사 (987-65-43210)', 2)])
-  const yes = await step(renamed, { answers: () => ans('content', 0.02, [0.95]) })
-  assert.deepEqual(yes.sent.map(r => r.names), [[...PS_NAMES, 'goal_met', 'same_0']], 'only the candidate carrying the recorded number is asked about')
-  const q = yes.sent[0].questions.find(x => x.name === 'same_0')
-  assert.equal(q.type, 'predicate')
-  assert.match(q.instructions, /^Is this option, "가나상사 \(987-65-43210\)", the same thing as the recorded choice, "사업자 987-65-43210"\?$/)
-  assert.doesNotMatch(q.instructions, /다라무역/, 'one option per predicate')
-  assert.deepEqual(yes.navigated, ['/biz/2'])
-  for (const p of [0.6, 0.2, 0.05]) {
-    const no = await step(renamed, { answers: () => ans('content', 0.02, [p]) })
-    assert.deepEqual([no.result.outcome, no.result.candidates, no.acts.length], ['needs_user_context', ['[L2] 가나상사 (987-65-43210)'], 0], String(p))
-  }
-  // two candidates carry the number: both asked; one yes and one decided no -> taken; two yes or one undecided -> ask
+  const s = await step(renamed)
+  assert.deepEqual(s.sent.map(r => r.names), [[...PS_NAMES, 'goal_met']], 'no which-question and no same-thing predicate')
+  assert.deepEqual(s.navigated, ['/biz/2'])
+  const verdict = recordedChoice(prior(), renamed, buildReflexCandidates(renamed).options, { goal: GOAL })
+  assert.deepEqual([verdict.kind, verdict.by, verdict.option.value], ['one', 'identifier', '[L2] 가나상사 (987-65-43210)'])
+  // two candidates carrying the recorded number: the person decides which (never a code pick)
   const two = page([biz('b1', '가나상사 본점 987-65-43210', 1), biz('b2', '가나상사 지점 987-65-43210', 2)])
-  assert.deepEqual((await step(two, { answers: () => ans('content', 0.02, [0.1, 0.93]) })).navigated, ['/biz/2'])
-  assert.equal((await step(two, { answers: () => ans('content', 0.02, [0.9, 0.93]) })).acts.length, 0)
-  assert.equal((await step(two, { answers: () => ans('content', 0.02, [0.5, 0.93]) })).acts.length, 0)
-  assert.deepEqual(identifiersOf('사업자 987-65-43210'), ['9876543210']); assert.deepEqual(identifiersOf('2026년 11월'), [])
+  const both = await step(two)
+  assert.deepEqual([both.result.outcome, both.result.candidates, both.acts.length], ['needs_user_context', ['[L1] 가나상사 본점 987-65-43210', '[L2] 가나상사 지점 987-65-43210'], 0])
 })
 
+test('the same-thing predicate stays only for label pairs without identifiers on both sides: one predicate per candidate, quoted; exactly one decided yes is taken', async () => {
+  // the recorded label carries no number; the page shows the business under a longer name
+  const named = page([biz('b1', '다라무역 주식회사', 1), biz('b2', '가나상사 주식회사', 2)])
+  const rec = prior('가나상사')
+  const yes = await step(named, { priorRun: rec, answers: () => ans('content', 0.02, [0.95]) })
+  assert.deepEqual(yes.sent.map(r => r.names), [[...PS_NAMES, 'goal_met', 'same_0']], 'only the candidate sharing a word is asked about')
+  const q = yes.sent[0].questions.find(x => x.name === 'same_0')
+  assert.match(q.instructions, /^Is this option, "가나상사 주식회사", the same thing as the recorded choice, "가나상사"\?$/)
+  assert.deepEqual(yes.navigated, ['/biz/2'])
+  for (const p of [0.75, 0.6, 0.2]) {
+    const no = await step(named, { priorRun: rec, answers: () => ans('content', 0.02, [p]) })
+    assert.deepEqual([no.result.outcome, no.result.candidates, no.acts.length], ['needs_user_context', ['[L2] 가나상사 주식회사'], 0], String(p))
+  }
+  // a masked number is not an identifier: the pair is asked, never matched by code
+  const masked = page([biz('b1', '사업자 ***-**-43210', 1), biz('b2', '사업자 ***-**-67890', 2)])
+  const m = await step(masked, { answers: () => ans('content', 0.02, [0.5, 0.5]) })
+  assert.deepEqual([m.sent[0].names.filter(n => n.startsWith('same_')).length, m.acts.length], [2, 0])
+})
+
+// Over-matching, table form: [recorded, offered label, sameByCode]
+const IDENTIFIER_TABLE = [
+  ['사업자 987-65-43210', '가나상사 (987-65-43210)', 'same'],            // the real c16 case: renamed, same number
+  ['사업자 987-65-43210', '가나상사 9876543210', 'same'],                // separators removed
+  ['사업자 987-65-43210', '가나상사 987.65.43210', 'same'],
+  ['사업자 987-65-43210', '사업자 987-65-43211', 'different'],          // shares a prefix, differs in the last digit
+  ['사업자 987-65-43210', '사업자 987-65-4321', 'different'],           // a prefix of it (9 digits)
+  ['사업자 987-65-43210', '사업자 1-987-65-43210', 'different'],         // contains it: compared whole, never as a part
+  ['사업자 987-65-43210', '고객센터 010-9876-5432', 'different'],        // a phone number vs a registration number
+  ['사업자 987-65-43210', '고객센터 1588-1234', 'different'],
+  ['고객센터 1588-1234', '상담 1588-1234', 'same'],                      // the same phone number is the same thing
+  ['사업자 987-65-43210', '사업자 ***-**-43210', 'unknown'],             // partial (masked) digits are not an identifier
+  ['사업자 987-65-43210', '가나상사', 'unknown'],                        // one side has no number
+  ['사업자 987 65 43210', '가나상사 (987-65-43210)', 'unknown'],         // spaces are not joints: 987 / 65 / 43210 is no identifier
+  ['주문 1234567', '주문 1234567 (재발행)', 'unknown'],                   // 7 digits: below the identifier length
+  ['청구서 2026-11-19', '청구서 2026-11-19 (재발행)', 'unknown'],         // a date is not an identifier
+  ['청구서 20261119', '견적서 20261119', 'unknown'],
+  ['계약 2026-1119-0042', '계약 2026-1119-0042 (변경)', 'same'],          // 12 digits shaped like no date: an identifier
+  ['사업자 987-65-43210', '[L2] 사업자  987-65-43210', 'same'],          // the label itself, prefix and spacing aside
+]
+test('identifier table: sameByCode never over-matches (prefixes, parts, phone vs registration, masked digits, dates, spaces)', () => {
+  for (const [recorded, label, want] of IDENTIFIER_TABLE) assert.equal(sameByCode(recorded, label), want, `${recorded} | ${label}`)
+  assert.equal(MIN_IDENTIFIER_DIGITS, 8)
+  assert.deepEqual(identifiersOf('2026-11-19 사업자 987-65-43210'), ['9876543210'], 'a date next to a number stays out')
+})
+
+test('exactly one candidate sharing the identifier, among others with different numbers and none: code takes it; a shared identifier on two: the person decides', () => {
+  const opts = labels => buildReflexCandidates(page(labels.map((l, i) => biz(`b${i}`, l, i + 1)))).options
+  const pick = labels => { const v = recordedChoice(prior(), page([]), opts(labels), { goal: GOAL }); return v && [v.kind, v.option?.value ?? v.candidates] }
+  assert.deepEqual(pick(['다라무역 (123-45-67890)', '가나상사 (987-65-43210)', '도움말']), ['one', '[L2] 가나상사 (987-65-43210)'])
+  assert.deepEqual(pick(['가나상사 (987-65-43210)', '가나상사 지점 (987-65-43210)']), ['several', ['[L1] 가나상사 (987-65-43210)', '[L2] 가나상사 지점 (987-65-43210)']])
+  assert.deepEqual(pick(['사업자 987-65-43211', '사업자 123-45-67890']), ['none', ['[L1] 사업자 987-65-43211', '[L2] 사업자 123-45-67890']], 'near misses are different businesses: the person is asked which')
+})
 test('the current request overrides the record: a reply in this task, a request naming another element, or a different request that does not name the recorded one -> the step is asked as before', async () => {
   const ctx = await step(page(BASE), { userContext: ['첫 번째 사업자로'], answers: modelPick('[L1] 사업자 123-45-67890') })
   assert.deepEqual([ctx.sent[0].names[0], ctx.navigated], ['next_step', ['/biz/1']])
@@ -130,11 +174,11 @@ import { decideRecordedStep } from './egdesk-browser-reflex.mjs'
 import { decisionThresholds } from './egdesk-decision-questions.mjs'
 import { estimateTokens } from './egdesk-memory-real-plan.mjs'
 import { PS_NAMES, pageStateAnswers, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
-test('census (b): of 12 page shapes 8 stop by the rule; 3 of them (push 2FA x2, a check-box captcha) would have carried a person-state label; one page-state request (six predicates and the goal) costs ~1.2k tokens', async () => {
+test('census (b): of 12 page shapes 9 stop by the rule (c17: the SSO-only sign-in page too); 4 of them (push 2FA x2, a check-box captcha, SSO-only sign-in) would have carried a person-state label; one page-state request (six predicates and the goal) costs ~1.2k tokens', async () => {
   const rows = census()
   assert.equal(rows.length, 12)
-  assert.deepEqual(rows.filter(r => r.stops !== 'asked').map(r => r.id), ['2fa-push', '2fa-push-resend', 'captcha', 'checkout-pay', 'subscription-cancel', 'permission-grant', 'form-submit-only', 'logout-only'])
-  assert.deepEqual(rows.filter(r => r.labelLost).map(r => [r.id, r.labelLost]), [['2fa-push', 'two_factor_required'], ['2fa-push-resend', 'two_factor_required'], ['captcha', 'bot_check']])
+  assert.deepEqual(rows.filter(r => r.stops !== 'asked').map(r => r.id), ['2fa-push', '2fa-push-resend', 'login-sso-only', 'captcha', 'checkout-pay', 'subscription-cancel', 'permission-grant', 'form-submit-only', 'logout-only'])
+  assert.deepEqual(rows.filter(r => r.labelLost).map(r => [r.id, r.labelLost]), [['2fa-push', 'two_factor_required'], ['2fa-push-resend', 'two_factor_required'], ['login-sso-only', 'login_required'], ['captcha', 'bot_check']])
   // the price of keeping the label: one page-state request on such a page (sized with the page-state + goal request of this module)
   let bytes = 0, questions = []
   const client = createDecisionClient({ getApiKey: async () => 'egd-synthetic-not-a-key-0008', fetchImpl: async (_u, init) => { bytes = Buffer.byteLength(init.body); questions = JSON.parse(init.body).questions; return { ok: true, text: async () => JSON.stringify({ answers: [] }) } } })

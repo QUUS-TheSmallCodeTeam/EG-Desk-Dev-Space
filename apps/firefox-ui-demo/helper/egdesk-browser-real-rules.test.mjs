@@ -201,3 +201,18 @@ test('loading is read from the snapshot by code: a wait, no request', async () =
   const result = await runBrowserReflex({ cardId: 'card', goal: 'x', callTool, client, maxSteps: 1 })
   assert.deepEqual([asked, tools, result.outcome], [0, ['egdesk_browser_observe', 'egdesk_browser_wait'], 'max_steps'])
 })
+
+// ---- c17: sign-in and SSO controls are the person's (the c16 census found "카카오로 로그인" offered on an SSO-only page) ----
+test('SSO page: the sign-in buttons are withheld, the help link about signing in is offered; an SSO-only page stops as human_step with no request', async () => {
+  const SSO = page('/login', ['로그인', '거래처 포털을 이용하려면 로그인하세요.'], [el('k1', 'button', '카카오로 로그인'), el('n1', 'button', '네이버로 로그인'),
+    el('g1', 'link', 'Google로 로그인', { href: 'https://accounts.example.test/o/oauth2/auth?client_id=x' }), el('h1', 'link', '로그인 도움말', { href: `${O}/help/faq/12` })])
+  const { options, excluded } = buildReflexCandidates(SSO)
+  // the Google link is withheld as a sign-in action by its label before its (off-site) address is looked at
+  assert.deepEqual([options.map(o => o.value), excluded.gated, excluded.offSite], [['[L1] 로그인 도움말'], 3, 0])
+  const only = await step(page('/login', ['로그인'], [el('k1', 'button', '카카오로 로그인')]), () => { throw new Error('must not be asked') })
+  assert.deepEqual([only.result.outcome, only.result.reason, only.sent.length, only.actions], ['escalated', 'human_step', 0, []])
+  // a sign-in link on the same site is withheld by its label and by its address
+  const sameSite = buildReflexCandidates(page('/home', ['포털'], [el('l1', 'link', '로그인', { href: `${O}/members/login` }), el('l2', 'link', '공지사항', { href: `${O}/notice` }),
+    el('l3', 'link', '자세히 보기', { href: `${O}/auth/signin?next=/invoices` })]))
+  assert.deepEqual([sameSite.options.map(o => o.value), sameSite.excluded.gated], [['[L1] 공지사항'], 2])
+})
