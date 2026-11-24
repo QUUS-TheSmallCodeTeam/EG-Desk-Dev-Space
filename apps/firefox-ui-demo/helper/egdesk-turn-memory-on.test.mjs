@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
 import { chmod, mkdtemp, readFile, stat } from 'node:fs/promises'
-import { CodexChatRuntime, TURN_MEMORY_CAPS, TURN_MEMORY_KEY, compactionSignal } from './codex-chat-runtime.mjs'
+import { CodexChatRuntime, RECORDING_KEY, TURN_MEMORY_CAPS, TURN_MEMORY_KEY, compactionSignal } from './codex-chat-runtime.mjs'
 import { DECISION_CONTEXT_KEY } from './egdesk-context-setup.mjs'
 import { BODY_ELSEWHERE, SAME_SOURCE } from './egdesk-wiki-reconstruction.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
@@ -79,9 +79,12 @@ test('first turn, on: the reconstructed packet rides in the turn input under one
   assert.match(packet, /\[page id=db\/pg-plan time=planned [^\]]*status-recorded=plan/); assert.ok(packet.includes(body('db/pg-plan')))
   assert.ok(!packet.includes('원가는 단가의 71%'), 'a page outside this DM never reaches the answering model')
   assert.deepEqual(x.starts[0].additionalContext[TURN_MEMORY_KEY].kind, 'application')
-  const without = structuredClone(x.starts[0]); delete without.additionalContext[TURN_MEMORY_KEY]
+  // the report may be recorded after the answer, so the recording rule rides beside the packet under its own key (L7 c18)
+  const { RECORDING_RULE } = await import('./egdesk-turn-memory.mjs')
+  assert.deepEqual(x.starts[0].additionalContext[RECORDING_KEY], { kind: 'application', value: RECORDING_RULE })
+  const without = structuredClone(x.starts[0]); delete without.additionalContext[TURN_MEMORY_KEY]; delete without.additionalContext[RECORDING_KEY]
   if (!Object.keys(without.additionalContext).length) delete without.additionalContext
-  assert.equal(normalize(JSON.stringify(without)), normalize(JSON.stringify(off.starts[0])), 'the one key is the only difference from a bridge without the feature')
+  assert.equal(normalize(JSON.stringify(without)), normalize(JSON.stringify(off.starts[0])), 'the memory key and the recording rule are the only difference from a bridge without the feature')
   assert.ok(x.timeline.indexOf('decide:fetch') < x.timeline.indexOf('turn/start'), 'the loop ran before the turn started')
   const [entry] = x.memoryEntries()
   assert.deepEqual([entry.mode, entry.position, entry.attached, entry.memory], ['on', 'first', true, 'ran'])
@@ -525,21 +528,32 @@ test('s9: a decided status change is kept as a pending reading although the sent
 })
 
 // ---- truthfulness: the answer is told that recording is not its to do; the draft check gets the actual record state ----
-test('the recording rule rides where a record may follow (first turn with its packet; a mid turn decided worth recording), and nowhere else', async () => {
+test('the recording rule rides on every turn where the write judgment can still run, under its own key; never where it cannot', async () => {
   const { RECORDING_RULE } = await import('./egdesk-turn-memory.mjs')
+  const rule = (x, i) => x.starts[i].additionalContext?.[RECORDING_KEY]?.value ?? null
   const x = await rig()
-  await x.send(PLAN_Q, 'r1'); await x.done(1)                       // first turn, packet attached (its recording triage still runs)
-  await x.send(DONE, 'r2'); await x.done(2)                         // mid: worth recording (the s9 shape: the plan is held, nothing new)
-  await x.send('그럼 헬스체크는 뭐부터 보면 돼?', 'r3'); await x.done(3) // mid: a question, not worth recording
-  const values = [0, 1, 2].map(i => x.starts[i].additionalContext?.[TURN_MEMORY_KEY]?.value ?? '')
-  assert.deepEqual(values.map(v => v.includes(RECORDING_RULE)), [true, true, false])
-  assert.ok(values[0].indexOf(RECORDING_RULE) > values[0].indexOf('[page id='), 'after the pages')
+  await x.send(PLAN_Q, 'r1'); await x.done(1)                       // first turn, a question: its triage already said "not worth recording"
+  await x.send(DONE, 'r2'); await x.done(2)                         // mid: worth recording (the s9 shape)
+  await x.send('그럼 헬스체크는 뭐부터 보면 돼?', 'r3'); await x.done(3) // mid: a question
+  assert.deepEqual([0, 1, 2].map(i => rule(x, i)), [null, RECORDING_RULE, null])
+  assert.ok([0, 1, 2].every(i => !(x.starts[i].additionalContext?.[TURN_MEMORY_KEY]?.value ?? '').includes('[recording]')), 'not mixed into the memory packet')
   assert.match(RECORDING_RULE, /Do not say that you have recorded, saved or noted anything, or that you will/)
   x.store.close()
+  // a first turn that states a new fact with no page to attach: the rule rides alone
+  const fresh = await rig({ wiki: buildWiki(SYNTHETIC_PAGES.filter(p => p.id.startsWith('misc/'))) })
+  await fresh.send('거래처 D사가 어제 단가를 올렸다고 들었어.', 'r1'); await fresh.done(1)
+  assert.deepEqual([fresh.packet(0), rule(fresh, 0)], [null, RECORDING_RULE])
+  fresh.store.close()
+  // a first turn whose recording triage has not answered when the turn starts: a judgment may still follow, so the rule rides
+  const gate = deferred(), judge = mockJudge()
+  const slow = await rig({ client: { async decide(req) { if (req.questions.some(q => q.name === 'tn_record')) await gate.promise; return judge.decide(req) } } })
+  await slow.send(PLAN_Q, 'r1')
+  assert.equal(rule(slow, 0), RECORDING_RULE)
+  gate.resolve(); await slow.done(1); slow.store.close()
   // no write path: nothing can be recorded, so nothing is said about it
   const y = await rig({ tm: { ontologyWrite: false } })
-  await y.send(PLAN_Q, 'r1'); await y.done(1)
-  assert.ok(!(y.packet(0) ?? '').includes('[recording]'))
+  await y.send(DONE, 'r1'); await y.done(1)
+  assert.equal(rule(y, 0), null)
   y.store.close()
 })
 

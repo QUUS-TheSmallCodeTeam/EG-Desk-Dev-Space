@@ -59,6 +59,8 @@ const DRAFT_HOLD_LIMIT = 256 * 1024
 // The cap is authoritative and is decided by the clock: a result counts only if it existed before the cap on that clock, however late the
 // code that looks at it happens to run. A timer only wakes the wait up (it can fire early or late). turnMemory.clock injects the clock.
 export const TURN_MEMORY_KEY = 'egdesk_turn_memory'
+// The recording rule for the answering model (RECORDING_RULE): its own key, because it is not memory content and rides also on turns with none.
+export const RECORDING_KEY = 'egdesk_recording'
 export const TURN_MEMORY_CAPS = Object.freeze({ firstMs: 4000, midMs: 2500 })
 // How the app-server says a thread's context was compacted: a `contextCompaction` item (item/started, item/completed), and on older builds the
 // deprecated `thread/compacted` notification. Either one means the answering model may no longer hold what was delivered to it.
@@ -2676,15 +2678,17 @@ export class CodexChatRuntime {
       // What was noted in this session and is not confirmed (flag turnMemory.confirmInConversation, default off): a few lines for the
       // answering model to state, after the pages. null without the flag, so nothing below changes then.
       // The confirmation note (flag confirmInConversation) and the recording rule (when a record may follow this turn) ride after the pages.
-      const confirmNote = memoryReady ? this.turnMemoryNoteFor(memoryTurn, additionalContext) : null, recordRule = memoryReady ? this.turnMemoryRuleFor(memoryTurn, memoryPacket !== null) : null
-      const memoryNote = [confirmNote, recordRule].filter(Boolean).join('\n\n') || null
+      const confirmNote = memoryReady ? this.turnMemoryNoteFor(memoryTurn, additionalContext) : null
+      const recordRule = memoryReady && !(additionalContext && Object.hasOwn(additionalContext, RECORDING_KEY)) ? this.turnMemoryRuleFor(memoryTurn) : null
+      const memoryNote = confirmNote
       const withNote = value => (memoryNote ? [value, memoryNote].filter(Boolean).join('\n\n') : value)
       // With one packet and no pages to add, a note alone also goes under the selection's key (never a second key for it).
       const noteOnly = !memoryPacket && memoryNote ? this.onePacketSelection(decision, additionalContext) : null
       const memoryContext = onePacket ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: withNote(onePacket.value) } }
         : noteOnly !== null ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: withNote(noteOnly) } }
         : memoryPacket || memoryNote ? { [TURN_MEMORY_KEY]: { kind: 'application', value: withNote(memoryPacket) } } : null
-      const turnAdditionalContext = browserTaskContext || memoryContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}) } : additionalContext
+      const recordingContext = recordRule ? { [RECORDING_KEY]: { kind: 'application', value: recordRule } } : null
+      const turnAdditionalContext = browserTaskContext || memoryContext || recordingContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}), ...(recordingContext || {}) } : additionalContext
       await this.readGateHookReply(cid, body.message)
       turnStartAttempted = context.turnStartAttempted = true
       const result = await engine.startTurn({
@@ -6055,6 +6059,8 @@ export class CodexChatRuntime {
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
       deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock, previous: turn.previous,
       ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about' })
+    // The first turn's recording triage answers on its own time; once it has, the rule knows whether a write judgment can still follow.
+    if (result.triageLater) void result.triageLater.then(late => { turn.lateTriage = late ?? { record: { state: 'unknown' } } }, () => { turn.lateTriage = { record: { state: 'unknown' } } })
     if (this.turnMemoryConfirmOn()) this.prepareTurnMemoryNote(turn, { wiki, scope, threadKey })
     Object.assign(turn, { wiki, baseScope, scope, result, readyMs: clock.now() - t0 })
   }
@@ -6211,15 +6217,18 @@ export class CodexChatRuntime {
     } catch { return null }
   }
 
-  // The recording rule for this turn, or null: a write judgment may follow it (the write path is configured) and either it is a first turn
-  // whose packet is attached (its recording triage still runs) or the mid-session triage decided the message is worth recording. Nothing
-  // rides on a turn whose memory was refused, cut or switched off: then no write judgment can use this turn's pages either.
-  turnMemoryRuleFor(turn, packetAttached = false) {
+  // The recording rule for this turn, or null: on every turn where the write judgment can still run after the answer. The write path is
+  // configured and the turn has its memory result; then
+  //   a first turn: the recording triage runs beside the loop. Unless it has already answered that the message is not worth recording,
+  //     the write judgment may follow (with or without a packet: a first turn that states a new fact has no page to attach).
+  //   a mid-session turn: the triage decided before the answer that the message is worth recording (only then is a judgment prepared).
+  turnMemoryRuleFor(turn) {
     try {
       const tm = this.decisionContext?.turnMemory
       if (!turn?.result || this.turnMemoryMode() !== 'on' || tm?.ontologyWrite !== true || typeof tm.writer !== 'function') return null
-      if (turn.position?.kind === 'first') return packetAttached ? RECORDING_RULE : null
-      return turn.result.triage?.record?.state === 'yes' && turn.result.memory?.status !== 'fallback' ? RECORDING_RULE : null
+      if (typeof turn.result.judgeWrite !== 'function') return null
+      if (turn.position?.kind === 'first') return turn.lateTriage && turn.lateTriage.record?.state !== 'yes' ? null : RECORDING_RULE
+      return turn.result.triage?.record?.state === 'yes' ? RECORDING_RULE : null
     } catch { return null }
   }
 
@@ -6231,7 +6240,7 @@ export class CodexChatRuntime {
       if (!turn?.result || !turn.wiki || this.turnMemoryMode() !== 'on') return []
       const items = memoryEvidence(turn.result, turn.wiki, { scope: turn.scope, attached })
       // Where a record may follow, the record state is evidence too: an answer that says it recorded something can then be checked against it.
-      if (!this.turnMemoryRuleFor(turn, attached)) return items
+      if (!this.turnMemoryRuleFor(turn)) return items
       const noted = (this.turnMemoryNoted.get(threadKey) ?? []).map(entry => { const page = turn.wiki.pages.get(entry.pageId)
         return page && memoryAllowsPage(page, turn.scope) ? { title: page.title, status: entry.status } : null }).filter(Boolean)
       return [...items, recordStateEvidence(noted)]

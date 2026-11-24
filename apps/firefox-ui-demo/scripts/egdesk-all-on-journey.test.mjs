@@ -148,7 +148,8 @@ test('all features on, one session: memory, briefing, a browser task, a long com
   // ---- d1. a status remark: turn memory proposes a status reading and keeps it pending; no page is changed ----
   w.step('d1')
   await say(Q.deployed)
-  assert.deepEqual(Object.keys(lastStart().additionalContext), ['egdesk_context', 'egdesk_decision_context', 'egdesk_channel', 'egdesk_turn_memory'])
+  // L7 c18: the triage decided this remark is worth recording, so the answer is told that recording is not its to do (its own key)
+  assert.deepEqual(Object.keys(lastStart().additionalContext), ['egdesk_context', 'egdesk_decision_context', 'egdesk_channel', 'egdesk_turn_memory', 'egdesk_recording'])
   await w.advance(2000); await w.answer(A.noted); await new Promise(resolve => setTimeout(resolve, 60)); await w.idle(); ui.pump(); close('d1')
   assert.deepEqual(w.byFeature('d1'), { turn_context: 1, memory_triage: 1, memory_fetch: 3, draft_check: 1, memory_write: 1 })
   assert.deepEqual(w.subjectiveTurnsIn('d1'), { main: 1, fork: 0, steer: 0 })
