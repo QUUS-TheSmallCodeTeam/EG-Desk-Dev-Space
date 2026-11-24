@@ -7,7 +7,7 @@ import { main as runnerMain } from './egdesk-decision-real-runner.mjs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CONTROL_EXAMPLES, INTERACTION_TYPES, TYPE_NAMES, areaOf, buildLabelPlan, dedupe, examplesOf, labelRequest, readLabels, scenariosOf, streamTurns, tagsOf } from './egdesk-conversation-examples.mjs'
+import { CONTROL_EXAMPLES, INTERACTION_TYPES, RELABEL_CONTROLS, RELABEL_TYPES, TYPE_NAMES, areaOf, buildLabelPlan, dedupe, examplesOf, labelRequest, readLabels, scenariosOf, streamTurns, tagsOf } from './egdesk-conversation-examples.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 import { DECISION_MODEL } from './egdesk-decision-client.mjs'
 
@@ -137,4 +137,24 @@ test('c23: the referential and re-ask questions are one concrete condition each,
   for (const type of ['referential', 'reask']) assert.ok(!/\band\b.*\band\b.*\bor\b.*\bnot\b/i.test('') && !/ask for it/.test(INTERACTION_TYPES[type].q), 'the cause, never the request, in the re-ask question')
   const body = labelRequest({ id: 'x', prev: { text: '진행할까요?' }, user: { text: '방금 그 내용 정리해줘' } }, DECISION_MODEL, { types: ['referential', 'reask'] })
   assert.deepEqual(body.questions.map(q => q.name), ['conv_referential', 'conv_reask'])
+})
+
+test('c24: a turn that checks an earlier action is its own type (one condition), found by its shape and told from a request to bring something back', () => {
+  assert.equal(INTERACTION_TYPES.check_earlier.q, 'Does the person ask whether something the assistant did or said earlier was done, or is so (a yes/no check of an earlier action or statement)?')
+  assert.ok(TYPE_NAMES.includes('check_earlier'))
+  assert.ok(tagsOf('오전 6시에 작업 중지 예약 걸었지?', '06:00 알림은 그대로 둡니다.').includes('check_earlier'))
+  assert.ok(tagsOf('어제 견적서 v2 보냈지?').includes('check_earlier'))
+  for (const text of ['방금 그 내용 정리해줘', '아까전 시나리오 다시 흐름을 설명해봐', '무슨 말인지 모르겠어']) assert.ok(!tagsOf(text, '진행했습니다.').includes('check_earlier'), text)
+})
+
+test('c24: the re-label plan asks only referential, re-ask and check_earlier, with synthetic controls in the first chunk only', () => {
+  const ex = Array.from({ length: 24 }, (_, i) => ({ id: `r${i}`, area: i % 2 ? 'taehwa' : 'egdesk', privacy: 'owner-approved', at: `2026-11-${String(i + 1).padStart(2, '0')}`, prev: { text: '진행할까요?' }, user: { text: `그래 ${i}` },
+    tags: [TYPE_NAMES[i % TYPE_NAMES.length]], source: { kind: 'codex', file: 'f', line: i } }))
+  const chunks = buildLabelPlan(ex, { model: DECISION_MODEL, chunkTokens: 12_000, estimateCap: 5_000, controlsEvery: false, types: RELABEL_TYPES, controlSet: RELABEL_CONTROLS, setPrefix: 'conversation-relabel', sha: text => createHash('sha256').update(text).digest('hex') })
+  assert.ok(chunks.length >= 2)
+  assert.deepEqual(chunks[0].plan.requests.slice(0, 3).map(r => r.id), ['control-points-back', 'control-not-understood', 'control-checks-earlier'])
+  assert.ok(chunks.slice(1).every(c => c.plan.requests.every(r => r.id.startsWith('ex-'))), 'controls only in the first chunk')
+  for (const c of chunks) { assert.ok(c.plan.requests.reduce((n, r) => n + r.estInputTokens, 0) <= 5_000); for (const r of c.requests) assert.deepEqual(JSON.parse(r.body).questions.map(q => q.name), ['conv_referential', 'conv_reask', 'conv_check_earlier']) }
+  assert.equal(chunks[0].plan.set, 'conversation-relabel-001')
+  assert.ok(chunks[0].plan.requests.slice(0, 3).every(r => r.expect.every(e => e.severity === 'hard')))
 })

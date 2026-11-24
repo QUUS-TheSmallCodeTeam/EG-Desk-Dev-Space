@@ -16,7 +16,7 @@ import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { APPROVAL, AREAS, CONTROL_EXAMPLES, TYPE_NAMES, buildLabelPlan, dedupe, examplesOf, readLabels, scenariosOf, streamTurns } from '../helper/egdesk-conversation-examples.mjs'
+import { APPROVAL, AREAS, CONTROL_EXAMPLES, RELABEL_CONTROLS, RELABEL_TYPES, TYPE_NAMES, buildLabelPlan, dedupe, examplesOf, readLabels, scenariosOf, streamTurns } from '../helper/egdesk-conversation-examples.mjs'
 import { seedFingerprints } from '../helper/egdesk-scenario-seed-guard.mjs'
 import { DECISION_MODEL } from '../helper/egdesk-decision-client.mjs'
 
@@ -66,7 +66,8 @@ export async function main(argv = process.argv.slice(2), { print = line => conso
   const count = (list, key) => Object.fromEntries([...new Set(list.map(key))].sort().map(k => [k, list.filter(x => key(x) === k).length]))
   // Labels of a sent chunk (runner results: { results: { <request id>: { answers } } }) turn heuristic scenarios into labelled ones.
   const labels = new Map()
-  if (opt('--labels')) { const res = JSON.parse(readFileSync(path.resolve(opt('--labels')), 'utf8')); for (const [id, r] of Object.entries(res.results ?? {})) if (r?.answers && id.startsWith('ex-')) labels.set(id.slice(3), readLabels(r.answers)) }
+  // --labels may be given several times (every chunk's results file)
+  for (const file of argv.flatMap((x, i) => (x === '--labels' ? [argv[i + 1]] : []))) { const res = JSON.parse(readFileSync(path.resolve(file), 'utf8')); for (const [id, r] of Object.entries(res.results ?? {})) if (r?.answers && id.startsWith('ex-')) labels.set(id.slice(3), readLabels(r.answers)) }
   const scenarios = examples.flatMap(e => scenariosOf(e, labels.get(e.id) ?? null))
   write('scenarios.json', `${JSON.stringify(scenarios, null, 1)}\n`)
   const rows = examples.map(e => ({ id: e.id, variant: 'example', hash: e.hash, area: e.area, privacy: e.privacy, at: e.at, tags: e.tags }))
@@ -95,6 +96,24 @@ export async function main(argv = process.argv.slice(2), { print = line => conso
     print(JSON.stringify({ sample: { chunks: sample.length, requests: sample.reduce((n, c) => n + c.plan.requests.length, 0), candidates: items.length,
       estInputTokens: sample.reduce((n, c) => n + c.plan.requests.reduce((m, r) => m + r.estInputTokens, 0), 0), maxCeiling: Math.max(...sample.map(c => c.plan.tokenCeiling)),
       perArea: count(items, x => x.area), perType: Object.fromEntries(TYPE_NAMES.map(t => [t, items.filter(x => x.heuristicTags.includes(t)).length])) } }))
+  }
+  // --relabel [affected] (c24): the examples named by --labels asked again with only referential, re-ask and check_earlier (reworded in c22/c23, and
+  // the new type), three synthetic controls in the first chunk (estimate <= 11,500, ceiling <= 12,000); written to plans/relabel-NNN/.
+  if (argv.includes('--relabel')) {
+    // --relabel affected: only the examples whose earlier label said referential or re-ask, or whose text looks like a check of an earlier action
+    // (the others cannot change on the reworded questions or the new type); controls in the first chunk only.
+    const all = examples.filter(e => labels.has(e.id)), affected = e => labels.get(e.id).referential === 'yes' || labels.get(e.id).reask === 'yes' || e.tags.includes('check_earlier')
+    const labelled = argv[argv.indexOf('--relabel') + 1] === 'affected' ? all.filter(affected) : all
+    const relabel = buildLabelPlan(labelled, { model: DECISION_MODEL, chunkTokens: 12_000, estimateCap: 11_500, controlsEvery: false, types: RELABEL_TYPES, controlSet: RELABEL_CONTROLS,
+      setPrefix: 'conversation-relabel', sha: text => createHash('sha256').update(text).digest('hex') })
+    for (let i = 0; i < relabel.length; i++) {
+      const dir = path.join('plans', `relabel-${String(i + 1).padStart(3, '0')}`), c = relabel[i]
+      for (const r of c.requests) write(path.join(dir, r.file), r.body)
+      write(path.join(dir, 'plan.json'), `${JSON.stringify(c.plan, null, 1)}\n`)
+      write(path.join(dir, 'preregistration.json'), `${JSON.stringify(c.preregistration, null, 1)}\n`)
+    }
+    print(JSON.stringify({ relabel: { labelled: labelled.length, chunks: relabel.length, requests: relabel.reduce((n, c) => n + c.plan.requests.length, 0),
+      estInputTokens: relabel.reduce((n, c) => n + c.plan.requests.reduce((m, r) => m + r.estInputTokens, 0), 0), maxCeiling: Math.max(...relabel.map(c => c.plan.tokenCeiling)) } }))
   }
   // The labelling plan, chunked; the first --chunks chunks are written (default 1).
   const chunks = buildLabelPlan(examples, { model: DECISION_MODEL, chunkTokens: Number(opt('--chunk-tokens') ?? 12000), sha: text => createHash('sha256').update(text).digest('hex') })

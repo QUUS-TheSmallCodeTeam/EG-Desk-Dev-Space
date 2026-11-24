@@ -74,7 +74,11 @@
 //    idle stretch after a run): at most one request per beat and one judged round at a time (a round ends when every
 //    onVerdict has settled, or after roundMs); at most maxQuestions per request; requests at least askGapMs (10 s) apart, and
 //    20, 40, then 80 s apart after one, two, three or more rounds in a row in which every verdict was `none`, except that an
-//    option never offered before on this heartbeat may ask at once; at most maxAsks requests per heartbeat. The owner supplies the judge (hb.setJudge) and with it
+//    option never offered before on this heartbeat may ask at once; at most maxAsks requests per heartbeat. These bounds are for what the assistant offers
+//    unprompted: a question a provider marks `solicited: true` (it is about something the person just sent, e.g. a message typed into the working run)
+//    skips the gap, the back-off and the ask budget, is asked alone in its round (other providers' unsolicited questions wait for their own beat),
+//    and its round counts neither as an ask nor in the back-off; its nudge, hb.nudge({ solicited: true }), is held only to the nudgeMs floor, and one
+//    that met a round in flight takes the next beat as soon as that round ends. (L3 c24.) The owner supplies the judge (hb.setJudge) and with it
 //    the egress gate, the Decision budget and the deadline; providers never call the Decision model through the heartbeat.
 
 export const HEARTBEAT_LIMITS = Object.freeze({
@@ -151,7 +155,7 @@ function normalizeQuestion(provider, raw, maxOptions) {
     const kinds = egressKinds(raw.kinds)
     if (quote && !kinds.length) return null // quoted content always names the egress kind it belongs to
     const topic = typeof raw.topic === 'string' && LABEL.test(raw.topic) ? raw.topic : null
-    return Object.freeze({ provider, name: raw.name, wire: `${provider}__${raw.name}`, type: 'predicate', instructions: raw.instructions, options: PREDICATE_OPTIONS, none: 'no', topic,
+    return Object.freeze({ provider, name: raw.name, wire: `${provider}__${raw.name}`, type: 'predicate', instructions: raw.instructions, options: PREDICATE_OPTIONS, none: 'no', topic, solicited: raw.solicited === true,
       facts: Object.freeze(sanitize(raw.facts, FACT_KEY, 24) ?? {}), kinds: Object.freeze(kinds), quote })
   }
   if (!Array.isArray(raw.options) || raw.options.length < 2 || raw.options.length > maxOptions) return null
@@ -180,7 +184,7 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
   // Judged rounds (see the contract in the header).
   let judge = null, onRound = null, asks = 0, lastAskAt = -Infinity, noneStreak = 0, roundBusy = false, roundCap = null
   // Session tempo: where the beat grid starts, since when the session is idle, and what keeps an idle session alive.
-  let tempo = 'active', gridAt = 0, idleSince = null, windowBeats = 0, keepAlive = null, lastNudgeAt = -Infinity
+  let tempo = 'active', gridAt = 0, idleSince = null, windowBeats = 0, keepAlive = null, lastNudgeAt = -Infinity, solicitedWaiting = false
   const offered = new Set()
   const lim = name => (Number.isSafeInteger(limits[name]) && limits[name] > 0 ? limits[name] : HEARTBEAT_LIMITS[name])
 
@@ -250,7 +254,7 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
   // One judged round at a beat: collect the questions proposed for this beat, apply the shared bounds, ask ONE request, and give
   // each provider the verdicts of its own questions. A beat on which nobody proposes costs nothing.
   function round(beat) {
-    if (!judge || roundBusy || asks >= lim('maxAsks')) return
+    if (!judge || roundBusy) return
     const questions = [], contexts = {}
     for (const [name, provider] of providers) {
       if (!provider.propose || questions.length >= lim('maxQuestions')) continue
@@ -270,14 +274,24 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
     }
     for (const name of Object.keys(contexts)) if (!questions.some(q => q.provider === name)) delete contexts[name]
     if (!questions.length) return
+    // Solicited (L3 c24, Main): a question about something the PERSON just sent (a message into the working run). The bounds above are for what the
+    // assistant offers unprompted; a person's message is judged at the next beat whatever the gap, the back-off or the ask budget say. Such a round
+    // asks only the solicited questions (other providers' unsolicited ones wait for their own beat) and leaves the unsolicited bounds as they were:
+    // it is not counted as an ask, does not move lastAskAt and does not count towards the all-"none" back-off.
+    const solicited = questions.some(q => q.solicited)
+    if (solicited) for (let i = questions.length - 1; i >= 0; i--) if (!questions[i].solicited) questions.splice(i, 1)
+    if (solicited) for (const name of Object.keys(contexts)) if (!questions.some(q => q.provider === name)) delete contexts[name]
+    if (!solicited && asks >= lim('maxAsks')) return
     const key = (q, o) => `${q.wire}\0${q.topic ?? ''}\0${o.value}`
     const fresh = questions.some(q => q.options.some(o => !offered.has(key(q, o))))
-    if (!fresh && beat.internalMs - lastAskAt < lim('askGapMs') * 2 ** Math.min(noneStreak, 3)) return
+    if (!solicited && !fresh && beat.internalMs - lastAskAt < lim('askGapMs') * 2 ** Math.min(noneStreak, 3)) return
     for (const q of questions) for (const o of q.options) offered.add(key(q, o))
-    asks++; lastAskAt = beat.internalMs; roundBusy = true
+    if (!solicited) { asks++; lastAskAt = beat.internalMs }
+    roundBusy = true
     const asked = monotonicNow()
-    const done = () => { if (roundCap != null) { clearTimer(roundCap); roundCap = null } roundBusy = false }
-    roundCap = setTimer(() => { roundCap = null; roundBusy = false }, lim('roundMs')); roundCap?.unref?.()
+    // A solicited nudge that met this round in flight takes the next beat as soon as the round ends (not the next grid beat).
+    const done = () => { if (roundCap != null) { clearTimer(roundCap); roundCap = null } roundBusy = false; if (solicitedWaiting) { solicitedWaiting = false; schedule(lim('nudgeMs')) } }
+    roundCap = setTimer(() => { roundCap = null; roundBusy = false; if (solicitedWaiting) { solicitedWaiting = false; schedule(lim('nudgeMs')) } }, lim('roundMs')); roundCap?.unref?.()
     void (async () => {
       let answers = null, failure = null
       try { answers = await judge({ beat, questions, contexts: Object.freeze(contexts) }) } catch (error) { failure = typeof error?.code === 'string' && LABEL.test(error.code) ? error.code : 'unreachable' }
@@ -290,7 +304,7 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
         return { question: q, verdict: Object.freeze({ name: q.name, value: accepted ? value : q.none, accepted, failed: !row, skipped: row?.skipped === true,
           confidence: num('confidence'), margin: num('margin'), top: num('top'), second: num('second') }) }
       })
-      noneStreak = verdicts.every(v => v.verdict.value === v.question.none) ? noneStreak + 1 : 0
+      if (!solicited) noneStreak = verdicts.every(v => v.verdict.value === v.question.none) ? noneStreak + 1 : 0
       const outcomes = {}
       if (state !== 'stopped') {
         await Promise.all([...new Set(questions.map(q => q.provider))].map(async name => {
@@ -341,12 +355,15 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
       newWindow(); schedule()
       return true
     },
-    /** A provider has something for the judge now: the next beat comes within nudgeMs. At most once per beatMs; false when refused. */
-    nudge() {
+    /** A provider has something for the judge now: the next beat comes within nudgeMs. At most once per beatMs; false when refused.
+     *  nudge({ solicited: true }): about something the person just sent: refused only within nudgeMs of the last nudge (the beat is on its way). */
+    nudge({ solicited = false } = {}) {
       if (state !== 'running') return false
       const t = internalMs()
-      if (t - lastNudgeAt < beatMs) return false
+      // solicited (c24): something the person sent: no once-per-beatMs limit, only the nudgeMs floor (a burst of messages shares one beat)
+      if (t - lastNudgeAt < (solicited === true ? lim('nudgeMs') : beatMs)) return false
       lastNudgeAt = t
+      if (solicited === true && roundBusy) { solicitedWaiting = true; return true }
       schedule(lim('nudgeMs'))
       return true
     },
