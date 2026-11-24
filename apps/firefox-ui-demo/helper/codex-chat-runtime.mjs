@@ -874,6 +874,7 @@ export class CodexChatRuntime {
       decision: { mode: () => this.decisionContext?.mode?.(), configured: () => this.decisionContext?.configured?.(), get client() { return self.decisionContext?.client ?? null }, get calibrationLog() { return self.decisionContext?.calibrationLog ?? null } },
       readOutput: (key, itemId) => this.runOutputs.commandOutput(key, itemId),
       egressFor: key => { const run = this.commandJudgeRuns.get(key); return run && !TERMINAL.has(run.status) ? this.decisionEgressFor(run) : null } })
+    this.deletedConversations = new Set() // clientThreadId of a conversation the person deleted (forgetConversation): its runs say nothing more
     this.inRunMessageQueue = new WeakMap() // run -> [{ requestId, localMessageId, text, at, state }]: messages typed while it works (inRunMessages flag)
     this.carriedInRun = new Map() // clientThreadId -> [text]: messages its run ended without acting on; they open the next turn's input
     this.postedInstead = new Map() // clientThreadId -> { outcome, posted }: the answer the person saw instead of the Agent's draft (consumed by the next turn)
@@ -1415,6 +1416,7 @@ export class CodexChatRuntime {
   }
 
   emit(run, event, details = {}, itemId) {
+    if (run?.clientThreadId && this.deletedConversations.has(run.clientThreadId)) return // deleted: nothing is stored or shown for it any more
     if (event === 'context.read.failed') {
       const failure = classifyPublicToolError({ code: details.code }, { context: true })
       details = { ...details, code: failure.code, message: failure.message }
@@ -1740,6 +1742,7 @@ export class CodexChatRuntime {
     const clientThreadId = idText(body.clientThreadId) || idText(body.thread?.id)
     const conversationId = idText(body.conversationId)
     if (body.conversationId != null && !conversationId) throw chatError('INVALID_THREAD_ID', 'Invalid conversationId')
+    if (!internal && clientThreadId) this.deletedConversations.delete(clientThreadId) // a new message under this id starts it anew
     const projectTarget = this.projectTarget(body)
     const expectedRoomProject = this.expectedRoomProject(body)
     const projectScope = this.projectScope(body, internal?.board?.record?.roomClientThreadId || clientThreadId, projectTarget, expectedRoomProject)
@@ -5265,7 +5268,19 @@ export class CodexChatRuntime {
     for (const run of this.runs.values()) if (run?.clientThreadId === key && typeof run.conversationId === 'string' && run.conversationId) native.add(run.conversationId)
     const hb = this.heartbeats.get(key), subject = hb ? this.heartbeatSubjects.get(hb) : null
     if (typeof subject?.conversationId === 'string' && subject.conversationId) native.add(subject.conversationId)
-    const out = { heartbeat: false, postedNote: false, carriedMessages: 0, heldPointers: 0, memoryReceipts: 0, notes: 0, browserTasks: 0, modules: {} }
+    const out = { heartbeat: false, postedNote: false, carriedMessages: 0, heldPointers: 0, memoryReceipts: 0, notes: 0, browserTasks: 0, modules: {}, interrupted: 0, history: null }
+    // Owner decision (L2 c17): deleting a conversation deletes it. A run still working in it is interrupted (as the stop button does, without
+    // its events), and from now on nothing of its runs is stored or shown (emit). The interrupt is not awaited; a failure changes nothing here.
+    this.deletedConversations.add(key)
+    while (this.deletedConversations.size > 500) this.deletedConversations.delete(this.deletedConversations.values().next().value)
+    for (const run of this.runs.values()) {
+      if (run?.clientThreadId !== key || TERMINAL.has(run.status) || run.stopRequested) continue
+      run.stopRequested = true
+      for (const provider of this.toolProviders) { try { provider.cancelRun?.(run) } catch { /* ignore */ } }
+      const held = this.browserRunHolds.get(run)
+      if (held && held.phase !== 'turn') { held.cancelled = true; out.interrupted++; continue }
+      try { void Promise.resolve(this.engineOf(run.conversationId)?.interruptTurn(run.conversationId, held?.turnId || run.runId, this.threadOperationSlot(run.conversationId))).catch(() => {}); out.interrupted++ } catch { /* ignore */ }
+    }
     if (hb && hb.state !== 'stopped') { this.stopHeartbeat(hb, 'deleted'); out.heartbeat = true }
     for (const [threadId, live] of [...this.heartbeatThreads]) if (native.has(threadId) || (hb && live === hb)) this.heartbeatThreads.delete(threadId)
     out.postedNote = this.postedInstead.delete(key)
@@ -5280,6 +5295,8 @@ export class CodexChatRuntime {
     for (const [name, forget] of this.conversationForgetters) {
       try { const n = forget({ clientThreadId: key, conversationIds: [...native] }); out.modules[name] = Number.isSafeInteger(n) ? n : n === true ? 1 : 0 } catch { out.modules[name] = 'failed' }
     }
+    // The stored history (messages, runs, events, requests, members, the room record) goes last, after the modules read what they need.
+    try { out.history = this.store?.deleteConversation?.(key) ?? null } catch { out.history = { deleted: false, failed: true } }
     return { accepted: true, ...out }
   }
 
@@ -6868,11 +6885,11 @@ export class CodexChatRuntime {
             const labels = judged.receipt?.labels
             turn.sources.speech.record?.(context.localMessageId, 'user', body.message, labels ? [{ start: 0, end: body.message.length, source: labels.source, form: labels.form, time: labels.time }] : [])
           }
-          applied = tm.writer(wiki, { enabled: true, canWrite }).apply(proposal, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: writeScope, operationId: `turn:${context.localMessageId}` })
+          applied = tm.writer(wiki, { enabled: true, canWrite }).apply(proposal, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: writeScope, operationId: `turn:${context.localMessageId}`, from: run.clientThreadId })
           // A correction: the record carries the pending "outdated" reading; the person's own sentence with the new detail becomes a page
           // that supersedes it, only where an utterance page may be stored at all (speech consent).
           if (judged.followUp && speechOk && applied?.status === 'recorded_pending') {
-            followUp = tm.writer(wiki, { enabled: true, canWrite }).apply(judged.followUp, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: writeScope, operationId: `turn:${context.localMessageId}:correction` })?.status ?? null
+            followUp = tm.writer(wiki, { enabled: true, canWrite }).apply(judged.followUp, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: writeScope, from: run.clientThreadId, operationId: `turn:${context.localMessageId}:correction` })?.status ?? null
           }
           // Noted for this session, so a later reply can say what was noted and the person's next message can confirm or refuse it.
           if (applied?.status === 'recorded_pending' && proposal.op === 'update_status' && this.turnMemoryConfirmOn() && typeof run.conversationId === 'string' && run.conversationId) {
