@@ -35,6 +35,9 @@ export const MAX_TASK_STEPS = 24
 export const BROWSER_TASK_TTL_MS = 30 * 60 * 1000 // a paused task can be resumed this long; a run held open for the reply waits no longer
 const SEGMENT_STEPS = 6
 const ASKED_CODES = new Set(['choice_needed', 'detail_needed'])
+const MAX_BRIEF_GOAL = 160
+// The last page action of a running task, as a closed word (the brief's `last`); a paused task's `last` is its pause code.
+const LAST_KIND_OF_TOOL = Object.freeze({ egdesk_browser_navigate: 'opened_link', egdesk_browser_scroll: 'scrolled', egdesk_browser_fill: 'filled_field' })
 const MAX_ENTRY_ASKS = 2 // "which card?" at most twice; then the request goes back to the ordinary turn
 const MAX_MESSAGE = 500
 const MAX_TASKS = 32
@@ -124,6 +127,22 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = BROWSER_TASK_TT
     markAsked(task, asked = true) { if (task) { task.asked = asked === true; task.updatedAt = now() } },
     // The host records the message in which the person was asked (bounded); the resume judgment reads it.
     noteQuestion(task, text) { if (task && task.status === 'paused' && typeof text === 'string' && text.trim()) { task.question = compactText(text, MAX_RESUME_QUESTION); task.updatedAt = now() } },
+    // c18: what the task is doing, for the heartbeat's note judgment and its check (R1): the goal as the person wrote it (bounded), the host
+    // of the card it works on, the steps done and the last closed outcome. Read-only. The heartbeat's caller sends each part only where
+    // the run's egress gate allows its kind (the goal as browser_task_record, the host as page_text); no label, path, URL or page text.
+    // Same pick as facts(): the newest running or waiting task of the conversation inside the TTL. null when none is active.
+    brief(conversationKey) {
+      let pick = null
+      for (const task of tasks.values()) {
+        if (task.conversationKey !== conversationKey || !live(task)) continue
+        if (!pick || task.updatedAt >= pick.updatedAt) pick = task
+      }
+      if (!pick) return null
+      const paused = pick.status === 'paused' && typeof pick.pause?.code === 'string' && PUBLIC_CODE.test(pick.pause.code)
+      const host = /^[a-z0-9.-]{1,120}$/.test(pick.host || '') ? pick.host : /^[a-z0-9.-]{1,120}$/.test(pick.cardHost || '') ? pick.cardHost : null
+      return Object.freeze({ goal: compactText(pick.goal, MAX_BRIEF_GOAL), host, stepsDone: pick.steps + (pick.status === 'running' ? pick.liveStep : 0),
+        status: pick.status, last: paused ? pick.pause.code : pick.lastKind ?? 'started', asked: pick.status === 'paused' && pick.asked === true })
+    },
     // Read-only progress facts for the heartbeat: numbers and closed words only (no goal, label, host, URL or page text).
     // The newest task of the conversation that is running or waiting, else the newest finished one inside the TTL; null when none.
     facts(conversationKey) {
@@ -151,7 +170,7 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = BROWSER_TASK_TT
     // The loop's own observer hook (see runBrowserReflex onStep): never read by the loop.
     progress(task, { step, action } = {}) {
       if (Number.isSafeInteger(step)) task.liveStep = step
-      if (typeof action === 'string' && action !== 'egdesk_browser_observe' && action !== 'egdesk_browser_wait') task.lastActionAt = now()
+      if (typeof action === 'string' && action !== 'egdesk_browser_observe' && action !== 'egdesk_browser_wait') { task.lastActionAt = now(); task.lastKind = LAST_KIND_OF_TOOL[action] ?? 'acted' }
       task.updatedAt = now()
     },
     get(taskId) { return tasks.get(taskId) ?? null },
@@ -212,7 +231,32 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
     return note(null, raw)
   }
 
+  // c18 (owner decision 5): every step's judgments go to the calibration log as closed words and numbers only (no page text, no label,
+  // no URL): the next-step choice when it was asked (a step code decided from the record asks none), each page-state predicate and goal_met.
+  // would: 'act' the answer moves the loop / stops it for the person, 'none' a decided no, 'hold' undecided (the person is asked).
+  const STEP_KIND_WOULD = { act: 'act', scroll: 'act', wait: 'act', done: 'none', handoff: 'hold', blocked: 'hold', user_context: 'hold', free_text: 'hold', uncertain: 'hold', page_unclear: 'hold' }
+  function recordSteps(result) {
+    if (!calibration?.record) return
+    const t = decisionThresholds(thresholds)
+    for (const step of result?.steps || []) {
+      const d = step?.decision
+      if (!d || typeof d !== 'object') continue
+      const judgments = []
+      if (d.next?.by !== 'code' && Number.isFinite(d.next?.confidence)) {
+        judgments.push({ q: 'next_step', would: STEP_KIND_WOULD[d.kind] ?? 'hold', top: d.top, second: d.second, confidence: d.next.confidence, margin: d.next.margin,
+          options: d.options, threshold: t.choice, minMargin: t.margin })
+      }
+      for (const [name, p] of Object.entries(d.pageChecks || {})) {
+        if (!/^ps_[a-z_]+$/.test(name)) continue
+        judgments.push({ q: name, would: !Number.isFinite(p) ? 'unknown' : p >= t.pageState ? 'act' : p <= 1 - t.pageState ? 'none' : 'hold', p: Number.isFinite(p) ? p : null, threshold: t.pageState })
+      }
+      if (Number.isFinite(d.goalMet)) judgments.push({ q: 'goal_met', would: d.goalMet >= t.done ? 'act' : 'none', p: d.goalMet, threshold: t.done })
+      note(null, { feature: 'browser_reflex', mode: 'on', candidates: Number.isSafeInteger(d.options) ? d.options : null, judgments })
+    }
+  }
+
   async function loop(run, task, hosts) {
+    if (!task.cardHost && typeof hosts?.[task.cardId] === 'string') task.cardHost = hosts[task.cardId].toLowerCase() // the card's host, for the brief
     // Segments of a few steps; the task's total budget survives pauses.
     for (;;) {
       const remaining = MAX_TASK_STEPS - task.steps
@@ -220,6 +264,7 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
       const result = await provider.runDirectTask(run, { cardId: task.cardId, goal: task.goal, userContext: task.userContext, resumeState: task.state, priorRun: task.prior, memoryPacket: task.memoryPacket,
         maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: info => store.progress?.(task, info) })
       task.liveStep = 0
+      recordSteps(result)
       tally(task, result)
       task.state = record(result.state) ? result.state : task.state
       store.touch(task)

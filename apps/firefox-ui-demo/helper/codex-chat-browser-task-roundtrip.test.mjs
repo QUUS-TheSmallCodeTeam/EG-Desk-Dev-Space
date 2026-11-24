@@ -44,7 +44,12 @@ const starts = (choices, text) => choices.find(c => c.value.includes(text))?.val
 const MSG = '거래처 포털에서 이번 달 세금계산서 내려받아줘'
 
 const WAIT_TEXT = '확인하는 데 시간이 조금 걸리고 있어요. 곧 이어서 말씀드릴게요.'
-function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {}, pick = null, patch = null, virtual = false, actGate = null } = {}) {
+// What a heartbeat question may carry of the page (c18): no address, path or numbers read from it; the card's host only as the page_text line.
+const pageFree = text => {
+  assert.doesNotMatch(text, /https?:|\/invoices|\/biz\/|\/download|\d{3}-\d{2}-\d{5}/, 'no address, path or page numbers')
+  assert.doesNotMatch(text.replace(/^- It works on the site portal\.example\.test\.$/gm, ''), /portal\.example|example\.test/, 'the host only on its own page_text line')
+}
+function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {}, pick = null, patch = null, virtual = false, actGate = null, writerGate = null } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-c11-')); chmodSync(dir, 0o700)
   const store = openChatStore({ dataDir: dir, ownerScope: 'synthetic-c11' })
   t.after(() => { store.close(); rmSync(dir, { recursive: true, force: true }) })
@@ -91,18 +96,19 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
         return { ok: true, text: async () => JSON.stringify({ answers: [choice('task_resume', /취소/.test(msg) ? 'cancel_task' : /점심/.test(msg) ? 'unrelated' : 'resume_task', 0.95)] }) } }
       const evidence = wire.input[1].content
       const url = /URL: (\S+)/.exec(evidence)?.[1], ctx = /Context the user gave in the chat \(not page text\):\n([\s\S]*?)\n\n/.exec(evidence)?.[1] ?? ''
-      let next, goalMet = 0, pageState = 'content'
+      let next, goalMet = 0, pageState = 'content', full = null, psWire = null
       if (/is NOT listed now/.test(evidence)) flags.notListed++
       const listed = /it is listed now as (\[L\d+\] [^\n]*?)\.(?:\n|$)/.exec(evidence)
-      if (pick) { const picked = pick(stepQ.choices, evidence, url, ctx); if (picked && typeof picked === 'object') { next = picked.next; goalMet = picked.goalMet ?? 0 } else next = picked }
+      // c18: a pick may also give the whole next_step answer (a real answer replayed), the page state, or the page-state predicates themselves
+      if (pick) { const picked = pick(stepQ.choices, evidence, url, ctx); if (picked && typeof picked === 'object') { next = picked.next ?? picked.answer?.choice; goalMet = picked.goalMet ?? 0; full = picked.answer ?? null; pageState = picked.pageState ?? pageState; psWire = picked.ps ?? null } else next = picked }
       else if (/\/download\//.test(url)) { next = 'goal_met'; goalMet = 0.95 }
       else if (url.endsWith('/otp')) { next = 'blocked'; pageState = 'two_factor_required' }
       else if (/\/invoices/.test(url)) next = listed ? listed[1].trim() : /is NOT listed now/.test(evidence) ? stepQ.choices.map(c => c.value).find(v => /^\[L1\]/.test(v)) : /두 번째/.test(ctx) ? starts(stepQ.choices, '987-65') : 'needs_user_context'
       else if (url.endsWith('/single')) next = starts(stepQ.choices, '111-22')
       else next = starts(stepQ.choices, '다운로드') ?? 'blocked'
-      const answer = choice('next_step', next, 0.95)
-      if (next === 'needs_user_context') answer.probabilities.push(...stepQ.choices.filter(c => /^\[L\d+\]/.test(c.value)).slice(0, 2).map(c => ({ value: c.value, probability: 0.02 })))
-      return { ok: true, text: async () => JSON.stringify({ answers: [answer, ...pageStateWire(pageState), { name: 'goal_met', type: 'predicate', probability: goalMet }] }) }
+      const answer = full ?? choice('next_step', next, 0.95)
+      if (!full && next === 'needs_user_context') answer.probabilities.push(...stepQ.choices.filter(c => /^\[L\d+\]/.test(c.value)).slice(0, 2).map(c => ({ value: c.value, probability: 0.02 })))
+      return { ok: true, text: async () => JSON.stringify({ answers: [answer, ...(psWire ?? pageStateWire(pageState)), { name: 'goal_met', type: 'predicate', probability: goalMet }] }) }
     },
   })
   const transport = { runs: new Map(), hasClient: id => id === 'ui',
@@ -145,6 +151,7 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
       if (method === 'turn/start' && String(params.threadId).startsWith('fork-')) { // the private writer turn: the subjective model words one short message
         forkPrompts.push(params.input[0].text)
         setTimeout(async () => {
+          if (writerGate) await writerGate.promise // c18: hold the writer so the question can be posted first
           await chat.handleNotification({ method: 'item/completed', params: { threadId: params.threadId, turnId: 'ft', item: { id: 'f1', type: 'agentMessage', phase: 'final_answer', text: WAIT_TEXT } } })
           await chat.handleNotification({ method: 'turn/completed', params: { threadId: params.threadId, turn: { id: 'ft', status: 'completed', items: [] } } })
         }, 1)
@@ -166,8 +173,9 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
     browserToolSelection: { token: `token-${n}`, threadId: DM } })
   let n = 0, last = null
   const notify = (method, params) => chat.handleNotification({ method, params })
-  const settle = async () => { for (let i = 0; i < 8; i++) { await chat.flowIdle(); await new Promise(r => setTimeout(r, 3)) } }
-  const w = { flowAsked, forkPrompts, timers, settle,
+  let holdingWriter = false // c18: while a test holds the writer turn, settling must not wait for the flow job it holds
+  const settle = async () => { for (let i = 0; i < 8; i++) { if (!holdingWriter) await chat.flowIdle(); await new Promise(r => setTimeout(r, 3)) } }
+  const w = { flowAsked, forkPrompts, timers, settle, holdWriter(on) { holdingWriter = on === true },
     async advance(ms, { settleEvery = 1 } = {}) { const end = clock + ms; let fired = 0
       for (;;) { timers.sort((a, b) => a.at - b.at); const next = timers[0]; if (!next || next.at > end) break; timers.shift(); clock = next.at; next.fn(); if (++fired % settleEvery === 0) await settle(); else await new Promise(r => setImmediate(r)) }
       clock = end; await settle() },
@@ -185,7 +193,7 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
     sends, turnIds, runs: () => chat.snapshot(last.conversationId).runs, replyEvents: () => events.filter(e => /^reply\./.test(e.event)).map(e => e.event),
     note() { const value = calls.filter(c => c.method === 'turn/start').at(-1).params.additionalContext?.egdesk_browser_task?.value; return value ? JSON.parse(value).egdesk_browser_task : null },
     // The scripted subjective engine: it words the closed note (it has nothing else) and streams like a real turn would.
-    async subjective({ beforeTurnEnds = null } = {}) {
+    async subjective({ beforeTurnEnds = null, skipFlowIdle = false } = {}) {
       const note = w.note(), timing = { threadId: last.conversationId, turnId: turnIds.at(-1) }
       const text = !note ? '(일반 답변)' : note.status === 'done' ? '세금계산서를 내려받았습니다.'
         : note.code === 'choice_needed' ? `사업자가 둘입니다(${(note.candidates || []).join(', ')}). 어느 쪽으로 받을까요?`
@@ -197,7 +205,7 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
       await new Promise(r => setTimeout(r, 2))
       beforeTurnEnds?.(text)
       await notify('turn/completed', { threadId: timing.threadId, turn: { id: timing.turnId, status: 'completed', items: [] } })
-      for (let i = 0; i < 6; i++) { await chat.draftCheckIdle(); await chat.flowIdle(); await chat.browserRunIdle(); await new Promise(r => setTimeout(r, 2)) }
+      for (let i = 0; i < 6; i++) { await chat.draftCheckIdle(); if (!skipFlowIdle) await chat.flowIdle(); await chat.browserRunIdle(); await new Promise(r => setTimeout(r, 2)) }
       return text
     },
     history: () => store.listMessages(DM).messages.map(m => [m.role, m.text]),
@@ -432,8 +440,9 @@ test('H1 a slow wording turn: the heartbeat speaks (one completed message), neve
   assert.deepEqual([hb.state, hb.tempo, hb.stopReason ?? null, w.runs().length, w.runs()[0].status], ['running', 'idle', null, 1, 'completed'])
   assert.deepEqual(w.history(), [['user', MSG], ['assistant', WAIT_TEXT], ['assistant', question], ['user', '두 번째 사업자로'], ['assistant', report]])
   assert.equal(w.deltas().length, 3, 'three assistant messages, each in one piece')
-  // L3 c15: the judge reads the run's own text (the person's request, the Agent's note); nothing of the page (its host, address or the numbers read from it).
-  assert.doesNotMatch(w.flowAsked.map(a => a.facts).join('\n'), /portal|example|https?:|\d{3}-\d{2}-\d{5}/, 'the heartbeat questions carry nothing of the page')
+  // L3 c15: the judge reads the run's own text; never an address, a path or numbers read from the page. L8 c18 (owner decision, Main
+  // 2026-11-25): the browser task's own facts go along, the card's host only as page_text (allowed for this run) on its own line.
+  pageFree(w.flowAsked.map(a => a.facts).join('\n'))
 })
 
 test('H2 held mode off: the heartbeat still beats with the task facts but cannot speak; the wording turn streams as before', async t => {
@@ -462,7 +471,7 @@ test('N1 mid-loop: the resumed loop works inside the run, so a slow step gets on
   assert.deepEqual(w.posted(), [question, WAIT_TEXT], 'the heartbeat spoke during the objective loop: a completed message in the same run')
   assert.ok(w.flowAsked.length >= 1 && w.flowAsked.every(a => !a.offered.includes('ask_missing')))
   assert.match(w.flowAsked.at(-1).facts, /current_phase: objective_step/)
-  assert.doesNotMatch(w.flowAsked.map(a => a.facts).join('\n'), /portal|example|https?:|\d{3}-\d{2}-\d{5}/)
+  pageFree(w.flowAsked.map(a => a.facts).join('\n'))
   slow.open()
   await w.chat.browserRunIdle()
   assert.deepEqual([w.note().status, w.turnIds.length], ['done', 2])
@@ -604,3 +613,81 @@ test('Q1 the resume request carries the posted question (bounded), in-run and as
     assert.equal(w.note().status, 'done')
   }
 })
+
+// ---- L8 c18: the heartbeat's note judgment sees what the browser task is doing (R1); and never a wait message on top of a question ----
+// Main's all-on journey (2026-11-25, s10/s11) on the same pages: the real next_step answers, replayed through the product path.
+const REAL_S10 = [['[L1] 사업자 123-45-67890', 0.05], ['[L2] 사업자 987-65-43210', 0.05], ['scroll_more', 0.04], ['goal_met', 0.01], ['needs_free_text', 0.05], ['needs_user_context', 0.74], ['blocked', 0.06]]
+const replayAllOn = (choices, evidence, url, ctx) => {
+  if (/\/download\//.test(url)) return { next: 'goal_met', goalMet: 0.95 }
+  if (/\/invoices/.test(url) && !/두 번째/.test(ctx)) return { answer: { name: 'next_step', type: 'choice', choice: 'needs_user_context', confidence: 0.70, probabilities: REAL_S10.map(([value, probability]) => ({ value, probability })) } } // s10, real
+  if (/\/invoices/.test(url)) return { answer: choice('next_step', '[L2] 사업자 987-65-43210', 1) } // s11 step 1, real 1.0
+  return { answer: choice('next_step', starts(choices, '다운로드'), 0.99) } // s11 step 2, real 0.99
+}
+const family = d => (d.names.some(n => n.includes('__')) ? 'beat' : /^(claim_|present_)/.test(d.q) ? 'check' : d.q === 'browser_entry' ? 'entry' : d.q === 'task_resume' ? 'resume' : d.names.includes('next_step') ? 'step' : d.q)
+const count = list => list.reduce((m, d) => (m[family(d)] = (m[family(d)] || 0) + 1, m), {})
+
+test('B1 c18 product path, s10 replayed: the note judgment, the writer and the check all see the task\'s goal, host, steps and its last closed outcome', async t => {
+  const w = world(t, { virtual: true, pick: replayAllOn })
+  await w.send(MSG)
+  assert.deepEqual([w.note().status, w.note().code, w.note().candidates], ['need_context', 'choice_needed', ['사업자 123-45-67890', '사업자 987-65-43210']], 's10 (0.70, below the bar) asks which, by code')
+  await w.advance(26000)
+  const facts = w.flowAsked.at(-1).facts
+  assert.match(facts, /- The task in the browser: 1 page step so far; it stopped to ask the person which of several options they mean\./)
+  assert.match(facts, /- The browser task's goal, as the person asked it: "거래처 포털에서 이번 달 세금계산서 내려받아줘"/)
+  assert.match(facts, /- It works on the site portal\.example\.test\./)
+  pageFree(facts)
+  // the writer is told the same, and the posted message is checked against the same facts (so a sentence naming the portal can pass)
+  assert.match(w.forkPrompts.at(-1), /The task in the browser: 1 page step so far; it stopped to ask the person which of several options they mean\. The browser task's goal, as the person asked it: "거래처 포털에서 이번 달 세금계산서 내려받아줘" It works on the site portal\.example\.test\. You may say what the task is doing/)
+  // (the check's evidence is built by messageEvidence with the same brief: asserted in egdesk-browser-heartbeat-brief.test.mjs; this wait
+  // message names nothing concrete, so the check sends no request here)
+  assert.deepEqual(w.posted(), [WAIT_TEXT])
+  t.diagnostic(JSON.stringify({ beforeQuestion: count(w.decisions) }))
+})
+
+test('B2 c18 product path, s10 -> s11 replayed: requests per task, and mid-loop the judge reads the new step and the last opened link', async t => {
+  const slow = gate()
+  const w = world(t, { virtual: true, pick: replayAllOn, actGate: n => (n === 1 ? slow.promise : null) })
+  await w.send(MSG); const question = await w.subjective()
+  const atQuestion = count(w.decisions)
+  await w.send('두 번째 사업자로', { wait: false }); await w.settle()
+  await w.advance(16000)
+  // the first page action (/biz/2) is in flight: the brief's last word is still the pause it resumed from until an action finishes
+  const mid = w.flowAsked.at(-1).facts
+  assert.match(mid, /- The task in the browser: \d+ page steps? so far; /)
+  assert.match(mid, /- The browser task's goal, as the person asked it: "거래처 포털에서 이번 달 세금계산서 내려받아줘"/)
+  pageFree(mid)
+  slow.open(); await w.chat.browserRunIdle()
+  const report = await w.subjective()
+  assert.deepEqual([w.note().status, w.acts.map(a => new URL(a.url).pathname)], ['done', ['/biz/2', '/download/2.pdf']])
+  const total = count(w.decisions)
+  t.diagnostic(JSON.stringify({ atQuestion, total }))
+  // per task: 1 entry, 1 step before the question; 1 resume and 3 steps after; each spoken beat costs one judge request and one check
+  assert.deepEqual([atQuestion.entry, atQuestion.step, total.resume, total.step], [1, 1, 1, 4])
+  assert.ok((total.beat ?? 0) >= 1 && total.beat <= 3, `beats asked: ${total.beat}`)
+  assert.deepEqual(w.posted(), [question, WAIT_TEXT, report].filter(Boolean).slice(0, w.posted().length))
+})
+
+// The four ways a task stops for the person, each with its own page (and answers): no wait message lands on top of the question.
+const STOPS = [
+  ['choice_needed', `${O}/invoices`, replayAllOn],
+  ['confirm_needed', `${O}/single`, choices => ({ answer: { name: 'next_step', type: 'choice', choice: 'needs_user_context', confidence: 0.9, probabilities: [{ value: 'needs_user_context', probability: 0.9 }, { value: choices.find(c => /^\[L1\]/.test(c.value)).value, probability: 0.05 }] } })],
+  ['login_required', `${O}/invoices`, () => ({ next: 'blocked', pageState: 'login_required' })],
+  ['page_unclear', `${O}/invoices`, () => ({ next: 'blocked', ps: pageStateWire('content', 0.5) })],
+]
+for (const [code, start, pick] of STOPS) {
+  test(`B3 c18 ${code}: a wait message written while the question is worded is dropped once the question is posted; then silence until the reply`, async t => {
+    const held = gate()
+    const w = world(t, { virtual: true, start, pick, writerGate: held })
+    w.holdWriter(true)
+    await w.send(MSG)
+    assert.equal(w.note().code, code)
+    await w.advance(26000) // a beat asks; the writer turn is held open
+    assert.ok(w.forkPrompts.length >= 1, 'a wait message is being written')
+    const question = await w.subjective({ skipFlowIdle: true }) // the question reaches the person first (the held writer is not awaited)
+    held.open(); w.holdWriter(false); await w.settle(); await w.chat.flowIdle()
+    assert.deepEqual(w.posted(), [question], 'nothing posted on top of the question')
+    const asked = w.flowAsked.length
+    await w.advance(60000)
+    assert.deepEqual([w.flowAsked.length, w.posted().length], [asked, 1], 'and nothing asked or said while the person is awaited')
+  })
+}

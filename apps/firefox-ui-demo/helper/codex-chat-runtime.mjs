@@ -20,7 +20,7 @@ import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
 import { createSpillRereadCounter, gateRuntimeToolResult, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
 import { homedir } from 'node:os'
 import { createInternalTurns } from './codex-internal-turn.mjs'
-import { FLOW_COPY, FLOW_LIMITS, attentionOf, audienceFacts, beatFlowFacts, cleanIntermediate, deriveFlowKind, enumerateOptions, flowPredicates, idleFlowFacts, messageEvidence, pointerDecision, pointerPredicates, pointerPrompt, rideAlongPredicates, pointerRoute, runContext, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
+import { attentionOf, audienceFacts, beatFlowFacts, browserTaskLines, cleanIntermediate, deriveFlowKind, enumerateOptions, FLOW_COPY, FLOW_LIMITS, flowPredicates, idleFlowFacts, messageEvidence, pointerDecision, pointerPredicates, pointerPrompt, pointerRoute, rideAlongPredicates, runContext, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
 import { BEAT_JUDGE_TIMEOUT_MS, BEAT_PREDICATE_YES, createBeatJudge } from './egdesk-heartbeat-judge.mjs'
 import { createHeartbeats } from './egdesk-heartbeat.mjs'
 import { feedBrowserTask } from './egdesk-heartbeat-providers.mjs'
@@ -4957,6 +4957,11 @@ export class CodexChatRuntime {
    * → null | { taskId, status: 'running'|'paused'|'done'|'cancelled', active, phase: 'objective_step'|'waiting_user'|null, stepsDone, stepsRemaining,
    *            waitingOnUser, waitingKind, waitingCode, actions: { fill, navigate, scroll }, lastActionAgeMs, ageMs, idleMs } — numbers and closed words only.
    */
+  // c18: what this run's browser task is doing (the store's brief: goal, host, steps, last closed outcome), or null. Read-only.
+  browserTaskBrief(run) {
+    try { return typeof run?.clientThreadId === 'string' && run.clientThreadId && this.browserTaskStore ? this.browserTaskStore.brief(run.clientThreadId) : null } catch { return null }
+  }
+
   browserTaskFacts(clientThreadId) {
     try { return typeof clientThreadId === 'string' && clientThreadId && this.browserTaskStore ? this.browserTaskStore.facts(clientThreadId) : null } catch { return null }
   }
@@ -5442,7 +5447,7 @@ export class CodexChatRuntime {
     // The judge reads what this run's own models receive: the person's request, what the Agent is doing now (the real command line
     // or tool name where the run's gate allows that kind) and what was already said. Without the run's own text nothing is asked.
     const egress = this.decisionEgressFor(run)
-    const context = runContext({ run, heartbeatFacts: beat.facts, flow, facts, userText: this.runUserText(run), allows: kind => egress.allows(kind), own: FLOW_OWN_KINDS })
+    const context = runContext({ run, heartbeatFacts: beat.facts, flow, facts, userText: this.runUserText(run), allows: kind => egress.allows(kind), own: FLOW_OWN_KINDS, browserTask: this.browserTaskBrief(run) })
     if (!context) return null
     const note = facts.question ? run.activities.find(a => a.id === facts.question.id) : null
     const pointer = options.includes('pointer') && subject ? this.pointerMaterial(subject, facts.attention, facts.pointerTarget) : null
@@ -5540,6 +5545,10 @@ export class CodexChatRuntime {
     // Read again at posting time: the message goes only into the conversation of the person who is waiting, and never where someone
     // other than the task's requester or owner takes part.
     if (flow.audience().postable !== true) return 'none'
+    // c18: a browser task that stopped for the person (choice_needed, confirm_needed, login_required, page_unclear, ...): once its question
+    // is posted, no wait message goes on top of it, also when this one was written before the question reached the person.
+    const task = this.browserTaskBrief(run)
+    if (task?.status === 'paused' && task.asked === true) return 'none'
     const id = `egdesk-flow:${randomUUID()}`
     await this.applyItem(run, { id, type: 'agentMessage', phase: null, text, completionConfirmed: true }, true, true, true)
     flow.sent.push({ id, text, kind, by, at: flow.heartbeat.internalMs() }); flow.kinds.add(kind); if (by === 'fallback') flow.kinds.add('stalled')
@@ -5552,8 +5561,10 @@ export class CodexChatRuntime {
     const note = kind === 'ask_missing' && facts.question ? run.activities.find(a => a.id === facts.question.id)?.detail?.text ?? null : null
     // Checked against what it was composed from (the run's facts at that beat), not against the turn's materials.
     const egress = this.decisionEgressFor(run)
-    const evidence = messageEvidence({ kind, run, heartbeatFacts: facts.heartbeatFacts ?? null, flow, userText: this.runUserText(run), allows: k => egress.allows(k), own: FLOW_OWN_KINDS, note })
-    return this.writeChecked(run, writerPrompt(kind, facts, { question: note, prior: flow.sent.map(row => row.text) }), { timeoutMs, prior: flow.sent.map(row => row.text), evidence })
+    const browserTask = this.browserTaskBrief(run)
+    const evidence = messageEvidence({ kind, run, heartbeatFacts: facts.heartbeatFacts ?? null, flow, userText: this.runUserText(run), allows: k => egress.allows(k), own: FLOW_OWN_KINDS, note, browserTask })
+    const task = facts.heartbeatFacts?.sources?.browser_task ? browserTaskLines(browserTask, k => egress.allows(k)).lines : []
+    return this.writeChecked(run, writerPrompt(kind, facts, { question: note, prior: flow.sent.map(row => row.text), task }), { timeoutMs, prior: flow.sent.map(row => row.text), evidence })
   }
 
   // One short message by the subjective model on a private fork of the run's conversation, then the same check as every posted

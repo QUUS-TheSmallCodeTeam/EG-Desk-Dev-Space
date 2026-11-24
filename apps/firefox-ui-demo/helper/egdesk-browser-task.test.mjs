@@ -213,14 +213,17 @@ test('S7 cancel and unrelated replies do not resume; the task stays paused only 
   assert.equal(w.store.paused('thread'), null)
 })
 
-test('S8 calibration records for the entry decision are content-free and pass the log whitelist', async t => {
+test('S8 calibration records for the entry decision (and, since c18, for each step) are content-free and pass the log whitelist', async t => {
   const w = await world(t, { start: `${O}/invoices` })
   await w.say('거래처 포털에서 세금계산서 내려받아줘')
-  assert.equal(w.calibrationRaw.length, 1)
+  assert.equal(w.calibrationRaw.length, 2, 'the entry, then the one step before the question')
   const entry = normalizeEntry(w.calibrationRaw[0])
   assert.equal(entry.feature, 'browser_reflex'); assert.equal(entry.mode, 'on')
   assert.doesNotMatch(JSON.stringify(entry), /세금|portal|example/)
   assert.equal(entry.judgments[0].q, 'choice')
+  const step = normalizeEntry(w.calibrationRaw[1])
+  assert.doesNotMatch(JSON.stringify(w.calibrationRaw[1]), /세금|portal|example|사업자|https?:|\/invoices/, 'the raw step record holds no page text, label or address')
+  assert.equal(step.judgments[0].q, 'next_step')
 })
 
 test('entry question rides on an existing request: options are code-enumerated cards plus two fixed options', () => {

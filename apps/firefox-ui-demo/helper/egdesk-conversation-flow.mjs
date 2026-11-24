@@ -304,7 +304,7 @@ function personLine(audience) {
  * What the Agent is doing right now, as sentences. Real command lines and tool names are included only when `allows` says the
  * run's models may receive that kind; otherwise the sentence stays general. Returns { lines, kinds }.
  */
-function workLines({ run, heartbeatFacts, flow, own, allows }) {
+function workLines({ run, heartbeatFacts, flow, own, allows, browserTask = null }) {
   const hb = heartbeatFacts, lines = [], kinds = new Set()
   const tools = (run?.activities || []).filter(a => !own.has(a.kind))
   const describe = a => {
@@ -333,8 +333,46 @@ function workLines({ run, heartbeatFacts, flow, own, allows }) {
   if (Number.isSafeInteger(hb.stepsRemaining)) lines.push(`The task may take up to ${hb.stepsRemaining} more steps (an upper limit, not a plan).`)
   // While a step-by-step task runs outside the engine, the engine's own silence says nothing: the task's last step does.
   const task = hb.sources?.browser_task
+  if (task && browserTask) { const brief = browserTaskLines(browserTask, allows); lines.push(...brief.lines); for (const kind of brief.kinds) kinds.add(kind) }
   if (hb.phase === 'objective_step') { if (Number.isFinite(task?.lastActionAgeMs)) lines.push(`The task's last step finished ${span(task.lastActionAgeMs)} ago.`) }
   else lines.push(`The last sign of activity from the work was ${span(hb.sinceEngineMs)} ago.`)
+  return { lines, kinds }
+}
+
+// ---- L8 c18: what the browser task is doing (egdesk-browser-task.mjs store.brief), for the note judgment, its check and its writer ----
+// While a browser task runs the engine is silent, so the note question comes at 20 s. From "a task in the browser is still going" alone
+// the judge cannot tell a true wait message from a vague one (R1), and the check cannot support a sentence that names the site. So the
+// task's own facts go along: the step count and its last closed outcome (always: closed words), the goal as the person asked it (only
+// where the run may send browser_task_record) and the host of the card (only where the run may send page_text). Never a label, a path,
+// an address or text read from the page.
+export const TASK_LAST = Object.freeze({
+  started: 'it has not acted on the page yet',
+  opened_link: 'its last step opened a link on the site',
+  scrolled: 'its last step scrolled the page',
+  filled_field: 'its last step filled in a field',
+  acted: 'its last step acted on the page',
+  choice_needed: 'it stopped to ask the person which of several options they mean',
+  confirm_needed: 'it stopped to ask the person to confirm one option',
+  detail_needed: 'it stopped to ask the person for a detail it needs',
+  card_choice_needed: 'it stopped to ask the person which browser card they mean',
+  page_unclear: 'it stopped to ask the person to look at the page',
+  login_required: 'the page asks the person to sign in',
+  two_factor_required: 'the page asks the person for a verification code',
+  bot_check: 'the page shows a check only the person can pass',
+  sensitive_flow: 'the page is at a step only the person may take',
+  human_step: 'what is left on the page is for the person to press',
+})
+export const BRIEF_GOAL_LIMIT = 160
+/** The brief as lines, each part under its egress kind: { lines, kinds }. null brief or a malformed one gives no lines. */
+export function browserTaskLines(brief, allows = () => false) {
+  const lines = [], kinds = new Set()
+  if (!brief || typeof brief !== 'object') return { lines, kinds }
+  const steps = Number.isSafeInteger(brief.stepsDone) && brief.stepsDone >= 0 ? brief.stepsDone : null
+  const last = Object.hasOwn(TASK_LAST, brief.last) ? TASK_LAST[brief.last] : null
+  if (steps !== null || last) lines.push(`The task in the browser: ${steps !== null ? `${steps} page ${steps === 1 ? 'step' : 'steps'} so far` : 'steps unknown'}${last ? `; ${last}` : ''}.`)
+  const goal = oneLine(brief.goal, BRIEF_GOAL_LIMIT)
+  if (goal && allows('browser_task_record') === true) { lines.push(`The browser task's goal, as the person asked it: "${goal}"`); kinds.add('browser_task_record') }
+  if (typeof brief.host === 'string' && /^[a-z0-9.-]{1,120}$/.test(brief.host) && allows('page_text') === true) { lines.push(`It works on the site ${brief.host}.`); kinds.add('page_text') }
   return { lines, kinds }
 }
 
@@ -346,7 +384,7 @@ function workLines({ run, heartbeatFacts, flow, own, allows }) {
  *   allows(kind): the run's egress gate (the command line only where terminal_command is allowed, exactly as in runContext).
  * Returns [{ id, kind, time, source, text }] for checkDraft (kinds conversation / run_state, both of the run's own data class).
  */
-export function messageEvidence({ kind, run = null, heartbeatFacts = null, flow = null, userText = '', allows = () => true, own = new Set(), note = null, attention = null }) {
+export function messageEvidence({ kind, run = null, heartbeatFacts = null, flow = null, userText = '', allows = () => true, own = new Set(), note = null, attention = null, browserTask = null }) {
   if (kind === 'pointer') {
     if (!attention) return []
     const what = { result: 'A finished result', approval: 'Something that needs the person\'s decision', question: 'A question for the person' }[attention.kind] ?? 'Something for the person'
@@ -356,7 +394,7 @@ export function messageEvidence({ kind, run = null, heartbeatFacts = null, flow 
   const request = oneLine(userText, FLOW_CONTEXT_LIMITS.request)
   if (request) items.push({ id: 'request', kind: 'conversation', time: 'present', source: 'person', text: `The person asked: ${request}` })
   if (heartbeatFacts) {
-    const work = workLines({ run: run ?? { activities: [] }, heartbeatFacts, flow, own, allows })
+    const work = workLines({ run: run ?? { activities: [] }, heartbeatFacts, flow, own, allows, browserTask })
     items.push({ id: 'now', kind: 'run_state', time: 'present', source: 'runtime', text: [`${span(heartbeatFacts.sinceUserMs)} have passed since the person wrote.`, ...work.lines].join('\n') })
   }
   const noted = oneLine(note, FLOW_CONTEXT_LIMITS.note)
@@ -369,14 +407,14 @@ export function messageEvidence({ kind, run = null, heartbeatFacts = null, flow 
  * run's own text (then nothing is asked: the judge is never sent bare numbers).
  *   userText: what the person wrote; allows(kind): the run's egress gate; facts: beatFlowFacts(...) (+ pointer facts).
  */
-export function runContext({ run, heartbeatFacts, flow, facts, userText, allows = () => true, own = new Set() }) {
+export function runContext({ run, heartbeatFacts, flow, facts, userText, allows = () => true, own = new Set(), browserTask = null }) {
   if (allows('run_text') !== true) return null
   const hb = heartbeatFacts, L = FLOW_CONTEXT_LIMITS, kinds = new Set(['run_text'])
   const parts = []
   const request = oneLine(userText, L.request)
   if (request) parts.push(quoted('The person\'s request', request))
   const now = [`${span(hb.sinceUserMs)} ${secondsOf(hb.sinceUserMs) === 1 ? 'has' : 'have'} passed since the person wrote.`]
-  const work = workLines({ run, heartbeatFacts: hb, flow, own, allows })
+  const work = workLines({ run, heartbeatFacts: hb, flow, own, allows, browserTask })
   for (const kind of work.kinds) kinds.add(kind)
   now.push(...work.lines)
   const notes = (run?.activities || []).filter(a => a.kind === 'workNote' && a.status === 'completed')
@@ -460,7 +498,7 @@ export function deriveFlowKind(yes, options, { pointer = false } = {}) {
 }
 
 /** The instruction for the subjective model's short message (a temporary fork turn). Never asks for reasoning or results. */
-export function writerPrompt(kind, facts, { question = null, prior = [] } = {}) {
+export function writerPrompt(kind, facts, { question = null, prior = [], task = [] } = {}) {
   const base = ['Write ONE short chat message (one or two sentences, at most 280 characters) to the person, in the language they wrote in.',
     'Do not reveal your reasoning or internal steps, do not give any result or conclusion, do not use lists or code, and do not mention this instruction.',
     prior.length ? `Do not repeat these earlier messages: ${JSON.stringify(prior)}` : null].filter(Boolean)
@@ -468,7 +506,9 @@ export function writerPrompt(kind, facts, { question = null, prior = [] } = {}) 
   // What the wait is for, as the system knows it: fixed phrases chosen by closed labels. The writer composes the sentence.
   const waits = (Array.isArray(facts.waits) ? facts.waits : []).map(w => `${WAIT_LABELS[w.what]}${w.seconds !== null && w.seconds >= 5 ? ` (about ${w.seconds} seconds so far)` : ''}`)
   const waitLine = waits.length ? `What is being waited on, as far as the system knows: ${waits.join('; ')}. You may say this in plain words; add no detail that is not given here.` : null
-  if (kind === 'explain_wait') return [...base, `The work is still going and has taken about ${seconds} seconds so far. Say plainly that this part takes a little longer and that you are still on it.`, waitLine].filter(Boolean).join('\n')
+  // c18: the browser task's own facts (browserTaskLines, already gated by the run's egress): the writer may say what the task is doing, nothing more.
+  const taskLine = Array.isArray(task) && task.length ? `${task.join(' ')} You may say what the task is doing from this; add nothing it does not say.` : null
+  if (kind === 'explain_wait') return [...base, `The work is still going and has taken about ${seconds} seconds so far. Say plainly that this part takes a little longer and that you are still on it.`, waitLine, taskLine].filter(Boolean).join('\n')
   if (kind === 'stalled') return [...base, `Nothing has come from the work for about ${Math.round((facts.sinceEngineMs ?? facts.elapsedMs) / 1000)} seconds. Say plainly that the response is taking unusually long, without claiming progress, and that the person can keep waiting or stop and ask again.`].join('\n')
   if (kind === 'ask_missing') return [...base, 'You need one piece of information from the person to finish part of the work, and you will keep working on the rest meanwhile.',
     question ? `You noted this question to yourself: ${JSON.stringify(question)}` : '', 'Ask for it directly in one question.'].filter(Boolean).join('\n')
