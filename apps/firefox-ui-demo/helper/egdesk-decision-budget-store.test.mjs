@@ -59,7 +59,7 @@ test('a damaged file is set aside, logged without content, and counting restarts
   assert.equal(store.status, 'recovered')
   assert.equal(budget.snapshot().inputTokens, 0)
   assert.ok(fs.readdirSync(dir).some(n => n.startsWith(`${DECISION_BUDGET_FILE}.corrupt-`)))
-  assert.ok(logs.length === 1 && !logs[0].includes('-5'))
+  assert.ok(logs.length === 1 && !logs[0].includes('inputTokens') && !logs[0].includes('2026-11'))  // no file content (the set-aside name carries a random hex that can contain '-5')
 })
 
 test('a newer-version file is left untouched and never overwritten', () => {
