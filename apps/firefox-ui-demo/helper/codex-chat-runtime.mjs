@@ -5002,7 +5002,7 @@ export class CodexChatRuntime {
   /** The heartbeat of a live conversation (key: the local chat id, else the native thread id), or null. Objective loops register fact providers and subscribe to beats here. */
   // By the local chat id, or (L1 c14) by the run's native conversation id: a run's file viewer reports only { runId, conversationId }, and its placement
   // request must find the same session heartbeat. Read-only.
-  heartbeatFor(key) { return this.heartbeats.get(key) ?? (typeof key === 'string' ? this.heartbeatThreads.get(key) : undefined) }
+  heartbeatFor(key) { const hb = this.heartbeats.get(key); return hb ?? (typeof key === 'string' ? this.heartbeatThreads.get(key) : null) ?? hb }
 
   // The conversation's session heartbeat. It starts when the person's first message is accepted (before any pre-turn objective loop)
   // and is kept across the session's runs: a later message re-activates the same heartbeat, so facts and questions that providers

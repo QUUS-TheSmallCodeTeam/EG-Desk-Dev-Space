@@ -156,5 +156,5 @@ test('product path fixes found by this scenario: a run\'s file viewer finds its 
   assert.ok(w.chat.heartbeatFor(DM) && w.chat.heartbeatFor(out.conversationId) === w.chat.heartbeatFor(DM), 'the viewer\'s { runId, conversationId } reach the same heartbeat')
   assert.equal(w.chat.placementContextFor(out.conversationId).request, ASK, 'the request is there for the content questions, by either key')
   assert.equal(w.chat.placementContextFor(DM).request, ASK)
-  assert.equal(w.chat.heartbeatFor('nobody'), undefined)
+  assert.equal(w.chat.heartbeatFor('nobody'), null, 'an unknown key answers as before')
 })
