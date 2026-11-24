@@ -69,7 +69,10 @@ const FILL_RULES = [
   'Write every text in the language of the materials.',
 ].join('\n')
 export function fillPrompt(request) {
-  const scope = Array.isArray(request?.only) && request.only.length ? `Fill only these items again: ${request.only.join(', ')}.\n\n` : ''
+  // A rewrite after the check: closed words only for what was not supported by its material ("P2 line 2", "P1 explanation"); never the reviewer's text.
+  const rejected = Array.isArray(request?.rejected) ? request.rejected.filter(w => typeof w === 'string' && /^P[1-6] (?:explanation|line \d{1,2}|row \d{1,2} (?:left|right))$/.test(w)).slice(0, 24) : []
+  const scope = (Array.isArray(request?.only) && request.only.length ? `Fill only these items again: ${request.only.join(', ')}.\n` : '') +
+    (rejected.length ? `A check found these parts of your previous data not supported by the material they cite: ${rejected.join('; ')}. Write them from what the material says, or report the slot as unfillable.\n` : '') + (request?.only?.length || rejected.length ? '\n' : '')
   return `${FILL_FRAME}\n\n${scope}${dataBlock('Design guide (decided; do not change it)', request?.guide ?? null)}\n\n${dataBlock('Materials', request?.materials ?? [])}\n\nRules:\n${FILL_RULES}\n\nJSON shape: ${FILL_SHAPE}`
 }
 const unfence = value => { const m = /^\s*```[a-zA-Z]*\n([\s\S]*?)\n```\s*$/.exec(value); return (m ? m[1] : value).trim() }

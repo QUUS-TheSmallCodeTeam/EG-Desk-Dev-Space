@@ -1,23 +1,24 @@
 import { createHash } from 'node:crypto'
-import { choiceQuestion, predicateQuestion, readChoice, readPredicate } from './egdesk-decision-questions.mjs'
+import { predicateQuestion, readPredicate } from './egdesk-decision-questions.mjs'
 import { BRIEFING_LIMITS, enumerateBriefingFacts } from './egdesk-briefing-flow.mjs'
 import { BRIEFING_CATALOG, STEP_SLOTS, resultCardCapacity, textLines } from './egdesk-briefing-catalog.mjs'
 import { canvasViewSize, placeCanvasView } from '../overlay/resources/EGDeskSurfaceState.sys.mjs'
 
-// Answer Briefing, skeleton first (cycle 13; the order the owner fixed). The Decision model, a system-level judge working with the component catalog
-// (egdesk-briefing-catalog.mjs), decides the DESIGN GUIDE: bubble or board, which catalog component (or which existing card) shows each part, in which order;
-// code lays the chosen skeleton out with the product's real sizes and hands back closed check items the judge re-chooses on. Only then the subjective model is
-// asked, and only to FILL THE SLOTS of that guide with data from the materials. A second, bounded judgment checks the filled result; a part that cannot be
-// completed is re-chosen alone or dropped, otherwise the chat answer stays as it is.
-// Every option the judge sees exists as data first: parts are enumerated by code from the materials (links, dates, recorded status), options per part from the
-// catalog (what a component suits and needs) and from the cards already on the board (with provenance). The judge never writes a component, a slot or an order
-// that code did not list. Nothing here talks to a network, publishes, moves a camera or writes the Board: the host injects judge{} (bridge route) and fill().
+// Answer Briefing, skeleton first (cycle 13; the order the owner fixed), judged by yes/no predicates (cycle 15, after the first real measurement).
+// The Decision model, a system-level judge, answers closed yes/no questions about text it can read: does this request need several materials shown together; would
+// showing THESE quoted materials in THIS way help; which of two parts comes first when the record does not say; is this slot text supported by this quoted material.
+// CODE combines the answers into the design guide (board or bubble, the component per part with reuse first, the order) and computes everything it can compute itself
+// (layout with the product's real sizes, time order from the records, what is already on the board, fold proposals). Only then the subjective model is asked, and
+// only to FILL THE SLOTS of that guide with data from the materials; a part whose data is not supported is written again once or left out, otherwise the chat answer stays.
+// Every option exists as data first: parts are enumerated by code from the materials (links, dates, recorded status), ways of showing them from the catalog
+// (egdesk-briefing-catalog.mjs) and from the cards already on the board (with provenance). Nothing here talks to a network, publishes, moves a camera or writes the
+// Board: the host injects judge{} (bridge route) and fill().
 
-export const SKELETON_LIMITS = Object.freeze({ maxMaterials: 8, maxParts: 6, softSteps: 5, repairRounds: 2, rechooseRounds: 2, maxRequests: 14, judgeMs: 40_000, fillTurns: 3, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 300, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
-export const SKELETON_BARS = Object.freeze({ choice: .75, margin: .2, mismatch: .7 }) // placeholders until calibrated
-export const SKELETON_STAGES = Object.freeze(['place', 'parts', 'order', 'repair', 'fill_check', 'rechoose'])
-export const SKELETON_CHECKS = Object.freeze(['overflow', 'overlap', 'spread', 'too_many_steps', 'unreadable_order'])
-export const FILL_PROBLEMS = Object.freeze(['slot_empty', 'slot_mismatch', 'overflow', 'explanation_mismatch'])
+export const SKELETON_LIMITS = Object.freeze({ maxMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 6, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
+// A predicate counts as yes at or above `yes` and as no at or below `no`; anything between is undecided. Placeholders until calibrated (real predicates of the other features answer near 0 or 1).
+export const SKELETON_BARS = Object.freeze({ yes: .7, no: .3 })
+export const SKELETON_STAGES = Object.freeze(['place', 'fit', 'order', 'fill_check'])
+export const SKELETON_CHECKS = Object.freeze(['overflow', 'overlap', 'spread'])
 // Lane L7's closed vocabularies (memoryMaterials rows): link types and recorded status.
 const VERSION_LINKS = new Set(['supersedes', 'superseded_by']), LINK_TYPES = new Set(['same_task', 'follows_from', 'decided_in', 'supersedes', 'refers_to', 'superseded_by'])
 const STATUS = new Set(['plan', 'done', 'superseded', 'reported_by_other', 'unknown'])
@@ -65,7 +66,6 @@ export function materialGroups(mats) {
 }
 
 // ---------------- 2. what can be chosen at all: parts and their options, from data ----------------
-const TRAIT_WORDS = { compare: 'two versions of one thing', sequence: 'things that happened in an order', open_items: 'what is still open', single: 'one material on its own' }
 /**
  * enumerateSkeleton({ materials, candidates, currentAnswerId, catalog, bindings }) -> { materials, targets, shows, built, parts, retrievable }
  * targets: the cards already on the board (opaque aliases T#, provenance facts, rect) from the flow's own enumeration.
@@ -74,7 +74,7 @@ const TRAIT_WORDS = { compare: 'two versions of one thing', sequence: 'things th
  *      binding is exactly one material's key shows it, and a card built for the same set of materials and the same kind of part is that part's card (built).
  *   2. the same title, exactly. 3. one title inside the other, only when no other material and no other card would match the same way.
  * A card shows at most one material and a material is shown by at most one card. Folded, outdated or unbindable cards never count.
- * parts: per group of linked materials (materialGroups), [{ alias:'P#', trait, materials:[M#], options:[{ value, component? , reuse? }] }]; every part also has none_fits and bubble_enough.
+ * parts: per group of linked materials (materialGroups), [{ alias:'P#', trait, materials:[M#], options:[{ value, component? , reuse? }] }]. There is no "none" option: each option is asked about as its own yes/no.
  */
 export function enumerateSkeleton({ materials = [], candidates = [], currentAnswerId = null, catalog = BRIEFING_CATALOG, bindings = null } = {}) {
   const mats = normalizeMaterials(materials)
@@ -124,110 +124,91 @@ export function enumerateSkeleton({ materials = [], candidates = [], currentAnsw
     const reuse = same?.alias ?? (part.materials.length === 1 ? existing[0] : null)
     if (reuse) options.push({ value: `reuse_${reuse}`, reuse })
     const dates = part.materials.map(a => byAlias.get(a).at).filter(Boolean).sort()
-    return { alias, trait: part.trait, materials: part.materials, anchor: { min: dates[0] ?? null, max: dates.at(-1) ?? null }, options: [...options, { value: 'none_fits' }, { value: 'bubble_enough' }] }
-  })
+    return { alias, trait: part.trait, materials: part.materials, anchor: { min: dates[0] ?? null, max: dates.at(-1) ?? null }, options }
+  }).filter(part => part.options.length) // a part nothing in the catalog can show is not a part
   return { materials: mats, targets, shows, how, built, parts, retrievable: targets.filter(t => t.retrievable).map(t => t.alias).slice(0, 6), catalog }
 }
-const usableOptions = part => part.options.filter(o => o.component || o.reuse)
-
-// ---------------- 3. the judge: one closed request shape for every stage ----------------
+// ---------------- 3. the judge: yes/no predicates only; every judged item is quoted in its own question; code combines the answers ----------------
+// Real measurement (2026-11-24, 11 requests) of the earlier request shape: N-way choices with safe ways out ("bubble", "none_fits", "bubble_enough") went flat or to
+// the safe side, a "which comes next" choice whose options carried no content was refused, and a negated check over a JSON blob said "mismatch" for every step, right
+// or wrong. So (design rules R1-R4): the model reads the actual request and material text, each question is ONE yes/no about ONE quoted thing, and whatever code can
+// compute (layout, time order, what is already on the board, which fold to propose) is not asked.
 const MATERIAL_ALIAS = /^M[1-8]$/, TARGET_ALIAS = /^T(?:[1-9]|1[0-2])$/, PART_ALIAS = /^P[1-6]$/, REUSE_VALUE = /^reuse_(T(?:[1-9]|1[0-2]))$/
-const KIND_RULES = {
-  place: { about: v => v === 'answer', options: () => v => v === 'bubble' || v === 'board' },
-  part: { about: v => PART_ALIAS.test(v), options: c => v => c.ids.includes(v) || REUSE_VALUE.test(v) || v === 'none_fits' || v === 'bubble_enough', facts: ['trait', 'materials'] },
-  retrieve: { about: v => TARGET_ALIAS.test(v), options: () => v => v === 'keep' || v === 'retrieve' },
-  next: { about: v => v === 'order', options: () => v => PART_ALIAS.test(v), facts: ['position'] },
-  repair: { about: v => v === 'guide' || PART_ALIAS.test(v), options: () => v => ['keep', 'trim', 'drop', 'own_step', 'time_order'].includes(v) || PART_ALIAS.test(v), facts: ['item'] },
-  mismatch: { about: v => PART_ALIAS.test(v), predicate: true },
-  rechoose: { about: v => PART_ALIAS.test(v), options: c => v => c.ids.includes(v) || REUSE_VALUE.test(v) || v === 'refill' || v === 'drop', facts: ['problem'] },
-}
-const STAGE_KINDS = { place: ['place'], parts: ['part', 'retrieve'], order: ['next'], repair: ['repair'], fill_check: ['mismatch'], rechoose: ['rechoose'] }
-const questionName = q => (q.kind === 'place' ? 'place' : q.kind === 'next' ? 'next' : q.kind === 'repair' ? `repair_${q.facts.item}_${q.about}` : `${q.kind}_${q.about}`)
-const ORIGINS = new Set(['agent-earlier', 'agent-current', 'user', 'shared'])
+const TRAITS = ['compare', 'sequence', 'open_items', 'single']
+const STAGE_KINDS = { place: ['several', 'one_sentence'], fit: ['fit'], order: ['before'], fill_check: ['slot', 'step'] }
+const SHOW = { compare: 'how these two versions differ', sequence: 'what happened across these materials, in date order', open_items: 'what is still not done in these materials', single: 'this one material' }
+export const questionName = q => (q.kind === 'several' || q.kind === 'one_sentence' ? q.kind : q.kind === 'fit' ? `fit_${q.part}_${q.component}` : q.kind === 'before' ? `before_${q.first.part}_${q.second.part}`
+  : q.kind === 'slot' ? `slot_${q.part}_r${q.row}${q.side ? `_${q.side}` : ''}` : `step_${q.part}`)
 
-/** The closed object for one judgment, re-validated here (the bridge route is reachable from the chrome): unknown fields, aliases or option words refuse the whole request. */
+/** The closed object for one judgment, re-validated here (the bridge route is reachable from the chrome): unknown fields, aliases, components or stages refuse the whole request. */
 export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
   try {
-    if (!exactKeys(raw, ['stage', 'request', 'materials', 'components', 'questions'], ['steps']) || !SKELETON_STAGES.includes(raw.stage) || (raw.request !== '' && !plain(raw.request, SKELETON_LIMITS.requestMax))) return null
-    if (!Array.isArray(raw.materials) || raw.materials.length > SKELETON_LIMITS.maxMaterials || !Array.isArray(raw.components) || raw.components.length > BRIEFING_LIMITS.maxCandidates ||
-        !Array.isArray(raw.questions) || !raw.questions.length || raw.questions.length > 12) return null
-    const mats = new Set(), comps = new Set()
+    if (!exactKeys(raw, ['stage', 'request', 'materials', 'cards', 'questions']) || !SKELETON_STAGES.includes(raw.stage) || !plain(raw.request, SKELETON_LIMITS.requestMax)) return null
+    if (!Array.isArray(raw.materials) || !raw.materials.length || raw.materials.length > SKELETON_LIMITS.maxMaterials || !Array.isArray(raw.cards) || raw.cards.length > BRIEFING_LIMITS.maxCandidates ||
+        !Array.isArray(raw.questions) || !raw.questions.length || raw.questions.length > SKELETON_LIMITS.maxQuestions) return null
+    const mats = new Set(), cards = new Set()
     const materials = raw.materials.map(m => {
       if (!exactKeys(m, ['alias', 'title', 'text', 'at', 'status']) || !MATERIAL_ALIAS.test(m.alias) || mats.has(m.alias) || !plain(m.title, SKELETON_LIMITS.titleMax) || (m.text !== '' && !plain(m.text, SKELETON_LIMITS.excerptMax)) ||
           !(m.at === null || DATE.test(m.at)) || !STATUS.has(m.status)) throw 0
       mats.add(m.alias); return { alias: m.alias, title: m.title, text: m.text, at: m.at, status: m.status }
     })
-    const components = raw.components.map(c => {
-      if (!exactKeys(c, ['alias', 'origin', 'label', 'shows'], ['gist']) || !TARGET_ALIAS.test(c.alias) || comps.has(c.alias) || !ORIGINS.has(c.origin) || !plain(c.label, BRIEFING_LIMITS.labelMax) || (Object.hasOwn(c, 'gist') && !plain(c.gist, BRIEFING_LIMITS.gistMax)) ||
-          !Array.isArray(c.shows) || !c.shows.every(a => mats.has(a))) throw 0
-      comps.add(c.alias); return { alias: c.alias, origin: c.origin, label: c.label, ...(Object.hasOwn(c, 'gist') ? { gist: c.gist } : {}), shows: [...c.shows] }
+    const list = raw.cards.map(c => {
+      if (!exactKeys(c, ['alias', 'label'], ['gist']) || !TARGET_ALIAS.test(c.alias) || cards.has(c.alias) || !plain(c.label, BRIEFING_LIMITS.labelMax) || (Object.hasOwn(c, 'gist') && !plain(c.gist, BRIEFING_LIMITS.gistMax))) throw 0
+      cards.add(c.alias); return { alias: c.alias, label: c.label, ...(Object.hasOwn(c, 'gist') ? { gist: c.gist } : {}) }
     })
+    const partRef = p => {
+      if (!exactKeys(p, ['part', 'trait', 'materials', 'component']) || !PART_ALIAS.test(p.part) || !TRAITS.includes(p.trait) || !Array.isArray(p.materials) || !p.materials.length || new Set(p.materials).size !== p.materials.length || !p.materials.every(a => mats.has(a))) throw 0
+      const reuse = REUSE_VALUE.exec(p.component)?.[1]
+      if (reuse ? !cards.has(reuse) : !(catalog.get(p.component)?.purpose?.[p.trait])) throw 0
+      return { part: p.part, trait: p.trait, materials: [...p.materials], component: p.component }
+    }
     const names = new Set()
     const questions = raw.questions.map(q => {
-      const rule = KIND_RULES[q?.kind]
-      if (!rule || !STAGE_KINDS[raw.stage].includes(q.kind) || !exactKeys(q, rule.predicate ? ['kind', 'about'] : ['kind', 'about', 'options'], ['facts']) || !rule.about(q.about)) throw 0
-      const facts = {}
-      for (const f of rule.facts ?? []) {
-        const v = q.facts?.[f]
-        if (f === 'trait' ? !Object.hasOwn(TRAIT_WORDS, v) : f === 'materials' ? !(Array.isArray(v) && v.length && v.every(a => mats.has(a))) : f === 'position' ? !(Number.isInteger(v) && v >= 1 && v <= 6)
-          : f === 'item' ? !SKELETON_CHECKS.includes(v) : !FILL_PROBLEMS.includes(v)) throw 0
-        facts[f] = Array.isArray(v) ? [...v] : v
-      }
-      if (q.facts !== undefined && Object.keys(q.facts).length !== Object.keys(facts).length) throw 0
-      const out = { kind: q.kind, about: q.about, ...(rule.facts ? { facts } : {}) }
-      if (!rule.predicate) {
-        const ok = rule.options(catalog)
-        if (!Array.isArray(q.options) || q.options.length < 2 || q.options.length > 12 || new Set(q.options).size !== q.options.length || !q.options.every(v => typeof v === 'string' && ok(v))) throw 0
-        if (q.options.some(v => REUSE_VALUE.test(v) && !comps.has(REUSE_VALUE.exec(v)[1]))) throw 0
-        if (q.kind === 'retrieve' && !comps.has(q.about)) throw 0
-        out.options = [...q.options]
+      if (!isObj(q) || !STAGE_KINDS[raw.stage].includes(q.kind)) throw 0
+      let out
+      if (q.kind === 'several' || q.kind === 'one_sentence') { if (!exactKeys(q, ['kind'])) throw 0; out = { kind: q.kind } }
+      else if (q.kind === 'fit') { const { kind, ...rest } = q; out = { kind, ...partRef(rest) } }
+      else if (q.kind === 'before') { if (!exactKeys(q, ['kind', 'first', 'second'])) throw 0; out = { kind: 'before', first: partRef(q.first), second: partRef(q.second) }; if (out.first.part === out.second.part) throw 0 }
+      else if (q.kind === 'slot') {
+        if (!exactKeys(q, ['kind', 'part', 'row', 'text', 'material'], ['side', 'aspect']) || !PART_ALIAS.test(q.part) || !Number.isInteger(q.row) || q.row < 1 || q.row > 12 || !plain(q.text, SKELETON_LIMITS.slotTextMax) || !mats.has(q.material) ||
+            (q.side !== undefined && q.side !== 'left' && q.side !== 'right') || (q.aspect !== undefined && !plain(q.aspect, 40)) || ((q.side === undefined) !== (q.aspect === undefined))) throw 0
+        out = { kind: 'slot', part: q.part, row: q.row, ...(q.side ? { side: q.side, aspect: q.aspect } : {}), text: q.text, material: q.material }
+      } else {
+        if (!exactKeys(q, ['kind', 'part', 'text', 'shown']) || !PART_ALIAS.test(q.part) || !plain(q.text, BRIEFING_LIMITS.textMax) || !Array.isArray(q.shown) || !q.shown.length || q.shown.length > 3 ||
+            !q.shown.every(x => exactKeys(x, ['label', 'content']) && plain(x.label, BRIEFING_LIMITS.labelMax) && (x.content === '' || plain(x.content, SKELETON_LIMITS.contentMax)))) throw 0
+        out = { kind: 'step', part: q.part, text: q.text, shown: q.shown.map(x => ({ label: x.label, content: x.content })) }
       }
       const name = questionName(out)
       if (names.has(name)) throw 0
       names.add(name); return out
     })
-    let steps
-    if (raw.steps !== undefined) {
-      if (raw.stage !== 'fill_check' || !Array.isArray(raw.steps) || !raw.steps.length || raw.steps.length > SKELETON_LIMITS.maxParts) return null
-      steps = raw.steps.map(s => {
-        if (!exactKeys(s, ['alias', 'text', 'shows']) || !PART_ALIAS.test(s.alias) || !plain(s.text, BRIEFING_LIMITS.textMax) || !Array.isArray(s.shows) || !s.shows.length || s.shows.length > 3 ||
-            !s.shows.every(x => exactKeys(x, ['label', 'content']) && plain(x.label, BRIEFING_LIMITS.labelMax) && (x.content === '' || plain(x.content, SKELETON_LIMITS.contentMax)))) throw 0
-        return { alias: s.alias, text: s.text, shows: s.shows.map(x => ({ label: x.label, content: x.content })) }
-      })
-      if (questions.some(q => !steps.some(s => s.alias === q.about))) return null
-    } else if (raw.stage === 'fill_check') return null
-    return { stage: raw.stage, request: raw.request, materials, components, questions, ...(steps ? { steps } : {}) }
+    return { stage: raw.stage, request: raw.request, materials, cards: list, questions }
   } catch { return null }
 }
 
-const FRAME = 'Judge only from the listed data. Choose only a listed option; never invent a component, a card or an order.'
-const REPAIR_WORDS = {
-  overflow: 'the content planned for this part does not fit its card without scrolling',
-  overlap: 'the cards this step points at cover each other',
-  spread: 'the cards this step points at are too far apart to read at one view',
-  too_many_steps: 'the briefing has more steps than a reader follows at once',
-  unreadable_order: 'a step about later events comes before a step about earlier ones',
+const RULES = {
+  place: 'You are a system judge. An assistant has answered a person in a chat; below are the person\'s request and the stored materials the assistant had. Each question is separate: answer each on its own, whatever the others are. Judge only what the person asked for, from the request and the materials as quoted.',
+  fit: 'You are a system judge. Each question quotes ONE set of stored materials and names ONE way of showing them on a board beside a chat answer. Answer each question on its own, whatever the others are. Judge only from the quoted request and the quoted materials; never assume content they do not contain.',
+  order: 'You are a system judge. Each question describes TWO parts of a briefing by the materials they show. Answer each question on its own. Judge only which part a reader who has seen none of it should be shown first to follow the other.',
+  fill_check: 'You are a system judge checking a text against its source. Each question quotes ONE text and ONE source. Answer each question on its own, whatever the others are. Rewording, summarising and linking words are fine. A number, amount, date, name or event that the quoted source does not contain is NOT supported.',
 }
-const REPAIR_OPTIONS = { keep: 'keep it as it is', trim: 'show fewer rows so it fits', drop: 'leave this part out of the briefing', own_step: 'point this step at its own card only', time_order: 'put the steps in the order things happened' }
-const PROBLEM_WORDS = { slot_empty: 'the materials do not contain the data it needs', slot_mismatch: 'the data given for it does not fit its slots', overflow: 'the filled content does not fit its card', explanation_mismatch: 'its explanation says something its cards do not show' }
-function instructions(q, catalog) {
-  const describe = v => (REUSE_VALUE.test(v) ? `use the existing card ${REUSE_VALUE.exec(v)[1]}, no new card` : v === 'none_fits' ? 'no listed component can show this part; leave it to the chat answer'
-    : v === 'bubble_enough' ? 'this part does not need the board; the chat answer covers it' : v === 'refill' ? 'keep the component and have its data written again' : v === 'drop' ? 'leave this part out of the briefing'
-    : catalog.get(v) ? `${catalog.get(v).label}${catalog.get(v).renderer.creates ? ' (a new card)' : ''}` : REPAIR_OPTIONS[v] ?? `part ${v}`)
-  const options = () => q.options.map(v => ({ value: v, description: describe(v) }))
-  if (q.kind === 'place') return choiceQuestion('place', `The person made the request below and the answer is already written in the chat. Should it ALSO be laid out on the board as ordered steps built from the listed components, or is the chat message enough? The board is worth it only when several materials should be seen in order or against each other. Choose bubble when unsure. ${FRAME}`,
-    [{ value: 'bubble', description: 'the chat message is enough' }, { value: 'board', description: 'lay it out on the board with the listed components' }].filter(o => q.options.includes(o.value)))
-  if (q.kind === 'part') return choiceQuestion(questionName(q), `Part ${q.about} is about ${TRAIT_WORDS[q.facts.trait]} (materials ${q.facts.materials.join(', ')}). Does the request need it on the board, and if so which listed component should show it? Use an existing card before anything new. ${FRAME}`, options())
-  if (q.kind === 'retrieve') return choiceQuestion(questionName(q), `The existing card ${q.about} is an outdated output of an earlier answer and is still shown. Should folding it away on the person's own screen be proposed? Choose keep when unsure. ${FRAME}`,
-    [{ value: 'keep', description: 'leave it as it is' }, { value: 'retrieve', description: 'propose folding it away' }])
-  if (q.kind === 'next') return choiceQuestion('next', `Which of the remaining parts should come ${q.facts.position === 1 ? 'first' : 'next'} in the briefing so that a first-time reader can follow it? ${FRAME}`, options())
-  if (q.kind === 'repair') return choiceQuestion(questionName(q), `The planned layout was computed: ${REPAIR_WORDS[q.facts.item]}${q.about === 'guide' ? '' : ` (part ${q.about})`}. What should be done? ${FRAME}`, options())
-  if (q.kind === 'rechoose') return choiceQuestion(questionName(q), `The component chosen for part ${q.about} could not be completed: ${PROBLEM_WORDS[q.facts.problem]}. Decide for this part only. ${FRAME}`, options())
-  return predicateQuestion(questionName(q), `Does the explanation of step ${q.about} say something that the cards it points at do not show? ${FRAME}`)
+const quoteMaterial = m => `${m.alias} ${JSON.stringify({ title: m.title, ...(m.at ? { date: m.at } : {}), status: m.status, text: m.text })}`
+function questionText(q, c, catalog) {
+  // The request is the one user message of the request; each question quotes its own materials, text or source.
+  const mat = a => c.materials.find(m => m.alias === a)
+  const way = p => { const reuse = REUSE_VALUE.exec(p.component)?.[1], card = reuse ? c.cards.find(x => x.alias === reuse) : null
+    return card ? `the card that is already on the board for ${p.materials.length === 1 ? 'this material' : 'exactly these materials'} (its title, quoted: ${JSON.stringify(card.label)}); nothing new is made, a briefing step points at it` : catalog.get(p.component).purpose[p.trait].replace(/\.$/, '') }
+  if (q.kind === 'several') return 'To answer this request well, does the person need to see several of the listed materials together: side by side (for example two versions against each other) or one after another (for example what happened in order)?'
+  if (q.kind === 'one_sentence') return 'Is this request fully answered by one short sentence or a single fact (for example one number, one date, or yes or no)?'
+  if (q.kind === 'fit') return `Materials, each quoted as JSON: ${q.materials.map(a => quoteMaterial(mat(a))).join('; ')}. Way of showing them: ${way(q)}. Would it help the person with what they asked to show ${SHOW[q.trait]} this way? ` +
+    'Answer no if these materials do not contain what this way of showing needs, or if what the person asked does not call for it.'
+  if (q.kind === 'before') { const side = (p, x) => `Part ${x} shows ${SHOW[p.trait]}: ${p.materials.map(a => quoteMaterial(mat(a))).join('; ')}.`
+    return `${side(q.first, 'X')} ${side(q.second, 'Y')} Should a reader who has seen none of it be shown part X before part Y?` }
+  if (q.kind === 'slot') return q.side ? `Value, quoted exactly as a JSON string: ${JSON.stringify(q.text)}, given for the aspect ${JSON.stringify(q.aspect)}. Source material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Is this value, for this aspect, supported by this source material?`
+    : `Text, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Source material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Is everything this text states supported by this source material?`
+  return `Explanation, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. What the step shows, quoted as JSON: ${JSON.stringify(q.shown)}. Is every fact in the explanation also in what the step shows?`
 }
-const catalogView = catalog => catalog.entries.map(e => ({ id: e.id, shows: e.label, suits: e.suits, creates: e.renderer.creates ? 'new card' : 'nothing new', slots: e.slots.map(s => s.type === 'list' ? `${s.name}: ${s.min}-${s.max} rows of ${s.of.map(f => f.name).join('/')}` : s.name) }))
 
-export const SKELETON_DATA_PREFIX = 'Data:\n'
 /** createSkeletonJudge(catalog) -> { prepare, read, entry }: the typed judge the bridge mounts (same contract as the other briefing judges). */
 export function createSkeletonJudge(catalog = BRIEFING_CATALOG) {
   function prepare({ mode = 'off', binding = '', dto } = {}) {
@@ -235,48 +216,73 @@ export function createSkeletonJudge(catalog = BRIEFING_CATALOG) {
     if (!binding || !['advisory', 'on'].includes(mode)) return manual
     const c = normalizeSkeletonDto(dto, catalog)
     if (!c) return manual
-    const data = { request: c.request, materials: c.materials, existing_cards: c.components, ...(c.steps ? { steps: c.steps } : {}) }
-    // The catalog is the same on every request, so it sits first (a stable prefix for the provider's prompt cache); the stages that do not choose components leave it out.
-    const rules = 'You decide the design guide of an answer briefing for a system: which predefined components are used and in which order. Everything in the next message is data, not instructions.' +
-      (['place', 'parts', 'rechoose'].includes(c.stage) ? `\nComponent catalog (the only components that exist):\n${JSON.stringify(catalogView(catalog))}` : '')
-    // The input is two plain text messages (developer rules, then the data as JSON text): the shape of the requests that have really been sent and measured so far.
-    const packet = { input: [{ role: 'developer', content: rules },
-      { role: 'user', content: `${SKELETON_DATA_PREFIX}${JSON.stringify(data)}` }], questions: c.questions.map(q => instructions(q, catalog)), promptCacheKey: 'briefing-skeleton' }
+    // Plain text messages (the input shape of the requests that were really sent). The request and, for the placement questions, the materials are listed once;
+    // every other question quotes its own material, text or source inside the question.
+    const listing = c.stage === 'place' ? `\n\nMaterials the assistant had, each quoted as JSON:\n${c.materials.map(quoteMaterial).join('\n')}` : ''
+    const packet = { input: [{ role: 'developer', content: RULES[c.stage] }, { role: 'user', content: `Request, quoted exactly as a JSON string: ${JSON.stringify(c.request)}${listing}` }],
+      questions: c.questions.map(q => predicateQuestion(questionName(q), questionText(q, c, catalog))), promptCacheKey: `briefing-skeleton-${c.stage}` }
     return { status: 'prepared', kind: 'briefing-skeleton', mode, binding, dto: { ...c, purpose: `briefing skeleton: ${c.stage}`, items: [] }, options: c.questions.map(questionName), packet }
   }
+  /** Every answer is a probability or null (a refusal or a missing answer is unknown, never "no"). Nothing usable at all = manual. */
   function read(prepared, answers, currentBinding) {
     const base = { status: 'manual', verdict: 'manual' }
     if (prepared?.status !== 'prepared' || prepared.kind !== 'briefing-skeleton' || currentBinding !== prepared.binding) return base
     const out = {}
-    for (const q of prepared.dto.questions) {
-      const name = questionName(q)
-      if (KIND_RULES[q.kind].predicate) {
-        const r = readPredicate(answers, name, SKELETON_BARS.mismatch)
-        if (r.probability === null) return base
-        out[name] = { yes: r.state === 'yes', p: r.probability }
-      } else {
-        const r = readChoice(answers, name, { minConfidence: SKELETON_BARS.choice, minMargin: SKELETON_BARS.margin })
-        if (r.state === 'unknown' || !q.options.includes(r.value)) return base
-        out[name] = { value: r.state === 'accepted' ? r.value : null, p: r.confidence }
-      }
-    }
-    const verdict = prepared.dto.stage === 'place' ? (out.place.value ?? 'undecided') : 'ok'
-    return { status: 'ok', verdict, reply: { status: 'ok', stage: prepared.dto.stage, answers: out } }
+    for (const q of prepared.dto.questions) { const name = questionName(q); out[name] = readPredicate(answers, name, SKELETON_BARS.yes).probability }
+    if (Object.values(out).every(p => p === null)) return base
+    return { status: 'ok', verdict: prepared.dto.stage === 'place' ? decidePlace(out).value : 'ok', reply: { status: 'ok', stage: prepared.dto.stage, answers: out } }
   }
-  /** Content-free calibration record: one judgment per question, the bar that applied, what it would do. */
+  /** Content-free calibration record: one judgment per predicate, the bar that applied, what it would do. */
   function entry(prepared, answers, result) {
-    const decided = result?.reply?.answers ?? {}
     return { feature: 'board_arrangement', mode: prepared.mode, candidates: prepared.dto.questions.length, attached: prepared.mode === 'on' && result?.status === 'ok',
-      judgments: prepared.dto.questions.map(q => {
-        const name = questionName(q), a = answers?.[name]
-        if (KIND_RULES[q.kind].predicate) return { q: 'relevance', would: decided[name]?.yes ? 'accept' : 'reject', p: a?.probability, threshold: SKELETON_BARS.mismatch, kind: 'board' }
-        const rows = Array.isArray(a?.probabilities) ? a.probabilities : []
-        return { q: 'choice', would: decided[name]?.value ? 'accept' : 'hold', top: rows[0]?.probability, second: rows[1]?.probability, p: a?.confidence, threshold: SKELETON_BARS.choice, minMargin: SKELETON_BARS.margin, kind: 'board' }
-      }) }
+      judgments: prepared.dto.questions.map(q => { const p = answers?.[questionName(q)]?.probability
+        return { q: 'relevance', would: !Number.isFinite(p) ? 'hold' : p >= SKELETON_BARS.yes ? 'accept' : p <= SKELETON_BARS.no ? 'reject' : 'hold', p, threshold: SKELETON_BARS.yes, kind: 'board' } }) }
   }
   return Object.freeze({ prepare, read, entry })
 }
 export const SKELETON_JUDGE = createSkeletonJudge()
+
+// ---- code combines the answers ----
+const isYes = p => typeof p === 'number' && p >= SKELETON_BARS.yes, isNo = p => typeof p === 'number' && p <= SKELETON_BARS.no
+/** Board only when several materials are needed together AND one sentence would not do. Anything undecided stays in the bubble. */
+export function decidePlace(answers) {
+  if (isYes(answers?.one_sentence)) return { value: 'bubble', reason: 'judged-bubble' }
+  if (isYes(answers?.several) && isNo(answers?.one_sentence)) return { value: 'board', reason: null }
+  return { value: 'bubble', reason: isNo(answers?.several) ? 'judged-bubble' : 'placement-undecided' }
+}
+// Reuse first: an existing card, then a component that makes nothing new, then new cards in catalog order.
+const preference = (option, catalog) => (option.reuse ? 0 : catalog.get(option.component)?.renderer.creates ? 2 : 1)
+/** Per part, the options the judge said yes to, best first. A part with no yes is simply not on the board; no part at all = no component fits. */
+export function chooseParts(scene, answers) {
+  return scene.parts.map(part => {
+    const ranked = part.options.map((o, i) => ({ o, i, p: answers?.[`fit_${part.alias}_${o.value}`] ?? null })).filter(x => isYes(x.p)).sort((a, b) => preference(a.o, scene.catalog) - preference(b.o, scene.catalog) || a.i - b.i)
+    return { part, yes: ranked.map(x => x.o), decided: part.options.every(o => { const p = answers?.[`fit_${part.alias}_${o.value}`]; return isYes(p) || isNo(p) }) }
+  })
+}
+const FUTURE = '9999-12-31', DERIVES = new Set(['follows_from', 'decided_in', 'supersedes', 'refers_to'])
+/** Does the record say a comes before b? true / false / null (the record does not say: a tie). Time first (every material of a is earlier than every material of b; a plan without a date is in the future), then links (b's materials build on a's and not the other way round). */
+export function recordedBefore(a, b, scene) {
+  const by = new Map(scene.materials.map(m => [m.alias, m])), when = m => m.at ?? (m.open ? FUTURE : null)
+  const span = item => { const dates = item.materials.map(x => when(by.get(x))); return dates.includes(null) ? null : { min: [...dates].sort()[0], max: [...dates].sort().at(-1) } }
+  const sa = span(a), sb = span(b)
+  if (sa && sb) { if (sa.max < sb.min) return true; if (sb.max < sa.min) return false }
+  if (a.materials.some(x => b.materials.includes(x))) return null
+  const builds = (x, y) => x.materials.some(m => by.get(m).links.some(l => DERIVES.has(l.type) && y.materials.includes(l.to)))
+  const ab = builds(b, a), ba = builds(a, b)
+  return ab && !ba ? true : ba && !ab ? false : null
+}
+/** The order of the chosen parts: recorded time and links decide; for the pairs they leave open the judge's "X before Y" answer; an undecided pair keeps the code's own order. */
+export function orderItems(items, scene, answers = {}) {
+  const wins = new Map(items.map(i => [i.id, 0])), ties = []
+  for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
+    const a = items[i], b = items[j], rec = recordedBefore(a, b, scene)
+    const p = rec === null ? answers[`before_${a.id}_${b.id}`] : null
+    if (rec === null) ties.push([a, b])
+    const first = rec !== null ? rec : isNo(p) ? false : true // undecided or unasked: the code's own order (versions, sequence, open items, single)
+    wins.set(first ? a.id : b.id, wins.get(first ? a.id : b.id) + 1)
+  }
+  return { ordered: [...items].sort((x, y) => wins.get(y.id) - wins.get(x.id) || items.indexOf(x) - items.indexOf(y)), ties }
+}
 
 // ---------------- 4. layout of the chosen skeleton, by code, with the product's sizes ----------------
 const targetsOf = item => [...(item.creates ? [item.creates] : []), ...item.reuse]
@@ -299,45 +305,35 @@ export function layoutSkeleton(items, scene, viewport = null) {
   return { view, rects, capacity }
 }
 const rowSlot = entry => entry?.slots.find(s => s.type === 'list') ?? null
-/** How many rows the part may get: the component's own maximum, the number of materials for a sequence, a trim the judge chose. */
+/** How many rows the part may get: the component's own maximum, the number of materials for a sequence, a trim made by the layout rule. */
 export function plannedRows(item, catalog = BRIEFING_CATALOG) {
   const slot = rowSlot(catalog.get(item.component))
   if (!slot) return 0
   return Math.min(item.maxRows ?? slot.max, item.trait === 'sequence' ? Math.max(slot.min, item.materials.length) : slot.max)
 }
-/** The closed check items of a planned skeleton: [{ item, about, options }]. An item the judge answered "keep" for is not raised again. */
+/** The closed check items of a planned skeleton, each with the fix code applies: [{ item, about, fix, fitRows? }]. Layout is computed, so it is decided by rule, not asked. */
 export function skeletonChecks(items, layout, scene, catalog = BRIEFING_CATALOG) {
-  const out = [], kept = (item, name) => item.kept?.includes(name)
+  const out = []
   for (const item of items) {
     const entry = catalog.get(item.component), cap = layout.capacity.get(item.id)
-    if (entry?.size && cap && !kept(item, 'overflow')) {
+    if (entry?.size && cap) {
       const want = entry.size.baseLines + (entry.size.rowLines ? (item.trait === 'sequence' && !item.maxRows ? item.materials.length : plannedRows(item, catalog)) * entry.size.rowLines : Math.ceil(600 / Math.max(1, cap.widthPx / 13)))
       const fitRows = entry.size.rowLines ? Math.floor((cap.lines - entry.size.baseLines) / entry.size.rowLines) : 0
-      if (want > cap.lines) out.push({ item: 'overflow', about: item.id, options: [...(entry.size.rowLines && fitRows >= (rowSlot(entry)?.min ?? 1) ? ['trim'] : []), 'keep', 'drop'], fitRows })
+      if (want > cap.lines) out.push({ item: 'overflow', about: item.id, fix: entry.size.rowLines && fitRows >= (rowSlot(entry)?.min ?? 1) ? 'trim' : 'drop', fitRows })
     }
     const rects = targetsOf(item).map(a => layout.rects.get(a)).filter(Boolean)
     if (rects.length >= 2) {
       const x = Math.min(...rects.map(r => r.x)), y = Math.min(...rects.map(r => r.y)), w = Math.max(...rects.map(right)) - x, h = Math.max(...rects.map(bottom)) - y
-      const alone = item.creates ? ['own_step'] : []
-      if (!kept(item, 'spread') && Math.min(layout.view.width / w, layout.view.height / h) < SKELETON_LIMITS.readZoom) out.push({ item: 'spread', about: item.id, options: [...alone, 'keep', 'drop'] })
+      const fix = item.creates ? 'own_step' : 'drop'
       let covers = false
       for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) if (overlapArea(rects[i], rects[j]) > Math.min(area(rects[i]), area(rects[j])) * SKELETON_LIMITS.overlapShare) covers = true
-      if (covers && !kept(item, 'overlap')) out.push({ item: 'overlap', about: item.id, options: [...alone, 'keep', 'drop'] })
+      if (Math.min(layout.view.width / w, layout.view.height / h) < SKELETON_LIMITS.readZoom) out.push({ item: 'spread', about: item.id, fix })
+      else if (covers) out.push({ item: 'overlap', about: item.id, fix })
     }
   }
-  if (items.length > SKELETON_LIMITS.softSteps) out.push({ item: 'too_many_steps', about: 'guide', options: items.map(i => i.id) })
-  const backward = items.some((a, i) => items.slice(i + 1).some(b => a.anchor.min && b.anchor.max && a.anchor.min > b.anchor.max))
-  if (backward && !scene.keptOrder) out.push({ item: 'unreadable_order', about: 'guide', options: ['time_order', 'keep'] })
   return out
 }
-// What code does when the judge is unsure about a flagged item: the change that removes the problem, never "keep".
-const DEFAULT_REPAIR = check => (check.item === 'too_many_steps' ? check.options.at(-1) : check.item === 'unreadable_order' ? 'time_order' : check.options[0] === 'keep' ? 'drop' : check.options[0])
-function applyRepair(items, check, value, scene) {
-  if (check.item === 'too_many_steps') return items.filter(i => i.id !== value)
-  if (check.item === 'unreadable_order') { if (value === 'keep') { scene.keptOrder = true; return items } return [...items].sort((a, b) => (a.anchor.max ?? '9999').localeCompare(b.anchor.max ?? '9999') || a.id.localeCompare(b.id)) }
-  if (value === 'drop') return items.filter(i => i.id !== check.about)
-  return items.map(i => (i.id !== check.about ? i : value === 'trim' ? { ...i, maxRows: check.fitRows } : value === 'own_step' ? { ...i, reuse: [] } : { ...i, kept: [...(i.kept ?? []), check.item] }))
-}
+const applyFix = (items, check) => (check.fix === 'drop' ? items.filter(i => i.id !== check.about) : items.map(i => (i.id !== check.about ? i : check.fix === 'trim' ? { ...i, maxRows: check.fitRows } : { ...i, reuse: [] })))
 
 // ---------------- 5. the design guide, the fill request and the validation of what comes back ----------------
 function itemFor(part, option, scene, n) {
@@ -345,7 +341,7 @@ function itemFor(part, option, scene, n) {
   const existing = part.materials.map(a => scene.shows.get(a)).filter(Boolean)
   // A compare card also points at the versions that are already on the board; a pair step IS those two cards; a reuse step is that card.
   const reuse = option.reuse ? [option.reuse] : entry.id === 'step_pair' ? existing.slice(0, 2) : part.trait === 'compare' ? existing.slice(0, 2) : []
-  return { id: part.alias, trait: part.trait, materials: [...part.materials], anchor: part.anchor, component: option.component ?? null, reuse, creates: entry?.renderer.creates ? 'N' + n : null, emphasis: entry?.emphasis ?? 'spotlight', tried: [option.value] }
+  return { id: part.alias, trait: part.trait, materials: [...part.materials], component: option.component ?? null, reuse, creates: entry?.renderer.creates ? 'N' + n : null, emphasis: entry?.emphasis ?? 'spotlight', tried: [option.value] }
 }
 const slotsOf = (item, catalog) => (catalog.get(item.component)?.slots ?? []).map(s => (s.type === 'list' && item.maxRows ? { ...s, max: Math.min(s.max, item.maxRows) } : s))
 /** The design guide: ordered components with their slot schemas, the existing cards they reuse, and the fold proposals. This, and the materials, is all the subjective model gets. */
@@ -357,8 +353,9 @@ export function buildGuide(items, scene, retire = []) {
       step: STEP_SLOTS, slots: slotsOf(item, scene.catalog) })),
     retrievals: [...retire] }
 }
-export function fillRequest(guide, materials, only = null) {
-  return { kind: 'briefing_fill', ...(only ? { only: [...only] } : {}), guide: { ...guide, items: guide.items.filter(i => !only || only.has(i.id)) },
+/** only: fill just these items again. rejected: closed words for what was not supported last time (e.g. "P2 line 2", "P1 explanation"). */
+export function fillRequest(guide, materials, only = null, rejected = []) {
+  return { kind: 'briefing_fill', ...(only ? { only: [...only] } : {}), ...(rejected.length ? { rejected: [...rejected] } : {}), guide: { ...guide, items: guide.items.filter(i => !only || only.has(i.id)) },
     materials: materials.map(m => ({ alias: m.alias, title: m.title, text: m.text, at: m.at, status: m.status })) }
 }
 function readSlot(schema, value, item, reported) {
@@ -403,33 +400,51 @@ export function validateFill(guide, reply, { only = null } = {}) {
   }
   return { ok: true, title: only ? null : title, items, issues }
 }
+/**
+ * The questions of the check after the fill, for one item: every piece of slot text against the ONE material it cites, and the step explanation against what the step shows.
+ * [{ kind:'slot', part, row, side?, aspect?, text, material }, ..., { kind:'step', part, text, shown }]. `what` is the closed word for a rejected piece ("P2 line 2").
+ */
+export function fillChecks(item, data, scene, catalog = BRIEFING_CATALOG) {
+  const out = [], slots = data.slots ?? {}, cut = (v, max) => clean(v, max)
+  if (item.component === 'result_lines') slots.lines.forEach((row, i) => out.push({ kind: 'slot', part: item.id, row: i + 1, text: cut(`${row.label} ${row.text}`, SKELETON_LIMITS.slotTextMax), material: row.from }))
+  else if (item.component === 'result_compare') slots.rows.forEach((row, i) => { for (const side of ['left', 'right']) out.push({ kind: 'slot', part: item.id, row: i + 1, side, aspect: cut(row.aspect, 40), text: cut(row[side], SKELETON_LIMITS.slotTextMax), material: slots[side] }) })
+  else if (item.component === 'result_text') out.push({ kind: 'slot', part: item.id, row: 1, text: cut(slots.body, SKELETON_LIMITS.slotTextMax), material: item.materials[0] })
+  const markdown = item.creates ? catalog.render(item.component, slots) : null
+  const shown = [...(item.creates ? [{ label: cut(slots.title, BRIEFING_LIMITS.labelMax), content: cut(markdown.replace(/\*\*/g, '').split('\n').join(' / '), SKELETON_LIMITS.contentMax) }] : []),
+    ...item.reuse.map(a => { const t = scene.targets.find(x => x.alias === a); return { label: cut(t.label, BRIEFING_LIMITS.labelMax), content: cut(t.gist ?? '', SKELETON_LIMITS.contentMax) } })].slice(0, 3)
+  out.push({ kind: 'step', part: item.id, text: cut(data.text, BRIEFING_LIMITS.textMax), shown })
+  return out
+}
+export const rejectedWord = q => (q.kind === 'step' ? `${q.part} explanation` : `${q.part} ${q.side ? `row ${q.row} ${q.side}` : `line ${q.row}`}`)
 
 // ---------------- 6. the bounded loop ----------------
 /**
- * runSkeletonFlow({ request, materials, candidates, currentAnswerId, viewport, judge, fill, egress, allow, observeOnly, catalog }) -> one of
- *   { status:'bubble', reason }            no-materials | no-component-fits | judged-bubble | placement-undecided | bubble-enough | declined | judge-unavailable
+ * runSkeletonFlow({ request, materials, candidates, currentAnswerId, viewport, judge, fill, egress, allow, observeOnly, catalog, bindings }) -> one of
+ *   { status:'bubble', reason }            no-materials | no-component-fits | judged-bubble | placement-undecided | declined | judge-unavailable
  *   { status:'advisory-only' | 'observed' } recorded only
  *   { status:'presented', plan, newComponents:[{ alias, part, title, markdown }], retrievals, guide, stats }   the host publishes it as a proposal (same path as before)
- *   { status:'fallback-chat', reason }     the chat answer stays: layout-check-not-passed | fill-invalid | fill-check-not-passed | fill-bound | nothing-left | judge-unavailable | request-bound
+ *   { status:'fallback-chat', reason }     the chat answer stays: fill-invalid | fill-bound | nothing-left | judge-unavailable | request-bound
  * judge: { prepare(dto), run(ticket), cancel(ticket) } (the bridge route of SKELETON_JUDGE). fill(request) -> the subjective model's JSON object | null.
- * Bounds: SKELETON_LIMITS (at most 14 judgment requests and 40 s spent waiting for them in total, 3 fill turns). stats counts both and keeps what the subjective model received.
+ * Judgment requests: place (1), fit (1), order (0 or 1, only for pairs the record leaves open), fill check (1, plus 1 per rewrite round): 3 or 4 on the usual path, at most 6.
+ * Bounds: SKELETON_LIMITS. stats counts requests and fill turns and keeps what the subjective model received.
  */
 export async function runSkeletonFlow({ request = '', materials = [], candidates = [], currentAnswerId = null, viewport = null, judge, fill = null, egress = null, allow = async () => true, observeOnly = false, catalog = BRIEFING_CATALOG, now = Date.now, bindings = null } = {}) {
-  const stats = { judgeRequests: 0, judgeMs: 0, fillTurns: 0, stages: [], received: [] }
+  const stats = { judgeRequests: 0, judgeMs: 0, questions: 0, fillTurns: 0, stages: [], received: [] }
   const done = (status, extra = {}) => ({ status, ...extra, stages: [...new Set(stats.stages)], stats })
   // The same permissions as the run's own models: memory pages only if the run's model had them, card labels only if the cards may be sent, the request as the run's own data.
   if (egress && !egress.allows('draft_text')) return done('bubble', { reason: 'declined', requested: false })
   const scene = enumerateSkeleton({ materials: egress && !egress.allows('memory_page') ? [] : materials, candidates: egress && !egress.allows('canvas_text') ? [] : candidates, currentAnswerId, catalog, bindings })
+  const asked = clean(request, SKELETON_LIMITS.requestMax)
   if (!scene.materials.length) return done('bubble', { reason: 'no-materials', requested: false })
-  if (!scene.parts.some(p => usableOptions(p).length)) return done('bubble', { reason: 'no-component-fits', requested: false })
-  const base = { request: clean(request, SKELETON_LIMITS.requestMax), materials: scene.materials.map(m => ({ alias: m.alias, title: m.title, text: m.text, at: m.at, status: m.status })),
-    components: scene.targets.filter(t => t.targetable || t.retrievable).map(t => ({ alias: t.alias, origin: t.origin, label: clean(t.label, BRIEFING_LIMITS.labelMax), ...(clean(t.gist, BRIEFING_LIMITS.gistMax) ? { gist: clean(t.gist, BRIEFING_LIMITS.gistMax) } : {}), shows: [...scene.shows].filter(([, a]) => a === t.alias).map(([m]) => m) })) }
-  const ask = async (stage, questions, extra = {}) => {
+  if (!asked || !scene.parts.length) return done('bubble', { reason: asked ? 'no-component-fits' : 'no-request', requested: false })
+  const base = { request: asked, materials: scene.materials.map(m => ({ alias: m.alias, title: m.title, text: m.text, at: m.at, status: m.status })),
+    cards: scene.targets.filter(t => t.targetable).map(t => ({ alias: t.alias, label: clean(t.label, BRIEFING_LIMITS.labelMax), ...(clean(t.gist, BRIEFING_LIMITS.gistMax) ? { gist: clean(t.gist, BRIEFING_LIMITS.gistMax) } : {}) })) }
+  const ask = async (stage, questions) => {
     if (stats.judgeRequests >= SKELETON_LIMITS.maxRequests || stats.judgeMs >= SKELETON_LIMITS.judgeMs) return { unavailable: 'request-bound' }
-    const prepared = await judge.prepare({ stage, ...base, questions, ...extra })
+    const prepared = await judge.prepare({ stage, ...base, questions: questions.slice(0, SKELETON_LIMITS.maxQuestions) })
     if (prepared?.status !== 'prepared') return { unavailable: prepared?.reason ?? 'unavailable' }
     if (!(await allow(`briefing-skeleton-${stage}`, prepared.preview))) { await judge.cancel(prepared.ticket); return { unavailable: 'declined' } }
-    stats.judgeRequests++; stats.stages.push(stage)
+    stats.judgeRequests++; stats.questions += Math.min(questions.length, SKELETON_LIMITS.maxQuestions); stats.stages.push(stage)
     const started = now()
     const reply = await judge.run(prepared.ticket)
     stats.judgeMs += Math.max(0, now() - started)
@@ -437,139 +452,121 @@ export async function runSkeletonFlow({ request = '', materials = [], candidates
     return reply?.status === 'ok' && isObj(reply.answers) ? { answers: reply.answers } : { unavailable: reply?.reason ?? reply?.status ?? 'manual' }
   }
   const unavailable = (r, fallback) => (fallback ? done('fallback-chat', { reason: r.unavailable === 'request-bound' ? 'request-bound' : 'judge-unavailable', detail: r.unavailable }) : done('bubble', { reason: r.unavailable === 'declined' ? 'declined' : 'judge-unavailable', detail: r.unavailable, requested: false }))
+  const partRef = (part, option) => ({ part: part.alias, trait: part.trait, materials: part.materials, component: option.value })
+  const fitQuestions = scene.parts.flatMap(part => part.options.map(option => ({ kind: 'fit', ...partRef(part, option) })))
 
-  // (a) bubble or board
-  const partQuestions = [...scene.parts.filter(p => usableOptions(p).length).map(p => ({ kind: 'part', about: p.alias, options: p.options.map(o => o.value), facts: { trait: p.trait, materials: p.materials } })),
-    ...scene.retrievable.map(a => ({ kind: 'retrieve', about: a, options: ['keep', 'retrieve'] }))]
-  const placed = await ask('place', [{ kind: 'place', about: 'answer', options: ['bubble', 'board'] }])
+  // (a) bubble or board: two predicates on the request and the materials; code combines them
+  const placed = await ask('place', [{ kind: 'several' }, { kind: 'one_sentence' }])
   if (placed.unavailable) return unavailable(placed, false)
   if (placed.advisory !== undefined) {
-    if (placed.advisory === 'board') await ask('parts', partQuestions)
+    if (placed.advisory === 'board') await ask('fit', fitQuestions)
     return done('advisory-only', { verdict: placed.advisory, requested: true })
   }
-  if (placed.answers.place?.value !== 'board') return done('bubble', { reason: placed.answers.place?.value === 'bubble' ? 'judged-bubble' : 'placement-undecided', requested: true })
+  const place = decidePlace(placed.answers)
+  if (place.value !== 'board') return done('bubble', { reason: place.reason, requested: true, place: placed.answers })
 
-  // (b) per part: a catalog component, an existing card, "no component fits" or "the bubble is enough"; and the fold proposals
-  const chosen = await ask('parts', partQuestions)
-  if (chosen.unavailable) return unavailable(chosen, true)
-  if (chosen.advisory !== undefined) return done('advisory-only', { verdict: 'board', requested: true })
+  // (b) one predicate per (part, way of showing it); code takes the best decided yes, reuse first. All no = nothing fits.
+  const fits = await ask('fit', fitQuestions)
+  if (fits.unavailable) return unavailable(fits, true)
+  if (fits.advisory !== undefined) return done('advisory-only', { verdict: 'board', requested: true })
+  const chosen = chooseParts(scene, fits.answers), decisions = Object.fromEntries(chosen.map(c => [c.part.alias, c.yes[0]?.value ?? (c.decided ? 'no' : 'undecided')]))
   let n = 0, items = []
-  const decisions = {}
-  for (const part of scene.parts) {
-    const value = chosen.answers[`part_${part.alias}`]?.value ?? null, option = usableOptions(part).find(o => o.value === value)
-    decisions[part.alias] = value ?? 'undecided'
-    if (option) { const item = itemFor(part, option, scene, n + 1); if (item.creates) n++; items.push(item) }
-  }
-  const used = () => new Set(items.flatMap(i => i.reuse))
-  const retire = scene.retrievable.filter(a => chosen.answers[`retrieve_${a}`]?.value === 'retrieve')
-  if (!items.length) return done('bubble', { reason: Object.values(decisions).includes('none_fits') ? 'no-component-fits' : 'bubble-enough', requested: true, decisions })
+  const alternatives = new Map()
+  for (const c of chosen) { if (!c.yes.length) continue; const item = itemFor(c.part, c.yes[0], scene, n + 1); if (item.creates) n++; items.push(item); alternatives.set(c.part.alias, c.yes.slice(1)) }
+  if (!items.length) return done('bubble', { reason: 'no-component-fits', requested: true, decisions })
   if (observeOnly) return done('observed', { requested: true, decisions })
+  const dropped = []
+  if (items.length > SKELETON_LIMITS.softSteps) { for (const extra of items.slice(SKELETON_LIMITS.softSteps)) dropped.push({ part: extra.id, why: 'too_many_steps' }); items = items.slice(0, SKELETON_LIMITS.softSteps) }
 
-  // (c) order: "which comes next" among the remaining parts; the last one needs no question
-  const ordered = []
-  let remaining = [...items]
-  while (remaining.length > 1) {
-    const next = await ask('order', [{ kind: 'next', about: 'order', options: remaining.map(i => i.id), facts: { position: ordered.length + 1 } }])
-    if (next.unavailable) return unavailable(next, true)
-    const pick = remaining.find(i => i.id === next.answers.next?.value) ?? remaining[0] // unsure: the code's own order (versions, sequence, open items, single)
-    ordered.push(pick); remaining = remaining.filter(i => i !== pick)
+  // (c) order: the record's own time and links; only the pairs they leave open are asked, as "X before Y"
+  const optionOf = item => ({ value: item.component ?? `reuse_${item.reuse[0]}` })
+  const refOf = item => partRef(scene.parts.find(p => p.alias === item.id), optionOf(item))
+  let ordering = orderItems(items, scene), orderAnswers = {}
+  if (ordering.ties.length) {
+    const tied = await ask('order', ordering.ties.map(([a, b]) => ({ kind: 'before', first: refOf(a), second: refOf(b) })))
+    if (tied.unavailable) return unavailable(tied, true)
+    orderAnswers = tied.answers; ordering = orderItems(items, scene, orderAnswers)
   }
-  items = [...ordered, ...remaining]
+  items = ordering.ordered
 
-  // (d) layout by code with real sizes -> closed check items -> the judge re-chooses the flagged ones (bounded)
-  let layout = layoutSkeleton(items, scene, viewport), checks = skeletonChecks(items, layout, scene, catalog), repairs = 0
+  // (d) layout by code with real sizes; what does not fit is fixed by rule (fewer rows, the step's own card only, or leaving the part out). Nothing is asked.
   const repaired = []
-  while (checks.length) {
-    if (repairs >= SKELETON_LIMITS.repairRounds) return done('fallback-chat', { reason: 'layout-check-not-passed', checks: checks.map(c => c.item) })
-    repairs++
-    const fixed = await ask('repair', checks.map(c => ({ kind: 'repair', about: c.about, options: c.options, facts: { item: c.item } })))
-    if (fixed.unavailable) return unavailable(fixed, true)
-    for (const c of checks) { const value = fixed.answers[`repair_${c.item}_${c.about}`]?.value ?? DEFAULT_REPAIR(c); repaired.push({ item: c.item, about: c.about, value }); items = applyRepair(items, c, value, scene) }
-    if (!items.length) return done('bubble', { reason: 'bubble-enough', requested: true, decisions })
-    layout = layoutSkeleton(items, scene, viewport); checks = skeletonChecks(items, layout, scene, catalog)
+  let layout = layoutSkeleton(items, scene, viewport)
+  for (let round = 0; round < 3; round++) {
+    const checks = skeletonChecks(items, layout, scene, catalog)
+    if (!checks.length) break
+    for (const c of checks) { repaired.push({ item: c.item, about: c.about, value: c.fix }); items = applyFix(items, c) }
+    if (!items.length) return done('bubble', { reason: 'no-component-fits', requested: true, decisions, repaired })
+    layout = layoutSkeleton(items, scene, viewport)
   }
 
   // Fill: the subjective model gets the guide and the materials, nothing else, and returns slot data.
   if (typeof fill !== 'function') return done('fallback-chat', { reason: 'fill-invalid', detail: 'no-engine' })
-  let guide = buildGuide(items, scene, retire.filter(a => !used().has(a))), title = null
+  const used = () => new Set(items.flatMap(i => i.reuse)), retire = () => scene.retrievable.filter(a => !used().has(a)) // a fold is only a proposal the person applies: decided by rule
+  let guide = buildGuide(items, scene, retire()), title = null
   const filled = {}
-  const fillOnce = async only => {
+  const fillOnce = async (only, rejected = []) => {
     if (stats.fillTurns >= SKELETON_LIMITS.fillTurns) return { bound: true }
     stats.fillTurns++
-    const asked = fillRequest(guide, scene.materials, only)
-    stats.received.push({ turn: stats.fillTurns, keys: Object.keys(asked), items: asked.guide.items.map(i => `${i.id}:${i.component}`), materials: asked.materials.map(m => m.alias) })
-    return validateFill(guide, await fill(asked), { only })
+    const want = fillRequest(guide, scene.materials, only, rejected)
+    stats.received.push({ turn: stats.fillTurns, keys: Object.keys(want), items: want.guide.items.map(i => `${i.id}:${i.component}`), materials: want.materials.map(m => m.alias), ...(rejected.length ? { rejected } : {}) })
+    return validateFill(guide, await fill(want), { only })
   }
   let got = await fillOnce(null)
   if (!got.bound && !got.ok) got = await fillOnce(null) // one retry for a reply that is not the asked shape
   if (got.bound || !got.ok) return done('fallback-chat', { reason: got.bound ? 'fill-bound' : 'fill-invalid', detail: got.reason })
   title = got.title; Object.assign(filled, got.items)
-  let issues = got.issues, recheck = new Set(items.map(i => i.id)), rounds = 0
-  const rechosen = []
+  let issues = got.issues, pending = new Set(items.map(i => i.id))
+  const rejections = []
   const markdownOf = item => (item.creates ? catalog.render(item.component, filled[item.id].slots) : null)
   for (;;) {
-    // Check after fill. Code: empty or mismatched slots, content that does not fit. Judge: does each explanation match what its step points at (JEV-BRIEF-01).
-    const flagged = new Map()
+    // Check after the fill. Code: empty or mismatched slots, content that does not fit its card. Judge: each piece of slot text against the one material it cites,
+    // each explanation against what its step shows; every question quotes both sides.
+    const failing = new Map()
     for (const item of items) {
-      if (!recheck.has(item.id)) continue
+      if (!pending.has(item.id)) continue
       const mine = issues.filter(x => x.item === item.id)
-      if (mine.length) { flagged.set(item.id, mine.some(x => x.kind === 'empty') ? 'slot_empty' : 'slot_mismatch'); continue }
+      if (mine.length) { failing.set(item.id, { problem: mine.some(x => x.kind === 'empty') ? 'slot_empty' : 'slot_mismatch', words: [] }); continue }
       const cap = layout.capacity.get(item.id), md = markdownOf(item)
-      if (md !== null && cap && !item.kept?.includes('overflow') && textLines(md, cap.widthPx) > cap.lines) flagged.set(item.id, 'overflow')
+      if (md !== null && cap && textLines(md, cap.widthPx) > cap.lines) failing.set(item.id, { problem: 'overflow', words: [] })
     }
-    const toJudge = items.filter(i => recheck.has(i.id) && !flagged.has(i.id))
-    if (toJudge.length) {
-      const steps = toJudge.map(item => ({ alias: item.id, text: clean(filled[item.id].text, BRIEFING_LIMITS.textMax),
-        shows: [...(item.creates ? [{ label: clean(filled[item.id].slots.title, BRIEFING_LIMITS.labelMax), content: clean(markdownOf(item), SKELETON_LIMITS.contentMax) }] : []),
-          ...item.reuse.map(a => { const t = scene.targets.find(x => x.alias === a); return { label: clean(t.label, BRIEFING_LIMITS.labelMax), content: clean(t.gist ?? '', SKELETON_LIMITS.contentMax) } })].slice(0, 3) }))
-      const judged = await ask('fill_check', toJudge.map(i => ({ kind: 'mismatch', about: i.id })), { steps })
+    const questions = items.filter(i => pending.has(i.id) && !failing.has(i.id)).flatMap(item => fillChecks(item, filled[item.id], scene, catalog))
+    if (questions.length) {
+      const judged = await ask('fill_check', questions)
       if (judged.unavailable) return unavailable(judged, true)
-      for (const item of toJudge) { if (judged.answers[`mismatch_${item.id}`]?.yes) flagged.set(item.id, 'explanation_mismatch') }
+      // Supported means a decided yes. A refusal, a missing answer or anything in between is not support.
+      for (const q of questions.slice(0, SKELETON_LIMITS.maxQuestions)) if (!isYes(judged.answers[questionName(q)])) { const f = failing.get(q.part) ?? { problem: 'unsupported', words: [] }; f.words.push(rejectedWord(q)); failing.set(q.part, f) }
+      for (const q of questions.slice(SKELETON_LIMITS.maxQuestions)) failing.set(q.part, failing.get(q.part) ?? { problem: 'unsupported', words: [rejectedWord(q)] })
     }
-    if (!flagged.size) break
-    if (rounds >= SKELETON_LIMITS.rechooseRounds) return done('fallback-chat', { reason: 'fill-check-not-passed', problems: [...flagged.values()] })
-    rounds++
-    // Re-choose the flagged components only. Alternatives are data: the part's other options, for a comparison the existing card of one of its versions (show the one that exists),
-    // a rewrite (once, and not when the data itself is missing), or leaving it out.
-    const questions = [], alternatives = new Map()
-    for (const [id, problem] of flagged) {
-      const item = items.find(i => i.id === id), part = scene.parts.find(p => p.alias === id)
-      const others = usableOptions(part).filter(o => !item.tried.includes(o.value)).map(o => o.value)
-      const cards = (part.trait === 'compare' ? part.materials : []).map(a => scene.shows.get(a)).filter(Boolean).map(a => `reuse_${a}`).filter(v => !item.tried.includes(v) && !others.includes(v))
-      const options = [...others, ...cards, ...(problem !== 'slot_empty' && !item.refilled ? ['refill'] : []), 'drop']
-      alternatives.set(id, options)
-      if (options.length >= 2) questions.push({ kind: 'rechoose', about: id, options, facts: { problem } })
+    if (!failing.size) break
+    // What happens to a failing part is a rule: missing data -> the next way of showing it that was judged to fit, else leave it out; anything else -> written again
+    // once, with the closed words for what was not supported, else leave it out.
+    const again = new Set(), words = []
+    for (const [id, f] of failing) {
+      const index = items.findIndex(i => i.id === id), item = items[index], part = scene.parts.find(p => p.alias === id)
+      const next = f.problem === 'slot_empty' ? (alternatives.get(id) ?? []).find(o => !item.tried.includes(o.value)) : null
+      if (next) { const swapped = itemFor(part, next, scene, 0); items[index] = { ...swapped, creates: swapped.creates ? item.creates ?? 'N' + (++n) : null, tried: [...item.tried, next.value] }; delete filled[id]; again.add(id); rejections.push({ part: id, problem: f.problem, action: next.value }); continue }
+      if (f.problem !== 'slot_empty' && !item.refilled) { items[index] = { ...item, refilled: true }; again.add(id); words.push(...f.words); rejections.push({ part: id, problem: f.problem, action: 'rewrite', words: f.words }); continue }
+      items.splice(index, 1); delete filled[id]; dropped.push({ part: id, why: f.problem, words: f.words }); rejections.push({ part: id, problem: f.problem, action: 'drop', words: f.words })
     }
-    let answers = {}
-    if (questions.length) { const again = await ask('rechoose', questions); if (again.unavailable) return unavailable(again, true); answers = again.answers }
-    const refill = new Set()
-    for (const [id, problem] of flagged) {
-      const value = answers[`rechoose_${id}`]?.value ?? 'drop', index = items.findIndex(i => i.id === id), item = items[index]
-      rechosen.push({ part: id, problem, value, asked: alternatives.get(id).length >= 2 })
-      if (value === 'drop') { items.splice(index, 1); delete filled[id]; continue }
-      if (value === 'refill') { items[index] = { ...item, refilled: true }; refill.add(id); continue }
-      const part = scene.parts.find(p => p.alias === id), option = usableOptions(part).find(o => o.value === value) ?? { value, reuse: REUSE_VALUE.exec(value)?.[1] }
-      const swapped = itemFor(part, option, scene, 0)
-      items[index] = { ...swapped, creates: swapped.creates ? item.creates ?? 'N' + (++n) : null, tried: [...item.tried, value] }; refill.add(id)
-    }
-    if (!items.length) return done('fallback-chat', { reason: 'nothing-left', rechosen })
-    issues = []; recheck = refill
-    if (!refill.size) break
-    layout = layoutSkeleton(items, scene, viewport); guide = buildGuide(items, scene, retire.filter(a => !used().has(a)))
-    const again = await fillOnce(refill)
-    if (again.bound || !again.ok) return done('fallback-chat', { reason: again.bound ? 'fill-bound' : 'fill-invalid', detail: again.reason, rechosen })
-    Object.assign(filled, again.items); issues = again.issues
+    if (!items.length) return done('fallback-chat', { reason: 'nothing-left', rejections })
+    issues = []; pending = again
+    if (!again.size) break
+    layout = layoutSkeleton(items, scene, viewport); guide = buildGuide(items, scene, retire())
+    const rewritten = await fillOnce(again, words)
+    if (rewritten.bound || !rewritten.ok) return done('fallback-chat', { reason: rewritten.bound ? 'fill-bound' : 'fill-invalid', detail: rewritten.reason, rejections })
+    Object.assign(filled, rewritten.items); issues = rewritten.issues
   }
-  guide = buildGuide(items, scene, retire.filter(a => !used().has(a)))
+  guide = buildGuide(items, scene, retire())
 
   // The result, in the shape the host already publishes: new cards first (their text is rendered by CODE from the slot data), then the briefing that points at them.
-  const refOf = a => ({ ...scene.targets.find(t => t.alias === a).ref })
-  const stepSpecs = items.map((item, i) => ({ id: 's' + (i + 1), text: filled[item.id].text, fallback: clean(filled[item.id].fallback, 400), emphasis: item.emphasis, refs: item.reuse.map(refOf), news: item.creates ? [item.creates] : [] }))
+  const targetRef = a => ({ ...scene.targets.find(t => t.alias === a).ref })
+  const stepSpecs = items.map((item, i) => ({ id: 's' + (i + 1), text: filled[item.id].text, fallback: clean(filled[item.id].fallback, 400), emphasis: item.emphasis, refs: item.reuse.map(targetRef), news: item.creates ? [item.creates] : [] }))
   // materialKeys: what the card is built from, for the bridge to remember (provenance of the card; never part of a request).
   const keyOf = a => scene.materials.find(m => m.alias === a).key
   const newComponents = items.filter(i => i.creates).map(item => ({ alias: item.creates, part: item.id, component: item.component, trait: item.trait, materialKeys: item.materials.map(keyOf),
     title: clean(filled[item.id].slots.title, BRIEFING_LIMITS.labelMax), markdown: markdownOf(item) }))
   return done('presented', { plan: { title, stepSpecs, pendingSteps: stepSpecs.filter(s => !s.refs.length).map(s => s.id) }, newComponents,
     retrievals: guide.retrievals.map(a => { const t = scene.targets.find(x => x.alias === a); return { alias: a, id: t.id, ref: t.ref } }),
-    reuse: { reuse: [...used()], retire: [...guide.retrievals], created: newComponents.map(c => c.component) }, guide, decisions, repaired, rechosen, revisions: rounds })
+    reuse: { reuse: [...used()], retire: [...guide.retrievals], created: newComponents.map(c => c.component) }, guide, decisions, order: { ties: ordering.ties.map(([a, b]) => `${a.id}/${b.id}`), answers: orderAnswers }, repaired, rejections, dropped, revisions: rejections.filter(r => r.action === 'rewrite').length })
 }

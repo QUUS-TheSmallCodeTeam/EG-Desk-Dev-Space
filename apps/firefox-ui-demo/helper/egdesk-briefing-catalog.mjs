@@ -43,16 +43,21 @@ const CARD = Object.freeze({ surface: 'result card', via: 'egdesk_publish_output
 const card = (lines, rowLines = 0) => Object.freeze({ width: RESULT_CARD_METRICS.width, height: RESULT_CARD_METRICS.height, minWidth: RESULT_CARD_METRICS.minWidth, minHeight: RESULT_CARD_METRICS.minHeight, baseLines: lines, rowLines })
 
 const ENTRIES = [
-  { id: 'result_compare', label: 'two versions set against each other, one line per aspect', renderer: CARD, suits: ['compare'], needs: { materials: { min: 2, max: 2 }, existing: 0 }, emphasis: 'outline',
+  { id: 'result_compare', label: 'two versions set against each other, one line per aspect', renderer: CARD, suits: ['compare'],
+    purpose: { compare: 'a new card that sets the two versions against each other, one line per aspect: the old value, then the new value. It needs a value for the same aspect in BOTH versions.' }, needs: { materials: { min: 2, max: 2 }, existing: 0 }, emphasis: 'outline',
     slots: [text('title', 40), material('left'), material('right'), list('rows', 1, 6, [text('aspect', 20), text('left', 60), text('right', 60)])], size: card(1, 3) },
   { id: 'step_pair', label: 'the two existing cards shown together in one step', renderer: Object.freeze({ surface: 'briefing step', via: 'egdesk_publish_briefing_multi: two targets, outline emphasis', creates: null }), suits: ['compare'],
+    purpose: { compare: 'one briefing step that shows the two cards of these two versions, which are already on the board, together. Nothing new is made.' },
     needs: { materials: { min: 2, max: 2 }, existing: 2 }, emphasis: 'outline', slots: [], size: null },
-  { id: 'result_lines', label: 'an ordered list of short lines, one per item', renderer: CARD, suits: ['sequence', 'open_items'], needs: { materials: { min: 1, max: 8 }, existing: 0 }, emphasis: 'spotlight',
+  { id: 'result_lines', label: 'an ordered list of short lines, one per item', renderer: CARD, suits: ['sequence', 'open_items'],
+    purpose: { sequence: 'a new card with a short list in date order: one line of plain text per material, saying what happened then. It is a plain list, not a table and not a chart.',
+      open_items: 'a new card with a short list of what is not done yet: one line of plain text per open item. It is a plain list, not a table and not a chart.' }, needs: { materials: { min: 1, max: 8 }, existing: 0 }, emphasis: 'spotlight',
     slots: [text('title', 40), list('lines', 2, 6, [text('label', 24), text('text', 90), material('from')])], size: card(0, 3) },
-  { id: 'result_text', label: 'one short text card', renderer: CARD, suits: ['single'], needs: { materials: { min: 1, max: 1 }, existing: 0 }, emphasis: 'spotlight',
+  { id: 'result_text', label: 'one short text card', renderer: CARD, suits: ['single'],
+    purpose: { single: 'a new card with one short paragraph of plain text about this one material. It is plain text, not a table and not a chart.' }, needs: { materials: { min: 1, max: 1 }, existing: 0 }, emphasis: 'spotlight',
     slots: [text('title', 40), text('body', 600)], size: card(0, 0) },
 ]
-const freezeEntry = e => Object.freeze({ ...e, suits: Object.freeze([...e.suits]), needs: Object.freeze({ materials: Object.freeze({ ...e.needs.materials }), existing: e.needs.existing }), slots: Object.freeze([...e.slots]) })
+const freezeEntry = e => Object.freeze({ ...e, purpose: Object.freeze({ ...(e.purpose ?? {}) }), suits: Object.freeze([...e.suits]), needs: Object.freeze({ materials: Object.freeze({ ...e.needs.materials }), existing: e.needs.existing }), slots: Object.freeze([...e.slots]) })
 
 // Templates over the result card's real renderer: bold label, plain text, one line each. Values are slot data only; nothing here adds a word of its own.
 const esc = value => String(value).replace(/[\\`*_[\]<>]/g, '\\$&').replace(/\s+/g, ' ').trim()
@@ -84,6 +89,8 @@ export function registerComponent(catalog, entry, render = null) {
   if (!entry || typeof entry.id !== 'string' || !/^[a-z][a-z0-9_]{1,31}$/.test(entry.id) || catalog.get(entry.id)) throw new TypeError('component id must be new and closed')
   if (!Array.isArray(entry.suits) || !entry.suits.length || !entry.suits.every(t => MATERIAL_TRAITS.includes(t))) throw new TypeError('suits must name known material traits')
   if (!Array.isArray(entry.slots) || !entry.slots.every(validSlot)) throw new TypeError('slots must be a valid slot schema')
+  // The Decision model is asked about a component in plain language (cycle 15): every trait it suits needs one sentence saying what it shows and what it is not.
+  if (!entry.suits.every(t => typeof entry.purpose?.[t] === 'string' && entry.purpose[t].length >= 20 && entry.purpose[t].length <= 300 && !/[\u0000-\u001f]/.test(entry.purpose[t]))) throw new TypeError('purpose must describe the component for every trait it suits')
   if (!entry.needs?.materials || !Number.isInteger(entry.needs.materials.min) || !Number.isInteger(entry.needs.materials.max) || !Number.isInteger(entry.needs.existing)) throw new TypeError('needs must be numbers')
   if (entry.renderer?.creates && typeof render !== 'function') throw new TypeError('a component that creates a card needs a render function')
   return build([...catalog.entries, freezeEntry(entry)], render ? { ...catalog.renderers, [entry.id]: render } : catalog.renderers)
