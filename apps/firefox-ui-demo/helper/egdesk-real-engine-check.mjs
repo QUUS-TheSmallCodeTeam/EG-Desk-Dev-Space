@@ -49,7 +49,8 @@ export const KILL_GRACE_MS = 2000
 // the product's advisory draft check (records only; the posted answer is the model's own) and the command gate. Every other flag is off.
 // flags that do something only when the Decision model answers: without --decisions a script that sets one would pass or fail for the wrong reason
 export const DECISION_DEPENDENT_FLAGS = Object.freeze(['EGDESK_DRAFT_CHECK', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_TERMINAL_GATE', 'EGDESK_DECISION_WARMUP', ...hookDecisionFlags()])
-export const DEFAULT_DECISION_FLAGS = Object.freeze({ EGDESK_DRAFT_CHECK: 'advisory' })
+// c24: nothing is on by default any more; the draft check is a conversation's own opt-in (conversation.draftCheck in the script, like memory) because it costs Decision calls
+export const DEFAULT_DECISION_FLAGS = Object.freeze({})
 // The bridge's decisionContext keys and the developer flags behind them that this composition reproduces. A test compares this list with
 // codex-bridge-server.mjs, so a key or flag the bridge gains and this composition lacks fails loudly instead of being silently absent.
 export const BRIDGE_COMPOSITION = Object.freeze({
@@ -57,9 +58,9 @@ export const BRIDGE_COMPOSITION = Object.freeze({
   keys: ['settingsGeneration', 'mode', 'configured', 'client', 'budgetMs', 'coldBudgetMs', 'warm', 'warmup', 'inRunMessages', 'calibrationLog', 'turnMemory', 'browserEntry', 'draftCheck', 'conversationFlow',
     'relevanceRules', 'commandJudge', 'terminalGate', 'workingMemory', 'topicRecipient', 'recipientForChatChoice', 'reviewRevision', 'memoryEvidence', 'collect'],
   // top-level options of the bridge's new CodexChatRuntime({ … }) that this composition passes (request / respond / toolProviders etc. are the check's own)
-  runtimeKeys: ['contexts', 'toolProviders', 'ownToolsWiring', 'roomAccount', 'store', 'requireStore', 'getOwnerKey', 'emit', 'emitLegacy'],
+  runtimeKeys: ['contexts', 'toolProviders', 'ownToolsWiring', 'roomAccount', 'store', 'requireStore', 'getOwnerKey', 'emit', 'emitLegacy', 'agentReloadReuse'],
   flags: ['EGDESK_DRAFT_CHECK', 'EGDESK_DRAFT_CHECK_DESIGN', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_TERMINAL_GATE', 'EGDESK_TERMINAL_GATE_METHOD',
-    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP', ...hookFlags()],
+    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP', 'EGDESK_AGENT_RELOAD_REUSE', ...hookFlags()],
   // present in the bridge, deliberately not reproduced: each needs a window, the Desk, a store this check does not open, or another lane's module
   notReproduced: {
     keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration'],
@@ -68,6 +69,48 @@ export const BRIDGE_COMPOSITION = Object.freeze({
            'EGDESK_HUD_ROUTING', 'EGDESK_TERMINAL_JUDGE', 'EGDESK_CONTEXT_ROOTS', 'EGDESK_FIREFOX_PROFILE', 'EGDESK_CLAUDE_READER', 'EGDESK_CLAUDE_DELETE_SESSION', 'EGDESK_CHAT_CHOICE'],
   },
 })
+
+// ---- persisted threads (c24, --persisted-with-cleanup) ----
+// A product-like fork needs a PERSISTED source thread (Main's smoke-5: thread/fork of an ephemeral source fails with "no rollout found"). Such a thread lands in the
+// Codex home's history, so the mode is only allowed when its removal can be guaranteed: the binary's generated schema has thread/delete (checked before anything
+// starts), every thread the check creates is written to <out>/created-threads.jsonl the moment the engine answers, each persisted one is deleted with thread/delete
+// and verified gone (thread/resume must fail with "no rollout found") at the end of its conversation, also after an abort, and a ledger that still lists a thread
+// that is not verified gone (a killed run) refuses the next start until --cleanup-leftovers has removed it.
+export const LEDGER_FILE = 'created-threads.jsonl'
+export const THREAD_GONE = /no rollout found|not found|does not exist|unknown thread/i
+export function createLedger(out, { now = Date.now } = {}) {
+  const file = path.join(out, LEDGER_FILE)
+  return {
+    file,
+    append(entry) { makeDirs(out); fs.appendFileSync(file, `${JSON.stringify({ at: now(), ...entry })}\n`, { mode: 0o600 }) },
+    read() { try { return fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(line => { try { return JSON.parse(line) } catch { return null } }).filter(Boolean) } catch { return [] } },
+  }
+}
+/** Persisted threads the ledger shows as created and not verified gone. */
+export function leftoverThreads(entries) {
+  const created = new Map(), gone = new Set()
+  for (const e of entries) { if (e.op === 'created' && e.ephemeral !== true && typeof e.id === 'string') created.set(e.id, e); else if (e.op === 'gone') gone.add(e.id) }
+  return [...created.keys()].filter(id => !gone.has(id))
+}
+/** deleteAndVerify(request, ids, ledger) → { persisted, deleted, verifiedGone, failures: [{ id, step, error }] }. Never throws; no retries. */
+export async function deleteAndVerify(request, ids, ledger) {
+  const out = { persisted: ids.length, deleted: 0, alreadyGone: 0, verifiedGone: 0, failures: [] }
+  for (const id of ids) {
+    let deleteError = null
+    try { await request('thread/delete', { threadId: id }); out.deleted++; ledger?.append({ op: 'deleted', id }) }
+    catch (error) { deleteError = { id, step: 'delete', error: clip(error?.message ?? error?.code ?? 'error', 200) } }
+    try {
+      await request('thread/resume', { threadId: id }) // a thread that is gone cannot be resumed
+      out.failures.push({ id, step: 'verify', error: 'still_resumable' })
+      try { await request('thread/unsubscribe', { threadId: id }) } catch { /* best effort */ }
+    } catch (error) {
+      if (THREAD_GONE.test(String(error?.message ?? ''))) { out.verifiedGone++; ledger?.append({ op: 'gone', id }); if (deleteError) { out.alreadyGone++; deleteError = null } } // already gone is clean
+      else out.failures.push({ id, step: 'verify', error: clip(error?.message ?? error?.code ?? 'error', 200) })
+    }
+    if (deleteError) out.failures.push(deleteError)
+  }
+  return out
+}
 
 const usage = message => Object.assign(new Error(message), { code: 'usage' })
 const isExecutable = file => { try { fs.accessSync(file, constants.X_OK); return fs.statSync(file).isFile() } catch { return false } }
@@ -87,11 +130,14 @@ export const HELP = `Usage: node scripts/egdesk-real-engine-check.mjs --codex-bi
   --model <id>, --effort <low|medium|high|…>   per-turn model and effort (otherwise the home's configuration applies)
   --app-server-config k=v    an extra -c k=v for the app-server (repeatable)
   --turn-timeout-ms <n>      per scripted turn (default ${DEFAULT_TURN_TIMEOUT_MS}); on timeout the turn is interrupted once and the conversation ends
+  --persisted-with-cleanup   persisted source threads (so product-like forks work); every thread the check creates is deleted with thread/delete and verified gone at the end of its
+                   conversation; refuses to start when the binary has no thread/delete or an earlier run left threads (see --cleanup-leftovers); default: ephemeral threads only
+  --cleanup-leftovers        delete and verify gone the threads an earlier killed run left in <out>/created-threads.jsonl (needs --codex-bin, a home, --out; no script)
   --json           print the plan or the summary as JSON`
 
 /** parseArgs(argv, env) → options. Throws { code: 'usage' }. */
 export function parseArgs(argv, env = process.env) {
-  const o = { mode: 'dry', codexBin: null, home: null, scripts: [], out: null, decisions: false, model: null, effort: null, appServerConfig: [], turnTimeoutMs: DEFAULT_TURN_TIMEOUT_MS, json: false, help: false }
+  const o = { mode: 'dry', codexBin: null, home: null, scripts: [], out: null, decisions: false, model: null, effort: null, appServerConfig: [], persisted: false, cleanupLeftovers: false, turnTimeoutMs: DEFAULT_TURN_TIMEOUT_MS, json: false, help: false }
   const takes = new Set(['--codex-bin', '--codex-home', '--script', '--out', '--model', '--effort', '--app-server-config', '--turn-timeout-ms'])
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -100,6 +146,8 @@ export function parseArgs(argv, env = process.env) {
     if (arg === '--run') { o.mode = 'run'; continue }
     if (arg === '--decisions') { o.decisions = true; continue }
     if (arg === '--json') { o.json = true; continue }
+    if (arg === '--persisted-with-cleanup') { o.persisted = true; continue }
+    if (arg === '--cleanup-leftovers') { o.cleanupLeftovers = true; continue }
     if (arg === '--person-home') { if (o.home) throw usage('give --codex-home or --person-home, not both'); o.home = { kind: 'person', dir: null }; continue }
     if (!takes.has(arg)) throw usage(`unknown argument ${arg}`)
     const value = argv[++i]
@@ -118,7 +166,7 @@ export function parseArgs(argv, env = process.env) {
   if (!path.isAbsolute(o.codexBin)) throw usage('--codex-bin must be an absolute path')
   if (!o.home) throw usage('give --codex-home <dir> or --person-home')
   if (o.home.kind === 'dir' && !path.isAbsolute(o.home.dir)) throw usage('--codex-home must be an absolute path')
-  if (!o.scripts.length) throw usage('at least one --script is required')
+  if (!o.scripts.length && !o.cleanupLeftovers) throw usage('at least one --script is required')
   if (!o.out) throw usage('--out is required')
   if (!path.isAbsolute(o.out)) o.out = path.resolve(o.out)
   if (o.out.split(path.sep).includes('.codex')) throw usage('--out must not be inside a .codex folder')
@@ -168,7 +216,7 @@ export function preflight(options, scripts, { env = process.env, exists = isExec
     if (needs.length) problems.push(`scripted "yes" approvals are read by the Decision model, so they need --decisions: ${needs.join(', ')}`)
     const seeded = scripts.flatMap(({ script }) => script.conversations.filter(memoryNeedsDecisions).map(c => `${script.set}/${c.id}`)) // memory hook
     if (seeded.length) problems.push(`seeded memory pages are picked and read by the Decision model, so they need --decisions: ${seeded.join(', ')}`)
-    const flagged = scripts.flatMap(({ script }) => script.conversations.filter(c => Object.keys(c.flags ?? {}).some(k => DECISION_DEPENDENT_FLAGS.includes(k))).map(c => `${script.set}/${c.id} (${Object.keys(c.flags).filter(k => DECISION_DEPENDENT_FLAGS.includes(k)).join(', ')})`))
+    const flagged = scripts.flatMap(({ script }) => script.conversations.filter(c => c.draftCheck || Object.keys(c.flags ?? {}).some(k => DECISION_DEPENDENT_FLAGS.includes(k))).map(c => `${script.set}/${c.id} (${[...(c.draftCheck ? ['draftCheck'] : []), ...Object.keys(c.flags ?? {}).filter(k => DECISION_DEPENDENT_FLAGS.includes(k))].join(', ')})`))
     if (flagged.length) problems.push(`these flags act only through the Decision model, so they need --decisions: ${flagged.join('; ')}`)
   }
   return problems
@@ -179,9 +227,10 @@ export function planRun(options, scripts, { env = process.env, buildLaunch = bui
   return {
     mode: options.mode, codexBin: options.codexBin,
     home: options.home.kind === 'person' ? { kind: 'person', note: 'CODEX_HOME unset: the person\'s own Codex home and login; the check never reads that folder' } : { kind: 'dir', dir: options.home.dir },
+    threads: options.persisted ? { kind: 'persisted-with-cleanup', ledger: path.join(options.out, LEDGER_FILE), note: 'created in the Codex home, deleted with thread/delete and verified gone at the end of each conversation' } : { kind: 'ephemeral' },
     out: options.out, decisions: options.decisions, model: options.model, effort: options.effort, turnTimeoutMs: options.turnTimeoutMs,
     appServer: { argv: [options.codexBin, ...appServerArgs(options, buildLaunch)], env: Object.keys(childEnv(options, env)), perConversation: true, processGroupKill: `SIGTERM, ${KILL_GRACE_MS}ms grace, SIGKILL` },
-    rules: ['ephemeral threads only (thread/start and thread/fork without ephemeral:true are refused)', 'own tools ON; the engine runs in EG-Desk\'s empty folder', 'scripted approver: yes/no answers sent as the person\'s next message',
+    rules: [options.persisted ? 'persisted threads, each deleted and verified gone at the end of its conversation (the binary must have thread/delete; the ledger must be clean)' : 'ephemeral threads only (thread/start and thread/fork without ephemeral:true are refused)', 'own tools ON; the engine runs in EG-Desk\'s empty folder', 'scripted approver: yes/no answers sent as the person\'s next message',
       'no retries', `Decision calls only with --decisions (key from ${DECISION_KEY_ENV}), through the run's egress gate`],
     conversations: scripts.flatMap(({ file, script }) => script.conversations.map(c => ({ set: script.set, file, id: c.id, scratch: path.join(options.out, 'scratch', c.id), files: Object.keys(c.folder ?? {}).length,
       flags: { ...(options.decisions ? DEFAULT_DECISION_FLAGS : {}), ...(c.flags ?? {}), EGDESK_OWN_TOOLS: 'on' }, turns: c.turns.map(t => ({ say: clip(t.say, 80), approve: t.approve ?? [], expects: Object.keys(t.expect ?? {}) })) }))),
@@ -190,7 +239,7 @@ export function planRun(options, scripts, { env = process.env, buildLaunch = bui
 
 export function formatPlan(plan, warnings = []) {
   const lines = [`real-engine check (${plan.mode === 'dry' ? 'DRY: nothing is started' : 'RUN'})`, `  binary: ${plan.codexBin}`, `  home: ${plan.home.kind === 'person' ? plan.home.note : plan.home.dir}`, `  out: ${plan.out}`,
-    `  decisions: ${plan.decisions ? `on (key from ${DECISION_KEY_ENV})` : 'off'}`, `  app-server: ${plan.appServer.argv.join(' ')}   (env: ${plan.appServer.env.join(', ')}${plan.home.kind === 'dir' ? ', CODEX_HOME' : ''})`]
+    `  threads: ${plan.threads.kind === 'ephemeral' ? 'ephemeral only' : `PERSISTED, then deleted and verified gone (${plan.threads.note}; ledger ${plan.threads.ledger})`}`, `  decisions: ${plan.decisions ? `on (key from ${DECISION_KEY_ENV})` : 'off'}`, `  app-server: ${plan.appServer.argv.join(' ')}   (env: ${plan.appServer.env.join(', ')}${plan.home.kind === 'dir' ? ', CODEX_HOME' : ''})`]
   for (const c of plan.conversations) {
     lines.push(`  conversation ${c.set}/${c.id}: scratch ${c.scratch}, ${c.files} files, flags ${Object.entries(c.flags).map(([k, v]) => `${k}=${v}`).join(' ')}`)
     c.turns.forEach((t, i) => lines.push(`    turn ${i + 1}: "${t.say}"${t.approve.length ? ` approve=${t.approve.join(',')}` : ''} expects ${t.expects.join(',') || '-'}`))
@@ -244,7 +293,10 @@ export async function runConversation({ options, set, conversation, deps = {} })
   const scratch = path.join(options.out, 'scratch', conversation.id), dataDir = conversationDir
   makeDirs(options.out); makeDirs(path.join(options.out, 'scratch')); makeDirs(path.join(options.out, 'data')); makeDirs(dataDir)
   writeScratch(scratch, conversation.folder)
-  const flags = { ...(options.decisions ? DEFAULT_DECISION_FLAGS : {}), ...(conversation.flags ?? {}), EGDESK_OWN_TOOLS: 'on' }
+  // the draft check is the conversation's own opt-in (conversation.draftCheck: { mode, design? }), like memory; explicit flags still win
+  const dc = conversation.draftCheck
+  const flags = { ...(options.decisions ? DEFAULT_DECISION_FLAGS : {}), ...(dc ? { EGDESK_DRAFT_CHECK: dc.mode, ...(dc.design === 'choice' ? { EGDESK_DRAFT_CHECK_DESIGN: 'choice' } : {}) } : {}), ...(conversation.flags ?? {}), EGDESK_OWN_TOOLS: 'on' }
+  const persisted = options.persisted === true, ledger = persisted ? (deps.ledger ?? createLedger(options.out)) : null, createdThreads = []
   const FLAG = { ...flags }
   const hooks = CHECK_HOOKS.filter(h => h.active(FLAG)) // features registered in helper/egdesk-real-engine-hooks.mjs (the briefing flow, ...); attached once the runtime exists
   let attached = []
@@ -266,8 +318,8 @@ export async function runConversation({ options, set, conversation, deps = {} })
   const memoryHook = createMemoryHook(conversation.memory) // memory hook: seeded pages, what the product sent, the memory expectations
   const journeyHook = createJourneyHook() // journey hook: what reached the engine for a message typed into a working run (turn/steer, turn/interrupt)
   const completions = [], tasks = []
-  const turnNow = { notifications: [], toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [] }
-  const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = [] }
+  const turnNow = { notifications: [], toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [], draftRows: [] }
+  const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = [] }
   let initializeResult = null, lastThreadStart = null
   const rpc = new AppServerRpc({
     send: payload => child.stdin.write(`${payload}\n`), experimentalApi: true, timeoutMs: 60_000,
@@ -322,16 +374,20 @@ export async function runConversation({ options, set, conversation, deps = {} })
 
     // ---- the runtime, composed the way codex-bridge-server.mjs composes it ----
     const request = async (method, params) => {
-      if ((method === 'thread/start' || method === 'thread/fork') && params?.ephemeral !== true) throw Object.assign(new Error('every thread of this check must be ephemeral'), { code: 'ephemeral_required' })
+      if (!persisted && (method === 'thread/start' || method === 'thread/fork') && params?.ephemeral !== true) throw Object.assign(new Error('every thread of this check must be ephemeral'), { code: 'ephemeral_required' })
       const start = performance.now()
       memoryHook.observe(method, params) // memory hook
       journeyHook.observe(method, params) // journey hook
       try {
         const result = await rpc.request(method, params)
         rec.requests.push({ method, ms: ms(start) })
-        if (method === 'thread/start') { lastThreadStart = result; if (result?.thread?.ephemeral !== true) { rec.aborted ??= 'thread_not_ephemeral' } }
+        if (method === 'thread/start') { lastThreadStart = result; if (!persisted && result?.thread?.ephemeral !== true) { rec.aborted ??= 'thread_not_ephemeral' } }
+        // persisted mode: every thread the engine reports is in the ledger before anything else happens with it (a crash leaves the record of what to delete)
+        if (persisted && (method === 'thread/start' || method === 'thread/fork') && typeof result?.thread?.id === 'string') {
+          const row = { id: result.thread.id, ephemeral: result.thread.ephemeral === true }; createdThreads.push(row); ledger.append({ op: 'created', via: method, ...row })
+        }
         return result
-      } catch (error) { rec.requests.push({ method, ms: ms(start), error: String(error?.code ?? 'error').slice(0, 40) }); throw error }
+      } catch (error) { rec.requests.push({ method, ms: ms(start), error: String(error?.code ?? 'error').slice(0, 40), message: clip(error?.message ?? '', 300) }); throw error }
     }
     const respond = (id, result, error) => {
       const call = turnNow.toolCalls.get(id)
@@ -341,7 +397,10 @@ export async function runConversation({ options, set, conversation, deps = {} })
     store = openChatStore({ dataDir: path.join(dataDir, 'chat'), ownerScope: `real-engine-check:${conversation.id}` })
     const settingsDir = path.join(dataDir, 'settings')
     const settings = openBridgeSettings({ dataDir: settingsDir, log() {} })
-    const calibrationLog = openCalibrationLog({ dataDir: settingsDir, log() {} })
+    const calibrationBase = openCalibrationLog({ dataDir: settingsDir, log() {} })
+    // the draft check records one calibration row per check (closed words): the check keeps a copy per turn so a script can say whether it ran
+    // (the log object is frozen: an inheriting wrapper, not a Proxy, so that only record is replaced)
+    const calibrationLog = Object.create(calibrationBase, { record: { value: row => { try { if (row?.feature === 'draft_check') turnNow.draftRows.push({ mode: row.mode ?? null, attached: row.attached === true, fallback: typeof row.fallback === 'string' ? row.fallback : null }) } catch { /* recording only */ } return calibrationBase.record(row) }, enumerable: true } })
     const KEY = options.decisions ? String(env[DECISION_KEY_ENV] ?? '').trim() : null
     const decisionCall = []
     const transport = options.decisions && !deps.fetchImpl ? createDecisionTransport() : null
@@ -349,8 +408,8 @@ export async function runConversation({ options, set, conversation, deps = {} })
       const started = performance.now(); let questions = []
       try { questions = JSON.parse(String(init?.body ?? '{}')).questions ?? [] } catch {}
       const response = await (deps.fetchImpl ?? transport.fetch)(url, init)
-      const row = { names: questions.map(q => q.name), ms: ms(started), status: response?.status ?? null, p: {} }
-      try { const body = JSON.parse(await response.clone().text()); for (const a of body.answers ?? []) row.p[a.name ?? a.id ?? '?'] = a.type === 'predicate' ? Math.round(a.probability * 100) / 100 : a.type === 'choice' ? (a.choice ?? a.picked ?? '?') : a.type } catch {}
+      const row = { names: questions.map(q => q.name), ms: ms(started), status: response?.status ?? null, inputTokens: null, p: {} }
+      try { const body = JSON.parse(await response.clone().text()); row.inputTokens = Number.isFinite(body?.usage?.input_tokens) ? body.usage.input_tokens : null; for (const a of body.answers ?? []) row.p[a.name ?? a.id ?? '?'] = a.type === 'predicate' ? Math.round(a.probability * 100) / 100 : a.type === 'choice' ? (a.choice ?? a.picked ?? '?') : a.type } catch {}
       turnNow.decisions.push(row); decisionCall.push(row)
       return response
     }
@@ -398,11 +457,12 @@ export async function runConversation({ options, set, conversation, deps = {} })
     }
     chat = new CodexChatRuntime({ request, respond,
       ...(needsNative ? { getBoardPeerContract: () => nativeContract?.boardPeerContract ?? null, getSteerContract: () => nativeContract?.steerContract ?? null, getThreadDelete: () => nativeContract?.threadDelete === true } : {}), emit: () => {}, emitLegacy: () => {}, store, requireStore: true, contexts, getOwnerKey: () => OWNER, verifyFile: async () => null, resolveProjectWorkspace: async () => null,
+      ...(FLAG.EGDESK_AGENT_RELOAD_REUSE === 'on' ? { agentReloadReuse: true } : {}), // inert without an Agent-profile conversation (L7 c27)
       toolProviders: wiring.toolProviders, ownTools: wiring.ownTools, decisionContext,
       roomAccount: { mode: () => (FLAG.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') } })
     chat.setConnection(true)
     try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
-    attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog }))
+    attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests }))
     rec.phases.composedMs = ms(t0)
     // The one registration point for another lane's module (the briefing hook, memory seeding): deps.extensions = [{ name, setup(ctx) → { afterTurn?(record, info), finish?() } }].
     // setup runs once the runtime is composed; afterTurn after every scripted turn record; finish at the end of the conversation (its value is kept in
@@ -425,7 +485,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const beginTurn = async text => {
       resetTurnNow(); runnerLog.length = 0
       const started = performance.now()
-      const run = await chat.send({ message: text, clientThreadId, requestId: `req-${++requestSeq}`, cwd: scratch, ...Object.assign({}, ...attached.map(a => a.sendExtra?.() ?? {})), ...(first ? { stateless: true } : { conversationId: nativeThread }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
+      const run = await chat.send({ message: text, clientThreadId, requestId: `req-${++requestSeq}`, cwd: scratch, ...Object.assign({}, ...attached.map(a => a.sendExtra?.() ?? {})), ...(first ? (persisted ? {} : { stateless: true }) : { conversationId: nativeThread }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
       first = false; nativeThread = run.conversationId
       return { run, started }
     }
@@ -439,7 +499,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
         if (status === 'timeout') { try { await rpc.request('turn/interrupt', { threadId: run.conversationId, turnId: run.runId }) } catch {} rec.aborted ??= 'turn_timeout' }
       }
       await Promise.allSettled(tasks.splice(0)); try { await chat.queue } catch {} try { await chat.draftCheckIdle() } catch {} await sleep(30); await Promise.allSettled(tasks.splice(0))
-      return { run, status, error: done?.error ?? null, latencyMs: ms(started), toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], commandsRan: [...runnerLog] }
+      return { run, status, error: done?.error ?? null, latencyMs: ms(started), toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], draftRows: [...turnNow.draftRows], commandsRan: [...runnerLog] }
     }
     const sendAndWait = async text => finishTurn(await beginTurn(text))
     // a message typed into the working run, afterMs after that turn started; not a turn of its own (the run's turn keeps going)
@@ -522,7 +582,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       for (const a of attached) if (turn.expect?.[a.name] !== undefined && a.afterTurn) hookRecords[a.name] = await a.afterTurn({ run: sub.at(-1).run, say: turn.say, answer: posted.at(-1) ?? null, turnIndex: index + 1 })
       const flat = {
         hooks: hookRecords, toolCalls: sub.flatMap(s => s.toolCalls), native: sumNative(sub), posted, asked, commandsRan: sub.flatMap(s => s.commandsRan), files: readFiles(turn), undoRecords: undoCount(),
-        turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted),
+        turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted), draftCheckRows: sub.reduce((n, s) => n + (s.draftRows?.length ?? 0), 0),
       }
       const memory = memoryHook.finishTurn(turn.expect?.memory) // memory hook
       const journey = journeyHook.finishTurn({ expect: turn.expect, nextExpect: withMessage ? next.expect : null, latencyMs: sub[0].latencyMs, counts, steerContract: FLAG.EGDESK_INRUN_MESSAGES === 'on' ? typeof nativeContract?.boardPeerContract === 'string' : null }) // journey hook
@@ -530,7 +590,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
       await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
-        ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, asked, undoRecords: flat.undoRecords, ...(memory.record ? { memory: memory.record } : {}), ...(journey.record ? { journey: journey.record } : {}), expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
+        ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...(memory.record ? { memory: memory.record } : {}), ...(journey.record ? { journey: journey.record } : {}), expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {
         // the message typed into the run: what happened after it was sent
         const prev = sub[0], after = texts.slice(mark.posted)
@@ -550,6 +610,14 @@ export async function runConversation({ options, set, conversation, deps = {} })
     rec.abortDetail = clip(error?.message ?? '', 300)
     if (stderrTail) rec.engineStderrTail = clip(stderrTail.replace(/\s+/g, ' '), 600)
   } finally {
+    // persisted mode: the threads this conversation created are deleted and verified gone BEFORE the engine goes, also after an abort
+    if (persisted) {
+      const ids = createdThreads.filter(t => !t.ephemeral).map(t => t.id)
+      try { rec.cleanup = await deleteAndVerify((method, params) => rpc.request(method, params), ids, ledger) }
+      catch (error) { rec.cleanup = { persisted: ids.length, deleted: 0, verifiedGone: 0, failures: [{ id: '*', step: 'cleanup', error: clip(error?.message ?? 'error', 200) }] } }
+      rec.cleanup.ephemeral = createdThreads.length - ids.length
+      if (rec.cleanup.failures.length) { rec.ok = false; rec.cleanupFailed = true }
+    }
     await stop()
     try { store?.close() } catch {}
     rec.totalMs = ms(t0)
@@ -558,9 +626,49 @@ export async function runConversation({ options, set, conversation, deps = {} })
 }
 
 /** run(options, scripts, deps) → { records, ok } and writes <out>/records/<set>/<id>.json plus <out>/summary.json. Sequential: one conversation at a time. */
+/** Refuses (code cleanup_not_guaranteed) before anything starts when persisted threads could be left behind. */
+export function assertCleanupGuaranteed(options, deps = {}, env = process.env) {
+  if (!options.persisted) return
+  makeDirs(options.out)
+  const ledger = deps.ledger ?? createLedger(options.out), left = leftoverThreads(ledger.read())
+  if (left.length) throw Object.assign(new Error(`an earlier run left ${left.length} persisted thread(s) listed in ${ledger.file}; run with --cleanup-leftovers first`), { code: 'cleanup_not_guaranteed', leftovers: left })
+  let native = null
+  try { native = (deps.inspectNative ?? inspectNativeCapabilities)({ executable: options.codexBin, env: childEnv(options, env), cwd: options.out }) } catch { native = null }
+  if (native?.threadDelete !== true) throw Object.assign(new Error('the binary\'s generated schema has no thread/delete (or could not be read), so removing the threads the check creates cannot be guaranteed'), { code: 'cleanup_not_guaranteed' })
+}
+
+/**
+ * cleanupLeftovers(options, deps) → { leftovers, deleted, verifiedGone, failures }: starts one app-server on the given home, deletes the persisted threads the ledger
+ * shows as created and not verified gone, verifies each gone, and stops the app-server (process group). Starts nothing when the ledger is clean.
+ */
+export async function cleanupLeftovers(options, deps = {}) {
+  const env = deps.env ?? process.env, ledger = deps.ledger ?? createLedger(options.out), ids = leftoverThreads(ledger.read())
+  const result = { leftovers: ids.length, deleted: 0, verifiedGone: 0, failures: [] }
+  if (!ids.length) return result
+  const spawn = deps.spawn ?? nodeSpawn, killGroup = deps.killGroup ?? createGroupKiller()
+  makeDirs(options.out)
+  const child = spawn(options.codexBin, appServerArgs(options, deps.buildLaunch ?? buildCodexAppServerLaunch), { cwd: options.out, env: childEnv(options, env), shell: false, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  let initializeResult = null, buffer = ''
+  const rpc = new AppServerRpc({ send: payload => child.stdin.write(`${payload}\n`), experimentalApi: true, timeoutMs: 60_000, onNotification: () => {}, onRequest: () => {} })
+  child.on('close', () => { try { rpc.close(Object.assign(new Error('the Codex app-server exited'), { code: 'engine_exited' })) } catch {} })
+  child.on('error', () => {})
+  child.stdout?.on('data', chunk => { buffer += chunk; let at; while ((at = buffer.indexOf('\n')) >= 0) { const line = buffer.slice(0, at); buffer = buffer.slice(at + 1); if (!line.trim()) continue; try { const m = JSON.parse(line); if (m.id === 1 && m.result?.codexHome) initializeResult = m.result } catch {} rpc.receive(line) } })
+  try {
+    await rpc.initialize()
+    if (options.home.kind === 'dir') {
+      const same = initializeResult?.codexHome === options.home.dir || (() => { try { return fs.realpathSync(initializeResult?.codexHome) === fs.realpathSync(options.home.dir) } catch { return false } })()
+      if (!same) throw Object.assign(new Error('the app-server reports another Codex home than --codex-home'), { code: 'home_mismatch' })
+    }
+    Object.assign(result, await deleteAndVerify((method, params) => rpc.request(method, params), ids, ledger), { leftovers: ids.length })
+  } catch (error) { result.failures.push({ id: '*', step: 'start', error: clip(error?.message ?? error?.code ?? 'error', 200) }) }
+  finally { try { rpc.close() } catch { /* closed */ } await killGroup(child) }
+  return result
+}
+
 export async function runCheck(options, scripts, deps = {}) {
   const records = []
   makeDirs(options.out)
+  assertCleanupGuaranteed(options, deps, deps.env ?? process.env)
   for (const { script } of scripts) {
     for (const conversation of script.conversations) {
       const rec = await runConversation({ options, set: script.set, conversation, deps })
@@ -569,7 +677,7 @@ export async function runCheck(options, scripts, deps = {}) {
       fs.writeFileSync(path.join(dir, `${conversation.id}.json`), `${JSON.stringify(rec, null, 2)}\n`, { mode: 0o600 })
     }
   }
-  const summary = { at: new Date().toISOString(), ok: records.every(r => r.ok), conversations: records.map(r => ({ set: r.set, id: r.id, ok: r.ok, aborted: r.aborted, turns: r.turns.length, failedChecks: r.turns.flatMap(t => t.expectations.filter(e => !e.ok).map(e => `${t.index}:${e.check}`)), totalMs: r.totalMs })) }
+  const summary = { at: new Date().toISOString(), ok: records.every(r => r.ok), conversations: records.map(r => ({ set: r.set, id: r.id, ok: r.ok, aborted: r.aborted, ...(r.cleanup ? { cleanup: { persisted: r.cleanup.persisted, deleted: r.cleanup.deleted, verifiedGone: r.cleanup.verifiedGone, failures: r.cleanup.failures.length } } : {}), turns: r.turns.length, failedChecks: r.turns.flatMap(t => t.expectations.filter(e => !e.ok).map(e => `${t.index}:${e.check}`)), totalMs: r.totalMs })) }
   fs.writeFileSync(path.join(options.out, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o600 })
   return { records, summary, ok: summary.ok }
 }

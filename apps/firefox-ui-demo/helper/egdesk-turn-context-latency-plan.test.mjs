@@ -150,3 +150,61 @@ test('body-size probe: two runs (product warm-up body vs the 648-token one, each
   assert.match(read(run(1500, 1200), run(1400, 1100)), /^warm-up did not help/)
   assert.deepEqual(SIZE_RUNS.map(([d]) => d), ['S1-small', 'S2-large'])
 })
+
+test('separating probe: N1, N2 (warm-up, then the same socket, then a NEW socket) and Y1 (a reused socket after a 10-minute idle), <= 4k estimated, record only, committed files match', async () => {
+  const { SEP_CEILING, SEP_DIR, SEP_ESTIMATE_BOUND, SEP_IDLE_WAIT_MS, SEP_RUNS, SEP_SOCKET_IDLE_MS, SEP_WAIT_LIMIT_MS, buildSeparationPlan } = await import('./egdesk-turn-context-latency-plan.mjs')
+  const { CONTENT_FREE_REQUESTS } = await import('./egdesk-decision-egress.mjs')
+  const built = await buildSeparationPlan(), sDir = path.join(dir, '..', path.basename(SEP_DIR))
+  assert.deepEqual(built.runs.map(r => r.dir), ['N1', 'N2', 'Y1'])
+  assert.ok(built.totals.estInputTokens <= SEP_ESTIMATE_BOUND && built.totals.ceilings <= SEP_CEILING, JSON.stringify(built.totals))
+  assert.equal(built.totals.requests, 8)
+  const bodies = new Set()
+  for (const run of built.runs) {
+    assert.ok(readFileSync(path.join(sDir, run.dir, 'plan.json')).equals(run.planBytes), `${run.dir}/plan.json is stale`)
+    for (const f of run.files) { assert.ok(readFileSync(path.join(sDir, run.dir, f.file)).equals(f.bytes)); bodies.add(f.bytes.toString('utf8')) }
+    const plan = loadPlan(path.join(sDir, run.dir, 'plan.json'))
+    assert.equal(plan.transport, 'product'); assert.match(plan.passRule, /at least 10 minutes with no Decisions request/)
+    assert.ok(plan.requests.every(r => r.recordOnly && r.groupingOk))
+    assert.ok(plan.totals.fittedEst * 1.1 <= plan.tokenCeiling)
+  }
+  assert.equal(bodies.size, 6, 'the five turn_context bodies all differ; the three warm-up bodies are the one fixed product body (the product sends it every time)')
+  const plans = Object.fromEntries(built.runs.map(r => [r.dir, loadPlan(path.join(sDir, r.dir, 'plan.json'))]))
+  for (const n of ['N1', 'N2']) {
+    assert.deepEqual(plans[n].requests.map(r => [r.id, r.waitBeforeMs, r.freshSocket]), [['warmup', 0, false], ['same', 1000, false], ['fresh', 1000, true]])
+    assert.deepEqual([plans[n].transportIdleMs, plans[n].waitLimitMs], [null, null], 'the N runs use the product transport as it is')
+  }
+  assert.deepEqual(plans.Y1.requests.map(r => [r.id, r.waitBeforeMs, r.freshSocket]), [['first', 0, false], ['after', SEP_IDLE_WAIT_MS, false]])
+  assert.deepEqual([plans.Y1.transportIdleMs, plans.Y1.waitLimitMs], [SEP_SOCKET_IDLE_MS, SEP_WAIT_LIMIT_MS])
+  assert.ok(SEP_SOCKET_IDLE_MS > SEP_IDLE_WAIT_MS, 'the socket may outlive the idle')
+  // the warm-up bodies are byte for byte the body the product sends
+  for (const [run, id] of [['N1', 'warmup'], ['N2', 'warmup'], ['Y1', 'first']]) {
+    const text = built.runs.find(r => r.dir === run).files.find(f => f.file.endsWith(`${id}.json`)).bytes.toString('utf8')
+    assert.equal(text, JSON.stringify({ model: JSON.parse(text).model, input: CONTENT_FREE_REQUESTS.warmup.input, questions: CONTENT_FREE_REQUESTS.warmup.questions }))
+  }
+  assert.deepEqual(SEP_RUNS.map(([d]) => d), ['N1', 'N2', 'Y1'])
+})
+
+test('separating probe readings: informative N runs (tail and a held warm-up), the new socket fast or slow, and what Y1 says', async () => {
+  const { analyzeSeparation } = await import('./egdesk-turn-context-latency-plan.mjs')
+  const r = (ms, extra = {}) => ({ elapsedMs: ms, openaiProcessingMs: '200', ...extra })
+  const nRun = (warmup, same, fresh) => ({ warmup: r(warmup), same: r(same, { reusedSocket: true }), fresh: r(fresh, { reusedSocket: false, freshSocket: true, connectMs: 15, tlsMs: 25 }) })
+  const yRun = (first, after, reused = true) => ({ first: r(first), after: r(after, { reusedSocket: reused, waitedMs: 600000 }) })
+  const read = (n1, n2, y) => analyzeSeparation({ N1: n1, N2: n2, Y1: y }).reading
+  assert.equal(analyzeSeparation({}).reading, 'incomplete'); assert.equal(read(nRun(1500, 300, 310), null, yRun(1200, 700, false)), 'incomplete')
+  // a new socket fast after a warm-up that followed a tail: warmth, not the socket
+  assert.match(read(nRun(1500, 300, 310), nRun(500, 300, 900), yRun(1200, 700, false)), /^warmth, not the socket/)
+  // a new socket slow after a held warm-up that followed a tail: the socket matters
+  assert.match(read(nRun(1500, 300, 1100), nRun(500, 300, 310), yRun(1200, 700, false)), /^the socket matters/)
+  // informative runs disagree
+  assert.match(read(nRun(1500, 300, 1100), nRun(1400, 310, 320), yRun(1200, 700, false)), /^mixed/)
+  // no run informative: no tail in either, or the warm-up did not hold
+  assert.match(read(nRun(500, 300, 310), nRun(600, 320, 1500), yRun(1200, 700, false)), /^inconclusive/)
+  assert.match(read(nRun(1500, 900, 310), nRun(1400, 1000, 320), yRun(1200, 700, false)), /^inconclusive/)
+  // Y1 reused and fast qualifies a "warmth" reading
+  assert.match(read(nRun(1500, 300, 310), nRun(1400, 310, 320), yRun(1200, 300, true)), /^reuse alone is fast too/)
+  const out = analyzeSeparation({ N1: nRun(1500, 300, 310), N2: nRun(500, 300, 900), Y1: yRun(1200, 1300, true) })
+  assert.deepEqual([out.runs.N1.informative, out.runs.N2.informative, out.runs.N1.freshFlag, out.runs.N1.freshReused, out.runs.N1.freshConnectMs], [true, false, true, false, 15])
+  assert.equal(out.runs.Y1.reading, 'reused and slow: reuse does not prevent the tail')
+  assert.equal(analyzeSeparation({ Y1: yRun(1200, 700, false) }).runs.Y1.reading, 'socket did not survive the idle: reuse after a long idle is not available')
+  assert.equal(analyzeSeparation({ Y1: yRun(1200, 300, true) }).runs.Y1.reading, 'reused and fast: weak (the tail is intermittent), repeat')
+})

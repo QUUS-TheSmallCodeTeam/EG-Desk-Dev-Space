@@ -1,0 +1,35 @@
+{
+  "set": "turn-context-warmup-sep-v1/N1",
+  "tokenCeiling": 1620,
+  "transport": "product",
+  "passRule": "Record only (latency probe). PRECONDITION, not enforced by the runner: start this run only after at least 10 minutes with no Decisions request from this machine (the point runner checks the shared send stamp). Run order N1, N2, Y1. Read with scripts/egdesk-turn-context-warmup-run.mjs --set sep --analyze.",
+  "requests": [
+    {
+      "id": "warmup",
+      "file": "requests/warmup.json",
+      "sha256": "1d71669e74bb5101c85daf8671f4920d1816850607e30862109caa5095059ad4",
+      "estInputTokens": 159,
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "same",
+      "file": "requests/same.json",
+      "sha256": "6c8297fa6d717377e3661f2a6b8e15e49ff158cbd97182a08a1dd6422b087dd4",
+      "estInputTokens": 658,
+      "waitBeforeMs": 1000,
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "fresh",
+      "file": "requests/fresh.json",
+      "sha256": "2f4f4c61500c16f21f3ecc2bc17b79989f14239b558823271d19a43f1d0f4ab2",
+      "estInputTokens": 654,
+      "waitBeforeMs": 1000,
+      "freshSocket": true,
+      "expect": [],
+      "recordOnly": true
+    }
+  ]
+}

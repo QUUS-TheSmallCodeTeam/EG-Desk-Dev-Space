@@ -29,7 +29,7 @@ test('default design is the predicates (cycle 18); the choice stays selectable; 
   const out = await checkDraft({ draft: `${S1_DRAFT}\n담당자는 김 대리입니다.`, evidence: S1_EVIDENCE, mode: 'on', client: pred, design: 'predicates' })
   const request = pred.requests[0]
   assert.deepEqual(request.questions.map(q => [q.name, q.type]), [['sup_0', 'predicate'], ['tense_0', 'predicate'], ['sup_1', 'predicate'], ['tense_1', 'predicate']])
-  assert.match(request.questions[0].instructions, /^Does the evidence say what sentence S1 says/); assert.equal(request.questions[1].instructions, 'Does sentence S1 present something as already carried out, or as true right now, when the evidence records it only as planned, or only as it was at an earlier time? Saying that something is planned, is decided, was decided or was so before is not.')
+  assert.match(request.questions[0].instructions, /^Does the evidence say what sentence S1 says/); assert.equal(request.questions[1].instructions, 'Does sentence S1 say that something is done or true now that the evidence records only as planned or only as past?', 'the measured wording (a c24 rewording lost the w-disk-now guard and was reverted)')
   const blocks = request.input.map(row => row.content)
   assert.equal(blocks.length, 4, 'the rules, the evidence once, then one block per sentence')
   assert.match(blocks[1], /^Evidence:\n\[E1 time=past status=unknown\]\n"""\nA사 견적서 v1 발송 11월 6일/); assert.match(blocks[1], /\[E2 time=planned status=unknown\]\n"""\nA사 견적서 v2 수정 계획/)

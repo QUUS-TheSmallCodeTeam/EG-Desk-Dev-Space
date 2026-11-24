@@ -119,7 +119,10 @@ test('journey-status: a status nudge neither interrupts nor steers; the command 
   const rec = await runJourneyConversation(w, script, 'journey-status')
   assert.equal(rec.aborted, null, rec.abortDetail); assert.deepEqual(failed(rec), [], JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok))))
   assert.equal(rec.turns[0].subTurns[0].status, 'completed'); assert.deepEqual(rec.turns[0].journey.steers, []); assert.equal(rec.turns[0].journey.flowMessages, 1)
-  const cost = costOf(w, rec); assert.deepEqual([cost.engineTurns, cost.steers, cost.interrupts], [1, 0, 0]); assert.equal(cost.writerForkTurns, 1, 'one writer fork: the reply')
+  const cost = costOf(w, rec); assert.deepEqual([cost.engineTurns, cost.steers, cost.interrupts], [1, 0, 0]); assert.equal(cost.writerForkTurns, 1, 'one internal writing turn: the reply (on a fresh ephemeral thread since L5 c24)')
+  // exactly one reply besides the final answer: after the message the person has two posts (the reply and the run's own answer), one of them the system's
+  assert.equal(rec.turns[1].posted.length, 2); assert.equal(rec.turns[1].posted.at(-1), '테스트가 모두 통과했습니다. tests-passed-40', 'the final answer is the run\'s own')
+  assert.deepEqual([rec.turns[0].journey.flowMessages, rec.turns[0].journey.agentMessages], [1, 1], 'one system message (the reply) and one Agent message (the final answer)')
   assert.deepEqual(w.stderrLines, [])
 })
 

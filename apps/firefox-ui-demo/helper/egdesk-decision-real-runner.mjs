@@ -54,6 +54,7 @@ import { DECISIONS_ENDPOINT, DECISION_MODEL, normalizeDecisionResponse, validate
 // A score expectation is the conjunction of the bounds it gives (min <= score <= max, minConfidence <= confidence <= maxConfidence).
 const OFFICIAL = DECISIONS_ENDPOINT
 if (OFFICIAL !== 'https://api.openai.com/v1/decisions') throw new Error('unexpected Decisions endpoint')
+export const LONG_WAIT_LIMIT_MS = 900_000
 export const REAL_RUN_LIMITS = Object.freeze({ maxRequests: 200, maxBodyBytes: 4 * 1024 * 1024, timeoutMs: 20000, maxWaitMs: 120_000, maxTotalWaitMs: 600_000 })
 export const EXIT = Object.freeze({ ok: 0, usage: 2, noKey: 3, stopped: 4 })
 
@@ -153,6 +154,16 @@ export function loadPlan(planFile) {
   if (!Array.isArray(raw.requests) || !raw.requests.length || raw.requests.length > REAL_RUN_LIMITS.maxRequests) bad(`the plan needs 1 to ${REAL_RUN_LIMITS.maxRequests} requests`)
   const dir = realpathSync(path.dirname(path.resolve(planFile)))
   const seen = new Set()
+  // c21 (separating warm-up probe): three plan-level declarations, each only with transport "product" (the product's own transport)
+  //   waitLimitMs      raises the per-request and total wait caps to this value (up to LONG_WAIT_LIMIT_MS) for a probe that must sit idle for minutes;
+  //                    every request of such a plan is record-only. A pause, never a second attempt of anything.
+  //   transportIdleMs  how long the transport keeps an idle socket (the product's own value is 55 s); a probe of socket reuse across minutes sets it
+  //   freshSocket      per request: the transport is closed and a new one made just before it, so the request cannot reuse a socket
+  if (raw.transport !== undefined && raw.transport !== 'product') bad('transport must be "product" when present')
+  for (const key of ['waitLimitMs', 'transportIdleMs']) if (raw[key] !== undefined && raw.transport !== 'product') bad(`${key} needs transport "product"`)
+  if (raw.waitLimitMs !== undefined && (!Number.isSafeInteger(raw.waitLimitMs) || raw.waitLimitMs <= REAL_RUN_LIMITS.maxTotalWaitMs || raw.waitLimitMs > LONG_WAIT_LIMIT_MS)) bad(`waitLimitMs must be an integer above ${REAL_RUN_LIMITS.maxTotalWaitMs} and at most ${LONG_WAIT_LIMIT_MS}`)
+  if (raw.transportIdleMs !== undefined && (!Number.isSafeInteger(raw.transportIdleMs) || raw.transportIdleMs < 1000 || raw.transportIdleMs > LONG_WAIT_LIMIT_MS)) bad(`transportIdleMs must be an integer from 1000 to ${LONG_WAIT_LIMIT_MS}`)
+  const waitCap = raw.waitLimitMs ?? REAL_RUN_LIMITS.maxWaitMs, totalWaitCap = raw.waitLimitMs ?? REAL_RUN_LIMITS.maxTotalWaitMs
   const requests = raw.requests.map((item, index) => {
     const where = `request ${index + 1}`
     if (!record(item) || typeof item.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(item.id)) bad(`${where}: id must be 1-100 letters, digits, dot, dash or underscore`)
@@ -186,17 +197,18 @@ export function loadPlan(planFile) {
     // owner-approved, or an owner-approved seed's material with a secret left in it, is refused at load (dry run and send alike).
     const seedProblem = seedRefusal(bytes.toString('utf8'), { declared: [...(Array.isArray(raw.seeds) ? raw.seeds : []), ...(Array.isArray(item.seeds) ? item.seeds : [])] })
     if (seedProblem) bad(`${item.id}: ${seedProblem}`)
-    if (item.waitBeforeMs !== undefined && (!Number.isSafeInteger(item.waitBeforeMs) || item.waitBeforeMs < 0 || item.waitBeforeMs > REAL_RUN_LIMITS.maxWaitMs)) bad(`${item.id}: waitBeforeMs must be an integer from 0 to ${REAL_RUN_LIMITS.maxWaitMs}`)
+    if (item.waitBeforeMs !== undefined && (!Number.isSafeInteger(item.waitBeforeMs) || item.waitBeforeMs < 0 || item.waitBeforeMs > waitCap)) bad(`${item.id}: waitBeforeMs must be an integer from 0 to ${waitCap}`)
+    if (item.freshSocket !== undefined && (item.freshSocket !== true || raw.transport !== 'product')) bad(`${item.id}: freshSocket must be true and needs transport "product"`)
+    if (raw.waitLimitMs !== undefined && item.recordOnly !== true) bad(`${item.id}: a plan with waitLimitMs holds record-only requests only`)
     const grouping = lintGroupedRequest(body)
     if (!grouping.ok && item.diagnostic !== true) bad(`${item.id}: grouped questions do not each carry their own item (${grouping.families.filter(f => f.problems.length).map(f => `${f.family}: ${[...new Set(f.problems.map(x => x.problem))].join('/')}`).join('; ')}); fix the request, or mark it "diagnostic": true if it reproduces the defect on purpose`)
     const counts = { choice: body.questions.filter(q => q.type === 'choice').length, predicate: body.questions.filter(q => q.type === 'predicate').length, score: body.questions.filter(q => q.type === 'score').length }
     const text = bytes.toString('utf8')
     return { id: item.id, file: item.file, sha256: item.sha256, bytes, estInputTokens: item.estInputTokens, independentEst: independentEstimate(counts.choice, counts.predicate + counts.score, bytes.length), fittedEst: estimateBodyTokens(text),
-      questions: body.questions, counts, images: (text.match(/"type"\s*:\s*"input_image"/g) || []).length, expect, recordOnly, diagnostic: item.diagnostic === true, groupingOk: grouping.ok, waitBeforeMs: item.waitBeforeMs ?? 0 }
+      questions: body.questions, counts, images: (text.match(/"type"\s*:\s*"input_image"/g) || []).length, expect, recordOnly, diagnostic: item.diagnostic === true, groupingOk: grouping.ok, waitBeforeMs: item.waitBeforeMs ?? 0, freshSocket: item.freshSocket === true }
   })
-  if (raw.transport !== undefined && raw.transport !== 'product') bad('transport must be "product" when present')
   const totalWaitMs = requests.reduce((sum, r) => sum + r.waitBeforeMs, 0)
-  if (totalWaitMs > REAL_RUN_LIMITS.maxTotalWaitMs) bad(`the waits add up to ${totalWaitMs} ms, over ${REAL_RUN_LIMITS.maxTotalWaitMs}`)
+  if (totalWaitMs > totalWaitCap) bad(`the waits add up to ${totalWaitMs} ms, over ${totalWaitCap}`)
   const productBars = checkProductBars(raw.productBars)
   for (const r of requests) for (const e of r.expect) if (e.notDecidedNo) {
     const bar = productBars?.[familyOf(e.name)] ?? productBars?.[`*${e.kind}`]
@@ -209,7 +221,7 @@ export function loadPlan(planFile) {
   }
   const totals = { requests: requests.length, estInputTokens: requests.reduce((sum, r) => sum + r.estInputTokens, 0), independentEst: requests.reduce((sum, r) => sum + r.independentEst, 0), fittedEst: requests.reduce((sum, r) => sum + r.fittedEst, 0),
     bytes: requests.reduce((sum, r) => sum + r.bytes.length, 0) }
-  return { set: raw.set, tokenCeiling: raw.tokenCeiling, passRule: raw.passRule, dir, requests, totals: { ...totals, waitMs: totalWaitMs }, productBars, transport: raw.transport ?? null,
+  return { set: raw.set, tokenCeiling: raw.tokenCeiling, passRule: raw.passRule, dir, requests, totals: { ...totals, waitMs: totalWaitMs }, productBars, transport: raw.transport ?? null, transportIdleMs: raw.transportIdleMs ?? null, waitLimitMs: raw.waitLimitMs ?? null,
     diagnostic: requests.reduce((n, r) => n + r.expect.filter(e => e.diagnostic).length, 0) }
 }
 
@@ -331,7 +343,7 @@ export function scoreRequest(request, result) {
  * send !== true: a dry run; nothing leaves the process and no key is looked at.
  */
 export async function runPlan({ plan, key = null, send = false, fetchImpl = globalThis.fetch, timeoutMs = REAL_RUN_LIMITS.timeoutMs, now = () => performance.now(),
-  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), warm = null, annotate = null } = {}) {
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), warm = null, annotate = null, beforeRequest = null } = {}) {
   const base = { set: plan.set, passRule: plan.passRule, totals: { requests: plan.totals.requests, estInputTokens: plan.totals.estInputTokens, independentEst: plan.totals.independentEst }, tokenCeiling: plan.tokenCeiling }
   const empty = stoppedBecause => ({ ...base, sent: 0, stoppedBecause, results: {}, scorecard: null, usage: { inputTokens: 0 } })
   if (send !== true) return empty('dry_run')
@@ -346,9 +358,11 @@ export async function runPlan({ plan, key = null, send = false, fetchImpl = glob
     if (seedRefusal(request.bytes.toString('utf8'))) { stoppedBecause = 'scenario_seed'; break }
     // A latency probe's idle gap: a pause before this request, never a second attempt of anything.
     if (request.waitBeforeMs > 0) await sleep(request.waitBeforeMs)
+    // c21: a request declared freshSocket gets a new transport (the caller closes the old one): it cannot reuse a socket. Before warm() is read.
+    if (request.freshSocket && typeof beforeRequest === 'function') { try { beforeRequest(request) } catch { stoppedBecause = 'transport_swap_failed'; break } }
     let warmBefore = null
     if (typeof warm === 'function') { try { warmBefore = warm() === true } catch { warmBefore = null } }
-    const probe = { ...(request.waitBeforeMs > 0 ? { waitedMs: request.waitBeforeMs } : {}), ...(warmBefore !== null ? { warmBefore } : {}) }
+    const probe = { ...(request.waitBeforeMs > 0 ? { waitedMs: request.waitBeforeMs } : {}), ...(request.freshSocket ? { freshSocket: true } : {}), ...(warmBefore !== null ? { warmBefore } : {}) }
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeoutMs)
     const started = now()
     try {
@@ -434,11 +448,14 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
     : { productBars: 'not declared', warning: 'hard checks were NOT compared with the bars the product acts on' }))
   // transport "product": the bridge's own Decisions transport, created only when something is really sent.
   const marks = []
-  const transport = send && plan.transport === 'product' ? createTransport({ trace: mark => marks.push(mark) }) : null
+  // freshSocket requests swap the transport (close the old one, make a new one with the plan's idle cap); everything else reuses the current one
+  const makeTransport = () => createTransport({ trace: mark => marks.push(mark), ...(plan.transportIdleMs ? { idleMs: plan.transportIdleMs } : {}) })
+  let transport = send && plan.transport === 'product' ? makeTransport() : null
+  const swap = () => { try { transport?.close?.() } catch { /* nothing to close */ } transport = makeTransport() }
   // c17: every real send writes the shared last-send stamp first (helper/egdesk-decision-send-stamp.mjs); a stamp that cannot be written sends nothing.
-  const network = transport ? transport.fetch : fetchImpl
+  const network = transport ? (url, init) => transport.fetch(url, init) : fetchImpl
   const outcome = await runPlan({ plan, key: send ? env.OPENAI_API_KEY ?? null : null, send, fetchImpl: send ? stampingFetch(network, { file: sendStampPath(env), runner: `decision-real-measure ${plan.set}` }) : network,
-    ...(transport?.warm ? { warm: () => transport.warm(), annotate: () => transportPhases(marks.splice(0)) } : {}), ...(now ? { now } : {}), ...(sleep ? { sleep } : {}) })
+    ...(transport?.warm ? { warm: () => transport.warm(), annotate: () => transportPhases(marks.splice(0)), beforeRequest: swap } : {}), ...(now ? { now } : {}), ...(sleep ? { sleep } : {}) })
   try { transport?.close?.() } catch { /* nothing to close */ }
   print(JSON.stringify({ sent: outcome.sent, stoppedBecause: outcome.stoppedBecause, inputTokens: outcome.usage.inputTokens,
     ...(outcome.scorecard ? { requestsPassed: outcome.scorecard.requestsPassed, recordedOnly: outcome.scorecard.recordedOnly, hardFailures: outcome.scorecard.hardFailures, softMisses: outcome.scorecard.softMisses } : {}) }))

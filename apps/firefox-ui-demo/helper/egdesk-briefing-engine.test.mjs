@@ -233,3 +233,13 @@ test('bridge wiring: the server mounts briefingDeps behind EGDESK_BRIEFING_FLOW;
   assert.match(surface, /timeoutMs: flowMode === 'on' \? 150000 : 20000/)
   assert.ok(BRIEFING_ENGINE_LIMITS.totalMs + 5 * 4000 < 150000, 'private turns plus the judgments fit inside the chrome wait')
 })
+
+test('c32: the briefing\'s private turns ask chat.internalText with preamble:false (a fresh ephemeral thread must see the prompt alone), with and without the output schema', async () => {
+  const calls = []
+  const chat = { canInternalTurn: () => true, internalText: async (run, text, options) => { calls.push({ run, options }); return '{"title":"t"}' }, runFor: () => null }
+  for (const outputSchema of ['off', 'on']) {
+    const engine = briefingDeps({ chat, contexts: {}, enabled: true, outputSchema }).engineFor({ id: 'run-1' }, { report: 'a' })
+    await engine({ kind: 'briefing_component', title: 't', summary: 's' })
+  }
+  assert.equal(calls.length, 2); assert.ok(calls.every(c => c.options.preamble === false && c.run.id === 'run-1' && Number.isFinite(c.options.timeoutMs)))
+})

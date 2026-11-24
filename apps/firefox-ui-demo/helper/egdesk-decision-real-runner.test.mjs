@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { EXIT, TOKEN_MODEL, estimateBodyTokens, independentEstimate, loadPlan, main, planTable, runPlan, scoreExpectation, scoreRequest, writeResults } from './egdesk-decision-real-runner.mjs'
+import { EXIT, LONG_WAIT_LIMIT_MS, TOKEN_MODEL, estimateBodyTokens, independentEstimate, loadPlan, main, planTable, runPlan, scoreExpectation, scoreRequest, writeResults } from './egdesk-decision-real-runner.mjs'
 
 const KEY = 'sk-test-not-a-real-key-0123456789'
 const sha = text => createHash('sha256').update(text).digest('hex')
@@ -532,4 +532,69 @@ test('notDecidedNo (c16, L4): passes when p is above the declared product no bar
   assert.deepEqual([blocked.pass, blocked.hardFailures], [false, ['is_question']])
   const undecided = scoreRequest(b, { status: 200, answers: [pred('is_question', 0.55), pred('is_secret', 0.01)] })
   assert.deepEqual([undecided.pass, undecided.hardFailures], [true, []])
+})
+
+// c21: the separating warm-up probe needs a request on a new socket, a transport that keeps idle sockets for minutes, and a pause of minutes.
+const recordOnly = (mutate = () => {}) => fixture(plan => { plan.transport = 'product'; for (const r of plan.requests) { r.expect = []; r.recordOnly = true } mutate(plan) })
+
+test('long waits: waitLimitMs raises the wait caps for a record-only product-transport plan, and only then', () => {
+  const tooLong = (extra, why) => assert.throws(() => loadPlan(recordOnly(extra).planFile), why)
+  // without the declaration the caps are the old ones
+  tooLong(plan => { plan.requests[1].waitBeforeMs = 600000 }, /waitBeforeMs must be an integer from 0 to 120000/)
+  const ok = loadPlan(recordOnly(plan => { plan.waitLimitMs = 660000; plan.requests[1].waitBeforeMs = 600000 }).planFile)
+  assert.deepEqual([ok.waitLimitMs, ok.totals.waitMs, ok.requests[1].waitBeforeMs], [660000, 600000, 600000])
+  // the declaration is bounded, needs the product transport, and a record-only plan
+  tooLong(plan => { plan.waitLimitMs = 600000 }, /waitLimitMs must be an integer above 600000/)
+  tooLong(plan => { plan.waitLimitMs = LONG_WAIT_LIMIT_MS + 1 }, /at most 900000/)
+  tooLong(plan => { plan.waitLimitMs = 660000; plan.requests[1].waitBeforeMs = 660001 }, /waitBeforeMs must be an integer from 0 to 660000/)
+  tooLong(plan => { plan.waitLimitMs = 660000; plan.requests[0].waitBeforeMs = 400000; plan.requests[1].waitBeforeMs = 400000 }, /the waits add up to 800000 ms, over 660000/)
+  tooLong(plan => { delete plan.transport; plan.waitLimitMs = 660000 }, /waitLimitMs needs transport "product"/)
+  assert.throws(() => loadPlan(fixture(plan => { plan.transport = 'product'; plan.waitLimitMs = 660000 }).planFile), /holds record-only requests only/)
+  // a plan that does not declare it gets null
+  assert.deepEqual([loadPlan(recordOnly().planFile).waitLimitMs, loadPlan(recordOnly().planFile).transportIdleMs], [null, null])
+})
+
+test('transportIdleMs and freshSocket: validated, product transport only, carried into the loaded plan', () => {
+  const bad = (mutate, why) => assert.throws(() => loadPlan(recordOnly(mutate).planFile), why)
+  assert.equal(loadPlan(recordOnly(plan => { plan.transportIdleMs = 660000 }).planFile).transportIdleMs, 660000)
+  bad(plan => { plan.transportIdleMs = 999 }, /transportIdleMs must be an integer from 1000/)
+  bad(plan => { plan.transportIdleMs = LONG_WAIT_LIMIT_MS + 1 }, /transportIdleMs must be an integer from 1000/)
+  bad(plan => { delete plan.transport; plan.transportIdleMs = 660000 }, /transportIdleMs needs transport "product"/)
+  const fresh = loadPlan(recordOnly(plan => { plan.requests[2].freshSocket = true }).planFile)
+  assert.deepEqual(fresh.requests.map(r => r.freshSocket), [false, false, true])
+  bad(plan => { plan.requests[2].freshSocket = false }, /freshSocket must be true/)
+  bad(plan => { plan.requests[2].freshSocket = 'yes' }, /freshSocket must be true/)
+  bad(plan => { delete plan.transport; plan.requests[2].freshSocket = true }, /needs transport "product"/)
+})
+
+test('runPlan: a freshSocket request calls beforeRequest (once, before warm() is read, after its pause) and nothing else does; a failing swap stops the run', async () => {
+  const f = recordOnly(plan => { plan.requests[1].waitBeforeMs = 1000; plan.requests[1].freshSocket = true }), plan = loadPlan(f.planFile), mock = mockFetch(f.files)
+  const order = []
+  const run = await runPlan({ plan, key: KEY, send: true, fetchImpl: async (url, init) => { order.push('send'); return mock.fetchImpl(url, init) }, sleep: async ms => order.push(`sleep ${ms}`),
+    warm: () => { order.push('warm'); return false }, beforeRequest: request => order.push(`swap ${request.id}`) })
+  assert.deepEqual(order, ['warm', 'send', 'sleep 1000', 'swap b', 'warm', 'send', 'warm', 'send'])
+  assert.equal(run.results.b.freshSocket, true); assert.equal(run.results.a.freshSocket, undefined); assert.equal(run.results.c.freshSocket, undefined)
+  // a swap that throws: that request and the later ones are not sent
+  const g = recordOnly(plan => { plan.requests[1].freshSocket = true }), m2 = mockFetch(g.files)
+  const stopped = await runPlan({ plan: loadPlan(g.planFile), key: KEY, send: true, fetchImpl: m2.fetchImpl, beforeRequest: () => { throw new Error('no transport') } })
+  assert.equal(stopped.stoppedBecause, 'transport_swap_failed'); assert.equal(stopped.sent, 1); assert.equal(m2.calls.length, 1)
+  // without a hook a freshSocket request is still sent (the caller that wants it supplies the hook)
+  const h = recordOnly(plan => { plan.requests[1].freshSocket = true }), m3 = mockFetch(h.files)
+  assert.equal((await runPlan({ plan: loadPlan(h.planFile), key: KEY, send: true, fetchImpl: m3.fetchImpl })).sent, 3)
+})
+
+test('main with the product transport: a freshSocket request goes through a NEW transport (the old one is closed first), the idle cap reaches the transport factory, and no transport is used for a dry run', async () => {
+  const f = recordOnly(plan => { plan.transportIdleMs = 660000; plan.requests[1].freshSocket = true })
+  const made = [], closed = []
+  const network = id => mockFetch(f.files).fetchImpl
+  const createTransport = opts => { const t = { id: made.length + 1, opts, sent: 0 }; made.push(t); const send = network(); return { fetch: (url, init) => { t.sent++; return send(url, init) }, warm: () => false, close: () => closed.push(t.id) } }
+  const io = capture()
+  const code = await main([f.planFile, '--send'], { env: { OPENAI_API_KEY: KEY, HOME: os.tmpdir() }, createTransport, ...io })
+  assert.equal(code, 0)
+  assert.deepEqual(made.map(t => t.opts.idleMs), [660000, 660000], 'the plan\'s idle cap reaches every transport')
+  assert.deepEqual(made.map(t => t.sent), [1, 2], 'the first transport carried request a; the new one carried b and c')
+  assert.deepEqual(closed, [1, 2], 'the old one was closed at the swap, the last at the end')
+  made.length = 0
+  await main([f.planFile], { env: { HOME: os.tmpdir() }, createTransport, ...capture() })
+  assert.equal(made.length, 0)
 })

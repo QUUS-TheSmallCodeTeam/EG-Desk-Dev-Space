@@ -9,7 +9,14 @@
 // Script (JSON, path in EGDESK_FAKE_APP_SERVER_SCRIPT; the log is appended to EGDESK_FAKE_APP_SERVER_LOG when set):
 //   { version, person: { mcpServers: [{ name, tools: [..] }], hooks: n, features: { name: bool }, instructionSources: [path] },
 //     turns: [ { match?: "text the person's message contains", steps: [ step ], status?: "completed"|"failed", final?: "text", error?: "text" } ],
-//     forkTurns?: [ … same … ] }
+//     forkTurns?: [ … same … ],
+//     refuseEphemeralFork?: boolean (default false): thread/fork of a thread that was started ephemeral fails with -32600 "no rollout found for thread id …",
+//       exactly as the official 0.171 does (Main's smoke-5: also mid-turn and with lastTurnId; a persisted source forks fine). }
+//     deleteFails?: boolean (thread/delete errors), deleteIgnored?: boolean (thread/delete answers ok but the thread stays resumable).
+//   A thread started or forked without ephemeral:true is PERSISTED: thread/resume finds it until thread/delete removes it; any other id fails with
+//   "no rollout found for thread id …" (as the official 0.171 does for a thread that is gone, and for an ephemeral one).
+//   A thread whose developerInstructions contain "private one-off task" is an EG-Desk internal thread (codex-internal-turn.mjs): its turns come from
+//   forkTurns, like a fork's.
 //   refuseEditsUnlessInstructed: models what Main's check-1 saw on the real 0.171 (a hypothesis, not a fact about every build): a thread whose
 //     <permissions instructions> block is on, or that was never told its egdesk_* tools act with EG-Desk's permissions, answers an edit request with
 //     "the filesystem is read-only" and calls no tool.
@@ -31,6 +38,7 @@ const MESSAGE_PHASES = { commentary: 'commentary', final: 'final_answer' }
 export function runFakeAppServer({ script, input = process.stdin, output = process.stdout, log = null, home = '/fake/codex-home', env = {}, exit = code => process.exit(code), stderr = process.stderr } = {}) {
   const logLine = entry => { if (log) fs.appendFileSync(log, `${JSON.stringify(entry)}\n`) }
   const person = { mcpServers: [], hooks: 0, features: {}, instructionSources: [], ...(script.person ?? {}) }
+  const persisted = new Set() // thread ids that were started or forked without ephemeral:true
   const threads = new Map(), used = new Set(), usedFork = new Set(), pending = new Map(), running = new Map() // turnId -> { threadId, interrupted, steers: [text] }
   let nextThread = 0, nextTurn = 0, nextItem = 0, nextServerRequest = 100
   const send = message => { output.write(`${JSON.stringify(message)}\n`); logLine({ dir: 'out', ...message }) }
@@ -133,22 +141,37 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
     initialize: (id) => result(id, 'initialize', { userAgent: `codex_cli_rs/${script.version ?? FAKE_VERSION} (Mac OS 26.0.0; arm64) fake`, codexHome: script.home || env.CODEX_HOME || home, platformFamily: 'unix', platformOs: 'macos' }),
     'thread/start': (id, params) => {
       const threadId = `thr-${++nextThread}`
-      threads.set(threadId, { id: threadId, cwd: params.cwd ?? '/fake/cwd', config: params.config ?? {}, developerInstructions: params.developerInstructions ?? '', ephemeral: params.ephemeral === true, dynamicTools: (params.dynamicTools ?? []).map(t => t.name) })
+      if (params.ephemeral !== true) persisted.add(threadId)
+      threads.set(threadId, { id: threadId, cwd: params.cwd ?? '/fake/cwd', config: params.config ?? {}, developerInstructions: params.developerInstructions ?? '', internal: String(params.developerInstructions ?? '').includes('private one-off task'), ephemeral: params.ephemeral === true, dynamicTools: (params.dynamicTools ?? []).map(t => t.name) })
       result(id, 'thread/start', { thread: threadObject(threadId, { ...params, ephemeral: script.reportEphemeral === false ? false : params.ephemeral }), cwd: params.cwd ?? '/fake/cwd', model: script.model ?? 'fake-model', modelProvider: 'openai', reasoningEffort: script.effort ?? 'low',
         approvalPolicy: params.approvalPolicy ?? 'never', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false }, instructionSources: effective(threads.get(threadId)).sources })
       // like the real binary (Main's 0.171 finding): every MCP server that will be active starts when the thread starts
       for (const server of effective(threads.get(threadId)).servers) for (const status of ['starting', 'ready']) notify('mcpServer/startupStatus/updated', { threadId, name: server.name, status, error: null })
     },
     'thread/fork': (id, params) => {
-      const threadId = `fork-${++nextThread}`, parent = threads.get(params.threadId)
+      const parent = threads.get(params.threadId)
+      if (script.refuseEphemeralFork === true && parent?.ephemeral === true) return send({ id, error: { code: -32600, message: `no rollout found for thread id ${params.threadId}` } })
+      const threadId = `fork-${++nextThread}`
+      if (params.ephemeral !== true) persisted.add(threadId)
       threads.set(threadId, { id: threadId, cwd: params.cwd ?? parent?.cwd ?? '/fake/cwd', config: params.config ?? parent?.config ?? {}, ephemeral: params.ephemeral === true, fork: true })
       result(id, 'thread/fork', { thread: threadObject(threadId, params), cwd: params.cwd ?? parent?.cwd ?? '/fake/cwd', model: script.model ?? 'fake-model', modelProvider: 'openai', approvalPolicy: 'never', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false } })
+    },
+    'thread/delete': (id, params) => {
+      if (script.deleteFails === true) return send({ id, error: { code: -32000, message: 'the thread could not be deleted' } })
+      if (!persisted.has(params.threadId)) return send({ id, error: { code: -32600, message: `no rollout found for thread id ${params.threadId}` } })
+      if (script.deleteIgnored !== true) persisted.delete(params.threadId)
+      result(id, 'thread/delete', {})
+    },
+    'thread/resume': (id, params) => {
+      const thread = threads.get(params.threadId)
+      if (!thread || !persisted.has(params.threadId)) return send({ id, error: { code: -32600, message: `no rollout found for thread id ${params.threadId}` } })
+      result(id, 'thread/resume', { thread: threadObject(params.threadId, { cwd: thread.cwd, ephemeral: false }), cwd: thread.cwd, model: script.model ?? 'fake-model', modelProvider: 'openai', approvalPolicy: 'never', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false } })
     },
     'turn/start': (id, params) => {
       const thread = threads.get(params.threadId)
       if (!thread) return send({ id, error: { code: -32600, message: `thread not found: ${params.threadId}` } })
       thread.lastText = textOf(params)
-      let plan = (thread.fork ? chooseTurn(script.forkTurns ?? [], usedFork, thread.lastText) : chooseTurn(script.turns ?? [], used, thread.lastText)) ?? { steps: [], final: '(the fake has no script for this turn)' }
+      let plan = (thread.fork || thread.internal ? chooseTurn(script.forkTurns ?? [], usedFork, thread.lastText) : chooseTurn(script.turns ?? [], used, thread.lastText)) ?? { steps: [], final: '(the fake has no script for this turn)' }
       // finalFor(inputText, params): the final message as a function of the turn's input (a script object passed in-process only; a JSON script cannot hold a function). c31: the
       // briefing's fill answers a guide that the product builds at run time, so a fake model must read it from the prompt.
       if (typeof plan.finalFor === 'function') plan = { ...plan, final: plan.finalFor(thread.lastText, params) }

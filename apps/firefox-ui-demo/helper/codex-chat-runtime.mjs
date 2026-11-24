@@ -2,6 +2,7 @@ import { isChatWorkNote, chatWorkNoteActivity, chatSpeechOnly, separateChatWork 
 import { boardAddresses, boardPeerReceipt, boardTurnFields, boardHasScopedResources, boardRosterIdentity, boardSendErrorText, classifyBoardDelivery } from '../overlay/resources/EGDeskBoardThread.sys.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
+import { realpathSync } from 'node:fs'
 import { chatError, explicitFileLinks, MAX_TEXT, publicError, publicNetworkContext, publicText, validateChatCwd, verifyLocalFile } from './codex-chat-values.mjs'
 import { READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA, requestedExecutionPolicy, loadQaThreadOverrides, verifyQaNativeThread, verifyQaMcpIsolation, QA_TURN_OVERRIDES } from './codex-chat-execution-policy.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
@@ -103,6 +104,13 @@ export const CONTINUITY_MAX_PAGES = 20
 // deprecated `thread/compacted` notification. Either one means the answering model may no longer hold what was delivered to it.
 // `thread/reverted` (Codex 0.171 schema, ThreadRevertedNotification): the thread's durable history was replaced by the prefix before one turn;
 // what later turns delivered (and their replies) is gone from it as well (L7 c24).
+// A stable key of what a resume sends and verifies under (L7 c27): the merged overrides, the policy, the shell switch, computer control and the ceiling.
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`
+  return JSON.stringify(value ?? null)
+}
+export const resumeKey = spec => createHash('sha256').update(stableJson(spec)).digest('hex')
 export function compactionSignal(message) {
   const p = message?.params
   if (!p || !idText(p.threadId)) return null
@@ -745,7 +753,7 @@ function cleanNotification(method, p, engineId = 'codex') {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null }) {
+  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], agentReloadReuse = false, expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer, monotonicNow })
     if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
     this.resolveProjectWorkspace = resolveProjectWorkspace
@@ -858,6 +866,7 @@ export class CodexChatRuntime {
     this.heartbeatReasoning = new WeakMap() // heartbeat -> ids of reasoning items the engine has started and not finished
     this.heartbeatSubjects = new WeakMap() // heartbeat -> { run, flow, context }: what its judge and its record speak for
     this.flowSpeakers = new WeakSet() // heartbeats whose run was opted in to intermediate messages without a held answer
+    this.freshInternalCache = new Map() // conversationId -> { at, value }: the thread/start overrides of a fresh internal thread (c24)
     this.internalTurns = createInternalTurns({ setTimer: (fn, ms) => this.setTimer(fn, ms), clearTimer: handle => this.clearTimer(handle) }) // short private fork turns (draft revision, intermediate messages); never a run
     this.flowRuns = new WeakMap() // run -> intermediate-message state (flag decisionContext.conversationFlow, default off)
     this.flowJobs = new Set()
@@ -865,6 +874,9 @@ export class CodexChatRuntime {
     this.commandGateRuns = new Set() // in-flight command gate assessments (never awaited by an approval card)
     // c18: { mode() → 'off'|'on', neutralFolder() → absolute EG-Desk-owned empty folder }; absent = off
     this.ownTools = ownTools
+    // L7 c27 (developer flag EGDESK_AGENT_RELOAD_REUSE=on in the bridge, default off): an Agent-profile turn on a thread this process has loaded skips the
+    // per-turn detach + resume when the resume parameters it would send are byte-identical to those the thread was last loaded with and verified under.
+    this.agentReloadReuse = agentReloadReuse === true
     // L1 c21 (owner decision, provisional; flag roomAccount.mode() === 'on', default off): a room keeps its own AI account; an explicit switch
     // continues the same room on another account (see switchRoomAccount).
     this.roomAccount = roomAccount
@@ -2682,24 +2694,63 @@ export class CodexChatRuntime {
       const computerOffApplied = this.threads.get(cid)?.computerControl === 'off'
       const computerReload = !bounded && engine.id === 'codex' && (computerOff ? !computerOffApplied : computerOffApplied)
       const mustReload = (bounded && !justRestored) || body.profileEnabled === true || body.profileEnabled === false || Boolean(context.profileRun) || computerReload
-      if (mustReload && this.loadedThreads.has(cid)) {
-        const detached = await engine.releaseThread(cid, slot)
-        this.loadedThreads.delete(cid)
-        if (!['unsubscribed', 'notLoaded'].includes(detached?.status)) throw chatError('PROFILE_TRANSITION_UNAVAILABLE', 'Could not detach this native thread for a profile change', 409)
-      }
-      if (!this.loadedThreads.has(cid)) {
-        // A saved profile always reloads the thread, so a changed ceiling is re-applied here.
+      // The exact resume the reload below would send, and a key of it. A saved profile's ceiling overrides are read from the engine's current
+      // configuration (sandbox mode, the MCP servers it lists), so they are computed each time, never remembered; only their result is compared.
+      const prepareResume = async () => {
         const extra = ceilingNarrows(ceiling) ? await ceilingOverrides() : null
         const computerExtra = computerOff ? await this.computerControlOffOverrides(overrides.cwd || this.threads.get(cid)?.cwd || null, request) : null
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
-        // A bounded thread resumed with the ceiling's shell_tool false must read it back off.
-        const resumed = await this.restoreThread(cid, context.clientThreadId, mergeCeilingOverrides(mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), ownTools ? await this.ownToolsThreadOverrides(request, neutralFolder, overrides, context) : null), { policy, shellOff: Boolean(extra) && ceiling?.terminal === 'none', beforeResume })
-        if (!bounded) context.ceilingNotices.push(...ceilingReportNotices(ceiling, await verifyCeilingNativeThread(request, ceiling, resumed, cid)))
-        if (computerExtra) {
-          await this.verifyComputerControl(cid, computerExtra, request)
-          this.threads.get(cid).computerControl = 'off'
+        const merged = mergeCeilingOverrides(mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), ownTools ? await this.ownToolsThreadOverrides(request, neutralFolder, overrides, context) : null)
+        if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409) // the own-tools overrides above are read from the engine
+        const shellOff = Boolean(extra) && ceiling?.terminal === 'none'
+        return { extra, computerExtra, merged, shellOff, key: resumeKey({ merged, policy, shellOff, computerOff, ceiling }) }
+      }
+      // L7 c27 (flag agentReloadReuse): the thread is loaded, the reload is only the per-turn profile reload (never QA, never after a restart: those
+      // have no loaded thread or are bounded), and the thread was last loaded AND verified under exactly these parameters: nothing the ceiling
+      // depends on changed, so detaching and resuming would put the thread in the state it already has. The verification is not skipped: the
+      // ceiling is verified again on this turn, against the sandbox the last resume reported and the thread's live MCP and feature lists.
+      let prepared = null, reused = false
+      if (mustReload && this.loadedThreads.has(cid) && this.agentReloadReuse && !bounded && engine.id === 'codex' && !justRestored) {
+        prepared = await prepareResume()
+        const applied = this.threads.get(cid)?.appliedResume
+        reused = applied?.key === prepared.key
+      }
+      if (reused) {
+        // A failed verification here (the engine's thread drifted from what was applied) is not an answer yet: the thread is detached and loaded
+        // again below, and that load is verified like any other (it refuses if the drift is still there).
+        try {
+          const applied = this.threads.get(cid).appliedResume
+          const notices = ceilingReportNotices(ceiling, await verifyCeilingNativeThread(request, ceiling, { sandbox: applied.sandbox }, cid))
+          if (prepared.computerExtra) await this.verifyComputerControl(cid, prepared.computerExtra, request)
+          context.ceilingNotices.push(...notices)
+        } catch (error) {
+          if (epoch !== this.epochOf(engine.id, slot)) throw error
+          reused = false
         }
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
+      }
+      if (reused) {
+        // nothing to load
+      } else {
+        if (mustReload && this.loadedThreads.has(cid)) {
+          const detached = await engine.releaseThread(cid, slot)
+          this.loadedThreads.delete(cid)
+          if (!['unsubscribed', 'notLoaded'].includes(detached?.status)) throw chatError('PROFILE_TRANSITION_UNAVAILABLE', 'Could not detach this native thread for a profile change', 409)
+        }
+        if (!this.loadedThreads.has(cid)) {
+          // A saved profile always reloads the thread, so a changed ceiling is re-applied here.
+          const { computerExtra, merged, shellOff, key } = prepared ?? await prepareResume()
+          // A bounded thread resumed with the ceiling's shell_tool false must read it back off.
+          const resumed = await this.restoreThread(cid, context.clientThreadId, merged, { policy, shellOff, beforeResume })
+          if (!bounded) context.ceilingNotices.push(...ceilingReportNotices(ceiling, await verifyCeilingNativeThread(request, ceiling, resumed, cid)))
+          if (computerExtra) {
+            await this.verifyComputerControl(cid, computerExtra, request)
+            this.threads.get(cid).computerControl = 'off'
+          }
+          if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
+          // remembered only after every check passed: a failed verification leaves nothing to reuse, so the next turn reloads
+          if (this.agentReloadReuse && !bounded && engine.id === 'codex') this.threads.get(cid).appliedResume = { key, sandbox: resumed?.sandbox ?? null }
+        }
       }
       if (skipFirstResume) assertNoActiveRun() // the history was hydrated by the reload above, not before it
       if (bounded) this.persistExecutionPolicy(context, cid)
@@ -5034,10 +5085,27 @@ export class CodexChatRuntime {
     try {
       const cid = context?.conversationId
       if (!cid) return deriveTurnPosition({ threadId: null })
-      let prior = 0
-      try { prior = (this.store?.listMessages?.(context.clientThreadId)?.messages ?? []).filter(m => m.role === 'assistant' && m.status !== 'streaming' && m.status !== 'error').length } catch { prior = 0 }
+      const prior = this.completedEngineTurns(cid, context.clientThreadId)
       return deriveTurnPosition({ threadId: cid, priorCompletedTurns: prior, compacted: this.compactedThreads.has(cid), foreign: this.foreignThreads.has(cid), resumed: !this.loadedThreads.has(cid) })
     } catch { return { kind: 'first', reason: 'unknown_state' } }
+  }
+
+  // Completed ENGINE turns of this conversation in EG-Desk's own record (runs whose status is completed), not posted messages: a turn whose answer
+  // the draft check withheld entirely posted nothing, yet its pages are in the engine's context and its receipts stand (L7 c28, real v7 run:
+  // s2 was positioned first, ignored the receipts, re-fetched and re-sent the a-v2-plan page). Unreadable record: 0 (first, the conservative side).
+  completedEngineTurns(cid, clientThreadId) {
+    let count = 0
+    try {
+      let afterSeq = 0
+      for (let n = 0; n < CONTINUITY_MAX_PAGES; n++) {
+        const page = this.store?.listRuns?.(clientThreadId, { afterSeq, limit: 100 })
+        if (!page) return 0
+        for (const run of page.runs ?? []) if (run?.status === 'completed' && (run.conversationId === undefined || run.conversationId === null || run.conversationId === cid)) count++
+        if (count > 0 || !page.hasMore) break
+        afterSeq = page.nextCursor
+      }
+    } catch { return 0 }
+    return count
   }
 
   // After a resume: does the engine's thread hold a turn EG-Desk did not run? Compares the engine's turn ids (the resume response, and the
@@ -6026,6 +6094,35 @@ export class CodexChatRuntime {
     return by
   }
 
+  // c24: what an internal turn needs when its parent thread cannot be forked (an ephemeral one: Main's smoke-5 on 0.171, "no rollout found").
+  // The fresh thread has not seen the conversation, so the preamble gives the one thing the callers rely on the fork's history for, the person's last
+  // message; everything else is in the caller's own text (the heartbeat writer's facts and prior messages, the draft check's draft, the briefing's answer,
+  // guide and materials). overrides(): the pure-engine switches (no shell, exec, image, web), read-only, never asking, nothing of the person's own MCP
+  // servers, plugins, hooks or skills, the parent's folder and model; it carries no tools (internal turns never act). Cached per conversation for 5 min.
+  internalFresh(run, { preamble = true } = {}) {
+    const cid = run.conversationId, person = preamble === false ? '' : String(this.runUserText(run) ?? '').replace(/\s+/g, ' ').trim().slice(0, 800)
+    return {
+      preamble: person ? `Context: the person's last message to you was ${JSON.stringify(person)}.` : '',
+      overrides: () => this.freshInternalOverrides(run),
+      effort: this.threads.get(cid)?.effort || undefined,
+    }
+  }
+
+  async freshInternalOverrides(run) {
+    const cid = run.conversationId, hit = this.freshInternalCache.get(cid)
+    if (hit && this.now() - hit.at < 300_000) return structuredClone(hit.value)
+    const slot = this.threadOperationSlot(cid), thread = this.threads.get(cid)
+    const base = mergeCeilingOverrides({}, pureEngineThreadOverrides())
+    const cwd = thread?.cwd ?? this.ownNeutralFolder() ?? null
+    const isolation = await loadOwnToolsIsolation(this.scopedRequest(slot), cwd)
+    mergeCeilingOverrides(base, isolation.overrides)
+    if (cwd) base.cwd = cwd
+    if (thread?.model) base.model = thread.model
+    this.freshInternalCache.set(cid, { at: this.now(), value: structuredClone(base) })
+    while (this.freshInternalCache.size > 32) this.freshInternalCache.delete(this.freshInternalCache.keys().next().value)
+    return base
+  }
+
   writeIntermediate(run, flow, kind, facts, timeoutMs = FLOW_LIMITS.writerMs) {
     const note = kind === 'ask_missing' && facts.question ? run.activities.find(a => a.id === facts.question.id)?.detail?.text ?? null : null
     // Checked against what it was composed from (the run's facts at that beat), not against the turn's materials.
@@ -6042,7 +6139,7 @@ export class CodexChatRuntime {
     try {
       const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
       if (!engine?.capabilities?.(slot)?.has('threadFork')) return null
-      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, timeoutMs, text: prompt })
+      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, timeoutMs, text: prompt, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run) })
       const text = cleanIntermediate(out.text)
       if (!text || prior.includes(text)) return null
       // The evidence is what the message was composed from (messageEvidence): the run's own facts, never the turn's materials. A message
@@ -6398,7 +6495,7 @@ export class CodexChatRuntime {
     try {
       const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
       if (!engine?.capabilities?.(slot)?.has('threadFork')) return null
-      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, signal, timeoutMs: 25_000,
+      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, signal, timeoutMs: 25_000, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run),
         text: `Here is your draft answer to the person's last message:\n\n${draft}\n\n${note}\n\nReply with only the revised answer text.` })
       return out.text || null
     } catch { return null }
@@ -6409,11 +6506,12 @@ export class CodexChatRuntime {
   canInternalTurn(run) {
     try { const engine = this.engineOf(run.conversationId); return engine?.capabilities?.(this.threadOperationSlot(run.conversationId))?.has('threadFork') === true } catch { return false }
   }
-  async internalText(run, text, { timeoutMs = 20_000, signal = null, outputSchema = null } = {}) {
+  // preamble: false = the fresh thread (an ephemeral room) gets the caller's text and nothing else: the briefing fill is guide + materials only on purpose (L4).
+  async internalText(run, text, { timeoutMs = 20_000, signal = null, outputSchema = null, preamble = true } = {}) {
     try {
       if (!this.canInternalTurn(run)) return null
       // outputSchema (cycle 30, briefing flag): the turn's final message is constrained by it; absent, the turn is exactly what it was.
-      const out = await this.internalTurns.run({ engine: this.engineOf(run.conversationId), slot: this.threadOperationSlot(run.conversationId), parentThreadId: run.conversationId, signal, timeoutMs, text, ...(outputSchema ? { outputSchema } : {}) })
+      const out = await this.internalTurns.run({ engine: this.engineOf(run.conversationId), slot: this.threadOperationSlot(run.conversationId), parentThreadId: run.conversationId, signal, timeoutMs, text, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run, { preamble }), ...(outputSchema ? { outputSchema } : {}) })
       return out.text || null
     } catch { return null }
   }
@@ -6623,6 +6721,31 @@ export class CodexChatRuntime {
   }
   ownNeutralFolder() { try { const folder = this.ownTools?.neutralFolder?.(); return typeof folder === 'string' && path.isAbsolute(folder) && !folder.includes('\0') ? folder : null } catch { return null } }
   /** The folder EG-Desk's own tools use for a run: the real folder in own-tools mode, otherwise the thread's folder. */
+  // c24 (Main's check-2: posted answers linked "…/engine-folders/empty/app.js"): in an own-tools run the engine works in EG-Desk's empty folder, so the model
+  // writes the paths it knows, under that folder; the person's file is in the run's real folder. Every path under the engine folder in an assistant message
+  // becomes the same path under the real folder, before the text is stored, shown, or read for file links (artifacts), so the viewer opens the real file.
+  // Only a whole path prefix is mapped ("<engine folder>/…" or the folder itself, never "<engine folder>-other"); other text is untouched. Items that
+  // complete carry the whole text, so a path split across streaming deltas is mapped when the message completes.
+  mapOwnPaths(run, text) {
+    if (!run?.ownTools || !run.ownFolder || typeof text !== 'string' || !text) return text
+    const engine = this.threads.get(run.conversationId)?.cwd ?? this.ownNeutralFolder()
+    if (typeof engine !== 'string' || !path.isAbsolute(engine) || engine === run.ownFolder) return text
+    const from = new Set([engine]); try { from.add(realpathSync(engine)) } catch { /* not on disk: the plain form only */ }
+    let out = text
+    for (const prefix of from) {
+      let at = 0, next = ''
+      for (let i; (i = out.indexOf(prefix, at)) >= 0; at = i + prefix.length) {
+        const after = out[i + prefix.length]
+        const whole = after === undefined || after === '/' || /[\s)\]>"'`,;:.]/.test(after)
+        const before = out[i - 1]
+        const start = before === undefined || !/[A-Za-z0-9_.\-/]/.test(before)
+        next += out.slice(at, i) + (whole && start ? run.ownFolder : prefix)
+      }
+      out = next + out.slice(at)
+    }
+    return out
+  }
+
   runFolder(run) { return run?.ownTools ? run.ownFolder ?? null : this.threads.get(run?.conversationId)?.cwd ?? null }
 
   // ---- Engine version against the hook's source check (c15). A new app-server connection is a new session: it records at most once. ----
@@ -7797,6 +7920,7 @@ export class CodexChatRuntime {
       if (typeof text !== 'string') return
       item = { ...item, text, truncated: false }
     }
+    if (item.type === 'agentMessage' && run.ownTools && typeof item.text === 'string') item = { ...item, text: this.mapOwnPaths(run, item.text) }
     let staged = ''
     if (item.type === 'agentMessage') {
       const channel = this.channelOutput.get(run)

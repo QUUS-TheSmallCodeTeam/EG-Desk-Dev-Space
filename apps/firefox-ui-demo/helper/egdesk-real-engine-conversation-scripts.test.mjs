@@ -70,12 +70,17 @@ test('the patterns: the correction, the terse yes after a proposal, the topic re
 test('c24 patterns: the conditional approval is checked by marker files (the skipped step stays absent), the pause ends the first turn interrupted without claiming it finished', () => {
   const c = load('conditional-yes').conversations[0]
   assert.equal(c.turns[1].say, '응 근데 테스트는 빼고')
+  assert.match(c.turns[0].say, /물어봐 줘\.$/, 'the person\'s "응" answers a question the assistant was asked to put (check-4: with no question it was read as a plan revision and nothing ran)')
   assert.deepEqual(c.turns[0].expect.files, { 'build.done': null, 'test.done': null, 'deploy.done': null }, 'nothing runs before the approval')
   assert.deepEqual(c.turns[1].expect.files, { 'build.done': 'ok', 'test.done': null, 'deploy.done': 'ok' })
   assert.ok(Object.values(c.folder).join('\n').split('\n').filter(Boolean).length === 3 && c.folder['notes/steps.md'].includes('test.done'))
   const p = load('pause').conversations[0]
   assert.deepEqual(p.flags, load('why-stopped').conversations[0].flags, 'the same flags as the why-stopped conversation')
-  assert.equal(p.turns[1].say, '아니 잠깐, 그거 하지 마'); assert.equal(p.turns[1].whileRunning.afterMs, 4000); assert.ok(p.turns[0].say.includes('sleep 15'))
+  // Real engine (check-4, 2026-11-25): with afterMs 4000 the stop landed before the engine had called its tool (turn 1 had no tool call), so the stop is sent
+  // at 10 s, and the command (sleep 30) outlasts it even if the tool started late.
+  assert.equal(p.turns[1].say, '아니 잠깐, 그거 하지 마'); assert.ok(p.turns[1].whileRunning.afterMs >= 8000)
+  assert.ok(Number(/sleep (\d+)/.exec(p.turns[0].say)[1]) * 1000 >= p.turns[1].whileRunning.afterMs + 15_000, 'the command outlasts the stop by a wide margin')
+  assert.deepEqual(p.turns[0].expect.toolCalls, ['egdesk_run_command'], 'the stop hit a command that had started')
   assert.equal(p.turns[0].expect.turnStatus, 'interrupted'); assert.deepEqual(p.turns[0].expect.answerExcludes, ['cleanup-finished']); assert.equal(p.turns[0].expect.posted, undefined, 'a preamble may have been posted')
   assert.deepEqual(p.turns[2].expect.answerExcludes, ['cleanup-finished']); assert.equal(p.turns[2].expect.turnStatus, 'completed')
 })

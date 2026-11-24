@@ -87,8 +87,9 @@ export const runJourneyConversation = (w, script, conversationId) => runConversa
 /** What a run cost on the Decisions side and on the engine side: requests and estimated input tokens, main turns, writer forks, steers, interrupts. */
 export function costOf(w, record) {
   const wire = w.wire(), inbound = name => wire.filter(m => m.dir === 'in' && m.method === name)
-  const forks = new Set(wire.filter(m => m.dir === 'out' && m.result?.thread?.id?.startsWith?.('fork-')).map(m => m.result.thread.id))
-  const turnStarts = inbound('turn/start'), forkTurns = turnStarts.filter(m => forks.has(m.params?.threadId))
+  // The conversation's own thread is the one of its first turn/start. Every other turn/start is the product's internal writing turn: on a fork of it, or (since L5 c24's
+  // fallback for an ephemeral parent) on a fresh ephemeral thread of its own.
+  const turnStarts = inbound('turn/start'), mainThread = turnStarts[0]?.params?.threadId ?? null, forkTurns = turnStarts.filter(m => m.params?.threadId !== mainThread)
   return { decisionRequests: w.decisionRows.length, decisionEstTokens: w.decisionRows.reduce((n, r) => n + r.est, 0), engineTurns: turnStarts.length - forkTurns.length, writerForkTurns: forkTurns.length,
     steers: inbound('turn/steer').length, interrupts: inbound('turn/interrupt').length, scriptedTurns: record.turns.length, byFamily: w.decisionRows.reduce((m, r) => { const k = r.names[0]?.replace(/_?\d+$/, '') ?? '?'; m[k] = (m[k] ?? 0) + 1; return m }, {}) }
 }

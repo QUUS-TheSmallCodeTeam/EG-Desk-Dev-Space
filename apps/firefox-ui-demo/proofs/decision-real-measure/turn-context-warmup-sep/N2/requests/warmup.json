@@ -1,0 +1,1 @@
+{"model":"gpt-6-luna","input":"EG-Desk warm-up","questions":[{"type":"predicate","name":"warmup_check","instructions":"Is the input a warm-up message?"}]}

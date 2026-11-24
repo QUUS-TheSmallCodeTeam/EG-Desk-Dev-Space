@@ -34,6 +34,7 @@ export const COMMITTED_PLANS = Object.freeze([
   { path: 'proofs/decision-real-measure/turn-context-idle', lane: 'L6', rebuilt: { script: 'egdesk-turn-context-latency-plan.mjs', argv: ['--idle'] } },
   { path: 'proofs/decision-real-measure/turn-context-latency', lane: 'L6', rebuilt: { script: 'egdesk-turn-context-latency-plan.mjs' } },
   { path: 'proofs/decision-real-measure/turn-context-warmup-size', lane: 'L6', rebuilt: { script: 'egdesk-turn-context-latency-plan.mjs', argv: ['--size'] } },
+  { path: 'proofs/decision-real-measure/turn-context-warmup-sep', lane: 'L6', rebuilt: { script: 'egdesk-turn-context-latency-plan.mjs', argv: ['--sep'] } },
   { path: 'proofs/decision-real-measure/turn-context-warmup', lane: 'L6', rebuilt: { script: 'egdesk-turn-context-latency-plan.mjs', argv: ['--warmup'] } },
   { path: 'proofs/decision-real-measure/utterance-threshold', lane: 'L6', rebuilt: { script: 'egdesk-utterance-threshold-study.mjs' } },
   { path: 'proofs/decision-real-measure/work-placement', lane: 'L1', rebuilt: { script: 'egdesk-board-reply-real-plan.mjs', matches: 3 } },
@@ -47,7 +48,7 @@ export const COMMITTED_PLANS = Object.freeze([
   ...['c15', 'c16', 'c17'].map(c => ({ path: `helper/egdesk-heartbeat-real-plan.${c}.json`, lane: 'L3', frozen: `the ${c} heartbeat registration as measured (2026-11-24); helper/egdesk-heartbeat-real-plan.test.mjs` })),
   ...['', '-v2', '-v3', '-v4', '-v5', '-v6', '-v7'].map(v => ({ path: `scripts/egdesk-all-on-live-measure.plan${v}.json`, lane: 'L2', handWritten: 'all-on journey scenario plan (steps and checks written by hand; the live runner builds bodies at run time)' })),
   ...['', '-v2', '-v3', '-v4'].map(v => ({ path: `scripts/egdesk-multiuser-live-measure.plan${v}.json`, lane: 'L1', handWritten: 'collaboration scenario plan (written by hand; the live runner builds bodies at run time)' })),
-  ...['allon-plan', 'plan', 'plan-delivery', 'plan-holdout', 'plan-settings', 'plan-settings-error', 'plan-stability', 'plan-statement', 'recorded-plan', 'renamed-plan'].map(v => ({ path: `scripts/egdesk-browser-live-${v}.json`, lane: 'L8', handWritten: 'browser journey plan (written by hand; the live runner builds bodies at run time)' })),
+  ...['allon-plan', 'plan', 'plan-delivery', 'plan-holdout', 'plan-holdout-rerun', 'plan-holdout2', 'plan-settings', 'plan-settings-error', 'plan-stability', 'plan-statement', 'recorded-plan', 'renamed-plan'].map(v => ({ path: `scripts/egdesk-browser-live-${v}.json`, lane: 'L8', handWritten: 'browser journey plan (written by hand; the live runner builds bodies at run time)' })),
 ])
 
 /** Every committed plan location under the app root (see the header), sorted. */
