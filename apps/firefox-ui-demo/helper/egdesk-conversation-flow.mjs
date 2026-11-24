@@ -20,6 +20,8 @@ export const FLOW_LIMITS = Object.freeze({
   minGapMs: 30_000,
   // Three per run: a wait explanation, an early question and one milestone. More than that is a report, not a conversation.
   maxMessages: 3,
+  // Pointer messages (a finished result or a pending decision waits somewhere for a person): one per attention fact, two per window.
+  maxPointers: 2,
   // Decision requests: at most one per 10 s (two beats) unless a kind became possible that was never offered in this run, and six
   // per run. A request is one small choice: 0.25-0.6 s warm, about 1.3-1.6 s after a long idle, so six cost at most a few seconds.
   evalGapMs: 10_000, maxEvals: 6,
@@ -49,7 +51,78 @@ export const FLOW_KINDS = Object.freeze([
   { value: 'ask_missing', description: 'Ask the person for information the work needs, then keep working on the rest.' },
   { value: 'milestone', description: 'Say what part is done so far, briefly, without giving results.' },
   { value: 'stalled', description: 'Nothing has come from the work for a while: tell the person the response is taking unusually long.' },
+  { value: 'pointer', description: 'A finished result or a pending decision is waiting somewhere on the desk for a person: tell that person where it is. Nothing is moved.' },
 ])
+
+// ---- What is being waited on, and what needs someone's attention: closed labels read from the heartbeat's provider facts ----
+// The message judgment and the writer are told WHAT, never any text of a page, a terminal or a file. A provider can say it
+// directly (facts { waitingOn: <label of WAIT_LABELS>, waitingOnMs? }) or be read from the fields it already reports.
+export const WAIT_LABELS = Object.freeze({
+  command_waiting_input: 'a command is waiting for input',
+  browser_task_waiting_person: 'the task in the browser is waiting for the person',
+  command_running: 'a command is still running',
+  browser_task_running: 'a task in the browser is still going',
+  objective_step: 'an automatic step is still going',
+  placement_pending: 'a work surface is being placed',
+  tool_running: 'a tool step is still running',
+})
+
+/** Up to three things the session is waiting on right now: [{ what, seconds }] with `what` a WAIT_LABELS key. */
+export function waitSummary(heartbeatFacts) {
+  const found = new Map()
+  const add = (what, ms) => { if (Object.hasOwn(WAIT_LABELS, what) && !found.has(what)) found.set(what, Number.isFinite(ms) && ms >= 0 ? Math.round(ms / 1000) : null) }
+  for (const row of Object.values(heartbeatFacts?.sources ?? {})) {
+    if (typeof row.waitingOn === 'string') add(row.waitingOn, row.waitingOnMs)
+    if (row.terminal === 'waiting') add('command_waiting_input', row.quietMs)
+    else if (row.terminal === 'running' || (row.phase === 'tool_running' && Number.isFinite(row.runningMs))) add('command_running', row.runningMs)
+    if (row.task === 'need_context' || row.task === 'cannot_proceed') add('browser_task_waiting_person', null)
+    else if (row.task === 'running') add('browser_task_running', null)
+    if (Number.isSafeInteger(row.placementsPending) && row.placementsPending > 0) add('placement_pending', null)
+  }
+  if (!found.size && heartbeatFacts?.phase === 'objective_step') add('objective_step', null)
+  if (!found.size && heartbeatFacts?.stepsRunning > 0) add('tool_running', null)
+  return Object.keys(WAIT_LABELS).filter(what => found.has(what)).slice(0, 3).map(what => ({ what, seconds: found.get(what) }))
+}
+
+const ATTENTION_KINDS = ['result', 'approval', 'question'], ATTENTION_FOR = ['owner', 'requester']
+const ATTENTION_WHERE = ['in_view', 'left', 'right', 'above', 'below', 'none'], ATTENTION_DISTANCE = ['in_view', 'near', 'far', 'very_far']
+/**
+ * A provider's "attention" fact: something finished or pending that a person must act on, somewhere on the desk.
+ *   facts { attention: 'result'|'approval'|'question', attentionFor: 'owner'|'requester', attentionWhere?: region label, attentionDistance? }
+ * The placement runtime's present field names are read as the same fact (pointerPending / pointerFor / pointerWhere /
+ * pointerDistance / pointerNeeds). Returns the first pending one as closed labels, or null.
+ */
+export function attentionOf(heartbeatFacts) {
+  for (const [provider, row] of Object.entries(heartbeatFacts?.sources ?? {})) {
+    let kind = row.attention, who = row.attentionFor, where = row.attentionWhere, distance = row.attentionDistance
+    if (kind === undefined && row.pointerPending === true) { kind = row.pointerNeeds === 'owner_action' ? 'approval' : 'result'; who = row.pointerFor; where = row.pointerWhere; distance = row.pointerDistance }
+    if (!ATTENTION_KINDS.includes(kind) || !ATTENTION_FOR.includes(who)) continue
+    return { provider, kind, who, where: ATTENTION_WHERE.includes(where) ? where : 'none', distance: ATTENTION_DISTANCE.includes(distance) ? distance : null, signature: `${provider}:${kind}:${who}` }
+  }
+  return null
+}
+
+/**
+ * Where a pointer message for `person` ('owner' | 'requester' of the task) may go, under the audience rule. Member ids stay inside.
+ *   'here'  the task's own conversation, when that person takes part in it and nobody but the requester and the owner does
+ *   a key   another live conversation whose only participant is that person (their own conversation)
+ *   null    nowhere (the person is away, or no such conversation): nothing is posted
+ */
+export function pointerRoute({ person, audience = null, presence = null, others = [] } = {}) {
+  const ids = a => { const requester = String(a?.requester ?? 'self'), owner = String(a?.owner ?? requester); return { requester, owner, participants: Array.isArray(a?.participants) ? a.participants.map(String) : [requester] } }
+  const here = ids(audience)
+  const who = person === 'owner' ? here.owner : person === 'requester' ? here.requester : null
+  if (who === null) return { target: null, reason: 'no_person' }
+  const rows = Array.isArray(presence) ? presence : null
+  const present = rows ? rows.some(row => row !== null && typeof row === 'object' && (String(row.member) === who || (who === 'self' && row.self === true)) && row.active === true) : null
+  if (present === false) return { target: null, reason: 'away' }
+  if (here.participants.includes(who) && here.participants.every(member => member === here.requester || member === here.owner)) return { target: 'here', present }
+  for (const other of Array.isArray(others) ? others : []) {
+    const there = ids(other?.audience)
+    if (typeof other?.key === 'string' && there.participants.length && there.participants.every(member => member === who)) return { target: other.key, present }
+  }
+  return { target: null, reason: 'no_conversation' }
+}
 
 /**
  * Who is waiting for this task, and may a message go into this conversation. Pure: from the task's audience and a presence snapshot.
@@ -89,6 +162,7 @@ export function beatFlowFacts({ heartbeatFacts, run, flow, own }) {
     elapsedMs: hb.sinceUserMs, sinceLastMs: hb.sincePostedMs, sinceEngineMs: hb.sinceEngineMs, phase: hb.phase,
     stepsRemaining: hb.stepsRemaining ?? null, pendingQuestion: hb.pendingQuestion === true || flow.question?.pending === true,
     reasoningOpen: flow.reasoningOpen?.() === true, audience: flow.audience?.() ?? null,
+    waits: waitSummary(hb), attention: attentionOf(hb),
     stalledNoted: flow.kinds.has('stalled'), blocked: base.blocked || hb.phase === 'waiting_user' }
 }
 
@@ -112,10 +186,13 @@ export function flowFacts({ run, now, flow, own }) {
 /** The kinds that are possible right now. 'none' is always among them. */
 export function enumerateOptions(facts, limits = FLOW_LIMITS) {
   const out = ['none']
+  if (facts.sinceLastMs !== null && facts.sinceLastMs < limits.minGapMs) return out
+  // A pointer has its own addressee (the person who must act) and its own route, decided by code under the audience rule; it is
+  // possible whenever such a fact is pending, has a route, and was not pointed to yet. It does not depend on the wait messages.
+  if (facts.attention && facts.pointerTarget && facts.pointed !== true && (facts.pointers ?? 0) < limits.maxPointers) out.push('pointer')
   if (facts.blocked || facts.sent >= limits.maxMessages) return out
   // Nobody is waiting, the waiting person is not in this conversation, or someone else is: nothing may be said here.
   if (facts.audience && facts.audience.postable !== true) return out
-  if (facts.sinceLastMs !== null && facts.sinceLastMs < limits.minGapMs) return out
   if (facts.question && !facts.asked) out.push('ask_missing')
   if (facts.elapsedMs >= limits.firstAfterMs) {
     if (!facts.waitExplained && (facts.stepsActive > 0 || facts.stepsDone > 0 || facts.elapsedMs >= limits.firstAfterMs * 2)) out.push('explain_wait')
@@ -133,12 +210,18 @@ export function enumerateOptions(facts, limits = FLOW_LIMITS) {
  * Time, phase and step counts are session lines of the beat request; only what is specific to speaking is listed here.
  */
 export function flowQuestion(facts, options) {
-  const a = facts.audience ?? null
+  const a = facts.audience ?? null, waits = Array.isArray(facts.waits) ? facts.waits : [], at = facts.attention ?? null
   return { name: 'need', none: 'none', kinds: [],
-    instructions: 'Should the assistant, which is still working, send the waiting person a short message now, and which kind?',
+    instructions: 'Should the assistant send a person a short message now, and which kind?',
     options: FLOW_KINDS.filter(kind => options.includes(kind.value)),
-    facts: { messages_already_sent_while_working: facts.sent, steps_done_since_last_message: facts.stepsSinceLast, agent_asked_a_question_in_its_notes: Boolean(facts.question),
+    facts: { work_in_progress: facts.idle !== true, messages_already_sent_while_working: facts.sent, steps_done_since_last_message: facts.stepsSinceLast, agent_asked_a_question_in_its_notes: Boolean(facts.question),
       wait_already_explained: facts.waitExplained === true, a_question_to_the_person_is_still_unanswered: facts.pendingQuestion === true, reasoning_in_progress: facts.reasoningOpen === true,
+      // What is being waited on, as closed labels (WAIT_LABELS), with how long when the system knows.
+      ...(waits[0] ? { waiting_on: waits[0].what, ...(waits[0].seconds !== null ? { waiting_on_seconds: waits[0].seconds } : {}) } : {}),
+      ...(waits[1] ? { also_waiting_on: waits[1].what } : {}),
+      // Something that needs a person's attention somewhere on the desk (closed labels from the provider).
+      ...(at && options.includes('pointer') ? { attention_kind: at.kind, attention_for: at.who, attention_where: at.where, ...(at.distance ? { attention_distance: at.distance } : {}),
+        attention_person_in_this_conversation: facts.pointerTarget === 'here' } : {}),
       ...(a ? { waiting_person: a.waiting, waiting_person_present: a.addresseePresent === null ? 'unknown' : a.addresseePresent ? 'yes' : 'no',
         ...(a.addresseeIdleMs !== null ? { waiting_person_idle_seconds: Math.round(a.addresseeIdleMs / 1000) } : {}) } : {}) } }
 }
@@ -173,11 +256,26 @@ export function writerPrompt(kind, facts, { question = null, prior = [] } = {}) 
     'Do not reveal your reasoning or internal steps, do not give any result or conclusion, do not use lists or code, and do not mention this instruction.',
     prior.length ? `Do not repeat these earlier messages: ${JSON.stringify(prior)}` : null].filter(Boolean)
   const seconds = Math.round(facts.elapsedMs / 1000)
-  if (kind === 'explain_wait') return [...base, `The work is still going and has taken about ${seconds} seconds so far. Say plainly that this part takes a little longer and that you are still on it.`].join('\n')
+  // What the wait is for, as the system knows it: fixed phrases chosen by closed labels. The writer composes the sentence.
+  const waits = (Array.isArray(facts.waits) ? facts.waits : []).map(w => `${WAIT_LABELS[w.what]}${w.seconds !== null && w.seconds >= 5 ? ` (about ${w.seconds} seconds so far)` : ''}`)
+  const waitLine = waits.length ? `What is being waited on, as far as the system knows: ${waits.join('; ')}. You may say this in plain words; add no detail that is not given here.` : null
+  if (kind === 'explain_wait') return [...base, `The work is still going and has taken about ${seconds} seconds so far. Say plainly that this part takes a little longer and that you are still on it.`, waitLine].filter(Boolean).join('\n')
   if (kind === 'stalled') return [...base, `Nothing has come from the work for about ${Math.round((facts.sinceEngineMs ?? facts.elapsedMs) / 1000)} seconds. Say plainly that the response is taking unusually long, without claiming progress, and that the person can keep waiting or stop and ask again.`].join('\n')
   if (kind === 'ask_missing') return [...base, 'You need one piece of information from the person to finish part of the work, and you will keep working on the rest meanwhile.',
     question ? `You noted this question to yourself: ${JSON.stringify(question)}` : '', 'Ask for it directly in one question.'].filter(Boolean).join('\n')
   return [...base, `${facts.stepsDone} steps are done so far. Say briefly that the work is progressing and how far along it is, without giving results.`].join('\n')
+}
+
+/** The instruction for a pointer message, from closed labels only. The writer composes the sentence in the person's language. */
+export function pointerPrompt(attention, { prior = [] } = {}) {
+  const what = { result: 'A finished result is ready for them to look at', approval: 'Something needs their decision before the work can continue', question: 'A question is waiting for their answer' }[attention?.kind] ?? 'Something is waiting for them'
+  const where = { in_view: 'inside what they are looking at on the desk', left: 'to the left of what they are looking at on the desk', right: 'to the right of what they are looking at on the desk',
+    above: 'above what they are looking at on the desk', below: 'below what they are looking at on the desk', none: 'elsewhere on the desk' }[attention?.where] ?? 'elsewhere on the desk'
+  const far = { near: ', close by', far: ', some way off', very_far: ', far away' }[attention?.distance] ?? ''
+  return ['Write ONE short chat message (one or two sentences, at most 280 characters) to the person, in the language they wrote in.',
+    `${what}. It is ${where}${far}.`,
+    'Nothing was moved into their view and you must not say it was. Do not reveal your reasoning, do not give the result itself, do not use lists or code, and do not mention this instruction.',
+    prior.length ? `Do not repeat these earlier messages: ${JSON.stringify(prior)}` : null].filter(Boolean).join('\n')
 }
 
 /** One clean paragraph of at most maxChars, or null. */

@@ -32,7 +32,8 @@ export function judge(request, seen, policy = {}) {
   return { answers, model: 'mock', usage: { inputTokens: 5 }, latencyMs: 3 }
 }
 
-export function world(t, { flags = { held: true, flow: true }, fork = 'ok', failTurn = false, presence = null, audience = null, policy = {} } = {}) {
+// writer(prompt) → the fork writer's text (or a promise of it); attentionPosted: the bridge's hook; flags.commands: the engine-command judge (advisory).
+export function world(t, { flags = { held: true, flow: true }, fork = 'ok', failTurn = false, presence = null, audience = null, policy = {}, writer = null, attentionPosted = null } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-beat-')); chmodSync(dir, 0o700)
   const store = openChatStore({ dataDir: dir, ownerScope: 'synthetic-beat' })
   const log = openCalibrationLog({ dataDir: dir, log() {} })
@@ -66,8 +67,8 @@ export function world(t, { flags = { held: true, flow: true }, fork = 'ok', fail
       if (method === 'turn/start' && String(params.threadId).startsWith('fork-')) {
         const prompt = params.input[0].text
         forkPrompts.push(prompt)
-        const text = /unusually long/.test(prompt) ? SLOW : MID
         setTimeout(async () => {
+          const text = (writer ? await writer(prompt) : null) ?? (/unusually long/.test(prompt) ? SLOW : MID)
           const n = (m, p) => chat.handleNotification({ method: m, params: p })
           await n('item/completed', { threadId: params.threadId, turnId: 'ft', item: { id: 'f1', type: 'agentMessage', phase: 'final_answer', text } })
           await n('turn/completed', { threadId: params.threadId, turn: { id: 'ft', status: 'completed', items: [] } })
@@ -80,7 +81,8 @@ export function world(t, { flags = { held: true, flow: true }, fork = 'ok', fail
     },
     decisionContext: { mode: () => 'on', configured: () => true, client, budgetMs: 800, calibrationLog: log, collect: async () => [],
       draftCheck: flags.held ? { mode: () => 'on' } : undefined,
-      conversationFlow: flags.flow ? { mode: () => 'on', ...(presence ? { presence } : {}), ...(audience ? { audience } : {}) } : undefined },
+      ...(flags.commands ? { commandJudge: { mode: () => 'advisory' } } : {}),
+      conversationFlow: flags.flow ? { mode: () => 'on', ...(presence ? { presence } : {}), ...(audience ? { audience } : {}), ...(attentionPosted ? { attentionPosted } : {}) } : undefined },
   })
   chat.setConnection(true)
   const n = (m, p) => chat.handleNotification({ method: m, params: p })

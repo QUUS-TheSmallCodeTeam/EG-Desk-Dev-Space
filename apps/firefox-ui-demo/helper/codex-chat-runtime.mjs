@@ -16,7 +16,7 @@ import { COMMAND_GATE_TIMEOUT_MS, assessCommand, classifyCommand } from './egdes
 import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
 import { homedir } from 'node:os'
 import { createInternalTurns } from './codex-internal-turn.mjs'
-import { FLOW_COPY, FLOW_LIMITS, audienceFacts, beatFlowFacts, cleanIntermediate, enumerateOptions, flowQuestion, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
+import { FLOW_COPY, FLOW_LIMITS, attentionOf, audienceFacts, beatFlowFacts, cleanIntermediate, enumerateOptions, flowQuestion, pointerPrompt, pointerRoute, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
 import { BEAT_JUDGE_TIMEOUT_MS, createBeatJudge } from './egdesk-heartbeat-judge.mjs'
 import { createHeartbeats } from './egdesk-heartbeat.mjs'
 import { feedBrowserTask } from './egdesk-heartbeat-providers.mjs'
@@ -2751,7 +2751,8 @@ export class CodexChatRuntime {
         try { this.store.cancelTopicAnswer(context.clientThreadId, context.requestId) } catch { this.storeHealthy = false }
       }
       if (browserPre && !browserPre.adopted) { try { void Promise.resolve(browserPre.provider.cancelRun?.(browserPre.preRun)).catch(() => {}) } catch { /* best effort */ } }
-      this.stopHeartbeat(context.heartbeat, 'start_failed')
+      // A session that was already live goes on (idle); one opened for this message alone ends with it.
+      if (context.heartbeatReused) context.heartbeat?.settle(); else this.stopHeartbeat(context.heartbeat, 'start_failed')
       if (epoch === this.epochOf(engine.id, slot) && uncertain) this.uncertainThreads.add(cid)
       if (context.nativeTurnId && epoch === this.epochOf(engine.id, slot)) {
         for (const event of pending.buffer.splice(0)) if ((event.method === 'dynamic' || event.method === 'approval') && this.eventRouteMatches(event.inbound)) {
@@ -4773,23 +4774,45 @@ export class CodexChatRuntime {
   /** The heartbeat of a live conversation (key: the local chat id, else the native thread id), or null. Objective loops register fact providers and subscribe to beats here. */
   heartbeatFor(key) { return this.heartbeats.get(key) }
 
-  // Starts when the person's message has been accepted and the conversation is about to work (before any pre-turn objective loop).
+  // The conversation's session heartbeat. It starts when the person's first message is accepted (before any pre-turn objective loop)
+  // and is kept across the session's runs: a later message re-activates the same heartbeat, so facts and questions that providers
+  // registered (a result waiting for attention, a placement) carry over. Run-scoped facts are replaced when the next run joins.
   startHeartbeat(context, cid) {
     try {
       if (this.heartbeatMode() !== 'on') return null
-      const hb = this.heartbeats.open(context.clientThreadId || cid)
+      const key = context.clientThreadId || cid
+      const live = this.heartbeats.get(key)
+      const reused = Boolean(live && live.state !== 'stopped')
+      const hb = reused ? live : this.heartbeats.open(key)
       if (!hb) return null
       const accepted = Number.isFinite(context.acceptedMono) ? context.acceptedMono : this.monotonicNow()
-      hb.start({ sinceMs: Math.max(0, this.monotonicNow() - accepted) })
+      hb.activate({ sinceMs: Math.max(0, this.monotonicNow() - accepted) })
       this.heartbeatThreads.set(cid, hb)
-      context.heartbeat = hb
-      // The heartbeat's judge: one Decision request per asked beat for every proposed question, through this conversation's egress gate.
-      const subject = { run: null, flow: null, toolCeiling: context.toolCeiling ?? null }
-      this.heartbeatSubjects.set(hb, subject)
-      hb.setJudge(round => this.judgeBeat(subject, round), { onRound: summary => this.recordBeatRound(subject, summary) })
+      context.heartbeat = hb; context.heartbeatReused = reused
+      let subject = this.heartbeatSubjects.get(hb)
+      if (!subject) {
+        // What the session's judge, record and message question speak for. run/flow are the session's current (or last) run.
+        subject = { key, conversationId: cid, run: null, flow: null, toolCeiling: null, canSpeak: false, pointed: new Set(), pointers: 0, proposal: null }
+        this.heartbeatSubjects.set(hb, subject)
+        // One Decision request per asked beat for every proposed question, through this conversation's egress gate.
+        hb.setJudge(round => this.judgeBeat(subject, round), { onRound: summary => this.recordBeatRound(subject, summary) })
+        // An idle session stays live past its linger time only while something of it still needs a person.
+        hb.setKeepAlive(facts => facts.pendingQuestion === true || facts.phase === 'waiting_user' || attentionOf(facts) !== null)
+        // Read-only for the other providers of this heartbeat: closed labels, never a member id.
+        hb.register('audience', () => { const a = this.sessionAudience(subject).facts; return { waiting: a.waiting, addressee: a.addressee, addresseePresent: a.addresseePresent, addresseeInConversation: a.addresseeInConversation, postable: a.postable,
+          reasoningOpen: (this.heartbeatReasoning.get(hb)?.size ?? 0) > 0 } })
+        // The message question: one proposer among the heartbeat's providers, while a run works and after it.
+        hb.register('message', { propose: beat => this.sessionPropose(subject, beat), onVerdict: round => this.sessionVerdict(subject, round) })
+      }
+      // A new window: the previous run's facts are over until the next run joins.
+      subject.conversationId = cid; subject.toolCeiling = context.toolCeiling ?? null; subject.pointers = 0
+      if (reused) { subject.run = null; subject.flow = null; hb.setSource(null); this.heartbeatReasoning.delete(hb) }
       return hb
     } catch { return null }
   }
+
+  /** The conversation was closed: its session heartbeat ends now (stop reason 'closed'). */
+  closeSession(key) { const hb = this.heartbeats.get(key); if (!hb) return false; this.stopHeartbeat(hb, 'closed'); return true }
 
   stopHeartbeat(hb, reason) {
     if (!hb) return
@@ -4820,15 +4843,35 @@ export class CodexChatRuntime {
     } catch { /* marking never affects the event */ }
   }
 
-  // Who is waiting for this run's task and whether a message may go into its conversation (egdesk-conversation-flow.mjs audienceFacts).
+  // Who is waiting for this conversation's task and whether a message may go into it (egdesk-conversation-flow.mjs audienceFacts).
   // conversationFlow.audience({ run }) → { requester, owner, participants } and conversationFlow.presence.snapshot() are optional; without
   // them the local person asked in their own DM and presence is unknown (today's single-user behaviour).
-  flowAudience(run) {
+  audienceInputs(ref) {
     const cf = this.decisionContext?.conversationFlow
     let audience = null, rows = null
-    try { audience = typeof cf?.audience === 'function' ? cf.audience({ run: { clientThreadId: run.clientThreadId, conversationId: run.conversationId, board: Boolean(run.board) } }) : null } catch { audience = null }
+    try { audience = typeof cf?.audience === 'function' ? cf.audience({ run: { clientThreadId: ref.clientThreadId ?? null, conversationId: ref.conversationId ?? null, board: Boolean(ref.board) } }) : null } catch { audience = null }
     try { rows = typeof cf?.presence?.snapshot === 'function' ? cf.presence.snapshot() : null } catch { rows = null }
-    return audienceFacts({ audience, presence: Array.isArray(rows) ? rows : null })
+    return { audience, presence: Array.isArray(rows) ? rows : null }
+  }
+
+  flowAudience(run) { return audienceFacts(this.audienceInputs(run)) }
+
+  sessionAudience(subject) {
+    const inputs = this.audienceInputs(subject.run ?? { clientThreadId: subject.key, conversationId: subject.conversationId })
+    return { ...inputs, facts: audienceFacts(inputs) }
+  }
+
+  // Where a pointer for the person who must act may go (pointerRoute): this conversation, or another live conversation that is that
+  // person's own. Decided by code under the audience rule, never by the model.
+  pointerRouteFor(subject, attention) {
+    const here = this.sessionAudience(subject)
+    const others = []
+    for (const key of this.heartbeats.keys()) {
+      if (key === subject.key) continue
+      const other = this.heartbeatSubjects.get(this.heartbeats.get(key))
+      if (other?.run) others.push({ key, audience: this.audienceInputs(other.run).audience })
+    }
+    return pointerRoute({ person: attention.who, audience: here.audience, presence: here.presence, others })
   }
 
   /**
@@ -4840,13 +4883,13 @@ export class CodexChatRuntime {
     const hb = this.heartbeats.get(key)
     if (!hb) return false
     this.flowSpeakers.add(hb)
-    const flow = this.heartbeatSubjects.get(hb)?.flow
-    if (flow && !flow.closed) flow.canSpeak = flow.held || this.draftCheckMode() === 'on'
+    const subject = this.heartbeatSubjects.get(hb), flow = subject?.flow
+    if (flow && !flow.closed) { flow.canSpeak = flow.held || this.draftCheckMode() === 'on'; subject.canSpeak = flow.canSpeak }
     return true
   }
 
-  // The run joins its conversation's heartbeat: the run's own facts become the heartbeat's source, and the message question is
-  // one proposer among the heartbeat's providers (see the contract in egdesk-heartbeat.mjs).
+  // The run joins its conversation's session heartbeat: the run's own facts become the heartbeat's source and the session's message
+  // question speaks for this run until it ends (see the contract in egdesk-heartbeat.mjs).
   startConversationFlow(run, body, context) {
     try {
       const hb = context.heartbeat
@@ -4857,15 +4900,12 @@ export class CodexChatRuntime {
         audience: () => this.flowAudience(run), reasoningOpen: () => (this.heartbeatReasoning.get(hb)?.size ?? 0) > 0 }
       this.flowRuns.set(run, flow)
       const subject = this.heartbeatSubjects.get(hb)
-      if (subject) { subject.run = run; subject.flow = flow }
+      if (subject) { subject.run = run; subject.flow = flow; subject.canSpeak = flow.canSpeak }
       hb.setSource(() => {
         const tools = (run.activities || []).filter(a => !FLOW_OWN_KINDS.has(a.kind))
         return { stepsDone: tools.filter(a => a.status === 'completed').length, stepsRunning: tools.filter(a => a.status === 'inProgress').length,
           waitingOnUser: Boolean(run.pendingApprovals?.length) || Boolean(run.pendingUserInputs?.length), pendingQuestion: flow.question?.pending === true }
       })
-      // Read-only for the other providers of this heartbeat: closed labels, never a member id.
-      hb.register('audience', () => { const a = flow.audience(); return { waiting: a.waiting, addressee: a.addressee, addresseePresent: a.addresseePresent, addresseeInConversation: a.addresseeInConversation, postable: a.postable, reasoningOpen: flow.reasoningOpen() } })
-      hb.register('message', { propose: beat => this.flowPropose(run, flow, beat), onVerdict: round => this.flowVerdict(run, flow, round) })
     } catch { /* never affects the turn */ }
   }
 
@@ -4890,9 +4930,18 @@ export class CodexChatRuntime {
     // Only the run that joined a heartbeat stops it: another (older or child) run ending on the same thread never does.
     const flow = this.flowRuns.get(run)
     if (!flow) return
-    flow.closed = true
+    const ended = flow.ended === true
+    flow.closed = flow.ended = true
     this.setReplyOpen(run, null)
-    this.stopHeartbeat(flow.heartbeat, reason)
+    const hb = flow.heartbeat, subject = this.heartbeatSubjects.get(hb)
+    // What the session may still say after this run (a pointer message) follows the run's own permission. An opt-in was for this run only.
+    // The run is over, the session is not: the heartbeat goes on at its idle tempo and ends by itself (linger, hard stop) or when the
+    // conversation is closed. Only a lost connection or process ends it here. A run that is not the session's current one changes nothing.
+    if (reason !== 'run_end' && reason !== 'cancel') { this.stopHeartbeat(hb, reason); return }
+    if (ended || subject?.run !== run) return
+    subject.canSpeak = flow.canSpeak; subject.pointers = 0 // a new window
+    this.flowSpeakers.delete(hb); this.heartbeatReasoning.delete(hb)
+    hb.setSource(null); hb.settle()
   }
 
   flowIdle() { return Promise.allSettled([...this.flowJobs]) }
@@ -4900,12 +4949,66 @@ export class CodexChatRuntime {
   // A streamed (not held) final answer has begun: nothing more is said in between.
   finalAnswerBegun(run, flow) { return !flow.held && run.messages.some(m => m.role === 'assistant' && m.phase === 'final_answer') }
 
-  // The message question for this beat, or nothing (a quiet beat costs no request). The request bounds are the heartbeat's.
-  flowPropose(run, flow, beat) {
+  // The session's message question at a beat: the working run's flow while a run works, else the idle session (a pointer only).
+  sessionPropose(subject, beat) {
+    subject.proposal = null
+    const run = subject.run, flow = subject.flow
+    if (run && flow && !flow.closed && run.status === 'inProgress') {
+      const question = this.flowPropose(run, flow, beat, subject)
+      if (question) subject.proposal = { mode: 'run', run, flow }
+      return question
+    }
+    const question = this.idlePropose(subject, beat)
+    if (question) subject.proposal = { mode: 'idle' }
+    return question
+  }
+
+  sessionVerdict(subject, round) {
+    const proposal = subject.proposal
+    subject.proposal = null
+    if (proposal?.mode === 'run') return this.flowVerdict(proposal.run, proposal.flow, round, subject)
+    if (proposal?.mode !== 'idle') return 'none'
+    const verdict = round.verdicts[0], pending = subject.pendingPointer
+    subject.pendingPointer = null
+    if (!verdict?.accepted || verdict.value !== 'pointer' || !pending) return 'none'
+    return this.trackFlowJob(this.postPointer(subject, pending.attention))
+  }
+
+  trackFlowJob(promise) {
+    const job = promise.catch(() => 'none')
+    this.flowJobs.add(job)
+    void job.finally(() => this.flowJobs.delete(job))
+    return job
+  }
+
+  // What a pointer needs before it is even asked about: a pending attention fact that was not pointed to yet, and a route for it.
+  pointerFacts(subject, heartbeatFacts) {
+    const attention = attentionOf(heartbeatFacts)
+    if (!attention) { subject.pointed.clear(); return { attention: null } } // the fact was withdrawn: a later one may be pointed to again
+    const route = this.pointerRouteFor(subject, attention)
+    return { attention, pointed: subject.pointed.has(attention.signature), pointers: subject.pointers, pointerTarget: route.target }
+  }
+
+  // After the run: the only thing the session may still say is a pointer to something that needs a person. No request otherwise.
+  idlePropose(subject, beat) {
+    const setup = this.decisionContext, run = subject.run
+    if (!run || run.status === 'inProgress' || !subject.canSpeak || this.draftCheckMode() !== 'on') return null
+    if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return null
+    const pointer = this.pointerFacts(subject, beat.facts)
+    const facts = { idle: true, sent: 0, stepsSinceLast: 0, question: null, waitExplained: false, pendingQuestion: beat.facts.pendingQuestion === true, reasoningOpen: false, blocked: true,
+      elapsedMs: beat.facts.sinceUserMs, sinceLastMs: beat.facts.sincePostedMs, audience: this.sessionAudience(subject).facts, waits: [], ...pointer }
+    const options = enumerateOptions(facts)
+    if (!options.includes('pointer')) return null
+    subject.pendingPointer = { attention: pointer.attention }
+    return flowQuestion(facts, options)
+  }
+
+  // The message question for this beat while the run works, or nothing (a quiet beat costs no request). The request bounds are the heartbeat's.
+  flowPropose(run, flow, beat, subject = this.heartbeatSubjects.get(flow.heartbeat)) {
     const setup = this.decisionContext
     if (flow.closed || run.status !== 'inProgress' || !flow.canSpeak || this.finalAnswerBegun(run, flow)) return null
     if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return null
-    const facts = beatFlowFacts({ heartbeatFacts: beat.facts, run, flow, own: FLOW_OWN_KINDS })
+    const facts = { ...beatFlowFacts({ heartbeatFacts: beat.facts, run, flow, own: FLOW_OWN_KINDS }), ...(subject ? this.pointerFacts(subject, beat.facts) : {}) }
     const options = enumerateOptions(facts)
     if (options.length < 2) return null
     flow.pendingFacts = facts
@@ -4913,14 +5016,13 @@ export class CodexChatRuntime {
   }
 
   // The verdict for the message question: write, check and post, and say what happened in a closed word for the record.
-  flowVerdict(run, flow, { verdicts }) {
+  flowVerdict(run, flow, { verdicts }, subject = this.heartbeatSubjects.get(flow.heartbeat)) {
     const verdict = verdicts[0], facts = flow.pendingFacts
     flow.pendingFacts = null
-    if (!verdict?.accepted || verdict.value === 'none' || !facts || flow.closed || run.status !== 'inProgress') return 'none'
-    const job = this.postIntermediate(run, flow, verdict.value, facts).catch(() => 'none')
-    this.flowJobs.add(job)
-    void job.finally(() => this.flowJobs.delete(job))
-    return job
+    if (!verdict?.accepted || verdict.value === 'none' || !facts) return 'none'
+    if (verdict.value === 'pointer') return subject && facts.attention ? this.trackFlowJob(this.postPointer(subject, facts.attention)) : 'none'
+    if (flow.closed || run.status !== 'inProgress') return 'none'
+    return this.trackFlowJob(this.postIntermediate(run, flow, verdict.value, facts))
   }
 
   // One Decision request for every question proposed at this beat. Run facts are numbers and closed labels (egress kind run_facts);
@@ -4971,28 +5073,64 @@ export class CodexChatRuntime {
     return by
   }
 
-  async writeIntermediate(run, flow, kind, facts, timeoutMs = FLOW_LIMITS.writerMs) {
+  writeIntermediate(run, flow, kind, facts, timeoutMs = FLOW_LIMITS.writerMs) {
+    const note = kind === 'ask_missing' && facts.question ? run.activities.find(a => a.id === facts.question.id)?.detail?.text ?? null : null
+    return this.writeChecked(run, writerPrompt(kind, facts, { question: note, prior: flow.sent.map(row => row.text) }), { timeoutMs, prior: flow.sent.map(row => row.text) })
+  }
+
+  // One short message by the subjective model on a private fork of the run's conversation, then the same check as every posted
+  // message. There is no revision for a short note: a message that fails the check is not posted (null).
+  async writeChecked(run, prompt, { timeoutMs = FLOW_LIMITS.writerMs, prior = [], withoutEvidence = false } = {}) {
     try {
       const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
       if (!engine?.capabilities?.(slot)?.has('threadFork')) return null
-      const note = kind === 'ask_missing' && facts.question ? run.activities.find(a => a.id === facts.question.id)?.detail?.text ?? null : null
-      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, timeoutMs,
-        text: writerPrompt(kind, facts, { question: note, prior: flow.sent.map(row => row.text) }) })
+      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, timeoutMs, text: prompt })
       const text = cleanIntermediate(out.text)
-      if (!text || flow.sent.some(row => row.text === text)) return null
-      // Checked like any posted message; there is no revision for a short note: a message that fails is not posted.
-      // When the turn's evidence may not be used (guarded, or a bounded run) the check runs with none: a message that states something
-      // concrete then fails and is not posted.
+      if (!text || prior.includes(text)) return null
+      // When the turn's evidence may not be used (guarded, a bounded run, or a message that is not about the turn's material) the
+      // check runs with none: a message that states something concrete then fails and is not posted.
       const setup = this.decisionContext, turn = this.draftCheckTurns.get(run)
       if (!turn) return null
       const controller = new AbortController(), timer = setTimeout(() => controller.abort(), DRAFT_CHECK_LIMITS.firstCheckMs)
       timer.unref?.()
       try {
-        const checked = await Promise.race([checkDraft({ draft: text, evidence: turn.skip ? [] : turn.evidence, userText: turn.userText, mode: 'on', client: setup.client, revise: null, signal: controller.signal, egress: this.decisionEgressFor(run) }),
+        const checked = await Promise.race([checkDraft({ draft: text, evidence: turn.skip || withoutEvidence ? [] : turn.evidence, userText: turn.userText, mode: 'on', client: setup.client, revise: null, signal: controller.signal, egress: this.decisionEgressFor(run) }),
           new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))])
         return checked && checked.text === text ? text : null
       } finally { clearTimeout(timer); controller.abort() }
     } catch { return null }
+  }
+
+  // The carrier of a message in a conversation right now: its working run when that run may speak (the message folds into the run's
+  // flow), its last run when the conversation is idle (the same store and event path, after the run), or nothing.
+  messageCarrier(target) {
+    const run = target?.run, flow = target?.flow
+    if (!run || this.draftCheckMode() !== 'on') return null
+    if (run.status === 'inProgress') return flow && !flow.closed && flow.canSpeak && this.heldGuard(run)?.state !== 'checking' && !this.finalAnswerBegun(run, flow) ? { run, flow } : null
+    return TERMINAL.has(run.status) && target.canSpeak && this.runs.get(run.answerId) === run ? { run, flow: null } : null
+  }
+
+  // A pointer message: something finished or pending needs a person, somewhere on the desk. One completed, checked message into the
+  // conversation the audience rule allows (the task's own, or that person's own conversation). Nothing is moved: no card, no camera.
+  async postPointer(subject, attention) {
+    const routed = () => { const route = this.pointerRouteFor(subject, attention); return route.target === 'here' ? subject : route.target ? this.heartbeatSubjects.get(this.heartbeats.get(route.target)) ?? null : null }
+    let target = routed(), carrier = this.messageCarrier(target)
+    if (!carrier) return 'none'
+    const text = await this.writeChecked(carrier.run, pointerPrompt(attention, { prior: carrier.flow ? carrier.flow.sent.map(row => row.text) : [] }), { withoutEvidence: true })
+    if (!text) return 'none'
+    // Read again at posting time: the route (the person may have left), the conversation's run state (a new run may have started: the
+    // message then folds into that run's flow), and whether this fact was pointed to meanwhile.
+    target = routed(); carrier = this.messageCarrier(target)
+    if (!carrier || subject.pointed.has(attention.signature)) return 'none'
+    const id = `egdesk-flow:${randomUUID()}`
+    await this.applyItem(carrier.run, { id, type: 'agentMessage', phase: null, text, completionConfirmed: true }, true, true, true)
+    if (carrier.flow) { carrier.flow.sent.push({ id, text, kind: 'pointer', by: 'model' }); carrier.flow.kinds.add('pointer') }
+    subject.pointed.add(attention.signature); subject.pointers++
+    try { this.heartbeats.get(target.key)?.mark('posted') } catch { /* ignore */ }
+    // The provider is told, so it can withdraw its fact (heartbeat contract 3b); the bridge may also be told.
+    try { this.heartbeats.get(subject.key)?.acknowledge(attention.provider, 'attention') } catch { /* ignore */ }
+    try { this.decisionContext?.conversationFlow?.attentionPosted?.({ key: subject.key, provider: attention.provider }) } catch { /* ignore */ }
+    return 'model'
   }
 
   openEarlyQuestion(clientThreadId, conversationId) {

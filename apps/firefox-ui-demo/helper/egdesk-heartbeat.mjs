@@ -1,6 +1,15 @@
-// The heartbeat of a live session. One per live conversation: it starts when the person's message is accepted and beats on its
-// OWN internal time counter until the run ends, is cancelled or the connection drops. It does not listen to the engine to keep
-// time, so it still beats when the engine is silent or hung; engine events only move a mark ("last engine event") on its clock.
+// The heartbeat of a live session. One per live conversation: it starts when the person's first message is accepted and beats on
+// its OWN internal time counter for as long as the conversation's session is live, across runs. It does not listen to the engine to
+// keep time, so it still beats when the engine is silent or hung; engine events only move a mark ("last engine event") on its clock.
+//
+// Session and tempo. A session is live while a run works (tempo 'active': a beat every beatMs), and after the run for as long as
+// something of it still needs a person (a result or decision waiting for attention, an open question, an objective loop waiting
+// on them) or the person was here a moment ago (tempo 'idle': a beat every idleBeatMs).
+//   hb.activate({ sinceMs })   a message was accepted: tempo active, the beat grid restarts at that moment, a new window of bounds
+//   hb.settle()                the run ended: tempo idle, a new window of bounds
+//   hb.nudge()                 a provider has something for the judge now: the next beat comes within nudgeMs (at most once per beatMs)
+// The idle session ends by itself (stop reason 'idle') after lingerMs without anything pending, and after idleStopMs without any
+// activity of the person whatever is pending. It also ends when the conversation is closed ('closed'), on disconnect or restart.
 //
 //   const beats = createHeartbeats({ monotonicNow, setTimer, clearTimer })
 //   const hb = beats.open(key)            // one per key; an older live heartbeat for the key is stopped ('superseded')
@@ -10,8 +19,8 @@
 //   hb.subscribe(({ beat, internalMs, facts }) => {})   // receive beats; returns unsubscribe()
 //   hb.pause() / hb.resume() / hb.stop(reason)
 //
-// Cadence (bounded): one beat every HEARTBEAT_LIMITS.beatMs on the internal clock, never replayed after a late timer (a late
-// beat counts once), at most maxBeats per heartbeat (then it stops itself with reason 'limit'), at most maxLive heartbeats.
+// Cadence (bounded): one beat every beatMs (active) or idleBeatMs (idle) on the internal clock, never replayed after a late timer
+// (a late beat counts once), at most maxBeats per window (then it stops itself with reason 'limit'), at most maxLive heartbeats.
 // A beat costs nothing by itself: it computes facts and tells its listeners.
 // Nothing is persisted: after a restart no heartbeat exists until a new message is accepted (restart-safe by construction).
 //
@@ -37,7 +46,10 @@
 //    It may return a closed label saying what it did (kept in the content-free record); it may be async. A provider that
 //    throws, in propose or in onVerdict, is ignored for that beat.
 // 3. Beats.   hb.subscribe(({ beat, internalMs, facts }) => {})   Facts only; verdicts never go to subscribers.
-// 4. Bounds (HEARTBEAT_LIMITS): at most one request per beat and one judged round at a time (a round ends when every
+// 3b. Acknowledge.   A provider registered with { acknowledge(what) } is told when the owner acted on one of its facts
+//    (hb.acknowledge(name, what), e.g. 'attention' after a pointer message was posted) so it can withdraw the fact.
+// 4. Bounds (HEARTBEAT_LIMITS), per session WINDOW (a window starts at every activate() and every settle(): one run, or one
+//    idle stretch after a run): at most one request per beat and one judged round at a time (a round ends when every
 //    onVerdict has settled, or after roundMs); at most maxQuestions per request; requests at least askGapMs (10 s) apart, and
 //    20, 40, then 80 s apart after one, two, three or more rounds in a row in which every verdict was `none`, except that an
 //    option never offered before on this heartbeat may ask at once; at most maxAsks requests per heartbeat. The owner supplies the judge (hb.setJudge) and with it
@@ -54,9 +66,19 @@ export const HEARTBEAT_LIMITS = Object.freeze({
   // Judged rounds. One small Decision request takes 0.25-0.6 s warm and about 1.3-1.6 s after a long idle, so a request every
   // 10 s (two beats) at most, six per heartbeat, keeps the cost of a long run to a few seconds of judgment.
   askGapMs: 10_000, maxAsks: 6, maxQuestions: 6, maxOptions: 8, roundMs: 60_000,
+  // Idle tempo. Nothing is being worked on, so nobody waits by the second: a beat every 20 s is enough to notice that something now
+  // needs a person, and it stays under the 30 s after which a queued placement scene is stale. Idle beats are free (facts only).
+  idleBeatMs: 20_000,
+  // A provider with something for the judge does not wait for the grid: the next beat comes within half a second (once per beatMs).
+  nudgeMs: 500,
+  // Nothing pending and the person not heard from for 5 minutes: the session is over. Follow-ups and late surfaces come within minutes.
+  lingerMs: 300_000,
+  // Hard stop: 15 minutes without any activity of the person, whatever is still pending (at most 45 idle beats, each free).
+  idleStopMs: 900_000,
 })
-export const HEARTBEAT_PHASES = Object.freeze(['thinking', 'tool_running', 'waiting_user', 'objective_step'])
-export const HEARTBEAT_STOP_REASONS = Object.freeze(['run_end', 'cancel', 'disconnect', 'restart', 'start_failed', 'superseded', 'limit'])
+// 'idle': no run works in this session (idle tempo) and nothing of it is waiting on a person.
+export const HEARTBEAT_PHASES = Object.freeze(['thinking', 'tool_running', 'waiting_user', 'objective_step', 'idle'])
+export const HEARTBEAT_STOP_REASONS = Object.freeze(['run_end', 'cancel', 'disconnect', 'restart', 'start_failed', 'superseded', 'limit', 'idle', 'closed'])
 const MARKS = Object.freeze(['user', 'posted', 'engine'])
 const NAME = /^[a-z][a-z0-9_]{0,31}$/
 const LABEL = /^[a-z0-9_]{1,40}$/
@@ -107,6 +129,8 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
   let source = null
   // Judged rounds (see the contract in the header).
   let judge = null, onRound = null, asks = 0, lastAskAt = -Infinity, noneStreak = 0, roundBusy = false, roundCap = null
+  // Session tempo: where the beat grid starts, since when the session is idle, and what keeps an idle session alive.
+  let tempo = 'active', gridAt = 0, idleSince = null, windowBeats = 0, keepAlive = null, lastNudgeAt = -Infinity
   const offered = new Set()
   const lim = name => (Number.isSafeInteger(limits[name]) && limits[name] > 0 ? limits[name] : HEARTBEAT_LIMITS[name])
 
@@ -138,26 +162,38 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
     if (waiting) phase = 'waiting_user'
     else if (objective) phase = 'objective_step'
     else if (stepsRunning > 0) phase = 'tool_running'
-    return Object.freeze({ internalMs: t, beat: beats, sinceUserMs: t - marks.user, sincePostedMs: marks.posted === null ? null : t - marks.posted,
+    else if (tempo === 'idle') phase = 'idle'
+    return Object.freeze({ internalMs: t, beat: beats, tempo, idleMs: idleSince === null ? null : t - idleSince, sinceUserMs: t - marks.user, sincePostedMs: marks.posted === null ? null : t - marks.posted,
       sinceEngineMs: t - marks.engine, engineEvents, lastEngineKind, phase, pendingQuestion, stepsDone, stepsRunning, stepsRemaining: remaining, sources: Object.freeze(sources) })
   }
 
-  function schedule() {
+  const interval = () => (tempo === 'idle' ? lim('idleBeatMs') : beatMs)
+  function schedule(within = null) {
     if (state !== 'running') return
-    const t = internalMs()
-    const due = (Math.floor(t / beatMs) + 1) * beatMs
-    timer = setTimer(fire, Math.max(1, Math.min(beatMs, due - t)))
+    if (timer != null) { clearTimer(timer); timer = null }
+    const t = internalMs(), every = interval()
+    const due = gridAt + (Math.floor(Math.max(0, t - gridAt) / every) + 1) * every
+    timer = setTimer(fire, Math.max(1, Math.min(every, due - t, within ?? Infinity)))
     timer?.unref?.()
   }
+  // A new window of the shared bounds: one run, or one idle stretch after a run.
+  function newWindow() { asks = 0; lastAskAt = -Infinity; noneStreak = 0; offered.clear(); windowBeats = 0 }
   function fire() {
     timer = null
     if (state !== 'running') return
-    beats++
+    beats++; windowBeats++
     const beat = Object.freeze({ beat: beats, internalMs: internalMs(), facts: facts() })
     for (const listener of [...listeners]) { try { listener(beat) } catch { /* a listener never stops the heartbeat */ } }
     if (state !== 'running') return
     round(beat)
-    if (beats >= maxBeats) { api.stop('limit'); return }
+    if (windowBeats >= maxBeats) { api.stop('limit'); return }
+    if (tempo === 'idle') {
+      // The idle session ends by itself: nothing pending and the person not heard from for lingerMs, or nobody at all for idleStopMs.
+      const quietFor = Math.min(beat.facts.idleMs ?? 0, beat.facts.sinceUserMs)
+      let pending = false
+      try { pending = keepAlive?.(beat.facts) === true } catch { pending = false }
+      if (quietFor >= lim('idleStopMs') || (quietFor >= lim('lingerMs') && !pending)) { api.stop('idle'); return }
+    }
     schedule()
   }
 
@@ -218,14 +254,51 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
     get stopReason() { return stopReason },
     get beats() { return beats },
     get asks() { return asks },
+    get tempo() { return tempo },
     internalMs, facts,
     /** Starts the internal counter. sinceMs: how long ago (monotonic) the person's message was accepted. Only once. */
     start({ sinceMs = 0 } = {}) {
       if (state !== 'idle') return false
       base = Number.isFinite(sinceMs) && sinceMs > 0 ? sinceMs : 0
-      resumedAt = monotonicNow(); state = 'running'
+      resumedAt = monotonicNow(); state = 'running'; tempo = 'active'; gridAt = 0; idleSince = null
       schedule()
       return true
+    },
+    /** A message of the person was accepted in this live session: active tempo, the beat grid and the bounds start again at that moment. */
+    activate({ sinceMs = 0 } = {}) {
+      if (state === 'idle') return api.start({ sinceMs })
+      if (state === 'stopped') return false
+      if (state === 'paused') { resumedAt = monotonicNow(); state = 'running' }
+      const at = Math.max(0, internalMs() - (Number.isFinite(sinceMs) && sinceMs > 0 ? sinceMs : 0))
+      tempo = 'active'; gridAt = at; idleSince = null; marks.user = at; marks.engine = at
+      newWindow(); schedule()
+      return true
+    },
+    /** The run ended and the session goes on: idle tempo, a new window of bounds. */
+    settle() {
+      if (state === 'stopped' || state === 'idle') return false
+      if (state === 'paused') { resumedAt = monotonicNow(); state = 'running' }
+      if (tempo === 'idle') return true
+      tempo = 'idle'; gridAt = internalMs(); idleSince = gridAt
+      newWindow(); schedule()
+      return true
+    },
+    /** A provider has something for the judge now: the next beat comes within nudgeMs. At most once per beatMs; false when refused. */
+    nudge() {
+      if (state !== 'running') return false
+      const t = internalMs()
+      if (t - lastNudgeAt < beatMs) return false
+      lastNudgeAt = t
+      schedule(lim('nudgeMs'))
+      return true
+    },
+    /** What keeps an idle session alive past lingerMs: (facts) → boolean, from the owner. */
+    setKeepAlive(fn) { keepAlive = typeof fn === 'function' ? fn : null },
+    /** Tell a provider that the owner acted on one of its facts (`what` is a closed label, e.g. 'attention'). */
+    acknowledge(name, what) {
+      const provider = providers.get(name)
+      if (!provider?.acknowledge || typeof what !== 'string' || !LABEL.test(what)) return false
+      try { provider.acknowledge(what); return true } catch { return false }
     },
     pause() {
       if (state !== 'running') return false
@@ -244,7 +317,7 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
       base = internalMs(); state = 'stopped'; stopReason = HEARTBEAT_STOP_REASONS.includes(reason) ? reason : 'run_end'
       if (timer != null) { clearTimer(timer); timer = null }
       if (roundCap != null) { clearTimer(roundCap); roundCap = null }
-      providers.clear(); listeners.clear(); source = null; judge = null; onRound = null
+      providers.clear(); listeners.clear(); source = null; judge = null; onRound = null; keepAlive = null
       try { onStop?.(api) } catch { /* ignore */ }
       return true
     },
@@ -261,9 +334,10 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
     setSource(fn) { source = typeof fn === 'function' ? fn : null },
     /** Registration (see the contract in the header): a facts function, or { facts?, propose?, onVerdict? }. Returns unregister(). */
     register(name, provider) {
-      const entry = typeof provider === 'function' ? { facts: provider, propose: null, onVerdict: null }
+      const entry = typeof provider === 'function' ? { facts: provider, propose: null, onVerdict: null, acknowledge: null }
         : provider && typeof provider === 'object' ? { facts: typeof provider.facts === 'function' ? provider.facts.bind(provider) : null,
-          propose: typeof provider.propose === 'function' ? provider.propose.bind(provider) : null, onVerdict: typeof provider.onVerdict === 'function' ? provider.onVerdict.bind(provider) : null } : null
+          propose: typeof provider.propose === 'function' ? provider.propose.bind(provider) : null, onVerdict: typeof provider.onVerdict === 'function' ? provider.onVerdict.bind(provider) : null,
+          acknowledge: typeof provider.acknowledge === 'function' ? provider.acknowledge.bind(provider) : null } : null
       if (state === 'stopped' || !NAME.test(String(name)) || !entry || (!entry.facts && !entry.propose)) return () => {}
       if (!providers.has(name) && providers.size >= (limits.maxProviders ?? HEARTBEAT_LIMITS.maxProviders)) return () => {}
       providers.set(name, entry)
@@ -274,7 +348,7 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
       listeners.add(listener)
       return () => listeners.delete(listener)
     },
-    snapshot() { return { key, state, stopReason, beats, asks, internalMs: internalMs(), providers: [...providers.keys()] } },
+    snapshot() { return { key, state, stopReason, tempo, beats, asks, internalMs: internalMs(), providers: [...providers.keys()] } },
   })
   return api
 }
@@ -286,11 +360,19 @@ export function createHeartbeats({ monotonicNow, setTimer, clearTimer, limits = 
     open(key) {
       if (typeof key !== 'string' || !key) return null
       live.get(key)?.stop('superseded')
-      if (live.size >= (limits.maxLive ?? HEARTBEAT_LIMITS.maxLive)) return null
+      if (live.size >= (limits.maxLive ?? HEARTBEAT_LIMITS.maxLive)) {
+        // Full: a session that only idles gives way to one that is about to work (the one idle the longest). Working sessions never do.
+        let oldest = null
+        for (const hb of live.values()) { const idleMs = hb.tempo === 'idle' ? hb.facts().idleMs : null; if (idleMs !== null && (!oldest || idleMs > oldest.idleMs)) oldest = { hb, idleMs } }
+        if (!oldest) return null
+        oldest.hb.stop('limit')
+      }
       const hb = createHeartbeat({ key, monotonicNow, setTimer, clearTimer, limits, onStop: self => { if (live.get(key) === self) live.delete(key) } })
       live.set(key, hb)
       return hb
     },
+    /** The live heartbeat of the key's session, or a new one when there is none (a session's heartbeat is kept across its runs). */
+    ensure(key) { const hb = live.get(key); return hb && hb.state !== 'stopped' ? hb : this.open(key) },
     get: key => live.get(key) ?? null,
     stop(key, reason) { return live.get(key)?.stop(reason) ?? false },
     stopAll(reason) { for (const hb of [...live.values()]) hb.stop(reason) },
