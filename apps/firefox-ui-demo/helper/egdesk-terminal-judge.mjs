@@ -120,6 +120,13 @@ export async function judgeTerminalState({ tail = '', alive, exitCode = null, fa
 const BLOCK_START = /^(?:not ok|✖|FAIL\b|AssertionError|Error:|TypeError:)/
 const FAILURE_WORDS = /(?:not ok|✖|FAIL\b|AssertionError|Error:|error TS\d+|expected|actual)/i
 const BLOCK_LINES = 12
+// R3 (real measurement 2026-11-24: the npm script header '> demo-app@1.0.0 build / > tsc -p .' was picked at 0.58): lines the runtime
+// can read itself are not candidates. A block made only of a script runner's echo of the command it runs (npm, yarn, pnpm: '> name@version
+// script' and '> command') or of passing progress lines (ok N, ✔, PASS, [n/m], a bare percentage, the counts of a summary) is dropped
+// before anything is asked. A block with a failure mark is always kept.
+const SCRIPT_HEADER = /^> \S/
+const PASSING_PROGRESS = /^(?:ok \d+\b|✔ |✓ |PASS\b|\[\d+\/\d+\] |\s*\d{1,3}%(?:\s|$)|#\s*(?:tests|suites|pass|cancelled|skipped|todo|duration_ms)\b)/
+export const runtimeReadable = text => !FAILURE_WORDS.test(text) && text.split('\n').filter(line => line.trim()).every(line => SCRIPT_HEADER.test(line) || PASSING_PROGRESS.test(line))
 /** The head of a block: a failure is at the top of its block, so the first lines are kept (never the last), bounded and secret-masked. */
 function blockHead(text, limits) {
   const lines = text.split('\n')
@@ -140,6 +147,7 @@ export function enumerateLogBlocks(output, limits = TERMINAL_JUDGE_LIMITS) {
     current.push(line)
   }
   flush()
+  for (let index = blocks.length - 1; index >= 0; index--) if (runtimeReadable(blocks[index])) blocks.splice(index, 1)
   // At most limits.blocks blocks, in output order: the blocks the runtime marks as failures are kept first, the rest are the latest ones.
   const marked = blocks.map((text, index) => (FAILURE_WORDS.test(text) ? index : -1)).filter(index => index >= 0).slice(-limits.blocks)
   const keep = new Set(marked)
