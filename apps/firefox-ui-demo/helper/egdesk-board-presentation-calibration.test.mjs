@@ -37,7 +37,7 @@ test('on: accepted answer records top/second/bar/would; entry carries no text, i
   const r = rig('on', [ans(.94, .06)]); assert.deepEqual(await r.go(), { status: 'preview', preview: 'pair' })
   const [e] = r.log.entries()
   assert.deepEqual({ feature: e.feature, mode: e.mode, candidates: e.candidates, attached: e.attached }, { feature: 'board_arrangement', mode: 'on', candidates: 4, attached: true })
-  assert.deepEqual(e.judgments, [{ q: 'choice', would: 'accept', top: .94, second: .06, p: .94, threshold: .75, minMargin: .2 }])
+  assert.deepEqual(e.judgments, [{ q: 'choice', would: 'accept', top: .94, second: .06, p: .94, confidence: .94, options: 4, margin: .88, threshold: .75, minMargin: .2 }])
   const raw = file(r.dir); for (const bad of ['PRIVATE-CUE', '선택한', '현재 배치', 'synthetic', 'slot', 'data:image', 'board_view']) assert.ok(!raw.includes(bad), bad)
 })
 test('on: below the confidence bar or margin => would reject, nothing attached', async () => {

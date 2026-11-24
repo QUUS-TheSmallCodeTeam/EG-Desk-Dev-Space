@@ -16,13 +16,16 @@ import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 // - Recording never throws and never changes what a feature does.
 
 export const CALIBRATION_FILE = 'egdesk-decision-calibration.json'
-export const CALIBRATION_VERSION = 1
+// Version 2 adds optional fields only (confidence, options, margin, noPick, outcome.next/keptN/removedN, feature board_reply, fallback timeout_unsent).
+// Version 1 files still load. A file from a newer version is left untouched and nothing is written over it.
+export const CALIBRATION_VERSION = 2
+const OLDEST_READABLE = 1
 export const MAX_ENTRIES = 100
 export const MAX_BYTES = 192 * 1024
 export const RETENTION_DAYS = 30
 const MAX_JUDGMENTS = 64
 
-const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'browser_reflex'])
+const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'board_reply', 'browser_reflex'])
 const MODES = new Set(['advisory', 'on'])
 const QUESTIONS = new Set(['answer_type', 'time_intent', 'relevance', 'speech_axis', 'speech_predicate', 'recall', 'topic_route', 'choice', 'next_step', 'page_state', 'goal_met'])
 const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed', 'none', 'act', 'hold'])
@@ -37,9 +40,27 @@ const VOCAB = new Set(['answer', 'browse', 'timeline_update', 'action_only', 'pr
   'past_anchored', 'past_unspecified', 'at_utterance', 'ongoing_no_end', 'future_anchored', 'future_unspecified'])
 const RUN = new Set(['completed', 'failed', 'interrupted', 'cancelled'])
 const FALLBACK = new Set(['timeout', 'unreachable', 'bad_response', 'no_credit', 'rate_limited', 'budget_exceeded', 'spend_limit_reached', 'invalid_key',
-  'not_configured', 'server_error', 'model_unavailable', 'evidence_unavailable', 'mode_changed', 'no_candidates'])
+  'not_configured', 'server_error', 'model_unavailable', 'evidence_unavailable', 'mode_changed', 'no_candidates', 'timeout_unsent'])
+// Why a choice produced no pick although the model answered (closed; never free text).
+const NO_PICK = new Set(['abstain', 'unclear', 'low_confidence'])
+// The user's next explicit action after the decision, per feature. A label from another feature's vocabulary is dropped.
+export const NEXT_LABELS = Object.freeze({
+  dm_chooser: Object.freeze(['asked_why', 'asked_agent', 'edited', 'retried', 'closed', 'sent_ordinary']),
+  board_arrangement: Object.freeze(['applied', 'undone', 'rejected', 'kept_own', 'timed_out']),
+})
+const MAX_SMALL = 99
 
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+// Rounding must not move a number across the bar that was applied to it (0.7999999999999999 against 0.8 must stay below).
+const sideRound = (value, bar, digits) => {
+  const scale = 10 ** digits
+  let r = Math.round(value * scale) / scale
+  const barOk = Number.isFinite(bar) && bar >= 0 && bar <= 1
+  if (barOk && value < bar && r >= bar) r = Math.round((bar - 1 / scale) * scale) / scale
+  if (barOk && value >= bar && r < bar) r = Math.round(bar * scale) / scale
+  return r
+}
+const probVs = (value, bar, digits) => (Number.isFinite(value) && value >= 0 && value <= 1 ? sideRound(value, bar, digits) : null)
 const prob = value => (Number.isFinite(value) && value >= 0 && value <= 1 ? Math.round(value * 1000) / 1000 : null)
 const word = (set, value) => (typeof value === 'string' && set.has(value) ? value : null)
 const count = (value, max) => (Number.isSafeInteger(value) && value >= 0 ? Math.min(value, max) : null)
@@ -54,10 +75,15 @@ function judgment(raw) {
   const would = word(WOULD, raw.would)
   if (!q || !would) return null
   const out = { q, would }
-  put(out, 'top', prob(raw.top)); put(out, 'second', prob(raw.second)); put(out, 'p', prob(raw.p)); put(out, 'threshold', prob(raw.threshold))
+  put(out, 'top', probVs(raw.top, raw.threshold, 3)); put(out, 'second', prob(raw.second)); put(out, 'p', probVs(raw.p, raw.threshold, 3)); put(out, 'threshold', prob(raw.threshold))
   put(out, 'minMargin', prob(raw.minMargin)); put(out, 'value', word(VOCAB, raw.value)); put(out, 'axis', word(AXES, raw.axis)); put(out, 'pred', word(PREDS, raw.pred))
   put(out, 'forced', word(FORCED, raw.forced)); put(out, 'kind', word(KINDS, raw.kind)); put(out, 'slice', word(SLICES, raw.slice))
   put(out, 'seg', count(raw.seg, 5))
+  // Chance-corrected confidence as the API reports it, the number of allowed values N it was corrected against, and the winner's margin.
+  // Four decimals so a replay of the product's bar agrees with the product at the boundary.
+  put(out, 'confidence', probVs(raw.confidence, raw.threshold, 4)); put(out, 'margin', probVs(raw.margin, raw.minMargin, 4))
+  put(out, 'options', Number.isSafeInteger(raw.options) && raw.options >= 2 && raw.options <= 255 ? raw.options : null)
+  put(out, 'noPick', word(NO_PICK, raw.noPick))
   return out
 }
 
@@ -74,10 +100,14 @@ export function normalizeEntry(raw, now = Date.now()) {
   return entry
 }
 
-function normalizeOutcome(raw) {
+function normalizeOutcome(raw, feature = null) {
   if (!record(raw)) return null
   const out = {}
   put(out, 'run', word(RUN, raw.run)); put(out, 'toolActivities', count(raw.toolActivities, 1000))
+  const next = typeof raw.next === 'string' && NEXT_LABELS[feature]?.includes(raw.next) ? raw.next : null
+  put(out, 'next', next)
+  // Board reply screening: how many of the Agent's excerpts the owner kept or removed. Small integers only.
+  if (feature === 'board_reply') { put(out, 'keptN', count(raw.keptN, MAX_SMALL)); put(out, 'removedN', count(raw.removedN, MAX_SMALL)) }
   return Object.keys(out).length ? out : null
 }
 
@@ -99,13 +129,14 @@ function readPrivateFile(file) {
 
 function parseFile(text, now) {
   const data = JSON.parse(text)
-  if (!record(data) || data.version !== CALIBRATION_VERSION || !Array.isArray(data.entries)) throw new Error('not a calibration log')
+  if (record(data) && Number.isSafeInteger(data.version) && data.version > CALIBRATION_VERSION) return { unsupported: true }
+  if (!record(data) || !Number.isSafeInteger(data.version) || data.version < OLDEST_READABLE || !Array.isArray(data.entries)) throw new Error('not a calibration log')
   const keep = []
   for (const row of data.entries) {
     const entry = normalizeEntry(row, Date.parse(`${row?.day}T00:00:00Z`))
-    if (entry && row.day === entry.day) { const outcome = normalizeOutcome(row.outcome); keep.push(outcome ? { ...entry, outcome } : entry) }
+    if (entry && row.day === entry.day) { const outcome = normalizeOutcome(row.outcome, entry.feature); keep.push(outcome ? { ...entry, outcome } : entry) }
   }
-  return keep
+  return { entries: keep }
 }
 
 /**
@@ -127,15 +158,19 @@ export function openCalibrationLog({ dataDir, log = defaultLog, now = Date.now }
   if (file) {
     try {
       const read = readPrivateFile(file)
-      if (read.missing) { status = 'missing'; writable = true } else { entries = parseFile(read.text, now()); status = 'saved'; writable = true }
+      if (read.missing) { status = 'missing'; writable = true } else {
+        const parsed = parseFile(read.text, now())
+        if (parsed.unsupported) { status = 'unsupported'; say(`${CALIBRATION_FILE} is from a newer EG-Desk; it is left as is`) }
+        else { entries = parsed.entries; status = 'saved'; writable = true }
+      }
     } catch (error) {
       const aside = `${CALIBRATION_FILE}.corrupt-${now()}-${randomBytes(4).toString('hex')}`
       try { renameSync(file, path.join(dir, aside)); status = 'recovered'; writable = true; say(`${CALIBRATION_FILE} was not a valid log; kept it as ${aside}`) }
       catch (moveError) { status = 'unavailable'; say(`${CALIBRATION_FILE} could not be read (${errorCode(error)}/${errorCode(moveError)})`) }
     }
   }
-  let sequence = 0
-  const ids = new WeakMap()
+  // Opaque, process-local handles. Nothing that identifies a record is ever written to the file.
+  const handles = new WeakMap()
 
   function prune() {
     const cutoff = dayOf(now() - RETENTION_DAYS * 86400000)
@@ -168,21 +203,52 @@ export function openCalibrationLog({ dataDir, log = defaultLog, now = Date.now }
       try {
         const entry = normalizeEntry(raw, now())
         if (!entry) return null
-        const id = `c${++sequence}`
-        ids.set(entry, id)
+        const handle = Object.freeze({})
+        handles.set(handle, entry)
         entries.push(entry); save()
-        return id
+        return handle
       } catch { return null }
     },
     // The label arrives after the turn ends. An entry that was already pruned is simply not completed.
-    complete(id, outcome) {
+    // Labels merge: a field that is already set is not overwritten, so the first explicit next action wins.
+    complete(handle, outcome) {
       try {
-        const clean = normalizeOutcome(outcome)
-        const entry = entries.find(e => ids.get(e) === id)
-        if (!clean || !entry) return false
-        entry.outcome = clean
+        const entry = handle !== null && typeof handle === 'object' ? handles.get(handle) : undefined
+        if (!entry || !entries.includes(entry)) return false
+        const clean = normalizeOutcome(outcome, entry.feature)
+        if (!clean) return false
+        const merged = { ...(entry.outcome || {}) }
+        let changed = false
+        for (const [key, value] of Object.entries(clean)) if (!Object.hasOwn(merged, key)) { merged[key] = value; changed = true }
+        if (!changed) return false
+        entry.outcome = merged
         return save()
       } catch { return false }
     },
   })
+}
+
+/** Attach a label later, from anywhere that holds the handle record() returned. Never throws; false when there is nothing to label. */
+export function attachLabel(log, handle, outcome) {
+  try { return typeof log?.complete === 'function' && handle ? log.complete(handle, outcome) === true : false } catch { return false }
+}
+
+/** The API's choice confidence is the chance-corrected top probability: (top - 1/N) / (1 - 1/N). */
+export function chanceCorrected(top, options) {
+  return Number.isFinite(top) && Number.isSafeInteger(options) && options >= 2 ? (top - 1 / options) / (1 - 1 / options) : null
+}
+
+/**
+ * Replay the product's bar from one recorded choice judgment: 'accept' | 'reject' | null (not enough recorded numbers).
+ * The bar is the recorded confidence >= threshold and winner margin >= minMargin; the DM chooser also requires the top
+ * probability itself to clear the bar. Rounding keeps every number on the side of the bar it was on, so the replay
+ * agrees with the product exactly at the boundary.
+ */
+export function replayGate(feature, j) {
+  if (!record(j)) return null
+  const margin = Number.isFinite(j.margin) ? j.margin : Number.isFinite(j.top) && Number.isFinite(j.second) ? j.top - j.second : null
+  if (![j.confidence, j.threshold, j.minMargin, margin].every(Number.isFinite)) return null
+  let ok = j.confidence >= j.threshold && margin >= j.minMargin
+  if (feature === 'dm_chooser') ok = ok && Number.isFinite(j.top) && j.top >= j.threshold
+  return ok ? 'accept' : 'reject'
 }

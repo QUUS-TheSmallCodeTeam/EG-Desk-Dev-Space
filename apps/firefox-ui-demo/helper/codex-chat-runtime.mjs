@@ -4462,11 +4462,13 @@ export class CodexChatRuntime {
     try {
       const log = this.decisionContext?.calibrationLog
       if (!log || this.decisionContext?.mode?.() !== 'on') return
-      const reason = result?.status === 'manual' && typeof result.reason === 'string' ? (result.reason === 'timeout_unsent' ? 'timeout' : result.reason) : null
+      const reason = result?.status === 'manual' && typeof result.reason === 'string' ? result.reason : null
       const hasNumbers = Number.isFinite(measured?.top)
       if (!hasNumbers && !reason) return
       log.record({ feature: 'dm_chooser', mode: 'on', candidates: options, ...(reason ? { fallback: reason } : {}),
-        judgments: hasNumbers ? [{ q: 'choice', top: measured.top, second: measured.second, p: measured.p, threshold: CHAT_CHOICE_BAR.confidence,
+        // options is N, the allowed values of the question (the offered options plus the abstain row), which the API's confidence is corrected against.
+        judgments: hasNumbers ? [{ q: 'choice', top: measured.top, second: measured.second, p: measured.p, confidence: measured.p, options: measured.options + 1,
+          margin: measured.top - measured.second, ...(reason ? { noPick: reason } : {}), threshold: CHAT_CHOICE_BAR.confidence,
           minMargin: CHAT_CHOICE_BAR.margin, would: measured.would === 'act' ? 'act' : 'hold' }] : [] })
     } catch { /* recording must never affect the choice */ }
   }

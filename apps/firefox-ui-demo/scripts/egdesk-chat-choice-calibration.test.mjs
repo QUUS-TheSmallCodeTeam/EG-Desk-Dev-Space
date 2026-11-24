@@ -118,10 +118,10 @@ const run = async (t, name) => {
 const only = rt => { const e = rt.calibrationLog.entries(); assert.equal(e.length, 1, JSON.stringify(e)); return e[0] }
 
 const EXPECT = {
-  confident: { top: 0.96, second: 0.03, p: 0.96, would: 'act' },
-  abstain: { top: 0.9, second: 0.06, p: 0.9, would: 'hold' },
-  near_tie: { top: 0.46, second: 0.44, p: 0.46, would: 'hold' },
-  low_confidence: { top: 0.62, second: 0.28, p: 0.62, would: 'hold' },
+  confident: { top: 0.96, second: 0.03, p: 0.96, confidence: 0.96, options: 3, margin: 0.93, would: 'act' },
+  abstain: { top: 0.9, second: 0.06, p: 0.9, confidence: 0.9, options: 3, margin: 0.84, noPick: 'abstain', would: 'hold' },
+  near_tie: { top: 0.46, second: 0.44, p: 0.46, confidence: 0.46, options: 3, margin: 0.02, noPick: 'unclear', would: 'hold' },
+  low_confidence: { top: 0.62, second: 0.28, p: 0.62, confidence: 0.62, options: 3, margin: 0.34, noPick: 'low_confidence', would: 'hold' },
 }
 for (const [name, want] of Object.entries(EXPECT)) {
   test(`C4 ${name}: one content-free entry with the numbers the bar saw (0.80 / 0.20) and what it did`, async t => {
