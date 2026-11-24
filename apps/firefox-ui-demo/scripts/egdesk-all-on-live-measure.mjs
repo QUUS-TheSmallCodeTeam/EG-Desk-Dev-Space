@@ -37,7 +37,9 @@ export const PLAN_FILE = fileURLToPath(new URL('./egdesk-all-on-live-measure.pla
 export const PLAN_FILE_V2 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v2.json', import.meta.url))
 // Plan v3 (cycle 13): every v2 expectation, a genuine recall step, and the person-level checks of what changed since c16. The latest plan.
 export const PLAN_FILE_V3 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v3.json', import.meta.url))
-export const LATEST_PLAN_FILE = PLAN_FILE_V3
+// Plan v4 (cycle 15): v3 counted in page bodies, L7's two new turn-memory flags on in the world, the owner question step. The latest plan.
+export const PLAN_FILE_V4 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v4.json', import.meta.url))
+export const LATEST_PLAN_FILE = PLAN_FILE_V4
 export const SCRIPT_FILE = fileURLToPath(import.meta.url)
 export const DEFAULT_CAPS = Object.freeze({ tokenCeiling: 80_000, maxRequests: 80 })
 const LIMITS = Object.freeze({ tokenCeilingMax: 200_000, maxRequestsMax: 200 })
@@ -73,14 +75,16 @@ async function agentAnswersTask(w, j) {
 const RECORDING_CONTEXT = 'egdesk_recording'
 const carriesRecordingRule = w => Object.hasOwn(w.turnStarts().at(-1)?.params?.additionalContext ?? {}, RECORDING_CONTEXT)
 // (cycle 13) The scripted note writer words its note from the waited-on fact the prompt gives, and claims nothing else.
+// (cycle 15) The pointer note says what the prompt says the person is pointed at for: a decision, or a result that is ready to look at.
+const pointerNote = prompt => (/is ready for them to look at/.test(prompt) ? '결과는 지금 보고 계신 곳 왼쪽 작업 영역에 있습니다.' : null)
 const waitNote = prompt => (/a command is still running/.test(prompt) ? '명령이 아직 실행 중이라 조금 더 걸리고 있어요.' : null)
 // The result card needs its owner, who looks elsewhere; a second member is on the desk. The request body is the chrome builder's (attentionRequest),
 // posted the way the surface posts its placement requests ({ clientThreadId, conversationId, dto }). No surface code sends this request yet.
-async function resultNeedsOwner(w, j) {
+async function resultNeedsOwner(w, j, task = { state: 'waiting_owner', ownerMustAct: true }) {
   w.presenceMirror.accept(people())
   const cards = RESULT_CARDS()
   const scene = WP.enumerateWorkScene({ presence: w.presenceMirror.snapshot(), cards,
-    tasks: [{ id: 'run-1', state: 'waiting_owner', requester: 'self', waiting: ['self'], ownerMustAct: true, surfaces: [{ kind: 'result', cardId: 'agent-result' }] }] })
+    tasks: [{ id: 'run-1', state: task.state, requester: 'self', waiting: task.state === 'finished' ? [] : ['self'], ownerMustAct: task.ownerMustAct, surfaces: [{ kind: 'result', cardId: 'agent-result' }] }] })
   const built = WP.attentionRequest(scene, { taskId: 'run-1', cardId: 'agent-result' })
   j.note.ownerRequest = built ? (await w.http('POST', '/decision/work-placement/request', { clientThreadId: DM, conversationId: w.state.lastOf.get(DM)?.conversationId ?? null, dto: built.dto })).body : null
   j.note.cards = cards.map(c => ({ id: c.id, kind: c.kind, creator: c.creator, rect: c.rect }))
@@ -116,6 +120,8 @@ export const STEPS = Object.freeze([
   { id: 's6-answer', room: DM, title: 'the answer', run: async (w, j) => { await agentSays(w, AGENT_SAYS.tests, j) } },
   { id: 's7-pointer-advisory', room: DM, title: 'the result needs the owner elsewhere; work placement advisory', run: async (w, j) => { w.ENV.EGDESK_WORK_PLACEMENT = 'advisory'; await resultNeedsOwner(w, j) } },
   { id: 's8-pointer-on', room: DM, title: 'the same, work placement on', run: async (w, j) => { w.ENV.EGDESK_WORK_PLACEMENT = 'on'; await resultNeedsOwner(w, j) } },
+  // (cycle 15) A finished result whose need for the owner code cannot tell: placement asks the owner question, quoting the answer.
+  { id: 's8b-finished-result', room: DM, since: 4, title: 'a finished result: does it need the owner?', run: async (w, j) => { w.ENV.EGDESK_WORK_PLACEMENT = 'on'; await resultNeedsOwner(w, j, { state: 'finished', ownerMustAct: false }) } },
   { id: 's9-status-remark', room: DM, title: 'a status remark', run: async (w, j) => { await j.say(SAYS.deployed); await w.advance(2000); await agentSays(w, carriesRecordingRule(w) ? AGENT_SAYS.heard : AGENT_SAYS.noted, j); await j.pause() } },
   { id: 's10-browser-task', room: BROWSER_ROOM, title: 'a browser task in a conversation of its own', run: async (w, j) => { w.use(BROWSER_ROOM); await j.say(SAYS.portal, w.browserExtra()); await agentAnswersTask(w, j) } },
   { id: 's11-browser-reply', room: BROWSER_ROOM, title: 'the person answers the task question', run: async (w, j) => { w.use(BROWSER_ROOM); await j.say(SAYS.second, w.browserExtra()); await agentAnswersTask(w, j); await j.pause() } },
@@ -152,23 +158,29 @@ export function loadJourneyPlan(file = PLAN_FILE) {
     })
     return { id: def.id, caps: { maxRequests: step.caps.maxRequests, maxEstTokens: step.caps.maxEstTokens }, expect }
   })
-  return { set: raw.set, registered: raw.registered, sha256: sha256(bytes), version: Number.isSafeInteger(raw.version) ? raw.version : 1, steps }
+  // (cycle 15) A plan may set developer flags of the all-on world (never the product's defaults): EGDESK_* names with string values.
+  const env = raw.world?.env ?? {}
+  if (typeof env !== 'object' || Array.isArray(env) || Object.entries(env).some(([k, v]) => !/^EGDESK_[A-Z_]+$/.test(k) || typeof v !== 'string')) bad('world.env must map EGDESK_* flags to strings')
+  return { set: raw.set, registered: raw.registered, sha256: sha256(bytes), version: Number.isSafeInteger(raw.version) ? raw.version : 1, world: { env: { ...env } }, steps }
 }
 
 // ---- checks: each judges one expectation from the step's results (and the world, for request bodies that are not written out) ----
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const newMessages = (step, room = null) => step.seen.newMessages.filter(m => room === null || m.room === room)
+// args.count 'bodies' (plan v4): only pages whose content was sent; otherwise every page header, as in v1-v3.
+const idsOf = (packet, args) => (args?.count === 'bodies' ? packet.bodyIds ?? [] : packet.pageIds)
+const sentencesOf = text => String(text ?? '').split(/(?<=[.?!])\s+/).map(x => x.trim()).filter(Boolean)
 const CHECKS = {
   // The subjective model's packet in this step: these pages are in it; none whose id starts with an excluded prefix.
   packet: ({ step, args }) => {
-    const pages = [...new Set(step.seen.packets.flatMap(p => p.pageIds))]
+    const pages = [...new Set(step.seen.packets.flatMap(p => idsOf(p, args)))]
     const missing = (args.include ?? []).filter(id => !pages.includes(id)), unwanted = pages.filter(id => (args.excludePrefix ?? []).some(prefix => id.startsWith(prefix)))
     return { pass: step.seen.packets.length > 0 && !missing.length && !unwanted.length, observed: { pages, missing, unwanted } }
   },
   // No page body that an earlier step of this room already delivered is delivered again.
-  noRepeatedPages: ({ step, results }) => {
-    const earlier = new Set(results.filter(r => r.seen && r !== step && r.room === step.room && results.indexOf(r) < results.indexOf(step)).flatMap(r => r.seen.packets.flatMap(p => p.pageIds)))
-    const repeated = [...new Set(step.seen.packets.flatMap(p => p.pageIds))].filter(id => earlier.has(id))
+  noRepeatedPages: ({ step, results, args }) => {
+    const earlier = new Set(results.filter(r => r.seen && r !== step && r.room === step.room && results.indexOf(r) < results.indexOf(step)).flatMap(r => r.seen.packets.flatMap(p => idsOf(p, args))))
+    const repeated = [...new Set(step.seen.packets.flatMap(p => idsOf(p, args)))].filter(id => earlier.has(id))
     return { pass: repeated.length === 0, observed: { repeated } }
   },
   // The Agent's answer of this step reached the conversation exactly as the subjective model wrote it.
@@ -252,6 +264,31 @@ const CHECKS = {
     const needs = note && ['ask_user_in_chat', 'tell_user_and_ask_in_chat'].includes(note.next)
     return { pass: Boolean(needs) && (note.candidates?.length ?? 0) >= args.min, observed: { note } }
   },
+  // (cycle 15) The needed page reaches the model: its content in this step's packet, or delivered in an earlier step of this conversation
+  // (the user's rule: nothing already in the conversation is sent again). Excluded pages are counted by their content in this step.
+  packetOrHeld: ({ step, results, args }) => {
+    const now = new Set(step.seen.packets.flatMap(p => idsOf(p, args)))
+    const earlier = new Set(results.filter(r => r.seen && r.room === step.room && results.indexOf(r) < results.indexOf(step)).flatMap(r => r.seen.packets.flatMap(p => idsOf(p, args))))
+    const missing = (args.include ?? []).filter(id => !now.has(id) && !earlier.has(id)), unwanted = [...now].filter(id => (args.excludePrefix ?? []).some(prefix => id.startsWith(prefix)))
+    return { pass: step.seen.packets.length > 0 && !missing.length && !unwanted.length, observed: { now: [...now], held: (args.include ?? []).filter(id => !now.has(id) && earlier.has(id)), missing, unwanted } }
+  },
+  // (cycle 15) Every Agent message of the step ends in words the subjective model wrote (its answer, revision or note): never with a text
+  // the system appended, such as a fixed caveat asking the person to supply materials. Sentences of the last paragraph are checked.
+  endsInOwnWords: ({ step }) => {
+    const agent = newMessages(step, step.room).filter(m => m.role === 'assistant' && m.by === 'agent'), written = step.seen.written ?? []
+    const bad = agent.filter(m => !sentencesOf(String(m.text).split(/\n\s*\n/).at(-1)).every(x => written.some(w => w.includes(x))))
+    return { pass: bad.length === 0, observed: { messages: agent.length, notTheModels: bad.map(m => m.text) } }
+  },
+  // (cycle 15) The owner question quotes the answer as the answering model wrote it: its sentences are in the request, and no sentence the
+  // draft check appended to the posted answer is.
+  quotesOwnAnswer: ({ step, results, args, world }) => {
+    const answered = results.find(r => r.id === args.answerStep)
+    const posted = (answered?.seen?.newMessages ?? []).filter(m => m.role === 'assistant' && m.by === 'agent').map(m => m.text), written = answered?.seen?.written ?? []
+    const own = posted.flatMap(sentencesOf).filter(x => written.some(w => w.includes(x))), appended = posted.flatMap(sentencesOf).filter(x => !written.some(w => w.includes(x)))
+    const rows = world.decisionsIn(step.id).filter(d => args.families.includes(d.feature))
+    const quoting = rows.filter(d => own.length && own.every(x => d.raw.includes(x)))
+    return { pass: quoting.length > 0 && rows.every(d => appended.every(x => !d.raw.includes(x))), observed: { requests: rows.length, quotingOwn: quoting.length, appendedSentences: appended } }
+  },
   // (cycle 13) A logged judgment of this step (calibration word, not a question name): measured, and within bounds when bounds are given.
   calibrationValue: ({ step, args }) => {
     const found = step.seen.calibration.filter(e => e.feature === args.feature).flatMap(e => e.judgments ?? []).find(x => x.q === args.q)
@@ -284,9 +321,25 @@ const CHECKS = {
   placementRecorded: ({ step }) => ({ pass: step.seen.placement.records.length >= 1, observed: { records: step.seen.placement.records, submitted: step.seen.placement.submitted } }),
 }
 export const CHECK_NAMES = Object.freeze(Object.keys(CHECKS))
+// The check functions themselves (read-only), for tests that judge hand-made results.
+export const CHECK_FUNCTIONS = Object.freeze({ ...CHECKS })
 
 // ---- what the person sees after a step ----
 const PAGE_ID = /\[(?:page|item) id=([^\s\]]+)/g
+// (cycle 15) A page header followed by its content is a BODY; a header that says the content is not re-sent (or is followed by another
+// header, or by the "content not repeated here" line) is a REFERENCE to a page the model already holds. pageIds counts both, as before.
+const HEADER = /^\[(?:page|item) id=([^\s\]]+)([^\]]*)\]/
+export function packetPages(value) {
+  const lines = String(value ?? '').split('\n'), bodies = [], refs = []
+  lines.forEach((line, i) => {
+    const m = HEADER.exec(line.trim())
+    if (!m) return
+    const next = lines.slice(i + 1).find(x => x.trim())?.trim() ?? ''
+    const ref = /content not re-sent|already delivered/.test(m[2]) || !next || HEADER.test(next) || next.startsWith('[content not repeated here')
+    ;(ref ? refs : bodies).push(m[1])
+  })
+  return { bodies, refs }
+}
 // A room that has no conversation yet has no messages (the store refuses to list an unknown room).
 const roomMessages = (w, room) => { try { return w.store.listMessages(room).messages } catch (error) { if (error?.code === 'CONVERSATION_NOT_FOUND') return []; throw error } }
 function counts(w) {
@@ -323,18 +376,20 @@ function seenAfter(w, id, before, j) {
   }
   const note = w.note()
   return {
-    conversation, newMessages: newOnes,
+    conversation, newMessages: newOnes, written: [...j.said, ...forkTexts],
     flows: w.calibrationLog.entries().slice(before.calibration).filter(e => e.feature === 'conversation_flow' && Object.hasOwn(e, 'flow')).map(e => ({ flow: e.flow, posted: e.posted ?? null })),
     activityRows: w.activityRowsIn(id),
     packets: w.native.filter(c => c.step === id && c.method === 'turn/start' && !String(c.params.threadId).startsWith('fork-')).map(c => {
       const ctx = c.params.additionalContext ?? {}
-      return { keys: Object.keys(ctx), pageIds: [...new Set(Object.values(ctx).flatMap(v => [...String(v?.value ?? '').matchAll(PAGE_ID)].map(m => m[1])))] }
+      const parsed = Object.values(ctx).map(v => packetPages(v?.value))
+      return { keys: Object.keys(ctx), pageIds: [...new Set(Object.values(ctx).flatMap(v => [...String(v?.value ?? '').matchAll(PAGE_ID)].map(m => m[1])))],
+        bodyIds: [...new Set(parsed.flatMap(p => p.bodies))], refIds: [...new Set(parsed.flatMap(p => p.refs))] }
     }),
     engineTurns: w.subjectiveTurnsIn(id),
     runs,
     board: { observe: j.note.briefing && id === 's3-briefing' ? j.note.briefing : null, published: stepEvents.filter(e => e.event === 'briefing.published').length,
       cards: stepEvents.filter(e => e.event === 'output.published').map(e => ({ title: e.details?.output?.title ?? null, zone: 'board' })), parts },
-    placement: { submitted: /^s[78]-/.test(id) ? j.note.ownerRequest ?? null : null, cards: /^s[78]-/.test(id) ? j.note.cards ?? [] : [],
+    placement: { submitted: /^s[78]b?-/.test(id) ? j.note.ownerRequest ?? null : null, cards: /^s[78]b?-/.test(id) ? j.note.cards ?? [] : [],
       records: w.workPlacement.records().slice(before.records).map(r => ({ kind: r.kind, surface: r.surface, source: r.source, would: r.would })), facts: w.workPlacement.facts(DM) },
     browser: { note: note ? { status: note.status, next: note.next, code: note.code ?? null, candidates: note.candidates ?? [], stepsDone: note.stepsDone ?? null } : null,
       acts: w.acts.slice(before.acts).map(a => ({ type: a.type, url: a.url })) },
@@ -431,8 +486,9 @@ export async function runJourney({ plan, send = false, key = null, fetchImpl = g
   const { transport, ledger } = createMeasureTransport({ send, key, fetchImpl, caps, plan, now, replay: send === true ? null : replay })
   const steps = []
   try {
-    const w = allOnWorld(t, { transport, settleLimitMs: 60_000, env })
-    w.state.wording.wait = waitNote
+    // The plan's world flags, then any the caller adds.
+    const w = allOnWorld(t, { transport, settleLimitMs: 60_000, env: { ...(plan.world?.env ?? {}), ...env } })
+    w.state.wording.wait = waitNote; w.state.wording.pointer = pointerNote
     await w.settings.turnMemory.save('on')
     const j = { note: {}, sends: [], said: [],
       async say(text, extra) {

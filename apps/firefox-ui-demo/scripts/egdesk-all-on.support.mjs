@@ -17,7 +17,7 @@ import { Readable } from 'node:stream'
 import os from 'node:os'
 import path from 'node:path'
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
-import { CodexChatRuntime } from '../helper/codex-chat-runtime.mjs'
+import { CodexChatRuntime, TURN_CONTEXT_BUDGET_MS, TURN_CONTEXT_COLD_BUDGET_MS } from '../helper/codex-chat-runtime.mjs'
 import { createChatHttpHandler } from '../helper/codex-bridge-http.mjs'
 import { openChatStore } from '../helper/egdesk-chat-store.mjs'
 import { ImmutableContextStore } from '../helper/egdesk-context-store.mjs'
@@ -312,7 +312,10 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
   let workPlacement = null
   const contexts = new ContextRuntime({ store: new ImmutableContextStore({ dataDir: path.join(dir, 'context'), allowedRoots: [cwd] }), getOwnerKey: () => OWNER })
   const decisionContext = on === null ? undefined : {
-    settingsGeneration: () => 0, mode: () => state.mode, configured: () => on === true, client, calibrationLog, budgetMs: 800,
+    settingsGeneration: () => 0, mode: () => state.mode, configured: () => on === true, client, calibrationLog,
+    // (cycle 15) The bridge's turn_context budgets: warm 800 ms, cold 1,500 ms (first turn of a conversation, or no warm Decisions socket).
+    // Warm here once a Decisions request of this world has been answered (a kept-alive connection), as the bridge's transport is after its first.
+    budgetMs: TURN_CONTEXT_BUDGET_MS, coldBudgetMs: TURN_CONTEXT_COLD_BUDGET_MS, warm: () => decisions.some(row => row.status === 200),
     turnMemory: turnMemoryConfig, browserEntry: browserEntryConfig,
     ...(['advisory', 'on'].includes(ENV.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => ENV.EGDESK_DRAFT_CHECK } } : {}),
     ...(ENV.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(ENV.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror, audience: ({ run }) => runRequesters.audience({ run }) } : {}),
@@ -332,7 +335,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
     forkPrompts.push({ step, prompt })
     if (/Design guide \(decided/.test(prompt)) return typeof state.fill === 'function' ? state.fill(prompt) : null
     if (/^Here is your draft answer/.test(prompt)) return state.wording.revise ?? '앞에서 확인한 내용 기준으로, A사 견적은 요청을 받은 뒤 첫 견적서를 보냈고 수정본은 팀장 승인 뒤 보낼 예정입니다.'
-    if (/on the desk/.test(prompt)) return state.wording.pointer ?? '결과는 지금 보고 계신 곳 왼쪽 작업 영역에 있습니다. 확인이 필요합니다.'
+    if (/on the desk/.test(prompt)) { const pointer = typeof state.wording.pointer === 'function' ? state.wording.pointer(prompt) : state.wording.pointer; return pointer ?? '결과는 지금 보고 계신 곳 왼쪽 작업 영역에 있습니다. 확인이 필요합니다.' }
     if (/ask the person|need one piece of information/.test(prompt)) return state.wording.ask ?? null
     if (/unusually long/.test(prompt)) return state.wording.stalled ?? null
     // wording.wait may be a function of the prompt (a writer that words the note from the facts it was given).
