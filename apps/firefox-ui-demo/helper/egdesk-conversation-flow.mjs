@@ -559,7 +559,8 @@ export const PERSON_PREDICATES = Object.freeze({
 /** The questions about one in-run message, each quoting it (R4). */
 export function personPredicates(message) {
   const quote = { label: 'The person\'s message, sent while the work is running', text: oneLine(message, IN_RUN_LIMITS.quoteChars) }
-  return [PERSON_PREDICATES.status, PERSON_PREDICATES.change, PERSON_PREDICATES.stop].map(q => ({ ...q, quote, kinds: ['run_text'], topic: 'person_message' }))
+  // solicited: the person sent it, so the heartbeat judges it at the next beat whatever its ask gap and ask budget (egdesk-heartbeat.mjs, c24)
+  return [PERSON_PREDICATES.status, PERSON_PREDICATES.change, PERSON_PREDICATES.stop].map(q => ({ ...q, quote, kinds: ['run_text'], topic: 'person_message', solicited: true }))
 }
 /** What code does with the message, from the yes answers (a Set of names). */
 export function personDecision(yes) {

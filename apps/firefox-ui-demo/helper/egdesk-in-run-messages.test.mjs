@@ -109,3 +109,25 @@ test('workMsOf and the prompts (pure): the work\'s age wins over the time since 
   assert.match(writerPrompt('reply_status', { ...facts, workMs: null }), /about 1 seconds so far/, 'unknown start: the old figure, as before')
   assert.match(writerPrompt('stalled', { ...facts, sinceEngineMs: 21_000 }), /about 21 seconds/, 'silence is its own figure'); assert.match(writerPrompt('stalled', { ...facts, sinceEngineMs: null }), /about 10 seconds/, 'unknown silence: the work\'s age')
 })
+
+// c24 (Main): the person's messages are judged at the next beat whatever the heartbeat's ask gap (10 s) and nudge limit (once per 5 s) say; those
+// bounds are for the assistant's unprompted notes.
+test('a stop one second after another message is acted on at the next beat (0.5 s), not after the ask gap or the nudge limit (fake clock)', async t => {
+  const { w, d } = await scene(t, { writer: prompt => (/The person just wrote, while you work/.test(prompt) ? '멈춘 게 아니라 아직 실행 중이에요.' : null) })
+  const run = [...w.chat.runs.values()][0]
+  const t0 = w.at()
+  await send(w, d, STATUS, 1); await w.advance(600)
+  assert.equal(settled(w, 'req-in-1'), 'reply', 'the first message was answered within 0.6 s')
+  await w.advance(400)                          // one second after the first message: inside the 5 s nudge limit and the 10 s ask gap
+  const sentAt = w.at()
+  await send(w, d, STOP, 2); await w.advance(600)
+  assert.equal(settled(w, 'req-in-2'), 'interrupt', 'the stop was judged at the next beat')
+  assert.equal(w.native.filter(([m]) => m === 'turn/interrupt').length, 1)
+  assert.ok(w.at() - sentAt <= 700 && sentAt - t0 <= 1100)
+  const askedStop = judged(w).at(-1)
+  assert.ok(JSON.stringify(askedStop.input).includes(STOP) && !askedStop.names.some(n => !/^message__person_/.test(n)), 'asked alone, about that message')
+  assert.deepEqual(w.chat.pendingInRunMessages(run), [])
+  // the assistant's own notes were not moved by those two rounds: the beat record says the person rounds did not count as asks
+  const rounds = w.flowEntries().filter(e => e.judgments?.some(j => /^beat_person_/.test(j.q)))
+  assert.equal(rounds.length, 2)
+})

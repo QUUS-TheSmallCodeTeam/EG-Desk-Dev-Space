@@ -6136,7 +6136,7 @@ export class CodexChatRuntime {
     const flow = this.flowRuns.get(run)
     const entry = { requestId, text: message, at: this.now(), state: 'pending', localMessageId: this.recordInRunReply(run, flow ?? {}, requestId, message) }
     queue.push(entry)
-    try { flow?.heartbeat?.nudge?.() } catch { /* timing hint only */ }
+    try { flow?.heartbeat?.nudge?.({ solicited: true }) } catch { /* timing hint only */ } // L3 c24: a person's message is judged at the next beat, not held to the nudge limit
     return answer(entry)
   }
 
