@@ -8,7 +8,7 @@ import { SKELETON_BARS } from './egdesk-briefing-skeleton.mjs'
 import { BEAT_PREDICATE_YES } from './egdesk-heartbeat-judge.mjs'
 import { RISK_PREDICATE_NO } from './egdesk-terminal-command-gate.mjs'
 import { SPEECH_THRESHOLDS } from './egdesk-speech-grounding.mjs'
-import { barFor, productVerdict } from './egdesk-product-bars.mjs'
+import { barFor, productHolds, productVerdict } from './egdesk-product-bars.mjs'
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -33,6 +33,12 @@ test('product verdict: single-threshold families have no undecided zone; three-s
   assert.equal(v('utterance-threshold-v1/chunk-01', 'speech_source_0', 'choice', { choice: 'inference', expected: ['inference'], confidence: 0.84, margin: 0.8 }), 'undecided')
   assert.equal(v('utterance-threshold-v1/chunk-01', 'speech_source_0', 'choice', { choice: 'inference', expected: ['unspecified'], confidence: 0.86, margin: 0.8 }), 'decided-wrong')
   assert.equal(productVerdict({ set: 'heartbeat-c18', q: 'message__note', kind: 'predicate', verdict: 'not-answered' }), 'not-answered')
+  // the speech axes never install "unknown", however confident
+  assert.equal(v('utterance-threshold-v1/chunk-01', 'speech_time_0', 'choice', { choice: 'unknown', expected: ['unknown'], confidence: 0.99, margin: 0.98 }), 'undecided')
+  // a wrong-install check holds when nothing (or the right value) is installed, and fails only on a wrong install
+  const w = rest => productHolds({ set: 'utterance-threshold-v1/chunk-01', q: 'speech_form_0', kind: 'choice', verdict: 'x', whenAccepted: true, ...rest })
+  assert.deepEqual([w({ choice: 'question', expected: ['assertion', 'unknown'], confidence: 0.84, margin: 0.8 }), w({ choice: 'question', expected: ['assertion', 'unknown'], confidence: 0.9, margin: 0.8 }), w({ choice: 'unknown', expected: ['unknown'], confidence: 0.99, margin: 0.9 })], [true, false, true])
+  assert.equal(productHolds({ set: 'heartbeat-c18', q: 'message__note', kind: 'predicate', verdict: 'x', p: 0.9, expect: 'yes' }), true)
   assert.equal(productVerdict({ set: 'command-judgments-v1', q: 'terminal_risk', kind: 'score', verdict: 'decided-wrong' }), 'decided-wrong')
 })
 

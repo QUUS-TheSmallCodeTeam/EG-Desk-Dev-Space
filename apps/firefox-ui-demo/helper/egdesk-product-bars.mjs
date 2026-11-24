@@ -18,7 +18,7 @@ const EPS = 1e-6
 const single = (bar, src) => ({ yesAt: bar, noAt: bar - EPS, src }) // acts on yes at >= bar, on no below it
 const onlyNo = (bar, src) => ({ yesAt: bar + EPS, noAt: bar, src }) // acts on no at <= bar, on yes above it
 const three = (yes, no, src) => ({ yesAt: yes, noAt: no, src })
-const choice = (c, m, src) => ({ c, m, src })
+const choice = (c, m, src, extra = {}) => ({ c, m, src, ...extra })
 const WM_SPILL_BAR = 0.2 // egdesk-working-memory-gate.mjs predicateAction / gateToolOutput: a block is spilled at p <= .2 (not exported)
 
 export const PRODUCT_BARS = Object.freeze([
@@ -42,7 +42,7 @@ export const PRODUCT_BARS = Object.freeze([
   [/^record-confirmation-predicates-v1$/, /.*/, three(CONFIRM_BARS.yes, CONFIRM_BARS.no, 'egdesk-record-confirmation.mjs CONFIRM_BARS (between: keep pending)')],
   [/^working-memory-judge-v1$/, /.*/, onlyNo(WM_SPILL_BAR, 'egdesk-working-memory-gate.mjs predicateAction: spilled iff p <= .2; kept otherwise')],
   [/^write-target-about-v1$|^mid-scan-previous-reply-v1$/, /^(tw_about_#|tn_record|tn_courtesy|pg_#)$/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO (between: undecided / a second look)')],
-  [/^write-target-about-v1$|^utterance-threshold-v1\//, /^speech_/, choice(SPEECH_THRESHOLDS.confidence, SPEECH_THRESHOLDS.margin, 'egdesk-speech-grounding.mjs SPEECH_THRESHOLDS')],
+  [/^write-target-about-v1$|^utterance-threshold-v1\//, /^speech_/, choice(SPEECH_THRESHOLDS.confidence, SPEECH_THRESHOLDS.margin, 'egdesk-speech-grounding.mjs SPEECH_THRESHOLDS; pick() never installs unknown', { neverAccepts: ['unknown'] })],
   [/^write-target-about-v1$|^utterance-threshold-v1\//, /^tw_status$/, choice(T.choice, T.margin, 'egdesk-turn-memory.mjs judgeWriteAbout readChoice .75 / .2')],
   [/^(heartbeat-c14|l4-work-placement)$/, /.*/, choice(T.choice, T.margin, 'retired c14 designs: DEFAULT_DECISION_THRESHOLDS choice / margin (assumed)')],
   [/^l4-briefing-skeleton$/, /^(place|part_P#|next)$/, choice(T.choice, T.margin, 'retired c14 skeleton: choice .75 / margin .2')],
@@ -50,7 +50,7 @@ export const PRODUCT_BARS = Object.freeze([
   [/-11(22|23|24)$/, /^speechp_/, three(SPEECH_PREDICATE_BARS.yes, SPEECH_PREDICATE_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_PREDICATE_BARS')],
   [/-11(22|23|24)$/, /^(tn_|tw_link|tw_about|pg_|op_)/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO')],
   [/-11(22|23|24)$/, /^rel_#$/, single(T.relevant, 'egdesk-decision-questions.mjs relevant: attached iff p >= relevant')],
-  [/-11(22|23|24)$/, /^speech_/, choice(SPEECH_THRESHOLDS.confidence, SPEECH_THRESHOLDS.margin, 'egdesk-speech-grounding.mjs SPEECH_THRESHOLDS')],
+  [/-11(22|23|24)$/, /^speech_/, choice(SPEECH_THRESHOLDS.confidence, SPEECH_THRESHOLDS.margin, 'egdesk-speech-grounding.mjs SPEECH_THRESHOLDS; pick() never installs unknown', { neverAccepts: ['unknown'] })],
   [/-11(22|23|24)$/, /.*/, choice(T.choice, T.margin, 'DEFAULT_DECISION_THRESHOLDS choice / margin')],
 ].map(([set, family, bar]) => Object.freeze({ set, family, bar: Object.freeze(bar) })))
 
@@ -65,6 +65,12 @@ export function barFor({ set, q, kind }, { fallback = true } = {}) {
   return fallback && (kind === 'predicate' || kind === 'choice') ? { ...FALLBACK_BARS[kind], fallback: true } : null
 }
 
+/** Whether a HARD check holds at the product bar. A wrong-install check (whenAccepted) holds unless the product installs a wrong value. */
+export function productHolds(row) {
+  const v = productVerdict(row)
+  return row.whenAccepted ? v !== 'decided-wrong' && v !== 'not-answered' : v === 'decided-correct'
+}
+
 /** productVerdict(row) -> 'decided-correct' | 'decided-wrong' | 'undecided' | 'not-answered' | row.verdict (score and band rows keep theirs). */
 export function productVerdict(row) {
   if (row.verdict === 'not-answered' || row.kind === 'score') return row.verdict
@@ -77,6 +83,6 @@ export function productVerdict(row) {
     if (!yes && !no) return 'undecided'
     return (row.expect === 'yes') === yes ? 'decided-correct' : 'decided-wrong'
   }
-  const accepted = Number.isFinite(row.confidence) && row.confidence >= b.c && (b.m === null || (Number.isFinite(row.margin) && row.margin >= b.m - 1e-9))
+  const accepted = Number.isFinite(row.confidence) && row.confidence >= b.c && (b.m === null || (Number.isFinite(row.margin) && row.margin >= b.m - 1e-9)) && !(b.neverAccepts || []).includes(row.choice)
   return !accepted ? 'undecided' : (row.expected || []).includes(row.choice) ? 'decided-correct' : 'decided-wrong'
 }
