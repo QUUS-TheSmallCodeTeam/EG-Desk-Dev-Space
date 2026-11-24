@@ -1,0 +1,339 @@
+{
+  "set": "hud-routing-v1",
+  "tokenCeiling": 10000,
+  "productBars": {
+    "*predicate": {
+      "yes": 0.8,
+      "no": 0.2,
+      "source": "overlay/resources/EGDeskHudRouting.sys.mjs HUD_ROUTING_BARS (.8 / .2), read by rankRoute"
+    }
+  },
+  "passRule": "HARD: 0 wrong highlights by the product reading (helper/egdesk-hud-routing-real-plan.mjs analyzeHudRouting: rankRoute at .8/.2 gives a row in the request's expected set, null meaning today's highlight). SOFT: per request the wanted row yes and the others no at the product bars; the wanted route highlighted (coverage). The diagnostic request is record-only. Code-routed with no request: address (address), command (command), exact-name (name).",
+  "codeRouted": [
+    {
+      "id": "address",
+      "text": "github.com/egdesk/desk/pull/12",
+      "rule": "address",
+      "requests": 0
+    },
+    {
+      "id": "command",
+      "text": "git status --short",
+      "rule": "command",
+      "requests": 0
+    },
+    {
+      "id": "exact-name",
+      "text": "점심 메뉴 투표 결과",
+      "rule": "name",
+      "requests": 0
+    }
+  ],
+  "requests": [
+    {
+      "id": "question",
+      "file": "requests/question.json",
+      "sha256": "d2295df3cccbf397af49ead7347d39d78dd6e5493009233283a9bf3adff9cf41",
+      "estInputTokens": 753,
+      "role": "route",
+      "keyOf": {
+        "I1": "card:res-v1",
+        "I2": "card:res-lunch",
+        "web": "web",
+        "ask": "ask"
+      },
+      "expected": [
+        "ask",
+        null
+      ],
+      "want": "ask",
+      "expect": [
+        {
+          "name": "goes_to_I1",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "goes_to_I2",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "web_search",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "assistant_request",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "the wanted row: yes at the product bar"
+        }
+      ]
+    },
+    {
+      "id": "open-card",
+      "file": "requests/open-card.json",
+      "sha256": "c42c0f86d5a116d7f35f33da8d05983f0531f61cd8d7e61e969a896931379026",
+      "estInputTokens": 749,
+      "role": "route",
+      "keyOf": {
+        "I1": "card:res-v1",
+        "I2": "card:res-lunch",
+        "web": "web",
+        "ask": "ask"
+      },
+      "expected": [
+        "card:res-v1",
+        null
+      ],
+      "want": "card:res-v1",
+      "expect": [
+        {
+          "name": "goes_to_I1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "the wanted row: yes at the product bar"
+        },
+        {
+          "name": "goes_to_I2",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "web_search",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "assistant_request",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        }
+      ]
+    },
+    {
+      "id": "open-card-2",
+      "file": "requests/open-card-2.json",
+      "sha256": "54f1e063e27586385510440e20b50f71faf0b9678fe18f446a8214145b3a94ac",
+      "estInputTokens": 751,
+      "role": "route",
+      "keyOf": {
+        "I1": "card:res-v1",
+        "I2": "card:res-lunch",
+        "web": "web",
+        "ask": "ask"
+      },
+      "expected": [
+        "card:res-lunch",
+        null
+      ],
+      "want": "card:res-lunch",
+      "expect": [
+        {
+          "name": "goes_to_I1",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "goes_to_I2",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "the wanted row: yes at the product bar"
+        },
+        {
+          "name": "web_search",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "assistant_request",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        }
+      ]
+    },
+    {
+      "id": "web-search",
+      "file": "requests/web-search.json",
+      "sha256": "130fb9ee35f8300fd7357ddb23f2fdf4a5f22204f9610a4e2b85f0101ed012dd",
+      "estInputTokens": 751,
+      "role": "route",
+      "keyOf": {
+        "I1": "card:res-v1",
+        "I2": "card:res-lunch",
+        "web": "web",
+        "ask": "ask"
+      },
+      "expected": [
+        "web",
+        null
+      ],
+      "want": "web",
+      "expect": [
+        {
+          "name": "goes_to_I1",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "goes_to_I2",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "web_search",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "the wanted row: yes at the product bar"
+        },
+        {
+          "name": "assistant_request",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        }
+      ]
+    },
+    {
+      "id": "ambiguous",
+      "file": "requests/ambiguous.json",
+      "sha256": "f55541b38d888758aab70b5df0a47434fd6e3c5d98b89c8cbdde7aaf85818c95",
+      "estInputTokens": 745,
+      "role": "route",
+      "keyOf": {
+        "I1": "card:res-v1",
+        "I2": "card:res-lunch",
+        "web": "web",
+        "ask": "ask"
+      },
+      "expected": [
+        "card:res-v1",
+        null
+      ],
+      "want": null,
+      "expect": [
+        {
+          "name": "goes_to_I1",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "goes_to_I2",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "web_search",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "assistant_request",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        }
+      ]
+    },
+    {
+      "id": "ambiguous-2",
+      "file": "requests/ambiguous-2.json",
+      "sha256": "0ffafec89f3e672cd7c641edd79d6104bf8b3ff5b8abccb06f12a72fe41a5161",
+      "estInputTokens": 747,
+      "role": "route",
+      "keyOf": {
+        "I1": "card:res-v1",
+        "I2": "card:res-lunch",
+        "web": "web",
+        "ask": "ask"
+      },
+      "expected": [
+        null
+      ],
+      "want": null,
+      "expect": [
+        {
+          "name": "goes_to_I1",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "goes_to_I2",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "web_search",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        },
+        {
+          "name": "assistant_request",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "not this row: no at the product bar"
+        }
+      ]
+    },
+    {
+      "id": "command-diagnostic",
+      "file": "requests/command-diagnostic.json",
+      "sha256": "54cbd4e7be1e5d9a3a2597d7611c792ac521221cb0ba12b1dbc21b38e6918c12",
+      "estInputTokens": 747,
+      "role": "diagnostic",
+      "keyOf": {
+        "I1": "card:res-v1",
+        "I2": "card:res-lunch",
+        "web": "web",
+        "ask": "ask"
+      },
+      "expected": null,
+      "want": null,
+      "recordOnly": true,
+      "diagnostic": true,
+      "expect": []
+    }
+  ]
+}

@@ -23,6 +23,10 @@ export const EGRESS_KINDS = Object.freeze({
   speech_history: Object.freeze({ data: 'speech', governedBy: 'Per-DM speech reuse consent (the same consent that lets the answering model see past utterances)' }),
   previous_reply: Object.freeze({ data: 'thread', governedBy: 'The assistant message right before this turn, which the answering model holds in its own native thread (same thread, completed turns, not compacted; Codex only, where compaction is reported). A bounded excerpt, quoted as data (L7 c22)' }),
   topic_history: Object.freeze({ data: 'topic', governedBy: 'Per-DM topic memory consent (the same consent that lets the answering model see past turns)' }),
+  // L1 c20: the words the person typed into the Desk's search field, before anything was sent. No structure lets ANY model see them (the
+  // field promises to search this device first), and Decisions gets no permission of its own, so this kind is refused by every gate: its
+  // class is not a model data class. It opens only if the owner decides a permission that covers all models (owner decision pending).
+  hud_text: Object.freeze({ data: 'hud', governedBy: 'No model permission covers typed search-field text yet: refused everywhere (owner decision pending)' }),
   board_excerpt: Object.freeze({ data: 'board', governedBy: 'This Board ask itself: the owner chose and confirmed a run that sends the approved public excerpts to the drafting model. An extract-only ask sends them to no model, so not to Decisions either' }),
 })
 const DATA_CLASSES = Object.freeze(['terminal', 'browser', 'canvas', 'run', 'memory', 'speech', 'topic', 'board', 'thread'])
@@ -105,6 +109,8 @@ export const EGRESS_SITES = Object.freeze({
   // request (run_text) and a nearby card's label and excerpt, only for cards the host marked maySend (canvas_text); "does the result need the
   // owner?" quotes the run's own request and answer (run_text). Each is asked of the run's gate (chat runtime placementContextFor) before it is sent.
   'egdesk-work-placement.mjs': ['run_text', 'canvas_text'],
+  // L1 c20 Desk HUD routing: the typed text (hud_text: refused until a permission covering all models exists) and maySend card labels
+  'egdesk-hud-routing.mjs': ['hud_text', 'canvas_text'],
   'egdesk-draft-check.mjs': ['draft_text'],
   'egdesk-heartbeat-judge.mjs': ['run_facts', 'run_text', 'terminal_command', 'plus any other kind a heartbeat question or a provider\'s context declares, each checked by the run\'s gate before it is sent'],
   // Plan builder for the real measurement: the product client with a recording fetch that refuses. Nothing is sent from this file.
