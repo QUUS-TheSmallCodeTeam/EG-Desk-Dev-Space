@@ -143,6 +143,24 @@ function mergedLabels(interpretations) {
 // 'about' asks neither as a forced choice. Each candidate gets its own yes/no question ("is this message about THIS record?"), and code
 // derives the target: exactly one yes and every other a decided no -> that record; every one a decided no (or there is no candidate) ->
 // a new record; anything else -> undecided, and nothing is written. "Do not add" stays where it is decided: tn_record.
+// ---- truthfulness about records (L7 c17) ----
+// The write judgment runs AFTER the answer, so the answering model cannot know whether anything will be recorded (real all-on run 2026-11-25,
+// s9: the answer said "네, 기록해 두겠습니다." and nothing was recorded). It is told so, on the turns where a record may follow: a first turn
+// (its recording triage is still running when the turn starts) and a mid-session turn whose triage said the message is worth recording.
+// What was actually noted reaches it on a later turn through the confirmation note (confirmInConversation), which it may then state.
+export const RECORDING_RULE = '[recording] EG-Desk, not you, decides after your reply whether anything from this message is recorded, and a record stays unconfirmed until the person confirms it. Do not say that you have recorded, saved or noted anything, or that you will. If something was noted, you will be told on a later turn.'
+/**
+ * The record state of a turn as one draft-check evidence item: what EG-Desk has noted in this session and not yet had confirmed, and that
+ * nothing is recorded during the reply. noted: [{ title, status }] (already permission-checked by the caller).
+ */
+export function recordStateEvidence(noted = []) {
+  const list = (Array.isArray(noted) ? noted : []).filter(n => n && typeof n.title === 'string' && n.title.trim() && ['done', 'plan', 'superseded'].includes(n.status)).slice(0, 3)
+  const words = { done: 'done', plan: 'planned', superseded: 'outdated' }
+  const text = ['EG-Desk record state for this reply: nothing is recorded or saved during the reply; a record, if any, is made by EG-Desk after it and stays unconfirmed until the person confirms it.',
+    list.length ? `Noted earlier in this conversation and not yet confirmed: ${list.map(n => `"${compactText(n.title, 120)}" reported as ${words[n.status]}`).join('; ')}.` : 'Nothing has been noted in this conversation that awaits confirmation.'].join(' ')
+  return { id: 'record-state', kind: 'memory', time: 'present', status: null, source: 'system', text }
+}
+
 export const WRITE_TARGET_DESIGNS = Object.freeze(['choice', 'about'])
 // The design turn memory uses unless told otherwise (2026-11-24 real re-measurement, 6 requests: the per-record predicates answered 0 or 1
 // in every case, while the 'choice' target of the same three new-record utterances stayed undecided, 0.6-0.7, 3 of 3). 'choice' stays
