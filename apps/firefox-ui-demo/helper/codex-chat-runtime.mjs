@@ -2,6 +2,7 @@ import { isChatWorkNote, chatWorkNoteActivity, chatSpeechOnly, separateChatWork 
 import { boardAddresses, boardPeerReceipt, boardTurnFields, boardHasScopedResources, boardRosterIdentity, boardSendErrorText, classifyBoardDelivery } from '../overlay/resources/EGDeskBoardThread.sys.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
+import { realpathSync } from 'node:fs'
 import { chatError, explicitFileLinks, MAX_TEXT, publicError, publicNetworkContext, publicText, validateChatCwd, verifyLocalFile } from './codex-chat-values.mjs'
 import { READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA, requestedExecutionPolicy, loadQaThreadOverrides, verifyQaNativeThread, verifyQaMcpIsolation, QA_TURN_OVERRIDES } from './codex-chat-execution-policy.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
@@ -6654,6 +6655,31 @@ export class CodexChatRuntime {
   }
   ownNeutralFolder() { try { const folder = this.ownTools?.neutralFolder?.(); return typeof folder === 'string' && path.isAbsolute(folder) && !folder.includes('\0') ? folder : null } catch { return null } }
   /** The folder EG-Desk's own tools use for a run: the real folder in own-tools mode, otherwise the thread's folder. */
+  // c24 (Main's check-2: posted answers linked "…/engine-folders/empty/app.js"): in an own-tools run the engine works in EG-Desk's empty folder, so the model
+  // writes the paths it knows, under that folder; the person's file is in the run's real folder. Every path under the engine folder in an assistant message
+  // becomes the same path under the real folder, before the text is stored, shown, or read for file links (artifacts), so the viewer opens the real file.
+  // Only a whole path prefix is mapped ("<engine folder>/…" or the folder itself, never "<engine folder>-other"); other text is untouched. Items that
+  // complete carry the whole text, so a path split across streaming deltas is mapped when the message completes.
+  mapOwnPaths(run, text) {
+    if (!run?.ownTools || !run.ownFolder || typeof text !== 'string' || !text) return text
+    const engine = this.threads.get(run.conversationId)?.cwd ?? this.ownNeutralFolder()
+    if (typeof engine !== 'string' || !path.isAbsolute(engine) || engine === run.ownFolder) return text
+    const from = new Set([engine]); try { from.add(realpathSync(engine)) } catch { /* not on disk: the plain form only */ }
+    let out = text
+    for (const prefix of from) {
+      let at = 0, next = ''
+      for (let i; (i = out.indexOf(prefix, at)) >= 0; at = i + prefix.length) {
+        const after = out[i + prefix.length]
+        const whole = after === undefined || after === '/' || /[\s)\]>"'`,;:.]/.test(after)
+        const before = out[i - 1]
+        const start = before === undefined || !/[A-Za-z0-9_.\-/]/.test(before)
+        next += out.slice(at, i) + (whole && start ? run.ownFolder : prefix)
+      }
+      out = next + out.slice(at)
+    }
+    return out
+  }
+
   runFolder(run) { return run?.ownTools ? run.ownFolder ?? null : this.threads.get(run?.conversationId)?.cwd ?? null }
 
   // ---- Engine version against the hook's source check (c15). A new app-server connection is a new session: it records at most once. ----
@@ -7828,6 +7854,7 @@ export class CodexChatRuntime {
       if (typeof text !== 'string') return
       item = { ...item, text, truncated: false }
     }
+    if (item.type === 'agentMessage' && run.ownTools && typeof item.text === 'string') item = { ...item, text: this.mapOwnPaths(run, item.text) }
     let staged = ''
     if (item.type === 'agentMessage') {
       const channel = this.channelOutput.get(run)
