@@ -65,7 +65,7 @@ test('engine silent but the fork still answers: the subjective model writes the 
   await d.final('확인을 마쳤습니다.')
 })
 
-test('browser task waiting on the person: the heartbeat beats and reports it, and nothing is asked or sent while the person is awaited', async t => {
+test('browser task handed off: while the subjective model is still wording the question the heartbeat reports the hand-off and can still speak (a slow turn is explained like any other)', async t => {
   const w = world(t), d = await w.dm('dm-browser')
   // The browser task loop feeds the conversation's heartbeat through the registration API (read-only).
   const feed = feedBrowserTask(w.chat.heartbeatFor('dm-browser'), createBrowserTaskStore())
@@ -78,15 +78,17 @@ test('browser task waiting on the person: the heartbeat beats and reports it, an
   assert.equal(out.status, 'paused')
   await w.advance(40000)
   assert.equal(d.hb.beats, 8)
-  assert.deepEqual([...new Set(d.beats.map(b => b.phase))], ['waiting_user'])
-  assert.deepEqual(d.beats[0].sources.browser_task, { active: true, phase: 'waiting_user', waitingOnUser: true, stepsDone: 4, stepBudgetLeft: 20, task: 'need_context' })
-  assert.equal(w.requests.flow, 0); assert.deepEqual(d.assistant(), [])
+  assert.deepEqual([...new Set(d.beats.map(b => b.phase))], ['thinking'], 'the person has not been asked yet: this is not waiting_user')
+  const row = d.beats[0].sources.browser_task
+  assert.deepEqual([row.active, row.phase, row.waitingOnUser, row.stepsDone, row.stepsRemaining, row.task, row.awaiting, row.awaitingCode], [true, 'handing_off', false, 4, 20, 'handing_off', 'need_context', 'choice_needed'])
+  assert.ok(w.requests.flow >= 1, 'a 40 s wording turn is not muted')
+  assert.ok(w.flowAsked.every(a => !a.offered.includes('ask_missing')), 'nothing here opens an in-run question')
   // The same 40 s without the waiting task: the wait message becomes possible at 20 s and the model is asked.
   const plain = world(t), p = await plain.dm('dm-plain')
   await plain.advance(40000)
   assert.ok(plain.requests.flow >= 1); assert.equal(p.beats[0].phase, 'thinking')
   await d.final('어느 사업자의 세금계산서인지 알려 주세요.'); await p.final('끝났습니다.')
-  t.diagnostic(`browser task waiting: beats=${d.hb.beats} flowRequests=${w.requests.flow} messages=0 while waiting (contrast without the task: flowRequests=${plain.requests.flow})`)
+  t.diagnostic(`browser task handed off: beats=${d.hb.beats} flowRequests=${w.requests.flow} messages=${d.assistant().length} before the question (same 40 s without the task: flowRequests=${plain.requests.flow})`)
 })
 
 test('quick 3 s answer: no beat, no decision request, no timer left', async t => {
