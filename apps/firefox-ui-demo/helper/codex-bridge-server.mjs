@@ -493,6 +493,8 @@ const chat = new CodexChatRuntime({
   resolveRunProjectOrigin: request => localFiles.resolveRunProjectOrigin(request),
   toolProviders: [browserProvider, planProvider, annotationProvider].concat(ownToolsWiring ? ownToolsWiring.toolProviders : []),
   ...(ownToolsWiring ? { ownTools: ownToolsWiring.ownTools } : {}),
+  // developer flag, default off (L7 c27): an Agent-profile turn on a loaded thread skips the per-turn detach + resume while its resume parameters are unchanged
+  ...(process.env.EGDESK_AGENT_RELOAD_REUSE === 'on' ? { agentReloadReuse: true } : {}),
   // L1 c21 (owner decision, provisional): a room keeps its account; an explicit switch continues the same room. Off unless EGDESK_ROOM_ACCOUNT=on.
   roomAccount: { mode: () => (process.env.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') },
   store: chatStore,
