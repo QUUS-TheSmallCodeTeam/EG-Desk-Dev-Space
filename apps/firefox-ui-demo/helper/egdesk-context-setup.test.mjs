@@ -269,3 +269,22 @@ test('speech design flag: predicates replace the axis questions end to end; defa
   assert.equal(current.names.filter(n => n.startsWith('speech_')).length, 3)
   assert.equal(current.names.filter(n => n.startsWith('speechp_')).length, 0)
 })
+
+test('speech design flag: isolated predicate design quotes only its own sentence in every question and installs labels per span', async () => {
+  const message = '하린이 상자를 옮겼다고 들었어. 내일 내가 표지를 살펴볼 예정이야.'
+  const segments = [{ start: 0, end: 18 }, { start: 19, end: message.length }]
+  const f = fakeClient(q => {
+    const m = q.name.match(/^speechp_(\w+)_(\d)$/)
+    if (!m) return q.name === 'answer_type' ? choice('answer') : q.name === 'time_intent' ? choice('not_time_specific') : predicate(0.02)
+    const yes = m[2] === '0' ? ['relay', 'before'] : ['plan', 'after', 'anchor_stated']
+    return predicate(yes.includes(m[1]) ? 1 : 0)
+  })
+  const out = await prepareTurnContext({ message, candidates: CANDIDATES.slice(0, 1), client: f.client, askedAt: Date.UTC(2026, 10, 23, 3),
+    speech: { allowed: () => true, modeActive: () => true, segments, design: 'predicates-isolated' } })
+  const qs = f.calls[0].questions.filter(q => q.name.startsWith('speechp_'))
+  assert.equal(qs.length, 24)
+  assert.ok(qs.filter(q => q.name.endsWith('_0')).every(q => q.instructions.includes(JSON.stringify(message.slice(0, 18))) && !q.instructions.includes('표지')))
+  assert.ok(qs.filter(q => q.name.endsWith('_1')).every(q => q.instructions.includes(JSON.stringify(message.slice(19))) && !q.instructions.includes('하린')))
+  assert.deepEqual(out.speechInterpretations.map(x => [x.source, x.form, x.time]), [['attributed_report', 'assertion', 'past_unspecified'], ['unspecified', 'plan', 'future_anchored']])
+  assert.equal(out.calibration.judgments.filter(j => j.q === 'speech_predicate').length, 24)
+})

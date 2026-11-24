@@ -1,4 +1,4 @@
-import { SPEECH_RULES, SPEECH_THRESHOLDS, SPEECH_PREDICATE_BARS, SPEECH_PREDICATE_KEYS, speechDesignQuestions, speechDesignInterpretations } from './egdesk-speech-grounding.mjs'
+import { SPEECH_RULES, SPEECH_THRESHOLDS, SPEECH_PREDICATE_BARS, SPEECH_PREDICATE_KEYS, speechDesignQuestions, speechDesignInterpretations, speechDesignFamily } from './egdesk-speech-grounding.mjs'
 import { DecisionError } from './egdesk-decision-client.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, readPredicate, sha256Hex, tableOptions, uniqueOptions } from './egdesk-decision-questions.mjs'
 
@@ -212,7 +212,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
   const localLookup = all.find(c => c.id === 'memory-lookup:0' && c.mayRead)
   const normalized = all.filter(c => c.id !== 'conversation:recent' && c.id !== 'memory-lookup:0')
   const activeSpeech = speech?.allowed() === true && Array.isArray(speech.segments)
-  const extraQuestions = activeSpeech ? [...speechDesignQuestions(speech.design, speech.segments), predicateQuestion('rel_recall', 'Does the current message refer back to earlier remarks, ask for recall or compare with a previous answer? Judge the wording, not whether such material exists.')] : []
+  const extraQuestions = activeSpeech ? [...speechDesignQuestions(speech.design, speech.segments, message), predicateQuestion('rel_recall', 'Does the current message refer back to earlier remarks, ask for recall or compare with a previous answer? Judge the wording, not whether such material exists.')] : []
   const liveTopic = topic?.allowed() === true ? topic : null
   const topicQuestions = liveTopic?.plan.questions || []
   const cold = liveTopic && !topicQuestions.length ? liveTopic.plan.resolve({}) : null
@@ -354,7 +354,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     anchor: anchor ? anchor.toISOString() : null,
     recall: recall ? { state: recall.state, probability: recall.probability } : null } : null
   const calibration = buildCalibration({ answers: result.answers, thresholds, answerType, timeIntent, scored, recall, withSpeech,
-    interpretations, segments: withSpeech ? speech.segments : [], design: withSpeech && speech.design === 'predicates' ? 'predicates' : 'axes', topicRoute, topicQuestions: topicQuestions.length, candidates: list.length, discarded: discardJudgments })
+    interpretations, segments: withSpeech ? speech.segments : [], design: withSpeech ? speechDesignFamily(speech.design) : 'axes', topicRoute, topicQuestions: topicQuestions.length, candidates: list.length, discarded: discardJudgments })
   const parts = items.length || withSpeech ? [PACKET_HEAD + evidenceRule + speechRule, ...items.map(item => item.block)] : []
   if (topicRoute?.packet) parts.push(topicRoute.packet)
   const packet = parts.join('\n\n') || null
