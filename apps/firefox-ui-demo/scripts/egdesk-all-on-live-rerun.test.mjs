@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
 import { scriptedDecisions } from './egdesk-all-on.support.mjs'
-import { LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, STEPS, diffJourneys, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
+import { LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, STEPS, diffJourneys, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
 
 const KEY = 'sk-synthetic-not-a-key-l2c12-000000000002'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -208,7 +208,7 @@ test('--rerun compares v3 with an earlier run that had no recall step: that step
 const REGISTERED_PLAN_V4_SHA256 = '9a0fe4aae6eb3c51f111c8d7181a30dffd01e0700bb0fc2f1b0a17a5026e1b9f'
 test('plan v4: pinned, based on v3 by hash, keeps every v3 expectation; the only changes are body counting and the held-page rule for s9.packet, each marked', () => {
   const bytes = readFileSync(PLAN_FILE_V4), raw = JSON.parse(bytes.toString('utf8')), v3 = JSON.parse(readFileSync(PLAN_FILE_V3, 'utf8'))
-  assert.equal(sha256(bytes), REGISTERED_PLAN_V4_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V4)
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V4_SHA256)
   assert.equal(raw.version, 4); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V3)))
   assert.deepEqual(raw.world.env, { EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', EGDESK_TURN_MEMORY_KEEP_LATE: 'on' }); assert.equal(raw.world.budgets, 'bridge')
   assert.deepEqual(raw.steps.map(s => s.id).filter(id => id !== 's8b-finished-result'), v3.steps.map(s => s.id))
@@ -231,7 +231,7 @@ test('plan v4: pinned, based on v3 by hash, keeps every v3 expectation; the only
   assert.ok(raw.steps.find(s => s.id === 's8b-finished-result').expect.some(e => e.check === 'quotesOwnAnswer' && e.severity === 'hard'))
   assert.equal(STEPS.find(s => s.id === 's8b-finished-result').since, 4)
   for (const file of [PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3]) assert.ok(!loadJourneyPlan(file).steps.some(s => s.id === 's8b-finished-result'))
-  assert.deepEqual(loadJourneyPlan(PLAN_FILE_V3).world, { env: {}, budgets: 'single' }, 'older plans keep the world as it was')
+  assert.deepEqual(loadJourneyPlan(PLAN_FILE_V3).world, { env: {}, budgets: 'single', switches: {} }, 'older plans keep the world as it was')
 })
 
 test('packet parsing: a page header with its content is a body; a "not re-sent" header, a header followed by another, or the "not repeated here" line is a reference', () => {
@@ -287,4 +287,47 @@ test('world budgets: "bridge" gives the runtime the bridge\'s warm and cold turn
   assert.deepEqual([bridge.budgetMs, bridge.coldBudgetMs, typeof bridge.warm], [TURN_CONTEXT_BUDGET_MS, TURN_CONTEXT_COLD_BUDGET_MS, 'function'])
   assert.equal(bridge.warm(), false, 'cold until a Decisions request of the world has been answered')
   assert.deepEqual([single.budgetMs, single.coldBudgetMs, single.warm], [TURN_CONTEXT_BUDGET_MS, undefined, undefined])
+})
+
+// ---- plan v5 (cycle 16) ----
+const REGISTERED_PLAN_V5_SHA256 = '841ca72597bf165d4d173b4adc5349211b8f9072d092d561888e40d27cbdc22a'
+test('plan v5: pinned, based on v4 by hash, every v4 expectation verbatim, one declared switch (off by default) and one expectation judged only under it', () => {
+  const bytes = readFileSync(PLAN_FILE_V5), raw = JSON.parse(bytes.toString('utf8')), v4 = JSON.parse(readFileSync(PLAN_FILE_V4, 'utf8'))
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V5_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V5)
+  assert.equal(raw.version, 5); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V4)))
+  assert.deepEqual({ env: raw.world.env, budgets: raw.world.budgets }, { env: v4.world.env, budgets: v4.world.budgets })
+  assert.deepEqual(Object.keys(raw.world.switches), ['action-relevance'])
+  assert.deepEqual(raw.world.switches['action-relevance'].env, { EGDESK_CONTEXT_RELEVANCE: 'action' }); assert.equal(raw.world.switches['action-relevance'].default, 'off')
+  assert.deepEqual(raw.steps.map(s => s.id), v4.steps.map(s => s.id))
+  for (const step of v4.steps) {
+    const now = raw.steps.find(s => s.id === step.id)
+    assert.deepEqual(now.caps, step.caps); assert.deepEqual(now.expect.slice(0, step.expect.length), step.expect, `${step.id}: v4 kept as it was`)
+  }
+  const added = raw.steps.flatMap(s => s.expect).filter(e => !v4.steps.flatMap(x => x.expect).some(x => x.id === e.id))
+  assert.deepEqual(added.map(e => [e.id, e.severity, e.owner, e.when]), [['s4.no-page-for-the-action', 'hard', 'L7', { switch: 'action-relevance' }]])
+})
+
+test('v5 switches: off, the gated expectation is not judged and the world has no switch flag; on, it is judged and the flag reaches the runtime; an unknown switch is refused', async t => {
+  const plan = loadJourneyPlan(PLAN_FILE_V5), noNet = async () => { throw new Error('no network') }
+  const off = await runJourney({ plan, fetchImpl: noNet }), on = await runJourney({ plan, fetchImpl: noNet, switches: ['action-relevance'] })
+  const gated = run => run.steps.find(s => s.id === 's4-long-command').checks.find(c => c.id === 's4.no-page-for-the-action')
+  assert.deepEqual([gated(off).pass, gated(off).state], [null, 'switch_off'])
+  assert.equal(typeof gated(on).pass, 'boolean'); assert.deepEqual(on.switches, ['action-relevance']); assert.deepEqual(off.switches, [])
+  // Every other expectation is judged the same way with the switch off as in a v4 run.
+  const v4 = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V4), fetchImpl: noNet })
+  const verdicts = run => run.steps.flatMap(s => s.checks).filter(c => c.id !== 's4.no-page-for-the-action').map(c => [c.id, c.pass])
+  assert.deepEqual(verdicts(off), verdicts(v4))
+  await assert.rejects(runJourney({ plan, fetchImpl: noNet, switches: ['no-such'] }), /the plan has no switch no-such/)
+  const { allOnWorld } = await import('./egdesk-all-on.support.mjs')
+  assert.equal(allOnWorld(t, { env: plan.world.switches['action-relevance'].env }).chat.decisionContext.relevanceRules, 'action')
+  assert.equal(allOnWorld(t, { env: plan.world.env }).chat.decisionContext.relevanceRules, undefined)
+})
+
+test('v5 switches on the command line: --switch is recorded in the results; an unknown one is a usage error before anything runs', async t => {
+  const out = path.join(tmp(t), 'v5.json')
+  const run = await cli(['--plan', PLAN_FILE_V5, '--switch', 'action-relevance', '--out', out], { fetchImpl: noNetwork().fetchImpl })
+  assert.equal(run.code, EXIT.ok, run.err.join('\n'))
+  assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')).world.switchesOn, ['action-relevance'])
+  const bad = await cli(['--plan', PLAN_FILE_V5, '--switch', 'no-such'], { fetchImpl: noNetwork().fetchImpl })
+  assert.equal(bad.code, EXIT.usage); assert.match(bad.err.join('\n'), /has no switch no-such \(it has: action-relevance\)/)
 })

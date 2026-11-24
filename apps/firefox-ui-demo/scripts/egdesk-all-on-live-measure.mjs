@@ -39,7 +39,9 @@ export const PLAN_FILE_V2 = fileURLToPath(new URL('./egdesk-all-on-live-measure.
 export const PLAN_FILE_V3 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v3.json', import.meta.url))
 // Plan v4 (cycle 15): v3 counted in page bodies, L7's two new turn-memory flags on in the world, the owner question step. The latest plan.
 export const PLAN_FILE_V4 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v4.json', import.meta.url))
-export const LATEST_PLAN_FILE = PLAN_FILE_V4
+// Plan v5 (cycle 16): v4, plus switches a run may turn on (--switch <name>, all off by default) and expectations judged only under them.
+export const PLAN_FILE_V5 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v5.json', import.meta.url))
+export const LATEST_PLAN_FILE = PLAN_FILE_V5
 export const SCRIPT_FILE = fileURLToPath(import.meta.url)
 export const DEFAULT_CAPS = Object.freeze({ tokenCeiling: 80_000, maxRequests: 80 })
 const LIMITS = Object.freeze({ tokenCeilingMax: 200_000, maxRequestsMax: 200 })
@@ -158,7 +160,8 @@ export function loadJourneyPlan(file = PLAN_FILE) {
       if (!OWNERS.includes(e.owner)) bad(`${e.id}: owner must be one of ${OWNERS.join(', ')}`)
       if (typeof e.text !== 'string' || !e.text.trim()) bad(`${e.id}: text is required`)
       if (!Object.hasOwn(CHECKS, e.check)) bad(`${e.id}: unknown check ${e.check}`)
-      return { id: e.id, severity: e.severity, owner: e.owner, text: e.text, check: e.check, args: e.args ?? {}, ...(e.predicted ? { predicted: String(e.predicted) } : {}) }
+      if (e.when !== undefined && (typeof e.when?.switch !== 'string' || !Object.hasOwn(raw.world?.switches ?? {}, e.when.switch))) bad(`${e.id}: when.switch must name a switch of world.switches`)
+      return { id: e.id, severity: e.severity, owner: e.owner, text: e.text, check: e.check, args: e.args ?? {}, ...(e.predicted ? { predicted: String(e.predicted) } : {}), ...(e.when ? { when: { switch: e.when.switch } } : {}) }
     })
     return { id: def.id, caps: { maxRequests: step.caps.maxRequests, maxEstTokens: step.caps.maxEstTokens }, expect }
   })
@@ -167,7 +170,14 @@ export function loadJourneyPlan(file = PLAN_FILE) {
   if (typeof env !== 'object' || Array.isArray(env) || Object.entries(env).some(([k, v]) => !/^EGDESK_[A-Z_]+$/.test(k) || typeof v !== 'string')) bad('world.env must map EGDESK_* flags to strings')
   // world.budgets 'bridge': the bridge's warm/cold turn_context budgets; absent: the single 800 ms budget of the earlier plans.
   if (raw.world?.budgets !== undefined && raw.world.budgets !== 'bridge') bad('world.budgets must be "bridge" when given')
-  return { set: raw.set, registered: raw.registered, sha256: sha256(bytes), version: Number.isSafeInteger(raw.version) ? raw.version : 1, world: { env: { ...env }, budgets: raw.world?.budgets ?? 'single' }, steps }
+  // (cycle 16) world.switches: { <name>: { env: { EGDESK_*: value }, default: 'off', owner } }: flags a run turns on with --switch <name>.
+  const switches = {}
+  for (const [name, sw] of Object.entries(raw.world?.switches ?? {})) {
+    if (!/^[a-z][a-z0-9-]{0,40}$/.test(name) || sw?.default !== 'off' || !OWNERS.includes(sw.owner) || typeof sw.env !== 'object' || !Object.keys(sw.env).length ||
+        Object.entries(sw.env).some(([k, v]) => !/^EGDESK_[A-Z_]+$/.test(k) || typeof v !== 'string')) bad(`world.switches.${name}: needs default "off", an owner and EGDESK_* flags`)
+    switches[name] = { env: { ...sw.env }, owner: sw.owner }
+  }
+  return { set: raw.set, registered: raw.registered, sha256: sha256(bytes), version: Number.isSafeInteger(raw.version) ? raw.version : 1, world: { env: { ...env }, budgets: raw.world?.budgets ?? 'single', switches }, steps }
 }
 
 // ---- checks: each judges one expectation from the step's results (and the world, for request bodies that are not written out) ----
@@ -487,13 +497,16 @@ export function createMeasureTransport({ send = false, key = null, fetchImpl = g
 
 // ---- the journey ----
 // env: developer flags that differ from the journey's (tests and offline replays only; the CLI passes none).
-export async function runJourney({ plan, send = false, key = null, fetchImpl = globalThis.fetch, caps = DEFAULT_CAPS, now = null, replay = null, env = {} } = {}) {
+export async function runJourney({ plan, send = false, key = null, fetchImpl = globalThis.fetch, caps = DEFAULT_CAPS, now = null, replay = null, env = {}, switches = [] } = {}) {
+  const unknownSwitch = switches.find(name => !Object.hasOwn(plan.world?.switches ?? {}, name))
+  if (unknownSwitch) throw new PlanError(`the plan has no switch ${unknownSwitch}`)
+  const switchEnv = Object.assign({}, ...switches.map(name => plan.world.switches[name].env))
   const cleanups = [], t = { after: fn => cleanups.push(fn) }
   const { transport, ledger } = createMeasureTransport({ send, key, fetchImpl, caps, plan, now, replay: send === true ? null : replay })
   const steps = []
   try {
     // The plan's world flags, then any the caller adds.
-    const w = allOnWorld(t, { transport, settleLimitMs: 60_000, env: { ...(plan.world?.env ?? {}), ...env }, budgets: plan.world?.budgets ?? 'single' })
+    const w = allOnWorld(t, { transport, settleLimitMs: 60_000, env: { ...(plan.world?.env ?? {}), ...switchEnv, ...env }, budgets: plan.world?.budgets ?? 'single' })
     w.state.wording.wait = waitNote; w.state.wording.pointer = pointerNote
     await w.settings.turnMemory.save('on')
     const j = { note: {}, sends: [], said: [],
@@ -519,6 +532,7 @@ export async function runJourney({ plan, send = false, key = null, fetchImpl = g
       step.checks = planned.expect.map(e => {
         const base = { id: e.id, severity: e.severity, owner: e.owner, text: e.text, ...(e.predicted ? { predicted: e.predicted } : {}) }
         if (step.state === 'not_run') return { ...base, pass: null, state: 'not_run' }
+        if (e.when && !switches.includes(e.when.switch)) return { ...base, when: e.when, pass: null, state: 'switch_off' }
         try { return { ...base, ...CHECKS[e.check]({ step, args: e.args, results: steps, world: w }) } } catch { return { ...base, pass: false, state: 'check_failed' } }
       })
     }
@@ -526,7 +540,7 @@ export async function runJourney({ plan, send = false, key = null, fetchImpl = g
   const checks = steps.flatMap(s => s.checks ?? [])
   const scorecard = { hard: { passed: checks.filter(c => c.severity === 'hard' && c.pass === true).length, failed: checks.filter(c => c.severity === 'hard' && c.pass === false).map(c => c.id), notRun: checks.filter(c => c.severity === 'hard' && c.pass === null).length },
     soft: { passed: checks.filter(c => c.severity === 'soft' && c.pass === true).length, missed: checks.filter(c => c.severity === 'soft' && c.pass === false).map(c => c.id), notRun: checks.filter(c => c.severity === 'soft' && c.pass === null).length } }
-  return { steps, ledger, scorecard }
+  return { steps, ledger, scorecard, switches: [...switches] }
 }
 
 // ---- replay and diff against an earlier results file ----
@@ -630,7 +644,8 @@ export function stepTable(outcome) {
 export function resultsPayload({ outcome, plan, send, caps, replayOf = null, at = new Date() }) {
   return { set: plan.set, mode: send ? 'send' : replayOf ? 'replay' : 'dry_run', at: at.toISOString(), endpoint: DECISIONS_ENDPOINT, automaticRetries: 0,
     ...(replayOf ? { replayOf } : {}),
-    plan: { file: path.basename(PLAN_FILE), sha256: plan.sha256, registered: plan.registered }, script: { sha256: sha256(readFileSync(SCRIPT_FILE)) },
+    plan: { file: path.basename(PLAN_FILE), sha256: plan.sha256, registered: plan.registered },
+    world: { env: plan.world?.env ?? {}, budgets: plan.world?.budgets ?? 'single', switchesOn: outcome.switches ?? [] }, script: { sha256: sha256(readFileSync(SCRIPT_FILE)) },
     caps: { tokenCeiling: caps.tokenCeiling, maxRequests: caps.maxRequests, perStep: Object.fromEntries(plan.steps.map(s => [s.id, s.caps])) },
     totals: { requests: outcome.ledger.requests, sent: outcome.ledger.sent, inputTokensCounted: outcome.ledger.tokens, inputTokensReported: outcome.ledger.reportedTokens, refusedBodies: outcome.ledger.refusedBodies, ...(replayOf ? { replayUnmatched: outcome.ledger.replayUnmatched, replayChangedBody: outcome.ledger.replayChangedBody } : {}) },
     stoppedBecause: outcome.ledger.stopped?.reason ?? null, stoppedAt: outcome.ledger.stopped?.step ?? null,
@@ -643,7 +658,7 @@ export function writeJourneyResults(file, payload) {
 
 const plausibleKey = key => typeof key === 'string' && key.length >= 20 && !/\s/.test(key)
 export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print = line => console.log(line), printError = line => console.error(line), now = null } = {}) {
-  const args = [...argv], valued = new Set(['--out', '--plan', '--token-ceiling', '--max-requests', '--replay', '--diff', '--rerun']), known = new Set([...valued, '--send'])
+  const args = [...argv], valued = new Set(['--out', '--plan', '--token-ceiling', '--max-requests', '--replay', '--diff', '--rerun', '--switch']), known = new Set([...valued, '--send'])
   const valueOf = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] ?? null : null }
   const unknown = args.find((arg, i) => !known.has(arg) && !valued.has(args[i - 1]))
   const int = (name, fallback, max) => { const v = valueOf(name); if (v === null) return fallback; const n = Number(v); return Number.isSafeInteger(n) && n > 0 && n <= max ? n : NaN }
@@ -666,7 +681,10 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
   if (send && !plausibleKey(key)) { printError('OPENAI_API_KEY is not set (or not a plausible key); nothing was sent'); return EXIT.noKey }
   print(JSON.stringify({ set: plan.set, mode: send ? 'send' : replayRun ? 'replay' : 'dry_run', endpoint: DECISIONS_ENDPOINT, plan: plan.sha256.slice(0, 16), registered: plan.registered, tokenCeiling: caps.tokenCeiling, maxRequests: caps.maxRequests,
     ...(send ? {} : replayRun ? { note: `replay: the answers recorded in ${replayRun.file} drive the journey; nothing is sent` } : { note: 'dry run: the scripted Decision answers drive the journey; real answers may change which requests follow' }) }))
-  const outcome = await runJourney({ plan, send, key, fetchImpl, caps, now, replay: replayRun ? replayAnswers(replayRun.run) : null })
+  const switches = args.flatMap((arg, i) => (arg === '--switch' ? [args[i + 1]] : []))
+  const unknownSwitch = switches.find(name => !Object.hasOwn(plan.world?.switches ?? {}, name))
+  if (unknownSwitch) { printError(`the plan has no switch ${unknownSwitch} (it has: ${Object.keys(plan.world?.switches ?? {}).join(', ') || 'none'})`); return EXIT.usage }
+  const outcome = await runJourney({ plan, send, key, fetchImpl, caps, now, replay: replayRun ? replayAnswers(replayRun.run) : null, switches })
   for (const row of stepTable(outcome)) print(JSON.stringify(row))
   const payload = resultsPayload({ outcome, plan, send, caps, replayOf: replayRun ? { file: replayRun.file, sha256: replayRun.sha256, at: replayRun.run.at ?? null } : null })
   if (diffRun) { payload.diffAgainst = { file: diffRun.file, sha256: diffRun.sha256, at: diffRun.run.at ?? null }; payload.diff = diffJourneys(diffRun.run, payload) }
