@@ -423,7 +423,10 @@ export const SPLIT_WORDINGS = Object.freeze(['v1', 'v2'])
 // v2 is at least as good as v1 for every changed predicate and loses no guard (c10 was not installed by the split reading under v1 either:
 // own .58, guess .71; under v2 own .16). So 'v2' is v2 for all five. A per-predicate object ({ own: 'v3', ... }) selects a version per key
 // (measurement only); a key it does not name is v1.
-export const SPLIT_WORDING_CHOICE = Object.freeze({ other: 'v2', own: 'v2', guess: 'v2', before: 'v2', now: 'v2' })
+// c24 (Main's rule, terse-record-v1 real, 2026-11-25): own v3 passed both requests (c10 guard .12, c12 target .06; v2 was .16 / .19), so own is v3.
+export const SPLIT_WORDING_CHOICE = Object.freeze({ other: 'v2', own: 'v3', guess: 'v2', before: 'v2', now: 'v2' })
+// The wording split-wording-v2 was sent with (c26): v2 for all five, own included. Kept so that plan rebuilds byte for byte.
+export const SPLIT_WORDING_V2_AS_SENT = Object.freeze({ other: 'v2', own: 'v2', guess: 'v2', before: 'v2', now: 'v2' })
 function splitTable(wording) {
   if (wording === 'v2') wording = SPLIT_WORDING_CHOICE
   if (!wording || typeof wording !== 'object') return split
@@ -467,7 +470,10 @@ export function splitLabels(verdicts) {
   const source = src.some(([, x]) => x === 'unknown') ? 'unknown' : (yes => (yes.length === 0 ? 'unspecified' : yes.length === 1 ? yes[0][0] : 'unknown'))(src.filter(([, x]) => x === 'yes'))
   const dirs = ['before', 'now', 'ongoing', 'after']
   let time = 'unknown'
-  if (dirs.every(key => v(key) !== 'unknown')) {
+  // Owner decision (Main, c24): with ongoing decided yes, now is not consulted ({ongoing} and {now, ongoing} both give ongoing_no_end, so an
+  // undecided now cannot change the label); before and after must still be decided no. Real c26: c37 now .39, c30 now .30, ongoing 1.0.
+  if (v('ongoing') === 'yes' && v('before') === 'no' && v('after') === 'no') time = 'ongoing_no_end'
+  else if (dirs.every(key => v(key) !== 'unknown')) {
     const yes = dirs.filter(key => v(key) === 'yes').sort().join('+')
     // A sentence read as about the moment of speaking that also names a day or time places something else at that other time (real, c23:
     // a16 "내일 비 오면 오늘 했어야 했나 싶어", now .92 and when 1.0, a deliberately ambiguous axis): conflicting times, no label (L7 c21).

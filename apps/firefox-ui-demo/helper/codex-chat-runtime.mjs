@@ -98,10 +98,12 @@ export const TURN_CONTEXT_BUDGET_MS = 800
 export const TURN_CONTEXT_COLD_BUDGET_MS = 1500
 // How the app-server says a thread's context was compacted: a `contextCompaction` item (item/started, item/completed), and on older builds the
 // deprecated `thread/compacted` notification. Either one means the answering model may no longer hold what was delivered to it.
+// `thread/reverted` (Codex 0.171 schema, ThreadRevertedNotification): the thread's durable history was replaced by the prefix before one turn;
+// what later turns delivered (and their replies) is gone from it as well (L7 c24).
 export function compactionSignal(message) {
   const p = message?.params
   if (!p || !idText(p.threadId)) return null
-  if (message.method === 'thread/compacted') return p.threadId
+  if (message.method === 'thread/compacted' || message.method === 'thread/reverted') return p.threadId
   if ((message.method === 'item/started' || message.method === 'item/completed') && p.item?.type === 'contextCompaction') return p.threadId
   return null
 }
@@ -4375,7 +4377,9 @@ export class CodexChatRuntime {
       // What code can rule out is not asked (egdesk-context-pruning.mjs): records the model already holds unchanged in this conversation. Only
       // under 'on' and where delivery receipts are trusted: a Codex thread (compaction is reported there and clears them). Advisory records only.
       // Internal flag turnMemory.pruneHeld (bridge EGDESK_TURN_MEMORY_PRUNE_HELD=on), off by default.
-      const thread = mode === 'on' && this.pruneHeldFlag() && context.engine?.id === 'codex' && typeof context.conversationId === 'string' && context.conversationId ? context.conversationId : null
+      // Receipts count only while the thread is live in this process (L7 c24): a resumed or forked thread may have been compacted unseen.
+      const thread = mode === 'on' && this.pruneHeldFlag() && context.engine?.id === 'codex' && typeof context.conversationId === 'string' && context.conversationId &&
+        this.turnPosition(context).reason === 'live_thread' ? context.conversationId : null
       const { kept: candidates, pruned } = thread ? await pruneContextCandidates(Array.isArray(collected) ? collected : [], {
         sent: this.contextDelivered.get(thread) ?? null, memoryReceipts: this.turnMemoryDelivered.get(thread)?.pages ?? null }) : { kept: Array.isArray(collected) ? collected : [], pruned: [] }
       const topic = mode === 'on' ? this.topicIntakes.get(context)?.prepare(controller.signal, inBudget) : null
@@ -4423,7 +4427,9 @@ export class CodexChatRuntime {
       if (this.decisionContext?.turnMemory?.previousReply !== true) return null
       let speechConsent = false
       try { speechConsent = speechSource?.allowed?.() === true } catch { speechConsent = false }
-      const threadReply = context.engine?.id === 'codex' && this.turnPosition(context).kind === 'mid'
+      // Only a LIVE thread (loaded by this process and followed since): after a bridge restart or on a thread this process has not loaded
+      // (resume, a fork's first turn) a compaction may have happened unseen, so the gate stays closed (L7 c24).
+      const threadReply = context.engine?.id === 'codex' && this.turnPosition(context).reason === 'live_thread'
       const gate = createEgressGate(modelDataPermissions({ speechConsent, threadReply }))
       if (!gate.allows('previous_reply') && !gate.allows('speech_history')) return null
       const last = (this.store?.listMessages?.(context.clientThreadId)?.messages ?? []).filter(m => m.role === 'assistant' && m.status !== 'streaming' && m.status !== 'error').at(-1)
