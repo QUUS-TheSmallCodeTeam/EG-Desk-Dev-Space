@@ -47,6 +47,7 @@ import { createBrowserEntryConfig } from './egdesk-browser-entry-wiring.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { createBoardPresentationHttpHandler } from './egdesk-board-presentation-http.mjs'
 import { briefingDeps } from './egdesk-briefing-engine.mjs'
+import { createWorkPlacement, createWorkPlacementHttpHandler } from './egdesk-work-placement.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 import { MemoryEvidenceStore } from './egdesk-memory-evidence.mjs'
 import { createMemoryEvidenceHttpHandler } from './egdesk-memory-http.mjs'
@@ -547,6 +548,11 @@ const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credent
   // private fork (egdesk-briefing-engine.mjs over codex-internal-turn.mjs). Off unless EGDESK_BRIEFING_FLOW=on here AND the chrome's egdesk.briefingFlow is "on" AND
   // the Decisions mode is on; otherwise the route answers 'no-engine' / 'mode' and does nothing. The advisory observe needs none of this.
   briefing: briefingDeps({ chat, contexts, enabled: process.env.EGDESK_BRIEFING_FLOW === 'on' }) })
+// Work-surface placement (egdesk-work-placement.mjs): where an Agent's visible work surface should open, judged at the conversation's heartbeat among options the
+// canvas enumerated. Off unless EGDESK_WORK_PLACEMENT=advisory (and the Decisions mode is advisory or on, and the chrome's egdesk.workPlacement is "advisory"); it
+// records what it would choose and changes nothing on the canvas.
+const workPlacement = createWorkPlacement({ client: decisionClient, mode: () => bridgeSettings.decisionContext.mode, enabled: () => process.env.EGDESK_WORK_PLACEMENT === 'advisory', calibrationLog: decisionCalibrationLog })
+const handleWorkPlacementHttp = createWorkPlacementHttpHandler({ placement: workPlacement, heartbeatFor: key => chat.heartbeatFor(key), port: BRIDGE_PORT })
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
 const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
   budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT, boardPresentation: handleBoardPresentationHttp,
@@ -1260,6 +1266,7 @@ const bridgeServer = createServer(async (req, res) => {
   if (await handleComputerControlHttp(req, res, url)) return
   if (await handleDecisionHttp(req, res, url)) return
   if (await handleBoardPresentationHttp(req, res, url)) return
+  if (await handleWorkPlacementHttp(req, res, url)) return
   if (await handleEngineProfilesHttp(req, res, url)) return
   if (await handleProfileHttp(req, res, url)) return
   if (await handleDeskHttp(req, res, url)) return

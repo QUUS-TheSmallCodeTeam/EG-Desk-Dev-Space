@@ -328,7 +328,7 @@ export function createFileCardZone(deps) {
       const existing = document.querySelector('.egd-file-card');
       if (existing) { focusCanvasCard(existing); return existing; }
     }
-    const placement = resolveCanvasCardPlacement('file');
+    const placement = resolveCanvasCardPlacement('file', runFile ? { workSurface: { kind: 'file', runId: runFile.target?.runId, conversationId: runFile.target?.conversationId } } : {});
     const shell = spawnDeskWindowShell({ id: `egd-file-card-${allocCardSeq()}`, kind: 'file', className: 'egd-file-card',
       activate: !options.restore && !options.deferPresentation, sourceRef: { kind: 'file-surface', id: `file-view-${chatBindingNonce()}`, scope: 'local-files' },
       style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
