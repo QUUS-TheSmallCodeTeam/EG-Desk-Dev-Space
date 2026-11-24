@@ -87,9 +87,8 @@ function placementJudge({ sameMatter = (card) => /주차/.test(card), ownerActio
   const calls = [];
   return { calls, model: 'mock', async decide(req) {
     calls.push(JSON.stringify(req));
-    const quoted = (name) => req.input.find((row) => row.content.startsWith(`Question ${name}:`))?.content ?? '';
     const answers = {};
-    for (const q of req.questions) answers[q.name] = { type: 'predicate', probability: (q.name === 'owner_action' ? ownerAction(req.input.map((row) => row.content).join('\n')) : sameMatter(quoted(q.name))) ? 0.97 : 0.03 };
+    for (const q of req.questions) answers[q.name] = { type: 'predicate', probability: (q.name === 'owner_action' ? ownerAction(req.input.map((row) => row.content).join('\n')) : sameMatter(q.instructions)) ? 0.97 : 0.03 };
     return { answers, usage: { inputTokens: 9 } };
   } };
 }

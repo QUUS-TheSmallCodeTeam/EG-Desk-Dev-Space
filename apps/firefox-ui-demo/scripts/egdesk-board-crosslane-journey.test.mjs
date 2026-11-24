@@ -273,10 +273,11 @@ test('Board journey across lanes: arrangement -> apply -> ask (advisory, on) -> 
   const on = await r.ask();
   record('step2-ask', { advisory: { screening: adv.result.screening, note: adv.note, used: adv.used }, on: { screening: on.result.screening, note: on.note, used: on.used },
     providerCalls: r.P.calls.map(c => c.name), budget: r.budget.snapshot() });
-  assert.equal(r.P.calls.filter(c => c.name !== 'board_view').length, 2, 'one paid screening request per explicit ask');
+  // L1 c13: per explicit ask, the relevance request and then the time question for the relevant excerpt only (never retried)
+  assert.equal(r.P.calls.filter(c => c.name !== 'board_view').length, 4, 'two paid screening requests per explicit ask (relevance, then time for what is relevant)');
   assert.equal(adv.result.screening, 'advisory'); assert.match(adv.note, /기록만.*반영하지 않고/);
   assert.equal(on.result.screening, 'decision'); assert.match(on.note, /Decisions API를 사용했습니다/);
-  assert.equal(total(r.budget), 10 + 7 + 7, 'each request is metered once, on the shared budget');
+  assert.equal(total(r.budget), 10 + 7 + 7 + 7 + 7, 'each request is metered once, on the shared budget');
   const ledgerAfterAsk = JSON.stringify(r.desk.boardRevisions(BOARD)); // owner-side ask codes/policy are explicit Board actions, not personal ones
   assert.deepEqual(W.seen(), s1, 'asking never moves the personal layout');
   assert.deepEqual(W.state.canvasLayoutHistory.size(), histAfterApply, 'history intact');

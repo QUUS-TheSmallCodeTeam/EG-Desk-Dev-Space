@@ -2,8 +2,10 @@
 // relevant at .99 and last term's refund rule at .83, so they would have gone into the reply as if current.
 // What an approved excerpt carries, from the product code: the owner types plain strings (egdesk-board-agent-ask.mjs validateExcerpts, at most 8 of
 // at most 1,500 bytes); the Desk stores them as a JSON array of strings (writeBoardAgentAskPolicy). No date, version or "superseded by" link of its own,
-// so there is nothing for a code rule to compute (R3). The excerpt's own words can tell: one more yes/no question per excerpt, quoted on its own (R4),
-// "is what it says still in effect today?", and code combines: relevant AND in effect is offered; relevant but not in effect is dated and never offered.
+// so there is nothing for a code rule to compute (R3). The excerpt's own words can tell. L1 c13, after the v2 measurement (.96 for parking "closed in
+// January 2026": the statement is still true, the arrangement is not): a SECOND request, only for the excerpts decided relevant, asks per excerpt
+// "does the arrangement this excerpt describes still apply on <the date the question is about>?" (that date found by code, else today), and code
+// combines: relevant AND applies is offered; relevant but not is dated and never offered.
 // Synthetic: temp SQLite Desk, the real service, the real selector, the real Decisions client over a mock fetch, the real draft transport over a mock fetch.
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -11,7 +13,7 @@ import path from 'node:path'
 import { rmSync } from 'node:fs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { createBoardAgentAskService } from './egdesk-board-agent-ask.mjs'
-import { BOARD_AGENT_IN_EFFECT_BAR, BOARD_AGENT_RELEVANCE_BAR, localDay, readScreeningInput, selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
+import { BOARD_AGENT_IN_EFFECT_BAR, BOARD_AGENT_RELEVANCE_BAR, localDay, questionDate, readScreeningInput, selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
 import { createBoardAgentDraftTransport } from './egdesk-board-agent-draft.mjs'
 import { createDecisionClient, DECISION_MODEL } from './egdesk-decision-client.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
@@ -60,42 +62,54 @@ function machine(t, { mode = 'on', respond } = {}) {
   return { ask, posts, drafted, log }
 }
 
-test('what an approved excerpt carries: plain text only (no date, version or link), so the time is judged from its own words; the ask\'s day is in the request', async t => {
+test('what is asked: relevance for every excerpt, then the arrangement question ONLY for the relevant ones, on the date the question is about', async t => {
   const m = machine(t, { respond: posts => provider(posts) })
   await m.ask('draft')
-  assert.equal(m.posts.length, 1)
-  const sent = readScreeningInput(m.posts[0].input)
-  assert.deepEqual(sent, { question: QUESTION, today: '2026-11-24', candidates: E.map((text, i) => ({ alias: `c${i + 1}`, text })) }); assert.equal(localDay(NOW), '2026-11-24')
-  assert.deepEqual(m.posts[0].questions.map(q => q.name), ['c1', 'c2', 'c3', 'c1_now', 'c2_now', 'c3_now'], 'two yes/no questions per excerpt, no choice, bounded by the 8-excerpt policy')
-  assert.equal(m.posts[0].questions[5].instructions, 'Judging only from this excerpt\'s own text and date (excerpt c3), is what it says still in effect on 2026-11-24?')
-  // each excerpt is quoted on its own, under its own heading; no excerpt shares a block with another
-  for (const [i, row] of m.posts[0].input.slice(2).entries()) { assert.match(row.content, new RegExp(`^Questions c${i + 1} and c${i + 1}_now:\\nExcerpt c${i + 1}:`)); for (const other of E.filter((_, j) => j !== i)) assert.ok(!row.content.includes(other)) }
+  assert.equal(m.posts.length, 2)
+  const first = readScreeningInput(m.posts[0].input), second = readScreeningInput(m.posts[1].input)
+  assert.deepEqual(first, { question: QUESTION, today: '2026-11-24', candidates: E.map((text, i) => ({ alias: `c${i + 1}`, text })) }); assert.equal(localDay(NOW), '2026-11-24')
+  assert.deepEqual(m.posts[0].questions.map(q => q.name), ['c1', 'c2', 'c3'], 'yes/no relevance per excerpt, nothing else')
+  // the canteen excerpt is not relevant: it is not asked about time at all (R3), and its words do not travel again
+  assert.deepEqual(second, { question: QUESTION, today: '2026-11-24', about: '2026-11-27', candidates: [{ alias: 'c2', text: CURRENT }, { alias: 'c3', text: DATED }] })
+  assert.deepEqual(m.posts[1].questions, ['c2', 'c3'].map(a => ({ type: 'predicate', name: `${a}_now`, instructions: `Does the arrangement this excerpt describes (excerpt ${a}) still apply on 2026-11-27?` })))
+  for (const [i, row] of m.posts[1].input.slice(2).entries()) for (const other of E.filter(text => text !== second.candidates[i].text)) assert.ok(!row.content.includes(other), 'each excerpt quoted on its own')
   assert.equal(BOARD_AGENT_RELEVANCE_BAR, 0.6); assert.equal(BOARD_AGENT_IN_EFFECT_BAR, 0.5)
 })
-test('on: a relevant but no-longer-in-effect excerpt is DATED and never offered as the current answer; the current one is; nothing else changes', async t => {
+test('the date the question is about is a code rule: stated dates, this/next week\'s weekday, tomorrow, a month; else today', () => {
+  const at = Date.parse('2026-11-24T12:00:00Z') // a Tuesday
+  const cases = [['이번 주 금요일(11월 27일) 설명회 주차는?', '2026-11-27'], ['이번 주 금요일 주차는?', '2026-11-27'], ['다음 주 월요일 회의실은?', '2026-11-30'], ['내일 셔틀 시간은?', '2026-11-25'],
+    ['2026-12-03 일정은?', '2026-12-03'], ['2026년 12월 5일 행사', '2026-12-05'], ['겨울 학기 워크숍(12월 시작) 환불은?', '2026-12'], ['2027년 1월 일정', '2027-01'], ['3월 2일 개강 준비물은?', '2027-03-02']]
+  for (const [q, when] of cases) assert.deepEqual(questionDate(q, at), { when, stated: true }, q)
+  for (const q of ['현재 스탠다드 요금제(2026년 개정판)의 월 요금은?', '2월 30일 행사', '설명회 주차는 어디?']) assert.deepEqual(questionDate(q, at), { when: '2026-11-24', stated: false }, q)
+})
+test('on: a relevant excerpt whose arrangement no longer applies is DATED and never offered as the current answer; nothing relevant -> no time question', async t => {
   const m = machine(t, { respond: posts => provider(posts) })
   const result = await m.ask('draft')
   assert.deepEqual(m.drafted, [[CURRENT]], 'the drafting model gets the current excerpt only: last year\'s parking is not offered')
   assert.equal(result.screening, 'decision')
-  // the calibration family of the Board reply: relevance and in_effect per excerpt, numbers and closed words only
+  // the calibration family of the Board reply: relevance per excerpt, the time judgment only where it was asked; numbers and closed words only
   const [entry] = m.log
   assert.deepEqual(entry.judgments.filter(j => j.q === 'relevance').map(j => [j.p, j.would]), [[0.96, 'attach'], [0.96, 'attach'], [0.04, 'skip']])
-  assert.deepEqual(entry.judgments.filter(j => j.q === 'in_effect').map(j => [j.p, j.threshold, j.would]), [[0.96, 0.5, 'accept'], [0.96, 0.5, 'accept'], [0.04, 0.5, 'reject']])
+  assert.deepEqual(entry.judgments.filter(j => j.q === 'in_effect').map(j => [j.p, j.threshold, j.would]), [[0.96, 0.5, 'accept'], [0.04, 0.5, 'reject']])
   assert.ok(!JSON.stringify(entry).includes('주차'))
   // if every relevant excerpt is dated, none is offered: the owner writes the reply (no draft request is made)
   const allDated = machine(t, { respond: posts => provider(posts, { current: () => false }) })
   const none = await allDated.ask('draft')
   assert.deepEqual([allDated.drafted, none.answer], [[], ''], 'nothing current to offer')
+  // nothing relevant: one request only, and no time question for anything
+  const unrelated = machine(t, { respond: posts => provider(posts, { relevant: () => false }) })
+  await unrelated.ask('draft')
+  assert.deepEqual([unrelated.posts.length, unrelated.posts[0].questions.length], [1, 3])
 })
 test('a missing or malformed "in effect" answer is never read as "in effect": the response is unusable and the word match stands, as for any bad answer; advisory and extract are unchanged', async t => {
   const missing = machine(t, { respond: posts => provider(posts, { drop: 'c3_now' }) })
   const r1 = await missing.ask('draft')
-  assert.equal(r1.screening, 'fallback'); assert.deepEqual(missing.drafted.length, 1)
+  assert.equal(r1.screening, 'fallback'); assert.deepEqual(missing.drafted.length, 1); assert.equal(missing.posts.length, 2)
   assert.deepEqual(missing.log[0].fallback, 'bad_response')
   // advisory: both questions are asked and recorded; the selection is today's word match
   const advisory = machine(t, { mode: 'advisory', respond: posts => provider(posts) })
   const r2 = await advisory.ask('draft')
-  assert.equal(r2.screening, 'advisory'); assert.equal(advisory.posts.length, 1); assert.equal(advisory.log[0].judgments.filter(j => j.q === 'in_effect').length, 3)
+  assert.equal(r2.screening, 'advisory'); assert.equal(advisory.posts.length, 2); assert.equal(advisory.log[0].judgments.filter(j => j.q === 'in_effect').length, 2, 'asked for the two relevant excerpts only')
   // extract: nothing is sent to any model, so not to Decisions either (cycle 7), and the word match has no notion of time (a limit, see report)
   const extract = machine(t, { respond: posts => provider(posts) })
   const r3 = await extract.ask('extract')

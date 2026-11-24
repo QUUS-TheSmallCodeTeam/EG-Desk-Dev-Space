@@ -330,7 +330,7 @@ export function createFileCardZone(deps) {
     }
     const placement = resolveCanvasCardPlacement('file', runFile ? { workSurface: { kind: 'file', runId: runFile.target?.runId, conversationId: runFile.target?.conversationId } } : {});
     const shell = spawnDeskWindowShell({ id: `egd-file-card-${allocCardSeq()}`, kind: 'file', className: 'egd-file-card',
-      activate: !options.restore && !options.deferPresentation, sourceRef: { kind: 'file-surface', id: `file-view-${chatBindingNonce()}`, scope: 'local-files' },
+      activate: !options.restore && !options.deferPresentation && !placement.quiet, sourceRef: { kind: 'file-surface', id: `file-view-${chatBindingNonce()}`, scope: 'local-files' },
       style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
     const card = shell.root;
     if (!options.restore && !options.deferPresentation) revealPlacedCanvasCard(card, placement);

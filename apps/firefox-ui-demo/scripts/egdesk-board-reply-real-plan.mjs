@@ -4,8 +4,10 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BOARD_REPLY_PLAN_DIR, buildBoardReplyPlan } from '../helper/egdesk-board-reply-real-plan.mjs'
 import { PLACEMENT_PLAN_DIR, buildPlacementPlan } from '../helper/egdesk-work-placement-real-plan.mjs'
+import { REMEASURE_PLAN_DIR, buildRemeasurePlan } from '../helper/egdesk-l1-remeasure-plan.mjs'
 
-// Lane L1's real-measurement plans (declarative format of scripts/egdesk-decision-real-measure.mjs): Board reply screening and work placement.
+// Lane L1's real-measurement plans (declarative format of scripts/egdesk-decision-real-measure.mjs): Board reply screening, work placement, and the
+// cycle-13 re-measurement of their two v2 failures.
 // Sends nothing, reads no key.
 //   node scripts/egdesk-board-reply-real-plan.mjs            # rebuild both with the product code and compare with the committed files
 //   node scripts/egdesk-board-reply-real-plan.mjs --write    # write plan.json and requests/<id>.json (stale request files are removed)
@@ -13,7 +15,7 @@ import { PLACEMENT_PLAN_DIR, buildPlacementPlan } from '../helper/egdesk-work-pl
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const write = process.argv.includes('--write')
 let differs = 0
-for (const [dirName, build] of [[BOARD_REPLY_PLAN_DIR, buildBoardReplyPlan], [PLACEMENT_PLAN_DIR, buildPlacementPlan]]) {
+for (const [dirName, build] of [[BOARD_REPLY_PLAN_DIR, buildBoardReplyPlan], [PLACEMENT_PLAN_DIR, buildPlacementPlan], [REMEASURE_PLAN_DIR, buildRemeasurePlan]]) {
   const dir = path.join(root, dirName), built = await build()
   const files = [['plan.json', built.planBytes], ...built.requests.map(r => [r.file, r.bytes])]
   if (write) { rmSync(path.join(dir, 'requests'), { recursive: true, force: true }); for (const [name, bytes] of files) { mkdirSync(path.dirname(path.join(dir, name)), { recursive: true }); writeFileSync(path.join(dir, name), bytes) } }

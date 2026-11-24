@@ -13,8 +13,9 @@ import { HEARTBEAT_LIMITS, createHeartbeat } from './egdesk-heartbeat.mjs'
 import { world } from './egdesk-heartbeat-flow.fixture.mjs'
 import { createEgressGate, EGRESS_KINDS, EGRESS_SITES, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { normalizeEntry } from './egdesk-decision-calibration-log.mjs'
-import { PLACEMENT_PREDICATE_YES, WORK_PLACEMENT_LIMITS, codeOutcome, createWorkPlacement, createWorkPlacementHttpHandler, normalizePlacementDto, placementQuestions, pointerWriterPrompt, readPlacement } from './egdesk-work-placement.mjs'
+import { PLACEMENT_ISOLATION, PLACEMENT_PREDICATE_YES, WORK_PLACEMENT_LIMITS, codeOutcome, placementRequests, createWorkPlacement, createWorkPlacementHttpHandler, normalizePlacementDto, placementQuestions, pointerWriterPrompt, readPlacement } from './egdesk-work-placement.mjs'
 import * as WP from '../overlay/resources/EGDeskWorkPlacement.sys.mjs'
+import * as SurfaceState from '../overlay/resources/EGDeskSurfaceState.sys.mjs'
 
 const r = (x, y, width, height) => ({ x, y, width, height })
 const A = r(0, 0, 1200, 800), B = r(4000, 0, 1200, 800)   // region A: the owner's view; region B: the invited member's view
@@ -53,16 +54,16 @@ function beating(key = 'dm') {
   const beat = () => { timers.sort((a, b) => a.at - b.at); const t = timers.shift(); if (!t) return false; clock = Math.max(clock, t.at); t.fn(); return true }
   return { hb, beat, now: () => clock, advance: ms => { clock += ms } }
 }
-// ---- a Decisions client that answers yes/no from the CONTENT it was sent (the quoted card under each question, the quoted result) ----
+// ---- a Decisions client that answers yes/no from the CONTENT it was sent: each same-matter question from the card quoted IN that question (L1 c13:
+// nothing in the shared input may tell one card's question from another's), the owner question from the quoted result ----
 function judgeClient({ sameMatter = card => /A사 견적서/.test(card), ownerAction = result => /승인|정해 주세요|골라 주세요/.test(result), fail = null } = {}) {
   const calls = []
   return { calls, model: 'mock', async decide(request) {
     calls.push(request)
     if (fail) throw Object.assign(new Error(fail), { code: fail })
-    const text = name => request.input.find(row => row.content.startsWith(`Question ${name}:`))?.content ?? ''
     const answers = {}
     for (const q of request.questions) {
-      const yes = q.name === 'owner_action' ? ownerAction(request.input.map(row => row.content).join('\n')) : sameMatter(text(q.name))
+      const yes = q.name === 'owner_action' ? ownerAction(request.input.map(row => row.content).join('\n')) : sameMatter(q.instructions)
       answers[q.name] = { type: 'predicate', probability: yes ? 0.97 : 0.03 }
     }
     return { answers, usage: { inputTokens: 9 } }
@@ -196,10 +197,13 @@ test('same matter (R1/R2/R4): one predicate per nearby card the host may send, e
   // exactly what was asked: the request quoted once, each card quoted alone under its own question, yes/no only
   assert.equal(client.calls.length, 1); const sent = client.calls[0]
   assert.deepEqual(sent.questions.map(q => [q.name, q.type]), [['same_matter_R1', 'predicate'], ['same_matter_R2', 'predicate']])
-  assert.deepEqual(sent.input.map(row => row.role), ['developer', 'user', 'user', 'user'])
+  // L1 c13 isolation: the shared input is the request only; each question carries its own card and no other
+  assert.deepEqual(sent.input.map(row => row.role), ['developer', 'user'])
   assert.match(sent.input[1].content, new RegExp(`The person's request:\\n"""\\n${REQUEST}\\n"""`)); assert.match(sent.input[1].content, /opening a file surface/)
-  assert.match(sent.input[2].content, /^Question same_matter_R1:\nThe card:\n"""\nA사 견적서 v1 단가표\nA사 견적서 v1: 단가/); assert.doesNotMatch(sent.input[2].content, /점심/)
-  assert.match(sent.input[3].content, /^Question same_matter_R2:\nThe card:\n"""\n점심 메뉴/); assert.doesNotMatch(sent.input[3].content, /견적/)
+  for (const card of RELATED) assert.ok(!sent.input.some(row => row.content.includes(card.label)), `no card in the shared input: ${card.label}`)
+  assert.match(sent.questions[0].instructions, /The card:\n"""\nA사 견적서 v1 단가표\nA사 견적서 v1: 단가/); assert.doesNotMatch(sent.questions[0].instructions, /점심/)
+  assert.match(sent.questions[1].instructions, /The card:\n"""\n점심 메뉴/); assert.doesNotMatch(sent.questions[1].instructions, /견적/)
+  assert.notEqual(sent.questions[0].instructions, sent.questions[1].instructions, 'no two questions are the same question')
   const text = JSON.stringify(sent); for (const bad of ['acct-', 'own-doc', 'res-quote', '협상', '10,000', '"x"', '5400', 'M2']) assert.ok(!text.includes(bad), bad)
   assert.equal(sent.promptCacheKey, 'work-placement'); assert.equal(sent.timeoutMs, 2000)
   // the calibration log's own family (finding A4): content-free predicates against their bar
@@ -359,7 +363,8 @@ test('consumer, default path: unless the pref is "advisory" or "on" the hook rea
   // the pref has the bridge's vocabulary: advisory | on, anything else off (lane L2's finding: "on" used to read as off)
   assert.deepEqual(['advisory', 'on', 'off', 'ON', undefined, 'yes'].map(WP.workPlacementMode), ['advisory', 'on', 'off', 'off', 'off', 'off'])
   const fn = decl('resolveCanvasCardPlacement')
-  assert.match(fn, /const placed = SurfaceState\.placeCanvasView\(\{ size, safe, occupied, anchor, gap: 24 \}\);\n[^\n]*\n    if \(options\.workSurface\) state\.noteWorkSurfacePlacement\?\.\(kind, placed, options\.workSurface\);\n    return placed;/)
+  // L1 c13: the hook may hand back the rule's spot ("on"); anything falsy keeps today's placement
+  assert.match(fn, /const placed = SurfaceState\.placeCanvasView\(\{ size, safe, occupied, anchor, gap: 24 \}\);\n[^\n]*\n[^\n]*\n    if \(options\.workSurface\) return state\.noteWorkSurfacePlacement\?\.\(kind, placed, options\.workSurface\) \|\| placed;\n    return placed;/)
   assert.match(surface, /resolveCanvasCardPlacement\('result', options\.restore \? \{\} : \{ workSurface: \{ kind: 'result'/)
   const zone = readFileSync(new URL('../overlay/resources/surface/EGDeskSurfaceFileCard.mjs', import.meta.url), 'utf8')
   assert.match(zone, /resolveCanvasCardPlacement\('file', runFile \? \{ workSurface: \{ kind: 'file', runId: runFile\.target\?\.runId, conversationId: runFile\.target\?\.conversationId \} \} : \{\}\)/)
@@ -367,16 +372,20 @@ test('consumer, default path: unless the pref is "advisory" or "on" the hook rea
   assert.match(server, /enabled: \(\) => \['advisory', 'on'\]\.includes\(process\.env\.EGDESK_WORK_PLACEMENT\),/); assert.match(server, /live: \(\) => process\.env\.EGDESK_WORK_PLACEMENT === 'on'/); assert.match(server, /if \(await handleWorkPlacementHttp\(req, res, url\)\) return/)
   assert.match(server, /contextFor: \(key, options\) => chat\.placementContextFor\(key, options\)/)
 })
-test('consumer, advisory and on: the rule\'s spot against where it lands today, the request with a result card\'s words (maySend), nothing changed; both modes do the same in the window', () => {
+test('consumer, advisory and on: the rule\'s spot against where it lands today, the request with a result card\'s words (maySend); "on" hands the spot back, quiet', () => {
   for (const pref of ['advisory', 'on']) {
     const c = consumer({ pref }); const placement = Object.freeze({ x: 24, y: 440, width: 720, height: 340, inView: true })
     const returned = c.note('file', placement, { runId: 'run-7', conversationId: 'thread-9' })
-    assert.equal(returned, undefined, 'the hook returns nothing: the surface lands where it lands today, in both modes')
+    if (pref === 'advisory') assert.equal(returned, null, 'advisory returns nothing: the surface lands where it lands today')
+    else {
+      assert.deepEqual([returned.width, returned.height, returned.inView, returned.quiet], [720, 340, false, true], 'on (L1 c13): the rule\'s spot, same size, quiet')
+      const own = r(0, 0, 1200, 800); assert.ok(!hits(returned, own) && gapTo(returned, own) < WP.PLACEMENT_RULES.nearViews * 1200, 'just beside my view (I am typing), not in it')
+    }
     assert.equal(c.log.posts.length, 1); const [method, path, body] = c.log.posts[0]
     assert.deepEqual([method, path, Object.keys(body)], ['POST', '/decision/work-placement/request', ['clientThreadId', 'conversationId', 'dto']]); assert.ok(normalizePlacementDto(body.dto), 'exactly the shape the bridge accepts')
     assert.deepEqual([body.dto.rule, body.dto.pick.kind, body.dto.landed], ['requester_working', 'near_requester', { distance: 'in_view', direction: 'in_view', insideView: ['M1'] }], 'I am waiting for my own run and typing: beside my view; today: inside it')
     assert.deepEqual(body.dto.related.map(x => [x.label, x.excerpt]), [['A사 견적서 v1', '단가 12,000원']], 'a published result card may be asked about; the other card has no words to send')
-    assert.deepEqual(c.state.workPlacementLog, [{ surface: 'file', would: { rule: 'requester_working', alias: 'P1', kind: 'near_requester', distance: 'near', direction: 'right', insideView: [], related: 'none' }, landed: body.dto.landed, differs: true }])
+    assert.deepEqual(c.state.workPlacementLog, [{ surface: 'file', would: { rule: 'requester_working', alias: 'P1', kind: 'near_requester', distance: 'near', direction: 'right', insideView: [], related: 'none' }, landed: body.dto.landed, differs: true, ...(pref === 'on' ? { applied: true } : {}) }])
     assert.ok(!/c1|c2|run-7|run-6|thread-9/.test(JSON.stringify(body.dto)) && !/"x"|"rect"/.test(JSON.stringify(c.state.workPlacementLog)))
     assert.equal(c.log.listeners, 3, 'input is watched only once the flag is on'); c.note('result', placement, { runId: 'run-8' }); assert.equal(c.log.listeners, 3); assert.equal(c.log.posts.length, 1, 'without a conversation nothing is sent')
   }
@@ -449,4 +458,84 @@ test('pointer round trip, post-run, on the real session heartbeat: finished task
   assert.equal(d.snapshot(), canvas); assert.deepEqual([...new Set(w.events.slice(eventsBefore).map(e => `${e.clientThreadId}:${e.event}`))], ['dm-owner:message.started', 'dm-owner:message.delta', 'dm-owner:message.completed'])
   await w.advance(60_000)
   assert.deepEqual([client.calls.length, w.requests.flow, o.assistant().length, m.assistant().length], [1, 0, 2, 1], 'L3 c16: the pointer took no heartbeat request (all its preconditions are code)')
+})
+
+// ================= 9. window "on" (L1 c13, U7): the new surface opens at the rule's spot; no camera move, no focus, no one's view, no card moved, no Board =================
+// The surface's own functions (resolveCanvasCardPlacement, the hook, workPresence, revealPlacedCanvasCard) run over a synthetic canvas: real
+// SurfaceState placement, real placement runtime, plain objects for cards, regions and the camera, spies for every camera and focus call.
+function windowRig({ pref, people, cards = [], regions = [] }) {
+  const calls = { camera: [], timers: 0, posts: [], prefs: 0 }
+  const node = (id, rect, extra = {}) => ({ id, isConnected: true, dataset: {}, _rect: rect, ...extra })
+  const cardNodes = cards.map(c => node(c.id, c.rect)), regionNodes = regions.map((rect, i) => node(`region-${i}`, rect))
+  const view = people.find(p => p.self).viewport
+  const state = { activeEntityId: 'own-doc', panTarget: { x: 0, y: 0 }, zoomTarget: 1, agenda: {}, surface: {}, presence: { snapshot: () => people.map(p => ({ ...p, viewport: { ...p.viewport } })) },
+    setCanvasPanTarget: t => calls.camera.push(['pan', t]), setCanvasViewportTarget: t => calls.camera.push(['viewport', t]) }
+  const deps = { WorkPlacement: WP, SurfaceState, state, readSurfacePref: () => { calls.prefs++; return pref },
+    document: { querySelectorAll: sel => (sel === '.egd-canvas-card' ? cardNodes : sel.includes('.egd-board-region') ? (sel.includes('.egd-canvas-card') ? [...cardNodes, ...regionNodes] : regionNodes) : []) },
+    window: { addEventListener() {}, setTimeout: () => { calls.timers++; return 1 } }, persistentEntityGeometry: n => ({ ...n._rect, zIndex: 1 }), cardKindForPersistence: () => 'file',
+    safeViewportWorldRect: () => ({ left: view.x, top: view.y, right: view.x + view.width, bottom: view.y + view.height }), viewportToCanvasPoint: (x, y) => ({ x, y }),
+    safeViewportRect: () => ({ left: 0, top: 0, right: view.width, bottom: view.height }), deskStoreRequest: async (m, p, body) => { calls.posts.push(body); return { status: 200, body: {} } } }
+  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('noteWorkSurfacePlacement')}\nstate.noteWorkSurfacePlacement = noteWorkSurfacePlacement;\n${decl('resolveCanvasCardPlacement')}\n${decl('revealPlacedCanvasCard')}\nreturn { resolveCanvasCardPlacement, revealPlacedCanvasCard };`
+  return { ...new Function(...Object.keys(deps), body)(...Object.values(deps)), calls, state }
+}
+const OWNER = { member: 'self', self: true, active: true, viewport: r(0, 0, 1200, 800), focusCard: 'own-doc', lastInputAgeMs: 400 }
+test('window on: a run\'s file viewer opens at the rule\'s spot, quiet: no camera call, no timer for a reveal, no activation; today\'s placement otherwise', () => {
+  const ownCards = [{ id: 'own-doc', rect: r(100, 100, 500, 400) }, { id: 'own-note', rect: r(650, 120, 300, 220) }]
+  const work = { workSurface: { kind: 'file', runId: 'run-7', conversationId: 'thread-9' } }
+  const off = windowRig({ pref: undefined, people: [OWNER], cards: ownCards }); const today = off.resolveCanvasCardPlacement('file', work)
+  const adv = windowRig({ pref: 'advisory', people: [OWNER], cards: ownCards }); assert.deepEqual(adv.resolveCanvasCardPlacement('file', work), today, 'advisory: exactly today\'s placement')
+  const on = windowRig({ pref: 'on', people: [OWNER], cards: ownCards }); const spot = on.resolveCanvasCardPlacement('file', work)
+  assert.deepEqual([spot.quiet, spot.inView, spot.width, spot.height], [true, false, today.width, today.height]); assert.notDeepEqual([spot.x, spot.y], [today.x, today.y])
+  assert.ok(!hits(spot, OWNER.viewport) && !ownCards.some(c => hits(c.rect, spot)), 'beside my view (I am typing), covering none of my cards')
+  // the surface's reveal would pan the camera to an off-view card; a quiet placement is never revealed
+  on.revealPlacedCanvasCard({ isConnected: true }, spot); assert.deepEqual([on.calls.camera, on.calls.timers], [[], 0], 'no camera move scheduled or made')
+  off.revealPlacedCanvasCard({ isConnected: true }, { ...spot, quiet: undefined }); assert.equal(off.calls.timers, 1, 'the same off-view spot without "quiet" WOULD be revealed: the check is real')
+  assert.deepEqual(on.state.activeEntityId, 'own-doc', 'the hook takes no focus')
+  // the callers open it without activating it: result cards and run file viewers pass activate: false for a quiet placement
+  assert.match(surface, /spawnDeskWindowShell\(\{ id: `egd-result-card-\$\{\+\+cardSeq\}`, kind: 'result', className: 'egd-result-card', sourceRef, \.\.\.\(placement\.quiet \? \{ activate: false \} : \{\}\),/)
+  const fileCard = readFileSync(new URL('../overlay/resources/surface/EGDeskSurfaceFileCard.mjs', import.meta.url), 'utf8')
+  assert.match(fileCard, /activate: !options\.restore && !options\.deferPresentation && !placement\.quiet,/)
+  assert.match(decl('revealPlacedCanvasCard'), /if \(!card \|\| !placement \|\| placement\.inView \|\| placement\.quiet\) return;/)
+  assert.match(surface, /if \(options\.activate !== false\) setActiveEntity\(root\);/, 'the shell activates only when not told otherwise')
+})
+test('window on: never inside another active person\'s view; an unknown requester\'s surface protects every view; no Board region, no shared ledger; a failure keeps today\'s placement', () => {
+  const member = { member: 'm-0123456789abcdef', self: false, active: true, viewport: r(1260, 0, 1200, 800), focusCard: null, lastInputAgeMs: 900 }
+  const regions = [r(1250, 900, 1400, 900)]
+  const on = windowRig({ pref: 'on', people: [OWNER, member], regions })
+  for (const requester of [undefined, member.member, 'm-ffffffffffffffff']) {
+    const spot = on.resolveCanvasCardPlacement('file', { workSurface: { kind: 'file', runId: 'run-7', conversationId: 'thread-9', ...(requester ? { requester } : {}) } })
+    assert.equal(spot.quiet, true, String(requester))
+    if (requester !== member.member) assert.ok(!hits(spot, member.viewport), `${requester}: not where the other member is looking`)
+    if (requester !== undefined) assert.ok(!hits(spot, OWNER.viewport), `${requester}: a member's or an unknown requester's surface never opens in the owner's view`)
+    for (const region of regions) assert.ok(!hits(spot, { x: region.x - 24, y: region.y - 24, width: region.width + 48, height: region.height + 48 }), 'never in or against a Board region: a private placement does not join a shared Board')
+  }
+  // nothing in the hook or the placement runtime can write a Board or move a card
+  const hook = decl('noteWorkSurfacePlacement')
+  for (const forbidden of ['jointDesk', 'saveBoard', 'boardLedger', 'persistBoard', 'setCanvasPanTarget', 'setCanvasViewportTarget', 'setActiveEntity', '.focus(', 'style.left', 'style.top']) assert.ok(!hook.includes(forbidden), forbidden)
+  // the runtime cannot answer: today's placement stands, the surface still opens
+  const broken = windowRig({ pref: 'on', people: [OWNER] }); broken.state.presence = { snapshot: () => { throw new Error('presence down') } }
+  const kept = broken.resolveCanvasCardPlacement('file', { workSurface: { kind: 'file', runId: 'run-7' } }), today = windowRig({ pref: undefined, people: [OWNER] }).resolveCanvasCardPlacement('file', { workSurface: { kind: 'file', runId: 'run-7' } })
+  assert.deepEqual(kept, today)
+  assert.equal(WP.onRuleSpot({ spot: null }, today, OWNER.viewport), null, 'reuse: nothing new to place'); assert.equal(WP.onRuleSpot({ spot: { x: 0, y: 0, width: 10, height: 10 } }, today, OWNER.viewport), null, 'a spot of another size is not used')
+})
+
+test('isolation (L1 c13, measured v2: one answer for every card of a request): one card per question by default; one card per request when chosen; both bounded', async () => {
+  const d = desk(); d.cards.push(...RELATED); const dto = normalizePlacementDto(WP.placementRequest(d.scene(), { taskId: 'run-1', surface: FILE }).dto)
+  assert.deepEqual(PLACEMENT_ISOLATION, ['question', 'request'])
+  const [byQuestion] = placementRequests(dto, { request: REQUEST }), byRequest = placementRequests(dto, { request: REQUEST }, { isolation: 'request' })
+  assert.equal(byRequest.length, 2); for (const [i, one] of byRequest.entries()) { assert.deepEqual(one.questions, [byQuestion.questions[i]]); assert.deepEqual(one.input, byQuestion.input, 'the same shared input: the request only') }
+  // sent together, answers combined by code, every request counted against the heartbeat's cap
+  const client = judgeClient(); const split = bridge(client, { isolation: 'request' })
+  const placed = await WP.placeSurface({ scene: d.inputs, request: { taskId: 'run-1', surface: FILE }, judge: split.judge })
+  assert.deepEqual([placed.option.kind, placed.option.cardId, client.calls.length, client.calls.map(c => c.questions.length)], ['beside_related', 'res-quote-v1', 2, [1, 1]])
+  const capped = bridge(judgeClient(), { isolation: 'request', limits: { maxEvals: 3 } })
+  for (let i = 0; i < 2; i++) { capped.placement.submit('dm', dto, capped.hb); capped.beat(); await capped.placement.idle() }
+  assert.deepEqual(capped.placement.records().map(x => x.source), ['decision', 'limit'], 'two requests fit the cap of three, the next two would not: the code\'s outcome stands')
+  // one failing request fails the judgment whole: the rule's spot stands
+  let n = 0; const flaky = { model: 'mock', async decide(req) { if (++n === 2) throw Object.assign(new Error('x'), { code: 'timeout' }); return judgeClient().decide(req) } }
+  const half = bridge(flaky, { isolation: 'request' }); const s1 = half.placement.submit('dm', dto, half.hb); half.beat(); await half.placement.idle()
+  assert.deepEqual([half.placement.result('dm', s1.id).source, half.placement.result('dm', s1.id).kind], ['failed', 'near_requester'])
+  // the token cost of each, from the bytes the product builds (the runner's typed model)
+  const est = rs => rs.reduce((sum, q) => sum + Math.round(134.8 * q.questions.length + 0.1983 * Buffer.byteLength(JSON.stringify({ model: 'm', input: q.input, questions: q.questions }))), 0)
+  assert.ok(est(byRequest) > est([byQuestion]), `one card per request costs more: ${est(byRequest)} vs ${est([byQuestion])}`)
 })

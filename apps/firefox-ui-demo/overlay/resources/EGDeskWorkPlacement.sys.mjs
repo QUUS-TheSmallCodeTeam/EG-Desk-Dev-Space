@@ -30,8 +30,9 @@ export const WORK_PLACEMENT_PREF = 'egdesk.workPlacement';
 /**
  * Default OFF. The same words as the bridge's EGDESK_WORK_PLACEMENT (advisory | on; anything else is off):
  *   "advisory": compute and record where a surface WOULD go, and send the request to the bridge; the surface still lands where it lands today.
- *   "on": the same in this window (the surface still lands where it lands today; this window never moves anything). What "on" adds is the
- *         bridge's: a decided pointer becomes a fact the session may turn into one chat message (and only when the bridge is "on" too).
+ *   "on" (L1 cycle 13, U7): a NEW work surface opens at the rule's spot (onRuleSpot) instead of today's, without moving any camera and without
+ *         taking input focus (the host opens it quietly), never inside another active person's view (hard rule 1), moving no card. Nothing moves
+ *         afterwards either. The bridge's "on" adds that a decided pointer becomes a fact the session may turn into one chat message.
  */
 export const workPlacementMode = value => (value === 'advisory' || value === 'on' ? value : 'off');
 
@@ -408,5 +409,17 @@ export function advisoryPlacement({ presence, cards, tasks, obstacles, taskId, s
   if (!request) return null;
   const pick = request.dto.pick;
   return { dto: request.dto, would: { rule: request.plan.rule, alias: request.plan.option.alias, ...request.plan.option.descriptor }, landed: request.dto.landed,
-    differs: !request.dto.landed || request.dto.landed.distance !== pick.distance || request.dto.landed.direction !== pick.direction };
+    differs: !request.dto.landed || request.dto.landed.distance !== pick.distance || request.dto.landed.direction !== pick.direction,
+    // where "on" opens the new surface: the rule's rectangle (already through the hard rules). Not for "reuse": that card exists, nothing new opens.
+    spot: request.plan.option.kind === 'reuse' ? null : rectOf(request.plan.option.rect) };
+}
+
+/**
+ * The placement "on" hands to the host for a NEW surface: the rule's spot, same size, marked quiet (the host must not reveal it with a camera move and
+ * must not activate it). inView: whether it lies in this Desk's own view (then nothing would need revealing anyway). null: keep today's placement.
+ */
+export function onRuleSpot(advisory, landed, ownView) {
+  const spot = advisory?.spot;
+  if (!spot || !finite(landed) || spot.width !== Math.round(landed.width) || spot.height !== Math.round(landed.height)) return null;
+  return { x: spot.x, y: spot.y, width: landed.width, height: landed.height, inView: finite(ownView) ? inside(spot, ownView) : false, quiet: true };
 }

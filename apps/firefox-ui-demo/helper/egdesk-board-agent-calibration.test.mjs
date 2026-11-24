@@ -75,7 +75,7 @@ for (const mode of ['off', 'advisory', 'on']) for (const [name, s] of Object.ent
       assert.deepEqual(m.draftExcerpts, [LOCAL]); assert.equal(Object.hasOwn(result, 'screening'), false)
       return
     }
-    assert.equal(m.decisionPosts.length, 1, 'allowed: exactly one screening request')
+    assert.equal(m.decisionPosts.length, s.fallback ? 1 : 1 + (s.picks > 0 ? 1 : 0), 'allowed: one relevance request, plus (L1 c13) the time question only when something is relevant')
     assert.deepEqual(readScreeningInput(m.decisionPosts[0].input), { question: QUESTION, today: localDay(Date.now()), candidates: E.map((text, i) => ({ alias: `c${i + 1}`, text })) })
     assert.equal(entries.length, 1)
     const [entry] = entries
@@ -93,8 +93,8 @@ for (const mode of ['off', 'advisory', 'on']) for (const [name, s] of Object.ent
       assert.deepEqual(relevance.map(j => j.p), s.probs)
       assert.ok(relevance.every(j => j.kind === 'board' && j.threshold === 0.6))
       assert.deepEqual(relevance.map(j => j.would), s.probs.map(p => p >= 0.6 ? 'attach' : 'skip'))
-      // L1 cycle 12: one "still in effect today?" judgment per excerpt, against its own bar, and nothing else
-      assert.deepEqual(inEffect.map(j => [j.p, j.threshold, j.would, j.kind]), E.map(() => [0.97, 0.5, 'accept', 'board']))
+      // L1 cycle 13: the time judgment only for the excerpts decided relevant (R3), against its own bar, and nothing else
+      assert.deepEqual(inEffect.map(j => [j.p, j.threshold, j.would, j.kind]), Array.from({ length: s.picks }, () => [0.97, 0.5, 'accept', 'board']))
       assert.equal(entry.judgments.length, relevance.length + inEffect.length)
       assert.equal(entry.attached, mode === 'on' && s.picks > 0, 'attached = the selection was applied to the reply')
       assert.equal(entry.fallback, undefined)

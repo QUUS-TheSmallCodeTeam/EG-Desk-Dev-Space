@@ -13,7 +13,9 @@ import * as WP from '../overlay/resources/EGDeskWorkPlacement.sys.mjs'
 // Nothing here sends anything. The PRODUCT CODE builds every body: the canvas runtime enumerates the scene and builds the request, the bridge's judge
 // half queues it on a real heartbeat (virtual clock) and builds the Decision request, the real Decisions client serializes it; its fetch is a recorder
 // that keeps the exact bytes and answers with the pre-registered expectation. Data: synthetic Korean work requests and card texts.
-export const PLACEMENT_SET = 'work-placement-predicates-v2'
+// v3 (L1 cycle 13): v2 measured every card of a request alike (1/1/1, .03/.03/.03): the questions were identical and the cards lived only in the shared
+// input. v3 bodies carry each card inside its own question (isolation 'question'); isolation 'request' (one card per request) is built for comparison.
+export const PLACEMENT_SET = 'work-placement-predicates-v3'
 export const PLACEMENT_TOKEN_CEILING = 5000
 export const PLACEMENT_PLAN_DIR = 'proofs/decision-real-measure/work-placement'
 export const BELOW_YES = Math.round((PLACEMENT_PREDICATE_YES - 0.001) * 1000) / 1000 // "max" is inclusive in the runner: just under the bar
@@ -53,8 +55,11 @@ function beating() {
   return { hb, now: () => clock, beat() { timers.sort((a, b) => a.at - b.at); const t = timers.shift(); if (t) { clock = Math.max(clock, t.at); t.fn() } } }
 }
 
-/** buildPlacementPlan() -> { plan, planBytes, requests: [{ id, file, bytes, body, url, outcome }] } */
-export async function buildPlacementPlan() {
+/**
+ * placementPlanRequests({ isolation, scenes, results }) -> [{ id, file, bytes, body, url, outcome, expect }] as the product builds and sends them.
+ * isolation 'request': one request per card, ids <scene>-R#.
+ */
+export async function placementPlanRequests({ isolation = 'question', scenes = SCENES, results = RESULTS } = {}) {
   const wire = []
   let forced = null
   const client = createDecisionClient({ getApiKey: () => 'egd-synthetic-not-a-key-0001', fetchImpl: async (url, init) => {
@@ -66,16 +71,21 @@ export async function buildPlacementPlan() {
   const requests = []
   const run = async (id, dto, context, expect) => {
     const b = beating()
-    const placement = createWorkPlacement({ client, mode: () => 'advisory', enabled: () => true, contextFor: () => ({ ...context, egress: gate }), now: b.now, setTimer: () => null })
+    const placement = createWorkPlacement({ client, mode: () => 'advisory', enabled: () => true, isolation, contextFor: () => ({ ...context, egress: gate }), now: b.now, setTimer: () => null })
     const before = wire.length
     const s = placement.submit('plan', dto, b.hb)
     if (s.status !== 'queued') throw new Error(`${id}: the product did not queue the scene (${s.status})`)
     b.beat(); await placement.idle()
-    if (wire.length !== before + 1) throw new Error(`${id}: the product did not build exactly one Decision request`)
-    const bytes = wire[before].bytes
-    requests.push({ id, file: `requests/${id}.json`, bytes, body: JSON.parse(bytes.toString('utf8')), url: wire[before].url, outcome: placement.result('plan', s.id), expect })
+    const sent = wire.slice(before)
+    if (!sent.length) throw new Error(`${id}: the product built no Decision request`)
+    const outcome = placement.result('plan', s.id)
+    for (const w of sent) {
+      const body = JSON.parse(w.bytes.toString('utf8')), names = body.questions.map(q => q.name)
+      const rid = sent.length === 1 ? id : `${id}-${names[0].replace('same_matter_', '')}`
+      requests.push({ id: rid, file: `requests/${rid}.json`, bytes: w.bytes, body, url: w.url, outcome, expect: expect.filter(e => names.includes(e.name)) })
+    }
   }
-  for (const scene of SCENES) {
+  for (const scene of scenes) {
     // the owner at A; the member who asked waits and is working at B; the cards are on the member's side
     const presence = [{ member: 'acct-owner', self: true, active: true, viewport: OWNER_VIEW, focusCard: null, lastInputAgeMs: 400 }, { member: 'acct-member', self: false, active: true, viewport: MEMBER_VIEW, focusCard: null, lastInputAgeMs: 900 }]
     const ws = WP.enumerateWorkScene({ presence, cards: scene.cards.map(row => row[1]), tasks: [{ id: 'task', state: 'running', requester: 'acct-member', waiting: ['acct-member'], ownerMustAct: false, surfaces: [] }] })
@@ -86,7 +96,7 @@ export async function buildPlacementPlan() {
     await run(scene.id, req.dto, { request: scene.request, answer: '' },
       req.plan.related.map(x => { const [kind, , note] = kindOf(x.alias); return { name: `same_matter_${x.alias}`, kind: 'predicate', ...(kind === 'yes' ? { min: PLACEMENT_PREDICATE_YES } : { max: BELOW_YES }), severity: kind === 'near_miss' ? 'soft' : 'hard', note: `${kind}: ${note}` } }))
   }
-  for (const result of RESULTS) {
+  for (const result of results) {
     const presence = [{ member: 'acct-owner', self: true, active: true, viewport: OWNER_VIEW, focusCard: null, lastInputAgeMs: 400 }, { member: 'acct-member', self: false, active: true, viewport: MEMBER_VIEW, focusCard: null, lastInputAgeMs: 900 }]
     const ws = WP.enumerateWorkScene({ presence, cards: [{ id: 'agent-result', rect: r(5300, 24, 720, 520), kind: 'result', creator: 'agent', taskId: 'task' }],
       tasks: [{ id: 'task', state: 'finished', requester: 'acct-member', waiting: ['acct-member'], ownerMustAct: false, surfaces: [{ kind: 'result', cardId: 'agent-result' }] }] })
@@ -95,9 +105,15 @@ export async function buildPlacementPlan() {
     await run(result.id, att.dto, { request: result.request, answer: result.answer },
       [{ name: 'owner_action', kind: 'predicate', ...(result.kind === 'yes' ? { min: PLACEMENT_PREDICATE_YES } : { max: BELOW_YES }), severity: 'hard', note: `${result.kind}: ${result.note}` }])
   }
-  const plan = { set: PLACEMENT_SET, tokenCeiling: PLACEMENT_TOKEN_CEILING,
-    passRule: `A request passes when every hard check holds: an expected yes has probability >= ${PLACEMENT_PREDICATE_YES} (the product's bar for acting on a yes) and an expected no has probability <= ${BELOW_YES}. ` +
-      `The set passes when all ${SCENES.length + RESULTS.length} requests pass. Near misses (same company or same kind of document, another matter) are soft: a miss is reported, never a failure. The note of every check starts with its kind.`,
-    requests: requests.map(r => ({ id: r.id, file: r.file, sha256: sha256(r.bytes), estInputTokens: estimatePlacementTokens(r.body.questions.length, r.bytes.length), expect: r.expect })) }
+  return requests
+}
+export const PLACEMENT_PASS_RULE = n => `A request passes when every hard check holds: an expected yes has probability >= ${PLACEMENT_PREDICATE_YES} (the product's bar for acting on a yes) and an expected no has probability <= ${BELOW_YES}. ` +
+  `The set passes when all ${n} requests pass. Near misses (same company or same kind of document, another matter) are soft: a miss is reported, never a failure. The note of every check starts with its kind.`
+export const planEntry = r => ({ id: r.id, file: r.file, sha256: sha256(r.bytes), estInputTokens: estimatePlacementTokens(r.body.questions.length, r.bytes.length), expect: r.expect })
+
+/** buildPlacementPlan() -> { plan, planBytes, requests } — the full plan (isolation 'question'). */
+export async function buildPlacementPlan() {
+  const requests = await placementPlanRequests()
+  const plan = { set: PLACEMENT_SET, tokenCeiling: PLACEMENT_TOKEN_CEILING, passRule: PLACEMENT_PASS_RULE(requests.length), requests: requests.map(planEntry) }
   return { plan, planBytes: Buffer.from(JSON.stringify(plan, null, 2) + '\n', 'utf8'), requests }
 }

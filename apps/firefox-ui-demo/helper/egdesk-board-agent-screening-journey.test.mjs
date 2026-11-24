@@ -106,7 +106,11 @@ for (const mode of ['off', 'advisory', 'on']) for (const [name, scenario] of Obj
     assert.equal(Object.hasOwn(prepared, 'decisionEgress'), false, 'no per-request screening choice in the contract')
     if (mode === 'off') assert.equal(m.posts.length, 0, 'off: no egress to Decisions at all')
     else {
-      assert.equal(m.posts.length, 1, 'allowed: exactly one screening request')
+      // L1 c13: one relevance request; a second one (the arrangement question, for the relevant excerpts only) exactly when the first found any
+      const anyRelevant = !FAILED.includes(name) && ['confident', 'outOfSet'].includes(name)
+      assert.equal(m.posts.length, anyRelevant ? 2 : 1, 'allowed: one relevance request, plus the time question only for what is relevant')
+      assert.deepEqual(m.posts[0].names, ['c1', 'c2', 'c3'])
+      if (anyRelevant) assert.ok(m.posts[1].names.length >= 1 && m.posts[1].names.every(n => /^c[1-3]_now$/.test(n)) && m.posts[1].names.length < 3 + (name === 'outOfSet' ? 1 : 0), m.posts[1].names.join())
       assert.deepEqual(m.posts[0].input, { question: QUESTION, today: localDay(Date.now()), candidates: E.map((text, i) => ({ alias: `c${i + 1}`, text })) }, 'only question, the ask\'s day and approved candidates leave the host')
       assert.equal(m.posts[0].auth, true)
     }

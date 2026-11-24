@@ -77,7 +77,8 @@ async function fixture(t, { config = 'dedicated', provider = response, decisions
       client: { async decide(request) {
         decisionsCount++; decisionInputs.push(readScreeningInput(request.input))
         if (!decisionAnswer) throw new Error('Decisions must never be invoked in this test')
-        return decisionAnswer
+        // a provider answers exactly the questions it is asked (L1 c13: relevance first, then the time question for the relevant excerpts)
+        return { ...decisionAnswer, answers: Object.fromEntries(request.questions.map(q => [q.name, decisionAnswer.answers[q.name]]).filter(([, a]) => a)) }
       } } }),
     draft, draftPreview: tone => `${BOARD_AGENT_DRAFT_INSTRUCTIONS}\n${BOARD_AGENT_DRAFT_REPLY_STYLES[tone]}`,
   })
@@ -183,12 +184,12 @@ test('with the saved Decisions mode on, one confirmed draft screens the same app
   assert.deepEqual([preview.body.decisionModel, preview.body.decisionMode, preview.body.draftModel], ['fixture-decisions-model', 'on', MODEL])
   noTraffic(f)
   assert.deepEqual(await f.run(preview), { status: 200, body: { mode: 'draft', answer: ANSWER, source: 'draft', screening: 'decision' } })
-  assert.equal(f.decisions(), 1)
-  assert.deepEqual(f.decisionInputs, [{ question: QUESTION, today: localDay(Date.now()), candidates: [{ alias: 'c1', text: EXCERPT }] }], 'only the question, the ask\'s day and the approved excerpts the drafting model may also receive')
+  assert.equal(f.decisions(), 2, 'L1 c13: relevance, then the time question for the one relevant excerpt')
+  assert.deepEqual(f.decisionInputs, [0, 1].map(() => ({ question: QUESTION, today: localDay(Date.now()), candidates: [{ alias: 'c1', text: EXCERPT }] })), 'only the question, the ask\'s day and the approved excerpts the drafting model may also receive')
   assert.equal(f.posts.length, 1)
   assert.deepEqual(JSON.parse(f.posts[0].body.input[0].content[0].text).excerpts, [EXCERPT])
   code(await f.run(preview), 409, 'STALE')
-  assert.deepEqual([f.decisions(), f.posts.length], [1, 1])
+  assert.deepEqual([f.decisions(), f.posts.length], [2, 1], 'the replay sends nothing more')
   trace('draft_with_decisions_on', f, { runStatus: 200, screening: 'decision', replayStatus: 409 })
 })
 

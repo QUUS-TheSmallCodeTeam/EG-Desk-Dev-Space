@@ -23,7 +23,9 @@ import { openDeskStore } from './egdesk-desk-store.mjs'
 //   irrelevant  cN    <  relevance bar   hard                            (cN_now: no expectation, it is never offered anyway)
 //   near_miss   cN    <  relevance bar   soft                            (cN_now: no expectation)
 //   wrong_time  (cN: no expectation: it IS about the matter)            cN_now <  in-effect bar  HARD  (it must never be offered as current)
-export const BOARD_REPLY_SET = 'board-reply-screening-v2'
+// v3 (L1 cycle 13): two requests per ask, built by the product: relevance for every excerpt (<id>), then the arrangement question for the excerpts the
+// pre-registered relevance answers select (<id>-now), on the date the question is about. The expectations of each stage live with its own request.
+export const BOARD_REPLY_SET = 'board-reply-screening-v3'
 export const BOARD_REPLY_TOKEN_CEILING = 6000
 export const BOARD_REPLY_PLAN_DIR = 'proofs/decision-real-measure/board-reply-screening'
 export const BELOW_BAR = Math.round((BOARD_AGENT_RELEVANCE_BAR - 0.001) * 1000) / 1000 // "max" is inclusive in the runner: just under the bar
@@ -54,18 +56,22 @@ export const ASKS = Object.freeze([
   ] },
 ])
 
+export const BOARD_REPLY_PASS_RULE = n => `A request passes when every hard check holds. Relevance requests (cN): each clearly relevant excerpt >= ${BOARD_AGENT_RELEVANCE_BAR} (the product's bar: it is selected), each clearly irrelevant one <= ${BELOW_BAR}. ` +
+  `Arrangement requests (cN_now, asked only for the excerpts the relevance answers select, on the date the question is about): each current excerpt >= ${BOARD_AGENT_IN_EFFECT_BAR} (it is not dropped as dated) and each wrong-time/version excerpt <= ${BELOW_IN_EFFECT} (HARD: below the bar it is dated and never offered as the current answer). ` +
+  `The set passes when all ${n} requests pass. Near-miss relevance (<= ${BELOW_BAR}) is soft: a miss is reported, never a failure. The note of every check starts with its kind.`
 // Typed input-token model solved from the real requests of 2026-11-24 (the same formula as egdesk-memory-real-plan.mjs estimateTokens and the
 // runner's independent cross-check): 56.5 per choice question, 134.8 per predicate, 0.1983 per body byte.
 export const estimateBoardReplyTokens = (predicates, bytes) => Math.round(134.8 * predicates + 0.1983 * bytes)
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const DRAFT_MODEL = 'synthetic-responses-model'
 // The pre-registered checks of one excerpt (see the table above), in the runner's predicate form.
-export function expectationsOf([kind, , note], index) {
+export function expectationsOf([kind, , note], index, stage = 'both') {
   const name = `c${index + 1}`, out = []
-  if (kind === 'relevant') out.push({ name, kind: 'predicate', min: BOARD_AGENT_RELEVANCE_BAR, severity: 'hard', note: `${kind}: ${note}` }, { name: `${name}_now`, kind: 'predicate', min: BOARD_AGENT_IN_EFFECT_BAR, severity: 'hard', note: `${kind}, in effect: ${note}` })
-  if (kind === 'irrelevant') out.push({ name, kind: 'predicate', max: BELOW_BAR, severity: 'hard', note: `${kind}: ${note}` })
-  if (kind === 'near_miss') out.push({ name, kind: 'predicate', max: BELOW_BAR, severity: 'soft', note: `${kind}: ${note}` })
-  if (kind === 'wrong_time') out.push({ name: `${name}_now`, kind: 'predicate', max: BELOW_IN_EFFECT, severity: 'hard', note: `${kind}, no longer in effect: ${note}` })
+  const rel = stage !== 'now', now = stage !== 'relevance'
+  if (kind === 'relevant') { if (rel) out.push({ name, kind: 'predicate', min: BOARD_AGENT_RELEVANCE_BAR, severity: 'hard', note: `${kind}: ${note}` }); if (now) out.push({ name: `${name}_now`, kind: 'predicate', min: BOARD_AGENT_IN_EFFECT_BAR, severity: 'hard', note: `${kind}, still applies: ${note}` }) }
+  if (kind === 'irrelevant' && rel) out.push({ name, kind: 'predicate', max: BELOW_BAR, severity: 'hard', note: `${kind}: ${note}` })
+  if (kind === 'near_miss' && rel) out.push({ name, kind: 'predicate', max: BELOW_BAR, severity: 'soft', note: `${kind}: ${note}` })
+  if (kind === 'wrong_time' && now) out.push({ name: `${name}_now`, kind: 'predicate', max: BELOW_IN_EFFECT, severity: 'hard', note: `${kind}, no longer applies: ${note}` })
   return out
 }
 
@@ -109,19 +115,23 @@ export async function buildBoardReplyPlan() {
       forced = ask.excerpts
       const before = wire.length, draftedBefore = drafted.length
       const screened = await run('draft')
-      if (wire.length !== before + 1 || screened.screening !== 'decision') throw new Error(`${ask.id}: the product did not build exactly one screening request`)
+      if (wire.length !== before + 2 || screened.screening !== 'decision') throw new Error(`${ask.id}: the product did not build the two screening requests`)
       const local = await run('extract') // today's word match; an extract run sends nothing to any model
-      if (wire.length !== before + 1) throw new Error(`${ask.id}: an extract run built a Decisions request`)
-      const bytes = wire[before].bytes, body = JSON.parse(bytes.toString('utf8'))
-      requests.push({ id: ask.id, file: `requests/${ask.id}.json`, bytes, body, url: wire[before].url, cases: ask.excerpts.map(row => row[0]),
-        forcedSelection: drafted.length === draftedBefore + 1 ? drafted[draftedBefore].map(text => texts.indexOf(text) + 1) : null,
-        localSelection: local.answer ? local.answer.split('\n\n').map(text => texts.indexOf(text) + 1) : [] })
+      if (wire.length !== before + 2) throw new Error(`${ask.id}: an extract run built a Decisions request`)
+      const cases = ask.excerpts.map(row => row[0])
+      const forcedSelection = drafted.length === draftedBefore + 1 ? drafted[draftedBefore].map(text => texts.indexOf(text) + 1) : null
+      const localSelection = local.answer ? local.answer.split('\n\n').map(text => texts.indexOf(text) + 1) : []
+      for (const [k, stage] of [[0, 'relevance'], [1, 'now']]) {
+        const bytes = wire[before + k].bytes, body = JSON.parse(bytes.toString('utf8')), id = stage === 'now' ? `${ask.id}-now` : ask.id
+        // the excerpts this request asks about, by their aliases (stage 2 holds the relevant ones only)
+        const asked = new Set(body.questions.map(q => Number(q.name.replace(/^c|_now$/g, '')) - 1))
+        requests.push({ id, ask: ask.id, stage, file: `requests/${id}.json`, bytes, body, url: wire[before + k].url, cases, forcedSelection, localSelection,
+          expect: ask.excerpts.flatMap((row, i) => (asked.has(i) ? expectationsOf(row, i, stage) : [])) })
+      }
     }
   } finally { service.close(); desk.close(); rmSync(root, { recursive: true, force: true }) }
   const plan = { set: BOARD_REPLY_SET, tokenCeiling: BOARD_REPLY_TOKEN_CEILING,
-    passRule: `A request passes when every hard check holds. Relevance (cN): each clearly relevant excerpt >= ${BOARD_AGENT_RELEVANCE_BAR} (the product's bar: it is selected), each clearly irrelevant one <= ${BELOW_BAR}. ` +
-      `In effect on the ask's day (cN_now): each relevant, current excerpt >= ${BOARD_AGENT_IN_EFFECT_BAR} (it is not dropped as dated) and each wrong-time/version excerpt <= ${BELOW_IN_EFFECT} (HARD: below the bar it is dated and never offered as the current answer). ` +
-      `The set passes when all ${ASKS.length} requests pass. Near-miss relevance (<= ${BELOW_BAR}) is soft: a miss is reported, never a failure. The note of every check starts with its kind.`,
-    requests: requests.map((r, n) => ({ id: r.id, file: r.file, sha256: sha256(r.bytes), estInputTokens: estimateBoardReplyTokens(r.body.questions.length, r.bytes.length), expect: ASKS[n].excerpts.flatMap(expectationsOf) })) }
+    passRule: BOARD_REPLY_PASS_RULE(requests.length),
+    requests: requests.map(r => ({ id: r.id, file: r.file, sha256: sha256(r.bytes), estInputTokens: estimateBoardReplyTokens(r.body.questions.length, r.bytes.length), expect: r.expect })) }
   return { plan, planBytes: Buffer.from(JSON.stringify(plan, null, 2) + '\n', 'utf8'), requests }
 }
