@@ -5026,7 +5026,9 @@ export class CodexChatRuntime {
       this.allowIntermediateMessages(hold.key)
       const cfg = this.decisionContext?.browserEntry, provider = this.browserToolProvider()
       const entry = createDirectBrowserEntry({ provider, store: this.browserTaskStore, outcomeSink: typeof cfg?.outcomeSink === 'function' ? cfg.outcomeSink : null, now: this.now,
-        calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null })
+        calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null,
+        // c20: the finished task's status text goes into the note only where this run's models may receive Browser data
+        pageTextInNote: () => { try { return this.decisionEgressFor(run).allows('page_text') === true } catch { return false } } })
       const out = await entry.handle({ run, conversationKey: hold.key, message, hosts: hold.hosts, titles: hold.titles || {} })
       if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
     } catch { note = null; handedOff = false }
@@ -5171,7 +5173,9 @@ export class CodexChatRuntime {
       // Read-only: the task loop's step count and waiting state feed this conversation's heartbeat; the store behaves exactly as before.
       if (context.heartbeat) feedBrowserTask(context.heartbeat, this.browserTaskStore, context.clientThreadId)
       const entry = createDirectBrowserEntry({ provider, store: this.browserTaskStore, outcomeSink: typeof cfg.outcomeSink === 'function' ? cfg.outcomeSink : null, now: this.now,
-        calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null })
+        calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null,
+        // c20: the finished task's status text goes into the note only where this run's models may receive Browser data
+        pageTextInNote: () => { try { return this.decisionEgressFor(preRun).allows('page_text') === true } catch { return false } } })
       const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), titles: this.browserEntryTitles(body), memory, entryAnswers })
       if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
     } catch { note = null; handedOff = false }

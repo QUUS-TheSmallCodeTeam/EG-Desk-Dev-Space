@@ -1,7 +1,7 @@
 import { localDay } from './egdesk-browser-reflex.mjs'
 import { randomBytes } from 'node:crypto'
 import { DecisionError, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
-import { hostOf, labelKey, outcomeCandidate, priorFromMemory, safePath } from './egdesk-browser-task-memory.mjs'
+import { hostOf, hrefIdentifiers, identifiersOf, labelKey, outcomeCandidate, priorFromMemory, safePath } from './egdesk-browser-task-memory.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, tableOptions } from './egdesk-decision-questions.mjs'
 
 // Direct chat -> objective browser entry (L8 cycle 6; JEV_INTEGRATION_SUGGESTIONS.md §2 Pillar 1, §4.3, §9.3).
@@ -37,6 +37,7 @@ export const BROWSER_TASK_TTL_MS = 30 * 60 * 1000 // a paused task can be resume
 const SEGMENT_STEPS = 6
 const ASKED_CODES = new Set(['choice_needed', 'detail_needed'])
 const MAX_BRIEF_GOAL = 160
+const MAX_FOUND_SEGMENTS = 3, MAX_FOUND_CHARS = 240
 // The last page action of a running task, as a closed word (the brief's `last`); a paused task's `last` is its pause code.
 const LAST_KIND_OF_TOOL = Object.freeze({ egdesk_browser_navigate: 'opened_link', egdesk_browser_scroll: 'scrolled', egdesk_browser_fill: 'filled_field' })
 const MAX_ENTRY_ASKS = 2 // "which card?" at most twice; then the request goes back to the ordinary turn
@@ -232,29 +233,57 @@ const tally = (task, result) => {
       if (!action.ok) continue
       if (action.tool === 'egdesk_browser_fill') task.actions.fill++
       else if (action.tool === 'egdesk_browser_navigate') task.actions.navigate++
+      else if (action.tool === 'egdesk_browser_click') task.actions.press = (task.actions.press ?? 0) + 1 // c20: a read-only button
       else if (action.tool === 'egdesk_browser_scroll') task.actions.scroll++
     }
   }
   task.steps += (result.steps || []).length
   // Content-minimal trail for the next run: the label of each opened element and where, never values or queries.
   for (const step of result.steps || []) {
-    if (!step.opened || !(step.actions || []).some(action => action.ok && action.tool === 'egdesk_browser_navigate')) continue
+    if (!step.opened || !step.opened.to || !(step.actions || []).some(action => action.ok && (action.tool === 'egdesk_browser_navigate' || action.tool === 'egdesk_browser_click'))) continue
     if (!task.host) task.host = hostOf(step.url)
     const label = labelKey(step.opened.option)
     task.trail.push({ op: 'open', label, from: safePath(step.url), to: safePath(step.opened.to) })
-    if (task.pendingAsk) { task.resolved.push({ asked: task.pendingAsk, chose: label, at: safePath(step.url) }); task.pendingAsk = null }
+    const ids = hrefIdentifiers(step.opened.to) // c20: the chosen link's address digits go with the settled choice
+    task.openedIds = [...new Set([...(task.openedIds || []), ...ids])].slice(-8) // and name what this run is about (the note's found text)
+    if (task.pendingAsk) { task.resolved.push({ asked: task.pendingAsk, chose: label, at: safePath(step.url), ...(ids.length ? { ids } : {}) }); task.pendingAsk = null }
     // A choice code took from the record is settled again this run: the new record carries it forward (with today's label).
-    else if (step.opened.recordedAsked) task.resolved.push({ asked: step.opened.recordedAsked, chose: label, at: safePath(step.url) })
+    else if (step.opened.recordedAsked) task.resolved.push({ asked: step.opened.recordedAsked, chose: label, at: safePath(step.url), ...(ids.length ? { ids } : {}) })
   }
   if (!task.host) task.host = hostOf(result.steps?.[0]?.url)
 }
 
+/** The identifiers this task is about: the settled choices' labels and address digits, this run's and the record's. */
+function taskIdentifiers(task) {
+  const out = new Set()
+  for (const item of [...(task.resolved || []), ...(task.prior?.resolved || [])]) { identifiersOf(item.chose).forEach(id => out.add(id)); (item.ids || []).forEach(id => out.add(id)) }
+  for (const id of task.openedIds || []) out.add(id)
+  return [...out]
+}
+/**
+ * textNearIdentifier(segments, ids) -> up to MAX_FOUND_SEGMENTS visible text segments: the first one that carries one of the ids and the
+ * ones right after it, bounded (MAX_FOUND_CHARS in all). [] when no segment carries an id: code never guesses what the status is.
+ */
+export function textNearIdentifier(segments, ids) {
+  const list = (Array.isArray(segments) ? segments : []).map(text => compactText(String(text ?? ''), 120)).filter(Boolean)
+  if (!ids?.length) return []
+  const at = list.findIndex(text => identifiersOf(text).some(id => ids.includes(id)))
+  if (at < 0) return []
+  const out = []
+  let used = 0
+  for (const text of list.slice(at, at + MAX_FOUND_SEGMENTS)) { if (used + text.length > MAX_FOUND_CHARS) break; out.push(text); used += text.length }
+  return out
+}
+
 /** The one structured line the subjective model receives. Closed vocabulary, counts, and (for a choice) up to three element labels. */
-export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null }) {
+export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null, found = [] }) {
   const body = { id: task.taskId, status, ...(code ? { code } : {}),
     ...(candidates.length ? { candidates: candidates.slice(0, 3).map(item => compactText(item.replace(/^\[[A-Z]\d+\]\s*/, ''), 60)) } : {}),
     // c17: a confirmation names what it confirms against (the label the earlier run settled on, from this app's own record)
     ...(typeof recorded === 'string' && recorded.trim() ? { recorded: compactText(recorded.replace(/^\[[A-Z]\d+\]\s*/, ''), 60) } : {}),
+    // c20 (owner decision c19 (3)): on a finished task, the page text code located next to the task's identifier, so the subjective model can
+    // report it (page_text; only where the run's models may receive Browser data)
+    ...(Array.isArray(found) && found.length ? { found: found.slice(0, MAX_FOUND_SEGMENTS) } : {}),
     ...(typeof detail === 'string' && PUBLIC_CODE.test(detail) ? { detail } : {}),
     stepsDone: task.steps, actions: { ...task.actions } }
   const next = status === 'done' ? 'report_to_user' : status === 'need_context' ? 'ask_user_in_chat' : 'tell_user_and_ask_in_chat'
@@ -266,7 +295,8 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
  * handle({ run, conversationKey, message, hosts? }) → { handled: false, reason } | { handled: true, status, note, taskId, resumed }
  * Gate: the provider's reflex gate (mode on + key). Off or no key: nothing is called.
  */
-export function createDirectBrowserEntry({ provider, store, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS } = {}) {
+// pageTextInNote(): whether this run's models may receive Browser data (the run's egress gate, page_text); off by default.
+export function createDirectBrowserEntry({ provider, store, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false } = {}) {
   if (!provider || typeof provider.runDirectTask !== 'function' || typeof provider.reflexScope !== 'function') throw new TypeError('provider must offer runDirectTask')
   const note = (key, raw) => { try { calibration?.record?.(raw) } catch { /* recording never changes behaviour */ } return key }
   const record1 = (answers, count, would, fallback) => {
@@ -350,10 +380,12 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
 
   function fromResult(task, result) {
     switch (result.outcome) {
-      case 'done':
+      case 'done': {
         task.status = 'done'; task.pause = null; store.touch(task)
         remember(task, { status: 'done' })
-        return { handled: true, status: 'done', taskId: task.taskId, note: subjectiveNote(task, { status: 'done' }) }
+        const found = pageTextInNote() === true ? textNearIdentifier(result.text, taskIdentifiers(task)) : []
+        return { handled: true, status: 'done', taskId: task.taskId, note: subjectiveNote(task, { status: 'done', found }) }
+      }
       case 'needs_user_context': {
         const candidates = result.candidates || []
         // c17: with exactly one candidate there is nothing to choose between: the person is asked to confirm it (closed code, worded by the
