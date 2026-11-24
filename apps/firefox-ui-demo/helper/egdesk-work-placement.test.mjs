@@ -16,6 +16,7 @@ import { normalizeEntry } from './egdesk-decision-calibration-log.mjs'
 import { PLACEMENT_ISOLATION, PLACEMENT_PREDICATE_YES, WORK_PLACEMENT_LIMITS, codeOutcome, placementRequests, createWorkPlacement, createWorkPlacementHttpHandler, normalizePlacementDto, placementQuestions, pointerWriterPrompt, readPlacement } from './egdesk-work-placement.mjs'
 import * as WP from '../overlay/resources/EGDeskWorkPlacement.sys.mjs'
 import * as SurfaceState from '../overlay/resources/EGDeskSurfaceState.sys.mjs'
+import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 
 const r = (x, y, width, height) => ({ x, y, width, height })
 const A = r(0, 0, 1200, 800), B = r(4000, 0, 1200, 800)   // region A: the owner's view; region B: the invited member's view
@@ -541,7 +542,7 @@ test('isolation (L1 c13, measured v2: one answer for every card of a request): o
 })
 
 // ================= 10. window "on", a surface that can wait (L1 c15): a bounded wait for the content answer before it opens =================
-function waitRig({ pref = 'on', people = [OWNER], cards = [], regions = [], bridge = {} } = {}) {
+function waitRig({ pref = 'on', people = [OWNER], cards = [], regions = [], bridge = {}, extraDeps = {}, extraBody = '' } = {}) {
   const calls = { posts: [], polls: 0, camera: 0 }, clock = { now: 0 }
   const node = (id, rect, extra = {}) => ({ id, isConnected: true, dataset: {}, _rect: rect, ...extra })
   const cardNodes = cards.map(c => node(c.id, c.rect, c.record ? { _resultRecord: c.record } : {})), regionNodes = regions.map((rect, i) => node(`region-${i}`, rect))
@@ -558,8 +559,8 @@ function waitRig({ pref = 'on', people = [OWNER], cards = [], regions = [], brid
     window: { addEventListener() {}, setTimeout: () => 1 }, persistentEntityGeometry: n => ({ ...n._rect, zIndex: 1 }), cardKindForPersistence: () => 'result',
     safeViewportWorldRect: () => ({ left: view.x, top: view.y, right: view.x + view.width, bottom: view.y + view.height }), viewportToCanvasPoint: (x, y) => ({ x, y }),
     safeViewportRect: () => ({ left: 0, top: 0, right: view.width, bottom: view.height }), deskStoreRequest,
-    workWaitNow: () => clock.now, workWaitSleep: async ms => { clock.now += ms } }
-  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('workSceneInputs')}\n${decl('noteWorkSurfacePlacement')}\nstate.noteWorkSurfacePlacement = noteWorkSurfacePlacement;\n${decl('placeWorkSurface')}\n${decl('resolveCanvasCardPlacement')}\nreturn { placeWorkSurface, resolveCanvasCardPlacement };`
+    workWaitNow: () => clock.now, workWaitSleep: async ms => { clock.now += ms }, ...extraDeps }
+  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('workSceneInputs')}\n${decl('noteWorkSurfacePlacement')}\nstate.noteWorkSurfacePlacement = noteWorkSurfacePlacement;\n${decl('placeWorkSurface')}\n${decl('resolveCanvasCardPlacement')}\n${extraBody}\nreturn { placeWorkSurface, resolveCanvasCardPlacement, ...(typeof extraOut === 'object' ? extraOut : {}) };`
   return { ...new Function(...Object.keys(deps), body)(...Object.values(deps)), calls, clock, state }
 }
 const MEMBER_B = { member: 'm-0123456789abcdef', self: false, active: true, viewport: r(2400, 200, 1200, 800), focusCard: null, lastInputAgeMs: 900 }
@@ -601,4 +602,69 @@ test('bounded wait: an answer that would now put it in the owner\'s view is re-c
   assert.match(zone, /const placement = \(runFile && options\.workPlacement\) \|\| resolveCanvasCardPlacement\('file', runFile \?/)
   assert.match(zone, /activate: !options\.restore && !options\.deferPresentation && !placement\.quiet,/, 'opened without focus')
   assert.equal(WP.WORK_PLACEMENT_WAIT_MS, 1500, 'the default Decision deadline')
+})
+
+// ================= 11. result cards wait under the same bounded rule (L1 c16, Main's position 3) =================
+// The real ChatState builds the record; the window's real openAnswerResultCard, resultCardPlacement and placeWorkSurface run; spawnResultCard is recorded.
+const ANSWER_THREAD = { id: 'thread-9', title: 'A사 견적', conversationId: 'thread-9', messages: [] }
+const ANSWER_MESSAGE = { id: 'msg-7', role: 'assistant', status: 'completed', conversationId: 'thread-9', runId: 'run-7', answerId: 'thread-9/run-7', createdAt: 1_700_000_000_000,
+  content: 'v2는 v1보다 단가가 12,000원에서 11,000원으로 낮습니다. 이 단가 인하를 소유자께서 승인해 주셔야 합니다.' }
+function resultRig(options = {}) {
+  const spawned = [], open = new Set(), notices = []
+  const extraDeps = { ChatState, codexMessageAuthorLabel: () => '분석 담당', boardNotice: text => notices.push(text),
+    makeSourceRef: (kind, fields) => `${kind}:${fields.scope}:${fields.id}`, findOpenCardBySourceRef: ref => (open.has(ref) ? { ref } : null),
+    spawnResultCard: o => { spawned.push(o); return { id: 'card', placement: o.workPlacement ?? null } } }
+  const extraBody = `const resultCardWaits = new Map();\n${decl('resultCardPlacement')}\nstate.resultCardPlacement = resultCardPlacement;\n${decl('openAnswerResultCard')}\nconst extraOut = { openAnswerResultCard, resultCardPlacement };`
+  return { ...waitRig({ ...options, extraDeps, extraBody }), spawned, open, notices }
+}
+test('result card wait: unless the pref is "on" nothing waits: the card opens at once, synchronously, with today\'s placement; an answer whose card is open waits for nothing', () => {
+  for (const pref of ['advisory', null, 'off']) {
+    const rig = resultRig({ pref, people: [OWNER, MEMBER_B], cards: [QUOTE_V1] })
+    const card = rig.openAnswerResultCard(ANSWER_THREAD, ANSWER_MESSAGE, { opener: null })
+    assert.deepEqual(card, { id: 'card', placement: null }, `${pref}: not a promise, opened now`)
+    assert.equal(rig.spawned.length, 1); assert.ok(!('workPlacement' in rig.spawned[0])); assert.equal(rig.calls.posts.length, 0)
+  }
+  const rig = resultRig({ people: [OWNER, MEMBER_B], cards: [QUOTE_V1] })
+  rig.open.add(`chat-answer:codex-answer:${ChatState.resultCardKey(ChatState.resultCardRecord(ANSWER_THREAD, ANSWER_MESSAGE))}`)
+  assert.deepEqual(rig.openAnswerResultCard(ANSWER_THREAD, ANSWER_MESSAGE), { id: 'card', placement: null }, 'already open: brought back at once (spawnResultCard), no wait')
+  assert.equal(rig.calls.posts.length, 0)
+  assert.equal(rig.openAnswerResultCard(ANSWER_THREAD, { ...ANSWER_MESSAGE, status: 'streaming' }), null); assert.match(rig.notices[0], /아직 카드로 만들 수 없습니다/)
+})
+test('result card wait: pref "on" -> the card opens only after the bounded wait; a timely "same matter" puts it beside that card, quietly; a second press shares the wait (one request)', async () => {
+  const rig = resultRig({ people: [OWNER, MEMBER_B], cards: [QUOTE_V1], bridge: { result: n => (n < 3 ? { status: 'pending' } : { status: 'decided', kind: 'beside_related', related: 'R1', source: 'decision' }) } })
+  const first = rig.openAnswerResultCard(ANSWER_THREAD, ANSWER_MESSAGE), again = rig.openAnswerResultCard(ANSWER_THREAD, ANSWER_MESSAGE)
+  assert.ok(first instanceof Promise && again instanceof Promise); assert.equal(rig.spawned.length, 0, 'nothing opens before the answer or the deadline')
+  await Promise.all([first, again])
+  assert.equal(rig.calls.posts.length, 1, 'one placement request for both presses'); assert.equal(rig.calls.posts[0].clientThreadId, 'thread-9')
+  assert.equal(rig.calls.posts[0].dto.surface, 'result')
+  const placed = rig.spawned[0].workPlacement
+  assert.ok(gapTo(placed, QUOTE_V1.rect) <= 25 && !hits(placed, OWNER.viewport) && !hits(placed, MEMBER_B.viewport) && placed.quiet, 'beside the v1 quote card, outside both views, quiet')
+  assert.ok(rig.clock.now <= WP.WORK_PLACEMENT_WAIT_MS); assert.equal(rig.calls.camera, 0)
+  assert.deepEqual(rig.state.workPlacementLog.at(-1), { surface: 'result', waited: true, decided: 'beside_related', opened: 'beside_related', source: 'decision', applied: true })
+})
+test('result card wait: the answer comes after 1.5 s -> the card opens at the rule\'s spot at the deadline; the late answer is only recorded by the bridge; nothing reads it and nothing moves', async () => {
+  const rig = resultRig({ people: [OWNER, MEMBER_B], cards: [QUOTE_V1], bridge: { result: () => ({ status: 'pending' }) } })
+  const card = await rig.openAnswerResultCard(ANSWER_THREAD, ANSWER_MESSAGE)
+  assert.equal(rig.clock.now, WP.WORK_PLACEMENT_WAIT_MS, 'waited exactly the bound')
+  assert.equal(rig.calls.polls, WP.WORK_PLACEMENT_WAIT_MS / WP.WORK_PLACEMENT_POLL_MS - 1, 'no read at or after the deadline')
+  const placed = rig.spawned[0].workPlacement
+  assert.ok(gapTo(placed, QUOTE_V1.rect) > 25 && gapTo(placed, MEMBER_B.viewport) < 900 && placed.quiet && !hits(placed, OWNER.viewport), 'the rule\'s spot beside B\'s view')
+  assert.deepEqual(rig.state.workPlacementLog.at(-1), { surface: 'result', waited: true, decided: null, opened: 'near_requester', source: 'rule', applied: true })
+  // the bridge answers late: the real placement runtime judges the very request the window posted and records "beside_related"
+  const b = bridge(judgeClient())
+  const s = b.placement.submit('dm', rig.calls.posts[0].dto, b.hb); assert.equal(s.status, 'queued'); b.beat(); await b.placement.idle()
+  const record = b.placement.result('dm', s.id)
+  assert.equal(record.status, 'decided'); assert.equal(record.kind, 'beside_related', 'recorded')
+  // ...and nothing in the window acts on it: no more reads, the one card is where it opened, no camera move
+  const before = { polls: rig.calls.polls, spawned: rig.spawned.length, rect: { ...card.placement } }
+  rig.clock.now += 10_000
+  assert.deepEqual({ polls: rig.calls.polls, spawned: rig.spawned.length, rect: { ...card.placement } }, before); assert.equal(rig.calls.camera, 0)
+})
+test('result card wait: the press, the published-result chip and spawnResultCard use the waited placement; restore never waits; opened without focus', () => {
+  assert.match(decl('openAnswerResultCard'), /state\.resultCardPlacement\(record\) : null;\n    return waiting \? waiting\.then\(open, \(\) => open\(null\)\) : open\(null\);/)
+  assert.match(surface, /const waiting = record \? \(state\.resultCardPlacement\?\.\(record\) \?\? null\) : null;\n        const workPlacement = waiting \? \(\(await waiting\.catch\(\(\) => null\)\) \?\? null\) : null;\n        return record \? spawnResultCard\(\{ record, opener: options\.opener \|\| null, \.\.\.\(workPlacement \? \{ workPlacement \} : \{\}\) \}\) : null;/)
+  const spawn = decl('spawnResultCard')
+  assert.match(spawn, /const placement = \(!options\.restore && options\.workPlacement\) \|\| resolveCanvasCardPlacement\('result', options\.restore \? \{\} :/)
+  assert.match(spawn, /\.\.\.\(placement\.quiet \? \{ activate: false \} : \{\}\)/)
+  assert.match(decl('resultCardPlacement'), /WorkPlacement\.workPlacementMode\(readSurfacePref\(WorkPlacement\.WORK_PLACEMENT_PREF\)\) !== 'on'\) return null;/)
 })

@@ -4345,7 +4345,11 @@
   function openAnswerResultCard(thread, message, options = {}) {
     const record = ChatState.resultCardRecord(thread, message, { author: codexMessageAuthorLabel(message) });
     if (!record) { boardNotice('이 답변은 아직 카드로 만들 수 없습니다. 답변이 끝난 뒤 다시 눌러 주세요.'); return null; }
-    return spawnResultCard({ record, opener: options.opener || null });
+    const open = workPlacement => spawnResultCard({ record, opener: options.opener || null, ...(workPlacement ? { workPlacement } : {}) });
+    // L1 c16: pref "on" and a new card -> it waits under the bounded rule first (state.resultCardPlacement hands back a promise); otherwise null and it
+    // opens at once, synchronously, as before.
+    const waiting = typeof state === 'object' && typeof state?.resultCardPlacement === 'function' ? state.resultCardPlacement(record) : null;
+    return waiting ? waiting.then(open, () => open(null)) : open(null);
   }
 
   // Cycle 8. A newer version of a published result arrived while an older one is still shown on a card: the card keeps its pose and content, and its
@@ -4413,7 +4417,7 @@
       if (record.source.outputId && existing._resultRecord?.source?.outputId !== record.source.outputId) existing._renderResultRecord?.(record);
       revealOpenCanvasCard(existing, { opener: options.opener || null, kind: 'result' }); return existing;
     }
-    const placement = resolveCanvasCardPlacement('result', options.restore ? {} : { workSurface: { kind: 'result', runId: record.source.runId, conversationId: record.source.conversationId, clientThreadId: record.source.threadId } });
+    const placement = (!options.restore && options.workPlacement) || resolveCanvasCardPlacement('result', options.restore ? {} : { workSurface: { kind: 'result', runId: record.source.runId, conversationId: record.source.conversationId, clientThreadId: record.source.threadId } });
     const shell = spawnDeskWindowShell({ id: `egd-result-card-${++cardSeq}`, kind: 'result', className: 'egd-result-card', sourceRef, ...(placement.quiet ? { activate: false } : {}),
       bodyClassName: 'egd-result-card-body', minWidth: 360, minHeight: 280,
       style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
@@ -9461,6 +9465,24 @@
   function workWaitNow() { return Date.now(); }
   function workWaitSleep(ms) { return new Promise(resolve => window.setTimeout(resolve, ms)); }
   state.placeWorkSurface = placeWorkSurface;
+  // L1 c16 (pref egdesk.workPlacement "on"): a NEW result card waits under the same bounded rule as a run's file viewer (placeWorkSurface: at most
+  // WORK_PLACEMENT_WAIT_MS for the content answer, then the rule's spot; opened quietly; never moved after). Null without the pref, for a record that
+  // cannot be a card, or when the same answer's card is already open (spawnResultCard brings that one back, so nothing waits).
+  // Synchronous null when nothing waits; a second press while one waits shares that wait (one request).
+  const resultCardWaits = new Map();
+  function resultCardPlacement(record) {
+    try {
+      if (WorkPlacement.workPlacementMode(readSurfacePref(WorkPlacement.WORK_PLACEMENT_PREF)) !== 'on') return null;
+      const restored = ChatState.restoreResultCardRecord(record), key = restored ? ChatState.resultCardKey(restored) : null;
+      if (!restored || !key || findOpenCardBySourceRef(makeSourceRef('chat-answer', { id: key, scope: 'codex-answer' }))) return null;
+      if (resultCardWaits.has(key)) return resultCardWaits.get(key);
+      const waiting = placeWorkSurface('result', { kind: 'result', runId: restored.source.runId, conversationId: restored.source.conversationId, clientThreadId: restored.source.threadId })
+        .catch(() => null).finally(() => resultCardWaits.delete(key));
+      resultCardWaits.set(key, waiting);
+      return waiting;
+    } catch { return null; }
+  }
+  state.resultCardPlacement = resultCardPlacement;
 
   // Cycle 9 (EGDeskJointPresence.sys.mjs). ONE presence.snapshot() for the placement runtime above and, mirrored to the bridge, for the heartbeat's audience rule.
   // Flag-gated and OFF by default: the first line is the whole default path. Unless the pref egdesk.presence is exactly "on" nothing below it runs, state.presence stays
@@ -17667,7 +17689,10 @@
         const current = getCodexThreadById(state.codex, threadId) || thread;
         const message = (current.messages || []).find(item => item.id === messageId) || null;
         const record = ChatState.publishedOutputCardRecord(current, message, read.output, read.markdown, { author: message ? codexMessageAuthorLabel(message) : 'Codex' });
-        return record ? spawnResultCard({ record, opener: options.opener || null }) : null;
+        // L1 c16: a new card waits under the bounded rule first (pref "on"); otherwise it opens as before
+        const waiting = record ? (state.resultCardPlacement?.(record) ?? null) : null;
+        const workPlacement = waiting ? ((await waiting.catch(() => null)) ?? null) : null;
+        return record ? spawnResultCard({ record, opener: options.opener || null, ...(workPlacement ? { workPlacement } : {}) }) : null;
       },
       addInputSources(threadId, sources) {
         const thread = getCodexThreadById(state.codex, threadId);

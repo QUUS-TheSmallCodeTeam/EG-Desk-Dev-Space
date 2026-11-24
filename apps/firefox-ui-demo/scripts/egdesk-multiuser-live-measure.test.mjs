@@ -11,7 +11,8 @@ import { DECISIONS_ENDPOINT, DECISION_MODEL } from '../helper/egdesk-decision-cl
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
 import { createMeasureTransport } from './egdesk-all-on-live-measure.mjs'
 import { allOnWorld, DM } from './egdesk-all-on.support.mjs'
-import { ANSWER, ANSWER_INFO, ASK, CHECK_NAMES, DEFAULT_CAPS, PLAN_FILE, PLAN_FILE_V1, SCRIPT_FILE, STEPS, STEPS_V1, loadScenarioPlan, main, runScenario, scenarioWorld, scriptedScenario } from './egdesk-multiuser-live-measure.mjs'
+import { DRAFT_CHECK_COPY } from '../helper/egdesk-draft-check.mjs'
+import { ANSWER, ANSWER_INFO, ASK, CHECK_NAMES, DEFAULT_CAPS, PLAN_FILE, PLAN_FILE_V1, PLAN_FILE_V2, SCRIPT_FILE, STEPS, STEPS_V1, loadScenarioPlan, main, runScenario, scenarioWorld, scriptedScenario } from './egdesk-multiuser-live-measure.mjs'
 
 const KEY = 'sk-synthetic-not-a-key-l1c14-000000000001'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -200,5 +201,25 @@ test('the v1 send, reproduced (c20): a first request slower than the turn\'s 800
   const posted = result.seen.newMessages[0].text
   assert.notEqual(posted, ANSWER); assert.ok(posted.includes('소유자께서 승인해 주셔야') && !posted.includes('12,000원에서 11,000원'), posted)
   assert.equal(result.checks.find(c => c.id === 'R0').pass, false, 'the soft check reports that A did not see the answer as written')
-  assert.deepEqual(result.checks.filter(c => c.severity === 'hard' && c.pass !== true).map(c => c.id), [], 'R1 (the posted answer is what is quoted), R3 and R4 hold')
+  assert.deepEqual(result.checks.filter(c => c.severity === 'hard' && c.pass !== true).map(c => c.id), [], 'R1 (v3: the answering model\'s own sentences of what A saw are quoted, no check copy), R3 and R4 hold')
+})
+
+test('the v2 send, reproduced (c21): both answers carry the draft check\'s appended caveat; the owner question quotes only the answering model\'s own sentences, so "nothing to do" stays the requester\'s branch and A gets no pointer for it', async () => {
+  const fast = provider(), slowFirst = async (url, init) => { const names = JSON.parse(Buffer.from(init.body).toString('utf8')).questions.map(q => q.name)
+    if (names.includes('answer_type')) await new Promise(resolve => setTimeout(resolve, 950)); return fast.fetchImpl(url, init) }
+  const calls = []; const spy = async (url, init) => { calls.push(Buffer.from(init.body).toString('utf8')); return slowFirst(url, init) }
+  const outcome = await runScenario({ plan: loadScenarioPlan(), send: true, key: KEY, fetchImpl: spy })
+  const follow = outcome.steps.find(s => s.id === 'followup'), result = outcome.steps.find(s => s.id === 'result')
+  // what A saw: the answers with the check's caveat (as in the v2 send)
+  for (const step of [result, follow]) assert.ok(step.seen.newMessages.find(m => m.by === 'agent').text.includes(DRAFT_CHECK_COPY.partial), step.id)
+  // what the owner question read: the model's own sentences, never the caveat
+  const owner = calls.filter(text => JSON.parse(text).questions.some(q => q.name === 'owner_action'))
+  assert.equal(owner.length, 2); for (const text of owner) assert.ok(!text.includes('자료를 알려 주세요') && !text.includes('확인되지 않은 부분'), 'no draft-check copy in the owner question')
+  assert.ok(owner[1].includes('따로 확인하실 일은 없습니다'), 'the follow-up\'s own sentence is quoted')
+  assert.deepEqual(follow.checks.filter(c => c.severity === 'hard' && c.pass !== true).map(c => c.id), [], 'F1 and F3 hold: the requester\'s branch, no pointer to A')
+  assert.equal(follow.checks.find(c => c.id === 'F2').pass, true, 'the owner question says no')
+  assert.deepEqual(result.checks.filter(c => c.severity === 'hard' && c.pass !== true).map(c => c.id), [], 'the decision result still points A to it')
+  // v2 as registered would fail its F1 here (it asked for the whole posted answer, caveat included): kept as it was, not rewritten
+  const v2 = await runScenario({ plan: loadScenarioPlan(PLAN_FILE_V2), send: true, key: KEY, fetchImpl: slowFirst })
+  assert.equal(v2.steps.find(s => s.id === 'followup').checks.find(c => c.id === 'F1').pass, false)
 })

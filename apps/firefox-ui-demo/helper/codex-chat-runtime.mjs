@@ -5429,11 +5429,20 @@ export class CodexChatRuntime {
     const hb = typeof key === 'string' ? this.heartbeatFor(key) : null
     const run = hb ? this.heartbeatSubjects.get(hb)?.run : null
     if (!run) return null
-    return { request: this.runUserText(run), answer: run.status === 'inProgress' ? '' : this.runAnswerText(run), egress: this.decisionEgressFor(run, { canvasMaySend: canvasMaySend === true }) }
+    // the answer the placement judge quotes: the answering model's own sentences only, never the draft check's appended copy (R3/R4)
+    return { request: this.runUserText(run), answer: run.status === 'inProgress' ? '' : this.runOwnAnswerText(run), egress: this.decisionEgressFor(run, { canvasMaySend: canvasMaySend === true }) }
   }
 
   // What the person wrote for this run, and the answer the run posted (its own text, which its model received or wrote).
   runUserText(run) { return this.draftCheckTurns.get(run)?.userText || this.runRequestTexts?.get(run) || run.messages?.find(m => m.role === 'user')?.text || '' }
+  // The answer as the answering model wrote it: the posted answer without what the draft check appended (L1 c16). The check reports which part is its own
+  // copy; that is used only when the posted answer is exactly what the check handed back. Otherwise (no check, or another text was posted) the posted answer.
+  runOwnAnswerText(run) {
+    const posted = this.runAnswerText(run), mark = this.draftOwnTexts?.get(run)
+    if (!mark || !posted) return posted
+    const norm = text => String(text).replace(/\s+/g, ' ').trim()
+    return norm(posted) === norm(mark.posted) ? mark.own : posted
+  }
   runAnswerText(run) { return [...(run.messages || [])].reverse().find(m => m.role === 'assistant' && m.status === 'complete' && !String(m.id).startsWith('egdesk-flow:'))?.text || '' }
 
   // The message question for this beat while the run works, or nothing (a quiet beat costs no request). The request bounds are the heartbeat's.
@@ -5752,6 +5761,8 @@ export class CodexChatRuntime {
           : { feature: 'draft_check', mode: 'on', attached: false, judgments: [], fallback: 'timeout', timing: { totalMs, calls: null } })
       } catch { /* recording never affects posting */ }
       if (result?.outcome) this.draftOutcomes.set(run, result.outcome)
+      // L1 c16: which part of what will be posted the answering model wrote (the check's own copy excluded), for readers of the answer's meaning
+      if (result && typeof result.text === 'string') { try { (this.draftOwnTexts ??= new WeakMap()).set(run, { posted: result.text, own: typeof result.own === 'string' ? result.own : result.text }) } catch { /* recording only */ } }
       return result && typeof result.text === 'string' && result.text.trim() ? result.text : null
     } finally { clearTimeout(timer); controller.abort() }
   }
