@@ -114,6 +114,9 @@ test('(2) restart: after the switch the store and runtime restart; the room is s
   await f.complete(restarted, after)
   restarted.switchRoomAccount({ clientThreadId: 'room-a', engineProfileId: MAIN })
   assert.equal(f.store.roomMemoryOwnerKey('room-a'), 'account-main')
+  // the store itself keeps the FIRST account even if a later caller names another
+  f.store.switchRoomAccount({ clientThreadId: 'room-a', engineProfileId: WORK, memoryOwnerKey: 'account-other' })
+  assert.equal(f.store.roomMemoryOwnerKey('room-a'), 'account-main')
 })
 
 test('(2) the unanswered approval question follows the room to its new engine thread: the person\'s yes is read there and approves that command once', async t => {
