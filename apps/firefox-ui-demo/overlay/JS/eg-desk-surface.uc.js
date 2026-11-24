@@ -39,7 +39,7 @@
   const JointUI = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskJointBoardView.sys.mjs', { global: 'current' });
   const WorkbenchArrange=ChromeUtils.importESModule('chrome://userchrome/content/EGDeskWorkbenchArrange.sys.mjs',{global:'current'});
   let jointDesk = null,arrangeUI=null;
-  const arrange=()=>arrangeUI??=WorkbenchArrange.createWorkbenchArrange({window,document,canvas:()=>document.getElementById('egd-canvas-layer'),projections:()=>Object.values(state.boards.projections).filter(p=>p.jointAccess),meta:p=>jointDesk?.presentationBoard(p),verifyAuthority:()=>jointDesk?.fresh(),safe:safeViewportRect,camera:()=>({...state.pan,zoom:state.zoom,minZoom:ZOOM_MIN,maxZoom:ZOOM_MAX}),moving:()=>!!state.cardFullscreen?.cardId||Math.abs(state.zoom-state.zoomTarget)>.002||Math.abs(state.pan.x-state.panTarget.x)>1||Math.abs(state.pan.y-state.panTarget.y)>1,context:()=>state.boardSelectionRevision||0,geometry:persistentEntityGeometry,apply:applyPersistentEntityGeometry,history:()=>state.canvasLayoutHistory,collapse:(n,v)=>{(n._deskWindowShell?.setCollapsed||n._setWindowCollapsed)?.(!!v,{quiet:true})},undoApplied:token=>{const h=state.canvasLayoutHistory;if(h?.top()?.token===token)return state.undoCanvasLayout?.()===true&&h.top()?.token!==token;h?.drop(token);return false;},setCamera:c=>state.setCanvasViewportTarget({pan:{x:c.x,y:c.y},zoom:c.zoom},{immediate:true}),record:n=>jointDesk?.recordPose(n),dirty:n=>markAgendaDirty('layout',n),refresh:()=>{for(const p of Object.values(state.boards.projections))refreshBoardRegion(p);refreshDeskMinimap();},http:deskStoreRequest,notice:boardNotice});
+  const arrange=()=>arrangeUI??=WorkbenchArrange.createWorkbenchArrange({window,document,canvas:()=>document.getElementById('egd-canvas-layer'),projections:()=>Object.values(state.boards.projections).filter(p=>p.jointAccess),meta:p=>jointDesk?.presentationBoard(p),verifyAuthority:()=>jointDesk?.fresh(),safe:safeViewportRect,camera:()=>({...state.pan,zoom:state.zoom,minZoom:ZOOM_MIN,maxZoom:ZOOM_MAX}),moving:()=>!!state.cardFullscreen?.cardId||Math.abs(state.zoom-state.zoomTarget)>.002||Math.abs(state.pan.x-state.panTarget.x)>1||Math.abs(state.pan.y-state.panTarget.y)>1,context:()=>state.boardSelectionRevision||0,geometry:persistentEntityGeometry,apply:applyPersistentEntityGeometry,history:()=>state.canvasLayoutHistory,pendingRetrieval:()=>{const p=state.briefingRetrievalOffer||null;state.briefingRetrievalOffer=null;return p;},collapse:(n,v)=>{(n._deskWindowShell?.setCollapsed||n._setWindowCollapsed)?.(!!v,{quiet:true})},undoApplied:token=>{const h=state.canvasLayoutHistory;if(h?.top()?.token===token)return state.undoCanvasLayout?.()===true&&h.top()?.token!==token;h?.drop(token);return false;},setCamera:c=>state.setCanvasViewportTarget({pan:{x:c.x,y:c.y},zoom:c.zoom},{immediate:true}),record:n=>jointDesk?.recordPose(n),dirty:n=>markAgendaDirty('layout',n),refresh:()=>{for(const p of Object.values(state.boards.projections))refreshBoardRegion(p);refreshDeskMinimap();},http:deskStoreRequest,notice:boardNotice});
   const jointUI = () => jointDesk || (jointDesk = JointUI.createUI(jointHost()));
   const SurfaceKeys = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceKeys.mjs', { global: 'current' });
   const MemoLink = ChromeUtils.importESModule('chrome://userchrome/content/surface/EGDeskSurfaceMemoLink.mjs', { global: 'current' });
@@ -4360,8 +4360,18 @@
   // reuse/retrieve judgments. No design, no publish, no change. The first line is the whole default path: with the flag unset nothing below it runs.
   const briefingObserved = new Set();
   state.observeBriefing = observeBriefing;
+  // Cycle 9, only with the flag on and a PROPOSED briefing: stale outputs of this Agent's earlier answers are offered as ONE fold preview. It is held until the user opens
+  // the desk arrangement panel (never opened for them, no focus taken); there it is a preview they can apply or leave, with undo and Cmd+Z like any arrangement.
+  function offerBriefingRetrieval(reply) {
+    if (reply?.outcome !== 'presented' || !Array.isArray(reply.retrievals)) return;
+    const collapse = reply.retrievals.map(item => item?.viewId).filter(id => typeof id === 'string' && document.getElementById(id)?.classList?.contains('egd-result-card')).map(id => ({ id, value: true }));
+    if (!collapse.length) return;
+    state.briefingRetrievalOffer = { option: 'retrieval', collapse };
+    boardNotice('오래된 결과 카드를 접는 정리 제안이 있습니다. 책상 빠른 정리를 열면 미리 볼 수 있습니다.');  // copy pending approval
+  }
   function observeBriefing(run) {
-    if (BriefingHost.briefingFlowMode(readSurfacePref(BriefingHost.BRIEFING_FLOW_PREF)) !== 'advisory' || run?.boardMember === true) return;
+    const flowMode = BriefingHost.briefingFlowMode(readSurfacePref(BriefingHost.BRIEFING_FLOW_PREF));
+    if (flowMode === 'off' || run?.boardMember === true) return;
     try {
       const thread = getCodexThreadById(state.codex, run.localThreadId);
       const message = [...(thread?.messages || [])].reverse().find(item => item.role === 'assistant' && item.runId === run.runId && typeof item.content === 'string');
@@ -4371,11 +4381,11 @@
       const cards = [...document.querySelectorAll('.egd-result-card, .egd-memo-card')].filter(card => card.isConnected && card.id && !card.dataset.jointManaged).map(card => ({
         id: card.id, kind: card.classList.contains('egd-result-card') ? 'result' : 'memo', rect: persistentEntityGeometry(card), collapsed: card.classList.contains('egd-card-collapsed'),
         record: card._resultRecord || null, memoSeq: card._memoRecord?.seq }));
-      const body = BriefingHost.observeRequest({ mode: 'advisory', report: message.content, answerId: message.answerId || null, candidates: BriefingHost.canvasBriefingCandidates(cards) });
+      const body = BriefingHost.observeRequest({ mode: flowMode, report: message.content, answerId: message.answerId || null, conversationId: run.conversationId || null, runId: run.runId || null, candidates: BriefingHost.canvasBriefingCandidates(cards) });
       if (!body) return;
       briefingObserved.add(key);
       if (briefingObserved.size > 200) briefingObserved.delete(briefingObserved.values().next().value);
-      void deskStoreRequest('POST', '/decision/briefing-observe', body, { timeoutMs: 20000 }).catch(() => {});
+      void deskStoreRequest('POST', '/decision/briefing-observe', body, { timeoutMs: flowMode === 'on' ? 60000 : 20000 }).then(reply => offerBriefingRetrieval(reply?.body)).catch(() => {});
     } catch { /* observing never affects the answer or the canvas */ }
   }
 

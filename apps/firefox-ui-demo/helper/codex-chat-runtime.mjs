@@ -993,6 +993,12 @@ export class CodexChatRuntime {
 
   // Server-only Context authority. Routing hints are not identity: never copy
   // a caller's ownerKey/epoch, or borrow Codex's identity for another engine.
+  // Cycle 9: the run of a finished answer, by its identities (the briefing flow proposes through that run's own context binding). Null when it is gone.
+  runFor({ conversationId, runId, answerId } = {}) {
+    for (const run of this.runs.values()) if (run.conversationId === conversationId && run.runId === runId && run.answerId === answerId) return run
+    return null
+  }
+
   contextAuthority(body = {}, trustedRoute = null) {
     const route = trustedRoute || this.requestEngineRoute(body)
     const { engineId } = route

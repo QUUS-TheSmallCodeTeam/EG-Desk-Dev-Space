@@ -40,7 +40,7 @@ export function answerFor(body, script, n) {
     return { name: q.name, type: 'choice', choice: pick, confidence: p, probabilities: [{ value: pick, probability: p }, { value: other, probability: 1 - p }] };
   });
 }
-export function rig(t, { mode = 'on', script, cap = 100000, hang = false } = {}) {
+export function rig(t, { mode = 'on', script, cap = 100000, hang = false, handlerOptions = {} } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egdesk-briefing-flow-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const S = { key: KEY, mode };
   const store = { status: 'configured', writable: true, getApiKey: () => S.key, savedAt: () => 17, hint: () => null, save: k => { S.key = k; return true; }, clear: () => { S.key = null; return true; } };
@@ -53,7 +53,7 @@ export function rig(t, { mode = 'on', script, cap = 100000, hang = false } = {})
     if (hang) return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }));
     return Response.json({ answers: answerFor(body, script, calls.length - 1), usage: { input_tokens: 11 } });
   };
-  const board = createBoardPresentationHttpHandler({ credentials: store, getMode: () => modeStore.mode, budget, fetchImpl: provider, calibrationLog: calibration });
+  const board = createBoardPresentationHttpHandler({ credentials: store, getMode: () => modeStore.mode, budget, fetchImpl: provider, calibrationLog: calibration, ...handlerOptions });
   const settings = createDecisionHttpHandler({ store, mode: modeStore, model: DECISION_MODEL, budget, verifyKey: async () => ({ status: 'verified' }), boardPresentation: board });
   const http = async (method, p, body) => {
     const req = Object.assign(Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]), { url: p, method, headers: { host: '127.0.0.1:39218', origin: 'chrome://browser', 'content-type': 'application/json' } });

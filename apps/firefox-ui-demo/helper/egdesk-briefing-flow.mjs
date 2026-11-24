@@ -30,6 +30,8 @@ const finiteRect = r => !!r && [r.x, r.y, r.width, r.height].every(Number.isFini
 
 // What the runtime knows about an already rendered component: who made it, for which answer, whether a newer output replaced it, whether it is stale, how it shows now.
 // Unknown provenance is treated as the user's own: only a component this Agent made for an EARLIER answer, now superseded or stale and still shown, can be retrieved.
+// A component can be a briefing target only if the publish path can bind it: a bound source, a run artifact, or a published result card (bound by the host).
+const targetableRef = ref => !!ref && typeof ref === 'object' && (typeof ref.sourceId === 'string' || typeof ref.artifactId === 'string' || typeof ref.outputId === 'string')
 const OWNERS = new Set(['agent', 'user', 'shared']), VISIBILITY = new Set(['visible', 'collapsed', 'offscreen'])
 function componentFacts(c, currentAnswerId) {
   const owner = OWNERS.has(c.owner) ? c.owner : 'user', visibility = VISIBILITY.has(c.visibility) ? c.visibility : 'visible'
@@ -50,7 +52,7 @@ export function enumerateBriefingFacts({ report = '', candidates = [], currentAn
   const usable = (Array.isArray(candidates) ? candidates : []).filter(c => c && typeof c.id === 'string' && KINDS.has(c.kind) && c.maySend === true && typeof c.label === 'string' && c.label.trim().length >= 3 && c.ref && typeof c.ref === 'object').slice(0, BRIEFING_LIMITS.maxCandidates)
   const lower = text.toLowerCase()
   const targets = usable.map((c, i) => ({ alias: 'T' + (i + 1), id: c.id, ref: c.ref, kind: c.kind, label: clean(c.label, BRIEFING_LIMITS.labelMax), ...(c.gist ? { gist: clean(c.gist, BRIEFING_LIMITS.gistMax) } : {}),
-    onBoard: c.onBoard === true, referenced: lower.includes(c.label.trim().toLowerCase()), ...(finiteRect(c.rect) ? { rect: { x: c.rect.x, y: c.rect.y, width: c.rect.width, height: c.rect.height } } : {}),
+    onBoard: c.onBoard === true, targetable: targetableRef(c.ref), referenced: lower.includes(c.label.trim().toLowerCase()), ...(finiteRect(c.rect) ? { rect: { x: c.rect.x, y: c.rect.y, width: c.rect.width, height: c.rect.height } } : {}),
     ...componentFacts(c, currentAnswerId) }))
   const n = v => Math.min(99999, v)
   const facts = { chars: n(text.length), lines: n(lines.filter(l => l.trim()).length), listItems: n(lines.filter(l => /^\s*(?:[-*+]|\d+[.)])\s+\S/.test(l)).length),
@@ -306,7 +308,7 @@ const retrievableOf = c => c.origin === 'agent-earlier' && (c.stale || c.superse
 
 /** reuseDto(enumeration, parts) -> the closed object for the reuse judge. Only components the user may send are in it (they are the only candidates). */
 export function reuseDto(enumeration, parts) {
-  return { components: enumeration.targets.filter(t => t.onBoard).map(t => ({ alias: t.alias, kind: t.kind, origin: t.origin, stale: t.stale, superseded: t.superseded, visibility: t.visibility, retrievable: t.retrievable,
+  return { components: enumeration.targets.filter(t => t.onBoard).map(t => ({ alias: t.alias, kind: t.kind, origin: t.origin, stale: t.stale, superseded: t.superseded, visibility: t.visibility, retrievable: t.retrievable, targetable: t.targetable,
       label: t.label, ...(t.gist ? { gist: t.gist } : {}) })),
     parts: parts.map(x => ({ alias: x.alias, label: x.label, chars: x.chars, coveredBy: [...x.coveredBy] })) }
 }
@@ -315,12 +317,12 @@ export function normalizeReuseDto(raw) {
     if (!exactKeys(raw, ['components', 'parts']) || !Array.isArray(raw.components) || !raw.components.length || raw.components.length > BRIEFING_LIMITS.maxCandidates || !Array.isArray(raw.parts) || raw.parts.length > MAX_REPORT_PARTS) return null
     const declared = new Set()
     const components = raw.components.map(c => {
-      const keys = Object.hasOwn(c ?? {}, 'gist') ? ['alias', 'kind', 'origin', 'stale', 'superseded', 'visibility', 'retrievable', 'label', 'gist'] : ['alias', 'kind', 'origin', 'stale', 'superseded', 'visibility', 'retrievable', 'label']
+      const keys = Object.hasOwn(c ?? {}, 'gist') ? ['alias', 'kind', 'origin', 'stale', 'superseded', 'visibility', 'retrievable', 'targetable', 'label', 'gist'] : ['alias', 'kind', 'origin', 'stale', 'superseded', 'visibility', 'retrievable', 'targetable', 'label']
       if (!exactKeys(c, keys) || !TARGET_ALIAS.test(c.alias) || c.alias.startsWith('N') || declared.has(c.alias) || !KINDS.has(c.kind) || !ORIGINS.has(c.origin) || typeof c.stale !== 'boolean' || typeof c.superseded !== 'boolean' ||
-          !VISIBILITY.has(c.visibility) || typeof c.retrievable !== 'boolean' || !plain(c.label, BRIEFING_LIMITS.labelMax) || (Object.hasOwn(c, 'gist') && !plain(c.gist, BRIEFING_LIMITS.gistMax))) throw 0
+          !VISIBILITY.has(c.visibility) || typeof c.retrievable !== 'boolean' || typeof c.targetable !== 'boolean' || !plain(c.label, BRIEFING_LIMITS.labelMax) || (Object.hasOwn(c, 'gist') && !plain(c.gist, BRIEFING_LIMITS.gistMax))) throw 0
       // The retrieve option is a closed rule of the system, not a claim of the chrome: it must follow from the facts.
       if (c.retrievable !== retrievableOf(c)) throw 0
-      declared.add(c.alias); return { alias: c.alias, kind: c.kind, origin: c.origin, stale: c.stale, superseded: c.superseded, visibility: c.visibility, retrievable: c.retrievable, label: c.label, ...(Object.hasOwn(c, 'gist') ? { gist: c.gist } : {}) }
+      declared.add(c.alias); return { alias: c.alias, kind: c.kind, origin: c.origin, stale: c.stale, superseded: c.superseded, visibility: c.visibility, retrievable: c.retrievable, targetable: c.targetable, label: c.label, ...(Object.hasOwn(c, 'gist') ? { gist: c.gist } : {}) }
     })
     const seen = new Set()
     const parts = raw.parts.map(x => {
@@ -338,8 +340,8 @@ export function prepareBriefingReuse({ mode = 'off', binding = '', dto } = {}) {
   const c = normalizeReuseDto(dto)
   if (!c) return manual
   const questions = [
-    ...c.components.map(x => choiceQuestion(`component_${x.alias}`, `What is the role of this existing board component (${x.alias}, a ${x.kind} made by ${x.origin}) for the final report? reuse = point a briefing step at it; irrelevant = the report does not need it${x.retrievable ? '; retrieve = it is an outdated output the agent made for an earlier answer, fold it away' : ''}. ${roleText}`,
-      [{ value: 'reuse', description: 'use it as a briefing target' }, { value: 'irrelevant', description: 'not needed for this report' }, ...(x.retrievable ? [{ value: 'retrieve', description: 'outdated output of an earlier answer: fold it away on the user screen' }] : [])])),
+    ...c.components.filter(x => x.targetable || x.retrievable).map(x => choiceQuestion(`component_${x.alias}`, `What is the role of this existing board component (${x.alias}, a ${x.kind} made by ${x.origin}) for the final report? reuse = point a briefing step at it; irrelevant = the report does not need it${x.retrievable ? '; retrieve = it is an outdated output the agent made for an earlier answer, fold it away' : ''}. ${roleText}`,
+      [...(x.targetable ? [{ value: 'reuse', description: 'use it as a briefing target' }] : []), { value: 'irrelevant', description: 'not needed for this report' }, ...(x.retrievable ? [{ value: 'retrieve', description: 'outdated output of an earlier answer: fold it away on the user screen' }] : [])])),
     ...c.parts.map(x => predicateQuestion(`new_${x.alias}`, `Is a NEW board component required to show part ${x.alias} of the report? Answer yes only if none of the existing components ${x.coveredBy.length ? `(covering it: ${x.coveredBy.join(', ')})` : '(none covers it by name)'} can show it. ${roleText}`)),
   ]
   const packet = { input: [{ role: 'user', content: [{ type: 'input_text', text: 'Existing board components and the parts of a final report. Reuse existing components before anything new is made.' }, { type: 'input_json', data: c }] }], questions }
@@ -351,6 +353,8 @@ export function readBriefingReuse(prepared, answers, currentBinding) {
   if (prepared?.status !== 'prepared' || prepared.kind !== 'briefing-reuse' || currentBinding !== prepared.binding) return base
   const components = [], parts = []
   for (const x of prepared.dto.components) {
+    // A component that can be neither a target nor retrieved has nothing to decide: it is simply not part of this briefing.
+    if (!x.targetable && !x.retrievable) { components.push({ alias: x.alias, decision: 'irrelevant', p: null }); continue }
     const r = readChoice(answers, `component_${x.alias}`, { minConfidence: REUSE_BARS.component, minMargin: REUSE_BARS.margin })
     if (r.state === 'unknown' || !['reuse', 'irrelevant', 'retrieve'].includes(r.value)) return base
     const allowed = r.value !== 'retrieve' || x.retrievable
@@ -374,7 +378,7 @@ export function briefingReuseCalibrationEntry(prepared, answers, result) {
 /** What the design may use, from the judge's reading: reuse set, retire list (code re-checks eligibility), parts where a new component is allowed (never where a reused component already covers it). */
 export function constraintFrom(reply, enumeration, parts) {
   const byAlias = new Map(enumeration.targets.map(t => [t.alias, t]))
-  const reuse = new Set(reply.components.filter(c => c.decision === 'reuse' && byAlias.get(c.alias)?.onBoard).map(c => c.alias))
+  const reuse = new Set(reply.components.filter(c => c.decision === 'reuse' && byAlias.get(c.alias)?.onBoard && byAlias.get(c.alias)?.targetable).map(c => c.alias))
   const retire = reply.components.filter(c => c.decision === 'retrieve' && byAlias.get(c.alias)?.retrievable === true && !reuse.has(c.alias)).map(c => c.alias)
   const newAllowed = new Map(), newBlocked = []
   for (const x of reply.parts) {
