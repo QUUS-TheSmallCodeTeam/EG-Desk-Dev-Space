@@ -552,3 +552,19 @@ test('N8 two questions in one run: each is one completed message with its own op
   assert.deepEqual(w.replyEvents(), ['reply.opened', 'reply.closed', 'reply.opened', 'reply.closed'])
   assert.equal(w.deltas().length, 3, 'three assistant messages, each whole')
 })
+
+test('N9 the task that finishes inside the held-open run still hands its content-minimal outcome to the memory sink, once, with the settled choice', async t => {
+  const written = []
+  const memory = async () => ({ packet: null, pages: [], scope: null })
+  const w = world(t, { entry: { memory, outcomeSink: async (candidate, args) => { written.push({ candidate, pages: args.memoryPages.length }); return { status: 'stored' } } } })
+  await w.send(MSG); await w.subjective()
+  assert.equal(written.length, 0, 'a question is not an outcome')
+  assert.equal((await w.send('두 번째 사업자로')).inRun, true)
+  await w.subjective()
+  assert.equal(written.length, 1)
+  const { candidate } = written[0]
+  assert.deepEqual([candidate.outcome, candidate.host], [{ status: 'done' }, 'portal.example.test'])
+  assert.match(candidate.text, /선택: 사업자 987-65-43210 @ \/invoices \[choice_needed\]/)
+  assert.doesNotMatch(candidate.text, /두 번째|https?:|\?/, 'the reply text and URLs are not in the record')
+  assert.equal(w.memoryCalls.length, 1, 'memory was fetched once, for the request; the in-run reply fetches nothing')
+})
