@@ -4359,6 +4359,7 @@
   // Cycle 8, advisory first and OFF by default: for a finished answer that names at least two cards on the canvas, ask the bridge to record the placement and
   // reuse/retrieve judgments. No design, no publish, no change. The first line is the whole default path: with the flag unset nothing below it runs.
   const briefingObserved = new Set();
+  state.observeBriefing = observeBriefing;
   function observeBriefing(run) {
     if (BriefingHost.briefingFlowMode(readSurfacePref(BriefingHost.BRIEFING_FLOW_PREF)) !== 'advisory' || run?.boardMember === true) return;
     try {
@@ -4377,6 +4378,8 @@
       void deskStoreRequest('POST', '/decision/briefing-observe', body, { timeoutMs: 20000 }).catch(() => {});
     } catch { /* observing never affects the answer or the canvas */ }
   }
+
+  state.noteOutputSuperseded = noteOutputSuperseded;
 
   function spawnResultCard(options = {}) {
     const record = ChatState.restoreResultCardRecord(options.record);
@@ -16429,12 +16432,13 @@
             if (run && event.event === 'annotation.published' && typeof surfaceZones !== 'undefined') surfaceZones.annotation?.receivePublishedAnnotation(run, event.details);
             // CHAT-06 Await: an Agent proposed a plan; its approval card goes under this run's answer.
             if (run && event.event === 'plan.proposed') planProposalFrame(run, event.details);
-            if (run && event.event === 'output.published') noteOutputSuperseded(event.details?.output);  // cycle 8: an older result card of the same output key is marked superseded
             if (run) { syncProtocolRun(run); emit(); }
-            if (run && event.event === 'run.completed') observeBriefing(run);  // cycle 8: off unless egdesk.briefingFlow is "advisory"
             state.noteChatAttention?.(event, run);
             // CTX-04: tool results can change tracked sources; '바뀜' reads again (still at most every 15 s).
             if (run?.localThreadId && InputContext.contextSourceRefreshSignal(event.event)) refreshContextSources(run.localThreadId, { signal: true });
+            // Cycle 8 (state hooks, like noteChatAttention): an older result card of the same output key is marked superseded; the briefing observer is off unless egdesk.briefingFlow is "advisory".
+            if (run && event.event === 'output.published') state.noteOutputSuperseded?.(event.details?.output);
+            if (run && event.event === 'run.completed') state.observeBriefing?.(run);
           }
           return;
         }

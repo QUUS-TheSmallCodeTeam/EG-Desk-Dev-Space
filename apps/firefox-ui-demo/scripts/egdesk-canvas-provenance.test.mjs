@@ -73,6 +73,12 @@ test('flag: only the exact value "advisory" turns it on; nothing else does', () 
   assert.equal(BriefingHost.observeRequest({ mode: 'off', report: 'Delay report and Invoice', candidates: [{ label: 'Delay report' }, { label: 'Invoice' }] }), null);
   assert.equal(BriefingHost.observeRequest({ mode: 'advisory', report: 'Only Delay report', candidates: [{ label: 'Delay report' }, { label: 'Invoice' }] }), null, 'fewer than two named cards: nothing to observe');
 });
+test('wiring: both hooks are state hooks called at the end of the chat.event case, after every existing statement (so the existing line-adjacency contracts hold)', () => {
+  const at = src.indexOf("case 'chat.event': {"), end = src.indexOf("case 'auth-status':", at); const body = src.slice(at, end);
+  assert.match(body, /state\.noteChatAttention\?\.\(event, run\);[\s\S]*refreshContextSources[\s\S]*state\.noteOutputSuperseded\?\.\(event\.details\?\.output\);\s+if \(run && event\.event === 'run\.completed'\) state\.observeBriefing\?\.\(run\);/);
+  assert.match(src, /state\.observeBriefing = observeBriefing;/); assert.match(src, /state\.noteOutputSuperseded = noteOutputSuperseded;/);
+  assert.match(decl('observeBriefing'), /^  function observeBriefing\(run\) \{\n    if \(BriefingHost\.briefingFlowMode\(readSurfacePref\(BriefingHost\.BRIEFING_FLOW_PREF\)\) !== 'advisory' \|\| run\?\.boardMember === true\) return;/, 'the flag check is the first statement');
+});
 function observeEnv({ pref, run = { runId: 'run-9', localThreadId: 'thread-1', boardMember: false }, text = 'The Delay report and the Invoice totals explain the delay.' } = {}) {
   const log = { prefs: [], posts: [], queries: 0, geometry: 0 };
   const rec1 = outputRecord(1);
