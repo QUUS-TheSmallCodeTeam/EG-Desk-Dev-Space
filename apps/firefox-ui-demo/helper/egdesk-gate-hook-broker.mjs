@@ -19,6 +19,10 @@ import { predicateQuestion } from './egdesk-decision-questions.mjs'
 //   check({ sessionId, turnId, cwd, command }) → { decision: 'allow'|'deny'|'none', note? }   (the hook's question)
 //   turnStarted({ conversationId, turnId }) / turnEnded({ turnId })                          (the runtime's turn lifecycle)
 //   awaitingReply(conversationId) → boolean; readReply({ conversationId, reply, client, egress, timeoutMs }) → { approved }
+// One question at a time, in order (c14): in a turn only the first command that needs the person is asked about ('needs_person');
+// every other one that needs the person is 'queued' with its position, and is carried, in order, to the next turn (one hop), where
+// the head of that queue is the only one that can be asked. The person's reply is read against the one command asked about and
+// approves only that command.
 // Modes: off → every check is 'none' (nothing recorded); advisory → what WOULD be denied is recorded, the answer is 'none'; on → as above.
 export const GATE_HOOK_MODES = Object.freeze(['off', 'advisory', 'on'])
 export const GATE_HOOK_LIMITS = Object.freeze({ turns: 64, keysPerTurn: 64, approvalsPerTurn: 16, commandChars: 8000, replyChars: 2000, bodyBytes: 64 * 1024 })
@@ -58,6 +62,7 @@ export function createGateHookBroker({ mode = () => 'off', assess = null, home, 
   const L = { ...GATE_HOOK_LIMITS, ...limits }
   const turns = new Map() // turnId → { conversationId, approvals: Set(key), denies: Map(key → n), asks: [], checked: Set(key) }
   const awaiting = new Map() // conversationId → { ask, fromTurn } (one hop: the next message of that conversation)
+  const carried = new Map() // conversationId → [{ key, command, cwd, reasons }]: needed the person, not yet asked (one hop, in order)
   const nextTurn = new Map() // conversationId → Set(key): approved by a reply whose turn has not been bound yet
   const currentMode = () => { try { const m = mode(); return GATE_HOOK_MODES.includes(m) ? m : 'off' } catch { return 'off' } }
   const note = (kind, extra = {}) => { try { record({ kind, ...extra }) } catch { /* recording only */ } }
@@ -65,11 +70,12 @@ export function createGateHookBroker({ mode = () => 'off', assess = null, home, 
     if (typeof turnId !== 'string' || !turnId) return null
     let turn = turns.get(turnId)
     if (!turn) {
-      turn = { conversationId, approvals: new Set(), denies: new Map(), asks: [], checked: new Set() }
+      turn = { conversationId, approvals: new Set(), denies: new Map(), asked: null, queued: [], carry: [], checked: new Set() }
       turns.set(turnId, turn)
       while (turns.size > L.turns) turns.delete(turns.keys().next().value)
     }
     if (!turn.conversationId && conversationId) turn.conversationId = conversationId
+    if (turn.conversationId && carried.has(turn.conversationId)) { turn.carry = carried.get(turn.conversationId); carried.delete(turn.conversationId) }
     if (turn.conversationId && nextTurn.has(turn.conversationId)) { for (const key of nextTurn.get(turn.conversationId)) turn.approvals.add(key); nextTurn.delete(turn.conversationId) }
     return turn
   }
@@ -79,8 +85,13 @@ export function createGateHookBroker({ mode = () => 'off', assess = null, home, 
       const turn = turns.get(turnId)
       if (!turn) return
       turns.delete(turnId) // its approvals expire with it
-      const ask = turn.asks.at(-1)
-      if (turn.conversationId && ask) awaiting.set(turn.conversationId, { ask, fromTurn: turnId })
+      if (!turn.conversationId) return
+      if (turn.asked) awaiting.set(turn.conversationId, { ask: turn.asked, fromTurn: turnId })
+      // what still needs the person, in order: the carried ones the model tried again in this turn but could not be asked about, then
+      // this turn's queued ones. One hop: a carried command the model did not try again is dropped.
+      const next = []
+      for (const item of [...turn.carry.filter(c => turn.denies.has(c.key)), ...turn.queued]) if (item.key !== turn.asked?.key && !next.some(n => n.key === item.key) && next.length < L.approvalsPerTurn) next.push(item)
+      if (next.length) carried.set(turn.conversationId, next); else carried.delete(turn.conversationId)
     },
     awaitingReply: conversationId => awaiting.has(conversationId),
     wasChecked: (turnId, command, cwd) => turns.get(turnId)?.checked.has(commandKey(command, cwd)) === true,
@@ -109,9 +120,18 @@ export function createGateHookBroker({ mode = () => 'off', assess = null, home, 
       const count = turn ? (turn.denies.get(key) ?? 0) + 1 : 2
       if (turn && turn.denies.size < L.keysPerTurn) turn.denies.set(key, count)
       if (count === 1) {
-        if (turn.asks.length < L.approvalsPerTurn) turn.asks.push({ key, command, cwd, reasons })
-        note('denied_ask', { mode: m, rule: floor.length > 0, reasons })
-        return { decision: 'deny', note: gateNote({ status: 'needs_person', reasons, options: GATE_HOOK_OPTIONS, next: 'ask_user_in_chat', retry: 'same_command_after_yes' }) }
+        const item = { key, command, cwd, reasons }
+        const head = turn.carry.find(c => c.key !== turn.asked?.key) ?? null
+        if (!turn.asked && (!head || head.key === key)) { // the one question of this turn
+          turn.asked = item
+          note('denied_ask', { mode: m, rule: floor.length > 0, reasons })
+          return { decision: 'deny', note: gateNote({ status: 'needs_person', reasons, options: GATE_HOOK_OPTIONS, next: 'ask_user_in_chat', retry: 'same_command_after_yes' }) }
+        }
+        const order = [...(turn.asked ? [turn.asked] : []), ...turn.carry.filter(c => c.key !== turn.asked?.key), ...turn.queued]
+        if (!order.some(o => o.key === key) && turn.queued.length < L.approvalsPerTurn) turn.queued.push(item)
+        const position = [...order, ...(order.some(o => o.key === key) ? [] : [item])].findIndex(o => o.key === key) + 1
+        note('denied_queued', { mode: m, rule: floor.length > 0, reasons })
+        return { decision: 'deny', note: gateNote({ status: 'queued', position, reasons, next: 'ask_after_previous_answer' }) }
       }
       try { onStop({ conversationId: turn?.conversationId ?? null, turnId }) } catch { /* ignore */ }
       note('denied_stop', { mode: m, rule: floor.length > 0, reasons })
@@ -137,7 +157,7 @@ export function createGateHookBroker({ mode = () => 'off', assess = null, home, 
       if (approved) { const set = nextTurn.get(conversationId) ?? new Set(); set.add(waiting.ask.key); nextTurn.set(conversationId, set) }
       return { approved, read: true }
     },
-    state: () => ({ turns: turns.size, awaiting: awaiting.size, nextTurn: nextTurn.size }),
+    state: () => ({ turns: turns.size, awaiting: awaiting.size, nextTurn: nextTurn.size, carried: carried.size }),
   })
 }
 

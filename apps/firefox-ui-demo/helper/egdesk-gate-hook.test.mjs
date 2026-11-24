@@ -78,7 +78,8 @@ test('broker: deny and ask once, stop on the second try; the person\'s yes appro
   assert.deepEqual(await broker.check({ sessionId: 'conv-1', turnId: 'T2', cwd: CWD, command: 'git push  --force   origin main' }), { decision: 'allow' }, 'spacing is not a different command')
   // replay: the same approval twice
   assert.equal((await broker.check({ sessionId: 'conv-1', turnId: 'T2', cwd: CWD, command: 'git push --force origin main' })).decision, 'deny')
-  assert.deepEqual(records.map(r => r.kind), ['denied_ask', 'denied_stop', 'reply_read', 'denied_ask', 'denied_ask', 'allowed_once', 'denied_ask'])
+  // (c14: one question per turn) in T2 the reworded command is the turn's one question; the other-directory command and the replay are queued
+  assert.deepEqual(records.map(r => r.kind), ['denied_ask', 'denied_stop', 'reply_read', 'denied_ask', 'denied_queued', 'allowed_once', 'denied_queued'])
   assert.ok(records.every(r => !JSON.stringify(r).includes('push')), 'records are content-free')
 })
 
@@ -203,10 +204,12 @@ test('runtime: the turn binds the hook; the person\'s next message is read once 
   const run2 = await h.chat.send({ message: 'yes, force push it', conversationId: run1.conversationId, requestId: 'r2' })
   assert.equal(h.requests.length, before + 1, 'one reply reading')
   assert.match(h.requests.at(-1), /reply_runs_command/); assert.match(h.requests.at(-1), /yes, force push it/)
-  // the last ask of the turn is the one the reply answers (git push origin main); the force push needs its own yes
-  assert.deepEqual(await broker.check({ sessionId: run2.conversationId, turnId: run2.runId, cwd: CWD, command: 'git push origin main' }), { decision: 'allow' })
-  assert.equal((await broker.check({ sessionId: run2.conversationId, turnId: run2.runId, cwd: CWD, command: 'git push origin main' })).decision, 'deny', 'once')
-  assert.equal((await broker.check({ sessionId: run2.conversationId, turnId: run2.runId, cwd: CWD, command: 'git push --force origin main' })).decision, 'deny')
+  // (c14, one at a time) the reply answers the one command asked about in run1 (the force push); the plain push was queued behind it,
+  // so it is the one question of run2 and needs its own yes
+  assert.deepEqual(await broker.check({ sessionId: run2.conversationId, turnId: run2.runId, cwd: CWD, command: 'git push --force origin main' }), { decision: 'allow' })
+  assert.equal((await broker.check({ sessionId: run2.conversationId, turnId: run2.runId, cwd: CWD, command: 'git push --force origin main' })).decision, 'deny', 'once')
+  const plain = await broker.check({ sessionId: run2.conversationId, turnId: run2.runId, cwd: CWD, command: 'git push origin main' })
+  assert.equal(JSON.parse(plain.note).egdesk_command_gate.status, 'needs_person')
   await h.complete(run2)
   // run2 denied again, so the next message is read once more (one hop); a turn without a deny leaves nothing waiting
   const settled = h.requests.length
@@ -230,4 +233,34 @@ test('hook not trusted or not installed: nothing is checked, so the runtime reco
   const unasked = h.calibrationLog.entries().filter(e => e.feature === 'terminal_gate' && e.gate?.unasked).map(e => [e.gate.rule, e.gate.hooked === true])
   assert.deepEqual(unasked, [[true, false], [false, true]])
   assert.equal(h.requests.length, 0)
+})
+
+test('several commands denied in one turn are asked one at a time, in order; each reply approves only the command it was asked about', async () => {
+  const broker = createGateHookBroker({ mode: () => 'on', home: '/home/synthetic' })
+  const A = 'git reset --hard HEAD~5', B = 'git push --force origin main', C = 'docker volume rm demo_pgdata'
+  const status = async (turnId, command) => { const out = await broker.check({ sessionId: 'c', turnId, cwd: CWD, command }); return out.decision === 'allow' ? 'allow' : JSON.parse(out.note).egdesk_command_gate }
+  const yes = async () => (await broker.readReply({ conversationId: 'c', reply: 'yes', client: replyClient(0.97, 0.01), egress: OPEN })).approved
+  broker.turnStarted({ conversationId: 'c', turnId: 'T1' })
+  assert.equal((await status('T1', A)).status, 'needs_person')
+  assert.deepEqual(await status('T1', B), { status: 'queued', position: 2, reasons: ['remote_irreversible'], next: 'ask_after_previous_answer' })
+  assert.deepEqual((await status('T1', C)).position, 3)
+  broker.turnEnded({ turnId: 'T1' })
+  assert.equal(await yes(), true) // answers A, the one asked about
+  broker.turnStarted({ conversationId: 'c', turnId: 'T2' })
+  assert.deepEqual(await status('T2', C), { status: 'queued', position: 2, reasons: ['container_data'], next: 'ask_after_previous_answer' }, 'B is ahead of C')
+  assert.equal((await status('T2', B)).status, 'needs_person', 'B is the one question of T2; the yes for A did not approve it')
+  assert.equal(await status('T2', A), 'allow')
+  broker.turnEnded({ turnId: 'T2' })
+  assert.equal(await yes(), true) // answers B
+  broker.turnStarted({ conversationId: 'c', turnId: 'T3' })
+  assert.equal(await status('T3', B), 'allow')
+  assert.deepEqual(await status('T3', A), { status: 'queued', position: 2, reasons: ['discards_history'], next: 'ask_after_previous_answer' }, 'A\'s approval expired with T2, and C (tried in T2) is ahead')
+  assert.equal((await status('T3', C)).status, 'needs_person')
+  broker.turnEnded({ turnId: 'T3' })
+  // a no answers its command (C) and approves nothing; what is still queued keeps its place for one more turn only if the model tries it again
+  assert.equal((await broker.readReply({ conversationId: 'c', reply: 'no', client: replyClient(0.03, 0.96), egress: OPEN })).approved, false)
+  broker.turnStarted({ conversationId: 'c', turnId: 'T4' }); broker.turnEnded({ turnId: 'T4' }) // the model gives up on C
+  broker.turnStarted({ conversationId: 'c', turnId: 'T5' })
+  assert.equal((await status('T5', 'git branch -D topic')).status, 'needs_person', 'nothing is carried past a turn that did not try it')
+  assert.equal((await status('T5', A)).status, 'queued')
 })
