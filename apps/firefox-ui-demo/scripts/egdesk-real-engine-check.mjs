@@ -30,7 +30,7 @@ async function main(argv) {
   if (!options.json) console.log(formatPlan(plan))
   let result
   try { result = await runCheck(options, scripts) } catch (error) {
-    if (error?.code === 'cleanup_not_guaranteed') { console.error(`not started: ${error.message}`); return 2 }
+    if (error?.code === 'cleanup_not_guaranteed' || error?.code === 'agent_room_needs_persisted') { console.error(`not started: ${error.message}`); return 2 }
     throw error
   }
   const lines = result.summary.conversations.map(c => `${c.ok ? 'ok  ' : 'FAIL'} ${c.set}/${c.id}  turns=${c.turns}  ${c.aborted ? `aborted=${c.aborted}  ` : ''}${c.failedChecks.length ? `failed=${c.failedChecks.join(',')}  ` : ''}${c.cleanup ? `cleanup=${c.cleanup.verifiedGone}/${c.cleanup.persisted} gone${c.cleanup.failures ? ` (${c.cleanup.failures} FAILED)` : ''}  ` : ''}${c.totalMs} ms`)

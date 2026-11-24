@@ -1,0 +1,63 @@
+{
+  "set": "real-engine-agent-reload-reuse-v1",
+  "description": "Pattern: an Agent-profile direct room with EGDESK_AGENT_RELOAD_REUSE on (L7 c27). Three turns on one thread. The first Agent turn after the start reloads once and records the parameters it loaded with (turn 2 is not asserted: its counts are recorded); the THIRD turn, with nothing changed, must skip the detach and resume: expect.resumes 0 and unsubscribes 0. Turn 1 has no resume (a new thread). The records carry engineRequests per turn, so the real counts are visible even where an expectation does not pin them. Needs --persisted-with-cleanup (a direct room is not one-time); no Decision model is needed.",
+  "conversations": [
+    {
+      "id": "reload-reuse",
+      "flags": {
+        "EGDESK_AGENT_RELOAD_REUSE": "on"
+      },
+      "agentProfile": {
+        "name": "기록 담당",
+        "role": "메모 읽어 주기",
+        "instructions": "폴더의 notes.txt를 읽고 사람이 묻는 줄만 한국어로 짧게 알려 준다.",
+        "tone": "concise"
+      },
+      "folder": {
+        "notes.txt": "첫째 줄: 발주 마감은 오후 3시\n둘째 줄: 출고는 금요일\n셋째 줄: 세금계산서는 경리팀으로\n"
+      },
+      "turns": [
+        {
+          "say": "notes.txt 첫째 줄에 뭐라고 적혀 있어?",
+          "expect": {
+            "toolCalls": [
+              "egdesk_read_file"
+            ],
+            "posted": true,
+            "answerIncludes": [
+              "3시"
+            ],
+            "noNativeTools": true,
+            "resumes": 0,
+            "unsubscribes": 0,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "둘째 줄은?",
+          "expect": {
+            "posted": true,
+            "answerIncludes": [
+              "금요일"
+            ],
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "셋째 줄은?",
+          "expect": {
+            "posted": true,
+            "answerIncludes": [
+              "경리"
+            ],
+            "noNativeTools": true,
+            "resumes": 0,
+            "unsubscribes": 0,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}
