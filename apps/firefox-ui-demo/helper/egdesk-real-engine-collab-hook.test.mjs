@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { runFakeAppServer } from '../scripts/real-engine/fake-app-server.mjs'
 import { BRIDGE_COMPOSITION, DECISION_DEPENDENT_FLAGS, DECISION_KEY_ENV, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { validateEngineScript, checkTurnExpectations } from './egdesk-real-engine-script.mjs'
-import { COLLAB_FLAGS, COLLAB_PEOPLE, attentionScene, checkCollabExpect, collabHook, createCollabWorld, presenceRows, validateCollabExpect } from './egdesk-real-engine-collab-hook.mjs'
+import { COLLAB_FLAGS, COLLAB_PEOPLE, attentionScene, checkCollabExpect, collabHook, createCollabWorld, identityLeak, presenceRows, validateCollabExpect } from './egdesk-real-engine-collab-hook.mjs'
 import { COLLAB_SAYS, COLLAB_SET, buildCollabScript } from './egdesk-collab-real-engine-script.mjs'
 import { CHECK_HOOKS, hookDecisionFlags, hookFlags } from './egdesk-real-engine-hooks.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
@@ -146,4 +146,12 @@ test('the hook\'s timer: presence is posted again every 3 s while the conversati
   const world = createCollabWorld({ setTimer: (f, ms) => { fn = f; ticks.push(ms); return { unref() {} } }, clearTimer: () => { cleared++ } })
   world.start(); world.start(); assert.deepEqual(ticks, [3000], 'one timer'); fn(); world.stop(); world.stop(); assert.equal(cleared, 1)
   assert.equal((await world.publish()).status, 200); assert.equal(world.mirror.snapshot()?.length, 2, 'the snapshot is held for the flow and the registry')
+})
+
+test('the identity rule (v4 K2): the member\'s feed alias, the Board id, a scene alias and a coordinate are leaks; the owner question\'s own words are not; the check disposes its hooks', () => {
+  const clean = JSON.stringify({ input: [{ role: 'user', content: `The person\'s request:\n${COLLAB_SAYS.compare}` }, { role: 'user', content: ANSWER_NEEDS_OWNER }], questions: [{ name: 'owner_action', instructions: 'Does this result need the owner of the desk to do something?' }] })
+  assert.equal(identityLeak(clean), false)
+  for (const leak of [COLLAB_PEOPLE.invited.member, COLLAB_PEOPLE.invited.board, '"x":12', '"width": 1200', 'asked by M2', '"M1"']) assert.equal(identityLeak(`${clean} ${leak}`), true, leak)
+  const check = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'egdesk-real-engine-check.mjs'), 'utf8')
+  assert.match(check, /for \(const a of attached\) \{ try \{ a\.dispose\?\.\(\) \}/, 'the check stops a hook\'s timers when the conversation ends')
 })

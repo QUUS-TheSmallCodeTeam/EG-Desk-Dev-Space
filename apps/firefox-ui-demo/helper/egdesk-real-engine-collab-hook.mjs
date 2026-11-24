@@ -184,6 +184,8 @@ export function attentionScene() {
     forRequester: { kind: 'surface_near_requester', distance: 'near', direction: 'right', insideView: [invited.scene], forMember: invited.scene } }
 }
 const COORDINATE = /"(?:x|y|width|height|left|top)"\s*:/
+/** Whether a Decision request's text holds what identifies a person or the Board, or a coordinate (multiuser v4 K2): the invited member's feed alias, the Board id, a scene alias, a coordinate key. */
+export const identityLeak = text => text.includes(COLLAB_PEOPLE.invited.member) || text.includes(COLLAB_PEOPLE.invited.board) || COORDINATE.test(text) || /"M[1-8]"|\bM[1-8]\b/.test(text)
 
 // ---- the hook ----
 const worlds = new WeakMap() // conversation (the script's object) -> its world: composed with the chat runtime's flow, then attached
@@ -267,7 +269,7 @@ export const collabHook = Object.freeze({
           att.requests = bodies.slice(markBodies).map(request => {
             const text = JSON.stringify(request), shared = (request.input ?? []).map(m => m.content).join('\n')
             return { family: 'work_placement', questions: (request.questions ?? []).map(q => q.name), shared: clip(shared, L.sharedChars),
-              identityLeak: text.includes(COLLAB_PEOPLE.invited.member) || text.includes(COLLAB_PEOPLE.invited.board) || COORDINATE.test(text) || /"M[1-8]"|\bM[1-8]\b/.test(text) }
+              identityLeak: identityLeak(text) }
           })
           rec.attention = att
         }
