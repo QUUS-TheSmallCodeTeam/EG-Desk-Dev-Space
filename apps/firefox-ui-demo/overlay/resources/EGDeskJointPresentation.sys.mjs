@@ -34,7 +34,7 @@ const undoStillValid = (u, now) => !!u && !!now &&
   u.before.targets.every(({ id }) => { const a = u.snapshot.cards.find(c => c.id === id), c = now.cards.find(c => c.id === id);
     return !!a && !!c && same(a.rect, c.rect) && a.z === c.z; }) &&
   (!u.before.camera || same(['x', 'y', 'zoom'].map(k => u.snapshot.camera[k]), ['x', 'y', 'zoom'].map(k => now.camera[k]))) &&
-  (u.before.collapse || []).every(({ id, applied }) => now.cards.find(c => c.id === id)?.collapsed === applied);
+  (u.before.collapse || []).every(({ id, applied }) => (now.cards.find(c => c.id === id) ?? now.folds?.find(c => c.id === id))?.collapsed === applied);
 // What a failed request says on screen: the same sentences the DM chooser shows for the same closed reasons (surface chat-choice outcomes).
 const FAILURE_NOTES = Object.freeze({
   no_credit: 'OpenAI API 크레딧이 부족해 추천을 받지 못했습니다. OpenAI 결제 설정에서 크레딧을 확인해 주세요.',
@@ -142,7 +142,8 @@ function snapshot(raw) {
     });
   const decision = raw.decision?.available === true && modeOK(raw.decision.mode) && typeof raw.decision.revision === 'string' && raw.decision.revision
     ? { mode: raw.decision.mode, revision: raw.decision.revision } : null;
-  return { revision: raw.revision, viewport: rect(raw.viewport), camera: { x, y, zoom, minZoom, maxZoom }, cards,overall:raw.overall===true,topZ:raw.topZ||0,links:(raw.links||[]).filter(e=>seen.has(e.child)&&seen.has(e.parent)).map(({child,parent,kind})=>({child,parent,kind})),
+  const folds = (Array.isArray(raw.folds) ? raw.folds : []).filter(f => f && typeof f.id === 'string' && f.id && !seen.has(f.id)).slice(0, 64).map(f => ({ id: f.id, collapsed: f.collapsed === true }));
+  return { revision: raw.revision, viewport: rect(raw.viewport), camera: { x, y, zoom, minZoom, maxZoom }, cards, folds,overall:raw.overall===true,topZ:raw.topZ||0,links:(raw.links||[]).filter(e=>seen.has(e.child)&&seen.has(e.parent)).map(({child,parent,kind})=>({child,parent,kind})),
     obstacles: raw.obstacles.filter(validRect).map(rect), decision };
 }
 export function decisionReviewPacket(p) {
@@ -223,7 +224,7 @@ export function createPresentationController(h) {
   function designScene(key) {
     const s = read(key);
     return s ? { viewport: s.viewport, camera: s.camera, topZ: s.topZ, obstacles: s.obstacles, links: s.links,
-      cards: s.cards.map(c => ({ id: c.id, rect: c.rect, z: c.z, kind: c.kind, maySendDescriptor: c.maySendDescriptor, movable: c.movable, pinned: c.pinned, inFrame: c.inFrame, collapsed: c.collapsed === true, minWidth: c.minWidth, minHeight: c.minHeight })) } : null;
+      folds: s.folds, cards: s.cards.map(c => ({ id: c.id, rect: c.rect, z: c.z, kind: c.kind, maySendDescriptor: c.maySendDescriptor, movable: c.movable, pinned: c.pinned, inFrame: c.inFrame, collapsed: c.collapsed === true, minWidth: c.minWidth, minHeight: c.minHeight })) } : null;
   }
   // Canvas design check, write side: an already validated redesign (EGDeskCanvasRedesign) becomes ONE preview choice. It is treated like any model
   // result: nothing moves until the user applies it, and apply re-checks mode, key and grants and the time window, then uses the same commit / undo / history.
@@ -241,7 +242,7 @@ export function createPresentationController(h) {
   // choice, applied through the same commit / undo / history with the same apply-time authority; nothing is deleted and no shared Board data is written.
   function offerRetrieval(plan) {
     if (!active || !sync() || active.job || plan?.option !== 'retrieval' || !Array.isArray(plan.collapse) || !plan.collapse.length) return false;
-    const a = active, byId = new Map(a.snapshot.cards.map(c => [c.id, c]));
+    const a = active, byId = new Map([...a.snapshot.cards, ...(a.snapshot.folds || [])].map(c => [c.id, c]));
     if (!plan.collapse.every(x => byId.get(x.id) && byId.get(x.id).collapsed !== true && x.value === true) || new Set(plan.collapse.map(x => x.id)).size !== plan.collapse.length) return false;
     a.plans = { ...choices(a), retrieval: { option: 'retrieval', camera: null, framing: null, targets: [], collapse: plan.collapse.map(x => ({ id: x.id, value: true })) } };
     a.retrieval = { expires: now() + RESULT_TTL_MS };
@@ -253,7 +254,7 @@ export function createPresentationController(h) {
     close();
     sync();
     const s = read(key);
-    if (!s || (!s.cards.length && undo?.key !== key)) return false;
+    if (!s || (!s.cards.length && !s.folds?.length && undo?.key !== key)) return false;
     const t0=now();const defaults = s.overall?Math.min(12,s.cards.length):(s.viewport.width >= 664 && s.viewport.height >= 200) ? 2 : 1;
     const ordered = s.cards.find(c => c.id === preferredId) ? [preferredId, ...s.cards.map(c => c.id).filter(id => id !== preferredId)] : s.cards.map(c => c.id);
     if(s.overall)ordered.sort((x,y)=>Number(!!s.cards.find(c=>c.id===y)?.inFrame)-Number(!!s.cards.find(c=>c.id===x)?.inFrame));
@@ -409,7 +410,7 @@ export function createPresentationController(h) {
     if (plan.option === 'keep') { close({ restoreFocus: true }); return true; }
     const before = { camera: plan.camera ? { x: a.snapshot.camera.x, y: a.snapshot.camera.y, zoom: a.snapshot.camera.zoom } : null,
       targets: plan.targets.map(({id,z})=>{const c=a.snapshot.cards.find(c=>c.id===id);return {id,rect:rect(c.rect),...(Number.isFinite(z)?{z:c.z}:{})};}),
-      ...(plan.collapse?.length ? { collapse: plan.collapse.map(({ id, value }) => ({ id, value: a.snapshot.cards.find(c => c.id === id)?.collapsed === true, applied: value })) } : {}) };
+      ...(plan.collapse?.length ? { collapse: plan.collapse.map(({ id, value }) => ({ id, value: (a.snapshot.cards.find(c => c.id === id) ?? a.snapshot.folds?.find(c => c.id === id))?.collapsed === true, applied: value })) } : {}) };
     const { camera, targets } = plan, key = a.key, collapse = plan.collapse || [];
     // Dismiss first: camera/geometry host notifications cannot invalidate a committing panel.
     close({ restoreFocus: true });

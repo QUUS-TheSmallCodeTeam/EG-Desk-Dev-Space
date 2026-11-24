@@ -20,6 +20,7 @@
   const InputContext = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskInputContext.sys.mjs');
   const ContextSuggestSettings = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskContextSuggestSettings.sys.mjs');
   const BriefingState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBriefingState.sys.mjs');
+  const BriefingHost = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBriefingHost.sys.mjs');
   const FileCardState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileCardState.sys.mjs');
   const BrowserAgentReceipts = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs');
   const BrowserGrant = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserGrant.sys.mjs');
@@ -4343,6 +4344,38 @@
     const record = ChatState.resultCardRecord(thread, message, { author: codexMessageAuthorLabel(message) });
     if (!record) { boardNotice('이 답변은 아직 카드로 만들 수 없습니다. 답변이 끝난 뒤 다시 눌러 주세요.'); return null; }
     return spawnResultCard({ record, opener: options.opener || null });
+  }
+
+  // Cycle 8. A newer version of a published result arrived while an older one is still shown on a card: the card keeps its pose and content, and its
+  // provenance records which output superseded it (saved with the card like its position). Nothing is redrawn, folded or removed.
+  function noteOutputSuperseded(output) {
+    for (const card of document.querySelectorAll('.egd-result-card')) {
+      const next = ChatState.supersedeResultRecord(card._resultRecord, output, { now: Date.now() });
+      if (!next) continue;
+      card._resultRecord = next;
+      markAgendaDirty('result-superseded', card);
+    }
+  }
+  // Cycle 8, advisory first and OFF by default: for a finished answer that names at least two cards on the canvas, ask the bridge to record the placement and
+  // reuse/retrieve judgments. No design, no publish, no change. The first line is the whole default path: with the flag unset nothing below it runs.
+  const briefingObserved = new Set();
+  function observeBriefing(run) {
+    if (BriefingHost.briefingFlowMode(readSurfacePref(BriefingHost.BRIEFING_FLOW_PREF)) !== 'advisory' || run?.boardMember === true) return;
+    try {
+      const thread = getCodexThreadById(state.codex, run.localThreadId);
+      const message = [...(thread?.messages || [])].reverse().find(item => item.role === 'assistant' && item.runId === run.runId && typeof item.content === 'string');
+      if (!message) return;
+      const key = `${run.runId}/${message.answerId || message.id}`;
+      if (briefingObserved.has(key)) return;
+      const cards = [...document.querySelectorAll('.egd-result-card, .egd-memo-card')].filter(card => card.isConnected && card.id && !card.dataset.jointManaged).map(card => ({
+        id: card.id, kind: card.classList.contains('egd-result-card') ? 'result' : 'memo', rect: persistentEntityGeometry(card), collapsed: card.classList.contains('egd-card-collapsed'),
+        record: card._resultRecord || null, memoSeq: card._memoRecord?.seq }));
+      const body = BriefingHost.observeRequest({ mode: 'advisory', report: message.content, answerId: message.answerId || null, candidates: BriefingHost.canvasBriefingCandidates(cards) });
+      if (!body) return;
+      briefingObserved.add(key);
+      if (briefingObserved.size > 200) briefingObserved.delete(briefingObserved.values().next().value);
+      void deskStoreRequest('POST', '/decision/briefing-observe', body, { timeoutMs: 20000 }).catch(() => {});
+    } catch { /* observing never affects the answer or the canvas */ }
   }
 
   function spawnResultCard(options = {}) {
@@ -16396,7 +16429,9 @@
             if (run && event.event === 'annotation.published' && typeof surfaceZones !== 'undefined') surfaceZones.annotation?.receivePublishedAnnotation(run, event.details);
             // CHAT-06 Await: an Agent proposed a plan; its approval card goes under this run's answer.
             if (run && event.event === 'plan.proposed') planProposalFrame(run, event.details);
+            if (run && event.event === 'output.published') noteOutputSuperseded(event.details?.output);  // cycle 8: an older result card of the same output key is marked superseded
             if (run) { syncProtocolRun(run); emit(); }
+            if (run && event.event === 'run.completed') observeBriefing(run);  // cycle 8: off unless egdesk.briefingFlow is "advisory"
             state.noteChatAttention?.(event, run);
             // CTX-04: tool results can change tracked sources; '바뀜' reads again (still at most every 15 s).
             if (run?.localThreadId && InputContext.contextSourceRefreshSignal(event.event)) refreshContextSources(run.localThreadId, { signal: true });
