@@ -122,7 +122,7 @@ test('bridge observe: advisory asks the placement judge and, if it would go to t
   assert.deepEqual(R.calls.map(c => c.questions[0].name), ['placement', 'component_T1']);
   assert.ok(R.calls[1].questions[0].choices.some(c => c.value === 'retrieve'), 'the superseded earlier output of this Agent is offered retrieve in the packet');
   assert.ok(!R.calls[1].questions.filter(q => q.name.startsWith('component_') && q.name !== 'component_T1').some(q => q.choices.some(c => c.value === 'retrieve')), 'the answer\'s own output is not offered retrieve; the memo is not even asked about (not a briefing target)');
-  const rows = R.calibration.entries(); assert.deepEqual(rows.map(x => [x.feature, x.mode, x.attached]), [['board_arrangement', 'advisory', false], ['board_arrangement', 'advisory', false]]);
+  const rows = R.calibration.entries(); assert.deepEqual(rows.map(x => [x.feature, x.mode, x.attached]), [['answer_briefing', 'advisory', false], ['answer_briefing', 'advisory', false]]);
   assert.ok(!/Delay|Invoice|메모|ans-|r1/.test(JSON.stringify(rows)), 'calibration is content-free');
   assert.equal(R.budget.snapshot().inputTokens, 22);
   // the verdict "bubble" stops after the first judgment
