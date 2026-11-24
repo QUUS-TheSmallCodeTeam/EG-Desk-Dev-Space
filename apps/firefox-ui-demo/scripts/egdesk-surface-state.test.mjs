@@ -99,7 +99,7 @@ function savedBriefingUiHarness({ respond, engineId = 'codex', verified = true, 
       state, document, listeners, () => {}, new Map(), new Map(), () => {}, null, () => {}, () => { saves++; }, () => refreshMinimap?.(), 'fixture');
   }
   const updateThreadById = (id, fn) => { const index = state.codex.threads.findIndex(item => item.id === id); if (index < 0) return null; return state.codex.threads[index] = fn(state.codex.threads[index]); };
-  const method = signature => { const start = surfaceSource.indexOf(`      ${signature}`), end = surfaceSource.indexOf('\n      },', start); assert.ok(start >= 0 && end > start); return surfaceSource.slice(start, end + 8); };
+  const method = signature => { const start = methodStart(signature), end = surfaceSource.indexOf('\n      },', start); assert.ok(start >= 0 && end > start); return surfaceSource.slice(start, end + 8); };
   const fits = [], prepared = new Set(), evidenceCalls = [], selectionRestores = [];
   const deps = { state, document, window, ChatState: Chat, BriefingState: Briefing, InputContext, epochScope, fetchJson, briefingCommentRecords: records,
     briefingResolvedTargets: (shown, step) => resolveEvidence ? resolveEvidence(shown, step) : prepareEvidence ? Briefing.resolveBriefingTargets(step || Briefing.currentBriefingStep(shown), {
@@ -1073,6 +1073,13 @@ function assertFocusTokens(css, selectors, { inset = false } = {}) {
 // Firefox overlay bootstrap, DOM handlers, bridge requests, or runtime code.
 // Source-body boundaries are identical for LF and Windows CRLF checkouts.
 const surfaceSource = readSurfaceSource();
+// A bridge method definition is `      name(args) {` at 6 spaces. A bare indexOf also matches earlier 6-space
+// call sites (e.g. the choice composer calling setDraft(draft);), so only accept definition lines.
+function methodStart(signature) {
+  const escaped = signature.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`^      ${escaped}[^\\n]*\\{$`, "m").exec(surfaceSource);
+  return match ? match.index : -1;
+}
 
 test('workflow File frames stay bound to the ready current SSE and do not change other event routing', () => {
   const start = surfaceSource.indexOf('      const fileEventStreamCurrent = () =>');
@@ -3940,7 +3947,7 @@ test('empty group Chat guides the first message while keeping title and auth fal
 });
 
 test('Chat composer starts compact but expands and scrolls for long requests', () => {
-  const body = surfaceSource.match(/            const resizeComposer = \(preserveViewport = true\) => \{([\s\S]*?)\n            \};\n            input\.addEventListener\('input'/)?.[1];
+  const body = surfaceSource.match(/            const resizeComposer = \(preserveViewport = true\) => \{([\s\S]*?)\n            \};\n(?:            choice\.attach\(\{[\s\S]*?\n            \}\);\n)?            input\.addEventListener\('input'/)?.[1];
   assert.ok(body);
   const resize = compileFunction(`${declaration('createChatComposerViewport')}\nconst composerViewport = createChatComposerViewport({ schedule() {} });\nconst boardDestination = null, boardPreview = null;\nreturn function resizeComposer(preserveViewport = true) {${body}\n            }`,
     ['input', 'activeThread', 'ChatState', 'codex', 'sendButton', 'chatRoomProjectSendBlock']);
@@ -6358,7 +6365,7 @@ function inputInspectorHarness({ engineId = 'codex', capture = null, beforeTrack
     return capture ? capture(response, request) : response;
   };
   const method = signature => {
-    const start = surfaceSource.indexOf(`      ${signature}`), end = surfaceSource.indexOf('\n      },', start);
+    const start = methodStart(signature), end = surfaceSource.indexOf('\n      },', start);
     assert.ok(start >= 0 && end > start);
     const code = surfaceSource.slice(start, end + 8);
     return signature === 'async refreshInputSourceChange(' && trackingTransform ? trackingTransform(code) : code;
@@ -7163,7 +7170,7 @@ test('Briefing room fence: real createThread/deleteThread ABA closes the old pre
   } });
   Object.assign(h.state.codex, { threadNonce: 0, threadDrafts: { [h.thread.id]: 'existing draft' }, messageThreadMap: {} });
   h.state.setCanvasViewportTarget = () => { cameraRestores++; };
-  const method = signature => { const start = surfaceSource.indexOf(`      ${signature}`), end = surfaceSource.indexOf('\n      },', start);
+  const method = signature => { const start = methodStart(signature), end = surfaceSource.indexOf('\n      },', start);
     assert.ok(start >= 0 && end > start); return surfaceSource.slice(start, end + 8); };
   const deps = { state: h.state, window: { confirm: () => true }, SELF_MEMBER: 'self', emit: h.emit,
     createCodexThread: (type, title) => ({ id: 'new-room', type, title, messages: [] }),
@@ -8690,6 +8697,7 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
     'return messageState;',
     '};',
     'const unsubscribe = () => {};',
+    'const choice = { dispose() { choiceCalls.push("dispose"); }, sync() {} };',
     'const composerObserver = null;',
     'let compositionInProgress = false, finishBoardComposition = null, deferredCodex = null;',
     'const onDocumentMouseDown = () => {}, onViewportMutate = () => {};',
@@ -8697,10 +8705,10 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
     cleanup,
     '};',
     'return { render, gesture: onMessageScrollGesture, cleanup };',
-  ].join('\n'), ['body', 'document', 'Element', 'requestAnimationFrame', 'window', 'codexBridge', 'ChatHistoryView', 'buildCodexNewMessageButton']);
+  ].join('\n'), ['body', 'document', 'Element', 'requestAnimationFrame', 'window', 'codexBridge', 'ChatHistoryView', 'buildCodexNewMessageButton', 'choiceCalls']);
 
   const harness = (initial = new ChatScrollLog({ last: '', height: 100, rows: [] })) => {
-    const frames = [], removed = [];
+    const frames = [], removed = [], choiceCalls = [];
     const body = {
       log: initial,
       querySelector(selector) { return selector === '.egd-codex-messages' ? this.log : null; },
@@ -8711,8 +8719,9 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
       { activeElement: null, removeEventListener(type) { removed.push('document:' + type); } },
       ChatScrollElement, callback => frames.push(callback),
       { removeEventListener(type) { removed.push('window:' + type); } }, { clearTaskAnswers: () => productionTaskAnswerFactory()(() => ({}), Chat.createChatEpochScope()).dispose() },
-      ChatHistoryView, onPress => ({ className: 'egd-codex-new-message-dock', press: onPress }));
+      ChatHistoryView, onPress => ({ className: 'egd-codex-new-message-dock', press: onPress }), choiceCalls);
     return {
+      choiceCalls,
       render: api.render,
       gesture: event => api.gesture({ target: body.log, ...event }),
       cleanup: api.cleanup,
@@ -8845,6 +8854,7 @@ test('Chat pending scroll intent preserves the rendered viewport across SSE rere
     const h = harness();
     h.render(new ChatScrollLog({ height: 1700 }));
     h.cleanup();
+    assert.deepEqual(h.choiceCalls, ['dispose'], 'the production cleanup also disposes the choice composer');
     h.log.scrollTop = 80;
     h.flush();
     assert.equal(h.log.scrollTop, 80);
@@ -8862,7 +8872,7 @@ function composerViewportHarness() {
   const mount = declaration('mountCodexHUD');
   const snapshot = mount.match(/      const oldInput = body\.querySelector\('\.egd-codex-input'\);[\s\S]*?\n      \} : null;/)?.[0];
   const restore = mount.match(/      const newInput = body\.querySelector\('\.egd-codex-input'\);[\s\S]*?(?=\n      if \(focusOpenedRoom\))/)?.[0];
-  const resize = mount.match(/            const resizeComposer = [\s\S]*?\n            \};\n(?=            input\.addEventListener\('input')/)?.[0];
+  const resize = mount.match(/            const resizeComposer = [\s\S]*?\n            \};\n(?=(?:            choice\.attach\(\{[\s\S]*?\n            \}\);\n)?            input\.addEventListener\('input')/)?.[0];
   const inputEvents = mount.slice(mount.indexOf("            input.addEventListener('input'"), mount.indexOf('            let composerWidth = 0;'));
   assert.ok(snapshot && restore && resize && inputEvents, 'test the production composer paths');
   const frames = [], microtasks = [], geometryWrites = [];
@@ -8911,6 +8921,7 @@ function composerViewportHarness() {
   const bind = compileFunction([
     viewportSource, viewportDeclaration, gesture,
     'let restoringComposerFocus = false, compositionInProgress = false, deferredCodex = null;',
+    'const choice = { sync() {} };',
     'const attach = () => { const input = body.querySelector(".egd-codex-input");',
     'const activeThread = { id: input.dataset.threadId, conversationId: null, preparingInput: false };',
     'const sendButton = {}, blockedSend = {}, boardDestination = null, boardPreview = null; let boardCompositionEnded = -Infinity;', resize, inputEvents,
@@ -8974,7 +8985,7 @@ test('Chat composer viewport: Backspace content shrink, changed rooms, unfocused
 });
 
 test('Chat composer reserves title, status and log space on compact cards', async (t) => {
-  const resizeBody = surfaceSource.match(/            const resizeComposer = \(preserveViewport = true\) => \{([\s\S]*?)\n            \};\n            input\.addEventListener\('input'/)?.[1];
+  const resizeBody = surfaceSource.match(/            const resizeComposer = \(preserveViewport = true\) => \{([\s\S]*?)\n            \};\n(?:            choice\.attach\(\{[\s\S]*?\n            \}\);\n)?            input\.addEventListener\('input'/)?.[1];
   const observerBody = surfaceSource.match(/            let composerWidth = 0;[\s\S]*?            composerObserver\.observe\(body\);/)?.[0];
   assert.ok(resizeBody && observerBody, 'production composer resizing remains directly testable');
   const bindResize = compileFunction(`${declaration('createChatComposerViewport')}\nconst composerViewport = createChatComposerViewport({ schedule() {} });\nconst boardDestination = null, boardPreview = null;\nreturn function resizeComposer(preserveViewport = true) {` + resizeBody + '\n}', [
@@ -13039,7 +13050,7 @@ function firstSendBriefingUiHarness({ hasAReceipt = false, assistantLifecycle = 
   assert.equal(InputContext.inputEvidenceKey(referenceB), InputContext.inputEvidenceKey({ ...transport.original, presentationRange: target.range }));
   const spawns = [], copy = value => JSON.parse(JSON.stringify(value));
   const method = signature => {
-    const start = surfaceSource.indexOf(`      ${signature}`), end = surfaceSource.indexOf('\n      },', start);
+    const start = methodStart(signature), end = surfaceSource.indexOf('\n      },', start);
     assert.ok(start >= 0 && end > start); return surfaceSource.slice(start, end + 8);
   };
   const names = ['el', 'getCodexThreadById', 'briefingInputReferences', 'briefingRangeIssue', 'openChatInputPanel', 'spawnInputEvidence'];
@@ -16106,7 +16117,10 @@ test('Chat room rows are buttons a keyboard can reach and choose, with the open 
   const item = surfaceSource.match(/          const item = el\('div', \{\n            class: `egd-codex-thread-item[\s\S]*?\n          bindChatRoomRowKeys\(item, \(\) => openRoomFromKeyboard\(thread\.id\)\);/)?.[0];
   assert.ok(item, 'the row keeps its class, click and key wiring together');
   assert.match(item, /'aria-current': activeThread && thread\.id === activeThread\.id \? 'true' : null,\n            role: 'button',\n            tabindex: '0',\n            'aria-label': codexThreadRowLabel\(thread\),\n            data: \{ focusKey: `room-\$\{thread\.id\}` \},/);
-  assert.match(item, /item\.addEventListener\('click', \(\) => codexBridge\.selectThread\(thread\.id, \{ openConversation: true \}\)\);/, 'the mouse path is unchanged');
+  // Intended: choosing a room by mouse or keyboard first lets the choice composer restore that room's list
+  // state (choice.selectListRoom), then opens the conversation exactly as before; both paths stay identical.
+  assert.match(item, /item\.addEventListener\('click', \(\) => \{ choice\.selectListRoom\(thread\.id\); codexBridge\.selectThread\(thread\.id, \{ openConversation: true \}\); \}\);/,
+    'the mouse path selects the list room, then opens the conversation');
   const label = compileFunction(`${declaration('codexThreadRowLabel')}\nreturn codexThreadRowLabel;`, ['codexThreadPreview', 'stripMarkdown'])(
     thread => thread.preview, text => text.replace(/\*\*/g, ''));
   assert.equal(label({ title: '보고서', unreadCount: 2, preview: '**초안** 끝' }), '보고서 · 안 읽은 메시지 2개 · 초안 끝');
@@ -16125,18 +16139,20 @@ test('Chat room rows are buttons a keyboard can reach and choose, with the open 
   // The compiled render takes the rebuilt composer as `newInput`, as the real render finds it.
   const shim = (composer, back) => {
     const calls = [];
+    const choice = { selectListRoom: id => calls.push(['selectListRoom', id]) };
     const api = compileFunction(['let focusOpenedRoom = false;',
       'const render = newInput => {', handoff, '};', opener, 'return { openRoomFromKeyboard, render, flag: () => focusOpenedRoom };'].join('\n'),
-    ['codexBridge', 'body', 'restoreChatFocus', 'focusState'])(
+    ['codexBridge', 'body', 'restoreChatFocus', 'focusState', 'choice'])(
       { selectThread(id, options) { calls.push([id, options]); api.render(composer); } },
       { querySelector: selector => selector === '.egd-codex-conversation-back' ? back : null },
-      () => calls.push(['restore']), null);
+      () => calls.push(['restore']), null, choice);
     return { api, calls };
   };
   const composer = focusable('composer'), back = focusable('back');
   const first = shim(composer, back);
   first.api.openRoomFromKeyboard('room-a');
-  assert.deepEqual(first.calls, [['room-a', { openConversation: true }]]);
+  assert.deepEqual(first.calls, [['selectListRoom', 'room-a'], ['room-a', { openConversation: true }]],
+    'the keyboard path does what the mouse click does: choice.selectListRoom, then selectThread with openConversation');
   assert.deepEqual(composer.focused, { preventScroll: true });
   assert.equal(first.api.flag(), false, 'only that one render moves focus');
   first.api.render(composer);
@@ -16230,7 +16246,7 @@ test('the room search keeps focus and caret across each filtered render and wait
   replaced.flush();
   assert.deepEqual(replaced.queries, [], 'an input already replaced by a render does nothing');
   // The render itself still holds back while composing.
-  assert.match(mount, /    const render = \(codex\) => \{\n      if \(compositionInProgress\) \{\n        deferredCodex = codex;\n        return;\n      \}/);
+  assert.match(mount, /    const render = \(codex\) => \{\n      choice\.sync\(\);\n      if \(compositionInProgress\) \{\n        deferredCodex = codex;\n        return;\n      \}/);
 });
 
 test('the lowest zoom that keeps Views in semantic detail follows the projection focus floors', () => {
@@ -19710,7 +19726,7 @@ test('CTX-03 suggestions: Korean reasons, consent rows one at a time, excluded r
   assert.deepEqual(store.contextSuggest.byThread.room.picked, ['egd-browser-1']);
 
   // Wiring: the area sits above the input row; the panel and the area share one attach path.
-  assert.match(surfaceSource, /return el\('div', \{ class: 'egd-codex-footer' \},\n              buildContextSuggestions\(activeThread, codexBridge\),\n              boardDestination\?\.node,\n              el\('div', \{ class: 'egd-codex-input-row' \},/);
+  assert.match(surfaceSource, /return el\('div', \{ class: 'egd-codex-footer' \},\n              buildContextSuggestions\(activeThread, codexBridge\),\n              boardDestination\?\.node,\n              choice\.panel,\n              el\('div', \{ class: 'egd-codex-input-row' \},/);
   assert.match(surfaceSource, /input\.addEventListener\('focus', \(\) => \{ if \(!restoringComposerFocus\) codexBridge\.requestContextSuggestions\?\.\(activeThread\.id\); \}\);/);
   assert.match(surfaceSource, /restoringComposerFocus = true;\n        try \{ newInput\.focus\(\{ preventScroll: true \}\); \} finally \{ restoringComposerFocus = false; \}/);
   assert.match(surfaceSource, /state\.codexBridge\.addInputSources\(threadId, userSelectedChatSources\(threadId, picked\.values\(\)\)\); close\(\);/);
@@ -23845,7 +23861,7 @@ test('saved Board canvas glue: pre-write name collision stays actionable; post-g
 
 function profileTransferBridgeMethods(fetchJson, epochScope) {
   const method = signature => {
-    const start = surfaceSource.indexOf(`      ${signature}`), end = surfaceSource.indexOf('\n      },', start);
+    const start = methodStart(signature), end = surfaceSource.indexOf('\n      },', start);
     assert.ok(start >= 0 && end > start); return surfaceSource.slice(start, end + 8);
   };
   return compileFunction(`return { ${method('async profileRequest(')}, ${method('createProfileTransferScope(')} };`, ['fetchJson', 'epochScope'])(fetchJson, epochScope);
@@ -26187,7 +26203,9 @@ test('Board composer executes Korean input and IME locally; disabled Enter expla
     getCodexThreadDraft: () => '', deskIcon: () => null, chatRoomProjectSendBlock: () => null, compositionInProgress: false,
     composerViewport: { cancel() {}, snapshot() {} }, ResizeObserver: class { observe() {} }, composerObserver: null, queueMicrotask() {},
     mountComposerMention: () => null, codexCurrentRun: () => null, inputState: { threadId: 'room' }, deferredCodex: null,
-    buildChatInputTray: () => null, buildContextSuggestions: () => null };
+    buildChatInputTray: () => null, buildContextSuggestions: () => null,
+    // The production choice composer has its own tests; here it contributes no nodes and no draft effect.
+    choice: { panel: null, trigger: null, questionHint: null, attach() {}, sync() {}, reset() {} } };
   const createElement = document.createElement;
   document.defaultView = { getComputedStyle: () => ({ minHeight: '35px', maxHeight: '80px' }) };
   document.createElement = tag => Object.assign(createElement(tag), { ownerDocument: document, scrollHeight: 35 });
