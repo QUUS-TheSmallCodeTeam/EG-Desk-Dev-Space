@@ -14,7 +14,7 @@ import { canvasViewSize, placeCanvasView } from '../overlay/resources/EGDeskSurf
 // (egdesk-briefing-catalog.mjs) and from the cards already on the board (with provenance). Nothing here talks to a network, publishes, moves a camera or writes the
 // Board: the host injects judge{} (bridge route) and fill().
 
-export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, maxFacts: 6, factMax: 300, maxMaterials: 12, usualMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 8, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
+export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, maxFacts: 6, factMax: 300, maxMaterials: 12, usualMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 8, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, pieceTurns: 4, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
 // A predicate counts as yes at or above `yes` and as no at or below `no`; anything between is undecided. Placeholders until calibrated (real predicates of the other features answer near 0 or 1).
 export const SKELETON_BARS = Object.freeze({ yes: .7, no: .3 })
 export const SKELETON_STAGES = Object.freeze(['place', 'fit', 'order', 'fill_check', 'coverage'])
@@ -560,8 +560,8 @@ export function buildGuide(items, scene, retire = []) {
     retrievals: [...retire] }
 }
 /** only: fill just these items again. rejected: closed words for what was not supported last time (e.g. "P2 line 2", "P1 explanation"). */
-export function fillRequest(guide, materials, only = null, rejected = []) {
-  return { kind: 'briefing_fill', ...(only ? { only: [...only] } : {}), ...(rejected.length ? { rejected: [...rejected] } : {}), guide: { ...guide, items: guide.items.filter(i => !only || only.has(i.id)) },
+export function fillRequest(guide, materials, only = null, rejected = [], cover = []) {
+  return { kind: 'briefing_fill', ...(only ? { only: [...only] } : {}), ...(rejected.length ? { rejected: [...rejected] } : {}), ...(cover.length ? { cover: [...cover] } : {}), guide: { ...guide, items: guide.items.filter(i => !only || only.has(i.id)) },
     materials: materials.map(m => ({ alias: m.alias, title: m.title, text: m.text, at: m.at, status: m.status })) }
 }
 function readSlot(schema, value, item, reported) {
@@ -584,13 +584,15 @@ function readSlot(schema, value, item, reported) {
  * The reply may only fill what the guide lists: an unknown item, field or slot refuses the whole reply (no new components, no extra steps). A slot the model
  * reports as unfillable, or leaves out, is an issue of that item, never a reason to invent a value.
  */
-export function validateFill(guide, reply, { only = null } = {}) {
+export function validateFill(guide, reply, { only = null, needTitle = false } = {}) {
   if (!isObj(reply) || !isObj(reply.items)) return { ok: false, reason: 'not-an-object' }
   if (Object.keys(reply).some(k => !['title', 'items', 'unfillable'].includes(k))) return { ok: false, reason: 'extra-field' }
   const wanted = guide.items.filter(i => !only || only.has(i.id)), ids = new Set(wanted.map(i => i.id))
   if (Object.keys(reply.items).some(k => !ids.has(k))) return { ok: false, reason: 'extra-item' }
-  const title = clean(reply.title, 400)
-  if (!only && (!title || title.length > guide.titleMax)) return { ok: false, reason: 'no-title' }
+  // Cycle 34: a title longer than its limit is cut at a word, not a reason to refuse the whole reply (a strict output schema cannot state a length, so the schema admits it).
+  const whole = !only || needTitle, raw = clean(reply.title, 400)
+  const title = raw.length > guide.titleMax ? clean(raw.slice(0, guide.titleMax).replace(/\s+\S*$/, '') || raw.slice(0, guide.titleMax), guide.titleMax) : raw
+  if (whole && !title) return { ok: false, reason: 'no-title' }
   const reported = new Set((Array.isArray(reply.unfillable) ? reply.unfillable : []).filter(u => isObj(u) && ids.has(u.item) && typeof u.slot === 'string').map(u => `${u.item}/${u.slot}`))
   const items = {}, issues = []
   for (const item of wanted) {
@@ -604,7 +606,7 @@ export function validateFill(guide, reply, { only = null } = {}) {
     if (out.slots.left !== undefined && out.slots.left === out.slots.right) issues.push({ item: item.id, slot: 'right', kind: 'mismatch' })
     items[item.id] = out
   }
-  return { ok: true, title: only ? null : title, items, issues }
+  return { ok: true, title: whole ? title : null, items, issues }
 }
 /**
  * The questions of the check after the fill, for one item: every piece of slot text against the ONE material it cites, and the step explanation against what the step shows.
@@ -853,15 +855,36 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
   const used = () => new Set(items.flatMap(i => i.reuse)), retire = () => scene.retrievable.filter(a => !used().has(a)) // a fold is only a proposal the person applies: decided by rule
   let guide = buildGuide(items, scene, retire()), title = null
   const filled = {}
-  const fillOnce = async (only, rejected = []) => {
+  // Why the last request produced nothing: the engine says 'timeout' | 'no-reply' | 'refused' | 'unusable' (a fill function without lastFailure is read as unusable).
+  const failureOf = () => (typeof fill.lastFailure === 'function' ? fill.lastFailure() : null)
+  const fillOnce = async (only, rejected = [], cover = []) => {
     if (stats.fillTurns >= SKELETON_LIMITS.fillTurns) return { bound: true }
     stats.fillTurns++
-    const want = fillRequest(guide, scene.materials, only, rejected)
-    stats.received.push({ turn: stats.fillTurns, keys: Object.keys(want), items: want.guide.items.map(i => `${i.id}:${i.component}`), materials: want.materials.map(m => m.alias), ...(rejected.length ? { rejected } : {}) })
-    return validateFill(guide, await fill(want), { only })
+    const want = fillRequest(guide, scene.materials, only, rejected, cover)
+    stats.received.push({ turn: stats.fillTurns, keys: Object.keys(want), items: want.guide.items.map(i => `${i.id}:${i.component}`), materials: want.materials.map(m => m.alias), ...(rejected.length ? { rejected } : {}), ...(cover.length ? { cover } : {}) })
+    const reply = await fill(want)
+    return { ...validateFill(guide, reply, { only }), failure: reply === null || reply === undefined ? failureOf() : null }
+  }
+  // Cycle 34 (owner rule U5): when the whole fill did not come back, ONE bounded re-design round asks for the items one by one (each reply is short, so each is asked inside
+  // its own time); the title is the first piece's. Not for a single item (nothing to split) and at most SKELETON_LIMITS.pieceTurns requests; any piece unusable -> stop.
+  const fillInPieces = async () => {
+    if (items.length < 2 || items.length > SKELETON_LIMITS.pieceTurns || stats.fillTurns >= SKELETON_LIMITS.fillTurns) return null
+    stats.fillTurns++; stats.pieces = []
+    const all = { ok: true, title: null, items: {}, issues: [] }
+    for (const item of items) {
+      stats.pieceTurns = (stats.pieceTurns ?? 0) + 1
+      const only = new Set([item.id]), want = fillRequest(guide, scene.materials, only)
+      stats.received.push({ turn: stats.fillTurns, piece: item.id, keys: Object.keys(want), items: want.guide.items.map(i => `${i.id}:${i.component}`), materials: want.materials.map(m => m.alias) })
+      const reply = await fill(want), read = validateFill(guide, reply, { only, needTitle: true })
+      stats.pieces.push({ item: item.id, ok: read.ok, ...(read.ok ? {} : { reason: read.reason }), ...(reply === null || reply === undefined ? { failure: failureOf() } : {}) })
+      if (!read.ok) return { ok: false, reason: `piece-${read.reason}`, failure: reply === null || reply === undefined ? failureOf() : null }
+      all.title ??= read.title; Object.assign(all.items, read.items); all.issues.push(...read.issues)
+    }
+    return all
   }
   let got = await fillOnce(null)
-  if (!got.bound && !got.ok) got = await fillOnce(null) // one retry for a reply that is not the asked shape
+  if (!got.bound && !got.ok && got.failure !== 'timeout') got = await fillOnce(null) // one retry for a reply that is not the asked shape (not after a timeout: the same request would time out again)
+  if (!got.bound && !got.ok) { const pieces = await fillInPieces(); if (pieces) { stats.pieceRound = true; if (pieces.ok) got = pieces } } // a failed round keeps the whole fill's reason as the detail (the pieces' own are in stats.pieces)
   if (got.bound || !got.ok) return done('fallback-chat', { reason: got.bound ? 'fill-bound' : 'fill-invalid', detail: got.reason })
   title = got.title; Object.assign(filled, got.items)
   let issues = got.issues, pending = new Set(items.map(i => i.id))
@@ -921,6 +944,24 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
   const coverage = { mode: coverageMode, asked: 0, redesign: null }
   const candidatesFor = cites => { const inItems = new Set(items.map(i => i.id))
     return scene.parts.filter(p => !inItems.has(p.alias) && decisions[p.alias] === 'undecided' && !dropped.some(d => d.part === p.alias) && p.options.some(o => o.component) && (cites === null || p.materials.some(a => cites.has(a)))) }
+  // Cycle 34 (owner rule U5): no undecided part to add (every part is already a card), but a fact that a material holds is not on the board -> the cards of those materials are
+  // written AGAIN, once, with the closed list of the materials whose statements they must carry (aliases only, never the answer's text); checked like any fill (code rules, the
+  // support questions) and asked again by the coverage question; still missing -> the chat answer.
+  const rewriteCovering = async cites => {
+    const targets = items.filter(i => cites === null || i.materials.some(a => cites.has(a)))
+    if (!targets.length) return done('fallback-chat', { reason: 'not-covered', coverage })
+    const cover = [...new Set(targets.flatMap(i => i.materials).filter(a => cites === null || cites.has(a)))].slice(0, 12)
+    coverage.redesign = { parts: [], from: 'rewrite', because: 'fact-missing', items: targets.map(i => i.id), cover }
+    const ids = new Set(targets.map(i => i.id)), before = Object.fromEntries(targets.map(i => [i.id, filled[i.id]]))
+    const one = await fillOnce(ids, [], cover)
+    if (one.bound || !one.ok || one.issues.length) return done('fallback-chat', { reason: one.bound ? 'fill-bound' : 'not-covered', coverage })
+    Object.assign(filled, one.items)
+    for (const item of targets) { const cap = layout.capacity.get(item.id), md = markdownOf(item); if (md !== null && cap && textLines(md, cap.widthPx) > cap.lines) { Object.assign(filled, before); return done('fallback-chat', { reason: 'not-covered', coverage }) } }
+    const checked = targets.map(item => fillChecks(item, filled[item.id], scene, catalog, { mode: checkMode })), questions = checked.flatMap(c => c.questions)
+    if (questions.length) { const verdict = await ask('fill_check', questions); if (verdict.unavailable) return unavailable(verdict, true); if (checked.some(c => c.failures.length) || questions.some(q => !isYes(verdict.answers[questionName(q)]))) return done('fallback-chat', { reason: 'not-covered', coverage }) }
+    else if (checked.some(c => c.failures.length)) return done('fallback-chat', { reason: 'not-covered', coverage })
+    return null
+  }
   const redesign = async (parts, because) => {
     const added = parts.slice(0, Math.max(0, SKELETON_LIMITS.maxParts - items.length)).map(part => { const option = part.options.find(o => o.component); return { part, option, item: itemFor(part, option, scene, ++n) } })
     coverage.redesign = { parts: added.map(a => ({ part: a.part.alias, trait: a.part.trait, component: a.option.value })), from: 'undecided-part', because }
@@ -962,8 +1003,7 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
       if (missing.length) {
         const cites = missing.some(f => f.cites === null) ? null : new Set(missing.flatMap(f => f.cites))
         const parts = candidatesFor(cites)
-        if (!parts.length) return done('fallback-chat', { reason: 'not-covered', coverage })
-        const stop = await redesign(parts, 'fact-missing')
+        const stop = parts.length ? await redesign(parts, 'fact-missing') : await rewriteCovering(cites)
         if (stop) return stop
         const r2 = await askFacts(missing)
         if (r2.unavailable) return unavailable(r2, true)

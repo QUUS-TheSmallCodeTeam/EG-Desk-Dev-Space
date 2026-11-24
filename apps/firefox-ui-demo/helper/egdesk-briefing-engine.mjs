@@ -78,8 +78,11 @@ const FILL_RULES = [
 export function fillPrompt(request) {
   // A rewrite after the check: closed words only for what was not supported by its material ("P2 line 2", "P1 explanation"); never the reviewer's text.
   const rejected = Array.isArray(request?.rejected) ? request.rejected.filter(w => typeof w === 'string' && /^P[1-6] (?:explanation|line \d{1,2}|row \d{1,2} (?:left|right))$/.test(w)).slice(0, 24) : []
+  // Cycle 34 (owner rule U5, one bounded re-design round): the materials whose statements the board must ALSO carry, by alias only (never the answer's text).
+  const cover = Array.isArray(request?.cover) ? request.cover.filter(a => typeof a === 'string' && /^M\d{1,2}$/.test(a)).slice(0, 12) : []
   const scope = (Array.isArray(request?.only) && request.only.length ? `Fill only these items again: ${request.only.join(', ')}.\n` : '') +
-    (rejected.length ? `A check found these parts of your previous data not supported by the material they cite: ${rejected.join('; ')}. Write them again from what the material says, keeping its actors, qualifiers, amounts and dates exactly, or report the slot as unfillable.\n` : '') + (request?.only?.length || rejected.length ? '\n' : '')
+    (cover.length ? `A check found that the board does not yet show everything these materials state: ${cover.join(', ')}. Write the listed items so that they carry every id, number, date, name and condition those materials state, as the material writes it.\n` : '') +
+    (rejected.length ? `A check found these parts of your previous data not supported by the material they cite: ${rejected.join('; ')}. Write them again from what the material says, keeping its actors, qualifiers, amounts and dates exactly, or report the slot as unfillable.\n` : '') + (request?.only?.length || rejected.length || cover.length ? '\n' : '')
   return `${FILL_FRAME}\n\n${scope}${dataBlock('Design guide (decided; do not change it)', request?.guide ?? null)}\n\n${dataBlock('Materials', request?.materials ?? [])}\n\nRules:\n${FILL_RULES}\n\nJSON shape: ${FILL_SHAPE}`
 }
 const unfence = value => { const m = /^\s*```[a-zA-Z]*\n([\s\S]*?)\n```\s*$/.exec(value); return (m ? m[1] : value).trim() }
@@ -95,12 +98,15 @@ export function createBriefingEngine({ runText, report = '', now = Date.now, lim
   const L = { ...BRIEFING_ENGINE_LIMITS, ...Object.fromEntries(Object.entries(limits).filter(([k, v]) => Object.hasOwn(BRIEFING_ENGINE_LIMITS, k) && Number.isFinite(v) && v > 0)) }
   const answer = typeof report === 'string' ? report.slice(0, L.reportMax) : ''
   const started = now()
-  let turns = 0, refused = 0, schemaInvalid = 0
+  let turns = 0, refused = 0, schemaInvalid = 0, last = null
   const ask = async (prompt, schema = null) => {
     const left = L.totalMs - (now() - started)
-    if (turns >= L.maxTurns || left <= 0) { refused++; return null }
+    if (turns >= L.maxTurns || left <= 0) { refused++; last = 'refused'; return null }
     turns++
-    try { const reply = await runText(prompt, { timeoutMs: Math.max(1, Math.min(L.turnMs, left)), ...(schema ? { outputSchema: schema } : {}) }); return typeof reply === 'string' && reply.length <= L.replyMax ? reply : null } catch { return null }
+    // Cycle 34: a null reply that came back only when its allotted time was up is a TIMEOUT (c33's check-7: two fill turns of 30.4 s each, no reply); asking the same
+    // thing again will not help, and the flow reads it through engine.lastFailure().
+    const allotted = Math.max(1, Math.min(L.turnMs, left)), at = now()
+    try { const reply = await runText(prompt, { timeoutMs: allotted, ...(schema ? { outputSchema: schema } : {}) }); if (typeof reply === 'string' && reply.length <= L.replyMax) return reply; last = reply === null || reply === undefined ? (now() - at >= allotted - 250 ? 'timeout' : 'no-reply') : 'unusable'; return null } catch { last = now() - at >= allotted - 250 ? 'timeout' : 'no-reply'; return null }
   }
   // The schema of a request (null when off or for a kind that is not constrained). A request that cannot be described is asked without one, as with the flag off.
   const schemaOf = request => { if (outputSchema !== true) return null; try { return outputSchemaFor(request) } catch { return null } }
@@ -111,7 +117,7 @@ export function createBriefingEngine({ runText, report = '', now = Date.now, lim
     if (value === null || violation(value, schema)) { schemaInvalid++; return null }
     return stripNulls(kind, value)
   }
-  const engine = async request => {
+  const run = async request => {
     const kind = request?.kind
     const schema = schemaOf(request)
     if (schema) {
@@ -131,6 +137,9 @@ export function createBriefingEngine({ runText, report = '', now = Date.now, lim
     }
     return null
   }
+  // The reason the last request produced nothing usable: 'timeout' | 'no-reply' | 'refused' (turn or time bound) | 'unusable' (a reply, but not the asked shape); null after a usable one.
+  const engine = async request => { last = null; const out = await run(request); if (out === null || out === undefined) last ??= 'unusable'; else last = null; return out }
+  engine.lastFailure = () => last
   engine.stats = () => ({ turns, refused, elapsedMs: Math.max(0, now() - started), ...(outputSchema === true ? { schemaInvalid } : {}) })
   return engine
 }
