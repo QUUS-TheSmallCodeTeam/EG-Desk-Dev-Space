@@ -37,6 +37,7 @@ import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
 import { createDecisionBudget, createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
+import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { createBoardPresentationHttpHandler } from './egdesk-board-presentation-http.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
@@ -230,6 +231,8 @@ const bridgeSettings = openBridgeSettings({ dataDir: path.join(dataDir, 'setting
 // never written there.
 const decisionCredentials = openDecisionCredentialStore({ dataDir: path.join(dataDir, 'settings') })
 const decisionBudgetStore = openDecisionBudgetStore({ dataDir: path.join(dataDir, 'settings') })
+// Content-free threshold-calibration record (canon 5.3): numbers and closed words only, own 0600 file, never exported.
+const decisionCalibrationLog = openCalibrationLog({ dataDir: path.join(dataDir, 'settings') })
 const decisionBudget = createDecisionBudget({ monthlyInputTokenCap: decisionBudgetStore.state?.cap ?? null, initial: decisionBudgetStore.state,
   onChange: state => { decisionBudgetStore.save(state) } })
 const recipientForDecisionKey = (key, endpoint, model) => decisionTopicRecipient(key, decisionCredentials.savedAt(), endpoint, model)
@@ -448,6 +451,7 @@ const chat = new CodexChatRuntime({
     mode: () => bridgeSettings.decisionContext.mode,
     configured: () => decisionCredentials.getApiKey() !== null,
     client: decisionClient,
+    calibrationLog: decisionCalibrationLog,
     topicRecipient: recipientForCodexDecisions,
     recipientForChatChoice: recipientForCodexDecisions,
     reviewRevision: () => handleBoardPresentationHttp.settingsRevision(),
