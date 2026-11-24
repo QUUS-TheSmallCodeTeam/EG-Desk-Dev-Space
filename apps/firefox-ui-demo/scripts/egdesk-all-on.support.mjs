@@ -29,7 +29,7 @@ import { openBridgeSettings } from '../helper/egdesk-bridge-settings.mjs'
 import { createTurnMemoryConfig } from '../helper/egdesk-turn-memory-wiring.mjs'
 import { createWikiAdapter, openWikiWrites } from '../helper/egdesk-wiki-adapter.mjs'
 import { createBrowserEntryConfig } from '../helper/egdesk-browser-entry-wiring.mjs'
-import { createPresenceMirror } from '../helper/egdesk-presence-mirror.mjs'
+import { createPresenceMirror, createRunRequesters } from '../helper/egdesk-presence-mirror.mjs'
 import { createWorkPlacement, createWorkPlacementHttpHandler } from '../helper/egdesk-work-placement.mjs'
 import { createBoardPresentationHttpHandler } from '../helper/egdesk-board-presentation-http.mjs'
 import { briefingDeps } from '../helper/egdesk-briefing-engine.mjs'
@@ -94,10 +94,13 @@ export function featureOf(names, cacheKey = '') {
 }
 
 /**
- * allOnWorld(t, { on }) → the world. on:true = every feature on; on:false = the bridge's default (every flag unset, Decisions mode off);
- * on:null = a runtime with no decisionContext at all (a bridge before any of these features).
+ * allOnWorld(t, { on, env, onePacket }) → the world. on:true = every feature on; on:false = the bridge's default (every flag unset,
+ * Decisions mode off); on:null = a runtime with no decisionContext at all (a bridge before any of these features).
+ * env: flag values that differ from "every feature on" (for example { EGDESK_WORK_PLACEMENT: 'advisory' }).
+ * onePacket: the turn-memory option that puts its pages under the context selection's packet. The bridge has no switch for it yet
+ *   (createTurnMemoryConfig accepts it; codex-bridge-server.mjs does not pass it), so here it is a harness option, default off like the bridge.
  */
-export function allOnWorld(t, { on = true, policy = {} } = {}) {
+export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = false } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-all-on-')); chmodSync(dir, 0o700)
   const cwd = path.join(dir, 'workspace'); mkdirSync(cwd)
   const store = openChatStore({ dataDir: path.join(dir, 'chat'), ownerScope: 'synthetic-all-on' })
@@ -107,7 +110,7 @@ export function allOnWorld(t, { on = true, policy = {} } = {}) {
   const calibrationLog = openCalibrationLog({ dataDir: settingsDir, log() {} })
   const ENV = on === true
     ? { EGDESK_DRAFT_CHECK: 'on', EGDESK_CONVERSATION_FLOW: 'on', EGDESK_PRESENCE: 'on', EGDESK_BROWSER_ENTRY: 'on', EGDESK_COMMAND_JUDGE: 'advisory', EGDESK_TERMINAL_GATE: 'advisory',
-      EGDESK_WORKING_MEMORY: 'on', EGDESK_WORK_PLACEMENT: 'advisory', EGDESK_BRIEFING_FLOW: 'on' }
+      EGDESK_WORKING_MEMORY: 'on', EGDESK_WORK_PLACEMENT: 'on', EGDESK_BRIEFING_FLOW: 'on', ...env }
     : {}
   let clock = Date.parse("2026-11-25T01:00:00Z"), step = 'setup'
   const timers = [], events = [], native = [], decisions = [], forkPrompts = [], acts = [], steers = [], replies = [], anomalies = []
@@ -197,17 +200,18 @@ export function allOnWorld(t, { on = true, policy = {} } = {}) {
 
   // ---- the bridge's own wiring, flag by flag (see codex-bridge-server.mjs) ----
   let wikiAdapter = null
-  const turnMemoryConfig = createTurnMemoryConfig({ settings, ontologyStore: { readGraph: async () => GRAPH },
+  const turnMemoryConfig = createTurnMemoryConfig({ settings, ...(onePacket === true ? { onePacket: true } : {}), ontologyStore: { readGraph: async () => GRAPH },
     getAdapter: () => wikiAdapter ??= createWikiAdapter({ writes: openWikiWrites({ dataDir: settingsDir, log() {} }) }) })
   const browserEntryConfig = createBrowserEntryConfig({ now: () => clock, flag: () => ENV.EGDESK_BROWSER_ENTRY, getAdapter: () => turnMemoryConfig.getAdapter(), wiki: args => turnMemoryConfig.wiki(args) })
   const presenceMirror = createPresenceMirror({ now: () => clock })
+  const runRequesters = createRunRequesters({ presence: presenceMirror, now: () => clock })
   let workPlacement = null
   const contexts = new ContextRuntime({ store: new ImmutableContextStore({ dataDir: path.join(dir, 'context'), allowedRoots: [cwd] }), getOwnerKey: () => OWNER })
   const decisionContext = on === null ? undefined : {
     settingsGeneration: () => 0, mode: () => state.mode, configured: () => on === true, client, calibrationLog, budgetMs: 800,
     turnMemory: turnMemoryConfig, browserEntry: browserEntryConfig,
     ...(['advisory', 'on'].includes(ENV.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => ENV.EGDESK_DRAFT_CHECK } } : {}),
-    ...(ENV.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(ENV.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror } : {}),
+    ...(ENV.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(ENV.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror, audience: ({ run }) => runRequesters.audience({ run }) } : {}),
       attentionPosted: ({ key, provider: name }) => { if (name === 'work_placement') workPlacement.acknowledgePointer(key) } } } : {}),
     ...(ENV.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
     ...(['advisory', 'on'].includes(ENV.EGDESK_TERMINAL_GATE) ? { terminalGate: { mode: () => ENV.EGDESK_TERMINAL_GATE, inspect: async () => null } } : {}),
@@ -262,7 +266,7 @@ export function allOnWorld(t, { on = true, policy = {} } = {}) {
     ...(decisionContext ? { decisionContext } : {}),
   })
   chat.setConnection(true)
-  workPlacement = createWorkPlacement({ client, mode: () => state.mode, enabled: () => ENV.EGDESK_WORK_PLACEMENT === 'advisory', calibrationLog, now: () => clock })
+  workPlacement = createWorkPlacement({ client, mode: () => state.mode, enabled: () => ['advisory', 'on'].includes(ENV.EGDESK_WORK_PLACEMENT), live: () => ENV.EGDESK_WORK_PLACEMENT === 'on', calibrationLog, now: () => clock })
   const chatHttp = createChatHttpHandler(chat, async () => {})
   const placementHttp = createWorkPlacementHttpHandler({ placement: workPlacement, heartbeatFor: key => chat.heartbeatFor(key) })
   // The Board/Decisions handler with the briefing flow, as the bridge mounts it (same key, same budget, same calibration log, same provider).
