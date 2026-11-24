@@ -559,12 +559,23 @@ export function buildGuide(items, scene, retire = []) {
       step: STEP_SLOTS, slots: slotsOf(item, scene.catalog) })),
     retrievals: [...retire] }
 }
-/** only: fill just these items again. rejected: closed words for what was not supported last time (e.g. "P2 line 2", "P1 explanation"). */
+// Cycle 35 (c33's real replies took 20-30 s per card; output and reasoning size dominate): the model is asked for the MINIMUM the render needs. A step's fallback sentence is not
+// asked for (the validator uses the step's text when the reply has none), and in a SEQUENCE line the label (the material's date) and the text (the material's own sentences, as many
+// as fit the line) may be null: code copies them from the material the line cites, exactly. The model is left only with choosing and ordering the lines.
+export const copyField = (item, field) => item?.shows === 'sequence' && (field?.name === 'label' || field?.name === 'text')
+const compactItem = item => ({ ...item, step: (item.step ?? []).filter(s => s.name !== 'fallback'), slots: (item.slots ?? []).map(s => (s.type === 'list' && Array.isArray(s.of) && s.of.some(f => f.name === 'from' && f.type === 'material') ? { ...s, of: s.of.map(f => (copyField(item, f) ? { ...f, copy: true } : f)) } : s)) })
+/** The longest run of whole sentences of `text` that fits `max` characters (a line of a card): the copy a null line text stands for. '' when even the first sentence does not fit. */
+export function sentencesThatFit(text, max) {
+  let out = ''
+  for (const part of clean(text, 4000).split(/(?<=[.!?。])\s+/)) { const next = out ? `${out} ${part}` : part; if (next.length > max) break; out = next }
+  return out
+}
+/** only: fill just these items again. rejected: closed words for what was not supported last time (e.g. "P2 line 2", "P1 explanation"). cover: material aliases the cards must carry. */
 export function fillRequest(guide, materials, only = null, rejected = [], cover = []) {
-  return { kind: 'briefing_fill', ...(only ? { only: [...only] } : {}), ...(rejected.length ? { rejected: [...rejected] } : {}), ...(cover.length ? { cover: [...cover] } : {}), guide: { ...guide, items: guide.items.filter(i => !only || only.has(i.id)) },
+  return { kind: 'briefing_fill', ...(only ? { only: [...only] } : {}), ...(rejected.length ? { rejected: [...rejected] } : {}), ...(cover.length ? { cover: [...cover] } : {}), guide: { ...guide, items: guide.items.filter(i => !only || only.has(i.id)).map(compactItem) },
     materials: materials.map(m => ({ alias: m.alias, title: m.title, text: m.text, at: m.at, status: m.status })) }
 }
-function readSlot(schema, value, item, reported) {
+function readSlot(schema, value, item, reported, materials = null) {
   if (reported) return { issue: 'empty' }
   if (schema.type === 'text') { const v = clean(value, 4000); return !v ? { issue: 'empty' } : v.length > schema.max ? { issue: 'mismatch' } : { value: v } }
   if (schema.type === 'material') return value === undefined || value === null || value === '' ? { issue: 'empty' } : item.materials.includes(value) ? { value } : { issue: 'mismatch' }
@@ -574,7 +585,11 @@ function readSlot(schema, value, item, reported) {
   for (const row of value) {
     if (!isObj(row) || Object.keys(row).some(k => !schema.of.some(f => f.name === k))) return { issue: 'mismatch' }
     const out = {}
-    for (const f of schema.of) { const r = readSlot(f, row[f.name], item, false); if (r.issue) return { issue: r.issue === 'empty' && value.length === 1 ? 'empty' : 'mismatch' }; out[f.name] = r.value }
+    for (const f of schema.of) {
+      // a sequence line's label / text left null is the cited material's own date / sentences (copyField), never a value the model had to retype
+      let given = row[f.name]
+      if (copyField(item, f) && (given === null || given === undefined || given === '') && materials) { const m = materials.get(row.from); given = !m ? null : f.name === 'label' ? (m.at ?? null) : (sentencesThatFit(m.text, f.max) || null) }
+      const r = readSlot(f, given, item, false, materials); if (r.issue) return { issue: r.issue === 'empty' && value.length === 1 ? 'empty' : 'mismatch' }; out[f.name] = r.value }
     rows.push(out)
   }
   return rows.length < schema.min ? { issue: 'mismatch' } : { value: rows }
@@ -584,7 +599,8 @@ function readSlot(schema, value, item, reported) {
  * The reply may only fill what the guide lists: an unknown item, field or slot refuses the whole reply (no new components, no extra steps). A slot the model
  * reports as unfillable, or leaves out, is an issue of that item, never a reason to invent a value.
  */
-export function validateFill(guide, reply, { only = null, needTitle = false } = {}) {
+export function validateFill(guide, reply, { only = null, needTitle = false, materials = null } = {}) {
+  const byAlias = Array.isArray(materials) ? new Map(materials.map(m => [m.alias, m])) : null
   if (!isObj(reply) || !isObj(reply.items)) return { ok: false, reason: 'not-an-object' }
   if (Object.keys(reply).some(k => !['title', 'items', 'unfillable'].includes(k))) return { ok: false, reason: 'extra-field' }
   const wanted = guide.items.filter(i => !only || only.has(i.id)), ids = new Set(wanted.map(i => i.id))
@@ -601,8 +617,8 @@ export function validateFill(guide, reply, { only = null, needTitle = false } = 
     const given = isObj(got.slots) ? got.slots : {}
     if (Object.keys(given).some(k => !item.slots.some(s => s.name === k))) return { ok: false, reason: 'extra-slot' }
     const out = { slots: {} }
-    for (const s of item.step) { const r = readSlot(s, got[s.name], item, reported.has(`${item.id}/${s.name}`)); if (r.issue) issues.push({ item: item.id, slot: s.name, kind: r.issue }); else out[s.name] = r.value }
-    for (const s of item.slots) { const r = readSlot(s, given[s.name], item, reported.has(`${item.id}/${s.name}`)); if (r.issue) issues.push({ item: item.id, slot: s.name, kind: r.issue }); else out.slots[s.name] = r.value }
+    for (const s of item.step) { const r = readSlot(s, s.name === 'fallback' && got.fallback === undefined ? got.text : got[s.name], item, reported.has(`${item.id}/${s.name}`)); if (r.issue) issues.push({ item: item.id, slot: s.name, kind: r.issue }); else out[s.name] = r.value }
+    for (const s of item.slots) { const r = readSlot(s, given[s.name], item, reported.has(`${item.id}/${s.name}`), byAlias); if (r.issue) issues.push({ item: item.id, slot: s.name, kind: r.issue }); else out.slots[s.name] = r.value }
     if (out.slots.left !== undefined && out.slots.left === out.slots.right) issues.push({ item: item.id, slot: 'right', kind: 'mismatch' })
     items[item.id] = out
   }
@@ -674,6 +690,8 @@ export function answerUnits(answer) { return taggedUnits(answer).map(u => u.text
 // The same units, each with whether it is a table row. Cycle 33: a row is ONE fact (its cells are one record: the date, the commit and the test count of the same line).
 // c32's real answer had "결제 모듈 병합 완료. 알림 설정 화면은 시안만 확정" in a cell; splitting the row at that period gave one fact with the date and no commit, and another
 // with the commit and no date, and the coverage check asked the board for both halves.
+// a table cell that carries no value (an empty marker), not a statement
+const NO_VALUE_CELL = /^(?:[-–—]+|없음|해당\s?없음|기록\s?없음|n\/a|none)$/i
 function taggedUnits(answer) {
   const raw = String(answer ?? '').normalize('NFC').slice(0, SKELETON_LIMITS.answerMax)
   if (!/\n/.test(raw)) return [{ text: raw, row: false }]
@@ -686,7 +704,9 @@ function taggedUnits(answer) {
     if (/^\|.*\|\s*$/.test(l)) {
       if (/^\|[\s:|-]+\|$/.test(l)) continue // separator row
       if (/^\|[\s:|-]+\|$/.test((lines[i + 1] ?? '').trim())) continue // header row (the next line is the separator)
-      l = l.replace(/^\||\|$/g, '').split('|').map(c => c.trim()).filter(Boolean).join(' · '); row = true
+      // Cycle 35 (check-9: the coverage check refused the row "11-24 · 검색 화면 착수 · 기록 없음 · 기록 없음" because no board can show that a commit and a test count were never recorded, and it
+      // cites the 11-24 note by its date, so it blocked): a cell that only says "no value" states nothing and is left out of the row's fact.
+      l = l.replace(/^\||\|$/g, '').split('|').map(c => c.replace(/\*\*|__|`/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').trim()).filter(c => c && !NO_VALUE_CELL.test(c)).join(' · '); row = true
     }
     l = l.replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, '').replace(/\*\*|__|`/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').trim()
     if (l) out.push({ text: l, row })
@@ -863,7 +883,7 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     const want = fillRequest(guide, scene.materials, only, rejected, cover)
     stats.received.push({ turn: stats.fillTurns, keys: Object.keys(want), items: want.guide.items.map(i => `${i.id}:${i.component}`), materials: want.materials.map(m => m.alias), ...(rejected.length ? { rejected } : {}), ...(cover.length ? { cover } : {}) })
     const reply = await fill(want)
-    return { ...validateFill(guide, reply, { only }), failure: reply === null || reply === undefined ? failureOf() : null }
+    return { ...validateFill(guide, reply, { only, materials: scene.materials }), failure: reply === null || reply === undefined ? failureOf() : null }
   }
   // Cycle 34 (owner rule U5): when the whole fill did not come back, ONE bounded re-design round asks for the items one by one (each reply is short, so each is asked inside
   // its own time); the title is the first piece's. Not for a single item (nothing to split) and at most SKELETON_LIMITS.pieceTurns requests; any piece unusable -> stop.
@@ -875,7 +895,7 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
       stats.pieceTurns = (stats.pieceTurns ?? 0) + 1
       const only = new Set([item.id]), want = fillRequest(guide, scene.materials, only)
       stats.received.push({ turn: stats.fillTurns, piece: item.id, keys: Object.keys(want), items: want.guide.items.map(i => `${i.id}:${i.component}`), materials: want.materials.map(m => m.alias) })
-      const reply = await fill(want), read = validateFill(guide, reply, { only, needTitle: true })
+      const reply = await fill(want), read = validateFill(guide, reply, { only, needTitle: true, materials: scene.materials })
       stats.pieces.push({ item: item.id, ok: read.ok, ...(read.ok ? {} : { reason: read.reason }), ...(reply === null || reply === undefined ? { failure: failureOf() } : {}) })
       if (!read.ok) return { ok: false, reason: `piece-${read.reason}`, failure: reply === null || reply === undefined ? failureOf() : null }
       all.title ??= read.title; Object.assign(all.items, read.items); all.issues.push(...read.issues)

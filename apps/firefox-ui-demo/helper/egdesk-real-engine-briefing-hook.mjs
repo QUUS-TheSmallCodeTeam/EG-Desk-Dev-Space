@@ -125,7 +125,8 @@ export const briefingHook = Object.freeze({
       wrapped.stats = engine.stats; wrapped.lastFailure = engine.lastFailure
       engines.push(wrapped); return wrapped
     }
-    // what each private turn did inside the runtime (c34): its time, how it ended (an error code, or via fork | fresh), the kinds of item the engine produced, the last token usage
+    // what each private turn did inside the runtime (c34): its time, how it ended (an error code, or via fork | fresh), the kinds of item the engine produced, the last token usage;
+    // c35: the model and the effort it ran at and where they came from (explicit | request | agent | egdesk | engine), and the prompt size
     const trace = []
     let live = null
     const internal = chat.internalTurns
@@ -143,9 +144,9 @@ export const briefingHook = Object.freeze({
         return handled
       }
       internal.run = async args => {
-        const entry = { schema: Boolean(args?.outputSchema), timeoutMs: args?.timeoutMs ?? null, startedAt: Date.now(), ms: null, via: null, code: null, status: null, firstMs: null, lastMs: null, notifications: 0, items: {}, usage: null }
+        const entry = { schema: Boolean(args?.outputSchema), timeoutMs: args?.timeoutMs ?? null, startedAt: Date.now(), ms: null, via: null, model: null, effort: null, source: null, promptChars: String(args?.text ?? '').length, code: null, status: null, firstMs: null, lastMs: null, notifications: 0, items: {}, usage: null }
         live = entry; trace.push(entry)
-        try { const out = await run0(args); entry.via = out?.via ?? null; return out } catch (error) { entry.code = String(error?.code ?? error?.name ?? 'error').slice(0, 40); throw error } finally { entry.ms = Date.now() - entry.startedAt; delete entry.startedAt; if (live === entry) live = null }
+        try { const out = await run0(args); entry.via = out?.via ?? null; entry.model = out?.model ?? null; entry.effort = out?.effort ?? null; entry.source = out?.source ?? null; return out } catch (error) { entry.code = String(error?.code ?? error?.name ?? 'error').slice(0, 40); throw error } finally { entry.ms = Date.now() - entry.startedAt; delete entry.startedAt; if (live === entry) live = null }
       }
     }
     const decisionFetch = async (url, init) => {

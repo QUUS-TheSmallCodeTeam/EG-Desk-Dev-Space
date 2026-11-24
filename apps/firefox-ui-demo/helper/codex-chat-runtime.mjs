@@ -129,6 +129,7 @@ import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, 
 import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
+import { sha256Hex } from './egdesk-decision-questions.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
 // Reviewed requests expire after two minutes; only canonical v4 UUID IDs are accepted.
@@ -908,6 +909,7 @@ export class CodexChatRuntime {
     this.stoppedCommands = new Map() // clientThreadId -> the fact of the command the person stopped (consumed by the next turn)
     this.postedInstead = new Map() // clientThreadId -> { outcome, posted }: the answer the person saw instead of the Agent's draft (consumed by the next turn)
     this.draftOutcomes = new WeakMap() // run -> the draft check's outcome for its answer
+    this.draftRecords = new WeakMap() // run -> the calibration handle of the draft check's entry, labelled with what was posted when the answer is settled
     this.draftCheckTurns = new WeakMap() // run -> what the model had this turn, for the check after the answer is posted
     this.draftCheckSeen = new WeakMap() // run -> final-answer item ids already handed to the check
     this.turnMemoryRuns = new Set() // in-flight advisory memory jobs (never awaited by a turn)
@@ -2947,6 +2949,8 @@ export class CodexChatRuntime {
       // One packet (flag turnMemory.onePacket, default off): with both features attaching, the memory pages ride under the selection's key and
       // a page that is already a selected item is not sent a second time. Without the flag, or with only one of the two present, nothing changes.
       const onePacket = memoryPacket ? this.mergeTurnMemory(memoryTurn, decision, additionalContext) : null
+      // What the selection delivers in full is held by the model too (flag turnMemory.selectionHeld, default off): kept on the turn, committed with the receipts once the turn was accepted.
+      if (memoryReady) memoryTurn.selectionHeld = this.selectionHeldPages(memoryTurn, decision, additionalContext)
       // What was noted in this session and is not confirmed (flag turnMemory.confirmInConversation, default off): a few lines for the
       // answering model to state, after the pages. null without the flag, so nothing below changes then.
       // The confirmation note (flag confirmInConversation) and the recording rule (when a record may follow this turn) ride after the pages.
@@ -5079,6 +5083,10 @@ export class CodexChatRuntime {
     } catch { /* receipts are an optimisation; never affects the turn */ }
   }
 
+  selectionHeldFlag() {
+    try { return this.decisionContext?.turnMemory?.selectionHeld === true } catch { return false }
+  }
+
   pruneHeldFlag() {
     try { return this.decisionContext?.turnMemory?.pruneHeld === true } catch { return false }
   }
@@ -6417,7 +6425,7 @@ export class CodexChatRuntime {
     this.pauseConversationFlow(run) // the final answer is being prepared: nothing else is posted, the counter rests
     const items = [...guard.items.values()]
     const setup = this.decisionContext
-    const texts = items.map(item => item.text)
+    const texts = items.map(item => item.text), originalTexts = [...texts]
     try {
       if (status === 'completed' && items.length === 1 && items[0].text.trim()) {
         const generation = typeof setup?.settingsGeneration === 'function' ? setup.settingsGeneration() : null
@@ -6439,8 +6447,18 @@ export class CodexChatRuntime {
     // withheld (c19): an answer the check emptied is not posted at all (no fixed sentence stands in for it).
     const withheld = items.length === 1 && !String(texts[0]).trim() && String(items[0].text).trim() !== ''
     items.forEach((item, i) => { item.text = texts[i] })
+    // What the person is shown for this checked answer, as a word in the calibration record (the log keeps no text): written by the Agent, revised, only the certain part, or nothing.
+    if (items.length === 1) this.labelPosted(run, withheld ? 'withheld' : texts[0] === originalTexts[0] ? 'as_written' : this.draftOutcomes.get(run) === 'certain_part' ? 'certain_part' : 'revised')
     if (withheld) return
     for (const item of items) await this.applyItem(run, item, true, true, true)
+  }
+
+  // The calibration entry of this run's draft check gets the word for what was posted. Never throws, never changes what is posted; no entry (no check ran) is no label.
+  labelPosted(run, posted) {
+    try {
+      const handle = this.draftRecords.get(run)
+      if (handle) this.decisionContext?.calibrationLog?.complete?.(handle, { posted })
+    } catch { /* recording only */ }
   }
 
   // Returns the text to post (the original when nothing changed or anything failed).
@@ -6466,10 +6484,11 @@ export class CodexChatRuntime {
       const totalMs = performance.now() - t0
       const log = setup.calibrationLog
       try {
-        log?.record?.(result ? { ...result.calibration, mode: 'on', ...(result.verdict ? { check: result.verdict.check, ifUnrevised: result.verdict.ifUnrevised } : {}),
+        const handle = log?.record?.(result ? { ...result.calibration, mode: 'on', ...(result.verdict ? { check: result.verdict.check, ifUnrevised: result.verdict.ifUnrevised } : {}),
           evidence: result.stats ? { items: result.stats.items, opaque: result.stats.opaque, sentences: result.stats.sentences, terms: result.stats.terms } : undefined,
           timing: { totalMs, calls: result.calls, withinBudget: totalMs <= DRAFT_CHECK_LIMITS.firstCheckMs } }
           : { feature: 'draft_check', mode: 'on', attached: false, judgments: [], fallback: 'timeout', timing: { totalMs, calls: null } })
+        if (handle) this.draftRecords.set(run, handle)
       } catch { /* recording never affects posting */ }
       if (result?.outcome) this.draftOutcomes.set(run, result.outcome)
       // L1 c16: which part of what will be posted the answering model wrote (the check's own copy excluded), for readers of the answer's meaning
@@ -6984,7 +7003,7 @@ export class CodexChatRuntime {
     const limit = Number.isSafeInteger(dc.deadlineMs) && dc.deadlineMs > 0 ? dc.deadlineMs : 15000
     const timer = setTimeout(() => controller.abort(), limit)
     timer.unref?.()
-    const record = fields => { try { log?.record?.({ feature: 'draft_check', mode: 'advisory', attached: false, judgments: [], ...fields }) } catch { /* ignore */ } }
+    const record = fields => { try { const handle = log?.record?.({ feature: 'draft_check', mode: 'advisory', attached: false, judgments: [], ...fields }); if (handle) log?.complete?.(handle, { posted: 'as_written' }) } catch { /* ignore */ } }
     try {
       if (turn.skip) { record({ fallback: 'evidence_unavailable' }); return }
       let vocabulary = []
@@ -7278,6 +7297,24 @@ export class CodexChatRuntime {
     } catch { return null }
   }
 
+  // Pages the dispatched selection carries WORD FOR WORD (its item has the page's whole body): the answering model holds them as much as the ones the memory packet
+  // carried, so the memory loop must know (L7 c31: a page delivered only as a selection item was offered to the next turn's memory scan as a candidate, and sent again).
+  // → { pageId: { revision, hash } } in the receipts' own form, or null (flag off, selection not on/attached, no wiki).
+  selectionHeldPages(turn, decision, additionalContext) {
+    try {
+      if (!this.selectionHeldFlag() || decision?.mode !== 'on') return null
+      const entry = additionalContext?.[DECISION_CONTEXT_KEY]
+      if (entry?.kind !== 'application' || typeof entry.value !== 'string' || !turn?.wiki?.pages) return null
+      const out = {}
+      for (const item of Array.isArray(decision.result?.selected) ? decision.result.selected : []) {
+        const id = typeof item?.id === 'string' ? memoryPageId(item.id) : null, page = id ? turn.wiki.pages.get(id) : null
+        if (!page || typeof page.body !== 'string' || !page.body.trim() || !entry.value.includes(page.body)) continue
+        out[id] = { revision: page.revision, hash: page.contentKey ?? sha256Hex(page.body) }
+      }
+      return Object.keys(out).length ? out : null
+    } catch { return null }
+  }
+
   mergeTurnMemory(turn, decision, additionalContext) {
     try {
       const selection = this.onePacketSelection(decision, additionalContext)
@@ -7310,9 +7347,13 @@ export class CodexChatRuntime {
         return
       }
       const memory = result.memory
-      if (attached && context.engine?.id === 'codex' && typeof cid === 'string' && cid) {
+      const selectionHeld = turn.selectionHeld && typeof turn.selectionHeld === 'object' ? turn.selectionHeld : null
+      if ((attached || selectionHeld) && context.engine?.id === 'codex' && typeof cid === 'string' && cid) {
+        const base = attached ? result.nextDelivered() : (this.turnMemoryDelivered.get(cid) ?? { usable: true, pages: {} })
+        // the memory packet's own entries win; the selection's pages are added where the memory side has none
+        const pages = { ...(selectionHeld ?? {}), ...(base.pages ?? {}) }
         this.turnMemoryDelivered.delete(cid)
-        this.turnMemoryDelivered.set(cid, { ...result.nextDelivered(), threadKey: cid })
+        this.turnMemoryDelivered.set(cid, { ...base, pages, threadKey: cid })
         while (this.turnMemoryDelivered.size > 50) this.turnMemoryDelivered.delete(this.turnMemoryDelivered.keys().next().value)
       }
       // A compaction mark is spent once a loop ran to its end for the turn after it; a cut or failed loop leaves it for the next turn.

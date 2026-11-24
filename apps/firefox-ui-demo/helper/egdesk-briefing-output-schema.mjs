@@ -17,7 +17,7 @@ const nullable = schema => ({ anyOf: [schema, NULL] })
 
 /** The schema of ONE slot as the catalog describes it: a text, one of the item's material aliases, or a list of rows with exactly the listed fields. */
 export function slotSchema(slot, item) {
-  if (slot.type === 'text') return { type: 'string' }
+  if (slot.type === 'text') return slot.copy === true ? nullable({ type: 'string' }) : { type: 'string' } // copy: null = the cited material's own words, copied by code (c35)
   if (slot.type === 'material') return { type: 'string', enum: [...item.materials] }
   if (slot.type === 'list') return { type: 'array', items: obj(Object.fromEntries(slot.of.map(f => [f.name, slotSchema(f, item)]))) }
   throw new TypeError(`unknown slot type ${slot?.type}`)
@@ -32,7 +32,8 @@ export function fillOutputSchema(guide, { only = null } = {}) {
   const items = (guide?.items ?? []).filter(i => !only || only.has(i.id))
   if (!items.length) throw new TypeError('the guide has no item to fill')
   const ids = items.map(i => i.id)
-  const itemSchema = item => obj({ text: { type: 'string' }, fallback: { type: 'string' }, slots: obj(Object.fromEntries((item.slots ?? []).map(s => [s.name, optionalSlot(s, item)]))) })
+  // c35: a step's fallback is only in the schema when the guide asks for it (the request's compact guide does not; the validator then uses the step's text)
+  const itemSchema = item => obj({ text: { type: 'string' }, ...((item.step ?? [{ name: 'fallback' }]).some(s => s.name === 'fallback') ? { fallback: { type: 'string' } } : {}), slots: obj(Object.fromEntries((item.slots ?? []).map(s => [s.name, optionalSlot(s, item)]))) })
   return obj({ title: { type: 'string' }, items: obj(Object.fromEntries(items.map(i => [i.id, itemSchema(i)]))),
     unfillable: { type: 'array', items: obj({ item: { type: 'string', enum: ids }, slot: { type: 'string' }, reason: { type: 'string' } }) } })
 }
