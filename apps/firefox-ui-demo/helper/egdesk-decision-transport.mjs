@@ -79,5 +79,8 @@ export function createDecisionTransport({ idleMs = DECISION_IDLE_MS, agentOption
     })
   }
 
-  return Object.freeze({ fetch, stats: () => ({ ...stats }), close() { agents['https:'].destroy(); agents['http:'].destroy() } })
+  // warm(): a kept-alive socket is free for the next request right now (the pools' own state: a socket idle past its cap, or past the
+  // server's Keep-Alive hint, has already been dropped). false on a cold process, after the idle window, or when every socket is busy.
+  const warm = () => Object.values(agents).some(agent => Object.values(agent.freeSockets ?? {}).some(list => Array.isArray(list) && list.some(socket => !socket.destroyed)))
+  return Object.freeze({ fetch, warm, stats: () => ({ ...stats }), close() { agents['https:'].destroy(); agents['http:'].destroy() } })
 }

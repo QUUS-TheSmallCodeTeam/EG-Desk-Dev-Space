@@ -82,6 +82,12 @@ export const TURN_MEMORY_CAPS = Object.freeze({ firstMs: 4000, midMs: 2500 })
 // How long after its budget a turn_context request already in flight may still answer, for the later steps of the turn only (flag keepLate).
 // The real first-turn asks took 946 and 1,098 ms against the 800 ms budget (L1 c20/c21); 1.5 s more covers them with room.
 export const LATE_CONTEXT_MS = 1500
+// The context setup's (turn_context) budget. Owner decision 2026-11-25 ("일단 늘려"): 800 ms when the Decisions connection is warm, 1,500 ms
+// for the first turn of a conversation and whenever the transport has no warm connection (cold process, or idle past its window; read from
+// the transport's warm(), never guessed). Real first asks: 946 / 1,098 ms (L1 c20 / c21); warm asks 216-598 ms (all-on c16 / c17).
+// The bridge passes both explicitly (decisionContext.budgetMs / coldBudgetMs / warm); a setup without coldBudgetMs keeps one budget.
+export const TURN_CONTEXT_BUDGET_MS = 800
+export const TURN_CONTEXT_COLD_BUDGET_MS = 1500
 // How the app-server says a thread's context was compacted: a `contextCompaction` item (item/started, item/completed), and on older builds the
 // deprecated `thread/compacted` notification. Either one means the answering model may no longer hold what was delivered to it.
 export function compactionSignal(message) {
@@ -4309,7 +4315,7 @@ export class CodexChatRuntime {
       mode = setup.mode()
       if ((mode !== 'advisory' && mode !== 'on') || setup.configured() !== true) return null
     } catch { return null }
-    const budgetMs = Number.isSafeInteger(setup.budgetMs) && setup.budgetMs > 0 ? setup.budgetMs : 800
+    const budgetMs = this.turnContextBudget(setup, context)
     const started = performance.now(), deadline = started + budgetMs
     const inBudget = () => performance.now() < deadline
     const askedAt = context.askedAt ?? this.now()
@@ -4352,6 +4358,19 @@ export class CodexChatRuntime {
       }
       return { mode, speech, generation, result: result || { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null }, ...(late ? { late } : {}) }
     } catch { return null } finally { clearTimeout(timer); if (!late) clearTimeout(lateTimer) }
+  }
+
+  // Which budget this turn's context setup gets (TURN_CONTEXT_BUDGET_MS / TURN_CONTEXT_COLD_BUDGET_MS, passed by the bridge).
+  turnContextBudget(setup, context) {
+    const warmMs = Number.isSafeInteger(setup.budgetMs) && setup.budgetMs > 0 ? setup.budgetMs : TURN_CONTEXT_BUDGET_MS
+    const coldMs = Number.isSafeInteger(setup.coldBudgetMs) && setup.coldBudgetMs > warmMs ? setup.coldBudgetMs : null
+    if (coldMs === null) return warmMs
+    let first = true
+    try { first = ['no_native_thread', 'fresh_native_thread', 'no_prior_turns'].includes(this.turnPosition(context).reason) } catch { first = true }
+    if (first) return coldMs
+    let warm = false
+    try { warm = typeof setup.warm === 'function' && setup.warm() === true } catch { warm = false }
+    return warm ? warmMs : coldMs
   }
 
   keepLateFlag() {

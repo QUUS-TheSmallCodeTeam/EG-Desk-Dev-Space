@@ -5,7 +5,7 @@ import { createCodexProfileAppServers } from './codex-profile-app-servers.mjs'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 import { accountAccessState, normalizeNativeAuth, publicAuthIdentityKey, publicPlanType, usageRefreshDue } from './codex-auth-state.mjs'
 import { usageDisplay } from './codex-account-usage.mjs'
-import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { CodexChatRuntime, TURN_CONTEXT_BUDGET_MS, TURN_CONTEXT_COLD_BUDGET_MS } from './codex-chat-runtime.mjs'
 import { createChatEngineAuth } from './codex-bridge-engine-auth.mjs'
 import { CODEX_ENGINE_PROFILE_ID, codexDeviceLoginPatch, codexLoginInProgressResponse, codexLoginMode, codexLoginStartParams, createCodexEngineAdapter, describeCodexEngine, isStaleLoginFailure } from './codex-engine-adapter.mjs'
 import { EngineRegistry, createEngineStatusEmitter } from './engine-registry.mjs'
@@ -481,6 +481,9 @@ const chat = new CodexChatRuntime({
     mode: () => bridgeSettings.decisionContext.mode,
     configured: () => decisionCredentials.getApiKey() !== null,
     client: decisionClient,
+    // turn_context budget (codex-chat-runtime.mjs TURN_CONTEXT_BUDGET_MS 800 / TURN_CONTEXT_COLD_BUDGET_MS 1500): cold = first turn of a
+    // conversation or no warm Decisions socket (egdesk-decision-transport.mjs warm()).
+    budgetMs: TURN_CONTEXT_BUDGET_MS, coldBudgetMs: TURN_CONTEXT_COLD_BUDGET_MS, warm: () => decisionTransport.warm(),
     calibrationLog: decisionCalibrationLog,
     turnMemory: turnMemoryConfig,
     browserEntry: browserEntryConfig,
