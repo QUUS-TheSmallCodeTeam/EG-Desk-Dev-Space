@@ -7,7 +7,7 @@ const ASKED = Date.parse('2026-11-24T14:30:00+09:00')
 const NOTE = [{ title: 'PostgreSQL 마이그레이션 배포 계획', status: 'done' }]
 const STATED = '수고하셨어요. PostgreSQL 마이그레이션 배포 계획은 완료로 적어 둘게요. 헬스체크는 응답 시간부터 보세요.'
 const judge = (message, previousAnswer = STATED, records = NOTE, client = mockJudge()) => judgeConfirmation({ message, previousAnswer, records, client, askedAt: ASKED })
-const accepted = value => ({ state: 'accepted', value }), yes = { state: 'yes', p: 0.96 }, no = { state: 'no', p: 0.03 }
+const yes = { state: 'yes', p: 0.96 }, no = { state: 'no', p: 0.03 }, maybe = { state: 'unknown', p: 0.5 }, missing = { state: 'unknown', p: null }
 
 test('the note for the answering model: what was noted, as a statement to make; never a question, never without a record', () => {
   const note = confirmationNote([...NOTE, { title: 'B사 납품 일정', status: 'superseded' }, { title: 'x', status: 'nonsense' }, { title: '', status: 'done' }])
@@ -18,24 +18,26 @@ test('the note for the answering model: what was noted, as a statement to make; 
   assert.equal(confirmationNote(Array.from({ length: 9 }, (_, i) => ({ title: `t${i}`, status: 'plan' }))).split('\n').filter(l => l.startsWith('- ')).length, CONFIRM_LIMITS.records)
 })
 
-test('confirmationAction: only a confirmation of a STATED note promotes; an objection always withdraws; everything else keeps it pending', () => {
-  assert.deepEqual(confirmationAction(yes, accepted('confirm')), { action: 'promote', reason: 'confirmed' })
-  assert.deepEqual(confirmationAction(no, accepted('confirm')), { action: 'keep', reason: 'confirmed_but_not_stated' })
-  assert.deepEqual(confirmationAction({ state: 'unknown', p: 0.5 }, accepted('confirm')), { action: 'keep', reason: 'confirmed_but_not_stated' })
-  assert.deepEqual([confirmationAction(yes, accepted('object')), confirmationAction(no, accepted('object'))], [{ action: 'revert', reason: 'objected' }, { action: 'revert', reason: 'objected' }])
-  assert.deepEqual(confirmationAction(yes, accepted('neither')), { action: 'keep', reason: 'no_response' }, 'not objecting is not agreeing')
-  assert.deepEqual([confirmationAction(yes, accepted('unsure')), confirmationAction(yes, { state: 'low_confidence', value: 'confirm' }), confirmationAction(yes, { state: 'missing' }), confirmationAction(yes, null)].map(a => a.reason), ['undecided', 'undecided', 'undecided', 'undecided'])
-  assert.deepEqual(CONFIRM_BARS, { stated: 0.8, reply: { minConfidence: 0.75, minMargin: 0.2 } })
+test('confirmationAction: only a decided confirmation of a STATED note (and no rejection) promotes; a decided rejection withdraws; everything else keeps it pending', () => {
+  assert.deepEqual(confirmationAction(yes, yes, no), { action: 'promote', reason: 'confirmed' })
+  assert.deepEqual(confirmationAction(no, yes, no), { action: 'keep', reason: 'confirmed_but_not_stated' })
+  assert.deepEqual(confirmationAction(maybe, yes, no), { action: 'keep', reason: 'confirmed_but_not_stated' })
+  assert.deepEqual([confirmationAction(yes, no, yes), confirmationAction(no, no, yes)], [{ action: 'revert', reason: 'objected' }, { action: 'revert', reason: 'objected' }])
+  assert.deepEqual(confirmationAction(yes, no, no), { action: 'keep', reason: 'no_response' }, 'both no: not objecting is not agreeing')
+  assert.deepEqual(confirmationAction(yes, yes, yes), { action: 'keep', reason: 'contradictory' })
+  // any undecided or missing answer keeps it pending, even beside a decided yes
+  for (const [c, r] of [[maybe, no], [yes, maybe], [no, maybe], [maybe, yes], [missing, no], [yes, missing], [undefined, undefined]]) assert.deepEqual(confirmationAction(yes, c, r), { action: 'keep', reason: 'undecided' })
+  assert.deepEqual(CONFIRM_BARS, { yes: 0.8, no: 0.2 })
 })
 
 test('judgeConfirmation: one call, closed options; the person agrees, objects, talks about something else, or the reply never stated it', async () => {
   const seen = []
   const client = { async decide(req) { seen.push(req); return mockJudge().decide(req) } }
   const agree = await judge('응, 맞아.', STATED, NOTE, client)
-  assert.deepEqual(seen[0].questions.map(q => [q.name, q.type]), [['rc_stated_0', 'predicate'], ['rc_reply_0', 'choice']])
-  assert.deepEqual(seen[0].questions[1].choices.map(c => c.value), ['confirm', 'object', 'neither', 'unsure'])
+  assert.deepEqual(seen[0].questions.map(q => [q.name, q.type]), [['rc_stated_0', 'predicate'], ['rc_confirms_0', 'predicate'], ['rc_rejects_0', 'predicate']], 'yes/no questions only, no forced choice')
+  for (const q of seen[0].questions) assert.ok(q.instructions.startsWith('Note "PostgreSQL 마이그레이션 배포 계획 (noted as done)": '), 'each question quotes the one note it is about')
   assert.ok(seen[0].input.some(m => m.content.startsWith('Assistant\'s previous reply:\n')) && seen[0].input.at(-1).content.endsWith('The person\'s new message:\n응, 맞아.'))
-  assert.deepEqual([agree.status, agree.verdicts.map(v => [v.action, v.reason, v.stated.state, v.reply.value]), agree.silent], ['ready', [['promote', 'confirmed', 'yes', 'confirm']], 0])
+  assert.deepEqual([agree.status, agree.verdicts.map(v => [v.action, v.reason, v.stated.state, v.confirms.state, v.rejects.state]), agree.silent], ['ready', [['promote', 'confirmed', 'yes', 'yes', 'no']], 0])
   assert.deepEqual((await judge('아니, 아직 스테이징만 끝났어.')).verdicts.map(v => [v.action, v.reason]), [['revert', 'objected']])
   const other = await judge('그럼 롤백 조건은 뭐였지?')
   assert.deepEqual([other.verdicts.map(v => [v.action, v.reason]), other.silent], [[['keep', 'no_response']], 1], 'silence keeps it pending; it is only counted')
@@ -56,5 +58,5 @@ test('judgeConfirmation never acts on a failure: no previous reply, no client, a
   // a long reply is cut, and at most three notes are judged
   const seen = []
   await judgeConfirmation({ message: '응', previousAnswer: 'ㄱ'.repeat(5000), records: Array.from({ length: 5 }, (_, i) => ({ title: `기록 ${i}`, status: 'plan' })), client: { async decide(req) { seen.push(req); return { answers: {} } } } })
-  assert.equal(seen[0].questions.length, CONFIRM_LIMITS.records * 2); assert.ok(seen[0].input[2].content.length < CONFIRM_LIMITS.answerChars + 60)
+  assert.equal(seen[0].questions.length, CONFIRM_LIMITS.records * 3); assert.ok(seen[0].input[2].content.length < CONFIRM_LIMITS.answerChars + 60)
 })

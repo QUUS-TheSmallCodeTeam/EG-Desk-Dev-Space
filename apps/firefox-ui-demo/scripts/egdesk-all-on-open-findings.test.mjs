@@ -15,7 +15,8 @@ const TIDY = '방금 그 내용 정리해줘', TIDY_ANSWER = 'A사 견적은 11�
 const PORTAL = '거래처 포털에서 이번 달 세금계산서 내려받아줘'
 
 // A1 (draft check, with turn memory): the Agent holds the five pages from the first turn; its follow-up answer restates them.
-test('A1: a follow-up answer that restates pages the Agent already holds is posted as written (no rewrite turn)', repro('A1, draft check x turn memory'), async t => {
+// Fixed (L7 c16): the draft check gets this turn's memory materials and the ones the session already holds as evidence. Runs always.
+test('A1: a follow-up answer that restates pages the Agent already holds is posted as written (no rewrite turn)', async t => {
   const w = allOnWorld(t)
   await w.settings.turnMemory.save('on')
   w.step('first'); await w.send(QUOTE); await w.idle(); await w.advance(3000); await w.answer(QUOTE_ANSWER); await w.idle()

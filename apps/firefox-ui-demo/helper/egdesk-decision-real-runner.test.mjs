@@ -58,6 +58,8 @@ function mockFetch(files, answers = GOOD, script = () => null) {
   return { calls, fetchImpl }
 }
 const capture = () => { const out = [], err = []; return { out, err, print: line => out.push(line), printError: line => err.push(line) } }
+// The run summary line (sent / stoppedBecause); since cycle 9 the usage total is printed after it, as the last line.
+const summaryOf = io => JSON.parse(io.out.find(line => JSON.parse(line).stoppedBecause !== undefined))
 
 test('loadPlan: exact file bytes are hashed and kept; the table shows what would be sent', () => {
   const f = fixture()
@@ -109,7 +111,8 @@ test('dry run is the default: nothing is sent even when a key is in the environm
   assert.equal(code, EXIT.ok); assert.equal(mock.calls.length, 0)
   const head = JSON.parse(io.out[0])
   assert.deepEqual([head.mode, head.endpoint, head.requests, head.estInputTokens, head.tokenCeiling, head.withinCeiling], ['dry_run', 'https://api.openai.com/v1/decisions', 3, 900, 5000, true])
-  assert.equal(JSON.parse(io.out.at(-1)).stoppedBecause, 'dry_run')
+  assert.equal(summaryOf(io).stoppedBecause, 'dry_run')
+  assert.deepEqual(JSON.parse(io.out.at(-1)), { usageTotal: { inputTokens: 0, declaredEstimate: 900, tokenCeiling: 5000, requestsSent: 0 } })
   assert.throws(() => statSync(path.join(f.dir, 'results.json')), /ENOENT/, 'a dry run writes no results file')
   assert.equal(io.out.join('\n').includes(KEY), false)
 })
@@ -133,7 +136,7 @@ test('refuses to start above the plan token ceiling (declared estimates), in a d
   const f = fixture(plan => { plan.tokenCeiling = 899 }), mock = mockFetch(f.files), io = capture()
   assert.equal(await main([f.planFile, '--send'], { env: { OPENAI_API_KEY: KEY }, fetchImpl: mock.fetchImpl, ...io }), EXIT.stopped)
   assert.equal(mock.calls.length, 0)
-  assert.equal(JSON.parse(io.out.at(-1)).stoppedBecause, 'over_token_ceiling')
+  assert.equal(summaryOf(io).stoppedBecause, 'over_token_ceiling')
   const dry = capture()
   assert.equal(await main([f.planFile], { env: {}, fetchImpl: mock.fetchImpl, ...dry }), EXIT.stopped, 'the lane sees the problem before asking for approval')
   assert.equal(JSON.parse(dry.out[0]).withinCeiling, false)
@@ -221,3 +224,126 @@ test('scoring: bounds are inclusive, a soft miss does not fail a request, an unr
   assert.deepEqual([statSync(file).mode & 0o777, JSON.parse(readFileSync(file, 'utf8')).at], [0o600, '2026-11-24T10:00:00.000Z'])
 })
 function softMisses(row) { return row.softMisses }
+
+// ---- cycle 9: score expectations and no silent pass ----
+const scoreQ = (name, levels = ['negligible', 'low', 'moderate', 'high', 'critical']) => ({ type: 'score', name, instructions: 'How risky?', levels: levels.map(label => ({ label })) })
+const scoreAnswer = (name, score, confidence, top = 0.8) => ({ type: 'score', name, score, confidence, probabilities: [{ value: Math.round(score), label: 'x', probability: top }, { value: 0, label: 'y', probability: 1 - top }] })
+function scoreFixture(mutate = () => {}) {
+  return fixture((plan, files) => {
+    files.d = bodyText([scoreQ('risk')], 'git reset --hard HEAD~5 on a clean tree')
+    files.e = bodyText([scoreQ('risk')], 'npm publish')
+    plan.requests.push(
+      { id: 'd', file: 'requests/d.json', sha256: sha(files.d), estInputTokens: 150, expect: [
+        { name: 'risk', kind: 'score', min: 2.5, severity: 'hard', note: 'discarding five commits must reach the approval bar' },
+        { name: 'risk', kind: 'score', minConfidence: 0.75, severity: 'soft', note: 'and the model should be sure of it' }] },
+      { id: 'e', file: 'requests/e.json', sha256: sha(files.e), estInputTokens: 150, expect: [], recordOnly: true })
+    mutate(plan, files)
+  })
+}
+
+test('score expectations: validated against the question levels, bounds are a conjunction, inclusive, and the observed score is kept', async () => {
+  const f = scoreFixture(), plan = loadPlan(f.planFile)
+  const d = plan.requests.find(r => r.id === 'd')
+  assert.deepEqual(d.expect[0], { name: 'risk', kind: 'score', severity: 'hard', note: 'discarding five commits must reach the approval bar', min: 2.5, levels: 5 })
+  const check = (expectation, answer) => scoreExpectation(expectation, answer)
+  const at = { name: 'risk', kind: 'score', min: 2.5, max: 3.5, minConfidence: 0.75, maxConfidence: 0.95, severity: 'hard', note: '', levels: 5 }
+  assert.equal(check(at, scoreAnswer('risk', 2.5, 0.75)).pass, true, 'all bounds inclusive (lower)')
+  assert.equal(check(at, scoreAnswer('risk', 3.5, 0.95)).pass, true, 'all bounds inclusive (upper)')
+  assert.deepEqual([check(at, scoreAnswer('risk', 2.14, 0.8)).pass, check(at, scoreAnswer('risk', 2.14, 0.8)).reason], [false, 'below_min'], 'the measured git reset answer fails a min 2.5 check')
+  assert.equal(check(at, scoreAnswer('risk', 3.6, 0.8)).reason, 'above_max')
+  assert.equal(check(at, scoreAnswer('risk', 3, 0.5)).reason, 'below_min_confidence')
+  assert.equal(check(at, scoreAnswer('risk', 3, 0.99)).reason, 'above_max_confidence')
+  assert.equal(check(at, scoreAnswer('risk', 1, 0.2)).reason, 'below_min+below_min_confidence', 'every failed bound is named')
+  assert.deepEqual(check(at, scoreAnswer('risk', 2.77, 0.64, 0.66)).observed, { score: 2.77, confidence: 0.64, top: 0.66, topLevel: 3, levels: 5 })
+  assert.deepEqual([check(at, { type: 'refusal' }).pass, check(at, { type: 'refusal' }).observed], [false, { state: 'refusal' }])
+  assert.equal(check(at, { type: 'predicate', probability: 1 }).pass, false, 'another answer type is a failed check')
+  const refused = (mutate, pattern) => assert.throws(() => loadPlan(scoreFixture(mutate).planFile), error => error.name === 'PlanError' && pattern.test(error.message), String(pattern))
+  refused(plan => { plan.requests[3].expect[0] = { name: 'risk', kind: 'score', severity: 'hard', note: 'x' } }, /needs at least one of min, max, minConfidence, maxConfidence/)
+  refused(plan => { plan.requests[3].expect[0].min = 5 }, /min must be a level between 0 and 4/)
+  refused(plan => { plan.requests[3].expect[0].max = 1 }, /min must be <= max/)
+  refused(plan => { plan.requests[3].expect[1].maxConfidence = 0.5 }, /minConfidence must be <= maxConfidence/)
+  refused(plan => { plan.requests[3].expect[1].minConfidence = 1.5 }, /minConfidence must be a probability/)
+  refused(plan => { plan.requests[0].expect[0] = { name: 'needs_reply', kind: 'score', min: 1, severity: 'hard', note: 'x' } }, /expected a score but the question is predicate/)
+  refused(plan => { plan.requests[3].expect[0] = { name: 'risk', kind: 'predicate', min: 0.5, severity: 'hard', note: 'x' } }, /expected a predicate but the question is score/)
+  refused(plan => { plan.requests[3].expect[0].kind = 'rank' }, /kind must be "predicate", "choice" or "score"/)
+})
+
+test('no silent pass: a request with no expectations is refused unless it is marked recordOnly, and a recorded request is never counted as passed', async () => {
+  const refused = (mutate, pattern) => assert.throws(() => loadPlan(scoreFixture(mutate).planFile), error => error.name === 'PlanError' && pattern.test(error.message), String(pattern))
+  refused(plan => { delete plan.requests[4].recordOnly }, /e: no expectations; add expectations, or mark the request "recordOnly": true/)
+  refused(plan => { plan.requests[4].recordOnly = 'yes' }, /recordOnly must be true when present/)
+  refused(plan => { plan.requests[4].recordOnly = false }, /recordOnly must be true when present/)
+  refused(plan => { plan.requests[3].recordOnly = true }, /d: a recordOnly request carries no expectations/)
+  // The exact situation of the command plan: the six risk requests had expect [] and the run said "pass".
+  const f = scoreFixture(), plan = loadPlan(f.planFile)
+  assert.deepEqual(planTable(plan).map(row => [row.id, row.recordOnly, row.hard, row.soft]), [['a', false, 2, 0], ['b', false, 1, 1], ['c', false, 0, 1], ['d', false, 1, 1], ['e', true, 0, 0]])
+  const answers = { ...GOOD, d: [scoreAnswer('risk', 2.14, 0.8)], e: [scoreAnswer('risk', 1.66, 0.43)] }
+  const mock = mockFetch(f.files, answers), io = capture(), out = path.join(f.dir, 'r.json')
+  assert.equal(await main([f.planFile, '--send', '--out', out], { env: { OPENAI_API_KEY: KEY }, fetchImpl: mock.fetchImpl, ...io }), EXIT.ok)
+  assert.deepEqual(mock.calls.map(call => call.id), ['a', 'b', 'c', 'd', 'e'], 'the record-only request is still sent, once, in order')
+  const saved = JSON.parse(readFileSync(out, 'utf8'))
+  const rows = Object.fromEntries(saved.scorecard.requests.map(row => [row.id, row]))
+  assert.deepEqual([rows.e.state, rows.e.pass, rows.e.checks], ['recorded', null, []])
+  assert.deepEqual(saved.results.e.answers, answers.e, 'its answers are kept for later scoring')
+  assert.deepEqual([rows.d.pass, rows.d.hardFailures, rows.d.hard, rows.d.soft], [false, ['risk'], { passed: 0, total: 1 }, { passed: 1, total: 1 }])
+  assert.deepEqual([saved.scorecard.requestsPassed, saved.scorecard.recordedOnly, saved.scorecard.hardFailures, saved.scorecard.allAnsweredPassed], ['3/4', 1, 1, false],
+    'requestsPassed counts checked requests only; the recorded one is neither a pass nor hidden')
+  // Printed: per request hard/soft outcome, and the usage total at the end.
+  const lines = io.out.map(line => JSON.parse(line))
+  const perRequest = lines.filter(line => line.state)
+  assert.deepEqual(perRequest.map(line => [line.id, line.state, line.pass, line.hard ?? null, line.soft ?? null]),
+    [['a', 'answered', true, '2/2', '0/0'], ['b', 'answered', true, '1/1', '1/1'], ['c', 'answered', true, '0/0', '1/1'], ['d', 'answered', false, '0/1', '1/1'], ['e', 'recorded', null, null, null]])
+  assert.deepEqual(lines.at(-1), { usageTotal: { inputTokens: 615, declaredEstimate: 1200, tokenCeiling: 5000, requestsSent: 5 } })
+  assert.equal(io.out.join('\n').includes(KEY), false)
+  // A plan whose every request is record-only can never report "all passed".
+  const only = fixture(p => { for (const r of p.requests) { r.expect = []; r.recordOnly = true } })
+  const run = await runPlan({ plan: loadPlan(only.planFile), key: KEY, send: true, fetchImpl: mockFetch(only.files).fetchImpl })
+  assert.deepEqual([run.scorecard.requestsPassed, run.scorecard.recordedOnly, run.scorecard.allAnsweredPassed], ['0/0', 3, false])
+})
+
+test('the existing guarantees hold with score and record-only requests in the plan', async () => {
+  const f = scoreFixture()
+  const none = mockFetch(f.files), dry = capture()
+  assert.equal(await main([f.planFile], { env: { OPENAI_API_KEY: KEY }, fetchImpl: none.fetchImpl, ...dry }), EXIT.ok)
+  assert.equal(none.calls.length, 0, 'dry run by default')
+  assert.deepEqual(JSON.parse(dry.out.at(-1)), { usageTotal: { inputTokens: 0, declaredEstimate: 1200, tokenCeiling: 5000, requestsSent: 0 } })
+  const noKey = capture()
+  assert.equal(await main([f.planFile, '--send'], { env: {}, fetchImpl: none.fetchImpl, ...noKey }), EXIT.noKey)
+  assert.equal(none.calls.length, 0)
+  const stop = mockFetch(f.files, GOOD, id => (id === 'd' ? { status: 500 } : null))
+  const stopped = await runPlan({ plan: loadPlan(f.planFile), key: KEY, send: true, fetchImpl: stop.fetchImpl })
+  assert.deepEqual([stopped.stoppedBecause, stop.calls.map(call => call.id), stopped.scorecard.requests.map(row => row.state)], ['http_500', ['a', 'b', 'c', 'd'], ['answered', 'answered', 'answered', 'failed', 'not_sent']])
+  const tight = scoreFixture(p => { p.tokenCeiling = 1199 }), refusedRun = mockFetch(tight.files)
+  assert.equal((await runPlan({ plan: loadPlan(tight.planFile), key: KEY, send: true, fetchImpl: refusedRun.fetchImpl })).stoppedBecause, 'over_token_ceiling')
+  assert.equal(refusedRun.calls.length, 0)
+  for (const call of stop.calls) { assert.equal(call.url, 'https://api.openai.com/v1/decisions'); assert.equal(call.init.redirect, 'error') }
+})
+
+test('whenAccepted: a choice check that fails only on a wrong install at the given bar; validated at load', () => {
+  const ok = fixture(plan => { plan.requests[2].expect = [{ name: 'target', kind: 'choice', oneOf: ['p1', 'p2'], whenAccepted: { minConfidence: 0.85, minMargin: 0.2 }, severity: 'hard', note: 'no wrong install' }] })
+  const loaded = loadPlan(ok.planFile)
+  const e = loaded.requests[2].expect[0]
+  assert.deepEqual(e.whenAccepted, { minConfidence: 0.85, minMargin: 0.2 })
+  const answer = (value, confidence, rows) => ({ type: 'choice', choice: value, confidence, probabilities: rows.map(([v, p]) => ({ value: v, probability: p })) })
+  // Wrong top choice, but below the bar: nothing would be installed, so the check passes.
+  assert.equal(scoreExpectation(e, answer('none', 0.6, [['none', 0.73], ['p1', 0.2], ['p2', 0.07]])).pass, true)
+  // Wrong top choice above both bars: a wrong install.
+  const wrong = scoreExpectation(e, answer('none', 0.95, [['none', 0.97], ['p1', 0.02], ['p2', 0.01]]))
+  assert.deepEqual([wrong.pass, wrong.reason, wrong.observed.accepted], [false, 'wrong_install', true])
+  // Confidence clears the bar but the margin does not: not installed.
+  assert.equal(scoreExpectation(e, answer('none', 0.9, [['none', 0.55], ['p1', 0.4], ['p2', 0.05]])).pass, true)
+  // A partial distribution: the unreported mass counts as the runner-up, as the product does.
+  assert.equal(scoreExpectation(e, answer('none', 0.9, [['none', 0.5], ['p1', 0.05]])).pass, true) // 0.45 unreported: margin 0.05
+  assert.equal(scoreExpectation(e, answer('none', 0.9, [['none', 0.6], ['p1', 0.05]])).pass, false) // 0.35 unreported: margin 0.25, installed
+  // Exactly at the bar is accepted (inclusive), and an expected value installed is a pass.
+  assert.equal(scoreExpectation(e, answer('none', 0.85, [['none', 0.6], ['p1', 0.4], ['p2', 0]])).pass, false)
+  assert.equal(scoreExpectation(e, answer('p2', 0.99, [['p2', 0.99], ['p1', 0.01], ['none', 0]])).pass, true)
+  // A refused or missing answer still fails its check.
+  assert.equal(scoreExpectation(e, undefined).pass, false)
+  for (const [bad, why] of [[{ minConfidence: 0.85 }, /whenAccepted needs exactly/], [{ minConfidence: 2, minMargin: 0.2 }, /whenAccepted needs exactly/], [[0.85, 0.2], /whenAccepted needs exactly/]]) {
+    const f = fixture(plan => { plan.requests[2].expect = [{ name: 'target', kind: 'choice', oneOf: ['p1'], whenAccepted: bad, severity: 'hard', note: 'x' }] })
+    assert.throws(() => loadPlan(f.planFile), why)
+  }
+  const both = fixture(plan => { plan.requests[2].expect = [{ name: 'target', kind: 'choice', oneOf: ['p1'], minConfidence: 0.5, whenAccepted: { minConfidence: 0.85, minMargin: 0.2 }, severity: 'hard', note: 'x' }] })
+  assert.throws(() => loadPlan(both.planFile), /either minConfidence or whenAccepted/)
+})

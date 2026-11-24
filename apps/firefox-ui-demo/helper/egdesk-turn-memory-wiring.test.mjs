@@ -106,9 +106,13 @@ test('first turn then mid-session: positions, shadow receipts, stage timing and 
   const entries = r.calibrationLog.entries().filter(e => e.feature === 'turn_memory')
   assert.deepEqual(entries.map(e => [e.position, e.memory]), [['first', 'ran'], ['mid', 'ran'], ['mid', 'skipped']])
   const [a, b, c] = entries
-  assert.deepEqual(a.judgments.map(j => j.q), ['triage_courtesy', 'triage_need', 'triage_record', 'write_target'])
+  // the default write target ('about'): one yes/no per candidate record (exactly one yes here), then the target the code derived
+  const abouts = a.judgments.filter(j => j.q === 'write_about')
+  assert.deepEqual(a.judgments.map(j => j.q), ['triage_courtesy', 'triage_need', 'triage_record', ...abouts.map(() => 'write_about'), 'write_target'])
   assert.equal(a.judgments.find(j => j.q === 'triage_record').would, 'attach')
-  assert.deepEqual(a.judgments.find(j => j.q === 'write_target'), { q: 'write_target', would: 'accept', top: 0.93, second: 0.01, threshold: 0.75, minMargin: 0.2, confidence: 0.92, margin: 0.92, options: 8 })
+  assert.ok(abouts.length >= 2); assert.deepEqual(abouts.map(j => j.would).sort(), ['accept', ...abouts.slice(1).map(() => 'reject')])
+  assert.ok(abouts.every(j => j.threshold === 0.8 && j.minMargin === 0.2 && Number.isFinite(j.p)))
+  assert.deepEqual(a.judgments.find(j => j.q === 'write_target'), { q: 'write_target', would: 'accept', options: abouts.length })
   assert.ok(Number.isFinite(a.timing.prepMs) && Number.isFinite(b.timing.prepMs), 'turn preparation time is recorded for first and mid turns')
   assert.ok(a.timing.calls >= 4 && typeof a.timing.withinBudget === 'boolean')
   // Read from the injected clock: every memory call moved it by 15, so the last one ends no earlier than 15 x calls (the log rounds times to
@@ -132,4 +136,13 @@ test('a failed fetch is recorded as a closed fallback and the turn is untouched'
   assert.deepEqual([e.memory, e.fallback, e.position], ['fallback', 'timeout', 'first'])
   assert.ok(!JSON.stringify(e).includes('SECRET'))
   r.store.close()
+})
+
+test('the "choice" write target can still be selected for comparison: its calibration entry is the N-way target with its bars', async () => {
+  const judge = mockJudge()
+  const r = await rig({ turnMemory: memoryConfig({ writeTarget: 'choice' }), client: { model: 'syn', decide: req => judge.decide(req) } })
+  await r.send('PostgreSQL 마이그레이션 배포 끝났어', 'r1'); await r.done(1); await r.chat.turnMemoryIdle()
+  const [a] = r.calibrationLog.entries().filter(e => e.feature === 'turn_memory')
+  assert.deepEqual(a.judgments.map(j => j.q), ['triage_courtesy', 'triage_need', 'triage_record', 'write_target'])
+  assert.deepEqual(a.judgments.find(j => j.q === 'write_target'), { q: 'write_target', would: 'accept', top: 0.93, second: 0.01, threshold: 0.75, minMargin: 0.2, confidence: 0.92, margin: 0.92, options: 8 })
 })

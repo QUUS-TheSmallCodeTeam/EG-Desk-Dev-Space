@@ -42,7 +42,7 @@ import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
-import { createTurnMemoryConfig } from './egdesk-turn-memory-wiring.mjs'
+import { createTurnMemoryConfig, turnMemoryFlagsFromEnv } from './egdesk-turn-memory-wiring.mjs'
 import { createBrowserEntryConfig } from './egdesk-browser-entry-wiring.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { createBoardPresentationHttpHandler } from './egdesk-board-presentation-http.mjs'
@@ -434,7 +434,8 @@ let memoryEvidenceStore = null
 const getMemoryEvidence = () => memoryEvidenceStore ??= new MemoryEvidenceStore({ dataDir, captures: contextStore })
 // Advisory turn memory: off unless the bridge setting `turnMemory` is 'advisory'. The adapter and its write store open lazily.
 let wikiAdapter = null
-const turnMemoryConfig = createTurnMemoryConfig({ settings: bridgeSettings, ontologyStore: ensureOntologyStore, deskStore,
+// Its internal options come from developer flags (turnMemoryFlagsFromEnv: EGDESK_TURN_MEMORY_ONE_PACKET / _WRITE_TARGET / _CONFIRM), default unchanged.
+const turnMemoryConfig = createTurnMemoryConfig({ settings: bridgeSettings, ontologyStore: ensureOntologyStore, deskStore, ...turnMemoryFlagsFromEnv(process.env),
   getAdapter: () => wikiAdapter ??= createWikiAdapter({ writes: openWikiWrites({ dataDir: path.join(dataDir, 'settings') }) }) })
 // Direct browser entry: developer flag EGDESK_BROWSER_ENTRY=advisory|on, default off (no settings screen entry). It reuses the turn-memory
 // snapshot builder and the same adapter/write store; nothing opens while it is off.

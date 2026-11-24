@@ -1,0 +1,317 @@
+{
+  "set": "working-memory-judge-v1",
+  "tokenCeiling": 8000,
+  "passRule": "A request passes when no hard check fails: no needed block is decided \"not needed\" (p <= 0.2) and no unrelated block is decided \"needed\" (p >= 0.8). Soft checks: needed blocks decided needed (>= 0.8), unrelated blocks decided not needed (<= 0.2), near misses not decided needed. The set passes when both requests pass. Bars are the gate's own: yes >= 0.8 keeps a block, no <= 0.2 lets the code spill it, anything between keeps it. Bodies are built by the product (advisory judge, predicate design).",
+  "requests": [
+    {
+      "id": "minutes-deploy-decision",
+      "file": "requests/minutes-deploy-decision.json",
+      "sha256": "6682a2ca139adc832c27853d2db2a447ff8c96e932e5f0aa4035a46f8515f0ee",
+      "estInputTokens": 3218,
+      "expect": [
+        {
+          "name": "wm_need_b1",
+          "kind": "predicate",
+          "max": 0.79,
+          "severity": "hard",
+          "note": "참석자: unrelated to the request. Hard: not decided \"needed\"; a judge that keeps everything saves nothing."
+        },
+        {
+          "name": "wm_need_b1",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "참석자: decided not needed (<= 0.2), so the code spills it behind a pointer."
+        },
+        {
+          "name": "wm_need_b2",
+          "kind": "predicate",
+          "max": 0.79,
+          "severity": "soft",
+          "note": "지난 회의 확인 사항: shares words with the request but does not answer it (near miss). Soft: not decided needed."
+        },
+        {
+          "name": "wm_need_b3",
+          "kind": "predicate",
+          "min": 0.21,
+          "severity": "hard",
+          "note": "결제 모듈 배포 일정: needed for the request. Hard: it must not be decided \"not needed\" (<= 0.2), because the code would then take it out of the model's context."
+        },
+        {
+          "name": "wm_need_b3",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "결제 모듈 배포 일정: decided needed (>= 0.8), so it stays verbatim."
+        },
+        {
+          "name": "wm_need_b4",
+          "kind": "predicate",
+          "max": 0.79,
+          "severity": "hard",
+          "note": "고객센터 안내 문구 개편: unrelated to the request. Hard: not decided \"needed\"; a judge that keeps everything saves nothing."
+        },
+        {
+          "name": "wm_need_b4",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "고객센터 안내 문구 개편: decided not needed (<= 0.2), so the code spills it behind a pointer."
+        },
+        {
+          "name": "wm_need_b5",
+          "kind": "predicate",
+          "max": 0.79,
+          "severity": "hard",
+          "note": "디자인 시안 피드백: unrelated to the request. Hard: not decided \"needed\"; a judge that keeps everything saves nothing."
+        },
+        {
+          "name": "wm_need_b5",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "디자인 시안 피드백: decided not needed (<= 0.2), so the code spills it behind a pointer."
+        },
+        {
+          "name": "wm_need_b6",
+          "kind": "predicate",
+          "max": 0.79,
+          "severity": "hard",
+          "note": "예산 집행 현황: unrelated to the request. Hard: not decided \"needed\"; a judge that keeps everything saves nothing."
+        },
+        {
+          "name": "wm_need_b6",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "예산 집행 현황: decided not needed (<= 0.2), so the code spills it behind a pointer."
+        },
+        {
+          "name": "wm_need_b7",
+          "kind": "predicate",
+          "max": 0.79,
+          "severity": "hard",
+          "note": "보안 점검: unrelated to the request. Hard: not decided \"needed\"; a judge that keeps everything saves nothing."
+        },
+        {
+          "name": "wm_need_b7",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "보안 점검: decided not needed (<= 0.2), so the code spills it behind a pointer."
+        },
+        {
+          "name": "wm_need_b8",
+          "kind": "predicate",
+          "max": 0.79,
+          "severity": "hard",
+          "note": "채용: unrelated to the request. Hard: not decided \"needed\"; a judge that keeps everything saves nothing."
+        },
+        {
+          "name": "wm_need_b8",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "채용: decided not needed (<= 0.2), so the code spills it behind a pointer."
+        },
+        {
+          "name": "wm_need_b9",
+          "kind": "predicate",
+          "max": 0.79,
+          "severity": "hard",
+          "note": "교육과 공유: unrelated to the request. Hard: not decided \"needed\"; a judge that keeps everything saves nothing."
+        },
+        {
+          "name": "wm_need_b9",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "교육과 공유: decided not needed (<= 0.2), so the code spills it behind a pointer."
+        },
+        {
+          "name": "wm_need_b10",
+          "kind": "predicate",
+          "max": 0.79,
+          "severity": "hard",
+          "note": "기타: unrelated to the request. Hard: not decided \"needed\"; a judge that keeps everything saves nothing."
+        },
+        {
+          "name": "wm_need_b10",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "기타: decided not needed (<= 0.2), so the code spills it behind a pointer."
+        },
+        {
+          "name": "wm_need_b11",
+          "kind": "predicate",
+          "max": 0.79,
+          "severity": "soft",
+          "note": "다음 회의: shares words with the request but does not answer it (near miss). Soft: not decided needed."
+        }
+      ]
+    },
+    {
+      "id": "minutes-summarise-all",
+      "file": "requests/minutes-summarise-all.json",
+      "sha256": "efbcb6a7165cb6472599d8f965c7c14d673eb70fe1f28323e7742602078b963a",
+      "estInputTokens": 3212,
+      "expect": [
+        {
+          "name": "wm_need_b1",
+          "kind": "predicate",
+          "min": 0.21,
+          "severity": "hard",
+          "note": "참석자: needed for the request. Hard: it must not be decided \"not needed\" (<= 0.2), because the code would then take it out of the model's context."
+        },
+        {
+          "name": "wm_need_b1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "참석자: decided needed (>= 0.8), so it stays verbatim."
+        },
+        {
+          "name": "wm_need_b2",
+          "kind": "predicate",
+          "min": 0.21,
+          "severity": "hard",
+          "note": "지난 회의 확인 사항: needed for the request. Hard: it must not be decided \"not needed\" (<= 0.2), because the code would then take it out of the model's context."
+        },
+        {
+          "name": "wm_need_b2",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "지난 회의 확인 사항: decided needed (>= 0.8), so it stays verbatim."
+        },
+        {
+          "name": "wm_need_b3",
+          "kind": "predicate",
+          "min": 0.21,
+          "severity": "hard",
+          "note": "결제 모듈 배포 일정: needed for the request. Hard: it must not be decided \"not needed\" (<= 0.2), because the code would then take it out of the model's context."
+        },
+        {
+          "name": "wm_need_b3",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "결제 모듈 배포 일정: decided needed (>= 0.8), so it stays verbatim."
+        },
+        {
+          "name": "wm_need_b4",
+          "kind": "predicate",
+          "min": 0.21,
+          "severity": "hard",
+          "note": "고객센터 안내 문구 개편: needed for the request. Hard: it must not be decided \"not needed\" (<= 0.2), because the code would then take it out of the model's context."
+        },
+        {
+          "name": "wm_need_b4",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "고객센터 안내 문구 개편: decided needed (>= 0.8), so it stays verbatim."
+        },
+        {
+          "name": "wm_need_b5",
+          "kind": "predicate",
+          "min": 0.21,
+          "severity": "hard",
+          "note": "디자인 시안 피드백: needed for the request. Hard: it must not be decided \"not needed\" (<= 0.2), because the code would then take it out of the model's context."
+        },
+        {
+          "name": "wm_need_b5",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "디자인 시안 피드백: decided needed (>= 0.8), so it stays verbatim."
+        },
+        {
+          "name": "wm_need_b6",
+          "kind": "predicate",
+          "min": 0.21,
+          "severity": "hard",
+          "note": "예산 집행 현황: needed for the request. Hard: it must not be decided \"not needed\" (<= 0.2), because the code would then take it out of the model's context."
+        },
+        {
+          "name": "wm_need_b6",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "예산 집행 현황: decided needed (>= 0.8), so it stays verbatim."
+        },
+        {
+          "name": "wm_need_b7",
+          "kind": "predicate",
+          "min": 0.21,
+          "severity": "hard",
+          "note": "보안 점검: needed for the request. Hard: it must not be decided \"not needed\" (<= 0.2), because the code would then take it out of the model's context."
+        },
+        {
+          "name": "wm_need_b7",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "보안 점검: decided needed (>= 0.8), so it stays verbatim."
+        },
+        {
+          "name": "wm_need_b8",
+          "kind": "predicate",
+          "min": 0.21,
+          "severity": "hard",
+          "note": "채용: needed for the request. Hard: it must not be decided \"not needed\" (<= 0.2), because the code would then take it out of the model's context."
+        },
+        {
+          "name": "wm_need_b8",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "채용: decided needed (>= 0.8), so it stays verbatim."
+        },
+        {
+          "name": "wm_need_b9",
+          "kind": "predicate",
+          "min": 0.21,
+          "severity": "hard",
+          "note": "교육과 공유: needed for the request. Hard: it must not be decided \"not needed\" (<= 0.2), because the code would then take it out of the model's context."
+        },
+        {
+          "name": "wm_need_b9",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "교육과 공유: decided needed (>= 0.8), so it stays verbatim."
+        },
+        {
+          "name": "wm_need_b10",
+          "kind": "predicate",
+          "min": 0.21,
+          "severity": "hard",
+          "note": "기타: needed for the request. Hard: it must not be decided \"not needed\" (<= 0.2), because the code would then take it out of the model's context."
+        },
+        {
+          "name": "wm_need_b10",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "기타: decided needed (>= 0.8), so it stays verbatim."
+        },
+        {
+          "name": "wm_need_b11",
+          "kind": "predicate",
+          "min": 0.21,
+          "severity": "hard",
+          "note": "다음 회의: needed for the request. Hard: it must not be decided \"not needed\" (<= 0.2), because the code would then take it out of the model's context."
+        },
+        {
+          "name": "wm_need_b11",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "다음 회의: decided needed (>= 0.8), so it stays verbatim."
+        }
+      ]
+    }
+  ]
+}

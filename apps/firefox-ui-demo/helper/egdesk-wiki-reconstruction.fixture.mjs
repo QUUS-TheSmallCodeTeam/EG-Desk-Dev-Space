@@ -120,8 +120,11 @@ export function mockJudge(log = []) {
       const said = /The person's new message:\n([\s\S]*)$/.exec(joined)?.[1]?.trim() ?? ''
       for (const q of request.questions) {
         if (q.name.startsWith('rc_stated_')) answers[q.name] = { type: 'predicate', probability: /적어 둘게요|적어 뒀어요|기록해 둘게요/.test(reply) ? 0.96 : 0.03 }
-        else if (q.name.startsWith('rc_reply_')) answers[q.name] = /^(응|네|맞아|그래)[\s,.!]|^(응|네|맞아|그래)$|그렇게 해/.test(said) ? choiceAnswer(q, 'confirm', 0.95)
-          : /아니|아직|취소|지워|기록하지|적지/.test(said) ? choiceAnswer(q, 'object', 0.95) : /음+\.*$|글쎄/.test(said) ? choiceAnswer(q, 'unsure', 0.5) : choiceAnswer(q, 'neither', 0.93)
+        else if (q.name.startsWith('rc_confirms_') || q.name.startsWith('rc_rejects_')) {
+          const confirms = /^(응|네|맞아|그래)[\s,.!]|^(응|네|맞아|그래)$|그렇게 해/.test(said), rejects = /아니|아직|취소|지워|기록하지|적지/.test(said), unsure = /음+\.*$|글쎄/.test(said)
+          const yes = q.name.startsWith('rc_confirms_') ? confirms && !rejects : rejects
+          answers[q.name] = { type: 'predicate', probability: unsure ? 0.5 : yes ? 0.95 : 0.03 }
+        }
       }
     }
     const cands = blocksOf(texts, 'Candidate pages:\n')

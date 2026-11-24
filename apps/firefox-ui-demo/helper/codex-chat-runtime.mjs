@@ -71,7 +71,7 @@ export function compactionSignal(message) {
 }
 const FLOW_OWN_KINDS = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
 import { SPEECH_AT_PAGE, speechSegments } from './egdesk-speech-grounding.mjs'
-import { deriveTurnPosition, memoryMaterials, prepareTurnMemory } from './egdesk-turn-memory.mjs'
+import { deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
 import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, entryQuestion, readBrowserEntry } from './egdesk-browser-task.mjs'
 import { hostOf } from './egdesk-browser-task-memory.mjs'
@@ -2677,7 +2677,10 @@ export class CodexChatRuntime {
       // answering model to state, after the pages. null without the flag, so nothing below changes then.
       const memoryNote = memoryReady ? this.turnMemoryNoteFor(memoryTurn, additionalContext) : null
       const withNote = value => (memoryNote ? [value, memoryNote].filter(Boolean).join('\n\n') : value)
+      // With one packet and no pages to add, a note alone also goes under the selection's key (never a second key for it).
+      const noteOnly = !memoryPacket && memoryNote ? this.onePacketSelection(decision, additionalContext) : null
       const memoryContext = onePacket ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: withNote(onePacket.value) } }
+        : noteOnly !== null ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: withNote(noteOnly) } }
         : memoryPacket || memoryNote ? { [TURN_MEMORY_KEY]: { kind: 'application', value: withNote(memoryPacket) } } : null
       const turnAdditionalContext = browserTaskContext || memoryContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}) } : additionalContext
       turnStartAttempted = context.turnStartAttempted = true
@@ -2777,7 +2780,8 @@ export class CodexChatRuntime {
         }
       }
       if (decision) this.noteDecisionContext(run, decision)
-      this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...(memoryPacket || memoryNote ? [TURN_MEMORY_KEY] : [])])
+      this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...(memoryPacket || memoryNote ? [TURN_MEMORY_KEY] : [])],
+        memoryReady ? this.turnMemoryDraftEvidence(memoryTurn, memoryPacket !== null) : [])
       this.startConversationFlow(run, body, context)
       this.turnMemoryLatest.delete(run.conversationId) // this turn is now the conversation's latest: the previous turn's materials end here
       if (memoryTurn) this.noteTurnMemoryOn(run, body, context, memoryTurn, memoryPacket !== null, memoryNote !== null)
@@ -5625,7 +5629,7 @@ export class CodexChatRuntime {
     try { vocabulary = (await dc?.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
     const revise = ({ draft, note }) => this.reviseOnFork(run, draft, note, controller.signal)
     const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))
-    const check = checkDraft({ draft: text, evidence: [...turn.evidence, ...tools], userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
+    const check = checkDraft({ draft: text, evidence: [...turn.evidence, ...(turn.memory ?? []), ...tools], userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
       mode: 'on', client: setup.client, revise, signal: controller.signal, egress: this.decisionEgressFor(run) })
     void check.catch(() => {})
     try {
@@ -5840,7 +5844,7 @@ export class CodexChatRuntime {
 
   draftCheckIdle() { return Promise.allSettled([...this.draftCheckRuns]) }
 
-  noteDraftCheckTurn(run, body, context, decision, bounded, extraKeys = []) {
+  noteDraftCheckTurn(run, body, context, decision, bounded, extraKeys = [], memoryItems = []) {
     try {
       if (this.draftCheckMode() === 'off') return
       const dc = this.decisionContext?.draftCheck
@@ -5856,7 +5860,7 @@ export class CodexChatRuntime {
       }
       // Application blocks that rode along this turn (shared messages and the like): the model saw them, the checker may not.
       const refs = extraKeys.slice(0, 4).map((key, i) => ({ id: `ctx${i + 1}`, kind: 'context', time: 'unknown', source: 'application', opaque: true }))
-      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...refs], userText: typeof body.message === 'string' ? body.message : '' })
+      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...refs], memory: memoryItems, userText: typeof body.message === 'string' ? body.message : '' })
     } catch { /* the check must never affect the turn */ }
   }
 
@@ -5890,7 +5894,7 @@ export class CodexChatRuntime {
       let vocabulary = []
       try { vocabulary = (await dc.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
       const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))
-      const check = checkDraft({ draft: text, evidence: [...turn.evidence, ...tools], userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
+      const check = checkDraft({ draft: text, evidence: [...turn.evidence, ...(turn.memory ?? []), ...tools], userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
         mode: 'advisory', client: setup.client, signal: controller.signal, egress: this.decisionEgressFor(run) })
       void check.catch(() => {}) // a check that outlives the deadline must not surface later
       const result = await Promise.race([check, aborted])
@@ -5970,7 +5974,7 @@ export class CodexChatRuntime {
     const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position: turn.position, threadKey, scope,
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
       deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock,
-      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'about' ? 'about' : 'choice' })
+      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about' })
     if (this.turnMemoryConfirmOn()) this.prepareTurnMemoryNote(turn, { wiki, scope, threadKey })
     Object.assign(turn, { wiki, baseScope, scope, result, readyMs: clock.now() - t0 })
   }
@@ -6098,7 +6102,7 @@ export class CodexChatRuntime {
           const done = applied?.status === 'status_updated' || applied?.status === 'reading_withdrawn'
           if (done) entry.closed = true
           else if (entry.offers >= CONFIRM_LIMITS.offers) entry.closed = true // mentioned twice without an answer: it simply stays pending
-          actions.push({ pageId: entry.pageId, status: entry.status, action: done ? (verdict.action === 'promote' ? 'promoted' : 'withdrawn') : 'kept', reason: verdict.reason, stated: verdict.stated.p, reply: verdict.reply.value, confidence: verdict.reply.confidence })
+          actions.push({ pageId: entry.pageId, status: entry.status, action: done ? (verdict.action === 'promote' ? 'promoted' : 'withdrawn') : 'kept', reason: verdict.reason, stated: verdict.stated.p, confirms: verdict.confirms.p, rejects: verdict.rejects.p })
         })
         this.turnMemoryNoted.set(threadKey, live.filter(entry => !(entry.closed === true && actions.some(a => a.pageId === entry.pageId && a.action !== 'kept'))))
       }
@@ -6127,14 +6131,33 @@ export class CodexChatRuntime {
     } catch { return null }
   }
 
+  // The draft check's evidence from turn memory ('on' only): what this turn attached and what the thread already holds, as the run's model has
+  // it at dispatch (see memoryEvidence). Under 'advisory' nothing reached the model, so there is nothing to add. Used by the checks of the
+  // ANSWER only; a heartbeat's intermediate note is about the run, not the memory, and keeps the evidence it had.
+  turnMemoryDraftEvidence(turn, attached) {
+    try {
+      if (!turn?.result || !turn.wiki || this.turnMemoryMode() !== 'on') return []
+      return memoryEvidence(turn.result, turn.wiki, { scope: turn.scope, attached })
+    } catch { return [] }
+  }
+
   // One packet: the memory pages appended to the dispatched selection, under the selection's key. null means "leave both as they are".
   // Read at the last moment, after every narrowing of the selection: what is merged is exactly what is about to be sent.
-  mergeTurnMemory(turn, decision, additionalContext) {
+  // The dispatched selection text when one packet applies (the flag is on, the selection is 'on' and attached), else null.
+  onePacketSelection(decision, additionalContext) {
     try {
       const flag = this.decisionContext?.turnMemory?.onePacket
       if ((typeof flag === 'function' ? flag() : flag) !== true) return null
       const entry = additionalContext?.[DECISION_CONTEXT_KEY]
-      if (decision?.mode !== 'on' || entry?.kind !== 'application' || typeof entry.value !== 'string') return null
+      return decision?.mode === 'on' && entry?.kind === 'application' && typeof entry.value === 'string' ? entry.value : null
+    } catch { return null }
+  }
+
+  mergeTurnMemory(turn, decision, additionalContext) {
+    try {
+      const selection = this.onePacketSelection(decision, additionalContext)
+      if (selection === null) return null
+      const entry = { value: selection }
       const selected = (Array.isArray(decision.result?.selected) ? decision.result.selected : []).map(item => (typeof item?.id === 'string' ? memoryPageId(item.id) : null)).filter(Boolean)
       const merged = mergeIntoSelection(entry.value, turn.result.memory.packetParts, selected)
       if (merged) turn.onePacket = { omitted: merged.omitted.length, sameSource: merged.sameSource.length }
@@ -6266,7 +6289,8 @@ export class CodexChatRuntime {
       }
     } catch { applied = { status: 'invalid' } }
     this.recordDeferredSpeech(run, []) // the judgment failed before it could be recorded: still once, unlabelled
-    this.turnMemoryWriteReceipts.set(run, { proposal: judged?.proposal?.op ?? null, reason: judged?.proposal?.reason ?? null, applied: applied?.status ?? null, ...(followUp ? { followUp } : {}) })
+    this.turnMemoryWriteReceipts.set(run, { proposal: judged?.proposal?.op ?? null, reason: judged?.proposal?.reason ?? null, applied: applied?.status ?? null, ...(followUp ? { followUp } : {}),
+      pageId: judged?.proposal?.pageId ?? applied?.pageId ?? null, status: judged?.proposal?.proposedStatus ?? judged?.proposal?.status ?? null })
     record(judged)
   }
 
@@ -6305,7 +6329,7 @@ export class CodexChatRuntime {
       const threadKey = run.conversationId
       const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position, threadKey,
         scope: typeof tm.scope === 'function' ? await (async () => { const base = await tm.scope({ body, context }); return base ? egress.memoryScope(base) : base })() : null, live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null,
-        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal })
+        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal , writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about' })
       const judged = result.judgeWrite ? await result.judgeWrite() : null
       if (typeof threadKey === 'string' && threadKey) {
         this.turnMemoryShadow.set(threadKey, result.nextDelivered())
@@ -6328,7 +6352,11 @@ export class CodexChatRuntime {
           { q: 'triage_record', p: triage.record.p, ...yesNo, would: triage.record.state === 'yes' ? 'attach' : 'skip' })
       }
       const target = judged?.receipt?.target
-      if (target) judgments.push({ q: 'write_target', top: target.top, second: target.second, confidence: target.confidence, margin: target.margin, options: target.options,
+      // 'about': one yes/no per candidate record (its probability against the yes bar), then the target the code derived from them.
+      if (target && judged.receipt.design === 'about') {
+        for (const p of Array.isArray(target.about) ? target.about : []) judgments.push({ q: 'write_about', p, ...yesNo, would: p === null ? 'unknown' : p >= MEMORY_YES ? 'accept' : p <= MEMORY_NO ? 'reject' : 'unknown' })
+        judgments.push({ q: 'write_target', options: target.options, would: target.value ? 'accept' : 'reject' })
+      } else if (target) judgments.push({ q: 'write_target', top: target.top, second: target.second, confidence: target.confidence, margin: target.margin, options: target.options,
         threshold: 0.75, minMargin: 0.2, would: target.value ? 'accept' : 'reject' })
       const stage = name => spans.filter(x => x.stage === name)
       const last = list => (list.length ? Math.max(...list.map(x => x.end)) : null), span = list => (list.length ? Math.max(...list.map(x => x.end)) - Math.min(...list.map(x => x.start)) : null)
