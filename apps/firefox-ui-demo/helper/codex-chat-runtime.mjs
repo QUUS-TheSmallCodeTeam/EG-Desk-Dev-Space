@@ -71,7 +71,7 @@ export function compactionSignal(message) {
 }
 const FLOW_OWN_KINDS = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
 import { SPEECH_AT_PAGE, speechSegments } from './egdesk-speech-grounding.mjs'
-import { deriveTurnPosition, memoryMaterials, prepareTurnMemory } from './egdesk-turn-memory.mjs'
+import { deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
 import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, entryQuestion, readBrowserEntry } from './egdesk-browser-task.mjs'
 import { hostOf } from './egdesk-browser-task-memory.mjs'
@@ -2764,7 +2764,8 @@ export class CodexChatRuntime {
         }
       }
       if (decision) this.noteDecisionContext(run, decision)
-      this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...(memoryPacket || memoryNote ? [TURN_MEMORY_KEY] : [])])
+      this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...(memoryPacket || memoryNote ? [TURN_MEMORY_KEY] : [])],
+        memoryReady ? this.turnMemoryDraftEvidence(memoryTurn, memoryPacket !== null) : [])
       this.startConversationFlow(run, body, context)
       this.turnMemoryLatest.delete(run.conversationId) // this turn is now the conversation's latest: the previous turn's materials end here
       if (memoryTurn) this.noteTurnMemoryOn(run, body, context, memoryTurn, memoryPacket !== null, memoryNote !== null)
@@ -5716,7 +5717,7 @@ export class CodexChatRuntime {
 
   draftCheckIdle() { return Promise.allSettled([...this.draftCheckRuns]) }
 
-  noteDraftCheckTurn(run, body, context, decision, bounded, extraKeys = []) {
+  noteDraftCheckTurn(run, body, context, decision, bounded, extraKeys = [], memoryItems = []) {
     try {
       if (this.draftCheckMode() === 'off') return
       const dc = this.decisionContext?.draftCheck
@@ -5732,7 +5733,7 @@ export class CodexChatRuntime {
       }
       // Application blocks that rode along this turn (shared messages and the like): the model saw them, the checker may not.
       const refs = extraKeys.slice(0, 4).map((key, i) => ({ id: `ctx${i + 1}`, kind: 'context', time: 'unknown', source: 'application', opaque: true }))
-      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...refs], userText: typeof body.message === 'string' ? body.message : '' })
+      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...memoryItems, ...refs], userText: typeof body.message === 'string' ? body.message : '' })
     } catch { /* the check must never affect the turn */ }
   }
 
@@ -6001,6 +6002,15 @@ export class CodexChatRuntime {
       if (additionalContext && Object.hasOwn(additionalContext, TURN_MEMORY_KEY)) return null
       return turn.noteEntries.every(entry => { const page = turn.wiki.pages.get(entry.pageId); return !!page && memoryAllowsPage(page, turn.scope) }) ? turn.note : null
     } catch { return null }
+  }
+
+  // The draft check's evidence from turn memory ('on' only): what this turn attached and what the thread already holds, as the run's model has
+  // it at dispatch (see memoryEvidence). Under 'advisory' nothing reached the model, so there is nothing to add.
+  turnMemoryDraftEvidence(turn, attached) {
+    try {
+      if (!turn?.result || !turn.wiki || this.turnMemoryMode() !== 'on') return []
+      return memoryEvidence(turn.result, turn.wiki, { scope: turn.scope, attached })
+    } catch { return [] }
   }
 
   // One packet: the memory pages appended to the dispatched selection, under the selection's key. null means "leave both as they are".

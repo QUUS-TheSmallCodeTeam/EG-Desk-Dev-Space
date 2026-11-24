@@ -720,3 +720,27 @@ test('writer.reject: the person\'s objection withdraws the pending reading and l
   assert.equal(writer.promote('db/pg-plan', { scope: SCOPE, confirmation: { by: 'user', at: '2026-11-24T07:00:00.000Z' }, operationId: 'p1' }).reason, 'no_pending_reading', 'a withdrawn reading cannot be promoted')
   assert.equal(createWikiWriter(wiki, { enabled: true, canWrite: ({ op }) => op !== 'reject' }).reject('db/pg-plan', { scope: SCOPE, objection: { by: 'user', at: '2026-11-24T08:00:00.000Z' }, operationId: 'r3' }).status, 'denied')
 })
+
+// ---- the draft check's evidence from turn memory ----
+import { memoryEvidence } from './egdesk-turn-memory.mjs'
+test('memoryEvidence: the pages of this turn and the held ones as draft-check evidence; a guarded page is a content-free reference; no page id', async () => {
+  const wiki = buildWiki(SYNTHETIC_PAGES.map(p => (p.id === 'db/pg-rollback' ? { ...p, mayRead: () => true } : p))), held = receiptsFor(wiki, PG_HELD)
+  const mid = await prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki, client: mockJudge(), scope: SCOPE, askedAt: ASKED, position: MID, threadKey: THREAD, delivered: held, budget: { linksFirst: true } })
+  const items = memoryEvidence(mid, wiki, { scope: SCOPE })
+  const rows = memoryMaterials(mid, wiki, { scope: SCOPE })
+  assert.equal(items.length, rows.length, 'the same pages as the materials, attached and held')
+  assert.deepEqual(items.map(i => i.id), items.map((_, n) => `mem${n + 1}`))
+  const rollback = items[rows.findIndex(r => r.title === wiki.pages.get('db/pg-rollback').title)]
+  assert.deepEqual(rollback, { id: rollback.id, kind: 'context', time: 'present', source: 'memory', opaque: true }, 'a page with its own guard: the checker gets no text')
+  const plan = items[rows.findIndex(r => r.title === wiki.pages.get('db/pg-plan').title)]
+  assert.deepEqual([plan.kind, plan.time, plan.status, plan.source, plan.text], ['memory', 'planned', 'plan', 'own_record', `${wiki.pages.get('db/pg-plan').title}\n${wiki.pages.get('db/pg-plan').body}`])
+  assert.doesNotMatch(JSON.stringify(items), /db\/pg-|"rev/)
+  // the packet was not sent: only the held pages remain; nothing at all without a result
+  assert.ok(memoryEvidence(mid, wiki, { scope: SCOPE, attached: false }).length === rows.filter(r => r.held).length)
+  assert.ok(memoryEvidence(mid, wiki, { scope: SCOPE, chars: 10 }).filter(i => !i.opaque).every(i => i.text.split('\n')[1].length <= 10 + 4))
+  assert.deepEqual([memoryEvidence(null, wiki), memoryEvidence(mid, null)], [[], []])
+  // an utterance page is always a reference (its text is consent-bound: the run's gate has no speech permission for the checker)
+  const utter = buildWiki([{ id: 'speech/m1', title: '한 말', body: '거래처 D사가 어제 단가를 올렸다고 들었어.', revision: 's1', time: { slice: 'past' }, provenance: { kind: 'utterance', by: 'user' }, ref: 'chat-message:m1', status: 'unknown', scope: 'dm:this-room' }])
+  const first = await prepareTurnMemory({ message: 'D사 단가 얘기 다시 정리해줘', wiki: utter, client: mockJudge(), scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD })
+  assert.ok(memoryEvidence(first, utter, { scope: SCOPE }).every(i => i.opaque === true && !('text' in i)))
+})
