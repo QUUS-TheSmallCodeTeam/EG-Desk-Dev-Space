@@ -24095,6 +24095,17 @@
   // This is the privileged-UI end of the Browser model-tool transport. It
   // deliberately never uses resolveBrowserCard's active/first-card fallback.
   const browserToolRunBindings = new Map();
+  // L1 c25 (owner decision U11; flag egdesk.roomAccount, default off): the account a Browser grant is bound to is the account of the ROOM it was granted in.
+  // The window makes every binding object it compares against (selection check, bind, run binding, agent-opened card) and remembers which room it is for;
+  // browserToolRoomKeyFor(clientThreadId) answers that room's own account key (the default sign-in's with the flag off or for a default room, so nothing
+  // changes there). Never read from the bridge: only objects made here are in the map.
+  const browserToolBindingRooms = new WeakMap();
+  function browserToolRoomKeyFor(clientThreadId) {
+    if (typeof clientThreadId !== 'string' || !clientThreadId) return undefined;
+    const thread = state.codex.threads.find(item => ChatState.clientThreadBinding(item) === clientThreadId);
+    return thread ? (ChatState.roomAccountScope(thread, state.codex).accountKey || null) : undefined;
+  }
+  const browserToolRoomKeyOf = binding => (binding && browserToolBindingRooms.has(binding) ? browserToolRoomKeyFor(browserToolBindingRooms.get(binding)) : undefined);
   const browserToolPendingBindings = new Map();
   const browserToolUserSelections = new Map();
   const browserToolCancelledRuns = new Map();
@@ -24135,7 +24146,7 @@
     if (!grant) return null;
     const card = document.getElementById(cardId);
     let current = null, held = false;
-    try { current = card?.isConnected && card.classList?.contains('egd-browser-card') ? card._browserControls?.toolBinding?.() : null; } catch { current = null; }
+    try { current = card?.isConnected && card.classList?.contains('egd-browser-card') ? card._browserControls?.toolBinding?.(browserToolRoomKeyFor(clientThreadId)) : null; } catch { current = null; }
     try { held = card?._browserControls?.agentControlState?.().held === true; } catch { held = true; }
     const state = BrowserGrant.browserGrantState(grant, current, { sites: browserToolThreadSites.get(clientThreadId),
       siteForHost: browserToolSiteForHost, held });
@@ -24238,15 +24249,18 @@
     const card = document.getElementById(source.sourceRef?.viewId);
     if (!card?.isConnected || !card.classList?.contains('egd-browser-card')) return null;
     let current = null;
+    // L1 c25: for a room on an Agent profile the grant carries THAT account (the attach-time default-account fact is not the room's); default rooms compare as before
+    const onSlot = ChatState.roomAccountScope(thread, state.codex).slot === true;
     try {
-      current = card._browserControls?.toolBinding?.();
+      current = card._browserControls?.toolBinding?.(browserToolRoomKeyFor(clientThreadId));
       if (!current || !browserToolSameUrl(current.url, source.sourceRef.uri) ||
           current.profileId !== source.sourceRef.profileId || current.accountId !== source.sourceRef.accountId ||
-          ['cardEpoch', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field =>
+          ['cardEpoch', 'userContextId', ...(onSlot ? [] : ['engineAccountKey']), 'authorityEpoch'].some(field =>
             current[field] !== source.browserToolIdentity[field])) return null;
     } catch { return null; }
     const token = chatBindingNonce();
     const selected = { ...source, selectedByUser: true, browserToolPermission: permission,
+      ...(onSlot ? { browserToolIdentity: { ...source.browserToolIdentity, engineAccountKey: current.engineAccountKey } } : {}),
       browserToolSelection: { token, threadId: clientThreadId } };
     browserToolUserSelections.set(token, {
       token, threadId: clientThreadId, localThreadId: threadId,
@@ -24281,7 +24295,7 @@
     const cardId = source.sourceRef?.viewId;
     if (!browserToolGrantFor(clientThreadId, cardId)) return source;
     let current = null;
-    try { current = document.getElementById(cardId)?._browserControls?.toolBinding?.(); } catch { return source; }
+    try { current = document.getElementById(cardId)?._browserControls?.toolBinding?.(browserToolRoomKeyFor(clientThreadId)); } catch { return source; }
     if (!current) return source;
     // A token re-issued for a send that never bound would otherwise linger.
     for (const [token, entry] of browserToolUserSelections) {
@@ -24306,7 +24320,7 @@
       const card = document.getElementById(source.sourceRef?.viewId);
       if (!card?.isConnected || !card.classList?.contains('egd-browser-card')) return false;
       try {
-        const current = card._browserControls?.toolBinding?.();
+        const current = card._browserControls?.toolBinding?.(browserToolRoomKeyFor(clientThreadId));
         return current && browserToolSameUrl(current.url, source.sourceRef.uri) &&
           current.profileId === source.sourceRef.profileId && current.accountId === source.sourceRef.accountId &&
           current.cardEpoch === source.browserToolIdentity?.cardEpoch &&
@@ -24538,7 +24552,7 @@
         lease.browser.browsingContext !== lease.browsingContext ||
         lease.browsingContext.currentWindowGlobal !== lease.windowGlobal) return false;
     try {
-      const current = lease.card._browserControls.toolBinding();
+      const current = lease.card._browserControls.toolBinding(browserToolRoomKeyOf(lease.bound.binding));
       return lease.card._browserControls.toolBrowser() === lease.browser &&
         ['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch']
           .every(field => current[field] === lease.bound.binding[field]);
@@ -24646,7 +24660,7 @@
     if (actionRef !== lease.actionRef) return deny('action-ref-mismatch');
     if (actionUrl !== lease.actionUrl) return deny('action-url-mismatch');
     try {
-      const current = lease.card._browserControls.toolBinding();
+      const current = lease.card._browserControls.toolBinding(browserToolRoomKeyOf(lease.bound.binding));
       if (['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch']
         .some(field => current[field] !== lease.bound.binding[field])) return deny('live-binding-changed');
     } catch { return deny('live-binding-unavailable'); }
@@ -24732,7 +24746,8 @@
     // bound to this run and gets the conversation's standing grant, marked as
     // opened by the Agent. A popup a page opened or a person's Card never is.
     if (!browserToolSafeNavigationUrl(request.url)) throw new Error('Browser Card URL must be an absolute http(s) URL without credentials');
-    const current = card._browserControls.toolBinding();
+    const roomKey = browserToolRoomKeyOf(authorized.binding);
+    const current = card._browserControls.toolBinding(roomKey);
     const decision = browserToolNavigationAllowed(clientThreadId, request.url, current.url);
     if (!decision.allowed) throw new Error(`Browser Card URL is outside the allowed sites [${decision.reason}]`);
     const runCards = [...browserToolRunBindings.keys()].filter(item => item.startsWith(`${request.runId}\u0000`)).length;
@@ -24747,12 +24762,13 @@
     const closeOpened = () => { try { opened._deskWindowShell?.requestClose?.(); } catch {} };
     await opened._browserControls.toolWhenReady?.(request.deadlineMs);
     let binding;
-    try { binding = opened._browserControls.toolBinding(); } catch (error) { closeOpened(); throw error; }
+    try { binding = opened._browserControls.toolBinding(roomKey); } catch (error) { closeOpened(); throw error; }
     if (['profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field => binding[field] !== current[field])) {
       closeOpened();
       throw new Error('Opened Browser Card did not keep the same profile, container and account');
     }
     if (browserToolRunBindings.get(key) !== authorized) { closeOpened(); throw new Error('Browser run was cancelled while opening a Card'); }
+    browserToolBindingRooms.set(binding, clientThreadId);
     browserToolRunBindings.set(`${request.runId}\u0000${binding.cardId}\u0000${binding.cardEpoch}`, { binding,
       permission: authorized.permission, clientThreadId, selectionToken: null, openedByAgent: true, openedFrom: card.id });
     const sourceGrant = browserToolThreadGrants.get(browserToolGrantKey(clientThreadId, card.id));
@@ -24871,7 +24887,8 @@
       }
       if (request.kind === 'bind') {
         const selection = request.selection;
-        const current = card._browserControls.toolBinding();
+        const current = card._browserControls.toolBinding(browserToolRoomKeyFor(request.clientThreadId));
+        browserToolBindingRooms.set(current, request.clientThreadId);
         const selectedByUser = browserToolUserSelections.get(selection?.selectionToken);
         if (browserToolRunBindings.has(key)) throw new Error('Browser run is already bound');
         if (!ChatState.knownCodexAccountKey(current.engineAccountKey)) throw new Error('Current Engine account is unverified');
@@ -24912,7 +24929,7 @@
       if (!authorized || authorized.clientThreadId !== request.clientThreadId || !request.binding ||
           ['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field =>
             authorized.binding[field] !== request.binding[field])) throw new Error('Browser run binding is missing or changed');
-      const current = card._browserControls.toolBinding();
+      const current = card._browserControls.toolBinding(browserToolRoomKeyFor(authorized.clientThreadId));
       if (['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch'].some(field =>
         authorized.binding[field] !== current[field])) {
         browserToolRunBindings.delete(key);
@@ -27991,7 +28008,7 @@
       closeAgentTimeline();
     };
     const toolDialogs = createBrowserToolDialogObserver(xulBrowser);
-    const browserToolBinding = () => {
+    const browserToolBinding = (roomKey) => {
       if (!card.isConnected || !xulBrowser?.isConnected || !xulBrowser?.browsingContext?.currentWindowGlobal) {
         throw new Error('Selected Browser Card is unavailable');
       }
@@ -28012,13 +28029,14 @@
         throw new Error('Browser profile container is unverified');
       }
       return { cardId: card.id, cardEpoch: agentBridgeId, profileId, accountId,
-        engineAccountKey: ChatState.codexAccountKey(state.codex.authStatus) || null,
+        // L1 c25: `roomKey` = the account of the room this binding is made for (undefined: the default sign-in, as before)
+        engineAccountKey: (roomKey === undefined ? ChatState.codexAccountKey(state.codex.authStatus) : roomKey) || null,
         authorityEpoch: browserToolAuthorityEpoch,
         accountStatus: accountId ? 'selected-metadata-unverified' : 'unverified', userContextId,
         url: browserCardState(card)?.uri || '' };
     };
     const assertBrowserToolBinding = (expected) => {
-      const current = browserToolBinding();
+      const current = browserToolBinding(browserToolRoomKeyOf(expected));
       if (!expected || ['cardId', 'cardEpoch', 'profileId', 'accountId', 'userContextId', 'engineAccountKey', 'authorityEpoch']
         .some(key => current[key] !== expected[key])) throw new Error('Browser Card, profile or account context changed');
       return current;
