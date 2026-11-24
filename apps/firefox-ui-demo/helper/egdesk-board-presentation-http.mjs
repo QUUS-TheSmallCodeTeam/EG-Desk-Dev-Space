@@ -1,7 +1,7 @@
 import { createHmac, randomBytes } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.mjs'
-import { createDecisionClient, DECISIONS_ENDPOINT, DECISION_MODEL } from './egdesk-decision-client.mjs'
+import { createDecisionClient, DECISIONS_ENDPOINT, DECISION_MODEL, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { normalizeBoardPresentationScene, prepareBoardPresentation, readBoardPresentation } from './egdesk-board-presentation-plan.mjs'
 import { attachBoardVisual, MAX_BOARD_VISUAL_IMAGE_CHARS, validateBoardVisual } from './egdesk-board-visual-packet.mjs'
 
@@ -129,7 +129,7 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     timer.unref()
     let authorized = false
     try {
-      const { answers } = await client.decide({ ...outbound, signal: controller.signal,
+      const { answers } = await client.decide({ ...outbound, signal: controller.signal, timeoutMs: FOREGROUND_DECISION_TIMEOUT_MS,
         authorizeDispatch(recipient) {
           if (authorized || recipient !== prepared.binding || controller.signal.aborted || res.destroyed || now() >= expiresAt) return false
           authorized = matches(authority())
