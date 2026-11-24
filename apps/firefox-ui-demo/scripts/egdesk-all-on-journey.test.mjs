@@ -63,7 +63,7 @@ test('all features on, one session: memory, briefing, a browser task, a long com
   const observed = (await w.http('POST', '/decision/briefing-observe', observe)).body
   await w.idle(); ui.pump(); close('a3')
   assert.equal(observed.status, 'observed'); assert.equal(observed.outcome, 'presented')
-  assert.deepEqual(observed.stages, ['place', 'parts', 'order', 'fill_check'])
+  assert.deepEqual(observed.stages, ['place', 'fit', 'order', 'fill_check']) // L4 cycle 15: the part choice became one yes/no per (part, way of showing it)
   assert.deepEqual(w.byFeature('a3'), { briefing: observed.judgeRequests })
   assert.deepEqual(w.subjectiveTurnsIn('a3'), { main: 0, fork: observed.fillTurns, steer: 0 })
   assert.equal(w.eventsIn('a3').at(-1), 'briefing.published')
