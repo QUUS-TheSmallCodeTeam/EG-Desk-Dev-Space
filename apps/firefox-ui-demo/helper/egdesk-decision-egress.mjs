@@ -130,6 +130,8 @@ export const EGRESS_SITES = Object.freeze({
   // request (run_text) and a nearby card's label and excerpt, only for cards the host marked maySend (canvas_text); "does the result need the
   // owner?" quotes the run's own request and answer (run_text). Each is asked of the run's gate (chat runtime placementContextFor) before it is sent.
   'egdesk-work-placement.mjs': ['run_text', 'canvas_text'],
+  // the real-engine check's collaboration hook records the work-placement runtime's own Decision requests on the way through (a pass-through under that runtime's gate: the kinds are the placement's)
+  'egdesk-real-engine-collab-hook.mjs': ['run_text', 'canvas_text'],
   // L1 c20 Desk HUD routing: the typed text (hud_text: refused until a permission covering all models exists) and maySend card labels
   'egdesk-hud-routing.mjs': ['hud_text', 'canvas_text'],
   'egdesk-draft-check.mjs': ['draft_text'],
