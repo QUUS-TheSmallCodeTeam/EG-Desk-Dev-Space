@@ -211,3 +211,38 @@ test('the bundled ontology graph maps to timeline and document candidates', asyn
   const result = await prepareTurnContext({ message: '온톨로지 구조', candidates, client })
   assert.ok(['ready', 'empty'].includes(result.status))
 })
+
+const speechStub = (message, allowed = () => true) => ({ allowed, modeActive: () => true,
+  segments: [{ start: 0, end: message.length }] })
+const lowSpeech = (name, request) => (/^speech_/.test(name) ? { type: 'choice', choice: 'plan', confidence: 0.16,
+  probabilities: [{ value: 'plan', probability: 0.16 }, { value: 'assertion', probability: 0.15 }] } : null)
+
+test('speech trace: an unconfirmed label is withheld, and the receipt/activity say how many labels and what recall verdict, with no text', async () => {
+  const message = '내일 살펴볼 예정이야.'
+  const { client } = fakeClient((q, r) => lowSpeech(q.name, r) || (q.name === 'rel_recall' ? predicate(0.16) : q.name === 'answer_type' ? choice('answer') : q.name === 'time_intent' ? choice('not_time_specific') : predicate(0.9)))
+  const out = await prepareTurnContext({ message, candidates: [...CANDIDATES.slice(0, 1), { id: 'conversation:recent', kind: 'conversation', title: 'recent', timeSlice: 'unknown', mayRead: () => true, loadText: () => '{}' }],
+    client, askedAt: Date.UTC(2026, 10, 23, 3), speech: speechStub(message) })
+  assert.deepEqual(out.speechInterpretations, [])
+  assert.deepEqual(out.receipt.speech, { segments: 1, axes: 3, accepted: 0, anchor: '2026-11-23T03:00:00.000Z', recall: { state: 'no', probability: 0.16 } })
+  const row = decisionContextActivity({ answerId: 'a', selected: out.selected, speech: out.receipt.speech, dropped: out.receipt.dropped })
+  assert.match(row.title, /발언 해석 0\/3개 채택/)
+  assert.ok(!JSON.stringify(row).includes('살펴볼'))
+})
+
+test('items beyond the limit are reported as dropped by id, never silently', async () => {
+  const { client } = fakeClient((q, r) => q.name === 'answer_type' ? choice('answer') : q.name === 'time_intent' ? choice('not_time_specific') : predicate(0.9))
+  const out = await prepareTurnContext({ message: '정리해 줘', candidates: CANDIDATES, client, maxItems: 2 })
+  assert.equal(out.selected.length, 2)
+  assert.ok(out.receipt.dropped.length >= 1 && out.receipt.dropped.every(d => d.reason === 'over_item_limit' && typeof d.id === 'string'))
+  assert.match(decisionContextActivity({ answerId: 'a', selected: out.selected, dropped: out.receipt.dropped }).title, /못 붙인 자료/)
+})
+
+test('a discarded topic batch keeps a typed-name item but none of the model-scored items', async () => {
+  const message = '보드 목표 기준으로 정리해 줘'
+  const topic = { plan: { questions: [{ type: 'predicate', name: 'topic_need_0', instructions: 'x' }], input: [], resolve: () => null },
+    allowed: () => true, authorizeDispatch: () => true }
+  const { client } = fakeClient(q => (q.name === 'answer_type' ? choice('answer') : q.name === 'time_intent' ? choice('not_time_specific') : predicate(0.95)))
+  const out = await prepareTurnContext({ message, candidates: CANDIDATES.slice(0, 5), client, topic })
+  assert.equal(out.privateTopicBatch, true)
+  assert.deepEqual(out.selected.map(s => s.id).sort(), ['pinned'])
+})

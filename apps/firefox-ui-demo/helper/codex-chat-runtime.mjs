@@ -4398,7 +4398,8 @@ export class CodexChatRuntime {
   // 'advisory' mode that nothing was attached. Nothing to show when it skipped.
   noteDecisionContext(run, { mode, result }) {
     if (!result || result.status === 'skipped' || result.privateTopicBatch) return
-    const activity = decisionContextActivity({ answerId: run.answerId, selected: result.selected || [], latencyMs: result.latencyMs ?? null, model: result.model ?? null })
+    const activity = decisionContextActivity({ answerId: run.answerId, selected: result.selected || [], latencyMs: result.latencyMs ?? null, model: result.model ?? null,
+      speech: result.receipt?.speech ?? null, dropped: result.receipt?.dropped ?? [] })
     const attached = mode === 'on' && result.status === 'ready'
     if (result.status === 'fallback') activity.title = '컨텍스트 세팅 · 결정 모델 응답 없음'
     else if (mode === 'advisory') activity.title = `컨텍스트 세팅(기록만) · 고른 자료 ${(result.selected || []).length}개`
