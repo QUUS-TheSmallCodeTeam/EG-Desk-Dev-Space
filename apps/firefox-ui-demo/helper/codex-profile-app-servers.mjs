@@ -237,7 +237,7 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
     boardPeerContract(id) { return readyClient(id).boardPeerContract },
     /** What this profile's own binary can do (dynamicTools, ephemeral, turnSteer, threadDelete), for a ready profile; all false otherwise. */
     capabilities(id) {
-      const none = Object.freeze({ version: null, dynamicTools: false, ephemeral: false, turnSteer: false, threadDelete: false, boardPeerContract: null, executable: null })
+      const none = Object.freeze({ version: null, dynamicTools: false, qaReadOnly: false, ephemeral: false, turnSteer: false, threadDelete: false, boardPeerContract: null, executable: null })
       try {
         const client = clients.get(id), owned = resolveHome(id)
         if (!client || !current(client) || client.home !== owned.home || client.identity !== owned.identity || !client.rpc.ready || !client.auth?.isLoggedIn) return none
