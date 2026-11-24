@@ -1,6 +1,6 @@
 import { classifyAction } from './egdesk-browser-action-classifier.mjs'
 import { sameSiteNavigation } from './egdesk-browser-tool-runtime.mjs'
-import { DecisionError } from './egdesk-decision-client.mjs'
+import { DecisionError, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, readPredicate, tableOptions, uniqueOptions } from './egdesk-decision-questions.mjs'
 
 // Browser reflex: the decision model drives one Browser Card toward a short
@@ -335,6 +335,10 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
   const attemptedRefs = new Set()
   const unmatched = new Set()
   const history = []
+  // The first decision of a run may open a cold connection (recorded cold calls 1.4-2.2 s against the 1.5 s
+  // default, and an expired deadline aborts the socket, so the next call is cold again): give it the
+  // foreground deadline once; later decisions of the run reuse the warm connection and the default.
+  let warmed = false
   let lastFailure = null
   const finish = (outcome, extra = {}) => ({ outcome, steps, decisions: steps.filter(step => step.decision).length,
     ...(unmatched.size ? { unmatchedValues: [...unmatched] } : {}), ...extra })
@@ -374,7 +378,8 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
 
     let decision
     try {
-      decision = await decideReflexStep({ goal, snapshot, options, history, pendingValues: [...pending.keys()], client, thresholds, timeoutMs, signal, authorizeDispatch })
+      decision = await decideReflexStep({ goal, snapshot, options, history, pendingValues: [...pending.keys()], client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
+      warmed = true
     } catch (error) { return signal?.aborted ? finish('aborted') : finish('fallback', { reason: failure(error) }) }
     if (signal?.aborted) return finish('aborted')
     if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
@@ -446,7 +451,8 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     switch (decision.kind) {
       case 'done': return finish('done', { url: snapshot.url, observationId })
       case 'handoff': return finish('handoff', { pageState: decision.pageState, url: snapshot.url })
-      case 'blocked': return finish('escalated', { reason: decision.pageState || 'blocked', ranked: decision.ranked })
+      // A blocked page names its state; "no listed element moves toward the goal" on an ordinary page is plain 'blocked'.
+      case 'blocked': return finish('escalated', { reason: BLOCKED_STATES.has(decision.pageState) ? decision.pageState : 'blocked', ranked: decision.ranked })
       case 'uncertain': return finish('escalated', { reason: 'uncertain', ranked: decision.ranked })
       case 'free_text': return finish('needs_free_text', { field: null, fields: fields.map(option => option.value) })
       case 'wait': {
