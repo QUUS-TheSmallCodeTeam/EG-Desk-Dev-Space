@@ -8,7 +8,7 @@
 // readGraph of the check's ontologyStore), BEFORE the conversation starts; they exist nowhere else (the data folder is the check's own). "mode"
 // is the turn-memory setting for the conversation: "on" attaches what the loop picks (needs --decisions: the Decision model reads the pages);
 // "advisory" (the check's default) only records.
-// A turn may carry "expect": { "memory": { "attached": [ids], "notAttached": [ids], "noResends": true, "noDuplicates": true } }, checked by code on what the check saw
+// A turn may carry "expect": { "memory": { "attached": [ids], "notAttached": [ids], "noResends": true, "noDuplicates": true, "minKeyChars": n, "merged": n } }, checked by code on what the check saw
 // the product send to the engine (the turn/start additionalContext of that scripted turn, approvals included):
 //   attached     every id has its BODY in this turn's context (the selection's [item id=…] or the memory packet's [page id=…] block);
 //   notAttached  no id has a body in this turn's context;
@@ -16,13 +16,18 @@
 //                earlier in this thread, unchanged; content not re-sent", is not a body). The seeded pages never change, so a second body is a re-send.
 //   noDuplicates no page has its body twice in THIS turn's context (the selection's item and the memory packet's page both carrying it: what the one-packet
 //                option, EGDESK_TURN_MEMORY_ONE_PACKET, merges; c27 real run: the product default sent the first turn's page twice).
+//   minKeyChars  the largest single additionalContext key of this turn has at least n characters (c30: a large item really went out; with turnStatus completed
+//                it was accepted by the engine);
+//   merged       at least n pages had their body once, in the selection's item, and only a reference line in the memory part of the merged packet (the one-packet
+//                form, '[content not repeated here: …among the selected items above]'), so a right answer shows the reference was followed.
 // Answers are checked with the check's existing answerIncludes / answerExcludes. Nothing here asks a model whether a turn went well.
 export const MEMORY_MODES = Object.freeze(['on', 'advisory'])
 export const MEMORY_TIMES = Object.freeze(['past', 'present', 'planned', 'hypothetical'])
 export const MEMORY_STATUSES = Object.freeze(['done', 'plan'])
 export const MEMORY_LINK_TYPES = Object.freeze(['follows_from', 'refers_to', 'same_task'])
-export const MEMORY_LIMITS = Object.freeze({ pages: 12, idChars: 60, titleChars: 120, bodyBytes: 4000, links: 4, ids: 12 })
-export const MEMORY_EXPECT_KEYS = Object.freeze(['attached', 'notAttached', 'noResends', 'noDuplicates'])
+// bodyBytes 8000 (c30; was 4000): a realistic page of 2,300 Korean characters is about 6,900 bytes
+export const MEMORY_LIMITS = Object.freeze({ pages: 12, idChars: 60, titleChars: 120, bodyBytes: 8000, links: 4, ids: 12, keyChars: 200000 })
+export const MEMORY_EXPECT_KEYS = Object.freeze(['attached', 'notAttached', 'noResends', 'noDuplicates', 'minKeyChars', 'merged'])
 const PAGE_ID = /^[a-z0-9][a-z0-9/_-]{0,59}$/
 // The JSON-schema form of the two fields (helper/egdesk-real-engine-script.mjs embeds these in the committed schema; validateMemory adds the
 // uniqueness and reference rules a schema cannot say).
@@ -33,7 +38,7 @@ export const MEMORY_SCHEMA = Object.freeze({ type: 'object', additionalPropertie
     time: { enum: [...MEMORY_TIMES] }, status: { enum: [...MEMORY_STATUSES] },
     links: { type: 'array', maxItems: MEMORY_LIMITS.links, items: { type: 'object', additionalProperties: false, required: ['to'], properties: { to: { type: 'string' }, type: { enum: [...MEMORY_LINK_TYPES] } } } } } } } } })
 const ids = { type: 'array', minItems: 1, maxItems: MEMORY_LIMITS.ids, items: { type: 'string' } }
-export const MEMORY_EXPECT_SCHEMA = Object.freeze({ type: 'object', additionalProperties: false, properties: { attached: ids, notAttached: ids, noResends: { const: true }, noDuplicates: { const: true } } })
+export const MEMORY_EXPECT_SCHEMA = Object.freeze({ type: 'object', additionalProperties: false, properties: { attached: ids, notAttached: ids, noResends: { const: true }, noDuplicates: { const: true }, minKeyChars: { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.keyChars }, merged: { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.ids } } })
 const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v)
 const PREFIX = 'ontology:'
 const BLOCK = /\[(page|item) id=([^\s\]]+)([^\]]*)\]/g
@@ -79,6 +84,8 @@ export function validateMemoryExpect(expect, memory, where = '$.expect.memory') 
     else for (const id of expect[k]) if (!known.has(id)) bad(`${where}.${k}`, `${id} is not a page of this memory`)
   }
   for (const k of ['noResends', 'noDuplicates']) if (expect[k] !== undefined && expect[k] !== true) bad(`${where}.${k}`, 'true')
+  if (expect.minKeyChars !== undefined && !(Number.isSafeInteger(expect.minKeyChars) && expect.minKeyChars >= 1 && expect.minKeyChars <= MEMORY_LIMITS.keyChars)) bad(`${where}.minKeyChars`, `an integer 1-${MEMORY_LIMITS.keyChars}`)
+  if (expect.merged !== undefined && !(Number.isSafeInteger(expect.merged) && expect.merged >= 1 && expect.merged <= MEMORY_LIMITS.ids)) bad(`${where}.merged`, `an integer 1-${MEMORY_LIMITS.ids}`)
   if (Array.isArray(expect.attached) && Array.isArray(expect.notAttached) && expect.attached.some(id => expect.notAttached.includes(id))) bad(where, 'attached and notAttached contradict')
   return errors
 }
@@ -93,20 +100,22 @@ export function memoryGraph(memory) {
 /** Pages in a turn/start additionalContext: { bodies: [short ids], refs: [short ids], keys: [names], copies: { id: number of bodies } }. A reference line is no body. */
 export function pagesIn(additionalContext) {
   const bodies = new Set(), refs = new Set(), keys = []
-  if (!isObject(additionalContext)) return { bodies: [], refs: [], keys, copies: {} }
-  const copies = {}
+  if (!isObject(additionalContext)) return { bodies: [], refs: [], keys, copies: {}, keyChars: {}, merged: [] }
+  const copies = {}, keyChars = {}, merged = new Set()
   for (const [key, entry] of Object.entries(additionalContext)) {
     keys.push(key)
     const text = typeof entry === 'string' ? entry : typeof entry?.value === 'string' ? entry.value : ''
+    keyChars[key] = text.length
     for (const m of text.matchAll(BLOCK)) {
       const id = m[2].startsWith(PREFIX) ? m[2].slice(PREFIX.length) : m[2]
       // A reference is a page block with no body: the header says it was delivered earlier in this thread, or (one packet, the memory part of a merged
       // packet) its first line says the content is not repeated because the page is among the selected items of the same packet.
       const followedBy = text.slice(m.index + m[0].length, m.index + m[0].length + 80)
+      if (m[1] === 'page' && /^\s*\[content not repeated here/.test(followedBy)) merged.add(id)
       if (m[1] === 'page' && (/already delivered earlier in this thread/.test(m[3]) || /^\s*\[content not repeated here/.test(followedBy))) refs.add(id); else { bodies.add(id); copies[id] = (copies[id] ?? 0) + 1 }
     }
   }
-  return { bodies: [...bodies].sort(), refs: [...refs].filter(id => !bodies.has(id)).sort(), keys, copies }
+  return { bodies: [...bodies].sort(), refs: [...refs].filter(id => !bodies.has(id)).sort(), keys, copies, keyChars, merged: [...merged].filter(id => bodies.has(id)).sort() }
 }
 
 /** Scripts whose memory only works through the Decision model (the pages are picked and judged by it). */
@@ -123,8 +132,8 @@ export const memoryNeedsDecisions = conversation => Boolean(conversation?.memory
 export function createMemoryHook(memory) {
   const enabled = isObject(memory) && Array.isArray(memory.pages)
   const delivered = new Set()
-  let current = { bodies: new Set(), refs: new Set(), keys: new Set(), starts: 0, duplicatesInTurn: 0, copies: {} }
-  const fresh = () => ({ bodies: new Set(), refs: new Set(), keys: new Set(), starts: 0, duplicatesInTurn: 0, copies: {} })
+  let current = { bodies: new Set(), refs: new Set(), keys: new Set(), starts: 0, duplicatesInTurn: 0, copies: {}, maxKeyChars: 0, merged: new Set() }
+  const fresh = () => ({ bodies: new Set(), refs: new Set(), keys: new Set(), starts: 0, duplicatesInTurn: 0, copies: {}, maxKeyChars: 0, merged: new Set() })
   return {
     enabled,
     mode: enabled ? (memory.mode ?? 'advisory') : null,
@@ -139,6 +148,8 @@ export function createMemoryHook(memory) {
       current.starts++
       for (const id of seen.bodies) { if (current.bodies.has(id)) current.duplicatesInTurn++; current.duplicatesInTurn += (seen.copies[id] ?? 1) - 1; current.bodies.add(id); current.copies[id] = (current.copies[id] ?? 0) + (seen.copies[id] ?? 1) } // twice in one turn: the selection's item and the memory packet's page (information, not a re-send)
       for (const id of seen.refs) current.refs.add(id)
+      for (const id of seen.merged) current.merged.add(id)
+      current.maxKeyChars = Math.max(current.maxKeyChars, ...Object.values(seen.keyChars), 0)
       for (const key of seen.keys) current.keys.add(key)
     },
     beginTurn() { current = fresh() },
@@ -146,12 +157,14 @@ export function createMemoryHook(memory) {
       if (!enabled) return { record: null, expectations: [] }
       const bodies = [...current.bodies].sort(), refs = [...current.refs].sort()
       const resent = bodies.filter(id => delivered.has(id))
-      const record = { starts: current.starts, keys: [...current.keys].sort(), attached: bodies, referenced: refs, resent, duplicatesInTurn: current.duplicatesInTurn, deliveredBefore: [...delivered].sort() }
+      const record = { starts: current.starts, keys: [...current.keys].sort(), attached: bodies, referenced: refs, resent, duplicatesInTurn: current.duplicatesInTurn, deliveredBefore: [...delivered].sort(), maxKeyChars: current.maxKeyChars, merged: [...current.merged].sort() }
       const expectations = [], put = (check, ok, detail) => expectations.push({ check, ok: ok === true, detail })
       if (expectMemory?.attached) { const missing = expectMemory.attached.filter(id => !current.bodies.has(id)); put('memory.attached', missing.length === 0, { missing, attached: bodies }) }
       if (expectMemory?.notAttached) { const found = expectMemory.notAttached.filter(id => current.bodies.has(id)); put('memory.notAttached', found.length === 0, { found, attached: bodies }) }
       if (expectMemory?.noResends) put('memory.noResends', resent.length === 0, { resent, referenced: refs })
       if (expectMemory?.noDuplicates) { const twice = Object.entries(current.copies).filter(([, n]) => n > 1).map(([id]) => id); put('memory.noDuplicates', twice.length === 0, { twice, keys: [...current.keys].sort() }) }
+      if (expectMemory?.minKeyChars !== undefined) put('memory.minKeyChars', current.maxKeyChars >= expectMemory.minKeyChars, { maxKeyChars: current.maxKeyChars, wanted: expectMemory.minKeyChars })
+      if (expectMemory?.merged !== undefined) put('memory.merged', current.merged.size >= expectMemory.merged, { merged: [...current.merged].sort(), wanted: expectMemory.merged })
       for (const id of current.bodies) delivered.add(id)
       return { record, expectations }
     },
