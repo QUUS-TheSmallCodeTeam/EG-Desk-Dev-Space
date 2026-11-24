@@ -58,7 +58,7 @@ function rig(t, { mode = 'on', terminalAllowed = true, budget = null, hang = fal
       const body = JSON.parse(init.body)
       requests.push(body)
       if (hang) return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))
-      const data = body.input[0].content[0].data
+      const data = body.input.find(m => Array.isArray(m.content))?.content?.[0]?.data ?? {}
       return Response.json({ answers: body.questions.map(q => modelAnswer(q, data)), usage: { input_tokens: 100 } })
     } })
   const cache = new Map()
@@ -189,13 +189,19 @@ test('S4 safety gate: rm -rf node_modules passes; rm -rf src/ needs approval; th
   ]) {
     const before = r.requests.length
     const result = await r.assess(command, { inspect, git })
-    rows[name] = { approval: result.approval, reasons: result.reasons, source: result.source, decisionRequests: r.requests.length - before, ...(result.score !== undefined ? { score: result.score } : {}) }
+    rows[name] = { approval: result.approval, reasons: result.reasons, source: result.source, decisionRequests: r.requests.length - before, ...(result.score !== undefined ? { score: result.score } : {}),
+      ...(result.predicates ? { predicates: result.predicates } : {}) }
   }
-  assert.deepEqual(rows['rm -rf node_modules'], { approval: false, reasons: [], source: 'decision', decisionRequests: 1, score: 0.5 })
+  // content predicates (default since c11): all three decided 'no' -> no approval added
+  assert.deepEqual(rows['rm -rf node_modules'], { approval: false, reasons: [], source: 'decision', decisionRequests: 1, predicates: { risk_unrestorable: 0.08, risk_outside: 0.08, risk_personal_files: 0.08 } })
+  // the old 0-4 score stays selectable for comparison and still behaves as before
+  const scored = await r.assess('rm -rf node_modules', { inspect, git: { dirty: false }, method: 'score' })
+  assert.deepEqual([scored.approval, scored.reasons, scored.source, scored.score, scored.method], [false, [], 'decision', 0.5, 'score'])
   assert.equal(rows['rm -rf src/'].approval, true)
   assert.deepEqual(rows['rm -rf src/'].reasons, ['tracked_files'])
   assert.equal(rows['rm -rf src/'].decisionRequests, 0, 'the rule decides; the model is not even asked')
-  assert.deepEqual([rows['git reset --hard HEAD~5 (clean tree)'].approval, rows['git reset --hard HEAD~5 (clean tree)'].reasons, rows['git reset --hard HEAD~5 (clean tree)'].decisionRequests], [true, ['risk_score'], 1])
+  assert.deepEqual([rows['git reset --hard HEAD~5 (clean tree)'].approval, rows['git reset --hard HEAD~5 (clean tree)'].reasons, rows['git reset --hard HEAD~5 (clean tree)'].decisionRequests], [true, ['discards_history'], 0],
+    'R5 (real measurement 2026-11-24: score 2.14 < 2.5): resetting to another commit needs approval by rule, the model is not asked')
   assert.deepEqual(rows['git reset --hard (dirty tree)'].reasons, ['dirty_worktree'])
   assert.equal(rows['kill -9 3000'].approval, false)
   for (const name of ['rm -rf $TARGET/*', 'rm -rf ~', 'rm -rf /tmp/other']) { assert.equal(rows[name].approval, true); assert.equal(rows[name].decisionRequests, 0) }
@@ -268,13 +274,27 @@ test('requests carry only the redacted tail and runtime facts, never the whole t
   assert.doesNotMatch(sent, /line 0 /)
 })
 
+test('log blocks the runtime can read itself are not candidates (R3): script-runner headers and passing progress are dropped, failures never are', () => {
+  // the real build log of 2026-11-24, whose header block was picked at 0.58
+  const build = ['> demo-app@1.0.0 build', '> tsc -p . && node scripts/bundle.mjs', '', "lib/format.ts(12,5): warning TS6133: 'unusedLocal' is declared but its value is never read.", '',
+    "lib/merge.ts(41,9): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.", '', 'Found 1 error and 2 warnings in 2 files.', '', 'npm ERR! code 2'].join('\n')
+  assert.deepEqual(enumerateLogBlocks(build).map(b => b.text.split('\n')[0].slice(0, 22)), ['lib/format.ts(12,5): w', 'lib/merge.ts(41,9): er', 'Found 1 error and 2 wa', 'npm ERR! code 2'])
+  const tap = ['> demo-app@1.0.0 test', '> node --test', '', ...Array.from({ length: 30 }, (_, i) => `ok ${i + 1} - case ${i + 1}`), '', '[1/4] Resolving', '[2/4] Linking', '', '  42%', '', '✔ adds (0.2ms)', '',
+    'not ok 31 - merges', '  AssertionError: expected [1, 2] but got [2, 1]', '', '# tests 31', '# pass 30', '# fail 1'].join('\n')
+  assert.deepEqual(enumerateLogBlocks(tap).map(b => b.text.split('\n')[0]), ['not ok 31 - merges', '# tests 31'], 'the summary that counts the failure is kept')
+  // a header in the same block as an error is kept whole
+  assert.equal(enumerateLogBlocks('> demo-app@1.0.0 build\nError: Cannot find module x').length, 1)
+  assert.deepEqual(enumerateLogBlocks('> demo@1 test\n> node --test\n\nok 1 - a'), [], 'nothing left to choose from: the hand-off keeps its fallback')
+})
+
 test('log blocks: a failure and its details are one block, the head of a block is what is kept, and marked blocks survive the cap', () => {
-  const out = ['ok 1 - a', 'ok 2 - b', 'not ok 3 - merges', '  AssertionError: expected 2 but got 3', '      at merge (lib/merge.mjs:4:1)', ...Array.from({ length: 40 }, (_, i) => `ok ${i + 4} - later`), '', '# fail 1'].join('\n')
+  // (c11: plain log lines, not passing-progress lines, so the structure is visible; progress-only blocks are dropped, see the test above)
+  const out = ['step 1 - a', 'step 2 - b', 'not ok 3 - merges', '  AssertionError: expected 2 but got 3', '      at merge (lib/merge.mjs:4:1)', ...Array.from({ length: 40 }, (_, i) => `step ${i + 4} - later`), '', '# fail 1'].join('\n')
   const blocks = enumerateLogBlocks(out)
-  assert.deepEqual(blocks.map(b => b.text.split('\n')[0]), ['ok 1 - a', 'not ok 3 - merges', 'ok 4 - later', '# fail 1'])
+  assert.deepEqual(blocks.map(b => b.text.split('\n')[0]), ['step 1 - a', 'not ok 3 - merges', 'step 4 - later', '# fail 1'])
   assert.equal(blocks[1].text, 'not ok 3 - merges\n  AssertionError: expected 2 but got 3\n      at merge (lib/merge.mjs:4:1)', 'the message and the stack stay with their failure line')
   assert.deepEqual(blocks.map(b => b.failureMarker), [false, true, false, true], 'the runtime marks the failure and the summary that counts it')
-  assert.ok(blocks[2].text.startsWith('ok 4 - later\nok 5 - later') && blocks[2].text.endsWith('\n…') && blocks[2].text.split('\n').length === 13, 'a long block keeps its first 12 lines')
+  assert.ok(blocks[2].text.startsWith('step 4 - later\nstep 5 - later') && blocks[2].text.endsWith('\n…') && blocks[2].text.split('\n').length === 13, 'a long block keeps its first 12 lines')
   // an early failure among many later paragraphs is not pushed out by the 12-block cap
   const long = ['not ok 1 - early failure', '  Error: boom', '', ...Array.from({ length: 30 }, (_, i) => `section ${i}\n`)].join('\n')
   const kept = enumerateLogBlocks(long)
