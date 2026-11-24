@@ -18,7 +18,7 @@ import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
 
 export const BRIEFING_FLAGS = Object.freeze(['EGDESK_BRIEFING_FLOW', 'EGDESK_BRIEFING_OUTPUT_SCHEMA'])
-export const BRIEFING_LIMITS = Object.freeze({ timeoutMs: 150_000, year: 2026, viewport: Object.freeze({ x: 0, y: 0, width: 2400, height: 1400 }), tokenCap: 5_000_000, strings: 16, stringChars: 400, replyChars: 6000, inputChars: 3000 })
+export const BRIEFING_LIMITS = Object.freeze({ timeoutMs: 150_000, year: 2026, viewport: Object.freeze({ x: 0, y: 0, width: 2400, height: 1400 }), tokenCap: 5_000_000, strings: 16, stringChars: 400, replyChars: 6000, inputChars: 6000 })
 export const BRIEFING_OUTCOMES = Object.freeze(['presented', 'fallback-chat', 'bubble'])
 const clip = (text, n) => String(text ?? '').slice(0, n)
 
