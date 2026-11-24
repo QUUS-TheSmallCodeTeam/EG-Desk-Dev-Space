@@ -10,16 +10,18 @@ import { TERMINAL_STATE_NAMES, runObjectiveLoop, terminalFactRow } from './egdes
  * The ONE browser-task fact provider: the task store's own read-only facts() (egdesk-browser-task.mjs), reduced to what a heartbeat
  * takes (numbers, booleans, closed labels; no task id, no nested counts). Null unless a task of the conversation is running or paused.
  *
- * A heartbeat lives from the moment the person's message is accepted until that turn ends. Inside that window a PAUSED task means
- * the loop has handed off and the subjective model is still wording the question: the person has not been asked yet. So the row says
- * phase 'handing_off' and waitingOnUser false (the heartbeat stays able to speak if that turn is slow), and names what is being
- * handed off in `awaiting`. By the time the person really is awaited the turn, and with it the heartbeat, has ended.
+ * A paused task is in one of two states, and the heartbeat must tell them apart:
+ * - handing off (facts.asked false): the loop stopped and the subjective model is still wording the question. The person has not
+ *   been asked yet, so the row says phase 'handing_off' and waitingOnUser false: a slow wording turn can still be explained.
+ * - waiting (facts.asked true): the question is posted and the run is held open for the reply. Now the person really is awaited:
+ *   phase 'waiting_user', waitingOnUser true, and nothing more is said until they answer.
+ * `awaiting` names what was handed off in both.
  */
 export function browserTaskRow(facts) {
   if (!facts || facts.active !== true) return null
-  const paused = facts.status === 'paused'
-  return { active: true, phase: paused ? 'handing_off' : 'objective_step', waitingOnUser: false, stepsDone: facts.stepsDone, stepsRemaining: facts.stepsRemaining,
-    task: paused ? 'handing_off' : 'running', awaiting: paused ? facts.waitingKind : null, awaitingCode: paused ? facts.waitingCode : null,
+  const paused = facts.status === 'paused', waiting = paused && facts.asked === true
+  return { active: true, phase: waiting ? 'waiting_user' : paused ? 'handing_off' : 'objective_step', waitingOnUser: waiting, stepsDone: facts.stepsDone, stepsRemaining: facts.stepsRemaining,
+    task: waiting ? 'waiting_user' : paused ? 'handing_off' : 'running', awaiting: paused ? facts.waitingKind : null, awaitingCode: paused ? facts.waitingCode : null,
     lastActionAgeMs: facts.lastActionAgeMs, idleMs: facts.idleMs }
 }
 

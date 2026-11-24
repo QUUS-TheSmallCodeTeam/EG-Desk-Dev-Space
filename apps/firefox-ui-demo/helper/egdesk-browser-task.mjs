@@ -32,10 +32,10 @@ export const RESUME_CONTROLS = Object.freeze({
   unrelated: 'The message is about something else; keep the browser task paused.',
 })
 export const MAX_TASK_STEPS = 24
+export const BROWSER_TASK_TTL_MS = 30 * 60 * 1000 // a paused task can be resumed this long; a run held open for the reply waits no longer
 const SEGMENT_STEPS = 6
 const ASKED_CODES = new Set(['choice_needed', 'detail_needed'])
 const MAX_MESSAGE = 500
-const TTL_MS = 30 * 60 * 1000
 const MAX_TASKS = 32
 
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -94,7 +94,7 @@ export async function decideResume({ message, pause, client, thresholds: overrid
 }
 
 /** One task per conversation, kept in memory only (never persisted, never logged). */
-export function createBrowserTaskStore({ now = Date.now, ttlMs = TTL_MS, maxTasks = MAX_TASKS } = {}) {
+export function createBrowserTaskStore({ now = Date.now, ttlMs = BROWSER_TASK_TTL_MS, maxTasks = MAX_TASKS } = {}) {
   const tasks = new Map() // taskId -> task
   const live = task => task && (task.status === 'running' || task.status === 'paused') && now() - task.updatedAt <= ttlMs
   return {
@@ -102,7 +102,7 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = TTL_MS, maxTask
       for (const task of tasks.values()) if (task.conversationKey === conversationKey && live(task)) task.status = 'cancelled'
       while (tasks.size >= maxTasks) tasks.delete(tasks.keys().next().value)
       const task = { taskId: `bt_${randomBytes(6).toString('hex')}`, conversationKey, cardId, goal: compactText(goal, MAX_MESSAGE), status: 'running',
-        pause: null, userContext: [], state: null, prior: null, memoryPacket: null, memoryPages: [], memory: null, pendingWrite: null, trail: [], resolved: [], pendingAsk: null, host: '', steps: 0, actions: { fill: 0, navigate: 0, scroll: 0 }, segments: 0, liveStep: 0, lastActionAt: null, createdAt: now(), updatedAt: now() }
+        pause: null, userContext: [], state: null, prior: null, memoryPacket: null, memoryPages: [], memory: null, pendingWrite: null, trail: [], resolved: [], pendingAsk: null, host: '', steps: 0, actions: { fill: 0, navigate: 0, scroll: 0 }, segments: 0, liveStep: 0, lastActionAt: null, asked: false, createdAt: now(), updatedAt: now() }
       tasks.set(task.taskId, task)
       return task
     },
@@ -111,6 +111,8 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = TTL_MS, maxTask
       return null
     },
     touch(task) { task.updatedAt = now() },
+    // The host tells the task when its question (or its "cannot proceed") has reached the person as a posted message.
+    markAsked(task, asked = true) { if (task) { task.asked = asked === true; task.updatedAt = now() } },
     // Read-only progress facts for the heartbeat: numbers and closed words only (no goal, label, host, URL or page text).
     // The newest task of the conversation that is running or waiting, else the newest finished one inside the TTL; null when none.
     facts(conversationKey) {
@@ -128,6 +130,8 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = TTL_MS, maxTask
       // active / phase / waitingOnUser / stepsDone / stepsRemaining use the heartbeat's own fact names, so a provider can return this object as is.
       return Object.freeze({ taskId: task.taskId, status: task.status, active: pick.active, phase: task.status === 'paused' ? 'waiting_user' : task.status === 'running' ? 'objective_step' : null,
         stepsDone, stepsRemaining: Math.max(0, MAX_TASK_STEPS - stepsDone),
+        // asked: the hand-off message is posted, the person is really awaited (false while the subjective model still words it)
+        asked: task.status === 'paused' && task.asked === true,
         waitingOnUser: waiting || blocked, waitingKind: waiting ? 'need_context' : blocked ? 'cannot_proceed' : null,
         waitingCode: task.status === 'paused' && typeof task.pause?.code === 'string' && PUBLIC_CODE.test(task.pause.code) ? task.pause.code : null,
         actions: Object.freeze({ ...task.actions }), lastActionAgeMs: task.lastActionAt === null ? null : Math.max(0, at - task.lastActionAt),
@@ -273,7 +277,7 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
           if (!gateScope.isDecisionCurrent()) return { handled: false, reason: 'evidence_unavailable' }
           if (resume.kind === 'cancel_task') { paused.status = 'cancelled'; return { handled: false, reason: 'task_cancelled' } }
           if (resume.kind !== 'resume_task') return { handled: false, reason: resume.kind === 'unrelated' ? 'unrelated' : 'uncertain' }
-          paused.userContext.push(compactText(message, MAX_MESSAGE)); paused.status = 'running'; paused.pause = null
+          paused.userContext.push(compactText(message, MAX_MESSAGE)); paused.status = 'running'; paused.pause = null; paused.asked = false
           const out = await finalize(await loop(run, paused, hosts), paused)
           return { ...out, resumed: true }
         }

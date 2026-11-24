@@ -40,15 +40,15 @@ const starts = (choices, text) => choices.find(c => c.value.includes(text))?.val
 const MSG = '거래처 포털에서 이번 달 세금계산서 내려받아줘'
 
 const WAIT_TEXT = '확인하는 데 시간이 조금 걸리고 있어요. 곧 이어서 말씀드릴게요.'
-function world(t, { start = `${O}/invoices`, held = true, entry = {}, pick = null, patch = null, virtual = false } = {}) {
+function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {}, pick = null, patch = null, virtual = false, actGate = null } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-c11-')); chmodSync(dir, 0o700)
   const store = openChatStore({ dataDir: dir, ownerScope: 'synthetic-c11' })
   t.after(() => { store.close(); rmSync(dir, { recursive: true, force: true }) })
   const pages = PAGES(), flags = { notListed: 0 }
   patch?.(pages)
   const events = [], calls = [], replies = [], decisions = [], acts = [], uiKinds = [], factsDuringActs = [], timeline = []
-  let docSeq = 1, turnCount = 0, threadCount = 0, chat = null, clock = 5_000_000, forks = 0
-  const timers = [], flowAsked = [], forkPrompts = []
+  let docSeq = 1, turnCount = 0, threadCount = 0, chat = null, clock = 5_000_000, forks = 0, failTurn = false
+  const timers = [], flowAsked = [], forkPrompts = [], turnIds = [], sends = []
   let cur = { url: start, documentId: 'doc1', revision: 1 }
   const snap = () => ({ cardId: 'card', documentId: cur.documentId, revision: cur.revision, url: cur.url, readyState: 'complete', text: ['합성 포털'],
     viewport: { width: 300, height: 200, devicePixelRatio: 1 }, interactiveElements: pages[cur.url] })
@@ -76,7 +76,8 @@ function world(t, { start = `${O}/invoices`, held = true, entry = {}, pick = nul
         return { ok: true, text: async () => JSON.stringify({ answers, usage: { input_tokens: 1 } }) }
       }
       if (q0.name === 'browser_entry') return { ok: true, text: async () => JSON.stringify({ answers: [entryAnswer(q0)] }) }
-      if (q0.name === 'task_resume') return { ok: true, text: async () => JSON.stringify({ answers: [choice('task_resume', 'resume_task', 0.95)] }) }
+      if (q0.name === 'task_resume') { const msg = /User message: (.*)/.exec(text)?.[1] ?? ''
+        return { ok: true, text: async () => JSON.stringify({ answers: [choice('task_resume', /취소/.test(msg) ? 'cancel_task' : /점심/.test(msg) ? 'unrelated' : 'resume_task', 0.95)] }) } }
       const evidence = wire.input[1].content
       const url = /URL: (\S+)/.exec(evidence)?.[1], ctx = /Context the user gave in the chat \(not page text\):\n([\s\S]*?)\n\n/.exec(evidence)?.[1] ?? ''
       let next, goalMet = 0, pageState = 'content'
@@ -104,6 +105,7 @@ function world(t, { start = `${O}/invoices`, held = true, entry = {}, pick = nul
         return { ...reply, status: 'observed', snapshot: wait ? { ...snap(), wait: { for: wait.for, outcome: 'met', elapsedMs: 1 } } : snap() } }
       if (request.kind === 'act') {
         const a = request.action; acts.push({ type: a.type, url: a.url ?? null, ref: a.ref ?? null })
+        if (actGate) await actGate(acts.length)
         factsDuringActs.push(chat.browserTaskFacts(DM))
         if (a.type === 'navigate') cur = { url: a.url, documentId: `doc${++docSeq}`, revision: 1 }
         return { ...reply, status: 'acted', receipt: { after: snap(), observation: {}, dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true, inputRoute: 'chrome-load-uri' } } }
@@ -137,12 +139,13 @@ function world(t, { start = `${O}/invoices`, held = true, entry = {}, pick = nul
         }, 1)
         return { turn: { id: 'ft', status: 'inProgress', items: [] } }
       }
-      if (method === 'turn/start') return { turn: { id: `turn-${++turnCount}`, status: 'inProgress', items: [] } }
+      if (method === 'turn/start') { if (failTurn) { failTurn = false; throw Object.assign(new Error('native refused'), { code: -32000 }) }
+        const id = `turn-${++turnCount}`; turnIds.push(id); return { turn: { id, status: 'inProgress', items: [] } } }
       if (method === 'turn/interrupt') return {}
       throw new Error(`Unexpected method: ${method}`)
     },
     decisionContext: { mode: () => 'on', configured: () => true, client, calibrationLog: { record: () => ({}), complete() {} },
-      ...(held ? { draftCheck: { mode: () => 'on' } } : {}), conversationFlow: { mode: () => 'on' },
+      ...(held ? { draftCheck: { mode: () => 'on' } } : {}), ...(flow ? { conversationFlow: { mode: () => 'on' } } : {}),
       browserEntry: { mode: () => 'on', ...entry, ...(entry.memory ? { memory: async args => { memoryCalls.push(1); return entry.memory(args) } } : {}) } },
   })
   chat.setConnection(true)
@@ -154,20 +157,25 @@ function world(t, { start = `${O}/invoices`, held = true, entry = {}, pick = nul
   const notify = (method, params) => chat.handleNotification({ method, params })
   const settle = async () => { for (let i = 0; i < 8; i++) { await chat.flowIdle(); await new Promise(r => setTimeout(r, 3)) } }
   const w = { flowAsked, forkPrompts, timers, settle,
-    async advance(ms) { const end = clock + ms
-      for (;;) { timers.sort((a, b) => a.at - b.at); const next = timers[0]; if (!next || next.at > end) break; timers.shift(); clock = next.at; next.fn(); await settle() }
+    async advance(ms, { settleEvery = 1 } = {}) { const end = clock + ms; let fired = 0
+      for (;;) { timers.sort((a, b) => a.at - b.at); const next = timers[0]; if (!next || next.at > end) break; timers.shift(); clock = next.at; next.fn(); if (++fired % settleEvery === 0) await settle(); else await new Promise(r => setImmediate(r)) }
       clock = end; await settle() },
-    timing: () => ({ threadId: last.conversationId, turnId: last.runId }), notify,
+    timing: () => ({ threadId: last.conversationId, turnId: turnIds.at(-1) }), notify,
     flags, chat, store, events, calls, decisions, acts, uiKinds, timeline, factsDuringActs, memoryCalls,
     setUrl(url) { cur = { url, documentId: `doc${++docSeq}`, revision: 1 } },
-    async send(message) { n++
-      last = await chat.send({ message, requestId: `req-${n}`, clientThreadId: DM, ...(last ? { conversationId: last.conversationId } : {}), executionPolicy: { mode: 'browserBounded' },
+    // Sent the way the composer sends: the same body whether or not a reply is open (the runtime decides where it goes).
+    async send(message, { wait = true } = {}) { n++
+      const out = await chat.send({ message, requestId: `req-${n}`, clientThreadId: DM, ...(last ? { conversationId: last.conversationId } : {}), executionPolicy: { mode: 'browserBounded' },
         selectedSources: [source(n)], browserTransportId: 'ui' })
-      return last },
+      sends.push(out)
+      if (out.inRun) { if (wait) await chat.browserRunIdle() } else last = out
+      return out },
+    failNextTurn() { failTurn = true },
+    sends, turnIds, runs: () => chat.snapshot(last.conversationId).runs, replyEvents: () => events.filter(e => /^reply\./.test(e.event)).map(e => e.event),
     note() { const value = calls.filter(c => c.method === 'turn/start').at(-1).params.additionalContext?.egdesk_browser_task?.value; return value ? JSON.parse(value).egdesk_browser_task : null },
     // The scripted subjective engine: it words the closed note (it has nothing else) and streams like a real turn would.
     async subjective({ beforeTurnEnds = null } = {}) {
-      const note = w.note(), timing = { threadId: last.conversationId, turnId: last.runId }
+      const note = w.note(), timing = { threadId: last.conversationId, turnId: turnIds.at(-1) }
       const text = !note ? '(일반 답변)' : note.status === 'done' ? '세금계산서를 내려받았습니다.'
         : note.code === 'choice_needed' ? `사업자가 둘입니다(${(note.candidates || []).join(', ')}). 어느 쪽으로 받을까요?`
           : note.code === 'two_factor_required' ? '2단계 인증이 필요합니다. 브라우저 카드에서 직접 마친 뒤 알려주세요.' : note.code === 'human_step' ? '남은 단계는 직접 눌러야 합니다.' : '진행할 수 없습니다.'
@@ -178,7 +186,7 @@ function world(t, { start = `${O}/invoices`, held = true, entry = {}, pick = nul
       await new Promise(r => setTimeout(r, 2))
       beforeTurnEnds?.(text)
       await notify('turn/completed', { threadId: timing.threadId, turn: { id: timing.turnId, status: 'completed', items: [] } })
-      for (let i = 0; i < 6; i++) { await chat.draftCheckIdle(); await chat.flowIdle(); await new Promise(r => setTimeout(r, 2)) }
+      for (let i = 0; i < 6; i++) { await chat.draftCheckIdle(); await chat.flowIdle(); await chat.browserRunIdle(); await new Promise(r => setTimeout(r, 2)) }
       return text
     },
     history: () => store.listMessages(DM).messages.map(m => [m.role, m.text]),
@@ -190,7 +198,7 @@ function world(t, { start = `${O}/invoices`, held = true, entry = {}, pick = nul
   return w
 }
 
-test('R1 need-context round trip, completed messages only: question -> reply -> same task -> one final report; history order holds', async t => {
+test('R1 one live run: question (completed message) -> run.replyOpen -> in-run reply -> the SAME task resumes inside the run -> one final report', async t => {
   const w = world(t)
   await w.send(MSG)
   const note1 = w.note()
@@ -204,12 +212,25 @@ test('R1 need-context round trip, completed messages only: question -> reply -> 
   assert.deepEqual(w.posted(), [question])
   assert.deepEqual(w.history(), [['user', MSG], ['assistant', question]])
   assert.deepEqual(w.acts, [], 'nothing was done before the person answered')
-  await w.send('두 번째 사업자로')
+  // the run stays open for the reply: still working, reply open on the question message, nothing else posted
+  const held = w.runs()
+  assert.deepEqual([held.length, held[0].status, held[0].replyOpen?.messageId], [1, 'inProgress', held[0].messages.find(m => m.role === 'assistant').id])
+  assert.deepEqual(w.replyEvents(), ['reply.opened'])
+  const reply = await w.send('두 번째 사업자로')
+  assert.deepEqual([reply.inRun, reply.runId, reply.accepted], [true, held[0].runId, true], 'the reply went into the same run')
   const note2 = w.note()
   assert.deepEqual([note2.status, note2.id, note2.next], ['done', note1.id, 'report_to_user'], 'the reply resumed the same task')
   const report = await w.subjective()
   assert.deepEqual(w.deltas(), [question, report]); assert.deepEqual(w.posted(), [question, report], 'the final report is one completed message too')
   assert.deepEqual(w.history(), [['user', MSG], ['assistant', question], ['user', '두 번째 사업자로'], ['assistant', report]])
+  const ended = w.runs()
+  assert.deepEqual([ended.length, ended[0].status, ended[0].replyOpen ?? null, ended[0].runId], [1, 'completed', null, held[0].runId], 'one run from the request to the report')
+  assert.deepEqual(ended[0].messages.map(m => m.role), ['assistant', 'user', 'assistant'], 'the question, the in-run reply and the report belong to one run')
+  assert.deepEqual(w.replyEvents(), ['reply.opened', 'reply.closed'])
+  assert.equal(w.events.filter(e => e.event === 'run.completed').length, 1)
+  // the second native turn is the person's reply plus the closed note, on the same thread; nothing else differs from the first turn's shape
+  const [turn1, turn2] = w.calls.filter(c => c.method === 'turn/start').map(c => c.params)
+  assert.deepEqual([turn2.threadId, turn2.input[0].text, Object.keys(turn2).sort()], [turn1.threadId, '두 번째 사업자로', Object.keys(turn1).sort()])
   assert.deepEqual(w.acts.map(a => [a.type, a.url]), [['navigate', `${O}/biz/2`], ['navigate', `${O}/download/2.pdf`]])
   assert.deepEqual(w.counts(), { browser_entry: 1, next_step: 4, task_resume: 1 })
   assert.equal(w.decisions.filter(d => d.image).length, 0)
@@ -218,7 +239,7 @@ test('R1 need-context round trip, completed messages only: question -> reply -> 
   assert.deepEqual(order, ['decide:browser_entry', 'decide:next_step+page_state+goal_met', 'native:turn/start', 'decide:task_resume',
     'decide:next_step+page_state+goal_met', 'decide:next_step+page_state+goal_met', 'decide:next_step+page_state+goal_met', 'native:turn/start'])
   // no intermediate-message job started for a browser-task turn (its reply must reach the task, not an in-run steer)
-  assert.equal(w.calls.some(c => c.method === 'thread/fork' || c.method === 'turn/steer'), false)
+  assert.equal(w.calls.some(c => c.method === 'thread/fork' || c.method === 'turn/steer' || c.method === 'turn/interrupt'), false, 'the reply is never steered into a native turn: it belongs to the task')
 
   // progress facts for the heartbeat: read-only, numbers and closed words only
   assert.deepEqual([waiting.status, waiting.active, waiting.phase, waiting.waitingOnUser, waiting.waitingKind, waiting.waitingCode, waiting.stepsDone, waiting.stepsRemaining, waiting.lastActionAgeMs], ['paused', true, 'waiting_user', true, 'need_context', 'choice_needed', 1, 23, null])
@@ -226,8 +247,9 @@ test('R1 need-context round trip, completed messages only: question -> reply -> 
   assert.deepEqual([done.status, done.active, done.phase, done.waitingOnUser, done.stepsDone, done.actions.navigate, done.taskId], ['done', false, null, false, 4, 2, note1.id])
   assert.equal(typeof done.lastActionAgeMs, 'number')
   assert.deepEqual(w.factsDuringActs.map(f => [f.status, f.phase, f.waitingOnUser]), [['running', 'objective_step', false], ['running', 'objective_step', false]])
+  assert.equal(waiting.asked, false, 'read while the question was still being worded')
   assert.ok(w.factsDuringActs[1].stepsDone > w.factsDuringActs[0].stepsDone, 'the step count moves while the loop runs')
-  assert.deepEqual(Object.keys(done).sort(), ['actions', 'active', 'ageMs', 'idleMs', 'lastActionAgeMs', 'phase', 'status', 'stepsDone', 'stepsRemaining', 'taskId', 'waitingCode', 'waitingKind', 'waitingOnUser'])
+  assert.deepEqual(Object.keys(done).sort(), ['actions', 'active', 'ageMs', 'asked', 'idleMs', 'lastActionAgeMs', 'phase', 'status', 'stepsDone', 'stepsRemaining', 'taskId', 'waitingCode', 'waitingKind', 'waitingOnUser'])
   assert.doesNotMatch(JSON.stringify([waiting, done, w.factsDuringActs]), /세금|사업자|portal|example|https?:|invoices/)
   assert.ok(Object.isFrozen(done))
   assert.equal(w.chat.browserTaskFacts('other-chat'), null)
@@ -242,13 +264,15 @@ test('R2 cannot-proceed round trip (2FA): one completed message asks the person,
   assert.deepEqual([facts.waitingOnUser, facts.waitingKind, facts.waitingCode], [true, 'cannot_proceed', 'two_factor_required'])
   const ask = await w.subjective()
   assert.deepEqual(w.acts, [])
+  assert.equal(w.runs()[0].status, 'inProgress'); assert.equal(w.chat.browserTaskFacts(DM).asked, true)
   w.setUrl(`${O}/single`) // the person finished the second factor in the card
-  await w.send('했어')
+  assert.equal((await w.send('했어')).inRun, true)
   const note2 = w.note()
   assert.deepEqual([note2.status, note2.id], ['done', note1.id])
   const report = await w.subjective()
   assert.deepEqual(w.history(), [['user', MSG], ['assistant', ask], ['user', '했어'], ['assistant', report]])
   assert.deepEqual(w.deltas(), [ask, report]); assert.deepEqual(w.posted(), [ask, report])
+  assert.deepEqual([w.runs().length, w.runs()[0].status], [1, 'completed'])
   assert.equal(w.acts.filter(a => a.type !== 'navigate').length, 0)
 })
 
@@ -377,11 +401,16 @@ test('H1 a slow wording turn: the heartbeat speaks (one completed message), neve
   assert.equal(w.calls.some(c => c.method === 'turn/steer'), false)
   assert.deepEqual(w.acts, [], 'speaking never acts on the page')
   const question = await w.subjective()
-  assert.deepEqual([hb.state, hb.stopReason], ['stopped', 'run_end'])
+  // the question is posted and the run is held open: now the person really is awaited, and the heartbeat says nothing more
+  assert.deepEqual([hb.state, hb.facts().phase, hb.facts().sources.browser_task.phase, hb.facts().sources.browser_task.waitingOnUser], ['running', 'waiting_user', 'waiting_user', true])
   assert.deepEqual(w.posted(), [WAIT_TEXT, question])
-  await w.send('두 번째 사업자로')
+  const askedBefore = w.flowAsked.length
+  await w.advance(60000)
+  assert.deepEqual([w.flowAsked.length, w.posted().length], [askedBefore, 2], 'a minute of waiting for the person: no request, no message')
+  assert.equal((await w.send('두 번째 사업자로')).inRun, true)
   assert.deepEqual([w.note().status, w.acts.length], ['done', 2])
   const report = await w.subjective()
+  assert.deepEqual([hb.state, hb.stopReason, w.runs().length, w.runs()[0].status], ['stopped', 'run_end', 1, 'completed'])
   assert.deepEqual(w.history(), [['user', MSG], ['assistant', WAIT_TEXT], ['assistant', question], ['user', '두 번째 사업자로'], ['assistant', report]])
   assert.equal(w.deltas().length, 3, 'three assistant messages, each in one piece')
   assert.doesNotMatch(w.flowAsked.map(a => a.facts).join('\n'), /세금|사업자|portal|example|https?:/, 'the heartbeat question carries numbers and closed labels only')
@@ -394,4 +423,93 @@ test('H2 held mode off: the heartbeat still beats with the task facts but cannot
   assert.equal(w.chat.heartbeatFor(DM).facts().sources.browser_task.phase, 'handing_off')
   assert.deepEqual([w.flowAsked.length, w.posted().length, w.forkPrompts.length], [0, 0, 0])
   await w.subjective()
+})
+
+// ---- the objective loop INSIDE the run (after the first hand-off): it can speak mid-loop, be stopped, time out, or be declined ----
+const gate = () => { let open; const promise = new Promise(resolve => { open = resolve }); return { promise, open } }
+
+test('N1 mid-loop: the resumed loop works inside the run, so a slow step gets one completed message from the heartbeat; then the report; one run', async t => {
+  const slow = gate()
+  const w = world(t, { virtual: true, actGate: n => (n === 1 ? slow.promise : null) })
+  await w.send(MSG); const question = await w.subjective()
+  const reply = await w.send('두 번째 사업자로', { wait: false })
+  assert.equal(reply.inRun, true)
+  await w.settle()
+  const hb = w.chat.heartbeatFor(DM)
+  assert.deepEqual([w.acts.length, hb.facts().phase, hb.facts().sources.browser_task.phase, w.runs()[0].status], [1, 'objective_step', 'objective_step', 'inProgress'], 'the first page action is in flight, inside the run')
+  assert.equal(w.turnIds.length, 1, 'no native turn is live while the objective loop works')
+  await w.advance(16000)
+  assert.deepEqual(w.posted(), [question, WAIT_TEXT], 'the heartbeat spoke during the objective loop: a completed message in the same run')
+  assert.ok(w.flowAsked.length >= 1 && w.flowAsked.every(a => !a.offered.includes('ask_missing')))
+  assert.match(w.flowAsked.at(-1).facts, /current_phase: objective_step/)
+  assert.doesNotMatch(w.flowAsked.map(a => a.facts).join('\n'), /세금|사업자|portal|example|https?:/)
+  slow.open()
+  await w.chat.browserRunIdle()
+  assert.deepEqual([w.note().status, w.turnIds.length], ['done', 2])
+  const report = await w.subjective()
+  assert.deepEqual(w.history(), [['user', MSG], ['assistant', question], ['user', '두 번째 사업자로'], ['assistant', WAIT_TEXT], ['assistant', report]])
+  assert.deepEqual([w.runs().length, w.runs()[0].status, w.acts.length], [1, 'completed', 2])
+  assert.equal(w.acts.filter(a => a.type === 'fill' || ['s1', 's2', 'x1'].includes(a.ref)).length, 0)
+})
+
+test('N2 stop while the run waits for the reply: it ends here (no native interrupt of a finished turn), the grant is released, the task stays resumable', async t => {
+  const w = world(t)
+  const first = await w.send(MSG); await w.subjective()
+  const out = await w.chat.interrupt({ conversationId: first.conversationId, runId: first.runId })
+  assert.equal(out.accepted, true)
+  assert.deepEqual([w.runs()[0].status, w.runs()[0].replyOpen ?? null], ['interrupted', null])
+  assert.equal(w.calls.some(c => c.method === 'turn/interrupt'), false)
+  assert.ok(w.uiKinds.includes('cancel'), 'the Card grant of the run was released')
+  assert.deepEqual(w.events.filter(e => e.event === 'run.completed').map(e => e.details.status), ['interrupted'], 'the reply closes with the run')
+  // the task itself is still paused: the next message is an ordinary new turn that resumes it before its native turn (the c12 path)
+  const next = await w.send('두 번째 사업자로')
+  assert.equal(next.inRun, undefined)
+  assert.deepEqual([w.note().status, w.acts.length, w.runs().length], ['done', 2, 2])
+  await w.subjective()
+})
+
+test('N3 no reply within the task lifetime (30 min): the run ends normally and closes the reply; nothing is acted on meanwhile', async t => {
+  const w = world(t, { virtual: true })
+  await w.send(MSG); const question = await w.subjective()
+  await w.advance(29 * 60 * 1000, { settleEvery: 60 })
+  assert.deepEqual([w.runs()[0].status, Boolean(w.runs()[0].replyOpen)], ['inProgress', true])
+  await w.advance(2 * 60 * 1000, { settleEvery: 12 })
+  assert.deepEqual([w.runs()[0].status, w.runs()[0].replyOpen ?? null, w.acts.length], ['completed', null, 0])
+  assert.deepEqual(w.posted(), [question]); assert.deepEqual(w.events.filter(e => e.event === 'run.completed').map(e => e.details.status), ['completed'])
+  assert.ok(w.uiKinds.includes('cancel'))
+})
+
+test('N4 the in-run reply is not about the task ("취소할래" / something else): the task does not act; the subjective model answers the reply in the same run', async t => {
+  for (const [message, taskStatus] of [['취소할래', 'cancelled'], ['점심 뭐 먹지', 'paused']]) {
+    const w = world(t)
+    await w.send(MSG); await w.subjective()
+    const id = w.chat.browserTaskFacts(DM).taskId
+    assert.equal((await w.send(message)).inRun, true)
+    assert.deepEqual([w.note(), w.acts.length, w.turnIds.length], [null, 0, 2], 'a second native turn with the reply and no note')
+    const answer = await w.subjective()
+    assert.equal(answer, '(일반 답변)')
+    assert.deepEqual([w.runs().length, w.runs()[0].status, w.chat.browserTaskStore.get(id).status], [1, 'completed', taskStatus])
+    assert.deepEqual(w.history().map(r => r[0]), ['user', 'assistant', 'user', 'assistant'])
+  }
+})
+
+test('N5 without the heartbeat flag (held messages only): the c12 behaviour, the run ends with the question and the reply is the next turn', async t => {
+  const w = world(t, { flow: false })
+  await w.send(MSG); const question = await w.subjective()
+  assert.deepEqual([w.runs()[0].status, w.runs()[0].replyOpen ?? null, w.replyEvents().length], ['completed', null, 0])
+  const reply = await w.send('두 번째 사업자로')
+  assert.equal(reply.inRun, undefined)
+  const report = await w.subjective()
+  assert.deepEqual(w.history(), [['user', MSG], ['assistant', question], ['user', '두 번째 사업자로'], ['assistant', report]])
+  assert.equal(w.runs().length, 2)
+})
+
+test('N6 the native turn of the reply fails to start: the run ends as failed, the reply is kept, nothing more is acted on', async t => {
+  const w = world(t)
+  await w.send(MSG); await w.subjective()
+  w.failNextTurn()
+  assert.equal((await w.send('두 번째 사업자로')).inRun, true)
+  assert.deepEqual([w.runs().length, w.runs()[0].status, w.runs()[0].replyOpen ?? null], [1, 'failed', null])
+  assert.deepEqual(w.history().map(r => r[0]), ['user', 'assistant', 'user'])
+  assert.equal(w.acts.length, 2, 'the task had already done its part; no retry')
 })
