@@ -469,7 +469,9 @@ const chat = new CodexChatRuntime({
     turnMemory: turnMemoryConfig,
     browserEntry: browserEntryConfig,
     // Advisory draft check after an answer is posted (records only). Developer flag, default off; it has no settings screen entry.
-    ...(process.env.EGDESK_DRAFT_CHECK === 'advisory' ? { draftCheck: { mode: () => 'advisory' } } : {}),
+    ...(['advisory', 'on'].includes(process.env.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => process.env.EGDESK_DRAFT_CHECK } } : {}),
+    // Intermediate messages while a run works; needs EGDESK_DRAFT_CHECK=on (held, checked messages). Developer flag, default off.
+    ...(process.env.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on' } } : {}),
     topicRecipient: recipientForCodexDecisions,
     recipientForChatChoice: recipientForCodexDecisions,
     reviewRevision: () => handleBoardPresentationHttp.settingsRevision(),
