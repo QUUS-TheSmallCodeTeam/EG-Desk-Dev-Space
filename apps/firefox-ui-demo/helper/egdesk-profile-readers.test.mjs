@@ -133,7 +133,7 @@ test('published results of a profile room are read under the room\'s own account
     const state = { work: 'email:work@example.test', seen: [] }
     const authority = () => ({ engineId: 'codex', engineProfileId: SLOT, ownerKey: state.work, epoch: 3 })
     const contexts = new ContextRuntime({ store: { async listOutputs(owner) { state.seen.push(['list', owner]); return [] }, async readOutput(owner) { state.seen.push(['read', owner]); state.afterRead?.(); return { markdown: 'x' } } },
-      reader: {}, getOwnerKey: () => defaultOwner, getAuthority: () => authority(), schemaReady: () => true })
+      reader: {}, getOwnerKey: () => defaultOwner, getAuthority: hints => (hints?.engineProfileId ? authority() : { engineId: 'codex', engineProfileId: MAIN, ownerKey: defaultOwner, epoch: 1 }), schemaReady: () => true })
     contexts.runtime = { epoch: 0 }
     assert.deepEqual(await contexts.listOutputVersions({ conversationId: 'c' }, authority()), { outputs: [] })
     await contexts.readOutput(OUT, authority())
