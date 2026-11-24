@@ -1,0 +1,101 @@
+{
+  "set": "l4-briefing-coverage-facts",
+  "tokenCeiling": 4000,
+  "productBars": {
+    "onboard_F#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs:19,347 SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided; per-fact coverage (cycle 21): a fact decided not shown (<= .3) that a material holds is missing -> the one re-design"
+    }
+  },
+  "passRule": "PASS when every hard check passes at the product bar: every fact the board shows is judged shown (yes >= .7) on the complete, the incomplete and the as-attached board, and on the incomplete board the removed remaining-work fact is judged not shown (decided no <= .3). The as-attached 11/3 fact is recorded only.",
+  "requests": [
+    {
+      "id": "f-complete",
+      "file": "requests/f-complete.json",
+      "sha256": "8411a0b3a43889230351383b49db75c94758c5196ee1dfe07e95c08a04b1d6ef",
+      "estInputTokens": 895,
+      "expect": [
+        {
+          "name": "onboard_F1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "\"A사 견적은 11월 3일 요청\" is part 1 (the request card)"
+        },
+        {
+          "name": "onboard_F2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "\"11월 6일 v1 발송\" is in part 2's text"
+        },
+        {
+          "name": "onboard_F3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "\"v2는 팀장 승인 후 발송 예정\" is part 3 (the decision card)"
+        }
+      ]
+    },
+    {
+      "id": "f-incomplete",
+      "file": "requests/f-incomplete.json",
+      "sha256": "911d93d653cf98052b9923bc07d5fa0e7d4aa7b2b19634fd3a6a1e274b2ed813",
+      "estInputTokens": 834,
+      "expect": [
+        {
+          "name": "onboard_F1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "part 1, unchanged"
+        },
+        {
+          "name": "onboard_F2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "part 2, unchanged"
+        },
+        {
+          "name": "onboard_F3",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "hard",
+          "note": "the remaining-work part is removed. FLAGGED: part 2 still says \"아직 보내지 않은 v2\", but nothing shows that v2 waits for the team lead's approval (c20: the whole-board question gave .46 here)"
+        }
+      ]
+    },
+    {
+      "id": "f-as-attached",
+      "file": "requests/f-as-attached.json",
+      "sha256": "1246a2d3a5bdaf059376102bc8869501477f772d01273e91a20ff92596427f3b",
+      "estInputTokens": 843,
+      "expect": [
+        {
+          "name": "onboard_F1",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "soft",
+          "note": "recorded: the 11/3 request is on no material of this board (no part could show it; code records it as unshowable, not blocking)"
+        },
+        {
+          "name": "onboard_F2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "part 1's text"
+        },
+        {
+          "name": "onboard_F3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "part 2 (the decision card)"
+        }
+      ]
+    }
+  ]
+}

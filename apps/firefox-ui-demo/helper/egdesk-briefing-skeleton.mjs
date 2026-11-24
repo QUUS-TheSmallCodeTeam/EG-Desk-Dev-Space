@@ -14,7 +14,7 @@ import { canvasViewSize, placeCanvasView } from '../overlay/resources/EGDeskSurf
 // (egdesk-briefing-catalog.mjs) and from the cards already on the board (with provenance). Nothing here talks to a network, publishes, moves a camera or writes the
 // Board: the host injects judge{} (bridge route) and fill().
 
-export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, maxMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 8, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
+export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, maxFacts: 6, factMax: 300, maxMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 8, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
 // A predicate counts as yes at or above `yes` and as no at or below `no`; anything between is undecided. Placeholders until calibrated (real predicates of the other features answer near 0 or 1).
 export const SKELETON_BARS = Object.freeze({ yes: .7, no: .3 })
 export const SKELETON_STAGES = Object.freeze(['place', 'fit', 'order', 'fill_check', 'coverage'])
@@ -206,15 +206,18 @@ const TRAITS = ['compare', 'sequence', 'open_items', 'single']
 //   single      fact_M#     does this material state a concrete fact?
 // A part whose only way of showing is a card already on the board for it (provenance or title, computed) is reused without a question.
 export const FIT_KINDS = Object.freeze({ compare: 'aspect', sequence: 'happened', open_items: 'todo', single: 'fact' })
-const STAGE_KINDS = { place: ['several', 'one_sentence', 'combines', 'about', 'same'], fit: ['aspect', 'happened', 'todo', 'fact'], order: ['before'], fill_check: ['slot', 'step'], coverage: ['covers'] }
+const STAGE_KINDS = { place: ['several', 'one_sentence', 'combines', 'about', 'same'], fit: ['aspect', 'happened', 'todo', 'fact'], order: ['before'], fill_check: ['slot', 'step'], coverage: ['covers', 'onboard'] }
 const SHOW = { compare: 'how these two versions differ', sequence: 'what happened across these materials, in date order', open_items: 'what is still not done in these materials', single: 'this one material' }
-export const questionName = q => (q.kind === 'several' || q.kind === 'one_sentence' || q.kind === 'combines' || q.kind === 'covers' ? q.kind : q.kind === 'about' ? `about_${q.material}` : q.kind === 'same' ? `same_${q.materials[0]}_${q.materials[1]}` : q.kind === 'aspect' ? `aspect_${q.part}` : ['happened', 'todo', 'fact'].includes(q.kind) ? `${q.kind}_${q.material}` : q.kind === 'before' ? `before_${q.first.part}_${q.second.part}`
+export const questionName = q => (q.kind === 'several' || q.kind === 'one_sentence' || q.kind === 'combines' || q.kind === 'covers' ? q.kind : q.kind === 'about' ? `about_${q.material}` : q.kind === 'onboard' ? `onboard_${q.fact}` : q.kind === 'same' ? `same_${q.materials[0]}_${q.materials[1]}` : q.kind === 'aspect' ? `aspect_${q.part}` : ['happened', 'todo', 'fact'].includes(q.kind) ? `${q.kind}_${q.material}` : q.kind === 'before' ? `before_${q.first.part}_${q.second.part}`
   : q.kind === 'slot' ? `slot_${q.part}_r${q.row}${q.side ? `_${q.side}` : ''}` : `step_${q.part}`)
 
 /** The closed object for one judgment, re-validated here (the bridge route is reachable from the chrome): unknown fields, aliases, components or stages refuse the whole request. */
 export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
   try {
-    if (!exactKeys(raw, ['stage', 'request', 'materials', 'cards', 'questions'], ['answer']) || !SKELETON_STAGES.includes(raw.stage) || !plain(raw.request, SKELETON_LIMITS.requestMax)) return null
+    if (!exactKeys(raw, ['stage', 'request', 'materials', 'cards', 'questions'], ['answer', 'board']) || !SKELETON_STAGES.includes(raw.stage) || !plain(raw.request, SKELETON_LIMITS.requestMax)) return null
+    // cycle 21: the board, quoted once for the per-fact coverage questions (each question quotes only its own fact); the coverage stage only, never with the answer
+    const board = raw.board === undefined ? undefined : raw.stage === 'coverage' && raw.answer === undefined ? boardFields(raw.board) : (() => { throw 0 })()
+    if (raw.questions?.some?.(q => q?.kind === 'onboard') !== (board !== undefined)) return null
     // the answer being laid out, for the place request only (a request like "정리해줘" refers to it)
     if (raw.answer !== undefined && (!['place', 'coverage'].includes(raw.stage) || !plain(raw.answer, SKELETON_LIMITS.answerMax))) return null
     if (raw.questions?.some?.(q => q?.kind === 'combines') && raw.answer === undefined) return null // the content question needs the answer it quotes
@@ -242,8 +245,12 @@ export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
       let out
       if (q.kind === 'several' || q.kind === 'one_sentence' || q.kind === 'combines') { if (!exactKeys(q, ['kind'])) throw 0; out = { kind: q.kind } }
       else if (q.kind === 'covers') {
-        if (!exactKeys(q, ['kind', 'board']) || !Array.isArray(q.board) || !q.board.length || q.board.length > SKELETON_LIMITS.maxParts) throw 0
-        out = { kind: 'covers', board: q.board.map(p => { if (!exactKeys(p, ['text', 'shown']) || !plain(p.text, BRIEFING_LIMITS.textMax) || !Array.isArray(p.shown) || !p.shown.length || p.shown.length > 3) throw 0; return { text: p.text, shown: p.shown.map(shownCard) } }) }
+        if (!exactKeys(q, ['kind', 'board'])) throw 0
+        out = { kind: 'covers', board: boardFields(q.board) }
+      }
+      else if (q.kind === 'onboard') {
+        if (!exactKeys(q, ['kind', 'fact', 'text']) || !/^F[1-9]$/.test(q.fact) || !plain(q.text, SKELETON_LIMITS.factMax)) throw 0
+        out = { kind: 'onboard', fact: q.fact, text: q.text }
       }
       else if (q.kind === 'about') { if (!exactKeys(q, ['kind', 'material']) || !mats.has(q.material)) throw 0; out = { kind: 'about', material: q.material } }
       else if (q.kind === 'same') { if (!exactKeys(q, ['kind', 'materials']) || !Array.isArray(q.materials) || q.materials.length !== 2 || q.materials[0] === q.materials[1] || !q.materials.every(a => mats.has(a))) throw 0; out = { kind: 'same', materials: [...q.materials] } }
@@ -263,8 +270,13 @@ export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
       if (names.has(name)) throw 0
       names.add(name); return out
     })
-    return { stage: raw.stage, request: raw.request, ...(raw.answer !== undefined ? { answer: raw.answer } : {}), materials, cards: list, questions }
+    return { stage: raw.stage, request: raw.request, ...(raw.answer !== undefined ? { answer: raw.answer } : {}), ...(board !== undefined ? { board } : {}), materials, cards: list, questions }
   } catch { return null }
+}
+/** A board as quoted to the judge: its parts in order, each { text, shown: [structured card fields] }; anything else refuses the request. */
+function boardFields(board) {
+  if (!Array.isArray(board) || !board.length || board.length > SKELETON_LIMITS.maxParts) throw 0
+  return board.map(p => { if (!exactKeys(p, ['text', 'shown']) || !plain(p.text, BRIEFING_LIMITS.textMax) || !Array.isArray(p.shown) || !p.shown.length || p.shown.length > 3) throw 0; return { text: p.text, shown: p.shown.map(shownCard) } })
 }
 
 // What a step shows, as structured fields (never one string of a label run into its text): a list card's lines as { heading, text }, a comparison's rows as
@@ -282,6 +294,7 @@ const RULES = {
   fit: 'You are a system judge reading stored materials. Each question quotes ONE material or ONE pair of materials and asks ONE thing about what its text states. Answer each question on its own, whatever the others are. Judge only from the quoted text; never assume content it does not contain.',
   order: 'You are a system judge. Each question describes TWO parts of a briefing by the materials they show. Answer each question on its own. Judge only which part a reader who has seen none of it should be shown first to follow the other.',
   coverage: 'You are a system judge checking a finished board briefing against what the person asked. Judge only from the quoted request, the quoted answer and the quoted parts of the board, in their order.',
+  coverage_facts: 'You are a system judge checking whether a finished board briefing shows given facts. Judge only from the quoted parts of the board and the quoted fact.',
   fill_check: 'You are a system judge checking a text against its source. Each question quotes ONE text and ONE source. Answer each question on its own, whatever the others are. Rewording, summarising and linking words are fine. A number, amount, date, name or event that the quoted source does not contain is NOT supported.',
 }
 // Only what the record has: no date when it has none, no status when the record does not say ("unknown" is not a status to judge from).
@@ -298,6 +311,8 @@ function questionText(q, c, catalog) {
   if (q.kind === 'todo') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. According to this material, is something not done yet or still to happen?`
   // Cycle 19: what is missing, as ONE condition over the whole board in order.
   if (q.kind === 'covers') return `The person asked, quoted exactly as a JSON string: ${JSON.stringify(c.request)}. The board, its parts quoted in order as JSON: ${JSON.stringify(q.board)}. Does this board answer everything the person's request asks about${c.answer ? ' (the request may refer to the assistant\'s answer quoted above)' : ''}?`
+  // Cycle 21 (R4): one fact per question, quoted alone; the board is quoted once, above.
+  if (q.kind === 'onboard') return `The fact, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Is this fact shown on the board quoted above (in the text or the shown fields of any of its parts)?`
   if (q.kind === 'about') return `The person asked, quoted exactly as a JSON string: ${JSON.stringify(c.request)}. Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material contain information that the person's request asks about${c.answer ? ' (the request may refer to the assistant\'s answer quoted above)' : ''}?`
   if (q.kind === 'same') return `Two materials, each quoted as JSON: ${q.materials.map(a => quoteMaterial(mat(a))).join('; ')}. Are these two materials an earlier and a later version of the same document, offer or plan?`
   if (q.kind === 'fact') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material state at least one concrete fact (for example a number, an amount, a date, a name or a decision)?`
@@ -319,8 +334,8 @@ export function createSkeletonJudge(catalog = BRIEFING_CATALOG) {
     if (!c) return manual
     // Plain text messages (the input shape of the requests that were really sent). The request and, for the placement questions, the materials are listed once;
     // every other question quotes its own material, text or source inside the question.
-    const listing = c.stage === 'coverage' && c.answer ? `\n\nThe assistant's answer to it, quoted exactly as a JSON string: ${JSON.stringify(c.answer)}` : c.stage === 'place' ? `${c.answer ? `\n\nThe assistant's answer to it, quoted exactly as a JSON string: ${JSON.stringify(c.answer)}` : ''}\n\nMaterials the assistant had, each quoted as JSON:\n${c.materials.map(quoteMaterial).join('\n')}` : ''
-    const packet = { input: [{ role: 'developer', content: RULES[c.stage] }, { role: 'user', content: `Request, quoted exactly as a JSON string: ${JSON.stringify(c.request)}${listing}` }],
+    const listing = c.stage === 'coverage' && c.board ? `\n\nThe board, its parts quoted in order as JSON: ${JSON.stringify(c.board)}` : c.stage === 'coverage' && c.answer ? `\n\nThe assistant's answer to it, quoted exactly as a JSON string: ${JSON.stringify(c.answer)}` : c.stage === 'place' ? `${c.answer ? `\n\nThe assistant's answer to it, quoted exactly as a JSON string: ${JSON.stringify(c.answer)}` : ''}\n\nMaterials the assistant had, each quoted as JSON:\n${c.materials.map(quoteMaterial).join('\n')}` : ''
+    const packet = { input: [{ role: 'developer', content: RULES[c.stage === 'coverage' && c.board ? 'coverage_facts' : c.stage] }, { role: 'user', content: `Request, quoted exactly as a JSON string: ${JSON.stringify(c.request)}${listing}` }],
       questions: c.questions.map(q => predicateQuestion(questionName(q), questionText(q, c, catalog))), promptCacheKey: `briefing-skeleton-${c.stage}` }
     return { status: 'prepared', kind: 'briefing-skeleton', mode, binding, dto: { ...c, purpose: `briefing skeleton: ${c.stage}`, items: [] }, options: c.questions.map(questionName), packet }
   }
@@ -578,6 +593,42 @@ export function dateMatches(date, material) {
 }
 export const rejectedWord = q => (q.kind === 'step' ? `${q.part} explanation` : `${q.part} ${q.side ? `row ${q.row} ${q.side}` : `line ${q.row}`}`)
 
+// ---------------- 5b. coverage facts (cycle 21): split and cited by code ----------------
+export const COVERAGE_MODES = Object.freeze(['facts', 'board'])
+/** The answer as facts: its sentences; a sentence is split at ", " / "; " into its clauses only when EVERY clause carries its own date, version mark or amount (then
+ *  each stands alone as a fact; a comma inside a number, "12,800", never splits). A list ("법무 검토, 대표 승인, 최종본 발송") stays one sentence, one fact.
+ *  At most SKELETON_LIMITS.maxFacts; the rest are counted (cut), never asked. -> { facts: [text], cut } */
+export function answerFacts(answer) {
+  const anchored = t => { const a = factAnchors(t); return a.dates.length + a.versions.length + a.amounts.length > 0 }
+  const out = clean(answer, SKELETON_LIMITS.answerMax).split(/(?<=[.!?。])\s+/).flatMap(sentence => {
+    const clauses = sentence.split(/[,;]\s+/).map(t => t.trim()).filter(Boolean)
+    return clauses.length > 1 && clauses.every(anchored) ? clauses : [sentence.trim()]
+  })
+  const facts = out.map(t => clean(t, SKELETON_LIMITS.factMax)).filter(Boolean)
+  return { facts: facts.slice(0, SKELETON_LIMITS.maxFacts), cut: Math.max(0, facts.length - SKELETON_LIMITS.maxFacts) }
+}
+const DATE_ANY = /(?<!\d)(\d{1,2})\s?월\s?(\d{1,2})\s?일|(?<![\d/.])(\d{1,2})[/.](\d{1,2})(?![\d/.])/g
+const AMOUNT = /\d{1,3}(?:,\d{3})+|\d+(?=\s?(?:원|개|%|명|건|대|일간))/g
+/** What a fact can be told apart by: its dates, version marks and amounts (code-readable anchors). */
+export function factAnchors(text) {
+  const t = String(text ?? '')
+  const dates = [...t.matchAll(DATE_ANY)].map(m => ({ month: Number(m[1] ?? m[3]), day: Number(m[2] ?? m[4]) })).filter(d => d.month >= 1 && d.month <= 12 && d.day >= 1 && d.day <= 31)
+  const versions = [...t.matchAll(new RegExp(VERSION_MARK.source, 'gi'))].map(m => Number(m[1] ?? m[2] ?? m[3]))
+  const amounts = [...t.replace(DATE_ANY, ' ').matchAll(AMOUNT)].map(m => m[0])
+  return { dates, versions, amounts }
+}
+/** Which materials a fact cites, by code: a material that has one of the fact's dates, version marks or amounts. null = the fact has no anchor (unknown: every
+ *  material may hold it); [] = it has anchors and no material has any of them (no part could show it). */
+export function factCites(text, materials) {
+  const a = factAnchors(text)
+  if (!a.dates.length && !a.versions.length && !a.amounts.length) return null
+  return materials.filter(m => {
+    const body = `${m.title} ${m.text}`
+    const marks = [...body.matchAll(new RegExp(VERSION_MARK.source, 'gi'))].map(x => Number(x[1] ?? x[2] ?? x[3]))
+    return a.dates.some(d => dateMatches(d, { at: m.at, text: body })) || a.versions.some(n => marks.includes(n)) || a.amounts.some(x => body.includes(x))
+  }).map(m => m.alias)
+}
+
 // ---------------- 6. the bounded loop ----------------
 /**
  * runSkeletonFlow({ request, materials, candidates, currentAnswerId, viewport, judge, fill, egress, allow, observeOnly, catalog, bindings }) -> one of
@@ -589,8 +640,8 @@ export const rejectedWord = q => (q.kind === 'step' ? `${q.part} explanation` : 
  * Judgment requests: place (1), fit (1), order (0 or 1, only for pairs the record leaves open), fill check (1, plus 1 per rewrite round): 3 or 4 on the usual path, at most 6.
  * Bounds: SKELETON_LIMITS. stats counts requests and fill turns and keeps what the subjective model received.
  */
-export async function runSkeletonFlow({ request = '', answer = '', materials = [], candidates = [], currentAnswerId = null, viewport = null, judge, fill = null, egress = null, allow = async () => true, observeOnly = false, catalog = BRIEFING_CATALOG, now = Date.now, bindings = null, fillCheck = 'all' } = {}) {
-  const checkMode = FILL_CHECK_MODES.includes(fillCheck) ? fillCheck : 'all'
+export async function runSkeletonFlow({ request = '', answer = '', materials = [], candidates = [], currentAnswerId = null, viewport = null, judge, fill = null, egress = null, allow = async () => true, observeOnly = false, catalog = BRIEFING_CATALOG, now = Date.now, bindings = null, fillCheck = 'all', coverageCheck = 'facts' } = {}) {
+  const checkMode = FILL_CHECK_MODES.includes(fillCheck) ? fillCheck : 'all', coverageMode = COVERAGE_MODES.includes(coverageCheck) ? coverageCheck : 'facts'
   const stats = { judgeRequests: 0, judgeMs: 0, questions: 0, fillTurns: 0, checkSkipped: 0, stages: [], received: [] }
   let relevanceOut = null, gaps = null
   const done = (status, extra = {}) => ({ status, ...(gaps ? { recordGaps: gaps } : {}), ...(relevanceOut ? { relevance: relevanceOut } : {}), ...extra, stages: [...new Set(stats.stages)], stats })
@@ -605,9 +656,10 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
   const said = clean(answer, SKELETON_LIMITS.answerMax)
   const base = { request: asked, materials: scene.materials.map(m => ({ alias: m.alias, title: m.title, text: m.text, at: m.at, status: m.status })),
     cards: scene.targets.filter(t => t.targetable).map(t => ({ alias: t.alias, label: clean(t.label, BRIEFING_LIMITS.labelMax), ...(clean(t.gist, BRIEFING_LIMITS.gistMax) ? { gist: clean(t.gist, BRIEFING_LIMITS.gistMax) } : {}) })) }
-  const ask = async (stage, questions) => {
+  const ask = async (stage, questions, extra = {}) => {
     if (stats.judgeRequests >= SKELETON_LIMITS.maxRequests || stats.judgeMs >= SKELETON_LIMITS.judgeMs) return { unavailable: 'request-bound' }
-    const prepared = await judge.prepare({ stage, ...base, ...((stage === 'place' || stage === 'coverage') && said ? { answer: said } : {}), questions: questions.slice(0, SKELETON_LIMITS.maxQuestions) })
+    const quoteAnswer = said && (stage === 'place' || (stage === 'coverage' && !extra.board))
+    const prepared = await judge.prepare({ stage, ...base, ...(quoteAnswer ? { answer: said } : {}), ...extra, questions: questions.slice(0, SKELETON_LIMITS.maxQuestions) })
     if (prepared?.status !== 'prepared') return { unavailable: prepared?.reason ?? 'unavailable' }
     if (!(await allow(`briefing-skeleton-${stage}`, prepared.preview))) { await judge.cancel(prepared.ticket); return { unavailable: 'declined' } }
     stats.judgeRequests++; stats.questions += Math.min(questions.length, SKELETON_LIMITS.maxQuestions); stats.stages.push(stage)
@@ -737,33 +789,67 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     if (rewritten.bound || !rewritten.ok) return done('fallback-chat', { reason: rewritten.bound ? 'fill-bound' : 'fill-invalid', detail: rewritten.reason, rejections })
     Object.assign(filled, rewritten.items); issues = rewritten.issues
   }
-  // (e) Coverage (cycle 19): does the board, its parts in order, answer everything the request asks about? One question. A decided no gets ONE bounded re-design:
-  // add the one part the board could still show (a catalog part whose fit was UNDECIDED: a part judged not to fit stays out), fill and check only it, ask again.
-  // Nothing to add, an added part that does not pass, or a second no -> the chat answer. Undecided is not a no: the board is proposed (the check's result is recorded).
-  // Requests: at most two more (the added part's fill check and the second coverage question), one more fill turn; SKELETON_LIMITS.maxRequests bounds the rest.
+  // (e) Coverage. Default (cycle 21, R4): the facts the board must show, split and cited by CODE (the answer's clauses; without an answer, the first sentence of each
+  // relevant material), each asked alone: "is this fact shown on the board?" with the board quoted once. Code combines: a fact decided NOT shown that some material
+  // holds (or that has no code anchor) is missing; a missing fact no material holds is recorded (no part could show it) and does not block; undecided does not block.
+  // Missing facts -> ONE bounded re-design: add the catalog parts whose fit was UNDECIDED and whose materials the missing facts cite (a part judged not to fit stays out),
+  // fill and check only them, ask the missing facts again; still missing, or nothing to add -> the chat answer.
+  // 'board' (cycle 19, kept for comparison; EGDESK_BRIEFING_COVERAGE=board): one whole-board question; a decided no, or (cycle 21) an undecided answer when a re-design
+  // candidate exists, gets the one re-design; a no after it -> the chat answer; an undecided answer with nothing to add -> the board is proposed (recorded).
+  // Requests: coverage 1, re-design 2 more (the added parts' check and the coverage again), one more fill turn; SKELETON_LIMITS.maxRequests bounds the rest.
   const boardView = () => items.map(item => ({ text: clean(filled[item.id].text, BRIEFING_LIMITS.textMax), shown: shownFor(item, filled[item.id], scene) }))
-  const coverage = { asked: 0, p: null, redesign: null }
-  const askCoverage = async () => { coverage.asked++; const r0 = await ask('coverage', [{ kind: 'covers', board: boardView() }]); if (!r0.unavailable) coverage.p = r0.answers.covers ?? null; return r0 }
-  let covered = await askCoverage()
-  if (covered.unavailable) return unavailable(covered, true)
-  if (isNo(coverage.p)) {
-    const inItems = new Set(items.map(i => i.id))
-    const part = scene.parts.find(p => !inItems.has(p.alias) && decisions[p.alias] === 'undecided' && !dropped.some(d => d.part === p.alias) && p.options.some(o => o.component))
-    if (!part) return done('fallback-chat', { reason: 'not-covered', coverage })
-    const option = part.options.find(o => o.component)
-    const added = itemFor(part, option, scene, ++n)
-    coverage.redesign = { part: part.alias, trait: part.trait, component: option.value, from: 'undecided-part' }
-    items = [...items, added]; layout = layoutSkeleton(items, scene, viewport); guide = buildGuide(items, scene, retire())
-    const one = await fillOnce(new Set([added.id]))
+  const coverage = { mode: coverageMode, asked: 0, redesign: null }
+  const candidatesFor = cites => { const inItems = new Set(items.map(i => i.id))
+    return scene.parts.filter(p => !inItems.has(p.alias) && decisions[p.alias] === 'undecided' && !dropped.some(d => d.part === p.alias) && p.options.some(o => o.component) && (cites === null || p.materials.some(a => cites.has(a)))) }
+  const redesign = async (parts, because) => {
+    const added = parts.slice(0, Math.max(0, SKELETON_LIMITS.maxParts - items.length)).map(part => { const option = part.options.find(o => o.component); return { part, option, item: itemFor(part, option, scene, ++n) } })
+    coverage.redesign = { parts: added.map(a => ({ part: a.part.alias, trait: a.part.trait, component: a.option.value })), from: 'undecided-part', because }
+    items = [...items, ...added.map(a => a.item)]; layout = layoutSkeleton(items, scene, viewport); guide = buildGuide(items, scene, retire())
+    const one = await fillOnce(new Set(added.map(a => a.item.id)))
     if (one.bound || !one.ok || one.issues.length) return done('fallback-chat', { reason: one.bound ? 'fill-bound' : 'not-covered', coverage })
     Object.assign(filled, one.items)
-    const checked = fillChecks(added, filled[added.id], scene, catalog, { mode: checkMode })
-    const verdict = await ask('fill_check', checked.questions)
+    const checked = added.map(a => fillChecks(a.item, filled[a.item.id], scene, catalog, { mode: checkMode }))
+    const verdict = await ask('fill_check', checked.flatMap(c => c.questions))
     if (verdict.unavailable) return unavailable(verdict, true)
-    if (checked.failures.length || checked.questions.some(q => !isYes(verdict.answers[questionName(q)]))) return done('fallback-chat', { reason: 'not-covered', coverage })
-    covered = await askCoverage()
+    if (checked.some(c => c.failures.length || c.questions.some(q => !isYes(verdict.answers[questionName(q)])))) return done('fallback-chat', { reason: 'not-covered', coverage })
+    return null
+  }
+  if (coverageMode === 'board') {
+    const askBoard = async () => { coverage.asked++; const r0 = await ask('coverage', [{ kind: 'covers', board: boardView() }]); if (!r0.unavailable) coverage.p = r0.answers.covers ?? null; return r0 }
+    let covered = await askBoard()
     if (covered.unavailable) return unavailable(covered, true)
-    if (isNo(coverage.p)) return done('fallback-chat', { reason: 'not-covered', coverage })
+    const parts = isYes(coverage.p) ? [] : candidatesFor(null).slice(0, 1)
+    if (isNo(coverage.p) && !parts.length) return done('fallback-chat', { reason: 'not-covered', coverage })
+    if (parts.length) {
+      const stop = await redesign(parts, isNo(coverage.p) ? 'board-no' : 'board-undecided')
+      if (stop) return stop
+      covered = await askBoard()
+      if (covered.unavailable) return unavailable(covered, true)
+      if (isNo(coverage.p)) return done('fallback-chat', { reason: 'not-covered', coverage })
+    }
+  } else {
+    const keptMats = scene.materials.filter(m => kept.has(m.alias))
+    const split = said ? answerFacts(said) : { facts: keptMats.slice(0, SKELETON_LIMITS.maxFacts).map(m => clean(m.text.split(/(?<=[.!?。])\s+/)[0], SKELETON_LIMITS.factMax)).filter(Boolean), cut: Math.max(0, keptMats.length - SKELETON_LIMITS.maxFacts) }
+    const facts = split.facts.map((text, i) => ({ id: `F${i + 1}`, text, cites: said ? factCites(text, keptMats) : [keptMats[i].alias], p: null }))
+    Object.assign(coverage, { from: said ? 'answer' : 'materials', facts, cut: split.cut, missing: [], unshowable: [] })
+    const askFacts = async list => { coverage.asked++; const r0 = await ask('coverage', list.map(f => ({ kind: 'onboard', fact: f.id, text: f.text })), { board: boardView() })
+      if (!r0.unavailable) for (const f of list) f.p = r0.answers[`onboard_${f.id}`] ?? null; return r0 }
+    const sortOut = () => { const no = facts.filter(f => isNo(f.p)); coverage.unshowable = no.filter(f => f.cites?.length === 0).map(f => f.id); coverage.missing = no.filter(f => f.cites?.length !== 0).map(f => f.id); return facts.filter(f => coverage.missing.includes(f.id)) }
+    if (facts.length) {
+      const r1 = await askFacts(facts)
+      if (r1.unavailable) return unavailable(r1, true)
+      const missing = sortOut()
+      if (missing.length) {
+        const cites = missing.some(f => f.cites === null) ? null : new Set(missing.flatMap(f => f.cites))
+        const parts = candidatesFor(cites)
+        if (!parts.length) return done('fallback-chat', { reason: 'not-covered', coverage })
+        const stop = await redesign(parts, 'fact-missing')
+        if (stop) return stop
+        const r2 = await askFacts(missing)
+        if (r2.unavailable) return unavailable(r2, true)
+        if (sortOut().length) return done('fallback-chat', { reason: 'not-covered', coverage })
+      }
+    }
   }
   guide = buildGuide(items, scene, retire())
 

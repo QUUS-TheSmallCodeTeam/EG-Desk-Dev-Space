@@ -115,8 +115,10 @@ export function createBriefingEngine({ runText, report = '', now = Date.now, lim
  * The bridge's dependencies for the `on` path, in one place so a test mounts exactly what the bridge mounts.
  * enabled === false (the default) leaves the engine out: the route then answers 'no-engine' and does nothing.
  */
-export function briefingDeps({ chat, contexts, enabled = false, limits, order = 'skeleton', fillCheck = 'all' } = {}) {
+export function briefingDeps({ chat, contexts, enabled = false, limits, order = 'skeleton', fillCheck = 'all', coverage = 'facts' } = {}) {
   return {
+    // The coverage check at the end: one question per fact the board must show (default, cycle 21) or the one whole-board question ('board', internal switch, cycle 19).
+    coverage: coverage === 'board' ? 'board' : 'facts',
     // The check after the fill: every piece (default) or only the pieces with a number, a date, a Latin word or a name ('facts', internal switch, off by default).
     fillCheck: fillCheck === 'facts' ? 'facts' : 'all',
     // Which side decides the design. 'skeleton' (default since cycle 13): the Decision model fixes the design guide from the catalog, the subjective model fills the data.
