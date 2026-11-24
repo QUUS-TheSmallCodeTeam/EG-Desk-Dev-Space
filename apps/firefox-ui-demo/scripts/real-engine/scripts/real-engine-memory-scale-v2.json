@@ -6,7 +6,8 @@
       "id": "memory-scale-v2",
       "flags": {
         "EGDESK_TURN_MEMORY_PRUNE_HELD": "on",
-        "EGDESK_TURN_MEMORY_ONE_PACKET": "on"
+        "EGDESK_TURN_MEMORY_ONE_PACKET": "on",
+        "EGDESK_TURN_MEMORY_SELECTION_HELD": "on"
       },
       "memory": {
         "mode": "on",

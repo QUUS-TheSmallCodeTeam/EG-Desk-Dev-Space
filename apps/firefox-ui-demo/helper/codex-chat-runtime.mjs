@@ -2931,7 +2931,7 @@ export class CodexChatRuntime {
       // One packet (flag turnMemory.onePacket, default off): with both features attaching, the memory pages ride under the selection's key and
       // a page that is already a selected item is not sent a second time. Without the flag, or with only one of the two present, nothing changes.
       const onePacket = memoryPacket ? this.mergeTurnMemory(memoryTurn, decision, additionalContext) : null
-      // What the selection delivers in full is held by the model too (flag pruneHeld, default off): kept on the turn, committed with the receipts once the turn was accepted.
+      // What the selection delivers in full is held by the model too (flag turnMemory.selectionHeld, default off): kept on the turn, committed with the receipts once the turn was accepted.
       if (memoryReady) memoryTurn.selectionHeld = this.selectionHeldPages(memoryTurn, decision, additionalContext)
       // What was noted in this session and is not confirmed (flag turnMemory.confirmInConversation, default off): a few lines for the
       // answering model to state, after the pages. null without the flag, so nothing below changes then.
@@ -5063,6 +5063,10 @@ export class CodexChatRuntime {
       this.contextDelivered.delete(cid); this.contextDelivered.set(cid, map)
       while (this.contextDelivered.size > 50) this.contextDelivered.delete(this.contextDelivered.keys().next().value)
     } catch { /* receipts are an optimisation; never affects the turn */ }
+  }
+
+  selectionHeldFlag() {
+    try { return this.decisionContext?.turnMemory?.selectionHeld === true } catch { return false }
   }
 
   pruneHeldFlag() {
@@ -7223,7 +7227,7 @@ export class CodexChatRuntime {
   // → { pageId: { revision, hash } } in the receipts' own form, or null (flag off, selection not on/attached, no wiki).
   selectionHeldPages(turn, decision, additionalContext) {
     try {
-      if (!this.pruneHeldFlag() || decision?.mode !== 'on') return null
+      if (!this.selectionHeldFlag() || decision?.mode !== 'on') return null
       const entry = additionalContext?.[DECISION_CONTEXT_KEY]
       if (entry?.kind !== 'application' || typeof entry.value !== 'string' || !turn?.wiki?.pages) return null
       const out = {}

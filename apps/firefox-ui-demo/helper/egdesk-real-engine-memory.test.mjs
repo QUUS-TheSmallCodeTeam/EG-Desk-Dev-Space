@@ -292,9 +292,16 @@ test('scale-v1 end to end (fake engine): the right answers pass; a missing tail 
 test('selection-delivered pages are held for the memory loop: turn 2\'s scan lists them as held and does not send them again (the lexical scan picks one of them)', async t => {
   const f = SCALE_FACTS
   const turns = [{ steps: [], final: `${f.budget}, ${f.firewall}, ${f.dump}, ${f.storage}` }, { steps: [], final: `${f.cutoverDate} 계획, 오류율 ${f.rollbackRate}를 넘으면 되돌리는 안(가정).` }]
-  const w = world(t, { turns }, { lexicalScan: true })
-  const rec = (await runCheck(w.options, asScripts(buildMemoryScaleScript()), w.deps)).records[0]
-  assert.equal(rec.aborted, null, rec.abortDetail)
+  const run = async flag => {
+    const w = world(t, { turns }, { lexicalScan: true }), script = buildMemoryScaleScript()
+    if (flag) script.conversations[0].flags = { ...script.conversations[0].flags, EGDESK_TURN_MEMORY_SELECTION_HELD: 'on' }
+    const rec = (await runCheck(w.options, asScripts(script), w.deps)).records[0]
+    assert.equal(rec.aborted, null, rec.abortDetail)
+    return { rec, w }
+  }
+  const off = await run(false)
+  assert.ok(off.rec.turns[1].memory.resent.length > 0, 'without the flag the lexical scan\'s pick is sent again (the behaviour this flag changes)')
+  const { rec, w } = await run(true)
   assert.deepEqual(rec.turns[1].memory.resent, [], 'no page whose body the engine already holds is sent again')
   const flat = w.scanInputs.at(-1), [heldPart, pagesPart = ''] = flat.split('\nPages:')
   const titles = ['서버 이전 프로젝트 개요', '서버 이전: 네트워크 작업 기록', '서버 이전: 데이터베이스 작업 기록', '서버 이전: 스토리지 증설 기록']

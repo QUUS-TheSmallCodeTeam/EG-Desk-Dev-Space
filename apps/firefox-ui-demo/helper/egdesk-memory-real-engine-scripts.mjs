@@ -294,7 +294,7 @@ export function buildMemoryScaleScript() {
 //    documents a 2,500-token "spill threshold" for hook additionalContext; turn/start additionalContext has no documented limit.
 //  - turn 2's key (3,291 characters, ~1,050 tokens) was well under that size: the model answered "일요일 밤" from the cut-over page's second sentence and left out its last
 //    sentence, the date. A question that does not ask for the date does not need it in the answer: v1's turn 2 was the script's fault.
-// v2 keeps v1's pages and turn 2 but asks for the date, and sizes turn 1 under what a 2,500-token entry holds (two long pages: database 1,395 and storage 864 characters). The
+// v2 keeps v1's pages and turn 2 but turns on EGDESK_TURN_MEMORY_SELECTION_HELD (a page the selection delivered is held for the memory loop), asks for the date, and sizes turn 1 under what a 2,500-token entry holds (two long pages: database 1,395 and storage 864 characters). The
 // probe below finds the real limit: the same question over 2, 4, 6 and 8 pages of about 1,000 characters, a code in each page's first sentence and a marker in its last,
 // plus the 4-page case with one packet OFF (two keys). Where the markers stop being in the answers, and how the engine input grows, is the answer.
 export const MEMORY_SCALE_V2_SET = 'real-engine-memory-scale-v2'
@@ -306,7 +306,7 @@ export function buildMemoryScaleV2Script() {
   const second = { say: '그럼 본 전환은 이미 끝났어? 언제로 계획돼 있는지, 문제가 생기면 어떻게 하기로 했는지도 알려줘.', expect: conv.turns[1].expect }
   return { set: MEMORY_SCALE_V2_SET,
     description: 'Pattern: scale-v1 after its real run. Same seven pages. Turn 1 asks for one fact from each of two long pages (database 1,395 and storage 864 characters; the packet stays under about 2,500 tokens): attached, merged, no body twice, minKeyChars 3000, both facts in the answer. Turn 2 asks whether the planned cut-over is done, WHEN it is planned and what happens if it goes wrong: the plan\'s date and the idea\'s number in the answer, neither stated as done or decided, no held page sent again. Needs --decisions. Expectations by code.',
-    conversations: [{ ...conv, id: 'memory-scale-v2', turns: [first, second] }] }
+    conversations: [{ ...conv, id: 'memory-scale-v2', flags: { ...conv.flags, EGDESK_TURN_MEMORY_SELECTION_HELD: 'on' }, turns: [first, second] }] }
 }
 const PROBE_WORDS = ['alpha', 'bravo', 'cedar', 'delta', 'ember', 'fjord', 'gamma', 'harbor']
 const probePage = i => {
