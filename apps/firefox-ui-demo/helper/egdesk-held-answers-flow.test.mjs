@@ -161,13 +161,14 @@ test('held final answer with a draft-check revision: the plan wording is posted,
 test('a failed or unavailable revision fork posts the original (certain part only is for the check, never silence)', async t => {
   const failing = world(t, { candidates: [PLAN], revision: null, flags: { held: true, flow: false } })
   await failing.send(); await failing.final('PostgreSQL 마이그레이션은 현재 운영 중입니다.')
-  // c19 (no fixed fallback): with the rewrite unavailable and nothing left after removing the failing sentence, the check posts no
-  // sentence of its own; the draft goes as written, as on any failure of the check (P2), and the record says revision_unavailable.
-  assert.deepEqual(failing.posted().filter(([r]) => r === 'assistant'), [['assistant', 'PostgreSQL 마이그레이션은 현재 운영 중입니다.']])
-  assert.equal(failing.log.entries().filter(e => e.feature === 'draft_check').at(-1).fallback, 'revision_unavailable')
+  // c20 (Main: never post unchecked text as if checked): with the rewrite unavailable and nothing left after removing the failing
+  // sentence, nothing is posted; the record says revision_unavailable / would_withhold.
+  assert.deepEqual(failing.posted().filter(([r]) => r === 'assistant'), [])
+  const rec = failing.log.entries().filter(e => e.feature === 'draft_check').at(-1)
+  assert.deepEqual([rec.fallback, rec.ifUnrevised], ['revision_unavailable', 'would_withhold'])
   const none = world(t, { candidates: [PLAN], forkOk: false, flags: { held: true, flow: false } })
   await none.send(); await none.final('PostgreSQL 마이그레이션은 현재 운영 중입니다.')
-  assert.deepEqual(none.posted().filter(([r]) => r === 'assistant'), [['assistant', 'PostgreSQL 마이그레이션은 현재 운영 중입니다.']])
+  assert.deepEqual(none.posted().filter(([r]) => r === 'assistant'), [], 'no fork either: nothing posted')
 })
 
 test('a long multi-step run (40 s): one wait-explaining message, then the final answer; ordering and counts', async t => {
@@ -322,7 +323,7 @@ test('c19: a turn whose context missed its deadline is checked against the resul
   await w.send(); await w.final('PostgreSQL 전환은 v16으로 다음 분기에 할 예정입니다.')
   assert.equal(seen.length, 0, 'the c18 reading never asks')
   // Before c19 the person got the fixed "확인되지 않은 ..." sentence here; now no fixed sentence exists, and with no rewrite in this world
-  // the draft goes as written, recorded as revision_unavailable (never judged).
+  // nothing is posted (c20), recorded as revision_unavailable (never judged).
   assert.equal(w.log.entries().filter(e => e.feature === 'draft_check').at(-1).fallback, 'revision_unavailable')
 })
 
@@ -343,7 +344,7 @@ test('c19: a follow-up whose context chose no material is checked against the re
   const none = draftRequests(other)
   await other.send(); await other.final('네, v16입니다.')
   assert.equal(none.length, 0)
-  assert.equal(other.log.entries().filter(e => e.feature === 'draft_check').at(-1).fallback, 'revision_unavailable', 'no evidence anywhere: the concrete sentence is not confirmed; no rewrite here, so it goes as written, unjudged')
+  assert.equal(other.log.entries().filter(e => e.feature === 'draft_check').at(-1).fallback, 'revision_unavailable', 'no evidence anywhere: the concrete sentence is not confirmed; no rewrite here, so nothing is posted (c20)')
 })
 
 test('c19: with no evidence at all, an answer that makes no concrete claim is posted as written, with no request and no added line', async t => {

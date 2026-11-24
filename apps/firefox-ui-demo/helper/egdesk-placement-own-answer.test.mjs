@@ -23,9 +23,9 @@ test('draft check: everything it hands back is the answering model\'s text (c19:
   const trimmed = await checkDraft({ draft: `PostgreSQL 마이그레이션은 v14에서 v16으로 3월에 끝났습니다. ${FOLLOW_UP}`, evidence: [], mode: 'on', client: never, revise: reviseNever })
   assert.deepEqual([trimmed.outcome, trimmed.text, trimmed.own], ['certain_part', '따로 확인하실 일은 없습니다.', '따로 확인하실 일은 없습니다.'])
   assert.ok(!trimmed.text.includes('자료를 알려 주세요'))
-  // nothing would be left and the rewrite could not run: the draft as written (no fixed question any more), all of it the model's
+  // nothing would be left and the rewrite could not run: nothing is posted (L3 c20), so there is nothing of anyone's to quote
   const asked = await checkDraft({ draft: 'PostgreSQL 마이그레이션은 v14에서 v16으로 3월에 끝났습니다.', evidence: [], mode: 'on', client: never, revise: reviseNever })
-  assert.deepEqual([asked.outcome, asked.text, asked.own, asked.calibration.fallback], ['unchecked', 'PostgreSQL 마이그레이션은 v14에서 v16으로 3월에 끝났습니다.', 'PostgreSQL 마이그레이션은 v14에서 v16으로 3월에 끝났습니다.', 'revision_unavailable'])
+  assert.deepEqual([asked.outcome, asked.text, asked.own, asked.calibration.fallback], ['withheld', '', '', 'revision_unavailable'])
   assert.deepEqual(DRAFT_CHECK_COPY, {})
   for (const mode of ['off', 'advisory']) { const kept = await checkDraft({ draft: FOLLOW_UP, evidence: [], mode, client: never }); assert.equal(kept.own, kept.text, mode); assert.equal(kept.text, FOLLOW_UP) }
 })

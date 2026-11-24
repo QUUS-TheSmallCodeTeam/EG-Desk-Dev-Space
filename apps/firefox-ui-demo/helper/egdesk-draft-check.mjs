@@ -384,10 +384,10 @@ export async function checkDraft({ draft, evidence = [], userText = '', internal
     if (second && !second.findings.length) return out(revised, 'revised', { calls, findings: first.findings })
     if (second) return fallbackPost(revised, second, calls, first.findings)
   }
-  // The rewrite could not run (no fork, it failed, or it gave nothing). With something left, the failing sentences are removed silently;
-  // with nothing left there is no sentence of the model's to post and the check posts no sentence of its own: the draft goes as written,
-  // as on any other failure of the check (P2), recorded as revision_unavailable.
-  if (!(typeof revised === 'string' && revised.trim()) && !trimmed(first).text) return out(draft, 'unchecked', { calls, findings: first.findings, fallback: 'revision_unavailable' })
+  // The rewrite could not run (no fork, it failed, or it gave nothing). The failing sentences are removed silently; with nothing left nothing
+  // is posted (Main c20, consistent with the owner's option (나): unchecked text is never posted as if checked), recorded as
+  // revision_unavailable with ifUnrevised would_withhold.
+  if (!(typeof revised === 'string' && revised.trim()) && !trimmed(first).text) return out('', 'withheld', { calls, findings: first.findings, fallback: 'revision_unavailable' })
   return fallbackPost(draft, first, calls, first.findings)
 
   // The sentences that still fail are removed silently (nothing appended). Nothing left: nothing is posted ('withheld', text '').
