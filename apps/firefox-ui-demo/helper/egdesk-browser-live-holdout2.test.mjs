@@ -108,3 +108,20 @@ test('c27 entry plan: seven entry requests, no step request, under 4k; the open 
   assert.deepEqual(['en-ctrl-a', 'en-ctrl-b'].map(id => phase(id).first.handled), [false, false], 'general-knowledge questions stay answers')
   assert.deepEqual(['en-ms', 'en-hc', 'en-se', 'en-ig', 'en-st'].map(id => phase(id).first.handled), [true, true, true, true, true])
 })
+
+test('c28 entry plan v2: four entry requests under 2k; the membership request shows the billing line AND the question says account data is read from the page that holds it; the controls stay answers with the stand-in', async () => {
+  const plan = loadLivePlan(FAMILY_PLAN_FILES.entry2)
+  assert.ok(plan.tokenCeiling <= 2000)
+  const est = await estimateLive({ plan })
+  assert.ok(est.estInputTokens <= 2000 && est.stoppedBecause === null, `${est.estInputTokens} ${est.stoppedBecause}`)
+  assert.deepEqual([est.scorecard.pass, est.scorecard.hardFailures, est.scorecard.absolute, est.scorecard.softMisses], [true, [], [], []])
+  const seen = []
+  const out = await runLive({ key: KEY, send: true, fetchImpl: standIn(plan.set, seen), plan })
+  assert.ok(out.requests.length === 4 && out.requests.every(r => r.stage === 'entry'))
+  for (const body of seen) { assert.equal(lintGroupedRequest({ input: body.input, questions: body.questions }).ok, true); assert.equal(body.questions[0].instructions, ENTRY_WEB_ASK) }
+  assert.match(ENTRY_WEB_ASK, /Account data such as a date, an amount or a status can only be read from the page that holds it, even when a line listed here shows it: a web task\./)
+  const ms = seen.find(b => b.input[1].content.startsWith('User message: 다음 결제일이 언제야?'))
+  assert.ok(ms.input[1].content.includes('"다음 결제일: 2026-12-14"'), 'the billing line is in the evidence (as in the real v1 run)')
+  assert.deepEqual(['en-ctrl-a', 'en-ctrl-b'].map(id => out.phases.find(p => p.id === id).first.handled), [false, false])
+  assert.deepEqual(['en-ms', 'en-hc'].map(id => out.phases.find(p => p.id === id).first.handled), [true, true])
+})

@@ -1,0 +1,117 @@
+{
+ "set": "browser-live-entry-v2",
+ "description": "LIVE, c28: entry only, after browser-live-entry-v1 (sent c34: hospital 1.0, both controls 0, settings, issuance and statement 1.0; but \"다음 결제일이 언제야?\" was STILL browser_entry .01 although the card predicate was .98 and the page's lines were shown, including \"다음 결제일: 2026-12-14\"). Reading the body: the listed line IS the answer, so the judge took it for an answer it could give; it could not (the lines are shown only to route the request, and a fact that belongs to the person's own account can only be read from the page that holds it). c28 changes only the request predicate's question: it now says account data such as a date, an amount or a status can only be read from the page that holds it, even when a listed line shows it (a web task), and that a question that needs no page is an answer. The bar is unchanged. This plan sends the membership request again, the same two general-knowledge controls (they must stay answers) and the hospital request (must stay entered). Predictions are in each check's note. Sent once.",
+ "maxRequests": 5,
+ "tokenCeiling": 2000,
+ "passRule": "The journey passes when every hard and every absolute check holds. Soft checks are reported and never fail it. The journey stops at the first hard or absolute failure, at the first request that fails (no retries), at the request limit or at the token ceiling; checks of phases that did not run count as not run (a failure).",
+ "phases": [
+  {
+   "id": "en-ms",
+   "host": "streamly.example.test",
+   "start": "/account/membership",
+   "pages": "membership",
+   "message": "다음 결제일이 언제야?",
+   "reply": null,
+   "fetchMemory": false,
+   "title": "멤버십 관리 | 스트리밍플러스",
+   "clock": "month2",
+   "maxSteps": 1,
+   "entryOnly": true
+  },
+  {
+   "id": "en-ctrl-a",
+   "host": "streamly.example.test",
+   "start": "/account/membership",
+   "pages": "membership",
+   "message": "광합성이 뭐야?",
+   "reply": null,
+   "fetchMemory": false,
+   "title": "멤버십 관리 | 스트리밍플러스",
+   "clock": "month2",
+   "maxSteps": 1,
+   "entryOnly": true
+  },
+  {
+   "id": "en-ctrl-b",
+   "host": "carehosp.example.test",
+   "start": "/my",
+   "pages": "hospital",
+   "message": "파이썬에서 리스트를 정렬하는 방법 알려줘",
+   "reply": null,
+   "fetchMemory": false,
+   "title": "마이페이지 | 한결병원",
+   "clock": "month2",
+   "maxSteps": 1,
+   "entryOnly": true
+  },
+  {
+   "id": "en-hc",
+   "host": "carehosp.example.test",
+   "start": "/my",
+   "pages": "hospital",
+   "message": "한결병원 다음 진료 예약 날짜 알려줘",
+   "reply": null,
+   "fetchMemory": false,
+   "title": "마이페이지 | 한결병원",
+   "clock": "month2",
+   "maxSteps": 1,
+   "entryOnly": true
+  }
+ ],
+ "checks": [
+  {
+   "id": "never-acted",
+   "phase": "all",
+   "severity": "absolute",
+   "note": "No action is taken (entry only). Predicted: HOLDS."
+  },
+  {
+   "id": "budget",
+   "phase": "all",
+   "severity": "absolute",
+   "note": "At most 5 requests and at most 2k input tokens. Predicted: HOLDS."
+  },
+  {
+   "id": "en-no-act",
+   "phase": "all",
+   "severity": "absolute",
+   "note": "No page action in any phase. Predicted: HOLDS."
+  },
+  {
+   "id": "en-ms-entered",
+   "phase": "en-ms",
+   "severity": "soft",
+   "note": "MODEL. The membership request enters (v1: .01, not entered). Predicted: HOLDS (medium: the wording now names the case; the evidence line was already shown)."
+  },
+  {
+   "id": "en-ms-web-decided",
+   "phase": "en-ms",
+   "severity": "soft",
+   "note": "MODEL. browser_entry >= .75 on the membership request. Predicted: HOLDS (medium)."
+  },
+  {
+   "id": "en-ctrl-a-answer",
+   "phase": "en-ctrl-a",
+   "severity": "soft",
+   "note": "MODEL. 광합성이 뭐야? with the membership page open stays an answer (browser_entry <= .25; v1: 0). Predicted: HOLDS (medium-high: the new wording is about account data)."
+  },
+  {
+   "id": "en-ctrl-b-answer",
+   "phase": "en-ctrl-b",
+   "severity": "soft",
+   "note": "MODEL. The python sorting question with the hospital page open stays an answer (v1: 0). Predicted: HOLDS (high)."
+  },
+  {
+   "id": "en-hc-entered",
+   "phase": "en-hc",
+   "severity": "soft",
+   "note": "MODEL. The hospital request still enters (v1: 1.0). Predicted: HOLDS (high)."
+  },
+  {
+   "id": "en-hc-web-decided",
+   "phase": "en-hc",
+   "severity": "soft",
+   "note": "MODEL. browser_entry >= .75 on the hospital request (v1: 1.0). Predicted: HOLDS (high)."
+  }
+ ]
+}
