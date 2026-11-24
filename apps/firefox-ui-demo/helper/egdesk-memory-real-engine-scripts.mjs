@@ -281,3 +281,55 @@ export function buildMemoryScaleScript() {
             answerExcludes: ['전환을 완료했', '전환이 완료되었', '전환이 완료됐', '전환을 마쳤', '전환은 끝났습니다', '되돌리기로 했', '되돌리기로 결정', '되돌리기로 확정'], noNativeTools: true, turnStatus: 'completed' } },
       ] }] }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+// c31, from the real run of scale-v1 (check-8: both answerIncludes failed, every other expectation passed).
+// What the record shows:
+//  - the product sent what it should: turn 1's key was one key of 8,520 characters (more than the four bodies, 6,329 characters), four pages attached, all four merged,
+//    no body twice; the selection was right (rel_0..3 = 1, the others .25/0/0); the memory scan picked the same four (pg .69/1/1/1);
+//  - the engine did not use all of it: the model said the budget was "in the omitted part of the provided records" and the firewall and dump facts were "not in the
+//    records", tried egdesk_list_context (refused), and found only the storage fact: the 4th and last item, whose page is the shortest. The three it missed are the tails of
+//    the first three pages. The turn's engine input grew by ~2,100 tokens over the 12,825-token baseline of the earlier short-page runs, where the key held ~3,100 tokens' worth of
+//    text (turn 2's 3,291-character key, which does not look cut, added ~1,090 tokens for ~1,600 Korean characters: ~0.40 token per character). The 0.171 protocol file
+//    documents a 2,500-token "spill threshold" for hook additionalContext; turn/start additionalContext has no documented limit.
+//  - turn 2's key (3,291 characters, ~1,050 tokens) was well under that size: the model answered "일요일 밤" from the cut-over page's second sentence and left out its last
+//    sentence, the date. A question that does not ask for the date does not need it in the answer: v1's turn 2 was the script's fault.
+// v2 keeps v1's pages and turn 2 but turns on EGDESK_TURN_MEMORY_SELECTION_HELD (a page the selection delivered is held for the memory loop), asks for the date, and sizes turn 1 under what a 2,500-token entry holds (two long pages: database 1,395 and storage 864 characters). The
+// probe below finds the real limit: the same question over 2, 4, 6 and 8 pages of about 1,000 characters, a code in each page's first sentence and a marker in its last,
+// plus the 4-page case with one packet OFF (two keys). Where the markers stop being in the answers, and how the engine input grows, is the answer.
+export const MEMORY_SCALE_V2_SET = 'real-engine-memory-scale-v2'
+export const MEMORY_SPILL_PROBE_SET = 'real-engine-memory-spill-probe-v1'
+export function buildMemoryScaleV2Script() {
+  const v1 = buildMemoryScaleScript(), conv = v1.conversations[0], f = SCALE_FACTS
+  const first = { say: '서버 이전 프로젝트에서 야간 덤프는 몇 시에 시작하고, 스토리지는 얼마나 늘리기로 했는지 알려줘.',
+    expect: { memory: { attached: [P.database, P.storage], notAttached: [P.decoy], noDuplicates: true, minKeyChars: 3000, merged: 1 }, posted: true, answerIncludes: [f.dump, f.storage], noNativeTools: true, turnStatus: 'completed' } }
+  const second = { say: '그럼 본 전환은 이미 끝났어? 언제로 계획돼 있는지, 문제가 생기면 어떻게 하기로 했는지도 알려줘.', expect: conv.turns[1].expect }
+  return { set: MEMORY_SCALE_V2_SET,
+    description: 'Pattern: scale-v1 after its real run. Same seven pages. Turn 1 asks for one fact from each of two long pages (database 1,395 and storage 864 characters; the packet stays under about 2,500 tokens): attached, merged, no body twice, minKeyChars 3000, both facts in the answer. Turn 2 asks whether the planned cut-over is done, WHEN it is planned and what happens if it goes wrong: the plan\'s date and the idea\'s number in the answer, neither stated as done or decided, no held page sent again. Needs --decisions. Expectations by code.',
+    conversations: [{ ...conv, id: 'memory-scale-v2', flags: { ...conv.flags, EGDESK_TURN_MEMORY_SELECTION_HELD: 'on' }, turns: [first, second] }] }
+}
+const PROBE_WORDS = ['alpha', 'bravo', 'cedar', 'delta', 'ember', 'fjord', 'gamma', 'harbor']
+const probePage = i => {
+  const n = i + 1, w = PROBE_WORDS[i]
+  const filler = ['이 문서는 하늘 프로젝트의 한 부분을 설명하는 기록이다.', '담당자는 작업 내용을 매주 한 번 공유 문서에 정리하고, 바뀐 점이 있으면 같은 날 안에 팀 대화방에 알린다.',
+    '작업 순서는 준비, 시험, 적용, 확인의 네 단계로 나누어 두었고 단계마다 두 사람이 확인한다.', '문제가 생기면 먼저 기록을 확인하고, 원인을 찾을 때까지 다음 단계로 넘어가지 않는다.',
+    '필요한 장비와 계정은 작업 전날까지 모두 준비하고, 빠진 것이 있으면 담당자가 그날 안에 요청한다.', '결과는 표로 정리해 팀장에게 보고하고, 보고서는 1년 동안 공유 폴더에 보관한다.',
+    '외부 업체와 연락해야 할 일이 생기면 담당자가 직접 하지 않고 팀장을 거쳐 하는 것이 원칙이다.', '작업이 끝난 뒤에는 한 주 동안 지켜보면서 이상이 없는지 날마다 확인한다.']
+  const body = [`하늘 프로젝트 문서 ${n}의 코드명은 ${w}${n}x이다.`, ...filler, ...filler.map(s => s.replace('이 문서는', '이 문서의 두 번째 부분은').replace(/^작업 순서는/, '다음 작업 순서는')), ...filler.slice(0, 3).map(s => s.replace('이 문서는', '이 문서의 다음 항목은')), `하늘 프로젝트 문서 ${n}의 끝 표식은 ${w}${n}z이다.`].join(' ')
+  return { id: `sky/doc-${n}`, title: `하늘 프로젝트 문서 ${n}`, time: 'past', status: 'done', body, code: `${w}${n}x`, end: `${w}${n}z` }
+}
+export const SPILL_PROBE_PAGES = Object.freeze(PROBE_WORDS.map((_, i) => Object.freeze(probePage(i))))
+export function buildMemorySpillProbeScript() {
+  const decoy = { ...DECOYS[0] }, strip = ({ id, title, body, time, status }) => ({ id, title, body, time, status })
+  const conv = (id, n, flags) => {
+    const pages = SPILL_PROBE_PAGES.slice(0, n)
+    return { id, flags: { EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', ...flags }, memory: { mode: 'on', pages: [...pages.map(strip), strip(decoy)] },
+      turns: [{ say: `하늘 프로젝트 문서 1번부터 ${n}번까지 각각의 코드명(첫 문장)과 끝 표식(마지막 문장)을 모두 알려줘.`,
+        expect: { memory: { attached: pages.map(p => p.id), notAttached: [decoy.id], ...(flags.EGDESK_TURN_MEMORY_ONE_PACKET === 'on' ? { noDuplicates: true } : {}), minKeyChars: Math.floor(pages.reduce((m, p) => m + p.body.length, 0) * 0.9) }, posted: true,
+          answerIncludes: pages.flatMap(p => [p.code, p.end]), noNativeTools: true, turnStatus: 'completed' } }] }
+  }
+  return { set: MEMORY_SPILL_PROBE_SET,
+    description: 'Probe, not a product test: how much of one large additionalContext item the engine keeps. The same question over 2, 4, 6 and 8 synthetic pages of about 1,000 characters (a code in each page\'s first sentence, a marker in its last; about 1,000 characters each), one packet on; and 4 pages with one packet OFF (two keys). The expectations are the measurement: the markers missing from the answer say which parts the engine did not use, minKeyChars says what was sent, and the record\'s engine usage says how much input the engine counted. Needs --decisions.',
+    conversations: [conv('probe-n2', 2, { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' }), conv('probe-n4', 4, { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' }), conv('probe-n6', 6, { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' }),
+      conv('probe-n8', 8, { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' }), conv('probe-n4-two-keys', 4, {})] }
+}
