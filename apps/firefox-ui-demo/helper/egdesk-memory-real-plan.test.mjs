@@ -192,3 +192,46 @@ test('rule texts: the first-turn rule is tied to the matter of the message; the 
   assert.match(JUDGE_RULES, /A page about a different matter is not needed merely because it mentions or describes the same kind of event/)
   assert.equal(createHash('sha256').update(NEXT_RULES).digest('hex'), 'ad6fc8aba1ae21c44005f62a7897085af7c2fb52fc070711141d846144c62fb7')
 })
+
+// ---- labelling an utterance once, at page creation ----
+import { UTTERANCE_LABELS, buildUtterancePlan, scoreUtteranceLabels } from './egdesk-memory-real-plan.mjs'
+const utterances = await buildUtterancePlan()
+const choice = (q, value, p) => ({ type: 'choice', name: q.name, choice: value, confidence: p, probabilities: [{ value, probability: p }, ...q.choices.filter(c => c.value !== value).map(c => ({ value: c.value, probability: (1 - p) / (q.choices.length - 1) }))] })
+// Answers as registered; overrides: { [runId]: { [questionName]: [value, probability] } }
+const labelResults = (overrides = {}) => Object.fromEntries(utterances.runs.map(run => { const def = UTTERANCE_LABELS.find(d => d.id === run.id), request = run.requests[0]
+  return [request.name, { status: 200, answers: request.body.questions.map(q => { const o = overrides[run.id]?.[q.name]
+    if (o) return choice(q, o[0], o[1])
+    if (q.name === 'tw_target') return choice(q, 'new', 0.95)
+    if (q.name === 'tw_status') return choice(q, def.page.status, 0.95)
+    return choice(q, def.labels[q.name.split('_')[1]], 0.95) }) }] }))
+
+test('utterance-label set: three page-creation requests built by the write judgment itself, one isolated sentence each, no candidate page', () => {
+  assert.deepEqual(utterances.runs.map(r => r.requests.map(q => [q.name, q.stage, q.questions, q.choice])), UTTERANCE_LABELS.map(d => [[`${d.id}-write`, 'write', 5, 5]]))
+  assert.equal(utterances.totals.requests, 3); assert.ok(utterances.totals.estInputTokens > 3000 && utterances.totals.estInputTokens < 5000, String(utterances.totals.estInputTokens))
+  for (const [i, run] of utterances.runs.entries()) {
+    const body = run.requests[0].body, def = UTTERANCE_LABELS[i]
+    assert.deepEqual(body.questions.map(q => q.name), ['tw_target', 'tw_status', 'speech_source_0', 'speech_form_0', 'speech_time_0'])
+    assert.deepEqual(body.questions[0].choices.map(c => c.value), ['new', 'none', 'unsure'])
+    for (const q of body.questions.slice(2)) assert.ok(q.instructions.includes(`Judge only this one sentence, quoted exactly as a JSON string: ${JSON.stringify(def.message)}.`))
+    assert.ok(body.input.some(m => m.content.includes('Candidate pages:\n(none)')) && body.input.at(-1).content.endsWith(`Message:\n${def.message}`))
+  }
+})
+
+test('utterance-label scoring: a wrong INSTALLED label fails; a label that is not installed does not, but fewer than 6 of 9 installed is not a pass', () => {
+  const perfect = scoreUtteranceLabels(utterances, labelResults())
+  assert.deepEqual([perfect.pass, perfect.runsPassed, perfect.installed, perfect.axes, perfect.bars, perfect.scored.flatMap(s => [...s.hardFailures, ...s.softMisses])], [true, 3, 9, 9, { confidence: 0.85, margin: 0.2 }, []])
+  const wrong = scoreUtteranceLabels(utterances, labelResults({ 'u1-relayed-past': { speech_source_0: ['self_reported_observation', 0.95] } }))
+  assert.deepEqual([wrong.pass, wrong.scored[0].hardFailures], [false, ['source: an installed label is the registered one']])
+  // the same wrong value below the bar is not installed: nothing misleading is stored, so it is a soft miss only
+  const low = scoreUtteranceLabels(utterances, labelResults({ 'u1-relayed-past': { speech_source_0: ['self_reported_observation', 0.6] } }))
+  assert.deepEqual([low.pass, low.installed, low.scored[0].hardFailures, low.scored[0].softMisses], [true, 8, [], ['source: installed', 'page attributes as registered']])
+  // flat answers everywhere (what the offset design gave): no wrong label, but the labelling did nothing
+  const flat = scoreUtteranceLabels(utterances, labelResults(Object.fromEntries(UTTERANCE_LABELS.map(d => [d.id, { speech_source_0: [d.labels.source, 0.3], speech_form_0: [d.labels.form, 0.3], speech_time_0: [d.labels.time, 0.3] }]))))
+  assert.deepEqual([flat.pass, flat.installed, flat.scored.every(s => s.hardFailures.length === 0)], [false, 0, true])
+  const five = scoreUtteranceLabels(utterances, labelResults({ 'u1-relayed-past': { speech_source_0: ['attributed_report', 0.3], speech_time_0: ['past_anchored', 0.3] }, 'u2-own-plan': { speech_source_0: ['unspecified', 0.3], speech_time_0: ['future_anchored', 0.3] } }))
+  assert.deepEqual([five.installed, five.pass], [5, false])
+  // not recorded as a new page: reported, soft
+  const none = scoreUtteranceLabels(utterances, labelResults({ 'u3-own-observation': { tw_target: ['none', 0.95] } }))
+  assert.deepEqual([none.pass, none.scored[2].softMisses], [true, ['recorded as a new page']])
+  assert.equal(scoreUtteranceLabels(utterances, {}).pass, false, 'not sent is not a pass')
+})

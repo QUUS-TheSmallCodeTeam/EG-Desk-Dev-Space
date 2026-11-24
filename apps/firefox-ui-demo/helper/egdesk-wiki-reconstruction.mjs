@@ -157,6 +157,48 @@ export function settleBefore(promise, deadlineAt, clock = REAL_CLOCK) {
 /** settleBefore with a span from now. */
 export const settleBy = (promise, ms, clock = REAL_CLOCK) => settleBefore(promise, clock.now() + Math.max(0, ms), clock)
 export const stableAlias = index => `P${index + 1}`
+
+/** The body line of a page whose content the answering model already receives in the same packet (see renderMemoryPacket). */
+export const BODY_ELSEWHERE = '[content not repeated here: this page is among the selected items above]'
+/** Put before the body of a page that a selected item above shows in another form (a summary, a different cut): one record, not two. */
+export const SAME_SOURCE = '[same record as a selected item above, which shows it in another form: count it once]'
+const TRUNCATED = '\n[…truncated]'
+/** A memory page with another id than any selected item counts as already sent only when at least this much of it is there word for word. */
+export const MIN_SAME_TEXT = 24
+const renderParts = (parts, omit = null, same = null) => [parts.head,
+  ...parts.blocks.map(b => `${b.header}\n${omit?.has(b.id) ? BODY_ELSEWHERE : same?.has(b.id) ? `${SAME_SOURCE}\n${b.body}` : b.body}`),
+  ...(parts.pointers.length ? [parts.pointers.join('\n')] : []), ...(parts.linkLines.length ? [`[links among held pages]\n${parts.linkLines.join('\n')}`] : [])]
+const idSet = value => (value instanceof Set ? value : new Set(Array.isArray(value) ? value : []))
+/**
+ * renderMemoryPacket(packetParts, { omitBodies, sameSource }) -> the packet text. With neither it is byte for byte the loop's own `packet`.
+ * omitBodies: page ids whose header (time, provenance, status) is kept and whose body is replaced by BODY_ELSEWHERE.
+ * sameSource: page ids whose body is kept, with the SAME_SOURCE line before it.
+ */
+export function renderMemoryPacket(parts, { omitBodies = null, sameSource = null } = {}) {
+  if (!parts || !Array.isArray(parts.blocks) || !parts.blocks.length) return null
+  const omit = idSet(omitBodies), same = idSet(sameSource)
+  return renderParts(parts, omit.size ? omit : null, same.size ? same : null).join('\n\n')
+}
+/**
+ * mergeIntoSelection(selectionText, packetParts, selectedIds) -> { value, omitted, sameSource } | null
+ * One packet for the answering model: the selected items (unchanged, first) and the memory pages after them. A memory page that is also a
+ * selected item is not sent twice: when its body (as memory would send it) is already there word for word, only its header stays; when the
+ * selection shows the same record in another form, the body stays once and is marked as the same record. A page under another id whose
+ * body is there word for word (an utterance quoted by the recent-utterances item) is treated the same way. null when there is nothing to merge.
+ */
+export function mergeIntoSelection(selectionText, parts, selectedIds) {
+  if (typeof selectionText !== 'string' || !selectionText.trim() || !parts || !Array.isArray(parts.blocks) || !parts.blocks.length) return null
+  const selected = idSet(selectedIds), omitted = [], sameSource = []
+  for (const block of parts.blocks) {
+    const text = block.body.endsWith(TRUNCATED) ? block.body.slice(0, -TRUNCATED.length) : block.body
+    // Word for word in the selection, as plain text or inside a JSON string (the recent-utterances item quotes utterances that way).
+    const there = text.trim() !== '' && (selectionText.includes(text) || selectionText.includes(JSON.stringify(text).slice(1, -1)))
+    // The same record by id, or (under another id) a body long enough that finding it word for word is not a coincidence.
+    if (there && (selected.has(block.id) || text.trim().length >= MIN_SAME_TEXT)) omitted.push(block.id)
+    else if (selected.has(block.id)) sameSource.push(block.id)
+  }
+  return { value: `${selectionText}\n\n${renderMemoryPacket(parts, { omitBodies: omitted, sameSource })}`, omitted, sameSource }
+}
 export function pageBlock(alias, page, chars, extra = '') {
   const text = page.body.length > chars ? `${page.body.slice(0, chars).trimEnd()} […]` : page.body
   return `${alias} | time=${page.time.slice}${page.time.at ? `@${page.time.at.slice(0, 10)}` : ''} | provenance=${page.provenance.kind}${page.provenance.by ? `:${page.provenance.by}` : ''} | rev=${page.revision}${extra} | ${page.title}\n${text}`
@@ -364,7 +406,7 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
     if (page.body.length > budget.pageChars) receipts.truncated.push({ id: page.id, reason: 'page_chars' })
     const block = `${header}\n${body}`
     if (used + block.length > budget.maxPacketChars && blocks.length) { receipts.truncated.push({ id: page.id, reason: 'packet_chars' }); continue }
-    used += block.length; blocks.push({ id: page.id, block })
+    used += block.length; blocks.push({ id: page.id, block, header, body })
     nextPages[page.id] = { revision: page.revision, hash: keyOf(page) }
   }
   // Links between pages the model now holds (this packet or earlier), by id only.
@@ -377,11 +419,13 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
     'Each page shows time (past/present/planned/hypothetical), provenance (who recorded it and how), the recorded status and, where present, the judge\'s fallible reading of that status.',
     'A planned or hypothetical page is not a current fact. reported_by_other is attribution, not the writer\'s own record and not independent evidence. A status reading or score is not proof and not permission to change any record.',
     clockLine(askedAt)].join('\n')
-  const parts = blocks.length ? [head, ...blocks.map(b => b.block), ...(pointers.length ? [pointers.join('\n')] : []), ...(linkLines.length ? [`[links among held pages]\n${linkLines.join('\n')}`] : [])] : []
+  // The same packet as data, so a host can render it again without the body of a page the model already gets elsewhere (renderMemoryPacket).
+  const packetParts = blocks.length ? { head, blocks: blocks.map(b => ({ id: b.id, header: b.header, body: b.body })), pointers, linkLines } : null
+  const parts = packetParts ? renderParts(packetParts) : []
   receipts.picks = order.map(p => ({ id: p.id, via: p.via, p: p.p, statusRead: p.statusRead ?? null }))
   const delivery = Object.fromEntries(blocks.map(b => [b.id, true]))
   if (receipts.deadlineHit) partial = true
-  return { status: parts.length ? 'ready' : 'empty', ...(partial ? { partial: true, reason: failure ?? 'deadline' } : {}), packet: parts.join('\n\n') || null,
+  return { status: parts.length ? 'ready' : 'empty', ...(partial ? { partial: true, reason: failure ?? 'deadline' } : {}), packet: parts.join('\n\n') || null, packetParts,
     picks: order.map(p => ({ ...p })), receipts: { ...receipts, calls: receipts.calls }, calls: receipts.calls, usage,
     // The host commits this only after the turn really started with the packet; it is never applied here.
     nextDelivered: () => ({ usable: true, pages: nextPages }), delivered: delivery, elapsedMs: now() - started }

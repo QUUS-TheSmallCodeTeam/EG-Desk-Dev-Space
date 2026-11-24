@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import { buildWiki, ternary } from './egdesk-wiki-reconstruction.mjs'
 import { SYNTHETIC_PAGES, choiceAnswer, mockSpeechAnswer } from './egdesk-wiki-reconstruction.fixture.mjs'
-import { prepareTurnMemory, triageSkipsFetch } from './egdesk-turn-memory.mjs'
+import { judgeTurnWrite, mergeSpeechLabels, prepareTurnMemory, recordFromLabels, triageSkipsFetch } from './egdesk-turn-memory.mjs'
+import { SPEECH_THRESHOLDS, speechDesignInterpretations, speechSegments } from './egdesk-speech-grounding.mjs'
 import { readChoice } from './egdesk-decision-questions.mjs'
 
 // END-TO-END real-measurement plan for the whole turn-memory loop (triage -> first-turn reconstruction or mid-session fetch -> write judgment)
@@ -255,4 +256,74 @@ export function scoreFirstScan(plan, results) {
   })).map(s => ({ ...s, hardFailures: s.checks.filter(c => c.severity === 'hard' && !c.ok).map(c => c.name), softMisses: s.checks.filter(c => c.severity === 'soft' && !c.ok).map(c => c.name) }))
     .map(s => ({ ...s, pass: s.hardFailures.length === 0 }))
   return { pass: scored.every(s => s.pass), runsPassed: scored.filter(s => s.pass).length, scored }
+}
+
+// ---- labelling an utterance once, at page creation: three public synthetic utterances, labels registered before any call ----
+// The request is the product's own page-creation request (the write judgment: where to record, the state it reports, and the three
+// isolated axes of each sentence). No candidate pages: each utterance is a new fact, so the only question besides the labels is "new or not".
+export const UTTERANCE_LABELS = Object.freeze([
+  { id: 'u1-relayed-past', message: '거래처 D사가 어제 단가를 올렸다고 들었어.',
+    labels: { source: 'attributed_report', form: 'assertion', time: 'past_anchored' }, page: { slice: 'past', kind: 'reported_by_other', status: 'done' } },
+  { id: 'u2-own-plan', message: '다음 주 화요일에 은모래 창고 재고를 다시 셀 예정이야.',
+    labels: { source: 'unspecified', form: 'plan', time: 'future_anchored' }, page: { slice: 'planned', kind: 'utterance', status: 'plan' } },
+  { id: 'u3-own-observation', message: '내가 달그림 상자 수량을 직접 세어 봤는데 42개였어.',
+    labels: { source: 'self_reported_observation', form: 'assertion', time: 'past_unspecified' }, page: { slice: 'past', kind: 'utterance', status: 'done' } },
+])
+const AXES = ['source', 'form', 'time']
+
+/** The three requests, built by judgeTurnWrite itself with a recording client. Nothing is sent. */
+export async function buildUtterancePlan({ askedAt = ASKED_AT } = {}) {
+  const runs = []
+  for (const def of UTTERANCE_LABELS) {
+    let recorded = null
+    await judgeTurnWrite({ message: def.message, candidates: [], askedAt, client: { async decide(request) { recorded = request; return { answers: {} } } } })
+    const body = { model: 'gpt-6-luna', input: recorded.input, questions: recorded.questions }, text = JSON.stringify(body)
+    const choice = recorded.questions.filter(q => q.type === 'choice').length, predicate = recorded.questions.length - choice
+    const request = { name: `${def.id}-write`, stage: 'write', body, bytes: Buffer.byteLength(text), sha256: sha(text), questions: recorded.questions.length, choice, predicate, estInputTokens: estimateTokens(choice, predicate, Buffer.byteLength(text)) }
+    runs.push({ id: def.id, message: def.message, position: 'page-creation', held: [], requests: [request], estInputTokens: request.estInputTokens })
+  }
+  return { runs, totals: { runs: runs.length, requests: runs.length, estInputTokens: runs.reduce((n, r) => n + r.estInputTokens, 0), bytes: runs.reduce((n, r) => n + r.requests[0].bytes, 0) } }
+}
+
+/**
+ * Registered before the call, with the bars the product uses (speech labels: confidence >= 0.85 and margin >= 0.20; not changed here):
+ *   hard  a label that was INSTALLED must be the registered one (a wrong installed label is the only way a stored label can mislead);
+ *         every request answers every question with its own type.
+ *   soft  how many of the nine axes were installed (a label that is not installed is "unknown", which stores nothing: allowed);
+ *         the utterance would become a page (target "new" accepted, time slice known) with the registered slice, provenance kind and status.
+ * pass: no hard failure AND at least 6 of 9 axes installed (the earlier isolated run installed 3 of 6, none wrong; one sentence per request
+ * is the easier case, so less than two thirds would mean the page-creation labelling is not doing its job).
+ */
+export function scoreUtteranceLabels(plan, results) {
+  let installedTotal = 0
+  const scored = plan.runs.map(run => {
+    const def = UTTERANCE_LABELS.find(d => d.id === run.id), request = run.requests[0], checks = []
+    const add = (severity, name, ok, detail = null) => checks.push({ severity, name, ok, ...(detail === null ? {} : { detail }) })
+    const r = results[request.name]
+    if (!r || r.status !== 200) { add('hard', `${request.name}: HTTP 200 with typed answers`, false, r?.status ?? 'not sent'); return { id: run.id, checks, installed: 0 } }
+    const a = answerMap(r.answers)
+    add('hard', `${request.name}: every question answered with its own type`, request.body.questions.every(q => a[q.name]?.type === q.type))
+    const spans = speechSegments(def.message)
+    add('hard', 'the utterance is one sentence', spans.length === 1, `sentences=${spans.length}`)
+    const got = speechDesignInterpretations('axes-isolated', a, spans)[0] ?? { source: 'unknown', form: 'unknown', time: 'unknown' }
+    let installed = 0
+    for (const axis of AXES) {
+      const answer = a[`speech_${axis}_0`], top = answer?.probabilities?.[0], second = answer?.probabilities?.[1]
+      const detail = `installed=${got[axis]} registered=${def.labels[axis]} top=${top?.value ?? null}:${top?.probability ?? null} second=${second?.value ?? null}:${second?.probability ?? null}`
+      if (got[axis] !== 'unknown') installed++
+      add('hard', `${axis}: an installed label is the registered one`, got[axis] === 'unknown' || got[axis] === def.labels[axis], detail)
+      add('soft', `${axis}: installed`, got[axis] !== 'unknown', detail)
+    }
+    installedTotal += installed
+    const target = readChoice(a, 'tw_target', { minConfidence: 0.75, minMargin: 0.2 })
+    add('soft', 'recorded as a new page', target.state === 'accepted' && target.value === 'new', `state=${target.state} value=${target.value ?? null} confidence=${target.confidence ?? null}`)
+    const rec = recordFromLabels(mergeSpeechLabels([got]).labels)
+    const said = readChoice(a, 'tw_status', { minConfidence: 0.75, minMargin: 0.2 })
+    const status = said.state === 'accepted' && (said.value === 'done' || said.value === 'plan') ? said.value : rec.status
+    add('soft', 'page attributes as registered', rec.slice === def.page.slice && rec.provenance.kind === def.page.kind && status === def.page.status, `slice=${rec.slice} kind=${rec.provenance.kind} status=${status}`)
+    return { id: run.id, checks, installed }
+  }).map(s => ({ ...s, hardFailures: s.checks.filter(c => c.severity === 'hard' && !c.ok).map(c => c.name), softMisses: s.checks.filter(c => c.severity === 'soft' && !c.ok).map(c => c.name) }))
+    .map(s => ({ ...s, pass: s.hardFailures.length === 0 }))
+  const axes = UTTERANCE_LABELS.length * AXES.length
+  return { pass: scored.every(s => s.pass) && installedTotal >= 6, runsPassed: scored.filter(s => s.pass).length, installed: installedTotal, axes, bars: { ...SPEECH_THRESHOLDS }, scored }
 }

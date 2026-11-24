@@ -149,13 +149,15 @@ export async function judgeTurnWrite({ message, candidates = [], client, askedAt
   let result
   try { result = await client.decide({ input, questions, timeoutMs, signal }) } catch (error) { return none('judge_failed', { code: error?.code ?? 'unreachable' }) }
   const target = readChoice(result.answers, 'tw_target', { minConfidence: 0.75, minMargin: 0.2 })
-  const labels = mergedLabels(speechDesignInterpretations('axes-isolated', result.answers, spans))
+  // One entry per sentence that got at least one label above its bar: offsets and label words only, never text, scores or runner-ups.
+  const installed = speechDesignInterpretations('axes-isolated', result.answers, spans)
+  const labels = mergedLabels(installed)
   const rec = recordFromLabels(labels)
   const said = readChoice(result.answers, 'tw_status', { minConfidence: 0.75, minMargin: 0.2 })
   if (said.state === 'accepted' && (said.value === 'done' || said.value === 'plan')) rec.status = said.value // a three-way state question; the axes decide time and provenance
   // Numbers only (never the option labels): the winner and runner-up probabilities and how many options there were.
   const rows = (Array.isArray(result.answers?.tw_target?.probabilities) ? result.answers.tw_target.probabilities : []).map(r => r?.probability).filter(Number.isFinite).sort((x, y) => y - x)
-  const receipt = { target: { value: target.state === 'accepted' ? target.value : null, confidence: target.confidence, margin: target.margin, top: rows[0] ?? null, second: rows[1] ?? null, options: options.length }, labels, status: said.state === 'accepted' ? said.value : null, usage: result.usage ?? null, questions: questions.length }
+  const receipt = { target: { value: target.state === 'accepted' ? target.value : null, confidence: target.confidence, margin: target.margin, top: rows[0] ?? null, second: rows[1] ?? null, options: options.length }, labels, spans: installed, sentences: spans.length, status: said.state === 'accepted' ? said.value : null, usage: result.usage ?? null, questions: questions.length }
   if (target.state !== 'accepted' || target.value === 'none' || target.value === 'unsure') return { proposal: { op: 'none', reason: target.state !== 'accepted' ? 'target_undecided' : target.value === 'none' ? 'not_recorded' : 'unsure' }, receipt }
   if (!rec.recordable) return { proposal: { op: 'none', reason: 'question' }, receipt }
   const spokenAt = Number.isSafeInteger(askedAt) ? new Date(askedAt).toISOString() : null
@@ -292,6 +294,8 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
   const pos = position?.kind === 'mid' ? position : { kind: 'first', reason: position?.reason ?? 'unspecified' }
   const receipts = usableReceipts(delivered, pos, threadKey)
   const heldPages = Object.keys(receipts.pages ?? {}).map(id => wiki.pages.get(id)).filter(p => p && allowsPage(p, scope))
+  // Held AND unchanged: the receipt's revision and content key still match the page as it is now (the loop's own test of "already delivered").
+  const heldSame = heldPages.filter(p => receipts.pages[p.id]?.revision === p.revision && receipts.pages[p.id]?.hash === (p.contentKey ?? sha256Hex(p.body))).map(p => p.id)
   const heldDigest = heldExcerpts !== false ? heldPages.map(p => ({ title: p.title, status: p.status, excerpt: p.body })) : null
   // Mid-session triage also sees what else is stored (titles only). The first-turn triage only decides recording, so it does not carry the list.
   const heldIds = new Set(heldPages.map(p => p.id))
@@ -339,6 +343,64 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
   } else if (ontologyWrite === true && triage?.record?.state === 'yes') {
     judgeWrite = () => judgeTurnWrite({ message, candidates: writeCandidates(), client, askedAt, signal })
   }
-  return { position: pos, triage, ...(triageLater ? { triageLater } : {}), memory, packet: memory.packet ?? null, nextDelivered, judgeWrite,
+  return { position: pos, triage, ...(triageLater ? { triageLater } : {}), memory, packet: memory.packet ?? null, held: heldSame, nextDelivered, judgeWrite,
     writeSkipped: ontologyWrite !== true ? 'flag_off' : triageLater ? null : triage?.record?.state !== 'yes' ? 'not_worth_recording' : null }
+}
+
+// ---- the turn's memory materials as DATA (for system judges and other consumers; the packet text is for the answering model) ----
+export const MATERIAL_KINDS = Object.freeze(['board', 'source', 'ontology', 'timeline', 'utterance', 'conversation', 'page'])
+export const MATERIAL_LINK_TYPES = Object.freeze(['same_task', 'follows_from', 'decided_in', 'supersedes', 'refers_to', 'superseded_by'])
+export const MATERIAL_LIMITS = Object.freeze({ max: 12, hardMax: 24, excerptChars: 400, maxExcerptChars: 2400, titleChars: 160, links: 8 })
+const materialKind = page => (typeof page.ref === 'string' && page.ref.startsWith('chat-message:') ? 'utterance' : typeof page.ref === 'string' && page.ref.startsWith('chat-pair:') ? 'conversation'
+  : page.id.startsWith('board:') ? 'board' : page.id.startsWith('selected:') ? 'source' : page.id.startsWith('ontology-snapshot:') ? 'timeline' : page.id.startsWith('ontology:') ? 'ontology' : 'page')
+const bounded = (value, fallback, low, high) => (Number.isSafeInteger(value) ? Math.min(high, Math.max(low, value)) : fallback)
+
+/**
+ * memoryMaterials(result, wiki, { scope, attached = true, excerptChars = 400, max = 12 }) -> frozen array, plain data only:
+ *   [{ alias, kind, time: { slice, at }, provenance: { kind, by, basis }, status, statusReading?, statusPending?, title, excerpt, links: [{ type, toAlias }], held }]
+ *
+ * result: what prepareTurnMemory returned for this turn. wiki: the snapshot it ran on. scope: the same read scope.
+ *   held false: the page is in this turn's packet (attached now). Listed first, in packet order. Left out when attached === false
+ *               (the host did not send the packet), because the answering model then does not have them.
+ *   held true:  the answering model already holds the page from an earlier turn of this thread (a real delivery receipt whose revision and
+ *               content still match). It says NOTHING about whether the page matters for this message: nobody judged that.
+ *   alias:      M1..Mn, valid inside this array only. No page id, reference, revision, score or probability leaves through here.
+ *   status:     the recorded status. statusReading: the judge's fallible reading of the record (present only when one was accepted).
+ *               statusPending: a reported status waiting for the person's confirmation. Neither is verification nor write permission.
+ *   links:      between two listed materials only (toAlias always resolves). Recorded, outgoing: same_task | follows_from | decided_in |
+ *               supersedes | refers_to. Derived: superseded_by (a listed, SETTLED record replaces this one now).
+ * Permission is checked again here, page by page (allowsPage); a page that may not be read now is absent, and so are links to it.
+ */
+export function memoryMaterials(result, wiki, { scope = null, attached = true, excerptChars = MATERIAL_LIMITS.excerptChars, max = MATERIAL_LIMITS.max } = {}) {
+  const none = Object.freeze([])
+  try {
+    if (!result || !wiki?.pages || typeof wiki.links !== 'function') return none
+    const limit = bounded(max, MATERIAL_LIMITS.max, 0, MATERIAL_LIMITS.hardMax), chars = bounded(excerptChars, MATERIAL_LIMITS.excerptChars, 0, MATERIAL_LIMITS.maxExcerptChars)
+    const picks = new Map((Array.isArray(result.memory?.picks) ? result.memory.picks : []).map(pick => [pick.id, pick]))
+    const fresh = attached === true && result.memory?.status === 'ready' ? Object.keys(result.memory.delivered ?? {}) : []
+    const heldIds = (Array.isArray(result.held) ? result.held : []).filter(id => !fresh.includes(id))
+    const rows = []
+    for (const [id, held] of [...fresh.map(id => [id, false]), ...heldIds.map(id => [id, true])]) {
+      if (rows.length >= limit) break
+      const page = wiki.pages.get(id)
+      if (!page || !allowsPage(page, scope)) continue
+      rows.push({ page, held })
+    }
+    const aliasOf = new Map(rows.map((row, index) => [row.page.id, `M${index + 1}`]))
+    return Object.freeze(rows.map(({ page, held }) => {
+      const pick = picks.get(page.id)
+      const pending = Array.isArray(page.statusReadings) ? page.statusReadings.filter(r => r?.state === 'pending').at(-1)?.status ?? null : null
+      const links = []
+      for (const link of wiki.links(page.id)) { if (links.length >= MATERIAL_LIMITS.links) break; if (aliasOf.has(link.to)) links.push(Object.freeze({ type: link.type, toAlias: aliasOf.get(link.to) })) }
+      // Derived, not recorded: the listed pages that REPLACE this one now (a settled record that supersedes it). A plan that will supersede it
+      // is not a replacement yet, so it shows only as that plan's own 'supersedes' link.
+      for (const by of typeof wiki.supersededBy === 'function' ? wiki.supersededBy(page.id) : []) { if (links.length >= MATERIAL_LIMITS.links) break; if (aliasOf.has(by)) links.push(Object.freeze({ type: 'superseded_by', toAlias: aliasOf.get(by) })) }
+      return Object.freeze({ alias: aliasOf.get(page.id), kind: materialKind(page),
+        time: Object.freeze({ slice: page.time.slice, at: typeof page.time.at === 'string' ? page.time.at.slice(0, 10) : null }),
+        provenance: Object.freeze({ kind: page.provenance.kind, by: page.provenance.by ?? null, basis: page.provenance.basis ?? null }),
+        status: page.status, ...(!held && typeof pick?.statusRead === 'string' ? { statusReading: pick.statusRead } : {}), ...(typeof pending === 'string' ? { statusPending: pending } : {}),
+        title: compactText(page.title, MATERIAL_LIMITS.titleChars), excerpt: page.body.length > chars ? `${page.body.slice(0, chars).trimEnd()} […]` : page.body,
+        links: Object.freeze(links), held })
+    }))
+  } catch { return none }
 }

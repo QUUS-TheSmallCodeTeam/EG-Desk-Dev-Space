@@ -328,7 +328,10 @@ export function speechPredicateInterpretations(answers, spans) {
 // The text is already part of the same request (the message), so this adds no disclosure; it only repeats it.
 // A span longer than MAX_ISOLATED_CHARS gets no questions at all (no label, never a guess from a prefix).
 export const MAX_ISOLATED_CHARS = 300
-export const SPEECH_DESIGNS = Object.freeze(['axes', 'predicates', 'axes-isolated', 'predicates-isolated', 'compare-isolated'])
+// 'at-page': no label question rides the turn at all. An utterance is labelled once, per sentence and isolated, by the write judgment that
+// runs after the answer (egdesk-turn-memory.mjs judgeTurnWrite), and only when that turn is worth recording.
+export const SPEECH_AT_PAGE = 'at-page'
+export const SPEECH_DESIGNS = Object.freeze(['axes', 'predicates', 'axes-isolated', 'predicates-isolated', 'compare-isolated', SPEECH_AT_PAGE])
 const isolation = text => `Judge only this one sentence, quoted exactly as a JSON string: ${JSON.stringify(text)}. ` +
   'Ignore every other sentence of the message; the rest of the message is context only for what this sentence\'s words refer to.'
 function isolatedSpans(spans, message) {
@@ -358,10 +361,11 @@ export const speechDesignFamily = design => (design === 'predicates' || design =
 
 /** Dispatch by the internal design flag; any unknown value means the current 'axes' design, byte for byte. */
 export function speechDesignQuestions(design, spans, message) {
+  if (design === SPEECH_AT_PAGE) return []
   if (design === 'predicates') return speechPredicateQuestions(spans)
   if (design === 'axes-isolated') return speechIsolatedQuestions(spans, message)
   if (design === 'predicates-isolated') return speechIsolatedPredicateQuestions(spans, message)
   if (design === 'compare-isolated') return [...speechIsolatedQuestions(spans, message), ...speechIsolatedPredicateQuestions(spans, message)] // measurement only
   return speechQuestions(spans)
 }
-export const speechDesignInterpretations = (design, answers, spans) => (speechDesignFamily(design) === 'predicates' ? speechPredicateInterpretations(answers, spans) : speechInterpretations(answers, spans))
+export const speechDesignInterpretations = (design, answers, spans) => (design === SPEECH_AT_PAGE ? [] : speechDesignFamily(design) === 'predicates' ? speechPredicateInterpretations(answers, spans) : speechInterpretations(answers, spans))
