@@ -150,7 +150,8 @@ const plan = { set: spec.set, tokenCeiling: spec.tokenCeiling,
     // Cycle 25: for the board decision the product's negative outcome is anything that is not a yes (decidePlace: a decided no -> judged-bubble, undecided -> placement-
     // undecided, both the bubble). A bubble check therefore holds combines below the yes bar; c24 held it at <= .3, stricter than the product (.43 was a bubble).
     combines: { yes: SKELETON_BARS.yes, no: COMBINES_NOT_YES, source: 'egdesk-briefing-skeleton.mjs decidePlace: board iff combines >= .7 (and two relevant materials); anything below .7 is the bubble' } },
-  passRule: spec.passRule, requests }
+  // cycle 28: a plan whose bodies carry lane L3's conversation examples declares their owner-approved seed (helper/egdesk-scenario-seed-guard.mjs)
+  ...(Array.isArray(spec.seeds) && spec.seeds.length ? { seeds: spec.seeds.map(x => ({ id: x.id, privacy: x.privacy })) } : {}), passRule: spec.passRule, requests }
 writeFileSync(path.join(OUT, 'plan.json'), JSON.stringify(plan, null, 2) + '\n', { mode: 0o600 })
 const total = requests.reduce((s, x) => s + x.estInputTokens, 0)
 log.push(`== plan: ${requests.length} requests, est ${total} input tokens (ceiling ${spec.tokenCeiling}); hard ${requests.reduce((s, x) => s + x.expect.filter(e => e.severity === 'hard').length, 0)}, soft ${requests.reduce((s, x) => s + x.expect.filter(e => e.severity === 'soft').length, 0)}`)
