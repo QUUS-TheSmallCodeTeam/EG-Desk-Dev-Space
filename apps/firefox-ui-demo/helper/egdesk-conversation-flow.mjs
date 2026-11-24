@@ -331,6 +331,21 @@ function workLines({ run, heartbeatFacts, flow, own, allows, browserTask = null 
   const done = tools.filter(a => a.status === 'completed')
   lines.push(hb.stepsDone > 0 ? `Tool steps finished so far: ${hb.stepsDone}${done.length ? ` (the last one: ${describe(done.at(-1))})` : ''}.` : 'No tool step has finished yet.')
   if (Number.isSafeInteger(hb.stepsRemaining)) lines.push(`The task may take up to ${hb.stepsRemaining} more steps (an upper limit, not a plan).`)
+  // c21: the last command EG-Desk ran itself. "The tests passed" is backed by the runner's own summary line (quoted where the run may
+  // send command output: the line is what supports the claim); a health the code could not confirm is said to be unconfirmed.
+  const ownLast = run?.ownCommandLast
+  if (ownLast) {
+    const parts = [`The last command EG-Desk ran ended with exit code ${ownLast.exitCode ?? 'unknown (it did not finish normally)'}`]
+    if (ownLast.summary) {
+      const counts = `${ownLast.summary.passed} passed, ${ownLast.summary.failed} failed${Number.isSafeInteger(ownLast.summary.total) ? `, ${ownLast.summary.total} in total` : ''}`
+      if (allows('command_output')) { kinds.add('command_output'); parts.push(`its test runner's own summary line reads "${oneLine(ownLast.summary.line, 300)}" (${counts})`) }
+      else parts.push(`its test runner counted ${counts}`)
+    } else if (ownLast.health === 'healthy') parts.push('no test summary was printed')
+    if (ownLast.health === 'unknown') parts.push('whether it fully worked is not confirmed')
+    if (ownLast.worktree?.state === 'conflict') parts.push(`git reports ${ownLast.worktree.conflicts} file${ownLast.worktree.conflicts === 1 ? '' : 's'} in conflict`)
+    else if (ownLast.worktree?.state === 'uncommitted_work') parts.push('the folder has uncommitted changes')
+    lines.push(`${parts.join('; ')}.`)
+  }
   // While a step-by-step task runs outside the engine, the engine's own silence says nothing: the task's last step does.
   const task = hb.sources?.browser_task
   if (task && browserTask) { const brief = browserTaskLines(browserTask, allows); lines.push(...brief.lines); for (const kind of brief.kinds) kinds.add(kind) }

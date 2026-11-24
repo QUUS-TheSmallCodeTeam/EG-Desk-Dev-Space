@@ -1,0 +1,174 @@
+{
+  "set": "run-conditions-v1",
+  "tokenCeiling": 8000,
+  "passRule": "A request passes when no hard check fails. Each request asks one auxiliary predicate, as the product does when the structured fact is missing. Hard checks are at the product bars; soft checks are observations.",
+  "productBars": {
+    "output_reports_problem": {
+      "yes": 0.8,
+      "no": 0.2,
+      "source": "helper/egdesk-run-conditions.mjs CONDITION_YES / CONDITION_NO (a yes lowers health or adds a hint; a no keeps the structured result)"
+    },
+    "output_says_listening": {
+      "yes": 0.8,
+      "no": 0.2,
+      "source": "helper/egdesk-run-conditions.mjs CONDITION_YES / CONDITION_NO (a yes lowers health or adds a hint; a no keeps the structured result)"
+    },
+    "output_reports_conflict": {
+      "yes": 0.8,
+      "no": 0.2,
+      "source": "helper/egdesk-run-conditions.mjs CONDITION_YES / CONDITION_NO (a yes lowers health or adds a hint; a no keeps the structured result)"
+    }
+  },
+  "requests": [
+    {
+      "id": "problem-lint-errors-exit0",
+      "file": "requests/problem-lint-errors-exit0.json",
+      "sha256": "660362679f832356422aa5ee988c9eb1c107943c870c2774ab8542fc3acff36d",
+      "estInputTokens": 303,
+      "expect": [
+        {
+          "name": "output_reports_problem",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "Lint errors with exit 0 (the script swallowed the status). If this is not a yes, exit 0 would stand as healthy over real errors."
+        }
+      ]
+    },
+    {
+      "id": "problem-tsc-errors-exit0",
+      "file": "requests/problem-tsc-errors-exit0.json",
+      "sha256": "04b7eef0009ef242e6a87381b18ff16bb1d806a4ea735b2fced43a78f6cf170a",
+      "estInputTokens": 272,
+      "expect": [
+        {
+          "name": "output_reports_problem",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "A type error, exit 0 from the trailing echo. A miss lets a type error pass as healthy."
+        }
+      ]
+    },
+    {
+      "id": "problem-build-clean",
+      "file": "requests/problem-build-clean.json",
+      "sha256": "d031b2ebd5af443b7d80ce261deb317c380cfa89f245d0aa7d8d6cc357e581ac",
+      "estInputTokens": 288,
+      "expect": [
+        {
+          "name": "output_reports_problem",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "hard",
+          "note": "A clean build. A miss marks a good build as unconfirmed (friction, not a false success)."
+        }
+      ]
+    },
+    {
+      "id": "problem-build-chunk-warning",
+      "file": "requests/problem-build-chunk-warning.json",
+      "sha256": "9184447ed4d769765c48b6cafe556e6d7afddca6aed6f3afb12bf310a8111769",
+      "estInputTokens": 294,
+      "expect": [
+        {
+          "name": "output_reports_problem",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "An advisory size warning on a finished build: observed (a yes is defensible, it only lowers to unconfirmed)."
+        }
+      ]
+    },
+    {
+      "id": "problem-install-deprecated",
+      "file": "requests/problem-install-deprecated.json",
+      "sha256": "96c9c5d587507a2363bb5002d891239e682085b143d6fe41c5e9caa05de4ece7",
+      "estInputTokens": 287,
+      "expect": [
+        {
+          "name": "output_reports_problem",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "Deprecation notices on a finished install: observed."
+        }
+      ]
+    },
+    {
+      "id": "listening-vite-ready",
+      "file": "requests/listening-vite-ready.json",
+      "sha256": "8e348213efd4655114cf90b9009494c7d354b3cc2157a00ae0409655ac7f7511",
+      "estInputTokens": 271,
+      "expect": [
+        {
+          "name": "output_says_listening",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "The usual ready banner. Only a hint (the port probe decides); a miss just loses the hint."
+        }
+      ]
+    },
+    {
+      "id": "listening-eaddrinuse",
+      "file": "requests/listening-eaddrinuse.json",
+      "sha256": "7b51ccaeda54199d799ecd2aaa6922dacc2f7818a0c5f810044be8db21ccb5da",
+      "estInputTokens": 283,
+      "expect": [
+        {
+          "name": "output_says_listening",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "hard",
+          "note": "The server failed to bind. A yes here would be a wrong hint (the probe still decides)."
+        }
+      ]
+    },
+    {
+      "id": "conflict-merge",
+      "file": "requests/conflict-merge.json",
+      "sha256": "3e0f5db2fa2663f6b5ad324578ce5afb4f4ae96911f92c10551438585178687f",
+      "estInputTokens": 265,
+      "expect": [
+        {
+          "name": "output_reports_conflict",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "The textbook conflict message. Only a hint when git status is unavailable."
+        }
+      ]
+    },
+    {
+      "id": "conflict-rebase",
+      "file": "requests/conflict-rebase.json",
+      "sha256": "7cecadda1426196a11b3b612c5a2b9faccaa49078da9a2d7375126fd48dbef8b",
+      "estInputTokens": 291,
+      "expect": [
+        {
+          "name": "output_reports_conflict",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "A rebase stopped on a conflict."
+        }
+      ]
+    },
+    {
+      "id": "conflict-fast-forward",
+      "file": "requests/conflict-fast-forward.json",
+      "sha256": "01b5302da039eb98c5d649c7c49f37eff75b3e54649b4645747ab9ac4e052e61",
+      "estInputTokens": 257,
+      "expect": [
+        {
+          "name": "output_reports_conflict",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "hard",
+          "note": "A clean fast-forward. A yes would be a wrong conflict hint."
+        }
+      ]
+    }
+  ]
+}
