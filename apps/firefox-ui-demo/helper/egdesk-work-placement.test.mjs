@@ -730,3 +730,9 @@ test('attention trigger -> the bridge route: the posted scene is a valid attenti
   assert.deepEqual([decided.status, decided.branch, decided.kind, decided.source], ['decided', 'owner', 'point', 'decision'])
   assert.equal(br.placement.facts('local-dm').pointerPending, true); assert.equal(br.placement.facts('local-dm').pointerNeeds, 'owner_action')
 })
+test('attention trigger: a run\'s file viewer carries its run mark (spawnFileCard, run files only, never on restore); the event loop hands every chat event to the trigger', () => {
+  const zone = readFileSync(new URL('../overlay/resources/surface/EGDeskSurfaceFileCard.mjs', import.meta.url), 'utf8')
+  assert.match(zone, /    const card = shell\.root;\n    \/\/ L1 c17:[^\n]*\n    if \(runFile && !options\.restore\) \{ try \{ Object\.assign\(card\.dataset, state\.workSurfaceMark\?\.\(runFile\.target\) \|\| \{\}\); \} catch \{ \/\* the mark is optional \*\/ \} \}/)
+  assert.match(surface, /            state\.noteChatAttention\?\.\(event, run\);\n            state\.noteWorkChatEvent\?\.\(event, run\);/)
+  assert.match(decl('noteWorkChatEvent'), /node\.dataset\?\.workRunId === ref\.runId/)
+})
