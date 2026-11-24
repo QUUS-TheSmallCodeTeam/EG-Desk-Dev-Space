@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
 import { scriptedDecisions } from './egdesk-all-on.support.mjs'
-import { LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, STEPS, diffJourneys, formatDiff, loadJourneyPlan, main } from './egdesk-all-on-live-measure.mjs'
+import { LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, STEPS, diffJourneys, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
 
 const KEY = 'sk-synthetic-not-a-key-l2c12-000000000002'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -160,7 +160,7 @@ test('diffJourneys: requests per family, answers by threshold, what the person s
 const REGISTERED_PLAN_V3_SHA256 = '2c1c5d8b4f03ba23fd16f17c84ff9e1164b1dde09c3f4c8469e6b1bb4dbc3988'
 test('plan v3: pinned, based on v2 by hash, keeps every v2 expectation verbatim, adds the recall step after s3, and every new expectation has an owner and a prediction', () => {
   const bytes = readFileSync(PLAN_FILE_V3), raw = JSON.parse(bytes.toString('utf8')), v2 = JSON.parse(readFileSync(PLAN_FILE_V2, 'utf8'))
-  assert.equal(sha256(bytes), REGISTERED_PLAN_V3_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V3)
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V3_SHA256)
   assert.equal(raw.version, 3); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V2)))
   assert.deepEqual(raw.steps.map(s => s.id), [...v2.steps.slice(0, 3).map(s => s.id), 's3b-recall', ...v2.steps.slice(3).map(s => s.id)])
   for (const step of v2.steps) {
@@ -188,10 +188,10 @@ test('plan loading: a plan must list every core step, in journey order, and no u
 test('--rerun compares v3 with an earlier run that had no recall step: that step shows as new (its expectations "new"), not as changes or failures of the earlier run', async t => {
   const { file, results } = await earlierRun(t), out = path.join(tmp(t), 'rerun-v3.json'), net = noNetwork()
   assert.ok(!results.steps.some(s => s.id === 's3b-recall'), 'the earlier run (plan v1) has no recall step')
-  const run = await cli(['--rerun', file, '--out', out], { fetchImpl: net.fetchImpl })
+  const run = await cli(['--rerun', file, '--plan', PLAN_FILE_V3, '--out', out], { fetchImpl: net.fetchImpl })
   assert.equal(run.code, EXIT.ok, run.err.join('\n')); assert.equal(net.calls.length, 0)
   const now = JSON.parse(readFileSync(out, 'utf8'))
-  assert.equal(now.plan.sha256, REGISTERED_PLAN_V3_SHA256, 'the latest plan by default')
+  assert.equal(now.plan.sha256, REGISTERED_PLAN_V3_SHA256)
   const recall = now.diff.steps.find(s => s.step === 's3b-recall')
   assert.equal(recall.added, true)
   assert.deepEqual(recall.changes.filter(c => c.kind !== 'expectation').map(c => c.kind), ['new_step', 'replay'], 'new, and (in a replay) scripted')
@@ -202,4 +202,89 @@ test('--rerun compares v3 with an earlier run that had no recall step: that step
   assert.match(text, /^== s3b-recall \[new in this plan, done\]$/m); assert.match(text, /^ {2}new step {5}not in the earlier run; requests /m)
   assert.match(text, /^ {2}expectation {2}s3b\.fetched \(hard, L7\): new -> \w+ \[not a model result: see replay above\]$/m)
   assert.doesNotMatch(text.split('== s3b-recall')[1].split('\n== ')[0], /requests {5}|answer {7}|person saw/)
+})
+
+// ---- plan v4 (cycle 15) ----
+const REGISTERED_PLAN_V4_SHA256 = '9a0fe4aae6eb3c51f111c8d7181a30dffd01e0700bb0fc2f1b0a17a5026e1b9f'
+test('plan v4: pinned, based on v3 by hash, keeps every v3 expectation; the only changes are body counting and the held-page rule for s9.packet, each marked', () => {
+  const bytes = readFileSync(PLAN_FILE_V4), raw = JSON.parse(bytes.toString('utf8')), v3 = JSON.parse(readFileSync(PLAN_FILE_V3, 'utf8'))
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V4_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V4)
+  assert.equal(raw.version, 4); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V3)))
+  assert.deepEqual(raw.world.env, { EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', EGDESK_TURN_MEMORY_KEEP_LATE: 'on' }); assert.equal(raw.world.budgets, 'bridge')
+  assert.deepEqual(raw.steps.map(s => s.id).filter(id => id !== 's8b-finished-result'), v3.steps.map(s => s.id))
+  assert.ok(raw.steps.findIndex(s => s.id === 's8b-finished-result') === raw.steps.findIndex(s => s.id === 's8-pointer-on') + 1)
+  for (const step of v3.steps) {
+    const now = raw.steps.find(s => s.id === step.id)
+    assert.deepEqual(now.caps, step.caps)
+    for (const e of step.expect) {
+      const n = now.expect.find(x => x.id === e.id)
+      assert.ok(n, `${e.id} kept`); assert.equal(n.severity, e.severity); assert.equal(n.owner, e.owner)
+      if (e.id === 's9.packet') { assert.equal(n.check, 'packetOrHeld'); assert.deepEqual(n.args, { ...e.args, count: 'bodies' }); assert.ok(n.revised) }
+      else if (e.check === 'packet' || e.check === 'noRepeatedPages') { assert.equal(n.check, e.check); assert.deepEqual(n.args, { ...(e.args ?? {}), count: 'bodies' }); assert.equal(n.text, e.text); assert.ok(n.revised) }
+      else assert.deepEqual(n, e, `${e.id} unchanged`)
+    }
+    for (const added of now.expect.filter(x => !step.expect.some(e => e.id === x.id))) assert.ok(added.owner && added.severity && added.predicted, added.id)
+  }
+  // The new person-level checks: no answer ends in a system text, in every step where the Agent answers; the owner question quotes the Agent's own answer.
+  assert.deepEqual(raw.steps.filter(s => s.expect.some(e => e.check === 'endsInOwnWords' && e.severity === 'hard')).map(s => s.id),
+    ['s1-first-turn', 's2-follow-up', 's3b-recall', 's6-answer', 's9-status-remark', 's10-browser-task', 's11-browser-reply'])
+  assert.ok(raw.steps.find(s => s.id === 's8b-finished-result').expect.some(e => e.check === 'quotesOwnAnswer' && e.severity === 'hard'))
+  assert.equal(STEPS.find(s => s.id === 's8b-finished-result').since, 4)
+  for (const file of [PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3]) assert.ok(!loadJourneyPlan(file).steps.some(s => s.id === 's8b-finished-result'))
+  assert.deepEqual(loadJourneyPlan(PLAN_FILE_V3).world, { env: {}, budgets: 'single' }, 'older plans keep the world as it was')
+})
+
+test('packet parsing: a page header with its content is a body; a "not re-sent" header, a header followed by another, or the "not repeated here" line is a reference', () => {
+  const value = ['intro', '[page id=ontology:db/pg-health time=present rev=1 via=scan]', '헬스체크 3종: 연결 풀 응답.', '',
+    '[page id=ontology:db/pg-design rev=c142 already delivered earlier in this thread, unchanged; content not re-sent]',
+    '[page id=ontology:db/pg-plan rev=e290 already delivered earlier in this thread, unchanged; content not re-sent]',
+    '[item id=ontology:quote/a-decision kind=timeline time=past status=done]', '11월 18일 회의에서 결정했다.',
+    '[page id=ontology:quote/a-v1 time=past rev=2]', '[content not repeated here: this page is among the selected items above]',
+    '[page id=ontology:quote/a-meeting time=past rev=3]', '[same record as a selected item above, which shows it in another form: count it once]', '팀장 말로는…',
+    '[page id=ontology:db/redis rev=9]'].join('\n')
+  assert.deepEqual(packetPages(value), { bodies: ['ontology:db/pg-health', 'ontology:quote/a-decision', 'ontology:quote/a-meeting'],
+    refs: ['ontology:db/pg-design', 'ontology:db/pg-plan', 'ontology:quote/a-v1', 'ontology:db/redis'] })
+})
+
+test('v4 run: the world gets the plan\'s flags, packets carry bodies and references, the owner-question step runs, and every new check is judged', async t => {
+  const outcome = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V4), fetchImpl: async () => { throw new Error('no network') } })
+  assert.deepEqual(outcome.steps.map(s => s.id), loadJourneyPlan(PLAN_FILE_V4).steps.map(s => s.id))
+  const s9 = outcome.steps.find(s => s.id === 's9-status-remark')
+  assert.ok(s9.seen.packets.every(p => Array.isArray(p.bodyIds) && Array.isArray(p.refIds)))
+  assert.ok(s9.seen.packets.some(p => p.refIds.includes('ontology:db/pg-plan')), 'the plan page held since s3b is referenced, not re-sent')
+  assert.ok(!s9.seen.packets.some(p => p.bodyIds.includes('ontology:db/pg-plan')))
+  assert.equal(s9.checks.find(c => c.id === 's9.packet').pass, true)
+  const s8b = outcome.steps.find(s => s.id === 's8b-finished-result')
+  assert.ok(s8b.requests.some(r => r.family === 'work_placement'), 'the owner question is asked')
+  for (const id of ['s8b.owner-question-own', 's8b.owner-question-asked', 's1.own-ending', 's6.own-ending', 's11.own-ending']) {
+    const check = outcome.steps.flatMap(s => s.checks).find(c => c.id === id)
+    assert.equal(check.pass, true, `${id} on the scripted answers: ${JSON.stringify(check.observed)}`)
+  }
+})
+
+test('new checks fail for what they forbid: an answer that ends in an appended caveat, and an owner question that quotes appended text', () => {
+  const own = 'A사 견적은 v1 발송 후 v2 수정 계획 단계입니다.', caveat = '확인되지 않은 부분은 답하지 않았습니다. 필요하면 기준으로 삼을 자료를 알려 주세요.'
+  const step = text => ({ id: 's1-first-turn', room: 'dm-all-on', seen: { written: [own], newMessages: [{ room: 'dm-all-on', role: 'assistant', by: 'agent', text }] } })
+  assert.ok(JSON.parse(readFileSync(PLAN_FILE_V4, 'utf8')).steps.flatMap(x => x.expect).some(x => x.check === 'endsInOwnWords'))
+  return import('./egdesk-all-on-live-measure.mjs').then(({ CHECK_FUNCTIONS }) => {
+    assert.equal(CHECK_FUNCTIONS.endsInOwnWords({ step: step(own) }).pass, true)
+    assert.equal(CHECK_FUNCTIONS.endsInOwnWords({ step: step(`${own}\n\n${caveat}`) }).pass, false, 'an appended fixed caveat')
+    assert.equal(CHECK_FUNCTIONS.endsInOwnWords({ step: step(caveat) }).pass, false, 'a fixed reply instead of the answer')
+    assert.equal(CHECK_FUNCTIONS.endsInOwnWords({ step: step('A사 견적은 v1 발송 후 v2 수정 계획 단계입니다.') }).pass, true, 'a sentence removed silently still ends in own words')
+    const answered = { id: 's6-answer', seen: { written: [own], newMessages: [{ role: 'assistant', by: 'agent', text: `${own}\n\n${caveat}` }] } }
+    const world = raw => ({ decisionsIn: () => [{ feature: 'work_placement', raw }] })
+    const quotes = (raw) => CHECK_FUNCTIONS.quotesOwnAnswer({ step: { id: 's8b-finished-result' }, results: [answered], args: { answerStep: 's6-answer', families: ['work_placement'] }, world: world(raw) }).pass
+    assert.equal(quotes(JSON.stringify({ input: [{ content: `Result: ${own}` }] })), true)
+    assert.equal(quotes(JSON.stringify({ input: [{ content: `Result: ${own} ${caveat}` }] })), false, 'the appended caveat is quoted')
+    assert.equal(quotes(JSON.stringify({ input: [{ content: 'Result: (none)' }] })), false, 'the answer is not quoted at all')
+  })
+})
+
+test('world budgets: "bridge" gives the runtime the bridge\'s warm and cold turn_context budgets; the default keeps the single 800 ms budget', async t => {
+  const { allOnWorld } = await import('./egdesk-all-on.support.mjs')
+  const { TURN_CONTEXT_BUDGET_MS, TURN_CONTEXT_COLD_BUDGET_MS } = await import('../helper/codex-chat-runtime.mjs')
+  const bridge = allOnWorld(t, { budgets: 'bridge' }).chat.decisionContext, single = allOnWorld(t).chat.decisionContext
+  assert.deepEqual([bridge.budgetMs, bridge.coldBudgetMs, typeof bridge.warm], [TURN_CONTEXT_BUDGET_MS, TURN_CONTEXT_COLD_BUDGET_MS, 'function'])
+  assert.equal(bridge.warm(), false, 'cold until a Decisions request of the world has been answered')
+  assert.deepEqual([single.budgetMs, single.coldBudgetMs, single.warm], [TURN_CONTEXT_BUDGET_MS, undefined, undefined])
 })
