@@ -280,3 +280,24 @@ test('M8 contrast (c6, no memory handed in): next month the same question is ask
   const a = await w.say(GOAL1)
   assert.deepEqual([a.out.status, JSON.parse(w.engine.received[0]).egdesk_browser_task.code], ['paused', 'choice_needed'])
 })
+
+// ---- L7 c17: a task outcome is a system result, written by a code rule ----
+test('a Browser task outcome is stored as an agent_note page by code: no Decision request, done -> done, stuck -> unknown, time past, no links', async () => {
+  const wiki = buildWiki(SYNTHETIC_PAGES), writer = createWikiWriter(wiki, { enabled: true, canWrite: ({ op }) => op === 'new_page' })
+  let asked = 0
+  const client = { async decide() { asked++; return { answers: {} } } }
+  const sink = createOutcomeToOntology({ wiki, client, writer, scope: SCOPE, enabled: true, now: () => Date.parse('2026-10-19T09:00:00Z') })
+  const done = outcomeCandidate({ taskId: 'bt_0123456789ab', goal: '이번 달 세금계산서 내려받기', host: 'portal.example.test', now: Date.parse('2026-10-19T09:00:00Z'), outcome: { status: 'done' } })
+  const out = await sink.write(done)
+  assert.deepEqual([out.status, out.pageId, asked], ['stored', 'browser-task/bt_0123456789ab', 0])
+  const page = wiki.pages.get(out.pageId)
+  assert.deepEqual([page.provenance.kind, page.provenance.by, page.status, page.time.slice, page.body, wiki.links(page.id)], ['agent_note', 'browser_task', 'done', 'past', done.text, []])
+  const stuck = outcomeCandidate({ taskId: 'bt_aaaaaaaaaaaa', goal: '이번 달 세금계산서 내려받기', host: 'portal.example.test', now: Date.parse('2026-10-19T09:00:00Z'), outcome: { status: 'stuck', code: 'two_factor_required' } })
+  const out2 = await sink.write(stuck)
+  assert.deepEqual([out2.status, wiki.pages.get(out2.pageId).status], ['stored', 'unknown'])
+  assert.equal((await sink.write(done)).replay, undefined) // same operation id: the writer's own idempotency answers
+  // off, no writer, or a run whose models may not see Browser data: nothing is stored
+  assert.equal((await createOutcomeToOntology({ wiki, writer, enabled: false }).write(done)).status, 'flag_off')
+  assert.equal((await createOutcomeToOntology({ wiki, writer: null, enabled: true }).write(done)).status, 'unavailable')
+  assert.equal((await createOutcomeToOntology({ wiki, writer, enabled: true, egress: { allows: kind => kind !== 'browser_task_record' } }).write(done)).reason, 'egress')
+})

@@ -270,7 +270,8 @@ test('C10 end to end: advisory records only; month 1 asks and persists the outco
   const fetchCalls1 = m1.log.length
   w1.h.finish(first)
   await w1.send('두 번째 사업자로', { conversationId: first.conversationId })
-  assert.deepEqual(m1.log.slice(fetchCalls1).map(l => l.questions.some(q => /^(pg_|st_|op_)/.test(q)) ? 'fetch' : l.questions.includes('tw_target') ? 'write-judgment' : 'other'), ['write-judgment'], 'the answer to a paused task fetches no memory again; the only new call is the outcome write judgment')
+  // L7 c17: the outcome of a Browser task is written by a code rule (an agent_note page), with no write judgment: no Decision request at all
+  assert.deepEqual(m1.log.slice(fetchCalls1).map(l => l.questions.some(q => /^(pg_|st_|op_)/.test(q)) ? 'fetch' : l.questions.some(q => q.startsWith('tw_')) ? 'write-judgment' : 'other'), [], 'the answer to a paused task fetches no memory again and asks nothing to store its outcome')
   await new Promise(resolve => setTimeout(resolve, 50))
   const file = path.join(dir, 'egdesk-wiki-writes.json')
   assert.equal(statSync(file).mode & 0o077, 0, 'private file')

@@ -1,7 +1,6 @@
 import { sameSiteNavigation } from './egdesk-browser-tool-runtime.mjs'
 import { compactText } from './egdesk-decision-questions.mjs'
 import { allowsPage } from './egdesk-wiki-reconstruction.mjs'
-import { judgeTurnWrite } from './egdesk-turn-memory.mjs'
 
 // How the objective browser task USES the general conversation-memory feature (L8 cycle 8). There is no browser-only
 // history store: memory lives in the ontology (llm-wiki) and is fetched and written by the general feature.
@@ -11,9 +10,9 @@ import { judgeTurnWrite } from './egdesk-turn-memory.mjs'
 //         among the fetched pages into structured facts ("on this path the earlier run settled the question by choosing
 //         X") for one code rule: if that earlier choice is no longer listed on the page, ask the user, whatever the
 //         Decision model picked.
-//   WRITE (task end, done or stuck): a content-minimal task-outcome candidate is handed to the GENERAL per-turn ontology
-//         write judgment (judgeTurnWrite) and the host write path (createWikiWriter; its flag, permission, revision and
-//         idempotency checks). This module stores nothing itself.
+//   WRITE (task end, done or stuck): a content-minimal task-outcome candidate goes to the host write path (createWikiWriter; its
+//         flag, permission, revision and idempotency checks) as an agent_note page by a code rule, with no write judgment (see
+//         createOutcomeToOntology). This module stores nothing itself.
 //
 // An outcome holds only: a UTC day, the host name, the user's request (shortened), the outcome (done, or a closed stop
 // code), labels of opened elements, sanitized paths (no query, fragment or token-like segment), and for each "which
@@ -112,27 +111,25 @@ export function priorFromMemory(pages, { scope = null, hosts = [] } = {}) {
 }
 
 /**
- * createOutcomeToOntology({ wiki, client, writer, scope, enabled, now }) -> { write(candidate, { memoryPages }) -> Promise<{ status, ... }> }
- * Hands a candidate to the general write judgment and the host write path. enabled=false (the default) calls nothing.
+ * createOutcomeToOntology({ wiki, writer, scope, enabled, now, egress }) -> { write(candidate) -> Promise<{ status, ... }> }
+ * Stores a finished Browser task's outcome as a page of this conversation. enabled=false (the default) stores nothing.
+ * The outcome is the host's own record of what the task did (its id, site, steps and result are known to code), not something a person
+ * said, so it is written by a code rule (R3), with no Decision request: always a NEW page, provenance agent_note, time past (the task ended
+ * before it is stored), status done for a finished task and unknown for a stopped one, no links. (Real all-on run 2026-11-25: asking the
+ * general write judgment gave target "new" 0.20 / 0.18 against "none" 0.41 and speech labels of a system note, so nothing was written.)
+ * `client` is accepted and ignored (the old signature); `memoryPages` too.
  */
-export function createOutcomeToOntology({ wiki, client, writer, scope = null, enabled = false, now = Date.now, egress = null } = {}) {
+export function createOutcomeToOntology({ wiki, writer, scope = null, enabled = false, now = Date.now, egress = null } = {}) {
   return {
-    async write(candidate, { memoryPages = [] } = {}) {
+    async write(candidate) {
       if (enabled !== true) return { status: 'flag_off' }
-      if (!candidate || !wiki?.pages || !writer || typeof writer.apply !== 'function') return { status: 'unavailable' }
-      // Records of a Browser task leave only when the run's models may see Browser data (shared gate).
+      if (!candidate || typeof candidate.text !== 'string' || !candidate.text.trim() || !wiki?.pages || !writer || typeof writer.apply !== 'function') return { status: 'unavailable' }
+      // The record holds Browser data: it is kept only where the run's models may see Browser data (shared gate), as before.
       if (egress && (!egress.allows('browser_task_record') || !egress.allows('memory_page'))) return { status: 'unavailable', reason: 'egress' }
       try {
-        const candidates = memoryPages.filter(page => page && wiki.pages.has(page.id) && allowsPage(page, scope))
-        const { proposal, receipt } = await judgeTurnWrite({ message: candidate.text, candidates, client, askedAt: now() })
-        if (proposal.op === 'none') return { status: 'not_written', reason: proposal.reason, judged: receipt?.target?.value ?? null }
-        // The text is the host's own record of a browser task, not something the person said. It is always a NEW page: a task
-        // outcome never changes another page's status, so an update proposal becomes a page of its own (links dropped).
-        const provenance = { kind: 'agent_note' }
-        const shaped = proposal.op === 'update_status'
-          ? { op: 'new_page', time: proposal.time, status: proposal.proposedStatus, links: [], spokenAt: proposal.spokenAt ?? null }
-          : proposal
-        const applied = writer.apply({ ...shaped, provenance }, { message: candidate.text, scope, operationId: `${OUTCOME_OPERATION_PREFIX}${candidate.taskId}${candidate.outcome?.status === 'stuck' ? '-stuck' : ''}` })
+        const at = Number.isFinite(now()) ? new Date(now()).toISOString() : null
+        const proposal = { op: 'new_page', time: { slice: 'past' }, status: candidate.outcome?.status === 'done' ? 'done' : 'unknown', provenance: { kind: 'agent_note' }, links: [], spokenAt: at }
+        const applied = writer.apply(proposal, { message: candidate.text, scope, operationId: `${OUTCOME_OPERATION_PREFIX}${candidate.taskId}${candidate.outcome?.status === 'stuck' ? '-stuck' : ''}` })
         return { status: applied.status, ...(applied.reason ? { reason: applied.reason } : {}), ...(applied.pageId ? { pageId: applied.pageId } : {}) }
       } catch { return { status: 'unavailable' } }
     },
