@@ -30,6 +30,8 @@ export const OUTPUT_MARKDOWN_MAX = 20000
 export const OUTPUT_KEY_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/
 export const BRIEFING_COMMENT_MAX = 2000
 const MAX_OUTPUTS_PER_RUN = 8
+// Working-memory gate: how many tool results one run may spill into re-readable sources.
+export const MAX_SPILLS_PER_RUN = 8
 const MAX_COMMENTS_PER_BRIEFING = 200
 const OUTPUT_LIST_LIMIT = 50
 const TARGET_KEYS = ['sourceId', 'artifactId', 'viewId', 'range']
@@ -752,6 +754,16 @@ export class ContextRuntime {
     }
     if (authority.engineId === 'claude' && (!await this.store.hasNativeTools(ownerKey, run.conversationId, this.toolManifest(authority)) || records.some(record => !record.engine || !sameEngine(record.engine, authority)))) reject('CONTEXT_TOOLS_UNAVAILABLE', 'The original Claude context manifest is missing or different; no replacement or subset was loaded', 409)
     if (records.some(record => record.clientThreadId && run.clientThreadId && record.clientThreadId !== run.clientThreadId)) reject('CONTEXT_THREAD_MISMATCH', 'Stored context belongs to another conversation', 403)
+    // Spilled tool results are bound by their own marked records. They are not sources the person sent: they stay out of the
+    // capture list the screen shows, and one that has expired (bounded retention) is simply no longer readable.
+    const spillRecords = records.filter(record => record.toolOutput === true)
+    if (spillRecords.length) records.splice(0, records.length, ...records.filter(record => record.toolOutput !== true))
+    if (!records.length) return
+    const spills = [], expiredSpills = new Set()
+    for (const id of new Set(spillRecords.flatMap(record => record.sourceIds))) {
+      try { const spill = await this.store.getCapture(ownerKey, id); if (spill.kind === 'tool-output') spills.push(spill) }
+      catch (error) { if (error.code !== 'CONTEXT_NOT_FOUND') throw error; expiredSpills.add(id) }
+    }
     const sourceIds = [...new Set(records.flatMap(record => record.sourceIds))]
     const captures = []
     for (const id of sourceIds) captures.push(await this.store.getCapture(ownerKey, id))
@@ -769,7 +781,7 @@ export class ContextRuntime {
     // Metadata only: the markdown body stays in its blob until the screen opens it.
     const outputs = (await this.store.listOutputs(ownerKey, matchesRun)).sort((a, b) => a.createdAt - b.createdAt)
     this.assertAuthority(authority)
-    const binding = { ...records[0], authority, ownerKey, sourceIds, captures, bindingId: records[0].id, controllers: new Set() }
+    const binding = { ...records[0], authority, ownerKey, sourceIds: [...sourceIds, ...spills.map(spill => spill.sourceId)], captures, spills, expiredSpills, bindingId: records[0].id, controllers: new Set() }
     for (const controller of previous?.controllers || []) controller.abort()
     this.bindings.set(this.bindingKey(run), binding)
     const resolver = records.find(record => record.resolver)?.resolver
@@ -798,6 +810,36 @@ export class ContextRuntime {
       }
     }
     return candidates
+  }
+
+  /**
+   * Working-memory gate. Can this run re-read a spilled tool result? Only when the pointer would really work: the run has a live
+   * context binding with read enabled (so egdesk_read_source exists for it and is allowed), and it is below its spill bound.
+   * Synchronous and side-effect free, so the gate can enumerate the spill option before deciding anything.
+   */
+  canSpill(run) {
+    try {
+      const binding = this.assertBound(run, 'read')
+      return run.status === 'inProgress' && (binding.spills?.length || 0) < MAX_SPILLS_PER_RUN
+    } catch { return false }
+  }
+
+  /**
+   * Store the full text of one EG-Desk tool result as an immutable source of THIS run and make it readable through
+   * egdesk_read_source (same binding check, same admission, same delivery receipts as any other source).
+   * The capture is not added to the capture list the person sees. Returns { id, lines } or throws; the caller then injects the text.
+   */
+  async spillToolOutput(run, { text, tool } = {}) {
+    const binding = this.assertBound(run, 'read')
+    if ((binding.spills?.length || 0) >= MAX_SPILLS_PER_RUN) reject('SPILL_LIMIT', `At most ${MAX_SPILLS_PER_RUN} tool results can be spilled per answer`, 409)
+    const assertActive = () => { if (run.status !== 'inProgress' || this.bindings.get(this.bindingKey(run)) !== binding) reject('READ_CANCELLED', 'Run ended or context binding changed; nothing was spilled'); this.assertBound(run, 'read') }
+    const capture = await this.store.captureToolOutput(binding.ownerKey, run, { text, tool, engine: engineOf(binding.authority) }, { assertActive })
+    assertActive()
+    await this.store.bindToolOutput(binding.ownerKey, run, capture.sourceId, binding.capabilities, binding.readerConfiguration, engineOf(binding.authority))
+    assertActive()
+    binding.sourceIds.push(capture.sourceId)
+    ;(binding.spills ||= []).push(capture)
+    return { id: capture.sourceId, lines: capture.lines }
   }
 
   // Cycle 9: a result card the user kept from this conversation's published output becomes a bound, immutable source, exactly like a file artifact pinned by
@@ -1191,7 +1233,20 @@ export class ContextRuntime {
         }
         else {
           this.assertBound(run, 'read')
+          // A pointer of THIS run whose spilled result has passed its retention bound: say so with a closed code, so the model can
+          // tell "gone" from "not allowed". Known only for ids this run itself spilled; anything else stays CONTEXT_FORBIDDEN.
+          if (binding.expiredSpills?.has(args.snapshotId)) reject('SPILL_EXPIRED', 'The spilled tool result is no longer kept', 410)
           if (!binding.sourceIds.includes(args.snapshotId)) reject('CONTEXT_FORBIDDEN', 'Source is not selected for this run', 403)
+          if (binding.spills?.some(spill => spill.sourceId === args.snapshotId)) {
+            try { await this.store.getCapture(binding.ownerKey, args.snapshotId) } catch (error) {
+              if (error.code !== 'CONTEXT_NOT_FOUND') throw error
+              binding.spills = binding.spills.filter(spill => spill.sourceId !== args.snapshotId)
+              binding.sourceIds = binding.sourceIds.filter(id => id !== args.snapshotId)
+              ;(binding.expiredSpills ||= new Set()).add(args.snapshotId)
+              reject('SPILL_EXPIRED', 'The spilled tool result is no longer kept', 410)
+            }
+            assertActive()
+          }
           const readId = randomUUID()
           this.runtime.emit(run, 'context.read.started', { readId, sourceId: args.snapshotId })
           const environment = this.readEnvironment(binding.authority, run, binding.readerConfiguration)

@@ -14,6 +14,7 @@ import { DRAFT_CHECK_LIMITS, checkDraft } from './egdesk-draft-check.mjs'
 import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { COMMAND_GATE_TIMEOUT_MS, assessCommand, classifyCommand } from './egdesk-terminal-command-gate.mjs'
 import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
+import { gateRuntimeToolResult, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
 import { homedir } from 'node:os'
 import { createInternalTurns } from './codex-internal-turn.mjs'
 import { FLOW_COPY, FLOW_LIMITS, attentionOf, audienceFacts, beatFlowFacts, cleanIntermediate, enumerateOptions, flowQuestion, pointerPrompt, pointerRoute, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
@@ -816,6 +817,7 @@ export class CodexChatRuntime {
     this.flowJobs = new Set()
     this.draftCheckRuns = new Set() // in-flight advisory draft checks (never awaited by a turn)
     this.commandGateRuns = new Set() // in-flight command gate assessments (never awaited by an approval card)
+    this.workingMemoryTallies = new WeakMap() // run -> counts of tool results the working-memory gate changed (for one activity row)
     // Advisory state judge on the engine's own command executions (egdesk-engine-command-watch.mjs). Inert unless decisionContext.commandJudge.mode() is 'advisory'.
     this.commandJudgeRuns = new Map() // run key (answerId) -> run, for the run's egress gate
     this.commandJudgeBeats = new WeakMap() // heartbeat -> { runKey } (one listener per heartbeat)
@@ -1227,14 +1229,19 @@ export class CodexChatRuntime {
           (item.type === 'inputAudio' && typeof item.audioUrl === 'string')
         )) && JSON.stringify(response).length <= 8 * 1024 * 1024
       if (!valid) throw chatError('INVALID_TOOL_RESPONSE', 'Tool provider returned an invalid native response', 500)
-      const reflex = provider.providerId === 'egdesk-browser' && event.tool === BROWSER_REFLEX_TOOL_NAME && !event.namespace
-      const bound = reflex && pending?.run === run && pending.provider === provider && pending.epoch === epoch &&
-        this.dynamicRequestProviders.get(event.rpcId) === pending
-      const replied = this.respond(event.rpcId, response)
-      if (bound && replied !== false && current() && this.runs.get(runKey(event.threadId, event.turnId)) === run &&
-          this.ownedRuns.has(run) && isCurrentBrowserReflexHandoff(response, run, event)) {
-        this.noteBrowserReflexHandoff(run, event.callId)
+      const deliver = delivered => {
+        const reflex = provider.providerId === 'egdesk-browser' && event.tool === BROWSER_REFLEX_TOOL_NAME && !event.namespace
+        const bound = reflex && pending?.run === run && pending.provider === provider && pending.epoch === epoch &&
+          this.dynamicRequestProviders.get(event.rpcId) === pending
+        const replied = this.respond(event.rpcId, delivered)
+        if (bound && replied !== false && current() && this.runs.get(runKey(event.threadId, event.turnId)) === run &&
+            this.ownedRuns.has(run) && isCurrentBrowserReflexHandoff(response, run, event)) {
+          this.noteBrowserReflexHandoff(run, event.callId)
+        }
       }
+      // Working-memory gate (flag, default off). Without the flag this is null and the result is delivered in the same tick, unchanged.
+      const gate = this.workingMemoryGate(provider, run, event, response)
+      return gate ? gate.then(delivered => { if (current()) deliver(delivered) }) : deliver(response)
     }).catch(error => {
       if (!current()) return
       const failure = classifyPublicToolError(error)
@@ -5339,6 +5346,40 @@ export class CodexChatRuntime {
   }
 
   commandJudgeIdle() { return this.engineCommands.idle() }
+
+  // ---- Working-memory gate at the EG-Desk tool-result boundary (egdesk-working-memory-wiring.mjs). ----
+  // Config: decisionContext.workingMemory = { mode(): 'off'|'advisory'|'on' }. Absent or 'off' → null and nothing changes.
+  // Only a result a tool provider RETURNS passes here. Context reads answer through their own receipt-hashed path and engine-native
+  // output never reaches this code. 'advisory' records what the code rules would do; 'on' lets the code rules act. No Decision call
+  // decides anything here: the judge is asked, not awaited, only for calibration.
+  workingMemoryGate(provider, run, event, response) {
+    const setup = this.decisionContext
+    let flag
+    try { flag = setup?.workingMemory?.mode?.() } catch { return null }
+    if ((flag !== 'advisory' && flag !== 'on') || provider === this.contexts) return null
+    // Decided synchronously: a tool that is not a declared consumer (and cannot hit the Claude output limit) is delivered in the same tick as before.
+    if (!toolResultConsumer({ provider, tool: event.tool, namespace: event.namespace || null, contexts: this.contexts }) && this.runEngine(run) !== 'claude') return null
+    let goal = ''
+    try { goal = this.store?.getAcceptedText?.(run.clientThreadId, run.requestId) || '' } catch { /* anchors then come from the output alone */ }
+    const paths = (run.activities || []).filter(item => item.kind === 'fileChange').flatMap(item => (item.detail?.changes || []).map(change => change?.path)).filter(value => typeof value === 'string').slice(-16)
+    return gateRuntimeToolResult({ response, flag, provider, tool: event.tool, namespace: event.namespace || null, engineId: this.runEngine(run), run, contexts: this.contexts, goal, paths,
+      egress: this.decisionEgressFor(run), decision: { mode: () => setup.mode(), configured: () => setup.configured(), client: setup.client }, calibrationLog: setup.calibrationLog })
+      .then(result => { if (result.touched) this.noteWorkingMemory(run, result); return result.response }, () => response)
+  }
+
+  // One content-free activity row per answer for results the gate really changed (flag 'on' only): how many results, how many
+  // lines were left out, how many can be re-read. No tool name and no text. Advisory changes nothing, so it shows nothing.
+  noteWorkingMemory(run, result) {
+    try {
+      if (run.status !== 'inProgress') return
+      const tally = this.workingMemoryTallies.get(run) || { results: 0, linesOmitted: 0, spilledResults: 0 }
+      tally.results++; tally.linesOmitted += result.report?.linesOmitted || 0; if (result.spillId) tally.spilledResults++
+      this.workingMemoryTallies.set(run, tally)
+      const activity = workingMemoryActivity({ answerId: run.answerId, tally })
+      this.put(run, 'activities', activity)
+      this.emit(run, 'activity.completed', activity)
+    } catch { /* the record never affects a tool result */ }
+  }
 
   // ---- Command gate before an engine approval (Codex commandExecution/requestApproval; Claude can_use_tool arrives as the same request). ----
   // Config: decisionContext.terminalGate = { mode(): 'off'|'advisory'|'on', inspect?({ cwd, paths }) → { targets, git }, home?, deadlineMs? (at most 4 s) }. Absent or any other mode: off,
