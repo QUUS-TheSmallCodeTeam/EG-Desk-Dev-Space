@@ -68,16 +68,17 @@ export function judgeFlow(expect, notes) {
 }
 
 /** The turn hook: remembers what the store held at the start, and reads the window's own messages at the end. */
-export function createFlowHook() {
-  let before = null
+// The window opens when the turn begins (the check's own clock, the one the chat store stamps its messages with); the person's message may carry its own timestamp (then that one).
+export function createFlowHook({ now = () => Date.now() } = {}) {
+  let before = null, began = null
   const messages = state => { try { return state.store.listMessages(state.clientThreadId, { limit: 500 }).messages } catch { return [] } }
   return {
-    beginTurn(ctx) { before = new Set(messages(ctx.state()).map(m => m.localMessageId ?? m.messageId ?? m.id)) },
+    beginTurn(ctx) { began = now(); before = new Set(messages(ctx.state()).map(m => m.localMessageId ?? m.messageId ?? m.id)) },
     finishTurn(ctx) {
       const all = messages(ctx.state()), key = m => m.localMessageId ?? m.messageId ?? m.id
       const fresh = all.filter(m => !(before ?? new Set()).has(key(m)))
-      before = null
-      const opener = fresh.find(m => m.role === 'user'), start = Number.isFinite(opener?.createdAt) ? opener.createdAt : null
+      const opener = fresh.find(m => m.role === 'user'), start = Number.isFinite(opener?.createdAt) ? opener.createdAt : (opener ? began : null)
+      before = null; began = null
       const notes = fresh.filter(m => m.role === 'assistant' && typeof m.messageId === 'string' && m.messageId.startsWith(FLOW_PREFIX) && Number.isFinite(m.createdAt) && start !== null)
         .sort((a, b) => a.createdAt - b.createdAt).map(m => ({ atMs: m.createdAt - start, text: String(m.text ?? '') }))
       const expectations = ctx.expect?.flow ? judgeFlow(ctx.expect.flow, notes) : []

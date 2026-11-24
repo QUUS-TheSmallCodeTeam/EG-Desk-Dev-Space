@@ -52,10 +52,11 @@ test('the hook: the window\'s own messages from the store, timed from the person
   const rows = []
   const store = { listMessages: () => ({ messages: rows }) }
   const ctx = expectFlow => ({ state: () => ({ store, clientThreadId: 'ui' }), expect: expectFlow ? { flow: expectFlow } : {} })
-  const hook = createFlowHook()
+  let clock = 5000
+  const hook = createFlowHook({ now: () => clock })
   rows.push({ localMessageId: 'old', role: 'assistant', messageId: `${FLOW_PREFIX}old`, createdAt: 1000, text: 'an earlier turn\'s note' })
   hook.beginTurn(ctx())
-  rows.push({ localMessageId: 'u', role: 'user', messageId: 'u', createdAt: 5000, text: 'run it' },
+  rows.push({ localMessageId: 'u', role: 'user', messageId: null, text: 'run it' }, // the store's user message carries no timestamp: the window opened at the turn's start (5000)
     { localMessageId: 'n1', role: 'assistant', messageId: `${FLOW_PREFIX}n1`, createdAt: 36000, text: '약 30초째 실행 중이에요.' },
     { localMessageId: 'a', role: 'assistant', messageId: 'agent-1', createdAt: 51000, text: 'done-42' })
   const out = hook.finishTurn(ctx({ notes: { equals: 1 }, firstNoteMs: { min: 10000, max: 40000 }, statedSecondsTrue: true, noResult: ['done-42'] }))
@@ -103,7 +104,47 @@ test('real-engine-unsolicited-note-v1 on the fake: one note is written, checked 
   const rec = await runJourneyConversation(w, script, 'unsolicited-note')
   assert.equal(rec.aborted, null, rec.abortDetail); assert.deepEqual(failed(rec), [], JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok))))
   const turn = rec.turns[0]
-  assert.equal(turn.hooks.flow.notes.length, 1, 'one note'); assert.ok(turn.hooks.flow.notes[0].atMs >= 10_000 && turn.hooks.flow.notes[0].atMs <= 40_000, `at ${turn.hooks.flow.notes[0].atMs} ms`)
+  assert.equal(turn.flow.notes.length, 1, 'one note'); assert.ok(turn.flow.notes[0].atMs >= 10_000 && turn.flow.notes[0].atMs <= 40_000, `at ${turn.flow.notes[0].atMs} ms`)
   assert.equal(turn.posted.length, 2); assert.equal(turn.posted.at(-1), '다 끝났어요. 출력은 done-42 입니다.'); assert.equal(turn.posted[0].includes('done-42'), false, 'the note holds no output')
   assert.deepEqual(w.stderrLines, [])
+})
+
+// ---- approval-words: the person answers the pending question in their own words ----
+const FORCE = 'git push --force origin main'
+function approvalWorld(t, { second }) {
+  const fake = { turns: [{ steps: [{ toolCall: { tool: 'egdesk_run_command', arguments: { command: FORCE } } }], final: '이 명령은 되돌릴 수 없어서 확인이 필요해요. 실행할까요?' }, second], forkTurns: [] }
+  const w = journeyWorld(t, fake, { commandMs: () => 50 })
+  // a sound judge for the command gate and for the reply (the real judge decides these on the real run): a force push is not restorable; the reply is read against the one command asked about
+  const original = w.deps.fetchImpl
+  w.deps.fetchImpl = async (url, init) => {
+    const body = JSON.parse(init.body), names = body.questions.map(q => q.name)
+    if (!names.some(n => /^(risk_|reply_)/.test(n))) return original(url, init)
+    const text = JSON.stringify(body.input), json = { answers: [], usage: { input_tokens: 40 } }
+    const reply = /"role":"user","content":"[^"]*Reply[^"]*"/.test(text) ? text : text
+    for (const q of body.questions) {
+      const p = q.name === 'reply_runs_command' ? (/그냥 해/.test(text) ? 0.96 : 0.03) : q.name === 'reply_declines_command' ? (/아니 잠깐/.test(text) ? 0.96 : 0.03) : q.name === 'risk_unrestorable' ? (/--force/.test(text) ? 0.95 : 0.03) : 0.03
+      json.answers.push({ type: 'predicate', name: q.name, probability: p })
+    }
+    return Response.json(json)
+  }
+  return w
+}
+test('real-engine-approval-words-v1 "그냥 해" on the fake: nothing runs while the question is open; the reply runs exactly that command once; every expectation passes', async t => {
+  const w = approvalWorld(t, { second: { steps: [{ toolCall: { tool: 'egdesk_run_command', arguments: { command: FORCE } } }], final: '실행했어요.' } })
+  const rec = await runJourneyConversation(w, load('real-engine-approval-words-v1'), 'approval-just-do-it')
+  assert.equal(rec.aborted, null, rec.abortDetail); assert.deepEqual(failed(rec), [], JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok))))
+  assert.deepEqual(rec.turns.map(x => x.subTurns.flatMap(s => s.commandsRan)), [[], [FORCE]]); assert.deepEqual(w.commands.map(c => c.command.includes('--force')), [true], 'one process, in the second turn only')
+})
+test('real-engine-approval-words-v1 "아니 잠깐" on the fake: the reply settles it as declined; nothing runs; every expectation passes', async t => {
+  const w = approvalWorld(t, { second: { steps: [], final: '알겠어요, 실행하지 않았어요.' } })
+  const rec = await runJourneyConversation(w, load('real-engine-approval-words-v1'), 'approval-wait-no')
+  assert.equal(rec.aborted, null, rec.abortDetail); assert.deepEqual(failed(rec), [], JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok))))
+  assert.deepEqual(rec.turns.map(x => x.subTurns.flatMap(s => s.commandsRan)), [[], []]); assert.deepEqual(w.commands, [])
+})
+test('the approval expectations can fail: a command that ran while the question was open, and a declined reply that ran it anyway', async t => {
+  // the fake model runs the command in the second turn although the person declined: the expectation commandsRan [] of that turn fails
+  const w = approvalWorld(t, { second: { steps: [{ toolCall: { tool: 'egdesk_run_command', arguments: { command: FORCE } } }], final: '실행했어요.' } })
+  w.deps.fetchImpl = (orig => async (url, init) => { const r = await orig(url, init); const j = await r.json(); for (const a of j.answers ?? []) if (a.name === 'reply_runs_command') a.probability = 0.96; if (j.answers) for (const a of j.answers) if (a.name === 'reply_declines_command') a.probability = 0.02; return Response.json(j) })(w.deps.fetchImpl)
+  const rec = await runJourneyConversation(w, load('real-engine-approval-words-v1'), 'approval-wait-no')
+  assert.ok(failed(rec).some(name => /commandsRan/.test(name)), `a run after "아니 잠깐" is a failure: ${JSON.stringify(failed(rec))}`)
 })
