@@ -26,7 +26,7 @@ export function createInternalTurns({ setTimer = (fn, ms) => setTimeout(fn, ms),
     /** True when a server request came from an internal thread; the caller answers it with a refusal. */
     declines(message) { return live.has(message?.params?.threadId) },
     /** The deadline covers everything, including an engine that never answers the fork or the turn start (a hung engine). */
-    async run({ engine, slot, parentThreadId, text, timeoutMs = 20000, signal = null }) {
+    async run({ engine, slot, parentThreadId, text, timeoutMs = 20000, signal = null, outputSchema = null }) {
       if (!engine?.forkThread || !engine.startTurn) throw fail('INTERNAL_TURN_UNSUPPORTED', 'Engine cannot run an internal turn')
       let forkId = null, timer = null, over = false, settle = null
       const done = new Promise((resolve, reject) => { settle = { resolve, reject } })
@@ -52,7 +52,8 @@ export function createInternalTurns({ setTimer = (fn, ms) => setTimeout(fn, ms),
         if (over) { release(id); return } // the deadline passed while the fork was pending: do not use it
         forkId = id
         live.set(id, collector)
-        await engine.startTurn({ threadId: id, input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: `egdesk-internal:${randomUUID()}` }, slot)
+        // outputSchema (cycle 30, the briefing's flag): Codex TurnStartParams.outputSchema constrains this turn's final message. Absent, the params are exactly as before.
+        await engine.startTurn({ threadId: id, input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: `egdesk-internal:${randomUUID()}`, ...(outputSchema ? { outputSchema } : {}) }, slot)
       })()
       work.then(() => {}, error => settle.reject(error))
       try { return { text: await done } } finally {

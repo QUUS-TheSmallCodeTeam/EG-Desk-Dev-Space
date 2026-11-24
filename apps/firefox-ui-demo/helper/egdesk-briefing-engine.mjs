@@ -3,6 +3,10 @@
 // This module only builds the prompt, reads back ONE reply and reduces it to the closed shape the flow's own validators check (resolveDesign / completeBriefingArgs).
 // It never decides anything: a reply that does not parse is null, the flow retries within its bound and then leaves the chat answer as it is.
 // Bounds: per-turn time, total time, number of turns, reply size. Model-facing text is English; step texts are asked for in the language of the answer.
+// Cycle 30, behind a default-off flag (outputSchema): the fill / design request also carries a JSON Schema built from the accepted shape of the render components
+// (egdesk-briefing-output-schema.mjs), sent as the turn's `outputSchema`, so the engine's final message must be a valid fill / design. Off: nothing below changes a byte.
+
+import { outputSchemaFor, stripNulls, violation } from './egdesk-briefing-output-schema.mjs'
 
 export const BRIEFING_ENGINE_LIMITS = Object.freeze({ turnMs: 30_000, totalMs: 100_000, maxTurns: 6, replyMax: 16_000, componentMax: 8_000, reportMax: 20_000 })
 const MAX_STEPS = 20, MAX_TARGETS = 12, MAX_NEW = 6
@@ -81,24 +85,42 @@ export function fillPrompt(request) {
 const unfence = value => { const m = /^\s*```[a-zA-Z]*\n([\s\S]*?)\n```\s*$/.exec(value); return (m ? m[1] : value).trim() }
 
 /**
- * createBriefingEngine({ runText, report?, now?, limits? }) → async engine(request) → design | { markdown } | null
- *   runText(prompt, { timeoutMs }) → the model's final text of one private turn, or null (CodexChatRuntime.internalText bound to the answer's run).
- * engine.stats() → { turns, elapsedMs, refused } (content-free).
+ * createBriefingEngine({ runText, report?, now?, limits?, outputSchema? }) → async engine(request) → design | { markdown } | null
+ *   runText(prompt, { timeoutMs, outputSchema? }) → the model's final text of one private turn, or null (CodexChatRuntime.internalText bound to the answer's run).
+ *   outputSchema === true: a fill / design request is sent with its schema; the reply is checked against it here (a reply that does not fit is null, as a reply that does not parse).
+ * engine.stats() → { turns, elapsedMs, refused } (content-free; plus schemaInvalid when outputSchema is on).
  */
-export function createBriefingEngine({ runText, report = '', now = Date.now, limits = {} } = {}) {
+export function createBriefingEngine({ runText, report = '', now = Date.now, limits = {}, outputSchema = false } = {}) {
   if (typeof runText !== 'function') throw new TypeError('runText is required')
   const L = { ...BRIEFING_ENGINE_LIMITS, ...Object.fromEntries(Object.entries(limits).filter(([k, v]) => Object.hasOwn(BRIEFING_ENGINE_LIMITS, k) && Number.isFinite(v) && v > 0)) }
   const answer = typeof report === 'string' ? report.slice(0, L.reportMax) : ''
   const started = now()
-  let turns = 0, refused = 0
-  const ask = async prompt => {
+  let turns = 0, refused = 0, schemaInvalid = 0
+  const ask = async (prompt, schema = null) => {
     const left = L.totalMs - (now() - started)
     if (turns >= L.maxTurns || left <= 0) { refused++; return null }
     turns++
-    try { const reply = await runText(prompt, { timeoutMs: Math.max(1, Math.min(L.turnMs, left)) }); return typeof reply === 'string' && reply.length <= L.replyMax ? reply : null } catch { return null }
+    try { const reply = await runText(prompt, { timeoutMs: Math.max(1, Math.min(L.turnMs, left)), ...(schema ? { outputSchema: schema } : {}) }); return typeof reply === 'string' && reply.length <= L.replyMax ? reply : null } catch { return null }
+  }
+  // The schema of a request (null when off or for a kind that is not constrained). A request that cannot be described is asked without one, as with the flag off.
+  const schemaOf = request => { if (outputSchema !== true) return null; try { return outputSchemaFor(request) } catch { return null } }
+  // With a schema the final message must BE the JSON object (no prose around it) and fit the schema; null slots / emphasis are read as left out.
+  const constrained = (reply, schema, kind) => {
+    let value = null
+    try { value = JSON.parse(String(reply ?? '').trim()) } catch { value = null }
+    if (value === null || violation(value, schema)) { schemaInvalid++; return null }
+    return stripNulls(kind, value)
   }
   const engine = async request => {
     const kind = request?.kind
+    const schema = schemaOf(request)
+    if (schema) {
+      const prompt = kind === 'briefing_fill' ? fillPrompt(request) : kind === 'briefing_design' ? designPrompt(request, answer) : redesignPrompt(request, answer)
+      const reply = await ask(prompt, schema)
+      if (typeof reply !== 'string') return null
+      const value = constrained(reply, schema, kind)
+      return value && kind !== 'briefing_fill' ? shapeDesign(value) : value
+    }
     if (kind === 'briefing_design') return shapeDesign(parseEngineJson(await ask(designPrompt(request, answer)), L.replyMax))
     if (kind === 'briefing_redesign' || kind === 'briefing_redesign_inconclusive') return shapeDesign(parseEngineJson(await ask(redesignPrompt(request, answer)), L.replyMax))
     if (kind === 'briefing_fill') return parseEngineJson(await ask(fillPrompt(request)), L.replyMax)
@@ -109,7 +131,7 @@ export function createBriefingEngine({ runText, report = '', now = Date.now, lim
     }
     return null
   }
-  engine.stats = () => ({ turns, refused, elapsedMs: Math.max(0, now() - started) })
+  engine.stats = () => ({ turns, refused, elapsedMs: Math.max(0, now() - started), ...(outputSchema === true ? { schemaInvalid } : {}) })
   return engine
 }
 
@@ -117,8 +139,10 @@ export function createBriefingEngine({ runText, report = '', now = Date.now, lim
  * The bridge's dependencies for the `on` path, in one place so a test mounts exactly what the bridge mounts.
  * enabled === false (the default) leaves the engine out: the route then answers 'no-engine' and does nothing.
  */
-export function briefingDeps({ chat, contexts, enabled = false, limits, order = 'skeleton', fillCheck = 'all', coverage = 'facts' } = {}) {
+export function briefingDeps({ chat, contexts, enabled = false, limits, order = 'skeleton', fillCheck = 'all', coverage = 'facts', outputSchema = 'off' } = {}) {
   return {
+    // Cycle 30: 'on' sends the fill / design request with its outputSchema (the engine's final message must be a valid fill / design). Default off: the request is as before.
+    outputSchema: outputSchema === 'on' ? 'on' : 'off',
     // The coverage check at the end: one question per fact the board must show (default, cycle 21) or the one whole-board question ('board', internal switch, cycle 19).
     coverage: coverage === 'board' ? 'board' : 'facts',
     // The check after the fill: every piece (default) or only the pieces with a number, a date, a Latin word or a name ('facts', internal switch, off by default).
@@ -129,7 +153,7 @@ export function briefingDeps({ chat, contexts, enabled = false, limits, order = 
     // The turn's memory materials as data (lane L7: chat.memoryMaterialsFor(run), rows the answering model was given this turn). Absent method or anything unusable = none.
     materialsFor: run => { try { const rows = chat.memoryMaterialsFor?.(run); return Array.isArray(rows) ? rows : [] } catch { return [] } },
     engineFor: (run, { report = '' } = {}) => (enabled === true && chat.canInternalTurn(run)
-      ? createBriefingEngine({ runText: (prompt, options) => chat.internalText(run, prompt, options), report, limits }) : null),
+      ? createBriefingEngine({ runText: (prompt, options) => chat.internalText(run, prompt, options), report, limits, outputSchema: outputSchema === 'on' }) : null),
     runFor: ids => chat.runFor(ids),
     propose: (run, args) => contexts.proposeBriefing(run, args),
     publishOutput: (run, args) => contexts.publishOutput(run, args),

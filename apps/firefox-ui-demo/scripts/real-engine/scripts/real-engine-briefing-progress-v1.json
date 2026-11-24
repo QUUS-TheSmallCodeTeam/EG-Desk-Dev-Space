@@ -1,0 +1,61 @@
+{
+  "set": "real-engine-briefing-progress-v1",
+  "description": "Pattern: a progress summary over dated materials. A synthetic dev log (three dated notes: two merges with commit ids and test counts, one started with three open items). Turn 1 asks for the progress in date order with the commit ids and test counts; the answer must carry every merged topic, commit id and test count, read the notes with the own file tool, change nothing and use no native tool. Turn 2 asks what is still to do; it must name every open item. All expectations are derived by code from the notes. The briefing flags are not set: the real-engine check does not reproduce the Board presentation path (its BRIDGE_COMPOSITION lists EGDESK_BRIEFING_FLOW as not reproduced).",
+  "conversations": [
+    {
+      "id": "briefing-progress",
+      "folder": {
+        "devlog/11-20.md": "# 11-20 기록\n\n- 로그인 화면 병합 완료 (커밋 a1b2c3d, 테스트 120건 통과).\n",
+        "devlog/11-22.md": "# 11-22 기록\n\n- 결제 모듈 병합 완료 (커밋 e4f5a6b, 테스트 98건 통과).\n- 알림 설정 화면은 시안만 확정.\n",
+        "devlog/11-24.md": "# 11-24 기록\n\n- 검색 화면 착수.\n- 남은 일: 알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성.\n"
+      },
+      "turns": [
+        {
+          "say": "devlog 폴더의 기록을 읽고 진행 상황을 날짜 순서로 정리해줘. 커밋 id와 테스트 건수도 같이. 파일은 바꾸지 마.",
+          "expect": {
+            "toolCalls": [
+              "egdesk_read_file"
+            ],
+            "posted": true,
+            "answerIncludes": [
+              "로그인 화면",
+              "a1b2c3d",
+              "120",
+              "결제 모듈",
+              "e4f5a6b",
+              "98",
+              "검색 화면"
+            ],
+            "files": {
+              "devlog/11-20.md": "# 11-20 기록\n\n- 로그인 화면 병합 완료 (커밋 a1b2c3d, 테스트 120건 통과).\n",
+              "devlog/11-22.md": "# 11-22 기록\n\n- 결제 모듈 병합 완료 (커밋 e4f5a6b, 테스트 98건 통과).\n- 알림 설정 화면은 시안만 확정.\n",
+              "devlog/11-24.md": "# 11-24 기록\n\n- 검색 화면 착수.\n- 남은 일: 알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성.\n"
+            },
+            "undoRecords": 0,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "그래서 남은 일은 뭐야?",
+          "expect": {
+            "posted": true,
+            "answerIncludes": [
+              "알림 설정 구현",
+              "검색 성능 점검",
+              "배포 체크리스트 작성"
+            ],
+            "files": {
+              "devlog/11-20.md": "# 11-20 기록\n\n- 로그인 화면 병합 완료 (커밋 a1b2c3d, 테스트 120건 통과).\n",
+              "devlog/11-22.md": "# 11-22 기록\n\n- 결제 모듈 병합 완료 (커밋 e4f5a6b, 테스트 98건 통과).\n- 알림 설정 화면은 시안만 확정.\n",
+              "devlog/11-24.md": "# 11-24 기록\n\n- 검색 화면 착수.\n- 남은 일: 알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성.\n"
+            },
+            "undoRecords": 0,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}
