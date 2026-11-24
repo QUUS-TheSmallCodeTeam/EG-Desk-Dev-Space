@@ -467,7 +467,10 @@ export function splitLabels(verdicts) {
   const source = src.some(([, x]) => x === 'unknown') ? 'unknown' : (yes => (yes.length === 0 ? 'unspecified' : yes.length === 1 ? yes[0][0] : 'unknown'))(src.filter(([, x]) => x === 'yes'))
   const dirs = ['before', 'now', 'ongoing', 'after']
   let time = 'unknown'
-  if (dirs.every(key => v(key) !== 'unknown')) {
+  // Owner decision (Main, c24): with ongoing decided yes, now is not consulted ({ongoing} and {now, ongoing} both give ongoing_no_end, so an
+  // undecided now cannot change the label); before and after must still be decided no. Real c26: c37 now .39, c30 now .30, ongoing 1.0.
+  if (v('ongoing') === 'yes' && v('before') === 'no' && v('after') === 'no') time = 'ongoing_no_end'
+  else if (dirs.every(key => v(key) !== 'unknown')) {
     const yes = dirs.filter(key => v(key) === 'yes').sort().join('+')
     // A sentence read as about the moment of speaking that also names a day or time places something else at that other time (real, c23:
     // a16 "내일 비 오면 오늘 했어야 했나 싶어", now .92 and when 1.0, a deliberately ambiguous axis): conflicting times, no label (L7 c21).
