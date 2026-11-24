@@ -1,5 +1,5 @@
 import { DECISIONS_ENDPOINT } from './egdesk-decision-client.mjs'
-import { RUNS, buildPlan, scorePlan } from './egdesk-memory-real-plan.mjs'
+import { RUNS, buildPlan, scorePlan, scoreRemeasure } from './egdesk-memory-real-plan.mjs'
 
 // Sends the pre-built measurement requests, one at a time, to the OFFICIAL Decisions endpoint. For Main to run after the user approves.
 //  - The key comes from the caller (the CLI reads one environment variable); it is used only in the Authorization header of the POST and is
@@ -28,7 +28,7 @@ export function diffPlan(plan, saved) {
  * runMeasurement({ plan, key, send = false, fetchImpl = fetch, maxEstimatedTokens, timeoutMs = 20000, now })
  * -> { sent, stoppedBecause, results, scorecard, totals }. With send = false nothing leaves the process (a dry run).
  */
-export async function runMeasurement({ plan, key = null, send = false, fetchImpl = globalThis.fetch, maxEstimatedTokens = null, timeoutMs = 20000, now = () => performance.now() } = {}) {
+export async function runMeasurement({ plan, key = null, send = false, fetchImpl = globalThis.fetch, maxEstimatedTokens = null, timeoutMs = 20000, now = () => performance.now(), score = scorePlan } = {}) {
   const table = planTable(plan)
   const totals = { requests: table.length, estInputTokens: table.reduce((n, r) => n + r.estInputTokens, 0) }
   const ceiling = Number.isFinite(maxEstimatedTokens) ? maxEstimatedTokens : Math.ceil(totals.estInputTokens * 1.25)
@@ -61,7 +61,7 @@ export async function runMeasurement({ plan, key = null, send = false, fetchImpl
     } finally { clearTimeout(timer) }
   }
   // Requests after a stop are simply absent from results: the scorer reports them as "not sent".
-  return { sent, stoppedBecause, results, scorecard: scorePlan(plan, results), totals, ceiling }
+  return { sent, stoppedBecause, results, scorecard: score(plan, results), totals, ceiling }
 }
 
-export { RUNS, buildPlan }
+export { RUNS, buildPlan, scorePlan, scoreRemeasure }

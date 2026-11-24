@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { readFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
 import crypto from 'node:crypto'
 import os from 'node:os'
@@ -53,7 +54,10 @@ test('mid-session never reconstructs: the judge gets the MID-CONVERSATION rules,
   assert.ok(log.filter(l => !l.questions.includes('tn_courtesy')).every(l => l.next), 'every fetch request is a next-judgment request')
   assert.match(wire, /MID-CONVERSATION/); assert.match(log.map(l => l.input).join('\n'), /Held in the answering model's context/)
   const heldBodies = PG_HELD.map(id => SYNTHETIC_PAGES.find(p => p.id === id).body)
-  for (const body of heldBodies) { assert.ok(!wire.includes(body), 'a held page body is never re-sent to the judge'); assert.ok(!r.packet.includes(body), 'nor to the answering model') }
+  // Held pages are shown to the judge by their start (<= 200 chars) so it can tell what is covered, but they are never OPTIONS and never in the packet.
+  const optionTitles = [...wire.matchAll(/^P\d+ \| .* \| (.+)$/gm)].map(m => m[1])
+  for (const id of PG_HELD) { const page = SYNTHETIC_PAGES.find(p => p.id === id); assert.ok(!optionTitles.includes(page.title), `held page ${id} is not an option`) }
+  for (const body of heldBodies) assert.ok(!r.packet.includes(body), 'a held page is not re-sent to the answering model')
   assert.deepEqual(ids(r).sort(), ['db/pg-followup', 'db/pg-health'])
   assert.deepEqual(r.memory.receipts.skippedDelivered.sort(), [...PG_HELD].sort())
   assert.match(r.packet, /Pages you already hold from earlier in this conversation are not repeated/)
@@ -94,9 +98,9 @@ test('mid-session links-first: only the link neighbours of what is held are scan
 
 test('small talk mid-session: one tiny call, nothing fetched, nothing sent to the answering model, no write judgment', async () => {
   const { r, log } = await turn('고마워', { ontologyWrite: true })
-  assert.equal(log.length, 1); assert.deepEqual(log[0].questions, ['tn_courtesy', 'tn_need', 'tn_record'])
+  assert.equal(log.length, 1); assert.deepEqual(log[0].questions, ['tn_courtesy', 'tn_need', 'tn_recall', 'tn_record'])
   assert.equal(r.memory.status, 'skipped'); assert.equal(r.packet, null); assert.equal(r.judgeWrite, null); assert.equal(r.writeSkipped, 'not_worth_recording')
-  assert.ok(!/지침|견적서|PostgreSQL 전환/.test(log[0].input.replace(/Held in[\s\S]*?\n\n/, '')), 'no page content in the triage request')
+  assert.ok(!/연결 풀 응답|단가 12,800원|12월 첫째 주에|흐름: 1\)/.test(log[0].input.replace(/Held in[\s\S]*?\n\nStored pages/, 'Stored pages')), 'the triage request carries titles of other pages, never their content')
 })
 
 test('triage that is undecided or failed still fetches: only a decided "no" skips; a failure never invents a write', async () => {
@@ -264,7 +268,7 @@ test('triage wording: courtesy is a plain social-act question with no mention of
   let qs
   await triageTurn({ message: '고마워', heldTitles: ['A'], client: { async decide(req) { qs = req.questions; return { answers: {} } } } })
   const by = Object.fromEntries(qs.map(q => [q.name, q.instructions]))
-  assert.deepEqual(Object.keys(by), ['tn_courtesy', 'tn_need', 'tn_record'])
+  assert.deepEqual(Object.keys(by), ['tn_courtesy', 'tn_need', 'tn_record'], 'without a stored-page list there is no recall question and the need wording stays the old one')
   assert.doesNotMatch(by.tn_courtesy, /stored|held|notes|documents/)
   assert.doesNotMatch(by.tn_need, /need none/)
 })
@@ -281,7 +285,7 @@ test('a report whose context is already held skips the fetch but is still judged
 
 test('real T4/T6 data: with titles only a decided need "no" does not skip (the wrong skip); with the held content shown (the default) need "no" skips, need "yes" fetches', async () => {
   const judge = mockJudge()
-  const answering = (need) => ({ async decide(req) { const r = await judge.decide(req); if (req.questions.some(q => q.name === 'tn_need')) { r.answers.tn_courtesy = { type: 'predicate', probability: 0 }; r.answers.tn_need = { type: 'predicate', probability: need }; r.answers.tn_record = { type: 'predicate', probability: 0 } } return r } })
+  const answering = (need, recall = 0) => ({ async decide(req) { const r = await judge.decide(req); if (req.questions.some(q => q.name === 'tn_need')) { r.answers.tn_courtesy = { type: 'predicate', probability: 0 }; r.answers.tn_need = { type: 'predicate', probability: need }; r.answers.tn_recall = { type: 'predicate', probability: recall }; r.answers.tn_record = { type: 'predicate', probability: 0 } } return r } })
   const held = ['db/pg-plan', 'db/pg-health', 'db/pg-followup']
   const titlesOnly = await turn('그럼 롤백 조건은?', { client: answering(0.02), held, heldExcerpts: false })
   assert.equal(titlesOnly.r.triage.need.state, 'no'); assert.notEqual(titlesOnly.r.memory.status, 'skipped', 'titles alone are not enough to skip on need')
@@ -297,7 +301,7 @@ test('held pages are shown with their status and the start of their content by d
   const seen = []
   const capture = { async decide(req) { seen.push(req.input.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n')); return { answers: {} } } }
   await turn('그럼 롤백 조건은?', { client: capture, held: ['db/pg-plan'], heldExcerpts: false })
-  assert.ok(!/status=plan\n/.test(seen[0]) && !seen[0].includes('아직 배포 전이다'), 'titles only when switched off')
+  assert.ok(!seen[0].includes('아직 배포 전이다') && !seen[0].includes('12월 첫째 주에'), 'titles only when switched off')
   seen.length = 0
   await turn('그럼 롤백 조건은?', { client: capture, held: ['db/pg-plan'] })
   assert.match(seen[0], /- PostgreSQL 마이그레이션 배포 계획 \| status=plan\n  12월 첫째 주에 SQLite에서 PostgreSQL로/)
@@ -323,4 +327,63 @@ test('no auto-promotion: only the person\'s own later explicit confirmation turn
   assert.deepEqual([page.status, page.statusReadings.map(r => r.state), page.statusReadings[0].confirmedAt], ['done', ['accepted'], ok.at])
   assert.deepEqual(writer.promote('db/pg-plan', { scope: SCOPE, confirmation: ok, operationId: 'p-ok' }), { ...promoted, replay: true })
   assert.equal(writer.promote('db/pg-plan', { scope: SCOPE, confirmation: ok, operationId: 'p-again' }).reason, 'no_pending_reading')
+})
+
+test('triage shows the stored pages that are not held, by title only: no bodies, no held pages, no page outside the scope; the list is complete up to 80 titles', async () => {
+  const seen = []
+  const capture = { async decide(req) { seen.push(req); return { answers: {} } } }
+  await turn('아까 jev hook 흐름 다시 정리해줘', { client: capture, held: ['jev/draft', 'jev/utt-user'] })
+  const text = seen[0].input.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n')
+  const block = text.slice(text.indexOf('Stored pages that are not held (titles only):'))
+  assert.match(block, /- jev hook 흐름 메모\(오늘 오전\) \| time=past \| status=done/, 'the page that holds the flow is visible to the judge')
+  assert.ok(!block.includes('jev hook 설계 초안') && !block.includes('hook 위치'), 'held pages are not listed again')
+  assert.ok(!block.includes('A사 내부 원가'), 'a page outside the scope is not listed')
+  assert.ok(!block.includes('흐름: 1) 사용자 입력'), 'titles only, no content')
+  assert.deepEqual(seen[0].questions.map(q => q.name), ['tn_courtesy', 'tn_need', 'tn_recall', 'tn_record'])
+  assert.match(seen[0].questions[1].instructions, /stored pages that are not held \(listed below, titles only\)/)
+})
+
+test('real j-mid ("아까 jev hook 흐름 다시 정리해줘", held draft + utterance): the REAL answers (courtesy 0, need 0.02, record 0, no recall answer) no longer skip; a recall yes or an incomplete list never skips either', async () => {
+  const real = JSON.parse(await readFile(new URL('./fixtures/memory-e2e-real-20261124.json', import.meta.url), 'utf8')).requests['j-mid-1-triage']
+  const a = Object.fromEntries(real.answers.map(x => [x.name, x]))
+  assert.deepEqual([a.tn_courtesy.probability, a.tn_need.probability, a.tn_record.probability], [0, 0.02, 0])
+  const judge = mockJudge()
+  const replay = extra => ({ async decide(req) { const r = await judge.decide(req); if (req.questions.some(q => q.name === 'tn_need')) { r.answers.tn_courtesy = a.tn_courtesy; r.answers.tn_need = a.tn_need; r.answers.tn_record = a.tn_record; delete r.answers.tn_recall; Object.assign(r.answers, extra) } return r } })
+  const held = ['jev/draft', 'jev/utt-user']
+  const old = await turn('아까 jev hook 흐름 다시 정리해줘', { client: replay({}), held })
+  assert.notEqual(old.r.memory.status, 'skipped', 'what used to be a wrong skip now fetches (recall is undecided)')
+  const yes = await turn('아까 jev hook 흐름 다시 정리해줘', { client: replay({ tn_recall: { type: 'predicate', probability: 0.97 } }), held })
+  assert.notEqual(yes.r.memory.status, 'skipped')
+  const no = await turn('아까 jev hook 흐름 다시 정리해줘', { client: replay({ tn_recall: { type: 'predicate', probability: 0.02 } }), held })
+  assert.equal(no.r.memory.status, 'skipped', 'with everything shown, recall no and need no it is the model\'s covered judgment that skips')
+  // an incomplete list: more than 80 stored pages that are not held
+  const pages = Array.from({ length: 90 }, (_, i) => ({ id: `bulk/p${i}`, title: `문서 ${i}`, body: `내용 ${i}`, revision: '1', time: { slice: 'present' }, provenance: { kind: 'document' }, status: 'done' }))
+  const big = buildWiki([...SYNTHETIC_PAGES, ...pages])
+  const seen = []
+  const wideClient = { async decide(req) { seen.push(req); const r = await replay({ tn_recall: { type: 'predicate', probability: 0.02 } }).decide(req); return r } }
+  const wide = await turn('아까 jev hook 흐름 다시 정리해줘', { client: wideClient, held, wiki: big })
+  assert.notEqual(wide.r.memory.status, 'skipped', 'the judge did not see every stored page, so "covered" cannot be trusted')
+  assert.equal(wide.r.triage.catalog.complete, false); assert.match(JSON.stringify(seen[0].input), /more stored pages are not listed/)
+})
+
+test('the fetch shows the start of each held page and asks for what must be decided, verified or done next (real pg-mid: the health-check page scored 0.37, then 0.03 as a second look)', async () => {
+  const { log } = await turn('PostgreSQL 마이그레이션 배포 끝났어', { budget: { linksFirst: true } })
+  const scan = log.find(l => l.questions.some(q => q.startsWith('pg_')))
+  assert.match(scan.input, /the start of each is shown; the rest is not repeated/)
+  assert.match(scan.input, /- PostgreSQL 마이그레이션 배포 계획 \| time=planned \| status=plan\n  12월 첫째 주에 SQLite에서 PostgreSQL로/)
+  assert.match(scan.input, /decide, verify or do what this message calls for next/)
+  assert.match(scan.input, /how success is judged, what is left to do, and what to do if it failed/)
+})
+
+test('characterization with the REAL pg-mid scan answers (0.37 / 0.8 / 0.01): an undecided page gets a second look, a second look that answers no closes it; the delivered pages are only the decided ones', async () => {
+  const real = JSON.parse(await readFile(new URL('./fixtures/memory-e2e-real-20261124.json', import.meta.url), 'utf8')).requests
+  const scan = Object.fromEntries(real['pg-mid-2-scan'].answers.map(x => [x.name, x])), second = Object.fromEntries(real['pg-mid-3-expand'].answers.map(x => [x.name, x]))
+  const judge = mockJudge()
+  const client = { async decide(req) { const r = await judge.decide(req)
+    if (req.questions.some(q => q.name === 'pg_0')) { r.answers.pg_0 = scan.pg_0; r.answers.pg_1 = scan.pg_1; r.answers.pg_2 = scan.pg_2 }
+    for (const q of req.questions) if (/^op_P\d+$/.test(q.name)) r.answers[q.name] = second.op_P3
+    return r } }
+  const { r } = await turn('PostgreSQL 마이그레이션 배포 끝났어', { client, budget: { linksFirst: true }, skipOnNeed: false })
+  assert.deepEqual(r.memory.picks.map(p => p.id), ['db/pg-followup'], 'the real answers delivered only the follow-up checklist')
+  assert.deepEqual(r.memory.receipts.uncertain.map(u => u.id), ['db/pg-health'], 'the health-check page was undecided and went to a second look')
 })

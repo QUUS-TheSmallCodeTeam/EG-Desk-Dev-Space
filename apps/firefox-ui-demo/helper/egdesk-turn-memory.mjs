@@ -43,29 +43,52 @@ export function usableReceipts(delivered, position, threadKey) {
 const heldBlock = (titles, digest) => (Array.isArray(digest) && digest.length
   ? digest.map(h => `- ${compactText(h.title, 120)} | status=${h.status}\n  ${compactText(h.excerpt, 200)}`).join('\n')
   : titles.length ? titles.map(t => `- ${compactText(t, 120)}`).join('\n') : '(nothing)')
-const TRIAGE_RULES = 'You are a system judge deciding what stored memory a turn needs. Judge only from the message, the list of what the answering model already holds, and any live conversation shown. Never invent anything.'
+// The stored pages that are NOT held, by title only. Without it the judge cannot tell whether anything relevant exists beyond what is held: the
+// first end-to-end run answered need 0.02 for "아까 jev hook 흐름 다시 정리해줘" because the held pages looked related, while the page that
+// actually holds the flow (not held) was invisible to it. Complete means every readable non-held page is listed.
+export const CATALOG_LIMIT = 80
+const catalogBlock = list => (list.length ? list.slice(0, CATALOG_LIMIT).map(p => `- ${compactText(p.title, 90)} | time=${p.time} | status=${p.status}`).join('\n') + (list.length > CATALOG_LIMIT ? `\n(${list.length - CATALOG_LIMIT} more stored pages are not listed)` : '') : '(none)')
 /**
- * One small call, no page content, three independent yes/no questions:
+ * The one rule that decides whether the mid-session fetch is skipped, from a triage result (also applied by the measurement scorer to real answers).
+ * A decided courtesy "yes" skips. A decided need "no" skips only when the held content AND the complete list of other stored pages were shown and
+ * recall is a decided "no". Anything else fetches.
+ */
+export function triageSkipsFetch(triage, { skipOnNeed = true, heldExcerpts = true } = {}) {
+  if (triage?.courtesy?.state === 'yes') return true
+  return skipOnNeed !== false && heldExcerpts !== false && triage?.catalog?.complete === true && triage?.recall?.state === 'no' && triage?.need?.state === 'no'
+}
+const TRIAGE_RULES = ['You are a system judge deciding what stored memory a turn needs. Judge only from the message, the list of what the answering model already holds, the titles of the stored pages that are not held, and any live conversation shown. Never invent anything.',
+  'A title tells you the topic of a stored page, not everything in it. The held list shows the start of each held page.'].join('\n')
+/**
+ * One small call, independent yes/no questions (held pages with their start; the other stored pages by title only):
  *  - tn_courtesy: is the message only thanks, a greeting, an acknowledgement or other small talk? (a plain social-act question;
  *    the first real run answered "does it need stored material?" with 1.0 for "고마워", so the skip no longer rests on that question)
  *  - tn_need: does it ask for or report something the held pages do not already cover?
+ *  - tn_recall: does the message point back to earlier material and ask for it to be recalled, summarized or re-organized? (a request like that
+ *    cannot be judged covered from the start of a few held pages; real run: need 0.02 although the page holding the flow was not held)
  *  - tn_record: is it worth keeping as a record?
- * The fetch is skipped only on a decided courtesy "yes" (or, when the host opts in with skipOnNeed, a decided need "no"). Undecided or failed answers still fetch.
+ * The fetch is skipped on a decided courtesy "yes", or on a decided need "no" only when the held content AND the complete list of the other stored
+ * pages were shown and recall is a decided "no". Undecided or failed answers, a truncated list or a recall request always fetch.
  */
-export async function triageTurn({ message, heldTitles = [], heldDigest = null, live = null, client, askedAt = null, signal, timeoutMs = 2000 } = {}) {
+export async function triageTurn({ message, heldTitles = [], heldDigest = null, stored = null, live = null, client, askedAt = null, signal, timeoutMs = 2000 } = {}) {
   const questions = [
     predicateQuestion('tn_courtesy', 'Is the message only a courtesy: thanks, a greeting, an acknowledgement or other social small talk, with no question, request, report or decision in it?'),
-    predicateQuestion('tn_need', 'Does the message ask for, or report, something that the held pages and the conversation do not already cover, so that stored notes or documents beyond the held ones would improve the answer?'),
+    predicateQuestion('tn_need', Array.isArray(stored)
+      ? 'Does the message ask for, or report, something that the held pages and the conversation do not already cover, so that stored pages that are not held (listed below, titles only) would help the answering model decide, verify or do what the message calls for?'
+      : 'Does the message ask for, or report, something that the held pages and the conversation do not already cover, so that stored notes or documents beyond the held ones would improve the answer?'),
+    ...(Array.isArray(stored) ? [predicateQuestion('tn_recall', 'Does the message point back to something discussed or worked on earlier (for example by saying "earlier", "last time" or "again") and ask for it to be recalled, summarized or re-organized, rather than ask for one new fact or one narrow detail?')] : []),
     predicateQuestion('tn_record', 'Does this message state something worth keeping as a record: a new fact, a decision, a plan, or a change in the status of something already recorded? Greetings, thanks, small talk and pure questions are not.'),
   ]
   const input = [{ role: 'developer', content: TRIAGE_RULES },
     { role: 'user', content: `Held in the answering model's context:\n${heldBlock(heldTitles, heldDigest)}` },
+    ...(Array.isArray(stored) ? [{ role: 'user', content: `Stored pages that are not held (titles only):\n${catalogBlock(stored)}` }] : []),
     ...(typeof live === 'string' && live.trim() ? [{ role: 'user', content: `Live conversation (recent turns, bounded):\n${live.slice(-3000)}` }] : []),
     { role: 'user', content: `${clockLine(askedAt)}\nMessage:\n${message}` }]
   try {
     const result = await client.decide({ input, questions, timeoutMs, signal })
-    return { status: 'ready', courtesy: ternary(result.answers?.tn_courtesy), need: ternary(result.answers?.tn_need), record: ternary(result.answers?.tn_record), usage: result.usage ?? null }
-  } catch (error) { return { status: 'fallback', reason: error?.code ?? 'unreachable', courtesy: { state: 'unknown', p: null }, need: { state: 'unknown', p: null }, record: { state: 'unknown', p: null }, usage: null } }
+    return { status: 'ready', courtesy: ternary(result.answers?.tn_courtesy), need: ternary(result.answers?.tn_need), recall: ternary(result.answers?.tn_recall), record: ternary(result.answers?.tn_record),
+      catalog: Array.isArray(stored) ? { listed: Math.min(stored.length, CATALOG_LIMIT), complete: stored.length <= CATALOG_LIMIT } : null, usage: result.usage ?? null }
+  } catch (error) { return { status: 'fallback', reason: error?.code ?? 'unreachable', courtesy: { state: 'unknown', p: null }, need: { state: 'unknown', p: null }, recall: { state: 'unknown', p: null }, record: { state: 'unknown', p: null }, catalog: null, usage: null } }
 }
 
 const WRITE_RULES = [
@@ -262,14 +285,18 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
   const receipts = usableReceipts(delivered, pos, threadKey)
   const heldPages = Object.keys(receipts.pages ?? {}).map(id => wiki.pages.get(id)).filter(p => p && allowsPage(p, scope))
   const heldDigest = heldExcerpts !== false ? heldPages.map(p => ({ title: p.title, status: p.status, excerpt: p.body })) : null
-  const triageCall = () => triageTurn({ message, heldTitles: heldPages.map(p => p.title), heldDigest, live: pos.kind === 'mid' ? live : null, client, askedAt, signal })
+  // Mid-session triage also sees what else is stored (titles only). The first-turn triage only decides recording, so it does not carry the list.
+  const heldIds = new Set(heldPages.map(p => p.id))
+  const stored = pos.kind === 'mid' ? [...wiki.pages.values()].filter(p => !heldIds.has(p.id) && allowsPage(p, scope)).map(p => ({ title: p.title, time: p.time.slice, status: p.status })) : null
+  const triageCall = () => triageTurn({ message, heldTitles: heldPages.map(p => p.title), heldDigest, stored, live: pos.kind === 'mid' ? live : null, client, askedAt, signal })
   let triage, memory
   if (pos.kind === 'mid') {
     triage = await triageCall()
-    // A decided courtesy "yes" skips the fetch. A decided need "no" skips it too, but only with the held pages' content shown (default; real
-    // data: titles alone gave a wrong need 0.02 for T4, with content T4x was 1 and the covered control T6 was 0). Turning either option off
-    // means only courtesy skips. A wrong skip loses material, a needless fetch only costs tokens, so undecided answers always fetch.
-    memory = triage.courtesy.state === 'yes' || (skipOnNeed !== false && heldExcerpts !== false && triage.need.state === 'no') ? { status: 'skipped', reason: 'nothing_needed', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [] }, nextDelivered: () => receipts }
+    // A decided courtesy "yes" skips the fetch. A decided need "no" skips it too, but only when ALL of these hold: the held pages' content was shown
+    // (titles alone gave a wrong need 0.02 for T4), the complete list of the other stored pages was shown, and recall is a decided "no" (a request to
+    // go over earlier material cannot be judged covered from a few held pages: the j-mid wrong skip). Anything else fetches: a wrong skip loses
+    // material, a needless fetch only costs tokens.
+    memory = triageSkipsFetch(triage, { skipOnNeed, heldExcerpts }) ? { status: 'skipped', reason: 'nothing_needed', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [] }, nextDelivered: () => receipts }
       : await reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget, signal, mode: 'next', live })
   } else {
     ;[triage, memory] = await Promise.all([ontologyWrite ? triageCall() : Promise.resolve(null),

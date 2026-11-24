@@ -91,3 +91,16 @@ test('the command line tool: dry run by default, the key only from OPENAI_API_KE
   assert.equal((runner.match(/api\.openai\.com/g) ?? []).length, 1, 'the endpoint is asserted once and is not a parameter')
   assert.ok(!/maxRetries|retries\s*[:=]\s*[1-9]/.test(runner))
 })
+
+test('the small re-measurement runs through the same runner with its own pass rule, and a failure still stops it', async () => {
+  const { buildPlan: build, scoreRemeasure } = await import('./egdesk-memory-real-plan.mjs')
+  const small = await build({ subset: 'remeasure' })
+  const bodies = new Map(small.runs.flatMap(run => run.requests.map(r => [JSON.stringify(r.body), r])))
+  const log = []
+  const fetchImpl = async (url, init) => { log.push(url); const r = bodies.get(init.body); return { status: 200, headers: { get: () => null }, async json() { return { answers: Object.entries(r.scripted).map(([name, a]) => ({ name, ...a })), usage: { input_tokens: r.estInputTokens, output_tokens: 0 } } } } }
+  const out = await runMeasurement({ plan: small, key: KEY, send: true, fetchImpl, score: scoreRemeasure })
+  assert.deepEqual([out.sent, out.stoppedBecause, out.scorecard.pass, out.scorecard.runsPassed], [6, null, true, 4])
+  assert.ok(log.every(u => u === 'https://api.openai.com/v1/decisions'))
+  const stopped = await runMeasurement({ plan: small, key: KEY, send: true, score: scoreRemeasure, fetchImpl: async () => ({ status: 429, headers: { get: () => null }, async json() { return {} } }) })
+  assert.deepEqual([stopped.sent, stopped.stoppedBecause, stopped.scorecard.pass], [1, 'http_429', false])
+})

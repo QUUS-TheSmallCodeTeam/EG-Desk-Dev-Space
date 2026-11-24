@@ -5021,6 +5021,7 @@ export class CodexChatRuntime {
       if (triage) {
         judgments.push({ q: 'triage_courtesy', p: triage.courtesy.p, ...yesNo, would: triage.courtesy.state === 'yes' ? 'skip' : 'fetch' },
           { q: 'triage_need', p: triage.need.p, ...yesNo, would: triage.need.state === 'no' ? 'skip' : 'fetch' },
+          ...(triage.recall && triage.recall.p !== null ? [{ q: 'triage_recall', p: triage.recall.p, ...yesNo, would: triage.recall.state === 'no' ? 'skip' : 'fetch' }] : []),
           { q: 'triage_record', p: triage.record.p, ...yesNo, would: triage.record.state === 'yes' ? 'attach' : 'skip' })
       }
       const target = judged?.receipt?.target
