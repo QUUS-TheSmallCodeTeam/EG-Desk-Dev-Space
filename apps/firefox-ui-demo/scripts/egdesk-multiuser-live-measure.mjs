@@ -43,7 +43,9 @@ import * as SurfaceState from '../overlay/resources/EGDeskSurfaceState.sys.mjs'
 import { allOnWorld, DM, scriptedDecisions } from './egdesk-all-on.support.mjs'
 import { createMeasureTransport, diffJourneys, formatDiff, replayAnswers, writeJourneyResults } from './egdesk-all-on-live-measure.mjs'
 
-export const PLAN_FILE = fileURLToPath(new URL('./egdesk-multiuser-live-measure.plan.json', import.meta.url))
+// v1 (cycle 14, sent 2026-11-24: 22/25) is kept as registered; v2 (cycle 15) is the default.
+export const PLAN_FILE_V1 = fileURLToPath(new URL('./egdesk-multiuser-live-measure.plan.json', import.meta.url))
+export const PLAN_FILE = fileURLToPath(new URL('./egdesk-multiuser-live-measure.plan-v2.json', import.meta.url))
 export const SCRIPT_FILE = fileURLToPath(import.meta.url)
 export const DEFAULT_CAPS = Object.freeze({ tokenCeiling: 20_000, maxRequests: 20 })
 const LIMITS = Object.freeze({ tokenCeilingMax: 20_000, maxRequestsMax: 20 })
@@ -59,7 +61,11 @@ export const B_SEES = r(2900, 500, 1200, 800)         // B's camera on B's own D
 export const B_OFFSET = { x: 500, y: 300 }            // where the Board sits on B's Desk relative to A's
 export const B_VIEW = r(2400, 200, 1200, 800)         // the same area on A's canvas
 export const ASK = 'A사 견적서 v2를 v1과 비교해서 달라진 점을 정리해 주세요. (B님 요청)'
-export const ANSWER = 'v2는 v1보다 단가가 8% 낮고 납기가 1주 짧습니다. 다만 결제 조건이 선금 50%로 바뀌어, 이 조건으로 진행할지 소유자께서 승인해 주셔야 견적 회신을 보낼 수 있습니다.'
+// The Agent's answers (the scripted subjective model). ANSWER needs A's decision: a price change A must approve before the revised quote goes out.
+export const ANSWER = 'v2는 v1보다 단가가 12,000원에서 11,000원으로 낮고 납기가 1주 짧습니다. 수정 견적서를 B님께 보내기 전에 이 단가 인하를 소유자께서 승인해 주셔야 합니다.'
+// The follow-up (v2): B asks something that needs nothing from A.
+export const ASK2 = 'A사 견적서 v2의 납기만 다시 알려 주세요. (B님 요청)'
+export const ANSWER_INFO = 'A사 견적서 v2의 납기는 2주입니다. 따로 확인하실 일은 없습니다.'
 export const POINTER = '오른쪽 작업 영역에 A사 견적 비교 결과가 있습니다. 결제 조건 승인이 필요합니다.'
 // A's canvas: A's own cards inside A's view, and two published result cards on B's side of the space whose words the host may send.
 export const A_CARDS = Object.freeze([
@@ -70,13 +76,18 @@ export const A_CARDS = Object.freeze([
 ])
 export const BOARD_REGION = r(-2600, 1200, 1400, 900) // a joint Board region on A's canvas (the shared part)
 
-export const STEPS = Object.freeze([
-  { id: 'join', title: 'A works in their area; B joins the Board and shares where they look' },
-  { id: 'ask', title: 'B asks A\'s Agent for work on A\'s material; the service says who asked; A\'s Agent starts' },
-  { id: 'surface', title: 'the Agent opens a viewer for B\'s task: placement by rule, the same-matter question, opened quietly' },
-  { id: 'result', title: 'the result needs A\'s decision: the owner question, one pointer in A\'s own conversation' },
-  { id: 'leave', title: 'B leaves the Board: the identity ends' },
-])
+const STEP_DEFS = Object.freeze({
+  join: 'A works in their area; B joins the Board and shares where they look',
+  ask: 'B asks A\'s Agent for work on A\'s material; the service says who asked; A\'s Agent starts',
+  surface: 'the Agent opens a viewer for B\'s task: placement by rule, the same-matter question (a bounded wait), opened quietly',
+  result: 'the result needs A\'s decision: the owner question, one pointer in A\'s own conversation',
+  followup: 'B asks for something that needs nothing from A: the owner question says no, the requester\'s branch, no pointer to A',
+  leave: 'B leaves the Board: the identity ends',
+})
+const stepsOf = ids => Object.freeze(ids.map(id => Object.freeze({ id, title: STEP_DEFS[id] })))
+export const STEPS_V1 = stepsOf(['join', 'ask', 'surface', 'result', 'leave'])
+export const STEPS_V2 = stepsOf(['join', 'ask', 'surface', 'result', 'followup', 'leave'])
+export const STEPS = STEPS_V2
 
 // ---- the plan: pre-registered person-level expectations, with owners and caps ----
 export class PlanError extends Error { constructor(message) { super(message); this.name = 'PlanError' } }
@@ -86,10 +97,13 @@ export function loadScenarioPlan(file = PLAN_FILE) {
   let bytes, raw
   try { bytes = readFileSync(file); raw = JSON.parse(bytes.toString('utf8')) } catch { bad('cannot read the plan file') }
   if (typeof raw?.set !== 'string' || !raw.set || typeof raw.registered !== 'string' || !raw.registered) bad('the plan needs a set name and its registration time')
-  if (!Array.isArray(raw.steps) || raw.steps.length !== STEPS.length) bad(`the plan needs exactly the ${STEPS.length} steps of the scenario`)
+  // the steps of the version the plan was registered for (v1: five steps; v2: with the follow-up)
+  const versions = [STEPS_V1, STEPS_V2], ids = Array.isArray(raw.steps) ? raw.steps.map(step => step?.id).join(',') : ''
+  const order = versions.find(v => v.map(step => step.id).join(',') === ids)
+  if (!order) bad(`the plan needs the steps of the scenario in order: ${versions.map(v => v.map(step => step.id).join(',')).join(' or ')}`)
   let requests = 0, tokens = 0
   const steps = raw.steps.map((step, index) => {
-    const def = STEPS[index]
+    const def = order[index]
     if (step?.id !== def.id) bad(`plan step ${index + 1} must be ${def.id}`)
     if (!posInt(step.caps?.maxRequests) || !posInt(step.caps?.maxEstTokens)) bad(`${def.id}: caps.maxRequests and caps.maxEstTokens must be positive integers`)
     requests += step.caps.maxRequests; tokens += step.caps.maxEstTokens
@@ -105,7 +119,7 @@ export function loadScenarioPlan(file = PLAN_FILE) {
       if (!Object.hasOwn(CHECKS, e.check)) bad(`${e.id}: unknown check ${e.check}`)
       return { id: e.id, severity: e.severity, owner: e.owner, who: e.who, text: e.text, check: e.check, args: e.args ?? {} }
     })
-    return { id: def.id, caps: { maxRequests: step.caps.maxRequests, maxEstTokens: step.caps.maxEstTokens }, expect }
+    return { id: def.id, title: def.title, caps: { maxRequests: step.caps.maxRequests, maxEstTokens: step.caps.maxEstTokens }, expect }
   })
   if (requests > DEFAULT_CAPS.maxRequests || tokens > DEFAULT_CAPS.tokenCeiling) bad(`the per-step caps add up to ${requests} requests / ${tokens} tokens: over the scenario's ${DEFAULT_CAPS.maxRequests} / ${DEFAULT_CAPS.tokenCeiling}`)
   return { set: raw.set, registered: raw.registered, sha256: sha256(bytes), steps }
@@ -128,6 +142,10 @@ export const CHECKS = {
   // nothing that identifies a person or a request reached the Decision model in this step
   noIdentityInBodies: ({ step }) => { const leaks = step.bodies.filter(b => ALIAS.test(b.text) || b.text.includes(step.seen.identity?.requestId ?? '\u0000') || /acct-|"x":|egask1-/.test(b.text)).map(b => b.family)
     return { pass: leaks.length === 0, observed: { leaks } } },
+  // the viewer stayed where it opened (later answers are recorded only)
+  notMovedAfterOpen: ({ step }) => { const s = step.seen.A.surface; return { pass: !!s && s.movedAfterOpen === false, observed: s ? { movedAfterOpen: s.movedAfterOpen, waited: s.waited } : null } },
+  // the viewer opened beside the related card (the same-matter answer came within the wait)
+  openedBesideRelated: ({ step }) => { const s = step.seen.A.surface; return { pass: !!s && s.besideRelated === true, observed: s ? { besideRelated: s.besideRelated, decided: s.decided } : null } },
   // where the work surface opened on A's Desk, and by which rule
   surfaceSpot: ({ step, args }) => { const s = step.seen.A.surface
     const pass = !!s && s.quiet === true && s.rule === args.rule && !s.inAView && (args.nearB ? s.nearB : true) && !s.inBView === !args.inBView
@@ -139,13 +157,26 @@ export const CHECKS = {
   // B's own Desk: no new card, nothing of A's private placement
   bDeskUnchanged: ({ step }) => ({ pass: step.seen.B.cardsAdded === 0, observed: { cardsAdded: step.seen.B.cardsAdded } }),
   // a work_placement request's questions, and that each card is quoted only in its own question and the run's request is quoted
-  placementBody: ({ step, args }) => { const bodies = step.bodies.filter(b => b.family === 'work_placement')
-    const ok = bodies.length === 1 && (() => { const w = JSON.parse(bodies[0].text), names = w.questions.map(q => q.name)
-      if (JSON.stringify(names) !== JSON.stringify(args.questions)) return false
-      const shared = w.input.map(m => m.content).join('\n')
-      if (!(args.quotes ?? []).every(text => shared.includes(text))) return false
-      return (args.cards ?? []).every((label, i) => w.questions[i].instructions.includes(label) && args.cards.every((other, j) => j === i || !w.questions[i].instructions.includes(other)) && !shared.includes(label)) })()
-    return { pass: ok, observed: { requests: bodies.length, questions: bodies.map(b => JSON.parse(b.text).questions.map(q => q.name)) } } },
+  // quotesPostedAnswer (v2): the answer quoted is exactly the answer A saw posted in this step (cycle 15: v1's R1 named a phrase of the scripted draft,
+  // which the posted, revised answer no longer had). The observed part names what failed.
+  placementBody: ({ step, args }) => { const bodies = step.bodies.filter(b => b.family === 'work_placement'), failed = []
+    if (bodies.length !== 1) failed.push(`requests:${bodies.length}`)
+    else {
+      const w = JSON.parse(bodies[0].text), names = w.questions.map(q => q.name), shared = w.input.map(m => m.content).join('\n')
+      if (JSON.stringify(names) !== JSON.stringify(args.questions)) failed.push('questions')
+      for (const text of args.quotes ?? []) if (!shared.includes(text)) failed.push(`quote:${text.slice(0, 24)}`)
+      // the product quotes the answer on one line (its whitespace collapsed); compare the same way
+      const oneLine = text => String(text).replace(/\s+/g, ' ').trim()
+      if (args.quotesPostedAnswer) { const posted = step.seen.newMessages.filter(m => m.by === 'agent').map(m => m.text); if (posted.length !== 1 || !oneLine(shared).includes(oneLine(posted[0]))) failed.push('posted_answer') }
+      ;(args.cards ?? []).forEach((label, i) => { if (!(w.questions[i]?.instructions.includes(label) && args.cards.every((other, j) => j === i || !w.questions[i].instructions.includes(other)) && !shared.includes(label))) failed.push(`card:${i + 1}`) })
+    }
+    return { pass: failed.length === 0, observed: { requests: bodies.length, questions: bodies.map(b => JSON.parse(b.text).questions.map(q => q.name)), failed } } },
+  // a request of this family answered within the product's budget for it (the turn's Decision context: 800 ms)
+  answeredWithin: ({ step, args }) => { const rows = step.requests.filter(q => q.family === args.family)
+    return { pass: rows.length > 0 && rows.every(q => q.status === 200 && Number.isFinite(q.elapsedMs) && q.elapsedMs <= args.maxMs), observed: { elapsedMs: rows.map(q => q.elapsedMs), budgetMs: args.maxMs } } },
+  // the Agent's answer A saw is the one the subjective model wrote (the draft check did not replace it)
+  answerAsWritten: ({ step, args }) => { const agent = step.seen.newMessages.filter(m => m.by === 'agent').map(m => m.text)
+    return { pass: agent.length === 1 && agent[0] === { decision: ANSWER, info: ANSWER_INFO }[args.said], observed: { agent } } },
   // a predicate answer of this step's work_placement request
   answer: ({ step, args }) => { const row = step.requests.find(q => q.family === 'work_placement'); const a = (row?.answers ?? []).find(x => x.name === args.name)
     const p = a?.type === 'predicate' ? a.probability : null
@@ -161,7 +192,7 @@ export const CHECK_NAMES = Object.freeze(Object.keys(CHECKS))
 
 // ---- the world: L2's bridge world, a joint Board with its presence service, two Desks, and A's surface ----
 const surfaceSource = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8')
-const decl = name => { const s = surfaceSource.indexOf(`  function ${name}(`); if (s < 0) throw new Error(`surface function ${name} not found`); return surfaceSource.slice(s, surfaceSource.indexOf('\n  }', s) + 4) }
+const decl = name => { const at = surfaceSource.indexOf(`  function ${name}(`), atAsync = surfaceSource.indexOf(`  async function ${name}(`); const s = at >= 0 ? at : atAsync; if (s < 0) throw new Error(`surface function ${name} not found`); return surfaceSource.slice(s, surfaceSource.indexOf('\n  }', s) + 4) }
 // A product route called the way the bridge calls it (loopback request and response objects, no socket).
 async function route(handler, pathname, body) {
   const req = Object.assign(Readable.from([Buffer.from(JSON.stringify(body))]), { method: 'POST', url: pathname, socket: { remoteAddress: '127.0.0.1' }, headers: { host: '127.0.0.1:39218', origin: 'chrome://browser', 'content-type': 'application/json' } })
@@ -207,15 +238,18 @@ export function scenarioWorld(t, { transport = null } = {}) {
   const deps = { WorkPlacement: WP, SurfaceState, state: hostState, readSurfacePref: key => (key === WP.WORK_PLACEMENT_PREF ? 'on' : undefined),
     document: { querySelectorAll: sel => (sel === '.egd-canvas-card' ? canvas.nodes : sel.includes('.egd-board-region') ? (sel.includes('.egd-canvas-card') ? [...canvas.nodes, ...canvas.regions] : canvas.regions) : []) },
     window: { addEventListener() {}, setTimeout: () => { canvas.revealTimers++; return 1 } }, persistentEntityGeometry: n => ({ ...n._rect, zIndex: 1 }), cardKindForPersistence: n => n._kind ?? 'file',
+    // placeWorkSurface's bounded wait: the product waits on wall time, which includes the provider's latency. The bridge world holds its virtual clock
+    // still while a Decision request is in flight, so the window's clock here is the virtual time (the heartbeat's nudge, the polls) PLUS real elapsed time.
+    workWaitNow: () => w.clock() + performance.now(), workWaitSleep: ms => w.advance(ms),
     safeViewportWorldRect: () => ({ left: A.view.x, top: A.view.y, right: A.view.x + A.view.width, bottom: A.view.y + A.view.height }), viewportToCanvasPoint: (x, y) => ({ x, y }),
     safeViewportRect: () => ({ left: 0, top: 0, right: A.view.width, bottom: A.view.height }),
-    deskStoreRequest: async (method, p, body) => (p === '/decision/work-placement/request' ? w.http(method, p, body) : { status: 404, body: null }) }
-  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('noteWorkSurfacePlacement')}\nstate.noteWorkSurfacePlacement = noteWorkSurfacePlacement;\n${decl('resolveCanvasCardPlacement')}\n${decl('revealPlacedCanvasCard')}\nreturn { resolveCanvasCardPlacement, revealPlacedCanvasCard };`
+    deskStoreRequest: async (method, p, body) => (p.startsWith('/decision/work-placement/') ? w.http(method, p, body) : { status: 404, body: null }) }
+  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('workSceneInputs')}\n${decl('noteWorkSurfacePlacement')}\nstate.noteWorkSurfacePlacement = noteWorkSurfacePlacement;\n${decl('placeWorkSurface')}\n${decl('resolveCanvasCardPlacement')}\n${decl('revealPlacedCanvasCard')}\nreturn { resolveCanvasCardPlacement, revealPlacedCanvasCard, placeWorkSurface };`
   const surface = new Function(...Object.keys(deps), body)(...Object.values(deps))
   // installDeskPresence's wrapper: the placement hook receives the run's requester; the bridge is told through its own route.
   const runRequesters = JP.createRunRequesters({ snapshot: () => A.presence.snapshot(), seated: (b, member) => A.joint.seated(b, member), now: () => w.clock(),
     post: payload => route(requesterHttp, RUN_REQUESTER.path, payload) })
-  hostState.noteWorkSurfacePlacement = runRequesters.wrap(hostState.noteWorkSurfacePlacement)
+  hostState.noteWorkSurfacePlacement = runRequesters.wrap(hostState.noteWorkSurfacePlacement); hostState.runRequesters = runRequesters
   const s = { w, store, board, ledgerFile, hub, A, B, canvas, surface, runRequesters, mirrorHttp, requesterHttp, keys, act }
   // one presence round: both Desks publish and read (3 s apart on the scenario's clock), and A's Desk mirrors its snapshot to the bridge
   s.round = async (people = [A, B]) => { await w.advance(JP.PRESENCE.publishMs); for (const p of people) { p.touch(); await p.joint.tick() } await route(mirrorHttp, PRESENCE_MIRROR.path, { rows: A.presence.snapshot() }) }
@@ -271,19 +305,24 @@ const RUNNERS = {
     return { identity: await identityNow(s, ctx) }
   },
   async surface(s, ctx) {
-    // the run's file viewer, as EGDeskSurfaceFileCard opens one: { kind: 'file', runId, conversationId }
-    const placed = s.surface.resolveCanvasCardPlacement('file', { workSurface: { kind: 'file', runId: ctx.ref.runId, conversationId: ctx.ref.conversationId } })
+    // the run's file viewer, as EGDeskSurfaceFileCard opens one (openVerifiedRunFile, then spawnFileCard): the bounded wait first, then the usual path if it gave nothing
+    const work = { kind: 'file', runId: ctx.ref.runId, conversationId: ctx.ref.conversationId }
+    const waited = await s.surface.placeWorkSurface('file', work)
+    const placed = waited || s.surface.resolveCanvasCardPlacement('file', { workSurface: work })
     s.surface.revealPlacedCanvasCard({ isConnected: true }, placed)
     ctx.viewer = { id: 'agent-viewer', isConnected: true, dataset: {}, _rect: { x: placed.x, y: placed.y, width: placed.width, height: placed.height }, _kind: 'file', _resultRecord: null }
     s.canvas.nodes.push(ctx.viewer) // opened (not activated): the shell is told activate: false for a quiet placement
-    await s.w.settle() // the hook posts without waiting (as the surface does); let the request reach the bridge before the clock moves
-    await s.w.advance(1000); await s.w.idle()
+    await s.w.settle(); await s.w.advance(1000); await s.w.idle()
     const rec = s.w.workPlacement.records().at(-1)
-    const rect = ctx.viewer._rect
-    return { identity: await identityNow(s, ctx), surface: { quiet: placed.quiet === true, rule: rec?.rule ?? null, rect: { ...rect }, inAView: hits(rect, A_VIEW), inBView: hits(rect, B_VIEW), nearB: gapTo(rect, B_VIEW) < WP.PLACEMENT_RULES.nearViews * B_VIEW.width,
-      decided: rec ? { source: rec.source, kind: rec.would.kind } : null } }
+    const rect = ctx.viewer._rect, opened = { ...rect }
+    // later beats: an answer that arrives after the deadline is recorded only; the viewer stays where it opened
+    await s.w.advance(3000); await s.w.idle()
+    return { identity: await identityNow(s, ctx), surface: { quiet: placed.quiet === true, waited: !!waited, rule: rec?.rule ?? null, rect: { ...rect }, movedAfterOpen: rect.x !== opened.x || rect.y !== opened.y,
+      inAView: hits(rect, A_VIEW), inBView: hits(rect, B_VIEW), nearB: gapTo(rect, B_VIEW) < WP.PLACEMENT_RULES.nearViews * B_VIEW.width,
+      besideRelated: gapTo(rect, A_CARDS.find(c => c.id === 'a-quote-v1').rect) <= WP.PLACEMENT_RULES.gap + 1, decided: rec ? { source: rec.source, kind: rec.would.kind } : null } }
   },
   async result(s, ctx) {
+    s.w.state.wording.revise = ANSWER // the scripted subjective model revises its own draft (lane L2's default revision is one fixed sentence about another matter)
     await s.w.answer(ANSWER)
     // the attention scene the window would send for the finished task (no product trigger sends it yet: see report)
     const scene = WP.enumerateWorkScene({ presence: s.A.presence.snapshot(), cards: s.canvas.nodes.map(n => ({ id: n.id, rect: { ...n._rect }, kind: n._kind === 'file' ? 'file' : n._kind, creator: n.id === 'agent-viewer' ? 'agent' : 'user', taskId: n.id === 'agent-viewer' ? ctx.ref.runId : null })),
@@ -292,6 +331,21 @@ const RUNNERS = {
     ctx.attention = att ? (await s.w.http('POST', '/decision/work-placement/request', { clientThreadId: DM, conversationId: ctx.ref.conversationId, dto: att.dto })).body : null
     await s.round(); await s.w.advance(10_000); await s.round(); await s.w.advance(10_000); await s.w.idle()
     return { identity: await identityNow(s, ctx) }
+  },
+  async followup(s, ctx) {
+    const out = await s.w.send(ASK2)
+    ctx.ref2 = { runId: out.runId, clientThreadId: DM, conversationId: out.conversationId }
+    const who = s.A.requests.of(ctx.review)
+    if (who) s.runRequesters.set(ctx.ref2, who)
+    await s.w.idle()
+    s.w.state.wording.revise = ANSWER_INFO
+    await s.w.answer(ANSWER_INFO)
+    const scene = WP.enumerateWorkScene({ presence: s.A.presence.snapshot(), cards: s.canvas.nodes.map(n => ({ id: n.id, rect: { ...n._rect }, kind: n._kind === 'file' ? 'file' : n._kind, creator: n.id === 'agent-viewer' ? 'agent' : 'user', taskId: n.id === 'agent-viewer' ? ctx.ref2.runId : null })),
+      tasks: [{ id: ctx.ref2.runId, state: 'finished', requester: ctx.alias, waiting: [ctx.alias], ownerMustAct: false, surfaces: [{ kind: 'file', cardId: 'agent-viewer' }] }] })
+    const att = WP.attentionRequest(scene, { taskId: ctx.ref2.runId, cardId: 'agent-viewer' })
+    if (att) await s.w.http('POST', '/decision/work-placement/request', { clientThreadId: DM, conversationId: ctx.ref2.conversationId, dto: att.dto })
+    await s.round(); await s.w.advance(10_000); await s.round(); await s.w.advance(10_000); await s.w.idle()
+    return { identity: await identityNow(s, { ...ctx, ref: ctx.ref2 }) }
   },
   async leave(s, ctx) {
     s.act('b', 'leave', { board: s.board })
@@ -304,7 +358,7 @@ const RUNNERS = {
 /**
  * The dry run's Decision model: lane L2's scripted model, with this scenario's own questions answered as the plan pre-registers them (a dry run then
  * walks the path the plan expects; a send may take another, and the results say so): the earlier v1 quote card is the same matter, the lunch card is
- * not; the result needs the owner.
+ * not; a result needs the owner only when it asks the owner to approve or decide.
  */
 export function scriptedScenario() {
   const base = scriptedDecisions()
@@ -313,7 +367,8 @@ export function scriptedScenario() {
     return answers.map(a => {
       const q = wire.questions.find(x => x.name === a.name)
       if (/^same_matter_R\d$/.test(a.name)) return { name: a.name, type: 'predicate', probability: /A사 견적서 v1/.test(q?.instructions ?? '') ? 0.95 : 0.03 }
-      if (a.name === 'owner_action') return { name: a.name, type: 'predicate', probability: 0.95 }
+      // the owner question, from the quoted result: yes only when it asks the owner to approve or decide something
+      if (a.name === 'owner_action') { const text = (Array.isArray(wire.input) ? wire.input.map(m => m.content) : [String(wire.input)]).join('\n'); return { name: a.name, type: 'predicate', probability: /승인해 주셔야|정해 주세요/.test(text) ? 0.95 : 0.03 } }
       return a
     })
   } }
@@ -328,7 +383,7 @@ export async function runScenario({ plan, send = false, key = null, fetchImpl = 
   const steps = []
   try {
     const s = scenarioWorld(t, { transport }), ctx = {}
-    for (const def of STEPS) {
+    for (const def of plan.steps) {
       if (ledger.stopped) { steps.push({ id: def.id, title: def.title, state: 'not_run' }); continue }
       s.w.step(def.id)
       const before = snapshotBefore(s)

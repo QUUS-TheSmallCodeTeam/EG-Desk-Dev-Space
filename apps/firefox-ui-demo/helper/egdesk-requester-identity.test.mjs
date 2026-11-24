@@ -459,7 +459,8 @@ test('default path: without the presence flag nothing of this exists; the bridge
   // The rig's two placement modes are the bridge's own: enabled for advisory and on, a pointer fact only when on.
   assert.match(server, /enabled: \(\) => \['advisory', 'on'\]\.includes\(process\.env\.EGDESK_WORK_PLACEMENT\),/); assert.match(server, /live: \(\) => process\.env\.EGDESK_WORK_PLACEMENT === 'on'/);
   // The surface: the placement hook's own line is L4's, unchanged; the wrapper and the request side are installed inside installDeskPresence only.
-  assert.ok(surface.includes("tasks: [{ id: taskId, state: 'running', requester: work.requester || null, waiting: [work.requester || 'self'], ownerMustAct: false, surfaces: [] }] });"));
+  // L1 c15: the scene is read by one helper (workSceneInputs) for the hook and for the bounded wait
+  assert.ok(surface.includes("tasks: [{ id: taskId, state: 'running', requester: work.requester || null, waiting: [work.requester || 'self'], ownerMustAct: false, surfaces: [] }] };"));
   const install = surface.slice(surface.indexOf('function installDeskPresence()'), surface.indexOf('return state.presence;', surface.indexOf('function installDeskPresence()')));
   assert.match(install, /if \(state\.presence \|\| !JointPresence\.presenceEnabled\(readSurfacePref\(JointPresence\.PRESENCE_PREF\)\)\) return null;/);
   for (const piece of ['JointPresence.createRunRequesters(', 'state.runRequesters.wrap(state.noteWorkSurfacePlacement)', 'JointPresence.createRequestRequesters(', "'/presence/requester'"]) assert.ok(install.includes(piece), piece);

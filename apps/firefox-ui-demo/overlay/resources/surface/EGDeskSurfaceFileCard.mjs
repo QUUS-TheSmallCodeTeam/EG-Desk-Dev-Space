@@ -166,8 +166,12 @@ export function createFileCardZone(deps) {
           || Object.keys(origin).some(key => latest[key] !== origin[key])) throw new Error('실행의 현재 폴더 연결이 바뀌었습니다.');
     };
     const opening = Object.freeze({ target: selected, location: place, origin, current, verify, signal });
+    // L1 c15 (pref egdesk.workPlacement "on"): a bounded wait for the placement's content answer before the viewer opens, then it opens quietly there.
+    let workPlacement = null;
+    try { workPlacement = (await state.placeWorkSurface?.('file', { kind: 'file', runId: selected.runId, conversationId: selected.conversationId })) ?? null; } catch { workPlacement = null; }
+    if (!current()) return { status: 'stale' };
     verifiedRunOpens.add(opening);
-    const card = spawnFileCard({ openMode: 'new', verifiedRunOpen: opening });
+    const card = spawnFileCard({ openMode: 'new', verifiedRunOpen: opening, workPlacement });
     const ready = await card._fileReady;
     if (!current() || !card.isConnected || card.dataset.closeState || card._fileOpenStatus === 'stale') return { status: 'stale' };
     return ready === true && card._fileOpenStatus === 'opened' ? { status: 'opened', cardId: card.id } : { status: 'unavailable' };
@@ -328,7 +332,7 @@ export function createFileCardZone(deps) {
       const existing = document.querySelector('.egd-file-card');
       if (existing) { focusCanvasCard(existing); return existing; }
     }
-    const placement = resolveCanvasCardPlacement('file', runFile ? { workSurface: { kind: 'file', runId: runFile.target?.runId, conversationId: runFile.target?.conversationId } } : {});
+    const placement = (runFile && options.workPlacement) || resolveCanvasCardPlacement('file', runFile ? { workSurface: { kind: 'file', runId: runFile.target?.runId, conversationId: runFile.target?.conversationId } } : {});
     const shell = spawnDeskWindowShell({ id: `egd-file-card-${allocCardSeq()}`, kind: 'file', className: 'egd-file-card',
       activate: !options.restore && !options.deferPresentation && !placement.quiet, sourceRef: { kind: 'file-surface', id: `file-view-${chatBindingNonce()}`, scope: 'local-files' },
       style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });

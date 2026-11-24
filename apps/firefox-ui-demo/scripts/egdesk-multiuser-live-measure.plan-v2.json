@@ -1,0 +1,83 @@
+{
+  "set": "multiuser-collaboration-v2",
+  "registered": "2026-11-25T00:30:00+09:00 (lane L1 cycle 15, before any send; v1 kept as registered)",
+  "changes": "v2: (1) the owner-decision result asks A to approve a price change; the scripted subjective model revises its own draft instead of lane L2's fixed sentence (v1's sent run posted that sentence: the turn's Decision context took 946 ms against its 800 ms budget, the draft check then revised without evidence). (2) R1 quotes the answer A actually saw, not a phrase of the draft; failures name the part. (3) a follow-up result that needs nothing from A. (4) the viewer may wait up to 1.5 s for the same-matter answer before it opens, and never moves after. (5) soft checks of the two budgets that decided v1's result.",
+  "steps": [
+    {
+      "id": "join",
+      "caps": { "maxRequests": 1, "maxEstTokens": 1000 },
+      "expect": [
+        { "id": "J1", "severity": "hard", "owner": "L1", "who": "A", "text": "A's Desk lists B as present, with the region B is looking at", "check": "presence", "args": { "person": "A", "others": { "equals": 1 }, "withView": 1 } },
+        { "id": "J2", "severity": "hard", "owner": "L1", "who": "B", "text": "B's Desk lists A as present (A shares 'active' only, so no region)", "check": "presence", "args": { "person": "B", "others": { "equals": 1 }, "withView": 0 } },
+        { "id": "J3", "severity": "hard", "owner": "L1", "who": "system", "text": "presence asks the Decision model nothing", "check": "requests", "args": { "equals": 0 } },
+        { "id": "J4", "severity": "hard", "owner": "L1", "who": "ledger", "text": "the shared ledger holds the same cards (presence is memory only)", "check": "ledger", "args": { "fileUnchanged": true } }
+      ]
+    },
+    {
+      "id": "ask",
+      "caps": { "maxRequests": 4, "maxEstTokens": 4000 },
+      "expect": [
+        { "id": "K1", "severity": "hard", "owner": "L1", "who": "A", "text": "A's Desk knows the request came from B (the service vouched for B's alias), the bridge's audience names B, and the placement hook will receive B", "check": "requester", "args": { "present": true } },
+        { "id": "K2", "severity": "hard", "owner": "L1", "who": "system", "text": "no member alias, request id, question code or coordinate is in any Decision request of this step", "check": "noIdentityInBodies" },
+        { "id": "K3", "severity": "hard", "owner": "L3", "who": "A", "text": "A's own conversation shows the request A sent for B and no system message", "check": "messages", "args": { "by": "system_flow", "equals": 0 } },
+        { "id": "K4", "severity": "hard", "owner": "L1", "who": "ledger", "text": "the shared ledger holds the same cards", "check": "ledger", "args": { "fileUnchanged": true } },
+        { "id": "K5", "severity": "soft", "owner": "L5", "who": "system", "text": "the turn's Decision context answered within its 800 ms budget (v1: 946 ms, and the draft check then had no evidence)", "check": "answeredWithin", "args": { "family": "turn_context", "maxMs": 800 } }
+      ]
+    },
+    {
+      "id": "surface",
+      "caps": { "maxRequests": 3, "maxEstTokens": 3000 },
+      "expect": [
+        { "id": "P1", "severity": "hard", "owner": "L1", "who": "A", "text": "the Agent's viewer for B's task opened quietly on B's side (rule: B waits and is working), not in A's view, not in B's", "check": "surfaceSpot", "args": { "rule": "requester_working", "nearB": true, "inBView": false } },
+        { "id": "P2", "severity": "hard", "owner": "L1", "who": "A", "text": "A's camera and focus are exactly as before; no reveal was scheduled; none of A's cards moved", "check": "aUndisturbed" },
+        { "id": "P3", "severity": "hard", "owner": "L1", "who": "ledger", "text": "the private placement wrote nothing to the shared ledger (file and cards unchanged)", "check": "ledger", "args": { "fileUnchanged": true } },
+        { "id": "P4", "severity": "hard", "owner": "L1", "who": "system", "text": "one placement request: one same-matter question per card the host may send, each card only inside its own question, the run's request quoted", "check": "placementBody", "args": { "questions": ["same_matter_R1", "same_matter_R2"], "cards": ["A사 견적서 v1 단가표", "점심 메뉴 투표 결과"], "quotes": ["A사 견적서 v2를 v1과 비교해서"] } },
+        { "id": "P5", "severity": "hard", "owner": "L1", "who": "system", "text": "no member alias, request id or coordinate is in the request", "check": "noIdentityInBodies" },
+        { "id": "P6", "severity": "soft", "owner": "L1", "who": "system", "text": "the earlier v1 quote card is the same matter (>= 0.8)", "check": "answer", "args": { "name": "same_matter_R1", "min": 0.8 } },
+        { "id": "P7", "severity": "soft", "owner": "L1", "who": "system", "text": "the lunch vote card is not (<= 0.2)", "check": "answer", "args": { "name": "same_matter_R2", "max": 0.2 } },
+        { "id": "P8", "severity": "hard", "owner": "L1", "who": "B", "text": "B's own Desk shows no new card: the placement is A's private canvas state", "check": "bDeskUnchanged" },
+        { "id": "P9", "severity": "hard", "owner": "L1", "who": "A", "text": "the viewer never moves after it opened (an answer after the 1.5 s wait is recorded only)", "check": "notMovedAfterOpen" },
+        { "id": "P10", "severity": "soft", "owner": "L1", "who": "A", "text": "the same-matter answer came within the wait, so the viewer opened beside the v1 quote card", "check": "openedBesideRelated" }
+      ]
+    },
+    {
+      "id": "result",
+      "caps": { "maxRequests": 5, "maxEstTokens": 5000 },
+      "expect": [
+        { "id": "R0", "severity": "soft", "owner": "L5", "who": "A", "text": "A sees the Agent's answer as the subjective model wrote it (the draft check did not need to revise it)", "check": "answerAsWritten", "args": { "said": "decision" } },
+        { "id": "R1", "severity": "hard", "owner": "L1", "who": "system", "text": "one placement request with the owner question only, quoting the run's own request and exactly the answer A saw", "check": "placementBody", "args": { "questions": ["owner_action"], "quotes": ["A사 견적서 v2를 v1과 비교해서"], "quotesPostedAnswer": true } },
+        { "id": "R2", "severity": "soft", "owner": "L1", "who": "system", "text": "the result needs the owner's decision (>= 0.8)", "check": "answer", "args": { "name": "owner_action", "min": 0.8 } },
+        { "id": "R3", "severity": "hard", "owner": "L1", "who": "system", "text": "the placement runtime records: the owner's branch, a pointer raised (placement is on)", "check": "placementRecord", "args": { "kind": "attention", "branch": "owner", "pointer": "raised" } },
+        { "id": "R4", "severity": "hard", "owner": "L3", "who": "A", "text": "A sees exactly one pointer message in A's own conversation, after the Agent's answer", "check": "messages", "args": { "by": "system_flow", "equals": 1 } },
+        { "id": "R5", "severity": "hard", "owner": "L3", "who": "A", "text": "A sees the Agent's answer once", "check": "messages", "args": { "by": "agent", "equals": 1 } },
+        { "id": "R6", "severity": "hard", "owner": "L1", "who": "A", "text": "still nothing moved for A: camera, focus, cards", "check": "aUndisturbed" },
+        { "id": "R7", "severity": "hard", "owner": "L1", "who": "B", "text": "B's own Desk still shows nothing new", "check": "bDeskUnchanged" },
+        { "id": "R8", "severity": "hard", "owner": "L1", "who": "ledger", "text": "the shared ledger holds the same cards", "check": "ledger", "args": { "fileUnchanged": true } }
+      ]
+    },
+    {
+      "id": "followup",
+      "caps": { "maxRequests": 5, "maxEstTokens": 5000 },
+      "expect": [
+        { "id": "F0", "severity": "soft", "owner": "L5", "who": "A", "text": "A sees the follow-up answer as written", "check": "answerAsWritten", "args": { "said": "info" } },
+        { "id": "F1", "severity": "hard", "owner": "L1", "who": "system", "text": "one placement request with the owner question only, quoting the follow-up request and exactly the answer A saw", "check": "placementBody", "args": { "questions": ["owner_action"], "quotes": ["납기만 다시 알려 주세요"], "quotesPostedAnswer": true } },
+        { "id": "F2", "severity": "soft", "owner": "L1", "who": "system", "text": "the follow-up needs nothing from the owner (<= 0.2)", "check": "answer", "args": { "name": "owner_action", "max": 0.2 } },
+        { "id": "F3", "severity": "hard", "owner": "L1", "who": "system", "text": "the placement runtime records the requester's branch (B is told where it is, through B's own channel)", "check": "placementRecord", "args": { "kind": "attention", "branch": "requester" } },
+        { "id": "F4", "severity": "hard", "owner": "L3", "who": "A", "text": "A sees the follow-up answer and no pointer: nothing was asked of A", "check": "messages", "args": { "by": "system_flow", "equals": 0 } },
+        { "id": "F5", "severity": "hard", "owner": "L1", "who": "A", "text": "the follow-up run is B's too (requester identity carried)", "check": "requester", "args": { "present": true } },
+        { "id": "F6", "severity": "hard", "owner": "L1", "who": "A", "text": "still nothing moved for A", "check": "aUndisturbed" },
+        { "id": "F7", "severity": "hard", "owner": "L1", "who": "ledger", "text": "the shared ledger holds the same cards", "check": "ledger", "args": { "fileUnchanged": true } }
+      ]
+    },
+    {
+      "id": "leave",
+      "caps": { "maxRequests": 1, "maxEstTokens": 1000 },
+      "expect": [
+        { "id": "E1", "severity": "hard", "owner": "L1", "who": "A", "text": "B is no longer on A's Desk; the window no longer names B for the run; the bridge refuses a new entry for B", "check": "requester", "args": { "present": false } },
+        { "id": "E2", "severity": "hard", "owner": "L1", "who": "A", "text": "A's Desk lists nobody else", "check": "presence", "args": { "person": "A", "others": { "equals": 0 } } },
+        { "id": "E3", "severity": "hard", "owner": "L1", "who": "system", "text": "B's leaving asks the Decision model nothing", "check": "requests", "args": { "equals": 0 } },
+        { "id": "E4", "severity": "hard", "owner": "L1", "who": "ledger", "text": "the shared ledger's cards are unchanged (only its membership changed)", "check": "ledger" }
+      ]
+    }
+  ]
+}

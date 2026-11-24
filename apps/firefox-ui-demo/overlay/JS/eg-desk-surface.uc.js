@@ -9394,18 +9394,23 @@
   // "advisory" returns nothing: the surface lands where it lands today. "on" (L1 c13) returns the rule's spot for the NEW surface, marked quiet; the
   // callers then neither reveal it (no camera move) nor activate it (no input focus). Nothing existing is moved, and nothing here writes a Board. A published result card's title and opening text go with the request only as a nearby card the
   // bridge may ask "is this work about the same matter?" about (maySend: the same rule as the briefing host's result cards); memos and other cards never.
+  // What the placement runtime reads from this window, read fresh each time: the cards (a published result card's title and opening text only, maySend),
+  // the Board regions and shapes, who is looking where, and the one task whose surface is opening.
+  function workSceneInputs(kind, placement, work) {
+    const cards = [...document.querySelectorAll('.egd-canvas-card')].filter(card => card.isConnected && card.id).map(card => ({ id: card.id, rect: persistentEntityGeometry(card), kind: cardKindForPersistence(card),
+      creator: card._resultRecord?.provenance?.creator ?? (card.dataset.jointManaged ? 'shared' : null), taskId: card._resultRecord?.provenance?.runId ?? null,
+      ...(card._resultRecord?.title ? { maySend: true, label: card._resultRecord.title, excerpt: card._resultRecord.text || '' } : {}) }));
+    const obstacles = [...document.querySelectorAll('.egd-canvas-shape, .egd-board-region')].map(persistentEntityGeometry);
+    const taskId = work.runId || 'surface';
+    // The person who asked waits for the run that is opening this surface (their own run, or the member's request it carries).
+    return { presence: workPresence().snapshot(), cards, obstacles, taskId, landed: placement, surface: { kind, size: { width: placement.width, height: placement.height } },
+      tasks: [{ id: taskId, state: 'running', requester: work.requester || null, waiting: [work.requester || 'self'], ownerMustAct: false, surfaces: [] }] };
+  }
   function noteWorkSurfacePlacement(kind, placement, work) {
     const mode = WorkPlacement.workPlacementMode(readSurfacePref(WorkPlacement.WORK_PLACEMENT_PREF));
     if (mode === 'off') return;
     try {
-      const cards = [...document.querySelectorAll('.egd-canvas-card')].filter(card => card.isConnected && card.id).map(card => ({ id: card.id, rect: persistentEntityGeometry(card), kind: cardKindForPersistence(card),
-        creator: card._resultRecord?.provenance?.creator ?? (card.dataset.jointManaged ? 'shared' : null), taskId: card._resultRecord?.provenance?.runId ?? null,
-        ...(card._resultRecord?.title ? { maySend: true, label: card._resultRecord.title, excerpt: card._resultRecord.text || '' } : {}) }));
-      const obstacles = [...document.querySelectorAll('.egd-canvas-shape, .egd-board-region')].map(persistentEntityGeometry);
-      const taskId = work.runId || 'surface';
-      const advisory = WorkPlacement.advisoryPlacement({ presence: workPresence().snapshot(), cards, obstacles, taskId, landed: placement, surface: { kind, size: { width: placement.width, height: placement.height } },
-        // The person who asked waits for the run that is opening this surface (their own run, or the member's request it carries).
-        tasks: [{ id: taskId, state: 'running', requester: work.requester || null, waiting: [work.requester || 'self'], ownerMustAct: false, surfaces: [] }] });
+      const advisory = WorkPlacement.advisoryPlacement(workSceneInputs(kind, placement, work));
       if (!advisory) return;
       const own = workPresence().snapshot().find(row => row.self)?.viewport ?? null;
       const applied = mode === 'on' ? WorkPlacement.onRuleSpot(advisory, placement, own) : null;
@@ -9416,6 +9421,46 @@
     } catch { return null; /* never breaks opening the surface: today's placement stands */ }
   }
   state.noteWorkSurfacePlacement = noteWorkSurfacePlacement;
+  // L1 c15, pref "on" only: a surface that opens asynchronously anyway (a run's file viewer) may wait, bounded (WORK_PLACEMENT_WAIT_MS), for the bridge's
+  // content answer before it opens. Returns the quiet placement to open at (beside the related card on a timely "same matter", else the rule's spot,
+  // re-checked against the canvas as it is now), or null (not "on", nothing new to open, no conversation, any failure): then the usual path runs.
+  // It never moves anything; an answer after the deadline is only recorded by the bridge.
+  async function placeWorkSurface(kind, work) {
+    if (WorkPlacement.workPlacementMode(readSurfacePref(WorkPlacement.WORK_PLACEMENT_PREF)) !== 'on') return null;
+    try {
+      const keys = { clientThreadId: work?.clientThreadId || null, conversationId: work?.conversationId || null };
+      if (!keys.clientThreadId && !keys.conversationId) return null;
+      const landed = resolveCanvasCardPlacement(kind, {}); // where it opens today: the size, and the "landed" words for the record
+      const who = { ...work, requester: work.requester || state.runRequesters?.for?.(work) || null };
+      const read = () => { const inputs = workSceneInputs(kind, landed, who); return WorkPlacement.placementRequest(WorkPlacement.enumerateWorkScene(inputs), { taskId: inputs.taskId, surface: inputs.surface }, { landed }); };
+      const first = read();
+      if (!first) return null;
+      const queued = await deskStoreRequest('POST', '/decision/work-placement/request', { ...keys, dto: first.dto }, { timeoutMs: 4000 }).catch(() => null);
+      let decided = null;
+      if (first.dto.related.length && queued?.body?.status === 'queued') {
+        const until = workWaitNow() + WorkPlacement.WORK_PLACEMENT_WAIT_MS;
+        while (workWaitNow() < until) {
+          await workWaitSleep(WorkPlacement.WORK_PLACEMENT_POLL_MS);
+          if (workWaitNow() >= until) break; // the bound is strict: nothing read after the deadline is acted on
+          const res = await deskStoreRequest('POST', '/decision/work-placement/result', { ...keys, id: queued.body.id }, { timeoutMs: 1000 }).catch(() => null);
+          if (workWaitNow() >= until) break;
+          if (res?.body?.status === 'decided') { decided = res.body; break; }
+          if (res?.body?.status !== 'pending') break;
+        }
+      }
+      const beside = decided?.kind === 'beside_related' ? first.plan.related.find(r => r.alias === decided.related) ?? null : null;
+      const settled = WorkPlacement.settle(read, beside ? { kind: 'beside_related', cardId: beside.cardId, rect: beside.rect } : null);
+      if (!settled.option || settled.option.kind === 'reuse') return null;
+      const own = workPresence().snapshot().find(row => row.self)?.viewport ?? null;
+      const placed = WorkPlacement.quietPlacement(settled.option.rect, landed, own);
+      (state.workPlacementLog ||= []).push({ surface: kind, waited: true, decided: decided ? decided.kind : null, opened: settled.option.kind, source: settled.source, applied: !!placed });
+      if (state.workPlacementLog.length > 50) state.workPlacementLog.shift();
+      return placed;
+    } catch { return null; }
+  }
+  function workWaitNow() { return Date.now(); }
+  function workWaitSleep(ms) { return new Promise(resolve => window.setTimeout(resolve, ms)); }
+  state.placeWorkSurface = placeWorkSurface;
 
   // Cycle 9 (EGDeskJointPresence.sys.mjs). ONE presence.snapshot() for the placement runtime above and, mirrored to the bridge, for the heartbeat's audience rule.
   // Flag-gated and OFF by default: the first line is the whole default path. Unless the pref egdesk.presence is exactly "on" nothing below it runs, state.presence stays
