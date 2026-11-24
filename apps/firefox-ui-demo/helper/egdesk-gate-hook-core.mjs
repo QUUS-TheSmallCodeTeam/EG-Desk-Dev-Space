@@ -13,6 +13,14 @@ import { gateNote } from './egdesk-gate-hook-broker.mjs'
 //   Why: a floor command is one whose effect cannot be undone; a wrong deny costs one turn (the model tells the person), a wrong
 //   pass cannot be taken back. For the rest, the predicates need the bridge; failing closed on every command would stop all work
 //   whenever the bridge is away, which is not today's behaviour (P2).
+// How the hook finds the bridge (c14, from the codex-rs source at a0d5b0a6): a command hook gets the Codex process environment as it
+// was when the thread's hooks were created (hooks/src/registry.rs:84 `std::env::vars_os()` snapshot; engine/command_runner.rs:490-501
+// replays it, minus protocol/src/shell_environment.rs NON_INHERITABLE_ENV_VARS), not filtered by shell_environment_policy. So the two
+// variables set on the app-server EG-Desk starts reach the hook. The model's own shell commands get the policy-filtered environment,
+// whose default excludes drop any name matching *KEY*, *SECRET* or *TOKEN* (shell_environment.rs populate_env, step 2): the token's
+// name must keep TOKEN in it. That hides it by default only (a person's ignore_default_excludes/set would expose it), so the design
+// never relies on it: the endpoint can only answer "may this command run now?" and cannot record an approval.
+export const GATE_HOOK_ENV = Object.freeze({ url: 'EGDESK_GATE_HOOK_URL', token: 'EGDESK_GATE_HOOK_TOKEN' })
 export const GATE_HOOK_TIMEOUT_MS = 5000 // the bridge may judge with the predicates (<= 4 s foreground deadline)
 
 export function hookCommandText(input) {
@@ -31,7 +39,7 @@ export async function runGateHook({ stdin, env = {}, fetchImpl = globalThis.fetc
   let input
   try { input = JSON.parse(stdin) } catch { return silent() }
   if (input?.hook_event_name !== 'PreToolUse' || input?.tool_name !== 'Bash') return silent()
-  const url = env.EGDESK_GATE_HOOK_URL, token = env.EGDESK_GATE_HOOK_TOKEN
+  const url = env[GATE_HOOK_ENV.url], token = env[GATE_HOOK_ENV.token]
   if (typeof url !== 'string' || !/^http:\/\/(?:127\.0\.0\.1|\[::1\]|localhost):\d+\//.test(url) || typeof token !== 'string' || token.length < 16) return silent()
   const command = hookCommandText(input)
   const cwd = typeof input.cwd === 'string' ? input.cwd : null
