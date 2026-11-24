@@ -440,6 +440,7 @@ export const DECISION_CREDIT_NOTE = 'ChatGPT Pro·Business 요금제의 API 크�
 const DECISION_VERIFICATION_TEXT = Object.freeze({
   verified: '확인됨',
   no_credit: '크레딧 없음 · 키는 저장했습니다. 크레딧이 생기면 바로 쓸 수 있습니다.',
+  spend_limit_reached: '지출·사용 한도에 도달 · 키는 저장했습니다. OpenAI에서 한도를 올리거나 다음 달 초기화 뒤에 쓸 수 있습니다.',
   rate_limited: '요청 한도에 걸림 · 키는 저장했습니다. 잠시 뒤 다시 시도하세요.',
   invalid_key: '키가 올바르지 않습니다',
   model_unavailable: '이 키로는 결정 모델(gpt-6-luna)을 쓸 수 없습니다',

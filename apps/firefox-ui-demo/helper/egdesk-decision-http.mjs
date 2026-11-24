@@ -10,11 +10,12 @@ import { validDecisionApiKey } from './egdesk-decision-credential.mjs'
 // status also carries mode (null when no mode setting is wired).
 // Same loopback/Origin guard as the other bridge routes. The key is accepted
 // only in a POST body, is never echoed, and no response or log contains it.
-// A key the provider authenticated but that has no usable balance (no_credit)
+// A key the provider authenticated but that has no usable balance (no_credit),
+// is stopped by a spend or usage limit (spend_limit_reached)
 // or is momentarily rate limited is saved and reported, so the person can
 // claim credits later without typing it again.
 
-const SAVE_ON = new Set(['verified', 'no_credit', 'rate_limited'])
+const SAVE_ON = new Set(['verified', 'no_credit', 'spend_limit_reached', 'rate_limited'])
 const BODY_LIMIT = 4096
 const ROUTES = new Set(['/decision/status', '/decision/credential', '/decision/mode'])
 
