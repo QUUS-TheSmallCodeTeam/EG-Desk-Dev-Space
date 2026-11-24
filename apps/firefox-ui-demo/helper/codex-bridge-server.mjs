@@ -898,6 +898,8 @@ async function connectToAppServer() {
     try {
       await connection.initialize()
       if (appServerSocket !== socket) return
+      // The command gate's hook path was source-checked for some Codex builds only (egdesk-codex-version-pin.mjs): record, never refuse.
+      try { chat.setEngineVersion({ engineId: 'codex', userAgent: connection.serverInfo?.userAgent ?? null }) } catch { /* recording only */ }
       const preflight = await preflightOwnedAppServer({
         launch: appServerLaunch, cwd: process.cwd(),
         request: (method, params) => connection.request(method, params),
