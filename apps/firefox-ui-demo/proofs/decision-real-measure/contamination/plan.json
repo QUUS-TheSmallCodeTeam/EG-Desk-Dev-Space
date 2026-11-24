@@ -1,6 +1,23 @@
 {
   "set": "contamination-v1",
   "tokenCeiling": 10000,
+  "productBars": {
+    "same_matter_R#": {
+      "yes": 0.8,
+      "no": 0.799,
+      "source": "L1 egdesk-work-placement.mjs PLACEMENT_PREDICATE_YES .8 (lane/c13-placement-on-c14): readPredicate yes iff p >= .8"
+    },
+    "slot_P#_r#": {
+      "yes": 0.7,
+      "no": 0.699,
+      "source": "egdesk-briefing-skeleton.mjs:19,693 SKELETON_BARS.yes .7: anything below is not support"
+    },
+    "c#": {
+      "yes": 0.6,
+      "no": 0.599,
+      "source": "egdesk-board-agent-context.mjs:4 BOARD_AGENT_RELEVANCE_BAR .6: selected iff p >= .6"
+    }
+  },
   "passRule": "A study, not a gate: hard checks hold each item to its registered side of its family's product bar (same-matter .8 [L1 plan], fill-slot .7 [SKELETON_BARS], excerpt .6 [BOARD_AGENT_RELEVANCE_BAR]); a hard failure is a finding. The outcome per family is read from the TARGET (first question) across A (alone), O (opposite siblings), S (same siblings) with the rules in design.json, registered before sending. Same-matter bodies are hand-built in L1's sent shape (builder not on int/c14); the other two families are product-built.",
   "requests": [
     {

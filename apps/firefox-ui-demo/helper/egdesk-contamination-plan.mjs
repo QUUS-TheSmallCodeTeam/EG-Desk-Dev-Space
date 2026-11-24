@@ -190,7 +190,13 @@ export async function buildContaminationPlan() {
     const g = Math.round(grouped.reduce((a, b) => a + b, 0) / grouped.length), a1 = Math.round(alone.reduce((a, b) => a + b, 0) / alone.length)
     splitCost[family] = { groupedOf3: g, aloneOne: a1, splitOf3: 3 * a1, extraTokens: 3 * a1 - g, ratio: Math.round(100 * 3 * a1 / g) / 100, perExtraItemGrouped: Math.round((g - a1) / 2) }
   }
-  const plan = { set: CONTAMINATION_SET, tokenCeiling: CONTAMINATION_CEILING,
+  // The bars the product acts on, declared so the runner refuses any hard check looser than them (all three families act on yes only).
+  const productBars = {
+    'same_matter_R#': { yes: SAME_MATTER.bar.yes, no: Math.round((SAME_MATTER.bar.yes - 0.001) * 1000) / 1000, source: 'L1 egdesk-work-placement.mjs PLACEMENT_PREDICATE_YES .8 (lane/c13-placement-on-c14): readPredicate yes iff p >= .8' },
+    'slot_P#_r#': { yes: FILL_SLOT.bar.yes, no: Math.round((FILL_SLOT.bar.yes - 0.001) * 1000) / 1000, source: 'egdesk-briefing-skeleton.mjs:19,693 SKELETON_BARS.yes .7: anything below is not support' },
+    'c#': { yes: EXCERPT.bar.yes, no: Math.round((EXCERPT.bar.yes - 0.001) * 1000) / 1000, source: 'egdesk-board-agent-context.mjs:4 BOARD_AGENT_RELEVANCE_BAR .6: selected iff p >= .6' },
+  }
+  const plan = { set: CONTAMINATION_SET, tokenCeiling: CONTAMINATION_CEILING, productBars,
     passRule: 'A study, not a gate: hard checks hold each item to its registered side of its family\'s product bar (same-matter .8 [L1 plan], fill-slot .7 [SKELETON_BARS], excerpt .6 [BOARD_AGENT_RELEVANCE_BAR]); a hard failure is a finding. ' +
       'The outcome per family is read from the TARGET (first question) across A (alone), O (opposite siblings), S (same siblings) with the rules in design.json, registered before sending. ' +
       'Same-matter bodies are hand-built in L1\'s sent shape (builder not on int/c14); the other two families are product-built.',

@@ -23,6 +23,7 @@ test('utterance study: committed labels and chunk plans are what the product bui
     assert.ok(c.est <= STUDY_CHUNK_CEILING && c.plan.tokenCeiling <= 12000)
     assert.equal(c.items.filter(s => s.ambiguous).length, 2)
     const loaded = loadPlan(path.join(dir, c.dir, 'plan.json'))
+    assert.deepEqual(loaded.productBars['*choice'], { minConfidence: SPEECH_THRESHOLDS.confidence, minMargin: SPEECH_THRESHOLDS.margin, source: loaded.productBars['*choice'].source })
     for (const r of loaded.requests) { assert.equal(r.recordOnly, false); assert.ok(r.expect.some(e => e.severity === 'hard')); seen.add(r.id) }
   }
   assert.equal(seen.size, 60, 'every sentence is in exactly one chunk')
