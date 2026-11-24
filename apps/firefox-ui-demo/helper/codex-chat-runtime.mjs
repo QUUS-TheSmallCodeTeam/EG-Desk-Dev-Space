@@ -874,6 +874,8 @@ export class CodexChatRuntime {
       decision: { mode: () => this.decisionContext?.mode?.(), configured: () => this.decisionContext?.configured?.(), get client() { return self.decisionContext?.client ?? null }, get calibrationLog() { return self.decisionContext?.calibrationLog ?? null } },
       readOutput: (key, itemId) => this.runOutputs.commandOutput(key, itemId),
       egressFor: key => { const run = this.commandJudgeRuns.get(key); return run && !TERMINAL.has(run.status) ? this.decisionEgressFor(run) : null } })
+    this.inRunMessageQueue = new WeakMap() // run -> [{ requestId, localMessageId, text, at, state }]: messages typed while it works (inRunMessages flag)
+    this.carriedInRun = new Map() // clientThreadId -> [text]: messages its run ended without acting on; they open the next turn's input
     this.postedInstead = new Map() // clientThreadId -> { outcome, posted }: the answer the person saw instead of the Agent's draft (consumed by the next turn)
     this.draftOutcomes = new WeakMap() // run -> the draft check's outcome for its answer
     this.draftCheckTurns = new WeakMap() // run -> what the model had this turn, for the check after the answer is posted
@@ -1721,6 +1723,16 @@ export class CodexChatRuntime {
     // a reply must never turn into a second turn (or a saved message without one).
     const replyTo = internal || body?.inRunReplyTo === undefined ? null : idText(body.inRunReplyTo) || ''
     if (replyTo !== null && (!inRun || inRun.runId !== replyTo)) throw chatError('INRUN_REPLY_UNAVAILABLE', 'The running turn is not waiting for a reply', 409)
+    // A message the person typed while the run works, named for that run (developer flag decisionContext.inRunMessages, default off).
+    // Refused before anything is stored when the flag is off or that run no longer works; without the field nothing changes.
+    const messageTo = internal || body?.inRunMessageTo === undefined ? null : idText(body.inRunMessageTo) || ''
+    if (messageTo !== null) {
+      if (replyTo !== null) throw chatError('INVALID_REQUEST', 'A message is either a reply or a message to the working run', 400)
+      if (inRun && inRun.runId === messageTo) return this.answerEarlyQuestion(inRun, body) // an open early question takes it as its reply, as before
+      const working = this.inRunMessagesOn() ? this.inRunMessageRun(idText(body?.clientThreadId) || idText(body?.thread?.id), idText(body?.conversationId)) : null
+      if (!working || working.runId !== messageTo) throw chatError('INRUN_MESSAGE_UNAVAILABLE', 'The running turn does not take messages', 409)
+      return this.acceptInRunMessage(working, body)
+    }
     if (inRun) return this.answerEarlyQuestion(inRun, body)
     validateChatCwd(body)
     if (this.requireStore) this.assertStore()
@@ -2754,7 +2766,7 @@ export class CodexChatRuntime {
       turnStartAttempted = context.turnStartAttempted = true
       const result = await engine.startTurn({
         threadId: cid,
-        input: [{ type: 'text', text: body.message, text_elements: [] }],
+        input: [...this.carriedInputFor(context.clientThreadId), { type: 'text', text: body.message, text_elements: [] }],
         clientUserMessageId: context.requestId,
         ...(bounded ? QA_TURN_OVERRIDES : {}),
         ...(ownTools ? OWN_TOOLS_TURN_OVERRIDES : {}),
@@ -5253,10 +5265,11 @@ export class CodexChatRuntime {
     for (const run of this.runs.values()) if (run?.clientThreadId === key && typeof run.conversationId === 'string' && run.conversationId) native.add(run.conversationId)
     const hb = this.heartbeats.get(key), subject = hb ? this.heartbeatSubjects.get(hb) : null
     if (typeof subject?.conversationId === 'string' && subject.conversationId) native.add(subject.conversationId)
-    const out = { heartbeat: false, postedNote: false, heldPointers: 0, memoryReceipts: 0, notes: 0, browserTasks: 0, modules: {} }
+    const out = { heartbeat: false, postedNote: false, carriedMessages: 0, heldPointers: 0, memoryReceipts: 0, notes: 0, browserTasks: 0, modules: {} }
     if (hb && hb.state !== 'stopped') { this.stopHeartbeat(hb, 'deleted'); out.heartbeat = true }
     for (const [threadId, live] of [...this.heartbeatThreads]) if (native.has(threadId) || (hb && live === hb)) this.heartbeatThreads.delete(threadId)
     out.postedNote = this.postedInstead.delete(key)
+    out.carriedMessages = this.carriedInRun.get(key)?.length ?? 0; this.carriedInRun.delete(key)
     const held = this.heldAttention?.length ?? 0
     this.heldAttention = (this.heldAttention ?? []).filter(row => row.sourceKey !== key && !native.has(row.sourceKey))
     out.heldPointers = held - this.heldAttention.length
@@ -5829,6 +5842,84 @@ export class CodexChatRuntime {
     const localMessageId = this.recordInRunReply(run, flow, requestId, message)
     this.setReplyOpen(run, null)
     return { accepted: true, durable: true, inRun: true, requestId, clientThreadId: run.clientThreadId, conversationId: run.conversationId, runId: run.runId, localMessageId }
+  }
+
+  // ---- Messages while a run works (developer flag decisionContext.inRunMessages.mode() === 'on', EGDESK_INRUN_MESSAGES=on; default off) ----
+  // Contract with the session heartbeat (lane L3 builds that side):
+  //   1. accept: the message is stored as the person's own message of the run, in arrival order, and shown as sent (message.completed).
+  //      It is queued on the run as pending and the heartbeat is told at once: mark('user') and nudge() (next beat within nudgeMs).
+  //   2. read: pendingInRunMessages(run) -> [{ requestId, text, at }] (oldest first; text is the person's own words, for the judge).
+  //   3. settle, once per message: settleInRunMessage(run, requestId, 'reply' | 'steer' | 'interrupt')
+  //        'reply'     the heartbeat answered it itself (a progress reply it posted): nothing goes to the engine.
+  //        'steer'     the message changes the task: steered into the working native turn (turn/steer, the verified contract).
+  //        'interrupt' the message stops the task: the run is stopped through interrupt() (turn/interrupt), as the stop button does.
+  //      Returns the decision taken, 'failed' (the message stays pending) or null (unknown, already settled, or the run has ended).
+  //   4. never lost: a message still pending when its run ends is carried into the next turn of the conversation, as the person's own
+  //      words before the new message (turn/start input). Deleting the conversation drops it.
+  inRunMessagesOn() { try { return this.decisionContext?.inRunMessages?.mode?.() === 'on' } catch { return false } }
+
+  // The one working run of this conversation that can take a message now: a live native turn (not a held-open browser task), not stopping.
+  inRunMessageRun(clientThreadId, conversationId) {
+    if (!clientThreadId) return null
+    const working = [...this.runs.values()].filter(run => run.clientThreadId === clientThreadId && run.status === 'inProgress' && (!conversationId || run.conversationId === conversationId))
+    if (working.length !== 1) return null
+    const run = working[0], held = this.browserRunHolds.get(run)
+    return run.stopRequested || (held && held.phase !== 'turn') ? null : run
+  }
+
+  acceptInRunMessage(run, body) {
+    const requestId = idText(body.requestId), message = typeof body.message === 'string' ? body.message : ''
+    if (!this.store || !requestId || !message.trim() || message.length > MAX_TEXT) throw chatError('INVALID_REQUEST', 'This message cannot be added to the running turn', 400)
+    const queue = this.inRunMessageQueue.get(run) ?? []
+    this.inRunMessageQueue.set(run, queue)
+    const answer = entry => ({ accepted: true, durable: true, inRun: true, requestId, clientThreadId: run.clientThreadId, conversationId: run.conversationId, runId: run.runId, localMessageId: entry.localMessageId })
+    const known = queue.find(entry => entry.requestId === requestId)
+    if (known) return answer(known) // the same request again: one message
+    const flow = this.flowRuns.get(run)
+    const entry = { requestId, text: message, at: this.now(), state: 'pending', localMessageId: this.recordInRunReply(run, flow ?? {}, requestId, message) }
+    queue.push(entry)
+    try { flow?.heartbeat?.nudge?.() } catch { /* timing hint only */ }
+    return answer(entry)
+  }
+
+  pendingInRunMessages(run) {
+    return (this.inRunMessageQueue.get(run) ?? []).filter(entry => entry.state === 'pending').map(({ requestId, text, at }) => Object.freeze({ requestId, text, at }))
+  }
+
+  async settleInRunMessage(run, requestId, decision) {
+    const entry = (this.inRunMessageQueue.get(run) ?? []).find(row => row.requestId === requestId)
+    if (!entry || entry.state !== 'pending' || run.status !== 'inProgress' || !['reply', 'steer', 'interrupt'].includes(decision)) return null
+    if (decision === 'reply') { entry.state = 'reply'; return 'reply' }
+    entry.state = 'settling'
+    try {
+      if (decision === 'steer') {
+        const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId), proof = engine?.boardPeerContract?.(slot)
+        if (!proof || typeof engine.steerTurn !== 'function') throw new Error('no steer contract')
+        const response = await engine.steerTurn({ threadId: run.conversationId, expectedTurnId: run.runId, clientUserMessageId: requestId,
+          input: [{ type: 'text', text: entry.text, text_elements: [] }] }, slot, proof)
+        if (response?.turnId !== run.runId) throw new Error('not taken')
+      } else {
+        const out = await this.interrupt({ conversationId: run.conversationId, runId: run.runId })
+        if (out?.accepted !== true) throw new Error('not stopped')
+      }
+      entry.state = decision
+      return decision
+    } catch { if (entry.state === 'settling') entry.state = 'pending'; return 'failed' }
+  }
+
+  carryInRunMessages(run) {
+    const pending = (this.inRunMessageQueue.get(run) ?? []).filter(entry => entry.state === 'pending' || entry.state === 'settling')
+    if (!pending.length || !run.clientThreadId) return
+    for (const entry of pending) entry.state = 'carried'
+    this.carriedInRun.set(run.clientThreadId, [...(this.carriedInRun.get(run.clientThreadId) ?? []), ...pending.map(entry => entry.text)])
+  }
+
+  // Taken once, by the turn that starts next in this conversation (none: the input is as before).
+  carriedInputFor(clientThreadId) {
+    const texts = clientThreadId ? this.carriedInRun.get(clientThreadId) : null
+    if (!texts?.length) return []
+    this.carriedInRun.delete(clientThreadId)
+    return texts.map(text => ({ type: 'text', text, text_elements: [] }))
   }
 
   // An in-run reply becomes a normal local user message of the run (one place for both reply paths: steered into a working native
@@ -7579,6 +7670,7 @@ export class CodexChatRuntime {
     this.releaseBrowserRunHold(run)
     run.status = turn.status
     this.stopConversationFlow(run, turn.status === 'interrupted' ? 'cancel' : 'run_end')
+    this.carryInRunMessages(run)
     this.completeCalibration(run)
     this.startTurnMemoryWrite(run) // 'on': the write judgment runs after the answer, in the background
     for (const provider of this.toolProviders) provider.cancelRun?.(run)

@@ -15025,7 +15025,7 @@
               try { ChatState.normalizeRequestProjectTarget(activeThread.requestProjectTarget); } catch { invalidProject = true; }
               const roomProjectBlock = chatRoomProjectSendBlock(activeThread);
               // D1: an open early question of the working run takes one text reply; attachments and a project choice wait for the turn.
-              const replyNow = codex.replyOpen === true && !boardDestination && !activeThread.inputSources?.length && !activeThread.briefingInputs?.length && activeThread.requestProjectTarget == null;
+              const replyNow = (codex.replyOpen === true || codex.inRunMessageOpen === true) && !boardDestination && !activeThread.inputSources?.length && !activeThread.briefingInputs?.length && activeThread.requestProjectTarget == null;
               const sendingBlocked = codex.isSending && !replyNow;
               sendButton.disabled = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld || activeThread.preparingInput || sendingBlocked || !input.value.trim() || !readiness.ready || invalidProject || !!roomProjectBlock || boardPreview?.intent.ok === false;
               sendButton.title = boardPreview?.intent.error || (ChatState.nativeBindingHeld(activeThread) || nativeSendHeld ? '보관된 연결을 현재 계정에 자동 연결하지 않습니다'
@@ -15842,6 +15842,8 @@
       state.codex.isSending = threadBusy(active);
       // D1: the one busy state a message can still be sent into (the working run asked an early question).
       state.codex.replyOpen = !!ChatState.replyRunForThread(protocol, active);
+      // ... or, with the bridge's in-run messages flag, the working run itself takes a text message.
+      state.codex.inRunMessageOpen = !!ChatState.inRunMessageRunForThread(protocol, active, state.codex.chatCapabilities);
     };
 
     // Set below, once the bridge request helper exists: tells the bridge when the conversation on the screen was closed or left.
@@ -19252,7 +19254,11 @@
         }
         // D1: the working run asked an early question. The reply is an ordinary user message that goes into that same run (the bridge
         // steers it in and refuses if the question is no longer open). It starts no turn and carries text only.
-        const replyRun = !activeThread || groupSend || !content || options.memoAskReservation ? null : ChatState.replyRunForThread(protocol, activeThread);
+        // With the bridge's in-run messages flag the working run itself takes the message the same way (inRunMessageTo instead of inRunReplyTo).
+        const questionRun = !activeThread || groupSend || !content || options.memoAskReservation ? null : ChatState.replyRunForThread(protocol, activeThread);
+        const messageRun = questionRun || !activeThread || groupSend || !content || options.memoAskReservation ? null
+          : ChatState.inRunMessageRunForThread(protocol, activeThread, state.codex.chatCapabilities);
+        const replyRun = questionRun || messageRun;
         if (replyRun) {
           if (ChatState.nativeBindingHeld(activeThread) || !ChatState.chatThreadReadiness(activeThread, state.codex).ready
               || !activeThread.conversationId || !ChatState.canResumeNativeThread(activeThread, state.codex.authStatus, state.codex)
@@ -19262,7 +19268,7 @@
           const replyBinding = ChatState.clientThreadBinding(activeThread);
           const mark = (status, fields = {}) => updateThreadById(activeThread.id, thread => ({ ...thread, ...fields.thread,
             messages: thread.messages.map(message => message.role === 'user' && message.requestId === requestId ? { ...message, status, ...fields.message } : message) }));
-          replyRun.replyPending = true; // one reply per question; the composer returns to the busy rule at once
+          if (questionRun) replyRun.replyPending = true; // one reply per question; the composer returns to the busy rule at once
           appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', { readBy: [SELF_MEMBER], requestId, inputReferences: [] }), { countUnread: false });
           updateThreadById(activeThread.id, thread => ({ ...thread, sendError: null }));
           state.codex.threadDrafts = { ...state.codex.threadDrafts, [activeThread.id]: '' };
@@ -19273,7 +19279,7 @@
             runtimeConfig.engineId = engineId;
             runtimeConfig.channelContext = state.codex.channelContextSupported === true;
             const result = await fetchJson('/chat/send', { method: 'POST',
-              body: JSON.stringify({ ...ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig), inRunReplyTo: replyRun.runId }) });
+              body: JSON.stringify({ ...ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig), ...(questionRun ? { inRunReplyTo: replyRun.runId } : { inRunMessageTo: replyRun.runId }) }) });
             if (result?.accepted !== true || result.inRun !== true || result.runId !== replyRun.runId) throw Object.assign(new Error('reply not taken'), { accepted: false });
             if (ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) === replyBinding) mark('complete', { message: {
               conversationId: replyRun.conversationId, runId: replyRun.runId, answerId: replyRun.answerId,

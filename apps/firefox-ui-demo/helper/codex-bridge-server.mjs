@@ -457,6 +457,9 @@ const ownToolsWiring = createOwnToolsWiring({ env: process.env, dataDir, spawn, 
 const terminalGateConfig = ['advisory', 'on'].includes(process.env.EGDESK_TERMINAL_GATE) ? { mode: () => process.env.EGDESK_TERMINAL_GATE, inspect: createGitTargetInspector(),
   // EGDESK_TERMINAL_GATE_METHOD=score selects the old 0-4 score question, only to compare; content predicates are the default.
   method: process.env.EGDESK_TERMINAL_GATE_METHOD === 'score' ? 'score' : 'predicates' } : null
+// A message typed while a run works is accepted into that run and handed to the session heartbeat (codex-chat-runtime.mjs, "Messages while a
+// run works"). Developer flag, default off: without it the composer waits for the turn and the runtime refuses such a message, as before.
+const IN_RUN_MESSAGES_ENABLED = process.env.EGDESK_INRUN_MESSAGES === 'on'
 const chat = new CodexChatRuntime({
   localCapacity,
   engines: engineRegistry,
@@ -506,6 +509,7 @@ const chat = new CodexChatRuntime({
     ...(process.env.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(process.env.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror, audience: ({ run }) => runRequesters.audience({ run }) } : {}),
       attentionPosted: ({ key, provider }) => { if (provider === 'work_placement') workPlacement.acknowledgePointer(key) } } } : {}),
     // Advisory state judge on the engine's own command executions: developer flag EGDESK_COMMAND_JUDGE=advisory, default off. Records only.
+    ...(IN_RUN_MESSAGES_ENABLED ? { inRunMessages: { mode: () => 'on' } } : {}),
     ...(process.env.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
     // Command gate before an engine approval card: developer flag EGDESK_TERMINAL_GATE=advisory|on, default off. It never answers an approval.
     ...(ownToolsWiring && !ownToolsWiring.shadow ? { terminalGate: ownToolsWiring.terminalGate(terminalGateConfig) } : terminalGateConfig ? { terminalGate: terminalGateConfig } : {}),
@@ -1163,7 +1167,7 @@ const bridgeServer = createServer(async (req, res) => {
       chat: chat.snapshot(),
       capabilities: {
         auth: ['status', 'start', 'cancel', 'signout', 'usage', 'device-code'],
-        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', 'stateless', 'fork', ...(CHAT_CHOICE_ENABLED ? ['choice'] : []), ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
+        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', 'stateless', 'fork', ...(CHAT_CHOICE_ENABLED ? ['choice'] : []), ...(IN_RUN_MESSAGES_ENABLED ? ['in-run-messages'] : []), ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
         context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
         profiles: profileStore ? ['local-store', 'revisions', 'run-binding'] : ['local-store-unavailable'],
