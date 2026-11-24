@@ -5,6 +5,11 @@ import { predicateQuestion } from './egdesk-decision-questions.mjs'
 
 // "Deny, ask in chat, allow the exact command once" (c13 prototype; flag default off).
 //
+// c17: the PreToolUse hook path is SUPERSEDED by the owner's decision (Codex is a pure model engine; executing commands is EG-Desk's
+// own function). This broker stays as the approval ledger of EG-Desk's own command tool (egdesk-command-executor.mjs): its check()
+// is asked by the executor before it runs anything. The hook script and core (egdesk-gate-hook-core.mjs, scripts/codex-hooks/) are
+// kept as reference evidence only and must never be installed.
+//
 // The only official pre-execution path in Codex is a PreToolUse command hook (https://learn.chatgpt.com/docs/hooks, "PreToolUse"):
 // it receives { session_id, cwd, hook_event_name, turn_id, tool_name: 'Bash', tool_use_id, tool_input: { command } } on stdin
 // BEFORE a shell command runs, and can deny it (hookSpecificOutput.permissionDecision 'deny' + permissionDecisionReason, which the
