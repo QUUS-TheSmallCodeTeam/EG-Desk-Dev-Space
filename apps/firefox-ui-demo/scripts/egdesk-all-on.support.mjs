@@ -176,6 +176,13 @@ export function scriptedDecisions({ policy = {} } = {}) {
     // L8 c20: the entry is yes/no predicates (browser_entry: is it a web task; browser_entry_card_N: on this card)
     const isTask = /세금계산서/.test(/(?:User message: |Message:\n)(.*)/.exec(text)?.[1] ?? '')
     const entry = q => ({ name: q.name, type: 'predicate', probability: q.name === 'browser_entry' ? (isTask ? 0.95 : 0.05) : q.name === 'browser_entry_card_0' && isTask ? 0.95 : 0.03 })
+    // L3 c22: the beat's questions about a message the person sent while the run works (each quotes that message alone): the mock reads
+    // the quoted message as a model would (asks what is happening / why it stopped; changes the task; asks to stop).
+    if (names.some(n => /^message__person_/.test(n))) {
+      const said = /The person's message, sent while the work is running:\n"""\n([\s\S]*?)\n"""/.exec(text)?.[1] ?? ''
+      const yes = { message__person_status: /왜|어디까지|뭐 ?하|진행 ?상황|멈췄/.test(said), message__person_change: /말고|대신|부터 해|바꿔/.test(said), message__person_stop: /그만|중지|취소|멈춰/.test(said) }
+      return wire.questions.map(q => ({ name: q.name, type: 'predicate', probability: yes[q.name] ? 0.95 : 0.03 }))
+    }
     if (names.some(n => n.includes('__'))) {
       // L3 c15: the message judgment is yes/no questions (message__pointer / __ask / __note / __stalled); code derives the kind. The mock keeps
       // its policy over the kinds those questions stand for and answers yes to the picked kind's question only.

@@ -86,7 +86,7 @@ test('v2 (c21): picked by the Decision labels only, the strongest per kind and a
   assert.deepEqual(body.questions.map(q => q.name), ['message__person_status', 'message__person_change', 'message__person_stop'])
   assert.ok(r.target.body.includes(JSON.stringify('왜 멈췄어? 계속 진행해').slice(1, -1)))
   assert.ok(lintGroupedRequest(body).ok)
-  assert.deepEqual(r.seen, { accepted: true, action: 'steered' }, 'the mock says no to all three: the safe default hands it to the run')
+  assert.deepEqual(r.seen, { accepted: true, action: 'steer' }, 'the mock says no to all three: the safe default hands it to the run (settleInRunMessage steer)')
   // the budget keeps one per kind first
   const fake = (kind, id, bytes) => ({ kind, example: { id, area: 'egdesk', source: {}, tags: [] }, labelledBy: 'decision_model', target: { body: JSON.stringify({ questions: [], x: 'x'.repeat(bytes) }) } })
   const built = scenarioPlan([fake('triage_recall', 'a', 3000), fake('triage_recall', 'b', 3000), fake('triage_correction', 'c', 3000)], { estimate: body => Buffer.byteLength(body), budget: 6100 })
