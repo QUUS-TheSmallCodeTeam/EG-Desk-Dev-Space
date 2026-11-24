@@ -496,3 +496,40 @@ test('independent token estimate: per question type and per ASCII / non-ASCII ch
   assert.match(head.warning, /fitted estimate x 1.1 \(\d+\) is over the token ceiling/)
   assert.equal(planTable(loaded)[0].fittedEst, loaded.requests[0].fittedEst)
 })
+
+test('notDecidedNo (c16, L4): passes when p is above the declared product no bar (the product would not act on "no"); resolved from productBars at load; stands alone; refusals', async () => {
+  const bars = { '*predicate': { yes: 0.8, no: 0.2, source: 'unit' }, '*choice': { minConfidence: 0.75, minMargin: 0.2 }, is_q: { yes: 0.7, no: 0.3 } }
+  const withCheck = (extra = {}, planBars = bars) => fixture(plan => {
+    if (planBars) plan.productBars = planBars
+    plan.requests[0].expect[1].minMargin = 0.2
+    plan.requests[1].expect[0] = { name: 'is_question', kind: 'predicate', notDecidedNo: true, severity: 'hard', note: 'undecided does not block', ...extra }
+  })
+  const plan = loadPlan(withCheck().planFile), e = plan.requests[1].expect[0]
+  assert.equal(e.notDecidedNo, true); assert.equal(e.above, 0.2, 'the *predicate no bar')
+  // the boundary: p equal to the no bar is "decided no" (the product blocks at p <= no), so the check fails there; just above passes
+  for (const [p, pass] of [[0.2, false], [0.19, false], [0.21, true], [0.5, true], [0.95, true]]) {
+    const row = scoreExpectation(e, pred('is_question', p))
+    assert.equal(row.pass, pass, `p=${p}`); assert.equal(row.above, 0.2); assert.equal(row.notDecidedNo, true)
+  }
+  assert.equal(scoreExpectation(e, { type: 'choice' }).pass, false, 'an unreadable answer fails')
+  // a family bar wins over the kind bar
+  const fam = fixture(plan => { plan.productBars = { ...bars, is_question: { yes: 0.7, no: 0.3 } }; plan.requests[0].expect[1].minMargin = 0.2
+    plan.requests[1].expect[0] = { name: 'is_question', kind: 'predicate', notDecidedNo: true, severity: 'hard', note: '' } })
+  assert.equal(loadPlan(fam.planFile).requests[1].expect[0].above, 0.3)
+  // refusals: no product bars, no "no" bar, not true, combined with min or max
+  assert.throws(() => loadPlan(withCheck({}, null).planFile), /notDecidedNo needs a declared product "no" bar/)
+  assert.throws(() => loadPlan(withCheck({}, { '*predicate': { yes: 0.8 }, '*choice': { minConfidence: 0.75, minMargin: 0.2 } }).planFile), /notDecidedNo needs a declared product "no" bar/)
+  assert.throws(() => loadPlan(withCheck({ notDecidedNo: false }).planFile), /notDecidedNo must be true/)
+  assert.throws(() => loadPlan(withCheck({ min: 0.5 }).planFile), /notDecidedNo stands alone/)
+  assert.throws(() => loadPlan(withCheck({ max: 0.6 }).planFile), /notDecidedNo stands alone/)
+  // a check without any bound is still refused
+  assert.throws(() => loadPlan(withCheck({ notDecidedNo: undefined }).planFile), /needs min and\/or max, or notDecidedNo/)
+  // scoring an unresolved expectation (not loaded through a plan) is a programming error, never a silent pass
+  assert.throws(() => scoreExpectation({ name: 'x', kind: 'predicate', severity: 'hard', note: '', notDecidedNo: true }, pred('x', 0.9)), /not resolved/)
+  // the request verdict: a hard notDecidedNo miss fails the request; undecided passes it
+  const b = plan.requests[1]
+  const blocked = scoreRequest(b, { status: 200, answers: [pred('is_question', 0.1), pred('is_secret', 0.01)] })
+  assert.deepEqual([blocked.pass, blocked.hardFailures], [false, ['is_question']])
+  const undecided = scoreRequest(b, { status: 200, answers: [pred('is_question', 0.55), pred('is_secret', 0.01)] })
+  assert.deepEqual([undecided.pass, undecided.hardFailures], [true, []])
+})

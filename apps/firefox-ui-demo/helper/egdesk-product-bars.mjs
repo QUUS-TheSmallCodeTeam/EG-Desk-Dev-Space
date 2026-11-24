@@ -74,6 +74,8 @@ export function barFor({ set, q, kind }, { fallback = true } = {}) {
 
 /** Whether a HARD check holds at the product bar. A wrong-install check (whenAccepted) holds unless the product installs a wrong value. */
 export function productHolds(row) {
+  // c16: a runner "notDecidedNo" check (row.expect 'not-no') holds when the product would not act on "no": p above the product no bar.
+  if (row.kind === 'predicate' && row.expect === 'not-no') { const b = barFor(row); return Number.isFinite(row.p) && b?.noAt !== undefined && row.p > b.noAt }
   const v = productVerdict(row)
   return row.whenAccepted ? v !== 'decided-wrong' && v !== 'not-answered' : v === 'decided-correct'
 }

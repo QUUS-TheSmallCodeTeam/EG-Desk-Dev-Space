@@ -94,9 +94,15 @@ function checkExpectation(raw, where, questions) {
   if (raw.kind === 'predicate') {
     if (question.type !== 'predicate') bad(`${where} ${raw.name}: expected a predicate but the question is ${question.type}`)
     const hasMin = raw.min !== undefined, hasMax = raw.max !== undefined
-    if (!hasMin && !hasMax) bad(`${where} ${raw.name}: a predicate expectation needs min and/or max`)
+    // c16 (L4): "notDecidedNo": true passes when p is ABOVE the plan's declared product "no" bar for this family, i.e. the product would not act
+    // on "no" (an undecided fact does not block; only p <= the no bar does). Resolved against productBars when the plan is loaded.
+    if (raw.notDecidedNo !== undefined && raw.notDecidedNo !== true) bad(`${where} ${raw.name}: notDecidedNo must be true when present`)
+    const notNo = raw.notDecidedNo === true
+    // It stands alone: min would say more than "not no", and max is the decided-no claim this check exists to avoid.
+    if (notNo && (hasMin || hasMax)) bad(`${where} ${raw.name}: notDecidedNo stands alone (no min or max)`)
+    if (!hasMin && !hasMax && !notNo) bad(`${where} ${raw.name}: a predicate expectation needs min and/or max, or notDecidedNo`)
     if ((hasMin && !unit(raw.min)) || (hasMax && !unit(raw.max)) || (hasMin && hasMax && raw.min > raw.max)) bad(`${where} ${raw.name}: min/max must be probabilities with min <= max`)
-    return { ...base, ...(hasMin ? { min: raw.min } : {}), ...(hasMax ? { max: raw.max } : {}) }
+    return { ...base, ...(hasMin ? { min: raw.min } : {}), ...(hasMax ? { max: raw.max } : {}), ...(notNo ? { notDecidedNo: true } : {}) }
   }
   if (raw.kind === 'choice') {
     if (question.type !== 'choice') bad(`${where} ${raw.name}: expected a choice but the question is ${question.type}`)
@@ -191,6 +197,11 @@ export function loadPlan(planFile) {
   const totalWaitMs = requests.reduce((sum, r) => sum + r.waitBeforeMs, 0)
   if (totalWaitMs > REAL_RUN_LIMITS.maxTotalWaitMs) bad(`the waits add up to ${totalWaitMs} ms, over ${REAL_RUN_LIMITS.maxTotalWaitMs}`)
   const productBars = checkProductBars(raw.productBars)
+  for (const r of requests) for (const e of r.expect) if (e.notDecidedNo) {
+    const bar = productBars?.[familyOf(e.name)] ?? productBars?.[`*${e.kind}`]
+    if (bar?.no === undefined) bad(`${r.id} ${e.name}: notDecidedNo needs a declared product "no" bar for family ${familyOf(e.name)} (productBars)`)
+    e.above = bar.no
+  }
   if (productBars) {
     const problems = requests.flatMap(r => r.expect.filter(e => e.severity === 'hard' && !e.diagnostic).map(e => lintExpectation(e, r, productBars)).filter(Boolean).map(text => `${r.id} ${text}`))
     if (problems.length) bad(`hard checks looser than the declared product bars (mark a deliberate one "diagnostic": true): ${problems.join('; ')}`)
@@ -224,6 +235,7 @@ export function lintExpectation(e, request, productBars) {
   if (e.kind === 'predicate') {
     if (e.min !== undefined) { if (bar.yes === undefined) return `${at}: no "yes" bar declared`; if (e.min < bar.yes) return `${at}: min ${e.min} < product yes bar ${bar.yes}` }
     if (e.max !== undefined) { if (bar.no === undefined) return `${at}: no "no" bar declared`; if (e.max > bar.no) return `${at}: max ${e.max} > product no bar ${bar.no}` }
+    if (e.notDecidedNo) { if (bar.no === undefined) return `${at}: no "no" bar declared`; if (!(e.above >= bar.no)) return `${at}: notDecidedNo above ${e.above ?? 'none'} < product no bar ${bar.no}` }
     return null
   }
   if (e.kind === 'choice') {
@@ -256,8 +268,10 @@ export function scoreExpectation(expectation, answer) {
   if (expectation.kind === 'predicate') {
     if (answer?.type !== 'predicate') return { ...out, pass: false, observed: { state: answer?.type ?? 'missing' } }
     const p = answer.probability
+    if (expectation.notDecidedNo && !Number.isFinite(expectation.above)) throw new TypeError(`${expectation.name}: notDecidedNo was not resolved against a product no bar`)
     return { ...out, ...(expectation.min !== undefined ? { min: expectation.min } : {}), ...(expectation.max !== undefined ? { max: expectation.max } : {}),
-      pass: (expectation.min === undefined || p >= expectation.min) && (expectation.max === undefined || p <= expectation.max), observed: { probability: p } }
+      ...(expectation.notDecidedNo ? { notDecidedNo: true, above: expectation.above } : {}),
+      pass: (expectation.min === undefined || p >= expectation.min) && (expectation.max === undefined || p <= expectation.max) && (!expectation.notDecidedNo || p > expectation.above), observed: { probability: p } }
   }
   if (expectation.kind === 'score') {
     if (answer?.type !== 'score') return { ...out, pass: false, observed: { state: answer?.type ?? 'missing' } }
