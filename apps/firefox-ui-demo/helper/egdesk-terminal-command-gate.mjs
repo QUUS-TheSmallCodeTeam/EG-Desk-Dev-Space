@@ -191,6 +191,7 @@ export function classifyCommand(command, { cwd, home = '/home/user', inspect = (
     // ---- shells, eval, source: their text runs too; a download fed to them is a remote script
     const fedByDownload = upstream.some(({ call: up }) => up && DOWNLOADERS.has(up.cmd))
     const subsHaveDownload = words => words.some(word => (word.subs ?? []).some(inner => parseShell(inner).some(item => !item.scope && DOWNLOADERS.has(unwrap(item.words).cmd))))
+    if (INTERPRETERS.has(cmd) && values[0] === '-m' && values[1] === 'twine' && values[2] === 'upload') { destructive = true; effects.add('outbound'); reasons.add('publishes'); return here }
     if (SHELLS.has(cmd) || INTERPRETERS.has(cmd)) {
       const flagIndex = args.findIndex(a => /^-[A-Za-z]*c[A-Za-z]*$/.test(a.v) && (SHELLS.has(cmd) || a.v === '-c' || a.v === '-e'))
       if (flagIndex >= 0 && SHELLS.has(cmd)) {
@@ -215,6 +216,10 @@ export function classifyCommand(command, { cwd, home = '/home/user', inspect = (
     if (DOWNLOADERS.has(cmd)) {
       for (let i = 0; i < args.length; i++) if (['-o', '--output', '-O', '--output-document'].includes(args[i].v) && args[i + 1]) downloaded.add(path.posix.basename(args[i + 1].v))
       for (const r of entry.redirects) if (!r.dyn) downloaded.add(path.posix.basename(r.target))
+      // a file saved under its remote name (curl -O / --remote-name, wget without -O) is the URL's last path segment
+      const remoteName = (cmd === 'curl' && (has(values, '--remote-name', '--remote-name-all') || values.some(v => !v.startsWith('--') && shortFlags(v).has('O')))) ||
+        (cmd === 'wget' && !has(values, '-O', '--output-document') && !values.some(v => !v.startsWith('--') && shortFlags(v).has('O')))
+      if (remoteName) for (const v of values) { try { const url = new URL(v); const name = path.posix.basename(url.pathname); if (name) downloaded.add(name) } catch { /* not a URL */ } }
       if (has(values, '-T', '--upload-file', '-d', '--data', '--data-binary', '--data-raw', '--data-urlencode', '-F', '--form', '--json', '--post-data', '--post-file', '--body-data') ||
           args.some((a, i) => ['-X', '--request', '--method'].includes(a.v) && /^(?:POST|PUT|PATCH|DELETE)$/i.test(args[i + 1]?.v ?? ''))) { destructive = true; effects.add('outbound') }
       return here
@@ -355,9 +360,9 @@ export function classifyCommand(command, { cwd, home = '/home/user', inspect = (
       case 'prune': case 'filter-branch': case 'filter-repo': return mark('discards_history', 'history')
       case 'update-ref': if (has(values, '-d')) return mark('discards_history', 'history'); return
       case 'push': {
+        if (has(values, '--dry-run', '-n') || hasShort(values, 'n')) return
         if (has(values, '-f', '--force', '--force-with-lease', '--force-if-includes', '-d', '--delete', '--mirror', '--prune') || hasShort(values, 'f') || hasShort(values, 'd') ||
             operands().slice(1).some(spec => spec.startsWith('+') || spec.startsWith(':'))) return mark('remote_irreversible', 'outbound')
-        if (has(values, '--dry-run', '-n')) return
         return mark(null, 'outbound')
       }
       default: return
