@@ -25,7 +25,7 @@ export const PLACEMENT_RULES = Object.freeze({
   gap: 24,            // clear space around a placed surface (the canvas' own 24px rule)
   idleMs: 20_000,     // no input for this long = idle (two attention limits; the same bound the conversation flow uses for a stall)
   nearViews: 0.75,    // "near": closer to the requester's view than this share of the view's larger side
-  quietMinViews: 0.5, // "quiet": at least this far from EVERY active view ...
+  quietMinViews: 0.75, // "quiet": at least this far from EVERY active view (never closer than "near" ends, so a quiet spot is never described as near) ...
   quietMaxViews: 2,   // ... and not further than this from the requester's view (further is the adjacent work area's job)
   farViews: 3,        // distance classes: in_view, near (< nearViews), far (< farViews), very_far
   step: 96, rings: 24,

@@ -257,18 +257,24 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     })
   }
   const briefingFlows = new Set() // answers whose `on` flow has started (bounded)
+  // What each card this flow published was built from: outputId -> { keys (opaque material keys), trait, component }. In memory only, bounded; it lets a later
+  // answer recognise "this card already shows these materials" by the card's provenance instead of by its title.
+  const briefingBindings = new Map()
   async function observe(body) {
     const mode = getMode(), want = body?.flow === 'on' ? 'on' : 'advisory'
     if (!['advisory', 'on'].includes(mode) || want !== mode) return { status: 'skipped', reason: 'mode' }
     if (!body || typeof body.report !== 'string' || !body.report.trim() || body.report.length > 20000) return { status: 'skipped', reason: 'invalid' }
     const live = mode === 'on'
+    // Skeleton-first also for the advisory recording (cycle 14): the same place and parts judgments the `on` path would ask, recorded only. It needs the answer's run
+    // (for the turn's materials), not the subjective model. Without the bridge's dependency factory (or with the earlier order) the earlier recording stays.
+    const skeleton = briefing?.order === 'skeleton' && typeof briefing?.runFor === 'function'
     // The full flow needs the subjective model, the run of that answer and the publish path. Without all three nothing runs at all (never a half flow).
     if (live && !((typeof briefing?.engine === 'function' || typeof briefing?.engineFor === 'function') && typeof briefing?.runFor === 'function' && typeof briefing?.propose === 'function')) return { status: 'skipped', reason: 'no-engine' }
     const ids = { conversationId: body.conversationId, runId: body.runId, answerId: body.currentAnswerId }
-    const answerRun = live ? briefing.runFor(ids) : null
-    if (live && !answerRun) return { status: 'skipped', reason: 'run-gone' }
+    const answerRun = live || skeleton ? briefing.runFor(ids) : null
+    if ((live || skeleton) && !answerRun) return { status: 'skipped', reason: 'run-gone' }
     // Completed messages only (D1): the briefing is proposed for an answer that is already posted in full. A run that is still working, failed or was stopped gets none.
-    if (live && answerRun.status !== 'completed') return { status: 'skipped', reason: 'run-not-completed' }
+    if ((live || skeleton) && answerRun.status !== 'completed') return { status: 'skipped', reason: 'run-not-completed' }
     // One flow per answer, whatever asks again.
     const flowKey = live ? `${ids.conversationId}/${ids.answerId}` : null
     if (live && briefingFlows.has(flowKey)) return { status: 'skipped', reason: 'already' }
@@ -284,12 +290,11 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     // Skeleton-first (default of the `on` path since cycle 13; briefing.order, set by the bridge's dependency factory): the Decision model decides the design guide from the
     // component catalog, the turn's materials and the cards already on the board; the subjective model only fills the slots. The request text and the materials are data
     // the run's own model already had (run / memory classes of the same gate); card labels as before (canvas).
-    const skeleton = live && briefing.order === 'skeleton'
     const materials = skeleton && typeof briefing.materialsFor === 'function' ? briefing.materialsFor(answerRun) : []
     const view = body.viewport, viewport = view && [view.x, view.y, view.width, view.height].every(Number.isFinite) && view.width > 0 && view.height > 0 ? { x: view.x, y: view.y, width: view.width, height: view.height } : null
     const gate = createEgressGate(modelDataPermissions({ canvasMaySend: list.some(c => c.maySend === true), ...(skeleton ? { runActive: true, memoryScope: Array.isArray(materials) && materials.length ? { attachedThisTurn: materials.length } : null } : {}) }))
     const out = skeleton ? await runSkeletonFlow({ request: typeof body.request === 'string' ? body.request.slice(0, 2000) : '', materials, candidates: list, egress: gate, viewport,
-      currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null, judge: route(JUDGES['/decision/briefing-skeleton']), fill: engine, allow: async () => true })
+      currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null, judge: route(JUDGES['/decision/briefing-skeleton']), fill: engine, observeOnly: !live, bindings: briefingBindings, allow: async () => true })
       : await runBriefingFlow({ report: body.report, candidates: list, egress: gate, currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null,
       decide: { placement: route(JUDGES['/decision/briefing-placement']), reuse: route(JUDGES['/decision/briefing-reuse']), ...(live ? { check: route(JUDGES['/decision/briefing-check']) } : {}) },
       engine, observeOnly: !live, allow: async () => true })
@@ -309,6 +314,10 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
       for (const { component, markdown } of drafts) {
         const published = await briefing.publishOutput(answerRun, { title: component.title, markdown, outputKey: `briefing-${randomBytes(5).toString('hex')}` })
         created[component.alias] = { outputId: published.output.id }
+        if (Array.isArray(component.materialKeys) && component.materialKeys.length) {
+          briefingBindings.set(published.output.id, { keys: [...component.materialKeys], trait: component.trait, component: component.component })
+          if (briefingBindings.size > 500) briefingBindings.delete(briefingBindings.keys().next().value)
+        }
       }
       const args = completeBriefingArgs(out, created)
       if (!args) throw new Error('args')

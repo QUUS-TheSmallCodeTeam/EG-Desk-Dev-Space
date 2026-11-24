@@ -81,15 +81,16 @@ test('wiring: both hooks are state hooks called at the end of the chat.event cas
   assert.match(src, /state\.observeBriefing = observeBriefing;/); assert.match(src, /state\.noteOutputSuperseded = noteOutputSuperseded;/);
   assert.match(decl('observeBriefing'), /^  function observeBriefing\(run\) \{\n    const flowMode = BriefingHost\.briefingFlowMode\(readSurfacePref\(BriefingHost\.BRIEFING_FLOW_PREF\)\);\n    if \(flowMode === 'off' \|\| run\?\.boardMember === true\) return;/, 'the flag check is the first statement');
 });
-function observeEnv({ pref, run = { runId: 'run-9', localThreadId: 'thread-1', boardMember: false }, text = 'The Delay report and the Invoice totals explain the delay.' } = {}) {
+function observeEnv({ pref, run = { runId: 'run-9', localThreadId: 'thread-1', boardMember: false }, text = 'The Delay report and the Invoice totals explain the delay.', asked = null } = {}) {
   const log = { prefs: [], posts: [], queries: 0, geometry: 0 };
   const rec1 = outputRecord(1);
   const cards = [{ id: 'r1', isConnected: true, dataset: {}, classList: { contains: c => c === 'egd-result-card' }, _resultRecord: rec1 }, { id: 'r2', isConnected: true, dataset: {}, classList: { contains: c => c === 'egd-result-card' }, _resultRecord: { ...outputRecord(1), title: 'Invoice totals' } }];
   const document = { querySelectorAll: () => { log.queries++; return cards; } };
-  const state = { codex: { threads: [{ id: 'thread-1', messages: [{ id: 'm9', role: 'assistant', runId: 'run-9', content: text, answerId: 'ans-9' }] }] } };
+  const state = { codex: { threads: [{ id: 'thread-1', messages: [...(asked ? [{ id: 'u9', role: 'user', content: asked }] : []), { id: 'm9', role: 'assistant', runId: 'run-9', content: text, answerId: 'ans-9' }] }] } };
   const body = `${decl('observeBriefing')}\nreturn observeBriefing;`;
-  const observe = new Function('BriefingHost', 'readSurfacePref', 'getCodexThreadById', 'document', 'state', 'briefingObserved', 'persistentEntityGeometry', 'deskStoreRequest', body)(
+  const observe = new Function('BriefingHost', 'readSurfacePref', 'getCodexThreadById', 'document', 'state', 'briefingObserved', 'persistentEntityGeometry', 'safeViewportWorldRect', 'deskStoreRequest', body)(
     BriefingHost, key => { log.prefs.push(key); return pref; }, (st, id) => st.threads.find(t => t.id === id), document, state, new Set(), () => { log.geometry++; return { x: 0, y: 0, width: 300, height: 200 }; },
+    () => ({ left: 10, top: 20, right: 1210, bottom: 820 }),
     async (method, path, b) => { log.posts.push([method, path, b]); return { status: 200, body: {} }; });
   return { observe: () => observe(run), log };
 }
@@ -100,9 +101,13 @@ test('default path: with the flag unset (or anything but "advisory") observeBrie
 test('flag on: exactly one content-bounded POST for an answer that names two cards, once per answer; an answer that names fewer sends nothing', async () => {
   const e = observeEnv({ pref: 'advisory' }); e.observe(); e.observe();
   assert.equal(e.log.posts.length, 1); const [method, path, body] = e.log.posts[0];
-  assert.deepEqual([method, path], ['POST', '/decision/briefing-observe']); assert.deepEqual(Object.keys(body), ['report', 'currentAnswerId', 'candidates']); assert.equal(body.currentAnswerId, 'ans-9');
+  assert.deepEqual([method, path], ['POST', '/decision/briefing-observe']); assert.deepEqual(Object.keys(body), ['conversationId', 'runId', 'report', 'currentAnswerId', 'candidates', 'viewport']); assert.equal(body.currentAnswerId, 'ans-9');
+  assert.deepEqual([body.runId, body.viewport], ['run-9', { x: 10, y: 20, width: 1200, height: 800 }], 'cycle 14: the advisory recording also names the run (for the turn\'s materials) and the visible area; `flow` stays absent, so nothing can happen');
   assert.deepEqual(body.candidates.map(c => [c.id, c.owner, c.createdForAnswer, c.superseded]), [['r1', 'agent', 'ans-1', false], ['r2', 'agent', 'ans-1', false]]);
   const none = observeEnv({ pref: 'advisory', text: 'Nothing on the canvas is named here.' }); none.observe(); assert.deepEqual(none.log.posts, []);
+  // cycle 14: the person's own request is enough to ask (the bridge decides from the turn's materials); it is the nearest message of theirs before the answer
+  const asked = observeEnv({ pref: 'advisory', text: 'Nothing on the canvas is named here.', asked: 'A사 견적 건 정리해줘' }); asked.observe();
+  assert.equal(asked.log.posts.length, 1); assert.equal(asked.log.posts[0][2].request, 'A사 견적 건 정리해줘'); assert.equal(asked.log.posts[0][2].flow, undefined);
 });
 
 // ---------------- 4. the bridge: advisory records, every other mode does nothing ----------------

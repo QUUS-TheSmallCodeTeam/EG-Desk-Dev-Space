@@ -8,9 +8,10 @@ import test from 'node:test'
 import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
 import { readFileSync } from 'node:fs'
-import { createHeartbeat } from './egdesk-heartbeat.mjs'
+import { HEARTBEAT_LIMITS, createHeartbeat } from './egdesk-heartbeat.mjs'
+import { world } from './egdesk-heartbeat-flow.fixture.mjs'
 import { createEgressGate, EGRESS_KINDS, EGRESS_SITES, modelDataPermissions } from './egdesk-decision-egress.mjs'
-import { createWorkPlacement, createWorkPlacementHttpHandler, normalizePlacementDto, placementQuestion, pointerWriterPrompt, readPlacement } from './egdesk-work-placement.mjs'
+import { WORK_PLACEMENT_LIMITS, createWorkPlacement, createWorkPlacementHttpHandler, normalizePlacementDto, placementQuestion, pointerWriterPrompt, readPlacement } from './egdesk-work-placement.mjs'
 import * as WP from '../overlay/resources/EGDeskWorkPlacement.sys.mjs'
 
 const r = (x, y, width, height) => ({ x, y, width, height })
@@ -59,7 +60,7 @@ function judgeClient(prefer, { p = .93, fail = null } = {}) {
 }
 function bridge(client, extra = {}) {
   const b = beating(); const log = []
-  const placement = createWorkPlacement({ client, mode: () => 'advisory', enabled: () => true, calibrationLog: { record: e => log.push(e) }, now: b.now, ...extra })
+  const placement = createWorkPlacement({ client, mode: () => 'advisory', enabled: () => true, live: () => true, calibrationLog: { record: e => log.push(e) }, now: b.now, setTimer: () => null, ...extra })
   // the chrome's judge: queue the closed request, let the heartbeat beat once, read the choice
   const judge = async dto => { const s = placement.submit('dm', dto, b.hb); if (s.status !== 'queued') return null; b.beat(); await placement.idle(); const res = placement.result('dm', s.id); return res.status === 'decided' ? res.choice : null }
   return { ...b, placement, judge, log }
@@ -323,7 +324,7 @@ test('consumer, default path: with the flag unset the hook reads the pref and do
   const zone = readFileSync(new URL('../overlay/resources/surface/EGDeskSurfaceFileCard.mjs', import.meta.url), 'utf8')
   assert.match(zone, /resolveCanvasCardPlacement\('file', runFile \? \{ workSurface: \{ kind: 'file', runId: runFile\.target\?\.runId, conversationId: runFile\.target\?\.conversationId \} \} : \{\}\)/)
   const server = readFileSync(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
-  assert.match(server, /enabled: \(\) => process\.env\.EGDESK_WORK_PLACEMENT === 'advisory'/); assert.match(server, /if \(await handleWorkPlacementHttp\(req, res, url\)\) return/)
+  assert.match(server, /enabled: \(\) => \['advisory', 'on'\]\.includes\(process\.env\.EGDESK_WORK_PLACEMENT\),/); assert.match(server, /live: \(\) => process\.env\.EGDESK_WORK_PLACEMENT === 'on'/); assert.match(server, /if \(await handleWorkPlacementHttp\(req, res, url\)\) return/)
 })
 test('consumer, advisory: records where it WOULD go against where it lands today, sends only the closed request, changes nothing', () => {
   const c = consumer({ pref: 'advisory' }); const placement = Object.freeze({ x: 24, y: 440, width: 720, height: 340, inView: true })
@@ -335,4 +336,67 @@ test('consumer, advisory: records where it WOULD go against where it lands today
   assert.ok(!/c1|c2|run-7|thread-9/.test(JSON.stringify(body.dto)) && !/"x"|"rect"/.test(JSON.stringify(c.state.workPlacementLog)))
   assert.equal(c.log.listeners, 3, 'input is watched only once the flag is on'); c.note('result', placement, { runId: 'run-8' }); assert.equal(c.log.listeners, 3); assert.equal(c.log.posts.length, 1, 'without a conversation nothing is sent')
   assert.equal(c.state.workPlacementLog.length, 2)
+})
+
+// ================= 7. cycle 14: nudges, and the pointer round trip on lane L3's REAL session heartbeat, after the run =================
+test('nudge: a queued scene and a raised pointer ask the heartbeat for a beat now; advisory decides "point" but raises nothing', async () => {
+  const d = desk(); const viewer = d.open(r(5300, 24, 720, 520)); d.tasks[0].state = 'waiting_owner'; d.tasks[0].ownerMustAct = true
+  const att = WP.attentionRequest(d.scene(), { taskId: 'run-1', cardId: viewer })
+  const b = beating(); const nudges = []; const real = b.hb.nudge.bind(b.hb); const hb = Object.create(b.hb, { nudge: { value: () => { const ok = real(); nudges.push(ok); return ok } } })
+  const timers = []
+  const live = createWorkPlacement({ client: judgeClient(['point']), mode: () => 'on', enabled: () => true, live: () => true, now: b.now, setTimer: (fn, ms) => { timers.push({ fn, ms }); return timers.at(-1) } })
+  assert.equal(live.submit('dm', att.dto, hb).status, 'queued'); assert.deepEqual(nudges, [true], 'queued: the judgment does not wait for the grid')
+  b.beat(); await live.idle()
+  assert.equal(live.facts('dm').pointerPending, true); assert.deepEqual(nudges, [true, false], 'the pointer\'s own nudge falls inside the same beat interval and is refused')
+  assert.deepEqual(timers.map(x => x.ms), [5000], 'so it is tried once more, one beat interval later'); b.advance(5000); timers[0].fn(); assert.deepEqual(nudges, [true, false, true])
+  assert.deepEqual(live.records().map(x => [x.kind, x.would.kind, x.pointer]), [['attention', 'point', 'raised']])
+  // the session's own acknowledgement (hb.acknowledge) withdraws the fact, with or without the bridge's attentionPosted wiring
+  assert.equal(b.hb.acknowledge('work_placement', 'attention'), true); assert.equal(live.facts('dm').pointerPending, false)
+  // wording the request bodies showed to be misleading (cycle 14): a quiet spot is never described as "near", and "leave" says whose view the card's place is measured from
+  const quiet = WP.placementOptions(desk().scene(), { taskId: 'run-1', surface: FILE }).find(o => o.kind === 'quiet'); assert.equal(quiet.descriptor.distance, 'far')
+  const asked = placementQuestion(normalizePlacementDto(att.dto)).questions[0].choices.map(c => c.description)
+  assert.deepEqual(asked, ['leave everything as it is and say nothing; the card is very_far, to the right of M1; inside nobody\'s view', 'leave the card where it is and tell the member who must act where it is; very_far, to the right of M1; inside nobody\'s view'])
+  // advisory (the default): the same decision is recorded as what it WOULD do; no fact, so no message can follow
+  const a = beating(); const advisory = createWorkPlacement({ client: judgeClient(['point']), mode: () => 'advisory', enabled: () => true, now: a.now })
+  advisory.submit('dm', att.dto, a.hb); a.beat(); await advisory.idle()
+  assert.equal(advisory.facts('dm').pointerPending, false); assert.deepEqual(advisory.records().map(x => [x.would.kind, x.pointer]), [['point', 'advisory']])
+})
+const POINTER = '오른쪽 작업 구역에 결과가 있어요. 확인이 필요합니다.'
+test('pointer round trip, post-run, on the real session heartbeat: attention scene -> judged "point" -> pointer fact -> ONE message to the owner -> acknowledged -> withdrawn', async t => {
+  // Real CodexChatRuntime with lane L3's session heartbeat and conversation flow (their fixture: mock engine, mock decision model, virtual clock). The placement runtime is this lane's real module.
+  const people = [{ member: 'self', self: true, active: true, lastInputAgeMs: 2000 }, { member: 'm-jin', active: false }]
+  const audience = { 'dm-task': { requester: 'm-jin', owner: 'self', participants: ['m-jin'] }, 'dm-owner': { requester: 'self', owner: 'self', participants: ['self'] } }
+  const acks = []; let placement
+  const w = world(t, { presence: { snapshot: () => people }, audience: ({ run }) => audience[run.clientThreadId] ?? null, policy: { message: values => (values.includes('pointer') ? 'pointer' : 'none') },
+    writer: prompt => (/on the desk/.test(prompt) ? POINTER : null), attentionPosted: e => { acks.push(e); if (e.provider === 'work_placement') placement.acknowledgePointer(e.key) } }) // the bridge's own wiring (codex-bridge-server.mjs)
+  const client = judgeClient(['point'])
+  placement = createWorkPlacement({ client, mode: () => 'on', enabled: () => true, live: () => true, now: () => w.at(), setTimer: (fn, ms) => w.chat.setTimer(fn, ms) })
+  const o = await w.dm('dm-owner', '예산표 정리해 주세요'); await w.advance(3000); await o.final('예산표를 정리했습니다.')
+  const m = await w.dm('dm-task', '분기 보고서 초안을 만들어 주세요'); await w.advance(4000); await m.final('보고서 초안을 만들었습니다.')
+  const hb = w.chat.heartbeatFor('dm-task')
+  assert.deepEqual([hb.state, hb.tempo], ['running', 'idle'], 'the run is over and the session heartbeat is still there (cycle 12\'s gap)')
+  // The canvas: owner at A, the member at B, the Agent's result card beside B; the finished task now needs the OWNER's approval.
+  const d = desk(); const viewer = d.open(r(5300, 24, 720, 520)); d.tasks[0].state = 'waiting_owner'; d.tasks[0].ownerMustAct = true
+  const canvas = d.snapshot(), att = WP.attentionRequest(d.scene(), { taskId: 'run-1', cardId: viewer })
+  const eventsBefore = w.events.length
+  assert.equal(placement.submit('dm-task', att.dto, hb).status, 'queued')
+  await w.advance(HEARTBEAT_LIMITS.nudgeMs)
+  assert.equal(client.calls.length, 1, 'judged within half a second of the submit, not at the 20 s idle grid')
+  assert.deepEqual(hb.facts().sources.work_placement, { placementsPending: 0, placementsDecided: 1, pointerPending: true, pointerWhere: 'right', pointerDistance: 'very_far', pointerFor: 'owner', pointerNeeds: 'owner_action' })
+  assert.deepEqual(o.assistant(), ['예산표를 정리했습니다.'], 'not yet: the second nudge was refused')
+  await w.advance(WORK_PLACEMENT_LIMITS.renudgeMs + HEARTBEAT_LIMITS.nudgeMs)
+  assert.deepEqual(o.assistant(), ['예산표를 정리했습니다.', POINTER], 'ONE completed message, in the owner\'s own conversation, about 6 s after the submit')
+  assert.deepEqual(m.assistant(), ['보고서 초안을 만들었습니다.'], 'nothing in the member\'s conversation')
+  assert.deepEqual(acks, [{ key: 'dm-task', provider: 'work_placement' }]); assert.equal(placement.facts('dm-task').pointerPending, false, 'acknowledged: the fact is withdrawn')
+  assert.equal(hb.facts().sources.work_placement.pointerPending, false)
+  // what each model saw: closed labels only; the writer was told where in fixed words; no member id, title or coordinate anywhere
+  const judged = JSON.stringify(client.calls[0]), asked = w.beatRequests.at(-1).input.join('\n'), prompt = w.forkPrompts.at(-1)
+  assert.match(asked, /attention_kind: approval/); assert.match(asked, /attention_for: owner/); assert.match(asked, /attention_where: right/)
+  assert.match(prompt, /to the right of what they are looking at on the desk/)
+  for (const text of [judged, asked, prompt]) assert.doesNotMatch(text, /m-jin|acct-|보고서|예산표|own-doc|5300|"x"/)
+  // nothing moved: the canvas is as it was, and the only events are the message's own
+  assert.equal(d.snapshot(), canvas); assert.deepEqual([...new Set(w.events.slice(eventsBefore).map(e => `${e.clientThreadId}:${e.event}`))], ['dm-owner:message.started', 'dm-owner:message.delta', 'dm-owner:message.completed'])
+  // once: later beats judge nothing more and post nothing more
+  await w.advance(60_000)
+  assert.deepEqual([client.calls.length, w.requests.flow, o.assistant().length, m.assistant().length], [1, 1, 2, 1])
 })

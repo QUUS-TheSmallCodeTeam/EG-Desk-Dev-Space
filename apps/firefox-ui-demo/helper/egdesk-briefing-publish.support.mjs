@@ -28,7 +28,7 @@ export const reuseScript = (parts = {}, check = () => ({ u: .96, issues: {} })) 
  * harness(t, { forkReply, forkOk, decisionContext }) → the bridge side with one run in progress.
  *   forkReply(prompt, index) → the text the private fork turn answers with (null = the fork turn fails; undefined = forks are not expected).
  */
-export async function harness(t, { forkReply = null, forkOk = true, decisionContext = undefined } = {}) {
+export async function harness(t, { forkReply = null, forkOk = true, decisionContext = undefined, message = 'Use selected sources', sendExtra = {} } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-briefing-publish-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   const cwd = path.join(dir, 'workspace'); await mkdir(cwd)
@@ -63,7 +63,7 @@ export async function harness(t, { forkReply = null, forkOk = true, decisionCont
   chat.setConnection(true)
   const source = (await contexts.capture({ clientThreadId: 'ui', attachments: [{ id: 'attachment', kind: 'browser', label: 'Selected page', sourceRef: { viewId: 'view-1', resourceId: 'page-1', url: 'https://example.com/p' },
     capturedAt: 10, captureScope: { type: 'dom-range', locator: '#selected' }, content: { mime: 'text/plain', text: 'Original selected text', truncated: false } }] })).captures[0]
-  const run = await chat.send({ message: 'Use selected sources', requestId: 'req-1', clientThreadId: 'ui', cwd, contextSnapshotIds: [source.sourceId], contextCapabilities: { read: true, reader: true, publishBriefing: true } })
+  const run = await chat.send({ message, requestId: 'req-1', clientThreadId: 'ui', cwd, contextSnapshotIds: [source.sourceId], contextCapabilities: { read: true, reader: true, publishBriefing: true }, ...sendExtra })
   const tool = async (name, args, id) => { await chat.handleServerRequest({ id, method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: id, tool: name, arguments: args } }); await contexts.calls.get(`${run.answerId}/${id}`); return replies.find(x => x.id === id) }
   // The answer is posted and the turn ends: from here on the run is finished (status 'completed').
   const finish = async (text = REPORT) => {
