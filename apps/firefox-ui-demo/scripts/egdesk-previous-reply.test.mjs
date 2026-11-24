@@ -77,3 +77,11 @@ test('the plan builder: the product triage body for the turn, with the previous 
   assert.ok(body.input[i].content.endsWith(JSON.stringify(PREV)), 'the stored reply as written (draft check off in the builder)')
   assert.match(body.input[i + 1].content, /Message:\nㅇㅇ$/)
 })
+
+test('terse-record plan: the own v3 request is the two-step second-request shape with only own', async () => {
+  const { ownRequest } = await import('./egdesk-terse-record-plan.mjs')
+  const body = ownRequest('c12')
+  assert.deepEqual(body.questions.map(q => q.name), ['speechs_own_0'])
+  assert.equal(body.input.length, 2)
+  assert.match(body.questions[0].instructions, /the thing it is mainly about is the conclusion/)
+})

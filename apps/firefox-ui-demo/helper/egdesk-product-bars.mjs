@@ -48,6 +48,8 @@ export const PRODUCT_BARS = Object.freeze([
   [/^l4-briefing-skeleton$/, /^(place|part_P#|next)$/, choice(T.choice, T.margin, 'retired c14 skeleton: choice .75 / margin .2')],
   [/^action-relevance-v\d+$/, /^rel_#$/, single(T.relevant, 'egdesk-context-setup.mjs (via egdesk-decision-questions.mjs relevant): a candidate is attached iff p >= relevant (L7 c20 action wording)')],
   [/^split-wording-v\d+$/, /^speechs_/, three(SPEECH_SPLIT_BARS.yes, SPEECH_SPLIT_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_SPLIT_BARS (split wording v2, the two-step hybrid second request, L7 c22)')],
+  [/^terse-record-v\d+$/, /^(tn_courtesy|tn_need|tn_record)$/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO (L7 c23 triage with the previous message)')],
+  [/^terse-record-v\d+$/, /^speechs_/, three(SPEECH_SPLIT_BARS.yes, SPEECH_SPLIT_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_SPLIT_BARS (own v3, L7 c23)')],
   [/^previous-reply-v\d+$/, /^(tn_courtesy|tn_need)$/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO: the triage acts on a decided yes or no (L7 c22, with the previous assistant message)')],
   [/^memory-action-v2$/, /^(tn_need|tn_action)$/, three(TERNARY_YES, TERNARY_NO, 'egdesk-turn-memory.mjs prepareTurnMemory: a decided tn_action yes fetches no stored page; a decided need no may skip (ternary YES / NO, L7 c22)')],
   [/^axis-hybrid-v\d+$/, /^speechs_/, three(SPEECH_SPLIT_BARS.yes, SPEECH_SPLIT_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_SPLIT_BARS (hybrid-isolated: read only where the axes question does not install, L7 c21)')],
