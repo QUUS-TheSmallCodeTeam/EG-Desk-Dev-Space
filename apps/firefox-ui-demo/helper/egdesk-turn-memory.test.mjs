@@ -744,3 +744,8 @@ test('memoryEvidence: the pages of this turn and the held ones as draft-check ev
   const first = await prepareTurnMemory({ message: 'D사 단가 얘기 다시 정리해줘', wiki: utter, client: mockJudge(), scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD })
   assert.ok(memoryEvidence(first, utter, { scope: SCOPE }).every(i => i.opaque === true && !('text' in i)))
 })
+
+test('readingSlice: an installed time label wins; otherwise the decided status gives the time (done: past, plan: planned); nothing else is guessed', async () => {
+  const { readingSlice } = await import('./egdesk-turn-memory.mjs')
+  assert.deepEqual([readingSlice({ slice: 'present' }, 'done'), readingSlice({ slice: 'unknown' }, 'done'), readingSlice({ slice: 'unknown' }, 'plan'), readingSlice({ slice: 'unknown' }, 'unknown')], ['present', 'past', 'planned', 'unknown'])
+})

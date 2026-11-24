@@ -505,3 +505,21 @@ test('one packet: a confirmation note with no pages to add also rides under the 
   assert.equal(typeof x.chat.turnMemoryNoteFor(turn, {}), 'string', 'the note is ready to go')
   x.store.close()
 })
+
+// ---- s9 of the real all-on run (2026-11-25): a decided target and status, the time label under its bar ----
+test('s9: a decided status change is kept as a pending reading although the sentence\'s time label was not installed (both write-target designs)', async () => {
+  // The real s9 label answers: time past_unspecified 0.77 (confidence 0.73, under the 0.85 bar), source self_reported_observation 0.67.
+  const s9Labels = { speech_time_0: { type: 'choice', choice: 'past_unspecified', confidence: 0.73, probabilities: [{ value: 'past_unspecified', probability: 0.77 }, { value: 'future_unspecified', probability: 0.08 }, { value: 'past_anchored', probability: 0.07 }] },
+    speech_source_0: { type: 'choice', choice: 'self_reported_observation', confidence: 0.6, probabilities: [{ value: 'self_reported_observation', probability: 0.67 }, { value: 'unspecified', probability: 0.28 }] } }
+  const judge = mockJudge()
+  const client = { async decide(req) { const r = await judge.decide(req); if (req.questions.some(q => q.name.startsWith('tw_'))) Object.assign(r.answers, s9Labels); return r } }
+  for (const writeTarget of ['choice', 'about']) {
+    const x = await rig({ tm: { writeTarget }, client })
+    await x.send(DONE, 'r1'); await x.done(1)
+    const receipt = x.chat.turnMemoryWriteReceipts.get(x.run())
+    assert.deepEqual([receipt.proposal, receipt.pageId, receipt.status, receipt.applied], ['update_status', 'db/pg-plan', 'done', 'recorded_pending'], writeTarget)
+    const plan = x.wiki.pages.get('db/pg-plan')
+    assert.deepEqual([plan.status, plan.statusReadings.map(r => [r.status, r.state])], ['plan', [['done', 'pending']]], `${writeTarget}: pending only, never promoted`)
+    x.store.close()
+  }
+})

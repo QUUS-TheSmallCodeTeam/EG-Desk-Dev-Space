@@ -102,6 +102,12 @@ const WRITE_RULES = [
   'A message that reports a plan as done is a status change of that plan page, not a new fact. A relayed statement stays attributed. Never invent a page.',
 ].join('\n')
 
+// The time of a status-change reading when the sentence's own time label was not installed: a report that something is done is about
+// something before the utterance, a report of a plan about something after it. Derived by code from the decided status (R3), never guessed.
+// (Real run 2026-11-25, s9: target 0.99, status done 0.94, time label past_unspecified 0.73 under its 0.85 bar -> slice 'unknown' -> the
+// writer refused the proposal as invalid and no reading was kept.)
+const SLICE_OF_STATUS = Object.freeze({ done: 'past', plan: 'planned' })
+export const readingSlice = (rec, status) => (rec.slice !== 'unknown' ? rec.slice : SLICE_OF_STATUS[status] ?? 'unknown')
 const SLICE_OF = Object.freeze({ past_anchored: 'past', past_unspecified: 'past', at_utterance: 'present', ongoing_no_end: 'present', future_anchored: 'planned', future_unspecified: 'planned' })
 /**
  * Labels (isolated axes, installed only above their bars) -> the page attributes of a recorded utterance.
@@ -203,7 +209,7 @@ export async function judgeTurnWrite({ message, candidates = [], client, askedAt
   const page = pages[index]
   if (!page) return { proposal: { op: 'none', reason: 'target_unknown' }, receipt }
   if (rec.status !== 'plan' && rec.status !== 'done') return { proposal: { op: 'none', reason: 'status_unclear' }, receipt }
-  return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: rec.status, time: { slice: rec.slice }, provenance: rec.provenance, spokenAt }, receipt }
+  return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: rec.status, time: { slice: readingSlice(rec, rec.status) }, provenance: rec.provenance, spokenAt }, receipt }
 }
 
 // The 'about' design of judgeTurnWrite: same inputs, same proposal shapes. Differences: the target is derived (deriveWriteTarget); a
@@ -264,7 +270,7 @@ async function judgeWriteAbout({ message, pages, spans, client, askedAt, signal,
     return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: 'superseded', time: { slice }, provenance: rec.provenance, spokenAt }, followUp, receipt: { ...receipt, linkCalls } }
   }
   if (rec.status !== 'plan' && rec.status !== 'done') return { proposal: { op: 'none', reason: 'status_unclear' }, receipt }
-  return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: rec.status, time: { slice: rec.slice }, provenance: rec.provenance, spokenAt }, receipt }
+  return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: rec.status, time: { slice: readingSlice(rec, rec.status) }, provenance: rec.provenance, spokenAt }, receipt }
 }
 
 const OPS = new Set(['none', 'new_page', 'update_status'])
@@ -301,7 +307,8 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
       if (earlier) return earlier.print === print ? { ...earlier.receipt, replay: true } : { status: 'conflict', reason: 'operation_reused' }
       const finish = receipt => { if (receipt.status === 'stored' || receipt.status === 'recorded_pending' || receipt.status === 'status_updated') done.set(key, { print, receipt }); return receipt }
       const provenance = proposal.provenance
-      if (!KINDS.has(provenance?.kind) || (provenance.basis !== undefined && !PROVENANCE_BASES.includes(provenance.basis)) || !SLICES.has(proposal.time?.slice)) return { status: 'invalid' }
+      if (!KINDS.has(provenance?.kind) || (provenance.basis !== undefined && !PROVENANCE_BASES.includes(provenance.basis))) return { status: 'invalid', reason: 'provenance' }
+      if (!SLICES.has(proposal.time?.slice)) return { status: 'invalid', reason: 'time_slice' }
       try {
         if (proposal.op === 'update_status') {
           const page = wiki.pages.get(proposal.pageId)
