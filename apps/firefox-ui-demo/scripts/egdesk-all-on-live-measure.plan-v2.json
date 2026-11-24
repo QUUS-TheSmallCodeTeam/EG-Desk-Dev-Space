@@ -1,0 +1,511 @@
+{
+ "set": "all-on-live-journey",
+ "version": 2,
+ "registered": "2026-11-25 (lane L2 cycle 12), before any re-run of this journey; the predictions were checked by an offline replay of the c16 answers (no request sent)",
+ "basedOn": {
+  "file": "egdesk-all-on-live-measure.plan.json",
+  "sha256": "eb1ebdb7c34df7f14412fbcc9313b253a69cc89d67cc5450b88925681fc98939",
+  "note": "every v1 expectation is kept verbatim; new ones are appended to their step"
+ },
+ "how": "Judged only from the results file of a run: what the person sees after each step and the Decision requests of that step. Hard = the journey is broken for the person if it fails; soft = expected but known to be fragile or already reported. \"predicted\" records what this lane expects to fail and why, written before the real run. v2 adds expectations for what the first real run (c16) showed was wrong or misleading for the person although no v1 expectation covered it.",
+ "caps": "Per step: about three times the requests and two and a half times the estimated input tokens of the dry run (independentEstimate of helper/egdesk-decision-real-runner.mjs), at least 4 requests and 4000 tokens. The journey total is capped separately (default 80000 tokens, 80 requests).",
+ "steps": [
+  {
+   "id": "s1-first-turn",
+   "caps": {
+    "maxRequests": 18,
+    "maxEstTokens": 22000
+   },
+   "expect": [
+    {
+     "id": "s1.packet",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "The first answer is prepared with the A company request and quote v1 pages, and with no PostgreSQL or SQLite page.",
+     "check": "packet",
+     "args": {
+      "include": [
+       "ontology:quote/a-request",
+       "ontology:quote/a-v1"
+      ],
+      "excludePrefix": [
+       "ontology:db/"
+      ]
+     }
+    },
+    {
+     "id": "s1.answer",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "The Agent's answer is posted once, as written (the draft check passes it).",
+     "check": "answerAsWritten",
+     "args": {
+      "said": "quote"
+     }
+    },
+    {
+     "id": "s1.no-flow",
+     "severity": "soft",
+     "owner": "L3",
+     "text": "No wait or pointer message for a short turn.",
+     "check": "messageCount",
+     "args": {
+      "by": "system_flow",
+      "equals": 0
+     }
+    },
+    {
+     "id": "s1.own-words",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "When relevant pages were attached, the person gets the Agent's own answer (or its revision), never the fixed \"not enough evidence, tell me which material\" reply.",
+     "check": "ownWords",
+     "predicted": "fails on int/c14 1f36c00 with the c16 answers: claim_0 insufficient .69 then .76 after the revision, present_0 .97/.96 -> DRAFT_CHECK_COPY.askUser (A1; L7 fix not merged yet). An offline replay of the c16 answers reproduces it."
+    }
+   ]
+  },
+  {
+   "id": "s2-follow-up",
+   "caps": {
+    "maxRequests": 9,
+    "maxEstTokens": 14000
+   },
+   "expect": [
+    {
+     "id": "s2.no-repeat",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "No page already delivered in the first turn is delivered again.",
+     "check": "noRepeatedPages"
+    },
+    {
+     "id": "s2.answer",
+     "severity": "soft",
+     "owner": "L7",
+     "text": "The follow-up answer is posted as the Agent wrote it.",
+     "check": "answerAsWritten",
+     "args": {
+      "said": "tidy"
+     },
+     "predicted": "fails: finding A1 (the draft check has no evidence for held pages and rewrites the answer)"
+    },
+    {
+     "id": "s2.one-answer",
+     "severity": "hard",
+     "owner": "L2",
+     "text": "Exactly one Agent message for the turn.",
+     "check": "messageCount",
+     "args": {
+      "role": "assistant",
+      "by": "agent",
+      "equals": 1
+     }
+    },
+    {
+     "id": "s2.told-what-was-posted",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "When the previous answer was not posted as the Agent wrote it, the next turn tells the Agent what the person actually saw.",
+     "check": "toldWhatWasPosted",
+     "predicted": "fails: no path in codex-chat-runtime.mjs passes the posted text to the next turn; the replayed s2 turn input carries neither the refusal nor any note, while the engine thread keeps its own s1 draft."
+    },
+    {
+     "id": "s2.no-unrelated-pages",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "The follow-up about the A company quote is prepared with no PostgreSQL or SQLite page.",
+     "check": "packet",
+     "args": {
+      "include": [],
+      "excludePrefix": [
+       "ontology:db/"
+      ]
+     },
+     "predicted": "fails with the c16 answers: the held A pages are not fetch candidates mid-session, and the fetch judged pg_1 .90 and pg_2 .98 (pg-health, pg-plan) needed for \"방금 그 내용 정리해줘\"."
+    }
+   ]
+  },
+  {
+   "id": "s3-briefing",
+   "caps": {
+    "maxRequests": 12,
+    "maxEstTokens": 14000
+   },
+   "expect": [
+    {
+     "id": "s3.board",
+     "severity": "hard",
+     "owner": "L4",
+     "text": "The briefing of the follow-up answer ends on the board, with at least two cards.",
+     "check": "briefingOnBoard",
+     "args": {
+      "minCards": 2
+     }
+    },
+    {
+     "id": "s3.timeline",
+     "severity": "soft",
+     "owner": "L4",
+     "text": "The board has a timeline part (what happened, in date order).",
+     "check": "briefingPart",
+     "args": {
+      "shows": "sequence"
+     },
+     "predicted": "fails: ontology pages reach the briefing without a date (pagesFromCandidates keeps only the time slice), so no part in date order is enumerated"
+    },
+    {
+     "id": "s3.remaining",
+     "severity": "soft",
+     "owner": "L4",
+     "text": "The board has a remaining-work part (what is still not done).",
+     "check": "briefingPart",
+     "args": {
+      "shows": "open_items"
+     },
+     "predicted": "fails: ontology nodes outside a snapshot carry no status, so no material is open"
+    },
+    {
+     "id": "s3.no-chat",
+     "severity": "hard",
+     "owner": "L4",
+     "text": "The briefing adds no chat message.",
+     "check": "messageCount",
+     "args": {
+      "equals": 0
+     }
+    }
+   ]
+  },
+  {
+   "id": "s4-long-command",
+   "caps": {
+    "maxRequests": 15,
+    "maxEstTokens": 16000
+   },
+   "expect": [
+    {
+     "id": "s4.wait",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "Ten seconds into a running command, one wait message is posted.",
+     "check": "flowPosted",
+     "args": {
+      "kind": "explain_wait",
+      "equals": 1
+     }
+    },
+    {
+     "id": "s4.no-command-shown",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "The command line is not in any chat message.",
+     "check": "notShown",
+     "args": {
+      "needles": [
+       "payroll-secret",
+       "npm test"
+      ]
+     }
+    },
+    {
+     "id": "s4.no-output-sent",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "The command's output is not in the heartbeat's judgment (the command-state judge reads it by design and is not covered here).",
+     "check": "notSent",
+     "args": {
+      "needles": [
+       "running 40 tests"
+      ],
+      "families": [
+       "heartbeat"
+      ]
+     }
+    },
+    {
+     "id": "s4.no-unrelated-pages",
+     "severity": "soft",
+     "owner": "L7",
+     "text": "The test-run request is prepared with no PostgreSQL migration page (they later become the evidence the wait message and the answer are checked against).",
+     "check": "packet",
+     "args": {
+      "include": [],
+      "excludePrefix": [
+       "ontology:db/"
+      ]
+     },
+     "predicted": "fails with the c16 answers: turn_context rel_7 1.0, rel_9 .55, rel_10 .57 and memory pg_2 .97, op_P4 .91 attach four PostgreSQL pages. Soft: whether a health-check list is relevant to \"run all tests\" is debatable."
+    }
+   ]
+  },
+  {
+   "id": "s5-silence",
+   "caps": {
+    "maxRequests": 8,
+    "maxEstTokens": 4000
+   },
+   "expect": [
+    {
+     "id": "s5.stalled-once",
+     "severity": "soft",
+     "owner": "L3",
+     "text": "After forty silent seconds at most one stalled line is posted.",
+     "check": "flowPosted",
+     "args": {
+      "kind": "stalled",
+      "max": 1
+     }
+    },
+    {
+     "id": "s5.no-command-shown",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "The command line is still not in any chat message.",
+     "check": "notShown",
+     "args": {
+      "needles": [
+       "payroll-secret",
+       "npm test"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "s6-answer",
+   "caps": {
+    "maxRequests": 4,
+    "maxEstTokens": 4000
+   },
+   "expect": [
+    {
+     "id": "s6.answer",
+     "severity": "hard",
+     "owner": "L2",
+     "text": "The answer is posted and the run ends.",
+     "check": "runEnded"
+    },
+    {
+     "id": "s6.one-answer",
+     "severity": "hard",
+     "owner": "L2",
+     "text": "Exactly one Agent message.",
+     "check": "messageCount",
+     "args": {
+      "role": "assistant",
+      "by": "agent",
+      "equals": 1
+     }
+    },
+    {
+     "id": "s6.own-words",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "The answer that reports the run's own command result is posted in the Agent's words, not replaced by the fixed \"not enough evidence\" reply.",
+     "check": "ownWords",
+     "predicted": "fails with the c16 answers: claim_0 not_mentioned (ignored: the command activity is opaque evidence) but present_0 .91 then .96 after the revision -> DRAFT_CHECK_COPY.askUser for \"테스트가 모두 통과했습니다.\""
+    }
+   ]
+  },
+  {
+   "id": "s7-pointer-advisory",
+   "caps": {
+    "maxRequests": 4,
+    "maxEstTokens": 4000
+   },
+   "expect": [
+    {
+     "id": "s7.silent",
+     "severity": "hard",
+     "owner": "L1",
+     "text": "With work placement advisory, nothing is posted when the result needs the owner elsewhere.",
+     "check": "messageCount",
+     "args": {
+      "equals": 0
+     }
+    },
+    {
+     "id": "s7.recorded",
+     "severity": "soft",
+     "owner": "L1",
+     "text": "The placement is still decided and recorded.",
+     "check": "placementRecorded"
+    }
+   ]
+  },
+  {
+   "id": "s8-pointer-on",
+   "caps": {
+    "maxRequests": 6,
+    "maxEstTokens": 4000
+   },
+   "expect": [
+    {
+     "id": "s8.pointer",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "With work placement on, exactly one pointer message tells the owner where the result is.",
+     "check": "flowPosted",
+     "args": {
+      "kind": "pointer",
+      "equals": 1
+     }
+    },
+    {
+     "id": "s8.one-message",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "Exactly one new message.",
+     "check": "messageCount",
+     "args": {
+      "equals": 1
+     }
+    }
+   ]
+  },
+  {
+   "id": "s9-status-remark",
+   "caps": {
+    "maxRequests": 21,
+    "maxEstTokens": 30000
+   },
+   "expect": [
+    {
+     "id": "s9.one-run",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "The status remark starts one run only (the record of it is a side judgment, not a second run).",
+     "check": "mainTurns",
+     "args": {
+      "equals": 1
+     }
+    },
+    {
+     "id": "s9.reading",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "The remark is kept as a pending reading of the migration plan page; no page is changed.",
+     "check": "readingPending",
+     "args": {
+      "pageId": "ontology:db/pg-plan"
+     }
+    },
+    {
+     "id": "s9.packet",
+     "severity": "soft",
+     "owner": "L7",
+     "text": "The turn is prepared with the migration plan page and no A company page.",
+     "check": "packet",
+     "args": {
+      "include": [
+       "ontology:db/pg-plan"
+      ],
+      "excludePrefix": [
+       "ontology:quote/"
+      ]
+     }
+    },
+    {
+     "id": "s9.claim-backed",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "An answer that says it will record (or has recorded) something is only posted when a reading or a page was written in that turn.",
+     "check": "recordClaimBacked",
+     "args": {
+      "claimPattern": "기록해 두|기록했|기록해 둘|저장해 두|적어 두"
+     },
+     "predicted": "fails: the write judgment proposed update_status on P7 (ontology:db/pg-plan, tw_target .99, tw_status done .94) but speech_time_0 past_unspecified .73 < .85 left the time slice unknown; the update branch of judgeTurnWrite does not check the slice (the new-page branch does) and createWikiWriter refuses it as invalid. Nothing tells the Agent or the person."
+    }
+   ]
+  },
+  {
+   "id": "s10-browser-task",
+   "caps": {
+    "maxRequests": 12,
+    "maxEstTokens": 10000
+   },
+   "expect": [
+    {
+     "id": "s10.asks-once",
+     "severity": "hard",
+     "owner": "L8",
+     "text": "The browser task asks which business once, and the conversation is open for the reply.",
+     "check": "taskAsked"
+    },
+    {
+     "id": "s10.no-move",
+     "severity": "soft",
+     "owner": "L8",
+     "text": "Nothing is clicked or opened before the person answers.",
+     "check": "navigated",
+     "args": {
+      "urls": []
+     }
+    },
+    {
+     "id": "s10.choices-given",
+     "severity": "hard",
+     "owner": "L8",
+     "text": "When the task needs the person, the Agent is given the choices the page offered (the two businesses), so it can ask a question that can be answered.",
+     "check": "taskChoices",
+     "args": {
+      "min": 2
+     },
+     "predicted": "fails with the c16 answers: page_state content .69 < .70 (checked before next_step, which was needs_user_context .70 < .75) -> uncertain -> escalated with no candidates; the note says tell_user_and_ask_in_chat with candidates []."
+    }
+   ]
+  },
+  {
+   "id": "s11-browser-reply",
+   "caps": {
+    "maxRequests": 15,
+    "maxEstTokens": 11000
+   },
+   "expect": [
+    {
+     "id": "s11.in-run",
+     "severity": "hard",
+     "owner": "L8",
+     "text": "The reply goes into the run that asked.",
+     "check": "replyInRun"
+    },
+    {
+     "id": "s11.download",
+     "severity": "hard",
+     "owner": "L8",
+     "text": "The task opens the second business and its invoice download, in that order.",
+     "check": "navigated",
+     "args": {
+      "urls": [
+       "https://portal.example.test/biz/2",
+       "https://portal.example.test/download/2.pdf"
+      ]
+     }
+    },
+    {
+     "id": "s11.report",
+     "severity": "soft",
+     "owner": "L8",
+     "text": "One Agent message reports the result.",
+     "check": "messageCount",
+     "args": {
+      "role": "assistant",
+      "by": "agent",
+      "equals": 1
+     }
+    },
+    {
+     "id": "s11.record",
+     "severity": "soft",
+     "owner": "L7",
+     "text": "The finished task is written as a page of this conversation.",
+     "check": "pageWritten",
+     "args": {
+      "scope": "dm:dm-browser",
+      "by": "browser_task"
+     }
+    }
+   ]
+  }
+ ]
+}

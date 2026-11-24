@@ -33,6 +33,8 @@ import * as BriefingHost from '../overlay/resources/EGDeskBriefingHost.sys.mjs'
 import { allOnWorld, callerOf, scriptedDecisions, DM } from './egdesk-all-on.support.mjs'
 
 export const PLAN_FILE = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan.json', import.meta.url))
+// Plan v2 (cycle 12): every v1 expectation plus the misleading outputs found in the first real run. v1 stays as registered.
+export const PLAN_FILE_V2 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v2.json', import.meta.url))
 export const SCRIPT_FILE = fileURLToPath(import.meta.url)
 export const DEFAULT_CAPS = Object.freeze({ tokenCeiling: 80_000, maxRequests: 80 })
 const LIMITS = Object.freeze({ tokenCeilingMax: 200_000, maxRequestsMax: 200 })
@@ -44,7 +46,8 @@ const CLIENT = 'helper/egdesk-decision-client.mjs', SUPPORT = 'scripts/egdesk-al
 export const SAYS = Object.freeze({ quote: '지난주 A사 견적 건 어디까지 됐지?', tidy: '방금 그 내용 정리해줘', tests: '전체 테스트 돌리고 결과 알려줘',
   deployed: 'PostgreSQL 마이그레이션 배포 끝났어', portal: '거래처 포털에서 이번 달 세금계산서 내려받아줘', second: '두 번째 사업자로' })
 const AGENT_SAYS = Object.freeze({ quote: 'A사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다.', tidy: 'A사 견적은 11월 3일 요청, 11월 6일 v1 발송, v2는 팀장 승인 후 발송 예정입니다.',
-  tests: '테스트가 모두 통과했습니다.', noted: '네, 기록해 두겠습니다.', ask: '사업자가 둘입니다. 어느 쪽으로 받을까요?', got: '세금계산서를 내려받았습니다.', stuck: '포털 작업을 마치지 못했습니다.' })
+  tests: '테스트가 모두 통과했습니다.', noted: '네, 기록해 두겠습니다.', ask: '사업자가 둘입니다. 어느 쪽으로 받을까요?', got: '세금계산서를 내려받았습니다.', stuck: '포털 작업을 마치지 못했습니다.',
+  stuckAsk: '포털에서 다음 단계를 정하지 못했습니다. 어느 사업자의 세금계산서를 받을지 알려 주세요.' })
 export const COMMAND = 'npm test -- --suite=payroll-secret', COMMAND_OUTPUT = 'running 40 tests'
 const rect = (x, y, width, height) => ({ x, y, width, height })
 const people = () => [{ member: 'self', self: true, active: true, viewport: rect(0, 0, 1200, 800), focusCard: null, lastInputAgeMs: 500 },
@@ -52,12 +55,15 @@ const people = () => [{ member: 'self', self: true, active: true, viewport: rect
 const RESULT_CARDS = () => [{ id: 'own-doc', rect: rect(100, 100, 500, 400), kind: 'file', creator: 'user' }, { id: 'agent-result', rect: rect(-2600, 100, 720, 520), kind: 'result', creator: 'agent', taskId: 'run-1' }]
 
 const running = w => w.state.last && w.runs().at(-1)?.status === 'inProgress'
-// The scripted subjective model answers the turn it is in (nothing when no turn of this room is working).
-async function agentSays(w, text) { if (running(w)) await w.answer(text) }
-// The browser turn answers from the task note the runtime handed it: a question when the task needs the person, a report when it is done.
-async function agentAnswersTask(w) {
+// The scripted subjective model answers the turn it is in (nothing when no turn of this room is working). What it wrote is kept, so that
+// a posted message can be told apart from a system substitution.
+async function agentSays(w, text, j) { if (running(w)) { j.said.push(text); await w.answer(text) } }
+// The browser turn follows the task note the runtime handed it: the choices when it lists them, a question when it says to tell the person
+// and ask (cycle 12: the first real run's note said so and the scripted turn ignored it), a report when the task is done.
+async function agentAnswersTask(w, j) {
   const note = w.note()
-  await agentSays(w, note?.next === 'ask_user_in_chat' ? AGENT_SAYS.ask : note?.status === 'done' ? AGENT_SAYS.got : AGENT_SAYS.stuck)
+  const text = note?.next === 'ask_user_in_chat' ? AGENT_SAYS.ask : note?.next === 'tell_user_and_ask_in_chat' ? AGENT_SAYS.stuckAsk : note?.status === 'done' ? AGENT_SAYS.got : AGENT_SAYS.stuck
+  await agentSays(w, text, j)
 }
 // The result card needs its owner, who looks elsewhere; a second member is on the desk. The request body is the chrome builder's (attentionRequest),
 // posted the way the surface posts its placement requests ({ clientThreadId, conversationId, dto }). No surface code sends this request yet.
@@ -74,8 +80,8 @@ async function resultNeedsOwner(w, j) {
 
 /** The steps, in order. Each step's expectations live in the plan file under the same id. */
 export const STEPS = Object.freeze([
-  { id: 's1-first-turn', room: DM, title: 'first message about the A company quote', run: async (w, j) => { await j.say(SAYS.quote); await w.advance(3000); await agentSays(w, AGENT_SAYS.quote) } },
-  { id: 's2-follow-up', room: DM, title: 'follow-up in the same session', run: async (w, j) => { await j.say(SAYS.tidy); await w.advance(3000); await agentSays(w, AGENT_SAYS.tidy) } },
+  { id: 's1-first-turn', room: DM, title: 'first message about the A company quote', run: async (w, j) => { await j.say(SAYS.quote); await w.advance(3000); await agentSays(w, AGENT_SAYS.quote, j) } },
+  { id: 's2-follow-up', room: DM, title: 'follow-up in the same session', run: async (w, j) => { await j.say(SAYS.tidy); await w.advance(3000); await agentSays(w, AGENT_SAYS.tidy, j) } },
   { id: 's3-briefing', room: DM, title: 'the briefing of that answer', run: async (w, j) => {
     const run = w.runs().at(-1), answer = w.history().filter(([role]) => role === 'assistant').at(-1)?.[1] ?? ''
     const body = run ? BriefingHost.observeRequest({ mode: 'on', report: answer, answerId: run.answerId, conversationId: run.conversationId, runId: run.runId,
@@ -97,12 +103,12 @@ export const STEPS = Object.freeze([
     await w.notify('item/completed', { ...j.note.command, item: { id: 'cmd-1', type: 'commandExecution', command: COMMAND, cwd: '/work', status: 'completed', exitCode: 0, commandActions: [], aggregatedOutput: 'all passed\n' } })
     await w.advance(40000)
   } },
-  { id: 's6-answer', room: DM, title: 'the answer', run: async w => { await agentSays(w, AGENT_SAYS.tests) } },
+  { id: 's6-answer', room: DM, title: 'the answer', run: async (w, j) => { await agentSays(w, AGENT_SAYS.tests, j) } },
   { id: 's7-pointer-advisory', room: DM, title: 'the result needs the owner elsewhere; work placement advisory', run: async (w, j) => { w.ENV.EGDESK_WORK_PLACEMENT = 'advisory'; await resultNeedsOwner(w, j) } },
   { id: 's8-pointer-on', room: DM, title: 'the same, work placement on', run: async (w, j) => { w.ENV.EGDESK_WORK_PLACEMENT = 'on'; await resultNeedsOwner(w, j) } },
-  { id: 's9-status-remark', room: DM, title: 'a status remark', run: async (w, j) => { await j.say(SAYS.deployed); await w.advance(2000); await agentSays(w, AGENT_SAYS.noted); await j.pause() } },
-  { id: 's10-browser-task', room: BROWSER_ROOM, title: 'a browser task in a conversation of its own', run: async (w, j) => { w.use(BROWSER_ROOM); await j.say(SAYS.portal, w.browserExtra()); await agentAnswersTask(w) } },
-  { id: 's11-browser-reply', room: BROWSER_ROOM, title: 'the person answers the task question', run: async (w, j) => { w.use(BROWSER_ROOM); await j.say(SAYS.second, w.browserExtra()); await agentAnswersTask(w); await j.pause() } },
+  { id: 's9-status-remark', room: DM, title: 'a status remark', run: async (w, j) => { await j.say(SAYS.deployed); await w.advance(2000); await agentSays(w, AGENT_SAYS.noted, j); await j.pause() } },
+  { id: 's10-browser-task', room: BROWSER_ROOM, title: 'a browser task in a conversation of its own', run: async (w, j) => { w.use(BROWSER_ROOM); await j.say(SAYS.portal, w.browserExtra()); await agentAnswersTask(w, j) } },
+  { id: 's11-browser-reply', room: BROWSER_ROOM, title: 'the person answers the task question', run: async (w, j) => { w.use(BROWSER_ROOM); await j.say(SAYS.second, w.browserExtra()); await agentAnswersTask(w, j); await j.pause() } },
 ])
 
 // ---- the plan (pre-registered expectations) ----
@@ -202,6 +208,35 @@ const CHECKS = {
   replyInRun: ({ step }) => { const sent = step.sends[0] ?? null; return { pass: sent?.inRun === true && sent?.accepted === true, observed: { send: sent } } },
   navigated: ({ step, args }) => { const urls = step.seen.browser.acts.filter(a => a.type === 'navigate').map(a => a.url); return { pass: JSON.stringify(urls) === JSON.stringify(args.urls), observed: { urls } } },
   pageWritten: ({ step, args }) => { const pages = step.seen.writes.pages.filter(p => p.scope === args.scope && p.by === args.by); return { pass: pages.length >= 1, observed: { pages: step.seen.writes.pages } } },
+  // Every Agent message of the step is the subjective model's own text or its revision, never a fixed system text.
+  ownWords: ({ step, args }) => {
+    const agent = newMessages(step, step.room).filter(m => m.role === 'assistant' && m.by === 'agent')
+    const system = agent.filter(m => m.authored === 'system')
+    const packetPages = step.seen.packets.flatMap(p => p.pageIds).length
+    return { pass: agent.length > 0 && system.length === 0, observed: { messages: agent.map(m => ({ authored: m.authored, text: m.text })), packetPages, ...(args.note ? { note: args.note } : {}) } }
+  },
+  // When the previous step's answer in this room was not posted as the Agent wrote it, this step's turn gives the Agent the text the person saw.
+  toldWhatWasPosted: ({ step, results, world }) => {
+    const index = results.indexOf(step), earlier = results.slice(0, index).filter(r => r.room === step.room && r.seen).at(-1)
+    const replaced = earlier ? earlier.seen.newMessages.filter(m => m.role === 'assistant' && m.by === 'agent' && m.authored !== 'own') : []
+    if (!replaced.length) return { pass: true, observed: { replacedBefore: [] } }
+    const turns = world.native.filter(c => c.step === step.id && c.method === 'turn/start' && !String(c.params.threadId).startsWith('fork-')).map(c => JSON.stringify(c.params))
+    const told = replaced.filter(m => turns.some(text => text.includes(JSON.stringify(m.text).slice(1, -1))))
+    return { pass: turns.length > 0 && told.length === replaced.length, observed: { replacedBefore: replaced.map(m => m.text), turns: turns.length, told: told.length } }
+  },
+  // An Agent message that says it will record (or recorded) something is only posted when a reading or a page was written in that step.
+  recordClaimBacked: ({ step, results, args }) => {
+    const claims = newMessages(step, step.room).filter(m => m.role === 'assistant' && new RegExp(args.claimPattern).test(m.text))
+    const index = results.indexOf(step), prior = results.slice(0, index).filter(r => r.seen).at(-1)?.seen.writes ?? { pages: [], readings: [] }
+    const added = { pages: step.seen.writes.pages.length - prior.pages.length, readings: step.seen.writes.readings.length - prior.readings.length }
+    return { pass: claims.length === 0 || added.pages > 0 || added.readings > 0, observed: { claims: claims.map(m => m.text), added } }
+  },
+  // When the task needs the person, the note gives the Agent the choices the page offered.
+  taskChoices: ({ step, args }) => {
+    const note = step.seen.browser.note
+    const needs = note && ['ask_user_in_chat', 'tell_user_and_ask_in_chat'].includes(note.next)
+    return { pass: Boolean(needs) && (note.candidates?.length ?? 0) >= args.min, observed: { note } }
+  },
   placementRecorded: ({ step }) => ({ pass: step.seen.placement.records.length >= 1, observed: { records: step.seen.placement.records, submitted: step.seen.placement.submitted } }),
 }
 export const CHECK_NAMES = Object.freeze(Object.keys(CHECKS))
@@ -224,11 +259,13 @@ function readWrites(w) {
   } catch { return { pages: [], readings: [], unreadable: true } }
 }
 function seenAfter(w, id, before, j) {
-  const conversation = {}, newOnes = []
+  const conversation = {}, newOnes = [], forkTexts = w.forkPrompts.slice(before.forks).map(p => p.text).filter(text => typeof text === 'string')
   for (const room of [DM, BROWSER_ROOM]) {
     const list = roomMessages(w, room).map(m => ({ role: m.role, text: m.text, by: m.role === 'assistant' ? (/^egdesk-flow:/.test(m.messageId ?? '') ? 'system_flow' : 'agent') : 'person' }))
     if (list.length) conversation[room] = list
-    newOnes.push(...list.slice(before.rooms[room]).map(m => ({ room, ...m })))
+    // Who wrote a new assistant message: the subjective model's own answer ('own'), its revision or short note on a fork ('model'), or
+    // neither: a fixed text of the system ('system').
+    newOnes.push(...list.slice(before.rooms[room]).map(m => ({ room, ...m, ...(m.role === 'assistant' ? { authored: j.said.includes(m.text) ? 'own' : forkTexts.includes(m.text) ? 'model' : 'system' } : {}) })))
   }
   const stepEvents = w.events.slice(before.events)
   const guide = w.forkPrompts.slice(before.forks).map(p => /Design guide \(decided; do not change it\):\n(.*)\n\nMaterials:/s.exec(p.prompt)?.[1]).filter(Boolean).at(-1)
@@ -261,7 +298,7 @@ function seenAfter(w, id, before, j) {
     calibration: w.calibrationLog.entries().slice(before.calibration).map(e => ({ feature: e.feature, mode: e.mode, ...(e.flow !== undefined ? { flow: e.flow } : {}), ...(e.fallback ? { fallback: e.fallback } : {}) })),
   }
 }
-const requestRow = d => ({ family: d.feature, caller: d.caller, origin: d.origin, sha256: d.sha256, bytes: d.bytes, questions: d.names, estInputTokens: d.estInputTokens ?? null,
+const requestRow = d => ({ ...(d.replay ? { replay: d.replay } : {}), family: d.feature, caller: d.caller, origin: d.origin, sha256: d.sha256, bytes: d.bytes, questions: d.names, estInputTokens: d.estInputTokens ?? null,
   sent: d.sent === true, ...(d.refused ? { refused: d.refused } : {}), ...(d.abandoned ? { abandonedByProduct: true } : {}),
   status: d.status ?? null, ...(d.error ? { error: d.error } : {}), elapsedMs: d.netElapsedMs ?? d.elapsedMs ?? null, usage: d.usage ?? null, answers: d.answers ?? null })
 
@@ -283,8 +320,8 @@ export function bodyFromProduct(stack) {
   return null
 }
 const estimateOf = (wire, body) => independentEstimate(wire.questions.filter(q => q.type === 'choice').length, wire.questions.filter(q => q.type !== 'choice').length, Buffer.byteLength(body))
-export function createMeasureTransport({ send = false, key = null, fetchImpl = globalThis.fetch, caps, plan, now = null, scripted = scriptedDecisions() } = {}) {
-  const ledger = { requests: 0, sent: 0, tokens: 0, reportedTokens: 0, byStep: {}, stopped: null, refusedBodies: 0, onWire: 0 }
+export function createMeasureTransport({ send = false, key = null, fetchImpl = globalThis.fetch, caps, plan, now = null, scripted = scriptedDecisions(), replay = null } = {}) {
+  const ledger = { requests: 0, sent: 0, tokens: 0, reportedTokens: 0, byStep: {}, stopped: null, refusedBodies: 0, onWire: 0, replayUnmatched: 0 }
   const stop = (reason, step) => { if (!ledger.stopped) ledger.stopped = { reason, step } }
   const transport = async ({ body, wire, row }) => {
     const refusal = bodyFromProduct(deepStack())
@@ -301,7 +338,11 @@ export function createMeasureTransport({ send = false, key = null, fetchImpl = g
     if (use.tokens + est > stepCaps.maxEstTokens) refuse('step_token_cap')
     ledger.requests++; use.requests++; ledger.tokens += est; use.tokens += est
     if (send !== true) {
-      return { status: 200, json: { answers: await scripted.answer(wire), usage: { input_tokens: est } } }
+      // Replay: the answer the provider gave to the same request (same step, family and question names, in order) in an earlier run.
+      // A request that run did not make is answered by the script and marked, so a replay shows where the code now asks something else.
+      const recorded = replay ? replay.take(step, row.feature, wire.questions.map(q => q.name)) : null
+      if (replay) { row.replay = recorded ? 'recorded' : 'unmatched'; if (!recorded) ledger.replayUnmatched++ }
+      return { status: 200, json: { answers: recorded?.answers ?? await scripted.answer(wire), usage: { input_tokens: recorded?.usage?.input_tokens ?? est } } }
     }
     const id = `r${ledger.requests}`
     // One request per plan, as the product asks: the runner's ceiling is what is left of the journey's ceiling.
@@ -337,14 +378,14 @@ export function createMeasureTransport({ send = false, key = null, fetchImpl = g
 }
 
 // ---- the journey ----
-export async function runJourney({ plan, send = false, key = null, fetchImpl = globalThis.fetch, caps = DEFAULT_CAPS, now = null } = {}) {
+export async function runJourney({ plan, send = false, key = null, fetchImpl = globalThis.fetch, caps = DEFAULT_CAPS, now = null, replay = null } = {}) {
   const cleanups = [], t = { after: fn => cleanups.push(fn) }
-  const { transport, ledger } = createMeasureTransport({ send, key, fetchImpl, caps, plan, now })
+  const { transport, ledger } = createMeasureTransport({ send, key, fetchImpl, caps, plan, now, replay: send === true ? null : replay })
   const steps = []
   try {
     const w = allOnWorld(t, { transport, settleLimitMs: 60_000 })
     await w.settings.turnMemory.save('on')
-    const j = { note: {}, sends: [],
+    const j = { note: {}, sends: [], said: [],
       async say(text, extra) {
         try { const out = await w.send(text, extra); j.sends.push({ inRun: out.inRun === true, accepted: out.accepted !== false, runId: out.runId ?? null }) }
         catch (error) { j.sends.push({ refused: typeof error?.code === 'string' ? error.code : 'error', status: error?.httpStatus ?? null }) }
@@ -353,7 +394,7 @@ export async function runJourney({ plan, send = false, key = null, fetchImpl = g
       async pause() { await new Promise(resolve => setTimeout(resolve, 60)); await w.idle() } }
     for (const def of STEPS) {
       if (ledger.stopped) { steps.push({ id: def.id, room: def.room, title: def.title, state: 'not_run' }); continue }
-      w.step(def.id); j.sends = []
+      w.step(def.id); j.sends = []; j.said = []
       const before = counts(w)
       let failure = null
       try { await def.run(w, j); await w.idle() } catch (error) { failure = typeof error?.code === 'string' ? error.code : error?.name ?? 'error' }
@@ -377,17 +418,97 @@ export async function runJourney({ plan, send = false, key = null, fetchImpl = g
   return { steps, ledger, scorecard }
 }
 
+// ---- replay and diff against an earlier results file ----
+/** replayAnswers(results) -> { take(step, family, names) -> { answers, usage } | null }: the recorded answers of a results file, consumed in order. */
+export function replayAnswers(results) {
+  const queues = new Map(), keyOf = (step, family, names) => [step, family, names.join(',')].join('\u0000')
+  for (const step of Array.isArray(results?.steps) ? results.steps : []) for (const row of Array.isArray(step.requests) ? step.requests : []) {
+    if (row.status !== 200 || !Array.isArray(row.answers) || !Array.isArray(row.questions)) continue
+    const key = keyOf(step.id, row.family, row.questions)
+    if (!queues.has(key)) queues.set(key, [])
+    queues.get(key).push({ answers: row.answers, usage: row.usage ?? null })
+  }
+  return { take: (step, family, names) => queues.get(keyOf(step, family, names))?.shift() ?? null }
+}
+const round = n => Math.round(n * 100) / 100
+const answerMap = answers => Object.fromEntries((Array.isArray(answers) ? answers : []).filter(a => a && typeof a.name === 'string').map(a =>
+  [a.name, a.type === 'predicate' ? { p: a.probability } : a.type === 'choice' ? { v: a.choice, c: a.confidence } : { other: a.type ?? 'missing' }]))
+const sameAnswer = (a, b) => (a && b && a.p !== undefined && b.p !== undefined ? Math.abs(a.p - b.p) < 0.05
+  : a && b && a.v !== undefined && b.v !== undefined ? a.v === b.v && Math.abs((a.c ?? 0) - (b.c ?? 0)) < 0.05 : JSON.stringify(a ?? null) === JSON.stringify(b ?? null))
+const answerWord = a => (!a ? '-' : a.p !== undefined ? String(round(a.p)) : a.v !== undefined ? `${a.v}@${round(a.c ?? 0)}` : a.other)
+const sawList = step => (step?.seen?.newMessages ?? []).map(m => `${m.by}${m.authored ? `(${m.authored})` : ''}: ${m.text}`)
+/**
+ * diffJourneys(previous, current) -> { previous, current, scorecard, steps: [{ step, state, changes: [...] }] }
+ * changes: requests per family, answers (paired by family and order in the step; a predicate moves by 0.05 or more, a choice changes value
+ * or confidence by 0.05 or more), what the person saw (new messages, flow messages, board, browser task, writes), expectations (pass ->
+ * fail, fail -> pass, new in this plan).
+ */
+export function diffJourneys(previous, current) {
+  const head = run => ({ at: run?.at ?? null, mode: run?.mode ?? null, plan: run?.plan?.sha256 ?? null })
+  const fam = list => (list ?? []).reduce((m, row) => (m[row.family] = (m[row.family] || 0) + 1, m), {})
+  const group = list => { const m = new Map(); for (const row of list ?? []) { if (!m.has(row.family)) m.set(row.family, []); m.get(row.family).push(row) } return m }
+  const steps = current.steps.map(cur => {
+    const prev = (previous?.steps ?? []).find(step => step.id === cur.id) ?? null, changes = []
+    const pf = fam(prev?.requests), cf = fam(cur.requests)
+    for (const family of [...new Set([...Object.keys(pf), ...Object.keys(cf)])]) if ((pf[family] ?? 0) !== (cf[family] ?? 0)) changes.push({ kind: 'requests', family, prev: pf[family] ?? 0, cur: cf[family] ?? 0 })
+    const pm = group(prev?.requests)
+    for (const [family, list] of group(cur.requests)) list.forEach((row, i) => {
+      const before = pm.get(family)?.[i]
+      if (!before) return
+      const a = answerMap(before.answers), b = answerMap(row.answers)
+      for (const name of [...new Set([...Object.keys(a), ...Object.keys(b)])]) if (!sameAnswer(a[name], b[name])) changes.push({ kind: 'answer', family, index: i + 1, name, prev: answerWord(a[name]), cur: answerWord(b[name]) })
+    })
+    const ps = sawList(prev), cs = sawList(cur)
+    const strip = list => list.map(line => line.replace(/^(\w+)\(\w+\): /, '$1: '))
+    if (JSON.stringify(strip(ps)) !== JSON.stringify(strip(cs))) changes.push({ kind: 'saw', prev: ps, cur: cs })
+    const flows = step => (step?.seen?.flows ?? []).map(f => `${f.flow}:${f.posted}`)
+    if (JSON.stringify(flows(prev)) !== JSON.stringify(flows(cur))) changes.push({ kind: 'flows', prev: flows(prev), cur: flows(cur) })
+    const board = step => (step?.seen?.board?.observe ? `${step.seen.board.observe.outcome ?? step.seen.board.observe.status} cards=${step.seen.board.cards.length} parts=${step.seen.board.parts.map(p => p.shows).join('+') || '-'}` : null)
+    if (board(prev) !== board(cur)) changes.push({ kind: 'board', prev: board(prev), cur: board(cur) })
+    const task = step => (step?.seen?.browser?.note ? `${step.seen.browser.note.status}/${step.seen.browser.note.next} candidates=${step.seen.browser.note.candidates?.length ?? 0} opened=${step.seen.browser.acts.map(a => a.url).join(' ') || '-'}` : null)
+    if (task(prev) !== task(cur)) changes.push({ kind: 'browser', prev: task(prev), cur: task(cur) })
+    const writes = step => (step?.seen?.writes ? `pages=${step.seen.writes.pages.length} readings=${step.seen.writes.readings.length}` : null)
+    if (writes(prev) !== writes(cur)) changes.push({ kind: 'writes', prev: writes(prev), cur: writes(cur) })
+    const was = new Map((prev?.checks ?? []).map(c => [c.id, c.pass]))
+    for (const c of cur.checks ?? []) {
+      const before = was.has(c.id) ? was.get(c.id) : 'new'
+      if (before !== c.pass) changes.push({ kind: 'expectation', id: c.id, severity: c.severity, owner: c.owner, prev: before, cur: c.pass })
+    }
+    return { step: cur.id, state: prev?.state === cur.state ? cur.state : `${prev?.state ?? 'absent'} -> ${cur.state}`, changes }
+  })
+  const card = run => (run?.scorecard ? { hard: `${run.scorecard.hard.passed}/${run.scorecard.hard.passed + run.scorecard.hard.failed.length + run.scorecard.hard.notRun}`,
+    soft: `${run.scorecard.soft.passed}/${run.scorecard.soft.passed + run.scorecard.soft.missed.length + run.scorecard.soft.notRun}` } : null)
+  return { previous: head(previous), current: head(current), scorecard: { prev: card(previous), cur: card(current) }, steps }
+}
+const passWord = value => (value === true ? 'pass' : value === false ? 'fail' : value === null ? 'not run' : value)
+export function formatDiff(diff) {
+  const lines = [`journey diff: ${diff.previous.at} (${diff.previous.mode}, plan ${String(diff.previous.plan).slice(0, 12)}) -> ${diff.current.at} (${diff.current.mode}, plan ${String(diff.current.plan).slice(0, 12)})`,
+    `hard ${diff.scorecard.prev?.hard ?? '-'} -> ${diff.scorecard.cur?.hard ?? '-'}, soft ${diff.scorecard.prev?.soft ?? '-'} -> ${diff.scorecard.cur?.soft ?? '-'}`]
+  for (const step of diff.steps) {
+    lines.push(`== ${step.step} [${step.state}]${step.changes.length ? '' : ' no change'}`)
+    for (const c of step.changes) {
+      if (c.kind === 'requests') lines.push(`  requests     ${c.family} ${c.prev} -> ${c.cur}`)
+      else if (c.kind === 'answer') lines.push(`  answer       ${c.family}#${c.index} ${c.name}: ${c.prev} -> ${c.cur}`)
+      else if (c.kind === 'saw') { lines.push('  person saw   before:'); for (const line of c.prev) lines.push(`                 ${line}`); lines.push('               now:'); for (const line of c.cur) lines.push(`                 ${line}`) }
+      else if (c.kind === 'expectation') lines.push(`  expectation  ${c.id} (${c.severity}, ${c.owner}): ${passWord(c.prev)} -> ${passWord(c.cur)}`)
+      else lines.push(`  ${c.kind.padEnd(12)} ${JSON.stringify(c.prev)} -> ${JSON.stringify(c.cur)}`)
+    }
+  }
+  return lines
+}
+
 // ---- output ----
 const familyCounts = requests => requests.reduce((m, r) => (m[r.family] = (m[r.family] || 0) + 1, m), {})
 export function stepTable(outcome) {
   return outcome.steps.map(s => ({ step: s.id, state: s.state, requests: s.requests?.length ?? 0, families: s.requests ? familyCounts(s.requests) : {},
     estInputTokens: (s.requests ?? []).reduce((n, r) => n + (r.estInputTokens ?? 0), 0), ...(s.requests?.some(r => r.refused) ? { refused: s.requests.filter(r => r.refused).map(r => r.refused) } : {}) }))
 }
-export function resultsPayload({ outcome, plan, send, caps, at = new Date() }) {
-  return { set: plan.set, mode: send ? 'send' : 'dry_run', at: at.toISOString(), endpoint: DECISIONS_ENDPOINT, automaticRetries: 0,
+export function resultsPayload({ outcome, plan, send, caps, replayOf = null, at = new Date() }) {
+  return { set: plan.set, mode: send ? 'send' : replayOf ? 'replay' : 'dry_run', at: at.toISOString(), endpoint: DECISIONS_ENDPOINT, automaticRetries: 0,
+    ...(replayOf ? { replayOf } : {}),
     plan: { file: path.basename(PLAN_FILE), sha256: plan.sha256, registered: plan.registered }, script: { sha256: sha256(readFileSync(SCRIPT_FILE)) },
     caps: { tokenCeiling: caps.tokenCeiling, maxRequests: caps.maxRequests, perStep: Object.fromEntries(plan.steps.map(s => [s.id, s.caps])) },
-    totals: { requests: outcome.ledger.requests, sent: outcome.ledger.sent, inputTokensCounted: outcome.ledger.tokens, inputTokensReported: outcome.ledger.reportedTokens, refusedBodies: outcome.ledger.refusedBodies },
+    totals: { requests: outcome.ledger.requests, sent: outcome.ledger.sent, inputTokensCounted: outcome.ledger.tokens, inputTokensReported: outcome.ledger.reportedTokens, refusedBodies: outcome.ledger.refusedBodies, ...(replayOf ? { replayUnmatched: outcome.ledger.replayUnmatched } : {}) },
     stoppedBecause: outcome.ledger.stopped?.reason ?? null, stoppedAt: outcome.ledger.stopped?.step ?? null,
     scorecard: outcome.scorecard, steps: outcome.steps }
 }
@@ -398,27 +519,36 @@ export function writeJourneyResults(file, payload) {
 
 const plausibleKey = key => typeof key === 'string' && key.length >= 20 && !/\s/.test(key)
 export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print = line => console.log(line), printError = line => console.error(line), now = null } = {}) {
-  const args = [...argv], valued = new Set(['--out', '--plan', '--token-ceiling', '--max-requests']), known = new Set([...valued, '--send'])
+  const args = [...argv], valued = new Set(['--out', '--plan', '--token-ceiling', '--max-requests', '--replay', '--diff', '--rerun']), known = new Set([...valued, '--send'])
   const valueOf = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] ?? null : null }
   const unknown = args.find((arg, i) => !known.has(arg) && !valued.has(args[i - 1]))
   const int = (name, fallback, max) => { const v = valueOf(name); if (v === null) return fallback; const n = Number(v); return Number.isSafeInteger(n) && n > 0 && n <= max ? n : NaN }
   const caps = { tokenCeiling: int('--token-ceiling', DEFAULT_CAPS.tokenCeiling, LIMITS.tokenCeilingMax), maxRequests: int('--max-requests', DEFAULT_CAPS.maxRequests, LIMITS.maxRequestsMax) }
   if (unknown || [...valued].some(name => args.includes(name) && !valueOf(name)) || Number.isNaN(caps.tokenCeiling) || Number.isNaN(caps.maxRequests)) {
-    printError('usage: egdesk-all-on-live-measure.mjs [--send] [--out results.json] [--plan plan.json] [--token-ceiling n<=200000] [--max-requests n<=200]   (dry run unless --send; the key is read from OPENAI_API_KEY only)')
+    printError('usage: egdesk-all-on-live-measure.mjs [--send] [--out results.json] [--plan plan.json] [--token-ceiling n<=200000] [--max-requests n<=200] [--replay earlier.json] [--diff earlier.json] [--rerun earlier.json]   (dry run unless --send; the key is read from OPENAI_API_KEY only)')
     return EXIT.usage
   }
+  // --rerun <earlier>: the latest plan, a diff against that file, and (without --send) its recorded answers. One command for a re-run.
+  const rerun = valueOf('--rerun')
+  const replayFile = valueOf('--replay') ?? (rerun && !args.includes('--send') ? rerun : null), diffFile = valueOf('--diff') ?? rerun
+  if (replayFile && args.includes('--send')) { printError('--replay and --send exclude each other (a replay sends nothing)'); return EXIT.usage }
+  const readRun = file => { try { const bytes = readFileSync(file); const run = JSON.parse(bytes.toString('utf8')); return Array.isArray(run?.steps) ? { run, sha256: sha256(bytes), file: path.basename(file) } : null } catch { return null } }
+  const replayRun = replayFile ? readRun(replayFile) : null, diffRun = diffFile ? readRun(diffFile) : null
+  if ((replayFile && !replayRun) || (diffFile && !diffRun)) { printError('the earlier results file cannot be read'); return EXIT.usage }
   let plan
-  try { plan = loadJourneyPlan(valueOf('--plan') ?? PLAN_FILE) } catch (error) { printError(error?.name === 'PlanError' ? `plan refused: ${error.message}` : 'plan refused'); return EXIT.usage }
+  try { plan = loadJourneyPlan(valueOf('--plan') ?? (rerun ? PLAN_FILE_V2 : PLAN_FILE)) } catch (error) { printError(error?.name === 'PlanError' ? `plan refused: ${error.message}` : 'plan refused'); return EXIT.usage }
   const send = args.includes('--send')
   const key = send ? env.OPENAI_API_KEY ?? null : null
   if (send && !plausibleKey(key)) { printError('OPENAI_API_KEY is not set (or not a plausible key); nothing was sent'); return EXIT.noKey }
-  print(JSON.stringify({ set: plan.set, mode: send ? 'send' : 'dry_run', endpoint: DECISIONS_ENDPOINT, plan: plan.sha256.slice(0, 16), registered: plan.registered, tokenCeiling: caps.tokenCeiling, maxRequests: caps.maxRequests,
-    ...(send ? {} : { note: 'dry run: the scripted Decision answers drive the journey; real answers may change which requests follow' }) }))
-  const outcome = await runJourney({ plan, send, key, fetchImpl, caps, now })
+  print(JSON.stringify({ set: plan.set, mode: send ? 'send' : replayRun ? 'replay' : 'dry_run', endpoint: DECISIONS_ENDPOINT, plan: plan.sha256.slice(0, 16), registered: plan.registered, tokenCeiling: caps.tokenCeiling, maxRequests: caps.maxRequests,
+    ...(send ? {} : replayRun ? { note: `replay: the answers recorded in ${replayRun.file} drive the journey; nothing is sent` } : { note: 'dry run: the scripted Decision answers drive the journey; real answers may change which requests follow' }) }))
+  const outcome = await runJourney({ plan, send, key, fetchImpl, caps, now, replay: replayRun ? replayAnswers(replayRun.run) : null })
   for (const row of stepTable(outcome)) print(JSON.stringify(row))
-  const payload = resultsPayload({ outcome, plan, send, caps })
+  const payload = resultsPayload({ outcome, plan, send, caps, replayOf: replayRun ? { file: replayRun.file, sha256: replayRun.sha256, at: replayRun.run.at ?? null } : null })
+  if (diffRun) { payload.diffAgainst = { file: diffRun.file, sha256: diffRun.sha256, at: diffRun.run.at ?? null }; payload.diff = diffJourneys(diffRun.run, payload) }
   print(JSON.stringify({ requests: payload.totals.requests, sent: payload.totals.sent, inputTokens: payload.totals.inputTokensCounted, stoppedBecause: payload.stoppedBecause, stoppedAt: payload.stoppedAt,
     hardPassed: payload.scorecard.hard.passed, hardFailed: payload.scorecard.hard.failed, softMissed: payload.scorecard.soft.missed }))
+  if (payload.diff) for (const line of formatDiff(payload.diff)) print(line)
   const out = valueOf('--out')
   if (out) writeJourneyResults(out, payload)
   return payload.stoppedBecause ? EXIT.stopped : EXIT.ok
