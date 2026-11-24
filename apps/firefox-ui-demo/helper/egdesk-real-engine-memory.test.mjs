@@ -14,14 +14,14 @@ import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { DECISION_KEY_ENV, loadScripts, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { REAL_ENGINE_SCRIPT_SCHEMA, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createMemoryHook, memoryGraph, memoryNeedsDecisions, pagesIn, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
-import { buildMemoryHeldScript, buildMemoryRecallScript, RETENTION } from './egdesk-memory-real-engine-scripts.mjs'
+import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryRecallScript, RETENTION } from './egdesk-memory-real-engine-scripts.mjs'
 import { candidatesFromOntologyGraph } from './egdesk-context-setup.mjs'
 
 const app = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
-const scriptFile = name => path.join(app, 'scripts', 'real-engine', 'scripts', `real-engine-${name}-v1.json`)
+const scriptFile = name => path.join(app, 'scripts', 'real-engine', 'scripts', `real-engine-${name}${/-v\d+$/.test(name) ? '' : '-v1'}.json`)
 
 test('the committed scripts are what the builders produce, validate, and need the Decision model', () => {
-  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript]]) {
+  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script]]) {
     const committed = JSON.parse(fs.readFileSync(scriptFile(name), 'utf8'))
     assert.deepEqual(committed, JSON.parse(JSON.stringify(build())))
     assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })
@@ -183,4 +183,15 @@ test('the scorer reads a record of the whole check: pages, re-sends, the numbers
   // a failing record scores as failing and names the failed check
   const bad = JSON.parse(JSON.stringify(rec)); bad.turns[1].memory.resent = [RETENTION.id]; bad.turns[1].expectations = [{ check: 'memory.noResends', ok: false, detail: { resent: [RETENTION.id] } }]; bad.turns[1].ok = false; bad.ok = false
   const s2 = scoreMemoryRecord(bad); assert.equal(s2.ok, false); assert.deepEqual(s2.summary.failed, ['memory.noResends']); assert.deepEqual(s2.summary.resentPages, [RETENTION.id])
+})
+
+test('held-v2: turn 1 must not volunteer the later fact (checked by code), turn 2 re-sends nothing and still holds it; runs with the product against the fake engine', async t => {
+  const w = world(t, { turns: [{ steps: [], final: '47일입니다.' }, { steps: [], final: '47일이 지나면 자동 삭제하기로 했습니다.' }] })
+  const rec = (await runCheck(w.options, asScripts(buildMemoryHeldV2Script()), w.deps)).records[0]
+  assert.equal(rec.aborted, null, rec.abortDetail); assert.equal(rec.ok, true, JSON.stringify(rec.turns.map(t => t.expectations)))
+  assert.deepEqual(rec.turns[1].memory.resent, [])
+  // the precondition: an engine that volunteers the fact in turn 1 fails the conversation there
+  const w2 = world(t, { turns: [{ steps: [], final: '47일이고, 47일이 지나면 자동 삭제합니다.' }, { steps: [], final: '자동 삭제합니다.' }] })
+  const rec2 = (await runCheck(w2.options, asScripts(buildMemoryHeldV2Script()), w2.deps)).records[0]
+  assert.equal(rec2.turns[0].ok, false); assert.equal(rec2.turns[0].expectations.find(e => e.check === 'answerExcludes').ok, false); assert.equal(rec2.ok, false)
 })
