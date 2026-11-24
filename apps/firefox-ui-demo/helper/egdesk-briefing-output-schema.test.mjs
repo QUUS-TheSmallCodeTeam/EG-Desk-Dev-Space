@@ -33,7 +33,14 @@ test('fill schema from the guide: exactly the guide\'s items and their slots, ma
   // a partial fill (rewrite one item) lists only that item
   assert.deepEqual(Object.keys(fillOutputSchema(GUIDE, { only: new Set([GUIDE.items[0].id]) }).properties.items.properties), [GUIDE.items[0].id])
   assert.throws(() => fillOutputSchema({ items: [] }))
-  assert.deepEqual(outputSchemaFor(fillRequest(GUIDE, MATS)), schema, 'the engine\'s request carries the same guide')
+  // c35: the engine's request carries the COMPACT guide (no fallback sentence asked for; a sequence line's label / text may be null = copied from its material)
+  const compact = fillRequest(GUIDE, MATS).guide, small = outputSchemaFor(fillRequest(GUIDE, MATS))
+  assert.deepEqual(small, fillOutputSchema(compact)); assert.deepEqual(schemaProblems(small), [])
+  for (const item of GUIDE.items) assert.deepEqual(Object.keys(small.properties.items.properties[item.id].properties), ['text', 'slots'], 'no fallback in the compact request')
+  assert.deepEqual(Object.keys(schema.properties.items.properties[GUIDE.items[0].id].properties), ['text', 'fallback', 'slots'], 'a guide that lists the fallback is still asked for it')
+  const seqItem = GUIDE.items.find(i => i.shows === 'sequence'), rowOf = sch => sch.properties.items.properties[seqItem.id].properties.slots.properties.lines.anyOf[0].items.properties
+  assert.deepEqual([rowOf(small).label.anyOf?.length, rowOf(small).text.anyOf?.length, rowOf(small).from.type], [2, 2, 'string'], 'a sequence line: label and text may be null, the material is always named')
+  assert.deepEqual([rowOf(schema).label.type, rowOf(schema).text.type], ['string', 'string'], 'the full guide is unchanged')
 })
 test('design schema from the request: the board aliases and "new:<part>" for an allowed part; emphasis a closed word or null; strict subset', () => {
   const request = { kind: 'briefing_design', targets: [{ alias: 'T1' }, { alias: 'T2' }], reuse: ['T1', 'T2'], retire: [], newAllowed: [{ part: 'P3', label: 'Next steps' }], maxNew: 1 }
@@ -73,14 +80,15 @@ test('engine, flag OFF: runText gets exactly { timeoutMs } (no outputSchema key)
   assert.equal(briefingDeps({ chat: {}, contexts: {} }).outputSchema, 'off'); assert.equal(briefingDeps({ chat: {}, contexts: {}, outputSchema: 'on' }).outputSchema, 'on'); assert.equal(briefingDeps({ chat: {}, contexts: {}, outputSchema: 'yes' }).outputSchema, 'off')
 })
 test('engine, flag ON: the same prompt plus the turn\'s outputSchema; a conforming bare JSON message is the fill; invalid, prose-wrapped, fenced, refused or empty messages are null and counted', async () => {
-  const seen = [], replies = [asJson(fillReply())]
+  const noFallback = r => ({ ...r, items: Object.fromEntries(Object.entries(r.items).map(([id, { fallback: _f, ...rest }]) => [id, rest])) }), cr = () => noFallback(fillReply())
+  const seen = [], replies = [asJson(cr())]
   const engine = createBriefingEngine({ outputSchema: true, limits: { maxTurns: 20 }, runText: async (prompt, options) => { seen.push([prompt, options]); return replies.shift() ?? null } })
   const request = fillRequest(GUIDE, MATS), good = await engine(request)
-  assert.deepEqual(seen[0][1].outputSchema, fillOutputSchema(GUIDE)); assert.equal(seen[0][0], fillPrompt(request), 'the prompt does not change: the schema carries the constraint')
+  assert.deepEqual(seen[0][1].outputSchema, fillOutputSchema(request.guide)); assert.equal(seen[0][0], fillPrompt(request), 'the prompt does not change: the schema carries the constraint')
   assert.deepEqual(validateFill(GUIDE, good).ok, true)
   const bad = [
-    asJson({ ...fillReply(), extra: 1 }), `Sure!\n${asJson(fillReply())}`, `\`\`\`json\n${asJson(fillReply())}\n\`\`\``, '죄송하지만 이 요청은 도와드릴 수 없습니다.', '', asJson({ title: 'x', unfillable: [], items: {} }),
-    asJson({ ...fillReply(), items: { ...fillReply().items, P9: { text: 't', fallback: 'f', slots: {} } } })]
+    asJson({ ...cr(), extra: 1 }), `Sure!\n${asJson(cr())}`, `\`\`\`json\n${asJson(cr())}\n\`\`\``, asJson(fillReply()) /* a fallback the compact request never asked for is a field off the schema */, '죄송하지만 이 요청은 도와드릴 수 없습니다.', '', asJson({ title: 'x', unfillable: [], items: {} }),
+    asJson({ ...cr(), items: { ...cr().items, P9: { text: 't', slots: {} } } })]
   for (const reply of bad) { replies.push(reply); assert.equal(await engine(request), null, reply.slice(0, 30)) }
   assert.equal(engine.stats().schemaInvalid, bad.length, 'every message that is not a conforming bare JSON object is counted (an empty final message too)'); assert.equal(engine.stats().turns, 1 + bad.length)
   // a turn that failed (runText null) is null too, and is not a schema failure

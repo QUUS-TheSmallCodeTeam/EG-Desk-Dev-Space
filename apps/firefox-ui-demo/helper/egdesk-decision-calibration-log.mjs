@@ -16,7 +16,7 @@ import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 // - Recording never throws and never changes what a feature does.
 
 export const CALIBRATION_FILE = 'egdesk-decision-calibration.json'
-// Version 2 adds optional fields only (confidence, options, margin, noPick, outcome.next/keptN/removedN, feature board_reply, fallback timeout_unsent).
+// Version 2 adds optional fields only (draft_check outcome.posted, confidence, options, margin, noPick, outcome.next/keptN/removedN, feature board_reply, fallback timeout_unsent).
 // Version 1 files still load. A file from a newer version is left untouched and nothing is written over it.
 export const CALIBRATION_VERSION = 2
 const OLDEST_READABLE = 1
@@ -43,7 +43,7 @@ const QUESTIONS = new Set(['claim_supported', 'claim_tense', 'answer_type', 'tim
   // the browser step's person-target predicates (lane L8 c22; MAX_PERSON_TARGETS = 3)
   'person_target_0', 'person_target_1', 'person_target_2',
   // the browser entry's yes/no predicates (lane L8 c20; MAX_ENTRY_CARDS = 6)
-  'browser_entry', 'browser_entry_card_0', 'browser_entry_card_1', 'browser_entry_card_2', 'browser_entry_card_3', 'browser_entry_card_4', 'browser_entry_card_5',
+  'browser_entry', 'browser_entry_answer', 'browser_entry_card_0', 'browser_entry_card_1', 'browser_entry_card_2', 'browser_entry_card_3', 'browser_entry_card_4', 'browser_entry_card_5',
   'browser_entry_wall_0', 'browser_entry_wall_1', 'browser_entry_wall_2', 'browser_entry_wall_3', 'browser_entry_wall_4', 'browser_entry_wall_5',
   // work placement's yes/no questions (egdesk-work-placement.mjs), and the Board reply's per-excerpt time question (egdesk-board-agent-context.mjs)
   'same_matter', 'owner_action', 'in_effect'])
@@ -57,6 +57,8 @@ const CHECKS = new Set(['would_pass', 'would_revise', 'would_trim', 'would_ask',
 // reply / steer / stop (c21): what code did with a person's message that arrived while the run worked.
 const FLOW_KINDS = new Set(['none', 'explain_wait', 'ask_missing', 'milestone', 'stalled', 'pointer', 'reply', 'steer', 'stop'])
 const POSTED = new Set(['none', 'model', 'fallback'])
+// c26: why a worded heartbeat message was or was not posted (a person's in-run question that was meant to be answered): the writer and the check, in closed words.
+const WRITE_OUTCOMES = new Set(['passed', 'fallback', 'no_fork', 'writer_failed', 'writer_empty', 'repeat', 'no_turn', 'check_failed', 'check_timeout', 'run_moved_on', 'not_postable', 'not_tried'])
 const BEAT_PHASES = new Set(['thinking', 'tool_running', 'waiting_user', 'objective_step', 'idle'])
 // Who proposed a question at a heartbeat (code names of features, never content). A new provider adds its name here.
 const BEAT_PROVIDERS = new Set(['message', 'placement', 'attention', 'presence', 'browser_task', 'terminal_loop'])
@@ -145,6 +147,9 @@ export const NEXT_LABELS = Object.freeze({
   board_arrangement: Object.freeze(['applied', 'undone', 'rejected', 'kept_own', 'timed_out']),
 })
 const MAX_SMALL = 99
+// What the person was actually shown for one checked answer (draft_check, label arrives when the answer is settled): the Agent's text as written, the one revised text,
+// the unflagged part only, or nothing (every sentence removed). A word, never text. Additive: files without it load as before.
+export const POSTED_LABELS = Object.freeze(['as_written', 'revised', 'certain_part', 'withheld'])
 
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 // Rounding must not move a number across the bar that was applied to it (0.7999999999999999 against 0.8 must stay below).
@@ -200,7 +205,7 @@ export function normalizeEntry(raw, now = Date.now()) {
     for (const key of ['items', 'opaque', 'sentences', 'terms']) put(counts, key, count(raw.evidence[key], 99))
     if (Object.keys(counts).length) entry.evidence = counts
   }
-  put(entry, 'flow', word(FLOW_KINDS, raw.flow)); put(entry, 'posted', word(POSTED, raw.posted)); put(entry, 'beat', beat(raw.beat)); put(entry, 'questions', count(raw.questions, 16))
+  put(entry, 'flow', word(FLOW_KINDS, raw.flow)); put(entry, 'posted', word(POSTED, raw.posted)); put(entry, 'write', word(WRITE_OUTCOMES, raw.write)); put(entry, 'beat', beat(raw.beat)); put(entry, 'questions', count(raw.questions, 16))
   // Working-memory gate: sizes only (blocks, lines, estimated tokens before and after), the output kind and who chose. Never text.
   if (feature === 'working_memory' && record(raw.wm)) {
     const wm = {}
@@ -240,6 +245,7 @@ function normalizeOutcome(raw, feature = null) {
   put(out, 'run', word(RUN, raw.run)); put(out, 'toolActivities', count(raw.toolActivities, 1000))
   const next = typeof raw.next === 'string' && NEXT_LABELS[feature]?.includes(raw.next) ? raw.next : null
   put(out, 'next', next)
+  if (feature === 'draft_check') put(out, 'posted', typeof raw.posted === 'string' && POSTED_LABELS.includes(raw.posted) ? raw.posted : null)
   // Board reply screening: how many of the Agent's excerpts the owner kept or removed. Small integers only.
   if (feature === 'board_reply') { put(out, 'keptN', count(raw.keptN, MAX_SMALL)); put(out, 'removedN', count(raw.removedN, MAX_SMALL)) }
   return Object.keys(out).length ? out : null

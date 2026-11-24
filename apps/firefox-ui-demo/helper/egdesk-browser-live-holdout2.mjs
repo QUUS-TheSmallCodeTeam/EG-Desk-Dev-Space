@@ -47,6 +47,10 @@ export const HOLDOUT2_SETS = Object.freeze({
   // c26: the c24 fee-and-verification page and the settings error page under the stuck-page rule (egdesk-browser-stuck-person-controls.test.mjs)
   'browser-live-stuck-v1': ['sk-form', 'sk-error'],
   // c27: the ENTRY decision only (no step requests): the two holdout2 requests the request predicate read as answers, two general-knowledge controls, and three earlier entries
+  // c29: v3, the same four requests under the two-predicate entry (hc last: the cheapest request, so a ceiling met by real tokens costs the least)
+  'browser-live-entry-v3': ['en-ms', 'en-ctrl-a', 'en-ctrl-b', 'en-hc'],
+  // c28: v2, the membership request again under the account-data wording (v1: browser_entry .01 with the billing line shown), the two controls, the hospital request
+  'browser-live-entry-v2': ['en-ms', 'en-ctrl-a', 'en-ctrl-b', 'en-hc'],
   'browser-live-entry-v1': ['en-ms', 'en-hc', 'en-ctrl-a', 'en-ctrl-b', 'en-se', 'en-ig', 'en-st'],
 })
 const MSG_U = '이번 달 전기요금 고지서 내려받아줘', MSG_I = '주민등록등본 발급 신청해줘', MSG_H = '한결병원 다음 진료 예약 날짜 알려줘', MSG_M = '다음 결제일이 언제야?'
@@ -127,7 +131,7 @@ export function holdout2Checks({ phaseOf }) {
     'h2-hc-options': j => { const o = options(rows(j, 'hc-link')[0]); return has(o, '예약 내역 보기') && has(o, '진료 기록 보기') && has(o, '병원 소개') && !has(o, '로그아웃') },
     'h2-hc-list-options': j => { const o = options(rows(j, 'hc-link')[1]); return has(o, '예약 변경') && has(o, '마이페이지') && !has(o, '예약 취소') },
     'h2-cv-options': j => { const o = options(rows(j, 'hc-covered')[0]); return has(o, '예약 내역 보기') && !has(o, '동의') },
-    'h2-hc-entry-by-code': j => entry(j, 'hc-link')?.names.join(',') === 'browser_entry',
+    'h2-hc-entry-by-code': j => entry(j, 'hc-link')?.names.filter(n => n !== 'browser_entry_answer').join(',') === 'browser_entry',
     'h2-hc-opens-list': j => navs(j, 'hc-link')[0] === '/my/appointments',
     'h2-hc-done': j => status(j, 'hc-link') === 'done',
     'h2-hc-no-click': j => ran(j, 'hc-link') && clicks(j, 'hc-link').length === 0,
@@ -164,6 +168,7 @@ export function holdout2Answers(body) {
   const find = (values, word) => values.find(v => v.includes(word))
   return body.questions.map(q => {
     const values = (q.choices ?? []).map(c => c.value)
+    if (q.name === 'browser_entry_answer') return yesNo(q, /광합성|파이썬/.test(ev) ? 0.95 : 0.03)
     if (q.name === 'browser_entry') return yesNo(q, /광합성|파이썬/.test(ev) ? 0.02 : 0.95)
     if (/^browser_entry_card_\d+$/.test(q.name)) return yesNo(q, /증명서 발급|멤버십 관리|마이페이지|알림 설정/.test(q.instructions ?? '') ? 0.95 : 0.03)
     if (/^browser_entry_wall_\d+$/.test(q.name)) return yesNo(q, 0.02)

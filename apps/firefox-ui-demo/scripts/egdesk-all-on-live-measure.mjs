@@ -48,7 +48,10 @@ export const PLAN_FILE_V6 = fileURLToPath(new URL('./egdesk-all-on-live-measure.
 // Plan v7 (cycle 20): v6, plus a change nudge and a stop nudge (the engine side judged by code), a faithful revision wording for s3b and the
 // elapsed-time check of the nudge reply prompt. The latest plan.
 export const PLAN_FILE_V7 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v7.json', import.meta.url))
-export const LATEST_PLAN_FILE = PLAN_FILE_V7
+// Plan v8 (cycle 22): v7, plus the empty-answer path as an explicit step pair (every sentence withheld: nothing posted, recorded, the next turn told, held pages stay held)
+// and the switch one-packet (L7's EGDESK_TURN_MEMORY_ONE_PACKET, off) with its expectations. The latest plan.
+export const PLAN_FILE_V8 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v8.json', import.meta.url))
+export const LATEST_PLAN_FILE = PLAN_FILE_V8
 export const SCRIPT_FILE = fileURLToPath(import.meta.url)
 export const DEFAULT_CAPS = Object.freeze({ tokenCeiling: 80_000, maxRequests: 80 })
 const LIMITS = Object.freeze({ tokenCeilingMax: 200_000, maxRequestsMax: 200 })
@@ -59,10 +62,14 @@ const CLIENT = 'helper/egdesk-decision-client.mjs', SUPPORT = 'scripts/egdesk-al
 // ---- the journey: what the person says, and the scripted subjective model ----
 export const SAYS = Object.freeze({ quote: '지난주 A사 견적 건 어디까지 됐지?', tidy: '방금 그 내용 정리해줘', tests: '전체 테스트 돌리고 결과 알려줘',
   recall: 'PostgreSQL 전환은 설계에서 어떻게 하기로 정했었지?', deployed: 'PostgreSQL 마이그레이션 배포 끝났어', portal: '거래처 포털에서 이번 달 세금계산서 내려받아줘', second: '두 번째 사업자로',
-  nudge: '아니 지금 왜 멈췄니?', change: '그거 말고 B부터 해줘', stop: '그만해, 그거 하지 마', again: '전체 테스트 한 번 더 돌려줘' }) // nudge: the person's real turn in L3's c25 evidence (a message typed while the command runs)
+  nudge: '아니 지금 왜 멈췄니?', change: '그거 말고 B부터 해줘', stop: '그만해, 그거 하지 마', again: '전체 테스트 한 번 더 돌려줘',
+  // (cycle 22) the empty-answer path: a question the stored benchmark page answers, then a follow-up about the same page
+  bench: 'PostgreSQL 전환 배포는 끝났어?', benchFollow: '그럼 배포는 언제 하기로 했었지?' }) // nudge: the person's real turn in L3's c25 evidence (a message typed while the command runs)
 export const AGENT_SAYS = Object.freeze({ quote: 'A사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다.', tidy: 'A사 견적은 11월 3일 요청, 11월 6일 v1 발송, v2는 팀장 승인 후 발송 예정입니다.',
   recall: 'PostgreSQL 전환 설계에서 스키마 변환, 데이터 이관, 롤백 순서를 정하기로 확정했습니다.', tests: '테스트가 모두 통과했습니다.', noted: '네, 기록해 두겠습니다.', heard: '네, 알겠습니다.', ask: '사업자가 둘입니다. 어느 쪽으로 받을까요?', got: '세금계산서를 내려받았습니다.', stuck: '포털 작업을 마치지 못했습니다.',
-  stuckAsk: '포털에서 다음 단계를 정하지 못했습니다. 어느 사업자의 세금계산서를 받을지 알려 주세요.' })
+  stuckAsk: '포털에서 다음 단계를 정하지 못했습니다. 어느 사업자의 세금계산서를 받을지 알려 주세요.',
+  // (cycle 22) the Agent's answer to SAYS.bench says the deployment is done; the stored plan page records it as planned ("아직 배포 전이다"): the tense question flags the one sentence
+  bench: 'PostgreSQL 전환 배포를 완료했습니다.', benchFollow: 'PostgreSQL 전환은 12월 첫째 주에 배포할 예정입니다.' })
 export const COMMAND = 'npm test -- --suite=payroll-secret', COMMAND_OUTPUT = 'running 40 tests'
 // (cycle 16) The run's summary line. A real Codex completion's aggregatedOutput is the whole output, the streamed lines and this one; the
 // product keeps the longer of the streamed and the completed text (codex-run-outputs.mjs completeCommand), so a shorter completion was ignored.
@@ -183,7 +190,11 @@ export const STEPS = Object.freeze([
     await j.say((j.says ?? SAYS).stop, { inRunMessageTo: w.runs().at(-1).runId })
     await w.advance(5000)
     if (w.interruptsIn('s12-stop-nudge') > 0) { await w.endTurn('interrupted'); await w.advance(1000) }
-  } }
+  } },
+  // (cycle 22) The empty-answer path. The Agent answers the benchmark question with a number the page contradicts; the check supports no sentence, the one revision is
+  // checked again and fails, every sentence is removed: nothing is posted (owner rule), the outcome is recorded content-free, and the next turn is told the person saw no answer.
+  { id: 's13-withheld', room: DM, since: 8, title: 'every sentence of the answer is withheld', run: async (w, j) => { w.use(DM); await j.say((j.says ?? SAYS).bench); await w.advance(2000); await agentSays(w, (j.agent ?? AGENT_SAYS).bench, j); await j.pause() } },
+  { id: 's14-after-withheld', room: DM, since: 8, title: 'the follow-up after a withheld answer', run: async (w, j) => { w.use(DM); await j.say((j.says ?? SAYS).benchFollow); await w.advance(2000); await agentSays(w, (j.agent ?? AGENT_SAYS).benchFollow, j); await j.pause() } }
 ])
 
 // ---- the plan (pre-registered expectations) ----
@@ -461,6 +472,21 @@ const CHECKS = {
     const agent = newMessages(step, step.room).filter(m => m.role === 'assistant' && m.by === 'agent')
     return { pass: agent.length >= 1 && !agent.some(m => args.needles.some(n => m.text.includes(n))), observed: { messages: agent.map(m => m.text) } }
   },
+  // (cycle 22) The draft check's own record of this step: the calibration log does not record the posting outcome (revised / certain_part / withheld), only the first reading
+  // (check), what posting the draft unrevised would have done (ifUnrevised) and whether the posted text differs from the draft (attached). A revision that failed the check again
+  // shows as two readings of the sentence in one record; the posting outcome itself is judged by the messages (messageCount).
+  draftCheckRecord: ({ step, args }) => {
+    const rows = step.seen.calibration.filter(e => e.feature === 'draft_check'), last = rows.at(-1)
+    const asked = step.requests.filter(r => r.family === 'draft_check').length
+    return { pass: Boolean(last) && last.check === args.check && last.ifUnrevised === args.ifUnrevised && last.attached === true && asked === (args.requests ?? asked), observed: { check: last?.check ?? null, ifUnrevised: last?.ifUnrevised ?? null, attached: last?.attached ?? null, draftCheckRequests: asked } }
+  },
+  // (cycle 22) No page has its body twice in one engine packet (L7 c29, one packet: a page that is a selection item and a memory page goes once).
+  packetNoDuplicates: ({ step }) => {
+    const twice = step.seen.packets.flatMap(p => Object.entries(p.copies ?? {}).filter(([, n]) => n > 1).map(([id]) => id))
+    return { pass: step.seen.packets.length > 0 && twice.length === 0, observed: { twice, packets: step.seen.packets.length } }
+  },
+  // (cycle 22) The answering turn of this step did NOT carry this context block (by its key).
+  noContextKey: ({ step, args }) => ({ pass: step.seen.packets.length > 0 && !step.seen.packets.some(p => p.keys.includes(args.key)), observed: { keys: step.seen.packets.map(p => p.keys) } }),
   placementRecorded: ({ step }) => ({ pass: step.seen.placement.records.length >= 1, observed: { records: step.seen.placement.records, submitted: step.seen.placement.submitted } }),
 }
 export const CHECK_NAMES = Object.freeze(Object.keys(CHECKS))
@@ -553,7 +579,7 @@ function seenAfter(w, id, before, j) {
     browser: { note: note ? { status: note.status, next: note.next, code: note.code ?? null, candidates: note.candidates ?? [], stepsDone: note.stepsDone ?? null } : null,
       acts: w.acts.slice(before.acts).map(a => ({ type: a.type, url: a.url })) },
     writes: readWrites(w),
-    calibration: w.calibrationLog.entries().slice(before.calibration).map(e => ({ feature: e.feature, mode: e.mode, ...(e.flow !== undefined ? { flow: e.flow } : {}), ...(e.fallback ? { fallback: e.fallback } : {}),
+    calibration: w.calibrationLog.entries().slice(before.calibration).map(e => ({ feature: e.feature, mode: e.mode, ...(e.flow !== undefined ? { flow: e.flow } : {}), ...(e.fallback ? { fallback: e.fallback } : {}), ...(typeof e.check === 'string' ? { check: e.check } : {}), ...(typeof e.ifUnrevised === 'string' ? { ifUnrevised: e.ifUnrevised } : {}), ...(typeof e.attached === 'boolean' ? { attached: e.attached } : {}), ...(e.evidence && typeof e.evidence === 'object' ? { evidence: e.evidence } : {}), ...(typeof e.outcome?.posted === 'string' ? { posted: e.outcome.posted } : {}),
       // (cycle 13) the entry's judgments by their logged word and probability, so values such as the memory triage are measured per step
       judgments: (Array.isArray(e.judgments) ? e.judgments : []).filter(x => typeof x?.q === 'string' && Number.isFinite(x.p)).map(x => ({ q: x.q, p: x.p })) })),
   }
@@ -580,7 +606,22 @@ export function bodyFromProduct(stack) {
   return null
 }
 const estimateOf = (wire, body) => independentEstimate(wire.questions.filter(q => q.type === 'choice').length, wire.questions.filter(q => q.type !== 'choice').length, Buffer.byteLength(body))
-export function createMeasureTransport({ send = false, key = null, fetchImpl = globalThis.fetch, caps, plan, now = null, scripted = scriptedDecisions(), replay = null } = {}) {
+/**
+ * The scripted Decision answers of a dry run, plus one rule for the empty-answer step (plan v8): the scripted judge cannot read, so a sentence that says the PostgreSQL deployment
+ * is done ("완료했습니다", the stored page records it as planned) gets a yes on the tense question, as the real judge's reading would, in the draft and in its revision (the
+ * scripted revision keeps the flagged sentence). Nothing else differs from scriptedDecisions(). A dry run's withheld outcome therefore shows the product's path, not the judge.
+ */
+export function dryRunJudge() {
+  const base = scriptedDecisions(), flat = content => (typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => (typeof part?.text === 'string' ? part.text : '')).join('\n') : '')
+  return { answer: async wire => {
+    const answers = await base.answer(wire)
+    if (!wire.questions.some(q => /^tense_\d+$/.test(q.name))) return answers
+    const text = (Array.isArray(wire.input) ? wire.input.map(m => flat(m.content)) : [String(wire.input)]).join('\n')
+    const flagged = new Set([...text.matchAll(/Sentence S(\d+):\n"""\n([\s\S]*?)\n"""/g)].filter(m => m[2].includes('배포를 완료했습니다')).map(m => Number(m[1]) - 1))
+    return answers.map(a => (/^tense_(\d+)$/.test(a.name) && flagged.has(Number(/(\d+)/.exec(a.name)[1])) ? { ...a, probability: 0.95 } : a))
+  } }
+}
+export function createMeasureTransport({ send = false, key = null, fetchImpl = globalThis.fetch, caps, plan, now = null, scripted = dryRunJudge(), replay = null } = {}) {
   const ledger = { requests: 0, sent: 0, tokens: 0, reportedTokens: 0, byStep: {}, stopped: null, refusedBodies: 0, onWire: 0, replayUnmatched: 0, replayChangedBody: 0 }
   const stop = (reason, step) => { if (!ledger.stopped) ledger.stopped = { reason, step } }
   const transport = async ({ body, wire, row }) => {
@@ -832,7 +873,7 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
     }
   }
   // a dry run sends nothing: the declared ceiling is not a stop there (the scripted double over-selects pages); the estimate is reported against it
-  else if (plan.ceiling) for (const [flag, field] of [['--token-ceiling', 'tokenCeiling'], ['--max-requests', 'maxRequests']]) if (valueOf(flag) === null) caps[field] = LIMITS[`${field}Max`] / 2
+  else if (plan.ceiling) for (const [flag, field] of [['--token-ceiling', 'tokenCeiling'], ['--max-requests', 'maxRequests']]) if (valueOf(flag) === null) caps[field] = LIMITS[`${field}Max`]
   const key = send ? env.OPENAI_API_KEY ?? null : null
   if (send && !plausibleKey(key)) { printError('OPENAI_API_KEY is not set (or not a plausible key); nothing was sent'); return EXIT.noKey }
   print(JSON.stringify({ set: plan.set, mode: send ? 'send' : replayRun ? 'replay' : 'dry_run', endpoint: DECISIONS_ENDPOINT, plan: plan.sha256.slice(0, 16), registered: plan.registered, tokenCeiling: caps.tokenCeiling, maxRequests: caps.maxRequests,

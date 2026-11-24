@@ -5,7 +5,7 @@ import { ALLON_PLAN_FILE, FAMILY_PLAN_FILES, HARD_LIMITS, RECORDED_PLAN_FILE, RE
 
 // LIVE browser-task measurement: the product's objective browser loop over synthetic pages, the monthly tax-invoice journey
 // pre-registered in scripts/egdesk-browser-live-plan.json. Dry run by default.
-//   node scripts/egdesk-browser-live-measure.mjs [--plan recorded|allon|renamed|statement|delivery|settings|stability|settings-error|holdout|holdout-rerun|holdout2|stuck|entry]                          # dry run: prints the plan and its size, sends nothing
+//   node scripts/egdesk-browser-live-measure.mjs [--plan recorded|allon|renamed|statement|delivery|settings|stability|settings-error|holdout|holdout-rerun|holdout2|stuck|entry|entry2|entry3]                          # dry run: prints the plan and its size, sends nothing
 //   plans: default browser-live-v2 (month 1 + changed page), recorded = browser-live-recorded-v3 (month 2 + renamed business), renamed = browser-live-renamed-v3 (c17 re-measure: renamed + SSO page),
 //   allon = browser-live-allon-v1 (Main's all-on s10/s11 pages)
 //   OPENAI_API_KEY=... node scripts/egdesk-browser-live-measure.mjs --send [--out results.json]    # real, after approval

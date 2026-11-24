@@ -41,7 +41,9 @@ export const FAMILY_PLAN_FILES = Object.freeze({ statement: new URL('../scripts/
   'holdout-rerun': new URL('../scripts/egdesk-browser-live-plan-holdout-rerun.json', import.meta.url),
   holdout2: new URL('../scripts/egdesk-browser-live-plan-holdout2.json', import.meta.url),
   stuck: new URL('../scripts/egdesk-browser-live-plan-stuck.json', import.meta.url),
-  entry: new URL('../scripts/egdesk-browser-live-plan-entry.json', import.meta.url) })
+  entry: new URL('../scripts/egdesk-browser-live-plan-entry.json', import.meta.url),
+  entry2: new URL('../scripts/egdesk-browser-live-plan-entry2.json', import.meta.url),
+  entry3: new URL('../scripts/egdesk-browser-live-plan-entry3.json', import.meta.url) })
 // The plan sets this runner knows, with their phases in order. A phase with seed writes, before it runs and by code only, the record a
 // month-1 run writes (the same outcome layout through the same write path), so a small plan need not pay for month 1 again.
 const PLAN_SETS = Object.freeze({ 'browser-live-v2': ['month1', 'changed'], 'browser-live-recorded-v3': ['month2', 'renamed'], 'browser-live-allon-v1': ['allon'],
@@ -364,6 +366,7 @@ function expectedAnswers(body) {
   const pick = (q, value, confidence = 0.95) => ({ name: q.name, type: 'choice', choice: value, confidence, probabilities: [{ value, probability: confidence }] })
   return body.questions.map(q => {
     const values = (q.choices ?? []).map(c => c.value)
+    if (q.name === 'browser_entry_answer') return { name: q.name, type: 'predicate', probability: 0.03 } // c29
     if (q.name === 'browser_entry') return { name: q.name, type: 'predicate', probability: 0.95 } // c20: the request predicate
     if (/^browser_entry_card_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: q.name === 'browser_entry_card_0' ? 0.95 : 0.03 }
     if (q.name === 'task_resume') return pick(q, 'resume_task')

@@ -266,9 +266,9 @@ const TRAITS = ['compare', 'sequence', 'open_items', 'single']
 //   single      fact_M#     does this material state a concrete fact?
 // A part whose only way of showing is a card already on the board for it (provenance or title, computed) is reused without a question.
 export const FIT_KINDS = Object.freeze({ compare: 'aspect', sequence: 'happened', open_items: 'todo', single: 'fact' })
-const STAGE_KINDS = { place: ['several', 'one_sentence', 'combines', 'about', 'same'], fit: ['aspect', 'happened', 'todo', 'fact'], order: ['before'], fill_check: ['slot', 'step'], coverage: ['covers', 'onboard'] }
+const STAGE_KINDS = { place: ['several', 'one_sentence', 'combines', 'about', 'same'], fit: ['aspect', 'happened', 'todo', 'fact'], order: ['before'], fill_check: ['slot', 'step'], coverage: ['covers', 'onboard', 'stated'] }
 const SHOW = { compare: 'how these two versions differ', sequence: 'what happened across these materials, in date order', open_items: 'what is still not done in these materials', single: 'this one material' }
-export const questionName = q => (q.kind === 'several' || q.kind === 'one_sentence' || q.kind === 'combines' || q.kind === 'covers' ? q.kind : q.kind === 'about' ? `about_${q.material}` : q.kind === 'onboard' ? `onboard_${q.fact}` : q.kind === 'same' ? `same_${q.materials[0]}_${q.materials[1]}` : q.kind === 'aspect' ? `aspect_${q.part}` : ['happened', 'todo', 'fact'].includes(q.kind) ? `${q.kind}_${q.material}` : q.kind === 'before' ? `before_${q.first.part}_${q.second.part}`
+export const questionName = q => (q.kind === 'several' || q.kind === 'one_sentence' || q.kind === 'combines' || q.kind === 'covers' ? q.kind : q.kind === 'about' ? `about_${q.material}` : q.kind === 'onboard' ? `onboard_${q.fact}` : q.kind === 'stated' ? `stated_${q.fact}` : q.kind === 'same' ? `same_${q.materials[0]}_${q.materials[1]}` : q.kind === 'aspect' ? `aspect_${q.part}` : ['happened', 'todo', 'fact'].includes(q.kind) ? `${q.kind}_${q.material}` : q.kind === 'before' ? `before_${q.first.part}_${q.second.part}`
   : q.kind === 'slot' ? `slot_${q.part}_r${q.row}${q.side ? `_${q.side}` : ''}` : `step_${q.part}`)
 
 /** The closed object for one judgment, re-validated here (the bridge route is reachable from the chrome): unknown fields, aliases, components or stages refuse the whole request. */
@@ -308,9 +308,9 @@ export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
         if (!exactKeys(q, ['kind', 'board'])) throw 0
         out = { kind: 'covers', board: boardFields(q.board) }
       }
-      else if (q.kind === 'onboard') {
+      else if (q.kind === 'onboard' || q.kind === 'stated') {
         if (!exactKeys(q, ['kind', 'fact', 'text']) || !/^F[1-9]$/.test(q.fact) || !plain(q.text, SKELETON_LIMITS.factMax)) throw 0
-        out = { kind: 'onboard', fact: q.fact, text: q.text }
+        out = { kind: q.kind, fact: q.fact, text: q.text }
       }
       else if (q.kind === 'about') { if (!exactKeys(q, ['kind', 'material']) || !mats.has(q.material)) throw 0; out = { kind: 'about', material: q.material } }
       else if (q.kind === 'same') { if (!exactKeys(q, ['kind', 'materials']) || !Array.isArray(q.materials) || q.materials.length !== 2 || q.materials[0] === q.materials[1] || !q.materials.every(a => mats.has(a))) throw 0; out = { kind: 'same', materials: [...q.materials] } }
@@ -355,6 +355,7 @@ const RULES = {
   order: 'You are a system judge. Each question describes TWO parts of a briefing by the materials they show. Answer each question on its own. Judge only which part a reader who has seen none of it should be shown first to follow the other.',
   coverage: 'You are a system judge checking a finished board briefing against what the person asked. Judge only from the quoted request, the quoted answer and the quoted parts of the board, in their order.',
   coverage_facts: 'You are a system judge checking whether a finished board briefing shows given facts. Judge only from the quoted parts of the board and the quoted fact.',
+  coverage_stated: 'You are a system judge checking whether a finished board briefing shows given facts, and whether a sentence states what the materials say. Judge only from the quoted parts of the board, the quoted materials and the quoted sentence or fact.',
   fill_check: 'You are a system judge checking a text against its source. Each question quotes ONE text and ONE source. Answer each question on its own, whatever the others are. Rewording, summarising and linking words are fine. A number, amount, date, name or event that the quoted source does not contain is NOT supported.',
 }
 // Only what the record has: no date when it has none, no status when the record does not say ("unknown" is not a status to judge from).
@@ -373,6 +374,9 @@ function questionText(q, c, catalog) {
   if (q.kind === 'covers') return `The person asked, quoted exactly as a JSON string: ${JSON.stringify(c.request)}. The board, its parts quoted in order as JSON: ${JSON.stringify(q.board)}. Does this board answer everything the person's request asks about${c.answer ? ' (the request may refer to the assistant\'s answer quoted above)' : ''}?`
   // Cycle 21 (R4): one fact per question, quoted alone; the board is quoted once, above.
   if (q.kind === 'onboard') return `The fact, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Is this fact shown on the board quoted above (in the text or the shown fields of any of its parts)?`
+  // Cycle 36 (check-11): a sentence of the answer that no code anchor ties to a material may be a statement ABOUT the answer ("정리했습니다", "파일은 변경하지 않았습니다") that no board can show.
+  // Only the judge can tell it from a content fact, from the materials quoted once above.
+  if (q.kind === 'stated') return `The sentence, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Does this sentence restate something that the materials quoted above say? (A sentence that only describes what the assistant did, how its answer is organised, or what it did not do is not a statement of the materials.)`
   if (q.kind === 'about') return `The person asked, quoted exactly as a JSON string: ${JSON.stringify(c.request)}. Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material contain information that the person's request asks about${c.answer ? ' (the request may refer to the assistant\'s answer quoted above)' : ''}?`
   if (q.kind === 'same') return `Two materials, each quoted as JSON: ${q.materials.map(a => quoteMaterial(mat(a))).join('; ')}. Are these two materials an earlier and a later version of the same document, offer or plan?`
   if (q.kind === 'fact') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material state at least one concrete fact (for example a number, an amount, a date, a name or a decision)?`
@@ -394,8 +398,8 @@ export function createSkeletonJudge(catalog = BRIEFING_CATALOG) {
     if (!c) return manual
     // Plain text messages (the input shape of the requests that were really sent). The request and, for the placement questions, the materials are listed once;
     // every other question quotes its own material, text or source inside the question.
-    const listing = c.stage === 'coverage' && c.board ? `\n\nThe board, its parts quoted in order as JSON: ${JSON.stringify(c.board)}` : c.stage === 'coverage' && c.answer ? `\n\nThe assistant's answer to it, quoted exactly as a JSON string: ${JSON.stringify(c.answer)}` : c.stage === 'place' ? `${c.answer ? `\n\nThe assistant's answer to it, quoted exactly as a JSON string: ${JSON.stringify(c.answer)}` : ''}\n\nMaterials the assistant had, each quoted as JSON:\n${c.materials.map(quoteMaterial).join('\n')}` : ''
-    const packet = { input: [{ role: 'developer', content: RULES[c.stage === 'coverage' && c.board ? 'coverage_facts' : c.stage] }, { role: 'user', content: `Request, quoted exactly as a JSON string: ${JSON.stringify(c.request)}${listing}` }],
+    const listing = c.stage === 'coverage' && c.board ? `\n\nThe board, its parts quoted in order as JSON: ${JSON.stringify(c.board)}${c.questions.some(q => q.kind === 'stated') ? `\n\nThe materials, each quoted as JSON:\n${c.materials.map(quoteMaterial).join('\n')}` : ''}` : c.stage === 'coverage' && c.answer ? `\n\nThe assistant's answer to it, quoted exactly as a JSON string: ${JSON.stringify(c.answer)}` : c.stage === 'place' ? `${c.answer ? `\n\nThe assistant's answer to it, quoted exactly as a JSON string: ${JSON.stringify(c.answer)}` : ''}\n\nMaterials the assistant had, each quoted as JSON:\n${c.materials.map(quoteMaterial).join('\n')}` : ''
+    const packet = { input: [{ role: 'developer', content: RULES[c.stage === 'coverage' && c.board ? (c.questions.some(q => q.kind === 'stated') ? 'coverage_stated' : 'coverage_facts') : c.stage] }, { role: 'user', content: `Request, quoted exactly as a JSON string: ${JSON.stringify(c.request)}${listing}` }],
       questions: c.questions.map(q => predicateQuestion(questionName(q), questionText(q, c, catalog))), promptCacheKey: `briefing-skeleton-${c.stage}` }
     return { status: 'prepared', kind: 'briefing-skeleton', mode, binding, dto: { ...c, purpose: `briefing skeleton: ${c.stage}`, items: [] }, options: c.questions.map(questionName), packet }
   }
@@ -559,12 +563,23 @@ export function buildGuide(items, scene, retire = []) {
       step: STEP_SLOTS, slots: slotsOf(item, scene.catalog) })),
     retrievals: [...retire] }
 }
-/** only: fill just these items again. rejected: closed words for what was not supported last time (e.g. "P2 line 2", "P1 explanation"). */
+// Cycle 35 (c33's real replies took 20-30 s per card; output and reasoning size dominate): the model is asked for the MINIMUM the render needs. A step's fallback sentence is not
+// asked for (the validator uses the step's text when the reply has none), and in a SEQUENCE line the label (the material's date) and the text (the material's own sentences, as many
+// as fit the line) may be null: code copies them from the material the line cites, exactly. The model is left only with choosing and ordering the lines.
+export const copyField = (item, field) => item?.shows === 'sequence' && (field?.name === 'label' || field?.name === 'text')
+const compactItem = item => ({ ...item, step: (item.step ?? []).filter(s => s.name !== 'fallback'), slots: (item.slots ?? []).map(s => (s.type === 'list' && Array.isArray(s.of) && s.of.some(f => f.name === 'from' && f.type === 'material') ? { ...s, of: s.of.map(f => (copyField(item, f) ? { ...f, copy: true } : f)) } : s)) })
+/** The longest run of whole sentences of `text` that fits `max` characters (a line of a card): the copy a null line text stands for. '' when even the first sentence does not fit. */
+export function sentencesThatFit(text, max) {
+  let out = ''
+  for (const part of clean(text, 4000).split(/(?<=[.!?。])\s+/)) { const next = out ? `${out} ${part}` : part; if (next.length > max) break; out = next }
+  return out
+}
+/** only: fill just these items again. rejected: closed words for what was not supported last time (e.g. "P2 line 2", "P1 explanation"). cover: material aliases the cards must carry. */
 export function fillRequest(guide, materials, only = null, rejected = [], cover = []) {
-  return { kind: 'briefing_fill', ...(only ? { only: [...only] } : {}), ...(rejected.length ? { rejected: [...rejected] } : {}), ...(cover.length ? { cover: [...cover] } : {}), guide: { ...guide, items: guide.items.filter(i => !only || only.has(i.id)) },
+  return { kind: 'briefing_fill', ...(only ? { only: [...only] } : {}), ...(rejected.length ? { rejected: [...rejected] } : {}), ...(cover.length ? { cover: [...cover] } : {}), guide: { ...guide, items: guide.items.filter(i => !only || only.has(i.id)).map(compactItem) },
     materials: materials.map(m => ({ alias: m.alias, title: m.title, text: m.text, at: m.at, status: m.status })) }
 }
-function readSlot(schema, value, item, reported) {
+function readSlot(schema, value, item, reported, materials = null) {
   if (reported) return { issue: 'empty' }
   if (schema.type === 'text') { const v = clean(value, 4000); return !v ? { issue: 'empty' } : v.length > schema.max ? { issue: 'mismatch' } : { value: v } }
   if (schema.type === 'material') return value === undefined || value === null || value === '' ? { issue: 'empty' } : item.materials.includes(value) ? { value } : { issue: 'mismatch' }
@@ -574,7 +589,11 @@ function readSlot(schema, value, item, reported) {
   for (const row of value) {
     if (!isObj(row) || Object.keys(row).some(k => !schema.of.some(f => f.name === k))) return { issue: 'mismatch' }
     const out = {}
-    for (const f of schema.of) { const r = readSlot(f, row[f.name], item, false); if (r.issue) return { issue: r.issue === 'empty' && value.length === 1 ? 'empty' : 'mismatch' }; out[f.name] = r.value }
+    for (const f of schema.of) {
+      // a sequence line's label / text left null is the cited material's own date / sentences (copyField), never a value the model had to retype
+      let given = row[f.name]
+      if (copyField(item, f) && (given === null || given === undefined || given === '') && materials) { const m = materials.get(row.from); given = !m ? null : f.name === 'label' ? (m.at ?? null) : (sentencesThatFit(m.text, f.max) || null) }
+      const r = readSlot(f, given, item, false, materials); if (r.issue) return { issue: r.issue === 'empty' && value.length === 1 ? 'empty' : 'mismatch' }; out[f.name] = r.value }
     rows.push(out)
   }
   return rows.length < schema.min ? { issue: 'mismatch' } : { value: rows }
@@ -584,7 +603,8 @@ function readSlot(schema, value, item, reported) {
  * The reply may only fill what the guide lists: an unknown item, field or slot refuses the whole reply (no new components, no extra steps). A slot the model
  * reports as unfillable, or leaves out, is an issue of that item, never a reason to invent a value.
  */
-export function validateFill(guide, reply, { only = null, needTitle = false } = {}) {
+export function validateFill(guide, reply, { only = null, needTitle = false, materials = null } = {}) {
+  const byAlias = Array.isArray(materials) ? new Map(materials.map(m => [m.alias, m])) : null
   if (!isObj(reply) || !isObj(reply.items)) return { ok: false, reason: 'not-an-object' }
   if (Object.keys(reply).some(k => !['title', 'items', 'unfillable'].includes(k))) return { ok: false, reason: 'extra-field' }
   const wanted = guide.items.filter(i => !only || only.has(i.id)), ids = new Set(wanted.map(i => i.id))
@@ -601,8 +621,8 @@ export function validateFill(guide, reply, { only = null, needTitle = false } = 
     const given = isObj(got.slots) ? got.slots : {}
     if (Object.keys(given).some(k => !item.slots.some(s => s.name === k))) return { ok: false, reason: 'extra-slot' }
     const out = { slots: {} }
-    for (const s of item.step) { const r = readSlot(s, got[s.name], item, reported.has(`${item.id}/${s.name}`)); if (r.issue) issues.push({ item: item.id, slot: s.name, kind: r.issue }); else out[s.name] = r.value }
-    for (const s of item.slots) { const r = readSlot(s, given[s.name], item, reported.has(`${item.id}/${s.name}`)); if (r.issue) issues.push({ item: item.id, slot: s.name, kind: r.issue }); else out.slots[s.name] = r.value }
+    for (const s of item.step) { const r = readSlot(s, s.name === 'fallback' && got.fallback === undefined ? got.text : got[s.name], item, reported.has(`${item.id}/${s.name}`)); if (r.issue) issues.push({ item: item.id, slot: s.name, kind: r.issue }); else out[s.name] = r.value }
+    for (const s of item.slots) { const r = readSlot(s, given[s.name], item, reported.has(`${item.id}/${s.name}`), byAlias); if (r.issue) issues.push({ item: item.id, slot: s.name, kind: r.issue }); else out.slots[s.name] = r.value }
     if (out.slots.left !== undefined && out.slots.left === out.slots.right) issues.push({ item: item.id, slot: 'right', kind: 'mismatch' })
     items[item.id] = out
   }
@@ -674,6 +694,8 @@ export function answerUnits(answer) { return taggedUnits(answer).map(u => u.text
 // The same units, each with whether it is a table row. Cycle 33: a row is ONE fact (its cells are one record: the date, the commit and the test count of the same line).
 // c32's real answer had "결제 모듈 병합 완료. 알림 설정 화면은 시안만 확정" in a cell; splitting the row at that period gave one fact with the date and no commit, and another
 // with the commit and no date, and the coverage check asked the board for both halves.
+// a table cell that carries no value (an empty marker), not a statement
+const NO_VALUE_CELL = /^(?:[-–—]+|없음|해당\s?없음|기록\s?없음|n\/a|none)$/i
 function taggedUnits(answer) {
   const raw = String(answer ?? '').normalize('NFC').slice(0, SKELETON_LIMITS.answerMax)
   if (!/\n/.test(raw)) return [{ text: raw, row: false }]
@@ -686,7 +708,9 @@ function taggedUnits(answer) {
     if (/^\|.*\|\s*$/.test(l)) {
       if (/^\|[\s:|-]+\|$/.test(l)) continue // separator row
       if (/^\|[\s:|-]+\|$/.test((lines[i + 1] ?? '').trim())) continue // header row (the next line is the separator)
-      l = l.replace(/^\||\|$/g, '').split('|').map(c => c.trim()).filter(Boolean).join(' · '); row = true
+      // Cycle 35 (check-9: the coverage check refused the row "11-24 · 검색 화면 착수 · 기록 없음 · 기록 없음" because no board can show that a commit and a test count were never recorded, and it
+      // cites the 11-24 note by its date, so it blocked): a cell that only says "no value" states nothing and is left out of the row's fact.
+      l = l.replace(/^\||\|$/g, '').split('|').map(c => c.replace(/\*\*|__|`/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').trim()).filter(c => c && !NO_VALUE_CELL.test(c)).join(' · '); row = true
     }
     l = l.replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, '').replace(/\*\*|__|`/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').trim()
     if (l) out.push({ text: l, row })
@@ -863,7 +887,7 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     const want = fillRequest(guide, scene.materials, only, rejected, cover)
     stats.received.push({ turn: stats.fillTurns, keys: Object.keys(want), items: want.guide.items.map(i => `${i.id}:${i.component}`), materials: want.materials.map(m => m.alias), ...(rejected.length ? { rejected } : {}), ...(cover.length ? { cover } : {}) })
     const reply = await fill(want)
-    return { ...validateFill(guide, reply, { only }), failure: reply === null || reply === undefined ? failureOf() : null }
+    return { ...validateFill(guide, reply, { only, materials: scene.materials }), failure: reply === null || reply === undefined ? failureOf() : null }
   }
   // Cycle 34 (owner rule U5): when the whole fill did not come back, ONE bounded re-design round asks for the items one by one (each reply is short, so each is asked inside
   // its own time); the title is the first piece's. Not for a single item (nothing to split) and at most SKELETON_LIMITS.pieceTurns requests; any piece unusable -> stop.
@@ -875,7 +899,7 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
       stats.pieceTurns = (stats.pieceTurns ?? 0) + 1
       const only = new Set([item.id]), want = fillRequest(guide, scene.materials, only)
       stats.received.push({ turn: stats.fillTurns, piece: item.id, keys: Object.keys(want), items: want.guide.items.map(i => `${i.id}:${i.component}`), materials: want.materials.map(m => m.alias) })
-      const reply = await fill(want), read = validateFill(guide, reply, { only, needTitle: true })
+      const reply = await fill(want), read = validateFill(guide, reply, { only, needTitle: true, materials: scene.materials })
       stats.pieces.push({ item: item.id, ok: read.ok, ...(read.ok ? {} : { reason: read.reason }), ...(reply === null || reply === undefined ? { failure: failureOf() } : {}) })
       if (!read.ok) return { ok: false, reason: `piece-${read.reason}`, failure: reply === null || reply === undefined ? failureOf() : null }
       all.title ??= read.title; Object.assign(all.items, read.items); all.issues.push(...read.issues)
@@ -993,11 +1017,16 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     const split = said ? answerFacts(answer) : { facts: keptMats.slice(0, SKELETON_LIMITS.maxFacts).map(m => clean(m.text.split(/(?<=[.!?。])\s+/)[0], SKELETON_LIMITS.factMax)).filter(Boolean), cut: Math.max(0, keptMats.length - SKELETON_LIMITS.maxFacts) }
     const facts = split.facts.map((text, i) => ({ id: `F${i + 1}`, text, cites: said ? factCites(text, keptMats) : [keptMats[i].alias], p: null }))
     Object.assign(coverage, { from: said ? 'answer' : 'materials', facts, cut: split.cut, missing: [], unshowable: [] })
-    const askFacts = async list => { coverage.asked++; const r0 = await ask('coverage', list.map(f => ({ kind: 'onboard', fact: f.id, text: f.text })), { board: boardView() })
-      if (!r0.unavailable) for (const f of list) f.p = r0.answers[`onboard_${f.id}`] ?? null; return r0 }
-    const sortOut = () => { const no = facts.filter(f => isNo(f.p)); coverage.unshowable = no.filter(f => f.cites?.length === 0).map(f => f.id); coverage.missing = no.filter(f => f.cites?.length !== 0).map(f => f.id); return facts.filter(f => coverage.missing.includes(f.id)) }
+    // Cycle 36: a fact with no code anchor (cites null) also gets the question "does it restate something the materials say?" in the same request (first ask only). Decided NO
+    // (a sentence about the answer itself) = no board can show it: recorded as unshowable, not missing. Yes or undecided = it is enforced as before.
+    const askFacts = async (list, withStated = false) => { coverage.asked++
+      const stated = withStated ? list.filter(f => f.cites === null).map(f => ({ kind: 'stated', fact: f.id, text: f.text })) : []
+      const r0 = await ask('coverage', [...list.map(f => ({ kind: 'onboard', fact: f.id, text: f.text })), ...stated], { board: boardView() })
+      if (!r0.unavailable) for (const f of list) { f.p = r0.answers[`onboard_${f.id}`] ?? null; if (withStated && f.cites === null) f.stated = r0.answers[`stated_${f.id}`] ?? null } return r0 }
+    const moot = f => f.cites?.length === 0 || (f.cites === null && isNo(f.stated))
+    const sortOut = () => { const no = facts.filter(f => isNo(f.p)); coverage.unshowable = no.filter(moot).map(f => f.id); coverage.missing = no.filter(f => !moot(f)).map(f => f.id); return facts.filter(f => coverage.missing.includes(f.id)) }
     if (facts.length) {
-      const r1 = await askFacts(facts)
+      const r1 = await askFacts(facts, true)
       if (r1.unavailable) return unavailable(r1, true)
       const missing = sortOut()
       if (missing.length) {

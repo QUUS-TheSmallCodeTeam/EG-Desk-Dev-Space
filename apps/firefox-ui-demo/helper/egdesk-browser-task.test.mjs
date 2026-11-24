@@ -229,7 +229,7 @@ test('S8 calibration records for the entry decision (and, since c18, for each st
 test('entry questions ride on an existing request (c20): the request predicate, then one predicate per code-enumerated card', () => {
   const cards = [{ cardId: 'a', host: 'one.example' }, { cardId: 'b', host: 'two.example' }]
   const qs = entryQuestion(cards)
-  assert.deepEqual(qs.map(q => q.name), ['browser_entry', 'browser_entry_card_0', 'browser_entry_card_1'])
+  assert.deepEqual(qs.map(q => q.name), ['browser_entry', 'browser_entry_answer', 'browser_entry_card_0', 'browser_entry_card_1'])
   const P = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { type: 'predicate', probability: v }]))
   assert.deepEqual(readBrowserEntry(P({ browser_entry: 0.9, browser_entry_card_0: 0.05, browser_entry_card_1: 0.9 }), cards).cardId, 'b')
   // an undecided, refused or missing entry never starts a task

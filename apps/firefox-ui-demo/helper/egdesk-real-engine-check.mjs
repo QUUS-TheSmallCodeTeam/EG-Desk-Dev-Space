@@ -393,7 +393,8 @@ export async function runConversation({ options, set, conversation, deps = {} })
       turnHooks.observe(method, params) // registered hooks
       try {
         const result = await rpc.request(method, params)
-        rec.requests.push({ method, ms: ms(start) })
+        // contextKeys (c27): the NAMES of the additionalContext blocks a turn/start carried (never their text): whether EG-Desk's own blocks (egdesk_stopped_command, ...) rode along
+        rec.requests.push({ method, ms: ms(start), ...(method === 'turn/start' && params?.additionalContext && typeof params.additionalContext === 'object' ? { contextKeys: Object.keys(params.additionalContext).filter(k => /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(k)).slice(0, 16) } : {}) })
         if (method === 'thread/start') { lastThreadStart = result; if (!persisted && result?.thread?.ephemeral !== true) { rec.aborted ??= 'thread_not_ephemeral' } }
         // persisted mode: every thread the engine reports is in the ledger before anything else happens with it (a crash leaves the record of what to delete)
         if (persisted && (method === 'thread/start' || method === 'thread/fork') && typeof result?.thread?.id === 'string') {
@@ -493,7 +494,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const runPrivate = chat.internalTurns.run.bind(chat.internalTurns)
     chat.internalTurns.run = async args => {
       const began = performance.now()
-      try { const out = await runPrivate(args); turnNow.internal.push({ via: out.via ?? null, ms: ms(began), chars: out.text.length, text: clip(out.text, 400), schema: Boolean(args.outputSchema), preamble: out.via === 'fresh' && Boolean(args.fresh?.preamble) }); return out }
+      try { const out = await runPrivate(args); turnNow.internal.push({ via: out.via ?? null, ms: ms(began), chars: out.text.length, model: out.model ?? null, effort: out.effort ?? null, source: out.source ?? null, text: clip(out.text, 400), schema: Boolean(args.outputSchema), preamble: out.via === 'fresh' && Boolean(args.fresh?.preamble) }); return out }
       catch (error) { turnNow.internal.push({ ms: ms(began), error: String(error?.code ?? 'error').slice(0, 60), message: clip(error?.message ?? '', 200) }); throw error }
     }
     const composeWriter = chat.writeChecked.bind(chat)
@@ -539,7 +540,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     // a message typed into the working run, afterMs after that turn started; not a turn of its own (the run's turn keeps going)
     const sendInRun = async (ctx, text, afterMs) => {
       const wait = afterMs - (performance.now() - ctx.started)
-      if (wait > 0) await sleep(wait)
+      if (wait > 0) await (deps.sleep ?? sleep)(wait) // deps.sleep: a test drives the wait from events instead of the wall clock
       while (performance.now() - ctx.started < afterMs) await sleep(1) // a timer may fire a millisecond early: never act before afterMs
       const mark = { afterMs, sentAtMs: ms(ctx.started), tools: turnNow.toolCalls.size, ran: runnerLog.length, posted: assistantTexts().length, accepted: false, error: null }
       try { const out = await chat.send({ clientThreadId, conversationId: nativeThread, message: text, requestId: `req-${++requestSeq}`, inRunMessageTo: ctx.run.runId }); mark.accepted = out?.accepted === true && out?.inRun === true } catch (error) { mark.error = String(error?.code ?? 'error').slice(0, 60) }
@@ -553,7 +554,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const engineAction = async (kind, ctx, step) => {
       const afterMs = step.afterMs ?? 0
       const wait = afterMs - (performance.now() - ctx.started)
-      if (wait > 0) await sleep(wait)
+      if (wait > 0) await (deps.sleep ?? sleep)(wait)
       while (performance.now() - ctx.started < afterMs) await sleep(1) // a timer may fire a millisecond early: never act before afterMs
       const mark = { afterMs, sentAtMs: ms(ctx.started), tools: turnNow.toolCalls.size, ran: runnerLog.length, posted: assistantTexts().length, accepted: false, error: null }
       try {
@@ -615,6 +616,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       for (const a of attached) if (turn.expect?.[a.name] !== undefined && a.afterTurn) hookRecords[a.name] = await a.afterTurn({ run: sub.at(-1).run, say: turn.say, answer: posted.at(-1) ?? null, turnIndex: index + 1 })
       const window = rec.requests.slice(requestsFrom), countOf = method => window.filter(r => r.method === method).length
       const engineRequests = {}
+      const contextKeys = [...new Set(window.flatMap(r => r.contextKeys ?? []))]
       for (const r of window) engineRequests[r.method] = (engineRequests[r.method] ?? 0) + 1
       const flat = {
         resumes: countOf('thread/resume'), unsubscribes: countOf('thread/unsubscribe'),
@@ -626,7 +628,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
       await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
-        ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(sub.some(s => s.flowRows?.length) ? { flowRows: sub.flatMap(s => s.flowRows) } : {}), ...(sub.some(s => s.internal?.length) ? { internalTurns: sub.flatMap(s => s.internal) } : {}), ...(sub.some(s => s.writers?.length) ? { writers: sub.flatMap(s => s.writers) } : {}), ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...ext.records, expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
+        ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(contextKeys.length ? { contextKeys } : {}), ...(sub.some(s => s.flowRows?.length) ? { flowRows: sub.flatMap(s => s.flowRows) } : {}), ...(sub.some(s => s.internal?.length) ? { internalTurns: sub.flatMap(s => s.internal) } : {}), ...(sub.some(s => s.writers?.length) ? { writers: sub.flatMap(s => s.writers) } : {}), ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...ext.records, expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {
         // the message typed into the run: what happened after it was sent
         const prev = sub[0], after = texts.slice(mark.posted)
