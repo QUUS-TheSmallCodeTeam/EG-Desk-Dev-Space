@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import path from 'node:path'
 import { createGateHookBroker, createGateHookHandler, commandKey, GATE_HOOK_OPTIONS } from './egdesk-gate-hook-broker.mjs'
-import { runGateHook, hookCommandText, gateHookMain } from './egdesk-gate-hook-core.mjs'
+import { runGateHook, hookCommandText, gateHookMain, GATE_HOOK_ENV } from './egdesk-gate-hook-core.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
@@ -263,4 +263,24 @@ test('several commands denied in one turn are asked one at a time, in order; eac
   broker.turnStarted({ conversationId: 'c', turnId: 'T5' })
   assert.equal((await status('T5', 'git branch -D topic')).status, 'needs_person', 'nothing is carried past a turn that did not try it')
   assert.equal((await status('T5', A)).status, 'queued')
+})
+
+test('the token is kept out of the model\'s own commands by Codex\'s default excludes, and the endpoint is harmless even if the model has it', async () => {
+  // codex-rs/protocol/src/shell_environment.rs populate_env, step 2 (commit a0d5b0a6): *KEY*, *SECRET*, *TOKEN*, case-insensitive
+  const defaultExcluded = name => ['KEY', 'SECRET', 'TOKEN'].some(part => name.toUpperCase().includes(part))
+  assert.equal(defaultExcluded(GATE_HOOK_ENV.token), true, 'the token variable is dropped from model-run commands by default')
+  assert.equal(defaultExcluded(GATE_HOOK_ENV.url), false, 'the address is visible to the model, and that is acceptable')
+  // a model that read the token anyway can only ask the same question as the hook
+  const broker = createGateHookBroker({ mode: () => 'on', home: '/home/synthetic' })
+  broker.turnStarted({ conversationId: 'c', turnId: 'T1' })
+  await broker.check({ sessionId: 'c', turnId: 'T1', cwd: CWD, command: 'git clean -fdx' })
+  broker.turnEnded({ turnId: 'T1' })
+  await broker.readReply({ conversationId: 'c', reply: 'yes', client: replyClient(0.97, 0.01), egress: OPEN })
+  broker.turnStarted({ conversationId: 'c', turnId: 'T2' })
+  // a forged check consumes the approval: the real hook's check that follows is denied (fails closed)
+  assert.equal((await broker.check({ sessionId: 'c', turnId: 'T2', cwd: CWD, command: 'git clean -fdx' })).decision, 'allow')
+  assert.equal((await broker.check({ sessionId: 'c', turnId: 'T2', cwd: CWD, command: 'git clean -fdx' })).decision, 'deny')
+  // forged checks of other commands never approve anything; repeating them only reaches stop_asking sooner (fails closed)
+  for (let i = 0; i < 3; i++) assert.equal((await broker.check({ sessionId: 'c', turnId: 'T2', cwd: CWD, command: 'git push --force origin main' })).decision, 'deny')
+  assert.equal(Object.keys(broker).filter(name => /approve|grant|record/i.test(name)).length, 0, 'no method records an approval except readReply')
 })
