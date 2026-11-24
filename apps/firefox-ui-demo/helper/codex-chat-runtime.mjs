@@ -38,6 +38,8 @@ import { planSessionTopic, SESSION_TOPIC_LIMITS } from './egdesk-session-topic.m
 import { TOPIC_ANSWER_LIMIT, TOPIC_ANSWER_HOLD_MS, topicAnswerContradiction } from './egdesk-topic-answer-grounding.mjs'
 import { speechSegments } from './egdesk-speech-grounding.mjs'
 import { deriveTurnPosition, prepareTurnMemory } from './egdesk-turn-memory.mjs'
+import { createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry } from './egdesk-browser-task.mjs'
+import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, YES as MEMORY_YES } from './egdesk-wiki-reconstruction.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
@@ -771,6 +773,9 @@ export class CodexChatRuntime {
     this.turnMemoryRuns = new Set() // in-flight advisory memory jobs (never awaited by a turn)
     this.turnMemoryShadow = new Map() // thread -> receipts of what advisory packets WOULD have delivered; in memory only, bounded
     this.turnMemoryCalibration = new WeakMap() // run -> calibration handle of the advisory memory entry
+    this.browserEntryRuns = new Set() // in-flight advisory entry jobs (never awaited by a turn)
+    this.browserEntryShadow = new Map() // runId -> what the advisory entry decision WOULD have done; in memory only, bounded
+    this.browserTaskStore = null // lazy: objective browser tasks of the direct entry ('on' only)
     this.compactedThreads = new Set() // native threads whose context the host knows was compacted (no engine signal is wired yet)
     this.topicAnswerGuards = new WeakMap() // private, bounded proof; never checkpointed
     this.topicIntakes = new WeakMap() // accepted local request -> prospective generation, never copied to checkpoints
@@ -2482,6 +2487,7 @@ export class CodexChatRuntime {
     this.pendingStarts.set(cid, pending)
     let turnStartAttempted = false
     let reservedTopicAnswer = false
+    let browserPre = null // the direct entry's pre-turn binding, until the turn's run adopts it
     try {
       await assertWorkspaceCurrent()
       assertPreparationActive()
@@ -2542,13 +2548,18 @@ export class CodexChatRuntime {
         this.store.reserveTopicAnswer(context.clientThreadId, context.requestId)
         reservedTopicAnswer = true
       }
+      // Direct browser entry, 'on' (flag decisionContext.browserEntry.mode() === 'on', default off): the objective loop runs on a pre-turn
+      // binding BEFORE the native turn exists, and the subjective model gets only the closed note. Any failure here means an ordinary turn.
+      if (bounded && policy === BROWSER_BOUNDED && browserInteractionRequested && this.browserEntryMode() === 'on') browserPre = await this.runBrowserEntryOn(body, context, preparedProviders)
+      const browserTaskContext = browserPre?.note ? { egdesk_browser_task: { kind: 'application', value: browserPre.note } } : null
+      const turnAdditionalContext = browserTaskContext ? { ...(additionalContext || {}), ...browserTaskContext } : additionalContext
       turnStartAttempted = context.turnStartAttempted = true
       const result = await engine.startTurn({
         threadId: cid,
         input: [{ type: 'text', text: body.message, text_elements: [] }],
         clientUserMessageId: context.requestId,
         ...(bounded ? QA_TURN_OVERRIDES : {}),
-        ...(additionalContext ? { additionalContext } : {}),
+        ...(turnAdditionalContext ? { additionalContext: turnAdditionalContext } : {}),
         ...(overrides.cwd ? { cwd: overrides.cwd } : {}),
         ...(overrides.model ? { model: overrides.model } : {}),
         ...(effort !== undefined ? { effort } : {}),
@@ -2612,7 +2623,10 @@ export class CodexChatRuntime {
       }
       run.parentTurnConfiguration = readerConfiguration
       this.emit(run, 'run.configuration', { configuration: readerConfiguration })
-      for (const provider of preparedProviders.keys()) await this.callProvider(provider, 'bindRun', run, preparedProviders.get(provider), readerConfiguration, provider === this.contexts ? contextAuthority : undefined)
+      for (const provider of preparedProviders.keys()) {
+        if (browserPre && provider === browserPre.provider) { await this.callProvider(provider, 'adoptRun', run, preparedProviders.get(provider), browserPre.preRun); browserPre.adopted = true; continue }
+        await this.callProvider(provider, 'bindRun', run, preparedProviders.get(provider), readerConfiguration, provider === this.contexts ? contextAuthority : undefined)
+      }
       if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
       for (const notice of context.ceilingNotices) this.noteCeiling(run, notice.key, notice)
       if (decision?.mode === 'on' && decision.result.status === 'ready') {
@@ -2624,6 +2638,7 @@ export class CodexChatRuntime {
       }
       if (decision) this.noteDecisionContext(run, decision)
       if (memoryPosition) this.startTurnMemoryAdvisory(run, body, context, memoryPosition, performance.now() - memoryClock) // after dispatch, in the background: never delays or changes the turn
+      if (bounded && policy === BROWSER_BOUNDED && browserInteractionRequested && this.browserEntryMode() === 'advisory') this.startBrowserEntryAdvisory(run, body, context) // same: record only
       // Notifications can precede the RPC response. Only the returned turn ID
       // may inherit this request's correlation; other turns remain unclaimed.
       while (pending.buffer.length) await this.apply(pending.buffer.shift())
@@ -2646,6 +2661,7 @@ export class CodexChatRuntime {
       if (reservedTopicAnswer && !uncertain) {
         try { this.store.cancelTopicAnswer(context.clientThreadId, context.requestId) } catch { this.storeHealthy = false }
       }
+      if (browserPre && !browserPre.adopted) { try { void Promise.resolve(browserPre.provider.cancelRun?.(browserPre.preRun)).catch(() => {}) } catch { /* best effort */ } }
       if (epoch === this.epochOf(engine.id, slot) && uncertain) this.uncertainThreads.add(cid)
       if (context.nativeTurnId && epoch === this.epochOf(engine.id, slot)) {
         for (const event of pending.buffer.splice(0)) if ((event.method === 'dynamic' || event.method === 'approval') && this.eventRouteMatches(event.inbound)) {
@@ -4519,6 +4535,81 @@ export class CodexChatRuntime {
       const own = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
       log.complete(id, { run: run.status, toolActivities: (run.activities || []).filter(a => !own.has(a.kind)).length })
     } catch { /* ignore */ }
+  }
+
+  // ---- Direct browser entry (egdesk-browser-task.mjs). Config: decisionContext.browserEntry = { mode(): 'off'|'advisory'|'on', hosts?({ body, context }),
+  // memory?({ body, context }) → { packet, pages, scope }|null, outcomeSink?(candidate, { memoryPages }) }. Absent or any other value means off.
+  // advisory: after dispatch, in the background, one entry decision is recorded (what WOULD happen); nothing native or browser changes.
+  // on: see runBrowserEntryOn. Both default off.
+  browserEntryMode() {
+    try { const mode = this.decisionContext?.browserEntry?.mode?.(); return mode === 'advisory' || mode === 'on' ? mode : 'off' } catch { return 'off' }
+  }
+
+  browserEntryIdle() { return Promise.allSettled([...this.browserEntryRuns]) }
+
+  browserToolProvider() { return this.toolProviders.find(provider => provider.providerId === 'egdesk-browser') || null }
+
+  browserEntryHosts(body) {
+    const hosts = {}
+    for (const source of Array.isArray(body?.selectedSources) ? body.selectedSources : []) {
+      const host = hostOf(source?.sourceRef?.uri)
+      if (host && typeof source?.sourceRef?.viewId === 'string') hosts[source.sourceRef.viewId] = host
+    }
+    return hosts
+  }
+
+  startBrowserEntryAdvisory(run, body, context) {
+    try {
+      const setup = this.decisionContext, provider = this.browserToolProvider()
+      if (!setup?.client || !provider || typeof provider.directEntryEnabled !== 'function' || !provider.directEntryEnabled() || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return
+      const job = this.runBrowserEntryAdvisory(run, body, provider).catch(() => {})
+      this.browserEntryRuns.add(job)
+      void job.finally(() => this.browserEntryRuns.delete(job))
+    } catch { /* the entry advisory must never affect the turn */ }
+  }
+
+  async runBrowserEntryAdvisory(run, body, provider) {
+    const hosts = this.browserEntryHosts(body)
+    const cards = (run.browserBinding?.cards || []).filter(card => card.permission === 'interact').map(card => ({ cardId: card.cardId, host: hosts[card.cardId] || '' }))
+    if (!cards.length || typeof body?.message !== 'string' || !body.message.trim()) return
+    const setup = this.decisionContext, scope = provider.reflexScope(run, { callId: 'entry-advisory', namespace: null }, cards[0].cardId)
+    let would = 'fallback', reason = null, numbers = null
+    try {
+      const entry = await decideBrowserEntry({ message: body.message, cards, client: scope.client, timeoutMs: FOREGROUND_DECISION_TIMEOUT_MS, authorizeDispatch: scope.authorizeDispatch })
+      if (!scope.isDecisionCurrent()) { reason = 'evidence_unavailable' } else {
+        would = entry.kind === 'browser' ? 'enter' : entry.kind
+        numbers = { top: entry.ranked[0] ?? 0, second: entry.ranked[1] ?? 0, p: entry.confidence ?? 0 }
+      }
+    } catch (error) { reason = typeof error?.code === 'string' ? error.code : 'unreachable' }
+    this.browserEntryShadow.set(run.runId, { would, ...(reason ? { reason } : {}) })
+    while (this.browserEntryShadow.size > 50) this.browserEntryShadow.delete(this.browserEntryShadow.keys().next().value)
+    try { // content-free numbers and closed words only
+      setup.calibrationLog?.record({ feature: 'browser_reflex', mode: 'advisory', attached: false, candidates: cards.length,
+        ...(reason && ['timeout', 'unreachable', 'bad_response', 'budget_exceeded', 'evidence_unavailable', 'not_configured'].includes(reason) ? { fallback: reason } : {}),
+        judgments: numbers ? [{ q: 'choice', top: numbers.top, second: numbers.second, p: numbers.p, confidence: numbers.p, options: cards.length + 2,
+          margin: numbers.top - numbers.second, threshold: 0.75, minMargin: 0.2, would: would === 'enter' ? 'act' : 'hold' }] : [] })
+    } catch { /* recording only */ }
+  }
+
+  // 'on': bind the selected Cards with a quiet pre-turn run object, let the direct entry decide and (if it takes the turn) run the
+  // objective loop, and return the closed note for the subjective input. The turn's run adopts this same binding afterwards
+  // (the Card selection token is single-use, so a second bind is not possible). Never throws: failure means an ordinary turn.
+  async runBrowserEntryOn(body, context, preparedProviders) {
+    const cfg = this.decisionContext?.browserEntry, provider = this.browserToolProvider(), prepared = provider ? preparedProviders.get(provider) : null
+    if (!cfg || !provider || !prepared || typeof provider.directEntryEnabled !== 'function' || !provider.directEntryEnabled()) return null
+    const id = `pre-${context.requestId}`
+    const preRun = { runId: id, answerId: id, clientThreadId: context.clientThreadId, status: 'inProgress', executionPolicy: { mode: BROWSER_BOUNDED }, quiet: true }
+    await this.callProvider(provider, 'bindRun', preRun, prepared) // a refusal here is a refusal before the native turn starts
+    let note = null
+    try {
+      if (!this.browserTaskStore) this.browserTaskStore = createBrowserTaskStore({ now: this.now })
+      const memory = typeof cfg.memory === 'function' ? await cfg.memory({ body, context }) : null
+      const entry = createDirectBrowserEntry({ provider, store: this.browserTaskStore, outcomeSink: typeof cfg.outcomeSink === 'function' ? cfg.outcomeSink : null, now: this.now,
+        calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null })
+      const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), memory })
+      if (out?.handled === true && typeof out.note === 'string') note = out.note
+    } catch { note = null }
+    return { preRun, provider, note, adopted: false }
   }
 
   // ---- Advisory turn memory (egdesk-turn-memory.mjs). Record only: nothing here changes what the answering model receives. ----

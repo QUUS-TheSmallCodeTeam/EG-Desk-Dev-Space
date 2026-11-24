@@ -1,0 +1,227 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
+import { createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
+
+// L8/C9: the direct browser entry inside the REAL chat runtime (CodexChatRuntime.send), flag decisionContext.browserEntry.mode():
+//   absent / 'off'  -> native input byte-identical to today
+//   'advisory'      -> one entry decision recorded after dispatch; native input byte-identical; no browser action
+//   'on'            -> pre-turn quiet binding, objective loop, closed note in the subjective input; the turn's run adopts the binding
+// Synthetic only: the UI is an in-process double, Decisions a mock fetch, the native engine the runtime test harness.
+const KEY = 'egd-synthetic-not-a-key-0008'
+const OWNER = 'codex:fixture-owner'
+const O = 'https://portal.example.test'
+const el = (ref, role, label, extra = {}) => ({ ref, role, label, tag: role === 'link' ? 'a' : 'button', href: '', value: '', ...extra })
+const PAGES = {
+  [`${O}/invoices`]: [el('b1', 'link', '사업자 123-45-67890', { href: `${O}/biz/1` }), el('b2', 'link', '사업자 987-65-43210', { href: `${O}/biz/2` }), el('s1', 'button', '발행 제출')],
+  [`${O}/biz/2`]: [el('d2', 'link', '이번 달 세금계산서 다운로드', { href: `${O}/download/2.pdf` })],
+  [`${O}/biz/1`]: [], [`${O}/download/2.pdf`]: [],
+}
+const choice = (name, value, confidence) => ({ name, type: 'choice', choice: value, confidence, probabilities: [{ value, probability: confidence }] })
+const starts = (choices, text) => choices.find(c => c.value.includes(text))?.value
+
+function qaHarness(override = {}) {
+  const calls = [], events = [], legacy = [], replies = []
+  let turnCount = 0, threadCount = 0
+  const defaults = async (method, params) => {
+    if (method === 'thread/start') return { thread: { id: `thread-${++threadCount}` }, cwd: '/work', model: 'configured-model' }
+    if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [] }, cwd: '/work' }
+    if (method === 'turn/start') return { turn: { id: `turn-${++turnCount}`, status: 'inProgress', items: [] } }
+    if (method === 'turn/interrupt') return {}
+    throw new Error(`Unexpected method: ${method}`)
+  }
+  const chat = new CodexChatRuntime({
+    request: async (method, params) => {
+      calls.push({ method, params }); override.onRequest?.(method)
+      if (override.failTurn && method === 'turn/start') throw Object.assign(new Error('native refused'), { code: -32000 })
+      if (method === 'experimentalFeature/list') return { data: ['browser_use', 'browser_use_external', 'computer_use'].map(name => ({ name, enabled: false, stage: 'stable' })), nextCursor: null }
+      if (method === 'mcpServerStatus/list') return { data: [], nextCursor: null }
+      if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
+      if (method === 'config/read') return { config: { developer_instructions: 'Ordinary instructions' }, layers: [] }
+      const result = await defaults(method, params)
+      if (method === 'thread/start' || method === 'thread/resume') return { ...result, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
+      return result
+    },
+    respond: (...args) => replies.push(args), emit: event => events.push(event), emitLegacy: event => legacy.push(event),
+    toolProviders: override.toolProviders, getOwnerKey: override.getOwnerKey, qaReady: override.qaReady,
+    verifyFile: async () => null, decisionContext: override.decisionContext,
+  })
+  chat.setConnection(true)
+  const finish = (run, status = 'completed') => chat.handleNotification({ method: 'turn/completed', params: { threadId: run.conversationId, turn: { id: run.runId, status, items: [] } } })
+  return { chat, calls, events, replies, finish }
+}
+
+function build({ entryMode, hang = false, withClient = true, outcomes = null, failTurn = false } = {}) {
+  const timeline = [], decisions = [], acts = [], uiKinds = []
+  let docSeq = 1
+  let cur = { url: `${O}/invoices`, documentId: 'doc1', revision: 1 }
+  const snap = () => ({ cardId: 'card', documentId: cur.documentId, revision: cur.revision, url: cur.url, readyState: 'complete', text: ['합성 포털'],
+    viewport: { width: 300, height: 200, devicePixelRatio: 1 }, interactiveElements: PAGES[cur.url] })
+  const client = createDecisionClient({
+    recipientForKey: (value, endpoint, model) => decisionTopicRecipient(value, 1, endpoint, model), getApiKey: async () => KEY,
+    fetchImpl: async (_e, { body, signal }) => {
+      const wire = JSON.parse(body), q0 = wire.questions[0], evidence = wire.input[1].content
+      decisions.push({ q: q0.name, image: /image/i.test(body) }); timeline.push(`decide:${q0.name}`)
+      if (hang) await new Promise((_, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }))
+      if (q0.name === 'browser_entry') {
+        const msg = /User message: (.*)/.exec(evidence)?.[1] ?? ''
+        return { ok: true, text: async () => JSON.stringify({ answers: [choice('browser_entry', /세금계산서|두 번째/.test(msg) ? starts(q0.choices, '[C1]') : 'not_browser_task', 0.95)] }) }
+      }
+      if (q0.name === 'task_resume') return { ok: true, text: async () => JSON.stringify({ answers: [choice('task_resume', 'resume_task', 0.95)] }) }
+      const url = /URL: (\S+)/.exec(evidence)?.[1], ctx = /Context the user gave in the chat \(not page text\):\n([\s\S]*?)\n\n/.exec(evidence)?.[1] ?? ''
+      let next, goalMet = 0
+      if (/\/download\//.test(url)) { next = 'goal_met'; goalMet = 0.95 }
+      else if (url.endsWith('/invoices')) next = /두 번째/.test(ctx) ? starts(q0.choices, '987-65') : 'needs_user_context'
+      else next = starts(q0.choices, '다운로드')
+      const answer = choice('next_step', next, 0.95)
+      if (next === 'needs_user_context') answer.probabilities.push({ value: starts(q0.choices, '123-45'), probability: 0.02 }, { value: starts(q0.choices, '987-65'), probability: 0.02 })
+      return { ok: true, text: async () => JSON.stringify({ answers: [answer, choice('page_state', 'content', 0.95), { name: 'goal_met', type: 'predicate', probability: goalMet }] }) }
+    },
+  })
+  const transport = { runs: new Map(), hasClient: id => id === 'ui',
+    bindRun: (id, thread, transportId) => { if (transport.runs.has(id)) throw new Error('already bound'); transport.runs.set(id, { clientThreadId: thread, transportId, ownerKey: OWNER }) },
+    unbindRun: id => transport.runs.delete(id),
+    async sendToUi(request) {
+      uiKinds.push({ kind: request.kind, runId: request.runId }); timeline.push(`ui:${request.kind}`)
+      const reply = { requestId: request.requestId }
+      if (request.kind === 'bind') return { ...reply, status: 'bound', binding: { cardId: 'card', cardEpoch: 'epoch', profileId: 'fixture', accountId: '', userContextId: 0, url: cur.url, engineAccountKey: OWNER, authorityEpoch: 1 } }
+      if (request.kind === 'observe') { const wait = request.options?.wait
+        return { ...reply, status: 'observed', snapshot: wait ? { ...snap(), wait: { for: wait.for, outcome: 'met', elapsedMs: 1 } } : snap() } }
+      if (request.kind === 'act') {
+        const a = request.action; acts.push({ type: a.type, url: a.url ?? null, ref: a.ref ?? null })
+        if (a.type === 'navigate') cur = { url: a.url, documentId: `doc${++docSeq}`, revision: 1 }
+        return { ...reply, status: 'acted', receipt: { after: snap(), observation: {}, dispatchReceipt: { actor: 'JSWindowActor', eventDispatched: true, documentStillCurrent: true, inputRoute: 'chrome-load-uri' } } }
+      }
+      if (request.kind === 'cancel') return { ...reply, status: 'cancelled' }
+      return { ...reply, status: 'rejected' }
+    },
+  }
+  const provider = createCodexBrowserToolProvider({ transport, getOwnerKey: () => OWNER, decision: { mode: () => 'on', configured: () => true, client,
+    recipient: () => decisionTopicRecipient(KEY, 1, undefined, client.model), generation: () => 0 } })
+  const calibration = []
+  const decisionContext = entryMode === undefined ? undefined : { mode: () => (withClient ? 'on' : 'off'), configured: () => withClient, client, calibrationLog: { record: raw => { calibration.push(raw); return {} }, complete() {} },
+    ...(entryMode === 'absent' ? {} : { browserEntry: { mode: () => entryMode, ...(outcomes ? { outcomeSink: outcomes } : {}) } }) }
+  const h = qaHarness({ toolProviders: [provider], getOwnerKey: () => OWNER, decisionContext, failTurn, onRequest: method => timeline.push(`native:${method}`) })
+  const source = { id: 'selected-source', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
+    sourceRef: { viewId: 'card', profileId: 'fixture', accountId: '', uri: `${O}/invoices` },
+    browserToolIdentity: { cardEpoch: 'epoch', userContextId: 0, engineAccountKey: OWNER, authorityEpoch: 1 },
+    browserToolSelection: { token: 'one-time-token', threadId: 'selected-chat' } }
+  let n = 0
+  const send = async (message, extra = {}) => { n++
+    return h.chat.send({ ...extra, message, requestId: `req-${n}`, clientThreadId: 'selected-chat', executionPolicy: { mode: 'browserBounded' },
+      selectedSources: [{ ...source, browserToolSelection: { token: `token-${n}`, threadId: 'selected-chat' } }], browserTransportId: 'ui' }) }
+  return { h, send, timeline, decisions, acts, uiKinds, calibration, provider }
+}
+const native = w => JSON.stringify(w.h.calls.filter(c => ['thread/start', 'turn/start'].includes(c.method)))
+const allNative = w => JSON.stringify(w.h.calls)
+const MSG = '거래처 포털에서 이번 달 세금계산서 내려받아줘'
+
+test('C9 flag off / absent / off-mode: native input is byte-identical, no entry decision, no browser action', async () => {
+  const baseline = build({}) // no decisionContext at all
+  await baseline.send(MSG)
+  for (const entryMode of ['absent', 'off']) {
+    const w = build({ entryMode })
+    await w.send(MSG)
+    assert.equal(native(w), native(baseline), 'identical bytes')
+    assert.deepEqual(w.decisions, []); assert.deepEqual(w.acts, []); assert.deepEqual(w.uiKinds.map(k => k.kind), ['bind'])
+  }
+})
+
+test('C9 advisory: native input byte-identical to off, one entry decision recorded after dispatch, no browser action', async () => {
+  const baseline = build({}); await baseline.send(MSG)
+  const w = build({ entryMode: 'advisory' })
+  const run = await w.send(MSG)
+  await w.h.chat.browserEntryIdle()
+  assert.equal(native(w), native(baseline))
+  assert.equal(allNative(w), allNative(baseline), 'every native request, not only thread/turn start')
+  assert.deepEqual(w.decisions.map(d => d.q), ['browser_entry'], 'exactly one Decisions request')
+  assert.deepEqual(w.acts, []); assert.deepEqual(w.uiKinds.map(k => k.kind), ['bind'])
+  assert.deepEqual(w.h.chat.browserEntryShadow.get(run.runId), { would: 'enter' })
+  assert.ok(w.timeline.indexOf('native:turn/start') < w.timeline.indexOf('decide:browser_entry'), 'recorded after dispatch, never before the native turn')
+  assert.equal(w.calibration.length, 1)
+  assert.equal(w.calibration[0].mode, 'advisory'); assert.equal(w.calibration[0].attached, false)
+  assert.doesNotMatch(JSON.stringify(w.calibration), /세금|portal|example|card/)
+  // not a browser task -> would not enter
+  const other = build({ entryMode: 'advisory' }); const r2 = await other.send('오늘 날씨 어때?'); await other.h.chat.browserEntryIdle()
+  assert.deepEqual(other.h.chat.browserEntryShadow.get(r2.runId), { would: 'not_browser' })
+})
+
+test('C9 advisory with the decision model off: no decision, native input unchanged', async () => {
+  const baseline = build({}); await baseline.send(MSG)
+  const off = build({ entryMode: 'advisory', withClient: false }); await off.send(MSG); await off.h.chat.browserEntryIdle()
+  assert.equal(native(off), native(baseline)); assert.deepEqual(off.decisions, [])
+})
+
+test('C9 on: pre-turn quiet binding, objective loop first, closed note only in the subjective input, the run adopts the same binding', { timeout: 20000 }, async () => {
+  const w = build({ entryMode: 'on' })
+  const first = await w.send(MSG)
+  const turn = w.h.calls.find(c => c.method === 'turn/start').params
+  const start = w.h.calls.find(c => c.method === 'thread/start').params
+  // order: bind (pre-turn), entry decision, one objective step, only then the native turn
+  const order = w.timeline.filter(x => /^(ui:bind|decide:|native:turn\/start)/.test(x))
+  assert.deepEqual(order, ['ui:bind', 'decide:browser_entry', 'decide:next_step', 'native:turn/start'])
+  assert.equal(w.uiKinds.filter(k => k.kind === 'bind').length, 1, 'one bind: the single-use selection is not bound twice')
+  assert.deepEqual(w.acts, [], 'asking the user needs no action')
+  // the only difference to the off-mode input: one application key carrying the closed note
+  const base = build({}); await base.send(MSG)
+  const baseTurn = base.h.calls.find(c => c.method === 'turn/start').params
+  const { additionalContext, ...rest } = turn
+  const { additionalContext: baseCtx, ...baseRest } = baseTurn
+  assert.deepEqual(rest, baseRest, 'user text, ids and options unchanged')
+  assert.deepEqual(JSON.stringify(start), JSON.stringify(base.h.calls.find(c => c.method === 'thread/start').params))
+  assert.deepEqual(Object.keys(additionalContext).filter(k => !(baseCtx && k in baseCtx)), ['egdesk_browser_task'])
+  assert.equal(additionalContext.egdesk_browser_task.kind, 'application')
+  const note = JSON.parse(additionalContext.egdesk_browser_task.value).egdesk_browser_task
+  assert.deepEqual([note.status, note.code, note.next], ['need_context', 'choice_needed', 'ask_user_in_chat'])
+  assert.doesNotMatch(additionalContext.egdesk_browser_task.value, /https?:|example\.test|\/biz|제출/)
+  // the turn's run now holds the grant: a native tool call for it reaches the UI with the original (pre-turn) runId
+  const toolCall = id => w.h.chat.handleServerRequest({ id, method: 'item/tool/call', params: { threadId: first.conversationId, turnId: first.runId, callId: id, tool: 'egdesk_browser_observe', arguments: { cardId: 'card' } } })
+  await toolCall('obs-1')
+  await new Promise(resolve => setImmediate(resolve))
+  const reply = w.h.replies.find(r => r[0] === 'obs-1')
+  assert.equal(reply?.[1]?.success, true)
+  assert.ok(w.uiKinds.some(k => k.kind === 'observe' && k.runId.startsWith('pre-')), 'binding kept its original run id toward the UI')
+  // the user's answer resumes the same task through the same entry: closed note says done, same task id
+  w.h.finish(first)
+  const second = await w.send('두 번째 사업자로', { conversationId: first.conversationId })
+  const turn2 = w.h.calls.filter(c => c.method === 'turn/start')[1].params
+  const note2 = JSON.parse(turn2.additionalContext.egdesk_browser_task.value).egdesk_browser_task
+  assert.deepEqual([note2.status, note2.id], ['done', note.id])
+  assert.deepEqual(w.acts.map(a => [a.type, a.url]), [['navigate', `${O}/biz/2`], ['navigate', `${O}/download/2.pdf`]])
+  assert.equal(w.acts.filter(a => a.type === 'fill' || a.ref === 's1').length, 0)
+  assert.equal(second.accepted, true)
+  // the subjective model's own turn text never changed
+  assert.equal(turn2.input[0].text, '두 번째 사업자로')
+})
+
+test('C9 on, not a browser task: ordinary turn (no note), binding still adopted and usable', async () => {
+  const w = build({ entryMode: 'on' })
+  const run = await w.send('오늘 날씨 어때?')
+  const turn = w.h.calls.find(c => c.method === 'turn/start').params
+  assert.equal(turn.additionalContext?.egdesk_browser_task, undefined)
+  assert.deepEqual(w.decisions.map(d => d.q), ['browser_entry']); assert.deepEqual(w.acts, [])
+  assert.equal(w.uiKinds.filter(k => k.kind === 'bind').length, 1)
+  assert.ok(run.runId)
+})
+
+test('C9 on with a hung decision endpoint: falls back to the ordinary turn after the 4 s foreground deadline, nothing acted', { timeout: 20000 }, async () => {
+  const w = build({ entryMode: 'on', hang: true })
+  const started = performance.now()
+  await w.send(MSG)
+  const elapsed = performance.now() - started
+  const turn = w.h.calls.find(c => c.method === 'turn/start').params
+  assert.equal(turn.additionalContext?.egdesk_browser_task, undefined)
+  assert.deepEqual(w.acts, [])
+  assert.ok(elapsed >= 3000 && elapsed < 9000, `elapsed ${elapsed}`)
+})
+
+test('C9 on: a native turn refusal after the pre-turn binding cancels that binding (no leaked grant), nothing acted', async () => {
+  const w = build({ entryMode: 'on', failTurn: true })
+  await assert.rejects(() => w.send(MSG), /native refused/)
+  await new Promise(resolve => setImmediate(resolve))
+  const kinds = w.uiKinds.map(k => k.kind)
+  assert.deepEqual(kinds.filter(k => k === 'bind').length, 1)
+  assert.ok(kinds.includes('cancel'), 'the pre-turn binding was released')
+  assert.deepEqual(w.acts, [])
+})
