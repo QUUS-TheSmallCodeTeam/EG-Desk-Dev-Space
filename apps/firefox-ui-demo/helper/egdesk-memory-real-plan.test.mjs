@@ -145,3 +145,50 @@ test('re-measurement scoring: the scripted expectations pass; a missing health p
   r = run(res => { res['t6-covered-1-triage'].answers.find(x => x.name === 'tn_courtesy').probability = 0.97 })
   assert.equal(r.scored.find(s => s.id === 't6-covered').pass, false, 'a courtesy yes on a real question is a wrong skip')
 })
+
+// ---- the two-request check of the first-turn scan wording ----
+import { createHash } from 'node:crypto'
+import { FIRST_SCAN, FIRST_SCAN_EXPECT, scoreFirstScan } from './egdesk-memory-real-plan.mjs'
+import { JUDGE_RULES, NEXT_RULES } from './egdesk-wiki-reconstruction.mjs'
+const firstScan = await buildPlan({ subset: 'first-scan' })
+const scanAnswers = (request, yes, p = {}) => ({ status: 200, answers: request.body.questions.map(q => { const id = request.aliases[`P${Number(q.name.slice(3)) + 1}`]
+  return { type: 'predicate', name: q.name, probability: id in p ? p[id] : yes.includes(id) ? 0.97 : 0.02 } }) })
+const firstScanResults = (overrides = {}) => Object.fromEntries(firstScan.runs.flatMap(run => run.requests.map(request =>
+  [request.name, scanAnswers(request, [...FIRST_SCAN_EXPECT[request.name].yes, ...FIRST_SCAN_EXPECT[request.name].wanted], overrides[request.name] ?? {})])))
+
+test('first-scan set: exactly the two first-turn scans, built by the product code, and nothing else', async () => {
+  const requests = firstScan.runs.flatMap(r => r.requests)
+  assert.deepEqual(requests.map(r => r.name), FIRST_SCAN)
+  assert.deepEqual(requests.map(r => [r.stage, r.questions, r.choice]), [['scan', 31, 0], ['scan', 31, 0]])
+  assert.equal(firstScan.totals.requests, 2)
+  assert.ok(firstScan.totals.estInputTokens > 10000 && firstScan.totals.estInputTokens < 15000, String(firstScan.totals.estInputTokens))
+  for (const r of requests) { assert.equal(r.body.input[0].content, JUDGE_RULES); assert.ok(!JSON.stringify(r.body).includes('A사 내부 원가'), 'the page outside this DM is not in the request') }
+  await assert.rejects(buildPlan({ subset: 'nope' }), /unknown request set/)
+})
+
+test('first-scan scoring: the off-topic page must be a decided no; undecided is inconclusive (not a pass, not called a wrong pick); the target of the other run must stay picked', () => {
+  const perfect = scoreFirstScan(firstScan, firstScanResults())
+  assert.deepEqual([perfect.pass, perfect.runsPassed, perfect.scored.flatMap(s => s.softMisses)], [true, 2, []])
+  const picked = scoreFirstScan(firstScan, firstScanResults({ 'pg-first-2-scan': { 'jev/flow-note': 0.87 } }))
+  assert.deepEqual(picked.scored[0].hardFailures, ['jev/flow-note is decided not needed', 'no page of another matter is picked']); assert.equal(picked.pass, false)
+  const undecided = scoreFirstScan(firstScan, firstScanResults({ 'pg-first-2-scan': { 'jev/flow-note': 0.5 } }))
+  assert.deepEqual(undecided.scored[0].hardFailures, ['jev/flow-note is decided not needed'])
+  assert.match(undecided.scored[0].checks.find(c => c.name === 'jev/flow-note is decided not needed').detail, /undecided.*inconclusive/)
+  // the gain of the broader wording is watched, softly: losing the health page on the first turn is reported but does not fail the check
+  const lost = scoreFirstScan(firstScan, firstScanResults({ 'pg-first-2-scan': { 'db/pg-health': 0.1 } }))
+  assert.deepEqual([lost.pass, lost.scored[0].softMisses], [true, ['db/pg-health is picked']])
+  const noPlan = scoreFirstScan(firstScan, firstScanResults({ 'pg-first-2-scan': { 'db/pg-plan': 0.4 } }))
+  assert.deepEqual(noPlan.scored[0].hardFailures, ['db/pg-plan is picked'])
+  // the tighter wording must not cost the run whose target IS that page
+  const jLost = scoreFirstScan(firstScan, firstScanResults({ 'j-first-2-scan': { 'jev/flow-note': 0.3 } }))
+  assert.deepEqual([jLost.pass, jLost.scored[1].hardFailures], [false, ['jev/flow-note is picked']])
+  const jStray = scoreFirstScan(firstScan, firstScanResults({ 'j-first-2-scan': { 'db/pg-plan': 0.9 } }))
+  assert.deepEqual(jStray.scored[1].hardFailures, ['no page of another matter is picked'])
+  assert.equal(scoreFirstScan(firstScan, {}).pass, false, 'not sent is not a pass')
+})
+
+test('rule texts: the first-turn rule is tied to the matter of the message; the mid-session rule is byte-identical to the one measured on 2026-11-24', () => {
+  assert.match(JUDGE_RULES, /a record about the same matter as the message/); assert.match(JUDGE_RULES, /decide, verify or do what this message calls for/)
+  assert.match(JUDGE_RULES, /A page about a different matter is not needed merely because it mentions or describes the same kind of event/)
+  assert.equal(createHash('sha256').update(NEXT_RULES).digest('hex'), 'ad6fc8aba1ae21c44005f62a7897085af7c2fb52fc070711141d846144c62fb7')
+})

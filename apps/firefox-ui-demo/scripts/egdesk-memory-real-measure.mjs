@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync } from 'node:fs'
-import { buildPlan, scoreRemeasure } from '../helper/egdesk-memory-real-plan.mjs'
+import { buildPlan, scoreFirstScan, scoreRemeasure } from '../helper/egdesk-memory-real-plan.mjs'
 import { diffPlan, planTable, runMeasurement } from '../helper/egdesk-memory-real-runner.mjs'
 
 // End-to-end turn-memory measurement (public synthetic wiki, 6 runs). Dry run by default: prints the plan and sends nothing.
-//   node scripts/egdesk-memory-real-measure.mjs [--set remeasure] [--plan plan.json] [--out results.json] [--max-tokens N]   # dry run
+//   node scripts/egdesk-memory-real-measure.mjs [--set remeasure|first-scan] [--plan plan.json] [--out results.json] [--max-tokens N]   # dry run
 //   --set remeasure: the small re-measurement (failing stages plus controls); without it, the full 23-request plan.
 //   OPENAI_API_KEY=... node scripts/egdesk-memory-real-measure.mjs --send [--plan plan.json] [--out results.json]    # real, after approval
 // The key is read from OPENAI_API_KEY only and is never printed or written. No retries; the first failure stops the run.
 const args = process.argv.slice(2)
 const flag = name => args.includes(name), value = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null }
-const remeasure = value('--set') === 'remeasure'
-const plan = await buildPlan({ subset: remeasure ? 'remeasure' : null })
+const set = value('--set'), remeasure = set === 'remeasure', firstScan = set === 'first-scan'
+if (set && !remeasure && !firstScan) { console.error(`unknown --set ${set} (remeasure | first-scan)`); process.exit(2) }
+const plan = await buildPlan({ subset: set ?? null })
 const planFile = value('--plan')
 if (planFile) {
   const diffs = diffPlan(plan, JSON.parse(readFileSync(planFile, 'utf8')))
@@ -21,7 +22,7 @@ if (planFile) {
 console.table(planTable(plan).map(({ run, name, stage, questions, bytes, estInputTokens, sha256 }) => ({ run, name, stage, questions, bytes, estInputTokens, sha: sha256.slice(0, 12) })))
 const maxTokens = value('--max-tokens') ? Number(value('--max-tokens')) : null
 const key = flag('--send') ? process.env.OPENAI_API_KEY ?? null : null
-const outcome = await runMeasurement({ plan, key, send: flag('--send'), maxEstimatedTokens: maxTokens, ...(remeasure ? { score: scoreRemeasure } : {}) })
+const outcome = await runMeasurement({ plan, key, send: flag('--send'), maxEstimatedTokens: maxTokens, ...(remeasure ? { score: scoreRemeasure } : firstScan ? { score: scoreFirstScan } : {}) })
 console.log(JSON.stringify({ sent: outcome.sent, stoppedBecause: outcome.stoppedBecause, totals: outcome.totals, ceiling: outcome.ceiling }))
 if (outcome.scorecard) {
   const out = value('--out')

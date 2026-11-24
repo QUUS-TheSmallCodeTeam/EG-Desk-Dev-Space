@@ -9,7 +9,7 @@ import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 import { openBridgeSettings, TURN_MEMORY_DEFAULT, TURN_MEMORY_MODES } from './egdesk-bridge-settings.mjs'
 import { createTurnMemoryConfig } from './egdesk-turn-memory-wiring.mjs'
 import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
-import { mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
+import { mockJudge, until } from './egdesk-wiki-reconstruction.fixture.mjs'
 
 const quiet = () => {}
 const profiles = { runProfile: (p, r) => ({ binding: { profileId: p, revision: r ?? 1, hash: 'h' }, developerInstructions: 'x', toolCeiling: null, model: null }) }
@@ -57,17 +57,18 @@ async function rig({ withMemory, settings, getAdapter, decides }) {
       if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
       starts.push(JSON.stringify(p))
       const id = `turn-${++turns}`, timing = { threadId: p.threadId, turnId: id }
-      setTimeout(async () => { const n = (m, q) => chat.handleNotification({ method: m, params: q })
+      const finish = async () => { const n = (m, q) => chat.handleNotification({ method: m, params: q })
         await n('item/started', { ...timing, item: { id: `a${id}`, type: 'agentMessage', phase: 'final_answer', text: '' } })
         await n('item/completed', { ...timing, item: { id: `a${id}`, type: 'agentMessage', phase: 'final_answer', text: '네' } })
-        await n('turn/completed', { threadId: p.threadId, turn: { id, status: 'completed', items: [] } }) }, 5)
+        await n('turn/completed', { threadId: p.threadId, turn: { id, status: 'completed', items: [] } }) }
+      setImmediate(() => setImmediate(finish))
       return { turn: { id, status: 'inProgress', items: [] } } },
     respond: () => {}, emit: () => {}, emitLegacy: () => {}, verifyFile: async () => null,
     decisionContext: { calibrationLog, mode: () => 'advisory', settingsGeneration: () => 0, configured: () => true, budgetMs: 800,
       client: { model: 'syn', async decide(req) { decides.push(req.questions.map(q => q.name)); return judge.decide(req) } }, collect: async () => [],
       ...(withMemory ? { turnMemory: createTurnMemoryConfig({ settings, getAdapter, ontologyStore: { readGraph: async () => GRAPH } }) } : {}) } })
   chat.setConnection(true)
-  const done = async n => { for (let i = 0; i < 250; i++) { await new Promise(r => setTimeout(r, 20)); if (store.listMessages('dm-1').messages.filter(m => m.role === 'assistant' && m.status === 'complete').length >= n) break } await new Promise(r => setTimeout(r, 30)) }
+  const done = async n => { await until(() => store.listMessages('dm-1').messages.filter(m => m.role === 'assistant' && m.status === 'complete').length >= n, `answer ${n} completed`); for (let i = 0; i < 3; i++) await new Promise(r => setImmediate(r)) }
   return { chat, store, starts, done, dir, calibrationLog, send: (message, requestId, conversationId) => chat.send({ message, clientThreadId: 'dm-1', requestId, ...(conversationId ? { conversationId } : {}), profileId: 'sol', replyDestination: 'direct' }) }
 }
 

@@ -7,13 +7,15 @@ import { CodexChatRuntime, TURN_MEMORY_CAPS, TURN_MEMORY_KEY, compactionSignal }
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 import { buildWiki } from './egdesk-wiki-reconstruction.mjs'
-import { SYNTHETIC_PAGES, mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
+import { SYNTHETIC_PAGES, createFakeClock, deferred, mockJudge, until } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { createWikiWriter } from './egdesk-turn-memory.mjs'
 import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
 import { createTurnMemoryConfig } from './egdesk-turn-memory-wiring.mjs'
 
 // Real: CodexChatRuntime.send / finish, the turn/start parameters, the chat store, the calibration log, the memory loop, the write path.
 // Synthetic: the native engine (thread/start, turn/start and its notifications) and the Decisions client (a lexical stand-in, never a model).
+// Time: every rig runs turn memory on a manual clock (x.clock). It moves only when a test moves it, so no cap or deadline can pass by
+// accident on a busy machine, and the cap tests state exactly when things happen instead of sleeping and measuring.
 const quiet = () => {}
 const profiles = { runProfile: (p, r) => ({ binding: { profileId: p, revision: r ?? 1, hash: 'h' }, developerInstructions: 'x', toolCeiling: null, model: null }) }
 const SCOPE = { allowedScopes: ['dm:this-room'], writeScope: 'dm:this-room' }
@@ -25,7 +27,7 @@ async function rig({ memoryMode = 'on', decisionMode = 'on', tm = {}, client = n
   const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-tm-on-')); await chmod(dir, 0o700)
   const store = openChatStore({ dataDir: path.join(dir, 'chat'), ownerScope: 'synthetic' })
   const calibrationLog = openCalibrationLog({ dataDir: path.join(dir, 'settings'), log: quiet })
-  const x = { dir, store, calibrationLog, wiki, starts: [], decides: [], timeline: [], events: [], memoryMode, decisionMode, autoFinish: true, terminal: 'completed' }
+  const x = { dir, store, calibrationLog, wiki, starts: [], decides: [], timeline: [], events: [], memoryMode, decisionMode, manual: hooks.manualFinish === true, terminal: 'completed', clock: tm.clock ?? createFakeClock() }
   const judge = mockJudge()
   let turns = 0, threads = 0
   const chat = new CodexChatRuntime({ now: () => Date.now(), store, requireStore: true, getOwnerKey: () => 'codex:synthetic:qa', profiles, resolveProjectWorkspace: async () => null,
@@ -36,11 +38,13 @@ async function rig({ memoryMode = 'on', decisionMode = 'on', tm = {}, client = n
       if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
       x.starts.push(p); x.timeline.push('turn/start')
       const id = `turn-${++turns}`, timing = { threadId: p.threadId, turnId: id }
-      setTimeout(async () => { const n = (m, q) => chat.handleNotification({ method: m, params: q })
+      const finish = async () => { const n = (m, q) => chat.handleNotification({ method: m, params: q })
         await n('item/started', { ...timing, item: { id: `a${id}`, type: 'agentMessage', phase: 'final_answer', text: '' } })
         await n('item/completed', { ...timing, item: { id: `a${id}`, type: 'agentMessage', phase: 'final_answer', text: '네' } })
         x.timeline.push(`turn/${x.terminal}`)
-        await n('turn/completed', { threadId: p.threadId, turn: { id, status: x.terminal, items: [] } }) }, 5)
+        await n('turn/completed', { threadId: p.threadId, turn: { id, status: x.terminal, items: [] } }) }
+      // The engine's answer arrives after turn/start returned (a later event-loop turn), or when the test says so.
+      if (x.manual) x.finish = finish; else setImmediate(() => setImmediate(finish))
       return { turn: { id, status: 'inProgress', items: [] } } },
     respond: () => {}, emit: e => x.events.push(e), emitLegacy: () => {}, verifyFile: async () => null,
     decisionContext: { calibrationLog, mode: () => x.decisionMode, settingsGeneration: () => 0, configured: () => true, budgetMs: 800,
@@ -50,11 +54,11 @@ async function rig({ memoryMode = 'on', decisionMode = 'on', tm = {}, client = n
         x.timeline.push(names.some(n => n.startsWith('tw_')) ? 'decide:write' : names.some(n => n.startsWith('tn_')) ? 'decide:triage' : 'decide:fetch')
         return (client ?? judge).decide(req)
       } }, collect: async () => [],
-      turnMemory: memoryMode === null ? undefined : { mode: () => x.memoryMode, wiki: async () => x.wiki, scope: () => SCOPE, writer: (w, o) => createWikiWriter(w, o), ontologyWrite: true, budget: { linksFirst: true }, ...tm } } })
+      turnMemory: memoryMode === null ? undefined : { mode: () => x.memoryMode, wiki: async () => x.wiki, scope: () => SCOPE, writer: (w, o) => createWikiWriter(w, o), ontologyWrite: true, budget: { linksFirst: true }, ...tm, clock: x.clock } } })
   chat.setConnection(true)
   x.chat = chat
   const completed = () => store.listMessages('dm-1').messages.filter(m => m.role === 'assistant' && m.status === 'complete').length
-  x.done = async n => { for (let i = 0; i < 300 && completed() < n; i++) await new Promise(r => setTimeout(r, 20)); await new Promise(r => setTimeout(r, 30)); await chat.turnMemoryIdle() }
+  x.done = async n => { await until(() => completed() >= n, `answer ${n} completed`); await x.clock.settle(); await chat.turnMemoryIdle(); await x.clock.settle() }
   x.send = async (message, requestId) => { const r = await chat.send({ message, clientThreadId: 'dm-1', requestId, ...(x.cid ? { conversationId: x.cid } : {}), profileId: 'sol', replyDestination: 'direct' }); x.cid ||= r.conversationId; return r }
   x.packet = i => x.starts[i]?.additionalContext?.[TURN_MEMORY_KEY]?.value ?? null
   x.memoryEntries = () => calibrationLog.entries().filter(e => e.feature === 'turn_memory')
@@ -138,40 +142,73 @@ test('mid-session, on: no reconstruction; real receipts keep pages the live cont
   x.store.close()
 })
 
-test('caps: a loop that does not answer in time never holds the turn; the turn starts without a packet and nothing is carried to a later turn', async () => {
-  // 1. A Decisions request that never answers: the loop gives up at its own deadline (the cap minus 200 ms), well before the request would.
-  let release
-  const hang = new Promise(resolve => { release = resolve })
-  const x = await rig({ tm: { caps: { firstMs: 400, midMs: 400 } }, client: { decide: () => hang.then(() => ({ answers: {} })) } })
-  let started = Date.now()
-  await x.send(DONE, 'r1')
-  let waited = Date.now() - started
-  assert.ok(waited >= 150 && waited < 1500, `waited ${waited} ms: about the loop deadline, never the hung request`)
-  assert.equal(x.packet(0), null)
-  release(); await x.done(1)
-  assert.equal(x.chat.turnMemoryDelivered.size, 0, 'nothing was delivered, so nothing counts as held')
+test('caps: a request that never answers is given up at the loop deadline (cap minus 200 ms on the clock); the turn starts then, without a packet', async () => {
+  const gate = deferred()
+  const x = await rig({ tm: { caps: { firstMs: 400, midMs: 400 } }, client: { decide: () => gate.promise } })
+  const t0 = x.clock.now()
+  const sending = x.send(DONE, 'r1')
+  await until(() => x.decides.length >= 1 && x.clock.pending() >= 2, 'the loop asked and the turn waits on the cap')
+  await x.clock.advance(199)
+  assert.equal(x.starts.length, 0, 'the turn is held while the loop may still answer in time')
+  await x.clock.advance(2)
+  await sending
+  assert.equal(x.starts.length, 1); assert.equal(x.packet(0), null)
+  assert.ok(x.clock.now() - t0 < 400, 'released at the loop deadline, before the cap')
+  gate.resolve({ answers: {} }); await x.done(1)
+  assert.equal(x.chat.turnMemoryDelivered.size, 0, 'nothing was delivered, so nothing counts as held and nothing is carried to a later turn')
   assert.deepEqual(x.memoryEntries().map(e => [e.mode, e.memory, e.fallback, e.attached]), [['on', 'fallback', 'timeout', false]])
-  // 2. A loop that cannot even finish by itself (here the wiki source hangs): the cap is the last line, the turn starts at the cap.
-  let releaseWiki
-  const y = await rig({ tm: { caps: { firstMs: 300, midMs: 300 }, wiki: () => new Promise(resolve => { releaseWiki = resolve }) } })
-  started = Date.now()
-  await y.send(DONE, 'r1')
-  waited = Date.now() - started
-  assert.ok(waited >= 250 && waited < 1500, `waited ${waited} ms: the cap`)
-  assert.equal(y.packet(0), null); assert.equal(y.decides.length, 0)
-  releaseWiki(null); await y.done(1)
-  assert.deepEqual(y.memoryEntries().map(e => [e.mode, e.memory, e.fallback, e.attached]), [['on', 'fallback', 'timeout', false]])
   assert.deepEqual(TURN_MEMORY_CAPS, { firstMs: 4000, midMs: 2500 })
+  x.store.close()
+})
+
+test('caps: a loop that cannot finish by itself is cut at the cap, to the millisecond on the clock; an early timer does not release the turn early', async () => {
+  for (const earlyMs of [0, 30]) {
+    const wikiGate = deferred(), clock = createFakeClock({ earlyMs })
+    const x = await rig({ tm: { clock, caps: { firstMs: 300, midMs: 300 }, wiki: () => wikiGate.promise } })
+    const sending = x.send(DONE, 'r1')
+    await until(() => clock.pending() >= 1, 'the turn waits on the cap')
+    await clock.advance(299)
+    assert.equal(x.starts.length, 0, `earlyMs ${earlyMs}: still held one millisecond before the cap`)
+    await clock.advance(2)
+    await sending
+    assert.equal(x.starts.length, 1); assert.equal(x.packet(0), null); assert.equal(x.decides.length, 0)
+    wikiGate.resolve(null); await x.done(1)
+    assert.deepEqual(x.memoryEntries().map(e => [e.mode, e.memory, e.fallback, e.attached]), [['on', 'fallback', 'timeout', false]])
+    x.store.close()
+  }
+})
+
+test('the cap is authoritative: a packet that became ready after the cap on the clock is not attached, even when no timer has fired (a busy process)', async () => {
+  // The scan answers in time and its picks are kept. While the link round is out, the process is "busy": the clock passes the cap and no
+  // timer has run. The loop then closes with the scan picks (a ready, partial packet) at 450 ms. Deciding by which callback ran first would
+  // attach that packet; deciding by the clock does not.
+  const judge = mockJudge(), clock = createFakeClock()
+  const t0 = clock.now()
+  const client = { async decide(req) { if (req.questions.some(q => /^(st_|op_)/.test(q.name))) clock.set(t0 + 450); return judge.decide(req) } }
+  const x = await rig({ tm: { clock, caps: { firstMs: 400, midMs: 400 }, ontologyWrite: false }, client })
+  await x.send(DONE, 'r1'); await x.done(1)
+  assert.ok(x.decides.some(d => d.names.some(n => n.startsWith('pg_'))), 'the loop ran and picked pages')
+  assert.ok(x.decides.some(d => d.names.some(n => /^(st_|op_)/.test(n))), 'the link round was started in time')
+  assert.equal(x.packet(0), null, 'ready at 450 ms with a 400 ms cap: not attached')
+  assert.equal(x.chat.turnMemoryDelivered.size, 0)
+  assert.equal(x.events.some(e => /기억 자료/.test(JSON.stringify(e))), false)
+  assert.deepEqual(x.memoryEntries().map(e => [e.mode, e.memory, e.fallback, e.attached]), [['on', 'fallback', 'timeout', false]])
+  // control: the same turn without the jump is attached
+  const y = await rig({ tm: { caps: { firstMs: 400, midMs: 400 }, ontologyWrite: false } })
+  await y.send(DONE, 'r1'); await y.done(1)
+  assert.ok(y.packet(0)?.includes(body('db/pg-plan')))
   for (const r of [x, y]) r.store.close()
 })
 
 test('caps: a loop cut by its deadline attaches what it already has (the scan picks) and marks the packet partial', async () => {
-  const judge = mockJudge()
-  const client = { async decide(req) { if (req.questions.some(q => /^(st_|op_)/.test(q.name))) await new Promise(r => setTimeout(r, 2000)); return judge.decide(req) } }
+  const judge = mockJudge(), never = deferred()
+  const client = { async decide(req) { if (req.questions.some(q => /^(st_|op_)/.test(q.name))) await never.promise; return judge.decide(req) } }
   const x = await rig({ tm: { caps: { firstMs: 700, midMs: 700 }, ontologyWrite: false }, client })
-  const started = Date.now()
-  await x.send(DONE, 'r1'); await x.done(1)
-  assert.ok(Date.now() - started < 2500)
+  const sending = x.send(DONE, 'r1')
+  await until(() => x.decides.some(d => d.names.some(n => /^(st_|op_)/.test(n))) && x.clock.pending() >= 2, 'the link round is pending and the turn waits')
+  assert.equal(x.starts.length, 0)
+  await x.clock.advance(501) // the loop deadline is the cap minus 200 ms
+  await sending; await x.done(1)
   assert.ok(x.packet(0)?.includes(body('db/pg-plan')), 'the pages the scan already picked are attached')
   assert.doesNotMatch(x.packet(0), /status-read=/, 'the status reading that did not finish is simply absent')
   assert.deepEqual(x.memoryEntries().map(e => [e.memory, e.attached]), [['partial', true]])
@@ -217,7 +254,7 @@ test('write judgment runs after the answer and stores only a pending reading; no
   assert.equal(q.chat.turnMemoryWriteReceipts.get(q.run()).proposal, 'none')
   assert.ok(!q.timeline.includes('decide:write'))
   const failed = await rig(); failed.terminal = 'failed'
-  await failed.send(DONE, 'r1'); await new Promise(r => setTimeout(r, 200)); await failed.chat.turnMemoryIdle()
+  await failed.send(DONE, 'r1'); await until(() => failed.run()?.status === 'failed', 'the run failed'); await failed.clock.settle(); await failed.chat.turnMemoryIdle()
   assert.ok(!failed.timeline.includes('decide:write')); assert.equal(failed.wiki.pages.get('db/pg-plan').statusReadings.length, 0)
   for (const r of [x, q, failed]) r.store.close()
 })
@@ -226,8 +263,9 @@ test('no writer, or the mode switched off before the answer finished: the judgme
   const none = await rig({ tm: { writer: undefined } })
   await none.send(DONE, 'r1'); await none.done(1)
   assert.equal(none.chat.turnMemoryWriteReceipts.get(none.run()).applied, null); assert.equal(none.wiki.pages.get('db/pg-plan').statusReadings.length, 0)
-  const flipped = await rig()
-  const sent = flipped.send(DONE, 'r1'); await sent; flipped.memoryMode = 'advisory'; await flipped.done(1)
+  const flipped = await rig({ hooks: { manualFinish: true } })
+  await flipped.send(DONE, 'r1'); flipped.memoryMode = 'advisory' // switched while the answer is still being written
+  await flipped.finish(); await flipped.done(1)
   assert.equal(flipped.wiki.pages.get('db/pg-plan').statusReadings.length, 0)
   for (const r of [none, flipped]) r.store.close()
 })

@@ -2,17 +2,18 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { LIVE_LIMITS, LIVE_RUNS, estimateLive, runLive, runLiveTurn, scoreLive, scoreLiveTurn } from './egdesk-memory-live-runner.mjs'
-import { mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
+import { createFakeClock, mockJudge, until } from './egdesk-wiki-reconstruction.fixture.mjs'
 
 const KEY = 'egd-synthetic-not-a-key-0012'
 // A stand-in Decisions server: answers each request with the lexical stand-in judge (never a model), in the API's wire shape.
-function server({ failAt = null, status = 500, throwAt = null, delayMs = 0, usage = null, log = [] } = {}) {
+function server({ failAt = null, status = 500, throwAt = null, hang = null, usage = null, log = [] } = {}) {
   const judge = mockJudge()
   let n = 0
   const impl = async (url, init) => {
     n++; log.push({ url, init, n })
     if (throwAt === n) throw Object.assign(new Error(`connect failed for ${init.headers.authorization}`), { name: 'TypeError' })
-    if (delayMs) await new Promise((resolve, reject) => { const t = setTimeout(resolve, delayMs); init.signal?.addEventListener('abort', () => { clearTimeout(t); reject(Object.assign(new Error('aborted'), { name: 'AbortError' })) }, { once: true }) })
+    // hang: requests whose questions match never answer; they end only when the caller aborts them.
+    if (hang && JSON.parse(init.body).questions.some(q => hang.test(q.name))) await new Promise((_, reject) => { const abort = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); if (init.signal?.aborted) abort(); else init.signal?.addEventListener('abort', abort, { once: true }) })
     if (failAt === n) return new Response(JSON.stringify({ error: { code: 'x' } }), { status })
     const body = JSON.parse(init.body)
     const { answers } = await judge.decide({ input: body.input, questions: body.questions })
@@ -87,16 +88,23 @@ test('no retries: the first HTTP failure or network error stops the measurement;
 })
 
 test('a slow model is a result, not a stop: the loop is cut at its deadline, the turn is marked partial and classed as cap, later turns still run', async () => {
-  const s = server({ delayMs: 400 })
+  // The triage and the link round never answer; the page scan answers at once. Time is a manual clock, moved by the test: the loop deadline is
+  // reached because the test says so, not because a sleep happened to be long enough.
+  const s = server({ hang: /^(tn_|st_|op_)/ }), clock = createFakeClock()
   const limits = { ...LIVE_LIMITS, caps: { firstMs: 700, midMs: 700 } }
-  const out = await runLive({ key: KEY, send: true, fetchImpl: s.impl, limits })
+  let out = null
+  void runLive({ key: KEY, send: true, fetchImpl: s.impl, limits, clock }).then(result => { out = result })
+  await until(() => { if (out) return true; if (clock.pending()) void clock.advance(50); return false }, 'the six turns ran')
   assert.equal(out.stoppedBecause, null); assert.equal(out.turns.length, 6)
-  assert.ok(out.requests.some(r => r.status === 'aborted_by_deadline'))
   assert.ok(out.turns.some(t => t.partial || t.status === 'fallback' || t.status === 'empty'))
   const failed = out.scorecard.scored.filter(x => !x.pass)
   assert.ok(failed.length > 0 && failed.every(x => x.failureClass === 'cap_or_outage' || x.failureClass === 'judgment'))
   assert.ok(failed.some(x => x.failureClass === 'cap_or_outage'))
-  assert.ok(out.turns.every(t => t.packetMs < 1500), 'no turn waits for the slow request beyond its deadline')
+  // exact, on the clock: nothing is handed over later than the loop deadline (the cap minus its margin)
+  assert.ok(out.turns.every(t => t.packetMs <= 700 - limits.loopMarginMs), `no turn waits beyond its deadline: ${out.turns.map(t => t.packetMs)}`)
+  assert.ok(out.turns.some(t => t.packetMs === 700 - limits.loopMarginMs), 'a turn that was cut ends exactly at the deadline')
+  // the requests that never answered are ended by the client's own abort and recorded as such
+  await until(() => out.requests.some(r => r.status === 'aborted_by_deadline'), 'a hung request was aborted')
 })
 
 test('scoring the final packet: required, off-topic, held, private, status, write and the pass rule', async () => {
