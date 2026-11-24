@@ -37,7 +37,7 @@ test('both plans carry only pre-registered check ids, run the phases the pre-reg
 
 test('all seven pre-registered phases, stand-in: every code-determined prediction holds, and the journeys the stand-in plays are reachable', async () => {
   const base = loadLivePlan(FAMILY_PLAN_FILES.holdout2)
-  const ids = Object.keys(holdout2Checks({ phaseOf: () => null })).filter(id => !id.startsWith('sk-') && !id.startsWith('en-')) // the c26 stuck plan and the c27 entry plan have their own tests below
+  const ids = Object.keys(holdout2Checks({ phaseOf: () => null })).filter(id => !id.startsWith('sk-') && !id.startsWith('en-') && !id.startsWith('rg-')) // the c26 stuck plan and the c27 entry plan have their own tests below
   // the runner's own hard limits (14 requests, 12k tokens) hold here too: the seven phases run as four journeys
   const groups = [['rr-ub-base', 'rr-ig-list'], ['hc-link', 'hc-tab'], ['hc-covered', 'ms-info'], ['ms-nav']]
   const outs = []
