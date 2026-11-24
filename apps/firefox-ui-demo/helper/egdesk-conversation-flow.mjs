@@ -30,6 +30,10 @@ export const FLOW_LIMITS = Object.freeze({
   // No engine or tool event for 20 s: two attention limits (2 x 10 s) and four beats. It is a judgement, not a measurement of real
   // engine gaps; each asked beat records the silence in the calibration log so the bound can be corrected from real runs.
   stallAfterMs: 20_000,
+  // While a reasoning item is open the engine is known to be thinking, and a model that does not stream its reasoning sends nothing
+  // until it is done: silence then needs three times as long before it counts (a judgement; see the c12 report for what the
+  // protocol documents and what could not be confirmed).
+  stallReasoningMs: 60_000,
   // A stalled engine probably cannot write either: the writer gets 6 s (three times a cold Decision call), then the fixed line is used.
   stalledWriterMs: 6_000,
 })
@@ -48,6 +52,32 @@ export const FLOW_KINDS = Object.freeze([
 ])
 
 /**
+ * Who is waiting for this task, and may a message go into this conversation. Pure: from the task's audience and a presence snapshot.
+ *   audience: { requester, owner, participants } member ids (default: the local person asked in their own DM, all 'self')
+ *   presence: the presence feed's snapshot() rows [{ member, self, active, viewport, focusCard, lastInputAgeMs }], or null when
+ *     there is no feed (then, as before, the requester is taken to be waiting and presence is unknown)
+ * waiting: 'requester' (present) | 'owner' (the requester is away, the owner of the task is present) | 'nobody'.
+ * postable: only when the waiting person takes part in this conversation and every participant is the requester or the owner.
+ * Member ids never leave this function: the facts are closed labels and numbers.
+ */
+export function audienceFacts({ audience = null, presence = null } = {}) {
+  const a = audience !== null && typeof audience === 'object' ? audience : {}
+  const requester = String(a.requester ?? 'self'), owner = String(a.owner ?? requester)
+  const participants = Array.isArray(a.participants) ? a.participants.map(String) : [requester]
+  const rows = Array.isArray(presence) ? presence : null
+  const find = id => rows?.find(row => row !== null && typeof row === 'object' && (String(row.member) === id || (id === 'self' && row.self === true))) ?? null
+  const present = id => find(id)?.active === true
+  let waiting = 'nobody', who = null
+  if (!rows || present(requester)) { waiting = 'requester'; who = requester }
+  else if (owner !== requester && present(owner)) { waiting = 'owner'; who = owner }
+  const outsiders = participants.filter(member => member !== requester && member !== owner).length
+  const inConversation = who !== null && participants.includes(who)
+  const idle = who === null ? null : find(who)?.lastInputAgeMs
+  return { waiting, addressee: who === null ? 'none' : waiting, addresseePresent: rows ? who !== null : null, addresseeIdleMs: Number.isFinite(idle) && idle >= 0 ? idle : null,
+    addresseeInConversation: inConversation, outsiders, postable: outsiders === 0 && inConversation }
+}
+
+/**
  * Facts at one heartbeat: time and phase from the heartbeat's internal counter, the rest from the run and the flow state.
  * heartbeatFacts: the frozen object of heartbeat.facts() ({ sinceUserMs, sincePostedMs, sinceEngineMs, phase, stepsRemaining, ... }).
  */
@@ -58,6 +88,7 @@ export function beatFlowFacts({ heartbeatFacts, run, flow, own }) {
   return { ...base, stepsDone: hb.stepsDone, stepsActive: hb.stepsRunning, stepsSinceLast: hb.stepsDone - flow.stepsAtLast,
     elapsedMs: hb.sinceUserMs, sinceLastMs: hb.sincePostedMs, sinceEngineMs: hb.sinceEngineMs, phase: hb.phase,
     stepsRemaining: hb.stepsRemaining ?? null, pendingQuestion: hb.pendingQuestion === true || flow.question?.pending === true,
+    reasoningOpen: flow.reasoningOpen?.() === true, audience: flow.audience?.() ?? null,
     stalledNoted: flow.kinds.has('stalled'), blocked: base.blocked || hb.phase === 'waiting_user' }
 }
 
@@ -82,15 +113,34 @@ export function flowFacts({ run, now, flow, own }) {
 export function enumerateOptions(facts, limits = FLOW_LIMITS) {
   const out = ['none']
   if (facts.blocked || facts.sent >= limits.maxMessages) return out
+  // Nobody is waiting, the waiting person is not in this conversation, or someone else is: nothing may be said here.
+  if (facts.audience && facts.audience.postable !== true) return out
   if (facts.sinceLastMs !== null && facts.sinceLastMs < limits.minGapMs) return out
   if (facts.question && !facts.asked) out.push('ask_missing')
   if (facts.elapsedMs >= limits.firstAfterMs) {
     if (!facts.waitExplained && (facts.stepsActive > 0 || facts.stepsDone > 0 || facts.elapsedMs >= limits.firstAfterMs * 2)) out.push('explain_wait')
     if (facts.stepsSinceLast >= limits.milestoneSteps && facts.sent > 0) out.push('milestone')
   }
-  // The engine has been silent for the stall bound (known only on a heartbeat: sinceEngineMs comes from its counter).
-  if (Number.isFinite(facts.sinceEngineMs) && facts.sinceEngineMs >= limits.stallAfterMs && !facts.stalledNoted) out.push('stalled')
+  // The engine has been silent for the stall bound (known only on a heartbeat: sinceEngineMs comes from its counter) while it is the
+  // engine's own turn. A tool or an objective loop that is running is not a silent engine: a long quiet step is a wait to explain.
+  if (Number.isFinite(facts.sinceEngineMs) && (facts.phase === undefined || facts.phase === 'thinking') && !facts.stalledNoted &&
+      facts.sinceEngineMs >= (facts.reasoningOpen ? limits.stallReasoningMs : limits.stallAfterMs)) out.push('stalled')
   return out
+}
+
+/**
+ * The message question as a heartbeat proposal (egdesk-heartbeat.mjs): closed options, facts as numbers and closed labels.
+ * Time, phase and step counts are session lines of the beat request; only what is specific to speaking is listed here.
+ */
+export function flowQuestion(facts, options) {
+  const a = facts.audience ?? null
+  return { name: 'need', none: 'none', kinds: [],
+    instructions: 'Should the assistant, which is still working, send the waiting person a short message now, and which kind?',
+    options: FLOW_KINDS.filter(kind => options.includes(kind.value)),
+    facts: { messages_already_sent_while_working: facts.sent, steps_done_since_last_message: facts.stepsSinceLast, agent_asked_a_question_in_its_notes: Boolean(facts.question),
+      wait_already_explained: facts.waitExplained === true, a_question_to_the_person_is_still_unanswered: facts.pendingQuestion === true, reasoning_in_progress: facts.reasoningOpen === true,
+      ...(a ? { waiting_person: a.waiting, waiting_person_present: a.addresseePresent === null ? 'unknown' : a.addresseePresent ? 'yes' : 'no',
+        ...(a.addresseeIdleMs !== null ? { waiting_person_idle_seconds: Math.round(a.addresseeIdleMs / 1000) } : {}) } : {}) } }
 }
 
 /** One Decision request over the enumerated kinds. Returns { kind, judgment } ('none' unless the answer clears the bar). */

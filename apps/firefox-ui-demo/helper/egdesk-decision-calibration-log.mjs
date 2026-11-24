@@ -37,6 +37,8 @@ const CHECKS = new Set(['would_pass', 'would_revise', 'would_trim', 'would_ask']
 const FLOW_KINDS = new Set(['none', 'explain_wait', 'ask_missing', 'milestone', 'stalled'])
 const POSTED = new Set(['none', 'model', 'fallback'])
 const BEAT_PHASES = new Set(['thinking', 'tool_running', 'waiting_user', 'objective_step'])
+// Who proposed a question at a heartbeat (code names of features, never content). A new provider adds its name here.
+const BEAT_PROVIDERS = new Set(['message', 'placement', 'attention', 'presence', 'browser_task', 'terminal_loop'])
 const seconds = value => (Number.isFinite(value) && value >= 0 ? Math.min(3600, Math.round(value / 1000)) : null)
 function beat(raw) {
   if (!record(raw)) return null
@@ -139,7 +141,7 @@ function judgment(raw) {
   // Four decimals so a replay of the product's bar agrees with the product at the boundary.
   put(out, 'confidence', probVs(raw.confidence, raw.threshold, 4)); put(out, 'margin', probVs(raw.margin, raw.minMargin, 4))
   put(out, 'options', Number.isSafeInteger(raw.options) && raw.options >= 2 && raw.options <= 255 ? raw.options : null)
-  put(out, 'noPick', word(NO_PICK, raw.noPick))
+  put(out, 'noPick', word(NO_PICK, raw.noPick)); put(out, 'provider', word(BEAT_PROVIDERS, raw.provider))
   return out
 }
 
@@ -158,7 +160,7 @@ export function normalizeEntry(raw, now = Date.now()) {
     for (const key of ['items', 'opaque', 'sentences', 'terms']) put(counts, key, count(raw.evidence[key], 99))
     if (Object.keys(counts).length) entry.evidence = counts
   }
-  put(entry, 'flow', word(FLOW_KINDS, raw.flow)); put(entry, 'posted', word(POSTED, raw.posted)); put(entry, 'beat', beat(raw.beat))
+  put(entry, 'flow', word(FLOW_KINDS, raw.flow)); put(entry, 'posted', word(POSTED, raw.posted)); put(entry, 'beat', beat(raw.beat)); put(entry, 'questions', count(raw.questions, 16))
   put(entry, 'position', word(POSITIONS, raw.position)); put(entry, 'memory', word(MEMORY, raw.memory)); put(entry, 'timing', timing(raw.timing))
   put(entry, 'fallback', word(FALLBACK, raw.fallback)); put(entry, 'attached', typeof raw.attached === 'boolean' ? raw.attached : null)
   if (feature === 'terminal_state') put(entry, 'terminal', terminalFields(raw.terminal))
