@@ -300,3 +300,85 @@ test('request shape: previews are bounded and secret-masked, and the goal is cut
   assert.equal(asked.length, request.questions.length)
   for (const block of data.blocks) { assert.ok(block.preview.length <= 1200); assert.equal(block.preview.includes('sk-abcdefghijklmnopqrstuvwxyz'), false) }
 })
+
+// ---- cycle 9: the content-quoting predicate design of the judge (R1/R2/R4); the default design is unchanged ----
+const predicateMock = (verdictOf, { fail = null } = {}) => {
+  const calls = []
+  return { calls, client: { async decide(request) {
+    calls.push(request)
+    if (fail) throw Object.assign(new Error('mock'), { name: 'DecisionError', code: fail })
+    const quoted = request.input.at(-1).content
+    const answers = request.questions.map(q => {
+      const id = q.name.replace('wm_need_', ''), block = new RegExp(`Block ${id} \\(lines [^)]*\\):\\n"""\\n([\\s\\S]*?)\\n"""`).exec(quoted)?.[1] ?? ''
+      return { name: q.name, type: 'predicate', probability: verdictOf(id, block) }
+    })
+    const { normalizeDecisionResponse } = await import('./egdesk-decision-client.mjs')
+    return { ...normalizeDecisionResponse({ answers, model: 'gpt-6-luna' }, request.questions), latencyMs: 0 }
+  } } }
+}
+
+test('predicate design: every open block is quoted and asked about on its own; the goal is quoted; long blocks state their cut; secrets are masked', async () => {
+  const { WM_JUDGE_DESIGNS } = await import('./egdesk-working-memory-gate.mjs')
+  assert.deepEqual(WM_JUDGE_DESIGNS, ['choice', 'predicates'])
+  const article = articleDump()
+  const { lines, blocks } = enumerateBlockOptions(article.text, { kind: 'page', goal: article.goal, canSpill: true })
+  const { asked, request } = buildGateRequest({ lines, blocks, kind: 'page', goal: article.goal, design: 'predicates' })
+  assert.ok(asked.length >= 5)
+  assert.deepEqual(request.questions.map(q => [q.type, q.name]), asked.map(b => ['predicate', `wm_need_${b.id}`]))
+  assert.equal(request.questions.some(q => q.type === 'choice'), false, 'no N-way question, so no "keep as it is" default to drift to')
+  const text = request.input.map(m => m.content).join('\n')
+  assert.ok(text.includes(`"""\n${article.goal}\n"""`), 'the person\'s request is quoted')
+  for (const b of asked) assert.ok(text.includes(lines.slice(b.startLine - 1, b.endLine).join('\n').slice(0, 200)), `block ${b.id} is quoted, not summarised`)
+  for (const must of article.mustKeep) assert.ok(text.includes(must), 'the sentence the goal needs is in front of the judge')
+  const long = ['$ cat notes', ...Array.from({ length: 30 }, (_, i) => `메모 ${i}: ${'가나다라마바사 '.repeat(12)}`), 'token=sk-abcdefghijklmnopqrstuvwxyz0123456789 끝', '끝']
+  const big = enumerateBlockOptions(long.join('\n'), { kind: 'page', canSpill: true })
+  const cut = buildGateRequest({ lines: big.lines, blocks: big.blocks, kind: 'page', goal: '요약', design: 'predicates', limits: { ...WM_LIMITS, blockQuoteChars: 300 } })
+  assert.match(cut.request.input.at(-1).content, /\[… \d+ more characters of this block are not shown\]/)
+  assert.equal(cut.request.input.at(-1).content.includes('sk-abcdefghijklmnopqrstuvwxyz'), false)
+  // The default design is still the N-way choice with previews.
+  assert.equal(buildGateRequest({ lines, blocks, kind: 'page', goal: article.goal }).request.questions[0].type, 'choice')
+})
+
+test('predicate design: the code turns answers into actions; anchors stay; undecided and "needed" blocks are never dropped; a failure is today\'s behaviour', async () => {
+  const article = articleDump(), spill = createSpillStore({ dir: tmp() })
+  const needed = (id, block) => (block.includes('지연 보상 정책') ? 0.97 : 0.02)
+  const mock = predicateMock(needed)
+  const result = await gateToolOutput({ ...article, mode: 'on', enabled: true, client: mock.client, egress: allow(), spill, design: 'predicates' })
+  assert.deepEqual([result.touched, result.source, result.requests], [true, 'decision', 1])
+  for (const must of [...article.mustKeep, article.relevantHeading]) assert.ok(result.text.split('\n').includes(must), must)
+  assert.ok(result.tokensAfter < result.tokensBefore * 0.4)
+  const original = article.text.split('\n')
+  for (const p of pointer(result.text)) assert.equal(spill.read(p.snapshotId, p.range).text, original.slice(p.range.startLine - 1, p.range.endLine).join('\n'))
+  // A "no" without a store: page text is content, so it is kept rather than collapsed without a way back.
+  const noStore = await gateToolOutput({ ...article, mode: 'on', enabled: true, client: predicateMock(() => 0).client, egress: allow(), design: 'predicates' })
+  assert.deepEqual([noStore.touched, noStore.reason], [false, 'nothing_to_omit'])
+  // Undecided (.5) keeps every block.
+  const unsure = await gateToolOutput({ ...article, mode: 'on', enabled: true, client: predicateMock(() => 0.5).client, egress: allow(), spill: createSpillStore({ dir: tmp() }), design: 'predicates' })
+  assert.deepEqual([unsure.touched, unsure.text === article.text], [false, true])
+  // A judge that says "not needed" to everything: anchors stay verbatim, and every other line of the page is spilled behind a
+  // pointer (re-readable), never dropped. Prose sentences the goal needs are NOT anchors (no pattern links them), so this is the
+  // case the measurement must watch: a wrong "no" costs the model one re-read, not the content.
+  const hostileStore = createSpillStore({ dir: tmp() })
+  const hostile = await gateToolOutput({ ...article, mode: 'on', enabled: true, client: predicateMock(() => 0).client, egress: allow(), spill: hostileStore, design: 'predicates' })
+  const { anchors } = enumerateBlockOptions(article.text, { kind: 'page', goal: article.goal, canSpill: true })
+  for (const index of anchors) assert.ok(hostile.text.split('\n').includes(original[index]), 'anchor ' + index)
+  const covered = new Set()
+  for (const m of hostile.text.matchAll(/spilled \(lines (\d+)-(\d+)\)/g)) for (let n = Number(m[1]); n <= Number(m[2]); n++) covered.add(n)
+  const keptLines = new Set(hostile.text.split('\n'))
+  original.forEach((line, i) => assert.ok(covered.has(i + 1) || keptLines.has(line), 'line ' + (i + 1) + ' is kept or re-readable'))
+  assert.equal(hostile.text.split('\n').includes(article.mustKeep[0]), false, 'and the needed sentence is then only re-readable, which is what a measurement must catch')
+  const down = await gateToolOutput({ ...article, mode: 'on', enabled: true, client: predicateMock(needed, { fail: 'timeout' }).client, egress: allow(), spill: createSpillStore({ dir: tmp() }), design: 'predicates' })
+  assert.deepEqual([down.touched, down.fallback, down.text === article.text], [false, 'timeout', true])
+  // Advisory records the per-block probabilities, content-free.
+  const calibration = recorder()
+  const advised = await gateToolOutput({ ...article, mode: 'advisory', client: predicateMock(needed).client, egress: allow(), spill: createSpillStore({ dir: tmp() }), calibration, design: 'predicates' })
+  assert.deepEqual([advised.touched, advised.text === article.text], [false, true])
+  const stored = normalizeEntry(calibration.entries[0])
+  assert.ok(stored.judgments.length >= 5 && stored.judgments.every(j => j.q === 'wm_block' && Number.isFinite(j.p) && j.threshold === 0.8))
+  assert.equal(JSON.stringify(stored).includes('보상'), false)
+  // Process output answered "no" without a store collapses (progress lines), as the rule path does.
+  const log = buildLog()
+  const collapsed = await gateToolOutput({ ...log, mode: 'on', enabled: true, client: predicateMock((id, block) => (/error TS2345|exit code/.test(block) ? 0.99 : 0.01)).client, egress: allow(), design: 'predicates' })
+  assert.equal(collapsed.touched, true); for (const must of log.mustKeep) assert.ok(collapsed.text.split('\n').includes(must))
+  assert.equal(collapsed.text.includes('Re-read:'), false)
+})

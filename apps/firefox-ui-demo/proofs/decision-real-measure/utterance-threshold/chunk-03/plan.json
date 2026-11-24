@@ -1,0 +1,735 @@
+{
+  "set": "utterance-threshold-v1/chunk-03",
+  "tokenCeiling": 12000,
+  "passRule": "Labels fixed in labels.json sha256 d29d9007bd871377dd2e30fb9c6b84fae98b401072abad2cca5eb76249d1b7aa before sending. A hard check fails only on a WRONG INSTALL at today's speech bar (confidence >= 0.85 and margin >= 0.2, runner-up including unreported mass): a label outside the sentence's allowed set. Soft checks: an allowed label at confidence >= the bar (coverage), unknown on a deliberately ambiguous axis, the status reading. This is a study: the outcome is the wrong-install rate per candidate bar from scripts/egdesk-utterance-threshold-study.mjs analyze, not pass/fail.",
+  "requests": [
+    {
+      "id": "c03",
+      "file": "requests/c03.json",
+      "sha256": "cab24765089dcd37f6a17bbcb0ea502e1c0d1043dc50de9fd00bb197ca105370",
+      "estInputTokens": 1263,
+      "expect": [
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "record_based",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "source: no label outside record_based installed at today's bar"
+        },
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "record_based"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "source: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "assertion",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "form: no label outside assertion installed at today's bar"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "assertion"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "form: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "past_anchored",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "time: no label outside past_anchored installed at today's bar"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "past_anchored"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "time: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "tw_status",
+          "kind": "choice",
+          "oneOf": [
+            "done",
+            "unknown"
+          ],
+          "severity": "soft",
+          "note": "status reading (not part of the threshold question)"
+        }
+      ]
+    },
+    {
+      "id": "c11",
+      "file": "requests/c11.json",
+      "sha256": "31752c4539e951dacc4374828079bdcf63c432aaa398074eeacc342153997a12",
+      "estInputTokens": 1263,
+      "expect": [
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "attributed_report",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "source: no label outside attributed_report installed at today's bar"
+        },
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "attributed_report"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "source: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "assertion",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "form: no label outside assertion installed at today's bar"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "assertion"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "form: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "past_anchored",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "time: no label outside past_anchored installed at today's bar"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "past_anchored"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "time: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "tw_status",
+          "kind": "choice",
+          "oneOf": [
+            "done",
+            "unknown"
+          ],
+          "severity": "soft",
+          "note": "status reading (not part of the threshold question)"
+        }
+      ]
+    },
+    {
+      "id": "c19",
+      "file": "requests/c19.json",
+      "sha256": "b95cb481d1c29e3abf40419eca8fc4fe370311df6cf41c57b5941d8af6de12ee",
+      "estInputTokens": 1258,
+      "expect": [
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "unspecified",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "source: no label outside unspecified installed at today's bar"
+        },
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "unspecified"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "source: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "conditional",
+            "plan",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "form: no label outside conditional/plan installed at today's bar"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "conditional",
+            "plan"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "form: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "future_anchored",
+            "future_unspecified",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "time: no label outside future_anchored/future_unspecified installed at today's bar"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "future_anchored",
+            "future_unspecified"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "time: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "tw_status",
+          "kind": "choice",
+          "oneOf": [
+            "plan",
+            "unknown"
+          ],
+          "severity": "soft",
+          "note": "status reading (not part of the threshold question)"
+        }
+      ]
+    },
+    {
+      "id": "a03",
+      "file": "requests/a03.json",
+      "sha256": "920ec51d76f04cd0fd55af780f3448e3d95ceef8061e18e0799b75d845112810",
+      "estInputTokens": 1227,
+      "expect": [
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "unspecified",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "source: no label outside unspecified installed at today's bar"
+        },
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "unspecified"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "source: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "plan",
+            "assertion",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "form: no label outside plan/assertion installed at today's bar"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "plan",
+            "assertion"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "form: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "future_anchored",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "time: no label outside future_anchored installed at today's bar"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "future_anchored"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "time: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "tw_status",
+          "kind": "choice",
+          "oneOf": [
+            "plan",
+            "unknown"
+          ],
+          "severity": "soft",
+          "note": "status reading (not part of the threshold question)"
+        }
+      ]
+    },
+    {
+      "id": "c27",
+      "file": "requests/c27.json",
+      "sha256": "14c88a0bf55d9e6ea0775820b560598b39ab80474e9b735173d3467c234b0568",
+      "estInputTokens": 1269,
+      "expect": [
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "record_based",
+            "self_reported_observation",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "source: no label outside record_based/self_reported_observation installed at today's bar"
+        },
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "record_based",
+            "self_reported_observation"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "source: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "assertion",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "form: no label outside assertion installed at today's bar"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "assertion"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "form: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "past_anchored",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "time: no label outside past_anchored installed at today's bar"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "past_anchored"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "time: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "tw_status",
+          "kind": "choice",
+          "oneOf": [
+            "unknown"
+          ],
+          "severity": "soft",
+          "note": "status reading (not part of the threshold question)"
+        }
+      ]
+    },
+    {
+      "id": "c35",
+      "file": "requests/c35.json",
+      "sha256": "c18d3e2db750019fddd8b2c97bd00011887e9550032ab7746e345c96879e8723",
+      "estInputTokens": 1262,
+      "expect": [
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "attributed_report",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "source: no label outside attributed_report installed at today's bar"
+        },
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "attributed_report"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "source: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "assertion",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "form: no label outside assertion installed at today's bar"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "assertion"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "form: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "past_anchored",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "time: no label outside past_anchored installed at today's bar"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "past_anchored"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "time: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "tw_status",
+          "kind": "choice",
+          "oneOf": [
+            "done",
+            "unknown"
+          ],
+          "severity": "soft",
+          "note": "status reading (not part of the threshold question)"
+        }
+      ]
+    },
+    {
+      "id": "c43",
+      "file": "requests/c43.json",
+      "sha256": "e545ec84028223fd5188db80ed1f044eadd53b948eb8106ac15f24554324ba10",
+      "estInputTokens": 1254,
+      "expect": [
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "unspecified",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "source: no label outside unspecified installed at today's bar"
+        },
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "unspecified"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "source: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "conditional",
+            "plan",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "form: no label outside conditional/plan installed at today's bar"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "conditional",
+            "plan"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "form: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "future_unspecified",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "time: no label outside future_unspecified installed at today's bar"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "future_unspecified"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "time: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "tw_status",
+          "kind": "choice",
+          "oneOf": [
+            "plan",
+            "unknown"
+          ],
+          "severity": "soft",
+          "note": "status reading (not part of the threshold question)"
+        }
+      ]
+    },
+    {
+      "id": "a11",
+      "file": "requests/a11.json",
+      "sha256": "6a3005a7e673f1c89e256c32c7780f0c7ea670ed5705551928e4cf6b8ee33007",
+      "estInputTokens": 1231,
+      "expect": [
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "unspecified",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "source: no label outside unspecified installed at today's bar"
+        },
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "unspecified"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "source: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "unknown",
+            "plan"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "form: no label outside unknown/plan installed at today's bar"
+        },
+        {
+          "name": "speech_form_0",
+          "kind": "choice",
+          "oneOf": [
+            "plan"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "form: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "unknown",
+            "future_unspecified"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "time: no label outside unknown/future_unspecified installed at today's bar"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "future_unspecified"
+          ],
+          "minConfidence": 0.85,
+          "severity": "soft",
+          "note": "time: an allowed label at confidence >= 0.85 (coverage)"
+        },
+        {
+          "name": "tw_status",
+          "kind": "choice",
+          "oneOf": [
+            "unknown"
+          ],
+          "severity": "soft",
+          "note": "status reading (not part of the threshold question)"
+        }
+      ]
+    }
+  ]
+}

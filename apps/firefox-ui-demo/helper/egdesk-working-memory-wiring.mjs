@@ -124,7 +124,8 @@ function adviseOnProse({ text, consumer, goal, paths, egress, decision, calibrat
     if (leftByRules < WM_JUDGE_MIN_TOKENS) return null
     const calibration = calibrationLog?.record ? { record: raw => calibrationLog.record({ ...raw, mode: 'advisory', attached: false }) } : null
     // mode 'advisory' in the gate: ask, record, change nothing, write nothing. The spill object only makes the option visible.
-    return gateToolOutput({ text, kind: consumer.kind, goal, paths, mode: 'advisory', client: decision.client, egress, calibration, spill: { put: () => null }, limits })
+    // decision.judgeDesign: 'choice' (default, unchanged) or 'predicates' (content-quoting yes/no per block); either way advisory only.
+    return gateToolOutput({ text, kind: consumer.kind, goal, paths, mode: 'advisory', client: decision.client, egress, calibration, spill: { put: () => null }, limits, design: decision.judgeDesign === 'predicates' ? 'predicates' : 'choice' })
       .then(result => ({ requests: result.requests, shadow: result.shadow ?? null, fallback: result.fallback ?? null }), () => null)
   } catch { return null }
 }

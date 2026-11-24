@@ -22,8 +22,17 @@ import { DECISIONS_ENDPOINT, DECISION_MODEL, normalizeDecisionResponse, validate
 //  { "set": name, "tokenCeiling": int, "passRule": text,
 //    "requests": [ { "id", "file": "requests/<id>.json", "sha256": hex of the exact file bytes, "estInputTokens": int,
 //        "expect": [ { "name", "kind": "predicate", "min"?: 0..1, "max"?: 0..1, "severity": "hard"|"soft", "note" },
-//                    { "name", "kind": "choice", "equals"?: value, "oneOf"?: [values], "minConfidence"?: 0..1, "severity", "note" } ] } ] }
+//                    { "name", "kind": "choice", "equals"?: value, "oneOf"?: [values], "minConfidence"?: 0..1,
+//                      "whenAccepted"?: { "minConfidence": 0..1, "minMargin": 0..1 }, "severity", "note" },
+//                    { "name", "kind": "score", "min"?: level, "max"?: level, "minConfidence"?: 0..1, "maxConfidence"?: 0..1, "severity", "note" } ],
+//        "recordOnly"?: true } ] }
 // A request passes when it has no failed hard check. An answer that is refused, missing or malformed fails its check.
+// A request with no expectations is refused unless it says "recordOnly": true; a record-only request is sent and its answers kept,
+// but it is never counted as passed (its state is "recorded"), so a pass can never mean "nothing was checked".
+// A choice expectation with whenAccepted checks only an answer the product would install at that bar (confidence >= minConfidence and
+// top minus the runner-up >= minMargin, the runner-up being at least the unreported mass): below the bar it passes, because nothing is
+// installed; at or above it, the choice must be one of the expected values. A hard whenAccepted check therefore fails only on a wrong install.
+// A score expectation is the conjunction of the bounds it gives (min <= score <= max, minConfidence <= confidence <= maxConfidence).
 const OFFICIAL = DECISIONS_ENDPOINT
 if (OFFICIAL !== 'https://api.openai.com/v1/decisions') throw new Error('unexpected Decisions endpoint')
 export const REAL_RUN_LIMITS = Object.freeze({ maxRequests: 200, maxBodyBytes: 4 * 1024 * 1024, timeoutMs: 20000 })
@@ -60,9 +69,27 @@ function checkExpectation(raw, where, questions) {
     const wanted = hasEquals ? [raw.equals] : raw.oneOf
     if (!Array.isArray(wanted) || !wanted.length || wanted.some(value => !values.includes(value))) bad(`${where} ${raw.name}: expected value is not one of the question's choices`)
     if (raw.minConfidence !== undefined && !unit(raw.minConfidence)) bad(`${where} ${raw.name}: minConfidence must be a probability`)
-    return { ...base, ...(hasEquals ? { equals: raw.equals } : { oneOf: [...raw.oneOf] }), ...(raw.minConfidence !== undefined ? { minConfidence: raw.minConfidence } : {}), options: values.length }
+    if (raw.whenAccepted !== undefined) {
+      const w = raw.whenAccepted
+      if (!w || typeof w !== 'object' || Array.isArray(w) || Object.keys(w).sort().join() !== 'minConfidence,minMargin' || !unit(w.minConfidence) || !unit(w.minMargin))
+        bad(`${where} ${raw.name}: whenAccepted needs exactly { minConfidence, minMargin }, both probabilities`)
+      if (raw.minConfidence !== undefined) bad(`${where} ${raw.name}: give either minConfidence or whenAccepted, not both`)
+    }
+    return { ...base, ...(hasEquals ? { equals: raw.equals } : { oneOf: [...raw.oneOf] }), ...(raw.minConfidence !== undefined ? { minConfidence: raw.minConfidence } : {}),
+      ...(raw.whenAccepted !== undefined ? { whenAccepted: { minConfidence: raw.whenAccepted.minConfidence, minMargin: raw.whenAccepted.minMargin } } : {}), options: values.length }
   }
-  return bad(`${where} ${raw.name}: kind must be "predicate" or "choice"`)
+  if (raw.kind === 'score') {
+    if (question.type !== 'score') bad(`${where} ${raw.name}: expected a score but the question is ${question.type}`)
+    const top = question.levels.length - 1
+    const keys = ['min', 'max', 'minConfidence', 'maxConfidence'].filter(key => raw[key] !== undefined)
+    if (!keys.length) bad(`${where} ${raw.name}: a score expectation needs at least one of min, max, minConfidence, maxConfidence`)
+    for (const key of ['min', 'max']) if (raw[key] !== undefined && !(typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] >= 0 && raw[key] <= top)) bad(`${where} ${raw.name}: ${key} must be a level between 0 and ${top}`)
+    for (const key of ['minConfidence', 'maxConfidence']) if (raw[key] !== undefined && !unit(raw[key])) bad(`${where} ${raw.name}: ${key} must be a probability`)
+    if (raw.min !== undefined && raw.max !== undefined && raw.min > raw.max) bad(`${where} ${raw.name}: min must be <= max`)
+    if (raw.minConfidence !== undefined && raw.maxConfidence !== undefined && raw.minConfidence > raw.maxConfidence) bad(`${where} ${raw.name}: minConfidence must be <= maxConfidence`)
+    return { ...base, ...Object.fromEntries(keys.map(key => [key, raw[key]])), levels: question.levels.length }
+  }
+  return bad(`${where} ${raw.name}: kind must be "predicate", "choice" or "score"`)
 }
 
 /**
@@ -102,11 +129,15 @@ export function loadPlan(planFile) {
     try { validateDecisionRequest({ input: body.input, questions: body.questions, promptCacheKey: body.prompt_cache_key ?? null, safetyIdentifier: body.safety_identifier ?? null }) }
     catch (error) { bad(`${item.id}: not a valid Decisions request (${error?.message || 'invalid'})`) }
     if (!Array.isArray(item.expect)) bad(`${item.id}: expect must be an array`)
+    if (item.recordOnly !== undefined && item.recordOnly !== true) bad(`${item.id}: recordOnly must be true when present`)
+    const recordOnly = item.recordOnly === true
+    if (!item.expect.length && !recordOnly) bad(`${item.id}: no expectations; add expectations, or mark the request "recordOnly": true (it will be sent and kept, never counted as passed)`)
+    if (item.expect.length && recordOnly) bad(`${item.id}: a recordOnly request carries no expectations`)
     const expect = item.expect.map(entry => checkExpectation(entry, item.id, body.questions))
     const counts = { choice: body.questions.filter(q => q.type === 'choice').length, predicate: body.questions.filter(q => q.type === 'predicate').length, score: body.questions.filter(q => q.type === 'score').length }
     const text = bytes.toString('utf8')
     return { id: item.id, file: item.file, sha256: item.sha256, bytes, estInputTokens: item.estInputTokens, independentEst: independentEstimate(counts.choice, counts.predicate + counts.score, bytes.length),
-      questions: body.questions, counts, images: (text.match(/"type"\s*:\s*"input_image"/g) || []).length, expect }
+      questions: body.questions, counts, images: (text.match(/"type"\s*:\s*"input_image"/g) || []).length, expect, recordOnly }
   })
   const totals = { requests: requests.length, estInputTokens: requests.reduce((sum, r) => sum + r.estInputTokens, 0), independentEst: requests.reduce((sum, r) => sum + r.independentEst, 0),
     bytes: requests.reduce((sum, r) => sum + r.bytes.length, 0) }
@@ -115,7 +146,7 @@ export function loadPlan(planFile) {
 
 export function planTable(plan) {
   return plan.requests.map(r => ({ id: r.id, bytes: r.bytes.length, sha: r.sha256.slice(0, 12), choice: r.counts.choice, predicate: r.counts.predicate, score: r.counts.score, images: r.images,
-    estInputTokens: r.estInputTokens, independentEst: r.independentEst, hard: r.expect.filter(e => e.severity === 'hard').length, soft: r.expect.filter(e => e.severity === 'soft').length }))
+    estInputTokens: r.estInputTokens, independentEst: r.independentEst, recordOnly: r.recordOnly, hard: r.expect.filter(e => e.severity === 'hard').length, soft: r.expect.filter(e => e.severity === 'soft').length }))
 }
 
 /** What the answer says about one expectation. observed carries what a later threshold analysis needs: probability, or choice + top/second/margin/N. */
@@ -127,25 +158,51 @@ export function scoreExpectation(expectation, answer) {
     return { ...out, ...(expectation.min !== undefined ? { min: expectation.min } : {}), ...(expectation.max !== undefined ? { max: expectation.max } : {}),
       pass: (expectation.min === undefined || p >= expectation.min) && (expectation.max === undefined || p <= expectation.max), observed: { probability: p } }
   }
+  if (expectation.kind === 'score') {
+    if (answer?.type !== 'score') return { ...out, pass: false, observed: { state: answer?.type ?? 'missing' } }
+    const bounds = Object.fromEntries(['min', 'max', 'minConfidence', 'maxConfidence'].filter(key => expectation[key] !== undefined).map(key => [key, expectation[key]]))
+    const failed = [
+      ...(expectation.min !== undefined && !(answer.score >= expectation.min) ? ['below_min'] : []),
+      ...(expectation.max !== undefined && !(answer.score <= expectation.max) ? ['above_max'] : []),
+      ...(expectation.minConfidence !== undefined && !(answer.confidence >= expectation.minConfidence) ? ['below_min_confidence'] : []),
+      ...(expectation.maxConfidence !== undefined && !(answer.confidence <= expectation.maxConfidence) ? ['above_max_confidence'] : []),
+    ]
+    const ranked = answer.probabilities || []
+    return { ...out, ...bounds, pass: failed.length === 0, ...(failed.length ? { reason: failed.join('+') } : {}),
+      observed: { score: answer.score, confidence: answer.confidence, top: ranked[0]?.probability ?? null, topLevel: ranked[0]?.value ?? null, levels: expectation.levels } }
+  }
   if (answer?.type !== 'choice') return { ...out, pass: false, observed: { state: answer?.type ?? 'missing' } }
   const ranked = answer.probabilities || []
   const top = ranked[0]?.probability ?? null, second = ranked[1]?.probability ?? null
   const wanted = expectation.equals !== undefined ? [expectation.equals] : expectation.oneOf
   const picked = wanted.includes(answer.choice)
   const confident = expectation.minConfidence === undefined || answer.confidence >= expectation.minConfidence
-  return { ...out, ...(expectation.equals !== undefined ? { equals: expectation.equals } : { oneOf: expectation.oneOf }), ...(expectation.minConfidence !== undefined ? { minConfidence: expectation.minConfidence } : {}),
-    pass: picked && confident, ...(picked && !confident ? { reason: 'below_min_confidence' } : !picked ? { reason: 'other_choice' } : {}),
-    observed: { choice: answer.choice, confidence: answer.confidence, top, second, margin: top !== null && second !== null ? Math.round((top - second) * 1e6) / 1e6 : null, options: expectation.options } }
+  const observed = { choice: answer.choice, confidence: answer.confidence, top, second, margin: top !== null && second !== null ? Math.round((top - second) * 1e6) / 1e6 : null, options: expectation.options }
+  const head = { ...out, ...(expectation.equals !== undefined ? { equals: expectation.equals } : { oneOf: expectation.oneOf }), ...(expectation.minConfidence !== undefined ? { minConfidence: expectation.minConfidence } : {}) }
+  if (expectation.whenAccepted) {
+    const { minConfidence, minMargin } = expectation.whenAccepted
+    const chosen = ranked.find(row => row.value === answer.choice)?.probability ?? top
+    const rest = ranked.filter(row => row.value !== answer.choice).map(row => row.probability)
+    const unreported = Math.max(0, 1 - ranked.reduce((sum, row) => sum + (Number.isFinite(row.probability) ? row.probability : 0), 0))
+    const runnerUp = Math.max(0, ...rest, ranked.length < expectation.options ? unreported : 0)
+    const accepted = Number.isFinite(answer.confidence) && answer.confidence >= minConfidence && Number.isFinite(chosen) && chosen - runnerUp >= minMargin - 1e-9
+    return { ...head, whenAccepted: expectation.whenAccepted, pass: !accepted || picked, ...(accepted && !picked ? { reason: 'wrong_install' } : {}), observed: { ...observed, accepted } }
+  }
+  return { ...head, pass: picked && confident, ...(picked && !confident ? { reason: 'below_min_confidence' } : !picked ? { reason: 'other_choice' } : {}), observed }
 }
 
 export function scoreRequest(request, result) {
   if (!result) return { id: request.id, state: 'not_sent', pass: false, hardFailures: [], softMisses: [], checks: [] }
   if (result.status !== 200) return { id: request.id, state: 'failed', pass: false, hardFailures: [], softMisses: [], checks: [] }
   let answers = {}
+  // A record-only request was checked against nothing: it is never a pass.
+  if (request.recordOnly) return { id: request.id, state: 'recorded', pass: null, hardFailures: [], softMisses: [], checks: [] }
   try { answers = normalizeDecisionResponse({ answers: result.answers }, request.questions).answers } catch { answers = {} }
   const checks = request.expect.map(expectation => scoreExpectation(expectation, answers[expectation.name]))
-  const hardFailures = checks.filter(check => check.severity === 'hard' && !check.pass).map(check => check.name)
-  return { id: request.id, state: 'answered', pass: hardFailures.length === 0, hardFailures, softMisses: checks.filter(check => check.severity === 'soft' && !check.pass).map(check => check.name), checks }
+  const hardChecks = checks.filter(check => check.severity === 'hard'), softChecks = checks.filter(check => check.severity === 'soft')
+  const hardFailures = hardChecks.filter(check => !check.pass).map(check => check.name)
+  return { id: request.id, state: 'answered', pass: hardFailures.length === 0, hard: { passed: hardChecks.length - hardFailures.length, total: hardChecks.length },
+    soft: { passed: softChecks.filter(check => check.pass).length, total: softChecks.length }, hardFailures, softMisses: softChecks.filter(check => !check.pass).map(check => check.name), checks }
 }
 
 /**
@@ -187,10 +244,12 @@ export async function runPlan({ plan, key = null, send = false, fetchImpl = glob
     } finally { clearTimeout(timer) }
   }
   const scored = plan.requests.map(request => scoreRequest(request, results[request.id]))
-  const answered = scored.filter(row => row.state === 'answered')
-  const scorecard = { requestsPassed: `${answered.filter(row => row.pass).length}/${plan.requests.length}`, answered: answered.length, notSent: scored.filter(row => row.state === 'not_sent').length,
+  const answered = scored.filter(row => row.state === 'answered'), checked = plan.requests.filter(request => !request.recordOnly).length
+  // requestsPassed counts only requests that were checked; record-only requests are reported apart and never as passed.
+  const scorecard = { requestsPassed: `${answered.filter(row => row.pass).length}/${checked}`, answered: answered.length, recordedOnly: scored.filter(row => row.state === 'recorded').length,
+    notSent: scored.filter(row => row.state === 'not_sent').length,
     hardFailures: scored.reduce((sum, row) => sum + row.hardFailures.length, 0), softMisses: scored.reduce((sum, row) => sum + row.softMisses.length, 0),
-    allAnsweredPassed: answered.length === plan.requests.length && answered.every(row => row.pass), requests: scored }
+    allAnsweredPassed: checked > 0 && answered.length === checked && answered.every(row => row.pass), requests: scored }
   return { ...base, sent, stoppedBecause, results, scorecard, usage: { inputTokens } }
 }
 
@@ -231,8 +290,11 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
   for (const row of planTable(plan)) print(JSON.stringify(row))
   const outcome = await runPlan({ plan, key: send ? env.OPENAI_API_KEY ?? null : null, send, fetchImpl, ...(now ? { now } : {}) })
   print(JSON.stringify({ sent: outcome.sent, stoppedBecause: outcome.stoppedBecause, inputTokens: outcome.usage.inputTokens,
-    ...(outcome.scorecard ? { requestsPassed: outcome.scorecard.requestsPassed, hardFailures: outcome.scorecard.hardFailures, softMisses: outcome.scorecard.softMisses } : {}) }))
-  if (outcome.scorecard) for (const row of outcome.scorecard.requests) print(JSON.stringify({ id: row.id, state: row.state, pass: row.pass, hardFailures: row.hardFailures, softMisses: row.softMisses }))
+    ...(outcome.scorecard ? { requestsPassed: outcome.scorecard.requestsPassed, recordedOnly: outcome.scorecard.recordedOnly, hardFailures: outcome.scorecard.hardFailures, softMisses: outcome.scorecard.softMisses } : {}) }))
+  if (outcome.scorecard) for (const row of outcome.scorecard.requests) print(JSON.stringify({ id: row.id, state: row.state, pass: row.pass,
+    ...(row.hard ? { hard: `${row.hard.passed}/${row.hard.total}`, soft: `${row.soft.passed}/${row.soft.total}` } : {}), hardFailures: row.hardFailures, softMisses: row.softMisses }))
+  const declared = outcome.totals.estInputTokens
+  print(JSON.stringify({ usageTotal: { inputTokens: outcome.usage.inputTokens, declaredEstimate: declared, tokenCeiling: outcome.tokenCeiling, requestsSent: outcome.sent } }))
   const out = valueOf('--out')
   if (out && outcome.sent > 0) writeResults(out, outcome)
   if (outcome.stoppedBecause === 'no_key') { printError('OPENAI_API_KEY is not set (or not a plausible key); nothing was sent'); return EXIT.noKey }
