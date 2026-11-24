@@ -206,7 +206,11 @@ test('restart: it needs --persisted-with-cleanup (preflight and the run refuse w
 
 test('restart, end to end on the fake engine: the room, its account and the invited member survive; the pending owner question is asked again and goes to the owner; nothing carried over is assumed', async t => {
   const w = persistedWorld(t)
+  // a file of the folder changed while the first engine ran (here: written when the second one starts): a restart must not rebuild the folder from the script
+  const spawnFirst = w.deps.spawn; let started = 0
+  w.deps.spawn = (...args) => { if (++started === 2) fs.writeFileSync(path.join(w.options.out, 'scratch', 'collab-restart-room', 'quotes', 'a-v1.md'), 'edited while the first engine ran\n'); return spawnFirst(...args) }
   const rec = (await runCheck(w.options, asScripts(buildCollabRestartScript()), w.deps)).records[0]
+  assert.equal(fs.readFileSync(path.join(w.options.out, 'scratch', 'collab-restart-room', 'quotes', 'a-v1.md'), 'utf8'), 'edited while the first engine ran\n', 'the folder is as the turns left it after the restart')
   assert.equal(rec.aborted, null, rec.abortDetail)
   assert.deepEqual(rec.turns.map(turn => [turn.index, turn.action ?? 'message']), [[1, 'message'], [2, 'message'], [3, 'restart'], [4, 'message'], [5, 'message']], 'the script\'s own turn numbers across the restart')
   for (const turn of rec.turns) assert.equal(turn.ok, true, `${turn.index}: ${JSON.stringify(turn.expectations.filter(e => !e.ok))}`)
@@ -250,4 +254,21 @@ test('restart, record level: roomKept, receiptsClosed and continuity each fail o
   const ok = rec => checkCollabExpect({ continuity: true }, rec)[0].ok
   assert.equal(ok(cont({})), true); assert.equal(ok(cont({ sameThread: false })), false, 'a new engine thread'); assert.equal(ok(cont({ resumed: false })), false, 'never resumed')
   assert.equal(ok(cont({ sentOnce: false, userMessages: 2 })), false, 'the message went twice'); assert.equal(ok(cont({ asRequester: 'owner' }, 'invited')), false, 'attributed to someone else'); assert.equal(ok({ from: 'owner' }), false, 'no continuity record')
+})
+
+test('restart, the hook reads what the NEW runtime holds: its receipts, its approval ledger and its route, never a copy of the old ones', async () => {
+  const route = { engineId: 'codex', engineProfileId: 'codex-default' }
+  const chat = { requestEngineRoute: () => route, engineOwnerHash: () => 'acct-1', turnMemoryDelivered: new Map([['thr-1', { pages: {} }]]), contextDelivered: new Map(), gateHookBroker: () => ({ awaitingReply: () => true }), allowIntermediateMessages: () => false }
+  const store = { getConversation: () => ({ clientThreadId: 'room', conversationId: 'thr-1', engineId: 'codex', engineProfileId: null }) }
+  const hook = createCollabTurnHook({ id: 'c' }), FLAG = { EGDESK_PRESENCE: 'on' }
+  hook.attach({ chat, store, FLAG, client: null, requestLog: [] })
+  const state = () => ({ clientThreadId: 'room', conversationId: 'thr-1' })
+  const carried = hook.beforeRestart({ state })
+  assert.deepEqual([carried.facts.awaiting, carried.facts.memoryReceipts, carried.conversationId], [true, 1, 'thr-1'])
+  const out = hook.afterRestart({ state, carried, expect: { collab: { roomKept: true, receiptsClosed: true } } })
+  assert.deepEqual(out.expectations.map(e => [e.check, e.ok]), [['collab.roomKept', true], ['collab.receiptsClosed', false]], 'the new runtime still holds a receipt and an open question: not closed')
+  chat.turnMemoryDelivered = new Map(); chat.gateHookBroker = () => ({ awaitingReply: () => false })
+  assert.deepEqual(hook.afterRestart({ state, carried, expect: { collab: { receiptsClosed: true } } }).expectations.map(e => e.ok), [true])
+  hook.dispose()
+  const idle = createCollabTurnHook({ id: 'c' }); assert.equal(idle.beforeRestart({ state }), undefined, 'a hook that never attached (the flag is off) carries nothing'); assert.equal(idle.afterRestart({ state, carried: undefined }), null)
 })
