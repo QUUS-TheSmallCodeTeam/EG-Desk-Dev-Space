@@ -41,7 +41,7 @@ const FINAL = '스테이징 환경에 배포했습니다. 결과는 세 단계�
 const AUTH = { isLoggedIn: true, authMode: 'chatgpt', accountId: 'verified-account' }
 
 // ---- bridge side: real runtime + store + HTTP handlers over a scripted engine, virtual clock ---------------------------------
-function bridgeWorld(t, { held = true, flow = true, writer = {}, forkHangs = false } = {}) {
+function bridgeWorld(t, { held = true, flow = true, writer = {}, forkHangs = false, audience = null } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-l2c6-')); chmodSync(dir, 0o700)
   const store = openChatStore({ dataDir: dir, ownerScope: 'synthetic-l2c6' })
   t.after(() => { store.close(); rmSync(dir, { recursive: true, force: true }) })
@@ -79,7 +79,7 @@ function bridgeWorld(t, { held = true, flow = true, writer = {}, forkHangs = fal
       assert.fail(`Unexpected native call: ${method}`)
     },
     decisionContext: { mode: () => 'on', configured: () => true, client: { model: 'mock', decide: async request => { state.decides++; return judge(request, flowAsked) } }, budgetMs: 800, collect: async () => [],
-      draftCheck: held ? { mode: () => 'on' } : undefined, conversationFlow: flow ? { mode: () => 'on' } : undefined },
+      draftCheck: held ? { mode: () => 'on' } : undefined, conversationFlow: flow ? { mode: () => 'on', ...(audience ? { audience } : {}) } : undefined },
   })
   chat.setConnection(true)
   const handler = createChatHttpHandler(chat, async () => {})
@@ -536,4 +536,20 @@ test('the notice field is the runtime\'s own: an engine item cannot mark itself,
   assert.equal(ChatState.systemNoticeMessageView({ role: 'assistant', presentation: 'other', content: 'x', status: 'complete' }), null)
   // The row never groups with an Agent answer.
   assert.match(surface, /const groupRole = \(message\) => \(message && \(ChatState\.awaitResumeMessageView\(message\) \|\| ChatState\.systemNoticeMessageView\(message\)\) \? 'system' : message\?\.role\);/)
+})
+
+// ---- L3 c12 audience rule: a message is posted only where the waiting person takes part and everyone is requester or owner ------
+test('audience rule: with someone else in the conversation no question is posted (the model is not even asked), so no reply opens', async t => {
+  const w = bridgeWorld(t, { writer: { ask: ASK }, audience: () => ({ requester: 'self', participants: ['self', 'guest'] }) })
+  const ui = screen(w)
+  const first = await ui.firstPrompt()
+  await w.advance(4000); await w.note('n1', '어느 환경에 배포할까요?'); await w.advance(2000); ui.pump()
+  assert.deepEqual(w.flowAsked, [], 'a message that could not be posted costs no Decision request')
+  assert.deepEqual(ui.bubbles().map(([role, , text]) => [role, text]), [['user', PROMPT]], 'nothing is posted into a conversation with an outsider')
+  assert.equal(ui.state.codex.replyOpen, false); assert.equal(ui.frames.some(frame => frame.event === 'reply.opened'), false)
+  const c = ui.composer(); c.type(REPLY)
+  assert.equal(c.sendButton.disabled, true); assert.equal(c.sendButton.title, '요청을 보내는 중입니다.')
+  const refused = await w.http('POST', '/chat/send', { clientThreadId: DM, conversationId: first.conversationId, profileId: A, profileEnabled: true, replyDestination: 'direct', message: REPLY, requestId: 'req-x', inRunReplyTo: first.runId })
+  assert.deepEqual([refused.status, refused.data.code], [409, 'INRUN_REPLY_UNAVAILABLE'])
+  assert.equal(w.steers.length, 0); assert.deepEqual(w.stored(), [['user', PROMPT]])
 })
