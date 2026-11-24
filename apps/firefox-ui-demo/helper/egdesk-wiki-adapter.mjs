@@ -27,7 +27,11 @@ const REVISION_OK = /^[A-Za-z0-9._-]{1,40}$/
 // ---- mappers: each returns raw page objects for buildWiki ----
 
 /** Candidates (ontology graph via candidatesFromOntologyGraph, Board, selected sources) -> pages. Bodies are read now, for this turn. */
-export async function pagesFromCandidates(candidates, { max = MAX.candidates, skip = () => false } = {}) {
+// Least privilege: a Board's items are readable only inside that Board's contexts (scope `board:<id>`), a source the person selected for
+// this message only in this DM, and the ontology graph is workspace-wide (no scope), as it already is for the decision catalog.
+const candidateScope = (c, dmScope) => (/^board:/.test(c.id) ? c.id : /^selected:/.test(c.id) ? dmScope : null)
+
+export async function pagesFromCandidates(candidates, { max = MAX.candidates, skip = () => false, dmScope = null } = {}) {
   const out = []
   for (const c of Array.isArray(candidates) ? candidates : []) {
     if (out.length >= max) break
@@ -41,7 +45,7 @@ export async function pagesFromCandidates(candidates, { max = MAX.candidates, sk
     if (!body.trim()) continue
     const mayRead = typeof c.mayRead === 'function' ? c.mayRead : null
     out.push({ id: safeId(c.id), title: String(c.title ?? c.id), body, revision: sha12(`${c.title}\u0000${body}`),
-      time: { slice: TIME_SLICES.includes(c.timeSlice) ? c.timeSlice : 'unknown' }, provenance: { kind: 'document' }, status: statusOfCandidate(c.status),
+      time: { slice: TIME_SLICES.includes(c.timeSlice) ? c.timeSlice : 'unknown' }, provenance: { kind: 'document' }, status: statusOfCandidate(c.status), scope: candidateScope(c, dmScope),
       ...(typeof c.sourceRef === 'string' && c.sourceRef ? { ref: c.sourceRef } : {}), ...(mayRead ? { mayRead } : {}),
       links: (Array.isArray(c.links) ? c.links : []).map(l => ({ type: l.type, to: safeId(l.to) })) })
   }
@@ -119,7 +123,8 @@ function storedReading(raw) {
       !STATUSES.has(raw.reading.status) || !READING_STATES.has(raw.reading.state)) return null
   return { pageId: raw.pageId, sourceRevision: String(raw.sourceRevision), reading: { status: raw.reading.status, state: raw.reading.state,
     basis: PROVENANCE_BASES.includes(raw.reading.basis) ? raw.reading.basis : null,
-    ...(typeof raw.reading.spokenAt === 'string' && !Number.isNaN(Date.parse(raw.reading.spokenAt)) ? { spokenAt: raw.reading.spokenAt } : {}) } }
+    ...(typeof raw.reading.spokenAt === 'string' && !Number.isNaN(Date.parse(raw.reading.spokenAt)) ? { spokenAt: raw.reading.spokenAt } : {}),
+    ...(typeof raw.reading.confirmedAt === 'string' && !Number.isNaN(Date.parse(raw.reading.confirmedAt)) ? { confirmedAt: raw.reading.confirmedAt } : {}) } }
 }
 const normalizeWrites = data => ({ pages: (Array.isArray(data?.pages) ? data.pages : []).map(storedPage).filter(Boolean).slice(-WRITES_LIMITS.pages),
   readings: (Array.isArray(data?.readings) ? data.readings : []).map(storedReading).filter(Boolean).slice(-WRITES_LIMITS.readings) })
@@ -159,7 +164,9 @@ export function overlayWrites(rawPages, written) {
   for (const entry of written.readings) {
     const page = byId.get(entry.pageId)
     if (!page || page.revision !== entry.sourceRevision) continue
-    page.statusReadings = [...(page.statusReadings ?? []), entry.reading]
+    const same = r => r.state === 'pending' && r.status === entry.reading.status && (r.spokenAt ?? null) === (entry.reading.spokenAt ?? null)
+    // An accepted reading (the person's own later confirmation) replaces the pending reading it came from.
+    page.statusReadings = [...(page.statusReadings ?? []).filter(r => entry.reading.state !== 'accepted' || !same(r)), entry.reading]
     if (entry.reading.state === 'accepted') page.status = entry.reading.status
     counts.set(page.id, (counts.get(page.id) ?? 0) + 1)
   }
@@ -175,12 +182,16 @@ export function overlayWrites(rawPages, written) {
 export function createWikiAdapter({ writes = null } = {}) {
   const scopeKey = context => (typeof context?.clientThreadId === 'string' && context.clientThreadId ? `dm:${context.clientThreadId}` : null)
   return {
-    scopeFor(context) { const key = scopeKey(context); return { allowedScopes: key ? [key] : [], writeScope: key } },
-    async snapshot({ context = null, graph = null, candidates = [], speechRecords = null, topicTurns = null, speechGuard = null, topicGuard = null } = {}) {
+    // This DM, plus the Board the message is sent from (when there is one). No other Board, no other DM.
+    scopeFor(context, body = null) {
+      const key = scopeKey(context), board = typeof body?.boardId === 'string' && body.boardId.trim() ? body.boardId : null
+      return { allowedScopes: [...(key ? [key] : []), ...(board ? [`board:${board}`, 'board:current'] : [])], writeScope: key }
+    },
+    async snapshot({ context = null, body = null, graph = null, candidates = [], speechRecords = null, topicTurns = null, speechGuard = null, topicGuard = null } = {}) {
       const scope = scopeKey(context), counts = {}
       const take = async (name, read) => { try { const list = await read(); counts[name] = list.length; return list } catch { counts[name] = -1; return [] } }
       const ontology = graph ? await take('ontology', () => pagesFromOntologyGraph(graph)) : []
-      const boards = await take('candidates', () => pagesFromCandidates(candidates))
+      const boards = await take('candidates', () => pagesFromCandidates(candidates, { dmScope: scope }))
       const speech = speechRecords && scope ? await take('speech', async () => pagesFromSpeechRecords(await speechRecords(), { scope, mayRead: speechGuard })) : []
       const topic = topicTurns && scope ? await take('topic', async () => pagesFromTopicTurns(await topicTurns(), { scope, mayRead: topicGuard })) : []
       let raw = [...ontology, ...boards, ...speech, ...topic]
@@ -202,8 +213,9 @@ export function createWikiAdapter({ writes = null } = {}) {
       return wiki
     },
     // The write path for a snapshot: persists what it accepts (a reference instead of a copy where the words already live in the chat store).
-    writerFor(wiki, { enabled = false, canWrite = () => false, acceptStatus = () => false, idFor = null } = {}) {
-      return createWikiWriter(wiki, { enabled, canWrite, acceptStatus, idFor, persist: writes ? change => writes.apply(change) : null })
+    // acceptStatus is not offered: no policy callback promotes a reading (see createWikiWriter.promote).
+    writerFor(wiki, { enabled = false, canWrite = () => false, idFor = null } = {}) {
+      return createWikiWriter(wiki, { enabled, canWrite, idFor, persist: writes ? change => writes.apply(change) : null })
     },
   }
 }

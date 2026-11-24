@@ -161,9 +161,10 @@ const fingerprint = (proposal, message) => sha256Hex(JSON.stringify([proposal, c
  * createWikiWriter(wiki, { enabled = false, canWrite, acceptStatus, idFor })
  * The only place a proposal becomes a stored page. Off by default. Checks, in order: flag, strict re-validation of the
  * proposal (the judge's shape is never trusted), the host's write permission for that page/scope, the revision the judge
- * saw, idempotency by operationId. A status change is stored as a PENDING reading on the page, apart from its status;
- * it becomes the status only if the host's acceptStatus policy says so. The body of a new page is the person's own
- * message text, supplied by the host; the judge never writes text.
+ * saw, idempotency by operationId. A status change is stored as a PENDING reading on the page, apart from its status, and
+ * NEVER promotes by itself. The only way to a status is promote(): the host rule "the person's own later explicit confirmation"
+ * (documented below). `acceptStatus` is accepted for backward compatibility and deliberately ignored: no policy callback can
+ * auto-promote a model's reading. The body of a new page is the person's own message text, supplied by the host; the judge never writes text.
  */
 export function createWikiWriter(wiki, { enabled = false, canWrite = () => false, acceptStatus = () => false, idFor = null, persist = null } = {}) {
   const done = new Map()
@@ -188,13 +189,12 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
           if (page.revision !== proposal.baseRevision) return { status: 'conflict', reason: 'revision_changed', currentRevision: page.revision }
           const reading = { status: proposal.proposedStatus, state: 'pending', basis: provenance.basis ?? null, ...(typeof proposal.spokenAt === 'string' ? { spokenAt: proposal.spokenAt } : {}) }
           const revision = nextRevision(page.revision)
-          const promote = acceptStatus({ page, reading: { ...reading }, scope }) === true
-          const stored = promote ? { ...reading, state: 'accepted' } : reading
+          const stored = reading
           // Persist first: a store that cannot keep the reading means nothing changed.
           if (typeof persist === 'function') persist({ kind: 'reading', pageId: page.id, sourceRevision: page.revision.replace(/\.r\d+$/, ''), reading: stored, revision })
-          const patched = wiki.patch(page.id, { statusReadings: [...page.statusReadings, stored], revision, ...(promote ? { status: reading.status } : {}) })
+          const patched = wiki.patch(page.id, { statusReadings: [...page.statusReadings, stored], revision })
           if (!patched) return { status: 'invalid', reason: 'write_failed' }
-          return finish({ status: promote ? 'status_updated' : 'recorded_pending', pageId: page.id, revision })
+          return finish({ status: 'recorded_pending', pageId: page.id, revision })
         }
         // new_page
         if (typeof message !== 'string' || !message.trim() || message.length > 2000) return { status: 'invalid', reason: 'message_required' }
@@ -214,6 +214,40 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
         return finish({ status: 'stored', pageId: page.id, revision: page.revision })
       } catch { return { status: 'invalid', reason: 'write_failed' } }
     },
+    /**
+     * promote(pageId, { scope, confirmation, operationId }) — the ONE host rule that turns a pending reading into the page's status:
+     * the person's own later, explicit confirmation. `confirmation` must be { by: 'user', at: ISO } where `at` is after the reading was
+     * made (the person confirms something they have seen, not something said in the same breath), and the host must have captured it from
+     * a real user action (this function cannot check that; it only refuses anything that is not literally by: 'user'). The model's score,
+     * the judge, another agent or a policy callback cannot promote. The latest pending reading is the one promoted; the status is the
+     * reading's own (plan or done), the revision moves, the accepted reading replaces the pending one.
+     */
+    promote(pageId, { scope = null, confirmation = null, operationId = null } = {}) {
+      if (enabled !== true) return { status: 'disabled' }
+      if (typeof operationId !== 'string' || !operationId) return { status: 'invalid', reason: 'operation_id_required' }
+      const key = `${scope?.writeScope ?? ''}\u0000promote\u0000${operationId}`
+      const earlier = done.get(key)
+      const print = sha256Hex(JSON.stringify([pageId, confirmation?.by ?? null, confirmation?.at ?? null]))
+      if (earlier) return earlier.print === print ? { ...earlier.receipt, replay: true } : { status: 'conflict', reason: 'operation_reused' }
+      try {
+        const page = wiki.pages.get(pageId)
+        if (!page) return { status: 'invalid' }
+        if (!record(confirmation) || confirmation.by !== 'user' || typeof confirmation.at !== 'string' || Number.isNaN(Date.parse(confirmation.at))) return { status: 'invalid', reason: 'user_confirmation_required' }
+        if (canWrite({ op: 'promote', page, scope }) !== true) return { status: 'denied' }
+        const index = page.statusReadings.map(r => r.state).lastIndexOf('pending')
+        if (index < 0) return { status: 'invalid', reason: 'no_pending_reading' }
+        const reading = page.statusReadings[index]
+        if (typeof reading.spokenAt === 'string' && !(Date.parse(confirmation.at) > Date.parse(reading.spokenAt))) return { status: 'invalid', reason: 'confirmation_not_later' }
+        const accepted = { ...reading, state: 'accepted', confirmedAt: confirmation.at }
+        const revision = nextRevision(page.revision)
+        if (typeof persist === 'function') persist({ kind: 'reading', pageId: page.id, sourceRevision: page.revision.replace(/\.r\d+$/, ''), reading: accepted, revision })
+        const readings = page.statusReadings.map((r, i) => (i === index ? accepted : r))
+        if (!wiki.patch(page.id, { statusReadings: readings, revision, status: accepted.status })) return { status: 'invalid', reason: 'write_failed' }
+        const receipt = { status: 'status_updated', pageId: page.id, revision }
+        done.set(key, { print, receipt })
+        return receipt
+      } catch { return { status: 'invalid', reason: 'write_failed' } }
+    },
   }
 }
 
@@ -223,18 +257,19 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
  * -> { position, triage, memory, packet, nextDelivered(), judgeWrite() -> Promise<{ proposal, receipt }> | null }
  * judgeWrite is a thunk so the host can run it after the answer started: the packet does not depend on it.
  */
-export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = false, heldExcerpts = false, signal } = {}) {
+export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal } = {}) {
   const pos = position?.kind === 'mid' ? position : { kind: 'first', reason: position?.reason ?? 'unspecified' }
   const receipts = usableReceipts(delivered, pos, threadKey)
   const heldPages = Object.keys(receipts.pages ?? {}).map(id => wiki.pages.get(id)).filter(p => p && allowsPage(p, scope))
-  const heldDigest = heldExcerpts === true ? heldPages.map(p => ({ title: p.title, status: p.status, excerpt: p.body })) : null
+  const heldDigest = heldExcerpts !== false ? heldPages.map(p => ({ title: p.title, status: p.status, excerpt: p.body })) : null
   const triageCall = () => triageTurn({ message, heldTitles: heldPages.map(p => p.title), heldDigest, live: pos.kind === 'mid' ? live : null, client, askedAt, signal })
   let triage, memory
   if (pos.kind === 'mid') {
     triage = await triageCall()
-    // Only a decided courtesy "yes" skips the fetch. A decided need "no" skips it only when the host opted in (skipOnNeed): a wrong skip
-    // loses material, a needless fetch only costs tokens, and the first real T4 run showed a wrong need "no" from titles alone.
-    memory = triage.courtesy.state === 'yes' || (skipOnNeed === true && triage.need.state === 'no') ? { status: 'skipped', reason: 'nothing_needed', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [] }, nextDelivered: () => receipts }
+    // A decided courtesy "yes" skips the fetch. A decided need "no" skips it too, but only with the held pages' content shown (default; real
+    // data: titles alone gave a wrong need 0.02 for T4, with content T4x was 1 and the covered control T6 was 0). Turning either option off
+    // means only courtesy skips. A wrong skip loses material, a needless fetch only costs tokens, so undecided answers always fetch.
+    memory = triage.courtesy.state === 'yes' || (skipOnNeed !== false && heldExcerpts !== false && triage.need.state === 'no') ? { status: 'skipped', reason: 'nothing_needed', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [] }, nextDelivered: () => receipts }
       : await reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget, signal, mode: 'next', live })
   } else {
     ;[triage, memory] = await Promise.all([ontologyWrite ? triageCall() : Promise.resolve(null),

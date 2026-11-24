@@ -44,9 +44,14 @@ test('Board and selected candidates become pages with their own guard; memory ha
   assert.deepEqual(pages.map(p => p.id), ['board:b1', 'selected:s1'])
   const wiki = buildWiki(pages)
   assert.equal(wiki.pages.get('selected:s1').ref, 'https://example.invalid/doc')
-  assert.equal(allowsPage(wiki.pages.get('board:b1'), SCOPE), true)
+  const own = adapter => adapter.scopeFor({ clientThreadId: 'thread-1' }), board = a => a.scopeFor({ clientThreadId: 'thread-1' }, { boardId: 'b1' })
+  const a0 = createWikiAdapter({})
+  assert.equal(allowsPage(wiki.pages.get('board:b1'), own(a0)), false, 'least privilege: a Board item is not readable from a DM that is not that Board')
+  assert.equal(allowsPage(wiki.pages.get('board:b1'), a0.scopeFor({ clientThreadId: 'thread-1' }, { boardId: 'other-board' })), false, 'nor from another Board')
+  assert.equal(allowsPage(wiki.pages.get('board:b1'), board(a0)), true, 'inside that Board\'s own context it is')
+  assert.equal(wiki.pages.get('board:b1').scope, 'board:b1'); assert.equal(wiki.pages.get('selected:s1').scope, null, 'without a DM scope given, a selected source has none; the adapter gives it the DM scope (next test)')
   allowed = false
-  assert.equal(allowsPage(wiki.pages.get('board:b1'), SCOPE), false, 'the store\'s own guard is reused: revoked means unreadable')
+  assert.equal(allowsPage(wiki.pages.get('board:b1'), board(a0)), false, 'the store\'s own guard is reused on top: revoked means unreadable')
   assert.match(safeId('weird id with spaces'), /^x\/[0-9a-f]{12}$/)
 })
 
@@ -136,7 +141,7 @@ test('the write path keeps a reference, not a copy, when the words already live 
   assert.equal(wiki.pages.has('browser-task/abc'), false)
 })
 
-test('a status reading on a store-backed page is persisted against its source revision and overlaid next turn; a changed source drops it; acceptance overrides the status', async () => {
+test('a status reading on a store-backed page is persisted against its source revision and overlaid next turn; a changed source drops it; only the person\'s confirmation promotes it', async () => {
   const dataDir = await tmpDir(), writes = openWikiWrites({ dataDir, log: quiet }), adapter = createWikiAdapter({ writes })
   const ctx = { clientThreadId: 'thread-1' }, scope = adapter.scopeFor(ctx)
   let wiki = await adapter.snapshot({ context: ctx, graph: GRAPH })
@@ -155,10 +160,16 @@ test('a status reading on a store-backed page is persisted against its source re
   const changed = JSON.parse(JSON.stringify(GRAPH)); changed.nodes[1].body += ' 수정됨.'
   const stale = (await adapter.snapshot({ context: ctx, graph: changed })).pages.get('ontology:b')
   assert.deepEqual([stale.statusReadings.length, stale.revision === `${sourceRevision}.r1`], [0, false])
-  // acceptance
-  const accepting = adapter.writerFor(wiki, { enabled: true, canWrite: () => true, acceptStatus: () => true })
-  assert.equal(accepting.apply({ ...proposal, baseRevision: `${sourceRevision}.r1` }, { message: '배포 끝났어', scope, operationId: 'op-r2' }).status, 'status_updated')
-  assert.equal((await adapter.snapshot({ context: ctx, graph: GRAPH })).pages.get('ontology:b').status, 'done')
+  // no auto-promotion: a callback is ignored; only the person's own later confirmation promotes, and the store keeps the accepted reading in place of the pending one
+  const ignoring = adapter.writerFor(wiki, { enabled: true, canWrite: () => true, acceptStatus: () => true })
+  assert.equal(ignoring.apply({ ...proposal, baseRevision: `${sourceRevision}.r1` }, { message: '배포 끝났어', scope, operationId: 'op-r2' }).status, 'recorded_pending')
+  const promoter = adapter.writerFor(wiki, { enabled: true, canWrite: () => true })
+  const promoted = promoter.promote('ontology:b', { scope, confirmation: { by: 'user', at: '2026-11-24T06:00:00.000Z' }, operationId: 'confirm-1' })
+  assert.equal(promoted.status, 'status_updated')
+  const final = (await adapter.snapshot({ context: ctx, graph: GRAPH })).pages.get('ontology:b')
+  assert.equal(final.status, 'done')
+  assert.deepEqual(final.statusReadings.map(r => r.state), ['accepted'], 'both pending readings were the same reading (same status and time): the confirmed one replaces them, nothing is duplicated')
+  assert.ok(JSON.parse(await readFile(path.join(dataDir, 'egdesk-wiki-writes.json'), 'utf8')).readings.some(r => r.reading.confirmedAt === '2026-11-24T06:00:00.000Z'))
 })
 
 test('a store that cannot keep a change makes the write fail without touching the wiki', async () => {
@@ -186,4 +197,27 @@ test('the adapter feeds the reconstruction loop end to end: ontology links are o
   const entry = spoken.nextDelivered().pages['speech/m1']
   if (entry) assert.equal(entry.hash, `h:${'e'.repeat(40)}`, 'the receipt carries the chat store\'s own hash')
   assert.equal(overlayWrites([{ id: 'x', revision: '1' }], { readings: [] })[0].revision, '1')
+})
+
+test('least privilege through the adapter: a Board item reaches the judge only from that Board\'s context, a selected source only from its own DM', async () => {
+  const adapter = createWikiAdapter({})
+  const candidates = [{ id: 'board:b1', kind: 'board', title: '보드 B1 목표', summary: '결제 안정화', timeSlice: 'present', loadText: () => '결제 안정화 목표 문서' },
+    { id: 'selected:s1', kind: 'source', title: '선택 문서', summary: 'selected', timeSlice: 'present', loadText: () => '선택한 문서 본문 내용' }]
+  const run = async (context, body) => {
+    const wiki = await adapter.snapshot({ context, body, candidates })
+    const seen = []
+    await reconstructMemory({ message: '관련 자료를 알려줘', wiki, client: { async decide(req) { seen.push(JSON.stringify(req.input)); return { answers: {} } } }, scope: adapter.scopeFor(context, body), askedAt: Date.UTC(2026, 10, 24) })
+    return seen.join('\n')
+  }
+  const dm1 = await run({ clientThreadId: 'thread-1' }, {})
+  assert.ok(dm1.includes('선택한 문서 본문 내용') && !dm1.includes('결제 안정화 목표 문서'), 'own DM: its selected source, no Board item')
+  const dm2 = await run({ clientThreadId: 'thread-2' }, {})
+  assert.ok(dm2.includes('선택한 문서 본문 내용'), 'a different DM builds its own snapshot (the candidate list is per message); the page still carries that DM\'s scope')
+  const wiki = await adapter.snapshot({ context: { clientThreadId: 'thread-1' }, candidates })
+  assert.equal(wiki.pages.get('selected:s1').scope, 'dm:thread-1'); assert.equal(wiki.pages.get('board:b1').scope, 'board:b1')
+  assert.equal(allowsPage(wiki.pages.get('selected:s1'), adapter.scopeFor({ clientThreadId: 'thread-2' })), false, 'another DM cannot read it')
+  const inBoard = await run({ clientThreadId: 'thread-1' }, { boardId: 'b1' })
+  assert.ok(inBoard.includes('결제 안정화 목표 문서'), 'sent from that Board: its item is readable')
+  const otherBoard = await run({ clientThreadId: 'thread-1' }, { boardId: 'other' })
+  assert.ok(!otherBoard.includes('결제 안정화 목표 문서'), 'sent from another Board: not readable')
 })

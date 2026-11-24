@@ -4754,7 +4754,7 @@ export class CodexChatRuntime {
       const threadKey = run.conversationId
       const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position, threadKey,
         scope: typeof tm.scope === 'function' ? await tm.scope({ body, context }) : null, live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null,
-        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed === true, heldExcerpts: tm.heldExcerpts === true, signal: controller.signal })
+        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal })
       const judged = result.judgeWrite ? await result.judgeWrite() : null
       if (typeof threadKey === 'string' && threadKey) {
         this.turnMemoryShadow.set(threadKey, result.nextDelivered())
