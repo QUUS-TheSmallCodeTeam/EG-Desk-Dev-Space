@@ -164,7 +164,11 @@ export function pageBlock(alias, page, chars, extra = '') {
 export const clockLine = asked => (Number.isSafeInteger(asked) ? `Question clock: ${new Date(asked).toISOString()} (UTC offset minutes ${-new Date(asked).getTimezoneOffset()}). Page times are as recorded; judge, do not compute dates.` : 'Question clock: unknown.')
 export const JUDGE_RULES = [
   'You are a system judge that reconstructs memory for another model. Judge only from the page contents shown and the message.',
-  'A page is needed when its content helps the answering model decide, verify or do what this message calls for, not only what it must say back. When a message reports that something finished, that includes how success is judged, what is left to do, and what to do if it failed.',
+  // "decide, verify or do" (2026-11-24) is kept, but tied to the matter of the message. Without that tie the real model read a design note on
+  // how completion reports are processed as needed for an unrelated completion report (jev/flow-note for the PostgreSQL message: 0.02 with the
+  // older wording, undecided in the scan and 0.87 on the second look with the untied one). NEXT_RULES (mid-session) is unchanged.
+  'A page is needed when it is a record about the same matter as the message (the same task, system, document or decision) and its content helps the answering model decide, verify or do what this message calls for, not only what it must say back. When a message reports that something finished, that includes how the success of that same thing is judged, what is left to do for it, and what to do if it failed.',
+  'A page about a different matter is not needed merely because it mentions or describes the same kind of event as the message. The one exception is a standing instruction or preference addressed to the answering model.',
   'A recorded plan is not a done fact; a relayed statement is attribution, not the writer\'s own record.',
   'Never invent a page. If the options do not fit, choose unknown.',
 ].join('\n')

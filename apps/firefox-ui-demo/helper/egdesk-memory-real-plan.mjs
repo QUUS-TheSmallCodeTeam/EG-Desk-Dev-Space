@@ -59,6 +59,14 @@ export const CONTROLS = Object.freeze([
 ])
 // The small re-measurement after the first end-to-end run: only the failing stages plus controls.
 export const REMEASURE = Object.freeze(['pg-mid-1-triage', 'pg-mid-2-scan', 'a-first-2-scan', 'j-mid-1-triage', 'j-mid-2-scan', 't6-covered-1-triage']) // in run order
+// The two-request check of the first-turn scan wording (after the live run of 2026-11-24 put jev/flow-note into the PostgreSQL packet).
+export const FIRST_SCAN = Object.freeze(['pg-first-2-scan', 'j-first-2-scan'])
+/** Pre-registered, per page id. yes: must be decided yes (>= 0.8). no: must be decided no (<= 0.2). wanted: soft. Every other page: not a decided yes. */
+export const FIRST_SCAN_EXPECT = Object.freeze({
+  'pg-first-2-scan': { yes: ['db/pg-plan'], no: ['jev/flow-note'], wanted: ['db/pg-health', 'db/pg-followup'], topic: 'db/' },
+  'j-first-2-scan': { yes: ['jev/flow-note'], no: [], wanted: [], topic: 'jev/' },
+})
+const SUBSETS = { remeasure: () => REMEASURE, 'first-scan': () => FIRST_SCAN }
 
 const sha = text => createHash('sha256').update(text).digest('hex')
 export const estimateTokens = (choiceQ, predQ, bytes) => Math.round(56.5 * choiceQ + 134.8 * predQ + 0.1983 * bytes) // typed model solved from the three real requests of 2026-11-24
@@ -101,6 +109,8 @@ const receiptsFor = (wiki, ids, threadKey) => ({ usable: true, threadKey, pages:
 export async function buildPlan({ pages = SYNTHETIC_PAGES, askedAt = ASKED_AT, subset = null } = {}) {
   const wiki = buildWiki(pages)
   const runs = []
+  const only = subset ? SUBSETS[subset]?.() ?? null : null
+  if (subset && !only) throw new Error(`unknown request set: ${subset}`)
   for (const run of subset === 'remeasure' ? [...RUNS, ...CONTROLS] : RUNS) {
     const recorded = []
     const client = scriptedClient(run, wiki, recorded)
@@ -116,7 +126,7 @@ export async function buildPlan({ pages = SYNTHETIC_PAGES, askedAt = ASKED_AT, s
       const choice = r.questions.filter(q => q.type === 'choice').length, predicate = r.questions.length - choice
       return { name: `${run.id}-${index + 1}-${stage}`, stage, body, bytes: Buffer.byteLength(text), sha256: sha(text), questions: names.length, choice, predicate, estInputTokens: estimateTokens(choice, predicate, Buffer.byteLength(text)), aliases: r.aliases, scripted: r.scripted }
     })
-    const kept = subset === 'remeasure' ? requests.filter(r => REMEASURE.includes(r.name)) : requests
+    const kept = only ? requests.filter(r => only.includes(r.name)) : requests
     if (kept.length) runs.push({ id: run.id, message: run.message, position: run.position, held: run.held, requests: kept, estInputTokens: kept.reduce((n, r) => n + r.estInputTokens, 0) })
   }
   const totals = { runs: runs.length, requests: runs.reduce((n, r) => n + r.requests.length, 0), estInputTokens: runs.reduce((n, r) => n + r.estInputTokens, 0), bytes: runs.reduce((n, r) => n + r.requests.reduce((m, q) => m + q.bytes, 0), 0) }
@@ -212,5 +222,37 @@ export function scorePlan(plan, results) {
 export function scoreRemeasure(plan, results) {
   const defs = [...RUNS, ...CONTROLS]
   const scored = plan.runs.map(run => scoreRun(defs.find(d => d.id === run.id), run, results, plan.wiki))
+  return { pass: scored.every(s => s.pass), runsPassed: scored.filter(s => s.pass).length, scored }
+}
+
+/**
+ * The first-turn scan check: each request is read against FIRST_SCAN_EXPECT by page id.
+ * pass: no hard failure. An undecided answer (between the bars) on a page that must be "no" is NOT a pass and not a wrong pick either: it is
+ * reported as inconclusive, because the product then asks again in the link round, which these two requests do not include.
+ */
+export function scoreFirstScan(plan, results) {
+  const scored = plan.runs.flatMap(run => run.requests.map(request => {
+    const expect = FIRST_SCAN_EXPECT[request.name], checks = []
+    const add = (severity, name, ok, detail = null) => checks.push({ severity, name, ok, ...(detail === null ? {} : { detail }) })
+    const r = results[request.name]
+    if (!expect) { add('hard', `${request.name}: has a pre-registered expectation`, false); return { id: request.name, checks } }
+    if (!r || r.status !== 200) { add('hard', `${request.name}: HTTP 200 with typed answers`, false, r?.status ?? 'not sent'); return { id: request.name, checks } }
+    const a = answerMap(r.answers)
+    add('hard', `${request.name}: every question answered with its own type`, request.body.questions.every(q => a[q.name]?.type === q.type))
+    const byId = new Map()
+    for (const q of request.body.questions) { const id = request.aliases[`P${Number(q.name.slice(3)) + 1}`]; if (id) byId.set(id, state(a[q.name])) }
+    for (const id of expect.yes) add('hard', `${id} is picked`, byId.get(id)?.state === 'yes', `p=${byId.get(id)?.p ?? null}`)
+    for (const id of expect.no) {
+      const v = byId.get(id)
+      add('hard', `${id} is decided not needed`, v?.state === 'no', `p=${v?.p ?? null}${v?.state === 'unknown' ? ' (undecided: the link round would ask again; inconclusive here)' : ''}`)
+    }
+    const stray = [...byId].filter(([id, v]) => !id.startsWith(expect.topic) && v.state === 'yes').map(([id, v]) => `${id}=${v.p}`)
+    add('hard', 'no page of another matter is picked', stray.length === 0, stray.join(', ') || null)
+    for (const id of expect.wanted) add('soft', `${id} is picked`, byId.get(id)?.state === 'yes', `p=${byId.get(id)?.p ?? null}`)
+    const undecided = [...byId].filter(([, v]) => v.state === 'unknown' && v.p !== null).map(([id, v]) => `${id}=${v.p}`)
+    add('soft', 'no page is left undecided', undecided.length === 0, undecided.join(', ') || null)
+    return { id: request.name, checks }
+  })).map(s => ({ ...s, hardFailures: s.checks.filter(c => c.severity === 'hard' && !c.ok).map(c => c.name), softMisses: s.checks.filter(c => c.severity === 'soft' && !c.ok).map(c => c.name) }))
+    .map(s => ({ ...s, pass: s.hardFailures.length === 0 }))
   return { pass: scored.every(s => s.pass), runsPassed: scored.filter(s => s.pass).length, scored }
 }
