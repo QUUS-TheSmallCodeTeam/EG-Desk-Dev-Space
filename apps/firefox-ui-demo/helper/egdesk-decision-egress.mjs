@@ -89,7 +89,6 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-context-setup.mjs': ['speech_history', 'topic_history', 'memory_page'],
   'egdesk-conversation-flow.mjs': ['run_facts'],
   'egdesk-draft-check.mjs': ['draft_text'],
-  'egdesk-conversation-flow.mjs': ['conversation_flow: elapsed seconds and step counts only, no text and no data class (nothing for the data-sharing permissions to govern)'],
   'egdesk-terminal-command-gate.mjs': ['terminal_command'],
   'egdesk-terminal-judge.mjs': ['terminal_output'],
   'egdesk-turn-memory.mjs': ['memory_page', 'topic_history'],
