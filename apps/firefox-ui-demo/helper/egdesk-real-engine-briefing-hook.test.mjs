@@ -151,3 +151,48 @@ test('a conversation without expect.briefing never runs the hook: no fork turn, 
   assert.equal(rec.turns[0].ok, true); assert.equal(rec.turns[0].hooks, undefined); assert.equal(w.wire().filter(m => m.method === 'thread/fork').length, 0)
   assert.equal(briefingHook.active({ EGDESK_BRIEFING_FLOW: 'on' }), true); assert.equal(briefingHook.active({}), false); assert.equal(briefingHook.active({ EGDESK_BRIEFING_FLOW: 'advisory' }), false)
 })
+
+// ---- c32: what Main's check-3 saw on the real 0.171 (thread/fork on an ephemeral source fails -32600 "no rollout found") ----
+const startsOf = w => w.wire().filter(m => m.dir === 'in' && m.method === 'thread/start')
+const textOf = m => m.params.input.map(x => x.text).join('\n')
+test('check-3 on the fake that refuses ephemeral forks like 0.171: the fill runs on a fresh ephemeral thread (L5\'s fallback), schema ON and OFF both present the board with every fact; the fresh thread sees exactly the guide and the materials', async t => {
+  const w = world(t, { ...fakeFor('json'), refuseEphemeralFork: true })
+  const { records } = await runCheck(w.options, asScripts(buildBoardScript()), w.deps)
+  for (const rec of records) { assert.equal(rec.aborted, null, rec.id); assert.equal(rec.turns[0].ok, true, `${rec.id}: ${JSON.stringify(rec.turns[0].expectations.filter(e => !e.ok))}`) }
+  const [on, off] = records.map(r => r.turns[0].hooks.briefing)
+  assert.deepEqual([on.outcome, on.reason, on.schemaInvalid, off.outcome, off.reason, off.schemaInvalid], ['presented', null, 0, 'presented', null, null])
+  assert.deepEqual([on.flow.stages, on.flow.fillTurns], [['place', 'fit', 'fill_check', 'coverage'], 1])
+  // the record says how the private turn ran: no thread/fork was needed, the fresh thread and its turn are listed, nothing was refused
+  assert.deepEqual(on.forkErrors, []); assert.ok(on.forkRequests.some(r => r.method === 'thread/start') && on.forkRequests.some(r => r.method === 'turn/start'), JSON.stringify(on.forkRequests))
+  // on the wire: the fresh internal threads are ephemeral, read-only, never-approve, and their turn input is the briefing prompt alone
+  const fresh = startsOf(w).filter(m => /private one-off task/.test(m.params?.developerInstructions ?? ''))
+  assert.equal(fresh.length, on.forkTurns + off.forkTurns); for (const m of fresh) assert.deepEqual([m.params.ephemeral, m.params.sandbox, m.params.approvalPolicy], [true, 'read-only', 'never'])
+  const fills = turnStarts(w).filter(m => textOf(m).startsWith('You are filling in the data of an Answer Briefing'))
+  assert.equal(fills.length, on.forkTurns + off.forkTurns)
+  for (const m of fills) { const text = textOf(m); assert.ok(text.includes('Design guide (decided; do not change it)') && text.includes('Materials:'), 'guide and materials'); for (const absent of ['Context:', BOARD_SAY.slice(0, 12), '<answer>', '커밋 a1b2c3d, 테스트 120건 통과)로']) assert.ok(!text.includes(absent), `no ${absent}`) }
+  assert.equal(fills.filter(m => m.params.outputSchema !== undefined).length, on.forkTurns, 'outputSchema goes to the fresh thread\'s turn exactly when the flag is on')
+  assert.equal(w.wire().filter(m => m.dir === 'in' && m.method === 'thread/fork').length, 0); assert.deepEqual(w.stderrLines, [])
+})
+
+test('a persisted answer thread still forks (the fallback is only for what cannot be forked): the fake without the refusal runs the same board through thread/fork', async t => {
+  const w = world(t, fakeFor('json'))
+  const script = buildBoardScript(); script.conversations.length = 1
+  const rec = (await runCheck(w.options, asScripts(script), w.deps)).records[0], b = rec.turns[0].hooks.briefing
+  assert.equal(rec.turns[0].ok, true); assert.ok(b.forkRequests.some(r => r.method === 'thread/fork') || startsOf(w).some(m => /private one-off task/.test(m.params?.developerInstructions ?? '')), JSON.stringify(b.forkRequests))
+})
+
+test('a chat-only outcome keeps its cause: an unusable fill on the fresh thread is recorded with the stages, the Decision numbers and the requests, and the failed expectation names them', async t => {
+  const w = world(t, { ...fakeFor('prose'), refuseEphemeralFork: true })
+  const script = buildBoardScript(); script.conversations.length = 1
+  const rec = (await runCheck(w.options, asScripts(script), w.deps)).records[0], b = rec.turns[0].hooks.briefing
+  assert.deepEqual([b.outcome, b.reason, b.flow.stages, b.flow.fillTurns], ['fallback-chat', 'fill-invalid', ['place', 'fit'], 2])
+  assert.ok(b.decisions[0].p.combines >= 0.9 && Object.values(b.decisions[0].p).every(v => typeof v === 'number'), 'the place judgment: board')
+  assert.equal(b.forkRequests.filter(r => r.method === 'turn/start').length, 2)
+  const failed = rec.turns[0].expectations.find(e => e.check === 'briefing.outcome')
+  assert.equal(failed.ok, false); assert.deepEqual([failed.detail.reason, failed.detail.stages], ['fill-invalid', ['place', 'fit']])
+})
+
+test('refused forks are recorded by code even when no fallback exists: a thread/fork error code lands in forkErrors and in the outcome detail', () => {
+  const rec = { outcome: 'fallback-chat', reason: 'fill-invalid', steps: [], flow: { stages: ['place', 'fit'] }, forkErrors: ['thread/fork:-32600'] }
+  assert.deepEqual(checkBriefingExpect({ outcome: 'presented' }, rec)[0].detail, { outcome: 'fallback-chat', reason: 'fill-invalid', steps: 0, stages: ['place', 'fit'], forkErrors: ['thread/fork:-32600'] })
+})

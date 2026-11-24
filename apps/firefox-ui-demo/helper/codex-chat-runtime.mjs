@@ -865,6 +865,7 @@ export class CodexChatRuntime {
     this.heartbeatReasoning = new WeakMap() // heartbeat -> ids of reasoning items the engine has started and not finished
     this.heartbeatSubjects = new WeakMap() // heartbeat -> { run, flow, context }: what its judge and its record speak for
     this.flowSpeakers = new WeakSet() // heartbeats whose run was opted in to intermediate messages without a held answer
+    this.freshInternalCache = new Map() // conversationId -> { at, value }: the thread/start overrides of a fresh internal thread (c24)
     this.internalTurns = createInternalTurns({ setTimer: (fn, ms) => this.setTimer(fn, ms), clearTimer: handle => this.clearTimer(handle) }) // short private fork turns (draft revision, intermediate messages); never a run
     this.flowRuns = new WeakMap() // run -> intermediate-message state (flag decisionContext.conversationFlow, default off)
     this.flowJobs = new Set()
@@ -6075,6 +6076,35 @@ export class CodexChatRuntime {
     return by
   }
 
+  // c24: what an internal turn needs when its parent thread cannot be forked (an ephemeral one: Main's smoke-5 on 0.171, "no rollout found").
+  // The fresh thread has not seen the conversation, so the preamble gives the one thing the callers rely on the fork's history for, the person's last
+  // message; everything else is in the caller's own text (the heartbeat writer's facts and prior messages, the draft check's draft, the briefing's answer,
+  // guide and materials). overrides(): the pure-engine switches (no shell, exec, image, web), read-only, never asking, nothing of the person's own MCP
+  // servers, plugins, hooks or skills, the parent's folder and model; it carries no tools (internal turns never act). Cached per conversation for 5 min.
+  internalFresh(run, { preamble = true } = {}) {
+    const cid = run.conversationId, person = preamble === false ? '' : String(this.runUserText(run) ?? '').replace(/\s+/g, ' ').trim().slice(0, 800)
+    return {
+      preamble: person ? `Context: the person's last message to you was ${JSON.stringify(person)}.` : '',
+      overrides: () => this.freshInternalOverrides(run),
+      effort: this.threads.get(cid)?.effort || undefined,
+    }
+  }
+
+  async freshInternalOverrides(run) {
+    const cid = run.conversationId, hit = this.freshInternalCache.get(cid)
+    if (hit && this.now() - hit.at < 300_000) return structuredClone(hit.value)
+    const slot = this.threadOperationSlot(cid), thread = this.threads.get(cid)
+    const base = mergeCeilingOverrides({}, pureEngineThreadOverrides())
+    const cwd = thread?.cwd ?? this.ownNeutralFolder() ?? null
+    const isolation = await loadOwnToolsIsolation(this.scopedRequest(slot), cwd)
+    mergeCeilingOverrides(base, isolation.overrides)
+    if (cwd) base.cwd = cwd
+    if (thread?.model) base.model = thread.model
+    this.freshInternalCache.set(cid, { at: this.now(), value: structuredClone(base) })
+    while (this.freshInternalCache.size > 32) this.freshInternalCache.delete(this.freshInternalCache.keys().next().value)
+    return base
+  }
+
   writeIntermediate(run, flow, kind, facts, timeoutMs = FLOW_LIMITS.writerMs) {
     const note = kind === 'ask_missing' && facts.question ? run.activities.find(a => a.id === facts.question.id)?.detail?.text ?? null : null
     // Checked against what it was composed from (the run's facts at that beat), not against the turn's materials.
@@ -6091,7 +6121,7 @@ export class CodexChatRuntime {
     try {
       const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
       if (!engine?.capabilities?.(slot)?.has('threadFork')) return null
-      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, timeoutMs, text: prompt })
+      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, timeoutMs, text: prompt, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run) })
       const text = cleanIntermediate(out.text)
       if (!text || prior.includes(text)) return null
       // The evidence is what the message was composed from (messageEvidence): the run's own facts, never the turn's materials. A message
@@ -6447,7 +6477,7 @@ export class CodexChatRuntime {
     try {
       const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
       if (!engine?.capabilities?.(slot)?.has('threadFork')) return null
-      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, signal, timeoutMs: 25_000,
+      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, signal, timeoutMs: 25_000, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run),
         text: `Here is your draft answer to the person's last message:\n\n${draft}\n\n${note}\n\nReply with only the revised answer text.` })
       return out.text || null
     } catch { return null }
@@ -6458,11 +6488,12 @@ export class CodexChatRuntime {
   canInternalTurn(run) {
     try { const engine = this.engineOf(run.conversationId); return engine?.capabilities?.(this.threadOperationSlot(run.conversationId))?.has('threadFork') === true } catch { return false }
   }
-  async internalText(run, text, { timeoutMs = 20_000, signal = null, outputSchema = null } = {}) {
+  // preamble: false = the fresh thread (an ephemeral room) gets the caller's text and nothing else: the briefing fill is guide + materials only on purpose (L4).
+  async internalText(run, text, { timeoutMs = 20_000, signal = null, outputSchema = null, preamble = true } = {}) {
     try {
       if (!this.canInternalTurn(run)) return null
       // outputSchema (cycle 30, briefing flag): the turn's final message is constrained by it; absent, the turn is exactly what it was.
-      const out = await this.internalTurns.run({ engine: this.engineOf(run.conversationId), slot: this.threadOperationSlot(run.conversationId), parentThreadId: run.conversationId, signal, timeoutMs, text, ...(outputSchema ? { outputSchema } : {}) })
+      const out = await this.internalTurns.run({ engine: this.engineOf(run.conversationId), slot: this.threadOperationSlot(run.conversationId), parentThreadId: run.conversationId, signal, timeoutMs, text, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run, { preamble }), ...(outputSchema ? { outputSchema } : {}) })
       return out.text || null
     } catch { return null }
   }
