@@ -72,7 +72,11 @@ test('A6: the default signing OUT keeps profile B\'s room working; a room on a p
   w.protocol.runs['conv-b/run-b'] = { runId: 'run-b', engineId: 'codex', localThreadId: 'room-b', clientThreadId: 'room-b', conversationId: 'conv-b', engineProfileId: SLOT, status: 'running' }
   w.protocol.runs['conv-u/run-u'] = { runId: 'run-u', engineId: 'codex', localThreadId: 'room-u', clientThreadId: 'room-u', conversationId: 'conv-u', status: 'running' }
   // the window's sign-out (POST /auth/signout, then resetThreadConversations, then the status update)
-  w.reset(); w.update({ authStatus: { isLoggedIn: false } })
+  w.reset()
+  // the reset itself leaves B's room attached (it is not detached and re-attached later): same binding pair, never held
+  const kept = w.state.codex.threads.find(t => t.id === 'room-b')
+  assert.deepEqual([kept.conversationId, kept.clientBindingId, kept.bindingState, kept.retainedNativeBinding], ['conv-b', 'room-b', 'verified', null])
+  w.update({ authStatus: { isLoggedIn: false } })
   assert.ok(w.protocol.runs['conv-b/run-b']); assert.equal(w.protocol.runs['conv-u/run-u'], undefined)
   assert.equal(ChatState.nativeBindingHeld(w.state.codex.threads.find(t => t.id === 'room-b')), false)
   assert.equal(ChatState.nativeBindingHeld(w.state.codex.threads.find(t => t.id === 'room-u')), true)
