@@ -211,6 +211,82 @@
               }
             }
           },
+          "seededWrites": {
+            "type": "object",
+            "additionalProperties": false,
+            "minProperties": 1,
+            "properties": {
+              "pages": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "title",
+                    "scope"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_./:-]{0,59}$"
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 80
+                    },
+                    "body": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 400
+                    },
+                    "scope": {
+                      "enum": [
+                        "conversation",
+                        "other",
+                        "personal"
+                      ]
+                    },
+                    "pointer": {
+                      "const": true
+                    }
+                  }
+                }
+              },
+              "readings": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "page",
+                    "state"
+                  ],
+                  "properties": {
+                    "page": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_./:-]{0,59}$"
+                    },
+                    "state": {
+                      "enum": [
+                        "pending",
+                        "accepted"
+                      ]
+                    },
+                    "from": {
+                      "enum": [
+                        "conversation",
+                        "other"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
           "turns": {
             "type": "array",
             "minItems": 1,
@@ -242,11 +318,87 @@
                     "invited"
                   ]
                 },
+                "browserTask": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "status"
+                  ],
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "done",
+                        "cannot_proceed",
+                        "need_context"
+                      ]
+                    },
+                    "code": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 40,
+                      "pattern": "^[a-z][a-z0-9_]{0,39}$"
+                    },
+                    "candidates": {
+                      "type": "array",
+                      "maxItems": 3,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 100
+                      }
+                    },
+                    "pageText": {
+                      "type": "array",
+                      "maxItems": 16,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 400
+                      }
+                    },
+                    "identifiers": {
+                      "type": "array",
+                      "maxItems": 4,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 40
+                      }
+                    },
+                    "steps": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 12
+                    },
+                    "actions": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "fill": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 12
+                        },
+                        "navigate": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 12
+                        },
+                        "scroll": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 12
+                        }
+                      }
+                    }
+                  }
+                },
                 "action": {
                   "enum": [
                     "interrupt",
                     "steer",
-                    "delete"
+                    "delete",
+                    "restart"
                   ]
                 },
                 "afterMs": {
@@ -481,6 +633,15 @@
                         },
                         "cameraUntouched": {
                           "const": true
+                        },
+                        "roomKept": {
+                          "const": true
+                        },
+                        "receiptsClosed": {
+                          "const": true
+                        },
+                        "continuity": {
+                          "const": true
                         }
                       }
                     },
@@ -524,6 +685,11 @@
                           "type": "integer",
                           "minimum": 1,
                           "maximum": 200000
+                        },
+                        "maxKeyBytes": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 800000
                         }
                       }
                     },
@@ -596,6 +762,56 @@
                           "type": "integer",
                           "minimum": 1000,
                           "maximum": 3600000
+                        }
+                      }
+                    },
+                    "rewrite": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "answered": {
+                          "type": "boolean"
+                        },
+                        "finding": {
+                          "type": "boolean"
+                        },
+                        "rewrote": {
+                          "type": "boolean"
+                        },
+                        "posted": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 4,
+                          "uniqueItems": true,
+                          "items": {
+                            "enum": [
+                              "as_written",
+                              "revised",
+                              "certain_part",
+                              "withheld"
+                            ]
+                          }
+                        },
+                        "neverShown": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "minProperties": 1,
+                          "properties": {
+                            "numbers": {
+                              "const": true
+                            },
+                            "phrases": {
+                              "type": "array",
+                              "minItems": 1,
+                              "maxItems": 8,
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 40
+                              }
+                            }
+                          }
                         }
                       }
                     },
@@ -720,6 +936,76 @@
                               "maxLength": 400
                             }
                           }
+                        }
+                      }
+                    },
+                    "browserAnswer": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "mentionsDates": {
+                          "type": "array",
+                          "maxItems": 4,
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 10,
+                            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                          }
+                        },
+                        "noInventedDates": {
+                          "const": true
+                        },
+                        "noInventedAmounts": {
+                          "const": true
+                        },
+                        "namesAnyOf": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 6,
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 100
+                          }
+                        },
+                        "namesAllOf": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 6,
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 100
+                          }
+                        }
+                      }
+                    },
+                    "deleted": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "routeAccepted": {
+                          "const": true
+                        },
+                        "storeRowsGone": {
+                          "const": true
+                        },
+                        "engineGone": {
+                          "const": true
+                        },
+                        "pendingReadingsWithdrawn": {
+                          "const": true
+                        },
+                        "conversationMemoryGone": {
+                          "const": true
+                        },
+                        "otherMemoryKept": {
+                          "const": true
+                        },
+                        "pointerMarked": {
+                          "const": true
                         }
                       }
                     }

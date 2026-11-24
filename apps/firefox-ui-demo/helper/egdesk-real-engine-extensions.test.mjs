@@ -13,7 +13,10 @@ const turnEntry = REAL_ENGINE_SCRIPT_SCHEMA.properties.conversations.items.prope
 const script = expect => ({ set: 'real-engine-ext-v1', conversations: [{ id: 'c', turns: [{ say: 'hi', expect }] }] })
 
 test('the lanes\' keys are registered, not listed in the core: the same keys, schemas and validators as before the move', () => {
-  assert.deepEqual(registeredExpectKeys(), ['collab', 'memory', 'engine', 'flow', 'briefing']); assert.deepEqual(registeredConversationFields(), ['memory']); assert.deepEqual(registeredTurnHookNames(), ['collab', 'memory', 'journey', 'flow']); assert.deepEqual(registeredTurnFields(), ['from'])
+  // lanes add their own keys over time: the three moved ones (and the deletion proof, L5) are there, in this order among themselves; no key is registered twice
+  const keys = registeredExpectKeys(), at = k => keys.indexOf(k); assert.ok(at('memory') >= 0 && at('memory') < at('engine') && at('engine') < at('briefing') && at('deleted') > at('briefing'), keys.join()); assert.equal(new Set(keys).size, keys.length)
+  assert.ok(registeredConversationFields().includes('memory') && registeredConversationFields().includes('seededWrites')); assert.ok(registeredTurnHookNames().indexOf('memory') < registeredTurnHookNames().indexOf('journey')); assert.ok(registeredTurnFields().includes('from') && registeredTurnFields().includes('browserTask')); assert.ok(registeredExpectKeys().includes('browserAnswer') && registeredTurnHookNames().includes('browserAnswer')) // L8 c31
+  assert.ok(registeredExpectKeys().includes('flow') && registeredTurnHookNames().includes('flow'), 'L3 c27: expect.flow and its hook are registered')
   for (const k of ['engine', 'memory', 'briefing']) { assert.ok(EXPECT_KEYS.includes(k)); assert.ok(turnEntry[k]) }
   const core = fs.readFileSync(path.join(here, 'egdesk-real-engine-script.mjs'), 'utf8') + fs.readFileSync(path.join(here, 'egdesk-real-engine-check.mjs'), 'utf8')
   for (const lane of ['egdesk-real-engine-memory.mjs', 'egdesk-real-engine-journey.mjs', 'egdesk-real-engine-briefing-hook.mjs']) assert.ok(!core.includes(`from './${lane}'`) || lane === 'egdesk-real-engine-memory.mjs', `${lane} is not imported by the core`)
@@ -84,4 +87,19 @@ test('turn hooks that need the live runtime: flowOptions merge, attach once with
   assert.deepEqual(await hooks.afterTurn({ turnIndex: 2, expect: {}, state }), { records: {}, expectations: [] }, 'a hook with nothing to say adds nothing')
   hooks.dispose()
   assert.deepEqual(order, [['attach', 'the-chat'], ['before', 0, 'native-1'], ['after', 1], ['after', 2], ['dispose']])
+})
+
+// c29: around a restart action (the bridge and the engine stopped and started again between two turns): the old hook hands something to its successor, the new one reports on the restart turn
+test('turn hooks around a restart: beforeRestart\'s result is handed to the same hook\'s successor under its name; afterRestart\'s record and expectations are collected; a hook without them is skipped', async () => {
+  const seen = []
+  registerTurnHooks('probeRestart', () => ({
+    beforeRestart: async ctx => { seen.push(['before', ctx.state().clientThreadId]); return { room: 'r1', n: 2 } },
+    afterRestart: async ctx => { seen.push(['after', ctx.carried, ctx.expect?.k]); return { record: { carried: ctx.carried }, expectations: [{ check: 'restart.probe', ok: ctx.carried?.n === 2 }] } } }))
+  const state = () => ({ store: null, clientThreadId: 'room-9', conversationId: 'native-9' })
+  const old = createTurnHooks({ id: 'old' }), carried = await old.beforeRestart({ state })
+  assert.deepEqual(carried.probeRestart, { room: 'r1', n: 2 }); assert.equal(carried.memory, undefined, 'a hook with nothing to carry hands over nothing')
+  const fresh = createTurnHooks({ id: 'new' }), out = await fresh.afterRestart({ state, expect: { k: 1 }, carried })
+  assert.deepEqual(out.records, { probeRestart: { carried: { room: 'r1', n: 2 } } }); assert.deepEqual(out.expectations, [{ check: 'restart.probe', ok: true }])
+  assert.deepEqual(seen, [['before', 'room-9'], ['after', { room: 'r1', n: 2 }, 1]])
+  assert.deepEqual(await fresh.afterRestart({ state, carried: {} }), { records: { probeRestart: { carried: undefined } }, expectations: [{ check: 'restart.probe', ok: false }] }, 'nothing carried: the successor sees undefined')
 })

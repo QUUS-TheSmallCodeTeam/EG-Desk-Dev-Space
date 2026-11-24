@@ -474,14 +474,14 @@ test('action turns: the validator takes interrupt, steer and delete with their o
   assert.match(errors([{ say: 'a' }, { action: 'delete', say: 'x' }]), /delete takes no say/)
   assert.match(errors([{ say: 'a' }, { action: 'delete', afterMs: 1 }]), /delete takes no afterMs/)
   assert.match(errors([{ say: 'a' }, { action: 'interrupt', afterMs: 120001 }]), /afterMs/)
-  assert.match(errors([{ say: 'a' }, { action: 'pause' }]), /one of interrupt, steer, delete/)
+  assert.match(errors([{ say: 'a' }, { action: 'pause' }]), /one of interrupt, steer, delete, restart/)
   assert.match(errors([{ say: 'a', afterMs: 3 }]), /only an interrupt or steer action takes afterMs/)
   assert.match(errors([{ say: 'a' }, { action: 'delete', approve: ['no'] }]), /takes no approve/)
   assert.match(errors([{ say: 'a' }, { action: 'interrupt', whileRunning: { afterMs: 1 } }]), /not also a whileRunning/)
   assert.match(errors([{ say: 'a' }, { action: 'interrupt' }, { action: 'steer', say: 'b' }]), /must follow a plain message turn/)
   assert.match(errors([{ say: 'a' }, { action: 'interrupt' }, { say: 'b', whileRunning: { afterMs: 1 } }]), /cannot follow an action turn/)
   assert.match(errors([{ say: 'a' }, { say: 'b' }, { expect: {} }]), /say/)
-  assert.deepEqual(REAL_ENGINE_SCRIPT_SCHEMA.properties.conversations.items.properties.turns.items.properties.action.enum, ['interrupt', 'steer', 'delete'])
+  assert.deepEqual(REAL_ENGINE_SCRIPT_SCHEMA.properties.conversations.items.properties.turns.items.properties.action.enum, ['interrupt', 'steer', 'delete', 'restart'])
   // the new expectations
   assert.equal(checkTurnExpectations({ commandsRanIncludes: ['a.txt', 'b'], commandsRanExcludes: ['rm'] }, { commandsRan: ['cat a.txt && echo b'] }).every(c => c.ok), true, 'substrings, for a model that batches commands')
   assert.equal(checkTurnExpectations({ commandsRanIncludes: ['zzz'] }, { commandsRan: ['ls'] })[0].ok, false)
@@ -869,4 +869,42 @@ test('draft-check script on the fake (memory selection and the product\'s verdic
   assert.deepEqual(rec.cleanup.failures, []); assert.ok(rec.agentProfile)
   // c27: the names (never the text) of the context blocks the turn/start carried are in the turn record and on the request rows
   assert.deepEqual(turn.contextKeys, ['egdesk_channel']); assert.deepEqual(rec.requests.filter(r => r.method === 'turn/start').map(r => r.contextKeys), [['egdesk_channel']])
+})
+
+// ---- c28: deletion through the product's route (helper/egdesk-real-engine-delete.mjs; the committed script real-engine-delete-v1) ----
+const deleteScript = () => starter('delete')
+const deleteFake = (extra = {}) => ({ ...extra, turns: [{ steps: [{ toolCall: { tool: 'egdesk_read_file', arguments: { path: 'notes.txt' } } }], final: '첫째 줄: 발주 마감은 오후 3시입니다.' }, { steps: [], final: '둘째 줄: 출고는 금요일입니다.' }] })
+const deleteChecks = rec => Object.fromEntries(rec.turns[2].expectations.map(c => [c.check, c.ok]))
+
+test('deletion through the product route: every proof passes (store rows, engine thread, pending readings, conversation memory, other memory, pointer)', async t => {
+  const w = withDelete(world(t, deleteFake()))
+  const rec = only(await runCheck(w.options, asScripts(deleteScript()), w.deps))
+  assert.equal(rec.aborted, null, rec.abortDetail); assert.equal(rec.ok, true, JSON.stringify(rec.turns.map(x => x.expectations.filter(c => !c.ok))))
+  const del = rec.turns[2]
+  assert.deepEqual(Object.keys(deleteChecks(rec)).filter(k => k.startsWith('deleted.')).sort(), ['deleted.conversationMemoryGone', 'deleted.engineGone', 'deleted.otherMemoryKept', 'deleted.pendingReadingsWithdrawn', 'deleted.pointerMarked', 'deleted.routeAccepted', 'deleted.storeRowsGone'])
+  assert.equal(del.deletion.route.status, 200); assert.deepEqual(del.deletion.route.modules.pending_readings, 1); assert.ok(del.deletion.before.messages >= 4, 'two turns, two messages each')
+  assert.equal(del.deletion.resume.failed, true); assert.equal(callsOf(w, 'thread/delete').length >= 1, true, 'the product asked the engine to delete the thread'); const inbound = wireLog(w).filter(m => m.dir === 'in').map(m => m.method), lastDelete = inbound.lastIndexOf('thread/delete'); assert.ok(inbound.indexOf('thread/resume', lastDelete) > lastDelete, 'the probe resumed the thread AFTER the product deleted it, and the engine refused')
+  assert.deepEqual(rec.cleanup.failures, []); assert.deepEqual(del.deletion.store, { conversation: false, messages: 0, listed: false, localIds: 0 })
+  assert.equal(del.deletion.writes.after.pendingFromConversation, 0); assert.equal(del.deletion.writes.after.conversationPages, 0)
+})
+
+test('deletion proofs fail by code: an engine that keeps the thread; a forgetter that does not run; a store that keeps its rows', async t => {
+  const keeps = withDelete(world(t, deleteFake({ deleteIgnored: true })))
+  const k = only(await runCheck(keeps.options, asScripts(deleteScript()), keeps.deps)), kc = deleteChecks(k)
+  assert.equal(kc['deleted.engineGone'], false, 'the thread stayed resumable'); assert.equal(kc['deleted.storeRowsGone'], true); assert.equal(kc['deleted.pendingReadingsWithdrawn'], true); assert.equal(k.ok, false)
+  const noForget = withDelete(world(t, deleteFake()))
+  noForget.deps.extensions = [{ name: 'drop-forgetters', setup: ctx => { ctx.chat.conversationForgetters.delete('pending_readings'); ctx.chat.conversationForgetters.delete('conversation_memory'); return {} } }]
+  const f = only(await runCheck(noForget.options, asScripts(deleteScript()), noForget.deps)), fc = deleteChecks(f)
+  assert.equal(fc['deleted.pendingReadingsWithdrawn'], false); assert.equal(fc['deleted.conversationMemoryGone'], false); assert.equal(fc['deleted.engineGone'], true); assert.equal(fc['deleted.storeRowsGone'], true); assert.equal(fc['deleted.otherMemoryKept'], true)
+  const noRows = withDelete(world(t, deleteFake()))
+  noRows.deps.extensions = [{ name: 'keep-rows', setup: ctx => { ctx.chat.store.deleteConversation = () => ({ deleted: false }); return {} } }]
+  const r = only(await runCheck(noRows.options, asScripts(deleteScript()), noRows.deps)), rc = deleteChecks(r)
+  assert.equal(rc['deleted.storeRowsGone'], false); assert.equal(rc.conversationGone, false); assert.equal(rc['deleted.engineGone'], true)
+})
+
+test('deletion proof preflight: engineGone needs a saved thread (--persisted-with-cleanup); the dry plan says so and a run refuses', async t => {
+  const w = world(t, deleteFake())
+  const problems = preflight({ ...w.options, mode: 'dry', codexBin: '/x', decisions: false }, asScripts(deleteScript()), { exists: () => true, env: {} }).join('\n')
+  assert.match(problems, /deleted\.engineGone[^\n]*--persisted-with-cleanup/)
+  await assert.rejects(runCheck(w.options, asScripts(deleteScript()), w.deps), { code: 'engine_gone_needs_persisted' })
 })

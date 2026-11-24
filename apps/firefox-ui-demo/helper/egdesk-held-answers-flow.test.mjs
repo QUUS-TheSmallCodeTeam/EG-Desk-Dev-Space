@@ -242,12 +242,14 @@ test('an answer after a command is checked against that command\'s facts first (
   await n('item/completed', { ...w.timing, item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test -- --suite=payroll', cwd: '/work', status: 'completed', exitCode: 0, durationMs: 12_000, commandActions: [], aggregatedOutput: 'running 40 tests\n40 passed, 0 failed\n' } })
   await w.final('테스트 40개가 모두 통과했습니다.')
   assert.equal(seen.length, 1)
+  const facts0 = w.chat.answerFactsEvidence([...w.chat.runs.values()][0])
+  assert.ok(facts0.length > 0 && facts0.every(item => item.opaque === true || item.pinned === true), 'c28: the run\'s own facts are pinned: they stay in the check\'s evidence whatever the bound (no word overlap can rank them)')
   const evidence = seen[0].input[1].content
   assert.match(evidence, /^Evidence:\n\[E1 time=present\]\n"""\nIn this turn the assistant ran `npm test -- --suite=payroll`; it finished after about 12 seconds with exit code 0, which means the command itself reported success\. Last lines of its output: running 40 tests 40 passed, 0 failed\n"""/)
   assert.match(evidence, /\[E2 time=planned[^\]]*\]\n"""\nPostgreSQL/, 'the turn\'s page follows')
   // The check keeps 8 items: with 8 pages the command fact still comes first (it used to be cut, being last).
   const turn = { evidence: pages.map(p => ({ id: p.id, kind: 'document', time: 'planned', text: p.title })), memory: [] }
-  const facts = [{ id: 'cmd1', kind: 'terminal', time: 'present', text: 'In this turn the assistant ran `npm test`; it finished with exit code 0.' }, { id: 'tool2', kind: 'tool', opaque: true }]
+  const facts = [{ id: 'cmd1', kind: 'terminal', time: 'present', pinned: true, text: 'In this turn the assistant ran `npm test`; it finished with exit code 0.' }, { id: 'tool2', kind: 'tool', opaque: true }]
   const ordered = answerEvidence(turn, facts)
   assert.deepEqual(ordered.slice(0, 2).map(item => item.id), ['cmd1', 'doc:pg-0']); assert.equal(ordered.at(-1).id, 'tool2')
   const bound = []
@@ -393,6 +395,7 @@ test('c23: an answer the check passes is recorded as posted as written', async t
   await w.send(); await w.final('PostgreSQL 마이그레이션은 아직 계획 단계입니다.')
   assert.deepEqual(w.posted().filter(([r]) => r === 'assistant').map(([, text]) => text), ['PostgreSQL 마이그레이션은 아직 계획 단계입니다.'])
   assert.deepEqual(postedWord(w), ['as_written'])
+  assert.deepEqual([...w.chat.earlierEvidence.values()].map(entry => entry.withheld), [false], 'c28: a posted answer: the usual four')
 })
 
 test('c23: an answer the check replaces with the one revision is recorded as revised', async t => {
@@ -407,6 +410,7 @@ test('c23: an answer whose every sentence fails is recorded as withheld, and not
   await w.send(); await w.final('PostgreSQL 마이그레이션은 v16으로 3월에 끝났습니다.')
   assert.deepEqual(w.posted().filter(([r]) => r === 'assistant'), [])
   assert.deepEqual(postedWord(w), ['withheld'])
+  assert.deepEqual([...w.chat.earlierEvidence.values()].map(entry => entry.withheld), [true], 'c28: the next check carries all the records of this one (the person saw nothing)')
 })
 
 test('c23: only the unflagged sentence is posted when the rewrite is unavailable: recorded as certain_part', async t => {

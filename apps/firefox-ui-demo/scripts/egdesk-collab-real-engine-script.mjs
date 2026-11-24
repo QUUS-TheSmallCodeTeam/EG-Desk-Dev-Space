@@ -1,18 +1,24 @@
 #!/usr/bin/env node
-// L1 cycle 27: write / compare the collaboration conversation script for lane L5's real-engine check. Sends nothing, starts nothing.
-//   node scripts/egdesk-collab-real-engine-script.mjs           # compare with the committed file
-//   node scripts/egdesk-collab-real-engine-script.mjs --write   # write scripts/real-engine/scripts/real-engine-collab-v1.json
+// L1 cycles 27 and 29: write / compare the collaboration conversation scripts for lane L5's real-engine check. Sends nothing, starts nothing.
+//   node scripts/egdesk-collab-real-engine-script.mjs           # compare with the committed files (collab-v1: one room; collab-restart-v1: the same room across a restart)
+//   node scripts/egdesk-collab-real-engine-script.mjs --write   # write scripts/real-engine/scripts/real-engine-collab-v1.json and real-engine-collab-restart-v1.json
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { COLLAB_SET, buildCollabScript } from '../helper/egdesk-collab-real-engine-script.mjs'
+import { COLLAB_RESTART_SET, COLLAB_SET, buildCollabRestartScript, buildCollabScript } from '../helper/egdesk-collab-real-engine-script.mjs'
 
-export const SCRIPT_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'real-engine', 'scripts', `${COLLAB_SET}.json`)
-export const scriptBytes = () => Buffer.from(`${JSON.stringify(buildCollabScript(), null, 2)}\n`)
+const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'real-engine', 'scripts')
+export const SCRIPT_FILE = path.join(dir, `${COLLAB_SET}.json`), RESTART_FILE = path.join(dir, `${COLLAB_RESTART_SET}.json`)
+const bytes = script => Buffer.from(`${JSON.stringify(script, null, 2)}\n`)
+export const scriptBytes = () => bytes(buildCollabScript()), restartScriptBytes = () => bytes(buildCollabRestartScript())
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (process.argv.includes('--write')) { mkdirSync(path.dirname(SCRIPT_FILE), { recursive: true }); writeFileSync(SCRIPT_FILE, scriptBytes()); console.log(`written ${path.basename(SCRIPT_FILE)}`); process.exit(0) }
-  let same = false
-  try { same = readFileSync(SCRIPT_FILE).equals(scriptBytes()) } catch { same = false }
-  console.log(same ? `matches ${path.basename(SCRIPT_FILE)}` : `DIFFERS ${path.basename(SCRIPT_FILE)}: run with --write`)
-  process.exit(same ? 0 : 1)
+  let differs = 0
+  for (const [file, make] of [[SCRIPT_FILE, scriptBytes], [RESTART_FILE, restartScriptBytes]]) {
+    if (process.argv.includes('--write')) { mkdirSync(dir, { recursive: true }); writeFileSync(file, make()); console.log(`written ${path.basename(file)}`); continue }
+    let same = false
+    try { same = readFileSync(file).equals(make()) } catch { same = false }
+    if (!same) differs++
+    console.log(same ? `matches ${path.basename(file)}` : `DIFFERS ${path.basename(file)}: run with --write`)
+  }
+  process.exit(differs ? 1 : 0)
 }

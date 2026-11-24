@@ -19,6 +19,10 @@
 //         beforeSend(ctx)               async, before a scripted message turn is sent (ctx.turn, ctx.index; ctx.state() also names conversationId)
 //         afterTurn(ctx) → { record?, expectations? }   async, after the turn's answer is posted (ctx = { run, say, answer, turnIndex, expect, state }); merged like finishTurn
 //         dispose()                     when the conversation ends (errors are ignored: it only releases timers and the like)
+//       and, around a restart action (c29: the bridge and the engine stopped and started again between two turns; every hook is made anew, so memory of the old bridge is gone):
+//         beforeRestart(ctx) → carried  the old hook, just before the engine goes (ctx.state()); what it returns is handed to its successor
+//         afterRestart(ctx) → { record?, expectations? }   the new hook, once the new runtime is composed and the room resumed (ctx = { carried, expect (the restart turn's), state }); it
+//                                       becomes the restart turn's record (under the hook's name) and expectations
 //       ctx = { state() → { store, clientThreadId, conversationId }, expect, nextExpect, latencyMs, steerContract, text }.  `hook` (any other member) is reachable as turnHooks.get(name)
 const expectKeys = new Map(), conversationFields = new Map(), turnFields = new Map(), turnHooks = new Map()
 
@@ -88,6 +92,18 @@ export function createTurnHooks(conversation) {
     observeCommand: (command, child) => each('observeCommand', command, child),
     beginTurn: ctx => each('beginTurn', ctx),
     inRun: ctx => each('inRun', ctx),
+    // c29: around a restart action
+    async beforeRestart(ctx) { const out = {}; for (const [name, h] of hooks) { const v = await h.beforeRestart?.(ctx); if (v !== undefined) out[name] = v } return out },
+    async afterRestart(ctx) {
+      const records = {}, expectations = []
+      for (const [name, h] of hooks) {
+        const r = await h.afterRestart?.({ ...ctx, carried: ctx.carried?.[name] })
+        if (!r) continue
+        if (r.record) records[name] = r.record
+        expectations.push(...(r.expectations ?? []))
+      }
+      return { records, expectations }
+    },
     // c27: the hooks that need the live runtime
     flowOptions: ctx => Object.assign({}, ...hooks.map(([, h]) => h.flowOptions?.(ctx) ?? {})),
     attach(deps) { for (const [, h] of hooks) h.attach?.(deps) },

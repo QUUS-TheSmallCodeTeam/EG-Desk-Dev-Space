@@ -96,18 +96,59 @@ test('memory pages as readable evidence: 40% against a page saying 18% is caught
   const right = await checkDraft({ draft: '벤치마크에서 쓰기 지연이 18% 줄었습니다.', evidence: [PAGE], mode: 'on', client: client(q => p(q.name.startsWith('sup_') ? 0.96 : 0.04)) })
   assert.deepEqual([right.findings.length, right.text], [0, '벤치마크에서 쓰기 지연이 18% 줄었습니다.'])
 })
-test('what the checker cannot read keeps the rule off: an opaque item, a page cut for the check, evidence the gate withheld', async () => {
+test('what the checker cannot read keeps the rule off: an opaque item, a page cut for the check, evidence the gate withheld (an item the bound left out does not: c28)', async () => {
   const wrongSup = () => client(q => p(q.name.startsWith('sup_') ? 0.03 : 0.04)), draft = '벤치마크에서 쓰기 지연이 40% 줄었습니다.'
   const opaque = await checkDraft({ draft, evidence: [PAGE, { id: 'mem2', kind: 'context', time: 'past', source: 'memory', opaque: true }], mode: 'on', client: wrongSup() })
   assert.equal(opaque.findings.filter(f => f.kind === 'unverified').length, 0, 'a guarded page the checker cannot read')
   const long = { ...PAGE, text: `${PAGE.text}\n${'부록 '.repeat(400)}` } // longer than the check's per-item bound: the tail is not seen
   const cut = await checkDraft({ draft, evidence: [long], mode: 'on', client: wrongSup() })
   assert.equal(cut.findings.filter(f => f.kind === 'unverified').length, 0, 'a page cut for the check')
-  const many = Array.from({ length: 10 }, (_, i) => ({ ...PAGE, id: `mem${i + 1}`, text: `${PAGE.text} (${i})` })) // more items than the check keeps
-  const left = await checkDraft({ draft, evidence: many, mode: 'on', client: wrongSup() })
-  assert.equal(left.findings.filter(f => f.kind === 'unverified').length, 0, 'pages the item limit left out')
   const withheld = await checkDraft({ draft, evidence: [PAGE], mode: 'on', client: wrongSup(), egress: { allows: () => true, filterEvidence: items => items.filter(i => i.kind !== 'memory') } })
   assert.equal(withheld.findings.filter(f => f.kind === 'unverified').length, 0, 'memory the run\'s gate keeps out of the check: the model had it, the checker may not')
   const readable = await checkDraft({ draft, evidence: [PAGE], mode: 'on', client: wrongSup(), egress: { allows: () => true, filterEvidence: items => items } })
   assert.ok(readable.findings.some(f => f.kind === 'unverified'), 'the same page where the gate allows it: caught')
+})
+
+// c28 (L2 c24, real v8 run, a SAFETY defect): s13's false "PostgreSQL 전환 배포를 완료했습니다." was posted as written. The check saw the plan page (planned, "배포 전이다"), the judge said sup 0.00 and
+// tense .01, but the evidence had more items than the bound and the c26 rule treated the one that did not fit as `cut`, which switched the unsupported rule off. The items below are the s13/s14
+// evidence of the all-on journey (the synthetic wiki; eleven records for a bound of eight), in the order the product hands them over.
+const PG = (id, time, status, text) => ({ id, kind: 'memory', time, status, source: 'document', text })
+const PLAN = PG('mem1', 'planned', 'plan', 'PostgreSQL 마이그레이션 배포 계획\n12월 첫째 주에 SQLite에서 PostgreSQL로 전환 배포한다. 아직 배포 전이다.')
+const OTHER = Array.from({ length: 10 }, (_, i) => PG(`mem${i + 2}`, i % 3 === 0 ? 'past' : 'present', 'done', `${['견적서 v1 발송 기록', '헬스체크 3종 체크리스트', '롤백 절차 문서', '알림 채널 설정', '캐시 비우기 순서'][i % 5]} ${i}\n${['A사 단가 12,800원', '디스크 사용률 점검', '30분 안에 되돌린다', '슬랙 채널 연결', '배포 직후 확인'][i % 5]} (${i}).`))
+const sentence = new Map([['complete', 'PostgreSQL 전환 배포를 완료했습니다.'], ['plan', '12월 첫째 주에 배포할 예정입니다.']])
+const evidenceHeads = request => request.input.find(row => /^Evidence:/.test(row.content)).content.split('\n').filter(l => l.startsWith('[E'))
+test('s13: a completion claim the plan page contradicts is caught although the evidence has more items than the bound (the over-the-bound item no longer excuses it)', async () => {
+  const evidence = [PLAN, ...OTHER] // 11 items, the plan page among the first eight
+  const c = client(q => p(q.name.startsWith('sup_') ? 0 : 0.01)) // the real v8 answers: sup_0 0.00, tense_0 .01
+  const out = await checkDraft({ draft: sentence.get('complete'), evidence, mode: 'on', client: c })
+  assert.ok(out.findings.some(f => f.kind === 'unverified'), 'unsupported by items the judge saw: a finding'); assert.notEqual(out.text, sentence.get('complete'))
+  assert.deepEqual([out.stats.items, out.stats.leftOut, out.stats.cut], [8, 3, 0], 'the counts are in the result')
+  assert.equal(c.requests[0].input.find(r => /^Evidence:/.test(r.content)).content.includes('아직 배포 전이다'), true, 'the judge saw the plan page')
+})
+test('s14: the plan page beyond the bound is kept because it is related to the draft; a correct plan sentence passes', async () => {
+  const evidence = [...OTHER, PLAN] // the plan page is the eleventh item: first-eight-by-position would drop it
+  const c = client(q => p(q.name.startsWith('sup_') ? 0.96 : 0.02))
+  const out = await checkDraft({ draft: sentence.get('plan'), evidence, mode: 'on', client: c })
+  const heads = evidenceHeads(c.requests[0]); assert.equal(heads.length, 8)
+  assert.ok(c.requests[0].input.find(r => /^Evidence:/.test(r.content)).content.includes('12월 첫째 주에 SQLite에서 PostgreSQL로 전환 배포한다'), 'ranked in: the related record')
+  assert.deepEqual([out.findings.length, out.text], [0, sentence.get('plan')]); assert.equal(out.stats.leftOut, 3)
+})
+test('with no more items than the bound nothing is ranked: the list is the product\'s own order, byte for byte', async () => {
+  const evidence = [...OTHER.slice(0, 7), PLAN]
+  const c = client(q => p(q.name.startsWith('sup_') ? 0.96 : 0.02))
+  await checkDraft({ draft: sentence.get('complete'), evidence, mode: 'on', client: c })
+  const body = c.requests[0].input.find(r => /^Evidence:/.test(r.content)).content
+  assert.deepEqual(evidence.map(e => body.indexOf(e.text.split('\n')[0])).every((at, i, all) => at >= 0 && (i === 0 || at > all[i - 1])), true, 'all eight, in order')
+})
+test('the 40%/18% case with memory pages beyond the bound: the related page is kept and the wrong figure is caught; the correct long page sentence still passes (cut text excuses)', async () => {
+  const bench = PG('mem11', 'past', 'unknown', '쓰기 지연 벤치마크\n벤치마크 결과 쓰기 지연이 18% 줄었다. 읽기 지연은 변하지 않았다.')
+  const wrong = await checkDraft({ draft: '벤치마크에서 쓰기 지연이 40% 줄었습니다.', evidence: [...OTHER, bench], mode: 'on', client: client(q => p(q.name.startsWith('sup_') ? 0.03 : 0.04)) })
+  assert.ok(wrong.findings.some(f => f.kind === 'unverified'), '40% against the page that says 18%')
+  const long = { ...bench, text: `${bench.text}\n${'부록 '.repeat(400)}` }
+  const right = await checkDraft({ draft: '벤치마크에서 쓰기 지연이 18% 줄었습니다.', evidence: [...OTHER, long], mode: 'on', client: client(q => p(q.name.startsWith('sup_') ? 0.03 : 0.04)) })
+  assert.equal(right.findings.filter(f => f.kind === 'unverified').length, 0, 'a page cut for the check may hold the figure: not called unsupported')
+})
+test('what the record says: evidence counts (items, opaque, cut, leftOut) are in the result stats and the calibration row accepts them', async () => {
+  const out = await checkDraft({ draft: sentence.get('plan'), evidence: [PLAN, ...OTHER], mode: 'on', client: client(q => p(q.name.startsWith('sup_') ? 0.96 : 0.02)) })
+  assert.deepEqual(out.stats, { sentences: 1, terms: 0, items: 8, opaque: 0, cut: 0, leftOut: 3 })
 })

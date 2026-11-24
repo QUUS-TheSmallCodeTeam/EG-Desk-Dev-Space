@@ -10,19 +10,19 @@ import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 //   EGDESK_TURN_MEMORY_ONE_PACKET=on        the memory pages ride under the context selection's packet
 //   EGDESK_TURN_MEMORY_WRITE_TARGET=choice  the old N-way write target, for comparison ('about' is the default)
 //   EGDESK_TURN_MEMORY_CONFIRM=on           pending readings may be confirmed or refused through the conversation
-export const TURN_MEMORY_FLAGS = Object.freeze({ onePacket: 'EGDESK_TURN_MEMORY_ONE_PACKET', writeTarget: 'EGDESK_TURN_MEMORY_WRITE_TARGET', confirmInConversation: 'EGDESK_TURN_MEMORY_CONFIRM', pruneHeld: 'EGDESK_TURN_MEMORY_PRUNE_HELD', keepLate: 'EGDESK_TURN_MEMORY_KEEP_LATE', speechDesign: 'EGDESK_TURN_MEMORY_SPEECH_DESIGN', splitWording: 'EGDESK_TURN_MEMORY_SPLIT_WORDING', previousReply: 'EGDESK_TURN_MEMORY_PREVIOUS_REPLY', selectionHeld: 'EGDESK_TURN_MEMORY_SELECTION_HELD', engineContext: 'EGDESK_TURN_MEMORY_ENGINE_CONTEXT', engineChars: 'EGDESK_TURN_MEMORY_ENGINE_CHARS' })
+export const TURN_MEMORY_FLAGS = Object.freeze({ onePacket: 'EGDESK_TURN_MEMORY_ONE_PACKET', writeTarget: 'EGDESK_TURN_MEMORY_WRITE_TARGET', confirmInConversation: 'EGDESK_TURN_MEMORY_CONFIRM', pruneHeld: 'EGDESK_TURN_MEMORY_PRUNE_HELD', keepLate: 'EGDESK_TURN_MEMORY_KEEP_LATE', speechDesign: 'EGDESK_TURN_MEMORY_SPEECH_DESIGN', splitWording: 'EGDESK_TURN_MEMORY_SPLIT_WORDING', previousReply: 'EGDESK_TURN_MEMORY_PREVIOUS_REPLY', selectionHeld: 'EGDESK_TURN_MEMORY_SELECTION_HELD', engineContext: 'EGDESK_TURN_MEMORY_ENGINE_CONTEXT', engineChars: 'EGDESK_TURN_MEMORY_ENGINE_CHARS', engineBytes: 'EGDESK_TURN_MEMORY_ENGINE_BYTES' })
 export function turnMemoryFlagsFromEnv(env = {}) {
   const get = name => (env && typeof env === 'object' && typeof env[name] === 'string' ? env[name] : null)
   return { ...(get(TURN_MEMORY_FLAGS.onePacket) === 'on' ? { onePacket: true } : {}), ...(get(TURN_MEMORY_FLAGS.writeTarget) === 'choice' ? { writeTarget: 'choice' } : {}),
     ...(get(TURN_MEMORY_FLAGS.confirmInConversation) === 'on' ? { confirmInConversation: true } : {}), ...(get(TURN_MEMORY_FLAGS.pruneHeld) === 'on' ? { pruneHeld: true } : {}),
     ...(get(TURN_MEMORY_FLAGS.keepLate) === 'on' ? { keepLate: true } : {}), ...(get(TURN_MEMORY_FLAGS.speechDesign) === 'split' ? { speechDesign: 'split-isolated' } : get(TURN_MEMORY_FLAGS.speechDesign) === 'hybrid' ? { speechDesign: 'hybrid-two-step' } : {}),
     ...(get(TURN_MEMORY_FLAGS.splitWording) === 'v2' ? { splitWording: 'v2' } : {}), ...(get(TURN_MEMORY_FLAGS.previousReply) === 'on' ? { previousReply: true } : {}), ...(get(TURN_MEMORY_FLAGS.selectionHeld) === 'on' ? { selectionHeld: true } : {}),
-    ...(['split', 'mark'].includes(get(TURN_MEMORY_FLAGS.engineContext)) ? { engineContext: get(TURN_MEMORY_FLAGS.engineContext), ...(/^\d{3,6}$/.test(get(TURN_MEMORY_FLAGS.engineChars) ?? '') ? { engineChars: Number(get(TURN_MEMORY_FLAGS.engineChars)) } : {}) } : {}) }
+    ...(['split', 'mark'].includes(get(TURN_MEMORY_FLAGS.engineContext)) ? { engineContext: get(TURN_MEMORY_FLAGS.engineContext), ...(/^\d{3,6}$/.test(get(TURN_MEMORY_FLAGS.engineChars) ?? '') ? { engineChars: Number(get(TURN_MEMORY_FLAGS.engineChars)) } : {}), ...(/^\d{4,6}$/.test(get(TURN_MEMORY_FLAGS.engineBytes) ?? '') ? { engineBytes: Number(get(TURN_MEMORY_FLAGS.engineBytes)) } : {}) } : {}) }
 }
 
 // createTurnMemoryConfig({ settings, getAdapter, ontologyStore, deskStore, budget?, deadlineMs? }) -> the object the runtime reads:
 //   { mode(), wiki({ body, context, sources }), scope({ context }), writer(wiki, options), budget, caps, deadlineMs, ontologyWrite }
-export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = null, deskStore = null, budget = { linksFirst: true }, deadlineMs = 15000, caps = null, onePacket = false, writeTarget = 'about', confirmInConversation = false, pruneHeld = false, keepLate = false, speechDesign = null, splitWording = null, previousReply = false, selectionHeld = false, engineContext = null, engineChars = null } = {}) {
+export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = null, deskStore = null, budget = { linksFirst: true }, deadlineMs = 15000, caps = null, onePacket = false, writeTarget = 'about', confirmInConversation = false, pruneHeld = false, keepLate = false, speechDesign = null, splitWording = null, previousReply = false, selectionHeld = false, engineContext = null, engineChars = null, engineBytes = null } = {}) {
   const mode = () => (['advisory', 'on'].includes(settings?.turnMemory?.mode) ? settings.turnMemory.mode : 'off')
   return {
     // The same lazy adapter, for other consumers of the wiki write path (the direct browser entry); it opens nothing by itself.
@@ -42,7 +42,7 @@ export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = n
     ...(selectionHeld === true ? { selectionHeld: true } : {}),
     // What the engine shows of EG-Desk's own context entries (egdesk-engine-context.mjs): 'split' cuts an entry over the limit into parts that each stay under it, 'mark' only tells the
     // draft check that such an entry is not fully seen. Absent unless the bridge passes them (off by default; L7 c32).
-    ...(engineContext === 'split' || engineContext === 'mark' ? { engineContext, ...(Number.isSafeInteger(engineChars) ? { engineChars } : {}) } : {}),
+    ...(engineContext === 'split' || engineContext === 'mark' ? { engineContext, ...(Number.isSafeInteger(engineChars) ? { engineChars } : {}), ...(Number.isSafeInteger(engineBytes) ? { engineBytes } : {}) } : {}),
     // A turn_context answer that missed its budget is kept for the later steps of the same turn (never for the native turn; off by default).
     ...(keepLate === true ? { keepLate: true } : {}),
     // How the write judgment asks the sentence labels: 'split-isolated' (source and time as yes/no predicates) only when passed; default axes.

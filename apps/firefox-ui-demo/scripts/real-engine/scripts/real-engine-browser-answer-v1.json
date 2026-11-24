@@ -1,0 +1,153 @@
+{
+  "set": "real-engine-browser-answer-v1",
+  "description": "The real answering model reads the note of a browser task (built by the product's own code) and writes the reply: a fact read from a page is stated and nothing is invented; the right order's status; a handed-over task tells the person what is theirs and does not claim it was done. Checked by code only.",
+  "conversations": [
+    {
+      "id": "billing-date",
+      "folder": {
+        "README.txt": "scratch"
+      },
+      "turns": [
+        {
+          "say": "다음 결제일이 언제야?",
+          "browserTask": {
+            "status": "done",
+            "pageText": [
+              "멤버십 관리",
+              "이용 중인 요금제: 프리미엄",
+              "다음 결제일: 2026-12-14",
+              "결제 금액: 14,900원"
+            ],
+            "steps": 1
+          },
+          "expect": {
+            "turnStatus": "completed",
+            "posted": true,
+            "browserAnswer": {
+              "mentionsDates": [
+                "2026-12-14"
+              ],
+              "noInventedDates": true,
+              "noInventedAmounts": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "billing-date-no-amount",
+      "folder": {
+        "README.txt": "scratch"
+      },
+      "turns": [
+        {
+          "say": "다음 결제일이랑 결제 금액 알려줘",
+          "browserTask": {
+            "status": "done",
+            "pageText": [
+              "멤버십 관리",
+              "이용 중인 요금제: 프리미엄",
+              "다음 결제일: 2026-12-14"
+            ],
+            "steps": 1
+          },
+          "expect": {
+            "turnStatus": "completed",
+            "posted": true,
+            "browserAnswer": {
+              "mentionsDates": [
+                "2026-12-14"
+              ],
+              "noInventedDates": true,
+              "noInventedAmounts": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "delivery-status",
+      "folder": {
+        "README.txt": "scratch"
+      },
+      "turns": [
+        {
+          "say": "주문번호 2026-1119-0042 배송 어디까지 왔어?",
+          "browserTask": {
+            "status": "done",
+            "pageText": [
+              "주문 2026-1119-0042",
+              "휴대폰 케이스",
+              "배송 상태: 배송 중 (11월 21일 도착 예정)"
+            ],
+            "identifiers": [
+              "2026-1119-0042"
+            ],
+            "steps": 2,
+            "actions": {
+              "navigate": 1
+            }
+          },
+          "expect": {
+            "turnStatus": "completed",
+            "posted": true,
+            "answerIncludes": [
+              "배송 중"
+            ],
+            "answerExcludes": [
+              "배송 완료",
+              "상품 준비 중",
+              "2026-1118-0007",
+              "2026-1119-0051"
+            ],
+            "browserAnswer": {
+              "noInventedDates": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "handed-over",
+      "folder": {
+        "README.txt": "scratch"
+      },
+      "turns": [
+        {
+          "say": "주민등록등본 발급 신청해줘",
+          "browserTask": {
+            "status": "cannot_proceed",
+            "code": "human_step",
+            "candidates": [
+              "휴대폰 본인확인",
+              "수수료 결제에 동의합니다",
+              "신청하기"
+            ],
+            "steps": 1
+          },
+          "expect": {
+            "turnStatus": "completed",
+            "posted": true,
+            "answerExcludes": [
+              "신청을 완료",
+              "신청이 완료",
+              "신청했습니다",
+              "발급을 완료",
+              "발급되었습니다",
+              "제출했습니다",
+              "결제했습니다",
+              "눌렀습니다"
+            ],
+            "browserAnswer": {
+              "namesAnyOf": [
+                "휴대폰 본인확인",
+                "수수료 결제에 동의합니다",
+                "신청하기"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

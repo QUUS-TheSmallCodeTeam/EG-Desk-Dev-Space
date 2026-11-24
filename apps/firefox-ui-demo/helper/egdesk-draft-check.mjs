@@ -158,30 +158,48 @@ export function evidenceFromPacket(packet) {
 // page, id mem...). L3 c24 dropped the bare title when its text was the start of another item's text (same time tag and status); not measured on its own
 // and reverted in c25 with the tense wording (the evidence list is what the measured bodies carry). In the v6 journey it would have dropped four titles
 // (s1: a-v1, a-decision; s3b: pg-design, pg-plan), each contained at the start of the page text that stays.
-function boundedEvidence(items) {
+// c28 (L2 c24, real v8 run, a SAFETY defect): s13's false "PostgreSQL 전환 배포를 완료했습니다." was posted as written. The check saw the plan page (planned: "배포 계획 … 아직 배포 전이다") and the
+// judge said sup 0.00, but the evidence had 9 items for a limit of 8, the c26 rule marked the last kept item `cut` for the item that did not fit, and one `cut` switched the whole
+// unsupported rule off. Three changes: (1) when there are more items than the bound, the items related to the draft are the ones kept (ranked, below), the rest fill what is left in their
+// own order; with no overflow nothing changes (the measured bodies stay byte for byte). (2) Only what the checker really cannot read excuses a sentence: an opaque item, or an item whose
+// own text was shortened for the check (`cut`). An item the bound left out does not (it is counted: stats.leftOut), because the ranking keeps the related ones. (3) The counts are recorded.
+//
+// Relatedness (fixed lexical overlap, no judgment; Korean endings defeat whole-word matching, so it counts shared character pairs): the sum over the character pairs a draft sentence and an
+// item share of 1 / (the number of items that hold the pair), so a pair that only one or two items hold (a name, a number's neighbour) counts more than one every item holds.
+const pairsOf = text => { const out = new Set(); for (const word of lower(String(text)).match(/[\p{L}\p{N}]+/gu) ?? []) for (let i = 0; i + 1 < word.length; i++) out.add(word.slice(i, i + 2)); return out }
+function rankedContent(content, draftText) {
+  const sentences = segmentDraft(draftText ?? '').filter(span => span.kind === 'claim').map(span => pairsOf(span.text))
+  if (!sentences.length) return content.map((item, index) => ({ item, index, score: 0 }))
+  const held = content.map(item => pairsOf(item.text)), df = new Map()
+  for (const set of held) for (const pair of set) df.set(pair, (df.get(pair) ?? 0) + 1)
+  return content.map((item, index) => ({ item, index, score: Math.max(...sentences.map(mine => { let sum = 0; for (const pair of mine) if (held[index].has(pair)) sum += 1 / df.get(pair); return sum })) }))
+}
+function boundedEvidence(items, draftText = '') {
   const usable = (Array.isArray(items) ? items : []).filter(item => item?.opaque === true || (typeof item?.text === 'string' && item.text.trim()))
   const content = usable.filter(item => item.opaque !== true), opaque = usable.filter(item => item.opaque === true)
-  const limit = DRAFT_CHECK_LIMITS.evidenceItems
-  return opaque.length ? [...content.slice(0, limit - 1), ...opaque.slice(0, Math.max(1, limit - content.length))] : content.slice(0, limit)
+  const limit = DRAFT_CHECK_LIMITS.evidenceItems, room = opaque.length ? limit - 1 : limit
+  let kept = content
+  if (content.length > room) {
+    // The run's own facts of this turn (`pinned`: what its commands and its browser task did; an answer after such a step reports them, in a language of their own, so no word overlap
+    // can rank them) stay first. Then the related items (best score first, earlier first among equals), up to the room; what is kept stays in its own order.
+    const rows = rankedContent(content, draftText), pinned = rows.filter(row => row.item.pinned === true).slice(0, room)
+    const chosen = new Set([...pinned.map(row => row.index), ...rows.filter(row => row.item.pinned !== true).sort((a, b) => b.score - a.score || a.index - b.index).slice(0, room - pinned.length).map(row => row.index)])
+    kept = content.filter((_, index) => chosen.has(index))
+  }
+  return { rows: opaque.length ? [...kept, ...opaque.slice(0, Math.max(1, limit - content.length))] : kept, leftOut: Math.max(0, content.length - room) }
 }
 // c26 (L2 c22 finding, Main HIGH): a turn with turn memory gave the check ONE opaque reference for the memory key although the pages are evidence items, and an
 // unsupported sentence is ignored while any evidence is opaque, so with memory attached only the tense question could flag ("40% 줄었습니다" against a page saying 18%
-// posted at judge .03). What the checker cannot read is now named exactly: `cut` marks an item whose text was shortened for the check (or that the item limit left out), and
-// the evidence the run's gate withheld is one opaque reference (checkDraft); everything else is read, and a sentence the readable evidence does not support is caught.
-function cutEvidence(items, kept) {
-  const usable = (Array.isArray(items) ? items : []).filter(item => item?.opaque === true || (typeof item?.text === 'string' && item.text.trim()))
-  const content = usable.filter(item => item.opaque !== true), opaque = usable.filter(item => item.opaque === true)
-  const room = opaque.length ? Math.max(0, DRAFT_CHECK_LIMITS.evidenceItems - 1) : DRAFT_CHECK_LIMITS.evidenceItems
-  return { leftOut: content.length > room, kept }
-}
-const normalizedEvidence = items => {
-  const bounded = boundedEvidence(items), leftOut = cutEvidence(items, bounded).leftOut
+// posted at judge .03). What the checker cannot read is named exactly: `cut` marks an item whose text was shortened for the check, and the evidence the run's gate
+// withheld is one opaque reference (checkDraft); everything else is read, and a sentence the readable evidence does not support is caught.
+const normalizedEvidence = (items, draftText = '') => {
+  const { rows: bounded, leftOut } = boundedEvidence(items, draftText)
+  const used = bounded.filter(item => item.opaque !== true) // the readable items this check was given (the originals), for the caller's next check
   const rows = bounded.map((item, index) => {
     const opaque = item.opaque === true, full = opaque ? '' : compactText(item.text, 1_000_000), text = opaque ? '(content not available to the checker)' : compactText(item.text, DRAFT_CHECK_LIMITS.evidenceChars)
     return { id: String(item.id ?? `item${index + 1}`), kind: item.kind ?? null, time: item.time ?? 'unknown', status: item.status ?? null, source: item.source ?? null, opaque, cut: !opaque && (item.cut === true || full.length > text.length), text }
   })
-  if (leftOut) { const last = rows.findLastIndex(row => !row.opaque); if (last >= 0) rows[last].cut = true }
-  return rows
+  return { rows, leftOut, used }
 }
 const unseen = evidence => evidence.some(item => item.opaque || item.cut)
 
@@ -368,10 +386,12 @@ export async function checkDraft({ draft, evidence = [], userText = '', internal
   // check trimmed the draft and added its partial note (own = the kept part) or replaced it with its own question (own = ''). Readers that judge the
   // answer's meaning (work placement's "does the result need the owner?") quote only this, never the check's copy.
   const out = (text, outcome, extra = {}) => ({ action: 'post', text, own: Object.hasOwn(extra, 'own') ? extra.own : text, outcome, calls: extra.calls ?? 0, findings: extra.findings ?? [], verdict: verdictOf(firstState),
+    evidenceUsed,
     stats: firstState ? { sentences: firstState.claimSpans.length, terms: firstState.terms.length,
-      items: proofCount.items, opaque: proofCount.opaque } : null,
+      items: proofCount.items, opaque: proofCount.opaque, cut: proofCount.cut, leftOut: proofCount.leftOut } : null,
     calibration: { ...calibration, ...(extra.fallback ? { fallback: extra.fallback } : {}), attached: text !== draft } })
-  const proofCount = { items: 0, opaque: 0 }
+  const proofCount = { items: 0, opaque: 0, cut: 0, leftOut: 0 }
+  let evidenceUsed = []
   if (typeof draft !== 'string' || !draft.trim()) return out(draft, 'unchecked')
   if (mode !== 'advisory' && mode !== 'on') return out(draft, 'unchecked')
   if (!client || typeof client.decide !== 'function') return out(draft, 'unchecked', { fallback: 'not_configured' })
@@ -382,8 +402,9 @@ export async function checkDraft({ draft, evidence = [], userText = '', internal
   // What the run's gate keeps out of the check is content the model had and the checker may not read: one opaque reference stands for it (not a silent absence).
   const allowedEvidence = egress ? egress.filterEvidence(evidence) : evidence
   const withheld = egress && (Array.isArray(evidence) ? evidence : []).filter(item => item?.opaque !== true).length > allowedEvidence.filter(item => item?.opaque !== true).length
-  const proof = normalizedEvidence(withheld ? [...allowedEvidence, { id: 'withheld', kind: 'context', time: 'unknown', source: 'application', opaque: true }] : allowedEvidence)
-  proofCount.items = proof.filter(item => !item.opaque).length; proofCount.opaque = proof.filter(item => item.opaque).length
+  const { rows: proof, leftOut, used } = normalizedEvidence(withheld ? [...allowedEvidence, { id: 'withheld', kind: 'context', time: 'unknown', source: 'application', opaque: true }] : allowedEvidence, draft)
+  evidenceUsed = used
+  proofCount.items = proof.filter(item => !item.opaque).length; proofCount.opaque = proof.filter(item => item.opaque).length; proofCount.cut = proof.filter(item => item.cut).length; proofCount.leftOut = leftOut
   let calls = 0
   const attempt = async (text, timeoutMs, recheck = false) => {
     if (budget && budget.canSpend() !== true) throw new DecisionError('budget_exceeded', 'budget')

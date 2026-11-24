@@ -3,7 +3,7 @@
 import { registerConversationFields, registerExpectKeys, registerFlags, registerTurnFields, registerTurnHooks } from './egdesk-real-engine-extensions.mjs'
 
 // ---- L1: collaboration (two synthetic requesters in one room: `from` on a turn, expect.collab; its hook needs the live runtime and registers as a turn hook) ----
-import { COLLAB_DECISION_FLAGS, COLLAB_EXPECT_SCHEMA, COLLAB_FLAGS, COLLAB_FROM, createCollabTurnHook, validateCollabExpect, validateCollabFrom } from './egdesk-real-engine-collab-hook.mjs'
+import { COLLAB_DECISION_FLAGS, COLLAB_EXPECT_SCHEMA, COLLAB_FLAGS, COLLAB_FROM, COLLAB_RESTART_KEYS, createCollabTurnHook, validateCollabExpect, validateCollabFrom } from './egdesk-real-engine-collab-hook.mjs'
 registerFlags({ reproduced: COLLAB_FLAGS, decisionDependent: COLLAB_DECISION_FLAGS })
 registerTurnFields({ from: { schema: { enum: [...COLLAB_FROM] }, validate: (value, { conv, turn, path, bad }) => {
   for (const why of validateCollabFrom(value)) bad(path, why)
@@ -13,11 +13,17 @@ registerTurnFields({ from: { schema: { enum: [...COLLAB_FROM] }, validate: (valu
 registerExpectKeys({ collab: { schema: COLLAB_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => {
   for (const why of validateCollabExpect(value)) bad(path, why)
   if (conv.flags?.EGDESK_PRESENCE !== 'on') bad(path, 'needs flags.EGDESK_PRESENCE = "on" in this conversation')
+  const restartTurn = turn.action === 'restart', prev = conv.turns[conv.turns.indexOf(turn) - 1]
+  if (restartTurn) { for (const k of Object.keys(value)) if (!COLLAB_RESTART_KEYS.includes(k)) bad(`${path}.${k}`, 'a restart turn takes only roomKept and receiptsClosed') }
+  else {
+    for (const k of COLLAB_RESTART_KEYS) if (value[k] !== undefined) bad(`${path}.${k}`, 'belongs to a restart turn')
+    if (value.continuity !== undefined && prev?.action !== 'restart') bad(`${path}.continuity`, 'belongs to the message turn right after a restart')
+    if (turn.whileRunning !== undefined || turn.action !== undefined) bad(path, 'not checked on a whileRunning or action turn')
+  }
   if (value.attention !== undefined) {
     for (const flag of ['EGDESK_WORK_PLACEMENT', 'EGDESK_CONVERSATION_FLOW']) if (conv.flags?.[flag] !== 'on') bad(`${path}.attention`, `needs flags.${flag} = "on" in this conversation (the scene is judged at the room's live heartbeat)`)
     if (['raised', 'posted'].includes(value.attention.pointer) && !(conv.draftCheck?.mode === 'on' || conv.flags?.EGDESK_DRAFT_CHECK === 'on')) bad(`${path}.attention.pointer`, 'a pointer message needs the draft check on in this conversation')
   }
-  if (turn.whileRunning !== undefined || turn.action !== undefined) bad(path, 'not checked on a whileRunning or action turn')
 } } })
 registerTurnHooks('collab', conversation => createCollabTurnHook(conversation))
 
@@ -47,6 +53,15 @@ registerTurnHooks('journey', () => {
   }
 })
 
+// ---- L2 c26: the draft check's rewrite (what the real model's rewrite does after a finding) ----
+import { REWRITE_EXPECT_SCHEMA, createRewriteHook, validateRewriteExpect } from './egdesk-real-engine-rewrite.mjs'
+registerExpectKeys({ rewrite: { schema: REWRITE_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => {
+  for (const why of validateRewriteExpect(value, conv, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
+  if (turn.whileRunning !== undefined || turn.action !== undefined) bad(path, 'not checked on a whileRunning or action turn')
+} } })
+registerTurnHooks('rewrite', conversation => createRewriteHook(conversation))
+
+
 // ---- L3: the heartbeat's own messages (expect.flow: notes, firstNoteMs, statedSecondsTrue, noResult) ----
 import { FLOW_EXPECT_SCHEMA, createFlowHook, validateFlowExpect } from './egdesk-real-engine-flow.mjs'
 registerExpectKeys({ flow: { schema: FLOW_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateFlowExpect(value, { conv, turn }, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
@@ -66,4 +81,17 @@ registerExpectKeys({ briefing: { schema: BRIEFING_EXPECT_SCHEMA,
 
 // ---- slot L6 ----
 
-// ---- slot L8 ----
+// ---- L8: browser answer (a code-built finished or handed-over browser-task note fed into a turn; expect.browserAnswer checks the REAL answering model's reply by code) ----
+import { BROWSER_ANSWER_EXPECT_SCHEMA, BROWSER_TASK_SCHEMA, createBrowserAnswerHook, validateBrowserAnswerExpect, validateBrowserTask } from './egdesk-real-engine-browser-answer-hook.mjs'
+registerTurnFields({ browserTask: { schema: BROWSER_TASK_SCHEMA, validate: (value, { turn, path, bad }) => {
+  for (const why of validateBrowserTask(value, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
+  if (turn.action !== undefined || turn.whileRunning !== undefined) bad(path, 'only a plain message turn carries a task note')
+} } })
+registerExpectKeys({ browserAnswer: { schema: BROWSER_ANSWER_EXPECT_SCHEMA, validate: (value, { turn, path, bad }) => { for (const why of validateBrowserAnswerExpect(value, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('browserAnswer', () => createBrowserAnswerHook())
+
+// ---- L5: deletion through the product's route (seeded memory writes, expect.deleted) ----
+import { DELETED_EXPECT_SCHEMA, SEEDED_WRITES_SCHEMA, checkDeleted, validateDeletedExpect, validateSeededWrites } from './egdesk-real-engine-delete.mjs'
+registerConversationFields({ seededWrites: { schema: SEEDED_WRITES_SCHEMA, validate: (value, { path, bad }) => { for (const why of validateSeededWrites(value, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerExpectKeys({ deleted: { schema: DELETED_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateDeletedExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) },
+  check: (value, record) => checkDeleted(value, record) } })

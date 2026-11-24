@@ -38,7 +38,9 @@ const clip = (text, n) => String(text ?? '').slice(0, n)
 const oneLine = text => String(text ?? '').replace(/\s+/g, ' ').trim()
 
 // ---- the `expect.collab` entry of a script turn: its shape (validator + JSON schema) and its checks ----
-export const COLLAB_EXPECT_KEYS = Object.freeze(['requester', 'attention', 'ownerQuestion', 'noIdentity', 'cameraUntouched'])
+// c29: roomKept and receiptsClosed belong to a restart turn; continuity to the first message turn after it
+export const COLLAB_RESTART_KEYS = Object.freeze(['roomKept', 'receiptsClosed'])
+export const COLLAB_EXPECT_KEYS = Object.freeze(['requester', 'attention', 'ownerQuestion', 'noIdentity', 'cameraUntouched', ...COLLAB_RESTART_KEYS, 'continuity'])
 const ATTENTION_KEYS = ['branch', 'kind', 'pointer']
 const OWNER_QUESTION_KEYS = ['questions', 'quotesRequest', 'quotesOwnAnswer']
 const strings = { type: 'array', maxItems: COLLAB_LIMITS.strings, items: { type: 'string', minLength: 1, maxLength: COLLAB_LIMITS.stringChars } }
@@ -50,6 +52,9 @@ export const COLLAB_EXPECT_SCHEMA = Object.freeze({
     ownerQuestion: { type: 'object', additionalProperties: false, minProperties: 1, properties: { questions: { type: 'array', minItems: 1, maxItems: 4, items: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,40}$' } }, quotesRequest: strings, quotesOwnAnswer: { const: true } } },
     noIdentity: { const: true },
     cameraUntouched: { const: true },
+    roomKept: { const: true },
+    receiptsClosed: { const: true },
+    continuity: { const: true },
   },
 })
 const plain = v => v !== null && typeof v === 'object' && !Array.isArray(v)
@@ -79,6 +84,7 @@ export function validateCollabExpect(e) {
     }
     if (e.attention === undefined) out.push('ownerQuestion: needs attention (the question is the attention scene\'s)')
   }
+  for (const k of [...COLLAB_RESTART_KEYS, 'continuity']) if (e[k] !== undefined && e[k] !== true) out.push(`${k}: true`)
   if (e.noIdentity !== undefined && e.noIdentity !== true) out.push('noIdentity: true')
   if (e.cameraUntouched !== undefined && e.cameraUntouched !== true) out.push('cameraUntouched: true')
   if (e.cameraUntouched === true && e.attention === undefined) out.push('cameraUntouched: needs attention (it reads the attention outcome)')
@@ -92,6 +98,23 @@ export function validateCollabFrom(from) { return COLLAB_FROM.includes(from) ? [
 export function checkCollabExpect(expect, rec) {
   const out = [], put = (check, ok, detail) => out.push({ check: `collab.${check}`, ok: ok === true, detail })
   if (!rec) return [{ check: 'collab.ran', ok: false, detail: { why: 'the collaboration hook did not run for this turn (flag off or the hook is not attached)' } }]
+  // after a restart (c29): what the new bridge holds about the room, read against what the old one held
+  if (expect.roomKept === true || expect.receiptsClosed === true) {
+    const r = rec.restart ?? null
+    if (expect.roomKept === true) {
+      const same = !!r?.before?.route && JSON.stringify(r.before.route) === JSON.stringify(r.after?.route) && JSON.stringify(r.before.row) === JSON.stringify(r.after?.row) && r.before.account !== null && r.before.account === r.after?.account
+      put('roomKept', same, { route: r ? [r.before?.route ?? null, r.after?.route ?? null] : null, row: r ? [r.before?.row ?? null, r.after?.row ?? null] : null, accountKept: r ? r.before?.account === r.after?.account && r.before?.account !== null : null })
+    }
+    if (expect.receiptsClosed === true) {
+      const a = r?.after
+      // nothing carried over: no receipt of what was attached or sent, no approval question assumed still open (an unread question is asked again, never taken as answered); and the old one DID have its question open
+      put('receiptsClosed', r?.before?.awaiting === true && !!a && a.memoryReceipts === 0 && a.contextReceipts === 0 && a.awaiting === false, { before: r?.before ? { awaiting: r.before.awaiting } : null, after: a ? { memoryReceipts: a.memoryReceipts, contextReceipts: a.contextReceipts, awaiting: a.awaiting } : null })
+    }
+  }
+  if (expect.continuity === true) {
+    const c = rec.continuity ?? null
+    put('continuity', !!c && c.sameThread === true && c.resumed === true && c.sentOnce === true && c.asRequester === rec.from, { sameThread: c?.sameThread ?? null, resumes: c?.resumes ?? null, userMessages: c?.userMessages ?? null, asRequester: c?.asRequester ?? null })
+  }
   if (expect.requester !== undefined) {
     const named = rec.audience?.requester ?? null, want = expect.requester === 'invited' ? COLLAB_PEOPLE.invited.member : null
     // the registry says who asked AND every time the conversation flow asked for the audience of this turn's run it got the same answer
@@ -204,14 +227,24 @@ export const COLLAB_DECISION_FLAGS = Object.freeze(['EGDESK_WORK_PLACEMENT'])
  */
 export function createCollabTurnHook(conversation, { world = createCollabWorld() } = {}) {
   const active = FLAG => FLAG?.EGDESK_PRESENCE === 'on'
-  let chat = null, store = null, L = COLLAB_LIMITS, ready = false, bodies = [], placement = null, placementHttp = null
+  let chat = null, store = null, requestLog = [], L = COLLAB_LIMITS, ready = false, bodies = [], placement = null, placementHttp = null
+  let restartedFrom = null // after a restart: the engine thread the room had before (the first message turn must continue on it)
+  // what the bridge holds about the room right now: its route and saved row, the account of that route, what the new runtime has in memory
+  const roomFacts = ({ clientThreadId, conversationId }) => {
+    let route = null, row = null, account = null
+    try { route = chat.requestEngineRoute({ clientThreadId, conversationId }, { verifyAccount: false }) } catch { route = null }
+    try { const r = store.getConversation(clientThreadId); row = r ? { clientThreadId: r.clientThreadId ?? clientThreadId, conversationId: r.conversationId ?? null, engineId: r.engineId ?? null, engineProfileId: r.engineProfileId ?? null } : null } catch { row = null }
+    try { account = route ? (chat.engineOwnerHash(route.engineId, route.engineProfileId) ?? null) : null } catch { account = null }
+    let awaiting = null; try { awaiting = chat.gateHookBroker?.()?.awaitingReply?.(conversationId) === true } catch { awaiting = null }
+    return { route, row, account, awaiting, memoryReceipts: chat.turnMemoryDelivered?.size ?? null, contextReceipts: chat.contextDelivered?.size ?? null }
+  }
   let last = { from: 'owner', set: null, clientThreadId: null, mark: 0, opted: false }
   return {
     flowOptions: ({ FLAG }) => (active(FLAG) ? { presence: world.mirror, audience: ({ run }) => world.audience({ run }), attentionPosted: ({ key, provider }) => { if (provider === 'work_placement') world.placement?.acknowledgePointer(key) } } : {}),
     attach(deps) {
       const { client, FLAG, calibrationLog = null, limits = {} } = deps
       if (!active(FLAG)) return
-      chat = deps.chat; store = deps.store ?? null; L = { ...COLLAB_LIMITS, ...(limits?.collab ?? {}) }
+      chat = deps.chat; store = deps.store ?? null; requestLog = deps.requestLog ?? []; L = { ...COLLAB_LIMITS, ...(limits?.collab ?? {}) }
       world.start()
       bodies = [] // the Decision requests of the placement runtime (bounded copies)
       // the placement runtime of the bridge (createWorkPlacement), over the check's own Decision client; every request it makes is recorded on the way through
@@ -233,6 +266,21 @@ export function createCollabTurnHook(conversation, { world = createCollabWorld()
       const opted = chat.allowIntermediateMessages?.(clientThreadId) === true
       last = { from, set: await world.tell(from, { clientThreadId, conversationId }), clientThreadId, mark: world.flowAudience.length, opted }
     },
+    // c29: the old bridge is about to go: what it holds about the room (the new one reads its own against this)
+    beforeRestart({ state }) {
+      if (!ready) return undefined
+      const { clientThreadId, conversationId = null } = state()
+      return { clientThreadId, conversationId, facts: roomFacts({ clientThreadId, conversationId }), requester: world.requesters.audience({ run: { clientThreadId, conversationId } })?.requester ?? null }
+    },
+    // c29: the new bridge is up and the room resumed: what it holds now. The requester registry and the presence snapshot are memory of the old process: empty until the window tells again.
+    afterRestart({ carried, expect, state }) {
+      if (!ready) return null
+      const { clientThreadId, conversationId = null } = state()
+      restartedFrom = carried?.conversationId ?? null
+      const after = roomFacts({ clientThreadId, conversationId })
+      const rec = { restart: { before: carried?.facts ?? null, after, requesterBefore: carried?.requester ?? null, requesterAfter: world.requesters.audience({ run: { clientThreadId, conversationId } })?.requester ?? null } }
+      return { record: rec, expectations: expect?.collab === undefined ? [] : checkCollabExpect(expect.collab, rec) }
+    },
     async afterTurn({ run, say, answer, turnIndex = 0, expect: turnExpect }) {
       const expect = turnExpect?.collab
       if (!ready || expect === undefined) return null
@@ -243,6 +291,15 @@ export function createCollabTurnHook(conversation, { world = createCollabWorld()
         rec.audience = audience ? { requester: audience.requester, owner: audience.owner } : { requester: null, owner: null }
         rec.flowAudience = world.flowAudience.slice(last.mark).filter(a => a.key === keys.clientThreadId).map(a => ({ requester: a.requester, owner: a.owner })).slice(-8)
         const key = keys.clientThreadId
+        // c29, the first message turn after a restart: the room CONTINUES (the same engine thread, resumed on the new engine) and the message was sent once, as the same requester
+        if (expect.continuity === true) {
+          let row = null, users = null
+          try { row = store.getConversation(key) } catch { row = null }
+          try { users = store.listMessages(key, { limit: 500 }).messages.filter(m => m.role === 'user' && String(m.text ?? '') === say).length } catch { users = null }
+          const resumes = requestLog.filter(r => r.method === 'thread/resume' && !r.error).length
+          rec.continuity = { sameThread: !!restartedFrom && row?.conversationId === restartedFrom && (run?.conversationId ?? restartedFrom) === restartedFrom, resumes, resumed: resumes >= 1, userMessages: users, sentOnce: users === 1,
+            asRequester: rec.audience.requester === COLLAB_PEOPLE.invited.member ? 'invited' : 'owner' }
+        }
         // the answering model's own sentences of this turn's answer (the posted answer without the draft check's appended copy), as the placement judge is given them
         try { const live = chat.runFor?.({ conversationId: run?.conversationId, runId: run?.runId, answerId: run?.answerId }); rec.ownAnswer = live ? clip(chat.runOwnAnswerText(live), 1200) : null } catch { rec.ownAnswer = null }
         // the attention scene costs Decision calls and may post a message: only for a turn whose expectation asks for it
