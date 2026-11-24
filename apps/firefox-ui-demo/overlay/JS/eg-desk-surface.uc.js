@@ -15111,7 +15111,6 @@
             });
             input.addEventListener('input', ev => {
               composerViewport.cancel(input);
-              composerWarmup.note(input.value !== '');
               blockedSend.textContent = '';
               if (boardDestination && ev.isComposing) beginBoardComposition();
               if (!boardDestination || !boardInputState.composing.has(input)) codexBridge.setDraft(input.value, activeThread.id);
@@ -31354,6 +31353,12 @@
     mode: () => readSurfacePref(DecisionWarmup.DECISION_WARMUP_PREF),
     post: (path, body) => deskStoreRequest('POST', path, body, { timeoutMs: DecisionWarmup.DECISION_WARMUP_LIMITS.waitMs }),
   });
+  // One delegated listener (not inside the composer's own input handler): typing in any chat composer notes the activity. The pref is read inside
+  // note(), so with the pref off this does nothing but compare a test id.
+  document.addEventListener('input', ev => {
+    const target = ev.target;
+    if (target?.dataset?.testid === 'chat-composer') composerWarmup.note(typeof target.value === 'string' && target.value !== '');
+  }, true);
 
   // Each /v1/state read (null for an older bridge). A store that just became
   // ready receives the Desk as it is now (after the one-time import, never instead of it).
