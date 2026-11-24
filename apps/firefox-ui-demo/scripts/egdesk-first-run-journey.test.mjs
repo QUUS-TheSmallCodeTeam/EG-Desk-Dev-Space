@@ -195,7 +195,7 @@ function createFixture(t, extraPhases = [], getDecisionStatus = decisionStatus, 
   }
   // --- Real bridge decision layer over a real temp settings dir (key file, mode file); restartable. ---
   const settingsDir = join(dir, 'settings')
-  const providerLog = [], requests = []
+  const providerLog = [], requests = [], ontology = { graph: { snapshots: [], nodes: [] } }
   let boots = 0, chat, routes, decisionCreds, bridgeSettings, decisionClient, boardPres, generation = 0
   const providerFetch = async (url, init) => {
     const body = JSON.parse(init.body)
@@ -207,6 +207,15 @@ function createFixture(t, extraPhases = [], getDecisionStatus = decisionStatus, 
       if (providerState.verify === 'invalid') return { ok: false, status: 401, text: async () => JSON.stringify({ error: { code: 'invalid_api_key' } }) }
       if (providerState.verify === 'no_credit') return { ok: false, status: 429, text: async () => JSON.stringify({ error: { code: 'insufficient_quota', type: 'insufficient_quota' } }) }
       return { ok: true, status: 200, text: async () => JSON.stringify({ model: DECISION_MODEL, answers: [{ name: 'key_check', type: 'predicate', probability: 0.99 }] }) }
+    }
+    if (body.questions.some(q => q.name === 'answer_type')) {
+      providerLog[providerLog.length - 1].kind = 'turn_context'
+      counts[phase].decisionContext++
+      if (providerState.context === '429') return { ok: false, status: 429, text: async () => JSON.stringify({ error: { code: 'insufficient_quota', type: 'insufficient_quota' } }) }
+      return { ok: true, status: 200, text: async () => JSON.stringify({ answers: body.questions.map(q => q.type === 'predicate'
+        ? { type: 'predicate', name: q.name, probability: 0.93 }
+        : { type: 'choice', name: q.name, choice: q.choices[0].value, confidence: 0.9,
+          probabilities: q.choices.map((c, k) => ({ value: c.value, probability: k === 0 ? 0.9 : 0.1 / Math.max(1, q.choices.length - 1) })) }) }) }
     }
     if (kind !== 'chat_choice') return fail(`unexpected decision request kind ${kind}`)
     if (providerState.choice === '429') return { ok: false, status: 429, text: async () => JSON.stringify({ error: { code: 'insufficient_quota', type: 'insufficient_quota' } }) }
@@ -242,8 +251,8 @@ function createFixture(t, extraPhases = [], getDecisionStatus = decisionStatus, 
         collect: async ({ body, context, memoryEvidenceFor, speech }) => {
           counts[phase].contextCollection++
           const collected = await collectDecisionCandidates({ body, memoryEvidenceFor, speech, clientThreadId: context.clientThreadId,
-            excludeMessageId: context.localMessageId, chatStore: store })
-          if (Object.values(collected.sources).some(count => count !== 0)) fail('expected no authorized pre-turn context candidates')
+            excludeMessageId: context.localMessageId, chatStore: store, ontologyStore: { readGraph: async () => ontology.graph } })
+          if (['selected', 'messages', 'board'].some(name => collected.sources[name] !== 0)) fail('expected no selected/speech/board candidates')
           return collected.candidates
         } },
     })
@@ -251,7 +260,7 @@ function createFixture(t, extraPhases = [], getDecisionStatus = decisionStatus, 
     const auth = createChatEngineAuth({ chat, refreshCodexAccount, getCodexAuth: () => codexAuth })
     routes = [createChatHttpHandler(chat, auth), decisionHandler]
   }
-  const providerState = { verify: 'ok', choice: 'ok' }
+  const providerState = { verify: 'ok', choice: 'ok', context: 'ok' }
   bootBridge()
   async function request(method, path, body) {
     requests.push({ phase, boot: boots, method, path })
@@ -293,7 +302,7 @@ function createFixture(t, extraPhases = [], getDecisionStatus = decisionStatus, 
     assert.ok(res.body.conversationId && res.body.runId, JSON.stringify(res.body))
     return res.body
   }
-  return { store, agent, custom, direct, send, complete, post, request, refreshCodexAccount, nativeCalls, providerLog, requests, providerState, JOURNEY_KEY,
+  return { store, agent, custom, direct, send, complete, post, request, refreshCodexAccount, nativeCalls, providerLog, requests, providerState, ontology, JOURNEY_KEY,
     restartBridge: () => { chat?.close?.(); bootBridge() }, bridgeState: () => ({ boots, mode: bridgeSettings.decisionContext.mode, configured: decisionCreds.getApiKey() !== null, savedAtSet: decisionCreds.savedAt() !== null }),
     authStatus: () => codexAuth, profileRows: () => profiles.list().profiles,
     snapshot: cid => chat.snapshot(cid),
@@ -633,11 +642,10 @@ function mountJourneyUi(x, t) {
     const res = await f.request(init.method, u.pathname, init.body === undefined ? undefined : JSON.parse(init.body))
     return { ok: res.status >= 200 && res.status < 300, status: res.status, json: async () => res.body }
   }
-  const ui = { current: null }
   const document = { getElementById: id => id === 'egd-settings-card-1' ? { matches: () => false } : assert.fail('unexpected entity ' + id) }
   codex.activeThreadId = room.id
-  const send = mountFixtureHudSend(f, env, room, { sync: () => ui.current.sync(), reset: () => ui.current.reset() }, input, false, {
-    document, fetch: bridgeFetch, emit: () => ui.current?.sync(), resumedNativeBindings: resumed, InputContext,
+  const send = mountFixtureHudSend(f, env, room, { sync() {}, reset() {} }, input, false, {
+    document, fetch: bridgeFetch, emit() {}, resumedNativeBindings: resumed, InputContext,
     refreshConversation: async (thread, resume) => {
       assert.equal(resume, true)
       const response = await f.post('/chat/resume', { conversationId: thread.conversationId, clientThreadId: ChatState.clientThreadBinding(thread), engineId: 'codex' })
@@ -645,33 +653,32 @@ function mountJourneyUi(x, t) {
       return response.status === 200 ? response.body : null
     },
   })
-  const spawnSettingsCard = () => {
+  // The user opens Settings from the Desk menu (account tab). The card shell is a fixture; the section is product code.
+  const openSettings = () => {
     if (settingsCard.current) settingsCard.current._settingsShowTab('account')
     else settingsCard.current = mountSettingsCard(state, (p, i) => send.bridge.decisionRequest(p, i))
     state.activeEntityId = settingsCard.current.id
-    state.canvasSelectionRevision = (state.canvasSelectionRevision || 0) + 1
     return settingsCard.current
   }
-  const openChatChoiceSettings = runInNewContext(surfaceSlice('  function openChatChoiceSettings(reason) {', '  function mountChatChoiceComposer(') + '\nopenChatChoiceSettings',
-    { spawnSettingsCard, revealOpenCanvasCard() {}, state, boardNotice: text => notices.push(text) }, { filename: 'eg-desk-surface.uc.js (openChatChoiceSettings)' })
-  const readScope = () => send.bridge.chatChoiceScope(codex.activeThreadId, input.value)
-  const choiceResponses = [], requestIds = []
-  const { mountChatChoiceComposer, readChatChoiceMode, postChatChoice } = loadComposer(async (path, { method, signal, body }) => {
-    const res = path === '/decision/status' ? await f.request('GET', path) : await f.post(path, JSON.parse(body))
-    if (path === '/chat/choice') choiceResponses.push(res)
-    if (res.status >= 400) throw Object.assign(new Error('http ' + res.status), { status: res.status })
-    return res.body
-  })
-  ui.current = mountChatChoiceComposer({ el: element, makeController: () => new AbortController(),
-    makeRequestId: () => { const id = `choice-${Date.now()}-${randomUUID()}`; requestIds.push(id); return id },
-    readMode: readChatChoiceMode, postChoice: postChatChoice, openSettings: openChatChoiceSettings })
-  t.after(() => ui.current.dispose())
-  let draftWrites = 0
-  ui.current.attach({ input, readScope, setDraft: text => { draftWrites++; send.bridge.setDraft(text, room.id) } })
+  const closeSettings = () => { settingsCard.current = null }
   const typeDraft = text => { input.value = text; send.bridge.setDraft(text, room.id) }
-  return { ui: ui.current, input, send, readScope, typeDraft, notices, resumed, resumeCalls, settingsCard, spawnSettingsCard, choiceResponses, requestIds,
-    fields: () => findAll(ui.current.panel, 'option'), button: id => findAll(ui.current.panel, id)[0],
-    panelText: () => textOf(ui.current.panel.children), get draftWrites() { return draftWrites }, room }
+  // Ordinary [보내기]: the real HUD send button.
+  async function sendOrdinary(phase, text) {
+    f.phase = phase
+    typeDraft(text)
+    send.syncSendButton()
+    const enabled = !send.sendButton.disabled
+    const n = send.outcomes.length
+    if (enabled) click(send.sendButton)
+    const outcome = enabled ? await eventually(() => send.outcomes[n], phase + ': send did not settle ' + JSON.stringify(room.sendError)) : null
+    return { enabled, outcome, post: send.posts[n] }
+  }
+  // The subscription reply finishes (mock) and the run is merged into the DM as the product's run sync does.
+  async function finishTurn(accepted) {
+    await f.complete(accepted, PRIVATE.subscriptionReply)
+    ChatState.mergeChatSnapshot(env.protocol, f.snapshot(accepted.conversationId), ChatState.clientThreadBinding(codex.threads[0]))
+  }
+  return { input, send, typeDraft, notices, resumed, resumeCalls, settingsCard, openSettings, closeSettings, sendOrdinary, finishTurn, room }
 }
 
 const countBy = (rows, key) => rows.reduce((o, r) => ({ ...o, [r[key]]: (o[r[key]] || 0) + 1 }), {})
@@ -679,259 +686,180 @@ const secretFree = (value, secrets, label) => {
   const wire = typeof value === 'string' ? value : JSON.stringify(value)
   for (const s of secrets) assert.ok(!wire.includes(s), label + ' must not contain ' + s.slice(0, 6) + '…')
 }
-
-test('L1c5 first-run journey: restored DM -> key-missing guidance -> settings -> paste key -> verify -> mode on -> same DM recommendation -> reason -> send -> bridge restart -> second recommendation', async t => {
-  const f = createFixture(t, ['restore', 'settings', 'restart'], undefined, { resolveProjectWorkspace: async () => null })
-  await f.refreshCodexAccount()
-  const seeded = await f.send(f.direct('qa-dm-restored'), 'seed-restored', PRIVATE.primaryHistory)
-  await f.complete(seeded, PRIVATE.code)
-  const env = createRoomProjection(f), { codex, state } = env
-  const live = f.authStatus(), signedOut = signedOutOf(live)
-  codex.authStatus = signedOut; codex.codexAccountKey = null
-  codex.threads.push(restoreRoom(f, seeded, 'qa-dm-restored', signedOut))
-  const bind = () => env.projectDefaults.set(codex.threads[0].id, { binding: ChatState.clientThreadBinding(codex.threads[0]), scope: { current: () => true }, status: 'ready', value: { status: 'none' } })
-  bind()
-  const heldInfo = { held: ChatState.nativeBindingHeld(codex.threads[0]) }
-  codex.authStatus = live; codex.codexAccountKey = ChatState.codexAccountKey(live)
-  codex.threads = codex.threads.map(row => ChatState.reconcileNativeThread(row, live)); bind()
-  const x = { f, env, codex, state }
-  const m = mountJourneyUi(x, t)
-  const trace = [], stuck = []
-  let focusMark = focusLog.length
-  const snapNow = (step, extra = {}) => {
-    const entry = { step, focus: focusLog.slice(focusMark).join('>') || '-', triggerHidden: m.ui.trigger.hidden, panelHidden: m.ui.panel.hidden,
-      panel: m.panelText().slice(0, 160), options: m.fields().map(n => n.value), composer: m.input.value.slice(0, 40),
-      provider: countBy(f.providerLog, 'kind'), bridge: { ...countBy(f.requests.filter(r => !r.path.startsWith('/chat/send')), 'path'), boots: f.bridgeState().boots },
-      bridgeState: f.bridgeState(), ...extra }
-    focusMark = focusLog.length
-    trace.push(entry); return entry
-  }
-  const QUESTION1 = '회의 안내를 어디에 둘까요?', OPTIONS1 = ['상단 알림', '일정 공지']
-  const KEY = f.JOURNEY_KEY
-  const room = () => codex.threads[0]
-
-  // 0. Restored DM: owner verified, resume 200.
-  assert.equal(heldInfo.held, true, 'restored DM starts held')
-  assert.equal(room().bindingState, 'verified')
-  const resumed = await f.post('/chat/resume', { conversationId: room().conversationId, clientThreadId: ChatState.clientThreadBinding(room()), engineId: 'codex' })
-  assert.equal(resumed.status, 200)
-  m.typeDraft(QUESTION1); m.ui.sync()
-  snapNow('0 restored+verified+resumed, question typed')
-  assert.equal(m.ui.trigger.hidden, false)
-
-  // 1. [보기 추천] -> options -> review while the key is missing.
-  click(m.ui.trigger)
-  m.fields().forEach((field, i) => { field.value = OPTIONS1[i]; field.props.oninput() })
-  f.phase = 'settings'
-  click(m.button('review'))
-  await eventually(() => m.button('settings'), 'setup guidance never appeared')
-  const guidance1 = snapNow('1 review with no key')
-  assert.match(guidance1.panel, /저장한 API 키가 없습니다/)
-  assert.equal(f.providerLog.length, 0, 'review is local only')
-
-  // 2. [계정 설정 열기]: account screen opens (first render: status still unknown).
-  click(m.button('settings'))
-  const card = m.settingsCard.current
-  assert.ok(card, 'settings card opened')
-  const open1 = snapNow('2 settings opened', { sectionState: card.section.props.data.state, keyInputDisabled: queryAll(card.section, 'input[type="password"][data-testid="settings-decision-key"]')[0].disabled })
-  if (!focusLog.slice(-3).includes('settings-decision-key')) stuck.push('S1: opening settings from the key-missing guidance does not focus the key field on first open (status not loaded yet, input disabled)')
-  await eventually(() => card.section.props.data.state === 'empty', 'status never loaded')
-  const loaded = snapNow('3 status loaded', { keyLine: textOf(queryAll(card.section, 'span')), result: null })
-  assert.equal(queryAll(card.section, 'input[type="password"][data-testid="settings-decision-key"]')[0].disabled, false)
-  assert.equal(card.section.props.data.mode, 'off')
-
-  // 3. Paste the key and [확인 후 저장] (mock verifier).
-  const keyInput = () => queryAll(card.section, 'input[type="password"][data-testid="settings-decision-key"]')[0]
-  keyInput().value = KEY
-  click(queryAll(card.section, 'button[data-testid="settings-decision-save"]')[0])
-  await eventually(() => queryAll(card.section, '[data-testid="settings-decision-result"]')[0], 'no verification result shown')
-  const saved = snapNow('4 key saved', { section: textOf(card.section).slice(0, 400), resultText: textOf(queryAll(card.section, '[data-testid="settings-decision-result"]')[0]) })
-  assert.deepEqual(f.providerLog.map(r => r.kind), ['key_check'], 'exactly one verification request reached the provider')
-  assert.equal(f.providerLog[0].authOk, true)
-  assert.equal(f.bridgeState().configured, true)
-  assert.equal(keyInput().value, '', 'key field cleared')
-  secretFree(saved, [KEY], 'visible account screen after save')
-  secretFree(f.requests, [KEY], 'request log')
-  assert.equal(card.decision.status.mode, 'off', 'mode is still off after the key is saved')
-  assert.match(saved.resultText, /모드가 ‘끔’이라 아직 쓰이지 않습니다.*‘사용’을 고르면/, 'the saved-key result points to the mode switch while the mode is still off')
-
-  // 4. Re-query: close Settings, reopen -> fresh GET shows configured + hint, never the key.
-  m.settingsCard.current = null
-  const reopened = m.spawnSettingsCard()
-  await eventually(() => reopened.section.props.data.state === 'configured', 'reopened screen never showed configured')
-  const requery = snapNow('5 settings reopened (re-query)', { section: textOf(reopened.section).slice(0, 300) })
-  assert.match(textOf(queryAll(reopened.section, '[data-testid="settings-decision-hint"]')[0]), /저장된 키 …0001/)
-  secretFree(requery, [KEY], 're-queried account screen')
-  secretFree(f.requests, [KEY], 'request log after re-query')
-
-  // 5. Back in the same DM: typed question/options survive; review now says the mode is off.
-  m.ui.sync()
-  assert.equal(m.ui.trigger.hidden, false, '[보기 추천] offered again')
-  assert.equal(codex.threadDrafts[room().id], QUESTION1)
-  click(m.ui.trigger)
-  snapNow('6 back in DM, reopened panel')
-  assert.deepEqual(m.fields().map(n => n.value), OPTIONS1, 'options survived the settings detour')
-  click(m.button('review'))
-  await eventually(() => m.button('settings'), 'mode guidance never appeared')
-  const modeGuidance = snapNow('7 review with key saved but mode off')
-  assert.match(modeGuidance.panel, /꺼져 있습니다/)
-  stuck.push('S3: after saving the key the user must go back to the DM, review again, and only then learns the mode is off (second trip to Settings); typed options survive both trips')
-  click(m.button('settings'))
-  snapNow('8 [계정 설정 열기] for the mode (focus target)', { sectionMode: m.settingsCard.current.section.props.data.mode })
-  assert.ok(focusLog.slice(focusMark - 1).length >= 0)
-
-  // 6. Switch mode to 사용 in the account screen.
-  const settings2 = m.settingsCard.current
-  await eventually(() => settings2.section.props.data.state === 'configured', 'status')
-  const onButton = () => queryAll(settings2.section, 'button[data-testid="settings-decision-mode"][data-mode="on"]')[0]
-  assert.equal(onButton().disabled, false)
-  click(onButton())
-  await eventually(() => settings2.decision.status?.mode === 'on' && !settings2.decision.busy, 'mode never saved')
-  snapNow('9 mode on', { modeNote: textOf(queryAll(settings2.section, '[data-testid="settings-decision-mode-note"]')[0]), bridge: f.bridgeState() })
-  assert.equal(f.bridgeState().mode, 'on')
-  assert.deepEqual(f.providerLog.map(r => r.kind), ['key_check'], 'saving the mode sends nothing to the provider')
-
-  // 7. Back to the SAME DM: options still there -> review -> confirm -> recommendation.
-  m.ui.sync()
-  assert.equal(m.ui.trigger.hidden, false)
-  click(m.ui.trigger)
-  assert.deepEqual(m.fields().map(n => n.value), OPTIONS1, 'options survived two settings detours')
-  assert.equal(m.input.value, QUESTION1)
-  f.phase = 'choice1'
-  click(m.button('review'))
-  const confirm = await eventually(() => m.button('confirm'), 'confirm never offered after mode on')
-  snapNow('10 review ok, confirm offered')
-  assert.deepEqual(f.counts.choice1, noWork(), 'review is local')
-  click(confirm)
-  const result = await eventually(() => m.button('result'), 'no recommendation')
-  snapNow('11 recommendation')
-  assert.equal(result.textContent, 'EG-Desk 추천: 일정 공지 · 실행하지 않음')
-  assert.deepEqual(f.providerLog.map(r => r.kind), ['key_check', 'chat_choice'])
-  assert.ok(f.providerLog.every(r => r.authOk && r.endpoint), 'the saved key and the provider endpoint, nothing else')
-
-  // 8. [이유 묻기] -> real HUD [보내기].
-  f.phase = 'draft'
-  click(m.button('explain'))
-  const draft = await eventually(() => m.draftWrites === 1 && m.input.value, 'no reason draft')
-  snapNow('12 reason draft in composer')
-  m.send.syncSendButton()
-  assert.equal(m.send.sendButton.disabled, false)
-  f.phase = 'explanation'
-  click(m.send.sendButton)
-  const outcome = await eventually(() => m.send.outcomes[0], 'send did not settle')
-  assert.deepEqual([outcome.result.accepted, m.send.posts[0].status], [true, 202], JSON.stringify(m.send.posts[0]?.body))
-  assert.equal(f.startTurns.at(-1).params.threadId, seeded.conversationId)
-  assert.equal(f.counts.draft.subscription, 0)
-  snapNow('13 ordinary send accepted on the original conversation', { subscriptionTurns: f.startTurns.length })
-  await f.complete(m.send.posts[0].body, PRIVATE.subscriptionReply)
-  // Reproject the finished run into the DM, as the product's run sync does.
-  for (const run of ChatState.mergeChatSnapshot(env.protocol, f.snapshot(seeded.conversationId), ChatState.clientThreadBinding(room()))) void run
-
-  // 9. The bridge restarts: key and mode come back from disk without re-entry.
-  f.phase = 'restart'
-  const before = f.bridgeState()
-  f.restartBridge()
-  m.resumed.clear()
-  const after = f.bridgeState()
-  snapNow('14 bridge restarted', { before, after })
-  assert.deepEqual([after.configured, after.mode, after.savedAtSet, after.boots], [true, 'on', true, 2])
-  const status2 = await f.request('GET', '/decision/status')
-  assert.equal(status2.body.configured, true); assert.equal(status2.body.mode, 'on')
-  secretFree(status2.body, [KEY], 'status after restart')
-
-  // 10. Second recommendation in the same DM; the saved key is reused (no key_check again).
-  const QUESTION2 = '다음 회의는 언제 열까요?', OPTIONS2 = ['오전', '오후']
-  m.typeDraft(QUESTION2); m.ui.sync()
-  if (m.ui.trigger.hidden) {
-    stuck.push('S4: after the first send the DM could not offer [보기 추천] again until the run was reprojected/resumed (harness reprojection incomplete or product gap) — see trace')
-  }
-  assert.equal(m.ui.trigger.hidden, false, 'second recommendation is offered in the same DM')
-  click(m.ui.trigger)
-  m.fields().forEach((field, i) => { field.value = OPTIONS2[i]; field.props.oninput() })
-  f.phase = 'choice2'
-  click(m.button('review'))
-  const confirm2 = await eventually(() => m.button('confirm'), 'confirm never offered after restart')
-  click(confirm2)
-  const result2 = await eventually(() => m.button('result'), 'no second recommendation')
-  snapNow('15 second recommendation after restart')
-  assert.equal(result2.textContent, 'EG-Desk 추천: 오전 · 실행하지 않음')
-  assert.deepEqual(countBy(f.providerLog, 'kind'), { key_check: 1, chat_choice: 2 })
-  assert.deepEqual(f.providerLog.map(r => r.boot), [1, 1, 2], 'the second recommendation came from the restarted bridge')
-  assert.ok(f.providerLog.every(r => r.authOk))
-  assert.deepEqual(f.unexpected, [])
-  secretFree(trace, [KEY], 'whole visible trace')
-  secretFree(f.requests, [KEY], 'every bridge request record')
-  t.diagnostic('TRACE ' + JSON.stringify(trace))
-  t.diagnostic('STUCK ' + JSON.stringify(stuck))
-})
-
-async function restoredToSettings(t) {
-  const f = createFixture(t, ['restore', 'settings', 'restart'], undefined, { resolveProjectWorkspace: async () => null })
-  await f.refreshCodexAccount()
-  const seeded = await f.send(f.direct('qa-dm-restored'), 'seed-restored', PRIVATE.primaryHistory)
-  await f.complete(seeded, PRIVATE.code)
-  const env = createRoomProjection(f), { codex, state } = env
-  const live = f.authStatus()
-  codex.authStatus = signedOutOf(live); codex.codexAccountKey = null
-  codex.threads.push(restoreRoom(f, seeded, 'qa-dm-restored', codex.authStatus))
-  codex.authStatus = live; codex.codexAccountKey = ChatState.codexAccountKey(live)
-  codex.threads = codex.threads.map(row => ChatState.reconcileNativeThread(row, live))
-  env.projectDefaults.set(codex.threads[0].id, { binding: ChatState.clientThreadBinding(codex.threads[0]), scope: { current: () => true }, status: 'ready', value: { status: 'none' } })
-  const m = mountJourneyUi({ f, env, codex, state }, t)
-  m.typeDraft('회의 안내를 어디에 둘까요?'); m.ui.sync()
-  click(m.ui.trigger)
-  m.fields().forEach((field, i) => { field.value = ['상단 알림', '일정 공지'][i]; field.props.oninput() })
-  f.phase = 'settings'
-  click(m.button('review'))
-  await eventually(() => m.button('settings'), 'guidance')
-  click(m.button('settings'))
-  const card = m.settingsCard.current
-  await eventually(() => card.section.props.data.state === 'empty', 'status')
-  return { f, m, card, seeded, codex }
-}
 const keyInputOf = card => queryAll(card.section, 'input[type="password"][data-testid="settings-decision-key"]')[0]
+const modeButton = (card, mode) => queryAll(card.section, `button[data-testid="settings-decision-mode"][data-mode="${mode}"]`)[0]
 const resultOf = card => textOf(queryAll(card.section, '[data-testid="settings-decision-result"]')[0])
 const pasteAndSave = async (card, value) => {
   keyInputOf(card).value = value
   click(queryAll(card.section, 'button[data-testid="settings-decision-save"]')[0])
-  await eventually(() => queryAll(card.section, '[data-testid="settings-decision-result"]')[0], 'no result')
+  await eventually(() => queryAll(card.section, '[data-testid="settings-decision-result"]')[0], 'no verification result shown')
+}
+const turnContextOf = (f, accepted) => {
+  const run = f.snapshot(accepted.conversationId).runs.find(r => r.runId === accepted.runId)
+  return { activity: (run?.activities || []).find(a => a.kind === 'decisionContext') || null, receipt: !!run?.decisionContextReceipt }
 }
 
-test('L1c5 variant: wrong key is rejected, nothing saved, field cleared, DM unchanged', async t => {
-  const { f, m, card } = await restoredToSettings(t)
-  f.providerState.verify = 'invalid'
-  await pasteAndSave(card, f.JOURNEY_KEY)
-  t.diagnostic('REJECT ' + JSON.stringify({ text: resultOf(card), bridge: f.bridgeState(), fieldAfter: keyInputOf(card).value }))
-  assert.match(resultOf(card), /키를 저장하지 않았습니다/)
-  assert.equal(f.bridgeState().configured, false)
-  assert.equal(keyInputOf(card).value, '')
-  m.ui.sync()
-  assert.equal(m.ui.trigger.hidden, false)
-  click(m.ui.trigger)
-  assert.deepEqual(m.fields().map(n => n.value), ['상단 알림', '일정 공지'], 'the typed options are still there after a rejected key')
+async function restoredDm(t, { candidates = true } = {}) {
+  const f = createFixture(t, ['restore', 'settings', 'preKey', 'modeOn', 'restart', 'afterRestart'], undefined, { resolveProjectWorkspace: async () => null })
+  if (candidates) f.ontology.graph = { snapshots: [], nodes: [{ id: 'n1', label: '회의 안내 장소', summary: '회의 안내는 상단 알림과 일정 공지 중 어디에 둘지 정리한 문서', timeSlice: 'present', body: 'synthetic body not sent unless selected' }] }
+  await f.refreshCodexAccount()
+  const seeded = await f.send(f.direct('qa-dm-restored'), 'seed-restored', PRIVATE.primaryHistory)
+  await f.complete(seeded, PRIVATE.code)
+  const env = createRoomProjection(f), { codex, state } = env
+  const live = f.authStatus(), out = signedOutOf(live)
+  codex.authStatus = out; codex.codexAccountKey = null
+  codex.threads.push(restoreRoom(f, seeded, 'qa-dm-restored', out))
+  const held = ChatState.nativeBindingHeld(codex.threads[0])
+  const bind = () => env.projectDefaults.set(codex.threads[0].id, { binding: ChatState.clientThreadBinding(codex.threads[0]), scope: { current: () => true }, status: 'ready', value: { status: 'none' } })
+  bind()
+  codex.authStatus = live; codex.codexAccountKey = ChatState.codexAccountKey(live)
+  codex.threads = codex.threads.map(row => ChatState.reconcileNativeThread(row, live)); bind()
+  const m = mountJourneyUi({ f, env, codex, state }, t)
+  const resumed = await f.post('/chat/resume', { conversationId: codex.threads[0].conversationId, clientThreadId: ChatState.clientThreadBinding(codex.threads[0]), engineId: 'codex' })
+  return { f, m, env, codex, seeded, held, resumeStatus: resumed.status }
+}
+
+test('L1c5 first-run journey (ordinary chat): restored DM -> account screen -> key -> verify -> re-query -> mode on -> ordinary message runs turn-start Decisions -> bridge restart -> again', async t => {
+  const { f, m, env, codex, seeded, held, resumeStatus } = await restoredDm(t)
+  const KEY = f.JOURNEY_KEY
+  const trace = [], stuck = []
+  const snapNow = (step, extra = {}) => { trace.push({ step, provider: countBy(f.providerLog, 'kind'), bridgeState: f.bridgeState(),
+    turns: f.startTurns.length, decisionHttp: countBy(f.requests.filter(r => r.path.startsWith('/decision/')), 'path'), ...extra }); return trace.at(-1) }
+  const ctxParam = () => f.startTurns.at(-1).params.additionalContext?.egdesk_decision_context
+
+  // 0. The restored DM: held until the owner is verified, then verified + resume 200.
+  assert.equal(held, true)
+  assert.equal(codex.threads[0].bindingState, 'verified')
+  assert.equal(resumeStatus, 200)
+  snapNow('0 restored DM verified + resumed')
+
+  // 1. Key-missing state. An ordinary message works and nothing in the DM mentions Decisions.
+  const first = await m.sendOrdinary('preKey', '회의 안내는 어디에 둘까요?')
+  assert.ok(first.enabled && first.outcome.result.accepted === true && first.post.status === 202)
+  await m.finishTurn(first.post.body)
+  assert.equal(f.providerLog.length, 0, 'no key, mode off: no provider request')
+  assert.equal(ctxParam(), undefined)
+  assert.deepEqual(m.notices, [], 'the DM shows no Decisions notice')
+  stuck.push('S1: with no key and mode 끔 the DM gives no sign that the Decisions model exists or is unconfigured; the only entry point is Settings > Account > 결정 모델')
+  snapNow('1 ordinary message, no key (mode off): turn ran, provider 0')
+
+  // 2. Settings > account > OpenAI Decisions. First render: status unknown, key field disabled until the GET returns.
+  const card = m.openSettings()
+  const firstRender = snapNow('2 settings opened', { sectionState: card.section.props.data.state, keyDisabled: keyInputOf(card).disabled })
+  await eventually(() => card.section.props.data.state === 'empty', 'status never loaded')
+  assert.equal(card.section.props.data.mode, 'off')
+  assert.match(textOf(queryAll(card.section, '[data-testid="settings-decision-hint"]')[0]), /저장된 키 없음/)
+  snapNow('3 status loaded: no key, mode 끔', { keyLine: '저장된 키 없음' })
+
+  // 3. Paste the key, [확인 후 저장] (mock verifier).
+  await pasteAndSave(card, KEY)
+  const saved = snapNow('4 key verified and saved', { resultText: resultOf(card) })
+  assert.deepEqual(f.providerLog.map(r => r.kind), ['key_check'])
+  assert.equal(f.providerLog[0].authOk, true)
+  assert.equal(keyInputOf(card).value, '', 'key field cleared')
+  assert.match(saved.resultText, /^확인됨 · 모드가 ‘끔’이라 아직 쓰이지 않습니다\. 아래에서 ‘사용’을 고르면 쓸 수 있습니다\.$/)
+  secretFree([saved, f.requests], [KEY], 'account screen and request log')
+  // An ordinary message while the key is saved but the mode is still off sends nothing to Decisions.
+  const mid = await m.sendOrdinary('preKey', '키만 저장했는데 지금은 어떻게 되나요?')
+  await m.finishTurn(mid.post.body)
+  assert.equal(f.providerLog.length, 1, 'key saved, mode off: still no turn-start request')
+  snapNow('5 ordinary message with key saved but mode 끔: provider still only the key check')
+
+  // 4. Re-query: reopen Settings; a fresh GET shows the configured key by its hint, never the key.
+  m.closeSettings()
+  const reopened = m.openSettings()
+  await eventually(() => reopened.section.props.data.state === 'configured', 'reopened screen never showed configured')
+  assert.match(textOf(queryAll(reopened.section, '[data-testid="settings-decision-hint"]')[0]), /저장된 키 …0001/)
+  secretFree(textOf(reopened.section), [KEY], 're-queried screen')
+  snapNow('6 settings reopened: 저장된 키 …0001, mode 끔', { section: textOf(reopened.section).slice(0, 200) })
+
+  // 5. Turn it on from the same section.
+  assert.equal(modeButton(reopened, 'on').disabled, false)
+  click(modeButton(reopened, 'on'))
+  await eventually(() => reopened.decision.status?.mode === 'on' && !reopened.decision.busy, 'mode never saved')
+  snapNow('7 mode 사용', { modeNote: textOf(queryAll(reopened.section, '[data-testid="settings-decision-mode-note"]')[0]).slice(0, 120) })
+  assert.equal(f.bridgeState().mode, 'on')
+  assert.equal(f.providerLog.length, 1, 'switching the mode sends nothing')
+
+  // 6. Back in the SAME DM: an ordinary message now runs the turn-start Decisions request, then the subscription turn.
+  const second = await m.sendOrdinary('modeOn', '회의 안내는 상단 알림과 일정 공지 중 어디에 둘까요?')
+  assert.ok(second.enabled && second.outcome.result.accepted === true && second.post.status === 202)
+  assert.equal(second.post.body.conversationId, seeded.conversationId, 'same conversation')
+  const firstDecisionTurn = turnContextOf(f, second.post.body)
+  snapNow('8 ordinary message, mode on', { activity: firstDecisionTurn.activity && { title: firstDecisionTurn.activity.title, detail: firstDecisionTurn.activity.detail } })
+  assert.deepEqual(countBy(f.providerLog, 'kind'), { key_check: 1, turn_context: 1 })
+  assert.ok(f.providerLog.every(r => r.authOk && r.endpoint))
+  assert.equal(f.counts.modeOn.decisionContext, 1)
+  assert.equal(f.counts.modeOn.subscription, 1, 'the subscription turn proceeds')
+  assert.equal(f.startTurns.at(-1).params.threadId, seeded.conversationId)
+  assert.ok(firstDecisionTurn.activity, 'the run records a Decisions context activity')
+  await m.finishTurn(second.post.body)
+
+  // 7. Bridge restart: key and mode come back from disk; nothing is re-entered.
+  f.phase = 'restart'
+  f.restartBridge(); m.resumed.clear()
+  assert.deepEqual([f.bridgeState().configured, f.bridgeState().mode, f.bridgeState().boots], [true, 'on', 2])
+  const status = await f.request('GET', '/decision/status')
+  secretFree(status.body, [KEY], 'status after restart')
+  snapNow('9 bridge restarted', { status: { configured: status.body.configured, mode: status.body.mode, keyHint: status.body.keyHint } })
+
+  // 8. Another ordinary message in the same DM uses Decisions again, with the saved key and no new key check.
+  const third = await m.sendOrdinary('afterRestart', '다음 회의는 언제 열까요? 안내 위치도 같이 정해 주세요.')
+  assert.ok(third.enabled && third.outcome.result.accepted === true, JSON.stringify(third.post?.body))
+  assert.equal(third.post.body.conversationId, seeded.conversationId)
+  const secondDecisionTurn = turnContextOf(f, third.post.body)
+  snapNow('10 ordinary message after restart', { activity: secondDecisionTurn.activity && { title: secondDecisionTurn.activity.title } })
+  assert.deepEqual(countBy(f.providerLog, 'kind'), { key_check: 1, turn_context: 2 })
+  assert.deepEqual(f.providerLog.map(r => r.boot), [1, 1, 2])
+  assert.ok(f.providerLog.every(r => r.authOk))
+  assert.equal(f.counts.afterRestart.subscription, 1)
+  assert.deepEqual(f.unexpected, [])
+  secretFree([trace, f.requests], [KEY], 'whole visible trace and request log')
+  t.diagnostic('TRACE ' + JSON.stringify(trace))
+  t.diagnostic('STUCK ' + JSON.stringify(stuck))
+  assert.ok(firstRender)
 })
 
-test('L1c5 variant: key saved with no credit, mode on, provider 429 on the recommendation: what the user sees and whether the options survive', async t => {
-  const { f, m, card } = await restoredToSettings(t)
+test('L1c5 variant: mode on but nothing to select (no candidates) -> no Decisions request, turn still proceeds', async t => {
+  const { f, m } = await restoredDm(t, { candidates: false })
+  const card = m.openSettings()
+  await eventually(() => card.section.props.data.state === 'empty', 'status')
+  await pasteAndSave(card, f.JOURNEY_KEY)
+  click(modeButton(card, 'on'))
+  await eventually(() => card.decision.status?.mode === 'on' && !card.decision.busy, 'mode')
+  const sent = await m.sendOrdinary('modeOn', '회의 안내는 어디에 둘까요?')
+  assert.equal(sent.post.status, 202)
+  t.diagnostic('NOCANDIDATES ' + JSON.stringify({ provider: countBy(f.providerLog, 'kind'), subscription: f.counts.modeOn.subscription, activity: !!turnContextOf(f, sent.post.body).activity }))
+  assert.deepEqual(countBy(f.providerLog, 'kind'), { key_check: 1 }, 'with no candidates the turn-start request is skipped')
+  assert.equal(f.counts.modeOn.subscription, 1)
+})
+
+test('L1c5 variant: wrong key is rejected, nothing saved, field cleared', async t => {
+  const { f, m } = await restoredDm(t)
+  const card = m.openSettings()
+  await eventually(() => card.section.props.data.state === 'empty', 'status')
+  f.providerState.verify = 'invalid'
+  await pasteAndSave(card, f.JOURNEY_KEY)
+  assert.match(resultOf(card), /키가 올바르지 않습니다 · 키를 저장하지 않았습니다/)
+  assert.equal(f.bridgeState().configured, false)
+  assert.equal(keyInputOf(card).value, '')
+})
+
+test('L1c5 variant: key saved without credit, mode on, provider 429 at turn start -> the ordinary turn still proceeds', async t => {
+  const { f, m } = await restoredDm(t)
+  const card = m.openSettings()
+  await eventually(() => card.section.props.data.state === 'empty', 'status')
   f.providerState.verify = 'no_credit'
   await pasteAndSave(card, f.JOURNEY_KEY)
-  const saveText = resultOf(card)
-  assert.match(saveText, /크레딧 없음 · 키는 저장했습니다/)
-  assert.equal(f.bridgeState().configured, true)
-  click(queryAll(card.section, 'button[data-testid="settings-decision-mode"][data-mode="on"]')[0])
+  assert.match(resultOf(card), /^크레딧 없음 · 키는 저장했습니다\. 크레딧이 생기면 바로 쓸 수 있습니다\. 모드가 ‘끔’이라/)
+  click(modeButton(card, 'on'))
   await eventually(() => card.decision.status?.mode === 'on' && !card.decision.busy, 'mode')
-  m.ui.sync(); click(m.ui.trigger)
-  f.providerState.choice = '429'
-  f.phase = 'choice1'
-  click(m.button('review'))
-  click(await eventually(() => m.button('confirm'), 'confirm'))
-  await eventually(() => /크레딧이 부족/.test(m.panelText()), 'no-credit guidance')
-  const manual = m.panelText()
-  click(m.button('edit'))
-  const keptOptions = m.fields().map(n => n.value)
-  t.diagnostic('NOCREDIT ' + JSON.stringify({ saveText, manual, keptOptions, providerKinds: f.providerLog.map(r => r.kind) }))
-  assert.match(manual, /OpenAI 결제 설정에서 크레딧을 확인해 주세요/)
-  assert.deepEqual(keptOptions, ['상단 알림', '일정 공지'], '[질문·보기 수정] keeps the typed options')
-  assert.deepEqual(f.providerLog.map(r => r.kind), ['key_check', 'chat_choice'])
-  assert.equal(f.counts.choice1.subscription, 0, 'a failed recommendation starts no subscription turn')
+  f.providerState.context = '429'
+  const sent = await m.sendOrdinary('modeOn', '회의 안내는 상단 알림과 일정 공지 중 어디에 둘까요?')
+  const turn = turnContextOf(f, sent.post.body)
+  t.diagnostic('NOCREDIT ' + JSON.stringify({ activity: turn.activity && { title: turn.activity.title, detail: turn.activity.detail }, subscription: f.counts.modeOn.subscription }))
+  assert.equal(sent.post.status, 202)
+  assert.equal(f.counts.modeOn.subscription, 1, 'a failed Decisions request never blocks the subscription turn')
+  assert.equal(f.startTurns.at(-1).params.additionalContext?.egdesk_decision_context, undefined)
+  assert.ok(turn.activity, 'the run shows that the Decisions request got no answer')
 })
