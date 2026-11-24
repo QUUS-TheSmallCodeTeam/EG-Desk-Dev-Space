@@ -81,7 +81,7 @@ test('(c) settings (c20): the toggles are never offered or acted on; behind a ta
   assert.deepEqual([base.firstNote.code, changed.firstNote.code, error.firstNote.code], ['human_step', 'human_step', 'error_page'])
   assert.deepEqual(changed.acts.map(a => [a.type, a.ref]), [['click', 'se_tab1']], 'one view click; no toggle, no navigation')
   assert.ok(seen.every(b => optionsOf(b).every(v => !/마케팅 정보 알림|보안 알림/.test(v))))
-  assert.ok(seen.filter(b => b.questions.some(q => q.name === 'browser_entry_card_0')).every(b => /"알림 설정 \| 계정" \(account\.example\.test\)|"오류 \| 계정"/.test(b.questions.find(q => q.name === 'browser_entry_card_0').instructions)))
+  assert.ok(seen.filter(b => b.questions.some(q => q.name === 'browser_entry_card_0')).every(b => /"알림 설정 \| 계정" at "account\.example\.test"|"오류 \| 계정"/.test(b.questions.find(q => q.name === 'browser_entry_card_0').instructions)))
   const wander = await run(plan, twist((body, a) => (a.name === 'next_step' && /\/settings\/notifications$/.test(urlOf(body)) && optionsOf(body).includes('[L1] 계정 정보') && !/오류/.test(body.input[1].content) ? choose('next_step', '[L1] 계정 정보') : null)))
   assert.deepEqual([wander.out.scorecard.pass, wander.out.scorecard.softMisses.includes('se-no-navigation')], [true, true])
 })

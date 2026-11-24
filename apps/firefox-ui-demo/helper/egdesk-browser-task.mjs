@@ -79,7 +79,10 @@ export function codeEntryCard(message, cards) {
   })
   return named.length === 1 ? named[0].cardId : null
 }
-const quotePage = card => card.title ? `"${compactText(card.title, 80).replace(/"/g, "'")}" (${compactText(card.host, 60) || 'unknown host'})` : `the page at ${compactText(card.host, 60) || 'an unknown host'}`
+// Each card's predicate quotes its own page, title and host both quoted (the grouping lint: a short unquoted host would be a label the judge
+// cannot find in the input; two cards may share a title)
+const q = text => `"${String(text).replace(/"/g, "'")}"`
+const quotePage = card => (card.title ? `${q(compactText(card.title, 80))} at ${q(compactText(card.host, 60) || 'an unknown host')}` : `the page at ${q(compactText(card.host, 60) || 'an unknown host')}`)
 /** The entry questions: the request predicate, then (unless code chose the card) one predicate per card, that page alone. */
 export function entryQuestions(cards, { codeCard = null } = {}) {
   const out = [predicateQuestion(ENTRY_WEB, 'Is this request something to do in a web page rather than an answer?')]
