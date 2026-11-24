@@ -14,7 +14,7 @@ import { BRIEFING_CATALOG, BRIEFING_RENDERERS, MATERIAL_TRAITS, RESULT_CARD_METR
 import { answerFacts, factAnchors, factCites, COVERAGE_MODES } from './egdesk-briefing-skeleton.mjs'
 import { SKELETON_JUDGE, SKELETON_LIMITS, VERSION_PAIRS, relevanceQuestions, versionCandidates, dateIn, dateMatches, fillChecks, fitQuestions, questionName, versionOf, materialGroups, buildGuide, chooseParts, createSkeletonJudge, decidePlace, enumerateSkeleton, fillRequest, layoutSkeleton, normalizeMaterials, normalizeSkeletonDto, orderItems, recordedBefore, runSkeletonFlow, skeletonChecks, validateFill } from './egdesk-briefing-skeleton.mjs'
 import { BRIEFING_ENGINE_LIMITS, briefingDeps, createBriefingEngine, fillPrompt } from './egdesk-briefing-engine.mjs'
-import { completeBriefingArgs } from './egdesk-briefing-flow.mjs'
+import { completeBriefingArgs, continuedBriefingOutput } from './egdesk-briefing-flow.mjs'
 import { createEgressGate, EGRESS_SITES, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { harness, toolJson } from './egdesk-briefing-publish.support.mjs'
 import { rig } from '../scripts/egdesk-briefing-rig.support.mjs'
@@ -394,10 +394,11 @@ async function mounted(t, { materials = QUOTE, script = ORDER, forkReply, order 
   const decisions = []
   const provider = async (_url, init) => { const body = JSON.parse(init.body); decisions.push(body); return Response.json({ answers: answersFor(body.questions, script), usage: { input_tokens: 11 } }) }
   // materialsFor models lane L7's accessor (chat.memoryMaterialsFor, not merged): the rows the answering model was given this turn.
-  const deps = { ...briefingDeps({ chat: h.chat, contexts: h.contexts, enabled, ...(order ? { order } : {}) }), materialsFor: () => materials }
+  let current = materials
+  const deps = { ...briefingDeps({ chat: h.chat, contexts: h.contexts, enabled, ...(order ? { order } : {}) }), materialsFor: () => current }
   const R = rig(t, { mode: 'on', handlerOptions: { briefing: deps, fetchImpl: provider } })
   const body = BriefingHost.observeRequest({ mode: 'on', report: ANSWER, answerId: h.ids.answerId, conversationId: h.ids.conversationId, runId: h.ids.runId, candidates: BriefingHost.canvasBriefingCandidates(cards), request: REQUEST, viewport: VIEW })
-  return { h, R, body, decisions, v1, count: event => h.events.filter(e => e.event === event).length }
+  return { h, R, body, decisions, v1, count: event => h.events.filter(e => e.event === event).length, setMaterials: next => { current = next } }
 }
 const fence = value => '```json\n' + JSON.stringify(value) + '\n```'
 const guideIds = prompt => JSON.parse(/Design guide \(decided; do not change it\):\n(.*)\n\nMaterials:/s.exec(prompt)[1]).items.map(i => i.id)
@@ -869,4 +870,49 @@ test('coverage switch: the bridge passes briefing.coverage (EGDESK_BRIEFING_COVE
   assert.equal(briefingDeps({}).coverage, 'facts'); assert.equal(briefingDeps({ coverage: 'board' }).coverage, 'board'); assert.equal(briefingDeps({ coverage: 'x' }).coverage, 'facts')
   assert.match(readFileSync(new URL('helper/codex-bridge-server.mjs', root), 'utf8'), /coverage: process\.env\.EGDESK_BRIEFING_COVERAGE === 'board' \? 'board' : 'facts'/)
   assert.match(readFileSync(new URL('helper/egdesk-board-presentation-http.mjs', root), 'utf8'), /coverageCheck: briefing\.coverage/)
+})
+
+// ================= 15. cycle 22: the second briefing of the same matter recalls the Agent's own stale card =================
+test('continuedBriefingOutput: the same trait and component with a shared material key in the same conversation continues that output; never across rooms, kinds or within one briefing', () => {
+  const b = new Map([['o-1', { keys: ['k1', 'k2'], trait: 'versions', component: 'result_compare', outputKey: 'briefing-aaaa', conversationId: 'c1' }],
+    ['o-2', { keys: ['k4'], trait: 'open_items', component: 'result_lines', outputKey: 'briefing-bbbb', conversationId: 'c1' }],
+    ['o-3', { keys: ['k2', 'k3'], trait: 'versions', component: 'result_compare', outputKey: 'briefing-cccc', conversationId: 'c1' }]])
+  const compare = { materialKeys: ['k2', 'k9'], trait: 'versions', component: 'result_compare' }
+  assert.deepEqual(continuedBriefingOutput(b, compare, 'c1'), { outputId: 'o-3', outputKey: 'briefing-cccc' }, 'the most recent match')
+  assert.deepEqual(continuedBriefingOutput(b, compare, 'c1', new Set(['briefing-cccc'])), { outputId: 'o-1', outputKey: 'briefing-aaaa' }, 'a key this briefing used is never shared by two of its parts')
+  assert.equal(continuedBriefingOutput(b, compare, 'c2'), null, 'another conversation'); assert.equal(continuedBriefingOutput(b, { ...compare, materialKeys: ['k7'] }, 'c1'), null, 'no shared material')
+  assert.equal(continuedBriefingOutput(b, { ...compare, trait: 'open_items', component: 'result_lines', materialKeys: ['k2'] }, 'c1'), null, 'another kind of part')
+  assert.equal(continuedBriefingOutput(b, { trait: 'versions', component: 'result_compare' }, 'c1'), null, 'a design-first component (no material keys) is always new')
+})
+test('mounted, the second briefing of the same matter: the v2 figures changed -> the compare is built again as the NEXT VERSION of the first compare; the first card is marked superseded and offered for folding in the same reply', async t => {
+  const s = await mounted(t, { forkReply: prompt => autoFill(prompt) })
+  const first = await s.R.http('POST', '/decision/briefing-observe', s.body); assert.deepEqual([first.body.outcome, first.body.newComponents], ['presented', 3])
+  const made = s.h.events.filter(e => e.event === 'output.published').slice(-3).map(e => e.details.output)
+  const firstCompare = made[0]
+  const next = await s.h.chat.send({ message: 'A사 견적 건 다시 정리해줘', requestId: 'req-2', clientThreadId: 'ui', conversationId: s.h.ids.conversationId, cwd: s.h.cwd, contextCapabilities: { read: true, reader: true, publishBriefing: true } })
+  const timing = { threadId: next.conversationId, turnId: next.runId }, notify = (method, params) => s.h.chat.handleNotification({ method, params })
+  await notify('item/completed', { ...timing, item: { id: 'ans2', type: 'agentMessage', phase: 'final_answer', text: ANSWER } }); await notify('turn/completed', { threadId: timing.threadId, turn: { id: timing.turnId, status: 'completed', items: [] } })
+  for (let i = 0; i < 8; i++) await new Promise(res => setTimeout(res, 2))
+  const message = { id: 'm1', conversationId: s.h.ids.conversationId, runId: s.h.ids.runId, answerId: s.h.ids.answerId, createdAt: 1 }
+  const cards = made.map((meta, i) => ({ id: `res-new-${i + 1}`, kind: 'result', rect: r(700 + 600 * i, 120, 560, 560), record: ChatState.publishedOutputCardRecord({ ...thread, conversationId: s.h.ids.conversationId }, message, meta, `# ${meta.title}\n본문`, { now: 3 }) }))
+  // the v2 page was revised since (a new record of it, dated 11/11, with new figures): the cards built from the earlier v2 no longer show what the materials say
+  const revised = [QUOTE[0], { ...QUOTE[1], time: { ...QUOTE[1].time, at: '2026-11-11' }, excerpt: '총액 1,000만원으로 재조정. 납기 8주. 유지보수 6개월.' }, QUOTE[2], QUOTE[3]]
+  const body = BriefingHost.observeRequest({ mode: 'on', report: ANSWER, answerId: next.answerId, conversationId: next.conversationId, runId: next.runId, candidates: BriefingHost.canvasBriefingCandidates(cards), request: 'A사 견적 건 다시 정리해줘', viewport: VIEW })
+  s.setMaterials(revised)
+  const before = s.h.events.filter(e => e.event === 'output.published').length
+  const res = await s.R.http('POST', '/decision/briefing-observe', body)
+  assert.equal(res.body.outcome, 'presented', JSON.stringify(res.body))
+  const again = s.h.events.filter(e => e.event === 'output.published').slice(before).map(e => e.details.output)
+  assert.ok(again.length >= 1, 'the parts built from the revised page are built again')
+  // every rebuilt part continues ITS OWN earlier output: same outputKey, the next version, the earlier output as previousId; no two parts share a key
+  for (const o of again) { const prior = made.find(m => m.outputKey === o.outputKey); assert.ok(prior, `${o.title} continues an earlier output (${JSON.stringify(made.map(m => m.outputKey))})`); assert.deepEqual([o.version, o.previousId], [prior.version + 1, prior.id]) }
+  assert.equal(new Set(again.map(o => o.outputKey)).size, again.length)
+  // each card that still shows a replaced version is offered for folding in the same reply (an offer only), the cards still current are not
+  const replacedCards = again.map(o => cards[made.findIndex(m => m.outputKey === o.outputKey)].id)
+  assert.deepEqual(res.body.retrievals.map(x => x.viewId).sort(), [...replacedCards].sort(), JSON.stringify(res.body.retrievals))
+  const v2 = again.find(o => o.outputKey === firstCompare.outputKey) ?? again[0]
+  // on the screen, the existing supersede rule marks the first compare card when the new version's event arrives (nothing is moved or redrawn)
+  const shownCard = cards[made.findIndex(m => m.outputKey === v2.outputKey)]
+  const marked = ChatState.supersedeResultRecord(shownCard.record, v2, { now: 10 })
+  assert.equal(marked.provenance.supersededBy.outputId, v2.id); assert.equal(BriefingHost.canvasBriefingCandidates([{ ...shownCard, record: marked }])[0].superseded, true)
 })
