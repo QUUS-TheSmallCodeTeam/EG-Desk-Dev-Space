@@ -508,7 +508,7 @@ const chat = new CodexChatRuntime({
     // Advisory state judge on the engine's own command executions: developer flag EGDESK_COMMAND_JUDGE=advisory, default off. Records only.
     ...(process.env.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
     // Command gate before an engine approval card: developer flag EGDESK_TERMINAL_GATE=advisory|on, default off. It never answers an approval.
-    ...(ownToolsWiring ? { terminalGate: ownToolsWiring.terminalGate(terminalGateConfig) } : terminalGateConfig ? { terminalGate: terminalGateConfig } : {}),
+    ...(ownToolsWiring && !ownToolsWiring.shadow ? { terminalGate: ownToolsWiring.terminalGate(terminalGateConfig) } : terminalGateConfig ? { terminalGate: terminalGateConfig } : {}),
     // Working-memory gate at the EG-Desk tool-result boundary: developer flag EGDESK_WORKING_MEMORY=advisory|on, default off (results unchanged).
     ...(['advisory', 'on'].includes(process.env.EGDESK_WORKING_MEMORY) ? { workingMemory: { mode: () => process.env.EGDESK_WORKING_MEMORY } } : {}),
     topicRecipient: recipientForCodexDecisions,

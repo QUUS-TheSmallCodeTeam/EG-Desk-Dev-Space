@@ -16,6 +16,7 @@ import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress
 import { COMMAND_GATE_TIMEOUT_MS, assessCommand, classifyCommand, sessionRuleCoversFloor } from './egdesk-terminal-command-gate.mjs'
 import { ENGINE_VERSION_NOTICE, checkEngineVersion } from './egdesk-codex-version-pin.mjs'
 import { pureEngineThreadOverrides } from './egdesk-command-executor.mjs'
+import { shadowCommand, shadowFileChange } from './egdesk-own-tools-shadow.mjs'
 // c18 own tools: every turn of such a thread is read-only with no approval prompts, so Codex's apply_patch can neither write nor ask.
 const OWN_TOOLS_TURN_OVERRIDES = Object.freeze({ approvalPolicy: 'never', sandboxPolicy: Object.freeze({ type: 'readOnly', networkAccess: false }) })
 const SHARED_CODEX_PROFILE = CODEX_ENGINE_PROFILE_ID // the shared app-server's slot (codex-engine-adapter.mjs)
@@ -858,6 +859,8 @@ export class CodexChatRuntime {
     this.commandGateRuns = new Set() // in-flight command gate assessments (never awaited by an approval card)
     // c18: { mode() → 'off'|'on', neutralFolder() → absolute EG-Desk-owned empty folder }; absent = off
     this.ownTools = ownTools
+    this.shadowSeen = new Set() // answerId:itemId already judged by the own-tools shadow (bounded)
+    this.shadowRuns = new Set()
     this.ownFolders = new Map() // conversationId → the real folder EG-Desk's tools use (never given to Codex in own-tools mode)
     this.engineVersionChecks = new Map() // Codex app-server session (shared or a profile id) → { status, version, noted, scope }
     this.commandGateAsked = new Set() // answerId:itemId of engine commands that came with an approval request (bounded)
@@ -4021,6 +4024,7 @@ export class CodexChatRuntime {
     if (event.privateOutput) this.keepRunOutput(run, event)
     this.observeEngineCommand(run, event)
     this.observeUnaskedCommand(run, event)
+    this.observeOwnToolsShadow(run, event)
     if (OUTPUT_METHODS.has(event.method)) return
     if (event.method === 'approval') return this.receiveApproval(run, event)
     if (event.method === 'dynamic') {
@@ -6157,6 +6161,35 @@ export class CodexChatRuntime {
   commandGateIdle() { return Promise.allSettled([...this.commandGateRuns]) }
 
   ownToolsOn() { try { return this.ownTools?.mode?.() === 'on' } catch { return false } }
+  ownToolsShadow() { try { return this.ownTools?.mode?.() === 'shadow' } catch { return false } }
+  shadowIdle() { return Promise.allSettled([...this.shadowRuns]) }
+
+  // ---- own-tools SHADOW (c20, egdesk-own-tools-shadow.mjs): what EG-Desk's own tools WOULD have done with each command and file
+  // change Codex starts. Record only, closed words; Codex's own path is untouched; never throws, never delays the event. ----
+  observeOwnToolsShadow(run, event) {
+    try {
+      if (event.method !== 'item/started' || !this.ownToolsShadow() || run.executionPolicy) return
+      const item = event.item
+      if (item?.type !== 'commandExecution' && item?.type !== 'fileChange') return
+      const seen = `${run.answerId}:${item.id}`
+      if (this.shadowSeen.has(seen)) return
+      this.shadowSeen.add(seen)
+      while (this.shadowSeen.size > 1024) this.shadowSeen.delete(this.shadowSeen.values().next().value)
+      const root = this.runFolder(run), cfg = this.decisionContext?.terminalGate
+      const home = typeof cfg?.home === 'string' && cfg.home.startsWith('/') ? cfg.home : homedir()
+      const engine = this.threadEngine(run.conversationId) === 'claude' ? 'claude' : 'codex'
+      const record = shadow => { try { this.decisionContext?.calibrationLog?.record?.({ feature: 'own_tools_shadow', mode: 'advisory', judgments: [], shadow: { ...shadow, engine } }) } catch { /* record only */ } }
+      const work = (async () => {
+        if (item.type === 'commandExecution') {
+          if (typeof item.command !== 'string' || !item.command) return
+          record(await shadowCommand({ command: item.command, cwd: item.cwd, root, home, conversationId: run.conversationId, turnId: run.runId,
+            assess: args => this.gateHookAssess(args) }))
+        } else for (const change of (item.changes ?? []).slice(0, 30)) record(await shadowFileChange({ filePath: change.path, kind: change.kind, root, inspect: cfg?.inspect ?? null }))
+      })().catch(() => {})
+      this.shadowRuns.add(work)
+      void work.finally(() => this.shadowRuns.delete(work))
+    } catch { /* record only */ }
+  }
   ownNeutralFolder() { try { const folder = this.ownTools?.neutralFolder?.(); return typeof folder === 'string' && path.isAbsolute(folder) && !folder.includes('\0') ? folder : null } catch { return null } }
   /** The folder EG-Desk's own tools use for a run: the real folder in own-tools mode, otherwise the thread's folder. */
   runFolder(run) { return run?.ownTools ? run.ownFolder ?? null : this.threads.get(run?.conversationId)?.cwd ?? null }

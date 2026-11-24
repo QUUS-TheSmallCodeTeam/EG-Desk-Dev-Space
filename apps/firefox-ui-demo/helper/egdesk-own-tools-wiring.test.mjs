@@ -52,6 +52,7 @@ test('on: the providers share one ledger; the gate config keeps the person\'s fl
   const bridge = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), 'codex-bridge-server.mjs'), 'utf8')
   assert.match(bridge, /const ownToolsWiring = createOwnToolsWiring\(\{ env: process\.env, dataDir, spawn, getChat: \(\) => chat, inspect: createGitTargetInspector\(\) \}\)/)
   assert.match(bridge, /toolProviders: \[browserProvider, planProvider, annotationProvider\]\.concat\(ownToolsWiring \? ownToolsWiring\.toolProviders : \[\]\),\n  \.\.\.\(ownToolsWiring \? \{ ownTools: ownToolsWiring\.ownTools \} : \{\}\),/)
-  assert.match(bridge, /\.\.\.\(ownToolsWiring \? \{ terminalGate: ownToolsWiring\.terminalGate\(terminalGateConfig\) \} : terminalGateConfig \? \{ terminalGate: terminalGateConfig \} : \{\}\),/,
+  // (c20: the shadow mode leaves the gate configuration as the person set it, so the own-tools merge applies only to 'on')
+  assert.match(bridge, /\.\.\.\(ownToolsWiring && !ownToolsWiring\.shadow \? \{ terminalGate: ownToolsWiring\.terminalGate\(terminalGateConfig\) \} : terminalGateConfig \? \{ terminalGate: terminalGateConfig \} : \{\}\),/,
     'off: exactly the c11 terminal gate configuration as before')
 })

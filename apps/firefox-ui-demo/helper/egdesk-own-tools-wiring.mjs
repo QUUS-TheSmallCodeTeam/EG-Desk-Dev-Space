@@ -12,6 +12,8 @@ import { createGateHookBroker } from './egdesk-gate-hook-broker.mjs'
 // group, killed as a group.
 export const OWN_TOOLS_FLAG = 'EGDESK_OWN_TOOLS'
 export const ownToolsEnabled = env => env?.[OWN_TOOLS_FLAG] === 'on'
+// c20: EGDESK_OWN_TOOLS=shadow keeps Codex's own tools as today and only records what the own tools would have done.
+export const ownToolsShadow = env => env?.[OWN_TOOLS_FLAG] === 'shadow'
 
 /** The empty folder Codex runs in: <dataDir>/engine-folders/empty, owner-only. Null when it cannot be made or is not empty. */
 export function prepareEngineFolder(dataDir, { fsImpl = fs } = {}) {
@@ -37,6 +39,8 @@ export function processGroupKill(kill = (pid, signal) => process.kill(pid, signa
  *   getChat() → the CodexChatRuntime (read lazily: the runtime is made after this wiring)
  */
 export function createOwnToolsWiring({ env = process.env, dataDir, spawn, getChat, inspect = null, killGroup = processGroupKill(), home = env?.HOME } = {}) {
+  // shadow: no provider, no ledger, no spawn, no engine folder, no gate change; the runtime only records (codex-chat-runtime observeOwnToolsShadow)
+  if (ownToolsShadow(env)) return { shadow: true, toolProviders: [], ownTools: { mode: () => 'shadow', neutralFolder: () => null }, terminalGate: base => base }
   if (!ownToolsEnabled(env)) return null
   if (typeof spawn !== 'function' || typeof getChat !== 'function') throw new TypeError('own tools need spawn and getChat')
   const ledger = createGateHookBroker({ mode: () => 'on', home, assess: executorAssess(args => getChat().gateHookAssess(args), { home }) })
