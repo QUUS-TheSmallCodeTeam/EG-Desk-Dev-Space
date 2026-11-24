@@ -8,6 +8,7 @@ export const MEMORY_RECALL_SET = 'real-engine-memory-recall-v1'
 export const MEMORY_HELD_SET = 'real-engine-memory-held-v1'
 export const MEMORY_HELD_V2_SET = 'real-engine-memory-held-v2'
 export const MEMORY_HELD_V3_SET = 'real-engine-memory-held-v3'
+export const MEMORY_HELD_V4_SET = 'real-engine-memory-held-v4'
 export const RETENTION = Object.freeze({ id: 'backup/retention', title: '서버 백업 보관 기간 결정', time: 'past', status: 'done', days: '47',
   body: '11월 5일 점검 회의에서 서버 백업 보관 기간을 47일로 정했다. 47일이 지나면 자동 삭제하고, 월 1회 복원 시험을 한다.' })
 export const DECOYS = Object.freeze([
@@ -48,6 +49,27 @@ export function buildMemoryHeldV3Script() {
     description: 'Pattern: held-v2 (the page already in the conversation is not sent again, and the answer comes from it) with the one-packet option on: the selection and the memory loop share one packet, so no page may have its body twice in one turn (noDuplicates), on top of the v2 expectations (turn 1 does not volunteer the later fact; turn 2 re-sends nothing and holds 자동 삭제). Needs --decisions. Expectations by code.',
     conversations: [{ ...conv, id: 'memory-held-v3', flags: { EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', EGDESK_TURN_MEMORY_ONE_PACKET: 'on' },
       turns: conv.turns.map(turn => ({ ...turn, expect: { ...turn.expect, memory: { ...turn.expect.memory, noDuplicates: true } } })) }] }
+}
+
+// held-v4 (c28, after the real run of held-v3, check-4): the real model volunteered 자동 삭제 in turn 1, so a design that needs the model to WITHHOLD a fact
+// cannot hold on this engine. Here the second fact is on a page the first turn cannot see: the page 'backup/purge' (the rule for backups past the period; it links
+// back to the retention page, the retention page links nowhere; its title and body share no word with turn 1's question about the days: 보관, 기간 and 삭제 are left out, so neither a lexical stand-in nor a model has a reason to attach it there).
+// Turn 1 asks for the number (retention attached; the purge page and the decoys not). Turn 2 asks what is done with a backup past that deadline: only the purge page
+// holds the phrase (매일 새벽 3시), so a right answer needs a page that was NOT in the conversation, while the retention page that was is not sent again
+// (noResends; one packet on, noDuplicates). Nothing here depends on what the model leaves out of its answers.
+export const PURGE = Object.freeze({ id: 'backup/purge', title: '백업 파일 정리 작업 규칙', time: 'past', status: 'done', phrase: '새벽 3시',
+  body: '기한을 넘긴 백업 파일은 매일 새벽 3시에 자동으로 정리하고, 결과는 담당자에게 메일로 알린다.', links: [{ to: RETENTION.id, type: 'follows_from' }] })
+export function buildMemoryHeldV4Script() {
+  const others = DECOYS.map(d => d.id)
+  return { set: MEMORY_HELD_V4_SET,
+    description: 'Pattern: a page already in the conversation is not sent again while a page that was not there is fetched. Turn 1 asks how many days the backups are kept (the retention page is attached; the purge page and the decoys are not; the answer must not hold the purge page\'s phrase). Turn 2 asks what is done with a backup past that deadline: the purge page is attached (only it holds 새벽 3시), the retention page is not sent again (EGDESK_TURN_MEMORY_PRUNE_HELD) and no page has its body twice in a turn (one packet, noDuplicates). The design does not depend on what the model leaves out of its answers. Needs --decisions. Expectations by code.',
+    conversations: [{ id: 'memory-held-v4', flags: { EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', EGDESK_TURN_MEMORY_ONE_PACKET: 'on' }, memory: { mode: 'on', pages: [page(RETENTION), { ...page(PURGE), links: PURGE.links }, ...DECOYS.map(page)] },
+      turns: [
+        { say: '지난번 점검 회의에서 서버 백업을 며칠 보관하기로 정했는지 알려줘.',
+          expect: { memory: { attached: [RETENTION.id], notAttached: [PURGE.id, ...others], noDuplicates: true }, posted: true, answerIncludes: [RETENTION.days], answerExcludes: [PURGE.phrase], noNativeTools: true, turnStatus: 'completed' } },
+        { say: '그 기한을 넘긴 백업은 어떻게 하기로 했지?',
+          expect: { memory: { attached: [PURGE.id], notAttached: others, noResends: true, noDuplicates: true }, posted: true, answerIncludes: [PURGE.phrase], noNativeTools: true, turnStatus: 'completed' } },
+      ] }] }
 }
 
 export function buildMemoryHeldScript() {
