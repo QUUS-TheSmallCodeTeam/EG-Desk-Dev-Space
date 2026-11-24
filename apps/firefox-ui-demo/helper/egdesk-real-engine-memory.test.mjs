@@ -14,14 +14,14 @@ import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { DECISION_KEY_ENV, loadScripts, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { REAL_ENGINE_SCRIPT_SCHEMA, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createMemoryHook, memoryGraph, memoryNeedsDecisions, pagesIn, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
-import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryRecallScript, RETENTION } from './egdesk-memory-real-engine-scripts.mjs'
+import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryHeldV4Script, buildMemoryRecallScript, PURGE, RETENTION } from './egdesk-memory-real-engine-scripts.mjs'
 import { candidatesFromOntologyGraph } from './egdesk-context-setup.mjs'
 
 const app = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scriptFile = name => path.join(app, 'scripts', 'real-engine', 'scripts', `real-engine-${name}${/-v\d+$/.test(name) ? '' : '-v1'}.json`)
 
 test('the committed scripts are what the builders produce, validate, and need the Decision model', () => {
-  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script]]) {
+  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script]]) {
     const committed = JSON.parse(fs.readFileSync(scriptFile(name), 'utf8'))
     assert.deepEqual(committed, JSON.parse(JSON.stringify(build())))
     assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })
@@ -117,7 +117,9 @@ function world(t, fakeScript) {
       const message = flat.slice(flat.lastIndexOf('Message:') + 8)
       answers = answers.map(a => { const m = /^rel_(\d+)$/.exec(a.name); if (!m) return a
         const line = new RegExp(`#${m[1]} \\|[^\\n]*`).exec(flat)?.[0] ?? ''
-        return { ...a, probability: /백업|기간/.test(message) && /보관 기간/.test(line) ? 0.95 : 0.02 } })
+        // turn 2 of held-v4 asks about a backup past the period: the purge rule is needed; the retention page (held) is too, but it is pruned as held
+        const wanted = /기한을 넘긴/.test(message) ? /백업 파일 정리/.test(line) || /보관 기간 결정/.test(line) : /백업|기간/.test(message) && /보관 기간/.test(line)
+        return { ...a, probability: wanted ? 0.95 : 0.02 } })
     }
     return Response.json({ answers, usage: { input_tokens: 20, output_tokens: 1 } })
   }
@@ -221,4 +223,16 @@ test('end to end (fake engine): held-v3 (one packet, no same body twice in a tur
   const rec2 = (await runCheck(w2.options, asScripts(script), w2.deps)).records[0]
   assert.equal(rec2.turns[0].expectations.find(e => e.check === 'memory.noDuplicates').ok, false)
   assert.equal(rec2.turns[0].ok, false); assert.equal(rec2.ok, false)
+})
+
+test('held-v4: the second fact is on a page turn 1 cannot see; turn 2 fetches it and re-sends the held page nowhere; it does not need the model to withhold anything (fake engine)', async t => {
+  // an engine that volunteers everything it can in turn 1 does not break the design: the phrase is not on the retention page
+  const w = world(t, { turns: [{ steps: [], final: '47일이고, 47일이 지나면 삭제할 것 같습니다.' }, { steps: [], final: `매일 ${PURGE.phrase}에 자동으로 삭제합니다.` }] })
+  const rec = (await runCheck(w.options, asScripts(buildMemoryHeldV4Script()), w.deps)).records[0]
+  assert.equal(rec.aborted, null, rec.abortDetail); assert.equal(rec.ok, true, JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok))))
+  assert.deepEqual(rec.turns[0].memory.attached, [RETENTION.id]); assert.deepEqual(rec.turns[1].memory.attached, [PURGE.id]); assert.deepEqual(rec.turns[1].memory.resent, [])
+  // an engine that answers turn 2 without the purge page's phrase fails turn 2 (the page was needed)
+  const w2 = world(t, { turns: [{ steps: [], final: '47일입니다.' }, { steps: [], final: '삭제합니다.' }] })
+  const rec2 = (await runCheck(w2.options, asScripts(buildMemoryHeldV4Script()), w2.deps)).records[0]
+  assert.equal(rec2.turns[1].ok, false); assert.equal(rec2.turns[1].expectations.find(e => e.check === 'answerIncludes').ok, false)
 })

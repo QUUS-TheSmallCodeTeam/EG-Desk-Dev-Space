@@ -5084,10 +5084,27 @@ export class CodexChatRuntime {
     try {
       const cid = context?.conversationId
       if (!cid) return deriveTurnPosition({ threadId: null })
-      let prior = 0
-      try { prior = (this.store?.listMessages?.(context.clientThreadId)?.messages ?? []).filter(m => m.role === 'assistant' && m.status !== 'streaming' && m.status !== 'error').length } catch { prior = 0 }
+      const prior = this.completedEngineTurns(cid, context.clientThreadId)
       return deriveTurnPosition({ threadId: cid, priorCompletedTurns: prior, compacted: this.compactedThreads.has(cid), foreign: this.foreignThreads.has(cid), resumed: !this.loadedThreads.has(cid) })
     } catch { return { kind: 'first', reason: 'unknown_state' } }
+  }
+
+  // Completed ENGINE turns of this conversation in EG-Desk's own record (runs whose status is completed), not posted messages: a turn whose answer
+  // the draft check withheld entirely posted nothing, yet its pages are in the engine's context and its receipts stand (L7 c28, real v7 run:
+  // s2 was positioned first, ignored the receipts, re-fetched and re-sent the a-v2-plan page). Unreadable record: 0 (first, the conservative side).
+  completedEngineTurns(cid, clientThreadId) {
+    let count = 0
+    try {
+      let afterSeq = 0
+      for (let n = 0; n < CONTINUITY_MAX_PAGES; n++) {
+        const page = this.store?.listRuns?.(clientThreadId, { afterSeq, limit: 100 })
+        if (!page) return 0
+        for (const run of page.runs ?? []) if (run?.status === 'completed' && (run.conversationId === undefined || run.conversationId === null || run.conversationId === cid)) count++
+        if (count > 0 || !page.hasMore) break
+        afterSeq = page.nextCursor
+      }
+    } catch { return 0 }
+    return count
   }
 
   // After a resume: does the engine's thread hold a turn EG-Desk did not run? Compares the engine's turn ids (the resume response, and the
