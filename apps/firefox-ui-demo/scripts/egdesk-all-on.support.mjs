@@ -60,18 +60,70 @@ const PAGES = {
   [`${PORTAL}/download/2.pdf`]: [], [`${PORTAL}/download/1.pdf`]: [],
 }
 
-// The scripted subjective model's fill for a briefing guide: slot data only, taken from the materials it was handed (never invented).
+// The scripted subjective model's fill for a briefing guide, written the way a careful model follows the fill rules (cycle 14): every line,
+// value and explanation is taken from the material it cites, keeping its actors, qualifiers, amounts and dates (whole sentences of the
+// material, or a value that the material states for the same aspect); nothing a material does not say. Before cycle 14 it wrote material
+// titles as lines, the same title on both sides of a comparison row and "…의 내용입니다." as explanations; the first real run's fill check
+// (c17) flagged exactly those, rightly. A redo prompt (rejected parts listed) drops what was rejected rather than repeating it.
 const clip = (text, max) => (text.length > max ? text.slice(0, max - 1) + '…' : text)
+const sentencesOf = text => String(text ?? '').split(/(?<=\.)\s+/).map(x => x.trim()).filter(Boolean)
+// A whole sentence (never cut inside one): the first one that fits, else the text clipped.
+const fitSentence = (list, max) => list.find(x => x.length <= max) ?? clip(list[0] ?? '', max)
+const dayOf = at => (typeof at === 'string' && /^\d{4}-\d{2}-\d{2}/.test(at) ? `${Number(at.slice(5, 7))}월 ${Number(at.slice(8, 10))}일` : null)
+const NOT_DONE = /아직|예정|않았|기다리|전이다|후 발송/
+const ASPECTS = ['단가', '납기', '수량']
+const aspectValue = (text, word) => new RegExp(`${word}\\s*(?:는|은|가|를)?\\s*([\\d,]+원|\\d+월 \\d+일|\\d+개)`).exec(text)?.[1] ?? null
+const stateSentence = m => sentencesOf(m.text).find(x => (m.status === 'plan' ? NOT_DONE.test(x) : /했다|했음|함\.$/.test(x) && !NOT_DONE.test(x))) ?? null
+const commonPrefix = titles => { const words = titles.map(t => t.split(' ')); const out = []; for (let i = 0; words.every(w => w[i] !== undefined && w[i] === words[0][i]); i++) out.push(words[0][i]); return out.join(' ') }
 export function fillFromGuide(prompt) {
   const guide = JSON.parse(/Design guide \(decided; do not change it\):\n(.*)\n\nMaterials:/s.exec(prompt)[1]), mats = JSON.parse(/Materials:\n(.*)\n\nRules:/s.exec(prompt)[1])
   const M = Object.fromEntries(mats.map(m => [m.alias, m]))
-  const value = (slot, item, k = 0) => (slot.type === 'material' ? item.materials[Math.min(k, item.materials.length - 1)]
-    : slot.type === 'list' ? item.materials.slice(0, slot.max).map((alias, i) => Object.fromEntries(slot.of.map(field => [field.name, field.type === 'material' ? alias : clip(field.name === 'label' || field.name === 'aspect' ? `${i + 1}` : M[alias]?.title ?? '', field.max ?? 60)])))
-      : clip(slot.name === 'title' ? M[item.materials[0]]?.title ?? '' : item.materials.map(alias => M[alias]?.text ?? '').join(' '), slot.max ?? 200))
-  const items = Object.fromEntries(guide.items.map(item => { let materialSlots = 0
-    return [item.id, { text: clip(`${item.materials.map(alias => M[alias]?.title ?? alias).join(', ')}의 내용입니다.`, 240), fallback: clip(`${M[item.materials[0]]?.title ?? ''} 카드를 열어 보세요.`, 400),
-      slots: Object.fromEntries(item.slots.map(slot => [slot.name, value(slot, item, slot.type === 'material' ? materialSlots++ : 0)])) }] }))
-  return '```json\n' + JSON.stringify({ title: 'A사 견적 정리', items }) + '\n```'
+  const only = /Fill only these items again: ([^\n]*?)\.\n/.exec(prompt)?.[1]?.split(/,\s*/) ?? null
+  const rejected = (/previous data not supported by the material they cite: ([^\n]*?)\. Write them again/.exec(prompt)?.[1] ?? '').split(/;\s*/).filter(Boolean)
+  const unfillable = []
+  const items = {}
+  for (const item of guide.items) {
+    if (only && !only.includes(item.id)) continue
+    const mine = item.materials.map(alias => M[alias]).filter(Boolean)
+    const drop = rejected.filter(part => part.startsWith(`${item.id} `)).map(part => part.slice(item.id.length + 1))
+    const slots = {}, slotOf = name => item.slots.find(slot => slot.name === name)
+    let text = ''
+    if (slotOf('lines')) {
+      const spec = slotOf('lines'), field = name => spec.of.find(x => x.name === name)
+      let lines = item.shows === 'open_items'
+        ? mine.flatMap(m => sentencesOf(m.text).filter(x => NOT_DONE.test(x)).map(x => ({ label: clip(m.title, field('label')?.max ?? 24), text: fitSentence([x], field('text')?.max ?? 90), from: m.alias })))
+        : mine.map(m => ({ label: clip(dayOf(m.at) ?? m.title, field('label')?.max ?? 24), text: fitSentence(sentencesOf(m.text), field('text')?.max ?? 90), from: m.alias }))
+      lines = lines.filter((_, i) => !drop.includes(`line ${i + 1}`)).slice(0, spec.max ?? 6)
+      if (lines.length < (spec.min ?? 1)) unfillable.push({ item: item.id, slot: 'lines', reason: 'the materials do not say it' })
+      else slots.lines = lines
+      // The explanation says only what the lines show: their dates for a sequence, the open line itself otherwise.
+      const dated = (slots.lines ?? []).map(x => x.label).filter(label => /^\d+월 \d+일$/.test(label))
+      text = item.shows === 'sequence' && dated.length >= 2 ? `${dated[0]}부터 ${dated.at(-1)}까지 ${dated.length}건의 기록입니다.` : (slots.lines?.[0]?.text ?? '')
+    }
+    if (slotOf('rows')) {
+      const [older, newer] = mine, spec = slotOf('rows'), max = spec.of.find(x => x.name === 'left')?.max ?? 60
+      let rows = []
+      if (older && newer) {
+        for (const word of ASPECTS) { const l = aspectValue(older.text, word), r = aspectValue(newer.text, word); if (l && r) rows.push({ aspect: word, left: l, right: r }) }
+        const l = stateSentence(older), r = stateSentence(newer)
+        if (l && r && l.length <= max && r.length <= max) rows.push({ aspect: '상태', left: l, right: r })
+      }
+      rows = rows.filter((_, i) => !drop.includes(`row ${i + 1} left`) && !drop.includes(`row ${i + 1} right`)).slice(0, spec.max ?? 6)
+      if (rows.length < (spec.min ?? 1)) unfillable.push({ item: item.id, slot: 'rows', reason: 'the materials do not say it' })
+      else slots.rows = rows
+      if (slotOf('left')) slots.left = older?.alias
+      if (slotOf('right')) slots.right = newer?.alias
+      text = (slots.rows ?? []).map(row => `${row.aspect}: ${row.left} → ${row.right}`).join(' / ')
+    }
+    if (slotOf('body')) { slots.body = fitSentence([mine[0]?.text ?? ''], slotOf('body').max ?? 600); text = fitSentence(sentencesOf(mine[0]?.text), 240) }
+    for (const slot of item.slots) if (slot.type === 'material' && slots[slot.name] === undefined) slots[slot.name] = item.materials[0]
+    if (slotOf('title')) slots.title = clip(mine.length === 1 ? mine[0].title : commonPrefix(mine.map(m => m.title)) || mine[0]?.title || '', slotOf('title').max ?? 40)
+    if (drop.includes('explanation')) text = slots.lines?.[0]?.text ?? slots.rows?.map(row => `${row.aspect}: ${row.left} → ${row.right}`).join(' / ') ?? text
+    if (!text.trim()) text = fitSentence(sentencesOf(mine[0]?.text), 240) // never an empty explanation: the first sentence of its material
+    items[item.id] = { text: clip(text, 240), fallback: clip(`${mine[0]?.title ?? ''} 카드를 열어 보세요.`, 400), slots }
+  }
+  const title = commonPrefix(mats.map(m => m.title)) || mats[0]?.title || ''
+  return '```json\n' + JSON.stringify({ title: clip(`${title} 정리`.trim(), guide.titleMax ?? 120), items, ...(unfillable.length ? { unfillable } : {}) }) + '\n```'
 }
 
 const wireChoice = (name, q, value, p = 0.95) => { const other = q.choices.map(c => c.value).find(v => v !== value); return { name, type: 'choice', choice: value, confidence: p, probabilities: [{ value, probability: p + 0.01 }, ...(other === undefined ? [] : [{ value: other, probability: 0.02 }])] } }
