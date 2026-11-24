@@ -52,7 +52,18 @@ const validateExcerpts = excerpts => {
   return excerpts.map(excerpt => txt(excerpt, 1500))
 }
 
-export function createBoardAgentAskService({ desk, profiles, selectContext, decisionStatus, draft, draftPreview, now = Date.now } = {}) {
+// Content-free calibration entry (canon 5.3) for the Board reply screening. It reuses the existing
+// calibration vocabulary: feature 'turn_context' + question 'relevance' + kind 'board' keeps these rows separable.
+// Numbers and closed words only: no excerpt/question text, ids, names or keys.
+function screeningEntry(mode, observed, attached) {
+  if (!observed || (mode !== 'advisory' && mode !== 'on')) return null
+  const judgments = observed.probabilities.map(p => ({ q: 'relevance', p, threshold: observed.bar, kind: 'board', would: p >= observed.bar ? 'attach' : 'skip' }))
+    .sort((a, b) => b.p - a.p)
+  return { feature: 'turn_context', mode, judgments, candidates: observed.candidates, judgedTotal: judgments.length,
+    ...(observed.failure ? { fallback: observed.failure } : {}), attached }
+}
+
+export function createBoardAgentAskService({ desk, profiles, selectContext, decisionStatus, draft, draftPreview, calibrationLog = null, now = Date.now } = {}) {
   const pending = new Map(), running = new Map()
   let closed = false
   const available = () => !closed && !!(desk && profiles && selectContext)
@@ -202,12 +213,14 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
       allowedSlices: Object.freeze(item.excerpts.map((text, index) => Object.freeze({ id: `x${index + 1}`, text }))) })
     const current = () => running.get(ticket) === item && isCurrent(item, true)
     const check = setInterval(() => { if (!current()) abort() }, 100); check.unref?.()
+    let calibrationId = null, finalRun = 'cancelled'
     try {
       if (!current()) stale()
       const decision = item.decisionEgress ? readDecision() : null
+      let observed = null
       const selected = await selectContext({ question: item.question, scope, decisionEgress: item.decisionEgress },
         { mode: decision?.mode ?? 'off', client: decision?.client ?? null, now, signal: item.controller.signal,
-          isCurrent: offered => offered === scope && current() })
+          isCurrent: offered => offered === scope && current(), observe: report => { observed = report } })
       if (!current()) stale()
       // Tell the owner what the requested external screening actually did. The excerpt set is unchanged by this label.
       const screening = !item.decisionEgress ? null : selected?.outcome === 'decision' ? 'decision'
@@ -215,6 +228,10 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
         : selected?.outcome === 'local' || selected?.outcome === 'local_fallback' ? 'fallback' : null
       const allowed = new Map(scope.allowedSlices.map(slice => [slice.id, slice.text]))
       const evidence = [...new Set(selected?.selectedIds ?? [])].filter(id => allowed.has(id)).slice(0, MAX_SELECTED).map(id => allowed.get(id))
+      try { // Recording only: never throws, never changes the selection.
+        const entry = calibrationLog ? screeningEntry(decision?.mode, observed, decision?.mode === 'on' && screening === 'decision' && evidence.length > 0) : null
+        calibrationId = entry ? calibrationLog.record(entry) : null
+      } catch { calibrationId = null }
       if (item.mode === 'extract' || evidence.length === 0) {
         const parts = []
         let bytes = 0
@@ -222,6 +239,7 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
           const size = Buffer.byteLength(text) + (parts.length ? 2 : 0)
           if (bytes + size <= REVIEW_TEXT_BYTES.answer) { parts.push(text); bytes += size }
         }
+        finalRun = 'completed'
         return { mode: item.mode, answer: parts.join('\n\n'), source: selected?.outcome === 'decision' ? 'decision' : 'local', omittedCount: evidence.length - parts.length,
           ...(screening ? { screening } : {}) }
       }
@@ -231,12 +249,15 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
         replyStyle: item.replyStyle, model: item.draftModel, bindingId: item.draftBinding, signal: item.controller.signal, isCurrent: current })
       if (!current()) stale()
       const answer = result?.answer ?? ''
+      finalRun = 'completed'
       return { mode: item.mode, answer: txt(answer, REVIEW_TEXT_BYTES.answer, { empty: true }), source: 'draft', ...(screening ? { screening } : {}) }
     } catch (error) {
       if (!current()) stale()
+      finalRun = 'failed'
       if (error instanceof BoardAskError) throw error
       fail('RUN_FAILED', 'The Board Agent ask could not finish; review manually', 502)
     } finally {
+      try { if (calibrationId) calibrationLog.complete(calibrationId, { run: finalRun }) } catch { /* ignore */ }
       clearTimeout(timer)
       clearInterval(check)
       signal?.removeEventListener('abort', abort)
