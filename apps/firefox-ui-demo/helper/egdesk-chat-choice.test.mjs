@@ -242,3 +242,10 @@ test('the chooser deadline releases a hung key lookup and prevents late dispatch
   await Promise.resolve()
   assert.equal(fx.calls.length, 0)
 })
+
+test('a foreground choice survives a cold connection slower than the in-turn budget', async () => {
+  // Recorded cold calls took 1.4-2.2 s; the old 1.5 s deadline aborted them and the socket with them.
+  const fx = fixture({ fetchImpl: async () => { await new Promise(r => setTimeout(r, 1700)); return response(body()) } })
+  assert.deepEqual(await fx.run(), { status: 'recommended', index: 1 })
+  assert.equal(fx.calls.length, 1)
+})

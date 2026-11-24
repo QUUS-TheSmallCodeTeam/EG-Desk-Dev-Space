@@ -1,6 +1,6 @@
 import { addAbortListener } from 'node:events'
 import { types } from 'node:util'
-import { DEFAULT_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
+import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { choiceQuestion, DEFAULT_DECISION_THRESHOLDS, readChoice } from './egdesk-decision-questions.mjs'
 
 const NAME = 'chat_choice'
@@ -94,7 +94,7 @@ export async function runChatChoice(request) {
   if (typeof isCurrent !== 'function' || types.isProxy(signal) || !(signal instanceof AbortSignal) ||
       typeof decide !== 'function') return MANUAL
 
-  const deadline = performance.now() + DEFAULT_DECISION_TIMEOUT_MS
+  const deadline = performance.now() + FOREGROUND_DECISION_TIMEOUT_MS
   const controller = new AbortController()
   let timer, abortListener
   let open = true
@@ -129,6 +129,7 @@ export async function runChatChoice(request) {
     timer = setTimeout(() => controller.abort(), Math.max(1, Math.ceil(deadline - performance.now())))
     const response = await Promise.race([cancelled, decide.call(client, {
       input, questions, signal: boundedSignal, strictChoiceResponse: true,
+      timeoutMs: Math.max(1, Math.ceil(deadline - performance.now())), // the client default (1.5 s) must not undercut the foreground deadline
       authorizeDispatch() {
         if (gateUsed) return false
         gateUsed = true

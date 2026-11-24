@@ -9,7 +9,7 @@ import { specManifestEntries, verifiedManifestOwners } from './codex-native-tool
 import { nativeQaCommandReceipt, validateQaCommandNonce, validateQaOutputMarkers } from './codex-qa-command-receipt.mjs'
 import { MAX_COMPOSED } from './egdesk-profile-store.mjs'
 import { chatChoiceManual, runChatChoice, validateChatChoice } from './egdesk-chat-choice.mjs'
-import { DEFAULT_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
+import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { browserRefusal, ceilingAllowsBrowserTool, ceilingAllowsComputerTool, ceilingApprovalRefusal, ceilingBrowserSelection, ceilingNarrows, ceilingReportNotices, CEILING_MESSAGES, computerRefusal, effectiveToolCeiling, liveBrowserSelected, loadCeilingThreadOverrides, mergeCeilingOverrides, recordedToolCeiling, verifyCeilingNativeThread } from './codex-chat-tool-ceiling.mjs'
 import { HOST_CONTROL_POLICIES, HOST_LEASE_CODES, requiresHostControl } from './egdesk-host-lease.mjs'
 import { COMPUTER_ADAPTER_CODES, refusedResult } from './egdesk-computer-adapter.mjs'
@@ -4309,7 +4309,7 @@ export class CodexChatRuntime {
     // Foreground choice and ordinary turn context use different deadlines.
     const configuredBudget = setup?.choiceBudgetMs
     const limit = Number.isSafeInteger(configuredBudget) && configuredBudget > 0
-      ? Math.min(DEFAULT_DECISION_TIMEOUT_MS, configuredBudget) : DEFAULT_DECISION_TIMEOUT_MS
+      ? Math.min(FOREGROUND_DECISION_TIMEOUT_MS, configuredBudget) : FOREGROUND_DECISION_TIMEOUT_MS
     const deadline = performance.now() + limit
     const remaining = () => deadline - performance.now()
     let generation, recipient, timer

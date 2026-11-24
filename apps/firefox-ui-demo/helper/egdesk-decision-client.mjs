@@ -36,6 +36,11 @@ export const DECISION_LIMITS = Object.freeze({
 const NAME_MAX = 120
 const RESPONSE_MAX_BYTES = 4 * 1024 * 1024
 export const DEFAULT_DECISION_TIMEOUT_MS = 1500
+// Deadline for a request the user explicitly confirmed and is watching (DM [보기 추천], Board photo apply).
+// Covers one cold connection (recorded cold calls: 1.4-2.2 s; an expired deadline aborts the socket, so the
+// next call is cold again) plus warm margin, and stays well under the 10 s attention limit. In-turn context
+// setup is not user-awaited and keeps its own budget (800 ms); key verify keeps 5 s.
+export const FOREGROUND_DECISION_TIMEOUT_MS = 4000
 export const DECISION_ERROR_CODES = Object.freeze(['not_configured', 'invalid_request', 'invalid_key', 'no_credit',
   'spend_limit_reached', 'rate_limited', 'model_unavailable', 'server_error', 'bad_response', 'timeout', 'aborted', 'unreachable', 'budget_exceeded', 'evidence_unavailable'])
 // 429 bodies that mean the organization has no usable balance, not a rate limit.
