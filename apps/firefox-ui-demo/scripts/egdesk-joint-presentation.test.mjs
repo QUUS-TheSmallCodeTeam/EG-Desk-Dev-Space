@@ -343,7 +343,10 @@ test('Board HTTP → Desk: live grants only, no resurrection of approved or retu
       const mode = { get mode(){ return savedMode; }, saved:true, persisted:true,
         save:m=>{ savedMode=m; return true; } };
       const board = createBoardPresentationHttpHandler({credentials:store, getMode:()=>mode.mode,
-        budget:createDecisionBudget({monthlyInputTokenCap:100}), fetchImpl:async (_endpoint, init)=>{
+        // This test is about live grants, not spend: the cap only has to stay out of the way. A request that was sent and
+        // then cancelled (off/on while pending) now adds a labelled estimate to the local guard, so a tiny cap would refuse
+        // the next approved request for budget reasons and hide what the test checks.
+        budget:createDecisionBudget({monthlyInputTokenCap:1_000_000}), fetchImpl:async (_endpoint, init)=>{
           provider.push(JSON.parse(init.body)); runnerEntered.resolve();
           if (providerGate) await providerGate.promise;
           return Response.json({ answers:[{name:'board_view', type:'choice', choice:pair, confidence:.94,
