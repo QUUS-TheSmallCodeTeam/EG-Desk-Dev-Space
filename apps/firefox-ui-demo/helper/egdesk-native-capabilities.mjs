@@ -2,7 +2,7 @@ import { accessSync, constants, realpathSync, statSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
-import { fingerprintNativeExecutable, probeGeneratedNativeSchema, probeThreadDeleteSchema } from './codex-native-schema-probe.mjs'
+import { fingerprintNativeExecutable, probeGeneratedNativeSchema, probeThreadDeleteSchema, probeTurnSteerSchema } from './codex-native-schema-probe.mjs'
 
 // These exact versions were checked against their generated experimental
 // schemas and the public App Server contract. Each selected binary must still
@@ -65,6 +65,19 @@ const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', '
 // envOverrides.CODEX_HOME for the spawn. The bridge passes none today: Codex
 // runs one app-server on the shared ~/.codex login until per-profile
 // app-servers (own port, own process) are added.
+/**
+ * c23: EG-Desk's own model and effort for an own-tools thread (the same EGDESK_CODEX_MODEL / EGDESK_CODEX_EFFORT the launch builder reads, same
+ * validation). null when neither is set; { model?, effort? } otherwise. Throws the launch builder's coded errors on a bad value.
+ */
+export function egdeskCodexSelectionFromEnv(env = process.env) {
+  const hasModel = Object.hasOwn(env, 'EGDESK_CODEX_MODEL'), hasEffort = Object.hasOwn(env, 'EGDESK_CODEX_EFFORT')
+  if (!hasModel && !hasEffort) return null
+  const model = hasModel ? env.EGDESK_CODEX_MODEL : null, effort = hasEffort ? env.EGDESK_CODEX_EFFORT : null
+  if (hasModel && (typeof model !== 'string' || !MODEL_ID.test(model))) throw Object.assign(new Error('EGDESK_CODEX_MODEL must be a bounded model identifier'), { code: 'INVALID_CODEX_MODEL_OVERRIDE' })
+  if (hasEffort && (typeof effort !== 'string' || !REASONING_EFFORTS.has(effort))) throw Object.assign(new Error('EGDESK_CODEX_EFFORT must be a supported reasoning effort'), { code: 'INVALID_CODEX_EFFORT_OVERRIDE' })
+  return { ...(hasModel ? { model } : {}), ...(hasEffort ? { effort } : {}) }
+}
+
 export function buildCodexAppServerLaunch({ env = process.env, listen, codexHome = null } = {}) {
   if (typeof listen !== 'string' || !listen) throw new TypeError('An app-server listen URL is required')
   if (codexHome != null && (typeof codexHome !== 'string' || !path.isAbsolute(codexHome) || codexHome.includes('\0') || codexHome.length > 4096)) {
@@ -166,7 +179,7 @@ export function resolveCodexExecutable(env = process.env, { platform = process.p
   throw new Error('Configured Codex executable is unavailable; set EGDESK_CODEX_BIN to an existing absolute executable path')
 }
 
-export function inspectNativeCapabilities({ executable, env = process.env, cwd = process.cwd(), run = spawnSync, probe = probeGeneratedNativeSchema, fingerprint = fingerprintNativeExecutable, deleteProbe = probeThreadDeleteSchema }) {
+export function inspectNativeCapabilities({ executable, env = process.env, cwd = process.cwd(), run = spawnSync, probe = probeGeneratedNativeSchema, fingerprint = fingerprintNativeExecutable, deleteProbe = probeThreadDeleteSchema, steerProbe = probeTurnSteerSchema }) {
   const result = run(executable, ['--version'], { env, cwd, encoding: 'utf8', timeout: 5000, maxBuffer: 4096, stdio: ['ignore', 'pipe', 'pipe'] })
   const version = result.status === 0 ? String(result.stdout || '').trim().match(/^codex-cli (\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$/)?.[1] || null : null
   let proof = null, binaryFingerprint = null
@@ -184,6 +197,15 @@ export function inspectNativeCapabilities({ executable, env = process.env, cwd =
     if (/^[a-f0-9]{64}$/.test(deleteFingerprint || '') && !deleteBinary) deleteBinary = fingerprint(executable)
   } catch { deleteFingerprint = null }
   const threadDelete = /^[a-f0-9]{64}$/.test(deleteFingerprint || '') && /^[a-f0-9]{64}$/.test(deleteBinary || '')
+  // turn/steer (c23): a capability of this binary's own generated schema, for any identified version (no version pin); it covers a plain message
+  // steered into a working turn only, never additional context (that stays the board peer contract).
+  let steerFingerprint = null, steerBinary = deleteBinary || binaryFingerprint
+  try {
+    steerFingerprint = CONTEXT_CONTRACT_VERSIONS.has(version) ? proof?.turnSteerSchemaFingerprint ?? null : version ? steerProbe({ executable, env, cwd, run }) : null
+    if (/^[a-f0-9]{64}$/.test(steerFingerprint || '') && !steerBinary) steerBinary = fingerprint(executable)
+  } catch { steerFingerprint = null }
+  const steerContract = /^[a-f0-9]{64}$/.test(steerFingerprint || '') && /^[a-f0-9]{64}$/.test(steerBinary || '')
+    ? createHash('sha256').update(`steer\0${version}\0${steerBinary}\0${steerFingerprint}`).digest('hex') : null
   const contextContract = CONTEXT_CONTRACT_VERSIONS.has(version) && proof?.contextContract === true && /^[a-f0-9]{64}$/.test(binaryFingerprint || '')
   const qaContract = contextContract && QA_POLICY_CONTRACT_VERSIONS.has(version) && proof.qaContract === true
   const contractFingerprint = contextContract ? createHash('sha256').update(`${version}\0${binaryFingerprint}\0${proof.schemaFingerprint}`).digest('hex') : null
@@ -200,6 +222,8 @@ export function inspectNativeCapabilities({ executable, env = process.env, cwd =
       ? createHash('sha256').update(contractFingerprint + '\0' + proof.boardPeerSchemaFingerprint).digest('hex') : null,
     // The generated schema of this binary lists thread/delete with { threadId }: deleting a conversation also deletes its native thread.
     threadDelete,
+    // A plain message may be steered into a working turn: the schema of this binary has turn/steer in the shape verifyTurnSteerSchema reads.
+    steerContract,
     binaryFingerprint: contextContract ? binaryFingerprint : null,
     schemaFingerprint: contextContract ? proof.schemaFingerprint : null,
     contractFingerprint,
@@ -219,6 +243,7 @@ export function capabilitiesOf(native) {
     dynamicTools: native.dynamicTools === true, qaReadOnly: native.qaReadOnly === true, ephemeral: native.schemaMatch === true,
     turnSteer: typeof native.boardPeerContract === 'string' && native.boardPeerContract.length > 0, threadDelete: native.threadDelete === true,
     boardPeerContract: typeof native.boardPeerContract === 'string' ? native.boardPeerContract : null,
+    steer: typeof native.steerContract === 'string' && native.steerContract.length > 0, steerContract: typeof native.steerContract === 'string' ? native.steerContract : null,
     executable: native.executable ?? null,
   })
 }

@@ -27,7 +27,7 @@ function tmp(t) {
 }
 
 // ---- fakes ----
-function world(t, fakeScript, { decisions = false, home = { kind: 'person', dir: null }, model = null, effort = null } = {}) {
+function world(t, fakeScript, { decisions = false, home = { kind: 'person', dir: null }, model = null, effort = null, downgrade = false } = {}) {
   const base = tmp(t), out = path.join(base, 'out'), codexHome = path.join(base, 'codex-home')
   fs.mkdirSync(codexHome)
   const spawns = [], ranCommands = [], decisionCalls = [], stderrLines = []
@@ -36,7 +36,14 @@ function world(t, fakeScript, { decisions = false, home = { kind: 'person', dir:
     const child = new EventEmitter()
     Object.assign(child, { pid: 4242 + spawns.length, stdin, stdout, stderr, exitCode: null, signalCode: null, kill: () => true })
     spawns.push({ bin, argv, options })
-    runFakeAppServer({ script: fakeScript, log: path.join(base, 'fake-app-server.log'), input: stdin, output: stdout, stderr: { write: line => { stderrLines.push(line); stderr.write(line) } }, env: options.env, exit: code => { child.exitCode = code; child.emit('close', code, null) } })
+    // downgrade: the thread/start of the product before c23 (no developer instructions, the permissions block on), for a control run
+    let fakeInput = stdin
+    if (downgrade) {
+      fakeInput = new PassThrough()
+      stdin.on('data', chunk => { for (const line of String(chunk).split('\n').filter(Boolean)) { const m = JSON.parse(line); if (m.method === 'thread/start') { delete m.params.developerInstructions; delete m.params.config?.include_permissions_instructions } fakeInput.write(`${JSON.stringify(m)}\n`) } })
+      stdin.on('end', () => fakeInput.end())
+    }
+    runFakeAppServer({ script: fakeScript, log: path.join(base, 'fake-app-server.log'), input: fakeInput, output: stdout, stderr: { write: line => { stderrLines.push(line); stderr.write(line) } }, env: options.env, exit: code => { child.exitCode = code; child.emit('close', code, null) } })
     return child
   }
   const killGroup = async child => { child.stdin.end(); await new Promise(resolve => { if (child.exitCode != null) return resolve(); child.once('close', resolve); setTimeout(resolve, 500) }); return { signal: 'SIGTERM' } }
@@ -269,6 +276,24 @@ test('starter (c): an edit with a preview and an undo record; the undo restores 
   assert.deepEqual(w.ranCommands, []); noSchemaErrors(w)
 })
 
+test('c23: the engine that refuses edits "because the filesystem is read-only" (Main\'s check-1 on 0.171) edits through egdesk_edit_file once it is told what the tools are', async t => {
+  const fake = { refuseEditsUnlessInstructed: true, turns: [
+    { steps: [{ toolCall: { tool: 'egdesk_edit_file', arguments: { path: 'app.js', mode: 'replace', oldString: "'hello'", newString: "'hi'", dryRun: true } } },
+      { toolCall: { tool: 'egdesk_edit_file', arguments: { path: 'app.js', mode: 'replace', oldString: "'hello'", newString: "'hi'" } } }], final: 'Changed hello to hi.' },
+    { steps: [{ toolCall: { tool: 'egdesk_undo_edit', arguments: {} } }], final: 'Undone.' }] }
+  const w = world(t, fake)
+  const rec = only(await runCheck(w.options, asScripts(starter('edit-undo')), w.deps))
+  assert.equal(rec.aborted, null); assert.equal(rec.ok, true, JSON.stringify(rec.turns.map(x => x.expectations)))
+  const start = wireLog(w).find(m => m.dir === 'in' && m.method === 'thread/start').params
+  assert.match(start.developerInstructions, /egdesk_edit_file/); assert.equal(start.config.include_permissions_instructions, false)
+  // the control: the same fake and script through the thread/start of the product before c23 refuses, and the check reports a failed turn
+  const bare = world(t, fake, { downgrade: true })
+  const old = only(await runCheck(bare.options, asScripts(starter('edit-undo')), bare.deps))
+  assert.equal(old.ok, false); assert.equal(old.turns[0].expectations.find(c => c.check === 'toolCalls').ok, false)
+  assert.match(old.turns[0].posted.at(-1), /filesystem permissions are read-only/)
+  assert.equal(fs.readFileSync(path.join(bare.out, 'scratch', 'edit-undo', 'app.js'), 'utf8').includes("'hello'"), true, 'nothing was changed')
+})
+
 test('a native command or file change is declined by the runtime and the check reports it (noNativeTools fails)', async t => {
   const script = { set: 'real-engine-native-v1', conversations: [{ id: 'native', turns: [{ say: 'List the files', expect: { noNativeTools: true } }] }] }
   const fake = { turns: [{ steps: [{ nativeCommand: { command: 'rm -rf src' } }], final: 'I could not run it.' }] }
@@ -332,7 +357,7 @@ test('the person\'s own MCP servers, plugins and instruction files do not reach 
   assert.deepEqual(seen.mcpStartup, { starting: 3, ready: 3, failed: 0, other: 0 })
 })
 
-test('the composition reproduces the bridge: every decisionContext key and developer flag of codex-bridge-server.mjs is covered or listed as not reproduced', () => {
+test('the composition reproduces the bridge: every decisionContext key, runtime option and developer flag of codex-bridge-server.mjs is covered or listed as not reproduced', () => {
   const bridge = fs.readFileSync(path.join(here, 'codex-bridge-server.mjs'), 'utf8')
   const start = bridge.indexOf('  decisionContext: {'), end = bridge.indexOf('\n  },\n})', start)
   assert.ok(start > 0 && end > start, 'the bridge\'s decisionContext block was found')
@@ -340,10 +365,21 @@ test('the composition reproduces the bridge: every decisionContext key and devel
   const keys = new Set([...block.matchAll(/^ {4}(?:\.\.\.\([^\n]*?\{ ([a-zA-Z]+)[:,]|get ([a-zA-Z]+)\(\)|([a-zA-Z]+)[:,])/gm)].map(m => m[1] ?? m[2] ?? m[3]))
   const covered = new Set([...BRIDGE_COMPOSITION.keys, ...BRIDGE_COMPOSITION.notReproduced.keys])
   for (const key of keys) assert.ok(covered.has(key), `the bridge's decisionContext has "${key}" and the real-engine check neither reproduces nor lists it`)
-  const flags = new Set([...block.matchAll(/process\.env\.(EGDESK_[A-Z_]+)/g)].map(m => m[1]))
+  // the runtime's own options (the lines between "new CodexChatRuntime({" and "decisionContext: {")
+  const open = bridge.indexOf('const chat = new CodexChatRuntime({'), runtimeBlock = bridge.slice(open, start)
+  const runtimeKeys = new Set([...runtimeBlock.matchAll(/^ {2}(?:\.\.\.\(([a-zA-Z]+)|([a-zA-Z]+)[:,])/gm)].map(m => m[1] ?? m[2]))
+  assert.ok(runtimeKeys.size >= 10, 'the runtime options were found: ' + [...runtimeKeys].join(','))
+  const coveredRuntime = new Set([...BRIDGE_COMPOSITION.runtimeKeys, ...BRIDGE_COMPOSITION.notReproduced.runtimeKeys])
+  for (const key of runtimeKeys) assert.ok(coveredRuntime.has(key), `the bridge passes "${key}" to CodexChatRuntime and the real-engine check neither reproduces nor lists it`)
+  // every developer flag the bridge file reads, wherever it reads it
+  const flags = new Set([...bridge.matchAll(/process\.env\.(EGDESK_[A-Z0-9_]+)/g)].map(m => m[1]))
   const coveredFlags = new Set([...BRIDGE_COMPOSITION.flags, ...BRIDGE_COMPOSITION.notReproduced.flags])
-  for (const flag of flags) assert.ok(coveredFlags.has(flag), `the bridge reads ${flag} in decisionContext; the real-engine check does not list it`)
-  // the bridge's own tools wiring is the same module
+  for (const flag of flags) assert.ok(coveredFlags.has(flag), `the bridge reads ${flag}; the real-engine check does not list it`)
+  // the lists carry nothing the bridge does not have (a stale entry would hide a missing one)
+  for (const key of BRIDGE_COMPOSITION.notReproduced.keys) assert.ok(keys.has(key) || block.includes(key), 'stale entry: ' + key)
+  for (const key of BRIDGE_COMPOSITION.notReproduced.runtimeKeys) assert.ok(runtimeKeys.has(key), 'stale entry: ' + key)
+  // the warm-up flag is read in the helper the bridge calls, not in the bridge file
+  assert.match(bridge, /warmupConfigFromEnv\(process\.env\)/)
   assert.match(bridge, /createOwnToolsWiring\(/)
 })
 
@@ -393,7 +429,7 @@ const WHILE = { set: 'real-engine-while-v1', conversations: [{ id: 'while', flag
   { say: 'Where are you with it?', whileRunning: { afterMs: 60 }, expect: { posted: true, noNativeTools: true } }] }] }
 
 test('whileRunning: the second message goes into the working run (no new turn), both turns are awaited and each keeps its own expectations', async t => {
-  const fake = { turns: [{ steps: [{ delayMs: 400 }, { toolCall: { tool: 'egdesk_run_command', arguments: { command: 'npm test' } } }], final: 'The tests passed.' }] }
+  const fake = { turns: [{ steps: [{ delayMs: 1500 }, { toolCall: { tool: 'egdesk_run_command', arguments: { command: 'npm test' } } }], final: 'The tests passed.' }] }
   const w = world(t, fake)
   w.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: null })
   const rec = only(await runCheck(w.options, asScripts(WHILE), w.deps))
@@ -402,10 +438,10 @@ test('whileRunning: the second message goes into the working run (no new turn), 
   assert.equal(first.ok, true, JSON.stringify(first.expectations)); assert.equal(first.subTurns[0].status, 'completed', 'the working turn was not interrupted')
   assert.deepEqual(first.subTurns[0].commandsRan, ['npm test'])
   assert.equal(second.ok, true, JSON.stringify(second.expectations)); assert.deepEqual(second.whileRunning, { afterMs: 60 })
-  assert.equal(second.subTurns[0].accepted, true); assert.equal(second.expectations[0].check, 'sent_while_running'); assert.ok(second.subTurns[0].sentAtMs >= 60 && second.subTurns[0].sentAtMs < 400, 'sent ' + second.subTurns[0].sentAtMs + ' ms after the first turn started')
+  assert.equal(second.subTurns[0].accepted, true); assert.equal(second.expectations[0].check, 'sent_while_running'); assert.ok(second.subTurns[0].sentAtMs >= 60 && second.subTurns[0].sentAtMs < 1500, 'sent ' + second.subTurns[0].sentAtMs + ' ms after the first turn started')
   assert.match(second.posted.at(-1), /tests passed/, 'the messages after it was sent include the run\'s own answer')
   assert.equal(wireLog(w).filter(m => m.dir === 'in' && m.method === 'turn/start').length, 1, 'the message typed into the run started no turn of its own')
-  assert.deepEqual(rec.engine.nativeContract, { version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: false }, 'the steer contract the product would use: none on this binary')
+  assert.deepEqual(rec.engine.nativeContract, { version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: false, steerContract: false, threadDelete: false }, 'no steer contract on this (stubbed) binary')
   noSchemaErrors(w)
 })
 
@@ -419,4 +455,129 @@ test('whileRunning: a run that ended before afterMs no longer takes the message;
   assert.deepEqual(second.expectations[0], { check: 'sent_while_running', ok: false, detail: { afterMs: 500, sentAtMs: second.expectations[0].detail.sentAtMs, error: 'INRUN_MESSAGE_UNAVAILABLE' } })
   assert.equal(rec.turns[0].ok, true, 'the first turn is judged on its own record'); assert.equal(rec.ok, false)
   assert.equal(rec.engine.nativeContract.boardPeerContract, true)
+})
+
+// ---- action turns: interrupt, steer, delete (c23; field names agreed with lane L3) ----
+test('action turns: the validator takes interrupt, steer and delete with their own rules', () => {
+  const base = turns => ({ set: 'real-engine-a-v1', conversations: [{ id: 'c', turns }] })
+  const errors = turns => validateEngineScript(base(turns)).errors.join('\n')
+  for (const turns of [[{ say: 'a' }, { action: 'interrupt', afterMs: 100 }], [{ say: 'a' }, { action: 'steer', say: 'b', afterMs: 5 }], [{ say: 'a' }, { action: 'delete', expect: { conversationGone: true } }, { say: 'b' }], [{ say: 'a' }, { action: 'interrupt' }]]) assert.equal(errors(turns), '')
+  assert.match(errors([{ action: 'delete' }]), /cannot be the first turn/)
+  assert.match(errors([{ say: 'a' }, { action: 'steer' }]), /steer needs a string/)
+  assert.match(errors([{ say: 'a' }, { action: 'interrupt', say: 'x' }]), /interrupt takes no say/)
+  assert.match(errors([{ say: 'a' }, { action: 'delete', say: 'x' }]), /delete takes no say/)
+  assert.match(errors([{ say: 'a' }, { action: 'delete', afterMs: 1 }]), /delete takes no afterMs/)
+  assert.match(errors([{ say: 'a' }, { action: 'interrupt', afterMs: 120001 }]), /afterMs/)
+  assert.match(errors([{ say: 'a' }, { action: 'pause' }]), /one of interrupt, steer, delete/)
+  assert.match(errors([{ say: 'a', afterMs: 3 }]), /only an interrupt or steer action takes afterMs/)
+  assert.match(errors([{ say: 'a' }, { action: 'delete', approve: ['no'] }]), /takes no approve/)
+  assert.match(errors([{ say: 'a' }, { action: 'interrupt', whileRunning: { afterMs: 1 } }]), /not also a whileRunning/)
+  assert.match(errors([{ say: 'a' }, { action: 'interrupt' }, { action: 'steer', say: 'b' }]), /must follow a plain message turn/)
+  assert.match(errors([{ say: 'a' }, { action: 'interrupt' }, { say: 'b', whileRunning: { afterMs: 1 } }]), /cannot follow an action turn/)
+  assert.match(errors([{ say: 'a' }, { say: 'b' }, { expect: {} }]), /say/)
+  assert.deepEqual(REAL_ENGINE_SCRIPT_SCHEMA.properties.conversations.items.properties.turns.items.properties.action.enum, ['interrupt', 'steer', 'delete'])
+  // the new expectations
+  assert.equal(checkTurnExpectations({ commandsRanIncludes: ['a.txt', 'b'], commandsRanExcludes: ['rm'] }, { commandsRan: ['cat a.txt && echo b'] }).every(c => c.ok), true, 'substrings, for a model that batches commands')
+  assert.equal(checkTurnExpectations({ commandsRanIncludes: ['zzz'] }, { commandsRan: ['ls'] })[0].ok, false)
+  assert.equal(checkTurnExpectations({ commandsRanExcludes: ['push'] }, { commandsRan: ['git push origin'] })[0].ok, false)
+  assert.equal(checkTurnExpectations({ conversationGone: true }, { conversationGone: true })[0].ok, true)
+  assert.equal(checkTurnExpectations({ conversationGone: true }, {})[0].ok, false)
+})
+
+const SLOW = { set: 'real-engine-slow-actions-v1', conversations: [{ id: 'slow-actions', folder: { 'README.md': 'x\n' }, turns: [
+  { say: 'Do the long job', expect: { turnStatus: 'interrupted', posted: false } },
+  { action: 'interrupt', afterMs: 80, expect: { noNativeTools: true } }] }] }
+
+test('interrupt action: the person presses stop on the working run; the engine ends it as interrupted and nothing partial is posted', async t => {
+  const w = world(t, { turns: [{ steps: [{ delayMs: 2000 }], final: 'The job is done.' }] })
+  const started = performance.now()
+  const rec = only(await runCheck(w.options, asScripts(SLOW), w.deps))
+  assert.ok(performance.now() - started < 1800, 'the run did not go on to its end')
+  assert.equal(rec.aborted, null); assert.equal(rec.turns.length, 2)
+  const [first, second] = rec.turns
+  assert.equal(first.subTurns[0].status, 'interrupted'); assert.equal(first.ok, true, JSON.stringify(first.expectations)); assert.deepEqual(first.posted, [])
+  assert.equal(second.action, 'interrupt'); assert.equal(second.subTurns[0].accepted, true); assert.equal(second.expectations[0].check, 'action_taken'); assert.equal(second.ok, true, JSON.stringify(second.expectations))
+  assert.ok(second.subTurns[0].sentAtMs >= 80)
+  assert.equal(wireLog(w).filter(m => m.dir === 'in' && m.method === 'turn/interrupt').length, 1)
+  assert.equal(rec.ok, true); noSchemaErrors(w)
+})
+
+const STEER = { set: 'real-engine-steer-v1', conversations: [{ id: 'steer', folder: { 'plan.md': 'a\nb\n' }, turns: [
+  { say: 'Read plan.md and summarise it', expect: { answerIncludes: ['only the names'], turnStatus: 'completed', posted: true } },
+  { action: 'steer', say: 'Only give me the names', afterMs: 80, expect: { posted: true } }] }] }
+
+test('steer action: a plain turn/steer into the working turn through the product\'s adapter with the binary\'s steer contract; no contract, no steer', async t => {
+  const fake = { turns: [{ steps: [{ delayMs: 300 }], final: 'a long summary', steerFinal: 'only the names: a, b' }] }
+  const w = world(t, fake)
+  w.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: null, steerContract: 'd'.repeat(64) })
+  const rec = only(await runCheck(w.options, asScripts(STEER), w.deps))
+  assert.equal(rec.aborted, null)
+  const [first, second] = rec.turns
+  assert.equal(second.action, 'steer'); assert.equal(second.subTurns[0].accepted, true, JSON.stringify(second.subTurns)); assert.equal(second.ok, true, JSON.stringify(second.expectations))
+  assert.equal(first.ok, true, JSON.stringify(first.expectations)); assert.equal(first.subTurns[0].status, 'completed'); assert.equal(first.subTurns[0].items.userMessage, 2, 'the steer text appears as a user message inside the running turn')
+  const steer = wireLog(w).find(m => m.dir === 'in' && m.method === 'turn/steer').params
+  const turnId = wireLog(w).find(m => m.dir === 'out' && m.result?.turn?.id)?.result.turn.id
+  assert.ok(turnId); assert.equal(steer.expectedTurnId, turnId, 'the steer names the running turn'); assert.equal(steer.input[0].text, 'Only give me the names'); assert.match(steer.clientUserMessageId, /^steer-/)
+  assert.equal(wireLog(w).filter(m => m.dir === 'in' && m.method === 'turn/start').length, 1, 'a steer starts no turn')
+  assert.deepEqual(rec.engine.nativeContract, { version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: false, steerContract: true, threadDelete: false })
+  noSchemaErrors(w)
+  // a binary without the capability: the product refuses with no proof, the check says so, the turn itself still completes
+  const none = world(t, fake)
+  none.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: null, steerContract: null })
+  const refused = only(await runCheck(none.options, asScripts(STEER), none.deps))
+  assert.equal(refused.turns[1].ok, false); assert.equal(refused.turns[1].subTurns[0].error, 'no_steer_contract'); assert.equal(refused.turns[1].expectations[0].check, 'action_taken')
+  assert.equal(wireLog(none).filter(m => m.dir === 'in' && m.method === 'turn/steer').length, 0, 'nothing was sent')
+  assert.equal(refused.turns[0].subTurns[0].status, 'completed')
+  assert.equal(refused.turns[0].ok, false, 'the first turn expected the steered answer')
+})
+
+test('delete action: the conversation is forgotten; the next message turn starts a new one (new thread, nothing remembered)', async t => {
+  const script = { set: 'real-engine-delete-v1', conversations: [{ id: 'del', turns: [
+    { say: 'remember this', expect: { posted: true, turnStatus: 'completed' } },
+    { action: 'delete', expect: { conversationGone: true } },
+    { say: 'what did I say?', expect: { posted: true, answerIncludes: ['nothing'] } }] }] }
+  const w = world(t, { turns: [{ steps: [], final: 'ok, noted' }, { steps: [], final: 'nothing yet' }] })
+  w.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: null, steerContract: null, threadDelete: false })
+  const rec = only(await runCheck(w.options, asScripts(script), w.deps))
+  assert.equal(rec.aborted, null); assert.equal(rec.turns.length, 3)
+  const [, del, third] = rec.turns
+  assert.equal(del.action, 'delete'); assert.equal(del.subTurns[0].conversationGone, true); assert.equal(del.subTurns[0].summary.stored, false); assert.equal(del.ok, true, JSON.stringify(del.expectations))
+  assert.deepEqual(del.subTurns[0].summary.engineHistory, [{ state: 'remains', reason: 'unsupported' }], 'this binary has no thread/delete: the engine keeps its (ephemeral) thread')
+  assert.equal(third.ok, true, JSON.stringify(third.expectations)); assert.deepEqual(third.posted, ['nothing yet'])
+  assert.equal(wireLog(w).filter(m => m.dir === 'in' && m.method === 'thread/start').length, 2, 'two native threads: the new conversation is a new thread')
+  assert.equal(rec.ok, true); noSchemaErrors(w)
+})
+
+test('extensions: one small registration point; a module sees the composed runtime, every turn record and the end; a broken one never changes the verdict', async t => {
+  const seen = []
+  const good = { name: 'stub-good', setup: ctx => { seen.push(['setup', Object.keys(ctx).sort()]); return { afterTurn: (record, info) => seen.push(['turn', record.index, info.index]), finish: () => ({ turns: seen.filter(x => x[0] === 'turn').length }) } } }
+  const broken = { name: 'stub-broken', setup: () => ({ afterTurn: () => { throw Object.assign(new Error('boom'), { code: 'EXT_BOOM' }) } }) }
+  const failing = { name: 'stub-setup-fails', setup: () => { throw new Error('no setup') } }
+  const script = { set: 'real-engine-ext-v1', conversations: [{ id: 'ext', turns: [{ say: 'one', expect: { posted: true } }, { say: 'two', expect: { posted: true } }] }] }
+  const w = world(t, { turns: [{ steps: [], final: 'a' }, { steps: [], final: 'b' }] })
+  w.deps.extensions = [good, broken, failing]
+  const rec = only(await runCheck(w.options, asScripts(script), w.deps))
+  assert.equal(rec.ok, true, 'the extensions did not change the verdict')
+  assert.deepEqual(seen.filter(x => x[0] === 'turn'), [['turn', 1, 0], ['turn', 2, 1]])
+  assert.deepEqual(seen[0][1], ['calibrationLog', 'chat', 'client', 'conversation', 'dataDir', 'flags', 'options', 'rec', 'request', 'scratch', 'store', 'wiring'])
+  assert.deepEqual(rec.extensions['stub-good'], { turns: 2 }); assert.deepEqual(rec.extensions['stub-broken'], { error: 'EXT_BOOM' }); assert.deepEqual(rec.extensions['stub-setup-fails'], { error: 'no setup' })
+  const plain = world(t, { turns: [{ steps: [], final: 'a' }, { steps: [], final: 'b' }] })
+  assert.equal(only(await runCheck(plain.options, asScripts(script), plain.deps)).extensions, undefined, 'no extension: nothing added to the record')
+})
+
+test('EG-Desk\'s own model and effort (env) are what an own-tools thread runs with when nothing in the request names one; --model and --effort win', async t => {
+  const script = { set: 'real-engine-own-model-v1', conversations: [{ id: 'own-model', turns: [{ say: 'hi', expect: { posted: true } }] }] }
+  const turnParams = w => wireLog(w).find(m => m.dir === 'in' && m.method === 'turn/start').params
+  const w = world(t, { turns: [{ steps: [], final: 'a' }] })
+  w.deps.env = { ...w.deps.env, EGDESK_CODEX_MODEL: 'egdesk-model', EGDESK_CODEX_EFFORT: 'low' }
+  assert.equal(only(await runCheck(w.options, asScripts(script), w.deps)).ok, true)
+  assert.equal(turnParams(w).model, 'egdesk-model'); assert.equal(turnParams(w).effort, 'low')
+  assert.equal(wireLog(w).find(m => m.dir === 'in' && m.method === 'thread/start').params.model, 'egdesk-model')
+  const asked = world(t, { turns: [{ steps: [], final: 'a' }] }, { model: 'asked-model', effort: 'high' })
+  asked.deps.env = { ...asked.deps.env, EGDESK_CODEX_MODEL: 'egdesk-model', EGDESK_CODEX_EFFORT: 'low' }
+  assert.equal(only(await runCheck(asked.options, asScripts(script), asked.deps)).ok, true)
+  assert.equal(turnParams(asked).model, 'asked-model'); assert.equal(turnParams(asked).effort, 'high')
+  const none = world(t, { turns: [{ steps: [], final: 'a' }] })
+  assert.equal(only(await runCheck(none.options, asScripts(script), none.deps)).ok, true)
+  assert.equal(turnParams(none).model, undefined, 'nothing configured by EG-Desk: the engine\'s own default (reported as a gap)')
 })
