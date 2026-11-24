@@ -656,7 +656,7 @@ test('about, no candidate: nothing asks "new or none"; the three utterances beco
 test('about, with candidates: a completion report is a status change of the one plan record; look-alikes block; a correction is a pending "superseded" reading plus a page that supersedes', async () => {
   const wiki = buildWiki(SYNTHETIC_PAGES), pages = pgPages(wiki), client = recording()
   const done = await about('PostgreSQL 마이그레이션 배포 끝났어', pages, client)
-  assert.deepEqual(client.seen[0].questions.map(q => q.name), ['tw_status', 'tw_about_0', 'tw_about_1', 'tw_about_2', 'tw_about_3', 'tw_link_0', 'tw_link_1', 'tw_link_2', 'tw_link_3', 'speech_source_0', 'speech_form_0', 'speech_time_0'])
+  assert.deepEqual(client.seen.map(req => req.questions.map(q => q.name)), [['tw_status', 'tw_about_0', 'tw_about_1', 'tw_about_2', 'tw_about_3', 'speech_source_0', 'speech_form_0', 'speech_time_0']], 'one request; a status change of an existing record asks for no links')
   assert.ok(!client.seen[0].questions.some(q => q.name === 'tw_target') && client.seen[0].questions.filter(q => q.type === 'choice').every(q => !q.choices.some(c => ['new', 'none'].includes(c.value))))
   assert.deepEqual([done.proposal.op, done.proposal.pageId, done.proposal.proposedStatus, done.proposal.baseRevision], ['update_status', 'db/pg-plan', 'done', wiki.pages.get('db/pg-plan').revision])
   assert.deepEqual([done.receipt.target.value, done.receipt.target.reason, done.receipt.target.about], ['P2', 'one_record', [0.03, 0.95, 0.03, 0.03]])
@@ -666,7 +666,12 @@ test('about, with candidates: a completion report is a status change of the one 
   assert.deepEqual((await about('PostgreSQL 마이그레이션 배포 끝났어', pages, answer({ tw_about_3: { type: 'predicate', probability: 0.9 } }))).proposal, { op: 'none', reason: 'target_ambiguous' })
   assert.deepEqual((await about('PostgreSQL 마이그레이션 배포 끝났어', pages, answer({ tw_about_3: { type: 'predicate', probability: 0.5 } }))).proposal, { op: 'none', reason: 'target_undecided' })
   // a new fact beside related records: a new page, linked to the records of the same case, about none of them
-  const fresh = await about('PostgreSQL 마이그레이션 헬스체크 3종 중 응답 시간 항목이 어제 500ms를 넘었다고 들었어.', pages)
+  const second = recording()
+  const fresh = await about('PostgreSQL 마이그레이션 헬스체크 3종 중 응답 시간 항목이 어제 500ms를 넘었다고 들었어.', pages, second)
+  assert.deepEqual(second.seen.map(req => req.questions.map(q => q.name.replace(/_\d+$/, ''))).map(n => [...new Set(n)]), [['tw_status', 'tw_about', 'speech_source', 'speech_form', 'speech_time'], ['tw_link']], 'links are asked only now, in a second small request')
+  assert.equal(fresh.receipt.linkCalls, 1)
+  const broken = { n: 0, async decide(req) { if (++this.n === 2) throw Object.assign(new Error('x'), { code: 'rate_limited' }); return mockJudge().decide(req) } }
+  assert.deepEqual((await about('PostgreSQL 마이그레이션 헬스체크 3종 중 응답 시간 항목이 어제 500ms를 넘었다고 들었어.', pages, broken)).proposal.links, [], 'a failed link request costs the links, not the page')
   assert.equal(fresh.proposal.op, 'new_page'); assert.equal(fresh.receipt.target.reason, 'no_record_fits'); assert.ok(fresh.proposal.links.length >= 1 && fresh.proposal.links.every(l => l.type === 'same_task'))
   // a correction
   const due = buildWiki([{ id: 'order/due', title: 'B사 납품 일정', body: 'B사 납기는 12월 3일로 정했다. 수량은 200개다.', revision: '1', time: { slice: 'planned' }, provenance: { kind: 'own_record' }, status: 'plan', scope: 'dm:this-room' },

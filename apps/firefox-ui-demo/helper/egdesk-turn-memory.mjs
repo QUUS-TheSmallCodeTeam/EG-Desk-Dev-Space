@@ -212,11 +212,22 @@ async function judgeWriteAbout({ message, pages, spans, client, askedAt, signal,
       { value: 'corrected', description: 'A recorded detail is wrong or has changed, and the message gives the detail that replaces it.' },
       { value: 'unknown', description: 'The message gives none of these, or it cannot be told.' }]),
     ...pages.map((_, i) => predicateQuestion(`tw_about_${i}`, `Is this message about the very record ${stableAlias(i)}: does it report on, complete, change or correct what ${stableAlias(i)} itself records?`)),
-    ...pages.map((_, i) => predicateQuestion(`tw_link_${i}`, `Does this message belong to the same task or case as record ${stableAlias(i)}, whether or not it is about that record itself?`)),
     ...speechDesignQuestions('axes-isolated', spans, message)]
   const input = [{ role: 'developer', content: ABOUT_RULES },
     { role: 'user', content: `Stored records:\n${pages.length ? pages.map((p, i) => pageBlock(stableAlias(i), p, 500)).join('\n\n') : '(none)'}` },
     { role: 'user', content: `${clockLine(askedAt)}\nMessage:\n${message}` }]
+  // Which stored records a NEW page belongs with is asked only when a new page is really going to be proposed (a status change of an
+  // existing record needs no links): a second, small request with the same records. If it fails the page simply has no links.
+  let linkCalls = 0
+  const related = async skip => {
+    const asked = pages.map((p, i) => ({ p, i })).filter(({ i }) => i !== skip)
+    if (!asked.length) return []
+    linkCalls++
+    try {
+      const linked = await client.decide({ input, questions: asked.map(({ i }) => predicateQuestion(`tw_link_${i}`, `Does this message belong to the same task or case as record ${stableAlias(i)}, whether or not it is about that record itself?`)), timeoutMs, signal })
+      return asked.filter(({ i }) => ternary(linked.answers?.[`tw_link_${i}`]).state === 'yes').map(({ p }) => ({ type: 'same_task', to: p.id }))
+    } catch { return [] }
+  }
   let result
   try { result = await client.decide({ input, questions, timeoutMs, signal }) } catch (error) { return none('judge_failed', { code: error?.code ?? 'unreachable' }) }
   const abouts = pages.map((_, i) => ternary(result.answers?.[`tw_about_${i}`]))
@@ -233,10 +244,10 @@ async function judgeWriteAbout({ message, pages, spans, client, askedAt, signal,
   if (derived.target === null) return { proposal: { op: 'none', reason: derived.reason }, receipt }
   if (!rec.recordable) return { proposal: { op: 'none', reason: 'question' }, receipt }
   const spokenAt = Number.isSafeInteger(askedAt) ? new Date(askedAt).toISOString() : null
-  const related = skip => pages.map((p, i) => ({ p, i })).filter(({ i }) => i !== skip && ternary(result.answers?.[`tw_link_${i}`]).state === 'yes').map(({ p }) => ({ type: 'same_task', to: p.id }))
   if (derived.target === 'new') {
     if (rec.slice === 'unknown') return { proposal: { op: 'none', reason: 'time_slice_unclear' }, receipt }
-    return { proposal: { op: 'new_page', time: { slice: rec.slice }, status: rec.status, provenance: rec.provenance, links: related(-1), spokenAt }, receipt }
+    const links = await related(-1)
+    return { proposal: { op: 'new_page', time: { slice: rec.slice }, status: rec.status, provenance: rec.provenance, links, spokenAt }, receipt: { ...receipt, linkCalls } }
   }
   const page = pages[derived.target]
   if (state === 'corrected') {
@@ -245,8 +256,8 @@ async function judgeWriteAbout({ message, pages, spans, client, askedAt, signal,
     // When the sentence's own time cannot be read, the correction stands in the time of the record it corrects (it is about the same thing).
     const slice = rec.slice !== 'unknown' ? rec.slice : ['past', 'present', 'planned', 'hypothetical'].includes(page.time.slice) ? page.time.slice : null
     if (!slice) return { proposal: { op: 'none', reason: 'time_slice_unclear' }, receipt }
-    const followUp = { op: 'new_page', time: { slice }, status: rec.status, provenance: rec.provenance, links: [{ type: 'supersedes', to: page.id }, ...related(derived.target)], spokenAt }
-    return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: 'superseded', time: { slice }, provenance: rec.provenance, spokenAt }, followUp, receipt }
+    const followUp = { op: 'new_page', time: { slice }, status: rec.status, provenance: rec.provenance, links: [{ type: 'supersedes', to: page.id }, ...(await related(derived.target))], spokenAt }
+    return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: 'superseded', time: { slice }, provenance: rec.provenance, spokenAt }, followUp, receipt: { ...receipt, linkCalls } }
   }
   if (rec.status !== 'plan' && rec.status !== 'done') return { proposal: { op: 'none', reason: 'status_unclear' }, receipt }
   return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: rec.status, time: { slice: rec.slice }, provenance: rec.provenance, spokenAt }, receipt }
