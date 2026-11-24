@@ -313,7 +313,7 @@ function sameThreadChat(chat, { wanted }) {
       if (busy(entry.body.conversationId)) { index += 1; continue }
       waiting.splice(index, 1)
       if (!wanted(entry.body)) { entry.reject(nativeTaskError('TASK_FENCED', 'The task stopped before its conversation was free')); continue }
-      try { entry.resolve(chat.send(entry.body)) } catch (error) { entry.reject(error) }
+      try { entry.resolve(chat.send(entry.body, entry.internal)) } catch (error) { entry.reject(error) }
     }
     if (waiting.length && !timer) {
       timer = setTimeout(() => { timer = null; pump() }, 250)
@@ -321,12 +321,12 @@ function sameThreadChat(chat, { wanted }) {
     }
   }
   return {
-    send(body) {
+    send(body, internal) {
       const conversationId = body?.conversationId
       if (typeof conversationId !== 'string' || (!busy(conversationId) && !waiting.some(entry => entry.body.conversationId === conversationId))) {
-        return chat.send(body)
+        return internal === undefined ? chat.send(body) : chat.send(body, internal)
       }
-      return new Promise((resolve, reject) => { waiting.push({ body, resolve, reject }); pump() })
+      return new Promise((resolve, reject) => { waiting.push({ body, internal, resolve, reject }); pump() })
     },
     interrupt: (...args) => chat.interrupt(...args),
     resume: (...args) => chat.resume(...args),

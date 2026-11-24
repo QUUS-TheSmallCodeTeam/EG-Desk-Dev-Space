@@ -18,9 +18,9 @@ const PLAN = { title: 'Quarterly report', tasks: [{ taskId: 'collect', title: 'C
 
 async function fixture(t, { flag = true, defaultOwner = null } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-plan-room-'))
-  const w = { flag, defaultOwner, profiles: { [WORK]: 'email:work@example.test' }, threads: new Map([['conv-w', WORK], ['conv-d', MAIN]]), sends: [] }
+  const w = { flag, defaultOwner, profiles: { [WORK]: 'email:work@example.test' }, threads: new Map([['conv-w', WORK], ['conv-d', MAIN]]), sends: [], internals: [] }
   const chat = { threads: new Map(), conversationBusy: () => false, interrupt: async () => ({}), resume: async () => ({ runs: [] }), snapshot: () => ({ runs: [] }),
-    send: async body => { w.sends.push(body); return { accepted: true, requestId: body.requestId, conversationId: body.conversationId ?? 'child-conv', runId: 'native-run', answerId: `${body.conversationId ?? 'child-conv'}/native-run` } } }
+    send: async (body, internal) => { w.sends.push(body); w.internals.push(internal); return { accepted: true, requestId: body.requestId, conversationId: body.conversationId ?? 'child-conv', runId: 'native-run', answerId: `${body.conversationId ?? 'child-conv'}/native-run` } } }
   const ownerKeyFor = id => (w.flag && isProfileSlot(id) ? (w.profiles[id] ?? null) : w.defaultOwner)
   const runtime = await openWorkflowRuntime({ dataDir: dir, chat, port: 39218, broadcast() {}, ensureAuth: async () => {}, getOwnerKey: () => w.defaultOwner,
     ownerKeyFor, roomKeyed: () => w.flag, roomSlotOf: origin => { if (!w.flag) return undefined; const slot = origin?.engineProfileId ?? w.threads.get(origin?.conversationId); return isProfileSlot(slot) ? slot : undefined } })
@@ -118,4 +118,35 @@ test('the bridge gives the workflow runtime the slot-aware owner rule behind the
   assert.match(server, /ensureAuth: hints => ensureChatAuth\(hints\), getOwnerKey: \(\) => publicAuthIdentityKey\(authState\), maxConcurrency: 2, localCapacity,/)
   assert.match(server, /ownerKeyFor: browserOwnerKeyFor, roomKeyed: \(\) => process\.env\.EGDESK_ROOM_ACCOUNT === 'on',/)
   assert.match(server, /if \(process\.env\.EGDESK_ROOM_ACCOUNT !== 'on'\) return undefined\n    const slot = origin\?\.engineProfileId \?\? chat\.threadEngineProfile\(origin\?\.conversationId\)/)
+})
+
+const NEW_THREAD_PLAN = { title: 'Review elsewhere', tasks: [{ taskId: 'review', title: 'Review in a new room', instructions: 'Review the report for typos.', dependsOn: [], resumeIn: 'newThread' }] }
+async function approveAndWait(f, plan) {
+  await f.runtime.plans.approve(plan.planId)
+  for (let i = 0; i < 300 && !f.w.sends.length; i++) await delay(5)
+  assert.equal(f.w.sends.length, 1, 'the step ran')
+}
+
+test('a profile room\'s newThread step is sent with the room\'s account on the trusted argument, never in the body (default signed out and default someone else)', async t => {
+  for (const defaultOwner of [null, 'email:someone-else@example.test']) {
+    const f = await fixture(t, { defaultOwner })
+    const plan = await f.runtime.plans.propose({ run: f.run('conv-w', WORK), args: NEW_THREAD_PLAN })
+    await approveAndWait(f, plan)
+    assert.equal(f.w.sends[0].conversationId, undefined, 'a new room (no conversation named)')
+    assert.match(f.w.sends[0].clientThreadId, /^task-child-/)
+    assert.deepEqual(f.w.internals[0], { newRoomProfile: WORK }, `default ${defaultOwner}`)
+    assert.equal(Object.hasOwn(f.w.sends[0], 'engineProfileId'), false, 'the send body stays closed to engineProfileId')
+  }
+})
+
+test('default-room plans are unchanged: no trusted account for a newThread step; a sameThread step names its conversation and passes none; flag off passes none', async t => {
+  const own = await fixture(t, { defaultOwner: 'email:a@example.test' })
+  await approveAndWait(own, await own.runtime.plans.propose({ run: own.run('conv-d', MAIN), args: NEW_THREAD_PLAN }))
+  assert.equal(own.w.internals[0], undefined, 'default room: send(body) as before')
+  const same = await fixture(t, { defaultOwner: 'email:a@example.test' })
+  await approveAndWait(same, await same.runtime.plans.propose({ run: same.run('conv-w', WORK), args: PLAN }))
+  assert.equal(same.w.sends[0].conversationId, 'conv-w'); assert.equal(same.w.internals[0], undefined, 'a same-thread step is in the room, which is pinned to its account already')
+  const off = await fixture(t, { flag: false, defaultOwner: 'email:a@example.test' })
+  await approveAndWait(off, await off.runtime.plans.propose({ run: off.run('conv-w', WORK), args: NEW_THREAD_PLAN }))
+  assert.equal(off.w.internals[0], undefined, 'flag off: nothing passed')
 })

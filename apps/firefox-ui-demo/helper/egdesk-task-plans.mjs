@@ -371,8 +371,10 @@ export function createTaskPlanService({ store, sources, graph, adapter, chat = n
       return { message: composeAwaitResume({ graphId: plan.scope.graphId, planId: plan.planId, planTitle: plan.title, task,
         instructions: base.message, gates, taskTitles, answers }), ...target }
     }
+    // L1 c26 (U11, "the room keeps its account"): a new room opened by this step starts on the account of the room that proposed the plan (slot undefined: as before)
+    const slot = slotOfPlan(plan)
     return { message: composePlanStep({ planTitle: plan.title, task, instructions: base.message, gates, taskTitles, answers }),
-      ...(base.cwd === undefined ? {} : { cwd: base.cwd }) }
+      ...(base.cwd === undefined ? {} : { cwd: base.cwd }), ...(slot ? { engineProfileId: slot } : {}) }
   }
 
   // Never throws: a hold is only a delay, and an unknown graph is not held.
