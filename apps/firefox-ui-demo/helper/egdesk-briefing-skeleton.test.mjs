@@ -77,7 +77,7 @@ function direct(script, { mode = 'on', catalog = null } = {}) {
 const run = (script, { materials = QUOTE, candidates = boardCards(), request = REQUEST, fill, viewport = VIEW, ...rest } = {}) => {
   const judge = direct(script, rest), fills = []
   const filler = fill === null ? null : async asked => { fills.push(asked); return typeof fill === 'function' ? fill(asked, fills.length) : fillReply(asked.guide.items.map(i => i.id)) }
-  return runSkeletonFlow({ request, materials, candidates, currentAnswerId: 'ans-now', viewport, judge, fill: filler, catalog: rest.catalog ?? BRIEFING_CATALOG, observeOnly: rest.observeOnly, ...(rest.now ? { now: rest.now } : {}), ...(rest.bindings ? { bindings: rest.bindings } : {}), ...(rest.fillCheck ? { fillCheck: rest.fillCheck } : {}) }).then(out => ({ out, judge, fills }))
+  return runSkeletonFlow({ request, materials, candidates, currentAnswerId: 'ans-now', viewport, judge, fill: filler, catalog: rest.catalog ?? BRIEFING_CATALOG, observeOnly: rest.observeOnly, ...(rest.now ? { now: rest.now } : {}), ...(rest.bindings ? { bindings: rest.bindings } : {}), ...(rest.fillCheck ? { fillCheck: rest.fillCheck } : {}), ...(rest.answer ? { answer: rest.answer } : {}) }).then(out => ({ out, judge, fills }))
 }
 const ORDER = undefined // the default script: every part fits, the tied pairs keep the code's own order
 
@@ -415,7 +415,9 @@ test('mounted journey: 4 judgment requests and ONE private fork turn; three card
   assert.equal(s.decisions.length, 4); assert.ok(s.decisions.every(d => d.questions.every(q => q.type === 'predicate') && d.input.every(m => typeof m.content === 'string')))
   assert.deepEqual(s.decisions.map(d => d.prompt_cache_key), ['briefing-skeleton-place', 'briefing-skeleton-fit', 'briefing-skeleton-order', 'briefing-skeleton-fill_check'])
   const sent = JSON.stringify(s.decisions); for (const piece of [REQUEST, 'A사 견적 결정 메모', '납기 8주', 'A사 견적서 v1']) assert.ok(sent.includes(piece), piece)
-  for (const absent of [s.v1.id, 'res-v1', s.h.ids.runId, ANSWER.slice(0, 20)]) assert.ok(!sent.includes(absent), absent)
+  for (const absent of [s.v1.id, 'res-v1', s.h.ids.runId]) assert.ok(!sent.includes(absent), absent)
+  // cycle 17: the answer being laid out is quoted in the place request only (a request like "정리해줘" refers to it); never in fit, order or the fill check
+  assert.ok(JSON.stringify(s.decisions[0]).includes(ANSWER.slice(0, 20))); assert.ok(s.decisions.slice(1).every(d => !JSON.stringify(d).includes(ANSWER.slice(0, 20))))
   // published: the three new results first, then the proposal; the answer was already complete; no new chat message
   const after = s.h.events.slice(completedAt + 1).map(e => e.event).filter(e => e !== 'context.bound'); assert.deepEqual(after, ['output.published', 'output.published', 'output.published', 'briefing.published'])
   assert.equal(s.count('output.published'), outputsBefore + 3); assert.equal(s.count('message.completed'), messages)
@@ -678,4 +680,28 @@ test('versions: what the record resolves is never asked; only unresolved title-s
   assert.equal(yes.judge.calls[0].packet.questions.find(x => x.name === 'same_M1_M2').instructions, 'Two materials, each quoted as JSON: M1 {"title":"A사 견적서","date":"2026-11-06","status":"done","text":"11월 6일 단가 12,800원, 납기 12월 15일로 보낸 견적서."}; M2 {"title":"A사 견적서 수정본","date":"2026-11-20","status":"done","text":"단가 12,200원, 납기 12월 20일로 고친 견적서."}. Are these two materials an earlier and a later version of the same document, offer or plan?')
   assert.deepEqual(yes.judge.calls[1].names, ['aspect_P1', 'happened_M1', 'happened_M2']); assert.deepEqual(yes.out.relevance.versions, [['M1', 'M2']])
   const no = await run({}, { materials: pair, candidates: [], request: 'A사 견적서 바뀐 점 정리해줘' }); assert.deepEqual(no.judge.calls[1].names, ['fact_M1', 'fact_M2'], 'two materials the record does not relate: two single parts, no comparison')
+})
+
+// ================= 11. cycle 17: the all-on product run (Main, real Decision model): what the place request saw =================
+// s3 of that run, the exact body recovered by replaying the run offline (sha 715a34ce…, same as sent): request "방금 그 내용 정리해줘", two PostgreSQL pages the
+// memory loop attached (no date, status "unknown"), no answer text. several .57 / one_sentence .49 -> undecided -> bubble.
+const S3_REQUEST = '방금 그 내용 정리해줘', S3_ANSWER = 'A사 견적은 11월 3일 요청, 11월 6일 v1 발송, v2는 팀장 승인 후 발송 예정입니다.'
+const S3_PAGES = [{ title: '헬스체크 3종 체크리스트', excerpt: '헬스체크 3종: 연결 풀 응답, 쓰기 지연 50ms 이하, 복제 지연 없음. 전부 통과하면 배포 성공으로 본다.', status: 'unknown', time: { at: null } },
+  { title: 'PostgreSQL 마이그레이션 배포 계획', excerpt: '12월 첫째 주에 SQLite에서 PostgreSQL로 전환 배포할 예정이다. 배포 뒤 헬스체크 3종을 통과해야 한다. 아직 배포 전이다.', status: 'unknown', time: { at: null } }]
+test('the place request carries the answer it lays out; a material is quoted only with what its record has; the gaps of the record are counted, not filled in', async () => {
+  const r0 = await run(q => (q.name.startsWith('about_') ? .03 : undefined), { request: S3_REQUEST, materials: S3_PAGES, candidates: [], answer: S3_ANSWER })
+  const place = r0.judge.calls[0].packet
+  assert.ok(place.input[1].content.startsWith(`Request, quoted exactly as a JSON string: "${S3_REQUEST}"\n\nThe assistant's answer to it, quoted exactly as a JSON string: "${S3_ANSWER}"`))
+  assert.ok(place.input[1].content.includes('M1 {"title":"헬스체크 3종 체크리스트","text":'), 'no "status":"unknown" and no date: only what the record has')
+  assert.ok(place.questions.find(q => q.name === 'about_M1').instructions.endsWith('(the request may refer to the assistant\'s answer quoted above)?'))
+  // the pages the memory loop attached are not what the request (that answer) is about: no board, and no further request
+  assert.deepEqual([r0.out.status, r0.out.reason, r0.judge.calls.length], ['bubble', 'not-asked-about', 1]); assert.deepEqual(r0.out.recordGaps, { materials: 2, undated: 2, noStatus: 2 })
+  // the right pages but without dates or status (the product path until lane L7 carries them): no part in date order, nothing open; what is left is honest
+  const bare = QUOTE.map(m => ({ ...m, time: { at: null }, status: 'unknown', links: [] }))
+  const r1 = await run({}, { request: S3_REQUEST, materials: bare, candidates: [], answer: S3_ANSWER })
+  assert.deepEqual(r1.out.recordGaps, { materials: 4, undated: 4, noStatus: 4 })
+  assert.ok(r1.judge.calls[1].names.every(n => n.startsWith('fact_')), 'without dates, status or links only single parts exist: nothing is guessed')
+  // the answer is optional: without it the request is exactly as before, and it never appears in another stage
+  const r2 = await run(ORDER); assert.ok(!r2.judge.calls[0].packet.input[1].content.includes("The assistant's answer")); assert.ok(r2.judge.calls.slice(1).every(c => !JSON.stringify(c.packet).includes('The assistant\'s answer')))
+  assert.equal(normalizeSkeletonDto({ stage: 'fit', request: 'x', answer: 'y', materials: [{ alias: 'M1', title: 't', text: '', at: null, status: 'done' }], cards: [], questions: [{ kind: 'fact', material: 'M1' }] }), null, 'the answer only rides in the place request')
 })

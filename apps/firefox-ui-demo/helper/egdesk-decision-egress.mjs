@@ -91,7 +91,7 @@ export const EGRESS_SITES = Object.freeze({
   'codex-chat-runtime.mjs': ['speech_history', 'topic_history', 'memory_page', 'draft_text', 'run_facts', 'page_text', 'browser_task_record', 'terminal_command'],
   'egdesk-board-presentation-http.mjs': ['canvas_text', 'board_arrangement: explicit owner confirm, coarse descriptors only',
     'briefing_judgments: /decision/briefing-placement (counts only), -reuse and -check (card labels, short summaries, step texts) are each asked of the gate with canvas_text by runBriefingFlow before they are sent',
-    'briefing_skeleton: /decision/briefing-skeleton (the request of the run as draft_text, the turn\'s memory materials as memory_page, card labels as canvas_text) asked of the gate by runSkeletonFlow before anything is sent; without draft_text nothing is asked, without memory_page there are no materials, without canvas_text no existing card is listed'],
+    'briefing_skeleton: /decision/briefing-skeleton (the request of the run and, in the place request, the run\'s own answer as draft_text, the turn\'s memory materials as memory_page, card labels as canvas_text) asked of the gate by runSkeletonFlow before anything is sent; without draft_text nothing is asked, without memory_page there are no materials, without canvas_text no existing card is listed'],
   'egdesk-board-agent-context.mjs': ['board_excerpt'],
   'egdesk-chat-choice.mjs': ['dm_chooser: the user\'s own typed question and options, confirmed in the panel'],
   'egdesk-browser-reflex.mjs': ['page_text'],

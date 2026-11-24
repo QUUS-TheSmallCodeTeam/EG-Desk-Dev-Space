@@ -14,7 +14,7 @@ import { canvasViewSize, placeCanvasView } from '../overlay/resources/EGDeskSurf
 // (egdesk-briefing-catalog.mjs) and from the cards already on the board (with provenance). Nothing here talks to a network, publishes, moves a camera or writes the
 // Board: the host injects judge{} (bridge route) and fill().
 
-export const SKELETON_LIMITS = Object.freeze({ maxMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 6, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
+export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, maxMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 6, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
 // A predicate counts as yes at or above `yes` and as no at or below `no`; anything between is undecided. Placeholders until calibrated (real predicates of the other features answer near 0 or 1).
 export const SKELETON_BARS = Object.freeze({ yes: .7, no: .3 })
 export const SKELETON_STAGES = Object.freeze(['place', 'fit', 'order', 'fill_check'])
@@ -214,7 +214,9 @@ export const questionName = q => (q.kind === 'several' || q.kind === 'one_senten
 /** The closed object for one judgment, re-validated here (the bridge route is reachable from the chrome): unknown fields, aliases, components or stages refuse the whole request. */
 export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
   try {
-    if (!exactKeys(raw, ['stage', 'request', 'materials', 'cards', 'questions']) || !SKELETON_STAGES.includes(raw.stage) || !plain(raw.request, SKELETON_LIMITS.requestMax)) return null
+    if (!exactKeys(raw, ['stage', 'request', 'materials', 'cards', 'questions'], ['answer']) || !SKELETON_STAGES.includes(raw.stage) || !plain(raw.request, SKELETON_LIMITS.requestMax)) return null
+    // the answer being laid out, for the place request only (a request like "정리해줘" refers to it)
+    if (raw.answer !== undefined && (raw.stage !== 'place' || !plain(raw.answer, SKELETON_LIMITS.answerMax))) return null
     if (!Array.isArray(raw.materials) || !raw.materials.length || raw.materials.length > SKELETON_LIMITS.maxMaterials || !Array.isArray(raw.cards) || raw.cards.length > BRIEFING_LIMITS.maxCandidates ||
         !Array.isArray(raw.questions) || !raw.questions.length || raw.questions.length > SKELETON_LIMITS.maxQuestions) return null
     const mats = new Set(), cards = new Set()
@@ -256,7 +258,7 @@ export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
       if (names.has(name)) throw 0
       names.add(name); return out
     })
-    return { stage: raw.stage, request: raw.request, materials, cards: list, questions }
+    return { stage: raw.stage, request: raw.request, ...(raw.answer !== undefined ? { answer: raw.answer } : {}), materials, cards: list, questions }
   } catch { return null }
 }
 
@@ -276,7 +278,8 @@ const RULES = {
   order: 'You are a system judge. Each question describes TWO parts of a briefing by the materials they show. Answer each question on its own. Judge only which part a reader who has seen none of it should be shown first to follow the other.',
   fill_check: 'You are a system judge checking a text against its source. Each question quotes ONE text and ONE source. Answer each question on its own, whatever the others are. Rewording, summarising and linking words are fine. A number, amount, date, name or event that the quoted source does not contain is NOT supported.',
 }
-const quoteMaterial = m => `${m.alias} ${JSON.stringify({ title: m.title, ...(m.at ? { date: m.at } : {}), status: m.status, text: m.text })}`
+// Only what the record has: no date when it has none, no status when the record does not say ("unknown" is not a status to judge from).
+const quoteMaterial = m => `${m.alias} ${JSON.stringify({ title: m.title, ...(m.at ? { date: m.at } : {}), ...(m.status && m.status !== 'unknown' ? { status: m.status } : {}), text: m.text })}`
 function questionText(q, c, catalog) {
   // The request is the one user message of the request; each question quotes its own materials, text or source.
   const mat = a => c.materials.find(m => m.alias === a)
@@ -285,7 +288,7 @@ function questionText(q, c, catalog) {
   if (q.kind === 'aspect') return `Two materials, each quoted as JSON: ${q.materials.map(a => quoteMaterial(mat(a))).join('; ')}. Do both of these materials state a value for at least one same aspect (for example a price in each, or a date in each)?`
   if (q.kind === 'happened') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material state something that happened or was decided (an action, an event or a decision)?`
   if (q.kind === 'todo') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. According to this material, is something not done yet or still to happen?`
-  if (q.kind === 'about') return `The person asked, quoted exactly as a JSON string: ${JSON.stringify(c.request)}. Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material contain information that the person's request asks about?`
+  if (q.kind === 'about') return `The person asked, quoted exactly as a JSON string: ${JSON.stringify(c.request)}. Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material contain information that the person's request asks about${c.answer ? ' (the request may refer to the assistant\'s answer quoted above)' : ''}?`
   if (q.kind === 'same') return `Two materials, each quoted as JSON: ${q.materials.map(a => quoteMaterial(mat(a))).join('; ')}. Are these two materials an earlier and a later version of the same document, offer or plan?`
   if (q.kind === 'fact') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material state at least one concrete fact (for example a number, an amount, a date, a name or a decision)?`
   if (q.kind === 'before') { const side = (p, x) => `Part ${x} shows ${SHOW[p.trait]}: ${p.materials.map(a => quoteMaterial(mat(a))).join('; ')}.`
@@ -306,7 +309,7 @@ export function createSkeletonJudge(catalog = BRIEFING_CATALOG) {
     if (!c) return manual
     // Plain text messages (the input shape of the requests that were really sent). The request and, for the placement questions, the materials are listed once;
     // every other question quotes its own material, text or source inside the question.
-    const listing = c.stage === 'place' ? `\n\nMaterials the assistant had, each quoted as JSON:\n${c.materials.map(quoteMaterial).join('\n')}` : ''
+    const listing = c.stage === 'place' ? `${c.answer ? `\n\nThe assistant's answer to it, quoted exactly as a JSON string: ${JSON.stringify(c.answer)}` : ''}\n\nMaterials the assistant had, each quoted as JSON:\n${c.materials.map(quoteMaterial).join('\n')}` : ''
     const packet = { input: [{ role: 'developer', content: RULES[c.stage] }, { role: 'user', content: `Request, quoted exactly as a JSON string: ${JSON.stringify(c.request)}${listing}` }],
       questions: c.questions.map(q => predicateQuestion(questionName(q), questionText(q, c, catalog))), promptCacheKey: `briefing-skeleton-${c.stage}` }
     return { status: 'prepared', kind: 'briefing-skeleton', mode, binding, dto: { ...c, purpose: `briefing skeleton: ${c.stage}`, items: [] }, options: c.questions.map(questionName), packet }
@@ -563,22 +566,25 @@ export const rejectedWord = q => (q.kind === 'step' ? `${q.part} explanation` : 
  * Judgment requests: place (1), fit (1), order (0 or 1, only for pairs the record leaves open), fill check (1, plus 1 per rewrite round): 3 or 4 on the usual path, at most 6.
  * Bounds: SKELETON_LIMITS. stats counts requests and fill turns and keeps what the subjective model received.
  */
-export async function runSkeletonFlow({ request = '', materials = [], candidates = [], currentAnswerId = null, viewport = null, judge, fill = null, egress = null, allow = async () => true, observeOnly = false, catalog = BRIEFING_CATALOG, now = Date.now, bindings = null, fillCheck = 'all' } = {}) {
+export async function runSkeletonFlow({ request = '', answer = '', materials = [], candidates = [], currentAnswerId = null, viewport = null, judge, fill = null, egress = null, allow = async () => true, observeOnly = false, catalog = BRIEFING_CATALOG, now = Date.now, bindings = null, fillCheck = 'all' } = {}) {
   const checkMode = FILL_CHECK_MODES.includes(fillCheck) ? fillCheck : 'all'
   const stats = { judgeRequests: 0, judgeMs: 0, questions: 0, fillTurns: 0, checkSkipped: 0, stages: [], received: [] }
-  let relevanceOut = null
-  const done = (status, extra = {}) => ({ status, ...(relevanceOut ? { relevance: relevanceOut } : {}), ...extra, stages: [...new Set(stats.stages)], stats })
+  let relevanceOut = null, gaps = null
+  const done = (status, extra = {}) => ({ status, ...(gaps ? { recordGaps: gaps } : {}), ...(relevanceOut ? { relevance: relevanceOut } : {}), ...extra, stages: [...new Set(stats.stages)], stats })
   // The same permissions as the run's own models: memory pages only if the run's model had them, card labels only if the cards may be sent, the request as the run's own data.
   if (egress && !egress.allows('draft_text')) return done('bubble', { reason: 'declined', requested: false })
   let scene = enumerateSkeleton({ materials: egress && !egress.allows('memory_page') ? [] : materials, candidates: egress && !egress.allows('canvas_text') ? [] : candidates, currentAnswerId, catalog, bindings })
   const asked = clean(request, SKELETON_LIMITS.requestMax)
   if (!scene.materials.length) return done('bubble', { reason: 'no-materials', requested: false })
   if (!asked || !scene.parts.length) return done('bubble', { reason: asked ? 'no-component-fits' : 'no-request', requested: false })
+  // Honest about what the record lacks: without a date no material can be in a part in date order, without a recorded status none is open. Counted, never guessed.
+  gaps = { materials: scene.materials.length, undated: scene.materials.filter(m => !m.at).length, noStatus: scene.materials.filter(m => m.status === 'unknown').length }
+  const said = clean(answer, SKELETON_LIMITS.answerMax)
   const base = { request: asked, materials: scene.materials.map(m => ({ alias: m.alias, title: m.title, text: m.text, at: m.at, status: m.status })),
     cards: scene.targets.filter(t => t.targetable).map(t => ({ alias: t.alias, label: clean(t.label, BRIEFING_LIMITS.labelMax), ...(clean(t.gist, BRIEFING_LIMITS.gistMax) ? { gist: clean(t.gist, BRIEFING_LIMITS.gistMax) } : {}) })) }
   const ask = async (stage, questions) => {
     if (stats.judgeRequests >= SKELETON_LIMITS.maxRequests || stats.judgeMs >= SKELETON_LIMITS.judgeMs) return { unavailable: 'request-bound' }
-    const prepared = await judge.prepare({ stage, ...base, questions: questions.slice(0, SKELETON_LIMITS.maxQuestions) })
+    const prepared = await judge.prepare({ stage, ...base, ...(stage === 'place' && said ? { answer: said } : {}), questions: questions.slice(0, SKELETON_LIMITS.maxQuestions) })
     if (prepared?.status !== 'prepared') return { unavailable: prepared?.reason ?? 'unavailable' }
     if (!(await allow(`briefing-skeleton-${stage}`, prepared.preview))) { await judge.cancel(prepared.ticket); return { unavailable: 'declined' } }
     stats.judgeRequests++; stats.questions += Math.min(questions.length, SKELETON_LIMITS.maxQuestions); stats.stages.push(stage)
