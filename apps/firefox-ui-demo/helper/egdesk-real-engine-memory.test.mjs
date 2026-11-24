@@ -14,14 +14,14 @@ import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { DECISION_KEY_ENV, loadScripts, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { REAL_ENGINE_SCRIPT_SCHEMA, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createMemoryHook, memoryGraph, memoryNeedsDecisions, pagesIn, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
-import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryHeldV4Script, buildMemoryRecallScript, buildMemoryScaleScript, buildMemoryScaleV2Script, buildMemorySpillProbeScript, buildMemorySpillProbeV2Script, SPILL_PROBE_PAGES, PURGE, RETENTION, SCALE_FACTS, SCALE_PAGES } from './egdesk-memory-real-engine-scripts.mjs'
+import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryHeldV4Script, buildMemoryRecallScript, buildMemoryScaleScript, buildMemoryScaleV2Script, buildMemoryScaleV3Script, buildMemorySpillProbeScript, buildMemorySpillProbeV2Script, SPILL_PROBE_PAGES, PURGE, RETENTION, SCALE_FACTS, SCALE_PAGES } from './egdesk-memory-real-engine-scripts.mjs'
 import { candidatesFromOntologyGraph } from './egdesk-context-setup.mjs'
 
 const app = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scriptFile = name => path.join(app, 'scripts', 'real-engine', 'scripts', `real-engine-${name}${/-v\d+$/.test(name) ? '' : '-v1'}.json`)
 
 test('the committed scripts are what the builders produce, validate, and need the Decision model', () => {
-  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-spill-probe', buildMemorySpillProbeScript], ['memory-spill-probe-v2', buildMemorySpillProbeV2Script]]) {
+  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-scale-v3', buildMemoryScaleV3Script], ['memory-spill-probe', buildMemorySpillProbeScript], ['memory-spill-probe-v2', buildMemorySpillProbeV2Script]]) {
     const committed = JSON.parse(fs.readFileSync(scriptFile(name), 'utf8'))
     assert.deepEqual(committed, JSON.parse(JSON.stringify(build())))
     assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })
@@ -370,11 +370,45 @@ test('spill probe v2 end to end (fake engine, schema-validated requests): the sp
   assert.equal(withSplit.rec.turns[0].ok, true, JSON.stringify(withSplit.rec.turns[0].expectations.filter(e => !e.ok)))
   const keys = Object.keys(withSplit.ctx).filter(k => k.startsWith('egdesk_decision_context'))
   assert.ok(keys.length >= 8, keys.join()); for (const k of keys) assert.ok(withSplit.ctx[k].value.length <= 2000, `${k} ${withSplit.ctx[k].value.length}`)
-  assert.deepEqual(emulateSpill(withSplit.ctx, { limit: 2000 }).spilled, [])
-  const seenSplit = Object.values(emulateSpill(withSplit.ctx, { limit: 2000 }).visible).join('\n')
+  assert.deepEqual(emulateSpill(withSplit.ctx, { limit: { bytes: 4000 } }).spilled, [])
+  const seenSplit = Object.values(emulateSpill(withSplit.ctx, { limit: { bytes: 4000 } }).visible).join('\n')
   for (const p of split.memory.pages.slice(0, 8)) assert.ok(seenSplit.includes(p.body.slice(0, 40)) && seenSplit.includes(p.body.slice(-40)), `${p.id} is whole`)
   const without = await run({ ...split, flags: Object.fromEntries(Object.entries(split.flags).filter(([k]) => !/ENGINE_CONTEXT|ENGINE_CHARS/.test(k))), turns: [{ ...split.turns[0], expect: { ...split.turns[0].expect, memory: { ...split.turns[0].expect.memory, maxKeyChars: undefined } } }] })
-  const cut = emulateSpill(without.ctx, { limit: 2000 }), seen = Object.values(cut.visible).join('\n')
+  const cut = emulateSpill(without.ctx, { limit: { bytes: 4000 } }), seen = Object.values(cut.visible).join('\n')
   assert.deepEqual(cut.spilled, ['egdesk_decision_context'])
   assert.ok(split.memory.pages.slice(0, 8).some(p => !seen.includes(p.body.slice(-40))), 'without the flag some pages lose their last sentence')
+})
+
+test('scale-v3 (fake engine, schema-validated requests): with the split on every key stays within 4,000 bytes (the 5.4 kB network page is cut inside the item), the engine double loses no fact; the same turn without it loses the middle facts the real run lost', async t => {
+  const { emulateSpill } = await import('./egdesk-engine-context.mjs')
+  const f = SCALE_FACTS, v3 = buildMemoryScaleV3Script(), limit = { bytes: 4000 }
+  const turns = [{ steps: [], final: `${f.budget} ${f.firewall} ${f.dump} ${f.storage}` }, { steps: [], final: `${f.cutoverDate} 계획, ${f.rollbackRate}를 넘으면 되돌리는 안(가정).` }]
+  const bytes = text => Buffer.byteLength(text, 'utf8')
+  const ctxOf = (w, i) => fs.readFileSync(path.join(w.base, 'fake.log'), 'utf8').trim().split('\n').map(l => JSON.parse(l)).filter(m => m.params?.additionalContext)[i].params.additionalContext
+  const w = world(t, { turns }), rec = (await runCheck(w.options, asScripts(v3), w.deps)).records[0]
+  assert.equal(rec.aborted, null, rec.abortDetail); assert.equal(rec.ok, true, JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok))))
+  for (const i of [0, 1]) {
+    const ctx = ctxOf(w, i), keys = Object.keys(ctx).filter(k => k.startsWith('egdesk_decision_context'))
+    for (const k of keys) assert.ok(bytes(ctx[k].value) <= 4000, `turn ${i + 1} ${k} ${bytes(ctx[k].value)}`)
+    assert.deepEqual(emulateSpill(ctx, { limit }).spilled, [])
+  }
+  const seen = Object.values(emulateSpill(ctxOf(w, 0), { limit }).visible).join('\n')
+  for (const fact of [f.budget, f.firewall, f.dump, f.storage]) assert.ok(seen.includes(fact), `${fact} is visible`)
+  assert.ok(Object.keys(ctxOf(w, 0)).length >= 4, 'turn 1 is several entries')
+  const off = JSON.parse(JSON.stringify(v3)); off.conversations[0].flags = Object.fromEntries(Object.entries(off.conversations[0].flags).filter(([k]) => !/ENGINE_/.test(k)))
+  for (const turn of off.conversations[0].turns) delete turn.expect.memory.maxKeyBytes
+  const w2 = world(t, { turns }), rec2 = (await runCheck(w2.options, asScripts(off), w2.deps)).records[0]
+  assert.equal(rec2.aborted, null, rec2.abortDetail)
+  const cut = emulateSpill(ctxOf(w2, 0), { limit }), lost = Object.values(cut.visible).join('\n')
+  assert.deepEqual(cut.spilled, ['egdesk_decision_context'])
+  assert.ok([f.budget, f.firewall, f.dump].some(fact => !lost.includes(fact)), 'without the split the middle pages lose their facts')
+})
+
+test('maxKeyBytes: judged on the largest key in UTF-8 bytes (Korean is 3 bytes a character)', () => {
+  const hook = createMemoryHook({ pages: [{ id: 'a', title: 'A', body: 'x' }] })
+  hook.beginTurn(); hook.observe('turn/start', { additionalContext: { k: { value: '가'.repeat(1300) } } })
+  assert.deepEqual(hook.finishTurn({ maxKeyBytes: 4000 }).expectations.map(e => e.ok), [true])
+  hook.beginTurn(); hook.observe('turn/start', { additionalContext: { k: { value: '가'.repeat(1400) } } })
+  assert.deepEqual(hook.finishTurn({ maxKeyBytes: 4000, maxKeyChars: 2000 }).expectations.map(e => [e.check, e.ok]), [['memory.maxKeyChars', true], ['memory.maxKeyBytes', false]])
+  assert.ok(validateMemoryExpect({ maxKeyBytes: 0 }, { pages: [{ id: 'a' }] }).length > 0)
 })

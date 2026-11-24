@@ -370,3 +370,19 @@ export function buildMemorySpillProbeV2Script() {
     description: 'Probe, not a product test: what cuts a turn/start additionalContext entry. One page per conversation with a Korean body of 200/1000/1400 characters and an English body of 2,000/4,000/7,700 characters (where the first marker is lost; characters or bytes), then 4 and 8 pages with the product\'s split option (EGDESK_TURN_MEMORY_ENGINE_CONTEXT=split at 2,000 characters): all markers present and no key over 2,000 characters means the limit is per entry. The missing markers in the answer and the engine input in the record are the measurement. Needs --decisions.',
     conversations: [one('kr-200', 'ko', 200), one('kr-1000', 'ko', 1000), one('kr-1400', 'ko', 1400), one('en-2000', 'en', 2000), one('en-4000', 'en', 4000), one('en-7700', 'en', 7700), many('split-n4', 4), many('split-n8', 8)] }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+// scale-v3 (c33): scale-v1's questions with the engine-context split ON. check-15 showed the engine's limit is per entry and in bytes (see egdesk-engine-context.mjs), and that
+// entries split into parts of 2.6-3.3 kB arrive whole. Turn 1 is v1's: one fact from each of four long pages (1,807 / 2,263 / 1,395 / 864 characters = 4.3k / 5.4k / 3.3k / 2.0k bytes,
+// the network page alone is over the 4,000-byte design limit, so one item is cut INSIDE: the intra-item chunking), each fact in the last fifth of its page: all four facts in the answer,
+// no key over 4,000 bytes (maxKeyBytes), no body twice, at least two pages merged. Turn 2 is v2's (planned cut-over: when; hypothetical rollback; no re-sends) with the same key bar.
+export const MEMORY_SCALE_V3_SET = 'real-engine-memory-scale-v3'
+export function buildMemoryScaleV3Script() {
+  const v1 = buildMemoryScaleScript(), v2 = buildMemoryScaleV2Script()
+  const bar = turn => ({ ...turn, expect: { ...turn.expect, memory: { ...turn.expect.memory, maxKeyBytes: 4000 } } })
+  const first = bar({ ...v1.conversations[0].turns[0], expect: { ...v1.conversations[0].turns[0].expect, memory: { ...v1.conversations[0].turns[0].expect.memory } } })
+  delete first.expect.memory.minKeyChars
+  return { set: MEMORY_SCALE_V3_SET,
+    description: 'Pattern: scale-v1 and scale-v2 with the engine-context split on (bytes limit 4000). Turn 1: one fact from each of four long pages (one of them is longer than a whole entry, so it is cut inside the item), every fact in the last fifth of its page: all four in the answer, no context key over 4,000 bytes, no body twice, two or more pages merged. Turn 2: whether the planned cut-over is done, when it is planned, and what happens if it goes wrong: the date and the number in the answer, neither stated as done or decided, nothing re-sent, no key over 4,000 bytes. Needs --decisions. Expectations by code.',
+    conversations: [{ ...v2.conversations[0], id: 'memory-scale-v3', flags: { ...v2.conversations[0].flags, EGDESK_TURN_MEMORY_ENGINE_CONTEXT: 'split', EGDESK_TURN_MEMORY_ENGINE_BYTES: '4000' }, turns: [first, bar(v2.conversations[0].turns[1])] }] }
+}
