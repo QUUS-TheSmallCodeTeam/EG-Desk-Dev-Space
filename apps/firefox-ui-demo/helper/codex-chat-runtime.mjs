@@ -5975,7 +5975,7 @@ export class CodexChatRuntime {
           const done = applied?.status === 'status_updated' || applied?.status === 'reading_withdrawn'
           if (done) entry.closed = true
           else if (entry.offers >= CONFIRM_LIMITS.offers) entry.closed = true // mentioned twice without an answer: it simply stays pending
-          actions.push({ pageId: entry.pageId, status: entry.status, action: done ? (verdict.action === 'promote' ? 'promoted' : 'withdrawn') : 'kept', reason: verdict.reason, stated: verdict.stated.p, reply: verdict.reply.value, confidence: verdict.reply.confidence })
+          actions.push({ pageId: entry.pageId, status: entry.status, action: done ? (verdict.action === 'promote' ? 'promoted' : 'withdrawn') : 'kept', reason: verdict.reason, stated: verdict.stated.p, confirms: verdict.confirms.p, rejects: verdict.rejects.p })
         })
         this.turnMemoryNoted.set(threadKey, live.filter(entry => !(entry.closed === true && actions.some(a => a.pageId === entry.pageId && a.action !== 'kept'))))
       }
