@@ -413,6 +413,8 @@ const claudeEngine = createClaudeEngineAdapter({
   defaultCwd: process.cwd(),
   onStatusChange: () => engineStatus.check(),
   processBudget: claudeProcessBudget,
+  // Deleting a conversation also removes the session files Claude Code keeps for it (helper/claude-session-files.mjs). Developer flag, default off.
+  deleteSessionFiles: () => process.env.EGDESK_CLAUDE_DELETE_SESSION === 'on',
   profiles: claudeProfileRows,
 })
 if (process.env.EGDESK_CLAUDE_READER === 'live') claudeReaderEvidence = createClaudeReaderEvidence({ adapter: claudeEngine, snapshot: () => claudeEngineStatus.snapshot() })
