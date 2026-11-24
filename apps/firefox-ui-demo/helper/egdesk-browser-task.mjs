@@ -373,6 +373,8 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
         judgments.push({ q: name, would: !Number.isFinite(p) ? 'unknown' : p >= t.pageState ? 'act' : p <= 1 - t.pageState ? 'none' : 'hold', p: Number.isFinite(p) ? p : null, threshold: t.pageState })
       }
       if (Number.isFinite(d.goalMet)) judgments.push({ q: 'goal_met', would: d.goalMet >= t.done ? 'act' : 'none', p: d.goalMet, threshold: t.done })
+      // c22: the person-target predicates (one per control only the person may operate)
+      ;(Array.isArray(d.targets) ? d.targets : []).forEach((p, i) => judgments.push({ q: `person_target_${i}`, would: !Number.isFinite(p) ? 'unknown' : p >= t.choice ? 'act' : p <= 1 - t.choice ? 'none' : 'hold', p: Number.isFinite(p) ? p : null, threshold: t.choice }))
       // c19: the same-thing predicates of a code-decided step (one per candidate; decided yes >= done, decided no <= 1 - done)
       ;(Array.isArray(d.next?.same) ? d.next.same : []).forEach((p, i) => judgments.push({ q: `same_${i}`, would: !Number.isFinite(p) ? 'unknown' : p >= t.done ? 'act' : p <= 1 - t.done ? 'none' : 'hold', p: Number.isFinite(p) ? p : null, threshold: t.done }))
       note(null, { feature: 'browser_reflex', mode: 'on', candidates: Number.isSafeInteger(d.options) ? d.options : null, judgments })
@@ -450,7 +452,8 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
         // c19: a control the loop cannot operate (excluded.unsupported) is the person's step as much as a person-only one
         const humanStep = result.reason === 'human_step' || (result.reason === 'blocked' && (last?.excluded?.gated ?? 0) + (last?.excluded?.unsupported ?? 0) > 0)
         const code = humanStep ? 'human_step' : CANNOT.has(result.reason) ? result.reason : 'blocked'
-        return finishPause(task, { kind: 'cannot_proceed', code }, result, { detail: result.code })
+        // c22: a person-only control the request is about is named (its label), so the person is told what to change themselves
+        return finishPause(task, { kind: 'cannot_proceed', code }, result, { detail: result.code, ...(typeof result.target === 'string' && result.target ? { candidates: [result.target] } : {}) })
       }
       case 'max_steps': return finishPause(task, { kind: 'cannot_proceed', code: 'step_rejected' }, result, { detail: result.code })
       case 'fallback': // the judge is unavailable: today's behaviour, the subjective model drives the tools itself
