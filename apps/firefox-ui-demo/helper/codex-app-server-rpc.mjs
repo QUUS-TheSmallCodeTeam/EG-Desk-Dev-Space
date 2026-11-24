@@ -13,11 +13,14 @@ export class AppServerRpc {
   }
 
   async initialize() {
-    await this.request('initialize', {
+    // InitializeResponse { userAgent, codexHome, platformFamily, platformOs }: only the user agent is kept (it carries the build version);
+    // the codexHome path is not kept.
+    const result = await this.request('initialize', {
       clientInfo: { name: 'egdesk-firefox-bridge', version: '0.2.0' },
       capabilities: { experimentalApi: this.experimentalApi },
     }, true)
     if (this.closed) throw new Error('Codex app-server disconnected')
+    this.serverInfo = Object.freeze({ userAgent: typeof result?.userAgent === 'string' ? result.userAgent.slice(0, 300) : null })
     this.send(JSON.stringify({ method: 'initialized', params: {} }))
     this.ready = true
   }

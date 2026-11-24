@@ -239,32 +239,53 @@ test('several commands denied in one turn are asked one at a time, in order; eac
   const broker = createGateHookBroker({ mode: () => 'on', home: '/home/synthetic' })
   const A = 'git reset --hard HEAD~5', B = 'git push --force origin main', C = 'docker volume rm demo_pgdata'
   const status = async (turnId, command) => { const out = await broker.check({ sessionId: 'c', turnId, cwd: CWD, command }); return out.decision === 'allow' ? 'allow' : JSON.parse(out.note).egdesk_command_gate }
-  const yes = async () => (await broker.readReply({ conversationId: 'c', reply: 'yes', client: replyClient(0.97, 0.01), egress: OPEN })).approved
+  const answer = async (runs, declines) => (await broker.readReply({ conversationId: 'c', reply: 'reply', client: replyClient(runs, declines), egress: OPEN })).approved
   broker.turnStarted({ conversationId: 'c', turnId: 'T1' })
   assert.equal((await status('T1', A)).status, 'needs_person')
   assert.deepEqual(await status('T1', B), { status: 'queued', position: 2, reasons: ['remote_irreversible'], next: 'ask_after_previous_answer' })
   assert.deepEqual((await status('T1', C)).position, 3)
   broker.turnEnded({ turnId: 'T1' })
-  assert.equal(await yes(), true) // answers A, the one asked about
+  assert.equal(await answer(0.97, 0.01), true) // answers A, the one asked about
+  // T2: the model retries the head of the queue first: B takes the question; C stays behind it
   broker.turnStarted({ conversationId: 'c', turnId: 'T2' })
-  assert.deepEqual(await status('T2', C), { status: 'queued', position: 2, reasons: ['container_data'], next: 'ask_after_previous_answer' }, 'B is ahead of C')
-  assert.equal((await status('T2', B)).status, 'needs_person', 'B is the one question of T2; the yes for A did not approve it')
+  assert.equal((await status('T2', B)).status, 'needs_person', 'the yes for A did not approve B')
+  assert.deepEqual(await status('T2', C), { status: 'queued', position: 2, reasons: ['container_data'], next: 'ask_after_previous_answer' })
   assert.equal(await status('T2', A), 'allow')
   broker.turnEnded({ turnId: 'T2' })
-  assert.equal(await yes(), true) // answers B
+  assert.equal(await answer(0.97, 0.01), true) // answers B
   broker.turnStarted({ conversationId: 'c', turnId: 'T3' })
   assert.equal(await status('T3', B), 'allow')
   assert.deepEqual(await status('T3', A), { status: 'queued', position: 2, reasons: ['discards_history'], next: 'ask_after_previous_answer' }, 'A\'s approval expired with T2, and C (tried in T2) is ahead')
   assert.equal((await status('T3', C)).status, 'needs_person')
   broker.turnEnded({ turnId: 'T3' })
-  // a no answers its command (C) and approves nothing; what is still queued keeps its place for one more turn only if the model tries it again
-  assert.equal((await broker.readReply({ conversationId: 'c', reply: 'no', client: replyClient(0.03, 0.96), egress: OPEN })).approved, false)
-  broker.turnStarted({ conversationId: 'c', turnId: 'T4' }); broker.turnEnded({ turnId: 'T4' }) // the model gives up on C
-  broker.turnStarted({ conversationId: 'c', turnId: 'T5' })
-  assert.equal((await status('T5', 'git branch -D topic')).status, 'needs_person', 'nothing is carried past a turn that did not try it')
-  assert.equal((await status('T5', A)).status, 'queued')
 })
 
+test('the queue does not lose a turn: when the head is not retried, the next queued command takes the question (c15)', async () => {
+  const broker = createGateHookBroker({ mode: () => 'on', home: '/home/synthetic' })
+  const A = 'git reset --hard HEAD~5', B = 'git push --force origin main', C = 'docker volume rm demo_pgdata', D = 'git branch -D topic'
+  const status = async (turnId, command) => { const out = await broker.check({ sessionId: 'c', turnId, cwd: CWD, command }); return out.decision === 'allow' ? 'allow' : JSON.parse(out.note).egdesk_command_gate }
+  const answer = async (runs, declines) => (await broker.readReply({ conversationId: 'c', reply: 'reply', client: replyClient(runs, declines), egress: OPEN })).approved
+  broker.turnStarted({ conversationId: 'c', turnId: 'T1' })
+  await status('T1', A); await status('T1', B); await status('T1', C) // A asked, B queued 2, C queued 3
+  broker.turnEnded({ turnId: 'T1' })
+  assert.equal(await answer(0.02, 0.97), false) // a no for A: approves nothing
+  // T2: carried queue is [B, C]. The model never retries B; it tries a new command D, then C
+  broker.turnStarted({ conversationId: 'c', turnId: 'T2' })
+  assert.deepEqual((await status('T2', D)).status, 'queued', 'a command that was not queued waits behind the carried ones')
+  assert.equal((await status('T2', C)).status, 'needs_person', 'the head (B) was not retried: the next queued command takes the question')
+  assert.equal((await status('T2', B)).status, 'queued', 'B, tried after the question was taken, waits')
+  broker.turnEnded({ turnId: 'T2' })
+  assert.equal(await answer(0.97, 0.01), true) // the reply answers C only
+  broker.turnStarted({ conversationId: 'c', turnId: 'T3' })
+  assert.equal(await status('T3', C), 'allow')
+  assert.equal((await status('T3', D)).status, 'needs_person', 'D and B are both carried; the first one the model tries takes the question')
+  assert.deepEqual((await status('T3', B)).position, 2)
+  broker.turnEnded({ turnId: 'T3' })
+  // a turn that retries none of the carried commands drops them (one hop); the next new command is asked at once
+  broker.turnStarted({ conversationId: 'c', turnId: 'T4' }); broker.turnEnded({ turnId: 'T4' })
+  broker.turnStarted({ conversationId: 'c', turnId: 'T5' })
+  assert.equal((await status('T5', A)).status, 'needs_person')
+})
 test('the token is kept out of the model\'s own commands by Codex\'s default excludes, and the endpoint is harmless even if the model has it', async () => {
   // codex-rs/protocol/src/shell_environment.rs populate_env, step 2 (commit a0d5b0a6): *KEY*, *SECRET*, *TOKEN*, case-insensitive
   const defaultExcluded = name => ['KEY', 'SECRET', 'TOKEN'].some(part => name.toUpperCase().includes(part))

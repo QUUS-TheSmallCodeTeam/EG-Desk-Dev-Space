@@ -13,6 +13,7 @@ import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { DRAFT_CHECK_LIMITS, checkDraft } from './egdesk-draft-check.mjs'
 import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { COMMAND_GATE_TIMEOUT_MS, assessCommand, classifyCommand, sessionRuleCoversFloor } from './egdesk-terminal-command-gate.mjs'
+import { ENGINE_VERSION_NOTICE, checkEngineVersion } from './egdesk-codex-version-pin.mjs'
 import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
 import { gateRuntimeToolResult, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
 import { homedir } from 'node:os'
@@ -5816,6 +5817,7 @@ export class CodexChatRuntime {
   //   that would also match a floor command (sessionRuleCoversFloor) is not offered, even for a harmless command: the floor's person
   //   approval must not be removed by an earlier grant (R5). Codex offers no session choice through EG-Desk (normalizeApproval).
   startCommandGate(run, { command, cwd = null, intent = null, sessionRules = null } = {}) {
+    if (this.threadEngine(run.conversationId) !== 'claude') this.noteEngineVersionOnce()
     try {
       const setup = this.decisionContext, cfg = setup?.terminalGate
       const flag = cfg?.mode?.()
@@ -5861,11 +5863,34 @@ export class CodexChatRuntime {
 
   commandGateIdle() { return Promise.allSettled([...this.commandGateRuns]) }
 
+  // ---- Engine version against the hook's source check (c15). A new app-server connection is a new session: it records at most once. ----
+  setEngineVersion({ engineId = 'codex', userAgent = null } = {}) {
+    if (engineId !== 'codex') return
+    this.engineVersionCheck = { ...checkEngineVersion(userAgent), noted: false }
+    this.noteEngineVersionOnce()
+  }
+
+  /** Records `unverified_engine_version` once per session, and only while some command-gate path is on. Never changes the gate. */
+  noteEngineVersionOnce() {
+    try {
+      const check = this.engineVersionCheck
+      if (!check || check.status === 'verified' || check.noted) return
+      const cfg = this.decisionContext?.terminalGate
+      const flag = cfg?.mode?.()
+      const hook = cfg?.hookBroker ? 'on' : null
+      const mode = flag === 'advisory' || flag === 'on' ? flag : hook
+      if (!mode) return
+      check.noted = true
+      this.decisionContext.calibrationLog?.record?.({ feature: 'terminal_gate', mode, judgments: [], attached: false, gate: { notice: ENGINE_VERSION_NOTICE, engine: 'codex' } })
+    } catch { /* recording only */ }
+  }
+
   // ---- Codex PreToolUse hook broker (c13 prototype: egdesk-gate-hook-broker.mjs; decisionContext.terminalGate.hookBroker, absent by default). ----
   gateHookBroker() { try { return this.decisionContext?.terminalGate?.hookBroker ?? null } catch { return null } }
 
   /** The broker's predicate question for a command of a live run: the same gate as an approval card (flags, Decision mode, egress). */
   async gateHookAssess({ conversationId, turnId, command, cwd }) {
+    this.noteEngineVersionOnce()
     const run = this.runs.get(runKey(conversationId, turnId))
     if (!run || TERMINAL.has(run.status)) return null
     const gate = this.startCommandGate(run, { command, cwd })
@@ -5899,6 +5924,7 @@ export class CodexChatRuntime {
   observeUnaskedCommand(run, event) {
     try {
       if (event.method !== 'item/completed' || event.item?.type !== 'commandExecution') return
+      if (this.threadEngine(run.conversationId) !== 'claude') this.noteEngineVersionOnce()
       const setup = this.decisionContext, flag = setup?.terminalGate?.mode?.()
       if (flag !== 'advisory' && flag !== 'on') return
       const key = `${run.answerId}:${event.item.id}`
