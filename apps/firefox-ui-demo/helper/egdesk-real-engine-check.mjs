@@ -23,6 +23,7 @@ import { CodexChatRuntime, TURN_CONTEXT_BUDGET_MS, TURN_CONTEXT_COLD_BUDGET_MS }
 import { createOwnToolsWiring } from './egdesk-own-tools-wiring.mjs'
 import { readOwnToolsIsolation } from './egdesk-own-tools-isolation.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
+import { openProfileStore } from './egdesk-profile-store.mjs'
 import { ImmutableContextStore } from './egdesk-context-store.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createDecisionBudget, createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
@@ -216,6 +217,8 @@ export function preflight(options, scripts, { env = process.env, exists = isExec
     const seeded = scripts.flatMap(({ script }) => script.conversations.filter(memoryNeedsDecisions).map(c => `${script.set}/${c.id}`)) // memory hook
     if (seeded.length) problems.push(`seeded memory pages are picked and read by the Decision model, so they need --decisions: ${seeded.join(', ')}`)
     const flagged = scripts.flatMap(({ script }) => script.conversations.filter(c => c.draftCheck || Object.keys(c.flags ?? {}).some(k => DECISION_DEPENDENT_FLAGS.includes(k))).map(c => `${script.set}/${c.id} (${[...(c.draftCheck ? ['draftCheck'] : []), ...Object.keys(c.flags ?? {}).filter(k => DECISION_DEPENDENT_FLAGS.includes(k))].join(', ')})`))
+    const agentRooms = scripts.flatMap(({ script }) => script.conversations.filter(c => c.agentProfile).map(c => `${script.set}/${c.id}`))
+    if (agentRooms.length && !options.persisted) problems.push(`an agentProfile conversation is a direct room, which is not one-time: it needs --persisted-with-cleanup: ${agentRooms.join(', ')}`)
     if (flagged.length) problems.push(`these flags act only through the Decision model, so they need --decisions: ${flagged.join('; ')}`)
   }
   return problems
@@ -295,6 +298,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
   // the draft check is the conversation's own opt-in (conversation.draftCheck: { mode, design? }), like memory; explicit flags still win
   const dc = conversation.draftCheck
   const flags = { ...(options.decisions ? DEFAULT_DECISION_FLAGS : {}), ...(dc ? { EGDESK_DRAFT_CHECK: dc.mode, ...(dc.design === 'choice' ? { EGDESK_DRAFT_CHECK_DESIGN: 'choice' } : {}) } : {}), ...(conversation.flags ?? {}), EGDESK_OWN_TOOLS: 'on' }
+  let profileStore = null, agentRoom = null // c25: the synthetic Agent of an agentProfile conversation
   const persisted = options.persisted === true, ledger = persisted ? (deps.ledger ?? createLedger(options.out)) : null, createdThreads = []
   const FLAG = { ...flags }
   const hooks = CHECK_HOOKS.filter(h => h.active(FLAG)) // features registered in helper/egdesk-real-engine-hooks.mjs (the briefing flow, ...); attached once the runtime exists
@@ -392,12 +396,21 @@ export async function runConversation({ options, set, conversation, deps = {} })
       rpc.respond(id, result, error)
     }
     store = openChatStore({ dataDir: path.join(dataDir, 'chat'), ownerScope: `real-engine-check:${conversation.id}` })
+    // c25: an Agent-profile DIRECT room. The Agent is synthetic and lives in this conversation's isolated profile store (no person data, nothing shared with the installed
+    // EG-Desk); every send names it with replyDestination 'direct', which is what makes the room the one the product's draft check judges (channelKind 'direct', not one-time).
+    if (conversation.agentProfile) {
+      const spec = conversation.agentProfile
+      profileStore = openProfileStore({ dataDir: path.join(dataDir, 'profiles'), ownerHash: 'real-engine-check' })
+      const created = profileStore.createDraft({ name: spec.name, avatar: { kind: 'initial', value: spec.name.trim().slice(0, 1) }, role: spec.role ?? '', personality: { tone: spec.tone ?? 'plain' }, expertise: spec.expertise ?? [], instructions: spec.instructions })
+      profileStore.activate(created.id, 1, null)
+      agentRoom = { id: created.id }; rec.agentProfile = { revision: 1, tone: spec.tone ?? 'plain' }
+    }
     const settingsDir = path.join(dataDir, 'settings')
     const settings = openBridgeSettings({ dataDir: settingsDir, log() {} })
     const calibrationBase = openCalibrationLog({ dataDir: settingsDir, log() {} })
     // the draft check records one calibration row per check (closed words): the check keeps a copy per turn so a script can say whether it ran
     // (the log object is frozen: an inheriting wrapper, not a Proxy, so that only record is replaced)
-    const calibrationLog = Object.create(calibrationBase, { record: { value: row => { try { if (row?.feature === 'draft_check') turnNow.draftRows.push({ mode: row.mode ?? null, attached: row.attached === true, fallback: typeof row.fallback === 'string' ? row.fallback : null }) } catch { /* recording only */ } return calibrationBase.record(row) }, enumerable: true } })
+    const calibrationLog = Object.create(calibrationBase, { record: { value: row => { try { if (row?.feature === 'draft_check') turnNow.draftRows.push({ mode: row.mode ?? null, attached: row.attached === true, fallback: typeof row.fallback === 'string' ? row.fallback : null, check: typeof row.check === 'string' ? row.check : null, ifUnrevised: typeof row.ifUnrevised === 'string' ? row.ifUnrevised : null, judgments: (Array.isArray(row.judgments) ? row.judgments : []).slice(0, 40).map(j => ({ q: String(j?.q ?? '').slice(0, 40), would: typeof j?.would === 'string' ? j.would : null, p: Number.isFinite(j?.p) ? Math.round(j.p * 100) / 100 : null })), ...(row.evidence ? { evidence: { items: row.evidence.items ?? null, opaque: row.evidence.opaque ?? null, sentences: row.evidence.sentences ?? null, terms: row.evidence.terms ?? null } } : {}) }) } catch { /* recording only */ } return calibrationBase.record(row) }, enumerable: true } })
     const KEY = options.decisions ? String(env[DECISION_KEY_ENV] ?? '').trim() : null
     const decisionCall = []
     const transport = options.decisions && !deps.fetchImpl ? createDecisionTransport() : null
@@ -452,7 +465,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       try { nativeContract = (deps.inspectNative ?? inspectNativeCapabilities)({ executable: options.codexBin, env: childEnv(options, env), cwd: dataDir }) } catch { nativeContract = null }
       rec.engine.nativeContract = { version: nativeContract?.version ?? null, schemaMatch: nativeContract?.schemaMatch === true, boardPeerContract: typeof nativeContract?.boardPeerContract === 'string', steerContract: typeof nativeContract?.steerContract === 'string', threadDelete: nativeContract?.threadDelete === true }
     }
-    chat = new CodexChatRuntime({ request, respond,
+    chat = new CodexChatRuntime({ request, respond, ...(profileStore ? { profiles: profileStore } : {}),
       ...(needsNative ? { getBoardPeerContract: () => nativeContract?.boardPeerContract ?? null, getSteerContract: () => nativeContract?.steerContract ?? null, getThreadDelete: () => nativeContract?.threadDelete === true } : {}), emit: () => {}, emitLegacy: () => {}, store, requireStore: true, contexts, getOwnerKey: () => OWNER, verifyFile: async () => null, resolveProjectWorkspace: async () => null,
       ...(FLAG.EGDESK_AGENT_RELOAD_REUSE === 'on' ? { agentReloadReuse: true } : {}), // inert without an Agent-profile conversation (L7 c27)
       toolProviders: wiring.toolProviders, ownTools: wiring.ownTools, decisionContext,
@@ -482,7 +495,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const beginTurn = async text => {
       resetTurnNow(); runnerLog.length = 0
       const started = performance.now()
-      const run = await chat.send({ message: text, clientThreadId, requestId: `req-${++requestSeq}`, cwd: scratch, ...Object.assign({}, ...attached.map(a => a.sendExtra?.() ?? {})), ...(first ? (persisted ? {} : { stateless: true }) : { conversationId: nativeThread }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
+      const run = await chat.send({ message: text, clientThreadId, requestId: `req-${++requestSeq}`, cwd: scratch, ...(agentRoom ? { profileId: agentRoom.id, replyDestination: 'direct' } : {}), ...Object.assign({}, ...attached.map(a => a.sendExtra?.() ?? {})), ...(first ? (persisted ? {} : { stateless: true }) : { conversationId: nativeThread }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
       first = false; nativeThread = run.conversationId
       return { run, started }
     }
@@ -554,7 +567,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       if (turn.action === 'delete') { await deleteTurn(index, turn); continue }
       // a message turn takes at most one follow-up: a person's message typed into the run (whileRunning), or an engine-level interrupt / steer
       const follow = next?.whileRunning !== undefined ? 'message' : (next?.action === 'interrupt' || next?.action === 'steer') ? next.action : null, withMessage = follow !== null
-      const sub = [], ledger = wiring.ledger
+      const sub = [], ledger = wiring.ledger, requestsFrom = rec.requests.length
       let asked = 0, mark = null
       memoryHook.beginTurn() // memory hook
       const ctx = await beginTurn(turn.say)
@@ -575,16 +588,20 @@ export async function runConversation({ options, set, conversation, deps = {} })
       // a registered feature that has an `expect.<name>` entry in this turn runs now, after the answer is posted, and leaves its record
       const hookRecords = {}
       for (const a of attached) if (turn.expect?.[a.name] !== undefined && a.afterTurn) hookRecords[a.name] = await a.afterTurn({ run: sub.at(-1).run, say: turn.say, answer: posted.at(-1) ?? null, turnIndex: index + 1 })
+      const window = rec.requests.slice(requestsFrom), countOf = method => window.filter(r => r.method === method).length
+      const engineRequests = {}
+      for (const r of window) engineRequests[r.method] = (engineRequests[r.method] ?? 0) + 1
       const flat = {
+        resumes: countOf('thread/resume'), unsubscribes: countOf('thread/unsubscribe'),
         hooks: hookRecords, toolCalls: sub.flatMap(s => s.toolCalls), native: sumNative(sub), posted, asked, commandsRan: sub.flatMap(s => s.commandsRan), files: readFiles(turn), undoRecords: undoCount(),
-        turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted), draftCheckRows: sub.reduce((n, s) => n + (s.draftRows?.length ?? 0), 0),
+        turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted), draftCheckRows: sub.reduce((n, s) => n + (s.draftRows?.length ?? 0), 0), draftCheckRejects: sub.reduce((n, s) => n + (s.draftRows ?? []).reduce((m, row) => m + (row.judgments ?? []).filter(j => j.would === 'reject').length, 0), 0),
       }
       const memory = memoryHook.finishTurn(turn.expect?.memory) // memory hook
       const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...memory.expectations]
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
       await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
-        ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...(memory.record ? { memory: memory.record } : {}), expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
+        ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...(memory.record ? { memory: memory.record } : {}), expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {
         // the message typed into the run: what happened after it was sent
         const prev = sub[0], after = texts.slice(mark.posted)
@@ -614,6 +631,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     }
     await stop()
     try { store?.close() } catch {}
+    try { profileStore?.close() } catch {}
     rec.totalMs = ms(t0)
   }
   return rec
@@ -662,6 +680,8 @@ export async function cleanupLeftovers(options, deps = {}) {
 export async function runCheck(options, scripts, deps = {}) {
   const records = []
   makeDirs(options.out)
+  const agentRooms = scripts.flatMap(({ script }) => script.conversations.filter(c => c.agentProfile).map(c => `${script.set}/${c.id}`))
+  if (agentRooms.length && !options.persisted) throw Object.assign(new Error(`an agentProfile conversation is a direct room, which is not one-time: it needs --persisted-with-cleanup (${agentRooms.join(', ')})`), { code: 'agent_room_needs_persisted' })
   assertCleanupGuaranteed(options, deps, deps.env ?? process.env)
   for (const { script } of scripts) {
     for (const conversation of script.conversations) {

@@ -165,6 +165,10 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
     'thread/resume': (id, params) => {
       const thread = threads.get(params.threadId)
       if (!thread || !persisted.has(params.threadId)) return send({ id, error: { code: -32600, message: `no rollout found for thread id ${params.threadId}` } })
+      // a resume re-applies the settings it carries (config, instructions, folder), like the real thread/resume does for a thread that is not loaded
+      if (params.config) thread.config = params.config
+      if (typeof params.developerInstructions === 'string') { thread.developerInstructions = params.developerInstructions; thread.internal = params.developerInstructions.includes('private one-off task') }
+      if (typeof params.cwd === 'string') thread.cwd = params.cwd
       result(id, 'thread/resume', { thread: threadObject(params.threadId, { cwd: thread.cwd, ephemeral: false }), cwd: thread.cwd, model: script.model ?? 'fake-model', modelProvider: 'openai', approvalPolicy: 'never', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false } })
     },
     'turn/start': (id, params) => {
