@@ -4121,6 +4121,26 @@ export class CodexChatRuntime {
     this.pendingApprovals.set(approvalId, { ...pending, rpcId: event.rpcId, conversationId: run.conversationId, runId: run.runId, ...(gate ? { commandGate: gate } : {}) })
     run.pendingApprovals.push(pending)
     this.emit(run, 'approval.required', pending, event.itemId)
+    if (gate?.pendingSession && event.choices.includes('acceptForSession') && !acceptDisabledReason &&
+        !ceilingApprovalRefusal(run.toolCeiling, { kind, network: event.isNetworkApproval, session: true })) this.offerSessionWhenAllowed(run, approvalId, pending, event, gate)
+  }
+
+  // The session choice comes back on the same card (same approvalId; the screen upserts it) only when the gate's answer arrived in time
+  // and does not require approval. A gate that could not judge (fallback) leaves today's behaviour (P2): the choice comes back too.
+  offerSessionWhenAllowed(run, approvalId, pending, event, gate) {
+    let timer = null
+    const late = new Promise(resolve => { timer = setTimeout(() => resolve('late'), COMMAND_GATE_TIMEOUT_MS); timer.unref?.() })
+    const done = Promise.race([gate.result, late]).then(assessed => {
+      clearTimeout(timer)
+      const stored = this.pendingApprovals.get(approvalId)
+      if (assessed === 'late' || !stored || stored.status !== 'pending' || TERMINAL.has(run.status)) return
+      if (assessed?.approval === true) return
+      const choices = event.choices.filter(choice => choice === 'acceptForSession' || pending.choices.includes(choice))
+      stored.choices = choices; pending.choices = choices
+      this.emit(run, 'approval.required', pending, event.itemId)
+    }).catch(() => {})
+    this.commandGateRuns.add(done)
+    void done.finally(() => this.commandGateRuns.delete(done))
   }
 
   receiveUserInput(run, event) {
@@ -5803,7 +5823,11 @@ export class CodexChatRuntime {
       this.commandGateRuns.add(result)
       void result.finally(() => this.commandGateRuns.delete(result))
       // Rules that need no lookup are known at once: with the flag on the session choice is not offered at all for those.
-      return { enforce, withholdSession: enforce && (first.floor.length > 0 || broadSession), result }
+      // c13 (decision 3): while the predicates (or the git facts a rule needs) are still coming, the card shows no session choice; it is
+      // added when they arrive and allow it, within the foreground deadline. No refusal after the fact, so no message is needed.
+      const pendingSession = enforce && !first.floor.length && !broadSession && first.destructive &&
+        (mode === 'on' || (typeof cfg.inspect === 'function' && where !== null && first.paths.length > 0))
+      return { enforce, withholdSession: enforce && (first.floor.length > 0 || broadSession || pendingSession), pendingSession, result }
     } catch { return null }
   }
 

@@ -211,18 +211,20 @@ test('flag on (Claude): the only effect is that a high-risk command cannot be ap
   // 1) rules that need no lookup settle it at once: the session choice is not offered on that card
   const floor = await h.ask(run, 'rm -rf "$TARGET"/*')
   assert.deepEqual(floor.choices, ['accept', 'decline', 'cancel'])
-  // 2) a rule that needs git facts (tracked files): the choice is shown, and checked when the person picks it
+  // 2) a rule that needs git facts (tracked files): (c13, decision 3) the choice is not shown while the facts come, and stays away when they
+  //    require approval, so picking it is impossible rather than refused afterwards
   const trackedCard = await h.ask(run, 'rm -rf src/')
-  assert.deepEqual(trackedCard.choices, ALL)
-  await assert.rejects(h.chat.replyApproval({ ...run, approvalId: trackedCard.approvalId, decision: 'acceptForSession' }), e => e.code === 'COMMAND_RISK_SESSION_FORBIDDEN' && e.httpStatus === 403)
-  assert.deepEqual(h.answers(), [], 'a refused session grant answers nothing; the card is still waiting')
+  assert.deepEqual(trackedCard.choices, ['accept', 'decline', 'cancel'])
+  await assert.rejects(h.chat.replyApproval({ ...run, approvalId: trackedCard.approvalId, decision: 'acceptForSession' }), e => e.code === 'INVALID_DECISION')
+  assert.deepEqual(h.answers(), [], 'a session grant that was never offered answers nothing; the card is still waiting')
   assert.equal((await h.chat.replyApproval({ ...run, approvalId: trackedCard.approvalId, decision: 'accept' })).status, 'replySent')
   // 3) the rule floor (R5) needs no lookup: discarding commits never offers the session choice
   const history = await h.ask(run, 'git reset --hard HEAD~5')
   assert.deepEqual(history.choices, ['accept', 'decline', 'cancel'])
-  // 4) a content predicate marks it (something leaves this machine): the session choice is refused when picked
+  // 4) a content predicate marks it (something leaves this machine): (c13) the session choice never appears on that card
   const scored = await h.ask(run, 'git push origin main')
-  await assert.rejects(h.chat.replyApproval({ ...run, approvalId: scored.approvalId, decision: 'acceptForSession' }), e => e.code === 'COMMAND_RISK_SESSION_FORBIDDEN')
+  assert.deepEqual(scored.choices, ['accept', 'decline', 'cancel'])
+  await assert.rejects(h.chat.replyApproval({ ...run, approvalId: scored.approvalId, decision: 'acceptForSession' }), e => e.code === 'INVALID_DECISION')
   assert.equal((await h.chat.replyApproval({ ...run, approvalId: scored.approvalId, decision: 'decline' })).status, 'replySent')
   // 5) low risk and plain commands: the session choice works as before
   for (const command of ['rm -rf node_modules', 'npm test']) {
@@ -253,6 +255,10 @@ test('flag on can only add: an unavailable score leaves today\'s behaviour, and 
   await s.chat.queue; await tick(); await s.chat.queue
   const slowCard = s.chat.runs.get(`${run3.conversationId}/${run3.runId}`).pendingApprovals.at(-1)
   const began = performance.now()
+  // (c13, decision 3) the card waits for nothing; the session choice comes back on it once the gate gives up (today's behaviour, P2)
+  assert.deepEqual(slowCard.choices, ['accept', 'decline', 'cancel'])
+  await s.chat.commandGateIdle()
+  assert.deepEqual(slowCard.choices, ALL)
   assert.equal((await s.chat.replyApproval({ ...run3, approvalId: slowCard.approvalId, decision: 'acceptForSession' })).status, 'replySent')
   assert.ok(performance.now() - began < 1500, 'bounded by the gate deadline')
   assert.deepEqual(s.answers(), ['allow+session']); assert.equal(s.gateEntries()[0].fallback, 'timeout')
