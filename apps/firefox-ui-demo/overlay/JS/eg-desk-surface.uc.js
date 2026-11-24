@@ -12725,6 +12725,7 @@
       rate_limited: { text: 'OpenAI가 요청을 잠시 제한했습니다. 잠시 뒤 다시 시도할 수 있습니다.', retry: true },
       timeout: { text: '제한 시간 안에 추천이 도착하지 않았습니다. 다시 시도할 수 있습니다.', retry: true },
       budget_exceeded: { text: '이번 달 EG-Desk 결정 모델 사용 한도에 도달해 요청을 보내지 않았습니다.' },
+      spend_limit_reached: { text: 'OpenAI의 지출·사용 한도에 도달해 추천을 받지 못했습니다. OpenAI에서 한도를 올리거나 다음 달 초기화 뒤에 쓸 수 있습니다.' },
       invalid_key: { text: 'OpenAI가 저장한 API 키를 받아들이지 않았습니다. 설정에서 키를 확인해 주세요.', settings: true },
       not_configured: { text: '저장한 API 키가 없습니다. 설정에서 키를 저장해 주세요.', settings: true },
       unreachable: { text: 'OpenAI Decisions에 연결하지 못했습니다. 네트워크를 확인한 뒤 다시 시도할 수 있습니다.', retry: true },
