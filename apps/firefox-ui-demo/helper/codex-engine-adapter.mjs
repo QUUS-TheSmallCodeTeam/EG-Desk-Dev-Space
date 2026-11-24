@@ -126,7 +126,7 @@ export function isStaleLoginFailure(params, currentLoginId) {
 }
 
 export function createCodexEngineAdapter({ request, respond, getOwnerKey = () => null, isReady = () => true,
-  describe = null, refresh = null, getModels = () => null, getBoardPeerContract = () => null, getThreadDelete = () => false, profiles = null } = {}) {
+  describe = null, refresh = null, getModels = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null } = {}) {
   const sinks = new Set()
   const deliver = (kind, value, profileId) => {
     for (const sink of [...sinks]) {
@@ -142,6 +142,13 @@ export function createCodexEngineAdapter({ request, respond, getOwnerKey = () =>
   const models = id => {
     try { const list = shared(id) ? getModels() : profiles?.snapshot(id)?.models; return Array.isArray(list) ? list : null }
     catch { return null }
+  }
+  // c23: the proof for a plain message into a working turn, by the schema capability of the slot's own binary (not a version pin)
+  const steerContract = id => {
+    try {
+      const proof = ready(id) && (shared(id) ? getSteerContract() : profiles?.steerContract?.(id))
+      return typeof proof === 'string' && /^[a-f0-9]{64}$/.test(proof) ? proof : null
+    } catch { return null }
   }
   const boardPeerContract = id => {
     try {
@@ -168,8 +175,11 @@ export function createCodexEngineAdapter({ request, respond, getOwnerKey = () =>
     releaseThread: (threadId, id) => call('thread/unsubscribe', { threadId }, id),
     startTurn: (params, id) => call('turn/start', params, id),
     boardPeerContract,
+    steerContract,
+    // The board peer contract allows additional context; the plain steer contract only { threadId, expectedTurnId, input, clientUserMessageId }.
     steerTurn(params, id, proof) {
-      if (!proof || proof !== boardPeerContract(id)) throw chatError('BOARD_PEER_UNSUPPORTED', 'No matching verified peer-input contract on this slot', 409)
+      const plain = !Object.hasOwn(params ?? {}, 'additionalContext')
+      if (!proof || !(proof === boardPeerContract(id) || (plain && proof === steerContract(id)))) throw chatError('BOARD_PEER_UNSUPPORTED', 'No matching verified peer-input contract on this slot', 409)
       return call('turn/steer', params, id)
     },
     interruptTurn: (threadId, turnId, id) => call('turn/interrupt', { threadId, turnId }, id),

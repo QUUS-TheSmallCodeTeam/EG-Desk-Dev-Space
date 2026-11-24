@@ -389,6 +389,8 @@ const codexEngine = createCodexEngineAdapter({
   isReady: () => appServerReady,
   getModels: () => modelCatalog.snapshot(),
   getBoardPeerContract: () => appServerReady ? nativeCapabilities.boardPeerContract : null,
+  // c23: a plain message may be steered into a working turn when this binary's own generated schema says so (no version pin)
+  getSteerContract: () => appServerReady ? nativeCapabilities.steerContract : null,
   // thread/delete: the shared app-server only, when its binary's generated schema has it (egdesk-native-capabilities threadDelete). A profile's
   // own app-server is not proven here; deleting a conversation there records that the engine history remains (L2 c18).
   getThreadDelete: id => (id == null || id === CODEX_ENGINE_PROFILE_ID) && appServerReady && nativeCapabilities.threadDelete === true,

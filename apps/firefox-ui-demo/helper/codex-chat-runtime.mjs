@@ -745,7 +745,7 @@ function cleanNotification(method, p, engineId = 'codex') {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null }) {
+  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer, monotonicNow })
     if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
     this.resolveProjectWorkspace = resolveProjectWorkspace
@@ -793,7 +793,7 @@ export class CodexChatRuntime {
     // given request/respond become the Codex adapter, which calls them with
     // the same methods and params as before.
     this.engines = engines instanceof EngineRegistry ? engines : new EngineRegistry()
-    if (!(engines instanceof EngineRegistry)) for (const adapter of engines || [createCodexEngineAdapter({ request, respond, getBoardPeerContract, getThreadDelete })]) this.engines.register(adapter)
+    if (!(engines instanceof EngineRegistry)) for (const adapter of engines || [createCodexEngineAdapter({ request, respond, getBoardPeerContract, getSteerContract, getThreadDelete })]) this.engines.register(adapter)
     const codex = this.engines.get('codex')
     if (typeof codex?.request !== 'function') throw chatError('INVALID_ENGINE_ADAPTER', 'The Codex engine adapter is required', 500)
     // Codex-only escape hatch (config/read, bounded-QA proofs).
@@ -6114,7 +6114,7 @@ export class CodexChatRuntime {
     const requestId = idText(body.requestId), message = typeof body.message === 'string' ? body.message : ''
     if (!flow?.question?.pending || !store || !requestId || !message.trim() || message.length > 16384) throw chatError('INVALID_REQUEST', 'This reply cannot be added to the running turn', 400)
     const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
-    const proof = engine?.boardPeerContract?.(slot)
+    const proof = engine?.steerContract?.(slot) ?? engine?.boardPeerContract?.(slot)
     if (!proof || typeof engine.steerTurn !== 'function') throw chatError('INRUN_REPLY_UNAVAILABLE', 'This engine cannot take a reply while it works', 409)
     const clientUserMessageId = requestId
     flow.question.pending = false // one reply per question; a second message waits for the turn like any other
@@ -6178,7 +6178,7 @@ export class CodexChatRuntime {
     entry.state = 'settling'
     try {
       if (decision === 'steer') {
-        const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId), proof = engine?.boardPeerContract?.(slot)
+        const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId), proof = engine?.steerContract?.(slot) ?? engine?.boardPeerContract?.(slot)
         if (!proof || typeof engine.steerTurn !== 'function') throw new Error('no steer contract')
         const response = await engine.steerTurn({ threadId: run.conversationId, expectedTurnId: run.runId, clientUserMessageId: requestId,
           input: [{ type: 'text', text: entry.text, text_elements: [] }] }, slot, proof)

@@ -441,7 +441,7 @@ test('whileRunning: the second message goes into the working run (no new turn), 
   assert.equal(second.subTurns[0].accepted, true); assert.equal(second.expectations[0].check, 'sent_while_running'); assert.ok(second.subTurns[0].sentAtMs >= 60 && second.subTurns[0].sentAtMs < 400, 'sent ' + second.subTurns[0].sentAtMs + ' ms after the first turn started')
   assert.match(second.posted.at(-1), /tests passed/, 'the messages after it was sent include the run\'s own answer')
   assert.equal(wireLog(w).filter(m => m.dir === 'in' && m.method === 'turn/start').length, 1, 'the message typed into the run started no turn of its own')
-  assert.deepEqual(rec.engine.nativeContract, { version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: false }, 'the steer contract the product would use: none on this binary')
+  assert.deepEqual(rec.engine.nativeContract, { version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: false, steerContract: false }, 'no steer contract on this (stubbed) binary')
   noSchemaErrors(w)
 })
 
