@@ -34,7 +34,8 @@ import { openProfileStore } from './egdesk-profile-store.mjs'
 import { createProfileHttpHandler } from './egdesk-profile-http.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
 import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
-import { createDecisionBudget, createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
+import { createDecisionBudget, createDecisionClient, decisionTopicRecipient, DECISIONS_ENDPOINT } from './egdesk-decision-client.mjs'
+import { createDecisionTransport } from './egdesk-decision-transport.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
@@ -236,7 +237,9 @@ const decisionCalibrationLog = openCalibrationLog({ dataDir: path.join(dataDir, 
 const decisionBudget = createDecisionBudget({ monthlyInputTokenCap: decisionBudgetStore.state?.cap ?? null, initial: decisionBudgetStore.state,
   onChange: state => { decisionBudgetStore.save(state) } })
 const recipientForDecisionKey = (key, endpoint, model) => decisionTopicRecipient(key, decisionCredentials.savedAt(), endpoint, model)
-const decisionClient = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget, recipientForKey: recipientForDecisionKey })
+// One keep-alive transport for the single Decisions endpoint (never retries; see egdesk-decision-transport.mjs).
+const decisionTransport = createDecisionTransport()
+const decisionClient = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget, recipientForKey: recipientForDecisionKey, fetchImpl: decisionTransport.fetch })
 const recipientForCodexDecisions = ({ engineId, engineProfileId, ownerKey }) => {
   if (engineId !== 'codex') return null
   const auth = !engineProfileId || engineProfileId === CODEX_ENGINE_PROFILE_ID ? authState : codexProfileServers.snapshot(engineProfileId)?.auth
@@ -514,10 +517,11 @@ const handleEngineProfilesHttp = createEngineProfilesHttpHandler({
 const handleHostControlHttp = createHostControlHttpHandler(hostControl, { port: BRIDGE_PORT })
 // Board arrangement gets a separate guarded client over the same isolated Decisions key and budget.
 const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credentials: decisionCredentials,
-  getMode: () => bridgeSettings.decisionContext.mode, budget: decisionBudget, port: BRIDGE_PORT, calibrationLog: decisionCalibrationLog })
+  getMode: () => bridgeSettings.decisionContext.mode, budget: decisionBudget, port: BRIDGE_PORT, calibrationLog: decisionCalibrationLog, fetchImpl: decisionTransport.fetch })
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
 const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
   budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT, boardPresentation: handleBoardPresentationHttp,
+  preconnect: () => decisionTransport.preconnect(DECISIONS_ENDPOINT),
   onSettingsChanged: () => { browserDecisionGeneration++ } })
 const handleOntologyHttp = createOntologyHttpHandler({ binding: () => ontologyBinding, store: ensureOntologyStore, runtime: sqliteRuntime, port: BRIDGE_PORT })
 const handleMemoryEvidenceHttp = createMemoryEvidenceHttpHandler({ port: BRIDGE_PORT,

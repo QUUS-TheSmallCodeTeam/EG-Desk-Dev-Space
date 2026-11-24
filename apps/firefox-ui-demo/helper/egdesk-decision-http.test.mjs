@@ -145,3 +145,34 @@ test('a saved key is replaced only by a verified key; an unusable new key leaves
   same.store.save(KEY)
   assert.equal((await same.call('POST', '/decision/credential', { apiKey: KEY })).status, 200)
 })
+
+test('/decision/preconnect: only mode on/advisory with a saved key may warm; off or no key is zero contact', async t => {
+  const root = createPrivateQaTempDirectory('egdesk-decision-preconnect-test-')
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const store = openDecisionCredentialStore({ dataDir: path.join(root, 'data'), log: () => {} })
+  const state = { mode: 'on' }
+  let warmed = 0
+  const handler = createDecisionHttpHandler({ store, verifyKey: async () => ({ status: 'verified', retryable: false }), model: 'gpt-6-luna',
+    mode: { get mode() { return state.mode }, saved: true, persisted: true, save() { return true } }, preconnect: () => { warmed++; return 'warmed' } })
+  const call = async (method, body) => {
+    const res = fakeResponse()
+    await handler(fakeRequest(method, '/decision/preconnect', body), res, new URL('/decision/preconnect', 'http://127.0.0.1:39218'))
+    return { status: res.status, data: res.body ? JSON.parse(res.body) : null }
+  }
+  assert.deepEqual((await call('POST', {})).data, { status: 'skipped' }, 'no key')
+  store.saveKey?.(KEY) ?? await handler(fakeRequest('POST', '/decision/credential', { apiKey: KEY }), fakeResponse(), new URL('/decision/credential', 'http://127.0.0.1:39218'))
+  assert.equal(store.getApiKey(), KEY)
+  state.mode = 'off'
+  assert.deepEqual((await call('POST', {})).data, { status: 'skipped' }, 'off')
+  assert.equal(warmed, 0)
+  state.mode = 'advisory'
+  assert.deepEqual((await call('POST', {})).data, { status: 'warmed' })
+  state.mode = 'on'
+  assert.deepEqual((await call('POST', {})).data, { status: 'warmed' })
+  assert.equal(warmed, 2)
+  assert.equal((await call('GET')).status, 405)
+  const foreign = fakeResponse()
+  await handler(fakeRequest('POST', '/decision/preconnect', {}, { origin: 'https://evil.example' }), foreign, new URL('/decision/preconnect', 'http://127.0.0.1:39218'))
+  assert.equal(foreign.status, 403)
+  assert.equal(warmed, 2)
+})
