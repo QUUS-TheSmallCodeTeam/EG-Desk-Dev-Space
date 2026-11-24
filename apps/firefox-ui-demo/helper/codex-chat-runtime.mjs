@@ -1273,8 +1273,10 @@ export class CodexChatRuntime {
     catch (error) { throw this.providerFailure(error, provider) }
   }
 
-  collectToolSpecs(policy = null, { forManifest = false, browserInteraction = false, toolCeiling = null, engineId = 'codex', authority } = {}) {
+  collectToolSpecs(policy = null, { forManifest = false, browserInteraction = false, toolCeiling = null, engineId = 'codex', authority, slot } = {}) {
     const specs = [], owners = new Map(), selected = [], manifest = []
+    // the slot that runs the turn: the caller's own (the run's route), else the context authority's; never the shared slot by default for a profile run
+    const routeHint = Object.freeze({ engineId: authority?.engineId ?? engineId, engineProfileId: slot ?? authority?.engineProfileId ?? null })
     for (const [index, provider] of this.toolProviders.entries()) {
       if (!this.providerSupportsEngine(provider, engineId)) continue
       const providerId = provider === this.contexts ? 'egdesk-context-v1' : provider.providerId
@@ -1288,7 +1290,9 @@ export class CodexChatRuntime {
       if (computerTools && !forManifest && (policy !== null || !this.computerToolsAvailable())) continue
       if (this.store && provider.specs && (typeof providerId !== 'string' || !providerId)) throw chatError('INVALID_TOOL_PROVIDER', 'Durable tool providers require a stable identity', 500)
       let offered
-      try { offered = provider.specs?.(provider === this.contexts ? authority : undefined) || [] }
+      // L1 c23: the context provider reads the whole authority; every other provider gets the slot that will run the turn (engine + account profile),
+      // so its readiness is that slot's, not the shared server's
+      try { offered = provider.specs?.(provider === this.contexts ? authority : routeHint) || [] }
       catch (error) { throw this.providerFailure(error, provider) }
       if (!Array.isArray(offered)) throw chatError('INVALID_TOOL_PROVIDER', 'Tool provider returned an invalid native catalog', 500)
       for (const spec of offered) {
@@ -1868,7 +1872,7 @@ export class CodexChatRuntime {
     if (qaOutputMarkers && (body.message.includes(qaOutputMarkers[0]) || instructions.includes(qaOutputMarkers[0]))) {
       throw chatError('QA_PRIVATE_MARKER_SPOILED', 'The first QA fixture marker must be absent from model-visible request text', 400)
     }
-    if (requestedPolicy && engineId !== 'claude' && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
+    if (requestedPolicy && engineId !== 'claude' && !this.qaReady(slot)) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
     if (requestedPolicy && engineId === 'claude' && !CLAUDE_BOUNDED_POLICIES.includes(requestedPolicy)) throw chatError('QA_POLICY_UNAVAILABLE', 'Claude supports only the bounded Browser policy', 503)
     if (requestedPolicy && !this.engines.get(engineId).capabilities(slot).has('boundedQa')) throw chatError('QA_POLICY_UNAVAILABLE', 'This AI engine cannot prove bounded execution', 503)
     if (qaMarkers && requestedPolicy && requestedPolicy !== READ_ONLY_QA) throw chatError('QA_COMMAND_POLICY_REQUIRED', 'Native QA command receipt requires readOnlyQa policy', 400)
@@ -2515,7 +2519,7 @@ export class CodexChatRuntime {
           context.ceilingNotices.push({ key: 'browser-selection', axis: 'browser', title: CEILING_MESSAGES.browserDowngraded })
         }
       }
-      preparedProviders.set(provider, await this.callProvider(provider, 'prepare', { ...input, effectiveExecutionPolicy: policy }, provider === this.contexts ? contextAuthority : undefined,
+      preparedProviders.set(provider, await this.callProvider(provider, 'prepare', { ...input, effectiveExecutionPolicy: policy }, provider === this.contexts ? contextAuthority : Object.freeze({ engineId: engine.id, engineProfileId: context.route?.engineProfileId ?? contextAuthority?.engineProfileId ?? null }),
         provider === this.contexts ? { model: overrides.model || this.threads.get(context.conversationId)?.model || null,
           effort: selection.effort || this.threads.get(context.conversationId)?.effort || null } : undefined) || null)
     }
@@ -2552,7 +2556,7 @@ export class CodexChatRuntime {
     if (this.store && engine.id === 'claude' && this.engineOwnerHash(engine.id, profileId) !== context.ownerHash) {
       throw Object.assign(chatError('ACCOUNT_CHANGED', 'AI engine account changed before dispatch', 409), { definite: true })
     }
-    if (bounded && engine.id !== 'claude' && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
+    if (bounded && engine.id !== 'claude' && !this.qaReady(slot)) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
     const qaOverrides = bounded && engine.id === 'claude' ? claudeBoundedThreadOverrides(policy) : bounded ? await loadQaThreadOverrides(request, {
       threadId: context.conversationId && this.loadedThreads.has(context.conversationId) ? context.conversationId : null,
       cwd: overrides.cwd || this.threads.get(context.conversationId)?.cwd || null,
@@ -2654,7 +2658,7 @@ export class CodexChatRuntime {
       }
       if (bounded) this.persistExecutionPolicy(context, cid)
     } else {
-      const nativeTools = this.collectToolSpecs(policy, { browserInteraction: browserInteractionRequested, toolCeiling: ceiling, engineId: engine.id, authority: contextAuthority })
+      const nativeTools = this.collectToolSpecs(policy, { browserInteraction: browserInteractionRequested, toolCeiling: ceiling, engineId: engine.id, authority: contextAuthority, slot })
       if (nativeTools.specs.length) overrides.dynamicTools = nativeTools.specs
       if (bounded) Object.assign(overrides, qaOverrides)
       // Ordinary Agent questions may arrive outside Plan mode. Bounded threads never ask.
@@ -3051,7 +3055,7 @@ export class CodexChatRuntime {
         const cwd = this.threadResumeCwds.get(cid)
         if (!cwd) throw Object.assign(chatError('NATIVE_CWD_UNVERIFIED', 'The original working folder was not recorded; this conversation cannot be resumed safely', 409), { definite: true })
         if (overrides.cwd && overrides.cwd !== cwd) throw Object.assign(chatError('CWD_CHANGE_UNSUPPORTED', 'A Claude conversation keeps the folder it started in; start a new conversation for another folder', 409), { definite: true })
-        currentCatalog = this.collectToolSpecs(null, { forManifest: true, engineId, authority: contextAuthority })
+        currentCatalog = this.collectToolSpecs(null, { forManifest: true, engineId, authority: contextAuthority, slot })
         verifiedTools = verifiedManifestOwners(this.threadToolManifests.get(cid), currentCatalog.manifest, currentCatalog.owners)
         if (verifiedTools.status !== 'verified') throw Object.assign(chatError('NATIVE_TOOL_MANIFEST_UNVERIFIED', 'The original tool catalog cannot be verified; start an explicit new conversation', 409), { definite: true })
         // Claude does not save dynamic tools. Reconstruct only the original
@@ -3088,7 +3092,7 @@ export class CodexChatRuntime {
       }
       if (engineId === 'codex') await this.checkContinuity(cid, clientThreadId, result, slot, turns)
       this.rememberThread(cid, result, clientThreadId)
-      currentCatalog ||= this.collectToolSpecs(null, { forManifest: true, engineId, authority: contextAuthority })
+      currentCatalog ||= this.collectToolSpecs(null, { forManifest: true, engineId, authority: contextAuthority, slot })
       verifiedTools ||= verifiedManifestOwners(this.threadToolManifests.get(cid), currentCatalog.manifest, currentCatalog.owners)
       this.threadToolOwners.set(cid, verifiedTools.owners)
       this.threadToolManifestStatus.set(cid, verifiedTools.status)
@@ -3188,7 +3192,7 @@ export class CodexChatRuntime {
     this.locks.add(cid)
     try {
       const bounded = [READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(boundPolicy)
-      if (bounded && engineId !== 'claude' && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
+      if (bounded && engineId !== 'claude' && !this.qaReady(slot)) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
       const qaOverrides = bounded && engineId === 'claude' ? claudeBoundedThreadOverrides(boundPolicy) : bounded ? await loadQaThreadOverrides(this.scopedRequest(slot), {
         threadId: this.loadedThreads.has(cid) ? cid : null,
         cwd: this.threads.get(cid)?.cwd || null,

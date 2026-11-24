@@ -591,7 +591,7 @@ export class ContextRuntime {
     const needsTools = ids.length || body.attachments?.length || caps.publishBriefing || caps.read || caps.reader
     if (!needsTools) {
       if (choice?.chosen.length) reject('RESOLVER_CHOICE_UNCAPTURED', 'Chosen suggestions must be attached through the normal capture path', 400)
-      return (selectedAuthority?.engineId || body.engineId) === 'claude' ? null : this.changesOnlyPrepared(body, this.runtime?.epoch)
+      return (selectedAuthority?.engineId || body.engineId) === 'claude' ? null : this.changesOnlyPrepared(body, this.runtime?.epoch, selectedAuthority)
     }
     const authority = this.scopedAuthority(body, selectedAuthority)
     this.assertExpectedContextScope(body.expectedContextScope, authority)
@@ -680,16 +680,20 @@ export class ContextRuntime {
   // still hears once that attached sources changed. Only for a conversation
   // that already had context tools in this bridge, so the note never makes an
   // older thread fail a tool check it would otherwise not meet; otherwise null.
-  async changesOnlyPrepared(body, epoch) {
+  async changesOnlyPrepared(body, epoch, selectedAuthority) {
     const conversationId = conversationOf(body.conversationId)
-    const ownerKey = this.getOwnerKey()
+    // L1 c23 (U11): the account is the ROOM's (the authority the runtime resolved for its route), not the window's default sign-in; a room on an
+    // Agent profile's account was tracked under that account's key, and must hear about changed sources while the default is signed out or another
+    let authority = null, ownerKey = null
+    try { authority = selectedAuthority || this.authority(body); ownerKey = this.owner(authority) } catch { return null }
     if (!conversationId || !ownerKey || !this.trackedSources.has(trackingKey(ownerKey, conversationId))) return null
     const changes = this.pendingChanges(ownerKey, conversationId)
-    if (!changes.length || !this.schemaReady()) return null
+    if (!changes.length || !this.schemaReady(authority)) return null
     if (this.runtime?.threadToolManifestStatus?.get?.(conversationId) !== 'verified') return null
     if (!await this.store.hasNativeTools(ownerKey, conversationId)) return null
-    if (this.getOwnerKey() !== ownerKey || this.runtime?.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during context preparation')
-    return { ownerKey, authority: this.authority(body), changesOnly: true, changes }
+    if (this.runtime?.epoch !== epoch) reject('ACCOUNT_CHANGED', 'Account or connection changed during context preparation')
+    this.assertAuthority(authority) // the room's own account and connection are still the same
+    return { ownerKey, authority, changesOnly: true, changes }
   }
 
   async registerThread(conversationId, selectedAuthority) {

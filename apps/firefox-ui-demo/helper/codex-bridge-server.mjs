@@ -75,7 +75,7 @@ import { createClaudeProcessBudget } from './egdesk-claude-limits.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { buildCodexAppServerLaunch, createNativeCapabilityCache, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
-const isProfileSlot = id => typeof id === 'string' && id !== '' && id !== CODEX_ENGINE_PROFILE_ID
+import { createSlotReadiness, isProfileSlot } from './egdesk-slot-readiness.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
 import { createLocalCapacity } from './egdesk-local-capacity.mjs'
@@ -347,16 +347,20 @@ for (const root of pendingFileRoots.values()) contexts.noteRoot(root)
 const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState) })
 // Browser-only transfer generation; restored settings never revive older work.
 let browserDecisionGeneration = 0
-const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: () => nativeCapabilities.qaReadOnly && appServerReady, fixtureQa: fixtureBrowserQaFromEnv(process.env),
+// L1 c23: readiness of the slot that will run the turn. The shared slot reads the shared binary's probe and the shared server; a profile slot reads ITS
+// OWN binary's probe and ITS OWN server (ready and signed in), so neither server being down affects the other's rooms.
+const slotReadiness = createSlotReadiness({ shared: () => ({ schemaMatch: nativeCapabilities.schemaMatch, qaReadOnly: nativeCapabilities.qaReadOnly, ready: appServerReady }),
+  profiles: { capabilities: id => codexProfileServers.capabilities(id) } })
+const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: route => slotReadiness.qaReady(route?.engineProfileId), fixtureQa: fixtureBrowserQaFromEnv(process.env),
   // DECISION_MODEL_CONTEXT_SETUP.md §3.3: egdesk_browser_reflex only with a key and mode 'on'.
   decision: { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null,
     recipient: () => recipientForDecisionKey(decisionCredentials.getApiKey(), undefined, decisionClient.model),
     generation: () => browserDecisionGeneration, client: decisionClient } })
 // egdesk_propose_plan on ordinary threads: plans wait for approval in the
 // workflow runtime opened below (null until then, so the tool answers unavailable).
-const planProvider = createPlanToolProvider({ plans: () => workflow?.plans ?? null, schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
+const planProvider = createPlanToolProvider({ plans: () => workflow?.plans ?? null, schemaReady: route => slotReadiness.schemaReady(route) })
 // CNV-05: egdesk_publish_annotation on ordinary threads (dotted '제안' over a card).
-const annotationProvider = createAnnotationToolProvider({ schemaReady: () => nativeCapabilities.schemaMatch && appServerReady })
+const annotationProvider = createAnnotationToolProvider({ schemaReady: route => slotReadiness.schemaReady(route) })
 // The Codex models the signed-in account can choose (model/list, hidden ones
 // excluded), read after each ready connection and on every account change;
 // null while unknown or signed out. They fill the Codex engines[] row and
@@ -495,7 +499,7 @@ const chat = new CodexChatRuntime({
   requireStore: true,
   getOwnerKey: () => publicAuthIdentityKey(authState),
   expectedProcessConfiguration: { model: appServerLaunch.configuredModel, effort: appServerLaunch.configuredEffort },
-  qaReady: () => nativeCapabilities.qaReadOnly && appServerReady,
+  qaReady: slot => slotReadiness.qaReady(slot),
   getNativeContractFingerprint: () => nativeCapabilities.contractFingerprint,
   profiles: profileStore,
   emit: event => { broadcast(event, 2); workflow?.onChatEvent(event); hostControl.onChatEvent(event) },
