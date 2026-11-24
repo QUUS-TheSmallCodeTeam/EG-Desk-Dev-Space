@@ -77,7 +77,9 @@ test('c26 stuck plan: the c24 form page and the settings error page send the req
   const seen = []
   const out = await runLive({ key: KEY, send: true, fetchImpl: standIn(plan.set, seen), plan })
   // sha256 of the real requests: c24 ig-form (entry, step, person-target follow-up) and c28/c29 settings-error-v2 (entry, wall follow-up, step)
-  assert.deepEqual(out.requests.map(r => r.sha256.slice(0, 8)), ['22478e6b', '854910d2', '784e4b64', '6c01471c', 'fe1d1885', '18706a5e'])
+  // c27: the two ENTRY requests changed (the request predicate's evidence lists the open pages, its question says what counts: c24 22478e6b -> 804d7b9b, settings-error-v2 6c01471c -> 21d0d454);
+  // the step and the follow-ups are the real runs' bytes unchanged (854910d2, 784e4b64, fe1d1885, 18706a5e)
+  assert.deepEqual(out.requests.map(r => r.sha256.slice(0, 8)), ['804d7b9b', '854910d2', '784e4b64', '21d0d454', 'fe1d1885', '18706a5e'])
   const phase = id => out.phases.find(p => p.id === id)
   assert.deepEqual([phase('sk-form').firstNote.code, phase('sk-form').firstNote.candidates, phase('sk-form').acts.length], ['human_step', ['휴대폰 본인확인', '수수료 결제에 동의합니다', '신청하기'], 0])
   assert.deepEqual([phase('sk-error').firstNote.code, phase('sk-error').acts.length], ['error_page', 0])

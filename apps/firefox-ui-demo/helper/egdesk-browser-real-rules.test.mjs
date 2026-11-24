@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
 import { runBrowserReflex } from './egdesk-browser-reflex.mjs'
-import { codeEntryCard, createBrowserTaskStore, createDirectBrowserEntry, decideResume, entryQuestions, readBrowserEntry } from './egdesk-browser-task.mjs'
+import { codeEntryCard, createBrowserTaskStore, createDirectBrowserEntry, decideResume, ENTRY_WEB_ASK, entryQuestions, readBrowserEntry } from './egdesk-browser-task.mjs'
 import { decisionThresholds } from './egdesk-decision-questions.mjs'
 import { PS_NAMES, pageStateAnswers, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
 
@@ -102,7 +102,7 @@ test('entry questions: the request predicate always; one per card quoting that p
   const cards = [{ cardId: 'a', host: 'shop.example.test', title: '주문 내역 | 쇼핑' }, { cardId: 'b', host: 'account.example.test', title: '' }]
   const qs = entryQuestions(cards)
   assert.deepEqual(qs.map(q => [q.name, q.type]), [['browser_entry', 'predicate'], ['browser_entry_card_0', 'predicate'], ['browser_entry_card_1', 'predicate']])
-  assert.equal(qs[0].instructions, 'Is this request something to do in a web page rather than an answer?')
+  assert.equal(qs[0].instructions, ENTRY_WEB_ASK) // c27: the question says what counts as a web task (the evidence now lists the open pages)
   assert.equal(qs[1].instructions, 'Does this request need to be done on this open page: "주문 내역 | 쇼핑" at "shop.example.test"?')
   assert.equal(qs[2].instructions, 'Does this request need to be done on this open page: the page at "account.example.test"?')
   assert.doesNotMatch(qs[1].instructions, /account/, 'one page per predicate')
