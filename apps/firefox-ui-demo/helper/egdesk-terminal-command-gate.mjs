@@ -508,6 +508,7 @@ const ruleMatcher = content => {
 function escape(text) { return text.replace(/[.+?^${}()|[\]\\]/g, '\\$&') }
 /** Whether a session allow rule (its rule content, or null for the whole tool) would let the engine run a floor command without asking. */
 export function sessionRuleCoversFloor(content) {
+  if (content !== null && content !== undefined && (typeof content !== 'string' || !content.trim())) return true // unreadable: the widest
   const matches = ruleMatcher(content)
   if (typeof content === 'string' && !content.includes('*')) {
     const exact = classifyCommand(content.trim(), { cwd: PROBE_CWD, home: PROBE_HOME })
