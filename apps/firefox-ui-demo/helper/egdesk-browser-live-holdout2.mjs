@@ -129,7 +129,7 @@ export function holdout2Checks({ phaseOf }) {
     'h2-hc-options': j => { const o = options(rows(j, 'hc-link')[0]); return has(o, '예약 내역 보기') && has(o, '진료 기록 보기') && has(o, '병원 소개') && !has(o, '로그아웃') },
     'h2-hc-list-options': j => { const o = options(rows(j, 'hc-link')[1]); return has(o, '예약 변경') && has(o, '마이페이지') && !has(o, '예약 취소') },
     'h2-cv-options': j => { const o = options(rows(j, 'hc-covered')[0]); return has(o, '예약 내역 보기') && !has(o, '동의') },
-    'h2-hc-entry-by-code': j => entry(j, 'hc-link')?.names.join(',') === 'browser_entry',
+    'h2-hc-entry-by-code': j => entry(j, 'hc-link')?.names.filter(n => n !== 'browser_entry_answer').join(',') === 'browser_entry',
     'h2-hc-opens-list': j => navs(j, 'hc-link')[0] === '/my/appointments',
     'h2-hc-done': j => status(j, 'hc-link') === 'done',
     'h2-hc-no-click': j => ran(j, 'hc-link') && clicks(j, 'hc-link').length === 0,
@@ -166,6 +166,7 @@ export function holdout2Answers(body) {
   const find = (values, word) => values.find(v => v.includes(word))
   return body.questions.map(q => {
     const values = (q.choices ?? []).map(c => c.value)
+    if (q.name === 'browser_entry_answer') return yesNo(q, /광합성|파이썬/.test(ev) ? 0.95 : 0.03)
     if (q.name === 'browser_entry') return yesNo(q, /광합성|파이썬/.test(ev) ? 0.02 : 0.95)
     if (/^browser_entry_card_\d+$/.test(q.name)) return yesNo(q, /증명서 발급|멤버십 관리|마이페이지|알림 설정/.test(q.instructions ?? '') ? 0.95 : 0.03)
     if (/^browser_entry_wall_\d+$/.test(q.name)) return yesNo(q, 0.02)

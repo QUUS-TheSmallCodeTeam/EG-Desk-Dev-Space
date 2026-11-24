@@ -365,6 +365,7 @@ function expectedAnswers(body) {
   const pick = (q, value, confidence = 0.95) => ({ name: q.name, type: 'choice', choice: value, confidence, probabilities: [{ value, probability: confidence }] })
   return body.questions.map(q => {
     const values = (q.choices ?? []).map(c => c.value)
+    if (q.name === 'browser_entry_answer') return { name: q.name, type: 'predicate', probability: 0.03 } // c29
     if (q.name === 'browser_entry') return { name: q.name, type: 'predicate', probability: 0.95 } // c20: the request predicate
     if (/^browser_entry_card_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: q.name === 'browser_entry_card_0' ? 0.95 : 0.03 }
     if (q.name === 'task_resume') return pick(q, 'resume_task')
