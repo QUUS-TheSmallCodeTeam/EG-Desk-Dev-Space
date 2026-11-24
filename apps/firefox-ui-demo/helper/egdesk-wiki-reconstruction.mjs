@@ -34,8 +34,10 @@ export const RECORD_STATUSES = Object.freeze({
 })
 const STATUS_KEYS = Object.keys(RECORD_STATUSES)
 export const YES = 0.8, NO = 0.2 // predicate guide: yes >= 0.8, no <= 0.2, in between is undecided
+/** No request is started with less than this left before the deadline: the fastest real answer so far took 238 ms, so it could only be thrown away. */
+export const MIN_CALL_MS = 150
 export const DEFAULTS = Object.freeze({ maxCalls: 4, maxScanCalls: 2, maxCatalogChars: 9000, excerptChars: 600, maxPicks: 6, maxDepth: 1,
-  maxOpenOptions: 12, maxPacketChars: 8000, pageChars: 2400, timeoutMs: 4000 })
+  maxOpenOptions: 12, maxPacketChars: 8000, pageChars: 2400, timeoutMs: 4000, minCallMs: MIN_CALL_MS })
 
 export const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/
@@ -124,13 +126,36 @@ export function allowsPage(page, scope) {
     return Array.isArray(scope?.allowedScopes) && scope.allowedScopes.includes(page.scope)
   } catch { return false }
 }
-/** The promise's result, or a rejection with code 'timeout' after ms. The late promise's own outcome is ignored. */
-export function settleBy(promise, ms) {
-  let timer
-  const late = new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('deadline passed'), { code: 'timeout' })), Math.max(1, ms)) })
-  Promise.resolve(promise).catch(() => {})
-  return Promise.race([promise, late]).finally(() => clearTimeout(timer))
+/**
+ * The ONE time source of the deadline logic: the clock it reads and the timer it arms. Injected in tests.
+ * A timer is only a wake-up. Real timers run on the event loop's whole-millisecond time, so they can fire up to about a millisecond before
+ * the high-resolution clock has passed the same span (and arbitrarily late under load); every decision below is therefore made by reading
+ * the clock, never by which callback happened to run first.
+ */
+export const REAL_CLOCK = Object.freeze({ now: () => performance.now(), setTimer: (fn, ms) => setTimeout(fn, ms), clearTimer: handle => clearTimeout(handle) })
+const deadlinePassed = () => Object.assign(new Error('deadline passed'), { code: 'timeout' })
+
+/**
+ * The promise's result if it settles while the clock is still before deadlineAt; otherwise a rejection with code 'timeout'.
+ * A timer that wakes early is re-armed, and an answer that arrives after the deadline is refused even when no timer has fired yet.
+ * The late promise's own outcome is ignored.
+ */
+export function settleBefore(promise, deadlineAt, clock = REAL_CLOCK) {
+  return new Promise((resolve, reject) => {
+    let done = false, timer = null
+    const finish = (settle, value) => { if (done) return; done = true; if (timer !== null) clock.clearTimer(timer); settle(value) }
+    const arm = () => {
+      if (done) return
+      const left = deadlineAt - clock.now()
+      if (left <= 0) finish(reject, deadlinePassed())
+      else timer = clock.setTimer(arm, Math.max(1, Math.ceil(left)))
+    }
+    Promise.resolve(promise).then(value => (clock.now() < deadlineAt ? finish(resolve, value) : finish(reject, deadlinePassed())), error => finish(reject, error))
+    arm()
+  })
 }
+/** settleBefore with a span from now. */
+export const settleBy = (promise, ms, clock = REAL_CLOCK) => settleBefore(promise, clock.now() + Math.max(0, ms), clock)
 export const stableAlias = index => `P${index + 1}`
 export function pageBlock(alias, page, chars, extra = '') {
   const text = page.body.length > chars ? `${page.body.slice(0, chars).trimEnd()} […]` : page.body
@@ -172,12 +197,16 @@ export const NEXT_RULES = [
 ].join('\n')
 
 /** mode 'first' (default): reconstruct memory for a session whose model holds nothing. mode 'next': fetch only what the next judgment needs; `live` is host-gated recent conversation text or null. */
-export async function reconstructMemory({ message, wiki, client, scope = null, askedAt = null, delivered = null, budget: overrides = {}, signal, now = () => performance.now(), mode = 'first', live = null } = {}) {
+export async function reconstructMemory({ message, wiki, client, scope = null, askedAt = null, delivered = null, budget: overrides = {}, signal, now = () => performance.now(), clock = null, mode = 'first', live = null } = {}) {
   const budget = { ...DEFAULTS, ...overrides }
+  // One time source for the whole loop (see REAL_CLOCK). `now` alone is still accepted and gets the real timers.
+  const time = clock ?? { now, setTimer: REAL_CLOCK.setTimer, clearTimer: REAL_CLOCK.clearTimer }
+  now = time.now
   const empty = (status, reason) => ({ status, reason, packet: null, picks: [], receipts: { calls: 0 }, nextDelivered: () => delivered, calls: 0, usage: { inputTokens: 0 } })
   if (!client || !wiki?.pages) return empty('fallback', 'not_configured')
   if (typeof message !== 'string' || !message.trim()) return empty('fallback', 'no_message')
-  const started = now(), deadline = Number.isFinite(budget.deadlineMs) ? started + budget.deadlineMs : Infinity
+  // budget.deadlineAt is a point on the clock (preferred: the caller's own deadline, unchanged by when this call began); deadlineMs is a span from now.
+  const started = now(), deadline = Number.isFinite(budget.deadlineAt) ? budget.deadlineAt : Number.isFinite(budget.deadlineMs) ? started + budget.deadlineMs : Infinity
   const receipts = { mode, calls: 0, rounds: [], withheld: 0, unscanned: [], skippedDelivered: [], uncertain: [], truncated: [] }
   const usage = { inputTokens: 0 }
   const allows = page => allowsPage(page, scope)
@@ -196,13 +225,15 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
   const heldMessage = isNext ? [{ role: 'user', content: `Held in the answering model's context (the start of each is shown; the rest is not repeated):\n${alreadyDelivered.length ? alreadyDelivered.map(p => `- ${p.title} | time=${p.time.slice} | status=${p.status}\n  ${compactText(p.body, 200)}`).join('\n') : '(nothing)'}` },
     ...(typeof live === 'string' && live.trim() ? [{ role: 'user', content: `Live conversation (recent turns, bounded):\n${live.slice(-3000)}` }] : [])] : []
   // Asked only when there is still work to do, so a deadline that cut work short is visible in the receipt (the result is then partial).
-  const canCall = () => { if (now() >= deadline) { receipts.deadlineHit = true; return false } return receipts.calls < budget.maxCalls && !signal?.aborted }
+  // A request that could not be answered in what is left is not started at all (it would be sent, perhaps billed, and thrown away).
+  const canCall = () => { if (Number.isFinite(deadline) && deadline - now() < budget.minCallMs) { receipts.deadlineHit = true; return false } return receipts.calls < budget.maxCalls && !signal?.aborted }
   const decide = async (questions, input) => {
     receipts.calls++
-    const remaining = Number.isFinite(deadline) ? Math.max(1, Math.floor(deadline - now())) : budget.timeoutMs
-    const call = client.decide({ input, questions, timeoutMs: Math.min(budget.timeoutMs, remaining), signal })
-    // With a deadline the loop does not depend on the client honouring its timeout: a request still pending at the deadline counts as timed out.
-    const result = Number.isFinite(deadline) ? await settleBy(call, remaining) : await call
+    const limited = Number.isFinite(deadline)
+    const call = client.decide({ input, questions, timeoutMs: limited ? Math.max(1, Math.min(budget.timeoutMs, Math.ceil(deadline - now()))) : budget.timeoutMs, signal })
+    // With a deadline the loop does not depend on the client honouring its timeout, nor on a timer: an answer counts only if the clock is
+    // still before the deadline when it arrives.
+    const result = limited ? await settleBefore(call, deadline, time) : await call
     usage.inputTokens += result?.usage?.inputTokens ?? 0
     return result
   }

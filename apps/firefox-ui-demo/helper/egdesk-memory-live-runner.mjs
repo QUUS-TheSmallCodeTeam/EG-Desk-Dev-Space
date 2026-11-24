@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { DECISIONS_ENDPOINT, createDecisionClient } from './egdesk-decision-client.mjs'
 import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
-import { buildWiki } from './egdesk-wiki-reconstruction.mjs'
+import { REAL_CLOCK, buildWiki } from './egdesk-wiki-reconstruction.mjs'
 import { SYNTHETIC_PAGES, mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { prepareTurnMemory } from './egdesk-turn-memory.mjs'
 import { ASKED_AT, SCOPE, estimateTokens } from './egdesk-memory-real-plan.mjs'
@@ -48,7 +48,8 @@ const stageOf = questions => (questions.some(q => q.name.startsWith('tn_')) ? 't
 const typedEstimate = (questions, bytes) => estimateTokens(questions.filter(q => q.type === 'choice').length, questions.filter(q => q.type !== 'choice').length, bytes)
 
 /** One turn of the real loop with the given client. Returns what the answering model would receive and what would be written. */
-export async function runLiveTurn(def, client, { now = () => performance.now(), pages = SYNTHETIC_PAGES, limits = LIVE_LIMITS } = {}) {
+export async function runLiveTurn(def, client, { clock = REAL_CLOCK, pages = SYNTHETIC_PAGES, limits = LIVE_LIMITS } = {}) {
+  const now = clock.now // the loop's deadlines and the reported latencies read the same clock
   const wiki = buildWiki(pages)
   // The shared egress gate, with the permissions of a DM whose memory scope is this room: only memory pages may leave.
   const gate = createEgressGate(modelDataPermissions({ memoryScope: SCOPE }))
@@ -57,7 +58,7 @@ export async function runLiveTurn(def, client, { now = () => performance.now(), 
   const capMs = def.position === 'mid' ? limits.caps.midMs : limits.caps.firstMs
   const started = now()
   const memory = await prepareTurnMemory({ message: def.message, wiki, client: guarded, scope: gate.memoryScope(SCOPE), askedAt: ASKED_AT, position, threadKey: 'thread-1',
-    delivered: def.held.length ? receiptsFor(wiki, def.held, 'thread-1') : null, budget: { linksFirst: true }, deadlineMs: capMs - limits.loopMarginMs, packetFirst: true, ontologyWrite: true })
+    delivered: def.held.length ? receiptsFor(wiki, def.held, 'thread-1') : null, budget: { linksFirst: true }, deadlineMs: capMs - limits.loopMarginMs, packetFirst: true, ontologyWrite: true, clock })
   const packetMs = Math.round(now() - started)
   const judged = memory.judgeWrite ? await memory.judgeWrite() : null
   const triage = memory.triage ?? judged?.receipt?.triage ?? null
@@ -124,7 +125,8 @@ export async function estimateLive({ limits = LIVE_LIMITS } = {}) {
  * runLive({ key, send = false, fetchImpl = fetch, tokenCeiling?, now? }) -> { sent, stoppedBecause, turns, requests, usage, scorecard }
  * With send = false nothing leaves the process.
  */
-export async function runLive({ key = null, send = false, fetchImpl = globalThis.fetch, tokenCeiling = LIVE_LIMITS.tokenCeiling, now = () => performance.now(), limits = LIVE_LIMITS } = {}) {
+export async function runLive({ key = null, send = false, fetchImpl = globalThis.fetch, tokenCeiling = LIVE_LIMITS.tokenCeiling, clock = REAL_CLOCK, limits = LIVE_LIMITS } = {}) {
+  const now = clock.now
   const ceiling = Math.min(Number.isFinite(tokenCeiling) && tokenCeiling > 0 ? tokenCeiling : limits.tokenCeiling, limits.hardTokenMax)
   const state = { sent: 0, tokens: 0, stopped: null, privateSeen: false, requests: [], turn: null }
   if (send !== true) return { sent: 0, stoppedBecause: 'dry_run', turns: [], requests: [], usage: { inputTokens: 0 }, ceiling, maxRequests: limits.maxRequests, scorecard: null }
@@ -163,7 +165,7 @@ export async function runLive({ key = null, send = false, fetchImpl = globalThis
   for (const def of LIVE_RUNS) {
     if (state.stopped) break
     state.turn = def.id
-    try { turns.push(await runLiveTurn(def, client, { now, limits })) } catch { /* a turn that could not run is scored as not run */ }
+    try { turns.push(await runLiveTurn(def, client, { clock, limits })) } catch { /* a turn that could not run is scored as not run */ }
   }
   return { sent: state.sent, stoppedBecause: state.stopped, turns, requests: state.requests, usage: { inputTokens: state.tokens }, ceiling, maxRequests: limits.maxRequests,
     scorecard: scoreLive(turns, { privateSeen: state.privateSeen }) }

@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { mkdtemp, chmod } from 'node:fs/promises'
 import { buildWiki } from './egdesk-wiki-reconstruction.mjs'
-import { SYNTHETIC_PAGES, mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
+import { SYNTHETIC_PAGES, createFakeClock, deferred, mockJudge, until } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { createWikiWriter, deriveTurnPosition, judgeTurnWrite, prepareTurnMemory, recordFromLabels, triageTurn, usableReceipts } from './egdesk-turn-memory.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
@@ -227,17 +227,18 @@ test('CodexChatRuntime.turnPosition derives the position from the real thread, s
       if (method === 'config/read') return { config: { developer_instructions: null } }
       if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
       const id = `turn-${++turns}`, timing = { threadId: p.threadId, turnId: id }
-      setTimeout(async () => { const n = (m, q) => chat.handleNotification({ method: m, params: q })
+      const finish = async () => { const n = (m, q) => chat.handleNotification({ method: m, params: q })
         await n('item/started', { ...timing, item: { id: `a${id}`, type: 'agentMessage', phase: 'final_answer', text: '' } })
         await n('item/completed', { ...timing, item: { id: `a${id}`, type: 'agentMessage', phase: 'final_answer', text: '네' } })
-        await n('turn/completed', { threadId: p.threadId, turn: { id, status: 'completed', items: [] } }) }, 5)
+        await n('turn/completed', { threadId: p.threadId, turn: { id, status: 'completed', items: [] } }) }
+      setImmediate(() => setImmediate(finish))
       return { turn: { id, status: 'inProgress', items: [] } } },
     respond: () => {}, emit: () => {}, emitLegacy: () => {}, verifyFile: async () => null })
   chat.setConnection(true)
   const seen = []
   const original = chat.prepareDecisionContext.bind(chat)
   chat.prepareDecisionContext = async (body, context) => { seen.push(chat.turnPosition(context)); return original(body, context) }
-  const done = async n => { for (let i = 0; i < 200; i++) { await new Promise(r => setTimeout(r, 20)); if (store.listMessages('dm-1').messages.filter(m => m.role === 'assistant' && m.status === 'complete').length >= n) break } await new Promise(r => setTimeout(r, 30)) }
+  const done = async n => { await until(() => store.listMessages('dm-1').messages.filter(m => m.role === 'assistant' && m.status === 'complete').length >= n, `answer ${n} completed`); for (let i = 0; i < 3; i++) await new Promise(r => setImmediate(r)) }
   const first = await chat.send({ message: '첫 질문', clientThreadId: 'dm-1', requestId: 'r1', profileId: 'sol', replyDestination: 'direct' })
   await done(1)
   const send = (message, requestId) => chat.send({ message, clientThreadId: 'dm-1', requestId, conversationId: first.conversationId, profileId: 'sol', replyDestination: 'direct' })
@@ -388,51 +389,141 @@ test('characterization with the REAL pg-mid scan answers (0.37 / 0.8 / 0.01): an
   assert.deepEqual(r.memory.receipts.uncertain.map(u => u.id), ['db/pg-health'], 'the health-check page was undecided and went to a second look')
 })
 
+// ---- deadlines and ordering: no sleeps. A manual clock and hand-settled promises decide when things happen. ----
+// A client whose answers to matching requests are held until the test releases them; everything else is answered at once by the stand-in.
+function gatedClient(pattern) {
+  const judge = mockJudge(), requests = [], gates = []
+  return { requests, gates,
+    release(extra = {}) { for (const g of gates.splice(0)) g.resolve(extra) },
+    client: { async decide(req) {
+      const names = req.questions.map(q => q.name)
+      requests.push(names.some(n => n.startsWith('tn_')) ? 'triage' : names.some(n => n.startsWith('tw_')) ? 'write' : names.some(n => n.startsWith('pg_')) ? 'scan' : 'expand')
+      const answer = await judge.decide(req)
+      if (!names.some(n => pattern.test(n))) return answer
+      const gate = deferred(); gates.push(gate)
+      Object.assign(answer.answers, await gate.promise)
+      return answer
+    } } }
+}
+const midCall = (g, clock, extra = {}) => prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: g.client, scope: SCOPE, askedAt: ASKED, position: MID, threadKey: THREAD,
+  delivered: receiptsFor(buildWiki(SYNTHETIC_PAGES), PG_HELD), deadlineMs: 200, clock, ...extra })
+
 test('packetFirst (first turn): the packet does not wait for the recording triage; the write thunk waits for it and judges only when it says yes', async () => {
-  const judge = mockJudge(), order = []
-  const slowTriage = record => ({ async decide(req) {
-    const triage = req.questions.some(q => q.name === 'tn_record')
-    if (triage) { await new Promise(r => setTimeout(r, 700)); order.push('triage') } else order.push(req.questions.some(q => q.name.startsWith('tw_')) ? 'write' : 'fetch')
-    const r = await judge.decide(req)
-    if (triage) r.answers.tn_record = { type: 'predicate', probability: record }
-    return r } })
   const run = async record => {
-    order.length = 0
-    const started = Date.now()
-    const r = await prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: slowTriage(record), scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD, ontologyWrite: true, packetFirst: true })
-    return { r, packetMs: Date.now() - started }
+    const g = gatedClient(/^tn_/)
+    const r = await prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: g.client, scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD, ontologyWrite: true, packetFirst: true })
+    // The packet is here while the triage is still unanswered (it is held by the test until released below).
+    assert.equal(g.gates.length, 1, 'the triage was asked and has not answered'); assert.equal(r.triage, null); assert.ok(r.packet.includes('PostgreSQL'))
+    assert.ok(!g.requests.includes('write'))
+    const judging = r.judgeWrite()
+    await new Promise(resolve => setImmediate(resolve))
+    assert.ok(!g.requests.includes('write'), 'the write judgment waits for the triage')
+    g.release({ tn_record: { type: 'predicate', probability: record } })
+    return { judged: await judging, g }
   }
   const yes = await run(0.97)
-  assert.ok(yes.packetMs < 600, `packet after ${yes.packetMs} ms, before the 700 ms triage`)
-  assert.ok(!order.includes('triage')); assert.equal(yes.r.triage, null); assert.ok(yes.r.packet.includes('PostgreSQL'))
-  const judged = await yes.r.judgeWrite()
-  assert.deepEqual(order.slice(-2), ['triage', 'write'])
-  assert.deepEqual([judged.proposal.op, judged.proposal.pageId, judged.receipt.triage.record.state], ['update_status', 'db/pg-plan', 'yes'])
+  assert.deepEqual([yes.judged.proposal.op, yes.judged.proposal.pageId, yes.judged.receipt.triage.record.state], ['update_status', 'db/pg-plan', 'yes'])
+  assert.equal(yes.g.requests.at(-1), 'write')
   const no = await run(0.02)
-  const skipped = await no.r.judgeWrite()
-  assert.deepEqual([skipped.proposal, order.includes('write')], [{ op: 'none', reason: 'not_worth_recording' }, false])
+  assert.deepEqual([no.judged.proposal, no.g.requests.includes('write')], [{ op: 'none', reason: 'not_worth_recording' }, false])
   // without the option nothing changed: triage is in the result and the thunk exists only when it said yes
   const plain = await prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: mockJudge(), scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD, ontologyWrite: true })
   assert.equal(plain.triage.record.state, 'yes'); assert.equal(plain.triageLater, undefined)
 })
 
-test('deadlineMs: a triage or a loop round that has not answered by then is cut, whatever the client does with its own timeout; the result says so', async () => {
-  const judge = mockJudge()
-  const hangOn = pattern => ({ async decide(req) { if (req.questions.some(q => pattern.test(q.name))) await new Promise(r => setTimeout(r, 1500)); return judge.decide(req) } })
-  // mid-session: the triage never answers in time -> treated as undecided; no time is left for a fetch, so nothing is attached and nothing is skipped silently
-  let started = Date.now()
-  const lateTriage = await prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: hangOn(/^tn_/), scope: SCOPE, askedAt: ASKED, position: MID, threadKey: THREAD,
-    delivered: receiptsFor(buildWiki(SYNTHETIC_PAGES), PG_HELD), deadlineMs: 200 })
-  assert.ok(Date.now() - started < 900)
-  assert.deepEqual([lateTriage.triage.status, lateTriage.triage.need.state, lateTriage.memory.status, lateTriage.packet], ['fallback', 'unknown', 'empty', null])
-  assert.deepEqual([lateTriage.memory.partial, lateTriage.memory.reason], [true, 'deadline'])
-  // first turn: the scan answers, the link round does not -> the scan picks are kept, marked partial
-  started = Date.now()
-  const cut = await prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: hangOn(/^(st_|op_)/), scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD, deadlineMs: 300 })
-  assert.ok(Date.now() - started < 1000)
+test('deadline, mid-session: a triage that has not answered when the clock reaches the deadline is cut, and NO fetch is started after it (timers on time, early or late)', async () => {
+  // The gate failure: the triage was cut by a timer, the clock said a moment was left, and that moment started a fetch that produced a packet.
+  // minCallMs 0 removes the "too little time left to ask" rule, so these rows rest on the cut alone: once cut, nothing is fetched.
+  for (const [earlyMs, extra] of [[0, {}], [1.2, {}], [30, {}], [0, { budget: { minCallMs: 0 } }], [1.2, { budget: { minCallMs: 0 } }]]) {
+    const clock = createFakeClock({ earlyMs }), g = gatedClient(/^tn_/)
+    const pending = midCall(g, clock, extra)
+    await clock.settle()
+    assert.deepEqual(g.requests, ['triage'])
+    await clock.advance(199)
+    assert.equal(g.gates.length, 1, `earlyMs ${earlyMs}: one millisecond before the deadline the triage is still awaited (an early timer does not cut it)`)
+    await clock.advance(2) // the wake-up that finds the clock at or past the deadline comes within a timer's one-millisecond grain
+    const r = await pending
+    assert.deepEqual([r.triage.status, r.triage.need.state, r.memory.status, r.packet], ['fallback', 'unknown', 'empty', null], `earlyMs ${earlyMs}`)
+    assert.deepEqual([r.memory.partial, r.memory.reason], [true, 'deadline'])
+    assert.deepEqual(g.requests, ['triage'], `earlyMs ${earlyMs}: no fetch request was started after the cut`)
+    assert.equal(clock.pending(), 0, 'no timer is left armed')
+    g.release() // the late answer changes nothing
+    await clock.settle()
+    assert.deepEqual(g.requests, ['triage'])
+  }
+})
+
+test('deadline, mid-session: decided by the clock alone. A late timer does not let a late answer in; an early timer does not shut an in-time answer out', async () => {
+  // late timer: the process was busy, the clock is past the deadline, no timer has fired yet, and only now the triage answers
+  let clock = createFakeClock(), g = gatedClient(/^tn_/)
+  let pending = midCall(g, clock)
+  await clock.settle()
+  clock.set(clock.now() + 250)
+  g.release()
+  let r = await pending
+  assert.deepEqual([r.triage.status, r.memory.status, r.packet, g.requests], ['fallback', 'empty', null, ['triage']], 'an answer that arrives after the deadline is refused although no timer fired')
+  // early timer: it wakes at 170 of 200, the answer comes at 180 and still counts; but too little is left to start a fetch (150 ms minimum)
+  clock = createFakeClock({ earlyMs: 30 }); g = gatedClient(/^tn_/)
+  pending = midCall(g, clock)
+  await clock.settle()
+  await clock.advance(180)
+  g.release()
+  r = await pending
+  assert.deepEqual([r.triage.status, r.triage.need.state], ['ready', 'yes'], 'cut only when the clock says so')
+  assert.deepEqual([r.memory.status, r.memory.partial, r.memory.reason, r.packet, g.requests], ['empty', true, 'deadline', null, ['triage']], 'with 20 ms left no request is started: it could only be thrown away')
+  // enough left: the answer comes at 40 of 200 and the fetch runs
+  clock = createFakeClock(); g = gatedClient(/^tn_/)
+  pending = midCall(g, clock)
+  await clock.settle()
+  await clock.advance(40)
+  g.release()
+  r = await pending
+  assert.deepEqual([r.memory.status, r.memory.partial], ['ready', undefined]); assert.ok(g.requests.includes('scan') && r.packet.includes('헬스체크'))
+  // exactly at the minimum (150 left) a request is started; one millisecond less and it is not
+  for (const [at, starts] of [[50, true], [51, false]]) {
+    clock = createFakeClock(); g = gatedClient(/^tn_/)
+    pending = midCall(g, clock)
+    await clock.settle(); await clock.advance(at); g.release()
+    r = await pending
+    assert.equal(g.requests.includes('scan'), starts, `triage answered at ${at} of 200`)
+  }
+  // no time to ask at all: nothing is sent
+  clock = createFakeClock(); g = gatedClient(/^tn_/)
+  r = await midCall(g, clock, { deadlineMs: 100 })
+  assert.deepEqual([g.requests, r.memory.status, r.memory.reason], [[], 'empty', 'deadline'])
+})
+
+test('deadline, first turn: the scan answers, the link round does not; the scan picks are kept and marked partial, and nothing is asked after the deadline', async () => {
+  const clock = createFakeClock(), g = gatedClient(/^(st_|op_)/)
+  const pending = prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: g.client, scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD, deadlineMs: 300, clock })
+  await clock.settle()
+  assert.deepEqual(g.requests, ['scan', 'expand'])
+  await clock.advance(299)
+  assert.equal(g.gates.length, 1, 'still waiting one millisecond before the deadline')
+  await clock.advance(1)
+  const cut = await pending
   assert.deepEqual([cut.memory.status, cut.memory.partial, cut.memory.reason], ['ready', true, 'timeout'])
   assert.ok(cut.memory.picks.some(p => p.id === 'db/pg-plan') && cut.memory.picks.every(p => p.statusRead === undefined))
+  assert.deepEqual(g.requests, ['scan', 'expand'])
   // no deadline: nothing is cut and nothing is marked
   const whole = await prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: mockJudge(), scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD })
   assert.equal(whole.memory.partial, undefined); assert.equal(whole.memory.receipts.deadlineHit, undefined)
+})
+
+test('settleBefore: in time means the clock is before the deadline when the answer arrives; early timers re-arm, late answers are refused, errors pass through', async () => {
+  const { settleBefore, settleBy, REAL_CLOCK, MIN_CALL_MS } = await import('./egdesk-wiki-reconstruction.mjs')
+  let clock = createFakeClock({ earlyMs: 30 }), d = deferred(), outcome = null
+  settleBefore(d.promise, clock.now() + 100, clock).then(v => { outcome = ['ok', v] }, e => { outcome = ['error', e.code] })
+  await clock.advance(99); assert.equal(outcome, null, 'early wake-ups do not cut')
+  d.resolve('answer'); await clock.settle(); assert.deepEqual(outcome, ['ok', 'answer']); assert.equal(clock.pending(), 0)
+  clock = createFakeClock(); d = deferred(); outcome = null
+  settleBefore(d.promise, clock.now() + 100, clock).then(v => { outcome = ['ok', v] }, e => { outcome = ['error', e.code] })
+  await clock.advance(100); assert.deepEqual(outcome, ['error', 'timeout'], 'at the deadline it is cut')
+  clock = createFakeClock(); d = deferred(); outcome = null
+  settleBefore(d.promise, clock.now() + 100, clock).then(v => { outcome = ['ok', v] }, e => { outcome = ['error', e.code] })
+  clock.set(clock.now() + 100); d.resolve('late'); await clock.settle(); assert.deepEqual(outcome, ['error', 'timeout'], 'an answer at or after the deadline is late, timer or no timer')
+  clock = createFakeClock(); d = deferred(); outcome = null
+  settleBy(d.promise, 100, clock).then(v => { outcome = ['ok', v] }, e => { outcome = ['error', e.code] })
+  d.reject(Object.assign(new Error('x'), { code: 'rate_limited' })); await clock.settle(); assert.deepEqual(outcome, ['error', 'rate_limited']); assert.equal(clock.pending(), 0)
+  assert.deepEqual([typeof REAL_CLOCK.now(), MIN_CALL_MS], ['number', 150])
 })

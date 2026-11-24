@@ -128,3 +128,48 @@ export function mockJudge(log = []) {
     return { answers, usage: { inputTokens: Math.round(joined.length * 0.5) }, latencyMs: 5, model: 'lexical-stand-in' }
   } }
 }
+
+// ---- deterministic time for deadline tests ----
+/**
+ * A manual clock (the shape of REAL_CLOCK). Time moves only when the test moves it; timers that fall due fire in order.
+ *   advance(ms): move time forward, firing due timers and letting the code under test run between them.
+ *   set(t):      jump the clock WITHOUT firing timers: what a busy process looks like to code that reads the clock (timers are late).
+ *   earlyMs:     timers fire that much before their time (never more than half the span), as real timers can by about a millisecond.
+ * Nothing here sleeps: `settle` only yields to the event loop so already-resolved work can run.
+ */
+export function createFakeClock({ start = 1000, earlyMs = 0 } = {}) {
+  let t = start, seq = 0
+  const timers = new Map()
+  const settle = async () => { for (let i = 0; i < 3; i++) await new Promise(resolve => setImmediate(resolve)) }
+  return {
+    now: () => t,
+    setTimer(fn, ms) { const span = Math.max(0, Number(ms) || 0), id = ++seq; timers.set(id, { at: t + span - Math.min(earlyMs, span / 2), fn }); return id },
+    clearTimer(id) { timers.delete(id) },
+    pending: () => timers.size,
+    set(value) { t = value },
+    settle,
+    async advance(ms) {
+      const target = t + ms
+      for (;;) {
+        const due = [...timers].filter(([, timer]) => timer.at <= target).sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0]
+        if (!due) break
+        timers.delete(due[0]); t = Math.max(t, due[1].at); due[1].fn(); await settle()
+      }
+      t = Math.max(t, target); await settle()
+    },
+  }
+}
+/** A promise the test settles by hand. */
+export function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
+/**
+ * Yield to the event loop until cond() holds. Not a timing assertion: it returns as soon as the thing happened, however long the machine took.
+ * The one-minute bound only turns a thing that never happens into a named error instead of a hung test.
+ */
+export async function until(cond, what = 'condition') {
+  const started = Date.now()
+  for (let i = 0; ; i++) {
+    if (cond()) return
+    if (Date.now() - started > 60000) throw new Error(`never happened: ${what}`)
+    await new Promise(resolve => (i % 20 === 19 ? setTimeout(resolve, 1) : setImmediate(resolve)))
+  }
+}

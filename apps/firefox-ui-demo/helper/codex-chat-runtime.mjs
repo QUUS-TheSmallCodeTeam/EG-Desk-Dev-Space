@@ -53,6 +53,8 @@ const DRAFT_HOLD_LIMIT = 256 * 1024
 //   first turn (scan + up to two link rounds; the recording triage runs beside it): 1.2-1.6 s warm, 3.1 s cold  -> cap 4.0 s
 //   mid-session (triage, then links-first scan, then one link round):                0.9-1.3 s warm, 1.9-2.3 s cold -> cap 2.5 s
 // The loop gets the cap minus 200 ms as its own deadline and returns what it has; past the cap the turn starts without a packet.
+// The cap is authoritative and is decided by the clock: a result counts only if it existed before the cap on that clock, however late the
+// code that looks at it happens to run. A timer only wakes the wait up (it can fire early or late). turnMemory.clock injects the clock.
 export const TURN_MEMORY_KEY = 'egdesk_turn_memory'
 export const TURN_MEMORY_CAPS = Object.freeze({ firstMs: 4000, midMs: 2500 })
 // How the app-server says a thread's context was compacted: a `contextCompaction` item (item/started, item/completed), and on older builds the
@@ -69,7 +71,7 @@ import { speechSegments } from './egdesk-speech-grounding.mjs'
 import { deriveTurnPosition, prepareTurnMemory } from './egdesk-turn-memory.mjs'
 import { createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry } from './egdesk-browser-task.mjs'
 import { hostOf } from './egdesk-browser-task-memory.mjs'
-import { NO as MEMORY_NO, YES as MEMORY_YES, allowsPage as memoryAllowsPage } from './egdesk-wiki-reconstruction.mjs'
+import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage } from './egdesk-wiki-reconstruction.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
 // Reviewed requests expire after two minutes; only canonical v4 UUID IDs are accepted.
@@ -5184,11 +5186,11 @@ export class CodexChatRuntime {
       const position = this.turnPosition(context)
       const caps = { ...TURN_MEMORY_CAPS, ...(tm.caps && typeof tm.caps === 'object' ? tm.caps : {}) }
       const capMs = position.kind === 'first' ? caps.firstMs : caps.midMs
-      const controller = new AbortController()
+      const controller = new AbortController(), clock = this.turnMemoryClock(tm)
       let speech = null
       try { speech = this.directSpeech(body, context, controller.signal) } catch { speech = null }
-      const turn = { position, capMs, startedAt: performance.now(), controller, spans: [], sources: { speech, topic: this.topicIntakes.get(context) ?? null }, result: null, cut: false }
-      turn.promise = this.runTurnMemoryOn(turn, body, context).catch(() => null)
+      const turn = { position, capMs, clock, startedAt: clock.now(), controller, spans: [], sources: { speech, topic: this.topicIntakes.get(context) ?? null }, result: null, cut: false }
+      turn.promise = this.runTurnMemoryOn(turn, body, context).catch(() => null).finally(() => { turn.finished = true })
       this.turnMemoryRuns.add(turn.promise)
       void turn.promise.finally(() => this.turnMemoryRuns.delete(turn.promise))
       return turn
@@ -5196,7 +5198,7 @@ export class CodexChatRuntime {
   }
 
   async runTurnMemoryOn(turn, body, context) {
-    const setup = this.decisionContext, tm = setup.turnMemory, t0 = turn.startedAt
+    const setup = this.decisionContext, tm = setup.turnMemory, t0 = turn.startedAt, clock = turn.clock
     const wiki = await tm.wiki({ body, context, sources: turn.sources })
     if (!wiki?.pages) return
     const baseScope = typeof tm.scope === 'function' ? await tm.scope({ body, context }) : null
@@ -5205,10 +5207,10 @@ export class CodexChatRuntime {
     // Every request of the loop (triage, fetch, write judgment) passes the shared gate first; a refusal sends nothing.
     const client = { decide: async request => {
       for (const kind of kinds) egress.require(kind)
-      const start = performance.now() - t0
+      const start = clock.now() - t0
       try { return await setup.client.decide(request) } finally {
         const names = request.questions.map(q => q.name)
-        turn.spans.push({ stage: names.some(n => n.startsWith('tn_')) ? 'triage' : names.some(n => n.startsWith('tw_')) ? 'write' : 'fetch', start, end: performance.now() - t0 })
+        turn.spans.push({ stage: names.some(n => n.startsWith('tn_')) ? 'triage' : names.some(n => n.startsWith('tw_')) ? 'write' : 'fetch', start, end: clock.now() - t0 })
       }
     } }
     const threadKey = context.conversationId ?? null
@@ -5217,21 +5219,37 @@ export class CodexChatRuntime {
     const scope = egress.memoryScope(baseScope ?? {})
     const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position: turn.position, threadKey, scope,
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
-      deadlineMs: Math.max(0, turn.capMs - 200 - (performance.now() - t0)), packetFirst: true,
+      deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock,
       ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal })
-    Object.assign(turn, { wiki, baseScope, scope, result, readyMs: performance.now() - t0 })
+    Object.assign(turn, { wiki, baseScope, scope, result, readyMs: clock.now() - t0 })
   }
 
-  // Waits for what is left of the cap. true when the loop finished in time (whatever it found); false means the turn goes on without it.
+  // The clock and timer of the turn-memory deadlines (injected in tests through turnMemory.clock; otherwise the real ones).
+  turnMemoryClock(tm) {
+    const clock = tm?.clock
+    return clock && typeof clock.now === 'function' && typeof clock.setTimer === 'function' && typeof clock.clearTimer === 'function' ? clock : MEMORY_CLOCK
+  }
+
+  // Waits for the loop or for the cap, whichever comes first ON THE CLOCK. true when the loop's result existed before the cap (whatever it
+  // found); false means the turn goes on without it. The timer below only wakes this wait: an early timer is re-armed, and a result that
+  // became ready after the cap is refused even if this code ran before any timer fired (a busy process, a late timer).
   async awaitTurnMemory(turn) {
     try {
-      let timer
-      const capped = new Promise(resolve => { timer = setTimeout(() => resolve('cap'), Math.max(0, turn.capMs - (performance.now() - turn.startedAt))) })
-      const outcome = await Promise.race([turn.promise.then(() => 'done'), capped])
-      clearTimeout(timer)
-      turn.waitedMs = performance.now() - turn.startedAt
-      if (outcome === 'cap' && !turn.result) { turn.cut = true; turn.controller.abort(); return false }
-      return Boolean(turn.result)
+      const clock = turn.clock, left = () => turn.capMs - (clock.now() - turn.startedAt)
+      await new Promise(resolve => {
+        let timer = null, over = false
+        const finish = () => { if (over) return; over = true; if (timer !== null) clock.clearTimer(timer); resolve() }
+        const arm = () => { if (over) return; if (left() <= 0) finish(); else timer = clock.setTimer(arm, Math.max(1, Math.ceil(left()))) }
+        turn.promise.then(finish, finish)
+        arm()
+      })
+      turn.waitedMs = clock.now() - turn.startedAt
+      if (turn.result && Number.isFinite(turn.readyMs) && turn.readyMs < turn.capMs) return true
+      // No result yet, or one that arrived after the cap: the turn goes on without it, and whatever is still running is told to stop.
+      turn.cut = !turn.finished || Boolean(turn.result)
+      turn.result = null
+      if (turn.cut) turn.controller.abort()
+      return false
     } catch { return false }
   }
 
@@ -5239,6 +5257,7 @@ export class CodexChatRuntime {
     try {
       const result = turn.result
       if (!result?.packet || result.memory?.status !== 'ready' || this.turnMemoryMode() !== 'on') return false
+      if (!(turn.readyMs < turn.capMs)) return false // never a packet that was not ready before the cap
       if (additionalContext && Object.hasOwn(additionalContext, TURN_MEMORY_KEY)) return false
       return Object.keys(result.memory.delivered ?? {}).every(id => { const page = turn.wiki.pages.get(id); return !!page && memoryAllowsPage(page, turn.scope) })
     } catch { return false }
@@ -5336,17 +5355,17 @@ export class CodexChatRuntime {
     const setup = this.decisionContext, tm = setup.turnMemory
     const wiki = await tm.wiki({ body, context, sources })
     if (!wiki?.pages) return
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), Number.isSafeInteger(tm.deadlineMs) && tm.deadlineMs > 0 ? tm.deadlineMs : 15000)
-    timer.unref?.()
-    const t0 = performance.now(), spans = []
+    const advisoryClock = this.turnMemoryClock(tm), t0 = advisoryClock.now(), spans = []
+    const controller = new AbortController(), timer = advisoryClock.setTimer(() => controller.abort(), Number.isSafeInteger(tm.deadlineMs) && tm.deadlineMs > 0 ? tm.deadlineMs : 15000)
+    timer?.unref?.()
     // Every Decisions call is timed by stage (triage / fetch / write) so a later 'on' wiring can be sized from real usage.
     const egress = this.decisionEgressFor(run)
     const client = { decide: async request => {
       egress.require('memory_page')
-      const start = performance.now() - t0
+      const start = advisoryClock.now() - t0
       try { return await setup.client.decide(request) } finally {
         const names = request.questions.map(q => q.name)
-        spans.push({ stage: names.some(n => n.startsWith('tn_')) ? 'triage' : names.some(n => n.startsWith('tw_')) ? 'write' : 'fetch', start, end: performance.now() - t0 })
+        spans.push({ stage: names.some(n => n.startsWith('tn_')) ? 'triage' : names.some(n => n.startsWith('tw_')) ? 'write' : 'fetch', start, end: advisoryClock.now() - t0 })
       }
     } }
     try {
@@ -5360,7 +5379,7 @@ export class CodexChatRuntime {
         while (this.turnMemoryShadow.size > 50) this.turnMemoryShadow.delete(this.turnMemoryShadow.keys().next().value)
       }
       this.recordTurnMemory(run, { setup, position, wiki, result, judged, spans, prepMs })
-    } finally { clearTimeout(timer) }
+    } finally { advisoryClock.clearTimer(timer) }
   }
 
   recordTurnMemory(run, { setup, position, wiki, result, judged, spans, prepMs, mode = 'advisory', attached = false }) {

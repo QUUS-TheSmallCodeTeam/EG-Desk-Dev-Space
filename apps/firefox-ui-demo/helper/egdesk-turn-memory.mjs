@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { choiceQuestion, compactText, predicateQuestion, readChoice, sha256Hex } from './egdesk-decision-questions.mjs'
 import { speechDesignInterpretations, speechDesignQuestions, speechSegments } from './egdesk-speech-grounding.mjs'
-import { PROVENANCE_BASES, YES, NO, allowsPage, clockLine, pageBlock, reconstructMemory, record, settleBy, stableAlias, ternary } from './egdesk-wiki-reconstruction.mjs'
+import { MIN_CALL_MS, PROVENANCE_BASES, REAL_CLOCK, YES, NO, allowsPage, clockLine, pageBlock, reconstructMemory, record, settleBefore, stableAlias, ternary } from './egdesk-wiki-reconstruction.mjs'
 
 // PROTOTYPE (not wired into the turn path): what the system does with a turn's memory, by turn position.
 //
@@ -283,10 +283,12 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
  * packetFirst (optional, first turn only): return as soon as the packet is ready; the triage that only decides recording keeps running and is
  *   awaited inside judgeWrite (triage is then null in the result and `triageLater` is its promise). It is not bound by the packet deadline.
  */
-export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false } = {}) {
-  const startedAt = performance.now()
-  const remaining = () => (Number.isFinite(deadlineMs) ? Math.max(0, deadlineMs - (performance.now() - startedAt)) : null)
-  const loopBudget = () => (remaining() === null ? budget : { ...budget, deadlineMs: remaining() })
+export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK } = {}) {
+  // The deadline is ONE point on ONE clock, fixed here. Everything below asks that clock; a timer only wakes the wait up.
+  const deadlineAt = Number.isFinite(deadlineMs) ? clock.now() + Math.max(0, deadlineMs) : null
+  const remaining = () => (deadlineAt === null ? null : Math.max(0, deadlineAt - clock.now()))
+  const loopBudget = () => (deadlineAt === null ? budget : { ...budget, deadlineAt })
+  const minCallMs = Number.isFinite(budget?.minCallMs) ? budget.minCallMs : MIN_CALL_MS
   const pos = position?.kind === 'mid' ? position : { kind: 'first', reason: position?.reason ?? 'unspecified' }
   const receipts = usableReceipts(delivered, pos, threadKey)
   const heldPages = Object.keys(receipts.pages ?? {}).map(id => wiki.pages.get(id)).filter(p => p && allowsPage(p, scope))
@@ -296,25 +298,30 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
   const stored = pos.kind === 'mid' ? [...wiki.pages.values()].filter(p => !heldIds.has(p.id) && allowsPage(p, scope)).map(p => ({ title: p.title, time: p.time.slice, status: p.status })) : null
   // A triage that gates the fetch (mid-session) is bound by the packet deadline; one that only decides recording (first turn) is not.
   // Without a deadline the old 2 s limit stays. A cold first request took 1.6-2.2 s in the real runs, so a deadline run allows up to 4 s.
-  const triageTimeout = () => (remaining() === null ? 2000 : pos.kind === 'mid' ? Math.max(1, Math.min(4000, remaining())) : 4000)
+  const triageTimeout = () => (remaining() === null ? 2000 : pos.kind === 'mid' ? Math.max(1, Math.min(4000, Math.ceil(remaining()))) : 4000)
   const triageCall = () => triageTurn({ message, heldTitles: heldPages.map(p => p.title), heldDigest, stored, live: pos.kind === 'mid' ? live : null, client, askedAt, signal, timeoutMs: triageTimeout() })
   let triage, memory, triageLater = null
   if (pos.kind === 'mid') {
-    // Under a deadline a triage that has not answered by then is treated as failed (undecided), which fetches if any time is left.
-    triage = remaining() === null ? await triageCall() : await settleBy(triageCall(), Math.max(1, remaining())).catch(() => ({ status: 'fallback', reason: 'timeout', courtesy: { state: 'unknown', p: null }, need: { state: 'unknown', p: null }, recall: { state: 'unknown', p: null }, record: { state: 'unknown', p: null }, catalog: null, usage: null }))
+    // Under a deadline: a triage that cannot be asked in what is left, or has not answered when the clock reaches the deadline, is cut. The
+    // deadline is then authoritative: NO fetch is started after it (not even when a clock or timer reading says a moment is left). The old
+    // code cut with a timer and asked the clock what was left; a timer can fire up to a millisecond early, and that leftover started a fetch.
+    let cutByDeadline = false
+    const cut = () => { cutByDeadline = true; return { status: 'fallback', reason: 'timeout', courtesy: { state: 'unknown', p: null }, need: { state: 'unknown', p: null }, recall: { state: 'unknown', p: null }, record: { state: 'unknown', p: null }, catalog: null, usage: null } }
+    triage = deadlineAt === null ? await triageCall() : remaining() < minCallMs ? cut() : await settleBefore(triageCall(), deadlineAt, clock).catch(cut)
     // A decided courtesy "yes" skips the fetch. A decided need "no" skips it too, but only when ALL of these hold: the held pages' content was shown
     // (titles alone gave a wrong need 0.02 for T4), the complete list of the other stored pages was shown, and recall is a decided "no" (a request to
     // go over earlier material cannot be judged covered from a few held pages: the j-mid wrong skip). Anything else fetches: a wrong skip loses
     // material, a needless fetch only costs tokens.
-    memory = triageSkipsFetch(triage, { skipOnNeed, heldExcerpts }) ? { status: 'skipped', reason: 'nothing_needed', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [] }, nextDelivered: () => receipts }
-      : await reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget: loopBudget(), signal, mode: 'next', live })
+    memory = cutByDeadline ? { status: 'empty', partial: true, reason: 'deadline', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [], deadlineHit: true }, nextDelivered: () => receipts }
+      : triageSkipsFetch(triage, { skipOnNeed, heldExcerpts }) ? { status: 'skipped', reason: 'nothing_needed', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [] }, nextDelivered: () => receipts }
+      : await reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget: loopBudget(), signal, clock, mode: 'next', live })
   } else if (packetFirst === true) {
     triageLater = ontologyWrite ? triageCall() : null
     triage = null
-    memory = await reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget: loopBudget(), signal, mode: 'first' })
+    memory = await reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget: loopBudget(), signal, clock, mode: 'first' })
   } else {
     ;[triage, memory] = await Promise.all([ontologyWrite ? triageCall() : Promise.resolve(null),
-      reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget: loopBudget(), signal, mode: 'first' })])
+      reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget: loopBudget(), signal, clock, mode: 'first' })])
   }
   // What the model holds is known from the receipts, whether or not the fetch ran (a skipped fetch has no skippedDelivered list).
   const heldNow = [...new Set([...heldPages.map(p => p.id), ...(memory.receipts?.skippedDelivered ?? [])])]

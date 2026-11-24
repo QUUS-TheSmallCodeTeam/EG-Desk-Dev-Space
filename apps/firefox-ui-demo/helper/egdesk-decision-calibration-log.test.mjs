@@ -5,6 +5,7 @@ import path from 'node:path'
 import { mkdtemp, readFile, readdir, stat, writeFile, chmod } from 'node:fs/promises'
 import { CALIBRATION_FILE, MAX_ENTRIES, openCalibrationLog, normalizeEntry } from './egdesk-decision-calibration-log.mjs'
 import { secretReason } from './egdesk-portable-extras.mjs'
+import { until } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 
@@ -102,8 +103,8 @@ async function advisoryTurn({ mode = 'advisory', decide, logDir }) {
         { id: 'board:2', kind: 'board', title: 'SECRET_TITLE_B', summary: 'SECRET_SUMMARY_B', timeSlice: 'planned' }] } })
   chat.setConnection(true)
   await chat.send({ message: 'SECRET_MESSAGE 알려줘', clientThreadId: 'dm-1', requestId: 'r1', profileId: 'sol', replyDestination: 'direct' })
-  for (let i = 0; i < 150; i++) { await new Promise(r => setTimeout(r, 20)); if (store.getLatestRun('dm-1')?.status === 'completed') break }
-  await new Promise(r => setTimeout(r, 40))
+  await until(() => store.getLatestRun('dm-1')?.status === 'completed', 'the run completed') // the turn itself, not an amount of time
+  for (let i = 0; i < 3; i++) await new Promise(r => setImmediate(r))
   const files = []
   const walk = async d => { for (const f of await readdir(d, { withFileTypes: true })) { const p = path.join(d, f.name); if (f.isDirectory()) await walk(p); else files.push(p) } }
   await walk(dir)
