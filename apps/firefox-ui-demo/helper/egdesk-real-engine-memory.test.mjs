@@ -166,3 +166,21 @@ test('end to end (fake engine): a conversation without memory is untouched (no m
   const rec = (await runCheck(w.options, asScripts(script), w.deps)).records[0]
   assert.equal('memory' in rec.turns[0], false); assert.equal(rec.ok, true)
 })
+
+test('the scorer reads a record of the whole check: pages, re-sends, the numbers that decided it, the answer, the check\'s own expectations', async t => {
+  const { scoreMemoryRecord, formatScore } = await import('./egdesk-real-engine-memory-score.mjs')
+  const w = world(t, HELD_FAKE)
+  const rec = (await runCheck(w.options, asScripts(buildMemoryHeldScript()), w.deps)).records[0]
+  const score = scoreMemoryRecord(JSON.parse(JSON.stringify(rec)))
+  assert.equal(score.ok, true)
+  assert.deepEqual(score.summary.resentPages, []); assert.deepEqual(score.summary.turnMemoryRanOn.includes(1), true)
+  assert.deepEqual(score.turns[0].memory.attached.includes(RETENTION.id), true)
+  assert.ok(Object.keys(score.turns[0].decisions.selection.rel).length >= 3, 'the selection numbers are kept')
+  assert.ok(Object.keys(score.turns[0].decisions.triage).length >= 1)
+  assert.match(score.turns[1].answer, /자동 삭제/)
+  assert.deepEqual(score.turns[1].checks.map(c => [c.check, c.ok]).filter(([c]) => c.startsWith('memory.')), [['memory.notAttached', true], ['memory.noResends', true]])
+  assert.match(formatScore(score), /\| 2 \|/)
+  // a failing record scores as failing and names the failed check
+  const bad = JSON.parse(JSON.stringify(rec)); bad.turns[1].memory.resent = [RETENTION.id]; bad.turns[1].expectations = [{ check: 'memory.noResends', ok: false, detail: { resent: [RETENTION.id] } }]; bad.turns[1].ok = false; bad.ok = false
+  const s2 = scoreMemoryRecord(bad); assert.equal(s2.ok, false); assert.deepEqual(s2.summary.failed, ['memory.noResends']); assert.deepEqual(s2.summary.resentPages, [RETENTION.id])
+})
