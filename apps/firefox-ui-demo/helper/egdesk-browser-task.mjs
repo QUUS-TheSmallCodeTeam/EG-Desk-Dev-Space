@@ -102,7 +102,7 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = TTL_MS, maxTask
       for (const task of tasks.values()) if (task.conversationKey === conversationKey && live(task)) task.status = 'cancelled'
       while (tasks.size >= maxTasks) tasks.delete(tasks.keys().next().value)
       const task = { taskId: `bt_${randomBytes(6).toString('hex')}`, conversationKey, cardId, goal: compactText(goal, MAX_MESSAGE), status: 'running',
-        pause: null, userContext: [], state: null, prior: null, memoryPacket: null, memoryPages: [], pendingWrite: null, trail: [], resolved: [], pendingAsk: null, host: '', steps: 0, actions: { fill: 0, navigate: 0, scroll: 0 }, segments: 0, createdAt: now(), updatedAt: now() }
+        pause: null, userContext: [], state: null, prior: null, memoryPacket: null, memoryPages: [], memory: null, pendingWrite: null, trail: [], resolved: [], pendingAsk: null, host: '', steps: 0, actions: { fill: 0, navigate: 0, scroll: 0 }, segments: 0, createdAt: now(), updatedAt: now() }
       tasks.set(task.taskId, task)
       return task
     },
@@ -187,7 +187,7 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
       if (typeof outcomeSink !== 'function' || !task.host) return
       const candidate = outcomeCandidate({ taskId: task.taskId, goal: task.goal, host: task.host, outcome, trail: task.trail, resolved: task.resolved, now: now() })
       if (!candidate) return
-      task.pendingWrite = Promise.resolve(outcomeSink(candidate, { memoryPages: task.memoryPages || [] })).catch(() => ({ status: 'unavailable' }))
+      task.pendingWrite = Promise.resolve(outcomeSink(candidate, { memoryPages: task.memoryPages || [], memory: task.memory })).catch(() => ({ status: 'unavailable' }))
     } catch { /* memory never changes the task */ }
   }
   const finalize = async (out, task) => {
@@ -255,6 +255,7 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
         const task = store.create({ conversationKey, cardId: entry.cardId, goal: message })
         const host = cards.find(card => card.cardId === entry.cardId)?.host
         task.memoryPacket = memoryPacket
+        task.memory = memory
         task.memoryPages = Array.isArray(memory?.pages) ? memory.pages : []
         task.prior = priorFromMemory(task.memoryPages, { scope: memory?.scope ?? null, hosts: host ? [host] : [] })
         return await finalize(await loop(run, task, hosts), task)

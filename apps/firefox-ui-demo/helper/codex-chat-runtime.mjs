@@ -4631,7 +4631,9 @@ export class CodexChatRuntime {
     let note = null
     try {
       if (!this.browserTaskStore) this.browserTaskStore = createBrowserTaskStore({ now: this.now })
-      const memory = typeof cfg.memory === 'function' ? await cfg.memory({ body, context }) : null
+      // A paused task of this conversation resumes with the packet it already holds: no second fetch for the user's answer.
+      const resuming = this.browserTaskStore.paused(context.clientThreadId) !== null
+      const memory = typeof cfg.memory === 'function' && !resuming ? await cfg.memory({ body, context, client: this.decisionContext?.client ?? null, askedAt: context.askedAt ?? this.now(), position: this.turnPosition(context) }) : null
       const entry = createDirectBrowserEntry({ provider, store: this.browserTaskStore, outcomeSink: typeof cfg.outcomeSink === 'function' ? cfg.outcomeSink : null, now: this.now,
         calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null })
       const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), memory })

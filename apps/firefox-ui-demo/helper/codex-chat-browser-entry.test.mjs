@@ -3,6 +3,12 @@ import assert from 'node:assert/strict'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
 import { createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
+import { mkdtempSync, readFileSync, statSync, chmodSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
+import { createBrowserEntryConfig } from './egdesk-browser-entry-wiring.mjs'
+import { mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
 
 // L8/C9: the direct browser entry inside the REAL chat runtime (CodexChatRuntime.send), flag decisionContext.browserEntry.mode():
 //   absent / 'off'  -> native input byte-identical to today
@@ -52,7 +58,7 @@ function qaHarness(override = {}) {
   return { chat, calls, events, replies, finish }
 }
 
-function build({ entryMode, hang = false, withClient = true, outcomes = null, failTurn = false } = {}) {
+function build({ entryMode, hang = false, withClient = true, outcomes = null, failTurn = false, entryConfig = null, judge = null } = {}) {
   const timeline = [], decisions = [], acts = [], uiKinds = []
   let docSeq = 1
   let cur = { url: `${O}/invoices`, documentId: 'doc1', revision: 1 }
@@ -72,7 +78,10 @@ function build({ entryMode, hang = false, withClient = true, outcomes = null, fa
       const url = /URL: (\S+)/.exec(evidence)?.[1], ctx = /Context the user gave in the chat \(not page text\):\n([\s\S]*?)\n\n/.exec(evidence)?.[1] ?? ''
       let next, goalMet = 0
       if (/\/download\//.test(url)) { next = 'goal_met'; goalMet = 0.95 }
-      else if (url.endsWith('/invoices')) next = /두 번째/.test(ctx) ? starts(q0.choices, '987-65') : 'needs_user_context'
+      else if (url.endsWith('/invoices')) {
+        const listed = /it is listed now as (\[L\d+\] [^\n]*?)\.(?:\n|$)/.exec(evidence)
+        next = listed ? listed[1].trim() : /두 번째/.test(ctx) ? starts(q0.choices, '987-65') : 'needs_user_context'
+      }
       else next = starts(q0.choices, '다운로드')
       const answer = choice('next_step', next, 0.95)
       if (next === 'needs_user_context') answer.probabilities.push({ value: starts(q0.choices, '123-45'), probability: 0.02 }, { value: starts(q0.choices, '987-65'), probability: 0.02 })
@@ -100,8 +109,10 @@ function build({ entryMode, hang = false, withClient = true, outcomes = null, fa
   const provider = createCodexBrowserToolProvider({ transport, getOwnerKey: () => OWNER, decision: { mode: () => 'on', configured: () => true, client,
     recipient: () => decisionTopicRecipient(KEY, 1, undefined, client.model), generation: () => 0 } })
   const calibration = []
-  const decisionContext = entryMode === undefined ? undefined : { mode: () => (withClient ? 'on' : 'off'), configured: () => withClient, client, calibrationLog: { record: raw => { calibration.push(raw); return {} }, complete() {} },
-    ...(entryMode === 'absent' ? {} : { browserEntry: { mode: () => entryMode, ...(outcomes ? { outcomeSink: outcomes } : {}) } }) }
+  const MEMORY_Q = /^(pg_|st_|op_|tn_|tw_|speech_)/
+  const ctxClient = judge ? { decide: request => (request.questions.some(q => MEMORY_Q.test(q.name)) ? judge.decide(request) : client.decide(request)) } : client
+  const decisionContext = entryMode === undefined && !entryConfig ? undefined : { mode: () => (withClient ? 'on' : 'off'), configured: () => withClient, client: ctxClient, calibrationLog: { record: raw => { calibration.push(raw); return {} }, complete() {} },
+    ...(entryConfig ? { browserEntry: entryConfig } : entryMode === 'absent' ? {} : { browserEntry: { mode: () => entryMode, ...(outcomes ? { outcomeSink: outcomes } : {}) } }) }
   const h = qaHarness({ toolProviders: [provider], getOwnerKey: () => OWNER, decisionContext, failTurn, onRequest: method => timeline.push(`native:${method}`) })
   const source = { id: 'selected-source', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
     sourceRef: { viewId: 'card', profileId: 'fixture', accountId: '', uri: `${O}/invoices` },
@@ -224,4 +235,70 @@ test('C9 on: a native turn refusal after the pre-turn binding cancels that bindi
   assert.deepEqual(kinds.filter(k => k === 'bind').length, 1)
   assert.ok(kinds.includes('cancel'), 'the pre-turn binding was released')
   assert.deepEqual(w.acts, [])
+})
+
+// ---- C10: flags on, end to end: entry advisory -> on, memory packet -> objective loop -> outcome persisted -> a later session fetches it ----
+function flagged(dir, mode) {
+  const log = []
+  const judge = mockJudge(log)
+  const adapter = createWikiAdapter({ writes: openWikiWrites({ dataDir: dir }) })
+  const flag = { value: mode }
+  const config = createBrowserEntryConfig({ flag: () => flag.value, getAdapter: () => adapter, wiki: ({ context }) => adapter.snapshot({ context }) })
+  return { log, judge, adapter, flag, config }
+}
+const newDir = () => { const dir = mkdtempSync(path.join(tmpdir(), 'egdesk-c10-')); chmodSync(dir, 0o700); return dir }
+
+test('C10 end to end: advisory records only; month 1 asks and persists the outcome; month 2 (new runtime, reopened store) fetches it and does not ask', { timeout: 30000 }, async () => {
+  const dir = newDir()
+  // advisory: the entry decision only; no memory fetch, no write, native input identical
+  const adv = flagged(dir, 'advisory')
+  const baseline = build({}); await baseline.send(MSG)
+  const a = build({ entryConfig: adv.config, judge: adv.judge })
+  const run = await a.send(MSG); await a.h.chat.browserEntryIdle()
+  assert.equal(allNative(a), allNative(baseline))
+  assert.deepEqual(a.h.chat.browserEntryShadow.get(run.runId), { would: 'enter' })
+  assert.deepEqual(a.decisions.map(d => d.q), ['browser_entry']); assert.equal(adv.log.length, 0, 'advisory fetches no memory and writes nothing')
+  assert.equal(adv.adapter.snapshot && (await adv.adapter.snapshot({ context: { clientThreadId: 'selected-chat' } })).pages.size, 0)
+
+  // month 1, on: nothing remembered yet -> asks; the answer resumes; the outcome is written through the persistent path
+  const m1 = flagged(dir, 'on')
+  const w1 = build({ entryConfig: m1.config, judge: m1.judge })
+  const first = await w1.send(MSG)
+  const note1 = JSON.parse(w1.h.calls.find(c => c.method === 'turn/start').params.additionalContext.egdesk_browser_task.value).egdesk_browser_task
+  assert.deepEqual([note1.status, note1.code], ['need_context', 'choice_needed'])
+  const fetchCalls1 = m1.log.length
+  w1.h.finish(first)
+  await w1.send('두 번째 사업자로', { conversationId: first.conversationId })
+  assert.deepEqual(m1.log.slice(fetchCalls1).map(l => l.questions.some(q => /^(pg_|st_|op_)/.test(q)) ? 'fetch' : l.questions.includes('tw_target') ? 'write-judgment' : 'other'), ['write-judgment'], 'the answer to a paused task fetches no memory again; the only new call is the outcome write judgment')
+  await new Promise(resolve => setTimeout(resolve, 50))
+  const file = path.join(dir, 'egdesk-wiki-writes.json')
+  assert.equal(statSync(file).mode & 0o077, 0, 'private file')
+  const stored = JSON.parse(readFileSync(file, 'utf8')).pages
+  assert.equal(stored.length, 1)
+  assert.match(stored[0].id, /^browser-task\/bt_[0-9a-f]{12}$/)
+  assert.equal(stored[0].provenance.kind, 'agent_note'); assert.equal(stored[0].scope, 'dm:selected-chat'); assert.equal(stored[0].ref, undefined, 'the outcome text is the body, not a message reference')
+  assert.match(stored[0].body, /사업자 987-65-43210 @ \/invoices \[choice_needed\]/)
+  assert.doesNotMatch(readFileSync(file, 'utf8'), /두 번째|https?:|\?|SECRET/)
+
+  // month 2: a NEW runtime, adapter and store object over the same file; the memory feature fetches the record, the loop does not ask
+  const m2 = flagged(dir, 'on')
+  const w2 = build({ entryConfig: m2.config, judge: m2.judge })
+  await w2.send(MSG)
+  const note2 = JSON.parse(w2.h.calls.find(c => c.method === 'turn/start').params.additionalContext.egdesk_browser_task.value).egdesk_browser_task
+  assert.deepEqual([note2.status, note2.code], ['done', undefined])
+  assert.deepEqual(w2.acts.map(x => [x.type, x.url]), [['navigate', `${O}/biz/2`], ['navigate', `${O}/download/2.pdf`]])
+  assert.deepEqual(w2.decisions.reduce((m, d) => (m[d.q] = (m[d.q] || 0) + 1, m), {}), { browser_entry: 1, next_step: 3 })
+  assert.equal(w2.acts.filter(x => x.type === 'fill' || x.ref === 's1').length, 0)
+  assert.ok(m2.log.length >= 1, 'the general memory feature ran its own Decisions calls')
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).pages.length, 2, 'the second outcome is persisted too')
+})
+
+test('C10 flag off by default: the bridge-style config with no flag never fetches, writes or opens a file', async () => {
+  const dir = newDir(), x = flagged(dir, undefined)
+  const w = build({ entryConfig: x.config, judge: x.judge })
+  await w.send(MSG)
+  const baseline = build({}); await baseline.send(MSG)
+  assert.deepEqual(w.decisions, []); assert.equal(x.log.length, 0); assert.deepEqual(w.acts, [])
+  assert.equal(allNative(w), allNative(baseline))
 })
