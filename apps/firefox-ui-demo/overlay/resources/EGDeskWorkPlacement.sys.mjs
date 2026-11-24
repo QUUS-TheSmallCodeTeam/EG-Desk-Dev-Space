@@ -419,7 +419,17 @@ export function advisoryPlacement({ presence, cards, tasks, obstacles, taskId, s
  * must not activate it). inView: whether it lies in this Desk's own view (then nothing would need revealing anyway). null: keep today's placement.
  */
 export function onRuleSpot(advisory, landed, ownView) {
-  const spot = advisory?.spot;
-  if (!spot || !finite(landed) || spot.width !== Math.round(landed.width) || spot.height !== Math.round(landed.height)) return null;
+  return quietPlacement(advisory?.spot, landed, ownView);
+}
+/** The same quiet placement for any spot the runtime chose (a rule's spot, or the spot beside a related card after a timely answer). */
+export function quietPlacement(spot, landed, ownView) {
+  if (!finite(spot) || !finite(landed) || spot.width !== Math.round(landed.width) || spot.height !== Math.round(landed.height)) return null;
   return { x: spot.x, y: spot.y, width: landed.width, height: landed.height, inView: finite(ownView) ? inside(spot, ownView) : false, quiet: true };
 }
+/**
+ * L1 cycle 15, pref "on": how long a surface that can wait (a run's file viewer, which opens asynchronously anyway) waits for the bridge's content answer
+ * ("is this work about the same matter as that card?") before it opens: the default Decision deadline. After it, the surface opens at the rule's spot
+ * and nothing moves later: an answer that arrives after the deadline is only recorded by the bridge.
+ */
+export const WORK_PLACEMENT_WAIT_MS = 1500;
+export const WORK_PLACEMENT_POLL_MS = 150;

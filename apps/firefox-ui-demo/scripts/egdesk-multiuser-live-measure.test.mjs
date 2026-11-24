@@ -11,7 +11,7 @@ import { DECISIONS_ENDPOINT, DECISION_MODEL } from '../helper/egdesk-decision-cl
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
 import { createMeasureTransport } from './egdesk-all-on-live-measure.mjs'
 import { allOnWorld, DM } from './egdesk-all-on.support.mjs'
-import { ASK, CHECK_NAMES, DEFAULT_CAPS, PLAN_FILE, SCRIPT_FILE, STEPS, loadScenarioPlan, main, runScenario, scenarioWorld, scriptedScenario } from './egdesk-multiuser-live-measure.mjs'
+import { ANSWER, ANSWER_INFO, ASK, CHECK_NAMES, DEFAULT_CAPS, PLAN_FILE, PLAN_FILE_V1, SCRIPT_FILE, STEPS, STEPS_V1, loadScenarioPlan, main, runScenario, scenarioWorld, scriptedScenario } from './egdesk-multiuser-live-measure.mjs'
 
 const KEY = 'sk-synthetic-not-a-key-l1c14-000000000001'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -38,9 +38,11 @@ async function cli(argv, { env = { OPENAI_API_KEY: KEY }, fetchImpl } = {}) {
 const tmp = t => { const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-multiuser-test-')); t.after(() => rmSync(dir, { recursive: true, force: true })); return dir }
 const results = file => JSON.parse(readFileSync(file, 'utf8'))
 
-test('plan: pre-registered before any send, five steps, person-level expectations with owners and whose view; caps within 20 requests / 20k tokens; malformed plans refused', t => {
+test('plan: pre-registered before any send, the six steps of v2 (v1\'s five kept), person-level expectations with owners and whose view; caps within 20 requests / 20k tokens; malformed plans refused', t => {
   const plan = loadScenarioPlan()
-  assert.deepEqual(plan.steps.map(s => s.id), STEPS.map(s => s.id))
+  assert.deepEqual(plan.steps.map(s => s.id), STEPS.map(s => s.id)); assert.deepEqual(STEPS.map(s => s.id), ['join', 'ask', 'surface', 'result', 'followup', 'leave'])
+  const v1 = loadScenarioPlan(PLAN_FILE_V1); assert.deepEqual(v1.steps.map(s => s.id), STEPS_V1.map(s => s.id)); assert.equal(v1.set, 'multiuser-collaboration-v1', 'v1 is kept as it was registered')
+  assert.notEqual(v1.sha256, plan.sha256)
   assert.match(plan.registered, /before any send/)
   const all = plan.steps.flatMap(s => s.expect)
   assert.deepEqual([...new Set(all.map(e => e.who))].sort(), ['A', 'B', 'ledger', 'system'], 'what A sees, what B sees, what the shared ledger holds')
@@ -50,6 +52,7 @@ test('plan: pre-registered before any send, five steps, person-level expectation
   const dir = tmp(t), raw = JSON.parse(readFileSync(PLAN_FILE, 'utf8'))
   const refused = edit => { const copy = structuredClone(raw); edit(copy); const f = path.join(dir, `p${Math.random()}.json`); writeFileSync(f, JSON.stringify(copy)); assert.throws(() => loadScenarioPlan(f), e => e.name === 'PlanError') }
   refused(p => { p.steps[1].caps.maxRequests = 30 }); refused(p => { p.steps[0].expect[0].check = 'nope' }); refused(p => { p.steps[0].expect[0].owner = 'L9' })
+  refused(p => { p.steps.splice(4, 1, p.steps[5]) }) // a step order that is neither v1 nor v2
   refused(p => { p.steps[0].expect[0].who = 'C' }); refused(p => { p.steps.pop() }); refused(p => { delete p.registered })
 })
 
@@ -71,7 +74,10 @@ test('dry run: sends nothing; the whole scenario runs through product code; ever
   assert.ok(fam('result').includes('work_placement'))
   const surface = r.steps.find(s => s.id === 'surface').seen.A.surface
   assert.deepEqual([surface.rule, surface.quiet, surface.inAView, surface.inBView, surface.nearB], ['requester_working', true, false, false, true])
-  assert.deepEqual(r.steps.find(s => s.id === 'result').seen.newMessages.map(m => m.by), ['agent', 'system_flow'], 'A sees the answer, then one pointer')
+  assert.deepEqual(r.steps.find(s => s.id === 'result').seen.newMessages.map(m => [m.by, m.text === ANSWER || m.by !== 'agent']), [['agent', true], ['system_flow', true]], 'A sees the decision answer as written, then one pointer')
+  assert.deepEqual(r.steps.find(s => s.id === 'followup').seen.newMessages.map(m => m.by), ['person', 'agent'], 'the follow-up: A sees the answer and no pointer')
+  assert.equal(r.steps.find(s => s.id === 'followup').seen.newMessages[1].text, ANSWER_INFO)
+  assert.deepEqual([surface.waited, surface.besideRelated, surface.movedAfterOpen], [true, true, false], 'a timely same-matter answer: opened beside the related card, never moved')
   // request bodies stay out of the results (sha256 and size only); what A saw is in it
   const text = readFileSync(out, 'utf8')
   assert.ok(!text.includes('Is the work for the quoted request') && !text.includes('"bodies"'), 'no request body is written')
@@ -95,7 +101,7 @@ test('caps: the request cap and the token ceiling stop the run before the reques
   const capped = provider()
   const one = await runScenario({ plan: loadScenarioPlan(), send: true, key: KEY, fetchImpl: capped.fetchImpl, caps: { tokenCeiling: 20_000, maxRequests: 2 } })
   assert.equal(one.ledger.stopped.reason, 'request_cap'); assert.equal(capped.calls.length, 2, 'the third request was not sent')
-  assert.deepEqual(one.steps.map(s => s.state), ['done', 'done', 'done', 'stopped', 'not_run'])
+  assert.deepEqual(one.steps.map(s => s.state), ['done', 'done', 'done', 'stopped', 'not_run', 'not_run'])
   const tight = provider()
   const two = await runScenario({ plan: loadScenarioPlan(), send: true, key: KEY, fetchImpl: tight.fetchImpl, caps: { tokenCeiling: 2_600, maxRequests: 20 } })
   assert.equal(two.ledger.stopped.reason, 'token_ceiling'); assert.equal(tight.calls.length, 1)
@@ -112,7 +118,7 @@ test('stop on failure: the first non-200 answer stops the run; nothing more is s
   const net = provider({ failAt: 2 })
   const outcome = await runScenario({ plan: loadScenarioPlan(), send: true, key: KEY, fetchImpl: net.fetchImpl })
   assert.equal(outcome.ledger.stopped.reason, 'http_429'); assert.equal(net.calls.length, 2)
-  assert.deepEqual(outcome.steps.map(s => s.state), ['done', 'done', 'stopped', 'not_run', 'not_run'])
+  assert.deepEqual(outcome.steps.map(s => s.state), ['done', 'done', 'stopped', 'not_run', 'not_run', 'not_run'])
   assert.ok(outcome.steps.slice(3).every(s => s.checks.every(c => c.pass === null)), 'the expectations of steps not run are not judged')
 })
 
@@ -157,4 +163,42 @@ test('product path fixes found by this scenario: a run\'s file viewer finds its 
   assert.equal(w.chat.placementContextFor(out.conversationId).request, ASK, 'the request is there for the content questions, by either key')
   assert.equal(w.chat.placementContextFor(DM).request, ASK)
   assert.equal(w.chat.heartbeatFor('nobody'), null, 'an unknown key answers as before')
+})
+
+test('the bounded wait: a same-matter answer later than 1.5 s on the scenario clock -> the viewer opens at the rule\'s spot; the late answer is recorded only; nothing moves', async () => {
+  // the provider answers the same-matter request slowly (real time), so the window's wait (1.5 s on the scenario clock, a few real ms) runs out first
+  const fast = provider(), calls = []
+  const fetchImpl = async (url, init) => { const names = JSON.parse(Buffer.from(init.body).toString('utf8')).questions.map(q => q.name); calls.push(names.join(','))
+    if (names[0] === 'same_matter_R1') await new Promise(resolve => setTimeout(resolve, 1700)); return fast.fetchImpl(url, init) }
+  const outcome = await runScenario({ plan: loadScenarioPlan(), send: true, key: KEY, fetchImpl })
+  const surface = outcome.steps.find(s => s.id === 'surface')
+  const spot = surface.seen.A.surface
+  // waited: the bounded path gave the placement (after its deadline: the rule's spot); besideRelated: it did NOT open beside the related card
+  assert.deepEqual([spot.waited, spot.besideRelated, spot.movedAfterOpen, spot.quiet, spot.inAView, spot.nearB], [true, false, false, true, false, true], 'opened at the rule\'s spot beside B\'s view, quietly; not moved')
+  assert.deepEqual(surface.checks.filter(c => c.pass !== true).map(c => c.id), ['P10'], 'only the soft "opened beside the related card" misses')
+  // the late answer: decided beside the related card, recorded by the bridge, and nothing in the window acted on it
+  assert.deepEqual(surface.seen.placementRecords.map(r => [r.kind, r.would.kind, r.source]), [['placement', 'beside_related', 'decision']])
+  assert.equal(surface.seen.A.cameraCalls, 0); assert.deepEqual(surface.seen.A.cardsMoved, [])
+  assert.ok(calls.includes('same_matter_R1,same_matter_R2'))
+})
+test('v1 stays runnable as registered (five steps): the same product path, judged by v1\'s expectations', async () => {
+  const outcome = await runScenario({ plan: loadScenarioPlan(PLAN_FILE_V1), fetchImpl: noNetwork().fetchImpl })
+  assert.deepEqual(outcome.steps.map(s => [s.id, s.state]), STEPS_V1.map(s => [s.id, 'done']))
+  assert.deepEqual(outcome.scorecard.hard.failed, [], 'with the faithful revision and the decision answer, v1\'s hard expectations hold too')
+})
+
+test('the v1 send, reproduced (c20): a first request slower than the turn\'s 800 ms Decision-context budget -> the draft check works without evidence (it trims); the owner question quotes what A saw, and A still gets the pointer', async () => {
+  const fast = provider(), slowFirst = async (url, init) => { const names = JSON.parse(Buffer.from(init.body).toString('utf8')).questions.map(q => q.name)
+    if (names.includes('answer_type')) await new Promise(resolve => setTimeout(resolve, 950)); return fast.fetchImpl(url, init) }
+  const outcome = await runScenario({ plan: loadScenarioPlan(), send: true, key: KEY, fetchImpl: slowFirst })
+  const ask = outcome.steps.find(s => s.id === 'ask'), result = outcome.steps.find(s => s.id === 'result')
+  assert.equal(ask.checks.find(c => c.id === 'K5').pass, false, 'the soft budget check names what decided v1: the turn context came back after 800 ms')
+  assert.ok(ask.checks.find(c => c.id === 'K5').observed.elapsedMs[0] > 800)
+  assert.ok(!result.requests.some(q => q.family === 'draft_check'), 'as in v1\'s send: no draft-check request, the check had no evidence')
+  assert.deepEqual(result.seen.newMessages.map(m => m.by), ['agent', 'system_flow'])
+  // the draft check without evidence trims what it cannot support (the price comparison) and adds its own caveat; the request for the owner's decision stays
+  const posted = result.seen.newMessages[0].text
+  assert.notEqual(posted, ANSWER); assert.ok(posted.includes('소유자께서 승인해 주셔야') && !posted.includes('12,000원에서 11,000원'), posted)
+  assert.equal(result.checks.find(c => c.id === 'R0').pass, false, 'the soft check reports that A did not see the answer as written')
+  assert.deepEqual(result.checks.filter(c => c.severity === 'hard' && c.pass !== true).map(c => c.id), [], 'R1 (the posted answer is what is quoted), R3 and R4 hold')
 })

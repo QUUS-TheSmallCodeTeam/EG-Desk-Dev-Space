@@ -342,7 +342,7 @@ test('bridge route: loopback JSON POST only; the request finds the conversation\
 
 // ================= 7. the first real consumer: default off; "advisory" and "on" are the bridge's words =================
 const surface = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8')
-const decl = name => { const s = surface.indexOf(`  function ${name}(`); assert.ok(s >= 0, name); return surface.slice(s, surface.indexOf('\n  }', s) + 4) }
+const decl = name => { const at = surface.indexOf(`  function ${name}(`), s = at >= 0 ? at : surface.indexOf(`  async function ${name}(`); assert.ok(s >= 0, name); return surface.slice(s, surface.indexOf('\n  }', s) + 4) }
 function consumer({ pref } = {}) {
   const log = { prefs: [], posts: [], queries: 0, listeners: 0 }
   const nodes = [{ id: 'c1', isConnected: true, dataset: {}, _rect: r(100, 100, 500, 400) },
@@ -351,7 +351,7 @@ function consumer({ pref } = {}) {
   const deps = { WorkPlacement: WP, state, readSurfacePref: key => { log.prefs.push(key); return pref }, document: { querySelectorAll: sel => { log.queries++; return sel === '.egd-canvas-card' ? nodes : [] } },
     window: { addEventListener: () => { log.listeners++ } }, persistentEntityGeometry: n => ({ ...n._rect, zIndex: 1 }), cardKindForPersistence: () => 'file', safeViewportWorldRect: () => ({ left: 0, top: 0, right: 1200, bottom: 800 }),
     deskStoreRequest: async (method, path, body) => { log.posts.push([method, path, body]); return { status: 200, body: { status: 'queued' } } } }
-  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('noteWorkSurfacePlacement')}\nreturn noteWorkSurfacePlacement;`
+  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('workSceneInputs')}\n${decl('noteWorkSurfacePlacement')}\nreturn noteWorkSurfacePlacement;`
   return { note: new Function(...Object.keys(deps), body)(...Object.values(deps)), log, state }
 }
 test('consumer, default path: unless the pref is "advisory" or "on" the hook reads the pref and does nothing else; the placement that is returned is never touched', () => {
@@ -475,7 +475,7 @@ function windowRig({ pref, people, cards = [], regions = [] }) {
     window: { addEventListener() {}, setTimeout: () => { calls.timers++; return 1 } }, persistentEntityGeometry: n => ({ ...n._rect, zIndex: 1 }), cardKindForPersistence: () => 'file',
     safeViewportWorldRect: () => ({ left: view.x, top: view.y, right: view.x + view.width, bottom: view.y + view.height }), viewportToCanvasPoint: (x, y) => ({ x, y }),
     safeViewportRect: () => ({ left: 0, top: 0, right: view.width, bottom: view.height }), deskStoreRequest: async (m, p, body) => { calls.posts.push(body); return { status: 200, body: {} } } }
-  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('noteWorkSurfacePlacement')}\nstate.noteWorkSurfacePlacement = noteWorkSurfacePlacement;\n${decl('resolveCanvasCardPlacement')}\n${decl('revealPlacedCanvasCard')}\nreturn { resolveCanvasCardPlacement, revealPlacedCanvasCard };`
+  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('workSceneInputs')}\n${decl('noteWorkSurfacePlacement')}\nstate.noteWorkSurfacePlacement = noteWorkSurfacePlacement;\n${decl('resolveCanvasCardPlacement')}\n${decl('revealPlacedCanvasCard')}\nreturn { resolveCanvasCardPlacement, revealPlacedCanvasCard };`
   return { ...new Function(...Object.keys(deps), body)(...Object.values(deps)), calls, state }
 }
 const OWNER = { member: 'self', self: true, active: true, viewport: r(0, 0, 1200, 800), focusCard: 'own-doc', lastInputAgeMs: 400 }
@@ -510,7 +510,7 @@ test('window on: never inside another active person\'s view; an unknown requeste
     for (const region of regions) assert.ok(!hits(spot, { x: region.x - 24, y: region.y - 24, width: region.width + 48, height: region.height + 48 }), 'never in or against a Board region: a private placement does not join a shared Board')
   }
   // nothing in the hook or the placement runtime can write a Board or move a card
-  const hook = decl('noteWorkSurfacePlacement')
+  const hook = decl('noteWorkSurfacePlacement') + decl('workSceneInputs') + decl('placeWorkSurface') // L1 c15: the shared scene reader and the bounded wait too
   for (const forbidden of ['jointDesk', 'saveBoard', 'boardLedger', 'persistBoard', 'setCanvasPanTarget', 'setCanvasViewportTarget', 'setActiveEntity', '.focus(', 'style.left', 'style.top']) assert.ok(!hook.includes(forbidden), forbidden)
   // the runtime cannot answer: today's placement stands, the surface still opens
   const broken = windowRig({ pref: 'on', people: [OWNER] }); broken.state.presence = { snapshot: () => { throw new Error('presence down') } }
@@ -538,4 +538,67 @@ test('isolation (L1 c13, measured v2: one answer for every card of a request): o
   // the token cost of each, from the bytes the product builds (the runner's typed model)
   const est = rs => rs.reduce((sum, q) => sum + Math.round(134.8 * q.questions.length + 0.1983 * Buffer.byteLength(JSON.stringify({ model: 'm', input: q.input, questions: q.questions }))), 0)
   assert.ok(est(byRequest) > est([byQuestion]), `one card per request costs more: ${est(byRequest)} vs ${est([byQuestion])}`)
+})
+
+// ================= 10. window "on", a surface that can wait (L1 c15): a bounded wait for the content answer before it opens =================
+function waitRig({ pref = 'on', people = [OWNER], cards = [], regions = [], bridge = {} } = {}) {
+  const calls = { posts: [], polls: 0, camera: 0 }, clock = { now: 0 }
+  const node = (id, rect, extra = {}) => ({ id, isConnected: true, dataset: {}, _rect: rect, ...extra })
+  const cardNodes = cards.map(c => node(c.id, c.rect, c.record ? { _resultRecord: c.record } : {})), regionNodes = regions.map((rect, i) => node(`region-${i}`, rect))
+  const view = people.find(p => p.self).viewport
+  const state = { activeEntityId: 'own-doc', panTarget: { x: 0, y: 0 }, zoomTarget: 1, agenda: {}, surface: {}, presence: { snapshot: () => people.map(p => ({ ...p, viewport: { ...p.viewport } })) },
+    setCanvasPanTarget: () => { calls.camera++ }, setCanvasViewportTarget: () => { calls.camera++ } }
+  const deskStoreRequest = async (method, p, body) => {
+    if (p === '/decision/work-placement/request') { calls.posts.push(body); return { status: 200, body: bridge.queued ?? { status: 'queued', id: 'wp-1' } } }
+    if (p === '/decision/work-placement/result') { calls.polls++; const next = typeof bridge.result === 'function' ? bridge.result(calls.polls, clock.now) : { status: 'pending' }; return { status: 200, body: next } }
+    return { status: 404, body: null }
+  }
+  const deps = { WorkPlacement: WP, SurfaceState, state, readSurfacePref: () => pref,
+    document: { querySelectorAll: sel => (sel === '.egd-canvas-card' ? cardNodes : sel.includes('.egd-board-region') ? (sel.includes('.egd-canvas-card') ? [...cardNodes, ...regionNodes] : regionNodes) : []) },
+    window: { addEventListener() {}, setTimeout: () => 1 }, persistentEntityGeometry: n => ({ ...n._rect, zIndex: 1 }), cardKindForPersistence: () => 'result',
+    safeViewportWorldRect: () => ({ left: view.x, top: view.y, right: view.x + view.width, bottom: view.y + view.height }), viewportToCanvasPoint: (x, y) => ({ x, y }),
+    safeViewportRect: () => ({ left: 0, top: 0, right: view.width, bottom: view.height }), deskStoreRequest,
+    workWaitNow: () => clock.now, workWaitSleep: async ms => { clock.now += ms } }
+  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('workSceneInputs')}\n${decl('noteWorkSurfacePlacement')}\nstate.noteWorkSurfacePlacement = noteWorkSurfacePlacement;\n${decl('placeWorkSurface')}\n${decl('resolveCanvasCardPlacement')}\nreturn { placeWorkSurface, resolveCanvasCardPlacement };`
+  return { ...new Function(...Object.keys(deps), body)(...Object.values(deps)), calls, clock, state }
+}
+const MEMBER_B = { member: 'm-0123456789abcdef', self: false, active: true, viewport: r(2400, 200, 1200, 800), focusCard: null, lastInputAgeMs: 900 }
+const QUOTE_V1 = { id: 'res-v1', rect: r(3700, 1150, 400, 300), record: { title: 'A사 견적서 v1 단가표', text: '단가 12,000원', provenance: { creator: 'agent', runId: 'run-0' } } }
+const WORK = { kind: 'file', runId: 'run-7', conversationId: 'thread-9', requester: MEMBER_B.member }
+test('bounded wait: only with the pref "on", only with a conversation; with nothing to ask it posts once and opens at the rule\'s spot without polling', async () => {
+  for (const pref of ['advisory', null, 'off']) { const rig = waitRig({ pref, people: [OWNER, MEMBER_B], cards: [QUOTE_V1] }); assert.equal(await rig.placeWorkSurface('file', WORK), null, String(pref)); assert.equal(rig.calls.posts.length, 0) }
+  const lonely = waitRig({ people: [OWNER, MEMBER_B], cards: [QUOTE_V1] }); assert.equal(await lonely.placeWorkSurface('file', { kind: 'file', runId: 'run-7' }), null, 'no conversation: the usual path')
+  const plain = waitRig({ people: [OWNER, MEMBER_B] })
+  const spot = await plain.placeWorkSurface('file', WORK)
+  assert.deepEqual([spot.quiet, plain.calls.posts.length, plain.calls.polls, plain.clock.now], [true, 1, 0, 0], 'no card may be asked about: posted for the record, no wait at all')
+  assert.ok(!hits(spot, OWNER.viewport) && !hits(spot, MEMBER_B.viewport) && gapTo(spot, MEMBER_B.viewport) < 900, 'the rule\'s spot, beside B\'s view')
+  assert.equal(plain.calls.posts[0].dto.rule, 'requester_working')
+})
+test('bounded wait: a timely "same matter" opens it beside that card; "pending" past 1.5 s opens it at the rule\'s spot and reads nothing after the deadline; "unknown" stops at once', async () => {
+  const timely = waitRig({ people: [OWNER, MEMBER_B], cards: [QUOTE_V1], bridge: { result: n => (n < 3 ? { status: 'pending' } : { status: 'decided', kind: 'beside_related', related: 'R1', source: 'decision' }) } })
+  const beside = await timely.placeWorkSurface('file', WORK)
+  assert.equal(timely.calls.polls, 3); assert.ok(timely.clock.now <= WP.WORK_PLACEMENT_WAIT_MS)
+  assert.ok(gapTo(beside, QUOTE_V1.rect) <= 25 && !hits(beside, OWNER.viewport) && !hits(beside, MEMBER_B.viewport) && beside.quiet, 'beside the v1 quote card, quietly')
+  const late = waitRig({ people: [OWNER, MEMBER_B], cards: [QUOTE_V1], bridge: { result: (n, now) => (now >= WP.WORK_PLACEMENT_WAIT_MS ? { status: 'decided', kind: 'beside_related', related: 'R1' } : { status: 'pending' }) } })
+  const ruled = await late.placeWorkSurface('file', WORK)
+  assert.equal(late.clock.now, WP.WORK_PLACEMENT_WAIT_MS, 'waited exactly the bound'); assert.equal(late.calls.polls, WP.WORK_PLACEMENT_WAIT_MS / WP.WORK_PLACEMENT_POLL_MS - 1, 'no read at or after the deadline')
+  assert.ok(gapTo(ruled, QUOTE_V1.rect) > 25 && gapTo(ruled, MEMBER_B.viewport) < 900 && ruled.quiet, 'the rule\'s spot: the late answer is not acted on')
+  assert.equal(late.calls.camera, 0)
+  const gone = waitRig({ people: [OWNER, MEMBER_B], cards: [QUOTE_V1], bridge: { result: () => ({ status: 'unknown' }) } })
+  await gone.placeWorkSurface('file', WORK); assert.deepEqual([gone.calls.polls, gone.clock.now], [1, WP.WORK_PLACEMENT_POLL_MS])
+  const refused = waitRig({ people: [OWNER, MEMBER_B], cards: [QUOTE_V1], bridge: { queued: { status: 'no-heartbeat' } } })
+  const kept = await refused.placeWorkSurface('file', WORK); assert.deepEqual([refused.calls.polls, kept.quiet], [0, true], 'not queued: no wait, the rule\'s spot')
+})
+test('bounded wait: an answer that would now put it in the owner\'s view is re-checked away; the file viewer path waits, then opens without the hook a second time', async () => {
+  // the owner panned over the v1 card while the answer was out: beside it is now inside the owner's view, so the fresh rule's spot is used
+  const people = [{ ...OWNER }, MEMBER_B]
+  const rig = waitRig({ people, cards: [QUOTE_V1], bridge: { result: n => { if (n === 2) people[0].viewport = r(3500, 900, 1400, 900); return n < 2 ? { status: 'pending' } : { status: 'decided', kind: 'beside_related', related: 'R1' } } } })
+  const spot = await rig.placeWorkSurface('file', WORK)
+  assert.ok(!hits(spot, people[0].viewport), 'not where the owner now looks'); assert.ok(spot.quiet)
+  // the run file viewer: openVerifiedRunFile waits first; spawnFileCard then uses that placement and does not call the hook again (one request)
+  const zone = readFileSync(new URL('../overlay/resources/surface/EGDeskSurfaceFileCard.mjs', import.meta.url), 'utf8')
+  assert.match(zone, /workPlacement = \(await state\.placeWorkSurface\?\.\('file', \{ kind: 'file', runId: selected\.runId, conversationId: selected\.conversationId \}\)\) \?\? null;[^\n]*\n    if \(!current\(\)\) return \{ status: 'stale' \};\n    verifiedRunOpens\.add\(opening\);\n    const card = spawnFileCard\(\{ openMode: 'new', verifiedRunOpen: opening, workPlacement \}\);/)
+  assert.match(zone, /const placement = \(runFile && options\.workPlacement\) \|\| resolveCanvasCardPlacement\('file', runFile \?/)
+  assert.match(zone, /activate: !options\.restore && !options\.deferPresentation && !placement\.quiet,/, 'opened without focus')
+  assert.equal(WP.WORK_PLACEMENT_WAIT_MS, 1500, 'the default Decision deadline')
 })
