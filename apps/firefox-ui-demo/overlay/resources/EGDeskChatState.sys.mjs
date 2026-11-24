@@ -607,6 +607,21 @@ export function codexRoomAccountCurrent(thread, authStatus, cachedDefaultKey, co
   const key = codexRoomAccountKey(thread, authStatus, context);
   return key && (codexRoomOnOtherProfile(thread, context) || cachedDefaultKey === key) ? key : null;
 }
+// L1 c21, owner decision (2): the same room continues on another account of its engine. Its messages, draft and selections stay (they
+// are kept elsewhere by room id); the engine thread does not: no native conversation until the next send, a fresh binding for the new
+// account, the same local room binding (the bridge's store keys the room by it).
+export function continueRoomOnAccount(thread, engineProfileId) {
+  if (!thread || typeof engineProfileId !== 'string' || !engineProfileId) return thread;
+  return { ...thread, engineProfileId, conversationId: null, bindingAccountKey: null, bindingState: 'fresh', retainedNativeBinding: null,
+    resuming: false, sendError: null, clientBindingId: clientThreadBinding(thread) };
+}
+// L1 c21, owner decision (3): with the pref "on" a default-account change keeps the task list (each task's own account is checked when it
+// resumes, by the bridge); returns what to put back after the reset, or null (pref off: as before).
+export function keptTasksOnDefaultSwitch(codex, pref) {
+  if (pref !== 'on' || !codex) return null;
+  return { taskBoard: codex.taskBoard, taskContinue: codex.taskContinue ?? null, taskApproval: codex.taskApproval ?? null,
+    taskResume: codex.taskResume ?? null, planProposals: codex.planProposals };
+}
 export function knownCodexAccountKey(key) {
   if (typeof key !== 'string' || !key.startsWith('codex:')) return false;
   const [, mode, ...identity] = key.split(':');

@@ -51,7 +51,8 @@ import { createBoardPresentationHttpHandler } from './egdesk-board-presentation-
 import { briefingDeps } from './egdesk-briefing-engine.mjs'
 import { createWorkPlacement, createWorkPlacementHttpHandler } from './egdesk-work-placement.mjs'
 import { createHudRouting, createHudRoutingHttpHandler } from './egdesk-hud-routing.mjs'
-import { createPresenceMirror, createPresenceMirrorHttpHandler, createRunRequesters, createRunRequesterHttpHandler } from './egdesk-presence-mirror.mjs'
+import { createRoomAccountHttpHandler } from './egdesk-room-account-http.mjs'
+import { createPresenceMirror, createPresenceMirrorHttpHandler, createRunRequesters, createRunRequesterHttpHandler, createRunRequesterReadHttpHandler } from './egdesk-presence-mirror.mjs'
 import { createWindowWatch } from './egdesk-heartbeat.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 import { MemoryEvidenceStore } from './egdesk-memory-evidence.mjs'
@@ -453,6 +454,8 @@ const handlePresenceMirrorHttp = createPresenceMirrorHttpHandler({ mirror: prese
 // Whose task a conversation's run is (another member's presence alias, told by the window; memory only). Same flag, default off.
 const runRequesters = createRunRequesters({ presence: presenceMirror })
 const handleRunRequesterHttp = createRunRequesterHttpHandler({ requesters: runRequesters, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
+// L1 c21 (5): a second Desk window reads a run's requester here
+const handleRunRequesterReadHttp = createRunRequesterReadHttpHandler({ requesters: runRequesters, presence: presenceMirror, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
 // EG-Desk's own command and file tools, Codex as a pure model engine: developer flag EGDESK_OWN_TOOLS=on, default off (null: nothing changes).
 const ownToolsWiring = createOwnToolsWiring({ env: process.env, dataDir, spawn, getChat: () => chat, inspect: createGitTargetInspector() })
 const terminalGateConfig = ['advisory', 'on'].includes(process.env.EGDESK_TERMINAL_GATE) ? { mode: () => process.env.EGDESK_TERMINAL_GATE, inspect: createGitTargetInspector(),
@@ -466,6 +469,8 @@ const chat = new CodexChatRuntime({
   resolveRunProjectOrigin: request => localFiles.resolveRunProjectOrigin(request),
   toolProviders: [browserProvider, planProvider, annotationProvider].concat(ownToolsWiring ? ownToolsWiring.toolProviders : []),
   ...(ownToolsWiring ? { ownTools: ownToolsWiring.ownTools } : {}),
+  // L1 c21 (owner decision, provisional): a room keeps its account; an explicit switch continues the same room. Off unless EGDESK_ROOM_ACCOUNT=on.
+  roomAccount: { mode: () => (process.env.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') },
   store: chatStore,
   requireStore: true,
   getOwnerKey: () => publicAuthIdentityKey(authState),
@@ -612,6 +617,7 @@ const handleWorkPlacementHttp = createWorkPlacementHttpHandler({ placement: work
 const hudRoutingEnabled = () => ['advisory', 'on'].includes(process.env.EGDESK_HUD_ROUTING)
 const hudRouting = createHudRouting({ client: decisionClient, mode: () => bridgeSettings.decisionContext.mode, enabled: hudRoutingEnabled })
 const handleHudRoutingHttp = createHudRoutingHttpHandler({ routing: hudRouting, enabled: hudRoutingEnabled, port: BRIDGE_PORT })
+const handleRoomAccountHttp = createRoomAccountHttpHandler({ chat, enabled: () => process.env.EGDESK_ROOM_ACCOUNT === 'on', port: BRIDGE_PORT })
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
 const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
   budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT, boardPresentation: handleBoardPresentationHttp,
@@ -1329,7 +1335,9 @@ const bridgeServer = createServer(async (req, res) => {
   if (await handleBoardPresentationHttp(req, res, url)) return
   if (await handleWorkPlacementHttp(req, res, url)) return
   if (await handleHudRoutingHttp(req, res, url)) return
+  if (await handleRoomAccountHttp(req, res, url)) return
   if (await handlePresenceMirrorHttp(req, res, url)) return
+  if (await handleRunRequesterReadHttp(req, res, url)) return
   if (await handleRunRequesterHttp(req, res, url)) return
   if (await handleEngineProfilesHttp(req, res, url)) return
   if (await handleProfileHttp(req, res, url)) return

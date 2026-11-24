@@ -9618,6 +9618,15 @@
     state.runRequesters = JointPresence.createRunRequesters({ snapshot: () => state.presence.snapshot(), seated: (board, member) => joint()?.seated?.(board, member) === true,
       post: body => deskStoreRequest('POST', '/presence/requester', body, { timeoutMs: 4000 }) });
     state.noteWorkSurfacePlacement = state.runRequesters.wrap(state.noteWorkSurfacePlacement);
+    // L1 c21, owner decision (5): when a run starts, a window that does not hold its requester reads it from the bridge (another window set it);
+    // a window that holds it tells the bridge again (the bridge's registry is memory only and empties when it restarts).
+    state.noteRunRequester = (event, run) => {
+      if (event?.event !== 'run.started' || !run || !state.runRequesters) return;
+      const ref = { runId: run.runId || null, conversationId: run.conversationId || null, clientThreadId: run.clientThreadId || run.localThreadId || null };
+      if (state.runRequesters.held(ref)) { state.runRequesters.retell(ref); return; }
+      void deskStoreRequest('POST', '/presence/requester/read', { clientThreadId: ref.clientThreadId, conversationId: ref.conversationId }, { timeoutMs: 4000 })
+        .then(res => { const member = res?.body?.requester; if (typeof member === 'string') state.runRequesters.adopt(ref, member); }).catch(() => {});
+    };
     state.requestRequesters = JointPresence.createRequestRequesters({ joint, sha256Hex: async text =>
       Array.from(new Uint8Array(await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))), byte => byte.toString(16).padStart(2, '0')).join('') });
     return state.presence;
@@ -15953,6 +15962,9 @@
       }
       const accountKey = ChatState.codexAccountKey(patch.authStatus);
       if (ChatState.codexAccountChanged(state.codex.codexAccountKey, patch.authStatus)) {
+        // L1 c21, owner decision (3), pref egdesk.roomAccount "on": the task list stays; each task's own account is checked when it resumes
+        // (the bridge resumes it through its own bound conversation). Off: as before.
+        const keptTasks = ChatState.keptTasksOnDefaultSwitch(state.codex, typeof readSurfacePref === 'function' ? readSurfacePref('egdesk.roomAccount') : null);
         resetThreadConversations();
         // Task graphs belong to the account that made them.
         state.codex.taskBoard = ChatState.createTaskBoard();
@@ -15960,6 +15972,7 @@
         state.codex.taskApproval = null;
         state.codex.taskResume = null;
         state.codex.planProposals = ChatState.createPlanProposals();
+        if (keptTasks) Object.assign(state.codex, keptTasks);
       }
       if (accountKey) state.codex.codexAccountKey = accountKey;
       Object.assign(state.codex, patch);
@@ -16743,7 +16756,8 @@
             if (run && event.event === 'plan.proposed') planProposalFrame(run, event.details);
             if (run) { syncProtocolRun(run); emit(); }
             state.noteChatAttention?.(event, run);
-            state.noteWorkChatEvent?.(event, run); // L1 c17: a finished run's work surface -> the attention scene (pref egdesk.workPlacement; default off: nothing)
+            state.noteWorkChatEvent?.(event, run); // L1 c17
+            state.noteRunRequester?.(event, run); // L1 c21 (5): presence flag only; a second window reads the run's requester from the bridge: a finished run's work surface -> the attention scene (pref egdesk.workPlacement; default off: nothing)
             // CTX-04: tool results can change tracked sources; '바뀜' reads again (still at most every 15 s).
             if (run?.localThreadId && InputContext.contextSourceRefreshSignal(event.event)) refreshContextSources(run.localThreadId, { signal: true });
             // Cycle 8 (state hooks, like noteChatAttention): an older result card of the same output key is marked superseded; the briefing observer is off unless egdesk.briefingFlow is "advisory".
@@ -18672,6 +18686,19 @@
         if (!thread || ChatState.chatThreadEngineLocked(thread)) return;
         updateThreadById(threadId, (current) => ({ ...current, startStateless: on === true }));
         emit();
+      },
+      // L1 c21, owner decision (2), pref egdesk.roomAccount "on" (and the bridge's EGDESK_ROOM_ACCOUNT): this room continues on another account
+      // of its engine. Same room: its messages, draft and selections stay; its next message starts a new engine thread on that account.
+      // No control calls this yet (the in-room switch control needs approved copy); nothing changes with the pref off.
+      async switchRoomAccount(threadId, engineProfileId) {
+        if (readSurfacePref('egdesk.roomAccount') !== 'on') return { status: 'off' };
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || thread.engineId === 'claude' || threadBusy(thread) || typeof engineProfileId !== 'string' || !engineProfileId) return { status: 'refused', code: null };
+        let res = null;
+        try { res = await fetchJson('/chat/room-account', { method: 'POST', body: JSON.stringify({ clientThreadId: ChatState.clientThreadBinding(thread), engineProfileId }) }); }
+        catch (error) { return { status: 'refused', code: typeof error?.code === 'string' ? error.code : null }; }
+        if (res?.status === 'switched') { updateThreadById(threadId, current => ChatState.continueRoomOnAccount(current, engineProfileId)); emit(); }
+        return res?.status === 'switched' || res?.status === 'unchanged' ? { status: res.status } : { status: 'refused', code: res?.code ?? null };
       },
       forkAvailability(threadId, fromTurnId = null) {
         const thread = getCodexThreadById(state.codex, threadId);

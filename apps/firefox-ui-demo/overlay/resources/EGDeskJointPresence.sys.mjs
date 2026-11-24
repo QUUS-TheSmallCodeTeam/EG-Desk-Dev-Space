@@ -474,6 +474,27 @@ export function createRunRequesters({ snapshot, seated, post = async () => null,
       }
       return rows.some((row) => row && row.self !== true && row.member === hit.alias) ? hit.alias : null;
     },
+    /** L1 c21 (5): this window's own entry for that run ({ board, alias }), or null. */
+    held(ref) {
+      const hit = find(ref);
+      return hit ? { board: hit.board, alias: hit.alias } : null;
+    },
+    /** Tell the bridge again what this window holds (the bridge's registry is memory only: after its restart it knows nothing). */
+    retell(ref) {
+      const hit = find(ref);
+      if (!hit || !hit.board) return false;
+      tell(ref, { board: hit.board, alias: hit.alias });
+      return true;
+    },
+    /** A requester the bridge vouched for (another window set it): kept here for the run; handed out only while in the live snapshot. */
+    adopt(ref, member) {
+      const keys = keysOf(ref);
+      if (!keys.length || typeof member !== 'string' || !alias.test(member) || find(ref)) return false;
+      while (runs.size >= REQUESTER.maxRuns) runs.delete(runs.keys().next().value);
+      const entry = { board: null, alias: member, until: now() + REQUESTER.runMs };
+      for (const key of keys) runs.set(key, entry);
+      return true;
+    },
     /** The placement hook with the requester filled in. The wrapped function and its callers are untouched. */
     wrap(note) {
       if (typeof note !== 'function') return note;
