@@ -77,6 +77,9 @@ test('a profile the window does not know keeps today\'s default-account rule; th
   const r = bound(room('r-s', SLOT, 'conv-s'), known)
   assert.deepEqual([r.bindingAccountKey, r.bindingState], [null, 'live-unverified'], 'unverified, never the default account')
   assert.equal(Chat.codexSlotAccountKey('codex-default', known), null)
+  // a row that still names an account but is not signed in gives no key (only a signed-in profile vouches for its account)
+  const stale = { engines: [{ id: 'codex', profiles: [{ id: SLOT, auth: { status: 'signedOut', account: 'b@example.test' } }] }] }
+  assert.equal(Chat.codexSlotAccountKey(SLOT, stale), null)
 })
 
 test('folder and screen are not part of a room\'s account: the same room in another folder or another window keeps its binding and readiness', () => {
