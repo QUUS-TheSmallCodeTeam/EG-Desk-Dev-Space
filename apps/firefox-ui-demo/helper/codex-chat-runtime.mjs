@@ -130,6 +130,7 @@ import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
 import { sha256Hex } from './egdesk-decision-questions.mjs'
+import { engineContextConfig, spilledKeys, splitEngineContext } from './egdesk-engine-context.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
 // Reviewed requests expire after two minutes; only canonical v4 UUID IDs are accepted.
@@ -2965,6 +2966,8 @@ export class CodexChatRuntime {
         : memoryPacket || memoryNote ? { [TURN_MEMORY_KEY]: { kind: 'application', value: withNote(memoryPacket) } } : null
       const recordingContext = recordRule ? { [RECORDING_KEY]: { kind: 'application', value: recordRule } } : null
       const turnAdditionalContext = browserTaskContext || memoryContext || recordingContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}), ...(recordingContext || {}) } : additionalContext
+      // What the engine will really show of the entries (flag turnMemory.engineContext, default off): 'split' sends an over-limit entry as parts that each stay under it.
+      const engineShape = this.shapeEngineContext(turnAdditionalContext)
       await this.readGateHookReply(cid, body.message)
       turnStartAttempted = context.turnStartAttempted = true
       const result = await engine.startTurn({
@@ -2973,7 +2976,7 @@ export class CodexChatRuntime {
         clientUserMessageId: context.requestId,
         ...(bounded ? QA_TURN_OVERRIDES : {}),
         ...(ownTools ? OWN_TOOLS_TURN_OVERRIDES : {}),
-        ...(turnAdditionalContext ? { additionalContext: turnAdditionalContext } : {}),
+        ...(engineShape.context ? { additionalContext: engineShape.context } : {}),
         ...(overrides.cwd ? { cwd: overrides.cwd } : {}),
         ...(overrides.model ? { model: overrides.model } : {}),
         ...(effort !== undefined ? { effort } : {}),
@@ -3073,7 +3076,9 @@ export class CodexChatRuntime {
       // the items do not cover what the model received (fewer page items than packet pages, or a confirmation note, which is model-seen text not in the items).
       const memoryItems = memoryReady ? this.turnMemoryDraftEvidence(memoryTurn, memoryPacket !== null, run.conversationId) : []
       const memoryCovered = this.memoryKeyCovered(memoryItems, memoryTurn, memoryPacket, memoryNote)
-      this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...((memoryPacket || memoryNote) && !memoryCovered ? [TURN_MEMORY_KEY] : [])], memoryItems)
+      // c32: the entries the engine would still cut (over its limit, not split) are only partly seen by the answering model; with one packet the memory pages ride in the same entry.
+      const cutForCheck = engineShape.spilled.has(DECISION_CONTEXT_KEY) && memoryTurn?.onePacket ? new Set([...engineShape.spilled, TURN_MEMORY_KEY]) : engineShape.spilled
+      this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...((memoryPacket || memoryNote) && !memoryCovered ? [TURN_MEMORY_KEY] : [])], memoryItems, cutForCheck)
       if (decision?.late) this.noteLateDecisionContext(run, decision)
       this.startConversationFlow(run, body, context)
       this.turnMemoryLatest.delete(run.conversationId) // this turn is now the conversation's latest: the previous turn's materials end here
@@ -6971,7 +6976,7 @@ export class CodexChatRuntime {
     return Array.isArray(memoryItems) && memoryItems.length > 0 && !memoryNote && memoryItems.filter(item => /^mem\d+$/.test(item?.id)).length >= packetPages
   }
 
-  noteDraftCheckTurn(run, body, context, decision, bounded, extraKeys = [], memoryItems = []) {
+  noteDraftCheckTurn(run, body, context, decision, bounded, extraKeys = [], memoryItems = [], spilled = null) {
     // L1 c14: what the person wrote for this run, kept whatever the draft check's mode (the heartbeat's and placement's questions read it through
     // runUserText; with the draft check off it was lost, and those questions had no request to quote). Weakly held: it goes with the run.
     try { if (typeof body?.message === 'string') (this.runRequestTexts ??= new WeakMap()).set(run, body.message) } catch { /* recording only */ }
@@ -7003,6 +7008,11 @@ export class CodexChatRuntime {
       // Application blocks that rode along this turn (shared messages and the like): the model saw them, the checker may not.
       // The browser task's note and the note of what the person saw are known text (answerFactsEvidence / the posted-answer note), not content-free blocks.
       const browserNote = typeof context.browserTaskNote === 'string' ? context.browserTaskNote : null
+      // What the engine really shows (L7 c32): an entry it would cut (over its limit, not split) is only partly seen by the answering model, so its items are not evidence
+      // for the check; it becomes one opaque reference like any block the checker cannot read.
+      const cut = spilled instanceof Set && spilled.size ? spilled : null
+      if (cut?.has(DECISION_CONTEXT_KEY)) { evidence = []; if (late) late = late.then(result => ({ ...result, evidence: [] })) }
+      if (cut) { memoryItems = cut.has(TURN_MEMORY_KEY) ? [] : memoryItems; for (const key of cut) if (!extraKeys.includes(key)) extraKeys = [...extraKeys, key] }
       const refs = extraKeys.filter(key => !(key === 'egdesk_browser_task' && browserNote) && key !== POSTED_ANSWER_KEY && key !== STOPPED_COMMAND_KEY).slice(0, 4).map((key, i) => ({ id: `ctx${i + 1}`, kind: 'context', time: 'unknown', source: 'application', opaque: true }))
       // c26: the command the person stopped, told to this turn: known text for the check (its output only where the run's models may receive terminal data)
       const stoppedEvidence = context.stoppedCommand ? [stoppedCommandEvidence(context.stoppedCommand, { outputAllowed: this.decisionEgressFor(run).allows('terminal_output') })] : []
@@ -7324,6 +7334,17 @@ export class CodexChatRuntime {
       const entry = additionalContext?.[DECISION_CONTEXT_KEY]
       return decision?.mode === 'on' && entry?.kind === 'application' && typeof entry.value === 'string' ? entry.value : null
     } catch { return null }
+  }
+
+  // The entries as the engine is sent them, and the keys it would still cut (flag turnMemory.engineContext 'split' | 'mark', chars = the per-entry limit estimate; off: untouched).
+  shapeEngineContext(additionalContext) {
+    try {
+      const flags = this.decisionContext?.turnMemory, config = engineContextConfig({ engineContext: flags?.engineContext, engineChars: flags?.engineChars })
+      if (!config || !additionalContext) return { context: additionalContext, spilled: new Set() }
+      if (config.mode === 'mark') return { context: additionalContext, spilled: new Set(spilledKeys(additionalContext, { limit: config.chars })) }
+      const { context, oversize } = splitEngineContext(additionalContext, { limit: config.chars })
+      return { context, spilled: new Set(oversize) }
+    } catch { return { context: additionalContext, spilled: new Set() } }
   }
 
   // Pages the dispatched selection carries WORD FOR WORD (its item has the page's whole body): the answering model holds them as much as the ones the memory packet

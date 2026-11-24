@@ -14,14 +14,14 @@ import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { DECISION_KEY_ENV, loadScripts, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { REAL_ENGINE_SCRIPT_SCHEMA, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createMemoryHook, memoryGraph, memoryNeedsDecisions, pagesIn, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
-import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryHeldV4Script, buildMemoryRecallScript, buildMemoryScaleScript, buildMemoryScaleV2Script, buildMemorySpillProbeScript, SPILL_PROBE_PAGES, PURGE, RETENTION, SCALE_FACTS, SCALE_PAGES } from './egdesk-memory-real-engine-scripts.mjs'
+import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryHeldV4Script, buildMemoryRecallScript, buildMemoryScaleScript, buildMemoryScaleV2Script, buildMemorySpillProbeScript, buildMemorySpillProbeV2Script, SPILL_PROBE_PAGES, PURGE, RETENTION, SCALE_FACTS, SCALE_PAGES } from './egdesk-memory-real-engine-scripts.mjs'
 import { candidatesFromOntologyGraph } from './egdesk-context-setup.mjs'
 
 const app = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scriptFile = name => path.join(app, 'scripts', 'real-engine', 'scripts', `real-engine-${name}${/-v\d+$/.test(name) ? '' : '-v1'}.json`)
 
 test('the committed scripts are what the builders produce, validate, and need the Decision model', () => {
-  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-spill-probe', buildMemorySpillProbeScript]]) {
+  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-spill-probe', buildMemorySpillProbeScript], ['memory-spill-probe-v2', buildMemorySpillProbeV2Script]]) {
     const committed = JSON.parse(fs.readFileSync(scriptFile(name), 'utf8'))
     assert.deepEqual(committed, JSON.parse(JSON.stringify(build())))
     assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })
@@ -338,4 +338,43 @@ test('the scorer reports what was sent and what the engine counted, and which as
   const score = scoreMemoryRecord(rec)
   assert.deepEqual(score.turns[0].sizes, { maxKeyChars: 8520, keyBytes: { egdesk_decision_context: 20000 }, engineInput: 14982, engineCached: 14848, answerMissing: ['4,730만 원'] })
   assert.match(formatScore(score), /engine input 14982 \(cached 14848\), answer missing \["4,730만 원"\]/)
+})
+
+test('spill probe v2: sizes are graded (Korean 200-1400, English 2,000-7,700, each one page), the split conversations carry the flag and a key bar; maxKeyChars is judged on the largest key', () => {
+  const probe = buildMemorySpillProbeV2Script(), by = id => probe.conversations.find(c => c.id === id)
+  assert.deepEqual(probe.conversations.map(c => c.id), ['kr-200', 'kr-1000', 'kr-1400', 'en-2000', 'en-4000', 'en-7700', 'split-n4', 'split-n8'])
+  for (const [id, chars] of [['kr-200', 200], ['kr-1400', 1400], ['en-2000', 2000], ['en-7700', 7700]]) { const body = by(id).memory.pages[0].body; assert.ok(body.length >= chars && body.length < chars + 150, `${id} ${body.length}`) }
+  assert.ok(/[가-힣]/.test(by('kr-1000').memory.pages[0].body) && !/[가-힣]/.test(by('en-4000').memory.pages[0].body))
+  for (const id of ['split-n4', 'split-n8']) { assert.equal(by(id).flags.EGDESK_TURN_MEMORY_ENGINE_CONTEXT, 'split'); assert.equal(by(id).turns[0].expect.memory.maxKeyChars, 2000) }
+  assert.equal(by('kr-1000').flags.EGDESK_TURN_MEMORY_ENGINE_CONTEXT, undefined)
+  const hook = createMemoryHook({ pages: [{ id: 'a', title: 'A', body: 'x' }] })
+  hook.beginTurn(); hook.observe('turn/start', { additionalContext: { k1: { value: 'x'.repeat(1900) }, k2: { value: 'y'.repeat(100) } } })
+  assert.deepEqual(hook.finishTurn({ maxKeyChars: 2000 }).expectations.map(e => e.ok), [true])
+  hook.beginTurn(); hook.observe('turn/start', { additionalContext: { k1: { value: 'x'.repeat(2100) } } })
+  assert.deepEqual(hook.finishTurn({ maxKeyChars: 2000 }).expectations.map(e => e.ok), [false])
+  assert.ok(validateMemoryExpect({ maxKeyChars: 0 }, { pages: [{ id: 'a' }] }).length > 0)
+})
+
+test('spill probe v2 end to end (fake engine, schema-validated requests): the split conversations send every page in keys of at most 2,000 characters that the engine double does not cut; the same pages without the flag are cut', async t => {
+  const { emulateSpill } = await import('./egdesk-engine-context.mjs')
+  const probe = buildMemorySpillProbeV2Script(), split = probe.conversations.find(c => c.id === 'split-n8')
+  const all = SPILL_PROBE_PAGES.slice(0, 8).flatMap(p => [p.code, p.end]).join(' ')
+  const keysOf = (w, i = 0) => { const lines = fs.readFileSync(path.join(w.base, 'fake.log'), 'utf8').trim().split('\n').map(l => JSON.parse(l)).filter(m => m.params?.additionalContext); return lines[i].params.additionalContext }
+  const run = async conv => {
+    const w = world(t, { turns: [{ steps: [], final: all }] }), script = { ...probe, conversations: [conv] }
+    const rec = (await runCheck(w.options, asScripts(script), w.deps)).records[0]
+    assert.equal(rec.aborted, null, rec.abortDetail)
+    return { rec, ctx: keysOf(w) }
+  }
+  const withSplit = await run(split)
+  assert.equal(withSplit.rec.turns[0].ok, true, JSON.stringify(withSplit.rec.turns[0].expectations.filter(e => !e.ok)))
+  const keys = Object.keys(withSplit.ctx).filter(k => k.startsWith('egdesk_decision_context'))
+  assert.ok(keys.length >= 8, keys.join()); for (const k of keys) assert.ok(withSplit.ctx[k].value.length <= 2000, `${k} ${withSplit.ctx[k].value.length}`)
+  assert.deepEqual(emulateSpill(withSplit.ctx, { limit: 2000 }).spilled, [])
+  const seenSplit = Object.values(emulateSpill(withSplit.ctx, { limit: 2000 }).visible).join('\n')
+  for (const p of split.memory.pages.slice(0, 8)) assert.ok(seenSplit.includes(p.body.slice(0, 40)) && seenSplit.includes(p.body.slice(-40)), `${p.id} is whole`)
+  const without = await run({ ...split, flags: Object.fromEntries(Object.entries(split.flags).filter(([k]) => !/ENGINE_CONTEXT|ENGINE_CHARS/.test(k))), turns: [{ ...split.turns[0], expect: { ...split.turns[0].expect, memory: { ...split.turns[0].expect.memory, maxKeyChars: undefined } } }] })
+  const cut = emulateSpill(without.ctx, { limit: 2000 }), seen = Object.values(cut.visible).join('\n')
+  assert.deepEqual(cut.spilled, ['egdesk_decision_context'])
+  assert.ok(split.memory.pages.slice(0, 8).some(p => !seen.includes(p.body.slice(-40))), 'without the flag some pages lose their last sentence')
 })
