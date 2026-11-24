@@ -105,6 +105,8 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-heartbeat-real-plan.mjs': ['run_facts: plan builder; a recording fetch that refuses, nothing is sent'],
   'egdesk-command-risk-plan.mjs': ['terminal_command: plan builder; a capturing fetch that answers locally, nothing is sent (controls are built with the gate\'s own request builder)'],
   'egdesk-terminal-command-gate.mjs': ['terminal_command'],
+  // c13 prototype: the person's reply to a command the hook denied (their own message, as the run's model receives it) and that command.
+  'egdesk-gate-hook-broker.mjs': ['run_text', 'terminal_command'],
   'egdesk-terminal-judge.mjs': ['terminal_output', 'command_output'],
   'egdesk-memory-live-runner.mjs': ['memory_page: measurement tool; the public synthetic wiki only, through guardClient'],
   // Measurement tool: drives the real runtime, whose own gates ask every kind before each request; synthetic pages in a temporary directory only.

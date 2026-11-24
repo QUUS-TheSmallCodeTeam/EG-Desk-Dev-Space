@@ -2683,6 +2683,7 @@ export class CodexChatRuntime {
         : noteOnly !== null ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: withNote(noteOnly) } }
         : memoryPacket || memoryNote ? { [TURN_MEMORY_KEY]: { kind: 'application', value: withNote(memoryPacket) } } : null
       const turnAdditionalContext = browserTaskContext || memoryContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}) } : additionalContext
+      await this.readGateHookReply(cid, body.message)
       turnStartAttempted = context.turnStartAttempted = true
       const result = await engine.startTurn({
         threadId: cid,
@@ -2726,6 +2727,7 @@ export class CodexChatRuntime {
       }
       const run = this.ensureRun(cid, result?.turn?.id, context)
       if (!run) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
+      try { this.gateHookBroker()?.turnStarted({ conversationId: cid, turnId: run.runId }) } catch { /* the gate hook never affects a turn */ }
       if (topicRoute && intake.current()) {
         const { topic, parent, needs } = topicRoute // discard the plaintext packet at this boundary
         const current = decision.result.privateBatchCurrent
@@ -5833,6 +5835,30 @@ export class CodexChatRuntime {
 
   commandGateIdle() { return Promise.allSettled([...this.commandGateRuns]) }
 
+  // ---- Codex PreToolUse hook broker (c13 prototype: egdesk-gate-hook-broker.mjs; decisionContext.terminalGate.hookBroker, absent by default). ----
+  gateHookBroker() { try { return this.decisionContext?.terminalGate?.hookBroker ?? null } catch { return null } }
+
+  /** The broker's predicate question for a command of a live run: the same gate as an approval card (flags, Decision mode, egress). */
+  async gateHookAssess({ conversationId, turnId, command, cwd }) {
+    const run = this.runs.get(runKey(conversationId, turnId))
+    if (!run || TERMINAL.has(run.status)) return null
+    const gate = this.startCommandGate(run, { command, cwd })
+    return gate && gate.enforce ? await gate.result : null
+  }
+
+  /** The person's next message after the hook denied a command: read once (yes/no predicates) before the turn starts. */
+  async readGateHookReply(conversationId, message) {
+    try {
+      const broker = this.gateHookBroker()
+      if (!broker?.awaitingReply(conversationId)) return
+      const setup = this.decisionContext
+      const usable = setup?.client && setup.configured?.() === true && setup.mode?.() === 'on'
+      const previous = [...this.runs.values()].filter(r => r.conversationId === conversationId).at(-1) ?? null
+      await broker.readReply({ conversationId, reply: typeof message === 'string' ? message : '', client: usable ? setup.client : null,
+        egress: previous ? this.decisionEgressFor(previous) : null, timeoutMs: COMMAND_GATE_TIMEOUT_MS })
+    } catch { /* an unread reply approves nothing */ }
+  }
+
   // ---- Commands the engine ran WITHOUT asking (c12), record only. ----
   // With Codex's default permissions (workspace-write sandbox, on-request approvals) a command inside the sandbox runs with no approval
   // request; the bridge first sees it as item/started, which for an asked command also comes before the request. So it is known only
@@ -5858,7 +5884,8 @@ export class CodexChatRuntime {
       const ruled = classifyCommand(command, { cwd, home })
       const engine = this.threadEngine(run.conversationId) === 'claude' ? 'claude' : 'codex'
       setup.calibrationLog?.record?.({ feature: 'terminal_gate', mode: flag, judgments: [], attached: false,
-        gate: { unasked: true, rule: ruled.floor.length > 0, would: ruled.floor.length > 0, scored: false, reasons: ruled.floor, engine } })
+        gate: { unasked: true, rule: ruled.floor.length > 0, would: ruled.floor.length > 0, scored: false, reasons: ruled.floor, engine,
+          hooked: this.gateHookBroker()?.wasChecked?.(run.runId, command, cwd) === true } })
     } catch { /* recording only */ }
   }
 
@@ -7068,6 +7095,7 @@ export class CodexChatRuntime {
   }
 
   async finish(run, turn) {
+    try { this.gateHookBroker()?.turnEnded({ turnId: run.runId }) } catch { /* the gate hook never affects a turn */ }
     const epoch = this.runEpoch(run)
     if (TERMINAL.has(run.status) && run.error?.origin !== 'bridge') return
     const guard = this.heldGuard(run)
