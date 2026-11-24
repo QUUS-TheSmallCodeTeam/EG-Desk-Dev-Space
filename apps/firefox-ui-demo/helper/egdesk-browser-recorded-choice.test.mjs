@@ -130,18 +130,20 @@ import { decideRecordedStep } from './egdesk-browser-reflex.mjs'
 import { decisionThresholds } from './egdesk-decision-questions.mjs'
 import { estimateTokens } from './egdesk-memory-real-plan.mjs'
 import { PS_NAMES, pageStateAnswers, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
-test('census (b): of 12 page shapes 8 stop by the rule; 3 of them (push 2FA x2, a check-box captcha) would have carried a person-state label; one request costs ~0.5k tokens (1,573 bytes)', async () => {
+test('census (b): of 12 page shapes 8 stop by the rule; 3 of them (push 2FA x2, a check-box captcha) would have carried a person-state label; one page-state request (six predicates and the goal) costs ~1.2k tokens', async () => {
   const rows = census()
   assert.equal(rows.length, 12)
   assert.deepEqual(rows.filter(r => r.stops !== 'asked').map(r => r.id), ['2fa-push', '2fa-push-resend', 'captcha', 'checkout-pay', 'subscription-cancel', 'permission-grant', 'form-submit-only', 'logout-only'])
   assert.deepEqual(rows.filter(r => r.labelLost).map(r => [r.id, r.labelLost]), [['2fa-push', 'two_factor_required'], ['2fa-push-resend', 'two_factor_required'], ['captcha', 'bot_check']])
   // the price of keeping the label: one page-state request on such a page (sized with the page-state + goal request of this module)
-  let bytes = 0
-  const client = createDecisionClient({ getApiKey: async () => 'egd-synthetic-not-a-key-0008', fetchImpl: async (_u, init) => { bytes = Buffer.byteLength(init.body); return { ok: true, text: async () => JSON.stringify({ answers: [] }) } } })
+  let bytes = 0, questions = []
+  const client = createDecisionClient({ getApiKey: async () => 'egd-synthetic-not-a-key-0008', fetchImpl: async (_u, init) => { bytes = Buffer.byteLength(init.body); questions = JSON.parse(init.body).questions; return { ok: true, text: async () => JSON.stringify({ answers: [] }) } } })
   const snapshot = page([el('b', 'button', '인증 확인')], ['2단계 인증', '휴대전화에서 승인하세요.'], '/otp-push')
   await decideRecordedStep({ goal: GOAL, snapshot, recorded: { kind: 'none', candidates: [] }, client, thresholds: decisionThresholds() }).catch(() => null)
-  const tokens = estimateTokens(1, 1, bytes)
-  assert.ok(bytes > 1000 && tokens > 400 && tokens < 600, `${bytes} bytes, ~${tokens} tokens`)
+  const predicates = questions.filter(q => q.type === 'predicate').length
+  assert.equal(predicates, 7)
+  const tokens = estimateTokens(questions.length - predicates, predicates, bytes)
+  assert.ok(tokens > 1000 && tokens < 1400, `${bytes} bytes, ~${tokens} tokens`)
 })
 
 test('the general memory packet is step evidence only when no record was parsed from it (c16, R1: the record\'s facts arrive as History lines)', async () => {
