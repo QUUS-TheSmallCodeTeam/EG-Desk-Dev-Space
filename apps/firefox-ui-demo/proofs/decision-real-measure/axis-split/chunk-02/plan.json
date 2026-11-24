@@ -1,0 +1,199 @@
+{
+  "set": "axis-split-v1/chunk-02",
+  "tokenCeiling": 12000,
+  "productBars": {
+    "*predicate": {
+      "yes": 0.85,
+      "no": 0.15,
+      "source": "egdesk-speech-grounding.mjs SPEECH_SPLIT_BARS (yes >= SPEECH_THRESHOLDS.confidence .85, no <= .15; the speech bar, not lowered)"
+    }
+  },
+  "passRule": "Labels frozen in labels.json sha256 d29d9007bd871377dd2e30fb9c6b84fae98b401072abad2cca5eb76249d1b7aa (the 60-sentence study). One sentence, one axis per request. The outcome is computed by scripts/egdesk-axis-split-plan.mjs analyze with the product combination (splitLabels) at the product bar: HARD 0 wrong installs (a label outside the allowed set) over all requests of all chunks; SOFT coverage of the 11 targets (study: 0 of 11; predicted >= 6), controls 6 of 6, guards 0 installs. The per-predicate expectations below are soft: what a correct install needs.",
+  "requests": [
+    {
+      "id": "time-c32",
+      "file": "requests/time-c32.json",
+      "sha256": "ea298a3bbf5e373aa0c59cfdbcd213dbb67c0c259e9b1e0774a54ff84ab5a9fc",
+      "estInputTokens": 1264,
+      "role": "target",
+      "axis": "time",
+      "allowed": [
+        "past_anchored"
+      ],
+      "expect": [
+        {
+          "name": "speechs_before_0",
+          "kind": "predicate",
+          "min": 0.85,
+          "severity": "soft",
+          "note": "every allowed label is before"
+        },
+        {
+          "name": "speechs_now_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "no allowed label is now"
+        },
+        {
+          "name": "speechs_ongoing_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "no allowed label is ongoing"
+        },
+        {
+          "name": "speechs_after_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "no allowed label is after"
+        },
+        {
+          "name": "speechs_when_0",
+          "kind": "predicate",
+          "min": 0.85,
+          "severity": "soft",
+          "note": "every allowed label is anchored"
+        }
+      ]
+    },
+    {
+      "id": "time-c07",
+      "file": "requests/time-c07.json",
+      "sha256": "ab7dbeceb82cadef0a89c5f1c9a6631051324bc15861e6aef6308cacfc89fdb8",
+      "estInputTokens": 1259,
+      "role": "target",
+      "axis": "time",
+      "allowed": [
+        "ongoing_no_end"
+      ],
+      "expect": [
+        {
+          "name": "speechs_before_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "no allowed label is before"
+        },
+        {
+          "name": "speechs_ongoing_0",
+          "kind": "predicate",
+          "min": 0.85,
+          "severity": "soft",
+          "note": "every allowed label is ongoing"
+        },
+        {
+          "name": "speechs_after_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "no allowed label is after"
+        }
+      ]
+    },
+    {
+      "id": "time-c37",
+      "file": "requests/time-c37.json",
+      "sha256": "0ea7d38cd21f434ece82185047f38f1a0bfc6b6bc2fb1d3ce937f6e11bfadf38",
+      "estInputTokens": 1263,
+      "role": "target",
+      "axis": "time",
+      "allowed": [
+        "ongoing_no_end",
+        "at_utterance"
+      ],
+      "expect": [
+        {
+          "name": "speechs_before_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "no allowed label is before"
+        },
+        {
+          "name": "speechs_after_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "no allowed label is after"
+        }
+      ]
+    },
+    {
+      "id": "time-c30",
+      "file": "requests/time-c30.json",
+      "sha256": "3c474cf691f1f09a60d5943b2f7dd0d78dab0208990e3cb13d1369e87f88339f",
+      "estInputTokens": 1265,
+      "role": "target",
+      "axis": "time",
+      "allowed": [
+        "ongoing_no_end"
+      ],
+      "expect": [
+        {
+          "name": "speechs_before_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "no allowed label is before"
+        },
+        {
+          "name": "speechs_ongoing_0",
+          "kind": "predicate",
+          "min": 0.85,
+          "severity": "soft",
+          "note": "every allowed label is ongoing"
+        },
+        {
+          "name": "speechs_after_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "no allowed label is after"
+        }
+      ]
+    },
+    {
+      "id": "time-c08",
+      "file": "requests/time-c08.json",
+      "sha256": "af785efeab3b8f9300d043fef58da09ff062d6f147e9e1560bf22920facea921",
+      "estInputTokens": 1261,
+      "role": "target",
+      "axis": "time",
+      "allowed": [
+        "at_utterance"
+      ],
+      "expect": [
+        {
+          "name": "speechs_before_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "no allowed label is before"
+        },
+        {
+          "name": "speechs_now_0",
+          "kind": "predicate",
+          "min": 0.85,
+          "severity": "soft",
+          "note": "every allowed label is now"
+        },
+        {
+          "name": "speechs_ongoing_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "no allowed label is ongoing"
+        },
+        {
+          "name": "speechs_after_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "no allowed label is after"
+        }
+      ]
+    }
+  ]
+}

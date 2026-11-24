@@ -1,0 +1,409 @@
+{
+  "set": "axis-split-v1/chunk-01",
+  "tokenCeiling": 12000,
+  "productBars": {
+    "*predicate": {
+      "yes": 0.85,
+      "no": 0.15,
+      "source": "egdesk-speech-grounding.mjs SPEECH_SPLIT_BARS (yes >= SPEECH_THRESHOLDS.confidence .85, no <= .15; the speech bar, not lowered)"
+    }
+  },
+  "passRule": "Labels frozen in labels.json sha256 d29d9007bd871377dd2e30fb9c6b84fae98b401072abad2cca5eb76249d1b7aa (the 60-sentence study). One sentence, one axis per request. The outcome is computed by scripts/egdesk-axis-split-plan.mjs analyze with the product combination (splitLabels) at the product bar: HARD 0 wrong installs (a label outside the allowed set) over all requests of all chunks; SOFT coverage of the 11 targets (study: 0 of 11; predicted >= 6), controls 6 of 6, guards 0 installs. The per-predicate expectations below are soft: what a correct install needs.",
+  "requests": [
+    {
+      "id": "source-c20",
+      "file": "requests/source-c20.json",
+      "sha256": "f748f1e5ba9d80ca12bf9cfecec22cf4745436eaf2a58dcc26067754d46749e7",
+      "estInputTokens": 1041,
+      "role": "target",
+      "axis": "source",
+      "allowed": [
+        "unspecified"
+      ],
+      "expect": [
+        {
+          "name": "speechs_other_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "attributed_report is not an allowed label"
+        },
+        {
+          "name": "speechs_own_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "self_reported_observation is not an allowed label"
+        },
+        {
+          "name": "speechs_record_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "record_based is not an allowed label"
+        },
+        {
+          "name": "speechs_guess_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "inference is not an allowed label"
+        }
+      ]
+    },
+    {
+      "id": "source-c15",
+      "file": "requests/source-c15.json",
+      "sha256": "8fe26d3f0646971a6c57ba256ea953bd4d797a7dd474d27f26e84f0bfe07d1e5",
+      "estInputTokens": 1034,
+      "role": "target",
+      "axis": "source",
+      "allowed": [
+        "unspecified"
+      ],
+      "expect": [
+        {
+          "name": "speechs_other_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "attributed_report is not an allowed label"
+        },
+        {
+          "name": "speechs_own_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "self_reported_observation is not an allowed label"
+        },
+        {
+          "name": "speechs_record_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "record_based is not an allowed label"
+        },
+        {
+          "name": "speechs_guess_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "inference is not an allowed label"
+        }
+      ]
+    },
+    {
+      "id": "source-c26",
+      "file": "requests/source-c26.json",
+      "sha256": "40254a57684cc35e4fdf839b2fd187d6d858c7eddd218ecf65294bcc538d7fa0",
+      "estInputTokens": 1040,
+      "role": "target",
+      "axis": "source",
+      "allowed": [
+        "unspecified"
+      ],
+      "expect": [
+        {
+          "name": "speechs_other_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "attributed_report is not an allowed label"
+        },
+        {
+          "name": "speechs_own_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "self_reported_observation is not an allowed label"
+        },
+        {
+          "name": "speechs_record_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "record_based is not an allowed label"
+        },
+        {
+          "name": "speechs_guess_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "inference is not an allowed label"
+        }
+      ]
+    },
+    {
+      "id": "source-c30",
+      "file": "requests/source-c30.json",
+      "sha256": "ad61ec2788e64a9ef72d3197ba9ee825d69cff0db4b0f2d26bc8b13d9191e49a",
+      "estInputTokens": 1040,
+      "role": "target",
+      "axis": "source",
+      "allowed": [
+        "unspecified"
+      ],
+      "expect": [
+        {
+          "name": "speechs_other_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "attributed_report is not an allowed label"
+        },
+        {
+          "name": "speechs_own_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "self_reported_observation is not an allowed label"
+        },
+        {
+          "name": "speechs_record_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "record_based is not an allowed label"
+        },
+        {
+          "name": "speechs_guess_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "inference is not an allowed label"
+        }
+      ]
+    },
+    {
+      "id": "source-c22",
+      "file": "requests/source-c22.json",
+      "sha256": "d1f059050e00652bd3ae4dd785d48ee2f7212920bf319f2b3ec22d9356f769fc",
+      "estInputTokens": 1039,
+      "role": "target",
+      "axis": "source",
+      "allowed": [
+        "record_based"
+      ],
+      "expect": [
+        {
+          "name": "speechs_other_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "attributed_report is not an allowed label"
+        },
+        {
+          "name": "speechs_own_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "self_reported_observation is not an allowed label"
+        },
+        {
+          "name": "speechs_record_0",
+          "kind": "predicate",
+          "min": 0.85,
+          "severity": "soft",
+          "note": "record_based is the only allowed label"
+        },
+        {
+          "name": "speechs_guess_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "inference is not an allowed label"
+        }
+      ]
+    },
+    {
+      "id": "source-c12",
+      "file": "requests/source-c12.json",
+      "sha256": "1e171d75f4c3e8464e61e6fe26feec4ed1955c07bbab03de2e5d2c7abc51faf6",
+      "estInputTokens": 1041,
+      "role": "target",
+      "axis": "source",
+      "allowed": [
+        "inference"
+      ],
+      "expect": [
+        {
+          "name": "speechs_other_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "attributed_report is not an allowed label"
+        },
+        {
+          "name": "speechs_own_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "self_reported_observation is not an allowed label"
+        },
+        {
+          "name": "speechs_record_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "record_based is not an allowed label"
+        },
+        {
+          "name": "speechs_guess_0",
+          "kind": "predicate",
+          "min": 0.85,
+          "severity": "soft",
+          "note": "inference is the only allowed label"
+        }
+      ]
+    },
+    {
+      "id": "source-a09",
+      "file": "requests/source-a09.json",
+      "sha256": "52b81dfdb3cc19497954a1edf22fe92b454ccee1ac481b2cce9bf7d952e4f546",
+      "estInputTokens": 1041,
+      "role": "guard",
+      "axis": "source",
+      "allowed": [
+        "unknown"
+      ],
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "source-a14",
+      "file": "requests/source-a14.json",
+      "sha256": "213791862b9fe7ae2c87f78320860a4cf914a6525d880d2976baadf2e53080f2",
+      "estInputTokens": 1039,
+      "role": "guard",
+      "axis": "source",
+      "allowed": [
+        "unknown"
+      ],
+      "expect": [],
+      "recordOnly": true
+    },
+    {
+      "id": "source-c01",
+      "file": "requests/source-c01.json",
+      "sha256": "a39d982fca97a05c6e0a3747beb2a6401ffd9b51cd60d635ed975fabf441444a",
+      "estInputTokens": 1044,
+      "role": "control",
+      "axis": "source",
+      "allowed": [
+        "self_reported_observation"
+      ],
+      "expect": [
+        {
+          "name": "speechs_other_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "attributed_report is not an allowed label"
+        },
+        {
+          "name": "speechs_own_0",
+          "kind": "predicate",
+          "min": 0.85,
+          "severity": "soft",
+          "note": "self_reported_observation is the only allowed label"
+        },
+        {
+          "name": "speechs_record_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "record_based is not an allowed label"
+        },
+        {
+          "name": "speechs_guess_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "inference is not an allowed label"
+        }
+      ]
+    },
+    {
+      "id": "source-c02",
+      "file": "requests/source-c02.json",
+      "sha256": "342c852885c9045c202348015c11a8c00cb8ed6481b202dbbd7e24abff807874",
+      "estInputTokens": 1042,
+      "role": "control",
+      "axis": "source",
+      "allowed": [
+        "attributed_report"
+      ],
+      "expect": [
+        {
+          "name": "speechs_other_0",
+          "kind": "predicate",
+          "min": 0.85,
+          "severity": "soft",
+          "note": "attributed_report is the only allowed label"
+        },
+        {
+          "name": "speechs_own_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "self_reported_observation is not an allowed label"
+        },
+        {
+          "name": "speechs_record_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "record_based is not an allowed label"
+        },
+        {
+          "name": "speechs_guess_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "inference is not an allowed label"
+        }
+      ]
+    },
+    {
+      "id": "source-c10",
+      "file": "requests/source-c10.json",
+      "sha256": "2a848e8139cc899fb0d18b03ab43a351e6d33b24140d76abf6c81fad3e1b3e55",
+      "estInputTokens": 1042,
+      "role": "control",
+      "axis": "source",
+      "allowed": [
+        "record_based"
+      ],
+      "expect": [
+        {
+          "name": "speechs_other_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "attributed_report is not an allowed label"
+        },
+        {
+          "name": "speechs_own_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "self_reported_observation is not an allowed label"
+        },
+        {
+          "name": "speechs_record_0",
+          "kind": "predicate",
+          "min": 0.85,
+          "severity": "soft",
+          "note": "record_based is the only allowed label"
+        },
+        {
+          "name": "speechs_guess_0",
+          "kind": "predicate",
+          "max": 0.15,
+          "severity": "soft",
+          "note": "inference is not an allowed label"
+        }
+      ]
+    }
+  ]
+}

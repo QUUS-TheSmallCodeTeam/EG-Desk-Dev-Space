@@ -120,11 +120,13 @@ test('the wiring passes its internal flags to the runtime only when the bridge s
 test('the bridge builds its turn-memory config with the options of its developer flags; unset or any other value leaves the defaults', async () => {
   const { TURN_MEMORY_FLAGS, turnMemoryFlagsFromEnv } = await import('./egdesk-turn-memory-wiring.mjs')
   assert.deepEqual(TURN_MEMORY_FLAGS, { onePacket: 'EGDESK_TURN_MEMORY_ONE_PACKET', writeTarget: 'EGDESK_TURN_MEMORY_WRITE_TARGET', confirmInConversation: 'EGDESK_TURN_MEMORY_CONFIRM',
-    pruneHeld: 'EGDESK_TURN_MEMORY_PRUNE_HELD', keepLate: 'EGDESK_TURN_MEMORY_KEEP_LATE' })
+    pruneHeld: 'EGDESK_TURN_MEMORY_PRUNE_HELD', keepLate: 'EGDESK_TURN_MEMORY_KEEP_LATE', speechDesign: 'EGDESK_TURN_MEMORY_SPEECH_DESIGN' })
   assert.deepEqual(turnMemoryFlagsFromEnv({}), {})
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_ONE_PACKET: 'on', EGDESK_TURN_MEMORY_WRITE_TARGET: 'choice', EGDESK_TURN_MEMORY_CONFIRM: 'on' }), { onePacket: true, writeTarget: 'choice', confirmInConversation: true })
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', EGDESK_TURN_MEMORY_KEEP_LATE: 'on' }), { pruneHeld: true, keepLate: true })
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_PRUNE_HELD: '1', EGDESK_TURN_MEMORY_KEEP_LATE: 'true' }), {})
+  assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_SPEECH_DESIGN: 'split' }), { speechDesign: 'split-isolated' })
+  assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_SPEECH_DESIGN: 'split-isolated' }), {}, 'only the exact value')
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_ONE_PACKET: '1', EGDESK_TURN_MEMORY_WRITE_TARGET: 'about', EGDESK_TURN_MEMORY_CONFIRM: 'yes' }), {}, 'only the exact values; "about" is already the default')
   assert.deepEqual([turnMemoryFlagsFromEnv(null), turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_ONE_PACKET: true })], [{}, {}])
   // the bridge itself: exactly one turn-memory config, built with the flags of its own environment
