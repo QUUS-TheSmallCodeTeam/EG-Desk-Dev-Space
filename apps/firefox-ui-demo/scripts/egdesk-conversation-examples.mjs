@@ -63,6 +63,7 @@ export async function main(argv = process.argv.slice(2), { print = line => conso
     const earlier = since && existsSync(path.join(out, 'examples', `${area}.jsonl`)) ? readFileSync(path.join(out, 'examples', `${area}.jsonl`), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(e => !examples.some(x => x.id === e.id)) : []
     write(path.join('examples', `${area}.jsonl`), [...earlier, ...examples.filter(e => e.area === area)].sort((a, b) => (String(a.at) < String(b.at) ? -1 : 1)).map(e => JSON.stringify(e)).join('\n') + '\n')
   }
+  const count = (list, key) => Object.fromEntries([...new Set(list.map(key))].sort().map(k => [k, list.filter(x => key(x) === k).length]))
   // Labels of a sent chunk (runner results: { results: { <request id>: { answers } } }) turn heuristic scenarios into labelled ones.
   const labels = new Map()
   if (opt('--labels')) { const res = JSON.parse(readFileSync(path.resolve(opt('--labels')), 'utf8')); for (const [id, r] of Object.entries(res.results ?? {})) if (r?.answers && id.startsWith('ex-')) labels.set(id.slice(3), readLabels(r.answers)) }
@@ -79,6 +80,22 @@ export async function main(argv = process.argv.slice(2), { print = line => conso
   const changes = { new: rows.filter(r => !prior.has(r.id)).length, changed: rows.filter(r => prior.has(r.id) && prior.get(r.id).hash !== r.hash).length, unchanged: rows.filter(r => prior.get(r.id)?.hash === r.hash).length, kept: kept.length }
   write('changes.json', `${JSON.stringify(changes, null, 1)}\n`)
 
+  // --sample <n> (c20): the stratified sample (round-robin over type x area, chunks already labelled excluded via --labels), the controls in
+  // every chunk, each chunk's estimate <= 11,500 and ceiling <= 12,000; written to plans/sample-NNN/.
+  if (opt('--sample')) {
+    const sample = buildLabelPlan(examples, { model: DECISION_MODEL, chunkTokens: 12_000, estimateCap: 11_500, controlsEvery: true, maxChunks: Number(opt('--sample')), exclude: [...labels.keys()],
+      setPrefix: 'conversation-labels-sample', sha: text => createHash('sha256').update(text).digest('hex') })
+    for (let i = 0; i < sample.length; i++) {
+      const dir = path.join('plans', `sample-${String(i + 1).padStart(3, '0')}`), c = sample[i]
+      for (const r of c.requests) write(path.join(dir, r.file), r.body)
+      write(path.join(dir, 'plan.json'), `${JSON.stringify(c.plan, null, 1)}\n`)
+      write(path.join(dir, 'preregistration.json'), `${JSON.stringify(c.preregistration, null, 1)}\n`)
+    }
+    const items = sample.flatMap(c => c.preregistration.filter(p => !p.control))
+    print(JSON.stringify({ sample: { chunks: sample.length, requests: sample.reduce((n, c) => n + c.plan.requests.length, 0), candidates: items.length,
+      estInputTokens: sample.reduce((n, c) => n + c.plan.requests.reduce((m, r) => m + r.estInputTokens, 0), 0), maxCeiling: Math.max(...sample.map(c => c.plan.tokenCeiling)),
+      perArea: count(items, x => x.area), perType: Object.fromEntries(TYPE_NAMES.map(t => [t, items.filter(x => x.heuristicTags.includes(t)).length])) } }))
+  }
   // The labelling plan, chunked; the first --chunks chunks are written (default 1).
   const chunks = buildLabelPlan(examples, { model: DECISION_MODEL, chunkTokens: Number(opt('--chunk-tokens') ?? 12000), sha: text => createHash('sha256').update(text).digest('hex') })
   const nChunks = Math.min(chunks.length, Number(opt('--chunks') ?? 1))
@@ -88,7 +105,6 @@ export async function main(argv = process.argv.slice(2), { print = line => conso
     write(path.join(dir, 'plan.json'), `${JSON.stringify({ ...c.plan, requests: c.plan.requests }, null, 1)}\n`)
     write(path.join(dir, 'preregistration.json'), `${JSON.stringify(c.preregistration, null, 1)}\n`)
   }
-  const count = (list, key) => Object.fromEntries([...new Set(list.map(key))].sort().map(k => [k, list.filter(x => key(x) === k).length]))
   print(JSON.stringify({ out, sources: perSource.length, turnsRead: perSource.reduce((n, s) => n + s.turns, 0), examples: examples.length,
     perArea: count(examples, e => e.area), candidates: examples.filter(e => e.tags.length).length,
     perType: Object.fromEntries(TYPE_NAMES.map(t => [t, examples.filter(e => e.tags.includes(t)).length])),

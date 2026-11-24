@@ -238,28 +238,31 @@ export function candidateOrder(examples) {
   return out
 }
 /** buildLabelPlan(examples, { model, chunkTokens, sha }) → [{ plan, requests: [{ file, body }], preregistration }] */
-export function buildLabelPlan(examples, { model, chunkTokens = 12_000, sha }) {
+// options (c20, Main: a stratified sample first): controlsEvery (the two controls in every chunk), estimateCap (a chunk's estimate stays
+// at or under it; the ceiling is min(estimate x 1.25, chunkTokens)), exclude (ids already labelled), maxChunks (stop after that many).
+export function buildLabelPlan(examples, { model, chunkTokens = 12_000, sha, controlsEvery = false, estimateCap = chunkTokens / 1.25, exclude = [], maxChunks = Infinity, setPrefix = 'conversation-labels' }) {
   const controls = CONTROL_EXAMPLES.map(c => ({ id: `control-${c.id.replace(/^control-/, '')}`, body: JSON.stringify(labelRequest(c, model)), expect: c.expect, control: c }))
   const controlTokens = controls.reduce((n, c) => n + estimate(c.body), 0)
   const chunks = []
   let cur = null
   // The controls ride in the first chunk only (each request costs about 2,200 tokens: twelve predicates).
-  const open = () => { const first = !chunks.length; cur = { items: first ? [...controls] : [], tokens: first ? controlTokens : 0, base: first ? controls.length : 0 }; chunks.push(cur) }
-  for (const e of candidateOrder(examples)) {
+  const open = () => { const first = !chunks.length || controlsEvery; cur = { items: first ? [...controls] : [], tokens: first ? controlTokens : 0, base: first ? controls.length : 0 }; chunks.push(cur) }
+  const skip = new Set(exclude)
+  for (const e of candidateOrder(examples.filter(x => !skip.has(x.id)))) {
     const body = JSON.stringify(labelRequest(e, model)), t = estimate(body)
-    // A chunk stays within chunkTokens / 1.25 so its ceiling (estimate x 1.25) is at most chunkTokens.
-    if (!cur || (cur.tokens + t > chunkTokens / 1.25 && cur.items.length > cur.base)) open()
+    // A chunk's estimate stays within estimateCap, so its ceiling is at most chunkTokens.
+    if (!cur || (cur.tokens + t > estimateCap && cur.items.length > cur.base)) { if (chunks.length >= maxChunks) break; open() }
     cur.items.push({ id: `ex-${e.id}`, body, example: e }); cur.tokens += t
   }
   return chunks.map((c, i) => {
     const requests = c.items.map(item => ({ file: `requests/${item.id}.json`, body: item.body }))
     const total = c.items.reduce((n, item) => n + estimate(item.body), 0)
-    const plan = { set: `conversation-labels-${String(i + 1).padStart(3, '0')}`, tokenCeiling: Math.min(Math.ceil(total * 1.25), chunkTokens), productBars: LABEL_PRODUCT_BARS,
+    const plan = { set: `${setPrefix}-${String(i + 1).padStart(3, '0')}`, tokenCeiling: Math.min(Math.ceil(total * 1.25), chunkTokens), productBars: LABEL_PRODUCT_BARS,
       seeds: [{ id: 'conversation-examples', privacy: 'owner-approved' }],
-      passRule: i === 0 ? 'Pass: every hard expectation of the two synthetic controls holds. The candidate turns are recordOnly: their answers become labels (readLabels at .8), never counted as passed.' : 'Record only: the answers become labels (readLabels at .8); the controls of chunk 001 say whether the question set works.',
+      passRule: i === 0 || controlsEvery ? 'Pass: every hard expectation of the two synthetic controls holds. The candidate turns are recordOnly: their answers become labels (readLabels at .8), never counted as passed.' : 'Record only: the answers become labels (readLabels at .8); the controls of chunk 001 say whether the question set works.',
       requests: c.items.map(item => ({ id: item.id, file: `requests/${item.id}.json`, sha256: sha(item.body), estInputTokens: estimate(item.body), ...(item.expect ? { expect: item.expect } : { expect: [], recordOnly: true }) })) }
     const preregistration = c.items.map(item => (item.control ? { id: item.id, control: true, turn: item.control.user.text, expect: item.expect }
-      : { id: item.id, area: item.example.area, at: item.example.at, provenance: item.example.source, heuristicTags: item.example.tags, recordOnly: true }))
+      : { id: item.id, area: item.example.area, at: item.example.at, provenance: item.example.source, heuristicTags: item.example.tags, stratum: `${item.example.tags[0]}/${item.example.area}`, recordOnly: true }))
     return { plan, requests, preregistration }
   })
 }

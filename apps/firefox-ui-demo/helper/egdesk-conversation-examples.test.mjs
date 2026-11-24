@@ -116,3 +116,17 @@ test('CLI: output outside the repository only, 0600 files; a second run reports 
   const code = await runnerMain([path.join(out, 'plans', 'chunk-001', 'plan.json')], { env: {}, print: l => printed.push(l), printError: l => refused.push(l), fetchImpl: async () => { throw new Error('no network') } })
   assert.equal(code, 0, refused.join('\n')); assert.match(printed.join('\n'), /"mode":"dry_run"/)
 })
+
+test('the stratified sample (c20): the controls in every chunk, labelled examples left out, each chunk within its estimate cap and a 12k ceiling', () => {
+  const ex = Array.from({ length: 12 }, (_, i) => ({ id: `s${i}`, area: i % 2 ? 'taehwa' : 'egdesk', privacy: 'owner-approved', at: `2026-11-${String(i + 1).padStart(2, '0')}`, prev: { text: '진행할까요?' }, user: { text: `그래 ${i}` },
+    tags: [TYPE_NAMES[i % TYPE_NAMES.length]], source: { kind: 'codex', file: 'f', line: i } }))
+  const chunks = buildLabelPlan(ex, { model: DECISION_MODEL, chunkTokens: 12_000, estimateCap: 11_500, controlsEvery: true, maxChunks: 3, exclude: ['s0', 's1'], sha: text => createHash('sha256').update(text).digest('hex') })
+  assert.equal(chunks.length, 3)
+  for (const c of chunks) {
+    assert.deepEqual(c.plan.requests.slice(0, 2).map(r => r.id), ['control-correction', 'control-praise'])
+    assert.ok(c.plan.requests.reduce((n, r) => n + r.estInputTokens, 0) <= 11_500 && c.plan.tokenCeiling <= 12_000)
+  }
+  const ids = chunks.flatMap(c => c.plan.requests.map(r => r.id))
+  assert.ok(!ids.includes('ex-s0') && !ids.includes('ex-s1'), 'already labelled')
+  assert.equal(new Set(ids.filter(id => id.startsWith('ex-'))).size, ids.filter(id => id.startsWith('ex-')).length, 'each candidate once')
+})
