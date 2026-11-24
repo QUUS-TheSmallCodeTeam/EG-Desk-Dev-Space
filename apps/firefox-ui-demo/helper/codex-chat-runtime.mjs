@@ -2479,6 +2479,29 @@ export class CodexChatRuntime {
       // already assembled packet after its grant expires or is revoked.
       const intake = this.topicIntakes.get(context)
       const narrowDecision = () => {
+        // The mode or key can change while the pending decision runs or between its answer and
+        // this dispatch. A result decided under 'on' is attached only while 'on' still holds with
+        // the same key; otherwise it is kept as a record (the call already happened) and attaches nothing.
+        if (decision?.mode === 'on') {
+          let current = false
+          try {
+            const setup = this.decisionContext
+            current = setup.mode() === 'on' && setup.configured() === true &&
+              (decision.generation === null || typeof setup.settingsGeneration !== 'function' || setup.settingsGeneration() === decision.generation)
+          } catch { current = false }
+          // A result that carries a private topic batch keeps its own grant guard below.
+          if (!current && !decision.result?.privateTopicBatch) {
+            const local = decision.result?.localOnly?.()
+            const safe = local?.status === 'ready' && (!local.mayDispatch || local.mayDispatch() === true) ? local : null
+            if (safe) {
+              decision.result = safe
+              if (additionalContext) additionalContext[DECISION_CONTEXT_KEY] = { kind: 'application', value: safe.extraContext[DECISION_CONTEXT_KEY] }
+            } else {
+              for (const key of Object.keys(decision.result?.extraContext || {})) if (additionalContext) delete additionalContext[key]
+              decision.mode = 'advisory'
+            }
+          }
+        }
         const r = decision?.result
         if (decision?.mode !== 'on' || !r) return null
         if (r.mayDispatch && !r.mayDispatch()) {
@@ -4022,7 +4045,9 @@ export class CodexChatRuntime {
     })().catch(() => ({ status: 'fallback', reason: 'unreachable', selected: [], extraContext: {}, receipt: null }))
     try {
       const result = await Promise.race([work, expired])
-      return { mode, speech, result: result || { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null } }
+      let generation = null
+      try { generation = typeof setup.settingsGeneration === 'function' ? setup.settingsGeneration() : null } catch {}
+      return { mode, speech, generation, result: result || { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null } }
     } catch { return null } finally { clearTimeout(timer) }
   }
 
