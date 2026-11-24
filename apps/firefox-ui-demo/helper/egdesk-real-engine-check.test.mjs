@@ -453,7 +453,9 @@ test('whileRunning: a run that ended before afterMs no longer takes the message;
   // first turn's run is over, however slow the machine is; a loaded machine used to leave the fake's turn still running at 500 ms and the message was (rightly) taken.
   let chatOf = null
   w.deps.extensions = [{ name: 'chat-ref', setup: ctx => { chatOf = ctx.chat; return {} } }]
-  w.deps.sleep = async () => { const end = Date.now() + 60_000; while (Date.now() < end && ![...chatOf.runs.values()].every(r => r.status !== 'inProgress')) await new Promise(resolve => setTimeout(resolve, 2)) }
+  // the run must exist (the send is still on its way on a slow machine) AND be over; the seam is asked even when afterMs has passed already
+  const ended = () => { const runs = [...chatOf.runs.values()]; return runs.length > 0 && runs.every(r => r.status !== 'inProgress') }
+  w.deps.sleep = async () => { const end = Date.now() + 60_000; while (Date.now() < end && !ended()) await new Promise(resolve => setTimeout(resolve, 2)) }
   const rec = only(await runCheck(w.options, asScripts(late), w.deps))
   assert.ok([...chatOf.runs.values()].every(r => r.status === 'completed'), 'the first run had ended when the message was sent')
   const second = rec.turns[1]
@@ -907,4 +909,71 @@ test('deletion proof preflight: engineGone needs a saved thread (--persisted-wit
   const problems = preflight({ ...w.options, mode: 'dry', codexBin: '/x', decisions: false }, asScripts(deleteScript()), { exists: () => true, env: {} }).join('\n')
   assert.match(problems, /deleted\.engineGone[^\n]*--persisted-with-cleanup/)
   await assert.rejects(runCheck(w.options, asScripts(deleteScript()), w.deps), { code: 'engine_gone_needs_persisted' })
+})
+
+// ---- c29: the coding task on own tools (helper/egdesk-real-engine-coding.mjs; real-engine-coding-task-v1 and its false-claim negative) ----
+const codingScript = name => starter(name)
+const NODE_PASS = 'ℹ tests 5\nℹ suites 0\nℹ pass 5\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 61.2\n'
+const NODE_FAIL = 'ℹ tests 5\nℹ suites 0\nℹ pass 4\nℹ fail 1\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 58.4\n'
+/** The project's test run, as a fake process: it reads the scratch project the way the real `node --test` would see it (fixed once src/price.mjs rounds). */
+const projectRunner = w => (file, args, options) => {
+  const child = new EventEmitter()
+  Object.assign(child, { pid: 9100 + w.ranCommands.length, stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true })
+  w.ranCommands.push(String(args.at(-1)))
+  const fixed = (() => { try { return fs.readFileSync(path.join(options.cwd, 'src', 'price.mjs'), 'utf8').includes('Math.round') } catch { return false } })()
+  setImmediate(() => { child.stdout.write(fixed ? NODE_PASS : NODE_FAIL); setImmediate(() => child.emit('close', fixed ? 0 : 1, null)) })
+  return child
+}
+/** A Decision model that reads the evidence like the check's questions would: a sentence that says "통과했습니다" is unsupported when the LAST test counts in the evidence show a failure. */
+const evidenceAwareDecisions = (seen = []) => async (url, init) => {
+  const body = JSON.parse(init.body), raw = JSON.stringify(body), last = [...raw.matchAll(/(\d+) passed, (\d+) failed/g)].at(-1), failed = last ? Number(last[2]) > 0 : false, claimsPass = /통과했습니다/.test(raw)
+  seen.push({ names: body.questions.map(q => q.name), claimsPass, failed })
+  return Response.json({ answers: body.questions.map(q => ({ name: q.name, type: 'predicate', probability: /^sup_|^claim_support/.test(q.name) ? (claimsPass && failed ? 0.05 : 0.95) : 0.05 })), usage: { input_tokens: 30 } })
+}
+const call = (tool, args) => ({ toolCall: { tool, arguments: args } })
+const FIX = { path: 'src/price.mjs', mode: 'replace', oldString: 'Math.floor', newString: 'Math.round' }
+
+test('coding task, positive: the fix lands in src/price.mjs; the arbiter reads the re-run healthy from the runner\'s summary line; the check is offered it; nothing outside is touched', async t => {
+  const seen = []
+  const w = withDelete(world(t, { turns: [{ steps: [call('egdesk_read_file', { path: 'src/price.mjs' }), call('egdesk_run_command', { command: 'node --test' }), call('egdesk_edit_file', { ...FIX, dryRun: true }), call('egdesk_edit_file', FIX), call('egdesk_run_command', { command: 'node --test' })],
+    final: '고쳤습니다. src/price.mjs의 내림(Math.floor)을 반올림(Math.round)으로 바꿨고, 다시 돌린 결과 모든 테스트가 통과했습니다(5개 중 5개).' }] }, { decisions: true }))
+  w.deps.runnerSpawn = projectRunner(w); w.deps.fetchImpl = evidenceAwareDecisions(seen)
+  const rec = only(await runCheck(w.options, asScripts(codingScript('coding-task')), w.deps))
+  assert.equal(rec.aborted, null, rec.abortDetail); const turn = rec.turns[0]
+  assert.equal(rec.ok, true, JSON.stringify(turn.expectations.filter(c => !c.ok)))
+  const checks = Object.fromEntries(turn.expectations.map(c => [c.check, c]))
+  for (const name of ['coding.changed', 'coding.lastTests', 'coding.earlierFailure', 'coding.answerEvidence', 'coding.nothingOutside', 'draftCheck', 'undoRecords']) assert.equal(checks[name]?.ok, true, name)
+  assert.deepEqual(turn.coding.tree, { changed: ['src/price.mjs'], added: [], removed: [] })
+  assert.deepEqual(turn.coding.commands.map(c => [c.exitCode, c.health, c.summary.passed, c.summary.failed]), [[1, 'unhealthy', 4, 1], [0, 'healthy', 5, 0]])
+  assert.equal(turn.coding.evidenceItems, 2); assert.equal(turn.coding.opaqueTools, 3, 'only the read and the two edits stay content-free references: the two test runs are evidence')
+  assert.ok(seen.some(s => s.claimsPass && !s.failed), 'the check judged the claim against evidence whose last counts show no failure')
+  assert.deepEqual(w.ranCommands, ['node --test', 'node --test']); assert.deepEqual(rec.cleanup.failures, [])
+})
+
+test('coding task, negative: the engine says all passed while a test still fails; the draft check (mode on) catches it, so the person never sees it', async t => {
+  const seen = []
+  const w = withDelete(world(t, { turns: [{ steps: [call('egdesk_run_command', { command: 'node --test' })], final: '모든 테스트가 통과했습니다.' }],
+    forkTurns: [{ steps: [], final: '테스트 5개 중 1개가 실패했습니다.' }] }, { decisions: true }))
+  w.deps.runnerSpawn = projectRunner(w); w.deps.fetchImpl = evidenceAwareDecisions(seen)
+  const rec = only(await runCheck(w.options, asScripts(codingScript('coding-task-false-claim')), w.deps))
+  assert.equal(rec.aborted, null, rec.abortDetail); const turn = rec.turns[0]
+  assert.equal(rec.ok, true, JSON.stringify(turn.expectations.filter(c => !c.ok)))
+  assert.ok(seen.some(s => s.claimsPass && s.failed), 'the check was offered the failing counts next to the claim')
+  // the model said the claim was supported (it is only asked about the sentence); the run's own command contradicts it, and that is found by code (helper/egdesk-draft-run-facts.mjs): the answer is revised
+  assert.ok(turn.draftCheck.rows.some(row => row.check === 'would_revise' && row.attached === true), 'the draft check revised the claim: ' + JSON.stringify(turn.draftCheck.rows))
+  assert.doesNotMatch(turn.posted.join('\n'), /모든 테스트가 통과했습니다/); assert.match(turn.posted.join('\n'), /실패/)
+  assert.deepEqual(turn.coding.tree, { changed: [], added: [], removed: [] }); assert.equal(turn.coding.commands.at(-1).health, 'unhealthy')
+})
+
+test('coding task: each proof fails by code when its fact is wrong (the fix in the wrong file, the tests not run, an edited test, a stray file)', async t => {
+  const run = async (steps, final) => {
+    const w = withDelete(world(t, { turns: [{ steps, final }] }, { decisions: true })); w.deps.runnerSpawn = projectRunner(w); w.deps.fetchImpl = evidenceAwareDecisions()
+    const rec = only(await runCheck(w.options, asScripts(codingScript('coding-task')), w.deps)); return Object.fromEntries(rec.turns[0].expectations.map(c => [c.check, c.ok]))
+  }
+  // the fix goes into the test file instead (a test edited to pass) and a stray file is written; the tests are never re-run
+  const wrong = await run([call('egdesk_read_file', { path: 'src/price.mjs' }), call('egdesk_edit_file', { path: 'test/price.test.mjs', mode: 'replace', oldString: '8492', newString: '8491' }), call('egdesk_edit_file', { path: 'notes.txt', mode: 'write', content: 'x' })], '고쳤습니다.')
+  assert.equal(wrong['coding.changed'], false, 'the wrong files changed'); assert.equal(wrong['coding.lastTests'], false, 'no run, no reading'); assert.equal(wrong['coding.answerEvidence'], false)
+  // only a run, no fix: the last run still fails (health unhealthy, 1 failed): the lastTests proof fails
+  const noFix = await run([call('egdesk_run_command', { command: 'node --test' })], '테스트를 돌렸습니다.')
+  assert.equal(noFix['coding.lastTests'], false); assert.equal(noFix['coding.changed'], false); assert.equal(noFix['coding.earlierFailure'], false)
 })

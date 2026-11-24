@@ -67,3 +67,8 @@ import { DELETED_EXPECT_SCHEMA, SEEDED_WRITES_SCHEMA, checkDeleted, validateDele
 registerConversationFields({ seededWrites: { schema: SEEDED_WRITES_SCHEMA, validate: (value, { path, bad }) => { for (const why of validateSeededWrites(value, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
 registerExpectKeys({ deleted: { schema: DELETED_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateDeletedExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) },
   check: (value, record) => checkDeleted(value, record) } })
+
+// ---- L5: a coding task on own tools (expect.coding: the fix lands in the right file, the arbiter's reading of the re-run, the draft check's evidence, nothing outside) ----
+import { CODING_EXPECT_SCHEMA, createCodingHook, validateCodingExpect } from './egdesk-real-engine-coding.mjs'
+registerExpectKeys({ coding: { schema: CODING_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateCodingExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('coding', conversation => createCodingHook(conversation))

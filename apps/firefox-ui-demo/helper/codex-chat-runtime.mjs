@@ -84,6 +84,7 @@ export const EARLIER_EVIDENCE_LIMIT = 4
 // its records are kept for the next check (the check's own ranking keeps the ones related to the next draft). After a posted answer the limit above stays.
 export const EARLIER_WITHHELD_LIMIT = 8
 export const POSTED_ANSWER_KEY = 'egdesk_posted_answer'
+import { OWN_COMMAND_LIMITS, ownCommandEntry, ownCommandEvidence } from './egdesk-own-command-evidence.mjs' // c29: what the check of an answer may know about the commands EG-Desk ran
 import { STOPPED_COMMAND_KEY, stoppedCommandBlock, stoppedCommandEvidence, stoppedCommandFact } from './egdesk-stopped-command.mjs' // c26: the command the person stopped, told to the next turn once
 // c19 (owner decision: no fixed fallback): 'withheld' = nothing could be posted; the next turn is told the person saw no answer.
 export const POSTED_OUTCOMES = Object.freeze(['revised', 'certain_part', 'withheld'])
@@ -6567,7 +6568,10 @@ export class CodexChatRuntime {
     const ref = (a, i) => ({ id: `tool${i + 1}`, kind: 'tool', time: 'present', status: typeof a.status === 'string' ? a.status : null, source: `tool:${a.kind}`, opaque: true })
     const lastLines = text => String(text ?? '').replace(/\r/g, '').split('\n').map(line => line.trimEnd()).filter(Boolean).slice(-3).join('\n').slice(-300)
     const judged = (() => { try { return this.engineCommands.advisories() } catch { return [] } })()
-    const out = (run.activities || []).filter(a => !own.has(a.kind)).slice(0, 8).map((a, i) => {
+    // c29: the commands EG-Desk ran itself are dynamic tool calls of the run; their facts (exit code, the test runner's summary line) are the evidence, not a content-free reference
+    const ownEntries = Array.isArray(run.ownCommands) ? run.ownCommands : [], ownTool = a => a.kind === 'dynamicToolCall' && (a.detail?.tool ?? a.title) === 'egdesk_run_command'
+    const useOwn = terminal && ownEntries.length > 0
+    const out = (run.activities || []).filter(a => !own.has(a.kind) && !(useOwn && ownTool(a))).slice(0, 8).map((a, i) => {
       if (a.kind !== 'commandExecution' || !terminal || typeof a.detail?.command !== 'string' || !a.detail.command.trim()) return ref(a, i)
       const exit = Number.isInteger(a.detail.exitCode) ? a.detail.exitCode : null
       // The exit code's meaning is a convention of the process, said in words (c19: measured 2026-11-24, heartbeat-c18, "finished with exit code 0"
@@ -6582,6 +6586,7 @@ export class CodexChatRuntime {
       try { const kept = this.runOutputs.commandOutput(run.answerId, a.id); tail = kept ? lastLines(kept.tail || kept.head) : '' } catch { tail = '' }
       return { id: `cmd${i + 1}`, kind: 'terminal', time: 'present', source: 'run', pinned: true, text: `In this turn the assistant ran \`${publicText(a.detail.command, 300)}\`; it ${ended}.${reading}${tail ? `\nLast lines of its output:\n${tail}` : ''}` }
     })
+    if (useOwn) { const quote = egress.allows('command_output'); ownEntries.forEach((entry, i) => out.push(ownCommandEvidence(entry, i, { quoteLine: quote }))) }
     const note = this.draftCheckTurns.get(run)?.browserNote
     if (typeof note === 'string' && note.trim() && egress.allows('browser_task_record')) out.push({ id: 'task', kind: 'browser', time: 'present', source: 'browser_task', pinned: true, text: `The browser task's outcome note: ${publicText(note, 1000)}` })
     return out
@@ -6691,6 +6696,7 @@ export class CodexChatRuntime {
         if (key) { this.stoppedCommands.delete(key); if (fact) { this.stoppedCommands.set(key, fact); while (this.stoppedCommands.size > 64) this.stoppedCommands.delete(this.stoppedCommands.keys().next().value) } }
       } catch { /* the note is advisory */ }
       run.ownCommandRunning = null
+      try { run.ownCommands = [...(run.ownCommands ?? []), ownCommandEntry(record)].slice(-OWN_COMMAND_LIMITS.commands) } catch { /* the evidence is advisory */ } // c29: every command of the run, in order
       const summary = record.health?.summary ?? null
       run.ownCommandLast = Object.freeze({ stopped: record.stopped === true, exitCode: Number.isSafeInteger(record.exitCode) ? record.exitCode : null, durationMs: Number.isFinite(record.durationMs) ? record.durationMs : null,
         health: record.health?.health ?? null, healthReasons: record.health?.reasons ?? [], summary: summary ? Object.freeze({ ...summary, line: String(summary.line).slice(0, 300) }) : null,

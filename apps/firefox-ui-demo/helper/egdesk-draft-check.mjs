@@ -1,5 +1,6 @@
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, readPredicate } from './egdesk-decision-questions.mjs'
 import { DecisionError } from './egdesk-decision-client.mjs'
+import { claimsPass, runFactFindings } from './egdesk-draft-run-facts.mjs' // c29: a completion claim the run's own command contradicts is found by code
 
 // Pre-posting check of the subjective model's draft (system-level judge, not a recommender).
 // The code fixes everything that can be fixed: it cuts the draft into sentence spans, collects the
@@ -196,7 +197,8 @@ const normalizedEvidence = (items, draftText = '') => {
   const { rows: bounded, leftOut } = boundedEvidence(items, draftText)
   const rows = bounded.map((item, index) => {
     const opaque = item.opaque === true, full = opaque ? '' : compactText(item.text, 1_000_000), text = opaque ? '(content not available to the checker)' : compactText(item.text, DRAFT_CHECK_LIMITS.evidenceChars)
-    return { id: String(item.id ?? `item${index + 1}`), kind: item.kind ?? null, time: item.time ?? 'unknown', status: item.status ?? null, source: item.source ?? null, opaque, cut: !opaque && (item.cut === true || full.length > text.length), text }
+    const raw = item.facts, facts = !opaque && raw && raw.kind === 'own_command' ? { kind: 'own_command', passed: Number.isFinite(raw.passed) ? raw.passed : null, failed: Number.isFinite(raw.failed) ? raw.failed : null, exitCode: Number.isSafeInteger(raw.exitCode) ? raw.exitCode : null, stopped: raw.stopped === true, hasSummary: raw.hasSummary === true } : null
+    return { id: String(item.id ?? `item${index + 1}`), kind: item.kind ?? null, time: item.time ?? 'unknown', status: item.status ?? null, source: item.source ?? null, opaque, cut: !opaque && (item.cut === true || full.length > text.length), ...(facts ? { facts } : {}), text }
   })
   return { rows, leftOut }
 }
@@ -341,7 +343,7 @@ export function verdictOf(state) {
 async function judge({ draft, evidence, userText, internalVocabulary, client, thresholds, timeoutMs, signal, design = 'predicates', concreteOnly = false }) {
   const spans = segmentDraft(draft)
   // concreteOnly: only sentences with a concrete detail are judged (see checkDraft).
-  const claimSpans = spans.map((s, i) => ({ ...s, index: i })).filter(s => s.kind === 'claim' && (!concreteOnly || isCheckable(s.text))).slice(0, DRAFT_CHECK_LIMITS.claims)
+  const claimSpans = spans.map((s, i) => ({ ...s, index: i })).filter(s => s.kind === 'claim' && (!concreteOnly || isCheckable(s.text) || claimsPass(s.text))).slice(0, DRAFT_CHECK_LIMITS.claims)
   const terms = collectTerms({ draft, userText, evidence, internalVocabulary }).filter(t => t.exposure === 'internal_only').slice(0, DRAFT_CHECK_LIMITS.terms)
   const wantsCall = claimSpans.length > 0 && (evidence.length > 0 || claimSpans.some(s => isCheckable(s.text))) || terms.length > 0
   if (!wantsCall) return { spans, claimSpans, terms, findings: [], judgments: [], called: false, skipped: 'nothing_checkable' }
@@ -355,11 +357,15 @@ async function judge({ draft, evidence, userText, internalVocabulary, client, th
   if (evidence.length && evidence.every(item => item.opaque) && !terms.length) return { spans, claimSpans, terms, findings: [], judgments: [], called: false, skipped: 'nothing_checkable' }
   const predicates = design === 'predicates'
   const request = predicates ? buildPredicateRequest({ claims: claimSpans, terms, evidence }) : buildRequest({ claims: claimSpans, terms, evidence })
-  const result = await client.decide({ ...request, timeoutMs, signal, promptCacheKey: 'draft-check' })
+  // c29: what the run's own command says about a claim that the tests passed is a fact, found here whatever the model answers (and when it cannot be asked)
+  const ruled = runFactFindings({ claims: claimSpans, evidence })
+  let result
+  try { result = await client.decide({ ...request, timeoutMs, signal, promptCacheKey: 'draft-check' }) }
+  catch (error) { if (ruled.length) return { spans, claimSpans, terms, findings: ruled, judgments: [], called: false, skipped: null, local: true }; throw error }
   const read = predicates ? readPredicateFindings({ answers: result.answers, claims: claimSpans, terms, evidence }) : readFindings({ answers: result.answers, claims: claimSpans, terms, evidence, thresholds })
   const local = !evidence.length
     ? claimSpans.filter(s => isCheckable(s.text)).map(s => ({ kind: 'unverified', span: claimSpans.indexOf(s), evidence: [], reason: 'no_evidence' })) : []
-  return { spans, claimSpans, terms, findings: [...local, ...read.findings.filter(f => !local.some(l => l.span === f.span && f.kind === 'unverified'))], judgments: read.judgments, called: true, usage: result.usage ?? null }
+  return { spans, claimSpans, terms, findings: [...local, ...read.findings.filter(f => !local.some(l => l.span === f.span && f.kind === 'unverified') && !ruled.some(r => r.span === f.span)), ...ruled], judgments: read.judgments, called: true, usage: result.usage ?? null }
 }
 
 /**
