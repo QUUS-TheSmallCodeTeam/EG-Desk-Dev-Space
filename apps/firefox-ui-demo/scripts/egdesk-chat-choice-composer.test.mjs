@@ -189,6 +189,8 @@ test('R1 actual mount consumes the supplement and existing composer send button 
   assert.match(surface, /choice\.attach\(\{ input, readScope:.*\n\s*\? codexBridge\.chatChoiceScope\(activeThread\.id, input\.value\)/);
   assert.match(surface, /choice\.panel,\n\s*el\('div', \{ class: 'egd-codex-input-row'/);
   assert.match(surface, /choice\.trigger,\n\s*sendButton/);
+  // Flag (default off): the HUD passes the bridge capability; while it is off the controller hands the footer no nodes.
+  assert.match(surface, /enabled: \(\) => codexBridge\.chatChoiceEnabled\?\.\(\) === true,/);
   assert.match(surface, /makeRequestId: \(\) => `choice-\$\{Date\.now\(\)\}-\$\{window\.crypto\.randomUUID\(\)\}`/);
   assert.match(surface, /testid: 'chat-send' \},\n\s*onclick: submitComposer/);
   assert.match(surface, /: fetchJson\('\/chat\/send', \{\n\s*method: 'POST'/);
@@ -200,7 +202,7 @@ test('R1 actual live Surface scope fails closed on wrong room/account/Agent, nat
   const room = { id: 'room', type: 'dm', engineId: 'codex', profileEnabled: true, agentProfileId: profile.id,
     bindingAccountKey: ChatState.codexAccountKey(account), bindingState: 'verified', conversationId: 'native',
     agent: { profileId: profile.id, revision: 1 } };
-  const state = { codex: { activeThreadId: room.id, hudView: 'conversation', authStatus: account, connected: true,
+  const state = { codex: { activeThreadId: room.id, hudView: 'conversation', chatCapabilities: ['choice'], authStatus: account, connected: true,
     threadDraftRevisions: { room: 0 }, activityRoomGeneration: 0 }, contextSuggest: { byThread: { room: { picked: [] } } } };
   const protocol = ChatState.createChatProtocolState();
   let project = { status: 'ready', value: { status: 'none' } }, busy = false;
@@ -669,4 +671,74 @@ test('opening [보기 추천] and typing make no bridge call at all (no pre-conn
   await tick();
   assert.deepEqual(fetched, [], 'opening the panel only reads local status through the injected readMode; no direct bridge call');
   assert.ok(choice.panel.find('chat-choice-option').length >= 2);
+});
+
+test('flag off (default): no capability means no scope, a hidden inert trigger and zero chooser requests; flag on restores it', async () => {
+  const profile = { id: 'review-verifier', origin: 'template', revision: 1 };
+  const account = { isLoggedIn: true, authMode: 'chatgpt', accountId: 'verified-account' };
+  const room = { id: 'room', type: 'dm', engineId: 'codex', profileEnabled: true, agentProfileId: profile.id,
+    bindingAccountKey: ChatState.codexAccountKey(account), bindingState: 'verified', conversationId: 'native', agent: { profileId: profile.id, revision: 1 } };
+  const state = { codex: { activeThreadId: room.id, hudView: 'conversation', authStatus: account, connected: true,
+    threadDraftRevisions: { room: 0 }, activityRoomGeneration: 0 }, contextSuggest: { byThread: { room: { picked: [] } } } };
+  const bridge = vm.runInNewContext(`({${section('      chatChoiceScope(', '      readChatChoiceMode(')}})`, {
+    state, protocol: ChatState.createChatProtocolState(), ChatState, choiceSettingsWriting: 0, choiceSettingsGeneration: 0,
+    getCodexThreadById: (_, id) => id === room.id ? room : null, getCodexThreadDraft: () => question,
+    codexThreadAgentProfile: () => profile, CODEX_AGENT_PROFILES: { [profile.id]: {} },
+    threadBusy: () => false, chatRoomProjectState: () => ({ status: 'ready', value: { status: 'none' } }), chatProjectDraftActions: new Map(),
+    manualOwnerIdentity: () => 'same-owner', document: { getElementById: () => ({ matches: () => true }) },
+  });
+  const calls = { status: 0, post: 0 };
+  const input = Object.assign(el('textarea'), { isConnected: true, value: question, dataset: { threadId: 'room' } });
+  const choice = mount({ el, readMode: async () => { calls.status++; return proof; }, postChoice: async () => { calls.post++; return { status: 'recommended', index: 0 }; },
+    makeController: () => new AbortController(), makeRequestId: () => 'choice-fixture' });
+  choice.attach({ input, readScope: () => bridge.chatChoiceScope(room.id, input.value), setDraft: () => assert.fail('no draft') });
+
+  // The HUD's own mount: with the flag off the footer receives no chooser node at all (el() skips null children).
+  const hud = mount({ el, readMode: async () => assert.fail('no status read'), postChoice: async () => assert.fail('no request'),
+    makeController: () => new AbortController(), makeRequestId: () => 'choice-fixture', enabled: () => bridge.chatChoiceEnabled() });
+  hud.attach({ input, readScope: () => bridge.chatChoiceScope(room.id, input.value), setDraft: () => assert.fail('no draft') });
+  hud.sync();
+  assert.deepEqual([hud.trigger, hud.panel, hud.questionHint], [null, null, null]);
+  state.codex.chatCapabilities = ['choice']; hud.sync();
+  assert.ok(hud.trigger && hud.panel && hud.questionHint); assert.equal(hud.trigger.hidden, false);
+  state.codex.chatCapabilities = null; hud.sync();
+  assert.deepEqual([hud.trigger, hud.panel, hud.questionHint], [null, null, null]);
+
+  // Off: every bridge shape without the capability (older bridge, capability list without 'choice', flag unset).
+  for (const capabilities of [undefined, null, [], ['send', 'stream', 'fork']]) {
+    state.codex.chatCapabilities = capabilities;
+    assert.equal(bridge.chatChoiceEnabled(), false);
+    assert.equal(bridge.chatChoiceScope(room.id, question), null);
+    choice.sync();
+    assert.equal(choice.trigger.hidden, true); assert.equal(choice.panel.hidden, true); assert.equal(choice.questionHint.hidden, true);
+    choice.trigger.props.onclick(); // even a stray click on the detached node opens nothing
+    assert.equal(choice.panel.find('chat-choice-option').length, 0); assert.equal(choice.panel.hidden, true);
+  }
+  assert.deepEqual(calls, { status: 0, post: 0 });
+
+  // On: the same room is eligible again and the reviewed flow works as before.
+  state.codex.chatCapabilities = ['send', 'choice'];
+  assert.equal(bridge.chatChoiceEnabled(), true);
+  assert.equal(bridge.chatChoiceScope(room.id, question)?.conversationId, 'native');
+  choice.sync(); assert.equal(choice.trigger.hidden, false);
+  choice.trigger.click(); choice.panel.find('chat-choice-option').forEach((node, i) => node.type(opts[i]));
+  choice.panel.find('chat-choice-review')[0].click(); await tick();
+  choice.panel.find('chat-choice-confirm')[0].click(); await tick();
+  assert.equal(calls.post, 1); assert.equal(choice.panel.find('chat-choice-result').length, 1);
+
+  // Turned off while a recommendation is on screen: the panel goes away and nothing stays actionable.
+  state.codex.chatCapabilities = ['send'];
+  choice.sync();
+  assert.equal(choice.panel.hidden, true); assert.equal(choice.trigger.hidden, true); assert.equal(choice.panel.find('chat-choice-explain').length, 0);
+  assert.equal(calls.post, 1);
+});
+
+test('flag off (default): the bridge lists the capability and serves the route only with EGDESK_CHAT_CHOICE=on', () => {
+  const server = fs.readFileSync(new URL('../helper/codex-bridge-server.mjs', import.meta.url), 'utf8');
+  assert.match(server, /const CHAT_CHOICE_ENABLED = process\.env\.EGDESK_CHAT_CHOICE === 'on'/);
+  assert.match(server, /\.\.\.\(CHAT_CHOICE_ENABLED \? \['choice'\] : \[\]\)/);
+  const refuse = server.indexOf("if (route === '/chat/choice' && !CHAT_CHOICE_ENABLED) { sendJson(res, 404, { code: 'CHAT_CHOICE_DISABLED' }); return }");
+  const serve = server.indexOf("if (route === '/chat/choice' && await handleChatHttp(req, res, url)) return");
+  assert.ok(refuse > 0 && serve > refuse && server.indexOf('if (await handleChatHttp(req, res, url)) return') > serve, 'refused before any handler can serve it');
+  assert.doesNotMatch(server, /'fork', 'choice'/, 'the capability is never listed unconditionally');
 });

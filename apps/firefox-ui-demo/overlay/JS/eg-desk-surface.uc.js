@@ -12723,7 +12723,10 @@
     boardNotice('설정의 계정 화면에서 OpenAI Decisions를 열 수 없습니다. 설정에서 직접 확인해 주세요. 채팅에는 API 키를 입력하지 마세요.');
   }
 
-  function mountChatChoiceComposer({ el, readMode, postChoice, openSettings, makeController, makeRequestId }) {
+  // `enabled` is the product flag (default off in the HUD: the bridge must list the 'choice' capability). While it is off the
+  // controller hands out no nodes, so nothing of [보기 추천] is drawn, and its scope gate (chatChoiceScope) admits no request.
+  function mountChatChoiceComposer({ el, readMode, postChoice, openSettings, makeController, makeRequestId, enabled = () => true }) {
+    const shown = () => { try { return enabled() === true; } catch { return false; } };
     const button = (key, label, onclick) => el('button', { type: 'button', data: { testid: `chat-choice-${key}` }, onclick }, label);
     const plain = (tag, text, props = {}) => { const node = el(tag, props); node.textContent = text; return node; };
     // Keep these line/duplicate rules in sync with egdesk-chat-choice.mjs.
@@ -13063,7 +13066,8 @@
       panel.replaceChildren(...content, close);
     };
     reset();
-    return { trigger, panel, questionHint, sync, reset, leaveForList, selectListRoom,
+    return { get trigger() { return shown() ? trigger : null; }, get panel() { return shown() ? panel : null; },
+      get questionHint() { return shown() ? questionHint : null; }, sync, reset, leaveForList, selectListRoom,
       attach: next => {
         if (listEdits && (!listEdits.returning || listEdits.roomId !== next.input.dataset?.threadId)) listEdits = null;
         binding = next;
@@ -13094,6 +13098,7 @@
       postChoice: (dto, signal) => codexBridge.postChatChoice(dto, signal),
       makeController: () => new window.AbortController(),
       makeRequestId: () => `choice-${Date.now()}-${window.crypto.randomUUID()}`,
+      enabled: () => codexBridge.chatChoiceEnabled?.() === true,
     });
     let focusOpenedRoom = false;
     // A render that puts focus back on the composer is not a new look at it.
@@ -14805,10 +14810,13 @@
               let invalidProject = false;
               try { ChatState.normalizeRequestProjectTarget(activeThread.requestProjectTarget); } catch { invalidProject = true; }
               const roomProjectBlock = chatRoomProjectSendBlock(activeThread);
-              sendButton.disabled = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld || activeThread.preparingInput || codex.isSending || !input.value.trim() || !readiness.ready || invalidProject || !!roomProjectBlock || boardPreview?.intent.ok === false;
+              // D1: an open early question of the working run takes one text reply; attachments and a project choice wait for the turn.
+              const replyNow = codex.replyOpen === true && !boardDestination && !activeThread.inputSources?.length && !activeThread.briefingInputs?.length && activeThread.requestProjectTarget == null;
+              const sendingBlocked = codex.isSending && !replyNow;
+              sendButton.disabled = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld || activeThread.preparingInput || sendingBlocked || !input.value.trim() || !readiness.ready || invalidProject || !!roomProjectBlock || boardPreview?.intent.ok === false;
               sendButton.title = boardPreview?.intent.error || (ChatState.nativeBindingHeld(activeThread) || nativeSendHeld ? '보관된 연결을 현재 계정에 자동 연결하지 않습니다'
                 : invalidProject ? CHAT_REQUEST_PROJECT_INVALID : roomProjectBlock || readiness.reason
-                  || (activeThread.preparingInput ? '첨부를 준비하는 중입니다.' : codex.isSending ? '요청을 보내는 중입니다.' : '보내기'));
+                  || (activeThread.preparingInput ? '첨부를 준비하는 중입니다.' : sendingBlocked ? '요청을 보내는 중입니다.' : '보내기'));
             };
             choice.attach({ input, readScope: () => !compositionInProgress && body.isConnected
               ? codexBridge.chatChoiceScope(activeThread.id, input.value) : null,
@@ -15618,6 +15626,8 @@
       state.codex.conversationId = active?.conversationId || null;
       state.codex.draft = getCodexThreadDraft(state.codex, active?.id || null);
       state.codex.isSending = threadBusy(active);
+      // D1: the one busy state a message can still be sent into (the working run asked an early question).
+      state.codex.replyOpen = !!ChatState.replyRunForThread(protocol, active);
     };
 
     const emit = () => {
@@ -17398,6 +17408,8 @@
       },
       chatChoiceScope(threadId, question) {
         const codex = state.codex, thread = getCodexThreadById(codex, threadId);
+        // Hidden pending the owner's decision: the chooser exists only when the bridge lists the 'choice' capability (EGDESK_CHAT_CHOICE=on).
+        if (!Array.isArray(codex.chatCapabilities) || !codex.chatCapabilities.includes('choice')) return null;
         if (choiceSettingsWriting || !thread || codex.activeThreadId !== threadId || codex.hudView !== 'conversation'
             || thread.type !== 'dm' || thread.engineId !== 'codex' || thread.profileEnabled !== true
             || thread.stateless || thread.startStateless || thread.executionBounded || ChatState.nativeBindingHeld(thread)
@@ -17436,6 +17448,7 @@
         return { clientThreadId, conversationId, profileId, question, editKey,
           key: JSON.stringify([editKey, state.canvasSelectionRevision || 0, choiceSettingsGeneration]) };
       },
+      chatChoiceEnabled() { return Array.isArray(state.codex.chatCapabilities) && state.codex.chatCapabilities.includes('choice'); },
       readChatChoiceMode(signal) { return fetchJson('/decision/status', { method: 'GET', signal, cache: 'no-store' }); },
       postChatChoice(dto, signal) { return fetchJson('/chat/choice', { method: 'POST', signal, body: JSON.stringify(dto) }); },
       // Settings '결정 모델 · OpenAI Decisions': only the /decision/* routes.
@@ -18903,8 +18916,9 @@
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread || threadBusy(thread)) return null;
         const run = codexRuns(thread).find((item) => item.runId === runId);
-        const prompt = thread.messages.findLast((message) => message.role === 'user' &&
-          ((run?.requestId && message.requestId === run.requestId) || (runId && message.runId === runId)));
+        // The run's own request first: a reply sent into the working run carries the same runId but is not its prompt.
+        const prompt = (run?.requestId ? thread.messages.findLast((message) => message.role === 'user' && message.requestId === run.requestId) : null)
+          || thread.messages.findLast((message) => message.role === 'user' && runId && message.runId === runId);
         if (!prompt?.content) { boardNotice('다시 보낼 메시지를 찾지 못했습니다.'); return null; }
         // A plan step resumed in place is not 대표님's message to send again.
         if (ChatState.awaitResumeMessageView(prompt)) { boardNotice('계획 단계에서 이어진 실행은 다시 보내지 않습니다. 작업 목록에서 상태를 확인해 주세요.'); return null; }
@@ -18999,6 +19013,51 @@
           updateThreadById(activeThread.id, thread => ({ ...thread, sendError: ChatState.claudeContextSendErrorText('CLAUDE_CONTEXT_UNSUPPORTED') }));
           emit();
           return;
+        }
+        // D1: the working run asked an early question. The reply is an ordinary user message that goes into that same run (the bridge
+        // steers it in and refuses if the question is no longer open). It starts no turn and carries text only.
+        const replyRun = !activeThread || groupSend || !content || options.memoAskReservation ? null : ChatState.replyRunForThread(protocol, activeThread);
+        if (replyRun) {
+          if (ChatState.nativeBindingHeld(activeThread) || !ChatState.chatThreadReadiness(activeThread, state.codex).ready
+              || !activeThread.conversationId || !ChatState.canResumeNativeThread(activeThread, state.codex.authStatus, state.codex)
+              || activeThread.inputSources?.length || activeThread.briefingInputs?.length || activeThread.requestProjectTarget != null) return;
+          const requestId = `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+          const replyDraft = ChatState.snapshotChatDraft(activeThread, draftText, state.codex.threadDraftRevisions[activeThread.id] || 0);
+          const replyBinding = ChatState.clientThreadBinding(activeThread);
+          const mark = (status, fields = {}) => updateThreadById(activeThread.id, thread => ({ ...thread, ...fields.thread,
+            messages: thread.messages.map(message => message.role === 'user' && message.requestId === requestId ? { ...message, status, ...fields.message } : message) }));
+          replyRun.replyPending = true; // one reply per question; the composer returns to the busy rule at once
+          appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', { readBy: [SELF_MEMBER], requestId, inputReferences: [] }), { countUnread: false });
+          updateThreadById(activeThread.id, thread => ({ ...thread, sendError: null }));
+          state.codex.threadDrafts = { ...state.codex.threadDrafts, [activeThread.id]: '' };
+          state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
+          emit();
+          try {
+            const runtimeConfig = codexThreadRuntimeConfig(activeThread);
+            runtimeConfig.engineId = engineId;
+            runtimeConfig.channelContext = state.codex.channelContextSupported === true;
+            const result = await fetchJson('/chat/send', { method: 'POST',
+              body: JSON.stringify({ ...ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig), inRunReplyTo: replyRun.runId }) });
+            if (result?.accepted !== true || result.inRun !== true || result.runId !== replyRun.runId) throw Object.assign(new Error('reply not taken'), { accepted: false });
+            if (ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) === replyBinding) mark('complete', { message: {
+              conversationId: replyRun.conversationId, runId: replyRun.runId, answerId: replyRun.answerId,
+              ...(typeof result.localMessageId === 'string' && result.localMessageId ? { localMessageId: result.localMessageId } : {}) } });
+            return { requestId, accepted: true, inRun: true };
+          } catch (error) {
+            if (ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) !== replyBinding) return { requestId, accepted: false, status: 'unconfirmed' };
+            const status = ChatState.submissionFailureStatus(error);
+            if (status === 'failed') {
+              // Refused before anything was sent or saved: the question may be closed. The words return to an empty composer.
+              replyRun.replyPending = false;
+              mark('failed', { thread: { sendError: '아직 보낼 수 없습니다.' } });
+              if (ChatState.chatDraftMatches(getCodexThreadById(state.codex, activeThread.id), getCodexThreadDraft(state.codex, activeThread.id), state.codex.threadDraftRevisions[activeThread.id] || 0,
+                { text: '', revision: replyDraft.revision, inputSources: [], briefingInputs: [], requestProjectTarget: null })) {
+                state.codex.threadDrafts = { ...state.codex.threadDrafts, [activeThread.id]: replyDraft.text };
+                state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
+              }
+            } else mark('unconfirmed', { thread: { sendError: '접수 여부를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다.' } });
+            return { requestId, accepted: false, status };
+          } finally { emit(); }
         }
         if (!activeThread || ChatState.nativeBindingHeld(activeThread) || !content || threadBusy(activeThread) || !ChatState.chatThreadReadiness(activeThread, state.codex).ready
             || (activeThread.conversationId && !ChatState.canResumeNativeThread(activeThread, state.codex.authStatus, state.codex))) return;

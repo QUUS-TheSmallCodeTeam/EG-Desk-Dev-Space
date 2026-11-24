@@ -24,6 +24,10 @@ export function separateChatWork(run) {
   }
   return { ...run, messages, activities };
 }
+// An early question the working run asked (bridge events reply.opened / reply.closed): while it is open, one message sent
+// in that DM goes into the same run. Never open on a stored, finished, stopping or blocked run, or while a reply is on its way.
+export const runReplyOpen = run => isRunBusy(run) && !!run.replyOpen && run.replyPending !== true && !run.stopRequested && !run.stopPending
+  && run.status !== 'stopping' && !(run.pendingApprovals?.length) && !(run.pendingUserInputs?.length);
 export const isRunBusy = run => !!run && run.localHistory !== true && !['completed', 'interrupted', 'failed', 'cancelled', 'unavailable'].includes(run.status);
 export const runKey = (conversationId, runId) => `${conversationId}/${runId}`;
 // A Board displays several native conversations. Never use the turn ID alone
@@ -1112,7 +1116,13 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
       if (!knownNote || event.event === 'message.completed') upsert(run.activities, note);
       return run;
     }
-    if (!message) { message = { id, role: 'assistant', content: '', status: 'streaming', createdAt: event.ts }; run.messages.push(message); }
+    // The person's reply to an early question arrives as a completed user message of the same run; everything else is the Agent's.
+    const userRow = details.role === 'user' && event.event === 'message.completed';
+    if (!message) { message = { id, role: userRow ? 'user' : 'assistant', content: '', status: 'streaming', createdAt: event.ts }; run.messages.push(message); }
+    if (userRow) {
+      if (typeof details.clientId === 'string' && details.clientId) message.clientId = details.clientId;
+      if (typeof details.localMessageId === 'string' && details.localMessageId) message.localMessageId = details.localMessageId;
+    }
     // CHAT-03: the store's name for this bubble rides on the event, so a live answer can be moved without a reload.
     if (typeof event.localMessageId === 'string' && event.localMessageId && !message.localMessageId) message.localMessageId = event.localMessageId;
     if (event.event === 'message.started' && !message.content && typeof details.text === 'string') message.content = details.text;
@@ -1163,6 +1173,10 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     // A malformed or late question is dropped; it never becomes answerable.
     const input = publicUserInput(details.userInput || details);
     if (input && isRunBusy(run)) upsert(run.pendingUserInputs ||= [], input, 'userInputId');
+  } else if (event.event === 'reply.opened' || event.event === 'reply.closed') {
+    const messageId = typeof details.messageId === 'string' && details.messageId ? details.messageId : null;
+    run.replyOpen = event.event === 'reply.opened' && messageId && isRunBusy(run) ? { messageId } : null;
+    if (!run.replyOpen) run.replyPending = false;
   } else if (event.event === 'userInput.resolved') {
     run.pendingUserInputs = (run.pendingUserInputs || []).filter(item => item.userInputId !== details.userInputId);
   } else if (event.event === 'subagent.updated') {
@@ -1186,6 +1200,7 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     endComputerUse(run);
     run.pendingApprovals = [];
     run.pendingUserInputs = [];
+    run.replyOpen = null;
     for (const message of run.messages) {
       if (message.status === 'streaming') message.status = run.status === 'completed' ? 'complete' : 'partial';
     }
@@ -1263,7 +1278,7 @@ export function mergeChatSnapshot(state, snapshot, clientThreadId) {
     recordRunSettings(run, { configuration: incoming.parentTurnConfiguration, profileBinding: incoming.profileBinding });
     if (!preserve) {
       const localInputs = run.pendingUserInputs || [];
-      for (const key of ['status', 'stopRequested', 'error', 'summary', 'plan', 'pendingApprovals', 'pendingUserInputs', 'subAgents', 'truncated', 'historyComplete', 'contextCaptures', 'contextEvents', 'briefing']) if (key in incoming) run[key] = copy(incoming[key]);
+      for (const key of ['status', 'stopRequested', 'error', 'summary', 'plan', 'pendingApprovals', 'pendingUserInputs', 'subAgents', 'truncated', 'historyComplete', 'contextCaptures', 'contextEvents', 'briefing', 'replyOpen']) if (key in incoming) run[key] = copy(incoming[key]);
       if ('rateLimit' in incoming && (stream || !run.streamId)) run.rateLimit = rateLimit;
       const quotaError = quotaErrorForRateLimit(publicRunRateLimit(run.rateLimit, run), run.error);
       if (quotaError) run.error = quotaError;
@@ -1304,6 +1319,15 @@ export function runsForThread(state, thread) {
   const live = Object.values(state.runs).filter(run => run.localThreadId === thread.id || run.clientThreadId === clientThreadBinding(thread) || (thread.conversationId && run.conversationId === thread.conversationId));
   const stored = (thread.localRuns || []).filter(run => !live.some(current => sameLocalRun(current, run)));
   return [...stored, ...live];
+}
+
+// D1: the one busy state a message can still be sent into. This DM's only working run asked an early question and nothing
+// else is on its way (no resume, no attachment capture, no request still being submitted). The reply goes into that same run.
+export function replyRunForThread(state, thread) {
+  if (!state || !thread || thread.type !== 'dm' || thread.resuming || thread.preparingInput) return null;
+  if (Object.values(state.requests || {}).some(request => requestBelongsToThread(request, thread) && ['submitting', 'unconfirmed'].includes(request.status))) return null;
+  const busy = runsForThread(state, thread).filter(isRunBusy);
+  return busy.length === 1 && runReplyOpen(busy[0]) ? busy[0] : null;
 }
 
 export function approvalRequestFor(run, approvalId, decision) {
@@ -1474,7 +1498,9 @@ export function projectRunMessages(existing, run, now = Date.now()) {
     ordinal[role] = order + 1;
     const sameTurn = message => message.runId === run.runId && (!message.conversationId || message.conversationId === run.conversationId);
     let index = messages.findIndex(message => sameTurn(message) && (message.providerItemId === incoming.id || message.id === incoming.id));
-    if (index < 0 && role === 'user') {
+    // A reply sent into the working run names its own request: it joins the bubble the person already sees, never the first prompt.
+    if (index < 0 && role === 'user' && incoming.clientId) index = messages.findIndex(message => message.role === 'user' && message.requestId === incoming.clientId);
+    if (index < 0 && role === 'user' && !(incoming.clientId && incoming.clientId !== run.requestId)) {
       const candidates = messages.map((message, i) => ({ message, i })).filter(({ message }) => sameTurn(message) && message.role === 'user');
       const candidate = candidates[order];
       if (candidate && !candidate.message.providerItemId) index = candidate.i;

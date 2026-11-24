@@ -101,7 +101,7 @@ test('advisory account handoff renders product Settings and restores same-DM edi
   const accountKey = ChatState.codexAccountKey(auth);
   const room = { id: 'room', type: 'dm', engineId: 'codex', profileEnabled: true, agentProfileId: profile.id,
     bindingAccountKey: accountKey, bindingState: 'verified', conversationId: 'synthetic-dm', agent: { profileId: profile.id, revision: 1 } };
-  const state = { sourceRefs: { cardsByKey: {} }, codex: { activeThreadId: room.id, hudView: 'conversation', authStatus: auth, connected: true,
+  const state = { sourceRefs: { cardsByKey: {} }, codex: { activeThreadId: room.id, hudView: 'conversation', chatCapabilities: ['choice'], authStatus: auth, connected: true,
     threadDraftRevisions: { room: 0 }, activityRoomGeneration: 1 }, contextSuggest: { byThread: {} } };
   const calls = { chooserGet: [], accountGet: 0, chooserPost: 0, nativeSend: 0, write: 0, other: 0 };
   const status = Object.freeze({ configured: true, mode: 'advisory', boardRevision: 'b'.repeat(64) });
