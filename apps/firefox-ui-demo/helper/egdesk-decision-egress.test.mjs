@@ -142,18 +142,19 @@ test('page_text: allowed -> the Card list is sent; ceiling browser none or no Ca
   }
 })
 
-test('browser_task_record + memory_page: allowed -> the record is judged; no Card grant -> not sent, status unavailable', async () => {
+test('browser_task_record + memory_page: allowed -> the record is stored (by code, L7 c17: no request); no Card grant -> not stored, status unavailable', async () => {
   const wiki = buildWiki(SYNTHETIC_PAGES), log = []
-  const writer = { apply: () => ({ status: 'written' }) }
+  const applied = [], writer = { apply: (...args) => { applied.push(args); return { status: 'written' } } }
   const candidate = { text: '포털에서 세금계산서를 내려받았다. zeta-synthetic-record', taskId: 't1', outcome: { status: 'done' } }
   const memoryPages = [...wiki.pages.values()].filter(page => !page.scope).slice(0, 2)
   const run = options => createOutcomeToOntology({ wiki, client: mockJudge(log), writer, scope: { allowedScopes: [] }, enabled: true, egress: gate({ memoryScope: {}, ...options }) })
     .write(candidate, { memoryPages })
   const before = log.length
   const refused = await run({ toolCeiling: OPEN, browserGranted: false })
-  assert.deepEqual(refused, { status: 'unavailable', reason: 'egress' }); assert.equal(log.length, before, 'no request')
+  assert.deepEqual(refused, { status: 'unavailable', reason: 'egress' }); assert.equal(log.length, before, 'no request'); assert.equal(applied.length, 0, 'nothing stored')
   const allowed = await run({ toolCeiling: OPEN, browserGranted: true })
-  assert.notEqual(allowed.reason, 'egress'); assert.ok(log.length > before, 'the record was judged')
+  assert.deepEqual(allowed, { status: 'written' }); assert.equal(applied.length, 1, 'stored once')
+  assert.equal(log.length, before, 'a system result needs no Decision request at all')
 })
 
 test('memory_page: a page outside the scope is never in a request; no memory permission -> no request', async () => {
