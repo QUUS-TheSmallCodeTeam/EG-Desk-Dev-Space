@@ -1,0 +1,413 @@
+{
+  "set": "draft-overcorrection-v1",
+  "tokenCeiling": 10000,
+  "productBars": {
+    "sup_#": {
+      "yes": 0.301,
+      "no": 0.3,
+      "source": "egdesk-draft-check.mjs readPredicateFindings: unsupported iff p <= 1 - DRAFT_CHECK_THRESHOLDS.finding (declared .001 above it)"
+    },
+    "tense_#": {
+      "yes": 0.7,
+      "no": 0.699,
+      "source": "egdesk-draft-check.mjs: a tense finding iff p >= DRAFT_CHECK_THRESHOLDS.finding"
+    }
+  },
+  "passRule": "A study: every sentence was registered CORRECT or WRONG before the bodies were built. A hard check fails when a CORRECT sentence would get a finding (the product would remove or rewrite it) or a WRONG one would pass. The outcome is the per-sentence rates from scripts/egdesk-draft-overcorrection-plan.mjs analyze, which replays the real answers through the product's checkDraft (on mode).",
+  "requests": [
+    {
+      "id": "c-quote",
+      "file": "requests/c-quote.json",
+      "sha256": "7b33dbea0190529c356a7f22349835ba7265ce2d76083dc54ed1d8d837324c31",
+      "estInputTokens": 1696,
+      "expect": [
+        {
+          "name": "sup_0",
+          "kind": "predicate",
+          "min": 0.301,
+          "severity": "hard",
+          "note": "CORRECT past_fact: not judged unsupported (a finding would remove or rewrite it)"
+        },
+        {
+          "name": "tense_0",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "CORRECT past_fact: no tense finding"
+        },
+        {
+          "name": "sup_0",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "CORRECT past_fact: decided supported"
+        },
+        {
+          "name": "sup_1",
+          "kind": "predicate",
+          "min": 0.301,
+          "severity": "hard",
+          "note": "CORRECT reported_as_reported: not judged unsupported (a finding would remove or rewrite it)"
+        },
+        {
+          "name": "tense_1",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "CORRECT reported_as_reported: no tense finding"
+        },
+        {
+          "name": "sup_1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "CORRECT reported_as_reported: decided supported"
+        },
+        {
+          "name": "sup_2",
+          "kind": "predicate",
+          "min": 0.301,
+          "severity": "hard",
+          "note": "CORRECT plan_as_plan: not judged unsupported (a finding would remove or rewrite it)"
+        },
+        {
+          "name": "tense_2",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "CORRECT plan_as_plan: no tense finding"
+        },
+        {
+          "name": "sup_2",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "CORRECT plan_as_plan: decided supported"
+        },
+        {
+          "name": "sup_3",
+          "kind": "predicate",
+          "min": 0.301,
+          "severity": "hard",
+          "note": "CORRECT past_fact: not judged unsupported (a finding would remove or rewrite it)"
+        },
+        {
+          "name": "tense_3",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "CORRECT past_fact: no tense finding"
+        },
+        {
+          "name": "sup_3",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "CORRECT past_fact: decided supported"
+        }
+      ]
+    },
+    {
+      "id": "c-sales",
+      "file": "requests/c-sales.json",
+      "sha256": "5e2070cee964bb40b8098b0cee7c8d95796f67dd54e669fcc52241a5f42a83ec",
+      "estInputTokens": 881,
+      "expect": [
+        {
+          "name": "sup_0",
+          "kind": "predicate",
+          "min": 0.301,
+          "severity": "hard",
+          "note": "CORRECT past_fact: not judged unsupported (a finding would remove or rewrite it)"
+        },
+        {
+          "name": "tense_0",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "CORRECT past_fact: no tense finding"
+        },
+        {
+          "name": "sup_0",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "CORRECT past_fact: decided supported"
+        },
+        {
+          "name": "sup_1",
+          "kind": "predicate",
+          "min": 0.301,
+          "severity": "hard",
+          "note": "CORRECT plan_as_plan: not judged unsupported (a finding would remove or rewrite it)"
+        },
+        {
+          "name": "tense_1",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "CORRECT plan_as_plan: no tense finding"
+        },
+        {
+          "name": "sup_1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "CORRECT plan_as_plan: decided supported"
+        }
+      ]
+    },
+    {
+      "id": "c-schedule",
+      "file": "requests/c-schedule.json",
+      "sha256": "f7dc3a52aeeb7c9c0b7adc4847439bed85f9575513128987e2fc1491d18ea0d0",
+      "estInputTokens": 2027,
+      "expect": [
+        {
+          "name": "sup_0",
+          "kind": "predicate",
+          "min": 0.301,
+          "severity": "hard",
+          "note": "CORRECT reported_as_reported: not judged unsupported (a finding would remove or rewrite it)"
+        },
+        {
+          "name": "tense_0",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "CORRECT reported_as_reported: no tense finding"
+        },
+        {
+          "name": "sup_0",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "CORRECT reported_as_reported: decided supported"
+        },
+        {
+          "name": "sup_1",
+          "kind": "predicate",
+          "min": 0.301,
+          "severity": "hard",
+          "note": "CORRECT past_fact: not judged unsupported (a finding would remove or rewrite it)"
+        },
+        {
+          "name": "tense_1",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "CORRECT past_fact: no tense finding"
+        },
+        {
+          "name": "sup_1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "CORRECT past_fact: decided supported"
+        },
+        {
+          "name": "sup_2",
+          "kind": "predicate",
+          "min": 0.301,
+          "severity": "hard",
+          "note": "CORRECT plan_as_plan: not judged unsupported (a finding would remove or rewrite it)"
+        },
+        {
+          "name": "tense_2",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "CORRECT plan_as_plan: no tense finding"
+        },
+        {
+          "name": "sup_2",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "CORRECT plan_as_plan: decided supported"
+        },
+        {
+          "name": "tense_3",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "CORRECT reported_as_reported: no tense finding"
+        },
+        {
+          "name": "sup_3",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "CORRECT reported_as_reported: decided supported (not checkable: a low value would not act)"
+        },
+        {
+          "name": "tense_4",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "CORRECT no_claim: no tense finding"
+        },
+        {
+          "name": "sup_4",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "CORRECT no_claim: decided supported (not checkable: a low value would not act)"
+        }
+      ]
+    },
+    {
+      "id": "c-server",
+      "file": "requests/c-server.json",
+      "sha256": "05f7e7782dda430c26e81e2ea45e51b2ae5d4f514a511d176c965c6d34eecfe7",
+      "estInputTokens": 874,
+      "expect": [
+        {
+          "name": "sup_0",
+          "kind": "predicate",
+          "min": 0.301,
+          "severity": "hard",
+          "note": "CORRECT present_fact: not judged unsupported (a finding would remove or rewrite it)"
+        },
+        {
+          "name": "tense_0",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "CORRECT present_fact: no tense finding"
+        },
+        {
+          "name": "sup_0",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "CORRECT present_fact: decided supported"
+        },
+        {
+          "name": "sup_1",
+          "kind": "predicate",
+          "min": 0.301,
+          "severity": "hard",
+          "note": "CORRECT past_fact: not judged unsupported (a finding would remove or rewrite it)"
+        },
+        {
+          "name": "tense_1",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "CORRECT past_fact: no tense finding"
+        },
+        {
+          "name": "sup_1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "CORRECT past_fact: decided supported"
+        }
+      ]
+    },
+    {
+      "id": "w-v2-done",
+      "file": "requests/w-v2-done.json",
+      "sha256": "d08da40114f5dd0afb0e8aa6e349e17ee51d48a777ae8e98cecb83ccd739199a",
+      "estInputTokens": 533,
+      "expect": [
+        {
+          "name": "tense_0",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "WRONG plan_as_done: caught as a tense finding"
+        },
+        {
+          "name": "sup_0",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "soft",
+          "note": "WRONG plan_as_done: also unsupported"
+        }
+      ]
+    },
+    {
+      "id": "w-sales-number",
+      "file": "requests/w-sales-number.json",
+      "sha256": "313495b4bda9abf2cc6b4ad621c43ae2995406b01a7a836e551a926892088b77",
+      "estInputTokens": 520,
+      "expect": [
+        {
+          "name": "sup_0",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "hard",
+          "note": "WRONG wrong_number: judged unsupported"
+        }
+      ]
+    },
+    {
+      "id": "w-vendor-fact",
+      "file": "requests/w-vendor-fact.json",
+      "sha256": "e4ab277e89e28bc41cbea30dac9446e45d69d001606295c14bb47ace2c7be45f",
+      "estInputTokens": 500,
+      "expect": [
+        {
+          "name": "sup_0",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "hard",
+          "note": "WRONG relayed_as_fact: judged unsupported"
+        }
+      ]
+    },
+    {
+      "id": "w-disk-now",
+      "file": "requests/w-disk-now.json",
+      "sha256": "cccc87d44e53f4232d1e494cf1203420063ee02a8fcbb0a6ad970ada0081e9c4",
+      "estInputTokens": 493,
+      "expect": [
+        {
+          "name": "tense_0",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "WRONG past_as_present: caught as a tense finding"
+        },
+        {
+          "name": "sup_0",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "soft",
+          "note": "WRONG past_as_present: also unsupported"
+        }
+      ]
+    },
+    {
+      "id": "w-renew-fact",
+      "file": "requests/w-renew-fact.json",
+      "sha256": "0364222e70a1d4c0a4b058a725a4e9494a6ec86b8899d141180f552af706b30e",
+      "estInputTokens": 862,
+      "expect": [
+        {
+          "name": "tense_0",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "WRONG relayed_as_fact: caught as a tense finding (not checkable: tense is the only way the product can catch it)"
+        },
+        {
+          "name": "tense_1",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "CORRECT reported_as_reported: no tense finding"
+        },
+        {
+          "name": "sup_1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "CORRECT reported_as_reported: decided supported (not checkable: a low value would not act)"
+        }
+      ]
+    }
+  ]
+}
