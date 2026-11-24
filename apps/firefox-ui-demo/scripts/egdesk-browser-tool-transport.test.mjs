@@ -38,7 +38,7 @@ function cardTools({ browser, query, bindingCheck = () => {}, activity = () => {
     `${toolActSource}\nreturn { act: browserToolAct, reconcile: browserToolReconcile }`)(
     bindingCheck, browser, activity, query, { id: 'browser-a' }, BrowserAgentReceipts, remaining, dialogs, scheduler)
 }
-const toolBindingSource = between('    const browserToolBinding = () => {', '    const assertBrowserToolBinding = (expected) => {')
+const toolBindingSource = between('    const browserToolBinding = (roomKey) => {', '    const assertBrowserToolBinding = (expected) => {')
 const interruptBody = between('      async interrupt(threadId = state.codex.activeThreadId) {', '      },\n      subscribe(listener) {')
   .slice('      async interrupt(threadId = state.codex.activeThreadId) {'.length)
 const clearTransportBody = between('    const clearBrowserToolTransport = ({ revoke = false } = {}) => {', '    };\n\n    // Read-only, sampled at call time')
@@ -120,10 +120,10 @@ test('Browser context source identifies exact live Card without silently selecti
   const doc = { getElementById: id => id === 'browser-a' ? card : null }
   const grants = new Map()
   const selectors = new Function('state', 'getCodexThreadById', 'document', 'structuredClone',
-    'browserToolUserSelections', 'chatBindingNonce', 'ChatState', 'BrowserGrant', 'servicesRef',
+    'browserToolUserSelections', 'chatBindingNonce', 'ChatState', 'BrowserGrant', 'servicesRef', 'browserToolRoomKeyFor',
     `${grantSource}\n${selectedSources}\nreturn {registerBrowserToolSelection,browserToolSelectedSources,browserToolThreadGrants,browserToolGrantFor,revokeBrowserToolGrants}`)(state,
     (codex, id) => codex.threads.find(thread => thread.id === id), doc, structuredClone, grants,
-    () => 'explicit-user-token', ChatState, BrowserGrant, servicesRef)
+    () => 'explicit-user-token', ChatState, BrowserGrant, servicesRef, () => undefined /* L1 c25: no room-account flag here: the default sign-in */)
   assert.deepEqual(selectors.browserToolSelectedSources('thread-a'), [])
   const selected = selectors.registerBrowserToolSelection('thread-a', source, 'observe')
   state.codex.threads[0].inputSources = [selected]
@@ -147,10 +147,10 @@ test('BRW-11: a standing interaction grant re-issues the one-time token each tur
   const tokens = new Map()
   let minted = 0
   const selectors = new Function('state', 'getCodexThreadById', 'document', 'structuredClone',
-    'browserToolUserSelections', 'chatBindingNonce', 'ChatState', 'BrowserGrant', 'servicesRef',
+    'browserToolUserSelections', 'chatBindingNonce', 'ChatState', 'BrowserGrant', 'servicesRef', 'browserToolRoomKeyFor',
     `${grantSource}\n${selectedSources}\nreturn {registerBrowserToolSelection,browserToolSelectedSources,browserToolThreadGrants,revokeBrowserToolGrants}`)(state,
     (codex, id) => codex.threads.find(thread => thread.id === id), { getElementById: id => id === 'browser-a' ? card : null }, structuredClone,
-    tokens, () => `token-${++minted}`, ChatState, BrowserGrant, servicesRef)
+    tokens, () => `token-${++minted}`, ChatState, BrowserGrant, servicesRef, () => undefined)
   const selected = selectors.registerBrowserToolSelection('thread-a', source, 'interact')
   state.codex.threads[0].inputSources = [selected]
   assert.equal(selectors.browserToolThreadGrants.size, 1, 'an interaction pick is a standing grant for the conversation')
@@ -254,12 +254,13 @@ function fixture() {
   const transport = new Function('document', 'ChatState', 'browserToolRunBindings', 'browserToolCancelledRuns',
     'browserToolRequestReceipts', 'browserToolCardLeases', 'browserToolUserSelections', 'browserToolPendingBindings',
     'browserToolActionLeases', 'browserToolStoppedRuns', 'chatBindingNonce', 'Date', 'performance', 'BROWSER_TOOL_REPLY_MARGIN_MS',
-    'BrowserGrant', 'servicesRef',
+    'BrowserGrant', 'servicesRef', 'browserToolRoomKeyFor', 'browserToolRoomKeyOf', 'browserToolBindingRooms',
     `let browserToolFixtureLastAction = null;\nconst browserToolFixtureAuthorizationByCard = new Map();\n${grantSource}\n${dispatchSource}\n` +
     'return {browserToolDispatch,browserToolAuthorizePhysicalAction,browserToolFixtureActionDiagnostic,browserToolThreadGrants,browserToolThreadSites}')(doc,
     { knownCodexAccountKey: key => typeof key === 'string' && key.startsWith('codex:') },
     runBindings, cancelled, receipts, leases, userSelections, pendingBindings, actionLeases, stoppedRuns,
-    () => `lease-${++nonce}`, { now: () => clockMs }, { timeOrigin: 0, now: () => clockMs }, 500, BrowserGrant, servicesRef)
+    () => `lease-${++nonce}`, { now: () => clockMs }, { timeOrigin: 0, now: () => clockMs }, 500, BrowserGrant, servicesRef,
+    () => undefined, () => undefined, new WeakMap() /* L1 c25: no room-account flag here: the default sign-in */)
   authorizePhysicalAction = transport.browserToolAuthorizePhysicalAction
   let sequence = 0
   const req = (kind, extra = {}) => ({ version: 1, requestId: `request-${++sequence}`,
@@ -290,9 +291,9 @@ function projectionFixture(f = fixture()) {
     '  function browserToolAuthorizePhysicalAction(')
   const { createBrowserAgentProjection, browserToolDisplayPoint, browserToolProjectionCurrent } = new Function(
     'browserToolActionLeases', 'browserToolRunBindings', 'browserToolCardLeases',
-    'browserToolCancelledRuns', 'browserToolStoppedRuns', `${projectionSource}\n` +
+    'browserToolCancelledRuns', 'browserToolStoppedRuns', 'browserToolRoomKeyOf', `${projectionSource}\n` +
     'return {createBrowserAgentProjection,browserToolDisplayPoint,browserToolProjectionCurrent}')(
-    f.actionLeases, f.runBindings, f.leases, f.cancelled, f.stoppedRuns)
+    f.actionLeases, f.runBindings, f.leases, f.cancelled, f.stoppedRuns, () => undefined /* L1 c25: no room-account flag here */)
   let seq = 0
   const timers = new Map(), frames = new Map()
   const scheduler = {

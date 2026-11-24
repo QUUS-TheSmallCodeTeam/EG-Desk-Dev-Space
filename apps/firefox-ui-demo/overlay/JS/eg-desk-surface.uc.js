@@ -24102,7 +24102,7 @@
   const browserToolBindingRooms = new WeakMap();
   function browserToolRoomKeyFor(clientThreadId) {
     if (typeof clientThreadId !== 'string' || !clientThreadId) return undefined;
-    const thread = state.codex.threads.find(item => ChatState.clientThreadBinding(item) === clientThreadId);
+    const thread = state.codex?.threads?.find(item => ChatState.clientThreadBinding(item) === clientThreadId);
     return thread ? (ChatState.roomAccountScope(thread, state.codex).accountKey || null) : undefined;
   }
   const browserToolRoomKeyOf = binding => (binding && browserToolBindingRooms.has(binding) ? browserToolRoomKeyFor(browserToolBindingRooms.get(binding)) : undefined);
