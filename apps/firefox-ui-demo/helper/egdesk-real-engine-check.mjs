@@ -377,12 +377,13 @@ export async function runConversation({ options, set, conversation, deps = {} })
     // verified (inspectNativeCapabilities → boardPeerContract). The check reads the same thing from the given binary (it runs the binary's
     // --version and schema generation, as the bridge does at start) and records it; without a contract the message stays pending and is carried.
     let nativeContract = null
-    if (FLAG.EGDESK_INRUN_MESSAGES === 'on') {
+    const needsNative = FLAG.EGDESK_INRUN_MESSAGES === 'on' || conversation.turns.some(t => t.action === 'steer' || t.action === 'delete')
+    if (needsNative) {
       try { nativeContract = (deps.inspectNative ?? inspectNativeCapabilities)({ executable: options.codexBin, env: childEnv(options, env), cwd: dataDir }) } catch { nativeContract = null }
-      rec.engine.nativeContract = { version: nativeContract?.version ?? null, schemaMatch: nativeContract?.schemaMatch === true, boardPeerContract: typeof nativeContract?.boardPeerContract === 'string', steerContract: typeof nativeContract?.steerContract === 'string' }
+      rec.engine.nativeContract = { version: nativeContract?.version ?? null, schemaMatch: nativeContract?.schemaMatch === true, boardPeerContract: typeof nativeContract?.boardPeerContract === 'string', steerContract: typeof nativeContract?.steerContract === 'string', threadDelete: nativeContract?.threadDelete === true }
     }
     chat = new CodexChatRuntime({ request, respond,
-      ...(FLAG.EGDESK_INRUN_MESSAGES === 'on' ? { getBoardPeerContract: () => nativeContract?.boardPeerContract ?? null, getSteerContract: () => nativeContract?.steerContract ?? null } : {}), emit: () => {}, emitLegacy: () => {}, store, requireStore: true, contexts, getOwnerKey: () => OWNER, verifyFile: async () => null, resolveProjectWorkspace: async () => null,
+      ...(needsNative ? { getBoardPeerContract: () => nativeContract?.boardPeerContract ?? null, getSteerContract: () => nativeContract?.steerContract ?? null, getThreadDelete: () => nativeContract?.threadDelete === true } : {}), emit: () => {}, emitLegacy: () => {}, store, requireStore: true, contexts, getOwnerKey: () => OWNER, verifyFile: async () => null, resolveProjectWorkspace: async () => null,
       toolProviders: wiring.toolProviders, ownTools: wiring.ownTools, decisionContext,
       roomAccount: { mode: () => (FLAG.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') } })
     chat.setConnection(true)
@@ -426,13 +427,52 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const readFiles = turn => Object.fromEntries(Object.keys(turn.expect?.files ?? {}).map(p => [p, readScratchFile(scratch, p)]))
     const undoCount = () => wiring.files?.undoRecords?.({ conversationId: nativeThread })?.length ?? 0
 
+    // an engine-level action on the previous turn's working run, afterMs after that turn started (the person's own message is whileRunning, above)
+    const engineAction = async (kind, ctx, step) => {
+      const afterMs = step.afterMs ?? 0
+      const wait = afterMs - (performance.now() - ctx.started)
+      if (wait > 0) await sleep(wait)
+      const mark = { afterMs, sentAtMs: ms(ctx.started), tools: turnNow.toolCalls.size, ran: runnerLog.length, posted: assistantTexts().length, accepted: false, error: null }
+      try {
+        if (kind === 'interrupt') mark.accepted = (await chat.interrupt({ conversationId: nativeThread, runId: ctx.run.runId }))?.accepted === true
+        else {
+          // the product's own steer path: its engine adapter, with the proof of this binary's steer contract
+          const engine = chat.engineOf(nativeThread), slot = chat.threadOperationSlot(nativeThread)
+          const proof = engine?.steerContract?.(slot) ?? engine?.boardPeerContract?.(slot)
+          if (!proof) mark.error = 'no_steer_contract'
+          else mark.accepted = (await engine.steerTurn({ threadId: nativeThread, expectedTurnId: ctx.run.runId, clientUserMessageId: `steer-${++requestSeq}`, input: [{ type: 'text', text: step.say, text_elements: [] }] }, slot, proof))?.turnId === ctx.run.runId
+        }
+      } catch (error) { mark.error = String(error?.code ?? error?.message ?? 'error').slice(0, 60) }
+      return mark
+    }
+    // the person deletes the conversation (the surface's delete: forgetConversation); the next message turn starts a new one
+    let generation = 0
+    const deleteTurn = async (index, turn) => {
+      const key = clientThreadId
+      let out = null, error = null
+      try { out = await chat.forgetConversation({ clientThreadId: key }) } catch (e) { error = String(e?.code ?? e?.message ?? 'error').slice(0, 60) }
+      let stored = null, messages = null
+      try { stored = Boolean(store.getConversation?.(key)) } catch { stored = null }
+      // a conversation the store no longer knows has no message list: listing it throws, which is the answer (0 messages)
+      try { messages = store.listMessages(key, { limit: 5 }).messages.length } catch { messages = stored === false ? 0 : null }
+      const gone = stored === false && messages === 0
+      const summary = out ? { stored, messages, interrupted: out.interrupted ?? 0, history: out.history ?? null, engineHistory: (out.engineHistory ?? []).map(h => ({ state: h.state, reason: h.reason ?? null })) } : null
+      const expectations = [{ check: 'action_taken', ok: out?.accepted === true, detail: { error } }, ...checkTurnExpectations(turn.expect ?? {}, { conversationGone: gone, posted: [], toolCalls: [], native: { commandExecution: 0, fileChange: 0, approvals: 0 } })]
+      rec.turns.push({ index: index + 1, action: 'delete', approve: [], subTurns: [{ action: 'delete', accepted: out?.accepted === true, error, conversationGone: gone, summary }], posted: [], asked: 0, undoRecords: undoCount(), expectations, ok: expectations.every(e => e.ok) })
+      clientThreadId = `check-${conversation.id}-${++generation}`; nativeThread = null; first = true; seen = 0
+    }
+
     for (let index = 0; index < conversation.turns.length; index++) {
       if (rec.aborted || closed) break
-      const turn = conversation.turns[index], next = conversation.turns[index + 1], withMessage = next?.whileRunning !== undefined
+      const turn = conversation.turns[index], next = conversation.turns[index + 1]
+      if (turn.action === 'delete') { await deleteTurn(index, turn); continue }
+      // a message turn takes at most one follow-up: a person's message typed into the run (whileRunning), or an engine-level interrupt / steer
+      const follow = next?.whileRunning !== undefined ? 'message' : (next?.action === 'interrupt' || next?.action === 'steer') ? next.action : null, withMessage = follow !== null
       const sub = [], ledger = wiring.ledger
       let asked = 0, mark = null
       const ctx = await beginTurn(turn.say)
-      if (withMessage) mark = await sendInRun(ctx, next.say, next.whileRunning.afterMs)
+      if (follow === 'message') mark = await sendInRun(ctx, next.say, next.whileRunning.afterMs)
+      else if (follow) mark = await engineAction(follow, ctx, next)
       sub.push(await finishTurn(ctx))
       for (const answer of turn.approve ?? []) {
         if (rec.aborted || closed || !nativeThread) break
@@ -458,8 +498,9 @@ export async function runConversation({ options, set, conversation, deps = {} })
         // the message typed into the run: what happened after it was sent
         const prev = sub[0], after = texts.slice(mark.posted)
         const flat2 = { toolCalls: prev.toolCalls.slice(mark.tools), native: prev.native, posted: after, asked, commandsRan: prev.commandsRan.slice(mark.ran), files: readFiles(next), undoRecords: undoCount(), turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted) }
-        const expect2 = [{ check: 'sent_while_running', ok: mark.accepted, detail: { afterMs: mark.afterMs, sentAtMs: mark.sentAtMs, error: mark.error } }, ...checkTurnExpectations(next.expect ?? {}, flat2)]
-        rec.turns.push({ index: index + 2, say: clip(next.say, 200), approve: [], whileRunning: { afterMs: mark.afterMs }, subTurns: [{ whileRunning: true, accepted: mark.accepted, error: mark.error, sentAtMs: mark.sentAtMs }],
+        const implicit = follow === 'message' ? 'sent_while_running' : 'action_taken'
+        const expect2 = [{ check: implicit, ok: mark.accepted, detail: { afterMs: mark.afterMs, sentAtMs: mark.sentAtMs, error: mark.error } }, ...checkTurnExpectations(next.expect ?? {}, flat2)]
+        rec.turns.push({ index: index + 2, say: clip(next.say ?? '', 200), approve: [], ...(follow === 'message' ? { whileRunning: { afterMs: mark.afterMs } } : { action: follow, afterMs: mark.afterMs }), subTurns: [{ ...(follow === 'message' ? { whileRunning: true } : { action: follow }), accepted: mark.accepted, error: mark.error, sentAtMs: mark.sentAtMs }],
           posted: after, asked, undoRecords: flat2.undoRecords, expectations: expect2, ok: expect2.every(e => e.ok) && !sub.some(failedRun) })
         index++
       }

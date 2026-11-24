@@ -39,9 +39,10 @@ test('the overrides switch the person\'s own MCP servers off by name, plugins by
   assert.deepEqual(config.features.code_mode, { enabled: false })
   assert.deepEqual(config.skills, { include_instructions: false, bundled: { enabled: false } })
   assert.equal(config.include_apps_instructions, false)
+  assert.deepEqual(config.memories, { use_memories: false, generate_memories: false })
   assert.doesNotMatch(JSON.stringify(config), /synthetic-notes-server/, 'a declaration is read for its shape, never copied')
   // no inventory: the switches only, nothing guessed by name
-  assert.deepEqual(Object.keys(ownToolsIsolationOverrides().config).sort(), ['features', 'include_apps_instructions', 'include_permissions_instructions', 'skills'])
+  assert.deepEqual(Object.keys(ownToolsIsolationOverrides().config).sort(), ['features', 'include_apps_instructions', 'include_permissions_instructions', 'memories', 'skills'])
 })
 
 test('loading never throws: an unreadable inventory is reported as unchecked and keeps the switches', async () => {

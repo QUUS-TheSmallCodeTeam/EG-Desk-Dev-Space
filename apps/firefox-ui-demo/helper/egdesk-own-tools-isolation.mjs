@@ -45,6 +45,8 @@ export function ownToolsIsolationOverrides(servers = null, directIds = null) {
     skills: { include_instructions: false, bundled: { enabled: false } },
     include_apps_instructions: false,
     include_permissions_instructions: false,
+    // 0.171 MemoriesToml: no memory usage instructions in the developer prompt, and an EG-Desk thread is never turned into the person's Codex memories
+    memories: { use_memories: false, generate_memories: false },
   }
   if (Array.isArray(servers) && directIds instanceof Set) {
     const { mcp_servers, plugins } = disabledNativeMcpConfig(servers, directIds)

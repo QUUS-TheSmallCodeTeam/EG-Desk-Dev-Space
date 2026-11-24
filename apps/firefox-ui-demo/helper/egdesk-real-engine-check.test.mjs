@@ -441,7 +441,7 @@ test('whileRunning: the second message goes into the working run (no new turn), 
   assert.equal(second.subTurns[0].accepted, true); assert.equal(second.expectations[0].check, 'sent_while_running'); assert.ok(second.subTurns[0].sentAtMs >= 60 && second.subTurns[0].sentAtMs < 400, 'sent ' + second.subTurns[0].sentAtMs + ' ms after the first turn started')
   assert.match(second.posted.at(-1), /tests passed/, 'the messages after it was sent include the run\'s own answer')
   assert.equal(wireLog(w).filter(m => m.dir === 'in' && m.method === 'turn/start').length, 1, 'the message typed into the run started no turn of its own')
-  assert.deepEqual(rec.engine.nativeContract, { version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: false, steerContract: false }, 'no steer contract on this (stubbed) binary')
+  assert.deepEqual(rec.engine.nativeContract, { version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: false, steerContract: false, threadDelete: false }, 'no steer contract on this (stubbed) binary')
   noSchemaErrors(w)
 })
 
@@ -455,4 +455,95 @@ test('whileRunning: a run that ended before afterMs no longer takes the message;
   assert.deepEqual(second.expectations[0], { check: 'sent_while_running', ok: false, detail: { afterMs: 500, sentAtMs: second.expectations[0].detail.sentAtMs, error: 'INRUN_MESSAGE_UNAVAILABLE' } })
   assert.equal(rec.turns[0].ok, true, 'the first turn is judged on its own record'); assert.equal(rec.ok, false)
   assert.equal(rec.engine.nativeContract.boardPeerContract, true)
+})
+
+// ---- action turns: interrupt, steer, delete (c23; field names agreed with lane L3) ----
+test('action turns: the validator takes interrupt, steer and delete with their own rules', () => {
+  const base = turns => ({ set: 'real-engine-a-v1', conversations: [{ id: 'c', turns }] })
+  const errors = turns => validateEngineScript(base(turns)).errors.join('\n')
+  for (const turns of [[{ say: 'a' }, { action: 'interrupt', afterMs: 100 }], [{ say: 'a' }, { action: 'steer', say: 'b', afterMs: 5 }], [{ say: 'a' }, { action: 'delete', expect: { conversationGone: true } }, { say: 'b' }], [{ say: 'a' }, { action: 'interrupt' }]]) assert.equal(errors(turns), '')
+  assert.match(errors([{ action: 'delete' }]), /cannot be the first turn/)
+  assert.match(errors([{ say: 'a' }, { action: 'steer' }]), /steer needs a string/)
+  assert.match(errors([{ say: 'a' }, { action: 'interrupt', say: 'x' }]), /interrupt takes no say/)
+  assert.match(errors([{ say: 'a' }, { action: 'delete', say: 'x' }]), /delete takes no say/)
+  assert.match(errors([{ say: 'a' }, { action: 'delete', afterMs: 1 }]), /delete takes no afterMs/)
+  assert.match(errors([{ say: 'a' }, { action: 'interrupt', afterMs: 120001 }]), /afterMs/)
+  assert.match(errors([{ say: 'a' }, { action: 'pause' }]), /one of interrupt, steer, delete/)
+  assert.match(errors([{ say: 'a', afterMs: 3 }]), /only an interrupt or steer action takes afterMs/)
+  assert.match(errors([{ say: 'a' }, { action: 'delete', approve: ['no'] }]), /takes no approve/)
+  assert.match(errors([{ say: 'a' }, { action: 'interrupt', whileRunning: { afterMs: 1 } }]), /not also a whileRunning/)
+  assert.match(errors([{ say: 'a' }, { action: 'interrupt' }, { action: 'steer', say: 'b' }]), /must follow a plain message turn/)
+  assert.match(errors([{ say: 'a' }, { action: 'interrupt' }, { say: 'b', whileRunning: { afterMs: 1 } }]), /cannot follow an action turn/)
+  assert.match(errors([{ say: 'a' }, { say: 'b' }, { expect: {} }]), /say/)
+  assert.deepEqual(REAL_ENGINE_SCRIPT_SCHEMA.properties.conversations.items.properties.turns.items.properties.action.enum, ['interrupt', 'steer', 'delete'])
+  // the new expectations
+  assert.equal(checkTurnExpectations({ commandsRanIncludes: ['a.txt', 'b'], commandsRanExcludes: ['rm'] }, { commandsRan: ['cat a.txt && echo b'] }).every(c => c.ok), true, 'substrings, for a model that batches commands')
+  assert.equal(checkTurnExpectations({ commandsRanIncludes: ['zzz'] }, { commandsRan: ['ls'] })[0].ok, false)
+  assert.equal(checkTurnExpectations({ commandsRanExcludes: ['push'] }, { commandsRan: ['git push origin'] })[0].ok, false)
+  assert.equal(checkTurnExpectations({ conversationGone: true }, { conversationGone: true })[0].ok, true)
+  assert.equal(checkTurnExpectations({ conversationGone: true }, {})[0].ok, false)
+})
+
+const SLOW = { set: 'real-engine-slow-actions-v1', conversations: [{ id: 'slow-actions', folder: { 'README.md': 'x\n' }, turns: [
+  { say: 'Do the long job', expect: { turnStatus: 'interrupted', posted: false } },
+  { action: 'interrupt', afterMs: 80, expect: { noNativeTools: true } }] }] }
+
+test('interrupt action: the person presses stop on the working run; the engine ends it as interrupted and nothing partial is posted', async t => {
+  const w = world(t, { turns: [{ steps: [{ delayMs: 2000 }], final: 'The job is done.' }] })
+  const started = performance.now()
+  const rec = only(await runCheck(w.options, asScripts(SLOW), w.deps))
+  assert.ok(performance.now() - started < 1800, 'the run did not go on to its end')
+  assert.equal(rec.aborted, null); assert.equal(rec.turns.length, 2)
+  const [first, second] = rec.turns
+  assert.equal(first.subTurns[0].status, 'interrupted'); assert.equal(first.ok, true, JSON.stringify(first.expectations)); assert.deepEqual(first.posted, [])
+  assert.equal(second.action, 'interrupt'); assert.equal(second.subTurns[0].accepted, true); assert.equal(second.expectations[0].check, 'action_taken'); assert.equal(second.ok, true, JSON.stringify(second.expectations))
+  assert.ok(second.subTurns[0].sentAtMs >= 80)
+  assert.equal(wireLog(w).filter(m => m.dir === 'in' && m.method === 'turn/interrupt').length, 1)
+  assert.equal(rec.ok, true); noSchemaErrors(w)
+})
+
+const STEER = { set: 'real-engine-steer-v1', conversations: [{ id: 'steer', folder: { 'plan.md': 'a\nb\n' }, turns: [
+  { say: 'Read plan.md and summarise it', expect: { answerIncludes: ['only the names'], turnStatus: 'completed', posted: true } },
+  { action: 'steer', say: 'Only give me the names', afterMs: 80, expect: { posted: true } }] }] }
+
+test('steer action: a plain turn/steer into the working turn through the product\'s adapter with the binary\'s steer contract; no contract, no steer', async t => {
+  const fake = { turns: [{ steps: [{ delayMs: 300 }], final: 'a long summary', steerFinal: 'only the names: a, b' }] }
+  const w = world(t, fake)
+  w.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: null, steerContract: 'd'.repeat(64) })
+  const rec = only(await runCheck(w.options, asScripts(STEER), w.deps))
+  assert.equal(rec.aborted, null)
+  const [first, second] = rec.turns
+  assert.equal(second.action, 'steer'); assert.equal(second.subTurns[0].accepted, true, JSON.stringify(second.subTurns)); assert.equal(second.ok, true, JSON.stringify(second.expectations))
+  assert.equal(first.ok, true, JSON.stringify(first.expectations)); assert.equal(first.subTurns[0].status, 'completed'); assert.equal(first.subTurns[0].items.userMessage, 2, 'the steer text appears as a user message inside the running turn')
+  const steer = wireLog(w).find(m => m.dir === 'in' && m.method === 'turn/steer').params
+  const turnId = wireLog(w).find(m => m.dir === 'out' && m.result?.turn?.id)?.result.turn.id
+  assert.ok(turnId); assert.equal(steer.expectedTurnId, turnId, 'the steer names the running turn'); assert.equal(steer.input[0].text, 'Only give me the names'); assert.match(steer.clientUserMessageId, /^steer-/)
+  assert.equal(wireLog(w).filter(m => m.dir === 'in' && m.method === 'turn/start').length, 1, 'a steer starts no turn')
+  assert.deepEqual(rec.engine.nativeContract, { version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: false, steerContract: true, threadDelete: false })
+  noSchemaErrors(w)
+  // a binary without the capability: the product refuses with no proof, the check says so, the turn itself still completes
+  const none = world(t, fake)
+  none.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: null, steerContract: null })
+  const refused = only(await runCheck(none.options, asScripts(STEER), none.deps))
+  assert.equal(refused.turns[1].ok, false); assert.equal(refused.turns[1].subTurns[0].error, 'no_steer_contract'); assert.equal(refused.turns[1].expectations[0].check, 'action_taken')
+  assert.equal(wireLog(none).filter(m => m.dir === 'in' && m.method === 'turn/steer').length, 0, 'nothing was sent')
+  assert.equal(refused.turns[0].subTurns[0].status, 'completed')
+  assert.equal(refused.turns[0].ok, false, 'the first turn expected the steered answer')
+})
+
+test('delete action: the conversation is forgotten; the next message turn starts a new one (new thread, nothing remembered)', async t => {
+  const script = { set: 'real-engine-delete-v1', conversations: [{ id: 'del', turns: [
+    { say: 'remember this', expect: { posted: true, turnStatus: 'completed' } },
+    { action: 'delete', expect: { conversationGone: true } },
+    { say: 'what did I say?', expect: { posted: true, answerIncludes: ['nothing'] } }] }] }
+  const w = world(t, { turns: [{ steps: [], final: 'ok, noted' }, { steps: [], final: 'nothing yet' }] })
+  w.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: null, steerContract: null, threadDelete: false })
+  const rec = only(await runCheck(w.options, asScripts(script), w.deps))
+  assert.equal(rec.aborted, null); assert.equal(rec.turns.length, 3)
+  const [, del, third] = rec.turns
+  assert.equal(del.action, 'delete'); assert.equal(del.subTurns[0].conversationGone, true); assert.equal(del.subTurns[0].summary.stored, false); assert.equal(del.ok, true, JSON.stringify(del.expectations))
+  assert.deepEqual(del.subTurns[0].summary.engineHistory, [{ state: 'remains', reason: 'unsupported' }], 'this binary has no thread/delete: the engine keeps its (ephemeral) thread')
+  assert.equal(third.ok, true, JSON.stringify(third.expectations)); assert.deepEqual(third.posted, ['nothing yet'])
+  assert.equal(wireLog(w).filter(m => m.dir === 'in' && m.method === 'thread/start').length, 2, 'two native threads: the new conversation is a new thread')
+  assert.equal(rec.ok, true); noSchemaErrors(w)
 })
