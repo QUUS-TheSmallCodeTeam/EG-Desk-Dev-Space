@@ -3050,8 +3050,12 @@ export class CodexChatRuntime {
         }
       }
       if (decision) this.noteDecisionContext(run, decision)
-      this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...(memoryPacket || memoryNote ? [TURN_MEMORY_KEY] : [])],
-        memoryReady ? this.turnMemoryDraftEvidence(memoryTurn, memoryPacket !== null, run.conversationId) : [])
+      // c26 (L2 c22 finding): the memory pages reach the check as evidence items (turnMemoryDraftEvidence: the same pages the model got, a guarded page as an opaque item of its own).
+      // The generic opaque reference for the memory key stood next to them and switched the unsupported-sentence rule off for every turn that carried memory; it stays only where
+      // the items do not cover what the model received (fewer page items than packet pages, or a confirmation note, which is model-seen text not in the items).
+      const memoryItems = memoryReady ? this.turnMemoryDraftEvidence(memoryTurn, memoryPacket !== null, run.conversationId) : []
+      const memoryCovered = this.memoryKeyCovered(memoryItems, memoryTurn, memoryPacket, memoryNote)
+      this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...((memoryPacket || memoryNote) && !memoryCovered ? [TURN_MEMORY_KEY] : [])], memoryItems)
       if (decision?.late) this.noteLateDecisionContext(run, decision)
       this.startConversationFlow(run, body, context)
       this.turnMemoryLatest.delete(run.conversationId) // this turn is now the conversation's latest: the previous turn's materials end here
@@ -6884,6 +6888,13 @@ export class CodexChatRuntime {
   }
 
   draftCheckIdle() { return Promise.allSettled([...this.draftCheckRuns]) }
+
+  // c26: true when the memory pages as evidence items stand for everything the memory key carried (so no opaque reference is needed): at least one page item, as many page items
+  // as pages in the packet (a packet page the check could not be given as an item is content the checker has not read), and no confirmation note (model-seen text outside the items).
+  memoryKeyCovered(memoryItems, memoryTurn, memoryPacket, memoryNote) {
+    const packetPages = memoryPacket ? (memoryTurn?.result?.memory?.packetParts?.blocks?.length ?? Number.POSITIVE_INFINITY) : 0
+    return Array.isArray(memoryItems) && memoryItems.length > 0 && !memoryNote && memoryItems.filter(item => /^mem\d+$/.test(item?.id)).length >= packetPages
+  }
 
   noteDraftCheckTurn(run, body, context, decision, bounded, extraKeys = [], memoryItems = []) {
     // L1 c14: what the person wrote for this run, kept whatever the draft check's mode (the heartbeat's and placement's questions read it through

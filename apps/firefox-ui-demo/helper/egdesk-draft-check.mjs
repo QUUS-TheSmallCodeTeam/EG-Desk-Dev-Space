@@ -164,9 +164,26 @@ function boundedEvidence(items) {
   const limit = DRAFT_CHECK_LIMITS.evidenceItems
   return opaque.length ? [...content.slice(0, limit - 1), ...opaque.slice(0, Math.max(1, limit - content.length))] : content.slice(0, limit)
 }
-const normalizedEvidence = items => boundedEvidence(items).map((item, index) => ({ id: String(item.id ?? `item${index + 1}`), kind: item.kind ?? null, time: item.time ?? 'unknown',
-    status: item.status ?? null, source: item.source ?? null, opaque: item.opaque === true,
-    text: item.opaque === true ? '(content not available to the checker)' : compactText(item.text, DRAFT_CHECK_LIMITS.evidenceChars) }))
+// c26 (L2 c22 finding, Main HIGH): a turn with turn memory gave the check ONE opaque reference for the memory key although the pages are evidence items, and an
+// unsupported sentence is ignored while any evidence is opaque, so with memory attached only the tense question could flag ("40% 줄었습니다" against a page saying 18%
+// posted at judge .03). What the checker cannot read is now named exactly: `cut` marks an item whose text was shortened for the check (or that the item limit left out), and
+// the evidence the run's gate withheld is one opaque reference (checkDraft); everything else is read, and a sentence the readable evidence does not support is caught.
+function cutEvidence(items, kept) {
+  const usable = (Array.isArray(items) ? items : []).filter(item => item?.opaque === true || (typeof item?.text === 'string' && item.text.trim()))
+  const content = usable.filter(item => item.opaque !== true), opaque = usable.filter(item => item.opaque === true)
+  const room = opaque.length ? Math.max(0, DRAFT_CHECK_LIMITS.evidenceItems - 1) : DRAFT_CHECK_LIMITS.evidenceItems
+  return { leftOut: content.length > room, kept }
+}
+const normalizedEvidence = items => {
+  const bounded = boundedEvidence(items), leftOut = cutEvidence(items, bounded).leftOut
+  const rows = bounded.map((item, index) => {
+    const opaque = item.opaque === true, full = opaque ? '' : compactText(item.text, 1_000_000), text = opaque ? '(content not available to the checker)' : compactText(item.text, DRAFT_CHECK_LIMITS.evidenceChars)
+    return { id: String(item.id ?? `item${index + 1}`), kind: item.kind ?? null, time: item.time ?? 'unknown', status: item.status ?? null, source: item.source ?? null, opaque, cut: !opaque && (item.cut === true || full.length > text.length), text }
+  })
+  if (leftOut) { const last = rows.findLastIndex(row => !row.opaque); if (last >= 0) rows[last].cut = true }
+  return rows
+}
+const unseen = evidence => evidence.some(item => item.opaque || item.cut)
 
 const words = text => new Set(lower(text).match(/[\p{L}\p{N}_]{3,}/gu) ?? [])
 /** Evidence items that share at least one distinctive word with a sentence (fixed lexical overlap, no judgment). */
@@ -222,7 +239,7 @@ function buildPredicateRequest({ claims, terms, evidence }) {
 }
 function readPredicateFindings({ answers, claims, terms, evidence }) {
   const findings = [], judgments = [], bar = DRAFT_CHECK_THRESHOLDS.finding
-  const opaque = evidence.some(item => item.opaque)
+  const opaque = unseen(evidence)
   claims.forEach((span, i) => {
     const sup = readPredicate(answers, `sup_${i}`, bar), tense = readPredicate(answers, `tense_${i}`, bar)
     const near = related(span.text, evidence).map(item => ({ id: item.id, time: item.time, status: item.status }))
@@ -248,12 +265,12 @@ function readFindings({ answers, claims, terms, evidence, thresholds, checkableO
     const present = readPredicate(answers, `present_${i}`, DRAFT_CHECK_THRESHOLDS.finding)
     const near = related(span.text, evidence).map(item => ({ id: item.id, time: item.time, status: item.status }))
     const answer = answers?.[`claim_${i}`]
-    judgments.push({ q: 'claim_support', would: support.state === 'accepted' && (support.value === 'contradicted' || (!evidence.some(item => item.opaque) && isCheckable(span.text) && (support.value === 'not_mentioned' || support.value === 'insufficient'))) ? 'reject' : support.state === 'accepted' ? 'accept' : 'unknown',
+    judgments.push({ q: 'claim_support', would: support.state === 'accepted' && (support.value === 'contradicted' || (!unseen(evidence) && isCheckable(span.text) && (support.value === 'not_mentioned' || support.value === 'insufficient'))) ? 'reject' : support.state === 'accepted' ? 'accept' : 'unknown',
       value: support.state === 'accepted' ? support.value : null, confidence: answer?.confidence, top: answer?.probabilities?.[0]?.probability, second: answer?.probabilities?.[1]?.probability,
       options: CLAIM_SUPPORT.length, threshold: thresholds.choice, minMargin: thresholds.margin })
     judgments.push({ q: 'claim_present', would: present.state === 'yes' ? 'reject' : present.state === 'no' ? 'accept' : 'unknown', p: present.probability, threshold: DRAFT_CHECK_THRESHOLDS.finding })
     if (support.state === 'accepted' && support.value === 'contradicted') findings.push({ kind: 'contradicted', span: i, evidence: near })
-    else if (!evidence.some(item => item.opaque) && support.state === 'accepted' && (support.value === 'not_mentioned' || support.value === 'insufficient') && isCheckable(span.text)) findings.push({ kind: 'unverified', span: i, evidence: near })
+    else if (!unseen(evidence) && support.state === 'accepted' && (support.value === 'not_mentioned' || support.value === 'insufficient') && isCheckable(span.text)) findings.push({ kind: 'unverified', span: i, evidence: near })
     if (present.state === 'yes') findings.push({ kind: 'present_tense', span: i, evidence: near.filter(item => item.time !== 'present') })
   })
   terms.forEach((t, i) => {
@@ -362,7 +379,10 @@ export async function checkDraft({ draft, evidence = [], userText = '', internal
   if (egress && !egress.allows('draft_text')) return out(draft, 'unchecked', { fallback: 'evidence_unavailable' })
   const started = now()
   const thresholds = decisionThresholds(overrides)
-  const proof = normalizedEvidence(egress ? egress.filterEvidence(evidence) : evidence)
+  // What the run's gate keeps out of the check is content the model had and the checker may not read: one opaque reference stands for it (not a silent absence).
+  const allowedEvidence = egress ? egress.filterEvidence(evidence) : evidence
+  const withheld = egress && (Array.isArray(evidence) ? evidence : []).filter(item => item?.opaque !== true).length > allowedEvidence.filter(item => item?.opaque !== true).length
+  const proof = normalizedEvidence(withheld ? [...allowedEvidence, { id: 'withheld', kind: 'context', time: 'unknown', source: 'application', opaque: true }] : allowedEvidence)
   proofCount.items = proof.filter(item => !item.opaque).length; proofCount.opaque = proof.filter(item => item.opaque).length
   let calls = 0
   const attempt = async (text, timeoutMs, recheck = false) => {
