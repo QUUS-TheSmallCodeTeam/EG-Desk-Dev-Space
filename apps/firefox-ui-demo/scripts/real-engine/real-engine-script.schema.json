@@ -91,6 +91,20 @@
                     ]
                   }
                 },
+                "whileRunning": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "afterMs"
+                  ],
+                  "properties": {
+                    "afterMs": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 120000
+                    }
+                  }
+                },
                 "expect": {
                   "type": "object",
                   "additionalProperties": false,

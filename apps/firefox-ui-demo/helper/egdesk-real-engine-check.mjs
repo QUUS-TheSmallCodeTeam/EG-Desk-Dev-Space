@@ -34,7 +34,7 @@ import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 import { createGitTargetInspector } from './egdesk-terminal-git-facts.mjs'
 import { parseCodexUserAgent } from './egdesk-codex-version-pin.mjs'
-import { buildCodexAppServerLaunch } from './egdesk-native-capabilities.mjs'
+import { buildCodexAppServerLaunch, inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { APPROVER_TEXT, checkTurnExpectations, folderPathProblem, validateEngineScript } from './egdesk-real-engine-script.mjs'
 
 export const DECISION_KEY_ENV = 'EGDESK_REAL_CHECK_DECISION_KEY'
@@ -43,14 +43,16 @@ export const DEFAULT_TURN_TIMEOUT_MS = 180_000
 export const KILL_GRACE_MS = 2000
 // Flags a conversation gets when --decisions is on and its script names none of its own (a script's flags are added to these, never replaced):
 // the product's advisory draft check (records only; the posted answer is the model's own) and the command gate. Every other flag is off.
+// flags that do something only when the Decision model answers: without --decisions a script that sets one would pass or fail for the wrong reason
+export const DECISION_DEPENDENT_FLAGS = Object.freeze(['EGDESK_DRAFT_CHECK', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_TERMINAL_GATE'])
 export const DEFAULT_DECISION_FLAGS = Object.freeze({ EGDESK_DRAFT_CHECK: 'advisory' })
 // The bridge's decisionContext keys and the developer flags behind them that this composition reproduces. A test compares this list with
 // codex-bridge-server.mjs, so a key or flag the bridge gains and this composition lacks fails loudly instead of being silently absent.
 export const BRIDGE_COMPOSITION = Object.freeze({
-  keys: ['settingsGeneration', 'mode', 'configured', 'client', 'budgetMs', 'coldBudgetMs', 'warm', 'calibrationLog', 'turnMemory', 'browserEntry', 'draftCheck', 'conversationFlow',
+  keys: ['settingsGeneration', 'mode', 'configured', 'client', 'budgetMs', 'coldBudgetMs', 'warm', 'inRunMessages', 'calibrationLog', 'turnMemory', 'browserEntry', 'draftCheck', 'conversationFlow',
     'relevanceRules', 'commandJudge', 'terminalGate', 'workingMemory', 'topicRecipient', 'recipientForChatChoice', 'reviewRevision', 'memoryEvidence', 'collect'],
   flags: ['EGDESK_DRAFT_CHECK', 'EGDESK_DRAFT_CHECK_DESIGN', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_TERMINAL_GATE', 'EGDESK_TERMINAL_GATE_METHOD',
-    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS'],
+    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES'],
   // present in the bridge, deliberately not reproduced here (reason in the report): the Browser Card and the Desk's presence need a window
   notReproduced: { keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration'], flags: ['EGDESK_PRESENCE', 'EGDESK_BROWSER_ENTRY', 'EGDESK_WORK_PLACEMENT', 'EGDESK_BRIEFING_FLOW', 'EGDESK_HUD_ROUTING'] },
 })
@@ -152,6 +154,8 @@ export function preflight(options, scripts, { env = process.env, exists = isExec
   if (!options.decisions) {
     const needs = scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => (t.approve ?? []).includes('yes'))).map(c => `${script.set}/${c.id}`))
     if (needs.length) problems.push(`scripted "yes" approvals are read by the Decision model, so they need --decisions: ${needs.join(', ')}`)
+    const flagged = scripts.flatMap(({ script }) => script.conversations.filter(c => Object.keys(c.flags ?? {}).some(k => DECISION_DEPENDENT_FLAGS.includes(k))).map(c => `${script.set}/${c.id} (${Object.keys(c.flags).filter(k => DECISION_DEPENDENT_FLAGS.includes(k)).join(', ')})`))
+    if (flagged.length) problems.push(`these flags act only through the Decision model, so they need --decisions: ${flagged.join('; ')}`)
   }
   return problems
 }
@@ -345,6 +349,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       settingsGeneration: () => 0, mode: () => (options.decisions ? 'on' : 'off'), configured: () => options.decisions, client,
       budgetMs: TURN_CONTEXT_BUDGET_MS, coldBudgetMs: TURN_CONTEXT_COLD_BUDGET_MS, warm: () => warmed || (warmed = decisionCall.some(r => r.status === 200)),
       ...(FLAG.EGDESK_CONTEXT_RELEVANCE === 'action' ? { relevanceRules: 'action' } : {}),
+      ...(FLAG.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}),
       calibrationLog, turnMemory: turnMemoryConfig,
       ...(['advisory', 'on'].includes(FLAG.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => FLAG.EGDESK_DRAFT_CHECK, design: () => (FLAG.EGDESK_DRAFT_CHECK_DESIGN === 'choice' ? 'choice' : 'predicates') } } : {}),
       ...(FLAG.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on' } } : {}),
@@ -354,7 +359,16 @@ export async function runConversation({ options, set, conversation, deps = {} })
       topicRecipient: recipient, recipientForChatChoice: recipient,
       collect: async ({ body, context, memoryEvidenceFor, speech }) => (await collectDecisionCandidates({ body, memoryEvidenceFor, speech, clientThreadId: context.clientThreadId, excludeMessageId: context.localMessageId, chatStore: store, deskStore: null, ontologyStore })).candidates,
     }
-    chat = new CodexChatRuntime({ request, respond, emit: () => {}, emitLegacy: () => {}, store, requireStore: true, contexts, getOwnerKey: () => OWNER, verifyFile: async () => null, resolveProjectWorkspace: async () => null,
+    // In-run messages are settled by steering them into the working turn, which the product allows only for a binary whose steer contract it
+    // verified (inspectNativeCapabilities → boardPeerContract). The check reads the same thing from the given binary (it runs the binary's
+    // --version and schema generation, as the bridge does at start) and records it; without a contract the message stays pending and is carried.
+    let nativeContract = null
+    if (FLAG.EGDESK_INRUN_MESSAGES === 'on') {
+      try { nativeContract = (deps.inspectNative ?? inspectNativeCapabilities)({ executable: options.codexBin, env: childEnv(options, env), cwd: dataDir }) } catch { nativeContract = null }
+      rec.engine.nativeContract = { version: nativeContract?.version ?? null, schemaMatch: nativeContract?.schemaMatch === true, boardPeerContract: typeof nativeContract?.boardPeerContract === 'string' }
+    }
+    chat = new CodexChatRuntime({ request, respond,
+      ...(FLAG.EGDESK_INRUN_MESSAGES === 'on' ? { getBoardPeerContract: () => nativeContract?.boardPeerContract ?? null } : {}), emit: () => {}, emitLegacy: () => {}, store, requireStore: true, contexts, getOwnerKey: () => OWNER, verifyFile: async () => null, resolveProjectWorkspace: async () => null,
       toolProviders: wiring.toolProviders, ownTools: wiring.ownTools, decisionContext })
     chat.setConnection(true)
     try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
@@ -363,11 +377,16 @@ export async function runConversation({ options, set, conversation, deps = {} })
     // ---- the scripted turns ----
     let clientThreadId = `check-${conversation.id}`, requestSeq = 0, nativeThread = null, first = true, seen = 0
     const engineFolder = path.join(dataDir, 'engine-folders', 'empty')
-    const sendAndWait = async text => {
+    const assistantTexts = () => store.listMessages(clientThreadId, { limit: 200 }).messages.filter(m => m.role === 'assistant').map(m => String(m.text ?? ''))
+    // beginTurn sends the person's message and returns at once with the running turn; finishTurn waits for it, then lets the runtime settle.
+    const beginTurn = async text => {
       resetTurnNow(); runnerLog.length = 0
       const started = performance.now()
       const run = await chat.send({ message: text, clientThreadId, requestId: `req-${++requestSeq}`, cwd: scratch, ...(first ? { stateless: true } : { conversationId: nativeThread }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
       first = false; nativeThread = run.conversationId
+      return { run, started }
+    }
+    const finishTurn = async ({ run, started }) => {
       const deadline = started + options.turnTimeoutMs
       let done = null
       while (!done && performance.now() < deadline && !closed && !rec.aborted) { done = completions.find(c => c.threadId === run.conversationId && c.turnId === run.runId); if (!done) await sleep(10) }
@@ -379,12 +398,27 @@ export async function runConversation({ options, set, conversation, deps = {} })
       await Promise.allSettled(tasks.splice(0)); try { await chat.queue } catch {} try { await chat.draftCheckIdle() } catch {} await sleep(30); await Promise.allSettled(tasks.splice(0))
       return { run, status, error: done?.error ?? null, latencyMs: ms(started), toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], commandsRan: [...runnerLog] }
     }
+    const sendAndWait = async text => finishTurn(await beginTurn(text))
+    // a message typed into the working run, afterMs after that turn started; not a turn of its own (the run's turn keeps going)
+    const sendInRun = async (ctx, text, afterMs) => {
+      const wait = afterMs - (performance.now() - ctx.started)
+      if (wait > 0) await sleep(wait)
+      const mark = { afterMs, sentAtMs: ms(ctx.started), tools: turnNow.toolCalls.size, ran: runnerLog.length, posted: assistantTexts().length, accepted: false, error: null }
+      try { const out = await chat.send({ clientThreadId, conversationId: nativeThread, message: text, requestId: `req-${++requestSeq}`, inRunMessageTo: ctx.run.runId }); mark.accepted = out?.accepted === true && out?.inRun === true } catch (error) { mark.error = String(error?.code ?? 'error').slice(0, 60) }
+      return mark
+    }
+    const sumNative = list => list.reduce((n, s) => ({ commandExecution: n.commandExecution + s.native.commandExecution, fileChange: n.fileChange + s.native.fileChange, approvals: n.approvals + s.native.approvals }), { commandExecution: 0, fileChange: 0, approvals: 0 })
+    const readFiles = turn => Object.fromEntries(Object.keys(turn.expect?.files ?? {}).map(p => [p, readScratchFile(scratch, p)]))
+    const undoCount = () => wiring.files?.undoRecords?.({ conversationId: nativeThread })?.length ?? 0
 
-    for (const [index, turn] of conversation.turns.entries()) {
+    for (let index = 0; index < conversation.turns.length; index++) {
       if (rec.aborted || closed) break
+      const turn = conversation.turns[index], next = conversation.turns[index + 1], withMessage = next?.whileRunning !== undefined
       const sub = [], ledger = wiring.ledger
-      let asked = 0
-      sub.push(await sendAndWait(turn.say))
+      let asked = 0, mark = null
+      const ctx = await beginTurn(turn.say)
+      if (withMessage) mark = await sendInRun(ctx, next.say, next.whileRunning.afterMs)
+      sub.push(await finishTurn(ctx))
       for (const answer of turn.approve ?? []) {
         if (rec.aborted || closed || !nativeThread) break
         if (!ledger?.awaitingReply?.(nativeThread)) { sub.at(-1).approverUnused = true; break }
@@ -393,18 +427,27 @@ export async function runConversation({ options, set, conversation, deps = {} })
       }
       if (ledger?.awaitingReply?.(nativeThread)) asked++ // a question left open at the end of the scripted turn
       if (index === 0 && !rec.isolation) rec.isolation = await readOwnToolsIsolation(request, { threadId: nativeThread, startResult: lastThreadStart, folders: [engineFolder] })
-      const messages = store.listMessages(clientThreadId, { limit: 200 }).messages.filter(m => m.role === 'assistant')
-      const posted = messages.slice(seen).map(m => String(m.text ?? '')); seen = messages.length
-      const files = Object.fromEntries(Object.keys(turn.expect?.files ?? {}).map(p => [p, readScratchFile(scratch, p)]))
+      const texts = assistantTexts()
+      const posted = texts.slice(seen) // the whole window of this turn (and of the message typed into it)
+      seen = texts.length
       const flat = {
-        toolCalls: sub.flatMap(s => s.toolCalls), native: sub.reduce((n, s) => ({ commandExecution: n.commandExecution + s.native.commandExecution, fileChange: n.fileChange + s.native.fileChange, approvals: n.approvals + s.native.approvals }), { commandExecution: 0, fileChange: 0, approvals: 0 }),
-        posted, asked, commandsRan: sub.flatMap(s => s.commandsRan), files, undoRecords: wiring.files?.undoRecords?.({ conversationId: nativeThread })?.length ?? 0,
+        toolCalls: sub.flatMap(s => s.toolCalls), native: sumNative(sub), posted, asked, commandsRan: sub.flatMap(s => s.commandsRan), files: readFiles(turn), undoRecords: undoCount(),
         turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted),
       }
       const expectations = checkTurnExpectations(turn.expect ?? {}, flat)
+      const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
       rec.turns.push({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
-        posted, asked, undoRecords: flat.undoRecords, expectations, ok: expectations.every(e => e.ok) && !sub.some(s => s.status === 'timeout' || s.status === 'engine_exited') })
+        posted, asked, undoRecords: flat.undoRecords, expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
+      if (withMessage) {
+        // the message typed into the run: what happened after it was sent
+        const prev = sub[0], after = texts.slice(mark.posted)
+        const flat2 = { toolCalls: prev.toolCalls.slice(mark.tools), native: prev.native, posted: after, asked, commandsRan: prev.commandsRan.slice(mark.ran), files: readFiles(next), undoRecords: undoCount(), turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted) }
+        const expect2 = [{ check: 'sent_while_running', ok: mark.accepted, detail: { afterMs: mark.afterMs, sentAtMs: mark.sentAtMs, error: mark.error } }, ...checkTurnExpectations(next.expect ?? {}, flat2)]
+        rec.turns.push({ index: index + 2, say: clip(next.say, 200), approve: [], whileRunning: { afterMs: mark.afterMs }, subTurns: [{ whileRunning: true, accepted: mark.accepted, error: mark.error, sentAtMs: mark.sentAtMs }],
+          posted: after, asked, undoRecords: flat2.undoRecords, expectations: expect2, ok: expect2.every(e => e.ok) && !sub.some(failedRun) })
+        index++
+      }
     }
     rec.ok = !rec.aborted && !closed && rec.turns.length === conversation.turns.length && rec.turns.every(t => t.ok)
     rec.decisionCalls = decisionCall.length

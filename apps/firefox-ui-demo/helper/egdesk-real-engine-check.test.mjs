@@ -153,6 +153,9 @@ test('the child environment, the app-server arguments and the preflight', () => 
   const withYes = structuredClone(scripts); withYes[1].script.conversations[0].turns[1].approve = ['yes']
   assert.deepEqual(preflight({ codexBin: '/x', home: { kind: 'person' }, decisions: false }, scripts, { exists: () => true, env: {} }), [])
   assert.match(preflight({ codexBin: '/x', home: { kind: 'person' }, decisions: false }, withYes, { exists: () => true, env: {} })[0], /"yes" approvals .* need --decisions: real-engine-command-approval-v1\/command-approval/)
+  const flagged = structuredClone(scripts); flagged[0].script.conversations[0].flags = { EGDESK_CONVERSATION_FLOW: 'on', EGDESK_DRAFT_CHECK: 'on' }
+  assert.match(preflight({ codexBin: '/x', home: { kind: 'person' }, decisions: false }, flagged, { exists: () => true, env: {} })[0], /flags act only through the Decision model, so they need --decisions: real-engine-read-file-v1\/read-file \(EGDESK_CONVERSATION_FLOW, EGDESK_DRAFT_CHECK\)/)
+  assert.deepEqual(preflight({ codexBin: '/x', home: { kind: 'person' }, decisions: true }, flagged, { exists: () => true, env: { [DECISION_KEY_ENV]: 'k' } }), [])
   assert.match(preflight({ codexBin: '/x', home: { kind: 'person' }, decisions: true }, scripts, { exists: () => true, env: {} })[0], new RegExp(DECISION_KEY_ENV))
   assert.match(preflight({ codexBin: '/missing', home: { kind: 'person' }, decisions: false }, scripts, { exists: () => false, env: {} })[0], /not an existing executable/)
 })
@@ -366,4 +369,54 @@ test('a binary that exits at once ends the conversation with a closed code and r
   }
   const rec = only(await runCheck(w.options, asScripts({ set: 'real-engine-exit-v1', conversations: [{ id: 'exit', turns: [{ say: 'hi' }] }] }), w.deps))
   assert.equal(rec.aborted, 'engine_exited'); assert.equal(rec.ok, false); assert.equal(rec.turns.length, 0); assert.match(rec.engineStderrTail, /not a codex/)
+})
+
+// ---- messages typed into a working run (whileRunning; lane L2's inRunMessageTo, flag EGDESK_INRUN_MESSAGES) ----
+test('whileRunning: the validator needs the flag, a previous turn, no approve and no chain', () => {
+  const base = () => ({ set: 'real-engine-w-v1', conversations: [{ id: 'c', flags: { EGDESK_INRUN_MESSAGES: 'on' }, turns: [{ say: 'a' }, { say: 'b', whileRunning: { afterMs: 100 }, expect: { posted: true } }] }] })
+  assert.deepEqual(validateEngineScript(base()), { ok: true, errors: [] })
+  const bad = (mutate, pattern) => { const v = base(); mutate(v); const r = validateEngineScript(v); assert.equal(r.ok, false); assert.match(r.errors.join('\n'), pattern) }
+  bad(v => { delete v.conversations[0].flags }, /needs flags\.EGDESK_INRUN_MESSAGES/)
+  bad(v => { v.conversations[0].flags.EGDESK_INRUN_MESSAGES = 'off' }, /needs flags/)
+  bad(v => { v.conversations[0].turns.reverse() }, /cannot be the first turn/)
+  bad(v => { v.conversations[0].turns.push({ say: 'c', whileRunning: { afterMs: 5 } }) }, /cannot follow another whileRunning/)
+  bad(v => { v.conversations[0].turns[1].approve = ['no'] }, /takes no approve/)
+  bad(v => { v.conversations[0].turns[1].whileRunning = { afterMs: -1 } }, /afterMs/)
+  bad(v => { v.conversations[0].turns[1].whileRunning = { afterMs: 120001 } }, /afterMs/)
+  bad(v => { v.conversations[0].turns[1].whileRunning = { afterMs: 5, extra: 1 } }, /unknown key/)
+  bad(v => { v.conversations[0].turns[1].whileRunning = 5 }, /an object/)
+  assert.equal(REAL_ENGINE_SCRIPT_SCHEMA.properties.conversations.items.properties.turns.items.properties.whileRunning.properties.afterMs.maximum, 120000)
+})
+
+const WHILE = { set: 'real-engine-while-v1', conversations: [{ id: 'while', flags: { EGDESK_INRUN_MESSAGES: 'on' }, folder: { 'README.md': 'x\n' }, turns: [
+  { say: 'Run the tests: npm test', expect: { toolCalls: ['egdesk_run_command'], commandsRan: ['npm test'], turnStatus: 'completed', answerIncludes: ['passed'], noNativeTools: true } },
+  { say: 'Where are you with it?', whileRunning: { afterMs: 60 }, expect: { posted: true, noNativeTools: true } }] }] }
+
+test('whileRunning: the second message goes into the working run (no new turn), both turns are awaited and each keeps its own expectations', async t => {
+  const fake = { turns: [{ steps: [{ delayMs: 400 }, { toolCall: { tool: 'egdesk_run_command', arguments: { command: 'npm test' } } }], final: 'The tests passed.' }] }
+  const w = world(t, fake)
+  w.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: null })
+  const rec = only(await runCheck(w.options, asScripts(WHILE), w.deps))
+  assert.equal(rec.aborted, null); assert.equal(rec.turns.length, 2)
+  const [first, second] = rec.turns
+  assert.equal(first.ok, true, JSON.stringify(first.expectations)); assert.equal(first.subTurns[0].status, 'completed', 'the working turn was not interrupted')
+  assert.deepEqual(first.subTurns[0].commandsRan, ['npm test'])
+  assert.equal(second.ok, true, JSON.stringify(second.expectations)); assert.deepEqual(second.whileRunning, { afterMs: 60 })
+  assert.equal(second.subTurns[0].accepted, true); assert.equal(second.expectations[0].check, 'sent_while_running'); assert.ok(second.subTurns[0].sentAtMs >= 60 && second.subTurns[0].sentAtMs < 400, 'sent ' + second.subTurns[0].sentAtMs + ' ms after the first turn started')
+  assert.match(second.posted.at(-1), /tests passed/, 'the messages after it was sent include the run\'s own answer')
+  assert.equal(wireLog(w).filter(m => m.dir === 'in' && m.method === 'turn/start').length, 1, 'the message typed into the run started no turn of its own')
+  assert.deepEqual(rec.engine.nativeContract, { version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: false }, 'the steer contract the product would use: none on this binary')
+  noSchemaErrors(w)
+})
+
+test('whileRunning: a run that ended before afterMs no longer takes the message; the turn fails its implicit check with the runtime\'s closed code', async t => {
+  const late = structuredClone(WHILE); late.conversations[0].turns[1].whileRunning.afterMs = 500
+  const w = world(t, { turns: [{ steps: [{ toolCall: { tool: 'egdesk_run_command', arguments: { command: 'npm test' } } }], final: 'The tests passed.' }] })
+  w.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: true, boardPeerContract: 'c'.repeat(64) })
+  const rec = only(await runCheck(w.options, asScripts(late), w.deps))
+  const second = rec.turns[1]
+  assert.equal(second.ok, false); assert.equal(second.subTurns[0].accepted, false); assert.equal(second.subTurns[0].error, 'INRUN_MESSAGE_UNAVAILABLE')
+  assert.deepEqual(second.expectations[0], { check: 'sent_while_running', ok: false, detail: { afterMs: 500, sentAtMs: second.expectations[0].detail.sentAtMs, error: 'INRUN_MESSAGE_UNAVAILABLE' } })
+  assert.equal(rec.turns[0].ok, true, 'the first turn is judged on its own record'); assert.equal(rec.ok, false)
+  assert.equal(rec.engine.nativeContract.boardPeerContract, true)
 })

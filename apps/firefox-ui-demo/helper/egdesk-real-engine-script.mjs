@@ -8,6 +8,12 @@
 // approve: the scripted approver's answers, in order, to the approval questions EG-Desk's own tools raise in that turn. Each answer is
 // one more message from the person in the same scripted turn (APPROVER_TEXT); the expectations cover the whole scripted turn.
 // Every conversation runs with EGDESK_OWN_TOOLS=on (the check sets it; a script cannot turn it off).
+// whileRunning { afterMs }: (optional, on a turn) this turn's `say` is typed into the PREVIOUS turn's working run, afterMs after that turn
+//   started (not after it ended), as chat.send({ inRunMessageTo: <that run's runId> }); the run's own turn keeps going. Both turns are then
+//   awaited. Needs conversation.flags.EGDESK_INRUN_MESSAGES = "on", cannot be the first turn, cannot follow another whileRunning turn, takes no
+//   approve. Its expectations cover what happened after it was sent (messages posted after it, tool calls and commands after it); the previous
+//   turn's own expectations cover the whole window of both. A message the run no longer takes (it ended before afterMs) fails the turn's
+//   implicit check "sent_while_running".
 export const SCRIPT_SET = /^real-engine-[a-z0-9][a-z0-9-]{0,40}-v\d{1,3}$/
 export const CONVERSATION_ID = /^[a-z0-9][a-z0-9-]{0,39}$/
 export const FLAG_NAME = /^EGDESK_[A-Z0-9_]{1,48}$/
@@ -15,7 +21,8 @@ export const FLAG_VALUE = /^[a-z0-9_-]{1,24}$/
 // launch-level settings belong to the check's own flags (--codex-bin, --model, --effort, …), never to a script
 export const RESERVED_FLAGS = Object.freeze(['EGDESK_CODEX_BIN', 'EGDESK_DATA_DIR', 'EGDESK_CODEX_MODEL', 'EGDESK_CODEX_EFFORT', 'EGDESK_CODEX_DISABLE_MEMORIES', 'EGDESK_CLAUDE_BIN'])
 export const PROTECTED_SEGMENTS = Object.freeze(['.git', '.codex', '.agents', '.egdesk'])
-export const LIMITS = Object.freeze({ conversations: 8, turns: 12, files: 32, pathChars: 200, contentBytes: 64 * 1024, sayChars: 4000, approvals: 4, strings: 16, stringChars: 400 })
+export const IN_RUN_FLAG = 'EGDESK_INRUN_MESSAGES'
+export const LIMITS = Object.freeze({ whileRunningMs: 120_000, conversations: 8, turns: 12, files: 32, pathChars: 200, contentBytes: 64 * 1024, sayChars: 4000, approvals: 4, strings: 16, stringChars: 400 })
 // the scripted person's answers (test input, never product copy)
 export const APPROVER_TEXT = Object.freeze({ yes: '응, 그 명령 실행해 줘', no: '아니, 그건 실행하지 마' })
 export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted'])
@@ -41,6 +48,7 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
           properties: {
             say: str(LIMITS.sayChars),
             approve: { type: 'array', maxItems: LIMITS.approvals, items: { enum: ['yes', 'no'] } },
+            whileRunning: { type: 'object', additionalProperties: false, required: ['afterMs'], properties: { afterMs: { type: 'integer', minimum: 0, maximum: LIMITS.whileRunningMs } } },
             expect: { type: 'object', additionalProperties: false, properties: {
               toolCalls: { type: 'array', maxItems: LIMITS.strings, items: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,63}$' } },
               noToolCalls: { const: true },
@@ -120,7 +128,19 @@ export function validateEngineScript(value) {
     for (const [ti, turn] of turns.entries()) {
       const tt = `${at}.turns[${ti}]`
       if (!isObject(turn)) { bad(tt, 'an object'); continue }
-      only(turn, ['say', 'approve', 'expect'], tt)
+      only(turn, ['say', 'approve', 'whileRunning', 'expect'], tt)
+      if (turn.whileRunning !== undefined) {
+        const w = turn.whileRunning
+        if (!isObject(w)) bad(`${tt}.whileRunning`, 'an object { afterMs }')
+        else {
+          only(w, ['afterMs'], `${tt}.whileRunning`)
+          if (!(Number.isInteger(w.afterMs) && w.afterMs >= 0 && w.afterMs <= LIMITS.whileRunningMs)) bad(`${tt}.whileRunning.afterMs`, `an integer 0-${LIMITS.whileRunningMs}`)
+        }
+        if (ti === 0) bad(`${tt}.whileRunning`, 'cannot be the first turn (there is no running turn to message)')
+        else if (turns[ti - 1]?.whileRunning !== undefined) bad(`${tt}.whileRunning`, 'cannot follow another whileRunning turn')
+        if (turn.approve?.length) bad(`${tt}.approve`, 'a whileRunning turn takes no approve')
+        if (!isObject(conv.flags) || conv.flags[IN_RUN_FLAG] !== 'on') bad(`${tt}.whileRunning`, `needs flags.${IN_RUN_FLAG} = "on" in this conversation`)
+      }
       if (typeof turn.say !== 'string' || !turn.say.trim() || turn.say.length > LIMITS.sayChars) bad(`${tt}.say`, `a string of 1-${LIMITS.sayChars} characters`)
       if (turn.approve !== undefined && (!Array.isArray(turn.approve) || turn.approve.length > LIMITS.approvals || turn.approve.some(a => a !== 'yes' && a !== 'no'))) bad(`${tt}.approve`, `at most ${LIMITS.approvals} of "yes" / "no"`)
       const e = turn.expect
