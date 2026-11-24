@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { main as examplesMain } from '../scripts/egdesk-conversation-examples.mjs'
+import { main as runnerMain } from './egdesk-decision-real-runner.mjs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -100,18 +101,18 @@ test('plan chunks: within the token budget, the synthetic controls with hard exp
 test('CLI: output outside the repository only, 0600 files; a second run reports nothing new; the first chunk passes the real runner\'s dry run', async t => {
   const f = files(t)
   const app = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
-  const cli = path.join(app, 'scripts', 'egdesk-conversation-examples.mjs')
-  const run = out => JSON.parse(execFileSync(process.execPath, [cli, '--out', out, '--codex', path.join(f.dir, 'codex'), '--claude', path.join(f.dir, 'claude'), '--pinned', path.join(f.dir, 'none'), '--aside', f.aside],
-    { encoding: 'utf8', env: { ...process.env, HOME: f.dir } }).trim().split('\n').at(-1))
-  assert.throws(() => run(path.join(app, 'tmp-out')), /inside the repository/)
+  const run = async out => { const lines = [], errors = []; const code = await examplesMain(['--out', out, '--codex', path.join(f.dir, 'codex'), '--claude', path.join(f.dir, 'claude'), '--pinned', path.join(f.dir, 'none'), '--aside', f.aside],
+    { print: l => lines.push(l), printError: l => errors.push(l), home: f.dir }); if (code !== 0) throw new Error(errors.join('\n')); return JSON.parse(lines.at(-1)) }
+  await assert.rejects(run(path.join(app, 'tmp-out')), /inside the repository/)
   const out = path.join(f.dir, 'out')
-  const first = run(out)
+  const first = await run(out)
   // The Aside export is this EG-Desk session (its project names the area); the Codex file by its cwd, the Claude one by its folder.
   assert.deepEqual([first.examples, first.perArea, first.dropped.no_area], [8, { egdesk: 5, taehwa: 3 }, 0])
   assert.equal(statSync(path.join(out, 'examples', 'egdesk.jsonl')).mode & 0o777, 0o600)
   assert.ok(!readFileSync(path.join(out, 'examples', 'egdesk.jsonl'), 'utf8').includes('sk-proj'))
-  assert.deepEqual(run(out).changes, { new: 0, changed: 0, unchanged: 8, kept: 0 })
-  const runner = path.join(app, 'scripts', 'egdesk-decision-real-measure.mjs')
-  const dry = execFileSync(process.execPath, [runner, path.join(out, 'plans', 'chunk-001', 'plan.json')], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: f.dir, EGDESK_SCENARIO_SEEDS: out } })
-  assert.match(dry, /"mode":"dry_run"/)
+  assert.deepEqual((await run(out)).changes, { new: 0, changed: 0, unchanged: 8, kept: 0 })
+  const before = process.env.EGDESK_SCENARIO_SEEDS; process.env.EGDESK_SCENARIO_SEEDS = out; t.after(() => { if (before === undefined) delete process.env.EGDESK_SCENARIO_SEEDS; else process.env.EGDESK_SCENARIO_SEEDS = before })
+  const printed = [], refused = []
+  const code = await runnerMain([path.join(out, 'plans', 'chunk-001', 'plan.json')], { env: {}, print: l => printed.push(l), printError: l => refused.push(l), fetchImpl: async () => { throw new Error('no network') } })
+  assert.equal(code, 0, refused.join('\n')); assert.match(printed.join('\n'), /"mode":"dry_run"/)
 })

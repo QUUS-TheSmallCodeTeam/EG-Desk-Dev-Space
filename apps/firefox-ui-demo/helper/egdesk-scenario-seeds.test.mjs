@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync, statSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { main as seedsMain } from '../scripts/egdesk-scenario-seeds.mjs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -138,17 +138,17 @@ test('runners: the plan runner refuses a plan built from a local-only seed (dry 
   assert.equal(state.sent, 0)
 })
 
-test('CLI: refuses an output inside the repository; writes 0600 files outside it; a second run reports nothing new', t => {
+test('CLI: refuses an output inside the repository; writes 0600 files outside it; a second run reports nothing new', async t => {
   const repo = mkdtempSync(path.join(os.tmpdir(), 'egd-seed-repo-')); t.after(() => rmSync(repo, { recursive: true, force: true }))
   for (const [f, text] of Object.entries(SEED_REPO)) { mkdirSync(path.join(repo, path.dirname(f)), { recursive: true }); writeFileSync(path.join(repo, f), text) }
-  const cli = path.join(app, 'scripts', 'egdesk-scenario-seeds.mjs')
-  const run = (...args) => execFileSync(process.execPath, [cli, '--repo', repo, '--source', 'taehwa-ontology', ...args], { encoding: 'utf8', env: { ...process.env, HOME: repo } })
-  assert.throws(() => run('--out', path.join(repo, 'seeds')), /inside the repository/)
+  const run = async (...args) => { const lines = [], errors = []; const code = await seedsMain(['--repo', repo, '--source', 'taehwa-ontology', ...args], { print: l => lines.push(l), printError: l => errors.push(l), home: repo })
+    if (code !== 0) throw new Error(errors.join('\n')); return lines.at(-1) }
+  await assert.rejects(run('--out', path.join(repo, 'seeds')), /inside the repository/)
   const out = path.join(repo, '..', `${path.basename(repo)}-out`); t.after(() => rmSync(out, { recursive: true, force: true }))
-  const first = JSON.parse(run('--out', out).trim().split('\n').at(-1))
+  const first = JSON.parse(await run('--out', out))
   assert.equal(first.seeds, 5); assert.equal(first.privacy['owner-approved'], 5)
   assert.equal(statSync(path.join(out, 'taehwa', 'rws-0027.json')).mode & 0o777, 0o600)
-  const second = JSON.parse(run('--out', out).trim().split('\n').at(-1))
+  const second = JSON.parse(await run('--out', out))
   assert.deepEqual([second.changes.new, second.changes.changed, second.changes.unchanged], [[], [], 5])
   assert.ok(existsSync(path.join(out, 'fingerprints.json')))
   assert.ok(!readFileSync(path.join(out, 'fingerprints.json'), 'utf8').includes('재감사'), 'hashes only')
