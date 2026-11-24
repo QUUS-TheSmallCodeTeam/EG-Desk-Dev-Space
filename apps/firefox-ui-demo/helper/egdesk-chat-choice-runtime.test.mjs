@@ -159,8 +159,8 @@ test('stalled key lookup reaches the host deadline and cannot fetch after releas
   let release
   const blocked = new Promise(resolve => { release = resolve })
   state.onKey = () => blocked
-  // Nothing was sent (the key never arrived); the DM is told it timed out so it can offer a retry.
-  assert.deepEqual(await post(), { status: 200, body: { status: 'manual', reason: 'timeout' } })
+  // Nothing was sent (the key never arrived): the DM is told so (no cost), and can offer a retry.
+  assert.deepEqual(await post(), { status: 200, body: { status: 'manual', reason: 'timeout_unsent' } })
   release()
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(state.attempts, 1)

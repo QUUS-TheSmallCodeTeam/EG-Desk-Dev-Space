@@ -9,9 +9,10 @@ const MANUAL = Object.freeze({ status: 'manual' })
 // Why no recommendation was produced. A closed enum: the only thing besides
 // `status` that leaves the bridge, so it can never carry question, option, key or provider text.
 //   abstain / unclear / low_confidence: the model answered but could not pick (ambiguous, near-tie, below the bar).
-//   everything else: a DecisionError code from the Decisions client (or a local timeout).
+//   timeout: the POST was started and no answer came in time (may be billed). timeout_unsent: the deadline passed before any POST was started.
+//   everything else: a DecisionError code from the Decisions client.
 export const CHOICE_MANUAL_REASONS = Object.freeze(['abstain', 'unclear', 'low_confidence', 'bad_response', 'no_credit', 'rate_limited',
-  'timeout', 'budget_exceeded', 'spend_limit_reached', 'invalid_key', 'not_configured', 'unreachable', 'server_error', 'model_unavailable'])
+  'timeout', 'timeout_unsent', 'budget_exceeded', 'spend_limit_reached', 'invalid_key', 'not_configured', 'unreachable', 'server_error', 'model_unavailable'])
 const REASON_SET = new Set(CHOICE_MANUAL_REASONS)
 const manualWith = reason => typeof reason === 'string' && REASON_SET.has(reason) ? Object.freeze({ status: 'manual', reason }) : MANUAL
 export const chatChoiceManual = manualWith
@@ -100,6 +101,7 @@ export async function runChatChoice(request) {
   let open = true
   let gateUsed = false
   let authorized = false
+  let sent = false // the client started its POST
   try {
     const boundedSignal = AbortSignal.any([signal, controller.signal])
     const live = () => open && !boundedSignal.aborted && performance.now() < deadline
@@ -130,6 +132,7 @@ export async function runChatChoice(request) {
     const response = await Promise.race([cancelled, decide.call(client, {
       input, questions, signal: boundedSignal, strictChoiceResponse: true,
       timeoutMs: Math.max(1, Math.ceil(deadline - performance.now())), // the client default (1.5 s) must not undercut the foreground deadline
+      onDispatch() { sent = true },
       authorizeDispatch() {
         if (gateUsed) return false
         gateUsed = true
@@ -137,11 +140,11 @@ export async function runChatChoice(request) {
         return authorized
       },
     })])
-    if (!authorized || !current()) return authorized && performance.now() >= deadline ? manualWith('timeout') : MANUAL
+    if (!authorized || !current()) return performance.now() >= deadline ? manualWith(sent ? 'timeout' : 'timeout_unsent') : MANUAL
     return readRecommendation(response?.answers, optionIds)
   } catch (error) {
     // Only a DecisionError code is forwarded, never its message.
-    return error?.name === 'DecisionError' ? manualWith(error.code) : MANUAL
+    return error?.name === 'DecisionError' ? manualWith(error.code === 'timeout' && !sent ? 'timeout_unsent' : error.code) : MANUAL
   } finally {
     open = false
     clearTimeout(timer)

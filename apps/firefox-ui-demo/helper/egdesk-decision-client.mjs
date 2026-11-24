@@ -55,12 +55,14 @@ const SPEND_LIMIT_CODES = new Set(['organization_spend_limit_exceeded', 'project
 const QUESTION_TYPES = new Set(['predicate', 'choice', 'score'])
 
 export class DecisionError extends Error {
-  constructor(code, message, { status = null, retryable = false, apiCode = null } = {}) {
+  constructor(code, message, { status = null, retryable = false, apiCode = null, dispatched = null } = {}) {
     super(message)
     this.name = 'DecisionError'
     this.code = DECISION_ERROR_CODES.includes(code) ? code : 'bad_response'
     this.status = status
     this.retryable = retryable === true
+    // true: fetch was invoked for this error; false: failed before any POST was started; null: not recorded.
+    this.dispatched = typeof dispatched === 'boolean' ? dispatched : null
     this.apiCode = typeof apiCode === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(apiCode) ? apiCode : null
   }
 }
@@ -295,7 +297,7 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
   if (typeof getApiKey !== 'function') throw new TypeError('getApiKey must be a function')
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be a function')
 
-  async function post(apiKey, { input, questions, promptCacheKey = null, safetyIdentifier = null }, { timeoutMs: limit = timeoutMs, signal, authorizeDispatch, strictChoiceResponse = false } = {}) {
+  async function post(apiKey, { input, questions, promptCacheKey = null, safetyIdentifier = null }, { timeoutMs: limit = timeoutMs, signal, authorizeDispatch, onDispatch, strictChoiceResponse = false } = {}) {
     validateDecisionRequest({ input, questions, promptCacheKey, safetyIdentifier })
     if (strictChoiceResponse === true && (questions.length !== 1 || questions[0].type !== 'choice')) {
       throw new DecisionError('invalid_request', 'A reviewed selection needs exactly one choice question')
@@ -333,7 +335,9 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
         if (!allowed) { denied = true; throw new Error('denied') }
       }
       if (signal?.aborted) throw new Error('cancelled')
+      // Data-free marker: the POST is started from here on (the request may be billed even without an answer).
       dispatched = true
+      try { onDispatch?.() } catch { /* an observer never changes the request */ }
       response = await fetchImpl(endpoint, { method: 'POST', redirect: 'error', credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal,
         headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }, body: wire })
       // A server can send headers promptly and then stall the body. Keep the
@@ -345,10 +349,10 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
       // Sent, but no usage came back (timeout, or a cancel after dispatch): the provider
       // may have processed and billed it, so the local guard counts a labelled estimate.
       if (dispatched && (timedOut || signal?.aborted)) { try { budget?.recordEstimate?.(estimateInputTokens(wire)) } catch {} }
-      if (timedOut) throw new DecisionError('timeout', 'The decision model did not answer in time', { retryable: true })
+      if (timedOut) throw new DecisionError('timeout', 'The decision model did not answer in time', { retryable: true, dispatched })
       if (signal?.aborted) throw new DecisionError('aborted', 'The decision request was cancelled')
       if (error instanceof DecisionError) throw error
-      throw new DecisionError('unreachable', 'The decision model could not be reached', { retryable: true })
+      throw new DecisionError('unreachable', 'The decision model could not be reached', { retryable: true, dispatched })
     } finally {
       clearTimeout(timer)
       signal?.removeEventListener?.('abort', onAbort)
