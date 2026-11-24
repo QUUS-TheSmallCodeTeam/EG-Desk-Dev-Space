@@ -74,6 +74,9 @@ function imageSettingsHarness() {
     // This section also carries the shared fixture's bridge-notice helper, which
     // the Settings account tab reads through the real Surface and account view modules.
     between('function settingsFakeDocument()', "test('production Settings card"),
+    // The shared fixture's bridge-method locator (definition lines only); its bridge helpers call it.
+    (() => { const first = testSource.indexOf('function methodStart('), last = testSource.indexOf('\n}\n', first);
+      assert.ok(first >= 0 && last > first, 'Settings fixture section missing: methodStart'); return testSource.slice(first, last + 3); })(),
     between('function profileTransferBridgeMethods(', 'function portableSettingsHarness('),
     between('function portableSettingsHarness(', 'async function duplicateSettingsHarness('),
     'return { portableSettingsHarness, settingsButton, settingsNodes, settle };',

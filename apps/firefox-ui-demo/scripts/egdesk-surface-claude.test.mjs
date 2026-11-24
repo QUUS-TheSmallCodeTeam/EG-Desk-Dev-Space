@@ -228,6 +228,8 @@ function composer(ui) {
     document: ui.document, body: {}, el: ui.el, ChatState, BoardThread, activeThread: ui.thread(), codex: ui.state.codex, codexBridge: ui,
     chatRoomProjectSendBlock: ui.projectBlock, composerViewport: viewport.instance,
     compositionInProgress: false,
+    // The production choice composer has its own tests; here it contributes no nodes and no draft effect.
+    choice: { panel: null, trigger: null, questionHint: null, attach() {}, sync() {}, reset() {} },
   });
   controls.resizeComposer();
   return { ...controls, viewport };
@@ -1324,7 +1326,8 @@ test('production engine popover reanchors to its fresh local chip across Canvas 
     const taskReveal = productionController('createChatTaskAnswerReveal', body);
     assert.equal(body.events.wheel.length, 1); assert.equal(body.events.click.length, 1, 'real Task helper owns its scoped listeners');
     const attach = () => compile(attachmentSource, {body,el:ui.el,shellClasses:'egd-codex-chat-shell',
-      contentChildren:[freshChip,menu],positionChatEngineMenu:geometry.position,taskAnswerReveal:taskReveal.instance});
+      contentChildren:[freshChip,menu],positionChatEngineMenu:geometry.position,taskAnswerReveal:taskReveal.instance,
+      choice:{sync(){}}}); // the choice composer is tested on its own; the render only re-syncs it after appending
     if (scene.name === 'translated Canvas at 96%') assert.ok(menu.getBoundingClientRect().left < 10, 'reproduce detached left-edge position before correction');
     attach();
     const check = () => {
