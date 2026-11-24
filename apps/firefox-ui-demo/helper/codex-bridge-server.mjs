@@ -39,6 +39,8 @@ import { createDecisionTransport } from './egdesk-decision-transport.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
+import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
+import { createTurnMemoryConfig } from './egdesk-turn-memory-wiring.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { createBoardPresentationHttpHandler } from './egdesk-board-presentation-http.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
@@ -423,6 +425,10 @@ const hostControl = createHostControl({
 })
 let memoryEvidenceStore = null
 const getMemoryEvidence = () => memoryEvidenceStore ??= new MemoryEvidenceStore({ dataDir, captures: contextStore })
+// Advisory turn memory: off unless the bridge setting `turnMemory` is 'advisory'. The adapter and its write store open lazily.
+let wikiAdapter = null
+const turnMemoryConfig = createTurnMemoryConfig({ settings: bridgeSettings, ontologyStore: ensureOntologyStore, deskStore,
+  getAdapter: () => wikiAdapter ??= createWikiAdapter({ writes: openWikiWrites({ dataDir: path.join(dataDir, 'settings') }) }) })
 const chat = new CodexChatRuntime({
   localCapacity,
   engines: engineRegistry,
@@ -455,6 +461,7 @@ const chat = new CodexChatRuntime({
     configured: () => decisionCredentials.getApiKey() !== null,
     client: decisionClient,
     calibrationLog: decisionCalibrationLog,
+    turnMemory: turnMemoryConfig,
     topicRecipient: recipientForCodexDecisions,
     recipientForChatChoice: recipientForCodexDecisions,
     reviewRevision: () => handleBoardPresentationHttp.settingsRevision(),

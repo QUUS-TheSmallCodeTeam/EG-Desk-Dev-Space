@@ -60,6 +60,10 @@ function normalizePage(raw, maxBody) {
     time: { slice: raw.time?.slice ?? 'unknown', ...(iso(raw.time?.at) ? { at: raw.time.at } : {}) },
     provenance: { kind: raw.provenance.kind, ...(typeof raw.provenance.by === 'string' ? { by: compactText(raw.provenance.by, 60) } : {}), ...(PROVENANCE_BASES.includes(raw.provenance.basis) ? { basis: raw.provenance.basis } : {}) },
     status: STATUS_KEYS.includes(raw.status) ? raw.status : 'unknown', scope: typeof raw.scope === 'string' ? raw.scope : null,
+    // A stable reference into the store that already holds this content (shown to the answering model), and an optional
+    // content key of that store (e.g. its own hash) so receipts do not depend on how the adapter renders the body.
+    ...(typeof raw.ref === 'string' && raw.ref.trim() ? { ref: compactText(raw.ref, 300) } : {}),
+    ...(typeof raw.contentKey === 'string' && /^[A-Za-z0-9._:+/=-]{1,120}$/.test(raw.contentKey) ? { contentKey: raw.contentKey } : {}),
     // When it was said / recorded. Never confused with the time of the event it describes (time.at).
     ...(iso(raw.spokenAt) ? { spokenAt: raw.spokenAt } : {}),
     // Fallible readings of a status change that the host has not (yet) accepted. Kept apart from `status`.
@@ -170,7 +174,8 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
   const usage = { inputTokens: 0 }
   const allows = page => allowsPage(page, scope)
   const have = delivered?.usable === true ? delivered.pages ?? {} : {}
-  const sameAsDelivered = page => have[page.id]?.revision === page.revision && have[page.id]?.hash === sha256Hex(page.body)
+  const keyOf = page => page.contentKey ?? sha256Hex(page.body)
+  const sameAsDelivered = page => have[page.id]?.revision === page.revision && have[page.id]?.hash === keyOf(page)
   const readable = [], alreadyDelivered = []
   for (const page of wiki.pages.values()) {
     if (!allows(page)) { receipts.withheld++; continue }
@@ -308,13 +313,13 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
     if (!page || !allows(page)) { receipts.withheld++; continue } // authority is re-checked at assembly
     const sup = wiki.supersededBy(page.id)
     const header = `[page id=${page.id} time=${page.time.slice}${page.time.at ? `@${page.time.at.slice(0, 10)}` : ''} provenance=${page.provenance.kind}${page.provenance.by ? `:${page.provenance.by}` : ''} ` +
-      `status-recorded=${page.status}${pick.statusRead ? ` status-read=${pick.statusRead}` : ''}${page.statusReadings?.some(r => r.state === 'pending') ? ` status-reported-pending=${page.statusReadings.filter(r => r.state === 'pending').at(-1).status}` : ''}${sup.length ? ` superseded-by=${sup.join('+')}` : ''} rev=${page.revision} via=${pick.via}]`
+      `status-recorded=${page.status}${pick.statusRead ? ` status-read=${pick.statusRead}` : ''}${page.statusReadings?.some(r => r.state === 'pending') ? ` status-reported-pending=${page.statusReadings.filter(r => r.state === 'pending').at(-1).status}` : ''}${sup.length ? ` superseded-by=${sup.join('+')}` : ''} rev=${page.revision}${page.ref ? ` ref=${page.ref}` : ''} via=${pick.via}]`
     const body = page.body.length > budget.pageChars ? `${page.body.slice(0, budget.pageChars).trimEnd()}\n[…truncated]` : page.body
     if (page.body.length > budget.pageChars) receipts.truncated.push({ id: page.id, reason: 'page_chars' })
     const block = `${header}\n${body}`
     if (used + block.length > budget.maxPacketChars && blocks.length) { receipts.truncated.push({ id: page.id, reason: 'packet_chars' }); continue }
     used += block.length; blocks.push({ id: page.id, block })
-    nextPages[page.id] = { revision: page.revision, hash: sha256Hex(page.body) }
+    nextPages[page.id] = { revision: page.revision, hash: keyOf(page) }
   }
   // Links between pages the model now holds (this packet or earlier), by id only.
   const inPacket = new Set(blocks.map(b => b.id)), held = new Set([...inPacket, ...Object.keys(have)])

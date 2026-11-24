@@ -17,9 +17,9 @@ const PG_HELD = ['db/pg-design', 'db/pg-plan', 'db/pg-rollback', 'db/sqlite-sche
 const hash = body => crypto.createHash('sha256').update(body).digest('hex')
 const receiptsFor = (wiki, ids, threadKey = THREAD) => ({ usable: true, threadKey, pages: Object.fromEntries(ids.map(id => [id, { revision: wiki.pages.get(id).revision, hash: hash(wiki.pages.get(id).body) }])) })
 const FIRST = { kind: 'first', reason: 'no_native_thread' }, MID = { kind: 'mid', reason: 'live_thread' }
-const turn = async (message, { position = MID, wiki = buildWiki(SYNTHETIC_PAGES), held = PG_HELD, ontologyWrite = false, budget = {}, client, delivered } = {}) => {
+const turn = async (message, { position = MID, wiki = buildWiki(SYNTHETIC_PAGES), held = PG_HELD, ontologyWrite = false, budget = {}, client, delivered, skipOnNeed = false, heldExcerpts = false } = {}) => {
   const log = []
-  const r = await prepareTurnMemory({ message, wiki, client: client ?? mockJudge(log), scope: SCOPE, askedAt: ASKED, position, threadKey: THREAD, ontologyWrite, budget,
+  const r = await prepareTurnMemory({ message, wiki, client: client ?? mockJudge(log), scope: SCOPE, askedAt: ASKED, position, threadKey: THREAD, ontologyWrite, budget, skipOnNeed, heldExcerpts,
     delivered: delivered ?? (held ? receiptsFor(wiki, held) : null) })
   return { r, log, wiki }
 }
@@ -271,9 +271,29 @@ test('triage wording: courtesy is a plain social-act question with no mention of
 test('a report whose context is already held skips the fetch but is still judged for recording against the held pages', async () => {
   const judge = mockJudge()
   const heldCovers = { async decide(req) { const r = await judge.decide(req); if (req.questions.some(q => q.name === 'tn_need')) r.answers.tn_need = { type: 'predicate', probability: 0 }; return r } }
-  const { r } = await turn('PostgreSQL 마이그레이션 배포 끝났어', { client: heldCovers, ontologyWrite: true })
+  const { r } = await turn('PostgreSQL 마이그레이션 배포 끝났어', { client: heldCovers, ontologyWrite: true, skipOnNeed: true })
   assert.equal(r.memory.status, 'skipped'); assert.equal(r.packet, null)
   assert.equal(typeof r.judgeWrite, 'function')
   const { proposal } = await r.judgeWrite()
   assert.equal(proposal.op, 'update_status'); assert.equal(proposal.pageId, 'db/pg-plan', 'the held plan page is a candidate even though nothing was fetched')
+})
+
+test('real T4 ("그럼 롤백 조건은?", rollback page NOT held, need answered 0.02): by default a decided need "no" no longer skips the fetch, only a decided courtesy does', async () => {
+  const judge = mockJudge()
+  const real = { async decide(req) { const r = await judge.decide(req); if (req.questions.some(q => q.name === 'tn_need')) { r.answers.tn_courtesy = { type: 'predicate', probability: 0 }; r.answers.tn_need = { type: 'predicate', probability: 0.02 }; r.answers.tn_record = { type: 'predicate', probability: 0 } } return r } }
+  const held = ['db/pg-plan', 'db/pg-health', 'db/pg-followup']
+  const byDefault = await turn('그럼 롤백 조건은?', { client: real, held })
+  assert.equal(byDefault.r.triage.need.state, 'no'); assert.notEqual(byDefault.r.memory.status, 'skipped', 'the rollback page was never held, so the answering model needs it')
+  const optedIn = await turn('그럼 롤백 조건은?', { client: real, held, skipOnNeed: true })
+  assert.equal(optedIn.r.memory.status, 'skipped')
+})
+
+test('held pages can be shown with their status and the start of their content, so "already covered" is judgeable; titles only stays the default', async () => {
+  const seen = []
+  const capture = { async decide(req) { seen.push(req.input.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n')); return { answers: {} } } }
+  await turn('그럼 롤백 조건은?', { client: capture, held: ['db/pg-plan'] })
+  assert.ok(!/status=plan\n/.test(seen[0]) && !seen[0].includes('아직 배포 전이다'), 'titles only by default')
+  seen.length = 0
+  await turn('그럼 롤백 조건은?', { client: capture, held: ['db/pg-plan'], heldExcerpts: true })
+  assert.match(seen[0], /- PostgreSQL 마이그레이션 배포 계획 \| status=plan\n  12월 첫째 주에 SQLite에서 PostgreSQL로/)
 })
