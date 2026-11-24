@@ -1,9 +1,10 @@
 // Host side of the briefing flow, advisory first (cycle 8). Pure: no DOM, no network. The surface turns its open cards into plain descriptors, this module
 // builds the closed observe request from them (with each card's provenance), and decides locally, before any request, whether there is anything to observe.
-// Default OFF: briefingFlowMode() is 'off' unless the pref egdesk.briefingFlow is exactly "advisory". Observing only asks the judge and records: it never
-// designs, publishes, moves, folds or deletes anything.
+// Default OFF: briefingFlowMode() is 'off' unless the pref egdesk.briefingFlow is exactly "advisory" (ask the judge and record: never designs, publishes, moves, folds
+// or deletes anything) or exactly "on" (the full flow: the bridge also needs the Decisions mode on, the subjective model and the briefing capability of that run;
+// the result is a PROPOSED briefing through the existing tool path plus an optional fold proposal that only the user can apply, on their own screen).
 export const BRIEFING_FLOW_PREF = 'egdesk.briefingFlow';
-export const briefingFlowMode = value => value === 'advisory' ? 'advisory' : 'off';
+export const briefingFlowMode = value => value === 'advisory' ? 'advisory' : value === 'on' ? 'on' : 'off';
 const clean = (text, max) => typeof text === 'string' ? text.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max) : '';
 const MAX = 12;
 
@@ -22,7 +23,9 @@ export function canvasBriefingCandidates(cards = []) {
       const p = c.record.provenance && c.record.provenance.version === 1 ? c.record.provenance : null;
       const label = clean(c.record.title, 40);
       if (!label) continue;
-      out.push({ id: c.id, ref: {}, kind: 'output', label, gist: clean(c.record.text, 100) || undefined, onBoard: true, maySend: true, rect,
+      // A published result card is bound by the bridge from its own output store (outputId); anything else cannot be a briefing target.
+      const ref = p?.outputId ? { outputId: p.outputId, viewId: c.id } : {};
+      out.push({ id: c.id, ref, kind: 'output', label, gist: clean(c.record.text, 100) || undefined, onBoard: true, maySend: true, rect,
         owner: p ? p.creator : undefined, createdForAnswer: p ? p.answerId : null, superseded: !!p?.supersededBy, stale: false, visibility });
     } else if (c.kind === 'memo') {
       out.push({ id: c.id, ref: {}, kind: 'source', label: `메모 ${Number.isSafeInteger(c.memoSeq) ? c.memoSeq : out.length + 1}`, onBoard: true, maySend: true, rect, owner: 'user', createdForAnswer: null, superseded: false, stale: false, visibility });
@@ -36,7 +39,8 @@ export function referencedCandidates(report, candidates) {
   return candidates.filter(c => typeof c.label === 'string' && c.label.trim().length >= 3 && text.includes(c.label.trim().toLowerCase())).length;
 }
 /** observeRequest({ mode, report, answerId, candidates }) -> the body for POST /decision/briefing-observe, or null when there is nothing to observe (no request is made then). */
-export function observeRequest({ mode, report, answerId = null, candidates = [] } = {}) {
-  if (mode !== 'advisory' || typeof report !== 'string' || !report.trim() || report.length > 20000 || referencedCandidates(report, candidates) < 2) return null;
-  return { report, currentAnswerId: typeof answerId === 'string' && answerId ? answerId : null, candidates };
+export function observeRequest({ mode, report, answerId = null, conversationId = null, runId = null, candidates = [] } = {}) {
+  if (!['advisory', 'on'].includes(mode) || typeof report !== 'string' || !report.trim() || report.length > 20000 || referencedCandidates(report, candidates) < 2) return null;
+  const body = { report, currentAnswerId: typeof answerId === 'string' && answerId ? answerId : null, candidates };
+  return mode === 'on' ? { flow: 'on', conversationId, runId, ...body } : body;
 }

@@ -70,8 +70,8 @@ test('host adapter: provenance becomes owner / answer / superseded; unknown stay
 
 // ---------------- 3. the flag: default OFF, advisory only; the default path touches nothing ----------------
 test('flag: only the exact value "advisory" turns it on; nothing else does', () => {
-  for (const v of [undefined, null, '', 'off', 'on', 'ADVISORY', 'advisory ', true, 1, { unreadable: true }]) assert.equal(BriefingHost.briefingFlowMode(v), 'off', String(v));
-  assert.equal(BriefingHost.briefingFlowMode('advisory'), 'advisory');
+  for (const v of [undefined, null, '', 'off', 'ON', 'ADVISORY', 'advisory ', 'on ', true, 1, { unreadable: true }]) assert.equal(BriefingHost.briefingFlowMode(v), 'off', String(v));
+  assert.equal(BriefingHost.briefingFlowMode('advisory'), 'advisory'); assert.equal(BriefingHost.briefingFlowMode('on'), 'on');
   assert.equal(BriefingHost.observeRequest({ mode: 'off', report: 'Delay report and Invoice', candidates: [{ label: 'Delay report' }, { label: 'Invoice' }] }), null);
   assert.equal(BriefingHost.observeRequest({ mode: 'advisory', report: 'Only Delay report', candidates: [{ label: 'Delay report' }, { label: 'Invoice' }] }), null, 'fewer than two named cards: nothing to observe');
 });
@@ -79,7 +79,7 @@ test('wiring: both hooks are state hooks called at the end of the chat.event cas
   const at = src.indexOf("case 'chat.event': {"), end = src.indexOf("case 'auth-status':", at); const body = src.slice(at, end);
   assert.match(body, /state\.noteChatAttention\?\.\(event, run\);[\s\S]*refreshContextSources[\s\S]*state\.noteOutputSuperseded\?\.\(event\.details\?\.output\);\s+if \(run && event\.event === 'run\.completed'\) state\.observeBriefing\?\.\(run\);/);
   assert.match(src, /state\.observeBriefing = observeBriefing;/); assert.match(src, /state\.noteOutputSuperseded = noteOutputSuperseded;/);
-  assert.match(decl('observeBriefing'), /^  function observeBriefing\(run\) \{\n    if \(BriefingHost\.briefingFlowMode\(readSurfacePref\(BriefingHost\.BRIEFING_FLOW_PREF\)\) !== 'advisory' \|\| run\?\.boardMember === true\) return;/, 'the flag check is the first statement');
+  assert.match(decl('observeBriefing'), /^  function observeBriefing\(run\) \{\n    const flowMode = BriefingHost\.briefingFlowMode\(readSurfacePref\(BriefingHost\.BRIEFING_FLOW_PREF\)\);\n    if \(flowMode === 'off' \|\| run\?\.boardMember === true\) return;/, 'the flag check is the first statement');
 });
 function observeEnv({ pref, run = { runId: 'run-9', localThreadId: 'thread-1', boardMember: false }, text = 'The Delay report and the Invoice totals explain the delay.' } = {}) {
   const log = { prefs: [], posts: [], queries: 0, geometry: 0 };
@@ -94,7 +94,7 @@ function observeEnv({ pref, run = { runId: 'run-9', localThreadId: 'thread-1', b
   return { observe: () => observe(run), log };
 }
 test('default path: with the flag unset (or anything but "advisory") observeBriefing reads the pref and does nothing else', () => {
-  for (const pref of [undefined, null, 'off', 'on', { unreadable: true }]) { const e = observeEnv({ pref }); e.observe(); assert.deepEqual(e.log, { prefs: ['egdesk.briefingFlow'], posts: [], queries: 0, geometry: 0 }, String(pref)); }
+  for (const pref of [undefined, null, 'off', 'ON', { unreadable: true }]) { const e = observeEnv({ pref }); e.observe(); assert.deepEqual(e.log, { prefs: ['egdesk.briefingFlow'], posts: [], queries: 0, geometry: 0 }, String(pref)); }
   const board = observeEnv({ pref: 'advisory', run: { runId: 'run-9', localThreadId: 'thread-1', boardMember: true } }); board.observe(); assert.deepEqual(board.log.posts, []); assert.equal(board.log.queries, 0);
 });
 test('flag on: exactly one content-bounded POST for an answer that names two cards, once per answer; an answer that names fewer sends nothing', async () => {
@@ -106,8 +106,8 @@ test('flag on: exactly one content-bounded POST for an answer that names two car
 });
 
 // ---------------- 4. the bridge: advisory records, every other mode does nothing ----------------
-const candidates = [{ id: 'r1', ref: {}, kind: 'output', label: 'Delay report', gist: 'Delay report body', onBoard: true, maySend: true, owner: 'agent', createdForAnswer: 'ans-1', superseded: true, visibility: 'visible' },
-  { id: 'r2', ref: {}, kind: 'output', label: 'Invoice totals', gist: 'Q3 totals', onBoard: true, maySend: true, owner: 'agent', createdForAnswer: 'ans-9', superseded: false, visibility: 'visible' },
+const candidates = [{ id: 'r1', ref: { outputId: uid(1), viewId: 'r1' }, kind: 'output', label: 'Delay report', gist: 'Delay report body', onBoard: true, maySend: true, owner: 'agent', createdForAnswer: 'ans-1', superseded: true, visibility: 'visible' },
+  { id: 'r2', ref: { outputId: uid(2), viewId: 'r2' }, kind: 'output', label: 'Invoice totals', gist: 'Q3 totals', onBoard: true, maySend: true, owner: 'agent', createdForAnswer: 'ans-9', superseded: false, visibility: 'visible' },
   { id: 'm1', ref: {}, kind: 'source', label: '메모 3', onBoard: true, maySend: true, owner: 'user', visibility: 'visible' }];
 const observeBody = { report: '## Delay\nThe Delay report and the Invoice totals explain it.\n\n## Notes\nSee 메모 3 for context and the details.', currentAnswerId: 'ans-9', candidates };
 test('bridge observe: advisory asks the placement judge and, if it would go to the board, the reuse judge, records both, and does nothing else', async t => {
@@ -116,7 +116,7 @@ test('bridge observe: advisory asks the placement judge and, if it would go to t
   assert.deepEqual(r.body, { status: 'observed', stages: ['placement', 'reuse'], outcome: 'advisory-only', judgeRequests: 2 }); assert.equal(R.calls.length, 2);
   assert.deepEqual(R.calls.map(c => c.questions[0].name), ['placement', 'component_T1']);
   assert.ok(R.calls[1].questions[0].choices.some(c => c.value === 'retrieve'), 'the superseded earlier output of this Agent is offered retrieve in the packet');
-  assert.ok(!R.calls[1].questions.slice(1, 3).some(q => q.choices.some(c => c.value === 'retrieve')), 'the answer\'s own output and the user memo are not');
+  assert.ok(!R.calls[1].questions.filter(q => q.name.startsWith('component_') && q.name !== 'component_T1').some(q => q.choices.some(c => c.value === 'retrieve')), 'the answer\'s own output is not offered retrieve; the memo is not even asked about (not a briefing target)');
   const rows = R.calibration.entries(); assert.deepEqual(rows.map(x => [x.feature, x.mode, x.attached]), [['board_arrangement', 'advisory', false], ['board_arrangement', 'advisory', false]]);
   assert.ok(!/Delay|Invoice|메모|ans-|r1/.test(JSON.stringify(rows)), 'calibration is content-free');
   assert.equal(R.budget.snapshot().inputTokens, 22);
