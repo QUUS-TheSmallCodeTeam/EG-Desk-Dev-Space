@@ -635,6 +635,7 @@ export function linkTypeForRelation(relation) {
  * items (ontology 'future' → planned); other nodes become documents whose full
  * text is the node body. Graph edges and snapshot continuations come along as typed `links`.
  */
+const recordedDate = value => (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}(?:T[\d:.]+(?:Z|[+-]\d{2}:\d{2}))?$/.test(value) && !Number.isNaN(Date.parse(value)) ? value : null)
 export function candidatesFromOntologyGraph(graph) {
   const out = []
   // Edges are kept as typed links (they used to be dropped). They only point between candidates that exist.
@@ -657,7 +658,10 @@ export function candidatesFromOntologyGraph(graph) {
     out.push({ id: `ontology:${node.id}`, kind: node.timeSlice ? 'timeline' : 'document', title: node.label || node.id,
       summary: typeof node.summary === 'string' ? node.summary : '',
       timeSlice: ONTOLOGY_SLICES[node.timeSlice] || 'unknown',
-      status: typeof node.snapshotStatus === 'string' ? node.snapshotStatus : null,
+      // The status the record gives: its snapshot's, or (a node outside any snapshot) its own recorded status when it has one.
+      status: typeof node.snapshotStatus === 'string' ? node.snapshotStatus : typeof node.status === 'string' ? node.status : null,
+      // The date the record gives, when it gives one (an ISO date or date-time); never computed from text.
+      ...(recordedDate(node.at) ? { at: recordedDate(node.at) } : {}),
       branchId: typeof node.snapshotId === 'string' ? node.snapshotId : null,
       aliases: [...(Array.isArray(node.aliases) ? node.aliases : []), ...(Array.isArray(node.abbreviations) ? node.abbreviations : [])],
       sourceRef: typeof node.path === 'string' ? node.path : null,

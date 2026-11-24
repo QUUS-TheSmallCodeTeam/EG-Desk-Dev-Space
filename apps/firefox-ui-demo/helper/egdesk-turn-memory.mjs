@@ -102,6 +102,12 @@ const WRITE_RULES = [
   'A message that reports a plan as done is a status change of that plan page, not a new fact. A relayed statement stays attributed. Never invent a page.',
 ].join('\n')
 
+// The time of a status-change reading when the sentence's own time label was not installed: a report that something is done is about
+// something before the utterance, a report of a plan about something after it. Derived by code from the decided status (R3), never guessed.
+// (Real run 2026-11-25, s9: target 0.99, status done 0.94, time label past_unspecified 0.73 under its 0.85 bar -> slice 'unknown' -> the
+// writer refused the proposal as invalid and no reading was kept.)
+const SLICE_OF_STATUS = Object.freeze({ done: 'past', plan: 'planned' })
+export const readingSlice = (rec, status) => (rec.slice !== 'unknown' ? rec.slice : SLICE_OF_STATUS[status] ?? 'unknown')
 const SLICE_OF = Object.freeze({ past_anchored: 'past', past_unspecified: 'past', at_utterance: 'present', ongoing_no_end: 'present', future_anchored: 'planned', future_unspecified: 'planned' })
 /**
  * Labels (isolated axes, installed only above their bars) -> the page attributes of a recorded utterance.
@@ -137,6 +143,24 @@ function mergedLabels(interpretations) {
 // 'about' asks neither as a forced choice. Each candidate gets its own yes/no question ("is this message about THIS record?"), and code
 // derives the target: exactly one yes and every other a decided no -> that record; every one a decided no (or there is no candidate) ->
 // a new record; anything else -> undecided, and nothing is written. "Do not add" stays where it is decided: tn_record.
+// ---- truthfulness about records (L7 c17) ----
+// The write judgment runs AFTER the answer, so the answering model cannot know whether anything will be recorded (real all-on run 2026-11-25,
+// s9: the answer said "네, 기록해 두겠습니다." and nothing was recorded). It is told so, on the turns where a record may follow: a first turn
+// (its recording triage is still running when the turn starts) and a mid-session turn whose triage said the message is worth recording.
+// What was actually noted reaches it on a later turn through the confirmation note (confirmInConversation), which it may then state.
+export const RECORDING_RULE = '[recording] EG-Desk, not you, decides after your reply whether anything from this message is recorded, and a record stays unconfirmed until the person confirms it. Do not say that you have recorded, saved or noted anything, or that you will. If something was noted, you will be told on a later turn.'
+/**
+ * The record state of a turn as one draft-check evidence item: what EG-Desk has noted in this session and not yet had confirmed, and that
+ * nothing is recorded during the reply. noted: [{ title, status }] (already permission-checked by the caller).
+ */
+export function recordStateEvidence(noted = []) {
+  const list = (Array.isArray(noted) ? noted : []).filter(n => n && typeof n.title === 'string' && n.title.trim() && ['done', 'plan', 'superseded'].includes(n.status)).slice(0, 3)
+  const words = { done: 'done', plan: 'planned', superseded: 'outdated' }
+  const text = ['EG-Desk record state for this reply: nothing is recorded or saved during the reply; a record, if any, is made by EG-Desk after it and stays unconfirmed until the person confirms it.',
+    list.length ? `Noted earlier in this conversation and not yet confirmed: ${list.map(n => `"${compactText(n.title, 120)}" reported as ${words[n.status]}`).join('; ')}.` : 'Nothing has been noted in this conversation that awaits confirmation.'].join(' ')
+  return { id: 'record-state', kind: 'memory', time: 'present', status: null, source: 'system', text }
+}
+
 export const WRITE_TARGET_DESIGNS = Object.freeze(['choice', 'about'])
 // The design turn memory uses unless told otherwise (2026-11-24 real re-measurement, 6 requests: the per-record predicates answered 0 or 1
 // in every case, while the 'choice' target of the same three new-record utterances stayed undecided, 0.6-0.7, 3 of 3). 'choice' stays
@@ -203,7 +227,7 @@ export async function judgeTurnWrite({ message, candidates = [], client, askedAt
   const page = pages[index]
   if (!page) return { proposal: { op: 'none', reason: 'target_unknown' }, receipt }
   if (rec.status !== 'plan' && rec.status !== 'done') return { proposal: { op: 'none', reason: 'status_unclear' }, receipt }
-  return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: rec.status, time: { slice: rec.slice }, provenance: rec.provenance, spokenAt }, receipt }
+  return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: rec.status, time: { slice: readingSlice(rec, rec.status) }, provenance: rec.provenance, spokenAt }, receipt }
 }
 
 // The 'about' design of judgeTurnWrite: same inputs, same proposal shapes. Differences: the target is derived (deriveWriteTarget); a
@@ -264,7 +288,7 @@ async function judgeWriteAbout({ message, pages, spans, client, askedAt, signal,
     return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: 'superseded', time: { slice }, provenance: rec.provenance, spokenAt }, followUp, receipt: { ...receipt, linkCalls } }
   }
   if (rec.status !== 'plan' && rec.status !== 'done') return { proposal: { op: 'none', reason: 'status_unclear' }, receipt }
-  return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: rec.status, time: { slice: rec.slice }, provenance: rec.provenance, spokenAt }, receipt }
+  return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: rec.status, time: { slice: readingSlice(rec, rec.status) }, provenance: rec.provenance, spokenAt }, receipt }
 }
 
 const OPS = new Set(['none', 'new_page', 'update_status'])
@@ -301,7 +325,8 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
       if (earlier) return earlier.print === print ? { ...earlier.receipt, replay: true } : { status: 'conflict', reason: 'operation_reused' }
       const finish = receipt => { if (receipt.status === 'stored' || receipt.status === 'recorded_pending' || receipt.status === 'status_updated') done.set(key, { print, receipt }); return receipt }
       const provenance = proposal.provenance
-      if (!KINDS.has(provenance?.kind) || (provenance.basis !== undefined && !PROVENANCE_BASES.includes(provenance.basis)) || !SLICES.has(proposal.time?.slice)) return { status: 'invalid' }
+      if (!KINDS.has(provenance?.kind) || (provenance.basis !== undefined && !PROVENANCE_BASES.includes(provenance.basis))) return { status: 'invalid', reason: 'provenance' }
+      if (!SLICES.has(proposal.time?.slice)) return { status: 'invalid', reason: 'time_slice' }
       try {
         if (proposal.op === 'update_status') {
           const page = wiki.pages.get(proposal.pageId)
@@ -413,7 +438,7 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
  * packetFirst (optional, first turn only): return as soon as the packet is ready; the triage that only decides recording keeps running and is
  *   awaited inside judgeWrite (triage is then null in the result and `triageLater` is its promise). It is not bound by the packet deadline.
  */
-export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = TURN_MEMORY_WRITE_TARGET } = {}) {
+export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = TURN_MEMORY_WRITE_TARGET, previous = null } = {}) {
   // The deadline is ONE point on ONE clock, fixed here. Everything below asks that clock; a timer only wakes the wait up.
   const deadlineAt = Number.isFinite(deadlineMs) ? clock.now() + Math.max(0, deadlineMs) : null
   const remaining = () => (deadlineAt === null ? null : Math.max(0, deadlineAt - clock.now()))
@@ -446,7 +471,7 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
     // material, a needless fetch only costs tokens.
     memory = cutByDeadline ? { status: 'empty', partial: true, reason: 'deadline', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [], deadlineHit: true }, nextDelivered: () => receipts }
       : triageSkipsFetch(triage, { skipOnNeed, heldExcerpts }) ? { status: 'skipped', reason: 'nothing_needed', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [] }, nextDelivered: () => receipts }
-      : await reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget: loopBudget(), signal, clock, mode: 'next', live })
+      : await reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget: loopBudget(), signal, clock, mode: 'next', live, previous })
   } else if (packetFirst === true) {
     triageLater = ontologyWrite ? triageCall() : null
     triage = null

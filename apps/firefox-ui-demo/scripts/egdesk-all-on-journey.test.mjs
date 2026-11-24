@@ -165,7 +165,8 @@ test('all features on, one session: memory, briefing, a browser task, a long com
   const reply = await w.send(Q.second, w.browserExtra())
   assert.deepEqual([reply.inRun, reply.accepted, reply.runId], [true, true, w.runs().at(-1).runId], 'the reply goes into the run that asked')
   await w.idle(); await w.answer(A.got); await new Promise(resolve => setTimeout(resolve, 60)); await w.idle(); close('b2')
-  assert.deepEqual(w.byFeature('b2'), { browser_resume: 1, browser_step: 3, memory_write: 1 })
+  // L7 c17: the task outcome is stored by a code rule (no write-judgment request); the page itself is asserted below
+  assert.deepEqual(w.byFeature('b2'), { browser_resume: 1, browser_step: 3 })
   assert.deepEqual(w.subjectiveTurnsIn('b1').main + w.subjectiveTurnsIn('b2').main, 2, 'the task start and its continuation after the reply')
   assert.equal(w.note().status, 'done')
   assert.deepEqual(w.acts.map(a => [a.type, a.url]), [['navigate', 'https://portal.example.test/biz/2'], ['navigate', 'https://portal.example.test/download/2.pdf']])

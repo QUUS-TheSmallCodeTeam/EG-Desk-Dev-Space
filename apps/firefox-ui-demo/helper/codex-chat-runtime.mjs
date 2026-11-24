@@ -71,7 +71,7 @@ export function compactionSignal(message) {
 }
 const FLOW_OWN_KINDS = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
 import { SPEECH_AT_PAGE, speechSegments } from './egdesk-speech-grounding.mjs'
-import { deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory } from './egdesk-turn-memory.mjs'
+import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory, recordStateEvidence } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
 import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, entryQuestion, readBrowserEntry } from './egdesk-browser-task.mjs'
 import { hostOf } from './egdesk-browser-task-memory.mjs'
@@ -2675,7 +2675,9 @@ export class CodexChatRuntime {
       const onePacket = memoryPacket ? this.mergeTurnMemory(memoryTurn, decision, additionalContext) : null
       // What was noted in this session and is not confirmed (flag turnMemory.confirmInConversation, default off): a few lines for the
       // answering model to state, after the pages. null without the flag, so nothing below changes then.
-      const memoryNote = memoryReady ? this.turnMemoryNoteFor(memoryTurn, additionalContext) : null
+      // The confirmation note (flag confirmInConversation) and the recording rule (when a record may follow this turn) ride after the pages.
+      const confirmNote = memoryReady ? this.turnMemoryNoteFor(memoryTurn, additionalContext) : null, recordRule = memoryReady ? this.turnMemoryRuleFor(memoryTurn, memoryPacket !== null) : null
+      const memoryNote = [confirmNote, recordRule].filter(Boolean).join('\n\n') || null
       const withNote = value => (memoryNote ? [value, memoryNote].filter(Boolean).join('\n\n') : value)
       // With one packet and no pages to add, a note alone also goes under the selection's key (never a second key for it).
       const noteOnly = !memoryPacket && memoryNote ? this.onePacketSelection(decision, additionalContext) : null
@@ -2781,10 +2783,10 @@ export class CodexChatRuntime {
       }
       if (decision) this.noteDecisionContext(run, decision)
       this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...(memoryPacket || memoryNote ? [TURN_MEMORY_KEY] : [])],
-        memoryReady ? this.turnMemoryDraftEvidence(memoryTurn, memoryPacket !== null) : [])
+        memoryReady ? this.turnMemoryDraftEvidence(memoryTurn, memoryPacket !== null, run.conversationId) : [])
       this.startConversationFlow(run, body, context)
       this.turnMemoryLatest.delete(run.conversationId) // this turn is now the conversation's latest: the previous turn's materials end here
-      if (memoryTurn) this.noteTurnMemoryOn(run, body, context, memoryTurn, memoryPacket !== null, memoryNote !== null)
+      if (memoryTurn) this.noteTurnMemoryOn(run, body, context, memoryTurn, memoryPacket !== null, confirmNote !== null)
       if (memoryPosition) this.startTurnMemoryAdvisory(run, body, context, memoryPosition, performance.now() - memoryClock, { speech: decision?.speech ?? null, topic: this.topicIntakes.get(context) ?? null }) // after dispatch, in the background: never delays or changes the turn
       if (bounded && policy === BROWSER_BOUNDED && browserInteractionRequested && this.browserEntryMode() === 'advisory') this.startBrowserEntryAdvisory(run, body, context) // same: record only
       // Notifications can precede the RPC response. Only the returned turn ID
@@ -5963,7 +5965,11 @@ export class CodexChatRuntime {
       const controller = new AbortController(), clock = this.turnMemoryClock(tm)
       let speech = null
       try { speech = this.directSpeech(body, context, controller.signal) } catch { speech = null }
-      const turn = { position, capMs, clock, startedAt: clock.now(), controller, spans: [], sources: { speech, topic: this.topicIntakes.get(context) ?? null }, result: null, cut: false }
+      // The pages the previous reply of this conversation was given with: what that turn attached, else what it held (read now, before this
+      // turn becomes the latest). Ids only; the loop names them by title among the held pages.
+      const prior = context.conversationId ? this.turnMemoryLatest.get(context.conversationId) : null
+      const previous = prior?.result ? (prior.attached ? Object.keys(prior.result.memory?.delivered ?? {}) : (prior.result.held ?? [])) : []
+      const turn = { position, capMs, clock, startedAt: clock.now(), controller, previous, spans: [], sources: { speech, topic: this.topicIntakes.get(context) ?? null }, result: null, cut: false }
       turn.promise = this.runTurnMemoryOn(turn, body, context).catch(() => null).finally(() => { turn.finished = true })
       this.turnMemoryTurns.set(context, turn)
       this.turnMemoryRuns.add(turn.promise)
@@ -5996,7 +6002,7 @@ export class CodexChatRuntime {
     if (this.turnMemoryConfirmOn()) await this.confirmNotedRecords(turn, body, context, { wiki, baseScope, scope, egress, threadKey })
     const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position: turn.position, threadKey, scope,
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
-      deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock,
+      deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock, previous: turn.previous,
       ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about' })
     if (this.turnMemoryConfirmOn()) this.prepareTurnMemoryNote(turn, { wiki, scope, threadKey })
     Object.assign(turn, { wiki, baseScope, scope, result, readyMs: clock.now() - t0 })
@@ -6154,13 +6160,30 @@ export class CodexChatRuntime {
     } catch { return null }
   }
 
+  // The recording rule for this turn, or null: a write judgment may follow it (the write path is configured) and either it is a first turn
+  // whose packet is attached (its recording triage still runs) or the mid-session triage decided the message is worth recording. Nothing
+  // rides on a turn whose memory was refused, cut or switched off: then no write judgment can use this turn's pages either.
+  turnMemoryRuleFor(turn, packetAttached = false) {
+    try {
+      const tm = this.decisionContext?.turnMemory
+      if (!turn?.result || this.turnMemoryMode() !== 'on' || tm?.ontologyWrite !== true || typeof tm.writer !== 'function') return null
+      if (turn.position?.kind === 'first') return packetAttached ? RECORDING_RULE : null
+      return turn.result.triage?.record?.state === 'yes' && turn.result.memory?.status !== 'fallback' ? RECORDING_RULE : null
+    } catch { return null }
+  }
+
   // The draft check's evidence from turn memory ('on' only): what this turn attached and what the thread already holds, as the run's model has
   // it at dispatch (see memoryEvidence). Under 'advisory' nothing reached the model, so there is nothing to add. Used by the checks of the
   // ANSWER only; a heartbeat's intermediate note is about the run, not the memory, and keeps the evidence it had.
-  turnMemoryDraftEvidence(turn, attached) {
+  turnMemoryDraftEvidence(turn, attached, threadKey = null) {
     try {
       if (!turn?.result || !turn.wiki || this.turnMemoryMode() !== 'on') return []
-      return memoryEvidence(turn.result, turn.wiki, { scope: turn.scope, attached })
+      const items = memoryEvidence(turn.result, turn.wiki, { scope: turn.scope, attached })
+      // Where a record may follow, the record state is evidence too: an answer that says it recorded something can then be checked against it.
+      if (!this.turnMemoryRuleFor(turn, attached)) return items
+      const noted = (this.turnMemoryNoted.get(threadKey) ?? []).map(entry => { const page = turn.wiki.pages.get(entry.pageId)
+        return page && memoryAllowsPage(page, turn.scope) ? { title: page.title, status: entry.status } : null }).filter(Boolean)
+      return [...items, recordStateEvidence(noted)]
     } catch { return [] }
   }
 

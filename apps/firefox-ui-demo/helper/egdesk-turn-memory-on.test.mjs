@@ -505,3 +505,58 @@ test('one packet: a confirmation note with no pages to add also rides under the 
   assert.equal(typeof x.chat.turnMemoryNoteFor(turn, {}), 'string', 'the note is ready to go')
   x.store.close()
 })
+
+// ---- s9 of the real all-on run (2026-11-25): a decided target and status, the time label under its bar ----
+test('s9: a decided status change is kept as a pending reading although the sentence\'s time label was not installed (both write-target designs)', async () => {
+  // The real s9 label answers: time past_unspecified 0.77 (confidence 0.73, under the 0.85 bar), source self_reported_observation 0.67.
+  const s9Labels = { speech_time_0: { type: 'choice', choice: 'past_unspecified', confidence: 0.73, probabilities: [{ value: 'past_unspecified', probability: 0.77 }, { value: 'future_unspecified', probability: 0.08 }, { value: 'past_anchored', probability: 0.07 }] },
+    speech_source_0: { type: 'choice', choice: 'self_reported_observation', confidence: 0.6, probabilities: [{ value: 'self_reported_observation', probability: 0.67 }, { value: 'unspecified', probability: 0.28 }] } }
+  const judge = mockJudge()
+  const client = { async decide(req) { const r = await judge.decide(req); if (req.questions.some(q => q.name.startsWith('tw_'))) Object.assign(r.answers, s9Labels); return r } }
+  for (const writeTarget of ['choice', 'about']) {
+    const x = await rig({ tm: { writeTarget }, client })
+    await x.send(DONE, 'r1'); await x.done(1)
+    const receipt = x.chat.turnMemoryWriteReceipts.get(x.run())
+    assert.deepEqual([receipt.proposal, receipt.pageId, receipt.status, receipt.applied], ['update_status', 'db/pg-plan', 'done', 'recorded_pending'], writeTarget)
+    const plan = x.wiki.pages.get('db/pg-plan')
+    assert.deepEqual([plan.status, plan.statusReadings.map(r => [r.status, r.state])], ['plan', [['done', 'pending']]], `${writeTarget}: pending only, never promoted`)
+    x.store.close()
+  }
+})
+
+// ---- truthfulness: the answer is told that recording is not its to do; the draft check gets the actual record state ----
+test('the recording rule rides where a record may follow (first turn with its packet; a mid turn decided worth recording), and nowhere else', async () => {
+  const { RECORDING_RULE } = await import('./egdesk-turn-memory.mjs')
+  const x = await rig()
+  await x.send(PLAN_Q, 'r1'); await x.done(1)                       // first turn, packet attached (its recording triage still runs)
+  await x.send(DONE, 'r2'); await x.done(2)                         // mid: worth recording (the s9 shape: the plan is held, nothing new)
+  await x.send('그럼 헬스체크는 뭐부터 보면 돼?', 'r3'); await x.done(3) // mid: a question, not worth recording
+  const values = [0, 1, 2].map(i => x.starts[i].additionalContext?.[TURN_MEMORY_KEY]?.value ?? '')
+  assert.deepEqual(values.map(v => v.includes(RECORDING_RULE)), [true, true, false])
+  assert.ok(values[0].indexOf(RECORDING_RULE) > values[0].indexOf('[page id='), 'after the pages')
+  assert.match(RECORDING_RULE, /Do not say that you have recorded, saved or noted anything, or that you will/)
+  x.store.close()
+  // no write path: nothing can be recorded, so nothing is said about it
+  const y = await rig({ tm: { ontologyWrite: false } })
+  await y.send(PLAN_Q, 'r1'); await y.done(1)
+  assert.ok(!(y.packet(0) ?? '').includes('[recording]'))
+  y.store.close()
+})
+
+test('record state as draft-check evidence: nothing is recorded during the reply, and what was noted and awaits confirmation', async () => {
+  const { recordStateEvidence } = await import('./egdesk-turn-memory.mjs')
+  const empty = recordStateEvidence([])
+  assert.deepEqual([empty.id, empty.kind, empty.source], ['record-state', 'memory', 'system'])
+  assert.match(empty.text, /nothing is recorded or saved during the reply/); assert.match(empty.text, /Nothing has been noted in this conversation that awaits confirmation/)
+  assert.match(recordStateEvidence([{ title: 'PostgreSQL 마이그레이션 배포 계획', status: 'done' }, { title: 'x', status: 'weird' }]).text, /Noted earlier in this conversation and not yet confirmed: "PostgreSQL 마이그레이션 배포 계획" reported as done\./)
+  // through the runtime: the turn that may be recorded hands the draft check this item with the pages; a question turn does not
+  const x = await rig({ tm: { confirmInConversation: true } })
+  x.chat.decisionContext.draftCheck = { mode: () => 'advisory' }
+  await x.send(PLAN_Q, 'r1'); await x.done(1)
+  await x.send(DONE, 'r2'); await x.done(2)
+  const second = x.chat.draftCheckTurns.get(x.run()).memory
+  assert.ok(second.some(i => i.id === 'record-state' && /Nothing has been noted/.test(i.text)), 'the report turn: nothing noted yet (the write judgment runs after this answer)')
+  await x.send('그럼 헬스체크는 뭐부터 보면 돼?', 'r3'); await x.done(3)
+  assert.ok(!x.chat.draftCheckTurns.get(x.run()).memory.some(i => i.id === 'record-state'), 'a question turn: no record can follow, no record state')
+  x.store.close()
+})
