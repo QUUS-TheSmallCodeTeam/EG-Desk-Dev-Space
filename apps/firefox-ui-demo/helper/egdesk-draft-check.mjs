@@ -14,7 +14,8 @@ import { DecisionError } from './egdesk-decision-client.mjs'
 //            is posted as it is today), 'passed', 'revised', 'certain_part', 'ask_user'.
 //
 // Two ways of asking (design), the same findings and the same revision:
-//   'choice'      (default, unchanged) one shared evidence list, per sentence a 4-way choice (supported / contradicted /
+//   'predicates'  (default since cycle 18) see below.
+//   'choice'      (selectable, for comparison) one shared evidence list, per sentence a 4-way choice (supported / contradicted /
 //                 not_mentioned / insufficient) and one predicate "does it state a plan, a past log or a relayed report as a
 //                 present fact".
 //   'predicates'  the evidence quoted once with its time tags, each sentence quoted on its own block, and per sentence two yes/no
@@ -146,8 +147,15 @@ export function evidenceFromPacket(packet) {
 
 // An item with opaque: true is a content-free reference (a tool output the checker may not receive). It stands in the list so the
 // checker knows material existed, but nothing can be concluded as "not in the evidence" while one is present.
-const normalizedEvidence = items => (Array.isArray(items) ? items : []).filter(item => item?.opaque === true || (typeof item?.text === 'string' && item.text.trim()))
-  .slice(0, DRAFT_CHECK_LIMITS.evidenceItems).map((item, index) => ({ id: String(item.id ?? `item${index + 1}`), kind: item.kind ?? null, time: item.time ?? 'unknown',
+// At most evidenceItems are kept, content first; when anything was content-free, one such reference always stays within the bound (it is what
+// stops a sentence being called unverified while some material could not be read).
+function boundedEvidence(items) {
+  const usable = (Array.isArray(items) ? items : []).filter(item => item?.opaque === true || (typeof item?.text === 'string' && item.text.trim()))
+  const content = usable.filter(item => item.opaque !== true), opaque = usable.filter(item => item.opaque === true)
+  const limit = DRAFT_CHECK_LIMITS.evidenceItems
+  return opaque.length ? [...content.slice(0, limit - 1), ...opaque.slice(0, Math.max(1, limit - content.length))] : content.slice(0, limit)
+}
+const normalizedEvidence = items => boundedEvidence(items).map((item, index) => ({ id: String(item.id ?? `item${index + 1}`), kind: item.kind ?? null, time: item.time ?? 'unknown',
     status: item.status ?? null, source: item.source ?? null, opaque: item.opaque === true,
     text: item.opaque === true ? '(content not available to the checker)' : compactText(item.text, DRAFT_CHECK_LIMITS.evidenceChars) }))
 
@@ -277,7 +285,7 @@ export function verdictOf(state) {
   return { check: 'would_revise', ifUnrevised: trimmed(state).hasClaims ? 'would_trim' : 'would_ask' }
 }
 
-async function judge({ draft, evidence, userText, internalVocabulary, client, thresholds, timeoutMs, signal, design = 'choice', concreteOnly = false }) {
+async function judge({ draft, evidence, userText, internalVocabulary, client, thresholds, timeoutMs, signal, design = 'predicates', concreteOnly = false }) {
   const spans = segmentDraft(draft)
   // concreteOnly: only sentences with a concrete detail are judged (see checkDraft).
   const claimSpans = spans.map((s, i) => ({ ...s, index: i })).filter(s => s.kind === 'claim' && (!concreteOnly || isCheckable(s.text))).slice(0, DRAFT_CHECK_LIMITS.claims)
@@ -309,13 +317,15 @@ async function judge({ draft, evidence, userText, internalVocabulary, client, th
  * 'advisory' judges and records but always posts the draft unchanged. 'off' calls nothing.
  */
 export async function checkDraft({ draft, evidence = [], userText = '', internalVocabulary = [], mode = 'off', client, revise = null, budget = null,
-  now = () => performance.now(), thresholds: overrides, signal, egress = null, design = 'choice', concreteOnly = false } = {}) {
+  now = () => performance.now(), thresholds: overrides, signal, egress = null, design = 'predicates', concreteOnly = false } = {}) {
   // concreteOnly: for a short message composed only from facts of the present (the heartbeat's messages: every evidence item is the run's
   // state now). Such a check can find only two things: a concrete detail (number, name, identifier) the facts do not hold, and a tense
   // mismatch, which cannot exist when every item is of the present. So a sentence without a concrete detail is not sent; with none left,
   // nothing is asked (outcome 'unchecked', as for any draft with nothing checkable). Measured 2026-11-24 (all-on journey s4/s5): the only
   // findings on two such wait messages were the present-tense predicate (.90/.91) on sentences that truly describe the present.
-  const asked = design === 'predicates' ? 'predicates' : 'choice'
+  // Measured 2026-11-24 (heartbeat-c17): the choice design's present question said .99 to a present-tense sentence whose evidence is
+  // present-tense; the predicate design passed it (sup .81, tense .01), passed the s1 answer (.99/.04) and stopped an invented result (sup 0).
+  const asked = design === 'choice' ? 'choice' : 'predicates'
   const calibration = { feature: 'draft_check', mode: mode === 'advisory' ? 'advisory' : 'on', judgments: [], design: asked }
   let firstState = null
   const out = (text, outcome, extra = {}) => ({ action: 'post', text, outcome, calls: extra.calls ?? 0, findings: extra.findings ?? [], verdict: verdictOf(firstState),

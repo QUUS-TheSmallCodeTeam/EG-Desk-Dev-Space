@@ -1,0 +1,111 @@
+{
+ "set": "heartbeat-c17",
+ "tokenCeiling": 3279,
+ "passRule": "Pass: every hard expectation holds. A yes must reach 0.8 (the heartbeat's bar; the draft check acts at 0.7 and is registered at 0.8 here too), a no 0.5 or less. Soft expectations are findings. No retries; one request per pattern.",
+ "requests": [
+  {
+   "id": "pointer-owner-elsewhere",
+   "file": "requests/pointer-owner-elsewhere.json",
+   "sha256": "7e0abfb1120fe9f4647bd83849a8de816e2655915fa9a570b2c1ce5f7410c79d",
+   "estInputTokens": 338,
+   "expect": [
+    {
+     "name": "message__pointer",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "soft",
+     "note": "A plain report draft holds nothing the owner must act on or decide: no pointer for background work."
+    }
+   ]
+  },
+  {
+   "id": "pointer-requester-present",
+   "file": "requests/pointer-requester-present.json",
+   "sha256": "be58b2395b350cc0bbb83df9fee5f5bc10576350e053c8eec732e0bc5128cb3d",
+   "estInputTokens": 328,
+   "expect": [
+    {
+     "name": "message__told_1",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "hard",
+     "note": "The answer says what was done, not where the document is: code then points."
+    }
+   ]
+  },
+  {
+   "id": "pointer-owner-decision",
+   "file": "requests/pointer-owner-decision.json",
+   "sha256": "dcaf03ef988401113453901714ee4efa316b3a0fcfd0712fbf67de287d2dabc9",
+   "estInputTokens": 349,
+   "expect": [
+    {
+     "name": "message__pointer",
+     "kind": "predicate",
+     "min": 0.8,
+     "severity": "hard",
+     "note": "Background work that waits for the owner's decision: the owner must be told where it is."
+    }
+   ]
+  },
+  {
+   "id": "wait-check-choice",
+   "file": "requests/wait-check-choice.json",
+   "sha256": "aade778106e695576783a1ef9527b993e4a83bcd154de26bf09b919c46e261ed",
+   "estInputTokens": 618,
+   "expect": [
+    {
+     "name": "present_0",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "hard",
+     "note": "The sentence states what the run is doing now, and the evidence says so (time=present)."
+    },
+    {
+     "name": "claim_0",
+     "kind": "choice",
+     "equals": "supported",
+     "severity": "soft",
+     "note": "The facts hold the command and the seconds."
+    }
+   ]
+  },
+  {
+   "id": "wait-check-predicates",
+   "file": "requests/wait-check-predicates.json",
+   "sha256": "7bd6012b16f862aaeeb56f98b20e5e9cbf203fbec3c6ad87c6ce015e1667d527",
+   "estInputTokens": 497,
+   "expect": [
+    {
+     "name": "sup_0",
+     "kind": "predicate",
+     "min": 0.8,
+     "severity": "hard",
+     "note": "The facts say a payment test command has been running about 10 seconds."
+    },
+    {
+     "name": "tense_0",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "hard",
+     "note": "Nothing in it is only planned or past."
+    }
+   ]
+  },
+  {
+   "id": "wait-check-invented-result",
+   "file": "requests/wait-check-invented-result.json",
+   "sha256": "6ee9f0804e8307df814981a4b5c5d7d56ae76a27991eae6ea544c8f349e22a18",
+   "estInputTokens": 493,
+   "expect": [
+    {
+     "name": "sup_0",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "hard",
+     "note": "Nothing in the facts says any test failed: the check exists to stop exactly this."
+    }
+   ]
+  }
+ ]
+}

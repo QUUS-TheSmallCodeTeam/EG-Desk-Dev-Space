@@ -18,9 +18,12 @@ function client(answer) {
 }
 const p = probability => ({ type: 'predicate', probability })
 
-test('default design is the choice, unchanged; the predicate design quotes the evidence once and each sentence on its own, with two yes/no questions per sentence', async () => {
+test('default design is the predicates (cycle 18); the choice stays selectable; the predicate design quotes the evidence once and each sentence on its own', async () => {
+  const byDefault = client(q => p(q.name.startsWith('sup_') ? 0.95 : 0.04))
+  await checkDraft({ draft: S1_DRAFT, evidence: S1_EVIDENCE.filter(e => !e.opaque), mode: 'on', client: byDefault })
+  assert.deepEqual(byDefault.requests[0].questions.map(q => [q.name, q.type]), [['sup_0', 'predicate'], ['tense_0', 'predicate']])
   const choice = client(q => (q.type === 'choice' ? { type: 'choice', choice: 'supported', confidence: 0.9, probabilities: [{ value: 'supported', probability: 0.95 }, { value: 'insufficient', probability: 0.03 }] } : p(0.02)))
-  await checkDraft({ draft: S1_DRAFT, evidence: S1_EVIDENCE.filter(e => !e.opaque), mode: 'on', client: choice })
+  await checkDraft({ draft: S1_DRAFT, evidence: S1_EVIDENCE.filter(e => !e.opaque), mode: 'on', client: choice, design: 'choice' })
   assert.deepEqual(choice.requests[0].questions.map(q => [q.name, q.type]), [['claim_0', 'choice'], ['present_0', 'predicate']])
   const pred = client(q => p(q.name.startsWith('sup_') ? 0.95 : 0.04))
   const out = await checkDraft({ draft: `${S1_DRAFT}\n담당자는 김 대리입니다.`, evidence: S1_EVIDENCE, mode: 'on', client: pred, design: 'predicates' })
@@ -63,7 +66,7 @@ test('the s1 answer: with sound answers on the predicate design it is posted as 
     { claim_0: { type: 'choice', choice: 'insufficient', confidence: 0.76, probabilities: [{ value: 'insufficient', probability: 0.82 }, { value: 'supported', probability: 0.15 }] }, present_0: p(0.96) }]
   let n = 0
   const replay = { async decide() { return { answers: real[n++], usage: null } } }
-  const blocked = await checkDraft({ draft: S1_DRAFT, evidence: S1_EVIDENCE, mode: 'on', client: replay, revise: async () => '앞에서 확인한 내용 기준으로, A사 견적은 요청을 받은 뒤 첫 견적서를 보냈고 수정본은 팀장 승인 뒤 보낼 예정입니다.' })
+  const blocked = await checkDraft({ draft: S1_DRAFT, evidence: S1_EVIDENCE, mode: 'on', client: replay, design: 'choice', revise: async () => '앞에서 확인한 내용 기준으로, A사 견적은 요청을 받은 뒤 첫 견적서를 보냈고 수정본은 팀장 승인 뒤 보낼 예정입니다.' })
   assert.equal(blocked.outcome, 'ask_user', 'the present predicate flagged a correctly worded plan twice')
 })
 
@@ -76,6 +79,6 @@ test('concreteOnly (heartbeat messages, composed from facts of the present): a s
   assert.equal(c.requests.length, 1); assert.deepEqual(c.requests[0].questions.map(q => q.name), ['sup_0', 'tense_0'])
   assert.notEqual(some.outcome, undefined)
   const all = client(() => p(0.5))
-  await checkDraft({ draft: '확인하는 데 시간이 조금 걸리고 있어요.', evidence: facts, mode: 'on', client: all })
+  await checkDraft({ draft: '확인하는 데 시간이 조금 걸리고 있어요.', evidence: facts, mode: 'on', client: all, design: 'choice' })
   assert.equal(all.requests.length, 1, 'without concreteOnly the plain sentence is still asked about (answers, unchanged)')
 })

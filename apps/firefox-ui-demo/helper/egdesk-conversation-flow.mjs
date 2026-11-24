@@ -111,7 +111,9 @@ export function attentionOf(heartbeatFacts) {
     if (!ATTENTION_KINDS.includes(kind) || !ATTENTION_FOR.includes(who)) continue
     // The placement runtime says 'none' for the direction of something already in view and puts 'in_view' in the distance: one meaning here.
     if (distance === 'in_view') where = 'in_view'
-    return { provider, kind, who, where: ATTENTION_WHERE.includes(where) ? where : 'none', distance: ATTENTION_DISTANCE.includes(distance) ? distance : null, signature: `${provider}:${kind}:${who}` }
+    const place = ATTENTION_WHERE.includes(where) ? where : 'none'
+    // located: the provider reports a real surface off the person's view (a direction), not just that something exists.
+    return { provider, kind, who, where: place, distance: ATTENTION_DISTANCE.includes(distance) ? distance : null, located: ['left', 'right', 'above', 'below'].includes(place), signature: `${provider}:${kind}:${who}` }
   }
   return null
 }
@@ -213,6 +215,8 @@ export function flowFacts({ run, now, flow, own }) {
  * answer had already said where the document is).
  *   no_fact     no provider reports something waiting for a person
  *   in_view     it is already inside what that person is looking at (the placement runtime's own geometry)
+ *   no_surface  a finished result with no surface the provider places off the person's view (a pointer says where something is:
+ *               with nothing located elsewhere there is nothing to point to; Main, 2026-11-24, for requested results)
  *   no_route    that person is away, has no conversation of their own, or the only place has someone else in it (pointerRoute:
  *               presence and participants); the fact is then held for them (holdAttention)
  *   pointed     a pointer for this fact was already posted (the posted-pointer record)
@@ -222,6 +226,7 @@ export function flowFacts({ run, now, flow, own }) {
 export function pointerBlocked(facts, limits = FLOW_LIMITS) {
   if (!facts?.attention) return 'no_fact'
   if (facts.attention.where === 'in_view') return 'in_view'
+  if (facts.attention.kind === 'result' && facts.attention.located !== true) return 'no_surface'
   if (!facts.pointerTarget) return 'no_route'
   if (facts.pointed === true) return 'pointed'
   if (facts.declined === true) return 'declined'
@@ -405,6 +410,15 @@ export function flowPredicates(options, { note = null, pointer = null } = {}) {
   const noteKinds = ['explain_wait', 'milestone', 'stalled'].filter(kind => options.includes(kind))
   if (noteKinds.length) out.push({ ...FLOW_PREDICATES.note, topic: noteKinds.join('_') })
   return out
+}
+
+// The early question for notes that do not end in "?" (c18, replacing the plain pre-filter; measured 2026-11-24: ask .97 on such a note
+// that needs the person, 0 on a plain plan step). They never cause a request: they ride on one that goes out anyway, at most two per
+// request, the oldest not yet judged first, each quoted on its own, and each note is judged once.
+export const RIDE_ALONG_LIMITS = Object.freeze({ perRequest: 2 })
+export function rideAlongPredicates(notes) {
+  return (Array.isArray(notes) ? notes : []).slice(0, RIDE_ALONG_LIMITS.perRequest).map((note, i) => ({ ...FLOW_PREDICATES.ask, name: `ask_${i + 1}`,
+    quote: { label: 'A note the assistant wrote to itself', text: oneLine(note.text, FLOW_CONTEXT_LIMITS.note) }, kinds: ['run_text'] }))
 }
 
 export function pointerPredicates({ kind, result = null, posted = [], topic = null, requested = false } = {}) {

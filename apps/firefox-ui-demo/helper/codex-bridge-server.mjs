@@ -483,8 +483,8 @@ const chat = new CodexChatRuntime({
     turnMemory: turnMemoryConfig,
     browserEntry: browserEntryConfig,
     // Advisory draft check after an answer is posted (records only). Developer flag, default off; it has no settings screen entry.
-    // EGDESK_DRAFT_CHECK_DESIGN=predicates asks per-sentence yes/no questions instead of the default choice (developer flag, unset = choice).
-    ...(['advisory', 'on'].includes(process.env.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => process.env.EGDESK_DRAFT_CHECK, design: () => (process.env.EGDESK_DRAFT_CHECK_DESIGN === 'predicates' ? 'predicates' : 'choice') } } : {}),
+    // The check asks per-sentence yes/no questions (default); EGDESK_DRAFT_CHECK_DESIGN=choice selects the old 4-way choice for comparison (developer flag).
+    ...(['advisory', 'on'].includes(process.env.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => process.env.EGDESK_DRAFT_CHECK, design: () => (process.env.EGDESK_DRAFT_CHECK_DESIGN === 'choice' ? 'choice' : 'predicates') } } : {}),
     // Live-session heartbeat (egdesk-heartbeat.mjs) and, with EGDESK_DRAFT_CHECK=on (held, checked messages), intermediate messages while a run works. Developer flag, default off.
     // attentionPosted: the session posted its pointer message for a provider's attention fact; the placement runtime withdraws it.
     // With EGDESK_PRESENCE=on the audience rule also reads the Desk's presence snapshot (egdesk-presence-mirror.mjs); without it, as before, presence is unknown.

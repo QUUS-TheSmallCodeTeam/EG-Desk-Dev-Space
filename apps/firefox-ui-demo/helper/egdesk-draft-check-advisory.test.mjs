@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
@@ -133,15 +134,22 @@ test('mode off, a missing key or an ineligible turn run no check; guarded or unk
   w.chat.noteDraftCheckTurn(run, body, ctx, null, true); assert.equal(w.chat.draftCheckTurns.get(run).skip, 'ineligible')
 })
 
-test('tool use reaches the checker as content-free references only; a claim then cannot be called unverified', async t => {
-  const w = world(t, { draftCheck: { mode: () => 'advisory' }, tools: true, candidates: [],
-    check: request => { const a = judgeAnswers(request); for (const q of request.questions) if (/^claim_/.test(q.name)) a.answers[q.name] = { type: 'choice', choice: 'not_mentioned', confidence: 0.95, probabilities: [{ value: 'not_mentioned', probability: 0.96 }, { value: 'supported', probability: 0.02 }] }
-      for (const q of request.questions) if (/^present_/.test(q.name)) a.answers[q.name] = { type: 'predicate', probability: 0.02 }; return a } })
+test('a command of the run reaches the checker as the run\'s own fact (command, exit code, last output lines) where its models may receive terminal data; otherwise as a content-free reference, and a claim then cannot be called unverified', async t => {
+  // L3 c18 (all-on journey s6, 2026-11-24): an answer reporting a command's result was checked against pages and a content-free reference only.
+  const w = world(t, { draftCheck: { mode: () => 'advisory' }, tools: true, candidates: [] })
   await w.ask()
-  assert.equal(w.checkCalls.length, 0, 'only opaque references: nothing for the judge to compare with')
+  assert.equal(w.checkCalls.length, 1, 'the command\'s facts are something to compare with')
+  const sent = w.checkCalls[0].input.map(row => row.content).join('\n')
+  assert.match(sent, /In this turn the assistant ran `ls`; it finished with exit code 0\. Last lines of its output: SECRET TOOL OUTPUT/)
   const entry = w.log.entries().find(e => e.feature === 'draft_check')
-  assert.ok(entry, 'recorded')
-  assert.equal(entry.check, 'would_pass'); assert.deepEqual(entry.evidence, { items: 0, opaque: 1, sentences: 1, terms: 0 })
-  assert.ok(!JSON.stringify(w.checkCalls).includes('SECRET'))
-  assert.ok(!JSON.stringify(entry).includes('SECRET'))
+  assert.deepEqual(entry.evidence, { items: 1, opaque: 0, sentences: 1, terms: 0 })
+  assert.ok(!JSON.stringify(entry).includes('SECRET'), 'the record stays content-free')
+  // The Agent's models may not receive terminal data (tool ceiling terminal none): as before, a content-free reference only.
+  const closed = world(t, { draftCheck: { mode: () => 'advisory' }, tools: true, candidates: [] })
+  closed.chat.decisionEgressFor = () => createEgressGate(modelDataPermissions({ toolCeiling: { terminal: 'none', browser: 'none' }, runActive: true }))
+  await closed.ask()
+  assert.equal(closed.checkCalls.length, 0, 'only opaque references: nothing for the judge to compare with')
+  const closedEntry = closed.log.entries().find(e => e.feature === 'draft_check')
+  assert.equal(closedEntry.check, 'would_pass'); assert.deepEqual(closedEntry.evidence, { items: 0, opaque: 1, sentences: 1, terms: 0 })
+  assert.ok(!JSON.stringify(closed.checkCalls).includes('SECRET') && !JSON.stringify(closedEntry).includes('SECRET'))
 })

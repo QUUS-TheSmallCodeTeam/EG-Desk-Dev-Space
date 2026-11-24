@@ -6,7 +6,14 @@ import { browserTaskRow } from './egdesk-heartbeat-providers.mjs'
 import { audienceFacts, beatFlowFacts, flowPredicates, runContext } from './egdesk-conversation-flow.mjs'
 import { world } from './egdesk-heartbeat-flow.fixture.mjs'
 
-// The real-measurement plan for the heartbeat's judgments, fourth registration (set heartbeat-c17): the pointer cases whose request changed
+// The real-measurement plan for the heartbeat's judgments, fifth registration (set heartbeat-c18): the early question for notes without "?"
+// (they ride along on a request that goes out anyway), on the two cases that show it in both directions. The all-on journey's answer checks
+// with the run's own facts are added by evidence/l3-c18/build-plan-c18.mjs.
+//
+//   heartbeat-c17 (sent 2026-11-24): 7/8. The choice design's present question said .99 on present-tense facts (the default is now the
+//     predicate design); predicates: wait message .81/.01, invented result sup 0, s1 .99/.04, s6 sup .01 (checked against pages only).
+//
+// Fourth registration (set heartbeat-c17): the pointer cases whose request changed
 // after heartbeat-c16, a new background-result case, and the draft check of a heartbeat message (product-built here). The all-on journey's
 // answer checks under the predicate design are built by evidence/l3-c17/build-plan-c17.mjs (they need Main's journey results) and are
 // added to the same plan file there.
@@ -43,7 +50,7 @@ import { world } from './egdesk-heartbeat-flow.fixture.mjs'
 // Expectations are registered here, before any real answer exists. A yes must reach the product's own bar (0.8). A no must be 0.5 or
 // less. 'hard': the shipped design depends on it. 'soft': a direction, or a study of a change not made yet; never fails the set.
 
-export const HEARTBEAT_PLAN_SET = 'heartbeat-c17'
+export const HEARTBEAT_PLAN_SET = 'heartbeat-c18'
 export const HEARTBEAT_PLAN_PASS_RULE = `Pass: every hard expectation holds. A yes must reach ${BEAT_PREDICATE_YES} (the heartbeat's bar; the draft check acts at 0.7 and is registered at 0.8 here too), a no 0.5 or less. Soft expectations are findings. No retries; one request per pattern.`
 const SYNTHETIC_KEY = 'egd-synthetic-not-a-key-heartbeat-plan'
 const sha = text => createHash('sha256').update(text).digest('hex')
@@ -176,9 +183,9 @@ export const HEARTBEAT_PATTERNS = Object.freeze([
     ifMissed: 'The wording of the ask question (the note is now quoted, so the material is there); if between 0.5 and 0.8, the bar.',
     build: () => inRuntime({}, async (w, wires) => { const d = await w.dm('dm', REQUEST.deploy); await w.advance(4000); await command(d, 's1', 'git status --short', 'inProgress'); await w.advance(2000); await command(d, 's1', 'git status --short', 'completed', { exitCode: 0 })
       await w.advance(1000); await d.note('n1', '배포 대상이 운영인지 스테이징인지 요청에 없다. 어느 환경에 배포해야 하나?'); await w.advance(3000); return pick(wires, 10) }) },
-  { id: 'need-silence-25s', path: 'runtime', pattern: '25 s, nothing at all from the engine for 24 s, no step running, no reasoning item open; the stall question is gone, the note question alone decides', before: 'heartbeat-c15: note .88, stalled .28',
-    expect: [yes('note', 'hard', 'True silence: the person must be told something; code words it as the stall line.')],
-    ifMissed: 'The c15 answer (.88) was given next to a stall question; without it the note question carries the case alone. A miss: its wording.',
+  { id: 'need-silence-25s', path: 'runtime', pattern: '25 s, nothing at all from the engine for 24 s, no step running; the Agent\'s plain note ("변경 파일을 확인하는 중이다", no "?") now rides along as an early-question judgment', before: 'heartbeat-c16: note .88 (alone)',
+    expect: [yes('note', 'hard', 'True silence: the person must be told something; code words it as the stall line.'), no('ask_1', 'hard', 'A plain plan step needs nothing from the person: a ride-along note must not turn into a question.')],
+    ifMissed: 'note: a ride-along question next to it changed the answer (then ride-along must not share a request with the note question). ask_1 above 0.5: ride-along asks about plain notes; revert to the "?" filter.',
     build: () => inRuntime({}, async (w, wires) => { const d = await w.dm('dm', REQUEST.review); await w.advance(1000); await d.note('n1', '풀 리퀘스트의 변경 파일을 확인하는 중이다.'); await w.advance(24_000); return pick(wires, 25) }) },
   { id: 'need-reasoning-70s', path: 'runtime', pattern: '70 s, a reasoning item has been open for 60 s and nothing has come since, nothing said yet; the note question alone decides', before: 'heartbeat-c15: note .94, stalled .78',
     expect: [yes('note', 'hard', 'Seventy seconds without a word: the person must be told something; code words it as the stall line.')],
@@ -205,6 +212,11 @@ export const HEARTBEAT_PATTERNS = Object.freeze([
     build: () => counterfactual({ atMs: 10_000, script: async ({ hb, at }) => { hb.setSource(() => ({ stepsDone: 1, stepsRunning: 0 })); await at(6000); hb.mark('engine', 'tool'); await at(7000); hb.mark('engine', 'output') },
       proposal: runProposal({ userText: REQUEST.deploy, options: ['ask_missing', 'explain_wait'], note: NOTE.needs, activities: [tool('s1', 'git status --short', 'completed'), { id: 'n1', kind: 'workNote', status: 'completed', detail: { text: NOTE.needs } }] }) }) },
 
+  { id: 'ride-along-needs-10s', path: 'runtime', pattern: '10 s, a tool step running; the Agent\'s note says it cannot go on without the person choosing the environment, without "?"; it rides along on the progress-note request', before: 'heartbeat-c16 counterfactual ask-no-question-mark-10s: ask .97 (alone, quoted as the latest note)',
+    expect: [yes('ask_1', 'hard', 'The information only the person has is named plainly: the early question must come from the ride-along judgment.')],
+    ifMissed: 'The ride-along judgment misses what the same note got alone (.97): its label ("A note the assistant wrote to itself") or its company in the request matters; the "?" filter then stays the only early-question path.',
+    build: () => inRuntime({}, async (w, wires) => { const d = await w.dm('dm', REQUEST.deploy); await w.advance(1000); await d.note('n1', NOTE.needs)
+      await w.advance(1000); await command(d, 's1', 'git status --short', 'inProgress'); await w.advance(8000); return pick(wires, 10) }) },
   { id: 'pointer-owner-elsewhere', path: 'runtime', pattern: 'a member\'s task has ended; its result (a report draft) waits for the owner, who did not request it; the owner is at the desk with a conversation of their own; the background question is asked', before: 'heartbeat-c16: .74 on "does the person need to look at it" (hard fail)',
     expect: [no('pointer', 'soft', 'A plain report draft holds nothing the owner must act on or decide: no pointer for background work.')],
     ifMissed: 'A yes: the background question reads "a draft" as something to review = act on; then every background result points the owner, which is the c16 behaviour.',
@@ -276,9 +288,10 @@ export const HEARTBEAT_PATTERNS = Object.freeze([
  * The cases sent in this set (estimated under 5,000 input tokens): the new or changed cases a design decision rests on.
  * Changed but not sent, with the reason (HEARTBEAT_NOT_SENT): their question and quoted item are the same as a sent case.
  */
-export const HEARTBEAT_REMEASURE = Object.freeze(['pointer-owner-elsewhere', 'pointer-requester-present', 'pointer-owner-decision', 'wait-check-choice', 'wait-check-predicates', 'wait-check-invented-result'])
+export const HEARTBEAT_REMEASURE = Object.freeze(['need-silence-25s', 'ride-along-needs-10s'])
 export const HEARTBEAT_NOT_SENT = Object.freeze({
-  'need-reasoning-70s': 'the c15 body (note .94) minus the stall question; need-silence-25s measured the note question alone in a silence (.88)',
+  // need-silence-25s is sent (it now carries a ride-along note).
+  'need-reasoning-70s': 'the c15 body (note .94) minus the stall question; need-silence-25s measured the note question alone in a silence (.88) and is re-measured with its ride-along note',
   'pointer-already-told': 'requested: only told_1 is asked now, on the same quoted message measured at 1.0 in heartbeat-c16',
   'pointer-nothing-to-look-at': 'requested: only told_1 is asked now, on the same quoted message measured at 0 in heartbeat-c16',
   'pointer-new-run': 'requested (the owner\'s own conversation): only told_1 on the same quoted message as pointer-requester-present',

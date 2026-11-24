@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, chmodSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { CodexChatRuntime } from './codex-chat-runtime.mjs'
+import { CodexChatRuntime, POSTED_ANSWER_KEY, answerEvidence } from './codex-chat-runtime.mjs'
+import { checkDraft } from './egdesk-draft-check.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 
@@ -23,7 +24,8 @@ function judge(request) {
       answers[q.name] = { type: 'predicate', probability: q.name === pick ? 0.97 : 0.03 }
     } else if (q.name === 'answer_type' || q.name === 'time_intent') answers[q.name] = { type: 'choice', choice: q.choices[0].value, confidence: 0.9, probabilities: [{ value: q.choices[0].value, probability: 0.9 }] }
     else if (/^claim_/.test(q.name)) answers[q.name] = { type: 'choice', choice: 'supported', confidence: 0.95, probabilities: [{ value: 'supported', probability: 0.96 }, { value: 'insufficient', probability: 0.02 }] }
-    else if (/^present_/.test(q.name)) answers[q.name] = { type: 'predicate', probability: /현재 운영 중/.test(JSON.stringify(request.input)) ? 0.93 : 0.03 }
+    else if (/^(present|tense)_/.test(q.name)) answers[q.name] = { type: 'predicate', probability: /현재 운영 중/.test(JSON.stringify(request.input)) ? 0.93 : 0.03 }
+    else if (/^sup_/.test(q.name)) answers[q.name] = { type: 'predicate', probability: 0.96 } // the predicate design (default): supported
     else answers[q.name] = { type: 'predicate', probability: q.name === 'rel_0' ? 0.95 : 0.04 }
   }
   return { answers, model: 'mock', usage: { inputTokens: 5 }, latencyMs: 3 }
@@ -217,4 +219,58 @@ test('the flow needs the held-answer mode: conversationFlow alone does nothing',
   const w = world(t, { flags: { held: false, flow: true } })
   await w.send(); await w.advance(30000)
   assert.equal(w.requests.flow, 0)
+})
+
+// ---- L3 c18: the answer's evidence holds the run's own facts; the next turn is told what the person saw ----
+
+test('an answer after a command is checked against that command\'s facts first (all-on journey s6), ahead of the turn\'s pages and within the 8-item bound', async t => {
+  const pages = Array.from({ length: 8 }, (_, i) => ({ ...PLAN, id: `doc:pg-${i}`, title: `PostgreSQL 체크리스트 ${i + 1}` }))
+  const w = world(t, { candidates: pages, flags: { held: true, flow: false } })
+  const seen = []
+  const decide = w.chat.decisionContext.client.decide
+  w.chat.decisionContext.client.decide = async request => { if (request.promptCacheKey === 'draft-check') seen.push(request); return decide(request) }
+  await w.send('전체 테스트 돌리고 결과 알려줘'); await w.advance(1000)
+  const n = (m, p) => w.chat.handleNotification({ method: m, params: p })
+  await n('item/started', { ...w.timing, item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test -- --suite=payroll', cwd: '/work', status: 'inProgress', commandActions: [] } })
+  await n('item/commandExecution/outputDelta', { ...w.timing, itemId: 'cmd-1', delta: 'running 40 tests\n40 passed, 0 failed\n' })
+  await n('item/completed', { ...w.timing, item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test -- --suite=payroll', cwd: '/work', status: 'completed', exitCode: 0, durationMs: 12_000, commandActions: [], aggregatedOutput: 'running 40 tests\n40 passed, 0 failed\n' } })
+  await w.final('테스트 40개가 모두 통과했습니다.')
+  assert.equal(seen.length, 1)
+  const evidence = seen[0].input[1].content
+  assert.match(evidence, /^Evidence:\n\[E1 time=present\]\n"""\nIn this turn the assistant ran `npm test -- --suite=payroll`; it finished with exit code 0 after about 12 seconds\. Last lines of its output: running 40 tests 40 passed, 0 failed\n"""/)
+  assert.match(evidence, /\[E2 time=planned[^\]]*\]\n"""\nPostgreSQL/, 'the turn\'s page follows')
+  // The check keeps 8 items: with 8 pages the command fact still comes first (it used to be cut, being last).
+  const turn = { evidence: pages.map(p => ({ id: p.id, kind: 'document', time: 'planned', text: p.title })), memory: [] }
+  const facts = [{ id: 'cmd1', kind: 'terminal', time: 'present', text: 'In this turn the assistant ran `npm test`; it finished with exit code 0.' }, { id: 'tool2', kind: 'tool', opaque: true }]
+  const ordered = answerEvidence(turn, facts)
+  assert.deepEqual(ordered.slice(0, 2).map(item => item.id), ['cmd1', 'doc:pg-0']); assert.equal(ordered.at(-1).id, 'tool2')
+  const bound = []
+  await checkDraft({ draft: '테스트 40개가 모두 통과했습니다.', evidence: ordered, mode: 'advisory', client: { async decide(request) { bound.push(request); return { answers: {} } } } })
+  assert.match(bound[0].input[1].content, /^Evidence:\n\[E1 time=present\]\n"""\nIn this turn the assistant ran `npm test`/); assert.equal((bound[0].input[1].content.match(/\[E\d+ /g) ?? []).length, 7, '8 items kept: the command fact, 6 pages and the content-free reference (not quoted, but it still stops an "unverified")')
+  assert.deepEqual(w.posted().filter(([r]) => r === 'assistant'), [['assistant', '테스트 40개가 모두 통과했습니다.']])
+})
+
+test('when the check replaces the answer, the next turn of that conversation is told exactly what the person saw, once; an answer posted as written leaves nothing', async t => {
+  const w = world(t, { candidates: [PLAN], revision: null, flags: { held: true, flow: false } })
+  const decide = w.chat.decisionContext.client.decide
+  // The check finds nothing in the evidence for the concrete sentence: with no revision the person is told the evidence is insufficient.
+  w.chat.decisionContext.client.decide = async request => { const out = await decide(request); if (request.promptCacheKey === 'draft-check') for (const q of request.questions) if (/^sup_/.test(q.name)) out.answers[q.name] = { type: 'predicate', probability: 0.02 }; return out }
+  await w.send(); await w.final('PostgreSQL 마이그레이션은 v16으로 3월에 끝났습니다.')
+  const shown = w.posted().filter(([r]) => r === 'assistant').map(([, text]) => text)
+  assert.equal(shown.length, 1); assert.notEqual(shown[0], 'PostgreSQL 마이그레이션은 v16으로 3월에 끝났습니다.')
+  const turns = () => w.native.filter(([m, p]) => m === 'turn/start' && !String(p.threadId).startsWith('fork-')).map(([, p]) => p)
+  const again = async (message, requestId) => { const r = await w.chat.send({ clientThreadId: DM, conversationId: w.r.conversationId, profileId: A, replyDestination: 'direct', message, requestId }); w.r = r; w.timing = { threadId: r.conversationId, turnId: r.runId } }
+  await again('방금 그 내용 정리해줘', 'req-2')
+  const second = turns().at(-1)
+  assert.equal(second.additionalContext[POSTED_ANSWER_KEY].kind, 'application')
+  assert.equal(second.additionalContext[POSTED_ANSWER_KEY].value, `Your previous answer in this conversation was not posted as you wrote it (a check before posting: ask_user). The person saw exactly this instead:\n"""\n${shown[0]}\n"""\nBuild on what the person saw, not on your earlier draft.`)
+  assert.ok(!JSON.stringify(w.events).includes('not posted as you wrote it'), 'never in the chat')
+  // That turn ends without an answer (stopped): nothing new was posted, and the note was already given to it.
+  await w.chat.handleNotification({ method: 'turn/completed', params: { threadId: w.timing.threadId, turn: { id: w.timing.turnId, status: 'interrupted', items: [] } } }); await w.settleAll()
+  await again('다시 정리해 줘', 'req-3')
+  assert.equal(turns().at(-1).additionalContext?.[POSTED_ANSWER_KEY], undefined, 'consumed by the turn that was told')
+  w.chat.decisionContext.client.decide = decide
+  await w.final('네, 정리했습니다.')
+  await again('고마워요', 'req-4')
+  assert.equal(turns().at(-1).additionalContext?.[POSTED_ANSWER_KEY], undefined, 'an answer posted as written leaves nothing to tell')
 })
