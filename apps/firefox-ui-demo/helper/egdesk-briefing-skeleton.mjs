@@ -56,6 +56,25 @@ export function normalizeMaterials(rows) {
       at: at && DATE.test(at.slice(0, 10)) ? at.slice(0, 10) : null, status, open: status === 'plan', links }
   })
 }
+// "These two materials are versions of one thing" is known to code from the record: a supersedes / superseded_by link, or (when the record has no link) two titles
+// that are the same except for a version mark (v1 / v2, 1차 / 2차, 버전 1 / 버전 2). The title rule adds the missing link to the newer one (marked derived: 'title').
+// Nothing else is guessed: two materials with neither are not offered as a comparison, so the Decision model is never asked whether they are versions.
+const VERSION_MARK = /(?:(?<![A-Za-z])v\s?(\d{1,3})(?![\dA-Za-z])|(?<!\d)(\d{1,3})\s?차(?![가-힣])|버전\s?(\d{1,3})(?!\d))/i
+export function versionOf(title) {
+  const m = VERSION_MARK.exec(String(title ?? ''))
+  if (!m) return null
+  const base = norm(String(title).replace(VERSION_MARK, ' '))
+  return base ? { base, n: Number(m[1] ?? m[2] ?? m[3]) } : null
+}
+function withTitleVersions(mats) {
+  const versioned = mats.map(m => ({ m, v: versionOf(m.title) })).filter(x => x.v)
+  for (const a of versioned) for (const b of versioned) {
+    if (a === b || a.v.base !== b.v.base || a.v.n <= b.v.n) continue
+    const linked = a.m.links.some(l => l.to === b.m.alias && VERSION_LINKS.has(l.type)) || b.m.links.some(l => l.to === a.m.alias && VERSION_LINKS.has(l.type))
+    if (!linked) a.m.links.push({ type: 'supersedes', to: b.m.alias, derived: 'title' })
+  }
+  return mats
+}
 /** Materials that the records link to each other (any recorded link, either direction) belong to one matter. Largest group first, then by first member. */
 export function materialGroups(mats) {
   const parent = new Map(mats.map(m => [m.alias, m.alias])), find = a => { while (parent.get(a) !== a) a = parent.get(a); return a }
@@ -77,7 +96,7 @@ export function materialGroups(mats) {
  * parts: per group of linked materials (materialGroups), [{ alias:'P#', trait, materials:[M#], options:[{ value, component? , reuse? }] }]. There is no "none" option: each option is asked about as its own yes/no.
  */
 export function enumerateSkeleton({ materials = [], candidates = [], currentAnswerId = null, catalog = BRIEFING_CATALOG, bindings = null } = {}) {
-  const mats = normalizeMaterials(materials)
+  const mats = withTitleVersions(normalizeMaterials(materials))
   const targets = enumerateBriefingFacts({ report: '', candidates, currentAnswerId }).targets.filter(t => t.onBoard)
   const usable = targets.filter(t => t.targetable && t.visibility !== 'collapsed' && !t.retrievable && !t.superseded && !t.stale)
   const bindingOf = t => { const b = typeof t.ref?.outputId === 'string' ? bindings?.get?.(t.ref.outputId) : null; return b && Array.isArray(b.keys) && b.keys.length ? b : null }
@@ -135,9 +154,18 @@ export function enumerateSkeleton({ materials = [], candidates = [], currentAnsw
 // compute (layout, time order, what is already on the board, which fold to propose) is not asked.
 const MATERIAL_ALIAS = /^M[1-8]$/, TARGET_ALIAS = /^T(?:[1-9]|1[0-2])$/, PART_ALIAS = /^P[1-6]$/, REUSE_VALUE = /^reuse_(T(?:[1-9]|1[0-2]))$/
 const TRAITS = ['compare', 'sequence', 'open_items', 'single']
-const STAGE_KINDS = { place: ['several', 'one_sentence'], fit: ['fit'], order: ['before'], fill_check: ['slot', 'step'] }
+// Fit (cycle 16, after the second real measurement): content sufficiency only, ONE condition per question. Whether a material belongs to the answer was decided upstream
+// (the memory loop's relevance judgments and \`place\`); whether two materials are versions of one thing and whether a material is still open are in the record (code).
+// What the judge reads is whether the quoted text holds what the way of showing needs:
+//   compare     aspect_P#   do both versions state a value for one same aspect?
+//   sequence    happened_M# does this material state something that happened or was decided?
+//   open_items  todo_M#     does this material name a concrete step that still has to be taken?   (open = status plan: recorded, not asked)
+//   single      fact_M#     does this material state a concrete fact?
+// A part whose only way of showing is a card already on the board for it (provenance or title, computed) is reused without a question.
+export const FIT_KINDS = Object.freeze({ compare: 'aspect', sequence: 'happened', open_items: 'todo', single: 'fact' })
+const STAGE_KINDS = { place: ['several', 'one_sentence'], fit: ['aspect', 'happened', 'todo', 'fact'], order: ['before'], fill_check: ['slot', 'step'] }
 const SHOW = { compare: 'how these two versions differ', sequence: 'what happened across these materials, in date order', open_items: 'what is still not done in these materials', single: 'this one material' }
-export const questionName = q => (q.kind === 'several' || q.kind === 'one_sentence' ? q.kind : q.kind === 'fit' ? `fit_${q.part}_${q.component}` : q.kind === 'before' ? `before_${q.first.part}_${q.second.part}`
+export const questionName = q => (q.kind === 'several' || q.kind === 'one_sentence' ? q.kind : q.kind === 'aspect' ? `aspect_${q.part}` : ['happened', 'todo', 'fact'].includes(q.kind) ? `${q.kind}_${q.material}` : q.kind === 'before' ? `before_${q.first.part}_${q.second.part}`
   : q.kind === 'slot' ? `slot_${q.part}_r${q.row}${q.side ? `_${q.side}` : ''}` : `step_${q.part}`)
 
 /** The closed object for one judgment, re-validated here (the bridge route is reachable from the chrome): unknown fields, aliases, components or stages refuse the whole request. */
@@ -167,16 +195,17 @@ export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
       if (!isObj(q) || !STAGE_KINDS[raw.stage].includes(q.kind)) throw 0
       let out
       if (q.kind === 'several' || q.kind === 'one_sentence') { if (!exactKeys(q, ['kind'])) throw 0; out = { kind: q.kind } }
-      else if (q.kind === 'fit') { const { kind, ...rest } = q; out = { kind, ...partRef(rest) } }
+      else if (q.kind === 'aspect') { if (!exactKeys(q, ['kind', 'part', 'materials']) || !PART_ALIAS.test(q.part) || !Array.isArray(q.materials) || q.materials.length !== 2 || q.materials[0] === q.materials[1] || !q.materials.every(a => mats.has(a))) throw 0; out = { kind: 'aspect', part: q.part, materials: [...q.materials] } }
+      else if (q.kind === 'happened' || q.kind === 'todo' || q.kind === 'fact') { if (!exactKeys(q, ['kind', 'material']) || !mats.has(q.material)) throw 0; out = { kind: q.kind, material: q.material } }
       else if (q.kind === 'before') { if (!exactKeys(q, ['kind', 'first', 'second'])) throw 0; out = { kind: 'before', first: partRef(q.first), second: partRef(q.second) }; if (out.first.part === out.second.part) throw 0 }
       else if (q.kind === 'slot') {
-        if (!exactKeys(q, ['kind', 'part', 'row', 'text', 'material'], ['side', 'aspect']) || !PART_ALIAS.test(q.part) || !Number.isInteger(q.row) || q.row < 1 || q.row > 12 || !plain(q.text, SKELETON_LIMITS.slotTextMax) || !mats.has(q.material) ||
-            (q.side !== undefined && q.side !== 'left' && q.side !== 'right') || (q.aspect !== undefined && !plain(q.aspect, 40)) || ((q.side === undefined) !== (q.aspect === undefined))) throw 0
-        out = { kind: 'slot', part: q.part, row: q.row, ...(q.side ? { side: q.side, aspect: q.aspect } : {}), text: q.text, material: q.material }
+        if (!exactKeys(q, ['kind', 'part', 'row', 'text', 'material'], ['side', 'aspect', 'heading']) || !PART_ALIAS.test(q.part) || !Number.isInteger(q.row) || q.row < 1 || q.row > 12 || !plain(q.text, SKELETON_LIMITS.slotTextMax) || !mats.has(q.material) ||
+            (q.side !== undefined && q.side !== 'left' && q.side !== 'right') || (q.aspect !== undefined && !plain(q.aspect, 40)) || ((q.side === undefined) !== (q.aspect === undefined)) ||
+            (q.heading !== undefined && (q.side !== undefined || !plain(q.heading, 40)))) throw 0
+        out = { kind: 'slot', part: q.part, row: q.row, ...(q.side ? { side: q.side, aspect: q.aspect } : {}), ...(q.heading !== undefined ? { heading: q.heading } : {}), text: q.text, material: q.material }
       } else {
-        if (!exactKeys(q, ['kind', 'part', 'text', 'shown']) || !PART_ALIAS.test(q.part) || !plain(q.text, BRIEFING_LIMITS.textMax) || !Array.isArray(q.shown) || !q.shown.length || q.shown.length > 3 ||
-            !q.shown.every(x => exactKeys(x, ['label', 'content']) && plain(x.label, BRIEFING_LIMITS.labelMax) && (x.content === '' || plain(x.content, SKELETON_LIMITS.contentMax)))) throw 0
-        out = { kind: 'step', part: q.part, text: q.text, shown: q.shown.map(x => ({ label: x.label, content: x.content })) }
+        if (!exactKeys(q, ['kind', 'part', 'text', 'shown']) || !PART_ALIAS.test(q.part) || !plain(q.text, BRIEFING_LIMITS.textMax) || !Array.isArray(q.shown) || !q.shown.length || q.shown.length > 3) throw 0
+        out = { kind: 'step', part: q.part, text: q.text, shown: q.shown.map(shownCard) }
       }
       const name = questionName(out)
       if (names.has(name)) throw 0
@@ -186,9 +215,19 @@ export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
   } catch { return null }
 }
 
+// What a step shows, as structured fields (never one string of a label run into its text): a list card's lines as { heading, text }, a comparison's rows as
+// { aspect, older, newer }, any other card as { text }.
+const field = (v, max) => (v === '' || plain(v, max) ? v : (() => { throw 0 })())
+function shownCard(x) {
+  if (!isObj(x) || !plain(x.label, BRIEFING_LIMITS.labelMax)) throw 0
+  if (exactKeys(x, ['label', 'lines'])) { if (!Array.isArray(x.lines) || !x.lines.length || x.lines.length > 12) throw 0; return { label: x.label, lines: x.lines.map(l => { if (!exactKeys(l, ['heading', 'text'])) throw 0; return { heading: field(l.heading, 40), text: field(l.text, SKELETON_LIMITS.slotTextMax) } }) } }
+  if (exactKeys(x, ['label', 'rows'])) { if (!Array.isArray(x.rows) || !x.rows.length || x.rows.length > 12) throw 0; return { label: x.label, rows: x.rows.map(r => { if (!exactKeys(r, ['aspect', 'older', 'newer'])) throw 0; return { aspect: field(r.aspect, 40), older: field(r.older, SKELETON_LIMITS.slotTextMax), newer: field(r.newer, SKELETON_LIMITS.slotTextMax) } }) } }
+  if (exactKeys(x, ['label', 'text'])) return { label: x.label, text: field(x.text, SKELETON_LIMITS.contentMax) }
+  throw 0
+}
 const RULES = {
   place: 'You are a system judge. An assistant has answered a person in a chat; below are the person\'s request and the stored materials the assistant had. Each question is separate: answer each on its own, whatever the others are. Judge only what the person asked for, from the request and the materials as quoted.',
-  fit: 'You are a system judge. Each question quotes ONE set of stored materials and names ONE way of showing them on a board beside a chat answer. Answer each question on its own, whatever the others are. Judge only from the quoted request and the quoted materials; never assume content they do not contain.',
+  fit: 'You are a system judge reading stored materials. Each question quotes ONE material or ONE pair of materials and asks ONE thing about what its text states. Answer each question on its own, whatever the others are. Judge only from the quoted text; never assume content it does not contain.',
   order: 'You are a system judge. Each question describes TWO parts of a briefing by the materials they show. Answer each question on its own. Judge only which part a reader who has seen none of it should be shown first to follow the other.',
   fill_check: 'You are a system judge checking a text against its source. Each question quotes ONE text and ONE source. Answer each question on its own, whatever the others are. Rewording, summarising and linking words are fine. A number, amount, date, name or event that the quoted source does not contain is NOT supported.',
 }
@@ -196,14 +235,16 @@ const quoteMaterial = m => `${m.alias} ${JSON.stringify({ title: m.title, ...(m.
 function questionText(q, c, catalog) {
   // The request is the one user message of the request; each question quotes its own materials, text or source.
   const mat = a => c.materials.find(m => m.alias === a)
-  const way = p => { const reuse = REUSE_VALUE.exec(p.component)?.[1], card = reuse ? c.cards.find(x => x.alias === reuse) : null
-    return card ? `the card that is already on the board for ${p.materials.length === 1 ? 'this material' : 'exactly these materials'} (its title, quoted: ${JSON.stringify(card.label)}); nothing new is made, a briefing step points at it` : catalog.get(p.component).purpose[p.trait].replace(/\.$/, '') }
   if (q.kind === 'several') return 'To answer this request well, does the person need to see several of the listed materials together: side by side (for example two versions against each other) or one after another (for example what happened in order)?'
   if (q.kind === 'one_sentence') return 'Is this request fully answered by one short sentence or a single fact (for example one number, one date, or yes or no)?'
-  if (q.kind === 'fit') return `Materials, each quoted as JSON: ${q.materials.map(a => quoteMaterial(mat(a))).join('; ')}. Way of showing them: ${way(q)}. Would it help the person with what they asked to show ${SHOW[q.trait]} this way? ` +
-    'Answer no if these materials do not contain what this way of showing needs, or if what the person asked does not call for it.'
+  if (q.kind === 'aspect') return `Two materials, each quoted as JSON: ${q.materials.map(a => quoteMaterial(mat(a))).join('; ')}. Do both of these materials state a value for at least one same aspect (for example a price in each, or a date in each)?`
+  if (q.kind === 'happened') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material state something that happened or was decided (an action, an event or a decision)?`
+  if (q.kind === 'todo') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material name at least one concrete step that still has to be taken (for example an approval, a dispatch or a reply)?`
+  if (q.kind === 'fact') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material state at least one concrete fact (for example a number, an amount, a date, a name or a decision)?`
   if (q.kind === 'before') { const side = (p, x) => `Part ${x} shows ${SHOW[p.trait]}: ${p.materials.map(a => quoteMaterial(mat(a))).join('; ')}.`
     return `${side(q.first, 'X')} ${side(q.second, 'Y')} Should a reader who has seen none of it be shown part X before part Y?` }
+  if (q.kind === 'slot' && q.heading !== undefined) return `Line of a list, quoted as JSON with its heading and its text as separate fields: ${JSON.stringify({ heading: q.heading, text: q.text })}. Source material, quoted as JSON: ${quoteMaterial(mat(q.material))}. ` +
+    'The heading only names the line. Is everything the line\'s text states supported by this source material?'
   if (q.kind === 'slot') return q.side ? `Value, quoted exactly as a JSON string: ${JSON.stringify(q.text)}, given for the aspect ${JSON.stringify(q.aspect)}. Source material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Is this value, for this aspect, supported by this source material?`
     : `Text, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Source material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Is everything this text states supported by this source material?`
   return `Explanation, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. What the step shows, quoted as JSON: ${JSON.stringify(q.shown)}. Is every fact in the explanation also in what the step shows?`
@@ -234,7 +275,7 @@ export function createSkeletonJudge(catalog = BRIEFING_CATALOG) {
   }
   /** Content-free calibration record: one judgment per predicate, the bar that applied, what it would do. */
   function entry(prepared, answers, result) {
-    return { feature: 'board_arrangement', mode: prepared.mode, candidates: prepared.dto.questions.length, attached: prepared.mode === 'on' && result?.status === 'ok',
+    return { feature: 'answer_briefing', mode: prepared.mode, candidates: prepared.dto.questions.length, attached: prepared.mode === 'on' && result?.status === 'ok',
       judgments: prepared.dto.questions.map(q => { const p = answers?.[questionName(q)]?.probability
         return { q: 'relevance', would: !Number.isFinite(p) ? 'hold' : p >= SKELETON_BARS.yes ? 'accept' : p <= SKELETON_BARS.no ? 'reject' : 'hold', p, threshold: SKELETON_BARS.yes, kind: 'board' } }) }
   }
@@ -252,11 +293,30 @@ export function decidePlace(answers) {
 }
 // Reuse first: an existing card, then a component that makes nothing new, then new cards in catalog order.
 const preference = (option, catalog) => (option.reuse ? 0 : catalog.get(option.component)?.renderer.creates ? 2 : 1)
-/** Per part, the options the judge said yes to, best first. A part with no yes is simply not on the board; no part at all = no component fits. */
+/** The fit questions of a scene: one per (part, content requirement), deduplicated (a material asked about once). None for a part that is only reused. */
+export function fitQuestions(scene) {
+  const out = [], seen = new Set()
+  for (const part of scene.parts) {
+    if (!part.options.some(o => o.component)) continue // an existing card for it, computed: reused, nothing to ask
+    const kind = FIT_KINDS[part.trait]
+    const qs = kind === 'aspect' ? [{ kind, part: part.alias, materials: [...part.materials] }] : part.materials.map(material => ({ kind, material }))
+    for (const q of qs) { const name = questionName(q); if (!seen.has(name)) { seen.add(name); out.push(q) } }
+  }
+  return out
+}
+/**
+ * Per part, the ways of showing it that its content supports, best first (reuse > nothing new > a new card), and the materials that carry it.
+ * compare: aspect yes. sequence: at least two materials with happened yes (only those are shown). open_items: at least one with todo yes. single: fact yes.
+ * Undecided or refused is not yes. A part with no yes is not on the board; no part at all = no component fits.
+ */
 export function chooseParts(scene, answers) {
   return scene.parts.map(part => {
-    const ranked = part.options.map((o, i) => ({ o, i, p: answers?.[`fit_${part.alias}_${o.value}`] ?? null })).filter(x => isYes(x.p)).sort((a, b) => preference(a.o, scene.catalog) - preference(b.o, scene.catalog) || a.i - b.i)
-    return { part, yes: ranked.map(x => x.o), decided: part.options.every(o => { const p = answers?.[`fit_${part.alias}_${o.value}`]; return isYes(p) || isNo(p) }) }
+    const rank = options => options.map((o, i) => ({ o, i })).sort((a, b) => preference(a.o, scene.catalog) - preference(b.o, scene.catalog) || a.i - b.i).map(x => x.o)
+    if (!part.options.some(o => o.component)) return { part, materials: part.materials, yes: rank(part.options), decided: true }
+    const kind = FIT_KINDS[part.trait], p = m => answers?.[`${kind}_${m}`] ?? null
+    if (kind === 'aspect') { const v = answers?.[`aspect_${part.alias}`] ?? null; return { part, materials: part.materials, yes: isYes(v) ? rank(part.options) : [], decided: isYes(v) || isNo(v) } }
+    const carried = part.materials.filter(m => isYes(p(m))), enough = carried.length >= (kind === 'happened' ? 2 : 1)
+    return { part, materials: enough ? carried : part.materials, yes: enough ? rank(part.options.filter(o => o.component)) : [], decided: part.materials.every(m => isYes(p(m)) || isNo(p(m))) }
   })
 }
 const FUTURE = '9999-12-31', DERIVES = new Set(['follows_from', 'decided_in', 'supersedes', 'refers_to'])
@@ -404,16 +464,44 @@ export function validateFill(guide, reply, { only = null } = {}) {
  * The questions of the check after the fill, for one item: every piece of slot text against the ONE material it cites, and the step explanation against what the step shows.
  * [{ kind:'slot', part, row, side?, aspect?, text, material }, ..., { kind:'step', part, text, shown }]. `what` is the closed word for a rejected piece ("P2 line 2").
  */
-export function fillChecks(item, data, scene, catalog = BRIEFING_CATALOG) {
-  const out = [], slots = data.slots ?? {}, cut = (v, max) => clean(v, max)
-  if (item.component === 'result_lines') slots.lines.forEach((row, i) => out.push({ kind: 'slot', part: item.id, row: i + 1, text: cut(`${row.label} ${row.text}`, SKELETON_LIMITS.slotTextMax), material: row.from }))
+export function fillChecks(item, data, scene, catalog = BRIEFING_CATALOG, { mode = 'all' } = {}) {
+  const out = [], failures = [], slots = data.slots ?? {}, cut = (v, max) => clean(v, max), by = a => scene.materials.find(m => m.alias === a)
+  // Never one string of a heading run into its text: each is its own field. A heading that is a date is checked by code against the material's own date.
+  if (item.component === 'result_lines') slots.lines.forEach((row, i) => {
+    const heading = cut(row.label, 40), date = dateIn(heading)
+    if (date && !dateMatches(date, by(row.from))) failures.push(`${item.id} line ${i + 1}`)
+    out.push({ kind: 'slot', part: item.id, row: i + 1, heading, text: cut(row.text, SKELETON_LIMITS.slotTextMax), material: row.from })
+  })
   else if (item.component === 'result_compare') slots.rows.forEach((row, i) => { for (const side of ['left', 'right']) out.push({ kind: 'slot', part: item.id, row: i + 1, side, aspect: cut(row.aspect, 40), text: cut(row[side], SKELETON_LIMITS.slotTextMax), material: slots[side] }) })
   else if (item.component === 'result_text') out.push({ kind: 'slot', part: item.id, row: 1, text: cut(slots.body, SKELETON_LIMITS.slotTextMax), material: item.materials[0] })
-  const markdown = item.creates ? catalog.render(item.component, slots) : null
-  const shown = [...(item.creates ? [{ label: cut(slots.title, BRIEFING_LIMITS.labelMax), content: cut(markdown.replace(/\*\*/g, '').split('\n').join(' / '), SKELETON_LIMITS.contentMax) }] : []),
-    ...item.reuse.map(a => { const t = scene.targets.find(x => x.alias === a); return { label: cut(t.label, BRIEFING_LIMITS.labelMax), content: cut(t.gist ?? '', SKELETON_LIMITS.contentMax) } })].slice(0, 3)
-  out.push({ kind: 'step', part: item.id, text: cut(data.text, BRIEFING_LIMITS.textMax), shown })
-  return out
+  const shown = [...(item.creates ? [shownOf(item, slots, cut)] : []),
+    ...item.reuse.map(a => { const t = scene.targets.find(x => x.alias === a); return { label: cut(t.label, BRIEFING_LIMITS.labelMax), text: cut(t.gist ?? '', SKELETON_LIMITS.contentMax) } })].slice(0, 3)
+  // 'facts' (internal switch, default off): only the pieces that carry a number, a date, a Latin word or a name are judged; every explanation still is.
+  const kept = mode === 'facts' ? out.filter(q => FACTY.test(q.text)) : [...out]
+  return { questions: [...kept, { kind: 'step', part: item.id, text: cut(data.text, BRIEFING_LIMITS.textMax), shown }], failures, skipped: out.length - kept.length }
+}
+export const FILL_CHECK_MODES = Object.freeze(['all', 'facts'])
+// A number, a Latin word (v2, an id, a name), a role title (팀장, 대표, ...) or a name with its marker (A사, 김민수 님).
+const FACTY = /[0-9０-９]|[A-Za-z]|(?:^|[^가-힣])(?:팀장|대표|부장|과장|이사|담당자)|[가-힣](?:사|님|씨)(?![가-힣])/
+function shownOf(item, slots, cut) {
+  const label = cut(slots.title, BRIEFING_LIMITS.labelMax)
+  if (item.component === 'result_lines') return { label, lines: slots.lines.map(l => ({ heading: cut(l.label, 40), text: cut(l.text, SKELETON_LIMITS.slotTextMax) })) }
+  if (item.component === 'result_compare') return { label, rows: slots.rows.map(r => ({ aspect: cut(r.aspect, 40), older: cut(r.left, SKELETON_LIMITS.slotTextMax), newer: cut(r.right, SKELETON_LIMITS.slotTextMax) })) }
+  return { label, text: cut(slots.body ?? '', SKELETON_LIMITS.contentMax) }
+}
+/** A date written as a heading: 11/06, 11.6, 2026-11-06, 11월 6일. -> { month, day } or null. */
+export function dateIn(text) {
+  const t = String(text ?? '').trim()
+  let m = /^(?:\d{4}-)?(\d{1,2})[-/.](\d{1,2})$/.exec(t) ?? /^(\d{1,2})\s?월\s?(\d{1,2})\s?일$/.exec(t)
+  if (!m) return null
+  const month = Number(m[1]), day = Number(m[2])
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31 ? { month, day } : null
+}
+/** Does the material record that date (its own date, or the same month and day written in its text)? */
+export function dateMatches(date, material) {
+  if (!material) return false
+  if (material.at) { const [, mm, dd] = material.at.split('-').map(Number); if (mm === date.month && dd === date.day) return true }
+  return new RegExp(`(?<!\\d)${date.month}\\s?월\\s?${date.day}\\s?일|(?<!\\d)0?${date.month}[/.]0?${date.day}(?!\\d)`).test(material.text)
 }
 export const rejectedWord = q => (q.kind === 'step' ? `${q.part} explanation` : `${q.part} ${q.side ? `row ${q.row} ${q.side}` : `line ${q.row}`}`)
 
@@ -428,8 +516,9 @@ export const rejectedWord = q => (q.kind === 'step' ? `${q.part} explanation` : 
  * Judgment requests: place (1), fit (1), order (0 or 1, only for pairs the record leaves open), fill check (1, plus 1 per rewrite round): 3 or 4 on the usual path, at most 6.
  * Bounds: SKELETON_LIMITS. stats counts requests and fill turns and keeps what the subjective model received.
  */
-export async function runSkeletonFlow({ request = '', materials = [], candidates = [], currentAnswerId = null, viewport = null, judge, fill = null, egress = null, allow = async () => true, observeOnly = false, catalog = BRIEFING_CATALOG, now = Date.now, bindings = null } = {}) {
-  const stats = { judgeRequests: 0, judgeMs: 0, questions: 0, fillTurns: 0, stages: [], received: [] }
+export async function runSkeletonFlow({ request = '', materials = [], candidates = [], currentAnswerId = null, viewport = null, judge, fill = null, egress = null, allow = async () => true, observeOnly = false, catalog = BRIEFING_CATALOG, now = Date.now, bindings = null, fillCheck = 'all' } = {}) {
+  const checkMode = FILL_CHECK_MODES.includes(fillCheck) ? fillCheck : 'all'
+  const stats = { judgeRequests: 0, judgeMs: 0, questions: 0, fillTurns: 0, checkSkipped: 0, stages: [], received: [] }
   const done = (status, extra = {}) => ({ status, ...extra, stages: [...new Set(stats.stages)], stats })
   // The same permissions as the run's own models: memory pages only if the run's model had them, card labels only if the cards may be sent, the request as the run's own data.
   if (egress && !egress.allows('draft_text')) return done('bubble', { reason: 'declined', requested: false })
@@ -452,27 +541,26 @@ export async function runSkeletonFlow({ request = '', materials = [], candidates
     return reply?.status === 'ok' && isObj(reply.answers) ? { answers: reply.answers } : { unavailable: reply?.reason ?? reply?.status ?? 'manual' }
   }
   const unavailable = (r, fallback) => (fallback ? done('fallback-chat', { reason: r.unavailable === 'request-bound' ? 'request-bound' : 'judge-unavailable', detail: r.unavailable }) : done('bubble', { reason: r.unavailable === 'declined' ? 'declined' : 'judge-unavailable', detail: r.unavailable, requested: false }))
-  const partRef = (part, option) => ({ part: part.alias, trait: part.trait, materials: part.materials, component: option.value })
-  const fitQuestions = scene.parts.flatMap(part => part.options.map(option => ({ kind: 'fit', ...partRef(part, option) })))
+  const fits0 = fitQuestions(scene)
 
   // (a) bubble or board: two predicates on the request and the materials; code combines them
   const placed = await ask('place', [{ kind: 'several' }, { kind: 'one_sentence' }])
   if (placed.unavailable) return unavailable(placed, false)
   if (placed.advisory !== undefined) {
-    if (placed.advisory === 'board') await ask('fit', fitQuestions)
+    if (placed.advisory === 'board' && fits0.length) await ask('fit', fits0)
     return done('advisory-only', { verdict: placed.advisory, requested: true })
   }
   const place = decidePlace(placed.answers)
   if (place.value !== 'board') return done('bubble', { reason: place.reason, requested: true, place: placed.answers })
 
-  // (b) one predicate per (part, way of showing it); code takes the best decided yes, reuse first. All no = nothing fits.
-  const fits = await ask('fit', fitQuestions)
+  // (b) content sufficiency, one predicate per (part, requirement); code takes the best supported way, reuse first. All no = nothing fits. A part that is only reused asks nothing.
+  const fits = fits0.length ? await ask('fit', fits0) : { answers: {} }
   if (fits.unavailable) return unavailable(fits, true)
   if (fits.advisory !== undefined) return done('advisory-only', { verdict: 'board', requested: true })
   const chosen = chooseParts(scene, fits.answers), decisions = Object.fromEntries(chosen.map(c => [c.part.alias, c.yes[0]?.value ?? (c.decided ? 'no' : 'undecided')]))
   let n = 0, items = []
   const alternatives = new Map()
-  for (const c of chosen) { if (!c.yes.length) continue; const item = itemFor(c.part, c.yes[0], scene, n + 1); if (item.creates) n++; items.push(item); alternatives.set(c.part.alias, c.yes.slice(1)) }
+  for (const c of chosen) { if (!c.yes.length) continue; const item = itemFor({ ...c.part, materials: c.materials }, c.yes[0], scene, n + 1); if (item.creates) n++; items.push(item); alternatives.set(c.part.alias, c.yes.slice(1)) }
   if (!items.length) return done('bubble', { reason: 'no-component-fits', requested: true, decisions })
   if (observeOnly) return done('observed', { requested: true, decisions })
   const dropped = []
@@ -480,7 +568,7 @@ export async function runSkeletonFlow({ request = '', materials = [], candidates
 
   // (c) order: the record's own time and links; only the pairs they leave open are asked, as "X before Y"
   const optionOf = item => ({ value: item.component ?? `reuse_${item.reuse[0]}` })
-  const refOf = item => partRef(scene.parts.find(p => p.alias === item.id), optionOf(item))
+  const refOf = item => ({ part: item.id, trait: item.trait, materials: item.materials, component: optionOf(item).value })
   let ordering = orderItems(items, scene), orderAnswers = {}
   if (ordering.ties.length) {
     const tied = await ask('order', ordering.ties.map(([a, b]) => ({ kind: 'before', first: refOf(a), second: refOf(b) })))
@@ -530,7 +618,11 @@ export async function runSkeletonFlow({ request = '', materials = [], candidates
       const cap = layout.capacity.get(item.id), md = markdownOf(item)
       if (md !== null && cap && textLines(md, cap.widthPx) > cap.lines) failing.set(item.id, { problem: 'overflow', words: [] })
     }
-    const questions = items.filter(i => pending.has(i.id) && !failing.has(i.id)).flatMap(item => fillChecks(item, filled[item.id], scene, catalog))
+    const checked = items.filter(i => pending.has(i.id) && !failing.has(i.id)).map(item => fillChecks(item, filled[item.id], scene, catalog, { mode: checkMode }))
+    const questions = checked.flatMap(c => c.questions)
+    stats.checkSkipped += checked.reduce((sum, c) => sum + c.skipped, 0)
+    // What code can check itself (a date heading against the material's own date) is a rule, not a question.
+    for (const c of checked) for (const word of c.failures) { const part = word.split(' ')[0], f = failing.get(part) ?? { problem: 'unsupported', words: [] }; f.words.push(word); failing.set(part, f) }
     if (questions.length) {
       const judged = await ask('fill_check', questions)
       if (judged.unavailable) return unavailable(judged, true)
@@ -545,7 +637,7 @@ export async function runSkeletonFlow({ request = '', materials = [], candidates
     for (const [id, f] of failing) {
       const index = items.findIndex(i => i.id === id), item = items[index], part = scene.parts.find(p => p.alias === id)
       const next = f.problem === 'slot_empty' ? (alternatives.get(id) ?? []).find(o => !item.tried.includes(o.value)) : null
-      if (next) { const swapped = itemFor(part, next, scene, 0); items[index] = { ...swapped, creates: swapped.creates ? item.creates ?? 'N' + (++n) : null, tried: [...item.tried, next.value] }; delete filled[id]; again.add(id); rejections.push({ part: id, problem: f.problem, action: next.value }); continue }
+      if (next) { const swapped = itemFor({ ...part, materials: item.materials }, next, scene, 0); items[index] = { ...swapped, creates: swapped.creates ? item.creates ?? 'N' + (++n) : null, tried: [...item.tried, next.value] }; delete filled[id]; again.add(id); rejections.push({ part: id, problem: f.problem, action: next.value }); continue }
       if (f.problem !== 'slot_empty' && !item.refilled) { items[index] = { ...item, refilled: true }; again.add(id); words.push(...f.words); rejections.push({ part: id, problem: f.problem, action: 'rewrite', words: f.words }); continue }
       items.splice(index, 1); delete filled[id]; dropped.push({ part: id, why: f.problem, words: f.words }); rejections.push({ part: id, problem: f.problem, action: 'drop', words: f.words })
     }

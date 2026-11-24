@@ -88,7 +88,7 @@ export function readBriefingPlacement(prepared, answers, currentBinding) {
 }
 export function placementCalibrationEntry(prepared, answers, result) {
   const a = answers?.placement, rows = Array.isArray(a?.probabilities) ? a.probabilities : []
-  return { feature: 'board_arrangement', mode: prepared.mode, candidates: 2, attached: prepared.mode === 'on' && result.status === 'board',
+  return { feature: 'answer_briefing', mode: prepared.mode, candidates: 2, attached: prepared.mode === 'on' && result.status === 'board',
     judgments: [{ q: 'choice', would: result.status === 'board' ? 'act' : result.status === 'bubble' ? 'none' : 'hold', top: rows[0]?.probability, second: rows[1]?.probability, p: a?.confidence,
       threshold: BRIEFING_BARS.placement, minMargin: BRIEFING_BARS.margin, kind: 'board' }] }
 }
@@ -273,7 +273,7 @@ export function readBriefingCheck(prepared, answers, currentBinding) {
 }
 export function briefingCheckCalibrationEntry(prepared, answers, result) {
   const flow = answers?.understandable, where = answers?.where, rows = Array.isArray(where?.probabilities) ? where.probabilities : []
-  return { feature: 'board_arrangement', mode: prepared.mode, candidates: prepared.dto.items.length, attached: prepared.mode === 'on' && result.status === 'findings',
+  return { feature: 'answer_briefing', mode: prepared.mode, candidates: prepared.dto.items.length, attached: prepared.mode === 'on' && result.status === 'findings',
     judgments: [{ q: 'goal_met', would: result.verdict === 'findings' ? 'act' : result.verdict === 'ok' ? 'none' : 'hold', p: flow?.probability, threshold: BRIEFING_BARS.understandable, kind: 'board' },
       ...prepared.dto.items.map(i => { const p = answers?.[`issue_${keyOf(i)}`]?.probability; return { q: 'relevance', would: p >= BRIEFING_BARS.issue ? 'accept' : 'reject', p, threshold: BRIEFING_BARS.issue, kind: 'board' } }),
       { q: 'choice', would: result.where ? 'accept' : 'reject', top: rows[0]?.probability, second: rows[1]?.probability, p: where?.confidence, threshold: BRIEFING_BARS.placement, minMargin: BRIEFING_BARS.margin, kind: 'board' }] }
@@ -370,7 +370,7 @@ export function readBriefingReuse(prepared, answers, currentBinding) {
 export function briefingReuseCalibrationEntry(prepared, answers, result) {
   const dec = new Map(result.components.map(c => [c.alias, c.decision])), np = new Map(result.parts.map(x => [x.alias, x.newRequired]))
   const WOULD = { reuse: 'attach', retrieve: 'act', irrelevant: 'skip', undecided: 'hold' }
-  return { feature: 'board_arrangement', mode: prepared.mode, candidates: prepared.dto.components.length, attached: prepared.mode === 'on' && result.status === 'ok' && result.components.some(c => c.decision === 'reuse'),
+  return { feature: 'answer_briefing', mode: prepared.mode, candidates: prepared.dto.components.length, attached: prepared.mode === 'on' && result.status === 'ok' && result.components.some(c => c.decision === 'reuse'),
     judgments: [...prepared.dto.components.map(x => { const a = answers?.[`component_${x.alias}`], rows = Array.isArray(a?.probabilities) ? a.probabilities : []
         return { q: 'choice', would: WOULD[dec.get(x.alias)] ?? 'unknown', top: rows[0]?.probability, second: rows[1]?.probability, p: a?.confidence, threshold: REUSE_BARS.component, minMargin: REUSE_BARS.margin, kind: 'board' } }),
       ...prepared.dto.parts.map(x => ({ q: 'relevance', would: np.get(x.alias) ? 'accept' : 'reject', p: answers?.[`new_${x.alias}`]?.probability, threshold: REUSE_BARS.newRequired, kind: 'board' }))] }

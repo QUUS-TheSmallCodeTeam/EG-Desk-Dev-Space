@@ -171,7 +171,7 @@ test('flow A: a report about three scattered board items -> board -> design -> c
   // metering and calibration: content-free rows, one per judgment
   assert.equal(R.budget.snapshot().inputTokens, 33);
   const rows = R.calibration.entries(); assert.equal(rows.length, 3);
-  assert.deepEqual(rows.map(x => [x.feature, x.mode, x.judgments[0].q + ':' + x.judgments[0].would]), [['board_arrangement', 'on', 'choice:act'], ['board_arrangement', 'on', 'goal_met:act'], ['board_arrangement', 'on', 'goal_met:none']]);
+  assert.deepEqual(rows.map(x => [x.feature, x.mode, x.judgments[0].q + ':' + x.judgments[0].would]), [['answer_briefing', 'on', 'choice:act'], ['answer_briefing', 'on', 'goal_met:act'], ['answer_briefing', 'on', 'goal_met:none']]);
   assert.ok(!/Invoice|Delivery|S2|T2|src-|explanation_mismatch/.test(JSON.stringify(rows)), 'calibration is content-free');
 });
 test('flow B: a short answer stays a chat bubble; no judge request, no design request', async t => {
