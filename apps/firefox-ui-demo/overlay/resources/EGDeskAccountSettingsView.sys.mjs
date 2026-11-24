@@ -505,7 +505,10 @@ export function decisionSettingsView(status, { connected = false } = {}) {
 export function decisionCredentialOutcome({ result = null, error = null } = {}) {
   if (result && !error) {
     const verification = typeof result.verification === 'string' ? result.verification : 'verified';
-    return { phase: verification === 'verified' ? 'done' : 'warning', verification, text: decisionVerificationText(verification) };
+    // A key alone does nothing while the mode is 끔: say so next to the switch the person has to use.
+    const base = decisionVerificationText(verification);
+    const modeHint = result.mode === 'off' ? `${/[.。]$/.test(base) ? ' ' : ' · '}모드가 ‘끔’이라 아직 쓰이지 않습니다. 아래에서 ‘사용’을 고르면 쓸 수 있습니다.` : '';
+    return { phase: verification === 'verified' ? 'done' : 'warning', verification, text: base + modeHint };
   }
   if (error?.code === 'DECISION_KEY_NOT_REPLACED') {
     const verification = typeof error.verification === 'string' ? error.verification : 'unreachable';
