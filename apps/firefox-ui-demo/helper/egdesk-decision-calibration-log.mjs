@@ -28,7 +28,9 @@ const MAX_JUDGMENTS = 64
 // answer_briefing: the Answer Briefing judgments (placement, reuse, flow check, skeleton predicates), recorded apart from the Board arrangement (lane L2 finding A4).
 const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'answer_briefing', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check', 'turn_memory', 'conversation_flow', 'working_memory'])
 const MODES = new Set(['advisory', 'on'])
-const QUESTIONS = new Set(['answer_type', 'time_intent', 'relevance', 'speech_axis', 'speech_predicate', 'recall', 'topic_route', 'choice', 'next_step', 'page_state', 'goal_met', 'terminal_state', 'terminal_risk', 'log_block', 'claim_support', 'claim_present', 'term_internal', 'triage_courtesy', 'triage_need', 'triage_recall', 'triage_record', 'write_target', 'write_about', 'wm_block', 'wm_role',
+// How the draft check asked (egdesk-draft-check.mjs design).
+const DRAFT_DESIGNS = new Set(['choice', 'predicates'])
+const QUESTIONS = new Set(['claim_supported', 'claim_tense', 'answer_type', 'time_intent', 'relevance', 'speech_axis', 'speech_predicate', 'recall', 'topic_route', 'choice', 'next_step', 'page_state', 'goal_met', 'terminal_state', 'terminal_risk', 'log_block', 'claim_support', 'claim_present', 'term_internal', 'triage_courtesy', 'triage_need', 'triage_recall', 'triage_record', 'write_target', 'write_about', 'wm_block', 'wm_role',
   // the heartbeat's yes/no message questions (egdesk-conversation-flow.mjs FLOW_PREDICATES)
   'beat_note', 'beat_ask', 'beat_stalled', 'beat_pointer', 'beat_told',
   // the command gate's yes/no content predicates (egdesk-terminal-command-gate.mjs RISK_PREDICATES)
@@ -186,6 +188,7 @@ export function normalizeEntry(raw, now = Date.now()) {
     if (Object.keys(wm).length) entry.wm = wm
   }
   put(entry, 'position', word(POSITIONS, raw.position)); put(entry, 'memory', word(MEMORY, raw.memory)); put(entry, 'timing', timing(raw.timing))
+  put(entry, 'design', word(DRAFT_DESIGNS, raw.design));
   put(entry, 'fallback', word(FALLBACK, raw.fallback)); put(entry, 'attached', typeof raw.attached === 'boolean' ? raw.attached : null)
   if (feature === 'terminal_state') put(entry, 'terminal', terminalFields(raw.terminal))
   if (feature === 'terminal_gate') put(entry, 'gate', gateFields(raw.gate))

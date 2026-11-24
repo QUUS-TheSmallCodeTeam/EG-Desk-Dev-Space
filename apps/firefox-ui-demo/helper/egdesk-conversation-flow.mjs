@@ -268,7 +268,9 @@ export const FLOW_PREDICATES = Object.freeze({
   ask: Object.freeze({ name: 'ask', type: 'predicate', instructions: 'Does the quoted note show that the assistant needs a piece of information that only the person can give before it can finish, so that asking the person now would help?' }),
   // The pointer: only what code cannot know, each quoted on its own (R4). Whether anyone is there, where it is and whether a pointer
   // was posted are code (pointerBlocked).
-  pointer: Object.freeze({ name: 'pointer', type: 'predicate', instructions: 'The quoted message announces work that is finished and open on the desk. Does the person it is for need to look at that work or do something with it, rather than the message already giving them all they need?' }),
+  // Asked only about a result the person did NOT request (a requested result is needed by its requester by definition: code).
+  // Measured 2026-11-24 on the c16 wording ("does the person need to look at it"): .74 and .42 on two requested results, i.e. ambiguous.
+  pointer: Object.freeze({ name: 'pointer', type: 'predicate', instructions: 'The quoted message announces a finished result that this person did not ask for. Does it contain something they must act on or decide?' }),
   told: Object.freeze({ type: 'predicate', instructions: 'Does the quoted message tell the reader where on their screen or desk the finished work is open (a direction or a place)?' }),
 })
 // Stalled is not a question (measured 2026-11-24: "has the work stalled" came back 0.28 after 24 s of silence and 0.78 after 60 s with
@@ -332,6 +334,32 @@ function workLines({ run, heartbeatFacts, flow, own, allows }) {
 }
 
 /**
+ * The evidence a heartbeat message is checked against before it is posted: the facts it was composed from, as the runtime holds them.
+ * Measured 2026-11-24 (all-on journey, step s4): a wait message checked against the turn's memory pages was blocked (present .90/.91:
+ * "it states something as a present fact"), because nothing given to the check said what the run was doing. These items say it.
+ *   kind: the message kind; attention: for a pointer; note: the Agent's note an early question was asked about.
+ *   allows(kind): the run's egress gate (the command line only where terminal_command is allowed, exactly as in runContext).
+ * Returns [{ id, kind, time, source, text }] for checkDraft (kinds conversation / run_state, both of the run's own data class).
+ */
+export function messageEvidence({ kind, run = null, heartbeatFacts = null, flow = null, userText = '', allows = () => true, own = new Set(), note = null, attention = null }) {
+  if (kind === 'pointer') {
+    if (!attention) return []
+    const what = { result: 'A finished result', approval: 'Something that needs the person\'s decision', question: 'A question for the person' }[attention.kind] ?? 'Something for the person'
+    return [{ id: 'now', kind: 'run_state', time: 'present', source: 'runtime', text: `${what} is waiting ${wherePhrase(attention)}. Nothing was moved into the person's view.` }]
+  }
+  const items = []
+  const request = oneLine(userText, FLOW_CONTEXT_LIMITS.request)
+  if (request) items.push({ id: 'request', kind: 'conversation', time: 'present', source: 'person', text: `The person asked: ${request}` })
+  if (heartbeatFacts) {
+    const work = workLines({ run: run ?? { activities: [] }, heartbeatFacts, flow, own, allows })
+    items.push({ id: 'now', kind: 'run_state', time: 'present', source: 'runtime', text: [`${span(heartbeatFacts.sinceUserMs)} have passed since the person wrote.`, ...work.lines].join('\n') })
+  }
+  const noted = oneLine(note, FLOW_CONTEXT_LIMITS.note)
+  if (kind === 'ask_missing' && noted) items.push({ id: 'note', kind: 'run_state', time: 'present', source: 'agent', text: `The assistant's note to itself: ${noted}` })
+  return items
+}
+
+/**
  * The material for the message questions of a working run: { text, kinds } or null when the run's models may not receive the
  * run's own text (then nothing is asked: the judge is never sent bare numbers).
  *   userText: what the person wrote; allows(kind): the run's egress gate; facts: beatFlowFacts(...) (+ pointer facts).
@@ -361,9 +389,10 @@ const POINTER_LIMITS = Object.freeze({ result: 600, posted: 2 })
 /**
  * The yes/no questions for the kinds that code found possible at this beat (enumerateOptions), in a fixed order.
  * note: the Agent's note the `ask` question judges, quoted on its own ({ text }); without it 'ask_missing' asks nothing.
- * pointer: { kind, result, posted } when 'pointer' is possible — the announcement of the finished work (its run's posted answer) and
- *   the messages already posted to that person since that work began (at most two, newest last). Each is quoted on its own:
- *   `pointer` (does the work need them) only for a finished result with an announcement to read; `told_N` per posted message.
+ * pointer: { kind, result, posted, requested } when 'pointer' is possible — the announcement of the finished work (its run's posted
+ *   answer), the messages already posted to that person since that work began (at most two, newest last), and whether that person is
+ *   the one who requested the work (code: the run's requester). Each item is quoted on its own: `pointer` (does it hold something they
+ *   must act on or decide) only for a finished result they did not request; `told_N` per posted message.
  */
 export function flowPredicates(options, { note = null, pointer = null } = {}) {
   const out = []
@@ -378,20 +407,21 @@ export function flowPredicates(options, { note = null, pointer = null } = {}) {
   return out
 }
 
-export function pointerPredicates({ kind, result = null, posted = [], topic = null } = {}) {
+export function pointerPredicates({ kind, result = null, posted = [], topic = null, requested = false } = {}) {
   const out = []
   const fresh = typeof topic === 'string' ? { topic } : {}
   const announced = oneLine(result, POINTER_LIMITS.result)
-  if (kind === 'result' && announced) out.push({ ...FLOW_PREDICATES.pointer, ...fresh, quote: { label: 'The message about the finished work', text: announced }, kinds: ['run_text'] })
+  if (kind === 'result' && requested !== true && announced) out.push({ ...FLOW_PREDICATES.pointer, ...fresh, quote: { label: 'The message about the finished work', text: announced }, kinds: ['run_text'] })
   ;(Array.isArray(posted) ? posted : []).map(text => oneLine(text, POINTER_LIMITS.result)).filter(Boolean).slice(-POINTER_LIMITS.posted)
     .forEach((text, i) => out.push({ ...FLOW_PREDICATES.told, ...fresh, name: `told_${i + 1}`, quote: { label: 'A message already posted to this person', text }, kinds: ['run_text'] }))
   return out
 }
 
 /**
- * Whether to point, once code allowed it: never when a posted message already said where the work is; for a finished result, only
- * when the work needs the person (asked when there is an announcement to read; without one the placement runtime's own judgment that
- * it is worth pointing stands); a decision or a question waiting for them needs them by definition.
+ * Whether to point, once code allowed it: never when a posted message already said where the work is; a result the person requested,
+ * a decision or a question waiting for them needs them by definition; a result they did not request only when the judge says it
+ * holds something they must act on or decide (asked when there is an announcement to read; without one the placement runtime's own
+ * judgment that it is worth pointing stands).
  *   yes: names answered yes; asked: names asked at that beat.
  */
 export function pointerDecision(attention, yes, asked = []) {

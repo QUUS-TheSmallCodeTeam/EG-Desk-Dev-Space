@@ -28,7 +28,8 @@ export const EGRESS_KINDS = Object.freeze({
 const DATA_CLASSES = Object.freeze(['terminal', 'browser', 'canvas', 'run', 'memory', 'speech', 'topic', 'board'])
 // Evidence kinds a draft-check catalog may carry, and the data class that already lets a model see them.
 // Items of the decision context packet were already admitted for this run's answering model, so they count as the run's own data.
-const EVIDENCE_CLASS = Object.freeze({ source: 'run', document: 'run', conversation: 'run', timeline: 'run', board: 'run', memory: 'memory', terminal: 'terminal', browser: 'browser' })
+// run_state: what the run is doing now, from the runtime's own facts (the heartbeat's material a message was composed from).
+const EVIDENCE_CLASS = Object.freeze({ source: 'run', document: 'run', conversation: 'run', timeline: 'run', board: 'run', run_state: 'run', memory: 'memory', terminal: 'terminal', browser: 'browser' })
 
 /**
  * modelDataPermissions({ toolCeiling, browserGranted, canvasMaySend, memoryScope, speechConsent, topicConsent, runActive, boardExcerptsToModel })
