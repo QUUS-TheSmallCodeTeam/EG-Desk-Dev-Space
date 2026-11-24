@@ -12,6 +12,9 @@
 //     forkTurns?: [ … same … ],
 //     refuseEphemeralFork?: boolean (default false): thread/fork of a thread that was started ephemeral fails with -32600 "no rollout found for thread id …",
 //       exactly as the official 0.171 does (Main's smoke-5: also mid-turn and with lastTurnId; a persisted source forks fine). }
+//     deleteFails?: boolean (thread/delete errors), deleteIgnored?: boolean (thread/delete answers ok but the thread stays resumable).
+//   A thread started or forked without ephemeral:true is PERSISTED: thread/resume finds it until thread/delete removes it; any other id fails with
+//   "no rollout found for thread id …" (as the official 0.171 does for a thread that is gone, and for an ephemeral one).
 //   A thread whose developerInstructions contain "private one-off task" is an EG-Desk internal thread (codex-internal-turn.mjs): its turns come from
 //   forkTurns, like a fork's.
 //   refuseEditsUnlessInstructed: models what Main's check-1 saw on the real 0.171 (a hypothesis, not a fact about every build): a thread whose
@@ -35,6 +38,7 @@ const MESSAGE_PHASES = { commentary: 'commentary', final: 'final_answer' }
 export function runFakeAppServer({ script, input = process.stdin, output = process.stdout, log = null, home = '/fake/codex-home', env = {}, exit = code => process.exit(code), stderr = process.stderr } = {}) {
   const logLine = entry => { if (log) fs.appendFileSync(log, `${JSON.stringify(entry)}\n`) }
   const person = { mcpServers: [], hooks: 0, features: {}, instructionSources: [], ...(script.person ?? {}) }
+  const persisted = new Set() // thread ids that were started or forked without ephemeral:true
   const threads = new Map(), used = new Set(), usedFork = new Set(), pending = new Map(), running = new Map() // turnId -> { threadId, interrupted, steers: [text] }
   let nextThread = 0, nextTurn = 0, nextItem = 0, nextServerRequest = 100
   const send = message => { output.write(`${JSON.stringify(message)}\n`); logLine({ dir: 'out', ...message }) }
@@ -137,6 +141,7 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
     initialize: (id) => result(id, 'initialize', { userAgent: `codex_cli_rs/${script.version ?? FAKE_VERSION} (Mac OS 26.0.0; arm64) fake`, codexHome: script.home || env.CODEX_HOME || home, platformFamily: 'unix', platformOs: 'macos' }),
     'thread/start': (id, params) => {
       const threadId = `thr-${++nextThread}`
+      if (params.ephemeral !== true) persisted.add(threadId)
       threads.set(threadId, { id: threadId, cwd: params.cwd ?? '/fake/cwd', config: params.config ?? {}, developerInstructions: params.developerInstructions ?? '', internal: String(params.developerInstructions ?? '').includes('private one-off task'), ephemeral: params.ephemeral === true, dynamicTools: (params.dynamicTools ?? []).map(t => t.name) })
       result(id, 'thread/start', { thread: threadObject(threadId, { ...params, ephemeral: script.reportEphemeral === false ? false : params.ephemeral }), cwd: params.cwd ?? '/fake/cwd', model: script.model ?? 'fake-model', modelProvider: 'openai', reasoningEffort: script.effort ?? 'low',
         approvalPolicy: params.approvalPolicy ?? 'never', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false }, instructionSources: effective(threads.get(threadId)).sources })
@@ -147,8 +152,20 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
       const parent = threads.get(params.threadId)
       if (script.refuseEphemeralFork === true && parent?.ephemeral === true) return send({ id, error: { code: -32600, message: `no rollout found for thread id ${params.threadId}` } })
       const threadId = `fork-${++nextThread}`
+      if (params.ephemeral !== true) persisted.add(threadId)
       threads.set(threadId, { id: threadId, cwd: params.cwd ?? parent?.cwd ?? '/fake/cwd', config: params.config ?? parent?.config ?? {}, ephemeral: params.ephemeral === true, fork: true })
       result(id, 'thread/fork', { thread: threadObject(threadId, params), cwd: params.cwd ?? parent?.cwd ?? '/fake/cwd', model: script.model ?? 'fake-model', modelProvider: 'openai', approvalPolicy: 'never', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false } })
+    },
+    'thread/delete': (id, params) => {
+      if (script.deleteFails === true) return send({ id, error: { code: -32000, message: 'the thread could not be deleted' } })
+      if (!persisted.has(params.threadId)) return send({ id, error: { code: -32600, message: `no rollout found for thread id ${params.threadId}` } })
+      if (script.deleteIgnored !== true) persisted.delete(params.threadId)
+      result(id, 'thread/delete', {})
+    },
+    'thread/resume': (id, params) => {
+      const thread = threads.get(params.threadId)
+      if (!thread || !persisted.has(params.threadId)) return send({ id, error: { code: -32600, message: `no rollout found for thread id ${params.threadId}` } })
+      result(id, 'thread/resume', { thread: threadObject(params.threadId, { cwd: thread.cwd, ephemeral: false }), cwd: thread.cwd, model: script.model ?? 'fake-model', modelProvider: 'openai', approvalPolicy: 'never', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false } })
     },
     'turn/start': (id, params) => {
       const thread = threads.get(params.threadId)
