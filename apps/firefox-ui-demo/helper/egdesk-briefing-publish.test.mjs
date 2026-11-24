@@ -5,80 +5,16 @@
 // the subjective model and the native app-server of the chat runtime. No network.
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtemp, mkdir, rm } from 'node:fs/promises'
-import os from 'node:os'
-import path from 'node:path'
-import { ImmutableContextStore } from './egdesk-context-store.mjs'
-import { ContextRuntime } from './egdesk-context-runtime.mjs'
-import { CodexChatRuntime } from './codex-chat-runtime.mjs'
-import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 import * as BriefingHost from '../overlay/resources/EGDeskBriefingHost.sys.mjs'
 import { validBriefing } from '../overlay/resources/EGDeskBriefingState.sys.mjs'
-import * as WorkbenchArrange from '../overlay/resources/EGDeskWorkbenchArrange.sys.mjs'
-import { world } from '../scripts/egdesk-board-world.support.mjs'
 import { engineOf, fits, publishSchema, rig } from '../scripts/egdesk-briefing-rig.support.mjs'
 import { readFileSync } from 'node:fs'
+import { REPORT, design, designWithNew, reuseScript, scene } from './egdesk-briefing-publish.support.mjs'
 
 const surface = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8')
 const decl = name => { const s = surface.indexOf(`  function ${name}(`); assert.ok(s >= 0, name); return surface.slice(s, surface.indexOf('\n  }', s) + 4) }
-const toolJson = reply => JSON.parse(reply.result.contentItems[0].text)
 const r = (x, y, width, height) => ({ x, y, width, height })
-
-async function harness(t) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-briefing-publish-'))
-  t.after(() => rm(dir, { recursive: true, force: true }))
-  const cwd = path.join(dir, 'workspace'); await mkdir(cwd)
-  let nativeSeq = 0
-  const store = new ImmutableContextStore({ dataDir: path.join(dir, 'state'), allowedRoots: [cwd] })
-  const contexts = new ContextRuntime({ store, getOwnerKey: () => 'email:a@example.com' })
-  const replies = [], events = []
-  const chat = new CodexChatRuntime({ contexts, respond: (id, result, error) => replies.push({ id, result, error }), emit: e => events.push(e),
-    request: async (method, params) => {
-      if (method === 'thread/start') return { thread: { id: `parent-${++nativeSeq}` }, cwd, model: 'configured-model' }
-      if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [] }, cwd }
-      if (method === 'turn/start') return { turn: { id: `turn-${nativeSeq}`, status: 'inProgress', items: [] } }
-      if (method === 'turn/interrupt') return {}
-      throw new Error(`Unexpected native method ${method}`)
-    } })
-  chat.setConnection(true)
-  const source = (await contexts.capture({ clientThreadId: 'ui', attachments: [{ id: 'attachment', kind: 'browser', label: 'Selected page', sourceRef: { viewId: 'view-1', resourceId: 'page-1', url: 'https://example.com/p' },
-    capturedAt: 10, captureScope: { type: 'dom-range', locator: '#selected' }, content: { mime: 'text/plain', text: 'Original selected text', truncated: false } }] })).captures[0]
-  const run = await chat.send({ message: 'Use selected sources', requestId: 'req-1', clientThreadId: 'ui', cwd, contextSnapshotIds: [source.sourceId], contextCapabilities: { read: true, reader: true, publishBriefing: true } })
-  const tool = async (name, args, id) => { await chat.handleServerRequest({ id, method: 'item/tool/call', params: { threadId: run.conversationId, turnId: run.runId, callId: id, tool: name, arguments: args } }); await contexts.calls.get(`${run.answerId}/${id}`); return replies.find(x => x.id === id) }
-  return { dir, store, contexts, chat, events, run, tool, ids: { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId } }
-}
-
-const thread = { id: 'thread-1', title: 'Room', engineId: 'codex', profileEnabled: true, agentProfileId: 'prof-agent-1' }
-const REPORT = ['## Billing', 'The Invoice totals show the Q3 amount that was billed to the customer.', '', '## Delivery', 'The Delivery log shows the shipment was two days late.', '',
-  '## Next steps', 'Refund the delay fee and ship the replacement as soon as possible.'].join('\n')
-const design = () => ({ title: 'Why the shipment is late', steps: [
-  { text: 'The invoice total shows the Q3 amount that was billed.', targets: ['T1'], fallback: 'Open the invoice totals.' },
-  { text: 'The delivery log shows the shipment was two days late.', targets: ['T2'], emphasis: 'outline', fallback: 'Open the delivery log.' }] })
-const designWithNew = () => ({ ...design(), steps: [...design().steps, { text: 'The next steps summary lists what to do about it.', targets: ['new:P3'], fallback: 'See the next steps in chat.' }],
-  newComponents: [{ part: 'P3', title: 'Next steps summary', summary: 'Refund the delay fee and ship the replacement' }] })
-
-// the board: three result cards the user kept from this room's published outputs (two of this answer, one stale output of an earlier answer, superseded by v2 of its key)
-async function scene(t, { withoutBriefingCapability = false } = {}) {
-  const h = await harness(t)
-  const publish = async (title, markdown, outputKey, id) => toolJson(await h.tool('egdesk_publish_output', { title, markdown, outputKey }, id)).output
-  const invoice = await publish('Invoice totals', '# Invoice totals\nQ3 invoice totals and the amount due', 'invoice-totals', 'o1')
-  const delivery = await publish('Delivery log', '# Delivery log\nShipment log showing the delay of two days', 'delivery-log', 'o2')
-  const oldV1 = await publish('Old shipment summary', '# Old shipment summary\nEarlier summary of the shipment', 'shipment-summary', 'o3')
-  const oldV2 = await publish('Old shipment summary', '# Old shipment summary\nRevised summary of the shipment', 'shipment-summary', 'o4')
-  const message = { id: 'm1', conversationId: h.run.conversationId, runId: h.run.runId, answerId: h.run.answerId, createdAt: 1 }
-  const card = (meta, over = {}) => ChatState.publishedOutputCardRecord({ ...thread, conversationId: h.run.conversationId }, message, { ...meta, ...over }, `# ${meta.title}\nbody of ${meta.title}`, { now: 2 })
-  const recA = card(invoice), recB = card(delivery)
-  const recOld = ChatState.supersedeResultRecord(card(oldV1, { answerId: 'answer-earlier', runId: 'run-earlier' }), oldV2, { now: 9 })
-  const spec = { cards: [{ id: 'vA', item: 'item-A', rect: r(100, 60, 260, 160), z: 1, kind: 'note' }], links: [],
-    others: [{ id: 'res-a', rect: r(100, 300, 260, 160), z: 2, result: recA }, { id: 'res-b', rect: r(620, 300, 260, 160), z: 3, result: recB }, { id: 'res-old', rect: r(620, 60, 260, 160), z: 4, result: recOld }] }
-  // The outputs above came from earlier turns that had the capability. This answer's run is modelled as one the user sent WITHOUT the briefing capability: the field assertBound
-  // checks is false for it (the same binding state a send without the grant produces), while the room's earlier outputs still exist in the store.
-  if (withoutBriefingCapability) { const binding = h.contexts.bindings.get(h.contexts.bindingKey(h.chat.runFor(h.ids))); binding.capabilities = { ...binding.capabilities, publishBriefing: false } }
-  const W = world({ WorkbenchArrange, http: async () => ({ status: 503, body: {} }), grant: () => true, spec })
-  const cards = [{ id: 'res-a', kind: 'result', record: recA, rect: r(100, 300, 260, 160) }, { id: 'res-b', kind: 'result', record: recB, rect: r(620, 300, 260, 160) }, { id: 'res-old', kind: 'result', record: recOld, rect: r(620, 60, 260, 160) }]
-  return { h, W, cards, recOld, outputs: { invoice, delivery, oldV1, oldV2 } }
-}
-const reuseScript = (parts = {}, check = n => ({ u: .96, issues: {} })) => n => n === 0 ? { placement: { value: 'board', p: .94 } } : n === 1 ? { components: { T1: { value: 'reuse', p: .92 }, T2: { value: 'reuse', p: .92 }, T3: { value: 'retrieve', p: .92 } }, parts } : check(n)
+void r
 function briefingDeps(h, engine) {
   return { engine, runFor: ids => h.chat.runFor(ids), propose: (run, args) => h.contexts.proposeBriefing(run, args), publishOutput: (run, args) => h.contexts.publishOutput(run, args) }
 }
