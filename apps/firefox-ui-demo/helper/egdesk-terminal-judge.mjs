@@ -9,7 +9,7 @@ import { stripAnsi } from './egdesk-run-result-parse.mjs'
 //   Rules stay: a password prompt is recognised by rule and the tail is then not sent anywhere.
 //   Mode: off = zero calls and today's behaviour. advisory = the model is asked and the result is only recorded; the
 //   system still acts on the deterministic fallback. on = the system acts on an accepted choice.
-//   Any failure (deadline, budget, bad answer, no consent for terminal text) falls back to today's behaviour: wait for the
+//   Any failure (deadline, budget, bad answer, the run's model permissions do not allow terminal output) falls back to today's behaviour: wait for the
 //   process, and let the reasoning model read the output itself.
 export const TERMINAL_STATES = Object.freeze({
   running_output: 'The command is still running and printing progress or logs. Nothing is asked of the person.',
@@ -71,12 +71,12 @@ function record(calibration, mode, judgments, fallback) {
 }
 
 /**
- * judgeTerminalState({ tail, alive, exitCode, quietMs, mode, client, thresholds?, timeoutMs?, signal?, calibration?, consent?, cache?, limits? })
+ * judgeTerminalState({ tail, alive, exitCode, quietMs, mode, client, thresholds?, timeoutMs?, signal?, calibration?, egress?, cache?, limits? })
  *  → { state, source: 'runtime'|'rule'|'decision'|'fallback', requests, fallback?, shadow? }
- * `consent()` must be true before any terminal text may leave; without it the model is not asked.
+ * `egress` is the run's shared gate (egdesk-decision-egress.mjs): terminal text leaves only when the models of this run may receive terminal output; there is no Decision-specific consent. Without a gate nothing is sent.
  */
 export async function judgeTerminalState({ tail = '', alive, exitCode = null, quietMs = 0, mode = 'off', client = null, thresholds, timeoutMs = TERMINAL_JUDGE_TIMEOUT_MS,
-  signal, calibration = null, consent = () => false, cache = null, limits = TERMINAL_JUDGE_LIMITS } = {}) {
+  signal, calibration = null, egress = null, cache = null, limits = TERMINAL_JUDGE_LIMITS } = {}) {
   const options = enumerateStateOptions({ alive, exitCode })
   const base = fallbackState({ alive, exitCode, quietMs }, limits)
   const text = redactTail(tail, limits)
@@ -90,7 +90,8 @@ export async function judgeTerminalState({ tail = '', alive, exitCode = null, qu
   if (cached) return { ...cached, requests: 0, cached: true }
   const done = (result, store = true) => { if (store && cache) cache.set(key, result); return result }
   if (mode !== 'advisory' && mode !== 'on') return { state: base, source: 'fallback', fallback: 'mode_off', requests: 0 }
-  if (!client?.decide || consent() !== true) return { state: base, source: 'fallback', fallback: 'not_configured', requests: 0 }
+  if (!client?.decide) return { state: base, source: 'fallback', fallback: 'not_configured', requests: 0 }
+  if (egress?.allows?.('terminal_output') !== true) return { state: base, source: 'fallback', fallback: 'evidence_unavailable', requests: 0 }
   const th = decisionThresholds(thresholds)
   let answer
   try {
@@ -133,14 +134,14 @@ export function enumerateLogBlocks(output, limits = TERMINAL_JUDGE_LIMITS) {
  * One predicate per runtime block. Fallback (and advisory): the blocks the runtime marked as failures plus the last block.
  */
 export async function pickRelevantBlocks({ blocks, mode = 'off', client = null, thresholds, timeoutMs = TERMINAL_JUDGE_TIMEOUT_MS, signal, calibration = null,
-  consent = () => false, limits = TERMINAL_JUDGE_LIMITS } = {}) {
+  egress = null, limits = TERMINAL_JUDGE_LIMITS } = {}) {
   const fallback = () => {
     const marked = blocks.filter(b => b.failureMarker), last = blocks.at(-1)
     return [...new Map([...marked, ...(last ? [last] : [])].map(b => [b.id, b])).values()].slice(0, limits.picked)
   }
   const trim = list => { let total = 0; return list.filter(b => (total += b.text.length) <= limits.pickedChars) }
   if (!blocks.length) return { blocks: [], source: 'runtime', requests: 0 }
-  if ((mode !== 'advisory' && mode !== 'on') || !client?.decide || consent() !== true) return { blocks: trim(fallback()), source: 'fallback', requests: 0 }
+  if ((mode !== 'advisory' && mode !== 'on') || !client?.decide || egress?.allows?.('terminal_output') !== true) return { blocks: trim(fallback()), source: 'fallback', requests: 0 }
   const th = decisionThresholds(thresholds)
   let answer
   try {

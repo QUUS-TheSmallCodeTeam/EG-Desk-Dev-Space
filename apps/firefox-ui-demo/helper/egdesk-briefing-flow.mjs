@@ -409,12 +409,14 @@ export function completeBriefingArgs(outcome, created = {}) {
  * allow(kind, preview) -> true when sending that exact packet is permitted (standing mode-on consent or the user's review). Bound: maxRevisions redesigns.
  * Without decide.reuse the flow behaves as before (every board target is a candidate); with it, the design is reuse-first.
  */
-export async function runBriefingFlow({ report, candidates, currentAnswerId = null, links = [], viewport = null, decide, engine, allow = async () => true, limits = {}, observeOnly = false }) {
+export async function runBriefingFlow({ report, candidates, currentAnswerId = null, links = [], viewport = null, decide, engine, allow = async () => true, limits = {}, observeOnly = false, egress = null }) {
   const maxRevisions = Number.isInteger(limits.maxRevisions) ? Math.max(0, Math.min(limits.maxRevisions, 3)) : BRIEFING_LIMITS.maxRevisions
   const stats = { judgeRequests: 0, designRounds: 0 }
   const enumeration = enumerateBriefingFacts({ report, candidates, currentAnswerId })
   if (!enumeration.boardFeasible) return { status: 'bubble', reason: 'no-board-targets', requested: false, stats }
   const ask = async (route, kind, dto) => {
+    // Step texts and card labels leave only when the run's models may receive them (shared gate; no separate consent).
+    if (egress && !egress.allows('canvas_text')) return { unavailable: 'declined' }
     const prepared = await route.prepare(dto)
     if (prepared?.status !== 'prepared') return { unavailable: prepared?.reason ?? 'unavailable' }
     if (!(await allow(kind, prepared.preview))) { await route.cancel(prepared.ticket); return { unavailable: 'declined' } }

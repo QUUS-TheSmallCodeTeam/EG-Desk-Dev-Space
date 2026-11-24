@@ -1,4 +1,5 @@
 import { BROWSER_INTERACTION_TOOL_NAMES, BROWSER_READ_TOOL_NAMES, BROWSER_TOOL_SPECS, createBrowserToolService } from './egdesk-browser-tool-runtime.mjs'
+import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { chatError } from './codex-chat-values.mjs'
 import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { fixtureSnapshotMatches } from './codex-browser-fixture-qa.mjs'
@@ -307,7 +308,9 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
         if (!output?.success) throw reflexStepError(text)
         return JSON.parse(text)
       }
-      return { callTool, authorizeDispatch, isDecisionCurrent, client: decision.client || null }
+      // Page text reaches the decision model only where it may reach this run's models: the Agent tool ceiling and the selected Card grant.
+      const gate = createEgressGate(modelDataPermissions({ toolCeiling: run.toolCeiling ?? null, browserGranted: Boolean(card) && card.permission !== 'none' }))
+      return { callTool, authorizeDispatch, isDecisionCurrent, client: decision.client ? gate.guardClient(decision.client, ['page_text']) : null }
     },
     // Each reflex step goes through this provider's own dispatch for the same
     // run with a fresh callId, so grants, the action gate and receipts apply.

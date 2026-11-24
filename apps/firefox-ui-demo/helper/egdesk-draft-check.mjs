@@ -252,7 +252,7 @@ async function judge({ draft, evidence, userText, internalVocabulary, client, th
  * 'advisory' judges and records but always posts the draft unchanged. 'off' calls nothing.
  */
 export async function checkDraft({ draft, evidence = [], userText = '', internalVocabulary = [], mode = 'off', client, revise = null, budget = null,
-  now = () => performance.now(), thresholds: overrides, signal } = {}) {
+  now = () => performance.now(), thresholds: overrides, signal, egress = null } = {}) {
   const calibration = { feature: 'draft_check', mode: mode === 'advisory' ? 'advisory' : 'on', judgments: [] }
   let firstState = null
   const out = (text, outcome, extra = {}) => ({ action: 'post', text, outcome, calls: extra.calls ?? 0, findings: extra.findings ?? [], verdict: verdictOf(firstState),
@@ -263,9 +263,11 @@ export async function checkDraft({ draft, evidence = [], userText = '', internal
   if (typeof draft !== 'string' || !draft.trim()) return out(draft, 'unchecked')
   if (mode !== 'advisory' && mode !== 'on') return out(draft, 'unchecked')
   if (!client || typeof client.decide !== 'function') return out(draft, 'unchecked', { fallback: 'not_configured' })
+  // The posted sentences and catalog text go only where the run's own models already see them (shared gate; evidence is filtered by kind).
+  if (egress && !egress.allows('draft_text')) return out(draft, 'unchecked', { fallback: 'evidence_unavailable' })
   const started = now()
   const thresholds = decisionThresholds(overrides)
-  const proof = normalizedEvidence(evidence)
+  const proof = normalizedEvidence(egress ? egress.filterEvidence(evidence) : evidence)
   proofCount.items = proof.filter(item => !item.opaque).length; proofCount.opaque = proof.filter(item => item.opaque).length
   let calls = 0
   const attempt = async (text, timeoutMs) => {

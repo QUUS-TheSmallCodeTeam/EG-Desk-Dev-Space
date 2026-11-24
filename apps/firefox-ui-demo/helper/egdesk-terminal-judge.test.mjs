@@ -8,6 +8,7 @@ import { rmSync } from 'node:fs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { createDecisionBudget, createDecisionClient } from './egdesk-decision-client.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
+import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { assessCommand, classifyCommand } from './egdesk-terminal-command-gate.mjs'
 import { enumerateLogBlocks, enumerateStateOptions, judgeTerminalState, pickRelevantBlocks, redactTail, runObjectiveLoop, stateResponse, TERMINAL_STATE_NAMES } from './egdesk-terminal-judge.mjs'
 
@@ -47,7 +48,7 @@ function modelAnswer(question, data) {
   return { name: question.name, type: 'refusal' }
 }
 
-function rig(t, { mode = 'on', consent = true, budget = null, hang = false, timeoutMs } = {}) {
+function rig(t, { mode = 'on', terminalAllowed = true, budget = null, hang = false, timeoutMs } = {}) {
   const root = createPrivateQaTempDirectory('egdesk-terminal-judge-test-')
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const calibration = openCalibrationLog({ dataDir: root, log: () => {} })
@@ -61,7 +62,8 @@ function rig(t, { mode = 'on', consent = true, budget = null, hang = false, time
       return Response.json({ answers: body.questions.map(q => modelAnswer(q, data)), usage: { input_tokens: 100 } })
     } })
   const cache = new Map()
-  const common = { mode, client, calibration, consent: () => consent, ...(timeoutMs ? { timeoutMs } : {}) }
+  const egress = createEgressGate(modelDataPermissions({ runActive: true, toolCeiling: terminalAllowed ? null : { browser: 'interact', files: 'write', terminal: 'none', network: 'on', mcp: 'all' } }))
+  const common = { mode, client, calibration, egress, ...(timeoutMs ? { timeoutMs } : {}) }
   return { requests, calibration, client, common, cache,
     judge: snap => judgeTerminalState({ ...snap, ...common, cache }),
     pick: (blocks) => pickRelevantBlocks({ blocks, ...common }),
@@ -204,7 +206,7 @@ test('S4 safety gate: rm -rf node_modules passes; rm -rf src/ needs approval; th
 
 test('the score can only ADD approval: a model that says "negligible" never removes a rule-required approval, and no mode/budget/consent weakens the floor', async t => {
   const inspect = () => ({ exists: true, kind: 'dir', trackedFiles: 41, ignored: false })
-  for (const setup of [{ mode: 'on' }, { mode: 'advisory' }, { mode: 'off' }, { mode: 'on', consent: false }, { mode: 'on', budget: usedUpBudget() }]) {
+  for (const setup of [{ mode: 'on' }, { mode: 'advisory' }, { mode: 'off' }, { mode: 'on', terminalAllowed: false }, { mode: 'on', budget: usedUpBudget() }]) {
     const r = rig(t, setup)
     const result = await r.assess('rm -rf src/', { inspect })
     assert.equal(result.approval, true, JSON.stringify(Object.keys(setup)))
@@ -228,9 +230,9 @@ test('S5 mode, budget, deadline, consent and calibration are respected', async t
   judged = await r.judge({ alive: false, exitCode: 0, tail: FAILING, quietMs: 0 })
   assert.equal(r.requests.length, 1); assert.equal(judged.source, 'fallback'); assert.equal(judged.state, 'completed_ok', 'exit 0 acts as today even though the shadow says error'); assert.equal(judged.shadow, 'completed_error')
   rows.advisory = { requests: r.requests.length, acted: judged.state, shadow: judged.shadow }
-  // consent for terminal text missing: nothing leaves
-  r = rig(t, { consent: false })
-  judged = await r.judge({ alive: false, exitCode: 0, tail: FAILING, quietMs: 0 }); assert.equal(r.requests.length, 0); assert.equal(judged.fallback, 'not_configured')
+  // the models of this run may not receive terminal output (tool ceiling terminal = none): nothing leaves
+  r = rig(t, { terminalAllowed: false })
+  judged = await r.judge({ alive: false, exitCode: 0, tail: FAILING, quietMs: 0 }); assert.equal(r.requests.length, 0); assert.equal(judged.fallback, 'evidence_unavailable')
   rows.noConsent = { requests: r.requests.length, fallback: judged.fallback }
   // budget used up: no request, fallback
   r = rig(t, { budget: usedUpBudget() })

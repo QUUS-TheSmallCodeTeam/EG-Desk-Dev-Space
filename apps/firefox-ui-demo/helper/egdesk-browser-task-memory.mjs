@@ -115,11 +115,13 @@ export function priorFromMemory(pages, { scope = null, hosts = [] } = {}) {
  * createOutcomeToOntology({ wiki, client, writer, scope, enabled, now }) -> { write(candidate, { memoryPages }) -> Promise<{ status, ... }> }
  * Hands a candidate to the general write judgment and the host write path. enabled=false (the default) calls nothing.
  */
-export function createOutcomeToOntology({ wiki, client, writer, scope = null, enabled = false, now = Date.now } = {}) {
+export function createOutcomeToOntology({ wiki, client, writer, scope = null, enabled = false, now = Date.now, egress = null } = {}) {
   return {
     async write(candidate, { memoryPages = [] } = {}) {
       if (enabled !== true) return { status: 'flag_off' }
       if (!candidate || !wiki?.pages || !writer || typeof writer.apply !== 'function') return { status: 'unavailable' }
+      // Records of a Browser task leave only when the run's models may see Browser data (shared gate).
+      if (egress && (!egress.allows('browser_task_record') || !egress.allows('memory_page'))) return { status: 'unavailable', reason: 'egress' }
       try {
         const candidates = memoryPages.filter(page => page && wiki.pages.has(page.id) && allowsPage(page, scope))
         const { proposal, receipt } = await judgeTurnWrite({ message: candidate.text, candidates, client, askedAt: now() })
