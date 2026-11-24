@@ -410,7 +410,8 @@ test('H1 a slow wording turn: the heartbeat speaks (one completed message), neve
   assert.equal((await w.send('두 번째 사업자로')).inRun, true)
   assert.deepEqual([w.note().status, w.acts.length], ['done', 2])
   const report = await w.subjective()
-  assert.deepEqual([hb.state, hb.stopReason, w.runs().length, w.runs()[0].status], ['stopped', 'run_end', 1, 'completed'])
+  // L3 c13: the heartbeat belongs to the conversation's live session. After the run ended it goes on at the idle tempo (it idles out by itself); the run itself is completed.
+  assert.deepEqual([hb.state, hb.tempo, hb.stopReason ?? null, w.runs().length, w.runs()[0].status], ['running', 'idle', null, 1, 'completed'])
   assert.deepEqual(w.history(), [['user', MSG], ['assistant', WAIT_TEXT], ['assistant', question], ['user', '두 번째 사업자로'], ['assistant', report]])
   assert.equal(w.deltas().length, 3, 'three assistant messages, each in one piece')
   assert.doesNotMatch(w.flowAsked.map(a => a.facts).join('\n'), /세금|사업자|portal|example|https?:/, 'the heartbeat question carries numbers and closed labels only')

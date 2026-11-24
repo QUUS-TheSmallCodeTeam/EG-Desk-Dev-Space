@@ -299,7 +299,8 @@ test('host wiring, default path: with the flag unset only the pref is read; the 
   // bridge side: both flags, both default off
   const server = fs.readFileSync(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8');
   assert.match(server, /createPresenceMirrorHttpHandler\(\{ mirror: presenceMirror, enabled: \(\) => process\.env\.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT \}\)/);
-  assert.match(server, /process\.env\.EGDESK_CONVERSATION_FLOW === 'on' \? \{ conversationFlow: \{ mode: \(\) => 'on', \.\.\.\(process\.env\.EGDESK_PRESENCE === 'on' \? \{ presence: presenceMirror \} : \{\}\) \} \} : \{\}/);
+  // The presence spread stays gated by EGDESK_PRESENCE inside the conversation-flow config; other lanes may add further properties after it (e.g. L3's attentionPosted).
+  assert.match(server, /process\.env\.EGDESK_CONVERSATION_FLOW === 'on' \? \{ conversationFlow: \{ mode: \(\) => 'on', \.\.\.\(process\.env\.EGDESK_PRESENCE === 'on' \? \{ presence: presenceMirror \} : \{\}\)(?:,[^\n]*\n[^\n]*)? \} \} : \{\}/);
   assert.match(server, /if \(await handlePresenceMirrorHttp\(req, res, url\)\) return/);
 });
 test('host wiring, flag on: ONE state.presence for the placement runtime and the bridge mirror; own row from the single-user provider; joint rows when a Board feed exists', async () => {
