@@ -11,7 +11,7 @@ import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 import { validBriefing } from '../overlay/resources/EGDeskBriefingState.sys.mjs'
 import { CANVAS_VIEW_SIZES } from '../overlay/resources/EGDeskSurfaceState.sys.mjs'
 import { BRIEFING_CATALOG, BRIEFING_RENDERERS, MATERIAL_TRAITS, RESULT_CARD_METRICS, STEP_SLOTS, registerComponent, resultCardCapacity, textLines } from './egdesk-briefing-catalog.mjs'
-import { answerFacts, factAnchors, factCites, COVERAGE_MODES } from './egdesk-briefing-skeleton.mjs'
+import { answerFacts, factAnchors, factCites, COVERAGE_MODES, splitByPeriod, sequenceRows } from './egdesk-briefing-skeleton.mjs'
 import { SKELETON_JUDGE, SKELETON_LIMITS, VERSION_PAIRS, relevanceQuestions, versionCandidates, dateIn, dateMatches, fillChecks, fitQuestions, questionName, versionOf, materialGroups, buildGuide, chooseParts, createSkeletonJudge, decidePlace, enumerateSkeleton, fillRequest, layoutSkeleton, normalizeMaterials, normalizeSkeletonDto, orderItems, recordedBefore, runSkeletonFlow, skeletonChecks, validateFill } from './egdesk-briefing-skeleton.mjs'
 import { BRIEFING_ENGINE_LIMITS, briefingDeps, createBriefingEngine, fillPrompt } from './egdesk-briefing-engine.mjs'
 import { completeBriefingArgs, continuedBriefingOutput } from './egdesk-briefing-flow.mjs'
@@ -982,4 +982,43 @@ test('a part whose fill fails twice is left out and the parts that passed are st
   // every part fails (the real all-on s3 run): nothing is left to show
   const none = await run(q => (/^(?:step|slot)_/.test(q.name) ? .05 : undefined), { answer: ANSWER, fill: (want, n) => (n === 1 ? fillReply(want.guide.items.map(i => i.id)) : fillReply(want.guide.items.map(i => i.id).filter(id => (want.only ?? []).includes(id) || !want.only))) })
   assert.deepEqual([none.out.status, none.out.reason], ['fallback-chat', 'nothing-left'])
+})
+
+// ================= 18. cycle 25: long ranges -> several sequence cards split by period (no chat), the coverage rule unchanged =================
+test('splitByPeriod: as few periods as the card rows require, near-equal, cut where the date changes, never one material alone; 12 materials kept', () => {
+  assert.equal(sequenceRows(), 6, 'the list card holds six rows')
+  const d = (...days) => days.map((day, i) => ({ alias: `M${i + 1}`, at: `2026-11-${String(day).padStart(2, '0')}` }))
+  const ids = chunks => chunks.map(c => c.map(m => m.alias).join(','))
+  assert.deepEqual(ids(splitByPeriod(d(1, 2, 3, 4, 5, 6), 6)), ['M1,M2,M3,M4,M5,M6'], 'fits one card: one period')
+  assert.deepEqual(ids(splitByPeriod(d(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), 6)), ['M1,M2,M3,M4,M5', 'M6,M7,M8,M9,M10'])
+  assert.deepEqual(ids(splitByPeriod(d(1, 1, 2, 2, 2, 3, 3, 4), 6)), ['M1,M2,M3,M4,M5', 'M6,M7,M8'], 'a day is not cut in two when the card has room')
+  assert.deepEqual(ids(splitByPeriod(d(1, 1, 1, 2, 2, 2, 3), 6)), ['M1,M2,M3', 'M4,M5,M6,M7'], 'a period of one moves back to the previous date change')
+  assert.deepEqual(ids(splitByPeriod(d(5, 5, 5, 5, 5, 5, 5), 6)), ['M1,M2,M3,M4', 'M5,M6,M7'], 'one day longer than a card: two near-equal halves')
+  for (const n of [7, 9, 11, 12]) { const c = splitByPeriod(d(...Array.from({ length: n }, (_, i) => i + 1)), 6); assert.ok(c.every(x => x.length >= 2 && x.length <= 6) && c.flat().length === n, `n=${n}`) }
+  const rows = Array.from({ length: 13 }, (_, i) => row(`M${i + 1}`, `기록 ${i + 1}`, `${i + 1}번째 일`, `2026-11-${String(i + 1).padStart(2, '0')}`, 'done'))
+  assert.equal(normalizeMaterials(rows).length, 12, 'twelve materials: lane L7 memory rows go to twelve')
+  const m = [{ alias: 'M12', title: 't', text: '', at: null, status: 'done' }]
+  assert.ok(normalizeSkeletonDto({ stage: 'place', request: 'x', materials: m, cards: [], questions: [{ kind: 'about', material: 'M12' }] }))
+  assert.equal(normalizeSkeletonDto({ stage: 'place', request: 'x', materials: [{ ...m[0], alias: 'M13' }], cards: [], questions: [{ kind: 'about', material: 'M13' }] }), null)
+})
+test('a long range (ten dated, linked materials): two sequence cards by period in date order (the order is the split\'s own, never asked), each fact on its card; a fact on no shown card -> the chat answer', async () => {
+  const LONG = Array.from({ length: 10 }, (_, i) => row(`M${i + 1}`, `L4 사이클 ${14 + i}`, `사이클 ${14 + i}에서 브리핑 단계 ${i + 1}을 바꿈.`, `2026-11-${String(10 + i).padStart(2, '0')}`, 'done', i ? [{ type: 'follows_from', toAlias: `M${i}` }] : []))
+  const scene = enumerateSkeleton({ materials: LONG, candidates: [] })
+  const seq = scene.parts.filter(p => p.trait === 'sequence')
+  assert.deepEqual(seq.map(p => [p.materials.join(','), p.period.index]), [['M1,M2,M3,M4,M5', 0], ['M6,M7,M8,M9,M10', 1]])
+  // the split's own order holds even when the record cannot tell (same day): no order question for the two periods
+  const sameDay = enumerateSkeleton({ materials: LONG.map(m => ({ ...m, time: { ...m.time, at: '2026-11-24' } })), candidates: [] })
+  const [a, b] = sameDay.parts.filter(p => p.trait === 'sequence').map(p => ({ id: p.alias, materials: p.materials, trait: p.trait }))
+  assert.equal(recordedBefore(b, a, sameDay), false); assert.equal(recordedBefore(a, b, sameDay), true)
+  const fill = asked => ({ title: '브리핑 변화', items: Object.fromEntries(asked.guide.items.map(item => [item.id, { text: `${item.materials.length}개 사이클의 변화입니다.`, fallback: '카드를 열어 보세요.',
+    slots: { title: '사이클별 변화', lines: item.materials.map(alias => { const m = LONG[Number(alias.slice(1)) - 1]; return { label: `${m.time.at.slice(5, 7)}/${m.time.at.slice(8)}`, text: m.excerpt, from: alias } }) } }])) })
+  const answer = '사이클 14에서 브리핑 단계 1을 바꿨습니다. 사이클 23에서 브리핑 단계 10을 바꿨습니다.'
+  const out = await run(q => (/^(?:aspect|todo|fact)_/.test(q.name) ? .03 : undefined), { materials: LONG, candidates: [], answer, request: '브리핑 기능 c14부터 지금까지 뭐가 바뀌었지?', fill })
+  assert.equal(out.out.status, 'presented', JSON.stringify(out.out)); assert.deepEqual(out.out.guide.items.map(i => [i.id, i.materials.length]), [['P1', 5], ['P2', 5]])
+  assert.ok(!out.judge.calls.some(c => c.stage === 'order' && c.names.includes('before_P1_P2')), 'the periods are ordered by code')
+  const cov = out.judge.calls.find(c => c.stage === 'coverage'); assert.deepEqual(cov.names, ['onboard_F1', 'onboard_F2'])
+  assert.ok(cov.packet.input[1].content.includes('사이클 23에서 브리핑 단계 10을 바꿈.'), 'the second period is on the board')
+  // the coverage rule is unchanged: the second period's card judged not to fit -> its fact is missing -> the chat answer
+  const half = await run(q => (q.name === 'onboard_F2' ? .02 : /^(?:aspect|todo|fact)_/.test(q.name) || /^happened_M(?:[6-9]|10)$/.test(q.name) ? .03 : undefined), { materials: LONG, candidates: [], answer, request: '브리핑 기능 c14부터 지금까지 뭐가 바뀌었지?', fill })
+  assert.deepEqual([half.out.status, half.out.reason], ['fallback-chat', 'not-covered'])
 })

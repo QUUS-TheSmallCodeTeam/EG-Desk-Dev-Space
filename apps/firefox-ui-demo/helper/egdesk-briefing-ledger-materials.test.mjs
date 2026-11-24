@@ -2,7 +2,7 @@
 // read-only, and their pages are written outside the repository).
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildLoopPages, laneCyclesIn, maskSecrets, mergedLaneCycles, parseLedger, parseReport, statedStatus } from './egdesk-briefing-ledger-materials.mjs'
+import { buildLoopPages, laneCyclesIn, maskSecrets, mergedLaneCycles, parseLedger, parseReport, statedStatus, titleHead } from './egdesk-briefing-ledger-materials.mjs'
 import { normalizeMaterials } from './egdesk-briefing-skeleton.mjs'
 
 const LEDGER = [
@@ -52,4 +52,12 @@ test('report pages: own H1 title, opening prose without bookkeeping lines; date 
   const m = normalizeMaterials([by('report-l4-c18'), by('report-l4-c19'), by('ledger-1124-2154-1')])
   assert.deepEqual(m.map(x => [x.at, x.status]), [[null, 'reported_by_other'], ['2026-11-24', 'done'], ['2026-11-24', 'done']])
   assert.deepEqual(m[1].links, [{ type: 'follows_from', to: 'M1' }, { type: 'refers_to', to: 'M3' }])
+})
+
+test('cycle 25: a ledger title says what the line records: commit ids dropped (kept in the text), up to the first sentence end, never ids alone', () => {
+  assert.equal(titleHead('L7 c19(e930372·18337b8·57de3f0) 병합 → int/c14 c680638, 341개 파일 6707건 0 실패. 이미 받은 기록 재전송 제거.'), 'L7 c19 병합 → int/c14 c680638, 341개 파일 6707건 0 실패.')
+  assert.equal(titleHead('사용자 결정 대체 문구 (나) \'이걸로\': 고정 문장 전부 제거. 비공개 고쳐 쓰기'), '사용자 결정 대체 문구 (나) \'이걸로\': 고정 문장 전부 제거.', 'a parenthesis that is not a commit id stays')
+  const [e] = parseLedger('- 11-24 22:50 L7 c19(e930372·18337b8·57de3f0) 병합 → int/c14 c680638. 이미 받은 기록 재전송 제거.', { year: 2026 })
+  assert.equal(e.title, '11-24 22:50 L7 c19 병합 → int/c14 c680638.'); assert.ok(e.excerpt.includes('(e930372·18337b8·57de3f0)'), 'the ids stay in the text')
+  assert.deepEqual(e.merged, ['l7-c19'], 'the merge rule still reads the ids from the text')
 })
