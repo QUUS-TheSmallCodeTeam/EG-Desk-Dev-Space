@@ -22,21 +22,21 @@ test('the fact: only a stopped command with a command line; the block and the ev
   assert.deepEqual(fact, { command: 'sleep 15 && echo build-finished', durationMs: 4630, signal: 'SIGTERM', exitCode: null, outputTail: 'compiling…\nstep 2' }); assert.ok(Object.isFrozen(fact))
   const block = stoppedCommandBlock(fact)
   assert.match(block, /^EG-Desk fact about the last command you started in this conversation:/)
-  assert.match(block, /The command `sleep 15 && echo build-finished` was stopped at the person's request after 4\.6 s \(signal SIGTERM\)\./)
-  assert.match(block, /It did not complete: it has no exit code; whether it would have succeeded is not known, and it is no longer running\./)
+  assert.match(block, /The command `sleep 15 && echo build-finished` was stopped at the person's request after 4\.6 s\./)
+  assert.match(block, /EG-Desk ended its process with signal SIGTERM: the command did not run to its end and has no exit code, and its process has exited\./)
   assert.match(block, /Output printed before it was stopped \(last part\):\ncompiling…\nstep 2$/)
-  assert.match(stoppedCommandBlock(stoppedCommandFact({ stopped: true, command: 'make', durationMs: 900, signal: 'SIGKILL' })), /after 0\.9 s \(signal SIGKILL\)[\s\S]*It had printed no output before it was stopped\./)
+  assert.match(stoppedCommandBlock(stoppedCommandFact({ stopped: true, command: 'make', durationMs: 900, signal: 'SIGKILL' })), /after 0\.9 s\.\nEG-Desk ended its process with signal SIGKILL[\s\S]*It had printed no output before it was stopped\./)
   // no duration or signal known: the sentence does not invent them; an odd signal word is dropped; a long command and a long output are cut
   const bare = stoppedCommandFact({ stopped: true, command: 'x'.repeat(500), signal: 'rm -rf', outputTail: 'o'.repeat(5000) })
   assert.equal(bare.command.length, STOPPED_COMMAND_LIMITS.commandChars); assert.equal(bare.signal, null); assert.equal(bare.durationMs, null); assert.ok(bare.outputTail.length <= STOPPED_COMMAND_LIMITS.outputChars + 1); assert.ok(bare.outputTail.startsWith('…'))
-  assert.doesNotMatch(stoppedCommandBlock(bare), /after .* s|signal/)
+  assert.doesNotMatch(stoppedCommandBlock(bare), /after \d|signal/)
   // the draft check's evidence: the output only where terminal data may go to the run's models
   const evidence = stoppedCommandEvidence(fact), withOutput = stoppedCommandEvidence(fact, { outputAllowed: true })
   assert.deepEqual([evidence.kind, evidence.time, evidence.source], ['terminal', 'past', 'run']); assert.doesNotMatch(evidence.text, /compiling/); assert.match(withOutput.text, /compiling/); assert.match(evidence.text, /stopped at the person's request after 4\.6 s/)
   assert.match(STOPPED_COMMAND_KEY, /^[A-Za-z][A-Za-z0-9_]{0,63}$/)
 })
 
-function world(t, { draftCheck = null } = {}) {
+function world(t, { draftCheck = null, stubborn = false } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-stopped-fact-'))
   t.after(() => fs.rmSync(base, { recursive: true, force: true }))
   const dataDir = path.join(base, 'egdesk-data'), project = path.join(base, 'demo-app')
@@ -50,7 +50,9 @@ function world(t, { draftCheck = null } = {}) {
     if (args[1].startsWith('echo ')) setTimeout(() => child.emit('close', 0, null), 20)
     return child
   }
-  const killGroup = (child, signal) => { signals.push([child.pid, signal]); setImmediate(() => child.emit('close', null, signal)) }
+  let neverClose = false
+  // stubborn: the command ignores SIGTERM (only SIGKILL ends it, after the runner's grace)
+  const killGroup = (child, signal) => { signals.push([child.pid, signal]); if (neverClose || (stubborn && signal === 'SIGTERM')) return; setImmediate(() => child.emit('close', null, signal)) }
   let chat = null
   const wiring = createOwnToolsWiring({ env: { EGDESK_OWN_TOOLS: 'on', PATH: '/usr/bin:/bin', HOME: '/home/synthetic' }, dataDir, spawn, getChat: () => chat, killGroup, home: '/home/synthetic', gitStatus: async () => null })
   const client = createDecisionClient({ getApiKey: () => 'egd-synthetic-not-a-key-0026', recipientForKey: () => 'a'.repeat(64),
@@ -68,7 +70,7 @@ function world(t, { draftCheck = null } = {}) {
   const turnStarts = () => calls.filter(([m]) => m === 'turn/start').map(([, p]) => p)
   const runCommand = (sent, id, command) => chat.handleServerRequest({ id, method: 'item/tool/call', params: { threadId: sent.conversationId, turnId: sent.runId, callId: id, tool: COMMAND_TOOL_NAME, arguments: { command } } })
   const finishTurn = async sent => chat.handleNotification({ method: 'turn/completed', params: { threadId: sent.conversationId, turn: { id: sent.runId, status: 'interrupted', items: [] } } })
-  return { chat, project, signals, spawned, replies, calls, turnStarts, runCommand, finishTurn }
+  return { chat, project, signals, spawned, replies, calls, turnStarts, runCommand, finishTurn, setNeverClose: () => { neverClose = true } }
 }
 const noteOf = start => start.additionalContext?.[STOPPED_COMMAND_KEY]?.value ?? null
 
@@ -87,8 +89,8 @@ test('end to end: the person stops a running command; the NEXT turn is told what
   const note = noteOf(w.turnStarts().at(-1))
   assert.ok(note, 'the second turn carries the fact: ' + JSON.stringify(w.turnStarts().at(-1).additionalContext))
   assert.equal(w.turnStarts().at(-1).additionalContext[STOPPED_COMMAND_KEY].kind, 'application')
-  assert.match(note, /The command `sleep 15 && echo build-finished` was stopped at the person's request after \d+\.\d s \(signal SIGTERM\)\./)
-  assert.match(note, /It did not complete: it has no exit code/); assert.match(note, /Output printed before it was stopped \(last part\):\ncompiling…/)
+  assert.match(note, /The command `sleep 15 && echo build-finished` was stopped at the person's request after \d+\.\d s\./)
+  assert.match(note, /EG-Desk ended its process with signal SIGTERM: the command did not run to its end/); assert.match(note, /Output printed before it was stopped \(last part\):\ncompiling…/)
   assert.doesNotMatch(JSON.stringify(w.turnStarts().at(-1).input), /stopped at the person/, 'the person\'s message itself is untouched: the fact rides as context')
   // consumed: the turn after that does not repeat it
   await w.chat.handleNotification({ method: 'turn/completed', params: { threadId: sent.conversationId, turn: { id: second.runId, status: 'completed', items: [] } } })
@@ -133,4 +135,37 @@ test('the draft check knows it: a stopped command told to this turn is known tex
   assert.ok(entry, 'the check registered this turn')
   const item = entry.evidence.find(e => e.id === 'stopped'); assert.ok(item, JSON.stringify(entry.evidence)); assert.match(item.text, /stopped at the person's request after \d+\.\d s/); assert.equal(item.opaque, undefined)
   assert.equal(entry.evidence.filter(e => e.source === 'application' && e.opaque).length, 0, 'the stopped-command block is not counted as an opaque context block')
+})
+
+test('c27: a message sent right after "stop", before the kill grace has passed and the command is recorded, still tells the next turn (bounded wait); with nothing stopping there is no wait', async t => {
+  const w = world(t, { stubborn: true })
+  const sent = await w.chat.send({ message: '빌드를 돌려줘', clientThreadId: 'ui', requestId: 'r1', cwd: w.project })
+  await w.runCommand(sent, 'call-1', 'sleep 15 && echo build-finished'); await until(() => w.spawned.length === 1)
+  // no stop yet: a send does not wait
+  assert.equal(w.chat.toolProviders.some(p => p.stopSettled?.('ui')), false)
+  await w.chat.interrupt({ conversationId: sent.conversationId, runId: sent.runId })
+  assert.ok(w.chat.toolProviders.some(p => p.stopSettled?.('ui')), 'the executor has a stop pending (the command ignores SIGTERM, SIGKILL comes after the grace)')
+  assert.equal(w.replies.some(r => r[0] === 'call-1'), false, 'not recorded yet')
+  await w.finishTurn(sent)
+  const started = Date.now()
+  await w.chat.send({ message: '왜 멈췄니?', clientThreadId: 'ui', requestId: 'r2', cwd: w.project, conversationId: sent.conversationId })
+  assert.match(noteOf(w.turnStarts().at(-1)) ?? '', /stopped at the person's request/, 'the send waited for the record')
+  assert.ok(Date.now() - started < 2500 + 1500, 'bounded')
+  assert.deepEqual(w.signals, [[8000, 'SIGTERM'], [8000, 'SIGKILL']])
+  assert.equal(w.chat.toolProviders.some(p => p.stopSettled?.('ui')), false, 'nothing pending any more')
+})
+
+test('c27: a record that never comes does not hold the send for longer than the bound', async t => {
+  const w = world(t, { stubborn: true })
+  const sent = await w.chat.send({ message: '빌드를 돌려줘', clientThreadId: 'ui', requestId: 'r1', cwd: w.project })
+  await w.runCommand(sent, 'call-1', 'sleep 15'); await until(() => w.spawned.length === 1)
+  // a stop that never completes: the runner is told to stop but the process never closes (the fake kill does nothing)
+  w.setNeverClose()
+  await w.chat.interrupt({ conversationId: sent.conversationId, runId: sent.runId }); await w.finishTurn(sent)
+  const started = Date.now()
+  await w.chat.send({ message: '왜 멈췄니?', clientThreadId: 'ui', requestId: 'r2', cwd: w.project, conversationId: sent.conversationId })
+  const took = Date.now() - started
+  assert.ok(took >= 2000 && took < 2500 + 1500, 'waited up to the bound, not longer: ' + took + ' ms')
+  assert.equal(noteOf(w.turnStarts().at(-1)), null, 'no record, no note (the turn still went out)')
+  assert.equal(w.turnStarts().length, 2)
 })

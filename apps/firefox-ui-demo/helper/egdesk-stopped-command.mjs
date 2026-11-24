@@ -24,8 +24,8 @@ export const seconds = ms => `${(Math.round(ms / 100) / 10).toFixed(1)} s`
 
 /** The sentences, shared by the next turn's block and the draft check's evidence. */
 function lines(fact, { output = true } = {}) {
-  const out = [`The command \`${fact.command}\` was stopped at the person's request${fact.durationMs !== null ? ` after ${seconds(fact.durationMs)}` : ''}${fact.signal ? ` (signal ${fact.signal})` : ''}.`,
-    `It did not complete${fact.exitCode === null ? ': it has no exit code' : ''}; whether it would have succeeded is not known, and it is no longer running.`]
+  const out = [`The command \`${fact.command}\` was stopped at the person's request${fact.durationMs !== null ? ` after ${seconds(fact.durationMs)}` : ''}.`,
+    `EG-Desk ended its process${fact.signal ? ` with signal ${fact.signal}` : ''}: the command did not run to its end${fact.exitCode === null ? ' and has no exit code' : ''}, and its process has exited.`]
   if (output) out.push(fact.outputTail ? `Output printed before it was stopped (last part):\n${fact.outputTail}` : 'It had printed no output before it was stopped.')
   return out
 }

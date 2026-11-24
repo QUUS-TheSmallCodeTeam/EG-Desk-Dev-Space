@@ -569,7 +569,7 @@ test('mounted, the next answer: the cards the first briefing built are recognise
   assert.equal(res.body.outcome, 'presented', JSON.stringify(res.body)); assert.deepEqual([res.body.steps, res.body.newComponents], [3, 0], 'three steps, no new card')
   assert.equal(s.count('output.published'), before, 'nothing was published again')
   assert.deepEqual(s.decisions.slice(asked).map(d => d.prompt_cache_key), ['briefing-skeleton-place', 'briefing-skeleton-order', 'briefing-skeleton-fill_check', 'briefing-skeleton-coverage'], 'every part is already on the board: reused by rule, no fit request at all')
-  assert.deepEqual(s.decisions.at(-2).questions.map(q => q.name), ['step_P1', 'step_P2', 'step_P3'], 'a reused card has no slots to check: only its explanation'); assert.deepEqual(s.decisions.at(-1).questions.map(q => q.name), ['onboard_F1', 'onboard_F2', 'onboard_F3'], 'cycle 21: one question per fact of the answer (two anchored clauses, then the list sentence whole)')
+  assert.deepEqual(s.decisions.at(-2).questions.map(q => q.name), ['step_P1', 'step_P2', 'step_P3'], 'a reused card has no slots to check: only its explanation'); assert.deepEqual(s.decisions.at(-1).questions.map(q => q.name), ['onboard_F1', 'onboard_F2', 'onboard_F3', 'stated_F3'], 'cycle 21: one question per fact of the answer (two anchored clauses, then the list sentence whole); c36: the list sentence has no anchor, so it also gets stated_F3')
   assert.deepEqual(s.h.chat.runFor({ conversationId: next.conversationId, runId: next.runId, answerId: next.answerId }).context.briefings.at(-1).steps.map(x => x.targets[0].viewId), ['res-new-1', 'res-new-2', 'res-new-3'])
 })
 test('advisory recording: place and fit are asked and recorded for the finished answer, nothing else happens; no engine is needed', async t => {
@@ -1023,7 +1023,7 @@ test('a long range (ten dated, linked materials): two sequence cards by period i
   const out = await run(q => (/^(?:aspect|todo|fact)_/.test(q.name) ? .03 : undefined), { materials: LONG, candidates: [], answer, request: '브리핑 기능 c14부터 지금까지 뭐가 바뀌었지?', fill })
   assert.equal(out.out.status, 'presented', JSON.stringify(out.out)); assert.deepEqual(out.out.guide.items.map(i => [i.id, i.materials.length]), [['P1', 5], ['P2', 5]])
   assert.ok(!out.judge.calls.some(c => c.stage === 'order' && c.names.includes('before_P1_P2')), 'the periods are ordered by code')
-  const cov = out.judge.calls.find(c => c.stage === 'coverage'); assert.deepEqual(cov.names, ['onboard_F1', 'onboard_F2'])
+  const cov = out.judge.calls.find(c => c.stage === 'coverage'); assert.deepEqual(cov.names, ['onboard_F1', 'onboard_F2', 'stated_F1', 'stated_F2'], 'c36: both facts have no anchor ("사이클 14" is not a date, version or amount), so each also gets the stated question')
   assert.ok(cov.packet.input[1].content.includes('사이클 23에서 브리핑 단계 10을 바꿈.'), 'the second period is on the board')
   // the coverage rule is unchanged: the second period's card judged not to fit -> its fact is missing -> the chat answer
   const half = await run(q => (q.name === 'onboard_F2' ? .02 : /^(?:aspect|todo|fact)_/.test(q.name) || /^happened_M(?:[6-9]|10)$/.test(q.name) ? .03 : undefined), { materials: LONG, candidates: [], answer, request: '브리핑 기능 c14부터 지금까지 뭐가 바뀌었지?', fill })

@@ -122,7 +122,7 @@ export function familyChecks({ phaseOf, firstNavigateAfter, byCodeOn }) {
     ...holdout2Checks({ phaseOf }),
     // statement
     'st-enters': j => phaseOf(j, 'st-base')?.first?.handled === true,
-    'st-entry-by-code': j => { const r = j.requests.find(x => x.phase === 'st-base' && x.stage === 'entry'); return Boolean(r) && r.names.join(',') === 'browser_entry' },
+    'st-entry-by-code': j => { const r = j.requests.find(x => x.phase === 'st-base' && x.stage === 'entry'); return Boolean(r) && r.names.filter(n => n !== 'browser_entry_answer').join(',') === 'browser_entry' },
     'st-query-read-only': j => { const p = phaseOf(j, 'st-base'); return Boolean(p?.ran) && nav(j, 'st-base')[0] === '/card/result' && p.paused === 0 },
     'st-download': j => nav(j, 'st-base').includes('/card/statement/2026-11.pdf'),
     'st-done': j => phaseOf(j, 'st-base')?.first?.status === 'done',
@@ -183,6 +183,7 @@ export function familyAnswers(body, set = null) {
   const met = /다운로드 완료|배송 상태:/.test(ev)
   return body.questions.map(q => {
     const values = (q.choices ?? []).map(c => c.value)
+    if (q.name === 'browser_entry_answer') return { name: q.name, type: 'predicate', probability: 0.03 } // c29: not answerable without a page
     if (q.name === 'browser_entry') return { name: q.name, type: 'predicate', probability: 0.95 } // c20: the request predicate
     const onError = /오류 500/.test(q.instructions ?? '')
     if (/^browser_entry_wall_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: /오류 500/.test(ev) ? 0.95 : 0.02 } // c23: an interruption of the site (c24: the page's lines are in the evidence, not in the question)

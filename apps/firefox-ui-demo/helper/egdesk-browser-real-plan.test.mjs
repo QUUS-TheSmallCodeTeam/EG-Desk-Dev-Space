@@ -54,8 +54,8 @@ test('building twice gives the same bytes; a body is one Decision request (model
 
 test('entry (c20): the request predicate and one predicate per granted card; the prior record rides only where declared', () => {
   // c20: the entry predicates: the request, then one per card quoting that page alone
-  assert.deepEqual(wire('entry-task').questions.map(q => q.name), ['browser_entry', 'browser_entry_card_0'])
-  assert.deepEqual(wire('entry-two-cards').questions.map(q => q.name), ['browser_entry', 'browser_entry_card_0', 'browser_entry_card_1'])
+  assert.deepEqual(wire('entry-task').questions.map(q => q.name), ['browser_entry', 'browser_entry_answer', 'browser_entry_card_0'])
+  assert.deepEqual(wire('entry-two-cards').questions.map(q => q.name), ['browser_entry', 'browser_entry_answer', 'browser_entry_card_0', 'browser_entry_card_1'])
   assert.match(question('entry-two-cards', 'browser_entry_card_1').instructions, /mail\.example\.test/)
   assert.match(text('entry-with-prior'), /Stored memory fetched for this turn/); assert.match(text('entry-with-prior'), /사업자 987-65-43210/)
   for (const id of ['entry-task', 'entry-not-browser', 'entry-two-cards']) assert.doesNotMatch(text(id), /Stored memory|987-65/)

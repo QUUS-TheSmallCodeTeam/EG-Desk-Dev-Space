@@ -266,7 +266,7 @@ test('R1 one live run: question (completed message) -> run.replyOpen -> in-run r
   assert.equal(w.decisions.filter(d => d.image).length, 0)
   // each objective phase ran before its native turn: the subjective model only ever worded a finished note
   const order = w.timeline.filter(x => /^(decide:|native:turn\/start)/.test(x))
-  assert.deepEqual(order, ['decide:browser_entry+browser_entry_card_0', STEP, 'native:turn/start', 'decide:task_resume',
+  assert.deepEqual(order, ['decide:browser_entry+browser_entry_answer+browser_entry_card_0', STEP, 'native:turn/start', 'decide:task_resume',
     STEP, STEP, STEP, 'native:turn/start'])
   // no intermediate-message job started for a browser-task turn (its reply must reach the task, not an in-run steer)
   assert.equal(w.calls.some(c => c.method === 'thread/fork' || c.method === 'turn/steer' || c.method === 'turn/interrupt'), false, 'the reply is never steered into a native turn: it belongs to the task')
@@ -334,7 +334,7 @@ const rideHook = { entryAnswers: async ({ body, questions, evidence, client }) =
 test('C1 ride-along: one turn-start request carries triage + the entry question; no separate entry request; the task runs the same', async t => {
   const alone = world(t); await alone.send(MSG)
   const ride = world(t, { entry: rideHook }); await ride.send(MSG)
-  assert.deepEqual(ride.decisions[0].names, ['tn_courtesy', 'tn_need', 'tn_record', 'browser_entry', 'browser_entry_card_0'], 'c20: the entry predicates ride along')
+  assert.deepEqual(ride.decisions[0].names, ['tn_courtesy', 'tn_need', 'tn_record', 'browser_entry', 'browser_entry_answer', 'browser_entry_card_0'], 'c20/c29: the entry predicates ride along')
   assert.deepEqual(ride.counts(), { tn_courtesy: 1, next_step: 1 }, 'no standalone browser_entry request')
   assert.deepEqual(alone.counts(), { browser_entry: 1, next_step: 1 })
   assert.deepEqual([ride.note().status, ride.note().code], [alone.note().status, alone.note().code])
@@ -720,7 +720,7 @@ test('C5 c22 ride-along through the runtime quotes what the card shows, exactly 
   const rideCard = card(ride.decisions[0]), aloneCard = card(alone.decisions[0])
   assert.match(rideCard, /which now shows "합성 포털"\?/)
   assert.equal(rideCard, aloneCard, 'the same quoting on both paths')
-  assert.deepEqual(ride.decisions[0].names.slice(-2), ['browser_entry', 'browser_entry_card_0'])
+  assert.deepEqual(ride.decisions[0].names.slice(-3), ['browser_entry', 'browser_entry_answer', 'browser_entry_card_0'])
 })
 
 // ---- L8 c23: in-run messages for browser tasks (EGDESK_INRUN_MESSAGES; lane L2's contract: inRunMessageTo, pendingInRunMessages, settleInRunMessage) ----
@@ -865,7 +865,7 @@ test('I7 the store: a change composes the goal from the original request and wha
 
 test('I8 the loop: a change between or during segments is planned again under the new goal, whatever the old segment ended with (done included)', async () => {
   const store = createBrowserTaskStore(), goals = []
-  const provider = { directEntryEnabled: () => true, reflexScope: () => ({ client: { decide: async r => ({ answers: Object.fromEntries(r.questions.map(q => [q.name, { type: 'predicate', probability: 0.95 }])) }) }, isDecisionCurrent: () => true }),
+  const provider = { directEntryEnabled: () => true, reflexScope: () => ({ client: { decide: async r => ({ answers: Object.fromEntries(r.questions.map(q => [q.name, { type: 'predicate', probability: q.name === 'browser_entry_answer' ? 0.03 : 0.95 }])) }) }, isDecisionCurrent: () => true }),
     async runDirectTask(_run, args) {
       goals.push(args.goal)
       if (goals.length === 1) { store.changeGoal('dm', '지난 달로'); return { outcome: 'done', steps: [{ url: 'https://portal.example.test/x', actions: [] }], state: null } } // the change arrived as the segment ended

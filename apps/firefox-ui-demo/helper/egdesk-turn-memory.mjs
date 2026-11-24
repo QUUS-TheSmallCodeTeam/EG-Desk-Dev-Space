@@ -104,7 +104,7 @@ export async function triageTurn({ message, heldTitles = [], heldDigest = null, 
   // extraQuestions: self-contained questions of another turn-start judgment (the browser entry) that ride on this one request. They are
   // appended AFTER the triage questions, never named tn_*, and their answers are returned untouched in `extra`; the triage reading ignores them.
   const withPrevious = previousReplyInput(previousReply).length > 0
-  const riders = (Array.isArray(extraQuestions) ? extraQuestions : []).filter(q => q && typeof q.name === 'string' && !q.name.startsWith('tn_')).slice(0, 2)
+  const riders = (Array.isArray(extraQuestions) ? extraQuestions : []).filter(q => q && typeof q.name === 'string' && !q.name.startsWith('tn_')).slice(0, 8) // c29: the browser entry rides with two request predicates and up to six card predicates (was 2)
   const questions = [
     predicateQuestion('tn_courtesy', withPrevious ? `${'Is the message only a courtesy: thanks, a greeting, an acknowledgement or other social small talk, with no question, request, report or decision in it?'} ${COURTESY_WITH_PREVIOUS}` : 'Is the message only a courtesy: thanks, a greeting, an acknowledgement or other social small talk, with no question, request, report or decision in it?'),
     predicateQuestion('tn_need', Array.isArray(stored)

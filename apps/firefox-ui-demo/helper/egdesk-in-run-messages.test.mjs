@@ -14,13 +14,13 @@ const yesIf = (request, text) => quoted(request).includes(text)
 const policy = Object.fromEntries(Object.entries(sound).map(([name, f]) => [name, f]))
 // On the wire the heartbeat prefixes its provider: message__person_status.
 function judged(w) { return w.beatRequests.filter(r => r.names.includes('message__person_status')) }
-async function scene(t, { flags = { held: true, flow: true, inRun: true }, writer = null, steer = 'ok' } = {}) {
-  const w = world(t, { flags, writer, steer, policy: {} })
+async function scene(t, { flags = { held: true, flow: true, inRun: true }, writer = null, steer = 'ok', fork = 'ok', draft = null } = {}) {
+  const w = world(t, { flags, writer, steer, fork, policy: {} }); w.draftBodies = []
   // the fixture judge answers predicates 0.03 unless a policy says otherwise: answer the person questions here
   const decide = w.chat.decisionContext.client.decide
   w.chat.decisionContext.client.decide = async request => {
     const out = await decide(request)
-    for (const q of request.questions) { const f = sound[q.name.replace(/^message__/, '')]; if (f) out.answers[q.name] = { type: 'predicate', probability: f(q, request) ? 0.95 : 0.03 } }
+    for (const q of request.questions) { const f = sound[q.name.replace(/^message__/, '')]; if (f) out.answers[q.name] = { type: 'predicate', probability: f(q, request) ? 0.95 : 0.03 }; const g = draft?.(q, request); if (g !== undefined) out.answers[q.name] = { type: 'predicate', probability: g } }; if (request.questions.some(q => /^sup_\d+$/.test(q.name))) w.draftBodies.push(JSON.stringify(request.input))
     return out
   }
   const d = await w.dm('dm-a', '전체 테스트 돌리고 A 모듈부터 고쳐줘')
@@ -130,4 +130,50 @@ test('a stop one second after another message is acted on at the next beat (0.5 
   // the assistant's own notes were not moved by those two rounds: the beat record says the person rounds did not count as asks
   const rounds = w.flowEntries().filter(e => e.judgments?.some(j => /^beat_person_/.test(j.q)))
   assert.equal(rounds.length, 2)
+})
+
+
+// c26 (Main's real-engine check-6, why-stopped): the engine refused the fork of an ephemeral thread, so the writer ran on a fresh thread and wrote a plain present-tense
+// status reply; the draft check read the tense question yes (.95, sup .5) on it, and nothing was posted. Main's decision: the bar and the wording stay; the run's live
+// state is current-time evidence (liveRunLines: still in progress as of now, the command line, how long, not finished), so a true present-tense statement is supported
+// and a false one ("it finished") is not. The judge here is a content-aware mock (supported unless the sentence says it ended while the evidence says it has not).
+const REPLY = '멈춘 게 아니라 명령이 12초째 실행 중이에요. 끝나면 바로 알려 드릴게요.'
+const FALSE_REPLY = '12초 만에 명령이 끝났어요.'
+const writer = text => prompt => (/The person just wrote, while you work/.test(prompt) ? text : null)
+// the mock judge reads the sentence and the evidence like a model would: a sentence that says the command ended is not supported while the evidence says it has not finished
+const aware = (q, request) => {
+  const body = JSON.stringify(request.input), ended = body.includes('명령이 끝났어요') && /has not finished yet/.test(body)
+  if (/^sup_/.test(q.name)) return ended ? 0.02 : 0.95
+  if (/^tense_/.test(q.name)) return ended ? 0.9 : 0.03
+  return undefined
+}
+test('check-6 replayed: fork refused (fresh private thread); the check is given the run\'s live state, the true present-tense reply is supported and posted; the row says why (write: passed)', async t => {
+  const { w, d } = await scene(t, { fork: 'norollout', writer: writer(REPLY), draft: aware })
+  await d.ownCommand('exec-1', 'npm test -- --all', 0)
+  const before = d.assistant().length
+  await send(w, d, STATUS, 1); await w.advance(6000)
+  assert.deepEqual(d.assistant().slice(before), [REPLY], 'the person sees the reply')
+  assert.ok(w.startedFresh.length >= 1, 'the writer ran on a fresh thread (the fork was refused)'); assert.ok(w.native.some(([m]) => m === 'thread/fork'), 'a fork was tried first')
+  const body = w.draftBodies.at(-1)
+  assert.match(body, /As of now the run is still in progress: the assistant began working \d+ seconds? ago\. Nothing has finished it\./, 'the run is still going as of now, and since when')
+  assert.match(body, /It is running the command `npm test -- --all`, started \d+ seconds? ago, and the command has not finished yet\./, 'the command line, its age, not finished')
+  assert.equal(w.native.filter(([m]) => m === 'turn/steer').length, 0, 'answered, so nothing is steered'); assert.equal(settled(w, 'req-in-1'), 'reply')
+  const rec = w.flowEntries().find(e => e.judgments?.some(j => j.q === 'beat_person_status'))
+  assert.deepEqual([rec.flow, rec.posted, rec.write], ['reply', 'model', 'passed'])
+})
+test('a false "it finished" while the command runs stays caught: not posted, the row says check_failed, the message goes to the run (safe default)', async t => {
+  const { w, d } = await scene(t, { fork: 'norollout', writer: writer(FALSE_REPLY), draft: aware })
+  await d.ownCommand('exec-1', 'npm test -- --all', 0)
+  const before = d.assistant().length
+  await send(w, d, STATUS, 1); await w.advance(6000)
+  assert.deepEqual(d.assistant().slice(before), [], 'a claim of an end the evidence does not hold is not posted')
+  assert.equal(w.native.filter(([m]) => m === 'turn/steer').length, 1, 'the run gets what the person wrote')
+  const rec = w.flowEntries().find(e => e.judgments?.some(j => j.q === 'beat_person_status'))
+  assert.deepEqual([rec.flow, rec.posted, rec.write], ['reply', 'none', 'check_failed'])
+})
+test('the record names the writer when it gave nothing (writer_empty)', async t => {
+  const { w, d } = await scene(t, { writer: writer(' ') })
+  await send(w, d, STATUS, 1); await w.advance(6000)
+  const rec = w.flowEntries().find(e => e.judgments?.some(j => j.q === 'beat_person_status'))
+  assert.deepEqual([rec.posted, rec.write], ['none', 'writer_empty'])
 })
