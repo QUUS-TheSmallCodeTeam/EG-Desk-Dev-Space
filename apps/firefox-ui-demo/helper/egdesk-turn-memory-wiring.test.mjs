@@ -44,8 +44,8 @@ const memoryConfig = (extra = {}) => ({ mode: () => 'advisory', wiki: wikiSource
 // the only per-run differences in turn/start params are generated ids
 const normalize = text => text.replace(/"(?:clientId|requestId|localMessageId|localRunId)":"[^"]*"/g, '"id":"x"')
 
-test('default off: without the flag, with mode off, or with the unimplemented "on", no memory call is made and the turn is unchanged', async () => {
-  for (const turnMemory of [undefined, memoryConfig({ mode: () => 'off' }), memoryConfig({ mode: () => 'on' })]) {
+test('default off: without the flag, with mode off, or with a value that is not a mode, no memory call is made and the turn is unchanged', async () => {
+  for (const turnMemory of [undefined, memoryConfig({ mode: () => 'off' }), memoryConfig({ mode: () => 'always' })]) {
     let calls = 0
     const r = await rig({ turnMemory, client: { model: 'syn', async decide() { calls++; return { answers: {} } } } })
     await r.send('PostgreSQL 마이그레이션 배포 끝났어', 'r1'); await r.done(1)

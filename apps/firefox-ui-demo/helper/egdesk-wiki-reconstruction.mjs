@@ -124,6 +124,13 @@ export function allowsPage(page, scope) {
     return Array.isArray(scope?.allowedScopes) && scope.allowedScopes.includes(page.scope)
   } catch { return false }
 }
+/** The promise's result, or a rejection with code 'timeout' after ms. The late promise's own outcome is ignored. */
+export function settleBy(promise, ms) {
+  let timer
+  const late = new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('deadline passed'), { code: 'timeout' })), Math.max(1, ms)) })
+  Promise.resolve(promise).catch(() => {})
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer))
+}
 export const stableAlias = index => `P${index + 1}`
 export function pageBlock(alias, page, chars, extra = '') {
   const text = page.body.length > chars ? `${page.body.slice(0, chars).trimEnd()} […]` : page.body
@@ -188,11 +195,14 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
   // Held pages are shown by header only: the judge knows what the model holds, the content is never re-sent.
   const heldMessage = isNext ? [{ role: 'user', content: `Held in the answering model's context (the start of each is shown; the rest is not repeated):\n${alreadyDelivered.length ? alreadyDelivered.map(p => `- ${p.title} | time=${p.time.slice} | status=${p.status}\n  ${compactText(p.body, 200)}`).join('\n') : '(nothing)'}` },
     ...(typeof live === 'string' && live.trim() ? [{ role: 'user', content: `Live conversation (recent turns, bounded):\n${live.slice(-3000)}` }] : [])] : []
-  const canCall = () => receipts.calls < budget.maxCalls && now() < deadline && !signal?.aborted
+  // Asked only when there is still work to do, so a deadline that cut work short is visible in the receipt (the result is then partial).
+  const canCall = () => { if (now() >= deadline) { receipts.deadlineHit = true; return false } return receipts.calls < budget.maxCalls && !signal?.aborted }
   const decide = async (questions, input) => {
     receipts.calls++
     const remaining = Number.isFinite(deadline) ? Math.max(1, Math.floor(deadline - now())) : budget.timeoutMs
-    const result = await client.decide({ input, questions, timeoutMs: Math.min(budget.timeoutMs, remaining), signal })
+    const call = client.decide({ input, questions, timeoutMs: Math.min(budget.timeoutMs, remaining), signal })
+    // With a deadline the loop does not depend on the client honouring its timeout: a request still pending at the deadline counts as timed out.
+    const result = Number.isFinite(deadline) ? await settleBy(call, remaining) : await call
     usage.inputTokens += result?.usage?.inputTokens ?? 0
     return result
   }
@@ -335,7 +345,8 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
   const parts = blocks.length ? [head, ...blocks.map(b => b.block), ...(pointers.length ? [pointers.join('\n')] : []), ...(linkLines.length ? [`[links among held pages]\n${linkLines.join('\n')}`] : [])] : []
   receipts.picks = order.map(p => ({ id: p.id, via: p.via, p: p.p, statusRead: p.statusRead ?? null }))
   const delivery = Object.fromEntries(blocks.map(b => [b.id, true]))
-  return { status: parts.length ? 'ready' : 'empty', ...(partial ? { partial: true, reason: failure } : {}), packet: parts.join('\n\n') || null,
+  if (receipts.deadlineHit) partial = true
+  return { status: parts.length ? 'ready' : 'empty', ...(partial ? { partial: true, reason: failure ?? 'deadline' } : {}), packet: parts.join('\n\n') || null,
     picks: order.map(p => ({ ...p })), receipts: { ...receipts, calls: receipts.calls }, calls: receipts.calls, usage,
     // The host commits this only after the turn really started with the packet; it is never applied here.
     nextDelivered: () => ({ usable: true, pages: nextPages }), delivered: delivery, elapsedMs: now() - started }

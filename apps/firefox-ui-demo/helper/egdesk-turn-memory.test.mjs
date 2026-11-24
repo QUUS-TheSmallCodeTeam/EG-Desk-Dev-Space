@@ -387,3 +387,52 @@ test('characterization with the REAL pg-mid scan answers (0.37 / 0.8 / 0.01): an
   assert.deepEqual(r.memory.picks.map(p => p.id), ['db/pg-followup'], 'the real answers delivered only the follow-up checklist')
   assert.deepEqual(r.memory.receipts.uncertain.map(u => u.id), ['db/pg-health'], 'the health-check page was undecided and went to a second look')
 })
+
+test('packetFirst (first turn): the packet does not wait for the recording triage; the write thunk waits for it and judges only when it says yes', async () => {
+  const judge = mockJudge(), order = []
+  const slowTriage = record => ({ async decide(req) {
+    const triage = req.questions.some(q => q.name === 'tn_record')
+    if (triage) { await new Promise(r => setTimeout(r, 700)); order.push('triage') } else order.push(req.questions.some(q => q.name.startsWith('tw_')) ? 'write' : 'fetch')
+    const r = await judge.decide(req)
+    if (triage) r.answers.tn_record = { type: 'predicate', probability: record }
+    return r } })
+  const run = async record => {
+    order.length = 0
+    const started = Date.now()
+    const r = await prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: slowTriage(record), scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD, ontologyWrite: true, packetFirst: true })
+    return { r, packetMs: Date.now() - started }
+  }
+  const yes = await run(0.97)
+  assert.ok(yes.packetMs < 600, `packet after ${yes.packetMs} ms, before the 700 ms triage`)
+  assert.ok(!order.includes('triage')); assert.equal(yes.r.triage, null); assert.ok(yes.r.packet.includes('PostgreSQL'))
+  const judged = await yes.r.judgeWrite()
+  assert.deepEqual(order.slice(-2), ['triage', 'write'])
+  assert.deepEqual([judged.proposal.op, judged.proposal.pageId, judged.receipt.triage.record.state], ['update_status', 'db/pg-plan', 'yes'])
+  const no = await run(0.02)
+  const skipped = await no.r.judgeWrite()
+  assert.deepEqual([skipped.proposal, order.includes('write')], [{ op: 'none', reason: 'not_worth_recording' }, false])
+  // without the option nothing changed: triage is in the result and the thunk exists only when it said yes
+  const plain = await prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: mockJudge(), scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD, ontologyWrite: true })
+  assert.equal(plain.triage.record.state, 'yes'); assert.equal(plain.triageLater, undefined)
+})
+
+test('deadlineMs: a triage or a loop round that has not answered by then is cut, whatever the client does with its own timeout; the result says so', async () => {
+  const judge = mockJudge()
+  const hangOn = pattern => ({ async decide(req) { if (req.questions.some(q => pattern.test(q.name))) await new Promise(r => setTimeout(r, 1500)); return judge.decide(req) } })
+  // mid-session: the triage never answers in time -> treated as undecided; no time is left for a fetch, so nothing is attached and nothing is skipped silently
+  let started = Date.now()
+  const lateTriage = await prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: hangOn(/^tn_/), scope: SCOPE, askedAt: ASKED, position: MID, threadKey: THREAD,
+    delivered: receiptsFor(buildWiki(SYNTHETIC_PAGES), PG_HELD), deadlineMs: 200 })
+  assert.ok(Date.now() - started < 900)
+  assert.deepEqual([lateTriage.triage.status, lateTriage.triage.need.state, lateTriage.memory.status, lateTriage.packet], ['fallback', 'unknown', 'empty', null])
+  assert.deepEqual([lateTriage.memory.partial, lateTriage.memory.reason], [true, 'deadline'])
+  // first turn: the scan answers, the link round does not -> the scan picks are kept, marked partial
+  started = Date.now()
+  const cut = await prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: hangOn(/^(st_|op_)/), scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD, deadlineMs: 300 })
+  assert.ok(Date.now() - started < 1000)
+  assert.deepEqual([cut.memory.status, cut.memory.partial, cut.memory.reason], ['ready', true, 'timeout'])
+  assert.ok(cut.memory.picks.some(p => p.id === 'db/pg-plan') && cut.memory.picks.every(p => p.statusRead === undefined))
+  // no deadline: nothing is cut and nothing is marked
+  const whole = await prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: mockJudge(), scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD })
+  assert.equal(whole.memory.partial, undefined); assert.equal(whole.memory.receipts.deadlineHit, undefined)
+})
