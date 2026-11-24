@@ -11,8 +11,9 @@ import { randomUUID } from 'node:crypto'
 // Assumptions that need the real app-server (the mock engine cannot confirm them): thread/fork may copy the parent's completed
 // turns (excludeTurns only trims the response); the fork keeps no local history when marked ephemeral; tool and approval requests
 // on the fork are declined here, so it cannot act.
-export function createInternalTurns({ idle = 120_000 } = {}) {
+export function createInternalTurns({ setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle) } = {}) {
   const live = new Map() // forkThreadId -> collector
+  const fail = (code, message) => Object.assign(new Error(message), { code })
   return {
     has: threadId => live.has(threadId),
     /** True when the message belonged to an internal turn (the caller must then not process it). */
@@ -24,11 +25,10 @@ export function createInternalTurns({ idle = 120_000 } = {}) {
     },
     /** True when a server request came from an internal thread; the caller answers it with a refusal. */
     declines(message) { return live.has(message?.params?.threadId) },
+    /** The deadline covers everything, including an engine that never answers the fork or the turn start (a hung engine). */
     async run({ engine, slot, parentThreadId, text, timeoutMs = 20000, signal = null }) {
-      if (!engine?.forkThread || !engine.startTurn) throw Object.assign(new Error('Engine cannot run an internal turn'), { code: 'INTERNAL_TURN_UNSUPPORTED' })
-      let forkId = null, timer = null
-      const fail = (code, message) => Object.assign(new Error(message), { code })
-      let settle = null
+      if (!engine?.forkThread || !engine.startTurn) throw fail('INTERNAL_TURN_UNSUPPORTED', 'Engine cannot run an internal turn')
+      let forkId = null, timer = null, over = false, settle = null
       const done = new Promise((resolve, reject) => { settle = { resolve, reject } })
       const parts = []
       const collector = {
@@ -40,20 +40,25 @@ export function createInternalTurns({ idle = 120_000 } = {}) {
           }
         },
       }
+      const release = id => { live.delete(id); try { void Promise.resolve(engine.releaseThread?.(id, slot)).catch(() => {}) } catch { /* best effort */ } }
       const stop = () => settle.reject(fail('INTERNAL_TURN_TIMEOUT', 'Internal turn timed out'))
-      timer = setTimeout(stop, Math.max(1, timeoutMs)); timer.unref?.()
+      timer = setTimer(stop, Math.max(1, timeoutMs)); timer?.unref?.()
       signal?.addEventListener?.('abort', stop, { once: true })
-      done.catch(() => {}) // a rejection before anyone awaits it is handled below
-      try {
+      done.catch(() => {})
+      const work = (async () => {
         const forked = await engine.forkThread({ threadId: parentThreadId, excludeTurns: true, ephemeral: true }, slot)
-        forkId = forked?.thread?.id
-        if (typeof forkId !== 'string' || !forkId || forkId === parentThreadId) throw fail('INTERNAL_TURN_FAILED', 'No fork id')
-        live.set(forkId, collector)
-        await engine.startTurn({ threadId: forkId, input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: `egdesk-internal:${randomUUID()}` }, slot)
-        return { text: await done }
-      } finally {
-        clearTimeout(timer)
-        if (forkId) { live.delete(forkId); try { void Promise.resolve(engine.releaseThread?.(forkId, slot)).catch(() => {}) } catch { /* best effort */ } }
+        const id = forked?.thread?.id
+        if (typeof id !== 'string' || !id || id === parentThreadId) throw fail('INTERNAL_TURN_FAILED', 'No fork id')
+        if (over) { release(id); return } // the deadline passed while the fork was pending: do not use it
+        forkId = id
+        live.set(id, collector)
+        await engine.startTurn({ threadId: id, input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: `egdesk-internal:${randomUUID()}` }, slot)
+      })()
+      work.then(() => {}, error => settle.reject(error))
+      try { return { text: await done } } finally {
+        over = true
+        clearTimer(timer)
+        if (forkId) release(forkId)
       }
     },
   }
