@@ -17,7 +17,7 @@ import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
 import { gateRuntimeToolResult, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
 import { homedir } from 'node:os'
 import { createInternalTurns } from './codex-internal-turn.mjs'
-import { FLOW_COPY, FLOW_LIMITS, attentionOf, audienceFacts, beatFlowFacts, cleanIntermediate, deriveFlowKind, enumerateOptions, flowPredicates, idleContext, idleFlowFacts, pointerPrompt, pointerRoute, runContext, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
+import { FLOW_COPY, FLOW_LIMITS, attentionOf, audienceFacts, beatFlowFacts, cleanIntermediate, deriveFlowKind, enumerateOptions, flowPredicates, idleFlowFacts, pointerDecision, pointerPredicates, pointerPrompt, pointerRoute, runContext, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
 import { BEAT_JUDGE_TIMEOUT_MS, BEAT_PREDICATE_YES, createBeatJudge } from './egdesk-heartbeat-judge.mjs'
 import { createHeartbeats } from './egdesk-heartbeat.mjs'
 import { feedBrowserTask } from './egdesk-heartbeat-providers.mjs'
@@ -5214,9 +5214,12 @@ export class CodexChatRuntime {
     subject.proposal = null
     if (proposal?.mode === 'run') return this.flowVerdict(proposal.run, proposal.flow, round, subject)
     if (proposal?.mode !== 'idle') return 'none'
-    const verdict = round.verdicts.find(v => v.name === 'pointer'), pending = subject.pendingPointer
+    const pending = subject.pendingPointer
     subject.pendingPointer = null
-    subject.derived = verdict?.accepted && verdict.value === 'yes' && pending ? 'pointer' : 'none'
+    const yes = new Set(round.verdicts.filter(v => v.accepted && v.value === 'yes').map(v => v.name))
+    const answered = round.verdicts.filter(v => !v.failed && !v.skipped).map(v => v.name)
+    subject.derived = pending && pointerDecision(pending.attention, yes, answered) ? 'pointer' : 'none'
+    if (pending && subject.derived === 'none') this.declinePointer(subject, pending.attention, answered)
     if (subject.derived !== 'pointer') return 'none'
     return this.trackFlowJob(this.postPointer(subject, pending.attention))
   }
@@ -5235,13 +5238,14 @@ export class CodexChatRuntime {
       const route = this.pointerRouteFor(subject, attention)
       // Nowhere to go now: kept for that person until a conversation of their own works again (holdAttention).
       if (!route.target && (route.reason === 'no_conversation' || route.reason === 'away') && !subject.pointed.has(attention.signature)) this.holdAttention(subject, attention)
-      if (route.target || !this.heldAttentionFor(subject)) return { attention, pointed: subject.pointed.has(attention.signature), pointers: subject.pointers, pointerTarget: route.target }
-    } else subject.pointed.clear() // the fact was withdrawn: a later one may be pointed to again
+      // A pointer being written for this fact counts as posted (no second writer turn for the same fact).
+      if (route.target || !this.heldAttentionFor(subject)) return { attention, pointed: subject.pointed.has(attention.signature) || subject.pointing === attention.signature, declined: subject.declined?.has(attention.signature) === true, pointers: subject.pointers, pointerTarget: route.target }
+    } else { subject.pointed.clear(); subject.declined?.clear() } // the fact was withdrawn: a later one may be pointed to again
     // Nothing of its own to point to: something held for the person of this conversation, if any. It is theirs alone, so it goes here.
     const held = this.heldAttentionFor(subject)
     if (!held) return { attention: null }
     return { attention: { provider: 'held', kind: held.kind, who: held.as, where: 'none', distance: null, signature: held.id, heldMs: Math.max(0, this.monotonicNow() - held.at) },
-      pointed: false, pointers: subject.pointers, pointerTarget: 'here' }
+      pointed: subject.pointing === held.id, declined: subject.declined?.has(held.id) === true, pointers: subject.pointers, pointerTarget: 'here' }
   }
 
   // ---- A pointer whose person has no conversation to hear it in ----
@@ -5295,12 +5299,51 @@ export class CodexChatRuntime {
     const facts = idleFlowFacts({ heartbeatFacts: beat.facts, audience: this.sessionAudience(subject).facts, pointer })
     const options = enumerateOptions(facts)
     if (!options.includes('pointer')) return null
-    // The judge reads the ended run's request and answer, as far as this run's models may receive them; without that, nothing is asked.
-    const egress = this.decisionEgressFor(run)
-    const context = idleContext({ heartbeatFacts: beat.facts, facts, userText: this.runUserText(run), answerText: this.runAnswerText(run), allows: kind => egress.allows(kind) })
-    if (!context) return null
+    // Code has decided that a pointer may be posted (pointerBlocked). The judge is asked only what code cannot know, each item quoted on its own.
+    const questions = pointerPredicates(this.pointerMaterial(subject, pointer.attention, pointer.pointerTarget))
+    if (!questions.length) { this.postCodePointer(subject, pointer.attention, beat); return null }
     subject.pendingPointer = { attention: pointer.attention }
-    return { context, questions: flowPredicates(['pointer']) }
+    return questions
+  }
+
+  // What the pointer questions quote: the announcement of the finished work (the posted answer of the run it came from) and the
+  // messages already posted to that person in the conversation the pointer would go to, since that work began. Each only when that
+  // run's own models may receive its text.
+  pointerMaterial(subject, attention, target) {
+    const sourceKey = attention.provider === 'held' ? this.heldAttention.find(row => row.id === attention.signature)?.sourceKey : subject.key
+    const finished = key => [...this.runs.values()].filter(run => run.clientThreadId === key && TERMINAL.has(run.status) && this.runAnswerText(run)).at(-1) ?? null
+    const source = sourceKey ? finished(sourceKey) : null
+    const readable = run => Boolean(run) && this.decisionEgressFor(run).allows('run_text')
+    const result = readable(source) ? this.runAnswerText(source) : null
+    const since = source ? Math.min(...source.messages.map(m => m.createdAt).filter(Number.isFinite)) : -Infinity
+    const into = target === 'here' || !target ? subject.key : target
+    const posted = [...this.runs.values()].filter(run => run.clientThreadId === into && readable(run))
+      .flatMap(run => run.messages.filter(m => m.role === 'assistant' && m.status === 'complete' && m.text && Number.isFinite(m.createdAt) && m.createdAt >= since))
+      .sort((a, b) => a.createdAt - b.createdAt).map(m => m.text)
+    // A new fact is a new topic for the judge's bounds (it may be asked at once).
+    subject.factTopics ??= new Map()
+    if (!subject.factTopics.has(attention.signature)) { subject.factTopics.set(attention.signature, `pointer_${subject.factTopics.size + 1}`); while (subject.factTopics.size > 16) subject.factTopics.delete(subject.factTopics.keys().next().value) }
+    return { kind: attention.kind, result, posted, topic: subject.factTopics.get(attention.signature) }
+  }
+
+  // The judge answered that no pointer is needed for this fact (a posted message already said where, or the work needs nothing from
+  // them): it is not asked about again until the provider withdraws the fact. A failed or skipped answer settles nothing.
+  declinePointer(subject, attention, answered) {
+    if (!answered.some(name => name === 'pointer' || /^told_\d$/.test(name))) return
+    subject.declined ??= new Set()
+    subject.declined.add(attention.signature)
+    while (subject.declined.size > 16) subject.declined.delete(subject.declined.values().next().value)
+  }
+
+  // Everything was decided by code (a decision or a question waiting for the person, nothing posted to them since): no request.
+  postCodePointer(subject, attention, beat) {
+    subject.derived = 'pointer'
+    try {
+      const f = beat.facts
+      this.decisionContext?.calibrationLog?.record({ feature: 'conversation_flow', mode: 'on', attached: true, candidates: 0, questions: 0, judgments: [], flow: 'pointer', posted: 'model',
+        beat: { n: f.beat, phase: f.phase, sinceUserMs: f.sinceUserMs, sincePostedMs: f.sincePostedMs, sinceEngineMs: f.sinceEngineMs, stepsDone: f.stepsDone, stepsRunning: f.stepsRunning, decisionMs: 0 } })
+    } catch { /* recording never affects the session */ }
+    return this.trackFlowJob(this.postPointer(subject, attention))
   }
 
   // What the person wrote for this run, and the answer the run posted (its own text, which its model received or wrote).
@@ -5321,9 +5364,16 @@ export class CodexChatRuntime {
     const context = runContext({ run, heartbeatFacts: beat.facts, flow, facts, userText: this.runUserText(run), allows: kind => egress.allows(kind), own: FLOW_OWN_KINDS })
     if (!context) return null
     const note = facts.question ? run.activities.find(a => a.id === facts.question.id) : null
-    const questions = flowPredicates(options, { note: note ? { text: note.detail?.text } : null })
-    if (!questions.length) return null
+    const pointer = options.includes('pointer') && subject ? this.pointerMaterial(subject, facts.attention, facts.pointerTarget) : null
+    const questions = flowPredicates(options, { note: note ? { text: note.detail?.text } : null, pointer })
+    if (!questions.length) {
+      // Only a pointer was possible and code decided it entirely.
+      if (pointer && subject) this.postCodePointer(subject, facts.attention, beat)
+      return null
+    }
     flow.pendingFacts = facts; flow.pendingOptions = options
+    // The pointer questions quote their own items (R4); with nothing else to ask, the run's material is not sent.
+    if (questions.every(q => q.name === 'pointer' || /^told_\d$/.test(q.name))) return questions
     return { context, questions }
   }
 
@@ -5331,8 +5381,12 @@ export class CodexChatRuntime {
   flowVerdict(run, flow, { verdicts }, subject = this.heartbeatSubjects.get(flow.heartbeat)) {
     const facts = flow.pendingFacts, options = flow.pendingOptions ?? []
     flow.pendingFacts = null; flow.pendingOptions = null
-    // The answers are yes/no; code picks the kind (a question first, then a pointer, a stall, a progress note).
-    const kind = facts ? deriveFlowKind(new Set(verdicts.filter(v => v.accepted && v.value === 'yes').map(v => v.name)), options) : 'none'
+    // The answers are yes/no; code picks the kind (a question first, then a pointer, then a progress note worded by code).
+    const yes = new Set(verdicts.filter(v => v.accepted && v.value === 'yes').map(v => v.name))
+    const answered = verdicts.filter(v => !v.failed && !v.skipped).map(v => v.name)
+    const pointer = Boolean(facts?.attention) && options.includes('pointer') && pointerDecision(facts.attention, yes, answered)
+    if (facts?.attention && options.includes('pointer') && !pointer && subject) this.declinePointer(subject, facts.attention, answered)
+    const kind = facts ? deriveFlowKind(yes, options, { pointer }) : 'none'
     if (subject) subject.derived = kind
     if (kind === 'none') return 'none'
     if (kind === 'pointer') return subject && facts.attention ? this.trackFlowJob(this.postPointer(subject, facts.attention)) : 'none'
@@ -5363,7 +5417,7 @@ export class CodexChatRuntime {
       log.record({ feature: 'conversation_flow', mode: 'on', attached: posted !== 'none', candidates: summary.questions.reduce((n, q) => n + q.options, 0), questions: summary.questions.length,
         judgments: summary.questions.filter(q => !q.verdict.failed && !q.verdict.skipped).map(q => (q.type === 'predicate'
           // A yes/no answer: its probability against the judge's bar; which predicate it was is a closed word.
-          ? { q: q.provider === 'message' ? `beat_${q.name}` : 'choice', provider: q.provider, would: q.verdict.value === 'yes' ? 'act' : 'none', p: q.verdict.confidence, threshold: BEAT_PREDICATE_YES }
+          ? { q: q.provider === 'message' ? `beat_${q.name.replace(/_\d$/, '')}` : 'choice', provider: q.provider, would: q.verdict.value === 'yes' ? 'act' : 'none', p: q.verdict.confidence, threshold: BEAT_PREDICATE_YES }
           : { q: 'choice', provider: q.provider, would: q.verdict.value === q.none ? 'none' : 'act',
             top: q.verdict.top, second: q.verdict.second, confidence: q.verdict.confidence, margin: q.verdict.margin, options: q.options, threshold: 0.75, minMargin: 0.2 })),
         ...(summary.failure ? { fallback: known.includes(summary.failure) ? summary.failure : 'unreachable' } : {}),
@@ -5432,6 +5486,12 @@ export class CodexChatRuntime {
   // A pointer message: something finished or pending needs a person, somewhere on the desk. One completed, checked message into the
   // conversation the audience rule allows (the task's own, or that person's own conversation). Nothing is moved: no card, no camera.
   async postPointer(subject, attention) {
+    if (subject.pointing === attention.signature) return 'none'
+    subject.pointing = attention.signature
+    try { return await this.writePointer(subject, attention) } finally { if (subject.pointing === attention.signature) subject.pointing = null }
+  }
+
+  async writePointer(subject, attention) {
     const routed = () => { const route = this.pointerRouteFor(subject, attention); return route.target === 'here' ? subject : route.target ? this.heartbeatSubjects.get(this.heartbeats.get(route.target)) ?? null : null }
     let target = routed(), carrier = this.messageCarrier(target)
     if (!carrier) return 'none'

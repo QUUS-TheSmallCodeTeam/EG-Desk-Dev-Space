@@ -5,91 +5,81 @@ import { readFileSync } from 'node:fs'
 import { DECISION_MODEL } from './egdesk-decision-client.mjs'
 import { FLOW_PREDICATES } from './egdesk-conversation-flow.mjs'
 import { BEAT_PREDICATE_YES } from './egdesk-heartbeat-judge.mjs'
-import { ANSWER, HEARTBEAT_PATTERNS, REQUEST, buildHeartbeatPlan, planFile } from './egdesk-heartbeat-real-plan.mjs'
+import { ANSWER, HEARTBEAT_NOT_SENT, HEARTBEAT_PATTERNS, HEARTBEAT_PLAN_TOKEN_CAP, HEARTBEAT_REMEASURE, NOTE, REQUEST, buildHeartbeatPlan, codeOnlyCases, planFile } from './egdesk-heartbeat-real-plan.mjs'
 
-// The real-measurement plan for the heartbeat's message judgment (second registration, after the first one measured "none" 15/15)
-// is built by the product code and sends nothing. These tests keep the registered plan (egdesk-heartbeat-real-plan.snapshot.json)
-// equal to what the product builds today: a change of wording, questions or material changes the bytes, and then the plan has to be
-// registered again (node scripts/egdesk-heartbeat-real-plan.mjs --snapshot) and a result measured on the old bytes no longer
-// describes the product.
+// The heartbeat's message judgment, third registration (heartbeat-c16, a re-measurement). Built by the product code; sends nothing.
+//  - egdesk-heartbeat-real-plan.snapshot.json is the registered c16 plan: the product must still build exactly those bytes.
+//  - egdesk-heartbeat-real-plan.c15.json is the c15 registration that was MEASURED (2026-11-24, 14/15). Every case not re-measured
+//    must still have exactly the bytes measured then, so its result still describes the product.
 const snapshot = JSON.parse(readFileSync(new URL('./egdesk-heartbeat-real-plan.snapshot.json', import.meta.url), 'utf8'))
+const measured = Object.fromEntries(JSON.parse(readFileSync(new URL('./egdesk-heartbeat-real-plan.c15.json', import.meta.url), 'utf8')).requests.map(r => [r.id, r.sha256]))
 const realFetch = globalThis.fetch
 let network = 0
 globalThis.fetch = async () => { network++; throw new Error('no network in a plan build') }
-const plan = await buildHeartbeatPlan()
+const plan = await buildHeartbeatPlan(), all = await buildHeartbeatPlan({ only: null }), code = await codeOnlyCases()
 globalThis.fetch = realFetch
-const body = id => JSON.parse(plan.requests.find(r => r.id === id).body)
+const body = id => JSON.parse(all.requests.find(r => r.id === id).body)
 const text = id => body(id).input.slice(1).map(row => row.content).join('\n')
 const asked = id => body(id).questions.map(q => q.name)
 
-test('the plan is exactly the registered one, in the runner\'s format, under the token bound, and building it sends nothing', () => {
+test('the plan is exactly the registered one, in the runner\'s format, at most 5,000 tokens, and building it sends nothing', () => {
   assert.equal(network, 0)
-  assert.deepEqual(planFile(plan), snapshot, 'the product no longer builds the registered bytes: register again with --snapshot and re-measure')
-  assert.deepEqual(Object.keys(snapshot), ['set', 'tokenCeiling', 'passRule', 'requests']); assert.equal(snapshot.set, 'heartbeat-c15')
+  assert.deepEqual(planFile(plan), snapshot, 'the product no longer builds the registered bytes: register again with --snapshot')
+  assert.equal(snapshot.set, 'heartbeat-c16'); assert.deepEqual(snapshot.requests.map(r => r.id), [...HEARTBEAT_REMEASURE])
   for (const r of snapshot.requests) {
-    assert.deepEqual(Object.keys(r), ['id', 'file', 'sha256', 'estInputTokens', 'expect']); assert.equal(r.file, `requests/${r.id}.json`); assert.match(r.sha256, /^[a-f0-9]{64}$/)
-    for (const e of r.expect) {
-      assert.ok(['hard', 'soft'].includes(e.severity) && e.kind === 'predicate' && /^message__(note|ask|stalled|pointer)$/.test(e.name) && typeof e.note === 'string' && e.note.length > 0)
-      assert.ok((e.min === undefined) !== (e.max === undefined), 'a yes (min) or a no (max)')
-    }
+    assert.deepEqual(Object.keys(r), ['id', 'file', 'sha256', 'estInputTokens', 'expect'])
+    for (const e of r.expect) { assert.ok(e.kind === 'predicate' && /^message__(note|ask|pointer|told_1)$/.test(e.name) && e.note.length > 0); assert.ok((e.min === undefined) !== (e.max === undefined)) }
   }
   const total = plan.requests.reduce((n, r) => n + r.estInputTokens, 0)
-  assert.equal(plan.requests.length, 15); assert.ok(total <= plan.tokenCeiling && plan.tokenCeiling < 12_000, `estimated ${total}, ceiling ${plan.tokenCeiling}`)
-  assert.deepEqual([plan.requests.filter(r => r.id.startsWith('need-')).length, plan.requests.filter(r => r.id.startsWith('pointer-')).length], [9, 6])
+  assert.ok(total <= plan.tokenCeiling && plan.tokenCeiling <= HEARTBEAT_PLAN_TOKEN_CAP, `estimated ${total}, ceiling ${plan.tokenCeiling}`)
 })
 
-test('every body is the product\'s wire body: the neutral rule, the session lines, the material in sentences with the person\'s own words quoted, and yes/no questions only', () => {
-  for (const r of plan.requests) {
+test('what is re-measured is exactly what changed: every other case still has the bytes measured in heartbeat-c15', () => {
+  const same = [], changed = [], fresh = []
+  for (const r of all.requests) (measured[r.id] === undefined ? fresh : measured[r.id] === r.sha256 ? same : changed).push(r.id)
+  assert.deepEqual(same, ['need-quick-3s', 'need-thinking-12s', 'need-objective-40s', 'need-missing-10s', 'need-just-posted-8s'])
+  assert.deepEqual(changed, ['need-silence-25s', 'need-reasoning-70s', 'pointer-owner-elsewhere', 'pointer-requester-present', 'pointer-already-told', 'pointer-new-run', 'pointer-held-3min'])
+  assert.deepEqual(fresh, ['need-thinking-30s', 'need-command-45s', 'ask-plain-note-10s', 'ask-no-question-mark-10s', 'pointer-nothing-to-look-at'])
+  // measured in c15 but no longer asked by the product: the 20 s ask (no-step floor), the 40 s command ask (moved to 45 s), and the
+  // two pointer cases code now decides (below)
+  assert.deepEqual(Object.keys(measured).filter(id => !all.requests.some(r => r.id === id)), ['need-thinking-20s', 'need-command-40s', 'pointer-nobody-waiting'])
+  for (const id of [...changed, ...fresh]) assert.ok(HEARTBEAT_REMEASURE.includes(id) || Object.hasOwn(HEARTBEAT_NOT_SENT, id), `${id} changed: sent, or a reason why not`)
+})
+
+test('what code decides costs no request: nobody at the desk (c15 measured 1.0 there) and something already in view', () => {
+  assert.deepEqual(code, [{ id: 'pointer-nobody-waiting', requests: 0, held: 1, posted: 1 }, { id: 'pointer-in-view', requests: 0, held: 0, posted: 1 }])
+})
+
+test('every body is the product\'s wire body: yes/no questions only, each pointer item quoted on its own, nothing of audience or geometry in a pointer request', () => {
+  for (const r of all.requests) {
     assert.equal(createHash('sha256').update(r.body).digest('hex'), r.sha256)
     const b = JSON.parse(r.body)
-    assert.deepEqual(Object.keys(b), ['model', 'input', 'questions', 'prompt_cache_key']); assert.deepEqual([b.model, b.prompt_cache_key], [DECISION_MODEL, 'heartbeat-beat'])
-    assert.equal(b.input[0].role, 'developer'); assert.doesNotMatch(b.input[0].content, /do-nothing|prefer/i)
-    assert.match(b.input[1].content, /^Session:\nseconds_since_the_person_wrote: \d+\n/)
-    assert.match(b.input[2].content, /^What the message questions are about:\nThe person's request:\n"""\n[^\n]+\n"""\n/, r.id)
-    assert.ok(Object.values(REQUEST).some(request => b.input[2].content.includes(request)), `${r.id}: the scripted request is quoted`)
-    // yes/no questions with the product's fixed instructions; no choice, no "none" option anywhere.
-    for (const q of b.questions) { assert.deepEqual(Object.keys(q), ['type', 'name', 'instructions']); assert.equal(q.type, 'predicate'); assert.equal(q.instructions, FLOW_PREDICATES[q.name.replace('message__', '')].instructions) }
-    for (const e of r.expect) assert.ok(b.questions.some(q => q.name === e.name), `${r.id}: ${e.name} is expected but not asked`)
-    // public synthetic content only: no member id, no key, no path, no page address
+    assert.deepEqual([b.model, b.prompt_cache_key], [DECISION_MODEL, 'heartbeat-beat'])
+    for (const q of b.questions) { assert.equal(q.type, 'predicate'); const name = q.name.replace('message__', '').replace(/_\d$/, ''); assert.equal(q.instructions, FLOW_PREDICATES[name].instructions) }
+    assert.ok(!b.questions.some(q => q.name === 'message__stalled'), 'the stall is code')
+    for (const e of r.expect) assert.ok(b.questions.some(q => q.name === e.name), `${r.id}: ${e.name}`)
     assert.doesNotMatch(r.body, /m-jin|egd-synthetic|\/work|https?:/)
   }
-})
-
-test('each pattern carries what it is named for, in the words the judge reads', () => {
-  const has = (id, ...needles) => { for (const needle of needles) assert.ok(text(id).includes(needle), `${id} lacks "${needle}"\n${text(id)}`) }
-  has('need-quick-3s', '- 3 seconds have passed since the person wrote.', 'The assistant is thinking (a reasoning step is open)'); assert.deepEqual(asked('need-quick-3s'), ['message__note'])
-  has('need-thinking-12s', '- 12 seconds have passed', 'The last sign of activity from the work was 1 second ago.')
-  has('need-thinking-20s', '- 20 seconds have passed', 'The assistant is thinking (a reasoning step is open)', 'Nothing has been said to the person since they wrote.')
-  has('need-command-40s', '- 40 seconds have passed', 'The assistant is running a command: `npm test -- --suite=payments` (running for about 18 seconds; its output shows it is still running).'); assert.deepEqual(asked('need-command-40s'), ['message__note'])
-  has('need-objective-40s', 'a task in the browser is still going', 'Tool steps finished so far: 3.', 'The task may take up to 21 more steps (an upper limit, not a plan).', 'The task\'s last step finished 3 seconds ago.')
-  assert.ok(!text('need-objective-40s').includes('The last sign of activity'), 'the engine\'s own silence is not reported while a step-by-step task runs')
-  has('need-missing-10s', 'Question message__ask:\nThe assistant\'s latest note to itself:\n"""\n배포 대상이 운영인지 스테이징인지 요청에 없다. 어느 환경에 배포해야 하나?\n"""', '(the last one: a command: `git status --short`)')
-  assert.deepEqual(asked('need-missing-10s'), ['message__ask', 'message__note'])
-  has('need-silence-25s', 'The last sign of activity from the work was 24 seconds ago.', '- No tool step is running.'); assert.deepEqual(asked('need-silence-25s'), ['message__stalled', 'message__note'])
-  has('need-reasoning-70s', '- 70 seconds have passed', 'The last sign of activity from the work was 60 seconds ago.', 'a reasoning step is open'); assert.deepEqual(asked('need-reasoning-70s'), ['message__stalled', 'message__note'])
-  has('need-just-posted-8s', 'Already said to the person while working:\n- 8 seconds ago (a note that this takes a while): "테스트를 돌리는 중이라 조금 걸립니다. 끝나면 바로 정리해 드릴게요."', 'Tool steps finished so far: 3')
-  has('pointer-owner-elsewhere', `The assistant's answer, already posted:\n"""\n${ANSWER.report}\n"""`, 'A finished result is waiting to the left of what they are looking at on the desk, some way off. It is for the owner of this task. They are not in this conversation: the note would go into their own conversation.',
-    'they are at the desk (last input 2 seconds ago)')
-  assert.ok(!text('pointer-owner-elsewhere').includes(REQUEST.budget) && !text('pointer-owner-elsewhere').includes(ANSWER.budget), 'nothing of the owner\'s own conversation')
-  has('pointer-requester-present', `"""\n${ANSWER.survey}\n"""`, 'waiting to the right of what they are looking at on the desk, close by. It is for the person who asked. They take part in this conversation.')
-  has('pointer-already-told', `"""\n${ANSWER.surveyTold}\n"""`)
-  has('pointer-nobody-waiting', 'Nobody is at the desk waiting for this.', 'far away')
-  has('pointer-new-run', REQUEST.summary, '- 5 seconds have passed', 'Separately, from earlier work in this conversation: a finished result is waiting below what they are looking at on the desk, close by.')
-  has('pointer-held-3min', REQUEST.budget, 'Separately: a finished result from another task has been waiting for this person for about 185 seconds, elsewhere on the desk.')
-  assert.ok(!text('pointer-held-3min').includes(REQUEST.report) && !/left/.test(text('pointer-held-3min')), 'a held fact carries neither the other task\'s text nor its old direction')
-  for (const r of plan.requests.filter(r => r.id.startsWith('pointer-'))) assert.deepEqual(asked(r.id), ['message__pointer'])
-})
-
-test('what is registered: speak (hard) in the seven situations whose hard expectation failed on the first measurement, stay silent (hard) at 3 s, just after speaking and with nobody there', () => {
-  const hard = kind => HEARTBEAT_PATTERNS.filter(p => p.expect.some(e => e.severity === 'hard' && e[kind] !== undefined)).map(p => p.id)
-  assert.deepEqual(hard('min'), ['need-command-40s', 'need-objective-40s', 'need-missing-10s', 'need-silence-25s', 'need-reasoning-70s', 'pointer-owner-elsewhere', 'pointer-requester-present'])
-  assert.deepEqual(hard('max'), ['need-quick-3s', 'need-just-posted-8s', 'pointer-nobody-waiting'])
-  for (const p of HEARTBEAT_PATTERNS) for (const e of p.expect) {
-    if (e.severity === 'hard' && e.min !== undefined) assert.equal(e.min, BEAT_PREDICATE_YES, 'an expected yes is registered at the product\'s own bar')
-    if (e.max !== undefined) assert.equal(e.max, 0.5)
+  for (const id of all.requests.map(r => r.id).filter(id => id.startsWith('pointer-'))) {
+    assert.doesNotMatch(text(id), /What the message questions are about|on the desk|at the desk|owner|left|right of|nobody/i, `${id}: pointer questions read only their quoted item`)
   }
-  const counterfactual = HEARTBEAT_PATTERNS.filter(p => p.path === 'counterfactual')
-  assert.deepEqual(counterfactual.map(p => p.id), ['need-quick-3s', 'need-thinking-12s', 'need-just-posted-8s', 'pointer-nobody-waiting'])
-  for (const p of counterfactual) { assert.ok(p.codeRule); assert.ok(p.expect.every(e => e.max !== undefined), 'where a code rule decides, the registered answer is no') }
-  for (const p of HEARTBEAT_PATTERNS) assert.ok(p.ifMissed.length > 20 && p.pattern.length > 20 && p.before.length > 3)
+  const quote = (label, value) => `${label}:\n"""\n${value}\n"""`
+  assert.deepEqual(asked('pointer-owner-elsewhere'), ['message__pointer']); assert.ok(text('pointer-owner-elsewhere').includes(quote('The message about the finished work', ANSWER.report)))
+  assert.deepEqual(asked('pointer-requester-present'), ['message__pointer', 'message__told_1']); assert.ok(text('pointer-requester-present').includes(quote('A message already posted to this person', ANSWER.survey)))
+  assert.ok(text('pointer-already-told').includes(quote('A message already posted to this person', ANSWER.surveyTold)))
+  assert.ok(text('pointer-nothing-to-look-at').includes(quote('The message about the finished work', ANSWER.tests)))
+  assert.ok(text('ask-no-question-mark-10s').includes(quote('The assistant\'s latest note to itself', NOTE.needs))); assert.ok(!NOTE.needs.includes('?') && !NOTE.plain.includes('?'))
+  assert.ok(text('ask-plain-note-10s').includes(quote('The assistant\'s latest note to itself', NOTE.plain)))
+  assert.ok(text('need-thinking-30s').includes('- 30 seconds have passed since the person wrote.')); assert.ok(text('need-thinking-30s').includes(REQUEST.plan))
+  assert.ok(text('need-command-45s').includes('running for about 23 seconds; its output shows it is still running'))
+  assert.deepEqual(asked('need-silence-25s'), ['message__note']); assert.deepEqual(asked('need-reasoning-70s'), ['message__note'])
+})
+
+test('what is registered: hard where the shipped design depends on the answer; the "?" pre-filter study is soft', () => {
+  const hard = HEARTBEAT_PATTERNS.filter(p => HEARTBEAT_REMEASURE.includes(p.id)).flatMap(p => p.expect.filter(e => e.severity === 'hard').map(e => `${p.id}:${e.name}:${e.min !== undefined ? 'yes' : 'no'}`))
+  assert.deepEqual(hard, ['need-thinking-30s:message__note:yes', 'need-command-45s:message__note:yes', 'need-silence-25s:message__note:yes', 'pointer-owner-elsewhere:message__pointer:yes',
+    'pointer-requester-present:message__pointer:yes', 'pointer-requester-present:message__told_1:no', 'pointer-already-told:message__told_1:yes'])
+  for (const id of ['ask-plain-note-10s', 'ask-no-question-mark-10s', 'pointer-nothing-to-look-at']) assert.ok(HEARTBEAT_PATTERNS.find(p => p.id === id).expect.every(e => e.severity === 'soft'))
+  for (const p of HEARTBEAT_PATTERNS) for (const e of p.expect) { if (e.min !== undefined) assert.equal(e.min, BEAT_PREDICATE_YES); if (e.max !== undefined) assert.equal(e.max, 0.5) }
+  for (const p of HEARTBEAT_PATTERNS) assert.ok(p.ifMissed.length > 20 && p.pattern.length > 20 && p.before.length > 2)
 })

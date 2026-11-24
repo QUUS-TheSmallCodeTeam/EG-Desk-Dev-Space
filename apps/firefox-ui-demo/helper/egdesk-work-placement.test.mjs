@@ -378,7 +378,7 @@ test('pointer round trip, post-run, on the real session heartbeat: attention sce
   // The canvas: owner at A, the member at B, the Agent's result card beside B; the finished task now needs the OWNER's approval.
   const d = desk(); const viewer = d.open(r(5300, 24, 720, 520)); d.tasks[0].state = 'waiting_owner'; d.tasks[0].ownerMustAct = true
   const canvas = d.snapshot(), att = WP.attentionRequest(d.scene(), { taskId: 'run-1', cardId: viewer })
-  const eventsBefore = w.events.length
+  const eventsBefore = w.events.length, beatsBefore = w.beatRequests.length
   assert.equal(placement.submit('dm-task', att.dto, hb).status, 'queued')
   await w.advance(HEARTBEAT_LIMITS.nudgeMs)
   assert.equal(client.calls.length, 1, 'judged within half a second of the submit, not at the 20 s idle grid')
@@ -390,15 +390,15 @@ test('pointer round trip, post-run, on the real session heartbeat: attention sce
   assert.deepEqual(acks, [{ key: 'dm-task', provider: 'work_placement' }]); assert.equal(placement.facts('dm-task').pointerPending, false, 'acknowledged: the fact is withdrawn')
   assert.equal(hb.facts().sources.work_placement.pointerPending, false)
   // what each model saw: closed labels only; the writer was told where in fixed words; no member id, title or coordinate anywhere
-  const judged = JSON.stringify(client.calls[0]), asked = w.beatRequests.at(-1).input.join('\n'), prompt = w.forkPrompts.at(-1)
-  // L3 c15: the message judgment reads the task's own request and answer (what that run's models have) and is told where in a sentence.
-  assert.match(asked, /Something that needs a decision before work can continue is waiting to the right of what they are looking at on the desk[^.]*\. It is for the owner of this task\./)
+  const judged = JSON.stringify(client.calls[0]), prompt = w.forkPrompts.at(-1)
+  // L3 c16: a decision the owner must make needs them by definition, the owner is present, it is not in view, and nothing was posted to
+  // them since the task began: every precondition is code, so the pointer is posted with no heartbeat request at all.
+  assert.equal(w.beatRequests.length, beatsBefore, 'no heartbeat request for this pointer')
   assert.match(prompt, /to the right of what they are looking at on the desk/)
-  for (const text of [judged, prompt]) assert.doesNotMatch(text, /m-jin|acct-|보고서|예산표|own-doc|5300|"x"/)
-  assert.doesNotMatch(asked, /m-jin|acct-|예산표|own-doc|5300|"x"/, 'no member id, card id or coordinate, and nothing of the owner\'s other conversation')
+  for (const text of [judged, prompt, ...w.beatRequests.map(r => r.input.join('\n'))]) assert.doesNotMatch(text, /m-jin|acct-|보고서|예산표|own-doc|5300|"x"/)
   // nothing moved: the canvas is as it was, and the only events are the message's own
   assert.equal(d.snapshot(), canvas); assert.deepEqual([...new Set(w.events.slice(eventsBefore).map(e => `${e.clientThreadId}:${e.event}`))], ['dm-owner:message.started', 'dm-owner:message.delta', 'dm-owner:message.completed'])
   // once: later beats judge nothing more and post nothing more
   await w.advance(60_000)
-  assert.deepEqual([client.calls.length, w.requests.flow, o.assistant().length, m.assistant().length], [1, 1, 2, 1])
+  assert.deepEqual([client.calls.length, w.requests.flow, o.assistant().length, m.assistant().length], [1, 0, 2, 1], 'L3 c16: the pointer took no heartbeat request (all its preconditions are code)')
 })

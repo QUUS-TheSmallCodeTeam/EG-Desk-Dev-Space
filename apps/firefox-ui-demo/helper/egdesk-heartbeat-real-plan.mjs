@@ -3,35 +3,40 @@ import { createDecisionClient, estimateInputTokens } from './egdesk-decision-cli
 import { createHeartbeat } from './egdesk-heartbeat.mjs'
 import { BEAT_PREDICATE_YES, createBeatJudge } from './egdesk-heartbeat-judge.mjs'
 import { browserTaskRow } from './egdesk-heartbeat-providers.mjs'
-import { attentionOf, audienceFacts, beatFlowFacts, flowPredicates, idleContext, idleFlowFacts, runContext } from './egdesk-conversation-flow.mjs'
+import { audienceFacts, beatFlowFacts, flowPredicates, runContext } from './egdesk-conversation-flow.mjs'
 import { world } from './egdesk-heartbeat-flow.fixture.mjs'
 
-// The real-measurement plan for the heartbeat's message judgment, second registration (set heartbeat-c15).
+// The real-measurement plan for the heartbeat's message judgment, third registration (set heartbeat-c16): a re-measurement of the
+// cases whose request changed after the second one, plus three new cases.
 //
-// The first plan (heartbeat-c14, 15 requests, sent 2026-11-24) asked ONE choice with a "none" option from numbers and closed labels
-// only. The real model answered "none" in all 15 patterns (7 hard expectations failed): with that request the heartbeat would never
-// speak. The product now shows the judge what the run's own models receive (the person's request, what the Agent is doing, what was
-// said) and asks yes/no questions; code derives the kind. This plan measures those new requests on the same 15 situations.
+//   heartbeat-c14 (sent 2026-11-24): one choice with "none", numbers and closed labels only -> "none" in 15/15.
+//   heartbeat-c15 (sent 2026-11-24): the run's own material and yes/no questions -> 14/15. The progress note and the early question
+//     discriminated (silent .16-.45, speak .82-.94, ask .94); the pointer question said yes whatever the audience (1.0 with nobody at
+//     the desk, .92 after the answer had said where the document is); the stall question followed the seconds (24 s .28, 60 s .78).
+//   c16 product changes: whether anyone is there, where it is and whether a pointer was posted are code (pointerBlocked); the pointer
+//     asks only "does the finished work need them" and "does this posted message already say where", each item quoted on its own;
+//     the stall is code (the note question decides whether to speak); a run without a tool step gets no note before 30 s while its
+//     engine is active.
 //
 // This file SENDS NOTHING. It scripts sessions in public synthetic Korean (engine events, provider rows, presence, a virtual clock),
 // lets the product build each request, and records the exact bytes the product's decision client would POST (its fetch is replaced
 // by a recorder that refuses). The generic runner (scripts/egdesk-decision-real-measure.mjs) consumes the plan written by
 // scripts/egdesk-heartbeat-real-plan.mjs: { set, tokenCeiling, passRule, requests: [{ id, file, sha256, estInputTokens, expect }] }.
 //
+// HEARTBEAT_PATTERNS is every case as the product builds it now; HEARTBEAT_REMEASURE names the ones sent in this set. The test
+// proves that every other case still has the exact bytes that were measured in heartbeat-c15 (so its result still holds).
+//
 // Two ways a request is built, named in each pattern's `path`:
 //   'runtime'         the whole product path: CodexChatRuntime + its session heartbeat + providers + egress gate + beat judge + client.
-//                     The request is the one the product really makes at that moment of that scripted session.
-//   'counterfactual'  the product never asks at this moment: a rule in code decides first (no message before 10 s, none for 30 s after
-//                     one, no pointer without a route). The same product functions build the material and the question
-//                     (heartbeat, beatFlowFacts / idleFlowFacts, runContext / idleContext, flowPredicates, beat judge, client), with
-//                     the code rule set aside, to learn whether the model would hold back by itself.
+//   'counterfactual'  the product never asks at this moment (a code rule decides first, or the "?" pre-filter of the early question
+//                     is set aside to learn whether removing it would be safe). The same product functions build the material and
+//                     the questions (heartbeat, beatFlowFacts, runContext, flowPredicates, beat judge, client).
 //
-// Expectations are registered here, before any real answer exists. A yes must reach the product's own bar (0.8: below it the product
-// stays silent). A no must be 0.5 or less: the product would stay silent up to 0.79, but an answer that leans yes where silence is
-// plainly right means the question does not discriminate. 'hard': the design depends on it. 'soft': a direction; a miss is a finding.
+// Expectations are registered here, before any real answer exists. A yes must reach the product's own bar (0.8). A no must be 0.5 or
+// less. 'hard': the shipped design depends on it. 'soft': a direction, or a study of a change not made yet; never fails the set.
 
-export const HEARTBEAT_PLAN_SET = 'heartbeat-c15'
-export const HEARTBEAT_PLAN_PASS_RULE = `Pass: every hard expectation holds. Speak cases: the named yes/no question must reach ${BEAT_PREDICATE_YES} (the product's bar for acting). Silent cases: it must be 0.5 or less. In need-silence-25s and need-reasoning-70s the product speaks when EITHER message__note or message__stalled is yes; the hard check is on message__note, so read message__stalled as well before calling those two a failure. Soft expectations are findings and never fail the set. No retries; one request per pattern.`
+export const HEARTBEAT_PLAN_SET = 'heartbeat-c16'
+export const HEARTBEAT_PLAN_PASS_RULE = `Pass: every hard expectation holds. Speak cases: the named yes/no question must reach ${BEAT_PREDICATE_YES} (the product's bar). Silent cases: 0.5 or less. The two ask-* cases are soft and decide one change only: the "?" pre-filter of the early question is removed only if BOTH land as registered (a plain note no, a request without "?" yes). No retries; one request per pattern.`
 const SYNTHETIC_KEY = 'egd-synthetic-not-a-key-heartbeat-plan'
 const sha = text => createHash('sha256').update(text).digest('hex')
 const yes = (name, severity, note) => ({ name: `message__${name}`, kind: 'predicate', min: BEAT_PREDICATE_YES, severity, note })
@@ -93,18 +98,19 @@ async function counterfactual({ atMs, proposal, script }) {
 const OWN = new Set(['workNote'])
 const tool = (id, line, status) => ({ id, kind: 'commandExecution', status, detail: { command: line } })
 // A working run's material and questions with the code rule set aside: `options` are the kinds whose questions are asked anyway.
-const runProposal = ({ userText, activities = [], sent = [], kinds = [], stepsAtLast = 0, presence = null, reasoningOpen = false, options }) => beat => {
+const runProposal = ({ userText, activities = [], sent = [], kinds = [], stepsAtLast = 0, presence = null, reasoningOpen = false, options, note = null }) => beat => {
   const run = { activities, pendingApprovals: [] }
   const flow = { sent, kinds: new Set(kinds), askedNotes: new Set(), stepsAtLast, question: null, audience: () => audienceFacts({ audience: null, presence }), reasoningOpen: () => reasoningOpen }
   const facts = beatFlowFacts({ heartbeatFacts: beat.facts, run, flow, own: OWN })
-  return { context: runContext({ run, heartbeatFacts: beat.facts, flow, facts, userText, own: OWN }), questions: flowPredicates(options) }
+  return { context: runContext({ run, heartbeatFacts: beat.facts, flow, facts, userText, own: OWN }), questions: flowPredicates(options, note ? { note: { text: note } } : {}) }
 }
 
+export const NOTE = Object.freeze({ plain: '결제 모듈 테스트 파일 목록을 확인했다. 이제 전체 테스트를 실행한다.', needs: '배포 대상 환경이 운영인지 스테이징인지 요청에 없다. 사용자가 정해 주어야 진행할 수 있다.' })
 export const REQUEST = Object.freeze({ tests: '결제 모듈 테스트를 돌리고 실패한 항목이 있으면 정리해 주세요.', logs: '지난주 배포 로그에서 오류가 난 구간을 찾아서 원인을 알려 주세요.', plan: '다음 분기 서버 증설 계획을 표로 정리해 주세요.',
   portal: '거래처 포털에서 10월 세금계산서 목록을 내려받아 주세요.', deploy: '주문 서비스를 배포해 주세요.', review: '어제 올라온 풀 리퀘스트를 검토하고 문제를 알려 주세요.',
   report: '3분기 매출 보고서 초안을 만들어 주세요.', survey: '경쟁 제품 세 곳의 요금제를 조사해서 문서로 정리해 주세요.', budget: '내년 예산표를 부서별로 정리해 주세요.', summary: '조사한 내용을 세 줄로 요약해 주세요.' })
 // The answers the scripted runs post (checked by the test to arrive in the request unchanged).
-export const ANSWER = Object.freeze({ report: '매출 보고서 초안을 만들었습니다. 요약과 표가 들어 있습니다.', survey: '세 곳의 요금제를 조사해서 문서로 정리했습니다.',
+export const ANSWER = Object.freeze({ tests: '결제 모듈 테스트가 모두 통과했습니다. 실패한 항목이 없어 따로 정리할 내용은 없습니다.', report: '매출 보고서 초안을 만들었습니다. 요약과 표가 들어 있습니다.', survey: '세 곳의 요금제를 조사해서 문서로 정리했습니다.',
   surveyTold: '세 곳의 요금제를 조사해서 문서로 정리했습니다. 문서는 지금 보고 계신 화면 바로 오른쪽에 열어 두었습니다.', budget: '부서별 예산표를 정리했습니다.' })
 
 /**
@@ -122,21 +128,22 @@ export const HEARTBEAT_PATTERNS = Object.freeze([
     expect: [no('note', 'soft', 'Reasoning is visibly going on and no step has run: the design waits until 20 s.')],
     ifMissed: 'Nothing in the product (the 20 s rule decides). It would say the model speaks sooner than the rule, which argues for keeping the rule.',
     build: () => counterfactual({ atMs: 12_000, proposal: runProposal({ userText: REQUEST.logs, reasoningOpen: true, options: ['explain_wait'] }), script: async ({ hb, at }) => { for (const ms of [3000, 6000, 9000, 11_000]) { await at(ms); hb.mark('engine', 'reasoning') } } }) },
-  { id: 'need-thinking-20s', path: 'runtime', pattern: '20 s, reasoning deltas keep arriving (1 s ago), no tool step: the first moment the product asks in a thinking-only run', before: 'none 0.94',
-    expect: [yes('note', 'soft', 'Twenty seconds without a word to the person is twice the attention limit the design rests on.')],
-    ifMissed: 'The first note in a thinking-only run then comes at the next ask (40 s). Either the question says more plainly that the person has seen nothing yet, or 40 s is accepted.',
+  { id: 'need-thinking-30s', path: 'runtime', pattern: '30 s, reasoning deltas keep arriving (1 s ago), no tool step: under the new floor the first moment the product asks in a thinking-only run',
+    before: 'heartbeat-c15 asked at 20 s on the same material: .62 (and .35 at 3 s, .45 at 12 s)',
+    expect: [yes('note', 'hard', 'Thirty seconds without a word: with the 20 s ask gone, this is the first chance to tell the person anything.')],
+    ifMissed: 'If between 0.5 and 0.8: the model still reads mostly the clock; the next ask comes at 50 s (backoff), so the floor alone does not fix the case and the note question needs to say how long the person has heard nothing. Below 0.5: the wording.',
     build: () => inRuntime({}, async (w, wires) => { const d = await w.dm('dm', REQUEST.plan); await w.advance(1000); await reasoning.start(d)
-      for (const ms of [4000, 7000, 10_000, 13_000, 16_000, 19_000]) { await w.advance(ms - w.at()); await reasoning.delta(d) }
-      await w.advance(20_000 - w.at()); return pick(wires, 20) }) },
-  { id: 'need-command-40s', path: 'runtime', pattern: '40 s, the test command has been running for 18 s (output 2 s ago), nothing said yet', before: 'none 0.94 (hard failure)',
+      for (const ms of [4000, 7000, 10_000, 13_000, 16_000, 19_000, 22_000, 25_000, 28_000, 29_000]) { await w.advance(ms - w.at()); await reasoning.delta(d) }
+      await w.advance(30_000 - w.at()); return pick(wires, 30) }) },
+  { id: 'need-command-45s', path: 'runtime', pattern: '45 s, the test command has been running for 23 s (output 2 s ago), nothing said yet; the product asked at 25 s (declined) and asks again now', before: 'heartbeat-c15 at 40 s on the same session (command 18 s): .82. With the no-step floor the first ask moved from 20 s to 25 s, so the second from 40 s to 45 s',
     expect: [yes('note', 'hard', 'The case the progress note exists for: a long command, and the person has heard nothing for 40 s.')],
     ifMissed: 'The material is then not the problem (the request and the command line are there): the wording of the question, or the bar (if the answer is between 0.5 and 0.8).',
     build: () => inRuntime({ flags: { held: true, flow: true, commands: true } }, async (w, wires) => { const d = await w.dm('dm', REQUEST.tests); await w.advance(1000); await reasoning.start(d)
       for (const ms of [5000, 9000, 13_000, 17_000, 19_000]) { await w.advance(ms - w.at()); await reasoning.delta(d) }
       await w.advance(20_500 - w.at()); await reasoning.end(d); await d.note('n1', '결제 모듈 테스트를 실행한다.')
       await w.advance(22_000 - w.at()); await command(d, 'cmd-1', 'npm test -- --suite=payments', 'inProgress')
-      for (const ms of [24_000, 31_000, 38_000]) { await w.advance(ms - w.at()); await d.raw('item/commandExecution/outputDelta', { itemId: 'cmd-1', delta: 'ok\n' }) }
-      await w.advance(40_000 - w.at()); return pick(wires, 40) }) },
+      for (const ms of [24_000, 31_000, 38_000, 43_000]) { await w.advance(ms - w.at()); await d.raw('item/commandExecution/outputDelta', { itemId: 'cmd-1', delta: 'ok\n' }) }
+      await w.advance(45_000 - w.at()); return pick(wires, 45) }) },
   { id: 'need-objective-40s', path: 'runtime', pattern: '40 s into a multi-step browser task: 3 steps done, up to 21 more, nothing said yet, the engine itself silent since the start', before: 'none 0.96 (hard failure)',
     expect: [yes('note', 'hard', 'A multi-step task that will clearly go on: the person should hear that it is under way.')],
     ifMissed: 'The wording of the task lines (steps done, upper limit of steps) or of the question; if between 0.5 and 0.8, the bar.',
@@ -149,15 +156,13 @@ export const HEARTBEAT_PATTERNS = Object.freeze([
     ifMissed: 'The wording of the ask question (the note is now quoted, so the material is there); if between 0.5 and 0.8, the bar.',
     build: () => inRuntime({}, async (w, wires) => { const d = await w.dm('dm', REQUEST.deploy); await w.advance(4000); await command(d, 's1', 'git status --short', 'inProgress'); await w.advance(2000); await command(d, 's1', 'git status --short', 'completed', { exitCode: 0 })
       await w.advance(1000); await d.note('n1', '배포 대상이 운영인지 스테이징인지 요청에 없다. 어느 환경에 배포해야 하나?'); await w.advance(3000); return pick(wires, 10) }) },
-  { id: 'need-silence-25s', path: 'runtime', pattern: '25 s, nothing at all from the engine for 24 s, no step running, no reasoning item open', before: 'none 0.79 (hard failure)',
-    expect: [yes('note', 'hard', 'True silence: the person must be told something. (The product also speaks when message__stalled is yes.)'),
-      { name: 'message__stalled', kind: 'predicate', min: 0.5, severity: 'soft', note: 'Nothing for 24 s after "checking the material" leans towards a stall.' }],
-    ifMissed: 'If both questions are no: the wording (silence is not read as something to tell the person). If only message__stalled is yes the product still speaks; the wording kind is then "stalled".',
+  { id: 'need-silence-25s', path: 'runtime', pattern: '25 s, nothing at all from the engine for 24 s, no step running, no reasoning item open; the stall question is gone, the note question alone decides', before: 'heartbeat-c15: note .88, stalled .28',
+    expect: [yes('note', 'hard', 'True silence: the person must be told something; code words it as the stall line.')],
+    ifMissed: 'The c15 answer (.88) was given next to a stall question; without it the note question carries the case alone. A miss: its wording.',
     build: () => inRuntime({}, async (w, wires) => { const d = await w.dm('dm', REQUEST.review); await w.advance(1000); await d.note('n1', '풀 리퀘스트의 변경 파일을 확인하는 중이다.'); await w.advance(24_000); return pick(wires, 25) }) },
-  { id: 'need-reasoning-70s', path: 'runtime', pattern: '70 s, a reasoning item has been open for 60 s and nothing has come since, nothing said yet', before: 'none 0.72 (hard failure)',
-    expect: [yes('note', 'hard', 'Seventy seconds without a word: the person must be told something. (The product also speaks when message__stalled is yes.)'),
-      no('stalled', 'soft', 'Reasoning is known to be in progress, so this is a long wait rather than a stall.')],
-    ifMissed: 'If both are no: the wording. If message__stalled is yes instead of message__note: the person is told the response is unusually slow, which is acceptable; the 60 s reasoning bound is then worth a second look.',
+  { id: 'need-reasoning-70s', path: 'runtime', pattern: '70 s, a reasoning item has been open for 60 s and nothing has come since, nothing said yet; the note question alone decides', before: 'heartbeat-c15: note .94, stalled .78',
+    expect: [yes('note', 'hard', 'Seventy seconds without a word: the person must be told something; code words it as the stall line.')],
+    ifMissed: 'As need-silence-25s: the note question carries the case alone; a miss means its wording.',
     build: () => inRuntime({}, async (w, wires) => { const d = await w.dm('dm', REQUEST.logs); await w.advance(1000); await d.note('n1', '배포 로그를 시간순으로 훑어본다.'); await w.advance(9000); await reasoning.start(d); await w.advance(60_000); return pick(wires, 70) }) },
   { id: 'need-just-posted-8s', path: 'counterfactual', pattern: '28 s, a progress note was posted 8 s ago, two more steps finished since',
     codeRule: 'no message within 30 s of the last one (FLOW_LIMITS.minGapMs): the product never asks here', before: 'none (soft, held)',
@@ -167,48 +172,59 @@ export const HEARTBEAT_PATTERNS = Object.freeze([
       proposal: (beat, hb) => runProposal({ userText: REQUEST.tests, stepsAtLast: 1, kinds: ['explain_wait'], options: ['milestone'],
         activities: [tool('s1', 'npm ci', 'completed'), tool('s2', 'npm run lint', 'completed'), tool('s3', 'npm run build', 'completed'), tool('s4', 'npm test -- --suite=payments', 'inProgress')],
         sent: [{ kind: 'explain_wait', text: '테스트를 돌리는 중이라 조금 걸립니다. 끝나면 바로 정리해 드릴게요.', at: hb.internalMs() - 8000 }] })(beat) }) },
+  { id: 'ask-plain-note-10s', path: 'counterfactual', pattern: '10 s, one step done; the Agent\'s latest note is a plain plan step (no question, nothing needed from the person), quoted to the ask question as it would be without the "?" pre-filter',
+    codeRule: 'the product asks the early question only about a note that ends in "?"; this case sets that pre-filter aside', before: 'new (the only real ask answer so far: .94 on a note that ended in "?")',
+    expect: [no('ask', 'soft', 'A plain plan step needs nothing from the person: removing the pre-filter is safe only if this stays no.')],
+    ifMissed: 'Keep the "?" pre-filter: without it every note would risk an early question.',
+    build: () => counterfactual({ atMs: 10_000, script: async ({ hb, at }) => { hb.setSource(() => ({ stepsDone: 1, stepsRunning: 0 })); await at(6000); hb.mark('engine', 'tool'); await at(7000); hb.mark('engine', 'output') },
+      proposal: runProposal({ userText: REQUEST.tests, options: ['ask_missing', 'explain_wait'], note: NOTE.plain, activities: [tool('s1', 'ls test', 'completed'), { id: 'n1', kind: 'workNote', status: 'completed', detail: { text: NOTE.plain } }] }) }) },
+  { id: 'ask-no-question-mark-10s', path: 'counterfactual', pattern: '10 s, one step done; the Agent\'s latest note says it cannot go on without the person choosing the environment, but does not end in "?"',
+    codeRule: 'the product asks the early question only about a note that ends in "?"; this case sets that pre-filter aside', before: 'new',
+    expect: [yes('ask', 'soft', 'The information only the person has is named plainly: removing the pre-filter is worth it only if this is a yes.')],
+    ifMissed: 'Keep the "?" pre-filter: without a yes here, removing it costs requests and gains nothing.',
+    build: () => counterfactual({ atMs: 10_000, script: async ({ hb, at }) => { hb.setSource(() => ({ stepsDone: 1, stepsRunning: 0 })); await at(6000); hb.mark('engine', 'tool'); await at(7000); hb.mark('engine', 'output') },
+      proposal: runProposal({ userText: REQUEST.deploy, options: ['ask_missing', 'explain_wait'], note: NOTE.needs, activities: [tool('s1', 'git status --short', 'completed'), { id: 'n1', kind: 'workNote', status: 'completed', detail: { text: NOTE.needs } }] }) }) },
 
-  { id: 'pointer-owner-elsewhere', path: 'runtime', pattern: 'a member\'s task has ended; its result waits for the owner, some way to the left; the owner is at the desk and has a conversation of their own (the note would go there)', before: 'none 0.90, pointer 0.05 (hard failure)',
-    expect: [yes('pointer', 'hard', 'The pointer exists for this: nothing is moved, so the note is the only way the owner learns where the result is.')],
-    ifMissed: 'The wording of the pointer question or of the "where" sentence; if between 0.5 and 0.8, the bar.',
+  { id: 'pointer-owner-elsewhere', path: 'runtime', pattern: 'a member\'s task has ended; its result waits for the owner, who is at the desk with a conversation of their own; nothing was posted to the owner since the task began, so only the work question is asked', before: 'heartbeat-c15: pointer 1.0',
+    expect: [yes('pointer', 'hard', 'A report draft made for the owner: they need to look at it.')],
+    ifMissed: 'The wording of the work question (it now sees only the announcement); if between 0.5 and 0.8, the bar.',
     build: () => inRuntime({ policy: quiet, audience: audienceOf, presence: { snapshot: () => [SELF, { member: 'm-jin', active: false, lastInputAgeMs: 400_000 }] } }, async (w, wires) => {
       const o = await w.dm('dm-owner', REQUEST.budget); await w.advance(3000); await o.final(ANSWER.budget)
       const m = await w.dm('dm-task', REQUEST.report); await w.advance(4000); await m.final(ANSWER.report)
       await w.advance(2000); placement(m.hb).pointer = { pointerWhere: 'left', pointerDistance: 'far', pointerFor: 'owner', pointerNeeds: 'review' }
       m.hb.nudge(); await w.advance(500); return pick(wires, 7) }) },
-  { id: 'pointer-requester-present', path: 'runtime', pattern: 'the run has ended; its result waits for the requester, close by to the right, outside their view; the requester is at the desk in this conversation; the answer did not say where it is', before: 'none 0.92 (hard failure)',
-    expect: [yes('pointer', 'hard', 'The requester is waiting right here, the answer did not say where the result is, and nothing was moved into their view.')],
-    ifMissed: 'The wording of the pointer question (close by may read as "they will see it anyway"); if between 0.5 and 0.8, the bar.',
+  { id: 'pointer-requester-present', path: 'runtime', pattern: 'the run has ended; its result waits for the requester outside their view; the posted answer does not say where it is', before: 'heartbeat-c15: pointer 1.0',
+    expect: [yes('pointer', 'hard', 'A compiled document the person asked for: they need to look at it.'), no('told_1', 'hard', 'The answer says what was done, not where the document is.')],
+    ifMissed: 'pointer: the work question wording. told_1 above 0.5: the told question reads "I made a document" as a location; its wording.',
     build: () => inRuntime({ policy: quiet, presence: { snapshot: () => [SELF] } }, async (w, wires) => {
       const d = await w.dm('dm', REQUEST.survey); await w.advance(4000); await d.final(ANSWER.survey)
       await w.advance(6000); placement(d.hb).pointer = { pointerWhere: 'right', pointerDistance: 'near', pointerFor: 'requester', pointerNeeds: 'review' }
       d.hb.nudge(); await w.advance(500); return pick(wires, 11) }) },
-  { id: 'pointer-already-told', path: 'runtime', pattern: 'as above, but the answer already told the person that the document is to the right of their screen', before: 'new pattern (the former pointer-in-view is now a code rule: something in view is never asked about)',
-    expect: [no('pointer', 'soft', 'They were just told where it is: a second note adds nothing.')],
-    ifMissed: 'The wording of the pointer question ("given what was already said"), or the product should drop a pointer when its own answer names the place (a code rule is not possible there, so the judge has to carry it).',
+  { id: 'pointer-already-told', path: 'runtime', pattern: 'as above, but the posted answer says the document is open just to the right of the screen they are looking at', before: 'heartbeat-c15: pointer .92 (soft miss: they had been told)',
+    expect: [yes('told_1', 'hard', 'The answer names the place: code then posts no pointer. Code cannot read that sentence; this question carries the case.')],
+    ifMissed: 'The told question wording; until it holds, a second note about the same place can follow the answer.',
     build: () => inRuntime({ policy: quiet, presence: { snapshot: () => [SELF] } }, async (w, wires) => {
       const d = await w.dm('dm', REQUEST.survey); await w.advance(4000); await d.final(ANSWER.surveyTold)
       await w.advance(6000); placement(d.hb).pointer = { pointerWhere: 'right', pointerDistance: 'near', pointerFor: 'requester', pointerNeeds: 'review' }
       d.hb.nudge(); await w.advance(500); return pick(wires, 11) }) },
-  { id: 'pointer-nobody-waiting', path: 'counterfactual', pattern: 'the run has ended; a result waits for the owner, far to the right; nobody is at the desk',
-    codeRule: 'no route for a person who is away (pointerRoute): the product never asks here, it holds the fact for later', before: 'none (soft, held)',
-    expect: [no('pointer', 'hard', 'Nobody is there to read it.')],
-    ifMissed: 'Nothing in the product (the route rule decides). It would say presence must stay a code rule; the question could also name the reader\'s absence more plainly.',
-    build: () => counterfactual({ atMs: 27_000, script: async ({ hb, at }) => { await at(6000); hb.settle(); hb.register('work_placement', () => ({ placementsPending: 0, placementsDecided: 1, pointerPending: true, pointerWhere: 'right', pointerDistance: 'very_far', pointerFor: 'owner', pointerNeeds: 'review' })) },
-      proposal: beat => { const facts = idleFlowFacts({ heartbeatFacts: beat.facts, audience: audienceFacts({ audience: null, presence: [{ member: 'self', self: true, active: false, lastInputAgeMs: 900_000 }] }),
-        pointer: { attention: attentionOf(beat.facts), pointed: false, pointers: 0, pointerTarget: 'here' } })
-        return { context: idleContext({ heartbeatFacts: beat.facts, facts, userText: REQUEST.report, answerText: ANSWER.report }), questions: flowPredicates(['pointer']) } } }) },
-  { id: 'pointer-new-run', path: 'runtime', pattern: 'a result of the previous run waits for the owner below, close by; the owner has just started a new run in the same conversation (5 s in)', before: 'none 0.98 (soft)',
-    expect: [yes('pointer', 'soft', 'They are here and writing; telling them now costs one line.')],
-    ifMissed: 'Nothing breaks: the fact stays pending and is asked again at later beats and after the run. If the model consistently waits, the pointer could be offered only once the run has gone on for a while.',
+  { id: 'pointer-nothing-to-look-at', path: 'runtime', pattern: 'the run has ended; the test report waits for the requester outside their view; the answer already says every test passed and there is nothing to follow up', before: 'new',
+    expect: [no('pointer', 'soft', 'The message already gives them all they need; pointing to the report adds nothing.'), no('told_1', 'soft', 'The answer does not say where the report is.')],
+    ifMissed: 'pointer yes: the work question cannot tell "done, nothing to see" from "done, go and look"; the pointer then always goes out for a result (harmless, one line).',
+    build: () => inRuntime({ policy: quiet, presence: { snapshot: () => [SELF] } }, async (w, wires) => {
+      const d = await w.dm('dm', REQUEST.tests); await w.advance(4000); await d.final(ANSWER.tests)
+      await w.advance(6000); placement(d.hb).pointer = { pointerWhere: 'right', pointerDistance: 'near', pointerFor: 'requester', pointerNeeds: 'review' }
+      d.hb.nudge(); await w.advance(500); return pick(wires, 11) }) },
+  { id: 'pointer-new-run', path: 'runtime', pattern: 'a result of the previous run waits for the owner; the owner has just started a new run in the same conversation (5 s in); the previous answer did not say where', before: 'heartbeat-c15: pointer .95',
+    expect: [yes('pointer', 'soft', 'The survey document they asked for: they need to look at it.'), no('told_1', 'soft', 'The previous answer does not say where it is.')],
+    ifMissed: 'Nothing breaks: the fact stays pending and is asked again at later beats and after the run.',
     build: () => inRuntime({ policy: quiet, presence: { snapshot: () => [SELF] } }, async (w, wires) => {
       const first = await w.dm('dm', REQUEST.survey); await w.advance(4000); await first.final(ANSWER.survey)
       placement(first.hb).pointer = { pointerWhere: 'below', pointerDistance: 'near', pointerFor: 'owner', pointerNeeds: 'review' }
       await w.advance(2000); await w.dm('dm', REQUEST.summary, { requestId: 'req-2', conversationId: first.r.conversationId })
       await w.advance(5000); return pick(wires, 5) }) },
-  { id: 'pointer-held-3min', path: 'runtime', pattern: 'a result has waited 3 minutes for the owner, who had no conversation open; they have just started a run in their own conversation (5 s in); the direction is no longer known', before: 'none 0.96 (soft)',
-    expect: [yes('pointer', 'soft', 'It is the first chance to tell them, and three minutes is recent.')],
-    ifMissed: 'The fallback then rarely delivers: either the sentence says that this is the first chance to tell the person, or the held fact is offered after the run instead of during it.',
+  { id: 'pointer-held-3min', path: 'runtime', pattern: 'a result has waited 3 minutes for the owner, who had no conversation open; they have just started a run in their own conversation (5 s in); only the work question is asked', before: 'heartbeat-c15: pointer .95',
+    expect: [yes('pointer', 'soft', 'A report draft made for the owner: they need to look at it.')],
+    ifMissed: 'The held fallback then rarely delivers; the work question wording.',
     build: () => inRuntime({ policy: quiet, audience: audienceOf, presence: { snapshot: () => [SELF] } }, async (w, wires) => {
       const m = await w.dm('dm-task', REQUEST.report); await w.advance(4000); await m.final(ANSWER.report)
       placement(m.hb).pointer = { pointerWhere: 'left', pointerDistance: 'far', pointerFor: 'owner', pointerNeeds: 'review' }
@@ -216,8 +232,39 @@ export const HEARTBEAT_PATTERNS = Object.freeze([
       await w.dm('dm-owner', REQUEST.budget); await w.advance(5000); return pick(wires, 5) }) },
 ])
 
+/**
+ * The cases sent in this set (estimated under 5,000 input tokens): the new or changed cases a design decision rests on.
+ * Changed but not sent, with the reason (HEARTBEAT_NOT_SENT): their question and quoted item are the same as a sent case.
+ */
+export const HEARTBEAT_REMEASURE = Object.freeze(['need-thinking-30s', 'need-command-45s', 'need-silence-25s', 'ask-plain-note-10s', 'ask-no-question-mark-10s',
+  'pointer-owner-elsewhere', 'pointer-requester-present', 'pointer-already-told', 'pointer-nothing-to-look-at'])
+export const HEARTBEAT_NOT_SENT = Object.freeze({
+  'need-reasoning-70s': 'the c15 body (note .94) minus the stall question; need-silence-25s measures the note question alone in a silence',
+  'pointer-new-run': 'the same two questions on the same quoted message as pointer-requester-present (only the session lines differ)',
+  'pointer-held-3min': 'the same question on the same quoted message as pointer-owner-elsewhere (only the session lines differ)',
+})
+// The runner stops when the provider's reported input tokens pass the ceiling: a quarter over the estimate, never over 5,000.
+export const HEARTBEAT_PLAN_TOKEN_CAP = 5000
+
+/**
+ * Cases code decides without any request (R3), run through the product. Returns [{ id, requests, held, posted }].
+ *   pointer-nobody-waiting: the result waits for the owner, who is away -> no route, the fact is held, no request (c15 measured 1.0 here).
+ *   pointer-in-view: the result is already inside what the requester is looking at -> no option, no request.
+ */
+export async function codeOnlyCases() {
+  const nobody = await inRuntime({ policy: quiet, presence: { snapshot: () => [{ member: 'self', self: true, active: false, lastInputAgeMs: 900_000 }] } }, async (w, wires) => {
+    const d = await w.dm('dm', REQUEST.report); await w.advance(4000); await d.final(ANSWER.report)
+    placement(d.hb).pointer = { pointerWhere: 'right', pointerDistance: 'very_far', pointerFor: 'owner', pointerNeeds: 'review' }
+    d.hb.nudge(); await w.advance(60_000); return { id: 'pointer-nobody-waiting', requests: wires.length, held: w.chat.heldAttention.length, posted: d.assistant().length } })
+  const inView = await inRuntime({ policy: quiet, presence: { snapshot: () => [SELF] } }, async (w, wires) => {
+    const d = await w.dm('dm', REQUEST.survey); await w.advance(4000); await d.final(ANSWER.survey)
+    placement(d.hb).pointer = { pointerWhere: 'none', pointerDistance: 'in_view', pointerFor: 'requester', pointerNeeds: 'review' }
+    d.hb.nudge(); await w.advance(60_000); return { id: 'pointer-in-view', requests: wires.length, held: w.chat.heldAttention.length, posted: d.assistant().length } })
+  return [nobody, inView]
+}
+
 /** Builds every request offline. Returns { set, tokenCeiling, passRule, requests: [{ id, file, sha256, estInputTokens, expect, body, bytes, path, pattern, codeRule?, before, ifMissed }] }. */
-export async function buildHeartbeatPlan({ only = null } = {}) {
+export async function buildHeartbeatPlan({ only = HEARTBEAT_REMEASURE } = {}) {
   const requests = []
   for (const p of HEARTBEAT_PATTERNS) {
     if (only && !only.includes(p.id)) continue
@@ -227,7 +274,7 @@ export async function buildHeartbeatPlan({ only = null } = {}) {
   }
   const total = requests.reduce((n, r) => n + r.estInputTokens, 0)
   // The estimate leans high (utf8 bytes / 3; the first plan measured 5,600 real tokens against 7,373 estimated); a quarter on top is the stop line.
-  return { set: HEARTBEAT_PLAN_SET, tokenCeiling: Math.ceil(total * 1.25), passRule: HEARTBEAT_PLAN_PASS_RULE, requests }
+  return { set: HEARTBEAT_PLAN_SET, tokenCeiling: only === HEARTBEAT_REMEASURE ? Math.min(Math.ceil(total * 1.25), HEARTBEAT_PLAN_TOKEN_CAP) : Math.ceil(total * 1.25), passRule: HEARTBEAT_PLAN_PASS_RULE, requests }
 }
 
 /** The plan file, exactly in the runner's format (no other keys). */

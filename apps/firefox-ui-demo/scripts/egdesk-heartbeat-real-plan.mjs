@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { HEARTBEAT_PATTERNS, buildHeartbeatPlan, planFile } from '../helper/egdesk-heartbeat-real-plan.mjs'
+import { HEARTBEAT_NOT_SENT, HEARTBEAT_PATTERNS, buildHeartbeatPlan, codeOnlyCases, planFile } from '../helper/egdesk-heartbeat-real-plan.mjs'
 
 // Writes the real-measurement plan for the heartbeat judgments. It SENDS NOTHING and reads no key: the request bodies are built by
 // the product code from scripted fact patterns (helper/egdesk-heartbeat-real-plan.mjs) and saved for the generic runner
@@ -26,7 +26,8 @@ if (out) {
   mkdirSync(path.join(out, 'requests'), { recursive: true })
   for (const r of plan.requests) writeFileSync(path.join(out, r.file), r.body) // exactly the bytes the product would POST; sha256 is of this file
   writeFileSync(path.join(out, 'plan.json'), text)
-  writeFileSync(path.join(out, 'preregistration.json'), `${JSON.stringify(plan.requests.map(r => ({ id: r.id, path: r.path, pattern: r.pattern, ...(r.codeRule ? { codeRule: r.codeRule } : {}), before: r.before, expect: r.expect, ifMissed: r.ifMissed })), null, 1)}\n`)
+  writeFileSync(path.join(out, 'preregistration.json'), `${JSON.stringify({ sent: plan.requests.map(r => ({ id: r.id, path: r.path, pattern: r.pattern, ...(r.codeRule ? { codeRule: r.codeRule } : {}), before: r.before, expect: r.expect, ifMissed: r.ifMissed })),
+    changedNotSent: HEARTBEAT_NOT_SENT, decidedByCode: await codeOnlyCases() }, null, 1)}\n`)
   console.log(`wrote ${plan.requests.length} requests, plan.json and preregistration.json to ${out}`)
 }
 const check = value('--check')
