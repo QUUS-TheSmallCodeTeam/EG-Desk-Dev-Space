@@ -25,11 +25,14 @@ export const MAX_BYTES = 192 * 1024
 export const RETENTION_DAYS = 30
 const MAX_JUDGMENTS = 64
 
-const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check', 'turn_memory', 'conversation_flow', 'working_memory'])
+// work_placement: L1 cycle 12 (placement judgments had been recorded as board_arrangement, finding A4).
+const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check', 'turn_memory', 'conversation_flow', 'working_memory', 'work_placement'])
 const MODES = new Set(['advisory', 'on'])
 const QUESTIONS = new Set(['answer_type', 'time_intent', 'relevance', 'speech_axis', 'speech_predicate', 'recall', 'topic_route', 'choice', 'next_step', 'page_state', 'goal_met', 'terminal_state', 'terminal_risk', 'log_block', 'claim_support', 'claim_present', 'term_internal', 'triage_courtesy', 'triage_need', 'triage_recall', 'triage_record', 'write_target', 'wm_block', 'wm_role',
   // the heartbeat's yes/no message questions (egdesk-conversation-flow.mjs FLOW_PREDICATES)
-  'beat_note', 'beat_ask', 'beat_stalled', 'beat_pointer'])
+  'beat_note', 'beat_ask', 'beat_stalled', 'beat_pointer',
+  // work placement's yes/no questions (egdesk-work-placement.mjs), and the Board reply's "still in effect today?" per excerpt (egdesk-board-agent-context.mjs)
+  'same_matter', 'owner_action', 'in_effect'])
 const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed', 'none', 'act', 'hold', 'fetch'])
 // Turn memory (advisory): where in the session the turn was, what the fetch did, and how long each stage took.
 // Draft check (advisory): what the check would have done to the posted answer, and what it would fall back to without a revision.

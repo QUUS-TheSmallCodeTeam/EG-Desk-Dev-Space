@@ -9382,17 +9382,21 @@
     return state.workPresence ||= WorkPlacement.createSingleUserPresence({ lastInputAt: () => workInputAt, focusCard: () => state.activeEntityId || null,
       viewport: () => { const v = safeViewportWorldRect(); return { x: v.left, y: v.top, width: v.right - v.left, height: v.bottom - v.top }; } });
   }
-  // Advisory only: where this surface WOULD go against where it lands today, in closed words (kept in this window's memory), and the same closed request to the
-  // bridge for the conversation's heartbeat. The first line is the whole default path: with the flag unset nothing below it runs. Nothing here moves anything.
+  // Where this surface WOULD go by the code's rule against where it lands today, in closed words (kept in this window's memory), and the request to the
+  // bridge for the conversation's heartbeat. The first line is the whole default path: unless the pref is "advisory" or "on" nothing below it runs.
+  // Nothing here moves anything, in either mode. A published result card's title and opening text go with the request only as a nearby card the
+  // bridge may ask "is this work about the same matter?" about (maySend: the same rule as the briefing host's result cards); memos and other cards never.
   function noteWorkSurfacePlacement(kind, placement, work) {
     if (WorkPlacement.workPlacementMode(readSurfacePref(WorkPlacement.WORK_PLACEMENT_PREF)) === 'off') return;
     try {
       const cards = [...document.querySelectorAll('.egd-canvas-card')].filter(card => card.isConnected && card.id).map(card => ({ id: card.id, rect: persistentEntityGeometry(card), kind: cardKindForPersistence(card),
-        creator: card._resultRecord?.provenance?.creator ?? (card.dataset.jointManaged ? 'shared' : null), taskId: card._resultRecord?.provenance?.runId ?? null }));
+        creator: card._resultRecord?.provenance?.creator ?? (card.dataset.jointManaged ? 'shared' : null), taskId: card._resultRecord?.provenance?.runId ?? null,
+        ...(card._resultRecord?.title ? { maySend: true, label: card._resultRecord.title, excerpt: card._resultRecord.text || '' } : {}) }));
       const obstacles = [...document.querySelectorAll('.egd-canvas-shape, .egd-board-region')].map(persistentEntityGeometry);
       const taskId = work.runId || 'surface';
       const advisory = WorkPlacement.advisoryPlacement({ presence: workPresence().snapshot(), cards, obstacles, taskId, landed: placement, surface: { kind, size: { width: placement.width, height: placement.height } },
-        tasks: [{ id: taskId, state: 'running', requester: work.requester || null, waiting: [], ownerMustAct: false, surfaces: [] }] });
+        // The person who asked waits for the run that is opening this surface (their own run, or the member's request it carries).
+        tasks: [{ id: taskId, state: 'running', requester: work.requester || null, waiting: [work.requester || 'self'], ownerMustAct: false, surfaces: [] }] });
       if (!advisory) return;
       (state.workPlacementLog ||= []).push({ surface: kind, would: advisory.would, landed: advisory.landed, differs: advisory.differs });
       if (state.workPlacementLog.length > 50) state.workPlacementLog.shift();

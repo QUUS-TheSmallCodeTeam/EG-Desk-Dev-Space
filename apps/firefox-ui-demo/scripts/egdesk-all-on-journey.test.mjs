@@ -126,7 +126,8 @@ test('all features on, one session: memory, briefing, a browser task, a long com
   assert.deepEqual((await w.http('POST', '/decision/work-placement/request', { clientThreadId: DM, dto: attention.dto })).body, { status: 'queued', id: 'wp-1' })
   const before = ui.bubbles().length, framesBefore = ui.frames.length
   await w.advance(25000); w.presenceMirror.accept(people); await w.advance(40000); await w.idle(); ui.pump(); close('c4')
-  assert.deepEqual(w.byFeature('c4'), { work_placement: 1, heartbeat: 1 })
+  // L1 c12: the task waits for the owner, which the code knows, so placement asks the Decision model nothing (R3); the heartbeat's question remains
+  assert.deepEqual(w.byFeature('c4'), { heartbeat: 1 })
   assert.deepEqual(w.subjectiveTurnsIn('c4'), { main: 0, fork: 1, steer: 0 })
   const pointerEvents = w.events.filter(e => e.step === 'c4')
   assert.deepEqual(pointerEvents.map(e => e.event), ['message.started', 'message.delta', 'message.completed'])
@@ -256,12 +257,12 @@ test('work placement advisory: the same pointer judgment is recorded, no pointer
   const attention = WP.attentionRequest(scene, { taskId: 'run-1', cardId: 'agent-result' })
   assert.equal((await w.http('POST', '/decision/work-placement/request', { clientThreadId: DM, dto: attention.dto })).body.status, 'queued')
   await w.advance(25000); w.presenceMirror.accept(people); await w.advance(40000); await w.idle()
-  assert.deepEqual(w.byFeature('pointer'), { work_placement: 1 }, 'the placement judgment only: no heartbeat question follows')
+  assert.deepEqual(w.byFeature('pointer'), {}, 'L1 c12: the owner must act, which the code knows: no placement question; and no heartbeat question follows')
   assert.deepEqual(w.subjectiveTurnsIn('pointer'), { main: 0, fork: 0, steer: 0 })
   assert.deepEqual(w.eventsIn('pointer'), [])
   assert.deepEqual(w.history(), before)
   assert.equal(w.workPlacement.facts(DM).pointerPending, false)
-  assert.deepEqual(w.workPlacement.records().map(r => [r.kind, r.source, r.would.kind]), [['attention', 'decision', 'point']], 'what it would have done is on record')
+  assert.deepEqual(w.workPlacement.records().map(r => [r.kind, r.source, r.would.kind]), [['attention', 'rule', 'point']], 'what it would have done is on record (decided by the code\'s rule)')
 })
 
 // ---- one packet: with the turn-memory option on, a page the context selection already carries is not sent a second time ----
