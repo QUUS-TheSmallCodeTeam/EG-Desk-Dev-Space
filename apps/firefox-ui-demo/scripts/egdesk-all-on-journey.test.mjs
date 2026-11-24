@@ -213,3 +213,28 @@ test('all flags off: an ordinary turn sends the engine the same bytes, emits the
   assert.equal(briefingOff.status, 'skipped'); assert.equal(off.w.decisions.length, 0); assert.equal(off.w.forkPrompts.length, 0)
   if (process.env.EGDESK_ALL_ON_LEDGER) writeFileSync(process.env.EGDESK_ALL_ON_LEDGER.replace(/\.json$/, '') + '-off.json', JSON.stringify({ native: JSON.parse(ids(off.native)), events: JSON.parse(ids(off.events)) }, null, 1))
 })
+
+// ---- the other direction of b0: an ordinary message inside a conversation that began as a browser task ----
+test('all features on: an ordinary message in a conversation that began as a browser task is answered; what the Decision features do there is recorded', async t => {
+  const w = allOnWorld(t), ui = screen(w, BROWSER_DM)
+  await w.settings.turnMemory.save('on')
+  w.use(BROWSER_DM)
+  w.step('task')
+  const first = await w.send(Q.portal, w.browserExtra()); ui.sent(Q.portal, 'req-1', first); await w.idle(); await w.answer(A.ask); await w.idle()
+  await w.send(Q.second, w.browserExtra()); await w.idle(); await w.answer(A.got); await new Promise(resolve => setTimeout(resolve, 60)); await w.idle(); ui.pump()
+  w.step('ordinary')
+  const out = await w.send(Q.quote); ui.sent(Q.quote, 'req-3', out); await w.idle(); ui.pump()
+  const timing = w.timing(), before = ui.frames.length
+  await w.notify('item/started', { ...timing, item: { id: 'ans-o', type: 'agentMessage', phase: 'final_answer', text: '' } })
+  await w.notify('item/agentMessage/delta', { ...timing, itemId: 'ans-o', delta: A.quote.slice(0, 9) }); await w.idle(); ui.pump()
+  const half = ui.frames.slice(before).map(frame => [frame.event, frame.bubbles.at(-1)])
+  await w.notify('item/completed', { ...timing, item: { id: 'ans-o', type: 'agentMessage', phase: 'final_answer', text: A.quote } }); await w.endTurn(); await w.idle(); ui.pump()
+  assert.deepEqual(w.history().slice(-2), [['user', Q.quote], ['assistant', A.quote]])
+  assert.deepEqual(ui.bubbles().at(-1), ['assistant', 'complete', A.quote])
+  assert.equal(w.runs().at(-1).status, 'completed'); assert.equal(ui.busy(), false)
+  // Finding A6 (reported, not pinned): the conversation keeps the browser task's bounded policy, so the turn-context selection, turn memory and
+  // the draft check do not run for this ordinary message, and without the draft check's hold the answer is drawn while it is still arriving.
+  const finding = { executionPolicy: w.runs().at(-1).executionPolicy?.mode ?? null, decisionRequests: w.byFeature('ordinary'), contextKeys: Object.keys(w.turnStarts().at(-1).params.additionalContext ?? {}),
+    partialTextOnScreen: half.filter(([, bubble]) => bubble?.[0] === 'assistant' && bubble[1] === 'streaming' && bubble[2]).map(([event, bubble]) => [event, bubble[2]]) }
+  if (process.env.EGDESK_ALL_ON_LEDGER) writeFileSync(process.env.EGDESK_ALL_ON_LEDGER.replace(/\.json$/, '') + '-browser-room.json', JSON.stringify(finding, null, 1))
+})
