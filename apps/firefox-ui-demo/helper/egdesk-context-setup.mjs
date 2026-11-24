@@ -200,6 +200,12 @@ const CONTEXT_RULES = [
   'Every item has a time slice: past = recorded history, present = applicable in the current interval, planned = decided but not done, hypothetical = a what-if branch, unknown = not tagged.',
   'Judge only from the catalog lines and the message. A planned or hypothetical item is never a current fact.',
 ].join('\n')
+// Selectable rule set 'action' (internal; NOT the default, which stays byte for byte CONTEXT_RULES). All-on v3, 2026-11-25, s4: the request
+// "전체 테스트 돌리고 결과 알려줘" got the deployment plan (0.56) and the health-check list (0.69) attached although it asks for no record.
+// One added rule says when an item is needed for a request to carry out an action; the questions are unchanged (L7 c20 plan).
+export const CONTEXT_RULE_SETS = Object.freeze(['default', 'action'])
+const ACTION_RULE = 'An item is needed only when the response has to use what the item says. A request to carry out an action (run, build, test, deploy, open, send) needs an item only when the item is about that very action (its procedure, target or expected result); records of other work are not needed because they are recent or belong to the same project.'
+const rulesFor = set => (set === 'action' ? `${CONTEXT_RULES}\n${ACTION_RULE}` : CONTEXT_RULES)
 
 function cacheKey(scope, hash) {
   return `egd-${compactText(scope, 20).replace(/[^A-Za-z0-9_-]/g, '') || 'ctx'}-${hash.slice(0, 32)}`
@@ -215,7 +221,7 @@ function cacheKey(scope, hash) {
  * message comes after it.
  */
 export async function prepareTurnContext({ message, candidates = [], client, thresholds: overrides, maxItems = 8, maxChars = 24000,
-  itemChars = 6000, timeoutMs, signal, cacheScope = 'ctx', askedAt = null, speech = null, topic = null } = {}) {
+  itemChars = 6000, timeoutMs, signal, cacheScope = 'ctx', askedAt = null, speech = null, topic = null, ruleSet = 'default' } = {}) {
   const thresholds = decisionThresholds(overrides)
   if (!client) return skipped('not_configured')
   if (typeof message !== 'string' || !message.trim()) return skipped('no_message')
@@ -262,7 +268,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     const request = {
       ...(topicQuestions.length ? { authorizeDispatch: recipient => speechCurrent() && liveTopic.authorizeDispatch(recipient) } : {}),
       input: [
-        { role: 'developer', content: CONTEXT_RULES },
+        { role: 'developer', content: rulesFor(ruleSet) },
         { role: 'user', content: [{ type: 'input_text', text: `Catalog:\n${catalog}`, prompt_cache_breakpoint: { mode: 'explicit' } }] },
         ...(topicQuestions.length ? liveTopic.plan.input : []),
         { role: 'user', content: `Message:\n${activeSpeech || topicQuestions.length ? message : message.trim()}` },

@@ -485,6 +485,8 @@ const chat = new CodexChatRuntime({
     // turn_context budget (codex-chat-runtime.mjs TURN_CONTEXT_BUDGET_MS 800 / TURN_CONTEXT_COLD_BUDGET_MS 1500): cold = first turn of a
     // conversation or no warm Decisions socket (egdesk-decision-transport.mjs warm()).
     budgetMs: TURN_CONTEXT_BUDGET_MS, coldBudgetMs: TURN_CONTEXT_COLD_BUDGET_MS, warm: () => decisionTransport.warm(),
+    // The selection's 'action' rule set (egdesk-context-setup.mjs CONTEXT_RULE_SETS): developer flag EGDESK_CONTEXT_RELEVANCE=action, default off.
+    ...(process.env.EGDESK_CONTEXT_RELEVANCE === 'action' ? { relevanceRules: 'action' } : {}),
     calibrationLog: decisionCalibrationLog,
     turnMemory: turnMemoryConfig,
     browserEntry: browserEntryConfig,
