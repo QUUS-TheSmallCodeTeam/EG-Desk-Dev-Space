@@ -1,0 +1,38 @@
+[
+  {
+    "id": "rule-password-prompt",
+    "requests": 0,
+    "settledBy": "waiting_password/rule",
+    "would": "hand_secret"
+  },
+  {
+    "id": "rule-exit0-clean",
+    "requests": 0,
+    "settledBy": "completed_ok/runtime",
+    "would": "report"
+  },
+  {
+    "id": "rule-rm-build-tracked",
+    "requests": 0,
+    "settledBy": "rule/tracked_files",
+    "would": "approval"
+  },
+  {
+    "id": "rule-git-clean-dirty",
+    "requests": 0,
+    "settledBy": "rule/dirty_worktree",
+    "would": "approval"
+  },
+  {
+    "id": "rule-git-reset-dirty",
+    "requests": 0,
+    "settledBy": "rule/dirty_worktree",
+    "would": "approval"
+  },
+  {
+    "id": "rule-rm-unresolved",
+    "requests": 0,
+    "settledBy": "rule/unresolved_target",
+    "would": "approval"
+  }
+]

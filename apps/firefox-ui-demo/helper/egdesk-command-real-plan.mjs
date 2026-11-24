@@ -17,7 +17,8 @@ import { RISK_LEVELS, assessCommand, classifyCommand } from './egdesk-terminal-c
 //
 // Synthetic data only: invented package, file and test names; the reserved example.test domain; no real path, host, name or key.
 export const COMMAND_PLAN_SET = 'command-judgments-v1'
-export const COMMAND_PLAN_TOKEN_CEILING = 12_000
+// About 1.45 times the plan's own estimate (5.5k input tokens by the product's bytes/3 rule, which over-estimates typed questions).
+export const COMMAND_PLAN_TOKEN_CEILING = 8_000
 export const RISK_BAR = 2.5, RISK_MIN_CONFIDENCE = 0.75 // the product's own bar (egdesk-terminal-command-gate.mjs)
 const SYNTHETIC_KEY = 'egd-synthetic-not-a-key-plan'
 const OPEN_CEILING = Object.freeze({ browser: 'interact', files: 'write', terminal: 'ask', network: 'on', mcp: 'all' })
@@ -186,7 +187,7 @@ export async function buildCommandRealPlan() {
   const blocksOf = body => JSON.parse(body).input[0].content[0].data.blocks
   const mark = (body, pattern) => blocksOf(body).filter(block => pattern.test(block.text)).map(block => Number(block.id.slice(1)))
   const testBlocks = failing.bodies[1]
-  add('blocks-test-assertion', testBlocks, blockExpect(mark(testBlocks, /not ok 137|AssertionError/), mark(testBlocks, /^> demo-app|deprecated|^ok 1 - /)))
+  add('blocks-test-assertion', testBlocks, blockExpect(mark(testBlocks, /not ok 137|AssertionError/), mark(testBlocks, /^> demo-app|deprecated|^ok \d+ - list case/)))
   const build = only(await runWatchCase({ output: BUILD_FAILURE, exit: 2 }), 2, 'blocks-build-error')
   add('blocks-build-error', build.bodies[1], blockExpect(mark(build.bodies[1], /error TS2345/), mark(build.bodies[1], /^> demo-app|warning TS6133/)))
 
