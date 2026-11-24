@@ -20,7 +20,7 @@ import { DecisionError } from './egdesk-decision-client.mjs'
 //                 present fact".
 //   'predicates'  the evidence quoted once with its time tags, each sentence quoted on its own block, and per sentence two yes/no
 //                 questions: "does the evidence say what this sentence says" and "does this sentence say something is done or true
-//                 now that the evidence records only as planned or only as past". Code combines.
+//                 now that the evidence records only as planned or only as past". Code combines. (c24: reworded, see buildPredicateRequest.)
 //                 Measured on real answers 2026-11-24 (all-on journey): the choice came back insufficient .69/.76 and not_mentioned
 //                 .72-.97, and the present predicate said yes (.90-.97) to a wait message that states its own present activity and to
 //                 a correctly worded plan ("...발송 예정입니다"): it reads "states a plan" rather than "states a plan AS a present fact".
@@ -154,8 +154,17 @@ export function evidenceFromPacket(packet) {
 // checker knows material existed, but nothing can be concluded as "not in the evidence" while one is present.
 // At most evidenceItems are kept, content first; when anything was content-free, one such reference always stays within the bound (it is what
 // stops a sentence being called unverified while some material could not be read).
+// c24 (lane L2's v6 real run, s3b: tense .86 on a correct recall): the same record can reach the check twice, once as its bare title (the context
+// selection's catalog line) and once as title + text (a loaded page). A bare title is not a statement and, repeated beside the planned page's
+// title, only adds noise. An item whose text (whitespace collapsed) is just the start of another item's text, stopping at a word boundary, with the
+// same time tag and status, is dropped (code, R3).
+export function withoutTitleOnlyCopies(items) {
+  const text = item => (typeof item?.text === 'string' ? item.text.replace(/\s+/g, ' ').trim() : '')
+  return items.filter(item => item?.opaque === true || !text(item) || !items.some(other => other !== item && other?.opaque !== true && other.time === item.time && (other.status ?? null) === (item.status ?? null)
+    && text(other).length > text(item).length && text(other).startsWith(`${text(item)} `)))
+}
 function boundedEvidence(items) {
-  const usable = (Array.isArray(items) ? items : []).filter(item => item?.opaque === true || (typeof item?.text === 'string' && item.text.trim()))
+  const usable = withoutTitleOnlyCopies((Array.isArray(items) ? items : []).filter(item => item?.opaque === true || (typeof item?.text === 'string' && item.text.trim())))
   const content = usable.filter(item => item.opaque !== true), opaque = usable.filter(item => item.opaque === true)
   const limit = DRAFT_CHECK_LIMITS.evidenceItems
   return opaque.length ? [...content.slice(0, limit - 1), ...opaque.slice(0, Math.max(1, limit - content.length))] : content.slice(0, limit)
@@ -204,7 +213,10 @@ function buildPredicateRequest({ claims, terms, evidence }) {
   claims.forEach((span, i) => {
     input.push({ role: 'user', content: `Sentence S${i + 1}:\n${quoteBlock(compactText(span.text, DRAFT_CHECK_LIMITS.claimChars))}` })
     questions.push(predicateQuestion(`sup_${i}`, `Does the evidence say what sentence S${i + 1} says, including each concrete detail in it (names, dates, numbers, states)?`))
-    questions.push(predicateQuestion(`tense_${i}`, `Does sentence S${i + 1} say that something is done or true now that the evidence records only as planned or only as past?`))
+    // c24: the c18 wording ("say that something is done or true now that the evidence records only as planned or only as past") read a sentence that
+    // says something WAS DECIDED or IS SET as "done": measured 2026-11-25 on correct sentences ("4분기 목표는 4억 5천만 원으로 정해져 있습니다" against a
+    // planned record .97; "…정하기로 확정했습니다" against a past record .86). A decision or a plan stated as such is what the record holds.
+    questions.push(predicateQuestion(`tense_${i}`, `Does sentence S${i + 1} present something as already carried out, or as true right now, when the evidence records it only as planned, or only as it was at an earlier time? Saying that something is planned, is decided, was decided or was so before is not.`))
   })
   if (terms.length) input.push({ role: 'user', content: `Terms:\n${terms.map((t, i) => `[T${i + 1}] ${t.term}`).join('\n')}` })
   terms.forEach((_, i) => questions.push(predicateQuestion(`term_${i}`, `Is T${i + 1} internal wording that a reader of this answer has no basis for?`)))
