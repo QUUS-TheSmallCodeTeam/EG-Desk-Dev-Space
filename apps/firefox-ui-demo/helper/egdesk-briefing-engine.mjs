@@ -152,8 +152,10 @@ export function briefingDeps({ chat, contexts, enabled = false, limits, order = 
     order: order === 'design-first' ? 'design-first' : 'skeleton',
     // The turn's memory materials as data (lane L7: chat.memoryMaterialsFor(run), rows the answering model was given this turn). Absent method or anything unusable = none.
     materialsFor: run => { try { const rows = chat.memoryMaterialsFor?.(run); return Array.isArray(rows) ? rows : [] } catch { return [] } },
+    // c32: preamble:false. The private turn may run on a FRESH ephemeral thread (an ephemeral answer thread cannot be forked on Codex 0.171); that thread must see exactly this
+    // prompt (guide + materials, or the design prompt that carries the answer itself), never a context line added by the runtime.
     engineFor: (run, { report = '' } = {}) => (enabled === true && chat.canInternalTurn(run)
-      ? createBriefingEngine({ runText: (prompt, options) => chat.internalText(run, prompt, options), report, limits, outputSchema: outputSchema === 'on' }) : null),
+      ? createBriefingEngine({ runText: (prompt, options) => chat.internalText(run, prompt, { ...options, preamble: false }), report, limits, outputSchema: outputSchema === 'on' }) : null),
     runFor: ids => chat.runFor(ids),
     propose: (run, args) => contexts.proposeBriefing(run, args),
     publishOutput: (run, args) => contexts.publishOutput(run, args),
