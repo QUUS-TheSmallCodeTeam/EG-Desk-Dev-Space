@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 import { writeFileSync } from 'node:fs'
-import { HARD_LIMITS, estimateLive, loadLivePlan, runLive } from '../helper/egdesk-browser-live-runner.mjs'
+import { HARD_LIMITS, RENAMED_PLAN_FILE, estimateLive, loadLivePlan, runLive } from '../helper/egdesk-browser-live-runner.mjs'
 
 // LIVE browser-task measurement: the product's objective browser loop over synthetic pages, the monthly tax-invoice journey
 // pre-registered in scripts/egdesk-browser-live-plan.json. Dry run by default.
-//   node scripts/egdesk-browser-live-measure.mjs                                                  # dry run: prints the plan and its size, sends nothing
+//   node scripts/egdesk-browser-live-measure.mjs [--plan renamed]                                 # dry run: prints the plan and its size, sends nothing
+//   (--plan renamed: the small c16 plan browser-live-renamed-v1, a renamed business with the same number; default browser-live-v1)
 //   OPENAI_API_KEY=... node scripts/egdesk-browser-live-measure.mjs --send [--out results.json]    # real, after approval
 // The key is read from OPENAI_API_KEY only and is never printed or written. No retries; the first failed request, the request limit
 // (14), the input-token ceiling (12k) or the first hard/absolute failure stops the journey.
 const args = process.argv.slice(2)
 const flag = name => args.includes(name), value = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null }
-const plan = loadLivePlan()
+const planName = value('--plan')
+if (planName !== null && planName !== 'renamed') { console.error('unknown --plan (only: renamed)'); process.exit(2) }
+const plan = planName === 'renamed' ? loadLivePlan(RENAMED_PLAN_FILE) : loadLivePlan()
 console.table(plan.checks.map(c => ({ check: c.id, phase: c.phase, severity: c.severity })))
 const estimate = await estimateLive({ plan })
 console.log(JSON.stringify({ plan: plan.set, planSha256: plan.sha256, note: 'sizes from a scripted stand-in that answers as the plan expects, not a model; the real loop is adaptive',

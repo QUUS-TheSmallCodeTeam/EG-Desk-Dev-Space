@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { HARD_LIMITS, LIVE_PAGES, estimateLive, loadLivePlan, runLive, scoreJourney } from './egdesk-browser-live-runner.mjs'
+import { HARD_LIMITS, LIVE_PAGES, RENAMED_PLAN_FILE, estimateLive, loadLivePlan, runLive, scoreJourney } from './egdesk-browser-live-runner.mjs'
 
 // L8 c15: the live browser measurement is safe to hand to Main. Nothing here sends: every fetch is a local stand-in.
 const KEY = 'egd-synthetic-not-a-key-0008-long-enough'
@@ -28,6 +28,7 @@ function expected(body) {
     if (q.name === 'task_resume') return pick(q, 'resume_task')
     if (q.name === 'page_state') return pick(q, 'content')
     if (q.name === 'goal_met') return { name: q.name, type: 'predicate', probability: /다운로드 완료/.test(ev) ? 0.95 : 0.02 }
+    if (/^same_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: 0.95 }
     const listed = /it is listed now as (\[L\d+\] [^\n]*?)\.(?:\n|$)/.exec(ev)
     if (/다운로드 완료/.test(ev)) return pick(q, 'goal_met')
     if (listed) return pick(q, listed[1].trim())
@@ -127,4 +128,40 @@ test('a soft miss is reported and does not fail the journey; the pages never con
   assert.ok(card.softMisses.includes('decided'))
   for (const pages of Object.values(LIVE_PAGES)) for (const page of Object.values(pages)) assert.ok(page.elements.every(e => e.role !== 'textbox'))
   assert.match(readFileSync(new URL('../scripts/egdesk-browser-live-measure.mjs', import.meta.url), 'utf8'), /process\.env\.OPENAI_API_KEY/)
+})
+
+// ---- c16: the recorded choice by code in the live plans ----
+test('c16 v1: changed-asks-which is hard; the month-2 and changed-page steps on /invoices are decided by code (page state and goal only)', async () => {
+  const plan = loadLivePlan()
+  assert.equal(plan.checks.find(c => c.id === 'changed-asks-which').severity, 'hard')
+  for (const id of ['m2-by-code', 'changed-by-code']) assert.equal(plan.checks.find(c => c.id === id).severity, 'hard')
+  const s = service()
+  const out = await runLive({ key: KEY, send: true, fetchImpl: s.fetchImpl })
+  assert.equal(out.scorecard.pass, true)
+  const names = s.seen.map(r => r.body.questions.map(q => q.name).join(','))
+  assert.equal(names.filter(n => n === 'page_state,goal_met').length, 2, 'month 2 and the changed page: no which-question')
+  assert.deepEqual(out.phases.find(p => p.id === 'changed').firstNote.candidates, ['사업자 555-11-22222', '사업자 444-33-55555'])
+  // a flat or wrong model cannot make the changed page act or skip the which: the which-question is not asked at all
+  const e = await estimateLive()
+  assert.deepEqual([e.requests, e.perPhase], [12, { month1: 6, month2: 4, changed: 2 }])
+})
+
+test('c16 renamed plan: separate (v1 + this phase would be 16 > 14 requests), seeded by code through the write path, one quoted predicate, 4 requests', async () => {
+  const plan = loadLivePlan(RENAMED_PLAN_FILE)
+  assert.deepEqual([plan.set, plan.maxRequests, plan.tokenCeiling, plan.phases.map(p => p.id)], ['browser-live-renamed-v1', 6, 5000, ['renamed']])
+  const v1 = await estimateLive()
+  assert.ok(v1.requests + 4 > 14, 'would not fit into v1')
+  const e = await estimateLive({ plan })
+  assert.deepEqual([e.requests, e.scorecard.pass], [4, true]); assert.ok(e.estInputTokens < 5000)
+  const s = service()
+  const out = await runLive({ key: KEY, send: true, fetchImpl: s.fetchImpl, plan })
+  assert.deepEqual([out.sent, out.scorecard.pass, out.phases[0].seeded, out.phases[0].acts.map(a => a.path)], [4, true, 'stored', ['/biz/2', '/download/2.pdf']])
+  const same = s.seen.flatMap(r => r.body.questions).filter(q => q.name.startsWith('same_'))
+  assert.deepEqual(same.map(q => q.instructions), ['Is this option, "가나상사 (987-65-43210)", the same thing as the recorded choice, "사업자 987-65-43210"?'])
+  // an undecided same-thing answer asks the person: hard failures, the journey fails
+  const unsure = body => expected(body).map(a => (a.name.startsWith('same_') ? { ...a, probability: 0.5 } : a))
+  const asked = await runLive({ key: KEY, send: true, fetchImpl: service({ answer: unsure }).fetchImpl, plan })
+  assert.equal(asked.scorecard.pass, false)
+  assert.ok(asked.scorecard.hardFailures.includes('r-no-question'))
+  assert.equal(asked.phases[0].firstNote.code, 'choice_needed'); assert.deepEqual(asked.phases[0].acts, [])
 })
