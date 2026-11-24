@@ -16,7 +16,10 @@
 //   approve. Its expectations cover what happened after it was sent (messages posted after it, tool calls and commands after it); the previous
 //   turn's own expectations cover the whole window of both. A message the run no longer takes (it ended before afterMs) fails the turn's
 //   implicit check "sent_while_running".
+// expect.engine { steers?, interrupts?, steerCarries?, flowMessages?, maxLatencyMs? } (L2 c21, helper/egdesk-real-engine-journey.mjs): what reached the engine (turn/steer,
+//   turn/interrupt) and how many system messages were posted, in the turn's window; on a whileRunning turn, after its message was sent.
 import { MEMORY_EXPECT_SCHEMA, MEMORY_SCHEMA, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
+import { ENGINE_EXPECT_SCHEMA, validateEngineExpect } from './egdesk-real-engine-journey.mjs' // journey hook (L2 c21)
 export const SCRIPT_SET = /^real-engine-[a-z0-9][a-z0-9-]{0,40}-v\d{1,3}$/
 export const CONVERSATION_ID = /^[a-z0-9][a-z0-9-]{0,39}$/
 export const FLAG_NAME = /^EGDESK_[A-Z0-9_]{1,48}$/
@@ -28,7 +31,7 @@ export const IN_RUN_FLAG = 'EGDESK_INRUN_MESSAGES'
 export const LIMITS = Object.freeze({ whileRunningMs: 120_000, conversations: 8, turns: 12, files: 32, pathChars: 200, contentBytes: 64 * 1024, sayChars: 4000, approvals: 4, strings: 16, stringChars: 400 })
 // the scripted person's answers (test input, never product copy)
 export const APPROVER_TEXT = Object.freeze({ yes: '응, 그 명령 실행해 줘', no: '아니, 그건 실행하지 마' })
-export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'memory'])
+export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'memory', 'engine'])
 
 const str = (max, extra = {}) => ({ type: 'string', minLength: 1, maxLength: max, ...extra })
 const strings = { type: 'array', maxItems: LIMITS.strings, items: str(LIMITS.stringChars) }
@@ -67,6 +70,7 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
               turnStatus: { enum: ['completed', 'failed', 'interrupted'] },
               compacted: { type: 'boolean' },
               memory: MEMORY_EXPECT_SCHEMA,
+              engine: ENGINE_EXPECT_SCHEMA,
             } },
           } } },
       } } },
@@ -166,6 +170,7 @@ export function validateEngineScript(value) {
         for (const why of validateMemoryExpect(e.memory, conv.memory, `${tt}.expect.memory`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
         if (turn.whileRunning !== undefined) bad(`${tt}.expect.memory`, 'not checked on a whileRunning turn (the memory window is the scripted turn)')
       }
+      if (e.engine !== undefined) for (const why of validateEngineExpect(e.engine, { whileRunning: turn.whileRunning !== undefined }, `${tt}.expect.engine`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
       if (e.files !== undefined) {
         if (!isObject(e.files) || Object.keys(e.files).length > LIMITS.files) bad(`${tt}.expect.files`, 'an object')
         else for (const [p, content] of Object.entries(e.files)) {

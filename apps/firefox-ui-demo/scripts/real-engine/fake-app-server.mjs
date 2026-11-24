@@ -10,6 +10,8 @@
 //   { version, person: { mcpServers: [{ name, tools: [..] }], hooks: n, features: { name: bool }, instructionSources: [path] },
 //     turns: [ { match?: "text the person's message contains", steps: [ step ], status?: "completed"|"failed", final?: "text", error?: "text" } ],
 //     forkTurns?: [ … same … ] }
+//   A turn may also carry steerFinal: "text" (the final answer when a turn/steer arrived while it worked) and the fake honours turn/interrupt (L2 c21):
+//   the working turn ends as "interrupted" with no final answer, within a few ms, as the real 0.171 engine did (Main's measurement).
 //   step: { agentMessage: "text", phase? } | { toolCall: { tool, arguments } } | { nativeCommand: { command, cwd } } | { compaction: true }
 //         | { usage: { input, cached, output, reasoning } } | { errorNotification: "text" } | { delayMs: n }
 import fs from 'node:fs'
@@ -25,7 +27,7 @@ const MESSAGE_PHASES = { commentary: 'commentary', final: 'final_answer' }
 export function runFakeAppServer({ script, input = process.stdin, output = process.stdout, log = null, home = '/fake/codex-home', env = {}, exit = code => process.exit(code), stderr = process.stderr } = {}) {
   const logLine = entry => { if (log) fs.appendFileSync(log, `${JSON.stringify(entry)}\n`) }
   const person = { mcpServers: [], hooks: 0, features: {}, instructionSources: [], ...(script.person ?? {}) }
-  const threads = new Map(), used = new Set(), usedFork = new Set(), pending = new Map()
+  const threads = new Map(), used = new Set(), usedFork = new Set(), pending = new Map(), working = new Map() // working: turnId -> { threadId, interrupted, steers: [text] }
   let nextThread = 0, nextTurn = 0, nextItem = 0, nextServerRequest = 100
   const send = message => { output.write(`${JSON.stringify(message)}\n`); logLine({ dir: 'out', ...message }) }
   let exitCode = 0
@@ -61,13 +63,20 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
   })
 
   async function runTurn(threadId, turnId, plan) {
-    const thread = threads.get(threadId), items = []
+    const thread = threads.get(threadId), items = [], control = { threadId, interrupted: false, steers: [] }
+    control.onInterrupt = new Promise(resolve => { control.fire = () => { control.interrupted = true; resolve('interrupted') } })
+    working.set(turnId, control)
+    // sleeps in short slices so an interrupt is noticed at once; waits for a server-request answer race the interrupt too
+    const nap = async ms => { for (let left = ms; left > 0 && !control.interrupted; left -= 15) await sleep(Math.min(15, left)) }
+    const interruptedEnd = () => { working.delete(turnId); notify('turn/completed', { threadId, turn: { id: turnId, items: [], status: 'interrupted' } }) }
     const turn = status => ({ id: turnId, items: [], status })
     notify('turn/started', { threadId, turn: turn('inProgress') })
     const user = { type: 'userMessage', id: itemId(), content: [{ type: 'text', text: thread.lastText, text_elements: [] }] }
     notify('item/started', { threadId, turnId, startedAtMs: Date.now(), item: user }); notify('item/completed', { threadId, turnId, completedAtMs: Date.now(), item: user }); items.push(user)
     for (const step of plan.steps ?? []) {
-      if (step.delayMs) await sleep(step.delayMs)
+      if (control.interrupted) return interruptedEnd()
+      if (step.delayMs) await nap(step.delayMs)
+      if (control.interrupted) return interruptedEnd()
       if (step.agentMessage !== undefined) {
         const item = { type: 'agentMessage', id: itemId(), text: step.agentMessage, phase: MESSAGE_PHASES[step.phase ?? 'commentary'] ?? step.phase }
         notify('item/started', { threadId, turnId, startedAtMs: Date.now(), item: { ...item, text: '' } }); notify('item/completed', { threadId, turnId, completedAtMs: Date.now(), item }); items.push(item)
@@ -76,7 +85,9 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
         const callId = `call-${itemId()}`, started = Date.now()
         const base = { type: 'dynamicToolCall', id: callId, tool: step.toolCall.tool, arguments: step.toolCall.arguments ?? {} }
         notify('item/started', { threadId, turnId, startedAtMs: Date.now(), item: { ...base, status: 'inProgress' } })
-        const answer = await serverRequest('item/tool/call', { threadId, turnId, callId, tool: step.toolCall.tool, arguments: step.toolCall.arguments ?? {} })
+        const waiting = serverRequest('item/tool/call', { threadId, turnId, callId, tool: step.toolCall.tool, arguments: step.toolCall.arguments ?? {} })
+        const answer = await Promise.race([waiting, control.onInterrupt])
+        if (answer === 'interrupted') { notify('item/completed', { threadId, turnId, completedAtMs: Date.now(), item: { ...base, status: 'failed', durationMs: Date.now() - started } }); return interruptedEnd() }
         const errors = answer?.result === undefined ? [] : validateMessage('response', 'item/tool/call', answer.result)
         if (errors.length) return fail('the response to item/tool/call', errors)
         const done = { ...base, status: answer?.error ? 'failed' : 'completed', durationMs: Date.now() - started, ...(answer?.result ? { contentItems: answer.result.contentItems, success: answer.result.success } : {}) }
@@ -102,8 +113,11 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
       }
       if (step.errorNotification) notify('error', { threadId, turnId, error: { message: step.errorNotification, codexErrorInfo: null, additionalDetails: null }, willRetry: false })
     }
-    if (plan.status !== 'failed' && plan.final !== undefined) {
-      const item = { type: 'agentMessage', id: itemId(), text: plan.final, phase: 'final_answer' }
+    if (control.interrupted) return interruptedEnd()
+    working.delete(turnId)
+    const finalText = control.steers.length && plan.steerFinal !== undefined ? plan.steerFinal : plan.final
+    if (plan.status !== 'failed' && finalText !== undefined) {
+      const item = { type: 'agentMessage', id: itemId(), text: finalText, phase: 'final_answer' }
       notify('item/started', { threadId, turnId, startedAtMs: Date.now(), item: { ...item, text: '' } }); notify('item/completed', { threadId, turnId, completedAtMs: Date.now(), item }); items.push(item)
     }
     const status = plan.status ?? 'completed'
@@ -135,7 +149,16 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
       setImmediate(() => { runTurn(params.threadId, turnId, plan).catch(error => fail('turn run', [String(error?.message ?? error)])) })
     },
     'thread/unsubscribe': (id) => result(id, 'thread/unsubscribe', { status: 'unsubscribed' }),
-    'turn/interrupt': (id) => result(id, 'turn/interrupt', {}),
+    'turn/interrupt': (id, params) => { const control = working.get(params.turnId); if (control && control.threadId === params.threadId) control.fire(); result(id, 'turn/interrupt', {}) },
+    // L2 c21: a message typed into the working run (the product's turn/steer): taken only by the turn it names, as one more user message of that turn
+    'turn/steer': (id, params) => {
+      const control = working.get(params.expectedTurnId)
+      if (!control || control.threadId !== params.threadId) return send({ id, error: { code: -32600, message: `expected turn ${params.expectedTurnId} is not running` } })
+      const text = textOf(params), user = { type: 'userMessage', id: itemId(), content: [{ type: 'text', text, text_elements: [] }] }
+      control.steers.push(text)
+      notify('item/started', { threadId: params.threadId, turnId: params.expectedTurnId, startedAtMs: Date.now(), item: user }); notify('item/completed', { threadId: params.threadId, turnId: params.expectedTurnId, completedAtMs: Date.now(), item: user })
+      result(id, 'turn/steer', { turnId: params.expectedTurnId })
+    },
     'config/read': (id) => result(id, 'config/read', { config: {}, origins: {}, layers: (person.mcpServers.some(s => !s.pluginId) ? [{ name: { type: 'user', file: `${env.CODEX_HOME || home}/config.toml` }, version: 'v1', config: { mcp_servers: Object.fromEntries(person.mcpServers.filter(s => !s.pluginId).map(s => [s.name, { command: 'fake-server' }])) } }] : []) }),
     'mcpServerStatus/list': (id, params) => {
       const view = params.threadId && threads.get(params.threadId) ? effective(threads.get(params.threadId)).servers : person.mcpServers

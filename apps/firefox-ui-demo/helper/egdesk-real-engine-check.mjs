@@ -37,6 +37,7 @@ import { parseCodexUserAgent } from './egdesk-codex-version-pin.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { APPROVER_TEXT, checkTurnExpectations, folderPathProblem, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createMemoryHook, memoryNeedsDecisions } from './egdesk-real-engine-memory.mjs' // memory hook (L7 c26)
+import { createJourneyHook, messageCounts } from './egdesk-real-engine-journey.mjs' // journey hook (L2 c21)
 
 export const DECISION_KEY_ENV = 'EGDESK_REAL_CHECK_DECISION_KEY'
 export const CHILD_ENV_ALLOW = Object.freeze(['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TMPDIR', 'SHELL'])
@@ -252,6 +253,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
   child.stderr?.on('data', chunk => { stderrTail = (stderrTail + chunk).slice(-1500) })
   let chat = null, store = null, wiring = null, threadClient = null
   const memoryHook = createMemoryHook(conversation.memory) // memory hook: seeded pages, what the product sent, the memory expectations
+  const journeyHook = createJourneyHook() // journey hook: what reached the engine for a message typed into a working run (turn/steer, turn/interrupt)
   const completions = [], tasks = []
   const turnNow = { notifications: [], toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [] }
   const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = [] }
@@ -312,6 +314,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       if ((method === 'thread/start' || method === 'thread/fork') && params?.ephemeral !== true) throw Object.assign(new Error('every thread of this check must be ephemeral'), { code: 'ephemeral_required' })
       const start = performance.now()
       memoryHook.observe(method, params) // memory hook
+      journeyHook.observe(method, params) // journey hook
       try {
         const result = await rpc.request(method, params)
         rec.requests.push({ method, ms: ms(start) })
@@ -424,8 +427,10 @@ export async function runConversation({ options, set, conversation, deps = {} })
       const sub = [], ledger = wiring.ledger
       let asked = 0, mark = null
       memoryHook.beginTurn() // memory hook
+      const counts = () => messageCounts(store, clientThreadId) // journey hook: the system's own and the Agent's own messages the store holds
+      journeyHook.beginTurn({ counts }) // journey hook
       const ctx = await beginTurn(turn.say)
-      if (withMessage) mark = await sendInRun(ctx, next.say, next.whileRunning.afterMs)
+      if (withMessage) { mark = await sendInRun(ctx, next.say, next.whileRunning.afterMs); journeyHook.markInRun({ text: next.say, counts }) } // journey hook
       sub.push(await finishTurn(ctx))
       for (const answer of turn.approve ?? []) {
         if (rec.aborted || closed || !nativeThread) break
@@ -443,16 +448,17 @@ export async function runConversation({ options, set, conversation, deps = {} })
         turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted),
       }
       const memory = memoryHook.finishTurn(turn.expect?.memory) // memory hook
-      const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...memory.expectations]
+      const journey = journeyHook.finishTurn({ expect: turn.expect, nextExpect: withMessage ? next.expect : null, latencyMs: sub[0].latencyMs, counts, steerContract: FLAG.EGDESK_INRUN_MESSAGES === 'on' ? typeof nativeContract?.boardPeerContract === 'string' : null }) // journey hook
+      const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...memory.expectations, ...journey.expectations]
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
       rec.turns.push({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
-        posted, asked, undoRecords: flat.undoRecords, ...(memory.record ? { memory: memory.record } : {}), expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
+        posted, asked, undoRecords: flat.undoRecords, ...(memory.record ? { memory: memory.record } : {}), ...(journey.record ? { journey: journey.record } : {}), expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {
         // the message typed into the run: what happened after it was sent
         const prev = sub[0], after = texts.slice(mark.posted)
         const flat2 = { toolCalls: prev.toolCalls.slice(mark.tools), native: prev.native, posted: after, asked, commandsRan: prev.commandsRan.slice(mark.ran), files: readFiles(next), undoRecords: undoCount(), turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted) }
-        const expect2 = [{ check: 'sent_while_running', ok: mark.accepted, detail: { afterMs: mark.afterMs, sentAtMs: mark.sentAtMs, error: mark.error } }, ...checkTurnExpectations(next.expect ?? {}, flat2)]
+        const expect2 = [{ check: 'sent_while_running', ok: mark.accepted, detail: { afterMs: mark.afterMs, sentAtMs: mark.sentAtMs, error: mark.error } }, ...checkTurnExpectations(next.expect ?? {}, flat2), ...journey.nextExpectations] // journey hook
         rec.turns.push({ index: index + 2, say: clip(next.say, 200), approve: [], whileRunning: { afterMs: mark.afterMs }, subTurns: [{ whileRunning: true, accepted: mark.accepted, error: mark.error, sentAtMs: mark.sentAtMs }],
           posted: after, asked, undoRecords: flat2.undoRecords, expectations: expect2, ok: expect2.every(e => e.ok) && !sub.some(failedRun) })
         index++

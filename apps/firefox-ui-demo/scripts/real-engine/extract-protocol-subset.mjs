@@ -18,10 +18,11 @@ export const WANTED = Object.freeze([
   ['serverRequest', 'item/fileChange/requestApproval', 'ServerRequest.json'],
   ['clientRequest', 'initialize', 'ClientRequest.json'], ['clientRequest', 'thread/start', 'ClientRequest.json'], ['clientRequest', 'turn/start', 'ClientRequest.json'],
   ['clientRequest', 'thread/unsubscribe', 'ClientRequest.json'], ['clientRequest', 'turn/interrupt', 'ClientRequest.json'], ['clientRequest', 'thread/fork', 'ClientRequest.json'],
+  ['clientRequest', 'turn/steer', 'ClientRequest.json'], // L2 c21: a message typed into a working run is steered into its turn
   ['clientRequest', 'config/read', 'ClientRequest.json'], ['clientRequest', 'mcpServerStatus/list', 'ClientRequest.json'],
   ['clientRequest', 'experimentalFeature/list', 'ClientRequest.json'], ['clientRequest', 'hooks/list', 'ClientRequest.json'],
   ['result', 'initialize', 'v1/InitializeResponse.json'], ['result', 'thread/start', 'v2/ThreadStartResponse.json'], ['result', 'turn/start', 'v2/TurnStartResponse.json'],
-  ['result', 'thread/fork', 'v2/ThreadForkResponse.json'], ['result', 'thread/unsubscribe', 'v2/ThreadUnsubscribeResponse.json'], ['result', 'turn/interrupt', 'v2/TurnInterruptResponse.json'],
+  ['result', 'thread/fork', 'v2/ThreadForkResponse.json'], ['result', 'thread/unsubscribe', 'v2/ThreadUnsubscribeResponse.json'], ['result', 'turn/interrupt', 'v2/TurnInterruptResponse.json'], ['result', 'turn/steer', 'v2/TurnSteerResponse.json'],
   ['result', 'config/read', 'v2/ConfigReadResponse.json'], ['result', 'mcpServerStatus/list', 'v2/ListMcpServerStatusResponse.json'],
   ['result', 'experimentalFeature/list', 'v2/ExperimentalFeatureListResponse.json'], ['result', 'hooks/list', 'v2/HooksListResponse.json'],
   ['response', 'item/tool/call', 'DynamicToolCallResponse.json'],
