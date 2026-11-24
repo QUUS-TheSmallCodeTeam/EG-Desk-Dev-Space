@@ -263,6 +263,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
       EGDESK_WORKING_MEMORY: 'on', EGDESK_WORK_PLACEMENT: 'on', EGDESK_BRIEFING_FLOW: 'on', ...env, ...(onePacket === true ? { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' } : {}) }
     : { ...(onePacket === true ? { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' } : {}) }
   let clock = Date.parse("2026-11-25T01:00:00Z"), step = 'setup'
+  const appServer = { turns: null, cursor: null, list: null, fail: false, listCalls: [] }
   const timers = [], events = [], native = [], decisions = [], forkPrompts = [], acts = [], steers = [], replies = [], anomalies = []
   const scripted = scriptedDecisions({ policy })
   const state = { cur: { url: `${PORTAL}/invoices`, documentId: 'doc1', revision: 1 }, docSeq: 1, threads: 0, forks: 0, turns: 0, turnsOf: new Map(), thread: DM, lastOf: new Map(), sends: 0, mode: on === true ? 'on' : 'off', fill: fillFromGuide, wording: {} }
@@ -371,7 +372,10 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
       if (method === 'mcpServerStatus/list') return { data: [], nextCursor: null }
       if (method === 'config/read') return { config: { developer_instructions: 'Ordinary instructions' }, layers: [] }
       if (method === 'thread/start') return { thread: { id: `thread-${++state.threads}` }, cwd, model: 'configured-model', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
-      if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [] }, cwd, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
+      // appServer: what the fake engine's thread holds beyond EG-Desk's own turns (tests of the continuity check): turns(threadId) -> the resume
+      // response's turns, cursor(threadId) -> turnsBackwardsCursor, list(params) -> a thread/turns/list page (default: none)
+      if (method === 'thread/resume') return { thread: { id: params.threadId, turns: appServer.turns?.(params.threadId) ?? [] }, turnsBackwardsCursor: appServer.cursor?.(params.threadId) ?? null, cwd, sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
+      if (method === 'thread/turns/list') { appServer.listCalls.push(params); if (appServer.fail) throw new Error('turns/list failed'); return appServer.list?.(params) ?? { data: [], nextCursor: null } }
       if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
       if (method === 'thread/fork') return { thread: { id: `fork-${++state.forks}`, forkedFromId: params.threadId } }
       if (method === 'turn/steer') { steers.push(params); return { turnId: params.expectedTurnId } }
@@ -434,7 +438,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
     sourceRef: { viewId: 'card', profileId: 'fixture', accountId: '', uri: `${PORTAL}/invoices` },
     browserToolIdentity: { cardEpoch: 'epoch', userContextId: 0, engineAccountKey: OWNER, authorityEpoch: 1 }, browserToolSelection: { token: `token-${n}`, threadId: state.thread } })
   const w = { runRequesters, briefingBindings, inflight: () => inflight, clock: () => clock, dir, cwd, chat, store, contexts, client, budget, calibrationLog, settings, turnMemoryConfig, presenceMirror, runRequesters, workPlacement, http, settle, notify,
-    events, native, decisions, forkPrompts, acts, steers, replies, anomalies, state, ENV,
+    events, native, decisions, forkPrompts, acts, steers, replies, anomalies, state, ENV, appServer,
     step(name) { step = name }, at: () => clock,
     async advance(ms) {
       const end = clock + ms
