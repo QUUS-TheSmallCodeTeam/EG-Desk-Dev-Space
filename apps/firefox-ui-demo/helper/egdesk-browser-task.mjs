@@ -111,7 +111,16 @@ const WALL_ASK = 'an error page, a sign-in page or a check that stops it from sh
 // "다음 결제일이 언제야?" (the hospital request, whose page does not show the date, went to 1.0). The listed line answers the question, so the judge took it for an answer
 // it could give. It could not: the lines are shown only to route the request; the answering model does not see them, and a fact that belongs to the person's own
 // account can only be read from the page that holds it. The heading and the question now say exactly that (R1): no bar, no other request changes.
-export const ENTRY_WEB_ASK = "Is this request something to do in a web page rather than an answer? (Account data such as a date, an amount or a status can only be read from the page that holds it, even when a line listed here shows it: a web task. A question that needs no page is an answer.)"
+// c29 (real, browser-live-entry-v2, 2026-11-25): the c28 wording did not move it: "다음 결제일이 언제야?" was still 0.01 (card 0.98) with the billing line listed. One
+// question carried two conditions ("is it a web task?" against "is it an answer?"), and a listed line that answers it made "answer" the easy reading. Owner decision (c28):
+// two single-condition predicates, combined by code (R2, R3). browser_entry (the page predicate): is the request about something that one of the open pages holds or
+// shows, so that doing it means reading from or working in that page? browser_entry_answer: can it be answered without any open page, from general knowledge or the
+// conversation alone? Code: a decided yes on the second (>= the entry bar) is an answer and nothing is entered; otherwise the first predicate decides as before
+// (decided yes enters, decided no does not), and the card rules are untouched. The bar is unchanged. An answer set without browser_entry_answer (older riders,
+// fixtures) reads as before.
+export const ENTRY_ANSWER = 'browser_entry_answer'
+export const ENTRY_WEB_ASK = "Is this request about something that one of the open pages holds or shows, so that doing it means reading from or working in that page? (An account's own data, such as a date, an amount or a status, is held by its page.)"
+export const ENTRY_ANSWER_ASK = 'Can this be answered from general knowledge or the conversation alone, with no open page? (The lines listed here are for routing only; the answering model does not see them.)'
 export const ENTRY_PAGES_HEADING = 'The pages the user has open:'
 /** The open pages as evidence lines for the request predicate: title and host, and the first lines each shows (when known). [] without any card. */
 export function entryEvidence(cards) {
@@ -121,7 +130,7 @@ export function entryEvidence(cards) {
 }
 /** The entry questions: the request predicate, then (unless code chose the card) one predicate per card, that page alone. */
 export function entryQuestions(cards, { codeCard = null } = {}) {
-  const out = [predicateQuestion(ENTRY_WEB, ENTRY_WEB_ASK)]
+  const out = [predicateQuestion(ENTRY_WEB, ENTRY_WEB_ASK), predicateQuestion(ENTRY_ANSWER, ENTRY_ANSWER_ASK)]
   if (codeCard) return out
   cards.slice(0, MAX_ENTRY_CARDS).forEach((card, index) => out.push(predicateQuestion(entryCardName(index), `Does this request need to be done on this open page: ${quotePage(card)}?`)))
   return out
@@ -178,11 +187,12 @@ export const entryQuestion = (cards, options = {}) => entryQuestions(cards, opti
 export function readBrowserEntry(answers, cards, { codeCard = null } = {}) {
   const p = name => (answers?.[name]?.type === 'predicate' && Number.isFinite(answers[name].probability) ? answers[name].probability : null)
   const web = p(ENTRY_WEB)
+  const answerP = p(ENTRY_ANSWER), answerYes = answerP !== null && answerP >= ENTRY_YES // c29: decided "answerable without any open page"
   const shown = cards.slice(0, MAX_ENTRY_CARDS)
   const cardsP = codeCard ? [] : shown.map((_, index) => p(entryCardName(index)))
   const wallsP = codeCard ? [] : shown.map((_, index) => p(entryWallName(index)))
-  const base = { web, cardsP, wallsP, by: codeCard ? 'code' : 'predicates', confidence: web, margin: null, ranked: cardsP.filter(Number.isFinite) }
-  const webNo = web !== null && web <= ENTRY_NO, webYes = web !== null && web >= ENTRY_YES
+  const base = { web, answerP, cardsP, wallsP, by: codeCard ? 'code' : 'predicates', confidence: web, margin: null, ranked: cardsP.filter(Number.isFinite) }
+  const webNo = answerYes || (web !== null && web <= ENTRY_NO), webYes = !answerYes && web !== null && web >= ENTRY_YES
   if (webNo) return { kind: 'not_browser', top: 'not_browser_task', ...base }
   if (codeCard) return web === null ? { kind: 'uncertain', top: null, ...base } : { kind: 'browser', cardId: codeCard, top: null, ...base }
   const yes = cardsP.map((value, index) => (value !== null && value >= ENTRY_YES ? index : -1)).filter(index => index >= 0)
@@ -445,6 +455,7 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
     const raw = { feature: 'browser_reflex', mode: 'on', candidates: count, ...(fallback ? { fallback } : {}),
       judgments: answers ? [
         ...(Number.isFinite(answers.web) ? [{ q: ENTRY_WEB, would, p: answers.web, threshold: ENTRY_YES }] : []),
+        ...(Number.isFinite(answers.answerP) ? [{ q: ENTRY_ANSWER, would: answers.answerP >= ENTRY_YES ? 'none' : answers.answerP <= ENTRY_NO ? 'act' : 'hold', p: answers.answerP, threshold: ENTRY_YES }] : []),
         ...(answers.cardsP || []).map((value, index) => (Number.isFinite(value) ? { q: entryCardName(index), would: value >= ENTRY_YES ? 'act' : value <= ENTRY_NO ? 'none' : 'hold', p: value, threshold: ENTRY_YES } : null)).filter(Boolean),
         ...(answers.wallsP || []).map((value, index) => (Number.isFinite(value) ? { q: entryWallName(index), would: value >= ENTRY_YES ? 'act' : value <= ENTRY_NO ? 'none' : 'hold', p: value, threshold: ENTRY_YES } : null)).filter(Boolean)] : [] }
     return note(null, raw)

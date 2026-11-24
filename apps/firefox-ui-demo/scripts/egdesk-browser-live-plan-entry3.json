@@ -1,0 +1,117 @@
+{
+ "set": "browser-live-entry-v3",
+ "description": "LIVE, c29: entry only. \"다음 결제일이 언제야?\" was browser_entry .02 (c31, no pages in the evidence), .01 (c34, pages and the billing line listed, a definition added) and .01 (c35, the account-data wording) while its card predicate was .93-.98. One question carried two conditions (\"a web task\" against \"an answer\"), and a listed line that answers it made \"answer\" the easy reading, whatever the wording. Owner decision (c28): TWO single-condition predicates combined by code. browser_entry: is the request about something that one of the open pages holds or shows, so that doing it means reading from or working in that page? browser_entry_answer: can it be answered from general knowledge or the conversation alone, with no open page? Code: a decided yes on browser_entry_answer is an answer and nothing is entered; otherwise browser_entry decides as before and the card rules are untouched. The bar is unchanged. The same four requests as entry-v2 (the membership request, the two general-knowledge controls that must stay answers, the hospital request); the three earlier entries (settings, issuance, statement) do not fit 2.5k. Predictions are in each check's note. Sent once.",
+ "maxRequests": 5,
+ "tokenCeiling": 2700,
+ "passRule": "The journey passes when every hard and every absolute check holds. Soft checks are reported and never fail it. The journey stops at the first hard or absolute failure, at the first request that fails (no retries), at the request limit or at the token ceiling; checks of phases that did not run count as not run (a failure).",
+ "phases": [
+  {
+   "id": "en-ms",
+   "host": "streamly.example.test",
+   "start": "/account/membership",
+   "pages": "membership",
+   "message": "다음 결제일이 언제야?",
+   "reply": null,
+   "fetchMemory": false,
+   "title": "멤버십 관리 | 스트리밍플러스",
+   "clock": "month2",
+   "maxSteps": 1,
+   "entryOnly": true
+  },
+  {
+   "id": "en-ctrl-a",
+   "host": "streamly.example.test",
+   "start": "/account/membership",
+   "pages": "membership",
+   "message": "광합성이 뭐야?",
+   "reply": null,
+   "fetchMemory": false,
+   "title": "멤버십 관리 | 스트리밍플러스",
+   "clock": "month2",
+   "maxSteps": 1,
+   "entryOnly": true
+  },
+  {
+   "id": "en-ctrl-b",
+   "host": "carehosp.example.test",
+   "start": "/my",
+   "pages": "hospital",
+   "message": "파이썬에서 리스트를 정렬하는 방법 알려줘",
+   "reply": null,
+   "fetchMemory": false,
+   "title": "마이페이지 | 한결병원",
+   "clock": "month2",
+   "maxSteps": 1,
+   "entryOnly": true
+  },
+  {
+   "id": "en-hc",
+   "host": "carehosp.example.test",
+   "start": "/my",
+   "pages": "hospital",
+   "message": "한결병원 다음 진료 예약 날짜 알려줘",
+   "reply": null,
+   "fetchMemory": false,
+   "title": "마이페이지 | 한결병원",
+   "clock": "month2",
+   "maxSteps": 1,
+   "entryOnly": true
+  }
+ ],
+ "checks": [
+  {
+   "id": "never-acted",
+   "phase": "all",
+   "severity": "absolute",
+   "note": "No action is taken (entry only). Predicted: HOLDS."
+  },
+  {
+   "id": "budget",
+   "phase": "all",
+   "severity": "absolute",
+   "note": "At most 5 requests and at most 2.7k input tokens: the estimate is 2,486 (under 2.5k), real tokens have run up to 7% above the estimates (c35: 1,789 estimated, 1,917 real), and the guard counts real tokens plus the next estimate, so a 2.5k ceiling would have refused the last request. The hospital request goes last for the same reason. Predicted: HOLDS."
+  },
+  {
+   "id": "en-no-act",
+   "phase": "all",
+   "severity": "absolute",
+   "note": "No page action in any phase. Predicted: HOLDS."
+  },
+  {
+   "id": "en-ms-entered",
+   "phase": "en-ms",
+   "severity": "soft",
+   "note": "MODEL. The membership request enters (c31/c34/c35: .02/.01/.01, not entered). Predicted: HOLDS (medium: browser_entry should now say yes, the page holds the date, and browser_entry_answer should say no, a date of the person's own account cannot be answered without the page; if browser_entry_answer says yes the request is read as an answer again and this fails)."
+  },
+  {
+   "id": "en-ms-web-decided",
+   "phase": "en-ms",
+   "severity": "soft",
+   "note": "MODEL. browser_entry >= .75 on the membership request. Predicted: HOLDS (medium)."
+  },
+  {
+   "id": "en-ctrl-a-answer",
+   "phase": "en-ctrl-a",
+   "severity": "soft",
+   "note": "MODEL. 광합성이 뭐야? with the membership page open stays an answer (not entered). Predicted: HOLDS (high: browser_entry should be no and browser_entry_answer yes)."
+  },
+  {
+   "id": "en-ctrl-b-answer",
+   "phase": "en-ctrl-b",
+   "severity": "soft",
+   "note": "MODEL. The python sorting question with the hospital page open stays an answer. Predicted: HOLDS (high)."
+  },
+  {
+   "id": "en-hc-entered",
+   "phase": "en-hc",
+   "severity": "soft",
+   "note": "MODEL. The hospital request still enters (1.0 in c34 and c35). Predicted: HOLDS (high)."
+  },
+  {
+   "id": "en-hc-web-decided",
+   "phase": "en-hc",
+   "severity": "soft",
+   "note": "MODEL. browser_entry >= .75 on the hospital request. Predicted: HOLDS (high)."
+  }
+ ]
+}

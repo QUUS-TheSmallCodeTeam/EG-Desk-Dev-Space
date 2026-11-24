@@ -84,7 +84,7 @@ test('browser task handed off: while the subjective model is still wording the q
   const segments = [{ outcome: 'max_steps', steps: [{ actions: [] }, { actions: [] }, { actions: [] }], state: { at: 1 } }, { outcome: 'needs_user_context', steps: [{ actions: [] }], candidates: [] }]
   let call = 0
   // L8 c20: the entry is yes/no predicates; the double answers every question (a predicate yes, a choice its first value)
-  const client = { async decide(request) { return { answers: Object.fromEntries(request.questions.map(q => [q.name, q.type === 'predicate' ? { type: 'predicate', probability: 0.95 }
+  const client = { async decide(request) { return { answers: Object.fromEntries(request.questions.map(q => [q.name, q.type === 'predicate' ? { type: 'predicate', probability: q.name === 'browser_entry_answer' ? 0.03 : 0.95 }
     : { type: 'choice', choice: q.choices[0].value, confidence: 0.95, probabilities: [{ value: q.choices[0].value, probability: 0.96 }, { value: q.choices[1].value, probability: 0.02 }] }])) } } }
   const entry = createDirectBrowserEntry({ store: feed.store, provider: { directEntryEnabled: () => true, reflexScope: () => ({ client, authorizeDispatch: () => true, isDecisionCurrent: () => true }), runDirectTask: async () => segments[call++] } })
   const out = await entry.handle({ run: { runId: 'pre', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm-browser', message: '세금계산서 내려받아줘', hosts: { card: 'portal.example.test' } })

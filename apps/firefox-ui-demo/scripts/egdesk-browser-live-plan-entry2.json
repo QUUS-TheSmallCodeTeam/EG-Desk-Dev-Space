@@ -1,8 +1,8 @@
 {
  "set": "browser-live-entry-v2",
- "description": "LIVE, c28: entry only, after browser-live-entry-v1 (sent c34: hospital 1.0, both controls 0, settings, issuance and statement 1.0; but \"다음 결제일이 언제야?\" was STILL browser_entry .01 although the card predicate was .98 and the page's lines were shown, including \"다음 결제일: 2026-12-14\"). Reading the body: the listed line IS the answer, so the judge took it for an answer it could give; it could not (the lines are shown only to route the request, and a fact that belongs to the person's own account can only be read from the page that holds it). c28 changes only the request predicate's question: it now says account data such as a date, an amount or a status can only be read from the page that holds it, even when a listed line shows it (a web task), and that a question that needs no page is an answer. The bar is unchanged. This plan sends the membership request again, the same two general-knowledge controls (they must stay answers) and the hospital request (must stay entered). Predictions are in each check's note. Sent once.",
+ "description": "LIVE, c28: entry only, after browser-live-entry-v1 (sent c34: hospital 1.0, both controls 0, settings, issuance and statement 1.0; but \"다음 결제일이 언제야?\" was STILL browser_entry .01 although the card predicate was .98 and the page's lines were shown, including \"다음 결제일: 2026-12-14\"). Reading the body: the listed line IS the answer, so the judge took it for an answer it could give; it could not (the lines are shown only to route the request, and a fact that belongs to the person's own account can only be read from the page that holds it). c28 changes only the request predicate's question: it now says account data such as a date, an amount or a status can only be read from the page that holds it, even when a listed line shows it (a web task), and that a question that needs no page is an answer. The bar is unchanged. This plan sends the membership request again, the same two general-knowledge controls (they must stay answers) and the hospital request (must stay entered). Predictions are in each check's note. Sent once. [c29: this plan was SENT with a ceiling of 2000; the entry request has since grown by one single-condition predicate (browser_entry_answer, ~+140 tokens per entry), so its estimate no longer fits 2000: the ceiling is raised to 2700 so the plan still estimates and lints. Its request bytes are no longer the bytes that were sent; do not resend it without comparing.]",
  "maxRequests": 5,
- "tokenCeiling": 2000,
+ "tokenCeiling": 2700,
  "passRule": "The journey passes when every hard and every absolute check holds. Soft checks are reported and never fail it. The journey stops at the first hard or absolute failure, at the first request that fails (no retries), at the request limit or at the token ceiling; checks of phases that did not run count as not run (a failure).",
  "phases": [
   {
@@ -69,7 +69,7 @@
    "id": "budget",
    "phase": "all",
    "severity": "absolute",
-   "note": "At most 5 requests and at most 2k input tokens. Predicted: HOLDS."
+   "note": "At most 5 requests and at most 2.7k input tokens. Predicted: HOLDS."
   },
   {
    "id": "en-no-act",
