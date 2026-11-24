@@ -19,7 +19,7 @@ import { createJointStore } from './egdesk-joint-board-store.mjs';
 import { jointHttp } from './egdesk-joint-board-server.mjs';
 import { createJointPresence as createHub, PRESENCE_LIMITS } from './egdesk-joint-presence.mjs';
 import { createPresenceMirror, createPresenceMirrorHttpHandler, createRunRequesters, createRunRequesterHttpHandler, PRESENCE_MIRROR, RUN_REQUESTER } from './egdesk-presence-mirror.mjs';
-import { createWorkPlacement, createWorkPlacementHttpHandler } from './egdesk-work-placement.mjs';
+import { createWorkPlacement, createWorkPlacementHttpHandler, WORK_PLACEMENT_LIMITS } from './egdesk-work-placement.mjs';
 import { HEARTBEAT_LIMITS } from './egdesk-heartbeat.mjs';
 import { pointerRoute } from './egdesk-conversation-flow.mjs';
 import { world as heartbeatWorld } from './egdesk-heartbeat-flow.fixture.mjs';
@@ -243,7 +243,10 @@ test('Board ask records: prepare and run carry the vouched requester; it is not 
 });
 
 // ================= 3. end to end: member B asks, the owner's Agent works, both consumers see B =================
-async function endToEnd(t, { ownerMustAct }) {
+// live: the placement runtime's own switch (the bridge: EGDESK_WORK_PLACEMENT=on). Only then may a decided "point" become a pointer fact, which the session
+// turns into ONE chat message. In advisory (the default) the same decision is only recorded as what it WOULD do (lane L4, cycle 14). Who the requester is
+// does not depend on it: the placement option is near B either way.
+async function endToEnd(t, { ownerMustAct, live }) {
   const w = await world(t);
   const a = await w.person('a', { offset: { x: 0, y: 0 }, view: OWNER_VIEW });   // the owner, working at region A
   const b = await w.person('b', { offset: { x: 500, y: 300 }, view: B_SEES });   // member B, looking at another part of the shared space
@@ -255,10 +258,12 @@ async function endToEnd(t, { ownerMustAct }) {
   const registry = createRunRequesters({ presence: mirror, now: () => w.clock.now });
   const acks = [];
   const judge = placementJudge(['near_requester', 'point']);
-  const placement = createWorkPlacement({ client: judge, mode: () => 'advisory', enabled: () => true, calibrationLog: { record() {} } });
+  let placement = null;
   const hw = heartbeatWorld(t, { presence: mirror, audience: ({ run }) => registry.audience({ run }),
     policy: { message: (values) => (values.includes('pointer') ? 'pointer' : 'none') }, writer: (prompt) => (/on the desk/.test(prompt) ? POINTER : null),
     attentionPosted: (e) => { acks.push(e); if (e.provider === 'work_placement') placement.acknowledgePointer(e.key); } });
+  // as the bridge builds it: enabled for advisory and on, live only for on; its clock and timers are the runtime's (virtual here)
+  placement = createWorkPlacement({ client: judge, mode: () => (live ? 'on' : 'advisory'), enabled: () => true, live: () => live, calibrationLog: { record() {} }, now: () => hw.at(), setTimer: (fn, ms) => hw.chat.setTimer(fn, ms) });
   const call = bridgeCalls([createPresenceMirrorHttpHandler({ mirror, enabled: () => true }), createRunRequesterHttpHandler({ requesters: registry, enabled: () => true }),
     createWorkPlacementHttpHandler({ placement, heartbeatFor: (key) => hw.chat.heartbeatFor(key) })]);
   const push = async () => { assert.equal((await call(PRESENCE_MIRROR.path, { rows: a.presence.snapshot() })).status, 200); };
@@ -353,18 +358,24 @@ async function endToEnd(t, { ownerMustAct }) {
   assert.deepEqual(attention.options.map((o) => o.kind), ['leave', 'point']); assert.equal(attention.actor, ownerMustAct ? 'M1' : 'M2');
   const messagesBefore = run.assistant().length, eventsBefore = hw.events.length;
   assert.equal((await call('/decision/work-placement/request', { clientThreadId: ref.clientThreadId, conversationId: ref.conversationId, dto: attention.dto })).body.status, 'queued');
-  await hw.advance(S.beatMs); run.hb.nudge(); await hw.advance(S.beatMs); await placement.idle();
-  const fact = placement.facts('dm-task') ?? {};
+  // The placement runtime nudges the heartbeat itself: judged within half a second of the request, not at the idle grid.
+  await hw.advance(S.nudgeMs); await placement.idle();
+  const fact = { ...(placement.facts('dm-task') ?? {}) }, onHeartbeat = { ...(run.hb.facts().sources.work_placement ?? {}) };
+  const record = placement.records().at(-1);
   const routeNow = pointerRoute({ person: ownerMustAct ? 'owner' : 'requester', audience: registry.audience({ run: ref }), presence: mirror.snapshot(), others: [] });
-  await hw.advance(S.beatMs * 2); await placement.idle(); await hw.advance(S.beatMs * 2);
+  assert.deepEqual(run.assistant().slice(messagesBefore), [], 'nothing is posted at the beat that judged');
+  // The pointer's own nudge (one beat interval later), then two more beats: whatever is posted is posted once.
+  await hw.advance(WORK_PLACEMENT_LIMITS.renudgeMs + S.nudgeMs); await placement.idle(); await hw.advance(S.beatMs * 2); await placement.idle(); await hw.advance(S.beatMs * 2);
   const posted = run.assistant().slice(messagesBefore);
   assert.equal(frozen(), before, 'still nothing moved in the owner\'s view');
-  return { w, a, b, hw, run, ref, aliasB, placement, registry, requesters, mirror, fact, routeNow, posted, acks, eventsBefore, sent, push, call, canvas, cardId };
+  return { w, a, b, hw, run, ref, aliasB, placement, registry, requesters, mirror, fact, onHeartbeat, record, judge, routeNow, posted, acks, eventsBefore, sent, push, call, canvas, cardId };
 }
 
 test('end to end: member B asks -> the viewer option is near B, the owner\'s view is untouched, and a finished result the owner need not act on does NOT point the owner', async (t) => {
-  const e = await endToEnd(t, { ownerMustAct: false });
+  const e = await endToEnd(t, { ownerMustAct: false, live: true });
   assert.deepEqual([e.fact.pointerPending, e.fact.pointerFor, e.fact.pointerNeeds], [true, 'requester', 'review'], 'the placement runtime says: this is for the requester');
+  assert.deepEqual(e.onHeartbeat, e.fact, 'the same fact on the conversation\'s heartbeat'); assert.deepEqual([e.record.would.kind, e.record.pointer], ['point', 'raised']);
+  assert.equal(e.placement.facts('dm-task').pointerPending, true, 'nobody could be told, so the fact is still there (it ends by itself after pointerMs)');
   assert.deepEqual(e.routeNow, { target: null, reason: 'no_conversation' }, 'the requester has no conversation on the owner\'s Desk');
   assert.deepEqual(e.posted, [], 'no pointer in the owner\'s conversation'); assert.deepEqual(e.acks, []);
   assert.deepEqual(e.hw.events.slice(e.eventsBefore).filter((x) => /^message\./.test(x.event)), [], 'no message event at all');
@@ -376,7 +387,8 @@ test('end to end: member B asks -> the viewer option is near B, the owner\'s vie
 });
 
 test('end to end: the same task now needs the OWNER\'s decision -> one pointer message to the owner, in the owner\'s own conversation; B\'s leaving ends the identity', async (t) => {
-  const e = await endToEnd(t, { ownerMustAct: true });
+  const e = await endToEnd(t, { ownerMustAct: true, live: true });
+  assert.deepEqual([e.fact.pointerPending, e.fact.pointerFor, e.fact.pointerNeeds], [true, 'owner', 'owner_action']); assert.deepEqual([e.record.would.kind, e.record.pointer], ['point', 'raised']);
   assert.deepEqual(e.routeNow, { target: 'here', present: true });
   assert.deepEqual(e.posted, [POINTER], 'exactly one pointer message, to the owner'); assert.deepEqual(e.acks, [{ key: 'dm-task', provider: 'work_placement' }]);
   assert.equal(e.placement.facts('dm-task').pointerPending, false, 'withdrawn once posted');
@@ -399,6 +411,22 @@ test('end to end: the same task now needs the OWNER\'s decision -> one pointer m
   assert.equal(RUN_REQUESTER.ttlMs, JP.REQUESTER.runMs);
 });
 
+test('end to end, advisory placement (the default): the requester is still B and the option is still near B, but a decided "point" is only RECORDED; no fact, no message, for either kind of result', async (t) => {
+  for (const ownerMustAct of [true, false]) {
+    const e = await endToEnd(t, { ownerMustAct, live: false }); // the first half of endToEnd already asserted: requester M2, near B, the owner's view untouched
+    assert.equal(e.judge.calls.length, 2, 'both scenes were judged: the surface\'s place and the attention');
+    assert.deepEqual([e.record.kind, e.record.would.kind, e.record.pointer, e.record.source], ['attention', 'point', 'advisory', 'decision'], 'recorded as what it WOULD do');
+    assert.deepEqual([e.fact.pointerPending, e.fact.pointerFor, e.onHeartbeat.pointerPending], [false, undefined, false], 'no pointer fact is raised');
+    assert.equal(e.placement.facts('dm-task').pointerPending, false);
+    assert.deepEqual(e.posted, [], 'no message in the owner\'s conversation, even when the owner must act'); assert.deepEqual(e.acks, []);
+    assert.deepEqual(e.hw.events.slice(e.eventsBefore).filter((x) => /^message\./.test(x.event)), [], 'no message event at all');
+    assert.equal(e.hw.forkPrompts.filter((prompt) => /on the desk/.test(prompt)).length, 0, 'the writer was never asked for a pointer');
+    // The route the audience rule WOULD give is unchanged by the mode: it is the missing fact, not the requester, that keeps the session silent.
+    assert.deepEqual(e.routeNow, ownerMustAct ? { target: 'here', present: true } : { target: null, reason: 'no_conversation' });
+    t.diagnostic(`advisory, ownerMustAct=${ownerMustAct}: record=${e.record.would.kind}/${e.record.pointer} fact=${e.fact.pointerPending} ownerMessages=${e.posted.length}`);
+  }
+});
+
 // ================= 4. off by default, and where it is wired =================
 test('default path: without the presence flag nothing of this exists; the bridge route is closed and guarded', async () => {
   const mirror = createPresenceMirror({ now: () => 1000 }), registry = createRunRequesters({ presence: mirror, now: () => 1000 });
@@ -417,6 +445,8 @@ test('default path: without the presence flag nothing of this exists; the bridge
   const server = fs.readFileSync(path.join(here, 'codex-bridge-server.mjs'), 'utf8'), surface = fs.readFileSync(path.join(here, '../overlay/JS/eg-desk-surface.uc.js'), 'utf8');
   assert.match(server, /createRunRequesterHttpHandler\(\{ requesters: runRequesters, enabled: \(\) => process\.env\.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT \}\)/);
   assert.match(server, /process\.env\.EGDESK_PRESENCE === 'on' \? \{ presence: presenceMirror, audience: \(\{ run \}\) => runRequesters\.audience\(\{ run \}\) \} : \{\}/);
+  // The rig's two placement modes are the bridge's own: enabled for advisory and on, a pointer fact only when on.
+  assert.match(server, /enabled: \(\) => \['advisory', 'on'\]\.includes\(process\.env\.EGDESK_WORK_PLACEMENT\),/); assert.match(server, /live: \(\) => process\.env\.EGDESK_WORK_PLACEMENT === 'on'/);
   // The surface: the placement hook's own line is L4's, unchanged; the wrapper and the request side are installed inside installDeskPresence only.
   assert.ok(surface.includes("tasks: [{ id: taskId, state: 'running', requester: work.requester || null, waiting: [], ownerMustAct: false, surfaces: [] }] });"));
   const install = surface.slice(surface.indexOf('function installDeskPresence()'), surface.indexOf('return state.presence;', surface.indexOf('function installDeskPresence()')));
