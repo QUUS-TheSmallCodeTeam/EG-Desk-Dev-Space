@@ -220,10 +220,10 @@ test('the v2 send, reproduced (c21 conditions; since L3 c19 the draft check appe
   const owner = calls.filter(text => JSON.parse(text).questions.some(q => q.name === 'owner_action'))
   assert.equal(owner.length, 2); for (const text of owner) assert.ok(!text.includes('자료를 알려 주세요') && !text.includes('확인되지 않은 부분'), 'no draft-check copy in the owner question')
   assert.ok(owner[1].includes('따로 확인하실 일은 없습니다'), 'the follow-up\'s own sentence is quoted')
-  // F1 and F3 hold: the requester's branch, no pointer to A. v4's F9 (no fixed fallback sentence in the answer A saw) fails HERE by design: this int still
-  // has the draft check's fixed caveat (the owner removed it; L3's change has not merged into this base), and that is exactly what F9 is for
-  assert.deepEqual(follow.checks.filter(c => c.severity === 'hard' && c.pass !== true).map(c => c.id), ['F9'], 'F1 and F3 hold; only F9 names the caveat')
-  assert.deepEqual(follow.checks.find(c => c.id === 'F9').observed.found, [DRAFT_CHECK_COPY.partial])
+  // F1 and F3 hold: the requester's branch, no pointer to A. Since L3 c19 merged into int/c14 (the owner removed the fixed fallback sentences),
+  // F9 holds as well: the answer A saw contains none of them, so no hard check fails in this reproduction
+  assert.deepEqual(follow.checks.filter(c => c.severity === 'hard' && c.pass !== true).map(c => c.id), [], 'F1, F3 and F9 hold')
+  assert.deepEqual(follow.checks.find(c => c.id === 'F9').observed.found, [], 'no removed fallback sentence is in what A saw')
   assert.equal(follow.checks.find(c => c.id === 'F2').pass, true, 'the owner question says no')
   assert.deepEqual(result.checks.filter(c => c.severity === 'hard' && c.pass !== true).map(c => c.id), [], 'the decision result still points A to it')
   // v2 as registered would fail its F1 here (it asked for the whole posted answer, caveat included): kept as it was, not rewritten
