@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
-import { createBrowserTaskStore, createDirectBrowserEntry, entryQuestions, entryWallQuestions, readBrowserEntry, wallCandidates } from './egdesk-browser-task.mjs'
+import { createBrowserTaskStore, createDirectBrowserEntry, entryQuestions, entryWallEvidence, entryWallQuestions, readBrowserEntry, wallCandidates } from './egdesk-browser-task.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 
 // L8 c21: the settings entry (real, browser-live-settings-v2, 2026-11-25): the request predicate 0.90, the card predicate 0.19, so the
@@ -110,7 +110,9 @@ test('the interruption follow-up: only where it can matter (web task decided, no
   assert.deepEqual(wallCandidates(first({ browser_entry: 0.9, browser_entry_card_0: 0.5, browser_entry_card_1: 0.05 }), cards), [], 'an undecided card is not a no')
   const qs = entryWallQuestions(cards, [0])
   assert.deepEqual(qs.map(q => q.name), ['browser_entry_wall_0'])
-  assert.equal(qs[0].instructions, 'Is this open page "오류 | 계정" at "account.example.test", which now shows "일시적인 오류가 발생했습니다." / "잠시 후 다시 시도해 주세요. (오류 500)" an error page, a sign-in page or a check that stops it from showing its content?')
+  // c24 (real: the follow-up was REFUSED when the page was only inside the question): the question names the page; the lines are the evidence
+  assert.equal(qs[0].instructions, 'Is this open page "오류 | 계정" at "account.example.test" an error page, a sign-in page or a check that stops it from showing its content?')
+  assert.equal(entryWallEvidence('마케팅 알림 꺼줘', cards, [0]), 'User message: 마케팅 알림 꺼줘\n\nWhat the open page shows now (the first lines):\n- "오류 | 계정" at "account.example.test" shows "일시적인 오류가 발생했습니다." / "잠시 후 다시 시도해 주세요. (오류 500)"')
   assert.deepEqual(entryQuestions(cards).map(q => q.name), ['browser_entry', 'browser_entry_card_0', 'browser_entry_card_1'], 'the first request has no wall question')
   assert.deepEqual(entryQuestions(cards, { codeCard: 'a' }).map(q => q.name), ['browser_entry'], 'a card named by code asks nothing about the card, its lines never veto it')
 })
@@ -145,6 +147,17 @@ test('through the entry: the follow-up enters an error page and the step hands i
     const other = await run({ shows: ['환율 계산기'], card: 0.0, wall: 0.02, rode })
     assert.deepEqual([other.out.handled, other.out.reason], [false, 'not_browser'], `rode=${rode}`)
   }
+  // c24: the follow-up as sent: the page lines are in the evidence, the question is about that page; a refusal (no probability) enters nothing
+  const bodies = []
+  const refusing = createDecisionClient({ getApiKey: async () => 'egd-synthetic-not-a-key-0008', fetchImpl: async (_u, init) => { const wire = JSON.parse(init.body); bodies.push(wire)
+    return { ok: true, text: async () => JSON.stringify({ answers: wire.questions.map(q => (q.name === 'browser_entry_wall_0' ? { name: q.name, type: 'refusal' } : { name: q.name, type: 'predicate', probability: q.name === 'browser_entry' ? 0.9 : 0.0 })) }) } } })
+  const cards1 = [{ cardId: 'card', host: 'account.example.test', title: '오류 | 계정', shows: ERROR_SHOWS }]
+  const decided = await decideBrowserEntry({ message: MSG, cards: cards1, client: refusing })
+  assert.equal(decided.kind, 'not_browser', 'an unanswered follow-up is not a yes: the page is not entered')
+  const followUp = bodies.find(b => b.questions.some(q => q.name === 'browser_entry_wall_0'))
+  assert.match(followUp.input[1].content, /shows "일시적인 오류가 발생했습니다\." \/ "잠시 후 다시 시도해 주세요\. \(오류 500\)"/)
+  assert.doesNotMatch(followUp.questions[0].instructions, /오류 500/)
+  assert.equal(lintGroupedRequest({ input: followUp.input, questions: followUp.questions }).ok, true)
   const failing = await run({ shows: ERROR_SHOWS, card: 0.0, wall: 0.95 }) // control: the same answers, follow-up working
   assert.equal(failing.out.handled, true)
 })

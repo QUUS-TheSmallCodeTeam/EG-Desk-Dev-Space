@@ -35,6 +35,7 @@ test('the three family plans are pre-registered within the hard limits (<= 14 re
   // c20 (v2): the statement no longer waits for the person at 조회 (read-only GET); the settings tab is shown before the hand-over
   assert.deepEqual(sizes, { statement: [9, { 'st-base': 4, 'st-changed': 3, 'st-expired': 2 }], delivery: [7, { 'dv-recorded': 3, 'dv-changed': 2, 'dv-captcha': 2 }], settings: [6, { 'se-base': 3, 'se-error': 3 }],
     'settings-error': [3, { 'se-error': 3 }],
+    holdout: [7, { 'ub-base': 3, 'ig-list': 2, 'ig-form': 2 }], // c24
     stability: [9, { 'stab-se': 3, 'stab-st': 2, 'stab-dv': 2, 'stab-inv': 2 }] })
 })
 
