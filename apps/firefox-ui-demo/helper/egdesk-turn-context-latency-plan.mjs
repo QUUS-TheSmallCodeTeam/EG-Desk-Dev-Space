@@ -294,3 +294,82 @@ export function analyzeSize(byRun) {
               : 'size does not matter'
   return { runs, reading }
 }
+
+// ---- cycle 21: does socket reuse alone explain the fast requests? (PREPARED, NOT SENT; run after the size probe) ----
+// In the six warm-up points every fast measured request reused the socket of the warm-up that had just landed, and the slow ones used a new
+// socket: socket reuse and "recent traffic" always came together. A2 (a new socket, fast) shows a new socket is not always slow, but it had no tail
+// to speak of. This probe separates the two with the product's own transport:
+//   N1, N2  (nothing can reuse the warm-up's socket, one request can): after >= 10 min idle
+//     warmup  the product warm-up body (it detects whether the idle tail occurred in this run: over 800 ms = it did)
+//     same    1 s later, a turn_context on the SAME transport (reuses the warm-up's socket: the B-point shape, the reference)
+//     fresh   1 s later, a turn_context on a NEW transport (the old one is closed first: a new TCP and TLS connection, no reuse, no TLS session)
+//   Y1  (a reused socket and NO recent traffic): after >= 10 min idle
+//     first   a tiny product warm-up body on a transport that keeps idle sockets for 11 minutes (detects the tail: over 800 ms)
+//     after   600 s later, a turn_context on the same transport (reused if the socket survived; no other Decisions request from this machine in
+//             between: the point runner flags an interleaved one)
+// Registered readings. A run N is informative only when its warm-up was slow (the tail occurred) and its "same" request was fast (the warm-up held):
+//   warmth, not the socket        at least one informative N run, every informative N run has "fresh" fast, and Y1 is not (reused and fast)
+//   the socket matters            at least one informative N run has "fresh" slow
+//   mixed                         informative N runs disagree (one fresh fast, one slow): repeat
+//   reuse alone is fast too       Y1 reused its socket and "after" was fast (the idle tail is intermittent, so this alone is weak): repeat Y1
+//   inconclusive                  no N run is informative (the tail did not occur, or the warm-up did not hold)
+// Y1's own reading: socket did not survive (after.reusedSocket false: reuse after a long idle is not available, so reuse cannot be what the
+// product gets), reused and slow (reuse does not prevent the tail), reused and fast (see above).
+export const SEP_SET = 'turn-context-warmup-sep-v1'
+export const SEP_DIR = 'proofs/decision-real-measure/turn-context-warmup-sep'
+export const SEP_ESTIMATE_BOUND = 4000
+export const SEP_CEILING = 4200
+export const SEP_IDLE_WAIT_MS = 600_000
+export const SEP_SOCKET_IDLE_MS = 660_000
+export const SEP_WAIT_LIMIT_MS = 660_000
+const SEP_MEASURED = Object.freeze(REALISTIC.slice(0, 1))
+export const SEP_RUNS = Object.freeze([
+  ['N1', [['warmup', 0, null, {}], ['same', 1000, 'A사 견적서는 지금 어디까지 진행됐어?', {}], ['fresh', 1000, 'v2 납기는 언제로 잡혀 있어?', { freshSocket: true }]]],
+  ['N2', [['warmup', 0, null, {}], ['same', 1000, 'v1 견적은 언제 보냈었지?', {}], ['fresh', 1000, 'A사 단가는 지금 얼마로 되어 있어?', { freshSocket: true }]]],
+  ['Y1', [['first', 0, null, {}], ['after', SEP_IDLE_WAIT_MS, 'A사 건 남은 일이 뭐야?', {}]]],
+])
+/** -> { runs: [{ dir, plan, planBytes, files, est }], totals } — deterministic; sends nothing. */
+export async function buildSeparationPlan() {
+  const runs = []
+  for (const [dir, items] of SEP_RUNS) {
+    const files = [], requests = []
+    for (const [id, waitBeforeMs, message, extra] of items) {
+      const body = message === null ? { model: DECISION_MODEL, input: CONTENT_FREE_REQUESTS.warmup.input, questions: CONTENT_FREE_REQUESTS.warmup.questions } : await idleBody(message, SEP_MEASURED)
+      const bytes = Buffer.from(JSON.stringify(body), 'utf8'), file = `requests/${id}.json`
+      files.push({ file, bytes })
+      requests.push({ id, file, sha256: sha(bytes), estInputTokens: estimateBodyTokens(bytes.toString('utf8')), ...(waitBeforeMs ? { waitBeforeMs } : {}), ...extra, expect: [], recordOnly: true })
+    }
+    const est = requests.reduce((t, r) => t + r.estInputTokens, 0), long = dir.startsWith('Y')
+    const plan = { set: `${SEP_SET}/${dir}`, tokenCeiling: Math.ceil(est * TOKEN_MODEL.margin / 10) * 10, transport: 'product', ...(long ? { transportIdleMs: SEP_SOCKET_IDLE_MS, waitLimitMs: SEP_WAIT_LIMIT_MS } : {}),
+      passRule: 'Record only (latency probe). PRECONDITION, not enforced by the runner: start this run only after at least 10 minutes with no Decisions request from this machine (the point runner checks the shared send stamp)' +
+        (long ? ', and send nothing else to Decisions from this machine during the 10-minute wait inside the run (the point runner marks an interleaved send). ' : '. ') +
+        'Run order N1, N2, Y1. Read with scripts/egdesk-turn-context-warmup-run.mjs --set sep --analyze.',
+      requests }
+    runs.push({ dir, plan, planBytes: Buffer.from(JSON.stringify(plan, null, 2) + '\n'), files, est })
+  }
+  const est = runs.reduce((t, r) => t + r.est, 0), ceilings = runs.reduce((t, r) => t + r.plan.tokenCeiling, 0)
+  if (est > SEP_ESTIMATE_BOUND) throw new Error(`the separating probe estimates ${est} input tokens, over ${SEP_ESTIMATE_BOUND}`)
+  if (ceilings > SEP_CEILING) throw new Error(`the separating probe's ceilings add up to ${ceilings}, over ${SEP_CEILING}`)
+  return { runs, totals: { runs: runs.length, requests: runs.reduce((t, r) => t + r.plan.requests.length, 0), estInputTokens: est, ceilings } }
+}
+/** { N1: { warmup, same, fresh }, N2: {...}, Y1: { first, after } } (a run's results: request id -> the runner's result) -> the runs and the registered reading. */
+export function analyzeSeparation(byRun) {
+  const slow = r => r.elapsedMs > BUDGETS.warm
+  const n = dir => { const x = byRun?.[dir]; if (!x?.warmup || !x?.same || !x?.fresh) return null
+    const tail = slow(x.warmup), held = !slow(x.same)
+    return { warmupMs: x.warmup.elapsedMs, sameMs: x.same.elapsedMs, sameReused: x.same.reusedSocket ?? null, freshMs: x.fresh.elapsedMs, freshReused: x.fresh.reusedSocket ?? null, freshFlag: x.fresh.freshSocket === true,
+      freshServerMs: x.fresh.openaiProcessingMs == null ? null : Number(x.fresh.openaiProcessingMs), freshConnectMs: x.fresh.connectMs ?? null, freshTlsMs: x.fresh.tlsMs ?? null, tail, held, informative: tail && held, freshSlow: slow(x.fresh) } }
+  const y = (() => { const x = byRun?.Y1; if (!x?.first || !x?.after) return null
+    return { firstMs: x.first.elapsedMs, tail: slow(x.first), afterMs: x.after.elapsedMs, afterReused: x.after.reusedSocket ?? null, afterSlow: slow(x.after), waitedMs: x.after.waitedMs ?? null,
+      reading: x.after.reusedSocket !== true ? 'socket did not survive the idle: reuse after a long idle is not available' : slow(x.after) ? 'reused and slow: reuse does not prevent the tail' : 'reused and fast: weak (the tail is intermittent), repeat' } })()
+  const runs = { N1: n('N1'), N2: n('N2'), Y1: y }
+  const ns = [runs.N1, runs.N2].filter(Boolean), info = ns.filter(r => r.informative)
+  const yReusedFast = !!y && y.afterReused === true && !y.afterSlow
+  const reading = ns.length < 2 || !y ? 'incomplete'
+    : info.length === 0 ? 'inconclusive: no N run had both the idle tail and a held warm-up'
+      : info.some(r => r.freshSlow) && info.some(r => !r.freshSlow) ? 'mixed: informative N runs disagree, repeat'
+        : info.some(r => r.freshSlow) ? 'the socket matters: a new socket was slow even after a warm-up'
+          : yReusedFast ? 'reuse alone is fast too: weak (the idle tail is intermittent), repeat Y1'
+            : 'warmth, not the socket: a new socket was fast after a warm-up'
+  return { runs, reading }
+}
