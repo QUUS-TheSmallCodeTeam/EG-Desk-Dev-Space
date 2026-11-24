@@ -246,7 +246,7 @@ export function validateEngineScript(value) {
         if (conv.flags?.EGDESK_PRESENCE !== 'on') bad(`${tt}.expect.collab`, 'needs flags.EGDESK_PRESENCE = "on" in this conversation')
         if (e.collab.attention !== undefined) {
           for (const flag of ['EGDESK_WORK_PLACEMENT', 'EGDESK_CONVERSATION_FLOW']) if (conv.flags?.[flag] !== 'on') bad(`${tt}.expect.collab.attention`, `needs flags.${flag} = "on" in this conversation (the scene is judged at the room's live heartbeat)`)
-          if (e.collab.attention.pointer === 'raised' && !(conv.draftCheck?.mode === 'on' || conv.flags?.EGDESK_DRAFT_CHECK === 'on')) bad(`${tt}.expect.collab.attention.pointer`, 'a pointer message needs the draft check on in this conversation')
+          if (['raised', 'posted'].includes(e.collab.attention.pointer) && !(conv.draftCheck?.mode === 'on' || conv.flags?.EGDESK_DRAFT_CHECK === 'on')) bad(`${tt}.expect.collab.attention.pointer`, 'a pointer message needs the draft check on in this conversation')
         }
         if (turn.whileRunning !== undefined || turn.action !== undefined) bad(`${tt}.expect.collab`, 'not checked on a whileRunning or action turn')
       }

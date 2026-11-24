@@ -21,7 +21,10 @@ import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
 import { PRESENCE_MIRROR, RUN_REQUESTER, createPresenceMirror, createPresenceMirrorHttpHandler, createRunRequesterHttpHandler, createRunRequesters } from './egdesk-presence-mirror.mjs'
 import { createWorkPlacement, createWorkPlacementHttpHandler } from './egdesk-work-placement.mjs'
-import { DRAFT_CHECK_COPY } from './egdesk-draft-check.mjs'
+import * as DraftCheck from './egdesk-draft-check.mjs'
+// the draft check's fixed fallback sentences (the owner removed them; L3): read when the module still has them, else none (the same reading as the multiuser measure)
+const DRAFT_CHECK_COPY = DraftCheck.DRAFT_CHECK_COPY ?? {}
+import { messageCounts } from './egdesk-real-engine-journey.mjs'
 
 export const COLLAB_FLAGS = Object.freeze(['EGDESK_PRESENCE', 'EGDESK_WORK_PLACEMENT'])
 export const COLLAB_FROM = Object.freeze(['owner', 'invited'])
@@ -30,7 +33,7 @@ export const COLLAB_PEOPLE = Object.freeze({
   owner: Object.freeze({ member: 'self', scene: 'M1', viewport: Object.freeze({ x: 0, y: 0, width: 1280, height: 800 }) }),
   invited: Object.freeze({ member: 'm-3f9a1c7e5b2d4a60', scene: 'M2', board: '0b1e7f3a-5c2d-4e8b-9a61-3d2c1f0e9a77', viewport: Object.freeze({ x: 2900, y: 500, width: 1200, height: 800 }) }),
 })
-export const COLLAB_LIMITS = Object.freeze({ repostMs: 3000, attentionWaitMs: 8000, sharedChars: 4000, strings: 8, stringChars: 200, outcomeWords: Object.freeze(['leave', 'point', 'surface_near_requester']) })
+export const COLLAB_LIMITS = Object.freeze({ repostMs: 3000, attentionWaitMs: 25_000, pointerWaitMs: 30_000, sharedChars: 4000, strings: 8, stringChars: 200, outcomeWords: Object.freeze(['leave', 'point', 'surface_near_requester']) })
 const clip = (text, n) => String(text ?? '').slice(0, n)
 const oneLine = text => String(text ?? '').replace(/\s+/g, ' ').trim()
 
@@ -43,7 +46,7 @@ export const COLLAB_EXPECT_SCHEMA = Object.freeze({
   type: 'object', additionalProperties: false, minProperties: 1,
   properties: {
     requester: { enum: [...COLLAB_FROM] },
-    attention: { type: 'object', additionalProperties: false, minProperties: 1, properties: { branch: { enum: ['owner', 'requester'] }, kind: { enum: [...COLLAB_LIMITS.outcomeWords] }, pointer: { enum: ['raised', 'none'] } } },
+    attention: { type: 'object', additionalProperties: false, minProperties: 1, properties: { branch: { enum: ['owner', 'requester'] }, kind: { enum: [...COLLAB_LIMITS.outcomeWords] }, pointer: { enum: ['posted', 'raised', 'none'] } } },
     ownerQuestion: { type: 'object', additionalProperties: false, minProperties: 1, properties: { questions: { type: 'array', minItems: 1, maxItems: 4, items: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,40}$' } }, quotesRequest: strings, quotesOwnAnswer: { const: true } } },
     noIdentity: { const: true },
     cameraUntouched: { const: true },
@@ -62,7 +65,7 @@ export function validateCollabExpect(e) {
       for (const k of Object.keys(e.attention)) if (!ATTENTION_KEYS.includes(k)) out.push(`attention.${k}: unknown key`)
       if (e.attention.branch !== undefined && !['owner', 'requester'].includes(e.attention.branch)) out.push('attention.branch: owner or requester')
       if (e.attention.kind !== undefined && !COLLAB_LIMITS.outcomeWords.includes(e.attention.kind)) out.push(`attention.kind: one of ${COLLAB_LIMITS.outcomeWords.join(' / ')}`)
-      if (e.attention.pointer !== undefined && !['raised', 'none'].includes(e.attention.pointer)) out.push('attention.pointer: raised or none')
+      if (e.attention.pointer !== undefined && !['posted', 'raised', 'none'].includes(e.attention.pointer)) out.push('attention.pointer: posted, raised or none')
     }
   }
   if (e.ownerQuestion !== undefined) {
@@ -98,10 +101,10 @@ export function checkCollabExpect(expect, rec) {
   const att = rec.attention
   if (expect.attention !== undefined) {
     const a = expect.attention, res = att?.result ?? null
-    const pointerRaised = att ? att.pointer === 'raised' : null
-    put('attention', !!res && res.status === 'decided' && (a.branch === undefined || res.branch === a.branch) && (a.kind === undefined || res.kind === a.kind)
-      && (a.pointer === undefined || (a.pointer === 'raised' ? pointerRaised === true : pointerRaised === false)),
-    { submitted: att?.submitted ?? null, result: res ? { status: res.status, branch: res.branch ?? null, kind: res.kind ?? null, source: res.source ?? null, forMember: res.forMember ?? null } : null, pointer: att?.pointer ?? null })
+    // posted: the placement runtime raised the pointer AND the conversation's flow posted exactly one message for it (the window's R4: one pointer message in the owner's own conversation)
+    const pointerOk = a.pointer === undefined || (att ? (a.pointer === 'posted' ? att.pointer === 'posted' && att.flowMessages === 1 : a.pointer === 'raised' ? ['raised', 'posted'].includes(att.pointer) : att.pointer === 'none') : false)
+    put('attention', !!res && res.status === 'decided' && (a.branch === undefined || res.branch === a.branch) && (a.kind === undefined || res.kind === a.kind) && pointerOk,
+    { submitted: att?.submitted ?? null, heartbeat: att?.heartbeat ?? null, result: res ? { status: res.status, branch: res.branch ?? null, kind: res.kind ?? null, source: res.source ?? null, forMember: res.forMember ?? null } : null, pointer: att?.pointer ?? null, flowMessages: att?.flowMessages ?? null })
   }
   if (expect.ownerQuestion !== undefined) {
     const q = expect.ownerQuestion, failed = []
@@ -202,7 +205,7 @@ export const collabHook = Object.freeze({
     worlds.set(conversation, world)
     return { presence: world.mirror, audience: ({ run }) => world.audience({ run }), attentionPosted: ({ key, provider }) => { if (provider === 'work_placement') world.placement?.acknowledgePointer(key) } }
   },
-  attach({ chat, client, FLAG, conversation, calibrationLog = null, limits = {} }) {
+  attach({ chat, client, store = null, FLAG, conversation, calibrationLog = null, limits = {} }) {
     const L = { ...COLLAB_LIMITS, ...limits }
     const world = worlds.get(conversation) ?? createCollabWorld()
     worlds.set(conversation, world)
@@ -214,37 +217,50 @@ export const collabHook = Object.freeze({
     const placement = createWorkPlacement({ client: recordingClient, mode: () => (on ? 'on' : 'off'), enabled: () => on, live: () => on, calibrationLog, contextFor: (key, options) => chat.placementContextFor(key, options) })
     world.placement = placement
     const placementHttp = createWorkPlacementHttpHandler({ placement, heartbeatFor: key => chat.heartbeatFor(key) })
-    let last = { from: 'owner', set: null, clientThreadId: null, mark: 0 }
+    let last = { from: 'owner', set: null, clientThreadId: null, mark: 0, opted: false }
     return {
       name: 'collab',
       // before a message turn: who sends it (the script's `from`, the owner by default), told through the bridge's own routes
       async beforeTurn({ turn, clientThreadId, conversationId = null }) {
         const from = COLLAB_FROM.includes(turn?.from) ? turn.from : 'owner'
-        last = { from, set: await world.tell(from, { clientThreadId, conversationId }), clientThreadId, mark: world.flowAudience.length }
+        // The check's one-time threads are not the owner's direct conversation (whose answers the draft check holds and whose flow may speak). Once the room's live session exists (from the
+        // second turn on) it is opted in to the flow's messages, the pointer, as the runtime does for a bounded run, without holding any answer (chat.allowIntermediateMessages, draft check on):
+        // it takes effect for the NEXT run of the session, which is why a script puts a turn of the owner's before the first one that expects a pointer.
+        const opted = chat.allowIntermediateMessages?.(clientThreadId) === true
+        last = { from, set: await world.tell(from, { clientThreadId, conversationId }), clientThreadId, mark: world.flowAudience.length, opted }
       },
-      async afterTurn({ run, say, answer, turnIndex = 0 }) {
+      async afterTurn({ run, say, answer, turnIndex = 0, expect = {} }) {
         const keys = { clientThreadId: run?.clientThreadId ?? last.clientThreadId, conversationId: run?.conversationId ?? null }
         const markBodies = bodies.length
-        const rec = { turnIndex, request: clip(say, 200), from: last.from, set: last.set, audience: null, flowAudience: [], ownAnswer: null, attention: null }
+        const rec = { turnIndex, request: clip(say, 200), from: last.from, set: last.set, optedIn: last.opted, audience: null, flowAudience: [], flowAudienceTotal: world.flowAudience.length, ownAnswer: null, attention: null }
         const audience = world.requesters.audience({ run: keys }) // the bridge's own answer for this run
         rec.audience = audience ? { requester: audience.requester, owner: audience.owner } : { requester: null, owner: null }
         rec.flowAudience = world.flowAudience.slice(last.mark).filter(a => a.key === keys.clientThreadId).map(a => ({ requester: a.requester, owner: a.owner })).slice(-8)
         const key = keys.clientThreadId
         // the answering model's own sentences of this turn's answer (the posted answer without the draft check's appended copy), as the placement judge is given them
         try { const live = chat.runFor?.({ conversationId: run?.conversationId, runId: run?.runId, answerId: run?.answerId }); rec.ownAnswer = live ? clip(chat.runOwnAnswerText(live), 1200) : null } catch { rec.ownAnswer = null }
-        if (typeof answer === 'string' && answer.trim() && key) {
+        // the attention scene costs Decision calls and may post a message: only for a turn whose expectation asks for it
+        if (expect.attention !== undefined && typeof answer === 'string' && answer.trim() && key) {
           const scene = attentionScene()
           const heartbeat = chat.heartbeatFor(key) ?? null
           const submitted = (await route(placementHttp, '/decision/work-placement/request', { clientThreadId: key, conversationId: keys.conversationId, dto: scene })).body ?? { status: 'invalid' }
-          const att = { submitted: submitted.status, id: submitted.id ?? null, heartbeat: heartbeat ? heartbeat.state ?? 'unknown' : 'none', result: null, pointer: 'none', requests: [], landedInsideOthers: null, sceneHasCoordinates: COORDINATE.test(JSON.stringify(scene)) }
+          const flows = () => (store ? messageCounts(store, key).flows : 0), flowsBefore = flows(), recordsBefore = placement.records().length
+          const att = { submitted: submitted.status, id: submitted.id ?? null, heartbeat: heartbeat ? heartbeat.state ?? 'unknown' : 'none', mayPoint: last.opted, result: null, pointer: 'none', flowMessages: 0, requests: [], landedInsideOthers: null, sceneHasCoordinates: COORDINATE.test(JSON.stringify(scene)) }
           if (submitted.status === 'queued') {
             const deadline = Date.now() + L.attentionWaitMs
             let result = { status: 'pending' }
             while (Date.now() < deadline) { result = (await route(placementHttp, '/decision/work-placement/result', { clientThreadId: key, conversationId: keys.conversationId, id: submitted.id })).body ?? { status: 'unknown' }; if (result.status !== 'pending') break; await sleep(100) }
             await placement.idle()
             att.result = { status: result.status, branch: result.branch ?? null, kind: result.kind ?? null, source: result.source ?? null, forMember: result.forMember ?? null }
-            const records = placement.records(), r = records.at(-1) ?? null
+            const r = placement.records().slice(recordsBefore).at(-1) ?? null // this scene's own record, never an earlier one
             att.pointer = r?.pointer === 'raised' ? 'raised' : 'none'
+            // a raised pointer is carried to the conversation by its flow at a beat: wait (bounded) until it is acknowledged, i.e. the message was posted
+            if (att.pointer === 'raised') {
+              const until = Date.now() + L.pointerWaitMs
+              while (Date.now() < until && placement.facts(key)?.pointerPending === true) await sleep(200)
+              if (placement.facts(key)?.pointerPending !== true) att.pointer = 'posted'
+            }
+            att.flowMessages = flows() - flowsBefore
             att.landedInsideOthers = r?.landed ? r.landed.insideOthers === true : false
             att.record = r ? { kind: r.kind, surface: r.surface, state: r.state ?? null, branch: r.branch ?? null, source: r.source, pointer: r.pointer ?? null, would: r.would } : null
           }

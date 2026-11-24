@@ -581,7 +581,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       seen = texts.length
       // a registered feature that has an `expect.<name>` entry in this turn runs now, after the answer is posted, and leaves its record
       const hookRecords = {}
-      for (const a of attached) if (turn.expect?.[a.name] !== undefined && a.afterTurn) hookRecords[a.name] = await a.afterTurn({ run: sub.at(-1).run, say: turn.say, answer: posted.at(-1) ?? null, turnIndex: index + 1 })
+      for (const a of attached) if (turn.expect?.[a.name] !== undefined && a.afterTurn) hookRecords[a.name] = await a.afterTurn({ run: sub.at(-1).run, say: turn.say, answer: posted.at(-1) ?? null, turnIndex: index + 1, expect: turn.expect[a.name] })
       const flat = {
         hooks: hookRecords, toolCalls: sub.flatMap(s => s.toolCalls), native: sumNative(sub), posted, asked, commandsRan: sub.flatMap(s => s.commandsRan), files: readFiles(turn), undoRecords: undoCount(),
         turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted), draftCheckRows: sub.reduce((n, s) => n + (s.draftRows?.length ?? 0), 0),
