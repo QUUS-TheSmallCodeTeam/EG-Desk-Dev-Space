@@ -11,6 +11,10 @@ import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.
 // Heartbeat (egdesk-heartbeat.mjs, used through its public API only): one judgment per beat per conversation, taken from a small queue; this module also
 // registers a fact provider so the conversation flow can see "a result is waiting over there" as closed labels (pointerPending / pointerWhere / ...).
 // Without a live heartbeat nothing is asked: the code's own default (already inside the hard rules) stands.
+// The heartbeat now belongs to the session and outlives the run (idle tempo, a beat every 20 s), so a surface opened or a result finished AFTER the run is judged too.
+// This module nudges it (hb.nudge(), a beat within half a second, at most once per beat interval) when a scene is queued and when a pointer fact is raised; a refused
+// second nudge is tried once more one beat interval later, so the pointer does not wait for the idle grid. The session posts ONE message from the pointer fact and
+// acknowledges it (hb.acknowledge / attentionPosted -> acknowledgePointer); the fact is then withdrawn.
 
 export const WORK_PLACEMENT_LIMITS = Object.freeze({
   pending: 8,          // queued judgments per conversation
@@ -19,6 +23,7 @@ export const WORK_PLACEMENT_LIMITS = Object.freeze({
   maxEvals: 12,        // Decision requests per conversation heartbeat
   results: 32, records: 64,
   pointerMs: 120_000,  // a pointer fact that nobody acknowledged is withdrawn after this
+  renudgeMs: 5_000,    // the heartbeat refuses a second nudge inside one beat interval (5 s): the pointer's nudge is tried once more after it
 })
 const SURFACES = new Set(['file', 'browser', 'terminal', 'result'])
 const STATES = new Set(['running', 'waiting_owner', 'finished'])
@@ -105,7 +110,11 @@ const RULE = 'People must not be disturbed where they are working. Judge only fr
 export function placementQuestion(dto) {
   if (dto.options.length < 2) return null
   const attention = dto.kind === 'attention'
-  const describe = o => `${attention ? ATTENTION_WORDS[o.kind] : PLACE_WORDS[o.kind]}; ${o.distance === 'in_view' ? 'in view' : `${o.distance}, ${o.direction}`} of ${attention && o.forMember ? o.forMember : 'the requester'}; ${viewWords(o.insideView, dto.task.requester)}${o.related && o.related !== 'none' ? `; ${o.related === 'same_task' ? 'with the same task\'s other cards' : 'with related cards'}` : ''}`
+  // Where an attention option's card is, is measured from the member who would be told (the owner when they must act, else the requester): say whose view it is measured from.
+  const actor = attention ? dto.options.find(o => o.forMember)?.forMember ?? dto.task.requester : null
+  const SIDE = { left: 'to the left of', right: 'to the right of', above: 'above', below: 'below' }
+  const where = o => { const who = attention ? (o.forMember ?? actor) : 'the requester'; return o.distance === 'in_view' ? `in view of ${who}` : `${o.distance}, ${SIDE[o.direction] ?? 'away from'} ${who}` }
+  const describe = o => `${attention ? ATTENTION_WORDS[o.kind] : PLACE_WORDS[o.kind]}; ${attention && o.kind === 'leave' ? `the card is ${where(o)}` : where(o)}; ${viewWords(o.insideView, dto.task.requester)}${o.related && o.related !== 'none' ? `; ${o.related === 'same_task' ? 'with the same task\'s other cards' : 'with related cards'}` : ''}`
   const facts = { members: dto.members, task: dto.task, surface: dto.surface, ...(attention ? { card: dto.card } : {}) }
   const question = attention
     ? choiceQuestion('attention', `A task's result card already exists. The flow changed (the task finished, needs the owner, or the requester went idle). What should happen now? A member who is working is not interrupted by cards arriving in their view; a member who must act but cannot see the card should be told where it is. ${RULE}`,
@@ -138,11 +147,12 @@ export function pointerWriterPrompt(fact) {
 }
 
 /**
- * createWorkPlacement({ client, mode, enabled, calibrationLog?, egressFor?, now?, limits? })
+ * createWorkPlacement({ client, mode, enabled, live?, calibrationLog?, egressFor?, now?, setTimer?, limits? })
  *   client: a Decisions client ({ decide }); mode(): 'off' | 'advisory' | 'on' (the Decisions mode); enabled(): the bridge-side switch (default off).
+ *   live(): may a decided "point" become a pointer fact (which the session turns into ONE chat message)? Default false: advisory records that it would point and raises nothing.
  * submit(key, dto, heartbeat) queues one judgment for the conversation's next beat. result(key, id) reads it. facts(key) is what the heartbeat provider reports.
  */
-export function createWorkPlacement({ client, mode = () => 'off', enabled = () => false, calibrationLog = null, egressFor = null, now = Date.now, limits = {} } = {}) {
+export function createWorkPlacement({ client, mode = () => 'off', enabled = () => false, live = () => false, calibrationLog = null, egressFor = null, now = Date.now, setTimer = (fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return t }, limits = {} } = {}) {
   const L = { ...WORK_PLACEMENT_LIMITS, ...limits }
   const convs = new Map()
   const running = new Set()
@@ -166,7 +176,8 @@ export function createWorkPlacement({ client, mode = () => 'off', enabled = () =
     const c = conv(key)
     if (c.heartbeat === heartbeat) return
     c.heartbeat = heartbeat; c.evals = 0
-    heartbeat.register('work_placement', () => facts(key))
+    // The session acknowledges an attention fact it has posted a message for (hb.acknowledge(provider, 'attention')): the pointer is withdrawn here.
+    heartbeat.register('work_placement', { facts: () => facts(key), acknowledge: what => { if (what === 'attention') { const cur = convs.get(key); if (cur) cur.pointer = null } } })
     heartbeat.subscribe(() => { const job = onBeat(key).catch(() => {}); running.add(job); void job.finally(() => running.delete(job)) })
   }
   function finish(c, item, alias, source, extra = {}) {
@@ -174,13 +185,18 @@ export function createWorkPlacement({ client, mode = () => 'off', enabled = () =
     c.results.set(item.id, { status: 'decided', choice: option.alias, kind: option.kind, source })
     while (c.results.size > L.results) c.results.delete(c.results.keys().next().value)
     c.decided++
-    if (item.dto.kind === 'attention' && option.kind === 'point') {
+    const pointing = item.dto.kind === 'attention' && option.kind === 'point', raise = pointing && (() => { try { return live() === true } catch { return false } })()
+    if (raise) {
       const self = item.dto.members.find(m => m.self)?.alias
       c.pointer = { at: now(), where: option.direction === 'in_view' ? 'none' : option.direction, distance: option.distance, who: option.forMember === self ? 'owner' : 'requester',
         needs: item.dto.task.ownerMustAct ? 'owner_action' : 'review' }
+      // Something for the session's judge now. The nudge that brought this beat was less than one beat interval ago, so this one is usually refused: try once more after it.
+      let accepted = false
+      try { accepted = c.heartbeat?.nudge?.() !== false } catch { accepted = true }
+      if (!accepted && !c.renudge) c.renudge = setTimer(() => { c.renudge = null; try { if (c.pointer) c.heartbeat?.nudge?.() } catch { /* the grid beat will carry it */ } }, L.renudgeMs)
     }
     // Content-free record of what would happen against what happens today (advisory): closed words only.
-    records.push({ kind: item.dto.kind, surface: item.dto.surface, source, would: { kind: option.kind, distance: option.distance, direction: option.direction },
+    records.push({ kind: item.dto.kind, surface: item.dto.surface, source, ...(pointing ? { pointer: raise ? 'raised' : 'advisory' } : {}), would: { kind: option.kind, distance: option.distance, direction: option.direction },
       landed: item.dto.landed ? { distance: item.dto.landed.distance, direction: item.dto.landed.direction, insideOthers: item.dto.landed.insideView.some(a => a !== item.dto.task.requester) } : null, ...extra })
     while (records.length > L.records) records.shift()
   }
@@ -226,6 +242,7 @@ export function createWorkPlacement({ client, mode = () => 'off', enabled = () =
       if (c.queue.length >= L.pending) return { status: 'busy' }
       const id = `wp-${++seq}`
       c.queue.push({ id, dto, at: now() })
+      try { heartbeat.nudge?.() } catch { /* the grid beat will take it */ } // judged within half a second instead of at the next grid beat
       return { status: 'queued', id }
     },
     result(key, id) { return convs.get(key)?.results.get(id) ?? (convs.get(key)?.queue.some(item => item.id === id) ? { status: 'pending' } : { status: 'unknown' }) },

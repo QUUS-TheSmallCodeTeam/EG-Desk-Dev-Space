@@ -562,9 +562,11 @@ const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credent
   // Order: the Decision model decides the design guide and the subjective model fills the data (default); EGDESK_BRIEFING_ORDER=design-first keeps the earlier order for comparison.
   briefing: briefingDeps({ chat, contexts, enabled: process.env.EGDESK_BRIEFING_FLOW === 'on', order: process.env.EGDESK_BRIEFING_ORDER === 'design-first' ? 'design-first' : 'skeleton' }) })
 // Work-surface placement (egdesk-work-placement.mjs): where an Agent's visible work surface should open, judged at the conversation's heartbeat among options the
-// canvas enumerated. Off unless EGDESK_WORK_PLACEMENT=advisory (and the Decisions mode is advisory or on, and the chrome's egdesk.workPlacement is "advisory"); it
+// canvas enumerated. Off unless EGDESK_WORK_PLACEMENT=advisory or on (and the Decisions mode is advisory or on, and the chrome's egdesk.workPlacement is "advisory"); it
 // records what it would choose and changes nothing on the canvas.
-const workPlacement = createWorkPlacement({ client: decisionClient, mode: () => bridgeSettings.decisionContext.mode, enabled: () => process.env.EGDESK_WORK_PLACEMENT === 'advisory', calibrationLog: decisionCalibrationLog })
+const workPlacement = createWorkPlacement({ client: decisionClient, mode: () => bridgeSettings.decisionContext.mode, enabled: () => ['advisory', 'on'].includes(process.env.EGDESK_WORK_PLACEMENT),
+  // 'on' additionally lets a decided "point" become a pointer fact, which the session heartbeat turns into ONE chat message (EGDESK_CONVERSATION_FLOW=on). Cards are never moved in either mode.
+  live: () => process.env.EGDESK_WORK_PLACEMENT === 'on', calibrationLog: decisionCalibrationLog })
 const handleWorkPlacementHttp = createWorkPlacementHttpHandler({ placement: workPlacement, heartbeatFor: key => chat.heartbeatFor(key), port: BRIDGE_PORT })
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
 const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),

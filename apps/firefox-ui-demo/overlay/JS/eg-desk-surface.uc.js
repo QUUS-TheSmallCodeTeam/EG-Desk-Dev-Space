@@ -4384,11 +4384,8 @@
         id: card.id, kind: card.classList.contains('egd-result-card') ? 'result' : 'memo', rect: persistentEntityGeometry(card), collapsed: card.classList.contains('egd-card-collapsed'),
         record: card._resultRecord || null, memoSeq: card._memoRecord?.seq }));
       // Cycle 13: the person's own message this answer replies to (the nearest one before it) and the visible canvas area, for the bridge's design-guide decision (`on` only).
-      let request = '', viewport = null;
-      if (flowMode === 'on') {
-        request = thread.messages.slice(0, thread.messages.indexOf(message)).reverse().find(item => item.role === 'user' && typeof item.content === 'string')?.content || '';
-        const safe = safeViewportWorldRect(); viewport = { x: safe.left, y: safe.top, width: safe.right - safe.left, height: safe.bottom - safe.top };
-      }
+      const request = thread.messages.slice(0, thread.messages.indexOf(message)).reverse().find(item => item.role === 'user' && typeof item.content === 'string')?.content || '';
+      const safe = safeViewportWorldRect(), viewport = { x: safe.left, y: safe.top, width: safe.right - safe.left, height: safe.bottom - safe.top };
       const body = BriefingHost.observeRequest({ mode: flowMode, report: message.content, answerId: message.answerId || null, conversationId: run.conversationId || null, runId: run.runId || null, candidates: BriefingHost.canvasBriefingCandidates(cards), request, viewport });
       if (!body) return;
       briefingObserved.add(key);
