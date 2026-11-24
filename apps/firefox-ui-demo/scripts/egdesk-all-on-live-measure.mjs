@@ -511,7 +511,11 @@ function seenAfter(w, id, before, j) {
       const ctx = c.params.additionalContext ?? {}
       const parsed = Object.values(ctx).map(v => packetPages(v?.value))
       return { inputTexts: (c.params.input ?? []).map(i => i?.text ?? null), keys: Object.keys(ctx), pageIds: [...new Set(Object.values(ctx).flatMap(v => [...String(v?.value ?? '').matchAll(PAGE_ID)].map(m => m[1])))],
-        bodyIds: [...new Set(parsed.flatMap(p => p.bodies))], refIds: [...new Set(parsed.flatMap(p => p.refs))] }
+        bodyIds: [...new Set(parsed.flatMap(p => p.bodies))], refIds: [...new Set(parsed.flatMap(p => p.refs))],
+        // sizes (L7 c29, additive): characters per context key, and the body copies of each page in this one packet (a page twice = 2)
+        chars: Object.fromEntries(Object.entries(ctx).map(([k, v]) => [k, String(v?.value ?? '').length])),
+        bytes: Object.fromEntries(Object.entries(ctx).map(([k, v]) => [k, Buffer.byteLength(String(v?.value ?? ''), 'utf8')])),
+        copies: parsed.flatMap(p => p.bodies).reduce((m, id) => { m[id] = (m[id] ?? 0) + 1; return m }, {}) }
     }),
     engineTurns: w.subjectiveTurnsIn(id), interrupts: w.interruptsIn(id),
     // (cycle 20) what reached the scripted engine for the person's in-run messages: each steer's turn, the person's words and request id; each interrupt's
