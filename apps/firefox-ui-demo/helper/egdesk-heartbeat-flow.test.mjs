@@ -45,7 +45,9 @@ test('engine silent for 25 s: the heartbeat still beats, the stall is offered at
   await w.advance(1000); await d.note('n1', '자료를 확인하는 중입니다.') // the last engine event, at 1 s
   await w.advance(23000) // 24 s
   assert.equal(d.hb.beats, 4); assert.deepEqual(d.assistant(), [])
-  assert.deepEqual(w.flowAsked.map(a => [a.offered, a.pick]), [[['none', 'explain_wait'], 'none']], 'at 20 s a wait message is possible; with no step running the model declines')
+  // L3 c16: without a tool step, a wait message waits for 30 s while the engine is active, or for the stall bound of silence (20 s):
+  // at the 20 s beat the engine had been silent 19 s, so nothing was asked yet.
+  assert.deepEqual(w.flowAsked.map(a => [a.offered, a.pick]), [], 'no tool step and the engine silent for less than the stall bound: no request')
   await w.advance(1000) // the 25 s beat: 24 s without an engine event
   assert.deepEqual(w.flowAsked.at(-1).offered, ['none', 'explain_wait', 'stalled']); assert.equal(w.flowAsked.at(-1).pick, 'stalled')
   assert.match(w.flowAsked.at(-1).facts, /seconds_since_anything_came_from_the_work: 24$/m); assert.match(w.flowAsked.at(-1).facts, /current_phase: thinking/)
@@ -54,7 +56,7 @@ test('engine silent for 25 s: the heartbeat still beats, the stall is offered at
   await w.advance(1)
   assert.deepEqual(d.assistant(), [FLOW_COPY.stalled]); assert.equal(w.at(), 31000)
   await w.advance(29000) // 60 s: still silent
-  assert.equal(d.hb.beats, 12); assert.equal(w.requests.flow, 2); assert.deepEqual(d.assistant(), [FLOW_COPY.stalled], 'said once')
+  assert.equal(d.hb.beats, 12); assert.equal(w.requests.flow, 1, 'L3 c16: one request (the 25 s stall beat); the 20 s ask is gone with the no-step floor'); assert.deepEqual(d.assistant(), [FLOW_COPY.stalled], 'said once')
   assert.equal(d.beats.at(-1).sinceEngineMs, 59000)
   await w.advance(2000); await d.final('늦어서 죄송합니다. 확인을 마쳤습니다.')
   assert.deepEqual(d.history().map(r => r[0]), ['user', 'assistant', 'assistant'])

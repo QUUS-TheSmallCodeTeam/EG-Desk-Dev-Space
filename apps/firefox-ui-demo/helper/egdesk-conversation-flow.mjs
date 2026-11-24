@@ -40,6 +40,11 @@ export const FLOW_LIMITS = Object.freeze({
   // until it is done: silence then needs three times as long before it counts (a judgement; see the c12 report for what the
   // protocol documents and what could not be confirmed).
   stallReasoningMs: 60_000,
+  // A run with no tool step whose engine is visibly active (something within the stall bound): no progress note before 30 s.
+  // Measured 2026-11-24 on the same thinking-only material at 3 / 12 / 20 s: yes 0.35 / 0.45 / 0.62. Nothing in the material but
+  // the number changed, so the answer was reading the clock: when to start is arithmetic and belongs here (R3). The first such ask
+  // now comes at 30 s; a silent engine still gets the earlier stall path, and a run with a tool step still starts at 10 s.
+  thinkingNoteMs: 30_000,
   // A stalled engine probably cannot write either: the writer gets 6 s (three times a cold Decision call), then the fixed line is used.
   stalledWriterMs: 6_000,
 })
@@ -202,19 +207,43 @@ export function flowFacts({ run, now, flow, own }) {
 }
 
 /** The kinds that are possible right now. 'none' is always among them. */
+/**
+ * Why no pointer may be posted now, or null. Everything here is a fact code holds; the Decision model is never asked about it
+ * (measured 2026-11-24: asked "do they still need to be told", the model said yes 1.0 with nobody at the desk and 0.92 when the
+ * answer had already said where the document is).
+ *   no_fact     no provider reports something waiting for a person
+ *   in_view     it is already inside what that person is looking at (the placement runtime's own geometry)
+ *   no_route    that person is away, has no conversation of their own, or the only place has someone else in it (pointerRoute:
+ *               presence and participants); the fact is then held for them (holdAttention)
+ *   pointed     a pointer for this fact was already posted (the posted-pointer record)
+ *   declined    the judge already answered for this fact that no pointer is needed (told where, or nothing to look at)
+ *   bound       the window's pointer bound is used up
+ */
+export function pointerBlocked(facts, limits = FLOW_LIMITS) {
+  if (!facts?.attention) return 'no_fact'
+  if (facts.attention.where === 'in_view') return 'in_view'
+  if (!facts.pointerTarget) return 'no_route'
+  if (facts.pointed === true) return 'pointed'
+  if (facts.declined === true) return 'declined'
+  if ((facts.pointers ?? 0) >= limits.maxPointers) return 'bound'
+  return null
+}
+
 export function enumerateOptions(facts, limits = FLOW_LIMITS) {
   const out = ['none']
   if (facts.sinceLastMs !== null && facts.sinceLastMs < limits.minGapMs) return out
-  // A pointer has its own addressee (the person who must act) and its own route, decided by code under the audience rule; it is
-  // possible whenever such a fact is pending, has a route, and was not pointed to yet. It does not depend on the wait messages.
-  // Something already inside what the person is looking at needs no pointer: decided here, never asked.
-  if (facts.attention && facts.attention.where !== 'in_view' && facts.pointerTarget && facts.pointed !== true && (facts.pointers ?? 0) < limits.maxPointers) out.push('pointer')
+  // A pointer has its own addressee (the person who must act) and its own route; whether one may be posted is code (pointerBlocked).
+  // It does not depend on the wait messages.
+  if (pointerBlocked(facts, limits) === null) out.push('pointer')
   if (facts.blocked || facts.sent >= limits.maxMessages) return out
   // Nobody is waiting, the waiting person is not in this conversation, or someone else is: nothing may be said here.
   if (facts.audience && facts.audience.postable !== true) return out
   if (facts.question && !facts.asked) out.push('ask_missing')
   if (facts.elapsedMs >= limits.firstAfterMs) {
-    if (!facts.waitExplained && (facts.stepsActive > 0 || facts.stepsDone > 0 || facts.elapsedMs >= limits.firstAfterMs * 2)) out.push('explain_wait')
+    // Without any tool step: from thinkingNoteMs while the engine is visibly active, from 20 s once it has been silent for the stall bound.
+    const stepped = facts.stepsActive > 0 || facts.stepsDone > 0
+    const silent = Number.isFinite(facts.sinceEngineMs) && facts.sinceEngineMs >= limits.stallAfterMs
+    if (!facts.waitExplained && (stepped || facts.elapsedMs >= limits.thinkingNoteMs || (silent && facts.elapsedMs >= limits.firstAfterMs * 2))) out.push('explain_wait')
     if (facts.stepsSinceLast >= limits.milestoneSteps && facts.sent > 0) out.push('milestone')
   }
   // The engine has been silent for the stall bound (known only on a heartbeat: sinceEngineMs comes from its counter) while it is the
@@ -233,13 +262,18 @@ export function enumerateOptions(facts, limits = FLOW_LIMITS) {
 // how many, who is present, is there a route) is decided by enumerateOptions before anything is asked.
 export const FLOW_CONTEXT_LIMITS = Object.freeze({ request: 600, note: 400, said: 280, command: 160, answer: 500, tools: 2 })
 // kind → the predicate that stands for it. 'explain_wait' and 'milestone' are the same question; code picks the wording.
-const PREDICATE_OF = Object.freeze({ ask_missing: 'ask', pointer: 'pointer', stalled: 'stalled', explain_wait: 'note', milestone: 'note' })
+const PREDICATE_OF = Object.freeze({ ask_missing: 'ask', pointer: 'pointer', stalled: 'note', explain_wait: 'note', milestone: 'note' })
 export const FLOW_PREDICATES = Object.freeze({
   note: Object.freeze({ name: 'note', type: 'predicate', instructions: 'Would a considerate collaborator send the waiting person a short progress note right now (one or two sentences on what is taking time), given what they asked, what is happening and what was already said?' }),
   ask: Object.freeze({ name: 'ask', type: 'predicate', instructions: 'Does the quoted note show that the assistant needs a piece of information that only the person can give before it can finish, so that asking the person now would help?' }),
-  stalled: Object.freeze({ name: 'stalled', type: 'predicate', instructions: 'Nothing has come from the work for a while. Given what it was doing, has the work likely stalled or hung, so that the person should be told the response is taking unusually long?' }),
-  pointer: Object.freeze({ name: 'pointer', type: 'predicate', instructions: 'Something that needs this person is on the desk outside their view, and nothing was moved. Given what was already said to them, do they still need to be told where it is?' }),
+  // The pointer: only what code cannot know, each quoted on its own (R4). Whether anyone is there, where it is and whether a pointer
+  // was posted are code (pointerBlocked).
+  pointer: Object.freeze({ name: 'pointer', type: 'predicate', instructions: 'The quoted message announces work that is finished and open on the desk. Does the person it is for need to look at that work or do something with it, rather than the message already giving them all they need?' }),
+  told: Object.freeze({ type: 'predicate', instructions: 'Does the quoted message tell the reader where on their screen or desk the finished work is open (a direction or a place)?' }),
 })
+// Stalled is not a question (measured 2026-11-24: "has the work stalled" came back 0.28 after 24 s of silence and 0.78 after 60 s with
+// a reasoning step open, i.e. it followed the seconds, and the one fact that was not a number pointed the other way). Code knows the
+// silence (enumerateOptions offers 'stalled' at the bound); the note question decides whether to speak; code picks the wording.
 const SAID = Object.freeze({ explain_wait: 'a note that this takes a while', ask_missing: 'a question to the person', milestone: 'a progress note', stalled: 'a note that the response is taking unusually long', pointer: 'a note about where a result is' })
 // The engine-command judge's own reading of the command's real output (egdesk-terminal-judge.mjs), in plain words.
 const COMMAND_STATE = Object.freeze({ running_output: 'its output shows it is still running', waiting_yn_input: 'it is waiting for a yes or no answer', waiting_password: 'it is waiting for a secret to be typed',
@@ -248,7 +282,6 @@ const oneLine = (value, max) => { const text = String(value ?? '').replace(/\s+/
 const quoted = (label, text) => `${label}:\n"""\n${text}\n"""`
 const secondsOf = ms => Math.max(0, Math.round(ms / 1000))
 const span = ms => { const n = secondsOf(ms); return `${n} second${n === 1 ? '' : 's'}` }
-const ATTENTION_WHAT = Object.freeze({ result: 'A finished result', approval: 'Something that needs a decision before work can continue', question: 'A question that is waiting for an answer' })
 const WHERE_WORDS = Object.freeze({ in_view: 'inside what they are looking at on the desk', left: 'to the left of what they are looking at on the desk', right: 'to the right of what they are looking at on the desk',
   above: 'above what they are looking at on the desk', below: 'below what they are looking at on the desk', none: 'elsewhere on the desk' })
 const FAR_WORDS = Object.freeze({ near: ', close by', far: ', some way off', very_far: ', far away' })
@@ -260,16 +293,6 @@ function personLine(audience) {
   const there = audience.addresseePresent === null ? 'whether they are at the desk is not known' : `they are at the desk${Number.isFinite(audience.addresseeIdleMs) ? ` (last input ${span(audience.addresseeIdleMs)} ago)` : ''}`
   return `Waiting for this: ${who}; ${there}.`
 }
-function attentionLine(attention, target, { earlier = false } = {}) {
-  const what = ATTENTION_WHAT[attention.kind] ?? 'Something'
-  if (attention.provider === 'held') return `Separately: ${what.toLowerCase()} from another task has been waiting for this person for about ${span(attention.heldMs ?? 0)}, elsewhere on the desk. Nothing was moved into their view and they have not been told.`
-  const who = attention.who === 'owner' ? 'the owner of this task' : 'the person who asked'
-  const route = target === 'here' ? 'They take part in this conversation.' : 'They are not in this conversation: the note would go into their own conversation.'
-  // During a run the fact belongs to earlier work, not to the request being worked on now.
-  const lead = earlier ? `Separately, from earlier work in this conversation: ${what.toLowerCase()}` : what
-  return `${lead} is waiting ${wherePhrase(attention)}. It is for ${who}. ${route} Nothing was moved into their view and they have not been told where it is.`
-}
-
 /**
  * What the Agent is doing right now, as sentences. Real command lines and tool names are included only when `allows` says the
  * run's models may receive that kind; otherwise the sentence stays general. Returns { lines, kinds }.
@@ -327,7 +350,6 @@ export function runContext({ run, heartbeatFacts, flow, facts, userText, allows 
   const note = oneLine(notes.at(-1)?.detail?.text, L.note)
   if (note) now.push(`The assistant's latest note to itself: "${note}"`)
   now.push(personLine(facts?.audience ?? null))
-  if (facts?.attention && facts.pointerTarget && facts.pointed !== true) now.push(attentionLine(facts.attention, facts.pointerTarget, { earlier: true }))
   parts.push(`Now:\n${now.map(line => `- ${line}`).join('\n')}`)
   const sent = (flow?.sent || []).slice(-3)
   parts.push(sent.length ? `Already said to the person while working:\n${sent.map(row => `- ${Number.isFinite(row.at) ? `${span(hb.internalMs - row.at)} ago` : 'earlier'} (${SAID[row.kind] ?? 'a note'}): "${oneLine(row.text, L.said)}"`).join('\n')}`
@@ -335,46 +357,61 @@ export function runContext({ run, heartbeatFacts, flow, facts, userText, allows 
   return { text: parts.join('\n\n'), kinds: [...kinds] }
 }
 
-/**
- * The material for the pointer question of a session whose run has ended: { text, kinds } or null (see runContext).
- *   userText / answerText: the ended run's request and its posted answer; facts: idleFlowFacts(...).
- */
-export function idleContext({ heartbeatFacts, facts, userText, answerText, allows = () => true }) {
-  if (allows('run_text') !== true || !facts?.attention) return null
-  const L = FLOW_CONTEXT_LIMITS, parts = []
-  const request = oneLine(userText, L.request), answer = oneLine(answerText, L.answer)
-  if (request) parts.push(quoted('The person\'s request', request))
-  if (answer) parts.push(quoted('The assistant\'s answer, already posted', answer))
-  parts.push(`Now:\n${[`The work on this request has ended${Number.isFinite(heartbeatFacts.idleMs) ? ` (${span(heartbeatFacts.idleMs)} ago)` : ''}.`, attentionLine(facts.attention, facts.pointerTarget), personLine(facts.audience ?? null)].map(line => `- ${line}`).join('\n')}`)
-  return { text: parts.join('\n\n'), kinds: ['run_text'] }
-}
-
+const POINTER_LIMITS = Object.freeze({ result: 600, posted: 2 })
 /**
  * The yes/no questions for the kinds that code found possible at this beat (enumerateOptions), in a fixed order.
- * note: the Agent's note the `ask` question judges, quoted on its own ({ text }), required when 'ask_missing' is possible.
+ * note: the Agent's note the `ask` question judges, quoted on its own ({ text }); without it 'ask_missing' asks nothing.
+ * pointer: { kind, result, posted } when 'pointer' is possible — the announcement of the finished work (its run's posted answer) and
+ *   the messages already posted to that person since that work began (at most two, newest last). Each is quoted on its own:
+ *   `pointer` (does the work need them) only for a finished result with an announcement to read; `told_N` per posted message.
  */
-export function flowPredicates(options, { note = null } = {}) {
-  const names = []
-  for (const kind of ['ask_missing', 'pointer', 'stalled', 'explain_wait', 'milestone']) if (options.includes(kind) && !names.includes(PREDICATE_OF[kind])) names.push(PREDICATE_OF[kind])
+export function flowPredicates(options, { note = null, pointer = null } = {}) {
   const out = []
-  for (const name of names) {
-    if (name !== 'ask') { out.push(FLOW_PREDICATES[name]); continue }
+  if (options.includes('ask_missing')) {
     const text = oneLine(note?.text, FLOW_CONTEXT_LIMITS.note)
     if (text) out.push({ ...FLOW_PREDICATES.ask, quote: { label: 'The assistant\'s latest note to itself', text }, kinds: ['run_text'] })
   }
+  if (options.includes('pointer') && pointer) out.push(...pointerPredicates(pointer))
+  // The note question's topic is the kinds it stands for now: when code first allows a stall, that is new and asks at once.
+  const noteKinds = ['explain_wait', 'milestone', 'stalled'].filter(kind => options.includes(kind))
+  if (noteKinds.length) out.push({ ...FLOW_PREDICATES.note, topic: noteKinds.join('_') })
+  return out
+}
+
+export function pointerPredicates({ kind, result = null, posted = [], topic = null } = {}) {
+  const out = []
+  const fresh = typeof topic === 'string' ? { topic } : {}
+  const announced = oneLine(result, POINTER_LIMITS.result)
+  if (kind === 'result' && announced) out.push({ ...FLOW_PREDICATES.pointer, ...fresh, quote: { label: 'The message about the finished work', text: announced }, kinds: ['run_text'] })
+  ;(Array.isArray(posted) ? posted : []).map(text => oneLine(text, POINTER_LIMITS.result)).filter(Boolean).slice(-POINTER_LIMITS.posted)
+    .forEach((text, i) => out.push({ ...FLOW_PREDICATES.told, ...fresh, name: `told_${i + 1}`, quote: { label: 'A message already posted to this person', text }, kinds: ['run_text'] }))
   return out
 }
 
 /**
- * Code turns the answers into one kind: a question to the person first, then a pointer, then a stall, then a progress note.
- * yes: the names of the predicates answered yes; options: what enumerateOptions allowed at that beat.
+ * Whether to point, once code allowed it: never when a posted message already said where the work is; for a finished result, only
+ * when the work needs the person (asked when there is an announcement to read; without one the placement runtime's own judgment that
+ * it is worth pointing stands); a decision or a question waiting for them needs them by definition.
+ *   yes: names answered yes; asked: names asked at that beat.
  */
-export function deriveFlowKind(yes, options) {
+export function pointerDecision(attention, yes, asked = []) {
+  const said = name => (yes instanceof Set ? yes.has(name) : Array.isArray(yes) && yes.includes(name))
+  if (!attention) return false
+  if (asked.some(name => /^told_\d$/.test(name) && said(name))) return false
+  if (attention.kind === 'result' && asked.includes('pointer')) return said('pointer')
+  return true
+}
+
+/**
+ * Code turns the answers into one kind: a question to the person first, then a pointer, then a progress note; a progress note is
+ * worded as the "unusually long" one when code found the engine silent for the stall bound.
+ * yes: the names answered yes; options: what enumerateOptions allowed at that beat; pointer: pointerDecision(...) for that beat.
+ */
+export function deriveFlowKind(yes, options, { pointer = false } = {}) {
   const said = name => (yes instanceof Set ? yes.has(name) : Array.isArray(yes) && yes.includes(name))
   if (said('ask') && options.includes('ask_missing')) return 'ask_missing'
-  if (said('pointer') && options.includes('pointer')) return 'pointer'
-  if (said('stalled') && options.includes('stalled')) return 'stalled'
-  if (said('note')) return options.includes('explain_wait') ? 'explain_wait' : options.includes('milestone') ? 'milestone' : 'none'
+  if (pointer && options.includes('pointer')) return 'pointer'
+  if (said('note')) return options.includes('stalled') ? 'stalled' : options.includes('explain_wait') ? 'explain_wait' : options.includes('milestone') ? 'milestone' : 'none'
   return 'none'
 }
 

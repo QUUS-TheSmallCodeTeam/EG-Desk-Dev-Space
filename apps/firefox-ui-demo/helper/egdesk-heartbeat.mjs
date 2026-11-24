@@ -49,7 +49,9 @@
 //      - kinds: egress kinds the question needs besides run facts (egdesk-decision-egress.mjs). A question whose kind the run's
 //        models may not receive is dropped alone; the other questions of the beat are still asked.
 //    A yes/no question (preferred: measured on real answers, a choice that contains a "do nothing" option collapses onto it):
-//      { name, type: 'predicate', instructions, facts?, quote?: { label, text }, kinds? }
+//      { name, type: 'predicate', instructions, facts?, quote?: { label, text }, kinds?, topic? }
+//      - topic: a closed label for what the yes/no question stands for at this beat. A question asked with a topic never asked
+//        before on this heartbeat may ask at once, exactly like a choice option never offered before (see the bounds below).
 //      - quote: the one item this question judges, shown on its own under the question (label: fixed English, at most 120
 //        characters; text: at most 800 characters of real content). kinds MUST then name the egress kind of that content.
 //    Shared material for a provider's questions of this beat: propose may return { context: { text, kinds }, questions: [...] }
@@ -148,7 +150,8 @@ function normalizeQuestion(provider, raw, maxOptions) {
     }
     const kinds = egressKinds(raw.kinds)
     if (quote && !kinds.length) return null // quoted content always names the egress kind it belongs to
-    return Object.freeze({ provider, name: raw.name, wire: `${provider}__${raw.name}`, type: 'predicate', instructions: raw.instructions, options: PREDICATE_OPTIONS, none: 'no',
+    const topic = typeof raw.topic === 'string' && LABEL.test(raw.topic) ? raw.topic : null
+    return Object.freeze({ provider, name: raw.name, wire: `${provider}__${raw.name}`, type: 'predicate', instructions: raw.instructions, options: PREDICATE_OPTIONS, none: 'no', topic,
       facts: Object.freeze(sanitize(raw.facts, FACT_KEY, 24) ?? {}), kinds: Object.freeze(kinds), quote })
   }
   if (!Array.isArray(raw.options) || raw.options.length < 2 || raw.options.length > maxOptions) return null
@@ -267,7 +270,7 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
     }
     for (const name of Object.keys(contexts)) if (!questions.some(q => q.provider === name)) delete contexts[name]
     if (!questions.length) return
-    const key = (q, o) => `${q.wire}\0${o.value}`
+    const key = (q, o) => `${q.wire}\0${q.topic ?? ''}\0${o.value}`
     const fresh = questions.some(q => q.options.some(o => !offered.has(key(q, o))))
     if (!fresh && beat.internalMs - lastAskAt < lim('askGapMs') * 2 ** Math.min(noneStreak, 3)) return
     for (const q of questions) for (const o of q.options) offered.add(key(q, o))

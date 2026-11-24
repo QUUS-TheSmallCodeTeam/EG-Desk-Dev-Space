@@ -13,24 +13,28 @@ export const MID = '이 부분은 시간이 좀 걸립니다. 계속 확인하�
 export const SLOW = '응답이 평소보다 늦어지고 있어요. 조금 더 기다리시거나 중지하고 다시 요청하셔도 됩니다.'
 
 // The mock decision model for the heartbeat's message questions. The product asks yes/no questions (message__ask, message__pointer,
-// message__stalled, message__note) and code derives the kind; the mock works the other way round so tests can still say "the model
-// picked this kind": it lists the kinds the asked questions stand for (`offered`), picks one (policy.message(values, request), or a
-// default policy), and answers yes to that kind's question and no to the others.
+// message__told_N, message__note) and code derives the kind; the mock works the other way round so tests can still say "the model
+// picked this kind": `offered` is the kinds CODE allowed at that beat (read from the runtime, see world()), restricted to those whose
+// question was asked; it picks one (policy.message(values, request), or a default policy) and answers yes to that kind's question
+// (ask_missing -> ask, pointer -> pointer, a progress note / milestone / stall -> note) and no to every other one (told_N included).
 //   seen row: { offered, pick, facts: the Session block, own: the provider's material and the question blocks, names }
-const MESSAGE_ORDER = ['message__pointer', 'message__ask', 'message__note', 'message__stalled']
-export function judge(request, seen, policy = {}) {
+const PREDICATE_OF_KIND = { ask_missing: 'message__ask', pointer: 'message__pointer', explain_wait: 'message__note', milestone: 'message__note', stalled: 'message__note' }
+export function judge(request, seen, policy = {}, allowed = null) {
   const answers = {}
   const texts = request.input.map(row => (typeof row.content === 'string' ? row.content : ''))
-  const asked = request.questions.filter(q => MESSAGE_ORDER.includes(q.name)).map(q => q.name)
+  const asked = request.questions.filter(q => /^message__/.test(q.name)).map(q => q.name)
   if (asked.length) {
     const context = texts.find(text => text.startsWith('What the message questions are about:')) ?? ''
-    const kindOf = { message__pointer: 'pointer', message__ask: 'ask_missing', message__stalled: 'stalled', message__note: /\(a note that this takes a while\)/.test(context) ? 'milestone' : 'explain_wait' }
-    const values = ['none', ...MESSAGE_ORDER.filter(name => asked.includes(name)).map(name => kindOf[name])], text = texts[1]
+    // Without the runtime at hand (a caller that passes only the request), the kinds are read from the material like a model would:
+    // a stall when the work has been silent for the 20 s bound.
+    const silence = Number(/The last sign of activity from the work was (\d+) seconds? ago\./.exec(context)?.[1] ?? 0)
+    const kinds = allowed ?? ['none', 'ask_missing', 'pointer', 'explain_wait', ...(silence >= 20 ? ['stalled'] : [])]
+    const values = ['none', ...kinds.filter(kind => kind !== 'none' && asked.includes(PREDICATE_OF_KIND[kind]))], text = texts[1]
     const num = name => Number(new RegExp(`${name}: (\\d+)`).exec(text)?.[1] ?? 0)
     const pick = typeof policy.message === 'function' ? policy.message(values, request) : values.includes('stalled') ? 'stalled' : values.includes('ask_missing') ? 'ask_missing'
       : values.includes('explain_wait') && num('tool_steps_done') + num('tool_steps_running') > 0 ? 'explain_wait' : 'none'
     seen.push({ offered: values, pick, facts: text, names: asked, own: [context, ...texts.filter(row => /^Question message__/.test(row))].join('\n') })
-    for (const name of asked) answers[name] = { type: 'predicate', probability: kindOf[name] === pick ? 0.97 : 0.03 }
+    for (const name of asked) answers[name] = { type: 'predicate', probability: PREDICATE_OF_KIND[pick] === name ? 0.97 : 0.03 }
   }
   for (const q of request.questions) {
     if (answers[q.name]) continue
@@ -59,8 +63,17 @@ export function world(t, { flags = { held: true, flow: true }, fork = 'ok', fail
     else requests.other++
     if (request.promptCacheKey === 'heartbeat-beat') beatRequests.push({ names: request.questions.map(q => q.name), input: request.input.map(row => row.content) })
     if (tap) await tap(request) // sees every request exactly as the product built it (the real-measurement plan records them)
-    return judge(request, flowAsked, policy)
+    return judge(request, flowAsked, policy, allowedNow())
   } }
+  // The kinds code allowed for the message questions of the request being judged (the subject whose proposal is pending).
+  const allowedNow = () => {
+    for (const key of chat.heartbeats.keys()) {
+      const subject = chat.heartbeatSubjects.get(chat.heartbeats.get(key))
+      if (subject?.proposal?.mode === 'run') return subject.proposal.flow.pendingOptions ?? null
+      if (subject?.proposal?.mode === 'idle') return ['none', 'pointer']
+    }
+    return null
+  }
   const chat = new CodexChatRuntime({
     store, requireStore: true, getOwnerKey: () => 'test-account', now: () => clock, monotonicNow: () => clock,
     setTimer: (fn, ms) => { const timer = { fn, at: clock + ms }; timers.push(timer); return timer },
