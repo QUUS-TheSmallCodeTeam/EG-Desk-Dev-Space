@@ -42,11 +42,11 @@ const sleepMs = command => { const m = /sleep (\d+)/.exec(command); return m ? N
  * journeyWorld(t, fakeScript, { decisions = true, commandMs: (seconds) => ms }) → { options, deps, wire(), decisions, commands }
  * commandMs maps the "sleep N" of a scripted command to how long the fake command takes (real time); the fake command ends early when it is killed (an interrupt).
  */
-export function journeyWorld(t, fakeScript, { decisions = true, commandMs = seconds => (seconds >= 40 ? 8000 : 3500), steerContract = true } = {}) {
+export function journeyWorld(t, fakeScript, { decisions = true, commandMs = seconds => (seconds >= 40 ? 8000 : 3500), steerContract = true, persisted = false, judge = null } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-journey-'))
   t.after(() => fs.rmSync(base, { recursive: true, force: true }))
   const out = path.join(base, 'out'), stderrLines = [], spawns = [], commands = [], decisionRows = []
-  const scripted = scriptedDecisions()
+  const scripted = judge ?? scriptedDecisions() // c26: a judge of the caller's own (ruleJudge) for the rewrite scripts
   const spawn = (bin, argv, options) => {
     const stdin = new PassThrough(), stdout = new PassThrough(), stderr = new PassThrough(), child = new EventEmitter()
     Object.assign(child, { pid: 4242 + spawns.length, stdin, stdout, stderr, exitCode: null, signalCode: null, kill: () => true })
@@ -73,9 +73,9 @@ export function journeyWorld(t, fakeScript, { decisions = true, commandMs = seco
     decisionRows.push({ names: body.questions.map(q => q.name), est })
     return Response.json({ answers, usage: { input_tokens: est } })
   }
-  const options = { mode: 'run', codexBin: '/fake/codex', home: { kind: 'person', dir: null }, scripts: [], out, decisions, model: null, effort: null, appServerConfig: [], turnTimeoutMs: 20_000, json: false }
+  const options = { mode: 'run', codexBin: '/fake/codex', home: { kind: 'person', dir: null }, scripts: [], out, decisions, model: null, effort: null, appServerConfig: [], turnTimeoutMs: 20_000, json: false, ...(persisted ? { persisted: true } : {}) }
   const deps = { spawn, runnerSpawn, fetchImpl, killGroup, killGroupRunner: (child, signal) => { try { child.kill(signal) } catch { /* gone */ } }, // the product's kill of a command's process group: here, the fake command ends gitStatus: async () => null,
-    inspectNative: () => ({ version: '0.171.0-alpha.13', schemaMatch: steerContract, boardPeerContract: steerContract ? 'c'.repeat(64) : null }),
+    inspectNative: () => ({ version: '0.171.0-alpha.13', schemaMatch: steerContract, boardPeerContract: steerContract ? 'c'.repeat(64) : null, ...(persisted ? { threadDelete: true } : {}) }),
     env: { PATH: '/usr/bin:/bin', HOME: path.join(base, 'home'), [DECISION_KEY_ENV]: 'egd-synthetic-not-a-key-0021', OPENAI_API_KEY: 'sk-synthetic-must-not-reach-the-child' } }
   const wire = () => spawns.flatMap((_, i) => { try { return fs.readFileSync(path.join(base, `fake-app-server-${i + 1}.log`), 'utf8').trim().split('\n').map(line => JSON.parse(line)) } catch { return [] } })
   return { base, out, options, deps, spawns, commands, decisionRows, stderrLines, wire }
@@ -92,4 +92,28 @@ export function costOf(w, record) {
   const turnStarts = inbound('turn/start'), mainThread = turnStarts[0]?.params?.threadId ?? null, forkTurns = turnStarts.filter(m => m.params?.threadId !== mainThread)
   return { decisionRequests: w.decisionRows.length, decisionEstTokens: w.decisionRows.reduce((n, r) => n + r.est, 0), engineTurns: turnStarts.length - forkTurns.length, writerForkTurns: forkTurns.length,
     steers: inbound('turn/steer').length, interrupts: inbound('turn/interrupt').length, scriptedTurns: record.turns.length, byFamily: w.decisionRows.reduce((m, r) => { const k = r.names[0]?.replace(/_?\d+$/, '') ?? '?'; m[k] = (m[k] ?? 0) + 1; return m }, {}) }
+}
+
+/**
+ * ruleJudge(rule) → a Decision provider like scriptedDecisions() whose draft-check answers follow a rule of the caller's: rule(sentence, { reading }) → null (the scripted answer) or
+ * { support?: p, tense?: p }. The sentence is quoted from the request's "Sentence S<n>" block; reading counts the draft-check requests so far (1 = the draft, 2 = the rewrite).
+ * It stands in for the real judge in the fake validation of the rewrite scripts: it shows the mechanics work, not how the real judge reads anything.
+ */
+export function ruleJudge(rule) {
+  const base = scriptedDecisions(), flat = content => (typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => (typeof part?.text === 'string' ? part.text : '')).join('\n') : '')
+  let reading = 0
+  return { answer: async wire => {
+    const answers = await base.answer(wire)
+    if (!wire.questions.some(q => /^sup_\d+$/.test(q.name))) return answers
+    reading += 1
+    const text = (Array.isArray(wire.input) ? wire.input.map(m => flat(m.content)) : [String(wire.input)]).join('\n')
+    const sentences = new Map([...text.matchAll(/Sentence S(\d+):\n"""\n([\s\S]*?)\n"""/g)].map(m => [Number(m[1]) - 1, m[2]]))
+    return answers.map(a => {
+      const m = /^(sup|tense)_(\d+)$/.exec(a.name)
+      if (!m) return a
+      const verdict = rule(sentences.get(Number(m[2])) ?? '', { reading }) ?? {}
+      const p = m[1] === 'sup' ? verdict.support : verdict.tense
+      return Number.isFinite(p) ? { ...a, probability: p } : a
+    })
+  } }
 }

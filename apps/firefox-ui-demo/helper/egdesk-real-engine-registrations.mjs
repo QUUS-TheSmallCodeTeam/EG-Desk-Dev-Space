@@ -47,6 +47,14 @@ registerTurnHooks('journey', () => {
   }
 })
 
+// ---- L2 c26: the draft check's rewrite (what the real model's rewrite does after a finding) ----
+import { REWRITE_EXPECT_SCHEMA, createRewriteHook, validateRewriteExpect } from './egdesk-real-engine-rewrite.mjs'
+registerExpectKeys({ rewrite: { schema: REWRITE_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => {
+  for (const why of validateRewriteExpect(value, conv, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
+  if (turn.whileRunning !== undefined || turn.action !== undefined) bad(path, 'not checked on a whileRunning or action turn')
+} } })
+registerTurnHooks('rewrite', conversation => createRewriteHook(conversation))
+
 // ---- slot L3 ----
 
 // ---- L4: briefing (the briefing flow; its hook itself is registered in egdesk-real-engine-hooks.mjs) ----
