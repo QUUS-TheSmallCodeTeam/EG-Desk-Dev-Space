@@ -296,6 +296,9 @@ export const HEARTBEAT_NOT_SENT = Object.freeze({
   'pointer-nothing-to-look-at': 'requested: only told_1 is asked now, on the same quoted message measured at 0 in heartbeat-c16',
   'pointer-new-run': 'requested (the owner\'s own conversation): only told_1 on the same quoted message as pointer-requester-present',
   'pointer-held-3min': 'background: the same question on the same quoted message as pointer-owner-elsewhere (only the session lines differ)',
+  'wait-check-choice': 'the evidence of the heartbeat message check gained the live state of the run (c26: still in progress as of now, the command running; the wording and the bars are unchanged); measured with the true and false status sentences of draft-check-live-state-c26',
+  'wait-check-predicates': 'the evidence of the heartbeat message check gained the live state of the run (c26: still in progress as of now, the command running; the wording and the bars are unchanged); measured with the true and false status sentences of draft-check-live-state-c26',
+  'wait-check-invented-result': 'the evidence of the heartbeat message check gained the live state of the run (c26: still in progress as of now, the command running; the wording and the bars are unchanged); measured with the true and false status sentences of draft-check-live-state-c26',
 })
 // The runner stops when the provider's reported input tokens pass the ceiling.
 export const HEARTBEAT_PLAN_TOKEN_CAP = 5000

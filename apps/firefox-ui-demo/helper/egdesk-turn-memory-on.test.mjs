@@ -574,3 +574,27 @@ test('record state as draft-check evidence: nothing is recorded during the reply
   assert.ok(!x.chat.draftCheckTurns.get(x.run()).memory.some(i => i.id === 'record-state'), 'a question turn: no record can follow, no record state')
   x.store.close()
 })
+
+// c26 (L2 c22 finding, Main HIGH): the memory pages reach the draft check as evidence items, so the generic opaque reference for the memory key must not stand next to
+// them (it switched the unsupported-sentence rule off for every turn that carried memory).
+test('a turn that carries memory hands the draft check the pages as readable evidence and no opaque reference for the memory key', async () => {
+  const x = await rig({})
+  x.chat.decisionContext.draftCheck = { mode: () => 'advisory' }
+  await x.send(PLAN_Q, 'r1'); await x.done(1)
+  const turn = x.chat.draftCheckTurns.get(x.run())
+  assert.deepEqual(turn.memory.map(i => [i.id, i.kind, i.opaque === true]), [['mem1', 'memory', false], ['mem2', 'memory', false], ['mem3', 'memory', false], ['mem4', 'memory', false], ['mem5', 'memory', false]], 'the pages as text')
+  assert.deepEqual(turn.evidence.filter(i => i.opaque), [], 'nothing in the evidence stands for the memory key: the unsupported-sentence rule is live')
+  x.store.close()
+})
+
+test('memoryKeyCovered: the page items stand for the memory key only when they cover the packet and no note rides along', async () => {
+  const x = await rig({})
+  const pages = n => Array.from({ length: n }, (_, i) => ({ id: `mem${i + 1}`, kind: 'memory' })), turn = n => ({ result: { memory: { packetParts: { blocks: Array.from({ length: n }, () => ({})) } } } })
+  const cover = (items, packet, note = null, blocks = 3) => x.chat.memoryKeyCovered(items, turn(blocks), packet, note)
+  assert.equal(cover(pages(3), 'packet'), true); assert.equal(cover(pages(5), 'packet'), true, 'held pages as items too')
+  assert.equal(cover(pages(2), 'packet'), false, 'a packet page that is not an item: the reference stays')
+  assert.equal(cover([], 'packet'), false); assert.equal(cover(pages(3), 'packet', 'a note'), false)
+  assert.equal(x.chat.memoryKeyCovered(pages(1), { result: {} }, 'packet', null), false, 'the packet size is unknown: not covered')
+  assert.equal(x.chat.memoryKeyCovered(pages(1), null, null, null), true, 'a note-only or held-only turn has no packet pages to cover')
+  x.store.close()
+})

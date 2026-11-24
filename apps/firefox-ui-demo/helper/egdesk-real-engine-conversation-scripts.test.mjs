@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { secretsIn } from './egdesk-secret-mask.mjs'
+import { EXPECT_KEYS, validateEngineScript } from './egdesk-real-engine-script.mjs'
 
 // The conversation scripts for lane L5's real-engine check (scripts/real-engine/scripts/real-engine-*-v1.json; L3 c23). Their format is L5's
 // (the schema lives on L5's branch until it merges), so this test restates its structural rules instead of importing the validator, and
@@ -11,7 +12,6 @@ import { secretsIn } from './egdesk-secret-mask.mjs'
 const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'real-engine', 'scripts')
 const SCRIPT_SET = /^real-engine-[a-z0-9][a-z0-9-]{0,40}-v\d{1,3}$/, ID = /^[a-z0-9][a-z0-9-]{0,39}$/, FLAG = /^EGDESK_[A-Z0-9_]{1,48}$/, VALUE = /^[a-z0-9_-]{1,24}$/
 const RESERVED = ['EGDESK_CODEX_BIN', 'EGDESK_DATA_DIR', 'EGDESK_CODEX_MODEL', 'EGDESK_CODEX_EFFORT', 'EGDESK_CODEX_DISABLE_MEMORIES', 'EGDESK_CLAUDE_BIN']
-const EXPECT_KEYS = ['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted']
 const OURS = ['correction', 'why-stopped', 'terse-yes', 'topic-return', 'conditional-yes', 'pause']
 const load = name => JSON.parse(readFileSync(path.join(dir, `real-engine-${name}-v1.json`), 'utf8'))
 
@@ -20,6 +20,7 @@ test('the four scripts exist, follow the real-engine script format, and use only
   for (const name of OURS) assert.ok(files.includes(`real-engine-${name}-v1.json`), name)
   for (const name of OURS) {
     const script = load(name)
+    { const checked = validateEngineScript(script); assert.ok(checked.ok, JSON.stringify(checked.errors)) } // L5's own validator (whileRunning, postedMin, engine.*, ...)
     assert.deepEqual(Object.keys(script).sort(), ['conversations', 'description', 'set']); assert.equal(script.set, `real-engine-${name}-v1`); assert.match(script.set, SCRIPT_SET)
     for (const conv of script.conversations) {
       assert.match(conv.id, ID); assert.ok(conv.turns.length >= 1 && conv.turns.length <= 12)
@@ -48,6 +49,8 @@ test('whileRunning: only on a later turn, with a bounded afterMs, and only in a 
   assert.equal(seen, 2, 'the why-stopped and the pause conversations')
   const why = load('why-stopped').conversations[0]
   assert.equal(why.turns[1].say, '아니 지금 왜 멈췄니?'); assert.equal(why.turns[1].whileRunning.afterMs, 4000)
+  // check-2, check-6, check-7w: posted:true passed on the final answer while the reply was dropped: the reply is a message of its own, after the question was sent
+  assert.ok(why.turns[1].expect.postedMin >= 2 && why.turns[1].expect.engine.flowMessages.min >= 1, 'the reply and the final answer, and one of the system\'s own messages')
   assert.ok(why.turns[0].say.includes('sleep 15'), 'the command outlasts the 4 s')
   assert.equal(why.turns[0].expect.turnStatus, 'completed', 'the question does not stop the command')
   assert.deepEqual(why.flags, { EGDESK_INRUN_MESSAGES: 'on', EGDESK_CONVERSATION_FLOW: 'on', EGDESK_DRAFT_CHECK: 'on' })
@@ -82,7 +85,10 @@ test('c24 patterns: the conditional approval is checked by marker files (the ski
   assert.ok(Number(/sleep (\d+)/.exec(p.turns[0].say)[1]) * 1000 >= p.turns[1].whileRunning.afterMs + 15_000, 'the command outlasts the stop by a wide margin')
   assert.deepEqual(p.turns[0].expect.toolCalls, ['egdesk_run_command'], 'the stop hit a command that had started')
   assert.equal(p.turns[0].expect.turnStatus, 'interrupted'); assert.deepEqual(p.turns[0].expect.answerExcludes, ['cleanup-finished']); assert.equal(p.turns[0].expect.posted, undefined, 'a preamble may have been posted')
-  assert.deepEqual(p.turns[2].expect.answerExcludes, ['cleanup-finished']); assert.equal(p.turns[2].expect.turnStatus, 'completed')
+  assert.equal(p.turns[2].expect.turnStatus, 'completed')
+  // check-7w: the product stops the command; the answer said "`cleanup-finished` 출력은 확인하지 못했어요", a negative mention that a plain answerExcludes failed on. The process fact is
+  // checked by code (the command was ended by a signal) and the answer may not report the marker as output (a fenced output block); the claim in check-6 ("kept running ... cleanup-finished") fails the first.
+  assert.deepEqual(p.turns[0].expect.engine, { commandStopped: true }); assert.deepEqual(p.turns[2].expect.answerExcludes, ['```text\ncleanup-finished'])
 })
 
 test('no secret, address, phone number or real-looking identifier in any script', () => {

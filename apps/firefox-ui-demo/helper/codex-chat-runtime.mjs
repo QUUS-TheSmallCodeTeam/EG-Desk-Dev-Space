@@ -3065,8 +3065,12 @@ export class CodexChatRuntime {
         }
       }
       if (decision) this.noteDecisionContext(run, decision)
-      this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...(memoryPacket || memoryNote ? [TURN_MEMORY_KEY] : [])],
-        memoryReady ? this.turnMemoryDraftEvidence(memoryTurn, memoryPacket !== null, run.conversationId) : [])
+      // c26 (L2 c22 finding): the memory pages reach the check as evidence items (turnMemoryDraftEvidence: the same pages the model got, a guarded page as an opaque item of its own).
+      // The generic opaque reference for the memory key stood next to them and switched the unsupported-sentence rule off for every turn that carried memory; it stays only where
+      // the items do not cover what the model received (fewer page items than packet pages, or a confirmation note, which is model-seen text not in the items).
+      const memoryItems = memoryReady ? this.turnMemoryDraftEvidence(memoryTurn, memoryPacket !== null, run.conversationId) : []
+      const memoryCovered = this.memoryKeyCovered(memoryItems, memoryTurn, memoryPacket, memoryNote)
+      this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...((memoryPacket || memoryNote) && !memoryCovered ? [TURN_MEMORY_KEY] : [])], memoryItems)
       if (decision?.late) this.noteLateDecisionContext(run, decision)
       this.startConversationFlow(run, body, context)
       this.turnMemoryLatest.delete(run.conversationId) // this turn is now the conversation's latest: the previous turn's materials end here
@@ -4266,6 +4270,10 @@ export class CodexChatRuntime {
         return
       }
       const provider = this.threadToolOwners.get(run.conversationId)?.get(toolKey(event.namespace, event.tool))
+      // c26: what the own command runner is running now (kept for the heartbeat messages' evidence, liveRunLines; cleared when the command's conditions are noted).
+      if (!event.namespace && event.tool === 'egdesk_run_command' && provider?.dispatch) {
+        run.ownCommandRunning = Object.freeze({ callId: event.callId, command: typeof event.arguments?.command === 'string' ? event.arguments.command.slice(0, 400) : null, startedMs: this.flowRuns.get(run)?.heartbeat?.internalMs?.() ?? null })
+      }
       if (provider?.providerId === COMPUTER_PROVIDER_ID && this.refuseComputerCall(run, event)) return
       if (!provider?.dispatch || !this.providerSupportsEngine(provider, this.runEngine(run))) this.respond(event.rpcId, null, { code: -32601, message: 'Unsupported dynamic tool' }, this.threadOperationSlot(event.threadId))
       else if (this.dynamicRequestProviders.size >= 512 || this.dynamicRequestProviders.has(event.rpcId)) this.respond(event.rpcId, null, { code: -32000, message: 'Native tool callback capacity or ID conflict' }, this.threadOperationSlot(event.threadId))
@@ -6084,6 +6092,7 @@ export class CodexChatRuntime {
       const f = summary.beat.facts, message = summary.questions.find(q => q.provider === 'message')
       const posted = summary.outcomes.message ?? 'none'
       const known = ['timeout', 'unreachable', 'bad_response', 'budget_exceeded', 'evidence_unavailable', 'not_configured', 'rate_limited', 'no_credit', 'spend_limit_reached', 'server_error']
+      const writeOutcome = subject.writeOutcome; delete subject.writeOutcome
       log.record({ feature: 'conversation_flow', mode: 'on', attached: posted !== 'none', candidates: summary.questions.reduce((n, q) => n + q.options, 0), questions: summary.questions.length,
         judgments: summary.questions.filter(q => !q.verdict.failed && !q.verdict.skipped).map(q => (q.type === 'predicate'
           // A yes/no answer: its probability against the judge's bar; which predicate it was is a closed word.
@@ -6092,31 +6101,34 @@ export class CodexChatRuntime {
             top: q.verdict.top, second: q.verdict.second, confidence: q.verdict.confidence, margin: q.verdict.margin, options: q.options, threshold: 0.75, minMargin: 0.2 })),
         ...(summary.failure ? { fallback: known.includes(summary.failure) ? summary.failure : 'unreachable' } : {}),
         // flow: the kind code derived from the answers of the message questions ('none' when none was yes).
-        ...(message ? { flow: summary.questions.filter(q => q.provider === 'message').every(q => q.verdict.failed) ? null : subject.derived ?? 'none', posted } : {}),
+        ...(message ? { flow: summary.questions.filter(q => q.provider === 'message').every(q => q.verdict.failed) ? null : subject.derived ?? 'none', posted, ...(writeOutcome ? { write: writeOutcome } : {}) } : {}),
         beat: { n: summary.beat.beat, phase: f.phase, sinceUserMs: f.sinceUserMs, sincePostedMs: f.sincePostedMs, sinceEngineMs: f.sinceEngineMs, stepsDone: f.stepsDone, stepsRunning: f.stepsRunning, decisionMs: summary.decisionMs } })
     } catch { /* recording never affects the session */ }
   }
 
   // Writes (subjective model, private fork), checks and posts one intermediate message. Returns 'model', 'fallback' or 'none'.
-  async postIntermediate(run, flow, kind, facts) {
+  async postIntermediate(run, flow, kind, facts, report = {}) {
     const stalled = Number.isFinite(facts.sinceEngineMs) && facts.sinceEngineMs >= FLOW_LIMITS.stallAfterMs
-    let text = await this.writeIntermediate(run, flow, kind, facts, stalled ? FLOW_LIMITS.stalledWriterMs : FLOW_LIMITS.writerMs)
+    let text = await this.writeIntermediate(run, flow, kind, facts, stalled ? FLOW_LIMITS.stalledWriterMs : FLOW_LIMITS.writerMs, report)
     let by = 'model'
     // A stalled engine usually cannot write either: then, and only then, the fixed line is used.
     if (!text && stalled && (kind === 'stalled' || kind === 'explain_wait') && !flow.sent.some(row => row.text === FLOW_COPY.stalled)) { text = FLOW_COPY.stalled; by = 'fallback' }
-    if (!text || flow.closed || run.status !== 'inProgress' || this.heldGuard(run)?.state === 'checking' || this.finalAnswerBegun(run, flow)) return 'none'
+    if (!text) return 'none'
+    // A checked message that could not be posted (c26 record): the run moved on, or the audience no longer allows it.
+    if (flow.closed || run.status !== 'inProgress' || this.heldGuard(run)?.state === 'checking' || this.finalAnswerBegun(run, flow)) { report.outcome = 'run_moved_on'; return 'none' }
     // Read again at posting time: the message goes only into the conversation of the person who is waiting, and never where someone
     // other than the task's requester or owner takes part.
-    if (flow.audience().postable !== true) return 'none'
+    if (flow.audience().postable !== true) { report.outcome = 'not_postable'; return 'none' }
     // c18/c19: a browser task that stopped for the person (choice_needed, confirm_needed, login_required, page_unclear, ...): its question
     // supersedes this message, whether the question is still being worded or already posted, and whenever this message was begun.
     const task = this.browserTaskBrief(run)
-    if (task?.status === 'paused') return 'none'
+    if (task?.status === 'paused') { report.outcome = 'not_postable'; return 'none' }
     const id = `egdesk-flow:${randomUUID()}`
     await this.applyItem(run, { id, type: 'agentMessage', phase: null, text, completionConfirmed: true }, true, true, true)
     flow.sent.push({ id, text, kind, by, at: flow.heartbeat.internalMs() }); flow.kinds.add(kind); if (by === 'fallback') flow.kinds.add('stalled')
     flow.heartbeat.mark('posted'); flow.stepsAtLast = facts.stepsDone
     if (kind === 'ask_missing') { flow.question = { id, pending: true }; if (facts.question) flow.askedNotes.add(facts.question.id); this.setReplyOpen(run, id) }
+    report.outcome = by === 'fallback' ? 'fallback' : 'passed'
     return by
   }
 
@@ -6175,34 +6187,39 @@ export class CodexChatRuntime {
     return base
   }
 
-  writeIntermediate(run, flow, kind, facts, timeoutMs = FLOW_LIMITS.writerMs) {
+  writeIntermediate(run, flow, kind, facts, timeoutMs = FLOW_LIMITS.writerMs, report = {}) {
     const note = kind === 'ask_missing' && facts.question ? run.activities.find(a => a.id === facts.question.id)?.detail?.text ?? null : null
     // Checked against what it was composed from (the run's facts at that beat), not against the turn's materials.
     const egress = this.decisionEgressFor(run)
     const browserTask = this.browserTaskBrief(run)
     const evidence = messageEvidence({ kind, run, heartbeatFacts: facts.heartbeatFacts ?? null, flow, userText: this.runUserText(run), allows: k => egress.allows(k), own: FLOW_OWN_KINDS, note, browserTask })
     const task = facts.heartbeatFacts?.sources?.browser_task ? browserTaskLines(browserTask, k => egress.allows(k)).lines : []
-    return this.writeChecked(run, writerPrompt(kind, facts, { question: note, prior: flow.sent.map(row => row.text), task }), { timeoutMs, prior: flow.sent.map(row => row.text), evidence })
+    return this.writeChecked(run, writerPrompt(kind, facts, { question: note, prior: flow.sent.map(row => row.text), task }), { timeoutMs, prior: flow.sent.map(row => row.text), evidence, report })
   }
 
   // One short message by the subjective model on a private fork of the run's conversation, then the same check as every posted
   // message. There is no revision for a short note: a message that fails the check is not posted (null).
-  async writeChecked(run, prompt, { timeoutMs = FLOW_LIMITS.writerMs, prior = [], evidence = [] } = {}) {
+  // report (optional): { outcome } receives a closed word for the record (c26): no_fork (the engine cannot run a private turn), writer_failed (the private
+  // turn failed or timed out), writer_empty, repeat, no_turn, check_failed, check_timeout, passed.
+  async writeChecked(run, prompt, { timeoutMs = FLOW_LIMITS.writerMs, prior = [], evidence = [], report = {} } = {}) {
+    report.outcome = 'writer_failed'
     try {
       const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
-      if (!engine?.capabilities?.(slot)?.has('threadFork')) return null
+      if (!engine?.capabilities?.(slot)?.has('threadFork')) { report.outcome = 'no_fork'; return null }
       const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, timeoutMs, text: prompt, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run) })
       const text = cleanIntermediate(out.text)
-      if (!text || prior.includes(text)) return null
+      if (!text) { report.outcome = 'writer_empty'; return null }
+      if (prior.includes(text)) { report.outcome = 'repeat'; return null }
       // The evidence is what the message was composed from (messageEvidence): the run's own facts, never the turn's materials. A message
       // that states something those facts do not say fails and is not posted.
       const setup = this.decisionContext, turn = this.draftCheckTurns.get(run)
-      if (!turn) return null
+      if (!turn) { report.outcome = 'no_turn'; return null }
       const controller = new AbortController(), timer = setTimeout(() => controller.abort(), DRAFT_CHECK_LIMITS.firstCheckMs)
       timer.unref?.()
       try {
         const checked = await Promise.race([checkDraft({ draft: text, evidence, concreteOnly: true, userText: turn.userText, mode: 'on', design: this.draftCheckDesign(), client: setup.client, revise: null, signal: controller.signal, egress: this.decisionEgressFor(run) }),
           new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))])
+        report.outcome = !checked ? 'check_timeout' : checked.text === text ? 'passed' : 'check_failed'
         return checked && checked.text === text ? text : null
       } finally { clearTimeout(timer); controller.abort() }
     } catch { return null }
@@ -6268,12 +6285,16 @@ export class CodexChatRuntime {
     // Returns the closed word for the beat's record: 'model' when a reply was posted, else 'none' (what was settled is personJudged's value).
     (flow.personJudged ??= new Map()).set(person.requestId, 'deciding')
     let settled = null, posted = 'none'
+    const report = {}
     if (action === 'reply' && facts && !flow.closed && run.status === 'inProgress') {
-      posted = await this.postIntermediate(run, flow, 'reply_status', { ...facts, personMessage: person.text })
+      posted = await this.postIntermediate(run, flow, 'reply_status', { ...facts, personMessage: person.text }, report)
       if (posted !== 'none') settled = await this.settleInRunMessage(run, person.requestId, 'reply')
     }
     if (settled === null && run.status === 'inProgress') settled = await this.settleInRunMessage(run, person.requestId, action === 'stop' ? 'interrupt' : 'steer', { judged: judgedChange === true })
     flow.personJudged.set(person.requestId, settled ?? 'none')
+    // What happened to a reply that was meant (closed words; recordBeatRound writes it as `write` on the beat's row).
+    const subject = this.heartbeatSubjects.get(flow.heartbeat)
+    if (subject && action === 'reply') subject.writeOutcome = report.outcome ?? 'not_tried'
     return posted
   }
 
@@ -6645,6 +6666,7 @@ export class CodexChatRuntime {
         const fact = stoppedCommandFact(record), key = run.clientThreadId
         if (key) { this.stoppedCommands.delete(key); if (fact) { this.stoppedCommands.set(key, fact); while (this.stoppedCommands.size > 64) this.stoppedCommands.delete(this.stoppedCommands.keys().next().value) } }
       } catch { /* the note is advisory */ }
+      run.ownCommandRunning = null
       const summary = record.health?.summary ?? null
       run.ownCommandLast = Object.freeze({ stopped: record.stopped === true, exitCode: Number.isSafeInteger(record.exitCode) ? record.exitCode : null, durationMs: Number.isFinite(record.durationMs) ? record.durationMs : null,
         health: record.health?.health ?? null, healthReasons: record.health?.reasons ?? [], summary: summary ? Object.freeze({ ...summary, line: String(summary.line).slice(0, 300) }) : null,
@@ -6927,6 +6949,13 @@ export class CodexChatRuntime {
   }
 
   draftCheckIdle() { return Promise.allSettled([...this.draftCheckRuns]) }
+
+  // c26: true when the memory pages as evidence items stand for everything the memory key carried (so no opaque reference is needed): at least one page item, as many page items
+  // as pages in the packet (a packet page the check could not be given as an item is content the checker has not read), and no confirmation note (model-seen text outside the items).
+  memoryKeyCovered(memoryItems, memoryTurn, memoryPacket, memoryNote) {
+    const packetPages = memoryPacket ? (memoryTurn?.result?.memory?.packetParts?.blocks?.length ?? Number.POSITIVE_INFINITY) : 0
+    return Array.isArray(memoryItems) && memoryItems.length > 0 && !memoryNote && memoryItems.filter(item => /^mem\d+$/.test(item?.id)).length >= packetPages
+  }
 
   noteDraftCheckTurn(run, body, context, decision, bounded, extraKeys = [], memoryItems = []) {
     // L1 c14: what the person wrote for this run, kept whatever the draft check's mode (the heartbeat's and placement's questions read it through
