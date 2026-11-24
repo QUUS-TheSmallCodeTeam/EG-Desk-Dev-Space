@@ -15,7 +15,7 @@ export function turnMemoryFlagsFromEnv(env = {}) {
   const get = name => (env && typeof env === 'object' && typeof env[name] === 'string' ? env[name] : null)
   return { ...(get(TURN_MEMORY_FLAGS.onePacket) === 'on' ? { onePacket: true } : {}), ...(get(TURN_MEMORY_FLAGS.writeTarget) === 'choice' ? { writeTarget: 'choice' } : {}),
     ...(get(TURN_MEMORY_FLAGS.confirmInConversation) === 'on' ? { confirmInConversation: true } : {}), ...(get(TURN_MEMORY_FLAGS.pruneHeld) === 'on' ? { pruneHeld: true } : {}),
-    ...(get(TURN_MEMORY_FLAGS.keepLate) === 'on' ? { keepLate: true } : {}), ...(get(TURN_MEMORY_FLAGS.speechDesign) === 'split' ? { speechDesign: 'split-isolated' } : {}) }
+    ...(get(TURN_MEMORY_FLAGS.keepLate) === 'on' ? { keepLate: true } : {}), ...(get(TURN_MEMORY_FLAGS.speechDesign) === 'split' ? { speechDesign: 'split-isolated' } : get(TURN_MEMORY_FLAGS.speechDesign) === 'hybrid' ? { speechDesign: 'hybrid-isolated' } : {}) }
 }
 
 // createTurnMemoryConfig({ settings, getAdapter, ontologyStore, deskStore, budget?, deadlineMs? }) -> the object the runtime reads:
@@ -39,7 +39,7 @@ export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = n
     // A turn_context answer that missed its budget is kept for the later steps of the same turn (never for the native turn; off by default).
     ...(keepLate === true ? { keepLate: true } : {}),
     // How the write judgment asks the sentence labels: 'split-isolated' (source and time as yes/no predicates) only when passed; default axes.
-    ...(speechDesign === 'split-isolated' ? { speechDesign: 'split-isolated' } : {}),
+    ...(speechDesign === 'split-isolated' || speechDesign === 'hybrid-isolated' ? { speechDesign } : {}),
     scope: ({ context, body }) => getAdapter().scopeFor(context, body),
     async wiki({ body, context, sources }) {
       const adapter = getAdapter()

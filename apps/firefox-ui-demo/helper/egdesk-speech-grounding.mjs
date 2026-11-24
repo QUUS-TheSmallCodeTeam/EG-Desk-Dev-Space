@@ -370,7 +370,13 @@ export function speechIsolatedPredicateQuestions(spans, message) {
 // The bar is not lowered: a predicate is yes at >= SPEECH_THRESHOLDS.confidence (0.85) and no at <= 1 - 0.85, undecided between.
 // Form keeps its axes question. Labels stay fallible readings of an utterance; nothing here computes a date.
 export const SPEECH_SPLIT = 'split-isolated'
-export const WRITE_SPEECH_DESIGNS = Object.freeze(['axes-isolated', SPEECH_SPLIT])
+// 'hybrid-isolated' (L7 c21): the axes questions AND the split predicates in one request; an axis the axes question installs (.85 / .20, as
+// today) keeps that label, and only an axis it leaves uninstalled is read from the predicates. Real c23 numbers, 21 requests: split alone
+// installed 6 of 11 targets but only 1 of 6 controls (a second predicate stayed undecided: c01 guess .66, c02 own .23, c10 own .58 / guess .71,
+// c01 time before .56, c26 before .75) and one guard (a16, fixed by the when rule above); the axes design installed all 6 controls in the
+// study and no target. Offline on the same answers: targets 6/11, controls 6/6, 0 wrong.
+export const SPEECH_HYBRID = 'hybrid-isolated'
+export const WRITE_SPEECH_DESIGNS = Object.freeze(['axes-isolated', SPEECH_SPLIT, SPEECH_HYBRID])
 export const SPEECH_SPLIT_BARS = Object.freeze({ yes: MIN_CONFIDENCE, no: Math.round((1 - MIN_CONFIDENCE) * 100) / 100 })
 const split = {
   source: {
@@ -427,7 +433,9 @@ export function splitLabels(verdicts) {
   let time = 'unknown'
   if (dirs.every(key => v(key) !== 'unknown')) {
     const yes = dirs.filter(key => v(key) === 'yes').sort().join('+')
-    if (yes === 'now') time = 'at_utterance'
+    // A sentence read as about the moment of speaking that also names a day or time places something else at that other time (real, c23:
+    // a16 "내일 비 오면 오늘 했어야 했나 싶어", now .92 and when 1.0, a deliberately ambiguous axis): conflicting times, no label (L7 c21).
+    if (yes === 'now') time = v('when') === 'yes' ? 'unknown' : 'at_utterance'
     else if (yes === 'ongoing' || yes === 'now+ongoing') time = 'ongoing_no_end'
     else if ((yes === 'before' || yes === 'after') && v('when') !== 'unknown') time = `${yes === 'before' ? 'past' : 'future'}_${v('when') === 'yes' ? 'anchored' : 'unspecified'}`
   }
@@ -446,6 +454,27 @@ export function speechSplitInterpretations(answers, spans) {
   return out
 }
 
+/** All three axes questions (isolated) plus the source and time split predicates of each span. */
+export function speechHybridQuestions(spans, message) {
+  const axesQ = speechIsolatedQuestions(spans, message), splitQ = speechSplitQuestions(spans, message)
+  return isolatedSpans(spans, message).flatMap(({ i, text }) => text === null ? [] : [
+    ...axesQ.filter(q => q.name.endsWith(`_${i}`)), ...splitQ.filter(q => q.type === 'predicate' && q.name.endsWith(`_${i}`))])
+}
+
+/** Per axis: the axes pick when it installs (unchanged bar), else (source, time) the split combination. */
+export function speechHybridInterpretations(answers, spans) {
+  const out = []
+  for (const [i, { start, end }] of ranges(spans).entries()) {
+    const verdicts = Object.fromEntries([...SPEECH_SPLIT_KEYS.source, ...SPEECH_SPLIT_KEYS.time].map(key => [key, splitVerdict(answers, splitName(key, i))]))
+    const fromSplit = splitLabels(verdicts)
+    const source = pick(answers, `speech_source_${i}`, axes.source.options) ?? fromSplit.source
+    const time = pick(answers, `speech_time_${i}`, axes.time.options) ?? fromSplit.time
+    const form = pick(answers, `speech_form_${i}`, axes.form.options) ?? 'unknown'
+    if (source !== 'unknown' || form !== 'unknown' || time !== 'unknown') out.push({ start, end, source, form, time })
+  }
+  return out
+}
+
 /** 'axes' | 'predicates' family of a design name; anything unknown is the current 'axes' design. */
 export const speechDesignFamily = design => (design === 'predicates' || design === 'predicates-isolated' ? 'predicates' : 'axes')
 
@@ -457,6 +486,7 @@ export function speechDesignQuestions(design, spans, message) {
   if (design === 'predicates-isolated') return speechIsolatedPredicateQuestions(spans, message)
   if (design === 'compare-isolated') return [...speechIsolatedQuestions(spans, message), ...speechIsolatedPredicateQuestions(spans, message)] // measurement only
   if (design === SPEECH_SPLIT) return speechSplitQuestions(spans, message) // write judgment only (WRITE_SPEECH_DESIGNS); not a turn-level design
+  if (design === SPEECH_HYBRID) return speechHybridQuestions(spans, message) // write judgment only
   return speechQuestions(spans)
 }
-export const speechDesignInterpretations = (design, answers, spans) => (design === SPEECH_AT_PAGE ? [] : design === SPEECH_SPLIT ? speechSplitInterpretations(answers, spans) : speechDesignFamily(design) === 'predicates' ? speechPredicateInterpretations(answers, spans) : speechInterpretations(answers, spans))
+export const speechDesignInterpretations = (design, answers, spans) => (design === SPEECH_AT_PAGE ? [] : design === SPEECH_SPLIT ? speechSplitInterpretations(answers, spans) : design === SPEECH_HYBRID ? speechHybridInterpretations(answers, spans) : speechDesignFamily(design) === 'predicates' ? speechPredicateInterpretations(answers, spans) : speechInterpretations(answers, spans))
