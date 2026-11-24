@@ -534,7 +534,10 @@ const handleEngineProfilesHttp = createEngineProfilesHttpHandler({
 const handleHostControlHttp = createHostControlHttpHandler(hostControl, { port: BRIDGE_PORT })
 // Board arrangement gets a separate guarded client over the same isolated Decisions key and budget.
 const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credentials: decisionCredentials,
-  getMode: () => bridgeSettings.decisionContext.mode, budget: decisionBudget, port: BRIDGE_PORT, calibrationLog: decisionCalibrationLog, fetchImpl: decisionTransport.fetch })
+  getMode: () => bridgeSettings.decisionContext.mode, budget: decisionBudget, port: BRIDGE_PORT, calibrationLog: decisionCalibrationLog, fetchImpl: decisionTransport.fetch,
+  // Briefing flow, `on` path (cycle 9). The publish side is the real context runtime; the subjective model's design turn has no adapter yet, so with engine null the `on` path
+  // answers 'no-engine' and does nothing (the advisory observe is unaffected). `egress` (the shared data-sharing permission) plugs in here when it lands.
+  briefing: { engine: null, runFor: ids => chat.runFor(ids), propose: (run, args) => contexts.proposeBriefing(run, args), publishOutput: (run, args) => contexts.publishOutput(run, args) } })
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
 const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
   budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT, boardPresentation: handleBoardPresentationHttp,

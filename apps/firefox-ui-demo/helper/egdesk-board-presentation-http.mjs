@@ -6,7 +6,7 @@ import { createDecisionClient, DECISIONS_ENDPOINT, DECISION_MODEL, FOREGROUND_DE
 import { DEFAULT_DECISION_THRESHOLDS } from './egdesk-decision-questions.mjs'
 import { normalizeBoardPresentationScene, prepareBoardPresentation, readBoardPresentation } from './egdesk-board-presentation-plan.mjs'
 import { canvasCheckCalibrationEntry, prepareCanvasDesignCheck, readCanvasDesignCheck } from './egdesk-canvas-design-check.mjs'
-import { runBriefingFlow, briefingCheckCalibrationEntry, briefingReuseCalibrationEntry, placementCalibrationEntry, prepareBriefingCheck, prepareBriefingPlacement, prepareBriefingReuse, readBriefingCheck, readBriefingPlacement, readBriefingReuse } from './egdesk-briefing-flow.mjs'
+import { completeBriefingArgs, runBriefingFlow, briefingCheckCalibrationEntry, briefingReuseCalibrationEntry, placementCalibrationEntry, prepareBriefingCheck, prepareBriefingPlacement, prepareBriefingReuse, readBriefingCheck, readBriefingPlacement, readBriefingReuse } from './egdesk-briefing-flow.mjs'
 import { attachBoardVisual, MAX_BOARD_VISUAL_IMAGE_CHARS, validateBoardVisual } from './egdesk-board-visual-packet.mjs'
 
 const ROOT = '/decision/board-presentation'
@@ -91,7 +91,7 @@ function normalizePrepare(body) {
  * `fetchImpl` and `now` support offline fixtures; production uses fixed defaults.
  */
 export function createBoardPresentationHttpHandler({ credentials, getMode, budget, port = 39218,
-  fetchImpl, now = () => performance.now(), calibrationLog = null } = {}) {
+  fetchImpl, now = () => performance.now(), calibrationLog = null, briefing = null } = {}) {
   if (typeof credentials?.getApiKey !== 'function' || typeof credentials?.savedAt !== 'function' ||
       typeof getMode !== 'function' || typeof budget?.canSpend !== 'function' ||
       typeof budget?.record !== 'function' || typeof now !== 'function') throw new TypeError('Board Decisions dependencies are required')
@@ -240,25 +240,54 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
   // Briefing flow, observe only (cycle 8): when the Decisions mode is advisory and the chrome's flag is on, a finished answer's placement and reuse/retrieve judgments
   // are asked and RECORDED (calibration), nothing else: no design request, no publish, no change anywhere. Any other mode does nothing at all.
   const OWNER_WORDS = new Set(['agent', 'user', 'shared']), VIS_WORDS = new Set(['visible', 'collapsed', 'offscreen']), KIND_WORDS = new Set(['source', 'artifact', 'output'])
+  // The only refs the chrome may name: a published output id (and its own card id as a hint). The bridge binds it itself from its output store.
+  const observeRef = ref => ref && typeof ref === 'object' && typeof ref.outputId === 'string' && /^[\da-f-]{36}$/i.test(ref.outputId)
+    ? { outputId: ref.outputId, ...(typeof ref.viewId === 'string' && ref.viewId && ref.viewId.length <= 256 ? { viewId: ref.viewId } : {}) } : {}
   function observeCandidates(list) {
     if (!Array.isArray(list)) return []
     const text = (v, max) => typeof v === 'string' && v.length <= max ? v : undefined
     return list.slice(0, 12).flatMap(c => {
       if (!c || typeof c !== 'object' || typeof c.id !== 'string' || c.id.length > 256 || !KIND_WORDS.has(c.kind) || typeof c.label !== 'string' || c.label.length > 200 || !c.ref || typeof c.ref !== 'object') return []
-      return [{ id: c.id, ref: {}, kind: c.kind, label: c.label, ...(text(c.gist, 400) ? { gist: c.gist } : {}), onBoard: c.onBoard === true, maySend: c.maySend === true,
+      return [{ id: c.id, ref: observeRef(c.ref), kind: c.kind, label: c.label, ...(text(c.gist, 400) ? { gist: c.gist } : {}), onBoard: c.onBoard === true, maySend: c.maySend === true,
         rect: c.rect, owner: OWNER_WORDS.has(c.owner) ? c.owner : undefined, createdForAnswer: text(c.createdForAnswer, 256) ?? null, superseded: c.superseded === true, stale: c.stale === true,
         visibility: VIS_WORDS.has(c.visibility) ? c.visibility : 'visible' }]
     })
   }
   async function observe(body) {
-    if (getMode() !== 'advisory') return { status: 'skipped', reason: 'mode' }
+    const mode = getMode(), want = body?.flow === 'on' ? 'on' : 'advisory'
+    if (!['advisory', 'on'].includes(mode) || want !== mode) return { status: 'skipped', reason: 'mode' }
     if (!body || typeof body.report !== 'string' || !body.report.trim() || body.report.length > 20000) return { status: 'skipped', reason: 'invalid' }
+    const live = mode === 'on'
+    // The full flow needs the subjective model, the run of that answer and the publish path. Without all three nothing runs at all (never a half flow).
+    if (live && !(typeof briefing?.engine === 'function' && typeof briefing?.runFor === 'function' && typeof briefing?.propose === 'function')) return { status: 'skipped', reason: 'no-engine' }
+    const ids = { conversationId: body.conversationId, runId: body.runId, answerId: body.currentAnswerId }
+    const answerRun = live ? briefing.runFor(ids) : null
+    if (live && !answerRun) return { status: 'skipped', reason: 'run-gone' }
     const sink = { destroyed: false, writableEnded: false, once() {}, off() {} }
     const route = judge => ({ prepare: async dto => prepareJudge(judge, dto).body, run: ticket => run(ticket, sink), cancel: async ticket => { discard(ticket) } })
     const list = observeCandidates(body.candidates)
-    const out = await runBriefingFlow({ report: body.report, candidates: list, egress: createEgressGate(modelDataPermissions({ canvasMaySend: list.some(c => c.maySend === true) })), currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null,
-      decide: { placement: route(JUDGES['/decision/briefing-placement']), reuse: route(JUDGES['/decision/briefing-reuse']) }, engine: null, observeOnly: true, allow: async () => true })
-    return { status: 'observed', stages: out.stages ?? [], outcome: out.status, judgeRequests: out.stats?.judgeRequests ?? 0 }
+    // ONE egress mechanism (D2): the Decision model follows the same data-sharing permissions as the other models, through the shared gate. There is no separate consent here:
+    // every judgment request of the flow (placement, reuse/retrieve, flow check) is asked of the gate by runBriefingFlow before it is sent.
+    const gate = createEgressGate(modelDataPermissions({ canvasMaySend: list.some(c => c.maySend === true) }))
+    const out = await runBriefingFlow({ report: body.report, candidates: list, egress: gate, currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null,
+      decide: { placement: route(JUDGES['/decision/briefing-placement']), reuse: route(JUDGES['/decision/briefing-reuse']), ...(live ? { check: route(JUDGES['/decision/briefing-check']) } : {}) },
+      engine: live ? briefing.engine : null, observeOnly: !live, allow: async () => true })
+    const summary = { status: 'observed', stages: out.stages ?? [], outcome: out.status, judgeRequests: out.stats?.judgeRequests ?? 0, ...(out.reason ? { reason: out.reason } : {}) }
+    if (!live || out.status !== 'presented') return summary
+    // Passed the flow check: create the (0..n) allowed new components, then propose through the same validation as the tool. Any failure leaves chat only.
+    try {
+      const created = {}
+      for (const component of out.newComponents) {
+        const drafted = await briefing.engine({ kind: 'briefing_component', part: component.part, title: component.title, summary: component.summary })
+        if (typeof drafted?.markdown !== 'string' || !drafted.markdown.trim() || typeof briefing.publishOutput !== 'function') throw new Error('component')
+        const published = await briefing.publishOutput(answerRun, { title: component.title, markdown: drafted.markdown, outputKey: `briefing-${randomBytes(5).toString('hex')}` })
+        created[component.alias] = { outputId: published.output.id }
+      }
+      const args = completeBriefingArgs(out, created)
+      if (!args) throw new Error('args')
+      const proposed = await briefing.propose(answerRun, args)
+      return { ...summary, outcome: 'presented', briefingId: proposed.id, steps: proposed.steps.length, newComponents: out.newComponents.length, retrievals: out.retrievals.map(r => ({ viewId: r.id })) }
+    } catch { return { ...summary, outcome: 'fallback-chat', reason: 'publish-failed' } }
   }
   async function observeRoute(req, res) {
     const reply = (code, body) => { if (!res.destroyed && !res.writableEnded) sendJson(res, code, body); return true }

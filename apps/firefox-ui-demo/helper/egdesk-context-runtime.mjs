@@ -800,6 +800,54 @@ export class ContextRuntime {
     return candidates
   }
 
+  // Cycle 9: a result card the user kept from this conversation's published output becomes a bound, immutable source, exactly like a file artifact pinned by
+  // pinOutput: the bytes come from the bridge's own output store (never from the screen), the capture is bound to this run, and its sourceId is then valid for the
+  // same briefingTarget checks the model's tool call goes through. viewId stays a UI hint that must equal the capture's own projection.
+  async bindCardSource(run, { outputId, viewId = null } = {}, assertActive = () => {}) {
+    const binding = this.assertBound(run, 'publishBriefing')
+    if (typeof outputId !== 'string' || !/^[\da-f-]{36}$/i.test(outputId)) reject('INVALID_BRIEFING_TARGET', 'A result card target needs the published output id', 400)
+    if (viewId !== null && (typeof viewId !== 'string' || !viewId || viewId.length > 256)) reject('INVALID_BRIEFING_TARGET', 'Invalid viewId', 400)
+    const previous = binding.captures.find(capture => capture.kind === 'board' && capture.source.resourceId === outputId)
+    if (previous) return previous
+    const { output, markdown } = await this.store.readOutput(binding.ownerKey, outputId)
+    assertActive()
+    if (output.conversationId !== run.conversationId) reject('INVALID_BRIEFING_TARGET', 'The result belongs to another conversation', 403)
+    const capture = await this.store.capture(binding.ownerKey, run.clientThreadId || run.conversationId, { id: outputId, kind: 'board', label: output.title,
+      sourceRef: { resourceId: outputId, ...(viewId ? { viewId } : {}) }, captureScope: { type: 'board-selection' }, content: { text: markdown, mime: 'text/markdown', truncated: false } }, { assertActive })
+    assertActive()
+    this.assertBound(run, 'publishBriefing')
+    await this.store.bind(binding.ownerKey, run, [capture.sourceId], binding.capabilities, binding.readerConfiguration)
+    assertActive()
+    this.assertBound(run, 'publishBriefing')
+    if (this.bindings.get(this.bindingKey(run)) !== binding) reject('CONTEXT_CHANGED', 'Context binding changed while binding a result card')
+    binding.sourceIds.push(capture.sourceId)
+    binding.captures.push(capture)
+    run.context.captures = binding.captures
+    this.runtime.emit(run, 'context.bound', { captures: binding.captures, bindingId: binding.bindingId })
+    return capture
+  }
+
+  // Cycle 9: the host (no model turn) proposes a briefing that already passed the flow check. Result-card targets ({outputId, viewId}) are bound first and
+  // rewritten to the sourceId the tool accepts; everything then goes through publish(), the same validation and the same 'proposed' record and event as
+  // egdesk_publish_briefing_multi. Needs the briefing capability the user granted for that run; nothing else is opened, moved or started.
+  async proposeBriefing(run, { title, steps }, assertActive = () => {}) {
+    this.assertBound(run, 'publishBriefing')
+    if (!Array.isArray(steps)) reject('INVALID_BRIEFING', 'Briefing requires steps', 400)
+    const bound = []
+    for (const step of steps) {
+      const targets = []
+      for (const target of Array.isArray(step?.targets) ? step.targets : []) {
+        if (target && typeof target === 'object' && Object.hasOwn(target, 'outputId')) {
+          if (Object.keys(target).some(key => !['outputId', 'viewId'].includes(key))) reject('INVALID_BRIEFING_TARGET', 'A result card target has outputId and viewId only', 400)
+          const capture = await this.bindCardSource(run, target, assertActive)
+          targets.push({ sourceId: capture.sourceId, ...(target.viewId ? { viewId: target.viewId } : {}) })
+        } else targets.push(target)
+      }
+      bound.push({ ...step, targets })
+    }
+    return this.publish(run, { title, steps: bound }, assertActive, { multiTarget: true })
+  }
+
   async pinOutput(run, artifactId, assertActive = () => {}) {
     const binding = this.assertBound(run, 'publishBriefing')
     const artifact = this.outputCandidates(run).find(candidate => candidate.id === artifactId)

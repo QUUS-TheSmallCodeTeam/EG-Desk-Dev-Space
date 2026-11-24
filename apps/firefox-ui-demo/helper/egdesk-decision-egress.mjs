@@ -80,7 +80,8 @@ export function createEgressGate(permissions) {
 /** Every file that sends a Decision request and the kinds it may declare. A new call site must be added here (a test scans the code). */
 export const EGRESS_SITES = Object.freeze({
   'codex-chat-runtime.mjs': ['speech_history', 'topic_history', 'memory_page', 'draft_text', 'run_facts', 'page_text', 'browser_task_record'],
-  'egdesk-board-presentation-http.mjs': ['canvas_text', 'board_arrangement: explicit owner confirm, coarse descriptors only'],
+  'egdesk-board-presentation-http.mjs': ['canvas_text', 'board_arrangement: explicit owner confirm, coarse descriptors only',
+    'briefing_judgments: /decision/briefing-placement (counts only), -reuse and -check (card labels, short summaries, step texts) are each asked of the gate with canvas_text by runBriefingFlow before they are sent'],
   'egdesk-board-agent-context.mjs': ['board_excerpt: NOT yet unified - still the owner\'s per-request screening choice (see the c6 report)'],
   'egdesk-chat-choice.mjs': ['dm_chooser: the user\'s own typed question and options, confirmed in the panel'],
   'egdesk-browser-reflex.mjs': ['page_text'],
@@ -88,6 +89,7 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-context-setup.mjs': ['speech_history', 'topic_history', 'memory_page'],
   'egdesk-conversation-flow.mjs': ['run_facts'],
   'egdesk-draft-check.mjs': ['draft_text'],
+  'egdesk-conversation-flow.mjs': ['conversation_flow: elapsed seconds and step counts only, no text and no data class (nothing for the data-sharing permissions to govern)'],
   'egdesk-terminal-command-gate.mjs': ['terminal_command'],
   'egdesk-terminal-judge.mjs': ['terminal_output'],
   'egdesk-turn-memory.mjs': ['memory_page', 'topic_history'],
