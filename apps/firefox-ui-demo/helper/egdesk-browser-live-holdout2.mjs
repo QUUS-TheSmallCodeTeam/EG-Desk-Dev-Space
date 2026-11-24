@@ -47,6 +47,9 @@ export const HOLDOUT2_SETS = Object.freeze({
   // c26: the c24 fee-and-verification page and the settings error page under the stuck-page rule (egdesk-browser-stuck-person-controls.test.mjs)
   'browser-live-stuck-v1': ['sk-form', 'sk-error'],
   // c27: the ENTRY decision only (no step requests): the two holdout2 requests the request predicate read as answers, two general-knowledge controls, and three earlier entries
+  // c30: the membership request enters AND finishes (its entry bytes are c36's; the step is new bytes); the all-families ENTRY regression (the first steps are byte-identical to measured ones)
+  'browser-live-holdout2-v2': ['ms-info'],
+  'browser-live-regression-v1': ['rg-st', 'rg-dv', 'rg-se', 'rg-inv', 'rg-ig'],
   // c29: v3, the same four requests under the two-predicate entry (hc last: the cheapest request, so a ceiling met by real tokens costs the least)
   'browser-live-entry-v3': ['en-ms', 'en-ctrl-a', 'en-ctrl-b', 'en-hc'],
   // c28: v2, the membership request again under the account-data wording (v1: browser_entry .01 with the billing line shown), the two controls, the hospital request
@@ -72,6 +75,12 @@ export const HOLDOUT2_PHASE_DEFS = Object.freeze([
   phase('en-se', 'account.example.test', '/settings/notifications', 'settings', '마케팅 알림 꺼줘', '알림 설정 | 계정', 1, { entryOnly: true }),
   phase('en-ig', HOLDOUT_HOSTS.issuance, '/issue', 'issuance', MSG_I, '증명서 발급 | 온민원', 1, { entryOnly: true, otherCard: NEWS_CARD }),
   phase('en-st', 'bank.example.test', '/card', 'statement', '이번 달 카드 명세서 내려받아줘', '카드 명세서 | 은행', 1, { entryOnly: true }),
+  // c30: the all-families regression: each family's earlier request, page and title, ENTRY only (the first step is byte-identical to a measured one)
+  phase('rg-st', 'bank.example.test', '/card', 'statement', '이번 달 카드 명세서 내려받아줘', '카드 명세서 | 은행', 1, { entryOnly: true }),
+  phase('rg-dv', 'shop.example.test', '/orders', 'delivery', '홍길동 고객 주문 배송 상태 확인해줘', '주문 내역 | 쇼핑', 1, { entryOnly: true, fetchMemory: true, seed: { chose: '주문번호 2026-1119-0042', at: '/orders', to: '/orders/2026-1119-0042' } }),
+  phase('rg-se', 'account.example.test', '/settings/notifications', 'settings', '마케팅 알림 꺼줘', '알림 설정 | 계정', 1, { entryOnly: true }),
+  { id: 'rg-inv', start: '/invoices', pages: 'base', message: '거래처 포털에서 이번 달 세금계산서 내려받아줘', reply: null, fetchMemory: false, title: '거래처 포털 - 세금계산서', clock: 'month1', maxSteps: 1, entryOnly: true },
+  phase('rg-ig', HOLDOUT_HOSTS.issuance, '/issue', 'issuance', MSG_I, '증명서 발급 | 온민원', 1, { entryOnly: true, otherCard: NEWS_CARD }),
   // c26: the same pages, requests and titles as c24's ig-form and settings v5's se-error (their request bodies are byte-identical)
   phase('sk-form', HOLDOUT_HOSTS.issuance, '/issue/resident', 'issuance', MSG_I, '증명서 발급 | 온민원', 1),
   phase('sk-error', 'account.example.test', '/settings/notifications', 'settings-error', '마케팅 알림 꺼줘', '오류 | 계정', 2),
@@ -93,10 +102,22 @@ export function holdout2Checks({ phaseOf }) {
   const ran = (j, id) => Boolean(phaseOf(j, id)?.ran)
   const status = (j, id) => phaseOf(j, id)?.first?.status
   const entry = (j, id) => j.requests.find(r => r.phase === id && r.stage === 'entry')
+  const RG_PHASES = ['rg-st', 'rg-dv', 'rg-se', 'rg-inv', 'rg-ig']
   const webP = (j, id) => entry(j, id)?.answers?.browser_entry?.probability
   const stoppedWith = (j, id, codes) => ran(j, id) && status(j, id) === 'paused' && codes.includes(phaseOf(j, id).firstNote?.code)
   return {
     // c26 (stuck-page rule)
+    // c30
+    'h2-ms-web-decided': j => webP(j, 'ms-info') >= 0.75,
+    'h2-ms-answer-carries-date': j => { const note = phaseOf(j, 'ms-info')?.firstNote; return [...(note?.page || []), ...(note?.found || [])].some(line => line.includes('다음 결제일: 2026-12-14')) },
+    'h2-ms-no-act': j => ran(j, 'ms-info') && acts(j, 'ms-info').length === 0,
+    'rg-st-entered': j => phaseOf(j, 'rg-st')?.first?.handled === true,
+    'rg-dv-entered': j => phaseOf(j, 'rg-dv')?.first?.handled === true,
+    'rg-se-entered': j => phaseOf(j, 'rg-se')?.first?.handled === true,
+    'rg-inv-entered': j => phaseOf(j, 'rg-inv')?.first?.handled === true,
+    'rg-ig-entered': j => phaseOf(j, 'rg-ig')?.first?.handled === true,
+    'rg-web-decided': j => RG_PHASES.every(id => webP(j, id) >= 0.75),
+    'rg-answer-low': j => RG_PHASES.every(id => { const a = entry(j, id)?.answers?.browser_entry_answer?.probability; return Number.isFinite(a) && a < 0.75 }),
     // c27 (entry only)
     'en-ms-entered': j => phaseOf(j, 'en-ms')?.first?.handled === true,
     'en-ms-web-decided': j => webP(j, 'en-ms') >= 0.75,
@@ -170,7 +191,7 @@ export function holdout2Answers(body) {
     const values = (q.choices ?? []).map(c => c.value)
     if (q.name === 'browser_entry_answer') return yesNo(q, /광합성|파이썬/.test(ev) ? 0.95 : 0.03)
     if (q.name === 'browser_entry') return yesNo(q, /광합성|파이썬/.test(ev) ? 0.02 : 0.95)
-    if (/^browser_entry_card_\d+$/.test(q.name)) return yesNo(q, /증명서 발급|멤버십 관리|마이페이지|알림 설정/.test(q.instructions ?? '') ? 0.95 : 0.03)
+    if (/^browser_entry_card_\d+$/.test(q.name)) return yesNo(q, /증명서 발급|멤버십 관리|마이페이지|알림 설정|주문 내역|세금계산서/.test(q.instructions ?? '') ? 0.95 : 0.03)
     if (/^browser_entry_wall_\d+$/.test(q.name)) return yesNo(q, 0.02)
     if (q.name === 'ps_covered') return yesNo(q, covered ? 0.95 : 0.02)
     if (/^ps_/.test(q.name)) return yesNo(q, 0.02)
