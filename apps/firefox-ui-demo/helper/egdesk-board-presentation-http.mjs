@@ -2,6 +2,7 @@ import { createHmac, randomBytes } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.mjs'
 import { createDecisionClient, DECISIONS_ENDPOINT, DECISION_MODEL, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
+import { DEFAULT_DECISION_THRESHOLDS } from './egdesk-decision-questions.mjs'
 import { normalizeBoardPresentationScene, prepareBoardPresentation, readBoardPresentation } from './egdesk-board-presentation-plan.mjs'
 import { attachBoardVisual, MAX_BOARD_VISUAL_IMAGE_CHARS, validateBoardVisual } from './egdesk-board-visual-packet.mjs'
 
@@ -74,7 +75,7 @@ function normalizePrepare(body) {
  * `fetchImpl` and `now` support offline fixtures; production uses fixed defaults.
  */
 export function createBoardPresentationHttpHandler({ credentials, getMode, budget, port = 39218,
-  fetchImpl, now = () => performance.now() } = {}) {
+  fetchImpl, now = () => performance.now(), calibrationLog = null } = {}) {
   if (typeof credentials?.getApiKey !== 'function' || typeof credentials?.savedAt !== 'function' ||
       typeof getMode !== 'function' || typeof budget?.canSpend !== 'function' ||
       typeof budget?.record !== 'function' || typeof now !== 'function') throw new TypeError('Board Decisions dependencies are required')
@@ -101,6 +102,23 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     if (!binding) return { mode, reason: 'not-configured' }
     if (checkBudget && budget.canSpend() !== true) return { mode, reason: 'budget-exceeded' }
     return { mode, binding }
+  }
+
+  // Content-free calibration record (canon 5.3, egdesk-decision-calibration-log.mjs): the two top probabilities, the bar that
+  // applied and what it would have done. No option names, slots, cue, ids, geometry or image. Never throws, never changes the reply.
+  const FAILURES = new Set(['timeout', 'unreachable', 'bad_response', 'no_credit', 'rate_limited', 'budget_exceeded', 'spend_limit_reached',
+    'invalid_key', 'server_error', 'model_unavailable'])
+  function calibrate(prepared, answers, result, fallback = null) {
+    try {
+      if (typeof calibrationLog?.record !== 'function') return
+      const a = answers?.board_view, rows = Array.isArray(a?.probabilities) ? a.probabilities : []
+      const accepted = result?.status === 'preview' || result?.status === 'advisory-only'
+      calibrationLog.record({ feature: 'board_arrangement', mode: prepared.mode, candidates: prepared.options.length,
+        ...(fallback ? { fallback, judgments: [] } : {
+          attached: prepared.mode === 'on' && result?.status === 'preview',
+          judgments: [{ q: 'choice', would: accepted ? 'accept' : 'reject', top: rows[0]?.probability, second: rows[1]?.probability,
+            p: a?.confidence, threshold: DEFAULT_DECISION_THRESHOLDS.choice, minMargin: DEFAULT_DECISION_THRESHOLDS.margin }] }) })
+    } catch { /* recording must never affect the reply */ }
   }
 
   function discard(ticket) {
@@ -138,15 +156,20 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
       })
       // Usage was already recorded by the client: do not reject a valid answer
       // merely because this very call reached the cap. Revocation still wins.
-      if (!authorized || controller.signal.aborted || res.destroyed || now() >= expiresAt) return MANUAL
+      if (!authorized || controller.signal.aborted || res.destroyed || now() >= expiresAt) {
+        if (authorized && !controller.signal.aborted && !res.destroyed) calibrate(prepared, null, null, 'timeout')
+        return MANUAL
+      }
       const current = authority({ checkBudget: false })
-      if (!matches(current)) return MANUAL
+      if (!matches(current)) { calibrate(prepared, null, null, 'mode_changed'); return MANUAL }
       const result = readBoardPresentation(prepared, answers, current.binding)
+      calibrate(prepared, answers, result)
       if (result.status === 'preview') return { status: 'preview', preview: result.preview }
       if (result.status === 'advisory-only') return { status: 'advisory-only', suggestion: result.suggestion }
       return MANUAL
-    } catch {
+    } catch (error) {
       // Do not echo provider errors, details, answers, or credentials. No retry.
+      if (authorized && FAILURES.has(error?.code)) calibrate(prepared, null, null, error.code)
       return MANUAL
     } finally {
       clearTimeout(timer)
