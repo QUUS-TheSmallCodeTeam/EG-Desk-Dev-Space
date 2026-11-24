@@ -126,6 +126,7 @@ test('the bridge builds its turn-memory config with the options of its developer
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', EGDESK_TURN_MEMORY_KEEP_LATE: 'on' }), { pruneHeld: true, keepLate: true })
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_PRUNE_HELD: '1', EGDESK_TURN_MEMORY_KEEP_LATE: 'true' }), {})
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_SPEECH_DESIGN: 'split' }), { speechDesign: 'split-isolated' })
+  assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_SPEECH_DESIGN: 'hybrid' }), { speechDesign: 'hybrid-isolated' })
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_SPEECH_DESIGN: 'split-isolated' }), {}, 'only the exact value')
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_ONE_PACKET: '1', EGDESK_TURN_MEMORY_WRITE_TARGET: 'about', EGDESK_TURN_MEMORY_CONFIRM: 'yes' }), {}, 'only the exact values; "about" is already the default')
   assert.deepEqual([turnMemoryFlagsFromEnv(null), turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_ONE_PACKET: true })], [{}, {}])

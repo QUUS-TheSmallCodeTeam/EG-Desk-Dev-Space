@@ -14,7 +14,7 @@ const srcN = { other: 'n', own: 'n', record: 'n', guess: 'n' }, timeN = { before
 test('the bar is the speech bar, not lowered: yes at >= .85, no at <= .15', () => {
   assert.equal(SPEECH_SPLIT_BARS.yes, SPEECH_THRESHOLDS.confidence)
   assert.deepEqual(SPEECH_SPLIT_BARS, { yes: 0.85, no: 0.15 })
-  assert.deepEqual(WRITE_SPEECH_DESIGNS, ['axes-isolated', 'split-isolated'])
+  assert.deepEqual(WRITE_SPEECH_DESIGNS, ['axes-isolated', 'split-isolated', 'hybrid-isolated'])
   assert.ok(!SPEECH_DESIGNS.includes(SPEECH_SPLIT), 'not a turn-level design')
 })
 
@@ -36,6 +36,8 @@ test('time: one direction (now+ongoing counts as ongoing), the anchor decides pa
   assert.equal(t({ after: 'y', when: 'y' }), 'future_anchored')
   assert.equal(t({ after: 'y' }), 'future_unspecified')
   assert.equal(t({ now: 'y' }), 'at_utterance')
+  assert.equal(t({ now: 'y', when: 'y' }), 'unknown', 'about now but naming a day or time: conflicting times (c23 a16)')
+  assert.equal(t({ now: 'y', when: '?' }), 'at_utterance', 'an undecided anchor does not block now (c23 c08: when .26)')
   assert.equal(t({ ongoing: 'y' }), 'ongoing_no_end')
   assert.equal(t({ ongoing: 'y', now: 'y' }), 'ongoing_no_end')
   assert.equal(t({ before: 'y', when: '?' }), 'unknown', 'an undecided anchor installs no past label')

@@ -1,0 +1,235 @@
+{
+  "set": "axis-hybrid-v1",
+  "tokenCeiling": 12000,
+  "productBars": {
+    "*choice": {
+      "minConfidence": 0.85,
+      "minMargin": 0.2,
+      "source": "egdesk-speech-grounding.mjs SPEECH_THRESHOLDS (axes are installed at confidence >= .85 and margin >= .20)"
+    },
+    "*predicate": {
+      "yes": 0.85,
+      "no": 0.15,
+      "source": "egdesk-speech-grounding.mjs SPEECH_SPLIT_BARS (.85 / .15)"
+    }
+  },
+  "passRule": "Labels frozen in labels.json sha256 d29d9007bd871377dd2e30fb9c6b84fae98b401072abad2cca5eb76249d1b7aa. HARD: no wrong install by the axes question at its product bar (runner), and 0 wrong installs from scripts/egdesk-axis-hybrid-plan.mjs analyze (the product interpretation speechHybridInterpretations). SOFT: the 5 controls installed correctly, the a16 guard not installed.",
+  "requests": [
+    {
+      "id": "source-c01",
+      "file": "requests/source-c01.json",
+      "sha256": "4aa75c454072f1638429008de7da60e8661227fc9af5992a0c7fb020e87f2de0",
+      "estInputTokens": 1355,
+      "role": "control",
+      "axis": "source",
+      "allowed": [
+        "self_reported_observation"
+      ],
+      "expect": [
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "self_reported_observation",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "no label outside self_reported_observation installed by the axes question at the product bar"
+        },
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "self_reported_observation"
+          ],
+          "minConfidence": 0.85,
+          "minMargin": 0.2,
+          "severity": "soft",
+          "note": "installed as in the study (coverage)"
+        }
+      ]
+    },
+    {
+      "id": "source-c02",
+      "file": "requests/source-c02.json",
+      "sha256": "f4713149af85785b9ff855c203abf51bc997ac221e42f820071daf569f4b4ee6",
+      "estInputTokens": 1350,
+      "role": "control",
+      "axis": "source",
+      "allowed": [
+        "attributed_report"
+      ],
+      "expect": [
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "attributed_report",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "no label outside attributed_report installed by the axes question at the product bar"
+        },
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "attributed_report"
+          ],
+          "minConfidence": 0.85,
+          "minMargin": 0.2,
+          "severity": "soft",
+          "note": "installed as in the study (coverage)"
+        }
+      ]
+    },
+    {
+      "id": "source-c10",
+      "file": "requests/source-c10.json",
+      "sha256": "efed4736b303ab48e5ab3fd8848a615dbf6e90fe02b24e5a48afbb3e6cb23191",
+      "estInputTokens": 1350,
+      "role": "control",
+      "axis": "source",
+      "allowed": [
+        "record_based"
+      ],
+      "expect": [
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "record_based",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "no label outside record_based installed by the axes question at the product bar"
+        },
+        {
+          "name": "speech_source_0",
+          "kind": "choice",
+          "oneOf": [
+            "record_based"
+          ],
+          "minConfidence": 0.85,
+          "minMargin": 0.2,
+          "severity": "soft",
+          "note": "installed as in the study (coverage)"
+        }
+      ]
+    },
+    {
+      "id": "time-c01",
+      "file": "requests/time-c01.json",
+      "sha256": "e164f9b1ad51f55934a281ab5b570f52d7af96adfb65e1276b2c3019c97d1f25",
+      "estInputTokens": 1622,
+      "role": "control",
+      "axis": "time",
+      "allowed": [
+        "past_anchored"
+      ],
+      "expect": [
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "past_anchored",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "no label outside past_anchored installed by the axes question at the product bar"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "past_anchored"
+          ],
+          "minConfidence": 0.85,
+          "minMargin": 0.2,
+          "severity": "soft",
+          "note": "installed as in the study (coverage)"
+        }
+      ]
+    },
+    {
+      "id": "time-c26",
+      "file": "requests/time-c26.json",
+      "sha256": "6aac61a8d5f301ed62991a5e99b6de7bb91be7474af2d2ffd77b3607c9fd4985",
+      "estInputTokens": 1614,
+      "role": "control",
+      "axis": "time",
+      "allowed": [
+        "past_anchored"
+      ],
+      "expect": [
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "past_anchored",
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "no label outside past_anchored installed by the axes question at the product bar"
+        },
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "past_anchored"
+          ],
+          "minConfidence": 0.85,
+          "minMargin": 0.2,
+          "severity": "soft",
+          "note": "installed as in the study (coverage)"
+        }
+      ]
+    },
+    {
+      "id": "time-a16",
+      "file": "requests/time-a16.json",
+      "sha256": "d7cba66b1547f94b43dfbdc4d07d2f38d35fbc7baab76b608d1635446912ae16",
+      "estInputTokens": 1610,
+      "role": "guard",
+      "axis": "time",
+      "allowed": [
+        "unknown"
+      ],
+      "expect": [
+        {
+          "name": "speech_time_0",
+          "kind": "choice",
+          "oneOf": [
+            "unknown"
+          ],
+          "whenAccepted": {
+            "minConfidence": 0.85,
+            "minMargin": 0.2
+          },
+          "severity": "hard",
+          "note": "no label outside unknown installed by the axes question at the product bar"
+        }
+      ]
+    }
+  ]
+}

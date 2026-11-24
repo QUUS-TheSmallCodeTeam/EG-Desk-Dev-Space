@@ -1,0 +1,92 @@
+{
+  "set": "memory-action-v1",
+  "tokenCeiling": 5000,
+  "productBars": {
+    "tn_need": {
+      "yes": 0.8,
+      "no": 0.2,
+      "source": "egdesk-wiki-reconstruction.mjs YES / NO (.8 / .2): the triage and the scan act on a decided yes or no"
+    },
+    "pg_#": {
+      "yes": 0.8,
+      "no": 0.2,
+      "source": "egdesk-wiki-reconstruction.mjs YES / NO (.8 / .2): the triage and the scan act on a decided yes or no"
+    }
+  },
+  "passRule": "All three hard checks pass: for the test-run request the triage says no stored page is needed and the scan would pick none; for the design question the triage still says one is. Built by the product (all-on journey, v4 flags plus EGDESK_CONTEXT_RELEVANCE=action, scripted model, offline).",
+  "requests": [
+    {
+      "id": "s4-triage",
+      "file": "requests/s4-triage.json",
+      "sha256": "e2f6e0ea87cac1dbc4f4b2176fe139c50036cdf3af761d0c8f2fb3c833f3a71f",
+      "estInputTokens": 1287,
+      "expect": [
+        {
+          "name": "tn_need",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "hard",
+          "note": "a test-run request needs no stored page (real v4 without the rule: .99)"
+        }
+      ]
+    },
+    {
+      "id": "s4-scan",
+      "file": "requests/s4-scan.json",
+      "sha256": "c6c79c3904dcd24cad356e0fb64ed26af62b6ce3b30b0c84f1d78dbd7a199787",
+      "estInputTokens": 1623,
+      "expect": [
+        {
+          "name": "pg_0",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "hard",
+          "note": "not about running the tests (real v4 without the rule: pg_0 .87, pg_1 .87)"
+        },
+        {
+          "name": "pg_1",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "hard",
+          "note": "not about running the tests (real v4 without the rule: pg_0 .87, pg_1 .87)"
+        },
+        {
+          "name": "pg_2",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "hard",
+          "note": "not about running the tests (real v4 without the rule: pg_0 .87, pg_1 .87)"
+        },
+        {
+          "name": "pg_3",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "hard",
+          "note": "not about running the tests (real v4 without the rule: pg_0 .87, pg_1 .87)"
+        },
+        {
+          "name": "pg_4",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "hard",
+          "note": "not about running the tests (real v4 without the rule: pg_0 .87, pg_1 .87)"
+        }
+      ]
+    },
+    {
+      "id": "s3b-triage",
+      "file": "requests/s3b-triage.json",
+      "sha256": "245d2273206619751326e6a35c6a1bff9107dab8cc41cd0788de094e81486c48",
+      "estInputTokens": 1240,
+      "expect": [
+        {
+          "name": "tn_need",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "the design question needs the design page (real v4: 1.0)"
+        }
+      ]
+    }
+  ]
+}

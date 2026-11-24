@@ -242,8 +242,14 @@ export const NEXT_RULES = [
   'A recorded plan is not a done fact; a relayed statement is attribution. Never invent a page. If the options do not fit, choose unknown.',
 ].join('\n')
 
+// The 'action' rule set (developer flag EGDESK_CONTEXT_RELEVANCE=action, the same flag as the context selection's; NOT the default). All-on
+// c17 and v4 (2026-11-25), s4 "전체 테스트 돌리고 결과 알려줘": the selection no longer attached anything with its action rule (c23: all twelve 0),
+// but turn memory did: triage need .99, scan pg .87 / .87, then linked pages. One added line, in the triage and in the scan rules (L7 c21).
+export const ACTION_MEMORY_RULE = 'A stored page is needed only when the response has to use what the page says. A request to carry out an action (run, build, test, deploy, open, send) needs a page only when the page is about that very action (its procedure, target or expected result); records of other work are not needed because they are recent or belong to the same project.'
+export const MEMORY_RULE_SETS = Object.freeze(['default', 'action'])
+
 /** mode 'first' (default): reconstruct memory for a session whose model holds nothing. mode 'next': fetch only what the next judgment needs; `live` is host-gated recent conversation text or null. */
-export async function reconstructMemory({ message, wiki, client, scope = null, askedAt = null, delivered = null, budget: overrides = {}, signal, now = () => performance.now(), clock = null, mode = 'first', live = null, previous = null } = {}) {
+export async function reconstructMemory({ message, wiki, client, scope = null, askedAt = null, delivered = null, budget: overrides = {}, signal, now = () => performance.now(), clock = null, mode = 'first', live = null, previous = null, ruleSet = 'default' } = {}) {
   const budget = { ...DEFAULTS, ...overrides }
   // One time source for the whole loop (see REAL_CLOCK). `now` alone is still accepted and gets the real timers.
   const time = clock ?? { now, setTimer: REAL_CLOCK.setTimer, clearTimer: REAL_CLOCK.clearTimer }
@@ -266,7 +272,7 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
   }
   receipts.skippedDelivered = alreadyDelivered.map(p => p.id)
   const isNext = mode === 'next'
-  const rules = isNext ? NEXT_RULES : JUDGE_RULES
+  const rules = `${isNext ? NEXT_RULES : JUDGE_RULES}${ruleSet === 'action' ? `\n${ACTION_MEMORY_RULE}` : ''}`
   // Held pages are shown by header only: the judge knows what the model holds, the content is never re-sent.
   const heldMessage = isNext ? [{ role: 'user', content: `Held in the answering model's context (the start of each is shown; the rest is not repeated):\n${alreadyDelivered.length ? alreadyDelivered.map(p => `- ${p.title} | time=${p.time.slice} | status=${p.status}\n  ${compactText(p.body, 200)}`).join('\n') : '(nothing)'}` },
     ...(typeof live === 'string' && live.trim() ? [{ role: 'user', content: `Live conversation (recent turns, bounded):\n${live.slice(-3000)}` }] : []),
