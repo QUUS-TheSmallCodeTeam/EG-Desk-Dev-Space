@@ -23,7 +23,7 @@ import { enumerateLogBlocks, judgeTerminalState, pickRelevantBlocks, stateRespon
 // Cost bounds: an exit-0 command without a failure mark is settled by rule (no request); the same quiet tail is judged
 // once; at most judgmentsPerCommand checks per running command and requestsPerRun Decision requests per run.
 export const ENGINE_COMMAND_FLAGS = Object.freeze(['off', 'advisory'])
-export const ENGINE_COMMAND_WATCH_LIMITS = Object.freeze({ quietMs: 1500, tailChars: 4000, outputChars: 24000, judgmentsPerCommand: 4, requestsPerRun: 12,
+export const ENGINE_COMMAND_WATCH_LIMITS = Object.freeze({ quietMs: 1500, longSilenceMs: 30_000, tailChars: 4000, outputChars: 24000, judgmentsPerCommand: 4, requestsPerRun: 12,
   commandsPerRun: 24, maxRuns: 32, trail: 80, deadlineMs: 1500 })
 const FAILURE_MARK = /(?:not ok|✖|FAIL\b|AssertionError|Traceback|panicked at|error TS\d+|\bError:|\berror\b[:\[]|npm ERR!|command not found|Permission denied|fatal:)/i
 
@@ -109,7 +109,10 @@ export function createEngineCommandWatch({ flag = () => 'off', decision = null, 
     const quietMs = Math.max(0, at - (command.lastOutputAt ?? command.startedAt))
     const output = outputOf(runKey, itemId)
     const tail = output.slice(-max.tailChars)
-    const key = `${alive}|${command.done?.exitCode ?? ''}|${command.done?.failed ?? ''}|${hashOf(tail)}`
+    // A tail is judged once when it goes quiet and, if the command is still silent after longSilenceMs, once more: a long silence is
+    // a different fact (a hang or a prompt the tail did not show). The second look only happens at a check point that comes that late (a beat).
+    const tier = alive && quietMs >= max.longSilenceMs ? 'long' : 'quiet'
+    const key = `${alive}|${command.done?.exitCode ?? ''}|${command.done?.failed ?? ''}|${tier}|${hashOf(tail)}`
     if (command.judgedKey === key) return command.judged
     if (alive && command.judgments >= max.judgmentsPerCommand) return command.judged
     command.busy = true
@@ -123,7 +126,7 @@ export function createEngineCommandWatch({ flag = () => 'off', decision = null, 
       // or a clean exit whose output carries no failure mark.
       if (!alive && (!output || (!errorExit && !FAILURE_MARK.test(output)))) judged = { state: errorExit ? 'completed_error' : 'completed_ok', source: 'runtime', requests: 0 }
       else judged = await judgeTerminalState({ tail, alive, exitCode, failed, quietMs, mode, client: decision?.client ?? null, egress, egressKind: 'command_output',
-        timeoutMs: max.deadlineMs, limits: { tailLines: 30, tailChars: 2400, lineChars: 200, quietMs: max.quietMs, maxQuietMs: 30_000 }, calibration: { record: raw => { captured = raw } } })
+        timeoutMs: max.deadlineMs, limits: { tailLines: 30, tailChars: 2400, lineChars: 200, quietMs: max.quietMs, maxQuietMs: max.longSilenceMs }, calibration: { record: raw => { captured = raw } } })
       run.requests += judged.requests
       const state = judged.shadow ?? judged.state
       const would = wouldOf(stateResponse(state, { agentOwned: false })) // nothing can be typed into an engine's command
@@ -230,21 +233,3 @@ export function createEngineCommandWatch({ flag = () => 'off', decision = null, 
   })
 }
 
-/**
- * The command facts as question facts for a heartbeat question (egdesk-heartbeat.mjs: numbers, booleans and closed labels with
- * keys /^[a-z][a-z0-9_]{0,63}$/). Input: the row this watch gives the heartbeat (beat.facts.sources.engine_commands). Returns {}
- * when there is no row, so a caller can spread it into its question's `facts` unconditionally.
- */
-export function commandQuestionFacts(row) {
-  if (!row || typeof row !== 'object' || typeof row.terminal !== 'string') return {}
-  const seconds = value => (Number.isFinite(value) && value >= 0 ? Math.round(value / 1000) : null)
-  const count = value => (Number.isSafeInteger(value) && value >= 0 ? value : 0)
-  const out = { command_running: row.active === true, commands_finished: count(row.commandsDone), commands_failed: count(row.commandsFailed) }
-  if (row.active === true) {
-    const running = seconds(row.runningMs), quiet = seconds(row.quietMs)
-    if (running !== null) out.command_running_seconds = running
-    if (quiet !== null) out.seconds_since_command_output = quiet
-  }
-  if (typeof row.terminalState === 'string' && /^[a-z0-9_]{1,40}$/.test(row.terminalState)) out.command_state = row.terminalState
-  return out
-}

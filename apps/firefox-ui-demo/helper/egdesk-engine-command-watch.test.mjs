@@ -9,8 +9,8 @@ import { RunOutputStore } from './codex-run-outputs.mjs'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 import { createEgressGate, EGRESS_KINDS, modelDataPermissions } from './egdesk-decision-egress.mjs'
-import { commandQuestionFacts, createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
-import { beatRequest } from './egdesk-heartbeat-judge.mjs'
+import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
+import { waitSummary } from './egdesk-conversation-flow.mjs'
 import { createHeartbeat } from './egdesk-heartbeat.mjs'
 import { observeTerminalLoop } from './egdesk-heartbeat-providers.mjs'
 import { enumerateStateOptions, terminalFactRow } from './egdesk-terminal-judge.mjs'
@@ -218,34 +218,32 @@ test('heartbeat: the facts pass the heartbeat\'s own sanitizer unchanged and say
   hb.stop('run_end')
 })
 
-test('question facts for a beat question: the command row becomes closed facts the heartbeat accepts unchanged, and they reach the one beat request', async t => {
+test('one source of truth for the wait labels: the conversation flow reads this row itself (waitSummary); no second mapping lives here', async t => {
   const r = rig(t)
-  const fired = []
-  const hbClock = { t: 0 }
-  const hb = createHeartbeat({ key: 'room', monotonicNow: () => hbClock.t, setTimer: fn => { fired.push(fn); return {} }, clearTimer: () => {} })
+  const hb = createHeartbeat({ key: 'room', monotonicNow: () => 0, setTimer: () => ({}), clearTimer: () => {} })
   hb.start({ sinceMs: 0 })
-  hb.register('engine_commands', { facts: () => r.watch.facts('run-1') }) // facts only: this feature has no question of its own
-  // A stand-in for a feature that does ask at a beat (the wait-explaining message question is one): it spreads the command facts into its own question.
-  hb.register('waiting', { propose: beat => ({ name: 'need', instructions: 'Should the assistant explain the wait now?', options: [{ value: 'none' }, { value: 'explain_wait' }],
-    facts: { ...commandQuestionFacts(beat.facts.sources.engine_commands) } }) })
-  const rounds = []
-  hb.setJudge(async round => { rounds.push(round); return {} })
-  assert.deepEqual(commandQuestionFacts(null), {}); assert.deepEqual(commandQuestionFacts(r.watch.facts('run-1')), {}, 'no command: nothing to add')
-  r.start('c1'); r.out('c1', 'running 40 tests zeta-synthetic-output\n'); await r.advance(1500) // judged: still running
-  r.clock.t += 18_500; hbClock.t = 20_000
-  const expected = { command_running: true, commands_finished: 0, commands_failed: 0, command_running_seconds: 20, seconds_since_command_output: 20, command_state: 'running_output' }
-  assert.deepEqual(commandQuestionFacts(r.watch.facts('run-1')), expected)
-  fired.shift()(); await new Promise(resolve => setImmediate(resolve)) // one beat
-  assert.equal(rounds.length, 1)
-  const [question] = rounds[0].questions
-  assert.deepEqual({ ...question.facts }, expected, 'the heartbeat\'s own whitelist keeps every fact as given')
-  const request = beatRequest({ beat: rounds[0].beat, questions: rounds[0].questions })
-  const text = request.input.map(part => part.content).join('\n')
-  assert.match(text, /current_phase: tool_running/); assert.match(text, /command_running_seconds: 20\nseconds_since_command_output: 20\ncommand_state: running_output/)
-  assert.doesNotMatch(text, /zeta-synthetic-output|running 40 tests/, 'numbers and closed labels only: no output text')
-  r.end('c1', 1); await r.settle()
-  assert.deepEqual(commandQuestionFacts(r.watch.facts('run-1')), { command_running: false, commands_finished: 1, commands_failed: 1, command_state: 'completed_error' })
+  hb.register('engine_commands', { facts: () => r.watch.facts('run-1') })
+  assert.deepEqual(waitSummary(hb.facts()), [], 'no command: nothing is waited on')
+  r.start('c1'); r.out('c1', 'running 40 tests zeta-synthetic-output\n'); r.clock.t += 20_000
+  assert.deepEqual(waitSummary(hb.facts()), [{ what: 'command_running', seconds: 20 }])
+  r.out('c1', 'Proceed? (y/N) '); await r.advance(1500); r.clock.t += 10_500
+  assert.deepEqual(waitSummary(hb.facts()), [{ what: 'command_waiting_input', seconds: 12 }], 'a judged waiting state: the label and how long the command has been silent')
+  r.end('c1', 0); await r.settle()
+  assert.deepEqual(waitSummary(hb.facts()), [], 'finished: nothing is waited on')
+  assert.doesNotMatch(JSON.stringify(waitSummary(hb.facts())), /zeta|Proceed/)
   hb.stop('run_end')
+})
+
+test('a long silence is a second, bounded look: the same quiet tail is judged again once after longSilenceMs, only at a check point that comes that late', async t => {
+  const r = rig(t)
+  r.start('c1'); r.out('c1', '[2/4] Compiling 412 modules\n'); await r.advance(1500)
+  assert.equal(r.requests.length, 1)
+  r.clock.t += 10_000; r.watch.beat('run-1'); await r.settle()
+  assert.equal(r.requests.length, 1, 'still the short quiet tier: not asked again')
+  r.clock.t += 230_000; r.watch.beat('run-1'); r.watch.beat('run-1'); await r.settle(); r.watch.beat('run-1'); await r.settle()
+  assert.equal(r.requests.length, 2, 'one more request for the long silence, however many beats follow')
+  assert.match(r.requests[1], /quiet_ms.:241500\b/)
+  assert.deepEqual(r.lines(), ['quiet:running_output/fallback→wait', 'beat:running_output/fallback→wait'])
 })
 
 test.after(() => { if (process.env.EGDESK_SIM_OUT) writeFileSync(process.env.EGDESK_SIM_OUT, JSON.stringify(MATRIX, null, 2)) })
