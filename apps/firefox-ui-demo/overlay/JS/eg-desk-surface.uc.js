@@ -14779,7 +14779,7 @@
               blockedSend.textContent = '';
               if (boardDestination && ev.isComposing) beginBoardComposition();
               if (!boardDestination || !boardInputState.composing.has(input)) codexBridge.setDraft(input.value, activeThread.id);
-              if (!boardDestination && input.value.trim()) { window.clearTimeout(input._warmTimer); input._warmTimer = window.setTimeout(() => codexBridge.warmDecisionConnection(), 600); }
+              if (!boardDestination && input.value.trim()) { try { window.clearTimeout(input._warmTimer); input._warmTimer = window.setTimeout(() => codexBridge.warmDecisionConnection?.(), 600); } catch { /* warm-up is best effort */ } }
               choice.sync();
               resizeComposer(false);
             });
