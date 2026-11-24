@@ -170,3 +170,38 @@ test('the runtime: preamble: false sends the caller\'s text and nothing else (th
   assert.doesNotMatch(JSON.stringify(w.of('turn/start').at(-1)), /Secret person text/)
   assert.match((await (async () => { await w.chat.internalText(run, 'DEFAULT', { timeoutMs: 3000 }); return w.of('turn/start').at(-1).input[0].text })()), /Secret person text[\s\S]*DEFAULT/, 'the default keeps the preamble for the other callers')
 })
+
+// ---- posted answers: engine-folder paths become the real folder's ----
+test('own-tools posted answers link the real file, not the engine\'s empty folder; artifacts verify the real path; other runs and other paths are untouched', async t => {
+  const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-own-links-'))
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }))
+  const real = path.join(base, 'project'), empty = path.join(base, 'engine-folders', 'empty'), sibling = `${empty}-other`
+  fs.mkdirSync(real); fs.mkdirSync(empty, { recursive: true }); fs.writeFileSync(path.join(real, 'app.js'), 'x')
+  const verified = []
+  const make = ownFlag => {
+    const chat = new CodexChatRuntime({ request: async (m, p) => (m === 'thread/start' ? { thread: { id: 'thr-1' }, cwd: p.cwd } : m === 'turn/start' ? { turn: { id: 'turn-1', status: 'inProgress', items: [] } } : {}),
+      respond: () => {}, emit: () => {}, emitLegacy: () => {}, verifyFile: async p => { verified.push(p); return p }, getOwnerKey: () => 'codex:links',
+      ownTools: { mode: () => ownFlag, neutralFolder: () => empty } })
+    chat.setConnection(true)
+    return chat
+  }
+  const finalText = `Done. See [app.js](${empty}/app.js) and [the folder](<${empty}>), also ${empty}/sub/b.js, [x](${sibling}/y.js), [etc](/etc/hosts).`
+  const answer = async (chat, run) => {
+    await chat.handleNotification({ method: 'item/completed', params: { threadId: run.conversationId, turnId: run.runId, item: { id: 'm1', type: 'agentMessage', phase: 'final_answer', text: finalText } } })
+    await chat.handleNotification({ method: 'turn/completed', params: { threadId: run.conversationId, turn: { id: run.runId, status: 'completed', items: [] } } })
+    await chat.queue
+    return chat.runFor(run)
+  }
+  const on = make('on'), run = await on.send({ message: 'edit', clientThreadId: 'ui', requestId: 'r1', cwd: real })
+  const posted = (await answer(on, run)).messages.find(m => m.role === 'assistant').text
+  assert.ok(posted.includes(`[app.js](${real}/app.js)`), posted)
+  assert.ok(posted.includes(`[the folder](<${real}>)`)); assert.ok(posted.includes(`${real}/sub/b.js`))
+  assert.ok(posted.includes(`[x](${sibling}/y.js)`), 'a sibling folder that merely starts with the same name is not mapped'); assert.ok(posted.includes('[etc](/etc/hosts)'))
+  assert.equal(posted.includes(`${empty}/app.js`), false)
+  assert.ok(verified.includes(path.join(real, 'app.js')), 'the artifact check opened the real file'); assert.equal(verified.includes(path.join(empty, 'app.js')), false)
+  assert.ok(on.runFor(run).artifacts.some(a => a.target.path === path.join(real, 'app.js')), 'the artifact points at the real file')
+  // without own tools (the engine works in the real folder itself) nothing is rewritten
+  verified.length = 0
+  const off = make('off'), plain = await off.send({ message: 'edit', clientThreadId: 'ui', requestId: 'r1', cwd: real })
+  assert.ok((await answer(off, plain)).messages.find(m => m.role === 'assistant').text.includes(`${empty}/app.js`), 'not an own-tools run: untouched')
+})

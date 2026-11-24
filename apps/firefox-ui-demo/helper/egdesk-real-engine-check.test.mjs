@@ -10,7 +10,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runFakeAppServer } from '../scripts/real-engine/fake-app-server.mjs'
 import { validateMessage } from './egdesk-app-server-protocol.mjs'
-import { BRIDGE_COMPOSITION, DECISION_KEY_ENV, appServerArgs, childEnv, createGroupKiller, formatPlan, loadScripts, parseArgs, planRun, preflight, runCheck } from './egdesk-real-engine-check.mjs'
+import { BRIDGE_COMPOSITION, DECISION_KEY_ENV, LEDGER_FILE, appServerArgs, assertCleanupGuaranteed, childEnv, cleanupLeftovers, createGroupKiller, createLedger, formatPlan, leftoverThreads, loadScripts, parseArgs, planRun, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { APPROVER_TEXT, REAL_ENGINE_SCRIPT_SCHEMA, checkTurnExpectations, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
@@ -255,7 +255,7 @@ test('a scripted "yes" is read by the Decision model through the egress gate and
   assert.ok(w.decisionCalls.some(c => c.names.includes('reply_runs_command') && c.reply === APPROVER_TEXT.yes), 'the reply was read by the Decision model')
   // decision calls are recorded as names and numbers only
   const calls = rec.turns[0].subTurns.flatMap(s => s.decisions)
-  assert.ok(calls.length > 0); for (const c of calls) { assert.deepEqual(Object.keys(c).sort(), ['ms', 'names', 'p', 'status']); assert.ok(Object.values(c.p).every(v => typeof v === 'number' || typeof v === 'string')) }
+  assert.ok(calls.length > 0); for (const c of calls) { assert.deepEqual(Object.keys(c).sort(), ['inputTokens', 'ms', 'names', 'p', 'status']); assert.equal(c.inputTokens, 20, 'the Decision input tokens of each call'); assert.ok(Object.values(c.p).every(v => typeof v === 'number' || typeof v === 'string')) }
   assert.doesNotMatch(JSON.stringify(rec), /egd-synthetic-not-a-key|sk-synthetic/, 'no key in any record')
   noSchemaErrors(w)
 })
@@ -580,4 +580,147 @@ test('EG-Desk\'s own model and effort (env) are what an own-tools thread runs wi
   const none = world(t, { turns: [{ steps: [], final: 'a' }] })
   assert.equal(only(await runCheck(none.options, asScripts(script), none.deps)).ok, true)
   assert.equal(turnParams(none).model, undefined, 'nothing configured by EG-Desk: the engine\'s own default (reported as a gap)')
+})
+
+// ---- c24: persisted threads with cleanup, fresh internal threads, records, the draft-check opt-in ----
+const ONE = { set: 'real-engine-one-v1', conversations: [{ id: 'one', turns: [{ say: 'hello', expect: { posted: true } }] }] }
+const withDelete = (w, extra = {}) => { w.options.persisted = true; w.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: null, steerContract: null, threadDelete: true, ...extra }); return w }
+const callsOf = (w, method) => wireLog(w).filter(m => m.dir === 'in' && m.method === method)
+const internalProbe = (results = []) => ({ name: 'probe', setup: ctx => ({ afterTurn: async () => { const run = ctx.chat.runFor([...ctx.chat.runs.values()].at(-1)); results.push(await ctx.chat.internalText(run, 'Say the word ok', { timeoutMs: 4000 })) } }) })
+
+test('--persisted-with-cleanup: persisted threads, each one deleted and verified gone at the end of its conversation; the ledger says so', async t => {
+  const w = withDelete(world(t, { turns: [{ steps: [], final: 'hi' }] }))
+  const rec = only(await runCheck(w.options, asScripts(ONE), w.deps))
+  assert.equal(rec.ok, true, JSON.stringify(rec.turns.map(x => x.expectations)))
+  assert.deepEqual(rec.cleanup, { persisted: 1, deleted: 1, alreadyGone: 0, verifiedGone: 1, failures: [], ephemeral: 0 })
+  const start = callsOf(w, 'thread/start')[0].params
+  assert.equal('ephemeral' in start && start.ephemeral === true, false, 'the thread is persisted')
+  assert.deepEqual(callsOf(w, 'thread/delete').map(m => m.params), [{ threadId: 'thr-1' }])
+  const log = wireLog(w), del = log.findIndex(m => m.dir === 'in' && m.method === 'thread/delete'), resume = log.findIndex(m => m.dir === 'in' && m.method === 'thread/resume')
+  assert.ok(del > 0 && resume > del, 'delete first, then the verification')
+  const ledger = createLedger(w.out)
+  assert.deepEqual(ledger.read().map(e => [e.op, e.id]), [['created', 'thr-1'], ['deleted', 'thr-1'], ['gone', 'thr-1']])
+  assert.deepEqual(leftoverThreads(ledger.read()), []); assert.equal(fs.statSync(path.join(w.out, LEDGER_FILE)).mode & 0o777, 0o600)
+  assert.equal(readJson(path.join(w.out, 'summary.json')).conversations[0].cleanup.verifiedGone, 1)
+  noSchemaErrors(w)
+})
+
+test('the default stays ephemeral-only: no ledger, no cleanup, no thread/delete', async t => {
+  const w = world(t, { turns: [{ steps: [], final: 'hi' }] })
+  const rec = only(await runCheck(w.options, asScripts(ONE), w.deps))
+  assert.equal(rec.ok, true); assert.equal(rec.cleanup, undefined); assert.equal(callsOf(w, 'thread/delete').length, 0)
+  assert.equal(fs.existsSync(path.join(w.out, LEDGER_FILE)), false); assert.equal(callsOf(w, 'thread/start')[0].params.ephemeral, true)
+})
+
+test('persisted mode refuses to start when cleanup cannot be guaranteed: no thread/delete in the binary, or threads left by an earlier run', async t => {
+  const none = withDelete(world(t, { turns: [] }), { threadDelete: false })
+  await assert.rejects(runCheck(none.options, asScripts(ONE), none.deps), { code: 'cleanup_not_guaranteed' })
+  assert.equal(none.spawns.length, 0, 'nothing was started')
+  assert.equal(fs.existsSync(path.join(none.out, 'scratch')), false)
+  const unreadable = withDelete(world(t, { turns: [] })); unreadable.deps.inspectNative = () => { throw new Error('cannot read the schema') }
+  await assert.rejects(runCheck(unreadable.options, asScripts(ONE), unreadable.deps), { code: 'cleanup_not_guaranteed' })
+  const left = withDelete(world(t, { turns: [] }))
+  createLedger(left.out).append({ op: 'created', id: 'thr-old', via: 'thread/start', ephemeral: false })
+  await assert.rejects(runCheck(left.options, asScripts(ONE), left.deps), error => error.code === 'cleanup_not_guaranteed' && /--cleanup-leftovers/.test(error.message) && error.leftovers.join() === 'thr-old')
+  assert.equal(left.spawns.length, 0)
+  assert.doesNotThrow(() => assertCleanupGuaranteed({ persisted: false, out: left.out }, {}), 'ephemeral mode needs no guarantee')
+})
+
+test('a failed delete or a thread that is still resumable fails the conversation loudly and leaves the ledger dirty; --cleanup-leftovers then removes it', async t => {
+  const stubborn = withDelete(world(t, { deleteIgnored: true, turns: [{ steps: [], final: 'hi' }] }))
+  const rec = only(await runCheck(stubborn.options, asScripts(ONE), stubborn.deps))
+  assert.equal(rec.ok, false); assert.equal(rec.cleanupFailed, true); assert.deepEqual(rec.cleanup.failures, [{ id: 'thr-1', step: 'verify', error: 'still_resumable' }])
+  assert.deepEqual(leftoverThreads(createLedger(stubborn.out).read()), ['thr-1'], 'the ledger still lists it')
+  assert.equal(readJson(path.join(stubborn.out, 'summary.json')).ok, false)
+  const broken = withDelete(world(t, { deleteFails: true, turns: [{ steps: [], final: 'hi' }] }))
+  const bad = only(await runCheck(broken.options, asScripts(ONE), broken.deps))
+  assert.deepEqual(bad.cleanup.failures.map(f => f.step).sort(), ['delete', 'verify']); assert.equal(bad.ok, false)
+  // the next start is refused until the leftovers are gone; the cleanup starts one app-server on the same home and verifies each thread gone
+  const again = withDelete(world(t, { turns: [] })); again.options.out = stubborn.out
+  await assert.rejects(runCheck(again.options, asScripts(ONE), again.deps), { code: 'cleanup_not_guaranteed' })
+  const fixed = world(t, { turns: [] }); fixed.options.out = stubborn.out
+  const result = await cleanupLeftovers(fixed.options, fixed.deps)
+  assert.deepEqual(result, { leftovers: 1, persisted: 1, deleted: 0, alreadyGone: 1, verifiedGone: 1, failures: [] }, 'a thread the engine no longer has is clean once verified gone')
+  assert.deepEqual(leftoverThreads(createLedger(stubborn.out).read()), [])
+  assert.equal(fixed.spawns.length, 1)
+  assert.equal((await cleanupLeftovers(fixed.options, fixed.deps)).leftovers, 0); assert.equal(fixed.spawns.length, 1, 'a clean ledger starts nothing')
+  assert.doesNotThrow(() => assertCleanupGuaranteed({ ...again.options, persisted: true }, again.deps))
+})
+
+test('arguments: --persisted-with-cleanup and --cleanup-leftovers; the plan says persisted and names the ledger', t => {
+  const base = tmp(t), out = path.join(base, 'out')
+  const args = ['--codex-bin', '/bin/true', '--person-home', '--script', STARTERS[0], '--out', out]
+  assert.equal(parseArgs(args, {}).persisted, false); assert.equal(parseArgs([...args, '--persisted-with-cleanup'], {}).persisted, true)
+  const only2 = parseArgs(['--codex-bin', '/bin/true', '--person-home', '--out', out, '--cleanup-leftovers'], {})
+  assert.equal(only2.cleanupLeftovers, true); assert.deepEqual(only2.scripts, [], 'no script needed to clean up')
+  assert.throws(() => parseArgs(['--codex-bin', '/bin/true', '--person-home', '--out', out], {}), { code: 'usage' })
+  const plan = planRun(parseArgs([...args, '--persisted-with-cleanup'], {}), loadScripts([STARTERS[0]]), { env: {} })
+  assert.equal(plan.threads.kind, 'persisted-with-cleanup'); assert.equal(plan.threads.ledger, path.join(out, LEDGER_FILE))
+  assert.match(formatPlan(plan), /threads: PERSISTED, then deleted and verified gone/); assert.match(plan.rules[0], /persisted threads, each deleted and verified gone/)
+  assert.equal(planRun(parseArgs(args, {}), loadScripts([STARTERS[0]]), { env: {} }).threads.kind, 'ephemeral')
+})
+
+test('an ephemeral room\'s internal turn (the briefing fill, the heartbeat writer, the draft revision) runs on a fresh thread when the engine refuses ephemeral forks like 0.171', async t => {
+  const answers = []
+  const w = world(t, { refuseEphemeralFork: true, turns: [{ steps: [], final: 'a' }], forkTurns: [{ steps: [], final: 'ok from the internal thread' }] })
+  w.deps.extensions = [internalProbe(answers)]
+  const rec = only(await runCheck(w.options, asScripts(ONE), w.deps))
+  assert.equal(rec.ok, true); assert.deepEqual(answers, ['ok from the internal thread'])
+  assert.equal(callsOf(w, 'thread/fork').length, 0, 'an ephemeral source is never forked')
+  const [main, internal] = callsOf(w, 'thread/start').map(m => m.params)
+  assert.match(internal.developerInstructions, /private one-off task/); assert.equal(internal.ephemeral, true); assert.equal(internal.sandbox, 'read-only'); assert.equal('dynamicTools' in internal, false)
+  assert.equal(internal.cwd, main.cwd, 'the engine\'s empty folder, like its parent'); assert.equal(internal.config.features.shell_tool, false)
+  assert.match(callsOf(w, 'turn/start').at(-1).params.input[0].text, /^Context: the person's last message to you was "hello"\.\n\nSay the word ok$/)
+  noSchemaErrors(w)
+})
+
+test('a persisted room forks for an internal turn (the product-like path of --persisted-with-cleanup); the fork is ephemeral and recorded as such in the ledger', async t => {
+  const answers = []
+  const w = withDelete(world(t, { refuseEphemeralFork: true, turns: [{ steps: [], final: 'a' }], forkTurns: [{ steps: [], final: 'ok from the fork' }] }))
+  w.deps.extensions = [internalProbe(answers)]
+  const rec = only(await runCheck(w.options, asScripts(ONE), w.deps))
+  assert.equal(rec.ok, true, JSON.stringify(rec.cleanup)); assert.deepEqual(answers, ['ok from the fork'])
+  assert.equal(callsOf(w, 'thread/fork').length, 1); assert.deepEqual(callsOf(w, 'thread/fork')[0].params, { threadId: 'thr-1', excludeTurns: true, ephemeral: true })
+  assert.deepEqual(rec.cleanup, { persisted: 1, deleted: 1, alreadyGone: 0, verifiedGone: 1, failures: [], ephemeral: 1 })
+  assert.deepEqual(createLedger(w.out).read().filter(e => e.op === 'created').map(e => [e.id, e.ephemeral]), [['thr-1', false], ['fork-2', true]])
+  noSchemaErrors(w)
+})
+
+test('records: Decision input tokens per call, messages posted apart from the final answer, error text of a failed engine call', async t => {
+  const failures = []
+  const w = world(t, { turns: [{ steps: [{ agentMessage: 'looking' }], final: 'the final answer' }] }, { decisions: true })
+  w.deps.extensions = [{ name: 'fail', setup: ctx => ({ afterTurn: async () => { await ctx.request('thread/resume', { threadId: 'zzz' }).catch(error => failures.push(error.message)) } }) }]
+  const rec = only(await runCheck(w.options, asScripts(ONE), w.deps))
+  const turn = rec.turns[0]
+  assert.equal(turn.postedCount, 1); assert.equal(turn.finalAnswer, 'the final answer'); assert.deepEqual(turn.posted, ['the final answer'])
+  assert.deepEqual(turn.subTurns[0].decisions, [], 'a plain turn asks the Decision model nothing now that the draft check is an opt-in (the per-call tokens are asserted in the "yes" test)')
+  const bad = rec.requests.find(r => r.error)
+  assert.ok(bad); assert.equal(bad.method, 'thread/resume'); assert.equal(bad.error, '-32600'); assert.match(bad.message, /no rollout found for thread id zzz/)
+})
+
+let ranWorld = null
+test('the draft check is the conversation\'s own opt-in: off unless the script asks; the turn record says whether it ran; the validator and the preflight know it', async t => {
+  const script = (draftCheck, ran) => ({ set: 'real-engine-dc-v1', conversations: [{ id: 'dc', ...(draftCheck ? { draftCheck } : {}), turns: [{ say: 'what is in the folder?', expect: { posted: true, ...(ran === undefined ? {} : { draftCheck: { ran } }) } }] }] })
+  assert.equal(validateEngineScript(script({ mode: 'advisory' }, true)).ok, true)
+  assert.match(validateEngineScript(script(null, true)).errors.join(), /needs conversation\.draftCheck/)
+  assert.match(validateEngineScript(script({ mode: 'sometimes' })).errors.join(), /advisory or on/)
+  assert.match(validateEngineScript(script({ mode: 'advisory', design: 'x' })).errors.join(), /predicates or choice/)
+  const clash = script({ mode: 'advisory' }); clash.conversations[0].flags = { EGDESK_DRAFT_CHECK: 'on' }
+  assert.match(validateEngineScript(clash).errors.join(), /contradicts draftCheck\.mode/)
+  assert.match(preflight({ codexBin: '/x', home: { kind: 'person' }, decisions: false }, asScripts(script({ mode: 'advisory' })), { exists: () => true, env: {} })[0], /need --decisions: real-engine-dc-v1\/dc \(draftCheck\)/)
+  assert.deepEqual(checkTurnExpectations({ draftCheck: { ran: true } }, { draftCheckRows: 2 }).map(c => c.ok), [true]); assert.deepEqual(checkTurnExpectations({ draftCheck: { ran: true } }, {}).map(c => c.ok), [false])
+  // the flags: default none, the opt-in sets the product's flag (and the design)
+  const flagsOf = rec => rec.flags
+  const off = world(t, { turns: [{ steps: [], final: 'a' }] }, { decisions: true })
+  assert.equal(flagsOf(only(await runCheck(off.options, asScripts(script(null, undefined)), off.deps))).EGDESK_DRAFT_CHECK, undefined)
+  const on = world(t, { turns: [{ steps: [], final: 'a' }] }, { decisions: true })
+  const rec = only(await runCheck(on.options, asScripts(script({ mode: 'advisory', design: 'choice' })), on.deps))
+  assert.equal(flagsOf(rec).EGDESK_DRAFT_CHECK, 'advisory'); assert.equal(flagsOf(rec).EGDESK_DRAFT_CHECK_DESIGN, 'choice')
+  assert.ok(rec.turns[0].draftCheck, 'the turn record carries the draft check section when the check is on')
+  // the product's own check writes one calibration row per check (closed words); the turn record carries them and expect.draftCheck.ran reads them
+  const ranRec = only(await runCheck((() => { const x = world(t, { turns: [{ steps: [], final: 'The folder has a README file.' }] }, { decisions: true }); ranWorld = x; return x.options })(), asScripts(script({ mode: 'advisory' }, true)), ranWorld.deps))
+  const dcRows = ranRec.turns[0].draftCheck.rows
+  assert.ok(dcRows.length >= 1 && dcRows.every(r => r.mode === 'advisory' && typeof r.attached === 'boolean'), JSON.stringify(dcRows))
+  assert.equal(ranRec.turns[0].expectations.find(c => c.check === 'draftCheck')?.ok, true)
+  assert.equal(ranRec.ok, true)
 })

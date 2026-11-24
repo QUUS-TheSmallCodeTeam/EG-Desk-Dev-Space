@@ -38,7 +38,7 @@ export const IN_RUN_FLAG = 'EGDESK_INRUN_MESSAGES'
 export const LIMITS = Object.freeze({ whileRunningMs: 120_000, conversations: 8, turns: 12, files: 32, pathChars: 200, contentBytes: 64 * 1024, sayChars: 4000, approvals: 4, strings: 16, stringChars: 400 })
 // the scripted person's answers (test input, never product copy)
 export const APPROVER_TEXT = Object.freeze({ yes: '응, 그 명령 실행해 줘', no: '아니, 그건 실행하지 마' })
-export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'conversationGone', 'memory', 'briefing', 'commandsRanIncludes', 'commandsRanExcludes'])
+export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'conversationGone', 'memory', 'briefing', 'draftCheck', 'commandsRanIncludes', 'commandsRanExcludes'])
 export const ACTIONS = Object.freeze(['interrupt', 'steer', 'delete'])
 
 // `expect.briefing` belongs to the briefing hook (helper/egdesk-real-engine-briefing-hook.mjs): its shape and its checks live there (registered in helper/egdesk-real-engine-hooks.mjs)
@@ -57,6 +57,7 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
       type: 'object', additionalProperties: false, required: ['id', 'turns'],
       properties: {
         id: { type: 'string', pattern: CONVERSATION_ID.source },
+        draftCheck: { type: 'object', additionalProperties: false, required: ['mode'], properties: { mode: { enum: ['advisory', 'on'] }, design: { enum: ['predicates', 'choice'] } } },
         folder: { type: 'object', maxProperties: LIMITS.files, propertyNames: { maxLength: LIMITS.pathChars }, additionalProperties: { type: 'string', maxLength: LIMITS.contentBytes } },
         flags: { type: 'object', propertyNames: { pattern: FLAG_NAME.source, not: { enum: [...RESERVED_FLAGS] } }, additionalProperties: { type: 'string', pattern: FLAG_VALUE.source } },
         memory: MEMORY_SCHEMA,
@@ -84,6 +85,7 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
               turnStatus: { enum: ['completed', 'failed', 'interrupted'] },
               compacted: { type: 'boolean' },
               conversationGone: { type: 'boolean' },
+              draftCheck: { type: 'object', additionalProperties: false, required: ['ran'], properties: { ran: { type: 'boolean' } } },
               memory: MEMORY_EXPECT_SCHEMA,
               briefing: BRIEFING_EXPECT_SCHEMA,
             } },
@@ -124,7 +126,19 @@ export function validateEngineScript(value) {
   for (const [ci, conv] of (Array.isArray(convs) ? convs : []).entries()) {
     const at = `$.conversations[${ci}]`
     if (!isObject(conv)) { bad(at, 'an object'); continue }
-    only(conv, ['id', 'folder', 'flags', 'memory', 'turns'], at)
+    only(conv, ['id', 'folder', 'flags', 'memory', 'draftCheck', 'turns'], at)
+    // c24: the draft check is a conversation's own opt-in (like memory): { mode: 'advisory' | 'on', design?: 'predicates' | 'choice' }; it costs Decision calls
+    if (conv.draftCheck !== undefined) {
+      const d = conv.draftCheck
+      if (!isObject(d)) bad(`${at}.draftCheck`, 'an object { mode, design? }')
+      else {
+        only(d, ['mode', 'design'], `${at}.draftCheck`)
+        if (!['advisory', 'on'].includes(d.mode)) bad(`${at}.draftCheck.mode`, 'advisory or on')
+        if (d.design !== undefined && !['predicates', 'choice'].includes(d.design)) bad(`${at}.draftCheck.design`, 'predicates or choice')
+        const own = conv.flags?.EGDESK_DRAFT_CHECK
+        if (own !== undefined && own !== d.mode) bad(`${at}.flags.EGDESK_DRAFT_CHECK`, 'contradicts draftCheck.mode')
+      }
+    }
     if (conv.memory !== undefined) for (const why of validateMemory(conv.memory, `${at}.memory`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
     if (typeof conv.id !== 'string' || !CONVERSATION_ID.test(conv.id)) bad(`${at}.id`, `matches ${CONVERSATION_ID.source}`)
     else if (ids.has(conv.id)) bad(`${at}.id`, 'unique'); else ids.add(conv.id)
@@ -205,6 +219,10 @@ export function validateEngineScript(value) {
         for (const why of validateMemoryExpect(e.memory, conv.memory, `${tt}.expect.memory`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
         if (turn.whileRunning !== undefined) bad(`${tt}.expect.memory`, 'not checked on a whileRunning turn (the memory window is the scripted turn)')
       }
+      if (e.draftCheck !== undefined) {
+        if (!isObject(e.draftCheck) || Object.keys(e.draftCheck).some(k => k !== 'ran') || typeof e.draftCheck.ran !== 'boolean') bad(`${tt}.expect.draftCheck`, 'an object { ran: boolean }')
+        if (!conv.draftCheck && !['advisory', 'on'].includes(conv.flags?.EGDESK_DRAFT_CHECK)) bad(`${tt}.expect.draftCheck`, 'needs conversation.draftCheck (or flags.EGDESK_DRAFT_CHECK) in this conversation')
+      }
       if (e.briefing !== undefined) {
         for (const why of validateBriefingExpect(e.briefing)) bad(`${tt}.expect.briefing`, why)
         if (conv.flags?.EGDESK_BRIEFING_FLOW !== 'on') bad(`${tt}.expect.briefing`, 'needs flags.EGDESK_BRIEFING_FLOW = "on" in this conversation')
@@ -258,6 +276,7 @@ export function checkTurnExpectations(expect = {}, record = {}) {
   if (expect.turnStatus) put('turnStatus', record.turnStatus === expect.turnStatus, { turnStatus: record.turnStatus ?? null })
   if (expect.conversationGone !== undefined) put('conversationGone', (record.conversationGone === true) === expect.conversationGone, { conversationGone: record.conversationGone === true })
   if (expect.compacted !== undefined) put('compacted', (record.compacted === true) === expect.compacted, { compacted: record.compacted === true })
+  if (expect.draftCheck) put('draftCheck', ((record.draftCheckRows ?? 0) > 0) === expect.draftCheck.ran, { rows: record.draftCheckRows ?? 0 })
   if (expect.briefing !== undefined) out.push(...checkBriefingExpect(expect.briefing, record.hooks?.briefing ?? null))
   return out
 }
