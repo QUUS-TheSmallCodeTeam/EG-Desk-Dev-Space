@@ -13,9 +13,12 @@ import { JointError } from './egdesk-joint-board-store.mjs'
 
 // publish cadence of the client is 3 s (the Board's existing refresh cadence) and its request timeout is 7 s:
 // staleMs = one cadence + one timeout, so a single slow or lost publish does not flip a member to inactive.
+// activeInputMs is the single-user provider's own bound (EGDeskWorkPlacement createSingleUserPresence: active within 5 minutes
+// of input), so "active" means the same for every row of one snapshot: someone reading without touching the Desk keeps
+// protecting their view. Shorter idleness is the consumers' business (they read lastInputAgeMs).
 export const PRESENCE_LIMITS = Object.freeze({
-  minIntervalMs: 1000, staleMs: 10_000, expireMs: 30_000, activeInputMs: 60_000,
-  inputCapMs: 300_000, inputStepMs: 5000, ageStepMs: 1000, grid: 40, space: 20_000, maxSide: 80_000, bodyBytes: 2000,
+  minIntervalMs: 1000, staleMs: 10_000, expireMs: 30_000, activeInputMs: 300_000,
+  inputCapMs: 600_000, inputStepMs: 5000, ageStepMs: 1000, grid: 40, space: 20_000, maxSide: 80_000, bodyBytes: 2000,
 })
 export const PRESENCE_SHARE = Object.freeze(['off', 'active', 'region'])
 const L = PRESENCE_LIMITS
@@ -86,7 +89,7 @@ export function createJointPresence({ access, now = Date.now, secret = randomByt
     const visible = focusIds.length ? new Set(seated(person, board, focusIds)?.visible || []) : new Set()
     const members = rows.map(record => {
       const age = time - record.at, inputAge = Math.min(L.inputCapMs, record.inputAge + age)
-      return { member: alias(board, record.person), active: age <= L.staleMs && inputAge < L.activeInputMs,
+      return { member: alias(board, record.person), active: age <= L.staleMs && inputAge <= L.activeInputMs,
         inputAgeMs: step(inputAge, L.inputStepMs), ageMs: step(age, L.ageStepMs),
         viewport: record.viewport ? { ...record.viewport } : null, focusCard: record.focus && visible.has(record.focus) ? record.focus : null }
     }).sort((a, b) => (a.member < b.member ? -1 : 1)) // by alias, never by arrival order

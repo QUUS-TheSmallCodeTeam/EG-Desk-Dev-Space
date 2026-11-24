@@ -262,9 +262,11 @@ test('staleness and expiry: a member who stops publishing turns inactive after 1
   await w.tickAll([b]);
   assert.equal(others(b.presence.snapshot()).length, 0, 'after 30 s the record is gone');
   assert.equal(w.hub.size(), 0, 'and deleted from the service memory');
-  // idle is not the same as gone: a publishes but has not touched the Desk for a minute
-  a.desk.lastInputAgeMs = 61_000; await w.tickAll([a, b]); await w.tickAll([a, b]);
-  assert.deepEqual([row().active, row().lastInputAgeMs >= 60_000], [false, true]);
+  // idle is not the same as gone: a publishes but has not touched the Desk for five minutes (the single-user provider's own bound for "active")
+  a.desk.lastInputAgeMs = 290_000; await w.tickAll([a, b]); await w.tickAll([a, b]);
+  assert.deepEqual([row().active, row().lastInputAgeMs], [true, 290_000], 'reading without input for minutes still counts as active: the view stays protected');
+  a.desk.lastInputAgeMs = 306_000; await w.tickAll([a, b]); await w.tickAll([a, b]); // input age travels in 5 s steps: 306 s arrives as 305 s
+  assert.deepEqual([row().active, row().lastInputAgeMs], [false, 305_000]);
   a.desk.lastInputAgeMs = 0; await w.tickAll([a, b]); await w.tickAll([a, b]);
   assert.equal(row().active, true);
   // b loses the link: b's own copy ages by b's clock, without any new answer

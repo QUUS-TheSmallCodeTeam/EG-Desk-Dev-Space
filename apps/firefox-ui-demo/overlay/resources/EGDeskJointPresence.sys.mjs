@@ -5,7 +5,13 @@
 // card-position space into this Desk's canvas coordinates with this person's own Board offset.
 // This module only reads: it has no way to write the shared ledger, a card position, or any personal layout or camera.
 // Nothing is kept beyond memory, and a row that is not refreshed turns inactive (staleMs) and then disappears (expireMs).
-export const PRESENCE = Object.freeze({ publishMs: 3000, staleMs: 10_000, expireMs: 30_000, activeInputMs: 60_000, maxMembers: 64 });
+// activeInputMs: the single-user provider's bound (active within 5 minutes of input), so every row of a snapshot means the same by "active".
+export const PRESENCE = Object.freeze({ publishMs: 3000, staleMs: 10_000, expireMs: 30_000, activeInputMs: 300_000, maxMembers: 64 });
+/** Chrome pref for the whole feature. Default OFF: unless it is exactly "on" nothing of presence is installed in the window. */
+export const PRESENCE_PREF = 'egdesk.presence';
+export const presenceEnabled = (value) => value === 'on';
+/** This person's own, private store of the per-Board sharing choice (a chrome pref of this profile; never the shared ledger). */
+export const PRESENCE_SHARE_PREF = 'egdesk.jointBoard.presenceShare.v1';
 export const SHARE_LEVELS = Object.freeze(['off', 'active', 'region']);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const alias = /^m-[0-9a-f]{16}$/;
@@ -97,7 +103,7 @@ export function createJointPresence({ send, self, boards, cardAlias = () => null
   const share = new Map(
     Object.entries(initialShare && typeof initialShare === 'object' ? initialShare : {}).filter(([k, v]) => uuid.test(k) && SHARE_LEVELS.includes(v)),
   );
-  const feeds = new Map(); // board id -> { at, members }
+  const feeds = new Map(); // board id -> { at, members, self }
   const sentAt = new Map();
   const pending = new Set();
   let flight = Promise.resolve();
@@ -155,7 +161,7 @@ export function createJointPresence({ send, self, boards, cardAlias = () => null
         sentAt.set(board.id, time);
         try {
           const answer = checkedPresence(await send(outgoing(board, me)), board.id);
-          feeds.set(board.id, { at: now(), members: answer.members });
+          feeds.set(board.id, { at: now(), members: answer.members, self: answer.self });
           done++;
         } catch {
           /* optional signal: keep working without it */
@@ -191,7 +197,7 @@ export function createJointPresence({ send, self, boards, cardAlias = () => null
         rows.push({
           member: m.member,
           self: false,
-          active: m.active && age <= PRESENCE.staleMs && inputAge < PRESENCE.activeInputMs,
+          active: m.active && age <= PRESENCE.staleMs && inputAge <= PRESENCE.activeInputMs,
           viewport: m.viewport ? { x: m.viewport.x + board.offset.x, y: m.viewport.y + board.offset.y, width: m.viewport.width, height: m.viewport.height } : null,
           focusCard: card,
           lastInputAgeMs: inputAge,
@@ -222,9 +228,120 @@ export function createJointPresence({ send, self, boards, cardAlias = () => null
     idle() {
       return flight.then(() => undefined);
     },
+    /** This person's own alias on a Board, as the other members see it (null until an answer arrived). Theirs to hand out, e.g. with a request they make. */
+    aliasOn(board) {
+      return feeds.get(board)?.self ?? null;
+    },
+    /** Replace every Board's sharing level at once (a saved choice read after connecting). Does not report back to the host. */
+    loadShare(map) {
+      share.clear();
+      for (const [k, v] of Object.entries(map && typeof map === 'object' ? map : {})) if (uuid.test(k) && SHARE_LEVELS.includes(v) && v !== 'off') share.set(k, v);
+      sentAt.clear();
+    },
     reset() {
       feeds.clear();
       sentAt.clear();
     },
   };
+}
+
+/**
+ * The per-Board sharing choice, kept in this person's own private settings.
+ *   read() -> stored object | null     write(object)     (the host backs these with a pref of this profile)
+ * Stored: { [scope]: { [boardId]: { level: 'active' | 'region', epoch } } } where scope = service instance + this account and
+ * epoch = the seat the choice was made on. Default is off: only a deliberate non-off choice is ever stored. A choice made on an
+ * earlier seat (the person left and joined again) or on a Board they are no longer on is dropped, not carried over.
+ */
+export function createShareStore({ read = null, write = null } = {}) {
+  // Without a host store the choices live in this object only (and so reset to off with the window).
+  let memory = {};
+  if (typeof read !== 'function' || typeof write !== 'function') {
+    read = () => memory;
+    write = (value) => {
+      memory = value;
+    };
+  }
+  const all = () => {
+    let raw = null;
+    try {
+      raw = read();
+    } catch {
+      raw = null;
+    }
+    return raw && typeof raw === 'object' && !Array.isArray(raw) && raw.unreadable !== true ? raw : {};
+  };
+  const put = (value) => {
+    try {
+      write(value);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  return {
+    /** seats: [{ id, epoch }] of the Boards this person is on now -> { [boardId]: level } */
+    load(scope, seats) {
+      const mine = all()[scope];
+      const out = {};
+      if (!mine || typeof mine !== 'object' || Array.isArray(mine)) return out;
+      for (const seat of Array.isArray(seats) ? seats : []) {
+        const row = Object.hasOwn(mine, seat?.id) ? mine[seat.id] : null;
+        if (row && typeof row === 'object' && row.epoch === seat.epoch && SHARE_LEVELS.includes(row.level) && row.level !== 'off' && uuid.test(seat.id)) out[seat.id] = row.level;
+      }
+      return out;
+    },
+    /** load(), and remove from the store whatever of this scope no longer applies (a Board left, an older seat). Writes only when something is removed. */
+    prune(scope, seats) {
+      const levels = this.load(scope, seats);
+      const mine = all()[scope];
+      const stored = mine && typeof mine === 'object' && !Array.isArray(mine) ? Object.keys(mine).length : mine === undefined ? 0 : -1;
+      if (stored !== Object.keys(levels).length) this.save(scope, levels, seats);
+      return levels;
+    },
+    /** levels: { [boardId]: level } as the presence module reports them; seats as above. Writes only this scope. */
+    save(scope, levels, seats) {
+      if (typeof scope !== 'string' || !scope) return false;
+      const next = { ...all() };
+      const mine = {};
+      for (const seat of Array.isArray(seats) ? seats : []) {
+        const level = levels && Object.hasOwn(levels, seat?.id) ? levels[seat.id] : 'off';
+        if (uuid.test(seat?.id) && typeof seat.epoch === 'string' && SHARE_LEVELS.includes(level) && level !== 'off') mine[seat.id] = { level, epoch: seat.epoch };
+      }
+      if (Object.keys(mine).length) next[scope] = mine;
+      else delete next[scope];
+      return put(next);
+    },
+    /** Signing out of the service on this Desk forgets the choices made for it. */
+    forget(scope) {
+      const next = { ...all() };
+      if (!Object.hasOwn(next, scope)) return true;
+      delete next[scope];
+      return put(next);
+    },
+  };
+}
+
+/**
+ * ONE presence.snapshot() for this Desk and every consumer (the placement runtime in the window, the heartbeat's audience rule
+ * through the bridge mirror): the joint provider's rows when it has any (own row first, then the members who share), else the
+ * single-user provider's rows. The own row is always the single-user provider's.
+ *   single: { snapshot() }            joint: () => ({ snapshot() } | null)
+ */
+export function createDeskPresence({ single, joint = () => null }) {
+  return Object.freeze({
+    snapshot() {
+      let rows = null;
+      try {
+        rows = joint()?.snapshot() ?? null;
+      } catch {
+        rows = null;
+      }
+      if (Array.isArray(rows) && rows.length && rows[0]?.self === true) return rows;
+      try {
+        return single.snapshot();
+      } catch {
+        return [];
+      }
+    },
+  });
 }

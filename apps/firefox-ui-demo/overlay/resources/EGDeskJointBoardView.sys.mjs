@@ -8,7 +8,7 @@ import {appLabels,appStates,nextAppStates,isAppRef} from './EGDeskJointMiniappSc
 import {createJointAudit} from './EGDeskJointSpatialAuditView.sys.mjs';
 import {describeSpatialObservation} from './EGDeskJointSpatialLabels.sys.mjs';
 import {boardCardAction, boardMaterials, createBoardStructure} from './EGDeskJointBoardStructure.sys.mjs';
-import {createJointPresence, projectionPresence} from './EGDeskJointPresence.sys.mjs';
+import {createJointPresence, createShareStore, projectionPresence} from './EGDeskJointPresence.sys.mjs';
 const errors = {'invalid-app':'승인된 앱과 40자 이내의 항목 번호를 확인하세요.','app-unavailable':'팀 앱에 연결할 수 없습니다. 변경은 반영되지 않았습니다.','app-interrupted':'권한 또는 연결이 바뀌어 변경을 마치지 않았습니다. 현재 상태를 확인하세요.','app-busy':'이 항목의 다른 변경이 진행 중입니다.','invalid-transition':'현재 상태에서는 선택할 수 없는 변경입니다.',cycle:'서로를 기다리는 순환 관계는 만들 수 없습니다.',
   'invalid-address': 'HTTPS 주소 또는 이 컴퓨터의 loopback 주소를 입력하세요.',
   'invalid-key': '협업 서비스에서 발급한 계정 키를 입력하세요.',
@@ -62,7 +62,13 @@ export function createUI(h) {
   // with no request at all, until the host supplies this person's own row (h.selfPresence, the single-user provider), and
   // every Board starts with sharing 'off'. A card's alias is its view id on this Desk unless the host maps it otherwise.
   const placed = projectionPresence({ projections: () => h.allProjections(), boardOf: (p) => getB(p.boardId), node: (id) => d.getElementById(id), geometry: (node) => h.geometry(node) });
+  // The per-Board sharing choice lives in this person's own private settings (a pref of this profile through the host), keyed
+  // by service + account and bound to the seat it was made on. It is never sent to the service as a setting and never stored there.
+  const shareStore = createShareStore(typeof h.readPresenceShare === 'function' && typeof h.writePresenceShare === 'function' ? { read: () => h.readPresenceShare(), write: (v) => h.writePresenceShare(v) } : {});
+  let shareMark = '';
+  const seats = () => boards().map((b) => ({ id: b.id, epoch: b.epoch }));
   const presence = createJointPresence({
+    onShareChange: (levels) => { if (instanceScope) shareStore.save(instanceScope, levels, seats()); },
     send: (body) => api.presence(body),
     self: () => (typeof h.selfPresence === 'function' ? h.selfPresence() : null),
     boards: placed.boards,
@@ -153,6 +159,8 @@ export function createUI(h) {
     view = v;audit.sync();
     if (!v) {
       presence.reset();
+      presence.loadShare({}); // no verified session: nothing is shared; the saved choice is read again after the next connect
+      shareMark = '';
       structure.clear();
       if (materialsContext) hidePanel();
       for (const p of h.allProjections()) h.removeProjection(p);
@@ -170,6 +178,13 @@ export function createUI(h) {
     if (ns !== instanceScope) {
       instanceScope = ns;
       layouts = local[ns] && typeof local[ns] === 'object' ? local[ns] : {};
+    }
+    // The saved choice follows the seats this person holds right now: read after connecting, and read again (dropping what no
+    // longer applies) whenever a Board is left or re-joined on a new seat.
+    const seatList = v.boards.map((b) => ({ id: b.id, epoch: b.epoch })), seatMark = ns + JSON.stringify(seatList);
+    if (seatMark !== shareMark) {
+      shareMark = seatMark;
+      presence.loadShare(shareStore.prune(ns, seatList));
     }
     const allowedLayouts = new Map();
     for (const b of v.boards) {
@@ -944,6 +959,7 @@ export function createUI(h) {
     if (instanceScope) {
       delete local[instanceScope];
       h.writeLayout(local);
+      shareStore.forget(instanceScope);
     }
     api.disconnect();
     draw();
@@ -971,7 +987,7 @@ export function createUI(h) {
     { once: true },
   );
   return {
-    presence: { snapshot: () => presence.snapshot(), share: (board) => presence.share(board), setShare: (board, level) => presence.setShare(board, level) },
+    presence: { snapshot: () => presence.snapshot(), share: (board) => presence.share(board), setShare: (board, level) => presence.setShare(board, level), aliasOn: (board) => presence.aliasOn(board), idle: () => presence.idle() },
     audit,structure,inspect,panel,fresh,openMaterials,syncMaterialsControl,presentationBoard(p){const b=api.connected&&p&&getB(p.boardId);return b&&b.epoch===p.jointAccess?{scope:instanceScope,board:b}:null;},
     propose(title) {
       proposalTitle = title || '';
