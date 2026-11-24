@@ -124,12 +124,12 @@ test('waitSummary: provider facts become closed labels with seconds; nothing els
 
 test('attentionOf: the provider\'s attention fact as closed fields (who, where, kind); the placement runtime\'s field names are read as the same fact', () => {
   const placement = { placementsPending: 0, placementsDecided: 2, pointerPending: true, pointerWhere: 'right', pointerDistance: 'very_far', pointerFor: 'owner', pointerNeeds: 'owner_action' }
-  assert.deepEqual(attentionOf({ sources: { work_placement: placement } }), { provider: 'work_placement', kind: 'approval', who: 'owner', where: 'right', distance: 'very_far', signature: 'work_placement:approval:owner' })
+  assert.deepEqual(attentionOf({ sources: { work_placement: placement } }), { provider: 'work_placement', kind: 'approval', who: 'owner', where: 'right', distance: 'very_far', located: true, signature: 'work_placement:approval:owner' })
   assert.equal(attentionOf({ sources: { work_placement: { ...placement, pointerPending: false } } }), null)
   // Already in view: the placement runtime sends direction 'none' with distance 'in_view'; the writer must not be told "elsewhere".
   const inView = attentionOf({ sources: { work_placement: { ...placement, pointerWhere: 'none', pointerDistance: 'in_view', pointerNeeds: 'review' } } })
   assert.deepEqual([inView.kind, inView.where, inView.distance], ['result', 'in_view', 'in_view']); assert.match(pointerPrompt(inView), /It is inside what they are looking at on the desk\./)
-  assert.deepEqual(attentionOf({ sources: { tasks: { attention: 'question', attentionFor: 'requester', attentionWhere: 'somewhere_odd' } } }), { provider: 'tasks', kind: 'question', who: 'requester', where: 'none', distance: null, signature: 'tasks:question:requester' })
+  assert.deepEqual(attentionOf({ sources: { tasks: { attention: 'question', attentionFor: 'requester', attentionWhere: 'somewhere_odd' } } }), { provider: 'tasks', kind: 'question', who: 'requester', where: 'none', distance: null, located: false, signature: 'tasks:question:requester' })
   assert.equal(attentionOf({ sources: { tasks: { attention: 'result', attentionFor: 'everyone' } } }), null, 'who must be the owner or the requester')
   const prompt = pointerPrompt({ kind: 'approval', who: 'owner', where: 'right', distance: 'very_far' })
   assert.match(prompt, /needs their decision/); assert.match(prompt, /to the right of what they are looking at on the desk, far away/); assert.match(prompt, /Nothing was moved/)
@@ -148,7 +148,7 @@ test('pointerRoute: the task\'s own conversation only when that person is in it 
   assert.equal(pointerRoute({ person: 'requester', audience: { requester: 'm-jin', owner: 'self', participants: ['m-jin'] }, presence: present }).target, 'here')
   assert.equal(pointerRoute({ person: 'everyone', audience: null }).target, null)
   // The option exists only with a route, once per fact, within the window's bound.
-  const base = { sent: 0, blocked: true, sinceLastMs: null, audience: { postable: true }, attention: { kind: 'result' }, pointerTarget: 'here', pointed: false, pointers: 0 }
+  const base = { sent: 0, blocked: true, sinceLastMs: null, audience: { postable: true }, attention: { kind: 'result', located: true }, pointerTarget: 'here', pointed: false, pointers: 0 }
   assert.deepEqual(enumerateOptions(base), ['none', 'pointer'])
   for (const off of [{ pointerTarget: null }, { pointed: true }, { pointers: FLOW_LIMITS.maxPointers }, { attention: null }, { sinceLastMs: 1000 }]) assert.deepEqual(enumerateOptions({ ...base, ...off }), ['none'])
 })
@@ -387,7 +387,7 @@ test('a pointer with nowhere to go is held for that person and delivered once in
   const w = pointerWorld(t, { rows, acks, audience: HELD_AUDIENCE })
   const { m, placement } = await holdOne(w)
   assert.deepEqual([w.requests.flow, w.chat.heldAttention.length, m.assistant().length], [0, 1, 1], 'no conversation of the owner is live: no request, the fact is held')
-  assert.deepEqual(Object.keys(w.chat.heldAttention[0]).sort(), ['at', 'id', 'kind', 'member', 'provider', 'signature', 'sourceKey'], 'who and what, never where')
+  assert.deepEqual(Object.keys(w.chat.heldAttention[0]).sort(), ['at', 'id', 'kind', 'located', 'member', 'provider', 'signature', 'sourceKey'], 'who and what and that a surface existed, never where')
   await w.advance(120_000); placement.pointer = null // the placement runtime withdraws its own fact after 120 s
   // Never into a conversation someone else takes part in.
   const room = await w.dm('room', '회의 정리해 주세요'); await w.advance(12_000); await room.final('정리했습니다.')
@@ -455,7 +455,10 @@ test('deriveFlowKind: a question first, then a pointer, then a progress note wor
 })
 
 test('pointer: who is there, where it is and whether it was posted are code (pointerBlocked); the judge reads only the announcement and what was posted, each on its own', () => {
-  const ok = { attention: { kind: 'result', where: 'right' }, pointerTarget: 'here', pointed: false, pointers: 0 }
+  const ok = { attention: { kind: 'result', where: 'right', located: true }, pointerTarget: 'here', pointed: false, pointers: 0 }
+  // L3 c18: a finished result needs a surface the provider places off the person's view; a decision or a question does not.
+  assert.equal(pointerBlocked({ ...ok, attention: { kind: 'result', where: 'none', located: false } }), 'no_surface')
+  assert.equal(pointerBlocked({ ...ok, attention: { kind: 'approval', where: 'none', located: false } }), null)
   assert.equal(pointerBlocked(ok), null)
   assert.deepEqual([pointerBlocked({}), pointerBlocked({ ...ok, attention: { kind: 'result', where: 'in_view' } }), pointerBlocked({ ...ok, pointerTarget: null }), pointerBlocked({ ...ok, pointed: true }), pointerBlocked({ ...ok, declined: true }), pointerBlocked({ ...ok, pointers: FLOW_LIMITS.maxPointers })],
     ['no_fact', 'in_view', 'no_route', 'pointed', 'declined', 'bound'])
@@ -612,9 +615,9 @@ test('heartbeat messages are checked against the facts they were composed from: 
   await w.advance(9000)
   assert.deepEqual(d.assistant(), [CONCRETE], 'the wait message is posted')
   assert.equal(checks.length, 1, 'one draft-check request for the message')
-  assert.match(checks[0], /\[C1\] 결제 테스트\(`npm test`\)를 10초째 돌리고 있어요\.\n/); assert.doesNotMatch(checks[0], /끝나면 바로 알려 드릴게요/, 'a sentence without a concrete detail is not sent')
-  assert.match(checks[0], /\[E1 time=present source=person\]\nThe person asked: 전체 테스트 돌리고 결과 알려줘/)
-  assert.match(checks[0], /\[E2 time=present source=runtime\]\n10 seconds have passed since the person wrote\. The assistant is running a command: `npm test -- --suite=payroll` \(running for about 9 seconds\)/)
+  assert.match(checks[0], /Sentence S1:\n"""\n결제 테스트\(`npm test`\)를 10초째 돌리고 있어요\.\n"""/); assert.doesNotMatch(checks[0], /끝나면 바로 알려 드릴게요/, 'a sentence without a concrete detail is not sent')
+  assert.match(checks[0], /\[E1 time=present\]\n"""\nThe person asked: 전체 테스트 돌리고 결과 알려줘\n"""/)
+  assert.match(checks[0], /\[E2 time=present\]\n"""\n10 seconds have passed since the person wrote\. The assistant is running a command: `npm test -- --suite=payroll` \(running for about 9 seconds\)/)
   assert.doesNotMatch(checks[0], /content not available/, 'no content-free reference from the turn')
   await d.final('끝났습니다.')
   // The Agent's models may not receive terminal data: the same check without the command line.
@@ -638,4 +641,55 @@ test('heartbeat messages are checked against the facts they were composed from: 
   // A pointer message: the place and the kind, in the fixed words the writer was given.
   const ev = messageEvidence({ kind: 'pointer', attention: { kind: 'approval', where: 'left', distance: 'far' } })
   assert.deepEqual(ev, [{ id: 'now', kind: 'run_state', time: 'present', source: 'runtime', text: 'Something that needs the person\'s decision is waiting to the left of what they are looking at on the desk, some way off. Nothing was moved into the person\'s view.' }])
+})
+
+// ---- cycle 18: notes without "?" ride along; a result pointer needs a located surface ----
+
+test('ride-along: notes without "?" are judged on a request that goes out anyway (oldest first, two at most, each once); a yes is an early question about that note; notes alone cause no request', async t => {
+  const NEEDS = '배포 대상 환경이 운영인지 스테이징인지 요청에 없다. 사용자가 정해 주어야 진행할 수 있다.'
+  const w = answering(t, {}, { writer: prompt => (/need one piece of information/.test(prompt) ? '어느 환경에 배포할지 알려 주세요.' : null) })
+  const decide = w.chat.decisionContext.client.decide, asked = []
+  w.chat.decisionContext.client.decide = async request => { const out = await decide(request)
+    if (request.promptCacheKey === 'heartbeat-beat') {
+      asked.push(request.questions.map(q => q.name))
+      request.questions.forEach((q, i) => { if (/^message__ask_\d$/.test(q.name)) out.answers[q.name] = { type: 'predicate', probability: request.input.some(row => row.content.startsWith(`Question ${q.name}:`) && row.content.includes(NEEDS)) ? 0.97 : 0.02 } })
+      if (out.answers.message__note) out.answers.message__note = { type: 'predicate', probability: 0.1 }
+    }
+    return out }
+  const d = await w.dm('dm', '주문 서비스를 배포해 주세요.')
+  await w.advance(1000); await d.note('n1', '저장소 상태를 먼저 확인한다.'); await d.note('n2', '빌드 설정 파일을 읽는다.')
+  await w.advance(1000); await d.note('n3', NEEDS)
+  await w.advance(1000); await d.tool('s1', 'started')
+  await w.advance(7000) // 10 s: the first request (a tool step is running), the two oldest notes ride along
+  assert.deepEqual(asked, [['message__note', 'message__ask_1', 'message__ask_2']])
+  const first = w.beatRequests.at(-1).input.join('\n')
+  assert.match(first, /Question message__ask_1:\nA note the assistant wrote to itself:\n"""\n저장소 상태를 먼저 확인한다\.\n"""/); assert.match(first, /Question message__ask_2:\nA note the assistant wrote to itself:\n"""\n빌드 설정 파일을 읽는다\.\n"""/)
+  assert.deepEqual(d.assistant(), [], 'both plain: no early question')
+  await w.advance(30_000) // the next request (after the backoff) carries the one note not judged yet
+  assert.deepEqual(asked.at(-1), ['message__note', 'message__ask_1']); assert.match(w.beatRequests.at(-1).input.join('\n'), new RegExp(`Question message__ask_1:\\n[^\\n]*\\n"""\\n${NEEDS.replace(/[.?]/g, '\\$&')}`))
+  assert.deepEqual(d.assistant(), ['어느 환경에 배포할지 알려 주세요.'], 'a yes: the early question about that note')
+  assert.match(w.forkPrompts.at(-1), new RegExp(NEEDS.slice(0, 20)))
+  const later = asked.length
+  await w.advance(60_000)
+  assert.ok(asked.slice(later).every(names => !names.some(n => /^message__ask_\d$/.test(n))), 'judged once: never again')
+  await d.final('배포했습니다.')
+  // Notes alone never cause a request: no tool step and an active engine before 30 s.
+  const quiet = answering(t, {}), q = await quiet.dm('dm-q', '계획을 정리해 주세요.')
+  for (let s = 1; s < 25; s += 3) { await quiet.advance(s * 1000 - quiet.at()); await q.note(`q${s}`, `메모 ${s}번을 정리한다.`) }
+  await quiet.advance(25_000 - quiet.at())
+  assert.equal(quiet.requests.flow, 0); await q.final('정리했습니다.')
+})
+
+test('a finished result is pointed to only when the provider places its surface off the person\'s view (Main 2026-11-24, rule 3); a decision needs no surface', async t => {
+  const rows = [{ member: 'self', self: true, active: true, lastInputAgeMs: 1000 }]
+  const run = async attention => {
+    const w = answering(t, { message__told_1: 0.02 }, { presence: { snapshot: () => rows }, writer: prompt => (/on the desk/.test(prompt) ? POINTER : null) })
+    const d = await w.dm('dm', '경쟁 제품 세 곳의 요금제를 조사해서 문서로 정리해 주세요.'); await w.advance(4000); await d.final('문서를 정리했습니다.')
+    d.hb.register('tasks', () => attention)
+    d.hb.nudge(); await w.advance(S.nudgeMs); await w.advance(30_000)
+    return { requests: w.requests.flow, posted: d.assistant().slice(1) }
+  }
+  assert.deepEqual(await run({ attention: 'result', attentionFor: 'requester' }), { requests: 0, posted: [] }, 'a result with no surface placed anywhere: nothing to point to, no request')
+  assert.deepEqual(await run({ attention: 'result', attentionFor: 'requester', attentionWhere: 'left', attentionDistance: 'far' }), { requests: 1, posted: [POINTER] }, 'requested, located, not told: pointed')
+  assert.deepEqual((await run({ attention: 'approval', attentionFor: 'requester' })).posted, [POINTER], 'a decision waiting for them needs no surface')
 })

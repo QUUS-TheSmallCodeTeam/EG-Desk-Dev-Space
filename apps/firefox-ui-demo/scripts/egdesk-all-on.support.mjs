@@ -99,7 +99,7 @@ export function featureOf(names, cacheKey = '') {
   if (names.includes('browser_entry')) return 'browser_entry'
   if (names.includes('task_resume')) return 'browser_resume'
   if (names.includes('next_step')) return 'browser_step'
-  if (names.some(n => /^(claim_|present_)/.test(n)) || cacheKey === 'draft-check') return 'draft_check'
+  if (names.some(n => /^(claim_|present_|sup_|tense_)/.test(n)) || cacheKey === 'draft-check') return 'draft_check'
   // work placement (L1 c12): yes/no content questions (same_matter_R#, owner_action) under its own cache key
   if (cacheKey === 'work-placement') return 'work_placement'
   if (names.includes('place') || names.includes('attention')) return cacheKey === 'work-placement' ? 'work_placement' : 'briefing'
@@ -162,6 +162,8 @@ export function scriptedDecisions({ policy = {} } = {}) {
       // about, no unresolved pair is two versions (falls to the 0.03 default below), every content requirement holds, the tied pairs
       // keep the code's order, every filled piece is supported by its source
       if (q.type === 'predicate' && (q.name === 'several' || q.name === 'combines' || /^(?:about|aspect|happened|todo|fact|before|slot|step)_/.test(q.name))) return { name: q.name, type: 'predicate', probability: 0.96 }
+      // the draft check's predicate design (L3 c18 default): a sound judge says supported (as claim_ answers 'supported' below); tense_ falls to 0.03
+      if (q.type === 'predicate' && /^sup_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: 0.96 }
       if (q.type !== 'choice') return { name: q.name, type: 'predicate', probability: 0.03 }
       const values = q.choices.map(c => c.value)
       if (q.name === 'place' && values.includes('board')) return wireChoice(q.name, q, 'board')

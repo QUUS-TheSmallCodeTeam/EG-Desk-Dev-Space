@@ -14,16 +14,29 @@ export function mockJudge({ internalTerms = [], delayMs: delays = 0, calls = [] 
     const late = request.timeoutMs !== undefined && delayMs > request.timeoutMs
     if (delayMs) await new Promise(resolve => setTimeout(resolve, late ? request.timeoutMs : delayMs))
     if (late) throw new DecisionError('timeout', 'mock timeout', { retryable: true })
-    const evidenceText = request.input[1].content, tail = request.input[2].content
-    const items = [...evidenceText.matchAll(/\[E\d+ time=(\S+)[^\]]*\]\n([^\[]*)/g)].map(m => ({ time: m[1], text: m[2] }))
-    const claims = [...tail.matchAll(/^\[C(\d+)\] (.*)$/gm)].map(m => ({ i: Number(m[1]) - 1, text: m[2] }))
+    // Both designs of the check (egdesk-draft-check.mjs): the choice ('[C1] …' lines, claim_/present_) and the predicates
+    // ('Sentence S1:' blocks, sup_/tense_). The same lexical stand-in decides both, so a test means the same under either.
+    const predicates = request.questions.some(q => /^(sup|tense)_\d+$/.test(q.name))
+    const evidenceText = request.input[1].content, tail = request.input.slice(2).map(row => row.content).join('\n')
+    const items = predicates
+      ? [...evidenceText.matchAll(/\[E\d+ time=(\S+)[^\]]*\]\n"""\n([\s\S]*?)\n"""/g)].map(m => ({ time: m[1], text: m[2] }))
+      : [...evidenceText.matchAll(/\[E\d+ time=(\S+)[^\]]*\]\n([^\[]*)/g)].map(m => ({ time: m[1], text: m[2] }))
+    const claims = predicates
+      ? [...tail.matchAll(/^Sentence S(\d+):\n"""\n([^\n]*)\n"""/gm)].map(m => ({ i: Number(m[1]) - 1, text: m[2] }))
+      : [...tail.matchAll(/^\[C(\d+)\] (.*)$/gm)].map(m => ({ i: Number(m[1]) - 1, text: m[2] }))
     const terms = [...tail.matchAll(/^\[T(\d+)\] (.*)$/gm)].map(m => ({ i: Number(m[1]) - 1, text: m[2] }))
     const answers = {}
     for (const c of claims) {
       const mine = words(c.text)
       const hit = items.filter(it => [...words(it.text)].some(w => mine.has(w)))
+      const tense = hit.some(it => it.time !== 'present') && PRESENT.test(c.text) ? 0.93 : 0.04
+      if (predicates) {
+        answers[`sup_${c.i}`] = { type: 'predicate', name: `sup_${c.i}`, probability: hit.length ? 0.96 : 0.03 }
+        answers[`tense_${c.i}`] = { type: 'predicate', name: `tense_${c.i}`, probability: tense }
+        continue
+      }
       answers[`claim_${c.i}`] = answerChoice(`claim_${c.i}`, hit.length ? 'supported' : items.length ? 'not_mentioned' : 'insufficient')
-      answers[`present_${c.i}`] = { type: 'predicate', name: `present_${c.i}`, probability: hit.some(it => it.time !== 'present') && PRESENT.test(c.text) ? 0.93 : 0.04 }
+      answers[`present_${c.i}`] = { type: 'predicate', name: `present_${c.i}`, probability: tense }
     }
     for (const t of terms) answers[`term_${t.i}`] = { type: 'predicate', name: `term_${t.i}`, probability: internalTerms.some(x => t.text.includes(x)) ? 0.9 : 0.05 }
     return { answers, model: 'mock-judge', usage: { inputTokens: 300 }, latencyMs: delayMs }

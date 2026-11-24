@@ -85,18 +85,19 @@ test('--rerun <earlier> (no --send): replays the recorded answers, sends nothing
 test('--rerun <earlier> --send: sends through the guarded path and the diff shows changed answers, what the person saw, and expectations that flipped', async t => {
   const { file } = await earlierRun(t), out = path.join(tmp(t), 'rerun-send.json')
   // Another day: the draft check now calls every sentence a present-tense restatement.
-  const net = provider(a => (/^present_\d+$/.test(a.name) ? { ...a, probability: 0.97 } : a))
+  // L3 c18: the draft check asks per-sentence predicates by default; its tense question is tense_N (was present_N).
+  const net = provider(a => (/^(present|tense)_\d+$/.test(a.name) ? { ...a, probability: 0.97 } : a))
   const run = await cli(['--rerun', file, '--send', '--out', out], { fetchImpl: net.fetchImpl })
   const now = JSON.parse(readFileSync(out, 'utf8'))
   assert.equal(now.mode, 'send'); assert.equal(net.calls.length, now.totals.sent); assert.ok(net.calls.every(c => c.authorization === `Bearer ${KEY}`))
   assert.ok(!('replayOf' in now))
   const s1 = now.diff.steps.find(s => s.step === 's1-first-turn')
-  assert.ok(s1.changes.some(c => c.kind === 'answer' && c.family === 'draft_check' && c.name === 'present_0' && c.prev === '0.03' && c.cur === '0.97'), JSON.stringify(s1.changes).slice(0, 400))
+  assert.ok(s1.changes.some(c => c.kind === 'answer' && c.family === 'draft_check' && c.name === 'tense_0' && c.prev === '0.03' && c.cur === '0.97'), JSON.stringify(s1.changes).slice(0, 400))
   assert.ok(s1.changes.some(c => c.kind === 'saw'))
   assert.ok(s1.changes.some(c => c.kind === 'expectation' && c.id === 's1.answer' && c.prev === true && c.cur === false))
   assert.ok(s1.changes.some(c => c.kind === 'expectation' && c.id === 's1.own-words' && c.prev === 'new'))
   for (const text of [readFileSync(out, 'utf8'), run.out.join('\n'), run.err.join('\n')]) assert.ok(!text.includes(KEY))
-  assert.match(run.out.join('\n'), /answer {7}draft_check#1 present_0: 0\.03 -> 0\.97/)
+  assert.match(run.out.join('\n'), /answer {7}draft_check#1 tense_0: 0\.03 -> 0\.97/)
 })
 
 test('replay: a request the earlier run did not make is answered by the script and counted; options that cannot go together are refused', async t => {
