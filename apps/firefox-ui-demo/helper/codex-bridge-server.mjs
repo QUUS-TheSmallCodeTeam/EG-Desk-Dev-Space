@@ -50,6 +50,7 @@ import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { createBoardPresentationHttpHandler } from './egdesk-board-presentation-http.mjs'
 import { briefingDeps } from './egdesk-briefing-engine.mjs'
 import { createWorkPlacement, createWorkPlacementHttpHandler } from './egdesk-work-placement.mjs'
+import { createHudRouting, createHudRoutingHttpHandler } from './egdesk-hud-routing.mjs'
 import { createPresenceMirror, createPresenceMirrorHttpHandler, createRunRequesters, createRunRequesterHttpHandler } from './egdesk-presence-mirror.mjs'
 import { createWindowWatch } from './egdesk-heartbeat.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
@@ -606,6 +607,11 @@ chat.onForgetConversation('work_placement', ({ clientThreadId, conversationIds }
 // (a working run keeps its heartbeat). A single conversation that is closed is told by the surface: POST /chat/session/close.
 const windowWatch = createWindowWatch({ onGone: () => chat.closeIdleSessions() })
 const handleWorkPlacementHttp = createWorkPlacementHttpHandler({ placement: workPlacement, heartbeatFor: key => chat.heartbeatFor(key), port: BRIDGE_PORT })
+// L1 c20 Desk HUD routing: one yes/no question per row of the search field's own list; probabilities back, nothing runs. Off (404) unless
+// EGDESK_HUD_ROUTING=advisory or on (and the Decisions mode is advisory or on; the chrome's egdesk.hudRouting decides whether it asks at all).
+const hudRoutingEnabled = () => ['advisory', 'on'].includes(process.env.EGDESK_HUD_ROUTING)
+const hudRouting = createHudRouting({ client: decisionClient, mode: () => bridgeSettings.decisionContext.mode, enabled: hudRoutingEnabled })
+const handleHudRoutingHttp = createHudRoutingHttpHandler({ routing: hudRouting, enabled: hudRoutingEnabled, port: BRIDGE_PORT })
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
 const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
   budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT, boardPresentation: handleBoardPresentationHttp,
@@ -1322,6 +1328,7 @@ const bridgeServer = createServer(async (req, res) => {
   if (await handleDecisionHttp(req, res, url)) return
   if (await handleBoardPresentationHttp(req, res, url)) return
   if (await handleWorkPlacementHttp(req, res, url)) return
+  if (await handleHudRoutingHttp(req, res, url)) return
   if (await handlePresenceMirrorHttp(req, res, url)) return
   if (await handleRunRequesterHttp(req, res, url)) return
   if (await handleEngineProfilesHttp(req, res, url)) return
