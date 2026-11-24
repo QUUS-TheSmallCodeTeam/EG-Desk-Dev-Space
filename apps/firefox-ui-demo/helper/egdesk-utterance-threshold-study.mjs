@@ -150,6 +150,7 @@ export async function buildStudy() {
     const est = requests.reduce((n, r) => n + r.estInputTokens, 0)
     if (est > STUDY_CHUNK_CEILING) throw new Error(`${chunk.dir}: ${est} estimated input tokens, over ${STUDY_CHUNK_CEILING}`)
     chunk.plan = { set: `${STUDY_SET}/${chunk.dir}`, tokenCeiling: STUDY_CHUNK_CEILING,
+      productBars: { '*choice': { minConfidence: SPEECH_THRESHOLDS.confidence, minMargin: SPEECH_THRESHOLDS.margin, source: 'egdesk-speech-grounding.mjs SPEECH_THRESHOLDS (axes are installed at confidence >= .85 and margin >= .20)' } },
       passRule: `Labels fixed in labels.json sha256 ${labels.sha256} before sending. A hard check fails only on a WRONG INSTALL at today's speech bar ` +
         `(confidence >= ${SPEECH_THRESHOLDS.confidence} and margin >= ${SPEECH_THRESHOLDS.margin}, runner-up including unreported mass): a label outside the sentence's allowed set. ` +
         'Soft checks: an allowed label at confidence >= the bar (coverage), unknown on a deliberately ambiguous axis, the status reading. ' +

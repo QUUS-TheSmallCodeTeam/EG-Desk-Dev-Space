@@ -1,6 +1,13 @@
 {
   "set": "utterance-threshold-v1/chunk-04",
   "tokenCeiling": 12000,
+  "productBars": {
+    "*choice": {
+      "minConfidence": 0.85,
+      "minMargin": 0.2,
+      "source": "egdesk-speech-grounding.mjs SPEECH_THRESHOLDS (axes are installed at confidence >= .85 and margin >= .20)"
+    }
+  },
   "passRule": "Labels fixed in labels.json sha256 d29d9007bd871377dd2e30fb9c6b84fae98b401072abad2cca5eb76249d1b7aa before sending. A hard check fails only on a WRONG INSTALL at today's speech bar (confidence >= 0.85 and margin >= 0.2, runner-up including unreported mass): a label outside the sentence's allowed set. Soft checks: an allowed label at confidence >= the bar (coverage), unknown on a deliberately ambiguous axis, the status reading. This is a study: the outcome is the wrong-install rate per candidate bar from scripts/egdesk-utterance-threshold-study.mjs analyze, not pass/fail.",
   "requests": [
     {

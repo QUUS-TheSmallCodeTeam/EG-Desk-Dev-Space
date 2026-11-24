@@ -1,0 +1,606 @@
+{
+  "set": "contamination-v1",
+  "tokenCeiling": 10000,
+  "productBars": {
+    "same_matter_R#": {
+      "yes": 0.8,
+      "no": 0.799,
+      "source": "L1 egdesk-work-placement.mjs PLACEMENT_PREDICATE_YES .8 (lane/c13-placement-on-c14): readPredicate yes iff p >= .8"
+    },
+    "slot_P#_r#": {
+      "yes": 0.7,
+      "no": 0.699,
+      "source": "egdesk-briefing-skeleton.mjs:19,693 SKELETON_BARS.yes .7: anything below is not support"
+    },
+    "c#": {
+      "yes": 0.6,
+      "no": 0.599,
+      "source": "egdesk-board-agent-context.mjs:4 BOARD_AGENT_RELEVANCE_BAR .6: selected iff p >= .6"
+    }
+  },
+  "passRule": "A study, not a gate: hard checks hold each item to its registered side of its family's product bar (same-matter .8 [L1 plan], fill-slot .7 [SKELETON_BARS], excerpt .6 [BOARD_AGENT_RELEVANCE_BAR]); a hard failure is a finding. The outcome per family is read from the TARGET (first question) across A (alone), O (opposite siblings), S (same siblings) with the rules in design.json, registered before sending. Same-matter bodies are hand-built in L1's sent shape (builder not on int/c14); the other two families are product-built.",
+  "requests": [
+    {
+      "id": "same-matter-yes-A",
+      "file": "requests/same-matter-yes-A.json",
+      "sha256": "49a95f5a6516e5946217fdf7efa1626fcc6599f2b7a714aa7a363fe0c506ad60",
+      "estInputTokens": 326,
+      "expect": [
+        {
+          "name": "same_matter_R1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "TARGET yes: the earlier version of the same quote (L1 R1). Hard = on its registered side of the product bar (0.8); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "same_matter_R1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "TARGET yes: decided (>= .8 / <= .2)"
+        }
+      ]
+    },
+    {
+      "id": "same-matter-yes-O",
+      "file": "requests/same-matter-yes-O.json",
+      "sha256": "1b576f68c2236d82c61b467f86e22b5d8f996e4a3251bc5bdc39391c0b93d5ae",
+      "estInputTokens": 766,
+      "expect": [
+        {
+          "name": "same_matter_R1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "TARGET yes: the earlier version of the same quote (L1 R1). Hard = on its registered side of the product bar (0.8); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "same_matter_R1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "TARGET yes: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "same_matter_R2",
+          "kind": "predicate",
+          "max": 0.799,
+          "severity": "hard",
+          "note": "sibling no: unrelated notice. Hard = on its registered side of the product bar (0.8); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "same_matter_R2",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "sibling no: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "same_matter_R3",
+          "kind": "predicate",
+          "max": 0.799,
+          "severity": "hard",
+          "note": "sibling no: another client's schedule. Hard = on its registered side of the product bar (0.8); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "same_matter_R3",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "sibling no: decided (>= .8 / <= .2)"
+        }
+      ]
+    },
+    {
+      "id": "same-matter-yes-S",
+      "file": "requests/same-matter-yes-S.json",
+      "sha256": "2436ab85f3fb99a0bf04b8dc296b7e0b6b9c3a86a4b4d70d005f9c8ef1899555",
+      "estInputTokens": 766,
+      "expect": [
+        {
+          "name": "same_matter_R1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "TARGET yes: the earlier version of the same quote (L1 R1). Hard = on its registered side of the product bar (0.8); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "same_matter_R1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "TARGET yes: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "same_matter_R2",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "sibling yes: the version under review. Hard = on its registered side of the product bar (0.8); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "same_matter_R2",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "sibling yes: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "same_matter_R3",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "sibling yes: the same client's request that started this quote. Hard = on its registered side of the product bar (0.8); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "same_matter_R3",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "sibling yes: decided (>= .8 / <= .2)"
+        }
+      ]
+    },
+    {
+      "id": "same-matter-no-A",
+      "file": "requests/same-matter-no-A.json",
+      "sha256": "7a661a6ba3a5cd5a77fd6a6dab6856dcef3a5596fa93b43d8f5e8c302de9ec68",
+      "estInputTokens": 329,
+      "expect": [
+        {
+          "name": "same_matter_R1",
+          "kind": "predicate",
+          "max": 0.799,
+          "severity": "hard",
+          "note": "TARGET no: another matter altogether (L1 R2). Hard = on its registered side of the product bar (0.8); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "same_matter_R1",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "TARGET no: decided (>= .8 / <= .2)"
+        }
+      ]
+    },
+    {
+      "id": "same-matter-no-O",
+      "file": "requests/same-matter-no-O.json",
+      "sha256": "8d7072466e023bb9cd7ba1217261466f04394ee9b52917cf6841e4379c830287",
+      "estInputTokens": 770,
+      "expect": [
+        {
+          "name": "same_matter_R1",
+          "kind": "predicate",
+          "max": 0.799,
+          "severity": "hard",
+          "note": "TARGET no: another matter altogether (L1 R2). Hard = on its registered side of the product bar (0.8); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "same_matter_R1",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "TARGET no: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "same_matter_R2",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "sibling yes: the version under review. Hard = on its registered side of the product bar (0.8); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "same_matter_R2",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "sibling yes: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "same_matter_R3",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "sibling yes: the same client's request that started this quote. Hard = on its registered side of the product bar (0.8); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "same_matter_R3",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "sibling yes: decided (>= .8 / <= .2)"
+        }
+      ]
+    },
+    {
+      "id": "fill-slot-yes-A",
+      "file": "requests/fill-slot-yes-A.json",
+      "sha256": "8b247fef8b81033791d11be3e0883e5cd550864022a1122cac5fd26949ca4604",
+      "estInputTokens": 356,
+      "expect": [
+        {
+          "name": "slot_P3_r1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "TARGET yes: M3 says 단가 12,200원. Hard = on its registered side of the product bar (0.7); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "slot_P3_r1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "TARGET yes: decided (>= .8 / <= .2)"
+        }
+      ]
+    },
+    {
+      "id": "fill-slot-yes-O",
+      "file": "requests/fill-slot-yes-O.json",
+      "sha256": "d5d34b401ee50bd3e2db14842be67c0f74beb4e2e3836b044b0a3c7b5a872639",
+      "estInputTokens": 848,
+      "expect": [
+        {
+          "name": "slot_P3_r1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "TARGET yes: M3 says 단가 12,200원. Hard = on its registered side of the product bar (0.7); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "slot_P3_r1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "TARGET yes: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "slot_P3_r2",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "sibling no: M1 says 12,800원 (11,900 is the asked-for price in another page). Hard = on its registered side of the product bar (0.7); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "slot_P3_r2",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "sibling no: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "slot_P3_r3",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "sibling no: M3 says it has not been sent. Hard = on its registered side of the product bar (0.7); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "slot_P3_r3",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "sibling no: decided (>= .8 / <= .2)"
+        }
+      ]
+    },
+    {
+      "id": "fill-slot-yes-S",
+      "file": "requests/fill-slot-yes-S.json",
+      "sha256": "3c8808ad78fbbc7d7bba2c954a1187935b5b1ab3c2cedbb5f1c21d7fa379e95a",
+      "estInputTokens": 847,
+      "expect": [
+        {
+          "name": "slot_P3_r1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "TARGET yes: M3 says 단가 12,200원. Hard = on its registered side of the product bar (0.7); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "slot_P3_r1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "TARGET yes: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "slot_P3_r2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "sibling yes: stated in M3. Hard = on its registered side of the product bar (0.7); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "slot_P3_r2",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "sibling yes: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "slot_P3_r3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "sibling yes: stated in M1. Hard = on its registered side of the product bar (0.7); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "slot_P3_r3",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "sibling yes: decided (>= .8 / <= .2)"
+        }
+      ]
+    },
+    {
+      "id": "fill-slot-no-A",
+      "file": "requests/fill-slot-no-A.json",
+      "sha256": "7b11e98f3bc61920f6747fad5ca8f54a28f82885595799766dee999946ba32cf",
+      "estInputTokens": 356,
+      "expect": [
+        {
+          "name": "slot_P3_r1",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "TARGET no: M3 says 납기 12월 20일: a date the source does not contain. Hard = on its registered side of the product bar (0.7); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "slot_P3_r1",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "TARGET no: decided (>= .8 / <= .2)"
+        }
+      ]
+    },
+    {
+      "id": "fill-slot-no-O",
+      "file": "requests/fill-slot-no-O.json",
+      "sha256": "cfd6fbc07ed345607ab893f8e5998af763fa9de5b7f6190a29f5bc9474431a9c",
+      "estInputTokens": 848,
+      "expect": [
+        {
+          "name": "slot_P3_r1",
+          "kind": "predicate",
+          "max": 0.699,
+          "severity": "hard",
+          "note": "TARGET no: M3 says 납기 12월 20일: a date the source does not contain. Hard = on its registered side of the product bar (0.7); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "slot_P3_r1",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "TARGET no: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "slot_P3_r2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "sibling yes: stated in M3. Hard = on its registered side of the product bar (0.7); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "slot_P3_r2",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "sibling yes: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "slot_P3_r3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "sibling yes: stated in M1. Hard = on its registered side of the product bar (0.7); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "slot_P3_r3",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "sibling yes: decided (>= .8 / <= .2)"
+        }
+      ]
+    },
+    {
+      "id": "excerpt-yes-A",
+      "file": "requests/excerpt-yes-A.json",
+      "sha256": "4b422f0b616b366ce23c3199467ce761fef809ac48cf465d86f82cd0118aefbe",
+      "estInputTokens": 233,
+      "expect": [
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "TARGET yes: the full-refund deadline. Hard = on its registered side of the product bar (0.6); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "TARGET yes: decided (>= .8 / <= .2)"
+        }
+      ]
+    },
+    {
+      "id": "excerpt-yes-O",
+      "file": "requests/excerpt-yes-O.json",
+      "sha256": "6e29f0017a3030e555e2d35271169de6924c0c6c375ea036e34d7f1bec6ee67b",
+      "estInputTokens": 623,
+      "expect": [
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "TARGET yes: the full-refund deadline. Hard = on its registered side of the product bar (0.6); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "TARGET yes: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "c2",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "hard",
+          "note": "sibling no: car park maintenance. Hard = on its registered side of the product bar (0.6); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "c2",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "sibling no: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "c3",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "hard",
+          "note": "sibling no: canteen menu. Hard = on its registered side of the product bar (0.6); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "c3",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "sibling no: decided (>= .8 / <= .2)"
+        }
+      ]
+    },
+    {
+      "id": "excerpt-yes-S",
+      "file": "requests/excerpt-yes-S.json",
+      "sha256": "a369df681f4785b79b8aa57ec460495007addbcbfa8e1dab893999060366a714",
+      "estInputTokens": 640,
+      "expect": [
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "TARGET yes: the full-refund deadline. Hard = on its registered side of the product bar (0.6); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "TARGET yes: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "c2",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "sibling yes: what happens after the deadline. Hard = on its registered side of the product bar (0.6); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "c2",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "sibling yes: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "c3",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "sibling yes: the same deadline for both sign-up routes. Hard = on its registered side of the product bar (0.6); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "c3",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "sibling yes: decided (>= .8 / <= .2)"
+        }
+      ]
+    },
+    {
+      "id": "excerpt-no-A",
+      "file": "requests/excerpt-no-A.json",
+      "sha256": "0e11dcbdac08b0f55a864e2781077ea3462d9451c32daa495609e0b0432e62d2",
+      "estInputTokens": 229,
+      "expect": [
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "hard",
+          "note": "TARGET no: library hours. Hard = on its registered side of the product bar (0.6); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "TARGET no: decided (>= .8 / <= .2)"
+        }
+      ]
+    },
+    {
+      "id": "excerpt-no-O",
+      "file": "requests/excerpt-no-O.json",
+      "sha256": "67d7993191497a1818930e36ed7f52033eaf450f9f347894eba056b8524daf9f",
+      "estInputTokens": 636,
+      "expect": [
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "max": 0.599,
+          "severity": "hard",
+          "note": "TARGET no: library hours. Hard = on its registered side of the product bar (0.6); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "c1",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "soft",
+          "note": "TARGET no: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "c2",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "sibling yes: what happens after the deadline. Hard = on its registered side of the product bar (0.6); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "c2",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "sibling yes: decided (>= .8 / <= .2)"
+        },
+        {
+          "name": "c3",
+          "kind": "predicate",
+          "min": 0.6,
+          "severity": "hard",
+          "note": "sibling yes: the same deadline for both sign-up routes. Hard = on its registered side of the product bar (0.6); a failure is a finding of this study, not a broken run."
+        },
+        {
+          "name": "c3",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "soft",
+          "note": "sibling yes: decided (>= .8 / <= .2)"
+        }
+      ]
+    }
+  ]
+}

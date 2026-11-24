@@ -23,7 +23,7 @@ import { DECISIONS_ENDPOINT, DECISION_MODEL, normalizeDecisionResponse, validate
 //    "requests": [ { "id", "file": "requests/<id>.json", "sha256": hex of the exact file bytes, "estInputTokens": int,
 //        "expect": [ { "name", "kind": "predicate", "min"?: 0..1, "max"?: 0..1, "severity": "hard"|"soft", "note" },
 //                    { "name", "kind": "choice", "equals"?: value, "oneOf"?: [values], "minConfidence"?: 0..1,
-//                      "whenAccepted"?: { "minConfidence": 0..1, "minMargin": 0..1 }, "severity", "note" },
+//                      "minMargin"?: 0..1, "whenAccepted"?: { "minConfidence": 0..1, "minMargin": 0..1 }, "severity", "note" },
 //                    { "name", "kind": "score", "min"?: level, "max"?: level, "minConfidence"?: 0..1, "maxConfidence"?: 0..1, "severity", "note" } ],
 //        "recordOnly"?: true } ] }
 // A request passes when it has no failed hard check. An answer that is refused, missing or malformed fails its check.
@@ -32,6 +32,13 @@ import { DECISIONS_ENDPOINT, DECISION_MODEL, normalizeDecisionResponse, validate
 // A choice expectation with whenAccepted checks only an answer the product would install at that bar (confidence >= minConfidence and
 // top minus the runner-up >= minMargin, the runner-up being at least the unreported mass): below the bar it passes, because nothing is
 // installed; at or above it, the choice must be one of the expected values. A hard whenAccepted check therefore fails only on a wrong install.
+// Any expectation may say "diagnostic": true: a deliberately looser (or otherwise non-product) check, exempt from the product-bar lint.
+// "productBars" (optional, plan level) declares the bars the PRODUCT acts on, per question family (the name with digit runs as "#") or per kind:
+//   { "<family>"|"*predicate"|"*choice"|"*score": { "yes"?, "no"?, "minConfidence"?, "minMargin"?, "source"? } }
+// When it is present, a hard expectation looser than its bar is REFUSED at load (dry run and send alike): a predicate min below "yes",
+// a max above "no", a choice without minConfidence/minMargin at least the bar, a whenAccepted check at a stricter bar than the product's
+// (it would miss wrong installs the product makes), a score check without minConfidence at least the bar. A hard expectation with no
+// declared bar for its family or kind is refused too. Without productBars, the runner prints that the checks were not compared.
 // A score expectation is the conjunction of the bounds it gives (min <= score <= max, minConfidence <= confidence <= maxConfidence).
 const OFFICIAL = DECISIONS_ENDPOINT
 if (OFFICIAL !== 'https://api.openai.com/v1/decisions') throw new Error('unexpected Decisions endpoint')
@@ -53,7 +60,8 @@ function checkExpectation(raw, where, questions) {
   if (raw.severity !== 'hard' && raw.severity !== 'soft') bad(`${where} ${raw.name}: severity must be "hard" or "soft"`)
   const question = questions.find(q => q.name === raw.name)
   if (!question) bad(`${where} ${raw.name}: the request has no question with this name`)
-  const base = { name: raw.name, kind: raw.kind, severity: raw.severity, note: typeof raw.note === 'string' ? raw.note : '' }
+  if (raw.diagnostic !== undefined && raw.diagnostic !== true) bad(`${where} ${raw.name}: diagnostic must be true when present`)
+  const base = { name: raw.name, kind: raw.kind, severity: raw.severity, note: typeof raw.note === 'string' ? raw.note : '', ...(raw.diagnostic === true ? { diagnostic: true } : {}) }
   if (raw.kind === 'predicate') {
     if (question.type !== 'predicate') bad(`${where} ${raw.name}: expected a predicate but the question is ${question.type}`)
     const hasMin = raw.min !== undefined, hasMax = raw.max !== undefined
@@ -69,6 +77,8 @@ function checkExpectation(raw, where, questions) {
     const wanted = hasEquals ? [raw.equals] : raw.oneOf
     if (!Array.isArray(wanted) || !wanted.length || wanted.some(value => !values.includes(value))) bad(`${where} ${raw.name}: expected value is not one of the question's choices`)
     if (raw.minConfidence !== undefined && !unit(raw.minConfidence)) bad(`${where} ${raw.name}: minConfidence must be a probability`)
+    if (raw.minMargin !== undefined && !unit(raw.minMargin)) bad(`${where} ${raw.name}: minMargin must be a probability`)
+    if (raw.whenAccepted !== undefined && raw.minMargin !== undefined) bad(`${where} ${raw.name}: give either minMargin or whenAccepted, not both`)
     if (raw.whenAccepted !== undefined) {
       const w = raw.whenAccepted
       if (!w || typeof w !== 'object' || Array.isArray(w) || Object.keys(w).sort().join() !== 'minConfidence,minMargin' || !unit(w.minConfidence) || !unit(w.minMargin))
@@ -76,6 +86,7 @@ function checkExpectation(raw, where, questions) {
       if (raw.minConfidence !== undefined) bad(`${where} ${raw.name}: give either minConfidence or whenAccepted, not both`)
     }
     return { ...base, ...(hasEquals ? { equals: raw.equals } : { oneOf: [...raw.oneOf] }), ...(raw.minConfidence !== undefined ? { minConfidence: raw.minConfidence } : {}),
+      ...(raw.minMargin !== undefined ? { minMargin: raw.minMargin } : {}),
       ...(raw.whenAccepted !== undefined ? { whenAccepted: { minConfidence: raw.whenAccepted.minConfidence, minMargin: raw.whenAccepted.minMargin } } : {}), options: values.length }
   }
   if (raw.kind === 'score') {
@@ -139,9 +150,59 @@ export function loadPlan(planFile) {
     return { id: item.id, file: item.file, sha256: item.sha256, bytes, estInputTokens: item.estInputTokens, independentEst: independentEstimate(counts.choice, counts.predicate + counts.score, bytes.length),
       questions: body.questions, counts, images: (text.match(/"type"\s*:\s*"input_image"/g) || []).length, expect, recordOnly }
   })
+  const productBars = checkProductBars(raw.productBars)
+  if (productBars) {
+    const problems = requests.flatMap(r => r.expect.filter(e => e.severity === 'hard' && !e.diagnostic).map(e => lintExpectation(e, r, productBars)).filter(Boolean).map(text => `${r.id} ${text}`))
+    if (problems.length) bad(`hard checks looser than the declared product bars (mark a deliberate one "diagnostic": true): ${problems.join('; ')}`)
+  }
   const totals = { requests: requests.length, estInputTokens: requests.reduce((sum, r) => sum + r.estInputTokens, 0), independentEst: requests.reduce((sum, r) => sum + r.independentEst, 0),
     bytes: requests.reduce((sum, r) => sum + r.bytes.length, 0) }
-  return { set: raw.set, tokenCeiling: raw.tokenCeiling, passRule: raw.passRule, dir, requests, totals }
+  return { set: raw.set, tokenCeiling: raw.tokenCeiling, passRule: raw.passRule, dir, requests, totals, productBars,
+    diagnostic: requests.reduce((n, r) => n + r.expect.filter(e => e.diagnostic).length, 0) }
+}
+
+export const familyOf = name => String(name).replace(/\d+/g, '#')
+const BAR_KEYS = ['yes', 'no', 'minConfidence', 'minMargin', 'source']
+function checkProductBars(raw) {
+  if (raw === undefined) return null
+  if (!record(raw) || !Object.keys(raw).length) bad('productBars must be an object of { family|*predicate|*choice|*score: bars }')
+  const out = {}
+  for (const [key, bars] of Object.entries(raw)) {
+    if (!record(bars) || Object.keys(bars).some(k => !BAR_KEYS.includes(k))) bad(`productBars ${key}: only ${BAR_KEYS.join(', ')}`)
+    for (const k of ['yes', 'no', 'minConfidence', 'minMargin']) if (bars[k] !== undefined && !unit(bars[k])) bad(`productBars ${key}.${k} must be a probability`)
+    if (bars.yes !== undefined && bars.no !== undefined && !(bars.no < bars.yes)) bad(`productBars ${key}: no must be below yes`)
+    if (bars.source !== undefined && typeof bars.source !== 'string') bad(`productBars ${key}.source must be text`)
+    out[key] = { ...bars }
+  }
+  return out
+}
+/** null when the hard expectation is at least as strict as the product bar; otherwise the reason. */
+export function lintExpectation(e, request, productBars) {
+  const bar = productBars[familyOf(e.name)] ?? productBars[`*${e.kind}`]
+  if (!bar) return `${e.name}: no product bar declared for family ${familyOf(e.name)} or kind ${e.kind}`
+  const at = `${e.name} (${familyOf(e.name)})`
+  if (e.kind === 'predicate') {
+    if (e.min !== undefined) { if (bar.yes === undefined) return `${at}: no "yes" bar declared`; if (e.min < bar.yes) return `${at}: min ${e.min} < product yes bar ${bar.yes}` }
+    if (e.max !== undefined) { if (bar.no === undefined) return `${at}: no "no" bar declared`; if (e.max > bar.no) return `${at}: max ${e.max} > product no bar ${bar.no}` }
+    return null
+  }
+  if (e.kind === 'choice') {
+    if (bar.minConfidence === undefined && bar.minMargin === undefined) return `${at}: no choice bar declared`
+    if (e.whenAccepted) {
+      if (bar.minConfidence !== undefined && e.whenAccepted.minConfidence > bar.minConfidence) return `${at}: whenAccepted confidence ${e.whenAccepted.minConfidence} > product ${bar.minConfidence} (would miss wrong installs)`
+      if (bar.minMargin !== undefined && e.whenAccepted.minMargin > bar.minMargin) return `${at}: whenAccepted margin ${e.whenAccepted.minMargin} > product ${bar.minMargin} (would miss wrong installs)`
+      return null
+    }
+    if (bar.minConfidence !== undefined && !(e.minConfidence >= bar.minConfidence)) return `${at}: minConfidence ${e.minConfidence ?? 'none'} < product ${bar.minConfidence}`
+    if (bar.minMargin !== undefined && !(e.minMargin >= bar.minMargin)) return `${at}: minMargin ${e.minMargin ?? 'none'} < product ${bar.minMargin}`
+    return null
+  }
+  if (e.kind === 'score') {
+    if (bar.minConfidence === undefined) return `${at}: no score confidence bar declared`
+    if (!(e.minConfidence >= bar.minConfidence)) return `${at}: minConfidence ${e.minConfidence ?? 'none'} < product ${bar.minConfidence}`
+    return null
+  }
+  return `${at}: unknown kind`
 }
 
 export function planTable(plan) {
@@ -178,17 +239,22 @@ export function scoreExpectation(expectation, answer) {
   const picked = wanted.includes(answer.choice)
   const confident = expectation.minConfidence === undefined || answer.confidence >= expectation.minConfidence
   const observed = { choice: answer.choice, confidence: answer.confidence, top, second, margin: top !== null && second !== null ? Math.round((top - second) * 1e6) / 1e6 : null, options: expectation.options }
-  const head = { ...out, ...(expectation.equals !== undefined ? { equals: expectation.equals } : { oneOf: expectation.oneOf }), ...(expectation.minConfidence !== undefined ? { minConfidence: expectation.minConfidence } : {}) }
+  const head = { ...out, ...(expectation.equals !== undefined ? { equals: expectation.equals } : { oneOf: expectation.oneOf }), ...(expectation.minConfidence !== undefined ? { minConfidence: expectation.minConfidence } : {}),
+    ...(expectation.minMargin !== undefined ? { minMargin: expectation.minMargin } : {}) }
+  // The product's margin: the chosen value's probability minus the best other one, the unreported mass counting as another one.
+  const chosen = ranked.find(row => row.value === answer.choice)?.probability ?? top
+  const rest = ranked.filter(row => row.value !== answer.choice).map(row => row.probability)
+  const unreported = Math.max(0, 1 - ranked.reduce((sum, row) => sum + (Number.isFinite(row.probability) ? row.probability : 0), 0))
+  const runnerUp = Math.max(0, ...rest, ranked.length < expectation.options ? unreported : 0)
+  const productMargin = Number.isFinite(chosen) ? chosen - runnerUp : null
   if (expectation.whenAccepted) {
     const { minConfidence, minMargin } = expectation.whenAccepted
-    const chosen = ranked.find(row => row.value === answer.choice)?.probability ?? top
-    const rest = ranked.filter(row => row.value !== answer.choice).map(row => row.probability)
-    const unreported = Math.max(0, 1 - ranked.reduce((sum, row) => sum + (Number.isFinite(row.probability) ? row.probability : 0), 0))
-    const runnerUp = Math.max(0, ...rest, ranked.length < expectation.options ? unreported : 0)
     const accepted = Number.isFinite(answer.confidence) && answer.confidence >= minConfidence && Number.isFinite(chosen) && chosen - runnerUp >= minMargin - 1e-9
     return { ...head, whenAccepted: expectation.whenAccepted, pass: !accepted || picked, ...(accepted && !picked ? { reason: 'wrong_install' } : {}), observed: { ...observed, accepted } }
   }
-  return { ...head, pass: picked && confident, ...(picked && !confident ? { reason: 'below_min_confidence' } : !picked ? { reason: 'other_choice' } : {}), observed }
+  const wide = expectation.minMargin === undefined || (productMargin !== null && productMargin >= expectation.minMargin - 1e-9)
+  return { ...head, pass: picked && confident && wide, ...(!picked ? { reason: 'other_choice' } : !confident ? { reason: 'below_min_confidence' } : !wide ? { reason: 'below_min_margin' } : {}),
+    observed: expectation.minMargin !== undefined ? { ...observed, productMargin: Math.round(productMargin * 1e6) / 1e6 } : observed }
 }
 
 export function scoreRequest(request, result) {
@@ -288,6 +354,8 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
     independentEst: plan.totals.independentEst, tokenCeiling: plan.tokenCeiling, withinCeiling: plan.totals.estInputTokens <= plan.tokenCeiling,
     ...(plan.totals.independentEst > plan.totals.estInputTokens * 1.5 ? { warning: 'declared estimates are much lower than the independent estimate' } : {}), passRule: plan.passRule }))
   for (const row of planTable(plan)) print(JSON.stringify(row))
+  print(JSON.stringify(plan.productBars ? { productBars: 'declared and checked', families: Object.keys(plan.productBars), diagnosticChecks: plan.diagnostic }
+    : { productBars: 'not declared', warning: 'hard checks were NOT compared with the bars the product acts on' }))
   const outcome = await runPlan({ plan, key: send ? env.OPENAI_API_KEY ?? null : null, send, fetchImpl, ...(now ? { now } : {}) })
   print(JSON.stringify({ sent: outcome.sent, stoppedBecause: outcome.stoppedBecause, inputTokens: outcome.usage.inputTokens,
     ...(outcome.scorecard ? { requestsPassed: outcome.scorecard.requestsPassed, recordedOnly: outcome.scorecard.recordedOnly, hardFailures: outcome.scorecard.hardFailures, softMisses: outcome.scorecard.softMisses } : {}) }))
