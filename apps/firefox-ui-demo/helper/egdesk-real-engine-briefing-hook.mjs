@@ -18,7 +18,7 @@ import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
 
 export const BRIEFING_FLAGS = Object.freeze(['EGDESK_BRIEFING_FLOW', 'EGDESK_BRIEFING_OUTPUT_SCHEMA'])
-export const BRIEFING_LIMITS = Object.freeze({ timeoutMs: 150_000, year: 2026, viewport: Object.freeze({ x: 0, y: 0, width: 2400, height: 1400 }), tokenCap: 5_000_000, strings: 16, stringChars: 400 })
+export const BRIEFING_LIMITS = Object.freeze({ timeoutMs: 150_000, year: 2026, viewport: Object.freeze({ x: 0, y: 0, width: 2400, height: 1400 }), tokenCap: 5_000_000, strings: 16, stringChars: 400, replyChars: 6000, inputChars: 3000 })
 export const BRIEFING_OUTCOMES = Object.freeze(['presented', 'fallback-chat', 'bubble'])
 const clip = (text, n) => String(text ?? '').slice(0, n)
 
@@ -64,7 +64,7 @@ export function checkBriefingExpect(expect, rec) {
 }
 
 // ---- materials: the conversation's own folder notes, by code ----
-/** folderMaterials(folder, { year }) -> rows in lane L7's memory-row shape. A file named MM-DD.md (any directory) is a page dated year-MM-DD; its title is the first
+/** folderMaterials(folder, { year }) -> rows in lane L7's memory-row shape. A file named MM-DD.md (any directory) is a page dated year-MM-DD, linked follows_from to the previous date; its title is the first
  *  line that is not a heading; its status is read from its words (merged -> done, started / open -> plan) or stays unknown. Nothing else is read. */
 export function folderMaterials(folder = {}, { year = BRIEFING_LIMITS.year } = {}) {
   const rows = []
@@ -75,7 +75,11 @@ export function folderMaterials(folder = {}, { year = BRIEFING_LIMITS.year } = {
     rows.push({ alias: `note-${m[1]}${m[2]}`, kind: 'page', time: { slice: 'past', at }, provenance: { kind: 'document', by: null, basis: 'record_based' }, status: statedStatus(lines.join(' ')),
       title: clip(lines[0] ?? file, 80), excerpt: clip(lines.join(' '), 400), links: [], held: false })
   }
-  return rows.sort((a, b) => a.time.at.localeCompare(b.time.at))
+  rows.sort((a, b) => a.time.at.localeCompare(b.time.at))
+  // c33: the dated notes of one folder are ONE log: each follows the one before it (the product's own ledger materials link consecutive records the same way,
+  // helper/egdesk-briefing-ledger-materials.mjs). Without a link the flow reads every note as its own matter (materialGroups) and designs one card per note, never a sequence.
+  rows.forEach((row, i) => { if (i > 0) row.links = [{ type: 'follows_from', toAlias: rows[i - 1].alias }] })
+  return rows
 }
 
 // ---- the hook ----
@@ -100,7 +104,8 @@ export const briefingHook = Object.freeze({
     let materialsFrom = null, materialCount = 0
     // what the product's flow calls on the runtime and on the context runtime, recorded on the way through (nothing is changed)
     const recChat = { canInternalTurn: run => chat.canInternalTurn(run), runFor: ids => chat.runFor(ids),
-      internalText: (run, text, options) => { forkCalls.push({ schema: Boolean(options?.outputSchema), promptChars: String(text).length }); return chat.internalText(run, text, options) },
+      // the private turn's reply is kept (bounded; the content is the synthetic notes' own): a chat-only outcome shows what the model actually wrote
+      internalText: async (run, text, options) => { const call = { schema: Boolean(options?.outputSchema), preamble: options?.preamble !== false, promptChars: String(text).length, reply: null }; forkCalls.push(call); const reply = await chat.internalText(run, text, options); call.reply = reply === null || reply === undefined ? null : clip(reply, L.replyChars); return reply },
       memoryMaterialsFor: run => {
         let rows = []; try { rows = chat.memoryMaterialsFor?.(run) ?? [] } catch { rows = [] }
         if (Array.isArray(rows) && rows.length) { materialsFrom = 'memory'; materialCount = rows.length; return rows }
@@ -119,7 +124,10 @@ export const briefingHook = Object.freeze({
       // what the Decision model answered, as numbers and closed words only (the check's own row has the same shape)
       const p = {}
       try { const body = JSON.parse(await response.clone().text()); for (const a of body.answers ?? []) p[String(a.name ?? '?').slice(0, 60)] = a.type === 'predicate' ? Math.round(a.probability * 100) / 100 : a.type === 'choice' ? String(a.choice ?? '?').slice(0, 40) : String(a.type ?? '?').slice(0, 20) } catch {}
-      decisions.push({ names, ms: Date.now() - started, status: response?.status ?? null, p })
+      // the coverage packet (the question per fact of the answer and the board as the Decision model saw it) is kept: it says what the board lacked
+      let input = null
+      if (names.some(n => String(n).startsWith('onboard_'))) { try { input = clip(JSON.stringify(JSON.parse(String(init?.body ?? '{}')).input), L.inputChars) } catch {} }
+      decisions.push({ names, ms: Date.now() - started, status: response?.status ?? null, p, ...(input ? { input } : {}) })
       return response
     }
     const budget = createDecisionBudget({ monthlyInputTokenCap: L.tokenCap })
@@ -132,7 +140,7 @@ export const briefingHook = Object.freeze({
         const started = Date.now()
         const mark = { requests: requestLog.length, forks: forkCalls.length, published: published.length, proposed: proposed.length, engines: engines.length, decisions: decisions.length }
         const base = { turnIndex, request: clip(say, 200), schemaFlag: schema, year: L.year, viewport: L.viewport, materialsFrom: null, materials: 0, outcome: null, reason: null }
-        const none = reason => ({ ...base, outcome: 'skipped', reason, forkRequests: [], forkErrors: [], flow: null, forkTurns: 0, forkSchemaTurns: 0, schemaInvalid: null, published: [], steps: [], decisions: [], wallMs: 0 })
+        const none = reason => ({ ...base, outcome: 'skipped', reason, forkRequests: [], forkErrors: [], forkReplies: [], flow: null, forkTurns: 0, forkSchemaTurns: 0, schemaInvalid: null, published: [], steps: [], decisions: [], wallMs: 0 })
         if (typeof answer !== 'string' || !answer.trim()) return none('no-answer')
         const body = BriefingHost.observeRequest({ mode: 'on', report: answer, answerId: run.answerId ?? null, conversationId: run.conversationId ?? null, runId: run.runId ?? null, candidates: [], request: say, viewport: L.viewport })
         if (!body) return none('nothing-to-observe')
@@ -148,6 +156,8 @@ export const briefingHook = Object.freeze({
           flow: summary ? { status: summary.status ?? null, stages: summary.stages ?? [], judgeRequests: summary.judgeRequests ?? 0, fillTurns: summary.fillTurns ?? 0 } : null,
           // forkRequests: every thread/fork, thread/start and turn/start the briefing's private turns sent, with the error code of a refusal
           forkRequests: requests, forkErrors: requests.filter(r => r.error).map(r => `${r.method}:${r.error}`),
+          // forkReplies: what each private turn answered (null = nothing usable), the board-design model's own words
+          forkReplies: forks.map(f => f.reply),
           forkTurns: forks.length, forkSchemaTurns: forks.filter(f => f.schema).length, engineStats: stats ? { turns: stats.turns, refused: stats.refused, elapsedMs: stats.elapsedMs } : null,
           // null when the schema flag is off (the engine does not count it then); an integer when on
           schemaInvalid: schema ? (stats?.schemaInvalid ?? 0) : null,

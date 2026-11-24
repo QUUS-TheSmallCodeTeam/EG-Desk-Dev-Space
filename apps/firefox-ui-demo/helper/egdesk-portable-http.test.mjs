@@ -533,7 +533,7 @@ test('the bridge mounts portable routes after Desk routes, behind the loopback g
   const at = text => { const index = source.indexOf(text); assert.notEqual(index, -1, `missing server marker: ${text}`); return index }
   at("import { createPortableHttpHandler } from './egdesk-portable-http.mjs'")
   at('const handlePortableHttp = createPortableHttpHandler({ desk: () => deskStore, chat: () => chatStore, profiles: () => profileStore, attachments: portableAttachments, fileDrafts: portableFileDrafts, appDataDir: dataDir, port: BRIDGE_PORT })')
-  at('const portableAttachments = createContextAttachmentProvider({ store: contextStore, ownerKey: () => publicAuthIdentityKey(authState) })')
+  at('const portableAttachments = createContextAttachmentProvider({ store: contextStore, ownerKey: () => publicAuthIdentityKey(authState),')
   at("const portableFileDrafts = createManagedDraftProvider({ directory: path.join(dataDir, 'file-drafts') })")
   const mount = at('if (await handlePortableHttp(req, res, url)) return')
   assert.ok(at('if (!guardBridgeRequest(req, BRIDGE_PORT)) {') < mount)

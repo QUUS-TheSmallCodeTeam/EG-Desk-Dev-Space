@@ -55,6 +55,9 @@ const hashed = (prefix, value) => `${prefix}-${createHash('sha256').update(Strin
 export async function openWorkflowRuntime({
   dataDir, chat, port = 39218, broadcast = () => {}, ensureAuth, getOwnerKey,
   maxConcurrency = 2, owner = WORKFLOW_OWNER, watch, openStores = null, localCapacity = null,
+  // L1 c25 (U11, only passed with the room-account flag on): ownerKeyFor(slot) = the raw account key of an Agent profile slot; roomSlotOf(origin) = the slot a
+  // plan's room runs on; roomKeyed() = flag on. Without them every plan, source and step uses the default sign-in, as before.
+  ownerKeyFor = null, roomSlotOf = null, roomKeyed = () => false,
 } = {}) {
   if (typeof ensureAuth !== 'function' || typeof getOwnerKey !== 'function') throw new TypeError('ensureAuth and getOwnerKey are required')
   const bus = createWorkflowEventBus()
@@ -73,15 +76,21 @@ export async function openWorkflowRuntime({
     try { bus.publish({ topic: 'auth.changed', owner, payload: { signedIn: signedIn === true } }) } catch {}
   }
 
-  const ownerKey = () => {
-    const key = getOwnerKey()
+  const rawOwnerKey = slot => (slot && typeof ownerKeyFor === 'function' ? ownerKeyFor(slot) : getOwnerKey())
+  const ownerKey = slot => {
+    const key = rawOwnerKey(slot)
     return typeof key === 'string' && key ? hashed('owner', key) : null
   }
+  // a plan's Board/graph belongs to the room's slot (undefined = default)
+  const slotOfGraph = graphId => { try { return plans?.slotOfGraph?.(graphId) } catch { return undefined } }
+  const slotOfBoard = boardId => { try { return plans?.slotOfBoard?.(boardId) } catch { return undefined } }
   function captureScope(context) {
-    const key = ownerKey()
+    const slot = slotOfGraph(context?.binding?.graphId ?? context?.scope?.graphId)
+    const key = ownerKey(slot)
     if (!key) throw nativeTaskError('TASK_AUTHORITY', 'Sign in to run Agent tasks', 403)
     const scope = context?.scope ?? {}
-    return { ownerKey: key, generation: authGeneration,
+    // a profile slot's scope does not move with the default sign-in: the account key in the scope already ends it when THAT account changes
+    return { ownerKey: key, generation: slot ? 0 : authGeneration,
       delegationKey: hashed('delegation', nativeHash({ boardId: context?.boardId ?? null, runId: scope.runId ?? null,
         parentTaskId: scope.parentTaskId ?? null, requestedBy: scope.requestedBy ?? null })) }
   }
@@ -129,7 +138,7 @@ export async function openWorkflowRuntime({
     // openStores (tests) returns { store, ledger, sourceOptions?, planOptions?, close? };
     // without sourceOptions/planOptions those stay in memory.
     stores = openStores ? await openStores() : await openDurableStores(dataDir)
-    sources = await openTaskSourceRegistry({ ...(stores.sourceOptions ?? {}), getOwnerKey: ownerKey })
+    sources = await openTaskSourceRegistry({ ...(stores.sourceOptions ?? {}), getOwnerKey: boardId => ownerKey(slotOfBoard(boardId)) })
     const planStore = await openTaskPlanStore(stores.planOptions ?? {})
     taskChat = sameThreadChat(chat, { wanted: body => {
       try {
@@ -150,7 +159,8 @@ export async function openWorkflowRuntime({
         if (pressure) holdRetry()
         if (graphId) broadcast({ type: 'task.graph', v: 1, graphId, change: 'task-queue-changed', graph: publicGraph(graph.getGraph(graphId)), ts: Date.now() })
       } })
-    plans = createTaskPlanService({ store: planStore, sources, graph, adapter, chat, getOwnerKey: ownerKey,
+    plans = createTaskPlanService({ store: planStore, sources, graph, adapter, chat, getOwnerKey: ownerKey, roomKeyed,
+      ...(typeof roomSlotOf === 'function' ? { slotOf: roomSlotOf } : {}),
       broadcast: frame => broadcast(frame), onBlocked: holdRetry })
     unsubscribeGraph = graph.subscribe(journalEvent => {
       const graphId = journalEvent.graphId ?? journalEvent.graph?.graphId

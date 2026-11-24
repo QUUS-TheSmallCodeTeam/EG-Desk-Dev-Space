@@ -77,6 +77,7 @@ import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { buildCodexAppServerLaunch, createNativeCapabilityCache, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 import { createSlotReadiness, isProfileSlot } from './egdesk-slot-readiness.mjs'
 import { createProfileReaders } from './egdesk-profile-readers.mjs'
+import { createProfileAccessFailures } from './egdesk-profile-access.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
 import { createLocalCapacity } from './egdesk-local-capacity.mjs'
@@ -382,11 +383,13 @@ const modelCatalog = createModelCatalogSync({
 // L1 c22: each profile server's binary is probed on its own (dynamicTools, ephemeral, turn/steer, thread/delete), remembered per binary; nothing is
 // inherited from the shared app-server's probe.
 const profileCapabilityCache = createNativeCapabilityCache()
+// L1 c25 (flag EGDESK_ROOM_ACCOUNT=on): the last access failure (auth, quota, permission) of each profile's own server, as status data per profile
+const profileAccess = createProfileAccessFailures({ enabled: () => process.env.EGDESK_ROOM_ACCOUNT === 'on', authOf: id => codexProfileServers.snapshot(id)?.auth ?? null })
 const codexProfileServers = createCodexProfileAppServers({
   resolveHome: id => engineProfiles.ownedCodexHome(id),
   inspectCapabilities: bin => profileCapabilityCache(bin),
   // L1 c24: a profile's reader (flag) consumes the events of its own read-only child threads; everything else goes on as before
-  onNotification: (id, message) => { if (!profileReaders.handleNotification(id, message)) codexEngine.notify(message, id) },
+  onNotification: (id, message) => { profileAccess.notify(id, message); if (!profileReaders.handleNotification(id, message)) codexEngine.notify(message, id) },
   onServerRequest: (id, message) => { if (!profileReaders.handleServerRequest(id, message)) codexEngine.serverRequest(message, id) },
   onConnection: (id, state) => codexEngine.connection(state, id),
   onChange: () => engineStatus.check(),
@@ -397,7 +400,8 @@ const codexProfileServers = createCodexProfileAppServers({
 const codexEngine = createCodexEngineAdapter({
   request: (method, params) => appServerRequest(method, params),
   respond: nativeRespond,
-  profiles: codexProfileServers,
+  // L1 c25: a turn/start rejection on a profile's server is recorded for THAT profile (flag EGDESK_ROOM_ACCOUNT=on); every other call passes straight through
+  profiles: { ...codexProfileServers, request: (id, method, params) => profileAccess.request(id, method, () => codexProfileServers.request(id, method, params)) },
   getOwnerKey: () => publicAuthIdentityKey(authState),
   isReady: () => appServerReady,
   getModels: () => modelCatalog.snapshot(),
@@ -415,7 +419,10 @@ const codexEngine = createCodexEngineAdapter({
     residentProcesses: (appServerProcess && appServerProcess.exitCode == null ? 1 : 0) + codexProfileServers.residentCount(),
     residentLimit: MAX_ENGINE_PROFILES,
     models: modelCatalog.snapshot(),
-    extraProfiles: engineProfiles.list('codex').filter(row => row.owned).map(row => ({ ...row, ...codexProfileServers.snapshot(row.id) })),
+    extraProfiles: engineProfiles.list('codex').filter(row => row.owned).map(row => {
+      const failure = profileAccess.failureOf(row.id)
+      return { ...row, ...codexProfileServers.snapshot(row.id), ...(failure ? { accessFailure: failure } : {}) }
+    }),
   }),
 })
 // D-S1 (b) (2026-10-24): the installed, unmodified `claude`, one child
@@ -682,7 +689,9 @@ const handleDeskHttp = createDeskHttpHandler({ store: () => deskStore, port: BRI
 // RT-03 .egdesk export/inspect/import over the same local stores (signed out too).
 // Exports go to ~/Downloads/EG-Desk, or <app data>/exports without a Downloads folder.
 // RT-03 opt-in extras: captures of the signed-in account and local File drafts (off unless asked, D-R3).
-const portableAttachments = createContextAttachmentProvider({ store: contextStore, ownerKey: () => publicAuthIdentityKey(authState) })
+const portableAttachments = createContextAttachmentProvider({ store: contextStore, ownerKey: () => publicAuthIdentityKey(authState),
+  // L1 c25 (flag EGDESK_ROOM_ACCOUNT=on): captures of rooms on Agent profiles are stored under those accounts; the export lists them too
+  ...(process.env.EGDESK_ROOM_ACCOUNT === 'on' ? { ownerKeys: () => [publicAuthIdentityKey(authState), ...codexProfileServers.residentIds().map(id => codexEngine.ownerKey(id))] } : {}) })
 const portableFileDrafts = createManagedDraftProvider({ directory: path.join(dataDir, 'file-drafts') })
 const boardAskBindingKey = randomBytes(32)
 const boardAgentAsk = createBoardAgentAskService({
@@ -703,7 +712,15 @@ const handlePortableHttp = createPortableHttpHandler({ desk: () => deskStore, ch
 // /events/recent; SSE workflow.event and task.graph frames on /events.
 workflow = await openWorkflowRuntime({
   dataDir, chat, port: BRIDGE_PORT, broadcast: event => broadcast(event),
-  ensureAuth: () => ensureChatAuth(), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2, localCapacity,
+  ensureAuth: hints => ensureChatAuth(hints), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2, localCapacity,
+  // L1 c25 (flag EGDESK_ROOM_ACCOUNT=on, default off; owner decision U11): a plan belongs to the account of its room's profile slot; steps, sources and the
+  // delegation scope use that account. Off: roomSlotOf answers nothing and every plan uses the default sign-in, as before.
+  ownerKeyFor: browserOwnerKeyFor, roomKeyed: () => process.env.EGDESK_ROOM_ACCOUNT === 'on',
+  roomSlotOf: origin => {
+    if (process.env.EGDESK_ROOM_ACCOUNT !== 'on') return undefined
+    const slot = origin?.engineProfileId ?? chat.threadEngineProfile(origin?.conversationId)
+    return isProfileSlot(slot) ? slot : undefined
+  },
 })
 const detachContextServices = contexts.attachServices({ bus: workflow.bus, settings: bridgeSettings.contextSuggest, boards: deskStore })
 for (const root of pendingFileRoots.values()) workflow.watchRoot(root)

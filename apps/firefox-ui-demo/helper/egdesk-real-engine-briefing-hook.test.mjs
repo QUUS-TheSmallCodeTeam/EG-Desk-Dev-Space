@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { runFakeAppServer } from '../scripts/real-engine/fake-app-server.mjs'
 import { BRIDGE_COMPOSITION, DECISION_DEPENDENT_FLAGS, DECISION_KEY_ENV, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { validateEngineScript } from './egdesk-real-engine-script.mjs'
+import { answerFacts, normalizeMaterials, enumerateSkeleton } from './egdesk-briefing-skeleton.mjs'
 import { BOARD_SAY, PROGRESS_ENTRIES, buildBoardScript } from './egdesk-briefing-real-engine-script.mjs'
 import { BRIEFING_FLAGS, boardText, briefingHook, checkBriefingExpect, folderMaterials, validateBriefingExpect } from './egdesk-real-engine-briefing-hook.mjs'
 import { CHECK_HOOKS, hookDecisionFlags, hookFlags } from './egdesk-real-engine-hooks.mjs'
@@ -92,7 +93,7 @@ test('the checks run on the record by code: outcome, reason, schema sent, schema
 
 test('folderMaterials: a note named MM-DD.md is a dated page (declared year), status from its words, nothing else is read', () => {
   const rows = folderMaterials({ 'devlog/11-22.md': '# 11-22\n\n- 결제 모듈 병합 완료 (커밋 e4f5a6b).\n', 'devlog/11-24.md': '# t\n- 검색 화면 착수.\n- 남은 일: 가', 'README.md': 'x', 'devlog/13-40.md': 'x' }, { year: 2026 })
-  assert.deepEqual(rows.map(r => [r.alias, r.time.at, r.status]), [['note-1122', '2026-11-22', 'done'], ['note-1124', '2026-11-24', 'plan']]); assert.equal(rows[0].title, '결제 모듈 병합 완료 (커밋 e4f5a6b).')
+  assert.deepEqual(rows.map(r => [r.alias, r.time.at, r.status]), [['note-1122', '2026-11-22', 'done'], ['note-1124', '2026-11-24', 'plan']]); assert.deepEqual(rows.map(r => r.links), [[], [{ type: 'follows_from', toAlias: 'note-1122' }]]); assert.equal(rows[0].title, '결제 모듈 병합 완료 (커밋 e4f5a6b).')
 })
 
 test('without --decisions the briefing flow is refused by the check\'s own preflight (the briefing runs on Decision calls)', () => {
@@ -161,7 +162,7 @@ test('check-3 on the fake that refuses ephemeral forks like 0.171: the fill runs
   for (const rec of records) { assert.equal(rec.aborted, null, rec.id); assert.equal(rec.turns[0].ok, true, `${rec.id}: ${JSON.stringify(rec.turns[0].expectations.filter(e => !e.ok))}`) }
   const [on, off] = records.map(r => r.turns[0].hooks.briefing)
   assert.deepEqual([on.outcome, on.reason, on.schemaInvalid, off.outcome, off.reason, off.schemaInvalid], ['presented', null, 0, 'presented', null, null])
-  assert.deepEqual([on.flow.stages, on.flow.fillTurns], [['place', 'fit', 'fill_check', 'coverage'], 1])
+  assert.deepEqual([on.flow.stages, on.flow.fillTurns], [['place', 'fit', 'order', 'fill_check', 'coverage'], 1])
   // the record says how the private turn ran: no thread/fork was needed, the fresh thread and its turn are listed, nothing was refused
   assert.deepEqual(on.forkErrors, []); assert.ok(on.forkRequests.some(r => r.method === 'thread/start') && on.forkRequests.some(r => r.method === 'turn/start'), JSON.stringify(on.forkRequests))
   // on the wire: the fresh internal threads are ephemeral, read-only, never-approve, and their turn input is the briefing prompt alone
@@ -185,14 +186,52 @@ test('a chat-only outcome keeps its cause: an unusable fill on the fresh thread 
   const w = world(t, { ...fakeFor('prose'), refuseEphemeralFork: true })
   const script = buildBoardScript(); script.conversations.length = 1
   const rec = (await runCheck(w.options, asScripts(script), w.deps)).records[0], b = rec.turns[0].hooks.briefing
-  assert.deepEqual([b.outcome, b.reason, b.flow.stages, b.flow.fillTurns], ['fallback-chat', 'fill-invalid', ['place', 'fit'], 2])
+  assert.deepEqual([b.outcome, b.reason, b.flow.stages, b.flow.fillTurns], ['fallback-chat', 'fill-invalid', ['place', 'fit', 'order'], 2])
   assert.ok(b.decisions[0].p.combines >= 0.9 && Object.values(b.decisions[0].p).every(v => typeof v === 'number'), 'the place judgment: board')
   assert.equal(b.forkRequests.filter(r => r.method === 'turn/start').length, 2)
   const failed = rec.turns[0].expectations.find(e => e.check === 'briefing.outcome')
-  assert.equal(failed.ok, false); assert.deepEqual([failed.detail.reason, failed.detail.stages], ['fill-invalid', ['place', 'fit']])
+  assert.equal(failed.ok, false); assert.deepEqual([failed.detail.reason, failed.detail.stages], ['fill-invalid', ['place', 'fit', 'order']])
 })
 
 test('refused forks are recorded by code even when no fallback exists: a thread/fork error code lands in forkErrors and in the outcome detail', () => {
   const rec = { outcome: 'fallback-chat', reason: 'fill-invalid', steps: [], flow: { stages: ['place', 'fit'] }, forkErrors: ['thread/fork:-32600'] }
   assert.deepEqual(checkBriefingExpect({ outcome: 'presented' }, rec)[0].detail, { outcome: 'fallback-chat', reason: 'fill-invalid', steps: 0, stages: ['place', 'fit'], forkErrors: ['thread/fork:-32600'] })
+})
+
+
+// ---- c33: what Main's check-5 showed (fresh thread ran, the strict schema was accepted, the fill was valid; the coverage check refused the board) ----
+// The posted answer of check-5 (briefing-schema-on, paths shortened): a table of three rows, a sum, the open items, a closing sentence.
+const CHECK5_ANSWER = '| 날짜 | 진행 상황 | 커밋 ID | 테스트 |\n|---|---|---|---|\n| [11-20](/x/devlog/11-20.md) | 로그인 화면 병합 완료 | `a1b2c3d` | 120건 통과 |\n| [11-22](/x/devlog/11-22.md) | 결제 모듈 병합 완료. 알림 설정 화면은 시안만 확정 | `e4f5a6b` | 98건 통과 |\n| [11-24](/x/devlog/11-24.md) | 검색 화면 착수 | 기록 없음 | 기록 없음 |\n\n기록된 테스트 통과 건수는 합계 **218건**입니다. 11-24 기준 남은 일은 **알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성**입니다.\n\n파일은 변경하지 않았습니다.\n'
+test('c33 cause 1: a table row is ONE fact, even when a cell holds a sentence (check-5 split the 11-22 row at its period into a half with the date and a half with the commit)', () => {
+  const { facts, cut } = answerFacts(CHECK5_ANSWER)
+  assert.deepEqual(facts, ['11-20 · 로그인 화면 병합 완료 · a1b2c3d · 120건 통과', '11-22 · 결제 모듈 병합 완료. 알림 설정 화면은 시안만 확정 · e4f5a6b · 98건 통과', '11-24 · 검색 화면 착수 · 기록 없음 · 기록 없음',
+    '기록된 테스트 통과 건수는 합계 218건입니다.', '11-24 기준 남은 일은 알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성입니다.', '파일은 변경하지 않았습니다.'])
+  assert.equal(cut, 0)
+  // prose is split into sentences as before
+  assert.deepEqual(answerFacts('11-20 로그인 화면 병합. 11-22 결제 모듈 병합.\n').facts, ['11-20 로그인 화면 병합.', '11-22 결제 모듈 병합.'])
+})
+
+test('c33 cause 2: the dated notes of one folder are one log: with follows_from links the flow designs a sequence card and an open-items card; without them it designed one card per note', () => {
+  const folder = buildBoardScript().conversations[0].folder
+  const kinds = rows => enumerateSkeleton({ materials: rows, candidates: [] }).parts.map(p => `${p.trait}:${p.materials.join('+')}`)
+  assert.deepEqual(kinds(folderMaterials(folder)), ['sequence:M1+M2+M3', 'open_items:M3'])
+  assert.deepEqual(kinds(folderMaterials(folder).map(r => ({ ...r, links: [] }))), ['single:M1', 'single:M2', 'open_items:M3'], 'the check-5 design: three unrelated notes')
+  assert.equal(normalizeMaterials(folderMaterials(folder)).length, 3)
+})
+
+test('the record keeps what the private turn wrote and the coverage packet, so a chat-only outcome shows the board the Decision model judged', async t => {
+  // a fill that states no fact of the notes (every text is a placeholder) and a Decision model that says no to every fact: the coverage check refuses the board
+  const noteOnly = prompt => { const f = fillFrom(prompt); for (const item of Object.values(f.items)) for (const [k, v] of Object.entries(item.slots)) if (typeof v === 'string' && !/title/.test(k)) item.slots[k] = '진행 중'; for (const item of Object.values(f.items)) for (const v of Object.values(item.slots)) if (Array.isArray(v)) for (const r of v) for (const k of Object.keys(r)) if (!['from', 'label'].includes(k) && typeof r[k] === 'string') r[k] = '진행 중'; return f }
+  const plan = { steps: [], finalFor: text => JSON.stringify(noteOnly(text)) }
+  const script = { ...fakeFor('json'), refuseEphemeralFork: true, forkTurns: [plan, plan, plan] }
+  const w2 = world(t, script)
+  w2.deps.fetchImpl = async (url, init) => { const body = JSON.parse(init.body); w2.decisionBodies.push(body); return Response.json({ answers: body.questions.map(q => ({ name: q.name, type: 'predicate', probability: q.name.startsWith('onboard_') ? .02 : DEFAULT_P(q.name) })), usage: { input_tokens: 20 } }) }
+  const bs = buildBoardScript(); bs.conversations.length = 1
+  const rec = (await runCheck(w2.options, asScripts(bs), w2.deps)).records[0], b = rec.turns[0].hooks.briefing
+  assert.deepEqual([b.outcome, b.reason], ['fallback-chat', 'not-covered'])
+  assert.deepEqual(b.flow.stages.slice(-2), ['fill_check', 'coverage']); assert.equal(b.forkReplies.length, 1); assert.match(b.forkReplies[0], /진행 중/)
+  const coverage = b.decisions.find(d => d.names.some(n => n.startsWith('onboard_')))
+  assert.ok(coverage.input.includes('진행 중'), 'the board as the Decision model saw it'); assert.ok(coverage.input.length <= 3000)
+  assert.ok(Object.entries(coverage.p).filter(([n]) => n.startsWith('onboard_')).every(([, v]) => v < .1))
+  assert.deepEqual(rec.turns[0].expectations.find(e => e.check === 'briefing.outcome').detail.reason, 'not-covered')
 })

@@ -539,7 +539,7 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
         const humanStep = result.reason === 'human_step' || (result.reason === 'blocked' && (last?.excluded?.gated ?? 0) + (last?.excluded?.unsupported ?? 0) > 0)
         const code = humanStep ? 'human_step' : CANNOT.has(result.reason) ? result.reason : 'blocked'
         // c22: a person-only control the request is about is named (its label), so the person is told what to change themselves
-        return finishPause(task, { kind: 'cannot_proceed', code }, result, { detail: result.code, ...(typeof result.target === 'string' && result.target ? { candidates: [result.target] } : {}) })
+        return finishPause(task, { kind: 'cannot_proceed', code }, result, { detail: result.code, ...(typeof result.target === 'string' && result.target ? { candidates: [result.target] } : Array.isArray(result.controls) && result.controls.length ? { candidates: result.controls.filter(label => typeof label === 'string').slice(0, 3) } : {}) })
       }
       case 'max_steps': return finishPause(task, { kind: 'cannot_proceed', code: 'step_rejected' }, result, { detail: result.code })
       case 'fallback': // the judge is unavailable: today's behaviour, the subjective model drives the tools itself
