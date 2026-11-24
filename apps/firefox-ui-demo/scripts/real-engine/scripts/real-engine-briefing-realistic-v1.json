@@ -26,9 +26,6 @@
         {
           "say": "ledger 폴더의 기록을 읽고 두 흐름(통합 게이트, 실호출 측정)을 각각 날짜와 시간 순서로 정리해줘. 항목마다 커밋 id나 건수·측정값을 기록에 적힌 그대로 같이 적어줘. 파일은 바꾸지 마.",
           "expect": {
-            "toolCalls": [
-              "egdesk_read_file"
-            ],
             "posted": true,
             "answerIncludes": [
               "9aeed73",
@@ -125,9 +122,6 @@
         {
           "say": "ledger 폴더의 기록을 읽고 두 흐름(통합 게이트, 실호출 측정)을 각각 날짜와 시간 순서로 정리해줘. 항목마다 커밋 id나 건수·측정값을 기록에 적힌 그대로 같이 적어줘. 파일은 바꾸지 마.",
           "expect": {
-            "toolCalls": [
-              "egdesk_read_file"
-            ],
             "posted": true,
             "answerIncludes": [
               "9aeed73",

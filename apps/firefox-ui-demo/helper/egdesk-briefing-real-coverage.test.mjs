@@ -30,17 +30,18 @@ function harness({ stated = text => (META.has(text) ? .02 : .97), onboard = text
 test('the answer\'s facts, by the materials: two statements about the answer, a derived sum, and four content facts that the board shows', () => {
   const { facts, cut } = answerFacts(REAL_ANSWER)
   assert.deepEqual(facts, ['devlog 기록을 날짜순으로 정리했습니다.', '파일은 변경하지 않았습니다.', '11-20 · 로그인 화면 병합 완료 · a1b2c3d · 120건 통과', '11-22 · 결제 모듈 병합 완료. 알림 설정 화면은 시안만 확정 · e4f5a6b · 98건 통과', '11-24 · 검색 화면 착수',
-    '기록된 테스트 통과 건수의 합계는 218건입니다.']); assert.equal(cut, 1)
-  assert.deepEqual(facts.map(f => factCites(f, MATS)), [null, null, ['M1'], ['M2'], null, []], 'the two statements about the answer and the 11-24 row have no code anchor; the sum is anchored and no material holds it')
+    '기록된 테스트 통과 건수의 합계는 218건입니다.', '최신 기록 기준 남은 작업은 알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성입니다.']); assert.equal(cut, 0, 'c38: seven facts are all asked (6 + 1)')
+  assert.deepEqual(facts.map(f => factCites(f, MATS)), [null, null, ['M1'], ['M2'], null, [], null], 'the two statements about the answer and the 11-24 row have no code anchor; the sum is anchored and no material holds it')
 })
 
-test('check-11 reproduced: the two sentences about the answer no longer block; the fill is checked and the coverage asked ONCE; the board is presented', async () => {
+test('check-11 reproduced: the two sentences about the answer no longer block; the fill is checked and the coverage is asked in two requests (6 facts, then the 7th); the board is presented', async () => {
   const h = harness(), out = await h.run()
   assert.equal(out.status, 'presented', JSON.stringify({ reason: out.reason, coverage: out.coverage }))
-  assert.deepEqual(h.calls.map(c => c.stage), ['place', 'fit', 'order', 'fill_check', 'coverage']); assert.equal(h.fills.length, 1, 'no rewrite round: nothing was missing')
-  const cov = h.calls.at(-1); assert.deepEqual(cov.names, ['onboard_F1', 'onboard_F2', 'onboard_F3', 'onboard_F4', 'onboard_F5', 'onboard_F6', 'stated_F1', 'stated_F2', 'stated_F5'], 'every fact is asked if the board shows it; the three without a code anchor are also asked if the materials state them')
+  assert.deepEqual(h.calls.map(c => c.stage), ['place', 'fit', 'order', 'fill_check', 'coverage', 'coverage']); assert.equal(h.fills.length, 1, 'no rewrite round: nothing was missing')
+  const second = h.calls.at(-1); assert.deepEqual(second.names, ['onboard_F7', 'stated_F7'], 'c38: the 7th fact is one more request, the board quoted again')
+  const cov = h.calls.at(-2); assert.deepEqual(cov.names, ['onboard_F1', 'onboard_F2', 'onboard_F3', 'onboard_F4', 'onboard_F5', 'onboard_F6', 'stated_F1', 'stated_F2', 'stated_F5'], 'every fact is asked if the board shows it; the three without a code anchor are also asked if the materials state them')
   assert.deepEqual([out.coverage.missing, out.coverage.unshowable], [[], ['F1', 'F2']], 'a decided "no" on stated: no board can show it (recorded)')
-  assert.deepEqual(out.coverage.facts.map(f => [f.id, f.p, f.stated ?? null]), [['F1', 0, .02], ['F2', 0, .02], ['F3', 1, null], ['F4', 1, null], ['F5', 1, .97], ['F6', .56, null]])
+  assert.deepEqual(out.coverage.facts.map(f => [f.id, f.p, f.stated ?? null]), [['F1', 0, .02], ['F2', 0, .02], ['F3', 1, null], ['F4', 1, null], ['F5', 1, .97], ['F6', .56, null], ['F7', 1, .97]])
   // the request is closed and carries the materials once (not per question) and the rule that mentions them
   assert.ok(cov.packet.input[0].content.includes('quoted materials') && cov.packet.input[1].content.split('The materials, each quoted as JSON:').length === 2)
   const stated = cov.packet.questions.find(q => q.name === 'stated_F1').instructions
@@ -52,15 +53,16 @@ test('the direction stays conservative: an undecided or a yes on "states the mat
   for (const stated of [.5, .97]) {
     const h = harness({ stated: text => (META.has(text) ? stated : .97), fillReplies: [REAL_FILL, REAL_FILL] }), out = await h.run()
     assert.deepEqual([out.status, out.reason, out.coverage.missing], ['fallback-chat', 'not-covered', ['F1', 'F2']], `stated ${stated}`)
-    assert.equal(h.fills.length, 2, 'the one bounded rewrite ran'); assert.deepEqual(h.calls.map(c => c.stage).slice(-3), ['coverage', 'fill_check', 'coverage'])
+    assert.equal(h.fills.length, 2, 'the one bounded rewrite ran'); assert.deepEqual(h.calls.map(c => c.stage).slice(-4), ['coverage', 'coverage', 'fill_check', 'coverage'])
     assert.deepEqual(h.calls.at(-1).names, ['onboard_F1', 'onboard_F2'], 'the second ask is only the missing facts, without the stated question')
   }
 })
 
 test('a content fact the board really lacks is still caught: the judge says it is on no board AND stated by the materials', async () => {
-  // the board lacks the 11-24 row (a fill whose sequence card has two lines only): F5 "11-24 · 검색 화면 착수" is a statement of the materials and not shown
-  const two = structuredClone(REAL_FILL); two.items.P1.slots.lines = two.items.P1.slots.lines.slice(0, 2)
-  const h = harness({ onboard: text => (text.startsWith('11-24') ? 0 : REAL_ONBOARD[text] ?? .9), fillReplies: [two, two] }), out = await h.run()
+  // the 11-24 line is on the card but says nothing of the fact (a model that wrote "진행 중" for it): F5 "11-24 · 검색 화면 착수" is a statement of the materials and not shown
+  const thin = structuredClone(REAL_FILL); thin.items.P1.slots.lines[2].text = '진행 중'
+  const h = harness({ onboard: text => (text.startsWith('11-24') ? 0 : REAL_ONBOARD[text] ?? .9), fillReplies: [thin, thin] }), out = await h.run()
+  assert.ok(out.coverage, JSON.stringify({ status: out.status, reason: out.reason, detail: out.detail, stages: h.calls.map(c => c.stage) }))
   assert.deepEqual([out.status, out.reason, out.coverage.missing], ['fallback-chat', 'not-covered', ['F5']])
   assert.deepEqual(out.coverage.unshowable, ['F1', 'F2'], 'the two sentences about the answer are still not blamed on the board')
 })

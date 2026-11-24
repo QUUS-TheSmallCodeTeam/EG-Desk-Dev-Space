@@ -96,7 +96,9 @@ export function buildLoopScript(entries = LOOP_ENTRIES) {
   const folder = Object.fromEntries(entries.map(e => [e.file, loopText(e)]))
   const inTime = topic => entries.filter(e => e.topic === topic).sort((a, b) => `${a.day} ${a.time}`.localeCompare(`${b.day} ${b.time}`)).map(e => e.fact)
   const topics = [...new Set(entries.map(e => e.topic))], facts = entries.map(e => e.fact)
-  const turn = schema => ({ say: LOOP_SAY, expect: { toolCalls: ['egdesk_read_file'], posted: true, answerIncludes: facts, files: folder, undoRecords: 0, noNativeTools: true, turnStatus: 'completed',
+  // c38: no `toolCalls` expectation: check-17b's engine read the twelve files with egdesk_run_command (cat) in one conversation and egdesk_read_file in the other; both are the engine's own
+  // tools, and what the turn must not do is checked by `files` (nothing changed) and `noNativeTools`.
+  const turn = schema => ({ say: LOOP_SAY, expect: { posted: true, answerIncludes: facts, files: folder, undoRecords: 0, noNativeTools: true, turnStatus: 'completed',
     briefing: { outcome: 'presented', schemaSent: schema, schemaInvalid: schema ? 0 : null, factsInCards: facts, inOrder: topics.map(inTime) } } })
   return { set: LOOP_SET,
     description: 'Pattern: the board-design turn of the briefing on REAL material. Twelve entries of the decision loop\'s own ledger (EG-Desk only), two topics interleaved in time, every entry longer than the 90 characters of a sequence line. The engine reads them, writes the progress answer, and after it is posted the check runs the briefing flow (the production Board/Decisions handler, the Decision model, the engine\'s private fresh-thread turns writing the fill). Expectations, derived by code from the entries: the board is presented, every key fact (commit id, count or measurement, as the ledger writes it) is in the text of the published cards, and within each topic the facts are in time order. Two conversations: EGDESK_BRIEFING_OUTPUT_SCHEMA on and off. Runs only with --decisions.',
