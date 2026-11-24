@@ -866,6 +866,7 @@ export class CodexChatRuntime {
     this.heartbeatReasoning = new WeakMap() // heartbeat -> ids of reasoning items the engine has started and not finished
     this.heartbeatSubjects = new WeakMap() // heartbeat -> { run, flow, context }: what its judge and its record speak for
     this.flowSpeakers = new WeakSet() // heartbeats whose run was opted in to intermediate messages without a held answer
+    this.isolationMemo = null // { key: engine folder, at, value }: the isolation read of the last own-tools thread start (c25: a fresh internal thread reuses it)
     this.freshInternalCache = new Map() // conversationId -> { at, value }: the thread/start overrides of a fresh internal thread (c24)
     this.internalTurns = createInternalTurns({ setTimer: (fn, ms) => this.setTimer(fn, ms), clearTimer: handle => this.clearTimer(handle) }) // short private fork turns (draft revision, intermediate messages); never a run
     this.flowRuns = new WeakMap() // run -> intermediate-message state (flag decisionContext.conversationFlow, default off)
@@ -2218,6 +2219,8 @@ export class CodexChatRuntime {
     const isolation = await loadOwnToolsIsolation(request, neutralFolder)
     mergeCeilingOverrides(own, isolation.overrides)
     context.ownToolsIsolation = isolation.mcp
+    // c25: on the real 0.171 the inventory read costs 1-2 s (mcpServerStatus/list); the room's first internal thread reuses this one for 5 minutes instead of paying it again
+    if (isolation.mcp !== 'unchecked') this.isolationMemo = { key: neutralFolder ?? null, at: this.now(), value: structuredClone(isolation.overrides) }
     try { if (this.ownTools?.environments?.() === 'none') own.environments = [] } catch { /* the flag only adds */ }
     own.developerInstructions = composeOwnToolsInstructions(base?.developerInstructions)
     return own
@@ -6114,7 +6117,9 @@ export class CodexChatRuntime {
     const slot = this.threadOperationSlot(cid), thread = this.threads.get(cid)
     const base = mergeCeilingOverrides({}, pureEngineThreadOverrides())
     const cwd = thread?.cwd ?? this.ownNeutralFolder() ?? null
-    const isolation = await loadOwnToolsIsolation(this.scopedRequest(slot), cwd)
+    const memo = this.isolationMemo
+    const reused = memo && memo.key === (cwd ?? null) && this.now() - memo.at < 300_000 ? memo.value : null
+    const isolation = reused ? { overrides: structuredClone(reused) } : await loadOwnToolsIsolation(this.scopedRequest(slot), cwd)
     mergeCeilingOverrides(base, isolation.overrides)
     if (cwd) base.cwd = cwd
     if (thread?.model) base.model = thread.model

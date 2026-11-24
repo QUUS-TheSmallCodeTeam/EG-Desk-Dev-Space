@@ -785,3 +785,20 @@ test('the main answer of an Agent direct room is judged by the product\'s draft 
   assert.ok(turn.draftCheck.rows.length >= 1); for (const row of turn.draftCheck.rows) { assert.equal(row.mode, 'advisory'); assert.ok(Array.isArray(row.judgments)); for (const j of row.judgments) assert.deepEqual(Object.keys(j).sort(), ['p', 'q', 'would']) }
   assert.deepEqual(rec.cleanup.failures, [])
 })
+
+test('records: each private turn (path, time, characters, the text) and each heartbeat message the runtime composed (posted or dropped) are in the turn record', async t => {
+  const w = world(t, { refuseEphemeralFork: true, turns: [{ steps: [], final: 'a' }], forkTurns: [{ steps: [], final: 'ok from the internal thread' }] })
+  w.deps.extensions = [{ name: 'in-window', setup: ctx => { ctx.chat.draftCheckIdle = async () => {
+    const live = [...ctx.chat.runs.values()].at(-1)
+    await ctx.chat.internalText(live, 'Say the word ok', { timeoutMs: 4000 })
+    await ctx.chat.writeChecked(live, 'Write one short message', { timeoutMs: 4000 }) // no draft check turn is registered for this run: dropped
+  } } }]
+  const rec = only(await runCheck(w.options, asScripts(ONE), w.deps))
+  const turn = rec.turns[0]
+  assert.equal(turn.internalTurns.length, 2)
+  assert.deepEqual(turn.internalTurns[0], { via: 'fresh', ms: turn.internalTurns[0].ms, chars: 'ok from the internal thread'.length, text: 'ok from the internal thread', schema: false, preamble: true })
+  assert.equal(turn.writers.length, 1); assert.equal(turn.writers[0].posted, false); assert.equal(turn.writers[0].promptChars, 'Write one short message'.length)
+  const plain = world(t, { turns: [{ steps: [], final: 'a' }] })
+  const quiet = only(await runCheck(plain.options, asScripts(ONE), plain.deps)).turns[0]
+  assert.equal(quiet.internalTurns, undefined); assert.equal(quiet.writers, undefined, 'no private turn: nothing added to the record')
+})

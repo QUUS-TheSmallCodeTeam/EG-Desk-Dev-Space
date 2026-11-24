@@ -320,8 +320,8 @@ export async function runConversation({ options, set, conversation, deps = {} })
   let chat = null, store = null, wiring = null, threadClient = null
   const memoryHook = createMemoryHook(conversation.memory) // memory hook: seeded pages, what the product sent, the memory expectations
   const completions = [], tasks = []
-  const turnNow = { notifications: [], toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [], draftRows: [] }
-  const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = [] }
+  const turnNow = { notifications: [], toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [], draftRows: [], internal: [], writers: [] }
+  const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = []; turnNow.internal = []; turnNow.writers = [] }
   let initializeResult = null, lastThreadStart = null
   const rpc = new AppServerRpc({
     send: payload => child.stdin.write(`${payload}\n`), experimentalApi: true, timeoutMs: 60_000,
@@ -462,7 +462,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     let nativeContract = null
     const needsNative = FLAG.EGDESK_INRUN_MESSAGES === 'on' || conversation.turns.some(t => t.action === 'steer' || t.action === 'delete')
     if (needsNative) {
-      try { nativeContract = (deps.inspectNative ?? inspectNativeCapabilities)({ executable: options.codexBin, env: childEnv(options, env), cwd: dataDir }) } catch { nativeContract = null }
+      try { nativeContract = (deps.inspectNative ?? inspectNativeCapabilities)({ executable: options.codexBin, env: childEnv(options, env), cwd: dataDir, ...(deps.run ? { run: deps.run } : {}) }) } catch { nativeContract = null }
       rec.engine.nativeContract = { version: nativeContract?.version ?? null, schemaMatch: nativeContract?.schemaMatch === true, boardPeerContract: typeof nativeContract?.boardPeerContract === 'string', steerContract: typeof nativeContract?.steerContract === 'string', threadDelete: nativeContract?.threadDelete === true }
     }
     chat = new CodexChatRuntime({ request, respond, ...(profileStore ? { profiles: profileStore } : {}),
@@ -474,6 +474,18 @@ export async function runConversation({ options, set, conversation, deps = {} })
     try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
     attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests }))
     rec.phases.composedMs = ms(t0)
+    // c25: what the runtime's private turns did, per turn (Main's check-6: a status reply never reached the chat and the record could not say where it stopped).
+    // internalTurns: each private turn (draft revision, heartbeat writer, briefing fill): by which path (fork or a fresh thread), how long, how many characters, the text the model
+    // wrote (the check's own copy of the model's output, like posted), or the error. writers: each heartbeat message the runtime composed and whether it was posted (null = it
+    // was dropped: the check found something in it, it repeated an earlier message, or the model wrote nothing).
+    const runPrivate = chat.internalTurns.run.bind(chat.internalTurns)
+    chat.internalTurns.run = async args => {
+      const began = performance.now()
+      try { const out = await runPrivate(args); turnNow.internal.push({ via: out.via ?? null, ms: ms(began), chars: out.text.length, text: clip(out.text, 400), schema: Boolean(args.outputSchema), preamble: out.via === 'fresh' && Boolean(args.fresh?.preamble) }); return out }
+      catch (error) { turnNow.internal.push({ ms: ms(began), error: String(error?.code ?? 'error').slice(0, 60), message: clip(error?.message ?? '', 200) }); throw error }
+    }
+    const composeWriter = chat.writeChecked.bind(chat)
+    chat.writeChecked = async (run, prompt, options) => { const text = await composeWriter(run, prompt, options); turnNow.writers.push({ promptChars: String(prompt).length, posted: text !== null && text !== undefined, ...(typeof text === 'string' ? { text: clip(text, 300) } : {}) }); return text }
     // The one registration point for another lane's module (the briefing hook, memory seeding): deps.extensions = [{ name, setup(ctx) → { afterTurn?(record, info), finish?() } }].
     // setup runs once the runtime is composed; afterTurn after every scripted turn record; finish at the end of the conversation (its value is kept in
     // rec.extensions[name]). An extension that throws is recorded as { error } and never stops the check or changes a turn's verdict.
@@ -509,7 +521,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
         if (status === 'timeout') { try { await rpc.request('turn/interrupt', { threadId: run.conversationId, turnId: run.runId }) } catch {} rec.aborted ??= 'turn_timeout' }
       }
       await Promise.allSettled(tasks.splice(0)); try { await chat.queue } catch {} try { await chat.draftCheckIdle() } catch {} await sleep(30); await Promise.allSettled(tasks.splice(0))
-      return { run, status, error: done?.error ?? null, latencyMs: ms(started), toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], draftRows: [...turnNow.draftRows], commandsRan: [...runnerLog] }
+      return { run, status, error: done?.error ?? null, latencyMs: ms(started), toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], draftRows: [...turnNow.draftRows], internal: [...turnNow.internal], writers: [...turnNow.writers], commandsRan: [...runnerLog] }
     }
     const sendAndWait = async text => finishTurn(await beginTurn(text))
     // a message typed into the working run, afterMs after that turn started; not a turn of its own (the run's turn keeps going)
@@ -601,7 +613,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
       await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
-        ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...(memory.record ? { memory: memory.record } : {}), expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
+        ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(sub.some(s => s.internal?.length) ? { internalTurns: sub.flatMap(s => s.internal) } : {}), ...(sub.some(s => s.writers?.length) ? { writers: sub.flatMap(s => s.writers) } : {}), ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...(memory.record ? { memory: memory.record } : {}), expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {
         // the message typed into the run: what happened after it was sent
         const prev = sub[0], after = texts.slice(mark.posted)
@@ -645,7 +657,7 @@ export function assertCleanupGuaranteed(options, deps = {}, env = process.env) {
   const ledger = deps.ledger ?? createLedger(options.out), left = leftoverThreads(ledger.read())
   if (left.length) throw Object.assign(new Error(`an earlier run left ${left.length} persisted thread(s) listed in ${ledger.file}; run with --cleanup-leftovers first`), { code: 'cleanup_not_guaranteed', leftovers: left })
   let native = null
-  try { native = (deps.inspectNative ?? inspectNativeCapabilities)({ executable: options.codexBin, env: childEnv(options, env), cwd: options.out }) } catch { native = null }
+  try { native = (deps.inspectNative ?? inspectNativeCapabilities)({ executable: options.codexBin, env: childEnv(options, env), cwd: options.out, ...(deps.run ? { run: deps.run } : {}) }) } catch { native = null }
   if (native?.threadDelete !== true) throw Object.assign(new Error('the binary\'s generated schema has no thread/delete (or could not be read), so removing the threads the check creates cannot be guaranteed'), { code: 'cleanup_not_guaranteed' })
 }
 
