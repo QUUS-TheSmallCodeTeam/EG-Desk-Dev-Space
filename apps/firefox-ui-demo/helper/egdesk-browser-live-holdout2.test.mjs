@@ -85,3 +85,25 @@ test('c26 stuck plan: the c24 form page and the settings error page send the req
   assert.deepEqual([phase('sk-error').firstNote.code, phase('sk-error').acts.length], ['error_page', 0])
   for (const body of seen) assert.equal(lintGroupedRequest({ input: body.input, questions: body.questions }).ok, true)
 })
+
+test('c27 entry plan: seven entry requests, no step request, under 4k; the open pages are in each request predicate\'s evidence; the controls stay answers with the stand-in', async () => {
+  const plan = loadLivePlan(FAMILY_PLAN_FILES.entry)
+  assert.ok(plan.tokenCeiling <= 4000)
+  const est = await estimateLive({ plan })
+  assert.ok(est.estInputTokens <= 4000 && est.stoppedBecause === null, `${est.estInputTokens} ${est.stoppedBecause}`)
+  assert.deepEqual([est.scorecard.pass, est.scorecard.hardFailures, est.scorecard.absolute, est.scorecard.softMisses], [true, [], [], []])
+  const seen = []
+  const out = await runLive({ key: KEY, send: true, fetchImpl: standIn(plan.set, seen), plan })
+  assert.equal(out.requests.length, 7)
+  assert.ok(out.requests.every(r => r.stage === 'entry'), 'entry only: no step request')
+  for (const body of seen) {
+    assert.equal(lintGroupedRequest({ input: body.input, questions: body.questions }).ok, true)
+    assert.match(body.input[1].content, /\nThe pages the user has open:\n- "/)
+    assert.equal(body.questions[0].instructions.includes('Reading something that one of the open pages shows is a web task'), true)
+  }
+  const ms = seen.find(b => b.input[1].content.startsWith('User message: 다음 결제일이 언제야?'))
+  assert.match(ms.input[1].content, /- "멤버십 관리 \| 스트리밍플러스" at "streamly.example.test" shows "멤버십 관리" \/ "이용 중인 요금제: 프리미엄" \/ "다음 결제일: 2026-12-14"$/)
+  const phase = id => out.phases.find(p => p.id === id)
+  assert.deepEqual(['en-ctrl-a', 'en-ctrl-b'].map(id => phase(id).first.handled), [false, false], 'general-knowledge questions stay answers')
+  assert.deepEqual(['en-ms', 'en-hc', 'en-se', 'en-ig', 'en-st'].map(id => phase(id).first.handled), [true, true, true, true, true])
+})
