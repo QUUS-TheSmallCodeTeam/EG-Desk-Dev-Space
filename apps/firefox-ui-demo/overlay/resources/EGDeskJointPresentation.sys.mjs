@@ -28,7 +28,13 @@ const bottom = r => r.y + r.height;
 const overlaps = (a, b) => a.x < right(b) && right(a) > b.x && a.y < bottom(b) && bottom(a) > b.y;
 const inside = (a, b) => a.x >= b.x && a.y >= b.y && right(a) <= right(b) && bottom(a) <= bottom(b);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const sameLayout = (a, b) => !!a && !!b && same({...a, decision:null}, {...b, decision:null});
+// Undo restores only what Apply touched, and only while that is still exactly as Apply left it.
+// Unrelated cards, content stamps, viewport and a camera Apply did not move are the user's and never invalidate it.
+const undoStillValid = (u, now) => !!u && !!now &&
+  u.before.targets.every(({ id }) => { const a = u.snapshot.cards.find(c => c.id === id), c = now.cards.find(c => c.id === id);
+    return !!a && !!c && same(a.rect, c.rect) && a.z === c.z; }) &&
+  (!u.before.camera || same(['x', 'y', 'zoom'].map(k => u.snapshot.camera[k]), ['x', 'y', 'zoom'].map(k => now.camera[k])));
+const RESULT_TTL_MS = 60_000; // how long a returned preview may be applied; starts when the preview appears
 const expand = (r, n) => ({ x: r.x - n, y: r.y - n, width: r.width + 2 * n, height: r.height + 2 * n });
 const cover = rs => { const x = Math.min(...rs.map(r => r.x)), y = Math.min(...rs.map(r => r.y));
   return { x, y, width: Math.max(...rs.map(right)) - x, height: Math.max(...rs.map(bottom)) - y }; };
@@ -169,7 +175,7 @@ export function createPresentationController(h) {
   function sync() {
     const a = active;
     const current = a ? read(a.key) : undo ? read(undo.key) : null;
-    if (undo && !sameLayout(undo.snapshot, a?.key === undo.key || !a ? current : read(undo.key))) undo = null;
+    if (undo && !undoStillValid(undo, a?.key === undo.key || !a ? current : read(undo.key))) undo = null;
     if (a && !same(a.snapshot, current)) { close({ reason: 'Board 상태가 바뀌어 미리보기를 닫았습니다.' }); return false; }
     return !!a;
   }
@@ -310,8 +316,15 @@ export function createPresentationController(h) {
       if (now() >= job.expires) { expire(a, job); return; }
       clearTimeout(job.timer); a.job = null;
       if (a.snapshot.decision.mode === 'on' && data?.status === 'preview' && job.options.includes(data.preview) && choices(a)[data.preview]) {
-        a.modelChoice = { previous:a.modelChoice?.previous ?? a.choice, expires:job.expires };
-        a.choice = data.preview; a.message = '제안한 구성을 미리 보는 중입니다. 아직 적용하지 않았습니다.';
+        if (data.preview === 'keep' && a.choice !== 'keep') {
+          // "Change nothing" is not a preview. The user's own pick and their pending choice stay as they were.
+          a.message = '제안은 현재 배치 유지입니다. 직접 고른 미리보기는 그대로 두었고, 아무것도 옮기지 않았습니다.';
+        } else {
+          const repeats = data.preview === a.choice;
+          a.modelChoice = { previous:a.modelChoice?.previous ?? a.choice, expires:now() + RESULT_TTL_MS };
+          a.choice = data.preview;
+          a.message = repeats ? '제안이 이미 고른 구성과 같습니다. 아직 적용하지 않았습니다.' : '제안한 구성을 미리 보는 중입니다. 아직 적용하지 않았습니다.';
+        }
       } else if (a.snapshot.decision.mode === 'advisory' && data?.status === 'advisory-only' && job.options.includes(data.suggestion)) {
         a.suggestion = data.suggestion; a.message = '참고 제안입니다. 미리보기는 바꾸지 않았습니다.';
       } else a.message = '사용할 제안이 없습니다. 수동으로 구성을 고르세요.';
@@ -351,16 +364,20 @@ export function createPresentationController(h) {
     const { camera, targets } = plan, key = a.key;
     // Dismiss first: camera/geometry host notifications cannot invalidate a committing panel.
     close({ restoreFocus: true });
-    if (!same(a.snapshot, read(key)) || h.commit(key, { camera, targets }) !== true) return false;
+    if (!same(a.snapshot, read(key)) || h.commit(key, { camera, targets }) !== true) {
+      h.notice?.('화면이 바뀌어 적용하지 않았습니다. 아무것도 옮기지 않았습니다.');
+      return false;
+    }
     const after = read(key);
     undo = after ? { key, snapshot: after, before } : null;
+    if (undo) h.notice?.('내 화면에 적용했습니다. 다시 열고 ‘마지막 적용 되돌리기’를 누르면 원래대로 돌아갑니다.');
     return true;
   }
   function undoOnce() {
     if (!sync() || !undo || active.key !== undo.key || active.job) return false;
     const record = undo;
     close({ restoreFocus: true, forgetUndo: true });
-    return sameLayout(record.snapshot, read(record.key)) && h.commit(record.key, record.before) === true;
+    return undoStillValid(record, read(record.key)) && h.commit(record.key, record.before) === true;
   }
   return { open, close, sync, view, select, focus, choose, prepare, confirm, cancelDecision, apply, undo: undoOnce };
 }
