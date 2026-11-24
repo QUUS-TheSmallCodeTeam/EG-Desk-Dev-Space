@@ -12,7 +12,7 @@ import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
 import { createMeasureTransport } from './egdesk-all-on-live-measure.mjs'
 import { allOnWorld, DM } from './egdesk-all-on.support.mjs'
 import { DRAFT_CHECK_COPY } from '../helper/egdesk-draft-check.mjs'
-import { ANSWER, ANSWER_INFO, ASK, CHECK_NAMES, DEFAULT_CAPS, PLAN_FILE, PLAN_FILE_V1, PLAN_FILE_V2, SCRIPT_FILE, STEPS, STEPS_V1, loadScenarioPlan, main, runScenario, scenarioWorld, scriptedScenario } from './egdesk-multiuser-live-measure.mjs'
+import { ANSWER, ANSWER_INFO, ASK, CHECK_NAMES, DEFAULT_CAPS, PLAN_FILE, PLAN_FILE_V1, PLAN_FILE_V2, PLAN_FILE_V3, SCRIPT_FILE, STEPS, STEPS_V1, loadScenarioPlan, main, runScenario, scenarioWorld, scriptedScenario } from './egdesk-multiuser-live-measure.mjs'
 
 const KEY = 'sk-synthetic-not-a-key-l1c14-000000000001'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -220,11 +220,37 @@ test('the v2 send, reproduced (c21 conditions; since L3 c19 the draft check appe
   const owner = calls.filter(text => JSON.parse(text).questions.some(q => q.name === 'owner_action'))
   assert.equal(owner.length, 2); for (const text of owner) assert.ok(!text.includes('자료를 알려 주세요') && !text.includes('확인되지 않은 부분'), 'no draft-check copy in the owner question')
   assert.ok(owner[1].includes('따로 확인하실 일은 없습니다'), 'the follow-up\'s own sentence is quoted')
-  assert.deepEqual(follow.checks.filter(c => c.severity === 'hard' && c.pass !== true).map(c => c.id), [], 'F1 and F3 hold: the requester\'s branch, no pointer to A')
+  // F1 and F3 hold: the requester's branch, no pointer to A. v4's F9 (no fixed fallback sentence in the answer A saw) fails HERE by design: this int still
+  // has the draft check's fixed caveat (the owner removed it; L3's change has not merged into this base), and that is exactly what F9 is for
+  assert.deepEqual(follow.checks.filter(c => c.severity === 'hard' && c.pass !== true).map(c => c.id), ['F9'], 'F1 and F3 hold; only F9 names the caveat')
+  assert.deepEqual(follow.checks.find(c => c.id === 'F9').observed.found, [DRAFT_CHECK_COPY.partial])
   assert.equal(follow.checks.find(c => c.id === 'F2').pass, true, 'the owner question says no')
   assert.deepEqual(result.checks.filter(c => c.severity === 'hard' && c.pass !== true).map(c => c.id), [], 'the decision result still points A to it')
   // v2 as registered would fail its F1 here (it asked for the whole posted answer, caveat included): kept as it was, not rewritten
   const v2 = await runScenario({ plan: loadScenarioPlan(PLAN_FILE_V2), send: true, key: KEY, fetchImpl: slowFirst })
   const f1 = v2.steps.find(s => s.id === 'followup').checks.find(c => c.id === 'F1'); t.diagnostic(`v2 F1: ${JSON.stringify(f1)}`)
   assert.equal(f1.pass, V2_F1_AFTER_C19)
+})
+
+// ================= L1 c17: the window's own attention trigger; no runner-side attention call =================
+test('v4: the runner sends no attention scene itself (no attentionRequest, no placement-request route); A\'s window does, from the run\'s run.completed, and only that makes the pointer', async () => {
+  const runner = readFileSync(SCRIPT_FILE, 'utf8')
+  assert.equal((runner.match(/attentionRequest\(/g) || []).length, 0, 'the runner builds no attention scene')
+  assert.equal((runner.match(/work-placement\/request/g) || []).length, 0, 'the runner posts to no placement route')
+  // the product's loop: every admitted chat.event goes to the window's work trigger right after the attention notice; the screen transport mirrors that
+  const surfaceSource = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8')
+  assert.match(surfaceSource, /            state\.noteChatAttention\?\.\(event, run\);\n            state\.noteWorkChatEvent\?\.\(event, run\);/)
+  assert.match(runner, /screen\(w, DM, \{ onEvent: \(event, run\) => hostState\.noteWorkChatEvent\?\.\(event, run\) \}\)/)
+  const outcome = await runScenario({ plan: loadScenarioPlan() })
+  const result = outcome.steps.find(s => s.id === 'result'), follow = outcome.steps.find(s => s.id === 'followup')
+  assert.deepEqual(result.seen.A.windowAttention, [{ surface: 'file', attention: true, owner: 'point', requester: 'point', sent: true }], 'B is working (not idle): pointed to, nothing moves')
+  assert.equal(result.checks.find(c => c.id === 'R3').pass, true); assert.equal(result.checks.find(c => c.id === 'R4').pass, true)
+  assert.equal(follow.seen.A.windowAttention.length, 1); assert.equal(follow.checks.find(c => c.id === 'F3').pass, true)
+  assert.ok(outcome.steps.flatMap(s => s.requests ?? []).every(q => q.sent !== true), 'a dry run sends nothing')
+})
+test('v1-v3 stay as registered (their hashes); v4 is the default and its own hash', () => {
+  const hashes = [PLAN_FILE_V1, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE].map(file => loadScenarioPlan(file).sha256)
+  assert.equal(new Set(hashes).size, 4)
+  assert.equal(loadScenarioPlan().set, 'multiuser-collaboration-v4')
+  for (const file of [PLAN_FILE_V1, PLAN_FILE_V2, PLAN_FILE_V3]) assert.ok(!readFileSync(file, 'utf8').includes('windowAttention'), file)
 })

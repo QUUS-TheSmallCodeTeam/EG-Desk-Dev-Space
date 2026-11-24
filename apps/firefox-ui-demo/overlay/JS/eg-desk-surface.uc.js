@@ -9414,13 +9414,15 @@
     const mode = WorkPlacement.workPlacementMode(readSurfacePref(WorkPlacement.WORK_PLACEMENT_PREF));
     if (mode === 'off') return;
     try {
+      if (!work.requester) { const who = state.runRequesters?.for?.(workRunRef(work)) || null; if (who) work = { ...work, requester: who }; } // L1 c17: found by the local chat too
       const advisory = WorkPlacement.advisoryPlacement(workSceneInputs(kind, placement, work));
       if (!advisory) return;
       const own = workPresence().snapshot().find(row => row.self)?.viewport ?? null;
       const applied = mode === 'on' ? WorkPlacement.onRuleSpot(advisory, placement, own) : null;
       (state.workPlacementLog ||= []).push({ surface: kind, would: advisory.would, landed: advisory.landed, differs: advisory.differs, ...(mode === 'on' ? { applied: !!applied } : {}) });
       if (state.workPlacementLog.length > 50) state.workPlacementLog.shift();
-      if (work.clientThreadId || work.conversationId) void deskStoreRequest('POST', '/decision/work-placement/request', { clientThreadId: work.clientThreadId || null, conversationId: work.conversationId || null, dto: advisory.dto }, { timeoutMs: 4000 }).catch(() => {});
+      const ref = workRunRef(work);
+      if (ref.clientThreadId || ref.conversationId) void deskStoreRequest('POST', '/decision/work-placement/request', { clientThreadId: ref.clientThreadId, conversationId: ref.conversationId, dto: advisory.dto }, { timeoutMs: 4000 }).catch(() => {});
       return applied;
     } catch { return null; /* never breaks opening the surface: today's placement stands */ }
   }
@@ -9432,10 +9434,12 @@
   async function placeWorkSurface(kind, work) {
     if (WorkPlacement.workPlacementMode(readSurfacePref(WorkPlacement.WORK_PLACEMENT_PREF)) !== 'on') return null;
     try {
-      const keys = { clientThreadId: work?.clientThreadId || null, conversationId: work?.conversationId || null };
+      // L1 c17: the person's conversation (the local chat) as well as the engine's native conversation id, so an engine profile or account switch
+      // (a new native conversation for the same chat) keeps the run's requester and heartbeat
+      const ref = workRunRef(work), keys = { clientThreadId: ref.clientThreadId, conversationId: ref.conversationId };
       if (!keys.clientThreadId && !keys.conversationId) return null;
       const landed = resolveCanvasCardPlacement(kind, {}); // where it opens today: the size, and the "landed" words for the record
-      const who = { ...work, requester: work.requester || state.runRequesters?.for?.(work) || null };
+      const who = { ...work, ...keys, requester: work.requester || state.runRequesters?.for?.(ref) || null };
       const read = () => { const inputs = workSceneInputs(kind, landed, who); return WorkPlacement.placementRequest(WorkPlacement.enumerateWorkScene(inputs), { taskId: inputs.taskId, surface: inputs.surface }, { landed }); };
       const first = read();
       if (!first) return null;
@@ -9483,6 +9487,59 @@
     } catch { return null; }
   }
   state.resultCardPlacement = resultCardPlacement;
+  // L1 c17. A run's keys as the person's conversation: the local chat (clientThreadId) and the engine's native conversation id. The local chat is the stable
+  // one: an engine profile, subscription account or folder can change under the same chat (a new native conversation), and a run's requester, heartbeat
+  // and placements follow the person and the conversation, never the engine. A surface that carries only the native id finds its chat in this window's runs.
+  function workRunRef(work) {
+    const text = value => (typeof value === 'string' && value && value.length <= 256 ? value : null);
+    const runId = text(work?.runId), conversationId = text(work?.conversationId);
+    let clientThreadId = text(work?.clientThreadId);
+    if (!clientThreadId && runId && conversationId) {
+      try { const run = state.codex?.chatProtocol?.runs?.[ChatState.runKey(conversationId, runId)]; clientThreadId = text(run?.clientThreadId) || text(run?.localThreadId); } catch { clientThreadId = null; }
+    }
+    return { runId, conversationId, clientThreadId };
+  }
+  // The mark an Agent's run surface carries in this window (pref not "off"): which run opened it. Memory/DOM only; never persisted or sent.
+  function workSurfaceMark(target) {
+    if (WorkPlacement.workPlacementMode(readSurfacePref(WorkPlacement.WORK_PLACEMENT_PREF)) === 'off') return null;
+    const ref = workRunRef(target);
+    return ref.runId ? { workRunId: ref.runId, ...(ref.conversationId ? { workConversationId: ref.conversationId } : {}) } : null;
+  }
+  state.workSurfaceMark = workSurfaceMark;
+  // The attention trigger (pref "advisory" or "on"; the bridge records, and raises a pointer only when its own switch is live). When a run finishes, the
+  // newest surface that run opened (its mark) is described to the bridge as the attention scene, once: the code's outcome for the owner and for the
+  // requester (leave / point; a move is only ever a recorded "would"), in closed words: member aliases (M#), the card's creator and movability, distance
+  // and direction words. No member id, card id, run id or coordinate is in it. When both people already see it there is nothing to tell and nothing is
+  // sent. Nothing moves here and nothing is written to a Board.
+  const workAttentionSent = new Set();
+  function noteWorkChatEvent(event, run) {
+    if (event?.event !== 'run.completed' || !run) return null;
+    if (WorkPlacement.workPlacementMode(readSurfacePref(WorkPlacement.WORK_PLACEMENT_PREF)) === 'off') return null;
+    try {
+      if ((event.details?.status || 'completed') !== 'completed') return null; // failed, blocked: the run's own notices; nothing here
+      const ref = workRunRef({ runId: run.runId, conversationId: run.conversationId, clientThreadId: run.clientThreadId || run.localThreadId });
+      if (!ref.runId || (!ref.clientThreadId && !ref.conversationId) || workAttentionSent.has(ref.runId)) return null;
+      const card = [...document.querySelectorAll('.egd-canvas-card')].filter(node => node.isConnected && node.id && node.dataset?.workRunId === ref.runId).at(-1);
+      if (!card) return null;
+      const kind = cardKindForPersistence(card), rect = persistentEntityGeometry(card);
+      const requester = state.runRequesters?.for?.(ref) || null;
+      const inputs = workSceneInputs(kind, rect, { ...ref, requester });
+      const scene = WorkPlacement.enumerateWorkScene({ presence: inputs.presence, obstacles: inputs.obstacles,
+        cards: inputs.cards.map(c => (c.id === card.id ? { ...c, creator: 'agent', taskId: ref.runId } : c)),
+        tasks: [{ id: ref.runId, state: 'finished', requester, waiting: [requester || 'self'], ownerMustAct: false, surfaces: [{ kind, cardId: card.id }] }] });
+      const attention = WorkPlacement.attentionRequest(scene, { taskId: ref.runId, cardId: card.id });
+      if (!attention) return null;
+      const tell = attention.outcomes.owner.kind !== 'leave' || attention.outcomes.requester.kind !== 'leave';
+      (state.workPlacementLog ||= []).push({ surface: kind, attention: true, owner: attention.outcomes.owner.kind, requester: attention.outcomes.requester.kind, sent: tell });
+      if (state.workPlacementLog.length > 50) state.workPlacementLog.shift();
+      workAttentionSent.add(ref.runId); while (workAttentionSent.size > 64) workAttentionSent.delete(workAttentionSent.values().next().value);
+      if (!tell) return null;
+      const body = { clientThreadId: ref.clientThreadId, conversationId: ref.conversationId, dto: attention.dto };
+      void deskStoreRequest('POST', '/decision/work-placement/request', body, { timeoutMs: 4000 }).catch(() => {});
+      return body;
+    } catch { return null; }
+  }
+  state.noteWorkChatEvent = noteWorkChatEvent;
 
   // Cycle 9 (EGDeskJointPresence.sys.mjs). ONE presence.snapshot() for the placement runtime above and, mirrored to the bridge, for the heartbeat's audience rule.
   // Flag-gated and OFF by default: the first line is the whole default path. Unless the pref egdesk.presence is exactly "on" nothing below it runs, state.presence stays
@@ -16623,6 +16680,7 @@
             if (run && event.event === 'plan.proposed') planProposalFrame(run, event.details);
             if (run) { syncProtocolRun(run); emit(); }
             state.noteChatAttention?.(event, run);
+            state.noteWorkChatEvent?.(event, run); // L1 c17: a finished run's work surface -> the attention scene (pref egdesk.workPlacement; default off: nothing)
             // CTX-04: tool results can change tracked sources; '바뀜' reads again (still at most every 15 s).
             if (run?.localThreadId && InputContext.contextSourceRefreshSignal(event.event)) refreshContextSources(run.localThreadId, { signal: true });
             // Cycle 8 (state hooks, like noteChatAttention): an older result card of the same output key is marked superseded; the briefing observer is off unless egdesk.briefingFlow is "advisory".

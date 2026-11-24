@@ -352,7 +352,7 @@ function consumer({ pref } = {}) {
   const deps = { WorkPlacement: WP, state, readSurfacePref: key => { log.prefs.push(key); return pref }, document: { querySelectorAll: sel => { log.queries++; return sel === '.egd-canvas-card' ? nodes : [] } },
     window: { addEventListener: () => { log.listeners++ } }, persistentEntityGeometry: n => ({ ...n._rect, zIndex: 1 }), cardKindForPersistence: () => 'file', safeViewportWorldRect: () => ({ left: 0, top: 0, right: 1200, bottom: 800 }),
     deskStoreRequest: async (method, path, body) => { log.posts.push([method, path, body]); return { status: 200, body: { status: 'queued' } } } }
-  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('workSceneInputs')}\n${decl('noteWorkSurfacePlacement')}\nreturn noteWorkSurfacePlacement;`
+  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('workSceneInputs')}\n${decl('workRunRef')}\n${decl('noteWorkSurfacePlacement')}\nreturn noteWorkSurfacePlacement;`
   return { note: new Function(...Object.keys(deps), body)(...Object.values(deps)), log, state }
 }
 test('consumer, default path: unless the pref is "advisory" or "on" the hook reads the pref and does nothing else; the placement that is returned is never touched', () => {
@@ -476,7 +476,7 @@ function windowRig({ pref, people, cards = [], regions = [] }) {
     window: { addEventListener() {}, setTimeout: () => { calls.timers++; return 1 } }, persistentEntityGeometry: n => ({ ...n._rect, zIndex: 1 }), cardKindForPersistence: () => 'file',
     safeViewportWorldRect: () => ({ left: view.x, top: view.y, right: view.x + view.width, bottom: view.y + view.height }), viewportToCanvasPoint: (x, y) => ({ x, y }),
     safeViewportRect: () => ({ left: 0, top: 0, right: view.width, bottom: view.height }), deskStoreRequest: async (m, p, body) => { calls.posts.push(body); return { status: 200, body: {} } } }
-  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('workSceneInputs')}\n${decl('noteWorkSurfacePlacement')}\nstate.noteWorkSurfacePlacement = noteWorkSurfacePlacement;\n${decl('resolveCanvasCardPlacement')}\n${decl('revealPlacedCanvasCard')}\nreturn { resolveCanvasCardPlacement, revealPlacedCanvasCard };`
+  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('workSceneInputs')}\n${decl('workRunRef')}\n${decl('noteWorkSurfacePlacement')}\nstate.noteWorkSurfacePlacement = noteWorkSurfacePlacement;\n${decl('resolveCanvasCardPlacement')}\n${decl('revealPlacedCanvasCard')}\nreturn { resolveCanvasCardPlacement, revealPlacedCanvasCard };`
   return { ...new Function(...Object.keys(deps), body)(...Object.values(deps)), calls, state }
 }
 const OWNER = { member: 'self', self: true, active: true, viewport: r(0, 0, 1200, 800), focusCard: 'own-doc', lastInputAgeMs: 400 }
@@ -511,7 +511,7 @@ test('window on: never inside another active person\'s view; an unknown requeste
     for (const region of regions) assert.ok(!hits(spot, { x: region.x - 24, y: region.y - 24, width: region.width + 48, height: region.height + 48 }), 'never in or against a Board region: a private placement does not join a shared Board')
   }
   // nothing in the hook or the placement runtime can write a Board or move a card
-  const hook = decl('noteWorkSurfacePlacement') + decl('workSceneInputs') + decl('placeWorkSurface') // L1 c15: the shared scene reader and the bounded wait too
+  const hook = decl('noteWorkSurfacePlacement') + decl('workSceneInputs') + decl('placeWorkSurface') + decl('workRunRef') // L1 c15: the shared scene reader and the bounded wait too
   for (const forbidden of ['jointDesk', 'saveBoard', 'boardLedger', 'persistBoard', 'setCanvasPanTarget', 'setCanvasViewportTarget', 'setActiveEntity', '.focus(', 'style.left', 'style.top']) assert.ok(!hook.includes(forbidden), forbidden)
   // the runtime cannot answer: today's placement stands, the surface still opens
   const broken = windowRig({ pref: 'on', people: [OWNER] }); broken.state.presence = { snapshot: () => { throw new Error('presence down') } }
@@ -545,7 +545,7 @@ test('isolation (L1 c13, measured v2: one answer for every card of a request): o
 function waitRig({ pref = 'on', people = [OWNER], cards = [], regions = [], bridge = {}, extraDeps = {}, extraBody = '' } = {}) {
   const calls = { posts: [], polls: 0, camera: 0 }, clock = { now: 0 }
   const node = (id, rect, extra = {}) => ({ id, isConnected: true, dataset: {}, _rect: rect, ...extra })
-  const cardNodes = cards.map(c => node(c.id, c.rect, c.record ? { _resultRecord: c.record } : {})), regionNodes = regions.map((rect, i) => node(`region-${i}`, rect))
+  const cardNodes = cards.map(c => node(c.id, c.rect, { ...(c.record ? { _resultRecord: c.record } : {}), ...(c.dataset ? { dataset: { ...c.dataset } } : {}) })), regionNodes = regions.map((rect, i) => node(`region-${i}`, rect))
   const view = people.find(p => p.self).viewport
   const state = { activeEntityId: 'own-doc', panTarget: { x: 0, y: 0 }, zoomTarget: 1, agenda: {}, surface: {}, presence: { snapshot: () => people.map(p => ({ ...p, viewport: { ...p.viewport } })) },
     setCanvasPanTarget: () => { calls.camera++ }, setCanvasViewportTarget: () => { calls.camera++ } }
@@ -560,7 +560,7 @@ function waitRig({ pref = 'on', people = [OWNER], cards = [], regions = [], brid
     safeViewportWorldRect: () => ({ left: view.x, top: view.y, right: view.x + view.width, bottom: view.y + view.height }), viewportToCanvasPoint: (x, y) => ({ x, y }),
     safeViewportRect: () => ({ left: 0, top: 0, right: view.width, bottom: view.height }), deskStoreRequest,
     workWaitNow: () => clock.now, workWaitSleep: async ms => { clock.now += ms }, ...extraDeps }
-  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('workSceneInputs')}\n${decl('noteWorkSurfacePlacement')}\nstate.noteWorkSurfacePlacement = noteWorkSurfacePlacement;\n${decl('placeWorkSurface')}\n${decl('resolveCanvasCardPlacement')}\n${extraBody}\nreturn { placeWorkSurface, resolveCanvasCardPlacement, ...(typeof extraOut === 'object' ? extraOut : {}) };`
+  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('workSceneInputs')}\n${decl('workRunRef')}\n${decl('noteWorkSurfacePlacement')}\nstate.noteWorkSurfacePlacement = noteWorkSurfacePlacement;\n${decl('placeWorkSurface')}\n${decl('resolveCanvasCardPlacement')}\n${extraBody}\nreturn { placeWorkSurface, resolveCanvasCardPlacement, ...(typeof extraOut === 'object' ? extraOut : {}) };`
   return { ...new Function(...Object.keys(deps), body)(...Object.values(deps)), calls, clock, state }
 }
 const MEMBER_B = { member: 'm-0123456789abcdef', self: false, active: true, viewport: r(2400, 200, 1200, 800), focusCard: null, lastInputAgeMs: 900 }
@@ -667,4 +667,72 @@ test('result card wait: the press, the published-result chip and spawnResultCard
   assert.match(spawn, /const placement = \(!options\.restore && options\.workPlacement\) \|\| resolveCanvasCardPlacement\('result', options\.restore \? \{\} :/)
   assert.match(spawn, /\.\.\.\(placement\.quiet \? \{ activate: false \} : \{\}\)/)
   assert.match(decl('resultCardPlacement'), /WorkPlacement\.workPlacementMode\(readSurfacePref\(WorkPlacement\.WORK_PLACEMENT_PREF\)\) !== 'on'\) return null;/)
+})
+
+// ================= 12. the attention trigger (L1 c17): a finished run's own surface -> the attention scene, sent by the window =================
+const leaves = value => (value && typeof value === 'object' ? Object.values(value).flatMap(leaves) : [value])
+function attentionRig({ pref = 'on', people = [OWNER, MEMBER_B], viewer = r(3700, 200, 720, 520), mark = true, requester = MEMBER_B.member, runs = {} } = {}) {
+  const VIEWER = { id: 'egd-file-card-3', rect: viewer, dataset: mark ? { workRunId: 'run-7', workConversationId: 'thread-9' } : {} }
+  const rig = waitRig({ pref, people, cards: [QUOTE_V1, VIEWER], extraDeps: { ChatState, cardKindForPersistence: n => (n.id.startsWith('egd-file-card') ? 'file' : 'result') },
+    extraBody: `${decl('workSurfaceMark')}\nconst workAttentionSent = new Set();\n${decl('noteWorkChatEvent')}\nconst extraOut = { workRunRef, workSurfaceMark, noteWorkChatEvent };` })
+  rig.state.codex = { chatProtocol: { runs } }
+  rig.state.runRequesters = { for: ref => (requester && (ref.clientThreadId === 'local-dm' || ref.conversationId === 'thread-9') ? requester : null) }
+  return rig
+}
+const DONE = { event: 'run.completed', runId: 'run-7', details: { status: 'completed' } }
+const RUN = { runId: 'run-7', conversationId: 'thread-9', clientThreadId: 'local-dm' }
+test('attention trigger: off by default (no pref, "off"): no mark, nothing sent; only a completed run with a surface it opened, once', () => {
+  for (const pref of [null, 'off']) { const rig = attentionRig({ pref }); assert.equal(rig.workSurfaceMark({ runId: 'run-7', conversationId: 'thread-9' }), null); assert.equal(rig.noteWorkChatEvent(DONE, RUN), null); assert.equal(rig.calls.posts.length, 0, String(pref)) }
+  const rig = attentionRig()
+  assert.deepEqual(rig.workSurfaceMark({ runId: 'run-7', conversationId: 'thread-9', itemId: 'i' }), { workRunId: 'run-7', workConversationId: 'thread-9' })
+  assert.equal(rig.noteWorkChatEvent({ event: 'run.started', runId: 'run-7' }, RUN), null)
+  assert.equal(rig.noteWorkChatEvent({ ...DONE, details: { status: 'failed' } }, RUN), null)
+  assert.equal(rig.noteWorkChatEvent({ ...DONE, details: { status: 'blocked' } }, RUN), null)
+  assert.equal(rig.noteWorkChatEvent(DONE, null), null)
+  assert.equal(rig.calls.posts.length, 0)
+  assert.equal(attentionRig({ mark: false }).noteWorkChatEvent(DONE, RUN), null, 'a card no run opened: nothing')
+  assert.ok(rig.noteWorkChatEvent(DONE, RUN)); assert.equal(rig.noteWorkChatEvent(DONE, RUN), null, 'once per run'); assert.equal(rig.calls.posts.length, 1)
+})
+test('attention trigger: the finished viewer the owner cannot see -> one attention scene, closed words only: aliases, no member id, card id, run id or coordinate', () => {
+  const rig = attentionRig()
+  const body = rig.noteWorkChatEvent(DONE, RUN)
+  assert.deepEqual(rig.calls.posts, [body]); assert.deepEqual([body.clientThreadId, body.conversationId], ['local-dm', 'thread-9'])
+  const dto = body.dto
+  assert.deepEqual(Object.keys(dto), ['kind', 'surface', 'members', 'requester', 'state', 'ownerMustAct', 'card', 'forOwner', 'forRequester'])
+  assert.deepEqual([dto.kind, dto.surface, dto.state, dto.ownerMustAct, dto.card], ['attention', 'file', 'finished', false, { creator: 'agent', movable: true }])
+  assert.equal(dto.forOwner.kind, 'point'); assert.ok(['point', 'leave', 'surface_near_requester'].includes(dto.forRequester.kind))
+  assert.ok(leaves(dto).every(v => typeof v === 'string' || typeof v === 'boolean' || v === null), 'no number leaves: no coordinate, size or age')
+  const text = JSON.stringify(dto)
+  for (const secret of [MEMBER_B.member, OWNER.member, 'egd-file-card-3', 'run-7', 'thread-9', 'res-v1', 'local-dm']) assert.ok(!leaves(dto).includes(secret), secret) // no id as a value
+  for (const secret of [MEMBER_B.member, 'egd-file-card-3', 'run-7', 'thread-9', 'res-v1']) assert.ok(!text.includes(secret), secret)
+  assert.ok(dto.members.every(m => /^M\d$/.test(m.alias)) && /^M\d$/.test(dto.requester))
+  assert.equal(rig.calls.camera, 0, 'nothing moves'); assert.deepEqual(rig.state.workPlacementLog.at(-1), { surface: 'file', attention: true, owner: 'point', requester: dto.forRequester.kind, sent: true })
+})
+test('attention trigger: both people already see it -> nothing to tell, nothing sent (recorded in the window only)', () => {
+  const rig = attentionRig({ people: [{ ...OWNER, viewport: r(0, 0, 4000, 1600) }, { ...MEMBER_B, viewport: r(3500, 0, 1400, 900) }] })
+  assert.equal(rig.noteWorkChatEvent(DONE, RUN), null); assert.equal(rig.calls.posts.length, 0)
+  assert.deepEqual(rig.state.workPlacementLog.at(-1), { surface: 'file', attention: true, owner: 'leave', requester: 'leave', sent: false })
+})
+test('attention trigger -> the bridge route: the posted scene is a valid attention DTO; the heartbeat judges it (owner question on the run\'s own answer) and raises the pointer when live', async () => {
+  const rig = attentionRig()
+  const body = rig.noteWorkChatEvent(DONE, RUN)
+  const br = bridge(judgeClient(), { context: { request: REQUEST, answer: '이 단가 인하를 소유자께서 승인해 주셔야 합니다.' }, live: () => true })
+  const handler = createWorkPlacementHttpHandler({ placement: br.placement, heartbeatFor: key => (key === 'local-dm' ? br.hb : null) })
+  const call = async (path, payload) => {
+    const req = Object.assign(Readable.from([Buffer.from(JSON.stringify(payload))]), { url: path, method: 'POST', headers: { host: '127.0.0.1:39218', origin: 'chrome://browser', 'content-type': 'application/json' } })
+    const res = Object.assign(new EventEmitter(), { setHeader() {}, writeHead(c) { this.status = c }, end(j) { this.body = JSON.parse(j); this.writableEnded = true } })
+    await handler(req, res, new URL(path, 'http://127.0.0.1:39218')); return res.body
+  }
+  assert.ok(normalizePlacementDto(body.dto), 'the bridge accepts it as it is')
+  const queued = await call('/decision/work-placement/request', body); assert.equal(queued.status, 'queued')
+  br.beat(); await br.placement.idle()
+  const decided = await call('/decision/work-placement/result', { clientThreadId: 'local-dm', id: queued.id })
+  assert.deepEqual([decided.status, decided.branch, decided.kind, decided.source], ['decided', 'owner', 'point', 'decision'])
+  assert.equal(br.placement.facts('local-dm').pointerPending, true); assert.equal(br.placement.facts('local-dm').pointerNeeds, 'owner_action')
+})
+test('attention trigger: a run\'s file viewer carries its run mark (spawnFileCard, run files only, never on restore); the event loop hands every chat event to the trigger', () => {
+  const zone = readFileSync(new URL('../overlay/resources/surface/EGDeskSurfaceFileCard.mjs', import.meta.url), 'utf8')
+  assert.match(zone, /    const card = shell\.root;\n    \/\/ L1 c17:[^\n]*\n    if \(runFile && !options\.restore\) \{ try \{ Object\.assign\(card\.dataset, state\.workSurfaceMark\?\.\(runFile\.target\) \|\| \{\}\); \} catch \{ \/\* the mark is optional \*\/ \} \}/)
+  assert.match(surface, /            state\.noteChatAttention\?\.\(event, run\);\n            state\.noteWorkChatEvent\?\.\(event, run\);/)
+  assert.match(decl('noteWorkChatEvent'), /node\.dataset\?\.workRunId === ref\.runId/)
 })

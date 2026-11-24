@@ -40,14 +40,19 @@ import { createPresenceMirrorHttpHandler, createRunRequesterHttpHandler, PRESENC
 import * as JP from '../overlay/resources/EGDeskJointPresence.sys.mjs'
 import * as WP from '../overlay/resources/EGDeskWorkPlacement.sys.mjs'
 import * as SurfaceState from '../overlay/resources/EGDeskSurfaceState.sys.mjs'
-import { allOnWorld, DM, scriptedDecisions } from './egdesk-all-on.support.mjs'
-import { DRAFT_CHECK_COPY } from '../helper/egdesk-draft-check.mjs'
+import { allOnWorld, DM, screen, scriptedDecisions } from './egdesk-all-on.support.mjs'
+import * as DraftCheck from '../helper/egdesk-draft-check.mjs'
+import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
+// the draft check's fixed fallback sentences (the owner removed them; L3): read when the module still has them, else none
+const DRAFT_CHECK_COPY = DraftCheck.DRAFT_CHECK_COPY ?? {}
 import { createMeasureTransport, diffJourneys, formatDiff, replayAnswers, writeJourneyResults } from './egdesk-all-on-live-measure.mjs'
 
 // v1 (cycle 14, sent: 22/25) and v2 (cycle 15, sent: 31/32) are kept as registered; v3 (cycle 16) is the default.
 export const PLAN_FILE_V1 = fileURLToPath(new URL('./egdesk-multiuser-live-measure.plan.json', import.meta.url))
 export const PLAN_FILE_V2 = fileURLToPath(new URL('./egdesk-multiuser-live-measure.plan-v2.json', import.meta.url))
-export const PLAN_FILE = fileURLToPath(new URL('./egdesk-multiuser-live-measure.plan-v3.json', import.meta.url))
+export const PLAN_FILE_V3 = fileURLToPath(new URL('./egdesk-multiuser-live-measure.plan-v3.json', import.meta.url))
+// v4 (cycle 17) is the default: the window's own attention trigger, no runner-side attention calls
+export const PLAN_FILE = fileURLToPath(new URL('./egdesk-multiuser-live-measure.plan-v4.json', import.meta.url))
 export const SCRIPT_FILE = fileURLToPath(import.meta.url)
 export const DEFAULT_CAPS = Object.freeze({ tokenCeiling: 20_000, maxRequests: 20 })
 const LIMITS = Object.freeze({ tokenCeilingMax: 20_000, maxRequestsMax: 20 })
@@ -161,8 +166,11 @@ export const CHECKS = {
   // a work_placement request's questions, and that each card is quoted only in its own question and the run's request is quoted
   // quotesPostedAnswer (v2): the answer quoted is exactly the answer A saw posted in this step (cycle 15: v1's R1 named a phrase of the scripted draft,
   // which the posted, revised answer no longer had). The observed part names what failed.
-  placementBody: ({ step, args }) => { const bodies = step.bodies.filter(b => b.family === 'work_placement'), failed = []
-    if (bodies.length !== 1) failed.push(`requests:${bodies.length}`)
+  placementBody: ({ step, args }) => { const all = step.bodies.filter(b => b.family === 'work_placement'), failed = []
+    // v4 (select): the step has args.requests work_placement requests (a placement and an attention); the one asking exactly args.questions is checked
+    const names = b => JSON.stringify(JSON.parse(b.text).questions.map(q => q.name))
+    const bodies = args.select ? (all.length === (args.requests ?? 1) ? all.filter(b => names(b) === JSON.stringify(args.questions)) : []) : all
+    if (bodies.length !== 1) failed.push(args.select ? `requests:${all.length}/selected:${bodies.length}` : `requests:${bodies.length}`)
     else {
       const w = JSON.parse(bodies[0].text), names = w.questions.map(q => q.name), shared = w.input.map(m => m.content).join('\n')
       if (JSON.stringify(names) !== JSON.stringify(args.questions)) failed.push('questions')
@@ -179,7 +187,14 @@ export const CHECKS = {
       }
       ;(args.cards ?? []).forEach((label, i) => { if (!(w.questions[i]?.instructions.includes(label) && args.cards.every((other, j) => j === i || !w.questions[i].instructions.includes(other)) && !shared.includes(label))) failed.push(`card:${i + 1}`) })
     }
-    return { pass: failed.length === 0, observed: { requests: bodies.length, questions: bodies.map(b => JSON.parse(b.text).questions.map(q => q.name)), failed } } },
+    return { pass: failed.length === 0, observed: { requests: all.length, questions: all.map(b => JSON.parse(b.text).questions.map(q => q.name)), failed } } },
+  // v4: A's window sent the attention scene itself (its trigger on the run's run.completed): one entry, sent as expected, with the code's outcome words
+  windowAttention: ({ step, args }) => { const rows = step.seen.A.windowAttention ?? []
+    return { pass: rows.length === 1 && rows[0].sent === args.sent && (args.owner === undefined || rows[0].owner === args.owner), observed: { rows } } },
+  // v4: the answer A saw carries none of the registered fallback sentences (the owner removed them; the model says itself what it could not confirm)
+  noCaveat: ({ step, args }) => { const agent = step.seen.newMessages.filter(m => m.by === 'agent').map(m => m.text), oneLine = t => String(t).replace(/\s+/g, ' ').trim()
+    const found = (args.caveats ?? []).filter(c => agent.some(text => oneLine(text).includes(oneLine(c))))
+    return { pass: agent.length === 1 && found.length === 0, observed: { found } } },
   // a request of this family answered within the product's budget for it (the turn's Decision context: 800 ms)
   answeredWithin: ({ step, args }) => { const rows = step.requests.filter(q => q.family === args.family)
     return { pass: rows.length > 0 && rows.every(q => q.status === 200 && Number.isFinite(q.elapsedMs) && q.elapsedMs <= args.maxMs), observed: { elapsedMs: rows.map(q => q.elapsedMs), budgetMs: args.maxMs } } },
@@ -187,7 +202,7 @@ export const CHECKS = {
   answerAsWritten: ({ step, args }) => { const agent = step.seen.newMessages.filter(m => m.by === 'agent').map(m => m.text)
     return { pass: agent.length === 1 && agent[0] === { decision: ANSWER, info: ANSWER_INFO }[args.said], observed: { agent } } },
   // a predicate answer of this step's work_placement request
-  answer: ({ step, args }) => { const row = step.requests.find(q => q.family === 'work_placement'); const a = (row?.answers ?? []).find(x => x.name === args.name)
+  answer: ({ step, args }) => { const row = step.requests.find(q => q.family === 'work_placement' && (!args.select || (q.answers ?? []).some(x => x.name === args.name))); const a = (row?.answers ?? []).find(x => x.name === args.name)
     const p = a?.type === 'predicate' ? a.probability : null
     return { pass: p !== null && (args.min === undefined || p >= args.min) && (args.max === undefined || p <= args.max), observed: { probability: p } } },
   // messages a person sees in A's own conversation after the step (by: person | agent | system_flow)
@@ -244,7 +259,11 @@ export function scenarioWorld(t, { transport = null } = {}) {
     nodes: A_CARDS.map(c => ({ id: c.id, isConnected: true, dataset: {}, _rect: { ...c.rect }, _kind: c.kind, ...(c.record ? { _resultRecord: c.record } : {}) })), regions: [{ id: 'region-1', _rect: { ...BOARD_REGION } }] }
   const hostState = { get activeEntityId() { return canvas.active }, panTarget: canvas.pan, get zoomTarget() { return canvas.zoom }, agenda: {}, surface: {}, presence: A.presence,
     setCanvasPanTarget: () => { canvas.cameraCalls++ }, setCanvasViewportTarget: () => { canvas.cameraCalls++ } }
-  const deps = { WorkPlacement: WP, SurfaceState, state: hostState, readSurfacePref: key => (key === WP.WORK_PLACEMENT_PREF ? 'on' : undefined),
+  // A's chat screen: the bridge's chat.event stream through the product's reducer path, and what the product's loop calls next for each event
+  // (state.noteWorkChatEvent: the attention trigger). This is the transport; the runner builds no scene and posts nothing itself.
+  const ui = screen(w, DM, { onEvent: (event, run) => hostState.noteWorkChatEvent?.(event, run) })
+  hostState.codex = { chatProtocol: ui.protocol }
+  const deps = { WorkPlacement: WP, SurfaceState, ChatState, state: hostState, readSurfacePref: key => (key === WP.WORK_PLACEMENT_PREF ? 'on' : undefined),
     document: { querySelectorAll: sel => (sel === '.egd-canvas-card' ? canvas.nodes : sel.includes('.egd-board-region') ? (sel.includes('.egd-canvas-card') ? [...canvas.nodes, ...canvas.regions] : canvas.regions) : []) },
     window: { addEventListener() {}, setTimeout: () => { canvas.revealTimers++; return 1 } }, persistentEntityGeometry: n => ({ ...n._rect, zIndex: 1 }), cardKindForPersistence: n => n._kind ?? 'file',
     // placeWorkSurface's bounded wait: the product waits on wall time, which includes the provider's latency. The bridge world holds its virtual clock
@@ -253,13 +272,15 @@ export function scenarioWorld(t, { transport = null } = {}) {
     safeViewportWorldRect: () => ({ left: A.view.x, top: A.view.y, right: A.view.x + A.view.width, bottom: A.view.y + A.view.height }), viewportToCanvasPoint: (x, y) => ({ x, y }),
     safeViewportRect: () => ({ left: 0, top: 0, right: A.view.width, bottom: A.view.height }),
     deskStoreRequest: async (method, p, body) => (p.startsWith('/decision/work-placement/') ? w.http(method, p, body) : { status: 404, body: null }) }
-  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('workSceneInputs')}\n${decl('noteWorkSurfacePlacement')}\nstate.noteWorkSurfacePlacement = noteWorkSurfacePlacement;\n${decl('placeWorkSurface')}\n${decl('resolveCanvasCardPlacement')}\n${decl('revealPlacedCanvasCard')}\nreturn { resolveCanvasCardPlacement, revealPlacedCanvasCard, placeWorkSurface };`
+  const body = `let workInputAt = null, workInputWatch = false;\n${decl('workPresence')}\n${decl('workSceneInputs')}\n${decl('workRunRef')}\n${decl('noteWorkSurfacePlacement')}\nstate.noteWorkSurfacePlacement = noteWorkSurfacePlacement;\n${decl('placeWorkSurface')}\n${decl('resolveCanvasCardPlacement')}\n${decl('revealPlacedCanvasCard')}\n${decl('workSurfaceMark')}\nstate.workSurfaceMark = workSurfaceMark;\nconst workAttentionSent = new Set();\n${decl('noteWorkChatEvent')}\nstate.noteWorkChatEvent = noteWorkChatEvent;\nreturn { resolveCanvasCardPlacement, revealPlacedCanvasCard, placeWorkSurface, workSurfaceMark };`
   const surface = new Function(...Object.keys(deps), body)(...Object.values(deps))
   // installDeskPresence's wrapper: the placement hook receives the run's requester; the bridge is told through its own route.
   const runRequesters = JP.createRunRequesters({ snapshot: () => A.presence.snapshot(), seated: (b, member) => A.joint.seated(b, member), now: () => w.clock(),
     post: payload => route(requesterHttp, RUN_REQUESTER.path, payload) })
   hostState.noteWorkSurfacePlacement = runRequesters.wrap(hostState.noteWorkSurfacePlacement); hostState.runRequesters = runRequesters
-  const s = { w, store, board, ledgerFile, hub, A, B, canvas, surface, runRequesters, mirrorHttp, requesterHttp, keys, act }
+  const s = { w, ui, hostState, store, board, ledgerFile, hub, A, B, canvas, surface, runRequesters, mirrorHttp, requesterHttp, keys, act }
+  // A types in the room: the composer's request registration, as the screen does before the request leaves
+  s.say = async text => { const n = w.state.sends + 1, out = await w.send(text); if (!out.inRun) ui.sent(text, `req-${n}`, out); return out }
   // one presence round: both Desks publish and read (3 s apart on the scenario's clock), and A's Desk mirrors its snapshot to the bridge
   s.round = async (people = [A, B]) => { await w.advance(JP.PRESENCE.publishMs); for (const p of people) { p.touch(); await p.joint.tick() } await route(mirrorHttp, PRESENCE_MIRROR.path, { rows: A.presence.snapshot() }) }
   return s
@@ -271,14 +292,14 @@ const ledgerState = s => { const v = s.store.view('a'); const boardView = (v.boa
 const listed = w => { try { return w.store.listMessages(DM).messages } catch (error) { if (error?.code === 'CONVERSATION_NOT_FOUND') return []; throw error } } // before A's first message there is no conversation
 const messagesOf = w => listed(w).map(m => ({ id: m.id ?? m.localMessageId ?? null, role: m.role, by: m.role === 'user' ? 'person' : String(m.id ?? m.localMessageId ?? '').startsWith('egdesk-flow:') ? 'system_flow' : 'agent', text: m.text }))
 function snapshotBefore(s) { return { ledger: ledgerState(s), messages: messagesOf(s.w).length, decisions: s.w.decisions.length, cards: s.canvas.nodes.map(n => [n.id, { ...n._rect }]), active: s.canvas.active,
-  cameraCalls: s.canvas.cameraCalls, revealTimers: s.canvas.revealTimers, records: s.w.workPlacement.records().length, bCards: s.B.cards.length } }
+  cameraCalls: s.canvas.cameraCalls, revealTimers: s.canvas.revealTimers, windowLog: (s.hostState.workPlacementLog ?? []).length, records: s.w.workPlacement.records().length, bCards: s.B.cards.length } }
 function seenAfter(s, before, extra) {
   const ledger = ledgerState(s), msgs = messagesOf(s.w).slice(before.messages)
   const moved = before.cards.filter(([id, rect]) => { const n = s.canvas.nodes.find(x => x.id === id); return !n || n._rect.x !== rect.x || n._rect.y !== rect.y || n._rect.width !== rect.width || n._rect.height !== rect.height }).map(([id]) => id)
   const rows = p => p.presence.snapshot().map(row => ({ self: row.self, active: row.active, viewport: row.viewport ? 'region' : null }))
   return { newMessages: msgs.map(m => ({ room: DM, role: m.role, by: m.by, text: m.text })),
     A: { presence: rows(s.A), cameraCalls: s.canvas.cameraCalls - before.cameraCalls, revealTimers: s.canvas.revealTimers - before.revealTimers, focusChanged: s.canvas.active !== before.active, cardsMoved: moved,
-      ...(extra.surface ? { surface: extra.surface } : {}) },
+      ...(extra.surface ? { surface: extra.surface } : {}), windowAttention: (s.hostState.workPlacementLog ?? []).slice(before.windowLog).filter(e => e.attention).map(e => ({ ...e })) },
     B: { presence: rows(s.B), cardsAdded: s.B.cards.length - before.bCards, conversationMessages: 0 },
     ledger: { fileUnchanged: ledger.fileSha === before.ledger.fileSha, cardsUnchanged: ledger.cards === before.ledger.cards, membersUnchanged: ledger.members === before.ledger.members },
     identity: extra.identity ?? null, placementRecords: s.w.workPlacement.records().slice(before.records) }
@@ -292,6 +313,17 @@ async function identityNow(s, ctx) {
   let bridgeRefusesNew = null
   if (ctx.left) bridgeRefusesNew = (await route(s.requesterHttp, RUN_REQUESTER.path, { clientThreadId: 'dm-next', conversationId: null, requester: { board: s.board, alias: ctx.alias } })).body?.status === 'unknown-member'
   return { resolved: !!who && who.alias === alias, bridgeAudience: audience?.requester === ctx.alias ? 'member' : audience ? 'other' : null, windowFor: windowFor === ctx.alias ? 'member' : windowFor, bridgeRefusesNew, requestId: ctx.review?.requestId ?? null }
+}
+// The run's file viewer, as EGDeskSurfaceFileCard opens one (openVerifiedRunFile, then spawnFileCard): the bounded wait first, then the usual path if it
+// gave nothing; the card carries the run's mark as spawnFileCard sets it (state.workSurfaceMark of the run file's target; the attention trigger finds it by that).
+async function openViewer(s, ref, id) {
+  const work = { kind: 'file', runId: ref.runId, conversationId: ref.conversationId }
+  const waited = await s.surface.placeWorkSurface('file', work)
+  const placed = waited || s.surface.resolveCanvasCardPlacement('file', { workSurface: work })
+  s.surface.revealPlacedCanvasCard({ isConnected: true }, placed)
+  const node = { id, isConnected: true, dataset: { ...(s.surface.workSurfaceMark({ runId: ref.runId, conversationId: ref.conversationId, itemId: 'item-1' }) || {}) }, _rect: { x: placed.x, y: placed.y, width: placed.width, height: placed.height }, _kind: 'file', _resultRecord: null }
+  s.canvas.nodes.push(node) // opened (not activated): the shell is told activate: false for a quiet placement
+  return { placed, waited, node }
 }
 const RUNNERS = {
   async join(s) {
@@ -307,20 +339,15 @@ const RUNNERS = {
     ctx.alias = s.B.joint.aliasOn(s.board)
     const who = s.A.requests.of(ctx.review)
     // A's Agent starts working on it in A's own conversation (no product screen does this yet: the requester hook is called here, see report)
-    const out = await s.w.send(ASK)
+    const out = await s.say(ASK)
     ctx.ref = { runId: out.runId, clientThreadId: DM, conversationId: out.conversationId }
     if (who) s.runRequesters.set(ctx.ref, who)
-    await s.w.idle()
+    await s.w.idle(); s.ui.pump()
     return { identity: await identityNow(s, ctx) }
   },
   async surface(s, ctx) {
-    // the run's file viewer, as EGDeskSurfaceFileCard opens one (openVerifiedRunFile, then spawnFileCard): the bounded wait first, then the usual path if it gave nothing
-    const work = { kind: 'file', runId: ctx.ref.runId, conversationId: ctx.ref.conversationId }
-    const waited = await s.surface.placeWorkSurface('file', work)
-    const placed = waited || s.surface.resolveCanvasCardPlacement('file', { workSurface: work })
-    s.surface.revealPlacedCanvasCard({ isConnected: true }, placed)
-    ctx.viewer = { id: 'agent-viewer', isConnected: true, dataset: {}, _rect: { x: placed.x, y: placed.y, width: placed.width, height: placed.height }, _kind: 'file', _resultRecord: null }
-    s.canvas.nodes.push(ctx.viewer) // opened (not activated): the shell is told activate: false for a quiet placement
+    const { placed, waited, node } = await openViewer(s, ctx.ref, 'agent-viewer')
+    ctx.viewer = node
     await s.w.settle(); await s.w.advance(1000); await s.w.idle()
     const rec = s.w.workPlacement.records().at(-1)
     const rect = ctx.viewer._rect, opened = { ...rect }
@@ -333,26 +360,23 @@ const RUNNERS = {
   async result(s, ctx) {
     s.w.state.wording.revise = ANSWER // the scripted subjective model revises its own draft (lane L2's default revision is one fixed sentence about another matter)
     await s.w.answer(ANSWER)
-    // the attention scene the window would send for the finished task (no product trigger sends it yet: see report)
-    const scene = WP.enumerateWorkScene({ presence: s.A.presence.snapshot(), cards: s.canvas.nodes.map(n => ({ id: n.id, rect: { ...n._rect }, kind: n._kind === 'file' ? 'file' : n._kind, creator: n.id === 'agent-viewer' ? 'agent' : 'user', taskId: n.id === 'agent-viewer' ? ctx.ref.runId : null })),
-      tasks: [{ id: ctx.ref.runId, state: 'finished', requester: ctx.alias, waiting: [ctx.alias], ownerMustAct: false, surfaces: [{ kind: 'file', cardId: 'agent-viewer' }] }] })
-    const att = WP.attentionRequest(scene, { taskId: ctx.ref.runId, cardId: 'agent-viewer' })
-    ctx.attention = att ? (await s.w.http('POST', '/decision/work-placement/request', { clientThreadId: DM, conversationId: ctx.ref.conversationId, dto: att.dto })).body : null
+    // L1 c17: the run finishes on the bridge; its run.completed reaches A's window, whose own trigger sends the attention scene (nothing here sends it)
+    await s.w.idle(); s.ui.pump()
     await s.round(); await s.w.advance(10_000); await s.round(); await s.w.advance(10_000); await s.w.idle()
     return { identity: await identityNow(s, ctx) }
   },
   async followup(s, ctx) {
-    const out = await s.w.send(ASK2)
+    const out = await s.say(ASK2)
     ctx.ref2 = { runId: out.runId, clientThreadId: DM, conversationId: out.conversationId }
     const who = s.A.requests.of(ctx.review)
     if (who) s.runRequesters.set(ctx.ref2, who)
-    await s.w.idle()
+    await s.w.idle(); s.ui.pump()
+    // this run opens its own viewer (the delivery schedule), as the first run did; the attention scene for it then comes from A's window when it finishes.
+    // (Before c17 the runner sent a scene for the first run's viewer as if it were this run's; the window's trigger only describes a run's own surface.)
+    await openViewer(s, ctx.ref2, 'agent-viewer-2'); await s.w.settle(); await s.w.advance(1000); await s.w.idle()
     s.w.state.wording.revise = ANSWER_INFO
     await s.w.answer(ANSWER_INFO)
-    const scene = WP.enumerateWorkScene({ presence: s.A.presence.snapshot(), cards: s.canvas.nodes.map(n => ({ id: n.id, rect: { ...n._rect }, kind: n._kind === 'file' ? 'file' : n._kind, creator: n.id === 'agent-viewer' ? 'agent' : 'user', taskId: n.id === 'agent-viewer' ? ctx.ref2.runId : null })),
-      tasks: [{ id: ctx.ref2.runId, state: 'finished', requester: ctx.alias, waiting: [ctx.alias], ownerMustAct: false, surfaces: [{ kind: 'file', cardId: 'agent-viewer' }] }] })
-    const att = WP.attentionRequest(scene, { taskId: ctx.ref2.runId, cardId: 'agent-viewer' })
-    if (att) await s.w.http('POST', '/decision/work-placement/request', { clientThreadId: DM, conversationId: ctx.ref2.conversationId, dto: att.dto })
+    await s.w.idle(); s.ui.pump()
     await s.round(); await s.w.advance(10_000); await s.round(); await s.w.advance(10_000); await s.w.idle()
     return { identity: await identityNow(s, { ...ctx, ref: ctx.ref2 }) }
   },

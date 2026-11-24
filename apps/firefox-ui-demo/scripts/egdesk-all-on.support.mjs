@@ -468,7 +468,8 @@ function section(from, to) {
  * (canAdmitChatEvent -> reduceChatEvent -> syncProtocolRun), or filled from the local store through the real history routes (restore()).
  * bubbles() lists what the render loop draws (it skips only an empty streaming assistant row).
  */
-export function screen(w, thread = DM) {
+// onEvent(event, run) (L1 c17): what the product's loop calls next for every admitted chat event (state.noteWorkChatEvent), e.g. a window's work functions
+export function screen(w, thread = DM, { onEvent = null } = {}) {
   const protocol = ChatState.createChatProtocolState()
   const room = { id: thread, type: 'dm', title: '방', engineId: 'codex', profileEnabled: true, agentProfileId: AGENT, messages: [], unreadCount: 0, conversationId: null, bindingState: 'fresh', bindingAccountKey: null }
   const state = { codex: { threads: [room], activeThreadId: thread, hudView: 'conversation', authStatus: { isLoggedIn: true, authMode: 'chatgpt', accountId: 'verified-account' }, connected: true, threadDrafts: {}, threadDraftRevisions: {},
@@ -503,6 +504,7 @@ export function screen(w, thread = DM) {
         if (!ChatState.canAdmitChatEvent(protocol, state.codex.threads, event)) continue
         const run = ChatState.reduceChatEvent(protocol, event, ['codex'])
         if (run) mounted.syncProtocolRun(run)
+        if (typeof onEvent === 'function') onEvent(event, run)
         api.frames.push({ event: event.event, step: event.step, bubbles: api.bubbles(), working: api.working()?.state ?? null, busy: api.busy() })
       }
     },

@@ -337,6 +337,8 @@ export function createFileCardZone(deps) {
       activate: !options.restore && !options.deferPresentation && !placement.quiet, sourceRef: { kind: 'file-surface', id: `file-view-${chatBindingNonce()}`, scope: 'local-files' },
       style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
     const card = shell.root;
+    // L1 c17: a run's file viewer carries which run opened it (pref egdesk.workPlacement not "off"), for the attention trigger when that run finishes
+    if (runFile && !options.restore) { try { Object.assign(card.dataset, state.workSurfaceMark?.(runFile.target) || {}); } catch { /* the mark is optional */ } }
     if (!options.restore && !options.deferPresentation) revealPlacedCanvasCard(card, placement);
     card.dataset.testid = 'file-card';
     card.setAttribute('aria-label', '파일 작업 창');

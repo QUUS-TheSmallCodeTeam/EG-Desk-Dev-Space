@@ -1,0 +1,558 @@
+{
+  "set": "multiuser-collaboration-v4",
+  "registered": "2026-11-25T03:10:00+09:00 (lane L1 cycle 17, before any send; v1, v2 and v3 kept as registered)",
+  "changes": "v4: no runner-side attention calls: A's window sends the attention scene itself when the run's run.completed reaches it (its trigger, behind egdesk.workPlacement); the runner only delivers the bridge's chat events through the product's reducer path. The follow-up run opens its own viewer (a run's attention is about its own surface), so its step has two work_placement requests (placement, then attention): F1/F2 select the owner question. New hard checks: R9/F8 the window sent the scene; F9 the follow-up answer A saw carries no fixed fallback sentence (removed by the owner, L3). Still a harness stand-in: who asked the owner's run (runRequesters.set; no product screen starts an owner run from a member's request).",
+  "steps": [
+    {
+      "id": "join",
+      "caps": {
+        "maxRequests": 1,
+        "maxEstTokens": 1000
+      },
+      "expect": [
+        {
+          "id": "J1",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "A",
+          "text": "A's Desk lists B as present, with the region B is looking at",
+          "check": "presence",
+          "args": {
+            "person": "A",
+            "others": {
+              "equals": 1
+            },
+            "withView": 1
+          }
+        },
+        {
+          "id": "J2",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "B",
+          "text": "B's Desk lists A as present (A shares 'active' only, so no region)",
+          "check": "presence",
+          "args": {
+            "person": "B",
+            "others": {
+              "equals": 1
+            },
+            "withView": 0
+          }
+        },
+        {
+          "id": "J3",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "system",
+          "text": "presence asks the Decision model nothing",
+          "check": "requests",
+          "args": {
+            "equals": 0
+          }
+        },
+        {
+          "id": "J4",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "ledger",
+          "text": "the shared ledger holds the same cards (presence is memory only)",
+          "check": "ledger",
+          "args": {
+            "fileUnchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "ask",
+      "caps": {
+        "maxRequests": 4,
+        "maxEstTokens": 4000
+      },
+      "expect": [
+        {
+          "id": "K1",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "A",
+          "text": "A's Desk knows the request came from B (the service vouched for B's alias), the bridge's audience names B, and the placement hook will receive B",
+          "check": "requester",
+          "args": {
+            "present": true
+          }
+        },
+        {
+          "id": "K2",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "system",
+          "text": "no member alias, request id, question code or coordinate is in any Decision request of this step",
+          "check": "noIdentityInBodies"
+        },
+        {
+          "id": "K3",
+          "severity": "hard",
+          "owner": "L3",
+          "who": "A",
+          "text": "A's own conversation shows the request A sent for B and no system message",
+          "check": "messages",
+          "args": {
+            "by": "system_flow",
+            "equals": 0
+          }
+        },
+        {
+          "id": "K4",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "ledger",
+          "text": "the shared ledger holds the same cards",
+          "check": "ledger",
+          "args": {
+            "fileUnchanged": true
+          }
+        },
+        {
+          "id": "K5",
+          "severity": "soft",
+          "owner": "L5",
+          "who": "system",
+          "text": "the turn's Decision context answered within its 800 ms budget (v1: 946 ms, and the draft check then had no evidence)",
+          "check": "answeredWithin",
+          "args": {
+            "family": "turn_context",
+            "maxMs": 800
+          }
+        }
+      ]
+    },
+    {
+      "id": "surface",
+      "caps": {
+        "maxRequests": 3,
+        "maxEstTokens": 3000
+      },
+      "expect": [
+        {
+          "id": "P1",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "A",
+          "text": "the Agent's viewer for B's task opened quietly on B's side (rule: B waits and is working), not in A's view, not in B's",
+          "check": "surfaceSpot",
+          "args": {
+            "rule": "requester_working",
+            "nearB": true,
+            "inBView": false
+          }
+        },
+        {
+          "id": "P2",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "A",
+          "text": "A's camera and focus are exactly as before; no reveal was scheduled; none of A's cards moved",
+          "check": "aUndisturbed"
+        },
+        {
+          "id": "P3",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "ledger",
+          "text": "the private placement wrote nothing to the shared ledger (file and cards unchanged)",
+          "check": "ledger",
+          "args": {
+            "fileUnchanged": true
+          }
+        },
+        {
+          "id": "P4",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "system",
+          "text": "one placement request: one same-matter question per card the host may send, each card only inside its own question, the run's request quoted",
+          "check": "placementBody",
+          "args": {
+            "questions": [
+              "same_matter_R1",
+              "same_matter_R2"
+            ],
+            "cards": [
+              "A사 견적서 v1 단가표",
+              "점심 메뉴 투표 결과"
+            ],
+            "quotes": [
+              "A사 견적서 v2를 v1과 비교해서"
+            ]
+          }
+        },
+        {
+          "id": "P5",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "system",
+          "text": "no member alias, request id or coordinate is in the request",
+          "check": "noIdentityInBodies"
+        },
+        {
+          "id": "P6",
+          "severity": "soft",
+          "owner": "L1",
+          "who": "system",
+          "text": "the earlier v1 quote card is the same matter (>= 0.8)",
+          "check": "answer",
+          "args": {
+            "name": "same_matter_R1",
+            "min": 0.8
+          }
+        },
+        {
+          "id": "P7",
+          "severity": "soft",
+          "owner": "L1",
+          "who": "system",
+          "text": "the lunch vote card is not (<= 0.2)",
+          "check": "answer",
+          "args": {
+            "name": "same_matter_R2",
+            "max": 0.2
+          }
+        },
+        {
+          "id": "P8",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "B",
+          "text": "B's own Desk shows no new card: the placement is A's private canvas state",
+          "check": "bDeskUnchanged"
+        },
+        {
+          "id": "P9",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "A",
+          "text": "the viewer never moves after it opened (an answer after the 1.5 s wait is recorded only)",
+          "check": "notMovedAfterOpen"
+        },
+        {
+          "id": "P10",
+          "severity": "soft",
+          "owner": "L1",
+          "who": "A",
+          "text": "the same-matter answer came within the wait, so the viewer opened beside the v1 quote card",
+          "check": "openedBesideRelated"
+        }
+      ]
+    },
+    {
+      "id": "result",
+      "caps": {
+        "maxRequests": 5,
+        "maxEstTokens": 5000
+      },
+      "expect": [
+        {
+          "id": "R0",
+          "severity": "soft",
+          "owner": "L5",
+          "who": "A",
+          "text": "A sees the Agent's answer as the subjective model wrote it (the draft check did not need to revise it)",
+          "check": "answerAsWritten",
+          "args": {
+            "said": "decision"
+          }
+        },
+        {
+          "id": "R1",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "system",
+          "text": "one placement request with the owner question only, quoting the run's own request and the answering model's own sentences of the answer A saw, never the draft check's appended copy",
+          "check": "placementBody",
+          "args": {
+            "questions": [
+              "owner_action"
+            ],
+            "quotes": [
+              "A사 견적서 v2를 v1과 비교해서"
+            ],
+            "quotesOwnAnswer": true
+          }
+        },
+        {
+          "id": "R2",
+          "severity": "soft",
+          "owner": "L1",
+          "who": "system",
+          "text": "the result needs the owner's decision (>= 0.8)",
+          "check": "answer",
+          "args": {
+            "name": "owner_action",
+            "min": 0.8
+          }
+        },
+        {
+          "id": "R3",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "system",
+          "text": "the placement runtime records: the owner's branch, a pointer raised (placement is on)",
+          "check": "placementRecord",
+          "args": {
+            "kind": "attention",
+            "branch": "owner",
+            "pointer": "raised"
+          }
+        },
+        {
+          "id": "R4",
+          "severity": "hard",
+          "owner": "L3",
+          "who": "A",
+          "text": "A sees exactly one pointer message in A's own conversation, after the Agent's answer",
+          "check": "messages",
+          "args": {
+            "by": "system_flow",
+            "equals": 1
+          }
+        },
+        {
+          "id": "R5",
+          "severity": "hard",
+          "owner": "L3",
+          "who": "A",
+          "text": "A sees the Agent's answer once",
+          "check": "messages",
+          "args": {
+            "by": "agent",
+            "equals": 1
+          }
+        },
+        {
+          "id": "R6",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "A",
+          "text": "still nothing moved for A: camera, focus, cards",
+          "check": "aUndisturbed"
+        },
+        {
+          "id": "R7",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "B",
+          "text": "B's own Desk still shows nothing new",
+          "check": "bDeskUnchanged"
+        },
+        {
+          "id": "R8",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "ledger",
+          "text": "the shared ledger holds the same cards",
+          "check": "ledger",
+          "args": {
+            "fileUnchanged": true
+          }
+        },
+        {
+          "id": "R9",
+          "severity": "hard",
+          "check": "windowAttention",
+          "args": {
+            "sent": true,
+            "owner": "point"
+          },
+          "owner": "L1",
+          "who": "A",
+          "text": "A's window itself sent the attention scene for the finished run's viewer (the owner cannot see it: point), once"
+        }
+      ]
+    },
+    {
+      "id": "followup",
+      "caps": {
+        "maxRequests": 5,
+        "maxEstTokens": 6000
+      },
+      "expect": [
+        {
+          "id": "F0",
+          "severity": "soft",
+          "owner": "L5",
+          "who": "A",
+          "text": "A sees the follow-up answer as written",
+          "check": "answerAsWritten",
+          "args": {
+            "said": "info"
+          }
+        },
+        {
+          "id": "F1",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "system",
+          "text": "one placement request with the owner question only, quoting the follow-up request and the answering model's own sentences of the answer A saw, never the draft check's appended copy",
+          "check": "placementBody",
+          "args": {
+            "questions": [
+              "owner_action"
+            ],
+            "quotes": [
+              "납기만 다시 알려 주세요"
+            ],
+            "quotesOwnAnswer": true,
+            "select": true,
+            "requests": 2
+          }
+        },
+        {
+          "id": "F2",
+          "severity": "soft",
+          "owner": "L1",
+          "who": "system",
+          "text": "the follow-up needs nothing from the owner (<= 0.2)",
+          "check": "answer",
+          "args": {
+            "name": "owner_action",
+            "max": 0.2,
+            "select": true
+          }
+        },
+        {
+          "id": "F3",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "system",
+          "text": "the placement runtime records the requester's branch (B is told where it is, through B's own channel)",
+          "check": "placementRecord",
+          "args": {
+            "kind": "attention",
+            "branch": "requester"
+          }
+        },
+        {
+          "id": "F4",
+          "severity": "hard",
+          "owner": "L3",
+          "who": "A",
+          "text": "A sees the follow-up answer and no pointer: nothing was asked of A",
+          "check": "messages",
+          "args": {
+            "by": "system_flow",
+            "equals": 0
+          }
+        },
+        {
+          "id": "F5",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "A",
+          "text": "the follow-up run is B's too (requester identity carried)",
+          "check": "requester",
+          "args": {
+            "present": true
+          }
+        },
+        {
+          "id": "F6",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "A",
+          "text": "still nothing moved for A",
+          "check": "aUndisturbed"
+        },
+        {
+          "id": "F7",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "ledger",
+          "text": "the shared ledger holds the same cards",
+          "check": "ledger",
+          "args": {
+            "fileUnchanged": true
+          }
+        },
+        {
+          "id": "F8",
+          "severity": "hard",
+          "check": "windowAttention",
+          "args": {
+            "sent": true
+          },
+          "owner": "L1",
+          "who": "A",
+          "text": "A's window itself sent the attention scene for the follow-up run's own viewer, once"
+        },
+        {
+          "id": "F9",
+          "severity": "hard",
+          "check": "noCaveat",
+          "args": {
+            "caveats": [
+              "확인되지 않은 부분은 답하지 않았습니다. 필요하면 기준으로 삼을 자료를 알려 주세요.",
+              "확인할 수 있는 근거가 부족해 지금은 답하기 어렵습니다. 어떤 자료를 기준으로 할지 알려 주세요."
+            ]
+          },
+          "owner": "L3",
+          "who": "A",
+          "text": "the follow-up answer A saw carries none of the removed fixed fallback sentences"
+        }
+      ]
+    },
+    {
+      "id": "leave",
+      "caps": {
+        "maxRequests": 1,
+        "maxEstTokens": 1000
+      },
+      "expect": [
+        {
+          "id": "E1",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "A",
+          "text": "B is no longer on A's Desk; the window no longer names B for the run; the bridge refuses a new entry for B",
+          "check": "requester",
+          "args": {
+            "present": false
+          }
+        },
+        {
+          "id": "E2",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "A",
+          "text": "A's Desk lists nobody else",
+          "check": "presence",
+          "args": {
+            "person": "A",
+            "others": {
+              "equals": 0
+            }
+          }
+        },
+        {
+          "id": "E3",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "system",
+          "text": "B's leaving asks the Decision model nothing",
+          "check": "requests",
+          "args": {
+            "equals": 0
+          }
+        },
+        {
+          "id": "E4",
+          "severity": "hard",
+          "owner": "L1",
+          "who": "ledger",
+          "text": "the shared ledger's cards are unchanged (only its membership changed)",
+          "check": "ledger"
+        }
+      ]
+    }
+  ]
+}
