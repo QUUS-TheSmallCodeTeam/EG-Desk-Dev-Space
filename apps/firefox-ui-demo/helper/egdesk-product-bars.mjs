@@ -48,6 +48,8 @@ export const PRODUCT_BARS = Object.freeze([
   [/^l4-briefing-skeleton$/, /^(place|part_P#|next)$/, choice(T.choice, T.margin, 'retired c14 skeleton: choice .75 / margin .2')],
   [/^action-relevance-v\d+$/, /^rel_#$/, single(T.relevant, 'egdesk-context-setup.mjs (via egdesk-decision-questions.mjs relevant): a candidate is attached iff p >= relevant (L7 c20 action wording)')],
   [/^axis-split-v\d+/, /^speechs_/, three(SPEECH_SPLIT_BARS.yes, SPEECH_SPLIT_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_SPLIT_BARS (split-isolated design, L7 c20): yes >= yes, no <= no, between undecided')],
+  // labelling study (no product action): a label is read at the general predicate guide (egdesk-conversation-examples.mjs readLabels, .8 / .2)
+  [/^conversation-labels-\d+$/, /^conv_/, three(TERNARY_YES, TERNARY_NO, 'egdesk-conversation-examples.mjs readLabels: a labelling study, no product action')],
   // legacy (c8-era, 11/22-11/24) families
   [/-11(22|23|24)$/, /^speechp_/, three(SPEECH_PREDICATE_BARS.yes, SPEECH_PREDICATE_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_PREDICATE_BARS')],
   [/-11(22|23|24)$/, /^(tn_|tw_link|tw_about|pg_|op_)/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO')],
