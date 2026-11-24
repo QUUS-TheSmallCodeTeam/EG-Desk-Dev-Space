@@ -6,6 +6,15 @@ import { choiceQuestion, DEFAULT_DECISION_THRESHOLDS, readChoice } from './egdes
 const NAME = 'chat_choice'
 const ABSTAIN = 'abstain'
 const MANUAL = Object.freeze({ status: 'manual' })
+// Why no recommendation was produced. A closed enum: the only thing besides
+// `status` that leaves the bridge, so it can never carry question, option, key or provider text.
+//   abstain / unclear / low_confidence: the model answered but could not pick (ambiguous, near-tie, below the bar).
+//   everything else: a DecisionError code from the Decisions client (or a local timeout).
+export const CHOICE_MANUAL_REASONS = Object.freeze(['abstain', 'unclear', 'low_confidence', 'bad_response', 'no_credit', 'rate_limited',
+  'timeout', 'budget_exceeded', 'invalid_key', 'not_configured', 'unreachable', 'server_error', 'model_unavailable'])
+const REASON_SET = new Set(CHOICE_MANUAL_REASONS)
+const manualWith = reason => typeof reason === 'string' && REASON_SET.has(reason) ? Object.freeze({ status: 'manual', reason }) : MANUAL
+export const chatChoiceManual = manualWith
 const MIN_CONFIDENCE = 0.8
 const MASS_TOLERANCE = 1e-6
 const FORBIDDEN = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u
@@ -63,7 +72,12 @@ function readRecommendation(answers, optionIds) {
     previous = row.probability
     total += previous
   }
-  if (allowed.size || Math.abs(total - 1) > MASS_TOLERANCE || rows[0].probability < MIN_CONFIDENCE) return MANUAL
+  if (allowed.size || Math.abs(total - 1) > MASS_TOLERANCE) return MANUAL
+  // The model answered, but not with a pick. Say which kind of "no pick" it was.
+  if (rows[0].value === ABSTAIN) return manualWith('abstain')
+  // unclear: the top two are (nearly) tied. low_confidence: a clear leader, but below the bar.
+  if (rows[0].probability - rows[1].probability < DEFAULT_DECISION_THRESHOLDS.margin) return manualWith('unclear')
+  if (rows[0].probability < MIN_CONFIDENCE || answer.confidence < MIN_CONFIDENCE) return manualWith('low_confidence')
   const result = readChoice(answers, NAME, { minConfidence: MIN_CONFIDENCE, minMargin: DEFAULT_DECISION_THRESHOLDS.margin })
   const index = optionIds.indexOf(result.value)
   return result.state === 'accepted' && index !== -1 ? { status: 'recommended', index } : MANUAL
@@ -122,10 +136,11 @@ export async function runChatChoice(request) {
         return authorized
       },
     })])
-    if (!authorized || !current()) return MANUAL
+    if (!authorized || !current()) return authorized && performance.now() >= deadline ? manualWith('timeout') : MANUAL
     return readRecommendation(response?.answers, optionIds)
-  } catch {
-    return MANUAL
+  } catch (error) {
+    // Only a DecisionError code is forwarded, never its message.
+    return error?.name === 'DecisionError' ? manualWith(error.code) : MANUAL
   } finally {
     open = false
     clearTimeout(timer)

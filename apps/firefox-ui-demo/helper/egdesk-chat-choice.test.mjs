@@ -4,6 +4,7 @@ import { runChatChoice, validateChatChoice } from './egdesk-chat-choice.mjs'
 import { createDecisionClient, DECISIONS_ENDPOINT, DECISION_MODEL } from './egdesk-decision-client.mjs'
 
 const manual = { status: 'manual' }
+const manualFor = reason => ({ status: 'manual', reason })
 const valid = { question: '어느 옵션이 맞나요?', options: ['첫 번째', '두 번째'] }
 const options = ['c1', 'c2', 'abstain']
 const distribution = (...ps) => ps.map((probability, i) => ({ value: options[i], probability }))
@@ -132,7 +133,11 @@ test('strict typed answer is withheld without fallback or retry', async t => {
     ['duplicate answer', { answers: [answer(), answer()] }],
   ]) await t.test(description, async () => {
     const fx = fixture({ fetchImpl: async () => response(payload) })
-    assert.deepEqual(await fx.run(), manual)
+    // Still never a recommendation. Only a closed reason enum says which kind of "no pick" it was;
+    // structurally unusable answers that the strict client rejects are 'bad_response', the rest stay reasonless.
+    const reasons = { abstention: 'abstain', 'too little rank separation': 'unclear', 'weak confidence': 'low_confidence' }
+    const stays = ['refusal', 'selected does not match top', 'exact top tie', 'partial distribution', 'incorrect mass']
+    assert.deepEqual(await fx.run(), reasons[description] ? manualFor(reasons[description]) : stays.includes(description) ? manual : manualFor('bad_response'))
     assert.equal(fx.calls.length, 1)
     assert.equal(fx.lookups(), 1)
   })
@@ -180,11 +185,11 @@ test('real dispatch checks authority after key lookup, and checks again after fe
 })
 
 test('missing recipient or exhausted budget cannot dispatch; skipping or repeating authorization cannot authorize again', async () => {
-  for (const settings of [
-    { recipientForKey: null }, { recipientForKey: () => 'invalid' }, { budget: { canSpend: () => false } },
+  for (const [settings, expected] of [
+    [{ recipientForKey: null }, manual], [{ recipientForKey: () => 'invalid' }, manual], [{ budget: { canSpend: () => false } }, manualFor('budget_exceeded')],
   ]) {
     const fx = fixture(settings)
-    assert.deepEqual(await fx.run(), manual)
+    assert.deepEqual(await fx.run(), expected)
     assert.equal(fx.lookups(), 1)
     assert.equal(fx.calls.length, 0)
   }
@@ -202,7 +207,7 @@ test('missing recipient or exhausted budget cannot dispatch; skipping or repeati
 test('provider timeout, abort during lookup/fetch, and transport failure never produce a retry', async () => {
   const whenAborted = signal => new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }))
   const slow = fixture({ timeoutMs: 10, fetchImpl: (_, init) => whenAborted(init.signal) })
-  assert.deepEqual(await slow.run(), manual)
+  assert.deepEqual(await slow.run(), manualFor('timeout'))
   assert.equal(slow.calls.length, 1)
 
   const key = deferred()
@@ -223,7 +228,7 @@ test('provider timeout, abort during lookup/fetch, and transport failure never p
   assert.equal(post.calls.length, 1)
 
   const failed = fixture({ fetchImpl: async () => { throw new Error('synthetic failure') } })
-  assert.deepEqual(await failed.run(), manual)
+  assert.deepEqual(await failed.run(), manualFor('unreachable'))
   assert.equal(failed.calls.length, 1)
 })
 
