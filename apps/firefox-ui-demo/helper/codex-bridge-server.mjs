@@ -76,6 +76,7 @@ import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { buildCodexAppServerLaunch, createNativeCapabilityCache, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 import { createSlotReadiness, isProfileSlot } from './egdesk-slot-readiness.mjs'
+import { createProfileReaders } from './egdesk-profile-readers.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
 import { createLocalCapacity } from './egdesk-local-capacity.mjs'
@@ -333,8 +334,12 @@ const claudeReader = {
   },
   disconnect(options) { return claudeReaderClient?.disconnect(options) },
 }
+// L1 c24 (flag EGDESK_ROOM_ACCOUNT=on, default off): a room on an Agent profile reads big sources on THAT profile's app-server as that account (owner decision,
+// U11); off, every Codex read goes through the shared reader as before.
+const profileReaders = createProfileReaders({ enabled: () => process.env.EGDESK_ROOM_ACCOUNT === 'on', isProfileSlot,
+  request: (id, method, params) => codexEngine.request(method, params, id), respond: (id, rpcId, result, error) => codexEngine.respond(rpcId, result, error, id), ownerKey: id => codexEngine.ownerKey(id) })
 contexts = new ContextRuntime({
-  store: contextStore, reader: nativeReader, readers: { claude: claudeReader }, getReadCapacity: getClaudeReadCapacity,
+  store: contextStore, reader: nativeReader, readers: { claude: claudeReader }, profileReaders, getReadCapacity: getClaudeReadCapacity,
   getOwnerKey: () => publicAuthIdentityKey(authState),
   getAuthority: hints => chat.contextAuthority(hints),
   // L1 c22: a run on another Codex engine profile is judged by THAT profile's server and binary (its own probe), not by the shared server being up
@@ -344,14 +349,17 @@ contexts = new ContextRuntime({
       : nativeCapabilities.schemaMatch && appServerReady,
 })
 for (const root of pendingFileRoots.values()) contexts.noteRoot(root)
-const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState) })
+// L1 c24 (flag EGDESK_ROOM_ACCOUNT=on, default off; owner decision U11): a Browser grant is bound to the account of the slot running the room. A room on an
+// Agent profile uses THAT profile's account for binding and for every later check; the default room, and every room with the flag off, the default sign-in.
+const browserOwnerKeyFor = id => (process.env.EGDESK_ROOM_ACCOUNT === 'on' && isProfileSlot(id) ? codexEngine.ownerKey(id) : publicAuthIdentityKey(authState))
+const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState), ownerKeyFor: browserOwnerKeyFor })
 // Browser-only transfer generation; restored settings never revive older work.
 let browserDecisionGeneration = 0
 // L1 c23: readiness of the slot that will run the turn. The shared slot reads the shared binary's probe and the shared server; a profile slot reads ITS
 // OWN binary's probe and ITS OWN server (ready and signed in), so neither server being down affects the other's rooms.
 const slotReadiness = createSlotReadiness({ shared: () => ({ schemaMatch: nativeCapabilities.schemaMatch, qaReadOnly: nativeCapabilities.qaReadOnly, ready: appServerReady }),
   profiles: { capabilities: id => codexProfileServers.capabilities(id) } })
-const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: route => slotReadiness.qaReady(route?.engineProfileId), fixtureQa: fixtureBrowserQaFromEnv(process.env),
+const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), ownerKeyFor: browserOwnerKeyFor, schemaReady: route => slotReadiness.qaReady(route?.engineProfileId), fixtureQa: fixtureBrowserQaFromEnv(process.env),
   // DECISION_MODEL_CONTEXT_SETUP.md §3.3: egdesk_browser_reflex only with a key and mode 'on'.
   decision: { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null,
     recipient: () => recipientForDecisionKey(decisionCredentials.getApiKey(), undefined, decisionClient.model),
@@ -377,8 +385,9 @@ const profileCapabilityCache = createNativeCapabilityCache()
 const codexProfileServers = createCodexProfileAppServers({
   resolveHome: id => engineProfiles.ownedCodexHome(id),
   inspectCapabilities: bin => profileCapabilityCache(bin),
-  onNotification: (id, message) => codexEngine.notify(message, id),
-  onServerRequest: (id, message) => codexEngine.serverRequest(message, id),
+  // L1 c24: a profile's reader (flag) consumes the events of its own read-only child threads; everything else goes on as before
+  onNotification: (id, message) => { if (!profileReaders.handleNotification(id, message)) codexEngine.notify(message, id) },
+  onServerRequest: (id, message) => { if (!profileReaders.handleServerRequest(id, message)) codexEngine.serverRequest(message, id) },
   onConnection: (id, state) => codexEngine.connection(state, id),
   onChange: () => engineStatus.check(),
   // Hooks can run in a profile's app-server too (reports/l5-c16.md): the same version pin, one session per profile process.

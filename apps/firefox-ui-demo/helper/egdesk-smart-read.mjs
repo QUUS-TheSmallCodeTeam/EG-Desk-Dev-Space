@@ -198,7 +198,7 @@ export class SmartReadEngine {
     const selected = selection.ranges.map(r => text.slice(r.startOffset, r.endOffset)).join('\n')
     const attachments = run.context?.captures?.length || 1
     let admission = readAdmission(selected, manifest.shape, usage, attachments)
-    const reader = allowReader ? (this.getReader ? this.getReader(engineId) : engineId === 'codex' ? this.reader : null) : null
+    const reader = allowReader ? (this.getReader ? this.getReader(engineId, authority) : engineId === 'codex' ? this.reader : null) : null
     const scopeKey = JSON.stringify([engineId, authority?.engineProfileId || null, authority?.epoch ?? null, run.clientThreadId || null])
     if (readerSessionId && reader && !prepareOnly) {
       await this.restoreSession({ ownerKey, readerSessionId, engineId, authority, scopeKey, run, sourceId, manifest, text })

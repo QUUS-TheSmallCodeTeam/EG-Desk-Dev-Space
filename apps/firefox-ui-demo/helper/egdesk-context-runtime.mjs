@@ -133,15 +133,23 @@ function argumentsFor(name, value) {
 }
 
 // No default-engine lookup: a missing Claude Reader must never select Codex.
-export function createEngineReaderFactory({ codex = null, claude = null } = {}) {
+export function createEngineReaderFactory({ codex = null, claude = null, forProfile = null } = {}) {
   const readers = new Map([['codex', codex], ['claude', claude]])
-  return engineId => readers.get(engineId) || null
+  // L1 c24: a Codex read for a room on an Agent profile goes to THAT profile's reader when the room-account flag provides one (forProfile returns a
+  // reader, or null when the profile has none: then the read is unavailable, never the shared account's). undefined: the shared reader, as before.
+  return (engineId, authority = null) => {
+    if (engineId === 'codex' && typeof forProfile === 'function' && authority?.engineProfileId) {
+      const own = forProfile(authority.engineProfileId)
+      if (own !== undefined) return own
+    }
+    return readers.get(engineId) || null
+  }
 }
 
 export class ContextRuntime {
-  constructor({ store, reader, readers = {}, getReadCapacity, getOwnerKey, getAuthority, schemaReady = () => true, now = Date.now }) {
+  constructor({ store, reader, readers = {}, profileReaders = null, getReadCapacity, getOwnerKey, getAuthority, schemaReady = () => true, now = Date.now }) {
     Object.assign(this, { store, reader, getReadCapacity, getOwnerKey, getAuthority, schemaReady, now })
-    this.readerForEngine = createEngineReaderFactory({ codex: reader, ...readers })
+    this.readerForEngine = createEngineReaderFactory({ codex: reader, ...readers, forProfile: profileReaders ? id => profileReaders.forProfile(id) : null })
     this.smartRead = new SmartReadEngine({ store, getReader: this.readerForEngine, now })
     this.runtime = null
     this.bindings = new Map()
@@ -235,7 +243,7 @@ export class ContextRuntime {
   }
 
   readerReadiness(authority, run, configuration) {
-    const reader = this.readerForEngine(authority.engineId)
+    const reader = this.readerForEngine(authority.engineId, authority)
     if (authority.engineId === 'codex') return { ready: Boolean(reader), engineId: 'codex', code: reader ? null : 'READER_UNAVAILABLE' }
     if (!reader) return { ready: false, engineId: authority.engineId, code: 'CLAUDE_CONTEXT_READER_UNSUPPORTED' }
     const environment = this.readEnvironment(authority, run, configuration)
@@ -1035,20 +1043,21 @@ export class ContextRuntime {
     })
   }
 
-  async readOutput(id) {
-    const ownerKey = this.owner(), epoch = this.runtime?.epoch
+  async readOutput(id, authority = null) {
+    // L1 c24: the room's own authority (the HTTP route resolves it from the request's routing hints); without one, the default's, as before
+    const ownerKey = authority ? this.owner(authority) : this.owner(), epoch = this.runtime?.epoch
     const value = await this.store.readOutput(ownerKey, id)
-    this.assertSameAuthority(ownerKey, epoch)
+    if (authority) this.assertAuthority(authority); else this.assertSameAuthority(ownerKey, epoch)
     return value
   }
 
-  async listOutputVersions({ conversationId, outputKey } = {}) {
+  async listOutputVersions({ conversationId, outputKey } = {}, authority = null) {
     if (typeof conversationId !== 'string' || !conversationId || conversationId.length > 512) reject('INVALID_OUTPUT_QUERY', 'conversationId is required', 400)
     if (outputKey !== undefined && (typeof outputKey !== 'string' || !OUTPUT_KEY_PATTERN.test(outputKey))) reject('INVALID_OUTPUT_QUERY', 'Invalid outputKey', 400)
-    const ownerKey = this.owner(), epoch = this.runtime?.epoch
+    const ownerKey = authority ? this.owner(authority) : this.owner(), epoch = this.runtime?.epoch
     const outputs = (await this.store.listOutputs(ownerKey, record => record.conversationId === conversationId && (outputKey === undefined || record.outputKey === outputKey)))
       .sort((a, b) => a.createdAt - b.createdAt || a.version - b.version).slice(-OUTPUT_LIST_LIMIT)
-    this.assertSameAuthority(ownerKey, epoch)
+    if (authority) this.assertAuthority(authority); else this.assertSameAuthority(ownerKey, epoch)
     return { outputs }
   }
 
@@ -1326,7 +1335,8 @@ export class ContextRuntime {
       for (const controller of binding.controllers) controller.abort()
       for (const call of this.calls.keys()) if (call.startsWith(`${key}/`)) this.calls.delete(call)
     }
-    for (const engineId of ['codex', 'claude']) if (!options.engineId || options.engineId === engineId) this.readerForEngine(engineId)?.disconnect?.({ ...options, engineId })
+    // L1 c24: a lost profile connection ends THAT profile's reader (when the flag gave it one), not the shared reader of the default account
+    for (const engineId of ['codex', 'claude']) if (!options.engineId || options.engineId === engineId) this.readerForEngine(engineId, options.engineProfileId ? { engineProfileId: options.engineProfileId } : null)?.disconnect?.({ ...options, engineId })
   }
   // Account change: suggestions and source-change records of the old account go too.
   reset(options = {}) {
