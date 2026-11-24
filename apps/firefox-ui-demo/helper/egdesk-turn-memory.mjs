@@ -129,7 +129,8 @@ export async function judgeTurnWrite({ message, candidates = [], client, askedAt
 const OPS = new Set(['none', 'new_page', 'update_status'])
 const STATUS = new Set(['plan', 'done'])
 const SLICES = new Set(['past', 'present', 'planned', 'hypothetical'])
-const KINDS = new Set(['utterance', 'reported_by_other'])
+// agent_note: the host's own record (a finished browser task), not something the person said; stored with by: 'browser_task'.
+const KINDS = new Set(['utterance', 'reported_by_other', 'agent_note'])
 const nextRevision = revision => (/^\d+$/.test(revision) ? String(Number(revision) + 1) : `${revision}+1`)
 const fingerprint = (proposal, message) => sha256Hex(JSON.stringify([proposal, createHash('sha256').update(String(message ?? '')).digest('hex')]))
 
@@ -171,10 +172,11 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
         // new_page
         if (typeof message !== 'string' || !message.trim() || message.length > 2000) return { status: 'invalid', reason: 'message_required' }
         if (canWrite({ op: 'new_page', page: null, scope }) !== true) return { status: 'denied' }
-        const id = typeof idFor === 'function' ? idFor({ operationId, scope }) : `memo/${sha256Hex(key).slice(0, 16)}`
+        const id = typeof idFor === 'function' ? idFor({ operationId, scope })
+          : provenance.kind === 'agent_note' && operationId.startsWith('browser-task:') ? `browser-task/${operationId.slice(13).replace(/[^A-Za-z0-9._-]/g, '-')}` : `memo/${sha256Hex(key).slice(0, 16)}`
         const links = (Array.isArray(proposal.links) ? proposal.links : []).filter(l => record(l) && wiki.pages.has(l.to) && allowsPage(wiki.pages.get(l.to), scope))
         const page = wiki.add({ id, title: compactText(message, 40), body: message, revision: '1', time: { slice: proposal.time.slice },
-          provenance: { kind: provenance.kind, by: 'user', ...(provenance.basis ? { basis: provenance.basis } : {}) }, status: STATUS.has(proposal.status) ? proposal.status : 'unknown',
+          provenance: { kind: provenance.kind, by: provenance.kind === 'agent_note' ? 'browser_task' : 'user', ...(provenance.basis ? { basis: provenance.basis } : {}) }, status: STATUS.has(proposal.status) ? proposal.status : 'unknown',
           scope: scope?.writeScope ?? null, ...(typeof proposal.spokenAt === 'string' ? { spokenAt: proposal.spokenAt } : {}), links })
         if (!page) return { status: 'conflict', reason: 'page_exists' }
         return finish({ status: 'stored', pageId: page.id, revision: page.revision })
