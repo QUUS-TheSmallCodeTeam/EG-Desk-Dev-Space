@@ -2,7 +2,7 @@ import {worksitePlans} from './EGDeskAdjacentWorkbench.sys.mjs';
 import {overallPlans,describeComposition} from './EGDeskCompositionChoice.sys.mjs';
 // Privileged Joint Board preview. No preferences, network primitives or direct card mutations.
 export const PRESENTATION_OPTIONS = Object.freeze({ keep: '현재 배치 유지', overview: '선택 자료 전체 보기',
-  focus: '지정 자료 한 장에 집중', pair: '선택한 두 장 나란히 비교',front:'지정 자료만 앞으로',tidy:'자리를 살려 전체 정돈',handoff:'업무 순서대로 인계 보기',workbench:'주 작업과 참고 자료 함께 보기' });
+  focus: '지정 자료 한 장에 집중', pair: '선택한 두 장 나란히 비교',front:'지정 자료만 앞으로',redesign:'재배치 제안',tidy:'자리를 살려 전체 정돈',handoff:'업무 순서대로 인계 보기',workbench:'주 작업과 참고 자료 함께 보기' });
 export const PRESENTATION_DECISION_PATHS = Object.freeze(Object.fromEntries(['prepare', 'run', 'cancel']
   .map(k => [k, `/decision/board-presentation/${k}`])));
 const QUESTION = '요청의 목적에 맞는 내 화면 구성 한 가지를 고르세요. 근거가 없으면 현재 배치 유지입니다. 자료 내용 추론이나 권한 변경은 하지 마세요.';
@@ -218,6 +218,24 @@ export function createPresentationController(h) {
       suggestion: a.suggestion, message: a.message };
   }
   const emit = () => h.render?.(view());
+  // Canvas design check, read side: a copy of the live scene (no title or content) for the runtime's check enumeration.
+  function designScene(key) {
+    const s = read(key);
+    return s ? { viewport: s.viewport, camera: s.camera, topZ: s.topZ, obstacles: s.obstacles, links: s.links,
+      cards: s.cards.map(c => ({ id: c.id, rect: c.rect, z: c.z, kind: c.kind, maySendDescriptor: c.maySendDescriptor, movable: c.movable, pinned: c.pinned, inFrame: c.inFrame, minWidth: c.minWidth, minHeight: c.minHeight })) } : null;
+  }
+  // Canvas design check, write side: an already validated redesign (EGDeskCanvasRedesign) becomes ONE preview choice. It is treated like any model
+  // result: nothing moves until the user applies it, and apply re-checks mode, key and grants and the time window, then uses the same commit / undo / history.
+  function offerRedesign(plan) {
+    if (!active || !sync() || active.job || plan?.option !== 'redesign' || !Array.isArray(plan.targets) || !plan.targets.length) return false;
+    const a = active, byId = new Map(a.snapshot.cards.map(c => [c.id, c]));
+    if (!plan.targets.every(t => byId.get(t.id) && canMove(byId.get(t.id)) && validRect(t.rect))) return false;
+    a.plans = { ...choices(a), redesign: { option: 'redesign', camera: null, framing: null, targets: plan.targets.map(t => ({ id: t.id, rect: rect(t.rect) })) } };
+    a.redesign = { expires: now() + RESULT_TTL_MS };
+    if (a.snapshot.decision) a.modelChoice = { previous: a.modelChoice?.previous ?? a.choice, expires: a.redesign.expires };
+    a.choice = 'redesign'; a.message = '제안한 구성을 미리 보는 중입니다. 아직 적용하지 않았습니다.'; emit();
+    return true;
+  }
   function open(key, preferredId = null) {
     close();
     sync();
@@ -246,7 +264,10 @@ export function createPresentationController(h) {
   }
   function choose(option) {
     if (!sync() || !Object.hasOwn(PRESENTATION_OPTIONS, option) || !choices(active)[option]) return;
-    discard(active); active.modelChoice = null; active.choice = option; active.message = ''; emit();
+    discard(active); active.modelChoice = null; active.choice = option; active.message = '';
+    // A model-originated redesign keeps its apply-time authority and time window whichever way the user steps between previews.
+    if (option === 'redesign' && active.redesign && active.snapshot.decision) active.modelChoice = { previous: 'keep', expires: active.redesign.expires };
+    emit();
   }
   function expire(a, job) {
     if (active !== a || a.job !== job) return;
@@ -400,7 +421,7 @@ export function createPresentationController(h) {
   }
   // The global Undo/Redo reverted or re-applied this Apply: the panel's own inverse no longer describes the screen.
   const forgetUndo = token => { if (undo && undo.token === token) undo = null; };
-  return { open, close, sync, view, select, focus, choose, prepare, confirm, cancelDecision, apply, undo: undoOnce, forgetUndo };
+  return { open, close, sync, view, select, focus, choose, prepare, confirm, cancelDecision, apply, undo: undoOnce, forgetUndo, designScene, offerRedesign };
 }
 
 // Firefox chrome UI: real HTML controls, modeless, with an independent, non-hit-testable world layer.
@@ -510,6 +531,7 @@ export function createJointPresentation(h) {
     const choices = make('fieldset', null, { ...test('choices') });
     choices.append(legend('로컬 미리보기'));
     for (const [option, label] of Object.entries(PRESENTATION_OPTIONS)) {
+      if (option === 'redesign' && !v.options.includes('redesign')) continue; // exists only while a validated redesign is on offer
       const row = make('label', null, { class: 'egd-joint-presentation-choice' });
       const radio = make('input', null, { type: 'radio', name: 'joint-presentation-option', value: option, ...control(option) });
       radio.disabled = !v.options.includes(option); radio.checked = option === v.choice;
@@ -521,7 +543,7 @@ export function createJointPresentation(h) {
       { role: 'status', ...test('status') });
     if (!status.textContent) status.hidden = true;
     const actions = make('footer', null);
-    const applyText = ({front:'이 자료만 앞으로',tidy:'내 책상 정돈 적용',handoff:'내 화면에 인계 순서 적용',workbench:'내 작업 공간에 적용', pair: '두 장을 내 화면에 배치', overview: '내 카메라에 적용', focus: '내 카메라에 적용' })[v.choice] || '변경 없이 닫기';
+    const applyText = ({redesign:'내 화면에 적용',front:'이 자료만 앞으로',tidy:'내 책상 정돈 적용',handoff:'내 화면에 인계 순서 적용',workbench:'내 작업 공간에 적용', pair: '두 장을 내 화면에 배치', overview: '내 카메라에 적용', focus: '내 카메라에 적용' })[v.choice] || '변경 없이 닫기';
     const apply = button(applyText, 'apply', () => api.apply());
     apply.disabled = !!v.phase;
     actions.append(apply, button('취소', 'cancel', () => api.close({ restoreFocus: true })));
@@ -582,5 +604,7 @@ export function createJointPresentation(h) {
     isOpen(boardKey) { return panel?.isConnected === true && (boardKey === undefined || key === boardKey); },
     handleEscape(ev) { return !!panel && onKey(ev); },
     forgetUndo(token) { api.forgetUndo(token); },
+    designScene(boardKey) { return api.designScene(boardKey); },
+    offerRedesign(plan) { return api.offerRedesign(plan); },
   };
 }
