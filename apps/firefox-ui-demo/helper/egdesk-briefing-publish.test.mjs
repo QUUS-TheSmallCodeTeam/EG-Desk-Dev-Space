@@ -19,10 +19,11 @@ function briefingDeps(h, engine) {
   return { engine, runFor: ids => h.chat.runFor(ids), propose: (run, args) => h.contexts.proposeBriefing(run, args), publishOutput: (run, args) => h.contexts.publishOutput(run, args) }
 }
 const bodyFor = (s, flow = 'on') => BriefingHost.observeRequest({ mode: flow, report: REPORT, answerId: s.h.ids.answerId, conversationId: s.h.ids.conversationId, runId: s.h.ids.runId, candidates: BriefingHost.canvasBriefingCandidates(s.cards) })
-async function foldOffer(s, reply) {
+async function foldOffer(s, reply, { pref = 'on' } = {}) {
   // the surface's own function (compiled from the real source) holds the fold proposal; the arrange wiring (real source) hands it to the panel when the user opens it
   const notices = []
-  new Function('state', 'document', 'boardNotice', `${decl('offerBriefingRetrieval')}\noffer = offerBriefingRetrieval;`.replace('offer =', 'arguments[3].offer ='))(s.W.state, s.W.doc, m => notices.push(m), (globalThis.__o = {}))
+  new Function('state', 'document', 'boardNotice', 'BriefingHost', 'readSurfacePref', `${decl('offerBriefingRetrieval')}\noffer = offerBriefingRetrieval;`.replace('offer =', 'arguments[5].offer ='))(
+    s.W.state, s.W.doc, m => notices.push(m), BriefingHost, name => (name === BriefingHost.BRIEFING_FLOW_PREF ? pref : undefined), (globalThis.__o = {}))
   globalThis.__o.offer(reply); return notices
 }
 
@@ -137,4 +138,17 @@ test('result card binding: only a published output of this conversation, only wi
   await assert.rejects(() => s.h.contexts.proposeBriefing(run, { title: 'x', steps: [{ id: 's1', text: 't', fallback: 'f', targets: [{ outputId: s.outputs.invoice.id, extra: 1 }] }] }), /outputId and viewId only/)
   const noCap = await scene(t, { withoutBriefingCapability: true }); await assert.rejects(() => noCap.h.contexts.bindCardSource(noCap.h.chat.runFor(noCap.h.ids), { outputId: noCap.outputs.invoice.id }))
   fits(publishSchema, { title: 'ok', steps: [{ id: 's1', text: 't', fallback: 'f', targets: [{ sourceId: cap.sourceId, viewId: 'res-a' }] }] })
+})
+
+test('cycle 22, the person\'s side: a late fold offer is re-checked against the screen as it is NOW: flag still on, the Agent\'s own result cards only, never a shared-Board card or one already folded', async t => {
+  const reply = { outcome: 'presented', retrievals: [{ viewId: 'res-old' }, { viewId: 'res-a' }, { viewId: 'res-b' }, { viewId: 'gone' }] }
+  const off = await scene(t); assert.deepEqual(await foldOffer(off, reply, { pref: 'advisory' }), []); assert.equal(off.W.state.briefingRetrievalOffer ?? null, null, 'flag turned away from "on" while the flow ran: nothing is offered')
+  const s = await scene(t)
+  s.W.doc.getElementById('res-a').dataset.jointManaged = 'card' // moved onto a shared Board meanwhile
+  s.W.doc.getElementById('res-b')._resultRecord = { ...s.W.doc.getElementById('res-b')._resultRecord, provenance: null } // not recorded as the Agent's own
+  const notices = await foldOffer(s, reply)
+  assert.equal(notices.length, 1); assert.deepEqual(s.W.state.briefingRetrievalOffer, { option: 'retrieval', collapse: [{ id: 'res-old', value: true }] })
+  assert.deepEqual(s.W.collapsedIds(), [], 'an offer only: nothing is folded, moved or opened until the person applies it')
+  const folded = await scene(t); folded.W.doc.getElementById('res-old').classList.add('egd-card-collapsed')
+  assert.deepEqual(await foldOffer(folded, { outcome: 'presented', retrievals: [{ viewId: 'res-old' }] }), []); assert.equal(folded.W.state.briefingRetrievalOffer ?? null, null, 'already folded: no offer, no notice')
 })

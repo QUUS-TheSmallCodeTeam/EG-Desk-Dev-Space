@@ -83,7 +83,8 @@ test('a finished run still allows the proposal: its binding outlives the turn, a
 // ---------------- 3. end to end, the engine speaking through the internal-turn path ----------------
 async function foldOffer(s, reply) {
   const notices = [], box = {}
-  new Function('state', 'document', 'boardNotice', 'box', `${decl('offerBriefingRetrieval')}\nbox.offer = offerBriefingRetrieval;`)(s.W.state, s.W.doc, m => notices.push(m), box)
+  // the journey runs with the chrome flag "on" (cycle 22: the offer re-reads it when the reply arrives)
+  new Function('state', 'document', 'boardNotice', 'BriefingHost', 'readSurfacePref', 'box', `${decl('offerBriefingRetrieval')}\nbox.offer = offerBriefingRetrieval;`)(s.W.state, s.W.doc, m => notices.push(m), BriefingHost, name => (name === BriefingHost.BRIEFING_FLOW_PREF ? 'on' : undefined), box)
   box.offer(reply); return notices
 }
 const noDraftLeak = (s, pieces) => { const wire = JSON.stringify(s.h.events); for (const piece of pieces) assert.ok(!wire.includes(piece), `nothing of the private turn reaches the chat: ${piece}`) }
