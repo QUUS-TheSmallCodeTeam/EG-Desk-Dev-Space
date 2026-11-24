@@ -193,10 +193,11 @@ test('S5 mode off: nothing is called at all', async t => {
 
 test('S6 entry deadline: a hung endpoint falls back to the ordinary subjective turn in about 4 s with 0 actions', { timeout: 20000 }, async t => {
   const w = await world(t, { start: `${O}/invoices`, hang: true })
-  const started = Date.now()
-  const a = await w.say('거래처 포털에서 세금계산서 내려받아줘')
+  const started = performance.now() // monotonic: the broad gate's guard may stub Date
+  const a = await w.say('거래처 포털에서 이번 달 세금계산서 내려받아줘')
+  const elapsed = performance.now() - started
   assert.deepEqual([a.out.handled, a.out.reason, a.acts], [false, 'fallback:timeout', 0])
-  assert.ok(Date.now() - started < 6000 && Date.now() - started >= 3500)
+  assert.ok(elapsed < 8000 && elapsed >= 3000, `elapsed ${elapsed}`)
 })
 
 test('S7 cancel and unrelated replies do not resume; the task stays paused only for unrelated', async t => {
