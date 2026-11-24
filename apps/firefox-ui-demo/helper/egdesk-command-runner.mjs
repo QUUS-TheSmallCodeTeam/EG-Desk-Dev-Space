@@ -29,9 +29,13 @@ export const COMMAND_ENV_FIXED = Object.freeze({
   GIT_TERMINAL_PROMPT: '0', // git fails instead of waiting for a password nobody can type
   CI: '1', // tools pick non-interactive behaviour
 })
-export function commandEnvironment(source = {}) {
+// c19: only a command the person approved one-time (e.g. a push, which the floor routes to approval) also gets the ssh agent, so it
+// can authenticate; no other command can use the person's ssh keys.
+export const COMMAND_ENV_APPROVED_ONLY = Object.freeze(['SSH_AUTH_SOCK'])
+export function commandEnvironment(source = {}, { approved = false } = {}) {
   const env = {}
   for (const name of COMMAND_ENV_INHERITED) if (typeof source[name] === 'string' && source[name]) env[name] = source[name]
+  if (approved === true) for (const name of COMMAND_ENV_APPROVED_ONLY) if (typeof source[name] === 'string' && source[name]) env[name] = source[name]
   return { ...env, ...COMMAND_ENV_FIXED }
 }
 
@@ -56,12 +60,12 @@ export function createCommandRunner({ spawn, env = process.env, killGroup = null
   clearTimer = handle => clearTimeout(handle), limits = {} } = {}) {
   if (typeof spawn !== 'function') throw new TypeError('createCommandRunner needs a spawn function')
   const L = { ...COMMAND_RUNNER_LIMITS, ...limits }
-  const childEnv = commandEnvironment(env)
   const kill = (child, sig) => {
     try { if (typeof killGroup === 'function') { killGroup(child, sig); return } } catch { /* fall back */ }
     try { child.kill(sig) } catch { /* already gone */ }
   }
-  return function run({ command, cwd, timeoutMs = L.timeoutMs, signal = null, itemId = null, output = null, onFacts = () => {} } = {}) {
+  return function run({ command, cwd, timeoutMs = L.timeoutMs, signal = null, itemId = null, output = null, onFacts = () => {}, approved = false } = {}) {
+    const childEnv = commandEnvironment(env, { approved })
     return new Promise((resolve, reject) => {
       const began = now()
       const facts = row => { try { onFacts(row) } catch { /* advisory */ } }

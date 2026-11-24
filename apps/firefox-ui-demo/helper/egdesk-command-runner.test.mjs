@@ -102,3 +102,29 @@ test('the executor with the real runner: facts carry exit code and duration; a r
   const risky = JSON.parse((await provider.dispatch(run, { callId: 'k2', tool: COMMAND_TOOL_NAME, arguments: { command: 'git reset --hard HEAD~5' } })).contentItems[0].text)
   assert.equal(risky.status, 'needs_person'); assert.equal(f.spawned.length, before)
 })
+
+test('c19: the ssh agent reaches only a command the person approved one-time', async () => {
+  assert.equal(commandEnvironment(BRIDGE_ENV).SSH_AUTH_SOCK, undefined)
+  assert.equal(commandEnvironment(BRIDGE_ENV, { approved: true }).SSH_AUTH_SOCK, '/tmp/agent.sock')
+  assert.equal(commandEnvironment(BRIDGE_ENV, { approved: true }).GITHUB_TOKEN, undefined, 'nothing else is added by an approval')
+  const f = fakes()
+  const runner = createCommandRunner({ spawn: f.spawn, env: BRIDGE_ENV, setTimer: f.setTimer, clearTimer: f.clearTimer, now: f.now })
+  const replyClient = (runs, declines) => ({ decide: async () => ({ answers: { reply_runs_command: { type: 'predicate', probability: runs }, reply_declines_command: { type: 'predicate', probability: declines } } }) })
+  const ledger = createGateHookBroker({ mode: () => 'on', home: '/home/synthetic', assess: async () => ({ approval: false, reasons: [], source: 'decision' }) })
+  const provider = createCommandExecutorProvider({ mode: () => 'on', ledger, workspaceOf: () => '/work/demo-app', runner })
+  const call = async (run, id, command) => {
+    const pending = provider.dispatch(run, { callId: id, tool: COMMAND_TOOL_NAME, arguments: { command } })
+    for (let i = 0; i < 20; i++) await tick()
+    const child = f.spawned.find(c => c.args[1] === command && !c.closed)
+    if (child) { child.closed = true; child.emit('close', 0, null) }
+    return JSON.parse((await pending).contentItems[0].text)
+  }
+  ledger.turnStarted({ conversationId: 'c', turnId: 'T1' })
+  await call({ conversationId: 'c', runId: 'T1', answerId: 'c/T1' }, 'k1', 'git status')
+  assert.equal((await call({ conversationId: 'c', runId: 'T1', answerId: 'c/T1' }, 'k2', 'git push --force origin main')).status, 'needs_person')
+  ledger.turnEnded({ turnId: 'T1' })
+  await ledger.readReply({ conversationId: 'c', reply: 'yes', client: replyClient(0.97, 0.01), egress: { allows: () => true } })
+  ledger.turnStarted({ conversationId: 'c', turnId: 'T2' })
+  assert.equal((await call({ conversationId: 'c', runId: 'T2', answerId: 'c/T2' }, 'k3', 'git push --force origin main')).status, 'ran')
+  assert.deepEqual(f.spawned.map(c => [c.args[1], c.options.env.SSH_AUTH_SOCK ?? null]), [['git status', null], ['git push --force origin main', '/tmp/agent.sock']])
+})

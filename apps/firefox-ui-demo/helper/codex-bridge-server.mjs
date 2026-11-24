@@ -24,6 +24,7 @@ import { TerminalSessionRegistry } from './terminal-sessions.mjs'
 import { createTerminalRunWatch } from './egdesk-terminal-run-watch.mjs'
 import { createTerminalStateWatch } from './egdesk-terminal-state-watch.mjs'
 import { createGitTargetInspector } from './egdesk-terminal-git-facts.mjs'
+import { createOwnToolsWiring } from './egdesk-own-tools-wiring.mjs'
 import { createTerminalSessionFactory } from './terminal-platform.mjs'
 import { createTerminalHttpHandler } from './terminal-http.mjs'
 import { chatError, publicText } from './codex-chat-values.mjs'
@@ -451,13 +452,19 @@ const handlePresenceMirrorHttp = createPresenceMirrorHttpHandler({ mirror: prese
 // Whose task a conversation's run is (another member's presence alias, told by the window; memory only). Same flag, default off.
 const runRequesters = createRunRequesters({ presence: presenceMirror })
 const handleRunRequesterHttp = createRunRequesterHttpHandler({ requesters: runRequesters, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
+// EG-Desk's own command and file tools, Codex as a pure model engine: developer flag EGDESK_OWN_TOOLS=on, default off (null: nothing changes).
+const ownToolsWiring = createOwnToolsWiring({ env: process.env, dataDir, spawn, getChat: () => chat, inspect: createGitTargetInspector() })
+const terminalGateConfig = ['advisory', 'on'].includes(process.env.EGDESK_TERMINAL_GATE) ? { mode: () => process.env.EGDESK_TERMINAL_GATE, inspect: createGitTargetInspector(),
+  // EGDESK_TERMINAL_GATE_METHOD=score selects the old 0-4 score question, only to compare; content predicates are the default.
+  method: process.env.EGDESK_TERMINAL_GATE_METHOD === 'score' ? 'score' : 'predicates' } : null
 const chat = new CodexChatRuntime({
   localCapacity,
   engines: engineRegistry,
   contexts,
   resolveProjectWorkspace: request => localFiles.resolveProjectWorkspace(request),
   resolveRunProjectOrigin: request => localFiles.resolveRunProjectOrigin(request),
-  toolProviders: [browserProvider, planProvider, annotationProvider],
+  toolProviders: [browserProvider, planProvider, annotationProvider].concat(ownToolsWiring ? ownToolsWiring.toolProviders : []),
+  ...(ownToolsWiring ? { ownTools: ownToolsWiring.ownTools } : {}),
   store: chatStore,
   requireStore: true,
   getOwnerKey: () => publicAuthIdentityKey(authState),
@@ -501,9 +508,7 @@ const chat = new CodexChatRuntime({
     // Advisory state judge on the engine's own command executions: developer flag EGDESK_COMMAND_JUDGE=advisory, default off. Records only.
     ...(process.env.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
     // Command gate before an engine approval card: developer flag EGDESK_TERMINAL_GATE=advisory|on, default off. It never answers an approval.
-    ...(['advisory', 'on'].includes(process.env.EGDESK_TERMINAL_GATE) ? { terminalGate: { mode: () => process.env.EGDESK_TERMINAL_GATE, inspect: createGitTargetInspector(),
-      // EGDESK_TERMINAL_GATE_METHOD=score selects the old 0-4 score question, only to compare; content predicates are the default.
-      method: process.env.EGDESK_TERMINAL_GATE_METHOD === 'score' ? 'score' : 'predicates' } } : {}),
+    ...(ownToolsWiring ? { terminalGate: ownToolsWiring.terminalGate(terminalGateConfig) } : terminalGateConfig ? { terminalGate: terminalGateConfig } : {}),
     // Working-memory gate at the EG-Desk tool-result boundary: developer flag EGDESK_WORKING_MEMORY=advisory|on, default off (results unchanged).
     ...(['advisory', 'on'].includes(process.env.EGDESK_WORKING_MEMORY) ? { workingMemory: { mode: () => process.env.EGDESK_WORKING_MEMORY } } : {}),
     topicRecipient: recipientForCodexDecisions,
