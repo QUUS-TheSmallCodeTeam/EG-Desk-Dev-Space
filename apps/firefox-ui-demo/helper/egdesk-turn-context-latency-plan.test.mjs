@@ -39,3 +39,25 @@ test('latency analysis: budgets per request from the product\'s warm() reading; 
   assert.equal(row(2, 'b-immediate').sent, false)
   assert.deepEqual([out.byCondition['a-first'].n, out.byCondition['a-first'].within800, out.byCondition['a-first'].within1500], [2, 0, 2])
 })
+
+test('idle probe: a realistic ~2.5k-token turn_context body and the smallest one, first after idle and immediately after; ceilings within 8k; the registered readings', async () => {
+  const { IDLE_CEILING, IDLE_DIR, analyzeIdle, buildIdlePlan } = await import('./egdesk-turn-context-latency-plan.mjs')
+  const built = await buildIdlePlan(), idleDir = path.join(dir, '..', path.basename(IDLE_DIR))
+  for (const run of built.runs) {
+    assert.ok(readFileSync(path.join(idleDir, run.dir, 'plan.json')).equals(run.planBytes), `${run.dir}/plan.json is stale`)
+    for (const f of run.files) assert.ok(readFileSync(path.join(idleDir, run.dir, f.file)).equals(f.bytes))
+    const plan = loadPlan(path.join(idleDir, run.dir, 'plan.json'))
+    assert.equal(plan.transport, 'product'); assert.ok(plan.requests.every(r => r.recordOnly && r.groupingOk && r.waitBeforeMs === 0))
+    assert.match(plan.passRule, /at least 10 minutes with no Decisions request/)
+  }
+  assert.ok(built.runs.reduce((s, r) => s + r.plan.tokenCeiling, 0) <= IDLE_CEILING)
+  const a1 = JSON.parse(built.runs[0].files[0].bytes.toString('utf8'))
+  assert.equal(a1.questions.length, 14, 'answer_type, time_intent and 12 relevance questions, as the multiuser first turn')
+  assert.ok(built.runs[0].plan.requests[0].estInputTokens >= 2400 && built.runs[0].plan.requests[0].estInputTokens <= 2800)
+  const r = (ms, srv = 200) => ({ elapsedMs: ms, openaiProcessingMs: String(srv) })
+  const A = { 'A1-realistic-first': r(1100, 600), 'A2-realistic-next': r(290), 'A3-small-next': r(250) }
+  assert.equal(analyzeIdle([A, { 'B1-small-first': r(1000, 550), 'B2-small-next': r(240) }]).reading, 'idle gap explains it, whatever the size')
+  assert.equal(analyzeIdle([A, { 'B1-small-first': r(320), 'B2-small-next': r(240) }]).reading, 'size matters on a cold path')
+  assert.equal(analyzeIdle([{ 'A1-realistic-first': r(330), 'A2-realistic-next': r(290), 'A3-small-next': r(250) }, { 'B1-small-first': r(300), 'B2-small-next': r(240) }]).reading, 'all fast: the tail is intermittent; two samples cannot show it')
+  assert.equal(analyzeIdle([A, {}]).reading, 'incomplete')
+})

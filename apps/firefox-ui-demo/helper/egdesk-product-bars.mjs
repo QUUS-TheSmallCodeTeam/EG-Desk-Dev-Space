@@ -51,6 +51,8 @@ export const PRODUCT_BARS = Object.freeze([
   [/^axis-hybrid-v\d+$/, /^speech_/, choice(SPEECH_THRESHOLDS.confidence, SPEECH_THRESHOLDS.margin, 'egdesk-speech-grounding.mjs SPEECH_THRESHOLDS (hybrid-isolated axes question); pick() never installs unknown', { neverAccepts: ['unknown'] })],
   [/^memory-action-v\d+$/, /^(tn_need|pg_#)$/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO: triageSkipsFetch acts on a decided need no; the scan picks a decided yes (L7 c21 action rules)')],
   [/^axis-split-v\d+/, /^speechs_/, three(SPEECH_SPLIT_BARS.yes, SPEECH_SPLIT_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_SPLIT_BARS (split-isolated design, L7 c20): yes >= yes, no <= no, between undecided')],
+  // labelling study (no product action): a label is read at the general predicate guide (egdesk-conversation-examples.mjs readLabels, .8 / .2)
+  [/^conversation-labels-\d+$/, /^conv_/, three(TERNARY_YES, TERNARY_NO, 'egdesk-conversation-examples.mjs readLabels: a labelling study, no product action')],
   // legacy (c8-era, 11/22-11/24) families
   [/-11(22|23|24)$/, /^speechp_/, three(SPEECH_PREDICATE_BARS.yes, SPEECH_PREDICATE_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_PREDICATE_BARS')],
   [/-11(22|23|24)$/, /^(tn_|tw_link|tw_about|pg_|op_)/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO')],
