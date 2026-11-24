@@ -512,5 +512,8 @@ test('v8 dry run: both ways of running the scripted world (the packet expectatio
   assert.deepEqual(judged(off).filter(c => c.pass === false).map(c => c.id), ['s4.no-page-for-the-action'])
   assert.deepEqual(judged(on).filter(c => c.pass === false).map(c => c.id), ['s4.no-page-for-the-action'])
   const s13 = on.steps.find(s => s.id === 's13-withheld'), s14 = on.steps.find(s => s.id === 's14-after-withheld')
+  // c23: the calibration record says what was posted (a word), so the empty-answer step is scored from the record, not only from the messages
+  const postedOf = (r, id) => r.steps.find(x => x.id === id).seen.calibration.filter(e => e.feature === 'draft_check').map(e => e.posted ?? null)
+  assert.deepEqual(postedOf(on, 's13-withheld'), ['withheld']); assert.deepEqual(postedOf(on, 's14-after-withheld'), ['as_written']); assert.deepEqual(postedOf(on, 's3b-recall'), ['as_written'], 'the scripted judge passes it (the real v7b run revised this answer: tense .86)')
   assert.deepEqual(s13.seen.newMessages.filter(m => m.role === 'assistant'), []); assert.deepEqual(s14.seen.newMessages.filter(m => m.by === 'agent').map(m => m.text), ['PostgreSQL 전환은 12월 첫째 주에 배포할 예정입니다.'])
 })

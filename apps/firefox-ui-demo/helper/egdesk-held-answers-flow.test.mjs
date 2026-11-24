@@ -1,12 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, chmodSync } from 'node:fs'
+import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import os from 'node:os'
+const tmpdir = os.tmpdir
 import path from 'node:path'
 import { CodexChatRuntime, POSTED_ANSWER_KEY, answerEvidence } from './codex-chat-runtime.mjs'
 import { checkDraft } from './egdesk-draft-check.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
-import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
+import { CALIBRATION_FILE, openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 
 // Held, completed answers and human-like intermediate messages, end to end over a mock engine (no network, no Codex binary).
 // Virtual clock and timers drive the long runs; fork turns (draft revision, intermediate writer) are answered by scripted text.
@@ -377,4 +379,58 @@ test('c25: the check lists the evidence it was given, as given: a record that re
   await checkDraft({ draft: 'PostgreSQL 전환 설계는 확정했습니다.', evidence: [title, planTitle, full, plan], mode: 'advisory', design: 'predicates', client: { async decide(request) { sent.push(request); return { answers: {} } } } })
   assert.equal((sent[0].input[1].content.match(/\[E\d+ /g) ?? []).length, 4, 'four items, none dropped')
   assert.deepEqual(answerEvidence({ evidence: [title, planTitle], memory: [full, plan] }, []).map(i => i.id), ['ontology:db/pg-design', 'ontology:db/pg-plan', 'mem1', 'mem2'])
+})
+
+// ---- c23: the posting outcome of a checked answer is recorded as a word in the calibration log (outcome.posted) ----
+const lowSupport = w => {
+  const decide = w.chat.decisionContext.client.decide
+  w.chat.decisionContext.client.decide = async request => { const out = await decide(request); if (request.promptCacheKey === 'draft-check') for (const q of request.questions) if (/^sup_/.test(q.name)) out.answers[q.name] = { type: 'predicate', probability: 0.02 }; return out }
+}
+const postedWord = w => w.log.entries().filter(e => e.feature === 'draft_check').map(e => e.outcome?.posted ?? null)
+
+test('c23: an answer the check passes is recorded as posted as written', async t => {
+  const w = world(t, { candidates: [PLAN], flags: { held: true, flow: false } })
+  await w.send(); await w.final('PostgreSQL 마이그레이션은 아직 계획 단계입니다.')
+  assert.deepEqual(w.posted().filter(([r]) => r === 'assistant').map(([, text]) => text), ['PostgreSQL 마이그레이션은 아직 계획 단계입니다.'])
+  assert.deepEqual(postedWord(w), ['as_written'])
+})
+
+test('c23: an answer the check replaces with the one revision is recorded as revised', async t => {
+  const w = world(t, { candidates: [PLAN], revision: 'PostgreSQL 마이그레이션은 아직 계획 단계입니다.', flags: { held: true, flow: false } })
+  await w.send(); await w.advance(2000); await w.final('PostgreSQL 마이그레이션은 현재 운영 중입니다.')
+  assert.equal(w.posted().filter(([r]) => r === 'assistant').length, 1)
+  assert.deepEqual(postedWord(w), ['revised'])
+})
+
+test('c23: an answer whose every sentence fails is recorded as withheld, and nothing is posted', async t => {
+  const w = world(t, { candidates: [PLAN], revision: 'PostgreSQL 마이그레이션은 v16으로 4월에 끝났습니다.', flags: { held: true, flow: false } }); lowSupport(w)
+  await w.send(); await w.final('PostgreSQL 마이그레이션은 v16으로 3월에 끝났습니다.')
+  assert.deepEqual(w.posted().filter(([r]) => r === 'assistant'), [])
+  assert.deepEqual(postedWord(w), ['withheld'])
+})
+
+test('c23: only the unflagged sentence is posted when the rewrite is unavailable: recorded as certain_part', async t => {
+  const w = world(t, { candidates: [PLAN], revision: null, flags: { held: true, flow: false } })
+  const decide = w.chat.decisionContext.client.decide
+  // only the sentence with the concrete detail (v16) is judged unsupported; the other has none and stays
+  w.chat.decisionContext.client.decide = async request => { const out = await decide(request); if (request.promptCacheKey === 'draft-check') for (const q of request.questions) if (/^sup_0$/.test(q.name)) out.answers[q.name] = { type: 'predicate', probability: 0.02 }; return out }
+  await w.send(); await w.final('PostgreSQL 마이그레이션은 v16으로 3월에 끝났습니다. 나머지는 계획대로 진행합니다.')
+  const shown = w.posted().filter(([r]) => r === 'assistant').map(([, text]) => text)
+  assert.equal(shown.length, 1); assert.ok(!shown[0].includes('v16'), shown[0])
+  assert.deepEqual(postedWord(w), ['certain_part'])
+})
+
+test('c23: the log keeps only the word: a text, an unknown word or another feature is not recorded as posted, and the first label stays', async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'egdesk-posted-')); t.after(() => rm(dir, { recursive: true, force: true }))
+  const log = openCalibrationLog({ dataDir: dir, log() {} })
+  const draft = log.record({ feature: 'draft_check', mode: 'on', judgments: [] })
+  assert.equal(log.complete(draft, { posted: 'PostgreSQL 마이그레이션은 v16으로 3월에 끝났습니다.' }), false, 'a text is not a label')
+  assert.equal(log.complete(draft, { posted: 'whatever' }), false)
+  assert.equal(log.complete(draft, { posted: 'revised' }), true)
+  assert.equal(log.complete(draft, { posted: 'withheld' }), false, 'the first label stays')
+  const other = log.record({ feature: 'turn_memory', mode: 'on', judgments: [] })
+  assert.equal(log.complete(other, { posted: 'revised' }), false, 'only a draft check has it')
+  assert.deepEqual(log.entries().map(e => e.outcome ?? null), [{ posted: 'revised' }, null])
+  assert.ok(!(await readFile(path.join(dir, CALIBRATION_FILE), 'utf8')).includes('v16'), 'the file holds no text')
+  assert.deepEqual(openCalibrationLog({ dataDir: dir, log() {} }).entries().map(e => e.outcome ?? null), [{ posted: 'revised' }, null], 'it survives a reload')
 })

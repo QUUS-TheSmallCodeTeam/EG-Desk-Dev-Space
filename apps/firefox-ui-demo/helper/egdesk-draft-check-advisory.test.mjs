@@ -87,6 +87,7 @@ test('flag absent, off and advisory post byte-identical answers and an identical
   const sha = w => createHash('sha256').update(volatile(JSON.stringify(w.events))).digest('hex').slice(0, 16)
   t.diagnostic(`event stream sha256[:16] none=${sha(none)} off=${sha(off)} advisory=${sha(adv)}; posted answer sha256[:16] none=${createHash('sha256').update(posted(none)).digest('hex').slice(0, 16)} advisory=${createHash('sha256').update(posted(adv)).digest('hex').slice(0, 16)}`)
   const entries = adv.log.entries().filter(e => e.feature === 'draft_check')
+  assert.ok(entries.length > 0 && entries.every(e => e.outcome?.posted === 'as_written'), 'c23: advisory never changes the answer: every entry says it was posted as written')
   assert.equal(entries.length, 1)
   const [entry] = entries
   t.diagnostic(`advisory calibration entry: ${JSON.stringify(entry)}`)
