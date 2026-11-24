@@ -8,12 +8,15 @@
 // approve: the scripted approver's answers, in order, to the approval questions EG-Desk's own tools raise in that turn. Each answer is
 // one more message from the person in the same scripted turn (APPROVER_TEXT); the expectations cover the whole scripted turn.
 // Every conversation runs with EGDESK_OWN_TOOLS=on (the check sets it; a script cannot turn it off).
+// memory { mode?, pages }: (optional, on a conversation) seeded memory pages and expect.memory { attached, notAttached, noResends } on a turn: both belong to
+//   helper/egdesk-real-engine-memory.mjs (L7 c26), which validates them and checks them.
 // whileRunning { afterMs }: (optional, on a turn) this turn's `say` is typed into the PREVIOUS turn's working run, afterMs after that turn
 //   started (not after it ended), as chat.send({ inRunMessageTo: <that run's runId> }); the run's own turn keeps going. Both turns are then
 //   awaited. Needs conversation.flags.EGDESK_INRUN_MESSAGES = "on", cannot be the first turn, cannot follow another whileRunning turn, takes no
 //   approve. Its expectations cover what happened after it was sent (messages posted after it, tool calls and commands after it); the previous
 //   turn's own expectations cover the whole window of both. A message the run no longer takes (it ended before afterMs) fails the turn's
 //   implicit check "sent_while_running".
+import { MEMORY_EXPECT_SCHEMA, MEMORY_SCHEMA, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
 export const SCRIPT_SET = /^real-engine-[a-z0-9][a-z0-9-]{0,40}-v\d{1,3}$/
 export const CONVERSATION_ID = /^[a-z0-9][a-z0-9-]{0,39}$/
 export const FLAG_NAME = /^EGDESK_[A-Z0-9_]{1,48}$/
@@ -25,7 +28,7 @@ export const IN_RUN_FLAG = 'EGDESK_INRUN_MESSAGES'
 export const LIMITS = Object.freeze({ whileRunningMs: 120_000, conversations: 8, turns: 12, files: 32, pathChars: 200, contentBytes: 64 * 1024, sayChars: 4000, approvals: 4, strings: 16, stringChars: 400 })
 // the scripted person's answers (test input, never product copy)
 export const APPROVER_TEXT = Object.freeze({ yes: '응, 그 명령 실행해 줘', no: '아니, 그건 실행하지 마' })
-export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted'])
+export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'memory'])
 
 const str = (max, extra = {}) => ({ type: 'string', minLength: 1, maxLength: max, ...extra })
 const strings = { type: 'array', maxItems: LIMITS.strings, items: str(LIMITS.stringChars) }
@@ -43,6 +46,7 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
         id: { type: 'string', pattern: CONVERSATION_ID.source },
         folder: { type: 'object', maxProperties: LIMITS.files, propertyNames: { maxLength: LIMITS.pathChars }, additionalProperties: { type: 'string', maxLength: LIMITS.contentBytes } },
         flags: { type: 'object', propertyNames: { pattern: FLAG_NAME.source, not: { enum: [...RESERVED_FLAGS] } }, additionalProperties: { type: 'string', pattern: FLAG_VALUE.source } },
+        memory: MEMORY_SCHEMA,
         turns: { type: 'array', minItems: 1, maxItems: LIMITS.turns, items: {
           type: 'object', additionalProperties: false, required: ['say'],
           properties: {
@@ -62,6 +66,7 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
               undoRecords: { type: 'integer', minimum: 0, maximum: 50 },
               turnStatus: { enum: ['completed', 'failed', 'interrupted'] },
               compacted: { type: 'boolean' },
+              memory: MEMORY_EXPECT_SCHEMA,
             } },
           } } },
       } } },
@@ -100,7 +105,8 @@ export function validateEngineScript(value) {
   for (const [ci, conv] of (Array.isArray(convs) ? convs : []).entries()) {
     const at = `$.conversations[${ci}]`
     if (!isObject(conv)) { bad(at, 'an object'); continue }
-    only(conv, ['id', 'folder', 'flags', 'turns'], at)
+    only(conv, ['id', 'folder', 'flags', 'memory', 'turns'], at)
+    if (conv.memory !== undefined) for (const why of validateMemory(conv.memory, `${at}.memory`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
     if (typeof conv.id !== 'string' || !CONVERSATION_ID.test(conv.id)) bad(`${at}.id`, `matches ${CONVERSATION_ID.source}`)
     else if (ids.has(conv.id)) bad(`${at}.id`, 'unique'); else ids.add(conv.id)
     if (conv.folder !== undefined) {
@@ -156,6 +162,10 @@ export function validateEngineScript(value) {
       if (e.undoRecords !== undefined && !(Number.isInteger(e.undoRecords) && e.undoRecords >= 0 && e.undoRecords <= 50)) bad(`${tt}.expect.undoRecords`, 'an integer 0-50')
       if (e.turnStatus !== undefined && !['completed', 'failed', 'interrupted'].includes(e.turnStatus)) bad(`${tt}.expect.turnStatus`, 'completed / failed / interrupted')
       if (e.noToolCalls && e.toolCalls?.length) bad(`${tt}.expect`, 'noToolCalls and toolCalls contradict')
+      if (e.memory !== undefined) {
+        for (const why of validateMemoryExpect(e.memory, conv.memory, `${tt}.expect.memory`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
+        if (turn.whileRunning !== undefined) bad(`${tt}.expect.memory`, 'not checked on a whileRunning turn (the memory window is the scripted turn)')
+      }
       if (e.files !== undefined) {
         if (!isObject(e.files) || Object.keys(e.files).length > LIMITS.files) bad(`${tt}.expect.files`, 'an object')
         else for (const [p, content] of Object.entries(e.files)) {

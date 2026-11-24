@@ -36,6 +36,7 @@ import { createGitTargetInspector } from './egdesk-terminal-git-facts.mjs'
 import { parseCodexUserAgent } from './egdesk-codex-version-pin.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { APPROVER_TEXT, checkTurnExpectations, folderPathProblem, validateEngineScript } from './egdesk-real-engine-script.mjs'
+import { createMemoryHook, memoryNeedsDecisions } from './egdesk-real-engine-memory.mjs' // memory hook (L7 c26)
 
 export const DECISION_KEY_ENV = 'EGDESK_REAL_CHECK_DECISION_KEY'
 export const CHILD_ENV_ALLOW = Object.freeze(['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TMPDIR', 'SHELL'])
@@ -154,6 +155,8 @@ export function preflight(options, scripts, { env = process.env, exists = isExec
   if (!options.decisions) {
     const needs = scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => (t.approve ?? []).includes('yes'))).map(c => `${script.set}/${c.id}`))
     if (needs.length) problems.push(`scripted "yes" approvals are read by the Decision model, so they need --decisions: ${needs.join(', ')}`)
+    const seeded = scripts.flatMap(({ script }) => script.conversations.filter(memoryNeedsDecisions).map(c => `${script.set}/${c.id}`)) // memory hook
+    if (seeded.length) problems.push(`seeded memory pages are picked and read by the Decision model, so they need --decisions: ${seeded.join(', ')}`)
     const flagged = scripts.flatMap(({ script }) => script.conversations.filter(c => Object.keys(c.flags ?? {}).some(k => DECISION_DEPENDENT_FLAGS.includes(k))).map(c => `${script.set}/${c.id} (${Object.keys(c.flags).filter(k => DECISION_DEPENDENT_FLAGS.includes(k)).join(', ')})`))
     if (flagged.length) problems.push(`these flags act only through the Decision model, so they need --decisions: ${flagged.join('; ')}`)
   }
@@ -247,6 +250,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
   child.on('error', error => { rec.aborted ??= `spawn_failed:${error?.code ?? 'error'}` })
   child.stderr?.on('data', chunk => { stderrTail = (stderrTail + chunk).slice(-1500) })
   let chat = null, store = null, wiring = null, threadClient = null
+  const memoryHook = createMemoryHook(conversation.memory) // memory hook: seeded pages, what the product sent, the memory expectations
   const completions = [], tasks = []
   const turnNow = { notifications: [], toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [] }
   const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = [] }
@@ -306,6 +310,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const request = async (method, params) => {
       if ((method === 'thread/start' || method === 'thread/fork') && params?.ephemeral !== true) throw Object.assign(new Error('every thread of this check must be ephemeral'), { code: 'ephemeral_required' })
       const start = performance.now()
+      memoryHook.observe(method, params) // memory hook
       try {
         const result = await rpc.request(method, params)
         rec.requests.push({ method, ms: ms(start) })
@@ -338,9 +343,10 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const OWNER = `codex:real-engine-check`
     const contexts = new ContextRuntime({ store: new ImmutableContextStore({ dataDir: path.join(dataDir, 'context'), allowedRoots: [scratch] }), getOwnerKey: () => OWNER })
     let wikiAdapter = null
-    const ontologyStore = { readGraph: async () => ({ snapshots: [], nodes: [], edges: [] }) }
+    const ontologyStore = { readGraph: async () => memoryHook.graph() } // memory hook: empty unless the script seeds pages
     const turnMemoryConfig = createTurnMemoryConfig({ settings, ontologyStore, ...turnMemoryFlagsFromEnv(FLAG), getAdapter: () => wikiAdapter ??= createWikiAdapter({ writes: openWikiWrites({ dataDir: settingsDir, log() {} }) }) })
-    if (options.decisions) await settings.turnMemory.save('advisory')
+    if (options.decisions) await settings.turnMemory.save(memoryHook.mode ?? 'advisory') // memory hook
+    if (memoryHook.mode === 'on') turnMemoryConfig.eligible = memoryHook.eligible // memory hook: turn memory also on this conversation's one-time thread
     wiring = createOwnToolsWiring({ env: { ...FLAG, PATH: env.PATH ?? '', HOME: env.HOME ?? '' }, dataDir, spawn: loggedRunnerSpawn, getChat: () => chat, inspect: createGitTargetInspector(), ...(deps.gitStatus ? { gitStatus: deps.gitStatus } : {}), ...(deps.killGroupRunner ? { killGroup: deps.killGroupRunner } : {}) })
     const terminalGateConfig = ['advisory', 'on'].includes(FLAG.EGDESK_TERMINAL_GATE) ? { mode: () => FLAG.EGDESK_TERMINAL_GATE, inspect: createGitTargetInspector(), method: FLAG.EGDESK_TERMINAL_GATE_METHOD === 'score' ? 'score' : 'predicates' } : null
     const recipient = () => (KEY ? decisionTopicRecipient(KEY, 1, undefined, client.model) : null)
@@ -416,6 +422,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       const turn = conversation.turns[index], next = conversation.turns[index + 1], withMessage = next?.whileRunning !== undefined
       const sub = [], ledger = wiring.ledger
       let asked = 0, mark = null
+      memoryHook.beginTurn() // memory hook
       const ctx = await beginTurn(turn.say)
       if (withMessage) mark = await sendInRun(ctx, next.say, next.whileRunning.afterMs)
       sub.push(await finishTurn(ctx))
@@ -434,11 +441,12 @@ export async function runConversation({ options, set, conversation, deps = {} })
         toolCalls: sub.flatMap(s => s.toolCalls), native: sumNative(sub), posted, asked, commandsRan: sub.flatMap(s => s.commandsRan), files: readFiles(turn), undoRecords: undoCount(),
         turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted),
       }
-      const expectations = checkTurnExpectations(turn.expect ?? {}, flat)
+      const memory = memoryHook.finishTurn(turn.expect?.memory) // memory hook
+      const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...memory.expectations]
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
       rec.turns.push({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
-        posted, asked, undoRecords: flat.undoRecords, expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
+        posted, asked, undoRecords: flat.undoRecords, ...(memory.record ? { memory: memory.record } : {}), expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {
         // the message typed into the run: what happened after it was sent
         const prev = sub[0], after = texts.slice(mark.posted)
