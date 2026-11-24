@@ -160,7 +160,7 @@ test('score: per case, how often a finding, a rewrite, a rewrite that passed, on
   await add('a-number', { draft: `${A.w} ${A.r}` }, 1)
   await add('a-number', { draft: `${A.w} ${A.bad}`, rule: () => ({ support: 0.9 }) }, 2)
   await add('c-contradicted', { draft: 'PostgreSQL 전환 배포를 완료했습니다.', rewrite: 'PostgreSQL 전환 배포를 완료했습니다.', rule: s => (/완료/.test(s) ? { support: 0.01 } : null) }, 1)
-  const score = scoreRewriteRecords([...records, { set: 'real-engine-memory-recall-v1', id: 'x', turns: [{ rewrite: { checked: true } }] }, null])
+  const score = scoreRewriteRecords([...records, { set: 'real-engine-memory-recall-v1', id: 'x', turns: [{ say: 'no rewrite record on this turn' }] }, { set: 'x' }, null])
   assert.deepEqual(Object.keys(score.cases), ['a-number', 'c-contradicted'])
   const a = score.cases['a-number']
   assert.deepEqual({ n: a.n, checked: a.checked, finding: a.finding, noFinding: a.noFinding, rewrote: a.rewrote, rewritePassed: a.rewritePassed, withheld: a.withheld, leakedNumbers: a.leakedNumbers, answered: a.answered, elicited: a.elicited },
@@ -170,4 +170,7 @@ test('score: per case, how often a finding, a rewrite, a rewrite that passed, on
   assert.equal(score.total.n, 5); assert.equal(score.total.withheld, 2)
   const text = formatRewriteScore(score); assert.match(text, /a-number: 4 turn\(s\)/); assert.match(text, /nothing remains \(withheld\) 1/); assert.match(text, /total: /)
   assert.deepEqual(scoreRewriteRecords([]), { cases: {}, total: {} })
+  // c27: a conversation of another set whose turns carry a rewrite record is tallied under its own id (journey-memory-v2 is an Agent room with the check on)
+  const other = scoreRewriteRecords([{ set: 'real-engine-journey-memory-v2', id: 'journey-memory', turns: [{ say: 'q', ok: true, rewrite: { checked: true, finding: false, posted: 'as_written', postedText: 'a', elicited: false, rewrite: { ran: false }, postedUnknownNumbers: [], postedPhraseHits: [] } }] }])
+  assert.deepEqual([Object.keys(other.cases), other.cases['journey-memory'].outcomes, other.total.answered], [['journey-memory'], { as_written: 1 }, 1])
 })
