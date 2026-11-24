@@ -115,3 +115,38 @@ test('warm-up reading while points are still missing: the readings still possibl
   const all = analyzeWarmup(some({ 'A-rep1': point(1812), 'B-rep1': point(324, true), 'C-rep1': point(300, true), 'A-rep2': point(1500), 'B-rep2': point(310, true), 'C-rep2': point(320, true) }))
   assert.equal(all.reading, 'warm-up works'); assert.equal(all.decidedAlready, 'warm-up works'); assert.equal(all.pointsIn, 6)
 })
+
+test('body-size probe: two runs (product warm-up body vs the 648-token one, each then a measured turn_context 1 s later), <= 3k, record only, committed files match, registered readings', async () => {
+  const { SIZE_CEILING, SIZE_DIR, SIZE_ESTIMATE_BOUND, SIZE_RUNS, analyzeSize, buildSizePlan } = await import('./egdesk-turn-context-latency-plan.mjs')
+  const { CONTENT_FREE_REQUESTS } = await import('./egdesk-decision-egress.mjs')
+  const built = await buildSizePlan(), sDir = path.join(dir, '..', path.basename(SIZE_DIR))
+  assert.deepEqual(built.runs.map(r => r.dir), ['S1-small', 'S2-large'])
+  assert.ok(built.totals.estInputTokens <= SIZE_ESTIMATE_BOUND && built.totals.ceilings <= SIZE_CEILING, JSON.stringify(built.totals))
+  assert.equal(built.totals.requests, 4)
+  const bodies = new Set()
+  for (const run of built.runs) {
+    assert.ok(readFileSync(path.join(sDir, run.dir, 'plan.json')).equals(run.planBytes), `${run.dir}/plan.json is stale`)
+    for (const f of run.files) { assert.ok(readFileSync(path.join(sDir, run.dir, f.file)).equals(f.bytes)); bodies.add(f.bytes.toString('utf8')) }
+    const plan = loadPlan(path.join(sDir, run.dir, 'plan.json'))
+    assert.equal(plan.transport, 'product'); assert.match(plan.passRule, /at least 10 minutes with no Decisions request/)
+    assert.ok(plan.requests.every(r => r.recordOnly && r.groupingOk))
+    assert.ok(plan.totals.fittedEst * 1.1 <= plan.tokenCeiling)
+    assert.deepEqual(plan.requests.map(r => [r.id, r.waitBeforeMs]), [['warmup', 0], ['measured', 1000]])
+  }
+  assert.equal(bodies.size, 4, 'no two bodies are identical')
+  // S1's warm-up is byte for byte the body the product sends (model, input, questions), and nothing else
+  const s1 = built.runs[0].files.find(f => f.file.endsWith('warmup.json')).bytes.toString('utf8')
+  assert.equal(s1, JSON.stringify({ model: JSON.parse(s1).model, input: CONTENT_FREE_REQUESTS.warmup.input, questions: CONTENT_FREE_REQUESTS.warmup.questions }))
+  const sizeOf = r => r.plan.requests.find(x => x.id === 'warmup').estInputTokens
+  assert.ok(sizeOf(built.runs[0]) < 200 && sizeOf(built.runs[1]) > 600, 'about 159 against about 648 tokens')
+  const run = (warmupMs, measuredMs) => ({ warmup: { elapsedMs: warmupMs, openaiProcessingMs: '300' }, measured: { elapsedMs: measuredMs, openaiProcessingMs: '200', reusedSocket: true } })
+  const read = (a, b) => analyzeSize({ 'S1-small': a, 'S2-large': b }).reading
+  assert.equal(analyzeSize({}).reading, 'incomplete')
+  assert.equal(read(run(1500, 300), run(1400, 320)), 'size does not matter')
+  assert.match(read(run(400, 300), run(500, 320)), /^inconclusive/)
+  assert.match(read(run(1500, 300), run(500, 320)), /^one run only/)
+  assert.match(read(run(1500, 1200), run(1400, 320)), /^small body does not warm/)
+  assert.match(read(run(1500, 300), run(1400, 1200)), /^large body failed while the small one warmed/)
+  assert.match(read(run(1500, 1200), run(1400, 1100)), /^warm-up did not help/)
+  assert.deepEqual(SIZE_RUNS.map(([d]) => d), ['S1-small', 'S2-large'])
+})

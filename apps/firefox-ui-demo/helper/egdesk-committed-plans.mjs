@@ -33,6 +33,7 @@ export const COMMITTED_PLANS = Object.freeze([
   { path: 'proofs/decision-real-measure/split-wording', lane: 'L7', rebuilt: { script: 'egdesk-split-wording-plan.mjs' } },
   { path: 'proofs/decision-real-measure/turn-context-idle', lane: 'L6', rebuilt: { script: 'egdesk-turn-context-latency-plan.mjs', argv: ['--idle'] } },
   { path: 'proofs/decision-real-measure/turn-context-latency', lane: 'L6', rebuilt: { script: 'egdesk-turn-context-latency-plan.mjs' } },
+  { path: 'proofs/decision-real-measure/turn-context-warmup-size', lane: 'L6', rebuilt: { script: 'egdesk-turn-context-latency-plan.mjs', argv: ['--size'] } },
   { path: 'proofs/decision-real-measure/turn-context-warmup', lane: 'L6', rebuilt: { script: 'egdesk-turn-context-latency-plan.mjs', argv: ['--warmup'] } },
   { path: 'proofs/decision-real-measure/utterance-threshold', lane: 'L6', rebuilt: { script: 'egdesk-utterance-threshold-study.mjs' } },
   { path: 'proofs/decision-real-measure/work-placement', lane: 'L1', rebuilt: { script: 'egdesk-board-reply-real-plan.mjs', matches: 3 } },
