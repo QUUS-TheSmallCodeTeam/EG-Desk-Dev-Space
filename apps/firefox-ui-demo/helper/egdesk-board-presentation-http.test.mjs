@@ -136,7 +136,8 @@ test('mode, revision, key and budget are checked again on run; denied attempts c
   assert.deepEqual(await run(revoked), manual)
   const { ticket } = await prepare()
   budget.record({ inputTokens: 100 })
-  assert.deepEqual(await run(ticket), manual)
+  // The one refusal the owner can act on carries a closed reason word (never provider text), so the screen can name it.
+  assert.deepEqual(await run(ticket), { status: 'manual', reason: 'budget_exceeded' })
   assert.equal(calls.length, 0)
 })
 
@@ -236,17 +237,21 @@ test('advisory yields a suggestion and an authorized response may reach the shar
 test('uncertain, ineligible, refused, malformed and provider failure are manual, never retried', async t => {
   let next
   const { calls, prepare, run } = await setup(t, { provider: () => next() })
-  for (const [input, provider] of [
-    [dto, () => result([accepted(0.51, 0.49)])],
-    [{ ...dto, tall: false }, () => result()],
-    [dto, () => result([{ name: 'board_view', type: 'refusal' }])],
-    [dto, () => Response.json({ noisy: 'do not return' })],
-    [dto, () => { throw new Error('noisy transport failure') }],
-    [dto, () => Response.json({ error: { code: 'insufficient_quota', message: 'do not return' } }, { status: 429 })],
+  // Provider failures add only a closed reason word to the manual reply; no provider text, detail or answer is ever echoed.
+  for (const [input, provider, reason] of [
+    [dto, () => result([accepted(0.51, 0.49)]), null],
+    [{ ...dto, tall: false }, () => result(), null],
+    [dto, () => result([{ name: 'board_view', type: 'refusal' }]), 'REFUSAL'],
+    [dto, () => Response.json({ noisy: 'do not return' }), 'bad_response'],
+    [dto, () => { throw new Error('noisy transport failure') }, 'unreachable'],
+    [dto, () => Response.json({ error: { code: 'insufficient_quota', message: 'do not return' } }, { status: 429 }), 'no_credit'],
   ]) {
     next = provider
     const before = calls.length
-    assert.deepEqual(await run((await prepare(input)).ticket), manual)
+    const reply = await run((await prepare(input)).ticket)
+    if (reason === 'REFUSAL') assert.equal(reply.status, 'manual')
+    else assert.deepEqual(reply, reason ? { status: 'manual', reason } : manual)
+    assert.doesNotMatch(JSON.stringify(reply), /noisy|do not return/)
     assert.equal(calls.length, before + 1)
   }
 })
