@@ -93,6 +93,7 @@ function gateFields(raw) {
   if (!record(raw)) return null
   const out = {}
   put(out, 'rule', flagOf(raw.rule)); put(out, 'would', flagOf(raw.would)); put(out, 'scored', flagOf(raw.scored)); put(out, 'gitFacts', flagOf(raw.gitFacts)); put(out, 'sessionWithheld', flagOf(raw.sessionWithheld))
+  put(out, 'sessionRuleBroad', flagOf(raw.sessionRuleBroad)); put(out, 'unasked', flagOf(raw.unasked))
   const reasons = Array.isArray(raw.reasons) ? [...new Set(raw.reasons.filter(reason => typeof reason === 'string' && GATE_REASONS.has(reason)))].slice(0, 6) : []
   if (reasons.length) out.reasons = reasons
   put(out, 'score', Number.isFinite(raw.score) && raw.score >= 0 && raw.score <= 4 ? Math.round(raw.score * 10) / 10 : null)
