@@ -94,7 +94,7 @@ test('flag absent, off and advisory post byte-identical answers and an identical
   assert.equal(entry.mode, 'advisory'); assert.equal(entry.attached, false)
   assert.equal(entry.check, 'would_revise'); assert.ok(['would_trim', 'would_withhold'].includes(entry.ifUnrevised), 'c19: no fixed question; nothing left = withheld')
   assert.ok(entry.timing.totalMs >= 0 && entry.timing.calls === 1 && typeof entry.timing.withinBudget === 'boolean')
-  assert.deepEqual(entry.evidence, { items: 1, opaque: 0, sentences: 1, terms: 0 })
+  assert.deepEqual(entry.evidence, { items: 1, opaque: 0, cut: 0, leftOut: 0, sentences: 1, terms: 0 })
   const text = JSON.stringify(entry)
   for (const secret of ['PostgreSQL', '마이그레이션', '계획', ANSWER]) assert.ok(!text.includes(secret), `no content in the entry: ${secret}`)
   // The request carries catalog text already sent to Decisions, never the loaded body.
@@ -143,7 +143,7 @@ test('a command of the run reaches the checker as the run\'s own fact (command, 
   const sent = w.checkCalls[0].input.map(row => row.content).join('\n')
   assert.match(sent, /In this turn the assistant ran `ls`; it finished with exit code 0, which means the command itself reported success\. Last lines of its output: SECRET TOOL OUTPUT/)
   const entry = w.log.entries().find(e => e.feature === 'draft_check')
-  assert.deepEqual(entry.evidence, { items: 1, opaque: 0, sentences: 1, terms: 0 })
+  assert.deepEqual(entry.evidence, { items: 1, opaque: 0, cut: 0, leftOut: 0, sentences: 1, terms: 0 })
   assert.ok(!JSON.stringify(entry).includes('SECRET'), 'the record stays content-free')
   // The Agent's models may not receive terminal data (tool ceiling terminal none): as before, a content-free reference only.
   const closed = world(t, { draftCheck: { mode: () => 'advisory' }, tools: true, candidates: [] })
@@ -151,6 +151,6 @@ test('a command of the run reaches the checker as the run\'s own fact (command, 
   await closed.ask()
   assert.equal(closed.checkCalls.length, 0, 'only opaque references: nothing for the judge to compare with')
   const closedEntry = closed.log.entries().find(e => e.feature === 'draft_check')
-  assert.equal(closedEntry.check, 'would_pass'); assert.deepEqual(closedEntry.evidence, { items: 0, opaque: 1, sentences: 1, terms: 0 })
+  assert.equal(closedEntry.check, 'would_pass'); assert.deepEqual(closedEntry.evidence, { items: 0, opaque: 1, cut: 0, leftOut: 0, sentences: 1, terms: 0 })
   assert.ok(!JSON.stringify(closed.checkCalls).includes('SECRET') && !JSON.stringify(closedEntry).includes('SECRET'))
 })

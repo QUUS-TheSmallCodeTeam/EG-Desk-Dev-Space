@@ -1,0 +1,102 @@
+{
+  "set": "real-engine-delete-v1",
+  "description": "Pattern: the person deletes a conversation (c28; owner decisions L2 c17/c18). A SAVED engine thread with two turns (it reads notes.txt twice), then the window's own request, POST /chat/conversation/forget { clientThreadId }, handled by the product's route handler with the same forgetters the bridge registers. Proved by code, each from facts read on both sides of the delete: routeAccepted; storeRowsGone (the chat store has no conversation, no messages, no listing, no local message ids, and the route reports the rows it deleted); engineGone (thread/resume of the engine thread fails and every thread of the room reports state deleted); pendingReadingsWithdrawn (a pending reading heard in this conversation is gone, the module count equals it); conversationMemoryGone (pages in this conversation's temporary scope and the readings on them); otherMemoryKept (another conversation's page and its pending reading, a personal page and its accepted reading are untouched); pointerMarked (a text-less page of another scope that pointed at this conversation's first message stays as a pointer marked sourceDeleted). The memory is SEEDED synthetic data written into the check's own isolated store (what the models would write is not deterministic): what is proven is the deletion. Needs --persisted-with-cleanup; no Decision model needed. Expectations by code.",
+  "conversations": [
+    {
+      "id": "delete-product-path",
+      "folder": {
+        "notes.txt": "첫째 줄: 발주 마감은 오후 3시\n둘째 줄: 출고는 금요일\n"
+      },
+      "seededWrites": {
+        "pages": [
+          {
+            "id": "mem/conversation-note",
+            "title": "이 대화에서 들은 메모",
+            "body": "이 대화에서만 쓰는 임시 메모다.",
+            "scope": "conversation"
+          },
+          {
+            "id": "mem/other-room-note",
+            "title": "다른 대화의 메모",
+            "body": "다른 대화방의 임시 메모다.",
+            "scope": "other"
+          },
+          {
+            "id": "mem/personal-note",
+            "title": "개인 메모",
+            "body": "대화와 상관없이 남는 개인 메모다.",
+            "scope": "personal"
+          },
+          {
+            "id": "mem/pointer-to-first-message",
+            "title": "첫 메시지를 가리키는 메모",
+            "scope": "personal",
+            "pointer": true
+          }
+        ],
+        "readings": [
+          {
+            "page": "mem/conversation-note",
+            "state": "accepted"
+          },
+          {
+            "page": "mem/personal-note",
+            "state": "pending",
+            "from": "conversation"
+          },
+          {
+            "page": "mem/other-room-note",
+            "state": "pending",
+            "from": "other"
+          },
+          {
+            "page": "mem/personal-note",
+            "state": "accepted"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "notes.txt 첫째 줄에 뭐라고 적혀 있어?",
+          "expect": {
+            "toolCalls": [
+              "egdesk_read_file"
+            ],
+            "posted": true,
+            "answerIncludes": [
+              "3시"
+            ],
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "둘째 줄은?",
+          "expect": {
+            "posted": true,
+            "answerIncludes": [
+              "금요일"
+            ],
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "action": "delete",
+          "expect": {
+            "conversationGone": true,
+            "deleted": {
+              "routeAccepted": true,
+              "storeRowsGone": true,
+              "engineGone": true,
+              "pendingReadingsWithdrawn": true,
+              "conversationMemoryGone": true,
+              "otherMemoryKept": true,
+              "pointerMarked": true
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

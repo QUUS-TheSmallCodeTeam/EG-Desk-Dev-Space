@@ -13,7 +13,9 @@ const turnEntry = REAL_ENGINE_SCRIPT_SCHEMA.properties.conversations.items.prope
 const script = expect => ({ set: 'real-engine-ext-v1', conversations: [{ id: 'c', turns: [{ say: 'hi', expect }] }] })
 
 test('the lanes\' keys are registered, not listed in the core: the same keys, schemas and validators as before the move', () => {
-  assert.deepEqual(registeredExpectKeys(), ['collab', 'memory', 'engine', 'briefing', 'browserAnswer']); assert.deepEqual(registeredConversationFields(), ['memory']); assert.deepEqual(registeredTurnHookNames(), ['collab', 'memory', 'journey', 'browserAnswer']); assert.deepEqual(registeredTurnFields(), ['from', 'browserTask'])
+  // lanes add their own keys over time: the three moved ones (and the deletion proof, L5) are there, in this order among themselves; no key is registered twice
+  const keys = registeredExpectKeys(), at = k => keys.indexOf(k); assert.ok(at('memory') >= 0 && at('memory') < at('engine') && at('engine') < at('briefing') && at('deleted') > at('briefing'), keys.join()); assert.equal(new Set(keys).size, keys.length)
+  assert.ok(registeredConversationFields().includes('memory') && registeredConversationFields().includes('seededWrites')); assert.ok(registeredTurnHookNames().indexOf('memory') < registeredTurnHookNames().indexOf('journey')); assert.ok(registeredTurnFields().includes('from') && registeredTurnFields().includes('browserTask')); assert.ok(registeredExpectKeys().includes('browserAnswer') && registeredTurnHookNames().includes('browserAnswer')) // L8 c31
   for (const k of ['engine', 'memory', 'briefing']) { assert.ok(EXPECT_KEYS.includes(k)); assert.ok(turnEntry[k]) }
   const core = fs.readFileSync(path.join(here, 'egdesk-real-engine-script.mjs'), 'utf8') + fs.readFileSync(path.join(here, 'egdesk-real-engine-check.mjs'), 'utf8')
   for (const lane of ['egdesk-real-engine-memory.mjs', 'egdesk-real-engine-journey.mjs', 'egdesk-real-engine-briefing-hook.mjs']) assert.ok(!core.includes(`from './${lane}'`) || lane === 'egdesk-real-engine-memory.mjs', `${lane} is not imported by the core`)

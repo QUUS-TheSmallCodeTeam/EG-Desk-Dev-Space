@@ -202,7 +202,7 @@ export function normalizeEntry(raw, now = Date.now()) {
   put(entry, 'check', word(CHECKS, raw.check)); put(entry, 'ifUnrevised', word(CHECKS, raw.ifUnrevised))
   if (record(raw.evidence)) {
     const counts = {}
-    for (const key of ['items', 'opaque', 'sentences', 'terms']) put(counts, key, count(raw.evidence[key], 99))
+    for (const key of ['items', 'opaque', 'cut', 'leftOut', 'sentences', 'terms']) put(counts, key, count(raw.evidence[key], 99))
     if (Object.keys(counts).length) entry.evidence = counts
   }
   put(entry, 'flow', word(FLOW_KINDS, raw.flow)); put(entry, 'posted', word(POSTED, raw.posted)); put(entry, 'write', word(WRITE_OUTCOMES, raw.write)); put(entry, 'beat', beat(raw.beat)); put(entry, 'questions', count(raw.questions, 16))

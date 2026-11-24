@@ -1,3 +1,4 @@
+import { registerConversationForgetters } from './egdesk-conversation-forgetters.mjs'
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
 import { fingerprintNativeExecutable } from './codex-native-schema-probe.mjs'
@@ -655,13 +656,7 @@ const workPlacement = createWorkPlacement({ client: decisionClient, mode: () => 
   contextFor: (key, options) => chat.placementContextFor(key, options) })
 // A conversation the person deleted in the surface (POST /chat/conversation/forget): besides the runtime's own per-conversation state, the
 // briefing bindings of its native conversation, the requester the window told for it, and its work-placement queue and pointer go.
-chat.onForgetConversation('briefing_bindings', ({ conversationIds }) => conversationIds.reduce((n, id) => n + briefingBindings.forgetConversation(id), 0))
-chat.onForgetConversation('run_requesters', ({ clientThreadId, conversationIds }) => (runRequesters.set([clientThreadId, ...conversationIds], null) === 'cleared' ? 1 : 0))
-chat.onForgetConversation('work_placement', ({ clientThreadId, conversationIds }) => workPlacement.forget([clientThreadId, ...conversationIds]))
-// Owner decision (L2 c17): a reading heard in the deleted conversation and still pending is withdrawn (it is not memory yet).
-chat.onForgetConversation('pending_readings', ({ clientThreadId }) => turnMemoryConfig.getAdapter().withdrawPendingFrom([clientThreadId]))
-// Owner decision (L2 c18): memory in the conversation-temporary scope goes with the conversation; other scopes stay (deleted under [기억]).
-chat.onForgetConversation('conversation_memory', ({ clientThreadId, messageRefs }) => { const n = turnMemoryConfig.getAdapter().forgetConversation({ clientThreadId, messageRefs }); return n.pages + n.readings + n.pointers })
+registerConversationForgetters(chat, { briefingBindings, runRequesters, workPlacement, turnMemoryConfig }) // helper/egdesk-conversation-forgetters.mjs: briefing bindings, run requesters, work placement, pending readings (c17), conversation memory (c18)
 // The window's event streams (/events): when the last one has been gone for 10 s, nobody can read a message, so idle live sessions end
 // (a working run keeps its heartbeat). A single conversation that is closed is told by the surface: POST /chat/session/close.
 const windowWatch = createWindowWatch({ onGone: () => chat.closeIdleSessions() })
