@@ -122,7 +122,7 @@ test('the bridge builds the profile readers behind the flag and routes a profile
   const server = readFileSync(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   assert.match(server, /const profileReaders = createProfileReaders\(\{ enabled: \(\) => process\.env\.EGDESK_ROOM_ACCOUNT === 'on', isProfileSlot,/)
   assert.match(server, /readers: \{ claude: claudeReader \}, profileReaders, getReadCapacity/)
-  assert.match(server, /onNotification: \(id, message\) => \{ if \(!profileReaders\.handleNotification\(id, message\)\) codexEngine\.notify\(message, id\) \},/)
+  assert.match(server, /onNotification: \(id, message\) => \{ profileAccess\.notify\(id, message\); if \(!profileReaders\.handleNotification\(id, message\)\) codexEngine\.notify\(message, id\) \},/)
   assert.match(server, /onServerRequest: \(id, message\) => \{ if \(!profileReaders\.handleServerRequest\(id, message\)\) codexEngine\.serverRequest\(message, id\) \},/)
   assert.match(readFileSync(new URL('./egdesk-smart-read.mjs', import.meta.url), 'utf8'), /this\.getReader\(engineId, authority\)/)
 })

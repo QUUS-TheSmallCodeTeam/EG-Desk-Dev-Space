@@ -168,7 +168,7 @@ test('the window wires the flag and every fence through the room-keyed helpers; 
     && !/roomAccountParts/.test(line)).map(([, line]) => line.trim())
   assert.deepEqual(left.map(line => line.replace(/\s+/g, ' ')), [
     '|| !!ChatState.codexAccountKey(state.codex.authStatus);', // the Agent-profile settings screen: the default sign-in gates the local profile store (not a room)
-    'engineAccountKey: ChatState.codexAccountKey(state.codex.authStatus) || null,', // the Browser agent profile container (not a room); listed in the c24 report
+    'engineAccountKey: (roomKey === undefined ? ChatState.codexAccountKey(state.codex.authStatus) : roomKey) || null,', // the Browser card's binding without a room: the default sign-in is only the fallback when no room key is given (c25 passes every room's own key); listed in the c24 report
   ])
   // the room-keyed helpers are the ChatState module's, flag-aware and pure
   assert.equal(typeof ChatState.roomAccountScope, 'function'); assert.equal(typeof ChatState.roomAccountParts, 'function'); assert.equal(ChatState.roomAccountModeOn({ roomAccountMode: 'on' }), true)

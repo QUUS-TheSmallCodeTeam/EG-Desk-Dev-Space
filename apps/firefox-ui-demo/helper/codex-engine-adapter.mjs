@@ -30,6 +30,8 @@ export function describeCodexEngine({ ready = false, starting = false, blocked =
   const added = (Array.isArray(extraProfiles) ? extraProfiles : []).filter(row => row && row.id !== CODEX_ENGINE_PROFILE_ID).map(row => ({
     id: row.id, label: typeof row.label === 'string' ? row.label : null, credentialStore: 'egdesk-owned', active: false, owned: true,
     status: row.runnable === true ? 'available' : 'notYet', auth: profileAuth(row.auth), usage: null, models: row.models ?? null,
+    // L1 c25 (room-account flag): the last access failure of this profile's own server, status data only
+    ...(row.accessFailure && ['auth', 'quota', 'permission'].includes(row.accessFailure.kind) ? { accessFailure: { kind: row.accessFailure.kind, cause: row.accessFailure.cause ?? null, at: row.accessFailure.at } } : {}),
   }))
   return {
     id: CODEX_ENGINE_ID, label: 'Codex',

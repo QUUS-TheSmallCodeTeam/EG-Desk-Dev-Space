@@ -5743,9 +5743,9 @@ test('actual send path preserves draft B and new attachments typed during delaye
     sourceId: 'a', permission: 'observe', usedRunId: null }]]);
   const actualSelectedSources = compileFunction(`return function browserToolSelectedSources(threadId, candidates = null) {${selectedBody}\n  }`,
     ['state', 'getCodexThreadById', 'ChatState', 'browserToolUserSelections', 'document', 'browserToolSameUrl', 'structuredClone',
-      'browserToolRefreshSelection'])(
+      'browserToolRefreshSelection', 'browserToolRoomKeyFor'])(
     state, getThread, Chat, grants, { getElementById: id => id === 'browser-a' ? selectedCard : null },
-    (left, right) => new URL(left).href === new URL(right).href, structuredClone, (_threadId, source) => source);
+    (left, right) => new URL(left).href === new URL(right).href, structuredClone, (_threadId, source) => source, () => undefined);
   let payload, sendCount = 0;
   const running = send(state, () => getThread(null), (codex, id) => codex.threadDrafts[id] || '', Chat, () => false,
     { begin: () => ({}), valid: () => true, finish() {} }, async () => true, update, () => {}, () => delayed, getThread, Chat.createChatProtocolState(), () => ({}),
@@ -18167,7 +18167,7 @@ function browserAgentControlHarness() {
   };
   const revokeSource = slice('  function revokeBrowserToolCard(cardId) {', '  function registerBrowserToolSelection(');
   const dispatchSource = slice('  function browserToolSameUrl(left, right) {', '  function attachBrowserToolTransport(');
-  const blockSource = slice('    // ---- BRW-13: Agent activity on this Card', '    const browserToolBinding = () => {');
+  const blockSource = slice('    // ---- BRW-13: Agent activity on this Card', '    const browserToolBinding = (roomKey) => {');
   const maps = { runBindings: new Map(), pendingBindings: new Map(), cancelled: new Map(), receipts: new Map(), cardLeases: new Map(),
     selections: new Map(), actionLeases: new Map(), stopped: new Set() };
   const current = { cardId: 'browser-a', cardEpoch: 'card-generation-a', profileId: 'firefox-default', accountId: '',
@@ -18210,13 +18210,16 @@ function browserAgentControlHarness() {
     'browserToolRequestReceipts', 'browserToolCardLeases', 'browserToolUserSelections', 'browserToolPendingBindings',
     'browserToolActionLeases', 'browserToolStoppedRuns', 'chatBindingNonce', 'BROWSER_TOOL_REPLY_MARGIN_MS',
     'browserToolNavigationPolicy', 'revokeBrowserToolGrants', 'browserToolThreadGrants', 'browserToolGrantKey',
+    'browserToolRoomKeyFor', 'browserToolRoomKeyOf', 'browserToolBindingRooms',
     `let browserToolFixtureLastAction = null;\nconst browserToolFixtureAuthorizationByCard = new Map();\n${revokeSource}\n${dispatchSource}\n` +
     'return {browserToolDispatch,browserToolAuthorizePhysicalAction,revokeBrowserToolCard,browserToolCardPermission,createBrowserToolDialogObserver}')(doc,
     { knownCodexAccountKey: key => typeof key === 'string' && key.startsWith('codex:') }, maps.runBindings, maps.cancelled,
     maps.receipts, maps.cardLeases, maps.selections, maps.pendingBindings, maps.actionLeases, maps.stopped, () => `lease-${++nonce}`,
     Number(surfaceSource.match(/const BROWSER_TOOL_REPLY_MARGIN_MS = (\d+);/)[1]),
     // BRW-05/11 state this harness does not exercise: default same-site policy, no standing grants.
-    () => ({ scope: 'same-site', allow: [], block: [], allowDowngrade: false }), () => 0, new Map(), (thread, cardId) => `${thread}\u0000${cardId}`);
+    () => ({ scope: 'same-site', allow: [], block: [], allowDowngrade: false }), () => 0, new Map(), (thread, cardId) => `${thread}\u0000${cardId}`,
+    // L1 c25: no room-account flag in this harness: every binding is the default sign-in's
+    () => undefined, () => undefined, new WeakMap());
   authorize = transport.browserToolAuthorizePhysicalAction;
   const timers = new Map();
   let timerSeq = 0;
@@ -22067,10 +22070,10 @@ test('ordinary chat: retry after a conflict rejects a Browser grant that expired
   let selected, checks = 0;
   const h = requestProjectSendHarness({ memoAgentRoom: true, inputSources: [], selectBrowserSources: (...args) => { checks++; return selected(...args); } });
   selected = compileFunction(`${declaration('browserToolSelectedSources')}\nreturn browserToolSelectedSources;`,
-    ['state', 'getCodexThreadById', 'ChatState', 'browserToolUserSelections', 'document', 'browserToolSameUrl', 'structuredClone', 'browserToolRefreshSelection'])(
+    ['state', 'getCodexThreadById', 'ChatState', 'browserToolUserSelections', 'document', 'browserToolSameUrl', 'structuredClone', 'browserToolRefreshSelection', 'browserToolRoomKeyFor'])(
     h.state, (codex, id) => codex.threads.find(thread => thread.id === id), Chat, grants,
     { getElementById: id => id === 'browser-card-a' ? card : null }, (left, right) => new URL(left).href === new URL(right).href,
-    structuredClone, (_threadId, input) => input);
+    structuredClone, (_threadId, input) => input, () => undefined);
   clearComposerForMemo(h); reserveEmptyMemoRoom(h); typeOrdinaryDraft(h, 'original words'); await h.send();
   assert.equal(checks, 0); assert.equal(h.calls.provider.length, 0);
   h.state.codex.threads = h.state.codex.threads.map(thread => thread.id === 'room' ? { ...thread, inputSources: [source] } : thread);

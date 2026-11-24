@@ -624,7 +624,7 @@ function memoDispatchBridgeSource() {
     'createCodexThread', 'normalizeHudView', 'createCodexMessage', 'defaultCodexAgentProfileIdForThread',
     'codexThreadAgentProfile', 'codexThreadToolMode', 'codexThreadSystemPrompt', 'codexThreadRuntimeConfig',
     'createAcceptedReceiptWatch', 'rememberAcceptedInputReceipt',
-    'browserToolRefreshSelection', 'browserToolSelectedSources', 'browserToolSameUrl',
+    'browserToolRefreshSelection', 'browserToolSelectedSources', 'browserToolSameUrl', 'browserToolRoomKeyFor',
   ].map(memoSurfaceFunction).join('\n');
   return `let cardSeq = 0;\n${memoSurfaceSource.slice(projectStart, projectEnd)}\n${functions}\n${bridge}\n${memoSurfaceSource.slice(memoStart, memoEnd)}\nreturn { bridge: installCodexBridge(), askMemoAgent, attachMemoRepliesFromRun, renderMemoCard, spawnMemoCard };`;
 }
