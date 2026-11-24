@@ -4767,7 +4767,8 @@ export class CodexChatRuntime {
   }
 
   async endBrowserReplyWait(run, hold) {
-    if (this.browserRunHolds.get(run) !== hold || hold.phase !== 'waiting' || run.status !== 'inProgress') return
+    if (this.browserRunHolds.get(run) !== hold) return
+    if (hold.phase !== 'waiting' || run.status !== 'inProgress') { if (run.status !== 'inProgress') this.releaseBrowserRunHold(run); return } // the run ended another way (disconnect, account change)
     hold.cancelled = true
     try { await this.finish(run, { id: run.runId, status: 'completed', items: [], error: null, itemsView: 'full' }) } catch { /* ignore */ }
   }

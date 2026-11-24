@@ -83,14 +83,14 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
       let next, goalMet = 0, pageState = 'content'
       if (/is NOT listed now/.test(evidence)) flags.notListed++
       const listed = /it is listed now as (\[L\d+\] [^\n]*?)\.(?:\n|$)/.exec(evidence)
-      if (pick) next = pick(q0.choices, evidence)
+      if (pick) { const picked = pick(q0.choices, evidence, url, ctx); if (picked && typeof picked === 'object') { next = picked.next; goalMet = picked.goalMet ?? 0 } else next = picked }
       else if (/\/download\//.test(url)) { next = 'goal_met'; goalMet = 0.95 }
       else if (url.endsWith('/otp')) { next = 'blocked'; pageState = 'two_factor_required' }
       else if (/\/invoices/.test(url)) next = listed ? listed[1].trim() : /is NOT listed now/.test(evidence) ? q0.choices.map(c => c.value).find(v => /^\[L1\]/.test(v)) : /두 번째/.test(ctx) ? starts(q0.choices, '987-65') : 'needs_user_context'
       else if (url.endsWith('/single')) next = starts(q0.choices, '111-22')
       else next = starts(q0.choices, '다운로드') ?? 'blocked'
       const answer = choice('next_step', next, 0.95)
-      if (next === 'needs_user_context') answer.probabilities.push({ value: starts(q0.choices, '123-45'), probability: 0.02 }, { value: starts(q0.choices, '987-65'), probability: 0.02 })
+      if (next === 'needs_user_context') answer.probabilities.push(...q0.choices.filter(c => /^\[L\d+\]/.test(c.value)).slice(0, 2).map(c => ({ value: c.value, probability: 0.02 })))
       return { ok: true, text: async () => JSON.stringify({ answers: [answer, choice('page_state', pageState, 0.95), { name: 'goal_met', type: 'predicate', probability: goalMet }] }) }
     },
   })
@@ -164,8 +164,8 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
     flags, chat, store, events, calls, decisions, acts, uiKinds, timeline, factsDuringActs, memoryCalls,
     setUrl(url) { cur = { url, documentId: `doc${++docSeq}`, revision: 1 } },
     // Sent the way the composer sends: the same body whether or not a reply is open (the runtime decides where it goes).
-    async send(message, { wait = true } = {}) { n++
-      const out = await chat.send({ message, requestId: `req-${n}`, clientThreadId: DM, ...(last ? { conversationId: last.conversationId } : {}), executionPolicy: { mode: 'browserBounded' },
+    async send(message, { wait = true, extra = {} } = {}) { n++
+      const out = await chat.send({ ...extra, message, requestId: `req-${n}`, clientThreadId: DM, ...(last ? { conversationId: last.conversationId } : {}), executionPolicy: { mode: 'browserBounded' },
         selectedSources: [source(n)], browserTransportId: 'ui' })
       sends.push(out)
       if (out.inRun) { if (wait) await chat.browserRunIdle() } else last = out
@@ -512,4 +512,43 @@ test('N6 the native turn of the reply fails to start: the run ends as failed, th
   assert.deepEqual([w.runs().length, w.runs()[0].status, w.runs()[0].replyOpen ?? null], [1, 'failed', null])
   assert.deepEqual(w.history().map(r => r[0]), ['user', 'assistant', 'user'])
   assert.equal(w.acts.length, 2, 'the task had already done its part; no retry')
+})
+
+test('N7 the composer names the run it replies to (inRunReplyTo): the open run takes it; a stale or wrong target is refused and nothing is stored or started', async t => {
+  const w = world(t)
+  const first = await w.send(MSG); await w.subjective()
+  await assert.rejects(() => w.send('두 번째 사업자로', { extra: { inRunReplyTo: 'turn-999' } }), e => e.code === 'INRUN_REPLY_UNAVAILABLE')
+  assert.deepEqual([w.acts.length, w.turnIds.length, w.history().length, Boolean(w.runs()[0].replyOpen)], [0, 1, 2, true])
+  const reply = await w.send('두 번째 사업자로', { extra: { inRunReplyTo: first.runId } })
+  assert.deepEqual([reply.inRun, w.note().status, w.acts.length], [true, 'done', 2])
+  await w.subjective()
+  // once the run has ended, a reply aimed at it is refused instead of becoming a second turn
+  await assert.rejects(() => w.send('하나 더', { extra: { inRunReplyTo: first.runId } }), e => e.code === 'INRUN_REPLY_UNAVAILABLE')
+  assert.equal(w.turnIds.length, 2)
+})
+
+test('N8 two questions in one run: each is one completed message with its own open reply; three native turns, one run, one task', async t => {
+  const pick = (choices, evidence, url, ctx) => {
+    const has = text => choices.find(c => c.value.includes(text))?.value
+    if (/\/download\//.test(url)) return { next: 'goal_met', goalMet: 0.95 }
+    if (url.endsWith('/invoices')) return /두 번째/.test(ctx) ? has('987-65') : 'needs_user_context'
+    return /11월/.test(ctx) ? has('11월') : 'needs_user_context'
+  }
+  const w = world(t, { pick, patch: p => { p[`${O}/biz/2`] = [el('m1', 'link', '10월 세금계산서 다운로드', { href: `${O}/download/1.pdf` }), el('m2', 'link', '11월 세금계산서 다운로드', { href: `${O}/download/2.pdf` })] } })
+  const first = await w.send(MSG)
+  const id = w.note().id
+  const q1 = await w.subjective()
+  assert.equal((await w.send('두 번째 사업자로')).inRun, true)
+  assert.deepEqual([w.note().status, w.note().code, w.note().id, w.acts.length], ['need_context', 'choice_needed', id, 1], 'the same task asks again after one page')
+  const q2 = await w.subjective()
+  const open = w.runs()[0]
+  assert.deepEqual([open.status, open.replyOpen.messageId, w.runs().length], ['inProgress', open.messages.filter(m => m.role === 'assistant').at(-1).id, 1])
+  assert.equal((await w.send('11월 걸로')).inRun, true)
+  assert.deepEqual([w.note().status, w.note().id], ['done', id])
+  const report = await w.subjective()
+  assert.deepEqual(w.history(), [['user', MSG], ['assistant', q1], ['user', '두 번째 사업자로'], ['assistant', q2], ['user', '11월 걸로'], ['assistant', report]])
+  assert.deepEqual([w.runs().length, w.runs()[0].status, w.runs()[0].runId, w.turnIds.length], [1, 'completed', first.runId, 3])
+  assert.deepEqual(w.acts.map(a => a.url), [`${O}/biz/2`, `${O}/download/2.pdf`])
+  assert.deepEqual(w.replyEvents(), ['reply.opened', 'reply.closed', 'reply.opened', 'reply.closed'])
+  assert.equal(w.deltas().length, 3, 'three assistant messages, each whole')
 })
