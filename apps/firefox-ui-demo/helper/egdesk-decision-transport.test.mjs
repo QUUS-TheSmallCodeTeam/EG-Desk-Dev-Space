@@ -30,46 +30,6 @@ async function server(t, { onRequest } = {}) {
 const mkTransport = (t, options) => { const tr = createDecisionTransport(options); t.after(() => tr.close()); return tr }
 const post = (tr, url, body = '{"a":1}', init = {}) => tr.fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer egd-synthetic-not-a-key-0005' }, body, ...init })
 
-test('pre-connect opens one connection and writes nothing: no bytes, no request, no credential', async t => {
-  const { log, url } = await server(t)
-  const tr = mkTransport(t)
-  assert.equal(tr.preconnect(url), 'warmed')
-  await sleep(150)
-  assert.equal(log.connections, 1)
-  assert.equal(log.bytes, 0, 'not a single byte reached the server')
-  assert.equal(log.requests.length, 0)
-  assert.equal(tr.preconnect(url), 'skipped', 'at most one warm-up per idle period')
-  await sleep(50)
-  assert.equal(log.connections, 1)
-})
-
-test('the next real request adopts the warm socket; the key travels only in that request', async t => {
-  const { log, url } = await server(t)
-  const tr = mkTransport(t)
-  tr.preconnect(url)
-  await sleep(100)
-  const response = await post(tr, url)
-  assert.equal(response.status, 200)
-  await response.text()
-  assert.equal(log.connections, 1, 'no second connection')
-  assert.equal(log.requests.length, 1)
-  assert.match(log.requests[0].headers.authorization, /^Bearer egd-synthetic/)
-  assert.equal(tr.stats().warmAdopted, 1)
-  // a real request ended the idle period, so a later warm-up is allowed again
-  await sleep(10)
-  assert.equal(tr.preconnect(url), 'skipped', 'a parked free socket already exists')
-})
-
-test('an unused warm socket is closed after its idle limit and never reused', async t => {
-  const { log, url } = await server(t)
-  const tr = mkTransport(t, { warmIdleMs: 120 })
-  tr.preconnect(url)
-  await sleep(350)
-  assert.equal(tr.stats().warmExpired, 1)
-  const response = await post(tr, url); await response.text()
-  assert.equal(log.connections, 2, 'the expired warm socket was not used')
-})
-
 test('sequential requests reuse one socket; the decision client works over the transport', async t => {
   const { log, url } = await server(t)
   const tr = mkTransport(t)
@@ -175,34 +135,16 @@ test('hardening: twelve concurrent decisions are all sent once each and none is 
   assert.equal(ids.length, 12, 'never two sends for one intent')
 })
 
-test('hardening: rapid typing across two DMs warms once; an expired unused warm-up may warm again after the cooldown', async t => {
-  const { log, url } = await server(t)
-  let clock = 0
-  const tr = mkTransport(t, { warmIdleMs: 100, now: () => clock })
-  const results = Array.from({ length: 200 }, () => tr.preconnect(url))
-  await sleep(60)
-  assert.equal(results.filter(r => r === 'warmed').length, 1)
-  assert.equal(log.connections, 1)
-  assert.equal(log.bytes, 0)
-  await sleep(250) // unused: closed
-  assert.equal(tr.preconnect(url), 'skipped', 'still inside the cooldown')
-  clock += 61_000
-  assert.equal(tr.preconnect(url), 'warmed')
-  await sleep(60)
-  assert.equal(log.connections, 2)
-  assert.equal(log.bytes, 0, 'warm-ups never carry content')
-  assert.equal(log.requests.length, 0)
-})
-
-test('hardening: close() releases parked and warm sockets', async t => {
+test('hardening: close() releases parked sockets', async t => {
   const { log, url } = await server(t)
   const tr = createDecisionTransport()
   await (await post(tr, url)).text() // parks a free socket
-  const other = createDecisionTransport(); other.preconnect(url) // a second, warm socket
+  const other = createDecisionTransport(); t.after(() => other.close())
+  await (await post(other, url)).text() // a second parked socket on a second transport
   await sleep(100)
   assert.equal(log.connections, 2)
   assert.equal(log.closed, 0)
   tr.close(); other.close()
   for (let i = 0; i < 40 && log.closed < 2; i++) await sleep(10)
-  assert.equal(log.closed, 2, 'both sockets were closed by shutdown')
+  assert.equal(log.closed, 2, 'both parked sockets were closed by shutdown')
 })

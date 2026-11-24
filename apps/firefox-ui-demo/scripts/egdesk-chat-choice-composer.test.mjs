@@ -655,23 +655,18 @@ test('R1 list navigation never revives a checking, confirmable, or already-revie
   }
 });
 
-test('opening [보기 추천] asks once for a content-free warm-up; its failure never blocks the panel; the call is throttled and bodyless', async () => {
+test('opening [보기 추천] and typing make no bridge call at all (no pre-connect, no warm-up)', async () => {
   const fetched = [];
   const codexBridge = vm.runInNewContext(`({${transport}})`, { fetchJson: (path, args) => { fetched.push([path, args]); return Promise.reject(new Error('offline')); } });
-  codexBridge.warmDecisionConnection(); codexBridge.warmDecisionConnection();
-  await tick();
-  assert.equal(fetched.length, 1, 'at most one warm-up call per 30 s');
-  assert.equal(fetched[0][0], '/decision/preconnect');
-  assert.equal(fetched[0][1].method, 'POST');
-  assert.equal(fetched[0][1].body, '{}', 'no question, options or key leave the composer for the warm-up');
-  let warmed = 0;
+  assert.equal(codexBridge.warmDecisionConnection, undefined);
   const input = Object.assign(el('textarea'), { isConnected: true, value: question, dataset: { threadId: 'room' } });
   const choice = mount({ el, readMode: async () => proof, postChoice: async () => ({ status: 'manual' }), openSettings() {},
-    makeController: () => new AbortController(), makeRequestId: () => 'choice-warm', warm: () => { warmed++; throw new Error('warm failed'); } });
+    makeController: () => new AbortController(), makeRequestId: () => 'choice-open' });
   choice.attach({ input, readScope: () => ({ key: 'room/owner/revision/1', editKey: 'room/owner/draft/1', clientThreadId: 'room', conversationId: 'native',
     profileId: 'review-verifier', question: input.value }), setDraft() {} });
   choice.sync();
   choice.trigger.click();
-  assert.equal(warmed, 1);
-  assert.ok(choice.panel.find('chat-choice-option').length >= 2, 'the editor still opens when the warm-up throws');
+  await tick();
+  assert.deepEqual(fetched, [], 'opening the panel only reads local status through the injected readMode; no direct bridge call');
+  assert.ok(choice.panel.find('chat-choice-option').length >= 2);
 });

@@ -7,8 +7,6 @@ import { validDecisionApiKey } from './egdesk-decision-credential.mjs'
 //   DELETE /decision/credential  → removes the saved key
 //   GET    /decision/mode        → { mode, saved, persisted, modes }
 //   POST   /decision/mode        { mode: 'off'|'advisory'|'on' } → saves the choice
-//   POST   /decision/preconnect  (no body) → { status: 'warmed'|'skipped' }. Content-free warm-up of the TCP/TLS connection to the
-//          Decisions endpoint; only with mode on/advisory and a saved key, never in off. Sends no HTTP request, header or key.
 // status also carries mode (null when no mode setting is wired).
 // Same loopback/Origin guard as the other bridge routes. The key is accepted
 // only in a POST body, is never echoed, and no response or log contains it.
@@ -20,12 +18,12 @@ import { validDecisionApiKey } from './egdesk-decision-credential.mjs'
 
 const SAVE_ON = new Set(['verified', 'no_credit', 'spend_limit_reached', 'rate_limited'])
 const BODY_LIMIT = 4096
-const ROUTES = new Set(['/decision/status', '/decision/credential', '/decision/mode', '/decision/preconnect'])
+const ROUTES = new Set(['/decision/status', '/decision/credential', '/decision/mode'])
 
 // mode: the bridge-settings adapter { mode, saved, persisted, save(mode) } (optional).
 // Revoke Board grants synchronously after each successful save, before returning status.
 // onSettingsChanged is the existing notifier for the other Decisions surfaces.
-export function createDecisionHttpHandler({ store, verifyKey, budget = null, model = null, mode = null, modes = ['off', 'advisory', 'on'], port = 39218, onSettingsChanged = () => {}, boardPresentation = null, preconnect = null } = {}) {
+export function createDecisionHttpHandler({ store, verifyKey, budget = null, model = null, mode = null, modes = ['off', 'advisory', 'on'], port = 39218, onSettingsChanged = () => {}, boardPresentation = null } = {}) {
   if (!store || typeof verifyKey !== 'function') throw new TypeError('store and verifyKey are required')
   const modeStatus = () => (mode ? { mode: mode.mode, saved: mode.saved, persisted: mode.persisted, modes: [...modes] } : null)
   const status = () => ({ configured: store.getApiKey() !== null, store: store.status, keyHint: store.hint(), savedAt: store.savedAt(),
@@ -49,15 +47,6 @@ export function createDecisionHttpHandler({ store, verifyKey, budget = null, mod
           if (mode.mode !== previousMode) onSettingsChanged()
           sendJson(res, 200, modeStatus())
         }
-        return true
-      }
-      if (url.pathname === '/decision/preconnect') {
-        if (req.method !== 'POST') { sendJson(res, 405, { error: 'Use POST', code: 'METHOD_NOT_ALLOWED' }); return true }
-        // Consent is the owner's choice of 사용/기록만 with a saved key (every turn's message goes out anyway); off = zero contact.
-        const allowed = typeof preconnect === 'function' && mode && (mode.mode === 'on' || mode.mode === 'advisory') && store.getApiKey() !== null
-        let warmed = 'skipped'
-        if (allowed) try { warmed = preconnect() === 'warmed' ? 'warmed' : 'skipped' } catch { warmed = 'skipped' }
-        sendJson(res, 200, { status: warmed })
         return true
       }
       if (url.pathname === '/decision/status') {

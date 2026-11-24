@@ -1,9 +1,8 @@
 // L2 cycle 5: cross-lane interaction matrix for the DM chooser, one continuous journey on int/c3.
-// Mounted/real code: Surface chooser controller + the Surface bridge snippet (status/choice/warm-up throttle) in a fake DOM,
+// Mounted/real code: Surface chooser controller + the Surface bridge snippet (status/choice) in a fake DOM,
 // real /decision/* and /chat/choice HTTP handlers, real credential store, real CodexChatRuntime.chatChoice, real decision client,
 // real keep-alive transport talking to a LOOPBACK mock "Decisions" server (127.0.0.1 only, synthetic keys), real calibration log.
-// Not mounted: Surface chatChoiceScope gate (covered by egdesk-chat-choice-restored-dm / settings-return) and the 600 ms typing
-// debounce (the journey calls the same warmDecisionConnection the debounce calls).
+// Not mounted: Surface chatChoiceScope gate (covered by egdesk-chat-choice-restored-dm / settings-return).
 // EGDESK_SIM_OUT=<file> dumps the measured journey as JSON.
 import assert from 'node:assert/strict'
 import fs, { mkdtempSync, rmSync } from 'node:fs'
@@ -109,7 +108,7 @@ function startBridge(t, provider, shared = null) {
   const revisionOf = () => createHash('sha256').update(JSON.stringify([state.mode.mode, state.credentials.getApiKey() !== null, state.credentials.savedAt(), state.credentials.getApiKey()?.length ?? 0, state.gen])).digest('hex')
   const boardPresentation = { settingsRevision: revisionOf, invalidate() {} }
   const decisionHttp = createDecisionHttpHandler({ store: state.credentials, verifyKey: async () => ({ status: 'verified', retryable: false }), model: DECISION_MODEL,
-    mode: state.mode, boardPresentation, preconnect: () => transport.preconnect(provider.endpoint), onSettingsChanged: () => { state.gen++ } })
+    mode: state.mode, boardPresentation, onSettingsChanged: () => { state.gen++ } })
   const client = createDecisionClient({ getApiKey: async () => { if (state.keyStall) await state.keyStall; return state.credentials.getApiKey() }, endpoint: provider.endpoint, fetchImpl: transport.fetch,
     recipientForKey: (key, endpoint, model) => decisionTopicRecipient(key, state.credentials.savedAt(), endpoint, model) })
   const recipient = () => decisionTopicRecipient(state.credentials.getApiKey(), state.credentials.savedAt(), provider.endpoint, DECISION_MODEL)
@@ -156,7 +155,7 @@ function mountDm(t, bridgeRef) {
   scene.key = JSON.stringify([scene.editKey, 0])
   const input = Object.assign(el('textarea'), { isConnected: true, value: question, dataset: { threadId: 'room' } })
   const drafts = []
-  // The real Surface snippet: status read, choice POST and the throttled warm-up, over the (possibly restarted) bridge.
+  // The real Surface snippet: status read and choice POST, over the (possibly restarted) bridge.
   const surfaceBridge = vm.runInNewContext(`({${transportSource}})`, { fetchJson: async (path, args) => {
     const body = args.body ? JSON.parse(args.body) : undefined
     const { status, data } = await bridgeRef.current.call(args.method ?? 'GET', path, body, args.signal)
@@ -164,7 +163,7 @@ function mountDm(t, bridgeRef) {
     return data
   } })
   const choice = mount({ el, readMode: surfaceBridge.readChatChoiceMode, postChoice: surfaceBridge.postChatChoice, makeController: () => new AbortController(),
-    makeRequestId: () => `choice-${time}-${randomUUID()}`, warm: () => surfaceBridge.warmDecisionConnection(),
+    makeRequestId: () => `choice-${time}-${randomUUID()}`,
     openSettings: reason => { scene.opened = (scene.opened || []).concat(reason) } })
   const attach = () => choice.attach({ input, readScope: () => scene.key && ({ key: scene.key, editKey: scene.editKey, ...ids, question: input.value }), setDraft: d => drafts.push(d) })
   attach(); choice.sync()
@@ -184,37 +183,35 @@ const JOURNEY = {}
 const mark = (step, row) => { JOURNEY[step] = row; if (process.env.EGDESK_SIM_OUT) fs.writeFileSync(process.env.EGDESK_SIM_OUT, JSON.stringify(JOURNEY, null, 2)) }
 const countsOf = (provider, bridge) => ({ providerRequests: provider.seen.requests.length, connections: provider.seen.connections, calibration: bridge.state.calibrationLog.entries().length, native: bridge.state.native })
 
-test('X0 mode off or no key: typing, opening the panel and confirming make no provider contact and no warm-up', async t => {
+test('X0 mode off or no key: typing, opening the panel and reviewing make no provider contact', async t => {
   const provider = await mockProvider(t)
   const bridge = startBridge(t, provider); const ref = { current: bridge }
   const dm = mountDm(t, ref)
-  // no key saved yet: warm-up is skipped, nothing connects
-  dm.surfaceBridge.warmDecisionConnection(); await settleAll()
-  assert.equal(provider.seen.connections, 0); assert.equal(bridge.transport.stats().warmups, 0)
+  dm.choice.trigger.click(); await settleAll() // no key saved yet: opening the panel contacts nobody
+  assert.equal(provider.seen.connections, 0)
   await bridge.call('POST', '/decision/credential', { apiKey: KEY1 })
   await bridge.call('POST', '/decision/mode', { mode: 'off' })
-  const fresh = mountDm(t, ref)          // new UI throttle
-  fresh.surfaceBridge.warmDecisionConnection(); fresh.choice.trigger.click(); await settleAll()
-  assert.equal(provider.seen.connections, 0, 'off = zero contact'); assert.equal(bridge.transport.stats().warmups, 0)
+  const fresh = mountDm(t, ref)
+  fresh.choice.trigger.click(); await settleAll()
+  assert.equal(provider.seen.connections, 0, 'off = zero contact')
   fresh.typeOptions(); fresh.click('review'); await settleAll()
   assert.match(fresh.text(), /결정 모델이 꺼져 있습니다/); assert.deepEqual(fresh.buttons(), ['settings', 'cancel'])
   assert.equal(provider.seen.requests.length, 0); assert.equal(bridge.state.calibrationLog.entries().length, 0)
   assert.notEqual(fresh.where(), 'body(lost)')
 })
 
-test('X1 one journey: warm-up -> timeout (dispatched) -> retry -> spend limit -> mode off mid-flight -> key replaced mid-flight -> bridge restart', async t => {
+test('X1 one journey: open panel (no contact) -> timeout (dispatched) -> retry -> spend limit -> mode off mid-flight -> key replaced mid-flight -> bridge restart', async t => {
   const provider = await mockProvider(t)
   const bridge = startBridge(t, provider); const ref = { current: bridge }
   await bridge.call('POST', '/decision/credential', { apiKey: KEY1 })
   await bridge.call('POST', '/decision/mode', { mode: 'on' })
   const dm = mountDm(t, ref)
 
-  // 1) typing -> warm-up; then opening the panel -> must not warm a second time
-  dm.surfaceBridge.warmDecisionConnection(); await until(() => provider.seen.connections === 1, 'warm connection')
+  // 1) opening the panel contacts nobody: there is no pre-connect
   dm.choice.trigger.click(); await settleAll()
-  const warm = { ...countsOf(provider, bridge), warmups: bridge.transport.stats().warmups, http: provider.seen.requests.length }
-  mark('1 typing + open panel', warm)
-  assert.deepEqual([warm.warmups, warm.connections, warm.providerRequests], [1, 1, 0], 'one warm-up, no HTTP request')
+  const opened = countsOf(provider, bridge)
+  mark('1 open panel', opened)
+  assert.deepEqual([opened.connections, opened.providerRequests], [0, 0], 'no connection and no request before the user confirms')
   assert.equal(dm.where(), 'option', 'opening lands on the first option field')
   dm.typeOptions(); dm.click('review'); await settleAll()
   assert.ok(dm.buttons().includes('confirm')); assert.equal(dm.where(), 'confirm')
@@ -223,11 +220,10 @@ test('X1 one journey: warm-up -> timeout (dispatched) -> retry -> spend limit ->
   provider.plan.push('hang')
   const confirm = dm.find('confirm')[0]; confirm.click(); confirm.click()
   await until(() => /제한 시간/.test(dm.text()), 'timeout text')
-  const timedOut = { ...countsOf(provider, bridge), text: dm.text().slice(0, 100), buttons: dm.buttons(), focus: dm.where(), adopted: bridge.transport.stats().warmAdopted }
+  const timedOut = { ...countsOf(provider, bridge), text: dm.text().slice(0, 100), buttons: dm.buttons(), focus: dm.where() }
   mark('2 confirm x2 -> timeout (dispatched)', timedOut)
   assert.equal(timedOut.providerRequests, 1, 'one paid request for a double-clicked confirm')
-  assert.equal(timedOut.connections, 1, 'the request adopted the warm socket')
-  assert.equal(timedOut.adopted, 1)
+  assert.equal(timedOut.connections, 1, 'the confirmed request opened the only connection')
   assert.match(timedOut.text, /요청은 이미 보냈으므로 비용이 청구될 수 있고/); assert.deepEqual(timedOut.buttons, ['retry', 'edit', 'cancel'])
   assert.equal(timedOut.focus, 'retry'); assert.equal(timedOut.calibration, 1)
 
