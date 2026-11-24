@@ -497,15 +497,16 @@ export function diffJourneys(previous, current) {
   const group = list => { const m = new Map(); for (const row of list ?? []) { if (!m.has(row.family)) m.set(row.family, []); m.get(row.family).push(row) } return m }
   const steps = current.steps.map(cur => {
     const prev = (previous?.steps ?? []).find(step => step.id === cur.id) ?? null, changes = []
-    // A step the earlier run did not have (added by a later plan): its requests and expectations are new, nothing in it is a change.
-    if (!prev) return { step: cur.id, state: cur.state, added: true, changes: [{ kind: 'new_step', requests: fam(cur.requests) },
-      ...(cur.checks ?? []).map(c => ({ kind: 'expectation', id: c.id, severity: c.severity, owner: c.owner, prev: 'new', cur: c.pass }))] }
-    const pf = fam(prev?.requests), cf = fam(cur.requests)
-    for (const family of [...new Set([...Object.keys(pf), ...Object.keys(cf)])]) if ((pf[family] ?? 0) !== (cf[family] ?? 0)) changes.push({ kind: 'requests', family, prev: pf[family] ?? 0, cur: cf[family] ?? 0 })
     // In a replay, a request the earlier run did not make was answered by the script, and one whose body changed got an answer given to
     // another body: both are named, and a scripted answer is not compared with a real one.
     const scripted = (cur.requests ?? []).filter(row => row.replay === 'unmatched'), reused = (cur.requests ?? []).filter(row => row.replay === 'recorded_changed_body')
-    if (scripted.length || reused.length) changes.push({ kind: 'replay', scripted: scripted.map(row => row.family), changedBody: reused.map(row => row.family) })
+    const replayed = scripted.length || reused.length ? [{ kind: 'replay', scripted: scripted.map(row => row.family), changedBody: reused.map(row => row.family) }] : []
+    // A step the earlier run did not have (added by a later plan): its requests and expectations are new, nothing in it is a change.
+    if (!prev) return { step: cur.id, state: cur.state, added: true, changes: [{ kind: 'new_step', requests: fam(cur.requests) }, ...replayed,
+      ...(cur.checks ?? []).map(c => ({ kind: 'expectation', id: c.id, severity: c.severity, owner: c.owner, prev: 'new', cur: c.pass }))] }
+    changes.push(...replayed)
+    const pf = fam(prev?.requests), cf = fam(cur.requests)
+    for (const family of [...new Set([...Object.keys(pf), ...Object.keys(cf)])]) if ((pf[family] ?? 0) !== (cf[family] ?? 0)) changes.push({ kind: 'requests', family, prev: pf[family] ?? 0, cur: cf[family] ?? 0 })
     const pm = group(prev?.requests)
     for (const [family, list] of group(cur.requests)) list.forEach((row, i) => {
       const before = pm.get(family)?.[i]
