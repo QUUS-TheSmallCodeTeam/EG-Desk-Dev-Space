@@ -8,7 +8,7 @@ import { Readable } from 'node:stream'
 import test from 'node:test'
 import { createBoardAgentAskHttpHandler } from './egdesk-board-agent-ask-http.mjs'
 import { createBoardAgentAskService } from './egdesk-board-agent-ask.mjs'
-import { selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
+import { localDay, readScreeningInput, selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
 import { createBoardAgentDraftTransport } from './egdesk-board-agent-draft.mjs'
 import { createDecisionBudget, createDecisionClient, DECISIONS_ENDPOINT } from './egdesk-decision-client.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
@@ -63,14 +63,15 @@ test('quota refresh on next explicit Board draft run uses the saved key without 
       const post = { phase, endpointMatched: url === DECISIONS_ENDPOINT, method: options.method,
         sameFixtureCredential: options.headers.authorization === `Bearer ${fixtureCredential}`,
         requestMatched: phase === 'check' ? body.input === 'EG-Desk key check' && body.questions.length === 1 :
-          body.input === JSON.stringify({ question: QUESTION, candidates: [{ alias: 'c1', text: LOCAL }, { alias: 'c2', text: SELECTED }] }) &&
-          body.questions.length === 2 && body.questions.every((q, i) => q.type === 'predicate' && q.name === `c${i + 1}`),
+          JSON.stringify(readScreeningInput(body.input)) === JSON.stringify({ question: QUESTION, today: localDay(Date.now()), candidates: [{ alias: 'c1', text: LOCAL }, { alias: 'c2', text: SELECTED }] }) &&
+          // L1 c12: one relevance and one "still in effect today?" question per approved excerpt
+          body.questions.length === 4 && body.questions.every((q, i) => q.type === 'predicate' && q.name === ['c1', 'c2', 'c1_now', 'c2_now'][i]),
         providerStatus: quota === 'exhausted' ? 429 : 200,
       }
       posts.push(post)
       if (post.providerStatus === 429) return Response.json({ error: { code: 'insufficient_quota', type: 'insufficient_quota' } }, { status: 429 })
       return Response.json({ model: client.model, usage: { input_tokens: 19, output_tokens: 2, total_tokens: 21 },
-        answers: [{ name: 'c1', type: 'predicate', probability: 0.1 }, { name: 'c2', type: 'predicate', probability: 0.98 }] })
+        answers: [{ name: 'c1', type: 'predicate', probability: 0.1 }, { name: 'c2', type: 'predicate', probability: 0.98 }, { name: 'c1_now', type: 'predicate', probability: 0.97 }, { name: 'c2_now', type: 'predicate', probability: 0.97 }] })
     },
   })
   const handleSettings = createDecisionHttpHandler({ store, mode, budget, model: client.model, verifyKey: client.verifyKey })

@@ -61,12 +61,15 @@ const validateExcerpts = excerpts => {
   return excerpts.map(excerpt => txt(excerpt, 1500))
 }
 
-// Content-free calibration entry (canon 5.3) for the Board reply screening (feature 'board_reply', question 'relevance').
+// Content-free calibration entry (canon 5.3) for the Board reply screening (feature 'board_reply', questions 'relevance' and 'in_effect').
 // Numbers and closed words only: no excerpt/question text, ids, names or keys.
 function screeningEntry(mode, observed, attached) {
   if (!observed || (mode !== 'advisory' && mode !== 'on')) return null
   const judgments = observed.probabilities.map(p => ({ q: 'relevance', p, threshold: observed.bar, kind: 'board', would: p >= observed.bar ? 'attach' : 'skip' }))
     .sort((a, b) => b.p - a.p)
+  // L1 cycle 12: whether each excerpt is still in effect today (a relevant one below the bar is dated and left out of the answer).
+  const current = Array.isArray(observed.inEffect) ? observed.inEffect.map(p => ({ q: 'in_effect', p, threshold: observed.inEffectBar, kind: 'board', would: p >= observed.inEffectBar ? 'accept' : 'reject' })).sort((a, b) => b.p - a.p) : []
+  judgments.push(...current)
   return { feature: 'board_reply', mode, judgments, candidates: observed.candidates, judgedTotal: judgments.length,
     ...(observed.failure ? { fallback: observed.failure } : {}), attached }
 }

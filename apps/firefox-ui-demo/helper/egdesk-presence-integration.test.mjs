@@ -151,7 +151,8 @@ test('scenario: owner at A, B (region) asks -> options avoid A and include a spo
   await w.round([a, b, c]); await w.round([a, b, c]);
   rows = await push();
   assert.deepEqual(rows.map((x) => [x.member, x.active, x.viewport]), [['self', true, OWNER_VIEW], [aliasB, true, B_VIEW]]);
-  const scene1 = sceneOf(rows, [task('inspect-1', aliasB)]);
+  // B asked and waits for it (L1 c12: who waits is an input of the code's placement rule)
+  const scene1 = sceneOf(rows, [task('inspect-1', aliasB, { waiting: [aliasB] })]);
   const request1 = WP.placementRequest(scene1, { taskId: 'inspect-1', surface: FILE });
   const kinds = request1.options.map((o) => o.kind);
   assert.ok(request1.options.length >= 2);
@@ -163,13 +164,14 @@ test('scenario: owner at A, B (region) asks -> options avoid A and include a spo
   const near = request1.options.find((o) => o.kind === 'near_requester');
   assert.ok(near, 'a spot near B is offered');
   assert.deepEqual([near.rect, near.descriptor.distance, near.descriptor.direction, near.descriptor.insideView], [r(3624, 224, 720, 520), 'near', 'right', []], 'just outside B\'s view, on B\'s side of the space');
-  assert.equal(request1.dto.task.requester, 'M2'); assert.equal(request1.fallback.kind, 'near_requester', 'the code\'s own pick is the spot near B');
+  assert.equal(request1.dto.requester, 'M2'); assert.deepEqual([request1.plan.rule, request1.fallback.kind], ['requester_working', 'near_requester'], 'the code\'s rule: B waits and is working, so the spot just outside B\'s view');
   assert.ok(normalizePlacementDto(request1.dto));
   assert.ok(!JSON.stringify(request1.dto).includes(aliasB) && !/"x"|"rect"|inspect-1|own-note/.test(JSON.stringify(request1.dto)), 'no alias of the feed, id or coordinate in what may leave the window');
   // the whole placement with a judge, re-read against the live scene: lands near B, never in A
-  const placed = await WP.placeSurface({ scene: () => ({ presence: a.presence.snapshot(), cards: CARDS, tasks: [task('inspect-1', aliasB)] }), request: { taskId: 'inspect-1', surface: FILE },
-    judge: (dto) => dto.options.find((o) => o.kind === 'near_requester').alias });
-  assert.deepEqual([placed.source, placed.rect, hits(placed.rect, OWNER_VIEW)], ['decision', r(3624, 224, 720, 520), false]);
+  let asked = 0;
+  const placed = await WP.placeSurface({ scene: () => ({ presence: a.presence.snapshot(), cards: CARDS, tasks: [task('inspect-1', aliasB, { waiting: [aliasB] })] }), request: { taskId: 'inspect-1', surface: FILE },
+    judge: () => { asked++; return null; } });
+  assert.deepEqual([placed.source, placed.rect, hits(placed.rect, OWNER_VIEW), asked], ['rule', r(3624, 224, 720, 520), false, 0], 'decided by the rule: no card here may be asked about, so nothing is asked');
   // and the owner's own next surface keeps out of B's view
   const own = WP.placementRequest(sceneOf(rows, [task('own-1', null)]), { taskId: 'own-1', surface: FILE });
   for (const o of own.options) assert.equal(hits(o.rect, B_VIEW), false, 'nothing of the owner\'s work opens where B is looking');
@@ -187,7 +189,11 @@ test('scenario: owner at A, B (region) asks -> options avoid A and include a spo
   const scene2 = sceneOf(rows, [task('ask-c', aliasC), task('own-2', null)]);
   assert.deepEqual(scene2.members.map((m) => m.member), ['self', aliasB], 'C has no rectangle, so C is not in the placement scene at all');
   const forC = WP.placementRequest(scene2, { taskId: 'ask-c', surface: FILE }), forOwner = WP.placementRequest(scene2, { taskId: 'own-2', surface: FILE });
-  assert.deepEqual(forC.options.map((o) => [o.kind, o.rect]), forOwner.options.map((o) => [o.kind, o.rect]), 'a surface for C\'s request is placed exactly as the owner\'s own would be: nothing is placed relative to C');
+  // C has no rectangle: nothing is placed relative to C. Since L1 c12 C is not taken for the local person either: C is an UNKNOWN requester,
+  // so the code places conservatively (the owner's adjacent work area) and protects every view, the owner's own included.
+  assert.deepEqual([forC.plan.rule, forC.fallback.kind, forC.dto.requester], ['unknown_presence', 'adjacent_area', null]);
+  assert.equal(forOwner.plan.rule, 'nobody_waiting');
+  for (const o of forC.options) assert.equal(hits(o.rect, OWNER_VIEW), false, o.kind + ': a request of someone the owner cannot see is never placed in the owner\'s view');
   assert.deepEqual(forC.dto.members.map((m) => m.alias), ['M1', 'M2'], 'and nothing about C (not even an alias) is in the placement request');
   for (const o of forC.options) assert.equal(hits(o.rect, B_VIEW), false, 'B\'s view stays protected meanwhile');
   steps.push(['2 C active only', 'audience(C)=requester present', 'scene members=2']);

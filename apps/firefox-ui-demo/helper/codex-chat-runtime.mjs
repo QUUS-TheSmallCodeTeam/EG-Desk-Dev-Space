@@ -5350,6 +5350,15 @@ export class CodexChatRuntime {
     return this.trackFlowJob(this.postPointer(subject, attention))
   }
 
+  // Work placement (egdesk-work-placement.mjs contextFor): the session's current or last run, its request and posted answer, and its egress gate,
+  // so placement's content questions follow the same permissions as the run's other models. Read-only; null when the session has no run.
+  placementContextFor(key, { canvasMaySend = false } = {}) {
+    const hb = typeof key === 'string' ? this.heartbeats.get(key) : null
+    const run = hb ? this.heartbeatSubjects.get(hb)?.run : null
+    if (!run) return null
+    return { request: this.runUserText(run), answer: run.status === 'inProgress' ? '' : this.runAnswerText(run), egress: this.decisionEgressFor(run, { canvasMaySend: canvasMaySend === true }) }
+  }
+
   // What the person wrote for this run, and the answer the run posted (its own text, which its model received or wrote).
   runUserText(run) { return this.draftCheckTurns.get(run)?.userText || run.messages?.find(m => m.role === 'user')?.text || '' }
   runAnswerText(run) { return [...(run.messages || [])].reverse().find(m => m.role === 'assistant' && m.status === 'complete' && !String(m.id).startsWith('egdesk-flow:'))?.text || '' }

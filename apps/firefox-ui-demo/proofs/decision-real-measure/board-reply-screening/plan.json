@@ -1,13 +1,13 @@
 {
-  "set": "board-reply-screening-v1",
-  "tokenCeiling": 8000,
-  "passRule": "A request passes when every hard check holds: each clearly relevant excerpt has probability >= 0.6 (the product's bar: it is selected) and each clearly irrelevant excerpt has probability <= 0.599 (below the bar: it is not selected). The set passes when all 3 requests pass. Near-miss and wrong-time/version excerpts are soft checks (expected <= 0.599); soft misses never fail the run and are reported per kind (the note of every check starts with its kind).",
+  "set": "board-reply-screening-v2",
+  "tokenCeiling": 6000,
+  "passRule": "A request passes when every hard check holds. Relevance (cN): each clearly relevant excerpt >= 0.6 (the product's bar: it is selected), each clearly irrelevant one <= 0.599. In effect on the ask's day (cN_now): each relevant, current excerpt >= 0.5 (it is not dropped as dated) and each wrong-time/version excerpt <= 0.499 (HARD: below the bar it is dated and never offered as the current answer). The set passes when all 3 requests pass. Near-miss relevance (<= 0.599) is soft: a miss is reported, never a failure. The note of every check starts with its kind.",
   "requests": [
     {
       "id": "ask-visitor-parking",
       "file": "requests/ask-visitor-parking.json",
-      "sha256": "d834d80ad04be5d820295bdc03d5193b1418ebaefb2cb1a37dec093003988e5d",
-      "estInputTokens": 1226,
+      "sha256": "c79af9526fccd16aaa5acc3762bd89a5076500be84a3a83d95119be9528e56f6",
+      "estInputTokens": 1984,
       "expect": [
         {
           "name": "c1",
@@ -24,6 +24,13 @@
           "note": "relevant: where visitors park"
         },
         {
+          "name": "c2_now",
+          "kind": "predicate",
+          "min": 0.5,
+          "severity": "hard",
+          "note": "relevant, in effect: where visitors park"
+        },
+        {
           "name": "c3",
           "kind": "predicate",
           "max": 0.599,
@@ -31,11 +38,11 @@
           "note": "near_miss: parking, but staff permits"
         },
         {
-          "name": "c4",
+          "name": "c4_now",
           "kind": "predicate",
-          "max": 0.599,
-          "severity": "soft",
-          "note": "wrong_time: last year's visitor parking, closed since"
+          "max": 0.499,
+          "severity": "hard",
+          "note": "wrong_time, no longer in effect: last year's visitor parking, closed since"
         },
         {
           "name": "c5",
@@ -45,26 +52,26 @@
           "note": "relevant: the lot's hours on the day"
         },
         {
-          "name": "c6",
+          "name": "c5_now",
           "kind": "predicate",
-          "max": 0.599,
+          "min": 0.5,
           "severity": "hard",
-          "note": "irrelevant: lost property"
+          "note": "relevant, in effect: the lot's hours on the day"
         }
       ]
     },
     {
       "id": "ask-plan-price-version",
       "file": "requests/ask-plan-price-version.json",
-      "sha256": "4173926662a11cc646c353313441e9955752bff999121a392b8b31b006b5e99d",
-      "estInputTokens": 1221,
+      "sha256": "ac13f5644f1951f034c0b95abab9be5ee1ef93d6237047d34c0a8264ee4e546e",
+      "estInputTokens": 1593,
       "expect": [
         {
-          "name": "c1",
+          "name": "c1_now",
           "kind": "predicate",
-          "max": 0.599,
-          "severity": "soft",
-          "note": "wrong_time: the discontinued 2024 version"
+          "max": 0.499,
+          "severity": "hard",
+          "note": "wrong_time, no longer in effect: the discontinued 2024 version"
         },
         {
           "name": "c2",
@@ -81,33 +88,26 @@
           "note": "relevant: the current price and seats"
         },
         {
+          "name": "c3_now",
+          "kind": "predicate",
+          "min": 0.5,
+          "severity": "hard",
+          "note": "relevant, in effect: the current price and seats"
+        },
+        {
           "name": "c4",
           "kind": "predicate",
           "max": 0.599,
           "severity": "soft",
           "note": "near_miss: another plan's price"
-        },
-        {
-          "name": "c5",
-          "kind": "predicate",
-          "max": 0.599,
-          "severity": "hard",
-          "note": "irrelevant: blog schedule"
-        },
-        {
-          "name": "c6",
-          "kind": "predicate",
-          "min": 0.6,
-          "severity": "hard",
-          "note": "relevant: what the included seats count"
         }
       ]
     },
     {
       "id": "ask-workshop-refund",
       "file": "requests/ask-workshop-refund.json",
-      "sha256": "2f1c754d1fc547a41ae30f75609186c11b2418530f152301c58b9759caf7cf57",
-      "estInputTokens": 1228,
+      "sha256": "71ba2a8ffba4d0370b2bf0cfe30f20035571ea40e3afae90bc21c6866c00fc98",
+      "estInputTokens": 1607,
       "expect": [
         {
           "name": "c1",
@@ -115,6 +115,13 @@
           "min": 0.6,
           "severity": "hard",
           "note": "relevant: the full-refund deadline"
+        },
+        {
+          "name": "c1_now",
+          "kind": "predicate",
+          "min": 0.5,
+          "severity": "hard",
+          "note": "relevant, in effect: the full-refund deadline"
         },
         {
           "name": "c2",
@@ -131,25 +138,11 @@
           "note": "irrelevant: library hours"
         },
         {
-          "name": "c4",
+          "name": "c4_now",
           "kind": "predicate",
-          "max": 0.599,
-          "severity": "soft",
-          "note": "wrong_time: last term's refund rule"
-        },
-        {
-          "name": "c5",
-          "kind": "predicate",
-          "min": 0.6,
+          "max": 0.499,
           "severity": "hard",
-          "note": "relevant: what happens after the deadline"
-        },
-        {
-          "name": "c6",
-          "kind": "predicate",
-          "max": 0.599,
-          "severity": "hard",
-          "note": "irrelevant: car park maintenance"
+          "note": "wrong_time, no longer in effect: last year's refund rule, abolished"
         }
       ]
     }

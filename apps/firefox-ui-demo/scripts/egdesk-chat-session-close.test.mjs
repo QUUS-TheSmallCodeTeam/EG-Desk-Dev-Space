@@ -219,6 +219,7 @@ test('end to end: hiding the chat is not leaving; the pointer still arrives in t
   const before = w.history().length
   w.step('hidden')
   await pointerDecided(w)
-  assert.deepEqual(w.byFeature('hidden'), { work_placement: 1, heartbeat: 1 })
+  // L1 c12: the owner must act (waiting_owner), which the code knows: no placement question, only the heartbeat's
+  assert.deepEqual(w.byFeature('hidden'), { heartbeat: 1 })
   assert.equal(w.history().length, before + 1, 'one pointer message')
 })

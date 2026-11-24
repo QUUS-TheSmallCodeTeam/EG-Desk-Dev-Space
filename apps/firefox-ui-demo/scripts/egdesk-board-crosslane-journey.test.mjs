@@ -178,7 +178,7 @@ async function rig(t, { mode = 'on' } = {}) {
       if (step.status) return Response.json({ error: { code: step.code, type: step.code } }, { status: step.status });
       return Response.json({ answers: [ans(step.a, step.b, step.choice)], usage: { input_tokens: 10 } });
     }
-    return Response.json({ model: DECISION_MODEL, answers: body.questions.map((q, i) => ({ name: q.name, type: 'predicate', probability: [0.1, 0.98, 0.02][i] })), usage: { input_tokens: 7 } });
+    return Response.json({ model: DECISION_MODEL, answers: body.questions.map((q, i) => ({ name: q.name, type: 'predicate', probability: q.name.endsWith('_now') ? 0.97 : [0.1, 0.98, 0.02][i] })), usage: { input_tokens: 7 } }); // _now: L1 c12 "still in effect today?" per excerpt
   };
   const board = createBoardPresentationHttpHandler({ credentials: store, getMode: () => modeStore.mode, budget, fetchImpl: provider, calibrationLog: calibration });
   const settings = createDecisionHttpHandler({ store, mode: modeStore, model: DECISION_MODEL, budget, verifyKey: async () => ({ status: 'verified' }), boardPresentation: board });
