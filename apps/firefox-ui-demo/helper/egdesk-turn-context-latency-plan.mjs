@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { DECISION_MODEL } from './egdesk-decision-client.mjs'
+import { CONTENT_FREE_REQUESTS } from './egdesk-decision-egress.mjs'
 import { prepareTurnContext } from './egdesk-context-setup.mjs'
 import { DECISION_IDLE_MS } from './egdesk-decision-transport.mjs'
 import { TOKEN_MODEL, estimateBodyTokens, independentEstimate } from './egdesk-decision-real-runner.mjs'
@@ -225,4 +226,71 @@ export function analyzeWarmup(byRun) {
   }
   const possibleReadings = [...possible]
   return { runs, reading, pointsIn: 6 - missing.length, possibleReadings, decidedAlready: possibleReadings.length === 1 ? possibleReadings[0] : null }
+}
+
+// ---- cycle 19: does the SIZE of the warm-up request matter? (PREPARED, NOT SENT; run only after the six turn-context-warmup points) ----
+// The product warm-up (helper/egdesk-decision-warmup.mjs) is the fixed content-free request, about 159 estimated tokens. The probe points B and C
+// used the smallest real turn_context body (about 648 tokens) as the warm-up and the measured request was fast after it (324 and 269 ms). The
+// design ASSUMES the smaller product body warms as well; this probe tests that assumption directly, with the same two-request shape as B:
+//   S1-small  the product warm-up body (CONTENT_FREE_REQUESTS.warmup), then the measured turn_context 1 s later
+//   S2-large  the 648-token warm-up (as in B and C), then the measured turn_context 1 s later
+// Each is its own run and must start after at least 10 minutes with no Decisions request from this machine (the point runner enforces it with the
+// shared send stamp: scripts/egdesk-turn-context-warmup-run.mjs --set size --point S1|S2). The measured body is a 2-item turn_context (about 840
+// tokens). Total estimate about 2.5k input tokens (bound 3k), the run ceilings add up to 2.7k. The idle tail is judged by the
+// warm-up request itself: a warm-up over the warm budget (800 ms) means the tail occurred in that run (it did in B1: 1,597 ms, C1: 1,187 ms).
+// Registered readings (measured request over 800 ms = slow):
+//   inconclusive                  neither warm-up was slow: the idle tail did not occur, nothing follows about the size
+//   size does not matter          both warm-ups slow (the tail occurred in both) and both measured requests fast
+//   small body does not warm      S1's warm-up slow and S1's measured slow while S2's measured is fast: the assumption is wrong, send the larger body
+//   warm-up did not help          both measured slow although a tail occurred: contradicts points B and C, repeat before any design change
+//   one run only                  the tail occurred in one run only: that run is read, the other is repeated
+export const SIZE_SET = 'turn-context-warmup-size-v1'
+export const SIZE_DIR = 'proofs/decision-real-measure/turn-context-warmup-size'
+export const SIZE_CEILING = 3000
+export const SIZE_ESTIMATE_BOUND = 3000
+const SIZE_MEASURED = Object.freeze(REALISTIC.slice(0, 2))
+export const SIZE_RUNS = Object.freeze([
+  ['S1-small', [['warmup', 0, null], ['measured', 1000, 'A사 견적서는 지금 어디까지 진행됐어?']]],
+  ['S2-large', [['warmup', 0, 'v1 견적은 언제 보냈었지?'], ['measured', 1000, 'v2 납기는 언제로 잡혀 있어?']]],
+])
+/** -> { runs: [{ dir, plan, planBytes, files, est }], totals } — deterministic; sends nothing. */
+export async function buildSizePlan() {
+  const runs = []
+  for (const [dir, items] of SIZE_RUNS) {
+    const files = [], requests = []
+    for (const [id, waitBeforeMs, message] of items) {
+      const body = id === 'warmup' && message === null
+        ? { model: DECISION_MODEL, input: CONTENT_FREE_REQUESTS.warmup.input, questions: CONTENT_FREE_REQUESTS.warmup.questions }
+        : await idleBody(message, id === 'warmup' ? CANDIDATES : SIZE_MEASURED)
+      const bytes = Buffer.from(JSON.stringify(body), 'utf8'), file = `requests/${id}.json`
+      files.push({ file, bytes })
+      requests.push({ id, file, sha256: sha(bytes), estInputTokens: estimateBodyTokens(bytes.toString('utf8')), ...(waitBeforeMs ? { waitBeforeMs } : {}), expect: [], recordOnly: true })
+    }
+    const est = requests.reduce((t, r) => t + r.estInputTokens, 0)
+    const plan = { set: `${SIZE_SET}/${dir}`, tokenCeiling: Math.ceil(est * TOKEN_MODEL.margin / 10) * 10, transport: 'product',
+      passRule: 'Record only (latency probe). PRECONDITION, not enforced by the runner: start this run only after at least 10 minutes with no Decisions request from this machine ' +
+        '(the point runner checks the shared send stamp). Run order S1-small, S2-large. Read with scripts/egdesk-turn-context-warmup-run.mjs --set size --analyze.',
+      requests }
+    runs.push({ dir, plan, planBytes: Buffer.from(JSON.stringify(plan, null, 2) + '\n'), files, est })
+  }
+  const est = runs.reduce((t, r) => t + r.est, 0), ceilings = runs.reduce((t, r) => t + r.plan.tokenCeiling, 0)
+  if (est > SIZE_ESTIMATE_BOUND) throw new Error(`the size probe estimates ${est} input tokens, over ${SIZE_ESTIMATE_BOUND}`)
+  if (ceilings > SIZE_CEILING) throw new Error(`the size probe's ceilings add up to ${ceilings}, over ${SIZE_CEILING}`)
+  return { runs, totals: { runs: runs.length, requests: runs.reduce((t, r) => t + r.plan.requests.length, 0), estInputTokens: est, ceilings } }
+}
+/** { 'S1-small': results, 'S2-large': results } (a run's results: { warmup, measured }) -> per run the two requests and the registered reading. */
+export function analyzeSize(byRun) {
+  const row = dir => { const m = byRun?.[dir]?.measured, w = byRun?.[dir]?.warmup
+    return m && w ? { warmupMs: w.elapsedMs, warmupServerMs: w.openaiProcessingMs == null ? null : Number(w.openaiProcessingMs), measuredMs: m.elapsedMs,
+      measuredServerMs: m.openaiProcessingMs == null ? null : Number(m.openaiProcessingMs), reusedSocket: m.reusedSocket ?? null, tail: w.elapsedMs > BUDGETS.warm, slow: m.elapsedMs > BUDGETS.warm } : null }
+  const runs = Object.fromEntries(SIZE_RUNS.map(([dir]) => [dir, row(dir)]))
+  const [s1, s2] = [runs['S1-small'], runs['S2-large']]
+  const reading = !s1 || !s2 ? 'incomplete'
+    : !s1.tail && !s2.tail ? 'inconclusive: the idle tail did not occur in either run'
+      : s1.tail !== s2.tail ? 'one run only: the tail occurred in one run, repeat the other'
+        : s1.slow && s2.slow ? 'warm-up did not help: contradicts points B and C, repeat before any design change'
+          : s1.slow ? 'small body does not warm: send the larger body'
+            : s2.slow ? 'large body failed while the small one warmed: size does not matter for the product body, repeat S2'
+              : 'size does not matter'
+  return { runs, reading }
 }

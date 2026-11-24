@@ -53,8 +53,9 @@ export const BRIDGE_COMPOSITION = Object.freeze({
     'relevanceRules', 'commandJudge', 'terminalGate', 'workingMemory', 'topicRecipient', 'recipientForChatChoice', 'reviewRevision', 'memoryEvidence', 'collect'],
   flags: ['EGDESK_DRAFT_CHECK', 'EGDESK_DRAFT_CHECK_DESIGN', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_TERMINAL_GATE', 'EGDESK_TERMINAL_GATE_METHOD',
     'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES'],
-  // present in the bridge, deliberately not reproduced here (reason in the report): the Browser Card and the Desk's presence need a window
-  notReproduced: { keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration'], flags: ['EGDESK_PRESENCE', 'EGDESK_BROWSER_ENTRY', 'EGDESK_WORK_PLACEMENT', 'EGDESK_BRIEFING_FLOW', 'EGDESK_HUD_ROUTING'] },
+  // present in the bridge, deliberately not reproduced here (reason in the report): the Browser Card and the Desk's presence need a window; the idle
+  // warm-up (c18, EGDESK_DECISION_WARMUP, off) only matters to the Decisions endpoint and this check runs with Decisions off
+  notReproduced: { keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration', 'warmup'], flags: ['EGDESK_PRESENCE', 'EGDESK_BROWSER_ENTRY', 'EGDESK_WORK_PLACEMENT', 'EGDESK_BRIEFING_FLOW', 'EGDESK_HUD_ROUTING'] },
 })
 
 const usage = message => Object.assign(new Error(message), { code: 'usage' })
