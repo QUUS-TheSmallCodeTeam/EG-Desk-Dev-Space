@@ -5536,7 +5536,10 @@ export class CodexChatRuntime {
     if (flow.closed || run.status !== 'inProgress' || !flow.canSpeak || this.finalAnswerBegun(run, flow)) return null
     if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return null
     const facts = { ...beatFlowFacts({ heartbeatFacts: beat.facts, run, flow, own: FLOW_OWN_KINDS }), ...(subject ? this.pointerFacts(subject, beat.facts) : {}), heartbeatFacts: beat.facts }
-    const options = enumerateOptions(facts).filter(kind => !(flow.taskTurn && kind === 'ask_missing'))
+    // c19 (owner decision): while this run's browser task is paused for the person (its question being worded or posted), the question
+    // supersedes any wait message: only a pointer (to someone else, its own route) may still be judged.
+    const taskPaused = this.browserTaskBrief(run)?.status === 'paused'
+    const options = enumerateOptions(facts).filter(kind => !(flow.taskTurn && kind === 'ask_missing') && !(taskPaused && kind !== 'none' && kind !== 'pointer'))
     if (options.length < 2) return null
     // The judge reads what this run's own models receive: the person's request, what the Agent is doing now (the real command line
     // or tool name where the run's gate allows that kind) and what was already said. Without the run's own text nothing is asked.
@@ -5639,10 +5642,10 @@ export class CodexChatRuntime {
     // Read again at posting time: the message goes only into the conversation of the person who is waiting, and never where someone
     // other than the task's requester or owner takes part.
     if (flow.audience().postable !== true) return 'none'
-    // c18: a browser task that stopped for the person (choice_needed, confirm_needed, login_required, page_unclear, ...): once its question
-    // is posted, no wait message goes on top of it, also when this one was written before the question reached the person.
+    // c18/c19: a browser task that stopped for the person (choice_needed, confirm_needed, login_required, page_unclear, ...): its question
+    // supersedes this message, whether the question is still being worded or already posted, and whenever this message was begun.
     const task = this.browserTaskBrief(run)
-    if (task?.status === 'paused' && task.asked === true) return 'none'
+    if (task?.status === 'paused') return 'none'
     const id = `egdesk-flow:${randomUUID()}`
     await this.applyItem(run, { id, type: 'agentMessage', phase: null, text, completionConfirmed: true }, true, true, true)
     flow.sent.push({ id, text, kind, by, at: flow.heartbeat.internalMs() }); flow.kinds.add(kind); if (by === 'fallback') flow.kinds.add('stalled')

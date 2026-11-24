@@ -62,7 +62,7 @@ test('candidates keep same-site links, labelled buttons and safe text fields onl
     ['[L1] 2026 3분기 보고서', 'navigate'], ['[B1] 더 보기', 'press'], ['[F1] 검색', 'fill']])
   // Pay now is gated by the action classifier, other.org is off-site, the
   // confirmation field looks sensitive, el_8 is disabled; the password role is never a field.
-  assert.deepEqual(excluded, { disabled: 1, gated: 1, offSite: 1, sensitive: 1, unlabeled: 0, overflow: 0 })
+  assert.deepEqual(excluded, { disabled: 1, gated: 1, offSite: 1, sensitive: 1, unlabeled: 0, overflow: 0, unsupported: 0 })
 })
 
 test('arguments are copied from the observation, never generated', () => {

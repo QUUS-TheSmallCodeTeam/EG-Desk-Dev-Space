@@ -345,10 +345,10 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
     // Reflex and Decisions gating is identical to the tool: mode on and a key, or nothing is called.
     // The account the run belongs to (history records are scoped to it).
     currentOwnerKey() { const key = getOwnerKey(); return typeof key === 'string' && key ? key : null },
-    async runDirectTask(run, { cardId, goal, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, maxSteps, callId, onStep = null }) {
+    async runDirectTask(run, { cardId, goal, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, maxSteps, callId, onStep = null, today = null }) {
       if (!reflexEnabled(decision)) return { outcome: 'fallback', reason: 'not_configured', steps: [] }
       const scope = this.reflexScope(run, { callId: callId || 'direct-task', namespace: null }, cardId)
-      const result = await runReflex({ cardId, goal, ...(maxSteps !== undefined ? { maxSteps } : {}), userContext, resumeState, priorRun, memoryPacket, onStep,
+      const result = await runReflex({ cardId, goal, ...(maxSteps !== undefined ? { maxSteps } : {}), userContext, resumeState, priorRun, memoryPacket, onStep, ...(today ? { today } : {}),
         callTool: scope.callTool, client: scope.client, authorizeDispatch: scope.authorizeDispatch, isDecisionCurrent: scope.isDecisionCurrent })
       if (result?.outcome === 'handoff') reflexHandoffs.set(result, { run, event: { callId: callId || 'direct-task' } })
       return result
