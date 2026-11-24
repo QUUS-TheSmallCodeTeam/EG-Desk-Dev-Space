@@ -4723,7 +4723,8 @@ export class CodexChatRuntime {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), DRAFT_CHECK_LIMITS.firstCheckMs)
     timer.unref?.()
     let verdict
-    try { verdict = await decideFlow({ facts, options, client: setup.client, signal: controller.signal, timeoutMs: DRAFT_CHECK_LIMITS.firstCheckMs }) }
+    // The request carries run facts as numbers and closed labels only; it still goes through the one egress gate (kind run_facts).
+    try { verdict = await decideFlow({ facts, options, client: this.decisionEgressFor(run).guardClient(setup.client, ['run_facts']), signal: controller.signal, timeoutMs: DRAFT_CHECK_LIMITS.firstCheckMs }) }
     catch { return } finally { clearTimeout(timer) }
     try { setup.calibrationLog?.record?.({ feature: 'conversation_flow', mode: 'on', attached: verdict.kind !== 'none', judgments: [verdict.judgment], candidates: options.length }) } catch { /* ignore */ }
     if (verdict.kind === 'none' || flow.closed || run.status !== 'inProgress') return
@@ -4750,7 +4751,7 @@ export class CodexChatRuntime {
       const controller = new AbortController(), timer = setTimeout(() => controller.abort(), DRAFT_CHECK_LIMITS.firstCheckMs)
       timer.unref?.()
       try {
-        const checked = await Promise.race([checkDraft({ draft: text, evidence: turn.evidence, userText: turn.userText, mode: 'on', client: setup.client, revise: null, signal: controller.signal }),
+        const checked = await Promise.race([checkDraft({ draft: text, evidence: turn.evidence, userText: turn.userText, mode: 'on', client: setup.client, revise: null, signal: controller.signal, egress: this.decisionEgressFor(run) }),
           new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))])
         return checked && checked.text === text ? text : null
       } finally { clearTimeout(timer); controller.abort() }
@@ -4853,7 +4854,7 @@ export class CodexChatRuntime {
     const revise = ({ draft, note }) => this.reviseOnFork(run, draft, note, controller.signal)
     const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))
     const check = checkDraft({ draft: text, evidence: [...turn.evidence, ...tools], userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
-      mode: 'on', client: setup.client, revise, signal: controller.signal })
+      mode: 'on', client: setup.client, revise, signal: controller.signal, egress: this.decisionEgressFor(run) })
     void check.catch(() => {})
     try {
       const result = await Promise.race([check, aborted])
