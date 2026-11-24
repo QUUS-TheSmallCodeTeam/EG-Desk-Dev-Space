@@ -90,6 +90,20 @@ export function datesIn(text) {
   for (const m of String(text ?? '').matchAll(DATE_KO)) out.push({ y: m[1] ? Number(m[1]) : null, m: Number(m[2]), d: Number(m[3]) })
   return out
 }
+/**
+ * The date of the run itself (c32): the device's local calendar day, which is what the engine's own environment tells the model ("오늘"), at the moment the turn was
+ * sent and at the moment it was over (a turn may cross midnight). Real (check-19ba, delivery-status): the reply said "오늘(11월 25일) 기준 이미 지났고" about an arrival date
+ * the note gave; today's date is known to the model and correct, so it is grounded. ONLY these days are: any other date the note and the message do not carry is still invented.
+ */
+export function runDates(times) {
+  const out = []
+  for (const ms of times) {
+    if (!Number.isFinite(ms)) continue
+    const d = new Date(ms), day = { y: d.getFullYear(), m: d.getMonth() + 1, d: d.getDate() }
+    if (!out.some(x => x.y === day.y && x.m === day.m && x.d === day.d)) out.push(day)
+  }
+  return out
+}
 const sameDate = (a, b) => a.m === b.m && a.d === b.d && (a.y === null || b.y === null || a.y === b.y)
 /** Money amounts written in the text, as won values: 14,900원, 1만 4천원 is not parsed (a value in digits only), 3만원. */
 export function amountsIn(text) {
@@ -105,14 +119,14 @@ export function checkBrowserAnswer(expect, record) {
   const reply = typeof record.reply === 'string' ? record.reply : ''
   add('note_delivered', record.delivered === true, record.delivered === true ? 'the note reached the engine as application context' : `delivered=${JSON.stringify(record.delivered)} (${record.deliveredWhy ?? 'no turn/start with the note'})`)
   add('reply_present', reply.trim().length > 0, reply.trim().length ? `${reply.length} characters` : 'no posted reply')
-  const noteDates = datesIn(`${record.note} ${record.say}`), noteAmounts = amountsIn(`${record.note} ${record.say}`)
+  const noteDates = [...datesIn(`${record.note} ${record.say}`), ...(Array.isArray(record.runDates) ? record.runDates : [])], noteAmounts = amountsIn(`${record.note} ${record.say}`)
   for (const date of expect.mentionsDates ?? []) {
     const [y, m, d] = date.split('-').map(Number)
     add(`mentions_date_${date}`, datesIn(reply).some(r => sameDate(r, { y, m, d })), `reply dates: ${JSON.stringify(datesIn(reply))}`)
   }
   if (expect.noInventedDates) {
     const invented = datesIn(reply).filter(r => !noteDates.some(n => sameDate(r, n)))
-    add('no_invented_dates', invented.length === 0, invented.length ? `not in the note or the message: ${JSON.stringify(invented)}` : 'every date of the reply is in the note or the message')
+    add('no_invented_dates', invented.length === 0, invented.length ? `not in the note, the message or the run's own day ${JSON.stringify(record.runDates ?? [])}: ${JSON.stringify(invented)}` : 'every date of the reply is in the note, the message or the run\'s own day')
   }
   if (expect.noInventedAmounts) {
     const invented = amountsIn(reply).filter(v => !noteAmounts.includes(v))
@@ -124,7 +138,8 @@ export function checkBrowserAnswer(expect, record) {
 }
 
 /** The per-conversation hook (registered with registerTurnHooks). */
-export function createBrowserAnswerHook() {
+export function createBrowserAnswerHook({ now = Date.now } = {}) {
+  let startedAt = null
   let pending = null // { note, parsed } for the turn being sent
   let seen = null // what the engine was sent for this turn: { delivered, deliveredWhy }
   const state = { sent: 0 }
@@ -138,6 +153,7 @@ export function createBrowserAnswerHook() {
     },
     beforeSend({ turn }) {
       pending = turn?.browserTask ? buildTaskNote(turn.browserTask) : null
+      startedAt = now()
       seen = pending ? { delivered: false, deliveredWhy: null } : null
     },
     observe(method, params) {
@@ -151,7 +167,7 @@ export function createBrowserAnswerHook() {
     async afterTurn({ answer, say, expect: turnExpect }) {
       const spec = turnExpect?.browserAnswer
       if (!pending || !seen) return null
-      const record = { ...seen, say, note: pending.note, noteParsed: pending.parsed, reply: typeof answer === 'string' ? answer : null }
+      const record = { ...seen, say, note: pending.note, noteParsed: pending.parsed, reply: typeof answer === 'string' ? answer : null, runDates: runDates([startedAt, now()]) }
       const expectations = checkBrowserAnswer(spec ?? {}, record)
       pending = null
       return { record, expectations }
