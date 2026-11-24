@@ -4,6 +4,7 @@ import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 import { createHash } from 'node:crypto'
 import { chmodSync, lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { sendStampPath, stampingFetch } from './egdesk-decision-send-stamp.mjs'
 import { DECISIONS_ENDPOINT, DECISION_MODEL, normalizeDecisionResponse, validateDecisionRequest } from './egdesk-decision-client.mjs'
 
 // Generic real-measurement runner for a DECLARATIVE plan (one plan per decision type, written by its lane).
@@ -367,7 +368,7 @@ export async function runPlan({ plan, key = null, send = false, fetchImpl = glob
       if (inputTokens > plan.tokenCeiling) { stoppedBecause = 'token_ceiling_reached'; break }
     } catch (error) {
       const phases = typeof annotate === 'function' ? annotate() ?? {} : {}
-      results[request.id] = { ...probe, ...phases, status: 0, elapsedMs: Math.round(now() - started), error: error?.name === 'AbortError' ? 'timeout' : 'network', answers: [] }
+      results[request.id] = { ...probe, ...phases, status: 0, elapsedMs: Math.round(now() - started), error: error?.name === 'AbortError' ? 'timeout' : error?.name === 'SendStampError' ? 'send_stamp_unwritable' : 'network', answers: [] }
       stoppedBecause = results[request.id].error
       break
     } finally { clearTimeout(timer) }
@@ -434,7 +435,9 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
   // transport "product": the bridge's own Decisions transport, created only when something is really sent.
   const marks = []
   const transport = send && plan.transport === 'product' ? createTransport({ trace: mark => marks.push(mark) }) : null
-  const outcome = await runPlan({ plan, key: send ? env.OPENAI_API_KEY ?? null : null, send, fetchImpl: transport ? transport.fetch : fetchImpl,
+  // c17: every real send writes the shared last-send stamp first (helper/egdesk-decision-send-stamp.mjs); a stamp that cannot be written sends nothing.
+  const network = transport ? transport.fetch : fetchImpl
+  const outcome = await runPlan({ plan, key: send ? env.OPENAI_API_KEY ?? null : null, send, fetchImpl: send ? stampingFetch(network, { file: sendStampPath(env), runner: `decision-real-measure ${plan.set}` }) : network,
     ...(transport?.warm ? { warm: () => transport.warm(), annotate: () => transportPhases(marks.splice(0)) } : {}), ...(now ? { now } : {}), ...(sleep ? { sleep } : {}) })
   try { transport?.close?.() } catch { /* nothing to close */ }
   print(JSON.stringify({ sent: outcome.sent, stoppedBecause: outcome.stoppedBecause, inputTokens: outcome.usage.inputTokens,

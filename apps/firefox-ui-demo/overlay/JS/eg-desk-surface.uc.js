@@ -9618,6 +9618,15 @@
     state.runRequesters = JointPresence.createRunRequesters({ snapshot: () => state.presence.snapshot(), seated: (board, member) => joint()?.seated?.(board, member) === true,
       post: body => deskStoreRequest('POST', '/presence/requester', body, { timeoutMs: 4000 }) });
     state.noteWorkSurfacePlacement = state.runRequesters.wrap(state.noteWorkSurfacePlacement);
+    // L1 c21, owner decision (5): when a run starts, a window that does not hold its requester reads it from the bridge (another window set it);
+    // a window that holds it tells the bridge again (the bridge's registry is memory only and empties when it restarts).
+    state.noteRunRequester = (event, run) => {
+      if (event?.event !== 'run.started' || !run || !state.runRequesters) return;
+      const ref = { runId: run.runId || null, conversationId: run.conversationId || null, clientThreadId: run.clientThreadId || run.localThreadId || null };
+      if (state.runRequesters.held(ref)) { state.runRequesters.retell(ref); return; }
+      void deskStoreRequest('POST', '/presence/requester/read', { clientThreadId: ref.clientThreadId, conversationId: ref.conversationId }, { timeoutMs: 4000 })
+        .then(res => { const member = res?.body?.requester; if (typeof member === 'string') state.runRequesters.adopt(ref, member); }).catch(() => {});
+    };
     state.requestRequesters = JointPresence.createRequestRequesters({ joint, sha256Hex: async text =>
       Array.from(new Uint8Array(await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))), byte => byte.toString(16).padStart(2, '0')).join('') });
     return state.presence;
@@ -15084,7 +15093,7 @@
               try { ChatState.normalizeRequestProjectTarget(activeThread.requestProjectTarget); } catch { invalidProject = true; }
               const roomProjectBlock = chatRoomProjectSendBlock(activeThread);
               // D1: an open early question of the working run takes one text reply; attachments and a project choice wait for the turn.
-              const replyNow = codex.replyOpen === true && !boardDestination && !activeThread.inputSources?.length && !activeThread.briefingInputs?.length && activeThread.requestProjectTarget == null;
+              const replyNow = (codex.replyOpen === true || codex.inRunMessageOpen === true) && !boardDestination && !activeThread.inputSources?.length && !activeThread.briefingInputs?.length && activeThread.requestProjectTarget == null;
               const sendingBlocked = codex.isSending && !replyNow;
               sendButton.disabled = ChatState.nativeBindingHeld(activeThread) || nativeSendHeld || activeThread.preparingInput || sendingBlocked || !input.value.trim() || !readiness.ready || invalidProject || !!roomProjectBlock || boardPreview?.intent.ok === false;
               sendButton.title = boardPreview?.intent.error || (ChatState.nativeBindingHeld(activeThread) || nativeSendHeld ? '보관된 연결을 현재 계정에 자동 연결하지 않습니다'
@@ -15901,6 +15910,8 @@
       state.codex.isSending = threadBusy(active);
       // D1: the one busy state a message can still be sent into (the working run asked an early question).
       state.codex.replyOpen = !!ChatState.replyRunForThread(protocol, active);
+      // ... or, with the bridge's in-run messages flag, the working run itself takes a text message.
+      state.codex.inRunMessageOpen = !!ChatState.inRunMessageRunForThread(protocol, active, state.codex.chatCapabilities);
     };
 
     // Set below, once the bridge request helper exists: tells the bridge when the conversation on the screen was closed or left.
@@ -15953,6 +15964,9 @@
       }
       const accountKey = ChatState.codexAccountKey(patch.authStatus);
       if (ChatState.codexAccountChanged(state.codex.codexAccountKey, patch.authStatus)) {
+        // L1 c21, owner decision (3), pref egdesk.roomAccount "on": the task list stays; each task's own account is checked when it resumes
+        // (the bridge resumes it through its own bound conversation). Off: as before.
+        const keptTasks = ChatState.keptTasksOnDefaultSwitch(state.codex, typeof readSurfacePref === 'function' ? readSurfacePref('egdesk.roomAccount') : null);
         resetThreadConversations();
         // Task graphs belong to the account that made them.
         state.codex.taskBoard = ChatState.createTaskBoard();
@@ -15960,6 +15974,7 @@
         state.codex.taskApproval = null;
         state.codex.taskResume = null;
         state.codex.planProposals = ChatState.createPlanProposals();
+        if (keptTasks) Object.assign(state.codex, keptTasks);
       }
       if (accountKey) state.codex.codexAccountKey = accountKey;
       Object.assign(state.codex, patch);
@@ -16743,7 +16758,8 @@
             if (run && event.event === 'plan.proposed') planProposalFrame(run, event.details);
             if (run) { syncProtocolRun(run); emit(); }
             state.noteChatAttention?.(event, run);
-            state.noteWorkChatEvent?.(event, run); // L1 c17: a finished run's work surface -> the attention scene (pref egdesk.workPlacement; default off: nothing)
+            state.noteWorkChatEvent?.(event, run); // L1 c17
+            state.noteRunRequester?.(event, run); // L1 c21 (5): presence flag only; a second window reads the run's requester from the bridge: a finished run's work surface -> the attention scene (pref egdesk.workPlacement; default off: nothing)
             // CTX-04: tool results can change tracked sources; '바뀜' reads again (still at most every 15 s).
             if (run?.localThreadId && InputContext.contextSourceRefreshSignal(event.event)) refreshContextSources(run.localThreadId, { signal: true });
             // Cycle 8 (state hooks, like noteChatAttention): an older result card of the same output key is marked superseded; the briefing observer is off unless egdesk.briefingFlow is "advisory".
@@ -18673,6 +18689,19 @@
         updateThreadById(threadId, (current) => ({ ...current, startStateless: on === true }));
         emit();
       },
+      // L1 c21, owner decision (2), pref egdesk.roomAccount "on" (and the bridge's EGDESK_ROOM_ACCOUNT): this room continues on another account
+      // of its engine. Same room: its messages, draft and selections stay; its next message starts a new engine thread on that account.
+      // No control calls this yet (the in-room switch control needs approved copy); nothing changes with the pref off.
+      async switchRoomAccount(threadId, engineProfileId) {
+        if (readSurfacePref('egdesk.roomAccount') !== 'on') return { status: 'off' };
+        const thread = getCodexThreadById(state.codex, threadId);
+        if (!thread || thread.engineId === 'claude' || threadBusy(thread) || typeof engineProfileId !== 'string' || !engineProfileId) return { status: 'refused', code: null };
+        let res = null;
+        try { res = await fetchJson('/chat/room-account', { method: 'POST', body: JSON.stringify({ clientThreadId: ChatState.clientThreadBinding(thread), engineProfileId }) }); }
+        catch (error) { return { status: 'refused', code: typeof error?.code === 'string' ? error.code : null }; }
+        if (res?.status === 'switched') { updateThreadById(threadId, current => ChatState.continueRoomOnAccount(current, engineProfileId)); emit(); }
+        return res?.status === 'switched' || res?.status === 'unchanged' ? { status: res.status } : { status: 'refused', code: res?.code ?? null };
+      },
       forkAvailability(threadId, fromTurnId = null) {
         const thread = getCodexThreadById(state.codex, threadId);
         return ChatState.chatForkAvailability(thread, {
@@ -18979,8 +19008,8 @@
         }
         const nextThreads = state.codex.threads.filter((entry) => entry.id !== threadId);
         state.codex.threads = nextThreads;
-        // The bridge drops what it holds for this conversation while it lives (session, notes, receipts, held pointers, bindings); the
-        // conversation's saved history and records are not touched here. A failed request is dropped.
+        // The bridge deletes the conversation: what it holds for it while it lives, its saved history, a run still working in it (interrupted)
+        // and readings heard there that are still pending; memory pages and records stay (L2 c16/c17). A failed request is dropped.
         if (typeof fetchJson === 'function') void fetchJson('/chat/conversation/forget', { method: 'POST', body: JSON.stringify({ clientThreadId: ChatState.clientThreadBinding(thread) }) }).catch(() => {});
         if (state.codex.activeThreadId === threadId) {
           state.codex.activeThreadId = nextThreads[0]?.id || null;
@@ -19315,7 +19344,11 @@
         }
         // D1: the working run asked an early question. The reply is an ordinary user message that goes into that same run (the bridge
         // steers it in and refuses if the question is no longer open). It starts no turn and carries text only.
-        const replyRun = !activeThread || groupSend || !content || options.memoAskReservation ? null : ChatState.replyRunForThread(protocol, activeThread);
+        // With the bridge's in-run messages flag the working run itself takes the message the same way (inRunMessageTo instead of inRunReplyTo).
+        const questionRun = !activeThread || groupSend || !content || options.memoAskReservation ? null : ChatState.replyRunForThread(protocol, activeThread);
+        const messageRun = questionRun || !activeThread || groupSend || !content || options.memoAskReservation ? null
+          : ChatState.inRunMessageRunForThread(protocol, activeThread, state.codex.chatCapabilities);
+        const replyRun = questionRun || messageRun;
         if (replyRun) {
           if (ChatState.nativeBindingHeld(activeThread) || !ChatState.chatThreadReadiness(activeThread, state.codex).ready
               || !activeThread.conversationId || !ChatState.canResumeNativeThread(activeThread, state.codex.authStatus, state.codex)
@@ -19325,7 +19358,7 @@
           const replyBinding = ChatState.clientThreadBinding(activeThread);
           const mark = (status, fields = {}) => updateThreadById(activeThread.id, thread => ({ ...thread, ...fields.thread,
             messages: thread.messages.map(message => message.role === 'user' && message.requestId === requestId ? { ...message, status, ...fields.message } : message) }));
-          replyRun.replyPending = true; // one reply per question; the composer returns to the busy rule at once
+          if (questionRun) replyRun.replyPending = true; // one reply per question; the composer returns to the busy rule at once
           appendMessageToThread(activeThread.id, createCodexMessage('user', content, 'submitting', { readBy: [SELF_MEMBER], requestId, inputReferences: [] }), { countUnread: false });
           updateThreadById(activeThread.id, thread => ({ ...thread, sendError: null }));
           state.codex.threadDrafts = { ...state.codex.threadDrafts, [activeThread.id]: '' };
@@ -19336,7 +19369,7 @@
             runtimeConfig.engineId = engineId;
             runtimeConfig.channelContext = state.codex.channelContextSupported === true;
             const result = await fetchJson('/chat/send', { method: 'POST',
-              body: JSON.stringify({ ...ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig), inRunReplyTo: replyRun.runId }) });
+              body: JSON.stringify({ ...ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig), ...(questionRun ? { inRunReplyTo: replyRun.runId } : { inRunMessageTo: replyRun.runId }) }) });
             if (result?.accepted !== true || result.inRun !== true || result.runId !== replyRun.runId) throw Object.assign(new Error('reply not taken'), { accepted: false });
             if (ChatState.clientThreadBinding(getCodexThreadById(state.codex, activeThread.id)) === replyBinding) mark('complete', { message: {
               conversationId: replyRun.conversationId, runId: replyRun.runId, answerId: replyRun.answerId,

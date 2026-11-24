@@ -377,6 +377,40 @@ function backupVersion(db, filename, version) {
   }
 }
 
+// The deleted conversation's rows also go from every upgrade backup this store kept (backupVersion: <file>.v<n>.bak). The backups stay;
+// only that conversation's rows go, from the tables the backup has, children first, overwritten (secure_delete), and the copy is rewritten
+// without free pages (VACUUM). Owner decision, L2 c18.
+const CONVERSATION_TABLES = ['event_refs', 'topic_answer_guards', 'events', 'messages', 'runs', 'run_project_origins', 'native_runs', 'native_messages', 'imports', 'room_members', 'requests', 'threads']
+const BACKUP_VERSIONS = [1, 2, 3, 4]
+function scrubBackups(filename, clientThreadId) {
+  const out = []
+  for (const version of BACKUP_VERSIONS) {
+    const backup = `${filename}.v${version}.bak`
+    let info
+    try { info = lstatSync(backup) } catch { continue }
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || !isOwnedAndPrivate(backup, info, 0o077)) { out.push({ version, scrubbed: false, reason: 'not_private' }); continue }
+    let copy
+    try {
+      copy = new DatabaseSync(backup)
+      copy.exec('PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;')
+      const present = new Set(copy.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name))
+      const row = present.has('threads') ? copy.prepare('SELECT local_conversation_id FROM threads WHERE client_thread_id=?').get(clientThreadId) : null
+      if (!row) { out.push({ version, scrubbed: true, rows: 0 }); continue }
+      copy.exec('BEGIN IMMEDIATE')
+      let rows = 0
+      try {
+        for (const table of CONVERSATION_TABLES) if (present.has(table)) rows += Number(copy.prepare(`DELETE FROM ${table} WHERE local_conversation_id=?`).run(row.local_conversation_id).changes)
+        copy.exec('COMMIT')
+      } catch (error) { try { copy.exec('ROLLBACK') } catch { /* keep the error */ } throw error }
+      // Rewrite the copy without free pages, so nothing of the deleted rows stays in the file (schema and user_version are kept).
+      if (rows) copy.exec('VACUUM')
+      out.push({ version, scrubbed: true, rows })
+    } catch { out.push({ version, scrubbed: false, reason: 'failed' }) }
+    finally { try { copy?.close() } catch { /* ignore */ } }
+  }
+  return out
+}
+
 function initialize(db, filename) {
   db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;')
   if (String(db.prepare('PRAGMA journal_mode=WAL').get().journal_mode).toLowerCase() !== 'wal') fail('STORE_OPEN_FAILED', 'WAL could not be enabled', 500)
@@ -454,12 +488,13 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
     run: db.prepare('SELECT * FROM runs WHERE local_conversation_id=? AND local_run_id=?'),
     request: db.prepare('SELECT * FROM requests WHERE local_conversation_id=? AND request_id=?'),
     // The binding is among a conversation's first events; seq order stops there.
-    binding: db.prepare("SELECT details_json FROM events WHERE local_conversation_id=? AND event='native.thread.bound' ORDER BY seq LIMIT 1"),
+    // the binding of the room's CURRENT native thread (a room continued on another account has an earlier one: L1 c21)
+    binding: db.prepare("SELECT details_json FROM events WHERE local_conversation_id=? AND event='native.thread.bound' AND json_extract(details_json, '$.conversationId')=? ORDER BY seq LIMIT 1"),
     native: db.prepare('SELECT * FROM threads WHERE conversation_id=? LIMIT 2'),
   }
   const publicThread = row => {
     if (!row) return null
-    const binding = row.conversation_id ? q.binding.get(row.local_conversation_id) : null
+    const binding = row.conversation_id ? q.binding.get(row.local_conversation_id, row.conversation_id) : null
     return thread(row, bindingSession(row, binding ? parse(binding.details_json) : null))
   }
   let closed = false
@@ -680,6 +715,29 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
 
   return {
     createConversation(input) { ensureOpen(); return tx(() => create(input)) },
+    // Every local message id of one conversation (memory refers to them as chat-message:<id>); [] when it does not exist.
+    localMessageIds(clientThreadId) {
+      ensureOpen()
+      const row = q.thread.get(identifier(clientThreadId, 'clientThreadId'))
+      return row ? db.prepare('SELECT local_message_id FROM messages WHERE local_conversation_id=? ORDER BY first_seq').all(row.local_conversation_id).map(r => r.local_message_id) : []
+    },
+    // The person deleted this conversation (surface "완전히 삭제"): every row of it goes, in one transaction, children first. Deleted pages
+    // are overwritten (secure_delete) and the WAL is checkpointed and truncated, so the words do not stay in the database files.
+    // Unknown conversation: { deleted: false }. Upgrade backups lose this conversation's rows too (scrubBackups); the backups themselves stay.
+    deleteConversation(clientThreadId) {
+      ensureOpen()
+      const key = identifier(clientThreadId, 'clientThreadId')
+      const row = q.thread.get(key)
+      if (!row) return { deleted: false, rows: 0, backups: scrubBackups(filename, key) } // a repeated delete still scrubs what a backup kept
+      const id = row.local_conversation_id
+      const previous = db.prepare('PRAGMA secure_delete').get().secure_delete
+      db.exec('PRAGMA secure_delete=ON')
+      try {
+        const rows = tx(() => CONVERSATION_TABLES.reduce((n, table) => n + Number(db.prepare(`DELETE FROM ${table} WHERE local_conversation_id=?`).run(id).changes), 0))
+        try { db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() } catch { /* a reader holds the WAL: it is truncated at the next checkpoint */ }
+        return { deleted: true, rows, backups: scrubBackups(filename, key) }
+      } finally { db.exec(`PRAGMA secure_delete=${previous ? 'ON' : 'OFF'}`) }
+    },
     getConversation(clientThreadId) { ensureOpen(); return publicThread(q.thread.get(identifier(clientThreadId, 'clientThreadId'))) },
     // The local conversation bound to one native conversation, or null.
     getConversationByNative(conversationId) {
@@ -866,6 +924,30 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       ensureOpen(); const row = requireThread(clientThreadId)
       const match = db.prepare('SELECT public_json FROM runs WHERE local_conversation_id=? AND run_id=? LIMIT 1').get(row.local_conversation_id, identifier(runId, 'runId'))
       return match ? parse(match.public_json) : null
+    },
+    // L1 c21 (the runtime calls this only with its roomAccount flag on): the room continues on another account of the same engine. Its
+    // native thread so far is recorded as an earlier segment (with the account its EG-Desk memory was written under), and the room is
+    // re-pinned to the new account with no native thread yet: the next send starts one there. The table is created on first use.
+    switchRoomAccount({ clientThreadId, engineProfileId, memoryOwnerKey = null }) {
+      ensureOpen()
+      return tx(() => {
+        const row = requireThread(clientThreadId), slot = identifier(engineProfileId, 'engineProfileId')
+        db.exec('CREATE TABLE IF NOT EXISTS room_account_segments (local_conversation_id TEXT NOT NULL, seq INTEGER NOT NULL, conversation_id TEXT, engine_id TEXT, engine_profile_id TEXT, memory_owner_key TEXT, switched_at INTEGER NOT NULL, PRIMARY KEY (local_conversation_id, seq))')
+        const n = db.prepare('SELECT COUNT(*) AS n FROM room_account_segments WHERE local_conversation_id=?').get(row.local_conversation_id).n
+        const first = n ? db.prepare('SELECT memory_owner_key FROM room_account_segments WHERE local_conversation_id=? ORDER BY seq LIMIT 1').get(row.local_conversation_id).memory_owner_key : null
+        const owner = first ?? (typeof memoryOwnerKey === 'string' && memoryOwnerKey ? memoryOwnerKey.slice(0, 512) : null)
+        db.prepare('INSERT INTO room_account_segments VALUES (?, ?, ?, ?, ?, ?, ?)').run(row.local_conversation_id, n + 1, row.conversation_id ?? null, row.engine_id ?? null, row.engine_profile_id ?? null, owner, Date.now())
+        db.prepare('UPDATE threads SET conversation_id=NULL, engine_profile_id=? WHERE local_conversation_id=?').run(slot, row.local_conversation_id)
+        return { clientThreadId: row.client_thread_id, engineProfileId: slot, previous: { conversationId: row.conversation_id ?? null, engineProfileId: row.engine_profile_id ?? null } }
+      })
+    },
+    /** The account a room's EG-Desk memory was written under, when the room changed accounts; else null (the current one applies). */
+    roomMemoryOwnerKey(clientThreadId) {
+      ensureOpen()
+      const row = requireThread(clientThreadId)
+      const has = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='room_account_segments'").get()
+      if (!has) return null
+      return db.prepare('SELECT memory_owner_key FROM room_account_segments WHERE local_conversation_id=? ORDER BY seq LIMIT 1').get(row.local_conversation_id)?.memory_owner_key ?? null
     },
     bindNative(input) { ensureOpen(); shape(input, ['clientThreadId', 'conversationId', 'engineId', 'engineProfileId', 'localRunId', 'runId', 'localMessageId', 'messageId']); return tx(() => bind(requireThread(input.clientThreadId), input)) },
     /**

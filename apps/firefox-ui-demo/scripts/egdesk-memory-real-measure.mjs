@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync } from 'node:fs'
 import { buildPlan, buildUtterancePlan, scoreFirstScan, scoreRemeasure, scoreUtteranceLabels } from '../helper/egdesk-memory-real-plan.mjs'
+import { sendStampPath, stampingFetch } from '../helper/egdesk-decision-send-stamp.mjs'
 import { diffPlan, planTable, runMeasurement } from '../helper/egdesk-memory-real-runner.mjs'
 
 // End-to-end turn-memory measurement (public synthetic wiki, 6 runs). Dry run by default: prints the plan and sends nothing.
@@ -22,7 +23,7 @@ if (planFile) {
 console.table(planTable(plan).map(({ run, name, stage, questions, bytes, estInputTokens, sha256 }) => ({ run, name, stage, questions, bytes, estInputTokens, sha: sha256.slice(0, 12) })))
 const maxTokens = value('--max-tokens') ? Number(value('--max-tokens')) : null
 const key = flag('--send') ? process.env.OPENAI_API_KEY ?? null : null
-const outcome = await runMeasurement({ plan, key, send: flag('--send'), maxEstimatedTokens: maxTokens, ...(remeasure ? { score: scoreRemeasure } : firstScan ? { score: scoreFirstScan } : utterances ? { score: scoreUtteranceLabels } : {}) })
+const outcome = await runMeasurement({ plan, key, send: flag('--send'), ...(flag('--send') ? { fetchImpl: stampingFetch(globalThis.fetch, { file: sendStampPath(), runner: 'memory-real-measure' }) } : {}), maxEstimatedTokens: maxTokens, ...(remeasure ? { score: scoreRemeasure } : firstScan ? { score: scoreFirstScan } : utterances ? { score: scoreUtteranceLabels } : {}) })
 console.log(JSON.stringify({ sent: outcome.sent, stoppedBecause: outcome.stoppedBecause, totals: outcome.totals, ceiling: outcome.ceiling }))
 if (outcome.scorecard) {
   const out = value('--out')

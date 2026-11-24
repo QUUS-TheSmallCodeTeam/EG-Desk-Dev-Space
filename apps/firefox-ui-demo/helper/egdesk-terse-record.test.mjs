@@ -3,7 +3,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { COURTESY_WITH_PREVIOUS, RECORD_WITH_PREVIOUS, triageTurn } from './egdesk-turn-memory.mjs'
-import { SPLIT_WORDING_CHOICE, speechSegments, speechSplitQuestions } from './egdesk-speech-grounding.mjs'
+import { SPLIT_WORDING_CHOICE, SPLIT_WORDING_V2_AS_SENT, speechSegments, speechSplitQuestions } from './egdesk-speech-grounding.mjs'
 import { buildWordingPlan } from './egdesk-split-wording-plan.mjs'
 
 const client = seen => ({ async decide(r) { seen.push(r); return { answers: {} } } })
@@ -23,8 +23,8 @@ test('without the previous message the triage questions are byte for byte as bef
   assert.equal(JSON.stringify(seen[2].questions), JSON.stringify(seen[0].questions))
 })
 
-test('per-predicate wording: v2 is the measured choice for all five changed predicates; v1 default; an object picks per key', () => {
-  assert.deepEqual(SPLIT_WORDING_CHOICE, { other: 'v2', own: 'v2', guess: 'v2', before: 'v2', now: 'v2' })
+test('per-predicate wording: the measured choice (v2, own v3 since c24); v1 default; an object picks per key', () => {
+  assert.deepEqual(SPLIT_WORDING_CHOICE, { other: 'v2', own: 'v3', guess: 'v2', before: 'v2', now: 'v2' })
   const text = '주문 내역을 보니 지난달 15일에 결제가 두 번 됐어.', spans = speechSegments(text)
   const by = w => Object.fromEntries(speechSplitQuestions(spans, text, { wording: w }).map(q => [q.name, q.instructions]))
   const v1 = by('v1'), v2 = by('v2'), mixed = by({ own: 'v1', other: 'v2' }), v3 = by({ other: 'v2', own: 'v3', guess: 'v2' })
@@ -32,7 +32,8 @@ test('per-predicate wording: v2 is the measured choice for all five changed pred
   assert.equal(mixed.speechs_own_0, v1.speechs_own_0)
   assert.equal(mixed.speechs_other_0, v2.speechs_other_0)
   assert.equal(mixed.speechs_guess_0, v1.speechs_guess_0, 'a key the object does not name is v1')
-  assert.notEqual(v3.speechs_own_0, v2.speechs_own_0)
+  assert.notEqual(v3.speechs_own_0, by(SPLIT_WORDING_V2_AS_SENT).speechs_own_0, 'v3 own differs from the v2 own split-wording-v2 was sent with')
+  assert.equal(v2.speechs_own_0, v3.speechs_own_0, "since c24 'v2' (the choice) asks own in v3")
   assert.match(v3.speechs_own_0, /주문 내역을 보니/)
   assert.equal(v3.speechs_guess_0, v2.speechs_guess_0)
   assert.equal(v3.speechs_before_0, v1.speechs_before_0, 'v3 changes only own; time keys not named stay v1')

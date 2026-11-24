@@ -91,3 +91,15 @@ test('cycle 28: a spec that declares seeds (real conversation wording) carries t
   assert.deepEqual(withSeeds.seeds, [{ id: 'conversation-examples', privacy: 'owner-approved' }]); assert.equal(without.seeds, undefined)
   assert.equal(loadPlan(path.join(root, 'p1', 'plan.json')).requests.length, 1, 'the runner loads it (its seed guard reads the declaration)')
 })
+
+test('cycle 29: a spec rule with notDecidedNo becomes lane L6\'s check kind ("does not block": above the declared no bar); the runner loads it', async t => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'egd-c29-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const loop = path.join(root, 'loop'); mkdirSync(path.join(loop, 'reports'), { recursive: true })
+  writeFileSync(path.join(loop, 'LEDGER.md'), ['# 원장', '- 11-24 22:50 L7 c19(e930372) 병합 → int/c14 c680638.', '- 11-24 22:52 사용자 결정: 고정 문장 전부 제거.'].join('\n'))
+  buildMaterials(['--loop', loop, '--out', path.join(root, 'm'), '--year', '2026', '--year-basis', 'synthetic fixture'])
+  writeFileSync(path.join(root, 's.json'), JSON.stringify({ set: 's', tokenCeiling: 99999, passRule: 's', requests: [{ id: 'r', request: '정리해줘', answer: '22:50 L7 c19가 병합되었습니다. 22:52 사용자가 고정 문장을 전부 빼기로 결정했습니다.', select: { rule: 'newest-ledger', n: 2 },
+    expect: { coverage: [{ match: 'onboard_F1', severity: 'hard', notDecidedNo: true, note: 'cited' }, { match: 'onboard_F2', severity: 'soft', yes: true, note: 'x' }] } }] }))
+  await buildPlan(['--pages', path.join(root, 'm', 'pages.json'), '--spec', path.join(root, 's.json'), '--out', path.join(root, 'p')])
+  const plan = loadPlan(path.join(root, 'p', 'plan.json')), cov = plan.requests.find(r => r.id === 'r-coverage')
+  assert.deepEqual(cov.expect.map(e => [e.name, e.notDecidedNo ?? false, e.min ?? null]), [['onboard_F1', true, null], ['onboard_F2', false, 0.7]])
+})

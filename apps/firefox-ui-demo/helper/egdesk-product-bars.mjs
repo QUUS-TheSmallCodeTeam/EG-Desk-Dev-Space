@@ -14,6 +14,7 @@ import { RISK_PREDICATE_NO } from './egdesk-terminal-command-gate.mjs'
 import { CONDITION_NO, CONDITION_YES } from './egdesk-run-conditions.mjs'
 import { NO as TERNARY_NO, YES as TERNARY_YES } from './egdesk-wiki-reconstruction.mjs'
 import { PLACEMENT_PREDICATE_YES } from './egdesk-work-placement.mjs'
+import { HUD_ROUTING_BARS } from '../overlay/resources/EGDeskHudRouting.sys.mjs'
 
 const EPS = 1e-6
 const single = (bar, src) => ({ yesAt: bar, noAt: bar - EPS, src }) // acts on yes at >= bar, on no below it
@@ -61,7 +62,14 @@ export const PRODUCT_BARS = Object.freeze([
   [/^memory-action-v\d+$/, /^(tn_need|pg_#)$/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO: triageSkipsFetch acts on a decided need no; the scan picks a decided yes (L7 c21 action rules)')],
   [/^axis-split-v\d+/, /^speechs_/, three(SPEECH_SPLIT_BARS.yes, SPEECH_SPLIT_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_SPLIT_BARS (split-isolated design, L7 c20): yes >= yes, no <= no, between undecided')],
   // labelling study (no product action): a label is read at the general predicate guide (egdesk-conversation-examples.mjs readLabels, .8 / .2)
-  [/^conversation-labels-\d+$/, /^conv_/, three(TERNARY_YES, TERNARY_NO, 'egdesk-conversation-examples.mjs readLabels: a labelling study, no product action')],
+  // c17: L1 HUD routing (rankRoute): a candidate is "yes" at >= yes and "no" at <= no; one undecided desk item, or two yes, keeps today's highlight
+  [/^hud-routing-v\d+$/, /^(goes_to_I#|web_search|assistant_request)$/, three(HUD_ROUTING_BARS.yes, HUD_ROUTING_BARS.no, 'overlay/resources/EGDeskHudRouting.sys.mjs HUD_ROUTING_BARS, read by rankRoute (between: undecided keeps the highlight)')],
+  // c17: L3 conversation scenarios: the triage, heartbeat and confirmation questions each act at the bars of their own module (the plans declare the same)
+  [/^conversation-scenarios-\d+$/, /^(tn_recall|tn_courtesy)$/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO (turn memory triage)')],
+  [/^conversation-scenarios-\d+$/, /^answer_type$/, choice(T.choice, null, 'egdesk-context-setup.mjs readChoice minConfidence thresholds.choice (no margin rule); answer_type has no consumer (L6 c4)')],
+  [/^conversation-scenarios-\d+$/, /^message__/, single(BEAT_PREDICATE_YES, 'egdesk-heartbeat-judge.mjs BEAT_PREDICATE_YES: speaks iff p >= bar')],
+  [/^conversation-scenarios-\d+$/, /^rc_(stated|confirms)_#$/, three(CONFIRM_BARS.yes, CONFIRM_BARS.no, 'egdesk-record-confirmation.mjs CONFIRM_BARS (between: keep pending)')],
+  [/^conversation-labels-(sample-)?\d+$/, /^conv_/, three(TERNARY_YES, TERNARY_NO, 'egdesk-conversation-examples.mjs readLabels: a labelling study, no product action')],
   // legacy (c8-era, 11/22-11/24) families
   [/-11(22|23|24)$/, /^speechp_/, three(SPEECH_PREDICATE_BARS.yes, SPEECH_PREDICATE_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_PREDICATE_BARS')],
   [/-11(22|23|24)$/, /^(tn_|tw_link|tw_about|pg_|op_)/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO')],

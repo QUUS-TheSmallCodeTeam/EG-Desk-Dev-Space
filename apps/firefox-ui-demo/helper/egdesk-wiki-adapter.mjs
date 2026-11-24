@@ -117,12 +117,16 @@ function storedPage(raw) {
     provenance: { kind: raw.provenance.kind, ...(typeof raw.provenance.by === 'string' ? { by: clip(raw.provenance.by, 60) } : {}), ...(PROVENANCE_BASES.includes(raw.provenance.basis) ? { basis: raw.provenance.basis } : {}) },
     status: SOURCE_STATUSES.has(raw.status) ? raw.status : 'unknown', scope: typeof raw.scope === 'string' ? raw.scope : null,
     ...(typeof raw.spokenAt === 'string' && !Number.isNaN(Date.parse(raw.spokenAt)) ? { spokenAt: raw.spokenAt } : {}),
+    // The chat message this page pointed to was deleted with its conversation: a text-less pointer stays (L2 c18). Internal state only.
+    ...(raw.sourceDeleted === true && hasRef && !hasBody ? { sourceDeleted: true } : {}),
     links: (Array.isArray(raw.links) ? raw.links : []).filter(l => record(l) && Object.hasOwn(LINK_TYPES, l.type) && typeof l.to === 'string' && SAFE_ID.test(l.to)).slice(0, 16).map(l => ({ type: l.type, to: l.to })) }
 }
+const FROM_OK = value => typeof value === 'string' && value.length > 0 && value.length <= 200
 function storedReading(raw) {
   if (!record(raw) || typeof raw.pageId !== 'string' || !SAFE_ID.test(raw.pageId) || !REVISION_OK.test(String(raw.sourceRevision ?? '')) || !record(raw.reading) ||
       !STATUSES.has(raw.reading.status) || !READING_STATES.has(raw.reading.state)) return null
-  return { pageId: raw.pageId, sourceRevision: String(raw.sourceRevision), reading: { status: raw.reading.status, state: raw.reading.state,
+  // from: the local conversation a pending reading was heard in (beside the reading, never shown on a page; see withdrawPendingFrom).
+  return { pageId: raw.pageId, sourceRevision: String(raw.sourceRevision), ...(raw.reading.state === 'pending' && FROM_OK(raw.from) ? { from: raw.from } : {}), reading: { status: raw.reading.status, state: raw.reading.state,
     basis: PROVENANCE_BASES.includes(raw.reading.basis) ? raw.reading.basis : null,
     ...(typeof raw.reading.spokenAt === 'string' && !Number.isNaN(Date.parse(raw.reading.spokenAt)) ? { spokenAt: raw.reading.spokenAt } : {}),
     ...(typeof raw.reading.confirmedAt === 'string' && !Number.isNaN(Date.parse(raw.reading.confirmedAt)) ? { confirmedAt: raw.reading.confirmedAt } : {}),
@@ -146,7 +150,7 @@ export function openWikiWrites({ dataDir, log, now } = {}) {
         if (!page) throw new Error('page not storable')
         data.pages = [...data.pages.filter(p => p.id !== page.id), page]
       } else if (change?.kind === 'reading') {
-        const entry = storedReading({ pageId: change.pageId, sourceRevision: change.sourceRevision, reading: change.reading })
+        const entry = storedReading({ pageId: change.pageId, sourceRevision: change.sourceRevision, reading: change.reading, from: change.from })
         if (!entry) throw new Error('reading not storable')
         data.readings = [...data.readings, entry]
       } else throw new Error('unknown change')
@@ -154,6 +158,38 @@ export function openWikiWrites({ dataDir, log, now } = {}) {
         if (store.save(data)) return true
         if (data.pages.length > 1) data.pages.shift(); else if (data.readings.length > 1) data.readings.shift(); else throw new Error('store full or unavailable')
       }
+    },
+    // The person deleted these conversations (L2 c17, owner decision): a reading heard there and still pending can only be confirmed in that
+    // conversation and is not memory yet, so it is withdrawn (removed from the store). Accepted or rejected readings, pages and promoted
+    // records stay. A pending reading stored before c17 has no conversation and is not touched. Returns how many were withdrawn.
+    // The person deleted a conversation (L2 c18, owner decision): memory in its conversation-temporary scope (pages written with that
+    // scope, and readings on them) is deleted with it. A page of another scope whose only source was a message of that conversation keeps
+    // a text-less pointer marked sourceDeleted. Board, Agent, personal and organisation scopes stay. Returns { pages, readings, pointers }.
+    forgetConversation({ scope, messageRefs = [] } = {}) {
+      const data = store.data, refs = new Set((Array.isArray(messageRefs) ? messageRefs : []).filter(ref => typeof ref === 'string' && ref))
+      if (typeof scope !== 'string' || !scope) return { pages: 0, readings: 0, pointers: 0 }
+      const gone = new Set(data.pages.filter(p => p.scope === scope).map(p => p.id))
+      let pointers = 0
+      const pages = data.pages.filter(p => !gone.has(p.id)).map(p => {
+        if (!p.body && p.ref && refs.has(p.ref) && p.sourceDeleted !== true) { pointers++; return { ...p, sourceDeleted: true } }
+        return p
+      })
+      const readings = data.readings.filter(entry => !gone.has(entry.pageId))
+      const out = { pages: gone.size, readings: data.readings.length - readings.length, pointers }
+      if (!out.pages && !out.readings && !pointers) return out
+      if (!store.save({ ...data, pages, readings })) throw new Error('store unavailable')
+      return out
+    },
+    withdrawPendingFrom(conversationKeys) {
+      const keys = new Set((Array.isArray(conversationKeys) ? conversationKeys : []).filter(FROM_OK))
+      const data = store.data
+      const answered = (entry, i) => data.readings.slice(i + 1).some(later => later.pageId === entry.pageId && later.reading.state !== 'pending' &&
+        later.reading.status === entry.reading.status && (later.reading.spokenAt ?? null) === (entry.reading.spokenAt ?? null))
+      const drop = data.readings.map((entry, i) => entry.reading.state === 'pending' && keys.has(entry.from) && !answered(entry, i))
+      const n = drop.filter(Boolean).length
+      if (!n) return 0
+      if (!store.save({ ...data, readings: data.readings.filter((_, i) => !drop[i]) })) throw new Error('store unavailable')
+      return n
     },
   })
 }
@@ -228,6 +264,13 @@ export function createWikiAdapter({ writes = null } = {}) {
     },
     // The write path for a snapshot: persists what it accepts (a reference instead of a copy where the words already live in the chat store).
     // acceptStatus is not offered: no policy callback promotes a reading (see createWikiWriter.promote).
+    // A deleted conversation's readings that are still pending are withdrawn from the store (openWikiWrites.withdrawPendingFrom). Count.
+    withdrawPendingFrom: conversationKeys => writes?.withdrawPendingFrom?.(conversationKeys) ?? 0,
+    // A deleted conversation's conversation-temporary memory (scope dm:<clientThreadId>) goes; see openWikiWrites.forgetConversation.
+    forgetConversation: ({ clientThreadId, messageRefs = [] } = {}) => {
+      const scope = scopeKey({ clientThreadId })
+      return scope && writes?.forgetConversation ? writes.forgetConversation({ scope, messageRefs }) : { pages: 0, readings: 0, pointers: 0 }
+    },
     writerFor(wiki, { enabled = false, canWrite = () => false, idFor = null } = {}) {
       return createWikiWriter(wiki, { enabled, canWrite, idFor, persist: writes ? change => writes.apply(change) : null })
     },

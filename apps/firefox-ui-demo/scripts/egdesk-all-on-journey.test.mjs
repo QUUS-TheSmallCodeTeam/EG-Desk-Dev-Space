@@ -155,7 +155,7 @@ test('all features on, one session: memory, briefing, a browser task, a long com
   await w.advance(2000); await w.answer(A.noted); await new Promise(resolve => setTimeout(resolve, 60)); await w.idle(); ui.pump(); close('d1')
   assert.deepEqual(w.byFeature('d1'), { turn_context: 1, memory_triage: 1, memory_fetch: 3, draft_check: 1, memory_write: 1 })
   assert.deepEqual(w.subjectiveTurnsIn('d1'), { main: 1, fork: 0, steer: 0 })
-  assert.deepEqual(writes(), { version: 1, pages: [], readings: [{ pageId: 'ontology:db/pg-plan', sourceRevision: writes().readings[0].sourceRevision, reading: { status: 'done', state: 'pending', basis: null, spokenAt: new Date(w.clock() - 2000).toISOString() } }] })
+  assert.deepEqual(writes(), { version: 1, pages: [], readings: [{ pageId: 'ontology:db/pg-plan', from: DM /* the conversation it was heard in (L2 c17) */, sourceRevision: writes().readings[0].sourceRevision, reading: { status: 'done', state: 'pending', basis: null, spokenAt: new Date(w.clock() - 2000).toISOString() } }] })
   assert.equal(w.history().at(-1)[1], A.noted)
 
   // ---- b1/b2. the browser task, in a conversation of its own (see b0): entry, a question to the person, the reply inside the same run ----

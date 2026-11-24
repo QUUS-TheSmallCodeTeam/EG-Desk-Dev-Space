@@ -533,13 +533,13 @@ export function writerPrompt(kind, facts, { question = null, prior = [], task = 
   return [...base, `${facts.stepsDone} steps are done so far. Say briefly that the work is progressing and how far along it is, without giving results.`].join('\n')
 }
 
-// ---- A person's message that arrives while the run works (c21; flag decisionContext.conversationFlow.inRunMessages, default off) ----
+// ---- A person's message that arrives while the run works (c21/c22; lane L2's flag decisionContext.inRunMessages, EGDESK_INRUN_MESSAGES, default off) ----
 // The message becomes a heartbeat fact, quoted on its own (bounded). The beat asks three yes/no questions about it (R1/R2); code decides:
 //   stop yes                         -> 'stop'  (the run is interrupted; the message stays in the conversation)
 //   change yes                       -> 'steer' (the message goes into the working turn, as the person's words)
 //   status yes, change and stop not  -> 'reply' (one short true progress reply, worded by the subjective model and checked)
 //   anything else, or no answer      -> 'steer' (the safe default: the run gets what the person wrote)
-export const IN_RUN_LIMITS = Object.freeze({ quoteChars: 600, pending: 8 })
+export const IN_RUN_LIMITS = Object.freeze({ quoteChars: 600 })
 export const PERSON_PREDICATES = Object.freeze({
   status: Object.freeze({ name: 'person_status', type: 'predicate', instructions: 'Does this message ask what is happening, how far along the work is, or why it stopped?' }),
   change: Object.freeze({ name: 'person_change', type: 'predicate', instructions: 'Does this message change or redirect the task the assistant is doing (a different target, order or way of doing it)?' }),

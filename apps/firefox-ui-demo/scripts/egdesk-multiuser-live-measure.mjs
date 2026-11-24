@@ -45,6 +45,7 @@ import * as DraftCheck from '../helper/egdesk-draft-check.mjs'
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 // the draft check's fixed fallback sentences (the owner removed them; L3): read when the module still has them, else none
 const DRAFT_CHECK_COPY = DraftCheck.DRAFT_CHECK_COPY ?? {}
+import { sendStampPath, stampingFetch } from '../helper/egdesk-decision-send-stamp.mjs'
 import { createMeasureTransport, diffJourneys, formatDiff, replayAnswers, writeJourneyResults } from './egdesk-all-on-live-measure.mjs'
 
 // v1 (cycle 14, sent: 22/25) and v2 (cycle 15, sent: 31/32) are kept as registered; v3 (cycle 16) is the default.
@@ -493,7 +494,7 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
   const replaying = !!earlier && !send
   print(JSON.stringify({ set: plan.set, mode: send ? 'send' : replaying ? 'replay' : 'dry_run', endpoint: DECISIONS_ENDPOINT, plan: plan.sha256.slice(0, 16), registered: plan.registered, tokenCeiling: caps.tokenCeiling, maxRequests: caps.maxRequests,
     note: send ? 'sending: one request at a time as the product asks' : replaying ? `replay: the answers recorded in ${earlier.file} drive the scenario; nothing is sent` : 'dry run: the pre-registered answers (and lane L2\'s scripted model for everything else) drive the scenario; nothing is sent' }))
-  const outcome = await runScenario({ plan, send, key, fetchImpl, caps, now, replay: replaying ? replayAnswers(earlier.run) : null })
+  const outcome = await runScenario({ plan, send, key, fetchImpl: send ? stampingFetch(fetchImpl, { file: sendStampPath(env), runner: `multiuser-live-measure ${plan.set}` }) : fetchImpl, caps, now, replay: replaying ? replayAnswers(earlier.run) : null })
   for (const row of stepTable(outcome)) print(JSON.stringify(row))
   const payload = resultsPayload({ outcome, plan, send, caps, replayOf: replaying ? { file: earlier.file, sha256: earlier.sha256, at: earlier.run.at ?? null } : null })
   if (earlier) { payload.diffAgainst = { file: earlier.file, sha256: earlier.sha256, at: earlier.run.at ?? null }; payload.diff = diffScenarios(earlier.run, payload) }

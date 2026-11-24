@@ -51,7 +51,8 @@ import { createBoardPresentationHttpHandler } from './egdesk-board-presentation-
 import { briefingDeps } from './egdesk-briefing-engine.mjs'
 import { createWorkPlacement, createWorkPlacementHttpHandler } from './egdesk-work-placement.mjs'
 import { createHudRouting, createHudRoutingHttpHandler } from './egdesk-hud-routing.mjs'
-import { createPresenceMirror, createPresenceMirrorHttpHandler, createRunRequesters, createRunRequesterHttpHandler } from './egdesk-presence-mirror.mjs'
+import { createRoomAccountHttpHandler } from './egdesk-room-account-http.mjs'
+import { createPresenceMirror, createPresenceMirrorHttpHandler, createRunRequesters, createRunRequesterHttpHandler, createRunRequesterReadHttpHandler } from './egdesk-presence-mirror.mjs'
 import { createWindowWatch } from './egdesk-heartbeat.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 import { MemoryEvidenceStore } from './egdesk-memory-evidence.mjs'
@@ -376,6 +377,9 @@ const codexEngine = createCodexEngineAdapter({
   isReady: () => appServerReady,
   getModels: () => modelCatalog.snapshot(),
   getBoardPeerContract: () => appServerReady ? nativeCapabilities.boardPeerContract : null,
+  // thread/delete: the shared app-server only, when its binary's generated schema has it (egdesk-native-capabilities threadDelete). A profile's
+  // own app-server is not proven here; deleting a conversation there records that the engine history remains (L2 c18).
+  getThreadDelete: id => (id == null || id === CODEX_ENGINE_PROFILE_ID) && appServerReady && nativeCapabilities.threadDelete === true,
   describe: () => describeCodexEngine({
     ready: appServerReady, starting: Boolean(appServerProcess) && !appServerReady, blocked: launchConfigBlocked,
     version: nativeCapabilities.version, versionSupported: nativeCapabilities.version ? nativeCapabilities.schemaMatch : null,
@@ -453,11 +457,16 @@ const handlePresenceMirrorHttp = createPresenceMirrorHttpHandler({ mirror: prese
 // Whose task a conversation's run is (another member's presence alias, told by the window; memory only). Same flag, default off.
 const runRequesters = createRunRequesters({ presence: presenceMirror })
 const handleRunRequesterHttp = createRunRequesterHttpHandler({ requesters: runRequesters, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
+// L1 c21 (5): a second Desk window reads a run's requester here
+const handleRunRequesterReadHttp = createRunRequesterReadHttpHandler({ requesters: runRequesters, presence: presenceMirror, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
 // EG-Desk's own command and file tools, Codex as a pure model engine: developer flag EGDESK_OWN_TOOLS=on, default off (null: nothing changes).
 const ownToolsWiring = createOwnToolsWiring({ env: process.env, dataDir, spawn, getChat: () => chat, inspect: createGitTargetInspector() })
 const terminalGateConfig = ['advisory', 'on'].includes(process.env.EGDESK_TERMINAL_GATE) ? { mode: () => process.env.EGDESK_TERMINAL_GATE, inspect: createGitTargetInspector(),
   // EGDESK_TERMINAL_GATE_METHOD=score selects the old 0-4 score question, only to compare; content predicates are the default.
   method: process.env.EGDESK_TERMINAL_GATE_METHOD === 'score' ? 'score' : 'predicates' } : null
+// A message typed while a run works is accepted into that run and handed to the session heartbeat (codex-chat-runtime.mjs, "Messages while a
+// run works"). Developer flag, default off: without it the composer waits for the turn and the runtime refuses such a message, as before.
+const IN_RUN_MESSAGES_ENABLED = process.env.EGDESK_INRUN_MESSAGES === 'on'
 const chat = new CodexChatRuntime({
   localCapacity,
   engines: engineRegistry,
@@ -466,6 +475,8 @@ const chat = new CodexChatRuntime({
   resolveRunProjectOrigin: request => localFiles.resolveRunProjectOrigin(request),
   toolProviders: [browserProvider, planProvider, annotationProvider].concat(ownToolsWiring ? ownToolsWiring.toolProviders : []),
   ...(ownToolsWiring ? { ownTools: ownToolsWiring.ownTools } : {}),
+  // L1 c21 (owner decision, provisional): a room keeps its account; an explicit switch continues the same room. Off unless EGDESK_ROOM_ACCOUNT=on.
+  roomAccount: { mode: () => (process.env.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') },
   store: chatStore,
   requireStore: true,
   getOwnerKey: () => publicAuthIdentityKey(authState),
@@ -507,6 +518,7 @@ const chat = new CodexChatRuntime({
     ...(process.env.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(process.env.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror, audience: ({ run }) => runRequesters.audience({ run }) } : {}),
       attentionPosted: ({ key, provider }) => { if (provider === 'work_placement') workPlacement.acknowledgePointer(key) } } } : {}),
     // Advisory state judge on the engine's own command executions: developer flag EGDESK_COMMAND_JUDGE=advisory, default off. Records only.
+    ...(IN_RUN_MESSAGES_ENABLED ? { inRunMessages: { mode: () => 'on' } } : {}),
     ...(process.env.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
     // Command gate before an engine approval card: developer flag EGDESK_TERMINAL_GATE=advisory|on, default off. It never answers an approval.
     ...(ownToolsWiring && !ownToolsWiring.shadow ? { terminalGate: ownToolsWiring.terminalGate(terminalGateConfig) } : terminalGateConfig ? { terminalGate: terminalGateConfig } : {}),
@@ -603,6 +615,10 @@ const workPlacement = createWorkPlacement({ client: decisionClient, mode: () => 
 chat.onForgetConversation('briefing_bindings', ({ conversationIds }) => conversationIds.reduce((n, id) => n + briefingBindings.forgetConversation(id), 0))
 chat.onForgetConversation('run_requesters', ({ clientThreadId, conversationIds }) => (runRequesters.set([clientThreadId, ...conversationIds], null) === 'cleared' ? 1 : 0))
 chat.onForgetConversation('work_placement', ({ clientThreadId, conversationIds }) => workPlacement.forget([clientThreadId, ...conversationIds]))
+// Owner decision (L2 c17): a reading heard in the deleted conversation and still pending is withdrawn (it is not memory yet).
+chat.onForgetConversation('pending_readings', ({ clientThreadId }) => turnMemoryConfig.getAdapter().withdrawPendingFrom([clientThreadId]))
+// Owner decision (L2 c18): memory in the conversation-temporary scope goes with the conversation; other scopes stay (deleted under [기억]).
+chat.onForgetConversation('conversation_memory', ({ clientThreadId, messageRefs }) => { const n = turnMemoryConfig.getAdapter().forgetConversation({ clientThreadId, messageRefs }); return n.pages + n.readings + n.pointers })
 // The window's event streams (/events): when the last one has been gone for 10 s, nobody can read a message, so idle live sessions end
 // (a working run keeps its heartbeat). A single conversation that is closed is told by the surface: POST /chat/session/close.
 const windowWatch = createWindowWatch({ onGone: () => chat.closeIdleSessions() })
@@ -612,6 +628,7 @@ const handleWorkPlacementHttp = createWorkPlacementHttpHandler({ placement: work
 const hudRoutingEnabled = () => ['advisory', 'on'].includes(process.env.EGDESK_HUD_ROUTING)
 const hudRouting = createHudRouting({ client: decisionClient, mode: () => bridgeSettings.decisionContext.mode, enabled: hudRoutingEnabled })
 const handleHudRoutingHttp = createHudRoutingHttpHandler({ routing: hudRouting, enabled: hudRoutingEnabled, port: BRIDGE_PORT })
+const handleRoomAccountHttp = createRoomAccountHttpHandler({ chat, enabled: () => process.env.EGDESK_ROOM_ACCOUNT === 'on', port: BRIDGE_PORT })
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
 const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
   budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT, boardPresentation: handleBoardPresentationHttp,
@@ -1169,7 +1186,7 @@ const bridgeServer = createServer(async (req, res) => {
       chat: chat.snapshot(),
       capabilities: {
         auth: ['status', 'start', 'cancel', 'signout', 'usage', 'device-code'],
-        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', 'stateless', 'fork', ...(CHAT_CHOICE_ENABLED ? ['choice'] : []), ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
+        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', 'stateless', 'fork', ...(CHAT_CHOICE_ENABLED ? ['choice'] : []), ...(IN_RUN_MESSAGES_ENABLED ? ['in-run-messages'] : []), ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
         context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
         profiles: profileStore ? ['local-store', 'revisions', 'run-binding'] : ['local-store-unavailable'],
@@ -1329,7 +1346,9 @@ const bridgeServer = createServer(async (req, res) => {
   if (await handleBoardPresentationHttp(req, res, url)) return
   if (await handleWorkPlacementHttp(req, res, url)) return
   if (await handleHudRoutingHttp(req, res, url)) return
+  if (await handleRoomAccountHttp(req, res, url)) return
   if (await handlePresenceMirrorHttp(req, res, url)) return
+  if (await handleRunRequesterReadHttp(req, res, url)) return
   if (await handleRunRequesterHttp(req, res, url)) return
   if (await handleEngineProfilesHttp(req, res, url)) return
   if (await handleProfileHttp(req, res, url)) return

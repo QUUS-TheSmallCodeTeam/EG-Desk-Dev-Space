@@ -25,7 +25,7 @@ import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
 import { createSpillRereadCounter, gateRuntimeToolResult, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
 import { homedir } from 'node:os'
 import { createInternalTurns } from './codex-internal-turn.mjs'
-import { attentionOf, audienceFacts, beatFlowFacts, browserTaskLines, cleanIntermediate, deriveFlowKind, enumerateOptions, FLOW_COPY, FLOW_LIMITS, flowPredicates, idleFlowFacts, messageEvidence, pointerDecision, pointerPredicates, pointerPrompt, pointerRoute, rideAlongPredicates, runContext, withoutRepeats, writerPrompt, personPredicates, personDecision, IN_RUN_LIMITS } from './egdesk-conversation-flow.mjs'
+import { attentionOf, audienceFacts, beatFlowFacts, browserTaskLines, cleanIntermediate, deriveFlowKind, enumerateOptions, FLOW_COPY, FLOW_LIMITS, flowPredicates, idleFlowFacts, messageEvidence, pointerDecision, pointerPredicates, pointerPrompt, pointerRoute, rideAlongPredicates, runContext, withoutRepeats, writerPrompt, personPredicates, personDecision } from './egdesk-conversation-flow.mjs'
 import { BEAT_JUDGE_TIMEOUT_MS, BEAT_PREDICATE_YES, createBeatJudge } from './egdesk-heartbeat-judge.mjs'
 import { createHeartbeats } from './egdesk-heartbeat.mjs'
 import { feedBrowserTask } from './egdesk-heartbeat-providers.mjs'
@@ -99,10 +99,12 @@ export const TURN_CONTEXT_BUDGET_MS = 800
 export const TURN_CONTEXT_COLD_BUDGET_MS = 1500
 // How the app-server says a thread's context was compacted: a `contextCompaction` item (item/started, item/completed), and on older builds the
 // deprecated `thread/compacted` notification. Either one means the answering model may no longer hold what was delivered to it.
+// `thread/reverted` (Codex 0.171 schema, ThreadRevertedNotification): the thread's durable history was replaced by the prefix before one turn;
+// what later turns delivered (and their replies) is gone from it as well (L7 c24).
 export function compactionSignal(message) {
   const p = message?.params
   if (!p || !idText(p.threadId)) return null
-  if (message.method === 'thread/compacted') return p.threadId
+  if (message.method === 'thread/compacted' || message.method === 'thread/reverted') return p.threadId
   if ((message.method === 'item/started' || message.method === 'item/completed') && p.item?.type === 'contextCompaction') return p.threadId
   return null
 }
@@ -112,7 +114,7 @@ import { pruneContextCandidates } from './egdesk-context-pruning.mjs'
 import { previousReplyExcerpt } from './egdesk-previous-reply.mjs'
 import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory, recordStateEvidence } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
-import { BROWSER_TASK_TTL_MS, codeEntryCard, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, entryQuestions, readBrowserEntry } from './egdesk-browser-task.mjs'
+import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, readBrowserEntry, rideAlongEntry } from './egdesk-browser-task.mjs'
 import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
@@ -741,7 +743,7 @@ function cleanNotification(method, p, engineId = 'codex') {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null }) {
+  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer, monotonicNow })
     if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
     this.resolveProjectWorkspace = resolveProjectWorkspace
@@ -789,7 +791,7 @@ export class CodexChatRuntime {
     // given request/respond become the Codex adapter, which calls them with
     // the same methods and params as before.
     this.engines = engines instanceof EngineRegistry ? engines : new EngineRegistry()
-    if (!(engines instanceof EngineRegistry)) for (const adapter of engines || [createCodexEngineAdapter({ request, respond, getBoardPeerContract })]) this.engines.register(adapter)
+    if (!(engines instanceof EngineRegistry)) for (const adapter of engines || [createCodexEngineAdapter({ request, respond, getBoardPeerContract, getThreadDelete })]) this.engines.register(adapter)
     const codex = this.engines.get('codex')
     if (typeof codex?.request !== 'function') throw chatError('INVALID_ENGINE_ADAPTER', 'The Codex engine adapter is required', 500)
     // Codex-only escape hatch (config/read, bounded-QA proofs).
@@ -861,6 +863,10 @@ export class CodexChatRuntime {
     this.commandGateRuns = new Set() // in-flight command gate assessments (never awaited by an approval card)
     // c18: { mode() → 'off'|'on', neutralFolder() → absolute EG-Desk-owned empty folder }; absent = off
     this.ownTools = ownTools
+    // L1 c21 (owner decision, provisional; flag roomAccount.mode() === 'on', default off): a room keeps its own AI account; an explicit switch
+    // continues the same room on another account (see switchRoomAccount).
+    this.roomAccount = roomAccount
+    this.roomSwitches = new Map() // clientThreadId -> { from: the previous native conversation id }: carried to the room's next native thread
     this.ownCommandBeats = new WeakSet() // heartbeats that already carry the own_commands provider
     this.shadowSeen = new Set() // answerId:itemId already judged by the own-tools shadow (bounded)
     this.shadowRuns = new Set()
@@ -877,6 +883,9 @@ export class CodexChatRuntime {
       decision: { mode: () => this.decisionContext?.mode?.(), configured: () => this.decisionContext?.configured?.(), get client() { return self.decisionContext?.client ?? null }, get calibrationLog() { return self.decisionContext?.calibrationLog ?? null } },
       readOutput: (key, itemId) => this.runOutputs.commandOutput(key, itemId),
       egressFor: key => { const run = this.commandJudgeRuns.get(key); return run && !TERMINAL.has(run.status) ? this.decisionEgressFor(run) : null } })
+    this.deletedConversations = new Set() // clientThreadId of a conversation the person deleted (forgetConversation): its runs say nothing more
+    this.inRunMessageQueue = new WeakMap() // run -> [{ requestId, localMessageId, text, at, state }]: messages typed while it works (inRunMessages flag)
+    this.carriedInRun = new Map() // clientThreadId -> [text]: messages its run ended without acting on; they open the next turn's input
     this.postedInstead = new Map() // clientThreadId -> { outcome, posted }: the answer the person saw instead of the Agent's draft (consumed by the next turn)
     this.draftOutcomes = new WeakMap() // run -> the draft check's outcome for its answer
     this.draftCheckTurns = new WeakMap() // run -> what the model had this turn, for the check after the answer is posted
@@ -1087,16 +1096,58 @@ export class CodexChatRuntime {
     const agentEngine = requested == null && !boundCid && !bound
       ? agentModel?.engine ?? (legacyAgentEngine ? this.agentEngine(body) : null) : null
     const engineId = this.engines.resolve({ requested: requested ?? agentEngine, bound })
-    if (savedSlot && (agentModel.engine !== engineId || (pinned && pinned !== savedSlot) ||
-        (boundCid && !pinned && this.engineRecord(engineId).engineProfileId !== savedSlot))) {
+    // L1 c21 (flag roomAccount on): an existing room keeps its own account; the Agent's saved account is only the default for a NEW room
+    const roomKeeps = this.roomAccountOn() && Boolean(boundCid || thread?.engineProfileId)
+    if (savedSlot && (agentModel.engine !== engineId || (!roomKeeps && ((pinned && pinned !== savedSlot) ||
+        (boundCid && !pinned && this.engineRecord(engineId).engineProfileId !== savedSlot))))) {
       throw chatError('ENGINE_PROFILE_CONFLICT', 'This Agent selected a different AI engine account; change the Agent selection or start a new conversation', 409)
     }
     // A pre-slot native checkpoint is still checked against the active/legacy
     // identity. Never retrofit it with the Agent's account, even when equal.
     const engineProfileId = pinned || (!boundCid ? savedSlot : null) || null
-    if (engineProfileId) this.assertEngineProfile(engineId, engineProfileId, { explicit: Boolean(savedSlot) })
+    if (engineProfileId) this.assertEngineProfile(engineId, engineProfileId, { explicit: Boolean(savedSlot) || (roomKeeps && !boundCid && Boolean(thread?.engineProfileId)) })
     if (binding && verifyAccount) this.assertNativeAccount(thread.clientThreadId, boundCid, engineId, binding)
     return { engineId, engineProfileId }
+  }
+
+  roomAccountOn() { try { return this.roomAccount?.mode?.() === 'on' } catch { return false } }
+
+  // L1 c21, owner decision (2), flag roomAccount on: the person explicitly switches THIS room to another account of the same engine. The same
+  // room continues: its history, draft, requester, an unanswered approval question and its EG-Desk memory stay with it; only the engine-side
+  // thread stays with the old account (the next message starts a new native thread on the new account). Refused while the room is working
+  // (a running Run never moves: Contract §14.1), for Board, one-time or forked rooms, and for an account profile that is missing.
+  switchRoomAccount({ clientThreadId, engineProfileId } = {}) {
+    if (!this.roomAccountOn()) throw chatError('ROOM_ACCOUNT_OFF', 'Switching a room\'s account is not enabled', 404)
+    if (!this.store) throw chatError('CHAT_STORE_UNAVAILABLE', 'No chat store', 503)
+    const room = idText(clientThreadId), slot = idText(engineProfileId)
+    const thread = room ? this.store.getConversation(room) : null
+    if (!thread || !slot) throw chatError('CONVERSATION_NOT_FOUND', 'No such room', 404)
+    if (thread.stateless || thread.forkedFrom || this.isSavedBoardTarget(room)) throw chatError('ROOM_ACCOUNT_UNSUPPORTED', 'This room cannot change its account', 409)
+    const engineId = thread.engineId || 'codex'
+    this.assertEngineProfile(engineId, slot, { explicit: true })
+    const from = thread.conversationId || null
+    if ((thread.engineProfileId || null) === slot) return { status: 'unchanged', clientThreadId: room, engineProfileId: slot }
+    if (from && this.conversationBusy(from)) throw chatError('RUN_IN_PROGRESS', 'The room is working; switch after the run ends', 409)
+    // EG-Desk memory belongs to the room: its scope keeps the account the room's memory was written under (its first account)
+    let memoryOwnerKey = null
+    try { memoryOwnerKey = this.store.roomMemoryOwnerKey?.(room) ?? (from ? this.engineOwnerKey(engineId, thread.engineProfileId || null) : null) } catch { memoryOwnerKey = null }
+    const switched = this.store.switchRoomAccount({ clientThreadId: room, engineProfileId: slot, memoryOwnerKey })
+    if (from) { this.roomSwitches.set(room, { from }); const left = this.threads.get(from); if (left) left.roomSwitchedAway = true }
+    return { status: 'switched', clientThreadId: room, engineProfileId: slot, previous: switched.previous }
+  }
+  // The room's first native thread on its new account: what belongs to the room and was keyed by the old native thread comes along.
+  continueSwitchedRoom(clientThreadId, conversationId) {
+    const room = idText(clientThreadId), carried = room ? this.roomSwitches.get(room) : null
+    if (!carried || !conversationId || carried.from === conversationId) return false
+    this.roomSwitches.delete(room)
+    try { this.gateHookBroker()?.rekey?.(carried.from, conversationId) } catch { /* an unread question asks again */ }
+    if (this.ownFolders.has(carried.from) && !this.ownFolders.has(conversationId)) this.ownFolders.set(conversationId, this.ownFolders.get(carried.from))
+    return true
+  }
+  // The memory scope's owner: the room's first account after a switch (flag on), else the current account (as before).
+  memoryOwnerKeyFor(clientThreadId, ownerKey) {
+    if (!this.roomAccountOn() || !this.store?.roomMemoryOwnerKey) return ownerKey
+    try { return this.store.roomMemoryOwnerKey(clientThreadId) ?? ownerKey } catch { return ownerKey }
   }
 
   // The engine the selected Agent's active (or named) revision saved, or null.
@@ -1416,6 +1467,7 @@ export class CodexChatRuntime {
   }
 
   emit(run, event, details = {}, itemId) {
+    if (run?.clientThreadId && this.deletedConversations.has(run.clientThreadId)) return // deleted: nothing is stored or shown for it any more
     if (event === 'context.read.failed') {
       const failure = classifyPublicToolError({ code: details.code }, { context: true })
       details = { ...details, code: failure.code, message: failure.message }
@@ -1724,17 +1776,24 @@ export class CodexChatRuntime {
     // a reply must never turn into a second turn (or a saved message without one).
     const replyTo = internal || body?.inRunReplyTo === undefined ? null : idText(body.inRunReplyTo) || ''
     if (replyTo !== null && (!inRun || inRun.runId !== replyTo)) throw chatError('INRUN_REPLY_UNAVAILABLE', 'The running turn is not waiting for a reply', 409)
+    // A message the person typed while the run works, named for that run (developer flag decisionContext.inRunMessages, default off).
+    // Refused before anything is stored when the flag is off or that run no longer works; without the field nothing changes.
+    const messageTo = internal || body?.inRunMessageTo === undefined ? null : idText(body.inRunMessageTo) || ''
+    if (messageTo !== null) {
+      if (replyTo !== null) throw chatError('INVALID_REQUEST', 'A message is either a reply or a message to the working run', 400)
+      if (inRun && inRun.runId === messageTo) return this.answerEarlyQuestion(inRun, body) // an open early question takes it as its reply, as before
+      const working = this.inRunMessagesOn() ? this.inRunMessageRun(idText(body?.clientThreadId) || idText(body?.thread?.id), idText(body?.conversationId)) : null
+      if (!working || working.runId !== messageTo) throw chatError('INRUN_MESSAGE_UNAVAILABLE', 'The running turn does not take messages', 409)
+      return this.acceptInRunMessage(working, body)
+    }
     if (inRun) return this.answerEarlyQuestion(inRun, body)
-    // c21 (Main: accept a person's message during a run, developer flag, default off): the screen marks a message sent while the run works
-    // (inRunMessage: true, lane L2's surface); it joins the working run as a heartbeat fact instead of being refused (RUN_IN_PROGRESS).
-    const working = !internal && body?.inRunMessage === true && this.inRunMessagesOn() ? this.workingRunFor(idText(body?.clientThreadId) || idText(body?.thread?.id), idText(body?.conversationId)) : null
-    if (working) return this.acceptInRunMessage(working, body)
     validateChatCwd(body)
     if (this.requireStore) this.assertStore()
     const requestedEngineId = this.requestedEngine(body)
     const clientThreadId = idText(body.clientThreadId) || idText(body.thread?.id)
     const conversationId = idText(body.conversationId)
     if (body.conversationId != null && !conversationId) throw chatError('INVALID_THREAD_ID', 'Invalid conversationId')
+    if (!internal && clientThreadId) this.deletedConversations.delete(clientThreadId) // a new message under this id starts it anew
     const projectTarget = this.projectTarget(body)
     const expectedRoomProject = this.expectedRoomProject(body)
     const projectScope = this.projectScope(body, internal?.board?.record?.roomClientThreadId || clientThreadId, projectTarget, expectedRoomProject)
@@ -1885,7 +1944,8 @@ export class CodexChatRuntime {
     const lock = conversationId || `client:${clientThreadId || 'legacy'}`
     if (this.locks.has(lock) || (conversationId && this.locks.has(`client:${clientThreadId}`))) throw chatError('RUN_IN_PROGRESS', 'A request is already starting for this conversation', 409)
     if (this.locks.size >= MAX_RUNS) throw chatError('RUNTIME_BUSY', 'Too many pending requests', 429)
-    const registered = !conversationId && clientThreadId ? [...this.threads.values()].find(t => t.clientThreadId === clientThreadId) : null
+    // (a native thread the room left for another account, L1 c21, is no longer the room's: its next message starts a new one)
+    const registered = !conversationId && clientThreadId ? [...this.threads.values()].find(t => t.clientThreadId === clientThreadId && t.roomSwitchedAway !== true) : null
     if (registered) {
       if (stateless) throw chatError('STATELESS_REQUIRES_NEW', 'Only a new conversation can be started without saved history', 400)
       throw Object.assign(chatError('CONVERSATION_REQUIRED', 'Continue this conversation using its returned conversationId', 409), {
@@ -2607,6 +2667,7 @@ export class CodexChatRuntime {
       const result = await engine.startThread(overrides, slot)
       if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       cid = result?.thread?.id
+      if (cid) this.continueSwitchedRoom(context.clientThreadId, cid) // L1 c21: a switched room's first thread on its new account
       if (!idText(cid)) throw chatError('INVALID_THREAD_RESPONSE', 'Codex did not return a thread ID', 502)
       if (workspace && (result.cwd || result.thread?.cwd) !== (ownTools ? neutralFolder : workspace.absolutePath)) throw Object.assign(chatError('PROJECT_WORKSPACE_UNVERIFIED', 'The AI engine did not confirm the associated working folder; no message was sent', 409), { definite: true })
       // Never call a thread one-time when the engine says it saved it.
@@ -2770,7 +2831,7 @@ export class CodexChatRuntime {
       turnStartAttempted = context.turnStartAttempted = true
       const result = await engine.startTurn({
         threadId: cid,
-        input: [{ type: 'text', text: body.message, text_elements: [] }],
+        input: [...this.carriedInputFor(context.clientThreadId), { type: 'text', text: body.message, text_elements: [] }],
         clientUserMessageId: context.requestId,
         ...(bounded ? QA_TURN_OVERRIDES : {}),
         ...(ownTools ? OWN_TOOLS_TURN_OVERRIDES : {}),
@@ -4385,7 +4446,9 @@ export class CodexChatRuntime {
       // What code can rule out is not asked (egdesk-context-pruning.mjs): records the model already holds unchanged in this conversation. Only
       // under 'on' and where delivery receipts are trusted: a Codex thread (compaction is reported there and clears them). Advisory records only.
       // Internal flag turnMemory.pruneHeld (bridge EGDESK_TURN_MEMORY_PRUNE_HELD=on), off by default.
-      const thread = mode === 'on' && this.pruneHeldFlag() && context.engine?.id === 'codex' && typeof context.conversationId === 'string' && context.conversationId ? context.conversationId : null
+      // Receipts count only while the thread is live in this process (L7 c24): a resumed or forked thread may have been compacted unseen.
+      const thread = mode === 'on' && this.pruneHeldFlag() && context.engine?.id === 'codex' && typeof context.conversationId === 'string' && context.conversationId &&
+        this.turnPosition(context).reason === 'live_thread' ? context.conversationId : null
       const { kept: candidates, pruned } = thread ? await pruneContextCandidates(Array.isArray(collected) ? collected : [], {
         sent: this.contextDelivered.get(thread) ?? null, memoryReceipts: this.turnMemoryDelivered.get(thread)?.pages ?? null }) : { kept: Array.isArray(collected) ? collected : [], pruned: [] }
       const topic = mode === 'on' ? this.topicIntakes.get(context)?.prepare(controller.signal, inBudget) : null
@@ -4433,7 +4496,9 @@ export class CodexChatRuntime {
       if (this.decisionContext?.turnMemory?.previousReply !== true) return null
       let speechConsent = false
       try { speechConsent = speechSource?.allowed?.() === true } catch { speechConsent = false }
-      const threadReply = context.engine?.id === 'codex' && this.turnPosition(context).kind === 'mid'
+      // Only a LIVE thread (loaded by this process and followed since): after a bridge restart or on a thread this process has not loaded
+      // (resume, a fork's first turn) a compaction may have happened unseen, so the gate stays closed (L7 c24).
+      const threadReply = context.engine?.id === 'codex' && this.turnPosition(context).reason === 'live_thread'
       const gate = createEgressGate(modelDataPermissions({ speechConsent, threadReply }))
       if (!gate.allows('previous_reply') && !gate.allows('speech_history')) return null
       const last = (this.store?.listMessages?.(context.clientThreadId)?.messages ?? []).filter(m => m.role === 'assistant' && m.status !== 'streaming' && m.status !== 'error').at(-1)
@@ -4841,7 +4906,7 @@ export class CodexChatRuntime {
     }
     if (this.readNativeBinding(clientThreadId, conversationId).executionPolicy) deny()
     assertCurrent()
-    const scope = { ownerKey: authority.ownerKey, clientThreadId, agentId: expectedProfileId }
+    const scope = { ownerKey: this.memoryOwnerKeyFor(clientThreadId, authority.ownerKey), clientThreadId, agentId: expectedProfileId }
     return { scope, assertCurrent, topicRecipient: () => {
       assertCurrent()
       if (route.engineId !== 'codex' || this.decisionContext?.configured() !== true) return null
@@ -5200,8 +5265,9 @@ export class CodexChatRuntime {
       if (!resuming && typeof cfg.entryAnswers === 'function' && egress.allows('page_text')) {
         const hostsByCard = this.browserEntryHosts(body), titlesByCard = this.browserEntryTitles(body)
         const cards = (preRun.browserBinding?.cards || []).filter(card => card.permission === 'interact').map(card => ({ cardId: card.cardId, host: hostsByCard[card.cardId] || '', title: titlesByCard[card.cardId] || '' }))
-        // c20: the entry is yes/no predicates (the request; one per card unless code named the card); the host appends all of them
-        const codeCard = codeEntryCard(body.message, cards), questions = entryQuestions(cards, { codeCard })
+        // c20: the entry is yes/no predicates (the request; one per card unless code named the card); the host appends all of them.
+        // c22: built like the standalone entry, observing each card's first lines under the same page_text gate and fallback.
+        const { codeCard, questions } = await rideAlongEntry({ provider, run: preRun, message: body.message, cards, cardText: egress.allows('page_text') === true })
         try { const answers = cards.length ? await cfg.entryAnswers({ body, context, questions, question: questions[0], client: guarded(['page_text']) }) : null
           if (answers && answers.browser_entry?.type === 'predicate') {
             const picked = Object.fromEntries(questions.map(q => [q.name, answers[q.name]]).filter(([, a]) => a))
@@ -5301,18 +5367,38 @@ export class CodexChatRuntime {
    * work placement). Not touched: the chat store's history, ontology pages and records, the write store, calibration rows (see the cycle-16
    * report). Counts only. Idempotent: an unknown or already forgotten conversation answers zeros.
    */
-  forgetConversation(target) {
+  async forgetConversation(target) {
     const key = typeof target === 'string' ? target : idText(target?.clientThreadId)
     if (!key?.trim()) throw chatError('INVALID_CONVERSATION_FORGET', 'clientThreadId is required', 400)
     const native = new Set()
-    try { const thread = this.store?.getConversation?.(key); if (typeof thread?.conversationId === 'string' && thread.conversationId) native.add(thread.conversationId) } catch { /* not stored */ }
+    let storedEngine = null, storedProfile = null
+    try {
+      const thread = this.store?.getConversation?.(key)
+      if (typeof thread?.conversationId === 'string' && thread.conversationId) { native.add(thread.conversationId); storedEngine = thread.engineId ?? null; storedProfile = thread.engineProfileId ?? null }
+    } catch { /* not stored */ }
     for (const run of this.runs.values()) if (run?.clientThreadId === key && typeof run.conversationId === 'string' && run.conversationId) native.add(run.conversationId)
     const hb = this.heartbeats.get(key), subject = hb ? this.heartbeatSubjects.get(hb) : null
     if (typeof subject?.conversationId === 'string' && subject.conversationId) native.add(subject.conversationId)
-    const out = { heartbeat: false, postedNote: false, heldPointers: 0, memoryReceipts: 0, notes: 0, browserTasks: 0, modules: {} }
+    const out = { heartbeat: false, postedNote: false, carriedMessages: 0, heldPointers: 0, memoryReceipts: 0, notes: 0, browserTasks: 0, modules: {}, interrupted: 0, history: null, engineHistory: [] }
+    // The conversation's messages as memory refers to them (chat-message:<localMessageId>), read before the history goes (L2 c18).
+    let messageRefs = []
+    try { messageRefs = (this.store?.localMessageIds?.(key) ?? []).map(id => `chat-message:${id}`) } catch { messageRefs = [] }
+    // Owner decision (L2 c17): deleting a conversation deletes it. A run still working in it is interrupted (as the stop button does, without
+    // its events), and from now on nothing of its runs is stored or shown (emit). The interrupt is not awaited; a failure changes nothing here.
+    this.deletedConversations.add(key)
+    while (this.deletedConversations.size > 500) this.deletedConversations.delete(this.deletedConversations.values().next().value)
+    for (const run of this.runs.values()) {
+      if (run?.clientThreadId !== key || TERMINAL.has(run.status) || run.stopRequested) continue
+      run.stopRequested = true
+      for (const provider of this.toolProviders) { try { provider.cancelRun?.(run) } catch { /* ignore */ } }
+      const held = this.browserRunHolds.get(run)
+      if (held && held.phase !== 'turn') { held.cancelled = true; out.interrupted++; continue }
+      try { void Promise.resolve(this.engineOf(run.conversationId)?.interruptTurn(run.conversationId, held?.turnId || run.runId, this.threadOperationSlot(run.conversationId))).catch(() => {}); out.interrupted++ } catch { /* ignore */ }
+    }
     if (hb && hb.state !== 'stopped') { this.stopHeartbeat(hb, 'deleted'); out.heartbeat = true }
     for (const [threadId, live] of [...this.heartbeatThreads]) if (native.has(threadId) || (hb && live === hb)) this.heartbeatThreads.delete(threadId)
     out.postedNote = this.postedInstead.delete(key)
+    out.carriedMessages = this.carriedInRun.get(key)?.length ?? 0; this.carriedInRun.delete(key)
     const held = this.heldAttention?.length ?? 0
     this.heldAttention = (this.heldAttention ?? []).filter(row => row.sourceKey !== key && !native.has(row.sourceKey))
     out.heldPointers = held - this.heldAttention.length
@@ -5321,8 +5407,26 @@ export class CodexChatRuntime {
     for (const id of ids) if (this.turnMemoryNoted.delete(id)) out.notes++
     try { out.browserTasks = this.browserTaskStore?.forget?.(key) ?? 0 } catch { out.browserTasks = 0 }
     for (const [name, forget] of this.conversationForgetters) {
-      try { const n = forget({ clientThreadId: key, conversationIds: [...native] }); out.modules[name] = Number.isSafeInteger(n) ? n : n === true ? 1 : 0 } catch { out.modules[name] = 'failed' }
+      try { const n = forget({ clientThreadId: key, conversationIds: [...native], messageRefs }); out.modules[name] = Number.isSafeInteger(n) ? n : n === true ? 1 : 0 } catch { out.modules[name] = 'failed' }
     }
+    // The engine's own history of each native thread (owner decision, L2 c18): thread/delete where the connected engine's schema has it;
+    // otherwise, or when it fails, the result says that history remains with that engine.
+    for (const cid of native) {
+      // The engine that holds this thread: the live binding, else the stored one (after a restart nothing is live).
+      const live = this.threadEngines.has(cid), engineId = live ? this.threadEngine(cid) : storedEngine ?? 'codex'
+      const engine = this.engines.get(engineId), slot = live ? this.threadOperationSlot(cid) : this.operationSlot(engineId, storedProfile)
+      let state = 'remains', reason = 'unsupported'
+      try {
+        if (typeof engine?.deleteThread === 'function' && engine.threadDeleteSupported?.(slot) === true) {
+          reason = null
+          await engine.deleteThread(cid, slot)
+          state = 'deleted'
+        }
+      } catch { state = 'remains'; reason = 'failed' }
+      out.engineHistory.push({ conversationId: cid, engineId, state, ...(reason ? { reason } : {}) })
+    }
+    // The stored history (messages, runs, events, requests, members, the room record) goes last, after the modules read what they need.
+    try { out.history = this.store?.deleteConversation?.(key) ?? null } catch { out.history = { deleted: false, failed: true } }
     return { accepted: true, ...out }
   }
 
@@ -5660,16 +5764,18 @@ export class CodexChatRuntime {
   flowPropose(run, flow, beat, subject = this.heartbeatSubjects.get(flow.heartbeat)) {
     const setup = this.decisionContext
     if (flow.closed || run.status !== 'inProgress') return null
-    // c21: a message judged at an earlier beat whose round never concluded is handed to the run (the safe default), not asked again.
-    for (const stale of (flow.personMessages ?? []).filter(m => m.state === 'judging' && m !== flow.pendingPerson)) this.trackFlowJob(this.actOnPersonMessage(run, flow, stale, 'steer', null))
-    const person = (flow.personMessages ?? []).find(m => m.state === 'pending')
+    // c21/c22: a message judged at an earlier beat whose round never concluded is handed to the run (the safe default), not asked again.
+    flow.personJudged ??= new Map()
+    const pending = typeof this.pendingInRunMessages === 'function' ? this.pendingInRunMessages(run) : []
+    for (const stale of pending.filter(m => flow.personJudged.get(m.requestId) === 'judging' && m.requestId !== flow.pendingPerson?.requestId)) this.trackFlowJob(this.decidePersonMessage(run, flow, stale, 'steer', null))
+    const person = pending.find(m => !flow.personJudged.has(m.requestId))
     if (person) {
-      if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) { this.trackFlowJob(this.actOnPersonMessage(run, flow, person, 'steer', null)); return null }
+      if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) { this.trackFlowJob(this.decidePersonMessage(run, flow, person, 'steer', null)); return null }
       // The beat asks about the person's message alone (quoted), with the run's own text as its context where the run's gate allows it.
       const facts = { ...beatFlowFacts({ heartbeatFacts: beat.facts, run, flow, own: FLOW_OWN_KINDS }), heartbeatFacts: beat.facts }
       const egress = this.decisionEgressFor(run)
       const context = runContext({ run, heartbeatFacts: beat.facts, flow, facts, userText: this.runUserText(run), allows: kind => egress.allows(kind), own: FLOW_OWN_KINDS, browserTask: this.browserTaskBrief(run) })
-      person.state = 'judging'
+      flow.personJudged.set(person.requestId, 'judging')
       flow.pendingPerson = person; flow.pendingFacts = facts; flow.pendingOptions = ['none', 'reply_status']; flow.pendingRide = null
       const questions = personPredicates(person.text)
       return context ? { context, questions } : questions
@@ -5723,7 +5829,7 @@ export class CodexChatRuntime {
       const said = new Set(verdicts.filter(v => v.accepted && v.value === 'yes').map(v => v.name))
       const action = personDecision(said)
       if (subject) subject.derived = action
-      return this.trackFlowJob(this.actOnPersonMessage(run, flow, person, action, personFacts))
+      return this.trackFlowJob(this.decidePersonMessage(run, flow, person, action, personFacts))
     }
     const facts = flow.pendingFacts, options = flow.pendingOptions ?? []
     flow.pendingFacts = null; flow.pendingOptions = null
@@ -5888,60 +5994,22 @@ export class CodexChatRuntime {
     return null
   }
 
-  // ---- In-run messages (c21; flag decisionContext.conversationFlow.inRunMessages(), default off; bridge EGDESK_IN_RUN_MESSAGES=on, lane L2) ----
-  // Contract with lane L2 (surface and bridge): the screen sends a message typed while its run works with inRunMessage: true (the same
-  // /chat/send body otherwise); the answer is { accepted, inRun: true, held: true, ... }. The message is recorded as the person's message of
-  // that run at once (message.completed); what happens next is decided at the next beat (within 0.5 s, heartbeat.nudge): a short progress
-  // reply (one completed assistant message of the run), the message steered into the working native turn (turn/steer, as the early
-  // question's reply is), or the run stopped (run.stop_requested). Without the flag, or with no working run, nothing changes.
-  inRunMessagesOn() {
-    try { return this.heartbeatMode() === 'on' && this.decisionContext?.conversationFlow?.inRunMessages?.() === true } catch { return false }
-  }
-  workingRunFor(clientThreadId, conversationId) {
-    if (!clientThreadId) return null
-    for (const run of this.runs.values()) {
-      if (run.clientThreadId !== clientThreadId || run.status !== 'inProgress' || (conversationId && run.conversationId !== conversationId)) continue
-      const flow = this.flowRuns.get(run)
-      if (flow && !flow.closed && flow.heartbeat) return run
+  // ---- In-run messages, the heartbeat's side (L3 c22, one contract with lane L2: inRunMessages flag, pendingInRunMessages, settleInRunMessage) ----
+  // At a beat the oldest pending message (lane L2's queue) is judged alone (personPredicates: status / change / stop, quoting only that
+  // message); code decides (personDecision) and settles it through lane L2's settleInRunMessage: 'interrupt' (stop), 'steer' (change, and the
+  // safe default for anything else or a failed judgment), or 'reply' after one checked progress reply was posted (status only). A message
+  // whose round never concluded is steered at the next beat. A settle that fails leaves it pending; lane L2 carries it into the next turn.
+  async decidePersonMessage(run, flow, person, action, facts) {
+    // Returns the closed word for the beat's record: 'model' when a reply was posted, else 'none' (what was settled is personJudged's value).
+    (flow.personJudged ??= new Map()).set(person.requestId, 'deciding')
+    let settled = null, posted = 'none'
+    if (action === 'reply' && facts && !flow.closed && run.status === 'inProgress') {
+      posted = await this.postIntermediate(run, flow, 'reply_status', { ...facts, personMessage: person.text })
+      if (posted !== 'none') settled = await this.settleInRunMessage(run, person.requestId, 'reply')
     }
-    return null
-  }
-  acceptInRunMessage(run, body) {
-    const flow = this.flowRuns.get(run)
-    const requestId = idText(body.requestId), message = typeof body.message === 'string' ? body.message : ''
-    if (!flow || !this.store || !requestId || !message.trim() || message.length > 16384) throw chatError('INVALID_REQUEST', 'This message cannot be added to the running turn', 400)
-    flow.personMessages ??= []
-    if (flow.personMessages.filter(m => m.state !== 'done').length >= IN_RUN_LIMITS.pending) throw chatError('RUN_IN_PROGRESS', 'The running turn already holds the messages it can take', 409)
-    const localMessageId = this.recordInRunReply(run, flow, requestId, message)
-    flow.personMessages.push({ requestId, text: message, state: 'pending', at: this.now() })
-    try { flow.heartbeat?.nudge?.() } catch { /* the next regular beat takes it */ }
-    return { accepted: true, durable: true, inRun: true, held: true, requestId, clientThreadId: run.clientThreadId, conversationId: run.conversationId, runId: run.runId, localMessageId }
-  }
-  // What code does with the message (personDecision): stop, steer, or reply (falling back to steer when no reply can be posted).
-  async actOnPersonMessage(run, flow, person, action, facts) {
-    person.state = 'done'
-    if (flow.closed || run.status !== 'inProgress') { person.action = 'none'; return 'none' }
-    if (action === 'stop') {
-      person.action = 'stopped'
-      try { await this.interrupt({ conversationId: run.conversationId, runId: run.runId }) } catch { person.action = 'stop_failed' }
-      return 'none'
-    }
-    if (action === 'reply' && facts) {
-      const posted = await this.postIntermediate(run, flow, 'reply_status', { ...facts, personMessage: person.text })
-      if (posted !== 'none') { person.action = 'replied'; return posted }
-    }
-    person.action = (await this.steerPersonMessage(run, person)) ? 'steered' : 'undelivered'
-    return 'none'
-  }
-  async steerPersonMessage(run, person) {
-    try {
-      const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
-      const proof = engine?.boardPeerContract?.(slot)
-      if (!proof || typeof engine.steerTurn !== 'function') return false
-      const response = await engine.steerTurn({ threadId: run.conversationId, expectedTurnId: run.runId, clientUserMessageId: person.requestId,
-        input: [{ type: 'text', text: person.text, text_elements: [] }] }, slot, proof)
-      return response?.turnId === run.runId
-    } catch { return false }
+    if (settled === null && run.status === 'inProgress') settled = await this.settleInRunMessage(run, person.requestId, action === 'stop' ? 'interrupt' : 'steer')
+    flow.personJudged.set(person.requestId, settled ?? 'none')
+    return posted
   }
 
   // The person answered the early question while the run kept working: the reply becomes a normal local user message and is
@@ -5965,6 +6033,84 @@ export class CodexChatRuntime {
     const localMessageId = this.recordInRunReply(run, flow, requestId, message)
     this.setReplyOpen(run, null)
     return { accepted: true, durable: true, inRun: true, requestId, clientThreadId: run.clientThreadId, conversationId: run.conversationId, runId: run.runId, localMessageId }
+  }
+
+  // ---- Messages while a run works (developer flag decisionContext.inRunMessages.mode() === 'on', EGDESK_INRUN_MESSAGES=on; default off) ----
+  // Contract with the session heartbeat (lane L3 builds that side):
+  //   1. accept: the message is stored as the person's own message of the run, in arrival order, and shown as sent (message.completed).
+  //      It is queued on the run as pending and the heartbeat is told at once: mark('user') and nudge() (next beat within nudgeMs).
+  //   2. read: pendingInRunMessages(run) -> [{ requestId, text, at }] (oldest first; text is the person's own words, for the judge).
+  //   3. settle, once per message: settleInRunMessage(run, requestId, 'reply' | 'steer' | 'interrupt')
+  //        'reply'     the heartbeat answered it itself (a progress reply it posted): nothing goes to the engine.
+  //        'steer'     the message changes the task: steered into the working native turn (turn/steer, the verified contract).
+  //        'interrupt' the message stops the task: the run is stopped through interrupt() (turn/interrupt), as the stop button does.
+  //      Returns the decision taken, 'failed' (the message stays pending) or null (unknown, already settled, or the run has ended).
+  //   4. never lost: a message still pending when its run ends is carried into the next turn of the conversation, as the person's own
+  //      words before the new message (turn/start input). Deleting the conversation drops it.
+  inRunMessagesOn() { try { return this.decisionContext?.inRunMessages?.mode?.() === 'on' } catch { return false } }
+
+  // The one working run of this conversation that can take a message now: a live native turn (not a held-open browser task), not stopping.
+  inRunMessageRun(clientThreadId, conversationId) {
+    if (!clientThreadId) return null
+    const working = [...this.runs.values()].filter(run => run.clientThreadId === clientThreadId && run.status === 'inProgress' && (!conversationId || run.conversationId === conversationId))
+    if (working.length !== 1) return null
+    const run = working[0], held = this.browserRunHolds.get(run)
+    return run.stopRequested || (held && held.phase !== 'turn') ? null : run
+  }
+
+  acceptInRunMessage(run, body) {
+    const requestId = idText(body.requestId), message = typeof body.message === 'string' ? body.message : ''
+    if (!this.store || !requestId || !message.trim() || message.length > MAX_TEXT) throw chatError('INVALID_REQUEST', 'This message cannot be added to the running turn', 400)
+    const queue = this.inRunMessageQueue.get(run) ?? []
+    this.inRunMessageQueue.set(run, queue)
+    const answer = entry => ({ accepted: true, durable: true, inRun: true, requestId, clientThreadId: run.clientThreadId, conversationId: run.conversationId, runId: run.runId, localMessageId: entry.localMessageId })
+    const known = queue.find(entry => entry.requestId === requestId)
+    if (known) return answer(known) // the same request again: one message
+    const flow = this.flowRuns.get(run)
+    const entry = { requestId, text: message, at: this.now(), state: 'pending', localMessageId: this.recordInRunReply(run, flow ?? {}, requestId, message) }
+    queue.push(entry)
+    try { flow?.heartbeat?.nudge?.() } catch { /* timing hint only */ }
+    return answer(entry)
+  }
+
+  pendingInRunMessages(run) {
+    return (this.inRunMessageQueue.get(run) ?? []).filter(entry => entry.state === 'pending').map(({ requestId, text, at }) => Object.freeze({ requestId, text, at }))
+  }
+
+  async settleInRunMessage(run, requestId, decision) {
+    const entry = (this.inRunMessageQueue.get(run) ?? []).find(row => row.requestId === requestId)
+    if (!entry || entry.state !== 'pending' || run.status !== 'inProgress' || !['reply', 'steer', 'interrupt'].includes(decision)) return null
+    if (decision === 'reply') { entry.state = 'reply'; return 'reply' }
+    entry.state = 'settling'
+    try {
+      if (decision === 'steer') {
+        const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId), proof = engine?.boardPeerContract?.(slot)
+        if (!proof || typeof engine.steerTurn !== 'function') throw new Error('no steer contract')
+        const response = await engine.steerTurn({ threadId: run.conversationId, expectedTurnId: run.runId, clientUserMessageId: requestId,
+          input: [{ type: 'text', text: entry.text, text_elements: [] }] }, slot, proof)
+        if (response?.turnId !== run.runId) throw new Error('not taken')
+      } else {
+        const out = await this.interrupt({ conversationId: run.conversationId, runId: run.runId })
+        if (out?.accepted !== true) throw new Error('not stopped')
+      }
+      entry.state = decision
+      return decision
+    } catch { if (entry.state === 'settling') entry.state = 'pending'; return 'failed' }
+  }
+
+  carryInRunMessages(run) {
+    const pending = (this.inRunMessageQueue.get(run) ?? []).filter(entry => entry.state === 'pending' || entry.state === 'settling')
+    if (!pending.length || !run.clientThreadId) return
+    for (const entry of pending) entry.state = 'carried'
+    this.carriedInRun.set(run.clientThreadId, [...(this.carriedInRun.get(run.clientThreadId) ?? []), ...pending.map(entry => entry.text)])
+  }
+
+  // Taken once, by the turn that starts next in this conversation (none: the input is as before).
+  carriedInputFor(clientThreadId) {
+    const texts = clientThreadId ? this.carriedInRun.get(clientThreadId) : null
+    if (!texts?.length) return []
+    this.carriedInRun.delete(clientThreadId)
+    return texts.map(text => ({ type: 'text', text, text_elements: [] }))
   }
 
   // An in-run reply becomes a normal local user message of the run (one place for both reply paths: steered into a working native
@@ -6939,11 +7085,11 @@ export class CodexChatRuntime {
             const labels = judged.receipt?.labels
             turn.sources.speech.record?.(context.localMessageId, 'user', body.message, labels ? [{ start: 0, end: body.message.length, source: labels.source, form: labels.form, time: labels.time }] : [])
           }
-          applied = tm.writer(wiki, { enabled: true, canWrite }).apply(proposal, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: writeScope, operationId: `turn:${context.localMessageId}` })
+          applied = tm.writer(wiki, { enabled: true, canWrite }).apply(proposal, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: writeScope, operationId: `turn:${context.localMessageId}`, from: run.clientThreadId })
           // A correction: the record carries the pending "outdated" reading; the person's own sentence with the new detail becomes a page
           // that supersedes it, only where an utterance page may be stored at all (speech consent).
           if (judged.followUp && speechOk && applied?.status === 'recorded_pending') {
-            followUp = tm.writer(wiki, { enabled: true, canWrite }).apply(judged.followUp, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: writeScope, operationId: `turn:${context.localMessageId}:correction` })?.status ?? null
+            followUp = tm.writer(wiki, { enabled: true, canWrite }).apply(judged.followUp, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: writeScope, from: run.clientThreadId, operationId: `turn:${context.localMessageId}:correction` })?.status ?? null
           }
           // Noted for this session, so a later reply can say what was noted and the person's next message can confirm or refuse it.
           if (applied?.status === 'recorded_pending' && proposal.op === 'update_status' && this.turnMemoryConfirmOn() && typeof run.conversationId === 'string' && run.conversationId) {
@@ -7741,6 +7887,7 @@ export class CodexChatRuntime {
     this.releaseBrowserRunHold(run)
     run.status = turn.status
     this.stopConversationFlow(run, turn.status === 'interrupted' ? 'cancel' : 'run_end')
+    this.carryInRunMessages(run)
     this.completeCalibration(run)
     this.startTurnMemoryWrite(run) // 'on': the write judgment runs after the answer, in the background
     for (const provider of this.toolProviders) provider.cancelRun?.(run)

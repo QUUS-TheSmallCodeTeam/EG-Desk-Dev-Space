@@ -30,6 +30,7 @@ import { EXIT, independentEstimate, runPlan } from '../helper/egdesk-decision-re
 import { DECISIONS_ENDPOINT } from '../helper/egdesk-decision-client.mjs'
 import * as WP from '../overlay/resources/EGDeskWorkPlacement.sys.mjs'
 import * as BriefingHost from '../overlay/resources/EGDeskBriefingHost.sys.mjs'
+import { sendStampPath, stampingFetch } from '../helper/egdesk-decision-send-stamp.mjs'
 import { allOnWorld, callerOf, scriptedDecisions, DM } from './egdesk-all-on.support.mjs'
 
 export const PLAN_FILE = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan.json', import.meta.url))
@@ -41,7 +42,9 @@ export const PLAN_FILE_V3 = fileURLToPath(new URL('./egdesk-all-on-live-measure.
 export const PLAN_FILE_V4 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v4.json', import.meta.url))
 // Plan v5 (cycle 16): v4, plus switches a run may turn on (--switch <name>, all off by default) and expectations judged only under them.
 export const PLAN_FILE_V5 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v5.json', import.meta.url))
-export const LATEST_PLAN_FILE = PLAN_FILE_V5
+// Plan v6 (cycle 17): v5, plus the in-run nudge step (EGDESK_INRUN_MESSAGES on in the world) and L7's turn-memory side in the switch.
+export const PLAN_FILE_V6 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v6.json', import.meta.url))
+export const LATEST_PLAN_FILE = PLAN_FILE_V6
 export const SCRIPT_FILE = fileURLToPath(import.meta.url)
 export const DEFAULT_CAPS = Object.freeze({ tokenCeiling: 80_000, maxRequests: 80 })
 const LIMITS = Object.freeze({ tokenCeilingMax: 200_000, maxRequestsMax: 200 })
@@ -51,7 +54,8 @@ const CLIENT = 'helper/egdesk-decision-client.mjs', SUPPORT = 'scripts/egdesk-al
 
 // ---- the journey: what the person says, and the scripted subjective model ----
 export const SAYS = Object.freeze({ quote: '지난주 A사 견적 건 어디까지 됐지?', tidy: '방금 그 내용 정리해줘', tests: '전체 테스트 돌리고 결과 알려줘',
-  recall: 'PostgreSQL 전환은 설계에서 어떻게 하기로 정했었지?', deployed: 'PostgreSQL 마이그레이션 배포 끝났어', portal: '거래처 포털에서 이번 달 세금계산서 내려받아줘', second: '두 번째 사업자로' })
+  recall: 'PostgreSQL 전환은 설계에서 어떻게 하기로 정했었지?', deployed: 'PostgreSQL 마이그레이션 배포 끝났어', portal: '거래처 포털에서 이번 달 세금계산서 내려받아줘', second: '두 번째 사업자로',
+  nudge: '아니 지금 왜 멈췄니?' }) // nudge: the person's real turn in L3's c25 evidence (a message typed while the command runs)
 const AGENT_SAYS = Object.freeze({ quote: 'A사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다.', tidy: 'A사 견적은 11월 3일 요청, 11월 6일 v1 발송, v2는 팀장 승인 후 발송 예정입니다.',
   recall: 'PostgreSQL 전환 설계에서 스키마 변환, 데이터 이관, 롤백 순서를 정하기로 확정했습니다.', tests: '테스트가 모두 통과했습니다.', noted: '네, 기록해 두겠습니다.', heard: '네, 알겠습니다.', ask: '사업자가 둘입니다. 어느 쪽으로 받을까요?', got: '세금계산서를 내려받았습니다.', stuck: '포털 작업을 마치지 못했습니다.',
   stuckAsk: '포털에서 다음 단계를 정하지 못했습니다. 어느 사업자의 세금계산서를 받을지 알려 주세요.' })
@@ -82,7 +86,10 @@ const carriesRecordingRule = w => Object.hasOwn(w.turnStarts().at(-1)?.params?.a
 // (cycle 13) The scripted note writer words its note from the waited-on fact the prompt gives, and claims nothing else.
 // (cycle 15) The pointer note says what the prompt says the person is pointed at for: a decision, or a result that is ready to look at.
 const pointerNote = prompt => (/is ready for them to look at/.test(prompt) ? '결과는 지금 보고 계신 곳 왼쪽 작업 영역에 있습니다.' : null)
-const waitNote = prompt => (/a command is still running/.test(prompt) ? '명령이 아직 실행 중이라 조금 더 걸리고 있어요.' : null)
+// L3 c22: the scripted writer also answers the heartbeat's in-run reply prompt (the person asked, while the work runs, what is happening): it
+// words that answer from the facts given, as a model would, and not as the wait note it already wrote.
+const waitNote = prompt => (/The person just wrote, while you work/.test(prompt) ? (/a command is still running/.test(prompt) ? '멈춘 게 아니라 명령이 아직 실행 중이에요. 끝나는 대로 알려 드릴게요.' : null)
+  : /a command is still running/.test(prompt) ? '명령이 아직 실행 중이라 조금 더 걸리고 있어요.' : null)
 // The result card needs its owner, who looks elsewhere; a second member is on the desk. The request body is the chrome builder's (attentionRequest),
 // posted the way the surface posts its placement requests ({ clientThreadId, conversationId, dto }). No surface code sends this request yet.
 async function resultNeedsOwner(w, j, task = { state: 'waiting_owner', ownerMustAct: true }) {
@@ -116,6 +123,13 @@ export const STEPS = Object.freeze([
     await w.notify('item/started', { ...timing, item: { id: 'cmd-1', type: 'commandExecution', command: COMMAND, cwd: '/work', status: 'inProgress', commandActions: [] } })
     await w.notify('item/commandExecution/outputDelta', { ...timing, itemId: 'cmd-1', delta: `${COMMAND_OUTPUT}\n` })
     await w.advance(9000)
+  } },
+  // (cycle 17) Ten seconds in, while the command still runs, the person asks why it stopped. The message is named for the working run, as
+  // the composer sends it with the in-run messages flag; five more seconds pass with the command running.
+  { id: 's4n-nudge', room: DM, since: 6, title: 'the person asks why it stopped while the command runs', run: async (w, j) => {
+    if (!j.note.command || !running(w)) return
+    await j.say(SAYS.nudge, { inRunMessageTo: w.runs().at(-1).runId })
+    await w.advance(5000)
   } },
   { id: 's5-silence', room: DM, title: 'the command ends; forty seconds without engine events', run: async (w, j) => {
     if (!j.note.command) return
@@ -334,6 +348,28 @@ const CHECKS = {
   },
   // (cycle 13) The answering turn of this step carried this context block (by its key).
   contextKey: ({ step, args }) => ({ pass: step.seen.packets.some(p => p.keys.includes(args.key)), observed: { keys: step.seen.packets.map(p => p.keys) } }),
+  // (cycle 17) The person's words were taken into the working run (not a new turn, not refused) and are shown once, as the person's own.
+  keptInRun: ({ step, args }) => {
+    const sent = step.sends[0] ?? null, mine = newMessages(step, step.room).filter(m => m.role === 'user')
+    return { pass: sent?.inRun === true && sent?.accepted === true && mine.length === 1 && mine[0].text === SAYS[args.said], observed: { send: sent, personMessages: mine.map(m => m.text) } }
+  },
+  // (cycle 17) The engine was left alone in this step: no new turn, no steer, no interrupt, and the run still works at its end.
+  runUntouched: ({ step }) => {
+    const t = step.seen.engineTurns, run = step.seen.runs[step.room]
+    return { pass: t.main === 0 && t.steer === 0 && step.seen.interrupts === 0 && run?.status === 'inProgress', observed: { engineTurns: t, interrupts: step.seen.interrupts, run } }
+  },
+  // (cycle 17) No system message of this step repeats one the person was already shown in this conversation.
+  noRepeatedFlowText: ({ step }) => {
+    const list = step.seen.conversation[step.room] ?? [], fresh = newMessages(step, step.room).filter(m => m.by === 'system_flow')
+    const earlier = list.slice(0, list.length - newMessages(step, step.room).length).filter(m => m.role === 'assistant').map(m => m.text)
+    const repeats = fresh.filter(m => earlier.includes(m.text)).map(m => m.text)
+    return { pass: repeats.length === 0, observed: { repeats, shown: fresh.map(m => m.text) } }
+  },
+  // (cycle 17) None of the main turns of this step carries the person's earlier words (one already answered must not come back as a request).
+  notInTurnInput: ({ step, args }) => {
+    const inputs = step.seen.packets.map(p => p.inputTexts ?? [])
+    return { pass: !inputs.some(list => list.includes(SAYS[args.said])), observed: { inputs } }
+  },
   placementRecorded: ({ step }) => ({ pass: step.seen.placement.records.length >= 1, observed: { records: step.seen.placement.records, submitted: step.seen.placement.submitted } }),
 }
 export const CHECK_NAMES = Object.freeze(Object.keys(CHECKS))
@@ -398,10 +434,10 @@ function seenAfter(w, id, before, j) {
     packets: w.native.filter(c => c.step === id && c.method === 'turn/start' && !String(c.params.threadId).startsWith('fork-')).map(c => {
       const ctx = c.params.additionalContext ?? {}
       const parsed = Object.values(ctx).map(v => packetPages(v?.value))
-      return { keys: Object.keys(ctx), pageIds: [...new Set(Object.values(ctx).flatMap(v => [...String(v?.value ?? '').matchAll(PAGE_ID)].map(m => m[1])))],
+      return { inputTexts: (c.params.input ?? []).map(i => i?.text ?? null), keys: Object.keys(ctx), pageIds: [...new Set(Object.values(ctx).flatMap(v => [...String(v?.value ?? '').matchAll(PAGE_ID)].map(m => m[1])))],
         bodyIds: [...new Set(parsed.flatMap(p => p.bodies))], refIds: [...new Set(parsed.flatMap(p => p.refs))] }
     }),
-    engineTurns: w.subjectiveTurnsIn(id),
+    engineTurns: w.subjectiveTurnsIn(id), interrupts: w.interruptsIn(id),
     runs,
     board: { observe: j.note.briefing && id === 's3-briefing' ? j.note.briefing : null, published: stepEvents.filter(e => e.event === 'briefing.published').length,
       cards: stepEvents.filter(e => e.event === 'output.published').map(e => ({ title: e.details?.output?.title ?? null, zone: 'board' })), parts },
@@ -684,7 +720,7 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
   const switches = args.flatMap((arg, i) => (arg === '--switch' ? [args[i + 1]] : []))
   const unknownSwitch = switches.find(name => !Object.hasOwn(plan.world?.switches ?? {}, name))
   if (unknownSwitch) { printError(`the plan has no switch ${unknownSwitch} (it has: ${Object.keys(plan.world?.switches ?? {}).join(', ') || 'none'})`); return EXIT.usage }
-  const outcome = await runJourney({ plan, send, key, fetchImpl, caps, now, replay: replayRun ? replayAnswers(replayRun.run) : null, switches })
+  const outcome = await runJourney({ plan, send, key, fetchImpl: send ? stampingFetch(fetchImpl, { file: sendStampPath(env), runner: `all-on-live-measure ${plan.set}` }) : fetchImpl, caps, now, replay: replayRun ? replayAnswers(replayRun.run) : null, switches })
   for (const row of stepTable(outcome)) print(JSON.stringify(row))
   const payload = resultsPayload({ outcome, plan, send, caps, replayOf: replayRun ? { file: replayRun.file, sha256: replayRun.sha256, at: replayRun.run.at ?? null } : null })
   if (diffRun) { payload.diffAgainst = { file: diffRun.file, sha256: diffRun.sha256, at: diffRun.run.at ?? null }; payload.diff = diffJourneys(diffRun.run, payload) }

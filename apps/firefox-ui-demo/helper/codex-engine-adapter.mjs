@@ -126,7 +126,7 @@ export function isStaleLoginFailure(params, currentLoginId) {
 }
 
 export function createCodexEngineAdapter({ request, respond, getOwnerKey = () => null, isReady = () => true,
-  describe = null, refresh = null, getModels = () => null, getBoardPeerContract = () => null, profiles = null } = {}) {
+  describe = null, refresh = null, getModels = () => null, getBoardPeerContract = () => null, getThreadDelete = () => false, profiles = null } = {}) {
   const sinks = new Set()
   const deliver = (kind, value, profileId) => {
     for (const sink of [...sinks]) {
@@ -172,6 +172,14 @@ export function createCodexEngineAdapter({ request, respond, getOwnerKey = () =>
       return call('turn/steer', params, id)
     },
     interruptTurn: (threadId, turnId, id) => call('turn/interrupt', { threadId, turnId }, id),
+    // thread/delete only where the connected binary's generated schema has it (getThreadDelete, from the schema probe); else refused.
+    threadDeleteSupported: id => { try { return ready(id) && getThreadDelete(id) === true } catch { return false } },
+    deleteThread(threadId, id) {
+      let supported = false
+      try { supported = ready(id) && getThreadDelete(id) === true } catch { supported = false }
+      if (!supported) throw chatError('THREAD_DELETE_UNSUPPORTED', 'This Codex cannot delete a thread', 409)
+      return call('thread/delete', { threadId }, id)
+    },
     forkThread: (params, id) => call('thread/fork', params, id),
     // Preserve legacy shared-RPC response arity and reject old scoped ids even
     // if accidentally called without a profile.

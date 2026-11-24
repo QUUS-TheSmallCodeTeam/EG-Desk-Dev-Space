@@ -29,7 +29,7 @@ export const SCENARIO_KINDS = Object.freeze({
   context_reask: { types: ['reask'], family: 'turn_context', expect: [{ name: 'answer_type', kind: 'choice', equals: 'answer', minConfidence: 0.75, severity: 'hard', note: 'the person asks to have something explained' }] },
   // v2: a turn LABELLED re-ask may re-instruct as well as ask ("아니 앱화면 말고 …받으라고"): an answer or an action, never browsing or a timeline update.
   context_reask_v2: { types: ['reask'], v2: true, family: 'turn_context', expect: [{ name: 'answer_type', kind: 'choice', oneOf: ['answer', 'action_only'], minConfidence: 0.75, severity: 'hard', note: 'labelled re-ask: the person wants it explained or redone' }] },
-  // v2 (c21): the person's message arrives WHILE the run works (flag conversationFlow.inRunMessages): the beat's person questions.
+  // v2 (c21/c22): the person's message arrives WHILE the run works (lane L2's flag decisionContext.inRunMessages): the beat's person questions.
   inrun_waiting: { types: ['frustration', 'pushback'], v2: true, family: 'heartbeat', expect: [{ name: 'message__person_stop', kind: 'predicate', max: 0.2, severity: 'hard', note: 'an impatient question is not a request to stop' },
     { name: 'message__person_status', kind: 'predicate', min: 0.8, severity: 'soft', note: 'asks what is happening or why it stopped (labelled frustration / pushback; not every one asks)' }] },
   inrun_change: { types: ['instruction_change'], v2: true, family: 'heartbeat', expect: [{ name: 'message__person_change', kind: 'predicate', min: 0.8, severity: 'hard', note: 'labelled instruction change: the task changes' },
@@ -112,7 +112,7 @@ export async function runScenario({ kind, example }, { allOnWorld, judgeConfirma
   const cleanups = [], t = { after: fn => cleanups.push(fn) }
   try {
     if (/^inrun_/.test(kind)) {
-      // The in-run path (flag conversationFlow.inRunMessages) is not wired in lane L2's all-on world yet (L2 does the bridge): the runtime with
+      // The in-run path (lane L2's flag decisionContext.inRunMessages) runs here in the runtime with
       // the conversation flow and held answers (helper/egdesk-heartbeat-flow.fixture.mjs). The person's earlier turn is the run's request, a
       // command runs, and 12 s in the person's real turn arrives while it works. The beat's request goes through the product's Decisions
       // client (makeClient) so the plan holds the wire body.
@@ -124,11 +124,11 @@ export async function runScenario({ kind, example }, { allOnWorld, judgeConfirma
       w.chat.decisionContext.client.decide = async request => { if (request.questions.some(q => /^message__person_/.test(q.name))) { try { await wire.decide(request) } catch { /* recording only */ } } return decide(request) }
       const d = await w.dm('dm-s', example.before?.text || NEUTRAL_OPENER)
       await d.tool('cmd-1', 'started'); await w.advance(12_000)
-      const accepted = await w.chat.send({ clientThreadId: 'dm-s', conversationId: d.r.conversationId, profileId: 'first-agent', replyDestination: 'direct', message: example.user.text, requestId: 'req-in-1', inRunMessage: true })
+      const accepted = await w.chat.send({ clientThreadId: 'dm-s', conversationId: d.r.conversationId, profileId: 'first-agent', replyDestination: 'direct', message: example.user.text, requestId: 'req-in-1', inRunMessageTo: d.timing.turnId })
       await w.advance(6000)
-      const person = w.chat.flowRuns.get([...w.chat.runs.values()][0])?.personMessages?.[0] ?? null
+      const settledAs = w.chat.flowRuns.get([...w.chat.runs.values()][0])?.personJudged?.get('req-in-1') ?? null
       return { kind, requests: bodies.map(body => ({ family: def.family, names: JSON.parse(body).questions.map(q => q.name), body })), target: bodies[0] ? { family: def.family, body: bodies[0] } : null,
-        seen: { accepted: accepted?.inRun === true, action: person?.action ?? null } }
+        seen: { accepted: accepted?.inRun === true, action: settledAs } }
     }
     if (kind === 'confirm_unstated') {
       const captured = []

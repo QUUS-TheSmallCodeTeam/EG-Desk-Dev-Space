@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
 import { scriptedDecisions } from './egdesk-all-on.support.mjs'
-import { LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, STEPS, diffJourneys, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
+import { LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, PLAN_FILE_V6, STEPS, diffJourneys, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
 
 const KEY = 'sk-synthetic-not-a-key-l2c12-000000000002'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -293,7 +293,7 @@ test('world budgets: "bridge" gives the runtime the bridge\'s warm and cold turn
 const REGISTERED_PLAN_V5_SHA256 = '841ca72597bf165d4d173b4adc5349211b8f9072d092d561888e40d27cbdc22a'
 test('plan v5: pinned, based on v4 by hash, every v4 expectation verbatim, one declared switch (off by default) and one expectation judged only under it', () => {
   const bytes = readFileSync(PLAN_FILE_V5), raw = JSON.parse(bytes.toString('utf8')), v4 = JSON.parse(readFileSync(PLAN_FILE_V4, 'utf8'))
-  assert.equal(sha256(bytes), REGISTERED_PLAN_V5_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V5)
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V5_SHA256)
   assert.equal(raw.version, 5); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V4)))
   assert.deepEqual({ env: raw.world.env, budgets: raw.world.budgets }, { env: v4.world.env, budgets: v4.world.budgets })
   assert.deepEqual(Object.keys(raw.world.switches), ['action-relevance'])
@@ -330,4 +330,43 @@ test('v5 switches on the command line: --switch is recorded in the results; an u
   assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')).world.switchesOn, ['action-relevance'])
   const bad = await cli(['--plan', PLAN_FILE_V5, '--switch', 'no-such'], { fetchImpl: noNetwork().fetchImpl })
   assert.equal(bad.code, EXIT.usage); assert.match(bad.err.join('\n'), /has no switch no-such \(it has: action-relevance\)/)
+})
+
+// ---- plan v6 (cycle 17) ----
+const REGISTERED_PLAN_V6_SHA256 = '7d7d238d73b9dc7b14db7c574a69f32e7b2518ec6d12f55566f11d06e34ecc83'
+const V6_NEW = [['s4n.kept', 'hard', 'L2'], ['s4n.not-interrupted', 'hard', 'L2'], ['s4n.one-reply', 'hard', 'L3'], ['s4n.reply-says-running', 'soft', 'L3'],
+  ['s4n.no-duplicate-wait', 'hard', 'L3'], ['s4n.heard', 'soft', 'L3'], ['s9.nudge-not-repeated', 'hard', 'L3']]
+test('plan v6: pinned, based on v5 by hash, every v5 expectation kept (one prediction revised and marked), the nudge step and its flag in the world', () => {
+  const bytes = readFileSync(PLAN_FILE_V6), raw = JSON.parse(bytes.toString('utf8')), v5 = JSON.parse(readFileSync(PLAN_FILE_V5, 'utf8'))
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V6_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V6)
+  assert.equal(raw.version, 6); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V5)))
+  assert.deepEqual(raw.world.env, { ...v5.world.env, EGDESK_INRUN_MESSAGES: 'on' }); assert.equal(raw.world.budgets, v5.world.budgets)
+  assert.deepEqual(raw.world.switches['action-relevance'].env, v5.world.switches['action-relevance'].env, 'one flag covers both sides of L7 (c20, c21)')
+  assert.deepEqual(raw.steps.map(s => s.id).filter(id => id !== 's4n-nudge'), v5.steps.map(s => s.id))
+  assert.equal(raw.steps[raw.steps.findIndex(s => s.id === 's4-long-command') + 1].id, 's4n-nudge')
+  for (const step of v5.steps) {
+    const now = raw.steps.find(s => s.id === step.id)
+    assert.deepEqual(now.caps, step.caps)
+    for (const [i, e] of step.expect.entries()) {
+      if (e.id !== 's4.no-page-for-the-action') { assert.deepEqual(now.expect[i], e, `${e.id}: verbatim`); continue }
+      const { predicted, revised, ...rest } = now.expect[i], { predicted: was, ...before } = e
+      assert.deepEqual(rest, before, `${e.id}: only the prediction changes`); assert.notEqual(predicted, was); assert.match(revised, /^v6: prediction only/)
+    }
+  }
+  const added = raw.steps.flatMap(s => s.expect).filter(e => !v5.steps.flatMap(x => x.expect).some(x => x.id === e.id))
+  assert.deepEqual(added.map(e => [e.id, e.severity, e.owner]), V6_NEW)
+})
+
+// L3 c22: the heartbeat side landed (it judges the nudge and settles it with one checked reply), so the four verdicts that were registered as
+// "FAIL until L3's side lands" now pass, and the nudge, settled as 'reply', is no longer carried into the next turn.
+test('v6 dry run: the nudge is kept in the run and the command left alone (L2); L3\'s heartbeat answers it once and settles it (L3 c22); every other verdict is v5\'s', async () => {
+  const noNet = async () => { throw new Error('no network') }
+  const v6 = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V6), fetchImpl: noNet }), v5 = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V5), fetchImpl: noNet })
+  const verdict = (run, id) => run.steps.flatMap(s => s.checks).find(c => c.id === id)
+  assert.deepEqual(V6_NEW.map(([id]) => [id, verdict(v6, id).pass]), [['s4n.kept', true], ['s4n.not-interrupted', true], ['s4n.one-reply', true], ['s4n.reply-says-running', true],
+    ['s4n.no-duplicate-wait', true], ['s4n.heard', true], ['s9.nudge-not-repeated', true]])
+  assert.deepEqual(verdict(v6, 's4n.one-reply').observed.shown, ['멈춘 게 아니라 명령이 아직 실행 중이에요. 끝나는 대로 알려 드릴게요.'])
+  assert.deepEqual(verdict(v6, 's9.nudge-not-repeated').observed.inputs, [['PostgreSQL 마이그레이션 배포 끝났어']], 'settled as reply: not carried into the next turn')
+  const others = run => run.steps.flatMap(s => s.checks).filter(c => !V6_NEW.some(([id]) => id === c.id)).map(c => [c.id, c.pass])
+  assert.deepEqual(others(v6), others(v5))
 })

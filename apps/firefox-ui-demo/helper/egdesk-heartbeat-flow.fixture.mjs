@@ -112,7 +112,9 @@ export function world(t, { flags = { held: true, flow: true }, fork = 'ok', fail
     decisionContext: { mode: () => 'on', configured: () => true, client, budgetMs: 800, calibrationLog: log, collect: async () => [],
       draftCheck: flags.held ? { mode: () => 'on', ...(flags.design ? { design: () => flags.design } : {}) } : undefined,
       ...(flags.commands ? { commandJudge: { mode: () => 'advisory' } } : {}),
-      conversationFlow: flags.flow ? { mode: () => 'on', ...(flags.inRun ? { inRunMessages: () => true } : {}), ...(presence ? { presence } : {}), ...(audience ? { audience } : {}), ...(attentionPosted ? { attentionPosted } : {}) } : undefined },
+      // flags.inRun: lane L2's developer flag for messages while a run works (decisionContext.inRunMessages; bridge EGDESK_INRUN_MESSAGES=on)
+      ...(flags.inRun ? { inRunMessages: { mode: () => 'on' } } : {}),
+      conversationFlow: flags.flow ? { mode: () => 'on', ...(presence ? { presence } : {}), ...(audience ? { audience } : {}), ...(attentionPosted ? { attentionPosted } : {}) } : undefined },
   })
   chat.setConnection(true)
   const n = (m, p) => chat.handleNotification({ method: m, params: p })

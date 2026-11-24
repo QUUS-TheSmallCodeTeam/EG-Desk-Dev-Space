@@ -40,6 +40,8 @@ const QUESTIONS = new Set(['claim_supported', 'claim_tense', 'answer_type', 'tim
   'ps_sign_in', 'ps_code', 'ps_challenge', 'ps_error', 'ps_sensitive', 'ps_covered',
   // the recorded choice's same-thing predicates, one per candidate (lane L8 c16/c19; MAX_SAME_THING = 3)
   'same_0', 'same_1', 'same_2',
+  // the browser step's person-target predicates (lane L8 c22; MAX_PERSON_TARGETS = 3)
+  'person_target_0', 'person_target_1', 'person_target_2',
   // the browser entry's yes/no predicates (lane L8 c20; MAX_ENTRY_CARDS = 6)
   'browser_entry', 'browser_entry_card_0', 'browser_entry_card_1', 'browser_entry_card_2', 'browser_entry_card_3', 'browser_entry_card_4', 'browser_entry_card_5',
   // work placement's yes/no questions (egdesk-work-placement.mjs), and the Board reply's per-excerpt time question (egdesk-board-agent-context.mjs)

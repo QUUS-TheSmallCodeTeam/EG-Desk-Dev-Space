@@ -607,6 +607,21 @@ export function codexRoomAccountCurrent(thread, authStatus, cachedDefaultKey, co
   const key = codexRoomAccountKey(thread, authStatus, context);
   return key && (codexRoomOnOtherProfile(thread, context) || cachedDefaultKey === key) ? key : null;
 }
+// L1 c21, owner decision (2): the same room continues on another account of its engine. Its messages, draft and selections stay (they
+// are kept elsewhere by room id); the engine thread does not: no native conversation until the next send, a fresh binding for the new
+// account, the same local room binding (the bridge's store keys the room by it).
+export function continueRoomOnAccount(thread, engineProfileId) {
+  if (!thread || typeof engineProfileId !== 'string' || !engineProfileId) return thread;
+  return { ...thread, engineProfileId, conversationId: null, bindingAccountKey: null, bindingState: 'fresh', retainedNativeBinding: null,
+    resuming: false, sendError: null, clientBindingId: clientThreadBinding(thread) };
+}
+// L1 c21, owner decision (3): with the pref "on" a default-account change keeps the task list (each task's own account is checked when it
+// resumes, by the bridge); returns what to put back after the reset, or null (pref off: as before).
+export function keptTasksOnDefaultSwitch(codex, pref) {
+  if (pref !== 'on' || !codex) return null;
+  return { taskBoard: codex.taskBoard, taskContinue: codex.taskContinue ?? null, taskApproval: codex.taskApproval ?? null,
+    taskResume: codex.taskResume ?? null, planProposals: codex.planProposals };
+}
 export function knownCodexAccountKey(key) {
   if (typeof key !== 'string' || !key.startsWith('codex:')) return false;
   const [, mode, ...identity] = key.split(':');
@@ -1390,6 +1405,19 @@ export function replyRunForThread(state, thread) {
   if (Object.values(state.requests || {}).some(request => requestBelongsToThread(request, thread) && ['submitting', 'unconfirmed'].includes(request.status))) return null;
   const busy = runsForThread(state, thread).filter(isRunBusy);
   return busy.length === 1 && runReplyOpen(busy[0]) ? busy[0] : null;
+}
+
+// The bridge's developer flag EGDESK_INRUN_MESSAGES=on (capability 'in-run-messages'): a text message typed while the DM's one run works goes
+// into that run (the bridge stores it, tells the session heartbeat, and keeps it for the next turn if the run ends without acting on it).
+// An open early question takes precedence (replyRunForThread). Without the capability: null, the composer waits for the turn as before.
+export const IN_RUN_MESSAGES_CAPABILITY = 'in-run-messages';
+export function inRunMessageRunForThread(state, thread, capabilities) {
+  if (!Array.isArray(capabilities) || !capabilities.includes(IN_RUN_MESSAGES_CAPABILITY)) return null;
+  if (!state || !thread || thread.type !== 'dm' || thread.resuming || thread.preparingInput) return null;
+  if (Object.values(state.requests || {}).some(request => requestBelongsToThread(request, thread) && ['submitting', 'unconfirmed'].includes(request.status))) return null;
+  const busy = runsForThread(state, thread).filter(isRunBusy);
+  const run = busy.length === 1 ? busy[0] : null;
+  return run && run.status !== 'stopping' && !run.stopRequested && !run.stopPending && !runReplyOpen(run) ? run : null;
 }
 
 export function approvalRequestFor(run, approvalId, decision) {

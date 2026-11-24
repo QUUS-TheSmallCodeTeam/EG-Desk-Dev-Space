@@ -103,13 +103,17 @@ export const INTERACTION_TYPES = Object.freeze({
   pushback: { re: /왜 (멈|안 ?하|물어|묻)|빨리|그냥 (진행|해)|계속 (진행|해)|이제야|하라고|라니까|몇 번|또 (물어|멈)/, q: 'Does the person push back on how the assistant works (stopping, asking permission, being slow or cautious) and tell it to go on?' },
   approval: { re: /^(그래|응|ㅇㅇ|ㅇㅋ|좋아|좋습니다|ok|okay|오케이|ㄱㄱ|고고|진행(해|해줘|하자)?|당연하지|해줘|해|넵|네|예|yes|go)[.!~ ]*$/i, q: 'Is the turn a short approval or go-ahead of what the assistant proposed?' },
   ambiguous: { short: 14, q: 'Is the turn so short or vague that what it approves, chooses or asks can only be guessed from the assistant\'s message?' },
-  referential: { re: /(방금|아까|위에|위의|그거|그것|그 내용|이거|저거|앞에서).{0,12}(정리|요약|다시|설명|말한|뭐|어떻게)/, q: 'Does the turn point back to something earlier ("that", "just now", "the above") instead of naming it?' },
+  referential: { re: /(방금|아까|위에|위의|그거|그것|그 내용|이거|저거|앞에서).{0,12}(정리|요약|다시|설명|말한|뭐|어떻게)/, q: 'Does the turn refer to something only by pointing at it ("that", "this", "the above", "what you said just now"), so that what it means can be found only in the earlier conversation? A turn that names what it is about is not.' },
+    // c22: the c19 wording ("point back to something earlier instead of naming it") was read as "is about something earlier": 2026-11-25 it
+    // labelled "오전 6시에 작업 중지 예약 걸었지?" (which names the stop it asks about) referential .99.
   topic_switch: { re: /^(그리고|근데|그런데|참고로|아 그리고|다른 얘기|그건 그렇고)|이제 .{0,20}(하자|해보자|넘어가)/, q: 'Does the person move to a different topic from the assistant\'s message?' },
   topic_return: { re: /(다시|아까).{0,15}(돌아|얘기|그거|이어)|원래 (하던|얘기)/, q: 'Does the person return to a topic from earlier in the conversation (not the assistant\'s last message)?' },
   interruption: { re: /복구|되돌려|롤백|취소|멈춰|중지|그만|stop\b|^뭐야/i, q: 'Does the person stop the assistant, or ask it to undo or recover work?' },
   praise: { re: /좋네|좋다|잘했|완벽|훌륭|굿|나이스|고마워|감사|최고|great|nice|perfect/i, q: 'Does the person praise or thank the assistant?' },
   frustration: { re: /짜증|답답|기분 ?나|왜 이래|엉망|대충|도대체|대체 |ㅡㅡ|;;|\?\?|아오|하\.\.|진짜/, q: 'Does the person show frustration or annoyance?' },
-  reask: { re: /안 ?보여|무슨 .{0,12}\?|뭔 소리|무슨 말|이해가 안|다시 설명|모르겠|뭐라는|뭘 말하는/, q: 'Does the person say the assistant\'s explanation was unclear or missing and ask again?' },
+  reask: { re: /안 ?보여|무슨 .{0,12}\?|뭔 소리|무슨 말|이해가 안|다시 설명|모르겠|뭐라는|뭘 말하는/, q: 'Does the person say they could not understand or could not see something the assistant said or showed, and ask for it to be explained or shown again?' },
+    // c22: the c19 wording ("unclear or missing and ask again") was read as "repeats a request": it labelled a repeated instruction
+    // ("아니 앱화면 말고 … 인수인계 받으라고") re-ask .92.
   instruction_change: { re: /말고 |대신 |바꿔|변경|이제부터|앞으로는|기준(을|은) /, q: 'Does the person change the instructions or criteria of the task in progress?' },
 })
 export const TYPE_NAMES = Object.freeze(Object.keys(INTERACTION_TYPES))
@@ -173,10 +177,10 @@ export function dedupe(examples) {
 export const LABEL_BAR = 0.8
 const DEVELOPER = 'You read one turn a person wrote to an AI assistant, with the end of the assistant message just before it. Answer each question about the PERSON\'S TURN only, from what it says; the assistant excerpt is there so you can tell what the turn reacts to. Probability is how likely the answer is yes.'
 /** labelRequest(example, model) → the Decisions body labelling this turn (no other turn in it). */
-export function labelRequest(example, model) {
+export function labelRequest(example, model, { types = TYPE_NAMES } = {}) {
   const text = `${example.prev ? `The end of the assistant message before the turn:\n"""\n${example.prev.text}\n"""\n\n` : 'There is no assistant message before the turn.\n\n'}The person's turn:\n"""\n${example.user.text}\n"""`
   return { model, input: [{ role: 'developer', content: DEVELOPER }, { role: 'user', content: text }],
-    questions: TYPE_NAMES.map(name => ({ type: 'predicate', name: `conv_${name}`, instructions: INTERACTION_TYPES[name].q })), prompt_cache_key: 'conversation-labels' }
+    questions: types.map(name => ({ type: 'predicate', name: `conv_${name}`, instructions: INTERACTION_TYPES[name].q })), prompt_cache_key: 'conversation-labels' }
 }
 /** readLabelScores(answers) → { [type]: probability | null } (the raw yes probabilities, for picking the strongest examples). */
 export function readLabelScores(answers) {

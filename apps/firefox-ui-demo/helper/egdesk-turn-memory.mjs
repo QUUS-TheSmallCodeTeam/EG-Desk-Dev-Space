@@ -255,9 +255,11 @@ export function writeCandidateOrder({ message = '', picks = [], held = [], previ
  * the new page relates to, and the isolated speech axes for each sentence. The proposal carries no text and is not applied.
  */
 // speechDesign: how the sentence labels are asked ('axes-isolated', the default, or 'split-isolated': egdesk-speech-grounding.mjs); anything else is the default.
-export async function judgeTurnWrite({ message, candidates = [], client, askedAt = null, signal, timeoutMs = 3000, maxCandidates = 8, targetDesign = 'choice', speechDesign = 'axes-isolated', splitWording = 'v1' } = {}) {
+export async function judgeTurnWrite({ message, candidates = [], client, askedAt = null, signal, timeoutMs = 3000, maxCandidates = 8, targetDesign = 'choice', speechDesign = 'axes-isolated', splitWording = null } = {}) {
   const design = WRITE_SPEECH_DESIGNS.includes(speechDesign) ? speechDesign : 'axes-isolated'
-  const wording = SPLIT_WORDINGS.includes(splitWording) ? splitWording : 'v1'
+  // The two-step hybrid's second step uses the measured per-predicate choice (SPLIT_WORDING_CHOICE: v2, own v3) unless a wording is given;
+  // every other design keeps v1 unless asked (L7 c24, Main's rule after terse-record-v1).
+  const wording = SPLIT_WORDINGS.includes(splitWording) ? splitWording : design === SPEECH_HYBRID_TWO_STEP ? 'v2' : 'v1'
   const pages = candidates.slice(0, maxCandidates)
   const spans = speechSegments(message)
   const none = (reason, extra = {}) => ({ proposal: { op: 'none', reason }, receipt: { reason, ...extra } })
@@ -388,7 +390,9 @@ const fingerprint = (proposal, message) => sha256Hex(JSON.stringify([proposal, c
 export function createWikiWriter(wiki, { enabled = false, canWrite = () => false, acceptStatus = () => false, idFor = null, persist = null } = {}) {
   const done = new Map()
   return {
-    apply(proposal, { message = null, messageRef = null, scope = null, operationId = null } = {}) {
+    // from: the local conversation the reading was heard in (kept beside the stored reading, never on the page), so deleting that
+    // conversation can withdraw a reading still pending (L2 c17). Optional; without it nothing changes.
+    apply(proposal, { message = null, messageRef = null, scope = null, operationId = null, from = null } = {}) {
       if (enabled !== true) return { status: 'disabled' }
       if (!record(proposal) || !OPS.has(proposal.op)) return { status: 'invalid' }
       if (proposal.op === 'none') return { status: 'noop' }
@@ -411,7 +415,7 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
           const revision = nextRevision(page.revision)
           const stored = reading
           // Persist first: a store that cannot keep the reading means nothing changed.
-          if (typeof persist === 'function') persist({ kind: 'reading', pageId: page.id, sourceRevision: page.revision.replace(/\.r\d+$/, ''), reading: stored, revision })
+          if (typeof persist === 'function') persist({ kind: 'reading', pageId: page.id, sourceRevision: page.revision.replace(/\.r\d+$/, ''), reading: stored, revision, ...(typeof from === 'string' && from ? { from } : {}) })
           const patched = wiki.patch(page.id, { statusReadings: [...page.statusReadings, stored], revision })
           if (!patched) return { status: 'invalid', reason: 'write_failed' }
           return finish({ status: 'recorded_pending', pageId: page.id, revision })
@@ -514,7 +518,7 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
  * packetFirst (optional, first turn only): return as soon as the packet is ready; the triage that only decides recording keeps running and is
  *   awaited inside judgeWrite (triage is then null in the result and `triageLater` is its promise). It is not bound by the packet deadline.
  */
-export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = TURN_MEMORY_WRITE_TARGET, previous = null, speechDesign = 'axes-isolated', splitWording = 'v1', ruleSet = 'default', previousReply = null } = {}) {
+export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = TURN_MEMORY_WRITE_TARGET, previous = null, speechDesign = 'axes-isolated', splitWording = null, ruleSet = 'default', previousReply = null } = {}) {
   // The deadline is ONE point on ONE clock, fixed here. Everything below asks that clock; a timer only wakes the wait up.
   const deadlineAt = Number.isFinite(deadlineMs) ? clock.now() + Math.max(0, deadlineMs) : null
   const remaining = () => (deadlineAt === null ? null : Math.max(0, deadlineAt - clock.now()))
