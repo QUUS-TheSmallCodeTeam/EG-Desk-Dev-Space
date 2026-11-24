@@ -124,9 +124,13 @@ export function createOutcomeToOntology({ wiki, client, writer, scope = null, en
         const candidates = memoryPages.filter(page => page && wiki.pages.has(page.id) && allowsPage(page, scope))
         const { proposal, receipt } = await judgeTurnWrite({ message: candidate.text, candidates, client, askedAt: now() })
         if (proposal.op === 'none') return { status: 'not_written', reason: proposal.reason, judged: receipt?.target?.value ?? null }
-        // The text is the host's own record of a browser task, not something the person said.
+        // The text is the host's own record of a browser task, not something the person said. It is always a NEW page: a task
+        // outcome never changes another page's status, so an update proposal becomes a page of its own (links dropped).
         const provenance = { kind: 'agent_note' }
-        const applied = writer.apply({ ...proposal, provenance }, { message: candidate.text, scope, operationId: `${OUTCOME_OPERATION_PREFIX}${candidate.taskId}${candidate.outcome?.status === 'stuck' ? '-stuck' : ''}` })
+        const shaped = proposal.op === 'update_status'
+          ? { op: 'new_page', time: proposal.time, status: proposal.proposedStatus, links: [], spokenAt: proposal.spokenAt ?? null }
+          : proposal
+        const applied = writer.apply({ ...shaped, provenance }, { message: candidate.text, scope, operationId: `${OUTCOME_OPERATION_PREFIX}${candidate.taskId}${candidate.outcome?.status === 'stuck' ? '-stuck' : ''}` })
         return { status: applied.status, ...(applied.reason ? { reason: applied.reason } : {}), ...(applied.pageId ? { pageId: applied.pageId } : {}) }
       } catch { return { status: 'unavailable' } }
     },

@@ -8,6 +8,8 @@ import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 //   { mode(), wiki({ body, context, sources }), scope({ context }), budget, deadlineMs, ontologyWrite }
 export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = null, deskStore = null, budget = { linksFirst: true }, deadlineMs = 15000 } = {}) {
   return {
+    // The same lazy adapter, for other consumers of the wiki write path (the direct browser entry); it opens nothing by itself.
+    getAdapter: () => getAdapter(),
     mode: () => (settings?.turnMemory?.mode === 'advisory' ? 'advisory' : 'off'),
     // Advisory records only: the write judgment (an extra call whose proposal nothing applies yet) stays off until the host has a write policy.
     ontologyWrite: false,

@@ -41,6 +41,7 @@ import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
 import { createTurnMemoryConfig } from './egdesk-turn-memory-wiring.mjs'
+import { createBrowserEntryConfig } from './egdesk-browser-entry-wiring.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { createBoardPresentationHttpHandler } from './egdesk-board-presentation-http.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
@@ -429,6 +430,10 @@ const getMemoryEvidence = () => memoryEvidenceStore ??= new MemoryEvidenceStore(
 let wikiAdapter = null
 const turnMemoryConfig = createTurnMemoryConfig({ settings: bridgeSettings, ontologyStore: ensureOntologyStore, deskStore,
   getAdapter: () => wikiAdapter ??= createWikiAdapter({ writes: openWikiWrites({ dataDir: path.join(dataDir, 'settings') }) }) })
+// Direct browser entry: developer flag EGDESK_BROWSER_ENTRY=advisory|on, default off (no settings screen entry). It reuses the turn-memory
+// snapshot builder and the same adapter/write store; nothing opens while it is off.
+const browserEntryConfig = createBrowserEntryConfig({ flag: () => process.env.EGDESK_BROWSER_ENTRY, getAdapter: () => turnMemoryConfig.getAdapter(),
+  wiki: args => turnMemoryConfig.wiki(args) })
 const chat = new CodexChatRuntime({
   localCapacity,
   engines: engineRegistry,
@@ -462,6 +467,7 @@ const chat = new CodexChatRuntime({
     client: decisionClient,
     calibrationLog: decisionCalibrationLog,
     turnMemory: turnMemoryConfig,
+    browserEntry: browserEntryConfig,
     // Advisory draft check after an answer is posted (records only). Developer flag, default off; it has no settings screen entry.
     ...(process.env.EGDESK_DRAFT_CHECK === 'advisory' ? { draftCheck: { mode: () => 'advisory' } } : {}),
     topicRecipient: recipientForCodexDecisions,
