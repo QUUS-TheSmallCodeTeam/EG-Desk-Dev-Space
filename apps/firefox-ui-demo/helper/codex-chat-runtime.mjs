@@ -107,6 +107,7 @@ export function compactionSignal(message) {
 const FLOW_OWN_KINDS = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
 import { SPEECH_AT_PAGE, speechSegments } from './egdesk-speech-grounding.mjs'
 import { pruneContextCandidates } from './egdesk-context-pruning.mjs'
+import { previousReplyExcerpt } from './egdesk-previous-reply.mjs'
 import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory, recordStateEvidence } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
 import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, entryQuestion, readBrowserEntry } from './egdesk-browser-task.mjs'
@@ -4369,7 +4370,8 @@ export class CodexChatRuntime {
         sent: this.contextDelivered.get(thread) ?? null, memoryReceipts: this.turnMemoryDelivered.get(thread)?.pages ?? null }) : { kept: Array.isArray(collected) ? collected : [], pruned: [] }
       const topic = mode === 'on' ? this.topicIntakes.get(context)?.prepare(controller.signal, inBudget) : null
       if (controller.signal.aborted || !inBudget()) return { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null }
-      const out = await prepareTurnContext({ message: body.message, candidates, client: setup.client, askedAt, speech, topic,
+      const previousReply = this.previousReplyFor(context, speech)
+      const out = await prepareTurnContext({ message: body.message, candidates, client: setup.client, askedAt, speech, topic, ...(previousReply ? { previousReply } : {}),
         timeoutMs: Math.max(1, Math.ceil(deadline + (keepLate ? LATE_CONTEXT_MS : 0) - performance.now())), signal: controller.signal, cacheScope: 'ctx',
         ...(setup.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
       if (out?.receipt && pruned.length) out.receipt = { ...out.receipt, pruned: { held: pruned.length } } // a count only, never ids
@@ -4400,6 +4402,23 @@ export class CodexChatRuntime {
     let warm = false
     try { warm = typeof setup.warm === 'function' && setup.warm() === true } catch { warm = false }
     return warm ? warmMs : coldMs
+  }
+
+  // The assistant message right before this turn, for the turn memory triage and the context selection (L7 c22, U9; flag
+  // turnMemory.previousReply, bridge EGDESK_TURN_MEMORY_PREVIOUS_REPLY=on, off by default). Only when the egress gate allows the conversation's
+  // own messages for this run: previous_reply (the answering model holds that message in its own live native thread: Codex, mid-session, not
+  // compacted) or speech_history (the DM's speech consent). A bounded excerpt (egdesk-previous-reply.mjs); never more than the answering model has.
+  previousReplyFor(context, speechSource = null) {
+    try {
+      if (this.decisionContext?.turnMemory?.previousReply !== true) return null
+      let speechConsent = false
+      try { speechConsent = speechSource?.allowed?.() === true } catch { speechConsent = false }
+      const threadReply = context.engine?.id === 'codex' && this.turnPosition(context).kind === 'mid'
+      const gate = createEgressGate(modelDataPermissions({ speechConsent, threadReply }))
+      if (!gate.allows('previous_reply') && !gate.allows('speech_history')) return null
+      const last = (this.store?.listMessages?.(context.clientThreadId)?.messages ?? []).filter(m => m.role === 'assistant' && m.status !== 'streaming' && m.status !== 'error').at(-1)
+      return typeof last?.text === 'string' ? previousReplyExcerpt(last.text) : null
+    } catch { return null }
   }
 
   keepLateFlag() {
@@ -6385,7 +6404,7 @@ export class CodexChatRuntime {
     if (this.turnMemoryConfirmOn()) await this.confirmNotedRecords(turn, body, context, { wiki, baseScope, scope, egress, threadKey })
     const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position: turn.position, threadKey, scope,
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
-      deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock, previous: turn.previous,
+      deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock, previous: turn.previous, previousReply: this.previousReplyFor(context, turn.sources?.speech ?? null),
       ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
         ...(this.decisionContext?.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
     // The first turn's recording triage answers on its own time; once it has, the rule knows whether a write judgment can still follow.

@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { choiceQuestion, compactText, predicateQuestion, readChoice, sha256Hex } from './egdesk-decision-questions.mjs'
+import { previousReplyInput } from './egdesk-previous-reply.mjs'
 import { SPEECH_HYBRID_TWO_STEP, SPLIT_WORDINGS, WRITE_SPEECH_DESIGNS, speechDesignInterpretations, speechDesignQuestions, speechHybridSecondQuestions, speechSegments } from './egdesk-speech-grounding.mjs'
 import { ACTION_MEMORY_RULE, MIN_CALL_MS, PROVENANCE_BASES, REAL_CLOCK, YES, NO, allowsPage, clockLine, pageBlock, reconstructMemory, record, settleBefore, stableAlias, ternary } from './egdesk-wiki-reconstruction.mjs'
 
@@ -87,7 +88,7 @@ const TRIAGE_RULES = ['You are a system judge deciding what stored memory a turn
 // record to such a turn. Undecided or "no": as before.
 export const TN_ACTION = 'Does the message ask the assistant to carry out an operation outside the conversation, such as running a command or tests, building, deploying, opening a page or sending something, rather than to answer, explain, summarize or recall something?'
 
-export async function triageTurn({ message, heldTitles = [], heldDigest = null, stored = null, live = null, client, askedAt = null, signal, timeoutMs = 2000, extraQuestions = [], ruleSet = 'default' } = {}) {
+export async function triageTurn({ message, heldTitles = [], heldDigest = null, stored = null, live = null, client, askedAt = null, signal, timeoutMs = 2000, extraQuestions = [], ruleSet = 'default', previousReply = null } = {}) {
   // extraQuestions: self-contained questions of another turn-start judgment (the browser entry) that ride on this one request. They are
   // appended AFTER the triage questions, never named tn_*, and their answers are returned untouched in `extra`; the triage reading ignores them.
   const riders = (Array.isArray(extraQuestions) ? extraQuestions : []).filter(q => q && typeof q.name === 'string' && !q.name.startsWith('tn_')).slice(0, 2)
@@ -106,6 +107,7 @@ export async function triageTurn({ message, heldTitles = [], heldDigest = null, 
     { role: 'user', content: `Held in the answering model's context:\n${heldBlock(heldTitles, heldDigest)}` },
     ...(Array.isArray(stored) ? [{ role: 'user', content: `Stored pages that are not held (titles only):\n${catalogBlock(stored)}` }] : []),
     ...(typeof live === 'string' && live.trim() ? [{ role: 'user', content: `Live conversation (recent turns, bounded):\n${live.slice(-3000)}` }] : []),
+    ...previousReplyInput(previousReply),
     { role: 'user', content: `${clockLine(askedAt)}\nMessage:\n${message}` }]
   try {
     const result = await client.decide({ input, questions, timeoutMs, signal })
@@ -503,7 +505,7 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
  * packetFirst (optional, first turn only): return as soon as the packet is ready; the triage that only decides recording keeps running and is
  *   awaited inside judgeWrite (triage is then null in the result and `triageLater` is its promise). It is not bound by the packet deadline.
  */
-export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = TURN_MEMORY_WRITE_TARGET, previous = null, speechDesign = 'axes-isolated', splitWording = 'v1', ruleSet = 'default' } = {}) {
+export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = TURN_MEMORY_WRITE_TARGET, previous = null, speechDesign = 'axes-isolated', splitWording = 'v1', ruleSet = 'default', previousReply = null } = {}) {
   // The deadline is ONE point on ONE clock, fixed here. Everything below asks that clock; a timer only wakes the wait up.
   const deadlineAt = Number.isFinite(deadlineMs) ? clock.now() + Math.max(0, deadlineMs) : null
   const remaining = () => (deadlineAt === null ? null : Math.max(0, deadlineAt - clock.now()))
@@ -521,7 +523,7 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
   // A triage that gates the fetch (mid-session) is bound by the packet deadline; one that only decides recording (first turn) is not.
   // Without a deadline the old 2 s limit stays. A cold first request took 1.6-2.2 s in the real runs, so a deadline run allows up to 4 s.
   const triageTimeout = () => (remaining() === null ? 2000 : pos.kind === 'mid' ? Math.max(1, Math.min(4000, Math.ceil(remaining()))) : 4000)
-  const triageCall = () => triageTurn({ message, heldTitles: heldPages.map(p => p.title), heldDigest, stored, live: pos.kind === 'mid' ? live : null, client, askedAt, signal, timeoutMs: triageTimeout(), ruleSet, extraQuestions })
+  const triageCall = () => triageTurn({ message, heldTitles: heldPages.map(p => p.title), heldDigest, stored, live: pos.kind === 'mid' ? live : null, client, askedAt, signal, timeoutMs: triageTimeout(), ruleSet, previousReply, extraQuestions })
   let triage, memory, triageLater = null
   if (pos.kind === 'mid') {
     // Under a deadline: a triage that cannot be asked in what is left, or has not answered when the clock reaches the deadline, is cut. The

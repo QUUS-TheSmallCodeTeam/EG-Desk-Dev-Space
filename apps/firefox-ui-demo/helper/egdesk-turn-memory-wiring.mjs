@@ -10,18 +10,18 @@ import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 //   EGDESK_TURN_MEMORY_ONE_PACKET=on        the memory pages ride under the context selection's packet
 //   EGDESK_TURN_MEMORY_WRITE_TARGET=choice  the old N-way write target, for comparison ('about' is the default)
 //   EGDESK_TURN_MEMORY_CONFIRM=on           pending readings may be confirmed or refused through the conversation
-export const TURN_MEMORY_FLAGS = Object.freeze({ onePacket: 'EGDESK_TURN_MEMORY_ONE_PACKET', writeTarget: 'EGDESK_TURN_MEMORY_WRITE_TARGET', confirmInConversation: 'EGDESK_TURN_MEMORY_CONFIRM', pruneHeld: 'EGDESK_TURN_MEMORY_PRUNE_HELD', keepLate: 'EGDESK_TURN_MEMORY_KEEP_LATE', speechDesign: 'EGDESK_TURN_MEMORY_SPEECH_DESIGN', splitWording: 'EGDESK_TURN_MEMORY_SPLIT_WORDING' })
+export const TURN_MEMORY_FLAGS = Object.freeze({ onePacket: 'EGDESK_TURN_MEMORY_ONE_PACKET', writeTarget: 'EGDESK_TURN_MEMORY_WRITE_TARGET', confirmInConversation: 'EGDESK_TURN_MEMORY_CONFIRM', pruneHeld: 'EGDESK_TURN_MEMORY_PRUNE_HELD', keepLate: 'EGDESK_TURN_MEMORY_KEEP_LATE', speechDesign: 'EGDESK_TURN_MEMORY_SPEECH_DESIGN', splitWording: 'EGDESK_TURN_MEMORY_SPLIT_WORDING', previousReply: 'EGDESK_TURN_MEMORY_PREVIOUS_REPLY' })
 export function turnMemoryFlagsFromEnv(env = {}) {
   const get = name => (env && typeof env === 'object' && typeof env[name] === 'string' ? env[name] : null)
   return { ...(get(TURN_MEMORY_FLAGS.onePacket) === 'on' ? { onePacket: true } : {}), ...(get(TURN_MEMORY_FLAGS.writeTarget) === 'choice' ? { writeTarget: 'choice' } : {}),
     ...(get(TURN_MEMORY_FLAGS.confirmInConversation) === 'on' ? { confirmInConversation: true } : {}), ...(get(TURN_MEMORY_FLAGS.pruneHeld) === 'on' ? { pruneHeld: true } : {}),
     ...(get(TURN_MEMORY_FLAGS.keepLate) === 'on' ? { keepLate: true } : {}), ...(get(TURN_MEMORY_FLAGS.speechDesign) === 'split' ? { speechDesign: 'split-isolated' } : get(TURN_MEMORY_FLAGS.speechDesign) === 'hybrid' ? { speechDesign: 'hybrid-two-step' } : {}),
-    ...(get(TURN_MEMORY_FLAGS.splitWording) === 'v2' ? { splitWording: 'v2' } : {}) }
+    ...(get(TURN_MEMORY_FLAGS.splitWording) === 'v2' ? { splitWording: 'v2' } : {}), ...(get(TURN_MEMORY_FLAGS.previousReply) === 'on' ? { previousReply: true } : {}) }
 }
 
 // createTurnMemoryConfig({ settings, getAdapter, ontologyStore, deskStore, budget?, deadlineMs? }) -> the object the runtime reads:
 //   { mode(), wiki({ body, context, sources }), scope({ context }), writer(wiki, options), budget, caps, deadlineMs, ontologyWrite }
-export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = null, deskStore = null, budget = { linksFirst: true }, deadlineMs = 15000, caps = null, onePacket = false, writeTarget = 'about', confirmInConversation = false, pruneHeld = false, keepLate = false, speechDesign = null, splitWording = null } = {}) {
+export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = null, deskStore = null, budget = { linksFirst: true }, deadlineMs = 15000, caps = null, onePacket = false, writeTarget = 'about', confirmInConversation = false, pruneHeld = false, keepLate = false, speechDesign = null, splitWording = null, previousReply = false } = {}) {
   const mode = () => (['advisory', 'on'].includes(settings?.turnMemory?.mode) ? settings.turnMemory.mode : 'off')
   return {
     // The same lazy adapter, for other consumers of the wiki write path (the direct browser entry); it opens nothing by itself.
@@ -42,6 +42,8 @@ export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = n
     // How the write judgment asks the sentence labels: 'split-isolated' (source and time as yes/no predicates) only when passed; default axes.
     ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step'].includes(speechDesign) ? { speechDesign } : {}),
     ...(splitWording === 'v2' ? { splitWording: 'v2' } : {}),
+    // The assistant message right before the turn, for the triage and the selection (egress-gated; off by default).
+    ...(previousReply === true ? { previousReply: true } : {}),
     scope: ({ context, body }) => getAdapter().scopeFor(context, body),
     async wiki({ body, context, sources }) {
       const adapter = getAdapter()
