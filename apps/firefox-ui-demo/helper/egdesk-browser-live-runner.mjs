@@ -40,7 +40,8 @@ export const FAMILY_PLAN_FILES = Object.freeze({ statement: new URL('../scripts/
   holdout: new URL('../scripts/egdesk-browser-live-plan-holdout.json', import.meta.url),
   'holdout-rerun': new URL('../scripts/egdesk-browser-live-plan-holdout-rerun.json', import.meta.url),
   holdout2: new URL('../scripts/egdesk-browser-live-plan-holdout2.json', import.meta.url),
-  stuck: new URL('../scripts/egdesk-browser-live-plan-stuck.json', import.meta.url) })
+  stuck: new URL('../scripts/egdesk-browser-live-plan-stuck.json', import.meta.url),
+  entry: new URL('../scripts/egdesk-browser-live-plan-entry.json', import.meta.url) })
 // The plan sets this runner knows, with their phases in order. A phase with seed writes, before it runs and by code only, the record a
 // month-1 run writes (the same outcome layout through the same write path), so a small plan need not pay for month 1 again.
 const PLAN_SETS = Object.freeze({ 'browser-live-v2': ['month1', 'changed'], 'browser-live-recorded-v3': ['month2', 'renamed'], 'browser-live-allon-v1': ['allon'],
@@ -98,6 +99,7 @@ export function loadLivePlan(file = LIVE_PLAN_FILE) {
     (phase.personDoes !== undefined && !LIVE_PAGES[phase.pages][phase.personDoes]) || (phase.title !== undefined && (typeof phase.title !== 'string' || phase.title.length > 120)) || (phase.clock !== undefined && !['month1', 'month2', 'month3'].includes(phase.clock)) ||
     (phase.maxSteps !== undefined && !(Number.isSafeInteger(phase.maxSteps) && phase.maxSteps >= 1 && phase.maxSteps <= 8)) ||
     // c24: a second, unrelated selected card (its own host, page set and title); only the entry reads it
+    (phase.entryOnly !== undefined && typeof phase.entryOnly !== 'boolean') ||
     (phase.otherCard !== undefined && !(phase.otherCard && HOSTS.has(phase.otherCard.host) && LIVE_PAGES[phase.otherCard.pages]?.[phase.otherCard.start] && typeof phase.otherCard.title === 'string' && phase.otherCard.title.length <= 120))) bad(`phase ${phase.id}`)
   const phaseIds = new Set([...plan.phases.map(p => p.id), 'all'])
   if (!Array.isArray(plan.checks) || plan.checks.some(c => !CHECKS[c.id] || !phaseIds.has(c.phase) || !['hard', 'soft', 'absolute'].includes(c.severity) || typeof c.note !== 'string')) bad('checks')
@@ -252,6 +254,8 @@ async function runJourney({ plan, client, key, record }) {
         return result?.outcome === 'max_steps' && used >= def.maxSteps ? { ...result, reason: 'step_rejected', capped: true } : result
       }
     }
+    // c27: a phase that measures the ENTRY decision only: when the task is entered, its step is not run (no step request); the entry request is real
+    if (def.entryOnly === true) provider.runDirectTask = async () => ({ outcome: 'max_steps', reason: 'step_rejected', steps: [], capped: true })
     // the synthetic run's models may receive Browser data (as every request here does): the finished task's status text goes in the note
     const entry = createDirectBrowserEntry({ provider, store, outcomeSink: sinkWriter.write.bind(sinkWriter), now: () => record.clock, pageTextInNote: () => true, cardTextInEntry: () => true })
     // month 1 starts with nothing stored; later phases get the memory feature's first-style packet for the browser consumer

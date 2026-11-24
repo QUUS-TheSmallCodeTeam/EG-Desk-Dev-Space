@@ -5,7 +5,7 @@ import { nativeHash, nativeTaskError, stableJSON } from './egdesk-task-native-st
 const SCOPE = ['graphId', 'requestId', 'runId', 'parentTaskId', 'requestedBy'];
 const BINDING = [...SCOPE, 'taskId', 'ownerId', 'sourceRef', 'attemptId'];
 const INPUT = ['message', 'cwd', 'model', 'effort', 'profileEnabled', 'systemPrompt',
-  'contextSnapshotIds', 'contextCapabilities', 'conversationId', 'clientThreadId', 'engineId'];
+  'contextSnapshotIds', 'contextCapabilities', 'conversationId', 'clientThreadId', 'engineId', 'engineProfileId'];
 const equal = (a, b) => stableJSON(a) === stableJSON(b);
 const clone = (value) => structuredClone(value);
 const pick = (value, keys) => Object.fromEntries(keys.map((key) => [key, value[key]]));
@@ -39,6 +39,9 @@ function normalizedInput(value) {
     typeof value.message === 'string' && value.message.trim() && value.message.length <= MAX_TEXT,
   'TASK_INPUT_UNRESOLVED', 'Trusted task input could not be resolved', 403);
   validateChatCwd(value);
+  // L1 c26: the account a NEW room starts on (a step of a plan from a room on an Agent profile); never together with a named conversation
+  requireValue(value.engineProfileId === undefined || ref(value.engineProfileId) && value.conversationId === undefined,
+    'TASK_INPUT_UNRESOLVED', 'Invalid resolved account for a new conversation', 403);
   for (const key of ['model', 'effort']) {
     requireValue(value[key] === undefined || ref(value[key]), 'TASK_INPUT_UNRESOLVED', 'Invalid resolved execution setting', 403);
   }
@@ -273,7 +276,10 @@ export function createNativeTaskAdapter({ chat, resolveTaskInput, ledger, captur
       });
       try {
         guard.check();
-        const accepted = await chat.send({ ...input, requestId, clientThreadId });
+        // engineProfileId is not a send-body field: it travels on the trusted internal argument only
+        const { engineProfileId: newRoomProfile, ...body } = input;
+        const accepted = newRoomProfile === undefined ? await chat.send({ ...body, requestId, clientThreadId })
+          : await chat.send({ ...body, requestId, clientThreadId }, { newRoomProfile });
         guard.check();
         requireValue(accepted?.accepted === true && accepted.requestId === requestId && nativeIds(accepted) &&
           (!sameThread || accepted.conversationId === input.conversationId),

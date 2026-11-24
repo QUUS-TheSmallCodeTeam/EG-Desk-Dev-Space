@@ -574,7 +574,8 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     // asked, because its page state (two_factor_required at 1.0 in the same measurement) names what the person has to do.
     if (!options.length && excluded.gated + excluded.unsupported > 0 && excluded.sensitive === 0) {
       entry.rule = 'person_only_controls'
-      return finish('escalated', { reason: 'human_step', withheld: excluded.gated + excluded.unsupported })
+      // c27 (owner decision, c26): the controls are named here too (they were not: S1 pinned an unnamed note); the person is told which controls are theirs
+      return finish('escalated', { reason: 'human_step', withheld: excluded.gated + excluded.unsupported, ...(withheld.length ? { controls: withheld.map(control => control.label) } : {}) })
     }
     // Loading is a fact of the snapshot (R3): wait without a request.
     if (snapshot.readyState === 'loading') {

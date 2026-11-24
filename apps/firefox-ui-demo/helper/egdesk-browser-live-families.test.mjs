@@ -38,6 +38,7 @@ test('the three family plans are pre-registered within the hard limits (<= 14 re
     holdout: [7, { 'ub-base': 3, 'ig-list': 2, 'ig-form': 2 }], // c24
     'holdout-rerun': [6, { 'rr-ub-base': 2, 'rr-ig-list': 4 }], // c25, rr-ub-base cut to one step (c26)
     stuck: [6, { 'sk-form': 3, 'sk-error': 3 }], // c26
+    entry: [7, { 'en-ms': 1, 'en-hc': 1, 'en-ctrl-a': 1, 'en-ctrl-b': 1, 'en-se': 1, 'en-ig': 1, 'en-st': 1 }], // c27: entry only
     holdout2: [7, { 'hc-link': 3, 'hc-covered': 2, 'ms-info': 2 }], // c25
     stability: [9, { 'stab-se': 3, 'stab-st': 2, 'stab-dv': 2, 'stab-inv': 2 }] })
 })

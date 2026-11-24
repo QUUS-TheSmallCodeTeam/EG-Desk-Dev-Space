@@ -99,3 +99,33 @@ test('engine, flag ON, design-first: the design request carries its schema; a va
   assert.equal(await engine(request), null); assert.equal(engine.stats().schemaInvalid, 1)
   assert.ok(BRIEFING_ENGINE_LIMITS.replyMax > 0 && BRIEFING_CATALOG.ids.length === 4)
 })
+
+// ---- c34: the schema must not admit a fill the validator REFUSES (c33's rule: "make the schema and the validator agree") ----
+// A strict schema cannot state a length, a row count, a non-empty string or "left differs from right", so a schema-valid reply can still be short of the limits; the validator
+// reads those as ISSUES of one slot (empty / mismatch), which the flow rewrites or drops one part at a time. What the validator refuses as a whole (validateFill ok:false) must
+// be only what the schema itself states: the shape. Seeded fuzz over schema-valid replies: no whole-reply refusal except a blank title (a string the schema cannot call blank).
+test('differential: every schema-valid fill is read by validateFill (no whole-reply refusal but a blank title); what the schema cannot state surfaces as slot issues only', () => {
+  let seed = 34
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff, pick = list => list[Math.floor(rnd() * list.length)]
+  const schema = fillOutputSchema(GUIDE)
+  const value = (slot, item) => {
+    if (slot.type === 'text') return pick([null, '', ' ', 'x', `${slot.name} 값`, 'y'.repeat((slot.max ?? 40) + 1 + Math.floor(rnd() * 400))])
+    if (slot.type === 'material') return pick([null, ...item.materials])
+    const n = pick([0, 1, 1, 2, 3, (slot.max ?? 6) + 1, (slot.max ?? 6) + 3])
+    return pick([null, Array.from({ length: n }, () => Object.fromEntries(slot.of.map(f => [f.name, f.type === 'material' ? pick(item.materials) : pick(['', 'z', `${f.name} 값`, 'w'.repeat((f.max ?? 40) + 20)])])))])
+  }
+  const titles = ['', 'a', '제목', 't'.repeat(200), `${'긴제목 '.repeat(40)}`]
+  const outcomes = { schemaValid: 0, accepted: 0, blankTitle: 0, issueKinds: new Set(), hard: [] }
+  for (let n = 0; n < 600; n++) {
+    const reply = { title: pick(titles), unfillable: pick([[], [{ item: GUIDE.items[0].id, slot: 'body', reason: 'r' }]]), items: Object.fromEntries(GUIDE.items.map(i => [i.id, { text: pick(['', 't', '설명'.repeat(130)]), fallback: pick(['', 'f']), slots: Object.fromEntries(i.slots.map(s => [s.name, value(s, i)])) }])) }
+    if (violation(reply, schema) !== null) continue
+    outcomes.schemaValid++
+    const read = validateFill(GUIDE, stripNulls('briefing_fill', reply))
+    if (!read.ok) { if (read.reason === 'no-title' && !reply.title.trim()) outcomes.blankTitle++; else outcomes.hard.push(read.reason); continue }
+    outcomes.accepted++; for (const issue of read.issues) outcomes.issueKinds.add(issue.kind)
+    assert.ok(read.title.length <= GUIDE.titleMax, 'a long title is cut, never carried over the limit')
+  }
+  assert.deepEqual(outcomes.hard, [], 'no schema-valid reply is refused as a whole except for a blank title')
+  assert.ok(outcomes.schemaValid >= 550 && outcomes.accepted > 100 && outcomes.blankTitle > 0, JSON.stringify({ ...outcomes, issueKinds: [...outcomes.issueKinds] }))
+  assert.deepEqual([...outcomes.issueKinds].sort(), ['empty', 'mismatch'], 'the inexpressible limits show up as the two slot issues the flow already handles')
+})

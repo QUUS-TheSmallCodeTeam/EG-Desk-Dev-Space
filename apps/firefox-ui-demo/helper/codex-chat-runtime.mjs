@@ -866,6 +866,7 @@ export class CodexChatRuntime {
     this.heartbeatReasoning = new WeakMap() // heartbeat -> ids of reasoning items the engine has started and not finished
     this.heartbeatSubjects = new WeakMap() // heartbeat -> { run, flow, context }: what its judge and its record speak for
     this.flowSpeakers = new WeakSet() // heartbeats whose run was opted in to intermediate messages without a held answer
+    this.isolationMemo = null // { key: engine folder, at, value }: the isolation read of the last own-tools thread start (c25: a fresh internal thread reuses it)
     this.freshInternalCache = new Map() // conversationId -> { at, value }: the thread/start overrides of a fresh internal thread (c24)
     this.internalTurns = createInternalTurns({ setTimer: (fn, ms) => this.setTimer(fn, ms), clearTimer: handle => this.clearTimer(handle) }) // short private fork turns (draft revision, intermediate messages); never a run
     this.flowRuns = new WeakMap() // run -> intermediate-message state (flag decisionContext.conversationFlow, default off)
@@ -1101,7 +1102,7 @@ export class CodexChatRuntime {
     return this.requestEngineRoute(body, { ...options, legacyAgentEngine: true }).engineId
   }
 
-  requestEngineRoute(body = {}, { verifyAccount = true, useAgent = false, legacyAgentEngine = false, profileRun, requireClientPair = false } = {}) {
+  requestEngineRoute(body = {}, { verifyAccount = true, useAgent = false, legacyAgentEngine = false, profileRun, requireClientPair = false, newRoomProfile = null } = {}) {
     if (this.requireStore) this.assertStore()
     const requested = this.requestedEngine(body)
     const cid = idText(body.conversationId)
@@ -1133,8 +1134,11 @@ export class CodexChatRuntime {
     }
     // A pre-slot native checkpoint is still checked against the active/legacy
     // identity. Never retrofit it with the Agent's account, even when equal.
-    const engineProfileId = pinned || (!boundCid ? savedSlot : null) || null
-    if (engineProfileId) this.assertEngineProfile(engineId, engineProfileId, { explicit: Boolean(savedSlot) || (roomKeeps && !boundCid && Boolean(thread?.engineProfileId)) })
+    // L1 c26 (flag roomAccount on; the plan runner's trusted path only, never a body field): a NEW room opened by a step of a plan that a room on an Agent profile
+    // proposed starts on THAT room's account, not the Agent's saved one or the default. An existing room keeps the account it is pinned to.
+    const inherited = !boundCid && !thread?.engineProfileId && engineId === 'codex' && this.roomAccountOn() ? idText(newRoomProfile) || null : null
+    const engineProfileId = pinned || inherited || (!boundCid ? savedSlot : null) || null
+    if (engineProfileId) this.assertEngineProfile(engineId, engineProfileId, { explicit: Boolean(savedSlot) || Boolean(inherited) || (roomKeeps && !boundCid && Boolean(thread?.engineProfileId)) })
     if (binding && verifyAccount) this.assertNativeAccount(thread.clientThreadId, boundCid, engineId, binding)
     return { engineId, engineProfileId }
   }
@@ -1801,7 +1805,7 @@ export class CodexChatRuntime {
 
   // internal (never reachable from HTTP, which passes one argument):
   // { board: run.board attribution + block, blocks: { key: text } } — extra
-  // turn context from sendBoard / reassignSubAgent.
+  // turn context from sendBoard / reassignSubAgent. { newRoomProfile } (L1 c26): the account a NEW room starts on, from the plan runner (flag roomAccount).
   async send(body, internal = null) {
     // A reply to an early question the run asked while it keeps working goes into that same run (flag decisionContext.conversationFlow).
     const inRun = internal ? null : this.openEarlyQuestion(idText(body?.clientThreadId) || idText(body?.thread?.id), idText(body?.conversationId))
@@ -1835,7 +1839,7 @@ export class CodexChatRuntime {
     // After a helper restart the binding, not the default engine or Codex's
     // connection state, determines both routing and the account to verify.
     const profileRun = internal?.profileRun ?? this.resolveProfile(body)
-    const route = this.requestEngineRoute(body, { verifyAccount: false, useAgent: true, profileRun })
+    const route = this.requestEngineRoute(body, { verifyAccount: false, useAgent: true, profileRun, newRoomProfile: internal?.newRoomProfile })
     const { engineId, engineProfileId } = route
     const boundId = conversationId || storedThread?.conversationId
     const boardTurn = !!internal?.board || body.expectedBoardDelivery !== undefined || this.isSavedBoardTarget(clientThreadId)
@@ -2218,6 +2222,8 @@ export class CodexChatRuntime {
     const isolation = await loadOwnToolsIsolation(request, neutralFolder)
     mergeCeilingOverrides(own, isolation.overrides)
     context.ownToolsIsolation = isolation.mcp
+    // c25: on the real 0.171 the inventory read costs 1-2 s (mcpServerStatus/list); the room's first internal thread reuses this one for 5 minutes instead of paying it again
+    if (isolation.mcp !== 'unchecked') this.isolationMemo = { key: neutralFolder ?? null, at: this.now(), value: structuredClone(isolation.overrides) }
     try { if (this.ownTools?.environments?.() === 'none') own.environments = [] } catch { /* the flag only adds */ }
     own.developerInstructions = composeOwnToolsInstructions(base?.developerInstructions)
     return own
@@ -5442,8 +5448,8 @@ export class CodexChatRuntime {
         const cards = (preRun.browserBinding?.cards || []).filter(card => card.permission === 'interact').map(card => ({ cardId: card.cardId, host: hostsByCard[card.cardId] || '', title: titlesByCard[card.cardId] || '' }))
         // c20: the entry is yes/no predicates (the request; one per card unless code named the card); the host appends all of them.
         // c22: built like the standalone entry, observing each card's first lines under the same page_text gate and fallback.
-        const { codeCard, questions } = await rideAlongEntry({ provider, run: preRun, message: body.message, cards, cardText: egress.allows('page_text') === true })
-        try { const answers = cards.length ? await cfg.entryAnswers({ body, context, questions, question: questions[0], client: guarded(['page_text']) }) : null
+        const { codeCard, questions, evidence } = await rideAlongEntry({ provider, run: preRun, message: body.message, cards, cardText: egress.allows('page_text') === true })
+        try { const answers = cards.length ? await cfg.entryAnswers({ body, context, questions, question: questions[0], evidence, client: guarded(['page_text']) }) : null
           if (answers && answers.browser_entry?.type === 'predicate') {
             const picked = Object.fromEntries(questions.map(q => [q.name, answers[q.name]]).filter(([, a]) => a))
             entryAnswers = { ...picked, codeCard, kind: readBrowserEntry(picked, cards, { codeCard }).kind }
@@ -6114,7 +6120,9 @@ export class CodexChatRuntime {
     const slot = this.threadOperationSlot(cid), thread = this.threads.get(cid)
     const base = mergeCeilingOverrides({}, pureEngineThreadOverrides())
     const cwd = thread?.cwd ?? this.ownNeutralFolder() ?? null
-    const isolation = await loadOwnToolsIsolation(this.scopedRequest(slot), cwd)
+    const memo = this.isolationMemo
+    const reused = memo && memo.key === (cwd ?? null) && this.now() - memo.at < 300_000 ? memo.value : null
+    const isolation = reused ? { overrides: structuredClone(reused) } : await loadOwnToolsIsolation(this.scopedRequest(slot), cwd)
     mergeCeilingOverrides(base, isolation.overrides)
     if (cwd) base.cwd = cwd
     if (thread?.model) base.model = thread.model
@@ -6577,7 +6585,7 @@ export class CodexChatRuntime {
     try {
       if (!run || !record) return
       const summary = record.health?.summary ?? null
-      run.ownCommandLast = Object.freeze({ exitCode: Number.isSafeInteger(record.exitCode) ? record.exitCode : null, durationMs: Number.isFinite(record.durationMs) ? record.durationMs : null,
+      run.ownCommandLast = Object.freeze({ stopped: record.stopped === true, exitCode: Number.isSafeInteger(record.exitCode) ? record.exitCode : null, durationMs: Number.isFinite(record.durationMs) ? record.durationMs : null,
         health: record.health?.health ?? null, healthReasons: record.health?.reasons ?? [], summary: summary ? Object.freeze({ ...summary, line: String(summary.line).slice(0, 300) }) : null,
         worktree: record.worktree ? Object.freeze({ ...record.worktree }) : null })
       const hb = this.heartbeatThreads.get(run.conversationId)
@@ -6591,7 +6599,7 @@ export class CodexChatRuntime {
     const last = [...this.runs.values()].filter(r => r.conversationId === conversationId && r.ownCommandLast).at(-1)?.ownCommandLast
     if (!last) return null
     return { ...(last.exitCode !== null ? { exit_code: last.exitCode } : {}), ...(last.durationMs !== null ? { duration_ms: last.durationMs } : {}),
-      ...(last.health ? { health: last.health } : {}), test_summary: Boolean(last.summary),
+      ...(last.stopped ? { stopped: true } : {}), ...(last.health ? { health: last.health } : {}), test_summary: Boolean(last.summary),
       ...(last.summary ? { tests_passed: last.summary.passed, tests_failed: last.summary.failed, ...(Number.isSafeInteger(last.summary.total) ? { tests_total: last.summary.total } : {}) } : {}),
       ...(last.worktree ? { worktree: last.worktree.state, ...(Number.isSafeInteger(last.worktree.conflicts) ? { conflicts: last.worktree.conflicts, uncommitted: last.worktree.uncommitted } : {}) } : {}) }
   }

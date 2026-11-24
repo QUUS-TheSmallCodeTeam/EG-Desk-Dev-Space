@@ -55,6 +55,49 @@
               }
             }
           },
+          "agentProfile": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "instructions"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40
+              },
+              "role": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "instructions": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000
+              },
+              "tone": {
+                "enum": [
+                  "plain",
+                  "warm",
+                  "concise",
+                  "formal",
+                  "playful"
+                ]
+              },
+              "expertise": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                }
+              }
+            }
+          },
           "folder": {
             "type": "object",
             "maxProperties": 32,
@@ -124,7 +167,7 @@
                     "body": {
                       "type": "string",
                       "minLength": 1,
-                      "maxLength": 4000
+                      "maxLength": 8000
                     },
                     "time": {
                       "enum": [
@@ -338,8 +381,28 @@
                       "properties": {
                         "ran": {
                           "type": "boolean"
+                        },
+                        "rejects": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 50
                         }
                       }
+                    },
+                    "resumes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 20
+                    },
+                    "postedMin": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 20
+                    },
+                    "unsubscribes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 20
                     },
                     "memory": {
                       "type": "object",
@@ -366,6 +429,88 @@
                         },
                         "noDuplicates": {
                           "const": true
+                        },
+                        "minKeyChars": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 200000
+                        },
+                        "merged": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 12
+                        }
+                      }
+                    },
+                    "engine": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "steers": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 5
+                        },
+                        "interrupts": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 5
+                        },
+                        "steerCarries": {
+                          "const": true
+                        },
+                        "flowMessages": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "minProperties": 1,
+                          "properties": {
+                            "equals": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 20
+                            },
+                            "max": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 20
+                            },
+                            "min": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 20
+                            }
+                          }
+                        },
+                        "agentMessages": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "minProperties": 1,
+                          "properties": {
+                            "equals": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 20
+                            },
+                            "max": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 20
+                            },
+                            "min": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 20
+                            }
+                          }
+                        },
+                        "commandStopped": {
+                          "const": true
+                        },
+                        "maxLatencyMs": {
+                          "type": "integer",
+                          "minimum": 1000,
+                          "maximum": 3600000
                         }
                       }
                     },
