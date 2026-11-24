@@ -414,8 +414,22 @@ const splitV2 = {
     now: ['now', 'Does the sentence describe a state or an opinion at the moment it is said (for example "지금", "현재", "이미 와 있어")? An action the speaker has just finished ("방금 ~했어") is not this, and neither is a situation it says started earlier and is still going on.'],
   },
 }
+// own v3 (L7 c23, a candidate, measured in plan terse-record-v1): v2 left c12 at own .19 and c10 at .16, just above the no bar .15.
+// It names the two exclusions with the Korean forms that carried them ("메일 보니까", "내역을 보니", "~걸 보니 ~것 같아").
+const ownV3 = ['self_reported_observation', 'Does the sentence say that the speaker personally saw, heard, checked, tried or did the thing the sentence is mainly about (for example "내가 봤어", "내가 고쳤어", "확인했어", "해 봤는데")? Reading it in a mail, log, record or document ("메일 보니까", "주문 내역을 보니", "기록상") is not this; being told it is not this. When the sentence states a conclusion and what it was drawn from ("~걸 보니 ~것 같아"), the thing it is mainly about is the conclusion, which the speaker did not see. A statement of a fact that does not say how the speaker knows it is no.']
+const VERSIONS = { v1: split, v2: splitV2, v3: { source: { ...splitV2.source, own: ownV3 }, time: splitV2.time } }
 export const SPLIT_WORDINGS = Object.freeze(['v1', 'v2'])
-const splitTable = wording => (wording === 'v2' ? splitV2 : split)
+// Per-predicate choice (L7 c23, from the real c23 v1 / c26 v2 answers on the five targets and five guards, evidence/l7-c23/per-predicate.txt):
+// v2 is at least as good as v1 for every changed predicate and loses no guard (c10 was not installed by the split reading under v1 either:
+// own .58, guess .71; under v2 own .16). So 'v2' is v2 for all five. A per-predicate object ({ own: 'v3', ... }) selects a version per key
+// (measurement only); a key it does not name is v1.
+export const SPLIT_WORDING_CHOICE = Object.freeze({ other: 'v2', own: 'v2', guess: 'v2', before: 'v2', now: 'v2' })
+function splitTable(wording) {
+  if (wording === 'v2') wording = SPLIT_WORDING_CHOICE
+  if (!wording || typeof wording !== 'object') return split
+  const pickKey = (axis, key) => (VERSIONS[wording[key]] ?? split)[axis][key]
+  return Object.fromEntries(Object.entries(split).map(([axis, group]) => [axis, Object.fromEntries(Object.keys(group).map(key => [key, pickKey(axis, key)]))]))
+}
 const splitName = (key, i) => `speechs_${key}_${i}`
 
 // A message that is exactly one sentence needs no quote: the question is about the message itself (each predicate costs about 135 tokens

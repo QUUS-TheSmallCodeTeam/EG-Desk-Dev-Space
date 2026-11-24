@@ -86,19 +86,28 @@ const TRIAGE_RULES = ['You are a system judge deciding what stored memory a turn
 // tn_action no stored page is fetched by turn memory; the context selection, which judges every record against the action itself under the
 // same rule set (c23: all twelve 0 for the test run, the design record 1.0 for the design question), is the only path that may attach a
 // record to such a turn. Undecided or "no": as before.
+// With the assistant message right before the turn (flag turnMemory.previousReply), two triage questions get one more sentence (L7 c23,
+// R4; the bar is unchanged; without that message both questions are byte for byte as before). Real c26 (previous-reply-v1):
+//   "ㅇㅇ" after "… 계속 갈까요?"  tn_courtesy .66 (.99 without the message): a yes to a yes/no question read as an acknowledgement.
+//   "좋다. 다음 진행" after "… 이 버전 어떠세요? OK면 … 8번 갑니다."  tn_record .95: the go-ahead was read as recording the version the
+//   ASSISTANT described; the question did not say that only the person's own statement counts.
+export const COURTESY_WITH_PREVIOUS = 'A short yes, no or go-ahead that answers a question or a proposal in the assistant\'s message (for example "ㅇㅇ" or "네" after "계속 갈까요?") is an answer that decides something, not a courtesy.'
+export const RECORD_WITH_PREVIOUS = 'Judge only what the person\'s own message states: the assistant\'s message is context for what the person answers, never part of the person\'s statement. Agreeing to, approving or saying go ahead to what the assistant proposed ("좋다", "ㅇㅇ", "다음 진행") is not a record by itself.'
+
 export const TN_ACTION = 'Does the message ask the assistant to carry out an operation outside the conversation, such as running a command or tests, building, deploying, opening a page or sending something, rather than to answer, explain, summarize or recall something?'
 
 export async function triageTurn({ message, heldTitles = [], heldDigest = null, stored = null, live = null, client, askedAt = null, signal, timeoutMs = 2000, extraQuestions = [], ruleSet = 'default', previousReply = null } = {}) {
   // extraQuestions: self-contained questions of another turn-start judgment (the browser entry) that ride on this one request. They are
   // appended AFTER the triage questions, never named tn_*, and their answers are returned untouched in `extra`; the triage reading ignores them.
+  const withPrevious = previousReplyInput(previousReply).length > 0
   const riders = (Array.isArray(extraQuestions) ? extraQuestions : []).filter(q => q && typeof q.name === 'string' && !q.name.startsWith('tn_')).slice(0, 2)
   const questions = [
-    predicateQuestion('tn_courtesy', 'Is the message only a courtesy: thanks, a greeting, an acknowledgement or other social small talk, with no question, request, report or decision in it?'),
+    predicateQuestion('tn_courtesy', withPrevious ? `${'Is the message only a courtesy: thanks, a greeting, an acknowledgement or other social small talk, with no question, request, report or decision in it?'} ${COURTESY_WITH_PREVIOUS}` : 'Is the message only a courtesy: thanks, a greeting, an acknowledgement or other social small talk, with no question, request, report or decision in it?'),
     predicateQuestion('tn_need', Array.isArray(stored)
       ? 'Does the message ask for, or report, something that the held pages and the conversation do not already cover, so that stored pages that are not held (listed below, titles only) would help the answering model decide, verify or do what the message calls for?'
       : 'Does the message ask for, or report, something that the held pages and the conversation do not already cover, so that stored notes or documents beyond the held ones would improve the answer?'),
     ...(Array.isArray(stored) ? [predicateQuestion('tn_recall', 'Does the message point back to something discussed or worked on earlier (for example by saying "earlier", "last time" or "again") and ask for it to be recalled, summarized or re-organized, rather than ask for one new fact or one narrow detail?')] : []),
-    predicateQuestion('tn_record', 'Does this message state something worth keeping as a record: a new fact, a decision, a plan, or a change in the status of something already recorded? Greetings, thanks, small talk and pure questions are not.'),
+    predicateQuestion('tn_record', withPrevious ? `${'Does this message state something worth keeping as a record: a new fact, a decision, a plan, or a change in the status of something already recorded? Greetings, thanks, small talk and pure questions are not.'} ${RECORD_WITH_PREVIOUS}` : 'Does this message state something worth keeping as a record: a new fact, a decision, a plan, or a change in the status of something already recorded? Greetings, thanks, small talk and pure questions are not.'),
     // 'action' rule set only (L7 c22): is this a request to carry out an operation? Code then fetches no stored page for it (prepareTurnMemory).
     ...(ruleSet === 'action' ? [predicateQuestion('tn_action', TN_ACTION)] : []),
     ...riders,
