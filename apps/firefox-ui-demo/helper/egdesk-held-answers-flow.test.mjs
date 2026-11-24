@@ -237,7 +237,7 @@ test('an answer after a command is checked against that command\'s facts first (
   await w.final('테스트 40개가 모두 통과했습니다.')
   assert.equal(seen.length, 1)
   const evidence = seen[0].input[1].content
-  assert.match(evidence, /^Evidence:\n\[E1 time=present\]\n"""\nIn this turn the assistant ran `npm test -- --suite=payroll`; it finished with exit code 0 after about 12 seconds\. Last lines of its output: running 40 tests 40 passed, 0 failed\n"""/)
+  assert.match(evidence, /^Evidence:\n\[E1 time=present\]\n"""\nIn this turn the assistant ran `npm test -- --suite=payroll`; it finished after about 12 seconds with exit code 0, which means the command itself reported success\. Last lines of its output: running 40 tests 40 passed, 0 failed\n"""/)
   assert.match(evidence, /\[E2 time=planned[^\]]*\]\n"""\nPostgreSQL/, 'the turn\'s page follows')
   // The check keeps 8 items: with 8 pages the command fact still comes first (it used to be cut, being last).
   const turn = { evidence: pages.map(p => ({ id: p.id, kind: 'document', time: 'planned', text: p.title })), memory: [] }
@@ -273,4 +273,71 @@ test('when the check replaces the answer, the next turn of that conversation is 
   await w.final('네, 정리했습니다.')
   await again('고마워요', 'req-4')
   assert.equal(turns().at(-1).additionalContext?.[POSTED_ANSWER_KEY], undefined, 'an answer posted as written leaves nothing to tell')
+})
+
+// ---- c19: the evidence a check reads when the turn's context was late or chose nothing (Main, real collaboration v2, 2026-11-24) ----
+// The turn's context result as the runtime received it, replaced: late = the deadline passed and the result comes afterwards; none = ready, nothing chosen.
+function contextAs(w, shape) {
+  const prepare = w.chat.prepareDecisionContext.bind(w.chat)
+  w.chat.prepareDecisionContext = async (body, context) => {
+    const real = await prepare(body, context)
+    const how = typeof shape === 'function' ? shape() : shape
+    if (!real || how === 'real') return real
+    if (how === 'none') return { ...real, result: { ...real.result, selected: [], draftEvidence: [] } }
+    const timeout = { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null }
+    if (how === 'late') return { ...real, result: timeout, late: Promise.resolve(real.result) }
+    if (how === 'late_guarded') return { ...real, result: timeout, late: Promise.resolve({ ...real.result, privateTopicBatch: true }) }
+    throw new Error(how)
+  }
+}
+const draftRequests = w => { const seen = [], decide = w.chat.decisionContext.client.decide
+  w.chat.decisionContext.client.decide = async request => { if (request.promptCacheKey === 'draft-check') seen.push(request); return decide(request) }
+  return seen }
+
+test('c19: a turn whose context missed its deadline is checked against the result that arrived later; a guarded late result skips the check', async t => {
+  for (const how of ['late', 'late_guarded']) {
+    const w = world(t, { candidates: [PLAN], flags: { held: true, flow: false } }); contextAs(w, how)
+    const seen = draftRequests(w)
+    await w.send(); await w.final('PostgreSQL 전환은 v16으로 다음 분기에 할 예정입니다.')
+    assert.deepEqual(w.posted().filter(([r]) => r === 'assistant'), [['assistant', 'PostgreSQL 전환은 v16으로 다음 분기에 할 예정입니다.']], `${how}: posted as written`)
+    if (how === 'late') {
+      assert.equal(seen.length, 1, 'one check, with the late materials')
+      assert.match(seen[0].input[1].content, /PostgreSQL 이전 계획/)
+    } else assert.equal(seen.length, 0, 'a private-topic result never reaches the checker, late or not')
+  }
+  // Before c19 the same late turn had no evidence: the concrete sentence was cut with no request (the real run's "확인되지 않은 부분은 ..." line).
+  const w = world(t, { candidates: [PLAN], flags: { held: true, flow: false } }); contextAs(w, 'late')
+  const seen = draftRequests(w)
+  w.chat.draftTurnEvidence = async (run, turn, tools) => ({ skip: null, evidence: answerEvidence(turn, tools) }) // the c18 reading
+  await w.send(); await w.final('PostgreSQL 전환은 v16으로 다음 분기에 할 예정입니다.')
+  assert.equal(seen.length, 0)
+  assert.notEqual(w.posted().filter(([r]) => r === 'assistant')[0][1], 'PostgreSQL 전환은 v16으로 다음 분기에 할 예정입니다.', 'the c18 reading cuts it')
+})
+
+test('c19: a follow-up whose context chose no material is checked against the records the last check of the conversation used (real collaboration v2 F0)', async t => {
+  const w = world(t, { candidates: [PLAN], flags: { held: true, flow: false } })
+  let next = 'real'; contextAs(w, () => next)
+  const seen = draftRequests(w)
+  await w.send(); await w.final('PostgreSQL 전환은 v16으로 다음 분기에 할 예정입니다.')
+  next = 'none'
+  const r = await w.chat.send({ clientThreadId: DM, conversationId: w.r.conversationId, profileId: A, replyDestination: 'direct', message: 'v16 맞지?', requestId: 'req-2' })
+  w.r = r; w.timing = { threadId: r.conversationId, turnId: r.runId }
+  await w.final('네, v16입니다. 따로 확인하실 일은 없습니다.')
+  assert.equal(seen.length, 2, 'the follow-up is asked about, not cut locally')
+  assert.match(seen[1].input[1].content, /PostgreSQL 이전 계획/, 'with the earlier record')
+  assert.deepEqual(w.posted().filter(([r]) => r === 'assistant').map(([, text]) => text), ['PostgreSQL 전환은 v16으로 다음 분기에 할 예정입니다.', '네, v16입니다. 따로 확인하실 일은 없습니다.'])
+  // Another conversation does not get them.
+  const other = world(t, { candidates: [PLAN], flags: { held: true, flow: false } }); contextAs(other, 'none')
+  const none = draftRequests(other)
+  await other.send(); await other.final('네, v16입니다.')
+  assert.equal(none.length, 0)
+  assert.notEqual(other.posted().filter(([r]) => r === 'assistant')[0][1], '네, v16입니다.', 'no evidence anywhere: the concrete sentence is still not confirmed (unchanged rule)')
+})
+
+test('c19: with no evidence at all, an answer that makes no concrete claim is posted as written, with no request and no added line', async t => {
+  const w = world(t, { candidates: [PLAN], flags: { held: true, flow: false } }); contextAs(w, 'none')
+  const seen = draftRequests(w)
+  await w.send(); await w.final('따로 확인하실 일은 없습니다.')
+  assert.equal(seen.length, 0)
+  assert.deepEqual(w.posted().filter(([r]) => r === 'assistant'), [['assistant', '따로 확인하실 일은 없습니다.']])
 })
