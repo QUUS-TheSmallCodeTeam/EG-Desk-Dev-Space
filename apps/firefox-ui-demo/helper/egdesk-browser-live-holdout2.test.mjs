@@ -125,3 +125,20 @@ test('c28 entry plan v2: four entry requests under 2k; the membership request sh
   assert.deepEqual(['en-ctrl-a', 'en-ctrl-b'].map(id => out.phases.find(p => p.id === id).first.handled), [false, false])
   assert.deepEqual(['en-ms', 'en-hc'].map(id => out.phases.find(p => p.id === id).first.handled), [true, true])
 })
+
+test('c29 entry plan v3: the same four entry requests under the two-predicate entry; estimate under 2.5k, ceiling 2.7k; both predicates in every request; controls stay answers, membership and hospital enter with the stand-in', async () => {
+  const plan = loadLivePlan(FAMILY_PLAN_FILES.entry3)
+  assert.equal(plan.tokenCeiling, 2700)
+  const est = await estimateLive({ plan })
+  assert.ok(est.estInputTokens < 2500 && est.stoppedBecause === null, `${est.estInputTokens} ${est.stoppedBecause}`)
+  assert.deepEqual([est.scorecard.pass, est.scorecard.hardFailures, est.scorecard.absolute, est.scorecard.softMisses], [true, [], [], []])
+  const seen = []
+  const out = await runLive({ key: KEY, send: true, fetchImpl: standIn(plan.set, seen), plan })
+  assert.ok(out.requests.length === 4 && out.requests.every(r => r.stage === 'entry'))
+  for (const body of seen) {
+    assert.equal(lintGroupedRequest({ input: body.input, questions: body.questions }).ok, true)
+    assert.deepEqual(body.questions.slice(0, 2).map(q => [q.name, q.instructions]), [['browser_entry', ENTRY_WEB_ASK], ['browser_entry_answer', ENTRY_ANSWER_ASK]])
+  }
+  assert.deepEqual(out.phases.map(p => [p.id, p.first.handled]), [['en-ms', true], ['en-ctrl-a', false], ['en-ctrl-b', false], ['en-hc', true]])
+  assert.equal(out.phases.at(-1).id, 'en-hc', 'the cheapest request last')
+})

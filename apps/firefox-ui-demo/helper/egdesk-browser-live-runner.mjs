@@ -42,7 +42,8 @@ export const FAMILY_PLAN_FILES = Object.freeze({ statement: new URL('../scripts/
   holdout2: new URL('../scripts/egdesk-browser-live-plan-holdout2.json', import.meta.url),
   stuck: new URL('../scripts/egdesk-browser-live-plan-stuck.json', import.meta.url),
   entry: new URL('../scripts/egdesk-browser-live-plan-entry.json', import.meta.url),
-  entry2: new URL('../scripts/egdesk-browser-live-plan-entry2.json', import.meta.url) })
+  entry2: new URL('../scripts/egdesk-browser-live-plan-entry2.json', import.meta.url),
+  entry3: new URL('../scripts/egdesk-browser-live-plan-entry3.json', import.meta.url) })
 // The plan sets this runner knows, with their phases in order. A phase with seed writes, before it runs and by code only, the record a
 // month-1 run writes (the same outcome layout through the same write path), so a small plan need not pay for month 1 again.
 const PLAN_SETS = Object.freeze({ 'browser-live-v2': ['month1', 'changed'], 'browser-live-recorded-v3': ['month2', 'renamed'], 'browser-live-allon-v1': ['allon'],
