@@ -583,6 +583,22 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     }
   }
 
+  // C9: hand a live binding from one run object to another (the pre-turn binding of the direct browser entry becomes the
+  // turn's run once the native turn exists). The UI keeps seeing the original runId (binding.runId); only the helper's key
+  // changes. Same owner and Chat thread are required; a closed or unknown binding is refused.
+  function adopt(fromRun, toRun) {
+    const binding = bindings.get(fromRun?.answerId)
+    if (!binding || binding.closed || closedRuns.has(fromRun.answerId) || !short(toRun?.answerId, 160) || !short(toRun?.clientThreadId, 160) ||
+        bindings.has(toRun.answerId) || pendingBindings.has(toRun.answerId) || closedRuns.has(toRun.answerId) ||
+        binding.clientThreadId !== toRun.clientThreadId || binding.ownerKey !== getOwnerKey()) {
+      reject('BROWSER_BINDING_FORBIDDEN', 'Browser binding cannot move to this run')
+    }
+    bindings.delete(fromRun.answerId)
+    bindings.set(toRun.answerId, binding)
+    return { cards: [...binding.cards.values()].map(({ cardId, profileId, accountId, permission, ui }) =>
+      ({ cardId, profileId, accountId, permission, userContextId: ui.userContextId, accountStatus: ui.accountStatus || 'unverified' })) }
+  }
+
   // Observation and wait both replace the Card's single fresh observation.
   // A pending document transition is resolved only by a new document whose
   // readback satisfies the original postcondition.
@@ -1205,5 +1221,5 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     pendingBindings.clear()
     return Promise.allSettled(pending)
   }
-  return { prepare, specs, bind, dispatch, cancelRun, reset }
+  return { prepare, specs, bind, adopt, dispatch, cancelRun, reset }
 }

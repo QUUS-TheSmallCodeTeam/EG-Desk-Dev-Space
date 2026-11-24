@@ -143,6 +143,8 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
       }
     },
     registerThread(threadId) { this.runtime.browserRegisteredThreads.add(threadId) },
+    // A pre-turn run object (quiet: true) never publishes Activity; its events belong to no run yet.
+    emit(run, ...args) { if (run?.quiet === true) return undefined; return this.runtime.emit(run, ...args) },
     async bindRun(run, prepared) {
       if (!prepared) return
       if (resetting) throw chatError('BROWSER_RESET_PENDING', 'Browser authority is still being revoked', 409)
@@ -155,7 +157,23 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
             ...(typeof selected?.sourceId === 'string' ? { sourceId: selected.sourceId } : {}),
             ...(typeof selected?.cardEpoch === 'string' ? { cardEpoch: selected.cardEpoch } : {}) }
         }) }
-        this.runtime.emit(run, 'browser.bound', run.browserBinding)
+        this.emit(run, 'browser.bound', run.browserBinding)
+      } catch (error) {
+        transport.unbindRun(run.runId)
+        const failure = classifyPublicToolError(error, { browser: true })
+        throw chatError(failure.code, failure.message, 409)
+      }
+    },
+    // C9: the direct entry's pre-turn binding (bindRun with a quiet pre-run) becomes the turn's run. Same binding, same grants.
+    async adoptRun(run, prepared, preRun) {
+      if (!prepared || !preRun) return
+      if (resetting) throw chatError('BROWSER_RESET_PENDING', 'Browser authority is still being revoked', 409)
+      transport.bindRun(run.runId, run.clientThreadId, prepared.transportId)
+      try {
+        service.adopt(preRun, run)
+        run.browserBinding = { cards: (preRun.browserBinding?.cards || []).map(card => ({ ...card })) }
+        run.adoptedFrom = preRun.runId
+        this.emit(run, 'browser.bound', run.browserBinding)
       } catch (error) {
         transport.unbindRun(run.runId)
         const failure = classifyPublicToolError(error, { browser: true })
@@ -214,20 +232,20 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
             !run.browserBinding.cards.some(item => item.cardId === result.cardId)) {
           run.browserBinding.cards.push({ cardId: result.cardId, permission: result.permission, cardEpoch: result.cardEpoch,
             openedByAgent: true, openedFrom: result.openedFrom })
-          this.runtime.emit(run, 'browser.card.opened', { callId: event.callId, cardId: result.cardId, openedFrom: result.openedFrom,
+          this.emit(run, 'browser.card.opened', { callId: event.callId, cardId: result.cardId, openedFrom: result.openedFrom,
             permission: result.permission, targetCardEpoch: result.cardEpoch, originalProviderId: this.providerId,
             namespace: event.namespace || null, bridgeEpoch: this.runtime.currentEpoch?.() ?? null }, event.callId)
         }
         if (result.status === 'card-closed' && Array.isArray(run.browserBinding?.cards)) {
           run.browserBinding.cards = run.browserBinding.cards.filter(item => item.cardId !== result.cardId)
-          this.runtime.emit(run, 'browser.card.closed', { callId: event.callId, cardId: result.cardId, originalProviderId: this.providerId,
+          this.emit(run, 'browser.card.closed', { callId: event.callId, cardId: result.cardId, originalProviderId: this.providerId,
             namespace: event.namespace || null, bridgeEpoch: this.runtime.currentEpoch?.() ?? null }, event.callId)
         }
         const selected = run.browserBinding?.cards?.find(card => card.cardId === result.cardId)
         // The route the actor reported, from a fixed set; never a success claim.
         const inputRoute = [result.dispatchReceipt?.inputRoute, result.dispatchReceipt?.clickInputRoute]
           .find(route => PUBLIC_INPUT_ROUTES.has(route))
-        this.runtime.emit(run, success ? 'browser.tool.completed' : 'browser.tool.unverified', {
+        this.emit(run, success ? 'browser.tool.completed' : 'browser.tool.unverified', {
           callId: event.callId, cardId: result.cardId, status: result.status,
           originalProviderId: this.providerId, namespace: event.namespace || null,
           bridgeEpoch: this.runtime.currentEpoch?.() ?? null,
@@ -247,7 +265,7 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
         if (run.executionPolicy?.mode === FIXTURE_BROWSER_QA) fixtureAttestations.delete(run.answerId)
         const failure = classifyPublicToolError(error, { browser: true })
         const selected = run.browserBinding?.cards?.find(card => card.cardId === event.arguments?.cardId)
-        this.runtime.emit(run, 'browser.tool.failed', { callId: event.callId, code: failure.code, cardId: selected?.cardId || null,
+        this.emit(run, 'browser.tool.failed', { callId: event.callId, code: failure.code, cardId: selected?.cardId || null,
           originalProviderId: this.providerId, namespace: event.namespace || null,
           bridgeEpoch: this.runtime.currentEpoch?.() ?? null,
           ...(selected?.sourceId ? { sourceId: selected.sourceId } : {}),
@@ -332,14 +350,14 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
       // Fence notices immediately, even while the stop RPC or UI cleanup is pending.
       cancelledBrowserRuns.add(run)
       fixtureAttestations.delete(run.answerId)
-      if (run.browserBinding?.cards?.length) this.runtime.emit(run, 'browser.cancel.requested', {
+      if (run.browserBinding?.cards?.length) this.emit(run, 'browser.cancel.requested', {
         originalProviderId: this.providerId, namespace: null, bridgeEpoch: this.runtime.currentEpoch?.() ?? null,
         cards: run.browserBinding.cards.map(({ cardId, sourceId, cardEpoch }) => ({ cardId,
           ...(sourceId ? { sourceId } : {}), ...(cardEpoch ? { targetCardEpoch: cardEpoch } : {}) })),
       })
       try { return await service.cancelRun(run) }
       catch { return [] }
-      finally { transport.unbindRun(run.runId) }
+      finally { transport.unbindRun(run.runId); if (run.adoptedFrom) transport.unbindRun(run.adoptedFrom) }
     },
     disconnect() {
       fixtureAttestations.clear()
