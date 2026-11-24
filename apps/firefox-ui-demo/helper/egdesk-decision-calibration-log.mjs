@@ -24,12 +24,13 @@ const MAX_JUDGMENTS = 64
 
 const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'browser_reflex'])
 const MODES = new Set(['advisory', 'on'])
-const QUESTIONS = new Set(['answer_type', 'time_intent', 'relevance', 'speech_axis', 'recall', 'topic_route', 'choice', 'next_step', 'page_state', 'goal_met'])
+const QUESTIONS = new Set(['answer_type', 'time_intent', 'relevance', 'speech_axis', 'speech_predicate', 'recall', 'topic_route', 'choice', 'next_step', 'page_state', 'goal_met'])
 const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed', 'none', 'act', 'hold'])
 const FORCED = new Set(['mentioned', 'mandatory'])
 const KINDS = new Set(['board', 'source', 'conversation', 'timeline', 'document'])
 const SLICES = new Set(['past', 'present', 'planned', 'hypothetical', 'unknown'])
 const AXES = new Set(['source', 'form', 'time'])
+const PREDS = new Set(['relay', 'own_observation', 'inference', 'record', 'plan', 'conditional', 'question', 'before', 'after', 'at_utterance', 'ongoing', 'anchor_stated'])
 // Schema vocabulary only. A value outside it is dropped, never stored as text.
 const VOCAB = new Set(['answer', 'browse', 'timeline_update', 'action_only', 'present', 'past', 'planned', 'what_if', 'cross_time', 'not_time_specific',
   'self_reported_observation', 'attributed_report', 'inference', 'record_based', 'unspecified', 'unknown', 'assertion', 'plan', 'conditional', 'question',
@@ -54,7 +55,7 @@ function judgment(raw) {
   if (!q || !would) return null
   const out = { q, would }
   put(out, 'top', prob(raw.top)); put(out, 'second', prob(raw.second)); put(out, 'p', prob(raw.p)); put(out, 'threshold', prob(raw.threshold))
-  put(out, 'minMargin', prob(raw.minMargin)); put(out, 'value', word(VOCAB, raw.value)); put(out, 'axis', word(AXES, raw.axis))
+  put(out, 'minMargin', prob(raw.minMargin)); put(out, 'value', word(VOCAB, raw.value)); put(out, 'axis', word(AXES, raw.axis)); put(out, 'pred', word(PREDS, raw.pred))
   put(out, 'forced', word(FORCED, raw.forced)); put(out, 'kind', word(KINDS, raw.kind)); put(out, 'slice', word(SLICES, raw.slice))
   put(out, 'seg', count(raw.seg, 5))
   return out

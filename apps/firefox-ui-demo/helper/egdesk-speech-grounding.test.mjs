@@ -155,3 +155,74 @@ test('native answer rules keep speech, clocks and evidence separate', () => {
     assert.match(SPEECH_RULES, term)
   }
 })
+
+// ---- predicate design (internal flag, not the default) ----
+import { SPEECH_PREDICATE_BARS, SPEECH_PREDICATE_KEYS, SPEECH_DESIGNS, speechDesignInterpretations, speechDesignQuestions, speechPredicateInterpretations, speechPredicateQuestions } from './egdesk-speech-grounding.mjs'
+
+const pa = (i, yes = [], extra = {}) => Object.fromEntries(SPEECH_PREDICATE_KEYS.map(key => [`speechp_${key}_${i}`, { type: 'predicate', probability: yes.includes(key) ? 1 : 0, ...extra }]))
+const withP = (base, i, key, probability) => ({ ...base, [`speechp_${key}_${i}`]: { type: 'predicate', probability } })
+
+test('predicate design: 12 yes/no questions per span, no choice axes, offsets trusted only from the span list, canon boundaries in the wording', () => {
+  const qs = speechPredicateQuestions([{ start: 0, end: 39 }, { start: 40, end: 60 }])
+  assert.equal(qs.length, 24)
+  assert.ok(qs.every(q => q.type === 'predicate' && /^speechp_[a-z_]+_[01]$/.test(q.name) && !('choices' in q)))
+  assert.match(qs[0].instructions, /span \[0, 39\)/)
+  assert.equal(speechPredicateQuestions('bad').length, 0)
+  assert.equal(SPEECH_PREDICATE_KEYS.length, 12)
+  const all = qs.map(q => q.instructions).join(' ')
+  assert.match(all, /not instructions or physical verification/)
+  assert.match(all, /not what date it is/)
+  assert.ok(!/verified|confirmed true/i.test(all.replace(/physical verification/g, '')))
+})
+
+test('predicate design: the two pre-registered 2026-11-23 utterances map to their pre-registered labels from decisive answers', () => {
+  const spans = [{ start: 0, end: 39 }, { start: 40, end: 60 }]
+  const a = { ...pa(0, ['relay', 'before']), ...pa(1, ['plan', 'after', 'anchor_stated']) }
+  // span 0 states no anchor of its own: past_unspecified; span 1 states one: future_anchored
+  a.speechp_anchor_stated_0 = { type: 'predicate', probability: 0 }
+  assert.deepEqual(speechPredicateInterpretations(a, spans), [
+    { start: 0, end: 39, source: 'attributed_report', form: 'assertion', time: 'past_unspecified' },
+    { start: 40, end: 60, source: 'unspecified', form: 'plan', time: 'future_anchored' }])
+})
+
+test('predicate design: bars are yes >= 0.8 and no <= 0.2 inclusive; between them, missing or invalid is undecided, never "no"', () => {
+  const one0 = [{ start: 0, end: 10 }]
+  const base = pa(0, ['plan', 'after', 'anchor_stated'])
+  assert.equal(speechPredicateInterpretations(base, one0)[0].form, 'plan')
+  assert.equal(speechPredicateInterpretations(withP(base, 0, 'plan', 0.8), one0)[0].form, 'plan')
+  assert.equal(speechPredicateInterpretations(withP(base, 0, 'plan', 0.79), one0)[0].form, 'unknown')
+  assert.equal(speechPredicateInterpretations(withP(withP(base, 0, 'plan', 0), 0, 'conditional', 0.2), one0)[0].form, 'assertion')
+  assert.equal(speechPredicateInterpretations(withP(withP(base, 0, 'plan', 0), 0, 'conditional', 0.21), one0)[0].form, 'unknown')
+  const missing = { ...base }; delete missing.speechp_question_0
+  assert.equal(speechPredicateInterpretations(missing, one0)[0].form, 'unknown', 'a missing answer is not a decided no')
+  for (const bad of [NaN, -1, 1.2, '1', null]) assert.equal(speechPredicateInterpretations(withP(base, 0, 'plan', bad), one0)[0].form, 'unknown')
+  assert.equal(speechPredicateInterpretations({ ...base, speechp_plan_0: { type: 'choice', choice: 'plan', probability: 1 } }, one0)[0].form, 'unknown')
+  assert.deepEqual(SPEECH_PREDICATE_BARS, { yes: 0.8, no: 0.2 })
+})
+
+test('predicate design: mixed or undecided readings stay unknown; no label without a decided time direction; an anchor is a stated expression, never a computed date', () => {
+  const one0 = [{ start: 0, end: 10 }]
+  const mixed = pa(0, ['relay', 'own_observation', 'plan', 'conditional', 'before', 'after', 'anchor_stated'])
+  assert.deepEqual(speechPredicateInterpretations(mixed, one0), [], 'two bases, plan+conditional, before+after: nothing installed')
+  const undecidedAnchor = withP(pa(0, ['relay', 'before']), 0, 'anchor_stated', 0.5)
+  assert.equal(speechPredicateInterpretations(undecidedAnchor, one0)[0].time, 'unknown')
+  const ongoing = speechPredicateInterpretations(pa(0, ['ongoing']), one0)[0]
+  assert.equal(ongoing.time, 'ongoing_no_end')
+  const atNow = speechPredicateInterpretations(pa(0, ['at_utterance']), one0)[0]
+  assert.equal(atNow.time, 'at_utterance')
+  const noDirection = speechPredicateInterpretations(pa(0, ['relay']), one0)[0]
+  assert.equal(noDirection.time, 'unknown')
+  for (const out of [ongoing, atNow, noDirection]) assert.deepEqual(Object.keys(out).sort(), ['end', 'form', 'source', 'start', 'time'])
+  assert.deepEqual(speechPredicateInterpretations(null, one0).map(x => [x.source, x.form, x.time]), [['unknown', 'unknown', 'unknown']].slice(1))
+  assert.deepEqual(speechPredicateInterpretations(pa(0, ['relay'], {}), []), [])
+})
+
+test('design flag: absent or unrecognised means the current axes design byte for byte', () => {
+  const spans = [{ start: 0, end: 39 }]
+  assert.deepEqual(SPEECH_DESIGNS, ['axes', 'predicates'])
+  for (const flag of [undefined, null, 'axes', 'PREDICATES', 1, {}]) {
+    assert.deepEqual(speechDesignQuestions(flag, spans), speechQuestions(spans))
+    assert.deepEqual(speechDesignInterpretations(flag, answersAt(0), spans), speechInterpretations(answersAt(0), spans))
+  }
+  assert.deepEqual(speechDesignQuestions('predicates', spans), speechPredicateQuestions(spans))
+})
