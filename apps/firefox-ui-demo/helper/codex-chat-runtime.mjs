@@ -754,6 +754,7 @@ function cleanNotification(method, p, engineId = 'codex') {
   return null
 }
 
+export const STOP_RECORD_WAIT_MS = 2500 // c27: how long the next send waits for a stopped command's record (the runner's kill grace is 2 s)
 const INTERNAL_WORD = /^[A-Za-z][A-Za-z0-9._:-]{0,63}$/ // an effort or a model name a caller may pick for an internal turn (the engine rejects what it does not know)
 export class CodexChatRuntime {
   constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], agentReloadReuse = false, expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null }) {
@@ -2597,7 +2598,9 @@ export class CodexChatRuntime {
     // The person saw something else than the Agent's last draft in this conversation: the Agent is told, once (consumed here).
     const postedInstead = !bounded ? this.postedInstead.get(context.clientThreadId) ?? null : null
     if (postedInstead) this.postedInstead.delete(context.clientThreadId)
-    // c26: the engine never got the result of a command the person stopped (its turn was interrupted): the next turn is told, once
+    // c26: the engine never got the result of a command the person stopped (its turn was interrupted): the next turn is told, once.
+    // c27: a message sent right after "stop" waits (bounded) until the executor has recorded the command it was stopping, so the fact is not missed
+    if (!bounded) await this.settlePendingStops(context.clientThreadId)
     const stoppedCommand = !bounded ? this.stoppedCommands.get(context.clientThreadId) ?? null : null
     if (stoppedCommand) { this.stoppedCommands.delete(context.clientThreadId); context.stoppedCommand = stoppedCommand }
     const extraContext = bounded ? {} : { ...(context.extraContext || {}), ...decisionExtra, ...channel, ...(shares.length ? { egdesk_shared_messages: sharedMessagesBlock(shares) } : {}),
@@ -6659,6 +6662,17 @@ export class CodexChatRuntime {
   // ---- c21: the conditions of the last command EG-Desk ran itself (egdesk-run-conditions.mjs via the command executor). ----
   // Kept on the run for the message evidence (the runner's own summary line backs "the tests passed"), and offered to the conversation's
   // heartbeat as flat facts (numbers, booleans, closed labels; no text), under the heartbeat's facts-only provider contract.
+  /** c27: resolves when the commands of this conversation that were told to stop have been recorded; never longer than STOP_RECORD_WAIT_MS (the kill grace is 2 s). */
+  async settlePendingStops(room) {
+    try {
+      const waits = this.toolProviders.map(provider => provider.stopSettled?.(room)).filter(Boolean)
+      if (!waits.length) return
+      let timer = null
+      await Promise.race([Promise.all(waits), new Promise(resolve => { timer = this.setTimer(resolve, STOP_RECORD_WAIT_MS) })])
+      if (timer !== null) this.clearTimer(timer)
+    } catch { /* the wait only avoids a missed note */ }
+  }
+
   noteOwnCommand(run, record) {
     try {
       if (!run || !record) return
