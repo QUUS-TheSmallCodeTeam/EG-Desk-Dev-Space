@@ -318,10 +318,12 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
     // The direct chat entry (egdesk-browser-task.mjs): same authority as the tool, but called by EG-Desk itself with
     // the user's own message as the goal. Returns the raw reflex result (outcome, steps, state), never the model text.
     // Reflex and Decisions gating is identical to the tool: mode on and a key, or nothing is called.
-    async runDirectTask(run, { cardId, goal, userContext = [], resumeState = null, maxSteps, callId }) {
+    // The account the run belongs to (history records are scoped to it).
+    currentOwnerKey() { const key = getOwnerKey(); return typeof key === 'string' && key ? key : null },
+    async runDirectTask(run, { cardId, goal, userContext = [], resumeState = null, priorRun = null, maxSteps, callId }) {
       if (!reflexEnabled(decision)) return { outcome: 'fallback', reason: 'not_configured', steps: [] }
       const scope = this.reflexScope(run, { callId: callId || 'direct-task', namespace: null }, cardId)
-      const result = await runReflex({ cardId, goal, ...(maxSteps !== undefined ? { maxSteps } : {}), userContext, resumeState,
+      const result = await runReflex({ cardId, goal, ...(maxSteps !== undefined ? { maxSteps } : {}), userContext, resumeState, priorRun,
         callTool: scope.callTool, client: scope.client, authorizeDispatch: scope.authorizeDispatch, isDecisionCurrent: scope.isDecisionCurrent })
       if (result?.outcome === 'handoff') reflexHandoffs.set(result, { run, event: { callId: callId || 'direct-task' } })
       return result

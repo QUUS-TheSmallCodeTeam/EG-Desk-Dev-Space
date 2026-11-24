@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { DecisionError, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
+import { decideHistory, hostOf, labelKey, safePath } from './egdesk-browser-task-history.mjs'
 import { choiceQuestion, compactText, decisionThresholds, readChoice, tableOptions } from './egdesk-decision-questions.mjs'
 
 // Direct chat -> objective browser entry (L8 cycle 6; JEV_INTEGRATION_SUGGESTIONS.md §2 Pillar 1, §4.3, §9.3).
@@ -32,6 +33,7 @@ export const RESUME_CONTROLS = Object.freeze({
 })
 export const MAX_TASK_STEPS = 24
 const SEGMENT_STEPS = 6
+const ASKED_CODES = new Set(['choice_needed', 'detail_needed'])
 const MAX_MESSAGE = 500
 const TTL_MS = 30 * 60 * 1000
 const MAX_TASKS = 32
@@ -69,9 +71,10 @@ export function readBrowserEntry(answers, cards, { name = 'browser_entry', thres
 const ENTRY_RULES = 'You route one user chat message for EG-Desk. Options are open browser cards the user granted plus fixed options. Pick a card only when the message asks for something to be done on a page in that card.'
 
 /** decideBrowserEntry({ message, cards, client, ... }) → readBrowserEntry result + usage. Throws DecisionError. */
-export async function decideBrowserEntry({ message, cards, client, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, signal, authorizeDispatch }) {
+export async function decideBrowserEntry({ message, cards, hints = [], client, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, signal, authorizeDispatch }) {
   const result = await client.decide({
-    input: [{ role: 'developer', content: ENTRY_RULES }, { role: 'user', content: `User message: ${compactText(message, MAX_MESSAGE)}` }],
+    input: [{ role: 'developer', content: ENTRY_RULES }, { role: 'user', content: [`User message: ${compactText(message, MAX_MESSAGE)}`,
+      ...(hints.length ? ['Earlier browser tasks on these cards (from this app):', ...hints] : [])].join('\n') }],
     questions: [entryQuestion(cards)], timeoutMs, signal, authorizeDispatch,
   })
   return { ...readBrowserEntry(result.answers, cards, { thresholds }), usage: result.usage, latencyMs: result.latencyMs }
@@ -99,7 +102,7 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = TTL_MS, maxTask
       for (const task of tasks.values()) if (task.conversationKey === conversationKey && live(task)) task.status = 'cancelled'
       while (tasks.size >= maxTasks) tasks.delete(tasks.keys().next().value)
       const task = { taskId: `bt_${randomBytes(6).toString('hex')}`, conversationKey, cardId, goal: compactText(goal, MAX_MESSAGE), status: 'running',
-        pause: null, userContext: [], state: null, steps: 0, actions: { fill: 0, navigate: 0, scroll: 0 }, segments: 0, createdAt: now(), updatedAt: now() }
+        pause: null, userContext: [], state: null, prior: null, trail: [], resolved: [], pendingAsk: null, host: '', steps: 0, actions: { fill: 0, navigate: 0, scroll: 0 }, segments: 0, createdAt: now(), updatedAt: now() }
       tasks.set(task.taskId, task)
       return task
     },
@@ -125,6 +128,15 @@ const tally = (task, result) => {
     }
   }
   task.steps += (result.steps || []).length
+  // Content-minimal trail for the next run: the label of each opened element and where, never values or queries.
+  for (const step of result.steps || []) {
+    if (!step.opened || !(step.actions || []).some(action => action.ok && action.tool === 'egdesk_browser_navigate')) continue
+    if (!task.host) task.host = hostOf(step.url)
+    const label = labelKey(step.opened.option)
+    task.trail.push({ op: 'open', label, from: safePath(step.url), to: safePath(step.opened.to) })
+    if (task.pendingAsk) { task.resolved.push({ asked: task.pendingAsk, chose: label, at: safePath(step.url) }); task.pendingAsk = null }
+  }
+  if (!task.host) task.host = hostOf(result.steps?.[0]?.url)
 }
 
 /** The one structured line the subjective model receives. Closed vocabulary, counts, and (for a choice) up to three element labels. */
@@ -142,7 +154,7 @@ export function subjectiveNote(task, { status, code, candidates = [], detail }) 
  * handle({ run, conversationKey, message, hosts? }) → { handled: false, reason } | { handled: true, status, note, taskId, resumed }
  * Gate: the provider's reflex gate (mode on + key). Off or no key: nothing is called.
  */
-export function createDirectBrowserEntry({ provider, store, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS } = {}) {
+export function createDirectBrowserEntry({ provider, store, history = null, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS } = {}) {
   if (!provider || typeof provider.runDirectTask !== 'function' || typeof provider.reflexScope !== 'function') throw new TypeError('provider must offer runDirectTask')
   const note = (key, raw) => { try { calibration?.record?.(raw) } catch { /* recording never changes behaviour */ } return key }
   const record1 = (answers, count, would, fallback) => {
@@ -158,7 +170,7 @@ export function createDirectBrowserEntry({ provider, store, calibration = null, 
     for (;;) {
       const remaining = MAX_TASK_STEPS - task.steps
       if (remaining <= 0) return finishPause(task, { kind: 'cannot_proceed', code: 'step_limit' }, null)
-      const result = await provider.runDirectTask(run, { cardId: task.cardId, goal: task.goal, userContext: task.userContext, resumeState: task.state,
+      const result = await provider.runDirectTask(run, { cardId: task.cardId, goal: task.goal, userContext: task.userContext, resumeState: task.state, priorRun: task.prior,
         maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}` })
       tally(task, result)
       task.state = record(result.state) ? result.state : task.state
@@ -168,8 +180,19 @@ export function createDirectBrowserEntry({ provider, store, calibration = null, 
     }
   }
 
+  // One content-minimal record per task (upsert by id): done, or where it got stuck. Never fatal.
+  function remember(task, run, outcome) {
+    try {
+      const ownerKey = provider.currentOwnerKey?.()
+      if (!history || !ownerKey || !task.host) return
+      history.record({ ownerKey, id: task.taskId, host: task.host, goal: task.goal, outcome, trail: task.trail, resolved: task.resolved, steps: task.steps })
+    } catch { /* history never changes the task */ }
+  }
+
   function finishPause(task, pause, result, extra = {}) {
     task.status = 'paused'; task.pause = pause; store.touch(task)
+    if (pause.kind === 'need_context' && ASKED_CODES.has(pause.code)) task.pendingAsk = pause.code
+    else remember(task, null, { status: 'stuck', code: pause.code })
     const status = pause.kind === 'need_context' ? 'need_context' : 'cannot_proceed'
     return { handled: true, status: 'paused', taskId: task.taskId,
       note: subjectiveNote(task, { status, code: pause.code, candidates: extra.candidates, detail: extra.detail }) }
@@ -179,6 +202,7 @@ export function createDirectBrowserEntry({ provider, store, calibration = null, 
     switch (result.outcome) {
       case 'done':
         task.status = 'done'; task.pause = null; store.touch(task)
+        remember(task, null, { status: 'done' })
         return { handled: true, status: 'done', taskId: task.taskId, note: subjectiveNote(task, { status: 'done' }) }
       case 'needs_user_context': return finishPause(task, { kind: 'need_context', code: 'choice_needed' }, result, { candidates: result.candidates || [] })
       case 'needs_free_text': return finishPause(task, { kind: 'need_context', code: 'detail_needed' }, result)
@@ -195,6 +219,21 @@ export function createDirectBrowserEntry({ provider, store, calibration = null, 
         return { handled: false, reason: `fallback:${result.reason || 'unavailable'}` }
       default: task.status = 'cancelled'; return { handled: false, reason: `outcome:${result.outcome}` }
     }
+  }
+
+  // History step: code enumerates permitted earlier records for this site; the Decision model picks the same task or none
+  // (no candidates means no request); the host fetches it again with the permission check. Any failure means no history.
+  async function lookupPrior({ message, ownerKey, host, gateScope }) {
+    try {
+      if (!history || !ownerKey || !host) return null
+      const found = history.candidates({ ownerKey, hosts: [host] })
+      if (!found.length) return null
+      const records = found.map(item => history.fetch({ ownerKey, hosts: [host], id: item.id })).filter(Boolean)
+      if (!records.length) return null
+      const pick = await decideHistory({ message, records, client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
+      if (!gateScope.isDecisionCurrent()) return null
+      return pick.kind === 'record' ? history.fetch({ ownerKey, hosts: [host], id: pick.id }) : null
+    } catch { return null }
   }
 
   return {
@@ -216,11 +255,14 @@ export function createDirectBrowserEntry({ provider, store, calibration = null, 
           const out = await loop(run, paused, hosts)
           return { ...out, resumed: true }
         }
-        const entry = await decideBrowserEntry({ message, cards, client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
+        const ownerKey = provider.currentOwnerKey?.() ?? null
+        const hints = history && ownerKey ? cards.map((card, i) => { const goal = card.host ? history.latestGoal({ ownerKey, host: card.host }) : null; return goal ? `[C${i + 1}] ${compactText(goal, 80)}` : null }).filter(Boolean).slice(0, 4) : []
+        const entry = await decideBrowserEntry({ message, cards, hints, client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
         if (!gateScope.isDecisionCurrent()) return { handled: false, reason: 'evidence_unavailable' }
         record1({ rows: { top: entry.ranked[0] ?? 0, second: entry.ranked[1] ?? 0, p: entry.confidence ?? 0 } }, cards.length, entry.kind === 'browser' ? 'act' : 'hold')
         if (entry.kind !== 'browser') return { handled: false, reason: entry.kind }
         const task = store.create({ conversationKey, cardId: entry.cardId, goal: message })
+        task.prior = await lookupPrior({ run, task, message, ownerKey, host: cards.find(card => card.cardId === entry.cardId)?.host, gateScope })
         return await loop(run, task, hosts)
       } catch (error) {
         record1({}, cards.length, 'hold', error instanceof DecisionError && ['timeout', 'unreachable', 'bad_response', 'budget_exceeded', 'evidence_unavailable', 'not_configured'].includes(error.code) ? error.code : null)
