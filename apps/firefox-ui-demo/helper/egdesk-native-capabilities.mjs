@@ -240,7 +240,7 @@ export function capabilitiesOf(native) {
   if (!native || typeof native !== 'object') return null
   return Object.freeze({
     version: typeof native.version === 'string' ? native.version : null,
-    dynamicTools: native.dynamicTools === true, ephemeral: native.schemaMatch === true,
+    dynamicTools: native.dynamicTools === true, qaReadOnly: native.qaReadOnly === true, ephemeral: native.schemaMatch === true,
     turnSteer: typeof native.boardPeerContract === 'string' && native.boardPeerContract.length > 0, threadDelete: native.threadDelete === true,
     boardPeerContract: typeof native.boardPeerContract === 'string' ? native.boardPeerContract : null,
     steer: typeof native.steerContract === 'string' && native.steerContract.length > 0, steerContract: typeof native.steerContract === 'string' ? native.steerContract : null,

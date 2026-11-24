@@ -1273,8 +1273,10 @@ export class CodexChatRuntime {
     catch (error) { throw this.providerFailure(error, provider) }
   }
 
-  collectToolSpecs(policy = null, { forManifest = false, browserInteraction = false, toolCeiling = null, engineId = 'codex', authority } = {}) {
+  collectToolSpecs(policy = null, { forManifest = false, browserInteraction = false, toolCeiling = null, engineId = 'codex', authority, slot } = {}) {
     const specs = [], owners = new Map(), selected = [], manifest = []
+    // the slot that runs the turn: the caller's own (the run's route), else the context authority's; never the shared slot by default for a profile run
+    const routeHint = Object.freeze({ engineId: authority?.engineId ?? engineId, engineProfileId: slot ?? authority?.engineProfileId ?? null })
     for (const [index, provider] of this.toolProviders.entries()) {
       if (!this.providerSupportsEngine(provider, engineId)) continue
       const providerId = provider === this.contexts ? 'egdesk-context-v1' : provider.providerId
@@ -1288,7 +1290,9 @@ export class CodexChatRuntime {
       if (computerTools && !forManifest && (policy !== null || !this.computerToolsAvailable())) continue
       if (this.store && provider.specs && (typeof providerId !== 'string' || !providerId)) throw chatError('INVALID_TOOL_PROVIDER', 'Durable tool providers require a stable identity', 500)
       let offered
-      try { offered = provider.specs?.(provider === this.contexts ? authority : undefined) || [] }
+      // L1 c23: the context provider reads the whole authority; every other provider gets the slot that will run the turn (engine + account profile),
+      // so its readiness is that slot's, not the shared server's
+      try { offered = provider.specs?.(provider === this.contexts ? authority : routeHint) || [] }
       catch (error) { throw this.providerFailure(error, provider) }
       if (!Array.isArray(offered)) throw chatError('INVALID_TOOL_PROVIDER', 'Tool provider returned an invalid native catalog', 500)
       for (const spec of offered) {
@@ -1868,7 +1872,7 @@ export class CodexChatRuntime {
     if (qaOutputMarkers && (body.message.includes(qaOutputMarkers[0]) || instructions.includes(qaOutputMarkers[0]))) {
       throw chatError('QA_PRIVATE_MARKER_SPOILED', 'The first QA fixture marker must be absent from model-visible request text', 400)
     }
-    if (requestedPolicy && engineId !== 'claude' && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
+    if (requestedPolicy && engineId !== 'claude' && !this.qaReady(slot)) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
     if (requestedPolicy && engineId === 'claude' && !CLAUDE_BOUNDED_POLICIES.includes(requestedPolicy)) throw chatError('QA_POLICY_UNAVAILABLE', 'Claude supports only the bounded Browser policy', 503)
     if (requestedPolicy && !this.engines.get(engineId).capabilities(slot).has('boundedQa')) throw chatError('QA_POLICY_UNAVAILABLE', 'This AI engine cannot prove bounded execution', 503)
     if (qaMarkers && requestedPolicy && requestedPolicy !== READ_ONLY_QA) throw chatError('QA_COMMAND_POLICY_REQUIRED', 'Native QA command receipt requires readOnlyQa policy', 400)
@@ -2544,7 +2548,7 @@ export class CodexChatRuntime {
           context.ceilingNotices.push({ key: 'browser-selection', axis: 'browser', title: CEILING_MESSAGES.browserDowngraded })
         }
       }
-      preparedProviders.set(provider, await this.callProvider(provider, 'prepare', { ...input, effectiveExecutionPolicy: policy }, provider === this.contexts ? contextAuthority : undefined,
+      preparedProviders.set(provider, await this.callProvider(provider, 'prepare', { ...input, effectiveExecutionPolicy: policy }, provider === this.contexts ? contextAuthority : Object.freeze({ engineId: engine.id, engineProfileId: context.route?.engineProfileId ?? contextAuthority?.engineProfileId ?? null }),
         provider === this.contexts ? { model: overrides.model || this.threads.get(context.conversationId)?.model || null,
           effort: selection.effort || this.threads.get(context.conversationId)?.effort || null } : undefined) || null)
     }
@@ -2581,7 +2585,7 @@ export class CodexChatRuntime {
     if (this.store && engine.id === 'claude' && this.engineOwnerHash(engine.id, profileId) !== context.ownerHash) {
       throw Object.assign(chatError('ACCOUNT_CHANGED', 'AI engine account changed before dispatch', 409), { definite: true })
     }
-    if (bounded && engine.id !== 'claude' && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
+    if (bounded && engine.id !== 'claude' && !this.qaReady(slot)) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
     const qaOverrides = bounded && engine.id === 'claude' ? claudeBoundedThreadOverrides(policy) : bounded ? await loadQaThreadOverrides(request, {
       threadId: context.conversationId && this.loadedThreads.has(context.conversationId) ? context.conversationId : null,
       cwd: overrides.cwd || this.threads.get(context.conversationId)?.cwd || null,
@@ -2631,14 +2635,26 @@ export class CodexChatRuntime {
       // Hydrate native history before deciding whether a new turn is safe.
       // This also supplies the historical cwd for profile-off config/read.
       const justRestored = !this.loadedThreads.has(cid)
-      if (justRestored) {
+      // Two resumes of one thread in one turn (L7 c26): this first one only hydrates history and learns the historical cwd, and the reload
+      // further below (a saved profile, a profile switch or computer control off: thread/resume cannot change a loaded thread's settings, so it
+      // is detached and resumed again with the ceiling / computer-off / own-tools overrides) hydrates it again. When that reload is certain
+      // and the cwd is already known (the send carries it, and every read of the thread's settings uses it first), this resume has nothing
+      // left to do: it is skipped, and the active-run check below runs once more after the reload, on what that resume hydrated. Without a cwd,
+      // or when no reload follows, this resume is the one that hydrates and nothing changes.
+      const reloadCertain = justRestored && !bounded && engine.id === 'codex' && (body.profileEnabled === true || body.profileEnabled === false || Boolean(context.profileRun) || computerOff)
+      const skipFirstResume = reloadCertain && Boolean(overrides.cwd)
+      if (justRestored && !skipFirstResume) {
+        // c23: a restored own-tools thread is resumed as pure as a new one (the pure switches, the isolation, EG-Desk's instructions)
         const ownRestore = ownTools ? await this.ownToolsThreadOverrides(request, neutralFolder, null, context) : null
         if (ownRestore && epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
         await this.restoreThread(cid, context.clientThreadId, ownRestore ? mergeCeilingOverrides({ ...(qaOverrides || {}) }, ownRestore) : qaOverrides || {}, { policy, beforeResume })
       }
-      if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
-        throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
+      const assertNoActiveRun = () => {
+        if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
+          throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
+        }
       }
+      assertNoActiveRun()
       if (body.profileEnabled === true || body.profileEnabled === false) {
         // Ordinary instructions come from Codex config; an engine without the
         // Codex escape hatch has none, so profile-off sends no instructions.
@@ -2685,9 +2701,10 @@ export class CodexChatRuntime {
         }
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
       }
+      if (skipFirstResume) assertNoActiveRun() // the history was hydrated by the reload above, not before it
       if (bounded) this.persistExecutionPolicy(context, cid)
     } else {
-      const nativeTools = this.collectToolSpecs(policy, { browserInteraction: browserInteractionRequested, toolCeiling: ceiling, engineId: engine.id, authority: contextAuthority })
+      const nativeTools = this.collectToolSpecs(policy, { browserInteraction: browserInteractionRequested, toolCeiling: ceiling, engineId: engine.id, authority: contextAuthority, slot })
       if (nativeTools.specs.length) overrides.dynamicTools = nativeTools.specs
       if (bounded) Object.assign(overrides, qaOverrides)
       // Ordinary Agent questions may arrive outside Plan mode. Bounded threads never ask.
@@ -3080,7 +3097,7 @@ export class CodexChatRuntime {
         const cwd = this.threadResumeCwds.get(cid)
         if (!cwd) throw Object.assign(chatError('NATIVE_CWD_UNVERIFIED', 'The original working folder was not recorded; this conversation cannot be resumed safely', 409), { definite: true })
         if (overrides.cwd && overrides.cwd !== cwd) throw Object.assign(chatError('CWD_CHANGE_UNSUPPORTED', 'A Claude conversation keeps the folder it started in; start a new conversation for another folder', 409), { definite: true })
-        currentCatalog = this.collectToolSpecs(null, { forManifest: true, engineId, authority: contextAuthority })
+        currentCatalog = this.collectToolSpecs(null, { forManifest: true, engineId, authority: contextAuthority, slot })
         verifiedTools = verifiedManifestOwners(this.threadToolManifests.get(cid), currentCatalog.manifest, currentCatalog.owners)
         if (verifiedTools.status !== 'verified') throw Object.assign(chatError('NATIVE_TOOL_MANIFEST_UNVERIFIED', 'The original tool catalog cannot be verified; start an explicit new conversation', 409), { definite: true })
         // Claude does not save dynamic tools. Reconstruct only the original
@@ -3117,7 +3134,7 @@ export class CodexChatRuntime {
       }
       if (engineId === 'codex') await this.checkContinuity(cid, clientThreadId, result, slot, turns)
       this.rememberThread(cid, result, clientThreadId)
-      currentCatalog ||= this.collectToolSpecs(null, { forManifest: true, engineId, authority: contextAuthority })
+      currentCatalog ||= this.collectToolSpecs(null, { forManifest: true, engineId, authority: contextAuthority, slot })
       verifiedTools ||= verifiedManifestOwners(this.threadToolManifests.get(cid), currentCatalog.manifest, currentCatalog.owners)
       this.threadToolOwners.set(cid, verifiedTools.owners)
       this.threadToolManifestStatus.set(cid, verifiedTools.status)
@@ -3217,7 +3234,7 @@ export class CodexChatRuntime {
     this.locks.add(cid)
     try {
       const bounded = [READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(boundPolicy)
-      if (bounded && engineId !== 'claude' && !this.qaReady()) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
+      if (bounded && engineId !== 'claude' && !this.qaReady(slot)) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
       const qaOverrides = bounded && engineId === 'claude' ? claudeBoundedThreadOverrides(boundPolicy) : bounded ? await loadQaThreadOverrides(this.scopedRequest(slot), {
         threadId: this.loadedThreads.has(cid) ? cid : null,
         cwd: this.threads.get(cid)?.cwd || null,
@@ -5222,7 +5239,9 @@ export class CodexChatRuntime {
         // c20: the finished task's status text goes into the note only where this run's models may receive Browser data
         pageTextInNote: () => { try { return this.decisionEgressFor(run).allows('page_text') === true } catch { return false } },
         // c21: the entry quotes the first lines each card shows, under the same gate
-        cardTextInEntry: () => { try { return this.decisionEgressFor(run).allows('page_text') === true } catch { return false } } })
+        cardTextInEntry: () => { try { return this.decisionEgressFor(run).allows('page_text') === true } catch { return false } },
+        // c23: with in-run messages on, a message that replaces the task is recognised (the same flag, EGDESK_INRUN_MESSAGES)
+        inRunChange: () => this.inRunMessagesOn() })
       const out = await entry.handle({ run, conversationKey: hold.key, message, hosts: hold.hosts, titles: hold.titles || {} })
       if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
     } catch { note = null; handedOff = false }
@@ -5372,7 +5391,8 @@ export class CodexChatRuntime {
         // c20: the finished task's status text goes into the note only where this run's models may receive Browser data
         pageTextInNote: () => { try { return this.decisionEgressFor(preRun).allows('page_text') === true } catch { return false } },
         // c21: the entry quotes the first lines each card shows, under the same gate
-        cardTextInEntry: () => { try { return this.decisionEgressFor(preRun).allows('page_text') === true } catch { return false } } })
+        cardTextInEntry: () => { try { return this.decisionEgressFor(preRun).allows('page_text') === true } catch { return false } },
+        inRunChange: () => this.inRunMessagesOn() })
       const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), titles: this.browserEntryTitles(body), memory, entryAnswers })
       if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
     } catch { note = null; handedOff = false }
@@ -5923,7 +5943,7 @@ export class CodexChatRuntime {
       const said = new Set(verdicts.filter(v => v.accepted && v.value === 'yes').map(v => v.name))
       const action = personDecision(said)
       if (subject) subject.derived = action
-      return this.trackFlowJob(this.decidePersonMessage(run, flow, person, action, personFacts))
+      return this.trackFlowJob(this.decidePersonMessage(run, flow, person, action, personFacts, said.has('person_change') && !said.has('person_stop')))
     }
     const facts = flow.pendingFacts, options = flow.pendingOptions ?? []
     flow.pendingFacts = null; flow.pendingOptions = null
@@ -6093,7 +6113,7 @@ export class CodexChatRuntime {
   // message); code decides (personDecision) and settles it through lane L2's settleInRunMessage: 'interrupt' (stop), 'steer' (change, and the
   // safe default for anything else or a failed judgment), or 'reply' after one checked progress reply was posted (status only). A message
   // whose round never concluded is steered at the next beat. A settle that fails leaves it pending; lane L2 carries it into the next turn.
-  async decidePersonMessage(run, flow, person, action, facts) {
+  async decidePersonMessage(run, flow, person, action, facts, judgedChange = false) {
     // Returns the closed word for the beat's record: 'model' when a reply was posted, else 'none' (what was settled is personJudged's value).
     (flow.personJudged ??= new Map()).set(person.requestId, 'deciding')
     let settled = null, posted = 'none'
@@ -6101,7 +6121,7 @@ export class CodexChatRuntime {
       posted = await this.postIntermediate(run, flow, 'reply_status', { ...facts, personMessage: person.text })
       if (posted !== 'none') settled = await this.settleInRunMessage(run, person.requestId, 'reply')
     }
-    if (settled === null && run.status === 'inProgress') settled = await this.settleInRunMessage(run, person.requestId, action === 'stop' ? 'interrupt' : 'steer')
+    if (settled === null && run.status === 'inProgress') settled = await this.settleInRunMessage(run, person.requestId, action === 'stop' ? 'interrupt' : 'steer', { judged: judgedChange === true })
     flow.personJudged.set(person.requestId, settled ?? 'none')
     return posted
   }
@@ -6143,13 +6163,14 @@ export class CodexChatRuntime {
   //      words before the new message (turn/start input). Deleting the conversation drops it.
   inRunMessagesOn() { try { return this.decisionContext?.inRunMessages?.mode?.() === 'on' } catch { return false } }
 
-  // The one working run of this conversation that can take a message now: a live native turn (not a held-open browser task), not stopping.
+  // The one working run of this conversation that can take a message now: a live native turn, or (c23) a held-open browser run whose objective loop
+  // works inside it; not a run that waits for the person's reply (that message is the reply) and not stopping.
   inRunMessageRun(clientThreadId, conversationId) {
     if (!clientThreadId) return null
     const working = [...this.runs.values()].filter(run => run.clientThreadId === clientThreadId && run.status === 'inProgress' && (!conversationId || run.conversationId === conversationId))
     if (working.length !== 1) return null
     const run = working[0], held = this.browserRunHolds.get(run)
-    return run.stopRequested || (held && held.phase !== 'turn') ? null : run
+    return run.stopRequested || (held && held.phase !== 'turn' && held.phase !== 'working') ? null : run
   }
 
   acceptInRunMessage(run, body) {
@@ -6171,13 +6192,18 @@ export class CodexChatRuntime {
     return (this.inRunMessageQueue.get(run) ?? []).filter(entry => entry.state === 'pending').map(({ requestId, text, at }) => Object.freeze({ requestId, text, at }))
   }
 
-  async settleInRunMessage(run, requestId, decision) {
+  async settleInRunMessage(run, requestId, decision, { judged = true } = {}) {
     const entry = (this.inRunMessageQueue.get(run) ?? []).find(row => row.requestId === requestId)
     if (!entry || entry.state !== 'pending' || run.status !== 'inProgress' || !['reply', 'steer', 'interrupt'].includes(decision)) return null
     if (decision === 'reply') { entry.state = 'reply'; return 'reply' }
     entry.state = 'settling'
     try {
-      if (decision === 'steer') {
+      const held = this.browserRunHolds.get(run)
+      if (decision === 'steer' && held?.phase === 'working') {
+        // c23: no native turn is live: the message changes the objective task (its goal; the next step is planned under it). Only a message the
+        // heartbeat judged a change does that; any other (an unjudged default, a judge that failed) stays pending and goes on with the person's next turn.
+        if (!judged || !this.browserTaskStore?.changeGoal(held.key, entry.text)) throw new Error('not a change of the task')
+      } else if (decision === 'steer') {
         const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId), proof = engine?.steerContract?.(slot) ?? engine?.boardPeerContract?.(slot)
         if (!proof || typeof engine.steerTurn !== 'function') throw new Error('no steer contract')
         const response = await engine.steerTurn({ threadId: run.conversationId, expectedTurnId: run.runId, clientUserMessageId: requestId,

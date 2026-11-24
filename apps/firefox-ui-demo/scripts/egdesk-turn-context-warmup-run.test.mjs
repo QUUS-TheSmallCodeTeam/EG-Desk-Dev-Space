@@ -7,17 +7,17 @@ import test from 'node:test'
 import { DECISIONS_ENDPOINT } from '../helper/egdesk-decision-client.mjs'
 import { main as runnerMain } from '../helper/egdesk-decision-real-runner.mjs'
 import { SEND_STAMP_FILE, readSendStamp, sendStampPath, stampingFetch, writeSendStamp } from '../helper/egdesk-decision-send-stamp.mjs'
-import { MIN_IDLE_MS, POINT_ORDER, WARMUP_POINTS, main, pointGate, pointPlanFile } from './egdesk-turn-context-warmup-run.mjs'
+import { KINDS, MIN_IDLE_MS, POINT_ORDER, SIZE_KIND, WARMUP_POINTS, main, pointGate, pointPlanFile } from './egdesk-turn-context-warmup-run.mjs'
 
 const KEY = 'sk-proj-' + 'k'.repeat(48)
 const home = () => mkdtempSync(path.join(tmpdir(), 'egdesk-warmup-run-'))
 const capture = () => { const out = [], err = []; return { out, err, print: l => out.push(l), printError: l => err.push(l) } }
-function mockNetwork(log = []) {
+function mockNetwork(log = [], tokens = 900) {
   return async (url, init) => {
     const body = JSON.parse(Buffer.from(init.body).toString('utf8'))
     log.push({ url, questions: body.questions.length, auth: init.headers.authorization })
     return { status: 200, headers: { get: n => (n === 'openai-processing-ms' ? '210' : null) },
-      json: async () => ({ model: 'gpt-6-luna', usage: { input_tokens: 900, output_tokens: 0 }, answers: body.questions.map(q => ({ name: q.name, type: q.type, ...(q.type === 'predicate' ? { probability: 0.1 } : {}) })) }) }
+      json: async () => ({ model: 'gpt-6-luna', usage: { input_tokens: tokens, output_tokens: 0 }, answers: body.questions.map(q => ({ name: q.name, type: q.type, ...(q.type === 'predicate' ? { probability: 0.1 } : {}) })) }) }
   }
 }
 const transportOf = fetch => () => ({ fetch, warm: () => false, close: () => {} })
@@ -155,4 +155,38 @@ test('every measurement script that reads --send (outside comments) writes the s
   }
   // the generic runner and the point runner themselves
   assert.match(readFileSync(path.join(dir, '..', 'helper', 'egdesk-decision-real-runner.mjs'), 'utf8'), /stampingFetch\(network/)
+})
+
+test('--set size: the two body-size points use the same 10-minute rule, their own results file and their own reading', async () => {
+  const h = home(), env = { HOME: h, OPENAI_API_KEY: KEY }, stampFile = path.join(h, SEND_STAMP_FILE), resultsFile = path.join(h, 'turn-context-warmup-size-results.json')
+  try {
+    assert.deepEqual(SIZE_KIND.order, ['S1', 'S2']); assert.equal(KINDS.size, SIZE_KIND); assert.match(pointPlanFile('S1', SIZE_KIND), /turn-context-warmup-size\/S1-small\/plan\.json$/)
+    let clock = Date.parse('2026-11-25T03:00:00Z')
+    const now = () => clock, log = [], opts = io => ({ env, now, createTransport: transportOf(mockNetwork(log, 200)), sleep: async ms => { clock += ms }, ...io })
+    // the six points' names are not size points, and the other way round
+    let io = capture(); assert.equal(await main(['--set', 'size', '--point', 'A1'], opts(io)), 4); assert.match(JSON.parse(io.out[0]).why, /unknown point A1 \(one of S1 S2\)/)
+    io = capture(); assert.equal(await main(['--point', 'S1'], opts(io)), 4); assert.match(JSON.parse(io.out[0]).why, /unknown point S1/)
+    io = capture(); assert.equal(await main(['--set', 'other', '--status'], opts(io)), 2)
+    // no stamp: refused; 9 minutes: refused; 10 minutes: allowed, with a note that the six warm-up points are not in
+    io = capture(); assert.equal(await main(['--set', 'size', '--point', 'S1', '--send'], opts(io)), 4); assert.equal(log.length, 0)
+    await main(['--stamp-now'], opts(capture())); clock += 9 * 60_000
+    io = capture(); assert.equal(await main(['--set', 'size', '--point', 'S1', '--send'], opts(io)), 4); assert.equal(log.length, 0)
+    clock += 60_000
+    io = capture(); assert.equal(await main(['--set', 'size', '--point', 'S1'], opts(io)), 0); const dry = JSON.parse(io.out[0]); assert.equal(dry.allowed, true); assert.match(dry.note2, /only 0 of the 6 warm-up points are in/)
+    io = capture(); assert.equal(await main(['--set', 'size', '--point', 'S1', '--send'], opts(io)), 0)
+    assert.equal(log.length, 2); assert.ok(log.every(r => r.url === DECISIONS_ENDPOINT))
+    const r1 = JSON.parse(readFileSync(resultsFile, 'utf8'))
+    assert.equal(r1.set, 'turn-context-warmup-size-v1'); assert.deepEqual(Object.keys(r1.points), ['S1']); assert.equal(r1.points.S1.results.measured.waitedMs, 1000); assert.equal(statSync(resultsFile).mode & 0o777, 0o600)
+    assert.match(readSendStamp(stampFile).runner, /^warmup-run S1/)
+    // the six-point results file is untouched, and S2 again needs 10 minutes
+    assert.throws(() => readFileSync(path.join(h, 'turn-context-warmup-results.json')))
+    io = capture(); assert.equal(await main(['--set', 'size', '--point', 'S2', '--send'], opts(io)), 4)
+    clock += MIN_IDLE_MS
+    io = capture(); assert.equal(await main(['--set', 'size', '--point', 'S2', '--send'], opts(io)), 0)
+    io = capture(); await main(['--set', 'size', '--analyze'], opts(io))
+    const an = JSON.parse(io.out.join('')); assert.deepEqual(an.points, ['S1', 'S2']); assert.ok(an.reading.length > 0 && an.reading !== 'incomplete')
+    io = capture(); await main(['--set', 'size', '--status'], opts(io)); assert.equal(JSON.parse(io.out.join('')).complete, true)
+    // a size results file is not a warm-up results file
+    io = capture(); assert.equal(await main(['--status', '--results', resultsFile], opts(io)), 2)
+  } finally { rmSync(h, { recursive: true, force: true }) }
 })

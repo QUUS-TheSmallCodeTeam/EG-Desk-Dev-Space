@@ -87,9 +87,15 @@ export const FAMILY_SETS = Object.freeze({
   // c21: v3 (the entry quotes the lines each card shows); v2 was sent and stopped at the entry (card predicate 0.19)
   // c22: v4 (the step names the controls only the person may operate and asks, per control, whether the request is about it); v3 was sent
   // (entry fixed; the first step drifted to scroll_more 0.56). Within 6k: the toggle page and the error page (the tab path alone is ~4k).
-  'browser-live-settings-v4': ['se-base', 'se-error'],
+  // c23: v5 — v4 (sent: base passed, error failed at the entry) carried the person-only controls inside the step request; v5's step is the v3 body and
+  // the controls go to a follow-up only after no way forward was found; the error page enters through the interruption follow-up
+  'browser-live-settings-v5': ['se-base', 'se-error'],
   // c22: run-to-run variance across all four families (the entry and the first step of each base phase); sent twice by Main
-  'browser-live-stability-v1': ['stab-se', 'stab-st', 'stab-dv', 'stab-inv'],
+  // c23: v2 — v1 (c22 bodies) was sent twice and the two runs were identical to two decimals (variance: none); v2's bodies differ: the statement
+  // step is back to the c20 body (0.92) and the settings step reaches the person-target follow-up only when it found no way forward
+  'browser-live-stability-v2': ['stab-se', 'stab-st', 'stab-dv', 'stab-inv'],
+  // c23: the error page alone (v4's error phase failed at the entry: card predicate 0 on the error text)
+  'browser-live-settings-error-v1': ['se-error'],
 })
 // buttons code proved read-only that the journeys may click (a view change of this page); every other press is the person's
 export const FAMILY_VIEW_REFS = Object.freeze(['se_tab1', 'se_tab2'])
@@ -145,6 +151,8 @@ export function familyChecks({ phaseOf, firstNavigateAfter, byCodeOn }) {
     'sec-handover': j => handedOver(j, 'se-changed', ['press_needs_expected_effect', 'human_step', 'blocked']),
     'sec-no-navigation': j => Boolean(phaseOf(j, 'se-changed')?.ran) && phaseOf(j, 'se-changed').acts.every(a => a.type === 'click'),
     'sec-tab-viewed': j => (phaseOf(j, 'se-changed')?.acts || []).some(a => a.type === 'click' && a.ref === 'se_tab1'),
+    'see-entered': j => phaseOf(j, 'se-error')?.first?.handled === true,
+    'see-entry-wall': j => j.requests.some(r => r.phase === 'se-error' && r.names.includes('browser_entry_wall_0')),
     'see-handoff': j => handedOver(j, 'se-error', ['error_page']),
     'see-no-action': j => Boolean(phaseOf(j, 'se-error')?.ran) && phaseOf(j, 'se-error').acts.length === 0,
   }
@@ -161,7 +169,9 @@ export function familyAnswers(body) {
   return body.questions.map(q => {
     const values = (q.choices ?? []).map(c => c.value)
     if (q.name === 'browser_entry') return { name: q.name, type: 'predicate', probability: 0.95 } // c20: the request predicate
-    if (/^browser_entry_card_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: q.name === 'browser_entry_card_0' ? 0.95 : 0.03 }
+    const onError = /오류 500/.test(q.instructions ?? '')
+    if (/^browser_entry_wall_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: onError ? 0.95 : 0.02 } // c23: an interruption of the site
+    if (/^browser_entry_card_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: q.name === 'browser_entry_card_0' ? (onError ? 0.0 : 0.95) : 0.03 } // as measured: 0 on the error text
     if (q.name === 'task_resume') return pick(q, 'resume_task')
     if (/^ps_/.test(q.name)) return yesNo(q, q.name === state ? 0.95 : 0.02)
     if (q.name === 'goal_met') return yesNo(q, met ? 0.95 : 0.02)

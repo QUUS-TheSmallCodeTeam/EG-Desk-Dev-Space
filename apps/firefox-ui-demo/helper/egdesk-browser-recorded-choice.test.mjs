@@ -202,3 +202,15 @@ test('the general memory packet is step evidence only when no record was parsed 
   const withRecord = await run(prior())
   assert.doesNotMatch(withRecord, /Stored memory|거래처 포털 메모/); assert.match(withRecord, /History \(earlier run of this task/)
 })
+
+test('c23: after the person changed the request the recorded choice is checked under the NEW goal: it is not the recorded request, so code does not take the record (the step is asked), unless the change itself names the recorded choice', async () => {
+  const { createBrowserTaskStore } = await import('./egdesk-browser-task.mjs')
+  const store = createBrowserTaskStore(), task = store.create({ conversationKey: 'dm', cardId: 'card', goal: GOAL })
+  const options = buildReflexCandidates(page(BASE)).options
+  assert.equal(recordedChoice(prior(), page(BASE), options, { goal: task.goal }).kind, 'one', 'the original request: code takes the recorded business')
+  store.changeGoal('dm', '아 그거 말고 지난 달 걸로')
+  assert.match(task.goal, /Update from the person while the task ran/)
+  assert.equal(recordedChoice(prior(), page(BASE), options, { goal: task.goal }), null, 'a changed request is not the recorded one: the step is asked (History lines stay evidence)')
+  store.changeGoal('dm', '987-65-43210 쪽으로')
+  assert.equal(recordedChoice(prior(), page(BASE), options, { goal: task.goal }).kind, 'one', 'the change names the recorded business (its number): code takes it')
+})

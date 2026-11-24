@@ -276,7 +276,7 @@ export function createAnnotationToolProvider({ schemaReady = () => true, now = D
   return {
     providerId: ANNOTATION_PROVIDER_ID,
     runtime: null,
-    specs() { return schemaReady() ? ANNOTATION_TOOL_SPECS : [] },
+    specs(route) { return schemaReady(route) ? ANNOTATION_TOOL_SPECS : [] },
     dispatch(run, event) {
       // The same native call delivered twice publishes once.
       const key = `${run?.answerId ?? ''}/${event?.callId ?? ''}`

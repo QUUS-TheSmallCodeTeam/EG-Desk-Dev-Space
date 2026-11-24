@@ -346,9 +346,9 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
   const notify = (method, params) => chat.handleNotification({ method, params })
   // The scripted subjective engine on a PRIVATE fork: it words one short message, or fills the briefing guide it was handed.
   const forkText = prompt => {
-    forkPrompts.push({ step, prompt })
+    forkPrompts.push({ step, prompt, at: clock })
     if (/Design guide \(decided/.test(prompt)) return typeof state.fill === 'function' ? state.fill(prompt) : null
-    if (/^Here is your draft answer/.test(prompt)) return state.wording.revise ?? '앞에서 확인한 내용 기준으로, A사 견적은 요청을 받은 뒤 첫 견적서를 보냈고 수정본은 팀장 승인 뒤 보낼 예정입니다.'
+    if (/^Here is your draft answer/.test(prompt)) return (typeof state.wording.revise === 'function' ? state.wording.revise(prompt) : state.wording.revise) ?? '앞에서 확인한 내용 기준으로, A사 견적은 요청을 받은 뒤 첫 견적서를 보냈고 수정본은 팀장 승인 뒤 보낼 예정입니다.'
     if (/on the desk/.test(prompt)) { const pointer = typeof state.wording.pointer === 'function' ? state.wording.pointer(prompt) : state.wording.pointer; return pointer ?? '결과는 지금 보고 계신 곳 왼쪽 작업 영역에 있습니다. 확인이 필요합니다.' }
     if (/ask the person|need one piece of information/.test(prompt)) return state.wording.ask ?? null
     if (/unusually long/.test(prompt)) return state.wording.stalled ?? null

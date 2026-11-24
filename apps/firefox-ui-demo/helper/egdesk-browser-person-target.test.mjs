@@ -23,14 +23,19 @@ async function step(answers, snapshot = SNAP) {
 const base = (extra = {}) => ({ next_step: REAL_NEXT, ...pageStateAnswers('content', 0.98), goal_met: { type: 'predicate', probability: 0.02 }, ...extra })
 const P = p => ({ type: 'predicate', probability: p })
 
-test('the step names the controls only the person may operate and asks one predicate per control, each quoting that control alone', async () => {
+test('the FIRST step request carries nothing about the person-only controls (the v3 body, byte for byte); when it found no way forward a follow-up names them and asks one predicate per control, each quoting that control alone', async () => {
   const { sent } = await step(() => base())
-  const req = sent[0]
+  assert.equal(sent.length, 2, 'the step request, then the follow-up')
+  assert.doesNotMatch(sent[0].input[1].content, /only the person may operate/)
+  assert.equal(sent[0].questions.some(q => q.name.startsWith('person_target')), false)
+  const req = sent[1]
   assert.match(req.input[1].content, /\n\nControls on this page that only the person may operate \(they are never options here\): "마케팅 정보 알림" \(switch, now "on"\) \/ "보안 알림" \(switch, now "on"\)$/)
-  assert.deepEqual(req.questions.filter(q => q.name.startsWith('person_target')).map(q => q.instructions),
+  assert.deepEqual(req.questions.map(q => q.instructions),
     ['Is this control, "마케팅 정보 알림" (switch, now "on"), the one this request asks to change?', 'Is this control, "보안 알림" (switch, now "on"), the one this request asks to change?'])
-  assert.ok(req.questions.find(q => q.name === 'next_step').choices.every(c => !/마케팅|보안 알림/.test(c.value)), 'never an option')
   assert.equal(lintGroupedRequest({ input: req.input, questions: req.questions }).ok, true)
+  // a confident next step never reaches the follow-up (the statement case: 조회 at 0.92 stays as measured before the controls were carried)
+  const link = await step(() => base({ next_step: { type: 'choice', choice: '[L1] 계정 정보', confidence: 0.95, probabilities: [{ value: '[L1] 계정 정보', probability: 0.96 }] } }))
+  assert.deepEqual([link.sent.length, link.acts.length > 0], [1, true], 'one request: the decided link is taken, no follow-up')
 })
 
 test('real replay: with next_step scroll_more 0.56, a decided yes on the marketing toggle makes the step the person\'s (human_step, the control named), nothing acted', async () => {

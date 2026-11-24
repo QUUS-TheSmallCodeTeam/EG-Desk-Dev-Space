@@ -83,12 +83,12 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
     // Card ids, observation ids, element refs and receipts are never touched.
     workingMemory: Object.freeze(Object.fromEntries(['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_wait']
       .map(name => [name, Object.freeze({ kind: 'page', jsonTextArray: Object.freeze(['snapshot', 'text']) })]))),
-    prepare(body) {
+    prepare(body, route) {
       const selectedSources = body.selectedSources ?? []
       if (!Array.isArray(selectedSources)) throw chatError('INVALID_BROWSER_SELECTION', 'Browser selection must be an array', 400)
       if (body.effectiveExecutionPolicy === FIXTURE_BROWSER_QA && !selectedSources.length) throw chatError('BROWSER_FIXTURE_REQUIRED', 'Fixture Browser QA requires one selected local Card', 400)
       if (!selectedSources.length) return null
-      if (!schemaReady()) throw chatError('BROWSER_TOOLS_UNAVAILABLE', 'Native Browser tool contract is not verified', 503)
+      if (!schemaReady(route)) throw chatError('BROWSER_TOOLS_UNAVAILABLE', 'Native Browser tool contract is not verified', 503)
       if (resetting) throw chatError('BROWSER_RESET_PENDING', 'Browser authority is still being revoked', 409)
       const policy = body.effectiveExecutionPolicy
       if (![READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(policy)) throw chatError('BROWSER_POLICY_REQUIRED', 'Browser tools require an explicit bounded native execution policy', 409)
@@ -138,8 +138,8 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
     // Advertise available specs; runtime narrows the original native catalog
     // using its safety envelope and first explicit selection. A later send
     // cannot expand that catalog. Per-run UI binding remains actual authority.
-    specs() {
-      if (!schemaReady()) return []
+    specs(route) {
+      if (!schemaReady(route)) return []
       return reflexEnabled(decision) ? [...BROWSER_TOOL_SPECS, BROWSER_REFLEX_TOOL_SPEC] : BROWSER_TOOL_SPECS
     },
     requireThread(threadId, prepared) {
@@ -345,10 +345,10 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
     // Reflex and Decisions gating is identical to the tool: mode on and a key, or nothing is called.
     // The account the run belongs to (history records are scoped to it).
     currentOwnerKey() { const key = getOwnerKey(); return typeof key === 'string' && key ? key : null },
-    async runDirectTask(run, { cardId, goal, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, maxSteps, callId, onStep = null, today = null }) {
+    async runDirectTask(run, { cardId, goal, userContext = [], resumeState = null, priorRun = null, memoryPacket = null, maxSteps, callId, onStep = null, today = null, signal = undefined }) {
       if (!reflexEnabled(decision)) return { outcome: 'fallback', reason: 'not_configured', steps: [] }
       const scope = this.reflexScope(run, { callId: callId || 'direct-task', namespace: null }, cardId)
-      const result = await runReflex({ cardId, goal, ...(maxSteps !== undefined ? { maxSteps } : {}), userContext, resumeState, priorRun, memoryPacket, onStep, ...(today ? { today } : {}),
+      const result = await runReflex({ cardId, goal, ...(maxSteps !== undefined ? { maxSteps } : {}), userContext, resumeState, priorRun, memoryPacket, onStep, ...(today ? { today } : {}), ...(signal ? { signal } : {}),
         callTool: scope.callTool, client: scope.client, authorizeDispatch: scope.authorizeDispatch, isDecisionCurrent: scope.isDecisionCurrent })
       if (result?.outcome === 'handoff') reflexHandoffs.set(result, { run, event: { callId: callId || 'direct-task' } })
       return result

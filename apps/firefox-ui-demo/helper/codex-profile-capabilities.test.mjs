@@ -12,7 +12,7 @@ import { buildCodexAppServerLaunch, capabilitiesOf, createNativeCapabilityCache,
 const A = 'codex-11111111', B = 'codex-22222222'
 const PROOF = 'a'.repeat(64)
 // what inspectNativeCapabilities returns for a build: A's binary has everything, B's only dynamic tools
-const BINARIES = { '/bin/codex-a': { executable: '/bin/codex-a', version: '0.162.1', schemaMatch: true, dynamicTools: true, boardPeerContract: PROOF, threadDelete: true },
+const BINARIES = { '/bin/codex-a': { executable: '/bin/codex-a', version: '0.162.1', schemaMatch: true, dynamicTools: true, qaReadOnly: true, boardPeerContract: PROOF, threadDelete: true },
   '/bin/codex-b': { executable: '/bin/codex-b', version: '0.150.0', schemaMatch: false, dynamicTools: false, boardPeerContract: null, threadDelete: false } }
 
 function rig({ env = { PATH: '/system/bin', HOME: '/user' }, sharedDelete = false, inspectLog = [], probe = null, signedOut = [] } = {}) {
@@ -47,8 +47,8 @@ test('(b) each profile server reports the capabilities of its OWN binary; the sh
   for (const sharedDelete of [true, false]) {
     const { pool, adapter } = rig({ sharedDelete })
     await adapter.ensureReady(A); await adapter.ensureReady(B)
-    assert.deepEqual({ ...pool.capabilities(A) }, { version: '0.162.1', dynamicTools: true, ephemeral: true, turnSteer: true, threadDelete: true, boardPeerContract: PROOF, executable: '/bin/codex-a' })
-    assert.deepEqual({ ...pool.capabilities(B) }, { version: '0.150.0', dynamicTools: false, ephemeral: false, turnSteer: false, threadDelete: false, boardPeerContract: null, executable: '/bin/codex-b' })
+    assert.deepEqual({ ...pool.capabilities(A) }, { version: '0.162.1', dynamicTools: true, qaReadOnly: true, ephemeral: true, turnSteer: true, threadDelete: true, boardPeerContract: PROOF, steer: false, steerContract: null, executable: '/bin/codex-a' })
+    assert.deepEqual({ ...pool.capabilities(B) }, { version: '0.150.0', dynamicTools: false, qaReadOnly: false, ephemeral: false, turnSteer: false, threadDelete: false, boardPeerContract: null, steer: false, steerContract: null, executable: '/bin/codex-b' })
     assert.equal(adapter.boardPeerContract(A), PROOF, 'the steer proof is the binary\'s own, not the shared one')
     assert.equal(adapter.boardPeerContract(B), null, 'another build: no steer proof, whatever the shared server has')
     assert.equal(adapter.boardPeerContract('codex-default'), 'e'.repeat(64), 'the shared slot answers from the shared server\'s own contract: a separate answer')
@@ -63,7 +63,7 @@ test('(b) each profile server reports the capabilities of its OWN binary; the sh
 
 test('(b) a profile that is not ready claims nothing; a failed probe claims nothing and borrows no shared contract; without a probe configured the legacy hook is unchanged', async () => {
   const { pool, adapter } = rig()
-  assert.deepEqual({ ...pool.capabilities(A) }, { version: null, dynamicTools: false, ephemeral: false, turnSteer: false, threadDelete: false, boardPeerContract: null, executable: null })
+  assert.deepEqual({ ...pool.capabilities(A) }, { version: null, dynamicTools: false, qaReadOnly: false, ephemeral: false, turnSteer: false, threadDelete: false, boardPeerContract: null, steer: false, steerContract: null, executable: null })
   assert.equal(adapter.threadDeleteSupported(A), false)
   const legacy = rig({ probe: () => { throw new Error('probe failed') } })
   await legacy.adapter.ensureReady(A)

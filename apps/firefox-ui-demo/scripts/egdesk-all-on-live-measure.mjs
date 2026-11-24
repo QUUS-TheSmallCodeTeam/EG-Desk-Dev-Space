@@ -44,7 +44,10 @@ export const PLAN_FILE_V4 = fileURLToPath(new URL('./egdesk-all-on-live-measure.
 export const PLAN_FILE_V5 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v5.json', import.meta.url))
 // Plan v6 (cycle 17): v5, plus the in-run nudge step (EGDESK_INRUN_MESSAGES on in the world) and L7's turn-memory side in the switch.
 export const PLAN_FILE_V6 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v6.json', import.meta.url))
-export const LATEST_PLAN_FILE = PLAN_FILE_V6
+// Plan v7 (cycle 20): v6, plus a change nudge and a stop nudge (the engine side judged by code), a faithful revision wording for s3b and the
+// elapsed-time check of the nudge reply prompt. The latest plan.
+export const PLAN_FILE_V7 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v7.json', import.meta.url))
+export const LATEST_PLAN_FILE = PLAN_FILE_V7
 export const SCRIPT_FILE = fileURLToPath(import.meta.url)
 export const DEFAULT_CAPS = Object.freeze({ tokenCeiling: 80_000, maxRequests: 80 })
 const LIMITS = Object.freeze({ tokenCeilingMax: 200_000, maxRequestsMax: 200 })
@@ -55,7 +58,7 @@ const CLIENT = 'helper/egdesk-decision-client.mjs', SUPPORT = 'scripts/egdesk-al
 // ---- the journey: what the person says, and the scripted subjective model ----
 export const SAYS = Object.freeze({ quote: '지난주 A사 견적 건 어디까지 됐지?', tidy: '방금 그 내용 정리해줘', tests: '전체 테스트 돌리고 결과 알려줘',
   recall: 'PostgreSQL 전환은 설계에서 어떻게 하기로 정했었지?', deployed: 'PostgreSQL 마이그레이션 배포 끝났어', portal: '거래처 포털에서 이번 달 세금계산서 내려받아줘', second: '두 번째 사업자로',
-  nudge: '아니 지금 왜 멈췄니?' }) // nudge: the person's real turn in L3's c25 evidence (a message typed while the command runs)
+  nudge: '아니 지금 왜 멈췄니?', change: '그거 말고 B부터 해줘', stop: '그만해, 그거 하지 마', again: '전체 테스트 한 번 더 돌려줘' }) // nudge: the person's real turn in L3's c25 evidence (a message typed while the command runs)
 const AGENT_SAYS = Object.freeze({ quote: 'A사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다.', tidy: 'A사 견적은 11월 3일 요청, 11월 6일 v1 발송, v2는 팀장 승인 후 발송 예정입니다.',
   recall: 'PostgreSQL 전환 설계에서 스키마 변환, 데이터 이관, 롤백 순서를 정하기로 확정했습니다.', tests: '테스트가 모두 통과했습니다.', noted: '네, 기록해 두겠습니다.', heard: '네, 알겠습니다.', ask: '사업자가 둘입니다. 어느 쪽으로 받을까요?', got: '세금계산서를 내려받았습니다.', stuck: '포털 작업을 마치지 못했습니다.',
   stuckAsk: '포털에서 다음 단계를 정하지 못했습니다. 어느 사업자의 세금계산서를 받을지 알려 주세요.' })
@@ -88,6 +91,15 @@ const carriesRecordingRule = w => Object.hasOwn(w.turnStarts().at(-1)?.params?.a
 export const pointerNote = prompt => (/is ready for them to look at/.test(prompt) ? '결과는 지금 보고 계신 곳 왼쪽 작업 영역에 있습니다.' : null)
 // L3 c22: the scripted writer also answers the heartbeat's in-run reply prompt (the person asked, while the work runs, what is happening): it
 // words that answer from the facts given, as a model would, and not as the wait note it already wrote.
+// (cycle 20) What a model does with the revision prompt (egdesk-draft-check.mjs): keep the draft's sentences that were not listed, and restate each
+// listed one with the status the material gives. Scripted here without inventing content: a listed sentence is kept as the material's own record
+// ("기록에 따르면 ..."), so the answer stays about what the person asked. Used only when the plan says world.wording "faithful".
+export const faithfulRevision = prompt => {
+  const draft = /^Here is your draft answer to the person's last message:\n\n([\s\S]*?)\n\nBefore posting/.exec(prompt)?.[1]
+  if (!draft) return null
+  const listed = [...prompt.matchAll(/^- "(.*)": /gm)].map(m => m[1])
+  return sentencesOf(draft).map(s => (listed.includes(s) ? `기록에 따르면 ${s}` : s)).join(' ')
+}
 export const waitNote = prompt => (/The person just wrote, while you work/.test(prompt) ? (/a command is still running/.test(prompt) ? '멈춘 게 아니라 명령이 아직 실행 중이에요. 끝나는 대로 알려 드릴게요.' : null)
   : /a command is still running/.test(prompt) ? '명령이 아직 실행 중이라 조금 더 걸리고 있어요.' : null)
 // The result card needs its owner, who looks elsewhere; a second member is on the desk. The request body is the chrome builder's (attentionRequest),
@@ -118,6 +130,7 @@ export const STEPS = Object.freeze([
     w.presenceMirror.accept(people())
     await j.say(SAYS.tests)
     if (!running(w)) return
+    j.note.runStartAt = w.at() // virtual clock at the person's first message of this run (the elapsed-time check of cycle 20)
     const timing = w.timing(); j.note.command = timing
     await w.advance(1000)
     await w.notify('item/started', { ...timing, item: { id: 'cmd-1', type: 'commandExecution', command: COMMAND, cwd: '/work', status: 'inProgress', commandActions: [] } })
@@ -129,6 +142,16 @@ export const STEPS = Object.freeze([
   { id: 's4n-nudge', room: DM, since: 6, title: 'the person asks why it stopped while the command runs', run: async (w, j) => {
     if (!j.note.command || !running(w)) return
     await j.say(SAYS.nudge, { inRunMessageTo: w.runs().at(-1).runId })
+    await w.advance(5000)
+  } },
+  // (cycle 20) Five seconds after the status nudge, still in the same running command, the person changes the task. The Decision model reads the message (real model in
+  // a real run); the engine side is judged by code: the message is steered into the working turn, nothing is posted for it, the command goes on.
+  { id: 's4c-change-nudge', room: DM, since: 7, title: 'the person changes the task while the command runs', run: async (w, j) => {
+    if (!j.note.command || !running(w)) return
+    // The heartbeat asks the Decision model at most once per 10 s (askGapMs): the status nudge was judged about 5 s ago, so wait it out; a message
+    // sent sooner is judged at a later beat (reported in the c20 notes), which is not what this step measures.
+    await w.advance(5500)
+    await j.say(SAYS.change, { inRunMessageTo: w.runs().at(-1).runId })
     await w.advance(5000)
   } },
   { id: 's5-silence', room: DM, title: 'the command ends; forty seconds without engine events', run: async (w, j) => {
@@ -145,6 +168,21 @@ export const STEPS = Object.freeze([
   { id: 's9-status-remark', room: DM, title: 'a status remark', run: async (w, j) => { await j.say(SAYS.deployed); await w.advance(2000); await agentSays(w, carriesRecordingRule(w) ? AGENT_SAYS.heard : AGENT_SAYS.noted, j); await j.pause() } },
   { id: 's10-browser-task', room: BROWSER_ROOM, title: 'a browser task in a conversation of its own', run: async (w, j) => { w.use(BROWSER_ROOM); await j.say(SAYS.portal, w.browserExtra()); await agentAnswersTask(w, j) } },
   { id: 's11-browser-reply', room: BROWSER_ROOM, title: 'the person answers the task question', run: async (w, j) => { w.use(BROWSER_ROOM); await j.say(SAYS.second, w.browserExtra()); await agentAnswersTask(w, j); await j.pause() } },
+  // (cycle 20) A second long command in the DM; ten seconds in the person says stop. The Decision model reads the message; by code the engine got the
+  // interrupt for that turn (and no steer), and the scripted engine ends the turn as interrupted, as the real engine did within ~30 ms of turn/interrupt.
+  { id: 's12-stop-nudge', room: DM, since: 7, title: 'a second long command; the person says stop', run: async (w, j) => {
+    w.use(DM)
+    await j.say(SAYS.again)
+    if (!running(w)) return
+    const timing = w.timing(); j.note.stopRun = { ...timing, startAt: w.at() }
+    await w.advance(1000)
+    await w.notify('item/started', { ...timing, item: { id: 'cmd-2', type: 'commandExecution', command: COMMAND, cwd: '/work', status: 'inProgress', commandActions: [] } })
+    await w.notify('item/commandExecution/outputDelta', { ...timing, itemId: 'cmd-2', delta: `${COMMAND_OUTPUT}\n` })
+    await w.advance(9000)
+    await j.say(SAYS.stop, { inRunMessageTo: w.runs().at(-1).runId })
+    await w.advance(5000)
+    if (w.interruptsIn('s12-stop-nudge') > 0) { await w.endTurn('interrupted'); await w.advance(1000) }
+  } }
 ])
 
 // ---- the plan (pre-registered expectations) ----
@@ -191,7 +229,10 @@ export function loadJourneyPlan(file = PLAN_FILE) {
         Object.entries(sw.env).some(([k, v]) => !/^EGDESK_[A-Z_]+$/.test(k) || typeof v !== 'string')) bad(`world.switches.${name}: needs default "off", an owner and EGDESK_* flags`)
     switches[name] = { env: { ...sw.env }, owner: sw.owner }
   }
-  return { set: raw.set, registered: raw.registered, sha256: sha256(bytes), version: Number.isSafeInteger(raw.version) ? raw.version : 1, world: { env: { ...env }, budgets: raw.world?.budgets ?? 'single', switches }, steps }
+  // (cycle 20) world.wording "faithful": the scripted revision of a checked draft keeps the draft's own sentences and only restates the listed ones
+  // (what the revision prompt asks of a model), instead of the fixed A사 sentence of the earlier plans.
+  if (raw.world?.wording !== undefined && raw.world.wording !== 'faithful') bad('world.wording must be "faithful" when given')
+  return { set: raw.set, registered: raw.registered, sha256: sha256(bytes), version: Number.isSafeInteger(raw.version) ? raw.version : 1, world: { env: { ...env }, budgets: raw.world?.budgets ?? 'single', ...(raw.world?.wording ? { wording: raw.world.wording } : {}), switches }, steps }
 }
 
 // ---- checks: each judges one expectation from the step's results (and the world, for request bodies that are not written out) ----
@@ -370,6 +411,41 @@ const CHECKS = {
     const inputs = step.seen.packets.map(p => p.inputTexts ?? [])
     return { pass: !inputs.some(list => list.includes(SAYS[args.said])), observed: { inputs } }
   },
+  // (cycle 20) The person's words went into the working run (kept once, as theirs). args.said names the words; the in-run send is the one that counts.
+  keptInRunSend: ({ step, args }) => {
+    const sent = step.sends.find(s => s.inRun === true) ?? null, mine = newMessages(step, step.room).filter(m => m.role === 'user' && m.text === SAYS[args.said])
+    return { pass: sent?.accepted === true && mine.length === 1, observed: { sends: step.sends, personMessages: mine.map(m => m.text) } }
+  },
+  // (cycle 20) The change reached the engine as exactly one steer into the working turn, carrying only the person's words under the request's own id.
+  steeredWith: ({ step, args }) => {
+    const turn = step.seen.steers
+    const ok = turn.length === 1 && turn[0].turnId === step.seen.workingTurn && turn[0].texts.length === 1 && turn[0].texts[0] === SAYS[args.said] && typeof turn[0].clientUserMessageId === 'string' && step.seen.interruptCalls.length === 0
+    return { pass: ok, observed: { steers: step.seen.steers, interrupts: step.seen.interruptCalls } }
+  },
+  // (cycle 20) The engine was not stopped or restarted and the run still works at the end of the step (a steer is allowed).
+  runWorking: ({ step }) => {
+    const run = step.seen.runs[step.room]
+    return { pass: step.seen.engineTurns.main === 0 && step.seen.interrupts === 0 && run?.status === 'inProgress', observed: { engineTurns: step.seen.engineTurns, interrupts: step.seen.interrupts, run } }
+  },
+  // (cycle 20) The stop reached the engine as exactly one interrupt of the turn that was working, with no steer; the run ended as interrupted.
+  interruptedRun: ({ step }) => {
+    const run = step.seen.runs[step.room], calls = step.seen.interruptCalls
+    return { pass: calls.length === 1 && calls[0].turnId === step.seen.workingTurn && step.seen.steers.length === 0 && run?.status === 'interrupted', observed: { interrupts: calls, workingTurn: step.seen.workingTurn, steers: step.seen.steers, run } }
+  },
+  // (cycle 20) Nothing of the person's in-run words waits to be carried into a later turn: the message was settled (replied, steered or stopped).
+  nothingCarried: ({ step }) => ({ pass: step.seen.carried === 0, observed: { carried: step.seen.carried } }),
+  // (cycle 20) The seconds a writer prompt of this step gives for the work (explain_wait, reply_status) match the run's real age, within args.within seconds.
+  elapsedTrue: ({ step, args }) => {
+    const rows = step.seen.writerSeconds.filter(r => !args.kind || r.kind === args.kind)
+    return { pass: rows.length >= 1 && rows.every(r => Math.abs(r.claimed - r.actual) <= (args.within ?? 2)), observed: { writerSeconds: step.seen.writerSeconds } }
+  },
+  // (cycle 20) The heartbeat's own record of what it derived for the beat: this kind (reply | steer | stop | ...), from the model's answers by code.
+  derivedFlow: ({ step, args }) => ({ pass: step.seen.flows.some(f => f.flow === args.kind), observed: { derived: step.seen.flows.map(f => f.flow) } }),
+  // (cycle 20) None of the Agent's new messages of this step names any of these words (an answer about something else).
+  messageAvoids: ({ step, args }) => {
+    const agent = newMessages(step, step.room).filter(m => m.role === 'assistant' && m.by === 'agent')
+    return { pass: agent.length >= 1 && !agent.some(m => args.needles.some(n => m.text.includes(n))), observed: { messages: agent.map(m => m.text) } }
+  },
   placementRecorded: ({ step }) => ({ pass: step.seen.placement.records.length >= 1, observed: { records: step.seen.placement.records, submitted: step.seen.placement.submitted } }),
 }
 export const CHECK_NAMES = Object.freeze(Object.keys(CHECKS))
@@ -438,6 +514,18 @@ function seenAfter(w, id, before, j) {
         bodyIds: [...new Set(parsed.flatMap(p => p.bodies))], refIds: [...new Set(parsed.flatMap(p => p.refs))] }
     }),
     engineTurns: w.subjectiveTurnsIn(id), interrupts: w.interruptsIn(id),
+    // (cycle 20) what reached the scripted engine for the person's in-run messages: each steer's turn, the person's words and request id; each interrupt's
+    // turn; what is still carried to the next turn; and the seconds the writer prompts of this step claim (numbers only) against the run's real age.
+    steers: w.native.filter(c => c.step === id && c.method === 'turn/steer').map(c => ({ threadId: c.params.threadId, turnId: c.params.expectedTurnId, clientUserMessageId: c.params.clientUserMessageId ?? null, texts: (c.params.input ?? []).map(i => i?.text ?? null) })),
+    interruptCalls: w.native.filter(c => c.step === id && c.method === 'turn/interrupt').map(c => ({ threadId: c.params.threadId, turnId: c.params.turnId })),
+    carried: w.chat.carriedInRun.get(DM)?.length ?? 0,
+    workingTurn: (id === 's12-stop-nudge' ? j.note.stopRun?.turnId : j.note.command?.turnId) ?? null,
+    writerSeconds: w.forkPrompts.slice(before.forks).flatMap(p => {
+      const kind = /has taken about (\d+) seconds so far/.exec(p.prompt) ? 'explain_wait' : /is still going \(about (\d+) seconds so far/.test(p.prompt) ? 'reply_status' : null
+      const claimed = Number((/has taken about (\d+) seconds so far/.exec(p.prompt) ?? /is still going \(about (\d+) seconds so far/.exec(p.prompt) ?? [])[1])
+      const start = id === 's12-stop-nudge' ? j.note.stopRun?.startAt : j.note.runStartAt
+      return kind && Number.isFinite(claimed) && Number.isFinite(start) ? [{ kind, claimed, actual: Math.round((p.at - start) / 1000) }] : []
+    }),
     runs,
     board: { observe: j.note.briefing && id === 's3-briefing' ? j.note.briefing : null, published: stepEvents.filter(e => e.event === 'briefing.published').length,
       cards: stepEvents.filter(e => e.event === 'output.published').map(e => ({ title: e.details?.output?.title ?? null, zone: 'board' })), parts },
@@ -544,6 +632,7 @@ export async function runJourney({ plan, send = false, key = null, fetchImpl = g
     // The plan's world flags, then any the caller adds.
     const w = allOnWorld(t, { transport, settleLimitMs: 60_000, env: { ...(plan.world?.env ?? {}), ...switchEnv, ...env }, budgets: plan.world?.budgets ?? 'single' })
     w.state.wording.wait = waitNote; w.state.wording.pointer = pointerNote
+    if (plan.world?.wording === 'faithful') w.state.wording.revise = faithfulRevision
     await w.settings.turnMemory.save('on')
     const j = { note: {}, sends: [], said: [],
       async say(text, extra) {
@@ -681,7 +770,7 @@ export function resultsPayload({ outcome, plan, send, caps, replayOf = null, at 
   return { set: plan.set, mode: send ? 'send' : replayOf ? 'replay' : 'dry_run', at: at.toISOString(), endpoint: DECISIONS_ENDPOINT, automaticRetries: 0,
     ...(replayOf ? { replayOf } : {}),
     plan: { file: path.basename(PLAN_FILE), sha256: plan.sha256, registered: plan.registered },
-    world: { env: plan.world?.env ?? {}, budgets: plan.world?.budgets ?? 'single', switchesOn: outcome.switches ?? [] }, script: { sha256: sha256(readFileSync(SCRIPT_FILE)) },
+    world: { env: plan.world?.env ?? {}, budgets: plan.world?.budgets ?? 'single', ...(plan.world?.wording ? { wording: plan.world.wording } : {}), switchesOn: outcome.switches ?? [] }, script: { sha256: sha256(readFileSync(SCRIPT_FILE)) },
     caps: { tokenCeiling: caps.tokenCeiling, maxRequests: caps.maxRequests, perStep: Object.fromEntries(plan.steps.map(s => [s.id, s.caps])) },
     totals: { requests: outcome.ledger.requests, sent: outcome.ledger.sent, inputTokensCounted: outcome.ledger.tokens, inputTokensReported: outcome.ledger.reportedTokens, refusedBodies: outcome.ledger.refusedBodies, ...(replayOf ? { replayUnmatched: outcome.ledger.replayUnmatched, replayChangedBody: outcome.ledger.replayChangedBody } : {}) },
     stoppedBecause: outcome.ledger.stopped?.reason ?? null, stoppedAt: outcome.ledger.stopped?.step ?? null,

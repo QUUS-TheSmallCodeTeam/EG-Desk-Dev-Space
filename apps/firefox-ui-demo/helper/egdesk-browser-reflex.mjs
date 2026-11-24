@@ -159,6 +159,25 @@ const SENSITIVE_REGION = /결제|지불|청구|카드\s*정보|계좌|권한|동
 // asks to change?"); R3/R5: any decided yes makes the step the person's (human_step), whatever next_step says. No action is ever taken on them.
 export const MAX_PERSON_TARGETS = 3
 export const personTargetName = index => `person_target_${index}`
+// c23 (measured: browser-live-stability runs 1 and 2, 2026-11-25, identical to two decimals): carrying the person-only controls in EVERY step
+// request moved the statement step from [B1] 조회 0.92 (c20 body, no controls) to 0.39 (c22 body: the line about the period dropdown and its
+// predicate, +311 bytes): the model hesitated over a control that was not the point. So the first request is as before (c21 shape); only when
+// it did not find a way forward (the next step is undecided, scroll_more or blocked) a FOLLOW-UP request names the controls only the person
+// may operate and asks one predicate per control. A confident next step never reaches it.
+export async function decidePersonTarget({ goal, snapshot, personOnly, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
+  const targets = (Array.isArray(personOnly) ? personOnly : []).slice(0, MAX_PERSON_TARGETS)
+  if (!targets.length) return { hit: null, targets: [], usage: null }
+  const evidence = [`Goal: ${goal}`, ...(isDay(today) ? [`Today: ${today}`] : []), `URL: ${snapshot.url}`, `Visible text:\n${visibleText(snapshot) || '(none)'}`,
+    `Controls on this page that only the person may operate (they are never options here): ${targets.map(quoteControl).join(' / ')}`].join('\n\n')
+  const result = await client.decide({
+    input: [{ role: 'developer', content: RECORDED_RULES }, { role: 'user', content: evidence }],
+    questions: targets.map((control, index) => predicateQuestion(personTargetName(index), `Is this control, ${quoteControl(control)}, the one this request asks to change?`)),
+    timeoutMs, signal, authorizeDispatch,
+  })
+  const p = targets.map((_, index) => { const a = result.answers?.[personTargetName(index)]; return a?.type === 'predicate' && Number.isFinite(a.probability) ? a.probability : null })
+  const at = p.findIndex(value => value !== null && value >= thresholds.choice)
+  return { hit: at >= 0 ? targets[at].label : null, targets: p, usage: result.usage }
+}
 const quoteControl = control => `"${String(control.label).replace(/"/g, "'")}" (${control.role}${control.value ? `, now "${String(control.value).replace(/"/g, "'")}"` : ''})`
 const SAFE_GET_FIELDS = new Set(['hidden', 'text', 'search', 'select', 'select-one', 'select-multiple', 'radio', 'checkbox', 'number', 'date', 'month', 'week', 'range', 'submit', 'button', 'image', 'reset'])
 export function readOnlyPress(element, snapshot, { classify = classifyAction, isAllowedUrl = defaultAllowedUrl } = {}) {
@@ -307,8 +326,7 @@ const REFLEX_RULES = [
  * controls), page_state and goal_met. Throws DecisionError.
  * → { kind: 'act'|'scroll'|'wait'|'done'|'free_text'|'handoff'|'blocked'|'uncertain', option?, pageState, next, goalMet, ranked, usage, latencyMs }
  */
-export async function decideReflexStep({ goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], memoryPacket = null, historyConflict = false, today = null, personOnly = [], client, thresholds, timeoutMs, signal, authorizeDispatch }) {
-  const targets = (Array.isArray(personOnly) ? personOnly : []).slice(0, MAX_PERSON_TARGETS)
+export async function decideReflexStep({ goal, snapshot, options, history = [], pendingValues = [], userContext = [], priorLines = [], memoryPacket = null, historyConflict = false, today = null, client, thresholds, timeoutMs, signal, authorizeDispatch }) {
   const choices = [...options.map(option => ({ value: option.value, ...(option.description ? { description: option.description } : {}) })), ...tableOptions(REFLEX_CONTROLS)]
   const evidence = [
     `Goal: ${goal}`, ...(isDay(today) ? [`Today: ${today}`] : []), `URL: ${snapshot.url}`,
@@ -318,7 +336,6 @@ export async function decideReflexStep({ goal, snapshot, options, history = [], 
     priorLines.length ? `History (earlier run of this task, from this app; may be outdated):\n${priorLines.join('\n')}` : null,
     history.length ? `Steps so far:\n${history.slice(-8).join('\n')}` : null,
     `Visible text:\n${visibleText(snapshot) || '(none)'}`,
-    targets.length ? `Controls on this page that only the person may operate (they are never options here): ${targets.map(quoteControl).join(' / ')}` : null,
   ].filter(Boolean).join('\n\n')
   const result = await client.decide({
     input: [{ role: 'developer', content: REFLEX_RULES }, { role: 'user', content: evidence }],
@@ -326,24 +343,19 @@ export async function decideReflexStep({ goal, snapshot, options, history = [], 
       choiceQuestion('next_step', 'Which option moves toward the goal next?', choices),
       ...pageStateQuestions(),
       predicateQuestion('goal_met', 'Does the current page already satisfy the goal?'),
-      ...targets.map((control, index) => predicateQuestion(personTargetName(index), `Is this control, ${quoteControl(control)}, the one this request asks to change?`)),
     ],
     timeoutMs, signal, authorizeDispatch,
   })
   const pageState = readPageState(result.answers, thresholds.pageState)
   const goalMet = readPredicate(result.answers, 'goal_met', thresholds.done)
-  const targetP = targets.map((_, index) => { const a = result.answers?.[personTargetName(index)]; return a?.type === 'predicate' && Number.isFinite(a.probability) ? a.probability : null })
   const next = readChoice(result.answers, 'next_step', { minConfidence: thresholds.choice, minMargin: thresholds.margin })
-  const out = { pageState: pageState.state, pageChecks: pageState.p, ...(targets.length ? { targets: targetP } : {}),
+  const out = { pageState: pageState.state, pageChecks: pageState.p,
     next: { value: next.value, confidence: next.confidence, margin: next.margin, state: next.state },
     goalMet: goalMet.probability, ranked: next.ranked, usage: result.usage, latencyMs: result.latencyMs }
   if (out.pageState && HANDOFF_STATES.has(out.pageState)) return { kind: 'handoff', ...out }
   if (out.pageState && BLOCKED_STATES.has(out.pageState)) return { kind: 'blocked', ...out }
   if (out.pageState !== 'content') return { kind: 'page_unclear', ...out }
   if (goalMet.state === 'yes') return { kind: 'done', ...out }
-  // c22: the request is about a control only the person may operate: their step, before any option is considered
-  const hit = targetP.findIndex(p => p !== null && p >= thresholds.choice)
-  if (hit >= 0) return { kind: 'person_target', target: targets[hit].label, ...out }
   // c16 (real s10: needs_user_context at 0.70, below the bar, ended as "uncertain" with no candidates): an undecided next step whose top is
   // the fixed ask option, or a page holding two or more same-kind elements, asks the person which; the candidates are built by code.
   const group = sameKindCandidates(options)
@@ -562,7 +574,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     try {
       if (recorded) { usedRecorded.add(safePathOf(snapshot.url)); entry.rule = `recorded_${recorded.kind}` }
       decision = recorded ? await decideRecordedStep({ goal, snapshot, recorded, today, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
-        : await decideReflexStep({ goal, snapshot, options, personOnly, history, pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
+        : await decideReflexStep({ goal, snapshot, options, history, pendingValues: [...pending.keys()], userContext: contextLines, priorLines: prior.lines, today,
           // c16: a parsed record already gives this step its facts as History lines (computed by code); the general packet would repeat them
           // at ~300 input tokens per step (R1). The packet stays step evidence when no record was parsed from it.
           memoryPacket: priorRun ? null : memoryPacket, historyConflict: conflict, client, thresholds, timeoutMs: timeoutMs ?? (warmed ? undefined : FOREGROUND_DECISION_TIMEOUT_MS), signal, authorizeDispatch })
@@ -575,6 +587,18 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       pageChecks: decision.pageChecks ?? null, targets: decision.targets ?? null, top: decision.ranked?.[0]?.probability ?? null, second: decision.ranked?.[1]?.probability ?? null,
       options: decision.next?.by === 'code' ? null : options.length + Object.keys(REFLEX_CONTROLS).length,
       usage: decision.usage, latencyMs: Math.round(decision.latencyMs) }
+
+    // c23: no way forward was found (undecided, scroll_more, blocked) and the page has controls only the person may operate: one follow-up
+    // asks whether the request is about one of them (a decided yes is the person's step, whatever the options were). Never for a decided step.
+    if (personOnly.length && ['uncertain', 'scroll', 'blocked'].includes(decision.kind)) {
+      let check = null
+      try { check = await decidePersonTarget({ goal, snapshot, personOnly, today, client, thresholds, timeoutMs: timeoutMs ?? undefined, signal, authorizeDispatch }) }
+      catch { check = null } // a failed follow-up leaves the first decision as it was; nothing is concluded on a guess
+      if (signal?.aborted) return finish('aborted')
+      if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
+      if (check) { entry.decision.targets = check.targets; entry.followUp = true }
+      if (check?.hit) { entry.rule = 'person_target'; return finish('escalated', { reason: 'human_step', withheld: excluded.gated + excluded.unsupported, target: check.hit }) }
+    }
 
     // A decided link leaves this page: supplied values are not typed into a page
     // that is about to be replaced (§3.3; they stay pending for the next page).
@@ -645,8 +669,6 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       // A blocked page names its state; "no listed element moves toward the goal" on an ordinary page is plain 'blocked'.
       case 'blocked': return finish('escalated', { reason: BLOCKED_STATES.has(decision.pageState) ? decision.pageState : 'blocked', ranked: decision.ranked })
       case 'uncertain': return finish('escalated', { reason: 'uncertain', ranked: decision.ranked })
-      // c22: the control the request is about is the person's (never operated by the loop)
-      case 'person_target': entry.rule = 'person_target'; return finish('escalated', { reason: 'human_step', withheld: excluded.gated + excluded.unsupported, target: decision.target })
       // the page-state predicates did not all decide: the person looks at the page (never a silent stop)
       case 'page_unclear': return finish('page_unclear', { url: snapshot.url, checks: decision.pageChecks })
       case 'free_text': return finish('needs_free_text', { field: null, fields: fields.map(option => option.value) })

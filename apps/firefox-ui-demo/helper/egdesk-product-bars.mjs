@@ -69,7 +69,7 @@ export const PRODUCT_BARS = Object.freeze([
   [/^conversation-scenarios-\d+$/, /^answer_type$/, choice(T.choice, null, 'egdesk-context-setup.mjs readChoice minConfidence thresholds.choice (no margin rule); answer_type has no consumer (L6 c4)')],
   [/^conversation-scenarios-\d+$/, /^message__/, single(BEAT_PREDICATE_YES, 'egdesk-heartbeat-judge.mjs BEAT_PREDICATE_YES: speaks iff p >= bar')],
   [/^conversation-scenarios-\d+$/, /^rc_(stated|confirms)_#$/, three(CONFIRM_BARS.yes, CONFIRM_BARS.no, 'egdesk-record-confirmation.mjs CONFIRM_BARS (between: keep pending)')],
-  [/^conversation-labels-(sample-)?\d+$/, /^conv_/, three(TERNARY_YES, TERNARY_NO, 'egdesk-conversation-examples.mjs readLabels: a labelling study, no product action')],
+  [/^conversation-labels-(sample-\d+|reworded-c\d+|\d+)$/, /^conv_/, three(TERNARY_YES, TERNARY_NO, 'egdesk-conversation-examples.mjs readLabels: a labelling study, no product action')],
   // legacy (c8-era, 11/22-11/24) families
   [/-11(22|23|24)$/, /^speechp_/, three(SPEECH_PREDICATE_BARS.yes, SPEECH_PREDICATE_BARS.no, 'egdesk-speech-grounding.mjs SPEECH_PREDICATE_BARS')],
   [/-11(22|23|24)$/, /^(tn_|tw_link|tw_about|pg_|op_)/, three(TERNARY_YES, TERNARY_NO, 'egdesk-wiki-reconstruction.mjs ternary YES / NO')],

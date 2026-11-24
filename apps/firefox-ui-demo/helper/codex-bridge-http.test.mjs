@@ -204,7 +204,10 @@ test('the server mounts the tested stored-engine auth function, without a Codex 
   assert.match(contextWiring, /getAuthority: hints => chat\.contextAuthority\(hints\)/)
   // every original fragment still holds (the Claude branch, the shared default), and (L1 c22) a run on another Codex profile is judged by THAT profile's own probe
   assert.match(contextWiring, /schemaReady: authority => authority\?\.engineId === 'claude'\s*\? claudeEngine\.isReady\(\) && claudeEngine\.capabilities\(\)\.has\('dynamicTools'\)\s*: isProfileSlot\(authority\?\.engineProfileId\) \? codexProfileServers\.capabilities\(authority\.engineProfileId\)\.dynamicTools === true\s*: nativeCapabilities\.schemaMatch && appServerReady/)
-  assert.match(source, /const isProfileSlot = id => typeof id === 'string' && id !== '' && id !== CODEX_ENGINE_PROFILE_ID/)
+  // (L1 c23: the predicate moved into the slot-readiness module, which the bridge imports; the same text, one definition)
+  assert.match(source, /import \{ createSlotReadiness, isProfileSlot \} from '\.\/egdesk-slot-readiness\.mjs'/)
+  const readinessSource = await readFile(new URL('./egdesk-slot-readiness.mjs', import.meta.url), 'utf8')
+  assert.match(readinessSource, /export const isProfileSlot = id => typeof id === 'string' && id !== '' && id !== CODEX_ENGINE_PROFILE_ID/)
   assert.match(source, /const profileCapabilityCache = createNativeCapabilityCache\(\)/)
   assert.match(source, /inspectCapabilities: bin => profileCapabilityCache\(bin\),/, 'each profile server is probed on its own binary')
   assert.match(source, /respond: nativeRespond,/)

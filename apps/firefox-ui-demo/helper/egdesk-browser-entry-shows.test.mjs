@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
-import { createBrowserTaskStore, createDirectBrowserEntry, entryQuestions, readBrowserEntry } from './egdesk-browser-task.mjs'
+import { createBrowserTaskStore, createDirectBrowserEntry, entryQuestions, entryWallQuestions, readBrowserEntry, wallCandidates } from './egdesk-browser-task.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 
 // L8 c21: the settings entry (real, browser-live-settings-v2, 2026-11-25): the request predicate 0.90, the card predicate 0.19, so the
@@ -40,6 +40,7 @@ test('on: one observation per card (a read, no Decision request); the card predi
   assert.equal(card.instructions, 'Does this request need to be done on this open page: "알림 설정 | 계정" at "account.example.test", which now shows "알림 설정" / "마케팅 정보 알림: 켜짐" / "보안 알림: 켜짐"?')
   assert.doesNotMatch(card.instructions, /약관 안내/, 'at most three lines')
   assert.ok(Buffer.byteLength(w.bodies[0]) - 631 < 200, 'a small addition to the 631-byte body')
+  assert.deepEqual(JSON.parse(w.bodies[0]).questions.map(q => q.name), ['browser_entry', 'browser_entry_card_0'], 'c23: the first entry request is unchanged; the interruption predicate is a follow-up only where it can matter')
 })
 
 test('the combination as designed: the real 0.90 / 0.19 is "the card is not the place" (not entered); a card decided yes on the page it shows enters', () => {
@@ -95,4 +96,55 @@ test('ride-along, on: one observation per card, the same quoting as the standalo
   const named = []
   const byCode = await rideAlongEntry({ provider: rideProvider(named), run: {}, message: '알림 설정에서 마케팅 꺼줘', cards: RIDE_CARDS, cardText: true })
   assert.deepEqual([byCode.codeCard, byCode.questions.map(q => q.name), named], ['card', ['browser_entry'], []])
+})
+
+// ---- c23: an interruption of the site never vetoes the card (real, browser-live-settings-v4: the error page's card predicate 0) ----
+const ERROR_SHOWS = ['일시적인 오류가 발생했습니다.', '잠시 후 다시 시도해 주세요. (오류 500)']
+const P2 = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { type: 'predicate', probability: v }]))
+test('the interruption follow-up: only where it can matter (web task decided, no card yes, a card with known lines decided no), one predicate per such card quoting that page alone', () => {
+  const cards = [{ cardId: 'a', host: 'account.example.test', title: '오류 | 계정', shows: ERROR_SHOWS }, { cardId: 'b', host: 'mail.example.test', title: '받은 편지함' }]
+  const first = answers => readBrowserEntry(P2(answers), cards)
+  assert.deepEqual(wallCandidates(first({ browser_entry: 0.9, browser_entry_card_0: 0.0, browser_entry_card_1: 0.05 }), cards), [0], 'card b has no known lines: not asked')
+  assert.deepEqual(wallCandidates(first({ browser_entry: 0.9, browser_entry_card_0: 0.0, browser_entry_card_1: 0.9 }), cards), [], 'a card decided yes already enters')
+  assert.deepEqual(wallCandidates(first({ browser_entry: 0.2, browser_entry_card_0: 0.0, browser_entry_card_1: 0.05 }), cards), [], 'an answer, not a web task')
+  assert.deepEqual(wallCandidates(first({ browser_entry: 0.9, browser_entry_card_0: 0.5, browser_entry_card_1: 0.05 }), cards), [], 'an undecided card is not a no')
+  const qs = entryWallQuestions(cards, [0])
+  assert.deepEqual(qs.map(q => q.name), ['browser_entry_wall_0'])
+  assert.equal(qs[0].instructions, 'Is this open page "오류 | 계정" at "account.example.test", which now shows "일시적인 오류가 발생했습니다." / "잠시 후 다시 시도해 주세요. (오류 500)" an error page, a sign-in page or a check that stops it from showing its content?')
+  assert.deepEqual(entryQuestions(cards).map(q => q.name), ['browser_entry', 'browser_entry_card_0', 'browser_entry_card_1'], 'the first request has no wall question')
+  assert.deepEqual(entryQuestions(cards, { codeCard: 'a' }).map(q => q.name), ['browser_entry'], 'a card named by code asks nothing about the card, its lines never veto it')
+})
+test('real replay: web task .90, card .00 on an error page; the interruption predicate decides the page is a wall: the card is still the place (one card, or the one wall among cards decided no)', () => {
+  const one = [{ cardId: 'card', host: 'account.example.test', title: '오류 | 계정', shows: ERROR_SHOWS }]
+  assert.equal(readBrowserEntry(P2({ browser_entry: 0.90, browser_entry_card_0: 0.0 }), one).kind, 'not_browser', 'before: the real answers alone (no wall asked) did not enter')
+  assert.equal(readBrowserEntry(P2({ browser_entry: 0.90, browser_entry_card_0: 0.0, browser_entry_wall_0: 0.95 }), one).cardId, 'card')
+  assert.equal(readBrowserEntry(P2({ browser_entry: 0.90, browser_entry_card_0: 0.0, browser_entry_wall_0: 0.5 }), one).kind, 'not_browser', 'an undecided wall does not enter')
+  assert.equal(readBrowserEntry(P2({ browser_entry: 0.10, browser_entry_card_0: 0.0, browser_entry_wall_0: 0.95 }), one).kind, 'not_browser', 'an answer, not a web task: a wall changes nothing')
+  const two = [{ cardId: 'a', host: 'account.example.test', title: '오류', shows: ERROR_SHOWS }, { cardId: 'b', host: 'mail.example.test', title: '받은 편지함', shows: ['받은 편지함'] }]
+  assert.equal(readBrowserEntry(P2({ browser_entry: 0.9, browser_entry_card_0: 0.0, browser_entry_card_1: 0.05, browser_entry_wall_0: 0.95, browser_entry_wall_1: 0.02 }), two).cardId, 'a', 'the one wall, the other card decided no')
+  assert.equal(readBrowserEntry(P2({ browser_entry: 0.9, browser_entry_card_0: 0.0, browser_entry_card_1: 0.5, browser_entry_wall_0: 0.95 }), two).kind, 'ask_user', 'another card is undecided: the person is asked')
+  assert.equal(readBrowserEntry(P2({ browser_entry: 0.9, browser_entry_card_0: 0.0, browser_entry_card_1: 0.9, browser_entry_wall_0: 0.95 }), two).cardId, 'b', 'a card decided yes wins over a wall')
+  assert.equal(readBrowserEntry(P2({ browser_entry: 0.9, browser_entry_card_0: 0.0, browser_entry_card_1: 0.0, browser_entry_wall_0: 0.95, browser_entry_wall_1: 0.95 }), two).kind, 'not_browser', 'two walls: no card is chosen by a wall')
+})
+test('through the entry: the follow-up enters an error page and the step hands it over (the person sees the error); a normal page that is not the place is still not entered; the first request is as before', async () => {
+  const run = async ({ shows, card, wall, rode = false }) => {
+    const sent = []
+    const answers = wire => wire.questions.map(q => ({ name: q.name, type: 'predicate', probability: q.name === 'browser_entry' ? 0.9 : q.name === 'browser_entry_card_0' ? card : wall }))
+    const client = createDecisionClient({ getApiKey: async () => 'egd-synthetic-not-a-key-0008', fetchImpl: async (_u, init) => { const wire = JSON.parse(init.body); sent.push(wire.questions.map(q => q.name)); return { ok: true, text: async () => JSON.stringify({ answers: answers(wire) }) } } })
+    const provider = { directEntryEnabled: () => true, reflexScope: () => ({ client, isDecisionCurrent: () => true, callTool: async () => ({ observationId: 'o', snapshot: { text: shows } }) }),
+      runDirectTask: async () => ({ outcome: 'handoff', pageState: 'error_page', steps: [{ url: 'https://account.example.test/x', actions: [] }], state: null }) }
+    const entry = createDirectBrowserEntry({ provider, store: createBrowserTaskStore(), cardTextInEntry: () => true })
+    const entryAnswers = rode ? { browser_entry: { type: 'predicate', probability: 0.9 }, browser_entry_card_0: { type: 'predicate', probability: card }, codeCard: null } : null
+    const out = await entry.handle({ run: { runId: 'r', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm', message: MSG, hosts: { card: 'account.example.test' }, titles: { card: '오류 | 계정' }, entryAnswers })
+    return { out, sent }
+  }
+  for (const rode of [false, true]) {
+    const wall = await run({ shows: ERROR_SHOWS, card: 0.0, wall: 0.95, rode })
+    assert.deepEqual([wall.out.handled, JSON.parse(wall.out.note).egdesk_browser_task.code], [true, 'error_page'], `rode=${rode}`)
+    assert.deepEqual(wall.sent, rode ? [['browser_entry_wall_0']] : [['browser_entry', 'browser_entry_card_0'], ['browser_entry_wall_0']], 'the first request unchanged; one follow-up')
+    const other = await run({ shows: ['환율 계산기'], card: 0.0, wall: 0.02, rode })
+    assert.deepEqual([other.out.handled, other.out.reason], [false, 'not_browser'], `rode=${rode}`)
+  }
+  const failing = await run({ shows: ERROR_SHOWS, card: 0.0, wall: 0.95 }) // control: the same answers, follow-up working
+  assert.equal(failing.out.handled, true)
 })

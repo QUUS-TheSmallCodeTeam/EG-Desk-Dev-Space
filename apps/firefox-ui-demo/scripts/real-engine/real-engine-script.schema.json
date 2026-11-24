@@ -65,6 +65,88 @@
               "pattern": "^[a-z0-9_-]{1,24}$"
             }
           },
+          "memory": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "pages"
+            ],
+            "properties": {
+              "mode": {
+                "enum": [
+                  "on",
+                  "advisory"
+                ]
+              },
+              "pages": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 12,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "title",
+                    "body"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9/_-]{0,59}$"
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "body": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4000
+                    },
+                    "time": {
+                      "enum": [
+                        "past",
+                        "present",
+                        "planned",
+                        "hypothetical"
+                      ]
+                    },
+                    "status": {
+                      "enum": [
+                        "done",
+                        "plan"
+                      ]
+                    },
+                    "links": {
+                      "type": "array",
+                      "maxItems": 4,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "to"
+                        ],
+                        "properties": {
+                          "to": {
+                            "type": "string"
+                          },
+                          "type": {
+                            "enum": [
+                              "follows_from",
+                              "refers_to",
+                              "same_task"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
           "turns": {
             "type": "array",
             "minItems": 1,
@@ -225,6 +307,31 @@
                     },
                     "conversationGone": {
                       "type": "boolean"
+                    },
+                    "memory": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "attached": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 12,
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "notAttached": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 12,
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "noResends": {
+                          "const": true
+                        }
+                      }
                     }
                   }
                 }
