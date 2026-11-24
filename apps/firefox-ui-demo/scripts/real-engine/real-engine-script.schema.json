@@ -397,7 +397,8 @@
                   "enum": [
                     "interrupt",
                     "steer",
-                    "delete"
+                    "delete",
+                    "restart"
                   ]
                 },
                 "afterMs": {
@@ -631,6 +632,15 @@
                           "const": true
                         },
                         "cameraUntouched": {
+                          "const": true
+                        },
+                        "roomKept": {
+                          "const": true
+                        },
+                        "receiptsClosed": {
+                          "const": true
+                        },
+                        "continuity": {
                           "const": true
                         }
                       }

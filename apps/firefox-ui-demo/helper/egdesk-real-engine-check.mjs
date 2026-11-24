@@ -239,6 +239,8 @@ export function preflight(options, scripts, { env = process.env, exists = isExec
     if (engineGone.length && !options.persisted) problems.push(`deleted.engineGone proves that the engine's saved thread is gone (thread/resume fails): the thread must be saved, so it needs --persisted-with-cleanup: ${engineGone.join(', ')}`)
     if (flagged.length) problems.push(`these flags act only through the Decision model, so they need --decisions: ${flagged.join('; ')}`)
   }
+  const restarting = scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => t.action === 'restart')).map(c => `${script.set}/${c.id}`)) // c29
+  if (restarting.length && !options.persisted) problems.push(`a restart turn needs a saved engine thread to come back to, so it needs --persisted-with-cleanup: ${restarting.join(', ')}`)
   return problems
 }
 
@@ -253,7 +255,7 @@ export function planRun(options, scripts, { env = process.env, buildLaunch = bui
     rules: [options.persisted ? 'persisted threads, each deleted and verified gone at the end of its conversation (the binary must have thread/delete; the ledger must be clean)' : 'ephemeral threads only (thread/start and thread/fork without ephemeral:true are refused)', 'own tools ON; the engine runs in EG-Desk\'s empty folder', 'scripted approver: yes/no answers sent as the person\'s next message',
       'no retries', `Decision calls only with --decisions (key from ${DECISION_KEY_ENV}), through the run's egress gate`],
     conversations: scripts.flatMap(({ file, script }) => script.conversations.map(c => ({ set: script.set, file, id: c.id, scratch: path.join(options.out, 'scratch', c.id), files: Object.keys(c.folder ?? {}).length,
-      flags: { ...(options.decisions ? DEFAULT_DECISION_FLAGS : {}), ...(c.flags ?? {}), EGDESK_OWN_TOOLS: 'on' }, turns: c.turns.map(t => ({ say: clip(t.say, 80), approve: t.approve ?? [], expects: Object.keys(t.expect ?? {}) })) }))),
+      flags: { ...(options.decisions ? DEFAULT_DECISION_FLAGS : {}), ...(c.flags ?? {}), EGDESK_OWN_TOOLS: 'on' }, turns: c.turns.map(t => ({ say: t.action === 'restart' ? '(restart: the bridge and the engine stop and start again)' : clip(t.say, 80), approve: t.approve ?? [], expects: Object.keys(t.expect ?? {}) })) }))),
   }
 }
 
@@ -302,22 +304,46 @@ export function createGroupKiller({ kill = process.kill.bind(process), grace = K
 }
 
 /**
- * runConversation({ options, set, conversation, deps }) → the conversation record. One app-server, one runtime, one scratch folder.
+ * runConversation({ options, set, conversation, deps }) → the conversation record. One app-server, one runtime, one scratch folder, until a `restart` turn: that stops the app-server, the runtime and
+ * every hook of the conversation (the bridge and the engine go) and starts them again over the SAME store, folder and persisted thread (c29). The conversation is run in segments, the turns before
+ * and after each restart; the segments' records are one record (turn indexes are the script's own, the restart turn has its own record).
  * deps: { spawn, runnerSpawn, fetchImpl, env, killGroup, now }
  */
 export async function runConversation({ options, set, conversation, deps = {} }) {
+  const cuts = conversation.turns.flatMap((t, i) => (t.action === 'restart' ? [i] : []))
+  if (!cuts.length) return runConversationSegment({ options, set, conversation, deps })
+  const bounds = [-1, ...cuts, conversation.turns.length]
+  let merged = null, previous = null
+  for (let s = 0; s < bounds.length - 1; s++) {
+    const last = s === bounds.length - 2, out = {}
+    const carry = { resumed: s > 0, keep: !last, out, offset: bounds[s] + 1, ...(s > 0 ? { state: previous.state, hooksCarried: previous.hooks, restartTurn: conversation.turns[bounds[s]], restartIndex: bounds[s] } : {}) }
+    const rec = await runConversationSegment({ options, set, conversation: { ...conversation, turns: conversation.turns.slice(bounds[s] + 1, bounds[s + 1]) }, deps, carry })
+    if (!merged) merged = rec
+    else {
+      merged.turns.push(...rec.turns); merged.requests.push(...rec.requests); merged.aborted ??= rec.aborted; merged.abortDetail ??= rec.abortDetail
+      merged.ok = merged.ok && rec.ok; merged.decisionCalls = (merged.decisionCalls ?? 0) + (rec.decisionCalls ?? 0); merged.totalMs = (merged.totalMs ?? 0) + (rec.totalMs ?? 0)
+      if (rec.cleanup) merged.cleanup = rec.cleanup; if (rec.cleanupFailed) merged.cleanupFailed = true
+      ;(merged.restarts ??= []).push({ afterTurn: bounds[s], engine: rec.engine, phases: { spawnMs: rec.phases.spawnMs, initializeMs: rec.phases.initializeMs, composedMs: rec.phases.composedMs } })
+    }
+    previous = out
+    if (rec.aborted || !out.state) { merged.ok = false; break } // a segment that aborted ends the conversation (its persisted threads were cleaned up in its own cleanup)
+  }
+  merged.ok = merged.ok && merged.turns.length === conversation.turns.length
+  return merged
+}
+async function runConversationSegment({ options, set, conversation, deps = {}, carry = null }) {
   const env = deps.env ?? process.env
   const spawn = deps.spawn ?? nodeSpawn
   const killGroup = deps.killGroup ?? createGroupKiller()
   const conversationDir = path.join(options.out, 'data', conversation.id)
   const scratch = path.join(options.out, 'scratch', conversation.id), dataDir = conversationDir
   makeDirs(options.out); makeDirs(path.join(options.out, 'scratch')); makeDirs(path.join(options.out, 'data')); makeDirs(dataDir)
-  writeScratch(scratch, conversation.folder)
+  if (!carry?.resumed) writeScratch(scratch, conversation.folder) // after a restart the folder is as the turns left it
   // the draft check is the conversation's own opt-in (conversation.draftCheck: { mode, design? }), like memory; explicit flags still win
   const dc = conversation.draftCheck
   const flags = { ...(options.decisions ? DEFAULT_DECISION_FLAGS : {}), ...(dc ? { EGDESK_DRAFT_CHECK: dc.mode, ...(dc.design === 'choice' ? { EGDESK_DRAFT_CHECK_DESIGN: 'choice' } : {}) } : {}), ...(conversation.flags ?? {}), EGDESK_OWN_TOOLS: 'on' }
   let profileStore = null, agentRoom = null // c25: the synthetic Agent of an agentProfile conversation
-  const persisted = options.persisted === true, ledger = persisted ? (deps.ledger ?? createLedger(options.out)) : null, createdThreads = []
+  const persisted = options.persisted === true, ledger = persisted ? (deps.ledger ?? createLedger(options.out)) : null, createdThreads = [...(carry?.state?.createdThreads ?? [])]
   const FLAG = { ...flags }
   const hooks = CHECK_HOOKS.filter(h => h.active(FLAG)) // features registered in helper/egdesk-real-engine-hooks.mjs (the briefing flow, ...); attached once the runtime exists
   let attached = []
@@ -519,12 +545,14 @@ export async function runConversation({ options, set, conversation, deps = {} })
       catch (error) { (rec.extensions ??= {})[String(ext?.name).slice(0, 40)] = { error: clip(error?.code ?? error?.message ?? 'error', 100) } }
     }
     const pushTurn = async record => {
+      if (carry?.offset) record = { ...record, index: record.index + carry.offset } // the script's own turn numbers across restarts
       rec.turns.push(record)
       for (const { name, api } of extensions) { try { await api.afterTurn?.(record, { conversation, index: rec.turns.length - 1 }) } catch (error) { (rec.extensions ??= {})[name] = { error: clip(error?.code ?? error?.message ?? 'error', 100) } } }
     }
 
     // ---- the scripted turns ----
-    let clientThreadId = `check-${conversation.id}`, requestSeq = 0, nativeThread = null, first = true, seen = 0
+    const st = carry?.state // after a restart: the room as the last segment left it
+    let clientThreadId = st?.clientThreadId ?? `check-${conversation.id}`, requestSeq = st?.requestSeq ?? 0, nativeThread = st?.nativeThread ?? null, first = st?.first ?? true, seen = st?.seen ?? 0
     const engineFolder = path.join(dataDir, 'engine-folders', 'empty')
     const assistantTexts = () => store.listMessages(clientThreadId, { limit: 200 }).messages.filter(m => m.role === 'assistant').map(m => String(m.text ?? ''))
     // beginTurn sends the person's message and returns at once with the running turn; finishTurn waits for it, then lets the runtime settle.
@@ -581,7 +609,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       return mark
     }
     // the person deletes the conversation (the surface's delete: forgetConversation); the next message turn starts a new one
-    let generation = 0
+    let generation = st?.generation ?? 0
     const deleteTurn = async (index, turn) => {
       const key = clientThreadId
       let out = null, error = null, route = null
@@ -624,6 +652,15 @@ export async function runConversation({ options, set, conversation, deps = {} })
       clientThreadId = `check-${conversation.id}-${++generation}`; nativeThread = null; first = true; seen = 0
     }
 
+    // ---- after a restart: the window's reconnect (resume the room's saved conversation on the new engine), and the restart turn's own record ----
+    if (carry?.resumed) {
+      let resumed = null, resumeError = null
+      try { resumed = await chat.resume({ conversationId: nativeThread, clientThreadId }) } catch (error) { resumeError = String(error?.code ?? error?.message ?? 'error').slice(0, 80) }
+      seen = assistantTexts().length
+      const after = await turnHooks.afterRestart({ state: () => ({ store, clientThreadId, conversationId: nativeThread }), expect: carry.restartTurn.expect, carried: carry.hooksCarried })
+      const expectations = [{ check: 'restart.resumed', ok: resumeError === null && resumed != null, detail: { error: resumeError, runs: Array.isArray(resumed?.runs) ? resumed.runs.length : null } }, ...after.expectations]
+      await pushTurn({ index: carry.restartIndex + 1 - carry.offset, action: 'restart', posted: [], asked: 0, ...after.records, expectations, ok: expectations.every(e => e.ok) })
+    }
     for (let index = 0; index < conversation.turns.length; index++) {
       if (rec.aborted || closed) break
       const turn = conversation.turns[index], next = conversation.turns[index + 1]
@@ -683,7 +720,10 @@ export async function runConversation({ options, set, conversation, deps = {} })
       }
     }
     for (const { name, api } of extensions) { try { const value = await api.finish?.(); if (value !== undefined) (rec.extensions ??= {})[name] = value } catch (error) { (rec.extensions ??= {})[name] = { error: clip(error?.code ?? error?.message ?? 'error', 100) } } }
-    rec.ok = !rec.aborted && !closed && rec.turns.length === conversation.turns.length && rec.turns.every(t => t.ok)
+    // before a restart: what the old hooks hand to the new ones, while the old engine and store are still there
+    if (carry?.out && !rec.aborted && !closed) carry.out.hooks = await turnHooks.beforeRestart({ state: () => ({ store, clientThreadId, conversationId: nativeThread }) })
+    if (carry?.out) carry.out.state = { clientThreadId, nativeThread, first, seen: assistantTexts().length, generation, requestSeq, createdThreads }
+    rec.ok = !rec.aborted && !closed && rec.turns.length === conversation.turns.length + (carry?.resumed ? 1 : 0) && rec.turns.every(t => t.ok)
     rec.decisionCalls = decisionCall.length
   } catch (error) {
     rec.aborted ??= String(error?.code ?? error?.name ?? 'error').slice(0, 60)
@@ -691,7 +731,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     if (stderrTail) rec.engineStderrTail = clip(stderrTail.replace(/\s+/g, ' '), 600)
   } finally {
     // persisted mode: the threads this conversation created are deleted and verified gone BEFORE the engine goes, also after an abort
-    if (persisted) {
+    if (persisted && !(carry?.keep && !rec.aborted)) { // a segment before a restart leaves its persisted threads for the next one (an abort cleans up now)
       const ids = createdThreads.filter(t => !t.ephemeral).map(t => t.id)
       try { rec.cleanup = await deleteAndVerify((method, params) => rpc.request(method, params), ids, ledger) }
       catch (error) { rec.cleanup = { persisted: ids.length, deleted: 0, verifiedGone: 0, failures: [{ id: '*', step: 'cleanup', error: clip(error?.message ?? 'error', 200) }] } }
@@ -754,6 +794,8 @@ export async function runCheck(options, scripts, deps = {}) {
   if (agentRooms.length && !options.persisted) throw Object.assign(new Error(`an agentProfile conversation is a direct room, which is not one-time: it needs --persisted-with-cleanup (${agentRooms.join(', ')})`), { code: 'agent_room_needs_persisted' })
   const engineGoneRooms = scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => t.expect?.deleted?.engineGone)).map(c => `${script.set}/${c.id}`)) // c28
   if (engineGoneRooms.length && !options.persisted) throw Object.assign(new Error(`deleted.engineGone needs a saved engine thread: it needs --persisted-with-cleanup (${engineGoneRooms.join(', ')})`), { code: 'engine_gone_needs_persisted' })
+  const restartRooms = scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => t.action === 'restart')).map(c => `${script.set}/${c.id}`)) // c29
+  if (restartRooms.length && !options.persisted) throw Object.assign(new Error(`a restart turn needs a saved engine thread to come back to: it needs --persisted-with-cleanup (${restartRooms.join(', ')})`), { code: 'restart_needs_persisted' })
   assertCleanupGuaranteed(options, deps, deps.env ?? process.env)
   for (const { script } of scripts) {
     for (const conversation of script.conversations) {
