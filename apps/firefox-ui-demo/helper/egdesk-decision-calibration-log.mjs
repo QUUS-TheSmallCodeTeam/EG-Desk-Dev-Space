@@ -42,6 +42,32 @@ function timing(raw) {
   put(out, 'calls', count(raw.calls, 50)); put(out, 'withinBudget', typeof raw.withinBudget === 'boolean' ? raw.withinBudget : null)
   return Object.keys(out).length ? out : null
 }
+// Terminal (advisory first): the judged state, where it came from, what the system would do, and for a command what the rules and the score said.
+// Closed words, booleans and one rounded number only: never a command, a path or output text.
+const TERMINAL_STATES = new Set(['running_output', 'waiting_yn_input', 'waiting_password', 'stuck_in_pager', 'completed_ok', 'completed_error', 'need_user_context', 'cannot_proceed'])
+const TERMINAL_SOURCES = new Set(['runtime', 'rule', 'decision', 'fallback'])
+const TERMINAL_WOULD = new Set(['wait', 'hand_yes_no', 'hand_secret', 'quit_pager', 'hand_close_pager', 'report', 'repair', 'hand_subjective'])
+const TERMINAL_CHECKS = new Set(['read', 'exit', 'beat'])
+const GATE_REASONS = new Set(['unresolved_target', 'protected_target', 'outside_cwd', 'tracked_files', 'dirty_worktree', 'remote_irreversible', 'privileged', 'remote_script', 'risk_score', 'risk_unsure'])
+const GATE_ENGINES = new Set(['codex', 'claude'])
+const flagOf = value => (typeof value === 'boolean' ? value : null)
+function terminalFields(raw) {
+  if (!record(raw)) return null
+  const out = {}
+  put(out, 'state', word(TERMINAL_STATES, raw.state)); put(out, 'source', word(TERMINAL_SOURCES, raw.source)); put(out, 'would', word(TERMINAL_WOULD, raw.would))
+  put(out, 'check', word(TERMINAL_CHECKS, raw.check)); put(out, 'acted', flagOf(raw.acted)); put(out, 'agentOwned', flagOf(raw.agentOwned))
+  return Object.keys(out).length ? out : null
+}
+function gateFields(raw) {
+  if (!record(raw)) return null
+  const out = {}
+  put(out, 'rule', flagOf(raw.rule)); put(out, 'would', flagOf(raw.would)); put(out, 'scored', flagOf(raw.scored)); put(out, 'gitFacts', flagOf(raw.gitFacts)); put(out, 'sessionWithheld', flagOf(raw.sessionWithheld))
+  const reasons = Array.isArray(raw.reasons) ? [...new Set(raw.reasons.filter(reason => typeof reason === 'string' && GATE_REASONS.has(reason)))].slice(0, 6) : []
+  if (reasons.length) out.reasons = reasons
+  put(out, 'score', Number.isFinite(raw.score) && raw.score >= 0 && raw.score <= 4 ? Math.round(raw.score * 10) / 10 : null)
+  put(out, 'engine', word(GATE_ENGINES, raw.engine))
+  return Object.keys(out).length ? out : null
+}
 const FORCED = new Set(['mentioned', 'mandatory'])
 const KINDS = new Set(['board', 'source', 'conversation', 'timeline', 'document'])
 const SLICES = new Set(['past', 'present', 'planned', 'hypothetical', 'unknown'])
@@ -118,6 +144,8 @@ export function normalizeEntry(raw, now = Date.now()) {
   }
   put(entry, 'position', word(POSITIONS, raw.position)); put(entry, 'memory', word(MEMORY, raw.memory)); put(entry, 'timing', timing(raw.timing))
   put(entry, 'fallback', word(FALLBACK, raw.fallback)); put(entry, 'attached', typeof raw.attached === 'boolean' ? raw.attached : null)
+  if (feature === 'terminal_state') put(entry, 'terminal', terminalFields(raw.terminal))
+  if (feature === 'terminal_gate') put(entry, 'gate', gateFields(raw.gate))
   return entry
 }
 

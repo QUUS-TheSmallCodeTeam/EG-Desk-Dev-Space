@@ -158,3 +158,18 @@ test('rounding never moves a number across the bar it was judged against', () =>
   const at = normalizeEntry({ feature: 'dm_chooser', mode: 'on', judgments: [{ q: 'choice', would: 'act', top: 0.8, second: 0.6, confidence: 0.8, margin: 0.2, options: 4, threshold: 0.8, minMargin: 0.2 }] }).judgments[0]
   assert.equal(replayGate('dm_chooser', at), 'accept')
 })
+
+test('terminal records are closed words, booleans and one rounded number: a command, path or output text cannot be stored', async () => {
+  const { normalizeEntry } = await import('./egdesk-decision-calibration-log.mjs')
+  const state = normalizeEntry({ feature: 'terminal_state', mode: 'advisory', judgments: [], attached: false,
+    terminal: { state: 'stuck_in_pager', source: 'decision', would: 'quit_pager', acted: false, check: 'read', agentOwned: true, tail: 'git log output', command: 'git log' } })
+  assert.deepEqual(state.terminal, { state: 'stuck_in_pager', source: 'decision', would: 'quit_pager', check: 'read', acted: false, agentOwned: true })
+  assert.equal(normalizeEntry({ feature: 'terminal_state', mode: 'advisory', terminal: { state: 'rm -rf src', would: 'type y', source: 'model said so' } }).terminal, undefined)
+  const gate = normalizeEntry({ feature: 'terminal_gate', mode: 'on', judgments: [], attached: true,
+    gate: { rule: true, would: true, scored: false, gitFacts: true, sessionWithheld: true, reasons: ['tracked_files', 'rm -rf src/', 'tracked_files', 7], score: 3.74, engine: 'claude', command: 'rm -rf src/', cwd: '/work' } })
+  assert.deepEqual(gate.gate, { rule: true, would: true, scored: false, gitFacts: true, sessionWithheld: true, reasons: ['tracked_files'], score: 3.7, engine: 'claude' })
+  assert.equal(normalizeEntry({ feature: 'terminal_gate', mode: 'advisory', gate: { score: 9, engine: 'bash', reasons: 'all' } }).gate, undefined)
+  // the fields belong to their own feature only
+  assert.equal(normalizeEntry({ feature: 'dm_chooser', mode: 'on', terminal: { state: 'completed_ok' }, gate: { rule: true } }).terminal, undefined)
+  assert.doesNotMatch(JSON.stringify([state, gate]), /git log|rm -rf|\/work/)
+})

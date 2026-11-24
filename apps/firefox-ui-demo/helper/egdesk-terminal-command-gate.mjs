@@ -43,6 +43,9 @@ const dynamic = t => /[$`]|\$\(/.test(t)
 export function classifyCommand(command, { cwd, home = '/home/user', inspect = () => ({ exists: true, trackedFiles: 0, ignored: false }), git = { dirty: false } } = {}) {
   const reasons = new Set(), targets = []
   let destructive = false
+  const absolute = []
+  const known = typeof cwd === 'string' && cwd.startsWith('/')
+  if (!known) cwd = '/'
   const text = String(command ?? '')
   if (/\b(?:curl|wget)\b[^|;&]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b/.test(text)) reasons.add('remote_script')
   for (const raw of tokenize(text)) {
@@ -55,6 +58,8 @@ export function classifyCommand(command, { cwd, home = '/home/user', inspect = (
       const recursive = args.some(a => /^-[a-zA-Z]*[rR]/.test(a) || a === '--recursive')
       for (const arg of rest.filter(a => a !== '--')) {
         if (dynamic(arg)) { reasons.add('unresolved_target'); continue }
+        // Without a known working directory a relative target cannot be resolved: that is not a pass.
+        if (!known && !arg.startsWith('/') && !arg.startsWith('~')) { reasons.add('unresolved_target'); continue }
         const expanded = arg === '~' || arg.startsWith('~/') ? path.posix.join(home, arg.slice(1)) : arg
         const abs = path.posix.resolve(cwd, expanded)
         const globbed = /[*?[]/.test(arg)
@@ -62,19 +67,21 @@ export function classifyCommand(command, { cwd, home = '/home/user', inspect = (
         const base = globbed ? path.posix.dirname(abs) : abs
         const root = abs === '/' || abs === home || base === '/' || path.posix.dirname(base) === '/' || cwd.startsWith(base + '/') || base === cwd && !globbed
         if (recursive && root) reasons.add('protected_target')
-        const inside = base === cwd || base.startsWith(cwd + '/')
+        const inside = known && (base === cwd || base.startsWith(cwd + '/'))
         if (!inside) reasons.add('outside_cwd')
         const info = globbed ? { exists: true, trackedFiles: 0, ignored: false, glob: true } : inspect(abs)
         if ((info?.trackedFiles ?? 0) > 0) reasons.add('tracked_files')
         targets.push({ path: inside ? path.posix.relative(cwd, abs) || '.' : '(outside cwd)', exists: info?.exists !== false, kind: info?.kind ?? null,
-          trackedFiles: Math.min(info?.trackedFiles ?? 0, 9999), ignored: info?.ignored === true, glob: globbed, insideCwd: inside })
+          trackedFiles: Math.min(info?.trackedFiles ?? 0, 9999), ignored: info?.ignored === true, glob: globbed, insideCwd: inside,
+          ...(info?.unknown === true ? { gitUnknown: true } : {}) })
+        absolute.push(abs)
       }
     } else if (cmd === 'git') {
       const sub = args.find(a => !isFlag(a))
       const flags = args.filter(isFlag)
       if (sub === 'reset' && flags.includes('--hard') || sub === 'clean' && flags.some(f => /^-[a-z]*f/.test(f)) || sub === 'checkout' && args.includes('--') || sub === 'restore' && !flags.includes('--staged') || sub === 'branch' && flags.includes('-D')) {
         destructive = true
-        if (git.dirty && sub !== 'branch') reasons.add('dirty_worktree')
+        if (git?.dirty === true && sub !== 'branch') reasons.add('dirty_worktree')
       }
       if (sub === 'push' && flags.some(f => f === '--force' || f === '-f' || f.startsWith('--force-with-lease') || f === '--delete')) { destructive = true; reasons.add('remote_irreversible') }
     } else if (['dd', 'mkfs', 'truncate', 'kill', 'killall', 'pkill', 'chmod', 'chown'].includes(cmd) || cmd.startsWith('mkfs.')) {
@@ -83,7 +90,7 @@ export function classifyCommand(command, { cwd, home = '/home/user', inspect = (
       if ((cmd === 'chmod' || cmd === 'chown') && !args.some(a => /^-[a-zA-Z]*R/.test(a))) destructive = false
     } else if (cmd === 'find' && args.includes('-delete')) { destructive = true; reasons.add('unresolved_target') }
   }
-  return { destructive, floor: [...reasons], targets }
+  return { destructive, floor: [...reasons], targets, paths: [...new Set(absolute)] }
 }
 
 /**
@@ -100,20 +107,21 @@ export async function assessCommand({ command, cwd, intent = '', mode = 'off', c
   let answer
   try {
     answer = await client.decide({
-      input: [{ role: 'user', content: [{ type: 'input_json', data: { command: String(command).slice(0, 600), working_directory: path.posix.basename(cwd) || '/',
-        stated_intent: String(intent).slice(0, 240), targets, git_dirty: git?.dirty === true } }] }],
+      input: [{ role: 'user', content: [{ type: 'input_json', data: { command: String(command).slice(0, 600), working_directory: typeof cwd === 'string' ? path.posix.basename(cwd) || '/' : null,
+        stated_intent: String(intent).slice(0, 240), targets, git_dirty: typeof git?.dirty === 'boolean' ? git.dirty : null } }] }],
       questions: [scoreQuestion('terminal_risk', 'How destructive or irreversible is running this command here, given the targets and the stated intent?', RISK_LEVELS)],
       timeoutMs, signal })
   } catch (error) {
     try { calibration?.record?.({ feature: 'terminal_gate', mode, judgments: [], fallback: typeof error?.code === 'string' ? error.code : 'unreachable' }) } catch { /* ignore */ }
-    return { approval: false, reasons: [], source: 'fallback', requests: 1 }
+    return { approval: false, reasons: [], source: 'fallback', requests: 1, fallback: typeof error?.code === 'string' ? error.code : 'unreachable' }
   }
   const a = answer.answers.terminal_risk
   const known = a?.type === 'score'
   const high = known && a.score >= RISK_BAR
   const unsure = !known || !(a.confidence >= th.choice)
   try { calibration?.record?.({ feature: 'terminal_gate', mode, judgments: [{ q: 'terminal_risk', would: high || unsure ? 'hold' : 'act', confidence: known ? a.confidence : undefined, threshold: th.choice, options: RISK_LEVELS.length }] }) } catch { /* ignore */ }
-  if (mode === 'advisory') return { approval: false, reasons: [], source: 'fallback', requests: 1, shadow: high || unsure }
+  if (mode === 'advisory') return { approval: false, reasons: [], source: 'fallback', requests: 1, shadow: high || unsure,
+    shadowReasons: high ? ['risk_score'] : unsure ? ['risk_unsure'] : [], ...(known ? { score: Math.round(a.score * 100) / 100 } : {}) }
   const reasons = high ? ['risk_score'] : unsure ? ['risk_unsure'] : []
   return { approval: reasons.length > 0, reasons, source: 'decision', requests: 1, ...(known ? { score: Math.round(a.score * 100) / 100 } : {}) }
 }
