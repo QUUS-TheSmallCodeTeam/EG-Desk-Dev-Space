@@ -607,7 +607,15 @@ test('renderMemoryPacket: byte-identical to the loop\'s packet when nothing is l
   assert.equal(count(merged.value, BODY_ELSEWHERE), 1); assert.ok(merged.value.includes(`${SAME_SOURCE}\n${body('db/pg-rollback')}`))
   assert.match(merged.value, /\[page id=db\/pg-plan [^\]]*status-read=plan[^\]]*\]\n\[content not repeated here/, 'the header (time, provenance, status reading) stays')
   assert.ok(merged.value.includes('[links among held pages]'), 'links are untouched')
+  // the same words under ANOTHER id (an utterance quoted inside the recent-utterances item, as a JSON string): not sent again either
+  const quoted = `SELECTED\n\n${JSON.stringify({ utterances: [{ quote: body('db/pg-health') }, { quote: 'say "hi"\nthen go' }] })}`
+  const other = mergeIntoSelection(quoted, { head: 'H', blocks: [{ id: 'speech/m1', header: '[page id=speech/m1]', body: body('db/pg-health') }, { id: 'speech/m2', header: '[page id=speech/m2]', body: 'say "hi"\nthen go' },
+    { id: 'speech/m3', header: '[page id=speech/m3]', body: 'hi' }], pointers: [], linkLines: [] }, [])
+  assert.deepEqual([other.omitted, other.sameSource], [['speech/m1'], []], 'a long body found word for word; a short one (16 chars, "hi") is not taken for the same content')
+  assert.equal(count(other.value, body('db/pg-health')), 1)
+  assert.deepEqual(mergeIntoSelection(`SELECTED\n\n${JSON.stringify({ quote: 'a long enough line that says "quoted" things\nover two lines' })}`, { head: 'H', blocks: [{ id: 'speech/m4', header: '[h]', body: 'a long enough line that says "quoted" things\nover two lines' }], pointers: [], linkLines: [] }, []).omitted, ['speech/m4'], 'found inside a JSON string too')
   // nothing selected: the memory part is the packet itself; nothing to merge into: null
-  assert.equal(mergeIntoSelection(selection, parts, []).value, `${selection}\n\n${result.packet}`)
+  assert.equal(mergeIntoSelection('OTHER ITEMS, none of these pages', parts, []).value, `OTHER ITEMS, none of these pages\n\n${result.packet}`)
+  assert.deepEqual(mergeIntoSelection(selection, parts, []).omitted, ['db/pg-plan'], 'the body is there word for word, whatever id the item has')
   assert.deepEqual([mergeIntoSelection('', parts, []), mergeIntoSelection(selection, null, []), mergeIntoSelection('  ', parts, ['db/pg-plan'])], [null, null, null])
 })

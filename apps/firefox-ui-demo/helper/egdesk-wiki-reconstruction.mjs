@@ -163,6 +163,8 @@ export const BODY_ELSEWHERE = '[content not repeated here: this page is among th
 /** Put before the body of a page that a selected item above shows in another form (a summary, a different cut): one record, not two. */
 export const SAME_SOURCE = '[same record as a selected item above, which shows it in another form: count it once]'
 const TRUNCATED = '\n[…truncated]'
+/** A memory page with another id than any selected item counts as already sent only when at least this much of it is there word for word. */
+export const MIN_SAME_TEXT = 24
 const renderParts = (parts, omit = null, same = null) => [parts.head,
   ...parts.blocks.map(b => `${b.header}\n${omit?.has(b.id) ? BODY_ELSEWHERE : same?.has(b.id) ? `${SAME_SOURCE}\n${b.body}` : b.body}`),
   ...(parts.pointers.length ? [parts.pointers.join('\n')] : []), ...(parts.linkLines.length ? [`[links among held pages]\n${parts.linkLines.join('\n')}`] : [])]
@@ -181,15 +183,19 @@ export function renderMemoryPacket(parts, { omitBodies = null, sameSource = null
  * mergeIntoSelection(selectionText, packetParts, selectedIds) -> { value, omitted, sameSource } | null
  * One packet for the answering model: the selected items (unchanged, first) and the memory pages after them. A memory page that is also a
  * selected item is not sent twice: when its body (as memory would send it) is already there word for word, only its header stays; when the
- * selection shows the same record in another form, the body stays once and is marked as the same record. null when there is nothing to merge.
+ * selection shows the same record in another form, the body stays once and is marked as the same record. A page under another id whose
+ * body is there word for word (an utterance quoted by the recent-utterances item) is treated the same way. null when there is nothing to merge.
  */
 export function mergeIntoSelection(selectionText, parts, selectedIds) {
   if (typeof selectionText !== 'string' || !selectionText.trim() || !parts || !Array.isArray(parts.blocks) || !parts.blocks.length) return null
   const selected = idSet(selectedIds), omitted = [], sameSource = []
   for (const block of parts.blocks) {
-    if (!selected.has(block.id)) continue
     const text = block.body.endsWith(TRUNCATED) ? block.body.slice(0, -TRUNCATED.length) : block.body
-    ;(text.trim() && selectionText.includes(text) ? omitted : sameSource).push(block.id)
+    // Word for word in the selection, as plain text or inside a JSON string (the recent-utterances item quotes utterances that way).
+    const there = text.trim() !== '' && (selectionText.includes(text) || selectionText.includes(JSON.stringify(text).slice(1, -1)))
+    // The same record by id, or (under another id) a body long enough that finding it word for word is not a coincidence.
+    if (there && (selected.has(block.id) || text.trim().length >= MIN_SAME_TEXT)) omitted.push(block.id)
+    else if (selected.has(block.id)) sameSource.push(block.id)
   }
   return { value: `${selectionText}\n\n${renderMemoryPacket(parts, { omitBodies: omitted, sameSource })}`, omitted, sameSource }
 }
