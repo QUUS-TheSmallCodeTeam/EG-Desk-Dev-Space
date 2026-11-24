@@ -96,6 +96,8 @@ export const LATE_CONTEXT_MS = 1500
 // The bridge passes both explicitly (decisionContext.budgetMs / coldBudgetMs / warm); a setup without coldBudgetMs keeps one budget.
 export const TURN_CONTEXT_BUDGET_MS = 800
 export const TURN_CONTEXT_COLD_BUDGET_MS = 1500
+// Continuity check after a resume (checkContinuity): how many pages of 100 turns / runs are compared before the thread counts as foreign.
+export const CONTINUITY_MAX_PAGES = 20
 // How the app-server says a thread's context was compacted: a `contextCompaction` item (item/started, item/completed), and on older builds the
 // deprecated `thread/compacted` notification. Either one means the answering model may no longer hold what was delivered to it.
 // `thread/reverted` (Codex 0.171 schema, ThreadRevertedNotification): the thread's durable history was replaced by the prefix before one turn;
@@ -906,6 +908,7 @@ export class CodexChatRuntime {
     this.browserTaskRuns = new WeakSet() // runs that worded a browser task's note (their last message may be the task's question)
     this.browserRunJobs = new Set() // in-run resumes of the objective loop (never awaited by a request)
     this.turnAliases = new Map() // runKey(thread, later native turn) -> the run id that turn continues (a held-open browser-task run)
+    this.foreignThreads = new Set() // native threads that hold a turn EG-Desk did not run, or whose history could not be compared (L7 c25); bounded
     this.compactedThreads = new Set() // native threads whose context the engine said was compacted (see compactionSignal); bounded
     this.topicAnswerGuards = new WeakMap() // private, bounded proof; never checkpointed
     this.topicIntakes = new WeakMap() // accepted local request -> prospective generation, never copied to checkpoints
@@ -3059,6 +3062,7 @@ export class CodexChatRuntime {
           throw chatError('TOPIC_ANSWER_BINDING', 'Native answer identity is unavailable; saved local history is unchanged', 409)
         this.store.bindTopicAnswer(clientThreadId, pendingGuard, matches[0].id)
       }
+      if (engineId === 'codex') await this.checkContinuity(cid, clientThreadId, result, slot, turns)
       this.rememberThread(cid, result, clientThreadId)
       currentCatalog ||= this.collectToolSpecs(null, { forManifest: true, engineId, authority: contextAuthority })
       verifiedTools ||= verifiedManifestOwners(this.threadToolManifests.get(cid), currentCatalog.manifest, currentCatalog.owners)
@@ -4959,8 +4963,46 @@ export class CodexChatRuntime {
       if (!cid) return deriveTurnPosition({ threadId: null })
       let prior = 0
       try { prior = (this.store?.listMessages?.(context.clientThreadId)?.messages ?? []).filter(m => m.role === 'assistant' && m.status !== 'streaming' && m.status !== 'error').length } catch { prior = 0 }
-      return deriveTurnPosition({ threadId: cid, priorCompletedTurns: prior, compacted: this.compactedThreads.has(cid), resumed: !this.loadedThreads.has(cid) })
+      return deriveTurnPosition({ threadId: cid, priorCompletedTurns: prior, compacted: this.compactedThreads.has(cid), foreign: this.foreignThreads.has(cid), resumed: !this.loadedThreads.has(cid) })
     } catch { return { kind: 'first', reason: 'unknown_state' } }
+  }
+
+  // After a resume: does the engine's thread hold a turn EG-Desk did not run? Compares the engine's turn ids (the resume response, and the
+  // thread/turns/list pages when it is paginated) with the run ids of EG-Desk's own record of this conversation. Any engine turn EG-Desk has no
+  // run for, or a history that cannot be compared completely (no store, a failed or oversized listing), marks the thread foreign: no receipts,
+  // no previous_reply, no held pruning, and the next turn is a first turn for memory purposes until its loop re-sent what it needs.
+  // Non-ephemeral threads live in the person's Codex home, where other Codex clients can continue them (Main, real engine smoke 3).
+  async checkContinuity(cid, clientThreadId, result, slot, turns) {
+    let foreign = false, why = null
+    try {
+      const ids = new Set(turns.map(turn => idText(turn?.id)).filter(Boolean))
+      let cursor = result.turnsBackwardsCursor ?? null, pages = 0
+      const request = this.scopedRequest(slot)
+      while (cursor && pages < CONTINUITY_MAX_PAGES) {
+        const page = await request('thread/turns/list', { threadId: cid, cursor, itemsView: 'notLoaded', limit: 100, sortDirection: 'desc' })
+        for (const turn of Array.isArray(page?.data) ? page.data : []) { const id = idText(turn?.id); if (id) ids.add(id) }
+        cursor = page?.nextCursor ?? null; pages++
+      }
+      if (cursor) { foreign = true; why = 'history_too_long' }
+      else {
+        const own = new Set()
+        let afterSeq = 0
+        for (let n = 0; n < CONTINUITY_MAX_PAGES; n++) {
+          const page = this.store?.listRuns?.(clientThreadId, { afterSeq, limit: 100 })
+          if (!page) { foreign = true; why = 'no_record'; break }
+          for (const run of page.runs ?? []) if (idText(run.runId)) own.add(run.runId)
+          if (!page.hasMore) break
+          afterSeq = page.nextCursor
+          if (n === CONTINUITY_MAX_PAGES - 1) { foreign = true; why = 'record_too_long' }
+        }
+        if (!foreign && [...ids].some(id => !own.has(id))) { foreign = true; why = 'unknown_turn' }
+      }
+    } catch { foreign = true; why = 'check_failed' }
+    if (!foreign) { this.foreignThreads.delete(cid); return }
+    this.foreignThreads.delete(cid); this.foreignThreads.add(cid)
+    while (this.foreignThreads.size > 200) this.foreignThreads.delete(this.foreignThreads.values().next().value)
+    this.turnMemoryDelivered.delete(cid); this.turnMemoryShadow.delete(cid); this.contextDelivered.delete(cid)
+    this.foreignReason = why // last reason only, for tests and diagnostics; never shown
   }
 
   /** The host learned that this thread's native context was compacted: the next turn is a first turn for memory purposes. */
@@ -6994,7 +7036,11 @@ export class CodexChatRuntime {
         while (this.turnMemoryDelivered.size > 50) this.turnMemoryDelivered.delete(this.turnMemoryDelivered.keys().next().value)
       }
       // A compaction mark is spent once a loop ran to its end for the turn after it; a cut or failed loop leaves it for the next turn.
-      if (memory.status !== 'fallback' && !memory.partial) this.compactedThreads.delete(cid)
+      if (memory.status !== 'fallback' && !memory.partial) {
+        this.compactedThreads.delete(cid)
+        // spent only by the loop that ran BECAUSE of it (as a first turn): the resumed turn that found the foreign turns does not spend it
+        if (turn.position?.reason === 'foreign_turns') this.foreignThreads.delete(cid)
+      }
       if (attached) {
         const pages = Object.keys(memory.delivered ?? {}).map(id => turn.wiki.pages.get(id)).filter(Boolean)
         const activity = decisionContextActivity({ answerId: `${run.answerId}\u0000memory`, selected: pages.map(p => ({ id: p.id, title: p.title, timeSlice: p.time.slice, ...(p.ref ? { sourceRef: p.ref } : {}) })) })

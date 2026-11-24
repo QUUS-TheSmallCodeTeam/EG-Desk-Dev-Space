@@ -24,17 +24,21 @@ import { ACTION_MEMORY_RULE, MIN_CALL_MS, PROVENANCE_BASES, REAL_CLOCK, YES, NO,
  *  - compacted: the host knows the native context was compacted (no signal is wired today; see markContextCompacted)
  *  - resumed: the thread was restored with its history (thread/resume), which keeps the context
  */
-export function deriveTurnPosition({ threadId = null, priorCompletedTurns = 0, startsFreshThread = false, compacted = false, resumed = false } = {}) {
+export function deriveTurnPosition({ threadId = null, priorCompletedTurns = 0, startsFreshThread = false, compacted = false, resumed = false, foreign = false } = {}) {
   if (typeof threadId !== 'string' || !threadId) return { kind: 'first', reason: 'no_native_thread' }
   if (startsFreshThread) return { kind: 'first', reason: 'fresh_native_thread' }
   if (!(Number.isSafeInteger(priorCompletedTurns) && priorCompletedTurns > 0)) return { kind: 'first', reason: 'no_prior_turns' }
   if (compacted) return { kind: 'first', reason: 'context_compacted' }
+  // The engine's thread holds a turn EG-Desk did not run (another Codex client continued it), or this could not be checked (L7 c25):
+  // what EG-Desk delivered earlier says nothing about what the model holds now, so the turn is a first turn until memory was re-sent.
+  if (foreign) return { kind: 'first', reason: 'foreign_turns' }
   return { kind: 'mid', reason: resumed ? 'resumed_thread_with_history' : 'live_thread' }
 }
 
-/** Receipts count only for the same native thread and only mid-session; anything else is "the model may not hold it". */
+/** Receipts count only for the same native thread and only on a LIVE thread (this process loaded it and has followed every turn since: no unseen
+ * compaction, revert or turn of another client); anything else is "the model may not hold it" (L7 c25: a resumed thread is not live). */
 export function usableReceipts(delivered, position, threadKey) {
-  const ok = position?.kind === 'mid' && record(delivered) && delivered.usable === true && delivered.threadKey === threadKey && typeof threadKey === 'string'
+  const ok = position?.kind === 'mid' && position.reason === 'live_thread' && record(delivered) && delivered.usable === true && delivered.threadKey === threadKey && typeof threadKey === 'string'
   return ok ? delivered : { usable: false, pages: {}, threadKey: threadKey ?? null }
 }
 
