@@ -14,7 +14,7 @@ import { canvasViewSize, placeCanvasView } from '../overlay/resources/EGDeskSurf
 // (egdesk-briefing-catalog.mjs) and from the cards already on the board (with provenance). Nothing here talks to a network, publishes, moves a camera or writes the
 // Board: the host injects judge{} (bridge route) and fill().
 
-export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, maxFacts: 6, factMax: 300, maxMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 8, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
+export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, maxFacts: 6, factMax: 300, maxMaterials: 12, maxParts: 6, softSteps: 5, maxRequests: 8, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
 // A predicate counts as yes at or above `yes` and as no at or below `no`; anything between is undecided. Placeholders until calibrated (real predicates of the other features answer near 0 or 1).
 export const SKELETON_BARS = Object.freeze({ yes: .7, no: .3 })
 export const SKELETON_STAGES = Object.freeze(['place', 'fit', 'order', 'fill_check', 'coverage'])
@@ -163,8 +163,12 @@ export function enumerateSkeleton({ materials = [], candidates = [], currentAnsw
       if (seenPairs.has(pair)) continue
       seenPairs.add(pair); raw.push({ trait: 'compare', materials: [older, newer] })
     }
-    const dated = group.filter(m => m.at).sort((a, b) => a.at.localeCompare(b.at) || a.alias.localeCompare(b.alias))
-    if (dated.length >= 2) raw.push({ trait: 'sequence', materials: dated.map(m => m.alias) })
+    const dated = group.filter(m => m.at).sort((a, b) => a.at.localeCompare(b.at) || Number(a.alias.slice(1)) - Number(b.alias.slice(1)))
+    // Cycle 25 (long ranges): more dated materials than one list card holds -> several sequence parts, one per period (consecutive in date order), never chat
+    if (dated.length >= 2) {
+      const chunks = splitByPeriod(dated, sequenceRows(catalog)), split = `S${raw.length}`
+      chunks.forEach((chunk, index) => raw.push({ trait: 'sequence', materials: chunk.map(m => m.alias), ...(chunks.length > 1 ? { period: { split, index } } : {}) }))
+    }
     const open = group.filter(m => m.open)
     if (open.length) raw.push({ trait: 'open_items', materials: open.map(m => m.alias) })
     for (const part of raw.slice(start)) for (const a of part.materials) covered.add(a)
@@ -186,16 +190,50 @@ export function enumerateSkeleton({ materials = [], candidates = [], currentAnsw
     const reuse = same?.alias ?? (part.materials.length === 1 ? existing[0] : null)
     if (reuse) options.push({ value: `reuse_${reuse}`, reuse })
     const dates = part.materials.map(a => byAlias.get(a).at).filter(Boolean).sort()
-    return { alias, trait: part.trait, materials: part.materials, anchor: { min: dates[0] ?? null, max: dates.at(-1) ?? null }, options }
+    return { alias, trait: part.trait, materials: part.materials, anchor: { min: dates[0] ?? null, max: dates.at(-1) ?? null }, ...(part.period ? { period: part.period } : {}), options }
   }).filter(part => part.options.length) // a part nothing in the catalog can show is not a part
   return { materials: mats, targets, shows, how, built, parts, retrievable: targets.filter(t => t.retrievable).map(t => t.alias).slice(0, 6), catalog }
+}
+/** How many rows a sequence card holds: the list slot of the catalog's sequence components (the smallest), else 6. */
+export function sequenceRows(catalog = BRIEFING_CATALOG) {
+  const maxes = (catalog.entries ?? []).filter(e => e.suits?.includes('sequence') && e.renderer?.creates).flatMap(e => e.slots.filter(sl => sl.type === 'list').map(sl => sl.max))
+  return maxes.length ? Math.min(...maxes) : 6
+}
+/**
+ * splitByPeriod(dated, max) -> consecutive chunks of the date-ordered materials, each 2..max long: as few chunks as the rows require, near-equal in size, cut where
+ * the date changes when it can (a chunk is a period), never leaving one material alone (a sequence needs two).
+ */
+export function splitByPeriod(dated, max = 6) {
+  const list = [...dated]
+  if (list.length <= max) return [list]
+  const k = Math.ceil(list.length / max), size = Math.ceil(list.length / k), out = []
+  const dayLength = at => list.filter(m => m.at === at).length
+  let cur = []
+  for (let i = 0; i < list.length; i++) {
+    cur.push(list[i])
+    const next = list[i + 1]
+    if (!next) break
+    // keep a day whole only when the day fits one card; a longer day is cut at the near-equal size
+    const sameDay = next.at === list[i].at && dayLength(next.at) <= max
+    if (cur.length >= max || (cur.length >= size && !(sameDay && cur.length < max && list.length - i - 1 > 1))) { out.push(cur); cur = [] }
+  }
+  if (cur.length) out.push(cur)
+  // a last chunk of one cannot be a sequence: move the boundary back to the previous date change when both sides keep two or more, else move one material
+  if (out.length > 1 && out.at(-1).length < 2) {
+    const prev = out.at(-2), last = out.at(-1)
+    let j = -1
+    for (let x = prev.length - 1; x >= 2; x--) if (prev[x].at !== prev[x - 1].at && prev.length - x + last.length <= max) { j = x; break }
+    const moved = prev.splice(j > 0 ? j : prev.length - 1)
+    out[out.length - 1] = [...moved, ...last]
+  }
+  return out
 }
 // ---------------- 3. the judge: yes/no predicates only; every judged item is quoted in its own question; code combines the answers ----------------
 // Real measurement (2026-11-24, 11 requests) of the earlier request shape: N-way choices with safe ways out ("bubble", "none_fits", "bubble_enough") went flat or to
 // the safe side, a "which comes next" choice whose options carried no content was refused, and a negated check over a JSON blob said "mismatch" for every step, right
 // or wrong. So (design rules R1-R4): the model reads the actual request and material text, each question is ONE yes/no about ONE quoted thing, and whatever code can
 // compute (layout, time order, what is already on the board, which fold to propose) is not asked.
-const MATERIAL_ALIAS = /^M[1-8]$/, TARGET_ALIAS = /^T(?:[1-9]|1[0-2])$/, PART_ALIAS = /^P[1-6]$/, REUSE_VALUE = /^reuse_(T(?:[1-9]|1[0-2]))$/
+const MATERIAL_ALIAS = /^M(?:[1-9]|1[0-2])$/, TARGET_ALIAS = /^T(?:[1-9]|1[0-2])$/, PART_ALIAS = /^P[1-6]$/, REUSE_VALUE = /^reuse_(T(?:[1-9]|1[0-2]))$/
 const TRAITS = ['compare', 'sequence', 'open_items', 'single']
 // Fit (cycle 16, after the second real measurement): content sufficiency only, ONE condition per question. Whether a material belongs to the answer was decided upstream
 // (the memory loop's relevance judgments and \`place\`); whether two materials are versions of one thing and whether a material is still open are in the record (code).
@@ -405,6 +443,9 @@ export function chooseParts(scene, answers) {
 const FUTURE = '9999-12-31', DERIVES = new Set(['follows_from', 'decided_in', 'supersedes', 'refers_to'])
 /** Does the record say a comes before b? true / false / null (the record does not say: a tie). Time first (every material of a is earlier than every material of b; a plan without a date is in the future), then links (b's materials build on a's and not the other way round). */
 export function recordedBefore(a, b, scene) {
+  // two periods of one split sequence: their order is the split's own (code made it from the date order)
+  const pa = a.period ?? scene.parts?.find(p => p.alias === a.id)?.period, pb = b.period ?? scene.parts?.find(p => p.alias === b.id)?.period
+  if (pa && pb && pa.split === pb.split) return pa.index < pb.index
   const by = new Map(scene.materials.map(m => [m.alias, m])), when = m => m.at ?? (m.open ? FUTURE : null)
   const span = item => { const dates = item.materials.map(x => when(by.get(x))); return dates.includes(null) ? null : { min: [...dates].sort()[0], max: [...dates].sort().at(-1) } }
   const sa = span(a), sb = span(b)

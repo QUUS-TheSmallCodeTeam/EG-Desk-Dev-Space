@@ -36,6 +36,11 @@ export function mergedLaneCycles(text) {
   if (!/병합|merged/i.test(t)) return []
   return [...new Set([...t.matchAll(/\bL([1-9])\s?c(\d{1,3})\(([0-9a-f]{7,40})[^)]*\)(?=([^,;]{0,24}))/g)].filter(m => !/충돌|보류|제외|않|실패|conflict|held|excluded/i.test(m[4])).map(m => `l${m[1]}-c${Number(m[2])}`))]
 }
+const COMMIT_IDS = /\s?\((?:[0-9a-f]{7,40})(?:\s*[·,/]\s*[0-9a-f]{7,40})*\)/g
+export function titleHead(body) {
+  const plainIds = String(body).replace(COMMIT_IDS, '')
+  return plainIds.split(/(?<=[.!?])\s|\s—\s/)[0].trim()
+}
 /** The status a ledger line states, by its words; anything else is unknown. merged -> done; assigned / started -> plan; a lane's report received -> reported_by_other. */
 export function statedStatus(text) {
   const t = String(text)
@@ -66,7 +71,9 @@ export function parseLedger(text, { year = null } = {}) {
     const body = flat(maskSecrets(m[5]))
     const stamp = `${pad(month)}-${pad(day)} ${pad(hh)}:${pad(mm)}`
     const n = (seen.get(stamp) ?? 0) + 1; seen.set(stamp, n)
-    const head = body.split(/(?<=[.:)])\s|\s—\s|→/)[0]
+    // Cycle 25: the title says what the line records. Commit ids in parentheses are dropped from it (they stay in the text), and it runs to the first sentence end
+    // (c24 cut at the first ')' or ':', so a merge line was titled by its ids alone: "11-24 22:50 L7 c19(e930372·18337b8·57de3f0)" -> about .31 in the real run).
+    const head = titleHead(body)
     events.push({ id: `ledger-${pad(month)}${pad(day)}-${pad(hh)}${pad(mm)}-${n}`, at: dated(year, month, day), clock: `${pad(hh)}:${pad(mm)}`, lanes: laneCyclesIn(body), merged: mergedLaneCycles(body),
       status: statedStatus(body), title: cut(`${stamp} ${head}`, LIMITS.title), excerpt: cut(`${stamp} ${body}`, LIMITS.excerpt) })
   }

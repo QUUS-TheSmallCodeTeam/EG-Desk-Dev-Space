@@ -2,7 +2,7 @@
 // L4 cycle 24: the briefing on REAL material (the decision loop's own record, built by scripts/egdesk-briefing-loop-materials.mjs). For each request of a spec
 // (kept outside the repository: it quotes the real material), the materials are selected BY CODE, the product's own skeleton flow runs through the production
 // Board/Decisions handler with a local provider (nothing is sent), the subjective model's fill is FAITHFUL (copied from the materials), and the exact bodies the
-// product sends are kept with pre-registered expectations at the product bars. Token estimate: lane L6's typed model + 15 %.
+// product sends are kept with pre-registered expectations at the product bars. Token estimate: TOKEN_MODEL (cycle 25, fitted on real usage).
 //   node scripts/egdesk-briefing-real-material-plan.mjs --pages <pages.json> --spec <spec.json> --out <dir outside the repo>
 import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -13,7 +13,18 @@ import { DECISION_MODEL } from '../helper/egdesk-decision-client.mjs'
 import { rig } from './egdesk-briefing-rig.support.mjs'
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
-const est = wire => { const body = JSON.parse(wire); return Math.ceil(1.15 * (134.8 * body.questions.length + 0.1983 * Buffer.byteLength(wire))) }
+// Cycle 25: fitted by least squares on the 15 real briefing requests with bodies on disk (c18, c20, c21, c24; 22,020 real input tokens): per question, per ASCII
+// character, per non-ASCII character (Korean text costs about 4.4x an ASCII character; the c24 byte model under-counted it and the real run hit its ceiling at
+// 13,076 against an estimate of 11,989). Worst real/fit ratio 1.074, so the estimate carries a 1.10 margin.
+export const TOKEN_MODEL = Object.freeze({ perQuestion: 132.18, perAscii: 0.2231, perNonAscii: 0.9838, margin: 1.10, fittedOn: 15, worstRatio: 1.074 })
+export function estimateTokens(wire) {
+  const body = JSON.parse(wire), text = String(wire)
+  let ascii = 0
+  for (const ch of text) if (ch.codePointAt(0) < 128) ascii++
+  const nonAscii = [...text].length - ascii
+  return Math.ceil(TOKEN_MODEL.margin * (TOKEN_MODEL.perQuestion * body.questions.length + TOKEN_MODEL.perAscii * ascii + TOKEN_MODEL.perNonAscii * nonAscii))
+}
+const est = estimateTokens
 const byTime = (a, b) => `${a.time.at ?? ''} ${a.clock ?? ''}`.localeCompare(`${b.time.at ?? ''} ${b.clock ?? ''}`)
 
 // ---- selection BY CODE (the memory loop that would choose in the product is not part of this measurement; the rule is named in the plan) ----
@@ -24,6 +35,8 @@ const selectors = pages => ({
   'lane-reports': ({ lane, from, n = 8 }) => pages.filter(p => p.source === 'report' && p.lane === lane && p.cycle >= from).sort((a, b) => a.cycle - b.cycle).slice(-n),
   // the ledger lines that name one lane-cycle (where its merge is recorded with its date), in time order
   naming: ({ laneCycle, n = 8 }) => pages.filter(p => p.source === 'ledger' && p.lanes.includes(laneCycle)).sort(byTime).slice(0, n),
+  // named pages, in the given order (a diagnostic re-asks one item alone); `override` replaces named fields of a page for an A/B of one change
+  ids: ({ ids, override = {} }) => ids.map(id => { const p = pages.find(x => x.id === id); if (!p) throw new Error(`no page ${id}`); return { ...p, ...(override[id] ?? {}) } }),
 })
 
 // ---- the faithful fill: every slot copied from the material it cites (as lane L2 did for s3) ----
@@ -47,16 +60,22 @@ function faithfulFill(asked, materials) {
             else if (f.name === 'label') row.label = item.shows === 'sequence' && mmdd(m.time.at) ? mmdd(m.time.at) : cut(m.title.replace(/^\d{2}-\d{2} \d{2}:\d{2}\s*/, ''), f.max)
             // what the card copies: a report page's change is its own title, cycle name included (its excerpt opens with bookkeeping); a ledger line is its own
             // text, its stamp included (the time is part of what it records)
-            // an open item copies the clause that makes it open (from the stated plan word on), when the whole line does not fit the card
-            else if (f.name === 'text') { const at = item.shows === 'open_items' ? m.excerpt.search(/배정|착수|assigned/i) : -1
-              row.text = cut(m.id.startsWith('report-') ? m.title : at > 0 && m.excerpt.length > f.max ? m.excerpt.slice(at) : m.excerpt, f.max) }
+            else if (f.name === 'text') row.text = cut(m.id.startsWith('report-') ? m.title : m.excerpt, f.max)
             else if (f.name === 'aspect') row.aspect = '내용'
             else if (f.name === 'left' || f.name === 'right') row[f.name] = cut(sentences(materials[Number(item.materials[f.name === 'right' ? 1 : 0].slice(1)) - 1].excerpt)[i] ?? '', f.max)
             else row[f.name] = cut(m.title, f.max ?? 60)
           }
           return row
         })
-        slots[s.name] = rows.slice(0, Math.max(s.min ?? 1, rows.length))
+        // Cycle 25: an open-items card lists what is still to happen. A planned line that assigns several items ("배정: A / B / C") gives one copied line per
+        // item, each headed by the line's own stamp (c24 put the whole line in one 90-character row: two of eight assignments, under a cut title -> F5 .60).
+        const openLines = item.shows === 'open_items' && s.of.some(f => f.name === 'text') ? item.materials.flatMap((alias, i) => {
+          const m = ms[i], at = m.excerpt.search(/배정|착수|assigned/i), stamp = /^\d{2}-\d{2} \d{2}:\d{2}/.exec(m.excerpt)?.[0]
+          if (at < 0) return []
+          const items = m.excerpt.slice(at).replace(/^(?:배정|착수|assigned)\s*[:：]?\s*/i, '').replace(/…$/, '').split(/\s+\/\s+/).map(x => x.trim()).filter(Boolean)
+          return items.map(x => ({ label: cut(stamp ?? m.title, s.of.find(f => f.name === 'label').max), text: cut(x, s.of.find(f => f.name === 'text').max), from: alias }))
+        }) : []
+        slots[s.name] = openLines.length ? openLines.slice(0, s.max) : rows.slice(0, Math.max(s.min ?? 1, rows.length))
       }
     }
     const first = slots.lines?.[0]?.text ?? slots.rows?.[0]?.left ?? sentences(slots.body ?? ms[0].title)[0] ?? ms[0].title
@@ -79,7 +98,7 @@ async function flow({ request, answer, materials, script = () => undefined }) {
   } finally { for (const fn of cleanups) fn() }
 }
 
-const YES = { min: SKELETON_BARS.yes }, NO = { max: SKELETON_BARS.no }
+const YES = { min: SKELETON_BARS.yes }, NO = { max: SKELETON_BARS.no }, COMBINES_NOT_YES = Math.round((SKELETON_BARS.yes - 0.001) * 1000) / 1000 // the board decision's bubble side (see productBars.combines)
 const check = (name, sev, bar, note) => ({ name, kind: 'predicate', ...bar, severity: sev, note })
 /** main(argv) -> { plan, log, total } (writes the plan and the bodies under --out). Throws on a refusal or an over-ceiling plan. */
 export async function main(argv = process.argv.slice(2)) {
@@ -108,7 +127,7 @@ for (const r of spec.requests) {
     const id = `${r.id}-${c.stage}${f.captured.filter(x => x.stage === c.stage).indexOf(c) ? `-${f.captured.filter(x => x.stage === c.stage).indexOf(c) + 1}` : ''}`
     const expect = c.names.map(n => {
       const rule = want.find(w => new RegExp(`^${w.match}$`).test(n))
-      return rule ? check(n, rule.severity, rule.yes ? YES : NO, rule.note) : null
+      return rule ? check(n, rule.severity, rule.yes ? YES : n === 'combines' ? { max: COMBINES_NOT_YES } : NO, rule.note) : null
     }).filter(Boolean)
     const bytes = Buffer.from(c.wire, 'utf8'), body = JSON.parse(c.wire)
     if (body.model !== DECISION_MODEL || body.questions.some(q => q.type !== 'predicate')) throw new Error(`${id}: not a plain predicate body`)
@@ -120,7 +139,10 @@ for (const r of spec.requests) {
 }
 const families = ['combines', 'about_M#', 'same_M#_M#', 'aspect_P#', 'happened_M#', 'todo_M#', 'fact_M#', 'before_P#_P#', 'slot_P#_r#', 'slot_P#_r#_left', 'slot_P#_r#_right', 'step_P#', 'onboard_F#', 'several', 'one_sentence']
 const plan = { set: spec.set, tokenCeiling: spec.tokenCeiling,
-  productBars: Object.fromEntries(families.map(f => [f, { yes: SKELETON_BARS.yes, no: SKELETON_BARS.no, source: 'egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7, isNo iff p <= .3' }])),
+  productBars: { ...Object.fromEntries(families.map(f => [f, { yes: SKELETON_BARS.yes, no: SKELETON_BARS.no, source: 'egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7, isNo iff p <= .3' }])),
+    // Cycle 25: for the board decision the product's negative outcome is anything that is not a yes (decidePlace: a decided no -> judged-bubble, undecided -> placement-
+    // undecided, both the bubble). A bubble check therefore holds combines below the yes bar; c24 held it at <= .3, stricter than the product (.43 was a bubble).
+    combines: { yes: SKELETON_BARS.yes, no: COMBINES_NOT_YES, source: 'egdesk-briefing-skeleton.mjs decidePlace: board iff combines >= .7 (and two relevant materials); anything below .7 is the bubble' } },
   passRule: spec.passRule, requests }
 writeFileSync(path.join(OUT, 'plan.json'), JSON.stringify(plan, null, 2) + '\n', { mode: 0o600 })
 const total = requests.reduce((s, x) => s + x.estInputTokens, 0)
