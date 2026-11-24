@@ -100,7 +100,7 @@ export function createGateHookBroker({ mode = () => 'off', assess = null, home, 
     async check({ sessionId = null, turnId, cwd, command } = {}) {
       const m = currentMode()
       if (m === 'off' || typeof command !== 'string' || !command.trim() || command.length > L.commandChars || typeof cwd !== 'string' || !cwd.startsWith('/')) return { decision: 'none' }
-      try { onCheck() } catch { /* e.g. the runtime's engine-version notice; never affects the answer */ }
+      try { onCheck({ conversationId: turns.get(turnId)?.conversationId ?? (typeof sessionId === 'string' ? sessionId : null) }) } catch { /* e.g. the runtime's engine-version notice; never affects the answer */ }
       const key = commandKey(command, cwd)
       // a turn the runtime started; or, when the hook is faster than the turn's registration, the turn a reply already approved for
       const turn = (typeof turnId === 'string' && turns.get(turnId)) || (typeof sessionId === 'string' && nextTurn.has(sessionId) ? turnOf(turnId, sessionId) : null)

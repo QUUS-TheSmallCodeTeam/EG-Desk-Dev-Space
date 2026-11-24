@@ -30,7 +30,8 @@ function isAuthRejection(error) {
 }
 
 export function createCodexProfileAppServers({ resolveHome, env = process.env, cwd = process.cwd(), spawnChild = spawn,
-  executable = () => resolveCodexExecutable(env), getBoardPeerContract = () => null, onNotification = () => {}, onServerRequest = () => {}, onConnection = () => {}, onChange = () => {} } = {}) {
+  executable = () => resolveCodexExecutable(env), getBoardPeerContract = () => null, onNotification = () => {}, onServerRequest = () => {}, onConnection = () => {}, onChange = () => {},
+  onVersion = () => {} } = {}) {
   const clients = new Map(), stopping = new Set()
   let disposed = false, sequence = 0
   const current = client => clients.get(client.id) === client && !disposed
@@ -170,6 +171,8 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
     })
     client.init = (async () => {
       await rpc.initialize()
+      // The build this profile's app-server reports (InitializeResponse.userAgent), for the command gate's version pin. Recording only.
+      if (current(client)) { try { onVersion(id, { userAgent: rpc.serverInfo?.userAgent ?? null }) } catch { /* recording only */ } }
       const proof = await preflightOwnedAppServer({ launch: plan, cwd, request: (m, p) => rpc.request(m, p), isCurrent: () => current(client) })
       if (!proof.ready || !current(client)) throw offline()
     })()
