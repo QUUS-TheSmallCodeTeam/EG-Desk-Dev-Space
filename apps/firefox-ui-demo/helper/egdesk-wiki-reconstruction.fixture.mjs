@@ -1,4 +1,4 @@
-// Public synthetic Korean wiki (31 pages). Invented companies, people and numbers; no private data.
+// Public synthetic Korean wiki (32 pages). Invented companies, people and numbers; no private data.
 const P = (id, title, body, slice, kind, status, links = [], extra = {}) => ({ id, title, body, revision: '1', time: { slice, ...(extra.at ? { at: extra.at } : {}) },
   provenance: { kind, ...(extra.by ? { by: extra.by } : {}) }, status, links, ...(extra.scope ? { scope: extra.scope } : {}) })
 export const SYNTHETIC_PAGES = [
@@ -23,6 +23,7 @@ export const SYNTHETIC_PAGES = [
     [{ type: 'follows_from', to: 'db/pg-design' }, { type: 'supersedes', to: 'db/sqlite-schema' }, { type: 'refers_to', to: 'db/pg-health' }, { type: 'refers_to', to: 'db/pg-rollback' }]),
   P('db/pg-health', '헬스체크 3종 체크리스트', '헬스체크 3종: 연결 풀 응답, 쓰기 지연 50ms 이하, 복제 지연 없음. 전부 통과하면 배포 성공으로 본다.', 'present', 'document', 'done'),
   P('db/sqlite-schema', '현재 SQLite 스키마(운영)', '현재 운영 DB는 SQLite이며 테이블은 users, orders, quotes 세 개다. 배포 전까지 이 스키마가 현재 운영 기준이다.', 'present', 'document', 'done'),
+  P('db/pg-followup', '배포 후 후속 체크리스트', '배포 직후: 알림 채널 확인, 캐시 비우기, 구 SQLite 백업 7일 보관, 헬스체크 결과 기록. 모두 끝나면 전환 완료로 본다.', 'present', 'document', 'plan', [{ type: 'follows_from', to: 'db/pg-plan' }]),
   P('db/pg-rollback', '롤백 절차', '문제가 생기면 SQLite 백업으로 30분 안에 되돌린다. 롤백 판단은 헬스체크 실패 시점에 한다.', 'present', 'document', 'done', [{ type: 'follows_from', to: 'db/pg-design' }]),
   P('db/pg-bench', '전환 벤치마크 결과', '테스트 환경 벤치마크: 쓰기 지연이 SQLite 대비 평균 18% 줄었다. 운영 수치는 아니다.', 'past', 'agent_note', 'done', [{ type: 'refers_to', to: 'db/pg-design' }], { at: '2026-11-16' }),
   P('db/redis', 'Redis 캐시 도입 검토', '세션 캐시로 Redis를 쓸지 검토 중이다. 결정 전이다.', 'hypothetical', 'document', 'plan'),
@@ -69,14 +70,54 @@ const statusOf = (head, text) => {
   if (/했다|확정했다|통과|이다\./.test(text)) return 'done'
   return 'unknown'
 }
+const COMPLETION = /끝났|완료|마쳤/
+const CHIT = /^(고마워|감사|ㅎㅎ|ㅋㅋ|안녕|수고|넵|네$|응$)/
+const choiceAnswer = (question, value, top, confidence = null) => {
+  const values = question.choices.map(c => c.value), rest = (1 - top) / Math.max(1, values.length - 1)
+  const rows = [{ value, probability: top }, ...values.filter(v => v !== value).map(v => ({ value: v, probability: rest }))]
+  const n = values.length
+  return { type: 'choice', choice: value, confidence: confidence ?? (top - 1 / n) / (1 - 1 / n), probabilities: rows }
+}
+const quoteOf = question => { const m = /quoted exactly as a JSON string: ("(?:[^"\\]|\\.)*")/.exec(question.instructions ?? ''); try { return m ? JSON.parse(m[1]) : '' } catch { return '' } }
+// Scripted, not a model: reads markers in the sentence and mimics the real isolated-axes result pattern (a decisive time/form,
+// a weak source label for an unmarked sentence, so a label is not installed when its confidence is low).
+function mockSpeechAnswer(question) {
+  const text = quoteOf(question), axis = question.name.split('_')[1]
+  if (axis === 'source') return /들었|라고 했|라고 함|전언/.test(text) ? choiceAnswer(question, 'attributed_report', 0.97) : choiceAnswer(question, 'unspecified', 0.55)
+  if (axis === 'form') return /[?？]\s*$|지\?|까\?/.test(text) ? choiceAnswer(question, 'question', 0.97) : /예정|할게|할 거|겠/.test(text) ? choiceAnswer(question, 'plan', 0.97) : choiceAnswer(question, 'assertion', 0.93)
+  return /어제|지난/.test(text) ? choiceAnswer(question, 'past_anchored', 0.93) : /끝났|했어|했다|됐/.test(text) ? choiceAnswer(question, 'past_unspecified', 0.93) : /내일|다음/.test(text) ? choiceAnswer(question, 'future_anchored', 0.95) : /지금|현재/.test(text) ? choiceAnswer(question, 'at_utterance', 0.93) : choiceAnswer(question, 'unknown', 0.9)
+}
 export function mockJudge(log = []) {
   return { async decide(request) {
     const texts = request.input.map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
     const joined = texts.join('\n\n'), message = /Message:\n([\s\S]*)$/.exec(joined)?.[1] ?? ''
-    log.push({ questions: request.questions.map(q => q.name), input: joined })
+    const next = /MID-CONVERSATION/.test(texts[0] ?? ''), heldTitles = [...(texts.find(t => t.startsWith('Held in'))?.matchAll(/^- (.+?) \|/gm) ?? [])].map(m => m[1]).join(' ')
+    log.push({ questions: request.questions.map(q => q.name), input: joined, next, bytes: Buffer.byteLength(JSON.stringify({ input: request.input, questions: request.questions })), choiceQ: request.questions.filter(q => q.type === 'choice').length, predQ: request.questions.filter(q => q.type === 'predicate').length })
     const answers = {}
-    for (const b of blocksOf(texts, 'Pages:\n')) { const s = overlap(message, b.head + ' ' + b.text) + (/A사/.test(message) && /A사/.test(b.text + b.head) ? 0.2 : 0)
-      answers[`pg_${Number(b.alias.slice(1)) - 1}`] = { type: 'predicate', probability: s >= 0.34 ? 0.95 : s >= 0.2 ? 0.5 : 0.03 } }
+    const chit = CHIT.test(message.trim()), isQuestion = /[?？]\s*$/.test(message.trim())
+    for (const q of request.questions) {
+      if (q.name === 'tn_need') answers[q.name] = { type: 'predicate', probability: chit ? 0.03 : 0.9 }
+      else if (q.name === 'tn_record') answers[q.name] = { type: 'predicate', probability: !chit && !isQuestion && /(어|야|다|요)\.?$/.test(message.trim()) ? 0.95 : 0.03 }
+      else if (q.name === 'tw_status') answers[q.name] = COMPLETION.test(message) ? choiceAnswer(q, 'done', 0.95) : /예정|할 거|할게/.test(message) ? choiceAnswer(q, 'plan', 0.95) : choiceAnswer(q, 'unknown', 0.9)
+      else if (/^speech_/.test(q.name)) answers[q.name] = mockSpeechAnswer(q)
+    }
+    const cands = blocksOf(texts, 'Candidate pages:\n')
+    if (request.questions.some(q => q.name === 'tw_target')) {
+      const q = request.questions.find(x => x.name === 'tw_target')
+      let pick = 'none'
+      if (!chit && !isQuestion) {
+        const hit = cands.find(b => /provenance=/.test(b.head) && /예정|계획|아직/.test(b.text) && overlap(message, b.head + ' ' + b.text) >= 0.15)
+        pick = COMPLETION.test(message) && hit ? hit.alias : 'new'
+      }
+      answers.tw_target = choiceAnswer(q, pick, 0.93)
+      cands.forEach(b => { answers[`tw_link_${Number(b.alias.slice(1)) - 1}`] = { type: 'predicate', probability: overlap(message, b.head + ' ' + b.text) >= 0.15 ? 0.9 : 0.05 } })
+    }
+    for (const b of blocksOf(texts, 'Pages:\n')) {
+      const s = overlap(message + (next ? ' ' + heldTitles : ''), b.head + ' ' + b.text) + (/A사/.test(message) && /A사/.test(b.text + b.head) ? 0.2 : 0)
+      const needNext = next && COMPLETION.test(message)
+      const p = needNext ? (/후속|체크리스트|헬스체크|통과|보관/.test(b.text) && s >= 0.06 ? 0.95 : 0.03) : (s >= 0.34 ? 0.95 : s >= 0.2 ? 0.5 : 0.03)
+      answers[`pg_${Number(b.alias.slice(1)) - 1}`] = { type: 'predicate', probability: p }
+    }
     for (const b of blocksOf(texts, 'Picked pages:\n')) { const s = statusOf(b.head, b.text)
       answers[`st_${b.alias}`] = { type: 'choice', choice: s, confidence: 0.9, probabilities: [{ value: s, probability: 0.9 }, { value: 'unknown', probability: 0.05 }] } }
     for (const b of blocksOf(texts, 'Linked pages you may open:\n')) {

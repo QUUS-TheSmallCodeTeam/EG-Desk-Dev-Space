@@ -23,6 +23,8 @@ export const LINK_TYPES = Object.freeze({
   refers_to: 'This page mentions the linked page.',
 })
 export const PROVENANCE_KINDS = Object.freeze(['own_record', 'document', 'agent_note', 'utterance', 'reported_by_other'])
+// How the speaker came to say it (the speech source label vocabulary). Only on utterance-type pages.
+export const PROVENANCE_BASES = Object.freeze(['self_reported_observation', 'attributed_report', 'inference', 'record_based', 'unspecified'])
 export const RECORD_STATUSES = Object.freeze({
   plan: 'The record says something is intended or scheduled, not done.',
   done: 'The record says it was carried out or is the settled state.',
@@ -35,62 +37,101 @@ export const YES = 0.8, NO = 0.2 // predicate guide: yes >= 0.8, no <= 0.2, in b
 export const DEFAULTS = Object.freeze({ maxCalls: 4, maxScanCalls: 2, maxCatalogChars: 9000, excerptChars: 600, maxPicks: 6, maxDepth: 1,
   maxOpenOptions: 12, maxPacketChars: 8000, pageChars: 2400, timeoutMs: 4000 })
 
-const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+export const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/
 const REVISION = /^[A-Za-z0-9._-]{1,40}$/
 
 /**
- * buildWiki(pages) → { pages, links(id), backlinks(id), supersededBy(id), warnings }
- * page: { id, title, body, time: { slice, at? }, provenance: { kind, by? }, status?, revision, scope?, links?: [{ type, to }], mayRead? }
+ * buildWiki(pages) → { pages, links(id), backlinks(id), supersededBy(id), warnings, add, addLink, patch }
+ * page: { id, title, body, time: { slice, at? }, provenance: { kind, by? }, status?, revision, scope?, spokenAt?, links?: [{ type, to }], mayRead? }
  * Links are maintained by code and validated here: closed types, existing targets, no self-links, bounded per page.
  * An invalid page or link is dropped and counted, never repaired by guessing.
+ * add / addLink / patch are the HOST's mutation API (used only by the write path in egdesk-turn-memory.mjs after its
+ * permission and revision checks). They are never offered to the judge.
  */
+export const READING_LIMIT = 8
+const iso = value => (typeof value === 'string' && !Number.isNaN(Date.parse(value)) ? value : null)
+function normalizePage(raw, maxBody) {
+  const ok = record(raw) && typeof raw.id === 'string' && ID.test(raw.id) && typeof raw.title === 'string' && raw.title.trim() &&
+    typeof raw.body === 'string' && raw.body.trim() && REVISION.test(String(raw.revision ?? '')) &&
+    PROVENANCE_KINDS.includes(raw.provenance?.kind) && (raw.time === undefined || TIME_SLICES.includes(raw.time?.slice))
+  if (!ok) return null
+  return { id: raw.id, title: compactText(raw.title, 160), body: raw.body.slice(0, maxBody), revision: String(raw.revision),
+    time: { slice: raw.time?.slice ?? 'unknown', ...(iso(raw.time?.at) ? { at: raw.time.at } : {}) },
+    provenance: { kind: raw.provenance.kind, ...(typeof raw.provenance.by === 'string' ? { by: compactText(raw.provenance.by, 60) } : {}), ...(PROVENANCE_BASES.includes(raw.provenance.basis) ? { basis: raw.provenance.basis } : {}) },
+    status: STATUS_KEYS.includes(raw.status) ? raw.status : 'unknown', scope: typeof raw.scope === 'string' ? raw.scope : null,
+    // When it was said / recorded. Never confused with the time of the event it describes (time.at).
+    ...(iso(raw.spokenAt) ? { spokenAt: raw.spokenAt } : {}),
+    // Fallible readings of a status change that the host has not (yet) accepted. Kept apart from `status`.
+    statusReadings: Array.isArray(raw.statusReadings) ? raw.statusReadings.filter(r => record(r) && STATUS_KEYS.includes(r.status)).slice(-READING_LIMIT) : [],
+    rawLinks: Array.isArray(raw.links) ? raw.links : [], mayRead: typeof raw.mayRead === 'function' ? raw.mayRead : null }
+}
 export function buildWiki(input, { maxPages = 400, maxLinks = 16, maxBody = 20000 } = {}) {
   const pages = new Map(), warnings = { droppedPages: 0, droppedLinks: 0 }
-  for (const raw of Array.isArray(input) ? input.slice(0, maxPages) : []) {
-    const ok = record(raw) && typeof raw.id === 'string' && ID.test(raw.id) && !pages.has(raw.id) && typeof raw.title === 'string' && raw.title.trim() &&
-      typeof raw.body === 'string' && raw.body.trim() && REVISION.test(String(raw.revision ?? '')) &&
-      PROVENANCE_KINDS.includes(raw.provenance?.kind) && (raw.time === undefined || TIME_SLICES.includes(raw.time?.slice))
-    if (!ok) { warnings.droppedPages++; continue }
-    pages.set(raw.id, { id: raw.id, title: compactText(raw.title, 160), body: raw.body.slice(0, maxBody), revision: String(raw.revision),
-      time: { slice: raw.time?.slice ?? 'unknown', ...(typeof raw.time?.at === 'string' && !Number.isNaN(Date.parse(raw.time.at)) ? { at: raw.time.at } : {}) },
-      provenance: { kind: raw.provenance.kind, ...(typeof raw.provenance.by === 'string' ? { by: compactText(raw.provenance.by, 60) } : {}) },
-      status: STATUS_KEYS.includes(raw.status) ? raw.status : 'unknown', scope: typeof raw.scope === 'string' ? raw.scope : null,
-      rawLinks: Array.isArray(raw.links) ? raw.links : [], mayRead: typeof raw.mayRead === 'function' ? raw.mayRead : null })
-  }
   const out = new Map(), back = new Map()
+  for (const raw of Array.isArray(input) ? input.slice(0, maxPages) : []) {
+    const page = normalizePage(raw, maxBody)
+    if (!page || pages.has(page.id)) { warnings.droppedPages++; continue }
+    pages.set(page.id, page)
+  }
+  const addLink = (from, type, to) => {
+    const page = pages.get(from), list = out.get(from) ?? []
+    if (!page || !Object.hasOwn(LINK_TYPES, type) || typeof to !== 'string' || to === from || !pages.has(to) || list.length >= maxLinks || list.some(l => l.type === type && l.to === to)) return false
+    list.push({ type, to }); out.set(from, list)
+    if (!back.has(to)) back.set(to, [])
+    back.get(to).push({ type, from })
+    return true
+  }
   for (const page of pages.values()) {
-    const seen = new Set(), list = []
-    for (const link of page.rawLinks.slice(0, maxLinks * 2)) {
-      const key = `${link?.type}>${link?.to}`
-      if (!record(link) || !Object.hasOwn(LINK_TYPES, link.type) || typeof link.to !== 'string' || link.to === page.id || !pages.has(link.to) || seen.has(key) || list.length >= maxLinks) {
-        warnings.droppedLinks++; continue
-      }
-      seen.add(key); list.push({ type: link.type, to: link.to })
-      if (!back.has(link.to)) back.set(link.to, [])
-      back.get(link.to).push({ type: link.type, from: page.id })
-    }
-    out.set(page.id, list)
+    out.set(page.id, [])
+    for (const link of page.rawLinks.slice(0, maxLinks * 2)) if (!record(link) || !addLink(page.id, link.type, link.to)) warnings.droppedLinks++
     delete page.rawLinks
   }
   // A replacement counts only when the replacing page is itself settled: a plan that "supersedes" is not yet a replacement.
   const settled = id => { const p = pages.get(id); return p && (p.time.slice === 'past' || p.time.slice === 'present') && p.status === 'done' }
   return { pages, warnings, links: id => out.get(id) ?? [], backlinks: id => back.get(id) ?? [],
-    supersededBy: id => (back.get(id) ?? []).filter(l => l.type === 'supersedes' && settled(l.from)).map(l => l.from) }
+    supersededBy: id => (back.get(id) ?? []).filter(l => l.type === 'supersedes' && settled(l.from)).map(l => l.from),
+    add(raw) {
+      const page = pages.size < maxPages ? normalizePage(raw, maxBody) : null
+      if (!page || pages.has(page.id)) return null
+      pages.set(page.id, page); out.set(page.id, [])
+      const wanted = page.rawLinks; delete page.rawLinks
+      for (const link of wanted.slice(0, maxLinks)) if (record(link)) addLink(page.id, link.type, link.to)
+      return page
+    },
+    addLink,
+    // Only these fields can change after creation, and only through the host's write path.
+    patch(id, patch) {
+      const page = pages.get(id)
+      if (!page || !record(patch)) return false
+      if (patch.status !== undefined) { if (!STATUS_KEYS.includes(patch.status)) return false; page.status = patch.status }
+      if (patch.revision !== undefined) { if (!REVISION.test(String(patch.revision))) return false; page.revision = String(patch.revision) }
+      if (patch.statusReadings !== undefined) page.statusReadings = patch.statusReadings.filter(r => record(r) && STATUS_KEYS.includes(r.status)).slice(-READING_LIMIT)
+      return true
+    } }
 }
 
-const stableAlias = index => `P${index + 1}`
-function pageBlock(alias, page, chars, extra = '') {
+/** The one permission rule for reading a page: its own guard, then its scope against what this caller may read. */
+export function allowsPage(page, scope) {
+  try {
+    if (page.mayRead && page.mayRead() !== true) return false
+    if (!page.scope) return true
+    if (typeof scope?.allows === 'function') return scope.allows(page) === true
+    return Array.isArray(scope?.allowedScopes) && scope.allowedScopes.includes(page.scope)
+  } catch { return false }
+}
+export const stableAlias = index => `P${index + 1}`
+export function pageBlock(alias, page, chars, extra = '') {
   const text = page.body.length > chars ? `${page.body.slice(0, chars).trimEnd()} […]` : page.body
   return `${alias} | time=${page.time.slice}${page.time.at ? `@${page.time.at.slice(0, 10)}` : ''} | provenance=${page.provenance.kind}${page.provenance.by ? `:${page.provenance.by}` : ''} | rev=${page.revision}${extra} | ${page.title}\n${text}`
 }
-const clockLine = asked => (Number.isSafeInteger(asked) ? `Question clock: ${new Date(asked).toISOString()} (UTC offset minutes ${-new Date(asked).getTimezoneOffset()}). Page times are as recorded; judge, do not compute dates.` : 'Question clock: unknown.')
-const JUDGE_RULES = [
+export const clockLine = asked => (Number.isSafeInteger(asked) ? `Question clock: ${new Date(asked).toISOString()} (UTC offset minutes ${-new Date(asked).getTimezoneOffset()}). Page times are as recorded; judge, do not compute dates.` : 'Question clock: unknown.')
+export const JUDGE_RULES = [
   'You are a system judge that reconstructs memory for another model. Judge only from the page contents shown and the message.',
   'A page is needed when its content helps answer the message. A recorded plan is not a done fact; a relayed statement is attribution, not the writer\'s own record.',
   'Never invent a page. If the options do not fit, choose unknown.',
 ].join('\n')
-const ternary = answer => (answer?.type !== 'predicate' || !Number.isFinite(answer.probability) ? { state: 'unknown', p: null }
+export const ternary = answer => (answer?.type !== 'predicate' || !Number.isFinite(answer.probability) ? { state: 'unknown', p: null }
   : { state: answer.probability >= YES ? 'yes' : answer.probability <= NO ? 'no' : 'unknown', p: answer.probability })
 
 function pack(items, maxChars, excerptChars, render) {
@@ -112,22 +153,22 @@ function pack(items, maxChars, excerptChars, render) {
  * → { status: 'ready'|'empty'|'fallback', packet, picks, receipts, nextDelivered(), calls, usage }
  *   status 'ready' may still carry partial: true when a later round failed; the picks so far are kept.
  */
-export async function reconstructMemory({ message, wiki, client, scope = null, askedAt = null, delivered = null, budget: overrides = {}, signal, now = () => performance.now() } = {}) {
+export const NEXT_RULES = [
+  'You are a system judge. The answering model is MID-CONVERSATION: it already holds the pages listed as HELD and the live conversation. Do not reconstruct memory.',
+  'Pick only the stored pages whose content it still needs to make the next judgment this message asks for, and that the held pages and the conversation do not already cover.',
+  'A recorded plan is not a done fact; a relayed statement is attribution. Never invent a page. If the options do not fit, choose unknown.',
+].join('\n')
+
+/** mode 'first' (default): reconstruct memory for a session whose model holds nothing. mode 'next': fetch only what the next judgment needs; `live` is host-gated recent conversation text or null. */
+export async function reconstructMemory({ message, wiki, client, scope = null, askedAt = null, delivered = null, budget: overrides = {}, signal, now = () => performance.now(), mode = 'first', live = null } = {}) {
   const budget = { ...DEFAULTS, ...overrides }
   const empty = (status, reason) => ({ status, reason, packet: null, picks: [], receipts: { calls: 0 }, nextDelivered: () => delivered, calls: 0, usage: { inputTokens: 0 } })
   if (!client || !wiki?.pages) return empty('fallback', 'not_configured')
   if (typeof message !== 'string' || !message.trim()) return empty('fallback', 'no_message')
   const started = now(), deadline = Number.isFinite(budget.deadlineMs) ? started + budget.deadlineMs : Infinity
-  const receipts = { calls: 0, rounds: [], withheld: 0, unscanned: [], skippedDelivered: [], uncertain: [], truncated: [] }
+  const receipts = { mode, calls: 0, rounds: [], withheld: 0, unscanned: [], skippedDelivered: [], uncertain: [], truncated: [] }
   const usage = { inputTokens: 0 }
-  const allows = page => {
-    try {
-      if (page.mayRead && page.mayRead() !== true) return false
-      if (!page.scope) return true
-      if (typeof scope?.allows === 'function') return scope.allows(page) === true
-      return Array.isArray(scope?.allowedScopes) && scope.allowedScopes.includes(page.scope)
-    } catch { return false }
-  }
+  const allows = page => allowsPage(page, scope)
   const have = delivered?.usable === true ? delivered.pages ?? {} : {}
   const sameAsDelivered = page => have[page.id]?.revision === page.revision && have[page.id]?.hash === sha256Hex(page.body)
   const readable = [], alreadyDelivered = []
@@ -136,6 +177,11 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
     ;(sameAsDelivered(page) ? alreadyDelivered : readable).push(page)
   }
   receipts.skippedDelivered = alreadyDelivered.map(p => p.id)
+  const isNext = mode === 'next'
+  const rules = isNext ? NEXT_RULES : JUDGE_RULES
+  // Held pages are shown by header only: the judge knows what the model holds, the content is never re-sent.
+  const heldMessage = isNext ? [{ role: 'user', content: `Held in the answering model's context (content not repeated):\n${alreadyDelivered.length ? alreadyDelivered.map(p => `- ${p.title} | time=${p.time.slice} | status=${p.status}`).join('\n') : '(nothing)'}` },
+    ...(typeof live === 'string' && live.trim() ? [{ role: 'user', content: `Live conversation (recent turns, bounded):\n${live.slice(-3000)}` }] : [])] : []
   const canCall = () => receipts.calls < budget.maxCalls && now() < deadline && !signal?.aborted
   const decide = async (questions, input) => {
     receipts.calls++
@@ -147,24 +193,25 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
   const picks = new Map() // id -> { id, p, via, statusRead, statusP }
   let partial = false, failure = null
 
-  // Round 0: scan the content of every readable page, in as few parallel stateless batches as the budget allows.
+  // Round 0: scan the content of readable pages, in as few parallel stateless batches as the budget allows.
+  // Mid-session with budget.linksFirst, only the link neighbours of what the model holds are scanned first (structure orders the
+  // work, the judge still decides from content); the rest is scanned only if that finds nothing, and is reported as unscanned otherwise.
   const render = (page, alias) => pageBlock(alias, page, budget.excerptChars)
-  const batches = pack(readable, budget.maxCatalogChars, budget.excerptChars, render)
-  const scanLimit = Math.max(0, Math.min(budget.maxScanCalls, budget.maxCalls))
-  const scanned = batches.slice(0, scanLimit)
-  for (const batch of batches.slice(scanLimit)) receipts.unscanned.push(...batch.map(p => p.id))
   const second = []
-  if (scanned.length && canCall()) {
+  async function scan(list, label) {
+    const batches = pack(list, budget.maxCatalogChars, budget.excerptChars, render)
+    const room = Math.max(0, Math.min(budget.maxScanCalls, budget.maxCalls - receipts.calls))
+    const scanned = batches.slice(0, room)
+    for (const batch of batches.slice(room)) receipts.unscanned.push(...batch.map(p => p.id))
+    if (!scanned.length || !canCall()) return
     const calls = scanned.map(async batch => {
-      const aliasOf = new Map(batch.map((p, i) => [stableAlias(i), p]))
-      const questions = batch.map((_, i) => predicateQuestion(`pg_${i}`, `Does answering the message need the content of page ${stableAlias(i)}?`))
-      const input = [{ role: 'developer', content: JUDGE_RULES },
+      const questions = batch.map((_, i) => predicateQuestion(`pg_${i}`, isNext ? `Does the answering model still need the content of page ${stableAlias(i)} for its next judgment?` : `Does answering the message need the content of page ${stableAlias(i)}?`))
+      const input = [{ role: 'developer', content: rules }, ...heldMessage,
         { role: 'user', content: `Pages:\n${batch.map((p, i) => render(p, stableAlias(i))).join('\n\n')}` },
         { role: 'user', content: `${clockLine(askedAt)}\nState: round=scan; picked=[]\nMessage:\n${message}` }]
-      try { return { batch, aliasOf, result: await decide(questions, input) } } catch (error) { return { batch, error } }
+      try { return { batch, result: await decide(questions, input) } } catch (error) { return { batch, error } }
     })
-    const results = await Promise.all(calls)
-    for (const { batch, result, error } of results) {
+    for (const { batch, result, error } of await Promise.all(calls)) {
       if (error || !result) { failure ??= error?.code ?? 'unreachable'; continue }
       batch.forEach((page, i) => {
         const v = ternary(result.answers?.[`pg_${i}`])
@@ -172,17 +219,29 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
         else if (v.state === 'unknown' && v.p !== null) { second.push(page); receipts.uncertain.push({ id: page.id, p: v.p }) }
       })
     }
-    receipts.rounds.push({ kind: 'scan', batches: scanned.length, pages: scanned.reduce((n, b) => n + b.length, 0) })
-    if (failure && !picks.size) return { ...empty('fallback', failure), receipts: { ...receipts, calls: receipts.calls } , calls: receipts.calls, usage }
-    if (failure) partial = true
+    receipts.rounds.push({ kind: 'scan', label, batches: scanned.length, pages: scanned.reduce((n, b) => n + b.length, 0) })
   }
+  let scanSet = readable, rest = []
+  if (isNext && budget.linksFirst === true) {
+    const near = new Set()
+    for (const h of alreadyDelivered) { for (const l of wiki.links(h.id)) near.add(l.to); for (const l of wiki.backlinks(h.id)) near.add(l.from) }
+    scanSet = readable.filter(p => near.has(p.id)); rest = readable.filter(p => !near.has(p.id))
+    receipts.linksFirst = { neighbours: scanSet.length, others: rest.length }
+  }
+  await scan(scanSet, 'first')
+  if (failure && !picks.size) return { ...empty('fallback', failure), receipts: { ...receipts, calls: receipts.calls }, calls: receipts.calls, usage }
+  if (rest.length && !picks.size && !failure && canCall()) { receipts.linksFirst.widened = true; await scan(rest, 'widened') }
+  else if (rest.length) receipts.unscanned.push(...rest.map(p => p.id))
+  if (failure && !picks.size) return { ...empty('fallback', failure), receipts: { ...receipts, calls: receipts.calls }, calls: receipts.calls, usage }
+  if (failure) partial = true
   // Keep the strongest picks within the budget; the rest is reported, not dropped silently.
   const ranked = [...picks.values()].sort((a, b) => b.p - a.p)
   for (const extra of ranked.slice(budget.maxPicks)) { picks.delete(extra.id); receipts.truncated.push({ id: extra.id, reason: 'pick_limit' }) }
 
   // Expansion rounds: the options are the links of the frontier (plus an explicit second look at uncertain pages).
   // The same call classifies the status of every record picked so far that has not been classified yet.
-  let frontier = [...picks.keys()], depth = 0
+  // Mid-session, the links of what the model already holds are options too: that is how "what comes next" is reached.
+  let frontier = [...picks.keys(), ...(isNext ? alreadyDelivered.map(p => p.id) : [])], depth = 0
   const opened = new Set(picks.keys())
   const classified = new Set()
   while ((frontier.length || second.length) && canCall() && !failure) {
@@ -212,9 +271,9 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
     const questions = [
       ...pickedBlocks.map(b => choiceQuestion(`st_${b.a}`, `What does the content of page ${b.a} show about the record itself (not about the message)?`,
         STATUS_KEYS.map(value => ({ value, description: RECORD_STATUSES[value] })))),
-      ...optionBlocks.map(b => predicateQuestion(`op_${b.a}`, `Does answering the message also need the content of page ${b.a}?`)),
+      ...optionBlocks.map(b => predicateQuestion(`op_${b.a}`, isNext ? `Does the answering model also still need the content of page ${b.a} for its next judgment?` : `Does answering the message also need the content of page ${b.a}?`)),
     ]
-    const input = [{ role: 'developer', content: JUDGE_RULES },
+    const input = [{ role: 'developer', content: rules }, ...heldMessage,
       ...(pickedBlocks.length ? [{ role: 'user', content: `Picked pages:\n${pickedBlocks.map(b => b.text).join('\n\n')}` }] : []),
       ...(optionBlocks.length ? [{ role: 'user', content: `Linked pages you may open:\n${optionBlocks.map(b => b.text).join('\n\n')}` }] : []),
       { role: 'user', content: `${clockLine(askedAt)}\nState: round=expand depth=${depth}; picked=[${pickedBlocks.map(b => b.a).join(',')}]\nMessage:\n${message}` }]
@@ -249,7 +308,7 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
     if (!page || !allows(page)) { receipts.withheld++; continue } // authority is re-checked at assembly
     const sup = wiki.supersededBy(page.id)
     const header = `[page id=${page.id} time=${page.time.slice}${page.time.at ? `@${page.time.at.slice(0, 10)}` : ''} provenance=${page.provenance.kind}${page.provenance.by ? `:${page.provenance.by}` : ''} ` +
-      `status-recorded=${page.status}${pick.statusRead ? ` status-read=${pick.statusRead}` : ''}${sup.length ? ` superseded-by=${sup.join('+')}` : ''} rev=${page.revision} via=${pick.via}]`
+      `status-recorded=${page.status}${pick.statusRead ? ` status-read=${pick.statusRead}` : ''}${page.statusReadings?.some(r => r.state === 'pending') ? ` status-reported-pending=${page.statusReadings.filter(r => r.state === 'pending').at(-1).status}` : ''}${sup.length ? ` superseded-by=${sup.join('+')}` : ''} rev=${page.revision} via=${pick.via}]`
     const body = page.body.length > budget.pageChars ? `${page.body.slice(0, budget.pageChars).trimEnd()}\n[…truncated]` : page.body
     if (page.body.length > budget.pageChars) receipts.truncated.push({ id: page.id, reason: 'page_chars' })
     const block = `${header}\n${body}`
@@ -263,7 +322,7 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
   for (const id of held) for (const link of wiki.links(id)) if (held.has(link.to) && (inPacket.has(id) || inPacket.has(link.to))) linkLines.push(`${id} ${link.type} ${link.to}`)
   const pointers = alreadyDelivered.filter(p => blocks.some(b => wiki.links(b.id).some(l => l.to === p.id) || wiki.backlinks(b.id).some(l => l.from === p.id)))
     .map(p => `[page id=${p.id} rev=${p.revision} already delivered earlier in this thread, unchanged; content not re-sent]`)
-  const head = ['EG-Desk reconstructed memory for this turn: pages chosen by a judge that read their contents, plus pages reached through recorded links.',
+  const head = [isNext ? 'EG-Desk fetched these stored pages for the judgment this message asks for. Pages you already hold from earlier in this conversation are not repeated.' : 'EG-Desk reconstructed memory for this turn: pages chosen by a judge that read their contents, plus pages reached through recorded links.',
     'Each page shows time (past/present/planned/hypothetical), provenance (who recorded it and how), the recorded status and, where present, the judge\'s fallible reading of that status.',
     'A planned or hypothetical page is not a current fact. reported_by_other is attribution, not the writer\'s own record and not independent evidence. A status reading or score is not proof and not permission to change any record.',
     clockLine(askedAt)].join('\n')

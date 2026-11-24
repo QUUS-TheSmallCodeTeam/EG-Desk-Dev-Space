@@ -109,7 +109,7 @@ test('stateless calls: every request carries the message, the clock and an expli
 test('budget: scan batches, call count, picks and packet size are bounded and what was left out is reported, never silent', async () => {
   const small = await run('지난주 A사 견적 건 어디까지 됐지?', { extra: { budget: { maxCatalogChars: 600, maxScanCalls: 1 } } })
   assert.ok(small.r.receipts.unscanned.length > 0)
-  assert.equal(small.log[0].questions.length + small.r.receipts.unscanned.length + small.r.receipts.withheld, 31)
+  assert.equal(small.log[0].questions.length + small.r.receipts.unscanned.length + small.r.receipts.withheld, 32)
   const one = await run(SCENARIOS[0].message, { extra: { budget: { maxCalls: 1 } } })
   assert.equal(one.r.calls, 1); assert.ok(one.r.picks.length > 0); assert.ok(one.r.picks.every(p => p.via === 'scan' && p.statusRead === undefined))
   const few = await run(SCENARIOS[0].message, { extra: { budget: { maxPicks: 2 } } })
