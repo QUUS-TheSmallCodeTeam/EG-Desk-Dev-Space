@@ -553,6 +553,12 @@ test('memoryMaterials: closed row shape, packet order, bounded excerpts, links o
   // the plan WILL replace the current schema: recorded on the plan row only; the schema is not marked replaced by a record that is not settled
   const schema = rows.find(r => r.title === '현재 SQLite 스키마(운영)')
   assert.ok(plan.links.some(l => l.type === 'supersedes' && l.toAlias === schema.alias)); assert.ok(!schema.links.some(l => l.type === 'superseded_by'))
+  // the opaque key: stable per page across calls and turns, never part of the data that can be serialised or spread, never a page id
+  const again = memoryMaterials(await firstTurn('PostgreSQL 마이그레이션 배포 끝났어', wiki), wiki, { scope: SCOPE })
+  assert.ok(rows.every(r => /^[0-9a-f]{32}$/.test(r.key)) && new Set(rows.map(r => r.key)).size === rows.length)
+  assert.equal(again.find(r => r.title === plan.title).key, plan.key, 'the same page has the same key on another turn')
+  assert.ok(!JSON.stringify(rows).includes(plan.key) && !Object.keys(plan).includes('key') && !('key' in { ...plan }), 'it cannot ride along by accident')
+  assert.ok(![...wiki.pages.keys()].some(id => rows.some(r => r.key.includes(id))))
   // bounds: the excerpt and the count are clamped, whatever is asked for
   assert.ok(memoryMaterials(result, wiki, { scope: SCOPE, excerptChars: 12 }).every(r => r.excerpt.length <= 12 + 4 && r.excerpt.endsWith(' […]')))
   assert.equal(memoryMaterials(result, wiki, { scope: SCOPE, max: 2 }).length, 2); assert.equal(memoryMaterials(result, wiki, { scope: SCOPE, max: 0 }).length, 0)

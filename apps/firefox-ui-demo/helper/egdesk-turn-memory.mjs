@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { choiceQuestion, compactText, predicateQuestion, readChoice, sha256Hex } from './egdesk-decision-questions.mjs'
 import { speechDesignInterpretations, speechDesignQuestions, speechSegments } from './egdesk-speech-grounding.mjs'
 import { MIN_CALL_MS, PROVENANCE_BASES, REAL_CLOCK, YES, NO, allowsPage, clockLine, pageBlock, reconstructMemory, record, settleBefore, stableAlias, ternary } from './egdesk-wiki-reconstruction.mjs'
@@ -358,6 +358,9 @@ export const MATERIAL_LINK_TYPES = Object.freeze(['same_task', 'follows_from', '
 export const MATERIAL_LIMITS = Object.freeze({ max: 12, hardMax: 24, excerptChars: 400, maxExcerptChars: 2400, titleChars: 160, links: 8 })
 const materialKind = page => (typeof page.ref === 'string' && page.ref.startsWith('chat-message:') ? 'utterance' : typeof page.ref === 'string' && page.ref.startsWith('chat-pair:') ? 'conversation'
   : page.id.startsWith('board:') ? 'board' : page.id.startsWith('selected:') ? 'source' : page.id.startsWith('ontology-snapshot:') ? 'timeline' : page.id.startsWith('ontology:') ? 'ontology' : 'page')
+// A random secret of this process: material keys cannot be computed outside it and change when the bridge restarts.
+const MATERIAL_SECRET = randomBytes(32)
+const materialKey = id => createHmac('sha256', MATERIAL_SECRET).update(id).digest('hex').slice(0, 32)
 const bounded = (value, fallback, low, high) => (Number.isSafeInteger(value) ? Math.min(high, Math.max(low, value)) : fallback)
 
 /**
@@ -374,6 +377,9 @@ const bounded = (value, fallback, low, high) => (Number.isSafeInteger(value) ? M
  *               statusPending: a reported status waiting for the person's confirmation. Neither is verification nor write permission.
  *   links:      between two listed materials only (toAlias always resolves). Recorded, outgoing: same_task | follows_from | decided_in |
  *               supersedes | refers_to. Derived: superseded_by (a listed, SETTLED record replaces this one now).
+ *   key:        NOT part of the data: a non-enumerable property (JSON.stringify, Object.keys and spread do not carry it; read row.key).
+ *               An opaque handle of the page, the same for the same page on every turn of this bridge process, different after a restart,
+ *               not derivable back to the page. For joining in-process state across turns only; it must never be sent to a model.
  * Permission is checked again here, page by page (allowsPage); a page that may not be read now is absent, and so are links to it.
  */
 export function memoryMaterials(result, wiki, { scope = null, attached = true, excerptChars = MATERIAL_LIMITS.excerptChars, max = MATERIAL_LIMITS.max } = {}) {
@@ -400,12 +406,12 @@ export function memoryMaterials(result, wiki, { scope = null, attached = true, e
       // Derived, not recorded: the listed pages that REPLACE this one now (a settled record that supersedes it). A plan that will supersede it
       // is not a replacement yet, so it shows only as that plan's own 'supersedes' link.
       for (const by of typeof wiki.supersededBy === 'function' ? wiki.supersededBy(page.id) : []) { if (links.length >= MATERIAL_LIMITS.links) break; if (aliasOf.has(by)) links.push(Object.freeze({ type: 'superseded_by', toAlias: aliasOf.get(by) })) }
-      return Object.freeze({ alias: aliasOf.get(page.id), kind: materialKind(page),
+      return Object.freeze(Object.defineProperty({ alias: aliasOf.get(page.id), kind: materialKind(page),
         time: Object.freeze({ slice: page.time.slice, at: typeof page.time.at === 'string' ? page.time.at.slice(0, 10) : null }),
         provenance: Object.freeze({ kind: page.provenance.kind, by: page.provenance.by ?? null, basis: page.provenance.basis ?? null }),
         status: page.status, ...(!held && typeof pick?.statusRead === 'string' ? { statusReading: pick.statusRead } : {}), ...(typeof pending === 'string' ? { statusPending: pending } : {}),
         title: compactText(page.title, MATERIAL_LIMITS.titleChars), excerpt: page.body.length > chars ? `${page.body.slice(0, chars).trimEnd()} […]` : page.body,
-        links: Object.freeze(links), held })
+        links: Object.freeze(links), held }, 'key', { value: materialKey(page.id), enumerable: false }))
     }))
   } catch { return none }
 }
