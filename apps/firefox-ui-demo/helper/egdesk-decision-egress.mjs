@@ -106,6 +106,8 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-terminal-judge.mjs': ['terminal_output', 'command_output'],
   'egdesk-memory-live-runner.mjs': ['memory_page: measurement tool; the public synthetic wiki only, through guardClient'],
   'egdesk-turn-memory.mjs': ['memory_page', 'topic_history'],
+  // The note (a memory page's title and reported status) and the previous reply of this DM (a past utterance): asked of the run's gate by the runtime before the call.
+  'egdesk-record-confirmation.mjs': ['memory_page', 'speech_history'],
   'egdesk-wiki-reconstruction.mjs': ['memory_page'],
   // Block previews of an EG-Desk tool result the run's model is about to receive (by output kind), and older session blocks.
   // Called from egdesk-working-memory-wiring.mjs as an advisory judge only; that file sends nothing itself.

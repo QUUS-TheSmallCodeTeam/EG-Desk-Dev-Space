@@ -244,3 +244,24 @@ test('one page per utterance: once a written page points at an utterance, the ba
   const gone = await adapter.snapshot({ context: { clientThreadId: 'thread-1' } })
   assert.equal(gone.pages.size, 0)
 })
+
+test('a withdrawn reading: stored as "rejected", it removes the pending reading it answers at the next snapshot and changes no status; "superseded" is a reading too', async () => {
+  const dataDir = await tmpDir(), writes = openWikiWrites({ dataDir, log: quiet }), adapter = createWikiAdapter({ writes })
+  const snap = () => adapter.snapshot({ context: { clientThreadId: 'thread-1' }, graph: GRAPH })
+  let wiki = await snap()
+  const id = [...wiki.pages.keys()].find(k => k.startsWith('ontology:')), before = wiki.pages.get(id).status
+  const writer = () => adapter.writerFor(wiki, { enabled: true, canWrite: () => true })
+  const reading = status => ({ op: 'update_status', pageId: id, baseRevision: wiki.pages.get(id).revision, proposedStatus: status, time: { slice: 'past' }, provenance: { kind: 'utterance' }, spokenAt: '2026-11-24T05:30:00.000Z' })
+  assert.equal(writer().apply(reading('done'), { operationId: 'w1', scope: adapter.scopeFor({ clientThreadId: 'thread-1' }) }).status, 'recorded_pending')
+  wiki = await snap()
+  assert.deepEqual(wiki.pages.get(id).statusReadings.map(r => [r.status, r.state]), [['done', 'pending']])
+  assert.equal(writer().reject(id, { scope: adapter.scopeFor({ clientThreadId: 'thread-1' }), objection: { by: 'user', at: '2026-11-24T06:00:00.000Z' }, operationId: 'r1' }).status, 'reading_withdrawn')
+  wiki = await snap()
+  assert.deepEqual([wiki.pages.get(id).status, wiki.pages.get(id).statusReadings.map(r => [r.status, r.state, r.rejectedAt])], [before, [['done', 'rejected', '2026-11-24T06:00:00.000Z']]])
+  // a correction is kept the same way: pending "superseded", the status untouched until the person confirms
+  assert.equal(writer().apply({ ...reading('superseded'), spokenAt: '2026-11-24T07:00:00.000Z' }, { operationId: 'w2', scope: adapter.scopeFor({ clientThreadId: 'thread-1' }) }).status, 'recorded_pending')
+  wiki = await snap()
+  assert.deepEqual([wiki.pages.get(id).status, wiki.pages.get(id).statusReadings.filter(r => r.state === 'pending').map(r => r.status)], [before, ['superseded']])
+  assert.equal(writer().promote(id, { scope: adapter.scopeFor({ clientThreadId: 'thread-1' }), confirmation: { by: 'user', at: '2026-11-24T08:00:00.000Z' }, operationId: 'p1' }).status, 'status_updated')
+  assert.equal((await snap()).pages.get(id).status, 'superseded')
+})

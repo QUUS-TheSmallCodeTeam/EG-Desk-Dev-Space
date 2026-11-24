@@ -102,3 +102,14 @@ test('default bridge: nothing extra is sent, nothing is built or opened, and the
   assert.ok(!(await readdir(path.join(dir, 'settings'))).some(n => n === 'egdesk-wiki-writes.json'), 'advisory writes no pages')
   for (const r of [baseline, off, on]) r.store.close()
 })
+
+test('the wiring passes its internal flags to the runtime only when the bridge sets them (absent means off)', async () => {
+  const { createTurnMemoryConfig } = await import('./egdesk-turn-memory-wiring.mjs')
+  const base = { settings: { turnMemory: { mode: 'on' } }, getAdapter: () => ({}) }
+  const plain = createTurnMemoryConfig(base)
+  assert.deepEqual(['onePacket', 'writeTarget', 'confirmInConversation'].map(k => Object.hasOwn(plain, k)), [false, false, false])
+  const all = createTurnMemoryConfig({ ...base, onePacket: true, writeTarget: 'about', confirmInConversation: true })
+  assert.deepEqual([all.onePacket, all.writeTarget, all.confirmInConversation], [true, 'about', true])
+  const odd = createTurnMemoryConfig({ ...base, onePacket: 'yes', writeTarget: 'anything', confirmInConversation: 1 })
+  assert.deepEqual(['onePacket', 'writeTarget', 'confirmInConversation'].map(k => Object.hasOwn(odd, k)), [false, false, false], 'only the exact values switch anything on')
+})

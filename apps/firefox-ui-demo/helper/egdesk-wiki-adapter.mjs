@@ -100,8 +100,8 @@ export function pagesFromTopicTurns(turns, { scope, mayRead = null, max = MAX.to
 
 const WRITES_FILE = 'egdesk-wiki-writes.json'
 const WRITES_LIMITS = Object.freeze({ pages: 200, readings: 200, bytes: 256 * 1024, body: 2000 })
-const READING_STATES = new Set(['pending', 'accepted'])
-const STATUSES = new Set(['plan', 'done'])
+const READING_STATES = new Set(['pending', 'accepted', 'rejected']) // rejected: the person objected; the pending reading it answers is withdrawn
+const STATUSES = new Set(['plan', 'done', 'superseded']) // what a stored reading may say (superseded: a correction was reported)
 const SOURCE_STATUSES = new Set(['plan', 'done', 'unknown'])
 const SLICE_SET = new Set(['past', 'present', 'planned', 'hypothetical'])
 const KIND_SET = new Set(PROVENANCE_KINDS)
@@ -124,7 +124,8 @@ function storedReading(raw) {
   return { pageId: raw.pageId, sourceRevision: String(raw.sourceRevision), reading: { status: raw.reading.status, state: raw.reading.state,
     basis: PROVENANCE_BASES.includes(raw.reading.basis) ? raw.reading.basis : null,
     ...(typeof raw.reading.spokenAt === 'string' && !Number.isNaN(Date.parse(raw.reading.spokenAt)) ? { spokenAt: raw.reading.spokenAt } : {}),
-    ...(typeof raw.reading.confirmedAt === 'string' && !Number.isNaN(Date.parse(raw.reading.confirmedAt)) ? { confirmedAt: raw.reading.confirmedAt } : {}) } }
+    ...(typeof raw.reading.confirmedAt === 'string' && !Number.isNaN(Date.parse(raw.reading.confirmedAt)) ? { confirmedAt: raw.reading.confirmedAt } : {}),
+    ...(typeof raw.reading.rejectedAt === 'string' && !Number.isNaN(Date.parse(raw.reading.rejectedAt)) ? { rejectedAt: raw.reading.rejectedAt } : {}) } }
 }
 const normalizeWrites = data => ({ pages: (Array.isArray(data?.pages) ? data.pages : []).map(storedPage).filter(Boolean).slice(-WRITES_LIMITS.pages),
   readings: (Array.isArray(data?.readings) ? data.readings : []).map(storedReading).filter(Boolean).slice(-WRITES_LIMITS.readings) })
@@ -165,8 +166,9 @@ export function overlayWrites(rawPages, written) {
     const page = byId.get(entry.pageId)
     if (!page || page.revision !== entry.sourceRevision) continue
     const same = r => r.state === 'pending' && r.status === entry.reading.status && (r.spokenAt ?? null) === (entry.reading.spokenAt ?? null)
-    // An accepted reading (the person's own later confirmation) replaces the pending reading it came from.
-    page.statusReadings = [...(page.statusReadings ?? []).filter(r => entry.reading.state !== 'accepted' || !same(r)), entry.reading]
+    // An accepted reading (the person's own later confirmation) replaces the pending reading it came from; so does a rejected one
+    // (the person objected), which changes no status.
+    page.statusReadings = [...(page.statusReadings ?? []).filter(r => entry.reading.state === 'pending' || !same(r)), entry.reading]
     if (entry.reading.state === 'accepted') page.status = entry.reading.status
     counts.set(page.id, (counts.get(page.id) ?? 0) + 1)
   }

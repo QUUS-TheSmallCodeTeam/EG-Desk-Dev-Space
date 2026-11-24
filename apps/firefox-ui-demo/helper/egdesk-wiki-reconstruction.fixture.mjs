@@ -85,8 +85,9 @@ export function mockSpeechAnswer(question) {
   const text = quoteOf(question), axis = question.name.split('_')[1]
   if (axis === 'source') return /들었|라고 했|라고 함|전언/.test(text) ? choiceAnswer(question, 'attributed_report', 0.97) : choiceAnswer(question, 'unspecified', 0.55)
   if (axis === 'form') return /[?？]\s*$|지\?|까\?/.test(text) ? choiceAnswer(question, 'question', 0.97) : /예정|할게|할 거|겠/.test(text) ? choiceAnswer(question, 'plan', 0.97) : choiceAnswer(question, 'assertion', 0.93)
-  return /어제|지난/.test(text) ? choiceAnswer(question, 'past_anchored', 0.93) : /끝났|했어|했다|됐/.test(text) ? choiceAnswer(question, 'past_unspecified', 0.93) : /내일|다음/.test(text) ? choiceAnswer(question, 'future_anchored', 0.95) : /지금|현재/.test(text) ? choiceAnswer(question, 'at_utterance', 0.93) : choiceAnswer(question, 'unknown', 0.9)
+  return /어제|지난/.test(text) ? choiceAnswer(question, 'past_anchored', 0.93) : /끝났|했어|했다|됐|였어|봤는데/.test(text) ? choiceAnswer(question, 'past_unspecified', 0.93) : /내일|다음/.test(text) ? choiceAnswer(question, 'future_anchored', 0.95) : /지금|현재/.test(text) ? choiceAnswer(question, 'at_utterance', 0.93) : choiceAnswer(question, 'unknown', 0.9)
 }
+const CORRECTION = /이 아니라|가 아니라|^아니[,.\s]/
 export function mockJudge(log = []) {
   return { async decide(request) {
     const texts = request.input.map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
@@ -100,8 +101,28 @@ export function mockJudge(log = []) {
       else if (q.name === 'tn_need') answers[q.name] = { type: 'predicate', probability: chit ? 0.03 : 0.9 }
       else if (q.name === 'tn_recall') answers[q.name] = { type: 'predicate', probability: /아까|다시 정리|지난번/.test(message) ? 0.95 : 0.03 }
       else if (q.name === 'tn_record') answers[q.name] = { type: 'predicate', probability: !chit && !isQuestion && /(어|야|다|요)\.?$/.test(message.trim()) ? 0.95 : 0.03 }
-      else if (q.name === 'tw_status') answers[q.name] = COMPLETION.test(message) ? choiceAnswer(q, 'done', 0.95) : /예정|할 거|할게/.test(message) ? choiceAnswer(q, 'plan', 0.95) : choiceAnswer(q, 'unknown', 0.9)
+      else if (q.name === 'tw_status') answers[q.name] = CORRECTION.test(message) && q.choices.some(c => c.value === 'corrected') ? choiceAnswer(q, 'corrected', 0.95) : COMPLETION.test(message) ? choiceAnswer(q, 'done', 0.95) : /예정|할 거|할게/.test(message) ? choiceAnswer(q, 'plan', 0.95) : choiceAnswer(q, 'unknown', 0.9)
       else if (/^speech_/.test(q.name)) answers[q.name] = mockSpeechAnswer(q)
+    }
+    // design 'about': one yes/no per stored record. A completion report is about the plan it completes, a correction about the record
+    // whose detail it replaces; everything else is not "this very record" (it may still be the same task: tw_link).
+    const records = blocksOf(texts, 'Stored records:\n')
+    for (const b of records) {
+      const i = Number(b.alias.slice(1)) - 1, s = overlap(message, b.head + ' ' + b.text)
+      const planLike = /provenance=/.test(b.head) && /예정|계획|아직/.test(b.text)
+      const isIt = !chit && !isQuestion && s >= 0.15 && ((COMPLETION.test(message) && planLike) || CORRECTION.test(message))
+      if (request.questions.some(q => q.name === `tw_about_${i}`)) answers[`tw_about_${i}`] = { type: 'predicate', probability: isIt ? 0.95 : 0.03 }
+      if (request.questions.some(q => q.name === `tw_link_${i}`)) answers[`tw_link_${i}`] = { type: 'predicate', probability: s >= 0.15 ? 0.9 : 0.05 }
+    }
+    // confirmation of a noted record: did the previous reply state it, and what does the new message do with it
+    if (request.questions.some(q => q.name.startsWith('rc_'))) {
+      const reply = /Assistant's previous reply:\n([\s\S]*)$/.exec(texts.find(t => t.startsWith('Assistant\'s previous reply:')) ?? '')?.[1] ?? ''
+      const said = /The person's new message:\n([\s\S]*)$/.exec(joined)?.[1]?.trim() ?? ''
+      for (const q of request.questions) {
+        if (q.name.startsWith('rc_stated_')) answers[q.name] = { type: 'predicate', probability: /적어 둘게요|적어 뒀어요|기록해 둘게요/.test(reply) ? 0.96 : 0.03 }
+        else if (q.name.startsWith('rc_reply_')) answers[q.name] = /^(응|네|맞아|그래)[\s,.!]|^(응|네|맞아|그래)$|그렇게 해/.test(said) ? choiceAnswer(q, 'confirm', 0.95)
+          : /아니|아직|취소|지워|기록하지|적지/.test(said) ? choiceAnswer(q, 'object', 0.95) : /음+\.*$|글쎄/.test(said) ? choiceAnswer(q, 'unsure', 0.5) : choiceAnswer(q, 'neither', 0.93)
+      }
     }
     const cands = blocksOf(texts, 'Candidate pages:\n')
     if (request.questions.some(q => q.name === 'tw_target')) {

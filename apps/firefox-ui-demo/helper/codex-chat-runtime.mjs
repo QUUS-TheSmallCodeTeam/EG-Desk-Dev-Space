@@ -72,9 +72,10 @@ export function compactionSignal(message) {
 const FLOW_OWN_KINDS = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
 import { SPEECH_AT_PAGE, speechSegments } from './egdesk-speech-grounding.mjs'
 import { deriveTurnPosition, memoryMaterials, prepareTurnMemory } from './egdesk-turn-memory.mjs'
+import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
 import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, entryQuestion, readBrowserEntry } from './egdesk-browser-task.mjs'
 import { hostOf } from './egdesk-browser-task-memory.mjs'
-import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection } from './egdesk-wiki-reconstruction.mjs'
+import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
@@ -836,6 +837,7 @@ export class CodexChatRuntime {
     this.turnMemoryDelivered = new Map() // 'on': native thread -> receipts (revision + hash, never text) of pages really attached to its turns; memory only, bounded
     this.turnMemoryWrites = new WeakMap() // 'on': run -> the write judgment to run once its answer completed
     this.turnMemoryTurns = new WeakMap() // 'on': the turn's request context, and later its run -> that turn's memory state (memoryMaterialsFor)
+    this.turnMemoryNoted = new Map() // 'on' + confirmInConversation: native thread -> pending readings noted in this session (page id, status, how often mentioned); memory only
     this.turnMemoryLatest = new Map() // 'on': native thread -> the memory state of its latest accepted turn; an older turn's materials are no longer served
     this.turnMemoryWriteReceipts = new WeakMap() // 'on': run -> { proposal, applied } of that write (closed words only)
     this.browserEntryRuns = new Set() // in-flight advisory entry jobs (never awaited by a turn)
@@ -2659,8 +2661,12 @@ export class CodexChatRuntime {
       // One packet (flag turnMemory.onePacket, default off): with both features attaching, the memory pages ride under the selection's key and
       // a page that is already a selected item is not sent a second time. Without the flag, or with only one of the two present, nothing changes.
       const onePacket = memoryPacket ? this.mergeTurnMemory(memoryTurn, decision, additionalContext) : null
-      const memoryContext = onePacket ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: onePacket.value } }
-        : memoryPacket ? { [TURN_MEMORY_KEY]: { kind: 'application', value: memoryPacket } } : null
+      // What was noted in this session and is not confirmed (flag turnMemory.confirmInConversation, default off): a few lines for the
+      // answering model to state, after the pages. null without the flag, so nothing below changes then.
+      const memoryNote = memoryReady ? this.turnMemoryNoteFor(memoryTurn, additionalContext) : null
+      const withNote = value => (memoryNote ? [value, memoryNote].filter(Boolean).join('\n\n') : value)
+      const memoryContext = onePacket ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: withNote(onePacket.value) } }
+        : memoryPacket || memoryNote ? { [TURN_MEMORY_KEY]: { kind: 'application', value: withNote(memoryPacket) } } : null
       const turnAdditionalContext = browserTaskContext || memoryContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}) } : additionalContext
       turnStartAttempted = context.turnStartAttempted = true
       const result = await engine.startTurn({
@@ -2758,10 +2764,10 @@ export class CodexChatRuntime {
         }
       }
       if (decision) this.noteDecisionContext(run, decision)
-      this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...(memoryPacket ? [TURN_MEMORY_KEY] : [])])
+      this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...(memoryPacket || memoryNote ? [TURN_MEMORY_KEY] : [])])
       this.startConversationFlow(run, body, context)
       this.turnMemoryLatest.delete(run.conversationId) // this turn is now the conversation's latest: the previous turn's materials end here
-      if (memoryTurn) this.noteTurnMemoryOn(run, body, context, memoryTurn, memoryPacket !== null)
+      if (memoryTurn) this.noteTurnMemoryOn(run, body, context, memoryTurn, memoryPacket !== null, memoryNote !== null)
       if (memoryPosition) this.startTurnMemoryAdvisory(run, body, context, memoryPosition, performance.now() - memoryClock, { speech: decision?.speech ?? null, topic: this.topicIntakes.get(context) ?? null }) // after dispatch, in the background: never delays or changes the turn
       if (bounded && policy === BROWSER_BOUNDED && browserInteractionRequested && this.browserEntryMode() === 'advisory') this.startBrowserEntryAdvisory(run, body, context) // same: record only
       // Notifications can precede the RPC response. Only the returned turn ID
@@ -5811,10 +5817,13 @@ export class CodexChatRuntime {
     // Receipts are trusted only where the engine reports compaction (Codex). Elsewhere a held page may be gone unnoticed, so nothing counts as held.
     const delivered = context.engine?.id === 'codex' && threadKey ? this.turnMemoryDelivered.get(threadKey) ?? null : null
     const scope = egress.memoryScope(baseScope ?? {})
+    // Before the loop reads the wiki: does this message confirm or refuse a note the previous reply stated? (flag, default off)
+    if (this.turnMemoryConfirmOn()) await this.confirmNotedRecords(turn, body, context, { wiki, baseScope, scope, egress, threadKey })
     const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position: turn.position, threadKey, scope,
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
       deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock,
-      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal })
+      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'about' ? 'about' : 'choice' })
+    if (this.turnMemoryConfirmOn()) this.prepareTurnMemoryNote(turn, { wiki, scope, threadKey })
     Object.assign(turn, { wiki, baseScope, scope, result, readyMs: clock.now() - t0 })
   }
 
@@ -5893,6 +5902,83 @@ export class CodexChatRuntime {
     return turn
   }
 
+  // ---- conversational confirmation of pending readings (flag turnMemory.confirmInConversation, default off; see egdesk-record-confirmation.mjs) ----
+  turnMemoryConfirmOn() {
+    try {
+      const tm = this.decisionContext?.turnMemory, flag = tm?.confirmInConversation
+      return (typeof flag === 'function' ? flag() : flag) === true && this.turnMemoryMode() === 'on' && tm.ontologyWrite === true && typeof tm.writer === 'function'
+    } catch { return false }
+  }
+
+  // The person's new message against the notes the previous reply was asked to state. Runs before the loop, on the same snapshot, so a
+  // confirmed or withdrawn reading is what the loop and the packet then show. Any failure keeps every note pending.
+  async confirmNotedRecords(turn, body, context, { wiki, baseScope, scope, egress, threadKey }) {
+    try {
+      const noted = threadKey ? this.turnMemoryNoted.get(threadKey) : null
+      if (!noted?.length) return
+      // The session these notes belong to is over (a new or rebuilt native thread): they stay pending and are not raised again.
+      if (turn.position.kind !== 'mid') { this.turnMemoryNoted.delete(threadKey); return }
+      const pendingOn = entry => { const page = wiki.pages.get(entry.pageId); return !!page && memoryAllowsPage(page, scope) && page.statusReadings.some(r => r.state === 'pending' && r.status === entry.status) }
+      const live = noted.filter(pendingOn)
+      this.turnMemoryNoted.set(threadKey, live)
+      const offered = live.filter(entry => entry.offered === true).slice(0, CONFIRM_LIMITS.records)
+      if (!offered.length) return
+      for (const entry of offered) entry.offered = false // one message answers one mention
+      const speech = turn.sources.speech
+      let previous = null
+      try { if (speech?.allowed?.() === true) { const last = speech.records().at(-1); if (last?.role === 'assistant' && offered.every(entry => Date.parse(last.spokenAt) >= entry.offeredAt)) previous = last.quote } } catch { previous = null }
+      if (typeof previous !== 'string') { turn.confirm = { judged: 0, reason: 'no_previous_answer', actions: [], silent: 0 }; return }
+      const setup = this.decisionContext, tm = setup.turnMemory, clock = turn.clock, t0 = turn.startedAt
+      // The previous reply is a past utterance of this DM and the notes are memory pages: both kinds must be allowed for the run's models.
+      const client = { decide: async request => {
+        egress.require('memory_page'); egress.require('speech_history')
+        const start = clock.now() - t0
+        try { return await setup.client.decide(request) } finally { turn.spans.push({ stage: 'confirm', start, end: clock.now() - t0 }) }
+      } }
+      const deadlineAt = t0 + turn.capMs - 200
+      const judged = await memorySettleBefore(judgeConfirmation({ message: body.message, previousAnswer: previous, records: offered.map(entry => ({ title: wiki.pages.get(entry.pageId).title, status: entry.status })),
+        client, askedAt: context.askedAt ?? this.now(), signal: turn.controller.signal, timeoutMs: Math.max(1, Math.min(CONFIRM_LIMITS.timeoutMs, Math.ceil(deadlineAt - clock.now()))) }), deadlineAt, clock).catch(() => null)
+      const actions = []
+      if (judged?.status === 'ready') {
+        const at = new Date(context.askedAt ?? this.now()).toISOString(), messageId = context.localMessageId ?? context.requestId
+        const writer = tm.writer(wiki, { enabled: true, canWrite: ({ op, page }) => (op === 'promote' || op === 'reject') && !!page && memoryAllowsPage(page, scope) })
+        judged.verdicts.forEach((verdict, index) => {
+          const entry = offered[index]
+          let applied = null
+          if (verdict.action === 'promote') applied = writer.promote(entry.pageId, { scope: baseScope, confirmation: { by: 'user', at }, operationId: `confirm:${messageId}:${entry.pageId}` })
+          else if (verdict.action === 'revert') applied = writer.reject(entry.pageId, { scope: baseScope, objection: { by: 'user', at }, operationId: `object:${messageId}:${entry.pageId}` })
+          const done = applied?.status === 'status_updated' || applied?.status === 'reading_withdrawn'
+          if (done) entry.closed = true
+          else if (entry.offers >= CONFIRM_LIMITS.offers) entry.closed = true // mentioned twice without an answer: it simply stays pending
+          actions.push({ pageId: entry.pageId, status: entry.status, action: done ? (verdict.action === 'promote' ? 'promoted' : 'withdrawn') : 'kept', reason: verdict.reason, stated: verdict.stated.p, reply: verdict.reply.value, confidence: verdict.reply.confidence })
+        })
+        this.turnMemoryNoted.set(threadKey, live.filter(entry => !(entry.closed === true && actions.some(a => a.pageId === entry.pageId && a.action !== 'kept'))))
+      }
+      turn.confirm = { judged: judged?.status === 'ready' ? offered.length : 0, reason: judged?.status === 'ready' ? null : judged?.reason ?? 'timeout', actions, silent: judged?.silent ?? 0 }
+    } catch { /* confirmation must never affect the turn */ }
+  }
+
+  // The notes this turn will mention: still pending, readable, not mentioned twice already.
+  prepareTurnMemoryNote(turn, { wiki, scope, threadKey }) {
+    try {
+      const noted = threadKey ? this.turnMemoryNoted.get(threadKey) : null
+      if (!noted?.length || turn.position.kind !== 'mid') return
+      const entries = noted.filter(entry => entry.closed !== true && entry.offers < CONFIRM_LIMITS.offers).filter(entry => { const page = wiki.pages.get(entry.pageId)
+        return !!page && memoryAllowsPage(page, scope) && page.statusReadings.some(r => r.state === 'pending' && r.status === entry.status) }).slice(0, CONFIRM_LIMITS.records)
+      const text = confirmationNote(entries.map(entry => ({ title: wiki.pages.get(entry.pageId).title, status: entry.status })))
+      if (text) { turn.note = text; turn.noteEntries = entries }
+    } catch { /* no note */ }
+  }
+
+  // Re-checked at dispatch like the packet: the flag and the mode still hold, it was ready before the cap, every noted page may still be read.
+  turnMemoryNoteFor(turn, additionalContext) {
+    try {
+      if (typeof turn.note !== 'string' || !this.turnMemoryConfirmOn() || !(turn.readyMs < turn.capMs)) return null
+      if (additionalContext && Object.hasOwn(additionalContext, TURN_MEMORY_KEY)) return null
+      return turn.noteEntries.every(entry => { const page = turn.wiki.pages.get(entry.pageId); return !!page && memoryAllowsPage(page, turn.scope) }) ? turn.note : null
+    } catch { return null }
+  }
+
   // One packet: the memory pages appended to the dispatched selection, under the selection's key. null means "leave both as they are".
   // Read at the last moment, after every narrowing of the selection: what is merged is exactly what is about to be sent.
   mergeTurnMemory(turn, decision, additionalContext) {
@@ -5909,8 +5995,11 @@ export class CodexChatRuntime {
   }
 
   // After the turn was accepted: receipts of what was really attached, the row the person can inspect, the record, and the pending write.
-  noteTurnMemoryOn(run, body, context, turn, attached) {
+  noteTurnMemoryOn(run, body, context, turn, attached, noteAttached = false) {
     try {
+      // The note really went out with this turn: the next message of the person is the one that can answer it.
+      if (noteAttached) for (const entry of turn.noteEntries ?? []) { entry.offered = true; entry.offers += 1; entry.offeredAt = Date.parse(new Date(context.askedAt ?? this.now()).toISOString()) }
+      this.noteRecordConfirmations(run, turn)
       turn.attached = attached === true
       this.turnMemoryTurns.set(run, turn)
       if (typeof run.conversationId === 'string' && run.conversationId) {
@@ -5947,6 +6036,22 @@ export class CodexChatRuntime {
     } catch { /* memory must never affect the turn */ }
   }
 
+  // What the person's message did to a noted record, as a row they can see. Titles and closed words only. (Wording pending approval.)
+  noteRecordConfirmations(run, turn) {
+    try {
+      for (const [index, action] of (turn.confirm?.actions ?? []).entries()) {
+        if (action.action === 'kept') continue
+        const page = turn.wiki?.pages.get(action.pageId)
+        if (!page) continue
+        const activity = decisionContextActivity({ answerId: `${run.answerId}\u0000record${index}`, selected: [{ id: page.id, title: page.title, timeSlice: page.time.slice, ...(page.ref ? { sourceRef: page.ref } : {}) }] })
+        activity.title = action.action === 'promoted' ? '기록 확정 1건' : '기록 취소 1건'
+        activity.detail = { ...activity.detail, feature: 'turnMemory', mode: 'on', confirmation: action.action, status: action.status }
+        this.put(run, 'activities', activity)
+        this.emit(run, 'activity.completed', activity)
+      }
+    } catch { /* never affects the turn */ }
+  }
+
   // The write judgment of an 'on' turn, after its answer completed. It stores only what the write path accepts: a pending reading on a
   // page this DM may read, or a new utterance page kept as a reference into the chat store (only with the speech consent that already lets
   // past utterances be reused). Nothing is promoted here; a pending reading becomes a status only through writer.promote on the person's
@@ -5977,7 +6082,7 @@ export class CodexChatRuntime {
 
   async runTurnMemoryWrite(run, { turn, body, context, record }) {
     const tm = this.decisionContext?.turnMemory
-    let judged = null, applied = null
+    let judged = null, applied = null, followUp = null
     try {
       judged = await turn.result.judgeWrite()
       // Before anything is stored that points at this utterance: its speech record, with the labels this judgment installed.
@@ -5997,11 +6102,23 @@ export class CodexChatRuntime {
             turn.sources.speech.record?.(context.localMessageId, 'user', body.message, labels ? [{ start: 0, end: body.message.length, source: labels.source, form: labels.form, time: labels.time }] : [])
           }
           applied = tm.writer(wiki, { enabled: true, canWrite }).apply(proposal, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: writeScope, operationId: `turn:${context.localMessageId}` })
+          // A correction: the record carries the pending "outdated" reading; the person's own sentence with the new detail becomes a page
+          // that supersedes it, only where an utterance page may be stored at all (speech consent).
+          if (judged.followUp && speechOk && applied?.status === 'recorded_pending') {
+            followUp = tm.writer(wiki, { enabled: true, canWrite }).apply(judged.followUp, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: writeScope, operationId: `turn:${context.localMessageId}:correction` })?.status ?? null
+          }
+          // Noted for this session, so a later reply can say what was noted and the person's next message can confirm or refuse it.
+          if (applied?.status === 'recorded_pending' && proposal.op === 'update_status' && this.turnMemoryConfirmOn() && typeof run.conversationId === 'string' && run.conversationId) {
+            const list = (this.turnMemoryNoted.get(run.conversationId) ?? []).filter(entry => entry.pageId !== proposal.pageId)
+            list.push({ pageId: proposal.pageId, status: proposal.proposedStatus, offers: 0, offered: false, offeredAt: 0 })
+            this.turnMemoryNoted.delete(run.conversationId); this.turnMemoryNoted.set(run.conversationId, list.slice(-CONFIRM_LIMITS.records))
+            while (this.turnMemoryNoted.size > 50) this.turnMemoryNoted.delete(this.turnMemoryNoted.keys().next().value)
+          }
         }
       }
     } catch { applied = { status: 'invalid' } }
     this.recordDeferredSpeech(run, []) // the judgment failed before it could be recorded: still once, unlabelled
-    this.turnMemoryWriteReceipts.set(run, { proposal: judged?.proposal?.op ?? null, reason: judged?.proposal?.reason ?? null, applied: applied?.status ?? null })
+    this.turnMemoryWriteReceipts.set(run, { proposal: judged?.proposal?.op ?? null, reason: judged?.proposal?.reason ?? null, applied: applied?.status ?? null, ...(followUp ? { followUp } : {}) })
     record(judged)
   }
 
