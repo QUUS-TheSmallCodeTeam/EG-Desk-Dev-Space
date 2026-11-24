@@ -138,6 +138,10 @@ function mergedLabels(interpretations) {
 // derives the target: exactly one yes and every other a decided no -> that record; every one a decided no (or there is no candidate) ->
 // a new record; anything else -> undecided, and nothing is written. "Do not add" stays where it is decided: tn_record.
 export const WRITE_TARGET_DESIGNS = Object.freeze(['choice', 'about'])
+// The design turn memory uses unless told otherwise (2026-11-24 real re-measurement, 6 requests: the per-record predicates answered 0 or 1
+// in every case, while the 'choice' target of the same three new-record utterances stayed undecided, 0.6-0.7, 3 of 3). 'choice' stays
+// selectable for comparison. judgeTurnWrite's own default is still 'choice' for its other callers (the browser task record).
+export const TURN_MEMORY_WRITE_TARGET = 'about'
 const ABOUT_RULES = [
   'You are a system judge reading one message against stored records. Every question is about ONE record or ONE sentence: answer each on its own, whatever the others are.',
   'A record is the record the message is about only when the message reports on, completes, changes or corrects that very record. A record that only belongs to the same task, or that the message would affect indirectly, is not it.',
@@ -409,7 +413,7 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
  * packetFirst (optional, first turn only): return as soon as the packet is ready; the triage that only decides recording keeps running and is
  *   awaited inside judgeWrite (triage is then null in the result and `triageLater` is its promise). It is not bound by the packet deadline.
  */
-export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = 'choice' } = {}) {
+export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = TURN_MEMORY_WRITE_TARGET } = {}) {
   // The deadline is ONE point on ONE clock, fixed here. Everything below asks that clock; a timer only wakes the wait up.
   const deadlineAt = Number.isFinite(deadlineMs) ? clock.now() + Math.max(0, deadlineMs) : null
   const remaining = () => (deadlineAt === null ? null : Math.max(0, deadlineAt - clock.now()))

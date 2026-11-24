@@ -5846,7 +5846,7 @@ export class CodexChatRuntime {
     const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position: turn.position, threadKey, scope,
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
       deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock,
-      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'about' ? 'about' : 'choice' })
+      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about' })
     if (this.turnMemoryConfirmOn()) this.prepareTurnMemoryNote(turn, { wiki, scope, threadKey })
     Object.assign(turn, { wiki, baseScope, scope, result, readyMs: clock.now() - t0 })
   }
@@ -6181,7 +6181,7 @@ export class CodexChatRuntime {
       const threadKey = run.conversationId
       const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position, threadKey,
         scope: typeof tm.scope === 'function' ? await (async () => { const base = await tm.scope({ body, context }); return base ? egress.memoryScope(base) : base })() : null, live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null,
-        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal })
+        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal , writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about' })
       const judged = result.judgeWrite ? await result.judgeWrite() : null
       if (typeof threadKey === 'string' && threadKey) {
         this.turnMemoryShadow.set(threadKey, result.nextDelivered())
@@ -6204,7 +6204,11 @@ export class CodexChatRuntime {
           { q: 'triage_record', p: triage.record.p, ...yesNo, would: triage.record.state === 'yes' ? 'attach' : 'skip' })
       }
       const target = judged?.receipt?.target
-      if (target) judgments.push({ q: 'write_target', top: target.top, second: target.second, confidence: target.confidence, margin: target.margin, options: target.options,
+      // 'about': one yes/no per candidate record (its probability against the yes bar), then the target the code derived from them.
+      if (target && judged.receipt.design === 'about') {
+        for (const p of Array.isArray(target.about) ? target.about : []) judgments.push({ q: 'write_about', p, ...yesNo, would: p === null ? 'unknown' : p >= MEMORY_YES ? 'accept' : p <= MEMORY_NO ? 'reject' : 'unknown' })
+        judgments.push({ q: 'write_target', options: target.options, would: target.value ? 'accept' : 'reject' })
+      } else if (target) judgments.push({ q: 'write_target', top: target.top, second: target.second, confidence: target.confidence, margin: target.margin, options: target.options,
         threshold: 0.75, minMargin: 0.2, would: target.value ? 'accept' : 'reject' })
       const stage = name => spans.filter(x => x.stage === name)
       const last = list => (list.length ? Math.max(...list.map(x => x.end)) : null), span = list => (list.length ? Math.max(...list.map(x => x.end)) - Math.min(...list.map(x => x.start)) : null)

@@ -18,9 +18,9 @@ const PG_HELD = ['db/pg-design', 'db/pg-plan', 'db/pg-rollback', 'db/sqlite-sche
 const hash = body => crypto.createHash('sha256').update(body).digest('hex')
 const receiptsFor = (wiki, ids, threadKey = THREAD) => ({ usable: true, threadKey, pages: Object.fromEntries(ids.map(id => [id, { revision: wiki.pages.get(id).revision, hash: hash(wiki.pages.get(id).body) }])) })
 const FIRST = { kind: 'first', reason: 'no_native_thread' }, MID = { kind: 'mid', reason: 'live_thread' }
-const turn = async (message, { position = MID, wiki = buildWiki(SYNTHETIC_PAGES), held = PG_HELD, ontologyWrite = false, budget = {}, client, delivered, skipOnNeed, heldExcerpts } = {}) => {
+const turn = async (message, { position = MID, wiki = buildWiki(SYNTHETIC_PAGES), held = PG_HELD, ontologyWrite = false, budget = {}, client, delivered, skipOnNeed, heldExcerpts, writeTarget } = {}) => {
   const log = []
-  const r = await prepareTurnMemory({ message, wiki, client: client ?? mockJudge(log), scope: SCOPE, askedAt: ASKED, position, threadKey: THREAD, ontologyWrite, budget, ...(skipOnNeed === undefined ? {} : { skipOnNeed }), ...(heldExcerpts === undefined ? {} : { heldExcerpts }),
+  const r = await prepareTurnMemory({ message, wiki, client: client ?? mockJudge(log), scope: SCOPE, askedAt: ASKED, position, threadKey: THREAD, ontologyWrite, budget, ...(skipOnNeed === undefined ? {} : { skipOnNeed }), ...(heldExcerpts === undefined ? {} : { heldExcerpts }), ...(writeTarget === undefined ? {} : { writeTarget }),
     delivered: delivered ?? (held ? receiptsFor(wiki, held) : null) })
   return { r, log, wiki }
 }
@@ -130,8 +130,14 @@ test('"배포 끝났어" is a status-change PROPOSAL for the plan page (isolated
   assert.equal(receipt.labels.time, 'past_unspecified'); assert.equal(receipt.labels.source, 'unknown', 'a label under its bar is not installed and not guessed')
   const write = log.at(-1)
   assert.ok(write.questions.some(q => q.startsWith('speech_time_0')) && !write.questions.some(q => q.startsWith('speechp_')), 'isolated AXES, not predicates')
-  assert.match(write.input, /Candidate pages:/)
+  // turn memory's default write target is 'about': one yes/no per stored record, the target derived by code, no "new / none" choice
+  assert.match(write.input, /Stored records:/); assert.ok(write.questions.some(q => q === 'tw_about_0') && !write.questions.includes('tw_target'))
+  assert.equal(receipt.design, 'about'); assert.equal(receipt.target.reason, 'one_record')
   assert.equal(JSON.stringify([...wiki.pages.values()].map(p => [p.id, p.status, p.revision, p.statusReadings])), before)
+  // 'choice' stays selectable for comparison and gives the same proposal here
+  const old = await turn('PostgreSQL 마이그레이션 배포 끝났어', { wiki: buildWiki(SYNTHETIC_PAGES), ontologyWrite: true, writeTarget: 'choice' })
+  const choice = await old.r.judgeWrite()
+  assert.deepEqual(choice.proposal, proposal); assert.match(old.log.at(-1).input, /Candidate pages:/); assert.ok(old.log.at(-1).questions.includes('tw_target'))
 })
 
 test('options are runtime-enumerated: existing candidate pages, "new" and "none"; thanks, questions and unclear targets are not recorded', async () => {

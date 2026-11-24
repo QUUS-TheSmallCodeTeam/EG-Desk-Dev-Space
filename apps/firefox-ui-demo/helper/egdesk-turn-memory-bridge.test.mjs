@@ -108,8 +108,10 @@ test('the wiring passes its internal flags to the runtime only when the bridge s
   const base = { settings: { turnMemory: { mode: 'on' } }, getAdapter: () => ({}) }
   const plain = createTurnMemoryConfig(base)
   assert.deepEqual(['onePacket', 'writeTarget', 'confirmInConversation'].map(k => Object.hasOwn(plain, k)), [false, false, false])
-  const all = createTurnMemoryConfig({ ...base, onePacket: true, writeTarget: 'about', confirmInConversation: true })
-  assert.deepEqual([all.onePacket, all.writeTarget, all.confirmInConversation], [true, 'about', true])
+  // the write target is 'about' unless 'choice' is asked for (to compare); 'about' is the default, so it is not passed
+  const all = createTurnMemoryConfig({ ...base, onePacket: true, writeTarget: 'choice', confirmInConversation: true })
+  assert.deepEqual([all.onePacket, all.writeTarget, all.confirmInConversation], [true, 'choice', true])
+  assert.equal(Object.hasOwn(createTurnMemoryConfig({ ...base, writeTarget: 'about' }), 'writeTarget'), false)
   const odd = createTurnMemoryConfig({ ...base, onePacket: 'yes', writeTarget: 'anything', confirmInConversation: 1 })
   assert.deepEqual(['onePacket', 'writeTarget', 'confirmInConversation'].map(k => Object.hasOwn(odd, k)), [false, false, false], 'only the exact values switch anything on')
 })
