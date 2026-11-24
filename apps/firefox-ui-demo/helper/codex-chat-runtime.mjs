@@ -2486,8 +2486,10 @@ export class CodexChatRuntime {
           let current = false
           try {
             const setup = this.decisionContext
-            current = setup.mode() === 'on' && setup.configured() === true &&
-              (decision.generation === null || typeof setup.settingsGeneration !== 'function' || setup.settingsGeneration() === decision.generation)
+            // No live decision settings to compare with (a result handed in without them):
+            // there is nothing that could have changed, so this check never drops it.
+            current = typeof setup?.mode !== 'function' || (setup.mode() === 'on' && setup.configured() === true &&
+              (decision.generation === null || typeof setup.settingsGeneration !== 'function' || setup.settingsGeneration() === decision.generation))
           } catch { current = false }
           // A result that carries a private topic batch keeps its own grant guard below.
           if (!current && !decision.result?.privateTopicBatch) {
