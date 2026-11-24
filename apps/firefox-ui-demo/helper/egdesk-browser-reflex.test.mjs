@@ -211,7 +211,9 @@ test('a repeated tool refusal stops the loop and step limits hold', async () => 
   const refused = await runBrowserReflex({ cardId: 'c', goal: 'g', callTool, client })
   assert.deepEqual([refused.outcome, refused.reason, refused.code], ['escalated', 'tool_failed', 'BROWSER_OBSERVATION_STALE'])
   const scroller = decisions(question => (question.name === 'next_step' ? choice('scroll_more') : question.name === 'page_state' ? choice('content') : { type: 'predicate', probability: 0.1 }))
-  const limited = await runBrowserReflex({ cardId: 'c', goal: 'g', maxSteps: 2, callTool: tools([LIST_PAGE]).callTool, client: scroller.client })
+  // c26: a page that holds controls withheld as the person's own and reports NO content below is the person's step (human_step); the step limit is a limit on
+  // scrolling a page that does report content below, so the page says so
+  const limited = await runBrowserReflex({ cardId: 'c', goal: 'g', maxSteps: 2, callTool: tools([{ ...LIST_PAGE, scroll: { x: 0, y: 0, maxY: 5000 } }]).callTool, client: scroller.client })
   assert.equal(limited.outcome, 'max_steps')
   assert.equal(limited.steps.length, 2)
 })

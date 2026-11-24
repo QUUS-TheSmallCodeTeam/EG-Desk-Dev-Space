@@ -199,6 +199,13 @@ export function readOnlyPress(element, snapshot, { classify = classifyAction, is
   return null
 }
 
+// c26: the snapshot's own scroll state (the Firefox child reports { x, y, maxY }): more than a few pixels left below. Unknown is not "more".
+export const MORE_BELOW_PX = 16
+export function contentBelow(snapshot) {
+  const scroll = snapshot?.scroll
+  return record(scroll) && Number.isFinite(scroll.y) && Number.isFinite(scroll.maxY) && scroll.maxY - scroll.y > MORE_BELOW_PX
+}
+
 function elementKind(element) {
   const role = String(element.role || '')
   if (role === 'link') return httpUrl(element.href) ? 'navigate' : 'press'
@@ -218,6 +225,7 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
   const excluded = { disabled: 0, gated: 0, offSite: 0, sensitive: 0, unlabeled: 0, overflow: 0, unsupported: 0 }
   const counters = { navigate: 0, press: 0, fill: 0 }
   const personOnly = [] // c22: the controls only the person may operate (no action exists for them), named for the step
+  const withheld = [] // c26: every control withheld as the person's own (a button withheld by vocabulary, a control with no action), in page order, named for the note
   for (const element of elements) {
     if (!record(element) || typeof element.ref !== 'string' || !element.ref) continue
     const kind = elementKind(element)
@@ -226,6 +234,7 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
         excluded.unsupported++
         const name = compactText(element.label, 60)
         if (name && personOnly.length < MAX_PERSON_TARGETS) personOnly.push({ label: name, role: String(element.role), value: compactText(element.value ?? '', 30) })
+        if (name && withheld.length < MAX_PERSON_TARGETS) withheld.push({ label: name, role: String(element.role) })
       }
       continue
     }
@@ -248,7 +257,11 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
     // c25: a same-site LINK is a page change; 등록 in its label (a registering phrase, not the noun inside 주민등록) is no reason to withhold it. The
     // address words are still classified below; a link to another site is withheld as before.
     const registerLink = kind === 'navigate' && judged?.category === 'submit' && judged.reason === 'submit-vocabulary' && /등록/.test(judged.term ?? '') && isAllowedUrl(element.href, snapshot)
-    if (judged?.category !== 'none' && !yieldsToProof && !registerLink) { excluded.gated++; continue }
+    if (judged?.category !== 'none' && !yieldsToProof && !registerLink) {
+      excluded.gated++
+      if (kind === 'press' && label && withheld.length < MAX_PERSON_TARGETS) withheld.push({ label, role: String(element.role) })
+      continue
+    }
     if (kind === 'navigate') {
       if (!isAllowedUrl(element.href, snapshot)) { excluded.offSite++; continue }
       const words = hrefWords(element.href)
@@ -264,7 +277,7 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
   }
   const kept = entries.slice(0, Math.max(0, maxOptions))
   excluded.overflow = entries.length - kept.length
-  return { options: uniqueOptions(kept), excluded, personOnly }
+  return { options: uniqueOptions(kept), excluded, personOnly, withheld }
 }
 
 export function expectedTargetOf(element) {
@@ -553,7 +566,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     }
     const entry = { step, observationId, revision: snapshot.revision, url: snapshot.url, actions: [] }
     steps.push(entry)
-    const { options, excluded, personOnly } = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}) })
+    const { options, excluded, personOnly, withheld } = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}) })
     entry.excluded = excluded
     // Code rule (R3/R5): nothing on this page may be chosen and something was withheld as the person's own control (submit, payment,
     // permission, delete). There is nothing to judge, so no request is made: the step is the person's. Real measurement (2026-11-25):
@@ -606,6 +619,17 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
       if (isDecisionCurrent && !isDecisionCurrent()) return finish('fallback', { reason: 'evidence_unavailable' })
       if (check) { entry.decision.targets = check.targets; entry.followUp = true }
       if (check?.hit) { entry.rule = 'person_target'; return finish('escalated', { reason: 'human_step', withheld: excluded.gated + excluded.unsupported, target: check.hit }) }
+    }
+    // c26 (owner decision, c25; real: the c24 fee-and-verification page read as ordinary content, next_step scroll_more 0.91, and the task ended with
+    // nothing said): the page's offered options do not move toward the goal (next_step decided to be scroll_more or blocked, on an ordinary content
+    // page) and it holds controls withheld as the person's own (a submit, payment, permission or delete button, a toggle or box the loop has no action
+    // for). That is the person's step: hand it over naming them (R3: decided by code from the step's answers and the snapshot, no new question).
+    // scroll_more is still scrolled when the page reports content below (a long page may hold the way forward further down); the snapshot's own scroll
+    // state decides, and a snapshot without one cannot promise more content. A decided forward option, a sensitive/handoff page state and an
+    // undecided step are not touched by this rule. Nothing is acted on.
+    if (withheld.length && decision.pageState === 'content' && (decision.kind === 'blocked' || (decision.kind === 'scroll' && !contentBelow(snapshot)))) {
+      entry.rule = 'stuck_person_controls'
+      return finish('escalated', { reason: 'human_step', withheld: excluded.gated + excluded.unsupported, controls: withheld.map(control => control.label) })
     }
 
     // A decided link leaves this page: supplied values are not typed into a page
@@ -731,7 +755,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
  */
 export function reflexResultForModel(result) {
   const pick = {}
-  for (const key of ['outcome', 'reason', 'code', 'url', 'observationId', 'pageState', 'field', 'label', 'fields', 'suggestion', 'ranked', 'candidates', 'unmatchedValues', 'withheld']) {
+  for (const key of ['outcome', 'reason', 'code', 'url', 'observationId', 'pageState', 'field', 'label', 'fields', 'suggestion', 'ranked', 'candidates', 'unmatchedValues', 'withheld', 'controls']) {
     if (result[key] !== undefined && result[key] !== null) pick[key] = result[key]
   }
   pick.steps = Array.isArray(result.steps) ? result.steps.length : 0
