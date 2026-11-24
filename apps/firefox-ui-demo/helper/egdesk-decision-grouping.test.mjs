@@ -76,7 +76,7 @@ test('grouping lint: builders asked directly (turn context catalog, draft check,
   const { buildGateRequest, enumerateBlockOptions } = await import('./egdesk-working-memory-gate.mjs')
   const text = Array.from({ length: 6 }, (_, k) => [`## 절 ${k}`, ...Array.from({ length: 8 }, (_, i) => `절 ${k}의 ${i}번째 문장은 서로 다른 내용을 담고 있습니다.`)].join('\n')).join('\n\n')
   const { lines, blocks } = enumerateBlockOptions(text, { kind: 'page', canSpill: true })
-  captured.push(buildGateRequest({ lines, blocks, kind: 'page', goal: '요약' }).request, buildGateRequest({ lines, blocks, kind: 'page', goal: '요약', design: 'predicates' }).request)
+  captured.push(buildGateRequest({ lines, blocks, kind: 'page', goal: '요약', design: 'choice' }).request, buildGateRequest({ lines, blocks, kind: 'page', goal: '요약' }).request)
   const families = new Set()
   for (const body of captured) { const r = lintGroupedRequest(body); assert.equal(r.ok, true, JSON.stringify(r.families.filter(f => f.problems.length))); r.families.forEach(f => families.add(f.family)) }
   for (const family of ['rel_#', 'claim_#', 'present_#', 'log_b#', 'wm_b#', 'wm_need_b#']) assert.ok(families.has(family), `${family} was linted (got ${[...families].join(',')})`)
