@@ -123,27 +123,22 @@ export async function estimateLive({ limits = LIVE_LIMITS } = {}) {
 }
 
 /**
- * runLive({ key, send = false, fetchImpl = fetch, tokenCeiling?, now? }) -> { sent, stoppedBecause, turns, requests, usage, scorecard }
- * With send = false nothing leaves the process.
+ * The fetch every measurement request goes through (the product Decisions client is given this as its fetchImpl): official endpoint only,
+ * a request limit and an input-token ceiling checked BEFORE each request (actual usage so far plus this request's estimate), no retries,
+ * the first HTTP or network failure stops everything after it. state: { sent, tokens, stopped, privateSeen, requests, turn } (mutated).
  */
-export async function runLive({ key = null, send = false, fetchImpl = globalThis.fetch, tokenCeiling = LIVE_LIMITS.tokenCeiling, clock = REAL_CLOCK, limits = LIVE_LIMITS } = {}) {
-  const now = clock.now
-  const ceiling = Math.min(Number.isFinite(tokenCeiling) && tokenCeiling > 0 ? tokenCeiling : limits.tokenCeiling, limits.hardTokenMax)
-  const state = { sent: 0, tokens: 0, stopped: null, privateSeen: false, requests: [], turn: null }
-  if (send !== true) return { sent: 0, stoppedBecause: 'dry_run', turns: [], requests: [], usage: { inputTokens: 0 }, ceiling, maxRequests: limits.maxRequests, scorecard: null }
-  if (typeof key !== 'string' || key.length < 20 || /\s/.test(key)) return { sent: 0, stoppedBecause: 'no_key', turns: [], requests: [], usage: { inputTokens: 0 }, ceiling, maxRequests: limits.maxRequests, scorecard: null }
+export function createGuardedFetch(state, { fetchImpl, ceiling, maxRequests, now = () => performance.now(), stage = stageOf } = {}) {
   const refuse = why => { state.stopped ??= why; throw Object.assign(new Error(`measurement stopped: ${why}`), { name: 'MeasurementStopped' }) }
-  // Every request of the product client passes here: endpoint, limits, then the real fetch. Nothing is retried.
-  const guardedFetch = async (url, init) => {
+  return async (url, init) => {
     if (url !== OFFICIAL) refuse('unofficial_endpoint')
     if (state.stopped) refuse(state.stopped)
     let body
     try { body = JSON.parse(init.body) } catch { refuse('bad_request_body') }
     const bytes = Buffer.byteLength(init.body), estimate = typedEstimate(body.questions ?? [], bytes)
-    if (state.sent >= limits.maxRequests) refuse('request_limit')
+    if (state.sent >= maxRequests) refuse('request_limit')
     if (state.tokens + estimate > ceiling) refuse('token_ceiling')
     if (init.body.includes(PRIVATE_TEXT) || init.body.includes('A사 내부 원가')) state.privateSeen = true
-    const row = { turn: state.turn, stage: stageOf(body.questions ?? []), questions: (body.questions ?? []).length, bytes, sha256: sha(init.body), estInputTokens: estimate, status: null, elapsedMs: null, inputTokens: null }
+    const row = { turn: state.turn, stage: stage(body.questions ?? []), questions: (body.questions ?? []).length, bytes, sha256: sha(init.body), estInputTokens: estimate, status: null, elapsedMs: null, inputTokens: null }
     state.requests.push(row); state.sent++
     const started = now()
     let response
@@ -161,6 +156,19 @@ export async function runLive({ key = null, send = false, fetchImpl = globalThis
     if (response.status !== 200) state.stopped ??= `http_${response.status}`
     return response
   }
+}
+
+/**
+ * runLive({ key, send = false, fetchImpl = fetch, tokenCeiling?, now? }) -> { sent, stoppedBecause, turns, requests, usage, scorecard }
+ * With send = false nothing leaves the process.
+ */
+export async function runLive({ key = null, send = false, fetchImpl = globalThis.fetch, tokenCeiling = LIVE_LIMITS.tokenCeiling, clock = REAL_CLOCK, limits = LIVE_LIMITS } = {}) {
+  const now = clock.now
+  const ceiling = Math.min(Number.isFinite(tokenCeiling) && tokenCeiling > 0 ? tokenCeiling : limits.tokenCeiling, limits.hardTokenMax)
+  const state = { sent: 0, tokens: 0, stopped: null, privateSeen: false, requests: [], turn: null }
+  if (send !== true) return { sent: 0, stoppedBecause: 'dry_run', turns: [], requests: [], usage: { inputTokens: 0 }, ceiling, maxRequests: limits.maxRequests, scorecard: null }
+  if (typeof key !== 'string' || key.length < 20 || /\s/.test(key)) return { sent: 0, stoppedBecause: 'no_key', turns: [], requests: [], usage: { inputTokens: 0 }, ceiling, maxRequests: limits.maxRequests, scorecard: null }
+  const guardedFetch = createGuardedFetch(state, { fetchImpl, ceiling, maxRequests: limits.maxRequests, now })
   const client = createDecisionClient({ getApiKey: () => key, fetchImpl: guardedFetch, timeoutMs: 4000 })
   const turns = []
   for (const def of LIVE_RUNS) {

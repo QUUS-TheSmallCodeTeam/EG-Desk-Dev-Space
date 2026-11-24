@@ -153,5 +153,8 @@ test('the command line tool: dry run by default, the key only from OPENAI_API_KE
   assert.equal((code.match(/\bkey\b/g) ?? []).length, 1, 'the key is only handed to the runner')
   const runner = await readFile(new URL('./egdesk-memory-live-runner.mjs', import.meta.url), 'utf8')
   assert.ok(!/console\.|writeFile|appendFile/.test(runner), 'the runner prints and writes nothing')
+  const journey = await readFile(new URL('./egdesk-memory-journey.mjs', import.meta.url), 'utf8')
+  assert.ok(!/console\.|writeFile|appendFile|process\.env/.test(journey), 'the v2 journey runner prints, writes and reads nothing of its own environment')
+  assert.match(source, /runJourneyLive\(\{ \.\.\.sending, tokenCeiling: ceiling \}\)/); assert.match(source, /runLive\(\{ \.\.\.sending, tokenCeiling: maxTokens \}\)/)
   assert.ok(!/retry|retries/i.test(runner.replace(/never retries|Nothing is retried|No retries/gi, '')))
 })

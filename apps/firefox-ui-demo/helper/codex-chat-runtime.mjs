@@ -2665,7 +2665,10 @@ export class CodexChatRuntime {
       // answering model to state, after the pages. null without the flag, so nothing below changes then.
       const memoryNote = memoryReady ? this.turnMemoryNoteFor(memoryTurn, additionalContext) : null
       const withNote = value => (memoryNote ? [value, memoryNote].filter(Boolean).join('\n\n') : value)
+      // With one packet and no pages to add, a note alone also goes under the selection's key (never a second key for it).
+      const noteOnly = !memoryPacket && memoryNote ? this.onePacketSelection(decision, additionalContext) : null
       const memoryContext = onePacket ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: withNote(onePacket.value) } }
+        : noteOnly !== null ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: withNote(noteOnly) } }
         : memoryPacket || memoryNote ? { [TURN_MEMORY_KEY]: { kind: 'application', value: withNote(memoryPacket) } } : null
       const turnAdditionalContext = browserTaskContext || memoryContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}) } : additionalContext
       turnStartAttempted = context.turnStartAttempted = true
@@ -6016,12 +6019,21 @@ export class CodexChatRuntime {
 
   // One packet: the memory pages appended to the dispatched selection, under the selection's key. null means "leave both as they are".
   // Read at the last moment, after every narrowing of the selection: what is merged is exactly what is about to be sent.
-  mergeTurnMemory(turn, decision, additionalContext) {
+  // The dispatched selection text when one packet applies (the flag is on, the selection is 'on' and attached), else null.
+  onePacketSelection(decision, additionalContext) {
     try {
       const flag = this.decisionContext?.turnMemory?.onePacket
       if ((typeof flag === 'function' ? flag() : flag) !== true) return null
       const entry = additionalContext?.[DECISION_CONTEXT_KEY]
-      if (decision?.mode !== 'on' || entry?.kind !== 'application' || typeof entry.value !== 'string') return null
+      return decision?.mode === 'on' && entry?.kind === 'application' && typeof entry.value === 'string' ? entry.value : null
+    } catch { return null }
+  }
+
+  mergeTurnMemory(turn, decision, additionalContext) {
+    try {
+      const selection = this.onePacketSelection(decision, additionalContext)
+      if (selection === null) return null
+      const entry = { value: selection }
       const selected = (Array.isArray(decision.result?.selected) ? decision.result.selected : []).map(item => (typeof item?.id === 'string' ? memoryPageId(item.id) : null)).filter(Boolean)
       const merged = mergeIntoSelection(entry.value, turn.result.memory.packetParts, selected)
       if (merged) turn.onePacket = { omitted: merged.omitted.length, sameSource: merged.sameSource.length }
@@ -6153,7 +6165,8 @@ export class CodexChatRuntime {
       }
     } catch { applied = { status: 'invalid' } }
     this.recordDeferredSpeech(run, []) // the judgment failed before it could be recorded: still once, unlabelled
-    this.turnMemoryWriteReceipts.set(run, { proposal: judged?.proposal?.op ?? null, reason: judged?.proposal?.reason ?? null, applied: applied?.status ?? null, ...(followUp ? { followUp } : {}) })
+    this.turnMemoryWriteReceipts.set(run, { proposal: judged?.proposal?.op ?? null, reason: judged?.proposal?.reason ?? null, applied: applied?.status ?? null, ...(followUp ? { followUp } : {}),
+      pageId: judged?.proposal?.pageId ?? applied?.pageId ?? null, status: judged?.proposal?.proposedStatus ?? judged?.proposal?.status ?? null })
     record(judged)
   }
 
