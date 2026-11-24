@@ -1,0 +1,381 @@
+{
+  "set": "contamination-v1",
+  "registeredBefore": "any request of this set was sent",
+  "families": {
+    "same-matter": {
+      "source": "hand-built in the shape of L1's sent request pl-same-matter-quote (builder not on int/c14)",
+      "bar": {
+        "yes": 0.8,
+        "no": 0.2
+      },
+      "request": "A사 견적서 v2를 검토하고 v1과 달라진 점을 정리해 주세요",
+      "skipped": [
+        "no-S"
+      ]
+    },
+    "fill-slot": {
+      "source": "product: briefing skeleton judge route /decision/briefing-skeleton (stage fill_check), closed DTO",
+      "bar": {
+        "yes": 0.7,
+        "no": 0.3
+      },
+      "request": "A사 견적 건 정리해줘",
+      "skipped": [
+        "no-S"
+      ]
+    },
+    "excerpt": {
+      "source": "product: Board agent ask service (draft ask, Decisions on), real Decisions client with a recording fetch",
+      "bar": {
+        "yes": 0.6,
+        "no": 0.2
+      },
+      "request": "봄 학기 워크숍 참가 신청을 취소하면 언제까지 전액 환불을 받을 수 있나요?",
+      "skipped": []
+    }
+  },
+  "requests": [
+    {
+      "id": "same-matter-yes-A",
+      "family": "same-matter",
+      "layout": "yes-A",
+      "targetSide": "yes",
+      "items": [
+        {
+          "name": "same_matter_R1",
+          "side": "yes",
+          "why": "the earlier version of the same quote (L1 R1)"
+        }
+      ]
+    },
+    {
+      "id": "same-matter-yes-O",
+      "family": "same-matter",
+      "layout": "yes-O",
+      "targetSide": "yes",
+      "items": [
+        {
+          "name": "same_matter_R1",
+          "side": "yes",
+          "why": "the earlier version of the same quote (L1 R1)"
+        },
+        {
+          "name": "same_matter_R2",
+          "side": "no",
+          "why": "unrelated notice"
+        },
+        {
+          "name": "same_matter_R3",
+          "side": "no",
+          "why": "another client's schedule"
+        }
+      ]
+    },
+    {
+      "id": "same-matter-yes-S",
+      "family": "same-matter",
+      "layout": "yes-S",
+      "targetSide": "yes",
+      "items": [
+        {
+          "name": "same_matter_R1",
+          "side": "yes",
+          "why": "the earlier version of the same quote (L1 R1)"
+        },
+        {
+          "name": "same_matter_R2",
+          "side": "yes",
+          "why": "the version under review"
+        },
+        {
+          "name": "same_matter_R3",
+          "side": "yes",
+          "why": "the same client's request that started this quote"
+        }
+      ]
+    },
+    {
+      "id": "same-matter-no-A",
+      "family": "same-matter",
+      "layout": "no-A",
+      "targetSide": "no",
+      "items": [
+        {
+          "name": "same_matter_R1",
+          "side": "no",
+          "why": "another matter altogether (L1 R2)"
+        }
+      ]
+    },
+    {
+      "id": "same-matter-no-O",
+      "family": "same-matter",
+      "layout": "no-O",
+      "targetSide": "no",
+      "items": [
+        {
+          "name": "same_matter_R1",
+          "side": "no",
+          "why": "another matter altogether (L1 R2)"
+        },
+        {
+          "name": "same_matter_R2",
+          "side": "yes",
+          "why": "the version under review"
+        },
+        {
+          "name": "same_matter_R3",
+          "side": "yes",
+          "why": "the same client's request that started this quote"
+        }
+      ]
+    },
+    {
+      "id": "fill-slot-yes-A",
+      "family": "fill-slot",
+      "layout": "yes-A",
+      "targetSide": "yes",
+      "items": [
+        {
+          "name": "slot_P3_r1",
+          "side": "yes",
+          "why": "M3 says 단가 12,200원"
+        }
+      ]
+    },
+    {
+      "id": "fill-slot-yes-O",
+      "family": "fill-slot",
+      "layout": "yes-O",
+      "targetSide": "yes",
+      "items": [
+        {
+          "name": "slot_P3_r1",
+          "side": "yes",
+          "why": "M3 says 단가 12,200원"
+        },
+        {
+          "name": "slot_P3_r2",
+          "side": "no",
+          "why": "M1 says 12,800원 (11,900 is the asked-for price in another page)"
+        },
+        {
+          "name": "slot_P3_r3",
+          "side": "no",
+          "why": "M3 says it has not been sent"
+        }
+      ]
+    },
+    {
+      "id": "fill-slot-yes-S",
+      "family": "fill-slot",
+      "layout": "yes-S",
+      "targetSide": "yes",
+      "items": [
+        {
+          "name": "slot_P3_r1",
+          "side": "yes",
+          "why": "M3 says 단가 12,200원"
+        },
+        {
+          "name": "slot_P3_r2",
+          "side": "yes",
+          "why": "stated in M3"
+        },
+        {
+          "name": "slot_P3_r3",
+          "side": "yes",
+          "why": "stated in M1"
+        }
+      ]
+    },
+    {
+      "id": "fill-slot-no-A",
+      "family": "fill-slot",
+      "layout": "no-A",
+      "targetSide": "no",
+      "items": [
+        {
+          "name": "slot_P3_r1",
+          "side": "no",
+          "why": "M3 says 납기 12월 20일: a date the source does not contain"
+        }
+      ]
+    },
+    {
+      "id": "fill-slot-no-O",
+      "family": "fill-slot",
+      "layout": "no-O",
+      "targetSide": "no",
+      "items": [
+        {
+          "name": "slot_P3_r1",
+          "side": "no",
+          "why": "M3 says 납기 12월 20일: a date the source does not contain"
+        },
+        {
+          "name": "slot_P3_r2",
+          "side": "yes",
+          "why": "stated in M3"
+        },
+        {
+          "name": "slot_P3_r3",
+          "side": "yes",
+          "why": "stated in M1"
+        }
+      ]
+    },
+    {
+      "id": "excerpt-yes-A",
+      "family": "excerpt",
+      "layout": "yes-A",
+      "targetSide": "yes",
+      "items": [
+        {
+          "name": "c1",
+          "side": "yes",
+          "why": "the full-refund deadline"
+        }
+      ]
+    },
+    {
+      "id": "excerpt-yes-O",
+      "family": "excerpt",
+      "layout": "yes-O",
+      "targetSide": "yes",
+      "items": [
+        {
+          "name": "c1",
+          "side": "yes",
+          "why": "the full-refund deadline"
+        },
+        {
+          "name": "c2",
+          "side": "no",
+          "why": "car park maintenance"
+        },
+        {
+          "name": "c3",
+          "side": "no",
+          "why": "canteen menu"
+        }
+      ]
+    },
+    {
+      "id": "excerpt-yes-S",
+      "family": "excerpt",
+      "layout": "yes-S",
+      "targetSide": "yes",
+      "items": [
+        {
+          "name": "c1",
+          "side": "yes",
+          "why": "the full-refund deadline"
+        },
+        {
+          "name": "c2",
+          "side": "yes",
+          "why": "what happens after the deadline"
+        },
+        {
+          "name": "c3",
+          "side": "yes",
+          "why": "the same deadline for both sign-up routes"
+        }
+      ]
+    },
+    {
+      "id": "excerpt-no-A",
+      "family": "excerpt",
+      "layout": "no-A",
+      "targetSide": "no",
+      "items": [
+        {
+          "name": "c1",
+          "side": "no",
+          "why": "library hours"
+        }
+      ]
+    },
+    {
+      "id": "excerpt-no-O",
+      "family": "excerpt",
+      "layout": "no-O",
+      "targetSide": "no",
+      "items": [
+        {
+          "name": "c1",
+          "side": "no",
+          "why": "library hours"
+        },
+        {
+          "name": "c2",
+          "side": "yes",
+          "why": "what happens after the deadline"
+        },
+        {
+          "name": "c3",
+          "side": "yes",
+          "why": "the same deadline for both sign-up routes"
+        }
+      ]
+    },
+    {
+      "id": "excerpt-no-S",
+      "family": "excerpt",
+      "layout": "no-S",
+      "targetSide": "no",
+      "items": [
+        {
+          "name": "c1",
+          "side": "no",
+          "why": "library hours"
+        },
+        {
+          "name": "c2",
+          "side": "no",
+          "why": "car park maintenance"
+        },
+        {
+          "name": "c3",
+          "side": "no",
+          "why": "canteen menu"
+        }
+      ]
+    }
+  ],
+  "outcomeRules": [
+    "Read per family from the TARGET (the first question). pA = target alone, pO = with opposite siblings, pS = with same siblings. side(p) = yes (>= the family bar), no (< the bar).",
+    "INCONCLUSIVE for a target: pA is not on its registered side, or 0.2 < pA < 0.8 (undecided alone). The item itself is the problem (as L4 c17 found for slot_P3_r2: .59 alone and .59 grouped); nothing follows about grouping.",
+    "KEEP GROUPING: for every conclusive target, side(pO) = side(pA), |pO - pA| <= 0.2 and (where S was asked) |pS - pA| <= 0.2. Grouping costs nothing measurable here; keep one request per judgment.",
+    "SPLIT ONLY WHEN SIBLINGS DISAGREE (operational form: re-ask each item alone when the grouped answers come back uniform): some target moves > 0.2 toward its opposite siblings or flips in O, while every S stays within 0.2, AND every contaminated O request shows the signature the product can see without labels: all its answers within 0.1 of each other. The product rule would be: a request of >= 2 same-family items whose answers are all within 0.1 is re-asked one item per request.",
+    "SPLIT: contamination in O WITHOUT the uniform signature (the product could not detect it), or a shift > 0.2 / flip in S as well (grouping changes answers even when the siblings agree): one item per request for that family.",
+    "Strength: one target per side per family, one sample each. The model returned identical answers for 20/20 repeated questions (c16 duplicate send), so the sampling noise of one condition is small, but the result is about these items, not a rate. A SPLIT or SPLIT-ONLY verdict on one family does not transfer to the other two."
+  ],
+  "splitCost": {
+    "same-matter": {
+      "groupedOf3": 767,
+      "aloneOne": 328,
+      "splitOf3": 984,
+      "extraTokens": 217,
+      "ratio": 1.28,
+      "perExtraItemGrouped": 220
+    },
+    "fill-slot": {
+      "groupedOf3": 848,
+      "aloneOne": 356,
+      "splitOf3": 1068,
+      "extraTokens": 220,
+      "ratio": 1.26,
+      "perExtraItemGrouped": 246
+    },
+    "excerpt": {
+      "groupedOf3": 630,
+      "aloneOne": 231,
+      "splitOf3": 693,
+      "extraTokens": 63,
+      "ratio": 1.1,
+      "perExtraItemGrouped": 200
+    }
+  }
+}
