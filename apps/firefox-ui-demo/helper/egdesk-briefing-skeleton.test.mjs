@@ -11,7 +11,7 @@ import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 import { validBriefing } from '../overlay/resources/EGDeskBriefingState.sys.mjs'
 import { CANVAS_VIEW_SIZES } from '../overlay/resources/EGDeskSurfaceState.sys.mjs'
 import { BRIEFING_CATALOG, BRIEFING_RENDERERS, MATERIAL_TRAITS, RESULT_CARD_METRICS, STEP_SLOTS, registerComponent, resultCardCapacity, textLines } from './egdesk-briefing-catalog.mjs'
-import { answerFacts, factAnchors, factCites, COVERAGE_MODES, splitByPeriod, sequenceRows, requestIdentifiers } from './egdesk-briefing-skeleton.mjs'
+import { answerFacts, factAnchors, factCites, COVERAGE_MODES, splitByPeriod, sequenceRows, requestIdentifiers, answerCited } from './egdesk-briefing-skeleton.mjs'
 import { SKELETON_JUDGE, SKELETON_LIMITS, VERSION_PAIRS, relevanceQuestions, versionCandidates, dateIn, dateMatches, fillChecks, fitQuestions, questionName, versionOf, materialGroups, buildGuide, chooseParts, createSkeletonJudge, decidePlace, enumerateSkeleton, fillRequest, layoutSkeleton, normalizeMaterials, normalizeSkeletonDto, orderItems, recordedBefore, runSkeletonFlow, skeletonChecks, validateFill } from './egdesk-briefing-skeleton.mjs'
 import { BRIEFING_ENGINE_LIMITS, briefingDeps, createBriefingEngine, fillPrompt } from './egdesk-briefing-engine.mjs'
 import { completeBriefingArgs, continuedBriefingOutput } from './egdesk-briefing-flow.mjs'
@@ -1047,4 +1047,34 @@ test('twelve materials only for a long range (more dated materials than the usua
 test('the fill rule: a material that lists more items than a card has rows still gives its total, in the title as the material writes it (c25: six of eight lanes, no count -> .25)', () => {
   const prompt = fillPrompt({ guide: { items: [] }, materials: [] })
   assert.ok(prompt.includes("If a material lists more items than a list slot has rows, list the first ones and put the total the material states in that item's title slot, as the material writes it."))
+})
+
+// ================= 20. cycle 27: what the answer cites stays on the board's materials, whatever request relevance said (Main, R3) =================
+test('answerCited by code: lane-cycle ids, version marks and amounts cite the materials that carry them; a date only when the fact has nothing more specific', () => {
+  const lines = normalizeMaterials([row('M1', '11-24 22:41 사용자 결정: 예산 → L3 c19', '사용자 결정', '2026-11-24', 'unknown'), row('M2', '11-24 22:50 L7 c19 병합 → int/c14 c680638', '병합', '2026-11-24', 'done'),
+    row('M3', '11-24 22:52 사용자 결정 대체 문구', '고정 문장 전부 제거', '2026-11-24', 'unknown'), row('M4', 'A사 견적서 v2', '총액 1,050만원', '2026-11-10', 'plan')])
+  assert.deepEqual(answerCited('L7 c19는 11월 24일 22:50에 병합되었습니다.', lines), ['M2'], 'the id is more specific than the day every line shares')
+  assert.deepEqual(answerCited('11월 24일에 사용자가 결정했습니다.', lines), ['M1', 'M2', 'M3'], 'a date alone cites that day')
+  assert.deepEqual(answerCited('v2 총액은 1,050만원입니다.', lines), ['M4']); assert.deepEqual(answerCited('남은 일이 있습니다.', lines), [], 'no anchor: cites nothing')
+  assert.deepEqual(answerCited('L3 c19 결정과 L7 c19 병합이 있었습니다. v2도 있습니다.', lines), ['M1', 'M2', 'M4'], 'every sentence of the answer counts')
+})
+test('a material the answer cites stays even when request relevance drops it (it is used by the answer); one it does not cite is dropped as before', async () => {
+  const C_PAGE = row('M6', 'C사 회식 일정', '다음 주 금요일 회식. 장소 미정.', null, 'unknown')
+  const answer = 'A사 견적은 v1에서 v2 안으로 조정되었습니다. B사도 케이스 500개 견적을 요청했습니다.'
+  const out = await run(q => (q.name === 'about_M5' || q.name === 'about_M6' ? .03 : undefined), { materials: [...QUOTE, B_PAGE, C_PAGE], answer })
+  assert.equal(out.out.status, 'presented', JSON.stringify(out.out))
+  assert.deepEqual(out.out.relevance, { kept: ['M1', 'M2', 'M3', 'M4', 'M5'], dropped: ['M6'], versions: [], cited: ['M5'] }, 'B사 (500개, in the answer) stays; the C사 page is dropped')
+  assert.ok(out.judge.calls.slice(1).every(c => !JSON.stringify(c.packet).includes('C사 회식')), 'the dropped page is in no later request')
+  assert.ok(out.judge.calls.some(c => c.stage === 'fit' && JSON.stringify(c.packet).includes('B사 견적 요청')), 'the cited page is designed for like any kept one')
+  // without an answer (the earlier path) nothing is cited: relevance alone decides
+  const plain = await run(q => (q.name === 'about_M5' || q.name === 'about_M6' ? .03 : undefined), { materials: [...QUOTE, B_PAGE, C_PAGE] })
+  assert.deepEqual(plain.out.relevance.dropped, ['M5', 'M6']); assert.equal(plain.out.relevance.cited, undefined)
+})
+test('the c25 case: tonight\'s merge line, judged only weakly about "today\'s progress" (.21), stays because the answer states it; an uncited line judged unrelated goes', async () => {
+  const LINES = [row('M1', '11-24 22:50 L7 c19 병합 → int/c14 c680638, 341개 파일 6707건 0 실패.', '11-24 22:50 L7 c19(e930372) 병합 → int/c14 c680638, 341개 파일 6707건 0 실패.', '2026-11-24', 'done'),
+    row('M2', '11-24 22:52 사용자 결정 대체 문구 (나) 고정 문장 전부 제거.', '11-24 22:52 사용자 결정: 고정 문장 전부 제거.', '2026-11-24', 'unknown'),
+    row('M3', '11-24 22:53 노트북 충전', '11-24 22:53 노트북 충전 중.', '2026-11-24', 'unknown')]
+  const answer = '22:50 L7 c19가 병합되어 int/c14는 c680638이 되었습니다. 22:52 사용자가 고정 문장을 전부 빼기로 결정했습니다.'
+  const out = await run(q => ({ about_M1: .21, about_M3: .05 })[q.name], { materials: LINES, candidates: [], answer, request: '오늘 Decision 루프 진행 상황 정리해줘' })
+  assert.deepEqual([out.out.relevance.kept, out.out.relevance.dropped, out.out.relevance.cited], [['M1', 'M2'], ['M3'], ['M1']])
 })
