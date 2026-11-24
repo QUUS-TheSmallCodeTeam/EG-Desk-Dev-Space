@@ -662,7 +662,7 @@ test('c17 never lost: a message the run ended without acting on opens the next t
   const r3 = await next('하나 더', 'req-4')
   await w.http('POST', '/chat/send', { clientThreadId: DM, conversationId: first.conversationId, profileId: A, profileEnabled: true, replyDestination: 'direct', message: NUDGE2, requestId: 'req-5', inRunMessageTo: r3.runId })
   await w.endTurn()
-  assert.equal(w.chat.forgetConversation(DM).carriedMessages, 1)
+  assert.equal((await w.chat.forgetConversation(DM)).carriedMessages, 1)
   assert.equal(w.chat.carriedInputFor(DM).length, 0)
 })
 

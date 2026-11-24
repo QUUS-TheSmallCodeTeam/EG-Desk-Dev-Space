@@ -117,6 +117,8 @@ function storedPage(raw) {
     provenance: { kind: raw.provenance.kind, ...(typeof raw.provenance.by === 'string' ? { by: clip(raw.provenance.by, 60) } : {}), ...(PROVENANCE_BASES.includes(raw.provenance.basis) ? { basis: raw.provenance.basis } : {}) },
     status: SOURCE_STATUSES.has(raw.status) ? raw.status : 'unknown', scope: typeof raw.scope === 'string' ? raw.scope : null,
     ...(typeof raw.spokenAt === 'string' && !Number.isNaN(Date.parse(raw.spokenAt)) ? { spokenAt: raw.spokenAt } : {}),
+    // The chat message this page pointed to was deleted with its conversation: a text-less pointer stays (L2 c18). Internal state only.
+    ...(raw.sourceDeleted === true && hasRef && !hasBody ? { sourceDeleted: true } : {}),
     links: (Array.isArray(raw.links) ? raw.links : []).filter(l => record(l) && Object.hasOwn(LINK_TYPES, l.type) && typeof l.to === 'string' && SAFE_ID.test(l.to)).slice(0, 16).map(l => ({ type: l.type, to: l.to })) }
 }
 const FROM_OK = value => typeof value === 'string' && value.length > 0 && value.length <= 200
@@ -160,6 +162,24 @@ export function openWikiWrites({ dataDir, log, now } = {}) {
     // The person deleted these conversations (L2 c17, owner decision): a reading heard there and still pending can only be confirmed in that
     // conversation and is not memory yet, so it is withdrawn (removed from the store). Accepted or rejected readings, pages and promoted
     // records stay. A pending reading stored before c17 has no conversation and is not touched. Returns how many were withdrawn.
+    // The person deleted a conversation (L2 c18, owner decision): memory in its conversation-temporary scope (pages written with that
+    // scope, and readings on them) is deleted with it. A page of another scope whose only source was a message of that conversation keeps
+    // a text-less pointer marked sourceDeleted. Board, Agent, personal and organisation scopes stay. Returns { pages, readings, pointers }.
+    forgetConversation({ scope, messageRefs = [] } = {}) {
+      const data = store.data, refs = new Set((Array.isArray(messageRefs) ? messageRefs : []).filter(ref => typeof ref === 'string' && ref))
+      if (typeof scope !== 'string' || !scope) return { pages: 0, readings: 0, pointers: 0 }
+      const gone = new Set(data.pages.filter(p => p.scope === scope).map(p => p.id))
+      let pointers = 0
+      const pages = data.pages.filter(p => !gone.has(p.id)).map(p => {
+        if (!p.body && p.ref && refs.has(p.ref) && p.sourceDeleted !== true) { pointers++; return { ...p, sourceDeleted: true } }
+        return p
+      })
+      const readings = data.readings.filter(entry => !gone.has(entry.pageId))
+      const out = { pages: gone.size, readings: data.readings.length - readings.length, pointers }
+      if (!out.pages && !out.readings && !pointers) return out
+      if (!store.save({ ...data, pages, readings })) throw new Error('store unavailable')
+      return out
+    },
     withdrawPendingFrom(conversationKeys) {
       const keys = new Set((Array.isArray(conversationKeys) ? conversationKeys : []).filter(FROM_OK))
       const data = store.data
@@ -246,6 +266,11 @@ export function createWikiAdapter({ writes = null } = {}) {
     // acceptStatus is not offered: no policy callback promotes a reading (see createWikiWriter.promote).
     // A deleted conversation's readings that are still pending are withdrawn from the store (openWikiWrites.withdrawPendingFrom). Count.
     withdrawPendingFrom: conversationKeys => writes?.withdrawPendingFrom?.(conversationKeys) ?? 0,
+    // A deleted conversation's conversation-temporary memory (scope dm:<clientThreadId>) goes; see openWikiWrites.forgetConversation.
+    forgetConversation: ({ clientThreadId, messageRefs = [] } = {}) => {
+      const scope = scopeKey({ clientThreadId })
+      return scope && writes?.forgetConversation ? writes.forgetConversation({ scope, messageRefs }) : { pages: 0, readings: 0, pointers: 0 }
+    },
     writerFor(wiki, { enabled = false, canWrite = () => false, idFor = null } = {}) {
       return createWikiWriter(wiki, { enabled, canWrite, idFor, persist: writes ? change => writes.apply(change) : null })
     },

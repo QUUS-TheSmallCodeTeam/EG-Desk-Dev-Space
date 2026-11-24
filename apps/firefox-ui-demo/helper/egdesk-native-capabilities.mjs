@@ -2,7 +2,7 @@ import { accessSync, constants, realpathSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
-import { fingerprintNativeExecutable, probeGeneratedNativeSchema } from './codex-native-schema-probe.mjs'
+import { fingerprintNativeExecutable, probeGeneratedNativeSchema, probeThreadDeleteSchema } from './codex-native-schema-probe.mjs'
 
 // These exact versions were checked against their generated experimental
 // schemas and the public App Server contract. Each selected binary must still
@@ -166,7 +166,7 @@ export function resolveCodexExecutable(env = process.env, { platform = process.p
   throw new Error('Configured Codex executable is unavailable; set EGDESK_CODEX_BIN to an existing absolute executable path')
 }
 
-export function inspectNativeCapabilities({ executable, env = process.env, cwd = process.cwd(), run = spawnSync, probe = probeGeneratedNativeSchema, fingerprint = fingerprintNativeExecutable }) {
+export function inspectNativeCapabilities({ executable, env = process.env, cwd = process.cwd(), run = spawnSync, probe = probeGeneratedNativeSchema, fingerprint = fingerprintNativeExecutable, deleteProbe = probeThreadDeleteSchema }) {
   const result = run(executable, ['--version'], { env, cwd, encoding: 'utf8', timeout: 5000, maxBuffer: 4096, stdio: ['ignore', 'pipe', 'pipe'] })
   const version = result.status === 0 ? String(result.stdout || '').trim().match(/^codex-cli (\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$/)?.[1] || null : null
   let proof = null, binaryFingerprint = null
@@ -176,6 +176,14 @@ export function inspectNativeCapabilities({ executable, env = process.env, cwd =
       if (proof?.contextContract && /^[a-f0-9]{64}$/.test(proof.schemaFingerprint || '')) binaryFingerprint = fingerprint(executable)
     } catch { proof = null; binaryFingerprint = null }
   }
+  // thread/delete (L2 c18): an optional contract of the generated schema. A contract version reads it from the same probe; any other identified
+  // version is checked for it alone (deleteProbe), which grants nothing else.
+  let deleteFingerprint = null, deleteBinary = binaryFingerprint
+  try {
+    deleteFingerprint = CONTEXT_CONTRACT_VERSIONS.has(version) ? proof?.threadDeleteSchemaFingerprint ?? null : version ? deleteProbe({ executable, env, cwd, run }) : null
+    if (/^[a-f0-9]{64}$/.test(deleteFingerprint || '') && !deleteBinary) deleteBinary = fingerprint(executable)
+  } catch { deleteFingerprint = null }
+  const threadDelete = /^[a-f0-9]{64}$/.test(deleteFingerprint || '') && /^[a-f0-9]{64}$/.test(deleteBinary || '')
   const contextContract = CONTEXT_CONTRACT_VERSIONS.has(version) && proof?.contextContract === true && /^[a-f0-9]{64}$/.test(binaryFingerprint || '')
   const qaContract = contextContract && QA_POLICY_CONTRACT_VERSIONS.has(version) && proof.qaContract === true
   const contractFingerprint = contextContract ? createHash('sha256').update(`${version}\0${binaryFingerprint}\0${proof.schemaFingerprint}`).digest('hex') : null
@@ -190,6 +198,8 @@ export function inspectNativeCapabilities({ executable, env = process.env, cwd =
     // untrusted additional context. Never infer either fact from ordinary chat.
     boardPeerContract: contextContract && version === '0.162.1' && /^[a-f0-9]{64}$/.test(proof?.boardPeerSchemaFingerprint || '')
       ? createHash('sha256').update(contractFingerprint + '\0' + proof.boardPeerSchemaFingerprint).digest('hex') : null,
+    // The generated schema of this binary lists thread/delete with { threadId }: deleting a conversation also deletes its native thread.
+    threadDelete,
     binaryFingerprint: contextContract ? binaryFingerprint : null,
     schemaFingerprint: contextContract ? proof.schemaFingerprint : null,
     contractFingerprint,

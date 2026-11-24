@@ -138,7 +138,41 @@ export function verifyNativeSchemaDirectory(directory) {
     start?.definitions?.AskForApproval?.oneOf?.some(item => item.enum?.includes('never')) &&
     readOnly(turn)?.properties?.type?.enum?.includes('readOnly') &&
     readOnly(turn)?.properties?.networkAccess?.type === 'boolean')
-  return { contextContract, qaContract, schemaFingerprint: digest.digest('hex'), boardPeerSchemaFingerprint: optionalBoardPeerFingerprint(directory) }
+  return { contextContract, qaContract, schemaFingerprint: digest.digest('hex'), boardPeerSchemaFingerprint: optionalBoardPeerFingerprint(directory),
+    threadDeleteSchemaFingerprint: optionalThreadDeleteFingerprint(directory) }
+}
+
+// thread/delete (Codex app-server, e.g. 0.171): the request is in the client request union, its params are exactly { threadId: string }
+// and its response is an object. Optional: a binary without it keeps every other contract. (L2 c18: deleting a conversation.)
+export function verifyThreadDeleteSchema(request, params, response) {
+  const listed = (request?.oneOf ?? request?.anyOf ?? []).some(item => item?.properties?.method?.enum?.length === 1 && item.properties.method.enum[0] === 'thread/delete')
+  return Boolean(listed && params?.title === 'ThreadDeleteParams' && params.type === 'object' && requires(params, 'threadId') && params.required.length === 1 &&
+    params.properties?.threadId?.type === 'string' && Object.keys(params.properties).length === 1 && response?.title === 'ThreadDeleteResponse' && response.type === 'object')
+}
+function optionalThreadDeleteFingerprint(directory) {
+  try {
+    const digest = createHash('sha256')
+    const schemas = ['ClientRequest.json', 'v2/ThreadDeleteParams.json', 'v2/ThreadDeleteResponse.json'].map(name => {
+      const filename = path.join(directory, name), stat = lstatSync(filename)
+      if (!stat.isFile() || stat.size > 5 * 1024 * 1024) throw Error('invalid optional schema')
+      const bytes = readFileSync(filename); digest.update(name).update('\0').update(bytes).update('\0')
+      return JSON.parse(bytes.toString('utf8'))
+    })
+    return verifyThreadDeleteSchema(...schemas) ? digest.digest('hex') : null
+  } catch { return null }
+}
+
+// Only the optional thread/delete contract, for a binary whose version this source does not otherwise trust (the context contract is never
+// granted from shape; see inspectNativeCapabilities). Returns the thread/delete fingerprint or null.
+export function probeThreadDeleteSchema({ executable, env, cwd, run }) {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'egdesk-native-schema-'))
+  try {
+    const result = run(executable, ['app-server', 'generate-json-schema', '--experimental', '--out', directory], {
+      env, cwd, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return result.status === 0 ? optionalThreadDeleteFingerprint(directory) : null
+  } catch { return null }
+  finally { rmSync(directory, { recursive: true, force: true }) }
 }
 
 export function probeGeneratedNativeSchema({ executable, env, cwd, run }) {

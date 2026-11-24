@@ -377,6 +377,40 @@ function backupVersion(db, filename, version) {
   }
 }
 
+// The deleted conversation's rows also go from every upgrade backup this store kept (backupVersion: <file>.v<n>.bak). The backups stay;
+// only that conversation's rows go, from the tables the backup has, children first, overwritten (secure_delete), and the copy is rewritten
+// without free pages (VACUUM). Owner decision, L2 c18.
+const CONVERSATION_TABLES = ['event_refs', 'topic_answer_guards', 'events', 'messages', 'runs', 'run_project_origins', 'native_runs', 'native_messages', 'imports', 'room_members', 'requests', 'threads']
+const BACKUP_VERSIONS = [1, 2, 3, 4]
+function scrubBackups(filename, clientThreadId) {
+  const out = []
+  for (const version of BACKUP_VERSIONS) {
+    const backup = `${filename}.v${version}.bak`
+    let info
+    try { info = lstatSync(backup) } catch { continue }
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || !isOwnedAndPrivate(backup, info, 0o077)) { out.push({ version, scrubbed: false, reason: 'not_private' }); continue }
+    let copy
+    try {
+      copy = new DatabaseSync(backup)
+      copy.exec('PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;')
+      const present = new Set(copy.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name))
+      const row = present.has('threads') ? copy.prepare('SELECT local_conversation_id FROM threads WHERE client_thread_id=?').get(clientThreadId) : null
+      if (!row) { out.push({ version, scrubbed: true, rows: 0 }); continue }
+      copy.exec('BEGIN IMMEDIATE')
+      let rows = 0
+      try {
+        for (const table of CONVERSATION_TABLES) if (present.has(table)) rows += Number(copy.prepare(`DELETE FROM ${table} WHERE local_conversation_id=?`).run(row.local_conversation_id).changes)
+        copy.exec('COMMIT')
+      } catch (error) { try { copy.exec('ROLLBACK') } catch { /* keep the error */ } throw error }
+      // Rewrite the copy without free pages, so nothing of the deleted rows stays in the file (schema and user_version are kept).
+      if (rows) copy.exec('VACUUM')
+      out.push({ version, scrubbed: true, rows })
+    } catch { out.push({ version, scrubbed: false, reason: 'failed' }) }
+    finally { try { copy?.close() } catch { /* ignore */ } }
+  }
+  return out
+}
+
 function initialize(db, filename) {
   db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;')
   if (String(db.prepare('PRAGMA journal_mode=WAL').get().journal_mode).toLowerCase() !== 'wal') fail('STORE_OPEN_FAILED', 'WAL could not be enabled', 500)
@@ -680,21 +714,27 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
 
   return {
     createConversation(input) { ensureOpen(); return tx(() => create(input)) },
-    // The person deleted this conversation (surface "완전히 삭제"): every row of it goes, in one transaction, children first. Deleted pages
-    // are overwritten (secure_delete) and the WAL is checkpointed and truncated, so the words do not stay in the database files.
-    // Unknown conversation: { deleted: false }. Migration backups made before this delete are not touched (see the L2 c17 report).
-    deleteConversation(clientThreadId) {
+    // Every local message id of one conversation (memory refers to them as chat-message:<id>); [] when it does not exist.
+    localMessageIds(clientThreadId) {
       ensureOpen()
       const row = q.thread.get(identifier(clientThreadId, 'clientThreadId'))
-      if (!row) return { deleted: false, rows: 0 }
+      return row ? db.prepare('SELECT local_message_id FROM messages WHERE local_conversation_id=? ORDER BY first_seq').all(row.local_conversation_id).map(r => r.local_message_id) : []
+    },
+    // The person deleted this conversation (surface "완전히 삭제"): every row of it goes, in one transaction, children first. Deleted pages
+    // are overwritten (secure_delete) and the WAL is checkpointed and truncated, so the words do not stay in the database files.
+    // Unknown conversation: { deleted: false }. Upgrade backups lose this conversation's rows too (scrubBackups); the backups themselves stay.
+    deleteConversation(clientThreadId) {
+      ensureOpen()
+      const key = identifier(clientThreadId, 'clientThreadId')
+      const row = q.thread.get(key)
+      if (!row) return { deleted: false, rows: 0, backups: scrubBackups(filename, key) } // a repeated delete still scrubs what a backup kept
       const id = row.local_conversation_id
       const previous = db.prepare('PRAGMA secure_delete').get().secure_delete
       db.exec('PRAGMA secure_delete=ON')
       try {
-        const rows = tx(() => ['event_refs', 'topic_answer_guards', 'events', 'messages', 'runs', 'run_project_origins', 'native_runs', 'native_messages', 'imports', 'room_members', 'requests', 'threads']
-          .reduce((n, table) => n + Number(db.prepare(`DELETE FROM ${table} WHERE local_conversation_id=?`).run(id).changes), 0))
+        const rows = tx(() => CONVERSATION_TABLES.reduce((n, table) => n + Number(db.prepare(`DELETE FROM ${table} WHERE local_conversation_id=?`).run(id).changes), 0))
         try { db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() } catch { /* a reader holds the WAL: it is truncated at the next checkpoint */ }
-        return { deleted: true, rows }
+        return { deleted: true, rows, backups: scrubBackups(filename, key) }
       } finally { db.exec(`PRAGMA secure_delete=${previous ? 'ON' : 'OFF'}`) }
     },
     getConversation(clientThreadId) { ensureOpen(); return publicThread(q.thread.get(identifier(clientThreadId, 'clientThreadId'))) },
