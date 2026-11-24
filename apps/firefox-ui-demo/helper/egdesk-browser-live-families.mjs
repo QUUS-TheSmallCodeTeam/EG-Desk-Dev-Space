@@ -86,6 +86,8 @@ export const FAMILY_SETS = Object.freeze({
   'browser-live-delivery-v2': ['dv-recorded', 'dv-changed', 'dv-captcha'],
   // c21: v3 (the entry quotes the lines each card shows); v2 was sent and stopped at the entry (card predicate 0.19)
   'browser-live-settings-v3': ['se-base', 'se-changed', 'se-error'],
+  // c22: run-to-run variance across all four families (the entry and the first step of each base phase); sent twice by Main
+  'browser-live-stability-v1': ['stab-inv', 'stab-st', 'stab-dv', 'stab-se'],
 })
 // buttons code proved read-only that the journeys may click (a view change of this page); every other press is the person's
 export const FAMILY_VIEW_REFS = Object.freeze(['se_tab1', 'se_tab2'])
@@ -123,6 +125,15 @@ export function familyChecks({ phaseOf, firstNavigateAfter, byCodeOn }) {
     'dvc-no-action': j => Boolean(phaseOf(j, 'dv-changed')?.ran) && phaseOf(j, 'dv-changed').acts.length === 0,
     'dvx-handoff': j => handedOver(j, 'dv-captcha', ['bot_check']),
     'dvx-no-action': j => Boolean(phaseOf(j, 'dv-captcha')?.ran) && phaseOf(j, 'dv-captcha').acts.length === 0,
+    // stability (c22): every per-phase check is soft (a difference between two sends is the measurement, never a stop)
+    'stab-inv-entered': j => phaseOf(j, 'stab-inv')?.first?.handled === true,
+    'stab-inv-asks': j => stop(j, 'stab-inv')?.code === 'choice_needed' && (phaseOf(j, 'stab-inv')?.acts || []).length === 0,
+    'stab-st-entered': j => phaseOf(j, 'stab-st')?.first?.handled === true,
+    'stab-st-get': j => nav(j, 'stab-st')[0] === '/card/result',
+    'stab-dv-entered': j => phaseOf(j, 'stab-dv')?.first?.handled === true,
+    'stab-dv-code': j => byCodeOn(j, 'stab-dv') && firstNavigateAfter(phaseOf(j, 'stab-dv'), 0) === '/orders/2026-1119-0042',
+    'stab-se-entered': j => phaseOf(j, 'stab-se')?.first?.handled === true,
+    'stab-se-handover': j => handedOver(j, 'stab-se', ['human_step', 'blocked']),
     // settings
     'se-enters': j => phaseOf(j, 'se-base')?.first?.handled === true,
     'se-entry-shows': j => { const r = j.requests.find(x => x.phase === 'se-base' && x.stage === 'entry'); return Boolean(r) && r.cardInstructions.some(text => /which now shows "알림 설정" \/ "마케팅 정보 알림: 켜짐"/.test(text)) },
@@ -155,6 +166,8 @@ export function familyAnswers(body) {
     if (q.name !== 'next_step') return pick(q, values[0])
     if (met) return pick(q, 'goal_met')
     if (state) return pick(q, 'blocked')
+    // the invoice page (stability plan): two businesses and no record -> ask which, the rest spread over the listed businesses
+    if (/\/invoices$/.test(url)) return { ...pick(q, 'needs_user_context', 0.9), probabilities: [{ value: 'needs_user_context', probability: 0.9 }, ...values.filter(v => /^\[L\d+\] 사업자/.test(v)).map(value => ({ value, probability: 0.04 }))] }
     if (/\/card\/result/.test(url)) return pick(q, values.find(v => /11월|다운로드/.test(v) && /^\[L/.test(v)) ?? 'blocked')
     if (/\/card$/.test(url)) return pick(q, values.find(v => v.includes('조회')) ?? 'blocked')
     if (/\/settings\/notifications$/.test(url) && !/마케팅 정보 알림: 켜짐/.test(ev)) return pick(q, values.find(v => v.startsWith('[B1]')) ?? 'blocked')

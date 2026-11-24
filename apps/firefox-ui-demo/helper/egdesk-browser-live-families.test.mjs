@@ -30,7 +30,8 @@ test('the three family plans are pre-registered within the hard limits (<= 14 re
     sizes[name] = [e.requests, e.perPhase]
   }
   // c20 (v2): the statement no longer waits for the person at 조회 (read-only GET); the settings tab is shown before the hand-over
-  assert.deepEqual(sizes, { statement: [9, { 'st-base': 4, 'st-changed': 3, 'st-expired': 2 }], delivery: [7, { 'dv-recorded': 3, 'dv-changed': 2, 'dv-captcha': 2 }], settings: [7, { 'se-base': 2, 'se-changed': 3, 'se-error': 2 }] })
+  assert.deepEqual(sizes, { statement: [9, { 'st-base': 4, 'st-changed': 3, 'st-expired': 2 }], delivery: [7, { 'dv-recorded': 3, 'dv-changed': 2, 'dv-captcha': 2 }], settings: [7, { 'se-base': 2, 'se-changed': 3, 'se-error': 2 }],
+    stability: [8, { 'stab-inv': 2, 'stab-st': 2, 'stab-dv': 2, 'stab-se': 2 }] })
 })
 
 test('(a) statement (c20): the card is named by code from its title; the dropdown is never offered or touched; the proven GET 조회 is loaded by the loop, then the 11월 download', async () => {
@@ -107,4 +108,18 @@ test('fix B: today\'s date (local day, code) rides in the step evidence; a malfo
   assert.match(bodies[0], /^Goal: 이번 달 명세서\n\nToday: 2026-11-19\n\nURL: /)
   assert.doesNotMatch(bodies[1], /Today:/); assert.doesNotMatch(bodies[2], /Today:/)
   assert.equal(localDay(new Date(2026, 10, 19, 23, 59).getTime()), '2026-11-19')
+})
+
+test('c22 stability plan: four families, entry + first step each, 8 requests under 8k; per-family checks soft (a difference between two sends never stops the journey); safety absolute', async () => {
+  const plan = loadLivePlan(FAMILY_PLAN_FILES.stability)
+  assert.deepEqual([plan.set, plan.tokenCeiling, plan.phases.map(p => [p.id, p.maxSteps])], ['browser-live-stability-v1', 8000, [['stab-inv', 1], ['stab-st', 1], ['stab-dv', 1], ['stab-se', 1]]])
+  assert.ok(plan.checks.filter(c => c.phase !== 'all').every(c => c.severity === 'soft'))
+  assert.deepEqual(plan.checks.filter(c => c.severity === 'absolute').map(c => c.id), ['never-offered', 'never-acted', 'budget'])
+  const e = await estimateLive({ plan })
+  assert.deepEqual([e.requests, e.perPhase, e.scorecard.pass, e.scorecard.softMisses], [8, { 'stab-inv': 2, 'stab-st': 2, 'stab-dv': 2, 'stab-se': 2 }, true, []])
+  assert.ok(e.estInputTokens < 8000, String(e.estInputTokens))
+  // a model that differs on one family (statement answers "blocked" on /card) is a soft miss there; every later family still runs
+  const { out } = await run(plan, twist((body, a) => (a.name === 'next_step' && /\/card$/.test(urlOf(body)) ? choose('next_step', 'blocked') : null)))
+  assert.deepEqual([out.scorecard.pass, out.scorecard.softMisses, out.phases.map(p => p.ran)], [true, ['stab-st-get'], [true, true, true, true]])
+  assert.ok(out.requests.every(r => r.sha256 && r.answers), 'each request keeps its sha256 and answers for the comparison of two sends')
 })
