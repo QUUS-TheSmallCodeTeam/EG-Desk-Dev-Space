@@ -202,7 +202,11 @@ test('the server mounts the tested stored-engine auth function, without a Codex 
   assert.ok(contextStart >= 0 && contextEnd > contextStart, 'the actual context constructor boundary is present')
   const contextWiring = source.slice(contextStart, contextEnd)
   assert.match(contextWiring, /getAuthority: hints => chat\.contextAuthority\(hints\)/)
-  assert.match(contextWiring, /schemaReady: authority => authority\?\.engineId === 'claude'\s*\? claudeEngine\.isReady\(\) && claudeEngine\.capabilities\(\)\.has\('dynamicTools'\)\s*: nativeCapabilities\.schemaMatch && appServerReady/)
+  // every original fragment still holds (the Claude branch, the shared default), and (L1 c22) a run on another Codex profile is judged by THAT profile's own probe
+  assert.match(contextWiring, /schemaReady: authority => authority\?\.engineId === 'claude'\s*\? claudeEngine\.isReady\(\) && claudeEngine\.capabilities\(\)\.has\('dynamicTools'\)\s*: isProfileSlot\(authority\?\.engineProfileId\) \? codexProfileServers\.capabilities\(authority\.engineProfileId\)\.dynamicTools === true\s*: nativeCapabilities\.schemaMatch && appServerReady/)
+  assert.match(source, /const isProfileSlot = id => typeof id === 'string' && id !== '' && id !== CODEX_ENGINE_PROFILE_ID/)
+  assert.match(source, /const profileCapabilityCache = createNativeCapabilityCache\(\)/)
+  assert.match(source, /inspectCapabilities: bin => profileCapabilityCache\(bin\),/, 'each profile server is probed on its own binary')
   assert.match(source, /respond: nativeRespond,/)
   assert.doesNotMatch(source, /respond:.*claudeEngine\.owns/)
 })

@@ -73,7 +73,8 @@ import { createClaudeReaderEvidence } from './egdesk-claude-capacity.mjs'
 import { createClaudeProcessBudget } from './egdesk-claude-limits.mjs'
 import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
-import { buildCodexAppServerLaunch, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
+import { buildCodexAppServerLaunch, createNativeCapabilityCache, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
+const isProfileSlot = id => typeof id === 'string' && id !== '' && id !== CODEX_ENGINE_PROFILE_ID
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
 import { createLocalCapacity } from './egdesk-local-capacity.mjs'
@@ -327,9 +328,11 @@ contexts = new ContextRuntime({
   store: contextStore, reader: nativeReader, readers: { claude: claudeReader }, getReadCapacity: getClaudeReadCapacity,
   getOwnerKey: () => publicAuthIdentityKey(authState),
   getAuthority: hints => chat.contextAuthority(hints),
+  // L1 c22: a run on another Codex engine profile is judged by THAT profile's server and binary (its own probe), not by the shared server being up
   schemaReady: authority => authority?.engineId === 'claude'
     ? claudeEngine.isReady() && claudeEngine.capabilities().has('dynamicTools')
-    : nativeCapabilities.schemaMatch && appServerReady,
+    : isProfileSlot(authority?.engineProfileId) ? codexProfileServers.capabilities(authority.engineProfileId).dynamicTools === true
+      : nativeCapabilities.schemaMatch && appServerReady,
 })
 for (const root of pendingFileRoots.values()) contexts.noteRoot(root)
 const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState) })
@@ -355,12 +358,12 @@ const modelCatalog = createModelCatalogSync({
   identity: () => modelAccountKey(authState),
   onChange: () => engineStatus.check(),
 })
+// L1 c22: each profile server's binary is probed on its own (dynamicTools, ephemeral, turn/steer, thread/delete), remembered per binary; nothing is
+// inherited from the shared app-server's probe.
+const profileCapabilityCache = createNativeCapabilityCache()
 const codexProfileServers = createCodexProfileAppServers({
   resolveHome: id => engineProfiles.ownedCodexHome(id),
-  // Bind proof to this dedicated process at launch, never borrow the shared
-  // RPC, owner or a new binary's contract for an already-running account slot.
-  getBoardPeerContract: bin => nativeCapabilities.boardPeerContract && bin === nativeCapabilities.executable
-    && fingerprintNativeExecutable(bin) === nativeCapabilities.binaryFingerprint ? nativeCapabilities.boardPeerContract : null,
+  inspectCapabilities: bin => profileCapabilityCache(bin),
   onNotification: (id, message) => codexEngine.notify(message, id),
   onServerRequest: (id, message) => codexEngine.serverRequest(message, id),
   onConnection: (id, state) => codexEngine.connection(state, id),
