@@ -97,13 +97,15 @@ function decisionRank(response, candidates, probabilities = null) {
 
 const nativeAborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted').get
 
-// Only the trusted host may construct a scope, authorize decisionEgress, or
-// inject a client. isCurrent(scope) must synchronously check the exact minted
+// Only the trusted host may construct a scope, pass the egress gate, or
+// inject a client. Excerpts leave for Decisions only when the shared gate allows
+// 'board_excerpt' (the ask already sends them to a model); there is no per-request
+// flag. isCurrent(scope) must synchronously check the exact minted
 // scope against the active invocation and its board, grant and policy revision.
 // This selector never derives authority from IDs supplied inside the scope.
 export async function selectBoardAgentContext(input, options) {
-  const { question, scope, decisionEgress = false } = input ?? {}
-  const { mode = 'off', client = null, now = Date.now, signal, isCurrent, observe = null } = options ?? {}
+  const { question, scope } = input ?? {}
+  const { mode = 'off', client = null, now = Date.now, signal, isCurrent, observe = null, egress = null } = options ?? {}
   const snapshot = snapshotScope(scope, question)
   const status = () => {
     if (signal?.aborted) return 'cancelled'
@@ -119,7 +121,9 @@ export async function selectBoardAgentContext(input, options) {
   const slices = snapshot.allowedSlices
   if (!slices.length) return result('empty')
   const local = localRank(question, slices)
-  if (decisionEgress !== true || (mode !== 'on' && mode !== 'advisory') || client === null) return result('local', local)
+  let maySend = false
+  try { maySend = egress !== null && typeof egress === 'object' && !types.isProxy(egress) && typeof egress.allows === 'function' && egress.allows('board_excerpt') === true } catch { maySend = false }
+  if (!maySend || (mode !== 'on' && mode !== 'advisory') || client === null) return result('local', local)
   let decide
   try { decide = client.decide } catch {
     const blocked = status()

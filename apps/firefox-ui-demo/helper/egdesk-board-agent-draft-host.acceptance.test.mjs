@@ -38,7 +38,9 @@ const response = () => Response.json({
     content: [{ type: 'output_text', text: ANSWER, annotations: [], logprobs: [] }] }],
 })
 
-async function fixture(t, { config = 'dedicated', provider = response } = {}) {
+// decisions: the saved Decisions setting of the host. 'off' is the bridge's answer for mode off or no key (no status at all);
+// 'on' is a usable setting whose client fails unless decisionAnswer is given. Nothing in a request can select either.
+async function fixture(t, { config = 'dedicated', provider = response, decisions = 'off', decisionAnswer = null } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'board-host-'))
   const dataDir = path.join(root, 'private-app')
   const settings = path.join(dataDir, 'settings')
@@ -58,6 +60,7 @@ async function fixture(t, { config = 'dedicated', provider = response } = {}) {
   const profile = { lifecycle: 'active', activeRevision: 1, active }
   const posts = []
   let decisionsCount = 0
+  const decisionInputs = []
   const draft = createBoardAgentDraftTransport({
     readConfig: createBoardAgentDraftConfigReader({ dataDir, getDecisionApiKey: () => decisionCredential }),
     fetchImpl(url, options) {
@@ -70,8 +73,12 @@ async function fixture(t, { config = 'dedicated', provider = response } = {}) {
   })
   const service = createBoardAgentAskService({ desk, profiles: { get: id => id === PROFILE ? profile : null },
     selectContext: selectBoardAgentContext,
-    decisionStatus: () => ({ mode: 'on', model: 'fixture-decisions-model', bindingId: 'fixture-decisions-binding',
-      client: { decide() { decisionsCount++; throw new Error('Decisions must never be invoked in this test') } } }),
+    decisionStatus: () => decisions === 'off' ? null : ({ mode: 'on', model: 'fixture-decisions-model', bindingId: 'fixture-decisions-binding',
+      client: { async decide(request) {
+        decisionsCount++; decisionInputs.push(JSON.parse(request.input))
+        if (!decisionAnswer) throw new Error('Decisions must never be invoked in this test')
+        return decisionAnswer
+      } } }),
     draft, draftPreview: tone => `${BOARD_AGENT_DRAFT_INSTRUCTIONS}\n${BOARD_AGENT_DRAFT_REPLY_STYLES[tone]}`,
   })
   t.after(() => { service.close(); desk.close(); rmSync(root, { recursive: true, force: true }) })
@@ -96,13 +103,13 @@ async function fixture(t, { config = 'dedicated', provider = response } = {}) {
     recipient: 'Fixture recipient', question: QUESTION, excerpt: '', expectedReply: 'Fixture human-review preference', askCode: issued.body.askCode }
   return {
     availability: () => policy('get'), revoke: () => policy('revoke', { expectedVersion: issued.body.policy.version }),
-    preview: (mode = 'draft') => route('prepare', { boardId: BOARD, request, mode, decisionEgress: false }),
+    preview: (mode = 'draft', extra = {}) => route('prepare', { boardId: BOARD, request, mode, ...extra }),
     run: (preview, confirm = true) => route('run', { ticket: preview.body.ticket, confirm }),
     cancel: preview => route('cancel', { ticket: preview.body.ticket }),
     rotate: () => { dedicatedCredential = dummyCredential(); writeConfig(dedicatedCredential) },
     remove: () => unlinkSync(configFile),
     boardUnchanged: () => boardBefore === JSON.stringify(desk.board(BOARD).head),
-    posts, decisions: () => decisionsCount,
+    posts, decisions: () => decisionsCount, decisionInputs,
   }
 }
 const code = (result, status, suffix) => {
@@ -113,10 +120,11 @@ const code = (result, status, suffix) => {
 const previewDraft = async f => {
   const preview = await f.preview()
   assert.equal(preview.status, 200)
-  const { mode, question, excerpts, publicInstructions, decisionEgress, decisionModel, draftModel, draftInstructions } = preview.body
-  assert.deepEqual({ mode, question, excerpts, publicInstructions, decisionEgress, decisionModel, draftModel, draftInstructions },
+  const { mode, question, excerpts, publicInstructions, decisionModel, decisionMode, draftModel, draftInstructions } = preview.body
+  assert.equal(Object.hasOwn(preview.body, 'decisionEgress'), false, 'there is no per-request screening choice')
+  assert.deepEqual({ mode, question, excerpts, publicInstructions, decisionModel, decisionMode, draftModel, draftInstructions },
     { mode: 'draft', question: QUESTION, excerpts: [EXCERPT], publicInstructions: GUIDANCE,
-      decisionEgress: false, decisionModel: null, draftModel: MODEL, draftInstructions: INSTRUCTIONS })
+      decisionModel: null, decisionMode: null, draftModel: MODEL, draftInstructions: INSTRUCTIONS })
   assert.equal(f.posts.length, 0)
   return preview
 }
@@ -130,17 +138,19 @@ test('preview is inert, and a run without confirmation makes zero outbound attem
   trace('preview_and_unconfirmed', f, { previewStatus: 200, runStatus: 400, answerReturned: false })
 })
 
-test('confirmed extract returns the approved local sentence, not a Responses draft', async t => {
-  const f = await fixture(t)
+test('confirmed extract returns the approved local sentence, not a Responses draft, and never reaches Decisions even when it is on', async t => {
+  const f = await fixture(t, { decisions: 'on' })
+  code(await f.preview('extract', { decisionEgress: true }), 400, 'INPUT')
   const preview = await f.preview('extract')
   assert.equal(preview.status, 200)
+  assert.deepEqual([preview.body.decisionModel, preview.body.decisionMode, preview.body.provider], [null, null, null])
   assert.deepEqual(await f.run(preview), { status: 200, body: { mode: 'extract', answer: EXCERPT, source: 'local', omittedCount: 0 } })
   noTraffic(f)
   trace('extract', f, { runStatus: 200, source: 'local' })
 })
 
 for (const config of ['none', 'shared']) test(`draft is off with ${config} dedicated credential configuration`, async t => {
-  const f = await fixture(t, { config })
+  const f = await fixture(t, { config, decisions: 'on' })
   const state = await f.availability()
   assert.equal(state.status, 200)
   assert.deepEqual(state.body.availability, { decision: true, draft: false, model: null })
@@ -164,6 +174,30 @@ test('one confirmed draft reaches the real Responses adapter and returns only it
   })
   assert.ok(f.boardUnchanged())
   trace('confirmed_draft', f, { endpoint: '/v1/responses', runStatus: 200, responseShape: 'output[].content[].output_text', answerMatched: true, replayStatus: 409, boardUnchanged: true })
+})
+
+test('with the saved Decisions mode on, one confirmed draft screens the same approved excerpts once, then drafts once', async t => {
+  const f = await fixture(t, { decisions: 'on', decisionAnswer: { answers: { c1: { type: 'predicate', probability: 0.97 } } } })
+  const preview = await f.preview()
+  assert.equal(preview.status, 200)
+  assert.deepEqual([preview.body.decisionModel, preview.body.decisionMode, preview.body.draftModel], ['fixture-decisions-model', 'on', MODEL])
+  noTraffic(f)
+  assert.deepEqual(await f.run(preview), { status: 200, body: { mode: 'draft', answer: ANSWER, source: 'draft', screening: 'decision' } })
+  assert.equal(f.decisions(), 1)
+  assert.deepEqual(f.decisionInputs, [{ question: QUESTION, candidates: [{ alias: 'c1', text: EXCERPT }] }], 'only the question and the approved excerpts the drafting model may also receive')
+  assert.equal(f.posts.length, 1)
+  assert.deepEqual(JSON.parse(f.posts[0].body.input[0].content[0].text).excerpts, [EXCERPT])
+  code(await f.run(preview), 409, 'STALE')
+  assert.deepEqual([f.decisions(), f.posts.length], [1, 1])
+  trace('draft_with_decisions_on', f, { runStatus: 200, screening: 'decision', replayStatus: 409 })
+})
+
+test('a Decisions failure during a draft run falls back to the local selection and the draft still runs once', async t => {
+  const f = await fixture(t, { decisions: 'on' })
+  const preview = await f.preview()
+  assert.deepEqual(await f.run(preview), { status: 200, body: { mode: 'draft', answer: ANSWER, source: 'draft', screening: 'fallback' } })
+  assert.deepEqual([f.decisions(), f.posts.length], [1, 1])
+  trace('draft_with_decisions_failing', f, { runStatus: 200, screening: 'fallback' })
 })
 
 test('a Chat Completions response is not mistaken for Responses output_text', async t => {

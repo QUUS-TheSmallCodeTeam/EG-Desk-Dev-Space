@@ -194,7 +194,15 @@ async function rig(t, { mode = 'on' } = {}) {
   const desk = openDeskStore({ dataDir: path.join(root, 'desk'), ownerScope: 'crosslane-sim' });
   desk.saveBoard(BOARD, { body: { version: 1, agenda: { id: BOARD, title: 'Sim Board' }, cards: [], shapes: [] }, expectedRevision: null });
   const askClient = createDecisionClient({ getApiKey: () => S.key, budget, fetchImpl: provider });
-  const draft = createBoardAgentDraftTransport({ readConfig: () => null, fetchImpl: async () => Response.json({}, { status: 500 }) });
+  // No per-request screening choice any more: Decisions screens the approved excerpts only in a draft run (the run that already
+  // sends them to the drafting model), so the member's question is answered with a draft here. The drafting provider is a mock.
+  const draftGot = [];
+  const draft = createBoardAgentDraftTransport({ readConfig: () => ({ apiKey: 'egd-synthetic-draft-not-a-key-0002', model: 'synthetic-responses-model' }),
+    fetchImpl: async (_url, init) => {
+      draftGot.push(JSON.parse(JSON.parse(init.body).input[0].content[0].text).excerpts);
+      return Response.json({ object: 'response', status: 'completed', model: 'synthetic-responses-model', output: [{ type: 'message', role: 'assistant', status: 'completed',
+        content: [{ type: 'output_text', text: 'Synthetic drafted reply.' }] }] });
+    } });
   const service = createBoardAgentAskService({ desk, profiles: { get: id => id === PROFILE ? profile : null }, selectContext: selectBoardAgentContext, calibrationLog: calibration,
     decisionStatus: () => S.mode === 'off' ? null : ({ mode: S.mode, model: DECISION_MODEL, bindingId: 'sim-binding', client: askClient }), draft });
   t.after(() => { service.close(); desk.close(); });
@@ -202,15 +210,14 @@ async function rig(t, { mode = 'on' } = {}) {
   async function ask() {
     const issued = service.policy({ boardId: BOARD, action: 'issue', expectedVersion: version }); version = issued.policy.version;
     const request = { kind: 'request', requestId: '8878a7f3-df6b-4383-af12-6ae38ad4fe2e', requestDigest: sha(String(Math.random())), question: QUESTION, recipient: 'Member', excerpt: '', expectedReply: 'short', askCode: issued.askCode };
-    const decisionEgress = S.mode !== 'off';
-    const prepared = service.prepare({ boardId: BOARD, request, mode: 'extract', decisionEgress });
+    const prepared = service.prepare({ boardId: BOARD, request, mode: 'draft' });
     const result = await service.run({ ticket: prepared.ticket, confirm: true });
     const binding = Object.freeze({}), b = { id: BOARD, title: 'Sim Board' };
     const flow = createReviewFlow({ getContext: () => binding, isContextCurrent: v => v === binding, getBoard: () => b, isBoardCurrent: () => true,
       store: { check() {}, issue() {} }, pickFile: async () => ({ bytes: new Uint8Array([1]) }), request: async () => ({ status: 200, body: { locked: false, encrypted: true, review: request } }) });
     flow.openFile(); await flow.chooseFile();
-    assert.equal(flow.beginAgentReply(flow.view().review, b, { ...result, decisionEgress }), true);
-    return { prepared, result, note: flow.view().answerSource };
+    assert.equal(flow.beginAgentReply(flow.view().review, b, result), true);
+    return { prepared, result, note: flow.view().answerSource, used: draftGot.at(-1)?.length ?? 0 };
   }
   return { S, P, store, budget, calibration, http, desk, ask, board, settings, root };
 }
@@ -264,7 +271,7 @@ test('Board journey across lanes: arrangement -> apply -> ask (advisory, on) -> 
   const adv = await r.ask();
   r.S.mode = 'on';
   const on = await r.ask();
-  record('step2-ask', { advisory: { screening: adv.result.screening, note: adv.note, used: adv.result.answer.split('\n\n').length }, on: { screening: on.result.screening, note: on.note, used: on.result.answer.split('\n\n').length },
+  record('step2-ask', { advisory: { screening: adv.result.screening, note: adv.note, used: adv.used }, on: { screening: on.result.screening, note: on.note, used: on.used },
     providerCalls: r.P.calls.map(c => c.name), budget: r.budget.snapshot() });
   assert.equal(r.P.calls.filter(c => c.name !== 'board_view').length, 2, 'one paid screening request per explicit ask');
   assert.equal(adv.result.screening, 'advisory'); assert.match(adv.note, /기록만.*반영하지 않고/);

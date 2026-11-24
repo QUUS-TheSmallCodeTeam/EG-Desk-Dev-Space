@@ -12,7 +12,12 @@ import { openCalibrationLog, CALIBRATION_FILE } from './egdesk-decision-calibrat
 import { createDecisionClient, DECISION_MODEL } from './egdesk-decision-client.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
 
-// L1 cycle 4. Synthetic: temp desk + temp private calibration file, real service/selector/client, mock fetch.
+// L1 cycle 4, updated in cycle 7. Synthetic: temp desk + temp private calibration file, real service/selector/client, mock fetch.
+// Cycle 7: there is no per-request screening choice. Decisions screens the approved excerpts only in a draft run (the run that
+// already sends them to the drafting model) and only under the saved mode, so the screening cases below are draft runs.
+const DRAFT_MODEL = 'synthetic-responses-model', DRAFT_ANSWER = 'Synthetic drafted reply.'
+const draftOk = () => Response.json({ object: 'response', status: 'completed', model: DRAFT_MODEL, output: [{ type: 'message', role: 'assistant', status: 'completed',
+  content: [{ type: 'output_text', text: DRAFT_ANSWER }] }] })
 const BOARD = 'board-calibration-sim', PROFILE = 'profile-calibration-sim'
 const QUESTION = 'Where do visitors park on Friday?'
 const E = ['Friday visitors park behind the gym.', 'Meet in the atrium on Friday.', 'Catering invoice totals seventy credits.']
@@ -22,26 +27,27 @@ const sha = text => createHash('sha256').update(text).digest('hex')
 const probs = list => body => Response.json({ model: DECISION_MODEL, answers: body.questions.map((q, i) => ({ name: q.name, type: 'predicate', probability: list[i] })) })
 const err = (status, code) => () => Response.json({ error: { code, type: code } }, { status })
 
-function machine(t, { mode, respond, draftFetch = null, brokenLog = false }) {
+function machine(t, { mode, respond, draftFetch = draftOk, brokenLog = false }) {
   const root = createPrivateQaTempDirectory('egdesk-board-calibration-')
   const desk = openDeskStore({ dataDir: path.join(root, 'desk'), ownerScope: 'calibration-sim' })
   desk.saveBoard(BOARD, { body: { version: 1, agenda: { id: BOARD, title: 'Sim Board' }, cards: [], shapes: [] }, expectedRevision: null })
   const log = openCalibrationLog({ dataDir: path.join(root, 'settings'), log() {} })
-  const client = createDecisionClient({ getApiKey: () => KEY, fetchImpl: async (url, init) => respond(JSON.parse(init.body), init) })
-  const draft = createBoardAgentDraftTransport({ readConfig: () => draftFetch ? { apiKey: 'egd-synthetic-draft-not-a-key-0002', model: 'synthetic-responses-model' } : null,
-    fetchImpl: draftFetch ?? (async () => Response.json({}, { status: 500 })) })
+  const decisionPosts = [], draftExcerpts = []
+  const client = createDecisionClient({ getApiKey: () => KEY, fetchImpl: async (url, init) => { decisionPosts.push(JSON.parse(init.body)); return respond(JSON.parse(init.body), init) } })
+  const draft = createBoardAgentDraftTransport({ readConfig: () => ({ apiKey: 'egd-synthetic-draft-not-a-key-0002', model: DRAFT_MODEL }),
+    fetchImpl: async (url, init) => { draftExcerpts.push(JSON.parse(JSON.parse(init.body).input[0].content[0].text).excerpts); return draftFetch() } })
   const service = createBoardAgentAskService({ desk, profiles: { get: id => id === PROFILE ? profile : null }, selectContext: selectBoardAgentContext, calibrationLog: brokenLog ? { record() { throw new Error('record failed') }, complete() { throw new Error('complete failed') } } : log,
     decisionStatus: () => mode === 'off' ? null : ({ mode, model: DECISION_MODEL, bindingId: 'sim-binding', client }), draft })
   t.after(() => { service.close(); desk.close(); rmSync(root, { recursive: true, force: true }) })
   let version = service.policy({ boardId: BOARD, action: 'save', expectedVersion: null, profileId: PROFILE, excerpts: E, publicInstructions: '' }).policy.version
   const issue = () => { const issued = service.policy({ boardId: BOARD, action: 'issue', expectedVersion: version }); version = issued.policy.version; return issued.askCode }
   const request = askCode => ({ kind: 'request', requestId: '8878a7f3-df6b-4383-af12-6ae38ad4fe2e', requestDigest: sha(String(Math.random())), question: QUESTION, recipient: 'Member', excerpt: '', expectedReply: 'short', askCode })
-  async function ask({ decisionEgress, runMode = 'extract', code = issue() } = {}) {
-    const prepared = service.prepare({ boardId: BOARD, request: request(code), mode: runMode, decisionEgress })
+  async function ask({ runMode = 'draft', code = issue() } = {}) {
+    const prepared = service.prepare({ boardId: BOARD, request: request(code), mode: runMode })
     const outcome = await service.run({ ticket: prepared.ticket, confirm: true }).then(result => ({ result }), error => ({ error: { code: error.code, status: error.httpStatus } }))
     return { prepared, code, ...outcome }
   }
-  return { service, log, ask, issue, root, get version() { return version }, request }
+  return { service, log, ask, issue, root, get version() { return version }, request, decisionPosts, draftExcerpts }
 }
 
 const SCEN = {
@@ -53,13 +59,22 @@ const SCEN = {
   timeout: { respond: (b, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(Object.assign(new Error('x'), { name: 'AbortError' })), { once: true })), fallback: 'timeout' },
 }
 
+const LOCAL = [E[0], E[1]] // what the on-device word match picks for this question
 for (const mode of ['off', 'advisory', 'on']) for (const [name, s] of Object.entries(SCEN)) {
-  test(`L1c4 calibration mode=${mode} decision=${name}`, async t => {
+  test(`L1c4 calibration (draft run) mode=${mode} decision=${name}`, async t => {
     const m = machine(t, { mode, respond: s.respond })
-    const { result, error } = await m.ask({ decisionEgress: mode !== 'off' })
+    const { result, error, prepared } = await m.ask()
     assert.equal(error, undefined)
+    assert.equal(Object.hasOwn(prepared, 'decisionEgress'), false)
     const entries = m.log.entries()
-    if (mode === 'off') { assert.deepEqual(entries, [], 'off records nothing'); return }
+    if (mode === 'off') {
+      assert.deepEqual(entries, [], 'off records nothing')
+      assert.equal(m.decisionPosts.length, 0, 'off sends nothing to Decisions')
+      assert.deepEqual(m.draftExcerpts, [LOCAL]); assert.equal(Object.hasOwn(result, 'screening'), false)
+      return
+    }
+    assert.equal(m.decisionPosts.length, 1, 'allowed: exactly one screening request')
+    assert.deepEqual(JSON.parse(m.decisionPosts[0].input), { question: QUESTION, candidates: E.map((text, i) => ({ alias: `c${i + 1}`, text })) })
     assert.equal(entries.length, 1)
     const [entry] = entries
     t.diagnostic('ENTRY ' + JSON.stringify(entry))
@@ -69,27 +84,43 @@ for (const mode of ['off', 'advisory', 'on']) for (const [name, s] of Object.ent
       assert.equal(entry.fallback, s.fallback)
       assert.deepEqual(entry.judgments, [])
       assert.equal(entry.attached, false)
+      assert.equal(result.screening, 'fallback')
+      assert.deepEqual(m.draftExcerpts, [LOCAL], 'a failed screening leaves the local selection for the draft')
     } else {
       assert.deepEqual(entry.judgments.map(j => j.p), s.probs)
       assert.ok(entry.judgments.every(j => j.q === 'relevance' && j.kind === 'board' && j.threshold === 0.6))
       assert.deepEqual(entry.judgments.map(j => j.would), s.probs.map(p => p >= 0.6 ? 'attach' : 'skip'))
       assert.equal(entry.attached, mode === 'on' && s.picks > 0, 'attached = the selection was applied to the reply')
       assert.equal(entry.fallback, undefined)
+      assert.equal(result.screening, mode === 'advisory' ? 'advisory' : 'decision')
+      // Advisory never changes the reply inputs: the drafting model gets the same local selection as with no Decisions.
+      if (mode === 'advisory') assert.deepEqual(m.draftExcerpts, [LOCAL])
+      else assert.deepEqual(m.draftExcerpts, s.picks ? [[E[1]]] : [], 'on: only the screened excerpts go to the draft; none selected means no draft request')
     }
-    // Advisory never changes the reply: the answer is the same as the no-Decisions local selection.
-    if (mode === 'advisory') assert.equal(result.answer, [E[0], E[1]].join('\n\n'))
     // Content-free: nothing from the question, excerpts, ids, names or keys.
     const raw = readFileSync(path.join(m.root, 'settings', CALIBRATION_FILE), 'utf8')
-    for (const secret of [QUESTION, ...E, BOARD, PROFILE, 'Calibration Sim Agent', KEY, 'Member', 'egask1']) assert.ok(!raw.includes(secret), 'file must not contain: ' + secret.slice(0, 12))
+    for (const secret of [QUESTION, ...E, BOARD, PROFILE, 'Calibration Sim Agent', KEY, 'Member', 'egask1', DRAFT_ANSWER]) assert.ok(!raw.includes(secret), 'file must not contain: ' + secret.slice(0, 12))
   })
 }
 
+for (const mode of ['off', 'advisory', 'on']) test(`L1c7 extract run mode=${mode}: no model receives the excerpts, so 0 Decisions requests, no record, the local selection as before`, async t => {
+  const m = machine(t, { mode, respond: SCEN.confident.respond })
+  const { result, error, prepared } = await m.ask({ runMode: 'extract' })
+  assert.equal(error, undefined)
+  assert.deepEqual([prepared.decisionModel, prepared.decisionMode, prepared.provider], [null, null, null])
+  assert.deepEqual(result, { mode: 'extract', answer: LOCAL.join('\n\n'), source: 'local', omittedCount: 0 })
+  assert.equal(m.decisionPosts.length, 0)
+  assert.deepEqual(m.draftExcerpts, [])
+  assert.deepEqual(m.log.entries(), [])
+})
+
 test('L1c4 recording never changes the answer or throws, even when the log throws', async t => {
-  const fine = await machine(t, { mode: 'on', respond: SCEN.confident.respond }).ask({ decisionEgress: true })
-  const broken = await machine(t, { mode: 'on', respond: SCEN.confident.respond, brokenLog: true }).ask({ decisionEgress: true })
+  const fineMachine = machine(t, { mode: 'on', respond: SCEN.confident.respond }), brokenMachine = machine(t, { mode: 'on', respond: SCEN.confident.respond, brokenLog: true })
+  const fine = await fineMachine.ask(), broken = await brokenMachine.ask()
   assert.equal(broken.error, undefined)
   assert.deepEqual(broken.result, fine.result)
-  assert.equal(broken.result.answer, E[1])
+  assert.deepEqual(broken.result, { mode: 'draft', answer: DRAFT_ANSWER, source: 'draft', screening: 'decision' })
+  assert.deepEqual([fineMachine.draftExcerpts, brokenMachine.draftExcerpts], [[[E[1]]], [[E[1]]]])
 })
 
 // --- Item 2: the question code when a run does not complete -----------------------------------
@@ -98,18 +129,18 @@ test('L1c4 code lifecycle: screening failure is not a failed run; a failed draft
   // (a) screening 429/timeout: run completes with the local selection, code is used, replay is refused
   for (const name of ['noCredit', 'spendLimit', 'timeout']) {
     const m = machine(t, { mode: 'on', respond: SCEN[name].respond })
-    const first = await m.ask({ decisionEgress: true })
+    const first = await m.ask()
     assert.ok(first.result, 'screening failure still returns a reviewed answer')
     assert.equal(first.result.screening, 'fallback')
-    assert.throws(() => m.service.prepare({ boardId: BOARD, request: m.request(first.code), mode: 'extract', decisionEgress: false }), e => e.code === 'BOARD_AGENT_ASK_CODE_INVALID')
-    assert.rejects(m.service.run({ ticket: first.prepared.ticket, confirm: true }), { code: 'BOARD_AGENT_ASK_STALE' })
+    assert.throws(() => m.service.prepare({ boardId: BOARD, request: m.request(first.code), mode: 'extract' }), e => e.code === 'BOARD_AGENT_ASK_CODE_INVALID')
+    await assert.rejects(m.service.run({ ticket: first.prepared.ticket, confirm: true }), { code: 'BOARD_AGENT_ASK_STALE' })
     rows.push([name, 'answer returned', 'code consumed', 'replay refused'])
   }
   // (b) draft provider failure after approval: no answer; code consumed; same code cannot be reused
   const d = machine(t, { mode: 'off', respond: SCEN.confident.respond, draftFetch: async () => Response.json({}, { status: 500 }) })
-  const failed = await d.ask({ decisionEgress: false, runMode: 'draft' })
+  const failed = await d.ask({ runMode: 'draft' })
   assert.equal(failed.error?.code, 'BOARD_AGENT_ASK_RUN_FAILED')
-  assert.throws(() => d.service.prepare({ boardId: BOARD, request: d.request(failed.code), mode: 'extract', decisionEgress: false }), e => e.code === 'BOARD_AGENT_ASK_CODE_INVALID')
+  assert.throws(() => d.service.prepare({ boardId: BOARD, request: d.request(failed.code), mode: 'extract' }), e => e.code === 'BOARD_AGENT_ASK_CODE_INVALID')
   rows.push(['draft provider 500', 'RUN_FAILED 502', 'code consumed', 'same code refused'])
   t.diagnostic('CODE ' + JSON.stringify(rows))
 })
@@ -122,7 +153,7 @@ test('L1c4 owner sees that a failed run may have used the code and that a manual
     post: async path => {
       const end = path.split('/').at(-1)
       if (end === 'policy') return { status: 200, body: { policy, availability: { decision: false, draft: false, model: null } } }
-      if (end === 'prepare') return { status: 200, body: { ticket: 't', expiresAt: 5000, mode: 'extract', decisionEgress: false, profileName: 'Agent', profileRevision: 1, model: null,
+      if (end === 'prepare') return { status: 200, body: { ticket: 't', expiresAt: 5000, mode: 'extract', profileName: 'Agent', profileRevision: 1, model: null,
         provider: null, draftModel: null, decisionModel: null, question: 'q?', excerpts: ['x'], replyStyle: 'plain', publicInstructions: '' } }
       if (end === 'run') return { status: 502, body: { code: 'BOARD_AGENT_ASK_RUN_FAILED' } }
       return { status: 200, body: {} }

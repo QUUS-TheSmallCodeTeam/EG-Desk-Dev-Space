@@ -16,6 +16,7 @@ import { decideBrowserEntry } from './egdesk-browser-task.mjs'
 import { reconstructMemory } from './egdesk-wiki-reconstruction.mjs'
 import { buildWiki } from './egdesk-wiki-reconstruction.mjs'
 import { SYNTHETIC_PAGES, mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
+import { selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
 
 const KEY = 'egd-synthetic-not-a-key-0005'
 const CEILING_NONE = { browser: 'none', files: 'read', terminal: 'none', network: 'off', mcp: 'none' }
@@ -45,7 +46,7 @@ test('permissions come only from the structures that govern the models; unknown 
   assert.equal(closed.allows('anything_else'), false)
   assert.equal(createEgressGate(null).allows('terminal_output'), false)
   // nothing here can be opened for Decisions alone: the only inputs are model-permission structures
-  assert.deepEqual(Object.keys(modelDataPermissions({})).sort(), ['browser', 'canvas', 'memory', 'run', 'speech', 'terminal', 'topic'])
+  assert.deepEqual(Object.keys(modelDataPermissions({})).sort(), ['board', 'browser', 'canvas', 'memory', 'run', 'speech', 'terminal', 'topic'])
 })
 
 test('guarded client: refuses before any request, with the closed code every feature already falls back on', async () => {
@@ -155,6 +156,32 @@ test('speech_history / topic_history follow the per-DM consents that already gov
   assert.equal(gate({ speechConsent: true }).allows('topic_history'), false); assert.equal(gate({ topicConsent: true }).allows('topic_history'), true)
 })
 
+test('board_excerpt: a draft ask (the excerpts already go to the drafting model) -> one screening request; an extract ask or mode off -> 0 requests and the local selection', async () => {
+  const question = 'Where do visitors park on Friday?'
+  const scope = () => ({ invocationId: 'i', boardId: 'b', grantId: 'g', policyRevision: 'r', expiresAt: 10_000, question,
+    allowedSlices: [{ id: 'x1', text: 'Friday visitors park behind the gym zeta-synthetic-excerpt.' }, { id: 'x2', text: 'Catering invoice totals seventy credits.' }] })
+  const select = (p, egress, mode) => { const offered = scope(); return selectBoardAgentContext({ question, scope: offered }, { mode, client: p.client, egress, now: () => 1, isCurrent: s => s === offered }) }
+  const draftAsk = createEgressGate(modelDataPermissions({ boardExcerptsToModel: true })), extractAsk = createEgressGate(modelDataPermissions({ boardExcerptsToModel: false }))
+  assert.equal(draftAsk.allows('board_excerpt'), true); assert.equal(extractAsk.allows('board_excerpt'), false)
+  assert.equal(gate({ toolCeiling: OPEN, browserGranted: true, canvasMaySend: true, memoryScope: {}, speechConsent: true, topicConsent: true }).allows('board_excerpt'), false, 'no other model permission opens Board excerpts')
+  const local = { selectedIds: ['x1'], outcome: 'local' }
+  const sent = provider()
+  const screened = await select(sent, draftAsk, 'on')
+  assert.equal(sent.requests.length, 1); assert.equal(sent.carrying('zeta-synthetic-excerpt'), 1); assert.equal(screened.outcome, 'decision')
+  const advisory = provider()
+  assert.deepEqual(await select(advisory, draftAsk, 'advisory'), local, 'advisory records only: the selection stays local')
+  assert.equal(advisory.requests.length, 1)
+  for (const [egress, mode] of [[extractAsk, 'on'], [extractAsk, 'advisory'], [draftAsk, 'off'], [null, 'on'], [undefined, 'on']]) {
+    const p = provider()
+    assert.deepEqual(await select(p, egress, mode), local)
+    assert.equal(p.requests.length, 0, 'not allowed: nothing leaves and the local selection is returned as before')
+  }
+  // the guarded client alone also refuses before any request
+  const q = provider()
+  await assert.rejects(extractAsk.guardClient(q.client, ['board_excerpt']).decide({ input: 'x', questions: [{ type: 'predicate', name: 'q', instructions: 'x' }] }), e => e.code === 'evidence_unavailable')
+  assert.equal(q.requests.length, 0)
+})
+
 test('registry: every file that sends a Decision request is listed with the kinds it may declare (a new call site must be registered)', () => {
   const dir = path.dirname(new URL(import.meta.url).pathname)
   const sending = fs.readdirSync(dir).filter(f => f.endsWith('.mjs') && !/\.test\.|\.fixture\.|egdesk-decision-client\.mjs|egdesk-decision-egress\.mjs/.test(f))
@@ -164,4 +191,7 @@ test('registry: every file that sends a Decision request is listed with the kind
   // chat chooser and Board arrangement are user-confirmed single requests of the typed/selected content; they live in the runtime/board files above.
   assert.deepEqual(unregistered, [], `register these Decision call sites in EGRESS_SITES: ${unregistered.join(', ')}`)
   for (const f of listed) assert.ok(fs.existsSync(path.join(dir, f)), `${f} exists`)
+  assert.deepEqual(EGRESS_SITES['egdesk-board-agent-context.mjs'], ['board_excerpt'], 'Board reply screening is governed by the shared gate')
+  assert.equal(JSON.stringify(EGRESS_SITES).includes('NOT yet unified'), false, 'no call site is left outside the gate')
+  assert.match(fs.readFileSync(path.join(dir, 'egdesk-board-agent-context.mjs'), 'utf8'), /egress\.allows\('board_excerpt'\)/, 'the Board selector asks the gate')
 })

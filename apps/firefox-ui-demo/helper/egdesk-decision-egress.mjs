@@ -20,14 +20,15 @@ export const EGRESS_KINDS = Object.freeze({
   memory_page: Object.freeze({ data: 'memory', governedBy: 'Memory scope of this DM/Agent (allowsPage: the page\'s own guard plus the scope the answering model may read)' }),
   speech_history: Object.freeze({ data: 'speech', governedBy: 'Per-DM speech reuse consent (the same consent that lets the answering model see past utterances)' }),
   topic_history: Object.freeze({ data: 'topic', governedBy: 'Per-DM topic memory consent (the same consent that lets the answering model see past turns)' }),
+  board_excerpt: Object.freeze({ data: 'board', governedBy: 'This Board ask itself: the owner chose and confirmed a run that sends the approved public excerpts to the drafting model. An extract-only ask sends them to no model, so not to Decisions either' }),
 })
-const DATA_CLASSES = Object.freeze(['terminal', 'browser', 'canvas', 'run', 'memory', 'speech', 'topic'])
+const DATA_CLASSES = Object.freeze(['terminal', 'browser', 'canvas', 'run', 'memory', 'speech', 'topic', 'board'])
 // Evidence kinds a draft-check catalog may carry, and the data class that already lets a model see them.
 // Items of the decision context packet were already admitted for this run's answering model, so they count as the run's own data.
 const EVIDENCE_CLASS = Object.freeze({ source: 'run', document: 'run', conversation: 'run', timeline: 'run', board: 'run', memory: 'memory', terminal: 'terminal', browser: 'browser' })
 
 /**
- * modelDataPermissions({ toolCeiling, browserGranted, canvasMaySend, memoryScope, speechConsent, topicConsent, runActive })
+ * modelDataPermissions({ toolCeiling, browserGranted, canvasMaySend, memoryScope, speechConsent, topicConsent, runActive, boardExcerptsToModel })
  * Derived ONLY from the structures that already govern the subjective models:
  *   toolCeiling: the run's effective Agent tool ceiling (codex-chat-tool-ceiling.mjs) or null for none
  *   browserGranted: the run has a selected Browser Card grant (run.browserBinding.cards)
@@ -35,8 +36,9 @@ const EVIDENCE_CLASS = Object.freeze({ source: 'run', document: 'run', conversat
  *   memoryScope: the memory scope object the answering model's packet is built with, or null
  *   speechConsent / topicConsent: per-DM consent states for reusing past utterances / turns
  *   runActive: there is a run whose answer text and evidence the model owns
+ *   boardExcerptsToModel: this Board ask sends the owner-approved excerpts to a model (the drafting model of a confirmed draft run)
  */
-export function modelDataPermissions({ toolCeiling = null, browserGranted = false, canvasMaySend = false, memoryScope = null, speechConsent = false, topicConsent = false, runActive = false } = {}) {
+export function modelDataPermissions({ toolCeiling = null, browserGranted = false, canvasMaySend = false, memoryScope = null, speechConsent = false, topicConsent = false, runActive = false, boardExcerptsToModel = false } = {}) {
   const ceiling = toolCeiling && typeof toolCeiling === 'object' ? toolCeiling : null
   return Object.freeze({
     terminal: ceiling ? ceiling.terminal !== 'none' : true,
@@ -46,6 +48,7 @@ export function modelDataPermissions({ toolCeiling = null, browserGranted = fals
     memory: memoryScope !== null && typeof memoryScope === 'object',
     speech: speechConsent === true,
     topic: topicConsent === true,
+    board: boardExcerptsToModel === true,
   })
 }
 
@@ -82,7 +85,7 @@ export const EGRESS_SITES = Object.freeze({
   'codex-chat-runtime.mjs': ['speech_history', 'topic_history', 'memory_page', 'draft_text', 'run_facts', 'page_text', 'browser_task_record'],
   'egdesk-board-presentation-http.mjs': ['canvas_text', 'board_arrangement: explicit owner confirm, coarse descriptors only',
     'briefing_judgments: /decision/briefing-placement (counts only), -reuse and -check (card labels, short summaries, step texts) are each asked of the gate with canvas_text by runBriefingFlow before they are sent'],
-  'egdesk-board-agent-context.mjs': ['board_excerpt: NOT yet unified - still the owner\'s per-request screening choice (see the c6 report)'],
+  'egdesk-board-agent-context.mjs': ['board_excerpt'],
   'egdesk-chat-choice.mjs': ['dm_chooser: the user\'s own typed question and options, confirmed in the panel'],
   'egdesk-browser-reflex.mjs': ['page_text'],
   'egdesk-browser-task.mjs': ['page_text'],

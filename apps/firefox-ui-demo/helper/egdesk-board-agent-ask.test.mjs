@@ -34,7 +34,7 @@ function fixture(t, { selectContext, transport, decisionStatus, excerpts = appro
   t.after(() => { service.close(); for (const db of stores) db.close(); rmSync(dir, { recursive: true, force: true }) })
   const save = (fields = {}) => service.policy({ boardId: BOARD, action: 'save', expectedVersion: null, profileId: PROFILE, excerpts, publicInstructions: 'Only answer briefly.', ...fields })
   const issue = expectedVersion => service.policy({ boardId: BOARD, action: 'issue', expectedVersion })
-  const prepare = (code, fields = {}) => service.prepare({ boardId: BOARD, request: request(code), mode: 'extract', decisionEgress: false, ...fields })
+  const prepare = (code, fields = {}) => service.prepare({ boardId: BOARD, request: request(code), mode: 'extract', ...fields })
   const run = (preview, options) => service.run({ ticket: preview.ticket, confirm: true }, options)
   return { desk, file: path.join(dir, `desk-${desk.ownerScopeHash}.sqlite`), deps, open, clock, calls, profile, service, save, issue, prepare, run }
 }
@@ -169,7 +169,7 @@ test('v3 database upgrade preserves an existing policy and binds future lifecycl
   assert.equal(upgraded.boardAgentAskPolicy(BOARD).version, issued.policy.version)
   const migrated = createBoardAgentAskService({ ...f.deps, desk: upgraded })
   t.after(() => migrated.close())
-  const input = { boardId: BOARD, request: request(issued.askCode), mode: 'extract', decisionEgress: false }
+  const input = { boardId: BOARD, request: request(issued.askCode), mode: 'extract' }
   const prepared = migrated.prepare(input)
   assert.equal((await migrated.run({ ticket: prepared.ticket, confirm: true })).answer, approved[0])
   assert.equal(migrated.lifecycle({ boardId: BOARD, action: 'trash', expectedVersion: null }).lifecycle, 'trash')
@@ -234,6 +234,57 @@ test('one-shot draft uses the displayed scope only; revocation/disconnect discar
   }
 })
 
+test('Decisions screening follows the shared egress gate (a draft run only) and the saved mode; no request field can turn it on', async t => {
+  const transport = { status: () => ({ configured: true, model: 'exact-model', bindingId: 'binding' }), draft: async () => ({ answer: 'drafted answer' }) }
+  let decision = { mode: 'on', model: 'decision-model', bindingId: 'decision-binding', client: { decide: async () => assert.fail('the fixture selector never dispatches') } }
+  const f = fixture(t, { transport, decisionStatus: () => decision })
+  let version = f.save().policy.version
+  const fresh = () => { const issued = f.issue(version); version = issued.policy.version; return issued.askCode }
+  // The removed per-request flag is not an accepted input in either mode.
+  for (const mode of ['extract', 'draft']) for (const value of [true, false]) {
+    assert.throws(() => f.prepare(fresh(), { mode, decisionEgress: value }), hasCode('INPUT'))
+  }
+  // Extract: no model receives the excerpts, so the gate is closed for Decisions too, whatever the saved mode is.
+  const extract = f.prepare(fresh())
+  assert.deepEqual([extract.decisionModel, extract.decisionMode, extract.decisionPayer, extract.provider, extract.model], [null, null, null, null, null])
+  assert.equal(Object.hasOwn(extract, 'decisionEgress'), false)
+  const extracted = await f.run(extract)
+  assert.equal(Object.hasOwn(extracted, 'screening'), false)
+  let call = f.calls.at(-1)
+  assert.deepEqual(Object.keys(call.input).sort(), ['question', 'scope'])
+  assert.equal(call.opts.egress.allows('board_excerpt'), false)
+  assert.deepEqual([call.opts.mode, call.opts.client], ['off', null])
+  // Draft with the saved mode on: the same run that sends the excerpts to the drafting model may screen them with Decisions.
+  const draft = f.prepare(fresh(), { mode: 'draft' })
+  assert.deepEqual([draft.decisionModel, draft.decisionMode, draft.draftModel, draft.provider], ['decision-model', 'on', 'exact-model', 'openai'])
+  await f.run(draft)
+  call = f.calls.at(-1)
+  assert.equal(call.opts.egress.allows('board_excerpt'), true)
+  assert.equal(call.opts.mode, 'on')
+  assert.equal(typeof call.opts.client.decide, 'function')
+  for (const kind of ['canvas_text', 'memory_page', 'draft_text', 'run_facts', 'terminal_output', 'terminal_command', 'page_text', 'browser_task_record', 'speech_history', 'topic_history']) assert.equal(call.opts.egress.allows(kind), false, `${kind} is not opened by a Board ask`)
+  // Draft with Decisions off (or no key): nothing names or reaches Decisions.
+  decision = null
+  const plain = f.prepare(fresh(), { mode: 'draft' })
+  assert.deepEqual([plain.decisionModel, plain.decisionMode, plain.decisionPayer], [null, null, null])
+  const plainResult = await f.run(plain)
+  assert.equal(Object.hasOwn(plainResult, 'screening'), false)
+  assert.deepEqual([f.calls.at(-1).opts.mode, f.calls.at(-1).opts.client], ['off', null])
+  // One approval covers what the preview showed: a Decisions setting that changes afterwards makes it stale (both directions).
+  const before = f.calls.length
+  const previewedOff = f.prepare(fresh(), { mode: 'draft' })
+  decision = { mode: 'on', model: 'decision-model', bindingId: 'decision-binding', client: { decide: async () => ({}) } }
+  await assert.rejects(f.run(previewedOff), hasCode('STALE'))
+  const previewedOn = f.prepare(fresh(), { mode: 'draft' })
+  decision = { ...decision, mode: 'advisory' }
+  await assert.rejects(f.run(previewedOn), hasCode('STALE'))
+  // An extract preview does not depend on the Decisions setting at all.
+  const previewedExtract = f.prepare(fresh())
+  decision = null
+  assert.equal((await f.run(previewedExtract)).mode, 'extract')
+  assert.equal(f.calls.length, before + 1, 'the two stale approvals never reached the selector')
+})
+
 test('real loopback HTTP checks origin, content type, bounds and dispatches four routes', async t => {
   const f = fixture(t)
   let handle
@@ -251,7 +302,7 @@ test('real loopback HTTP checks origin, content type, bounds and dispatches four
   assert.equal((await send('run', { ticket: 'x'.repeat(1024), confirm: true })).status, 413)
   assert.deepEqual(await (await send('policy', body)).json(), { policy: null, availability: { decision: false, draft: false, model: null } })
   const { policy } = f.save(), { askCode } = f.issue(policy.version)
-  const prepare = () => send('prepare', { boardId: BOARD, request: request(askCode), mode: 'extract', decisionEgress: false }).then(res => res.json())
+  const prepare = () => send('prepare', { boardId: BOARD, request: request(askCode), mode: 'extract' }).then(res => res.json())
   const first = await prepare()
   assert.equal((await send('cancel', { ticket: first.ticket })).status, 200)
   assert.equal((await send('run', { ticket: first.ticket, confirm: true })).status, 409)
