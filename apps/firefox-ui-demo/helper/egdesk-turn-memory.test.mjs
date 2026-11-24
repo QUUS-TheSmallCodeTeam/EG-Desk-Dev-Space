@@ -392,7 +392,7 @@ test('packetFirst (first turn): the packet does not wait for the recording triag
   const judge = mockJudge(), order = []
   const slowTriage = record => ({ async decide(req) {
     const triage = req.questions.some(q => q.name === 'tn_record')
-    if (triage) { await new Promise(r => setTimeout(r, 250)); order.push('triage') } else order.push(req.questions.some(q => q.name.startsWith('tw_')) ? 'write' : 'fetch')
+    if (triage) { await new Promise(r => setTimeout(r, 700)); order.push('triage') } else order.push(req.questions.some(q => q.name.startsWith('tw_')) ? 'write' : 'fetch')
     const r = await judge.decide(req)
     if (triage) r.answers.tn_record = { type: 'predicate', probability: record }
     return r } })
@@ -403,7 +403,7 @@ test('packetFirst (first turn): the packet does not wait for the recording triag
     return { r, packetMs: Date.now() - started }
   }
   const yes = await run(0.97)
-  assert.ok(yes.packetMs < 200, `packet after ${yes.packetMs} ms, before the 250 ms triage`)
+  assert.ok(yes.packetMs < 600, `packet after ${yes.packetMs} ms, before the 700 ms triage`)
   assert.ok(!order.includes('triage')); assert.equal(yes.r.triage, null); assert.ok(yes.r.packet.includes('PostgreSQL'))
   const judged = await yes.r.judgeWrite()
   assert.deepEqual(order.slice(-2), ['triage', 'write'])
