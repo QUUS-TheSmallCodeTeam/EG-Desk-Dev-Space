@@ -43,7 +43,8 @@ const QUESTIONS = new Set(['claim_supported', 'claim_tense', 'answer_type', 'tim
 const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed', 'none', 'act', 'hold', 'fetch'])
 // Turn memory (advisory): where in the session the turn was, what the fetch did, and how long each stage took.
 // Draft check (advisory): what the check would have done to the posted answer, and what it would fall back to without a revision.
-const CHECKS = new Set(['would_pass', 'would_revise', 'would_trim', 'would_ask'])
+// would_ask: records before c19 (the fixed question post, retired); would_withhold: nothing would remain (nothing is posted).
+const CHECKS = new Set(['would_pass', 'would_revise', 'would_trim', 'would_ask', 'would_withhold'])
 // Heartbeat (conversation flow): what was chosen at an asked beat, who wrote a posted message, and the beat's facts as
 // whole seconds and small counts. Durations only, never a clock time.
 const FLOW_KINDS = new Set(['none', 'explain_wait', 'ask_missing', 'milestone', 'stalled', 'pointer'])
@@ -122,7 +123,8 @@ const VOCAB = new Set(['answer', 'browse', 'timeline_update', 'action_only', 'pr
   // Working-memory gate: what the runtime would do with a tool-output block, and the role of an older session block.
   'inject_full', 'collapse_template', 'spill_scratch', 'user_goal', 'current_active_task', 'stale_intermediate_log', 'error_trace_resolved', 'critical_fact'])
 const RUN = new Set(['completed', 'failed', 'interrupted', 'cancelled'])
-const FALLBACK = new Set(['timeout', 'unreachable', 'bad_response', 'no_credit', 'rate_limited', 'budget_exceeded', 'spend_limit_reached', 'invalid_key',
+// revision_unavailable (c19): the draft check's one rewrite could not run and nothing would remain; the draft was posted as written.
+const FALLBACK = new Set(['revision_unavailable', 'timeout', 'unreachable', 'bad_response', 'no_credit', 'rate_limited', 'budget_exceeded', 'spend_limit_reached', 'invalid_key',
   'not_configured', 'server_error', 'model_unavailable', 'evidence_unavailable', 'mode_changed', 'no_candidates', 'timeout_unsent', 'all_not_needed'])
 // Why a choice produced no pick although the model answered (closed; never free text).
 const NO_PICK = new Set(['abstain', 'unclear', 'low_confidence'])

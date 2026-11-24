@@ -16,7 +16,7 @@ const codexLines = [
   { type: 'response_item', timestamp: '2026-11-01T01:00:00Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context><cwd>/work</cwd></environment_context>' }, { type: 'input_text', text: '보드 정리 기능 만들어줘' }] } },
   { type: 'response_item', timestamp: '2026-11-01T01:00:01Z', payload: { type: 'reasoning', summary: [] } },
   { type: 'response_item', timestamp: '2026-11-01T01:00:02Z', payload: { type: 'function_call_output', output: 'secret tool output sk-abcdefghijklmnopqrstu' } },
-  { type: 'response_item', timestamp: '2026-11-01T01:01:00Z', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '정리 기능을 c17 브랜치에 넣었습니다. 진행할까요?' }] } },
+  { type: 'response_item', timestamp: '2026-11-01T01:01:00Z', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '정리 기능을 c17 브랜치에 넣었습니다. 진행할까요?\n<oai-mem-citation>\n<citation_entries>x</citation_entries>\n</oai-mem-citation>' }] } },
   { type: 'response_item', timestamp: '2026-11-01T01:02:00Z', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '아니 그거 c17이 아니라 c18이야. 키는 sk-proj-abcdefghijklmnop1234 이고 메일은 a@b.co' }] } },
   { type: 'response_item', timestamp: '2026-11-01T01:03:00Z', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'c18로 옮기겠습니다. 계속할까요?' }] } },
   { type: 'event_msg', timestamp: '2026-11-01T01:03:30Z', payload: { type: 'agent_message', author: '/root/x', content: [{ type: 'input_text', text: '에이전트끼리의 말' }] } },
@@ -25,7 +25,7 @@ const codexLines = [
 const claudeLines = [
   { type: 'user', cwd: '/work/Taehwa_backup', timestamp: '2026-11-02T01:00:00Z', message: { content: '온톨로지 후보 정리해줘' } },
   { type: 'assistant', cwd: '/work/Taehwa_backup', timestamp: '2026-11-02T01:01:00Z', message: { content: [{ type: 'thinking', thinking: '...' }, { type: 'text', text: '후보 3건을 정리했습니다. A안과 B안 중 고르시면 됩니다.' }] } },
-  { type: 'user', cwd: '/work/Taehwa_backup', timestamp: '2026-11-02T01:01:30Z', message: { content: [{ type: 'tool_result', content: 'x' }] } },
+  { type: 'user', cwd: '/work/Taehwa_backup', timestamp: '2026-11-02T01:01:30Z', message: { content: [{ type: 'tool_result', content: 'x' }, { type: 'text', text: 'tool says hi' }] } },
   { type: 'user', isMeta: true, cwd: '/work/Taehwa_backup', timestamp: '2026-11-02T01:01:40Z', message: { content: 'meta' } },
   { type: 'user', cwd: '/work/Taehwa_backup', timestamp: '2026-11-02T01:02:00Z', message: { content: 'a안 안보여. 무슨 대체 문구?' } },
   { type: 'assistant', cwd: '/work/Taehwa_backup', timestamp: '2026-11-02T01:03:00Z', message: { content: [{ type: 'text', text: '다시 보여 드리겠습니다.' }] } },
@@ -48,6 +48,7 @@ test('readers keep only the person\'s typed turns and the assistant\'s messages 
   const claude = await read(f.claude, 'claude')
   assert.deepEqual(claude.map(x => [x.role, x.text]), [['user', '온톨로지 후보 정리해줘'], ['assistant', '후보 3건을 정리했습니다. A안과 B안 중 고르시면 됩니다.'], ['user', 'a안 안보여. 무슨 대체 문구?'], ['assistant', '다시 보여 드리겠습니다.'], ['user', '그래']])
   assert.equal(claude[0].line, 1); assert.equal(claude[2].line, 5)
+  assert.ok(!JSON.stringify(claude).includes('tool says hi'), 'a tool result record is never a turn')
 })
 
 test('examples: area by cwd first, then mentions; secrets masked always; the turn before and after bounded; heuristic tags are candidates only', async t => {

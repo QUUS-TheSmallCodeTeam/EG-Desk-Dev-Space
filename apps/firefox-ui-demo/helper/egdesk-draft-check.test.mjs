@@ -47,7 +47,8 @@ for (const design of ['predicates', 'choice']) {
     assert.equal(result.outcome, 'revised'); assert.equal(result.text, 'PostgreSQL 마이그레이션은 아직 계획 단계입니다.')
     assert.equal(result.calls, 2); assert.equal(revise.log.length, 1)
     assert.deepEqual(revise.log[0].kinds, ['present_tense'])
-    assert.match(revise.log[0].note, /tags as planned/); assert.match(revise.log[0].note, /Do not mention this check/)
+    assert.match(revise.log[0].note, /wrong tense\. It states as done or true now something the material records only as planned/); assert.match(revise.log[0].note, /Do not mention this check/)
+    assert.match(revise.log[0].note, /Do not ask the person to choose, send or point to materials/, 'never a request for materials (U1/U4)')
     assert.ok(!result.text.includes('planned'), 'findings never enter the answer')
   })
 
@@ -59,14 +60,20 @@ for (const design of ['predicates', 'choice']) {
     assert.deepEqual(revise.log[0].kinds, ['internal_term'])
   })
 
-  test(`${design}: (d) evidence missing: concrete claims are unverified; only the certain part is posted, or the person is asked`, async () => {
+  test(`${design}: (d) evidence missing: concrete claims are unverified; the rest is posted with nothing appended, or nothing is posted (owner decision c19: no fixed sentence)`, async () => {
     const revise = mockReviser()
     const partial = await check({ draft: 'PostgreSQL 마이그레이션은 v14에서 v16으로 3월에 끝났습니다. 도움이 되었길 바랍니다.', evidence: [], mode: 'on', client: mockJudge(), revise })
     assert.equal(partial.outcome, 'certain_part')
-    assert.equal(partial.text, `도움이 되었길 바랍니다.\n\n${DRAFT_CHECK_COPY.partial}`)
+    assert.equal(partial.text, '도움이 되었길 바랍니다.', 'the failing sentence removed silently')
+    assert.equal(partial.own, partial.text, 'all of it is the model\'s text')
     assert.equal(partial.calls, 0, 'no evidence: nothing for the judge to choose among')
-    const ask = await check({ draft: 'PostgreSQL 마이그레이션은 v14에서 v16으로 3월에 끝났습니다.', evidence: [], mode: 'on', client: mockJudge(), revise })
-    assert.equal(ask.outcome, 'ask_user'); assert.equal(ask.text, DRAFT_CHECK_COPY.askUser)
+    const none = await check({ draft: 'PostgreSQL 마이그레이션은 v14에서 v16으로 3월에 끝났습니다.', evidence: [], mode: 'on', client: mockJudge(), revise })
+    assert.deepEqual([none.outcome, none.text, none.verdict.ifUnrevised], ['withheld', '', 'would_withhold'])
+    // The rewrite says in the model's own words what it could not confirm: nothing concrete in it, so the re-check passes it.
+    const honest = mockReviser({ 'PostgreSQL 마이그레이션은 v14에서 v16으로 3월에 끝났습니다.': '가진 자료로는 마이그레이션이 끝났는지 확인하지 못했습니다.' })
+    const said = await check({ draft: 'PostgreSQL 마이그레이션은 v14에서 v16으로 3월에 끝났습니다.', evidence: [], mode: 'on', client: mockJudge(), revise: honest })
+    assert.deepEqual([said.outcome, said.text], ['revised', '가진 자료로는 마이그레이션이 끝났는지 확인하지 못했습니다.'])
+    assert.equal(Object.keys(DRAFT_CHECK_COPY).length, 0, 'no fixed fallback sentence exists')
   })
 
   test(`${design}: still failing after the one revision: only the certain part is posted, never a second revision`, async () => {
@@ -114,5 +121,8 @@ test('nothing checkable means no call and no spend', async () => {
 
 test('the revision note carries spans and kinds, not the check as answer text', () => {
   const note = revisionNote({ findings: [{ kind: 'unverified', span: 0, evidence: [] }, { kind: 'contradicted', span: 0, evidence: [] }], claims: [{ text: 'X는 3월에 끝났습니다.' }] })
-  assert.match(note, /not supported/); assert.match(note, /conflicts/); assert.match(note, /Do not mention this check/)
+  assert.match(note, /"X는 3월에 끝났습니다\.": not supported\./); assert.match(note, /"X는 3월에 끝났습니다\.": the material says otherwise/); assert.match(note, /Do not mention this check/)
+  assert.match(note, /say so in your own words in one short sentence, without names, numbers or dates you cannot confirm/)
+  assert.match(note, /Do not ask the person to choose, send or point to materials/)
+  assert.ok(!/알려 주세요|자료를/.test(note), 'no fixed Korean sentence for the model to copy')
 })

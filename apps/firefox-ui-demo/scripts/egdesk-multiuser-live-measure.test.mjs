@@ -204,14 +204,18 @@ test('the v1 send, reproduced (c20): a first request slower than the turn\'s 800
   assert.deepEqual(result.checks.filter(c => c.severity === 'hard' && c.pass !== true).map(c => c.id), [], 'R1 (v3: the answering model\'s own sentences of what A saw are quoted, no check copy), R3 and R4 hold')
 })
 
-test('the v2 send, reproduced (c21): both answers carry the draft check\'s appended caveat; the owner question quotes only the answering model\'s own sentences, so "nothing to do" stays the requester\'s branch and A gets no pointer for it', async () => {
+// L3 c19: with no appended caveat the v2 plan's F1 (the whole posted answer quoted) no longer meets the check's copy.
+const V2_F1_AFTER_C19 = true
+test('the v2 send, reproduced (c21 conditions; since L3 c19 the draft check appends nothing): what A sees is the answering model\'s own sentences, the owner question reads no check copy, so "nothing to do" stays the requester\'s branch and A gets no pointer for it', async t => {
   const fast = provider(), slowFirst = async (url, init) => { const names = JSON.parse(Buffer.from(init.body).toString('utf8')).questions.map(q => q.name)
     if (names.includes('answer_type')) await new Promise(resolve => setTimeout(resolve, 950)); return fast.fetchImpl(url, init) }
   const calls = []; const spy = async (url, init) => { calls.push(Buffer.from(init.body).toString('utf8')); return slowFirst(url, init) }
   const outcome = await runScenario({ plan: loadScenarioPlan(), send: true, key: KEY, fetchImpl: spy })
   const follow = outcome.steps.find(s => s.id === 'followup'), result = outcome.steps.find(s => s.id === 'result')
-  // what A saw: the answers with the check's caveat (as in the v2 send)
-  for (const step of [result, follow]) assert.ok(step.seen.newMessages.find(m => m.by === 'agent').text.includes(DRAFT_CHECK_COPY.partial), step.id)
+  // what A saw: in the v2 send both answers ended with the check's fixed caveat ("…자료를 알려 주세요."); since c19 no fixed sentence exists
+  for (const step of [result, follow]) { const text = step.seen.newMessages.find(m => m.by === 'agent').text; t.diagnostic(`${step.id}: ${text}`)
+    assert.ok(!text.includes('자료를 알려 주세요') && !text.includes('확인되지 않은 부분') && !text.includes('근거가 부족해'), step.id) }
+  assert.deepEqual(DRAFT_CHECK_COPY, {})
   // what the owner question read: the model's own sentences, never the caveat
   const owner = calls.filter(text => JSON.parse(text).questions.some(q => q.name === 'owner_action'))
   assert.equal(owner.length, 2); for (const text of owner) assert.ok(!text.includes('자료를 알려 주세요') && !text.includes('확인되지 않은 부분'), 'no draft-check copy in the owner question')
@@ -221,5 +225,6 @@ test('the v2 send, reproduced (c21): both answers carry the draft check\'s appen
   assert.deepEqual(result.checks.filter(c => c.severity === 'hard' && c.pass !== true).map(c => c.id), [], 'the decision result still points A to it')
   // v2 as registered would fail its F1 here (it asked for the whole posted answer, caveat included): kept as it was, not rewritten
   const v2 = await runScenario({ plan: loadScenarioPlan(PLAN_FILE_V2), send: true, key: KEY, fetchImpl: slowFirst })
-  assert.equal(v2.steps.find(s => s.id === 'followup').checks.find(c => c.id === 'F1').pass, false)
+  const f1 = v2.steps.find(s => s.id === 'followup').checks.find(c => c.id === 'F1'); t.diagnostic(`v2 F1: ${JSON.stringify(f1)}`)
+  assert.equal(f1.pass, V2_F1_AFTER_C19)
 })

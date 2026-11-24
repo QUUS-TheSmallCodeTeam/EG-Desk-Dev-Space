@@ -161,10 +161,13 @@ test('held final answer with a draft-check revision: the plan wording is posted,
 test('a failed or unavailable revision fork posts the original (certain part only is for the check, never silence)', async t => {
   const failing = world(t, { candidates: [PLAN], revision: null, flags: { held: true, flow: false } })
   await failing.send(); await failing.final('PostgreSQL 마이그레이션은 현재 운영 중입니다.')
-  assert.equal(failing.posted().filter(([r]) => r === 'assistant').length, 1)
+  // c19 (no fixed fallback): with the rewrite unavailable and nothing left after removing the failing sentence, the check posts no
+  // sentence of its own; the draft goes as written, as on any failure of the check (P2), and the record says revision_unavailable.
+  assert.deepEqual(failing.posted().filter(([r]) => r === 'assistant'), [['assistant', 'PostgreSQL 마이그레이션은 현재 운영 중입니다.']])
+  assert.equal(failing.log.entries().filter(e => e.feature === 'draft_check').at(-1).fallback, 'revision_unavailable')
   const none = world(t, { candidates: [PLAN], forkOk: false, flags: { held: true, flow: false } })
   await none.send(); await none.final('PostgreSQL 마이그레이션은 현재 운영 중입니다.')
-  assert.equal(none.posted().filter(([r]) => r === 'assistant').length, 1)
+  assert.deepEqual(none.posted().filter(([r]) => r === 'assistant'), [['assistant', 'PostgreSQL 마이그레이션은 현재 운영 중입니다.']])
 })
 
 test('a long multi-step run (40 s): one wait-explaining message, then the final answer; ordering and counts', async t => {
@@ -251,9 +254,10 @@ test('an answer after a command is checked against that command\'s facts first (
 })
 
 test('when the check replaces the answer, the next turn of that conversation is told exactly what the person saw, once; an answer posted as written leaves nothing', async t => {
-  const w = world(t, { candidates: [PLAN], revision: null, flags: { held: true, flow: false } })
+  // c19: the one rewrite says in the model's own words what it could not confirm (no concrete detail: the re-check passes it).
+  const w = world(t, { candidates: [PLAN], revision: '가진 자료로는 마이그레이션이 끝났는지 확인하지 못했습니다.', flags: { held: true, flow: false } })
   const decide = w.chat.decisionContext.client.decide
-  // The check finds nothing in the evidence for the concrete sentence: with no revision the person is told the evidence is insufficient.
+  // The check finds nothing in the evidence for the concrete sentence: the rewrite replaces it.
   w.chat.decisionContext.client.decide = async request => { const out = await decide(request); if (request.promptCacheKey === 'draft-check') for (const q of request.questions) if (/^sup_/.test(q.name)) out.answers[q.name] = { type: 'predicate', probability: 0.02 }; return out }
   await w.send(); await w.final('PostgreSQL 마이그레이션은 v16으로 3월에 끝났습니다.')
   const shown = w.posted().filter(([r]) => r === 'assistant').map(([, text]) => text)
@@ -263,7 +267,7 @@ test('when the check replaces the answer, the next turn of that conversation is 
   await again('방금 그 내용 정리해줘', 'req-2')
   const second = turns().at(-1)
   assert.equal(second.additionalContext[POSTED_ANSWER_KEY].kind, 'application')
-  assert.equal(second.additionalContext[POSTED_ANSWER_KEY].value, `Your previous answer in this conversation was not posted as you wrote it (a check before posting: ask_user). The person saw exactly this instead:\n"""\n${shown[0]}\n"""\nBuild on what the person saw, not on your earlier draft.`)
+  assert.equal(second.additionalContext[POSTED_ANSWER_KEY].value, `Your previous answer in this conversation was not posted as you wrote it (a check before posting: revised). The person saw exactly this instead:\n"""\n${shown[0]}\n"""\nBuild on what the person saw, not on your earlier draft.`)
   assert.ok(!JSON.stringify(w.events).includes('not posted as you wrote it'), 'never in the chat')
   // That turn ends without an answer (stopped): nothing new was posted, and the note was already given to it.
   await w.chat.handleNotification({ method: 'turn/completed', params: { threadId: w.timing.threadId, turn: { id: w.timing.turnId, status: 'interrupted', items: [] } } }); await w.settleAll()
@@ -285,7 +289,8 @@ function contextAs(w, shape) {
     if (!real || how === 'real') return real
     if (how === 'none') return { ...real, result: { ...real.result, selected: [], draftEvidence: [] } }
     const timeout = { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null }
-    if (how === 'late') return { ...real, result: timeout, late: Promise.resolve(real.result) }
+    // late: the result arrives 20 ms (real time) after the turn started, i.e. after lane L7's own late reading could have merged it
+    if (how === 'late') return { ...real, result: timeout, late: new Promise(resolve => setTimeout(() => resolve(real.result), 20)) }
     if (how === 'late_guarded') return { ...real, result: timeout, late: Promise.resolve({ ...real.result, privateTopicBatch: true }) }
     throw new Error(how)
   }
@@ -297,13 +302,17 @@ const draftRequests = w => { const seen = [], decide = w.chat.decisionContext.cl
 test('c19: a turn whose context missed its deadline is checked against the result that arrived later; a guarded late result skips the check', async t => {
   for (const how of ['late', 'late_guarded']) {
     const w = world(t, { candidates: [PLAN], flags: { held: true, flow: false } }); contextAs(w, how)
+    w.chat.noteLateDecisionContext = () => {} // lane L7's merge off: only the check's own wait reads the late result
     const seen = draftRequests(w)
     await w.send(); await w.final('PostgreSQL 전환은 v16으로 다음 분기에 할 예정입니다.')
     assert.deepEqual(w.posted().filter(([r]) => r === 'assistant'), [['assistant', 'PostgreSQL 전환은 v16으로 다음 분기에 할 예정입니다.']], `${how}: posted as written`)
     if (how === 'late') {
       assert.equal(seen.length, 1, 'one check, with the late materials')
       assert.match(seen[0].input[1].content, /PostgreSQL 이전 계획/)
-    } else assert.equal(seen.length, 0, 'a private-topic result never reaches the checker, late or not')
+    } else {
+      assert.equal(seen.length, 0, 'a private-topic result never reaches the checker, late or not')
+      assert.equal(w.log.entries().filter(e => e.feature === 'draft_check').length, 0, 'the check is skipped (guarded), not run without evidence')
+    }
   }
   // Before c19 the same late turn had no evidence: the concrete sentence was cut with no request (the real run's "확인되지 않은 부분은 ..." line).
   const w = world(t, { candidates: [PLAN], flags: { held: true, flow: false } }); contextAs(w, 'late')
@@ -311,8 +320,10 @@ test('c19: a turn whose context missed its deadline is checked against the resul
   w.chat.draftTurnEvidence = async (run, turn, tools) => ({ skip: null, evidence: answerEvidence(turn, tools) }) // the c18 reading
   w.chat.noteLateDecisionContext = () => {} // and without lane L7's late reading (flag keepLate)
   await w.send(); await w.final('PostgreSQL 전환은 v16으로 다음 분기에 할 예정입니다.')
-  assert.equal(seen.length, 0)
-  assert.notEqual(w.posted().filter(([r]) => r === 'assistant')[0][1], 'PostgreSQL 전환은 v16으로 다음 분기에 할 예정입니다.', 'the c18 reading cuts it')
+  assert.equal(seen.length, 0, 'the c18 reading never asks')
+  // Before c19 the person got the fixed "확인되지 않은 ..." sentence here; now no fixed sentence exists, and with no rewrite in this world
+  // the draft goes as written, recorded as revision_unavailable (never judged).
+  assert.equal(w.log.entries().filter(e => e.feature === 'draft_check').at(-1).fallback, 'revision_unavailable')
 })
 
 test('c19: a follow-up whose context chose no material is checked against the records the last check of the conversation used (real collaboration v2 F0)', async t => {
@@ -332,7 +343,7 @@ test('c19: a follow-up whose context chose no material is checked against the re
   const none = draftRequests(other)
   await other.send(); await other.final('네, v16입니다.')
   assert.equal(none.length, 0)
-  assert.notEqual(other.posted().filter(([r]) => r === 'assistant')[0][1], '네, v16입니다.', 'no evidence anywhere: the concrete sentence is still not confirmed (unchanged rule)')
+  assert.equal(other.log.entries().filter(e => e.feature === 'draft_check').at(-1).fallback, 'revision_unavailable', 'no evidence anywhere: the concrete sentence is not confirmed; no rewrite here, so it goes as written, unjudged')
 })
 
 test('c19: with no evidence at all, an answer that makes no concrete claim is posted as written, with no request and no added line', async t => {
@@ -341,4 +352,17 @@ test('c19: with no evidence at all, an answer that makes no concrete claim is po
   await w.send(); await w.final('따로 확인하실 일은 없습니다.')
   assert.equal(seen.length, 0)
   assert.deepEqual(w.posted().filter(([r]) => r === 'assistant'), [['assistant', '따로 확인하실 일은 없습니다.']])
+})
+
+test('c19 (owner decision, no fixed fallback): a rewrite whose every sentence still fails leaves nothing: nothing is posted, the record says would_withhold, the next turn is told the person saw no answer', async t => {
+  const w = world(t, { candidates: [PLAN], revision: 'PostgreSQL 마이그레이션은 v16으로 4월에 끝났습니다.', flags: { held: true, flow: false } })
+  const decide = w.chat.decisionContext.client.decide
+  w.chat.decisionContext.client.decide = async request => { const out = await decide(request); if (request.promptCacheKey === 'draft-check') for (const q of request.questions) if (/^sup_/.test(q.name)) out.answers[q.name] = { type: 'predicate', probability: 0.02 }; return out }
+  await w.send(); await w.final('PostgreSQL 마이그레이션은 v16으로 3월에 끝났습니다.')
+  assert.deepEqual(w.posted().filter(([r]) => r === 'assistant'), [], 'nothing of the check\'s own, and nothing unconfirmed')
+  assert.equal(w.log.entries().filter(e => e.feature === 'draft_check').at(-1).ifUnrevised, 'would_withhold')
+  const r = await w.chat.send({ clientThreadId: DM, conversationId: w.r.conversationId, profileId: A, replyDestination: 'direct', message: '그래서 끝났어?', requestId: 'req-2' })
+  const next = w.native.filter(([m, p]) => m === 'turn/start' && !String(p.threadId).startsWith('fork-')).at(-1)[1]
+  assert.match(next.additionalContext[POSTED_ANSWER_KEY].value, /was not posted: a check before posting could not confirm anything in it .* the person saw no answer to that message/)
+  assert.ok(r)
 })

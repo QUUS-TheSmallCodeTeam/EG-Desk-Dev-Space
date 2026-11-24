@@ -75,8 +75,10 @@ export function answerEvidence(turn, facts) {
 // c19: how many records of the last check of a conversation the next check of it may reuse.
 export const EARLIER_EVIDENCE_LIMIT = 4
 export const POSTED_ANSWER_KEY = 'egdesk_posted_answer'
-export const POSTED_OUTCOMES = Object.freeze(['revised', 'certain_part', 'ask_user'])
+// c19 (owner decision: no fixed fallback): 'withheld' = nothing could be posted; the next turn is told the person saw no answer.
+export const POSTED_OUTCOMES = Object.freeze(['revised', 'certain_part', 'withheld'])
 export function postedAnswerBlock({ outcome, posted }) {
+  if (outcome === 'withheld' || !posted) return 'Your previous answer in this conversation was not posted: a check before posting could not confirm anything in it from the material you were given, so the person saw no answer to that message. Answer from what the material supports, and say in your own words what you could not confirm.'
   return [`Your previous answer in this conversation was not posted as you wrote it (a check before posting: ${outcome}). The person saw exactly this instead:`,
     '"""', String(posted), '"""', 'Build on what the person saw, not on your earlier draft.'].join('\n')
 }
@@ -5806,7 +5808,7 @@ export class CodexChatRuntime {
         // The owner may have changed the mode or key meanwhile: then the check's result is not acted on.
         const current = this.draftCheckMode() === 'on' && ['advisory', 'on'].includes(setup?.mode?.()) && setup?.configured?.() === true &&
           (generation === null || typeof setup.settingsGeneration !== 'function' || setup.settingsGeneration() === generation)
-        if (checked && current && checked !== items[0].text) texts[0] = checked
+        if (typeof checked === 'string' && current && checked !== items[0].text) texts[0] = checked
         // What the person will see is not what the Agent wrote: its next turn in this conversation is told (POSTED_ANSWER_KEY).
         const outcome = this.draftOutcomes.get(run)
         if (texts[0] !== items[0].text && POSTED_OUTCOMES.includes(outcome)) this.notePostedInstead(run.clientThreadId, { outcome, posted: texts[0] })
@@ -5817,7 +5819,10 @@ export class CodexChatRuntime {
     if (flow?.sent.length && texts.length === 1) texts[0] = withoutRepeats(texts[0], flow.sent.map(row => row.text))
     guard.state = 'released'
     guard.items.clear()
+    // withheld (c19): an answer the check emptied is not posted at all (no fixed sentence stands in for it).
+    const withheld = items.length === 1 && !String(texts[0]).trim() && String(items[0].text).trim() !== ''
     items.forEach((item, i) => { item.text = texts[i] })
+    if (withheld) return
     for (const item of items) await this.applyItem(run, item, true, true, true)
   }
 
@@ -5852,6 +5857,8 @@ export class CodexChatRuntime {
       if (result?.outcome) this.draftOutcomes.set(run, result.outcome)
       // L1 c16: which part of what will be posted the answering model wrote (the check's own copy excluded), for readers of the answer's meaning
       if (result && typeof result.text === 'string') { try { (this.draftOwnTexts ??= new WeakMap()).set(run, { posted: result.text, own: typeof result.own === 'string' ? result.own : result.text }) } catch { /* recording only */ } }
+      // withheld: '' (nothing is posted; settleDraftAnswer holds the item back). Otherwise the text, or null for the original.
+      if (result?.outcome === 'withheld') return ''
       return result && typeof result.text === 'string' && result.text.trim() ? result.text : null
     } finally { clearTimeout(timer); controller.abort() }
   }

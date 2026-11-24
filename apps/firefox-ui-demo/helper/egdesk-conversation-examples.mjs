@@ -33,6 +33,8 @@ const tail = (text, n) => { const t = squash(text); return t.length > n ? `…${
 
 // ---- record readers: each yields { role: 'user' | 'assistant', text, at, line, cwd? } -------------------------------------------------
 const INJECTED = /^\s*(?:<[a-z_-]+[\s>]|# AGENTS\.md|<INSTRUCTIONS>|Caveat: |\[Request interrupted|This session is being continued from a previous conversation)/i
+// What the person saw of an assistant message: without the app's memory-citation blocks (Codex <oai-mem-citation>…).
+const visible = text => String(text).replace(/<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>/g, '').trim()
 const textParts = (content, types) => (Array.isArray(content) ? content : []).filter(c => types.includes(c?.type) && typeof c.text === 'string').map(c => c.text)
 
 /** fromCodex(record, line) → turn | { cwd } | null (a Codex rollout line: response_item messages; session_meta / turn_context give the cwd). */
@@ -42,7 +44,7 @@ export function fromCodex(o, line) {
   if ((o.type === 'session_meta' || o.type === 'turn_context') && typeof p.cwd === 'string') return { cwd: p.cwd }
   if (o.type !== 'response_item' || p.type !== 'message') return null
   if (p.role === 'user') { const text = textParts(p.content, ['input_text']).filter(t => !INJECTED.test(t)).join('\n').trim(); return text ? { role: 'user', text, at: o.timestamp ?? null, line } : null }
-  if (p.role === 'assistant') { const text = textParts(p.content, ['output_text']).join('\n').trim(); return text ? { role: 'assistant', text, at: o.timestamp ?? null, line } : null }
+  if (p.role === 'assistant') { const text = visible(textParts(p.content, ['output_text']).join('\n')); return text ? { role: 'assistant', text, at: o.timestamp ?? null, line } : null }
   return null
 }
 /** fromClaude(record, line) → turn | null (a Claude Code log line: user text that is not a tool result or meta; assistant text parts). */

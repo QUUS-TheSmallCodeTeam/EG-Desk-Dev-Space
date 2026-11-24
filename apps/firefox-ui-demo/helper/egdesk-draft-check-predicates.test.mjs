@@ -67,7 +67,10 @@ test('the s1 answer: with sound answers on the predicate design it is posted as 
   let n = 0
   const replay = { async decide() { return { answers: real[n++], usage: null } } }
   const blocked = await checkDraft({ draft: S1_DRAFT, evidence: S1_EVIDENCE, mode: 'on', client: replay, design: 'choice', revise: async () => '앞에서 확인한 내용 기준으로, A사 견적은 요청을 받은 뒤 첫 견적서를 보냈고 수정본은 팀장 승인 뒤 보낼 예정입니다.' })
-  assert.equal(blocked.outcome, 'ask_user', 'the present predicate flagged a correctly worded plan twice')
+  // The present predicate flagged a correctly worded plan; since c19 the person sees the model's own rewrite (never a fixed sentence). The
+  // re-check judges only concrete sentences, and the rewrite has none ("A사" alone is not a concrete detail), so it is not asked again.
+  assert.deepEqual([blocked.outcome, blocked.calls, n, blocked.findings.map(f => f.kind)], ['revised', 1, 1, ['present_tense']])
+  assert.match(blocked.text, /^앞에서 확인한 내용 기준으로/)
 })
 
 test('concreteOnly (heartbeat messages, composed from facts of the present): a sentence without a concrete detail is not sent; none left, no request', async () => {
