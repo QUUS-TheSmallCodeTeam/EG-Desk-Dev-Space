@@ -742,7 +742,7 @@ function cleanNotification(method, p, engineId = 'codex') {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null }) {
+  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer, monotonicNow })
     if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
     this.resolveProjectWorkspace = resolveProjectWorkspace
@@ -790,7 +790,7 @@ export class CodexChatRuntime {
     // given request/respond become the Codex adapter, which calls them with
     // the same methods and params as before.
     this.engines = engines instanceof EngineRegistry ? engines : new EngineRegistry()
-    if (!(engines instanceof EngineRegistry)) for (const adapter of engines || [createCodexEngineAdapter({ request, respond, getBoardPeerContract })]) this.engines.register(adapter)
+    if (!(engines instanceof EngineRegistry)) for (const adapter of engines || [createCodexEngineAdapter({ request, respond, getBoardPeerContract, getThreadDelete })]) this.engines.register(adapter)
     const codex = this.engines.get('codex')
     if (typeof codex?.request !== 'function') throw chatError('INVALID_ENGINE_ADAPTER', 'The Codex engine adapter is required', 500)
     // Codex-only escape hatch (config/read, bounded-QA proofs).
@@ -5308,15 +5308,22 @@ export class CodexChatRuntime {
    * work placement). Not touched: the chat store's history, ontology pages and records, the write store, calibration rows (see the cycle-16
    * report). Counts only. Idempotent: an unknown or already forgotten conversation answers zeros.
    */
-  forgetConversation(target) {
+  async forgetConversation(target) {
     const key = typeof target === 'string' ? target : idText(target?.clientThreadId)
     if (!key?.trim()) throw chatError('INVALID_CONVERSATION_FORGET', 'clientThreadId is required', 400)
     const native = new Set()
-    try { const thread = this.store?.getConversation?.(key); if (typeof thread?.conversationId === 'string' && thread.conversationId) native.add(thread.conversationId) } catch { /* not stored */ }
+    let storedEngine = null, storedProfile = null
+    try {
+      const thread = this.store?.getConversation?.(key)
+      if (typeof thread?.conversationId === 'string' && thread.conversationId) { native.add(thread.conversationId); storedEngine = thread.engineId ?? null; storedProfile = thread.engineProfileId ?? null }
+    } catch { /* not stored */ }
     for (const run of this.runs.values()) if (run?.clientThreadId === key && typeof run.conversationId === 'string' && run.conversationId) native.add(run.conversationId)
     const hb = this.heartbeats.get(key), subject = hb ? this.heartbeatSubjects.get(hb) : null
     if (typeof subject?.conversationId === 'string' && subject.conversationId) native.add(subject.conversationId)
-    const out = { heartbeat: false, postedNote: false, carriedMessages: 0, heldPointers: 0, memoryReceipts: 0, notes: 0, browserTasks: 0, modules: {}, interrupted: 0, history: null }
+    const out = { heartbeat: false, postedNote: false, carriedMessages: 0, heldPointers: 0, memoryReceipts: 0, notes: 0, browserTasks: 0, modules: {}, interrupted: 0, history: null, engineHistory: [] }
+    // The conversation's messages as memory refers to them (chat-message:<localMessageId>), read before the history goes (L2 c18).
+    let messageRefs = []
+    try { messageRefs = (this.store?.localMessageIds?.(key) ?? []).map(id => `chat-message:${id}`) } catch { messageRefs = [] }
     // Owner decision (L2 c17): deleting a conversation deletes it. A run still working in it is interrupted (as the stop button does, without
     // its events), and from now on nothing of its runs is stored or shown (emit). The interrupt is not awaited; a failure changes nothing here.
     this.deletedConversations.add(key)
@@ -5341,7 +5348,23 @@ export class CodexChatRuntime {
     for (const id of ids) if (this.turnMemoryNoted.delete(id)) out.notes++
     try { out.browserTasks = this.browserTaskStore?.forget?.(key) ?? 0 } catch { out.browserTasks = 0 }
     for (const [name, forget] of this.conversationForgetters) {
-      try { const n = forget({ clientThreadId: key, conversationIds: [...native] }); out.modules[name] = Number.isSafeInteger(n) ? n : n === true ? 1 : 0 } catch { out.modules[name] = 'failed' }
+      try { const n = forget({ clientThreadId: key, conversationIds: [...native], messageRefs }); out.modules[name] = Number.isSafeInteger(n) ? n : n === true ? 1 : 0 } catch { out.modules[name] = 'failed' }
+    }
+    // The engine's own history of each native thread (owner decision, L2 c18): thread/delete where the connected engine's schema has it;
+    // otherwise, or when it fails, the result says that history remains with that engine.
+    for (const cid of native) {
+      // The engine that holds this thread: the live binding, else the stored one (after a restart nothing is live).
+      const live = this.threadEngines.has(cid), engineId = live ? this.threadEngine(cid) : storedEngine ?? 'codex'
+      const engine = this.engines.get(engineId), slot = live ? this.threadOperationSlot(cid) : this.operationSlot(engineId, storedProfile)
+      let state = 'remains', reason = 'unsupported'
+      try {
+        if (typeof engine?.deleteThread === 'function' && engine.threadDeleteSupported?.(slot) === true) {
+          reason = null
+          await engine.deleteThread(cid, slot)
+          state = 'deleted'
+        }
+      } catch { state = 'remains'; reason = 'failed' }
+      out.engineHistory.push({ conversationId: cid, engineId, state, ...(reason ? { reason } : {}) })
     }
     // The stored history (messages, runs, events, requests, members, the room record) goes last, after the modules read what they need.
     try { out.history = this.store?.deleteConversation?.(key) ?? null } catch { out.history = { deleted: false, failed: true } }

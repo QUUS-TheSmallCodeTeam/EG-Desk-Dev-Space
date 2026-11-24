@@ -250,7 +250,7 @@ export function scriptedDecisions({ policy = {} } = {}) {
  * onePacket: shorthand for the bridge's developer flag EGDESK_TURN_MEMORY_ONE_PACKET=on (the turn-memory pages ride under the context
  *   selection's packet). The flag goes through turnMemoryFlagsFromEnv exactly as in codex-bridge-server.mjs; default off like the bridge.
  */
-export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = false, transport: decisionTransport = null, settleLimitMs = 60_000, budgets = 'single' } = {}) {
+export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = false, transport: decisionTransport = null, settleLimitMs = 60_000, budgets = 'single', threadDelete = false } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-all-on-')); chmodSync(dir, 0o700)
   const cwd = path.join(dir, 'workspace'); mkdirSync(cwd)
   const store = openChatStore({ dataDir: path.join(dir, 'chat'), ownerScope: 'synthetic-all-on' })
@@ -362,6 +362,8 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
     setTimer: (fn, ms) => { const timer = { fn, at: clock + Math.max(0, Math.ceil(ms)) }; timers.push(timer); return timer },
     clearTimer: timer => { const i = timers.indexOf(timer); if (i >= 0) timers.splice(i, 1) },
     getBoardPeerContract: () => 'c'.repeat(64),
+    // threadDelete: the fake app-server's generated schema lists thread/delete (as Codex 0.171 does); default: it does not (L2 c18).
+    getThreadDelete: () => threadDelete === true,
     respond: (id, result, error) => replies.push({ id, result, error }), emit: e => events.push({ ...e, step }), emitLegacy() {},
     request: async (method, params) => {
       native.push({ step, method, params })
@@ -384,6 +386,9 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
       }
       if (method === 'turn/start') { const id = `turn-${++state.turns}`; if (!state.turnsOf.has(params.threadId)) state.turnsOf.set(params.threadId, []); state.turnsOf.get(params.threadId).push(id); return { turn: { id, status: 'inProgress', items: [] } } }
       if (method === 'turn/interrupt') return {}
+      // Codex 0.171 app-server: thread/delete { threadId } -> {}, then the thread/deleted notification. Only when the world's schema has it.
+      if (method === 'thread/delete' && threadDelete === true && state.failThreadDelete === true) throw Object.assign(new Error('thread not found'), { code: -32600 })
+      if (method === 'thread/delete' && threadDelete === true) { state.deletedThreads = [...(state.deletedThreads ?? []), params.threadId]; setTimeout(() => { void notify('thread/deleted', { threadId: params.threadId }) }, 1); return {} }
       throw new Error(`Unexpected native method: ${method}`)
     },
     ...(decisionContext ? { decisionContext } : {}),
@@ -401,6 +406,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
   chat.onForgetConversation('run_requesters', ({ clientThreadId, conversationIds }) => (runRequesters.set([clientThreadId, ...conversationIds], null) === 'cleared' ? 1 : 0))
   chat.onForgetConversation('work_placement', ({ clientThreadId, conversationIds }) => workPlacement.forget([clientThreadId, ...conversationIds]))
   chat.onForgetConversation('pending_readings', ({ clientThreadId }) => turnMemoryConfig.getAdapter().withdrawPendingFrom([clientThreadId]))
+  chat.onForgetConversation('conversation_memory', ({ clientThreadId, messageRefs }) => { const n = turnMemoryConfig.getAdapter().forgetConversation({ clientThreadId, messageRefs }); return n.pages + n.readings + n.pointers })
   const board = createBoardPresentationHttpHandler({ briefingBindings, credentials: { status: 'configured', writable: true, getApiKey: () => KEY, savedAt: () => 17, hint: () => null }, getMode: () => state.mode, budget, calibrationLog,
     fetchImpl: async (endpoint, init) => { const out = await provider(endpoint, init, 'briefing'); return new Response(await out.text(), { status: out.status, headers: { 'content-type': 'application/json' } }) },
     briefing: briefingDeps({ chat, contexts, enabled: ENV.EGDESK_BRIEFING_FLOW === 'on', order: 'skeleton' }) })

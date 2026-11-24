@@ -376,6 +376,9 @@ const codexEngine = createCodexEngineAdapter({
   isReady: () => appServerReady,
   getModels: () => modelCatalog.snapshot(),
   getBoardPeerContract: () => appServerReady ? nativeCapabilities.boardPeerContract : null,
+  // thread/delete: the shared app-server only, when its binary's generated schema has it (egdesk-native-capabilities threadDelete). A profile's
+  // own app-server is not proven here; deleting a conversation there records that the engine history remains (L2 c18).
+  getThreadDelete: id => (id == null || id === CODEX_ENGINE_PROFILE_ID) && appServerReady && nativeCapabilities.threadDelete === true,
   describe: () => describeCodexEngine({
     ready: appServerReady, starting: Boolean(appServerProcess) && !appServerReady, blocked: launchConfigBlocked,
     version: nativeCapabilities.version, versionSupported: nativeCapabilities.version ? nativeCapabilities.schemaMatch : null,
@@ -609,6 +612,8 @@ chat.onForgetConversation('run_requesters', ({ clientThreadId, conversationIds }
 chat.onForgetConversation('work_placement', ({ clientThreadId, conversationIds }) => workPlacement.forget([clientThreadId, ...conversationIds]))
 // Owner decision (L2 c17): a reading heard in the deleted conversation and still pending is withdrawn (it is not memory yet).
 chat.onForgetConversation('pending_readings', ({ clientThreadId }) => turnMemoryConfig.getAdapter().withdrawPendingFrom([clientThreadId]))
+// Owner decision (L2 c18): memory in the conversation-temporary scope goes with the conversation; other scopes stay (deleted under [기억]).
+chat.onForgetConversation('conversation_memory', ({ clientThreadId, messageRefs }) => { const n = turnMemoryConfig.getAdapter().forgetConversation({ clientThreadId, messageRefs }); return n.pages + n.readings + n.pointers })
 // The window's event streams (/events): when the last one has been gone for 10 s, nobody can read a message, so idle live sessions end
 // (a working run keeps its heartbeat). A single conversation that is closed is told by the surface: POST /chat/session/close.
 const windowWatch = createWindowWatch({ onGone: () => chat.closeIdleSessions() })
