@@ -80,7 +80,7 @@ test('all features on, one session: memory, briefing, a browser task, a long com
   ledger.findings.A2 = { code: 'BROWSER_TOOLS_UNAVAILABLE', refusedMessageSaved: w.history().some(([role, text]) => role === 'user' && text === Q.portal),
     savedRow: w.store.listMessages(DM).messages.filter(m => m.text === Q.portal).map(m => ({ role: m.role, status: m.status ?? null }))[0] ?? null }
 
-  // ---- c1. a long command: the wait message may name what is being waited on, never the command itself ----
+  // ---- c1. a long command: the wait message's writer is told what is being waited on in fixed words, never the command itself ----
   w.step('c1')
   const people = [{ member: 'self', self: true, active: true, viewport: rect(0, 0, 1200, 800), focusCard: null, lastInputAgeMs: 500 }, { member: 'm-jin', self: false, active: true, viewport: rect(4000, 0, 1200, 800), focusCard: null, lastInputAgeMs: 900 }]
   assert.equal(w.presenceMirror.accept(people), true)
@@ -95,7 +95,9 @@ test('all features on, one session: memory, briefing, a browser task, a long com
   const waitPrompt = w.forkPrompts.filter(p => p.step === 'c1').at(-1).prompt
   assert.match(waitPrompt, /a command is still running \(about 9 seconds so far\)/)
   assert.ok(!waitPrompt.includes('payroll-secret'), 'the command text is not handed to the writer')
-  assert.ok(!w.decisionsIn('c1').find(d => d.feature === 'heartbeat').raw.includes('payroll-secret'), 'nor to the heartbeat question')
+  // L3 c15: the heartbeat's judgment now reads what this run's models already receive, the command line included (egress kind terminal_command); its output is not sent.
+  assert.ok(w.decisionsIn('c1').find(d => d.feature === 'heartbeat').raw.includes(COMMAND), 'the heartbeat judgment reads the command line')
+  assert.ok(!w.decisionsIn('c1').find(d => d.feature === 'heartbeat').raw.includes('running 40 tests'), 'never the command\'s output')
   ledger.findings.commandTextInDecisionRequests = w.decisionsIn('c1').filter(d => d.raw.includes('payroll-secret')).map(d => d.feature)
   assert.equal(w.history().at(-1)[0], 'assistant'); assert.equal(ui.working()?.state, 'working')
 

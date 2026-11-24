@@ -393,8 +393,9 @@ test('end to end: the same task now needs the OWNER\'s decision -> one pointer m
   assert.deepEqual(e.posted, [POINTER], 'exactly one pointer message, to the owner'); assert.deepEqual(e.acks, [{ key: 'dm-task', provider: 'work_placement' }]);
   assert.equal(e.placement.facts('dm-task').pointerPending, false, 'withdrawn once posted');
   const asked = e.hw.beatRequests.at(-1).input.join('\n'), prompt = e.hw.forkPrompts.at(-1);
-  assert.match(asked, /attention_kind: approval/); assert.match(asked, /attention_for: owner/);
-  for (const text of [asked, prompt]) assert.doesNotMatch(text, new RegExp(`${e.aliasB}|주차|방문자`), 'no member id and no task text reached the judgment or the writer');
+  // L3 c15: the message judgment reads the task's own request (what that run's models have) and is told what waits in a sentence.
+  assert.match(asked, /Something that needs a decision before work can continue is waiting/); assert.match(asked, /It is for the owner of this task\./);
+  assert.doesNotMatch(asked, new RegExp(e.aliasB), 'no member id reached the judgment'); assert.doesNotMatch(prompt, new RegExp(`${e.aliasB}|주차|방문자`), 'no member id and no task text reached the writer');
   t.diagnostic(`owner must act: route=${e.routeNow.target} ownerMessages=${e.posted.length} acks=${e.acks.length}`);
 
   // Retention: the requester is held no longer than the member is there to be named.

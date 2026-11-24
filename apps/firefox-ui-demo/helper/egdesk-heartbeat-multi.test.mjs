@@ -18,7 +18,7 @@ test('a provider\'s question rides the same request as the message question; eac
     onVerdict: ({ verdicts }) => { skipped.push(verdicts) } })
   await w.advance(2000); await d.tool('s1', 'started'); await w.advance(8000)
   assert.equal(w.requests.flow, 1, 'one Decision request for the beat')
-  assert.deepEqual(w.beatRequests[0].names, ['message__need', 'placement__surface'], 'the canvas question is not sent: no card of this run may go to a model')
+  assert.deepEqual(w.beatRequests[0].names, ['message__note', 'placement__surface'], 'the canvas question is not sent: no card of this run may go to a model')
   assert.match(w.beatRequests[0].input.join('\n'), /Question placement__surface:\nguest_viewport_free: yes\nowner_busy_nearby: yes/)
   assert.deepEqual(placed.map(list => list.map(v => [v.name, v.value, v.accepted])), [[['surface', 'guest_screen', true]]])
   assert.deepEqual(skipped.map(list => list.map(v => [v.name, v.value, v.accepted, v.skipped])), [[['card', 'none', false, true]]])
@@ -34,8 +34,8 @@ const GUEST = (active, idle = 3000) => ({ member: 'guest-1', self: false, active
 const OWNER = (active, idle = 1000) => ({ member: 'owner-1', self: true, active, viewport: null, focusCard: null, lastInputAgeMs: idle })
 const both = { requester: 'guest-1', owner: 'owner-1', participants: ['guest-1', 'owner-1'] }
 for (const [label, rows, audience, expected] of [
-  ['the requester (an invited person) is present', [GUEST(true), OWNER(false)], both, { posts: 1, waiting: 'requester', own: /waiting_person: requester\nwaiting_person_present: yes\nwaiting_person_idle_seconds: 3/ }],
-  ['the requester is away, the owner is present and takes part', [GUEST(false), OWNER(true)], both, { posts: 1, waiting: 'owner', own: /waiting_person: owner\nwaiting_person_present: yes\nwaiting_person_idle_seconds: 1/ }],
+  ['the requester (an invited person) is present', [GUEST(true), OWNER(false)], both, { posts: 1, waiting: 'requester', own: /Waiting for this: the person who asked; they are at the desk \(last input 3 seconds ago\)\./ }],
+  ['the requester is away, the owner is present and takes part', [GUEST(false), OWNER(true)], both, { posts: 1, waiting: 'owner', own: /Waiting for this: the owner of this task \(the person who asked is away\); they are at the desk \(last input 1 second ago\)\./ }],
   ['nobody is present', [GUEST(false), OWNER(false)], both, { posts: 0, waiting: 'nobody', requests: 0 }],
   ['a third person takes part in the conversation', [GUEST(true), OWNER(true)], { ...both, participants: ['guest-1', 'owner-1', 'other-2'] }, { posts: 0, waiting: 'requester', requests: 0 }],
   ['the owner is present but not in this conversation', [GUEST(false), OWNER(true)], { ...both, participants: ['guest-1'] }, { posts: 0, waiting: 'owner', requests: 0, inConversation: false }],
@@ -67,7 +67,7 @@ test('the waiting person leaves between the verdict and the post: nothing is pos
   await d.final('끝났습니다.')
   const solo = world(t), s = await solo.dm('dm-solo')
   await solo.advance(2000); await s.tool('s1', 'started'); await solo.advance(8000)
-  assert.deepEqual(s.assistant(), [MID]); assert.match(solo.flowAsked[0].own, /waiting_person: requester\nwaiting_person_present: unknown/)
+  assert.deepEqual(s.assistant(), [MID]); assert.match(solo.flowAsked[0].own, /Waiting for this: the person who asked; whether they are at the desk is not known\./)
   await s.final('끝났습니다.')
   // the pure rule
   assert.deepEqual(audienceFacts({}), { waiting: 'requester', addressee: 'requester', addresseePresent: null, addresseeIdleMs: null, addresseeInConversation: true, outsiders: 0, postable: true })
@@ -85,7 +85,7 @@ test('long reasoning is not a stall: reasoning deltas, part boundaries and token
   assert.equal(d.hb.beats, 12)
   assert.ok(d.beats.every(b => b.sinceEngineMs <= 4000), 'never silent for more than one delta interval')
   assert.ok(w.flowAsked.length >= 1 && w.flowAsked.every(a => !a.offered.includes('stalled')), 'the stall option is never offered')
-  assert.match(w.flowAsked[0].own, /reasoning_in_progress: yes/)
+  assert.match(w.flowAsked[0].own, /The assistant is thinking \(a reasoning step is open\)/)
   assert.match(w.beatRequests[0].input[1], /last_activity_from_the_work: (reasoning|usage)/)
   assert.deepEqual(d.assistant(), [])
   await d.final('오래 생각했습니다. 결론입니다.')
@@ -98,13 +98,13 @@ test('a reasoning item is open and the engine sends nothing: the stall bound is 
   await w.advance(54_000) // 55 s: 54 s of silence with the item open
   assert.ok(w.flowAsked.every(a => !a.offered.includes('stalled')))
   await w.advance(10_000) // 65 s: the first beat with at least 60 s of silence
-  assert.ok(w.flowAsked.at(-1).offered.includes('stalled')); assert.match(w.flowAsked.at(-1).own, /reasoning_in_progress: yes/)
+  assert.ok(w.flowAsked.at(-1).offered.includes('stalled')); assert.match(w.flowAsked.at(-1).own, /The assistant is thinking \(a reasoning step is open\)/)
   await d.final('끝났습니다.')
   const closed = world(t), c = await closed.dm('dm-after-thinking')
   await closed.advance(1000); await c.raw('item/started', { item: { id: 'r1', type: 'reasoning', summary: [], content: [] } })
   await closed.advance(2000); await c.raw('item/completed', { item: { id: 'r1', type: 'reasoning', summary: [], content: [] } })
   await closed.advance(22_000) // 25 s: 22 s of silence, nothing open
-  assert.ok(closed.flowAsked.at(-1).offered.includes('stalled')); assert.match(closed.flowAsked.at(-1).own, /reasoning_in_progress: no/)
+  assert.ok(closed.flowAsked.at(-1).offered.includes('stalled')); assert.match(closed.flowAsked.at(-1).own, /- No tool step is running\./)
   await c.final('끝났습니다.')
 })
 

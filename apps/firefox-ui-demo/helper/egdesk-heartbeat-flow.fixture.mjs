@@ -12,18 +12,29 @@ export const A = 'first-agent'
 export const MID = '이 부분은 시간이 좀 걸립니다. 계속 확인하고 있어요.'
 export const SLOW = '응답이 평소보다 늦어지고 있어요. 조금 더 기다리시거나 중지하고 다시 요청하셔도 됩니다.'
 
-// The mock decision model's policy for the flow question, from the facts it is given (numbers and closed labels).
+// The mock decision model for the heartbeat's message questions. The product asks yes/no questions (message__ask, message__pointer,
+// message__stalled, message__note) and code derives the kind; the mock works the other way round so tests can still say "the model
+// picked this kind": it lists the kinds the asked questions stand for (`offered`), picks one (policy.message(values, request), or a
+// default policy), and answers yes to that kind's question and no to the others.
+//   seen row: { offered, pick, facts: the Session block, own: the provider's material and the question blocks, names }
+const MESSAGE_ORDER = ['message__pointer', 'message__ask', 'message__note', 'message__stalled']
 export function judge(request, seen, policy = {}) {
   const answers = {}
+  const texts = request.input.map(row => (typeof row.content === 'string' ? row.content : ''))
+  const asked = request.questions.filter(q => MESSAGE_ORDER.includes(q.name)).map(q => q.name)
+  if (asked.length) {
+    const context = texts.find(text => text.startsWith('What the message questions are about:')) ?? ''
+    const kindOf = { message__pointer: 'pointer', message__ask: 'ask_missing', message__stalled: 'stalled', message__note: /\(a note that this takes a while\)/.test(context) ? 'milestone' : 'explain_wait' }
+    const values = ['none', ...MESSAGE_ORDER.filter(name => asked.includes(name)).map(name => kindOf[name])], text = texts[1]
+    const num = name => Number(new RegExp(`${name}: (\\d+)`).exec(text)?.[1] ?? 0)
+    const pick = typeof policy.message === 'function' ? policy.message(values, request) : values.includes('stalled') ? 'stalled' : values.includes('ask_missing') ? 'ask_missing'
+      : values.includes('explain_wait') && num('tool_steps_done') + num('tool_steps_running') > 0 ? 'explain_wait' : 'none'
+    seen.push({ offered: values, pick, facts: text, names: asked, own: [context, ...texts.filter(row => /^Question message__/.test(row))].join('\n') })
+    for (const name of asked) answers[name] = { type: 'predicate', probability: kindOf[name] === pick ? 0.97 : 0.03 }
+  }
   for (const q of request.questions) {
-    if (q.name === 'message__need') {
-      const values = q.choices.map(c => c.value), text = request.input[1].content
-      const num = name => Number(new RegExp(`${name}: (\\d+)`).exec(text)?.[1] ?? 0)
-      const pick = typeof policy.message === 'function' ? policy.message(values, request) : values.includes('stalled') ? 'stalled' : values.includes('ask_missing') ? 'ask_missing'
-        : values.includes('explain_wait') && num('tool_steps_done') + num('tool_steps_running') > 0 ? 'explain_wait' : 'none'
-      seen.push({ offered: values, pick, facts: text, own: request.input.find(row => typeof row.content === 'string' && row.content.startsWith('Question message__need:'))?.content ?? '' })
-      answers[q.name] = { type: 'choice', choice: pick, confidence: 0.95, probabilities: [{ value: pick, probability: 0.96 }, { value: values.find(v => v !== pick), probability: 0.02 }] }
-    } else if (typeof policy[q.name] === 'function') {
+    if (answers[q.name]) continue
+    if (typeof policy[q.name] === 'function') {
       const pick = policy[q.name](q, request), values = q.choices.map(c => c.value)
       answers[q.name] = { type: 'choice', choice: pick, confidence: 0.95, probabilities: [{ value: pick, probability: 0.96 }, { value: values.find(v => v !== pick), probability: 0.02 }] }
     } else if (q.type === 'choice') answers[q.name] = { type: 'choice', choice: /^claim_/.test(q.name) ? 'supported' : q.choices[0].value, confidence: 0.95, probabilities: [{ value: /^claim_/.test(q.name) ? 'supported' : q.choices[0].value, probability: 0.96 }, { value: 'insufficient', probability: 0.02 }] }
@@ -31,6 +42,7 @@ export function judge(request, seen, policy = {}) {
   }
   return { answers, model: 'mock', usage: { inputTokens: 5 }, latencyMs: 3 }
 }
+
 
 // writer(prompt) → the fork writer's text (or a promise of it); attentionPosted: the bridge's hook; flags.commands: the engine-command judge (advisory);
 // tap(request): called with every decision request before the mock answers it.
