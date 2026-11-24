@@ -35,14 +35,16 @@ test('the plan fits 8k (estimate), every request lints, no real send, the script
   assert.ok(plan.tokenCeiling <= 8000)
   const est = await estimateLive({ plan })
   assert.ok(est.estInputTokens <= 8000 && est.stoppedBecause === null, `${est.estInputTokens} ${est.stoppedBecause}`)
-  assert.deepEqual([est.scorecard.pass, est.scorecard.hardFailures, est.scorecard.absolute, est.scorecard.softMisses], [true, [], [], []])
+  // c25: the c24 plan's two code-determined predictions of FALSE EXCLUSIONS (a 확인 GET button, the 주민등록표 links) no longer hold: that is the fix (c25). Every other
+  // prediction, and every safety floor, is unchanged.
+  assert.deepEqual([est.scorecard.pass, est.scorecard.hardFailures, est.scorecard.absolute, est.scorecard.softMisses], [true, [], [], ['ho-ub-confirm-withheld', 'ho-ig-resident-withheld']])
   const seen = []
   await runLive({ key: KEY, send: true, fetchImpl: standIn(seen), plan })
   assert.ok(seen.length >= 6)
   for (const body of seen) assert.equal(lintGroupedRequest({ input: body.input, questions: body.questions }).ok, true, body.questions.map(q => q.name).join())
 })
 
-test('all five pre-registered phases, stand-in: the code-determined predictions hold (a false exclusion of a 확인 button and of 주민등록표 links is what the rules as written do)', async () => {
+test('all five pre-registered phases, stand-in: the code-determined predictions hold except the two false exclusions c25 fixed', async () => {
   const base = loadLivePlan(FAMILY_PLAN_FILES.holdout)
   const ids = ['ho-ub-entry-by-code', 'ho-ub-confirm-withheld', 'ho-ub-no-result', 'ho-uv-options', 'ho-si-signin-withheld', 'ho-ig-resident-withheld', 'ho-ig-form-options', 'ho-si-handoff', 'ho-uv-this-month']
   const checks = [...base.checks.filter(c => c.severity === 'absolute' && c.id !== 'budget'), ...ids.map(id => ({ id, phase: 'all', severity: 'soft', note: 'x' }))]
@@ -50,11 +52,11 @@ test('all five pre-registered phases, stand-in: the code-determined predictions 
   const seen = []
   const out = await runLive({ key: KEY, send: true, fetchImpl: standIn(seen), plan })
   const bad = out.scorecard.checks.filter(c => !c.ok).map(c => c.id)
-  assert.deepEqual(bad, [], `${out.stoppedBecause}`)
+  assert.deepEqual(bad, ['ho-ub-confirm-withheld', 'ho-ig-resident-withheld'], `${out.stoppedBecause}`) // c25: the two false exclusions are fixed
   // the options the product offered, from its own code
   const opts = phase => out.requests.filter(r => r.phase === phase && r.optionValues.length).flatMap(r => r.optionValues)
-  assert.deepEqual(opts('ub-base').filter(v => /^\[/.test(v)), ['[L1] 이용 안내'])
-  assert.deepEqual(opts('ig-list').filter(v => /^\[/.test(v)), ['[L1] 가족관계증명서 발급', '[L2] 발급 수수료 안내'])
+  assert.deepEqual(opts('ub-base').filter(v => /^\[/.test(v)), ['[B1] 확인', '[L1] 이용 안내'], 'c25: the proven read-only GET button is offered')
+  assert.deepEqual(opts('ig-list').filter(v => /^\[/.test(v)), ['[L1] 주민등록표 등본 교부', '[L2] 주민등록표 초본 교부', '[L3] 가족관계증명서 발급', '[L4] 발급 수수료 안내'], 'c25: the certificates the request names are offered')
   assert.deepEqual(opts('ig-form').filter(v => /^\[/.test(v)), ['[L1] 발급 수수료 안내', '[L2] 목록'])
   assert.deepEqual(opts('ub-view').filter(v => /^\[/.test(v)), ['[L1] 고지서 PDF 내려받기', '[L2] 지난해 같은 달 고지서 PDF (2025-11)', '[L3] 이전 화면'])
   assert.deepEqual(opts('ub-signin').filter(v => /^\[/.test(v)), ['[L1] 이용 안내'])
