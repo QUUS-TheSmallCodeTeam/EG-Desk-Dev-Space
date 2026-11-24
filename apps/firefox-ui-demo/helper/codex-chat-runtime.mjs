@@ -845,6 +845,7 @@ export class CodexChatRuntime {
     this.calibrationRuns = new WeakMap() // run -> content-free calibration entry id; process-local
     // Live-session heartbeats (egdesk-heartbeat.mjs): one per live conversation, on its own monotonic counter, independent of engine events.
     this.heldAttention = [] // pointers whose person had no conversation to hear them in (holdAttention); memory only, bounded
+    this.conversationForgetters = new Map() // name -> ({ clientThreadId, conversationIds }) => count: other modules' per-conversation state (onForgetConversation)
     this.heartbeats = createHeartbeats({ monotonicNow: () => this.monotonicNow(), setTimer: (fn, ms) => this.setTimer(fn, ms), clearTimer: handle => this.clearTimer(handle) })
     this.heartbeatThreads = new Map() // native thread id -> heartbeat (to mark engine events on its clock)
     this.heartbeatReasoning = new WeakMap() // heartbeat -> ids of reasoning items the engine has started and not finished
@@ -5231,6 +5232,42 @@ export class CodexChatRuntime {
     else this.stopHeartbeat(hb, 'closed')
     return typeof target === 'string' ? !working : { accepted: true, closed: !working, ...(working ? { afterRun: true } : {}) }
   }
+
+  /**
+   * The person deleted this conversation in the surface (POST /chat/conversation/forget { clientThreadId }): the ephemeral state EG-Desk holds
+   * for it ends now. Its live session heartbeat stops even while a run works (nothing more is posted into a deleted conversation; the engine's
+   * run itself is not interrupted), and its posted-answer note, held pointers, memory and context receipts (what its model holds), pending
+   * confirmation notes and browser tasks go, as does what other modules registered (onForgetConversation: briefing bindings, run requesters,
+   * work placement). Not touched: the chat store's history, ontology pages and records, the write store, calibration rows (see the cycle-16
+   * report). Counts only. Idempotent: an unknown or already forgotten conversation answers zeros.
+   */
+  forgetConversation(target) {
+    const key = typeof target === 'string' ? target : idText(target?.clientThreadId)
+    if (!key?.trim()) throw chatError('INVALID_CONVERSATION_FORGET', 'clientThreadId is required', 400)
+    const native = new Set()
+    try { const thread = this.store?.getConversation?.(key); if (typeof thread?.conversationId === 'string' && thread.conversationId) native.add(thread.conversationId) } catch { /* not stored */ }
+    for (const run of this.runs.values()) if (run?.clientThreadId === key && typeof run.conversationId === 'string' && run.conversationId) native.add(run.conversationId)
+    const hb = this.heartbeats.get(key), subject = hb ? this.heartbeatSubjects.get(hb) : null
+    if (typeof subject?.conversationId === 'string' && subject.conversationId) native.add(subject.conversationId)
+    const out = { heartbeat: false, postedNote: false, heldPointers: 0, memoryReceipts: 0, notes: 0, browserTasks: 0, modules: {} }
+    if (hb && hb.state !== 'stopped') { this.stopHeartbeat(hb, 'deleted'); out.heartbeat = true }
+    for (const [threadId, live] of [...this.heartbeatThreads]) if (native.has(threadId) || (hb && live === hb)) this.heartbeatThreads.delete(threadId)
+    out.postedNote = this.postedInstead.delete(key)
+    const held = this.heldAttention?.length ?? 0
+    this.heldAttention = (this.heldAttention ?? []).filter(row => row.sourceKey !== key && !native.has(row.sourceKey))
+    out.heldPointers = held - this.heldAttention.length
+    const ids = [key, ...native]
+    for (const map of [this.turnMemoryDelivered, this.contextDelivered, this.turnMemoryShadow, this.turnMemoryLatest]) for (const id of ids) if (map.delete(id)) out.memoryReceipts++
+    for (const id of ids) if (this.turnMemoryNoted.delete(id)) out.notes++
+    try { out.browserTasks = this.browserTaskStore?.forget?.(key) ?? 0 } catch { out.browserTasks = 0 }
+    for (const [name, forget] of this.conversationForgetters) {
+      try { const n = forget({ clientThreadId: key, conversationIds: [...native] }); out.modules[name] = Number.isSafeInteger(n) ? n : n === true ? 1 : 0 } catch { out.modules[name] = 'failed' }
+    }
+    return { accepted: true, ...out }
+  }
+
+  /** Another module's per-conversation state, dropped when a conversation is deleted (forgetConversation). forget returns how many entries went. */
+  onForgetConversation(name, forget) { if (typeof name === 'string' && name && typeof forget === 'function') this.conversationForgetters.set(name, forget) }
 
   /** The window has gone (no event stream for a while): every idle session ends; a working run keeps its heartbeat until it ends. */
   closeIdleSessions(reason = 'closed') {

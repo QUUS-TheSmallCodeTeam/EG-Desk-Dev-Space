@@ -18916,6 +18916,9 @@
         }
         const nextThreads = state.codex.threads.filter((entry) => entry.id !== threadId);
         state.codex.threads = nextThreads;
+        // The bridge drops what it holds for this conversation while it lives (session, notes, receipts, held pointers, bindings); the
+        // conversation's saved history and records are not touched here. A failed request is dropped.
+        if (typeof fetchJson === 'function') void fetchJson('/chat/conversation/forget', { method: 'POST', body: JSON.stringify({ clientThreadId: ChatState.clientThreadBinding(thread) }) }).catch(() => {});
         if (state.codex.activeThreadId === threadId) {
           state.codex.activeThreadId = nextThreads[0]?.id || null;
         }

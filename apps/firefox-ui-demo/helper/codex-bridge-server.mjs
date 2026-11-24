@@ -574,11 +574,12 @@ const handleEngineProfilesHttp = createEngineProfilesHttpHandler({
   },
 })
 const handleHostControlHttp = createHostControlHttpHandler(hostControl, { port: BRIDGE_PORT })
+// L4 c23: the briefing version chain survives a bridge restart (ids, kinds, material-key hashes, versions and content hashes only; 0600 in the bridge's data dir).
+const briefingBindings = openBriefingBindings({ dataDir: path.join(dataDir, 'briefing') })
 // Board arrangement gets a separate guarded client over the same isolated Decisions key and budget.
 const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credentials: decisionCredentials,
   getMode: () => bridgeSettings.decisionContext.mode, budget: decisionBudget, port: BRIDGE_PORT, calibrationLog: decisionCalibrationLog, fetchImpl: decisionTransport.fetch,
-  // L4 c23: the briefing version chain survives a bridge restart (ids, kinds, material-key hashes, versions and content hashes only; 0600 in the bridge's data dir).
-  briefingBindings: openBriefingBindings({ dataDir: path.join(dataDir, 'briefing') }),
+  briefingBindings,
   // Briefing flow, `on` path. Publishing goes through the real context runtime; the design / redesign / new-component text comes from the answer's own model on a
   // private fork (egdesk-briefing-engine.mjs over codex-internal-turn.mjs). Off unless EGDESK_BRIEFING_FLOW=on here AND the chrome's egdesk.briefingFlow is "on" AND
   // the Decisions mode is on; otherwise the route answers 'no-engine' / 'mode' and does nothing. The advisory observe needs none of this.
@@ -596,6 +597,11 @@ const workPlacement = createWorkPlacement({ client: decisionClient, mode: () => 
   live: () => process.env.EGDESK_WORK_PLACEMENT === 'on', calibrationLog: decisionCalibrationLog,
   // the run's own request and answer and its egress gate, for the content questions (L1 cycle 12); the card words come from the chrome (maySend cards only)
   contextFor: (key, options) => chat.placementContextFor(key, options) })
+// A conversation the person deleted in the surface (POST /chat/conversation/forget): besides the runtime's own per-conversation state, the
+// briefing bindings of its native conversation, the requester the window told for it, and its work-placement queue and pointer go.
+chat.onForgetConversation('briefing_bindings', ({ conversationIds }) => conversationIds.reduce((n, id) => n + briefingBindings.forgetConversation(id), 0))
+chat.onForgetConversation('run_requesters', ({ clientThreadId, conversationIds }) => (runRequesters.set([clientThreadId, ...conversationIds], null) === 'cleared' ? 1 : 0))
+chat.onForgetConversation('work_placement', ({ clientThreadId, conversationIds }) => workPlacement.forget([clientThreadId, ...conversationIds]))
 // The window's event streams (/events): when the last one has been gone for 10 s, nobody can read a message, so idle live sessions end
 // (a working run keeps its heartbeat). A single conversation that is closed is told by the surface: POST /chat/session/close.
 const windowWatch = createWindowWatch({ onGone: () => chat.closeIdleSessions() })
