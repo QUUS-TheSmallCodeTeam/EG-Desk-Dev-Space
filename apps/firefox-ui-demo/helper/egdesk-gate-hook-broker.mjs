@@ -100,6 +100,14 @@ export function createGateHookBroker({ mode = () => 'off', assess = null, home, 
       if (next.length) carried.set(turn.conversationId, next); else carried.delete(turn.conversationId)
     },
     awaitingReply: conversationId => awaiting.has(conversationId),
+    // L1 c21: a room continued on another account (a new native thread): its unanswered question, the commands still waiting for the
+    // person and an approval not yet bound to a turn move to the new thread. Nothing else changes; an existing entry there is kept.
+    rekey(from, to) {
+      if (typeof from !== 'string' || typeof to !== 'string' || !from || !to || from === to) return false
+      let moved = false
+      for (const map of [awaiting, carried, nextTurn]) if (map.has(from) && !map.has(to)) { map.set(to, map.get(from)); map.delete(from); moved = true }
+      return moved
+    },
     wasChecked: (turnId, command, cwd) => turns.get(turnId)?.checked.has(commandKey(command, cwd)) === true,
     /** The hook's question. Never throws; an unreadable request is 'none' (the hook applies its own floor when it gets no answer). */
     // c18: a caller that judges its own target by code (EG-Desk's file edits) passes `floor` (closed reasons; [] = nothing to ask) and

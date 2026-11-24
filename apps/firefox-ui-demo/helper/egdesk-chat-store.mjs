@@ -488,12 +488,13 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
     run: db.prepare('SELECT * FROM runs WHERE local_conversation_id=? AND local_run_id=?'),
     request: db.prepare('SELECT * FROM requests WHERE local_conversation_id=? AND request_id=?'),
     // The binding is among a conversation's first events; seq order stops there.
-    binding: db.prepare("SELECT details_json FROM events WHERE local_conversation_id=? AND event='native.thread.bound' ORDER BY seq LIMIT 1"),
+    // the binding of the room's CURRENT native thread (a room continued on another account has an earlier one: L1 c21)
+    binding: db.prepare("SELECT details_json FROM events WHERE local_conversation_id=? AND event='native.thread.bound' AND json_extract(details_json, '$.conversationId')=? ORDER BY seq LIMIT 1"),
     native: db.prepare('SELECT * FROM threads WHERE conversation_id=? LIMIT 2'),
   }
   const publicThread = row => {
     if (!row) return null
-    const binding = row.conversation_id ? q.binding.get(row.local_conversation_id) : null
+    const binding = row.conversation_id ? q.binding.get(row.local_conversation_id, row.conversation_id) : null
     return thread(row, bindingSession(row, binding ? parse(binding.details_json) : null))
   }
   let closed = false
@@ -923,6 +924,30 @@ export function openChatStore({ dataDir, ownerScope } = {}) {
       ensureOpen(); const row = requireThread(clientThreadId)
       const match = db.prepare('SELECT public_json FROM runs WHERE local_conversation_id=? AND run_id=? LIMIT 1').get(row.local_conversation_id, identifier(runId, 'runId'))
       return match ? parse(match.public_json) : null
+    },
+    // L1 c21 (the runtime calls this only with its roomAccount flag on): the room continues on another account of the same engine. Its
+    // native thread so far is recorded as an earlier segment (with the account its EG-Desk memory was written under), and the room is
+    // re-pinned to the new account with no native thread yet: the next send starts one there. The table is created on first use.
+    switchRoomAccount({ clientThreadId, engineProfileId, memoryOwnerKey = null }) {
+      ensureOpen()
+      return tx(() => {
+        const row = requireThread(clientThreadId), slot = identifier(engineProfileId, 'engineProfileId')
+        db.exec('CREATE TABLE IF NOT EXISTS room_account_segments (local_conversation_id TEXT NOT NULL, seq INTEGER NOT NULL, conversation_id TEXT, engine_id TEXT, engine_profile_id TEXT, memory_owner_key TEXT, switched_at INTEGER NOT NULL, PRIMARY KEY (local_conversation_id, seq))')
+        const n = db.prepare('SELECT COUNT(*) AS n FROM room_account_segments WHERE local_conversation_id=?').get(row.local_conversation_id).n
+        const first = n ? db.prepare('SELECT memory_owner_key FROM room_account_segments WHERE local_conversation_id=? ORDER BY seq LIMIT 1').get(row.local_conversation_id).memory_owner_key : null
+        const owner = first ?? (typeof memoryOwnerKey === 'string' && memoryOwnerKey ? memoryOwnerKey.slice(0, 512) : null)
+        db.prepare('INSERT INTO room_account_segments VALUES (?, ?, ?, ?, ?, ?, ?)').run(row.local_conversation_id, n + 1, row.conversation_id ?? null, row.engine_id ?? null, row.engine_profile_id ?? null, owner, Date.now())
+        db.prepare('UPDATE threads SET conversation_id=NULL, engine_profile_id=? WHERE local_conversation_id=?').run(slot, row.local_conversation_id)
+        return { clientThreadId: row.client_thread_id, engineProfileId: slot, previous: { conversationId: row.conversation_id ?? null, engineProfileId: row.engine_profile_id ?? null } }
+      })
+    },
+    /** The account a room's EG-Desk memory was written under, when the room changed accounts; else null (the current one applies). */
+    roomMemoryOwnerKey(clientThreadId) {
+      ensureOpen()
+      const row = requireThread(clientThreadId)
+      const has = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='room_account_segments'").get()
+      if (!has) return null
+      return db.prepare('SELECT memory_owner_key FROM room_account_segments WHERE local_conversation_id=? ORDER BY seq LIMIT 1').get(row.local_conversation_id)?.memory_owner_key ?? null
     },
     bindNative(input) { ensureOpen(); shape(input, ['clientThreadId', 'conversationId', 'engineId', 'engineProfileId', 'localRunId', 'runId', 'localMessageId', 'messageId']); return tx(() => bind(requireThread(input.clientThreadId), input)) },
     /**

@@ -142,3 +142,29 @@ export function createRunRequesterHttpHandler({ requesters, enabled = () => fals
     return reply(status === 'invalid' ? 400 : status === 'unknown-member' ? 409 : 200, { status })
   }
 }
+
+// L1 c21, owner decision (5): a second Desk window reads the requester of a run from here (the registry is keyed by the conversation, not the
+// window). POST /presence/requester/read { clientThreadId, conversationId } -> { requester: alias | null }: only an alias the presence feed lists
+// right now (the same rule as the heartbeat's audience). Off (404) with the presence flag; loopback JSON only. Nothing is written.
+export const RUN_REQUESTER_READ_PATH = '/presence/requester/read'
+export function createRunRequesterReadHttpHandler({ requesters, presence, enabled = () => false, port = 39218 } = {}) {
+  if (!requesters || typeof presence?.snapshot !== 'function') throw new TypeError('a requester registry and a presence snapshot are required')
+  return async (req, res, url) => {
+    if (url.pathname !== RUN_REQUESTER_READ_PATH) return false
+    const reply = (code, body) => { if (!res.destroyed && !res.writableEnded) sendJson(res, code, body); return true }
+    let on = false
+    try { on = enabled() === true } catch { on = false }
+    if (!on) return reply(404, { status: 'off' })
+    if (!guardBridgeRequest(req, port)) return reply(403, { status: 'refused', reason: 'loopback-required' })
+    if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); return reply(405, { status: 'refused', reason: 'post-required' }) }
+    if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || '')) return reply(415, { status: 'refused', reason: 'json-required' })
+    let body
+    try { body = await readJsonBody(req, { maxBytes: RUN_REQUESTER.bodyBytes }) } catch { return reply(400, { status: 'invalid' }) }
+    if (!exact(body, ['clientThreadId', 'conversationId'])) return reply(400, { status: 'invalid' })
+    const audience = requesters.audience({ run: { clientThreadId: body.clientThreadId, conversationId: body.conversationId } })
+    let rows = null
+    try { rows = presence.snapshot() } catch { rows = null }
+    const listed = !!audience?.requester && Array.isArray(rows) && rows.some(row => row && row.self !== true && row.member === audience.requester)
+    return reply(200, { requester: listed ? audience.requester : null })
+  }
+}

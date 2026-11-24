@@ -742,7 +742,7 @@ function cleanNotification(method, p, engineId = 'codex') {
 }
 
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null }) {
+  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer, monotonicNow })
     if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
     this.resolveProjectWorkspace = resolveProjectWorkspace
@@ -862,6 +862,10 @@ export class CodexChatRuntime {
     this.commandGateRuns = new Set() // in-flight command gate assessments (never awaited by an approval card)
     // c18: { mode() → 'off'|'on', neutralFolder() → absolute EG-Desk-owned empty folder }; absent = off
     this.ownTools = ownTools
+    // L1 c21 (owner decision, provisional; flag roomAccount.mode() === 'on', default off): a room keeps its own AI account; an explicit switch
+    // continues the same room on another account (see switchRoomAccount).
+    this.roomAccount = roomAccount
+    this.roomSwitches = new Map() // clientThreadId -> { from: the previous native conversation id }: carried to the room's next native thread
     this.ownCommandBeats = new WeakSet() // heartbeats that already carry the own_commands provider
     this.shadowSeen = new Set() // answerId:itemId already judged by the own-tools shadow (bounded)
     this.shadowRuns = new Set()
@@ -1091,16 +1095,58 @@ export class CodexChatRuntime {
     const agentEngine = requested == null && !boundCid && !bound
       ? agentModel?.engine ?? (legacyAgentEngine ? this.agentEngine(body) : null) : null
     const engineId = this.engines.resolve({ requested: requested ?? agentEngine, bound })
-    if (savedSlot && (agentModel.engine !== engineId || (pinned && pinned !== savedSlot) ||
-        (boundCid && !pinned && this.engineRecord(engineId).engineProfileId !== savedSlot))) {
+    // L1 c21 (flag roomAccount on): an existing room keeps its own account; the Agent's saved account is only the default for a NEW room
+    const roomKeeps = this.roomAccountOn() && Boolean(boundCid || thread?.engineProfileId)
+    if (savedSlot && (agentModel.engine !== engineId || (!roomKeeps && ((pinned && pinned !== savedSlot) ||
+        (boundCid && !pinned && this.engineRecord(engineId).engineProfileId !== savedSlot))))) {
       throw chatError('ENGINE_PROFILE_CONFLICT', 'This Agent selected a different AI engine account; change the Agent selection or start a new conversation', 409)
     }
     // A pre-slot native checkpoint is still checked against the active/legacy
     // identity. Never retrofit it with the Agent's account, even when equal.
     const engineProfileId = pinned || (!boundCid ? savedSlot : null) || null
-    if (engineProfileId) this.assertEngineProfile(engineId, engineProfileId, { explicit: Boolean(savedSlot) })
+    if (engineProfileId) this.assertEngineProfile(engineId, engineProfileId, { explicit: Boolean(savedSlot) || (roomKeeps && !boundCid && Boolean(thread?.engineProfileId)) })
     if (binding && verifyAccount) this.assertNativeAccount(thread.clientThreadId, boundCid, engineId, binding)
     return { engineId, engineProfileId }
+  }
+
+  roomAccountOn() { try { return this.roomAccount?.mode?.() === 'on' } catch { return false } }
+
+  // L1 c21, owner decision (2), flag roomAccount on: the person explicitly switches THIS room to another account of the same engine. The same
+  // room continues: its history, draft, requester, an unanswered approval question and its EG-Desk memory stay with it; only the engine-side
+  // thread stays with the old account (the next message starts a new native thread on the new account). Refused while the room is working
+  // (a running Run never moves: Contract §14.1), for Board, one-time or forked rooms, and for an account profile that is missing.
+  switchRoomAccount({ clientThreadId, engineProfileId } = {}) {
+    if (!this.roomAccountOn()) throw chatError('ROOM_ACCOUNT_OFF', 'Switching a room\'s account is not enabled', 404)
+    if (!this.store) throw chatError('CHAT_STORE_UNAVAILABLE', 'No chat store', 503)
+    const room = idText(clientThreadId), slot = idText(engineProfileId)
+    const thread = room ? this.store.getConversation(room) : null
+    if (!thread || !slot) throw chatError('CONVERSATION_NOT_FOUND', 'No such room', 404)
+    if (thread.stateless || thread.forkedFrom || this.isSavedBoardTarget(room)) throw chatError('ROOM_ACCOUNT_UNSUPPORTED', 'This room cannot change its account', 409)
+    const engineId = thread.engineId || 'codex'
+    this.assertEngineProfile(engineId, slot, { explicit: true })
+    const from = thread.conversationId || null
+    if ((thread.engineProfileId || null) === slot) return { status: 'unchanged', clientThreadId: room, engineProfileId: slot }
+    if (from && this.conversationBusy(from)) throw chatError('RUN_IN_PROGRESS', 'The room is working; switch after the run ends', 409)
+    // EG-Desk memory belongs to the room: its scope keeps the account the room's memory was written under (its first account)
+    let memoryOwnerKey = null
+    try { memoryOwnerKey = this.store.roomMemoryOwnerKey?.(room) ?? (from ? this.engineOwnerKey(engineId, thread.engineProfileId || null) : null) } catch { memoryOwnerKey = null }
+    const switched = this.store.switchRoomAccount({ clientThreadId: room, engineProfileId: slot, memoryOwnerKey })
+    if (from) { this.roomSwitches.set(room, { from }); const left = this.threads.get(from); if (left) left.roomSwitchedAway = true }
+    return { status: 'switched', clientThreadId: room, engineProfileId: slot, previous: switched.previous }
+  }
+  // The room's first native thread on its new account: what belongs to the room and was keyed by the old native thread comes along.
+  continueSwitchedRoom(clientThreadId, conversationId) {
+    const room = idText(clientThreadId), carried = room ? this.roomSwitches.get(room) : null
+    if (!carried || !conversationId || carried.from === conversationId) return false
+    this.roomSwitches.delete(room)
+    try { this.gateHookBroker()?.rekey?.(carried.from, conversationId) } catch { /* an unread question asks again */ }
+    if (this.ownFolders.has(carried.from) && !this.ownFolders.has(conversationId)) this.ownFolders.set(conversationId, this.ownFolders.get(carried.from))
+    return true
+  }
+  // The memory scope's owner: the room's first account after a switch (flag on), else the current account (as before).
+  memoryOwnerKeyFor(clientThreadId, ownerKey) {
+    if (!this.roomAccountOn() || !this.store?.roomMemoryOwnerKey) return ownerKey
+    try { return this.store.roomMemoryOwnerKey(clientThreadId) ?? ownerKey } catch { return ownerKey }
   }
 
   // The engine the selected Agent's active (or named) revision saved, or null.
@@ -1897,7 +1943,8 @@ export class CodexChatRuntime {
     const lock = conversationId || `client:${clientThreadId || 'legacy'}`
     if (this.locks.has(lock) || (conversationId && this.locks.has(`client:${clientThreadId}`))) throw chatError('RUN_IN_PROGRESS', 'A request is already starting for this conversation', 409)
     if (this.locks.size >= MAX_RUNS) throw chatError('RUNTIME_BUSY', 'Too many pending requests', 429)
-    const registered = !conversationId && clientThreadId ? [...this.threads.values()].find(t => t.clientThreadId === clientThreadId) : null
+    // (a native thread the room left for another account, L1 c21, is no longer the room's: its next message starts a new one)
+    const registered = !conversationId && clientThreadId ? [...this.threads.values()].find(t => t.clientThreadId === clientThreadId && t.roomSwitchedAway !== true) : null
     if (registered) {
       if (stateless) throw chatError('STATELESS_REQUIRES_NEW', 'Only a new conversation can be started without saved history', 400)
       throw Object.assign(chatError('CONVERSATION_REQUIRED', 'Continue this conversation using its returned conversationId', 409), {
@@ -2610,6 +2657,7 @@ export class CodexChatRuntime {
       const result = await engine.startThread(overrides, slot)
       if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       cid = result?.thread?.id
+      if (cid) this.continueSwitchedRoom(context.clientThreadId, cid) // L1 c21: a switched room's first thread on its new account
       if (!idText(cid)) throw chatError('INVALID_THREAD_RESPONSE', 'Codex did not return a thread ID', 502)
       if (workspace && (result.cwd || result.thread?.cwd) !== (ownTools ? neutralFolder : workspace.absolutePath)) throw Object.assign(chatError('PROJECT_WORKSPACE_UNVERIFIED', 'The AI engine did not confirm the associated working folder; no message was sent', 409), { definite: true })
       // Never call a thread one-time when the engine says it saved it.
@@ -4848,7 +4896,7 @@ export class CodexChatRuntime {
     }
     if (this.readNativeBinding(clientThreadId, conversationId).executionPolicy) deny()
     assertCurrent()
-    const scope = { ownerKey: authority.ownerKey, clientThreadId, agentId: expectedProfileId }
+    const scope = { ownerKey: this.memoryOwnerKeyFor(clientThreadId, authority.ownerKey), clientThreadId, agentId: expectedProfileId }
     return { scope, assertCurrent, topicRecipient: () => {
       assertCurrent()
       if (route.engineId !== 'codex' || this.decisionContext?.configured() !== true) return null
