@@ -11,6 +11,8 @@ import * as CanvasLayout from '../overlay/resources/EGDeskCanvasLayout.sys.mjs';
 import { scrubJointSession } from '../overlay/resources/EGDeskJointBoardClient.sys.mjs';
 import { enumerateBriefingFacts } from '../helper/egdesk-briefing-flow.mjs';
 import { rig } from './egdesk-briefing-rig.support.mjs';
+import { world } from './egdesk-board-world.support.mjs';
+import * as WorkbenchArrange from '../overlay/resources/EGDeskWorkbenchArrange.sys.mjs';
 
 const src = readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8');
 const decl = name => { const s = src.indexOf(`  function ${name}(`); assert.ok(s >= 0, name); return src.slice(s, src.indexOf('\n  }', s) + 4); };
@@ -165,4 +167,19 @@ test('fold persistence: a folded result card and memo survive Desk save + reload
   new Function('MinimapLayout', 'snapshot', 'document', 'restoredIds', 'restoredViews', src.slice(start, end))(CanvasLayout, JSON.parse(JSON.stringify(snapshot)), doc, new Map(), fresh);
   const folded = fresh.filter(n => n.classList.contains('egd-card-collapsed')).map(n => n.id);
   assert.deepEqual(folded, ['result-1', 'memo-1'], 'a retrieved (folded) result card is still folded after save + reload; the card that was never folded is open');
+});
+
+test('retrieval on the real kind of card: a result card with provenance is a fold target of the Desk scope (preview, apply, Cmd+Z, redo); one without provenance is not', async () => {
+  const r = (x, y, width, height) => ({ x, y, width, height });
+  const old = ChatState.supersedeResultRecord(outputRecord(1), out(2), { now: 9 }), unknown = ChatState.restoreResultCardRecord(JSON.parse(JSON.stringify({ ...outputRecord(1), provenance: undefined })));
+  const spec = { cards: [{ id: 'vA', item: 'item-A', rect: r(100, 60, 260, 160), z: 1, kind: 'note' }, { id: 'vB', item: 'item-B', rect: r(620, 60, 260, 160), z: 2, kind: 'note' }],
+    others: [{ id: 'res-old', rect: r(100, 300, 260, 160), z: 3, result: old }, { id: 'res-unknown', rect: r(620, 300, 260, 160), z: 4, result: unknown }], links: [] };
+  const W = world({ WorkbenchArrange, http: async () => ({ status: 503, body: {} }), grant: () => true, spec });
+  const ui = W.real.arrange(); const folds = ui.designScene('@desk').folds; assert.deepEqual(folds, [{ id: 'res-old', collapsed: false }], 'only a result card with recorded provenance is a fold target');
+  await ui.open('@desk', null); const s0 = W.seen();
+  assert.equal(ui.offerRetrieval({ option: 'retrieval', collapse: [{ id: 'res-unknown', value: true }] }), false); assert.equal(ui.offerRetrieval({ option: 'retrieval', collapse: [{ id: 'vA', value: true }] }), false, 'an arrangement card is not a retrieval target');
+  assert.equal(ui.offerRetrieval({ option: 'retrieval', collapse: [{ id: 'res-old', value: true }] }), true); assert.deepEqual(W.collapsedIds(), []);
+  W.control('apply').fire('click'); for (let i = 0; i < 400 && W.control('apply'); i++) await new Promise(res => setTimeout(res, 5));
+  assert.deepEqual(W.collapsedIds(), ['res-old']); assert.deepEqual(W.seen(), s0, 'nothing moved'); assert.deepEqual(W.state.canvasLayoutHistory.size(), { undo: 1, redo: 0 }); assert.equal(W.fetches.length, 0);
+  W.key(); assert.deepEqual(W.collapsedIds(), []); W.key(true); assert.deepEqual(W.collapsedIds(), ['res-old']); W.key(); assert.deepEqual(W.collapsedIds(), []);
 });

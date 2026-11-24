@@ -242,7 +242,8 @@ export function createPresentationController(h) {
   // choice, applied through the same commit / undo / history with the same apply-time authority; nothing is deleted and no shared Board data is written.
   function offerRetrieval(plan) {
     if (!active || !sync() || active.job || plan?.option !== 'retrieval' || !Array.isArray(plan.collapse) || !plan.collapse.length) return false;
-    const a = active, byId = new Map([...a.snapshot.cards, ...(a.snapshot.folds || [])].map(c => [c.id, c]));
+    // Only fold targets (result cards with recorded provenance): never an arrangement card, a Board card or a memo.
+    const a = active, byId = new Map((a.snapshot.folds || []).map(c => [c.id, c]));
     if (!plan.collapse.every(x => byId.get(x.id) && byId.get(x.id).collapsed !== true && x.value === true) || new Set(plan.collapse.map(x => x.id)).size !== plan.collapse.length) return false;
     a.plans = { ...choices(a), retrieval: { option: 'retrieval', camera: null, framing: null, targets: [], collapse: plan.collapse.map(x => ({ id: x.id, value: true })) } };
     a.retrieval = { expires: now() + RESULT_TTL_MS };

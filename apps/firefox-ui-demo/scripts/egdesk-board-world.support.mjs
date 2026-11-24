@@ -59,7 +59,7 @@ export function world({ WorkbenchArrange, http, grant, spec = DEFAULT_SPEC }) {
   const jd = (item, access) => ({ projectionId: 'proj1', jointItem: item, jointLease: access, jointVersion: '1', jointManaged: 'card' });
   // world coordinates include the projection offset; the stored pose is relative to it (pose() subtracts it)
   for (const c of spec.cards) mk(c.id, c.rect, c.z, jd(c.item, 'acc-' + c.item));
-  for (const o of spec.others) mk(o.id, o.rect, o.z, null);
+  for (const o of spec.others) { const n = mk(o.id, o.rect, o.z, null); if (o.result) { n.attrs.class = 'egd-canvas-card egd-result-card'; n._resultRecord = o.result; } }
   const board = { id: BOARD_ID, epoch: EPOCH, title: 't', cards: spec.cards.map(c => ({ id: c.item, access: 'acc-' + c.item, version: 1, own: true, title: c.id, kind: c.kind || 'note', layoutVersion: 0 })), links: spec.links.map(l => ({ ...l })) };
   const projection = { id: 'proj1', boardId: BOARD_ID, jointAccess: EPOCH, offset: { ...OFFSET }, members: spec.cards.map(c => ({ sourceId: c.item, viewId: c.id })) };
   state.boards.projections.proj1 = projection;

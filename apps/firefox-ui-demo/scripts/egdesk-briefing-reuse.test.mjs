@@ -9,6 +9,7 @@ import * as WorkbenchArrange from '../overlay/resources/EGDeskWorkbenchArrange.s
 import { validBriefing } from '../overlay/resources/EGDeskBriefingState.sys.mjs';
 import { completeBriefingArgs, constraintFrom, enumerateBriefingFacts, enumerateReportParts, normalizeReuseDto, prepareBriefingReuse, readBriefingReuse, resolveDesign,
   retrievalPlan, reuseDto, runBriefingFlow } from '../helper/egdesk-briefing-flow.mjs';
+import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs';
 import { world } from './egdesk-board-world.support.mjs';
 import { engineOf, fits, publishSchema, rig } from './egdesk-briefing-rig.support.mjs';
 
@@ -24,12 +25,16 @@ const PROV = {
   vE: { label: 'Quarterly budget', gist: 'Budget sheet for another project', owner: 'shared', ref: { sourceId: 'src-budget' } },
   vF: { label: 'Holiday calendar', gist: 'Company holiday calendar', owner: 'shared', ref: { sourceId: 'src-calendar' } },
 };
+// vC is what a retrieval can act on in the real canvas: a result card the user kept from an Agent output, with recorded provenance. The other five are Board cards.
+const uid = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const resultRecord = () => ChatState.publishedOutputCardRecord({ id: 'thread-1', title: 'Room', conversationId: 'conv-1', engineId: 'codex', profileEnabled: true, agentProfileId: 'prof-agent-1' },
+  { id: 'm1', conversationId: 'conv-1', runId: 'run-1', answerId: 'answer-1', createdAt: 1 }, { id: uid(1), outputKey: 'shipment-summary', version: 1, title: 'Old shipment summary', charCount: 10, createdAt: 1, conversationId: 'conv-1', runId: 'run-1', answerId: 'answer-1' }, '# Old shipment summary\nbody', { now: 2 });
 async function board(extra = {}) {
-  const spec = { cards: [jc('vA', 'item-A', r(100, 60, 260, 160), 1), jc('vB', 'item-B', r(620, 60, 260, 160), 2), jc('vC', 'item-C', r(100, 300, 260, 160), 3),
-    jc('vD', 'item-D', r(620, 300, 260, 160), 4), jc('vE', 'item-E', r(100, 520, 260, 160), 5), jc('vF', 'item-F', r(620, 520, 260, 160), 6)], others: [], links: [] };
+  const spec = { cards: [jc('vA', 'item-A', r(100, 60, 260, 160), 1), jc('vB', 'item-B', r(620, 60, 260, 160), 2), jc('vD', 'item-D', r(620, 300, 260, 160), 4),
+    jc('vE', 'item-E', r(100, 520, 260, 160), 5), jc('vF', 'item-F', r(620, 520, 260, 160), 6)], others: [{ id: 'vC', rect: r(100, 300, 260, 160), z: 3, result: resultRecord() }], links: [] };
   const W = world({ WorkbenchArrange, http: extra.http ?? (async () => ({ status: 503, body: {} })), grant: extra.grant ?? (() => true), spec });
-  const desk = W.real.arrange().designScene('proj1');
-  const candidates = desk.cards.map(c => ({ id: c.id, kind: 'source', onBoard: true, maySend: true, rect: c.rect, visibility: c.collapsed ? 'collapsed' : 'visible', ...PROV[c.id] }));
+  const desk = W.real.arrange().designScene('@desk');
+  const candidates = ['vA', 'vB', 'vC', 'vD', 'vE', 'vF'].map(id => ({ id, kind: 'source', onBoard: true, maySend: true, rect: desk.cards.find(c => c.id === id)?.rect ?? r(100, 300, 260, 160), visibility: 'visible', ...PROV[id] }));
   return { W, desk, candidates, viewport: desk.viewport };
 }
 const REPORT = ['## Billing', 'The Invoice totals show the Q3 amount that was billed to the customer.', '', '## Delivery', 'The Delivery log shows the shipment was two days late.', '',
@@ -142,14 +147,14 @@ test('flow: six existing components -> reuses the 2 relevant outputs, proposes r
   const rows = R.calibration.entries(); assert.equal(rows.length, 3); assert.deepEqual(rows[1].judgments.slice(0, 6).map(j => j.would), ['attach', 'attach', 'act', 'skip', 'skip', 'skip']);
   assert.ok(!/Invoice|Delivery|Team note|Old shipment|src-/.test(JSON.stringify(rows)));
   // apply the retrieval on the user's own screen, then undo / redo through the existing history
-  const W = b.W, ui = W.real.arrange(); await ui.open('proj1', null);
+  const W = b.W, ui = W.real.arrange(); await ui.open('@desk', null);
   const s0 = W.seen(); assert.deepEqual(W.collapsedIds(), []);
   assert.equal(ui.offerRetrieval(retrievalPlan(out.retrievals)), true); assert.ok(W.control('retrieval')?.checked); assert.deepEqual(W.collapsedIds(), [], 'a preview folds nothing');
   W.control('apply').fire('click'); for (let i = 0; i < 400 && W.control('apply'); i++) await new Promise(res => setTimeout(res, 5));
   assert.deepEqual(W.collapsedIds(), ['vC'], 'only the stale earlier output is folded; the user note and everything else stay'); assert.deepEqual(W.seen(), s0, 'no card moved, resized or restacked');
   assert.deepEqual(W.state.canvasLayoutHistory.size(), { undo: 1, redo: 0 }); assert.equal(W.fetches.length, 0, 'the shared Board is untouched');
   W.key(); assert.deepEqual(W.collapsedIds(), []); W.key(true); assert.deepEqual(W.collapsedIds(), ['vC']); W.key(); assert.deepEqual(W.collapsedIds(), []);
-  assert.equal(await (async () => { await ui.open('proj1', null); return !!W.control('undo'); })(), false, 'the panel Undo was retired by Cmd+Z: one history');
+  assert.equal(await (async () => { await ui.open('@desk', null); return !!W.control('undo'); })(), false, 'the panel Undo was retired by Cmd+Z: one history');
 });
 test('flow: a needed part with no existing component -> exactly 1 new component is allowed (and nothing more)', async t => {
   const { R, out, engineLog } = await run(t, { design: () => designWithNew(), parts: { P3: .91 } });
@@ -187,12 +192,12 @@ test('flow: nothing to reuse and nothing new needed -> chat answer; an unusable 
 test('retrieval is a proposal on the user screen: apply re-checks authority, an already folded or unknown card is refused, and the shared Board is never written', async t => {
   const b = await board(); const ui = b.W.real.arrange(); let granted = true;
   const R2 = await board({ http: async () => ({ status: 503, body: {} }), grant: () => granted });
-  const W = R2.W, u = W.real.arrange(); await u.open('proj1', null);
+  const W = R2.W, u = W.real.arrange(); await u.open('@desk', null);
   assert.equal(u.offerRetrieval({ option: 'retrieval', collapse: [{ id: 'nope', value: true }] }), false); assert.equal(u.offerRetrieval({ option: 'retrieval', collapse: [{ id: 'vC', value: false }] }), false);
   assert.equal(u.offerRetrieval({ option: 'retrieval', collapse: [] }), false); assert.equal(u.offerRetrieval({ option: 'retrieval', collapse: [{ id: 'vC', value: true }, { id: 'vC', value: true }] }), false);
   W.real.arrange().close(); void ui;
   // collapsing is a view state of the card: history guard refuses an undo after the user changed the fold themselves
-  await u.open('proj1', null); assert.equal(u.offerRetrieval({ option: 'retrieval', collapse: [{ id: 'vC', value: true }] }), true);
+  await u.open('@desk', null); assert.equal(u.offerRetrieval({ option: 'retrieval', collapse: [{ id: 'vC', value: true }] }), true);
   W.control('apply').fire('click'); for (let i = 0; i < 400 && W.control('apply'); i++) await new Promise(res => setTimeout(res, 5));
   assert.deepEqual(W.collapsedIds(), ['vC']); W.doc.getElementById('vC')._setWindowCollapsed(false); const before = W.collapsedIds();
   W.key(); assert.deepEqual(W.collapsedIds(), before, 'the user unfolded it themselves: Cmd+Z does not fight them'); assert.ok(W.notices.some(m => /건너뛰었습니다/.test(m)));
