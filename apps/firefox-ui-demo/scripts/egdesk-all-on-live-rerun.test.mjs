@@ -446,12 +446,13 @@ test('faithful revision: keeps the unlisted sentences, restates the listed one a
   assert.equal(loadJourneyPlan(PLAN_FILE_V6).world.wording, undefined); assert.equal(loadJourneyPlan(PLAN_FILE_V7).world.wording, 'faithful')
 })
 
-test('v7 dry run with the switch: what the scripted world shows about the new steps (the nudge steps pass by code; the elapsed check fails until L3 c24; the model-side checks use the scripted judge here)', async () => {
+test('v7 dry run with the switch: what the scripted world shows about the new steps (the nudge steps pass by code; the elapsed check passes now that L3 c24 is in; the model-side checks use the scripted judge here)', async () => {
   const noNet = async () => { throw new Error('no network') }
   const run = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V7), fetchImpl: noNet, switches: ['action-relevance'] })
   const checks = run.steps.flatMap(s => s.checks), by = id => checks.find(c => c.id === id)
-  assert.deepEqual(V7_NEW.filter(([id]) => by(id).pass !== true).map(([id]) => id), ['s4n.elapsed-true'])
-  assert.deepEqual(by('s4n.elapsed-true').observed.writerSeconds.map(r => r.kind), ['reply_status'])
+  // L3 c24 (the reply prompt gives the work's age, not the time since the person wrote) is in: before it, this was the one new expectation that failed (claimed 1 s for a run 11 s in)
+  assert.deepEqual(V7_NEW.filter(([id]) => by(id).pass !== true).map(([id]) => id), [])
+  assert.deepEqual(by('s4n.elapsed-true').observed.writerSeconds.map(r => [r.kind, Math.abs(r.claimed - r.actual) <= 2]), [['reply_status', true]])
   assert.deepEqual(by('s4.elapsed-true').observed.writerSeconds.map(r => [r.kind, r.claimed === r.actual]), [['explain_wait', true]])
   assert.deepEqual(run.steps.find(s => s.id === 's12-stop-nudge').seen.flows.map(f => f.flow), ['explain_wait', 'stop'])
   assert.deepEqual(run.steps.find(s => s.id === 's4c-change-nudge').seen.flows.map(f => f.flow), ['steer'])
