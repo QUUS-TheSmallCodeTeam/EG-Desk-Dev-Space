@@ -95,7 +95,8 @@ export const FAMILY_SETS = Object.freeze({
   // step is back to the c20 body (0.92) and the settings step reaches the person-target follow-up only when it found no way forward
   'browser-live-stability-v2': ['stab-se', 'stab-st', 'stab-dv', 'stab-inv'],
   // c23: the error page alone (v4's error phase failed at the entry: card predicate 0 on the error text)
-  'browser-live-settings-error-v1': ['se-error'],
+  // c24: v2 — v1 was sent: the entry went as designed, the follow-up was refused by the model (the page was only in the question); v2 puts the page in the evidence
+  'browser-live-settings-error-v2': ['se-error'],
 })
 // buttons code proved read-only that the journeys may click (a view change of this page); every other press is the person's
 export const FAMILY_VIEW_REFS = Object.freeze(['se_tab1', 'se_tab2'])
@@ -170,7 +171,7 @@ export function familyAnswers(body) {
     const values = (q.choices ?? []).map(c => c.value)
     if (q.name === 'browser_entry') return { name: q.name, type: 'predicate', probability: 0.95 } // c20: the request predicate
     const onError = /오류 500/.test(q.instructions ?? '')
-    if (/^browser_entry_wall_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: onError ? 0.95 : 0.02 } // c23: an interruption of the site
+    if (/^browser_entry_wall_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: /오류 500/.test(ev) ? 0.95 : 0.02 } // c23: an interruption of the site (c24: the page's lines are in the evidence, not in the question)
     if (/^browser_entry_card_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: q.name === 'browser_entry_card_0' ? (onError ? 0.0 : 0.95) : 0.03 } // as measured: 0 on the error text
     if (q.name === 'task_resume') return pick(q, 'resume_task')
     if (/^ps_/.test(q.name)) return yesNo(q, q.name === state ? 0.95 : 0.02)
