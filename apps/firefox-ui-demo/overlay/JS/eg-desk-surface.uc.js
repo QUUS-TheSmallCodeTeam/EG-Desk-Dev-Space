@@ -12734,7 +12734,7 @@
     const outcomeOf = reason => typeof reason === 'string' && Object.hasOwn(outcomes, reason) ? outcomes[reason] : null;
     let binding = null, entry = null, savedEdits = null, listEdits = null;
     const panel = el('section', { 'aria-label': '보기 추천', data: { testid: 'chat-choice-panel' },
-      style: 'max-height:40vh;overflow:auto;overflow-wrap:anywhere;padding:6px;' });
+      tabindex: '-1', style: 'max-height:40vh;overflow:auto;overflow-wrap:anywhere;padding:6px;' });
     const questionHint = plain('p', '보기 추천에 쓰는 질문은 보이지 않는 문자나 줄바꿈 없이 한 줄(최대 500자)이어야 합니다.',
       { class: 'egd-codex-send-blocked', data: { testid: 'chat-choice-question-hint' } });
     questionHint.hidden = true;
@@ -12895,7 +12895,15 @@
       setDraft(draft); // Editable draft only; the existing [보내기] is still required.
       sync();
     };
+    // Every phase change rebuilds the panel, which destroys the focused button (retry, confirm, review...).
+    // If focus was inside the panel and ended up nowhere, keep it with the chooser instead of the page body.
+    const ownsFocus = () => { try { return panel.contains?.(panel.ownerDocument?.activeElement) === true; } catch { return false; } };
     const paint = () => {
+      const hadFocus = ownsFocus();
+      paintPhase();
+      if (hadFocus && !ownsFocus()) (entry ? panel : trigger).focus?.({ preventScroll: true });
+    };
+    const paintPhase = () => {
       sync();
       if (!entry) return;
       const item = entry;
