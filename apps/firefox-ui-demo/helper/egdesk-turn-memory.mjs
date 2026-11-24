@@ -129,16 +129,40 @@ function mergedLabels(interpretations) {
   return { source: same('source'), form: same('form'), time: same('time') }
 }
 
+// ---- write target, design 'about' (flag; the default 'choice' design is unchanged) ----
+// Real answers, 2026-11-24. With candidate pages the single choice was decisive (the plan page 1.00, twice). With NO candidate it was not:
+// "new" 0.73 / 0.73 / 0.80 against "none" 0.24 / 0.21 / 0.15 (confidence 0.6 / 0.6 / 0.7, under the 0.75 bar), for three utterances the
+// recording triage had no doubt about. The choice asked two things at once: WHERE this belongs and WHETHER to record it at all, and the
+// second one is already decided, decisively, by tn_record before this judgment runs.
+// 'about' asks neither as a forced choice. Each candidate gets its own yes/no question ("is this message about THIS record?"), and code
+// derives the target: exactly one yes and every other a decided no -> that record; every one a decided no (or there is no candidate) ->
+// a new record; anything else -> undecided, and nothing is written. "Do not add" stays where it is decided: tn_record.
+export const WRITE_TARGET_DESIGNS = Object.freeze(['choice', 'about'])
+const ABOUT_RULES = [
+  'You are a system judge reading one message against stored records. Every question is about ONE record or ONE sentence: answer each on its own, whatever the others are.',
+  'A record is the record the message is about only when the message reports on, completes, changes or corrects that very record. A record that only belongs to the same task, or that the message would affect indirectly, is not it.',
+  'A message that reports a plan as done is about that plan record. A correction ("not X but Y") is about the record that holds X. Never invent a record.',
+].join('\n')
+/** abouts: one ternary per candidate -> { target: index | 'new' | null, reason } (pure; the judge never names the target itself). */
+export function deriveWriteTarget(abouts) {
+  if (!abouts.length) return { target: 'new', reason: 'no_candidates' }
+  const yes = abouts.map((a, i) => (a.state === 'yes' ? i : -1)).filter(i => i >= 0), unknown = abouts.filter(a => a.state !== 'yes' && a.state !== 'no').length
+  if (unknown) return { target: null, reason: 'target_undecided' }
+  if (yes.length > 1) return { target: null, reason: 'target_ambiguous' }
+  return yes.length === 1 ? { target: yes[0], reason: 'one_record' } : { target: 'new', reason: 'no_record_fits' }
+}
+
 /**
- * judgeTurnWrite({ message, candidates, client, askedAt, signal, timeoutMs, maxCandidates }) -> { proposal, receipt }
+ * judgeTurnWrite({ message, candidates, client, askedAt, signal, timeoutMs, maxCandidates, targetDesign }) -> { proposal, followUp?, receipt }
  * candidates: pages (already permission-filtered by the caller). One stateless call: which page/new/none, which candidates
  * the new page relates to, and the isolated speech axes for each sentence. The proposal carries no text and is not applied.
  */
-export async function judgeTurnWrite({ message, candidates = [], client, askedAt = null, signal, timeoutMs = 3000, maxCandidates = 8 } = {}) {
+export async function judgeTurnWrite({ message, candidates = [], client, askedAt = null, signal, timeoutMs = 3000, maxCandidates = 8, targetDesign = 'choice' } = {}) {
   const pages = candidates.slice(0, maxCandidates)
   const spans = speechSegments(message)
   const none = (reason, extra = {}) => ({ proposal: { op: 'none', reason }, receipt: { reason, ...extra } })
   if (!client || typeof message !== 'string' || !message.trim()) return none('not_configured')
+  if (targetDesign === 'about') return judgeWriteAbout({ message, pages, spans, client, askedAt, signal, timeoutMs, none })
   const options = [...pages.map((p, i) => ({ value: stableAlias(i), description: `Record this as a status change of page ${stableAlias(i)}.` })),
     { value: 'new', description: 'Add a new page for this message.' }, { value: 'none', description: 'Do not add anything.' },
     { value: 'unsure', description: 'The options do not fit, or it cannot be told.' }]
@@ -178,7 +202,59 @@ export async function judgeTurnWrite({ message, candidates = [], client, askedAt
   return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: rec.status, time: { slice: rec.slice }, provenance: rec.provenance, spokenAt }, receipt }
 }
 
+// The 'about' design of judgeTurnWrite: same inputs, same proposal shapes. Differences: the target is derived (deriveWriteTarget); a
+// correction of a record is a pending reading "superseded" on that record, plus (followUp) a page for the correcting utterance that
+// supersedes it, which the host stores only where it may store an utterance page at all.
+async function judgeWriteAbout({ message, pages, spans, client, askedAt, signal, timeoutMs, none }) {
+  const questions = [
+    choiceQuestion('tw_status', 'What does the message say about the state of a plan, task or recorded detail?', [
+      { value: 'done', description: 'It was carried out, finished or settled.' }, { value: 'plan', description: 'It is intended or scheduled, not done.' },
+      { value: 'corrected', description: 'A recorded detail is wrong or has changed, and the message gives the detail that replaces it.' },
+      { value: 'unknown', description: 'The message gives none of these, or it cannot be told.' }]),
+    ...pages.map((_, i) => predicateQuestion(`tw_about_${i}`, `Is this message about the very record ${stableAlias(i)}: does it report on, complete, change or correct what ${stableAlias(i)} itself records?`)),
+    ...pages.map((_, i) => predicateQuestion(`tw_link_${i}`, `Does this message belong to the same task or case as record ${stableAlias(i)}, whether or not it is about that record itself?`)),
+    ...speechDesignQuestions('axes-isolated', spans, message)]
+  const input = [{ role: 'developer', content: ABOUT_RULES },
+    { role: 'user', content: `Stored records:\n${pages.length ? pages.map((p, i) => pageBlock(stableAlias(i), p, 500)).join('\n\n') : '(none)'}` },
+    { role: 'user', content: `${clockLine(askedAt)}\nMessage:\n${message}` }]
+  let result
+  try { result = await client.decide({ input, questions, timeoutMs, signal }) } catch (error) { return none('judge_failed', { code: error?.code ?? 'unreachable' }) }
+  const abouts = pages.map((_, i) => ternary(result.answers?.[`tw_about_${i}`]))
+  const derived = deriveWriteTarget(abouts)
+  const installed = speechDesignInterpretations('axes-isolated', result.answers, spans)
+  const labels = mergedLabels(installed)
+  const rec = recordFromLabels(labels)
+  const said = readChoice(result.answers, 'tw_status', { minConfidence: 0.75, minMargin: 0.2 })
+  const state = said.state === 'accepted' ? said.value : null
+  if (state === 'done' || state === 'plan') rec.status = state
+  // Numbers only: each record's probability of being the one, never a title or an option label.
+  const receipt = { design: 'about', target: { value: derived.target === 'new' ? 'new' : derived.target === null ? null : stableAlias(derived.target), reason: derived.reason, about: abouts.map(a => a.p), options: pages.length },
+    labels, spans: installed, sentences: spans.length, status: state, usage: result.usage ?? null, questions: questions.length }
+  if (derived.target === null) return { proposal: { op: 'none', reason: derived.reason }, receipt }
+  if (!rec.recordable) return { proposal: { op: 'none', reason: 'question' }, receipt }
+  const spokenAt = Number.isSafeInteger(askedAt) ? new Date(askedAt).toISOString() : null
+  const related = skip => pages.map((p, i) => ({ p, i })).filter(({ i }) => i !== skip && ternary(result.answers?.[`tw_link_${i}`]).state === 'yes').map(({ p }) => ({ type: 'same_task', to: p.id }))
+  if (derived.target === 'new') {
+    if (rec.slice === 'unknown') return { proposal: { op: 'none', reason: 'time_slice_unclear' }, receipt }
+    return { proposal: { op: 'new_page', time: { slice: rec.slice }, status: rec.status, provenance: rec.provenance, links: related(-1), spokenAt }, receipt }
+  }
+  const page = pages[derived.target]
+  if (state === 'corrected') {
+    // The record is reported as outdated in a detail. The reading says only that (pending, like any reading); the new detail is the
+    // person's own sentence, kept as its own page that supersedes the record where an utterance page may be stored.
+    // When the sentence's own time cannot be read, the correction stands in the time of the record it corrects (it is about the same thing).
+    const slice = rec.slice !== 'unknown' ? rec.slice : ['past', 'present', 'planned', 'hypothetical'].includes(page.time.slice) ? page.time.slice : null
+    if (!slice) return { proposal: { op: 'none', reason: 'time_slice_unclear' }, receipt }
+    const followUp = { op: 'new_page', time: { slice }, status: rec.status, provenance: rec.provenance, links: [{ type: 'supersedes', to: page.id }, ...related(derived.target)], spokenAt }
+    return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: 'superseded', time: { slice }, provenance: rec.provenance, spokenAt }, followUp, receipt }
+  }
+  if (rec.status !== 'plan' && rec.status !== 'done') return { proposal: { op: 'none', reason: 'status_unclear' }, receipt }
+  return { proposal: { op: 'update_status', pageId: page.id, baseRevision: page.revision, proposedStatus: rec.status, time: { slice: rec.slice }, provenance: rec.provenance, spokenAt }, receipt }
+}
+
 const OPS = new Set(['none', 'new_page', 'update_status'])
+// What a pending reading may say about a record: its state, or that a later detail replaced it (a correction).
+const READING_STATUS = new Set(['plan', 'done', 'superseded'])
 const STATUS = new Set(['plan', 'done'])
 const SLICES = new Set(['past', 'present', 'planned', 'hypothetical'])
 // agent_note: the host's own record (a finished browser task), not something the person said; stored with by: 'browser_task'.
@@ -214,7 +290,7 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
       try {
         if (proposal.op === 'update_status') {
           const page = wiki.pages.get(proposal.pageId)
-          if (!page || !STATUS.has(proposal.proposedStatus) || typeof proposal.baseRevision !== 'string') return { status: 'invalid' }
+          if (!page || !READING_STATUS.has(proposal.proposedStatus) || typeof proposal.baseRevision !== 'string') return { status: 'invalid' }
           if (canWrite({ op: 'update_status', page, scope }) !== true) return { status: 'denied' }
           if (page.revision !== proposal.baseRevision) return { status: 'conflict', reason: 'revision_changed', currentRevision: page.revision }
           const reading = { status: proposal.proposedStatus, state: 'pending', basis: provenance.basis ?? null, ...(typeof proposal.spokenAt === 'string' ? { spokenAt: proposal.spokenAt } : {}) }
@@ -249,7 +325,9 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
      * the person's own later, explicit confirmation. `confirmation` must be { by: 'user', at: ISO } where `at` is after the reading was
      * made (the person confirms something they have seen, not something said in the same breath), and the host must have captured it from
      * a real user action (this function cannot check that; it only refuses anything that is not literally by: 'user'). The model's score,
-     * the judge, another agent or a policy callback cannot promote. The latest pending reading is the one promoted; the status is the
+     * the judge, another agent or a policy callback cannot promote. The real user action may be a message of the person: the host may
+     * read that message as a confirmation of a note the person was told about (egdesk-record-confirmation.mjs); what promotes is still
+     * the person's message, and a message that does not answer the note never does. The latest pending reading is the one promoted; the status is the
      * reading's own (plan or done), the revision moves, the accepted reading replaces the pending one.
      */
     promote(pageId, { scope = null, confirmation = null, operationId = null } = {}) {
@@ -278,6 +356,36 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
         return receipt
       } catch { return { status: 'invalid', reason: 'write_failed' } }
     },
+    /**
+     * reject(pageId, { scope, objection, operationId }) — the person said the note is not so. The latest pending reading is withdrawn
+     * (kept as 'rejected', so it is known that it was reported and refused); the page's status is NOT touched. Same authority as
+     * promote: objection must be { by: 'user', at: ISO } later than the reading.
+     */
+    reject(pageId, { scope = null, objection = null, operationId = null } = {}) {
+      if (enabled !== true) return { status: 'disabled' }
+      if (typeof operationId !== 'string' || !operationId) return { status: 'invalid', reason: 'operation_id_required' }
+      const key = `${scope?.writeScope ?? ''}\u0000reject\u0000${operationId}`
+      const earlier = done.get(key)
+      const print = sha256Hex(JSON.stringify([pageId, objection?.by ?? null, objection?.at ?? null]))
+      if (earlier) return earlier.print === print ? { ...earlier.receipt, replay: true } : { status: 'conflict', reason: 'operation_reused' }
+      try {
+        const page = wiki.pages.get(pageId)
+        if (!page) return { status: 'invalid' }
+        if (!record(objection) || objection.by !== 'user' || typeof objection.at !== 'string' || Number.isNaN(Date.parse(objection.at))) return { status: 'invalid', reason: 'user_objection_required' }
+        if (canWrite({ op: 'reject', page, scope }) !== true) return { status: 'denied' }
+        const index = page.statusReadings.map(r => r.state).lastIndexOf('pending')
+        if (index < 0) return { status: 'invalid', reason: 'no_pending_reading' }
+        const reading = page.statusReadings[index]
+        if (typeof reading.spokenAt === 'string' && !(Date.parse(objection.at) > Date.parse(reading.spokenAt))) return { status: 'invalid', reason: 'objection_not_later' }
+        const rejected = { ...reading, state: 'rejected', rejectedAt: objection.at }
+        const revision = nextRevision(page.revision)
+        if (typeof persist === 'function') persist({ kind: 'reading', pageId: page.id, sourceRevision: page.revision.replace(/\.r\d+$/, ''), reading: rejected, revision })
+        if (!wiki.patch(page.id, { statusReadings: page.statusReadings.map((r, i) => (i === index ? rejected : r)), revision })) return { status: 'invalid', reason: 'write_failed' }
+        const receipt = { status: 'reading_withdrawn', pageId: page.id, revision }
+        done.set(key, { print, receipt })
+        return receipt
+      } catch { return { status: 'invalid', reason: 'write_failed' } }
+    },
   }
 }
 
@@ -290,7 +398,7 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
  * packetFirst (optional, first turn only): return as soon as the packet is ready; the triage that only decides recording keeps running and is
  *   awaited inside judgeWrite (triage is then null in the result and `triageLater` is its promise). It is not bound by the packet deadline.
  */
-export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [] } = {}) {
+export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = 'choice' } = {}) {
   // The deadline is ONE point on ONE clock, fixed here. Everything below asks that clock; a timer only wakes the wait up.
   const deadlineAt = Number.isFinite(deadlineMs) ? clock.now() + Math.max(0, deadlineMs) : null
   const remaining = () => (deadlineAt === null ? null : Math.max(0, deadlineAt - clock.now()))
@@ -342,11 +450,11 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
     judgeWrite = async () => {
       const late = await triageLater
       if (late?.record?.state !== 'yes') return { proposal: { op: 'none', reason: 'not_worth_recording' }, receipt: { triage: late } }
-      const judged = await judgeTurnWrite({ message, candidates: writeCandidates(), client, askedAt, signal })
+      const judged = await judgeTurnWrite({ message, candidates: writeCandidates(), client, askedAt, signal, targetDesign: writeTarget })
       return { ...judged, receipt: { ...judged.receipt, triage: late } }
     }
   } else if (ontologyWrite === true && triage?.record?.state === 'yes') {
-    judgeWrite = () => judgeTurnWrite({ message, candidates: writeCandidates(), client, askedAt, signal })
+    judgeWrite = () => judgeTurnWrite({ message, candidates: writeCandidates(), client, askedAt, signal, targetDesign: writeTarget })
   }
   return { position: pos, triage, ...(triageLater ? { triageLater } : {}), memory, packet: memory.packet ?? null, held: heldSame, nextDelivered, judgeWrite,
     writeSkipped: ontologyWrite !== true ? 'flag_off' : triageLater ? null : triage?.record?.state !== 'yes' ? 'not_worth_recording' : null }

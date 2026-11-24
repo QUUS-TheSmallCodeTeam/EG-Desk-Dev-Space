@@ -177,7 +177,7 @@ test('proposals are re-validated, never trusted: unknown ops, vocabulary outside
   const o = { message: '새 사실이야', scope: SCOPE, operationId: 'x' }
   for (const bad of [null, 'x', { op: 'delete_everything' }, { ...ok, time: { slice: 'someday' } }, { ...ok, provenance: { kind: 'own_record' } }, { ...ok, provenance: { kind: 'utterance', basis: 'rumor' } },
     { op: 'update_status', pageId: 'ghost', baseRevision: '1', proposedStatus: 'done', time: { slice: 'past' }, provenance: { kind: 'utterance' } },
-    { op: 'update_status', pageId: 'db/pg-plan', baseRevision: '1', proposedStatus: 'superseded', time: { slice: 'past' }, provenance: { kind: 'utterance' } }]) {
+    { op: 'update_status', pageId: 'db/pg-plan', baseRevision: '1', proposedStatus: 'reported_by_other', time: { slice: 'past' }, provenance: { kind: 'utterance' } }]) {
     assert.equal(writer.apply(bad, o).status, 'invalid', JSON.stringify(bad))
   }
   assert.equal(writer.apply(ok, { ...o, operationId: null }).status, 'invalid')
@@ -624,4 +624,88 @@ test('renderMemoryPacket: byte-identical to the loop\'s packet when nothing is l
   assert.equal(mergeIntoSelection('OTHER ITEMS, none of these pages', parts, []).value, `OTHER ITEMS, none of these pages\n\n${result.packet}`)
   assert.deepEqual(mergeIntoSelection(selection, parts, []).omitted, ['db/pg-plan'], 'the body is there word for word, whatever id the item has')
   assert.deepEqual([mergeIntoSelection('', parts, []), mergeIntoSelection(selection, null, []), mergeIntoSelection('  ', parts, ['db/pg-plan'])], [null, null, null])
+})
+
+// ---- write target, design 'about': one yes/no per record, the target derived by code ----
+import { WRITE_TARGET_DESIGNS, deriveWriteTarget } from './egdesk-turn-memory.mjs'
+const yes = { state: 'yes', p: 0.95 }, no = { state: 'no', p: 0.03 }, maybe = { state: 'unknown', p: 0.5 }
+const recording = (inner = mockJudge()) => { const seen = []; return { seen, async decide(req) { seen.push(req); return inner.decide(req) } } }
+const about = (message, candidates, client = mockJudge()) => judgeTurnWrite({ message, candidates, client, askedAt: ASKED, targetDesign: 'about' })
+const pgPages = wiki => ['db/pg-design', 'db/pg-plan', 'db/pg-health', 'db/pg-followup'].map(id => wiki.pages.get(id))
+
+test('deriveWriteTarget: exactly one yes with every other a decided no is that record; all decided no is a new record; anything else writes nothing', () => {
+  assert.deepEqual(WRITE_TARGET_DESIGNS, ['choice', 'about'])
+  assert.deepEqual(deriveWriteTarget([]), { target: 'new', reason: 'no_candidates' })
+  assert.deepEqual(deriveWriteTarget([no, yes, no]), { target: 1, reason: 'one_record' })
+  assert.deepEqual(deriveWriteTarget([no, no]), { target: 'new', reason: 'no_record_fits' })
+  assert.deepEqual(deriveWriteTarget([yes, yes, no]), { target: null, reason: 'target_ambiguous' })
+  assert.deepEqual(deriveWriteTarget([yes, maybe]), { target: null, reason: 'target_undecided' }, 'a look-alike that is not ruled out blocks the write')
+  assert.deepEqual(deriveWriteTarget([no, { state: 'unknown', p: null }]), { target: null, reason: 'target_undecided' }, 'a missing answer is not a no')
+})
+
+test('about, no candidate: nothing asks "new or none"; the three utterances become new pages from their labels alone', async () => {
+  for (const [message, slice, kind] of [['거래처 D사가 어제 단가를 올렸다고 들었어.', 'past', 'reported_by_other'], ['다음 주 화요일에 은모래 창고 재고를 다시 셀 예정이야.', 'planned', 'utterance'], ['내가 달그림 상자 수량을 직접 세어 봤는데 42개였어.', 'past', 'utterance']]) {
+    const client = recording()
+    const r = await about(message, [], client)
+    assert.deepEqual(client.seen[0].questions.map(q => q.name), ['tw_status', 'speech_source_0', 'speech_form_0', 'speech_time_0'], 'no target question at all')
+    assert.deepEqual([r.proposal.op, r.proposal.time.slice, r.proposal.provenance.kind, r.proposal.links], ['new_page', slice, kind, []])
+    assert.deepEqual([r.receipt.design, r.receipt.target], ['about', { value: 'new', reason: 'no_candidates', about: [], options: 0 }])
+  }
+})
+
+test('about, with candidates: a completion report is a status change of the one plan record; look-alikes block; a correction is a pending "superseded" reading plus a page that supersedes', async () => {
+  const wiki = buildWiki(SYNTHETIC_PAGES), pages = pgPages(wiki), client = recording()
+  const done = await about('PostgreSQL 마이그레이션 배포 끝났어', pages, client)
+  assert.deepEqual(client.seen[0].questions.map(q => q.name), ['tw_status', 'tw_about_0', 'tw_about_1', 'tw_about_2', 'tw_about_3', 'tw_link_0', 'tw_link_1', 'tw_link_2', 'tw_link_3', 'speech_source_0', 'speech_form_0', 'speech_time_0'])
+  assert.ok(!client.seen[0].questions.some(q => q.name === 'tw_target') && client.seen[0].questions.filter(q => q.type === 'choice').every(q => !q.choices.some(c => ['new', 'none'].includes(c.value))))
+  assert.deepEqual([done.proposal.op, done.proposal.pageId, done.proposal.proposedStatus, done.proposal.baseRevision], ['update_status', 'db/pg-plan', 'done', wiki.pages.get('db/pg-plan').revision])
+  assert.deepEqual([done.receipt.target.value, done.receipt.target.reason, done.receipt.target.about], ['P2', 'one_record', [0.03, 0.95, 0.03, 0.03]])
+  assert.doesNotMatch(JSON.stringify(done.receipt), /PostgreSQL|배포/, 'the receipt carries numbers and closed words only')
+  // two records answer yes, or one is left undecided: nothing is written, and the reason says which
+  const answer = map => ({ async decide(req) { const r = await mockJudge().decide(req); Object.assign(r.answers, map); return r } })
+  assert.deepEqual((await about('PostgreSQL 마이그레이션 배포 끝났어', pages, answer({ tw_about_3: { type: 'predicate', probability: 0.9 } }))).proposal, { op: 'none', reason: 'target_ambiguous' })
+  assert.deepEqual((await about('PostgreSQL 마이그레이션 배포 끝났어', pages, answer({ tw_about_3: { type: 'predicate', probability: 0.5 } }))).proposal, { op: 'none', reason: 'target_undecided' })
+  // a new fact beside related records: a new page, linked to the records of the same case, about none of them
+  const fresh = await about('PostgreSQL 마이그레이션 헬스체크 3종 중 응답 시간 항목이 어제 500ms를 넘었다고 들었어.', pages)
+  assert.equal(fresh.proposal.op, 'new_page'); assert.equal(fresh.receipt.target.reason, 'no_record_fits'); assert.ok(fresh.proposal.links.length >= 1 && fresh.proposal.links.every(l => l.type === 'same_task'))
+  // a correction
+  const due = buildWiki([{ id: 'order/due', title: 'B사 납품 일정', body: 'B사 납기는 12월 3일로 정했다. 수량은 200개다.', revision: '1', time: { slice: 'planned' }, provenance: { kind: 'own_record' }, status: 'plan', scope: 'dm:this-room' },
+    { id: 'order/price', title: 'B사 단가', body: 'B사 단가는 개당 9,800원이다.', revision: '1', time: { slice: 'present' }, provenance: { kind: 'document' }, status: 'done', scope: 'dm:this-room' }])
+  const fix = await about('아니, B사 납기는 12월 3일이 아니라 10일이야.', [...due.pages.values()])
+  assert.deepEqual([fix.proposal.op, fix.proposal.pageId, fix.proposal.proposedStatus, fix.receipt.status], ['update_status', 'order/due', 'superseded', 'corrected'])
+  assert.deepEqual([fix.followUp.op, fix.followUp.links[0]], ['new_page', { type: 'supersedes', to: 'order/due' }])
+  // the host stores it as a PENDING reading (the status is untouched) and, where it may, the correcting sentence as a page that supersedes
+  const writer = createWikiWriter(due, { enabled: true, canWrite: () => true })
+  assert.equal(writer.apply(fix.proposal, { operationId: 'op-1', scope: SCOPE }).status, 'recorded_pending')
+  assert.deepEqual([due.pages.get('order/due').status, due.pages.get('order/due').statusReadings.map(r => [r.status, r.state])], ['plan', [['superseded', 'pending']]])
+  const page = writer.apply(fix.followUp, { message: '아니, B사 납기는 12월 3일이 아니라 10일이야.', operationId: 'op-2', scope: SCOPE })
+  assert.equal(page.status, 'stored'); assert.deepEqual(due.links(page.pageId).filter(l => l.type === 'supersedes'), [{ type: 'supersedes', to: 'order/due' }])
+  assert.deepEqual(due.supersededBy('order/due'), [], 'a reported correction does not replace the record by itself')
+})
+
+test('the default write-target design is unchanged: the same request with the flag absent or "choice"; prepareTurnMemory passes the design through', async () => {
+  const wiki = buildWiki(SYNTHETIC_PAGES), a = recording(), b = recording(), c = recording()
+  await judgeTurnWrite({ message: 'PostgreSQL 마이그레이션 배포 끝났어', candidates: pgPages(wiki), client: a, askedAt: ASKED })
+  await judgeTurnWrite({ message: 'PostgreSQL 마이그레이션 배포 끝났어', candidates: pgPages(wiki), client: b, askedAt: ASKED, targetDesign: 'choice' })
+  assert.deepEqual(a.seen, b.seen); assert.ok(a.seen[0].questions.some(q => q.name === 'tw_target'))
+  const turn = await prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki, client: c, scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD, ontologyWrite: true, writeTarget: 'about' })
+  const judged = await turn.judgeWrite()
+  assert.deepEqual([judged.receipt.design, judged.proposal.op, judged.proposal.pageId], ['about', 'update_status', 'db/pg-plan'])
+  assert.ok(c.seen.some(req => req.questions.some(q => q.name === 'tw_about_0')) && !c.seen.some(req => req.questions.some(q => q.name === 'tw_target')))
+})
+
+test('writer.reject: the person\'s objection withdraws the pending reading and leaves the status alone; only the user, only later, only once', () => {
+  const wiki = buildWiki(SYNTHETIC_PAGES), writer = createWikiWriter(wiki, { enabled: true, canWrite: () => true })
+  const proposal = { op: 'update_status', pageId: 'db/pg-plan', baseRevision: '1', proposedStatus: 'done', time: { slice: 'past' }, provenance: { kind: 'utterance', by: 'user' }, spokenAt: '2026-11-24T05:30:00.000Z' }
+  assert.equal(writer.apply(proposal, { operationId: 'w1', scope: SCOPE }).status, 'recorded_pending')
+  assert.deepEqual([writer.reject('db/pg-plan', { scope: SCOPE, objection: { by: 'judge', at: '2026-11-24T06:00:00.000Z' }, operationId: 'r0' }).reason,
+    writer.reject('db/pg-plan', { scope: SCOPE, objection: { by: 'user', at: '2026-11-24T05:00:00.000Z' }, operationId: 'r0b' }).reason], ['user_objection_required', 'objection_not_later'])
+  const out = writer.reject('db/pg-plan', { scope: SCOPE, objection: { by: 'user', at: '2026-11-24T06:00:00.000Z' }, operationId: 'r1' })
+  assert.equal(out.status, 'reading_withdrawn')
+  const page = wiki.pages.get('db/pg-plan')
+  assert.deepEqual([page.status, page.statusReadings.map(r => [r.status, r.state]), page.revision], ['plan', [['done', 'rejected']], out.revision])
+  assert.equal(writer.reject('db/pg-plan', { scope: SCOPE, objection: { by: 'user', at: '2026-11-24T06:00:00.000Z' }, operationId: 'r1' }).replay, true)
+  assert.equal(writer.reject('db/pg-plan', { scope: SCOPE, objection: { by: 'user', at: '2026-11-24T07:00:00.000Z' }, operationId: 'r2' }).reason, 'no_pending_reading')
+  assert.equal(writer.promote('db/pg-plan', { scope: SCOPE, confirmation: { by: 'user', at: '2026-11-24T07:00:00.000Z' }, operationId: 'p1' }).reason, 'no_pending_reading', 'a withdrawn reading cannot be promoted')
+  assert.equal(createWikiWriter(wiki, { enabled: true, canWrite: ({ op }) => op !== 'reject' }).reject('db/pg-plan', { scope: SCOPE, objection: { by: 'user', at: '2026-11-24T08:00:00.000Z' }, operationId: 'r3' }).status, 'denied')
 })
