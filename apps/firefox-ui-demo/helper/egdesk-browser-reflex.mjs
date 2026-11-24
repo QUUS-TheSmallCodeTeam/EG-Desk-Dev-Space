@@ -393,6 +393,14 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     steps.push(entry)
     const { options, excluded } = buildReflexCandidates(snapshot, { ...(classify ? { classify } : {}), ...(isAllowedUrl ? { isAllowedUrl } : {}) })
     entry.excluded = excluded
+    // Code rule (R3/R5): nothing on this page may be chosen and something was withheld as the person's own control (submit, payment,
+    // permission, delete). There is nothing to judge, so no request is made: the step is the person's. Real measurement (2026-11-25):
+    // asked anyway, the model answered scroll_more at confidence 0.30. A page that withholds a sensitive FIELD (a code, a password) is still
+    // asked, because its page state (two_factor_required at 1.0 in the same measurement) names what the person has to do.
+    if (!options.length && excluded.gated > 0 && excluded.sensitive === 0) {
+      entry.rule = 'person_only_controls'
+      return finish('escalated', { reason: 'human_step', withheld: excluded.gated })
+    }
     const fields = options.filter(option => option.item.kind === 'fill')
     const prior = priorRun ? priorFacts(priorRun, snapshot, options) : { lines: [], conflict: false }
     if (prior.conflict) entry.historyConflict = true
@@ -525,7 +533,7 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
  */
 export function reflexResultForModel(result) {
   const pick = {}
-  for (const key of ['outcome', 'reason', 'code', 'url', 'observationId', 'pageState', 'field', 'label', 'fields', 'suggestion', 'ranked', 'candidates', 'unmatchedValues']) {
+  for (const key of ['outcome', 'reason', 'code', 'url', 'observationId', 'pageState', 'field', 'label', 'fields', 'suggestion', 'ranked', 'candidates', 'unmatchedValues', 'withheld']) {
     if (result[key] !== undefined && result[key] !== null) pick[key] = result[key]
   }
   pick.steps = Array.isArray(result.steps) ? result.steps.length : 0

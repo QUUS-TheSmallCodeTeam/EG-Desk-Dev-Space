@@ -213,8 +213,8 @@ test('M3 month 2: the memory feature fetches the record, the browser loop does n
   assert.deepEqual(end.byQuestion, { browser_entry: 1, next_step: 3 }, 'no history request of its own')
   assert.equal(end.subjectiveTurns, 1); assert.equal(end.submits + end.dangerous + end.fills + end.clicks + end.images, 0)
   assert.equal(JSON.parse(w.engine.received[0]).egdesk_browser_task.status, 'done')
-  // the Decision model read the fetched memory in the entry request and in every step request
-  for (const d of w.decisions) assert.match(d.body, /Stored memory fetched for this turn/)
+  // c15 (real result: the packet lowered the entry from 0.93 to 0.76): the fetched memory is step evidence only, never entry evidence
+  for (const d of w.decisions) assert[d.q === 'browser_entry' ? 'doesNotMatch' : 'match'](d.body, /Stored memory fetched for this turn/)
   assert.equal(a.out.memoryWrite.status, 'stored', 'the second outcome is written through the same path')
 })
 

@@ -844,6 +844,7 @@ export class CodexChatRuntime {
     this.browserEntryShadow = new Map() // runId -> what the advisory entry decision WOULD have done; in memory only, bounded
     this.browserTaskStore = null // lazy: objective browser tasks of the direct entry ('on' only)
     this.browserRunHolds = new WeakMap() // run -> a browser-task run that stays open across its question, the in-run reply and the report turn
+    this.browserTaskRuns = new WeakSet() // runs that worded a browser task's note (their last message may be the task's question)
     this.browserRunJobs = new Set() // in-run resumes of the objective loop (never awaited by a request)
     this.turnAliases = new Map() // runKey(thread, later native turn) -> the run id that turn continues (a held-open browser-task run)
     this.compactedThreads = new Set() // native threads whose context the engine said was compacted (see compactionSignal); bounded
@@ -1854,6 +1855,12 @@ export class CodexChatRuntime {
         // Schema v2 also locks the local chat to the engine of its first send.
         if (requestedEngineId && thread?.engineId && thread.engineId !== requestedEngineId) throw engineError('ENGINE_MISMATCH', 'This conversation runs on another AI engine; continue in a new conversation')
         if (requestedPolicy && boundPolicy && requestedPolicy !== boundPolicy) throw chatError('POLICY_TRANSITION_FORBIDDEN', 'Start an explicit new conversation to change bounded execution modes', 409)
+        // The same refusal startTurn makes for a Browser task in an ordinary conversation whose native thread has no Browser tools, made
+        // BEFORE the message is stored: a refused request must not stay behind as an accepted message (all-on finding A2). The binding was
+        // read just above (assertNativeAccount), so this is the stored answer, not a guess.
+        if (conversationId && requestedPolicy === BROWSER_BOUNDED && !boundPolicy && !this.browserRegisteredThreads.has(conversationId)) {
+          throw chatError('BROWSER_TOOLS_UNAVAILABLE', 'This native thread predates Browser tools; keep its history and choose an explicit new conversation', 409)
+        }
         if (conversationId && requestedPolicy === FIXTURE_BROWSER_QA && !boundPolicy) throw chatError('FIXTURE_QA_NEW_CONVERSATION_REQUIRED', 'Start an explicit new fixture QA conversation with its narrowed native tool catalog', 409)
         if (qaMarkers && (requestedPolicy || boundPolicy) !== READ_ONLY_QA) throw chatError('QA_COMMAND_POLICY_REQUIRED', 'Native QA command receipt requires readOnlyQa policy', 400)
         if (!thread) thread = this.store.createConversation({ clientThreadId, createdAt: this.now() })
@@ -1873,7 +1880,7 @@ export class CodexChatRuntime {
         }
         if (accepted?.accepted) this.recordRoomAgent(clientThreadId, body, profileRun)
       } catch (error) {
-        if (['REQUEST_CONFLICT', 'CONVERSATION_REQUIRED', 'STATELESS_REQUIRES_NEW', 'NATIVE_BINDING_MISMATCH', 'NATIVE_ACCOUNT_MISMATCH', 'NATIVE_ACCOUNT_UNVERIFIED', 'POLICY_TRANSITION_FORBIDDEN', 'FIXTURE_QA_NEW_CONVERSATION_REQUIRED', 'QA_COMMAND_POLICY_REQUIRED', 'ENGINE_MISMATCH', 'ENGINE_UNAVAILABLE'].includes(error?.code)) throw error
+        if (['REQUEST_CONFLICT', 'CONVERSATION_REQUIRED', 'STATELESS_REQUIRES_NEW', 'NATIVE_BINDING_MISMATCH', 'NATIVE_ACCOUNT_MISMATCH', 'NATIVE_ACCOUNT_UNVERIFIED', 'POLICY_TRANSITION_FORBIDDEN', 'BROWSER_TOOLS_UNAVAILABLE', 'FIXTURE_QA_NEW_CONVERSATION_REQUIRED', 'QA_COMMAND_POLICY_REQUIRED', 'ENGINE_MISMATCH', 'ENGINE_UNAVAILABLE'].includes(error?.code)) throw error
         this.storeHealthy = false
         throw chatError('CHAT_STORE_UNAVAILABLE', 'Local chat history could not save the message; no Codex turn was started', 503)
       }
@@ -2655,6 +2662,10 @@ export class CodexChatRuntime {
       // (its question to the person, or its final report) is held and posted once, like any held answer. No second mechanism: the same
       // guard, settle point and post. The draft check itself stays ineligible for a bounded turn, so the original text is posted.
       if (browserPre?.note && this.browserTaskHoldEligible()) { context.draftHold = pending.draftHold = true; context.browserTaskTurn = true }
+      // Every other turn of a Browser conversation (U8: no streaming, only finished messages; all-on finding A6): the same hold, nothing new.
+      // It only holds: the draft check stays ineligible for a bounded turn (the original is posted whole), and the heartbeat does not start
+      // speaking in a bounded run because of it (holdOnly; allowIntermediateMessages is still the only way to opt a bounded run in).
+      else if (policy === BROWSER_BOUNDED && !context.draftHold && this.browserTaskHoldEligible()) { context.draftHold = pending.draftHold = true; context.holdOnly = true }
       const browserTaskContext = browserPre?.note ? { egdesk_browser_task: { kind: 'application', value: browserPre.note } } : null
       // Re-checked at the last moment: the mode, every page's permission and the key must still hold, or nothing is attached.
       const memoryPacket = memoryReady && this.turnMemoryMayDispatch(memoryTurn, additionalContext) ? memoryTurn.result.packet : null
@@ -2741,6 +2752,7 @@ export class CodexChatRuntime {
       for (const provider of preparedProviders.keys()) {
         if (browserPre && provider === browserPre.provider) {
           await this.callProvider(provider, 'adoptRun', run, preparedProviders.get(provider), browserPre.preRun); browserPre.adopted = true
+          if (context.browserTaskTurn === true || browserPre.note) this.browserTaskRuns.add(run)
           // A browser-task turn in the live-session mode (held messages + heartbeat + a store for in-run replies): this run may stay open
           // after its question so the reply resumes the task INSIDE the run (see holdRunForBrowserReply). Everything a later native turn
           // of the same run needs is kept here; nothing is decided yet.
@@ -4764,6 +4776,18 @@ export class CodexChatRuntime {
   //   -> the run ends. Every sentence is written by the subjective model in its own thread; the run is the only thing that spans.
   browserRunIdle() { return Promise.allSettled([...this.browserRunJobs]) }
 
+  // After a browser-task turn: if its task now waits for the person, the last completed message of this turn is the question it asked.
+  noteBrowserTaskQuestion(run) {
+    try {
+      if (!this.browserTaskRuns.has(run) || !this.browserTaskStore) return
+      const task = this.browserTaskStore.paused(run.clientThreadId)
+      if (!task || task.question) return
+      const flow = this.flowRuns.get(run), hold = this.browserRunHolds.get(run)
+      const asked = [...run.messages].reverse().find(m => m.role === 'assistant' && m.status === 'complete' && m.id !== hold?.questionId && !flow?.sent.some(row => row.id === m.id))
+      if (asked) this.browserTaskStore.noteQuestion(task, asked.text)
+    } catch { /* recording the question never changes the run */ }
+  }
+
   holdRunForBrowserReply(run, turn) {
     const hold = this.browserRunHolds.get(run)
     if (!hold || hold.cancelled) return false
@@ -4852,6 +4876,7 @@ export class CodexChatRuntime {
       if (!turnId) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
       if (hold.cancelled || run.status !== 'inProgress') { await engine.interruptTurn(cid, turnId, slot).catch(() => {}); return }
       hold.phase = 'turn'; hold.turnId = turnId
+      if (note) this.browserTaskRuns.add(run)
       this.turnAliases.set(runKey(cid, turnId), run.runId)
       const buffered = pending.buffer.splice(0)
       this.pendingStarts.delete(cid)
@@ -5115,7 +5140,7 @@ export class CodexChatRuntime {
       const held = context.draftHold === true
       // taskTurn: this turn words a browser task's note (its question or report). The heartbeat may speak in it like in any held turn, but the
       // message question never opens an in-run question there: the task's own question is this turn's message (see holdRunForBrowserReply).
-      const flow = { heartbeat: hb, held, canSpeak: held || (this.flowSpeakers.has(hb) && this.draftCheckMode() === 'on'), taskTurn: context.browserTaskTurn === true, sent: [], kinds: new Set(), askedNotes: new Set(), stepsAtLast: 0,
+      const flow = { heartbeat: hb, held, canSpeak: (held && context.holdOnly !== true) || (this.flowSpeakers.has(hb) && this.draftCheckMode() === 'on'), taskTurn: context.browserTaskTurn === true, sent: [], kinds: new Set(), askedNotes: new Set(), stepsAtLast: 0,
         closed: false, question: null, startedAt: 0, lastSentAt: null, pendingFacts: null,
         audience: () => this.flowAudience(run), reasoningOpen: () => (this.heartbeatReasoning.get(hb)?.size ?? 0) > 0 }
       this.flowRuns.set(run, flow)
@@ -6913,6 +6938,8 @@ export class CodexChatRuntime {
       if (raw !== undefined) await this.applyItem(run, { id: message.id, type: 'agentMessage', text: raw, phase: message.phase }, true)
     }
     if (epoch !== this.runEpoch(run)) return
+    // The task's question is the message this turn posted; the resume judgment reads it (R1).
+    if (turn.status === 'completed') this.noteBrowserTaskQuestion(run)
     // A browser-task run whose task now waits for the person stays open: the reply comes into this run and resumes the task in it.
     if (turn.status === 'completed' && this.holdRunForBrowserReply(run, turn)) return
     this.releaseBrowserRunHold(run)

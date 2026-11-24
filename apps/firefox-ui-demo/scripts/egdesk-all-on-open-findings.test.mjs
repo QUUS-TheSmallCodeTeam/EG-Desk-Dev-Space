@@ -28,7 +28,8 @@ test('A1: a follow-up answer that restates pages the Agent already holds is post
 
 // A2 (browser lane): a browser task asked in a conversation that began with an ordinary turn is refused (409). The refusal itself
 // is a product decision; what this pins is that a refused message is not left behind as an accepted one.
-test('A2: a browser request that is refused with 409 is not kept as an accepted message of the conversation', repro('A2, browser tools x existing conversation'), async t => {
+// Fixed in L8 c15: the refusal is made before the message is stored. Un-skipped.
+test('A2: a browser request that is refused with 409 is not kept as an accepted message of the conversation', async t => {
   const w = allOnWorld(t)
   w.step('first'); await w.send(QUOTE); await w.idle(); await w.answer(QUOTE_ANSWER); await w.idle()
   w.step('browser')
@@ -42,7 +43,8 @@ test('A2: a browser request that is refused with 409 is not kept as an accepted 
 
 // A6 (browser lane, draft check): the conversation keeps the bounded policy of the browser task, so nothing holds the answer of a later
 // ordinary message and its text is drawn while it arrives.
-test('A6: in a conversation that began as a browser task, an ordinary answer is drawn only when it is complete', repro('A6, browser conversation x completed messages only'), async t => {
+// Fixed in L8 c15: every turn of a Browser conversation uses the held-answer guard while the held mode is on. Un-skipped.
+test('A6: in a conversation that began as a browser task, an ordinary answer is drawn only when it is complete', async t => {
   const thread = 'dm-browser', w = allOnWorld(t), ui = screen(w, thread)
   w.use(thread)
   w.step('task')
