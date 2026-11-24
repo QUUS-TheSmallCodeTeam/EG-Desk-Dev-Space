@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { SCENARIO_KINDS, UNSTATED_NOTE, pickScenarios, runScenario, scenarioPlan } from './egdesk-conversation-scenarios.mjs'
+import { SCENARIO_KINDS, UNSTATED_NOTE, pickByLabels, pickScenarios, runScenario, scenarioPlan } from './egdesk-conversation-scenarios.mjs'
+import { world as flowWorld } from './egdesk-heartbeat-flow.fixture.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 import { judgeConfirmation } from './egdesk-record-confirmation.mjs'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
@@ -68,4 +69,26 @@ test('CLI: writes outside the repository (0600); the plan it writes passes the r
   const dry = await runnerMain([path.join(out, 'plan', 'plan.json')], { env: {}, print: l => printed.push(l), printError: l => refused.push(l), fetchImpl: async () => { throw new Error('no network') } })
   assert.equal(dry, 0, refused.join('\n')); assert.match(printed.join('\n'), /"mode":"dry_run"/)
   assert.ok(JSON.parse(readFileSync(path.join(out, 'mock-results.json'), 'utf8')).every(r => r.target))
+})
+
+test('v2 (c21): picked by the Decision labels only, the strongest per kind and area, each example once; the in-run kinds go through the beat\'s person questions', async () => {
+  const score = (o = {}) => ({ correction: 0, pushback: 0, approval: 0, ambiguous: 0, referential: 0, topic_switch: 0, topic_return: 0, interruption: 0, praise: 0, frustration: 0, reask: 0, instruction_change: 0, ...o })
+  const scores = new Map([['r1', score({ referential: 0.95 })], ['c1', score({ correction: 0.99, instruction_change: 0.9 })], ['h1', score({ frustration: 0.97, pushback: 0.9 })],
+    ['a1', score({ approval: 0.92 })], ['a2', score({ approval: 0.99, ambiguous: 0.9 })], ['q1', score({ reask: 0.7 })], ['s1', score({ approval: 1 })]])
+  const picked = pickByLabels(EXAMPLES, scores)
+  assert.deepEqual(picked.map(p => [p.kind, p.example.id]), [['triage_recall', 'r1'], ['triage_correction', 'c1'], ['triage_approval', 'a2'], ['heartbeat_waiting', 'h1'], ['confirm_unstated', 'a1']],
+    'the strongest first (a2 .99 over a1 .92), each example once, nothing below .8 (q1 .7), never after an automation stub (s1), no heuristic fallback (p1 praise unlabelled)')
+  assert.ok(picked.every(p => p.labelledBy === 'decision_model'))
+  // the in-run path: the person's real turn arrives while a run works and the beat asks about it alone
+  const r = await runScenario({ kind: 'inrun_waiting', example: EXAMPLES.find(e => e.id === 'h1') }, { flowWorld, makeClient })
+  assert.ok(r.target, 'the beat asked its person questions')
+  const body = JSON.parse(r.target.body)
+  assert.deepEqual(body.questions.map(q => q.name), ['message__person_status', 'message__person_change', 'message__person_stop'])
+  assert.ok(r.target.body.includes(JSON.stringify('왜 멈췄어? 계속 진행해').slice(1, -1)))
+  assert.ok(lintGroupedRequest(body).ok)
+  assert.deepEqual(r.seen, { accepted: true, action: 'steered' }, 'the mock says no to all three: the safe default hands it to the run')
+  // the budget keeps one per kind first
+  const fake = (kind, id, bytes) => ({ kind, example: { id, area: 'egdesk', source: {}, tags: [] }, labelledBy: 'decision_model', target: { body: JSON.stringify({ questions: [], x: 'x'.repeat(bytes) }) } })
+  const built = scenarioPlan([fake('triage_recall', 'a', 3000), fake('triage_recall', 'b', 3000), fake('triage_correction', 'c', 3000)], { estimate: body => Buffer.byteLength(body), budget: 6100 })
+  assert.deepEqual(built.plan.requests.map(q => q.id), ['triage_recall-a', 'triage_correction-c']); assert.deepEqual(built.dropped, ['triage_recall-b'])
 })
