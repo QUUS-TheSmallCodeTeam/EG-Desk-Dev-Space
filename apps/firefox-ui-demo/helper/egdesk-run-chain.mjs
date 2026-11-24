@@ -32,3 +32,12 @@ export function summarize(list) {
   const last = list.at(-1)
   return { passed: list.filter(x => x.pass).length, failed: list.filter(x => !x.pass).length, freshPasses: list.filter(x => x.fresh).length, last: last ? `${last.name} ${last.pass ? 'pass' : `FAIL ${last.hardFailures}`}` : null }
 }
+
+/**
+ * attributed(results, belongs) -> { hardChecks, failed: [id] }: the hard checks of a journey run whose id `belongs(id)` to one flag, and which of them failed. A run that
+ * failed on another flag's checks is still a pass for this one (a not-run check, pass null, is not counted).
+ */
+export function attributed(results, belongs) {
+  const checks = (Array.isArray(results?.steps) ? results.steps : []).flatMap(step => step.checks ?? []).filter(c => c?.severity === 'hard' && c.pass !== null && c.pass !== undefined && belongs(String(c.id)))
+  return { hardChecks: checks.length, failed: checks.filter(c => c.pass === false).map(c => c.id) }
+}
