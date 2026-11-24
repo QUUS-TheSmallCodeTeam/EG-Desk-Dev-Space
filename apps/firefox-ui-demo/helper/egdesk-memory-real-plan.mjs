@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { buildWiki, ternary } from './egdesk-wiki-reconstruction.mjs'
 import { SYNTHETIC_PAGES, choiceAnswer, mockSpeechAnswer } from './egdesk-wiki-reconstruction.fixture.mjs'
-import { prepareTurnMemory } from './egdesk-turn-memory.mjs'
+import { prepareTurnMemory, triageSkipsFetch } from './egdesk-turn-memory.mjs'
 import { readChoice } from './egdesk-decision-questions.mjs'
 
 // END-TO-END real-measurement plan for the whole turn-memory loop (triage -> first-turn reconstruction or mid-session fetch -> write judgment)
@@ -25,31 +25,40 @@ const OFF_TOPIC_J = NOT(['quote/', 'db/', 'misc/'])
 // forced: what the scripted client answers yes to (so the product builds the next request). must/mustNot/soft: what is scored.
 export const RUNS = Object.freeze([
   { id: 'pg-first', message: 'PostgreSQL 마이그레이션 배포 끝났어', position: 'first', held: [],
-    triage: { courtesy: 'no', need: 'yes', record: 'yes' }, scan: ['db/pg-plan', 'db/pg-design', 'db/pg-health'], open: ['db/sqlite-schema', 'db/pg-followup', 'db/pg-rollback'],
+    triage: { courtesy: 'no', need: 'yes', recall: 'no', record: 'yes' }, scan: ['db/pg-plan', 'db/pg-design', 'db/pg-health'], open: ['db/sqlite-schema', 'db/pg-followup', 'db/pg-rollback'],
     status: { 'db/pg-plan': 'plan', 'db/pg-design': 'done' }, write: { target: 'db/pg-plan', status: 'done', form: 'assertion', time: 'past_unspecified' },
     hard: { triage: { courtesy: 'no', record: 'yes' }, mustPick: ['db/pg-plan'], mustNot: OFF_TOPIC_PG, status: { 'db/pg-plan': 'plan', 'db/pg-design': 'done' }, write: { target: 'db/pg-plan', status: 'done' } },
     soft: { open: ['db/sqlite-schema', 'db/pg-followup'], labels: { form: 'assertion' } } },
   { id: 'pg-mid', message: 'PostgreSQL 마이그레이션 배포 끝났어', position: 'mid', held: ['db/pg-design', 'db/pg-plan', 'db/pg-rollback', 'db/sqlite-schema'],
-    triage: { courtesy: 'no', need: 'yes', record: 'yes' }, scan: ['db/pg-health', 'db/pg-followup'], open: [], status: { 'db/pg-health': 'done', 'db/pg-followup': 'plan' },
+    triage: { courtesy: 'no', need: 'yes', recall: 'no', record: 'yes' }, scan: ['db/pg-health', 'db/pg-followup'], open: [], status: { 'db/pg-health': 'done', 'db/pg-followup': 'plan' },
     write: { target: 'db/pg-plan', status: 'done', form: 'assertion', time: 'past_unspecified' },
     hard: { triage: { courtesy: 'no', needNotNo: true, record: 'yes' }, mustPick: ['db/pg-health', 'db/pg-followup'], mustNot: NOT([], ['db/pg-bench']), heldNeverScanned: true, write: { target: 'db/pg-plan', status: 'done' } },
     soft: { triageNeed: 'yes', labels: { form: 'assertion' } } },
   { id: 'a-first', message: '지난주 A사 견적 건 어디까지 됐지?', position: 'first', held: [],
-    triage: { courtesy: 'no', need: 'yes', record: 'no' }, scan: ['quote/a-request', 'quote/a-v1', 'quote/a-v2-plan'], open: ['quote/a-meeting', 'quote/a-decision'],
+    triage: { courtesy: 'no', need: 'yes', recall: 'any', record: 'no' }, scan: ['quote/a-request', 'quote/a-v1', 'quote/a-v2-plan'], open: ['quote/a-meeting', 'quote/a-decision'],
     status: { 'quote/a-v2-plan': 'plan', 'quote/a-meeting': 'reported_by_other', 'quote/a-v1': 'done' }, write: null,
     hard: { triage: { courtesy: 'no', record: 'no' }, mustPick: ['quote/a-v1', 'quote/a-v2-plan'], mustNot: OFF_TOPIC_A, status: { 'quote/a-v2-plan': 'plan', 'quote/a-meeting': 'reported_by_other' }, noPrivate: 'quote/a-cost' },
     soft: { open: ['quote/a-meeting', 'quote/a-decision'] } },
   { id: 'a-mid', message: '지난주 A사 견적 건 어디까지 됐지?', position: 'mid', held: ['quote/a-request', 'quote/a-v1'],
-    triage: { courtesy: 'no', need: 'yes', record: 'no' }, scan: ['quote/a-v2-plan', 'quote/a-decision', 'quote/a-meeting'], open: [], status: { 'quote/a-v2-plan': 'plan', 'quote/a-meeting': 'reported_by_other' }, write: null,
+    triage: { courtesy: 'no', need: 'yes', recall: 'any', record: 'no' }, scan: ['quote/a-v2-plan', 'quote/a-decision', 'quote/a-meeting'], open: [], status: { 'quote/a-v2-plan': 'plan', 'quote/a-meeting': 'reported_by_other' }, write: null,
     hard: { triage: { courtesy: 'no', needNotNo: true, record: 'no' }, mustPick: ['quote/a-v2-plan'], mustNot: NOT([]), heldNeverScanned: true, status: { 'quote/a-v2-plan': 'plan', 'quote/a-meeting': 'reported_by_other' }, noPrivate: 'quote/a-cost' },
     soft: { triageNeed: 'yes', pick: ['quote/a-decision', 'quote/a-meeting'] } },
   { id: 'j-first', message: '아까 jev hook 흐름 다시 정리해줘', position: 'first', held: [],
-    triage: { courtesy: 'no', need: 'yes', record: 'no' }, scan: ['jev/flow-note', 'jev/utt-user', 'jev/draft'], open: ['jev/utt-agent'], status: { 'jev/draft': 'plan' }, write: null,
+    triage: { courtesy: 'no', need: 'yes', recall: 'yes', record: 'no' }, scan: ['jev/flow-note', 'jev/utt-user', 'jev/draft'], open: ['jev/utt-agent'], status: { 'jev/draft': 'plan' }, write: null,
     hard: { triage: { courtesy: 'no', record: 'no' }, mustPick: ['jev/flow-note'], mustNot: OFF_TOPIC_J, status: { 'jev/draft': 'plan' } }, soft: { open: ['jev/utt-agent'], pick: ['jev/utt-user', 'jev/draft'] } },
   { id: 'j-mid', message: '아까 jev hook 흐름 다시 정리해줘', position: 'mid', held: ['jev/draft', 'jev/utt-user'],
-    triage: { courtesy: 'no', need: 'yes', record: 'no' }, scan: ['jev/flow-note', 'jev/utt-agent'], open: [], status: {}, write: null,
+    triage: { courtesy: 'no', need: 'yes', recall: 'yes', record: 'no' }, scan: ['jev/flow-note', 'jev/utt-agent'], open: [], status: {}, write: null,
     hard: { triage: { courtesy: 'no', needNotNo: true, record: 'no' }, mustPick: ['jev/flow-note'], mustNot: NOT([]), heldNeverScanned: true }, soft: { triageNeed: 'yes', pick: ['jev/utt-agent'] } },
 ])
+
+// Controls for the re-measurement: a mid-session turn whose answer IS covered by what is held (the fetch may legitimately be skipped).
+export const CONTROLS = Object.freeze([
+  { id: 't6-covered', message: '그럼 롤백 조건은?', position: 'mid', held: ['db/pg-plan', 'db/pg-health', 'db/pg-followup', 'db/pg-rollback'],
+    triage: { courtesy: 'no', need: 'no', recall: 'no', record: 'no' }, scan: [], open: [], status: {}, write: null,
+    hard: { triage: { courtesy: 'no', record: 'no' }, mustPick: [] }, soft: { triageNeed: 'no', triageRecall: 'no' } },
+])
+// The small re-measurement after the first end-to-end run: only the failing stages plus controls.
+export const REMEASURE = Object.freeze(['pg-mid-1-triage', 'pg-mid-2-scan', 'a-first-2-scan', 'j-mid-1-triage', 'j-mid-2-scan', 't6-covered-1-triage']) // in run order
 
 const sha = text => createHash('sha256').update(text).digest('hex')
 export const estimateTokens = (choiceQ, predQ, bytes) => Math.round(56.5 * choiceQ + 134.8 * predQ + 0.1983 * bytes) // typed model solved from the three real requests of 2026-11-24
@@ -71,6 +80,7 @@ function scriptedClient(run, wiki, recorded) {
     for (const q of request.questions) {
       if (q.name === 'tn_courtesy') answers[q.name] = yesNo(run.triage.courtesy === 'yes')
       else if (q.name === 'tn_need') answers[q.name] = yesNo(run.triage.need === 'yes')
+      else if (q.name === 'tn_recall') answers[q.name] = yesNo(run.triage.recall === 'yes')
       else if (q.name === 'tn_record') answers[q.name] = yesNo(run.triage.record === 'yes')
       else if (/^pg_\d+$/.test(q.name)) answers[q.name] = yesNo(run.scan.includes(aliases[`P${Number(q.name.slice(3)) + 1}`]))
       else if (/^op_P\d+$/.test(q.name)) answers[q.name] = yesNo(run.open.includes(aliases[q.name.slice(3)]))
@@ -88,10 +98,10 @@ function scriptedClient(run, wiki, recorded) {
 const receiptsFor = (wiki, ids, threadKey) => ({ usable: true, threadKey, pages: Object.fromEntries(ids.map(id => [id, { revision: wiki.pages.get(id).revision, hash: wiki.pages.get(id).contentKey ?? sha(wiki.pages.get(id).body) }])) })
 
 /** Build the six runs offline: every request body, its sha256, size and expected tokens. Nothing is sent. */
-export async function buildPlan({ pages = SYNTHETIC_PAGES, askedAt = ASKED_AT } = {}) {
+export async function buildPlan({ pages = SYNTHETIC_PAGES, askedAt = ASKED_AT, subset = null } = {}) {
   const wiki = buildWiki(pages)
   const runs = []
-  for (const run of RUNS) {
+  for (const run of subset === 'remeasure' ? [...RUNS, ...CONTROLS] : RUNS) {
     const recorded = []
     const client = scriptedClient(run, wiki, recorded)
     const position = run.position === 'mid' ? { kind: 'mid', reason: 'live_thread' } : { kind: 'first', reason: 'no_native_thread' }
@@ -106,7 +116,8 @@ export async function buildPlan({ pages = SYNTHETIC_PAGES, askedAt = ASKED_AT } 
       const choice = r.questions.filter(q => q.type === 'choice').length, predicate = r.questions.length - choice
       return { name: `${run.id}-${index + 1}-${stage}`, stage, body, bytes: Buffer.byteLength(text), sha256: sha(text), questions: names.length, choice, predicate, estInputTokens: estimateTokens(choice, predicate, Buffer.byteLength(text)), aliases: r.aliases, scripted: r.scripted }
     })
-    runs.push({ id: run.id, message: run.message, position: run.position, held: run.held, requests, estInputTokens: requests.reduce((n, r) => n + r.estInputTokens, 0) })
+    const kept = subset === 'remeasure' ? requests.filter(r => REMEASURE.includes(r.name)) : requests
+    if (kept.length) runs.push({ id: run.id, message: run.message, position: run.position, held: run.held, requests: kept, estInputTokens: kept.reduce((n, r) => n + r.estInputTokens, 0) })
   }
   const totals = { runs: runs.length, requests: runs.reduce((n, r) => n + r.requests.length, 0), estInputTokens: runs.reduce((n, r) => n + r.estInputTokens, 0), bytes: runs.reduce((n, r) => n + r.requests.reduce((m, q) => m + q.bytes, 0), 0) }
   return { wiki, runs, totals }
@@ -138,8 +149,13 @@ export function scoreRun(def, planRun, results, wiki) {
       const c = state(a.tn_courtesy), n = state(a.tn_need), rec = state(a.tn_record)
       add('hard', 'triage courtesy is decided and as pre-registered', c.state === def.hard.triage.courtesy, `p=${c.p}`)
       add('hard', 'triage record is decided and as pre-registered', rec.state === def.hard.triage.record, `p=${rec.p}`)
-      if (def.hard.triage.needNotNo) add('hard', 'triage need is not a decided "no" (a wrong skip loses material)', n.state !== 'no', `p=${n.p}`)
+      const catalogComplete = JSON.stringify(request.body.input).includes('Stored pages that are not held (titles only):') && !JSON.stringify(request.body.input).includes('more stored pages are not listed')
+      const skips = triageSkipsFetch({ courtesy: c, need: n, recall: state(a.tn_recall), catalog: { complete: catalogComplete } })
+      if (def.hard.triage.needNotNo) add('hard', 'triage does not skip the fetch (the rule applied to the answers; a wrong skip loses material)', !skips, `need=${n.p} recall=${state(a.tn_recall).p} skip=${skips}`)
+      if (def.hard.triage.needNotNo) add('soft', 'triage need is not a decided "no"', n.state !== 'no', `p=${n.p}`)
       if (def.soft.triageNeed) add('soft', 'triage need is a decided yes', n.state === def.soft.triageNeed, `p=${n.p}`)
+      if (a.tn_recall && def.triage.recall && def.triage.recall !== 'any') add('soft', `triage recall is a decided ${def.triage.recall}`, state(a.tn_recall).state === def.triage.recall, `p=${state(a.tn_recall).p}`)
+      if (def.soft.triageNeed === 'no') add('soft', 'triage need is a decided no (the held pages cover it)', n.state === 'no', `p=${n.p}`)
     }
     if (request.stage === 'scan') {
       const pickedIds = []
@@ -190,4 +206,11 @@ export function scorePlan(plan, results) {
   const scored = RUNS.map(def => scoreRun(def, plan.runs.find(r => r.id === def.id), results, plan.wiki))
   const triageFailures = scored.flatMap(s => s.checks.filter(c => c.severity === 'hard' && !c.ok && /^triage/.test(c.name)))
   return { runsPassed: scored.filter(s => s.pass).length, pass: scored.filter(s => s.pass).length >= 5 && triageFailures.length === 0, triageFailures: triageFailures.map(c => c.name), scored }
+}
+
+/** The re-measurement passes when no included request has a hard failure (the controls included). */
+export function scoreRemeasure(plan, results) {
+  const defs = [...RUNS, ...CONTROLS]
+  const scored = plan.runs.map(run => scoreRun(defs.find(d => d.id === run.id), run, results, plan.wiki))
+  return { pass: scored.every(s => s.pass), runsPassed: scored.filter(s => s.pass).length, scored }
 }

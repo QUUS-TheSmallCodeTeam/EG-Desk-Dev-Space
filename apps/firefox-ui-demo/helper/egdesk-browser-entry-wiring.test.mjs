@@ -58,9 +58,9 @@ test('W3 mid-session: the browser consumer still gets the prior record when the 
   // 1. Contrast: the general mid-session fetch for the ANSWERING model skips what it holds, so a browser loop fed from it would miss the record.
   const midHeld = await prepareTurnMemory({ message: GOAL, wiki, client: x.judge, scope, position: MID, delivered: heldReceipts, threadKey: 'native-1' })
   assert.equal(midHeld.memory.picks.some(p => p.id === page.id), false, 'held by the subjective model, so not re-sent to it')
-  // 2. Contrast: a wrong "no need" with the host opt-in skips the fetch entirely.
+  // 2. Contrast: a wrong "no need" (with recall also decided "no" and the full list shown) skips the fetch entirely.
   const noNeed = { async decide(request) { const names = request.questions.map(q => q.name)
-    if (names.includes('tn_need')) return { answers: { tn_need: { type: 'predicate', probability: 0.02 }, tn_courtesy: { type: 'predicate', probability: 0.02 }, tn_record: { type: 'predicate', probability: 0.02 } }, usage: { inputTokens: 1 }, latencyMs: 1 }
+    if (names.includes('tn_need')) return { answers: { tn_need: { type: 'predicate', probability: 0.02 }, tn_recall: { type: 'predicate', probability: 0.02 }, tn_courtesy: { type: 'predicate', probability: 0.02 }, tn_record: { type: 'predicate', probability: 0.02 } }, usage: { inputTokens: 1 }, latencyMs: 1 }
     return x.judge.decide(request) } }
   const skipped = await prepareTurnMemory({ message: GOAL, wiki, client: noNeed, scope, position: MID, delivered: heldReceipts, threadKey: 'native-1', skipOnNeed: true })
   assert.equal(skipped.memory.status, 'skipped')

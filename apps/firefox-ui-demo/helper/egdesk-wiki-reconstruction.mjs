@@ -132,7 +132,8 @@ export function pageBlock(alias, page, chars, extra = '') {
 export const clockLine = asked => (Number.isSafeInteger(asked) ? `Question clock: ${new Date(asked).toISOString()} (UTC offset minutes ${-new Date(asked).getTimezoneOffset()}). Page times are as recorded; judge, do not compute dates.` : 'Question clock: unknown.')
 export const JUDGE_RULES = [
   'You are a system judge that reconstructs memory for another model. Judge only from the page contents shown and the message.',
-  'A page is needed when its content helps answer the message. A recorded plan is not a done fact; a relayed statement is attribution, not the writer\'s own record.',
+  'A page is needed when its content helps the answering model decide, verify or do what this message calls for, not only what it must say back. When a message reports that something finished, that includes how success is judged, what is left to do, and what to do if it failed.',
+  'A recorded plan is not a done fact; a relayed statement is attribution, not the writer\'s own record.',
   'Never invent a page. If the options do not fit, choose unknown.',
 ].join('\n')
 export const ternary = answer => (answer?.type !== 'predicate' || !Number.isFinite(answer.probability) ? { state: 'unknown', p: null }
@@ -159,7 +160,7 @@ function pack(items, maxChars, excerptChars, render) {
  */
 export const NEXT_RULES = [
   'You are a system judge. The answering model is MID-CONVERSATION: it already holds the pages listed as HELD and the live conversation. Do not reconstruct memory.',
-  'Pick only the stored pages whose content it still needs to make the next judgment this message asks for, and that the held pages and the conversation do not already cover.',
+  'Pick only the stored pages whose content it still needs to decide, verify or do what this message calls for next (not only what it must say back), and that the held pages and the conversation do not already cover. When a message reports that something finished, that includes how success is judged, what is left to do, and what to do if it failed.',
   'A recorded plan is not a done fact; a relayed statement is attribution. Never invent a page. If the options do not fit, choose unknown.',
 ].join('\n')
 
@@ -185,7 +186,7 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
   const isNext = mode === 'next'
   const rules = isNext ? NEXT_RULES : JUDGE_RULES
   // Held pages are shown by header only: the judge knows what the model holds, the content is never re-sent.
-  const heldMessage = isNext ? [{ role: 'user', content: `Held in the answering model's context (content not repeated):\n${alreadyDelivered.length ? alreadyDelivered.map(p => `- ${p.title} | time=${p.time.slice} | status=${p.status}`).join('\n') : '(nothing)'}` },
+  const heldMessage = isNext ? [{ role: 'user', content: `Held in the answering model's context (the start of each is shown; the rest is not repeated):\n${alreadyDelivered.length ? alreadyDelivered.map(p => `- ${p.title} | time=${p.time.slice} | status=${p.status}\n  ${compactText(p.body, 200)}`).join('\n') : '(nothing)'}` },
     ...(typeof live === 'string' && live.trim() ? [{ role: 'user', content: `Live conversation (recent turns, bounded):\n${live.slice(-3000)}` }] : [])] : []
   const canCall = () => receipts.calls < budget.maxCalls && now() < deadline && !signal?.aborted
   const decide = async (questions, input) => {
