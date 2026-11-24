@@ -350,19 +350,23 @@ test('triage shows the stored pages that are not held, by title only: no bodies,
   assert.match(seen[0].questions[1].instructions, /stored pages that are not held \(listed below, titles only\)/)
 })
 
-test('real j-mid ("아까 jev hook 흐름 다시 정리해줘", held draft + utterance): the REAL answers (courtesy 0, need 0.02, record 0, no recall answer) no longer skip; a recall yes or an incomplete list never skips either', async () => {
+test('j-mid ("아까 jev hook 흐름 다시 정리해줘", held draft + utterance): under the c18 rule a decided need "no" with held pages skips, whatever recall says; the current-body real answers (need 1) fetch; an incomplete list never skips', async () => {
+  // The c10 real answers (courtesy 0, need 0.02, record 0) were given to an OLDER triage body (held titles only, no list of the other stored
+  // pages). Replayed onto today's body they now skip: that is the residual risk of the c18 rule, which trusts a decided need "no". The same
+  // message on today's body (c11 re-measurement, real) answered need 1 and recall 1, which fetches.
   const real = JSON.parse(await readFile(new URL('./fixtures/memory-e2e-real-20261124.json', import.meta.url), 'utf8')).requests['j-mid-1-triage']
   const a = Object.fromEntries(real.answers.map(x => [x.name, x]))
   assert.deepEqual([a.tn_courtesy.probability, a.tn_need.probability, a.tn_record.probability], [0, 0.02, 0])
   const judge = mockJudge()
   const replay = extra => ({ async decide(req) { const r = await judge.decide(req); if (req.questions.some(q => q.name === 'tn_need')) { r.answers.tn_courtesy = a.tn_courtesy; r.answers.tn_need = a.tn_need; r.answers.tn_record = a.tn_record; delete r.answers.tn_recall; Object.assign(r.answers, extra) } return r } })
   const held = ['jev/draft', 'jev/utt-user']
-  const old = await turn('아까 jev hook 흐름 다시 정리해줘', { client: replay({}), held })
-  assert.notEqual(old.r.memory.status, 'skipped', 'what used to be a wrong skip now fetches (recall is undecided)')
-  const yes = await turn('아까 jev hook 흐름 다시 정리해줘', { client: replay({ tn_recall: { type: 'predicate', probability: 0.97 } }), held })
-  assert.notEqual(yes.r.memory.status, 'skipped')
-  const no = await turn('아까 jev hook 흐름 다시 정리해줘', { client: replay({ tn_recall: { type: 'predicate', probability: 0.02 } }), held })
-  assert.equal(no.r.memory.status, 'skipped', 'with everything shown, recall no and need no it is the model\'s covered judgment that skips')
+  for (const recall of [null, 0.97, 0.02]) {
+    const r = await turn('아까 jev hook 흐름 다시 정리해줘', { client: replay(recall === null ? {} : { tn_recall: { type: 'predicate', probability: recall } }), held })
+    assert.equal(r.r.memory.status, 'skipped', `stale need 0.02, recall ${recall}: a decided need "no" with held pages skips`)
+  }
+  // today's body, the real answers of the c11 re-measurement: need 1, recall 1 -> fetch
+  const now = await turn('아까 jev hook 흐름 다시 정리해줘', { client: replay({ tn_need: { type: 'predicate', probability: 1 }, tn_recall: { type: 'predicate', probability: 1 } }), held })
+  assert.notEqual(now.r.memory.status, 'skipped'); assert.ok(now.r.memory.picks.some(p => p.id === 'jev/flow-note'), 'the flow note is fetched')
   // an incomplete list: more than 80 stored pages that are not held
   const pages = Array.from({ length: 90 }, (_, i) => ({ id: `bulk/p${i}`, title: `문서 ${i}`, body: `내용 ${i}`, revision: '1', time: { slice: 'present' }, provenance: { kind: 'document' }, status: 'done' }))
   const big = buildWiki([...SYNTHETIC_PAGES, ...pages])

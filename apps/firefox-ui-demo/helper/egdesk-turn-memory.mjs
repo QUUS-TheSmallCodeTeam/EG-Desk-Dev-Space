@@ -50,12 +50,21 @@ export const CATALOG_LIMIT = 80
 const catalogBlock = list => (list.length ? list.slice(0, CATALOG_LIMIT).map(p => `- ${compactText(p.title, 90)} | time=${p.time} | status=${p.status}`).join('\n') + (list.length > CATALOG_LIMIT ? `\n(${list.length - CATALOG_LIMIT} more stored pages are not listed)` : '') : '(none)')
 /**
  * The one rule that decides whether the mid-session fetch is skipped, from a triage result (also applied by the measurement scorer to real answers).
- * A decided courtesy "yes" skips. A decided need "no" skips only when the held content AND the complete list of other stored pages were shown and
- * recall is a decided "no". Anything else fetches.
+ * A decided courtesy "yes" skips. A decided need "no" skips when the conversation already holds pages, their content was shown to the triage,
+ * and the complete list of the other stored pages was shown: no new material is needed, and the held pages are what the turn refers to.
+ * Anything else fetches (an undecided need, nothing held, an incomplete list).
+ * Recall no longer overrides a decided need "no" (L7 c18). Pointing back to something said IN this conversation is not a memory fetch, and the
+ * scan cannot tell what "그 내용" is without the conversation (real all-on run 2026-11-25, s2 "방금 그 내용 정리해줘": need 0, recall 0.96 ->
+ * fetched; the scan then picked unrelated PostgreSQL pages at 0.90 / 0.98, and still 0.80 / 0.66 when told which held pages the previous
+ * reply was given with). In every real mid-session triage with the current inputs (9), a decided need "no" was never wrong; where material
+ * was missing (a-mid, j-mid) need was 1 although recall was high too. legacyRecall: true is the c11 rule, for the scorer of measurements
+ * that were made under it.
  */
-export function triageSkipsFetch(triage, { skipOnNeed = true, heldExcerpts = true } = {}) {
+export function triageSkipsFetch(triage, { skipOnNeed = true, heldExcerpts = true, legacyRecall = false } = {}) {
   if (triage?.courtesy?.state === 'yes') return true
-  return skipOnNeed !== false && heldExcerpts !== false && triage?.catalog?.complete === true && triage?.recall?.state === 'no' && triage?.need?.state === 'no'
+  if (skipOnNeed === false || heldExcerpts === false || triage?.catalog?.complete !== true || triage?.need?.state !== 'no') return false
+  if (legacyRecall === true) return triage?.recall?.state === 'no'
+  return Number.isSafeInteger(triage?.held) && triage.held > 0
 }
 const TRIAGE_RULES = ['You are a system judge deciding what stored memory a turn needs. Judge only from the message, the list of what the answering model already holds, the titles of the stored pages that are not held, and any live conversation shown. Never invent anything.',
   'A title tells you the topic of a stored page, not everything in it. The held list shows the start of each held page.'].join('\n')
@@ -92,6 +101,7 @@ export async function triageTurn({ message, heldTitles = [], heldDigest = null, 
     const result = await client.decide({ input, questions, timeoutMs, signal })
     return { status: 'ready', courtesy: ternary(result.answers?.tn_courtesy), need: ternary(result.answers?.tn_need), recall: ternary(result.answers?.tn_recall), record: ternary(result.answers?.tn_record),
       catalog: Array.isArray(stored) ? { listed: Math.min(stored.length, CATALOG_LIMIT), complete: stored.length <= CATALOG_LIMIT } : null, usage: result.usage ?? null,
+      held: Array.isArray(heldTitles) ? heldTitles.length : 0, // how many held pages the triage was shown (the skip rule needs at least one)
       ...(riders.length ? { extra: Object.fromEntries(riders.map(q => [q.name, result.answers?.[q.name] ?? { type: 'missing' }])) } : {}) }
   } catch (error) { return { status: 'fallback', reason: error?.code ?? 'unreachable', courtesy: { state: 'unknown', p: null }, need: { state: 'unknown', p: null }, recall: { state: 'unknown', p: null }, record: { state: 'unknown', p: null }, catalog: null, usage: null } }
 }
