@@ -73,6 +73,8 @@ export function createCommandExecutorProvider({ mode = () => 'off', ledger = nul
   const calls = new Map()
   const running = new Map() // run key -> Set of AbortController: commands that are running now (c25: the person stopping the run stops them)
   const runKey = run => String(run?.answerId ?? run?.runId ?? '')
+  const stopPending = new Map() // clientThreadId (or conversation id) -> Set of promises: commands that were told to stop and have not been recorded yet (c27)
+  const roomKey = run => String(run?.clientThreadId ?? run?.conversationId ?? '')
   return {
     providerId: COMMAND_EXECUTOR_PROVIDER_ID,
     runtime: null,
@@ -91,8 +93,21 @@ export function createCommandExecutorProvider({ mode = () => 'off', ledger = nul
     cancelRun(run) {
       const set = running.get(runKey(run))
       if (!set) return
-      for (const controller of [...set]) { try { controller.abort() } catch { /* already aborted */ } }
+      const room = roomKey(run)
+      for (const controller of [...set]) {
+        if (controller.settled && room) {
+          const pending = stopPending.get(room) ?? new Set(); stopPending.set(room, pending)
+          const tracked = controller.settled.then(() => { pending.delete(tracked); if (pending.size === 0 && stopPending.get(room) === pending) stopPending.delete(room) })
+          pending.add(tracked)
+        }
+        try { controller.abort() } catch { /* already aborted */ }
+      }
     },
+    /**
+     * c27: resolves when every command of this room that was told to stop has been recorded (its fact is in place for the next turn), at once when there is none. The runtime
+     * waits for it, bounded, before it builds the next turn: a message sent right after "stop" must still be told what happened to the command.
+     */
+    stopSettled(room) { const pending = stopPending.get(String(room ?? '')); return pending && pending.size ? Promise.all([...pending]).then(() => undefined) : null },
     async execute(run, event) {
       if (event?.namespace || event?.tool !== COMMAND_TOOL_NAME) return respond(false, { error: { code: 'COMMAND_TOOL_UNKNOWN' } })
       if (!on()) return respond(false, { error: { code: 'COMMAND_EXECUTOR_OFF' } })
@@ -124,11 +139,12 @@ export function createCommandExecutorProvider({ mode = () => 'off', ledger = nul
       try { output = outputFor(run) } catch { output = null }
       // the runner enforces the hard limit itself (SIGTERM, then SIGKILL); a soft notice only updates the facts
       const controller = new AbortController(), key = runKey(run)
+      controller.settled = new Promise(resolve => { controller.markSettled = resolve }) // resolved when this command's record has been handed to onConditions
       if (!running.has(key)) running.set(key, new Set())
       running.get(key).add(controller)
       try { result = await runner({ command, cwd, timeoutMs, signal: controller.signal, itemId: `egdesk-cmd:${event.callId ?? ''}`, output, approved: decision.decision === 'allow',
         onFacts: row => { if (row?.softNotice) facts(run, terminalFactRow({ kind: 'engine', running: true, runningMs: row.runningMs })) } }) }
-      catch { facts(run, terminalFactRow({ kind: 'engine', running: false })); return respond(false, { error: { code: 'COMMAND_RUN_FAILED' } }) }
+      catch { facts(run, terminalFactRow({ kind: 'engine', running: false })); controller.markSettled(); return respond(false, { error: { code: 'COMMAND_RUN_FAILED' } }) }
       finally { const set = running.get(key); set?.delete(controller); if (set && set.size === 0) running.delete(key) }
       const stopped = result?.aborted === true || (controller.signal.aborted && result?.exitCode === null && result?.timedOut !== true)
       const exitCode = Number.isSafeInteger(result?.exitCode) ? result.exitCode : null
@@ -144,6 +160,7 @@ export function createCommandExecutorProvider({ mode = () => 'off', ledger = nul
         try { worktree = await judgeWorktree({ porcelain: typeof porcelain === 'string' ? porcelain : null, output: tailText, command, ask: askRun }) } catch { worktree = null }
       }
       try { onConditions(run, { exitCode, durationMs: Number.isFinite(result?.durationMs) ? result.durationMs : null, health, worktree, ...(stopped ? { stopped: true, command: command.slice(0, 300), signal: typeof result?.signal === 'string' ? result.signal : null, outputTail: tailText.slice(-1000) } : {}) }) } catch { /* facts are advisory */ }
+      controller.markSettled()
       // the c10 row keeps runningMs only while running; the ended row adds how long it ran (an extra field, the row shape is unchanged)
       facts(run, { ...terminalFactRow({ kind: 'engine', running: false, exitCode }), ...(Number.isFinite(result?.durationMs) ? { durationMs: result.durationMs } : {}), ...(stopped ? { stopped: true } : {}) })
       const out = tail(result?.stdout, L.outputChars), err = tail(result?.stderr, Math.floor(L.outputChars / 3))

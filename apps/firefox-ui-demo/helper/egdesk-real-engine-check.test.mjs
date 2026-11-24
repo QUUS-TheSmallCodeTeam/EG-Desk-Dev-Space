@@ -449,7 +449,13 @@ test('whileRunning: a run that ended before afterMs no longer takes the message;
   const late = structuredClone(WHILE); late.conversations[0].turns[1].whileRunning.afterMs = 500
   const w = world(t, { turns: [{ steps: [{ toolCall: { tool: 'egdesk_run_command', arguments: { command: 'npm test' } } }], final: 'The tests passed.' }] })
   w.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: true, boardPeerContract: 'c'.repeat(64) })
+  // Timing-robust (c27): "the run ended before afterMs" is made true by EVENTS, not by the wall clock. The wait for afterMs (the check's injectable sleep) ends only once the
+  // first turn's run is over, however slow the machine is; a loaded machine used to leave the fake's turn still running at 500 ms and the message was (rightly) taken.
+  let chatOf = null
+  w.deps.extensions = [{ name: 'chat-ref', setup: ctx => { chatOf = ctx.chat; return {} } }]
+  w.deps.sleep = async () => { const end = Date.now() + 60_000; while (Date.now() < end && ![...chatOf.runs.values()].every(r => r.status !== 'inProgress')) await new Promise(resolve => setTimeout(resolve, 2)) }
   const rec = only(await runCheck(w.options, asScripts(late), w.deps))
+  assert.ok([...chatOf.runs.values()].every(r => r.status === 'completed'), 'the first run had ended when the message was sent')
   const second = rec.turns[1]
   assert.equal(second.ok, false); assert.equal(second.subTurns[0].accepted, false); assert.equal(second.subTurns[0].error, 'INRUN_MESSAGE_UNAVAILABLE')
   assert.deepEqual(second.expectations[0], { check: 'sent_while_running', ok: false, detail: { afterMs: 500, sentAtMs: second.expectations[0].detail.sentAtMs, error: 'INRUN_MESSAGE_UNAVAILABLE' } })
@@ -861,4 +867,6 @@ test('draft-check script on the fake (memory selection and the product\'s verdic
   assert.equal(rec.aborted, null); const turn = rec.turns[0]
   assert.equal(turn.expectations.find(c => c.check === 'draftCheck')?.ok, true, JSON.stringify(turn.draftCheck)); assert.equal(rec.ok, true, JSON.stringify(turn.expectations.filter(c => !c.ok)))
   assert.deepEqual(rec.cleanup.failures, []); assert.ok(rec.agentProfile)
+  // c27: the names (never the text) of the context blocks the turn/start carried are in the turn record and on the request rows
+  assert.deepEqual(turn.contextKeys, ['egdesk_channel']); assert.deepEqual(rec.requests.filter(r => r.method === 'turn/start').map(r => r.contextKeys), [['egdesk_channel']])
 })
