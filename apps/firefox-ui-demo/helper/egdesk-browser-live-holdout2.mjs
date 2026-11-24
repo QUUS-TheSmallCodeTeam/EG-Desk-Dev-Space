@@ -47,6 +47,8 @@ export const HOLDOUT2_SETS = Object.freeze({
   // c26: the c24 fee-and-verification page and the settings error page under the stuck-page rule (egdesk-browser-stuck-person-controls.test.mjs)
   'browser-live-stuck-v1': ['sk-form', 'sk-error'],
   // c27: the ENTRY decision only (no step requests): the two holdout2 requests the request predicate read as answers, two general-knowledge controls, and three earlier entries
+  // c28: v2, the membership request again under the account-data wording (v1: browser_entry .01 with the billing line shown), the two controls, the hospital request
+  'browser-live-entry-v2': ['en-ms', 'en-ctrl-a', 'en-ctrl-b', 'en-hc'],
   'browser-live-entry-v1': ['en-ms', 'en-hc', 'en-ctrl-a', 'en-ctrl-b', 'en-se', 'en-ig', 'en-st'],
 })
 const MSG_U = '이번 달 전기요금 고지서 내려받아줘', MSG_I = '주민등록등본 발급 신청해줘', MSG_H = '한결병원 다음 진료 예약 날짜 알려줘', MSG_M = '다음 결제일이 언제야?'
