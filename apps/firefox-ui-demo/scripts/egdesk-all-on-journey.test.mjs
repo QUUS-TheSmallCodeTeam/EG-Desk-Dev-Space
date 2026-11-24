@@ -104,7 +104,9 @@ test('all features on, one session: memory, briefing, a browser task, a long com
 
   // ---- c2. the command ends, the engine stays silent: the system's own stalled line (not a model text) ----
   w.step('c2')
-  await w.notify('item/completed', { ...timing, item: { id: 'cmd-1', type: 'commandExecution', command: COMMAND, cwd: '/work', status: 'completed', exitCode: 0, commandActions: [], aggregatedOutput: 'all passed\n' } })
+  // As a real Codex completion: the summary line streams too, and the completion carries the whole output (cycle 16, L3's finding).
+  await w.notify('item/commandExecution/outputDelta', { ...timing, itemId: 'cmd-1', delta: '40 passed, 0 failed\n' })
+  await w.notify('item/completed', { ...timing, item: { id: 'cmd-1', type: 'commandExecution', command: COMMAND, cwd: '/work', status: 'completed', exitCode: 0, commandActions: [], aggregatedOutput: 'running 40 tests\n40 passed, 0 failed\n' } })
   await w.advance(40000); await w.idle(); ui.pump(); close('c2')
   assert.deepEqual(w.byFeature('c2'), { heartbeat: 1 })
   assert.equal(w.history().at(-1)[1], FLOW_COPY.stalled)

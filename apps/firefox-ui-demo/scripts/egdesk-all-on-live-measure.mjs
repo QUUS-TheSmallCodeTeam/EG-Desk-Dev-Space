@@ -54,6 +54,9 @@ const AGENT_SAYS = Object.freeze({ quote: 'A사 견적은 v1 발송 후 v2 수�
   recall: 'PostgreSQL 전환 설계에서 스키마 변환, 데이터 이관, 롤백 순서를 정하기로 확정했습니다.', tests: '테스트가 모두 통과했습니다.', noted: '네, 기록해 두겠습니다.', heard: '네, 알겠습니다.', ask: '사업자가 둘입니다. 어느 쪽으로 받을까요?', got: '세금계산서를 내려받았습니다.', stuck: '포털 작업을 마치지 못했습니다.',
   stuckAsk: '포털에서 다음 단계를 정하지 못했습니다. 어느 사업자의 세금계산서를 받을지 알려 주세요.' })
 export const COMMAND = 'npm test -- --suite=payroll-secret', COMMAND_OUTPUT = 'running 40 tests'
+// (cycle 16) The run's summary line. A real Codex completion's aggregatedOutput is the whole output, the streamed lines and this one; the
+// product keeps the longer of the streamed and the completed text (codex-run-outputs.mjs completeCommand), so a shorter completion was ignored.
+export const COMMAND_SUMMARY = '40 passed, 0 failed'
 const rect = (x, y, width, height) => ({ x, y, width, height })
 const people = () => [{ member: 'self', self: true, active: true, viewport: rect(0, 0, 1200, 800), focusCard: null, lastInputAgeMs: 500 },
   { member: 'm-jin', self: false, active: true, viewport: rect(4000, 0, 1200, 800), focusCard: null, lastInputAgeMs: 900 }]
@@ -114,7 +117,8 @@ export const STEPS = Object.freeze([
   } },
   { id: 's5-silence', room: DM, title: 'the command ends; forty seconds without engine events', run: async (w, j) => {
     if (!j.note.command) return
-    await w.notify('item/completed', { ...j.note.command, item: { id: 'cmd-1', type: 'commandExecution', command: COMMAND, cwd: '/work', status: 'completed', exitCode: 0, commandActions: [], aggregatedOutput: 'all passed\n' } })
+    await w.notify('item/commandExecution/outputDelta', { ...j.note.command, itemId: 'cmd-1', delta: `${COMMAND_SUMMARY}\n` })
+    await w.notify('item/completed', { ...j.note.command, item: { id: 'cmd-1', type: 'commandExecution', command: COMMAND, cwd: '/work', status: 'completed', exitCode: 0, commandActions: [], aggregatedOutput: `${COMMAND_OUTPUT}\n${COMMAND_SUMMARY}\n` } })
     await w.advance(40000)
   } },
   { id: 's6-answer', room: DM, title: 'the answer', run: async (w, j) => { await agentSays(w, AGENT_SAYS.tests, j) } },
