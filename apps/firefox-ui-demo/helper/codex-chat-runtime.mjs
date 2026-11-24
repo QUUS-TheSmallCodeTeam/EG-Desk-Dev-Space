@@ -6520,13 +6520,30 @@ export class CodexChatRuntime {
         if (handle) this.draftRecords.set(run, handle)
       } catch { /* recording never affects posting */ }
       if (result?.outcome) this.draftOutcomes.set(run, result.outcome)
-      if (result?.outcome === 'withheld') { const kept = this.earlierEvidence?.get(run.clientThreadId); if (kept) kept.withheld = true } // c28: the next check carries all of this check's records
+      if (result?.outcome === 'withheld') this.rememberWithheldEvidence(run, result) // c28/c29: the next check carries what this check had
       // L1 c16: which part of what will be posted the answering model wrote (the check's own copy excluded), for readers of the answer's meaning
       if (result && typeof result.text === 'string') { try { (this.draftOwnTexts ??= new WeakMap()).set(run, { posted: result.text, own: typeof result.own === 'string' ? result.own : result.text }) } catch { /* recording only */ } }
       // withheld: '' (nothing is posted; settleDraftAnswer holds the item back). Otherwise the text, or null for the original.
       if (result?.outcome === 'withheld') return ''
       return result && typeof result.text === 'string' && result.text.trim() ? result.text : null
     } finally { clearTimeout(timer); controller.abort() }
+  }
+
+  // c29 (L2 c24, real v9 run, s14): after a WITHHELD answer the person saw nothing, so the next check carries what this check was GIVEN (the readable items of its evidence, the
+  // ones it ranked in), not only this turn's own records: in v9 the plan page reached the s13 check as a carried record (prev_mem1), so it was not among s13's own records and the
+  // chain broke at s14, whose check again had no plan page (byte-identical to v8; "12월 첫째 주에 배포할 예정입니다." read unsupported .08 and was withheld).
+  rememberWithheldEvidence(run, result) {
+    try {
+      const entry = this.earlierEvidence?.get(run.clientThreadId)
+      if (!entry) return
+      entry.withheld = true
+      const seen = Array.isArray(result?.evidenceUsed) ? result.evidenceUsed : []
+      if (!seen.length) return
+      const base = id => String(id).replace(/^(?:prev_)+/, '')
+      const seenIds = new Set()
+      entry.records = seen.filter(item => { const id = base(item.id); if (seenIds.has(id)) return false; seenIds.add(id); return true })
+        .slice(0, EARLIER_WITHHELD_LIMIT).map(item => ({ ...item, id: `prev_${base(item.id)}`, source: 'earlier_turn' }))
+    } catch { /* the next check keeps the records it had */ }
   }
 
   // The evidence a check of this run's answer reads (c19): this turn's facts and materials (answerEvidence), its turn context's late result when the
