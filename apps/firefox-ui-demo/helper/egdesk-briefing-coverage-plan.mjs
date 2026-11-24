@@ -9,6 +9,9 @@ import { buildWiki } from './egdesk-wiki-reconstruction.mjs'
 import { SYNTHETIC_PAGES } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { DECISION_MODEL } from './egdesk-decision-client.mjs'
 import { rig } from '../scripts/egdesk-briefing-rig.support.mjs'
+import { CHECK11_ANSWER, CHECK11_FILL } from './egdesk-briefing-real-run.fixture.mjs'
+import { folderMaterials } from './egdesk-real-engine-briefing-hook.mjs'
+import { BOARD_SAY, buildBoardScript } from './egdesk-briefing-real-engine-script.mjs'
 
 export const BRIEFING_COVERAGE_SET = 'l4-briefing-coverage'
 export const BRIEFING_COVERAGE_DIR = 'proofs/decision-real-measure/briefing-coverage'
@@ -95,9 +98,13 @@ export async function buildBriefingCoveragePlan() {
 // ---------------- cycle 21: the same boards under the per-fact coverage (the default) ----------------
 export const BRIEFING_COVERAGE_FACTS_SET = 'l4-briefing-coverage-facts'
 export const BRIEFING_COVERAGE_FACTS_DIR = 'proofs/decision-real-measure/briefing-coverage-facts'
-export const factsProductBars = () => ({ 'onboard_F#': { yes: SKELETON_BARS.yes, no: SKELETON_BARS.no, source: `${SOURCE}; per-fact coverage (cycle 21): a fact decided not shown (<= .3) that a material holds is missing -> the one re-design` } })
+// cycle 37: the facts plan has a fourth request (the real check-11 board and answer), so its ceiling is its own
+export const BRIEFING_COVERAGE_FACTS_CEILING = 6000
+export const factsProductBars = () => ({
+  'onboard_F#': { yes: SKELETON_BARS.yes, no: SKELETON_BARS.no, source: `${SOURCE}; per-fact coverage (cycle 21): a fact decided not shown (<= .3) that a material holds is missing -> the one re-design` },
+  'stated_F#': { yes: SKELETON_BARS.yes, no: SKELETON_BARS.no, source: `${SOURCE}; cycle 36: a fact with no code anchor is excused from the board only when the judge decides it does NOT restate something the materials say (<= .3); yes or undecided keeps it enforced` } })
 export const factsOf = wire => JSON.parse(wire).questions.map(q => JSON.parse(q.instructions.split('The fact, quoted exactly as a JSON string: ')[1].split('. Is this fact shown')[0]))
-export const boardIn = wire => JSON.parse(JSON.parse(wire).input[1].content.split('The board, its parts quoted in order as JSON: ')[1])
+export const boardIn = wire => JSON.parse(JSON.parse(wire).input[1].content.split('The board, its parts quoted in order as JSON: ')[1].split('\n\nThe materials, each quoted as JSON:')[0])
 /** -> { plan, planBytes, files, requests, totals, flows } — deterministic; sends nothing. */
 export async function buildBriefingCoverageFactsPlan() {
   const S3_MATS = bare(rowsFor(['quote/a-v1', 'quote/a-v2-plan', 'quote/a-decision']))
@@ -118,9 +125,16 @@ export async function buildBriefingCoverageFactsPlan() {
     script: q => (q.name === 'fact_M4' ? .5 : q.name === 'onboard_F3' ? (again++ ? .95 : .05) : versions(q)) })
   const asAttached = await flow({ request: S3_REQUEST, answer: S3_ANSWER, materials: S3_MATS, ...F, script: q => (q.name.startsWith('same_') ? (q.name === 'same_M1_M2' ? .96 : .03) : q.name === 'onboard_F1' ? .05 : undefined),
     fill: asked => ({ title: 'A사 견적 정리', items: Object.fromEntries(asked.guide.items.map(i => [i.id, i.component === 'result_compare' ? { ...PARTS.compare, slots: { ...PARTS.compare.slots, left: 'M1', right: 'M2' } } : PARTS.M4])) }) })
+  // cycle 37: the REAL board and answer of Main's check-11 (engine-written fill, the notes of the v2 script): two sentences about the answer itself, three table rows, a derived sum.
+  // The first coverage request carries onboard_F1..F6 and, for the three facts with no code anchor, stated_F1, stated_F2, stated_F5 (the materials quoted once).
+  const NOTES = folderMaterials(buildBoardScript().conversations[0].folder)
+  const meta = await flow({ request: BOARD_SAY, answer: CHECK11_ANSWER, materials: NOTES, ...F, fill: () => structuredClone(CHECK11_FILL), script: q => (q.name.startsWith('same_') ? .03 : undefined) })
   const FACTS = 'onboard_F1,onboard_F2,onboard_F3'
   const first = f => { const c = f.all('coverage')[0]; if (!c || c.names.join() !== FACTS) throw new Error(`facts plan: coverage is ${c?.names.join() ?? 'missing'}`); return c }
   const cov1 = first(complete), cov2 = first(without), cov3 = first(asAttached)
+  const cov4 = meta.all('coverage')[0]
+  if (!cov4 || cov4.names.join() !== 'onboard_F1,onboard_F2,onboard_F3,onboard_F4,onboard_F5,onboard_F6,stated_F1,stated_F2,stated_F5') throw new Error(`facts plan: the check-11 coverage is ${cov4?.names.join() ?? 'missing'}`)
+  if (meta.out.status !== 'presented' || JSON.stringify(meta.out.coverage.unshowable) !== '[]' || boardIn(cov4.wire).length !== 2) throw new Error(`facts plan: the check-11 flow is ${meta.out.status} ${JSON.stringify(meta.out.coverage)}`)
   if (JSON.stringify(factsOf(cov1.wire)) !== JSON.stringify(['A사 견적은 11월 3일 요청', '11월 6일 v1 발송', 'v2는 팀장 승인 후 발송 예정입니다.'])) throw new Error(`facts plan: facts are ${JSON.stringify(factsOf(cov1.wire))}`)
   if (complete.out.status !== 'presented' || boardIn(cov1.wire).length !== 3) throw new Error(`facts plan: complete is ${complete.out.status}`)
   if (boardIn(cov2.wire).length !== 2 || JSON.stringify(boardIn(cov2.wire)).includes('팀장 승인')) throw new Error('facts plan: the incomplete board still shows the remaining work')
@@ -134,6 +148,11 @@ export async function buildBriefingCoverageFactsPlan() {
     ['f-incomplete', cov2, [hard('onboard_F1', YES, 'part 1, unchanged'), hard('onboard_F2', YES, 'part 2, unchanged'),
       hard('onboard_F3', NO, 'the remaining-work part is removed. FLAGGED: part 2 still says "아직 보내지 않은 v2", but nothing shows that v2 waits for the team lead\'s approval (c20: the whole-board question gave .46 here)')]],
     ['f-as-attached', cov3, [soft('onboard_F1', NO, 'recorded: the 11/3 request is on no material of this board (no part could show it; code records it as unshowable, not blocking)'), hard('onboard_F2', YES, 'part 1\'s text'), hard('onboard_F3', YES, 'part 2 (the decision card)')]],
+    ['f-meta-sentences', cov4, [soft('onboard_F1', NO, 'a sentence about the answer itself ("devlog 기록을 날짜순으로 정리했습니다."): no board can show it'), soft('onboard_F2', NO, 'a sentence about what was not done ("파일은 변경하지 않았습니다."): no board can show it'),
+      hard('onboard_F3', YES, 'the 11-20 row is the first line of the sequence card, copied from its material'), hard('onboard_F4', YES, 'the 11-22 row is the second line'), hard('onboard_F5', YES, 'the 11-24 row ("11-24 · 검색 화면 착수") is the third line'),
+      soft('onboard_F6', NO, 'recorded: a derived sum (218) that no material states; anchored, so it is unshowable and never blocks'),
+      hard('stated_F1', NO, 'c36: a sentence about the answer itself restates nothing of the materials; a judge that cannot say so (undecided or yes) keeps the sentence enforced and the board falls back to chat (check-11)'),
+      hard('stated_F2', NO, 'c36: the same for "파일은 변경하지 않았습니다."'), hard('stated_F5', YES, 'c36: "11-24 · 검색 화면 착수" restates what the 11-24 note says')]]
   ]
   const files = [], requests = []
   for (const [id, c, expect] of specs) {
@@ -141,13 +160,13 @@ export async function buildBriefingCoverageFactsPlan() {
     if (body.model !== DECISION_MODEL || Object.keys(body).some(k => !['model', 'input', 'questions', 'prompt_cache_key'].includes(k)) || body.questions.some(q => q.type !== 'predicate')) throw new Error(`${id}: not a plain predicate body`)
     files.push({ file: `requests/${id}.json`, bytes }); requests.push({ id, file: `requests/${id}.json`, sha256: sha(bytes), estInputTokens: est(c.wire), expect })
   }
-  const plan = { set: BRIEFING_COVERAGE_FACTS_SET, tokenCeiling: BRIEFING_COVERAGE_CEILING, productBars: factsProductBars(),
-    passRule: 'PASS when every hard check passes at the product bar: every fact the board shows is judged shown (yes >= .7) on the complete, the incomplete and the as-attached board, and on the incomplete board the removed remaining-work fact is judged not shown (decided no <= .3). The as-attached 11/3 fact is recorded only.',
+  const plan = { set: BRIEFING_COVERAGE_FACTS_SET, tokenCeiling: BRIEFING_COVERAGE_FACTS_CEILING, productBars: factsProductBars(),
+    passRule: 'PASS when every hard check passes at the product bar: every fact the board shows is judged shown (yes >= .7) on the complete, the incomplete and the as-attached board, and on the incomplete board the removed remaining-work fact is judged not shown (decided no <= .3). The as-attached 11/3 fact is recorded only. Cycle 37 adds the real check-11 board: its three content facts are judged shown (yes >= .7), the two sentences about the answer itself are judged NOT restating the materials (stated, decided no <= .3), and the content sentence is judged restating them (yes >= .7).',
     requests }
   const totals = { requests: requests.length, questions: specs.reduce((sum, [, c]) => sum + c.names.length, 0), bytes: files.reduce((sum, f) => sum + f.bytes.length, 0), estInputTokens: requests.reduce((sum, r) => sum + r.estInputTokens, 0) }
-  if (totals.estInputTokens > BRIEFING_COVERAGE_CEILING) throw new Error(`facts plan over the ceiling: ${totals.estInputTokens}`)
+  if (totals.estInputTokens > BRIEFING_COVERAGE_FACTS_CEILING) throw new Error(`facts plan over the ceiling: ${totals.estInputTokens}`)
   const stages = f => f.captured.map(c => c.stage.replace('briefing-skeleton-', ''))
   return { plan, planBytes: Buffer.from(JSON.stringify(plan, null, 2) + '\n'), files, requests, totals,
     flows: { complete: { status: complete.out.status, stages: stages(complete) }, incomplete: { status: without.out.status, stages: stages(without), redesign: without.out.coverage.redesign },
-      asAttached: { status: asAttached.out.status, unshowable: asAttached.out.coverage.unshowable } } }
+      asAttached: { status: asAttached.out.status, unshowable: asAttached.out.coverage.unshowable }, metaSentences: { status: meta.out.status, stages: stages(meta), unshowable: meta.out.coverage.unshowable } } }
 }
