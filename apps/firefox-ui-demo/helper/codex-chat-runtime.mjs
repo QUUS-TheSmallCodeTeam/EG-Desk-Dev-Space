@@ -17,7 +17,7 @@ import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
 import { gateRuntimeToolResult, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
 import { homedir } from 'node:os'
 import { createInternalTurns } from './codex-internal-turn.mjs'
-import { FLOW_COPY, FLOW_LIMITS, attentionOf, audienceFacts, beatFlowFacts, cleanIntermediate, enumerateOptions, flowQuestion, pointerPrompt, pointerRoute, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
+import { FLOW_COPY, FLOW_LIMITS, attentionOf, audienceFacts, beatFlowFacts, cleanIntermediate, enumerateOptions, flowQuestion, idleFlowFacts, pointerPrompt, pointerRoute, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
 import { BEAT_JUDGE_TIMEOUT_MS, createBeatJudge } from './egdesk-heartbeat-judge.mjs'
 import { createHeartbeats } from './egdesk-heartbeat.mjs'
 import { feedBrowserTask } from './egdesk-heartbeat-providers.mjs'
@@ -807,6 +807,7 @@ export class CodexChatRuntime {
     this.speechDeferred = new WeakMap() // speech design 'at-page': run -> the person's utterance, recorded once after the answer with the labels installed then
     this.calibrationRuns = new WeakMap() // run -> content-free calibration entry id; process-local
     // Live-session heartbeats (egdesk-heartbeat.mjs): one per live conversation, on its own monotonic counter, independent of engine events.
+    this.heldAttention = [] // pointers whose person had no conversation to hear them in (holdAttention); memory only, bounded
     this.heartbeats = createHeartbeats({ monotonicNow: () => this.monotonicNow(), setTimer: (fn, ms) => this.setTimer(fn, ms), clearTimer: handle => this.clearTimer(handle) })
     this.heartbeatThreads = new Map() // native thread id -> heartbeat (to mark engine events on its clock)
     this.heartbeatReasoning = new WeakMap() // heartbeat -> ids of reasoning items the engine has started and not finished
@@ -4991,7 +4992,8 @@ export class CodexChatRuntime {
         // The message question: one proposer among the heartbeat's providers, while a run works and after it.
         hb.register('message', { propose: beat => this.sessionPropose(subject, beat), onVerdict: round => this.sessionVerdict(subject, round) })
       }
-      // A new window: the previous run's facts are over until the next run joins.
+      // A new window: the previous run's facts are over until the next run joins. A message means the conversation is open again.
+      subject.closeAfterRun = false
       subject.conversationId = cid; subject.toolCeiling = context.toolCeiling ?? null; subject.pointers = 0
       if (reused) { subject.run = null; subject.flow = null; hb.setSource(null); this.heartbeatReasoning.delete(hb) }
       return hb
@@ -4999,7 +5001,30 @@ export class CodexChatRuntime {
   }
 
   /** The conversation was closed: its session heartbeat ends now (stop reason 'closed'). */
-  closeSession(key) { const hb = this.heartbeats.get(key); if (!hb) return false; this.stopHeartbeat(hb, 'closed'); return true }
+  // closeSession(key) or closeSession({ clientThreadId }) (POST /chat/session/close, sent by the surface when the conversation is closed
+  // or the room is left). An idle session ends now. A session whose run still works keeps its heartbeat for that run (the run goes on
+  // and its messages are kept for when the conversation is opened again) and ends with the run instead of idling. Memory only.
+  closeSession(target) {
+    const key = typeof target === 'string' ? target : idText(target?.clientThreadId)
+    if (!key?.trim()) throw chatError('INVALID_SESSION_CLOSE', 'clientThreadId is required', 400)
+    const hb = this.heartbeats.get(key)
+    if (!hb || hb.state === 'stopped') return typeof target === 'string' ? false : { accepted: true, closed: false }
+    const subject = this.heartbeatSubjects.get(hb)
+    const working = hb.tempo === 'active' && subject?.run?.status === 'inProgress'
+    if (working) subject.closeAfterRun = true
+    else this.stopHeartbeat(hb, 'closed')
+    return typeof target === 'string' ? !working : { accepted: true, closed: !working, ...(working ? { afterRun: true } : {}) }
+  }
+
+  /** The window has gone (no event stream for a while): every idle session ends; a working run keeps its heartbeat until it ends. */
+  closeIdleSessions(reason = 'closed') {
+    let closed = 0
+    for (const key of this.heartbeats.keys()) {
+      const hb = this.heartbeats.get(key)
+      if (hb?.tempo === 'idle' && hb.state !== 'stopped') { this.stopHeartbeat(hb, reason); closed++ }
+    }
+    return closed
+  }
 
   stopHeartbeat(hb, reason) {
     if (!hb) return
@@ -5130,6 +5155,7 @@ export class CodexChatRuntime {
     if (ended || subject?.run !== run) return
     subject.canSpeak = flow.canSpeak; subject.pointers = 0 // a new window
     this.flowSpeakers.delete(hb); this.heartbeatReasoning.delete(hb)
+    if (subject.closeAfterRun) { this.stopHeartbeat(hb, 'closed'); return } // the conversation was closed while this run worked
     hb.setSource(null); hb.settle()
   }
 
@@ -5173,9 +5199,59 @@ export class CodexChatRuntime {
   // What a pointer needs before it is even asked about: a pending attention fact that was not pointed to yet, and a route for it.
   pointerFacts(subject, heartbeatFacts) {
     const attention = attentionOf(heartbeatFacts)
-    if (!attention) { subject.pointed.clear(); return { attention: null } } // the fact was withdrawn: a later one may be pointed to again
-    const route = this.pointerRouteFor(subject, attention)
-    return { attention, pointed: subject.pointed.has(attention.signature), pointers: subject.pointers, pointerTarget: route.target }
+    if (attention) {
+      const route = this.pointerRouteFor(subject, attention)
+      // Nowhere to go now: kept for that person until a conversation of their own works again (holdAttention).
+      if (!route.target && (route.reason === 'no_conversation' || route.reason === 'away') && !subject.pointed.has(attention.signature)) this.holdAttention(subject, attention)
+      if (route.target || !this.heldAttentionFor(subject)) return { attention, pointed: subject.pointed.has(attention.signature), pointers: subject.pointers, pointerTarget: route.target }
+    } else subject.pointed.clear() // the fact was withdrawn: a later one may be pointed to again
+    // Nothing of its own to point to: something held for the person of this conversation, if any. It is theirs alone, so it goes here.
+    const held = this.heldAttentionFor(subject)
+    if (!held) return { attention: null }
+    return { attention: { provider: 'held', kind: held.kind, who: held.as, where: 'none', distance: null, signature: held.id, heldMs: Math.max(0, this.monotonicNow() - held.at) },
+      pointed: false, pointers: subject.pointers, pointerTarget: 'here' }
+  }
+
+  // ---- A pointer whose person has no conversation to hear it in ----
+  // The fact is kept in memory for that person (their member id never leaves this object), without its direction, and is offered as
+  // an attention fact in the next working run of a conversation in which they are the only participant. It is dropped when it was
+  // delivered, when its own source was pointed to after all, after FLOW_LIMITS.heldAttentionMs, or when the bridge restarts.
+  holdAttention(subject, attention) {
+    const { audience } = this.audienceInputs(subject.run ?? { clientThreadId: subject.key, conversationId: subject.conversationId })
+    const requester = String(audience?.requester ?? 'self'), owner = String(audience?.owner ?? requester)
+    const member = attention.who === 'owner' ? owner : requester
+    const id = `held:${subject.key}:${attention.signature}`
+    this.heldAttention = (this.heldAttention ?? []).filter(row => this.monotonicNow() - row.at < FLOW_LIMITS.heldAttentionMs)
+    if (this.heldAttention.some(row => row.id === id)) return false
+    this.heldAttention.push({ id, member, kind: attention.kind, sourceKey: subject.key, provider: attention.provider, signature: attention.signature, at: this.monotonicNow() })
+    while (this.heldAttention.length > FLOW_LIMITS.maxHeldAttention) this.heldAttention.shift()
+    return true
+  }
+
+  // The oldest fact held for the one person of this conversation, with the word that names them here ('owner' | 'requester'), or null.
+  heldAttentionFor(subject) {
+    if (!this.heldAttention?.length || !subject.run || subject.run.status !== 'inProgress') return null
+    this.heldAttention = this.heldAttention.filter(row => this.monotonicNow() - row.at < FLOW_LIMITS.heldAttentionMs)
+    const { audience } = this.audienceInputs(subject.run)
+    const requester = String(audience?.requester ?? 'self'), owner = String(audience?.owner ?? requester)
+    const participants = Array.isArray(audience?.participants) ? audience.participants.map(String) : [requester]
+    const row = this.heldAttention.find(held => held.sourceKey !== subject.key && participants.length > 0 && participants.every(member => member === held.member))
+    const as = !row ? null : row.member === requester ? 'requester' : row.member === owner ? 'owner' : null
+    return as ? { ...row, as } : null
+  }
+
+  // A held fact was delivered, or its source was pointed to: it is over, and the source is told like any pointed fact.
+  releaseHeldAttention(match, delivered) {
+    const rows = (this.heldAttention ?? []).filter(match)
+    if (!rows.length) return
+    this.heldAttention = this.heldAttention.filter(row => !rows.includes(row))
+    if (!delivered) return
+    for (const row of rows) {
+      const hb = this.heartbeats.get(row.sourceKey)
+      this.heartbeatSubjects.get(hb)?.pointed.add(row.signature)
+      try { hb?.acknowledge(row.provider, 'attention') } catch { /* ignore */ }
+      try { this.decisionContext?.conversationFlow?.attentionPosted?.({ key: row.sourceKey, provider: row.provider }) } catch { /* ignore */ }
+    }
   }
 
   // After the run: the only thing the session may still say is a pointer to something that needs a person. No request otherwise.
@@ -5184,8 +5260,7 @@ export class CodexChatRuntime {
     if (!run || run.status === 'inProgress' || !subject.canSpeak || this.draftCheckMode() !== 'on') return null
     if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return null
     const pointer = this.pointerFacts(subject, beat.facts)
-    const facts = { idle: true, sent: 0, stepsSinceLast: 0, question: null, waitExplained: false, pendingQuestion: beat.facts.pendingQuestion === true, reasoningOpen: false, blocked: true,
-      elapsedMs: beat.facts.sinceUserMs, sinceLastMs: beat.facts.sincePostedMs, audience: this.sessionAudience(subject).facts, waits: [], ...pointer }
+    const facts = idleFlowFacts({ heartbeatFacts: beat.facts, audience: this.sessionAudience(subject).facts, pointer })
     const options = enumerateOptions(facts)
     if (!options.includes('pointer')) return null
     subject.pendingPointer = { attention: pointer.attention }
@@ -5316,7 +5391,10 @@ export class CodexChatRuntime {
     if (carrier.flow) { carrier.flow.sent.push({ id, text, kind: 'pointer', by: 'model' }); carrier.flow.kinds.add('pointer') }
     subject.pointed.add(attention.signature); subject.pointers++
     try { this.heartbeats.get(target.key)?.mark('posted') } catch { /* ignore */ }
-    // The provider is told, so it can withdraw its fact (heartbeat contract 3b); the bridge may also be told.
+    // A fact that was held for this person: its source is told. Otherwise the provider itself is told, so it can withdraw its fact
+    // (heartbeat contract 3b; the bridge may also be told), and a copy held for later is dropped.
+    if (attention.provider === 'held') { this.releaseHeldAttention(row => row.id === attention.signature, true); return 'model' }
+    this.releaseHeldAttention(row => row.sourceKey === subject.key && row.signature === attention.signature, false)
     try { this.heartbeats.get(subject.key)?.acknowledge(attention.provider, 'attention') } catch { /* ignore */ }
     try { this.decisionContext?.conversationFlow?.attentionPosted?.({ key: subject.key, provider: attention.provider }) } catch { /* ignore */ }
     return 'model'

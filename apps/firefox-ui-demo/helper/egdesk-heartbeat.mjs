@@ -8,6 +8,15 @@
 //   hb.activate({ sinceMs })   a message was accepted: tempo active, the beat grid restarts at that moment, a new window of bounds
 //   hb.settle()                the run ended: tempo idle, a new window of bounds
 //   hb.nudge()                 a provider has something for the judge now: the next beat comes within nudgeMs (at most once per beatMs)
+//
+// nudge(), for providers. An idle session beats every 20 s, so a question or a fact that appears between beats would wait up to 20 s
+// (5 s while a run works). A provider that has just queued something for the judge, or has just set a fact a person must hear about,
+// calls nudge() on the heartbeat it registered with:
+//     queue.push(item); heartbeat.nudge?.()              // e.g. the placement runtime, after submit() queues a scene
+//     pointer = { ... }; heartbeat.nudge?.()             // ... and when it sets its pointer / attention fact
+// The beat then comes within 0.5 s and goes through the same round as any other beat (same bounds, same single request). nudge() is
+// always safe to call: it returns false and does nothing when the heartbeat is not running or was nudged within the last 5 s, and it
+// never moves the beat grid. It is a hint about timing only: what is asked is still decided by propose() at that beat.
 // The idle session ends by itself (stop reason 'idle') after lingerMs without anything pending, and after idleStopMs without any
 // activity of the person whatever is pending. It also ends when the conversation is closed ('closed'), on disconnect or restart.
 //
@@ -354,6 +363,26 @@ export function createHeartbeat({ key = null, monotonicNow = () => performance.n
 }
 
 /** One heartbeat per key. */
+/**
+ * Tells when the window has gone: the bridge's event stream is how a window reads messages, and a window that reloads reconnects
+ * within about a second. When the last stream has been closed for graceMs (the presence mirror's stale bound) nobody can read a
+ * message any more, and onGone() runs once. arrived() on every new stream, left(remaining) on every closed one.
+ */
+export function createWindowWatch({ graceMs = 10_000, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), onGone } = {}) {
+  let timer = null
+  const cancel = () => { if (timer != null) { clearTimer(timer); timer = null } }
+  return Object.freeze({
+    arrived() { cancel() },
+    left(remaining) {
+      if (remaining > 0 || timer != null) return
+      timer = setTimer(() => { timer = null; try { onGone?.() } catch { /* never affects the bridge */ } }, graceMs)
+      timer?.unref?.()
+    },
+    get waiting() { return timer != null },
+    stop: cancel,
+  })
+}
+
 export function createHeartbeats({ monotonicNow, setTimer, clearTimer, limits = HEARTBEAT_LIMITS } = {}) {
   const live = new Map()
   return Object.freeze({

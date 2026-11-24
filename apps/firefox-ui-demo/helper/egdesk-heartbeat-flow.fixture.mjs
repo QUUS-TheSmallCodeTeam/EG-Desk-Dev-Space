@@ -32,8 +32,9 @@ export function judge(request, seen, policy = {}) {
   return { answers, model: 'mock', usage: { inputTokens: 5 }, latencyMs: 3 }
 }
 
-// writer(prompt) → the fork writer's text (or a promise of it); attentionPosted: the bridge's hook; flags.commands: the engine-command judge (advisory).
-export function world(t, { flags = { held: true, flow: true }, fork = 'ok', failTurn = false, presence = null, audience = null, policy = {}, writer = null, attentionPosted = null } = {}) {
+// writer(prompt) → the fork writer's text (or a promise of it); attentionPosted: the bridge's hook; flags.commands: the engine-command judge (advisory);
+// tap(request): called with every decision request before the mock answers it.
+export function world(t, { flags = { held: true, flow: true }, fork = 'ok', failTurn = false, presence = null, audience = null, policy = {}, writer = null, attentionPosted = null, tap = null } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-beat-')); chmodSync(dir, 0o700)
   const store = openChatStore({ dataDir: dir, ownerScope: 'synthetic-beat' })
   const log = openCalibrationLog({ dataDir: dir, log() {} })
@@ -45,6 +46,7 @@ export function world(t, { flags = { held: true, flow: true }, fork = 'ok', fail
     else if (request.promptCacheKey === 'draft-check') requests.draft++
     else requests.other++
     if (request.promptCacheKey === 'heartbeat-beat') beatRequests.push({ names: request.questions.map(q => q.name), input: request.input.map(row => row.content) })
+    if (tap) await tap(request) // sees every request exactly as the product built it (the real-measurement plan records them)
     return judge(request, flowAsked, policy)
   } }
   const chat = new CodexChatRuntime({

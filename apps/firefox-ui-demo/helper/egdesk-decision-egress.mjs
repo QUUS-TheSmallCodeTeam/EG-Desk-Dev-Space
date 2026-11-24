@@ -100,6 +100,8 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-work-placement.mjs': ['placement_facts'],
   'egdesk-draft-check.mjs': ['draft_text'],
   'egdesk-heartbeat-judge.mjs': ['run_facts', 'plus the kinds a heartbeat question declares, each checked by the run\'s gate before it is sent'],
+  // Plan builder for the real measurement: the product client with a recording fetch that refuses. Nothing is sent from this file.
+  'egdesk-heartbeat-real-plan.mjs': ['run_facts: plan builder; a recording fetch that refuses, nothing is sent'],
   'egdesk-terminal-command-gate.mjs': ['terminal_command'],
   'egdesk-terminal-judge.mjs': ['terminal_output', 'command_output'],
   'egdesk-memory-live-runner.mjs': ['memory_page: measurement tool; the public synthetic wiki only, through guardClient'],
