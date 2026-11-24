@@ -235,7 +235,7 @@ test('provider timeout, abort during lookup/fetch, and transport failure never p
 test('the chooser deadline releases a hung key lookup and prevents late dispatch', async () => {
   const key = deferred()
   const fx = fixture({ getApiKey: () => key.promise })
-  assert.deepEqual(await fx.run(), manual)
+  assert.deepEqual(await fx.run(), { status: 'manual', reason: 'timeout_unsent' })
   assert.equal(fx.lookups(), 1)
   key.resolve('test-fixture-not-a-key')
   await Promise.resolve()
@@ -248,4 +248,15 @@ test('a foreground choice survives a cold connection slower than the in-turn bud
   const fx = fixture({ fetchImpl: async () => { await new Promise(r => setTimeout(r, 1700)); return response(body()) } })
   assert.deepEqual(await fx.run(), { status: 'recommended', index: 1 })
   assert.equal(fx.calls.length, 1)
+})
+
+test('timeout reason tells a started POST from one that never started', async () => {
+  // Sent, never answered: the client's own deadline fires after the POST began.
+  const sentFx = fixture({ fetchImpl: (url, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })) })
+  assert.deepEqual(await sentFx.run(), { status: 'manual', reason: 'timeout' })
+  assert.equal(sentFx.calls.length, 1)
+  // Key lookup stalls past the deadline: no POST is started.
+  const stalled = fixture({ getApiKey: () => new Promise(() => {}) })
+  assert.deepEqual(await stalled.run(), { status: 'manual', reason: 'timeout_unsent' })
+  assert.equal(stalled.calls.length, 0)
 })
