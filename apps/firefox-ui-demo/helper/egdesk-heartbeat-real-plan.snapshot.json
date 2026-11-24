@@ -1,154 +1,109 @@
 {
- "set": "heartbeat-c16",
- "tokenCeiling": 5000,
- "passRule": "Pass: every hard expectation holds. Speak cases: the named yes/no question must reach 0.8 (the product's bar). Silent cases: 0.5 or less. The two ask-* cases are soft and decide one change only: the \"?\" pre-filter of the early question is removed only if BOTH land as registered (a plain note no, a request without \"?\" yes). No retries; one request per pattern.",
+ "set": "heartbeat-c17",
+ "tokenCeiling": 3279,
+ "passRule": "Pass: every hard expectation holds. A yes must reach 0.8 (the heartbeat's bar; the draft check acts at 0.7 and is registered at 0.8 here too), a no 0.5 or less. Soft expectations are findings. No retries; one request per pattern.",
  "requests": [
-  {
-   "id": "need-thinking-30s",
-   "file": "requests/need-thinking-30s.json",
-   "sha256": "c464c4a520011a6b1378acde264a309f9b9c42f002687ab48f92a93b1e3f003d",
-   "estInputTokens": 481,
-   "expect": [
-    {
-     "name": "message__note",
-     "kind": "predicate",
-     "min": 0.8,
-     "severity": "hard",
-     "note": "Thirty seconds without a word: with the 20 s ask gone, this is the first chance to tell the person anything."
-    }
-   ]
-  },
-  {
-   "id": "need-command-45s",
-   "file": "requests/need-command-45s.json",
-   "sha256": "0e846821c16e140243d1de85b00a539a3190a76e7a03828c96d3b8d35dd585e0",
-   "estInputTokens": 537,
-   "expect": [
-    {
-     "name": "message__note",
-     "kind": "predicate",
-     "min": 0.8,
-     "severity": "hard",
-     "note": "The case the progress note exists for: a long command, and the person has heard nothing for 40 s."
-    }
-   ]
-  },
-  {
-   "id": "need-silence-25s",
-   "file": "requests/need-silence-25s.json",
-   "sha256": "4f71c73a13c8d2b4dea1ff377f1b85e25c42d94e41c3ef4029b122739a5daf71",
-   "estInputTokens": 503,
-   "expect": [
-    {
-     "name": "message__note",
-     "kind": "predicate",
-     "min": 0.8,
-     "severity": "hard",
-     "note": "True silence: the person must be told something; code words it as the stall line."
-    }
-   ]
-  },
-  {
-   "id": "ask-plain-note-10s",
-   "file": "requests/ask-plain-note-10s.json",
-   "sha256": "5c405fa55585fc5ecd6d16748d479fc716af7736246906caab59cb11ed1ddf14",
-   "estInputTokens": 674,
-   "expect": [
-    {
-     "name": "message__ask",
-     "kind": "predicate",
-     "max": 0.5,
-     "severity": "soft",
-     "note": "A plain plan step needs nothing from the person: removing the pre-filter is safe only if this stays no."
-    }
-   ]
-  },
-  {
-   "id": "ask-no-question-mark-10s",
-   "file": "requests/ask-no-question-mark-10s.json",
-   "sha256": "78784e0899438e83b390a77bf2c21fc4aa867f0cc970e04bb8715e0698a51541",
-   "estInputTokens": 682,
-   "expect": [
-    {
-     "name": "message__ask",
-     "kind": "predicate",
-     "min": 0.8,
-     "severity": "soft",
-     "note": "The information only the person has is named plainly: removing the pre-filter is worth it only if this is a yes."
-    }
-   ]
-  },
   {
    "id": "pointer-owner-elsewhere",
    "file": "requests/pointer-owner-elsewhere.json",
-   "sha256": "c40e04327e9c1b7ecc71741813b36b916be3bfbf27a7ff20a8348f6641f6e560",
-   "estInputTokens": 362,
+   "sha256": "7e0abfb1120fe9f4647bd83849a8de816e2655915fa9a570b2c1ce5f7410c79d",
+   "estInputTokens": 338,
    "expect": [
     {
      "name": "message__pointer",
      "kind": "predicate",
-     "min": 0.8,
-     "severity": "hard",
-     "note": "A report draft made for the owner: they need to look at it."
+     "max": 0.5,
+     "severity": "soft",
+     "note": "A plain report draft holds nothing the owner must act on or decide: no pointer for background work."
     }
    ]
   },
   {
    "id": "pointer-requester-present",
    "file": "requests/pointer-requester-present.json",
-   "sha256": "baffa0c21bb3871eb5dd6de83027c65dde47c89a44d773d36865aac41487f70d",
-   "estInputTokens": 478,
+   "sha256": "be58b2395b350cc0bbb83df9fee5f5bc10576350e053c8eec732e0bc5128cb3d",
+   "estInputTokens": 328,
+   "expect": [
+    {
+     "name": "message__told_1",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "hard",
+     "note": "The answer says what was done, not where the document is: code then points."
+    }
+   ]
+  },
+  {
+   "id": "pointer-owner-decision",
+   "file": "requests/pointer-owner-decision.json",
+   "sha256": "dcaf03ef988401113453901714ee4efa316b3a0fcfd0712fbf67de287d2dabc9",
+   "estInputTokens": 349,
    "expect": [
     {
      "name": "message__pointer",
      "kind": "predicate",
      "min": 0.8,
      "severity": "hard",
-     "note": "A compiled document the person asked for: they need to look at it."
-    },
-    {
-     "name": "message__told_1",
-     "kind": "predicate",
-     "max": 0.5,
-     "severity": "hard",
-     "note": "The answer says what was done, not where the document is."
+     "note": "Background work that waits for the owner's decision: the owner must be told where it is."
     }
    ]
   },
   {
-   "id": "pointer-already-told",
-   "file": "requests/pointer-already-told.json",
-   "sha256": "c18e3a7e03e736f1566a5822f8047a0128ad27519b5b27f814d4190297fb8fca",
-   "estInputTokens": 533,
+   "id": "wait-check-choice",
+   "file": "requests/wait-check-choice.json",
+   "sha256": "aade778106e695576783a1ef9527b993e4a83bcd154de26bf09b919c46e261ed",
+   "estInputTokens": 618,
    "expect": [
     {
-     "name": "message__told_1",
+     "name": "present_0",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "hard",
+     "note": "The sentence states what the run is doing now, and the evidence says so (time=present)."
+    },
+    {
+     "name": "claim_0",
+     "kind": "choice",
+     "equals": "supported",
+     "severity": "soft",
+     "note": "The facts hold the command and the seconds."
+    }
+   ]
+  },
+  {
+   "id": "wait-check-predicates",
+   "file": "requests/wait-check-predicates.json",
+   "sha256": "7bd6012b16f862aaeeb56f98b20e5e9cbf203fbec3c6ad87c6ce015e1667d527",
+   "estInputTokens": 497,
+   "expect": [
+    {
+     "name": "sup_0",
      "kind": "predicate",
      "min": 0.8,
      "severity": "hard",
-     "note": "The answer names the place: code then posts no pointer. Code cannot read that sentence; this question carries the case."
+     "note": "The facts say a payment test command has been running about 10 seconds."
+    },
+    {
+     "name": "tense_0",
+     "kind": "predicate",
+     "max": 0.5,
+     "severity": "hard",
+     "note": "Nothing in it is only planned or past."
     }
    ]
   },
   {
-   "id": "pointer-nothing-to-look-at",
-   "file": "requests/pointer-nothing-to-look-at.json",
-   "sha256": "796a6a32f4514cfbff3732a89c46ac46ecac0da0c0d360c4f9c2a51a5521ad75",
-   "estInputTokens": 515,
+   "id": "wait-check-invented-result",
+   "file": "requests/wait-check-invented-result.json",
+   "sha256": "6ee9f0804e8307df814981a4b5c5d7d56ae76a27991eae6ea544c8f349e22a18",
+   "estInputTokens": 493,
    "expect": [
     {
-     "name": "message__pointer",
+     "name": "sup_0",
      "kind": "predicate",
      "max": 0.5,
-     "severity": "soft",
-     "note": "The message already gives them all they need; pointing to the report adds nothing."
-    },
-    {
-     "name": "message__told_1",
-     "kind": "predicate",
-     "max": 0.5,
-     "severity": "soft",
-     "note": "The answer does not say where the report is."
+     "severity": "hard",
+     "note": "Nothing in the facts says any test failed: the check exists to stop exactly this."
     }
    ]
   }

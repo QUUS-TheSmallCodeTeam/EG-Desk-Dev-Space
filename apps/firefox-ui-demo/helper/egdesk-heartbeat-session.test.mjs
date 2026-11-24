@@ -5,8 +5,8 @@ import { readFileSync } from 'node:fs'
 import { HEARTBEAT_LIMITS, createHeartbeat, createHeartbeats, createWindowWatch } from './egdesk-heartbeat.mjs'
 import { browserTaskRow } from './egdesk-heartbeat-providers.mjs'
 import { createChatHttpHandler } from './codex-bridge-http.mjs'
-import { FLOW_LIMITS, FLOW_PREDICATES, WAIT_LABELS, attentionOf, audienceFacts, deriveFlowKind, enumerateOptions, flowPredicates, idleFlowFacts, pointerBlocked, pointerDecision, pointerPredicates, pointerPrompt, pointerRoute, runContext, waitSummary, writerPrompt } from './egdesk-conversation-flow.mjs'
-import { world } from './egdesk-heartbeat-flow.fixture.mjs'
+import { FLOW_LIMITS, FLOW_PREDICATES, WAIT_LABELS, attentionOf, audienceFacts, deriveFlowKind, enumerateOptions, flowPredicates, idleFlowFacts, messageEvidence, pointerBlocked, pointerDecision, pointerPredicates, pointerPrompt, pointerRoute, runContext, waitSummary, writerPrompt } from './egdesk-conversation-flow.mjs'
+import { MID, world } from './egdesk-heartbeat-flow.fixture.mjs'
 
 // The session heartbeat (cycle 13): it lives as long as the conversation's session, across runs, at two tempos; the message
 // judgment reads the providers' facts as closed labels; a pointer message tells a person where something waits for them.
@@ -567,12 +567,13 @@ test('pointer in the runtime: an answer that already said where -> told yes -> n
     d.hb.nudge(); await w.advance(S.nudgeMs); await w.advance(60_000)
     return { requests: w.requests.flow - before, names: w.beatRequests.slice(-1)[0]?.names ?? [], posted: d.assistant().slice(1), entry: w.flowEntries().at(-1) }
   }
+  // L3 c17: the person asked for this work (they are the run's requester), so it is needed by definition: only told_N is asked.
   const told = await run({ message__pointer: 0.97, message__told_1: 0.95 }, '문서를 정리해서 화면 오른쪽에 열어 두었습니다.', 'review')
-  assert.deepEqual([told.requests, told.names, told.posted, told.entry.flow], [1, ['message__pointer', 'message__told_1'], [], 'none'], 'they were told where: nothing is posted, and the fact is not asked about again')
-  const notTold = await run({ message__pointer: 0.97, message__told_1: 0.04 }, '문서를 정리했습니다.', 'review')
-  assert.deepEqual([notTold.requests, notTold.posted, notTold.entry.flow], [1, [POINTER], 'pointer'])
-  const nothing = await run({ message__pointer: 0.2, message__told_1: 0.04 }, '테스트가 모두 통과했습니다. 따로 볼 것은 없습니다.', 'review')
-  assert.deepEqual([nothing.requests, nothing.posted], [1, []], 'the work does not need them: no pointer')
+  assert.deepEqual([told.requests, told.names, told.posted, told.entry.flow], [1, ['message__told_1'], [], 'none'], 'they were told where: nothing is posted, and the fact is not asked about again')
+  const notTold = await run({ message__pointer: 0.02, message__told_1: 0.04 }, '문서를 정리했습니다.', 'review')
+  assert.deepEqual([notTold.requests, notTold.names, notTold.posted, notTold.entry.flow], [1, ['message__told_1'], [POINTER], 'pointer'], 'a requested result: a no to the work question cannot matter, it is not asked')
+  const nothing = await run({ message__told_1: 0.04 }, '테스트가 모두 통과했습니다. 따로 볼 것은 없습니다.', 'review')
+  assert.deepEqual([nothing.requests, nothing.posted], [1, [POINTER]], 'requested, not told where: pointed (c16 asked the work question here)')
   const decide = await run({}, '승인할 항목을 정리했습니다.', 'owner_action')
   assert.deepEqual([decide.names.includes('message__pointer'), decide.posted], [false, [POINTER]], 'a decision waiting for them needs them by definition')
   assert.deepEqual([decide.entry.flow, decide.entry.questions, decide.entry.posted], ['pointer', 1, 'model'], 'only told_1 was asked (the answer was posted to them)')
@@ -580,4 +581,61 @@ test('pointer in the runtime: an answer that already said where -> told yes -> n
   rows[0] = { member: 'self', self: true, active: false, lastInputAgeMs: 900_000 }
   const away = await run({ message__pointer: 0.99 }, '문서를 정리했습니다.', 'review')
   assert.deepEqual([away.requests, away.posted], [0, []])
+})
+
+test('pointer for a result the person did not request (a member\'s task, for the owner): only then is the result itself judged, quoted on its own', async t => {
+  const rows = [{ member: 'self', self: true, active: true, lastInputAgeMs: 1000 }, { member: 'm-jin', active: false }]
+  const audience = { 'dm-task': { requester: 'm-jin', owner: 'self', participants: ['m-jin'] }, 'dm-owner': { requester: 'self', owner: 'self', participants: ['self'] } }
+  const run = async (probability, answer) => {
+    const w = answering(t, { message__pointer: probability }, { audience: ({ run }) => audience[run.clientThreadId] ?? null, presence: { snapshot: () => rows }, writer: prompt => (/on the desk/.test(prompt) ? POINTER : null) })
+    const o = await w.dm('dm-owner', '예산표 정리해 주세요'); await w.advance(3000); await o.final('예산표를 정리했습니다.')
+    const m = await w.dm('dm-task', '견적서 수정본 초안을 만들어 주세요'); await w.advance(4000); await m.final(answer)
+    placementProvider(m.hb).pointer = { pointerWhere: 'left', pointerDistance: 'far', pointerFor: 'owner', pointerNeeds: 'review' }
+    m.hb.nudge(); await w.advance(S.nudgeMs); await w.advance(60_000)
+    const req = w.beatRequests.at(-1)
+    return { names: req.names, asked: req.input.join('\n'), posted: o.assistant().slice(1) }
+  }
+  const decide = await run(0.93, '견적서 수정본 초안을 만들었습니다. 단가 적용 여부를 정해 주셔야 발송할 수 있습니다.')
+  assert.deepEqual([decide.names, decide.posted], [['message__pointer'], [POINTER]])
+  assert.match(decide.asked, /Question message__pointer:\nThe message about the finished work:\n"""\n견적서 수정본 초안을 만들었습니다\. 단가 적용 여부를 정해 주셔야 발송할 수 있습니다\.\n"""/)
+  const plain = await run(0.1, '견적서 수정본 초안을 만들었습니다.')
+  assert.deepEqual([plain.names, plain.posted], [['message__pointer'], []], 'nothing for the owner to act on or decide: no pointer')
+})
+
+test('heartbeat messages are checked against the facts they were composed from: the run\'s state (the command line only where the gate allows it), the request, never the turn\'s materials', async t => {
+  const checks = [], CONCRETE = '결제 테스트(`npm test`)를 10초째 돌리고 있어요. 끝나면 바로 알려 드릴게요.'
+  const w = world(t, { flags: { held: true, flow: true, commands: true }, writer: () => CONCRETE })
+  const decide = w.chat.decisionContext.client.decide
+  w.chat.decisionContext.client.decide = async request => { if (request.promptCacheKey === 'draft-check') checks.push(request.input.map(row => row.content).join('\n')); return decide(request) }
+  const d = await w.dm('dm', '전체 테스트 돌리고 결과 알려줘')
+  await w.advance(1000); await d.raw('item/started', { item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test -- --suite=payroll', cwd: '/work', status: 'inProgress', commandActions: [] } })
+  await w.advance(9000)
+  assert.deepEqual(d.assistant(), [CONCRETE], 'the wait message is posted')
+  assert.equal(checks.length, 1, 'one draft-check request for the message')
+  assert.match(checks[0], /\[C1\] 결제 테스트\(`npm test`\)를 10초째 돌리고 있어요\.\n/); assert.doesNotMatch(checks[0], /끝나면 바로 알려 드릴게요/, 'a sentence without a concrete detail is not sent')
+  assert.match(checks[0], /\[E1 time=present source=person\]\nThe person asked: 전체 테스트 돌리고 결과 알려줘/)
+  assert.match(checks[0], /\[E2 time=present source=runtime\]\n10 seconds have passed since the person wrote\. The assistant is running a command: `npm test -- --suite=payroll` \(running for about 9 seconds\)/)
+  assert.doesNotMatch(checks[0], /content not available/, 'no content-free reference from the turn')
+  await d.final('끝났습니다.')
+  // The Agent's models may not receive terminal data: the same check without the command line.
+  const closed = world(t, { flags: { held: true, flow: true, commands: true }, writer: () => CONCRETE }), seen = []
+  const decide2 = closed.chat.decisionContext.client.decide
+  closed.chat.decisionContext.client.decide = async request => { if (request.promptCacheKey === 'draft-check') seen.push(request.input.map(row => row.content).join('\n')); return decide2(request) }
+  const c = await closed.dm('dm', '전체 테스트 돌리고 결과 알려줘'); [...closed.chat.runs.values()].at(-1).toolCeiling = { terminal: 'none', browser: 'none' }
+  await closed.advance(1000); await c.raw('item/started', { item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test -- --suite=payroll', cwd: '/work', status: 'inProgress', commandActions: [] } })
+  await closed.advance(9000)
+  assert.equal(seen.length, 1); assert.doesNotMatch(seen[0], /--suite=payroll/, 'the command line is not in the evidence'); assert.match(seen[0], /The assistant is running a command \(running for about 9 seconds\)/)
+  await c.final('끝.')
+  // A wait message without any concrete detail (s4's real one): nothing to check against facts of the present, no request, posted.
+  const plain = world(t, { flags: { held: true, flow: true, commands: true } }), plainChecks = []
+  const decide3 = plain.chat.decisionContext.client.decide
+  plain.chat.decisionContext.client.decide = async request => { if (request.promptCacheKey === 'draft-check') plainChecks.push(request); return decide3(request) }
+  const p = await plain.dm('dm', '전체 테스트 돌리고 결과 알려줘')
+  await plain.advance(1000); await p.raw('item/started', { item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test', cwd: '/work', status: 'inProgress', commandActions: [] } })
+  await plain.advance(9000)
+  assert.deepEqual([p.assistant(), plainChecks.length], [[MID], 0])
+  await p.final('끝.')
+  // A pointer message: the place and the kind, in the fixed words the writer was given.
+  const ev = messageEvidence({ kind: 'pointer', attention: { kind: 'approval', where: 'left', distance: 'far' } })
+  assert.deepEqual(ev, [{ id: 'now', kind: 'run_state', time: 'present', source: 'runtime', text: 'Something that needs the person\'s decision is waiting to the left of what they are looking at on the desk, some way off. Nothing was moved into the person\'s view.' }])
 })

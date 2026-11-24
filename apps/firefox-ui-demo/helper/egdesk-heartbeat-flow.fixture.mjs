@@ -42,6 +42,8 @@ export function judge(request, seen, policy = {}, allowed = null) {
       const pick = policy[q.name](q, request), values = q.choices.map(c => c.value)
       answers[q.name] = { type: 'choice', choice: pick, confidence: 0.95, probabilities: [{ value: pick, probability: 0.96 }, { value: values.find(v => v !== pick), probability: 0.02 }] }
     } else if (q.type === 'choice') answers[q.name] = { type: 'choice', choice: /^claim_/.test(q.name) ? 'supported' : q.choices[0].value, confidence: 0.95, probabilities: [{ value: /^claim_/.test(q.name) ? 'supported' : q.choices[0].value, probability: 0.96 }, { value: 'insufficient', probability: 0.02 }] }
+    // the draft check's predicate design: a sound judge (supported, no tense mismatch)
+    else if (/^sup_\d+$/.test(q.name)) answers[q.name] = { type: 'predicate', probability: 0.96 }
     else answers[q.name] = { type: 'predicate', probability: 0.03 }
   }
   return { answers, model: 'mock', usage: { inputTokens: 5 }, latencyMs: 3 }
@@ -107,7 +109,7 @@ export function world(t, { flags = { held: true, flow: true }, fork = 'ok', fail
       assert.fail(`Unexpected native call: ${method}`)
     },
     decisionContext: { mode: () => 'on', configured: () => true, client, budgetMs: 800, calibrationLog: log, collect: async () => [],
-      draftCheck: flags.held ? { mode: () => 'on' } : undefined,
+      draftCheck: flags.held ? { mode: () => 'on', ...(flags.design ? { design: () => flags.design } : {}) } : undefined,
       ...(flags.commands ? { commandJudge: { mode: () => 'advisory' } } : {}),
       conversationFlow: flags.flow ? { mode: () => 'on', ...(presence ? { presence } : {}), ...(audience ? { audience } : {}), ...(attentionPosted ? { attentionPosted } : {}) } : undefined },
   })

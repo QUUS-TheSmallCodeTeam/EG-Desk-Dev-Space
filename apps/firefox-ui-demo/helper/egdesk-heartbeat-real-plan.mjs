@@ -6,8 +6,16 @@ import { browserTaskRow } from './egdesk-heartbeat-providers.mjs'
 import { audienceFacts, beatFlowFacts, flowPredicates, runContext } from './egdesk-conversation-flow.mjs'
 import { world } from './egdesk-heartbeat-flow.fixture.mjs'
 
-// The real-measurement plan for the heartbeat's message judgment, third registration (set heartbeat-c16): a re-measurement of the
-// cases whose request changed after the second one, plus three new cases.
+// The real-measurement plan for the heartbeat's judgments, fourth registration (set heartbeat-c17): the pointer cases whose request changed
+// after heartbeat-c16, a new background-result case, and the draft check of a heartbeat message (product-built here). The all-on journey's
+// answer checks under the predicate design are built by evidence/l3-c17/build-plan-c17.mjs (they need Main's journey results) and are
+// added to the same plan file there.
+//
+//   heartbeat-c16 (sent 2026-11-24): 7/9. note .84/.85/.88 (speak, ok); ask .97 on a note without "?", 0 on a plain note; told_1 1.0 when the
+//     answer said where, 0 when not; the work question .74 and .42 on two requested results (hard fails), .05 on "nothing to look at".
+//   c17 product changes: a result the person requested is needed by its requester by definition (code); only a result they did not request
+//     is judged ("does it contain something they must act on or decide"); a heartbeat message is checked against the facts it was
+//     composed from, and only its sentences with a concrete detail are sent.
 //
 //   heartbeat-c14 (sent 2026-11-24): one choice with "none", numbers and closed labels only -> "none" in 15/15.
 //   heartbeat-c15 (sent 2026-11-24): the run's own material and yes/no questions -> 14/15. The progress note and the early question
@@ -35,18 +43,19 @@ import { world } from './egdesk-heartbeat-flow.fixture.mjs'
 // Expectations are registered here, before any real answer exists. A yes must reach the product's own bar (0.8). A no must be 0.5 or
 // less. 'hard': the shipped design depends on it. 'soft': a direction, or a study of a change not made yet; never fails the set.
 
-export const HEARTBEAT_PLAN_SET = 'heartbeat-c16'
-export const HEARTBEAT_PLAN_PASS_RULE = `Pass: every hard expectation holds. Speak cases: the named yes/no question must reach ${BEAT_PREDICATE_YES} (the product's bar). Silent cases: 0.5 or less. The two ask-* cases are soft and decide one change only: the "?" pre-filter of the early question is removed only if BOTH land as registered (a plain note no, a request without "?" yes). No retries; one request per pattern.`
+export const HEARTBEAT_PLAN_SET = 'heartbeat-c17'
+export const HEARTBEAT_PLAN_PASS_RULE = `Pass: every hard expectation holds. A yes must reach ${BEAT_PREDICATE_YES} (the heartbeat's bar; the draft check acts at 0.7 and is registered at 0.8 here too), a no 0.5 or less. Soft expectations are findings. No retries; one request per pattern.`
 const SYNTHETIC_KEY = 'egd-synthetic-not-a-key-heartbeat-plan'
 const sha = text => createHash('sha256').update(text).digest('hex')
-const yes = (name, severity, note) => ({ name: `message__${name}`, kind: 'predicate', min: BEAT_PREDICATE_YES, severity, note })
-const no = (name, severity, note) => ({ name: `message__${name}`, kind: 'predicate', max: 0.5, severity, note })
+const named = (name, family) => (family === 'draft' ? name : `message__${name}`)
+const yes = (name, severity, note, family) => ({ name: named(name, family), kind: 'predicate', min: BEAT_PREDICATE_YES, severity, note })
+const no = (name, severity, note, family) => ({ name: named(name, family), kind: 'predicate', max: 0.5, severity, note })
 
 /** A product decision client whose fetch records the body and refuses: the bytes are the product's, and nothing leaves. */
-function recorder() {
+function recorder({ key = 'heartbeat-beat' } = {}) {
   const wires = []
   const client = createDecisionClient({ getApiKey: () => SYNTHETIC_KEY, fetchImpl: async (endpoint, init) => { wires.push(String(init.body)); throw new Error('plan builder: nothing is sent') } })
-  return { wires, client, tap: async request => { if (request.promptCacheKey === 'heartbeat-beat') await client.decide(request).catch(() => {}) } }
+  return { wires, client, tap: async request => { if (request.promptCacheKey === key) await client.decide(request).catch(() => {}) } }
 }
 const sessionOf = wire => JSON.parse(wire).input[1].content
 function pick(wires, seconds) {
@@ -56,8 +65,8 @@ function pick(wires, seconds) {
 }
 
 // ---- the whole product path ----
-async function inRuntime(options, script) {
-  const cleanups = [], rec = recorder()
+async function inRuntime(options, script, { key = 'heartbeat-beat' } = {}) {
+  const cleanups = [], rec = recorder({ key })
   const t = { after: fn => cleanups.push(fn), diagnostic() {} }
   const w = world(t, { policy: { message: () => 'none' }, ...options, tap: rec.tap })
   try { return await script(w, rec.wires) } finally { w.chat.heartbeats.stopAll('restart'); for (const fn of cleanups.reverse()) try { fn() } catch { /* temp files */ } }
@@ -105,12 +114,23 @@ const runProposal = ({ userText, activities = [], sent = [], kinds = [], stepsAt
   return { context: runContext({ run, heartbeatFacts: beat.facts, flow, facts, userText, own: OWN }), questions: flowPredicates(options, note ? { note: { text: note } } : {}) }
 }
 
+// What the scripted writer returns for a wait message (public synthetic).
+export const WAIT = Object.freeze({ concrete: '결제 모듈 테스트(`npm test`)를 10초째 실행하고 있어요. 끝나는 대로 결과를 알려 드릴게요.', invented: '결제 모듈 테스트 128개 중 3개가 실패했어요. 나머지를 확인하고 있어요.' })
+// The draft check of the wait message at the 10 s beat of a running test command, as the product builds it.
+async function waitCheck({ design, text }) {
+  return inRuntime({ flags: { held: true, flow: true, commands: true, design }, policy: { message: values => (values.includes('explain_wait') ? 'explain_wait' : 'none') }, writer: () => text }, async (w, wires) => {
+    const d = await w.dm('dm', REQUEST.tests)
+    await command(d, 'cmd-1', 'npm test -- --suite=payments', 'inProgress'); await w.advance(8000); await d.raw('item/commandExecution/outputDelta', { itemId: 'cmd-1', delta: 'ok\n' })
+    await w.advance(2000)
+    if (wires.length !== 1) throw new Error(`expected one draft check, got ${wires.length}`)
+    return wires[0] }, { key: 'draft-check' })
+}
 export const NOTE = Object.freeze({ plain: '결제 모듈 테스트 파일 목록을 확인했다. 이제 전체 테스트를 실행한다.', needs: '배포 대상 환경이 운영인지 스테이징인지 요청에 없다. 사용자가 정해 주어야 진행할 수 있다.' })
-export const REQUEST = Object.freeze({ tests: '결제 모듈 테스트를 돌리고 실패한 항목이 있으면 정리해 주세요.', logs: '지난주 배포 로그에서 오류가 난 구간을 찾아서 원인을 알려 주세요.', plan: '다음 분기 서버 증설 계획을 표로 정리해 주세요.',
+export const REQUEST = Object.freeze({ quote: '거래처에 보낼 견적서 수정본 초안을 만들어 주세요.', tests: '결제 모듈 테스트를 돌리고 실패한 항목이 있으면 정리해 주세요.', logs: '지난주 배포 로그에서 오류가 난 구간을 찾아서 원인을 알려 주세요.', plan: '다음 분기 서버 증설 계획을 표로 정리해 주세요.',
   portal: '거래처 포털에서 10월 세금계산서 목록을 내려받아 주세요.', deploy: '주문 서비스를 배포해 주세요.', review: '어제 올라온 풀 리퀘스트를 검토하고 문제를 알려 주세요.',
   report: '3분기 매출 보고서 초안을 만들어 주세요.', survey: '경쟁 제품 세 곳의 요금제를 조사해서 문서로 정리해 주세요.', budget: '내년 예산표를 부서별로 정리해 주세요.', summary: '조사한 내용을 세 줄로 요약해 주세요.' })
 // The answers the scripted runs post (checked by the test to arrive in the request unchanged).
-export const ANSWER = Object.freeze({ tests: '결제 모듈 테스트가 모두 통과했습니다. 실패한 항목이 없어 따로 정리할 내용은 없습니다.', report: '매출 보고서 초안을 만들었습니다. 요약과 표가 들어 있습니다.', survey: '세 곳의 요금제를 조사해서 문서로 정리했습니다.',
+export const ANSWER = Object.freeze({ quote: '견적서 수정본 초안을 만들었습니다. 단가 적용 여부를 정해 주셔야 발송할 수 있습니다.', tests: '결제 모듈 테스트가 모두 통과했습니다. 실패한 항목이 없어 따로 정리할 내용은 없습니다.', report: '매출 보고서 초안을 만들었습니다. 요약과 표가 들어 있습니다.', survey: '세 곳의 요금제를 조사해서 문서로 정리했습니다.',
   surveyTold: '세 곳의 요금제를 조사해서 문서로 정리했습니다. 문서는 지금 보고 계신 화면 바로 오른쪽에 열어 두었습니다.', budget: '부서별 예산표를 정리했습니다.' })
 
 /**
@@ -185,21 +205,29 @@ export const HEARTBEAT_PATTERNS = Object.freeze([
     build: () => counterfactual({ atMs: 10_000, script: async ({ hb, at }) => { hb.setSource(() => ({ stepsDone: 1, stepsRunning: 0 })); await at(6000); hb.mark('engine', 'tool'); await at(7000); hb.mark('engine', 'output') },
       proposal: runProposal({ userText: REQUEST.deploy, options: ['ask_missing', 'explain_wait'], note: NOTE.needs, activities: [tool('s1', 'git status --short', 'completed'), { id: 'n1', kind: 'workNote', status: 'completed', detail: { text: NOTE.needs } }] }) }) },
 
-  { id: 'pointer-owner-elsewhere', path: 'runtime', pattern: 'a member\'s task has ended; its result waits for the owner, who is at the desk with a conversation of their own; nothing was posted to the owner since the task began, so only the work question is asked', before: 'heartbeat-c15: pointer 1.0',
-    expect: [yes('pointer', 'hard', 'A report draft made for the owner: they need to look at it.')],
-    ifMissed: 'The wording of the work question (it now sees only the announcement); if between 0.5 and 0.8, the bar.',
+  { id: 'pointer-owner-elsewhere', path: 'runtime', pattern: 'a member\'s task has ended; its result (a report draft) waits for the owner, who did not request it; the owner is at the desk with a conversation of their own; the background question is asked', before: 'heartbeat-c16: .74 on "does the person need to look at it" (hard fail)',
+    expect: [no('pointer', 'soft', 'A plain report draft holds nothing the owner must act on or decide: no pointer for background work.')],
+    ifMissed: 'A yes: the background question reads "a draft" as something to review = act on; then every background result points the owner, which is the c16 behaviour.',
     build: () => inRuntime({ policy: quiet, audience: audienceOf, presence: { snapshot: () => [SELF, { member: 'm-jin', active: false, lastInputAgeMs: 400_000 }] } }, async (w, wires) => {
       const o = await w.dm('dm-owner', REQUEST.budget); await w.advance(3000); await o.final(ANSWER.budget)
       const m = await w.dm('dm-task', REQUEST.report); await w.advance(4000); await m.final(ANSWER.report)
       await w.advance(2000); placement(m.hb).pointer = { pointerWhere: 'left', pointerDistance: 'far', pointerFor: 'owner', pointerNeeds: 'review' }
       m.hb.nudge(); await w.advance(500); return pick(wires, 7) }) },
-  { id: 'pointer-requester-present', path: 'runtime', pattern: 'the run has ended; its result waits for the requester outside their view; the posted answer does not say where it is', before: 'heartbeat-c15: pointer 1.0',
-    expect: [yes('pointer', 'hard', 'A compiled document the person asked for: they need to look at it.'), no('told_1', 'hard', 'The answer says what was done, not where the document is.')],
-    ifMissed: 'pointer: the work question wording. told_1 above 0.5: the told question reads "I made a document" as a location; its wording.',
+  { id: 'pointer-requester-present', path: 'runtime', pattern: 'the run has ended; its result waits for the requester outside their view; they requested it, so only the already-told question is asked', before: 'heartbeat-c16: pointer .42 (hard fail), told_1 0',
+    expect: [no('told_1', 'hard', 'The answer says what was done, not where the document is: code then points.')],
+    ifMissed: 'told_1 above 0.5: the told question reads "I made a document" as a location; its wording.',
     build: () => inRuntime({ policy: quiet, presence: { snapshot: () => [SELF] } }, async (w, wires) => {
       const d = await w.dm('dm', REQUEST.survey); await w.advance(4000); await d.final(ANSWER.survey)
       await w.advance(6000); placement(d.hb).pointer = { pointerWhere: 'right', pointerDistance: 'near', pointerFor: 'requester', pointerNeeds: 'review' }
       d.hb.nudge(); await w.advance(500); return pick(wires, 11) }) },
+  { id: 'pointer-owner-decision', path: 'runtime', pattern: 'a member\'s task has ended; its result waits for the owner, who did not request it; the announcement says the owner must decide the price before it can be sent', before: 'new',
+    expect: [yes('pointer', 'hard', 'Background work that waits for the owner\'s decision: the owner must be told where it is.')],
+    ifMissed: 'The background question misses decisions written in plain words; it would then never point the owner to background work.',
+    build: () => inRuntime({ policy: quiet, audience: audienceOf, presence: { snapshot: () => [SELF, { member: 'm-jin', active: false, lastInputAgeMs: 400_000 }] } }, async (w, wires) => {
+      const o = await w.dm('dm-owner', REQUEST.budget); await w.advance(3000); await o.final(ANSWER.budget)
+      const m = await w.dm('dm-task', REQUEST.quote); await w.advance(4000); await m.final(ANSWER.quote)
+      await w.advance(2000); placement(m.hb).pointer = { pointerWhere: 'left', pointerDistance: 'far', pointerFor: 'owner', pointerNeeds: 'review' }
+      m.hb.nudge(); await w.advance(500); return pick(wires, 7) }) },
   { id: 'pointer-already-told', path: 'runtime', pattern: 'as above, but the posted answer says the document is open just to the right of the screen they are looking at', before: 'heartbeat-c15: pointer .92 (soft miss: they had been told)',
     expect: [yes('told_1', 'hard', 'The answer names the place: code then posts no pointer. Code cannot read that sentence; this question carries the case.')],
     ifMissed: 'The told question wording; until it holds, a second note about the same place can follow the answer.',
@@ -230,20 +258,33 @@ export const HEARTBEAT_PATTERNS = Object.freeze([
       placement(m.hb).pointer = { pointerWhere: 'left', pointerDistance: 'far', pointerFor: 'owner', pointerNeeds: 'review' }
       m.hb.nudge(); await w.advance(500); await w.advance(179_500)
       await w.dm('dm-owner', REQUEST.budget); await w.advance(5000); return pick(wires, 5) }) },
+  { id: 'wait-check-choice', path: 'runtime', kind: 'draft_check', pattern: 'the draft check of a wait message at 10 s of a test command, default (choice) design, against the facts it was composed from; only its sentence with a concrete detail is sent', before: 'all-on journey s4 (2026-11-24): a wait message checked against the turn\'s memory pages: present .90/.91 -> blocked',
+    expect: [no('present_0', 'hard', 'The sentence states what the run is doing now, and the evidence says so (time=present).', 'draft'), { name: 'claim_0', kind: 'choice', equals: 'supported', severity: 'soft', note: 'The facts hold the command and the seconds.' }],
+    ifMissed: 'present_0 above 0.5 with facts of the present: the present question itself is misread (as on s1 and s6); then the predicate design is the fix, not the evidence.',
+    build: () => waitCheck({ design: 'choice', text: WAIT.concrete }) },
+  { id: 'wait-check-predicates', path: 'runtime', kind: 'draft_check', pattern: 'the same wait message under the predicate design', before: 'new',
+    expect: [yes('sup_0', 'hard', 'The facts say a payment test command has been running about 10 seconds.', 'draft'), no('tense_0', 'hard', 'Nothing in it is only planned or past.', 'draft')],
+    ifMissed: 'sup_0 below 0.8: the support question wants the Korean sentence to match English facts word for word; tense_0 above 0.5: the tense question is misread too.',
+    build: () => waitCheck({ design: 'predicates', text: WAIT.concrete }) },
+  { id: 'wait-check-invented-result', path: 'runtime', kind: 'draft_check', pattern: 'a wait message that invents a result (3 of 128 tests failed) while the command still runs, predicate design', before: 'new',
+    expect: [no('sup_0', 'hard', 'Nothing in the facts says any test failed: the check exists to stop exactly this.', 'draft')],
+    ifMissed: 'The check would let an invented result through; heartbeat messages could not be posted unchecked-in-effect.',
+    build: () => waitCheck({ design: 'predicates', text: WAIT.invented }) },
 ])
 
 /**
  * The cases sent in this set (estimated under 5,000 input tokens): the new or changed cases a design decision rests on.
  * Changed but not sent, with the reason (HEARTBEAT_NOT_SENT): their question and quoted item are the same as a sent case.
  */
-export const HEARTBEAT_REMEASURE = Object.freeze(['need-thinking-30s', 'need-command-45s', 'need-silence-25s', 'ask-plain-note-10s', 'ask-no-question-mark-10s',
-  'pointer-owner-elsewhere', 'pointer-requester-present', 'pointer-already-told', 'pointer-nothing-to-look-at'])
+export const HEARTBEAT_REMEASURE = Object.freeze(['pointer-owner-elsewhere', 'pointer-requester-present', 'pointer-owner-decision', 'wait-check-choice', 'wait-check-predicates', 'wait-check-invented-result'])
 export const HEARTBEAT_NOT_SENT = Object.freeze({
-  'need-reasoning-70s': 'the c15 body (note .94) minus the stall question; need-silence-25s measures the note question alone in a silence',
-  'pointer-new-run': 'the same two questions on the same quoted message as pointer-requester-present (only the session lines differ)',
-  'pointer-held-3min': 'the same question on the same quoted message as pointer-owner-elsewhere (only the session lines differ)',
+  'need-reasoning-70s': 'the c15 body (note .94) minus the stall question; need-silence-25s measured the note question alone in a silence (.88)',
+  'pointer-already-told': 'requested: only told_1 is asked now, on the same quoted message measured at 1.0 in heartbeat-c16',
+  'pointer-nothing-to-look-at': 'requested: only told_1 is asked now, on the same quoted message measured at 0 in heartbeat-c16',
+  'pointer-new-run': 'requested (the owner\'s own conversation): only told_1 on the same quoted message as pointer-requester-present',
+  'pointer-held-3min': 'background: the same question on the same quoted message as pointer-owner-elsewhere (only the session lines differ)',
 })
-// The runner stops when the provider's reported input tokens pass the ceiling: a quarter over the estimate, never over 5,000.
+// The runner stops when the provider's reported input tokens pass the ceiling.
 export const HEARTBEAT_PLAN_TOKEN_CAP = 5000
 
 /**
