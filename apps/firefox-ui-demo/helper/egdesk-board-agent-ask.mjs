@@ -165,7 +165,7 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
     return { ticket, expiresAt, mode, decisionEgress, profileName: policy.profileName, profileRevision: active.revision,
       model: f?.model ?? d?.model ?? null, question, excerpts, replyStyle, publicInstructions,
       provider: f || d ? 'openai' : null, payer: f ? 'Host’s dedicated OpenAI Responses API key' : d ? 'Host’s Decision API key' : null,
-      decisionModel: d?.model ?? null, draftModel: f?.model ?? null,
+      decisionModel: d?.model ?? null, decisionMode: d?.mode ?? null, draftModel: f?.model ?? null,
       decisionPayer: d ? 'Host’s Decision API key' : null, draftPayer: f ? 'Host’s dedicated OpenAI Responses API key' : null,
       draftInstructions: f ? draftPreview?.(replyStyle, publicInstructions) ?? null : null }
   }
@@ -209,6 +209,10 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
         { mode: decision?.mode ?? 'off', client: decision?.client ?? null, now, signal: item.controller.signal,
           isCurrent: offered => offered === scope && current() })
       if (!current()) stale()
+      // Tell the owner what the requested external screening actually did. The excerpt set is unchanged by this label.
+      const screening = !item.decisionEgress ? null : selected?.outcome === 'decision' ? 'decision'
+        : selected?.outcome === 'local' && decision?.mode === 'advisory' ? 'advisory'
+        : selected?.outcome === 'local' || selected?.outcome === 'local_fallback' ? 'fallback' : null
       const allowed = new Map(scope.allowedSlices.map(slice => [slice.id, slice.text]))
       const evidence = [...new Set(selected?.selectedIds ?? [])].filter(id => allowed.has(id)).slice(0, MAX_SELECTED).map(id => allowed.get(id))
       if (item.mode === 'extract' || evidence.length === 0) {
@@ -218,7 +222,8 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
           const size = Buffer.byteLength(text) + (parts.length ? 2 : 0)
           if (bytes + size <= REVIEW_TEXT_BYTES.answer) { parts.push(text); bytes += size }
         }
-        return { mode: item.mode, answer: parts.join('\n\n'), source: selected?.outcome === 'decision' ? 'decision' : 'local', omittedCount: evidence.length - parts.length }
+        return { mode: item.mode, answer: parts.join('\n\n'), source: selected?.outcome === 'decision' ? 'decision' : 'local', omittedCount: evidence.length - parts.length,
+          ...(screening ? { screening } : {}) }
       }
       // The preview authorizes an upper bound. Local or opted-in Decisions ranking can
       // narrow it; unselected evidence is never sent to the drafting provider.
@@ -226,7 +231,7 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
         replyStyle: item.replyStyle, model: item.draftModel, bindingId: item.draftBinding, signal: item.controller.signal, isCurrent: current })
       if (!current()) stale()
       const answer = result?.answer ?? ''
-      return { mode: item.mode, answer: txt(answer, REVIEW_TEXT_BYTES.answer, { empty: true }), source: 'draft' }
+      return { mode: item.mode, answer: txt(answer, REVIEW_TEXT_BYTES.answer, { empty: true }), source: 'draft', ...(screening ? { screening } : {}) }
     } catch (error) {
       if (!current()) stale()
       if (error instanceof BoardAskError) throw error
