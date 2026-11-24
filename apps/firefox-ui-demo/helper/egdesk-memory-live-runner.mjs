@@ -1,3 +1,4 @@
+import { seedRefusal } from './egdesk-scenario-seed-guard.mjs'
 import { createHash } from 'node:crypto'
 import { DECISIONS_ENDPOINT, createDecisionClient } from './egdesk-decision-client.mjs'
 import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
@@ -135,6 +136,7 @@ export function createGuardedFetch(state, { fetchImpl, ceiling, maxRequests, now
     let body
     try { body = JSON.parse(init.body) } catch { refuse('bad_request_body') }
     const bytes = Buffer.byteLength(init.body), estimate = typedEstimate(body.questions ?? [], bytes)
+    if (seedRefusal(init.body)) refuse('scenario_seed')
     if (state.sent >= maxRequests) refuse('request_limit')
     if (state.tokens + estimate > ceiling) refuse('token_ceiling')
     if (init.body.includes(PRIVATE_TEXT) || init.body.includes('A사 내부 원가')) state.privateSeen = true

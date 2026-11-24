@@ -1,3 +1,4 @@
+import { seedRefusal } from './egdesk-scenario-seed-guard.mjs'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { DECISIONS_ENDPOINT, createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
@@ -281,6 +282,7 @@ function guardedFetchFor({ record, limits, fetchImpl, scripted }) {
     try { body = JSON.parse(init.body) } catch { refuse('bad_request_body') }
     const questions = body.questions ?? [], bytes = Buffer.byteLength(init.body, 'utf8')
     const estimate = estimateTokens(questions.filter(q => q.type === 'choice').length, questions.filter(q => q.type !== 'choice').length, bytes)
+    if (!scripted && seedRefusal(init.body)) refuse('scenario_seed')
     if (record.requests.length >= limits.maxRequests) refuse('request_limit')
     if (record.tokens + estimate > limits.tokenCeiling) refuse('token_ceiling')
     const names = questions.map(q => q.name)
