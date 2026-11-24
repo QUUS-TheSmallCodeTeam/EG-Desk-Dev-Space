@@ -143,8 +143,10 @@ function windowRig(options) {
     deskStoreRequest: async (method, path, body) => (path === HUD_ROUTING_PATH ? r.call(body) : { status: 404, body: null }) }
   const body = `let hudRoutingTimer = null, hudRoutingSeq = 0;\n${decl('railSearchQuery')}\n${decl('railSearchLooksLikeNavigation')}\n${decl('hudRoutingModeNow')}\n${decl('scheduleHudRouting')}\n${decl('hudRowQuote')}\n${decl('routeHudQuery')}\n${decl('suggestHudRow')}\nreturn { scheduleHudRouting, routeHudQuery };`
   const api = new Function(...Object.keys(deps), body)(...Object.values(deps))
-  const fire = async () => { const t = timers.shift(); assert.ok(t, 'a debounced question'); assert.equal(t.ms, HR.HUD_ROUTING_LIMITS.debounceMs); await t.fn(); await new Promise(res => setImmediate(res)) }
-  return { ...api, state, timers, updates, focus, client, fire, ran: () => current.ran }
+  // the timer callback starts the question without awaiting it (void): wait until the route, the mock and the reading have all finished
+  const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(res => setImmediate(res)) }
+  const fire = async () => { const t = timers.shift(); assert.ok(t, 'a debounced question'); assert.equal(t.ms, HR.HUD_ROUTING_LIMITS.debounceMs); t.fn(); await settle() }
+  return { ...api, state, timers, updates, focus, client, fire, settle, ran: () => current.ran }
 }
 
 test('window, default off (and "off"): no timer, no request, the highlight stays where it is', async () => {
@@ -182,14 +184,14 @@ test('window "on": an address and an exact card name route by rule with NO reque
 
 test('window: the answer is dropped when the person typed on, moved the highlight, or closed the list; "advisory" records and moves nothing; a failure keeps today\'s highlight', async () => {
   const typed = windowRig({ query: 'v1이랑 v2 견적 차이 알려줘' })
-  typed.scheduleHudRouting(); const t = typed.timers.shift(); const pending = t.fn(); typed.state.railSearch.query = 'v1이랑 v2 견적 차이 알려줘 단가만'; await pending
-  assert.equal(typed.state.railSearch.activeIndex, 0); assert.equal(typed.state.railSearch.routingLog, undefined)
+  typed.scheduleHudRouting(); const t = typed.timers.shift(); t.fn(); typed.state.railSearch.query = 'v1이랑 v2 견적 차이 알려줘 단가만'; await typed.settle()
+  assert.equal(typed.client.calls.length, 1, 'the question was answered'); assert.equal(typed.state.railSearch.activeIndex, 0); assert.equal(typed.state.railSearch.routingLog, undefined, 'and dropped')
   const moved = windowRig({ query: 'v1이랑 v2 견적 차이 알려줘' })
   moved.scheduleHudRouting(); moved.state.railSearch.personMoved = true; moved.state.railSearch.activeIndex = 2; await moved.fire()
   assert.equal(moved.state.railSearch.activeIndex, 2, 'the person\'s own choice stays'); assert.deepEqual(moved.state.railSearch.routingLog, [{ rule: 'decision', type: 'ask', applied: false }])
   const closed = windowRig({ query: 'v1이랑 v2 견적 차이 알려줘' })
-  closed.scheduleHudRouting(); const c = closed.timers.shift(); const p = c.fn(); closed.state.railSearch.open = false; await p
-  assert.equal(closed.state.railSearch.activeIndex, 0)
+  closed.scheduleHudRouting(); const c = closed.timers.shift(); c.fn(); closed.state.railSearch.open = false; await closed.settle()
+  assert.equal(closed.client.calls.length, 1); assert.equal(closed.state.railSearch.activeIndex, 0); assert.equal(closed.state.railSearch.routingLog, undefined)
   const adv = windowRig({ pref: 'advisory', query: 'v1이랑 v2 견적 차이 알려줘' })
   adv.scheduleHudRouting(); await adv.fire()
   assert.equal(adv.state.railSearch.activeIndex, 0); assert.deepEqual(adv.state.railSearch.routingLog, [{ rule: 'decision', type: 'ask', applied: false }])
