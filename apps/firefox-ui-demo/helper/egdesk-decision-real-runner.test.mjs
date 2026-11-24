@@ -421,3 +421,57 @@ test('grouped-question lint: a request whose grouped questions do not each carry
   const fixed = fixture((plan, files) => { files.d = c13; plan.requests.push({ id: 'd', file: 'requests/d.json', sha256: sha(c13), estInputTokens: 200, expect: [{ name: 'same_matter_R1', kind: 'predicate', min: 0.8, severity: 'hard', note: 'x' }] }) })
   assert.equal(loadPlan(fixed.planFile).requests.find(r => r.id === 'd').groupingOk, true)
 })
+
+test('waitBeforeMs: the runner pauses before a request (never a retry), records the pause, validates bounds, and a dry run neither waits nor sends', async () => {
+  const f = fixture(plan => { plan.requests[1].waitBeforeMs = 20000; plan.requests[2].waitBeforeMs = 70000 })
+  const plan = loadPlan(f.planFile)
+  assert.deepEqual([plan.requests.map(r => r.waitBeforeMs), plan.totals.waitMs], [[0, 20000, 70000], 90000])
+  assert.deepEqual(planTable(plan).map(r => r.waitBeforeMs ?? 0), [0, 20000, 70000])
+  const events = [], m = mockFetch(f.files)
+  const fetchImpl = async (url, init) => { events.push('send'); return m.fetchImpl(url, init) }
+  const sleep = async ms => { events.push(`wait ${ms}`) }
+  const out = await runPlan({ plan, key: KEY, send: true, fetchImpl, sleep })
+  assert.deepEqual(events, ['send', 'wait 20000', 'send', 'wait 70000', 'send'])
+  assert.deepEqual([out.results.a.waitedMs, out.results.b.waitedMs, out.results.c.waitedMs], [undefined, 20000, 70000])
+  // a failure stops the run: no wait for, and no send of, anything after it
+  const stopEvents = []
+  const failing = await runPlan({ plan, key: KEY, send: true, sleep: async ms => { stopEvents.push(`wait ${ms}`) },
+    fetchImpl: async (url, init) => { stopEvents.push('send'); return mockFetch(f.files, GOOD, id => (id === 'b' ? { throw: 'TypeError' } : null)).fetchImpl(url, init) } })
+  assert.deepEqual([stopEvents, failing.stoppedBecause, failing.sent], [['send', 'wait 20000', 'send'], 'network', 1])
+  // dry run: nothing waits, nothing is sent
+  const idle = []
+  const dry = await runPlan({ plan, send: false, sleep: async ms => idle.push(ms), fetchImpl: async () => { idle.push('send') } })
+  assert.deepEqual([dry.stoppedBecause, idle], ['dry_run', []])
+  for (const [bad, why] of [[-1, /waitBeforeMs must be an integer/], [120001, /waitBeforeMs must be an integer/], [1.5, /waitBeforeMs must be an integer/]]) assert.throws(() => loadPlan(fixture(p => { p.requests[0].waitBeforeMs = bad }).planFile), why)
+  assert.equal(loadPlan(fixture(p => { p.requests.forEach(r => { r.waitBeforeMs = 120000 }) }).planFile).totals.waitMs, 360000, 'three waits of 120 s are allowed')
+  const many = fixture((p, files) => { for (let k = 0; k < 5; k++) { files[`w${k}`] = bodyText([predicate('needs_reply')], `대기 ${k}`); p.requests.push({ id: `w${k}`, file: `requests/w${k}.json`, sha256: sha(files[`w${k}`]), estInputTokens: 100, waitBeforeMs: 120000, expect: [{ name: 'needs_reply', kind: 'predicate', min: 0.8, severity: 'soft', note: 'x' }] }) } p.requests[0].waitBeforeMs = 120000 })
+  assert.throws(() => loadPlan(many.planFile), /the waits add up to 720000 ms, over 600000/)
+})
+
+test('transport "product": a real send goes through the product transport, records warmBefore and the socket phases; a dry run creates no transport', async () => {
+  const f = fixture(plan => { plan.transport = 'product'; plan.requests[1].waitBeforeMs = 5 })
+  const made = [], m = mockFetch(f.files)
+  let warmNow = false
+  const createTransport = ({ trace }) => {
+    const t = { closed: false, fetch: async (url, init) => { trace({ phase: 'start', t: 0, reused: false }); if (!warmNow) { trace({ phase: 'connect', t: 40, reused: false }); trace({ phase: 'secureConnect', t: 90, reused: false }) }
+      trace({ phase: 'response', t: 300, reused: warmNow }); const r = await m.fetchImpl(url, init); warmNow = true; return r },
+      warm: () => warmNow, close() { t.closed = true } }
+    made.push(t); return t
+  }
+  const io = capture()
+  assert.equal(await main([f.planFile, '--send'], { env: { OPENAI_API_KEY: KEY }, fetchImpl: async () => { throw new Error('the default fetch must not be used') }, createTransport, sleep: async () => {}, print: io.print, printError: io.printError }), EXIT.ok)
+  assert.equal(made.length, 1); assert.equal(made[0].closed, true)
+  const lines = io.out.map(line => JSON.parse(line))
+  assert.equal(lines[0].transport, 'product'); assert.equal(lines[0].waitMs, 5)
+  const outcome = await runPlan({ plan: loadPlan(f.planFile), key: KEY, send: true, fetchImpl: m.fetchImpl, warm: () => false, annotate: () => ({ reusedSocket: false, connectMs: 40 }), sleep: async () => {} })
+  assert.deepEqual([outcome.results.a.warmBefore, outcome.results.a.reusedSocket, outcome.results.a.connectMs], [false, false, 40])
+  const dryMade = []
+  await main([f.planFile], { env: {}, createTransport: o => { dryMade.push(o); return createTransport(o) }, print: () => {}, printError: () => {} })
+  assert.equal(dryMade.length, 0)
+  assert.throws(() => loadPlan(fixture(p => { p.transport = 'undici' }).planFile), /transport must be "product"/)
+  // the phases helper: numbers only
+  const { transportPhases } = await import('./egdesk-decision-real-runner.mjs')
+  assert.deepEqual(transportPhases([{ phase: 'start', t: 10 }, { phase: 'lookup', t: 12 }, { phase: 'connect', t: 50 }, { phase: 'secureConnect', t: 110 }, { phase: 'response', t: 410, reused: false }]),
+    { reusedSocket: false, dnsMs: 2, connectMs: 40, tlsMs: 100, responseMs: 400 })
+  assert.deepEqual(transportPhases([{ phase: 'start', t: 0 }, { phase: 'response', t: 200, reused: true }]), { reusedSocket: true, responseMs: 200 })
+})

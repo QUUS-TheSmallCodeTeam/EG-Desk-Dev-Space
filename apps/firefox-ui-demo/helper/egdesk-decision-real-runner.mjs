@@ -1,3 +1,4 @@
+import { createDecisionTransport } from './egdesk-decision-transport.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 import { createHash } from 'node:crypto'
 import { chmodSync, lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
@@ -26,7 +27,12 @@ import { DECISIONS_ENDPOINT, DECISION_MODEL, normalizeDecisionResponse, validate
 //                    { "name", "kind": "choice", "equals"?: value, "oneOf"?: [values], "minConfidence"?: 0..1,
 //                      "minMargin"?: 0..1, "whenAccepted"?: { "minConfidence": 0..1, "minMargin": 0..1 }, "severity", "note" },
 //                    { "name", "kind": "score", "min"?: level, "max"?: level, "minConfidence"?: 0..1, "maxConfidence"?: 0..1, "severity", "note" } ],
-//        "recordOnly"?: true, "diagnostic"?: true } ] }
+//        "recordOnly"?: true, "diagnostic"?: true, "waitBeforeMs"?: 0..120000 } ],
+//    "transport"?: "product" }
+// waitBeforeMs: the runner waits that long before sending the request (a latency probe's idle gap). It is a pause, never a retry; the
+// total of all waits is bounded (REAL_RUN_LIMITS.maxTotalWaitMs). transport "product": send through the product's own Decisions transport
+// (helper/egdesk-decision-transport.mjs: the bridge's keep-alive pool and idle window, no retry, redirects refused), and record before
+// each request whether that transport had a warm socket (warmBefore), i.e. which turn-context budget the product would have used.
 // A request passes when it has no failed hard check. An answer that is refused, missing or malformed fails its check.
 // A request with no expectations is refused unless it says "recordOnly": true; a record-only request is sent and its answers kept,
 // but it is never counted as passed (its state is "recorded"), so a pass can never mean "nothing was checked".
@@ -46,7 +52,7 @@ import { DECISIONS_ENDPOINT, DECISION_MODEL, normalizeDecisionResponse, validate
 // A score expectation is the conjunction of the bounds it gives (min <= score <= max, minConfidence <= confidence <= maxConfidence).
 const OFFICIAL = DECISIONS_ENDPOINT
 if (OFFICIAL !== 'https://api.openai.com/v1/decisions') throw new Error('unexpected Decisions endpoint')
-export const REAL_RUN_LIMITS = Object.freeze({ maxRequests: 200, maxBodyBytes: 4 * 1024 * 1024, timeoutMs: 20000 })
+export const REAL_RUN_LIMITS = Object.freeze({ maxRequests: 200, maxBodyBytes: 4 * 1024 * 1024, timeoutMs: 20000, maxWaitMs: 120_000, maxTotalWaitMs: 600_000 })
 export const EXIT = Object.freeze({ ok: 0, usage: 2, noKey: 3, stopped: 4 })
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -150,13 +156,17 @@ export function loadPlan(planFile) {
     if (item.expect.length && recordOnly) bad(`${item.id}: a recordOnly request carries no expectations`)
     const expect = item.expect.map(entry => checkExpectation(entry, item.id, body.questions))
     if (item.diagnostic !== undefined && item.diagnostic !== true) bad(`${item.id}: diagnostic must be true when present`)
+    if (item.waitBeforeMs !== undefined && (!Number.isSafeInteger(item.waitBeforeMs) || item.waitBeforeMs < 0 || item.waitBeforeMs > REAL_RUN_LIMITS.maxWaitMs)) bad(`${item.id}: waitBeforeMs must be an integer from 0 to ${REAL_RUN_LIMITS.maxWaitMs}`)
     const grouping = lintGroupedRequest(body)
     if (!grouping.ok && item.diagnostic !== true) bad(`${item.id}: grouped questions do not each carry their own item (${grouping.families.filter(f => f.problems.length).map(f => `${f.family}: ${[...new Set(f.problems.map(x => x.problem))].join('/')}`).join('; ')}); fix the request, or mark it "diagnostic": true if it reproduces the defect on purpose`)
     const counts = { choice: body.questions.filter(q => q.type === 'choice').length, predicate: body.questions.filter(q => q.type === 'predicate').length, score: body.questions.filter(q => q.type === 'score').length }
     const text = bytes.toString('utf8')
     return { id: item.id, file: item.file, sha256: item.sha256, bytes, estInputTokens: item.estInputTokens, independentEst: independentEstimate(counts.choice, counts.predicate + counts.score, bytes.length),
-      questions: body.questions, counts, images: (text.match(/"type"\s*:\s*"input_image"/g) || []).length, expect, recordOnly, diagnostic: item.diagnostic === true, groupingOk: grouping.ok }
+      questions: body.questions, counts, images: (text.match(/"type"\s*:\s*"input_image"/g) || []).length, expect, recordOnly, diagnostic: item.diagnostic === true, groupingOk: grouping.ok, waitBeforeMs: item.waitBeforeMs ?? 0 }
   })
+  if (raw.transport !== undefined && raw.transport !== 'product') bad('transport must be "product" when present')
+  const totalWaitMs = requests.reduce((sum, r) => sum + r.waitBeforeMs, 0)
+  if (totalWaitMs > REAL_RUN_LIMITS.maxTotalWaitMs) bad(`the waits add up to ${totalWaitMs} ms, over ${REAL_RUN_LIMITS.maxTotalWaitMs}`)
   const productBars = checkProductBars(raw.productBars)
   if (productBars) {
     const problems = requests.flatMap(r => r.expect.filter(e => e.severity === 'hard' && !e.diagnostic).map(e => lintExpectation(e, r, productBars)).filter(Boolean).map(text => `${r.id} ${text}`))
@@ -164,7 +174,7 @@ export function loadPlan(planFile) {
   }
   const totals = { requests: requests.length, estInputTokens: requests.reduce((sum, r) => sum + r.estInputTokens, 0), independentEst: requests.reduce((sum, r) => sum + r.independentEst, 0),
     bytes: requests.reduce((sum, r) => sum + r.bytes.length, 0) }
-  return { set: raw.set, tokenCeiling: raw.tokenCeiling, passRule: raw.passRule, dir, requests, totals, productBars,
+  return { set: raw.set, tokenCeiling: raw.tokenCeiling, passRule: raw.passRule, dir, requests, totals: { ...totals, waitMs: totalWaitMs }, productBars, transport: raw.transport ?? null,
     diagnostic: requests.reduce((n, r) => n + r.expect.filter(e => e.diagnostic).length, 0) }
 }
 
@@ -214,7 +224,7 @@ export function lintExpectation(e, request, productBars) {
 
 export function planTable(plan) {
   return plan.requests.map(r => ({ id: r.id, bytes: r.bytes.length, sha: r.sha256.slice(0, 12), choice: r.counts.choice, predicate: r.counts.predicate, score: r.counts.score, images: r.images,
-    estInputTokens: r.estInputTokens, independentEst: r.independentEst, recordOnly: r.recordOnly, ...(r.diagnostic ? { diagnostic: true } : {}), ...(r.groupingOk ? {} : { groupingLint: 'fails' }), hard: r.expect.filter(e => e.severity === 'hard').length, soft: r.expect.filter(e => e.severity === 'soft').length }))
+    estInputTokens: r.estInputTokens, independentEst: r.independentEst, recordOnly: r.recordOnly, ...(r.waitBeforeMs ? { waitBeforeMs: r.waitBeforeMs } : {}), ...(r.diagnostic ? { diagnostic: true } : {}), ...(r.groupingOk ? {} : { groupingLint: 'fails' }), hard: r.expect.filter(e => e.severity === 'hard').length, soft: r.expect.filter(e => e.severity === 'soft').length }))
 }
 
 /** What the answer says about one expectation. observed carries what a later threshold analysis needs: probability, or choice + top/second/margin/N. */
@@ -282,7 +292,8 @@ export function scoreRequest(request, result) {
  * runPlan({ plan, key, send = false, fetchImpl = fetch, timeoutMs, now }) → { set, sent, stoppedBecause, results, scorecard, totals, tokenCeiling, usage }
  * send !== true: a dry run; nothing leaves the process and no key is looked at.
  */
-export async function runPlan({ plan, key = null, send = false, fetchImpl = globalThis.fetch, timeoutMs = REAL_RUN_LIMITS.timeoutMs, now = () => performance.now() } = {}) {
+export async function runPlan({ plan, key = null, send = false, fetchImpl = globalThis.fetch, timeoutMs = REAL_RUN_LIMITS.timeoutMs, now = () => performance.now(),
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), warm = null, annotate = null } = {}) {
   const base = { set: plan.set, passRule: plan.passRule, totals: { requests: plan.totals.requests, estInputTokens: plan.totals.estInputTokens, independentEst: plan.totals.independentEst }, tokenCeiling: plan.tokenCeiling }
   const empty = stoppedBecause => ({ ...base, sent: 0, stoppedBecause, results: {}, scorecard: null, usage: { inputTokens: 0 } })
   if (send !== true) return empty('dry_run')
@@ -294,6 +305,11 @@ export async function runPlan({ plan, key = null, send = false, fetchImpl = glob
   let sent = 0, stoppedBecause = null, inputTokens = 0
   for (const request of plan.requests) {
     if (sha256(request.bytes) !== request.sha256) { stoppedBecause = 'hash_mismatch'; break }
+    // A latency probe's idle gap: a pause before this request, never a second attempt of anything.
+    if (request.waitBeforeMs > 0) await sleep(request.waitBeforeMs)
+    let warmBefore = null
+    if (typeof warm === 'function') { try { warmBefore = warm() === true } catch { warmBefore = null } }
+    const probe = { ...(request.waitBeforeMs > 0 ? { waitedMs: request.waitBeforeMs } : {}), ...(warmBefore !== null ? { warmBefore } : {}) }
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeoutMs)
     const started = now()
     try {
@@ -305,13 +321,15 @@ export async function runPlan({ plan, key = null, send = false, fetchImpl = glob
       const usage = record(body?.usage) ? { input_tokens: body.usage.input_tokens ?? null, output_tokens: body.usage.output_tokens ?? null,
         cached_tokens: body.usage.input_tokens_details?.cached_tokens ?? null } : null
       const apiCode = record(body?.error) && typeof (body.error.code ?? body.error.type) === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(body.error.code ?? body.error.type) ? body.error.code ?? body.error.type : null
-      results[request.id] = { status: response.status, elapsedMs: Math.round(now() - started), openaiProcessingMs: response.headers?.get?.('openai-processing-ms') ?? null,
+      const phases = typeof annotate === 'function' ? annotate() ?? {} : {}
+      results[request.id] = { ...probe, ...phases, status: response.status, elapsedMs: Math.round(now() - started), openaiProcessingMs: response.headers?.get?.('openai-processing-ms') ?? null,
         model: typeof body?.model === 'string' ? body.model : null, usage, ...(apiCode ? { apiCode } : {}), answers: Array.isArray(body?.answers) ? body.answers : [] }
       if (Number.isFinite(usage?.input_tokens)) inputTokens += usage.input_tokens
       if (response.status !== 200) { stoppedBecause = `http_${response.status}`; break }
       if (inputTokens > plan.tokenCeiling) { stoppedBecause = 'token_ceiling_reached'; break }
     } catch (error) {
-      results[request.id] = { status: 0, elapsedMs: Math.round(now() - started), error: error?.name === 'AbortError' ? 'timeout' : 'network', answers: [] }
+      const phases = typeof annotate === 'function' ? annotate() ?? {} : {}
+      results[request.id] = { ...probe, ...phases, status: 0, elapsedMs: Math.round(now() - started), error: error?.name === 'AbortError' ? 'timeout' : 'network', answers: [] }
       stoppedBecause = results[request.id].error
       break
     } finally { clearTimeout(timer) }
@@ -340,7 +358,17 @@ export function writeResults(file, outcome, at = new Date()) {
  *   <plan.json>            dry run: validate, print the table, send nothing
  *   <plan.json> --send     real run (needs OPENAI_API_KEY); --out <file> writes the 0600 results file
  */
-export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print = line => console.log(line), printError = line => console.error(line), now } = {}) {
+/** Numbers only, from the product transport's data-free trace of one request: socket reuse and connection phases in ms. */
+export function transportPhases(marks) {
+  const at = phase => marks.find(m => m.phase === phase)?.t, start = at('start')
+  if (!Number.isFinite(start)) return {}
+  const ms = t => (Number.isFinite(t) ? Math.round(t - start) : null)
+  const out = { reusedSocket: marks.some(m => m.reused === true) }
+  for (const [name, phase] of [['dnsMs', 'lookup'], ['connectMs', 'connect'], ['tlsMs', 'secureConnect'], ['responseMs', 'response']]) { const v = ms(at(phase)); if (v !== null) out[name] = v }
+  return out
+}
+
+export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print = line => console.log(line), printError = line => console.error(line), now, sleep, createTransport = createDecisionTransport } = {}) {
   const args = [...argv]
   const flag = name => args.includes(name)
   const valueOf = name => { const index = args.indexOf(name); return index >= 0 ? args[index + 1] ?? null : null }
@@ -359,11 +387,17 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
   const send = flag('--send')
   print(JSON.stringify({ set: plan.set, mode: send ? 'send' : 'dry_run', endpoint: OFFICIAL, requests: plan.totals.requests, bytes: plan.totals.bytes, estInputTokens: plan.totals.estInputTokens,
     independentEst: plan.totals.independentEst, tokenCeiling: plan.tokenCeiling, withinCeiling: plan.totals.estInputTokens <= plan.tokenCeiling,
-    ...(plan.totals.independentEst > plan.totals.estInputTokens * 1.5 ? { warning: 'declared estimates are much lower than the independent estimate' } : {}), passRule: plan.passRule }))
+    ...(plan.totals.independentEst > plan.totals.estInputTokens * 1.5 ? { warning: 'declared estimates are much lower than the independent estimate' } : {}),
+    ...(plan.totals.waitMs ? { waitMs: plan.totals.waitMs } : {}), ...(plan.transport ? { transport: plan.transport } : {}), passRule: plan.passRule }))
   for (const row of planTable(plan)) print(JSON.stringify(row))
   print(JSON.stringify(plan.productBars ? { productBars: 'declared and checked', families: Object.keys(plan.productBars), diagnosticChecks: plan.diagnostic }
     : { productBars: 'not declared', warning: 'hard checks were NOT compared with the bars the product acts on' }))
-  const outcome = await runPlan({ plan, key: send ? env.OPENAI_API_KEY ?? null : null, send, fetchImpl, ...(now ? { now } : {}) })
+  // transport "product": the bridge's own Decisions transport, created only when something is really sent.
+  const marks = []
+  const transport = send && plan.transport === 'product' ? createTransport({ trace: mark => marks.push(mark) }) : null
+  const outcome = await runPlan({ plan, key: send ? env.OPENAI_API_KEY ?? null : null, send, fetchImpl: transport ? transport.fetch : fetchImpl,
+    ...(transport?.warm ? { warm: () => transport.warm(), annotate: () => transportPhases(marks.splice(0)) } : {}), ...(now ? { now } : {}), ...(sleep ? { sleep } : {}) })
+  try { transport?.close?.() } catch { /* nothing to close */ }
   print(JSON.stringify({ sent: outcome.sent, stoppedBecause: outcome.stoppedBecause, inputTokens: outcome.usage.inputTokens,
     ...(outcome.scorecard ? { requestsPassed: outcome.scorecard.requestsPassed, recordedOnly: outcome.scorecard.recordedOnly, hardFailures: outcome.scorecard.hardFailures, softMisses: outcome.scorecard.softMisses } : {}) }))
   if (outcome.scorecard) for (const row of outcome.scorecard.requests) print(JSON.stringify({ id: row.id, state: row.state, pass: row.pass,
