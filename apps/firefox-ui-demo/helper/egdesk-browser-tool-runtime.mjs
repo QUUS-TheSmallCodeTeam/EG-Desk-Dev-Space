@@ -431,7 +431,7 @@ function cardSummary(binding) {
     ...(card.openedFrom ? { openedFrom: card.openedFrom } : {}) }))
 }
 
-export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15000, now = Date.now, clock = sameClock,
+export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = () => getOwnerKey(), timeoutMs = 15000, now = Date.now, clock = sameClock,
   actionGatePolicy = CURRENT_ACTION_GATE_POLICY } = {}) {
   if (typeof sendToUi !== 'function' || typeof getOwnerKey !== 'function' || typeof clock !== 'function' ||
       !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 60000) {
@@ -474,7 +474,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       const response = await Promise.race([
         Promise.resolve().then(() => {
           if (payload.kind !== 'cancel' && (!binding || binding.closed || closedRuns.has(run?.answerId) ||
-              binding.ownerKey !== getOwnerKey() || run?.status !== 'inProgress')) {
+              binding.ownerKey !== ownerNow(binding) || run?.status !== 'inProgress')) {
             reject('BROWSER_RUN_ENDED', 'Browser run or account ended before UI dispatch')
           }
           // Allocated at the actual handoff (open-browser-use moveSequence),
@@ -500,9 +500,13 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     } finally { clearTimeout(timer) }
   }
 
-  function prepare({ selectedSources = [], ownerKey = getOwnerKey() } = {}) {
+  // L1 c24 (owner decision U11): the account a Browser grant is bound to is the account of the slot running the room. `ownerKeyFor(engineProfileId)` answers the
+  // room's own account when the room-account flag is on and the room is on an Agent profile; otherwise (and by default) the default sign-in, as before.
+  // The binding remembers its slot, so every later check compares with THAT account.
+  const ownerNow = item => ownerKeyFor(item?.engineProfileId)
+  function prepare({ selectedSources = [], engineProfileId, ownerKey = ownerKeyFor(engineProfileId) } = {}) {
     if (Array.isArray(selectedSources) && selectedSources.length === 0) return null
-    if (!short(ownerKey, 256) || ownerKey !== getOwnerKey()) reject('BROWSER_OWNER_REQUIRED', 'Current Engine account must be known and unchanged')
+    if (!short(ownerKey, 256) || ownerKey !== ownerKeyFor(engineProfileId)) reject('BROWSER_OWNER_REQUIRED', 'Current Engine account must be known and unchanged')
     if (!Array.isArray(selectedSources) || selectedSources.length > 4) reject('INVALID_BROWSER_SELECTION', 'Select at most four Browser Cards')
     const cards = new Map()
     for (const source of selectedSources) {
@@ -522,7 +526,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
         selectedUrl: ref.uri, permission: source.browserToolPermission,
         selectionToken: selection.token, clientThreadId: selection.threadId, sourceId: source.id, ...identity })
     }
-    const value = { ownerKey, cards, preparedAt: now() }
+    const value = { ownerKey, ...(engineProfileId ? { engineProfileId } : {}), cards, preparedAt: now() }
     preparedRuns.add(value)
     return value
   }
@@ -536,17 +540,17 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
 
   async function bind(run, prepared) {
     if (!short(run?.answerId, 160) || !short(run?.clientThreadId, 160) ||
-        !preparedRuns.has(prepared) || prepared.ownerKey !== getOwnerKey()) reject('BROWSER_BINDING_FORBIDDEN', 'Browser run binding is unavailable for this account')
+        !preparedRuns.has(prepared) || prepared.ownerKey !== ownerNow(prepared)) reject('BROWSER_BINDING_FORBIDDEN', 'Browser run binding is unavailable for this account')
     if (closedRuns.has(run.answerId)) reject('BROWSER_RUN_ENDED', 'Cancelled Browser run cannot be rebound')
     if (bindings.has(run.answerId) || pendingBindings.has(run.answerId)) reject('BROWSER_BINDING_EXISTS', 'Browser run is already bound or binding')
-    const binding = { ownerKey: prepared.ownerKey, runId: run.runId || run.answerId,
+    const binding = { ownerKey: prepared.ownerKey, ...(prepared.engineProfileId ? { engineProfileId: prepared.engineProfileId } : {}), runId: run.runId || run.answerId,
       clientThreadId: run.clientThreadId, selectedCards: [...prepared.cards.values()],
       cards: new Map(), pending: new Set(), calls: new Map(), closed: false, seq: 0,
       navigationPolicy: DEFAULT_NAVIGATION_POLICY, refusedSites: new Set() }
     pendingBindings.set(run.answerId, binding)
     try {
       for (const card of prepared.cards.values()) {
-        if (binding.closed || closedRuns.has(run.answerId) || prepared.ownerKey !== getOwnerKey() || run.status !== 'inProgress') {
+        if (binding.closed || closedRuns.has(run.answerId) || prepared.ownerKey !== ownerNow(prepared) || run.status !== 'inProgress') {
           reject('BROWSER_RUN_ENDED', 'Browser run or account ended during binding')
         }
         if (card.clientThreadId !== binding.clientThreadId) reject('BROWSER_BINDING_FORBIDDEN', 'Browser selection belongs to another Chat thread')
@@ -560,12 +564,12 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
             response.binding.engineAccountKey !== card.engineAccountKey ||
             response.binding.authorityEpoch !== card.authorityEpoch) reject('BROWSER_BINDING_STALE', 'Selected Browser identity changed before binding')
         if (binding.closed || closedRuns.has(run.answerId) || run.status !== 'inProgress') reject('BROWSER_RUN_ENDED', 'Browser run ended during binding')
-        if (prepared.ownerKey !== getOwnerKey()) reject('BROWSER_OWNER_CHANGED', 'Engine account changed during Browser binding')
+        if (prepared.ownerKey !== ownerNow(prepared)) reject('BROWSER_OWNER_CHANGED', 'Engine account changed during Browser binding')
         adoptNavigationPolicy(binding, response)
         binding.cards.set(card.cardId, { ...card, ui: response.binding, observation: null,
           busy: false, uncertain: false, uncertainAction: null, pendingTransition: null, lastFill: null, noEffectClick: null })
       }
-      if (binding.closed || closedRuns.has(run.answerId) || prepared.ownerKey !== getOwnerKey() || run.status !== 'inProgress') {
+      if (binding.closed || closedRuns.has(run.answerId) || prepared.ownerKey !== ownerNow(prepared) || run.status !== 'inProgress') {
         reject('BROWSER_RUN_ENDED', 'Browser run or account ended before binding completed')
       }
       bindings.set(run.answerId, binding)
@@ -590,7 +594,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const binding = bindings.get(fromRun?.answerId)
     if (!binding || binding.closed || closedRuns.has(fromRun.answerId) || !short(toRun?.answerId, 160) || !short(toRun?.clientThreadId, 160) ||
         bindings.has(toRun.answerId) || pendingBindings.has(toRun.answerId) || closedRuns.has(toRun.answerId) ||
-        binding.clientThreadId !== toRun.clientThreadId || binding.ownerKey !== getOwnerKey()) {
+        binding.clientThreadId !== toRun.clientThreadId || binding.ownerKey !== ownerNow(binding)) {
       reject('BROWSER_BINDING_FORBIDDEN', 'Browser binding cannot move to this run')
     }
     bindings.delete(fromRun.answerId)
@@ -648,7 +652,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     card.observation = null
     const trace = {}
     const response = await observeRequest(run, binding, card, { textLimit: 60, elementLimit: 80, wait }, trace)
-    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during wait')
+    if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during wait')
     const reported = response?.snapshot?.wait
     let snapshot
     try { snapshot = observationFrom({ ...response, snapshot: withoutWait(response?.snapshot) }, card.cardId) }
@@ -684,7 +688,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     card.observation = null
     const trace = {}
     const response = await observeRequest(run, binding, card, { textLimit: OBSERVE_TEXT_LIMIT, elementLimit: 80, wait }, trace)
-    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during wait')
+    if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during wait')
     const reported = response?.snapshot?.wait
     let snapshot
     try { snapshot = observationFrom({ ...response, snapshot: withoutWait(response?.snapshot) }, card.cardId) }
@@ -717,7 +721,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
   // are 'unknown'. Read-only: no lease, never a second action.
   async function reconcileAct(run, binding, card, { callId, actRequestId, guard, actSeq }) {
     const unknown = reason => ({ dispatched: 'unknown', summary: { answered: false, reason } })
-    if (binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== getOwnerKey() || run?.status !== 'inProgress') {
+    if (binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== ownerNow(binding) || run?.status !== 'inProgress') {
       return unknown('run-ended')
     }
     let response
@@ -751,7 +755,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const tool = event?.tool
     validateArgs(tool, args)
     const binding = bindings.get(run?.answerId)
-    if (!binding || binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== getOwnerKey() || run?.status !== 'inProgress') reject('BROWSER_RUN_ENDED', 'Browser tool run or account is no longer active')
+    if (!binding || binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== ownerNow(binding) || run?.status !== 'inProgress') reject('BROWSER_RUN_ENDED', 'Browser tool run or account is no longer active')
     const card = binding.cards.get(args.cardId)
     if (!card) reject('BROWSER_CARD_NOT_SELECTED', 'Browser Card was not selected for this run')
     if (card.busy) reject('BROWSER_CARD_BUSY', 'Wait for the current Browser request to finish')
@@ -759,7 +763,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     if (tool === 'egdesk_browser_observe') {
       const trace = {}
       const response = await observeRequest(run, binding, card, { textLimit: 60, elementLimit: 80 }, trace)
-      if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
+      if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
       const snapshot = observationFrom(response, card.cardId)
       adoptNavigationPolicy(binding, response)
       const recovery = recordObservation(card, snapshot)
@@ -772,7 +776,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       // pixels never become input coordinates (REA 웹6).
       const trace = {}
       const response = await observeRequest(run, binding, card, SCREENSHOT_OBSERVE_OPTIONS, trace)
-      if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
+      if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during observation')
       const snapshot = observationFrom(response, card.cardId)
       narrowPointerFallback(card, snapshot)
       if (!validScreenshot(snapshot.screenshot)) reject('BROWSER_OBSERVATION_UNAVAILABLE', 'The selected Browser did not return a verifiable screenshot')
@@ -888,7 +892,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const mutationGeneration = beginMutation(binding)
     // Restore only eligibility to be checked by the next valid observation, never input permission.
     const restoreFallback = () => {
-      if (!eligibility || binding.closed || binding.ownerKey !== getOwnerKey() || run.status !== 'inProgress') return
+      if (!eligibility || binding.closed || binding.ownerKey !== ownerNow(binding) || run.status !== 'inProgress') return
       Object.assign(card, clickLock)
       if (binding.mutationGeneration === mutationGeneration) card.noEffectClick = eligibility
     }
@@ -954,7 +958,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       throw error
     }
     finally { binding.pending.delete(pending); card.busy = false }
-    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during action; effect is unknown')
+    if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during action; effect is unknown')
     const dialog = dialogOf(response.dialog)
     if (response.status !== 'acted' || !record(response.receipt)) {
       const obscuredBy = obscuredByOf(response)
@@ -1079,7 +1083,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
       throw error
     }
     finally { binding.pending.delete(pending) }
-    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during the site request')
+    if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during the site request')
     if (!['site-allowed', 'site-refused', 'site-pending'].includes(response?.status)) reject('BROWSER_UI_PROTOCOL', 'Browser UI site answer is unreadable')
     adoptNavigationPolicy(binding, response)
     if (response.status === 'site-refused') binding.refusedSites.add(site.site)
@@ -1106,7 +1110,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     binding.pending.add(pending)
     let response
     try { response = await pending } finally { binding.pending.delete(pending) }
-    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended while opening a Card')
+    if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended while opening a Card')
     const opened = response?.binding
     if (response?.status !== 'card-opened' || !record(opened) || !short(opened.cardId, 160) || binding.cards.has(opened.cardId) ||
         !short(opened.cardEpoch, 160) || opened.profileId !== card.profileId || opened.accountId !== card.accountId ||
@@ -1163,7 +1167,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     binding.pending.add(pending)
     let response
     try { response = await pending } finally { binding.pending.delete(pending); card.busy = false }
-    if (binding.closed || binding.ownerKey !== getOwnerKey()) reject('BROWSER_RUN_ENDED', 'Browser run ended during the history move; effect is unknown')
+    if (binding.closed || binding.ownerKey !== ownerNow(binding)) reject('BROWSER_RUN_ENDED', 'Browser run ended during the history move; effect is unknown')
     const receipt = response?.receipt?.dispatchReceipt
     if (response?.status !== 'acted' || !record(receipt)) {
       if (record(response) && provenNotDispatched(response)) {
@@ -1183,7 +1187,7 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, timeoutMs = 15
     const tool = event?.tool
     validateArgs(tool, event?.arguments)
     const binding = bindings.get(run?.answerId)
-    if (!binding || binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== getOwnerKey() || run?.status !== 'inProgress') {
+    if (!binding || binding.closed || closedRuns.has(run?.answerId) || binding.ownerKey !== ownerNow(binding) || run?.status !== 'inProgress') {
       reject('BROWSER_RUN_ENDED', 'Browser tool run or account is no longer active')
     }
     const callId = event?.callId

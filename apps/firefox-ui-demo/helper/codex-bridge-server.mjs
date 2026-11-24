@@ -349,14 +349,17 @@ contexts = new ContextRuntime({
       : nativeCapabilities.schemaMatch && appServerReady,
 })
 for (const root of pendingFileRoots.values()) contexts.noteRoot(root)
-const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState) })
+// L1 c24 (flag EGDESK_ROOM_ACCOUNT=on, default off; owner decision U11): a Browser grant is bound to the account of the slot running the room. A room on an
+// Agent profile uses THAT profile's account for binding and for every later check; the default room, and every room with the flag off, the default sign-in.
+const browserOwnerKeyFor = id => (process.env.EGDESK_ROOM_ACCOUNT === 'on' && isProfileSlot(id) ? codexEngine.ownerKey(id) : publicAuthIdentityKey(authState))
+const browserTransport = new BrowserToolTransport({ getOwnerKey: () => publicAuthIdentityKey(authState), ownerKeyFor: browserOwnerKeyFor })
 // Browser-only transfer generation; restored settings never revive older work.
 let browserDecisionGeneration = 0
 // L1 c23: readiness of the slot that will run the turn. The shared slot reads the shared binary's probe and the shared server; a profile slot reads ITS
 // OWN binary's probe and ITS OWN server (ready and signed in), so neither server being down affects the other's rooms.
 const slotReadiness = createSlotReadiness({ shared: () => ({ schemaMatch: nativeCapabilities.schemaMatch, qaReadOnly: nativeCapabilities.qaReadOnly, ready: appServerReady }),
   profiles: { capabilities: id => codexProfileServers.capabilities(id) } })
-const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), schemaReady: route => slotReadiness.qaReady(route?.engineProfileId), fixtureQa: fixtureBrowserQaFromEnv(process.env),
+const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), ownerKeyFor: browserOwnerKeyFor, schemaReady: route => slotReadiness.qaReady(route?.engineProfileId), fixtureQa: fixtureBrowserQaFromEnv(process.env),
   // DECISION_MODEL_CONTEXT_SETUP.md §3.3: egdesk_browser_reflex only with a key and mode 'on'.
   decision: { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null,
     recipient: () => recipientForDecisionKey(decisionCredentials.getApiKey(), undefined, decisionClient.model),
