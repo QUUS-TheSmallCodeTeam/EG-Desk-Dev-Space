@@ -1,4 +1,4 @@
-import { SPEECH_RULES, speechQuestions, speechInterpretations } from './egdesk-speech-grounding.mjs'
+import { SPEECH_RULES, SPEECH_THRESHOLDS, speechQuestions, speechInterpretations } from './egdesk-speech-grounding.mjs'
 import { DecisionError } from './egdesk-decision-client.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, readPredicate, sha256Hex, tableOptions, uniqueOptions } from './egdesk-decision-questions.mjs'
 
@@ -293,7 +293,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     const strict = presentOnly && (candidate.timeSlice === 'planned' || candidate.timeSlice === 'hypothetical')
     const verdict = readPredicate(result.answers, `rel_${index}`, strict ? thresholds.relevantStrict : thresholds.relevant)
     const reason = forcedReason(message, candidate) || (verdict.state === 'yes' ? 'scored' : null)
-    return { candidate, probability: verdict.probability, reason, unknown: verdict.state === 'unknown' }
+    return { candidate, probability: verdict.probability, reason, unknown: verdict.state === 'unknown', threshold: strict ? thresholds.relevantStrict : thresholds.relevant }
   })
   if (localLookup) scored.push({ candidate: localLookup, probability: null, reason: 'mandatory', unknown: false })
   let recall = null
@@ -342,6 +342,8 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     accepted: interpretations.reduce((n, k) => n + ['source', 'form', 'time'].filter(axis => k[axis] !== 'unknown').length, 0),
     anchor: anchor ? anchor.toISOString() : null,
     recall: recall ? { state: recall.state, probability: recall.probability } : null } : null
+  const calibration = buildCalibration({ answers: result.answers, thresholds, answerType, timeIntent, scored, recall, withSpeech,
+    interpretations, segments: withSpeech ? speech.segments : [], topicRoute, topicQuestions: topicQuestions.length, candidates: list.length, discarded: discardJudgments })
   const parts = items.length || withSpeech ? [PACKET_HEAD + evidenceRule + speechRule, ...items.map(item => item.block)] : []
   if (topicRoute?.packet) parts.push(topicRoute.packet)
   const packet = parts.join('\n\n') || null
@@ -357,6 +359,8 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     ...(topicQuestions.length ? { privateTopicBatch: true, withoutTopic, privateBatchCurrent } : {}),
     ...(guarded.length || withSpeech || topicQuestions.length || guardSpeech ? { mayDispatch: () => !modeStopped() && privateBatchCurrent() && (!withSpeech || speech.allowed()) && guarded.every(item => mayRead(item.candidate)),
       noteSent: () => { for (const { candidate } of guarded) { try { candidate.noteSent?.() } catch {} } } } : {}),
+    // Process-local numbers for the calibration record; never part of the receipt, activity or any event.
+    calibration,
     extraContext: packet ? { [DECISION_CONTEXT_KEY]: packet } : {},
     latencyMs: result.latencyMs,
     model: result.model,
@@ -368,6 +372,39 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
       unknown: scored.filter(row => row.unknown).map(row => row.candidate.id),
       ...(dropped.length ? { dropped } : {}), ...(speechTrace ? { speech: speechTrace } : {}) },
   }
+}
+
+// Content-free numbers for later threshold calibration (egdesk-decision-calibration-log.mjs). It holds
+// probabilities, the bar applied and what that bar did; no ids, titles, text or message-derived words.
+const topTwo = (answers, name) => {
+  try {
+    const rows = answers?.[name]?.probabilities
+    if (!Array.isArray(rows)) return { top: null, second: null }
+    const p = rows.map(row => row?.probability).filter(Number.isFinite).sort((a, b) => b - a)
+    return { top: p[0] ?? null, second: p[1] ?? null }
+  } catch { return { top: null, second: null } }
+}
+function buildCalibration({ answers, thresholds, answerType, timeIntent, scored, recall, withSpeech, interpretations, segments, topicRoute, topicQuestions, candidates, discarded }) {
+  const judgments = []
+  for (const [q, name, read] of [['answer_type', 'answer_type', answerType], ['time_intent', 'time_intent', timeIntent]]) {
+    judgments.push({ q, ...topTwo(answers, name), value: read.value, threshold: thresholds.choice, minMargin: 0, would: read.state === 'accepted' ? 'accept' : 'reject' })
+  }
+  if (withSpeech) {
+    segments.forEach((_, i) => {
+      for (const axis of ['source', 'form', 'time']) {
+        const accepted = interpretations.find(k => k.start === segments[i].start)?.[axis]
+        judgments.push({ q: 'speech_axis', axis, seg: i, ...topTwo(answers, `speech_${axis}_${i}`), threshold: SPEECH_THRESHOLDS.confidence,
+          minMargin: SPEECH_THRESHOLDS.margin, value: accepted && accepted !== 'unknown' ? accepted : null, would: accepted && accepted !== 'unknown' ? 'accept' : 'reject' })
+      }
+    })
+    if (recall) judgments.push({ q: 'recall', p: recall.probability, threshold: thresholds.relevant, would: recall.state === 'yes' ? 'attach' : recall.state === 'no' ? 'skip' : 'unknown' })
+  }
+  if (topicQuestions) judgments.push({ q: 'topic_route', ...topTwo(answers, 'topic_route'), would: topicRoute && !discarded ? 'routed' : 'none' })
+  const relevance = scored.filter(row => row.candidate.id !== 'memory-lookup:0' && row.candidate.id !== 'conversation:recent')
+    .map(row => ({ q: 'relevance', p: row.probability, threshold: row.threshold, forced: row.reason === 'mentioned' || row.reason === 'mandatory' ? row.reason : null,
+      kind: row.candidate.kind, slice: row.candidate.timeSlice, would: row.unknown ? 'unknown' : row.reason ? 'attach' : 'skip' }))
+    .sort((a, b) => (b.p ?? -1) - (a.p ?? -1))
+  return { feature: 'turn_context', judgments: [...judgments, ...relevance].slice(0, 64), candidates, judgedTotal: relevance.length }
 }
 
 const BRANCH_RULES = [
