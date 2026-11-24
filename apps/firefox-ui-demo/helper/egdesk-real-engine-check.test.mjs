@@ -10,7 +10,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runFakeAppServer } from '../scripts/real-engine/fake-app-server.mjs'
 import { validateMessage } from './egdesk-app-server-protocol.mjs'
-import { BRIDGE_COMPOSITION, DECISION_KEY_ENV, LEDGER_FILE, appServerArgs, assertCleanupGuaranteed, childEnv, cleanupLeftovers, createGroupKiller, createLedger, formatPlan, leftoverThreads, loadScripts, parseArgs, planRun, preflight, runCheck } from './egdesk-real-engine-check.mjs'
+import { BRIDGE_COMPOSITION, DECISION_KEY_ENV, LEDGER_FILE, appServerArgs, assertCleanupGuaranteed, childEnv, cleanupLeftovers, closedRow, createGroupKiller, createLedger, formatPlan, leftoverThreads, loadScripts, parseArgs, planRun, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { APPROVER_TEXT, REAL_ENGINE_SCRIPT_SCHEMA, checkTurnExpectations, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
@@ -801,4 +801,23 @@ test('records: each private turn (path, time, characters, the text) and each hea
   const plain = world(t, { turns: [{ steps: [], final: 'a' }] })
   const quiet = only(await runCheck(plain.options, asScripts(ONE), plain.deps)).turns[0]
   assert.equal(quiet.internalTurns, undefined); assert.equal(quiet.writers, undefined, 'no private turn: nothing added to the record')
+})
+
+test('expect.postedMin counts the messages posted in the turn\'s window (an in-run reply and the final answer are two); flowRows copy the conversation flow\'s calibration rows, closed fields only', async t => {
+  const script = (postedMin, turns2) => ({ set: 'real-engine-pm-v1', conversations: [{ id: 'pm', turns: turns2 ?? [{ say: 'hi', expect: { posted: true, postedMin } }] }] })
+  assert.equal(validateEngineScript(script(2)).ok, true)
+  assert.match(validateEngineScript(script(0)).errors.join(), /postedMin/); assert.match(validateEngineScript(script(21)).errors.join(), /postedMin/)
+  assert.match(validateEngineScript(script(1, [{ say: 'x', expect: { posted: false, postedMin: 1 } }])).errors.join(), /contradict/)
+  assert.deepEqual(checkTurnExpectations({ postedMin: 2 }, { posted: ['a', 'b'] }).map(c => c.ok), [true]); assert.deepEqual(checkTurnExpectations({ postedMin: 2 }, { posted: ['a'] }).map(c => c.ok), [false])
+  assert.equal(REAL_ENGINE_SCRIPT_SCHEMA.properties.conversations.items.properties.turns.items.properties.expect.properties.postedMin.maximum, 20)
+  // the two messages of a window: an assistant message posted while the turn runs, and the final answer
+  const w = world(t, { turns: [{ steps: [{ agentMessage: 'working on it' }], final: 'done' }] })
+  w.deps.extensions = [{ name: 'flow-row', setup: ctx => { ctx.chat.draftCheckIdle = async () => { ctx.calibrationLog.record({ feature: 'conversation_flow', mode: 'on', outcome: 'check_failed', kind: 'reply_status', judgments: [{ q: 'x' }], p: 0.8765, nested: { no: 1 }, long: 'x'.repeat(200), flags: ['a', 'b'] }) } } }]
+  const rec = only(await runCheck(w.options, asScripts(script(1)), w.deps))
+  const turn = rec.turns[0]
+  assert.equal(turn.postedCount, 1); assert.equal(turn.expectations.find(c => c.check === 'postedMin').ok, true)
+  assert.deepEqual(turn.flowRows, [{ feature: 'conversation_flow', mode: 'on', outcome: 'check_failed', kind: 'reply_status', p: 0.88, flags: ['a', 'b'] }], 'closed fields only: no nested object, no long text')
+  assert.deepEqual(closedRow(null), {})
+  const none = world(t, { turns: [{ steps: [], final: 'a' }] })
+  assert.equal(only(await runCheck(none.options, asScripts(script(1)), none.deps)).turns[0].flowRows, undefined)
 })

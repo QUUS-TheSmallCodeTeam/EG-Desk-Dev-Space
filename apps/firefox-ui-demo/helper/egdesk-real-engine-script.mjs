@@ -38,7 +38,7 @@ export const IN_RUN_FLAG = 'EGDESK_INRUN_MESSAGES'
 export const LIMITS = Object.freeze({ whileRunningMs: 120_000, conversations: 8, turns: 12, files: 32, pathChars: 200, contentBytes: 64 * 1024, sayChars: 4000, approvals: 4, strings: 16, stringChars: 400 })
 // the scripted person's answers (test input, never product copy)
 export const APPROVER_TEXT = Object.freeze({ yes: '응, 그 명령 실행해 줘', no: '아니, 그건 실행하지 마' })
-export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'conversationGone', 'memory', 'briefing', 'draftCheck', 'resumes', 'unsubscribes', 'commandsRanIncludes', 'commandsRanExcludes'])
+export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'conversationGone', 'memory', 'briefing', 'draftCheck', 'resumes', 'unsubscribes', 'postedMin', 'commandsRanIncludes', 'commandsRanExcludes'])
 export const ACTIONS = Object.freeze(['interrupt', 'steer', 'delete'])
 // c25: conversation.agentProfile makes the conversation an Agent-profile DIRECT room (the room the product's draft check judges and the Agent turn's detach + resume belongs to):
 // a synthetic Agent, created in the check's isolated profile store (no person data), every send names it with replyDestination "direct". A direct room is not one-time, so it
@@ -94,6 +94,7 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
               conversationGone: { type: 'boolean' },
               draftCheck: { type: 'object', additionalProperties: false, required: ['ran'], properties: { ran: { type: 'boolean' }, rejects: { type: 'integer', minimum: 0, maximum: 50 } } },
               resumes: { type: 'integer', minimum: 0, maximum: 20 },
+              postedMin: { type: 'integer', minimum: 1, maximum: 20 },
               unsubscribes: { type: 'integer', minimum: 0, maximum: 20 },
               memory: MEMORY_EXPECT_SCHEMA,
               briefing: BRIEFING_EXPECT_SCHEMA,
@@ -232,6 +233,8 @@ export function validateEngineScript(value) {
       if (e.commandsRan !== undefined) textList(e.commandsRan, `${tt}.expect.commandsRan`, 2000)
       for (const k of ['commandsRanIncludes', 'commandsRanExcludes']) if (e[k] !== undefined) textList(e[k], `${tt}.expect.${k}`)
       if (e.asked !== undefined && !(Number.isInteger(e.asked) && e.asked >= 0 && e.asked <= LIMITS.approvals)) bad(`${tt}.expect.asked`, `an integer 0-${LIMITS.approvals}`)
+      if (e.postedMin !== undefined && !(Number.isInteger(e.postedMin) && e.postedMin >= 1 && e.postedMin <= 20)) bad(`${tt}.expect.postedMin`, 'an integer 1-20')
+      if (e.postedMin !== undefined && e.posted === false) bad(`${tt}.expect`, 'postedMin and posted:false contradict')
       for (const k of ['resumes', 'unsubscribes']) if (e[k] !== undefined && !(Number.isInteger(e[k]) && e[k] >= 0 && e[k] <= 20)) bad(`${tt}.expect.${k}`, 'an integer 0-20')
       if (e.undoRecords !== undefined && !(Number.isInteger(e.undoRecords) && e.undoRecords >= 0 && e.undoRecords <= 50)) bad(`${tt}.expect.undoRecords`, 'an integer 0-50')
       if (e.turnStatus !== undefined && !['completed', 'failed', 'interrupted'].includes(e.turnStatus)) bad(`${tt}.expect.turnStatus`, 'completed / failed / interrupted')
@@ -279,6 +282,8 @@ export function checkTurnExpectations(expect = {}, record = {}) {
   if (expect.toolCalls) put('toolCalls', inOrder(expect.toolCalls, tools), { wanted: expect.toolCalls, seen: tools })
   if (expect.noToolCalls) put('noToolCalls', tools.length === 0, { seen: tools })
   if (expect.posted !== undefined) put('posted', (last !== null) === expect.posted, { posted: (record.posted ?? []).length })
+  // how many chat messages were posted in this turn's window (an in-run reply AND the final answer are two); on a whileRunning turn, the messages posted after it was sent
+  if (expect.postedMin !== undefined) put('postedMin', (record.posted ?? []).length >= expect.postedMin, { posted: (record.posted ?? []).length, wanted: expect.postedMin })
   if (expect.answerIncludes) { const missing = expect.answerIncludes.filter(s => !(last ?? '').includes(s)); put('answerIncludes', last !== null && missing.length === 0, { missing }) }
   if (expect.answerExcludes) { const found = expect.answerExcludes.filter(s => (last ?? '').includes(s)); put('answerExcludes', found.length === 0, { found }) }
   if (expect.noNativeTools) {

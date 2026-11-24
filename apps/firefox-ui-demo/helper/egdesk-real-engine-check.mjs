@@ -112,6 +112,16 @@ export async function deleteAndVerify(request, ids, ledger) {
   return out
 }
 
+/** A calibration row of the conversation flow, copied as it is: its closed words, numbers and booleans only (short strings, flat arrays of those); no nested object, no long text. */
+export function closedRow(row) {
+  const out = {}, scalar = v => (typeof v === 'string' && v.length <= 60) || typeof v === 'boolean' || Number.isFinite(v)
+  for (const [key, value] of Object.entries(row ?? {}).slice(0, 40)) {
+    if (scalar(value)) out[key] = typeof value === 'number' ? Math.round(value * 100) / 100 : value
+    else if (Array.isArray(value) && value.length <= 20 && value.every(scalar)) out[key] = value
+  }
+  return out
+}
+
 const usage = message => Object.assign(new Error(message), { code: 'usage' })
 const isExecutable = file => { try { fs.accessSync(file, constants.X_OK); return fs.statSync(file).isFile() } catch { return false } }
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -320,8 +330,8 @@ export async function runConversation({ options, set, conversation, deps = {} })
   let chat = null, store = null, wiring = null, threadClient = null
   const memoryHook = createMemoryHook(conversation.memory) // memory hook: seeded pages, what the product sent, the memory expectations
   const completions = [], tasks = []
-  const turnNow = { notifications: [], toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [], draftRows: [], internal: [], writers: [] }
-  const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = []; turnNow.internal = []; turnNow.writers = [] }
+  const turnNow = { notifications: [], toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [], draftRows: [], flowRows: [], internal: [], writers: [] }
+  const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = []; turnNow.flowRows = []; turnNow.internal = []; turnNow.writers = [] }
   let initializeResult = null, lastThreadStart = null
   const rpc = new AppServerRpc({
     send: payload => child.stdin.write(`${payload}\n`), experimentalApi: true, timeoutMs: 60_000,
@@ -410,7 +420,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const calibrationBase = openCalibrationLog({ dataDir: settingsDir, log() {} })
     // the draft check records one calibration row per check (closed words): the check keeps a copy per turn so a script can say whether it ran
     // (the log object is frozen: an inheriting wrapper, not a Proxy, so that only record is replaced)
-    const calibrationLog = Object.create(calibrationBase, { record: { value: row => { try { if (row?.feature === 'draft_check') turnNow.draftRows.push({ mode: row.mode ?? null, attached: row.attached === true, fallback: typeof row.fallback === 'string' ? row.fallback : null, check: typeof row.check === 'string' ? row.check : null, ifUnrevised: typeof row.ifUnrevised === 'string' ? row.ifUnrevised : null, judgments: (Array.isArray(row.judgments) ? row.judgments : []).slice(0, 40).map(j => ({ q: String(j?.q ?? '').slice(0, 40), would: typeof j?.would === 'string' ? j.would : null, p: Number.isFinite(j?.p) ? Math.round(j.p * 100) / 100 : null })), ...(row.evidence ? { evidence: { items: row.evidence.items ?? null, opaque: row.evidence.opaque ?? null, sentences: row.evidence.sentences ?? null, terms: row.evidence.terms ?? null } } : {}) }) } catch { /* recording only */ } return calibrationBase.record(row) }, enumerable: true } })
+    const calibrationLog = Object.create(calibrationBase, { record: { value: row => { try { if (row?.feature === 'draft_check') turnNow.draftRows.push({ mode: row.mode ?? null, attached: row.attached === true, fallback: typeof row.fallback === 'string' ? row.fallback : null, check: typeof row.check === 'string' ? row.check : null, ifUnrevised: typeof row.ifUnrevised === 'string' ? row.ifUnrevised : null, judgments: (Array.isArray(row.judgments) ? row.judgments : []).slice(0, 40).map(j => ({ q: String(j?.q ?? '').slice(0, 40), would: typeof j?.would === 'string' ? j.would : null, p: Number.isFinite(j?.p) ? Math.round(j.p * 100) / 100 : null })), ...(row.evidence ? { evidence: { items: row.evidence.items ?? null, opaque: row.evidence.opaque ?? null, sentences: row.evidence.sentences ?? null, terms: row.evidence.terms ?? null } } : {}) }) } catch { /* recording only */ } try { if (row?.feature === 'conversation_flow') turnNow.flowRows.push(closedRow(row)) } catch { /* recording only */ } return calibrationBase.record(row) }, enumerable: true } })
     const KEY = options.decisions ? String(env[DECISION_KEY_ENV] ?? '').trim() : null
     const decisionCall = []
     const transport = options.decisions && !deps.fetchImpl ? createDecisionTransport() : null
@@ -521,7 +531,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
         if (status === 'timeout') { try { await rpc.request('turn/interrupt', { threadId: run.conversationId, turnId: run.runId }) } catch {} rec.aborted ??= 'turn_timeout' }
       }
       await Promise.allSettled(tasks.splice(0)); try { await chat.queue } catch {} try { await chat.draftCheckIdle() } catch {} await sleep(30); await Promise.allSettled(tasks.splice(0))
-      return { run, status, error: done?.error ?? null, latencyMs: ms(started), toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], draftRows: [...turnNow.draftRows], internal: [...turnNow.internal], writers: [...turnNow.writers], commandsRan: [...runnerLog] }
+      return { run, status, error: done?.error ?? null, latencyMs: ms(started), toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], draftRows: [...turnNow.draftRows], flowRows: [...turnNow.flowRows], internal: [...turnNow.internal], writers: [...turnNow.writers], commandsRan: [...runnerLog] }
     }
     const sendAndWait = async text => finishTurn(await beginTurn(text))
     // a message typed into the working run, afterMs after that turn started; not a turn of its own (the run's turn keeps going)
@@ -613,7 +623,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
       await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
-        ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(sub.some(s => s.internal?.length) ? { internalTurns: sub.flatMap(s => s.internal) } : {}), ...(sub.some(s => s.writers?.length) ? { writers: sub.flatMap(s => s.writers) } : {}), ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...(memory.record ? { memory: memory.record } : {}), expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
+        ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(sub.some(s => s.flowRows?.length) ? { flowRows: sub.flatMap(s => s.flowRows) } : {}), ...(sub.some(s => s.internal?.length) ? { internalTurns: sub.flatMap(s => s.internal) } : {}), ...(sub.some(s => s.writers?.length) ? { writers: sub.flatMap(s => s.writers) } : {}), ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...(memory.record ? { memory: memory.record } : {}), expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {
         // the message typed into the run: what happened after it was sent
         const prev = sub[0], after = texts.slice(mark.posted)
@@ -621,7 +631,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
         const implicit = follow === 'message' ? 'sent_while_running' : 'action_taken'
         const expect2 = [{ check: implicit, ok: mark.accepted, detail: { afterMs: mark.afterMs, sentAtMs: mark.sentAtMs, error: mark.error } }, ...checkTurnExpectations(next.expect ?? {}, flat2)]
         await pushTurn({ index: index + 2, say: clip(next.say ?? '', 200), approve: [], ...(follow === 'message' ? { whileRunning: { afterMs: mark.afterMs } } : { action: follow, afterMs: mark.afterMs }), subTurns: [{ ...(follow === 'message' ? { whileRunning: true } : { action: follow }), accepted: mark.accepted, error: mark.error, sentAtMs: mark.sentAtMs }],
-          posted: after, asked, undoRecords: flat2.undoRecords, expectations: expect2, ok: expect2.every(e => e.ok) && !sub.some(failedRun) })
+          posted: after, postedCount: after.length, ...(sub.some(s => s.flowRows?.length) ? { flowRows: sub.flatMap(s => s.flowRows) } : {}), asked, undoRecords: flat2.undoRecords, expectations: expect2, ok: expect2.every(e => e.ok) && !sub.some(failedRun) })
         index++
       }
     }
