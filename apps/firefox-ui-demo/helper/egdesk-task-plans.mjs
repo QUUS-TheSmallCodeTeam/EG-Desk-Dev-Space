@@ -228,6 +228,10 @@ export function createTaskPlanService({ store, sources, graph, adapter, chat = n
   onBlocked = () => {}, now = () => new Date().toISOString(), makeId = randomUUID }) {
   const slotOfOrigin = origin => { try { return origin ? slotOf(origin) : undefined } catch { return undefined } }
   const slotOfPlan = plan => slotOfOrigin(plan?.origin)
+  const hintsFor = plan => {
+    const slot = slotOfPlan(plan)
+    return slot && plan.origin.conversationId && plan.origin.clientThreadId ? { conversationId: plan.origin.conversationId, clientThreadId: plan.origin.clientThreadId } : undefined
+  }
   // a Board's instructions are registered before its plan is stored: until then the proposing room's slot is kept here
   const proposing = new Map()
   const owner = slot => {
@@ -409,7 +413,10 @@ export function createTaskPlanService({ store, sources, graph, adapter, chat = n
     slotOfGraph: graphId => slotOfPlan(store.byGraph(graphId)),
     slotOfBoard: boardId => (proposing.has(boardId) ? proposing.get(boardId) : slotOfPlan(typeof boardId === 'string' ? store.all().find(plan => plan.boardId === boardId) : null)),
     roomKeyed,
-    hintsOf(planId) { const plan = typeof planId === 'string' && PLAN_ID.test(planId) ? store.find(planId) : null; const slot = slotOfPlan(plan); return slot && plan.origin.conversationId && plan.origin.clientThreadId ? { conversationId: plan.origin.conversationId, clientThreadId: plan.origin.clientThreadId } : undefined },
+    hintsOf(planId) { return hintsFor(typeof planId === 'string' && PLAN_ID.test(planId) ? store.find(planId) : null) },
+    // L1 c26: the same for the task graph and source routes, which name a graph or a Board, not a plan (any other graph or Board: undefined = the default sign-in)
+    hintsOfGraph(graphId) { return hintsFor(typeof graphId === 'string' ? store.byGraph(graphId) : null) },
+    hintsOfBoard(boardId) { return hintsFor(typeof boardId === 'string' ? store.all().find(plan => plan.boardId === boardId) : null) },
   }
 }
 

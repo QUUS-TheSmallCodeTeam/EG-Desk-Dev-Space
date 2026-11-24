@@ -178,8 +178,8 @@ export async function openWorkflowRuntime({
     const unsubscribeJournal = unsubscribeGraph
     unsubscribeGraph = () => { unsubscribeJournal(); unsubscribeNative(); if (hintTimer) clearTimeout(hintTimer); hintTimer = null }
     router = createAwaitGateRouter({ graph, bus, owner })
-    handleTasks = createTaskHttpHandler({ graph, adapter, ensureAuth, port, continueGate })
-    handleSources = createTaskSourceHttpHandler({ sources, ensureAuth, port })
+    handleTasks = createTaskHttpHandler({ graph, adapter, ensureAuth, port, continueGate, hintsOfGraph: graphId => plans?.hintsOfGraph?.(graphId) })
+    handleSources = createTaskSourceHttpHandler({ sources, ensureAuth, port, hintsOfBoard: boardId => plans?.hintsOfBoard?.(boardId) })
     handlePlans = createTaskPlanHttpHandler({ plans, ensureAuth, port })
   } catch (error) {
     tasksError = publicText(error?.message || 'Local task storage failed to open', 1000)

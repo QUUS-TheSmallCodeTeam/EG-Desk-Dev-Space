@@ -11,6 +11,7 @@ import path from 'node:path'
 import { openWorkflowRuntime } from './egdesk-workflow-runtime.mjs'
 import { isProfileSlot } from './egdesk-slot-readiness.mjs'
 import { readFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 
 const WORK = 'codex-abcdef01', MAIN = 'codex-default'
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -21,12 +22,20 @@ async function fixture(t, { flag = true, defaultOwner = null } = {}) {
   const w = { flag, defaultOwner, profiles: { [WORK]: 'email:work@example.test' }, threads: new Map([['conv-w', WORK], ['conv-d', MAIN]]), sends: [], internals: [] }
   const chat = { threads: new Map(), conversationBusy: () => false, interrupt: async () => ({}), resume: async () => ({ runs: [] }), snapshot: () => ({ runs: [] }),
     send: async (body, internal) => { w.sends.push(body); w.internals.push(internal); return { accepted: true, requestId: body.requestId, conversationId: body.conversationId ?? 'child-conv', runId: 'native-run', answerId: `${body.conversationId ?? 'child-conv'}/native-run` } } }
+  w.auths = []
+  let runtime = null
+  const server = createServer((req, res) => { void runtime.handle(req, res, new URL(req.url, 'http://127.0.0.1')).then(handled => { if (!handled) { res.writeHead(404); res.end('{}') } }) })
+  const port = await new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)))
   const ownerKeyFor = id => (w.flag && isProfileSlot(id) ? (w.profiles[id] ?? null) : w.defaultOwner)
-  const runtime = await openWorkflowRuntime({ dataDir: dir, chat, port: 39218, broadcast() {}, ensureAuth: async () => {}, getOwnerKey: () => w.defaultOwner,
+  runtime = await openWorkflowRuntime({ dataDir: dir, chat, port, broadcast() {}, ensureAuth: async hints => { w.auths.push(hints) }, getOwnerKey: () => w.defaultOwner,
     ownerKeyFor, roomKeyed: () => w.flag, roomSlotOf: origin => { if (!w.flag) return undefined; const slot = origin?.engineProfileId ?? w.threads.get(origin?.conversationId); return isProfileSlot(slot) ? slot : undefined } })
-  t.after(async () => { await runtime.close(); await rm(dir, { recursive: true, force: true }) })
+  t.after(async () => { await runtime.close(); server.closeAllConnections?.(); await new Promise(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }) })
   const run = (conversationId, slot, runId = `run-${conversationId}`) => ({ runId, conversationId, clientThreadId: `room-${conversationId}`, engine: { id: 'codex', engineProfileId: slot } })
-  return { w, runtime, run, chat }
+  const call = async (method, route, body) => {
+    const response = await fetch(`http://127.0.0.1:${port}${route}`, { method, headers: body ? { 'content-type': 'application/json' } : {}, ...(body ? { body: JSON.stringify(body) } : {}) })
+    return { status: response.status, body: await response.json() }
+  }
+  return { w, runtime, run, chat, call }
 }
 
 test('a profile room proposes, lists, views and approves its plan while the default is signed out and while the default is someone else; steps run under the room\'s account', async t => {
@@ -149,4 +158,35 @@ test('default-room plans are unchanged: no trusted account for a newThread step;
   const off = await fixture(t, { flag: false, defaultOwner: 'email:a@example.test' })
   await approveAndWait(off, await off.runtime.plans.propose({ run: off.run('conv-w', WORK), args: NEW_THREAD_PLAN }))
   assert.equal(off.w.internals[0], undefined, 'flag off: nothing passed')
+})
+
+test('/tasks state and gate routes, and /task-sources, authenticate the plan\'s own room (its conversation pair), not the default; other graphs and Boards use the default as before', async t => {
+  const f = await fixture(t, { defaultOwner: null })
+  const gated = { title: 'Gated', tasks: [{ taskId: 'ask', title: 'Ask', instructions: 'Ask the owner.', dependsOn: [], gates: [{ gateId: 'ok', kind: 'userAction', label: 'Looks right' }] }] }
+  const work = await f.runtime.plans.propose({ run: f.run('conv-w', WORK), args: gated })
+  f.w.auths.length = 0
+  const roomHints = { conversationId: 'conv-w', clientThreadId: 'room-conv-w' }
+  const state = await f.call('GET', `/tasks/state?graphId=${work.graphId}`)
+  assert.equal(state.status, 200); assert.deepEqual(f.w.auths.at(-1), roomHints, 'state: the plan room\'s account')
+  assert.equal((await f.call('GET', '/tasks/state?graphId=graph-unknown')).status, 404)
+  assert.equal(f.w.auths.at(-1), undefined, 'another graph: the default, as before')
+  const scope = work.scope
+  await f.call('POST', '/tasks/continue', { boardId: work.boardId, scope, taskId: 'ask', gateId: 'ok' })
+  assert.deepEqual(f.w.auths.at(-1), roomHints, 'gate continue: the plan room\'s account')
+  const source = await f.call('POST', '/task-sources', { boardId: work.boardId, message: 'More instructions.' })
+  assert.deepEqual(f.w.auths.at(-1), roomHints, 'task source of the plan\'s Board: the plan room\'s account'); assert.equal(source.status, 201, 'and it is registered under that account while the default is signed out')
+  await f.call('POST', '/task-sources', { boardId: 'board-someone-else', message: 'x' })
+  assert.equal(f.w.auths.at(-1), undefined, 'another Board: the default, as before')
+  f.w.auths.length = 0
+  const cancelled = await f.call('POST', '/tasks/cancel', { boardId: work.boardId, scope })
+  assert.equal(cancelled.status, 202); assert.equal(f.w.auths.length, 0, 'cancel is never gated on an account (a person can always stop their own task)')
+})
+
+test('flag off: the graph and source routes authenticate with no hints, exactly as before', async t => {
+  const f = await fixture(t, { flag: false, defaultOwner: 'email:a@example.test' })
+  const work = await f.runtime.plans.propose({ run: f.run('conv-w', WORK), args: PLAN })
+  f.w.auths.length = 0
+  await f.call('GET', `/tasks/state?graphId=${work.graphId}`)
+  await f.call('POST', '/task-sources', { boardId: work.boardId, message: 'x' })
+  assert.deepEqual(f.w.auths, [undefined, undefined])
 })
