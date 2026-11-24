@@ -26,7 +26,7 @@ const wiki = buildWiki(SYNTHETIC_PAGES)
 const rowsFor = ids => memoryMaterials({ memory: { status: 'ready', delivered: Object.fromEntries(ids.map(id => [id, true])), picks: [] }, held: [] }, wiki, { scope: { allowedScopes: ['dm:this-room'] } })
 const bare = rows => rows.map(m => ({ title: m.title, excerpt: m.excerpt, status: 'unknown', time: { at: null }, links: [] }))
 
-async function flow({ request, answer, materials, script = () => undefined, fill = null }) {
+async function flow({ request, answer, materials, script = () => undefined, fill = null, coverageCheck = 'board' }) {
   const captured = [], cleanups = []
   const provider = async (_url, init) => { const body = JSON.parse(init.body); captured.push({ wire: init.body, names: body.questions.map(q => q.name), stage: body.prompt_cache_key })
     return Response.json({ answers: body.questions.map(q => ({ name: q.name, type: 'predicate', probability: script(q) ?? (q.name.startsWith('same_') ? .03 : .95) })), usage: { input_tokens: 1 } }) }
@@ -34,10 +34,11 @@ async function flow({ request, answer, materials, script = () => undefined, fill
   const root = '/decision/briefing-skeleton'
   const judge = { prepare: async dto => (await R.http('POST', `${root}/prepare`, dto)).body, run: async ticket => (await R.http('POST', `${root}/run`, { ticket, confirm: true })).body, cancel: async ticket => (await R.http('POST', `${root}/cancel`, { ticket })).body }
   try {
-    const out = await runSkeletonFlow({ request, answer, materials, candidates: [], currentAnswerId: 'ans-now', viewport: { x: 0, y: 0, width: 2400, height: 1400 }, judge, fill })
+    const out = await runSkeletonFlow({ request, answer, materials, candidates: [], currentAnswerId: 'ans-now', viewport: { x: 0, y: 0, width: 2400, height: 1400 }, judge, fill, coverageCheck })
     return { out, captured, all: stage => captured.filter(c => c.stage === `briefing-skeleton-${stage}`) }
   } finally { for (const fn of cleanups) fn() }
 }
+// c20's plan was built with the one whole-board question; since cycle 21 that is the 'board' mode, so it still rebuilds byte for byte (it is what Main sent).
 export const boardOf = wire => JSON.parse(JSON.parse(wire).questions[0].instructions.split('The board, its parts quoted in order as JSON: ')[1].split('. Does this board')[0])
 
 /** -> { plan, planBytes, files: [{ file, bytes }], requests, flows, totals } — deterministic; sends nothing. */
@@ -89,4 +90,64 @@ export async function buildBriefingCoveragePlan() {
   if (totals.estInputTokens > BRIEFING_COVERAGE_CEILING) throw new Error(`coverage plan over the ceiling: ${totals.estInputTokens}`)
   return { plan, planBytes: Buffer.from(JSON.stringify(plan, null, 2) + '\n'), files, requests, totals,
     flows: { complete: complete.out.coverage, incomplete: { status: without.out.status, reason: without.out.reason }, asAttached: asAttached.out.coverage } }
+}
+
+// ---------------- cycle 21: the same boards under the per-fact coverage (the default) ----------------
+export const BRIEFING_COVERAGE_FACTS_SET = 'l4-briefing-coverage-facts'
+export const BRIEFING_COVERAGE_FACTS_DIR = 'proofs/decision-real-measure/briefing-coverage-facts'
+export const factsProductBars = () => ({ 'onboard_F#': { yes: SKELETON_BARS.yes, no: SKELETON_BARS.no, source: `${SOURCE}; per-fact coverage (cycle 21): a fact decided not shown (<= .3) that a material holds is missing -> the one re-design` } })
+export const factsOf = wire => JSON.parse(wire).questions.map(q => JSON.parse(q.instructions.split('The fact, quoted exactly as a JSON string: ')[1].split('. Is this fact shown')[0]))
+export const boardIn = wire => JSON.parse(JSON.parse(wire).input[1].content.split('The board, its parts quoted in order as JSON: ')[1])
+/** -> { plan, planBytes, files, requests, totals, flows } — deterministic; sends nothing. */
+export async function buildBriefingCoverageFactsPlan() {
+  const S3_MATS = bare(rowsFor(['quote/a-v1', 'quote/a-v2-plan', 'quote/a-decision']))
+  const FULL = bare(rowsFor(['quote/a-request', 'quote/a-v1', 'quote/a-v2-plan', 'quote/a-decision'])) // M1 request, M2 v1, M3 v2 plan, M4 decision
+  const PARTS = {
+    M1: { text: '11월 3일 A사가 스피커 모듈 200개 견적을 요청했습니다.', fallback: '요청 카드를 열어 보세요.', slots: { title: 'A사 견적 요청', body: 'A사 구매팀이 11월 3일 스피커 모듈 200개 견적을 요청했다.' } },
+    compare: { text: '11월 6일 보낸 v1과 아직 보내지 않은 v2의 단가를 나란히 봅니다.', fallback: '비교 카드를 열어 보세요.', slots: { title: 'A사 견적서 v1과 v2', left: 'M2', right: 'M3', rows: [{ aspect: '단가', left: '12,800원', right: '12,200원' }] } },
+    M4: { text: 'v2는 팀장 승인 후 발송합니다. 승인 기한은 11월 25일입니다.', fallback: '결정 카드를 열어 보세요.', slots: { title: 'A사 건 결정', body: '11월 18일 회의에서 v2는 팀장 승인 후 발송하기로 결정했다. 승인 기한은 11월 25일이다.' } },
+  }
+  const fillFor = asked => ({ title: 'A사 견적 정리', items: Object.fromEntries(asked.guide.items.map(i => [i.id, i.component === 'result_compare' ? PARTS.compare : PARTS[i.materials[0]]])) })
+  const ORDER = { before_P1_P2: .03, before_P1_P3: .95, before_P2_P3: .95 }
+  const versions = q => (q.name.startsWith('same_') ? (q.name === 'same_M2_M3' ? .96 : .03) : ORDER[q.name])
+  const F = { coverageCheck: 'facts' }
+  const complete = await flow({ request: S3_REQUEST, answer: S3_ANSWER, materials: FULL, script: versions, fill: fillFor, ...F })
+  // the remaining-work part (the decision memo, M4) left out: its fit undecided, so the per-fact check finds the missing fact and the one re-design adds that part back
+  let again = 0
+  const without = await flow({ request: S3_REQUEST, answer: S3_ANSWER, materials: FULL, fill: fillFor, ...F,
+    script: q => (q.name === 'fact_M4' ? .5 : q.name === 'onboard_F3' ? (again++ ? .95 : .05) : versions(q)) })
+  const asAttached = await flow({ request: S3_REQUEST, answer: S3_ANSWER, materials: S3_MATS, ...F, script: q => (q.name.startsWith('same_') ? (q.name === 'same_M1_M2' ? .96 : .03) : q.name === 'onboard_F1' ? .05 : undefined),
+    fill: asked => ({ title: 'A사 견적 정리', items: Object.fromEntries(asked.guide.items.map(i => [i.id, i.component === 'result_compare' ? { ...PARTS.compare, slots: { ...PARTS.compare.slots, left: 'M1', right: 'M2' } } : PARTS.M4])) }) })
+  const FACTS = 'onboard_F1,onboard_F2,onboard_F3'
+  const first = f => { const c = f.all('coverage')[0]; if (!c || c.names.join() !== FACTS) throw new Error(`facts plan: coverage is ${c?.names.join() ?? 'missing'}`); return c }
+  const cov1 = first(complete), cov2 = first(without), cov3 = first(asAttached)
+  if (JSON.stringify(factsOf(cov1.wire)) !== JSON.stringify(['A사 견적은 11월 3일 요청', '11월 6일 v1 발송', 'v2는 팀장 승인 후 발송 예정입니다.'])) throw new Error(`facts plan: facts are ${JSON.stringify(factsOf(cov1.wire))}`)
+  if (complete.out.status !== 'presented' || boardIn(cov1.wire).length !== 3) throw new Error(`facts plan: complete is ${complete.out.status}`)
+  if (boardIn(cov2.wire).length !== 2 || JSON.stringify(boardIn(cov2.wire)).includes('팀장 승인')) throw new Error('facts plan: the incomplete board still shows the remaining work')
+  if (without.out.status !== 'presented' || without.out.coverage.redesign?.because !== 'fact-missing') throw new Error(`facts plan: incomplete flow is ${without.out.status} ${JSON.stringify(without.out.coverage)}`)
+  if (asAttached.out.status !== 'presented' || boardIn(cov3.wire).length !== 2 || asAttached.out.coverage.unshowable.join() !== 'F1') throw new Error(`facts plan: as-attached is ${asAttached.out.status} ${JSON.stringify(asAttached.out.coverage)}`)
+
+  const YES = { min: SKELETON_BARS.yes }, NO = { max: SKELETON_BARS.no }
+  const hard = (name, rest, note) => ({ name, kind: 'predicate', ...rest, severity: 'hard', note }), soft = (name, rest, note) => ({ name, kind: 'predicate', ...rest, severity: 'soft', note })
+  const specs = [
+    ['f-complete', cov1, [hard('onboard_F1', YES, '"A사 견적은 11월 3일 요청" is part 1 (the request card)'), hard('onboard_F2', YES, '"11월 6일 v1 발송" is in part 2\'s text'), hard('onboard_F3', YES, '"v2는 팀장 승인 후 발송 예정" is part 3 (the decision card)')]],
+    ['f-incomplete', cov2, [hard('onboard_F1', YES, 'part 1, unchanged'), hard('onboard_F2', YES, 'part 2, unchanged'),
+      hard('onboard_F3', NO, 'the remaining-work part is removed. FLAGGED: part 2 still says "아직 보내지 않은 v2", but nothing shows that v2 waits for the team lead\'s approval (c20: the whole-board question gave .46 here)')]],
+    ['f-as-attached', cov3, [soft('onboard_F1', NO, 'recorded: the 11/3 request is on no material of this board (no part could show it; code records it as unshowable, not blocking)'), hard('onboard_F2', YES, 'part 1\'s text'), hard('onboard_F3', YES, 'part 2 (the decision card)')]],
+  ]
+  const files = [], requests = []
+  for (const [id, c, expect] of specs) {
+    const bytes = Buffer.from(c.wire, 'utf8'), body = JSON.parse(c.wire)
+    if (body.model !== DECISION_MODEL || Object.keys(body).some(k => !['model', 'input', 'questions', 'prompt_cache_key'].includes(k)) || body.questions.some(q => q.type !== 'predicate')) throw new Error(`${id}: not a plain predicate body`)
+    files.push({ file: `requests/${id}.json`, bytes }); requests.push({ id, file: `requests/${id}.json`, sha256: sha(bytes), estInputTokens: est(c.wire), expect })
+  }
+  const plan = { set: BRIEFING_COVERAGE_FACTS_SET, tokenCeiling: BRIEFING_COVERAGE_CEILING, productBars: factsProductBars(),
+    passRule: 'PASS when every hard check passes at the product bar: every fact the board shows is judged shown (yes >= .7) on the complete, the incomplete and the as-attached board, and on the incomplete board the removed remaining-work fact is judged not shown (decided no <= .3). The as-attached 11/3 fact is recorded only.',
+    requests }
+  const totals = { requests: requests.length, questions: specs.reduce((sum, [, c]) => sum + c.names.length, 0), bytes: files.reduce((sum, f) => sum + f.bytes.length, 0), estInputTokens: requests.reduce((sum, r) => sum + r.estInputTokens, 0) }
+  if (totals.estInputTokens > BRIEFING_COVERAGE_CEILING) throw new Error(`facts plan over the ceiling: ${totals.estInputTokens}`)
+  const stages = f => f.captured.map(c => c.stage.replace('briefing-skeleton-', ''))
+  return { plan, planBytes: Buffer.from(JSON.stringify(plan, null, 2) + '\n'), files, requests, totals,
+    flows: { complete: { status: complete.out.status, stages: stages(complete) }, incomplete: { status: without.out.status, stages: stages(without), redesign: without.out.coverage.redesign },
+      asAttached: { status: asAttached.out.status, unshowable: asAttached.out.coverage.unshowable } } }
 }

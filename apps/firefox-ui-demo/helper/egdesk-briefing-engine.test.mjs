@@ -226,7 +226,7 @@ test('on the screen: the chrome\'s own reducer shows the completed answer first;
 
 test('bridge wiring: the server mounts briefingDeps behind EGDESK_BRIEFING_FLOW; the chrome waits long enough for the bounded flow', () => {
   const server = readFileSync(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
-  assert.match(server, /briefing: briefingDeps\(\{ chat, contexts, enabled: process\.env\.EGDESK_BRIEFING_FLOW === 'on', order: process\.env\.EGDESK_BRIEFING_ORDER === 'design-first' \? 'design-first' : 'skeleton',\n[^\n]*\n    fillCheck: process\.env\.EGDESK_BRIEFING_FILL_CHECK === 'facts' \? 'facts' : 'all' \}\)/)
+  assert.match(server, /briefing: briefingDeps\(\{ chat, contexts, enabled: process\.env\.EGDESK_BRIEFING_FLOW === 'on', order: process\.env\.EGDESK_BRIEFING_ORDER === 'design-first' \? 'design-first' : 'skeleton',\n[^\n]*\n    fillCheck: process\.env\.EGDESK_BRIEFING_FILL_CHECK === 'facts' \? 'facts' : 'all',\n[^\n]*\n    coverage: process\.env\.EGDESK_BRIEFING_COVERAGE === 'board' \? 'board' : 'facts' \}\)/)
   assert.equal(briefingDeps({ chat: {}, contexts: {} }).order, 'skeleton', 'the default order is skeleton-first'); assert.equal(briefingDeps({ chat: {}, contexts: {}, order: 'design-first' }).order, 'design-first')
   assert.match(surface, /timeoutMs: flowMode === 'on' \? 150000 : 20000/)
   assert.ok(BRIEFING_ENGINE_LIMITS.totalMs + 5 * 4000 < 150000, 'private turns plus the judgments fit inside the chrome wait')
