@@ -31,7 +31,8 @@ import { DECISIONS_ENDPOINT } from '../helper/egdesk-decision-client.mjs'
 import * as WP from '../overlay/resources/EGDeskWorkPlacement.sys.mjs'
 import * as BriefingHost from '../overlay/resources/EGDeskBriefingHost.sys.mjs'
 import { sendStampPath, stampingFetch } from '../helper/egdesk-decision-send-stamp.mjs'
-import { allOnWorld, callerOf, scriptedDecisions, DM } from './egdesk-all-on.support.mjs'
+import { allOnWorld, callerOf, scriptedDecisions, DM, GRAPH_PAGES, graphOf } from './egdesk-all-on.support.mjs'
+import { VARIANTS, variantPages, variantProblems, variantSha256 } from './egdesk-journey-variants.mjs'
 
 export const PLAN_FILE = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan.json', import.meta.url))
 // Plan v2 (cycle 12): every v1 expectation plus the misleading outputs found in the first real run. v1 stays as registered.
@@ -59,7 +60,7 @@ const CLIENT = 'helper/egdesk-decision-client.mjs', SUPPORT = 'scripts/egdesk-al
 export const SAYS = Object.freeze({ quote: '지난주 A사 견적 건 어디까지 됐지?', tidy: '방금 그 내용 정리해줘', tests: '전체 테스트 돌리고 결과 알려줘',
   recall: 'PostgreSQL 전환은 설계에서 어떻게 하기로 정했었지?', deployed: 'PostgreSQL 마이그레이션 배포 끝났어', portal: '거래처 포털에서 이번 달 세금계산서 내려받아줘', second: '두 번째 사업자로',
   nudge: '아니 지금 왜 멈췄니?', change: '그거 말고 B부터 해줘', stop: '그만해, 그거 하지 마', again: '전체 테스트 한 번 더 돌려줘' }) // nudge: the person's real turn in L3's c25 evidence (a message typed while the command runs)
-const AGENT_SAYS = Object.freeze({ quote: 'A사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다.', tidy: 'A사 견적은 11월 3일 요청, 11월 6일 v1 발송, v2는 팀장 승인 후 발송 예정입니다.',
+export const AGENT_SAYS = Object.freeze({ quote: 'A사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다.', tidy: 'A사 견적은 11월 3일 요청, 11월 6일 v1 발송, v2는 팀장 승인 후 발송 예정입니다.',
   recall: 'PostgreSQL 전환 설계에서 스키마 변환, 데이터 이관, 롤백 순서를 정하기로 확정했습니다.', tests: '테스트가 모두 통과했습니다.', noted: '네, 기록해 두겠습니다.', heard: '네, 알겠습니다.', ask: '사업자가 둘입니다. 어느 쪽으로 받을까요?', got: '세금계산서를 내려받았습니다.', stuck: '포털 작업을 마치지 못했습니다.',
   stuckAsk: '포털에서 다음 단계를 정하지 못했습니다. 어느 사업자의 세금계산서를 받을지 알려 주세요.' })
 export const COMMAND = 'npm test -- --suite=payroll-secret', COMMAND_OUTPUT = 'running 40 tests'
@@ -80,7 +81,7 @@ async function agentSays(w, text, j) { if (running(w)) { j.said.push(text); awai
 // (cycle 13) A question names the choices the note lists, as a model handed them would.
 async function agentAnswersTask(w, j) {
   const note = w.note(), choices = Array.isArray(note?.candidates) && note.candidates.length ? ` ${note.candidates.join(' / ')}` : ''
-  const text = note?.next === 'ask_user_in_chat' ? AGENT_SAYS.ask + choices : note?.next === 'tell_user_and_ask_in_chat' ? AGENT_SAYS.stuckAsk + choices : note?.status === 'done' ? AGENT_SAYS.got : AGENT_SAYS.stuck
+  const text = note?.next === 'ask_user_in_chat' ? (j.agent ?? AGENT_SAYS).ask + choices : note?.next === 'tell_user_and_ask_in_chat' ? (j.agent ?? AGENT_SAYS).stuckAsk + choices : note?.status === 'done' ? (j.agent ?? AGENT_SAYS).got : (j.agent ?? AGENT_SAYS).stuck
   await agentSays(w, text, j)
 }
 // (cycle 13) The answering model follows the recording rule when its turn carries it (do not say you recorded or will record anything).
@@ -117,18 +118,18 @@ async function resultNeedsOwner(w, j, task = { state: 'waiting_owner', ownerMust
 
 /** The steps, in order. Each step's expectations live in the plan file under the same id. */
 export const STEPS = Object.freeze([
-  { id: 's1-first-turn', room: DM, title: 'first message about the A company quote', run: async (w, j) => { await j.say(SAYS.quote); await w.advance(3000); await agentSays(w, AGENT_SAYS.quote, j) } },
-  { id: 's2-follow-up', room: DM, title: 'follow-up in the same session', run: async (w, j) => { await j.say(SAYS.tidy); await w.advance(3000); await agentSays(w, AGENT_SAYS.tidy, j) } },
+  { id: 's1-first-turn', room: DM, title: 'first message about the A company quote', run: async (w, j) => { await j.say((j.says ?? SAYS).quote); await w.advance(3000); await agentSays(w, (j.agent ?? AGENT_SAYS).quote, j) } },
+  { id: 's2-follow-up', room: DM, title: 'follow-up in the same session', run: async (w, j) => { await j.say((j.says ?? SAYS).tidy); await w.advance(3000); await agentSays(w, (j.agent ?? AGENT_SAYS).tidy, j) } },
   { id: 's3-briefing', room: DM, title: 'the briefing of that answer', run: async (w, j) => {
     const run = w.runs().at(-1), answer = w.history().filter(([role]) => role === 'assistant').at(-1)?.[1] ?? ''
     const body = run ? BriefingHost.observeRequest({ mode: 'on', report: answer, answerId: run.answerId, conversationId: run.conversationId, runId: run.runId,
-      candidates: BriefingHost.canvasBriefingCandidates([]), request: SAYS.tidy, viewport: rect(0, 0, 1200, 800) }) : null
+      candidates: BriefingHost.canvasBriefingCandidates([]), request: (j.says ?? SAYS).tidy, viewport: rect(0, 0, 1200, 800) }) : null
     j.note.briefing = body ? (await w.http('POST', '/decision/briefing-observe', body)).body : { status: 'not_asked' }
   } },
-  { id: 's3b-recall', room: DM, since: 3, title: 'a genuine recall: stored material the conversation does not hold', run: async (w, j) => { await j.say(SAYS.recall); await w.advance(3000); await agentSays(w, AGENT_SAYS.recall, j) } },
+  { id: 's3b-recall', room: DM, since: 3, title: 'a genuine recall: stored material the conversation does not hold', run: async (w, j) => { await j.say((j.says ?? SAYS).recall); await w.advance(3000); await agentSays(w, (j.agent ?? AGENT_SAYS).recall, j) } },
   { id: 's4-long-command', room: DM, title: 'a long command: ten seconds in', run: async (w, j) => {
     w.presenceMirror.accept(people())
-    await j.say(SAYS.tests)
+    await j.say((j.says ?? SAYS).tests)
     if (!running(w)) return
     j.note.runStartAt = w.at() // virtual clock at the person's first message of this run (the elapsed-time check of cycle 20)
     const timing = w.timing(); j.note.command = timing
@@ -141,7 +142,7 @@ export const STEPS = Object.freeze([
   // the composer sends it with the in-run messages flag; five more seconds pass with the command running.
   { id: 's4n-nudge', room: DM, since: 6, title: 'the person asks why it stopped while the command runs', run: async (w, j) => {
     if (!j.note.command || !running(w)) return
-    await j.say(SAYS.nudge, { inRunMessageTo: w.runs().at(-1).runId })
+    await j.say((j.says ?? SAYS).nudge, { inRunMessageTo: w.runs().at(-1).runId })
     await w.advance(5000)
   } },
   // (cycle 20) Five seconds after the status nudge, still in the same running command, the person changes the task. The Decision model reads the message (real model in
@@ -151,7 +152,7 @@ export const STEPS = Object.freeze([
     // The heartbeat asks the Decision model at most once per 10 s (askGapMs): the status nudge was judged about 5 s ago, so wait it out; a message
     // sent sooner is judged at a later beat (reported in the c20 notes), which is not what this step measures.
     await w.advance(5500)
-    await j.say(SAYS.change, { inRunMessageTo: w.runs().at(-1).runId })
+    await j.say((j.says ?? SAYS).change, { inRunMessageTo: w.runs().at(-1).runId })
     await w.advance(5000)
   } },
   { id: 's5-silence', room: DM, title: 'the command ends; forty seconds without engine events', run: async (w, j) => {
@@ -160,26 +161,26 @@ export const STEPS = Object.freeze([
     await w.notify('item/completed', { ...j.note.command, item: { id: 'cmd-1', type: 'commandExecution', command: COMMAND, cwd: '/work', status: 'completed', exitCode: 0, commandActions: [], aggregatedOutput: `${COMMAND_OUTPUT}\n${COMMAND_SUMMARY}\n` } })
     await w.advance(40000)
   } },
-  { id: 's6-answer', room: DM, title: 'the answer', run: async (w, j) => { await agentSays(w, AGENT_SAYS.tests, j) } },
+  { id: 's6-answer', room: DM, title: 'the answer', run: async (w, j) => { await agentSays(w, (j.agent ?? AGENT_SAYS).tests, j) } },
   { id: 's7-pointer-advisory', room: DM, title: 'the result needs the owner elsewhere; work placement advisory', run: async (w, j) => { w.ENV.EGDESK_WORK_PLACEMENT = 'advisory'; await resultNeedsOwner(w, j) } },
   { id: 's8-pointer-on', room: DM, title: 'the same, work placement on', run: async (w, j) => { w.ENV.EGDESK_WORK_PLACEMENT = 'on'; await resultNeedsOwner(w, j) } },
   // (cycle 15) A finished result whose need for the owner code cannot tell: placement asks the owner question, quoting the answer.
   { id: 's8b-finished-result', room: DM, since: 4, title: 'a finished result: does it need the owner?', run: async (w, j) => { w.ENV.EGDESK_WORK_PLACEMENT = 'on'; await resultNeedsOwner(w, j, { state: 'finished', ownerMustAct: false }) } },
-  { id: 's9-status-remark', room: DM, title: 'a status remark', run: async (w, j) => { await j.say(SAYS.deployed); await w.advance(2000); await agentSays(w, carriesRecordingRule(w) ? AGENT_SAYS.heard : AGENT_SAYS.noted, j); await j.pause() } },
-  { id: 's10-browser-task', room: BROWSER_ROOM, title: 'a browser task in a conversation of its own', run: async (w, j) => { w.use(BROWSER_ROOM); await j.say(SAYS.portal, w.browserExtra()); await agentAnswersTask(w, j) } },
-  { id: 's11-browser-reply', room: BROWSER_ROOM, title: 'the person answers the task question', run: async (w, j) => { w.use(BROWSER_ROOM); await j.say(SAYS.second, w.browserExtra()); await agentAnswersTask(w, j); await j.pause() } },
+  { id: 's9-status-remark', room: DM, title: 'a status remark', run: async (w, j) => { await j.say((j.says ?? SAYS).deployed); await w.advance(2000); await agentSays(w, carriesRecordingRule(w) ? (j.agent ?? AGENT_SAYS).heard : (j.agent ?? AGENT_SAYS).noted, j); await j.pause() } },
+  { id: 's10-browser-task', room: BROWSER_ROOM, title: 'a browser task in a conversation of its own', run: async (w, j) => { w.use(BROWSER_ROOM); await j.say((j.says ?? SAYS).portal, w.browserExtra()); await agentAnswersTask(w, j) } },
+  { id: 's11-browser-reply', room: BROWSER_ROOM, title: 'the person answers the task question', run: async (w, j) => { w.use(BROWSER_ROOM); await j.say((j.says ?? SAYS).second, w.browserExtra()); await agentAnswersTask(w, j); await j.pause() } },
   // (cycle 20) A second long command in the DM; ten seconds in the person says stop. The Decision model reads the message; by code the engine got the
   // interrupt for that turn (and no steer), and the scripted engine ends the turn as interrupted, as the real engine did within ~30 ms of turn/interrupt.
   { id: 's12-stop-nudge', room: DM, since: 7, title: 'a second long command; the person says stop', run: async (w, j) => {
     w.use(DM)
-    await j.say(SAYS.again)
+    await j.say((j.says ?? SAYS).again)
     if (!running(w)) return
     const timing = w.timing(); j.note.stopRun = { ...timing, startAt: w.at() }
     await w.advance(1000)
     await w.notify('item/started', { ...timing, item: { id: 'cmd-2', type: 'commandExecution', command: COMMAND, cwd: '/work', status: 'inProgress', commandActions: [] } })
     await w.notify('item/commandExecution/outputDelta', { ...timing, itemId: 'cmd-2', delta: `${COMMAND_OUTPUT}\n` })
     await w.advance(9000)
-    await j.say(SAYS.stop, { inRunMessageTo: w.runs().at(-1).runId })
+    await j.say((j.says ?? SAYS).stop, { inRunMessageTo: w.runs().at(-1).runId })
     await w.advance(5000)
     if (w.interruptsIn('s12-stop-nudge') > 0) { await w.endTurn('interrupted'); await w.advance(1000) }
   } }
@@ -197,7 +198,21 @@ export function loadJourneyPlan(file = PLAN_FILE) {
   if (!Array.isArray(raw.steps)) bad('the plan needs its steps')
   const listed = raw.steps.map(step => step?.id), positions = listed.map(id => STEPS.findIndex(def => def.id === id))
   if (positions.some(p => p < 0)) bad(`unknown plan step ${listed[positions.indexOf(-1)]}`)
-  if (positions.some((p, i) => i > 0 && p <= positions[i - 1])) bad('plan steps must follow the journey order')
+  // (L6 c24) A variant plan names a pre-registered variant of scripts/egdesk-journey-variants.mjs: the person's words, the scripted model's texts, the page
+  // set and (where order is not the point) the step order. The plan records the variant's sha256; a variant that changed since is refused.
+  let variant = null
+  if (raw.variant !== undefined) {
+    if (typeof raw.variant !== 'string' || !Object.hasOwn(VARIANTS, raw.variant)) bad(`unknown variant ${raw.variant}`)
+    if (raw.variantSha256 !== variantSha256(raw.variant)) bad('the variant changed since this plan was written: regenerate the plan with scripts/egdesk-journey-variants.mjs --write')
+    const problems = variantProblems(VARIANTS[raw.variant], { baseSays: SAYS, baseAgent: AGENT_SAYS, basePages: GRAPH_PAGES, baseStepIds: listed })
+    if (problems.length) bad(`variant ${raw.variant}: ${problems[0]}`)
+    const v = VARIANTS[raw.variant]
+    variant = { id: raw.variant, says: { ...SAYS, ...Object.fromEntries(Object.entries(v.says).map(([k, x]) => [k, x.text])) }, agent: { ...AGENT_SAYS, ...v.agent }, pages: variantPages(GRAPH_PAGES, v), order: v.order ? [...v.order] : null }
+  }
+  // (L6 c24) A plan may declare the journey's own ceiling; the run cannot be given a higher one.
+  if (raw.ceiling !== undefined && (!posInt(raw.ceiling?.tokenCeiling) || !posInt(raw.ceiling?.maxRequests) || raw.ceiling.tokenCeiling > LIMITS.tokenCeilingMax || raw.ceiling.maxRequests > LIMITS.maxRequestsMax)) bad('ceiling needs tokenCeiling and maxRequests, positive integers within the limits')
+  const order = variant?.order ?? STEPS.map(def => def.id), at = listed.map(id => order.indexOf(id))
+  if (at.some(p => p < 0) || at.some((p, i) => i > 0 && p <= at[i - 1])) bad('plan steps must follow the journey order')
   const missing = STEPS.filter(def => def.since === undefined && !listed.includes(def.id))
   if (missing.length) bad(`the plan needs the journey step ${missing[0].id}`)
   const steps = raw.steps.map((step, index) => {
@@ -232,7 +247,7 @@ export function loadJourneyPlan(file = PLAN_FILE) {
   // (cycle 20) world.wording "faithful": the scripted revision of a checked draft keeps the draft's own sentences and only restates the listed ones
   // (what the revision prompt asks of a model), instead of the fixed A사 sentence of the earlier plans.
   if (raw.world?.wording !== undefined && raw.world.wording !== 'faithful') bad('world.wording must be "faithful" when given')
-  return { set: raw.set, registered: raw.registered, sha256: sha256(bytes), version: Number.isSafeInteger(raw.version) ? raw.version : 1, world: { env: { ...env }, budgets: raw.world?.budgets ?? 'single', ...(raw.world?.wording ? { wording: raw.world.wording } : {}), switches }, steps }
+  return { set: raw.set, registered: raw.registered, sha256: sha256(bytes), version: Number.isSafeInteger(raw.version) ? raw.version : 1, ...(variant ? { variant } : {}), ...(raw.ceiling ? { ceiling: { tokenCeiling: raw.ceiling.tokenCeiling, maxRequests: raw.ceiling.maxRequests } } : {}), world: { env: { ...env }, budgets: raw.world?.budgets ?? 'single', ...(raw.world?.wording ? { wording: raw.world.wording } : {}), switches }, steps }
 }
 
 // ---- checks: each judges one expectation from the step's results (and the world, for request bodies that are not written out) ----
@@ -255,9 +270,9 @@ const CHECKS = {
     return { pass: repeated.length === 0, observed: { repeated } }
   },
   // The Agent's answer of this step reached the conversation exactly as the subjective model wrote it.
-  answerAsWritten: ({ step, args }) => {
+  answerAsWritten: ({ step, args, world }) => {
     const agent = newMessages(step, step.room).filter(m => m.role === 'assistant' && m.by === 'agent')
-    return { pass: agent.length === 1 && agent[0].text === AGENT_SAYS[args.said], observed: { agentMessages: agent.map(m => m.text) } }
+    return { pass: agent.length === 1 && agent[0].text === (world?.agent ?? AGENT_SAYS)[args.said], observed: { agentMessages: agent.map(m => m.text) } }
   },
   // How many new messages of this kind the person sees after the step (by: agent | system_flow; role: user | assistant).
   messageCount: ({ step, args }) => {
@@ -390,9 +405,9 @@ const CHECKS = {
   // (cycle 13) The answering turn of this step carried this context block (by its key).
   contextKey: ({ step, args }) => ({ pass: step.seen.packets.some(p => p.keys.includes(args.key)), observed: { keys: step.seen.packets.map(p => p.keys) } }),
   // (cycle 17) The person's words were taken into the working run (not a new turn, not refused) and are shown once, as the person's own.
-  keptInRun: ({ step, args }) => {
+  keptInRun: ({ step, args, world }) => {
     const sent = step.sends[0] ?? null, mine = newMessages(step, step.room).filter(m => m.role === 'user')
-    return { pass: sent?.inRun === true && sent?.accepted === true && mine.length === 1 && mine[0].text === SAYS[args.said], observed: { send: sent, personMessages: mine.map(m => m.text) } }
+    return { pass: sent?.inRun === true && sent?.accepted === true && mine.length === 1 && mine[0].text === (world?.says ?? SAYS)[args.said], observed: { send: sent, personMessages: mine.map(m => m.text) } }
   },
   // (cycle 17) The engine was left alone in this step: no new turn, no steer, no interrupt, and the run still works at its end.
   runUntouched: ({ step }) => {
@@ -407,19 +422,19 @@ const CHECKS = {
     return { pass: repeats.length === 0, observed: { repeats, shown: fresh.map(m => m.text) } }
   },
   // (cycle 17) None of the main turns of this step carries the person's earlier words (one already answered must not come back as a request).
-  notInTurnInput: ({ step, args }) => {
+  notInTurnInput: ({ step, args, world }) => {
     const inputs = step.seen.packets.map(p => p.inputTexts ?? [])
-    return { pass: !inputs.some(list => list.includes(SAYS[args.said])), observed: { inputs } }
+    return { pass: !inputs.some(list => list.includes((world?.says ?? SAYS)[args.said])), observed: { inputs } }
   },
   // (cycle 20) The person's words went into the working run (kept once, as theirs). args.said names the words; the in-run send is the one that counts.
-  keptInRunSend: ({ step, args }) => {
-    const sent = step.sends.find(s => s.inRun === true) ?? null, mine = newMessages(step, step.room).filter(m => m.role === 'user' && m.text === SAYS[args.said])
+  keptInRunSend: ({ step, args, world }) => {
+    const sent = step.sends.find(s => s.inRun === true) ?? null, mine = newMessages(step, step.room).filter(m => m.role === 'user' && m.text === (world?.says ?? SAYS)[args.said])
     return { pass: sent?.accepted === true && mine.length === 1, observed: { sends: step.sends, personMessages: mine.map(m => m.text) } }
   },
   // (cycle 20) The change reached the engine as exactly one steer into the working turn, carrying only the person's words under the request's own id.
-  steeredWith: ({ step, args }) => {
+  steeredWith: ({ step, args, world }) => {
     const turn = step.seen.steers
-    const ok = turn.length === 1 && turn[0].turnId === step.seen.workingTurn && turn[0].texts.length === 1 && turn[0].texts[0] === SAYS[args.said] && typeof turn[0].clientUserMessageId === 'string' && step.seen.interruptCalls.length === 0
+    const ok = turn.length === 1 && turn[0].turnId === step.seen.workingTurn && turn[0].texts.length === 1 && turn[0].texts[0] === (world?.says ?? SAYS)[args.said] && typeof turn[0].clientUserMessageId === 'string' && step.seen.interruptCalls.length === 0
     return { pass: ok, observed: { steers: step.seen.steers, interrupts: step.seen.interruptCalls } }
   },
   // (cycle 20) The engine was not stopped or restarted and the run still works at the end of the step (a steer is allowed).
@@ -634,18 +649,21 @@ export async function runJourney({ plan, send = false, key = null, fetchImpl = g
   const steps = []
   try {
     // The plan's world flags, then any the caller adds.
-    const w = allOnWorld(t, { transport, settleLimitMs: 60_000, env: { ...(plan.world?.env ?? {}), ...switchEnv, ...env }, budgets: plan.world?.budgets ?? 'single' })
+    const w = allOnWorld(t, { transport, settleLimitMs: 60_000, env: { ...(plan.world?.env ?? {}), ...switchEnv, ...env }, budgets: plan.world?.budgets ?? 'single', ...(plan.variant ? { graph: graphOf(plan.variant.pages) } : {}) })
+    // (L6 c24) the words of this run: the base journey's, or the plan's variant's (the checks read them from the world)
+    w.says = plan.variant?.says ?? SAYS; w.agent = plan.variant?.agent ?? AGENT_SAYS
     w.state.wording.wait = waitNote; w.state.wording.pointer = pointerNote
     if (plan.world?.wording === 'faithful') w.state.wording.revise = faithfulRevision
     await w.settings.turnMemory.save('on')
-    const j = { note: {}, sends: [], said: [],
+    const j = { note: {}, sends: [], said: [], says: w.says, agent: w.agent,
       async say(text, extra) {
         try { const out = await w.send(text, extra); j.sends.push({ inRun: out.inRun === true, accepted: out.accepted !== false, runId: out.runId ?? null }) }
         catch (error) { j.sends.push({ refused: typeof error?.code === 'string' ? error.code : 'error', status: error?.httpStatus ?? null }) }
         await w.idle()
       },
       async pause() { await new Promise(resolve => setTimeout(resolve, 60)); await w.idle() } }
-    for (const def of STEPS.filter(def => plan.steps.some(step => step.id === def.id))) {
+    for (const def of plan.steps.map(step => STEPS.find(d => d.id === step.id))) {
+      if (plan.variant?.order) w.use(def.room) // a reordered journey: each step starts in its own room, as it would after the base order
       if (ledger.stopped) { steps.push({ id: def.id, room: def.room, title: def.title, state: 'not_run' }); continue }
       w.step(def.id); j.sends = []; j.said = []
       const before = counts(w)
@@ -773,8 +791,8 @@ export function stepTable(outcome) {
 export function resultsPayload({ outcome, plan, send, caps, replayOf = null, at = new Date() }) {
   return { set: plan.set, mode: send ? 'send' : replayOf ? 'replay' : 'dry_run', at: at.toISOString(), endpoint: DECISIONS_ENDPOINT, automaticRetries: 0,
     ...(replayOf ? { replayOf } : {}),
-    plan: { file: path.basename(PLAN_FILE), sha256: plan.sha256, registered: plan.registered },
-    world: { env: plan.world?.env ?? {}, budgets: plan.world?.budgets ?? 'single', ...(plan.world?.wording ? { wording: plan.world.wording } : {}), switchesOn: outcome.switches ?? [] }, script: { sha256: sha256(readFileSync(SCRIPT_FILE)) },
+    plan: { file: path.basename(PLAN_FILE), sha256: plan.sha256, registered: plan.registered, ...(plan.variant ? { variant: plan.variant.id } : {}) },
+    world: { env: plan.world?.env ?? {}, budgets: plan.world?.budgets ?? 'single', ...(plan.world?.wording ? { wording: plan.world.wording } : {}), ...(plan.variant ? { variant: plan.variant.id } : {}), switchesOn: outcome.switches ?? [] }, script: { sha256: sha256(readFileSync(SCRIPT_FILE)) },
     caps: { tokenCeiling: caps.tokenCeiling, maxRequests: caps.maxRequests, perStep: Object.fromEntries(plan.steps.map(s => [s.id, s.caps])) },
     totals: { requests: outcome.ledger.requests, sent: outcome.ledger.sent, inputTokensCounted: outcome.ledger.tokens, inputTokensReported: outcome.ledger.reportedTokens, refusedBodies: outcome.ledger.refusedBodies, ...(replayOf ? { replayUnmatched: outcome.ledger.replayUnmatched, replayChangedBody: outcome.ledger.replayChangedBody } : {}) },
     stoppedBecause: outcome.ledger.stopped?.reason ?? null, stoppedAt: outcome.ledger.stopped?.step ?? null,
@@ -805,7 +823,16 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
   if ((replayFile && !replayRun) || (diffFile && !diffRun)) { printError('the earlier results file cannot be read'); return EXIT.usage }
   let plan
   try { plan = loadJourneyPlan(valueOf('--plan') ?? (rerun ? LATEST_PLAN_FILE : PLAN_FILE)) } catch (error) { printError(error?.name === 'PlanError' ? `plan refused: ${error.message}` : 'plan refused'); return EXIT.usage }
+  // (L6 c24) a plan that declares its ceiling: that is the default, and a higher --token-ceiling or --max-requests is refused
   const send = args.includes('--send')
+  if (plan.ceiling && send) {
+    for (const [flag, field] of [['--token-ceiling', 'tokenCeiling'], ['--max-requests', 'maxRequests']]) {
+      if (valueOf(flag) === null) caps[field] = plan.ceiling[field]
+      else if (caps[field] > plan.ceiling[field]) { printError(`${flag} ${caps[field]} is above the ceiling this plan declares (${plan.ceiling[field]}); nothing was sent`); return EXIT.usage }
+    }
+  }
+  // a dry run sends nothing: the declared ceiling is not a stop there (the scripted double over-selects pages); the estimate is reported against it
+  else if (plan.ceiling) for (const [flag, field] of [['--token-ceiling', 'tokenCeiling'], ['--max-requests', 'maxRequests']]) if (valueOf(flag) === null) caps[field] = LIMITS[`${field}Max`] / 2
   const key = send ? env.OPENAI_API_KEY ?? null : null
   if (send && !plausibleKey(key)) { printError('OPENAI_API_KEY is not set (or not a plausible key); nothing was sent'); return EXIT.noKey }
   print(JSON.stringify({ set: plan.set, mode: send ? 'send' : replayRun ? 'replay' : 'dry_run', endpoint: DECISIONS_ENDPOINT, plan: plan.sha256.slice(0, 16), registered: plan.registered, tokenCeiling: caps.tokenCeiling, maxRequests: caps.maxRequests,
@@ -818,7 +845,8 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
   const payload = resultsPayload({ outcome, plan, send, caps, replayOf: replayRun ? { file: replayRun.file, sha256: replayRun.sha256, at: replayRun.run.at ?? null } : null })
   if (diffRun) { payload.diffAgainst = { file: diffRun.file, sha256: diffRun.sha256, at: diffRun.run.at ?? null }; payload.diff = diffJourneys(diffRun.run, payload) }
   print(JSON.stringify({ requests: payload.totals.requests, sent: payload.totals.sent, inputTokens: payload.totals.inputTokensCounted, stoppedBecause: payload.stoppedBecause, stoppedAt: payload.stoppedAt,
-    hardPassed: payload.scorecard.hard.passed, hardFailed: payload.scorecard.hard.failed, softMissed: payload.scorecard.soft.missed }))
+    hardPassed: payload.scorecard.hard.passed, hardFailed: payload.scorecard.hard.failed, softMissed: payload.scorecard.soft.missed,
+    ...(plan.ceiling ? { declaredCeiling: plan.ceiling, ...(send ? {} : { overDeclaredCeiling: payload.totals.inputTokensCounted > plan.ceiling.tokenCeiling || payload.totals.requests > plan.ceiling.maxRequests }) } : {}) }))
   if (payload.diff) for (const line of formatDiff(payload.diff)) print(line)
   const out = valueOf('--out')
   if (out) writeJourneyResults(out, payload)

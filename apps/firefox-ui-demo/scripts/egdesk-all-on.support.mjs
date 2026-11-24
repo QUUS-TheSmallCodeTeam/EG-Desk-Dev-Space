@@ -46,11 +46,13 @@ export const PORTAL = 'https://portal.example.test'
 
 // ---- the ontology graph the turn memory reads (public synthetic pages: the A사 quote and the PostgreSQL migration) ----
 const SLICE = { past: 'past', present: 'present', planned: 'future', hypothetical: 'hypothetical' }
-const GRAPH_PAGES = SYNTHETIC_PAGES.filter(p => /^(quote\/a-|db\/pg-|db\/sqlite)/.test(p.id) && !p.scope)
-export const GRAPH = { snapshots: [],
+export const GRAPH_PAGES = Object.freeze(SYNTHETIC_PAGES.filter(p => /^(quote\/a-|db\/pg-|db\/sqlite)/.test(p.id) && !p.scope))
+/** The ontology graph of a page list (the synthetic page shape of the wiki fixture). A journey variant (L6 c24) builds its own list: renamed pages and decoys. */
+export const graphOf = pages => ({ snapshots: [],
   // the date and status each synthetic page records travel with its node, as an ontology node records them (at, status; L7 c17)
-  nodes: GRAPH_PAGES.map(p => ({ id: p.id, label: p.title, body: p.body, timeSlice: SLICE[p.time.slice] ?? 'present', ...(p.time.at ? { at: p.time.at } : {}), ...(typeof p.status === 'string' ? { status: p.status } : {}) })),
-  edges: GRAPH_PAGES.flatMap(p => (p.links || []).filter(l => GRAPH_PAGES.some(q => q.id === l.to)).map(l => ({ source: p.id, target: l.to, relation: l.type }))) }
+  nodes: pages.map(p => ({ id: p.id, label: p.title, body: p.body, timeSlice: SLICE[p.time.slice] ?? 'present', ...(p.time.at ? { at: p.time.at } : {}), ...(typeof p.status === 'string' ? { status: p.status } : {}) })),
+  edges: pages.flatMap(p => (p.links || []).filter(l => pages.some(q => q.id === l.to)).map(l => ({ source: p.id, target: l.to, relation: l.type }))) })
+export const GRAPH = graphOf(GRAPH_PAGES)
 
 // ---- the browser card double (the portal of the browser-task journeys) ----
 const el = (ref, role, label, extra = {}) => ({ ref, role, label, tag: role === 'link' ? 'a' : 'button', href: '', value: '', ...extra })
@@ -180,7 +182,7 @@ export function scriptedDecisions({ policy = {} } = {}) {
     // the quoted message as a model would (asks what is happening / why it stopped; changes the task; asks to stop).
     if (names.some(n => /^message__person_/.test(n))) {
       const said = /The person's message, sent while the work is running:\n"""\n([\s\S]*?)\n"""/.exec(text)?.[1] ?? ''
-      const yes = { message__person_status: /왜|어디까지|뭐 ?하|진행 ?상황|멈췄/.test(said), message__person_change: /말고|대신|부터 해|바꿔/.test(said), message__person_stop: /그만|중지|취소|멈춰/.test(said) }
+      const yes = { message__person_status: /왜|어디까지|뭐 ?하|진행 ?상황|멈췄|멈춘|오래 걸|얼마나/.test(said), message__person_change: /말고|대신|부터 해|바꿔|먼저/.test(said), message__person_stop: /그만|중지|취소|멈춰/.test(said) }
       return wire.questions.map(q => ({ name: q.name, type: 'predicate', probability: yes[q.name] ? 0.95 : 0.03 }))
     }
     if (names.some(n => n.includes('__'))) {
@@ -208,7 +210,7 @@ export function scriptedDecisions({ policy = {} } = {}) {
       const listed = /it is listed now as (\[L\d+\] [^\n]*?)\.(?:\n|$)/.exec(evidence)
       let next, goalMet = 0
       if (/\/download\//.test(url)) { next = 'goal_met'; goalMet = 0.95 }
-      else if (/\/invoices/.test(url)) next = listed ? listed[1].trim() : /두 번째/.test(ctx) ? starts('987-65') : 'needs_user_context'
+      else if (/\/invoices/.test(url)) next = listed ? listed[1].trim() : /두\s?번째|2번|둘째/.test(ctx) ? starts('987-65') : 'needs_user_context'
       else next = starts('다운로드') ?? 'blocked'
       const a = { name: 'next_step', type: 'choice', choice: next, confidence: 0.95, probabilities: [{ value: next, probability: 0.95 }] }
       if (next === 'needs_user_context') a.probabilities.push(...q0.choices.filter(c => /^\[L\d+\]/.test(c.value)).slice(0, 2).map(c => ({ value: c.value, probability: 0.02 })))
@@ -250,7 +252,7 @@ export function scriptedDecisions({ policy = {} } = {}) {
  * onePacket: shorthand for the bridge's developer flag EGDESK_TURN_MEMORY_ONE_PACKET=on (the turn-memory pages ride under the context
  *   selection's packet). The flag goes through turnMemoryFlagsFromEnv exactly as in codex-bridge-server.mjs; default off like the bridge.
  */
-export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = false, transport: decisionTransport = null, settleLimitMs = 60_000, budgets = 'single', threadDelete = false } = {}) {
+export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = false, transport: decisionTransport = null, settleLimitMs = 60_000, budgets = 'single', threadDelete = false, graph = GRAPH } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-all-on-')); chmodSync(dir, 0o700)
   const cwd = path.join(dir, 'workspace'); mkdirSync(cwd)
   const store = openChatStore({ dataDir: path.join(dir, 'chat'), ownerScope: 'synthetic-all-on' })
@@ -315,7 +317,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
 
   // ---- the bridge's own wiring, flag by flag (see codex-bridge-server.mjs) ----
   let wikiAdapter = null
-  const turnMemoryConfig = createTurnMemoryConfig({ settings, ...turnMemoryFlagsFromEnv(ENV), ontologyStore: { readGraph: async () => GRAPH },
+  const turnMemoryConfig = createTurnMemoryConfig({ settings, ...turnMemoryFlagsFromEnv(ENV), ontologyStore: { readGraph: async () => graph },
     getAdapter: () => wikiAdapter ??= createWikiAdapter({ writes: openWikiWrites({ dataDir: settingsDir, log() {} }) }) })
   const browserEntryConfig = createBrowserEntryConfig({ now: () => clock, flag: () => ENV.EGDESK_BROWSER_ENTRY, getAdapter: () => turnMemoryConfig.getAdapter(), wiki: args => turnMemoryConfig.wiki(args) })
   const presenceMirror = createPresenceMirror({ now: () => clock })
@@ -340,7 +342,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
     topicRecipient: () => decisionTopicRecipient(KEY, 1, undefined, client.model), recipientForChatChoice: () => decisionTopicRecipient(KEY, 1, undefined, client.model),
     // The bridge's own collector over the same stores (here: the ontology graph only; no Board, no selected source).
     collect: async ({ body, context }) => (await collectDecisionCandidates({ body, clientThreadId: context.clientThreadId, excludeMessageId: context.localMessageId, chatStore: store, deskStore: null,
-      ontologyStore: { readGraph: async () => GRAPH } })).candidates,
+      ontologyStore: { readGraph: async () => graph } })).candidates,
   }
   let chat = null
   const notify = (method, params) => chat.handleNotification({ method, params })

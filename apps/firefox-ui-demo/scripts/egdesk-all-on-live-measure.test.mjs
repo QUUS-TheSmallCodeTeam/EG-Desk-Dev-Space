@@ -142,7 +142,7 @@ test('guard (static): the script and its plan build no request and know no quest
   const imports = [...source.matchAll(/^import .* from '([^']+)'/gm)].map(m => m[1]).sort()
   // c17 (L6): the shared last-send stamp wraps the fetch handed in on --send; it builds no request and knows no question.
   assert.deepEqual(imports, ['../helper/egdesk-decision-client.mjs', '../helper/egdesk-decision-real-runner.mjs', '../helper/egdesk-decision-send-stamp.mjs', '../overlay/resources/EGDeskBriefingHost.sys.mjs',
-    '../overlay/resources/EGDeskWorkPlacement.sys.mjs', './egdesk-all-on.support.mjs', 'node:crypto', 'node:fs', 'node:path', 'node:url'])
+    '../overlay/resources/EGDeskWorkPlacement.sys.mjs', './egdesk-all-on.support.mjs', './egdesk-journey-variants.mjs', 'node:crypto', 'node:fs', 'node:path', 'node:url'])
   assert.match(source, /import \{ DECISIONS_ENDPOINT \} from '\.\.\/helper\/egdesk-decision-client\.mjs'/, 'only the endpoint constant, for printing')
   for (const pattern of [/api\.openai\.com/, /prompt_cache_key/, /questions:\s*\[/, /type:\s*'(?:predicate|choice|score)'/, /\.decide\(/])
     assert.ok(!pattern.test(source), `the script contains ${pattern}`)
