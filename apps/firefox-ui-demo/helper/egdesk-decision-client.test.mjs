@@ -646,3 +646,20 @@ test('the month roll is forward only: a later month resets, an earlier clock kee
   assert.deepEqual({ ...budget.snapshot() }, { month: '2027-01', inputTokens: 0, cap: 100 })
   assert.equal(budget.canSpend(), true)
 })
+
+test('records whether the POST was started: onDispatch fires once, before fetch; DecisionError.dispatched follows it', async () => {
+  const order = []
+  const hang = (url, init) => { order.push('fetch'); return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('x')), { once: true })) }
+  const client = createDecisionClient({ getApiKey: () => 'fixture-only-not-a-key', fetchImpl: hang, timeoutMs: 20 })
+  await assert.rejects(client.decide({ input: 'x', questions: [QUESTIONS[0]], onDispatch: () => order.push('dispatch') }),
+    e => e.code === 'timeout' && e.dispatched === true)
+  assert.deepEqual(order, ['dispatch', 'fetch'])
+  // A throwing observer never changes the request.
+  const ok = createDecisionClient({ getApiKey: () => 'fixture-only-not-a-key', fetchImpl: hang, timeoutMs: 20 })
+  await assert.rejects(ok.decide({ input: 'x', questions: [QUESTIONS[0]], onDispatch: () => { throw new Error('observer') } }), e => e.code === 'timeout')
+  // Refused before any POST (budget): no dispatch marker.
+  let fired = false
+  const blocked = createDecisionClient({ getApiKey: () => 'fixture-only-not-a-key', fetchImpl: hang, budget: { canSpend: () => false, record() {} } })
+  await assert.rejects(blocked.decide({ input: 'x', questions: [QUESTIONS[0]], onDispatch: () => { fired = true } }), e => e.code === 'budget_exceeded' && e.dispatched === null)
+  assert.equal(fired, false)
+})

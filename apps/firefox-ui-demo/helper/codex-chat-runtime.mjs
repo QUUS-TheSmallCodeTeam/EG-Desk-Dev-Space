@@ -4328,11 +4328,11 @@ export class CodexChatRuntime {
             this.chatChoiceScope(ids).revision === scoped.revision && setup.recipientForChatChoice(scoped.authority) === recipient && remaining() > 0
         } catch { return false }
       }
-      let dispatched = false
+      let dispatched = false, posted = false // posted: the real client started its POST
       const client = { decide: async request => {
         if (dispatched || !isCurrent()) throw new Error('Choice dispatch unavailable')
         dispatched = true
-        return setup.client.decide({ ...request, signal: choiceSignal,
+        return setup.client.decide({ ...request, signal: choiceSignal, onDispatch: () => { posted = true; request.onDispatch?.() },
           timeoutMs: Math.max(1, Math.min(Math.ceil(remaining()), request.timeoutMs ?? limit)),
           // The real client invokes this with the recipient of the key it actually
           // loaded, after intervention points and immediately before its only POST.
@@ -4341,7 +4341,7 @@ export class CodexChatRuntime {
       } }
       this.activeChoices.add(ids.conversationId)
       const expired = new Promise(resolve => {
-        timer = this.setTimer(() => { controller.abort(); resolve(chatChoiceManual('timeout')) }, Math.max(1, Math.ceil(remaining())))
+        timer = this.setTimer(() => { controller.abort(); resolve(chatChoiceManual(posted ? 'timeout' : 'timeout_unsent')) }, Math.max(1, Math.ceil(remaining())))
       })
       const result = await Promise.race([runChatChoice({ ...choice, client, isCurrent, signal: choiceSignal }), expired])
       return result?.status === 'recommended' && Number.isSafeInteger(result.index) &&

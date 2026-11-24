@@ -55,6 +55,8 @@ export const OUTCOMES = {
   no_credit: { respond: () => json(429, { error: { code: 'insufficient_quota', type: 'insufficient_quota' } }) },
   rate_limited: { respond: () => json(429, { error: { code: 'rate_limit_exceeded', type: 'rate_limit_error' } }) },
   timeout: { hang: true },
+  // The key lookup never returns, so no POST is ever started: nothing was sent and nothing can be billed.
+  timeout_unsent: { stallKey: true },
   budget_exceeded: { budget: { canSpend: () => false, record() {} } },
   // L3's code is not on this branch yet: the real client cannot emit it here, so the client is replaced by a stub that
   // throws the same shape (name 'DecisionError', closed-set code) that runChatChoice forwards. No provider request is made.
@@ -84,7 +86,7 @@ function runtime(t, outcome) {
   const state = { native: 0, posts: [], key: 'egd-synthetic-not-a-key-0002' }
   const noNative = () => { state.native++; throw Error('Unexpected native operation') }
   const client = createDecisionClient({
-    getApiKey: async () => state.key, budget: outcome.budget ?? null,
+    getApiKey: outcome.stallKey ? () => new Promise(() => {}) : async () => state.key, budget: outcome.budget ?? null,
     recipientForKey: (key, endpoint, model) => decisionTopicRecipient(key, 42, endpoint, model),
     fetchImpl: async (url, req) => {
       const body = JSON.parse(req.body)
@@ -193,7 +195,7 @@ async function journey(t, name, { probe = 'edit' } = {}) {
 
 const MATRIX = {}
 const dump = () => { if (process.env.EGDESK_SIM_OUT) fs.writeFileSync(process.env.EGDESK_SIM_OUT, JSON.stringify(MATRIX, null, 2)) }
-const RETRYABLE = new Set(['rate_limited', 'timeout', 'unreachable', 'server_error'])
+const RETRYABLE = new Set(['rate_limited', 'timeout', 'timeout_unsent', 'unreachable', 'server_error'])
 const AMBIGUOUS = new Set(['abstain', 'near_tie', 'low_confidence'])
 
 for (const name of Object.keys(OUTCOMES)) {
@@ -213,7 +215,7 @@ for (const name of Object.keys(OUTCOMES)) {
     assert.equal(seen.nativeOps, 0, 'nothing may start or send a native/subscription turn')
     assert.equal(seen.draftsCreated, 0, 'no draft is created without an explicit user click')
     assert.equal(seen.composerValue, question, 'the composer text is untouched')
-    assert.equal(seen.decisionsPosts, ['budget_exceeded', 'spend_limit_reached'].includes(name) ? 0 : 1, 'exactly one Decisions call (zero when the local budget blocks it or the outcome is stubbed)')
+    assert.equal(seen.decisionsPosts, ['budget_exceeded', 'spend_limit_reached', 'timeout_unsent'].includes(name) ? 0 : 1, 'exactly one Decisions call (zero when the local budget blocks it or the outcome is stubbed)')
     if (name === 'confident') {
       assert.match(seen.text, /EG-Desk 추천: 슬라이드 10장 요약본 · 실행하지 않음/)
       assert.ok(seen.buttons.some(b => b.id === 'explain' && !b.disabled))
@@ -225,6 +227,8 @@ for (const name of Object.keys(OUTCOMES)) {
     assert.equal(seen.bridgeReply.status, 'manual')
     assert.equal(seen.bridgeReply.reason, name === 'near_tie' ? 'unclear' : name === 'out_of_list' ? 'bad_response' : name, 'bridge names the outcome with a fixed enum, nothing else')
     assert.deepEqual(Object.keys(seen.bridgeReply).sort(), ['reason', 'status'])
+    if (name === 'timeout') assert.match(seen.text, /요청은 이미 보냈으므로 비용이 청구될 수 있고, 다시 시도하면 요청을 한 번 더 보냅니다/)
+    if (name === 'timeout_unsent') { assert.match(seen.text, /아무것도 전송하지 않았습니다\. 비용은 없습니다/); assert.doesNotMatch(seen.text, /청구될 수 있/) }
     assert.doesNotMatch(seen.text, /^추천을 표시할 수 없습니다\. 직접 판단해 주세요\. 작성 중인 메시지는 그대로입니다\. 닫기$/, 'not the one generic sentence')
     // The reviewed options survive (GOV.UK: do not clear fields on error).
     // [닫기] stays an explicit dismissal (existing composer test: manual close discards option edits);
