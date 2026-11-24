@@ -23,7 +23,7 @@ export const BRIEFING_OUTCOMES = Object.freeze(['presented', 'fallback-chat', 'b
 const clip = (text, n) => String(text ?? '').slice(0, n)
 
 // ---- the `expect.briefing` entry of a script turn: its shape (validator + JSON schema) and its checks ----
-export const BRIEFING_EXPECT_KEYS = Object.freeze(['outcome', 'reason', 'schemaSent', 'schemaInvalid', 'factsOnBoard'])
+export const BRIEFING_EXPECT_KEYS = Object.freeze(['outcome', 'reason', 'schemaSent', 'schemaInvalid', 'factsOnBoard', 'factsInCards', 'inOrder'])
 export const BRIEFING_EXPECT_SCHEMA = Object.freeze({
   type: 'object', additionalProperties: false,
   properties: {
@@ -32,6 +32,9 @@ export const BRIEFING_EXPECT_SCHEMA = Object.freeze({
     schemaSent: { type: 'boolean' },
     schemaInvalid: { type: ['integer', 'null'], minimum: 0, maximum: 20 },
     factsOnBoard: { type: 'array', maxItems: BRIEFING_LIMITS.strings, items: { type: 'string', minLength: 1, maxLength: BRIEFING_LIMITS.stringChars } },
+    // c37: strings that must be in the text of the published CARDS (not the step explanations), and lists of strings that must appear in the cards in that order
+    factsInCards: { type: 'array', maxItems: BRIEFING_LIMITS.strings, items: { type: 'string', minLength: 1, maxLength: BRIEFING_LIMITS.stringChars } },
+    inOrder: { type: 'array', maxItems: 4, items: { type: 'array', minItems: 2, maxItems: BRIEFING_LIMITS.strings, items: { type: 'string', minLength: 1, maxLength: BRIEFING_LIMITS.stringChars } } },
   },
 })
 /** [] when the entry is well formed, else the problems as short texts. */
@@ -44,10 +47,15 @@ export function validateBriefingExpect(e) {
   if (e.schemaSent !== undefined && typeof e.schemaSent !== 'boolean') out.push('schemaSent: a boolean')
   if (e.schemaInvalid !== undefined && e.schemaInvalid !== null && !(Number.isInteger(e.schemaInvalid) && e.schemaInvalid >= 0 && e.schemaInvalid <= 20)) out.push('schemaInvalid: an integer 0-20 or null')
   if (e.factsOnBoard !== undefined && (!Array.isArray(e.factsOnBoard) || e.factsOnBoard.length > BRIEFING_LIMITS.strings || e.factsOnBoard.some(s => typeof s !== 'string' || !s || s.length > BRIEFING_LIMITS.stringChars))) out.push('factsOnBoard: up to 16 strings')
-  if (e.outcome !== undefined && e.outcome !== 'presented' && e.factsOnBoard?.length) out.push('factsOnBoard: only for an outcome presented')
+  const strings = v => Array.isArray(v) && v.length <= BRIEFING_LIMITS.strings && v.every(s => typeof s === 'string' && s && s.length <= BRIEFING_LIMITS.stringChars)
+  if (e.factsInCards !== undefined && !strings(e.factsInCards)) out.push('factsInCards: up to 16 strings')
+  if (e.inOrder !== undefined && !(Array.isArray(e.inOrder) && e.inOrder.length <= 4 && e.inOrder.every(l => strings(l) && l.length >= 2))) out.push('inOrder: up to 4 lists of 2 to 16 strings')
+  if (e.outcome !== undefined && e.outcome !== 'presented' && (e.factsOnBoard?.length || e.factsInCards?.length || e.inOrder?.length)) out.push('factsOnBoard / factsInCards / inOrder: only for an outcome presented')
   return out
 }
 /** The text of the board the briefing made: every card it published and every step it proposed. */
+/** The text of the cards the briefing published (what a reader sees on the board's cards, not the step explanations). */
+export const cardsText = rec => (rec?.published ?? []).map(p => `${p.title}\n${p.markdown}`).join('\n')
 export const boardText = rec => [...(rec?.published ?? []).map(p => `${p.title}\n${p.markdown}`), ...(rec?.steps ?? []).map(s => s.text)].join('\n')
 /** checkBriefingExpect(expect, record) -> [{ check, ok, detail }] (names are "briefing.<key>"); a missing record fails every check. */
 export function checkBriefingExpect(expect, rec) {
@@ -59,6 +67,11 @@ export function checkBriefingExpect(expect, rec) {
   if (expect.reason !== undefined) put('reason', rec.reason === expect.reason, { reason: rec.reason ?? null })
   if (expect.schemaSent !== undefined) put('schemaSent', expect.schemaSent ? rec.forkTurns > 0 && rec.forkSchemaTurns === rec.forkTurns : rec.forkSchemaTurns === 0, { forkTurns: rec.forkTurns, withSchema: rec.forkSchemaTurns })
   if (expect.schemaInvalid !== undefined) put('schemaInvalid', rec.schemaInvalid === expect.schemaInvalid, { schemaInvalid: rec.schemaInvalid ?? null })
+  if (expect.factsInCards) { const text = cardsText(rec), missing = expect.factsInCards.filter(f => !text.includes(f)); put('factsInCards', rec.outcome === 'presented' && missing.length === 0, { missing, cardChars: text.length }) }
+  if (expect.inOrder) {
+    const text = cardsText(rec), lists = expect.inOrder.map(list => { let from = -1, bad = null; for (const f of list) { const at = text.indexOf(f); if (at < 0) { bad = { missing: f }; break } if (at <= from) { bad = { outOfOrder: f }; break } from = at } return bad })
+    put('inOrder', rec.outcome === 'presented' && lists.every(b => b === null), { problems: lists.map((b, i) => (b ? { list: i, ...b } : null)).filter(Boolean) })
+  }
   if (expect.factsOnBoard) { const text = boardText(rec), missing = expect.factsOnBoard.filter(f => !text.includes(f)); put('factsOnBoard', rec.outcome === 'presented' && missing.length === 0, { missing, boardChars: text.length }) }
   return out
 }
@@ -69,17 +82,20 @@ export function checkBriefingExpect(expect, rec) {
 export function folderMaterials(folder = {}, { year = BRIEFING_LIMITS.year } = {}) {
   const rows = []
   for (const [file, text] of Object.entries(folder)) {
-    const m = /(?:^|\/)(\d{2})-(\d{2})\.md$/.exec(file)
+    // MM-DD.md, or MM-DD-HHMM-topic.md (c37: several entries a day, and entries of more than one topic in one folder)
+    const m = /(?:^|\/)(\d{2})-(\d{2})(?:-(\d{4}))?(?:-([a-z][a-z0-9_]*))?\.md$/.exec(file)
     if (!m || !(Number(m[1]) >= 1 && Number(m[1]) <= 12 && Number(m[2]) >= 1 && Number(m[2]) <= 31)) continue
     const lines = String(text).split('\n').map(l => l.replace(/^\s*[-*]\s*/, '').trim()).filter(l => l && !/^#/.test(l)), at = `${year}-${m[1]}-${m[2]}`
-    rows.push({ alias: `note-${m[1]}${m[2]}`, kind: 'page', time: { slice: 'past', at }, provenance: { kind: 'document', by: null, basis: 'record_based' }, status: statedStatus(lines.join(' ')),
+    rows.push({ alias: `note-${m[1]}${m[2]}${m[3] ? `-${m[3]}` : ''}${m[4] ? `-${m[4]}` : ''}`, topic: m[4] ?? '', sortKey: `${at}-${m[3] ?? '0000'}-${file}`, kind: 'page', time: { slice: 'past', at }, provenance: { kind: 'document', by: null, basis: 'record_based' }, status: statedStatus(lines.join(' ')),
       title: clip(lines[0] ?? file, 80), excerpt: clip(lines.join(' '), 400), links: [], held: false })
   }
-  rows.sort((a, b) => a.time.at.localeCompare(b.time.at))
+  rows.sort((a, b) => a.sortKey.localeCompare(b.sortKey))
   // c33: the dated notes of one folder are ONE log: each follows the one before it (the product's own ledger materials link consecutive records the same way,
   // helper/egdesk-briefing-ledger-materials.mjs). Without a link the flow reads every note as its own matter (materialGroups) and designs one card per note, never a sequence.
-  rows.forEach((row, i) => { if (i > 0) row.links = [{ type: 'follows_from', toAlias: rows[i - 1].alias }] })
-  return rows
+  // c37: one chain per topic (two topics interleaved in time are two matters, each a sequence), and the sort key and topic are the hook's own, not row fields
+  const last = new Map()
+  for (const row of rows) { const before = last.get(row.topic); if (before) row.links = [{ type: 'follows_from', toAlias: before.alias }]; last.set(row.topic, row) }
+  return rows.map(({ topic: _t, sortKey: _k, ...row }) => row)
 }
 
 // ---- the hook ----

@@ -39,7 +39,7 @@ import { parseCodexUserAgent } from './egdesk-codex-version-pin.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { APPROVER_TEXT, checkTurnExpectations, folderPathProblem, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { memoryNeedsDecisions } from './egdesk-real-engine-memory.mjs' // memory hook (L7 c26)
-import { createTurnHooks } from './egdesk-real-engine-extensions.mjs' // the lanes' per-turn hooks (memory, journey, ...): registered in egdesk-real-engine-registrations.mjs
+import { createTurnHooks, registeredDecisionFlags, registeredFlags } from './egdesk-real-engine-extensions.mjs' // the lanes' per-turn hooks (memory, journey, ...): registered in egdesk-real-engine-registrations.mjs
 import { CHECK_HOOKS, hookDecisionFlags, hookFlags } from './egdesk-real-engine-hooks.mjs'
 
 export const DECISION_KEY_ENV = 'EGDESK_REAL_CHECK_DECISION_KEY'
@@ -49,7 +49,7 @@ export const KILL_GRACE_MS = 2000
 // Flags a conversation gets when --decisions is on and its script names none of its own (a script's flags are added to these, never replaced):
 // the product's advisory draft check (records only; the posted answer is the model's own) and the command gate. Every other flag is off.
 // flags that do something only when the Decision model answers: without --decisions a script that sets one would pass or fail for the wrong reason
-export const DECISION_DEPENDENT_FLAGS = Object.freeze(['EGDESK_DRAFT_CHECK', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_TERMINAL_GATE', 'EGDESK_DECISION_WARMUP', ...hookDecisionFlags()])
+export const DECISION_DEPENDENT_FLAGS = Object.freeze(['EGDESK_DRAFT_CHECK', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_TERMINAL_GATE', 'EGDESK_DECISION_WARMUP', ...hookDecisionFlags(), ...registeredDecisionFlags()])
 // c24: nothing is on by default any more; the draft check is a conversation's own opt-in (conversation.draftCheck in the script, like memory) because it costs Decision calls
 export const DEFAULT_DECISION_FLAGS = Object.freeze({})
 // The bridge's decisionContext keys and the developer flags behind them that this composition reproduces. A test compares this list with
@@ -61,12 +61,12 @@ export const BRIDGE_COMPOSITION = Object.freeze({
   // top-level options of the bridge's new CodexChatRuntime({ … }) that this composition passes (request / respond / toolProviders etc. are the check's own)
   runtimeKeys: ['contexts', 'toolProviders', 'ownToolsWiring', 'roomAccount', 'store', 'requireStore', 'getOwnerKey', 'emit', 'emitLegacy', 'agentReloadReuse'],
   flags: ['EGDESK_DRAFT_CHECK', 'EGDESK_DRAFT_CHECK_DESIGN', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_TERMINAL_GATE', 'EGDESK_TERMINAL_GATE_METHOD',
-    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP', 'EGDESK_AGENT_RELOAD_REUSE', ...hookFlags()],
+    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP', 'EGDESK_AGENT_RELOAD_REUSE', ...hookFlags(), ...registeredFlags()],
   // present in the bridge, deliberately not reproduced: each needs a window, the Desk, a store this check does not open, or another lane's module
   notReproduced: {
     keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration'],
     runtimeKeys: ['localCapacity', 'engines', 'resolveProjectWorkspace', 'resolveRunProjectOrigin', 'expectedProcessConfiguration', 'qaReady', 'getNativeContractFingerprint', 'profiles', 'mcpServerKind', 'computerControlStore', 'onComputerControlChange', 'hostLease'],
-    flags: ['EGDESK_PRESENCE', 'EGDESK_BROWSER_ENTRY', 'EGDESK_WORK_PLACEMENT', 'EGDESK_BRIEFING_ORDER', 'EGDESK_BRIEFING_FILL_CHECK', 'EGDESK_BRIEFING_COVERAGE', // the briefing flow and its output schema are reproduced by the hook (hookFlags)
+    flags: ['EGDESK_BROWSER_ENTRY', 'EGDESK_BRIEFING_ORDER', 'EGDESK_BRIEFING_FILL_CHECK', 'EGDESK_BRIEFING_COVERAGE', // the briefing flow and its output schema are reproduced by the hook (hookFlags)
            'EGDESK_HUD_ROUTING', 'EGDESK_TERMINAL_JUDGE', 'EGDESK_CONTEXT_ROOTS', 'EGDESK_FIREFOX_PROFILE', 'EGDESK_CLAUDE_READER', 'EGDESK_CLAUDE_DELETE_SESSION', 'EGDESK_CHAT_CHOICE'],
   },
 })
@@ -462,7 +462,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       ...(FLAG.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}),
       calibrationLog, turnMemory: turnMemoryConfig,
       ...(['advisory', 'on'].includes(FLAG.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => FLAG.EGDESK_DRAFT_CHECK, design: () => (FLAG.EGDESK_DRAFT_CHECK_DESIGN === 'choice' ? 'choice' : 'predicates') } } : {}),
-      ...(FLAG.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on' } } : {}),
+      ...(FLAG.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...turnHooks.flowOptions({ FLAG, conversation }) } } : {}), // a registered feature may add keys to the flow, as the bridge does (the collaboration hook: presence, audience, attentionPosted)
       ...(FLAG.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
       ...(wiring && !wiring.shadow ? { terminalGate: wiring.terminalGate(terminalGateConfig) } : terminalGateConfig ? { terminalGate: terminalGateConfig } : {}),
       ...(['advisory', 'on'].includes(FLAG.EGDESK_WORKING_MEMORY) ? { workingMemory: { mode: () => FLAG.EGDESK_WORKING_MEMORY } } : {}),
@@ -486,6 +486,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     chat.setConnection(true)
     try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
     attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests, limits: deps.hookLimits?.[h.name] }))
+    turnHooks.attach({ chat, contexts, client, store, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests, limits: deps.hookLimits }) // the registered turn hooks that need the live runtime
     rec.phases.composedMs = ms(t0)
     // c25: what the runtime's private turns did, per turn (Main's check-6: a status reply never reached the chat and the record could not say where it stopped).
     // internalTurns: each private turn (draft revision, heartbeat writer, briefing fill): by which path (fork or a fresh thread), how long, how many characters, the text the model
@@ -594,8 +595,9 @@ export async function runConversation({ options, set, conversation, deps = {} })
       const follow = next?.whileRunning !== undefined ? 'message' : (next?.action === 'interrupt' || next?.action === 'steer') ? next.action : null, withMessage = follow !== null
       const sub = [], ledger = wiring.ledger, requestsFrom = rec.requests.length
       let asked = 0, mark = null
-      const hookCtx = { state: () => ({ store, clientThreadId }) }
+      const hookCtx = { state: () => ({ store, clientThreadId, conversationId: nativeThread }) }
       turnHooks.beginTurn(hookCtx) // registered hooks
+      await turnHooks.beforeSend({ ...hookCtx, turn, index }) // registered hooks: set up this turn before its message is sent (who sends it)
       const ctx = await beginTurn(turn.say)
       if (follow === 'message') { mark = await sendInRun(ctx, next.say, next.whileRunning.afterMs); turnHooks.inRun({ ...hookCtx, text: next.say }) } // registered hooks
       else if (follow) mark = await engineAction(follow, ctx, next)
@@ -623,7 +625,10 @@ export async function runConversation({ options, set, conversation, deps = {} })
         hooks: hookRecords, toolCalls: sub.flatMap(s => s.toolCalls), native: sumNative(sub), posted, asked, commandsRan: sub.flatMap(s => s.commandsRan), files: readFiles(turn), undoRecords: undoCount(),
         turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted), draftCheckRows: sub.reduce((n, s) => n + (s.draftRows?.length ?? 0), 0), draftCheckRejects: sub.reduce((n, s) => n + (s.draftRows ?? []).reduce((m, row) => m + (row.judgments ?? []).filter(j => j.would === 'reject').length, 0), 0),
       }
+      // registered hooks that wait on the live runtime after the answer is posted (their record goes under their name, their expectations join the turn's)
+      const after = await turnHooks.afterTurn({ ...hookCtx, run: sub.at(-1).run, say: turn.say, answer: posted.at(-1) ?? null, turnIndex: index + 1, expect: turn.expect })
       const ext = turnHooks.finishTurn({ ...hookCtx, expect: turn.expect, nextExpect: withMessage ? next.expect : null, latencyMs: sub[0].latencyMs, steerContract: FLAG.EGDESK_INRUN_MESSAGES === 'on' ? typeof nativeContract?.boardPeerContract === 'string' : null }) // registered hooks: records, expectations
+      Object.assign(ext.records, after.records); ext.expectations.push(...after.expectations)
       const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...ext.expectations]
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
       await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
@@ -656,6 +661,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       rec.cleanup.ephemeral = createdThreads.length - ids.length
       if (rec.cleanup.failures.length) { rec.ok = false; rec.cleanupFailed = true }
     }
+    turnHooks.dispose() // registered hooks: timers and the like
     await stop()
     try { store?.close() } catch {}
     try { profileStore?.close() } catch {}

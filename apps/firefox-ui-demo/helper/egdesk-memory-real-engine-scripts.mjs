@@ -333,3 +333,40 @@ export function buildMemorySpillProbeScript() {
     conversations: [conv('probe-n2', 2, { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' }), conv('probe-n4', 4, { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' }), conv('probe-n6', 6, { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' }),
       conv('probe-n8', 8, { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' }), conv('probe-n4-two-keys', 4, {})] }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+// spill probe v2 (c32). v1 (check-12) showed the cut but not its rule: every probe lost its middle, even two pages (a 3,556-character entry), while the 1.4-1.6k-character
+// entries of the earlier runs arrived whole. The 0.171 schema documents a 2,500-token spill threshold only for hook handlers. v2 finds what applies to turn/start entries:
+//  - one entry, one page, Korean body of 200 / 1000 / 1400 characters (entry of about 1.5k / 2.3k / 2.7k characters): where the first loss appears;
+//  - one entry, one page, ENGLISH body of 2,000 / 4,000 / 7,700 characters: characters or bytes? (Korean is 3 bytes a character, English 1; an engine counting characters or
+//    "tokens" by length cuts both at the same length, one counting bytes cuts the Korean entry at a third of the English one);
+//  - the product's own remedy: 4 and 8 pages with EGDESK_TURN_MEMORY_ENGINE_CONTEXT=split at 2,000 characters (each entry then under what the first group shows is whole):
+//    every marker in the answer and no key over 2,000 characters says the cut is per entry; markers lost although every entry is small says the limit is on the sum.
+// Each conversation asks for the code in the first sentence and the marker in the last sentence of its page(s); the answer's missing markers and the engine input are the data.
+export const MEMORY_SPILL_PROBE_V2_SET = 'real-engine-memory-spill-probe-v2'
+const probeBody = (n, lang, chars) => {
+  const w = PROBE_WORDS[(n - 1) % PROBE_WORDS.length], code = `${w}${n}x`, end = `${w}${n}z`
+  const ko = ['담당자는 작업 내용을 매주 한 번 공유 문서에 정리하고, 바뀐 점이 있으면 같은 날 안에 팀 대화방에 알린다.', '작업 순서는 준비, 시험, 적용, 확인의 네 단계로 나누어 두었고 단계마다 두 사람이 확인한다.',
+    '문제가 생기면 먼저 기록을 확인하고, 원인을 찾을 때까지 다음 단계로 넘어가지 않는다.', '결과는 표로 정리해 팀장에게 보고하고, 보고서는 1년 동안 공유 폴더에 보관한다.', '작업이 끝난 뒤에는 한 주 동안 지켜보면서 이상이 없는지 날마다 확인한다.']
+  const en = ['The owner writes up the work in the shared document once a week and tells the team chat on the same day when anything changes.', 'The steps are preparation, test, rollout and check, and two people confirm each step.',
+    'When something goes wrong the record is read first, and nobody moves on to the next step until the cause is found.', 'Results are summarised in a table for the team lead, and the report is kept in the shared folder for a year.',
+    'After the work ends the team watches for a week and checks every day that nothing is wrong.']
+  const first = lang === 'ko' ? `하늘 프로젝트 문서 ${n}의 코드명은 ${code}이다.` : `The code name of Sky project document ${n} is ${code}.`
+  const last = lang === 'ko' ? `하늘 프로젝트 문서 ${n}의 끝 표식은 ${end}이다.` : `The end marker of Sky project document ${n} is ${end}.`
+  const pool = lang === 'ko' ? ko : en, mid = []
+  let used = first.length + last.length + 2
+  for (let i = 0; used < chars && i < 200; i++) { const s = pool[i % pool.length]; mid.push(s); used += s.length + 1 }
+  return { id: `sky/doc-${n}`, title: `하늘 프로젝트 문서 ${n}`, time: 'past', status: 'done', body: [first, ...mid, last].join(' '), code, end }
+}
+export function buildMemorySpillProbeV2Script() {
+  const decoy = { id: DECOYS[0].id, title: DECOYS[0].title, body: DECOYS[0].body, time: DECOYS[0].time, status: DECOYS[0].status }
+  const strip = ({ id, title, body, time, status }) => ({ id, title, body, time, status })
+  const conv = (id, pages, flags, extra = {}) => ({ id, flags: { EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', EGDESK_TURN_MEMORY_ONE_PACKET: 'on', ...flags }, memory: { mode: 'on', pages: [...pages.map(strip), decoy] },
+    turns: [{ say: pages.length === 1 ? '하늘 프로젝트 문서 1번의 코드명(첫 문장)과 끝 표식(마지막 문장)을 알려줘.' : `하늘 프로젝트 문서 1번부터 ${pages.length}번까지 각각의 코드명(첫 문장)과 끝 표식(마지막 문장)을 모두 알려줘.`,
+      expect: { memory: { attached: pages.map(p => p.id), notAttached: [decoy.id], noDuplicates: true, ...extra }, posted: true, answerIncludes: pages.flatMap(p => [p.code, p.end]), noNativeTools: true, turnStatus: 'completed' } }] })
+  const one = (id, lang, chars) => conv(id, [probeBody(1, lang, chars)], {})
+  const many = (id, n) => conv(id, Array.from({ length: n }, (_, i) => probeBody(i + 1, 'ko', 1000)), { EGDESK_TURN_MEMORY_ENGINE_CONTEXT: 'split', EGDESK_TURN_MEMORY_ENGINE_CHARS: '2000' }, { maxKeyChars: 2000 })
+  return { set: MEMORY_SPILL_PROBE_V2_SET,
+    description: 'Probe, not a product test: what cuts a turn/start additionalContext entry. One page per conversation with a Korean body of 200/1000/1400 characters and an English body of 2,000/4,000/7,700 characters (where the first marker is lost; characters or bytes), then 4 and 8 pages with the product\'s split option (EGDESK_TURN_MEMORY_ENGINE_CONTEXT=split at 2,000 characters): all markers present and no key over 2,000 characters means the limit is per entry. The missing markers in the answer and the engine input in the record are the measurement. Needs --decisions.',
+    conversations: [one('kr-200', 'ko', 200), one('kr-1000', 'ko', 1000), one('kr-1400', 'ko', 1400), one('en-2000', 'en', 2000), one('en-4000', 'en', 4000), one('en-7700', 'en', 7700), many('split-n4', 4), many('split-n8', 8)] }
+}

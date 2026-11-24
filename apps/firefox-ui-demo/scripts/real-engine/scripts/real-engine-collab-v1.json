@@ -1,0 +1,85 @@
+{
+  "set": "real-engine-collab-v1",
+  "description": "Collaboration on the real engine (L1 c27): one room, two synthetic people through the bridge's own requester and presence path (no window). Turn 1: the owner asks what is in the folder (it starts the live session of the room). Turn 2: the invited member asks for a quote comparison whose result needs the owner's approval: the request is attributed to them, the owner question quotes the run's request and the model's own sentences only, the owner's branch raises one pointer message in the owner's conversation, no member alias or coordinate reaches a Decision request. Turn 3: the invited member asks for something that needs nothing from the owner: the result card's attention goes to the requester (no pointer), nobody's view is entered. Turn 4: the owner asks: nobody is named as requester. Needs --decisions with a key. The owner-needed expectations depend on the real model naming the owner's approval in its answer.",
+  "conversations": [
+    {
+      "id": "collab-shared-room",
+      "draftCheck": {
+        "mode": "on"
+      },
+      "flags": {
+        "EGDESK_CONVERSATION_FLOW": "on",
+        "EGDESK_PRESENCE": "on",
+        "EGDESK_WORK_PLACEMENT": "on"
+      },
+      "folder": {
+        "quotes/a-v1.md": "# A사 견적서 v1\n단가 12,000원 / 납기 3주 / 결제 조건 선금 30%.\n",
+        "quotes/a-v2.md": "# A사 견적서 v2\n단가 11,000원 / 납기 2주 / 결제 조건 선금 30%.\n단가 인하는 소유자 승인 후에만 고객에게 발송할 수 있다. 승인 전에는 수정 견적서를 보내지 않는다.\n"
+      },
+      "turns": [
+        {
+          "say": "quotes 폴더에 어떤 파일이 있는지만 알려 주세요.",
+          "from": "owner",
+          "expect": {
+            "collab": {
+              "requester": "owner"
+            }
+          }
+        },
+        {
+          "say": "quotes 폴더의 A사 견적서 v1과 v2를 읽고 달라진 점을 정리해 주세요. 수정 견적서를 보내기 전에 필요한 승인이 있으면 알려 주세요.",
+          "from": "invited",
+          "expect": {
+            "toolCalls": [
+              "egdesk_read_file"
+            ],
+            "collab": {
+              "requester": "invited",
+              "attention": {
+                "branch": "owner",
+                "kind": "point",
+                "pointer": "posted"
+              },
+              "ownerQuestion": {
+                "questions": [
+                  "owner_action"
+                ],
+                "quotesRequest": [
+                  "A사 견적서 v1과 v2를 읽고"
+                ],
+                "quotesOwnAnswer": true
+              },
+              "noIdentity": true,
+              "cameraUntouched": true
+            }
+          }
+        },
+        {
+          "say": "A사 견적서 v2의 납기만 다시 알려 주세요.",
+          "from": "invited",
+          "expect": {
+            "collab": {
+              "requester": "invited",
+              "attention": {
+                "branch": "requester",
+                "kind": "surface_near_requester",
+                "pointer": "none"
+              },
+              "noIdentity": true,
+              "cameraUntouched": true
+            }
+          }
+        },
+        {
+          "say": "지금까지 들어온 두 요청을 한 줄로 요약해 주세요.",
+          "from": "owner",
+          "expect": {
+            "collab": {
+              "requester": "owner"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

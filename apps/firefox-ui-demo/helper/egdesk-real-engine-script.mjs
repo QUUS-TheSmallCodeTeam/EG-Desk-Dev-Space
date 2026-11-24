@@ -18,7 +18,7 @@
 //   implicit check "sent_while_running".
 // expect.engine { steers?, interrupts?, steerCarries?, flowMessages?, maxLatencyMs? } (L2 c21, helper/egdesk-real-engine-journey.mjs): what reached the engine (turn/steer,
 //   turn/interrupt) and how many system messages were posted, in the turn's window; on a whileRunning turn, after its message was sent.
-import { checkRegisteredExpect, conversationFieldSchemas, expectKeySchemas, registeredConversationFields, registeredExpectKeys, validateRegisteredConversation, validateRegisteredExpect } from './egdesk-real-engine-extensions.mjs'
+import { checkRegisteredExpect, conversationFieldSchemas, expectKeySchemas, registeredConversationFields, registeredExpectKeys, registeredTurnFields, turnFieldSchemas, validateRegisteredConversation, validateRegisteredExpect, validateRegisteredTurn } from './egdesk-real-engine-extensions.mjs'
 import './egdesk-real-engine-registrations.mjs' // the lanes' registrations (memory, journey, briefing, ...): their script keys are NOT listed in this file
 // action turns (c23, agreed with lane L3): { action: "interrupt" | "steer" | "delete", afterMs?, say?, expect? } instead of a message.
 //   interrupt  the person presses stop on the PREVIOUS turn's run, afterMs after that turn started (chat.interrupt). Give the previous turn
@@ -74,6 +74,7 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
           type: 'object', additionalProperties: false, anyOf: [{ required: ['say'] }, { required: ['action'] }],
           properties: {
             say: str(LIMITS.sayChars),
+            ...turnFieldSchemas(), // a lane's own turn field (registered: egdesk-real-engine-registrations.mjs)
             action: { enum: [...ACTIONS] },
             afterMs: { type: 'integer', minimum: 0, maximum: LIMITS.whileRunningMs },
             approve: { type: 'array', maxItems: LIMITS.approvals, items: { enum: ['yes', 'no'] } },
@@ -189,7 +190,8 @@ export function validateEngineScript(value) {
     for (const [ti, turn] of turns.entries()) {
       const tt = `${at}.turns[${ti}]`
       if (!isObject(turn)) { bad(tt, 'an object'); continue }
-      only(turn, ['say', 'approve', 'whileRunning', 'action', 'afterMs', 'expect'], tt)
+      only(turn, ['say', 'approve', 'whileRunning', 'action', 'afterMs', 'expect', ...registeredTurnFields()], tt)
+      validateRegisteredTurn(turn, { conv, tt, bad }) // the registered turn fields (from, ...)
       const prev = turns[ti - 1]
       if (turn.action !== undefined) {
         if (!ACTIONS.includes(turn.action)) bad(`${tt}.action`, `one of ${ACTIONS.join(', ')}`)

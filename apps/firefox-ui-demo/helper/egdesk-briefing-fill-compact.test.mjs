@@ -4,7 +4,7 @@
 //  - the same replies the real engine wrote in check-9 (kept here as fixtures), compacted by these rules, give the SAME board lines with fewer characters.
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildGuide, copyField, enumerateSkeleton, fillRequest, normalizeMaterials, sentencesThatFit, validateFill } from './egdesk-briefing-skeleton.mjs'
+import { buildGuide, copyField, copyThatFits, enumerateSkeleton, fillRequest, normalizeMaterials, validateFill } from './egdesk-briefing-skeleton.mjs'
 import { fillPrompt } from './egdesk-briefing-engine.mjs'
 import { fillOutputSchema, schemaProblems, stripNulls, violation } from './egdesk-briefing-output-schema.mjs'
 import { folderMaterials } from './egdesk-real-engine-briefing-hook.mjs'
@@ -29,7 +29,7 @@ function compacted(reply, request) {
     const guideItem = request.guide.items.find(i => i.id === id)
     const slots = Object.fromEntries(Object.entries(it.slots).map(([name, v]) => [name, !Array.isArray(v) ? v : v.map(row => {
       const m = byAlias.get(row.from)
-      return { ...row, ...(copyField(guideItem, { name: 'label' }) && row.label === m?.at ? { label: null } : {}), ...(copyField(guideItem, { name: 'text' }) && row.text === sentencesThatFit(m?.text, 90) ? { text: null } : {}) }
+      return { ...row, ...(copyField(guideItem, { name: 'label' }) && row.label === m?.at ? { label: null } : {}), ...(copyField(guideItem, { name: 'text' }) && row.text === copyThatFits(m?.text, 90) ? { text: null } : {}) }
     })]))
     return [id, { ...it, slots }]
   })) }
@@ -45,7 +45,7 @@ test('the design of the v2 notes: a sequence card and an open-items card; only t
   assert.equal(p1.slots.find(s => s.name === 'lines').of.every(f => f.copy === undefined || copyField(GUIDE.items[0], f)), true)
 })
 
-test('a sequence line left null is the cited material\'s own date and sentences, exactly; what does not fit the line is an empty slot, not a cut id', () => {
+test('a sequence line left null is the cited material\'s own date and whole text, exactly; what does not fit the line is an empty slot, not a cut id', () => {
   const full = compacted(REAL_P1, fillRequest(GUIDE, MATS))
   const read = validateFill(GUIDE, stripNulls('briefing_fill', full), { materials: MATS, only: new Set(['P1']), needTitle: true })
   assert.equal(read.ok, true); assert.deepEqual(read.issues, [])
@@ -55,8 +55,10 @@ test('a sequence line left null is the cited material\'s own date and sentences,
   const long = MATS.map(m => (m.alias === 'M1' ? { ...m, text: `${'가'.repeat(95)}. 다음 문장.` } : m))
   const over = validateFill(GUIDE, stripNulls('briefing_fill', full), { materials: long, only: new Set(['P1']), needTitle: true })
   assert.deepEqual(over.issues, [{ item: 'P1', slot: 'lines', kind: 'mismatch' }], 'the line the code cannot copy is an issue of the list slot (a row of several that does not fit), which the flow rewrites')
-  // the sentences that fit are whole sentences
-  assert.equal(sentencesThatFit('하나입니다. 둘입니다. 셋입니다.', 11), '하나입니다.'); assert.equal(sentencesThatFit('하나입니다. 둘입니다. 셋입니다.', 12), '하나입니다. 둘입니다.'); assert.equal(sentencesThatFit('하나입니다. 둘입니다.', 40), '하나입니다. 둘입니다.'); assert.equal(sentencesThatFit('가'.repeat(100), 90), '')
+  // c37: the copy is the material's WHOLE text or nothing (never a prefix that may drop the figure)
+  assert.equal(copyThatFits('하나입니다. 둘입니다. 셋입니다.', 40), '하나입니다. 둘입니다. 셋입니다.'); assert.equal(copyThatFits('하나입니다. 둘입니다. 셋입니다.', 12), '', 'two of the three sentences fit, but a prefix is not the material'); assert.equal(copyThatFits('가'.repeat(100), 90), ''); assert.equal(copyThatFits('  ', 90), '')
+  const figure = MATS.map(m => (m.alias === 'M2' ? { ...m, text: `${'결제 모듈 병합 완료. '.repeat(7)}게이트 5752건 통과.` } : m)), prefix = validateFill(GUIDE, stripNulls('briefing_fill', full), { materials: figure, only: new Set(['P1']), needTitle: true })
+  assert.deepEqual(prefix.issues, [{ item: 'P1', slot: 'lines', kind: 'mismatch' }], 'a long entry whose figure is in its last sentence is not copied as its first sentences: the model must write that line')
   // without the materials the validator does not guess (a null stays an empty line)
   assert.deepEqual(validateFill(GUIDE, stripNulls('briefing_fill', full), { only: new Set(['P1']), needTitle: true }).issues, [{ item: 'P1', slot: 'lines', kind: 'mismatch' }])
   // the model may still write its own line (shorter or different); and an open-items line is never copied

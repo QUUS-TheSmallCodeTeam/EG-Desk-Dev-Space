@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
 import { scriptedDecisions } from './egdesk-all-on.support.mjs'
-import { CHECK_FUNCTIONS, DEFAULT_CAPS, LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, PLAN_FILE_V6, PLAN_FILE_V7, PLAN_FILE_V8, STEPS, diffJourneys, faithfulRevision, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
+import { CHECK_FUNCTIONS, DEFAULT_CAPS, LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, PLAN_FILE_V6, PLAN_FILE_V7, PLAN_FILE_V8, PLAN_FILE_V9, STEPS, diffJourneys, faithfulRevision, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
 
 const KEY = 'sk-synthetic-not-a-key-l2c12-000000000002'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -469,7 +469,7 @@ const V8_NEW = [['s1.no-duplicate-bodies', 'hard', 'L7'], ['s1.no-memory-key', '
   ['s14.told', 'hard', 'L3'], ['s14.no-repeat', 'hard', 'L7'], ['s14.held-known', 'hard', 'L7'], ['s14.one-answer', 'hard', 'L2'], ['s14.answer', 'hard', 'L3']]
 test('plan v8: pinned, based on v7 by hash, every v7 expectation verbatim, the world with the one-packet switch, two new steps at the end and the listed additions', () => {
   const bytes = readFileSync(PLAN_FILE_V8), raw = JSON.parse(bytes.toString('utf8')), v7 = JSON.parse(readFileSync(PLAN_FILE_V7, 'utf8'))
-  assert.equal(sha256(bytes), REGISTERED_PLAN_V8_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V8)
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V8_SHA256)
   assert.equal(raw.version, 8); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V7)))
   assert.deepEqual(Object.keys(raw.world.switches), [...Object.keys(v7.world.switches), 'one-packet'])
   assert.deepEqual({ ...raw.world, switches: undefined }, { ...v7.world, switches: undefined }); assert.equal(raw.world.switches['one-packet'].env.EGDESK_TURN_MEMORY_ONE_PACKET, 'on')
@@ -516,4 +516,30 @@ test('v8 dry run: both ways of running the scripted world (the packet expectatio
   const postedOf = (r, id) => r.steps.find(x => x.id === id).seen.calibration.filter(e => e.feature === 'draft_check').map(e => e.posted ?? null)
   assert.deepEqual(postedOf(on, 's13-withheld'), ['withheld']); assert.deepEqual(postedOf(on, 's14-after-withheld'), ['as_written']); assert.deepEqual(postedOf(on, 's3b-recall'), ['as_written'], 'the scripted judge passes it (the real v7b run revised this answer: tense .86)')
   assert.deepEqual(s13.seen.newMessages.filter(m => m.role === 'assistant'), []); assert.deepEqual(s14.seen.newMessages.filter(m => m.by === 'agent').map(m => m.text), ['PostgreSQL 전환은 12월 첫째 주에 배포할 예정입니다.'])
+})
+
+// ---- plan v9 (cycle 24) ----
+const REGISTERED_PLAN_V9_SHA256 = '3275a8b97dc2783441598391a2d65e237ad4a500e5bdee63fc5f8c27f189b29a'
+test('plan v9: pinned, based on v8 by hash, every v8 expectation verbatim except the withdrawn s13.fetched, three added, the real v8 run reproduced by replay', async () => {
+  const bytes = readFileSync(PLAN_FILE_V9), raw = JSON.parse(bytes.toString('utf8')), v8 = JSON.parse(readFileSync(PLAN_FILE_V8, 'utf8'))
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V9_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V9)
+  assert.equal(raw.version, 9); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V8)))
+  assert.deepEqual(raw.world, v8.world); assert.deepEqual(raw.steps.map(s => s.id), v8.steps.map(s => s.id))
+  assert.deepEqual(raw.withdrawn.map(w => [w.id, w.step]), [['s13.fetched', 's13-withheld']])
+  for (const step of v8.steps) {
+    const now = raw.steps.find(s => s.id === step.id), kept = step.expect.filter(e => e.id !== 's13.fetched')
+    assert.deepEqual(now.caps, step.caps); assert.deepEqual(now.expect.slice(0, kept.length), kept, `${step.id}: every v8 expectation verbatim`)
+  }
+  const added = raw.steps.flatMap(s => s.expect).filter(e => !v8.steps.flatMap(x => x.expect).some(x => x.id === e.id))
+  assert.deepEqual(added.map(e => [e.id, e.severity, e.owner]), [['s13.not-resent', 'hard', 'L7'], ['s13.check-saw-the-plan', 'hard', 'L3'], ['s14.check-saw-the-plan', 'hard', 'L3']])
+  assert.ok(added.every(e => typeof e.predicted === 'string' && e.predicted.length > 0))
+})
+
+test('v9 dry run: the scripted world passes the three new readings\' counterparts as predicted (the scripted triage fetches the plan page again, so s13.not-resent is the scripted miss; the real v8 run passed it)', async () => {
+  const noNet = async () => { throw new Error('no network') }
+  const run = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V9), fetchImpl: noNet, switches: ['action-relevance'], caps: { ...DEFAULT_CAPS, tokenCeiling: 100000 } })
+  const checks = run.steps.flatMap(s => s.checks), by = id => checks.find(c => c.id === id)
+  assert.equal(by('s13.fetched'), undefined, 'withdrawn')
+  assert.deepEqual(checks.filter(c => c.severity === 'hard' && c.pass === false).map(c => c.id), ['s4.no-page-for-the-action', 's13.not-resent'])
+  assert.equal(by('s13.check-saw-the-plan').pass, true); assert.equal(by('s14.check-saw-the-plan').pass, true, 'in the scripted world the follow-up check has the plan page; in the real v8 run (c37) it had not')
 })

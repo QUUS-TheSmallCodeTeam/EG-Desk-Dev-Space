@@ -244,6 +244,8 @@ export function createWorkPlacement({ client, mode = () => 'off', enabled = () =
     const item = c.queue.shift()
     if (!item) return
     c.busy = true
+    // L1 c28: the judgment is out of the queue and not yet decided while the Decision model answers (a real call takes seconds): result() must say 'pending' then, not 'unknown'
+    c.inflight = item.id
     try {
       const own = codeOutcome(item.dto)
       // Nothing code does not already know: the rule (or the state) decides, and nothing is asked.
@@ -271,7 +273,7 @@ export function createWorkPlacement({ client, mode = () => 'off', enabled = () =
       } catch (error) { fallback = typeof error?.code === 'string' ? error.code : 'unreachable' }
       record(item.dto, read ? read.judgments : [], read ? null : fallback)
       finish(c, item, read ? read.outcome : own, read ? (read.accepted ? 'decision' : 'unsure') : 'failed')
-    } finally { c.busy = false }
+    } finally { c.busy = false; c.inflight = null }
   }
 
   return Object.freeze({
@@ -289,7 +291,8 @@ export function createWorkPlacement({ client, mode = () => 'off', enabled = () =
       try { heartbeat.nudge?.() } catch { /* the grid beat will take it */ } // judged within half a second instead of at the next grid beat
       return { status: 'queued', id }
     },
-    result(key, id) { return convs.get(key)?.results.get(id) ?? (convs.get(key)?.queue.some(item => item.id === id) ? { status: 'pending' } : { status: 'unknown' }) },
+    // decided / expired, else pending while it is queued OR being judged (c28: the real model's answer takes seconds, and 'unknown' there ended the window's bounded wait and the check's early), else unknown
+    result(key, id) { const c = convs.get(key); return c?.results.get(id) ?? (c?.queue.some(item => item.id === id) || (id !== undefined && c?.inflight === id) ? { status: 'pending' } : { status: 'unknown' }) },
     facts,
     /** The conversation flow posted its pointer message: the fact is withdrawn. */
     acknowledgePointer(key) { const c = convs.get(key); if (!c?.pointer) return false; c.pointer = null; return true },

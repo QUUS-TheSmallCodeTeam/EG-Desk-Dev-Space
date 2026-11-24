@@ -1,0 +1,146 @@
+{
+ "set": "browser-live-regression-v1",
+ "description": "LIVE, c30: all families after the entry change (c27-c29), ENTRY requests with the new bytes: statement (named by code), delivery (the recorded-order request), settings, invoice, issuance (with the unrelated second card). Entry plus first step was asked (<= 9k); the five FIRST STEPS are not sent because each is byte-identical to a step already sent and measured (settings 4dc14ab3 and its follow-up fb59df7a, statement 2c251fef, delivery 41a0dcff, invoice f8b2c92d, issuance 2ca3325b / b8ee9302; a test asserts it), they would cost about 7.8k to resend, and byte-identical requests return identical answers. Only the entry requests are new bytes. Expectations were committed in scripts/egdesk-browser-live-c30-preregistration.md before this plan existed. Sent once.",
+ "maxRequests": 6,
+ "tokenCeiling": 4000,
+ "passRule": "The journey passes when every hard and every absolute check holds. Soft checks are reported and never fail it. The journey stops at the first hard or absolute failure, at the first request that fails (no retries), at the request limit or at the token ceiling; checks of phases that did not run count as not run (a failure).",
+ "phases": [
+  {
+   "id": "rg-st",
+   "host": "bank.example.test",
+   "start": "/card",
+   "pages": "statement",
+   "message": "이번 달 카드 명세서 내려받아줘",
+   "reply": null,
+   "fetchMemory": false,
+   "title": "카드 명세서 | 은행",
+   "clock": "month2",
+   "maxSteps": 1,
+   "entryOnly": true
+  },
+  {
+   "id": "rg-dv",
+   "host": "shop.example.test",
+   "start": "/orders",
+   "pages": "delivery",
+   "message": "홍길동 고객 주문 배송 상태 확인해줘",
+   "reply": null,
+   "fetchMemory": true,
+   "title": "주문 내역 | 쇼핑",
+   "clock": "month2",
+   "maxSteps": 1,
+   "entryOnly": true,
+   "seed": {
+    "chose": "주문번호 2026-1119-0042",
+    "at": "/orders",
+    "to": "/orders/2026-1119-0042"
+   }
+  },
+  {
+   "id": "rg-se",
+   "host": "account.example.test",
+   "start": "/settings/notifications",
+   "pages": "settings",
+   "message": "마케팅 알림 꺼줘",
+   "reply": null,
+   "fetchMemory": false,
+   "title": "알림 설정 | 계정",
+   "clock": "month2",
+   "maxSteps": 1,
+   "entryOnly": true
+  },
+  {
+   "id": "rg-inv",
+   "start": "/invoices",
+   "pages": "base",
+   "message": "거래처 포털에서 이번 달 세금계산서 내려받아줘",
+   "reply": null,
+   "fetchMemory": false,
+   "title": "거래처 포털 - 세금계산서",
+   "clock": "month1",
+   "maxSteps": 1,
+   "entryOnly": true
+  },
+  {
+   "id": "rg-ig",
+   "host": "minwon.example.test",
+   "start": "/issue",
+   "pages": "issuance",
+   "message": "주민등록등본 발급 신청해줘",
+   "reply": null,
+   "fetchMemory": false,
+   "title": "증명서 발급 | 온민원",
+   "clock": "month2",
+   "maxSteps": 1,
+   "entryOnly": true,
+   "otherCard": {
+    "title": "오늘의 뉴스 | 경제일보",
+    "host": "news.example.test",
+    "pages": "news",
+    "start": "/"
+   }
+  }
+ ],
+ "checks": [
+  {
+   "id": "never-acted",
+   "phase": "all",
+   "severity": "absolute",
+   "note": "No action is taken (entry only). Predicted: HOLDS."
+  },
+  {
+   "id": "budget",
+   "phase": "all",
+   "severity": "absolute",
+   "note": "At most 6 requests and at most 4k input tokens. Predicted: HOLDS."
+  },
+  {
+   "id": "en-no-act",
+   "phase": "all",
+   "severity": "absolute",
+   "note": "No page action in any phase. Predicted: HOLDS."
+  },
+  {
+   "id": "rg-st-entered",
+   "phase": "rg-st",
+   "severity": "soft",
+   "note": "MODEL. The statement request enters (named by code). Predicted: HOLDS (high)."
+  },
+  {
+   "id": "rg-dv-entered",
+   "phase": "rg-dv",
+   "severity": "soft",
+   "note": "MODEL. The delivery request enters (older bytes: .96 / .88). Predicted: HOLDS (medium)."
+  },
+  {
+   "id": "rg-se-entered",
+   "phase": "rg-se",
+   "severity": "soft",
+   "note": "MODEL. The settings request enters (c34 older bytes: 1.0 / card 1.0). Predicted: HOLDS (medium-high)."
+  },
+  {
+   "id": "rg-inv-entered",
+   "phase": "rg-inv",
+   "severity": "soft",
+   "note": "MODEL. The invoice request enters. Predicted: HOLDS (medium-high)."
+  },
+  {
+   "id": "rg-ig-entered",
+   "phase": "rg-ig",
+   "severity": "soft",
+   "note": "MODEL. The issuance request enters card 0 (c34 older bytes: card .98). Predicted: HOLDS (medium-high)."
+  },
+  {
+   "id": "rg-web-decided",
+   "phase": "all",
+   "severity": "soft",
+   "note": "MODEL. Every phase's browser_entry >= .75. Predicted: HOLDS (medium)."
+  },
+  {
+   "id": "rg-answer-low",
+   "phase": "all",
+   "severity": "soft",
+   "note": "MODEL. Every phase's browser_entry_answer < .75. Predicted: HOLDS (medium-high)."
+  }
+ ]
+}

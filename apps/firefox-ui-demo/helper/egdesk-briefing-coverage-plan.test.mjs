@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { lintExpectation, loadPlan } from './egdesk-decision-real-runner.mjs'
 import { SKELETON_BARS } from './egdesk-briefing-skeleton.mjs'
-import { BRIEFING_COVERAGE_CEILING, BRIEFING_COVERAGE_DIR, BRIEFING_COVERAGE_FACTS_DIR, boardIn, boardOf, buildBriefingCoverageFactsPlan, buildBriefingCoveragePlan, factsOf } from './egdesk-briefing-coverage-plan.mjs'
+import { BRIEFING_COVERAGE_CEILING, BRIEFING_COVERAGE_DIR, BRIEFING_COVERAGE_FACTS_CEILING, BRIEFING_COVERAGE_FACTS_DIR, boardIn, boardOf, buildBriefingCoverageFactsPlan, buildBriefingCoveragePlan, factsOf } from './egdesk-briefing-coverage-plan.mjs'
 
 const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', BRIEFING_COVERAGE_DIR)
 
@@ -38,11 +38,13 @@ test('per-fact coverage plan (c21): committed files are what the code builds tod
   assert.ok(readFileSync(path.join(factsDir, 'plan.json')).equals(built.planBytes), 'plan.json is stale: node scripts/egdesk-briefing-coverage-plan.mjs --write')
   for (const f of built.files) assert.ok(readFileSync(path.join(factsDir, f.file)).equals(f.bytes), `${f.file} is stale`)
   const loaded = loadPlan(path.join(factsDir, 'plan.json'))
-  assert.deepEqual(Object.keys(loaded.productBars), ['onboard_F#']); assert.deepEqual([loaded.productBars['onboard_F#'].yes, loaded.productBars['onboard_F#'].no], [SKELETON_BARS.yes, SKELETON_BARS.no])
+  assert.deepEqual(Object.keys(loaded.productBars), ['onboard_F#', 'stated_F#']); for (const family of ['onboard_F#', 'stated_F#']) assert.deepEqual([loaded.productBars[family].yes, loaded.productBars[family].no], [SKELETON_BARS.yes, SKELETON_BARS.no])
   for (const r of loaded.requests) for (const e of r.expect) assert.equal(lintExpectation(e, r, loaded.productBars), null, `${r.id} ${e.name}`)
   assert.deepEqual(loaded.requests.map(r => r.expect.map(e => `${e.name}:${e.severity}:${e.min ?? e.max}`)), [
-    ['onboard_F1:hard:0.7', 'onboard_F2:hard:0.7', 'onboard_F3:hard:0.7'], ['onboard_F1:hard:0.7', 'onboard_F2:hard:0.7', 'onboard_F3:hard:0.3'], ['onboard_F1:soft:0.3', 'onboard_F2:hard:0.7', 'onboard_F3:hard:0.7']])
-  assert.ok(built.totals.estInputTokens <= BRIEFING_COVERAGE_CEILING)
+    ['onboard_F1:hard:0.7', 'onboard_F2:hard:0.7', 'onboard_F3:hard:0.7'], ['onboard_F1:hard:0.7', 'onboard_F2:hard:0.7', 'onboard_F3:hard:0.3'], ['onboard_F1:soft:0.3', 'onboard_F2:hard:0.7', 'onboard_F3:hard:0.7'],
+    // c37: the real check-11 board and answer: three content facts shown, two sentences about the answer itself and a derived sum recorded, and the stated question (c36)
+    ['onboard_F1:soft:0.3', 'onboard_F2:soft:0.3', 'onboard_F3:hard:0.7', 'onboard_F4:hard:0.7', 'onboard_F5:hard:0.7', 'onboard_F6:soft:0.3', 'stated_F1:hard:0.3', 'stated_F2:hard:0.3', 'stated_F5:hard:0.7']])
+  assert.ok(built.totals.estInputTokens <= BRIEFING_COVERAGE_FACTS_CEILING && loaded.tokenCeiling === BRIEFING_COVERAGE_FACTS_CEILING && BRIEFING_COVERAGE_FACTS_CEILING >= BRIEFING_COVERAGE_CEILING)
 })
 test('per-fact coverage plan (c21): the same three facts on each board; the incomplete board lacks the approval, and offline the one re-design puts the decision part back', async () => {
   const built = await buildBriefingCoverageFactsPlan(), body = f => readFileSync(path.join(factsDir, 'requests', `${f}.json`), 'utf8')
@@ -53,4 +55,14 @@ test('per-fact coverage plan (c21): the same three facts on each board; the inco
   assert.deepEqual(built.flows.incomplete.redesign, { parts: [{ part: 'P3', trait: 'single', component: 'result_text' }], from: 'undecided-part', because: 'fact-missing' })
   assert.deepEqual(built.flows.asAttached, { status: 'presented', unshowable: ['F1'] })
   for (const f of ['f-complete', 'f-incomplete', 'f-as-attached']) { assert.doesNotMatch(body(f), /quote\/|"key"|outputId|viewId|"rect"/); assert.ok(!body(f).includes('발송 예정입니다."\n') && body(f).split('The board, its parts quoted').length === 2) }
+})
+
+test('c37 coverage plan: the check-11 request is what the product sends today (stated_F# for the three facts with no code anchor, the materials quoted once, no answer text), and offline it presents', async () => {
+  const built = await buildBriefingCoverageFactsPlan(), wire = readFileSync(path.join(factsDir, 'requests', 'f-meta-sentences.json'), 'utf8'), body = JSON.parse(wire)
+  assert.deepEqual(body.questions.map(q => q.name), ['onboard_F1', 'onboard_F2', 'onboard_F3', 'onboard_F4', 'onboard_F5', 'onboard_F6', 'stated_F1', 'stated_F2', 'stated_F5'])
+  assert.ok(body.input[0].content.includes('quoted materials') && body.input[1].content.split('The materials, each quoted as JSON:').length === 2)
+  assert.deepEqual(boardIn(wire).map(p => p.shown[0].label), ['진행 경과', '남은 일']); assert.equal(boardIn(wire)[0].shown[0].lines.length, 3)
+  assert.match(body.questions.find(q => q.name === 'stated_F1').instructions, /^The sentence, quoted exactly as a JSON string: "devlog 기록을 날짜순으로 정리했습니다\."/)
+  assert.ok(!wire.includes('| 날짜 | 진행 상황 |'), 'the answer itself is not in the request, only its facts'); assert.doesNotMatch(wire, /"key"|outputId|viewId|"rect"|\/Users\//)
+  assert.deepEqual(built.flows.metaSentences, { status: 'presented', stages: ['place', 'fit', 'order', 'fill_check', 'coverage'], unshowable: [] })
 })

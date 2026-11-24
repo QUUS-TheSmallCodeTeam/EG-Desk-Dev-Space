@@ -568,11 +568,12 @@ export function buildGuide(items, scene, retire = []) {
 // as fit the line) may be null: code copies them from the material the line cites, exactly. The model is left only with choosing and ordering the lines.
 export const copyField = (item, field) => item?.shows === 'sequence' && (field?.name === 'label' || field?.name === 'text')
 const compactItem = item => ({ ...item, step: (item.step ?? []).filter(s => s.name !== 'fallback'), slots: (item.slots ?? []).map(s => (s.type === 'list' && Array.isArray(s.of) && s.of.some(f => f.name === 'from' && f.type === 'material') ? { ...s, of: s.of.map(f => (copyField(item, f) ? { ...f, copy: true } : f)) } : s)) })
-/** The longest run of whole sentences of `text` that fits `max` characters (a line of a card): the copy a null line text stands for. '' when even the first sentence does not fit. */
-export function sentencesThatFit(text, max) {
-  let out = ''
-  for (const part of clean(text, 4000).split(/(?<=[.!?。])\s+/)) { const next = out ? `${out} ${part}` : part; if (next.length > max) break; out = next }
-  return out
+/** The copy a null line text stands for: the material's WHOLE text when it fits `max` characters (a line of a card), else ''. Cycle 37: never a prefix of it. c35 copied the whole
+ *  sentences that fit; for a long ledger entry ("... 표준 게이트 교체: 242개 파일 5752건 통과") that is a first sentence WITHOUT the figure, a fact lost to the line without any check
+ *  noticing (the text is still "supported by its material"). A line the material does not fit in is the model's to write, keeping the ids, numbers and dates. */
+export function copyThatFits(text, max) {
+  const whole = clean(text, 4000)
+  return whole.length > 0 && whole.length <= max ? whole : ''
 }
 /** only: fill just these items again. rejected: closed words for what was not supported last time (e.g. "P2 line 2", "P1 explanation"). cover: material aliases the cards must carry. */
 export function fillRequest(guide, materials, only = null, rejected = [], cover = []) {
@@ -592,7 +593,7 @@ function readSlot(schema, value, item, reported, materials = null) {
     for (const f of schema.of) {
       // a sequence line's label / text left null is the cited material's own date / sentences (copyField), never a value the model had to retype
       let given = row[f.name]
-      if (copyField(item, f) && (given === null || given === undefined || given === '') && materials) { const m = materials.get(row.from); given = !m ? null : f.name === 'label' ? (m.at ?? null) : (sentencesThatFit(m.text, f.max) || null) }
+      if (copyField(item, f) && (given === null || given === undefined || given === '') && materials) { const m = materials.get(row.from); given = !m ? null : f.name === 'label' ? (m.at ?? null) : (copyThatFits(m.text, f.max) || null) }
       const r = readSlot(f, given, item, false, materials); if (r.issue) return { issue: r.issue === 'empty' && value.length === 1 ? 'empty' : 'mismatch' }; out[f.name] = r.value }
     rows.push(out)
   }

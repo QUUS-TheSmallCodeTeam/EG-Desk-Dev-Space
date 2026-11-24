@@ -8,7 +8,7 @@
 // readGraph of the check's ontologyStore), BEFORE the conversation starts; they exist nowhere else (the data folder is the check's own). "mode"
 // is the turn-memory setting for the conversation: "on" attaches what the loop picks (needs --decisions: the Decision model reads the pages);
 // "advisory" (the check's default) only records.
-// A turn may carry "expect": { "memory": { "attached": [ids], "notAttached": [ids], "noResends": true, "noDuplicates": true, "minKeyChars": n, "merged": n } }, checked by code on what the check saw
+// A turn may carry "expect": { "memory": { "attached": [ids], "notAttached": [ids], "noResends": true, "noDuplicates": true, "minKeyChars": n, "merged": n, "maxKeyChars": n } }, checked by code on what the check saw
 // the product send to the engine (the turn/start additionalContext of that scripted turn, approvals included):
 //   attached     every id has its BODY in this turn's context (the selection's [item id=…] or the memory packet's [page id=…] block);
 //   notAttached  no id has a body in this turn's context;
@@ -18,6 +18,7 @@
 //                option, EGDESK_TURN_MEMORY_ONE_PACKET, merges; c27 real run: the product default sent the first turn's page twice).
 //   minKeyChars  the largest single additionalContext key of this turn has at least n characters (c30: a large item really went out; with turnStatus completed
 //                it was accepted by the engine);
+//   maxKeyChars  no single additionalContext key of this turn has more than n characters (c32: the entries were split to stay under the engine's cut);
 //   merged       at least n pages had their body once, in the selection's item, and only a reference line in the memory part of the merged packet (the one-packet
 //                form, '[content not repeated here: …among the selected items above]'), so a right answer shows the reference was followed.
 // Answers are checked with the check's existing answerIncludes / answerExcludes. Nothing here asks a model whether a turn went well.
@@ -27,7 +28,7 @@ export const MEMORY_STATUSES = Object.freeze(['done', 'plan'])
 export const MEMORY_LINK_TYPES = Object.freeze(['follows_from', 'refers_to', 'same_task'])
 // bodyBytes 8000 (c30; was 4000): a realistic page of 2,300 Korean characters is about 6,900 bytes
 export const MEMORY_LIMITS = Object.freeze({ pages: 12, idChars: 60, titleChars: 120, bodyBytes: 8000, links: 4, ids: 12, keyChars: 200000 })
-export const MEMORY_EXPECT_KEYS = Object.freeze(['attached', 'notAttached', 'noResends', 'noDuplicates', 'minKeyChars', 'merged'])
+export const MEMORY_EXPECT_KEYS = Object.freeze(['attached', 'notAttached', 'noResends', 'noDuplicates', 'minKeyChars', 'merged', 'maxKeyChars'])
 const PAGE_ID = /^[a-z0-9][a-z0-9/_-]{0,59}$/
 // The JSON-schema form of the two fields (helper/egdesk-real-engine-script.mjs embeds these in the committed schema; validateMemory adds the
 // uniqueness and reference rules a schema cannot say).
@@ -38,7 +39,7 @@ export const MEMORY_SCHEMA = Object.freeze({ type: 'object', additionalPropertie
     time: { enum: [...MEMORY_TIMES] }, status: { enum: [...MEMORY_STATUSES] },
     links: { type: 'array', maxItems: MEMORY_LIMITS.links, items: { type: 'object', additionalProperties: false, required: ['to'], properties: { to: { type: 'string' }, type: { enum: [...MEMORY_LINK_TYPES] } } } } } } } } })
 const ids = { type: 'array', minItems: 1, maxItems: MEMORY_LIMITS.ids, items: { type: 'string' } }
-export const MEMORY_EXPECT_SCHEMA = Object.freeze({ type: 'object', additionalProperties: false, properties: { attached: ids, notAttached: ids, noResends: { const: true }, noDuplicates: { const: true }, minKeyChars: { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.keyChars }, merged: { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.ids } } })
+export const MEMORY_EXPECT_SCHEMA = Object.freeze({ type: 'object', additionalProperties: false, properties: { attached: ids, notAttached: ids, noResends: { const: true }, noDuplicates: { const: true }, minKeyChars: { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.keyChars }, merged: { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.ids }, maxKeyChars: { type: 'integer', minimum: 1, maximum: MEMORY_LIMITS.keyChars } } })
 const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v)
 const PREFIX = 'ontology:'
 const BLOCK = /\[(page|item) id=([^\s\]]+)([^\]]*)\]/g
@@ -85,6 +86,7 @@ export function validateMemoryExpect(expect, memory, where = '$.expect.memory') 
   }
   for (const k of ['noResends', 'noDuplicates']) if (expect[k] !== undefined && expect[k] !== true) bad(`${where}.${k}`, 'true')
   if (expect.minKeyChars !== undefined && !(Number.isSafeInteger(expect.minKeyChars) && expect.minKeyChars >= 1 && expect.minKeyChars <= MEMORY_LIMITS.keyChars)) bad(`${where}.minKeyChars`, `an integer 1-${MEMORY_LIMITS.keyChars}`)
+  if (expect.maxKeyChars !== undefined && !(Number.isSafeInteger(expect.maxKeyChars) && expect.maxKeyChars >= 1 && expect.maxKeyChars <= MEMORY_LIMITS.keyChars)) bad(`${where}.maxKeyChars`, `an integer 1-${MEMORY_LIMITS.keyChars}`)
   if (expect.merged !== undefined && !(Number.isSafeInteger(expect.merged) && expect.merged >= 1 && expect.merged <= MEMORY_LIMITS.ids)) bad(`${where}.merged`, `an integer 1-${MEMORY_LIMITS.ids}`)
   if (Array.isArray(expect.attached) && Array.isArray(expect.notAttached) && expect.attached.some(id => expect.notAttached.includes(id))) bad(where, 'attached and notAttached contradict')
   return errors
@@ -165,6 +167,7 @@ export function createMemoryHook(memory) {
       if (expectMemory?.noResends) put('memory.noResends', resent.length === 0, { resent, referenced: refs })
       if (expectMemory?.noDuplicates) { const twice = Object.entries(current.copies).filter(([, n]) => n > 1).map(([id]) => id); put('memory.noDuplicates', twice.length === 0, { twice, keys: [...current.keys].sort() }) }
       if (expectMemory?.minKeyChars !== undefined) put('memory.minKeyChars', current.maxKeyChars >= expectMemory.minKeyChars, { maxKeyChars: current.maxKeyChars, wanted: expectMemory.minKeyChars })
+      if (expectMemory?.maxKeyChars !== undefined) put('memory.maxKeyChars', current.maxKeyChars <= expectMemory.maxKeyChars, { maxKeyChars: current.maxKeyChars, allowed: expectMemory.maxKeyChars, keys: Object.keys(current.keyBytes).length })
       if (expectMemory?.merged !== undefined) put('memory.merged', current.merged.size >= expectMemory.merged, { merged: [...current.merged].sort(), wanted: expectMemory.merged })
       for (const id of current.bodies) delivered.add(id)
       return { record, expectations }
