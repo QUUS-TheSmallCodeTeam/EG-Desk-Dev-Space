@@ -361,6 +361,8 @@ const codexProfileServers = createCodexProfileAppServers({
   onServerRequest: (id, message) => codexEngine.serverRequest(message, id),
   onConnection: (id, state) => codexEngine.connection(state, id),
   onChange: () => engineStatus.check(),
+  // Hooks can run in a profile's app-server too (reports/l5-c16.md): the same version pin, one session per profile process.
+  onVersion: (id, info) => { try { chat.setEngineVersion({ engineId: 'codex', engineProfileId: id, userAgent: info?.userAgent ?? null }) } catch { /* recording only */ } },
 })
 // Each adapter owns its responses; the chat runtime routes engine RPC IDs.
 const codexEngine = createCodexEngineAdapter({

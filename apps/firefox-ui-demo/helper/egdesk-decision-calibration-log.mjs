@@ -85,6 +85,7 @@ const GATE_REASONS = new Set(['unresolved_target', 'protected_target', 'outside_
 const GATE_METHODS = new Set(['predicates', 'score'])
 const GATE_ENGINES = new Set(['codex', 'claude'])
 const GATE_NOTICES = new Set(['unverified_engine_version'])
+const GATE_ENGINE_SCOPES = new Set(['shared', 'profile'])
 const flagOf = value => (typeof value === 'boolean' ? value : null)
 function terminalFields(raw) {
   if (!record(raw)) return null
@@ -105,7 +106,7 @@ function gateFields(raw) {
   const reasons = Array.isArray(raw.reasons) ? [...new Set(raw.reasons.filter(reason => typeof reason === 'string' && GATE_REASONS.has(reason)))].slice(0, 6) : []
   if (reasons.length) out.reasons = reasons
   put(out, 'score', Number.isFinite(raw.score) && raw.score >= 0 && raw.score <= 4 ? Math.round(raw.score * 10) / 10 : null)
-  put(out, 'engine', word(GATE_ENGINES, raw.engine)); put(out, 'method', word(GATE_METHODS, raw.method)); put(out, 'notice', word(GATE_NOTICES, raw.notice))
+  put(out, 'engine', word(GATE_ENGINES, raw.engine)); put(out, 'method', word(GATE_METHODS, raw.method)); put(out, 'notice', word(GATE_NOTICES, raw.notice)); put(out, 'engineScope', word(GATE_ENGINE_SCOPES, raw.engineScope))
   return Object.keys(out).length ? out : null
 }
 const FORCED = new Set(['mentioned', 'mandatory'])

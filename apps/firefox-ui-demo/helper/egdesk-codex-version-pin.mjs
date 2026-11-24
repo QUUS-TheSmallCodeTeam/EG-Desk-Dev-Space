@@ -4,7 +4,7 @@
 // Codex process environment snapshot (hooks/src/registry.rs), model commands drop *TOKEN* names by default
 // (protocol/src/shell_environment.rs), and PreToolUse session_id/turn_id are the root thread id and the turn's sub_id
 // (core/src/hook_runtime.rs, core/src/session/session.rs). The same facts were checked, as greps over the downloaded files
-// (evidence/l5-c15/facts-check.sh), in each release below and in main at the commit. A build outside this list is not refused:
+// (scripts/codex-hooks/source-facts-check.sh <tag>; the procedure is in reports/l5-c16.md), in each release below and in main at the commit. A build outside this list is not refused:
 // the gate keeps working and records `unverified_engine_version` once per session, so the owner sees when the check must be repeated.
 //
 // The version is read from what the app-server already returns at initialize: InitializeResponse.userAgent

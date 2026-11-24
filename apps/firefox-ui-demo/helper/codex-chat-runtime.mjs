@@ -15,6 +15,7 @@ import { TERMINAL_STATES } from './egdesk-terminal-judge.mjs'
 import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { COMMAND_GATE_TIMEOUT_MS, assessCommand, classifyCommand, sessionRuleCoversFloor } from './egdesk-terminal-command-gate.mjs'
 import { ENGINE_VERSION_NOTICE, checkEngineVersion } from './egdesk-codex-version-pin.mjs'
+const SHARED_CODEX_PROFILE = CODEX_ENGINE_PROFILE_ID // the shared app-server's slot (codex-engine-adapter.mjs)
 import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
 import { createSpillRereadCounter, gateRuntimeToolResult, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
 import { homedir } from 'node:os'
@@ -837,6 +838,7 @@ export class CodexChatRuntime {
     this.flowJobs = new Set()
     this.draftCheckRuns = new Set() // in-flight advisory draft checks (never awaited by a turn)
     this.commandGateRuns = new Set() // in-flight command gate assessments (never awaited by an approval card)
+    this.engineVersionChecks = new Map() // Codex app-server session (shared or a profile id) → { status, version, noted, scope }
     this.commandGateAsked = new Set() // answerId:itemId of engine commands that came with an approval request (bounded)
     this.workingMemoryTallies = new WeakMap() // run -> counts of tool results the working-memory gate changed (for one activity row)
     // Advisory state judge on the engine's own command executions (egdesk-engine-command-watch.mjs). Inert unless decisionContext.commandJudge.mode() is 'advisory'.
@@ -5896,7 +5898,7 @@ export class CodexChatRuntime {
   //   that would also match a floor command (sessionRuleCoversFloor) is not offered, even for a harmless command: the floor's person
   //   approval must not be removed by an earlier grant (R5). Codex offers no session choice through EG-Desk (normalizeApproval).
   startCommandGate(run, { command, cwd = null, intent = null, sessionRules = null } = {}) {
-    if (this.threadEngine(run.conversationId) !== 'claude') this.noteEngineVersionOnce()
+    if (this.threadEngine(run.conversationId) !== 'claude') this.noteEngineVersionOnce({ conversationId: run.conversationId })
     try {
       const setup = this.decisionContext, cfg = setup?.terminalGate
       const flag = cfg?.mode?.()
@@ -5943,16 +5945,32 @@ export class CodexChatRuntime {
   commandGateIdle() { return Promise.allSettled([...this.commandGateRuns]) }
 
   // ---- Engine version against the hook's source check (c15). A new app-server connection is a new session: it records at most once. ----
-  setEngineVersion({ engineId = 'codex', userAgent = null } = {}) {
+  // One session per Codex app-server connection: the shared one (engineProfileId absent or codex-default) and each per-profile one
+  // (codex-profile-app-servers.mjs; hooks can run there too, see reports/l5-c16.md). Each records at most once.
+  setEngineVersion({ engineId = 'codex', engineProfileId = null, userAgent = null } = {}) {
     if (engineId !== 'codex') return
-    this.engineVersionCheck = { ...checkEngineVersion(userAgent), noted: false }
-    this.noteEngineVersionOnce()
+    const key = typeof engineProfileId === 'string' && engineProfileId ? engineProfileId : SHARED_CODEX_PROFILE
+    this.engineVersionChecks.set(key, { ...checkEngineVersion(userAgent), noted: false, scope: key === SHARED_CODEX_PROFILE ? 'shared' : 'profile' })
+    while (this.engineVersionChecks.size > 64) this.engineVersionChecks.delete(this.engineVersionChecks.keys().next().value)
+    this.noteEngineVersionOnce({ engineProfileId: key })
+  }
+
+  // The shared app-server's check (kept as a property for the c15 callers and tests).
+  get engineVersionCheck() { return this.engineVersionChecks.get(SHARED_CODEX_PROFILE) ?? null }
+  set engineVersionCheck(check) { if (check) this.engineVersionChecks.set(SHARED_CODEX_PROFILE, { scope: 'shared', ...check }); else this.engineVersionChecks.delete(SHARED_CODEX_PROFILE) }
+
+  /** The version session a conversation's commands run in: its Codex profile, or the shared app-server. */
+  engineVersionKeyFor(conversationId) {
+    const profile = typeof conversationId === 'string' ? this.threadEngineProfile(conversationId) : null
+    return typeof profile === 'string' && profile && this.engineVersionChecks.has(profile) ? profile : SHARED_CODEX_PROFILE
   }
 
   /** Records `unverified_engine_version` once per session, and only while some command-gate path is on. Never changes the gate. */
-  noteEngineVersionOnce() {
+  noteEngineVersionOnce({ engineProfileId = null, conversationId = null } = {}) {
     try {
-      const check = this.engineVersionCheck
+      const key = engineProfileId ?? (conversationId ? this.engineVersionKeyFor(conversationId) : null)
+      if (key === null) { for (const profile of [...this.engineVersionChecks.keys()]) this.noteEngineVersionOnce({ engineProfileId: profile }); return }
+      const check = this.engineVersionChecks.get(key)
       if (!check || check.status === 'verified' || check.noted) return
       const cfg = this.decisionContext?.terminalGate
       const flag = cfg?.mode?.()
@@ -5960,7 +5978,7 @@ export class CodexChatRuntime {
       const mode = flag === 'advisory' || flag === 'on' ? flag : hook
       if (!mode) return
       check.noted = true
-      this.decisionContext.calibrationLog?.record?.({ feature: 'terminal_gate', mode, judgments: [], attached: false, gate: { notice: ENGINE_VERSION_NOTICE, engine: 'codex' } })
+      this.decisionContext.calibrationLog?.record?.({ feature: 'terminal_gate', mode, judgments: [], attached: false, gate: { notice: ENGINE_VERSION_NOTICE, engine: 'codex', engineScope: check.scope ?? 'shared' } })
     } catch { /* recording only */ }
   }
 
@@ -5969,7 +5987,7 @@ export class CodexChatRuntime {
 
   /** The broker's predicate question for a command of a live run: the same gate as an approval card (flags, Decision mode, egress). */
   async gateHookAssess({ conversationId, turnId, command, cwd }) {
-    this.noteEngineVersionOnce()
+    this.noteEngineVersionOnce({ conversationId })
     const run = this.runs.get(runKey(conversationId, turnId))
     if (!run || TERMINAL.has(run.status)) return null
     const gate = this.startCommandGate(run, { command, cwd })
@@ -6003,7 +6021,7 @@ export class CodexChatRuntime {
   observeUnaskedCommand(run, event) {
     try {
       if (event.method !== 'item/completed' || event.item?.type !== 'commandExecution') return
-      if (this.threadEngine(run.conversationId) !== 'claude') this.noteEngineVersionOnce()
+      if (this.threadEngine(run.conversationId) !== 'claude') this.noteEngineVersionOnce({ conversationId: run.conversationId })
       const setup = this.decisionContext, flag = setup?.terminalGate?.mode?.()
       if (flag !== 'advisory' && flag !== 'on') return
       const key = `${run.answerId}:${event.item.id}`
