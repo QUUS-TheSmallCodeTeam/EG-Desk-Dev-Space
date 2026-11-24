@@ -24,7 +24,7 @@ import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
 import { createSpillRereadCounter, gateRuntimeToolResult, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
 import { homedir } from 'node:os'
 import { createInternalTurns } from './codex-internal-turn.mjs'
-import { attentionOf, audienceFacts, beatFlowFacts, browserTaskLines, cleanIntermediate, deriveFlowKind, enumerateOptions, FLOW_COPY, FLOW_LIMITS, flowPredicates, idleFlowFacts, messageEvidence, pointerDecision, pointerPredicates, pointerPrompt, pointerRoute, rideAlongPredicates, runContext, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
+import { attentionOf, audienceFacts, beatFlowFacts, browserTaskLines, cleanIntermediate, deriveFlowKind, enumerateOptions, FLOW_COPY, FLOW_LIMITS, flowPredicates, idleFlowFacts, messageEvidence, pointerDecision, pointerPredicates, pointerPrompt, pointerRoute, rideAlongPredicates, runContext, withoutRepeats, writerPrompt, personPredicates, personDecision, IN_RUN_LIMITS } from './egdesk-conversation-flow.mjs'
 import { BEAT_JUDGE_TIMEOUT_MS, BEAT_PREDICATE_YES, createBeatJudge } from './egdesk-heartbeat-judge.mjs'
 import { createHeartbeats } from './egdesk-heartbeat.mjs'
 import { feedBrowserTask } from './egdesk-heartbeat-providers.mjs'
@@ -1724,6 +1724,10 @@ export class CodexChatRuntime {
     const replyTo = internal || body?.inRunReplyTo === undefined ? null : idText(body.inRunReplyTo) || ''
     if (replyTo !== null && (!inRun || inRun.runId !== replyTo)) throw chatError('INRUN_REPLY_UNAVAILABLE', 'The running turn is not waiting for a reply', 409)
     if (inRun) return this.answerEarlyQuestion(inRun, body)
+    // c21 (Main: accept a person's message during a run, developer flag, default off): the screen marks a message sent while the run works
+    // (inRunMessage: true, lane L2's surface); it joins the working run as a heartbeat fact instead of being refused (RUN_IN_PROGRESS).
+    const working = !internal && body?.inRunMessage === true && this.inRunMessagesOn() ? this.workingRunFor(idText(body?.clientThreadId) || idText(body?.thread?.id), idText(body?.conversationId)) : null
+    if (working) return this.acceptInRunMessage(working, body)
     validateChatCwd(body)
     if (this.requireStore) this.assertStore()
     const requestedEngineId = this.requestedEngine(body)
@@ -5645,7 +5649,22 @@ export class CodexChatRuntime {
   // The message question for this beat while the run works, or nothing (a quiet beat costs no request). The request bounds are the heartbeat's.
   flowPropose(run, flow, beat, subject = this.heartbeatSubjects.get(flow.heartbeat)) {
     const setup = this.decisionContext
-    if (flow.closed || run.status !== 'inProgress' || !flow.canSpeak || this.finalAnswerBegun(run, flow)) return null
+    if (flow.closed || run.status !== 'inProgress') return null
+    // c21: a message judged at an earlier beat whose round never concluded is handed to the run (the safe default), not asked again.
+    for (const stale of (flow.personMessages ?? []).filter(m => m.state === 'judging' && m !== flow.pendingPerson)) this.trackFlowJob(this.actOnPersonMessage(run, flow, stale, 'steer', null))
+    const person = (flow.personMessages ?? []).find(m => m.state === 'pending')
+    if (person) {
+      if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) { this.trackFlowJob(this.actOnPersonMessage(run, flow, person, 'steer', null)); return null }
+      // The beat asks about the person's message alone (quoted), with the run's own text as its context where the run's gate allows it.
+      const facts = { ...beatFlowFacts({ heartbeatFacts: beat.facts, run, flow, own: FLOW_OWN_KINDS }), heartbeatFacts: beat.facts }
+      const egress = this.decisionEgressFor(run)
+      const context = runContext({ run, heartbeatFacts: beat.facts, flow, facts, userText: this.runUserText(run), allows: kind => egress.allows(kind), own: FLOW_OWN_KINDS, browserTask: this.browserTaskBrief(run) })
+      person.state = 'judging'
+      flow.pendingPerson = person; flow.pendingFacts = facts; flow.pendingOptions = ['none', 'reply_status']; flow.pendingRide = null
+      const questions = personPredicates(person.text)
+      return context ? { context, questions } : questions
+    }
+    if (!flow.canSpeak || this.finalAnswerBegun(run, flow)) return null
     if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return null
     const facts = { ...beatFlowFacts({ heartbeatFacts: beat.facts, run, flow, own: FLOW_OWN_KINDS }), ...(subject ? this.pointerFacts(subject, beat.facts) : {}), heartbeatFacts: beat.facts }
     // c19 (owner decision): while this run's browser task is paused for the person (its question being worded or posted), the question
@@ -5687,6 +5706,15 @@ export class CodexChatRuntime {
 
   // The verdict for the message question: write, check and post, and say what happened in a closed word for the record.
   flowVerdict(run, flow, { verdicts }, subject = this.heartbeatSubjects.get(flow.heartbeat)) {
+    const person = flow.pendingPerson
+    if (person) {
+      const personFacts = flow.pendingFacts
+      flow.pendingPerson = null; flow.pendingFacts = null; flow.pendingOptions = null
+      const said = new Set(verdicts.filter(v => v.accepted && v.value === 'yes').map(v => v.name))
+      const action = personDecision(said)
+      if (subject) subject.derived = action
+      return this.trackFlowJob(this.actOnPersonMessage(run, flow, person, action, personFacts))
+    }
     const facts = flow.pendingFacts, options = flow.pendingOptions ?? []
     flow.pendingFacts = null; flow.pendingOptions = null
     // The answers are yes/no; code picks the kind (a question first, then a pointer, then a progress note worded by code).
@@ -5848,6 +5876,62 @@ export class CodexChatRuntime {
       if (flow && !flow.closed && flow.question?.pending) return run
     }
     return null
+  }
+
+  // ---- In-run messages (c21; flag decisionContext.conversationFlow.inRunMessages(), default off; bridge EGDESK_IN_RUN_MESSAGES=on, lane L2) ----
+  // Contract with lane L2 (surface and bridge): the screen sends a message typed while its run works with inRunMessage: true (the same
+  // /chat/send body otherwise); the answer is { accepted, inRun: true, held: true, ... }. The message is recorded as the person's message of
+  // that run at once (message.completed); what happens next is decided at the next beat (within 0.5 s, heartbeat.nudge): a short progress
+  // reply (one completed assistant message of the run), the message steered into the working native turn (turn/steer, as the early
+  // question's reply is), or the run stopped (run.stop_requested). Without the flag, or with no working run, nothing changes.
+  inRunMessagesOn() {
+    try { return this.heartbeatMode() === 'on' && this.decisionContext?.conversationFlow?.inRunMessages?.() === true } catch { return false }
+  }
+  workingRunFor(clientThreadId, conversationId) {
+    if (!clientThreadId) return null
+    for (const run of this.runs.values()) {
+      if (run.clientThreadId !== clientThreadId || run.status !== 'inProgress' || (conversationId && run.conversationId !== conversationId)) continue
+      const flow = this.flowRuns.get(run)
+      if (flow && !flow.closed && flow.heartbeat) return run
+    }
+    return null
+  }
+  acceptInRunMessage(run, body) {
+    const flow = this.flowRuns.get(run)
+    const requestId = idText(body.requestId), message = typeof body.message === 'string' ? body.message : ''
+    if (!flow || !this.store || !requestId || !message.trim() || message.length > 16384) throw chatError('INVALID_REQUEST', 'This message cannot be added to the running turn', 400)
+    flow.personMessages ??= []
+    if (flow.personMessages.filter(m => m.state !== 'done').length >= IN_RUN_LIMITS.pending) throw chatError('RUN_IN_PROGRESS', 'The running turn already holds the messages it can take', 409)
+    const localMessageId = this.recordInRunReply(run, flow, requestId, message)
+    flow.personMessages.push({ requestId, text: message, state: 'pending', at: this.now() })
+    try { flow.heartbeat?.nudge?.() } catch { /* the next regular beat takes it */ }
+    return { accepted: true, durable: true, inRun: true, held: true, requestId, clientThreadId: run.clientThreadId, conversationId: run.conversationId, runId: run.runId, localMessageId }
+  }
+  // What code does with the message (personDecision): stop, steer, or reply (falling back to steer when no reply can be posted).
+  async actOnPersonMessage(run, flow, person, action, facts) {
+    person.state = 'done'
+    if (flow.closed || run.status !== 'inProgress') { person.action = 'none'; return 'none' }
+    if (action === 'stop') {
+      person.action = 'stopped'
+      try { await this.interrupt({ conversationId: run.conversationId, runId: run.runId }) } catch { person.action = 'stop_failed' }
+      return 'none'
+    }
+    if (action === 'reply' && facts) {
+      const posted = await this.postIntermediate(run, flow, 'reply_status', { ...facts, personMessage: person.text })
+      if (posted !== 'none') { person.action = 'replied'; return posted }
+    }
+    person.action = (await this.steerPersonMessage(run, person)) ? 'steered' : 'undelivered'
+    return 'none'
+  }
+  async steerPersonMessage(run, person) {
+    try {
+      const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
+      const proof = engine?.boardPeerContract?.(slot)
+      if (!proof || typeof engine.steerTurn !== 'function') return false
+      const response = await engine.steerTurn({ threadId: run.conversationId, expectedTurnId: run.runId, clientUserMessageId: person.requestId,
+        input: [{ type: 'text', text: person.text, text_elements: [] }] }, slot, proof)
+      return response?.turnId === run.runId
+    } catch { return false }
   }
 
   // The person answered the early question while the run kept working: the reply becomes a normal local user message and is
