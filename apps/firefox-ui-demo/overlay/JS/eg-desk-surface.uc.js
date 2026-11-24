@@ -12775,8 +12775,12 @@
       if (listEdits?.roomId === roomId) listEdits.returning = true;
       else listEdits = null;
     };
+    // A Decisions settings save changes the scope key (not the edit key) while the panel is open. Keep only the raw
+    // text the user typed, bound to the same room/owner/question edit key; review, approval and results are never kept.
+    const rawEditsOf = item => ['edit', 'checking', 'review', 'checkingConfirm'].includes(item.phase) && item.scope.editKey
+      ? { key: item.scope.editKey, question: item.scope.question, options: [...item.options] } : null;
     const sync = () => {
-      if (entry && !current(entry)) reset();
+      if (entry && !current(entry)) { const kept = rawEditsOf(entry); reset(); savedEdits = kept; }
       const scope = currentScope();
       // Native resume can briefly leave the same room without a fresh scope.
       if (listEdits?.returning && scope && !matchesListReturn(scope)) listEdits = null;
