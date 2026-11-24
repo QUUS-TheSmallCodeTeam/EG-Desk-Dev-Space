@@ -7339,10 +7339,10 @@ export class CodexChatRuntime {
   // The entries as the engine is sent them, and the keys it would still cut (flag turnMemory.engineContext 'split' | 'mark', chars = the per-entry limit estimate; off: untouched).
   shapeEngineContext(additionalContext) {
     try {
-      const flags = this.decisionContext?.turnMemory, config = engineContextConfig({ engineContext: flags?.engineContext, engineChars: flags?.engineChars })
+      const flags = this.decisionContext?.turnMemory, config = engineContextConfig({ engineContext: flags?.engineContext, engineChars: flags?.engineChars, engineBytes: flags?.engineBytes }), limit = config ? { bytes: config.bytes, chars: config.chars } : null
       if (!config || !additionalContext) return { context: additionalContext, spilled: new Set() }
-      if (config.mode === 'mark') return { context: additionalContext, spilled: new Set(spilledKeys(additionalContext, { limit: config.chars })) }
-      const { context, oversize } = splitEngineContext(additionalContext, { limit: config.chars })
+      if (config.mode === 'mark') return { context: additionalContext, spilled: new Set(spilledKeys(additionalContext, { limit })) }
+      const { context, oversize } = splitEngineContext(additionalContext, { limit })
       return { context, spilled: new Set(oversize) }
     } catch { return { context: additionalContext, spilled: new Set() } }
   }
