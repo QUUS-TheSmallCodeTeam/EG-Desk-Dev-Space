@@ -21,6 +21,7 @@
   const ContextSuggestSettings = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskContextSuggestSettings.sys.mjs');
   const BriefingState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBriefingState.sys.mjs');
   const BriefingHost = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBriefingHost.sys.mjs');
+  const WorkPlacement = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskWorkPlacement.sys.mjs');
   const FileCardState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileCardState.sys.mjs');
   const BrowserAgentReceipts = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs');
   const BrowserGrant = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserGrant.sys.mjs');
@@ -4402,7 +4403,7 @@
       if (record.source.outputId && existing._resultRecord?.source?.outputId !== record.source.outputId) existing._renderResultRecord?.(record);
       revealOpenCanvasCard(existing, { opener: options.opener || null, kind: 'result' }); return existing;
     }
-    const placement = resolveCanvasCardPlacement('result');
+    const placement = resolveCanvasCardPlacement('result', options.restore ? {} : { workSurface: { kind: 'result', runId: record.source.runId, conversationId: record.source.conversationId, clientThreadId: record.source.threadId } });
     const shell = spawnDeskWindowShell({ id: `egd-result-card-${++cardSeq}`, kind: 'result', className: 'egd-result-card', sourceRef,
       bodyClassName: 'egd-result-card-body', minWidth: 360, minHeight: 280,
       style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
@@ -9359,8 +9360,38 @@
       ? viewportToCanvasPoint(options.anchorClientX, options.anchorClientY) : null;
     const occupied = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape, .egd-board-region'))
       .map(persistentEntityGeometry);
-    return SurfaceState.placeCanvasView({ size, safe, occupied, anchor, gap: 24 });
+    const placed = SurfaceState.placeCanvasView({ size, safe, occupied, anchor, gap: 24 });
+    // Cycle 12, advisory and OFF by default: an Agent's work surface (a run's file viewer, a result card) is also shown to the placement runtime. The placement returned is unchanged.
+    if (options.workSurface) state.noteWorkSurfacePlacement?.(kind, placed, options.workSurface);
+    return placed;
   }
+
+  // Cycle 12 (EGDeskWorkPlacement.sys.mjs). Who is looking where: lane L1's multi-user provider when it exists (state.presence, same interface), else this window alone.
+  let workInputAt = null, workInputWatch = false;
+  function workPresence() {
+    if (typeof state.presence?.snapshot === 'function') return state.presence;
+    if (!workInputWatch) { workInputWatch = true; for (const type of ['pointerdown', 'keydown', 'wheel']) window.addEventListener(type, () => { workInputAt = Date.now(); }, { capture: true, passive: true }); }
+    return state.workPresence ||= WorkPlacement.createSingleUserPresence({ lastInputAt: () => workInputAt, focusCard: () => state.activeEntityId || null,
+      viewport: () => { const v = safeViewportWorldRect(); return { x: v.left, y: v.top, width: v.right - v.left, height: v.bottom - v.top }; } });
+  }
+  // Advisory only: where this surface WOULD go against where it lands today, in closed words (kept in this window's memory), and the same closed request to the
+  // bridge for the conversation's heartbeat. The first line is the whole default path: with the flag unset nothing below it runs. Nothing here moves anything.
+  function noteWorkSurfacePlacement(kind, placement, work) {
+    if (WorkPlacement.workPlacementMode(readSurfacePref(WorkPlacement.WORK_PLACEMENT_PREF)) === 'off') return;
+    try {
+      const cards = [...document.querySelectorAll('.egd-canvas-card')].filter(card => card.isConnected && card.id).map(card => ({ id: card.id, rect: persistentEntityGeometry(card), kind: cardKindForPersistence(card),
+        creator: card._resultRecord?.provenance?.creator ?? (card.dataset.jointManaged ? 'shared' : null), taskId: card._resultRecord?.provenance?.runId ?? null }));
+      const obstacles = [...document.querySelectorAll('.egd-canvas-shape, .egd-board-region')].map(persistentEntityGeometry);
+      const taskId = work.runId || 'surface';
+      const advisory = WorkPlacement.advisoryPlacement({ presence: workPresence().snapshot(), cards, obstacles, taskId, landed: placement, surface: { kind, size: { width: placement.width, height: placement.height } },
+        tasks: [{ id: taskId, state: 'running', requester: work.requester || null, waiting: [], ownerMustAct: false, surfaces: [] }] });
+      if (!advisory) return;
+      (state.workPlacementLog ||= []).push({ surface: kind, would: advisory.would, landed: advisory.landed, differs: advisory.differs });
+      if (state.workPlacementLog.length > 50) state.workPlacementLog.shift();
+      if (work.clientThreadId || work.conversationId) void deskStoreRequest('POST', '/decision/work-placement/request', { clientThreadId: work.clientThreadId || null, conversationId: work.conversationId || null, dto: advisory.dto }, { timeoutMs: 4000 }).catch(() => {});
+    } catch { /* advisory: never affects where the surface opens */ }
+  }
+  state.noteWorkSurfacePlacement = noteWorkSurfacePlacement;
 
   // The camera follows a View placed outside the view once its caller is done.
   // A restore that writes the saved rect, or a camera move made meanwhile (a
