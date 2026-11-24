@@ -82,7 +82,7 @@ export function createEgressGate(permissions) {
 
 /** Every file that sends a Decision request and the kinds it may declare. A new call site must be added here (a test scans the code). */
 export const EGRESS_SITES = Object.freeze({
-  'codex-chat-runtime.mjs': ['speech_history', 'topic_history', 'memory_page', 'draft_text', 'run_facts', 'page_text', 'browser_task_record'],
+  'codex-chat-runtime.mjs': ['speech_history', 'topic_history', 'memory_page', 'draft_text', 'run_facts', 'page_text', 'browser_task_record', 'terminal_command'],
   'egdesk-board-presentation-http.mjs': ['canvas_text', 'board_arrangement: explicit owner confirm, coarse descriptors only',
     'briefing_judgments: /decision/briefing-placement (counts only), -reuse and -check (card labels, short summaries, step texts) are each asked of the gate with canvas_text by runBriefingFlow before they are sent'],
   'egdesk-board-agent-context.mjs': ['board_excerpt'],

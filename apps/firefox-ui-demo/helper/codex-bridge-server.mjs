@@ -22,6 +22,8 @@ import { createInheritedMcpSync } from './codex-inherited-mcp.mjs'
 import { BoundedSseClient } from './codex-bridge-sse.mjs'
 import { TerminalSessionRegistry } from './terminal-sessions.mjs'
 import { createTerminalRunWatch } from './egdesk-terminal-run-watch.mjs'
+import { createTerminalStateWatch } from './egdesk-terminal-state-watch.mjs'
+import { createGitTargetInspector } from './egdesk-terminal-git-facts.mjs'
 import { createTerminalSessionFactory } from './terminal-platform.mjs'
 import { createTerminalHttpHandler } from './terminal-http.mjs'
 import { chatError, publicText } from './codex-chat-values.mjs'
@@ -473,6 +475,8 @@ const chat = new CodexChatRuntime({
     ...(['advisory', 'on'].includes(process.env.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => process.env.EGDESK_DRAFT_CHECK } } : {}),
     // Live-session heartbeat (egdesk-heartbeat.mjs) and, with EGDESK_DRAFT_CHECK=on (held, checked messages), intermediate messages while a run works. Developer flag, default off.
     ...(process.env.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on' } } : {}),
+    // Command gate before an engine approval card: developer flag EGDESK_TERMINAL_GATE=advisory|on, default off. It never answers an approval.
+    ...(['advisory', 'on'].includes(process.env.EGDESK_TERMINAL_GATE) ? { terminalGate: { mode: () => process.env.EGDESK_TERMINAL_GATE, inspect: createGitTargetInspector() } } : {}),
     topicRecipient: recipientForCodexDecisions,
     recipientForChatChoice: recipientForCodexDecisions,
     reviewRevision: () => handleBoardPresentationHttp.settingsRevision(),
@@ -960,7 +964,14 @@ async function startChatgptDeviceLogin() {
 // ── Terminal PTY support ──
 // CODE-06: a user-typed test/build command's result rides on the next /terminal/read.
 const terminalRunWatch = createTerminalRunWatch({ bus: workflow?.bus ?? null, owner: WORKFLOW_OWNER })
-const terminalRegistry = new TerminalSessionRegistry({ onExit: receipt => workflow?.publishTerminalExit(receipt), runWatch: terminalRunWatch })
+// Terminal state judge: developer flag EGDESK_TERMINAL_JUDGE=advisory|on, default off (then this wrapper only passes calls through).
+// Every Terminal card is the person's own terminal and belongs to no run: no session is agent-owned and none has an egress gate,
+// so no terminal text is sent to the decision model from here; rules and process facts are recorded with zero requests.
+// terminalStateWatch.terminalFacts() is the read-only, content-free fact provider for other system parts (a live-session heartbeat may also call beat()).
+const terminalStateWatch = createTerminalStateWatch({ runWatch: terminalRunWatch, flag: () => process.env.EGDESK_TERMINAL_JUDGE,
+  decision: { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null, client: decisionClient, calibrationLog: decisionCalibrationLog },
+  egressFor: () => null, isAgentOwned: () => false, sendKey: (id, key) => terminalRegistry.write(id, key) })
+const terminalRegistry = new TerminalSessionRegistry({ onExit: receipt => { terminalStateWatch.noteExit(receipt); workflow?.publishTerminalExit(receipt) }, runWatch: terminalStateWatch })
 
 // npm 설치 과정에서 node-pty spawn-helper의 실행 비트가 소실되는 경우가 있어
 // (posix_spawnp failed → 조용히 child_process fallback 강등) 기동 시 복구한다.
@@ -1329,5 +1340,5 @@ process.on('exit', () => {
   try { appServerSocket?.close(); } catch {}
   try { appServerProcess?.kill(); } catch {}
   terminalRegistry.requestStopAll()
-  terminalRunWatch.close()
+  terminalStateWatch.close() // also closes the run watch it wraps
 })

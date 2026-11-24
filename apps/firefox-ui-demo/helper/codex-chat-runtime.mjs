@@ -12,6 +12,8 @@ import { CHAT_CHOICE_BAR, chatChoiceManual, runChatChoice, validateChatChoice } 
 import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { DRAFT_CHECK_LIMITS, checkDraft } from './egdesk-draft-check.mjs'
 import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
+import { COMMAND_GATE_TIMEOUT_MS, assessCommand, classifyCommand } from './egdesk-terminal-command-gate.mjs'
+import { homedir } from 'node:os'
 import { createInternalTurns } from './codex-internal-turn.mjs'
 import { FLOW_COPY, FLOW_LIMITS, beatFlowFacts, cleanIntermediate, decideFlow, enumerateOptions, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
 import { createHeartbeats } from './egdesk-heartbeat.mjs'
@@ -804,6 +806,7 @@ export class CodexChatRuntime {
     this.flowRuns = new WeakMap() // run -> intermediate-message state (flag decisionContext.conversationFlow, default off)
     this.flowJobs = new Set()
     this.draftCheckRuns = new Set() // in-flight advisory draft checks (never awaited by a turn)
+    this.commandGateRuns = new Set() // in-flight command gate assessments (never awaited by an approval card)
     this.draftCheckTurns = new WeakMap() // run -> what the model had this turn, for the check after the answer is posted
     this.draftCheckSeen = new WeakMap() // run -> final-answer item ids already handed to the check
     this.turnMemoryRuns = new Set() // in-flight advisory memory jobs (never awaited by a turn)
@@ -3574,6 +3577,11 @@ export class CodexChatRuntime {
     if (grants && ceilingApprovalRefusal(run.toolCeiling, { kind: approval.kind, network: Boolean(approval.networkApprovalContext), session: body.decision === 'acceptForSession' })) {
       throw chatError('PROFILE_CEILING_FORBIDDEN', 'This Agent profile does not allow that action', 403)
     }
+    if (body.decision === 'acceptForSession' && approval.commandGate?.enforce === true) {
+      const assessed = await approval.commandGate.result
+      if (approval.status !== 'pending' || TERMINAL.has(run.status)) throw chatError('STALE_APPROVAL', 'Approval is stale, already answered, or belongs to another run', 409)
+      if (assessed?.approval === true) throw chatError('COMMAND_RISK_SESSION_FORBIDDEN', 'This command is high risk; it can be approved one time only', 403)
+    }
     // D-C3: [이번만 허락] answers this one question; [거절] declines it.
     let reply = { decision: body.decision }
     if (approval.kind === 'computerElicitation') {
@@ -3990,8 +3998,12 @@ export class CodexChatRuntime {
     if (event.isNetworkApproval && !event.networkApprovalContext) acceptDisabledReason = 'Network target or protocol is missing or unsupported.'
     else if (kind === 'commandExecution' && event.nativeKind !== 'command') acceptDisabledReason = 'This terminal-input approval type is not supported.'
     else if (kind === 'commandExecution' && !event.isNetworkApproval && !command) acceptDisabledReason = 'Command details are unavailable.'
+    // Command gate (egdesk-terminal-command-gate.mjs), flag off by default. It never answers the request and never removes [거절]/[이번만 허락]:
+    // advisory only records; 'on' can only keep a high-risk command asking each time (no session-wide grant from its card).
+    const gate = kind === 'commandExecution' && command && !event.isNetworkApproval && !acceptDisabledReason ? this.startCommandGate(run, { command, cwd, intent: event.reason }) : null
     const choices = event.choices.filter(choice => {
       if (acceptDisabledReason && (choice === 'accept' || choice === 'acceptForSession')) return false
+      if (choice === 'acceptForSession' && gate?.withholdSession) return false
       return choice !== 'acceptForSession' || !ceilingApprovalRefusal(run.toolCeiling, { kind, network: event.isNetworkApproval, session: true })
     })
     if (!choices.length) {
@@ -4012,7 +4024,7 @@ export class CodexChatRuntime {
       ...(command ? { command } : {}), ...(cwd ? { cwd } : {}),
       paths: activity?.detail?.changes?.map(change => change.path) || activity?.sourceRefs.map(ref => ref.target.path) || [],
     }
-    this.pendingApprovals.set(approvalId, { ...pending, rpcId: event.rpcId, conversationId: run.conversationId, runId: run.runId })
+    this.pendingApprovals.set(approvalId, { ...pending, rpcId: event.rpcId, conversationId: run.conversationId, runId: run.runId, ...(gate ? { commandGate: gate } : {}) })
     run.pendingApprovals.push(pending)
     this.emit(run, 'approval.required', pending, event.itemId)
   }
@@ -5026,6 +5038,52 @@ export class CodexChatRuntime {
   decisionEgressFor(run, { memoryScope = {}, canvasMaySend = false } = {}) {
     return createEgressGate(modelDataPermissions({ toolCeiling: run?.toolCeiling ?? null, browserGranted: Boolean(run?.browserBinding?.cards?.length), canvasMaySend, memoryScope, runActive: Boolean(run) }))
   }
+
+  // ---- Command gate before an engine approval (Codex commandExecution/requestApproval; Claude can_use_tool arrives as the same request). ----
+  // Config: decisionContext.terminalGate = { mode(): 'off'|'advisory'|'on', inspect?({ cwd, paths }) → { targets, git }, home?, deadlineMs? (at most 4 s) }. Absent or any other mode: off,
+  // and nothing below runs. The human approval card is created exactly as before in every mode; this method never answers a request.
+  //   advisory: the rule result, the Decision score and whether approval WOULD have been required are recorded (content-free). Nothing changes.
+  //   on: additionally, a command the rules or the score mark high risk cannot be approved for the whole session from its card.
+  // The score is asked only when the person's Decision mode is advisory/on with a saved key, and only through the run's shared egress gate.
+  startCommandGate(run, { command, cwd = null, intent = null } = {}) {
+    try {
+      const setup = this.decisionContext, cfg = setup?.terminalGate
+      const flag = cfg?.mode?.()
+      if (flag !== 'advisory' && flag !== 'on') return null
+      const decisionMode = setup.mode?.()
+      const usable = setup.client && setup.configured?.() === true && (decisionMode === 'advisory' || decisionMode === 'on')
+      const mode = !usable ? 'off' : flag === 'on' && decisionMode === 'on' ? 'on' : 'advisory'
+      const where = typeof cwd === 'string' && cwd.startsWith('/') ? cwd : null
+      const home = typeof cfg.home === 'string' && cfg.home.startsWith('/') ? cfg.home : homedir()
+      const first = classifyCommand(command, { cwd: where, home })
+      const engine = this.threadEngine(run.conversationId) === 'claude' ? 'claude' : 'codex'
+      const enforce = flag === 'on'
+      const result = (async () => {
+        let facts = null
+        if (typeof cfg.inspect === 'function' && where && first.paths.length) { try { facts = await cfg.inspect({ cwd: where, paths: first.paths }) } catch { facts = null } }
+        const inspect = target => (facts?.targets && Object.hasOwn(facts.targets, target) ? facts.targets[target] : { exists: true, trackedFiles: 0, ignored: false, unknown: true })
+        let captured = null
+        const assessed = await assessCommand({ command, cwd: where, intent: typeof intent === 'string' ? intent : '', mode, client: setup.client, inspect, git: facts?.git ?? null, home,
+          timeoutMs: Number.isSafeInteger(cfg.deadlineMs) && cfg.deadlineMs > 0 ? Math.min(cfg.deadlineMs, COMMAND_GATE_TIMEOUT_MS) : COMMAND_GATE_TIMEOUT_MS,
+          egress: this.decisionEgressFor(run), calibration: { record: raw => { captured = raw } } })
+        const rule = assessed.source === 'rules' && assessed.approval === true
+        const would = assessed.approval === true || assessed.shadow === true
+        try { // content-free: closed words, booleans and one rounded number
+          setup.calibrationLog?.record?.({ feature: 'terminal_gate', mode: flag, judgments: captured?.judgments ?? [], attached: enforce && assessed.approval === true,
+            ...(captured?.fallback ?? assessed.fallback ? { fallback: captured?.fallback ?? assessed.fallback } : {}),
+            gate: { rule, would, scored: typeof assessed.score === 'number', reasons: assessed.approval ? assessed.reasons : assessed.shadowReasons ?? [], score: assessed.score, engine,
+              gitFacts: facts !== null, sessionWithheld: enforce && assessed.approval === true } })
+        } catch { /* recording only */ }
+        return assessed
+      })().catch(() => null)
+      this.commandGateRuns.add(result)
+      void result.finally(() => this.commandGateRuns.delete(result))
+      // Rules that need no lookup are known at once: with the flag on the session choice is not offered at all for those.
+      return { enforce, withholdSession: enforce && first.floor.length > 0, result }
+    } catch { return null }
+  }
+
+  commandGateIdle() { return Promise.allSettled([...this.commandGateRuns]) }
 
   draftCheckMode() {
     try { const mode = this.decisionContext?.draftCheck?.mode?.(); return mode === 'advisory' || mode === 'on' ? mode : 'off' } catch { return 'off' }
