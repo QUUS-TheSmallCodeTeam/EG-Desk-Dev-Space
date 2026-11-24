@@ -243,7 +243,7 @@ export const NEXT_RULES = [
 ].join('\n')
 
 /** mode 'first' (default): reconstruct memory for a session whose model holds nothing. mode 'next': fetch only what the next judgment needs; `live` is host-gated recent conversation text or null. */
-export async function reconstructMemory({ message, wiki, client, scope = null, askedAt = null, delivered = null, budget: overrides = {}, signal, now = () => performance.now(), clock = null, mode = 'first', live = null } = {}) {
+export async function reconstructMemory({ message, wiki, client, scope = null, askedAt = null, delivered = null, budget: overrides = {}, signal, now = () => performance.now(), clock = null, mode = 'first', live = null, previous = null } = {}) {
   const budget = { ...DEFAULTS, ...overrides }
   // One time source for the whole loop (see REAL_CLOCK). `now` alone is still accepted and gets the real timers.
   const time = clock ?? { now, setTimer: REAL_CLOCK.setTimer, clearTimer: REAL_CLOCK.clearTimer }
@@ -269,7 +269,12 @@ export async function reconstructMemory({ message, wiki, client, scope = null, a
   const rules = isNext ? NEXT_RULES : JUDGE_RULES
   // Held pages are shown by header only: the judge knows what the model holds, the content is never re-sent.
   const heldMessage = isNext ? [{ role: 'user', content: `Held in the answering model's context (the start of each is shown; the rest is not repeated):\n${alreadyDelivered.length ? alreadyDelivered.map(p => `- ${p.title} | time=${p.time.slice} | status=${p.status}\n  ${compactText(p.body, 200)}`).join('\n') : '(nothing)'}` },
-    ...(typeof live === 'string' && live.trim() ? [{ role: 'user', content: `Live conversation (recent turns, bounded):\n${live.slice(-3000)}` }] : [])] : []
+    ...(typeof live === 'string' && live.trim() ? [{ role: 'user', content: `Live conversation (recent turns, bounded):\n${live.slice(-3000)}` }] : []),
+    // Which held pages the assistant's previous reply in this conversation was given with (from the delivery receipts; titles of held pages
+    // only, nothing new is sent). Without it a message that points back ("방금 그 내용 정리해줘") has no referent, and the judge reads it as
+    // asking for something the held pages do not cover (real all-on run 2026-11-25, s2: two unrelated PostgreSQL pages at 0.90 / 0.98).
+    ...(() => { const ids = new Set(Array.isArray(previous) ? previous : []), titles = alreadyDelivered.filter(p => ids.has(p.id)).map(p => p.title)
+      return titles.length ? [{ role: 'user', content: `The assistant's previous reply in this conversation was given with these held pages: ${titles.join('; ')}.` }] : [] })()] : []
   // Asked only when there is still work to do, so a deadline that cut work short is visible in the receipt (the result is then partial).
   // A request that could not be answered in what is left is not started at all (it would be sent, perhaps billed, and thrown away).
   const canCall = () => { if (Number.isFinite(deadline) && deadline - now() < budget.minCallMs) { receipts.deadlineHit = true; return false } return receipts.calls < budget.maxCalls && !signal?.aborted }

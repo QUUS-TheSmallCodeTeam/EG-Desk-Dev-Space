@@ -5904,7 +5904,11 @@ export class CodexChatRuntime {
       const controller = new AbortController(), clock = this.turnMemoryClock(tm)
       let speech = null
       try { speech = this.directSpeech(body, context, controller.signal) } catch { speech = null }
-      const turn = { position, capMs, clock, startedAt: clock.now(), controller, spans: [], sources: { speech, topic: this.topicIntakes.get(context) ?? null }, result: null, cut: false }
+      // The pages the previous reply of this conversation was given with: what that turn attached, else what it held (read now, before this
+      // turn becomes the latest). Ids only; the loop names them by title among the held pages.
+      const prior = context.conversationId ? this.turnMemoryLatest.get(context.conversationId) : null
+      const previous = prior?.result ? (prior.attached ? Object.keys(prior.result.memory?.delivered ?? {}) : (prior.result.held ?? [])) : []
+      const turn = { position, capMs, clock, startedAt: clock.now(), controller, previous, spans: [], sources: { speech, topic: this.topicIntakes.get(context) ?? null }, result: null, cut: false }
       turn.promise = this.runTurnMemoryOn(turn, body, context).catch(() => null).finally(() => { turn.finished = true })
       this.turnMemoryTurns.set(context, turn)
       this.turnMemoryRuns.add(turn.promise)
@@ -5937,7 +5941,7 @@ export class CodexChatRuntime {
     if (this.turnMemoryConfirmOn()) await this.confirmNotedRecords(turn, body, context, { wiki, baseScope, scope, egress, threadKey })
     const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position: turn.position, threadKey, scope,
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
-      deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock,
+      deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock, previous: turn.previous,
       ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about' })
     if (this.turnMemoryConfirmOn()) this.prepareTurnMemoryNote(turn, { wiki, scope, threadKey })
     Object.assign(turn, { wiki, baseScope, scope, result, readyMs: clock.now() - t0 })

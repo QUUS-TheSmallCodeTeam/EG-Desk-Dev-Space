@@ -438,7 +438,7 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
  * packetFirst (optional, first turn only): return as soon as the packet is ready; the triage that only decides recording keeps running and is
  *   awaited inside judgeWrite (triage is then null in the result and `triageLater` is its promise). It is not bound by the packet deadline.
  */
-export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = TURN_MEMORY_WRITE_TARGET } = {}) {
+export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = TURN_MEMORY_WRITE_TARGET, previous = null } = {}) {
   // The deadline is ONE point on ONE clock, fixed here. Everything below asks that clock; a timer only wakes the wait up.
   const deadlineAt = Number.isFinite(deadlineMs) ? clock.now() + Math.max(0, deadlineMs) : null
   const remaining = () => (deadlineAt === null ? null : Math.max(0, deadlineAt - clock.now()))
@@ -471,7 +471,7 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
     // material, a needless fetch only costs tokens.
     memory = cutByDeadline ? { status: 'empty', partial: true, reason: 'deadline', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [], deadlineHit: true }, nextDelivered: () => receipts }
       : triageSkipsFetch(triage, { skipOnNeed, heldExcerpts }) ? { status: 'skipped', reason: 'nothing_needed', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [] }, nextDelivered: () => receipts }
-      : await reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget: loopBudget(), signal, clock, mode: 'next', live })
+      : await reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget: loopBudget(), signal, clock, mode: 'next', live, previous })
   } else if (packetFirst === true) {
     triageLater = ontologyWrite ? triageCall() : null
     triage = null

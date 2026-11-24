@@ -26,3 +26,19 @@ test('product path: the A사 materials carry recorded dates, the plan status and
   const traits = new Set(parts.map(p => p.trait))
   assert.ok(traits.has('sequence') && traits.has('open_items') && traits.has('compare'), `traits: ${[...traits]}`)
 })
+
+// ---- s2 of the real all-on run (2026-11-25): "방금 그 내용 정리해줘" fetched two unrelated PostgreSQL pages ----
+test('product path: a referential follow-up\'s memory loop is told which held pages the previous reply was given with (titles of held pages only)', async t => {
+  const w = allOnWorld(t)
+  await w.settings.turnMemory.save('on')
+  w.step('m1'); await w.send(QUOTE); await w.idle(); await w.advance(3000); await w.answer('A사 견적은 v1 발송 후 v2 수정 계획 단계입니다.'); await w.idle()
+  w.step('m2'); const sent = await w.send('방금 그 내용 정리해줘'); await w.idle()
+  const scans = w.decisionsIn('m2').filter(d => d.feature === 'memory_fetch')
+  assert.ok(scans.length >= 1, 'the follow-up still asks (recall points back), as the real triage did')
+  const line = scans[0].raw.match(/The assistant's previous reply in this conversation was given with these held pages: ([^"\\]*)\./)?.[1] ?? ''
+  for (const title of ['A사 견적 요청 접수', 'A사 견적서 v1 발송', 'A사 견적서 v2 수정 계획']) assert.ok(line.includes(title), `${title} in: ${line}`)
+  assert.ok(!/PostgreSQL/.test(line), 'only held pages are named')
+  // and nothing new is attached: the materials of the follow-up are the held A사 pages
+  const rows = w.chat.memoryMaterialsFor(w.chat.runFor(sent))
+  assert.ok(rows.length && rows.every(r => r.held && r.title.startsWith('A사')), rows.map(r => `${r.title}:${r.held}`).join(', '))
+})
