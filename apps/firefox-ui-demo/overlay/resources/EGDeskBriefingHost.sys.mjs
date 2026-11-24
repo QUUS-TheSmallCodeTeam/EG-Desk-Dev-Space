@@ -39,8 +39,12 @@ export function referencedCandidates(report, candidates) {
   return candidates.filter(c => typeof c.label === 'string' && c.label.trim().length >= 3 && text.includes(c.label.trim().toLowerCase())).length;
 }
 /** observeRequest({ mode, report, answerId, candidates }) -> the body for POST /decision/briefing-observe, or null when there is nothing to observe (no request is made then). */
-export function observeRequest({ mode, report, answerId = null, conversationId = null, runId = null, candidates = [] } = {}) {
-  if (!['advisory', 'on'].includes(mode) || typeof report !== 'string' || !report.trim() || report.length > 20000 || referencedCandidates(report, candidates) < 2) return null;
+export function observeRequest({ mode, report, answerId = null, conversationId = null, runId = null, candidates = [], request = '', viewport = null } = {}) {
+  if (!['advisory', 'on'].includes(mode) || typeof report !== 'string' || !report.trim() || report.length > 20000) return null;
+  // Cycle 13 (`on` only): the bridge decides the design guide from the person's request and the turn's materials, so a request text is enough to ask; the board need not be named.
+  const asked = mode === 'on' ? clean(request, 2000) : '';
+  if (referencedCandidates(report, candidates) < 2 && !asked) return null;
   const body = { report, currentAnswerId: typeof answerId === 'string' && answerId ? answerId : null, candidates };
-  return mode === 'on' ? { flow: 'on', conversationId, runId, ...body } : body;
+  const view = viewport && [viewport.x, viewport.y, viewport.width, viewport.height].every(Number.isFinite) && viewport.width > 0 && viewport.height > 0 ? { x: viewport.x, y: viewport.y, width: viewport.width, height: viewport.height } : null;
+  return mode === 'on' ? { flow: 'on', conversationId, runId, ...body, ...(asked ? { request: asked } : {}), ...(view ? { viewport: view } : {}) } : body;
 }
