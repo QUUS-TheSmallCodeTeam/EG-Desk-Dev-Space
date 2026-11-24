@@ -15703,8 +15703,11 @@
       state.codex.replyOpen = !!ChatState.replyRunForThread(protocol, active);
     };
 
+    // Set below, once the bridge request helper exists: tells the bridge when the conversation on the screen was closed or left.
+    let syncOpenConversation = null;
     const emit = () => {
       normalizeThreads();
+      syncOpenConversation?.();
       for (const watch of memoReadWatches.values()) observeMemoReadWatch(watch);
       taskAnswers?.sync();
       const projectPanel = document.getElementById('egd-codex-input-panel');
@@ -15951,6 +15954,18 @@
         throw error;
       }
       return response.json();
+    };
+
+    // The conversation on the screen was closed or left (another room opened, back to the room list, the room deleted): its live
+    // session ends at the bridge, once per leave (POST /chat/session/close; memory only there). Hiding the chat is not leaving, and
+    // scrolling changes nothing here. A failed request is dropped: the bridge also ends idle sessions when the window is gone.
+    let openConversation = null;
+    syncOpenConversation = () => {
+      const change = ChatState.openConversationChange(openConversation, {
+        chatOpen: (state.hudOpen && state.hudApp === 'chat') || !!state.codex.chatCardEntityId,
+        hudView: state.codex.hudView, thread: getActiveCodexThread(state.codex) });
+      openConversation = change.open;
+      if (change.left) void fetchJson('/chat/session/close', { method: 'POST', body: JSON.stringify({ clientThreadId: change.left }) }).catch(() => {});
     };
 
     // CHAT-10: a Board Thread's members live in the chat store (room_members,

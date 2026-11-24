@@ -57,6 +57,19 @@ export const clientThreadBinding = thread => thread?.clientBindingId || thread?.
 export const freshClientThreadBinding = (thread, nonce) => `${thread.id}-binding-${nonce}`;
 export const requestBelongsToThread = (request, thread) => !!thread && (request.localThreadId === thread.id || request.clientThreadId === clientThreadBinding(thread));
 
+// The conversation that is open on the screen, as the bridge names it (clientThreadId), for the live-session close signal
+// (POST /chat/session/close). Chat shown with a conversation: that room. Chat shown with the room list: none. Chat not shown
+// (hidden or minimised): unchanged, because hiding the chat is not leaving the conversation.
+// openConversationChange(previous, { chatOpen, hudView, thread }) -> { open, left }
+//   previous: the value this returned as `open` last time (null at start); thread: the active room.
+//   left: the conversation that was closed or left since then (the caller sends the close once), or null.
+export function openConversationChange(previous, { chatOpen = false, hudView = 'conversation', thread = null } = {}) {
+  const before = typeof previous === 'string' && previous ? previous : null;
+  if (chatOpen !== true) return { open: before, left: null };
+  const open = hudView === 'conversation' ? clientThreadBinding(thread) || null : null;
+  return { open, left: before && before !== open ? before : null };
+}
+
 // The durable local key is the UI room ID. Native client bindings may rotate on
 // restore or account change, and must never become the history lookup key.
 export const localClientThreadId = thread => typeof thread?.id === 'string' && thread.id.trim() ? thread.id : null;
