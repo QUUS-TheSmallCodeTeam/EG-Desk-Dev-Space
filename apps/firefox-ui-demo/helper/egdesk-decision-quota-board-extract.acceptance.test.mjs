@@ -134,13 +134,13 @@ test('quota refresh on next explicit Board extract uses the saved key without po
     return result
   }
 
-  assert.deepEqual(await approveExtract(1, 1), { status: 200, body: { mode: 'extract', answer: LOCAL, source: 'local', omittedCount: 0 } })
+  assert.deepEqual(await approveExtract(1, 1), { status: 200, body: { mode: 'extract', answer: LOCAL, source: 'local', omittedCount: 0, screening: 'fallback' } })
   credentialKept()
   assert.equal(budget.snapshot().inputTokens, 0)
   // Change only the mock provider's quota state. Neither idle time nor reads dispatch.
   quota = 'recovered'
   await noBackgroundPost(2)
-  assert.deepEqual(await approveExtract(2, 2), { status: 200, body: { mode: 'extract', answer: SELECTED, source: 'decision', omittedCount: 0 } })
+  assert.deepEqual(await approveExtract(2, 2), { status: 200, body: { mode: 'extract', answer: SELECTED, source: 'decision', omittedCount: 0, screening: 'decision' } })
   credentialKept()
   assert.equal(budget.snapshot().inputTokens, 19)
   await noBackgroundPost(3)
