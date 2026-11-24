@@ -25,9 +25,9 @@ export const MAX_BYTES = 192 * 1024
 export const RETENTION_DAYS = 30
 const MAX_JUDGMENTS = 64
 
-const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check', 'turn_memory', 'conversation_flow'])
+const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check', 'turn_memory', 'conversation_flow', 'working_memory'])
 const MODES = new Set(['advisory', 'on'])
-const QUESTIONS = new Set(['answer_type', 'time_intent', 'relevance', 'speech_axis', 'speech_predicate', 'recall', 'topic_route', 'choice', 'next_step', 'page_state', 'goal_met', 'terminal_state', 'terminal_risk', 'log_block', 'claim_support', 'claim_present', 'term_internal', 'triage_courtesy', 'triage_need', 'triage_recall', 'triage_record', 'write_target'])
+const QUESTIONS = new Set(['answer_type', 'time_intent', 'relevance', 'speech_axis', 'speech_predicate', 'recall', 'topic_route', 'choice', 'next_step', 'page_state', 'goal_met', 'terminal_state', 'terminal_risk', 'log_block', 'claim_support', 'claim_present', 'term_internal', 'triage_courtesy', 'triage_need', 'triage_recall', 'triage_record', 'write_target', 'wm_block', 'wm_role'])
 const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed', 'none', 'act', 'hold', 'fetch'])
 // Turn memory (advisory): where in the session the turn was, what the fetch did, and how long each stage took.
 // Draft check (advisory): what the check would have done to the posted answer, and what it would fall back to without a revision.
@@ -91,7 +91,9 @@ const PREDS = new Set(['relay', 'own_observation', 'inference', 'record', 'plan'
 const VOCAB = new Set(['answer', 'browse', 'timeline_update', 'action_only', 'present', 'past', 'planned', 'what_if', 'cross_time', 'not_time_specific',
   'self_reported_observation', 'attributed_report', 'inference', 'record_based', 'unspecified', 'unknown', 'assertion', 'plan', 'conditional', 'question',
   'past_anchored', 'past_unspecified', 'at_utterance', 'ongoing_no_end', 'future_anchored', 'future_unspecified',
-  'supported', 'contradicted', 'not_mentioned', 'insufficient'])
+  'supported', 'contradicted', 'not_mentioned', 'insufficient',
+  // Working-memory gate: what the runtime would do with a tool-output block, and the role of an older session block.
+  'inject_full', 'collapse_template', 'spill_scratch', 'user_goal', 'current_active_task', 'stale_intermediate_log', 'error_trace_resolved', 'critical_fact'])
 const RUN = new Set(['completed', 'failed', 'interrupted', 'cancelled'])
 const FALLBACK = new Set(['timeout', 'unreachable', 'bad_response', 'no_credit', 'rate_limited', 'budget_exceeded', 'spend_limit_reached', 'invalid_key',
   'not_configured', 'server_error', 'model_unavailable', 'evidence_unavailable', 'mode_changed', 'no_candidates', 'timeout_unsent'])
