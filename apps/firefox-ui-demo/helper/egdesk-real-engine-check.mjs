@@ -484,7 +484,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       roomAccount: { mode: () => (FLAG.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') } })
     chat.setConnection(true)
     try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
-    attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests }))
+    attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests, limits: deps.hookLimits?.[h.name] }))
     rec.phases.composedMs = ms(t0)
     // c25: what the runtime's private turns did, per turn (Main's check-6: a status reply never reached the chat and the record could not say where it stopped).
     // internalTurns: each private turn (draft revision, heartbeat writer, briefing fill): by which path (fork or a fresh thread), how long, how many characters, the text the model

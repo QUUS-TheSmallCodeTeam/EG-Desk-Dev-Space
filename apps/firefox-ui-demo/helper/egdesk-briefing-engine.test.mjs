@@ -243,3 +243,19 @@ test('c32: the briefing\'s private turns ask chat.internalText with preamble:fal
   }
   assert.equal(calls.length, 2); assert.ok(calls.every(c => c.options.preamble === false && c.run.id === 'run-1' && Number.isFinite(c.options.timeoutMs)))
 })
+
+test('c34: engine.lastFailure() tells a timeout (nothing came back before its allotted time) from an unusable reply, an empty turn and a refused one; null after a usable reply', async () => {
+  let clock = 0
+  const seen = []
+  const engine = createBriefingEngine({ now: () => clock, limits: { maxTurns: 4, turnMs: 30_000, totalMs: 100_000 }, runText: async (prompt, options) => { seen.push(options.timeoutMs); const r = replies.shift(); clock += r.ms; return r.reply } })
+  const replies = [{ ms: 30_400, reply: null }, { ms: 200, reply: null }, { ms: 500, reply: 'prose, not an object' }, { ms: 500, reply: '{"title":"t","items":{}}' }]
+  const request = { kind: 'briefing_fill', guide: { items: [] }, materials: [] }
+  assert.equal(engine.lastFailure(), null)
+  assert.equal(await engine(request), null); assert.equal(engine.lastFailure(), 'timeout', 'null after the whole allotted time')
+  assert.equal(await engine(request), null); assert.equal(engine.lastFailure(), 'no-reply', 'null at once: the turn failed, it did not time out')
+  assert.equal(await engine(request), null); assert.equal(engine.lastFailure(), 'unusable', 'a reply that is not the asked JSON')
+  assert.notEqual(await engine(request), null); assert.equal(engine.lastFailure(), null)
+  assert.equal(await engine(request), null); assert.equal(engine.lastFailure(), 'refused', 'the turn bound')
+  assert.deepEqual(Object.keys(engine.stats()), ['turns', 'refused', 'elapsedMs'], 'stats are as before; the reason is a separate accessor')
+  assert.ok(seen.every(ms => ms <= 30_000))
+})
