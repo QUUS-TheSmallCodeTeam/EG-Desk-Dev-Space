@@ -10,13 +10,13 @@ const WORK = 'codex-abcdef01'
 const CAPTURE = { sourceId: 's1', kind: 'browser', sourceRef: { viewId: 'card-1', url: 'https://captured.example/page' }, captureScope: { type: 'page' } }
 // the Browser card left the captured page: the source is now stale and not yet announced (what the changes-only message tells the person)
 const changed = contexts => contexts.noteSourceEvent({ topic: 'browser.navigated', payload: { cardId: 'card-1', origin: 'https://elsewhere.example', path: '/' } })
-function fixture({ defaultOwner = null, ready = () => true } = {}) {
+function fixture({ defaultOwner = null, ready = () => true, duringCheck = null } = {}) {
   const state = { defaultOwner, workOwner: 'email:work@example.test', epoch: 3 }
   const authorities = {
     default: () => ({ engineId: 'codex', engineProfileId: 'codex-default', ownerKey: state.defaultOwner, epoch: 1 }),
     work: () => ({ engineId: 'codex', engineProfileId: WORK, ownerKey: state.workOwner, epoch: state.epoch }),
   }
-  const contexts = new ContextRuntime({ store: { hasNativeTools: async () => true }, reader: {}, getReadCapacity: () => 1, getOwnerKey: () => state.defaultOwner,
+  const contexts = new ContextRuntime({ store: { hasNativeTools: async () => { duringCheck?.(state); return true } }, reader: {}, getReadCapacity: () => 1, getOwnerKey: () => state.defaultOwner,
     getAuthority: hints => (hints?.engineProfileId === WORK ? authorities.work() : authorities.default()), schemaReady: authority => ready(authority) })
   contexts.runtime = { epoch: 0, threadToolManifestStatus: new Map([['conv-default', 'verified'], ['conv-work', 'verified']]), emit() {} }
   return { state, contexts, authorities }
@@ -56,4 +56,10 @@ test('the room\'s own account and slot decide: another account on the profile, o
   assert.equal(await contexts.prepare(room('conv-work', WORK), authorities.work()), null, 'another account signed in on the profile: not that room\'s tracking')
   state.workOwner = 'email:work@example.test'
   assert.equal((await contexts.prepare(room('conv-work', WORK), authorities.work()))?.changesOnly, true)
+})
+
+test('the room\'s account changing while the check is in flight is refused (ACCOUNT_CHANGED), never delivered under the new account', async () => {
+  const { contexts, authorities } = fixture({ duringCheck: state => { state.epoch += 1 } }) // the profile's connection is replaced during the check
+  contexts.trackBound('email:work@example.test', 'conv-work', [CAPTURE]); assert.equal(changed(contexts), 1)
+  await assert.rejects(contexts.prepare(room('conv-work', WORK), authorities.work()), { code: 'ACCOUNT_CHANGED' })
 })
