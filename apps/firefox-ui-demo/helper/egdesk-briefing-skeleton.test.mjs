@@ -11,7 +11,7 @@ import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 import { validBriefing } from '../overlay/resources/EGDeskBriefingState.sys.mjs'
 import { CANVAS_VIEW_SIZES } from '../overlay/resources/EGDeskSurfaceState.sys.mjs'
 import { BRIEFING_CATALOG, BRIEFING_RENDERERS, MATERIAL_TRAITS, RESULT_CARD_METRICS, STEP_SLOTS, registerComponent, resultCardCapacity, textLines } from './egdesk-briefing-catalog.mjs'
-import { SKELETON_JUDGE, SKELETON_LIMITS, dateIn, dateMatches, fillChecks, fitQuestions, questionName, versionOf, materialGroups, buildGuide, chooseParts, createSkeletonJudge, decidePlace, enumerateSkeleton, fillRequest, layoutSkeleton, normalizeMaterials, normalizeSkeletonDto, orderItems, recordedBefore, runSkeletonFlow, skeletonChecks, validateFill } from './egdesk-briefing-skeleton.mjs'
+import { SKELETON_JUDGE, SKELETON_LIMITS, VERSION_PAIRS, relevanceQuestions, versionCandidates, dateIn, dateMatches, fillChecks, fitQuestions, questionName, versionOf, materialGroups, buildGuide, chooseParts, createSkeletonJudge, decidePlace, enumerateSkeleton, fillRequest, layoutSkeleton, normalizeMaterials, normalizeSkeletonDto, orderItems, recordedBefore, runSkeletonFlow, skeletonChecks, validateFill } from './egdesk-briefing-skeleton.mjs'
 import { BRIEFING_ENGINE_LIMITS, briefingDeps, createBriefingEngine, fillPrompt } from './egdesk-briefing-engine.mjs'
 import { completeBriefingArgs } from './egdesk-briefing-flow.mjs'
 import { createEgressGate, EGRESS_SITES, modelDataPermissions } from './egdesk-decision-egress.mjs'
@@ -55,7 +55,8 @@ const fillReply = (ids, { unfillable = [], title = 'A사 견적 정리' } = {}) 
 
 // ---- the Decision model, scripted. Every question is a yes/no predicate; a script gives the probability for a question name (default: the "everything fits" path) ----
 const FIT = /^(?:aspect|happened|todo|fact)_/
-const DEFAULT_P = name => (name === 'several' ? .96 : name === 'one_sentence' ? .03 : FIT.test(name) ? .95 : name.startsWith('before_') ? .9 : name.startsWith('slot_') ? .97 : .96)
+// about_: the materials are what the request asks about; same_: an unresolved pair is NOT two versions (cycle 17)
+const DEFAULT_P = name => (name === 'several' ? .96 : name === 'one_sentence' ? .03 : name.startsWith('about_') ? .96 : name.startsWith('same_') ? .03 : FIT.test(name) ? .95 : name.startsWith('before_') ? .9 : name.startsWith('slot_') ? .97 : .96)
 function answersFor(questions, script) {
   return questions.map(q => {
     assert.equal(q.type, 'predicate', `${q.name}: only yes/no questions are asked`)
@@ -76,7 +77,7 @@ function direct(script, { mode = 'on', catalog = null } = {}) {
 const run = (script, { materials = QUOTE, candidates = boardCards(), request = REQUEST, fill, viewport = VIEW, ...rest } = {}) => {
   const judge = direct(script, rest), fills = []
   const filler = fill === null ? null : async asked => { fills.push(asked); return typeof fill === 'function' ? fill(asked, fills.length) : fillReply(asked.guide.items.map(i => i.id)) }
-  return runSkeletonFlow({ request, materials, candidates, currentAnswerId: 'ans-now', viewport, judge, fill: filler, catalog: rest.catalog ?? BRIEFING_CATALOG, observeOnly: rest.observeOnly, ...(rest.now ? { now: rest.now } : {}), ...(rest.bindings ? { bindings: rest.bindings } : {}), ...(rest.fillCheck ? { fillCheck: rest.fillCheck } : {}) }).then(out => ({ out, judge, fills }))
+  return runSkeletonFlow({ request, materials, candidates, currentAnswerId: 'ans-now', viewport, judge, fill: filler, catalog: rest.catalog ?? BRIEFING_CATALOG, observeOnly: rest.observeOnly, ...(rest.now ? { now: rest.now } : {}), ...(rest.bindings ? { bindings: rest.bindings } : {}), ...(rest.fillCheck ? { fillCheck: rest.fillCheck } : {}), ...(rest.answer ? { answer: rest.answer } : {}) }).then(out => ({ out, judge, fills }))
 }
 const ORDER = undefined // the default script: every part fits, the tied pairs keep the code's own order
 
@@ -166,7 +167,7 @@ test('the judge request is closed and is made of yes/no questions only: no "bubb
   for (const q of prepared.packet.questions) assert.doesNotMatch(q.instructions, /help|call for|asked|request|Answer no if| or if /i, `${q.name}: one condition about content, nothing about usefulness`)
   assert.equal(prepared.packet.input[1].content, 'Request, quoted exactly as a JSON string: "A사 견적 건 정리해줘"', 'the request is the one user message; the materials are quoted inside each question')
   const fitAll = SKELETON_JUDGE.prepare({ mode: 'on', binding: 'b', dto: { ...base, questions: [{ kind: 'happened', material: 'M1' }, { kind: 'todo', material: 'M2' }] } }).packet.questions
-  assert.deepEqual(fitAll.map(q => [q.name, q.instructions.split('}. ')[1]]), [['happened_M1', 'Does this material state something that happened or was decided (an action, an event or a decision)?'], ['todo_M2', 'Does this material name at least one concrete step that still has to be taken (for example an approval, a dispatch or a reply)?']])
+  assert.deepEqual(fitAll.map(q => [q.name, q.instructions.split('}. ')[1]]), [['happened_M1', 'Does this material state something that happened or was decided (an action, an event or a decision)?'], ['todo_M2', 'According to this material, is something not done yet or still to happen?']])
   assert.equal(SKELETON_JUDGE.prepare({ mode: 'off', binding: 'b', dto: base }).status, 'manual')
   // reading: a probability per question; a refusal or a missing answer is unknown (null), never "no"; nothing usable at all is manual
   const read = answers => SKELETON_JUDGE.read(prepared, answers, 'b')
@@ -228,8 +229,8 @@ test('code combines the answers: board needs "several" yes AND "one sentence" no
 test('journey: v1 quote, v2 plan, meeting note, decision memo -> compare + ordered lines + open-items lines; the v1 card is reused; 4 judgment requests, 1 fill turn', async () => {
   const { out, judge, fills } = await run(ORDER)
   assert.equal(out.status, 'presented', JSON.stringify(out))
-  assert.deepEqual(judge.calls.map(c => c.stage), ['place', 'fit', 'order', 'fill_check']); assert.deepEqual([out.stats.judgeRequests, out.stats.fillTurns, out.stats.questions], [4, 1, 2 + 7 + 3 + 16])
-  assert.deepEqual(judge.calls.slice(0, 3).map(c => c.names), [['several', 'one_sentence'], ['aspect_P1', 'happened_M1', 'happened_M2', 'happened_M3', 'happened_M4', 'todo_M2', 'todo_M4'], ['before_P1_P2', 'before_P1_P3', 'before_P2_P3']])
+  assert.deepEqual(judge.calls.map(c => c.stage), ['place', 'fit', 'order', 'fill_check']); assert.deepEqual([out.stats.judgeRequests, out.stats.fillTurns, out.stats.questions], [4, 1, 5 + 7 + 3 + 16])
+  assert.deepEqual(judge.calls.slice(0, 3).map(c => c.names), [['several', 'one_sentence', 'about_M1', 'same_M1_M4', 'same_M2_M4'], ['aspect_P1', 'happened_M1', 'happened_M2', 'happened_M3', 'happened_M4', 'todo_M2', 'todo_M4'], ['before_P1_P2', 'before_P1_P3', 'before_P2_P3']])
   assert.deepEqual(judge.calls[3].names, ['slot_P1_r1_left', 'slot_P1_r1_right', 'slot_P1_r2_left', 'slot_P1_r2_right', 'slot_P1_r3_left', 'slot_P1_r3_right', 'step_P1', 'slot_P2_r1', 'slot_P2_r2', 'slot_P2_r3', 'slot_P2_r4', 'step_P2', 'slot_P3_r1', 'slot_P3_r2', 'slot_P3_r3', 'step_P3'])
   // the design guide: ordered components with their slot schemas, the reused card, the fold proposal (decided by rule: an outdated output of an earlier answer)
   assert.deepEqual(out.guide.items.map(i => [i.position, i.id, i.shows, i.component, i.materials.join(), i.pointsAt.map(p => `${p.alias}${p.new ? '+' : ''}`).join()]), [
@@ -278,7 +279,8 @@ test('journey: one sentence is enough, nothing needs to be seen together, nothin
   assert.deepEqual([enough.out.status, enough.out.reason, enough.out.stats.judgeRequests, enough.out.stats.fillTurns], ['bubble', 'judged-bubble', 1, 0])
   const alone = await run({ several: .04 }); assert.deepEqual([alone.out.status, alone.out.reason, alone.out.stats.judgeRequests], ['bubble', 'judged-bubble', 1])
   const unsure = await run({ several: .55 }); assert.deepEqual([unsure.out.status, unsure.out.reason], ['bubble', 'placement-undecided'])
-  const refused = await run({ several: 'refuse', one_sentence: 'refuse' }); assert.deepEqual([refused.out.status, refused.out.reason], ['bubble', 'judge-unavailable'], 'a refusal is not an answer')
+  const refused = await run({ several: 'refuse', one_sentence: 'refuse' }); assert.deepEqual([refused.out.status, refused.out.reason], ['bubble', 'placement-undecided'], 'a refusal is not an answer: the place stays undecided')
+  const silent = await run(() => 'refuse'); assert.deepEqual([silent.out.status, silent.out.reason], ['bubble', 'judge-unavailable'], 'nothing answered at all')
   // "no component fits" is not an option anybody can pick: it is what code concludes when every (part, way) is a no
   const none = await run(q => (FIT.test(q.name) ? .05 : undefined), { request: 'A사 견적 단가 변화를 그래프로 그려줘' })
   assert.deepEqual([none.out.status, none.out.reason, none.out.stats.judgeRequests, none.out.stats.fillTurns], ['bubble', 'no-component-fits', 2, 0]); assert.deepEqual(none.out.decisions, { P1: 'no', P2: 'no', P3: 'no' }); assert.equal(none.fills.length, 0)
@@ -413,7 +415,9 @@ test('mounted journey: 4 judgment requests and ONE private fork turn; three card
   assert.equal(s.decisions.length, 4); assert.ok(s.decisions.every(d => d.questions.every(q => q.type === 'predicate') && d.input.every(m => typeof m.content === 'string')))
   assert.deepEqual(s.decisions.map(d => d.prompt_cache_key), ['briefing-skeleton-place', 'briefing-skeleton-fit', 'briefing-skeleton-order', 'briefing-skeleton-fill_check'])
   const sent = JSON.stringify(s.decisions); for (const piece of [REQUEST, 'A사 견적 결정 메모', '납기 8주', 'A사 견적서 v1']) assert.ok(sent.includes(piece), piece)
-  for (const absent of [s.v1.id, 'res-v1', s.h.ids.runId, ANSWER.slice(0, 20)]) assert.ok(!sent.includes(absent), absent)
+  for (const absent of [s.v1.id, 'res-v1', s.h.ids.runId]) assert.ok(!sent.includes(absent), absent)
+  // cycle 17: the answer being laid out is quoted in the place request only (a request like "정리해줘" refers to it); never in fit, order or the fill check
+  assert.ok(JSON.stringify(s.decisions[0]).includes(ANSWER.slice(0, 20))); assert.ok(s.decisions.slice(1).every(d => !JSON.stringify(d).includes(ANSWER.slice(0, 20))))
   // published: the three new results first, then the proposal; the answer was already complete; no new chat message
   const after = s.h.events.slice(completedAt + 1).map(e => e.event).filter(e => e !== 'context.bound'); assert.deepEqual(after, ['output.published', 'output.published', 'output.published', 'briefing.published'])
   assert.equal(s.count('output.published'), outputsBefore + 3); assert.equal(s.count('message.completed'), messages)
@@ -502,32 +506,35 @@ const realMemory = () => ({ mode: () => 'on', configured: () => true, settingsGe
   // Lane L7's turn memory, on, over its public synthetic wiki; eligible() stands in for "a direct conversation" (this harness has no Agent profile).
   turnMemory: { mode: () => 'on', wiki: async () => buildWiki(SYNTHETIC_PAGES), scope: () => ({ allowedScopes: ['dm:this-room'], writeScope: 'dm:this-room' }), budget: { linksFirst: true }, ontologyWrite: false, eligible: () => true } })
 
-test('mounted on the REAL turn memory: the materials are what lane L7 attached to this answer\'s turn; a page attached there is shown if its content holds a fact', async t => {
+test('mounted on the REAL turn memory: the materials are what lane L7 attached to this answer\'s turn; a page the request does not ask about gets no card', async t => {
   const h = await harness(t, { message: REQUEST, decisionContext: realMemory(), forkReply: prompt => autoFill(prompt) })
   await h.finish(ANSWER); await h.chat.turnMemoryIdle()
   const run = h.chat.runFor(h.ids), rows = h.chat.memoryMaterialsFor(run)
   assert.equal(h.chat.memoryMaterialsState(run), 'attached'); assert.ok(rows.length >= 5 && rows.every(m => m.held === false), `the real loop attached ${rows.length} pages`)
   assert.deepEqual(rows.filter(m => m.title.startsWith('A사')).map(m => m.title), ['A사 견적 요청 접수', 'A사 견적서 v1 발송', 'A사 단가 협의 메모', 'A사 견적서 v2 수정 계획', 'A사 건 결정 메모'])
   const decisions = []
-  const provider = async (_url, init) => { const body = JSON.parse(init.body); decisions.push(body); return Response.json({ answers: answersFor(body.questions, {}), usage: { input_tokens: 11 } }) }
+  const provider = async (_url, init) => { const body = JSON.parse(init.body); decisions.push(body); return Response.json({ answers: answersFor(body.questions, { about_M6: .03 }), usage: { input_tokens: 11 } }) }
   // the bridge's own dependency factory, unchanged: materialsFor is chat.memoryMaterialsFor
   const R = rig(t, { mode: 'on', handlerOptions: { briefing: briefingDeps({ chat: h.chat, contexts: h.contexts, enabled: true }), fetchImpl: provider } })
   const body = BriefingHost.observeRequest({ mode: 'on', report: ANSWER, answerId: h.ids.answerId, conversationId: h.ids.conversationId, runId: h.ids.runId, candidates: [], request: REQUEST, viewport: VIEW })
   const res = await R.http('POST', '/decision/briefing-observe', body)
-  // Cycle 16: whether a page belongs to the answer is the memory loop's judgment (lane L7). Here that loop's MOCK judge attached the B사 page too, and the briefing no
-  // longer second-guesses relevance: the page is its own part, its content holds a fact, so it gets a card. With the real relevance predicates (0/1 in real results) it
-  // is not attached in the first place.
-  assert.equal(res.body.outcome, 'presented', JSON.stringify(res.body)); assert.equal(res.body.order, 'skeleton'); assert.deepEqual([res.body.steps, res.body.newComponents, res.body.fillTurns, res.body.judgeRequests], [4, 4, 1, 4])
-  // parts came from the recorded links and dates of those pages: v1 against the v2 plan, the dated A사 pages in order, the open plan; the B사 page on its own
+  // The memory loop attached what the answering model needed as CONTEXT (here lane L7's mock judge attached the B사 page too). Whether a page belongs on the board for
+  // THIS request is its own question (cycle 17): one per linked group, quoted with the request. The SCRIPTED Decision model here answers no for the B사 page; whether
+  // the real one does is what the re-measure plan checks (hard). The A사 pages are one linked group, so one question covers them.
+  assert.equal(res.body.outcome, 'presented', JSON.stringify(res.body)); assert.equal(res.body.order, 'skeleton'); assert.deepEqual([res.body.steps, res.body.newComponents, res.body.fillTurns, res.body.judgeRequests], [3, 3, 1, 4])
+  assert.deepEqual(decisions[0].questions.map(q => q.name), ['several', 'one_sentence', 'about_M1', 'about_M6', 'same_M3_M5'], 'relevance per linked group, and the one unresolved title-sharing pair (두 메모)')
+  assert.ok(decisions[0].questions[3].instructions.startsWith('The person asked, quoted exactly as a JSON string: "A사 견적 건 정리해줘". Material, quoted as JSON: M6 {"title":"B사 견적 요청"'))
+  // parts came from the recorded links and dates of the kept pages: v1 against the v2 plan, the dated A사 pages in order, the open plan
   const fit = decisions[1].questions
-  assert.deepEqual(fit.map(q => q.name), ['aspect_P1', 'happened_M1', 'happened_M2', 'happened_M3', 'happened_M5', 'todo_M4', 'fact_M6'])
+  assert.deepEqual(fit.map(q => q.name), ['aspect_P1', 'happened_M1', 'happened_M2', 'happened_M3', 'happened_M5', 'todo_M4'])
   assert.ok(fit[0].instructions.includes('M2 {"title":"A사 견적서 v1 발송"') && fit[0].instructions.includes('M4 {"title":"A사 견적서 v2 수정 계획","status":"plan","text":"단가 12,200원'), 'the question quotes the two versions\' own text')
-  assert.ok(fit[6].instructions.includes('M6 {"title":"B사 견적 요청"') && fit.slice(0, 6).every(q => !q.instructions.includes('B사')), 'the B사 page is asked about on its own and is not in the A사 sequence')
+  assert.ok(decisions.slice(1).every(d => !JSON.stringify(d).includes('B사')), 'after the relevance answer the B사 page is in no request')
   // order: the dated pages come before the plan by record; only the pairs the record leaves open are asked
-  assert.deepEqual(decisions[2].questions.map(q => q.name), ['before_P1_P2', 'before_P1_P3', 'before_P1_P4', 'before_P2_P4'], 'the open plan (no date) comes after the dated B사 page by record')
+  assert.deepEqual(decisions[2].questions.map(q => q.name), ['before_P1_P2', 'before_P1_P3'])
   const sent = JSON.stringify(decisions); for (const absent of ['quote/a-', '"key"', '"held"', '"provenance"', 'rev=']) assert.ok(!sent.includes(absent), `no ${absent} reaches the Decision model`)
   assert.ok(h.forkPrompts[0].includes('A사 건 결정 메모') && !h.forkPrompts[0].includes('quote/a-') && !h.forkPrompts[0].includes('B사 견적 요청 "'))
-  assert.equal(h.events.filter(e => e.event === 'output.published').length, 4); assert.equal(h.chat.runFor(h.ids).context.briefings.at(-1).steps.length, 4)
+  assert.equal(h.events.filter(e => e.event === 'output.published').length, 3); assert.equal(h.chat.runFor(h.ids).context.briefings.at(-1).steps.length, 3)
+  assert.ok(!h.forkPrompts[0].includes('B사'), 'the subjective model is not given the page either')
   // turn memory off: the accessor gives nothing, and only then is the outcome no-materials
   const off = await harness(t, { message: REQUEST }); await off.finish(ANSWER)
   const R2 = rig(t, { mode: 'on', handlerOptions: { briefing: briefingDeps({ chat: off.chat, contexts: off.contexts, enabled: true }), fetchImpl: provider } })
@@ -561,8 +568,8 @@ test('advisory recording: place and fit are asked and recorded for the finished 
   assert.equal(body.flow, undefined); const events = s.h.events.length
   const res = await R.http('POST', '/decision/briefing-observe', body)
   assert.deepEqual(res.body, { status: 'observed', stages: ['place', 'fit'], outcome: 'advisory-only', judgeRequests: 2, order: 'skeleton', fillTurns: 0 })
-  assert.deepEqual(s.decisions.map(d => d.questions.map(q => q.name).join()), ['several,one_sentence', 'aspect_P1,happened_M1,happened_M2,happened_M3,happened_M4,todo_M2,todo_M4']); assert.equal(s.h.events.length, events, 'no event'); assert.equal(s.h.forkPrompts.length, 0)
-  const recorded = R.calibration.entries().filter(e => e.feature === 'answer_briefing'); assert.deepEqual(recorded.map(e => [e.mode, e.judgments.length]), [['advisory', 2], ['advisory', 7]], 'content-free calibration entries of the skeleton judge, in their own family')
+  assert.deepEqual(s.decisions.map(d => d.questions.map(q => q.name).join()), ['several,one_sentence,about_M1,same_M1_M4,same_M2_M4', 'aspect_P1,happened_M1,happened_M2,happened_M3,happened_M4,todo_M2,todo_M4']); assert.equal(s.h.events.length, events, 'no event'); assert.equal(s.h.forkPrompts.length, 0)
+  const recorded = R.calibration.entries().filter(e => e.feature === 'answer_briefing'); assert.deepEqual(recorded.map(e => [e.mode, e.judgments.length]), [['advisory', 5], ['advisory', 7]], 'content-free calibration entries of the skeleton judge, in their own family')
   assert.equal(R.calibration.entries().filter(e => e.feature === 'board_arrangement').length, 0, 'nothing of the briefing is filed under the Board arrangement')
   assert.deepEqual((await R.http('POST', '/decision/briefing-observe', { ...body, runId: 'gone' })).body, { status: 'skipped', reason: 'run-gone' })
   // a handler without the bridge's dependency factory keeps the earlier recording (placement + reuse on the report)
@@ -626,8 +633,75 @@ test('open items: "not done" is the record (status plan), never asked; the one q
   assert.deepEqual([open.yes.map(o => o.value).join(), open.materials.join()], ['result_lines', 'M2'], 'shown from the one material that names a step')
   assert.deepEqual(chooseParts(scene, { todo_M2: .02, todo_M4: .02 }).find(c => c.part.trait === 'open_items').yes, [])
   const asked = (await run(ORDER)).judge.calls[1].packet.questions.filter(q => q.name.startsWith('todo_'))
-  assert.equal(asked.length, 2); assert.ok(asked.every(q => !/\bplan\b|not done|open|status/.test(q.instructions.split('}. ')[1])), 'the question does not ask whether it is done')
+  assert.equal(asked.length, 2); assert.ok(asked.every(q => q.instructions.split('}. ')[1] === 'According to this material, is something not done yet or still to happen?'), 'what the material says is not done (cycle 17 wording; the recorded status itself is never asked)')
   // a single step makes a list of one line (the real single-material case)
   const scene1 = enumerateSkeleton({ materials: [row('M1', 'A사 견적서 v2 수정 계획', '팀장 승인 후 발송한다.', null, 'plan')], candidates: [] })
   assert.deepEqual(fitQuestions(scene1).map(questionName), ['todo_M1'])
+})
+
+// ================= 10. cycle 17: relevance for THIS request, unresolved version pairs, the "not done" wording =================
+const B_PAGE = row('M5', 'B사 견적 요청', 'B사가 11월 10일 케이스 500개 견적을 요청했다. 단가 협의 전이다.', '2026-11-10', 'done')
+test('relevance: one question per linked group (the record says it is one matter); a material linked to nothing is asked by itself; no or undecided drops it before fit', async () => {
+  const mats = normalizeMaterials([...QUOTE, B_PAGE])
+  assert.deepEqual(relevanceQuestions(mats).map(q => [q.material, q.covers.join()]), [['M1', 'M1,M2,M3,M4'], ['M5', 'M5']], 'four linked A사 materials: one question; the B사 page: its own')
+  // path 1 (skip): the A사 group is kept on its first material's answer, the other three are never asked
+  const kept = await run({ about_M5: .03 }, { materials: [...QUOTE, B_PAGE] })
+  assert.equal(kept.out.status, 'presented'); assert.deepEqual(kept.judge.calls[0].names, ['several', 'one_sentence', 'about_M1', 'about_M5', 'same_M1_M4', 'same_M2_M4'])
+  assert.deepEqual(kept.out.relevance, { kept: ['M1', 'M2', 'M3', 'M4'], dropped: ['M5'], versions: [] })
+  assert.ok(kept.judge.calls.slice(1).every(c => !JSON.stringify(c.packet).includes('B사')) && kept.fills.every(f => !JSON.stringify(f).includes('B사')), 'a dropped page is in no later request and not in the fill')
+  assert.deepEqual(kept.out.guide.items.map(i => i.id), ['P1', 'P2', 'P3'], 'the same three parts as without the B사 page')
+  // the question quotes the request and ONE material, nothing else
+  const q = kept.judge.calls[0].packet.questions.find(x => x.name === 'about_M5').instructions
+  assert.equal(q, 'The person asked, quoted exactly as a JSON string: "A사 견적 건 정리해줘". Material, quoted as JSON: M5 {"title":"B사 견적 요청","date":"2026-11-10","status":"done","text":"B사가 11월 10일 케이스 500개 견적을 요청했다. 단가 협의 전이다."}. Does this material contain information that the person\'s request asks about?')
+  // path 2 (asked by itself): the B사 page kept when the judge says yes; it is its own part
+  const both = await run({}, { materials: [...QUOTE, B_PAGE] }); assert.ok(both.judge.calls[1].names.includes('fact_M5'), 'kept: its own part is asked about in fit')
+  // a group whose question is no or undecided is dropped whole; nothing kept -> the chat answer, with no fit request
+  const lost = await run({ about_M1: .5 }, { materials: [...QUOTE, B_PAGE] }); assert.deepEqual(lost.out.relevance.dropped, ['M1', 'M2', 'M3', 'M4']); assert.deepEqual(lost.judge.calls[1].names, ['fact_M5'], 'only what was kept is asked about in fit')
+  const none = await run({ about_M1: .02, about_M5: .02 }, { materials: [...QUOTE, B_PAGE] })
+  assert.deepEqual([none.out.status, none.out.reason, none.judge.calls.length, none.fills.length], ['bubble', 'not-asked-about', 1, 0])
+  const refused = await run({ about_M1: 'refuse' }); assert.deepEqual([refused.out.status, refused.out.reason], ['bubble', 'not-asked-about'], 'a refusal is not a yes')
+  // place decides first: a bubble does not look at relevance
+  const bubble = await run({ about_M1: .02, one_sentence: .98 }); assert.deepEqual([bubble.out.status, bubble.out.reason], ['bubble', 'judged-bubble'])
+})
+test('versions: what the record resolves is never asked; only unresolved title-sharing pairs of the same company, at most 3 per briefing; a judged pair becomes a comparison', async () => {
+  const pair = [row('M1', 'A사 견적서', '11월 6일 단가 12,800원, 납기 12월 15일로 보낸 견적서.', '2026-11-06', 'done'), row('M2', 'A사 견적서 수정본', '단가 12,200원, 납기 12월 20일로 고친 견적서.', '2026-11-20', 'done')]
+  const mats = normalizeMaterials(pair)
+  assert.deepEqual(versionCandidates(mats), [['M1', 'M2']]); assert.deepEqual(enumerateSkeleton({ materials: pair, candidates: [] }).parts.map(x => x.trait), ['single', 'single'], 'not a comparison until it is judged')
+  // resolved by code: a version link or mark, any other recorded link, different companies; nothing shared
+  assert.deepEqual(versionCandidates(normalizeMaterials([pair[0], { ...pair[1], links: [{ type: 'refers_to', toAlias: 'M1' }] }])), [], 'the record relates them some other way')
+  assert.deepEqual(versionCandidates(normalizeMaterials([pair[0], { ...pair[1], title: 'B사 견적서 수정본' }])), [], 'different companies')
+  assert.deepEqual(versionCandidates(normalizeMaterials([pair[0], { ...pair[1], title: 'A사 견적서 v2' }])), [], 'titles that differ only by a version mark: code (no question)')
+  assert.deepEqual(versionCandidates(normalizeMaterials([pair[0], { ...pair[1], title: 'A사 납품 일정' }])), [], 'no shared word')
+  // the bound
+  const many = Array.from({ length: 6 }, (_, i) => row(`M${i + 1}`, `A사 회의 메모 ${'가나다라마바'[i]}`, '회의 내용.', `2026-11-1${i}`, 'done'))
+  assert.equal(versionCandidates(normalizeMaterials(many)).length, VERSION_PAIRS); assert.equal(VERSION_PAIRS, 3)
+  // judged yes -> the comparison exists (the earlier one first by date); no -> two single parts as before
+  const yes = await run({ same_M1_M2: .95 }, { materials: pair, candidates: [], request: 'A사 견적서 바뀐 점 정리해줘' })
+  assert.equal(yes.judge.calls[0].packet.questions.find(x => x.name === 'same_M1_M2').instructions, 'Two materials, each quoted as JSON: M1 {"title":"A사 견적서","date":"2026-11-06","status":"done","text":"11월 6일 단가 12,800원, 납기 12월 15일로 보낸 견적서."}; M2 {"title":"A사 견적서 수정본","date":"2026-11-20","status":"done","text":"단가 12,200원, 납기 12월 20일로 고친 견적서."}. Are these two materials an earlier and a later version of the same document, offer or plan?')
+  assert.deepEqual(yes.judge.calls[1].names, ['aspect_P1', 'happened_M1', 'happened_M2']); assert.deepEqual(yes.out.relevance.versions, [['M1', 'M2']])
+  const no = await run({}, { materials: pair, candidates: [], request: 'A사 견적서 바뀐 점 정리해줘' }); assert.deepEqual(no.judge.calls[1].names, ['fact_M1', 'fact_M2'], 'two materials the record does not relate: two single parts, no comparison')
+})
+
+// ================= 11. cycle 17: the all-on product run (Main, real Decision model): what the place request saw =================
+// s3 of that run, the exact body recovered by replaying the run offline (sha 715a34ce…, same as sent): request "방금 그 내용 정리해줘", two PostgreSQL pages the
+// memory loop attached (no date, status "unknown"), no answer text. several .57 / one_sentence .49 -> undecided -> bubble.
+const S3_REQUEST = '방금 그 내용 정리해줘', S3_ANSWER = 'A사 견적은 11월 3일 요청, 11월 6일 v1 발송, v2는 팀장 승인 후 발송 예정입니다.'
+const S3_PAGES = [{ title: '헬스체크 3종 체크리스트', excerpt: '헬스체크 3종: 연결 풀 응답, 쓰기 지연 50ms 이하, 복제 지연 없음. 전부 통과하면 배포 성공으로 본다.', status: 'unknown', time: { at: null } },
+  { title: 'PostgreSQL 마이그레이션 배포 계획', excerpt: '12월 첫째 주에 SQLite에서 PostgreSQL로 전환 배포할 예정이다. 배포 뒤 헬스체크 3종을 통과해야 한다. 아직 배포 전이다.', status: 'unknown', time: { at: null } }]
+test('the place request carries the answer it lays out; a material is quoted only with what its record has; the gaps of the record are counted, not filled in', async () => {
+  const r0 = await run(q => (q.name.startsWith('about_') ? .03 : undefined), { request: S3_REQUEST, materials: S3_PAGES, candidates: [], answer: S3_ANSWER })
+  const place = r0.judge.calls[0].packet
+  assert.ok(place.input[1].content.startsWith(`Request, quoted exactly as a JSON string: "${S3_REQUEST}"\n\nThe assistant's answer to it, quoted exactly as a JSON string: "${S3_ANSWER}"`))
+  assert.ok(place.input[1].content.includes('M1 {"title":"헬스체크 3종 체크리스트","text":'), 'no "status":"unknown" and no date: only what the record has')
+  assert.ok(place.questions.find(q => q.name === 'about_M1').instructions.endsWith('(the request may refer to the assistant\'s answer quoted above)?'))
+  // the pages the memory loop attached are not what the request (that answer) is about: no board, and no further request
+  assert.deepEqual([r0.out.status, r0.out.reason, r0.judge.calls.length], ['bubble', 'not-asked-about', 1]); assert.deepEqual(r0.out.recordGaps, { materials: 2, undated: 2, noStatus: 2 })
+  // the right pages but without dates or status (the product path until lane L7 carries them): no part in date order, nothing open; what is left is honest
+  const bare = QUOTE.map(m => ({ ...m, time: { at: null }, status: 'unknown', links: [] }))
+  const r1 = await run({}, { request: S3_REQUEST, materials: bare, candidates: [], answer: S3_ANSWER })
+  assert.deepEqual(r1.out.recordGaps, { materials: 4, undated: 4, noStatus: 4 })
+  assert.ok(r1.judge.calls[1].names.every(n => n.startsWith('fact_')), 'without dates, status or links only single parts exist: nothing is guessed')
+  // the answer is optional: without it the request is exactly as before, and it never appears in another stage
+  const r2 = await run(ORDER); assert.ok(!r2.judge.calls[0].packet.input[1].content.includes("The assistant's answer")); assert.ok(r2.judge.calls.slice(1).every(c => !JSON.stringify(c.packet).includes('The assistant\'s answer')))
+  assert.equal(normalizeSkeletonDto({ stage: 'fit', request: 'x', answer: 'y', materials: [{ alias: 'M1', title: 't', text: '', at: null, status: 'done' }], cards: [], questions: [{ kind: 'fact', material: 'M1' }] }), null, 'the answer only rides in the place request')
 })
