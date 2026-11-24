@@ -41,7 +41,7 @@ const AUTH = { isLoggedIn: true, authMode: 'chatgpt', accountId: 'verified-accou
 function judge(request) {
   const answers = {}
   for (const q of request.questions) {
-    if (q.name === 'intermediate_message') {
+    if (q.name === 'message__need') { // the heartbeat's message provider (L3 c12: one question among the beat's providers)
       const values = q.choices.map(c => c.value), facts = String(request.input?.[1]?.content ?? '')
       const num = name => Number(new RegExp(`${name}: (\\d+)`).exec(facts)?.[1] ?? 0)
       const pick = values.includes('stalled') ? 'stalled' : values.includes('ask_missing') ? 'ask_missing'
