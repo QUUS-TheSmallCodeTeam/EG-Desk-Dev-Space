@@ -1,14 +1,19 @@
 {
   "set": "l4-briefing-coverage-facts",
-  "tokenCeiling": 4000,
+  "tokenCeiling": 6000,
   "productBars": {
     "onboard_F#": {
       "yes": 0.7,
       "no": 0.3,
       "source": "egdesk-briefing-skeleton.mjs:19,347 SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided; per-fact coverage (cycle 21): a fact decided not shown (<= .3) that a material holds is missing -> the one re-design"
+    },
+    "stated_F#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs:19,347 SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided; cycle 36: a fact with no code anchor is excused from the board only when the judge decides it does NOT restate something the materials say (<= .3); yes or undecided keeps it enforced"
     }
   },
-  "passRule": "PASS when every hard check passes at the product bar: every fact the board shows is judged shown (yes >= .7) on the complete, the incomplete and the as-attached board, and on the incomplete board the removed remaining-work fact is judged not shown (decided no <= .3). The as-attached 11/3 fact is recorded only.",
+  "passRule": "PASS when every hard check passes at the product bar: every fact the board shows is judged shown (yes >= .7) on the complete, the incomplete and the as-attached board, and on the incomplete board the removed remaining-work fact is judged not shown (decided no <= .3). The as-attached 11/3 fact is recorded only. Cycle 37 adds the real check-11 board: its three content facts are judged shown (yes >= .7), the two sentences about the answer itself are judged NOT restating the materials (stated, decided no <= .3), and the content sentence is judged restating them (yes >= .7).",
   "requests": [
     {
       "id": "f-complete",
@@ -94,6 +99,77 @@
           "min": 0.7,
           "severity": "hard",
           "note": "part 2 (the decision card)"
+        }
+      ]
+    },
+    {
+      "id": "f-meta-sentences",
+      "file": "requests/f-meta-sentences.json",
+      "sha256": "d6afd9ca5538036a8a0e6a822588baeb0fee561ddd5086dd659137b6be924560",
+      "estInputTokens": 2515,
+      "expect": [
+        {
+          "name": "onboard_F1",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "soft",
+          "note": "a sentence about the answer itself (\"devlog 기록을 날짜순으로 정리했습니다.\"): no board can show it"
+        },
+        {
+          "name": "onboard_F2",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "soft",
+          "note": "a sentence about what was not done (\"파일은 변경하지 않았습니다.\"): no board can show it"
+        },
+        {
+          "name": "onboard_F3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "the 11-20 row is the first line of the sequence card, copied from its material"
+        },
+        {
+          "name": "onboard_F4",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "the 11-22 row is the second line"
+        },
+        {
+          "name": "onboard_F5",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "the 11-24 row (\"11-24 · 검색 화면 착수\") is the third line"
+        },
+        {
+          "name": "onboard_F6",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "soft",
+          "note": "recorded: a derived sum (218) that no material states; anchored, so it is unshowable and never blocks"
+        },
+        {
+          "name": "stated_F1",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "hard",
+          "note": "c36: a sentence about the answer itself restates nothing of the materials; a judge that cannot say so (undecided or yes) keeps the sentence enforced and the board falls back to chat (check-11)"
+        },
+        {
+          "name": "stated_F2",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "hard",
+          "note": "c36: the same for \"파일은 변경하지 않았습니다.\""
+        },
+        {
+          "name": "stated_F5",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "c36: \"11-24 · 검색 화면 착수\" restates what the 11-24 note says"
         }
       ]
     }

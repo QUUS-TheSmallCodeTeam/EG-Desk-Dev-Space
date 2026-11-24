@@ -24,16 +24,19 @@ const NOTES = PROGRESS_ENTRIES.map(e => e.file)
 const ANSWER = '진행 상황을 날짜 순서로 정리했습니다. 11-20 로그인 화면 병합(커밋 a1b2c3d, 테스트 120건), 11-22 결제 모듈 병합(커밋 e4f5a6b, 테스트 98건), 11-24 검색 화면 착수. 남은 일은 알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성입니다.'
 const block = (text, label, next) => JSON.parse(new RegExp(`${label}:\\n(.*)\\n\\n${next}`, 's').exec(text)[1])
 /** A fill built from the prompt itself: every text is a line of the material the item cites (as a faithful model copies it). */
-function fillFrom(prompt) {
+function fillFrom(prompt, { lineFor = null, reverse = false } = {}) {
   const guide = block(prompt, 'Design guide \\(decided; do not change it\\)', 'Materials'), materials = block(prompt, 'Materials', 'Rules')
   const line = (alias, max = 90) => String(materials.find(m => m.alias === alias)?.text ?? '').slice(0, max)
   // c35: a model that follows the compact request writes null for a field marked "copy" (the code copies the material's own words) and no fallback sentence
-  const rowFor = (fields, alias) => Object.fromEntries(fields.map(f => [f.name, f.type === 'material' ? alias : f.copy === true ? null : line(alias, f.max ?? 40) || f.name]))
+  const text = alias => String(materials.find(m => m.alias === alias)?.text ?? '')
+  // c37: null (copied by the code) only when the whole material fits the line; a longer one the model writes, as lineFor says
+  const copyOrWrite = (f, alias) => (f.name === 'label' || text(alias).length <= (f.max ?? 90) ? null : lineFor ? lineFor(materials.find(m => m.alias === alias), f.max) : line(alias, f.max ?? 40))
+  const rowFor = (fields, alias) => Object.fromEntries(fields.map(f => [f.name, f.type === 'material' ? alias : f.copy === true ? copyOrWrite(f, alias) : line(alias, f.max ?? 40) || f.name]))
   const slot = (s, item) => (s.type === 'text' ? line(item.materials[0], s.max ?? 60) || s.name : s.type === 'material' ? item.materials[s.name === 'right' ? 1 : 0] ?? item.materials[0]
-    : item.materials.slice(0, s.max ?? 6).map(alias => rowFor(s.of, alias)))
+    : (reverse ? [...item.materials].reverse() : item.materials).slice(0, s.max ?? 6).map(alias => rowFor(s.of, alias)))
   return { title: '진행 정리', unfillable: [], items: Object.fromEntries(guide.items.map(i => [i.id, { text: line(i.materials[0], 80) || i.id, ...(i.step?.some(st => st.name === 'fallback') ? { fallback: '카드를 열어 보세요.' } : {}), slots: Object.fromEntries(i.slots.map(s => [s.name, slot(s, i)])) }])) }
 }
-const FILL_PLAN = (mode = 'json') => ({ steps: [], finalFor: text => { const fill = JSON.stringify(fillFrom(text)); return mode === 'fenced' ? `Here you go:\n\`\`\`json\n${fill}\n\`\`\`` : mode === 'prose' ? 'I could not make a board of this.' : fill } })
+const FILL_PLAN = (mode = 'json', opts = {}) => ({ steps: [], finalFor: text => { const fill = JSON.stringify(fillFrom(text, opts)); return mode === 'fenced' ? `Here you go:\n\`\`\`json\n${fill}\n\`\`\`` : mode === 'prose' ? 'I could not make a board of this.' : fill } })
 const fakeFor = mode => ({ turns: [
   { steps: [...NOTES.map(file => ({ toolCall: { tool: 'egdesk_read_file', arguments: { path: file } } })), { usage: { input: 23200, cached: 22900, output: 60, reasoning: 0 } }], final: ANSWER },
   { steps: [], final: '더 필요하면 말해주세요.' }],
@@ -78,7 +81,7 @@ test('the validator: expect.briefing only in a conversation that runs the briefi
   assert.match(validateEngineScript(script(null, { outcome: 'presented' })).errors.join('\n'), /needs flags\.EGDESK_BRIEFING_FLOW/)
   const bad = briefing => validateEngineScript(script({ EGDESK_BRIEFING_FLOW: 'on' }, briefing))
   assert.equal(bad({ outcome: 'great' }).ok, false); assert.equal(bad({ other: 1 }).ok, false); assert.equal(bad({ schemaInvalid: -1 }).ok, false); assert.equal(bad({ factsOnBoard: [''] }).ok, false)
-  assert.deepEqual(validateBriefingExpect({ outcome: 'bubble', factsOnBoard: ['x'] }), ['factsOnBoard: only for an outcome presented'])
+  assert.deepEqual(validateBriefingExpect({ outcome: 'bubble', factsOnBoard: ['x'] }), ['factsOnBoard / factsInCards / inOrder: only for an outcome presented'])
 })
 
 test('the checks run on the record by code: outcome, reason, schema sent, schema invalid, facts on the board; no record fails', () => {
@@ -264,4 +267,89 @@ test('c34 check-7 reproduced: the whole fill does not come back inside its time 
   assert.deepEqual([on.schemaInvalid, off.schemaInvalid], [0, null], 'a timeout is not a schema violation')
   assert.deepEqual(w.stderrLines, [])
   await new Promise(resolve => setTimeout(resolve, 1000)) // the two late turns of the fake finish before the test ends
+})
+
+
+// ---- c37: the realistic script (twelve entries of the loop's own ledger, two topics interleaved, every entry longer than a 90-character line) ----
+import { LOOP_ENTRIES, LOOP_SAY, LOOP_SET, buildLoopScript } from './egdesk-briefing-real-engine-script.mjs'
+import { cardsText } from './egdesk-real-engine-briefing-hook.mjs'
+import { maskSecrets } from './egdesk-briefing-ledger-materials.mjs'
+const LOOP_FACT_OF = text => LOOP_ENTRIES.find(e => text.includes(e.text.slice(0, 40)))?.fact ?? null
+const LOOP_ANSWER = ['ledger 기록을 두 흐름으로 정리했습니다.', '', '| 시각 | 흐름 | 핵심 |', '|---|---|---|', ...[...LOOP_ENTRIES].sort((a, b) => `${a.day} ${a.time}`.localeCompare(`${b.day} ${b.time}`)).map(e => `| ${e.day} ${e.time} | ${e.topic === 'integration' ? '통합 게이트' : '실호출 측정'} | ${e.fact} |`)].join('\n')
+const loopFake = opts => ({ turns: [
+  { steps: [...LOOP_ENTRIES.map(e => ({ toolCall: { tool: 'egdesk_read_file', arguments: { path: e.file } } })), { usage: { input: 30000, cached: 22900, output: 400, reasoning: 0 } }], final: LOOP_ANSWER },
+  { steps: [], final: '더 필요하면 말해주세요.' }], refuseEphemeralFork: true,
+  forkTurns: Array.from({ length: 8 }, () => FILL_PLAN('json', opts)) })
+const loopFaithful = { lineFor: m => `${m.text.slice(0, 30)}… ${LOOP_FACT_OF(m.text)}` }
+const runLoop = async (t, opts, mutate = s => s) => {
+  const w = world(t, loopFake(opts)), script = mutate(buildLoopScript())
+  return { w, ...(await runCheck(w.options, asScripts(script), w.deps)) }
+}
+const briefingOf = rec => rec.turns[0].hooks.briefing
+
+test('c37 the entries: twelve real ledger lines, two topics interleaved, each longer than a 90-character line and at most 400, masked, EG-Desk only, each key fact in its own entry', () => {
+  assert.equal(LOOP_ENTRIES.length, 12); assert.deepEqual([...new Set(LOOP_ENTRIES.map(e => e.topic))].sort(), ['integration', 'measure'])
+  const byTime = [...LOOP_ENTRIES].sort((a, b) => `${a.day} ${a.time}`.localeCompare(`${b.day} ${b.time}`)); assert.ok(byTime.map(e => e.topic).reduce((n, t, i, a) => n + (i && a[i - 1] !== t ? 1 : 0), 0) >= 4, 'interleaved in time')
+  for (const e of LOOP_ENTRIES) {
+    assert.ok(e.text.length > 90 && e.text.length <= 400, `${e.file}: ${e.text.length}`); assert.ok(e.text.includes(e.fact), e.file); assert.equal(maskSecrets(e.text), e.text, `${e.file} has nothing to mask`)
+    assert.doesNotMatch(e.text, /태화|쿠스|고객|customer|@|sk-/i, `${e.file}: EG-Desk only`); assert.match(e.file, /^ledger\/\d{2}-\d{2}-\d{4}-(?:integration|measure)\.md$/)
+  }
+  assert.equal(new Set(LOOP_ENTRIES.map(e => e.fact)).size, 12, 'the key facts are distinct'); assert.ok(new Set(LOOP_ENTRIES.map(e => e.day)).size >= 2)
+})
+
+test('c37 the script: committed file is the builder\'s and validates; its folder reads as two sequence parts (one per topic), each in time order with its own chain', () => {
+  const file = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'real-engine', 'scripts', `${LOOP_SET}.json`), 'utf8'))
+  assert.deepEqual(file, JSON.parse(JSON.stringify(buildLoopScript()))); assert.deepEqual(validateEngineScript(file), { ok: true, errors: [] })
+  assert.deepEqual(file.conversations.map(c => [c.id, c.flags.EGDESK_BRIEFING_OUTPUT_SCHEMA ?? null]), [['realistic-schema-on', 'on'], ['realistic-schema-off', null]])
+  const turn = file.conversations[0].turns[0], b = turn.expect.briefing
+  assert.equal(turn.say, LOOP_SAY); assert.deepEqual(b.factsInCards, LOOP_ENTRIES.map(e => e.fact)); assert.equal(b.inOrder.length, 2)
+  assert.deepEqual(b.inOrder[0], ['9aeed73', '5752건', '5930건', '5990건', '6085건', '218c711']); assert.deepEqual(b.inOrder[1], ['2.48s', '0.27~0.29s', '13,404토큰', '13,579토큰', '269ms', '248ms'])
+  const rows = folderMaterials(file.conversations[0].folder), scene = enumerateSkeleton({ materials: rows, candidates: [] })
+  assert.equal(rows.length, 12); assert.deepEqual(scene.parts.map(p => [p.trait, p.materials.length]), [['sequence', 6], ['sequence', 6]])
+  for (const part of scene.parts) { const ats = part.materials.map(a => scene.materials.find(m => m.alias === a).at); assert.deepEqual(ats, [...ats].sort(), 'a part is in date order') }
+  assert.throws(() => buildLoopScript(LOOP_ENTRIES.map((e, i) => (i === 0 ? { ...e, fact: 'nowhere' } : e))), /not in/)
+  assert.throws(() => buildLoopScript(LOOP_ENTRIES.map((e, i) => (i === 0 ? { ...e, text: `${e.text} sk-abcdefghijklmnopqrstuvwxyz`, fact: e.fact } : e))), /maskSecrets/)
+})
+
+test('c37 the expectations by code: factsInCards looks in the cards only, inOrder checks each list in order', () => {
+  const rec = { outcome: 'presented', published: [{ title: 'A', markdown: '1 aaa\n2 bbb\n3 ccc' }, { title: 'B', markdown: 'x xxx\ny yyy' }], steps: [{ text: 'only here: zzz' }] }
+  const run = e => checkBriefingExpect(e, rec).map(c => [c.check, c.ok])
+  assert.deepEqual(run({ factsInCards: ['aaa', 'yyy'], inOrder: [['aaa', 'bbb', 'ccc'], ['xxx', 'yyy']] }), [['briefing.factsInCards', true], ['briefing.inOrder', true]])
+  assert.deepEqual(run({ factsInCards: ['zzz'] }), [['briefing.factsInCards', false]], 'a fact only in a step explanation is not on a card')
+  const wrong = checkBriefingExpect({ inOrder: [['ccc', 'aaa'], ['xxx', 'nope']] }, rec)[0]; assert.equal(wrong.ok, false); assert.deepEqual(wrong.detail.problems, [{ list: 0, outOfOrder: 'aaa' }, { list: 1, missing: 'nope' }])
+  assert.equal(cardsText(rec).includes('zzz'), false)
+  assert.deepEqual(validateBriefingExpect({ factsInCards: ['a'], inOrder: [['a', 'b']] }), []); assert.match(validateBriefingExpect({ inOrder: [['a']] }).join(), /inOrder/); assert.match(validateBriefingExpect({ outcome: 'bubble', factsInCards: ['a'] }).join(), /only for an outcome presented/)
+})
+
+test('c37 the real script on the fake: a model that keeps each entry\'s key fact inside its line passes in both conversations (schema on and off); the fill prompt carries the twelve entries, and no briefing request carries additionalContext', async t => {
+  const { w, records } = await runLoop(t, loopFaithful)
+  for (const rec of records) { assert.equal(rec.aborted, null, rec.id); assert.equal(rec.turns[0].ok, true, `${rec.id}: ${JSON.stringify(rec.turns[0].expectations.filter(e => !e.ok))}`) }
+  const [on, off] = records.map(briefingOf)
+  for (const b of [on, off]) { assert.deepEqual([b.outcome, b.reason], ['presented', null]); assert.equal(b.published.length, 2, 'two cards, one per topic'); assert.ok(b.published.every(p => p.markdown.split('\n').length >= 6)) }
+  assert.deepEqual([on.schemaInvalid, off.schemaInvalid], [0, null])
+  // L7's finding: Codex spills an additionalContext ENTRY above about 2,500 tokens. The briefing's private turns put their text in the turn's `input` (a user message) and carry no
+  // additionalContext at all; the Decision requests do not go to Codex. Measured here: the keys of every briefing turn/start and thread/start, and the size of the fill prompt.
+  const forkStarts = turnStarts(w).filter(m => /You are filling in the data of an Answer Briefing/.test(textOf(m)))
+  assert.ok(forkStarts.length >= 2); for (const m of forkStarts) assert.deepEqual(Object.keys(m.params).sort(), ['clientUserMessageId', 'effort', 'input', 'model', 'outputSchema', 'threadId'].filter(k => k !== 'outputSchema' || m.params.outputSchema !== undefined), 'no additionalContext on a briefing turn')
+  for (const m of startsOf(w).filter(x => /private one-off task/.test(x.params?.developerInstructions ?? ''))) assert.ok(!Object.hasOwn(m.params, 'additionalContext'))
+  const prompt = textOf(forkStarts[0]); assert.ok(LOOP_ENTRIES.every(e => prompt.includes(e.text.slice(0, 30))), 'all twelve entries are in the fill prompt')
+  assert.ok(prompt.length > 5000, `the fill prompt is ${prompt.length} characters: over what a 2,500-token additionalContext entry would carry, and still not one`)
+  console.log(JSON.stringify({ fillPromptChars: prompt.length, entries: LOOP_ENTRIES.length, additionalContextOnBriefingTurns: 0 }))
+})
+
+test('c37 a fact lost to the 90-character line is caught: a model that cuts each long entry to its first 90 characters loses the facts, the board is still "presented", and factsInCards names what is missing', async t => {
+  const { records } = await runLoop(t, { lineFor: (m, max) => m.text.slice(0, max) })
+  for (const rec of records) {
+    const b = briefingOf(rec), failed = rec.turns[0].expectations.filter(e => !e.ok)
+    assert.equal(b.outcome, 'presented', 'the judge (scripted yes) calls a cut line supported by its material; only the by-code check sees the loss')
+    assert.deepEqual(failed.map(e => e.check), ['briefing.factsInCards', 'briefing.inOrder'], `${rec.id}: the lost facts also break the order lists`); assert.ok(failed[0].detail.missing.length >= 6 && failed[0].detail.missing.every(f => LOOP_ENTRIES.some(e => e.fact === f)), JSON.stringify(failed[0].detail))
+  }
+})
+
+test('c37 a null copy of a long entry is refused (the copy is the whole text or nothing); a topic written in the wrong order is caught by inOrder', async t => {
+  // the naive model: null for every text, even where the material is longer than the line -> the validator refuses the line (never a prefix of the entry) and the flow rewrites, then gives up
+  const naive = await runLoop(t, { lineFor: () => null })
+  for (const rec of naive.records) { const b = briefingOf(rec); assert.notEqual(b.outcome, 'presented', rec.id); assert.ok(['fill-invalid', 'nothing-left', 'not-covered'].includes(b.reason), `${rec.id}: ${b.reason}`); assert.equal(rec.turns[0].ok, false) }
+  const reversed = await runLoop(t, { ...loopFaithful, reverse: true })
+  for (const rec of reversed.records) { const b = briefingOf(rec), failed = rec.turns[0].expectations.filter(e => !e.ok); assert.equal(b.outcome, 'presented'); assert.deepEqual(failed.map(e => e.check), ['briefing.inOrder'], rec.id); assert.equal(failed[0].detail.problems.length, 2) }
 })

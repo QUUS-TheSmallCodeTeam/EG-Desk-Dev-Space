@@ -93,7 +93,7 @@ const hasCopy = request => (request?.guide?.items ?? []).some(i => (i.slots ?? [
 const itemRule = request => (wantsFallback(request)
   ? 'Each item has "text" (the step explanation, saying only what the item shows) and "fallback" (one sentence for when it cannot be shown), plus the slots its component lists.'
   : 'Each item has "text" (the step explanation: one short phrase of at most 80 characters that says what the item shows, without repeating what its slots show), plus the slots its component lists.')
-const COPY_RULE = 'A list field marked "copy": true may be null: use null whenever the line should show what the material it cites says, as that material writes it (its date as the label, its own sentences as the text). The code copies it exactly, so do not retype it; write a value only where the line must say something shorter or different.'
+const COPY_RULE = 'A list field marked "copy": true may be null: the label as null is the cited material\'s date; the text as null is the cited material\'s whole text, copied by the code exactly, and only when that whole text is no longer than the field\'s "max". If the material\'s text is longer than "max", do not use null: write a line of at most "max" characters that keeps every id, number, date and name the material states (leave out explanations first).'
 const fillRules = request => FILL_RULES_BASE.replace('@@ITEM_RULE@@', itemRule(request)) + (hasCopy(request) ? `\n${COPY_RULE}` : '')
 export function fillPrompt(request) {
   // A rewrite after the check: closed words only for what was not supported by its material ("P2 line 2", "P1 explanation"); never the reviewer's text.
