@@ -49,7 +49,7 @@ test('mid-session never reconstructs: the judge gets the MID-CONVERSATION rules,
   const { r, log } = await turn('PostgreSQL 마이그레이션 배포 끝났어')
   assert.equal(r.position.kind, 'mid'); assert.equal(r.memory.receipts.mode, 'next')
   const wire = log.map(l => l.input).join('\n')
-  assert.ok(log.filter(l => !l.questions.includes('tn_need')).every(l => l.next), 'every fetch request is a next-judgment request')
+  assert.ok(log.filter(l => !l.questions.includes('tn_courtesy')).every(l => l.next), 'every fetch request is a next-judgment request')
   assert.match(wire, /MID-CONVERSATION/); assert.match(wire, /Held in the answering model's context/)
   const heldBodies = PG_HELD.map(id => SYNTHETIC_PAGES.find(p => p.id === id).body)
   for (const body of heldBodies) { assert.ok(!wire.includes(body), 'a held page body is never re-sent to the judge'); assert.ok(!r.packet.includes(body), 'nor to the answering model') }
@@ -93,7 +93,7 @@ test('mid-session links-first: only the link neighbours of what is held are scan
 
 test('small talk mid-session: one tiny call, nothing fetched, nothing sent to the answering model, no write judgment', async () => {
   const { r, log } = await turn('고마워', { ontologyWrite: true })
-  assert.equal(log.length, 1); assert.deepEqual(log[0].questions, ['tn_need', 'tn_record'])
+  assert.equal(log.length, 1); assert.deepEqual(log[0].questions, ['tn_courtesy', 'tn_need', 'tn_record'])
   assert.equal(r.memory.status, 'skipped'); assert.equal(r.packet, null); assert.equal(r.judgeWrite, null); assert.equal(r.writeSkipped, 'not_worth_recording')
   assert.ok(!/지침|견적서|PostgreSQL 전환/.test(log[0].input.replace(/Held in[\s\S]*?\n\n/, '')), 'no page content in the triage request')
 })
@@ -102,7 +102,7 @@ test('triage that is undecided or failed still fetches: only a decided "no" skip
   const dead = { async decide() { throw Object.assign(new Error('x'), { code: 'timeout' }) } }
   const t = await triageTurn({ message: '배포 끝났어', client: dead })
   assert.equal(t.status, 'fallback'); assert.equal(t.need.state, 'unknown'); assert.equal(t.record.state, 'unknown')
-  const judge = mockJudge(), unsure = { async decide(req) { const r = await judge.decide(req); if (req.questions[0].name === 'tn_need') r.answers.tn_need = { type: 'predicate', probability: 0.5 }; return r } }
+  const judge = mockJudge(), unsure = { async decide(req) { const r = await judge.decide(req); if (req.questions.some(q => q.name === 'tn_need')) r.answers.tn_need = { type: 'predicate', probability: 0.5 }; return r } }
   const { r } = await turn('PostgreSQL 마이그레이션 배포 끝났어', { client: unsure })
   assert.equal(r.triage.need.state, 'unknown'); assert.notEqual(r.memory.status, 'skipped')
   const failed = await prepareTurnMemory({ message: '배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: dead, scope: SCOPE, position: MID, threadKey: THREAD, ontologyWrite: true, delivered: receiptsFor(buildWiki(SYNTHETIC_PAGES), PG_HELD) })
@@ -244,4 +244,36 @@ test('CodexChatRuntime.turnPosition derives the position from the real thread, s
   store.close()
   assert.deepEqual(seen.map(p => `${p.kind}/${p.reason}`), ['first/no_native_thread', 'mid/live_thread', 'mid/resumed_thread_with_history', 'first/context_compacted'])
   assert.deepEqual(chat.turnPosition(null), { kind: 'first', reason: 'no_native_thread' })
+})
+
+test('the first real run answered "needs stored material" with 1.0 for "고마워": a decided courtesy yes now skips the fetch whatever tn_need says', async () => {
+  const judge = mockJudge()
+  let calls = 0
+  const real = { async decide(req) { calls++; const r = await judge.decide(req); if (req.questions.some(q => q.name === 'tn_need')) { r.answers.tn_need = { type: 'predicate', probability: 1 }; r.answers.tn_courtesy = { type: 'predicate', probability: 1 } } return r } }
+  const { r } = await turn('고마워', { client: real, ontologyWrite: true })
+  assert.equal(r.triage.need.state, 'yes'); assert.equal(r.triage.courtesy.state, 'yes')
+  assert.equal(r.memory.status, 'skipped'); assert.equal(calls, 1, 'only the triage call, no fetch')
+  // an undecided courtesy answer does not skip: the fetch is only skipped on a decided answer
+  const undecided = { async decide(req) { const r2 = await judge.decide(req); if (req.questions.some(q => q.name === 'tn_courtesy')) r2.answers.tn_courtesy = { type: 'predicate', probability: 0.5 }; return r2 } }
+  const second = await turn('PostgreSQL 마이그레이션 배포 끝났어', { client: undecided })
+  assert.notEqual(second.r.memory.status, 'skipped')
+})
+
+test('triage wording: courtesy is a plain social-act question with no mention of stored material; need no longer says "need none"', async () => {
+  let qs
+  await triageTurn({ message: '고마워', heldTitles: ['A'], client: { async decide(req) { qs = req.questions; return { answers: {} } } } })
+  const by = Object.fromEntries(qs.map(q => [q.name, q.instructions]))
+  assert.deepEqual(Object.keys(by), ['tn_courtesy', 'tn_need', 'tn_record'])
+  assert.doesNotMatch(by.tn_courtesy, /stored|held|notes|documents/)
+  assert.doesNotMatch(by.tn_need, /need none/)
+})
+
+test('a report whose context is already held skips the fetch but is still judged for recording against the held pages', async () => {
+  const judge = mockJudge()
+  const heldCovers = { async decide(req) { const r = await judge.decide(req); if (req.questions.some(q => q.name === 'tn_need')) r.answers.tn_need = { type: 'predicate', probability: 0 }; return r } }
+  const { r } = await turn('PostgreSQL 마이그레이션 배포 끝났어', { client: heldCovers, ontologyWrite: true })
+  assert.equal(r.memory.status, 'skipped'); assert.equal(r.packet, null)
+  assert.equal(typeof r.judgeWrite, 'function')
+  const { proposal } = await r.judgeWrite()
+  assert.equal(proposal.op, 'update_status'); assert.equal(proposal.pageId, 'db/pg-plan', 'the held plan page is a candidate even though nothing was fetched')
 })

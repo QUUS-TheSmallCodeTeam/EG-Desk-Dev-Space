@@ -96,7 +96,8 @@ export function mockJudge(log = []) {
     const answers = {}
     const chit = CHIT.test(message.trim()), isQuestion = /[?？]\s*$/.test(message.trim())
     for (const q of request.questions) {
-      if (q.name === 'tn_need') answers[q.name] = { type: 'predicate', probability: chit ? 0.03 : 0.9 }
+      if (q.name === 'tn_courtesy') answers[q.name] = { type: 'predicate', probability: chit ? 0.97 : 0.02 }
+      else if (q.name === 'tn_need') answers[q.name] = { type: 'predicate', probability: chit ? 0.03 : 0.9 }
       else if (q.name === 'tn_record') answers[q.name] = { type: 'predicate', probability: !chit && !isQuestion && /(어|야|다|요)\.?$/.test(message.trim()) ? 0.95 : 0.03 }
       else if (q.name === 'tw_status') answers[q.name] = COMPLETION.test(message) ? choiceAnswer(q, 'done', 0.95) : /예정|할 거|할게/.test(message) ? choiceAnswer(q, 'plan', 0.95) : choiceAnswer(q, 'unknown', 0.9)
       else if (/^speech_/.test(q.name)) answers[q.name] = mockSpeechAnswer(q)
