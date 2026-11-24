@@ -135,6 +135,8 @@ test('the runtime: an ephemeral room\'s internal text (the briefing fill\'s path
   const text = await w.chat.internalText(run, 'DESIGN GUIDE', { timeoutMs: 3000, outputSchema: { type: 'object' } })
   assert.equal(text, 'internal answer for thr-2')
   assert.equal(w.of('thread/fork').length, 0, 'an ephemeral source is never forked')
+  // the room's thread start already read the person's MCP inventory (1-2 s on the real 0.171): the first internal thread reuses it, it does not read it again
+  assert.equal(w.of('config/read').length, 1); assert.equal(w.calls.filter(([m]) => m === 'mcpServerStatus/list').length, 1)
   const [, fresh] = w.of('thread/start')
   assert.equal(fresh.ephemeral, true); assert.equal(fresh.sandbox, 'read-only'); assert.equal(fresh.approvalPolicy, 'never'); assert.equal(fresh.cwd, w.empty, 'the parent\'s engine folder, never the real one')
   assert.equal(fresh.config.features.shell_tool, false); assert.equal(fresh.config.features.hooks, false); assert.deepEqual(fresh.config.mcp_servers, { 'my-notes': { enabled: false } })

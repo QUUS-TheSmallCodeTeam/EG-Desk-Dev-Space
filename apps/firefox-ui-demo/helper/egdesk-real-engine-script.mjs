@@ -18,8 +18,8 @@
 //   implicit check "sent_while_running".
 // expect.engine { steers?, interrupts?, steerCarries?, flowMessages?, maxLatencyMs? } (L2 c21, helper/egdesk-real-engine-journey.mjs): what reached the engine (turn/steer,
 //   turn/interrupt) and how many system messages were posted, in the turn's window; on a whileRunning turn, after its message was sent.
-import { MEMORY_EXPECT_SCHEMA, MEMORY_SCHEMA, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
-import { ENGINE_EXPECT_SCHEMA, validateEngineExpect } from './egdesk-real-engine-journey.mjs' // journey hook (L2 c21)
+import { checkRegisteredExpect, conversationFieldSchemas, expectKeySchemas, registeredConversationFields, registeredExpectKeys, validateRegisteredConversation, validateRegisteredExpect } from './egdesk-real-engine-extensions.mjs'
+import './egdesk-real-engine-registrations.mjs' // the lanes' registrations (memory, journey, briefing, ...): their script keys are NOT listed in this file
 // action turns (c23, agreed with lane L3): { action: "interrupt" | "steer" | "delete", afterMs?, say?, expect? } instead of a message.
 //   interrupt  the person presses stop on the PREVIOUS turn's run, afterMs after that turn started (chat.interrupt). Give the previous turn
 //              expect.turnStatus "interrupted" (and posted false: only completed agent messages are posted).
@@ -41,11 +41,15 @@ export const IN_RUN_FLAG = 'EGDESK_INRUN_MESSAGES'
 export const LIMITS = Object.freeze({ whileRunningMs: 120_000, conversations: 8, turns: 12, files: 32, pathChars: 200, contentBytes: 64 * 1024, sayChars: 4000, approvals: 4, strings: 16, stringChars: 400 })
 // the scripted person's answers (test input, never product copy)
 export const APPROVER_TEXT = Object.freeze({ yes: '응, 그 명령 실행해 줘', no: '아니, 그건 실행하지 마' })
-export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'engine', 'conversationGone', 'memory', 'briefing', 'draftCheck', 'commandsRanIncludes', 'commandsRanExcludes'])
+export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'conversationGone', 'draftCheck', 'resumes', 'unsubscribes', 'postedMin', 'commandsRanIncludes', 'commandsRanExcludes', ...registeredExpectKeys()])
 export const ACTIONS = Object.freeze(['interrupt', 'steer', 'delete'])
+// c25: conversation.agentProfile makes the conversation an Agent-profile DIRECT room (the room the product's draft check judges and the Agent turn's detach + resume belongs to):
+// a synthetic Agent, created in the check's isolated profile store (no person data), every send names it with replyDestination "direct". A direct room is not one-time, so it
+// needs --persisted-with-cleanup (the preflight says so). { name, role?, instructions, tone?, expertise? }
+export const AGENT_TONES = Object.freeze(['plain', 'warm', 'concise', 'formal', 'playful'])
+export const AGENT_LIMITS = Object.freeze({ name: 40, role: 80, instructions: 2000, expertise: 4, expertiseChars: 80 })
 
 // `expect.briefing` belongs to the briefing hook (helper/egdesk-real-engine-briefing-hook.mjs): its shape and its checks live there (registered in helper/egdesk-real-engine-hooks.mjs)
-import { BRIEFING_EXPECT_SCHEMA, checkBriefingExpect, validateBriefingExpect } from './egdesk-real-engine-briefing-hook.mjs'
 const str = (max, extra = {}) => ({ type: 'string', minLength: 1, maxLength: max, ...extra })
 const strings = { type: 'array', maxItems: LIMITS.strings, items: str(LIMITS.stringChars) }
 export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
@@ -61,9 +65,11 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
       properties: {
         id: { type: 'string', pattern: CONVERSATION_ID.source },
         draftCheck: { type: 'object', additionalProperties: false, required: ['mode'], properties: { mode: { enum: ['advisory', 'on'] }, design: { enum: ['predicates', 'choice'] } } },
+        agentProfile: { type: 'object', additionalProperties: false, required: ['name', 'instructions'], properties: { name: str(AGENT_LIMITS.name), role: str(AGENT_LIMITS.role), instructions: str(AGENT_LIMITS.instructions), tone: { enum: [...AGENT_TONES] },
+          expertise: { type: 'array', maxItems: AGENT_LIMITS.expertise, items: str(AGENT_LIMITS.expertiseChars) } } },
         folder: { type: 'object', maxProperties: LIMITS.files, propertyNames: { maxLength: LIMITS.pathChars }, additionalProperties: { type: 'string', maxLength: LIMITS.contentBytes } },
         flags: { type: 'object', propertyNames: { pattern: FLAG_NAME.source, not: { enum: [...RESERVED_FLAGS] } }, additionalProperties: { type: 'string', pattern: FLAG_VALUE.source } },
-        memory: MEMORY_SCHEMA,
+        ...conversationFieldSchemas(),
         turns: { type: 'array', minItems: 1, maxItems: LIMITS.turns, items: {
           type: 'object', additionalProperties: false, anyOf: [{ required: ['say'] }, { required: ['action'] }],
           properties: {
@@ -88,10 +94,11 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
               turnStatus: { enum: ['completed', 'failed', 'interrupted'] },
               compacted: { type: 'boolean' },
               conversationGone: { type: 'boolean' },
-              draftCheck: { type: 'object', additionalProperties: false, required: ['ran'], properties: { ran: { type: 'boolean' } } },
-              memory: MEMORY_EXPECT_SCHEMA,
-              engine: ENGINE_EXPECT_SCHEMA,
-              briefing: BRIEFING_EXPECT_SCHEMA,
+              draftCheck: { type: 'object', additionalProperties: false, required: ['ran'], properties: { ran: { type: 'boolean' }, rejects: { type: 'integer', minimum: 0, maximum: 50 } } },
+              resumes: { type: 'integer', minimum: 0, maximum: 20 },
+              postedMin: { type: 'integer', minimum: 1, maximum: 20 },
+              unsubscribes: { type: 'integer', minimum: 0, maximum: 20 },
+              ...expectKeySchemas(),
             } },
           } } },
       } } },
@@ -130,7 +137,18 @@ export function validateEngineScript(value) {
   for (const [ci, conv] of (Array.isArray(convs) ? convs : []).entries()) {
     const at = `$.conversations[${ci}]`
     if (!isObject(conv)) { bad(at, 'an object'); continue }
-    only(conv, ['id', 'folder', 'flags', 'memory', 'draftCheck', 'turns'], at)
+    only(conv, ['id', 'folder', 'flags', ...registeredConversationFields(), 'draftCheck', 'agentProfile', 'turns'], at)
+    if (conv.agentProfile !== undefined) {
+      const a = conv.agentProfile, here = `${at}.agentProfile`
+      if (!isObject(a)) bad(here, 'an object { name, instructions, role?, tone?, expertise? }')
+      else {
+        only(a, ['name', 'role', 'instructions', 'tone', 'expertise'], here)
+        const text = (v, key, max, required) => { if (v === undefined && !required) return; if (typeof v !== 'string' || !v.trim() || v.length > max) bad(`${here}.${key}`, `a string of 1-${max} characters`) }
+        text(a.name, 'name', AGENT_LIMITS.name, true); text(a.role, 'role', AGENT_LIMITS.role, false); text(a.instructions, 'instructions', AGENT_LIMITS.instructions, true)
+        if (a.tone !== undefined && !AGENT_TONES.includes(a.tone)) bad(`${here}.tone`, `one of ${AGENT_TONES.join(', ')}`)
+        if (a.expertise !== undefined) { if (!Array.isArray(a.expertise) || a.expertise.length > AGENT_LIMITS.expertise) bad(`${here}.expertise`, `an array of at most ${AGENT_LIMITS.expertise}`); else a.expertise.forEach((x, i) => text(x, `expertise[${i}]`, AGENT_LIMITS.expertiseChars, true)) }
+      }
+    }
     // c24: the draft check is a conversation's own opt-in (like memory): { mode: 'advisory' | 'on', design?: 'predicates' | 'choice' }; it costs Decision calls
     if (conv.draftCheck !== undefined) {
       const d = conv.draftCheck
@@ -143,7 +161,7 @@ export function validateEngineScript(value) {
         if (own !== undefined && own !== d.mode) bad(`${at}.flags.EGDESK_DRAFT_CHECK`, 'contradicts draftCheck.mode')
       }
     }
-    if (conv.memory !== undefined) for (const why of validateMemory(conv.memory, `${at}.memory`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
+    validateRegisteredConversation(conv, { at, bad })
     if (typeof conv.id !== 'string' || !CONVERSATION_ID.test(conv.id)) bad(`${at}.id`, `matches ${CONVERSATION_ID.source}`)
     else if (ids.has(conv.id)) bad(`${at}.id`, 'unique'); else ids.add(conv.id)
     if (conv.folder !== undefined) {
@@ -208,7 +226,7 @@ export function validateEngineScript(value) {
       const e = turn.expect
       if (e === undefined) continue
       if (!isObject(e)) { bad(`${tt}.expect`, 'an object'); continue }
-      only(e, EXPECT_KEYS, `${tt}.expect`)
+      only(e, [...EXPECT_KEYS, ...registeredExpectKeys()], `${tt}.expect`) // keys registered after this module loaded count too
       if (e.toolCalls !== undefined && (!Array.isArray(e.toolCalls) || e.toolCalls.length > LIMITS.strings || e.toolCalls.some(n => typeof n !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(n)))) bad(`${tt}.expect.toolCalls`, 'tool names')
       for (const k of ['noToolCalls', 'noNativeTools']) if (e[k] !== undefined && e[k] !== true) bad(`${tt}.expect.${k}`, 'true')
       for (const k of ['posted', 'compacted', 'conversationGone']) if (e[k] !== undefined && typeof e[k] !== 'boolean') bad(`${tt}.expect.${k}`, 'a boolean')
@@ -216,21 +234,17 @@ export function validateEngineScript(value) {
       if (e.commandsRan !== undefined) textList(e.commandsRan, `${tt}.expect.commandsRan`, 2000)
       for (const k of ['commandsRanIncludes', 'commandsRanExcludes']) if (e[k] !== undefined) textList(e[k], `${tt}.expect.${k}`)
       if (e.asked !== undefined && !(Number.isInteger(e.asked) && e.asked >= 0 && e.asked <= LIMITS.approvals)) bad(`${tt}.expect.asked`, `an integer 0-${LIMITS.approvals}`)
+      if (e.postedMin !== undefined && !(Number.isInteger(e.postedMin) && e.postedMin >= 1 && e.postedMin <= 20)) bad(`${tt}.expect.postedMin`, 'an integer 1-20')
+      if (e.postedMin !== undefined && e.posted === false) bad(`${tt}.expect`, 'postedMin and posted:false contradict')
+      for (const k of ['resumes', 'unsubscribes']) if (e[k] !== undefined && !(Number.isInteger(e[k]) && e[k] >= 0 && e[k] <= 20)) bad(`${tt}.expect.${k}`, 'an integer 0-20')
       if (e.undoRecords !== undefined && !(Number.isInteger(e.undoRecords) && e.undoRecords >= 0 && e.undoRecords <= 50)) bad(`${tt}.expect.undoRecords`, 'an integer 0-50')
       if (e.turnStatus !== undefined && !['completed', 'failed', 'interrupted'].includes(e.turnStatus)) bad(`${tt}.expect.turnStatus`, 'completed / failed / interrupted')
       if (e.noToolCalls && e.toolCalls?.length) bad(`${tt}.expect`, 'noToolCalls and toolCalls contradict')
-      if (e.memory !== undefined) {
-        for (const why of validateMemoryExpect(e.memory, conv.memory, `${tt}.expect.memory`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
-        if (turn.whileRunning !== undefined) bad(`${tt}.expect.memory`, 'not checked on a whileRunning turn (the memory window is the scripted turn)')
-      }
-      if (e.engine !== undefined) for (const why of validateEngineExpect(e.engine, { whileRunning: turn.whileRunning !== undefined }, `${tt}.expect.engine`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
+      validateRegisteredExpect(e, { conv, turn, tt, bad }) // the registered keys (memory, engine, briefing, ...)
       if (e.draftCheck !== undefined) {
-        if (!isObject(e.draftCheck) || Object.keys(e.draftCheck).some(k => k !== 'ran') || typeof e.draftCheck.ran !== 'boolean') bad(`${tt}.expect.draftCheck`, 'an object { ran: boolean }')
+        if (!isObject(e.draftCheck) || Object.keys(e.draftCheck).some(k => !['ran', 'rejects'].includes(k)) || typeof e.draftCheck.ran !== 'boolean' || (e.draftCheck.rejects !== undefined && !(Number.isInteger(e.draftCheck.rejects) && e.draftCheck.rejects >= 0 && e.draftCheck.rejects <= 50))) bad(`${tt}.expect.draftCheck`, 'an object { ran: boolean, rejects?: integer }')
+        else if (e.draftCheck.rejects !== undefined && e.draftCheck.ran !== true) bad(`${tt}.expect.draftCheck`, 'rejects counts the check\'s rejections: it needs ran: true')
         if (!conv.draftCheck && !['advisory', 'on'].includes(conv.flags?.EGDESK_DRAFT_CHECK)) bad(`${tt}.expect.draftCheck`, 'needs conversation.draftCheck (or flags.EGDESK_DRAFT_CHECK) in this conversation')
-      }
-      if (e.briefing !== undefined) {
-        for (const why of validateBriefingExpect(e.briefing)) bad(`${tt}.expect.briefing`, why)
-        if (conv.flags?.EGDESK_BRIEFING_FLOW !== 'on') bad(`${tt}.expect.briefing`, 'needs flags.EGDESK_BRIEFING_FLOW = "on" in this conversation')
       }
       if (e.files !== undefined) {
         if (!isObject(e.files) || Object.keys(e.files).length > LIMITS.files) bad(`${tt}.expect.files`, 'an object')
@@ -262,6 +276,8 @@ export function checkTurnExpectations(expect = {}, record = {}) {
   if (expect.toolCalls) put('toolCalls', inOrder(expect.toolCalls, tools), { wanted: expect.toolCalls, seen: tools })
   if (expect.noToolCalls) put('noToolCalls', tools.length === 0, { seen: tools })
   if (expect.posted !== undefined) put('posted', (last !== null) === expect.posted, { posted: (record.posted ?? []).length })
+  // how many chat messages were posted in this turn's window (an in-run reply AND the final answer are two); on a whileRunning turn, the messages posted after it was sent
+  if (expect.postedMin !== undefined) put('postedMin', (record.posted ?? []).length >= expect.postedMin, { posted: (record.posted ?? []).length, wanted: expect.postedMin })
   if (expect.answerIncludes) { const missing = expect.answerIncludes.filter(s => !(last ?? '').includes(s)); put('answerIncludes', last !== null && missing.length === 0, { missing }) }
   if (expect.answerExcludes) { const found = expect.answerExcludes.filter(s => (last ?? '').includes(s)); put('answerExcludes', found.length === 0, { found }) }
   if (expect.noNativeTools) {
@@ -281,7 +297,10 @@ export function checkTurnExpectations(expect = {}, record = {}) {
   if (expect.turnStatus) put('turnStatus', record.turnStatus === expect.turnStatus, { turnStatus: record.turnStatus ?? null })
   if (expect.conversationGone !== undefined) put('conversationGone', (record.conversationGone === true) === expect.conversationGone, { conversationGone: record.conversationGone === true })
   if (expect.compacted !== undefined) put('compacted', (record.compacted === true) === expect.compacted, { compacted: record.compacted === true })
-  if (expect.draftCheck) put('draftCheck', ((record.draftCheckRows ?? 0) > 0) === expect.draftCheck.ran, { rows: record.draftCheckRows ?? 0 })
-  if (expect.briefing !== undefined) out.push(...checkBriefingExpect(expect.briefing, record.hooks?.briefing ?? null))
+  if (expect.draftCheck) put('draftCheck', ((record.draftCheckRows ?? 0) > 0) === expect.draftCheck.ran && (expect.draftCheck.rejects === undefined || record.draftCheckRejects === expect.draftCheck.rejects), { rows: record.draftCheckRows ?? 0, rejects: record.draftCheckRejects ?? 0 })
+  // engine requests the runtime made in this scripted turn (an Agent-profile turn detaches and resumes its thread; EGDESK_AGENT_RELOAD_REUSE skips that when nothing changed)
+  if (expect.resumes !== undefined) put('resumes', record.resumes === expect.resumes, { resumes: record.resumes ?? null })
+  if (expect.unsubscribes !== undefined) put('unsubscribes', record.unsubscribes === expect.unsubscribes, { unsubscribes: record.unsubscribes ?? null })
+  out.push(...checkRegisteredExpect(expect, record)) // the registered keys that check against the turn record (briefing, ...)
   return out
 }

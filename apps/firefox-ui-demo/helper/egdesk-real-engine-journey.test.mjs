@@ -135,18 +135,18 @@ test('journey-change: the change is steered into the working turn with only the 
   const cost = costOf(w, rec); assert.deepEqual([cost.engineTurns, cost.steers, cost.interrupts, cost.writerForkTurns], [1, 1, 0, 0]); assert.deepEqual(w.stderrLines, [])
 })
 
-test('journey-stop: the stop interrupts the working turn once and the Agent posts no answer; EG-Desk does NOT stop the command process (a finding, pinned here)', async t => {
+test('journey-stop: the stop interrupts the working turn once, the Agent posts no answer, and EG-Desk stops the command process (c25: the finding of c21 is fixed)', async t => {
   const script = nudgeFast(), w = journeyWorld(t, commandFake({ command: 'sleep 40 && echo never-printed', final: 'never-printed' }))
   const rec = await runJourneyConversation(w, script, 'journey-stop')
   assert.equal(rec.aborted, null, rec.abortDetail); assert.deepEqual(w.stderrLines, [])
   assert.equal(rec.turns[0].subTurns[0].status, 'interrupted'); assert.deepEqual(rec.turns[0].posted, []); assert.equal(rec.turns[0].journey.interrupts.length, 1); assert.deepEqual(rec.turns[0].journey.steers, [])
   assert.ok(rec.turns[1].expectations.every(e => e.ok), JSON.stringify(rec.turns[1].expectations))
-  // The finding: the turn ends because the engine ends it; the command process is not stopped by EG-Desk. helper/egdesk-command-executor.mjs calls the runner without an
-  // abort signal and the executor provider has no cancelRun, so an interrupt leaves the command running. On this fake the command simply runs out (8 s), and the turn,
-  // which waits for it, ends then. When the executor cancels its commands on interrupt this test flips: commandStopped passes and this list becomes empty.
-  assert.deepEqual(failed(rec), ['1:engine.commandStopped'], JSON.stringify(rec.turns[0].expectations.filter(e => !e.ok)))
+  // c21 pinned the finding that an interrupt left the command running (the executor had no cancelRun). c25 (helper/egdesk-command-executor.mjs cancelRun): the interrupt stops
+  // the command's process group (SIGTERM, SIGKILL after the grace), so engine.commandStopped passes and nothing fails.
+  assert.deepEqual(failed(rec), [], JSON.stringify(rec.turns[0].expectations.filter(e => !e.ok)))
   const stopped = rec.turns[0].expectations.find(e => e.check === 'engine.commandStopped')
-  assert.deepEqual(stopped.detail.commands, [{ command: 'sleep 40 && echo never-printed', closed: true, code: 0, signal: null }]); assert.equal(w.commands[0].killedAfterMs, null, 'nothing killed it')
+  assert.equal(stopped.ok, true); assert.equal(stopped.detail.commands.length, 1); assert.equal(stopped.detail.commands[0].closed, true); assert.notEqual(stopped.detail.commands[0].signal, null, 'it was stopped by a signal, it did not run out')
+  assert.notEqual(w.commands[0].killedAfterMs, null, 'EG-Desk killed it')
   const cost = costOf(w, rec); assert.deepEqual([cost.engineTurns, cost.steers, cost.interrupts], [1, 0, 1])
 })
 

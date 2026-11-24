@@ -55,6 +55,49 @@
               }
             }
           },
+          "agentProfile": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "instructions"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40
+              },
+              "role": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "instructions": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000
+              },
+              "tone": {
+                "enum": [
+                  "plain",
+                  "warm",
+                  "concise",
+                  "formal",
+                  "playful"
+                ]
+              },
+              "expertise": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                }
+              }
+            }
+          },
           "folder": {
             "type": "object",
             "maxProperties": 32,
@@ -338,8 +381,28 @@
                       "properties": {
                         "ran": {
                           "type": "boolean"
+                        },
+                        "rejects": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 50
                         }
                       }
+                    },
+                    "resumes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 20
+                    },
+                    "postedMin": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 20
+                    },
+                    "unsubscribes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 20
                     },
                     "memory": {
                       "type": "object",

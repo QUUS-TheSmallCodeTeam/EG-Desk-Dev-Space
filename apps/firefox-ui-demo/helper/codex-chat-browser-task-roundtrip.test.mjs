@@ -329,7 +329,7 @@ test('R4 held mode on, not a browser task: the ordinary turn of a Browser conver
 })
 
 // ---- cost: the entry decision riding on a turn-start triage request ----
-const rideHook = { entryAnswers: async ({ body, questions, client }) => (await triageTurn({ message: body.message, client, extraQuestions: questions })).extra ?? null }
+const rideHook = { entryAnswers: async ({ body, questions, evidence, client }) => (await triageTurn({ message: body.message, client, extraQuestions: questions, extraEvidence: evidence })).extra ?? null }
 
 test('C1 ride-along: one turn-start request carries triage + the entry question; no separate entry request; the task runs the same', async t => {
   const alone = world(t); await alone.send(MSG)
