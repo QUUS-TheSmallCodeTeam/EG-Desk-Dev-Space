@@ -12650,7 +12650,27 @@
       '', `질문: ${question}`, ...labels, `EG-Desk 추천: ${labels[index]}`].join('\n');
   }
 
-  function mountChatChoiceComposer({ el, readMode, postChoice, makeController, makeRequestId }) {
+  function openChatChoiceSettings(reason) {
+    try {
+      const card = spawnSettingsCard({ tab: 'account' });
+      const section = card?.isConnected && card.querySelector('[data-testid="settings-tab-account"][aria-selected="true"]')
+        ? card.querySelector('[data-testid="settings-decision"]') : null;
+      const key = section?.querySelector('input[type="password"][data-testid="settings-decision-key"]');
+      if (section && key) {
+        if (card.classList.contains('egd-card-collapsed')) card._setWindowCollapsed?.(false);
+        revealOpenCanvasCard(card, { isCurrent: () => state.activeEntityId === card.id && section.isConnected });
+        section.scrollIntoView({ block: 'nearest' });
+        const target = reason === 'key' ? key : section.querySelector('[data-testid="settings-decision-mode"][data-mode="on"]');
+        // A lazy account render can replace this node; do not queue a focus
+        // attempt that could interrupt the user after the status read.
+        if (target && !target.disabled) target.focus({ preventScroll: true });
+        return;
+      }
+    } catch { /* Do not route to another card or create an input. */ }
+    boardNotice('설정의 계정 화면에서 OpenAI Decisions를 열 수 없습니다. 설정에서 직접 확인해 주세요. 채팅에는 API 키를 입력하지 마세요.');
+  }
+
+  function mountChatChoiceComposer({ el, readMode, postChoice, openSettings, makeController, makeRequestId }) {
     const button = (key, label, onclick) => el('button', { type: 'button', data: { testid: `chat-choice-${key}` }, onclick }, label);
     const plain = (tag, text, props = {}) => { const node = el(tag, props); node.textContent = text; return node; };
     // Keep these line/duplicate rules in sync with egdesk-chat-choice.mjs.
@@ -12676,10 +12696,17 @@
       }
       return { snapshot: Object.freeze({ question, options: Object.freeze(options) }) };
     };
-    const modeProof = status => status?.mode === 'on' && status.configured === true && /^[a-f0-9]{64}$/.test(status.boardRevision || '')
+    const settingsRevision = status => typeof status?.boardRevision === 'string' && /^[a-f0-9]{64}$/.test(status.boardRevision)
       ? status.boardRevision : null;
+    const modeProof = status => status?.mode === 'on' && status.configured === true ? settingsRevision(status) : null;
+    const setupReason = status => {
+      if (!settingsRevision(status) || typeof status.configured !== 'boolean' || !['off', 'advisory', 'on'].includes(status.mode)) return null;
+      if (status.configured === false && ['missing', 'recovered'].includes(status.store)) return 'key';
+      if (status.mode === 'off' || status.mode === 'advisory') return 'mode';
+      return null;
+    };
     const manualText = '추천을 표시할 수 없습니다. 직접 판단해 주세요. 작성 중인 메시지는 그대로입니다.';
-    let binding = null, entry = null;
+    let binding = null, entry = null, savedEdits = null, listEdits = null;
     const panel = el('section', { 'aria-label': '보기 추천', data: { testid: 'chat-choice-panel' },
       style: 'max-height:40vh;overflow:auto;overflow-wrap:anywhere;padding:6px;' });
     const questionHint = plain('p', '보기 추천에 쓰는 질문은 보이지 않는 문자나 줄바꿈 없이 한 줄(최대 500자)이어야 합니다.',
@@ -12688,7 +12715,10 @@
     const trigger = button('open', '보기 추천', () => {
       const scope = currentScope();
       if (entry || !scope || !normalizeLine(scope.question, 500)) return;
-      entry = { scope, phase: 'edit', options: ['', ''], controller: makeController() };
+      const reviewedEdits = savedEdits && savedEdits.key === scope.editKey && savedEdits.question === scope.question ? savedEdits : null;
+      const options = matchesListReturn(scope) ? listEdits.options : reviewedEdits?.options ?? ['', ''];
+      savedEdits = null; listEdits = null;
+      entry = { scope, phase: 'edit', options, reviewed: !!reviewedEdits, controller: makeController() };
       paint();
       panel.querySelector('[data-testid="chat-choice-option"]')?.focus();
     });
@@ -12699,23 +12729,42 @@
         && scope.key === item.scope.key && scope.question === item.scope.question;
     };
     const reset = () => {
-      entry?.controller.abort(); entry = null;
+      entry?.controller.abort(); entry = null; savedEdits = null; listEdits = null;
       // Drop both the editable option nodes and all rendered result text.
       panel.replaceChildren(); panel.hidden = true;
+    };
+    const matchesListReturn = scope => listEdits?.returning && listEdits.roomId === binding?.input.dataset?.threadId
+      && listEdits.key === scope.key && listEdits.question === scope.question;
+    const leaveForList = () => {
+      const item = entry, roomId = binding?.input.dataset?.threadId;
+      if (!roomId || !item?.scope.key || item.phase !== 'edit' || item.reviewed || !current(item)) return reset();
+      // Keep just raw options and their guard; the old editor and review authority are discarded.
+      const { key, question } = item.scope;
+      const options = [...item.options];
+      reset();
+      listEdits = { roomId, key, question, options, returning: false };
+    };
+    const selectListRoom = roomId => {
+      if (listEdits?.roomId === roomId) listEdits.returning = true;
+      else listEdits = null;
     };
     const sync = () => {
       if (entry && !current(entry)) reset();
       const scope = currentScope();
+      // Native resume can briefly leave the same room without a fresh scope.
+      if (listEdits?.returning && scope && !matchesListReturn(scope)) listEdits = null;
+      if (scope && savedEdits && (savedEdits.key !== scope.editKey || savedEdits.question !== scope.question)) savedEdits = null;
       trigger.hidden = !scope || !!entry;
       trigger.disabled = !normalizeLine(scope?.question, 500);
       questionHint.hidden = !scope?.question || !trigger.disabled || !!entry;
       trigger.title = '작성창 질문 한 줄(최대 500자)과 직접 입력한 보기만 추천에 사용';
     };
-    const cancel = () => { reset(); sync(); trigger.focus(); };
+    const cancel = (edits = null) => { reset(); savedEdits = edits; sync(); trigger.focus(); };
     const useManual = item => { item.phase = 'manual'; paint(); };
-    const checkMode = async item => {
-      try { return modeProof(await readMode(item.controller.signal)); } catch { return null; }
+    const readStatus = async item => {
+      try { return await readMode(item.controller.signal); } catch { return null; }
     };
+    const checkMode = async item => modeProof(await readStatus(item));
     const review = async item => {
       if (!current(item) || item.phase !== 'edit') return;
       const { snapshot } = readReview(item);
@@ -12726,9 +12775,21 @@
       item.phase = 'checking'; paint();
       // The complete question/options are already rendered. Read settings
       // metadata only, without sending the question, options or key to any API.
-      const proof = await checkMode(item);
+      const status = await readStatus(item);
       if (!current(item)) return sync();
-      if (!proof) return useManual(item);
+      const proof = modeProof(status);
+      if (!proof) {
+        const reason = setupReason(status);
+        if (!reason) {
+          // Only this initial check can report that no choice request was sent.
+          item.phase = 'statusUnavailable'; paint();
+          return;
+        }
+        if (typeof openSettings !== 'function') return useManual(item);
+        item.setup = { reason, mode: status.mode };
+        item.phase = 'setup'; paint();
+        return;
+      }
       item.mode = proof; item.phase = 'review'; paint();
       panel.querySelector('[data-testid="chat-choice-confirm"]')?.focus();
     };
@@ -12773,7 +12834,21 @@
       if (!entry) return;
       const item = entry;
       panel.hidden = false;
-      const close = button('cancel', item.phase === 'manual' ? '닫기' : '취소', cancel);
+      const close = button('cancel', ['manual', 'setup', 'statusUnavailable'].includes(item.phase) ? '닫기' : '취소', () => {
+        if (item.phase === 'statusUnavailable') {
+          if (!current(item)) return sync();
+          const { editKey, question } = item.scope;
+          // Keep only the raw input, never the review or permission to send.
+          return cancel(editKey ? { key: editKey, question, options: [...item.options] } : null);
+        }
+        if (item.phase !== 'setup') return cancel();
+        if (!current(item)) return sync();
+        const { scope, options } = item;
+        reset();
+        entry = { scope, options, phase: 'edit', reviewed: true, controller: makeController() };
+        paint();
+        panel.querySelector('[data-testid="chat-choice-option"]')?.focus();
+      });
       if (item.phase === 'edit') {
         const reviewButton = button('review', '질문과 보기 검토', () => { void review(item); });
         const validation = plain('p', '', { role: 'status', data: { testid: 'chat-choice-validation' } });
@@ -12806,8 +12881,27 @@
         panel.replaceChildren(...children.filter(Boolean));
         return;
       }
-      if (item.phase === 'manual') {
-        panel.replaceChildren(plain('p', manualText, { role: 'status' }), close);
+      if (item.phase === 'setup') {
+        const { reason, mode } = item.setup;
+        const issue = reason === 'key' ? '저장한 API 키가 없습니다.'
+          : mode === 'off' ? '결정 모델이 꺼져 있습니다.' : '결정 모델이 ‘기록만’ 모드입니다.';
+        const go = button('settings', '계정 설정 열기', () => {
+          if (!current(item) || item.phase !== 'setup') return sync();
+          const { editKey, question } = item.scope;
+          const options = [...item.options];
+          reset(); // Drop approval and its signal before navigation.
+          if (editKey) savedEdits = { key: editKey, question, options };
+          sync();
+          openSettings(reason);
+        });
+        panel.replaceChildren(plain('p', issue + ' 설정에서 변경한 뒤 돌아와 질문과 보기를 다시 검토해 주세요. 작성 중인 메시지는 그대로입니다.', { role: 'status' }), go, close);
+        return;
+      }
+      if (item.phase === 'manual' || item.phase === 'statusUnavailable') {
+        const text = item.phase === 'statusUnavailable'
+          ? '결정 모델 설정을 확인하지 못해 질문과 보기를 보내지 않았습니다. 작성 중인 메시지는 그대로입니다.'
+          : manualText;
+        panel.replaceChildren(plain('p', text, { role: 'status' }), close);
         return;
       }
       const { question, options } = item.review;
@@ -12827,7 +12921,17 @@
       panel.replaceChildren(...content, close);
     };
     reset();
-    return { trigger, panel, questionHint, attach: next => { binding = next; }, sync, reset, dispose: () => { reset(); binding = null; } };
+    return { trigger, panel, questionHint, sync, reset, leaveForList, selectListRoom,
+      attach: next => {
+        if (listEdits && (!listEdits.returning || listEdits.roomId !== next.input.dataset?.threadId)) listEdits = null;
+        binding = next;
+      },
+      dispose: listRoomId => {
+        const continuation = listEdits && listEdits.roomId === listRoomId && !listEdits.returning ? listEdits : null;
+        reset(); binding = null;
+        listEdits = continuation;
+      },
+    };
   }
 
   function mountCodexHUD(body, codexBridge, options = {}) {
@@ -12844,6 +12948,7 @@
     const taskAnswerReveal = createChatTaskAnswerReveal(body);
     const choice = mountChatChoiceComposer({ el,
       readMode: signal => codexBridge.readChatChoiceMode(signal),
+      openSettings: openChatChoiceSettings,
       postChoice: (dto, signal) => codexBridge.postChatChoice(dto, signal),
       makeController: () => new window.AbortController(),
       makeRequestId: () => `choice-${Date.now()}-${window.crypto.randomUUID()}`,
@@ -12856,7 +12961,7 @@
     // list leaving the screen does not drop focus onto the page.
     const openRoomFromKeyboard = (threadId) => {
       focusOpenedRoom = true;
-      try { codexBridge.selectThread(threadId, { openConversation: true }); } finally { focusOpenedRoom = false; }
+      try { choice.selectListRoom(threadId); codexBridge.selectThread(threadId, { openConversation: true }); } finally { focusOpenedRoom = false; }
     };
     const closeFloatingMenus = () => {
       codexBridge.closeMemberMenu();
@@ -13564,7 +13669,7 @@
             'aria-label': codexThreadRowLabel(thread),
             data: { focusKey: `room-${thread.id}` },
           });
-          item.addEventListener('click', () => codexBridge.selectThread(thread.id, { openConversation: true }));
+          item.addEventListener('click', () => { choice.selectListRoom(thread.id); codexBridge.selectThread(thread.id, { openConversation: true }); });
           bindChatRoomRowKeys(item, () => openRoomFromKeyboard(thread.id));
           const lastMsg = thread.messages && thread.messages.length > 0 ? thread.messages[thread.messages.length - 1] : null;
           const lastTime = lastMsg && lastMsg.createdAt ? formatRelativeTime(lastMsg.createdAt) : '';
@@ -13692,7 +13797,7 @@
               class: 'egd-codex-conversation-back',
               title: '대화 목록으로',
               'aria-label': '대화 목록으로',
-              onclick: () => codexBridge.setHudView('list'),
+              onclick: () => { choice.leaveForList(); codexBridge.setHudView('list'); },
             }, deskIcon('back')),
             el('div', { class: 'egd-codex-conversation-hud-center' },
               el('h2', { class: 'egd-codex-conversation-hud-title', title: activeIdentity.title }, activeIdentity.title),
@@ -13882,7 +13987,7 @@
               class: 'egd-codex-conversation-back',
               title: '대화 목록으로',
               'aria-label': '대화 목록으로',
-              onclick: () => codexBridge.setHudView('list'),
+              onclick: () => { choice.leaveForList(); codexBridge.setHudView('list'); },
             }, deskIcon('back')),
             el('div', { class: 'egd-codex-thread-active-title' }, activeThread.title,
               buildCodexThreadKindBadge(activeThread),
@@ -14684,7 +14789,7 @@
         );
         contentChildren.push(mainPane);
       }
-      if (!allowComposer) choice.dispose();
+      if (!allowComposer) choice.dispose(isHudListView ? activeThread?.id : null);
       body.appendChild(el('div', { class: shellClasses }, ...contentChildren));
       choice.sync();
       const currentNotices = body.querySelector('[data-testid="chat-notices"]');
@@ -17173,11 +17278,13 @@
         const account = ChatState.codexAccountKey(codex.authStatus);
         const owner = manualOwnerIdentity(threadId);
         if (!account || !owner) return null;
-        return { clientThreadId, conversationId, profileId, question, key: JSON.stringify([
-          threadId, codex.activityRoomGeneration || 0, state.canvasSelectionRevision || 0, clientThreadId, conversationId, owner,
-          profileId, profile.revision, choiceSettingsGeneration, codex.threadDraftRevisions[threadId] || 0,
-          thread.agent?.revision ?? null, thread.toolMode, thread.systemPrompt, codex.authStatus?.access?.state ?? null,
-        ]) };
+        // Unreviewed option edits can survive opening Settings, but approval
+        // also observes canvas selection and the Decisions settings generation.
+        const editKey = JSON.stringify([threadId, codex.activityRoomGeneration || 0, clientThreadId, conversationId, owner,
+          profileId, profile.revision, codex.threadDraftRevisions[threadId] || 0, thread.agent?.revision ?? null,
+          thread.toolMode, thread.systemPrompt, codex.authStatus?.access?.state ?? null]);
+        return { clientThreadId, conversationId, profileId, question, editKey,
+          key: JSON.stringify([editKey, state.canvasSelectionRevision || 0, choiceSettingsGeneration]) };
       },
       readChatChoiceMode(signal) { return fetchJson('/decision/status', { method: 'GET', signal, cache: 'no-store' }); },
       postChatChoice(dto, signal) { return fetchJson('/chat/choice', { method: 'POST', signal, body: JSON.stringify(dto) }); },

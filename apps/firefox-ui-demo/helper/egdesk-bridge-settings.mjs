@@ -190,7 +190,8 @@ export function openBridgeSettings({ dataDir, log = defaultLog, now = Date.now }
       const next = { values: Object.assign(Object.create(null), values, { [name]: clean }), extra }
       try { write(next) }
       catch (error) {
-        say(`${BRIDGE_SETTINGS_FILE} could not be saved (${errorCode(error)}); the setting applies until the bridge restarts`)
+        const effect = name === 'decisionContext' ? 'the previous decision mode remains active' : 'the setting applies until the bridge restarts'
+        say(`${BRIDGE_SETTINGS_FILE} could not be saved (${errorCode(error)}); ${effect}`)
         return false
       }
       values = next.values
