@@ -690,6 +690,8 @@ export function answerUnits(answer) { return taggedUnits(answer).map(u => u.text
 // The same units, each with whether it is a table row. Cycle 33: a row is ONE fact (its cells are one record: the date, the commit and the test count of the same line).
 // c32's real answer had "결제 모듈 병합 완료. 알림 설정 화면은 시안만 확정" in a cell; splitting the row at that period gave one fact with the date and no commit, and another
 // with the commit and no date, and the coverage check asked the board for both halves.
+// a table cell that carries no value (an empty marker), not a statement
+const NO_VALUE_CELL = /^(?:[-–—]+|없음|해당\s?없음|기록\s?없음|n\/a|none)$/i
 function taggedUnits(answer) {
   const raw = String(answer ?? '').normalize('NFC').slice(0, SKELETON_LIMITS.answerMax)
   if (!/\n/.test(raw)) return [{ text: raw, row: false }]
@@ -702,7 +704,9 @@ function taggedUnits(answer) {
     if (/^\|.*\|\s*$/.test(l)) {
       if (/^\|[\s:|-]+\|$/.test(l)) continue // separator row
       if (/^\|[\s:|-]+\|$/.test((lines[i + 1] ?? '').trim())) continue // header row (the next line is the separator)
-      l = l.replace(/^\||\|$/g, '').split('|').map(c => c.trim()).filter(Boolean).join(' · '); row = true
+      // Cycle 35 (check-9: the coverage check refused the row "11-24 · 검색 화면 착수 · 기록 없음 · 기록 없음" because no board can show that a commit and a test count were never recorded, and it
+      // cites the 11-24 note by its date, so it blocked): a cell that only says "no value" states nothing and is left out of the row's fact.
+      l = l.replace(/^\||\|$/g, '').split('|').map(c => c.replace(/\*\*|__|`/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').trim()).filter(c => c && !NO_VALUE_CELL.test(c)).join(' · '); row = true
     }
     l = l.replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, '').replace(/\*\*|__|`/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').trim()
     if (l) out.push({ text: l, row })

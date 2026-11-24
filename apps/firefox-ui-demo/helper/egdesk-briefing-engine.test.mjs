@@ -241,7 +241,7 @@ test('c32: the briefing\'s private turns ask chat.internalText with preamble:fal
     const engine = briefingDeps({ chat, contexts: {}, enabled: true, outputSchema }).engineFor({ id: 'run-1' }, { report: 'a' })
     await engine({ kind: 'briefing_component', title: 't', summary: 's' })
   }
-  assert.equal(calls.length, 2); assert.ok(calls.every(c => c.options.preamble === false && c.run.id === 'run-1' && Number.isFinite(c.options.timeoutMs)))
+  assert.equal(calls.length, 2); assert.ok(calls.every(c => c.options.preamble === false && c.run.id === 'run-1' && Number.isFinite(c.options.timeoutMs) && c.options.effort === BRIEFING_FILL_EFFORT))
 })
 
 test('c34: engine.lastFailure() tells a timeout (nothing came back before its allotted time) from an unusable reply, an empty turn and a refused one; null after a usable reply', async () => {
@@ -258,4 +258,22 @@ test('c34: engine.lastFailure() tells a timeout (nothing came back before its al
   assert.equal(await engine(request), null); assert.equal(engine.lastFailure(), 'refused', 'the turn bound')
   assert.deepEqual(Object.keys(engine.stats()), ['turns', 'refused', 'elapsedMs'], 'stats are as before; the reason is a separate accessor')
   assert.ok(seen.every(ms => ms <= 30_000))
+})
+
+test('c35: the private turn limit and the flow budget come from the measured real times (check-9: 20.9 s and 28.7 s per card, a 2-card whole fill over 30 s); the chrome waits longer than the budget and less than 300 s', () => {
+  const measuredCardMs = 30_000
+  assert.ok(BRIEFING_ENGINE_LIMITS.turnMs >= 60_000, 'a private turn gets at least a minute')
+  assert.ok(BRIEFING_ENGINE_LIMITS.turnMs >= 3 * measuredCardMs, 'a whole fill of three cards at the measured pace fits one turn')
+  assert.ok(BRIEFING_ENGINE_LIMITS.totalMs >= BRIEFING_ENGINE_LIMITS.turnMs + 3 * measuredCardMs + 60_000, 'one whole fill, one round of pieces (three cards) and one rewrite fit the budget')
+  assert.ok(BRIEFING_ENGINE_LIMITS.totalMs + 5 * 4000 < BRIEFING_CHROME_WAIT_MS && BRIEFING_CHROME_WAIT_MS < 300_000)
+})
+
+test('c35: the fill and the component turns ask for the briefing\'s own effort; a design turn does not; an engine built without an effort sends no effort key (as before)', async () => {
+  const sent = []
+  const make = effort => createBriefingEngine({ effort, runText: async (prompt, options) => { sent.push(options); return '{"title":"t","items":{}}' } })
+  const withEffort = make(BRIEFING_FILL_EFFORT), without = make(null)
+  await withEffort({ kind: 'briefing_fill', guide: { items: [] }, materials: [] }); await withEffort({ kind: 'briefing_component', title: 't', summary: 's' }); await withEffort({ kind: 'briefing_design', targets: [], reuse: [], retire: [], newAllowed: [], maxNew: 0 })
+  await without({ kind: 'briefing_fill', guide: { items: [] }, materials: [] })
+  assert.deepEqual(sent.map(o => o.effort ?? null), ['low', 'low', null, null]); assert.deepEqual(Object.keys(sent[3]), ['timeoutMs'])
+  assert.equal(BRIEFING_FILL_EFFORT, 'low')
 })

@@ -1091,7 +1091,7 @@ test('outputSchema ON, valid: the fork turn is started with the schema built fro
   const res = await s.R.http('POST', '/decision/briefing-observe', s.body)
   assert.equal(res.body.outcome, 'presented', JSON.stringify(res.body)); assert.equal(s.h.forkParams.length, 1)
   const params = s.h.forkParams[0], guide = guideOfPrompt(s.h.forkPrompts[0])
-  assert.deepEqual(Object.keys(params).sort(), ['clientUserMessageId', 'input', 'outputSchema', 'threadId']); assert.deepEqual(params.outputSchema, fillOutputSchema(guide))
+  assert.deepEqual(Object.keys(params).sort(), ['clientUserMessageId', 'effort', 'input', 'model', 'outputSchema', 'threadId']); assert.equal(params.effort, 'low', 'c35: the briefing\'s own effort'); assert.deepEqual(params.outputSchema, fillOutputSchema(guide))
   assert.equal(violation(JSON.parse(schemaFill(s.h.forkPrompts[0])), params.outputSchema), null, 'the scripted model\'s own message fits the schema it was given')
   assert.equal(s.count('briefing.published'), 1)
 })
@@ -1106,10 +1106,10 @@ test('outputSchema ON, invalid / refused / failed: nothing is published, the cha
     assert.equal(s.h.forkParams.length >= 1 && s.h.forkParams.every(p => p.outputSchema), true, `${name}: every fork turn carried the schema`)
   }
 })
-test('outputSchema OFF (the default): the fork turn is started with exactly the params it had before, and the prompt is the one the flag ON sends', async t => {
+test('outputSchema OFF (the default): the fork turn is started with exactly the params it had before (plus, since c35 and the model/effort resolution of lane L5, the effort of the briefing and the resolved model), and the prompt is the one the flag ON sends', async t => {
   const off = await mounted(t, { forkReply: autoFill }), on = await mounted(t, { forkReply: schemaFill, outputSchema: 'on' })
   assert.equal((await off.R.http('POST', '/decision/briefing-observe', off.body)).body.outcome, 'presented'); await on.R.http('POST', '/decision/briefing-observe', on.body)
-  assert.deepEqual(Object.keys(off.h.forkParams[0]).sort(), ['clientUserMessageId', 'input', 'threadId']); assert.match(off.h.forkParams[0].clientUserMessageId, /^egdesk-internal:/)
+  assert.deepEqual(Object.keys(off.h.forkParams[0]).sort(), ['clientUserMessageId', 'effort', 'input', 'model', 'threadId']); assert.equal(off.h.forkParams[0].effort, 'low' /* c35: the only addition to the params of before */); assert.match(off.h.forkParams[0].clientUserMessageId, /^egdesk-internal:/)
   assert.deepEqual(off.h.forkParams[0].input, [{ type: 'text', text: off.h.forkPrompts[0], text_elements: [] }])
   assert.equal(off.h.forkPrompts[0], on.h.forkPrompts[0], 'the schema does not change the prompt')
   assert.equal(JSON.stringify(off.h.forkParams[0]).includes('outputSchema'), false)

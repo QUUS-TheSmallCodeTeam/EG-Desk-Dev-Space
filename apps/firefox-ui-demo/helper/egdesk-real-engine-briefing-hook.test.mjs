@@ -173,6 +173,9 @@ test('check-3 on the fake that refuses ephemeral forks like 0.171: the fill runs
   assert.equal(fills.length, on.forkTurns + off.forkTurns)
   for (const m of fills) { const text = textOf(m); assert.ok(text.includes('Design guide (decided; do not change it)') && text.includes('Materials:'), 'guide and materials'); for (const absent of ['Context:', BOARD_SAY.slice(0, 12), '<answer>', '커밋 a1b2c3d, 테스트 120건 통과)로']) assert.ok(!text.includes(absent), `no ${absent}`) }
   assert.equal(fills.filter(m => m.params.outputSchema !== undefined).length, on.forkTurns, 'outputSchema goes to the fresh thread\'s turn exactly when the flag is on')
+  // c35: the briefing's private fill turns run at the briefing's own effort (not the person's default), and the trace says so
+  assert.ok(fills.every(m => m.params.effort === 'low'), 'every fill turn/start carries effort low')
+  for (const b of [on, off]) assert.ok(b.forkTrace.every(t => t.effort === 'low' && t.source === 'explicit' && t.via === 'fresh' && t.promptChars > 1000), JSON.stringify(b.forkTrace))
   assert.equal(w.wire().filter(m => m.dir === 'in' && m.method === 'thread/fork').length, 0); assert.deepEqual(w.stderrLines, [])
 })
 
@@ -180,6 +183,7 @@ test('a persisted answer thread still forks (the fallback is only for what canno
   const w = world(t, fakeFor('json'))
   const script = buildBoardScript(); script.conversations.length = 1
   const rec = (await runCheck(w.options, asScripts(script), w.deps)).records[0], b = rec.turns[0].hooks.briefing
+  assert.deepEqual([...new Set(b.forkTrace.map(t => `${t.via}/${t.effort}/${t.source}`))], [`${b.forkTrace[0].via}/low/explicit`], 'the fork path carries the same effort')
   assert.equal(rec.turns[0].ok, true); assert.ok(b.forkRequests.some(r => r.method === 'thread/fork') || startsOf(w).some(m => /private one-off task/.test(m.params?.developerInstructions ?? '')), JSON.stringify(b.forkRequests))
 })
 
@@ -205,9 +209,11 @@ test('refused forks are recorded by code even when no fallback exists: a thread/
 const CHECK5_ANSWER = '| 날짜 | 진행 상황 | 커밋 ID | 테스트 |\n|---|---|---|---|\n| [11-20](/x/devlog/11-20.md) | 로그인 화면 병합 완료 | `a1b2c3d` | 120건 통과 |\n| [11-22](/x/devlog/11-22.md) | 결제 모듈 병합 완료. 알림 설정 화면은 시안만 확정 | `e4f5a6b` | 98건 통과 |\n| [11-24](/x/devlog/11-24.md) | 검색 화면 착수 | 기록 없음 | 기록 없음 |\n\n기록된 테스트 통과 건수는 합계 **218건**입니다. 11-24 기준 남은 일은 **알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성**입니다.\n\n파일은 변경하지 않았습니다.\n'
 test('c33 cause 1: a table row is ONE fact, even when a cell holds a sentence (check-5 split the 11-22 row at its period into a half with the date and a half with the commit)', () => {
   const { facts, cut } = answerFacts(CHECK5_ANSWER)
-  assert.deepEqual(facts, ['11-20 · 로그인 화면 병합 완료 · a1b2c3d · 120건 통과', '11-22 · 결제 모듈 병합 완료. 알림 설정 화면은 시안만 확정 · e4f5a6b · 98건 통과', '11-24 · 검색 화면 착수 · 기록 없음 · 기록 없음',
+  assert.deepEqual(facts, ['11-20 · 로그인 화면 병합 완료 · a1b2c3d · 120건 통과', '11-22 · 결제 모듈 병합 완료. 알림 설정 화면은 시안만 확정 · e4f5a6b · 98건 통과', '11-24 · 검색 화면 착수',
     '기록된 테스트 통과 건수는 합계 218건입니다.', '11-24 기준 남은 일은 알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성입니다.', '파일은 변경하지 않았습니다.'])
   assert.equal(cut, 0)
+  // c35: a cell that only says "no value" (check-9's "기록 없음") states nothing: the row is the other cells; a cell that says something stays
+  assert.deepEqual(answerFacts('| 날짜 | 상태 | 비고 |\n|---|---|---|\n| 11-24 | 착수 | - |\n| 11-25 | 중단 | 기록 없음 |\n| 11-26 | 완료 | 미정 |\n').facts, ['11-24 · 착수', '11-25 · 중단', '11-26 · 완료 · 미정'])
   // prose is split into sentences as before
   assert.deepEqual(answerFacts('11-20 로그인 화면 병합. 11-22 결제 모듈 병합.\n').facts, ['11-20 로그인 화면 병합.', '11-22 결제 모듈 병합.'])
 })
