@@ -46,7 +46,7 @@ export const COMMITTED_PLANS = Object.freeze([
   // single-file plans
   { path: 'helper/egdesk-heartbeat-real-plan.snapshot.json', lane: 'L3', rebuilt: { heartbeat: true } },
   ...['c15', 'c16', 'c17'].map(c => ({ path: `helper/egdesk-heartbeat-real-plan.${c}.json`, lane: 'L3', frozen: `the ${c} heartbeat registration as measured (2026-11-24); helper/egdesk-heartbeat-real-plan.test.mjs` })),
-  ...['', '-v2', '-v3', '-v4', '-v5', '-v6', '-v7', '-v8'].map(v => ({ path: `scripts/egdesk-all-on-live-measure.plan${v}.json`, lane: 'L2', handWritten: 'all-on journey scenario plan (steps and checks written by hand; the live runner builds bodies at run time)' })),
+  ...['', '-v2', '-v3', '-v4', '-v5', '-v6', '-v7', '-v8', '-v9'].map(v => ({ path: `scripts/egdesk-all-on-live-measure.plan${v}.json`, lane: 'L2', handWritten: 'all-on journey scenario plan (steps and checks written by hand; the live runner builds bodies at run time)' })),
   ...['', '-v2', '-v3', '-v4'].map(v => ({ path: `scripts/egdesk-multiuser-live-measure.plan${v}.json`, lane: 'L1', handWritten: 'collaboration scenario plan (written by hand; the live runner builds bodies at run time)' })),
   ...['allon-plan', 'plan', 'plan-delivery', 'plan-holdout', 'plan-holdout-rerun', 'plan-holdout2', 'plan-settings', 'plan-stuck', 'plan-entry', 'plan-entry2', 'plan-entry3', 'plan-settings-error', 'plan-stability', 'plan-statement', 'recorded-plan', 'renamed-plan'].map(v => ({ path: `scripts/egdesk-browser-live-${v}.json`, lane: 'L8', handWritten: 'browser journey plan (written by hand; the live runner builds bodies at run time)' })),
 ])
