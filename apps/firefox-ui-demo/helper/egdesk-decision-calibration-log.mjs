@@ -29,7 +29,9 @@ const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'bo
 const MODES = new Set(['advisory', 'on'])
 const QUESTIONS = new Set(['answer_type', 'time_intent', 'relevance', 'speech_axis', 'speech_predicate', 'recall', 'topic_route', 'choice', 'next_step', 'page_state', 'goal_met', 'terminal_state', 'terminal_risk', 'log_block', 'claim_support', 'claim_present', 'term_internal', 'triage_courtesy', 'triage_need', 'triage_recall', 'triage_record', 'write_target', 'wm_block', 'wm_role',
   // the heartbeat's yes/no message questions (egdesk-conversation-flow.mjs FLOW_PREDICATES)
-  'beat_note', 'beat_ask', 'beat_stalled', 'beat_pointer'])
+  'beat_note', 'beat_ask', 'beat_stalled', 'beat_pointer',
+  // the command gate's yes/no content predicates (egdesk-terminal-command-gate.mjs RISK_PREDICATES)
+  'risk_unrestorable', 'risk_outside', 'risk_personal_files'])
 const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed', 'none', 'act', 'hold', 'fetch'])
 // Turn memory (advisory): where in the session the turn was, what the fetch did, and how long each stage took.
 // Draft check (advisory): what the check would have done to the posted answer, and what it would fall back to without a revision.
@@ -70,7 +72,9 @@ const TERMINAL_WOULD = new Set(['wait', 'hand_yes_no', 'hand_secret', 'quit_page
 const TERMINAL_CHECKS = new Set(['read', 'exit', 'beat', 'quiet'])
 // Where the judged output came from: a Terminal card (the person's own shell) or a command the run's engine executed.
 const TERMINAL_STREAMS = new Set(['card', 'engine'])
-const GATE_REASONS = new Set(['unresolved_target', 'protected_target', 'outside_cwd', 'tracked_files', 'dirty_worktree', 'remote_irreversible', 'privileged', 'remote_script', 'risk_score', 'risk_unsure'])
+const GATE_REASONS = new Set(['unresolved_target', 'protected_target', 'outside_cwd', 'tracked_files', 'dirty_worktree', 'remote_irreversible', 'privileged', 'remote_script',
+  'discards_history', 'deletes_untracked', 'publishes', 'container_data', 'database_destructive', 'risk_score', 'risk_unsure', 'risk_unrestorable', 'risk_outside', 'risk_personal_files'])
+const GATE_METHODS = new Set(['predicates', 'score'])
 const GATE_ENGINES = new Set(['codex', 'claude'])
 const flagOf = value => (typeof value === 'boolean' ? value : null)
 function terminalFields(raw) {
@@ -91,7 +95,7 @@ function gateFields(raw) {
   const reasons = Array.isArray(raw.reasons) ? [...new Set(raw.reasons.filter(reason => typeof reason === 'string' && GATE_REASONS.has(reason)))].slice(0, 6) : []
   if (reasons.length) out.reasons = reasons
   put(out, 'score', Number.isFinite(raw.score) && raw.score >= 0 && raw.score <= 4 ? Math.round(raw.score * 10) / 10 : null)
-  put(out, 'engine', word(GATE_ENGINES, raw.engine))
+  put(out, 'engine', word(GATE_ENGINES, raw.engine)); put(out, 'method', word(GATE_METHODS, raw.method))
   return Object.keys(out).length ? out : null
 }
 const FORCED = new Set(['mentioned', 'mandatory'])

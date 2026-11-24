@@ -59,9 +59,11 @@ test('the facts drive the gate rules: tracked files and a dirty worktree require
   assert.deepEqual(classifyCommand('rm -rf /work/app/build', { cwd: undefined }).floor, ['outside_cwd'])
 })
 
-test('irreversible commands that delete no file of the working tree are scored, not waved through; one command line keeps its worst command', () => {
-  for (const command of ['npm publish', 'pnpm publish --access public', 'cargo publish', 'docker system prune -af', 'docker volume rm data', 'docker rm -f web', 'podman image prune -a'])
-    assert.deepEqual([classifyCommand(command, { cwd: '/work/app' }).destructive, classifyCommand(command, { cwd: '/work/app' }).floor], [true, []], command)
+test('irreversible commands that delete no file of the working tree are never waved through; one command line keeps its worst command', () => {
+  // c11 (R5): publishing and container data are now rule floors; removing one named container or an image is still judged.
+  for (const [command, floor] of [['npm publish', ['publishes']], ['pnpm publish --access public', ['publishes']], ['cargo publish', ['publishes']], ['docker system prune -af', ['container_data']],
+    ['docker volume rm data', ['container_data']], ['docker rm -f web', []], ['podman image prune -a', []]])
+    assert.deepEqual([classifyCommand(command, { cwd: '/work/app' }).destructive, classifyCommand(command, { cwd: '/work/app' }).floor], [true, floor], command)
   for (const command of ['npm test', 'npm run publish-docs', 'docker ps', 'docker build .', 'cargo build'])
     assert.equal(classifyCommand(command, { cwd: '/work/app' }).destructive, false, command)
   // a harmless chmod after a destructive command must not clear it

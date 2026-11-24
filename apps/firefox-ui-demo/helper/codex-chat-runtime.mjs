@@ -5665,7 +5665,7 @@ export class CodexChatRuntime {
   }
 
   // ---- Command gate before an engine approval (Codex commandExecution/requestApproval; Claude can_use_tool arrives as the same request). ----
-  // Config: decisionContext.terminalGate = { mode(): 'off'|'advisory'|'on', inspect?({ cwd, paths }) → { targets, git }, home?, deadlineMs? (at most 4 s) }. Absent or any other mode: off,
+  // Config: decisionContext.terminalGate = { mode(): 'off'|'advisory'|'on', inspect?({ cwd, paths }) → { targets, git }, home?, deadlineMs? (at most 4 s), method?: 'predicates' (default) | 'score' }. Absent or any other mode: off,
   // and nothing below runs. The human approval card is created exactly as before in every mode; this method never answers a request.
   //   advisory: the rule result, the Decision score and whether approval WOULD have been required are recorded (content-free). Nothing changes.
   //   on: additionally, a command the rules or the score mark high risk cannot be approved for the whole session from its card.
@@ -5689,6 +5689,7 @@ export class CodexChatRuntime {
         const inspect = target => (facts?.targets && Object.hasOwn(facts.targets, target) ? facts.targets[target] : { exists: true, trackedFiles: 0, ignored: false, unknown: true })
         let captured = null
         const assessed = await assessCommand({ command, cwd: where, intent: typeof intent === 'string' ? intent : '', mode, client: setup.client, inspect, git: facts?.git ?? null, home,
+          method: cfg.method === 'score' ? 'score' : 'predicates', // 'score' only to compare with the c5-c10 question
           timeoutMs: Number.isSafeInteger(cfg.deadlineMs) && cfg.deadlineMs > 0 ? Math.min(cfg.deadlineMs, COMMAND_GATE_TIMEOUT_MS) : COMMAND_GATE_TIMEOUT_MS,
           egress: this.decisionEgressFor(run), calibration: { record: raw => { captured = raw } } })
         const rule = assessed.source === 'rules' && assessed.approval === true
@@ -5696,7 +5697,7 @@ export class CodexChatRuntime {
         try { // content-free: closed words, booleans and one rounded number
           setup.calibrationLog?.record?.({ feature: 'terminal_gate', mode: flag, judgments: captured?.judgments ?? [], attached: enforce && assessed.approval === true,
             ...(captured?.fallback ?? assessed.fallback ? { fallback: captured?.fallback ?? assessed.fallback } : {}),
-            gate: { rule, would, scored: typeof assessed.score === 'number', reasons: assessed.approval ? assessed.reasons : assessed.shadowReasons ?? [], score: assessed.score, engine,
+            gate: { rule, would, scored: typeof assessed.score === 'number' || Boolean(assessed.predicates), method: assessed.method, reasons: assessed.approval ? assessed.reasons : assessed.shadowReasons ?? [], score: assessed.score, engine,
               gitFacts: facts !== null, sessionWithheld: enforce && assessed.approval === true } })
         } catch { /* recording only */ }
         return assessed

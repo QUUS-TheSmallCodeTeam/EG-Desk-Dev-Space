@@ -22,10 +22,15 @@ const tracked = target => /\/src$/.test(target) ? { exists: true, kind: 'dir', t
 
 function riskAnswer(question, data) {
   const command = String(data?.command ?? '')
+  // content predicates (the default method): 'yes' means risky. A push sends something out; removing a named container loses its data.
+  if (question.type === 'predicate') {
+    const yes = question.name === 'risk_outside' ? /\bpush\b/.test(command) : question.name === 'risk_unrestorable' ? /docker rm/.test(command) : false
+    return { name: question.name, type: 'predicate', probability: yes ? 0.95 : 0.05 }
+  }
   const score = /node_modules|dist\b/.test(command) ? 0.4 : /reset --hard/.test(command) ? 3.7 : /kill/.test(command) ? 0.8 : 2
   return { name: question.name, type: 'score', score, confidence: 0.93, probabilities: question.levels.map((_, i) => ({ value: String(i), probability: i === Math.round(score) ? 0.9 : 0.025 })) }
 }
-function decisionSetup(t, { flag = null, decisionMode = 'on', configured = true, hang = false, budget = null, dirty = false, deadlineMs } = {}) {
+function decisionSetup(t, { flag = null, decisionMode = 'on', configured = true, hang = false, budget = null, dirty = false, deadlineMs, method } = {}) {
   const root = createPrivateQaTempDirectory('egdesk-terminal-gate-wiring-test-')
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const requests = [], inspected = []
@@ -34,12 +39,12 @@ function decisionSetup(t, { flag = null, decisionMode = 'on', configured = true,
       requests.push(init.body)
       if (hang) return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))
       const body = JSON.parse(init.body)
-      return Response.json({ answers: body.questions.map(q => riskAnswer(q, body.input[0].content[0].data)), usage: { input_tokens: 30 } })
+      return Response.json({ answers: body.questions.map(q => riskAnswer(q, body.input.find(m => Array.isArray(m.content)).content[0].data)), usage: { input_tokens: 30 } })
     } })
   const calibrationLog = openCalibrationLog({ dataDir: root, log: () => {} })
   const state = { flag, decisionMode, configured }
   const decisionContext = { mode: () => state.decisionMode, configured: () => state.configured, client, calibrationLog,
-    ...(flag ? { terminalGate: { mode: () => state.flag, home: '/home/synthetic', ...(deadlineMs ? { deadlineMs } : {}),
+    ...(flag ? { terminalGate: { mode: () => state.flag, home: '/home/synthetic', ...(method ? { method } : {}), ...(deadlineMs ? { deadlineMs } : {}),
       inspect: async ({ cwd, paths }) => { inspected.push({ cwd, paths }); return { targets: Object.fromEntries(paths.filter(tracked).map(p => [p, tracked(p)])), git: { dirty } } } } } : {}) }
   return { decisionContext, requests, inspected, calibrationLog, state,
     gateEntries: () => calibrationLog.entries().filter(e => e.feature === 'terminal_gate'), carrying: needle => requests.filter(body => body.includes(needle)).length }
@@ -108,7 +113,7 @@ function claudeHarness(t, options = {}) {
 const observable = h => JSON.stringify({ replies: h.replies, calls: h.calls.map(c => c.method), events: h.events, runs: h.chat.snapshot().runs },
   (key, value) => (['ts', 'at', 'seq', 'startedAt', 'updatedAt', 'createdAt', 'eventId', 'cursor'].includes(key) ? undefined : value))
   .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, 'UUID').replace(/\b1[67]\d{11}\b/g, 'TIME')
-const COMMANDS = ['rm -rf src/', 'rm -rf node_modules', 'git reset --hard HEAD~5', 'npm test', 'rm -rf "$TARGET"/*']
+const COMMANDS = ['rm -rf src/', 'rm -rf node_modules', 'git reset --hard HEAD~5', 'npm test', 'rm -rf "$TARGET"/*', 'git push origin main']
 async function journey(h) {
   const run = await h.chat.send({ message: 'Clean up and run the tests' })
   const pending = []
@@ -122,30 +127,33 @@ async function journey(h) {
 test('Codex: flag off and advisory are identical to no gate at all (cards, choices, replies, events); nothing is ever answered for the person', async t => {
   const none = codexHarness(t), off = codexHarness(t, { flag: 'off' }), advisory = codexHarness(t, { flag: 'advisory' })
   const base = await journey(none); await journey(off); await journey(advisory)
-  assert.equal(base.pending.length, 5)
+  assert.equal(base.pending.length, 6)
   assert.equal(observable(off), observable(none)); assert.equal(observable(advisory), observable(none))
   assert.deepEqual(advisory.replies.map(r => r[1]), [{ decision: 'decline' }, { decision: 'accept' }, { decision: 'accept' }], 'exactly the person\'s three answers')
-  assert.deepEqual(advisory.chat.snapshot().runs[0].pendingApprovals.map(p => p.status), ['replySent', 'replySent', 'pending', 'replySent', 'pending'])
+  assert.deepEqual(advisory.chat.snapshot().runs[0].pendingApprovals.map(p => p.status), ['replySent', 'replySent', 'pending', 'replySent', 'pending', 'pending'])
   assert.equal(none.requests.length, 0); assert.equal(off.requests.length, 0); assert.equal(off.gateEntries().length, 0)
-  assert.ok(advisory.requests.length > 0); assert.equal(advisory.gateEntries().length, 5)
-  MATRIX.codexIdentical = { cards: 5, observableBytes: observable(none).length, advisoryRequests: advisory.requests.length, advisoryRecords: advisory.gateEntries().length }
+  assert.ok(advisory.requests.length > 0); assert.equal(advisory.gateEntries().length, 6)
+  MATRIX.codexIdentical = { cards: 6, observableBytes: observable(none).length, advisoryRequests: advisory.requests.length, advisoryRecords: advisory.gateEntries().length }
 })
 
 test('advisory records the rule result, the score and whether approval WOULD have been required, content-free', async t => {
   const h = codexHarness(t, { flag: 'advisory' })
   await journey(h)
-  const rows = h.gateEntries().map(e => ({ rule: e.gate.rule, would: e.gate.would, scored: e.gate.scored, reasons: e.gate.reasons ?? [], score: e.gate.score ?? null, engine: e.gate.engine, gitFacts: e.gate.gitFacts, mode: e.mode, attached: e.attached }))
+  const rows = h.gateEntries().map(e => ({ rule: e.gate.rule, would: e.gate.would, scored: e.gate.scored, reasons: e.gate.reasons ?? [], score: e.gate.score ?? null, method: e.gate.method, engine: e.gate.engine, gitFacts: e.gate.gitFacts, mode: e.mode, attached: e.attached }))
   const by = Object.fromEntries(COMMANDS.map((name, i) => [name, rows[i]]))
   MATRIX.advisory = by
-  assert.deepEqual(by['rm -rf src/'], { rule: true, would: true, scored: false, reasons: ['tracked_files'], score: null, engine: 'codex', gitFacts: true, mode: 'advisory', attached: false })
-  assert.deepEqual(by['rm -rf node_modules'], { rule: false, would: false, scored: true, reasons: [], score: 0.4, engine: 'codex', gitFacts: true, mode: 'advisory', attached: false })
-  assert.deepEqual(by['git reset --hard HEAD~5'], { rule: false, would: true, scored: true, reasons: ['risk_score'], score: 3.7, engine: 'codex', gitFacts: false, mode: 'advisory', attached: false })
-  assert.deepEqual(by['npm test'], { rule: false, would: false, scored: false, reasons: [], score: null, engine: 'codex', gitFacts: false, mode: 'advisory', attached: false })
+  const row = (fields) => ({ score: null, method: 'predicates', engine: 'codex', mode: 'advisory', attached: false, ...fields })
+  assert.deepEqual(by['rm -rf src/'], row({ rule: true, would: true, scored: false, reasons: ['tracked_files'], gitFacts: true }))
+  assert.deepEqual(by['rm -rf node_modules'], row({ rule: false, would: false, scored: true, reasons: [], gitFacts: true }))
+  assert.deepEqual(by['git reset --hard HEAD~5'], row({ rule: true, would: true, scored: false, reasons: ['discards_history'], gitFacts: false }), 'R5: a rule, not a score')
+  assert.deepEqual(by['npm test'], row({ rule: false, would: false, scored: false, reasons: [], gitFacts: false }))
+  assert.deepEqual(by['git push origin main'], row({ rule: false, would: true, scored: true, reasons: ['risk_outside'], gitFacts: false }), 'a content predicate adds approval the floor does not')
   assert.deepEqual([by['rm -rf "$TARGET"/*'].rule, by['rm -rf "$TARGET"/*'].would, by['rm -rf "$TARGET"/*'].scored, by['rm -rf "$TARGET"/*'].reasons], [true, true, false, ['unresolved_target']])
-  assert.equal(h.requests.length, 2, 'only the two destructive commands the rules did not already settle are scored')
+  assert.equal(h.requests.length, 2, 'only the two changing commands the rules did not already settle are asked about')
   assert.deepEqual(h.inspected.map(i => i.paths), [['/work/src'], ['/work/node_modules']], 'git facts are asked only for the targets')
   assert.doesNotMatch(JSON.stringify(h.calibrationLog.entries()), /node_modules|src|TARGET|reset|zeta|\/work/, 'the record holds no command, path or intent')
-  assert.equal(h.carrying('zeta-synthetic-intent'), 2, 'the stated intent travels only inside the scored requests')
+  assert.equal(h.carrying('zeta-synthetic-intent'), 2, 'the stated intent travels only inside the asked requests')
+  for (const body of h.requests) assert.deepEqual(JSON.parse(body).questions.map(q => [q.type, q.name]), [['predicate', 'risk_unrestorable'], ['predicate', 'risk_outside'], ['predicate', 'risk_personal_files']])
 })
 
 test('no key, Decision off, a used-up budget or a model that never answers: rules only, and the card neither waits nor changes', async t => {
@@ -153,7 +161,7 @@ test('no key, Decision off, a used-up budget or a model that never answers: rule
   for (const [name, options] of [['no key', { configured: false }], ['decision off', { decisionMode: 'off' }], ['budget', { budget: usedUp }]]) {
     const h = codexHarness(t, { flag: 'advisory', ...options })
     const run = await h.chat.send({ message: 'Work' })
-    const pending = await h.ask(run, 1, 'git reset --hard HEAD~5')
+    const pending = await h.ask(run, 1, 'git push origin main')
     assert.deepEqual(pending.choices, ['accept', 'decline', 'cancel'], name)
     assert.equal(h.requests.length, 0, name)
     const [entry] = h.gateEntries()
@@ -162,7 +170,7 @@ test('no key, Decision off, a used-up budget or a model that never answers: rule
   const slow = codexHarness(t, { flag: 'advisory', hang: true })
   const run = await slow.chat.send({ message: 'Work' })
   const startedAt = performance.now()
-  await slow.chat.handleServerRequest({ id: 1, method: 'item/commandExecution/requestApproval', params: { threadId: run.conversationId, turnId: run.runId, itemId: 'cmd', command: 'git reset --hard HEAD~5', cwd: '/work', availableDecisions: ALL } })
+  await slow.chat.handleServerRequest({ id: 1, method: 'item/commandExecution/requestApproval', params: { threadId: run.conversationId, turnId: run.runId, itemId: 'cmd', command: 'git push origin main', cwd: '/work', availableDecisions: ALL } })
   const card = slow.chat.snapshot().runs[0].pendingApprovals[0]
   assert.ok(card && performance.now() - startedAt < 500, 'the card is there at once; it never waits for the gate')
   assert.equal((await slow.chat.replyApproval({ ...run, approvalId: card.approvalId, decision: 'accept' })).status, 'replySent', 'and the person can answer before the model does')
@@ -183,7 +191,7 @@ test('Claude: advisory changes nothing on the real can_use_tool path; the sessio
   const play = async h => {
     const run = await h.send()
     const cards = []
-    for (const command of ['rm -rf src/', 'git reset --hard HEAD~5', 'rm -rf node_modules']) cards.push(await h.ask(run, command))
+    for (const command of ['rm -rf src/', 'git push origin main', 'rm -rf node_modules']) cards.push(await h.ask(run, command))
     await h.chat.replyApproval({ ...run, approvalId: cards[0].approvalId, decision: 'acceptForSession' })
     await h.chat.replyApproval({ ...run, approvalId: cards[1].approvalId, decision: 'decline' })
     await h.chat.replyApproval({ ...run, approvalId: cards[2].approvalId, decision: 'accept' })
@@ -193,7 +201,7 @@ test('Claude: advisory changes nothing on the real can_use_tool path; the sessio
   assert.deepEqual(advisory, none)
   assert.deepEqual(none.choices, [ALL, ALL, ALL]); assert.deepEqual(none.answers, ['allow+session', 'deny', 'allow'])
   assert.deepEqual(none.commands[0], ['rm -rf src/', CLAUDE_CWD])
-  assert.deepEqual(advisoryRig.gateEntries().map(e => [e.gate.engine, e.gate.rule, e.gate.would, e.gate.score ?? null]), [['claude', true, true, null], ['claude', false, true, 3.7], ['claude', false, false, 0.4]])
+  assert.deepEqual(advisoryRig.gateEntries().map(e => [e.gate.engine, e.gate.rule, e.gate.would, e.gate.reasons ?? []]), [['claude', true, true, ['tracked_files']], ['claude', false, true, ['risk_outside']], ['claude', false, false, []]])
   MATRIX.claudeAdvisory = { answers: advisory.answers, records: advisoryRig.gateEntries().length }
 })
 
@@ -209,11 +217,14 @@ test('flag on (Claude): the only effect is that a high-risk command cannot be ap
   await assert.rejects(h.chat.replyApproval({ ...run, approvalId: trackedCard.approvalId, decision: 'acceptForSession' }), e => e.code === 'COMMAND_RISK_SESSION_FORBIDDEN' && e.httpStatus === 403)
   assert.deepEqual(h.answers(), [], 'a refused session grant answers nothing; the card is still waiting')
   assert.equal((await h.chat.replyApproval({ ...run, approvalId: trackedCard.approvalId, decision: 'accept' })).status, 'replySent')
-  // 3) the score marks it high risk
-  const scored = await h.ask(run, 'git reset --hard HEAD~5')
+  // 3) the rule floor (R5) needs no lookup: discarding commits never offers the session choice
+  const history = await h.ask(run, 'git reset --hard HEAD~5')
+  assert.deepEqual(history.choices, ['accept', 'decline', 'cancel'])
+  // 4) a content predicate marks it (something leaves this machine): the session choice is refused when picked
+  const scored = await h.ask(run, 'git push origin main')
   await assert.rejects(h.chat.replyApproval({ ...run, approvalId: scored.approvalId, decision: 'acceptForSession' }), e => e.code === 'COMMAND_RISK_SESSION_FORBIDDEN')
   assert.equal((await h.chat.replyApproval({ ...run, approvalId: scored.approvalId, decision: 'decline' })).status, 'replySent')
-  // 4) low risk and plain commands: the session choice works as before
+  // 5) low risk and plain commands: the session choice works as before
   for (const command of ['rm -rf node_modules', 'npm test']) {
     const ok = await h.ask(run, command)
     assert.deepEqual(ok.choices, ALL)
@@ -222,7 +233,7 @@ test('flag on (Claude): the only effect is that a high-risk command cannot be ap
   assert.deepEqual(h.answers(), ['allow', 'deny', 'allow+session', 'allow+session'], 'every grant is the person\'s own click; none was added or made by the gate')
   const rows = h.gateEntries().map(e => [e.mode, e.gate.engine, e.gate.rule, e.gate.would, e.gate.sessionWithheld, e.attached])
   MATRIX.on = { answers: h.answers(), records: rows }
-  assert.deepEqual(rows, [['on', 'claude', true, true, true, true], ['on', 'claude', true, true, true, true], ['on', 'claude', false, true, true, true],
+  assert.deepEqual(rows, [['on', 'claude', true, true, true, true], ['on', 'claude', true, true, true, true], ['on', 'claude', true, true, true, true], ['on', 'claude', false, true, true, true],
     ['on', 'claude', false, false, false, false], ['on', 'claude', false, false, false, false]])
 })
 
@@ -230,14 +241,14 @@ test('flag on can only add: an unavailable score leaves today\'s behaviour, and 
   // Decision mode advisory under flag on: the score is only recorded, so the session choice still works; a rule still withholds
   const a = claudeHarness(t, { flag: 'on', decisionMode: 'advisory' })
   const run = await a.send()
-  const scored = await a.ask(run, 'git reset --hard HEAD~5')
+  const scored = await a.ask(run, 'git push origin main')
   assert.equal((await a.chat.replyApproval({ ...run, approvalId: scored.approvalId, decision: 'acceptForSession' })).status, 'replySent')
   const ruled = await a.ask(run, 'sudo rm -rf build')
   assert.deepEqual(ruled.choices, ['accept', 'decline', 'cancel'], 'a rule needs no model')
   // the model never answers: a session grant waits for the gate's own deadline at most, then today's behaviour
   const s = claudeHarness(t, { flag: 'on', hang: true, deadlineMs: 80 })
   const run3 = await s.send()
-  s.transports[0].control('permission-slow', { subtype: 'can_use_tool', tool_name: 'Bash', tool_use_id: 'toolu-slow', input: { command: 'git reset --hard HEAD~5' },
+  s.transports[0].control('permission-slow', { subtype: 'can_use_tool', tool_name: 'Bash', tool_use_id: 'toolu-slow', input: { command: 'git push origin main' },
     permission_suggestions: [{ type: 'addRules', behavior: 'allow', rules: [{ toolName: 'Bash', ruleContent: 'synthetic' }], destination: 'userSettings' }] })
   await s.chat.queue; await tick(); await s.chat.queue
   const slowCard = s.chat.runs.get(`${run3.conversationId}/${run3.runId}`).pendingApprovals.at(-1)
@@ -248,9 +259,18 @@ test('flag on can only add: an unavailable score leaves today\'s behaviour, and 
   // no key: rules only, zero requests
   const k = claudeHarness(t, { flag: 'on', configured: false })
   const run2 = await k.send()
-  const plain = await k.ask(run2, 'git reset --hard HEAD~5')
+  const plain = await k.ask(run2, 'git push origin main')
   assert.equal((await k.chat.replyApproval({ ...run2, approvalId: plain.approvalId, decision: 'acceptForSession' })).status, 'replySent')
   assert.equal(k.requests.length, 0)
+})
+
+test('method score (the c5-c10 question) stays selectable for comparison: same wiring, the score is recorded instead of the predicates', async t => {
+  const h = codexHarness(t, { flag: 'advisory', method: 'score' })
+  const run = await h.chat.send({ message: 'Work' })
+  await h.ask(run, 1, 'rm -rf node_modules'); await h.ask(run, 2, 'git reset --hard HEAD~5')
+  assert.deepEqual(h.gateEntries().map(e => [e.gate.method, e.gate.rule, e.gate.scored, e.gate.score ?? null, e.gate.reasons ?? []]), [['score', false, true, 0.4, []], ['score', true, false, null, ['discards_history']]],
+    'the floor is the same whichever method judges the rest')
+  assert.deepEqual(JSON.parse(h.requests[0]).questions.map(q => q.type), ['score'])
 })
 
 test.after(() => { if (process.env.EGDESK_SIM_OUT) import('node:fs').then(fs => fs.writeFileSync(process.env.EGDESK_SIM_OUT, JSON.stringify(MATRIX, null, 2))) })

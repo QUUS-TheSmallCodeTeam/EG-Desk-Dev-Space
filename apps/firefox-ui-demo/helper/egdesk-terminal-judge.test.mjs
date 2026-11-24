@@ -58,7 +58,7 @@ function rig(t, { mode = 'on', terminalAllowed = true, budget = null, hang = fal
       const body = JSON.parse(init.body)
       requests.push(body)
       if (hang) return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }))
-      const data = body.input[0].content[0].data
+      const data = body.input.find(m => Array.isArray(m.content))?.content?.[0]?.data ?? {}
       return Response.json({ answers: body.questions.map(q => modelAnswer(q, data)), usage: { input_tokens: 100 } })
     } })
   const cache = new Map()
@@ -189,13 +189,19 @@ test('S4 safety gate: rm -rf node_modules passes; rm -rf src/ needs approval; th
   ]) {
     const before = r.requests.length
     const result = await r.assess(command, { inspect, git })
-    rows[name] = { approval: result.approval, reasons: result.reasons, source: result.source, decisionRequests: r.requests.length - before, ...(result.score !== undefined ? { score: result.score } : {}) }
+    rows[name] = { approval: result.approval, reasons: result.reasons, source: result.source, decisionRequests: r.requests.length - before, ...(result.score !== undefined ? { score: result.score } : {}),
+      ...(result.predicates ? { predicates: result.predicates } : {}) }
   }
-  assert.deepEqual(rows['rm -rf node_modules'], { approval: false, reasons: [], source: 'decision', decisionRequests: 1, score: 0.5 })
+  // content predicates (default since c11): all three decided 'no' -> no approval added
+  assert.deepEqual(rows['rm -rf node_modules'], { approval: false, reasons: [], source: 'decision', decisionRequests: 1, predicates: { risk_unrestorable: 0.08, risk_outside: 0.08, risk_personal_files: 0.08 } })
+  // the old 0-4 score stays selectable for comparison and still behaves as before
+  const scored = await r.assess('rm -rf node_modules', { inspect, git: { dirty: false }, method: 'score' })
+  assert.deepEqual([scored.approval, scored.reasons, scored.source, scored.score, scored.method], [false, [], 'decision', 0.5, 'score'])
   assert.equal(rows['rm -rf src/'].approval, true)
   assert.deepEqual(rows['rm -rf src/'].reasons, ['tracked_files'])
   assert.equal(rows['rm -rf src/'].decisionRequests, 0, 'the rule decides; the model is not even asked')
-  assert.deepEqual([rows['git reset --hard HEAD~5 (clean tree)'].approval, rows['git reset --hard HEAD~5 (clean tree)'].reasons, rows['git reset --hard HEAD~5 (clean tree)'].decisionRequests], [true, ['risk_score'], 1])
+  assert.deepEqual([rows['git reset --hard HEAD~5 (clean tree)'].approval, rows['git reset --hard HEAD~5 (clean tree)'].reasons, rows['git reset --hard HEAD~5 (clean tree)'].decisionRequests], [true, ['discards_history'], 0],
+    'R5 (real measurement 2026-11-24: score 2.14 < 2.5): resetting to another commit needs approval by rule, the model is not asked')
   assert.deepEqual(rows['git reset --hard (dirty tree)'].reasons, ['dirty_worktree'])
   assert.equal(rows['kill -9 3000'].approval, false)
   for (const name of ['rm -rf $TARGET/*', 'rm -rf ~', 'rm -rf /tmp/other']) { assert.equal(rows[name].approval, true); assert.equal(rows[name].decisionRequests, 0) }
