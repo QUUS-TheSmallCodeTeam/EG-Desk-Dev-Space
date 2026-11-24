@@ -8492,14 +8492,6 @@
   const HudRouting = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskHudRouting.sys.mjs');
   let hudRoutingTimer = null, hudRoutingSeq = 0;
   function hudRoutingModeNow() { return HudRouting.hudRoutingMode(readSurfacePref(HudRouting.HUD_ROUTING_PREF)); }
-  // L6 c18, idle warm-up of the Decisions endpoint (pref egdesk.decisionWarmup "advisory" | "on"; default off: the post below never happens).
-  // Typing in a chat composer tells the bridge, at most once a minute and with a closed word only, that a Decisions request may be coming; the
-  // bridge decides whether a long idle makes a warm-up worthwhile. Rules: EGDeskDecisionWarmup.sys.mjs, helper/egdesk-decision-warmup.mjs.
-  const DecisionWarmup = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskDecisionWarmup.sys.mjs');
-  const composerWarmup = DecisionWarmup.createComposerWarmup({
-    mode: () => readSurfacePref(DecisionWarmup.DECISION_WARMUP_PREF),
-    post: (path, body) => deskStoreRequest('POST', path, body, { timeoutMs: DecisionWarmup.DECISION_WARMUP_LIMITS.waitMs }),
-  });
   function scheduleHudRouting() {
     if (hudRoutingModeNow() === 'off') return;
     if (hudRoutingTimer) window.clearTimeout(hudRoutingTimer);
@@ -31354,6 +31346,14 @@
       return { status: response.status, body: payload };
     } finally { window.clearTimeout(timer); signal?.removeEventListener('abort', abort); }
   }
+  // L6 c18, idle warm-up of the Decisions endpoint (pref egdesk.decisionWarmup "advisory" | "on"; default off: the post below never happens).
+  // Typing in a chat composer tells the bridge, at most once a minute and with a closed word only, that a Decisions request may be coming; the
+  // bridge decides whether a long idle makes a warm-up worthwhile. Rules: EGDeskDecisionWarmup.sys.mjs, helper/egdesk-decision-warmup.mjs.
+  const DecisionWarmup = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskDecisionWarmup.sys.mjs');
+  const composerWarmup = DecisionWarmup.createComposerWarmup({
+    mode: () => readSurfacePref(DecisionWarmup.DECISION_WARMUP_PREF),
+    post: (path, body) => deskStoreRequest('POST', path, body, { timeoutMs: DecisionWarmup.DECISION_WARMUP_LIMITS.waitMs }),
+  });
 
   // Each /v1/state read (null for an older bridge). A store that just became
   // ready receives the Desk as it is now (after the one-time import, never instead of it).
