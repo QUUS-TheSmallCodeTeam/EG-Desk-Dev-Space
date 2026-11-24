@@ -189,7 +189,7 @@ for (const mode of ['extract', 'draft']) test(`encrypted guest question and one 
   const siblingPreview = prepare(checked.review)
   const result = await ask.run({ ticket: preview.ticket, confirm: true })
   const answer = mode === 'draft' ? DRAFT_ANSWER : EXCERPT
-  exactJson(result, { mode, answer, source: mode === 'draft' ? 'draft' : 'local', ...(mode === 'extract' ? { omittedCount: 0 } : {}) }, 'confirmed ask yields only an editable reply and disclosure mode')
+  exactJson(result, { mode, answer, source: mode === 'draft' ? 'draft' : 'local', ...(mode === 'extract' ? { omittedCount: 0 } : { screening: 'decision' }) }, 'confirmed ask yields only an editable reply and disclosure mode')
   assert.equal(ask.policy({ boardId: hostBoard.id, action: 'get' }).policy.codeActive, false)
   for (const ticket of [preview.ticket, siblingPreview.ticket]) await assert.rejects(ask.run({ ticket, confirm: true }), { code: 'BOARD_AGENT_ASK_STALE' })
   assert.throws(() => prepare(checked.review), { code: 'BOARD_AGENT_ASK_CODE_INVALID' })

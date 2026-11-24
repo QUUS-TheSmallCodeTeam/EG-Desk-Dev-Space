@@ -197,7 +197,8 @@ export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, on
     s.view.prepared = null;
     const binding = s.binding;
     close();
-    onAnswer(binding, { answer: result.answer, mode, decisionEgress, source: result.source });
+    const screening = ['decision', 'advisory', 'fallback'].includes(result.screening) ? result.screening : null;
+    onAnswer(binding, { answer: result.answer, mode, decisionEgress, source: result.source, ...(screening ? { screening } : {}) });
   }
   return { view, open, close, invalidate: () => current(active), pickProfile, editExcerpt, editInstructions, addExcerpt,
     save: () => changePolicy('save'), revoke: () => changePolicy('revoke'), issue: () => changePolicy('issue'), chooseMode, chooseDecision, prepare, back, run };
@@ -275,7 +276,7 @@ export function boardAgentAskContent(el, view, flow, onClose) {
         p.mode === 'draft' ? display('공개 답변 말투', styles[p.replyStyle]) : null,
         p.mode === 'draft' && p.publicInstructions ? display('공개 답변 지침', p.publicInstructions) : null),
       p.mode === 'draft' ? text(`OpenAI의 ${p.draftModel} 모델이 표시된 질문·공개 말투와 지침·표시된 공개 발췌문 중 관련 항목만 봅니다. Board 운영 쪽의 전용 API 키로 비용을 부담하며, 개인 Chat·CLI와 구독 사용량을 쓰지 않습니다.`, 'warning') : text('관련 공개 발췌문을 원문 그대로 찾습니다. 새 답변 문장을 만들지 않습니다.'),
-      p.decisionEgress ? text(`관련성 판단을 위해 별도 OpenAI Decisions API (${p.decisionModel})에 표시된 질문과 공개 발췌문 전부를 보냅니다. Board 운영 쪽의 Decisions API 설정을 사용합니다.`, 'warning') : text(p.mode === 'extract' ? '외부 API로 보내지 않습니다.' : '별도 Decisions API에는 보내지 않습니다.'),
+      p.decisionEgress ? text(`관련성 판단을 위해 별도 OpenAI Decisions API (${p.decisionModel})에 표시된 질문과 공개 발췌문 전부를 보냅니다. Board 운영 쪽의 Decisions API 설정을 사용합니다.${p.decisionMode === 'advisory' ? ' 지금은 ‘기록만’ 모드라 그 판단은 선택에 반영되지 않고 이 기기의 단어 일치로 고릅니다. 그래도 전송되며 API 비용이 생길 수 있습니다.' : ''}`, 'warning') : text(p.mode === 'extract' ? '외부 API로 보내지 않습니다.' : '별도 Decisions API에는 보내지 않습니다.'),
       text('실행해도 회신 파일을 만들거나 전달하지 않습니다. 결과를 회신 작성 창에서 확인하고 편집할 수 있습니다.'),
       step === 'running' ? status('한 번 실행 중… 닫으면 결과를 회신에 넣지 않습니다.') : row(button('back', '뒤로', flow.back), button('run', '이 내용으로 한 번 실행', flow.run, true))];
   } else if (step === 'done') content = [status(view.message)];
