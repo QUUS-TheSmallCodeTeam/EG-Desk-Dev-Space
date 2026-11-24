@@ -97,9 +97,11 @@ export function hintsOf(entry) {
   for (const h of entry.hunks) for (const line of [...h.removed, ...h.added]) { const m = /^questions\[([^\]]+)\]\.instructions \|/.exec(line); if (m) wording.add(m[1]) }
   if (wording.size) hints.push(`wording of ${[...wording].join(', ')} changed`)
   if (entry.nameChanges && (entry.nameChanges.added.length || entry.nameChanges.removed.length)) hints.push(`question set changed (${entry.names.old.length} -> ${entry.names.new.length})`)
+  // lines added anywhere else in the same body: a list that was renumbered or reordered shows as a removal in one hunk and an addition in the next, which is not a section that is gone
+  const addedElsewhere = entry.hunks.reduce((n, h) => n + h.added.filter(l => !/^questions\[/.test(l) && !/\(nothing\)|\(none\)|\(empty\)/.test(l)).length, 0)
   for (const h of entry.hunks) {
     const gone = h.removed.filter(l => !/^questions\[/.test(l))
-    if (gone.length >= 3 && (!h.added.length || h.added.every(l => /\(nothing\)|\(none\)|\(empty\)/.test(l)))) hints.push(`a section of ${gone.length} lines is gone${h.added.length ? ' and reads (nothing)' : ''}${h.after ? `, after "${clip(String(h.after).replace(/^[^|]*\|\s?/, ''), 60)}"` : ''}`)
+    if (addedElsewhere * 2 < gone.length && gone.length >= 3 && (!h.added.length || h.added.every(l => /\(nothing\)|\(none\)|\(empty\)/.test(l)))) hints.push(`a section of ${gone.length} lines is gone${h.added.length ? ' and reads (nothing)' : ''}${h.after ? `, after "${clip(String(h.after).replace(/^[^|]*\|\s?/, ''), 60)}"` : ''}`)
   }
   const heldGone = entry.hunks.some(h => h.removed.some(l => /\b(held|already delivered|already sent)\b/i.test(l)) && !h.added.some(l => /\b(held|already delivered|already sent)\b/i.test(l)))
   if (heldGone) hints.push('lines about held (already delivered) pages are gone')
@@ -226,6 +228,23 @@ export function formatReport(report, { full = false } = {}) {
   }
   const failed = report.steps.flatMap(s => s.checks.newlyFailed.map(c => `${c.id}`)), fixed = report.steps.flatMap(s => s.checks.newlyPassed.map(c => c.id))
   L.push(`checks: newly failed ${failed.length}${failed.length ? ` (${failed.join(', ')})` : ''}; newly passed ${fixed.length}${fixed.length ? ` (${fixed.join(', ')})` : ''}; new in the plan ${report.steps.reduce((t, s) => t + s.checks.newFailing.length + s.checks.newPassing.length, 0)} (failing ${report.steps.reduce((t, s) => t + s.checks.newFailing.length, 0)})`)
+  // a digest first: the changed bodies that carry a hint or a named commit, grouped by family and hint, with the commits most likely behind them
+  const groups = new Map(), famOf = new Map(report.families.map(f => [f.family, f]))
+  for (const st of report.steps) for (const b of st.bodies) {
+    if (b.status !== 'changed' || (!b.hints?.length && !b.pickaxe?.length)) continue
+    const key = `${b.family}\u0000${(b.hints ?? []).join('; ')}`
+    if (!groups.has(key)) groups.set(key, { family: b.family, hints: b.hints ?? [], steps: [], pickaxe: [] })
+    const g = groups.get(key); if (!g.steps.includes(st.id)) g.steps.push(st.id); for (const px of b.pickaxe ?? []) for (const c of px.commits) if (!g.pickaxe.some(x => x.sha === c.sha)) g.pickaxe.push(c)
+  }
+  if (groups.size) {
+    L.push('likely causes (details below):')
+    for (const g of [...groups.values()].slice(0, 8)) {
+      const fam = famOf.get(g.family)
+      const commits = [...g.pickaxe, ...(fam?.builderCommits ?? []), ...(fam?.symbols ?? []).flatMap(x => x.commits)].filter((c, i, all) => all.findIndex(d => d.sha === c.sha) === i).slice(0, 3)
+      L.push(`  ${g.family} in ${g.steps.join(', ')}: ${g.hints.length ? g.hints.join('; ') : 'body text changed'}${commits.length ? `  <- ${commits.map(c => `${c.sha} ${clip(c.subject, 60)}`).join(' | ')}` : ''}`)
+    }
+    if (groups.size > 8) L.push(`  … ${groups.size - 8} more groups`)
+  }
   for (const s of report.steps) {
     const c = s.checks, posted = s.posted
     const messageChange = posted.oldAgent !== posted.newAgent || posted.oldFlows !== posted.newFlows

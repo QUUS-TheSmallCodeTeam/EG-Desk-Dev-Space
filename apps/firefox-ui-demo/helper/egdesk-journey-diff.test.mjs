@@ -45,6 +45,9 @@ test('hintsOf: wording of a question, a changed question set, a section that is 
   const hints = hintsOf(entry)
   assert.ok(hints.includes('wording of tn_need changed')); assert.ok(hints.includes('question set changed (3 -> 1)'))
   assert.ok(hints.some(h => /^a section of 3 lines is gone and reads \(nothing\), after "Held in the answering model's context:"$/.test(h)), hints.join(' / '))
+  // a list that was replaced (removed in one hunk, added in the next) is not a section that is gone
+  const moved = { names: { old: ['a'], new: ['a'] }, nameChanges: { added: [], removed: [] }, hunks: [{ removed: ['c | l1', 'c | l2', 'c | l3', 'c | l4'], added: [], after: null }, { removed: [], added: ['c | m1', 'c | m2', 'c | m3'], after: null }] }
+  assert.deepEqual(hintsOf(moved), [])
   assert.deepEqual(hintsOf({ names: { old: ['a'], new: ['a'] }, nameChanges: { added: [], removed: [] }, hunks: [{ removed: ['x | held pages one'], added: [], after: null }] }), ['lines about held (already delivered) pages are gone'])
   assert.deepEqual(hintsOf({ names: { old: ['a'], new: ['a'] }, nameChanges: { added: [], removed: [] }, hunks: [{ removed: ['x | one'], added: ['x | two'], after: null }] }), [])
 })
@@ -102,6 +105,7 @@ test('the report: newly failed / new / passed checks, posted counts, requests, c
   // the words of a changed line are searched in the family's files, and the commits that added or removed them are named on the body
   const asked = calls.filter(c => c[0] === 'pickaxe')
   assert.ok(asked.length >= 1 && asked.every(c => c[2].includes('helper/egdesk-draft-check.mjs')), 'searched in the family files')
+  assert.match(formatReport(report).join('\n'), /likely causes \(details below\):\n  draft_check in s1: body text changed  <- c3 the wording commit \| c1 draft tense/, 'the digest names the pickaxe commit first, then the builder commit')
   assert.deepEqual(dc.pickaxe.map(p => [p.text, p.commits[0].sha]), [['A long sentence in its old wording that the code writes', 'c3'], ['A long sentence in its new wording that the code writes', 'c3']])
 })
 
