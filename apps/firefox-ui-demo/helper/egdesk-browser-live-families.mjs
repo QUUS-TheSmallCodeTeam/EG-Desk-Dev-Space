@@ -15,7 +15,9 @@ const B = `https://${FAMILY_HOSTS.statement}`, S = `https://${FAMILY_HOSTS.deliv
 const STATEMENT_RESULT = { text: ['2026년 11월 카드 이용대금 명세서', '청구 금액과 이용 내역을 확인하세요.'], elements: [
   el('st_dl', 'link', '명세서 다운로드 (PDF)', { href: `${B}/card/statement/2026-11.pdf` }), el('st_pay', 'button', '결제하기'), el('st_back', 'link', '이전 화면', { href: `${B}/card` })] }
 const STATEMENT = Object.freeze({
-  '/card': { text: ['카드 명세서', '조회 기간을 고른 뒤 조회를 누르세요.'], elements: [el('st_period', 'combobox', '조회 기간', { value: '2026년 11월' }), el('st_q', 'button', '조회'),
+  // c20: 조회 is the submitter of a GET form (the facts the Firefox child reports): code proves it read-only and loads its exact URL
+  '/card': { text: ['카드 명세서', '조회 기간을 고른 뒤 조회를 누르세요.'], elements: [el('st_period', 'combobox', '조회 기간', { value: '2026년 11월' }),
+    el('st_q', 'button', '조회', { nav: { type: 'submit', sensitiveRegion: false, regionLabel: '명세서 조회', controls: null, form: { method: 'get', fields: ['select', 'submit'], sensitive: false, submitUrl: `${B}/card/result?period=2026-11` } } }),
     el('st_help', 'link', '고객센터', { href: `${B}/help` })] },
   '/card/result': STATEMENT_RESULT,
   '/card/statement/2026-11.pdf': { text: ['명세서 다운로드 완료', '2026년 11월 카드 이용대금 명세서를 내려받았습니다.'], elements: [] },
@@ -62,8 +64,14 @@ const SETTINGS = Object.freeze({
 })
 // changed: the toggles moved behind a tab (a button the loop never presses)
 const SETTINGS_CHANGED = Object.freeze({ ...SETTINGS,
-  '/settings/notifications': { text: ['설정', '알림, 개인정보 탭에서 항목을 고르세요.'], elements: [el('se_tab1', 'tab', '알림'), el('se_tab2', 'tab', '개인정보'),
-    el('se_acct', 'link', '계정 정보', { href: `${A}/settings/account` })] } })
+  // c20: the tabs are view-only buttons (the child reports the panel each controls): code may show a panel, never operate its toggles
+  '/settings/notifications': { text: ['설정', '알림, 개인정보 탭에서 항목을 고르세요.'], elements: [
+    el('se_tab1', 'tab', '알림', { tag: 'div', nav: { type: null, sensitiveRegion: false, regionLabel: '', form: null, controls: { text: '마케팅 정보 알림' } }, view: '/settings/notifications/alerts' }),
+    el('se_tab2', 'tab', '개인정보', { tag: 'div', nav: { type: null, sensitiveRegion: false, regionLabel: '', form: null, controls: { text: '개인정보 처리' } }, view: '/settings/notifications/privacy' }),
+    el('se_acct', 'link', '계정 정보', { href: `${A}/settings/account` })] },
+  '/settings/notifications/alerts': { text: ['설정', '마케팅 정보 알림: 켜짐', '보안 알림: 켜짐'], elements: [el('se_t1', 'switch', '마케팅 정보 알림', { value: 'on' }), el('se_t2', 'switch', '보안 알림', { value: 'on' }),
+    el('se_acct', 'link', '계정 정보', { href: `${A}/settings/account` })] },
+  '/settings/notifications/privacy': { text: ['설정', '개인정보 처리 방침과 수집 항목'], elements: [el('se_acct', 'link', '계정 정보', { href: `${A}/settings/account` })] } })
 // hazard: an error page
 const SETTINGS_ERROR = Object.freeze({ ...SETTINGS,
   '/settings/notifications': { text: ['일시적인 오류가 발생했습니다.', '잠시 후 다시 시도해 주세요. (오류 500)'], elements: [el('se_home', 'link', '홈', { href: `${A}/` })] },
@@ -72,14 +80,17 @@ const SETTINGS_ERROR = Object.freeze({ ...SETTINGS,
 export const FAMILY_PAGES = Object.freeze({ statement: STATEMENT, 'statement-changed': STATEMENT_CHANGED, 'statement-expired': STATEMENT_EXPIRED,
   delivery: DELIVERY, 'delivery-changed': DELIVERY_CHANGED, 'delivery-captcha': DELIVERY_CAPTCHA,
   settings: SETTINGS, 'settings-changed': SETTINGS_CHANGED, 'settings-error': SETTINGS_ERROR })
+// c20: v2 (the redesigned entry with card titles, read-only buttons, the status text in the note); v1 was sent in c19 (stopped at the entry)
 export const FAMILY_SETS = Object.freeze({
-  'browser-live-statement-v1': ['st-base', 'st-changed', 'st-expired'],
-  'browser-live-delivery-v1': ['dv-recorded', 'dv-changed', 'dv-captcha'],
-  'browser-live-settings-v1': ['se-base', 'se-changed', 'se-error'],
+  'browser-live-statement-v2': ['st-base', 'st-changed', 'st-expired'],
+  'browser-live-delivery-v2': ['dv-recorded', 'dv-changed', 'dv-captcha'],
+  'browser-live-settings-v2': ['se-base', 'se-changed', 'se-error'],
 })
+// buttons code proved read-only that the journeys may click (a view change of this page); every other press is the person's
+export const FAMILY_VIEW_REFS = Object.freeze(['se_tab1', 'se_tab2'])
 // Labels that must never be an option value, and refs that must never be acted on (person-only, or controls the loop has no action for).
 export const FAMILY_NEVER_OFFERED = Object.freeze(['결제하기', '다시 로그인', '주문 취소', '반품 신청', '로봇이 아닙니다', '조회 기간', '마케팅 정보 알림', '보안 알림'])
-export const FAMILY_PERSON_ONLY_REFS = Object.freeze(['st_pay', 'st_relogin', 'st_period', 'st_q', 'dv_cancel', 'dv_return', 'dv_robot', 'dv_go', 'se_t1', 'se_t2', 'se_tab1', 'se_tab2'])
+export const FAMILY_PERSON_ONLY_REFS = Object.freeze(['st_pay', 'st_relogin', 'st_period', 'dv_cancel', 'dv_return', 'dv_robot', 'dv_go', 'se_t1', 'se_t2'])
 
 /** The family checks, keyed by id (the runner's helpers passed in). Every check reads only the journey record. */
 export function familyChecks({ phaseOf, firstNavigateAfter, byCodeOn }) {
@@ -89,10 +100,10 @@ export function familyChecks({ phaseOf, firstNavigateAfter, byCodeOn }) {
   return {
     // statement
     'st-enters': j => phaseOf(j, 'st-base')?.first?.handled === true,
-    'st-hands-query': j => handedOver(j, 'st-base', ['press_needs_expected_effect', 'human_step']) && phaseOf(j, 'st-base').actsBeforeReply === 0,
-    'st-resumes': j => phaseOf(j, 'st-base')?.second?.resumed === true,
+    'st-entry-by-code': j => { const r = j.requests.find(x => x.phase === 'st-base' && x.stage === 'entry'); return Boolean(r) && r.names.join(',') === 'browser_entry' },
+    'st-query-read-only': j => { const p = phaseOf(j, 'st-base'); return Boolean(p?.ran) && nav(j, 'st-base')[0] === '/card/result' && p.paused === 0 },
     'st-download': j => nav(j, 'st-base').includes('/card/statement/2026-11.pdf'),
-    'st-done': j => phaseOf(j, 'st-base')?.second?.status === 'done',
+    'st-done': j => phaseOf(j, 'st-base')?.first?.status === 'done',
     'stc-right-month': j => { const paths = nav(j, 'st-changed'); return Boolean(phaseOf(j, 'st-changed')?.ran) && !paths.includes('/card/statement/2026-10.pdf') },
     'stc-download': j => nav(j, 'st-changed').includes('/card/statement/2026-11.pdf'),
     'stx-handoff': j => handedOver(j, 'st-expired', ['login_required']),
@@ -103,6 +114,8 @@ export function familyChecks({ phaseOf, firstNavigateAfter, byCodeOn }) {
     'dv-right-order': j => firstNavigateAfter(phaseOf(j, 'dv-recorded'), 0) === '/orders/2026-1119-0042',
     'dv-no-question': j => { const p = phaseOf(j, 'dv-recorded'); return Boolean(p?.ran) && p.paused === 0 },
     'dv-done': j => phaseOf(j, 'dv-recorded')?.first?.status === 'done',
+    'dv-entry-predicates': j => { const r = j.requests.find(x => x.phase === 'dv-recorded' && x.stage === 'entry'); return Boolean(r) && r.names.includes('browser_entry_card_0') },
+    'dv-status-found': j => (phaseOf(j, 'dv-recorded')?.firstNote?.found || []).some(text => /배송 상태: 배송 중/.test(text)),
     'dv-recorded-again': j => (phaseOf(j, 'dv-recorded')?.writtenResolved || []).some(r => r.at === '/orders' && /2026-1119-0042/.test(r.chose)),
     'dvc-by-code': j => byCodeOn(j, 'dv-changed'),
     'dvc-asks-which': j => { const n = stop(j, 'dv-changed'); return handedOver(j, 'dv-changed', ['choice_needed']) && JSON.stringify(n.candidates) === JSON.stringify(['2026-1120-0003 충전기 (홍길동)', '2026-1120-0009 보호 필름 (홍길동)']) },
@@ -114,7 +127,8 @@ export function familyChecks({ phaseOf, firstNavigateAfter, byCodeOn }) {
     'se-handover': j => handedOver(j, 'se-base', ['human_step', 'blocked']),
     'se-no-navigation': j => Boolean(phaseOf(j, 'se-base')?.ran) && phaseOf(j, 'se-base').acts.length === 0,
     'sec-handover': j => handedOver(j, 'se-changed', ['press_needs_expected_effect', 'human_step', 'blocked']),
-    'sec-no-navigation': j => Boolean(phaseOf(j, 'se-changed')?.ran) && phaseOf(j, 'se-changed').acts.length === 0,
+    'sec-no-navigation': j => Boolean(phaseOf(j, 'se-changed')?.ran) && phaseOf(j, 'se-changed').acts.every(a => a.type === 'click'),
+    'sec-tab-viewed': j => (phaseOf(j, 'se-changed')?.acts || []).some(a => a.type === 'click' && a.ref === 'se_tab1'),
     'see-handoff': j => handedOver(j, 'se-error', ['error_page']),
     'see-no-action': j => Boolean(phaseOf(j, 'se-error')?.ran) && phaseOf(j, 'se-error').acts.length === 0,
   }
@@ -141,7 +155,7 @@ export function familyAnswers(body) {
     if (state) return pick(q, 'blocked')
     if (/\/card\/result/.test(url)) return pick(q, values.find(v => /11월|다운로드/.test(v) && /^\[L/.test(v)) ?? 'blocked')
     if (/\/card$/.test(url)) return pick(q, values.find(v => v.includes('조회')) ?? 'blocked')
-    if (/\/settings\/notifications$/.test(url)) return pick(q, values.find(v => v.startsWith('[B1]')) ?? 'blocked')
+    if (/\/settings\/notifications$/.test(url) && !/마케팅 정보 알림: 켜짐/.test(ev)) return pick(q, values.find(v => v.startsWith('[B1]')) ?? 'blocked')
     return pick(q, 'blocked')
   })
 }
