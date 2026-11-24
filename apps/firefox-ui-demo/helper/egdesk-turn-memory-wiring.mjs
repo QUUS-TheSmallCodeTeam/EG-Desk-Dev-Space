@@ -5,9 +5,21 @@ import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 // lazily on the first advisory or on turn, so a default bridge does not even open its file.
 // 'advisory' records only. 'on' attaches the packet and lets the write judgment store what the write path accepts.
 //
+// Developer flags of the bridge for the turn-memory options (environment, read once at start; no settings screen entry, nothing user-facing).
+// Unset or any other value means the default: one packet off, write target 'about', confirmation in conversation off.
+//   EGDESK_TURN_MEMORY_ONE_PACKET=on        the memory pages ride under the context selection's packet
+//   EGDESK_TURN_MEMORY_WRITE_TARGET=choice  the old N-way write target, for comparison ('about' is the default)
+//   EGDESK_TURN_MEMORY_CONFIRM=on           pending readings may be confirmed or refused through the conversation
+export const TURN_MEMORY_FLAGS = Object.freeze({ onePacket: 'EGDESK_TURN_MEMORY_ONE_PACKET', writeTarget: 'EGDESK_TURN_MEMORY_WRITE_TARGET', confirmInConversation: 'EGDESK_TURN_MEMORY_CONFIRM' })
+export function turnMemoryFlagsFromEnv(env = {}) {
+  const get = name => (env && typeof env === 'object' && typeof env[name] === 'string' ? env[name] : null)
+  return { ...(get(TURN_MEMORY_FLAGS.onePacket) === 'on' ? { onePacket: true } : {}), ...(get(TURN_MEMORY_FLAGS.writeTarget) === 'choice' ? { writeTarget: 'choice' } : {}),
+    ...(get(TURN_MEMORY_FLAGS.confirmInConversation) === 'on' ? { confirmInConversation: true } : {}) }
+}
+
 // createTurnMemoryConfig({ settings, getAdapter, ontologyStore, deskStore, budget?, deadlineMs? }) -> the object the runtime reads:
 //   { mode(), wiki({ body, context, sources }), scope({ context }), writer(wiki, options), budget, caps, deadlineMs, ontologyWrite }
-export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = null, deskStore = null, budget = { linksFirst: true }, deadlineMs = 15000, caps = null, onePacket = false, writeTarget = 'choice', confirmInConversation = false } = {}) {
+export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = null, deskStore = null, budget = { linksFirst: true }, deadlineMs = 15000, caps = null, onePacket = false, writeTarget = 'about', confirmInConversation = false } = {}) {
   const mode = () => (['advisory', 'on'].includes(settings?.turnMemory?.mode) ? settings.turnMemory.mode : 'off')
   return {
     // The same lazy adapter, for other consumers of the wiki write path (the direct browser entry); it opens nothing by itself.
@@ -18,9 +30,9 @@ export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = n
     // The write path of a snapshot (persists what it accepts). Pending readings never promote here; see createWikiWriter.promote.
     writer: (wiki, options) => getAdapter().writerFor(wiki, options),
     budget, deadlineMs, ...(caps ? { caps } : {}),
-    // Internal flags, all off unless the bridge passes them: one packet with the context selection, the 'about' write-target design,
-    // and confirmation of pending readings through the conversation.
-    ...(onePacket === true ? { onePacket: true } : {}), ...(writeTarget === 'about' ? { writeTarget: 'about' } : {}), ...(confirmInConversation === true ? { confirmInConversation: true } : {}),
+    // Internal flags, absent unless the bridge passes them: one packet with the context selection (off by default), the write-target design
+    // ('about' by default; 'choice' is passed only to compare), and confirmation of pending readings through the conversation (off by default).
+    ...(onePacket === true ? { onePacket: true } : {}), ...(writeTarget === 'choice' ? { writeTarget: 'choice' } : {}), ...(confirmInConversation === true ? { confirmInConversation: true } : {}),
     scope: ({ context, body }) => getAdapter().scopeFor(context, body),
     async wiki({ body, context, sources }) {
       const adapter = getAdapter()

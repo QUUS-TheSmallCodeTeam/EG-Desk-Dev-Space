@@ -53,7 +53,8 @@ test('all features on, one session: memory, briefing, a browser task, a long com
   await w.advance(3000); await w.answer(A.tidy); await w.idle(); ui.pump(); close('a2')
   assert.equal(w.subjectiveTurnsIn('a2').main, 1)
   assert.equal(w.history().length, 4, 'one answer bubble for the turn')
-  // Finding A1 (reported, not pinned): with no newly attached material the draft check has nothing to compare with and sends the answer back for a rewrite.
+  // Finding A1 (fixed in L7 c16, pinned by the A1 test in egdesk-all-on-open-findings.test.mjs): the draft check now gets the pages the Agent
+  // already holds as evidence, so the follow-up answer is posted as written. Recorded here for the ledger.
   ledger.findings.A1 = { draftCheckRequests: w.byFeature('a2').draft_check ?? 0, rewriteTurns: w.subjectiveTurnsIn('a2').fork, postedAnswerIsTheAgentsDraft: w.history().at(-1)[1] === A.tidy, posted: w.history().at(-1)[1] }
 
   // ---- a3. the briefing for that answer: design guide from the held materials, one fill turn, published in order ----
@@ -265,9 +266,9 @@ test('work placement advisory: the same pointer judgment is recorded, no pointer
 })
 
 // ---- one packet: with the turn-memory option on, a page the context selection already carries is not sent a second time ----
-test('one packet (turn-memory option, no bridge switch yet): selection and memory share one packet and each page body is sent once', async t => {
+test('one packet (bridge developer flag EGDESK_TURN_MEMORY_ONE_PACKET): selection and memory share one packet and each page body is sent once', async t => {
   const first = async onePacket => {
-    const w = allOnWorld(t, { onePacket })
+    const w = allOnWorld(t, { env: onePacket ? { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' } : {} })
     await w.settings.turnMemory.save('on')
     w.step('a1'); await w.send(Q.quote); await w.idle()
     const start = w.turnStarts().at(-1).params
@@ -278,7 +279,7 @@ test('one packet (turn-memory option, no bridge switch yet): selection and memor
   assert.equal(one.bodies, 1)
   assert.deepEqual(one.byFeature, two.byFeature, 'the same Decision requests either way')
   assert.deepEqual(one.rows, two.rows, 'and the same activity rows')
-  // The bridge's present behaviour (it does not pass the option): two packets, the body twice. Finding A3 stays open until a switch exists.
+  // The bridge's default (the flag unset): two packets, the body twice. A3 is closed in the bridge by the flag (L7 c16), off by default.
   assert.deepEqual(two.keys, ['egdesk_context', 'egdesk_decision_context', 'egdesk_channel', 'egdesk_turn_memory'])
   if (process.env.EGDESK_ALL_ON_LEDGER) writeFileSync(process.env.EGDESK_ALL_ON_LEDGER.replace(/\.json$/, '') + '-one-packet.json', JSON.stringify({ onePacket: one, bridgeDefault: two }, null, 1))
 })

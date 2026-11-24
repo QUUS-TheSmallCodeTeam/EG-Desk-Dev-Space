@@ -108,8 +108,26 @@ test('the wiring passes its internal flags to the runtime only when the bridge s
   const base = { settings: { turnMemory: { mode: 'on' } }, getAdapter: () => ({}) }
   const plain = createTurnMemoryConfig(base)
   assert.deepEqual(['onePacket', 'writeTarget', 'confirmInConversation'].map(k => Object.hasOwn(plain, k)), [false, false, false])
-  const all = createTurnMemoryConfig({ ...base, onePacket: true, writeTarget: 'about', confirmInConversation: true })
-  assert.deepEqual([all.onePacket, all.writeTarget, all.confirmInConversation], [true, 'about', true])
+  // the write target is 'about' unless 'choice' is asked for (to compare); 'about' is the default, so it is not passed
+  const all = createTurnMemoryConfig({ ...base, onePacket: true, writeTarget: 'choice', confirmInConversation: true })
+  assert.deepEqual([all.onePacket, all.writeTarget, all.confirmInConversation], [true, 'choice', true])
+  assert.equal(Object.hasOwn(createTurnMemoryConfig({ ...base, writeTarget: 'about' }), 'writeTarget'), false)
   const odd = createTurnMemoryConfig({ ...base, onePacket: 'yes', writeTarget: 'anything', confirmInConversation: 1 })
   assert.deepEqual(['onePacket', 'writeTarget', 'confirmInConversation'].map(k => Object.hasOwn(odd, k)), [false, false, false], 'only the exact values switch anything on')
+})
+
+// ---- A3: the bridge passes the internal turn-memory options from its developer flags ----
+test('the bridge builds its turn-memory config with the options of its developer flags; unset or any other value leaves the defaults', async () => {
+  const { TURN_MEMORY_FLAGS, turnMemoryFlagsFromEnv } = await import('./egdesk-turn-memory-wiring.mjs')
+  assert.deepEqual(TURN_MEMORY_FLAGS, { onePacket: 'EGDESK_TURN_MEMORY_ONE_PACKET', writeTarget: 'EGDESK_TURN_MEMORY_WRITE_TARGET', confirmInConversation: 'EGDESK_TURN_MEMORY_CONFIRM' })
+  assert.deepEqual(turnMemoryFlagsFromEnv({}), {})
+  assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_ONE_PACKET: 'on', EGDESK_TURN_MEMORY_WRITE_TARGET: 'choice', EGDESK_TURN_MEMORY_CONFIRM: 'on' }), { onePacket: true, writeTarget: 'choice', confirmInConversation: true })
+  assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_ONE_PACKET: '1', EGDESK_TURN_MEMORY_WRITE_TARGET: 'about', EGDESK_TURN_MEMORY_CONFIRM: 'yes' }), {}, 'only the exact values; "about" is already the default')
+  assert.deepEqual([turnMemoryFlagsFromEnv(null), turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_ONE_PACKET: true })], [{}, {}])
+  // the bridge itself: exactly one turn-memory config, built with the flags of its own environment
+  const { readFileSync } = await import('node:fs')
+  const source = readFileSync(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  assert.equal([...source.matchAll(/createTurnMemoryConfig\(/g)].length, 1)
+  assert.match(source, /const turnMemoryConfig = createTurnMemoryConfig\(\{ settings: bridgeSettings, ontologyStore: ensureOntologyStore, deskStore, \.\.\.turnMemoryFlagsFromEnv\(process\.env\),/)
+  assert.match(source, /import \{[^}]*\bturnMemoryFlagsFromEnv\b[^}]*\} from '\.\/egdesk-turn-memory-wiring\.mjs'/)
 })

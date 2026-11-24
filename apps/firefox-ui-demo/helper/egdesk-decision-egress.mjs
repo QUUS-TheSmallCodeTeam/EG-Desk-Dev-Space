@@ -107,6 +107,8 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-terminal-command-gate.mjs': ['terminal_command'],
   'egdesk-terminal-judge.mjs': ['terminal_output', 'command_output'],
   'egdesk-memory-live-runner.mjs': ['memory_page: measurement tool; the public synthetic wiki only, through guardClient'],
+  // Measurement tool: drives the real runtime, whose own gates ask every kind before each request; synthetic pages in a temporary directory only.
+  'egdesk-memory-journey.mjs': ['memory_page', 'speech_history: measurement tool over the real runtime and its own gates; public synthetic data only'],
   'egdesk-turn-memory.mjs': ['memory_page', 'topic_history'],
   // The note (a memory page's title and reported status) and the previous reply of this DM (a past utterance): asked of the run's gate by the runtime before the call.
   'egdesk-record-confirmation.mjs': ['memory_page', 'speech_history'],

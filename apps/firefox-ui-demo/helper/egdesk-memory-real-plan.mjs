@@ -117,7 +117,10 @@ export async function buildPlan({ pages = SYNTHETIC_PAGES, askedAt = ASKED_AT, s
     const client = scriptedClient(run, wiki, recorded)
     const position = run.position === 'mid' ? { kind: 'mid', reason: 'live_thread' } : { kind: 'first', reason: 'no_native_thread' }
     const memory = await prepareTurnMemory({ message: run.message, wiki, client, scope: SCOPE, askedAt, position, threadKey: 'thread-1', ontologyWrite: true,
-      budget: run.position === 'mid' ? { linksFirst: true } : {}, delivered: run.held.length ? receiptsFor(wiki, run.held, 'thread-1') : null })
+      budget: run.position === 'mid' ? { linksFirst: true } : {}, delivered: run.held.length ? receiptsFor(wiki, run.held, 'thread-1') : null,
+      // These runs are the record of what was measured on 2026-11-24 (the 'choice' write target); they keep that design so the saved real
+      // answers still score against the same requests. The 'about' design has its own plan (egdesk-write-target-plan.mjs).
+      writeTarget: 'choice' })
     if (memory.judgeWrite) await memory.judgeWrite()
     const requests = recorded.map((r, index) => {
       const names = r.questions.map(q => q.name)

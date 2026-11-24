@@ -244,7 +244,7 @@ test('write judgment runs after the answer and stores only a pending reading; no
   const x = await rig({ tm: { writer: (w, o) => createWikiWriter(w, { ...o, acceptStatus: () => true }) } })
   await x.send(DONE, 'r1'); await x.done(1)
   assert.ok(x.timeline.indexOf('decide:write') > x.timeline.indexOf('turn/completed'), 'the write judgment is made after the answer completed')
-  assert.deepEqual(x.chat.turnMemoryWriteReceipts.get(x.run()), { proposal: 'update_status', reason: null, applied: 'recorded_pending' })
+  assert.deepEqual(x.chat.turnMemoryWriteReceipts.get(x.run()), { proposal: 'update_status', reason: null, applied: 'recorded_pending', pageId: 'db/pg-plan', status: 'done' })
   const page = x.wiki.pages.get('db/pg-plan')
   assert.equal(page.status, 'plan', 'the stored status is untouched')
   assert.deepEqual(page.statusReadings.map(r => [r.status, r.state]), [['done', 'pending']])
@@ -470,4 +470,38 @@ test('one packet: with turn memory off (or advisory) the flag changes nothing: t
   assert.deepEqual(Object.keys(on.starts[0].additionalContext).filter(k => k === DECISION_CONTEXT_KEY || k === TURN_MEMORY_KEY).sort(), [DECISION_CONTEXT_KEY, TURN_MEMORY_KEY].sort())
   assert.equal(on.starts[0].additionalContext[DECISION_CONTEXT_KEY].value, base.starts[0].additionalContext[DECISION_CONTEXT_KEY].value)
   for (const r of [base, on]) r.store.close()
+})
+
+// ---- A3: a developer flag of the bridge, read the way the bridge reads it, really reaches the runtime ----
+test('bridge flags reach the runtime through createTurnMemoryConfig: one packet, the write target, the confirmation flow; unset changes nothing', async () => {
+  const { createTurnMemoryConfig: build, turnMemoryFlagsFromEnv } = await import('./egdesk-turn-memory-wiring.mjs')
+  const collect = () => [asCandidate('db/pg-plan'), asCandidate('db/pg-health')]
+  const world = async env => {
+    // the config object the bridge builds from its environment; the runtime reads its options from it
+    const config = build({ settings: { turnMemory: { mode: 'on' } }, getAdapter: () => ({}), ...turnMemoryFlagsFromEnv(env) })
+    const options = Object.fromEntries(['onePacket', 'writeTarget', 'confirmInConversation'].filter(k => Object.hasOwn(config, k)).map(k => [k, config[k]]))
+    const x = await rig({ tm: options, client: selecting(), hooks: { collect } })
+    await x.send(DONE, 'r1'); await x.done(1)
+    const out = { keys: Object.keys(x.starts[0].additionalContext).filter(k => k === DECISION_CONTEXT_KEY || k === TURN_MEMORY_KEY).sort(),
+      write: x.decides.filter(d => d.names.some(n => n.startsWith('tw_'))).map(d => (d.names.includes('tw_target') ? 'choice' : 'about')), confirm: x.chat.turnMemoryConfirmOn() }
+    x.store.close()
+    return out
+  }
+  const plain = await world({})
+  assert.deepEqual(plain, { keys: [DECISION_CONTEXT_KEY, TURN_MEMORY_KEY].sort(), write: ['about'], confirm: false })
+  const flagged = await world({ EGDESK_TURN_MEMORY_ONE_PACKET: 'on', EGDESK_TURN_MEMORY_WRITE_TARGET: 'choice', EGDESK_TURN_MEMORY_CONFIRM: 'on' })
+  assert.deepEqual(flagged, { keys: [DECISION_CONTEXT_KEY], write: ['choice'], confirm: true })
+})
+
+test('one packet: a confirmation note with no pages to add also rides under the selection\'s key, never under a second key', async () => {
+  const { buildWiki: build } = await import('./egdesk-wiki-reconstruction.mjs')
+  const x = await rig({ tm: { ontologyWrite: false, onePacket: true, confirmInConversation: true }, client: selecting(), hooks: { collect: () => [asCandidate('db/pg-plan')] } })
+  const value = 'SELECTION'
+  const turn = { note: '[noted in this conversation, not confirmed]\n- "x": the person reported it as done.', noteEntries: [], readyMs: 1, capMs: 10, wiki: build([]), scope: null }
+  assert.equal(x.chat.onePacketSelection({ mode: 'on' }, { [DECISION_CONTEXT_KEY]: { kind: 'application', value } }), value)
+  assert.equal(x.chat.onePacketSelection({ mode: 'advisory' }, { [DECISION_CONTEXT_KEY]: { kind: 'application', value } }), null)
+  assert.equal(x.chat.onePacketSelection({ mode: 'on' }, {}), null)
+  x.chat.decisionContext.turnMemory.ontologyWrite = true
+  assert.equal(typeof x.chat.turnMemoryNoteFor(turn, {}), 'string', 'the note is ready to go')
+  x.store.close()
 })

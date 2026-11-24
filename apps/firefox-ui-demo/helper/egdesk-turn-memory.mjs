@@ -138,6 +138,10 @@ function mergedLabels(interpretations) {
 // derives the target: exactly one yes and every other a decided no -> that record; every one a decided no (or there is no candidate) ->
 // a new record; anything else -> undecided, and nothing is written. "Do not add" stays where it is decided: tn_record.
 export const WRITE_TARGET_DESIGNS = Object.freeze(['choice', 'about'])
+// The design turn memory uses unless told otherwise (2026-11-24 real re-measurement, 6 requests: the per-record predicates answered 0 or 1
+// in every case, while the 'choice' target of the same three new-record utterances stayed undecided, 0.6-0.7, 3 of 3). 'choice' stays
+// selectable for comparison. judgeTurnWrite's own default is still 'choice' for its other callers (the browser task record).
+export const TURN_MEMORY_WRITE_TARGET = 'about'
 const ABOUT_RULES = [
   'You are a system judge reading one message against stored records. Every question is about ONE record or ONE sentence: answer each on its own, whatever the others are.',
   'A record is the record the message is about only when the message reports on, completes, changes or corrects that very record. A record that only belongs to the same task, or that the message would affect indirectly, is not it.',
@@ -409,7 +413,7 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
  * packetFirst (optional, first turn only): return as soon as the packet is ready; the triage that only decides recording keeps running and is
  *   awaited inside judgeWrite (triage is then null in the result and `triageLater` is its promise). It is not bound by the packet deadline.
  */
-export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = 'choice' } = {}) {
+export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = TURN_MEMORY_WRITE_TARGET } = {}) {
   // The deadline is ONE point on ONE clock, fixed here. Everything below asks that clock; a timer only wakes the wait up.
   const deadlineAt = Number.isFinite(deadlineMs) ? clock.now() + Math.max(0, deadlineMs) : null
   const remaining = () => (deadlineAt === null ? null : Math.max(0, deadlineAt - clock.now()))
@@ -482,6 +486,45 @@ const MATERIAL_SECRET = randomBytes(32)
 const materialKey = id => createHmac('sha256', MATERIAL_SECRET).update(id).digest('hex').slice(0, 32)
 const bounded = (value, fallback, low, high) => (Number.isSafeInteger(value) ? Math.min(high, Math.max(low, value)) : fallback)
 
+// The pages of one turn's materials, in order: this turn's packet first (when it was attached), then the held ones. Permission per page.
+function materialRows(result, wiki, { scope, attached, max }) {
+  if (!result || !wiki?.pages || typeof wiki.links !== 'function') return null
+  const limit = bounded(max, MATERIAL_LIMITS.max, 0, MATERIAL_LIMITS.hardMax)
+  const fresh = attached === true && result.memory?.status === 'ready' ? Object.keys(result.memory.delivered ?? {}) : []
+  const heldIds = (Array.isArray(result.held) ? result.held : []).filter(id => !fresh.includes(id))
+  const rows = []
+  for (const [id, held] of [...fresh.map(id => [id, false]), ...heldIds.map(id => [id, true])]) {
+    if (rows.length >= limit) break
+    const page = wiki.pages.get(id)
+    if (!page || !allowsPage(page, scope)) continue
+    rows.push({ page, held })
+  }
+  return rows
+}
+
+/**
+ * memoryEvidence(result, wiki, { scope, attached, chars, max }) -> the same pages as memoryMaterials, as the draft check's evidence items
+ * ([{ id, kind, time, status, source, text }], see egdesk-draft-check.mjs): what the answering model has from memory on this turn, the
+ * pages attached now and the pages it already holds from earlier turns of the thread, so a sentence they support is not taken as invented.
+ *   A page with a guard of its own (a consent-bound utterance or conversation, or any page whose read permission can change) is given as
+ *   a content-free reference (opaque): the model has it, the checker does not receive its text. Every other page as kind 'memory' with its
+ *   title and body (bounded), which the draft check sends only where the run's gate allows memory (egress.filterEvidence).
+ *   Ids are positional (mem1..n); no page id leaves here.
+ */
+export function memoryEvidence(result, wiki, { scope = null, attached = true, chars = 1200, max = MATERIAL_LIMITS.max } = {}) {
+  try {
+    const rows = materialRows(result, wiki, { scope, attached, max })
+    if (!rows) return []
+    const size = bounded(chars, 1200, 0, MATERIAL_LIMITS.maxExcerptChars)
+    return rows.map(({ page }, index) => {
+      const id = `mem${index + 1}`, guarded = typeof page.mayRead === 'function' || ['utterance', 'conversation'].includes(materialKind(page))
+      if (guarded) return { id, kind: 'context', time: page.time.slice, source: 'memory', opaque: true }
+      const body = page.body.length > size ? `${page.body.slice(0, size).trimEnd()} […]` : page.body
+      return { id, kind: 'memory', time: page.time.slice, status: page.status, source: page.provenance.kind, text: `${page.title}\n${body}` }
+    })
+  } catch { return [] }
+}
+
 /**
  * memoryMaterials(result, wiki, { scope, attached = true, excerptChars = 400, max = 12 }) -> frozen array, plain data only:
  *   [{ alias, kind, time: { slice, at }, provenance: { kind, by, basis }, status, statusReading?, statusPending?, title, excerpt, links: [{ type, toAlias }], held }]
@@ -504,18 +547,10 @@ const bounded = (value, fallback, low, high) => (Number.isSafeInteger(value) ? M
 export function memoryMaterials(result, wiki, { scope = null, attached = true, excerptChars = MATERIAL_LIMITS.excerptChars, max = MATERIAL_LIMITS.max } = {}) {
   const none = Object.freeze([])
   try {
-    if (!result || !wiki?.pages || typeof wiki.links !== 'function') return none
-    const limit = bounded(max, MATERIAL_LIMITS.max, 0, MATERIAL_LIMITS.hardMax), chars = bounded(excerptChars, MATERIAL_LIMITS.excerptChars, 0, MATERIAL_LIMITS.maxExcerptChars)
+    const rows = materialRows(result, wiki, { scope, attached, max })
+    if (!rows) return none
+    const chars = bounded(excerptChars, MATERIAL_LIMITS.excerptChars, 0, MATERIAL_LIMITS.maxExcerptChars)
     const picks = new Map((Array.isArray(result.memory?.picks) ? result.memory.picks : []).map(pick => [pick.id, pick]))
-    const fresh = attached === true && result.memory?.status === 'ready' ? Object.keys(result.memory.delivered ?? {}) : []
-    const heldIds = (Array.isArray(result.held) ? result.held : []).filter(id => !fresh.includes(id))
-    const rows = []
-    for (const [id, held] of [...fresh.map(id => [id, false]), ...heldIds.map(id => [id, true])]) {
-      if (rows.length >= limit) break
-      const page = wiki.pages.get(id)
-      if (!page || !allowsPage(page, scope)) continue
-      rows.push({ page, held })
-    }
     const aliasOf = new Map(rows.map((row, index) => [row.page.id, `M${index + 1}`]))
     return Object.freeze(rows.map(({ page, held }) => {
       const pick = picks.get(page.id)
