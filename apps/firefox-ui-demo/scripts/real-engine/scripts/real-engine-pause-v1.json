@@ -1,6 +1,6 @@
 {
   "set": "real-engine-pause-v1",
-  "description": "Pattern: a pause typed while a long command runs (\"아니 잠깐, 그거 하지 마\"). Needs the decision composition (--decisions with a key) and the same flags as real-engine-why-stopped-v1. The second turn carries whileRunning (sent 4 s after the first turn started); the heartbeat reads it as a request to stop and settles it as an interrupt, so the first turn ends interrupted and never claims the command finished. The third turn asks how it went and must not claim it finished. Pattern taken from the person's real turns (masked); expectations are code checks only.",
+  "description": "Pattern: a pause typed while a long command runs (\"아니 잠깐, 그거 하지 마\"). Needs the decision composition (--decisions with a key) and the same flags as real-engine-why-stopped-v1. The second turn carries whileRunning (sent 10 s after the first turn started, by when the engine has started the command: measured 2026-11-25, with 4 s the stop landed before the engine had called its tool at all); the heartbeat reads it as a request to stop and settles it as an interrupt, so the first turn ends interrupted with the command having started and never claims it finished. The third turn asks how it went and must not claim it finished. Pattern taken from the person's real turns (masked); expectations are code checks only.",
   "conversations": [
     {
       "id": "pause",
@@ -14,7 +14,7 @@
       },
       "turns": [
         {
-          "say": "다음 명령을 실행하고, 끝나면 알려 줘: sleep 15 && echo cleanup-finished",
+          "say": "다음 명령을 실행하고, 끝나면 알려 줘: sleep 30 && echo cleanup-finished",
           "expect": {
             "toolCalls": [
               "egdesk_run_command"
@@ -29,7 +29,7 @@
         {
           "say": "아니 잠깐, 그거 하지 마",
           "whileRunning": {
-            "afterMs": 4000
+            "afterMs": 10000
           },
           "expect": {
             "noNativeTools": true

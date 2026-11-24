@@ -296,11 +296,6 @@ export const HEARTBEAT_NOT_SENT = Object.freeze({
   'pointer-nothing-to-look-at': 'requested: only told_1 is asked now, on the same quoted message measured at 0 in heartbeat-c16',
   'pointer-new-run': 'requested (the owner\'s own conversation): only told_1 on the same quoted message as pointer-requester-present',
   'pointer-held-3min': 'background: the same question on the same quoted message as pointer-owner-elsewhere (only the session lines differ)',
-  // L3 c24: the draft check's tense question was reworded (decisions and plans are not "done"); the wait message is a present-tense sentence with no
-  // plan or decision in it, measured tense .01 (predicates) and .95 for the invented result; the reworded question is measured on correct sentences and
-  // on two wrong ones in plan draft-check-tense-c24 (w-disk-now, w-vendor-fact stay caught).
-  'wait-check-predicates': 'the draft check\'s tense question was reworded in c24; the sentence and evidence are as measured in heartbeat-c17 (sup .81 / tense .01)',
-  'wait-check-invented-result': 'the draft check\'s tense question was reworded in c24; the sentence and evidence are as measured in heartbeat-c17 (sup 0 / tense .95)',
 })
 // The runner stops when the provider's reported input tokens pass the ceiling.
 export const HEARTBEAT_PLAN_TOKEN_CAP = 5000

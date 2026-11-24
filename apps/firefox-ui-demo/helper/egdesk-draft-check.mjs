@@ -20,7 +20,7 @@ import { DecisionError } from './egdesk-decision-client.mjs'
 //                 present fact".
 //   'predicates'  the evidence quoted once with its time tags, each sentence quoted on its own block, and per sentence two yes/no
 //                 questions: "does the evidence say what this sentence says" and "does this sentence say something is done or true
-//                 now that the evidence records only as planned or only as past". Code combines. (c24: reworded, see buildPredicateRequest.)
+//                 now that the evidence records only as planned or only as past". Code combines. (A c24 rewording was measured and reverted in c25.)
 //                 Measured on real answers 2026-11-24 (all-on journey): the choice came back insufficient .69/.76 and not_mentioned
 //                 .72-.97, and the present predicate said yes (.90-.97) to a wait message that states its own present activity and to
 //                 a correctly worded plan ("...발송 예정입니다"): it reads "states a plan" rather than "states a plan AS a present fact".
@@ -154,17 +154,12 @@ export function evidenceFromPacket(packet) {
 // checker knows material existed, but nothing can be concluded as "not in the evidence" while one is present.
 // At most evidenceItems are kept, content first; when anything was content-free, one such reference always stays within the bound (it is what
 // stops a sentence being called unverified while some material could not be read).
-// c24 (lane L2's v6 real run, s3b: tense .86 on a correct recall): the same record can reach the check twice, once as its bare title (the context
-// selection's catalog line) and once as title + text (a loaded page). A bare title is not a statement and, repeated beside the planned page's
-// title, only adds noise. An item whose text (whitespace collapsed) is just the start of another item's text, stopping at a word boundary, with the
-// same time tag and status, is dropped (code, R3).
-export function withoutTitleOnlyCopies(items) {
-  const text = item => (typeof item?.text === 'string' ? item.text.replace(/\s+/g, ' ').trim() : '')
-  return items.filter(item => item?.opaque === true || !text(item) || !items.some(other => other !== item && other?.opaque !== true && other.time === item.time && (other.status ?? null) === (item.status ?? null)
-    && text(other).length > text(item).length && text(other).startsWith(`${text(item)} `)))
-}
+// The same record can reach the check twice: as its bare title (the context selection's catalog line, id ontology:...) and as title + text (a loaded
+// page, id mem...). L3 c24 dropped the bare title when its text was the start of another item's text (same time tag and status); not measured on its own
+// and reverted in c25 with the tense wording (the evidence list is what the measured bodies carry). In the v6 journey it would have dropped four titles
+// (s1: a-v1, a-decision; s3b: pg-design, pg-plan), each contained at the start of the page text that stays.
 function boundedEvidence(items) {
-  const usable = withoutTitleOnlyCopies((Array.isArray(items) ? items : []).filter(item => item?.opaque === true || (typeof item?.text === 'string' && item.text.trim())))
+  const usable = (Array.isArray(items) ? items : []).filter(item => item?.opaque === true || (typeof item?.text === 'string' && item.text.trim()))
   const content = usable.filter(item => item.opaque !== true), opaque = usable.filter(item => item.opaque === true)
   const limit = DRAFT_CHECK_LIMITS.evidenceItems
   return opaque.length ? [...content.slice(0, limit - 1), ...opaque.slice(0, Math.max(1, limit - content.length))] : content.slice(0, limit)
@@ -213,10 +208,13 @@ function buildPredicateRequest({ claims, terms, evidence }) {
   claims.forEach((span, i) => {
     input.push({ role: 'user', content: `Sentence S${i + 1}:\n${quoteBlock(compactText(span.text, DRAFT_CHECK_LIMITS.claimChars))}` })
     questions.push(predicateQuestion(`sup_${i}`, `Does the evidence say what sentence S${i + 1} says, including each concrete detail in it (names, dates, numbers, states)?`))
-    // c24: the c18 wording ("say that something is done or true now that the evidence records only as planned or only as past") read a sentence that
-    // says something WAS DECIDED or IS SET as "done": measured 2026-11-25 on correct sentences ("4분기 목표는 4억 5천만 원으로 정해져 있습니다" against a
-    // planned record .97; "…정하기로 확정했습니다" against a past record .86). A decision or a plan stated as such is what the record holds.
-    questions.push(predicateQuestion(`tense_${i}`, `Does sentence S${i + 1} present something as already carried out, or as true right now, when the evidence records it only as planned, or only as it was at an earlier time? Saying that something is planned, is decided, was decided or was so before is not.`))
+    // The c18 wording, measured: it reads a sentence that says something WAS DECIDED or IS SET as "done" on some correct sentences ("4분기 목표는 4억 5천만 원으로
+    // 정해져 있습니다" against a planned record .97 in the over-correction run; "…정하기로 확정했습니다" against a past record .86 in the v6 journey), and it catches the
+    // wrong ones (w-disk-now 1.0, w-vendor-fact .88). L3 c24 reworded it (one clause: "present something as already carried out, or as true right now …; saying that
+    // something is planned, is decided, was decided or was so before is not") and measured 2026-11-25 (draft-check-tense-c24): the rewording lost the guard
+    // (w-disk-now 1.0 -> .01), and made a fine sentence read yes (c-sales S1 .01 -> .76) while the false positive stayed (c-sales S2 .99). Reverted in c25. Any
+    // change to this question must keep all four of those cases (see evidence of c24/c25), and is measured before it ships.
+    questions.push(predicateQuestion(`tense_${i}`, `Does sentence S${i + 1} say that something is done or true now that the evidence records only as planned or only as past?`))
   })
   if (terms.length) input.push({ role: 'user', content: `Terms:\n${terms.map((t, i) => `[T${i + 1}] ${t.term}`).join('\n')}` })
   terms.forEach((_, i) => questions.push(predicateQuestion(`term_${i}`, `Is T${i + 1} internal wording that a reader of this answer has no basis for?`)))

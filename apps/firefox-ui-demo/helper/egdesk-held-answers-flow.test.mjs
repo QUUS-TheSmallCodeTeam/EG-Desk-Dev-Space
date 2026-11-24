@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, chmodSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { CodexChatRuntime, POSTED_ANSWER_KEY, answerEvidence } from './codex-chat-runtime.mjs'
-import { checkDraft, withoutTitleOnlyCopies } from './egdesk-draft-check.mjs'
+import { checkDraft } from './egdesk-draft-check.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 
@@ -368,20 +368,13 @@ test('c19 (owner decision, no fixed fallback): a rewrite whose every sentence st
   assert.ok(r)
 })
 
-test('c24: a record that reaches the check twice (its bare title and title + text) is listed once; different times or statuses, and opaque items, are never merged', async () => {
-  const full = { id: 'pg', kind: 'document', time: 'past', status: 'done', text: 'PostgreSQL 전환 설계 SQLite에서 PostgreSQL로 옮기는 설계를 확정했다.' }
-  const title = { id: 'pg-title', kind: 'document', time: 'past', status: 'done', text: 'PostgreSQL 전환 설계' }
-  const plan = { id: 'plan', kind: 'document', time: 'planned', status: 'plan', text: 'PostgreSQL 마이그레이션 배포 계획 12월 첫째 주에 전환 배포할 예정이다.' }
-  const planTitle = { id: 'plan-title', kind: 'document', time: 'planned', status: 'plan', text: 'PostgreSQL 마이그레이션 배포 계획' }
-  assert.deepEqual(withoutTitleOnlyCopies([title, planTitle, full, plan]).map(i => i.id), ['pg', 'plan'])
-  const otherTime = { ...title, id: 'other', time: 'planned' }, opaque = { id: 'tool1', kind: 'tool', opaque: true }
-  assert.deepEqual(withoutTitleOnlyCopies([otherTime, opaque, full]).map(i => i.id), ['other', 'tool1', 'pg'], 'another time tag: a different statement')
-  assert.deepEqual(withoutTitleOnlyCopies([{ ...title, id: 'near', text: 'PostgreSQL 이전' }, { ...title, id: 'cut', text: 'PostgreSQL 전환 설' }, full]).map(i => i.id), ['near', 'cut', 'pg'],
-    'only a copy that stops at a word boundary of the other item\'s text is dropped; another title, or a cut inside a word, stays')
-  assert.deepEqual(withoutTitleOnlyCopies([{ ...title, id: 'other-status', status: 'unknown' }, full]).map(i => i.id), ['other-status', 'pg'], 'another status: a different statement')
-  // through the check itself: the request lists each record once (the title and the text may be separated by a line break)
+test('c25: the check lists the evidence it was given, as given: a record that reaches it twice (bare title, then title + text) stays twice; nothing is merged (the c24 merge was reverted)', async () => {
+  const full = { id: 'mem1', kind: 'document', time: 'past', status: 'done', text: 'PostgreSQL 전환 설계\nSQLite에서 PostgreSQL로 옮기는 설계를 확정했다.' }
+  const title = { id: 'ontology:db/pg-design', kind: 'document', time: 'past', status: 'done', text: 'PostgreSQL 전환 설계' }
+  const planTitle = { id: 'ontology:db/pg-plan', kind: 'document', time: 'planned', status: 'plan', text: 'PostgreSQL 마이그레이션 배포 계획' }
+  const plan = { id: 'mem2', kind: 'document', time: 'planned', status: 'plan', text: 'PostgreSQL 마이그레이션 배포 계획\n12월 첫째 주에 전환 배포할 예정이다.' }
   const sent = []
-  await checkDraft({ draft: 'PostgreSQL 전환 설계는 확정했습니다.', evidence: [title, planTitle, { ...full, text: 'PostgreSQL 전환 설계\nSQLite에서 PostgreSQL로 옮기는 설계를 확정했다.' }, plan], mode: 'advisory', design: 'predicates',
-    client: { async decide(request) { sent.push(request); return { answers: {} } } } })
-  assert.equal((sent[0].input[1].content.match(/\[E\d+ /g) ?? []).length, 2, 'two records, two items')
+  await checkDraft({ draft: 'PostgreSQL 전환 설계는 확정했습니다.', evidence: [title, planTitle, full, plan], mode: 'advisory', design: 'predicates', client: { async decide(request) { sent.push(request); return { answers: {} } } } })
+  assert.equal((sent[0].input[1].content.match(/\[E\d+ /g) ?? []).length, 4, 'four items, none dropped')
+  assert.deepEqual(answerEvidence({ evidence: [title, planTitle], memory: [full, plan] }, []).map(i => i.id), ['ontology:db/pg-design', 'ontology:db/pg-plan', 'mem1', 'mem2'])
 })
