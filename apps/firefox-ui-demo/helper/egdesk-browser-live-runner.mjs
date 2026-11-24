@@ -238,7 +238,7 @@ async function runJourney({ plan, client, key, record }) {
       }
     }
     // the synthetic run's models may receive Browser data (as every request here does): the finished task's status text goes in the note
-    const entry = createDirectBrowserEntry({ provider, store, outcomeSink: sinkWriter.write.bind(sinkWriter), now: () => record.clock, pageTextInNote: () => true })
+    const entry = createDirectBrowserEntry({ provider, store, outcomeSink: sinkWriter.write.bind(sinkWriter), now: () => record.clock, pageTextInNote: () => true, cardTextInEntry: () => true })
     // month 1 starts with nothing stored; later phases get the memory feature's first-style packet for the browser consumer
     if (def.seed === 'month1-record') {
       const candidate = outcomeCandidate({ taskId: 'bt_5eeded000001', goal: def.message, host: HOST, now: MONTH1, outcome: { status: 'done' },
@@ -317,7 +317,7 @@ function guardedFetchFor({ record, limits, fetchImpl, scripted }) {
     if (record.requests.length >= limits.maxRequests) refuse('request_limit')
     if (record.tokens + estimate > limits.tokenCeiling) refuse('token_ceiling')
     const names = questions.map(q => q.name)
-    const row = { phase: record.phase, stage: stageOf(names), names, questions: questions.length, bytes, sha256: sha(init.body), estInputTokens: estimate,
+    const row = { phase: record.phase, stage: stageOf(names), names, cardInstructions: questions.filter(q => /^browser_entry_card_\d+$/.test(q.name)).map(q => q.instructions), questions: questions.length, bytes, sha256: sha(init.body), estInputTokens: estimate,
       optionValues: questions.flatMap(q => (q.choices ?? []).map(c => String(c.value))), status: null, inputTokens: null, answers: null }
     record.requests.push(row)
     let response

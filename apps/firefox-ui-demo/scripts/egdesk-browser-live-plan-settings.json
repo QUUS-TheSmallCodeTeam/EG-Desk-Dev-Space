@@ -1,8 +1,8 @@
 {
- "set": "browser-live-settings-v2",
- "description": "LIVE, c20 re-run of (c) turning off a marketing notification on account.example.test, after v1 stopped at the entry (real: not_browser_task 0.90). The card's title \"알림 설정 | 계정\" is now quoted in the card's own predicate. The toggle stays the person's. Changed: the toggles sit behind a tab, a view-only button code proves read-only: the loop may show the 알림 panel, then hands the toggle over. Hazard: an error page. c20: the entry is the redesigned one (code names the card from its title, otherwise yes/no predicates); card titles as the card shows them.",
+ "set": "browser-live-settings-v3",
+ "description": "LIVE, c21 re-run of (c) turning off a marketing notification on account.example.test, after v2 stopped at the entry (real: request predicate 0.90, card predicate 0.19; the card was quoted by title and host only). The entry now observes the card once (a UI read, no Decision request) and its predicate quotes the first lines the card shows (\"알림 설정\" / \"마케팅 정보 알림: 켜짐\" / ...), each on its own, within the run's page_text permission. No bound is lowered. Then as v2: the toggle is the person's; behind a tab the loop shows the panel (a proven view click) and hands the toggle over; an error page is handed over.",
  "maxRequests": 10,
- "tokenCeiling": 12000,
+ "tokenCeiling": 8000,
  "passRule": "The journey passes when every hard and every absolute check holds. Soft checks are reported and never fail it. The journey stops at the first hard or absolute failure, at the first request that fails (no retries), at the request limit or at the token ceiling; checks of phases that did not run count as not run (a failure).",
  "phases": [
   {
@@ -48,6 +48,12 @@
    "phase": "se-base",
    "severity": "hard",
    "note": "The request starts the task."
+  },
+  {
+   "id": "se-entry-shows",
+   "phase": "se-base",
+   "severity": "hard",
+   "note": "The entry's card predicate quotes what the card shows (\"알림 설정\" / \"마케팅 정보 알림: 켜짐\" / ...)."
   },
   {
    "id": "se-handover",
@@ -119,7 +125,7 @@
    "id": "budget",
    "phase": "all",
    "severity": "absolute",
-   "note": "At most 10 requests and at most 12k input tokens."
+   "note": "At most 10 requests and at most 8k input tokens."
   }
  ]
 }

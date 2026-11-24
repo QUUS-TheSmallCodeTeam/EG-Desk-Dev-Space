@@ -64,6 +64,7 @@ export const MAX_ENTRY_CARDS = 6
 export const ENTRY_WEB = 'browser_entry'
 export const entryCardName = index => `browser_entry_card_${index}`
 const ENTRY_YES = 0.75, ENTRY_NO = 0.25
+export const ENTRY_LINES = 3, ENTRY_LINE_CHARS = 60
 const norm = text => String(text ?? '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim()
 // Host labels that name no site (public suffixes, generic subdomains, the synthetic test domains) and title parts that name no service.
 const HOST_STOP = new Set(['www', 'm', 'mobile', 'com', 'net', 'org', 'co', 'kr', 'go', 'or', 'ac', 'io', 'app', 'example', 'test', 'invalid', 'localhost', 'local'])
@@ -82,7 +83,15 @@ export function codeEntryCard(message, cards) {
 // Each card's predicate quotes its own page, title and host both quoted (the grouping lint: a short unquoted host would be a label the judge
 // cannot find in the input; two cards may share a title)
 const q = text => `"${String(text).replace(/"/g, "'")}"`
-const quotePage = card => (card.title ? `${q(compactText(card.title, 80))} at ${q(compactText(card.host, 60) || 'an unknown host')}` : `the page at ${q(compactText(card.host, 60) || 'an unknown host')}`)
+// c21 (real, browser-live-settings-v2): "마케팅 알림 꺼줘" against a card quoted only as "알림 설정 | 계정" at its host: the card predicate answered
+// 0.19 (decided no), so the entry, as designed, did not enter. Nothing said what the page shows. R1: the card's predicate also quotes the
+// first lines the card shows now (its heading and the next lines, each quoted on its own), where the run may receive page text.
+const shownLines = card => (Array.isArray(card.shows) ? card.shows : []).map(line => compactText(String(line ?? ''), ENTRY_LINE_CHARS)).filter(Boolean).slice(0, ENTRY_LINES)
+const quotePage = card => {
+  const page = card.title ? `${q(compactText(card.title, 80))} at ${q(compactText(card.host, 60) || 'an unknown host')}` : `the page at ${q(compactText(card.host, 60) || 'an unknown host')}`
+  const lines = shownLines(card)
+  return lines.length ? `${page}, which now shows ${lines.map(q).join(' / ')}` : page
+}
 /** The entry questions: the request predicate, then (unless code chose the card) one predicate per card, that page alone. */
 export function entryQuestions(cards, { codeCard = null } = {}) {
   const out = [predicateQuestion(ENTRY_WEB, 'Is this request something to do in a web page rather than an answer?')]
@@ -301,7 +310,8 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
  * Gate: the provider's reflex gate (mode on + key). Off or no key: nothing is called.
  */
 // pageTextInNote(): whether this run's models may receive Browser data (the run's egress gate, page_text); off by default.
-export function createDirectBrowserEntry({ provider, store, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false } = {}) {
+// cardTextInEntry(): whether the entry may quote what each card shows (the run's egress gate, page_text); off by default.
+export function createDirectBrowserEntry({ provider, store, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false, cardTextInEntry = () => false } = {}) {
   if (!provider || typeof provider.runDirectTask !== 'function' || typeof provider.reflexScope !== 'function') throw new TypeError('provider must offer runDirectTask')
   const note = (key, raw) => { try { calibration?.record?.(raw) } catch { /* recording never changes behaviour */ } return key }
   const record1 = (answers, count, would, fallback) => {
@@ -428,6 +438,21 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
   }
 
   // The task waits for the person to say which card. Nothing is recorded as an outcome (no page was touched).
+  // The first lines each card shows now, by one observation per card (a UI read; no Decision request). Only when code did not name the card
+  // and the run may receive page text; a card that cannot be observed is quoted by title and host alone.
+  async function withShownLines(run, message, cards, replyTo = null) {
+    if (cardTextInEntry() !== true || (typeof replyTo === 'string' && codeEntryCard(replyTo, cards)) || codeEntryCard(message, cards)) return cards
+    return Promise.all(cards.slice(0, MAX_ENTRY_CARDS).map(async card => {
+      try {
+        const scope = provider.reflexScope(run, { callId: 'direct-entry-observe', namespace: null }, card.cardId)
+        if (typeof scope?.callTool !== 'function') return card
+        const observed = await scope.callTool('egdesk_browser_observe', { cardId: card.cardId })
+        const text = Array.isArray(observed?.snapshot?.text) ? observed.snapshot.text : []
+        return text.length ? { ...card, shows: text.slice(0, ENTRY_LINES) } : card
+      } catch { return card }
+    })).then(seen => [...seen, ...cards.slice(MAX_ENTRY_CARDS)])
+  }
+
   function askWhichCard(task, cards, extra = {}) {
     task.entryAsks++
     task.status = 'paused'; task.pause = { kind: 'need_context', code: 'card_choice_needed' }; task.question = null; task.asked = false; store.touch(task)
@@ -454,7 +479,7 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
           if (resume.kind === 'cancel_task') { paused.status = 'cancelled'; return { handled: false, reason: 'task_cancelled' } }
           if (resume.kind !== 'resume_task') return { handled: false, reason: resume.kind === 'unrelated' ? 'unrelated' : 'uncertain' }
           if (!paused.cardId) { // the person was asked which card: the entry is decided again with their answer, then the task starts there
-            const picked = await decideBrowserEntry({ message: paused.goal, replyTo: message, cards, client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
+            const picked = await decideBrowserEntry({ message: paused.goal, replyTo: message, cards: await withShownLines(run, paused.goal, cards, message), client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
             if (!gateScope.isDecisionCurrent()) return { handled: false, reason: 'evidence_unavailable' }
             if (picked.kind !== 'browser') {
               if (picked.kind === 'ask_user' && cards.length > 1 && paused.entryAsks < MAX_ENTRY_ASKS) return askWhichCard(paused, cards, { resumed: true })
@@ -475,7 +500,7 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
         const memoryPacket = typeof memory?.packet === 'string' && memory.packet ? memory.packet : null
         const rode = entryAnswers && entryAnswers.browser_entry?.type === 'predicate'
         const entry = rode ? readBrowserEntry(entryAnswers, cards, { codeCard: entryAnswers.codeCard ?? null })
-          : await decideBrowserEntry({ message, cards, client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
+          : await decideBrowserEntry({ message, cards: await withShownLines(run, message, cards), client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
         if (!gateScope.isDecisionCurrent()) return { handled: false, reason: 'evidence_unavailable' }
         record1(entry, cards.length, entry.kind === 'browser' ? 'act' : 'hold')
         // Several granted cards and the pick is not decided (or the model chose to ask): the person is asked which card, and the request
