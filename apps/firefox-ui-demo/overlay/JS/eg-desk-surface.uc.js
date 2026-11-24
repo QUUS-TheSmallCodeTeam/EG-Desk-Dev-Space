@@ -4408,7 +4408,7 @@
       revealOpenCanvasCard(existing, { opener: options.opener || null, kind: 'result' }); return existing;
     }
     const placement = resolveCanvasCardPlacement('result', options.restore ? {} : { workSurface: { kind: 'result', runId: record.source.runId, conversationId: record.source.conversationId, clientThreadId: record.source.threadId } });
-    const shell = spawnDeskWindowShell({ id: `egd-result-card-${++cardSeq}`, kind: 'result', className: 'egd-result-card', sourceRef,
+    const shell = spawnDeskWindowShell({ id: `egd-result-card-${++cardSeq}`, kind: 'result', className: 'egd-result-card', sourceRef, ...(placement.quiet ? { activate: false } : {}),
       bodyClassName: 'egd-result-card-body', minWidth: 360, minHeight: 280,
       style: { left: `${placement.x}px`, top: `${placement.y}px`, width: `${placement.width}px`, height: `${placement.height}px` } });
     if (!options.restore) revealPlacedCanvasCard(shell.root, placement, { opener: options.opener || null, kind: 'result' });
@@ -9369,8 +9369,9 @@
     const occupied = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape, .egd-board-region'))
       .map(persistentEntityGeometry);
     const placed = SurfaceState.placeCanvasView({ size, safe, occupied, anchor, gap: 24 });
-    // Cycle 12, advisory and OFF by default: an Agent's work surface (a run's file viewer, a result card) is also shown to the placement runtime. The placement returned is unchanged.
-    if (options.workSurface) state.noteWorkSurfacePlacement?.(kind, placed, options.workSurface);
+    // Cycle 12, advisory and OFF by default: an Agent's work surface (a run's file viewer, a result card) is also shown to the placement runtime; the placement
+    // returned is unchanged. L1 c13: with the pref "on" the hook returns the code rule's spot instead, marked quiet (no camera move, no activation).
+    if (options.workSurface) return state.noteWorkSurfacePlacement?.(kind, placed, options.workSurface) || placed;
     return placed;
   }
 
@@ -9382,22 +9383,31 @@
     return state.workPresence ||= WorkPlacement.createSingleUserPresence({ lastInputAt: () => workInputAt, focusCard: () => state.activeEntityId || null,
       viewport: () => { const v = safeViewportWorldRect(); return { x: v.left, y: v.top, width: v.right - v.left, height: v.bottom - v.top }; } });
   }
-  // Advisory only: where this surface WOULD go against where it lands today, in closed words (kept in this window's memory), and the same closed request to the
-  // bridge for the conversation's heartbeat. The first line is the whole default path: with the flag unset nothing below it runs. Nothing here moves anything.
+  // Where this surface WOULD go by the code's rule against where it lands today, in closed words (kept in this window's memory), and the request to the
+  // bridge for the conversation's heartbeat. The first line is the whole default path: unless the pref is "advisory" or "on" nothing below it runs.
+  // "advisory" returns nothing: the surface lands where it lands today. "on" (L1 c13) returns the rule's spot for the NEW surface, marked quiet; the
+  // callers then neither reveal it (no camera move) nor activate it (no input focus). Nothing existing is moved, and nothing here writes a Board. A published result card's title and opening text go with the request only as a nearby card the
+  // bridge may ask "is this work about the same matter?" about (maySend: the same rule as the briefing host's result cards); memos and other cards never.
   function noteWorkSurfacePlacement(kind, placement, work) {
-    if (WorkPlacement.workPlacementMode(readSurfacePref(WorkPlacement.WORK_PLACEMENT_PREF)) === 'off') return;
+    const mode = WorkPlacement.workPlacementMode(readSurfacePref(WorkPlacement.WORK_PLACEMENT_PREF));
+    if (mode === 'off') return;
     try {
       const cards = [...document.querySelectorAll('.egd-canvas-card')].filter(card => card.isConnected && card.id).map(card => ({ id: card.id, rect: persistentEntityGeometry(card), kind: cardKindForPersistence(card),
-        creator: card._resultRecord?.provenance?.creator ?? (card.dataset.jointManaged ? 'shared' : null), taskId: card._resultRecord?.provenance?.runId ?? null }));
+        creator: card._resultRecord?.provenance?.creator ?? (card.dataset.jointManaged ? 'shared' : null), taskId: card._resultRecord?.provenance?.runId ?? null,
+        ...(card._resultRecord?.title ? { maySend: true, label: card._resultRecord.title, excerpt: card._resultRecord.text || '' } : {}) }));
       const obstacles = [...document.querySelectorAll('.egd-canvas-shape, .egd-board-region')].map(persistentEntityGeometry);
       const taskId = work.runId || 'surface';
       const advisory = WorkPlacement.advisoryPlacement({ presence: workPresence().snapshot(), cards, obstacles, taskId, landed: placement, surface: { kind, size: { width: placement.width, height: placement.height } },
-        tasks: [{ id: taskId, state: 'running', requester: work.requester || null, waiting: [], ownerMustAct: false, surfaces: [] }] });
+        // The person who asked waits for the run that is opening this surface (their own run, or the member's request it carries).
+        tasks: [{ id: taskId, state: 'running', requester: work.requester || null, waiting: [work.requester || 'self'], ownerMustAct: false, surfaces: [] }] });
       if (!advisory) return;
-      (state.workPlacementLog ||= []).push({ surface: kind, would: advisory.would, landed: advisory.landed, differs: advisory.differs });
+      const own = workPresence().snapshot().find(row => row.self)?.viewport ?? null;
+      const applied = mode === 'on' ? WorkPlacement.onRuleSpot(advisory, placement, own) : null;
+      (state.workPlacementLog ||= []).push({ surface: kind, would: advisory.would, landed: advisory.landed, differs: advisory.differs, ...(mode === 'on' ? { applied: !!applied } : {}) });
       if (state.workPlacementLog.length > 50) state.workPlacementLog.shift();
       if (work.clientThreadId || work.conversationId) void deskStoreRequest('POST', '/decision/work-placement/request', { clientThreadId: work.clientThreadId || null, conversationId: work.conversationId || null, dto: advisory.dto }, { timeoutMs: 4000 }).catch(() => {});
-    } catch { /* advisory: never affects where the surface opens */ }
+      return applied;
+    } catch { return null; /* never breaks opening the surface: today's placement stands */ }
   }
   state.noteWorkSurfacePlacement = noteWorkSurfacePlacement;
 
@@ -9431,7 +9441,8 @@
   // from a Chat card (an artifact chip) is framed with that Chat while both
   // stay readable; otherwise it shows alone with a short way back to the Chat.
   function revealPlacedCanvasCard(card, placement, options = {}) {
-    if (!card || !placement || placement.inView) return;
+    // a quiet placement (an Agent's work surface opened at the placement rule's spot, pref "on") never moves the camera
+    if (!card || !placement || placement.inView || placement.quiet) return;
     const camera = { x: state.panTarget.x, y: state.panTarget.y, zoom: state.zoomTarget };
     window.setTimeout(() => {
       if (!card.isConnected || state.agenda.restoreInProgress || state.surface.restoring) return;

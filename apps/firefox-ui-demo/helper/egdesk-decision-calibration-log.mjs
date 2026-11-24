@@ -26,7 +26,8 @@ export const RETENTION_DAYS = 30
 const MAX_JUDGMENTS = 64
 
 // answer_briefing: the Answer Briefing judgments (placement, reuse, flow check, skeleton predicates), recorded apart from the Board arrangement (lane L2 finding A4).
-const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'answer_briefing', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check', 'turn_memory', 'conversation_flow', 'working_memory'])
+// work_placement: L1 cycle 12 (work-surface placement judgments had been recorded as board_arrangement, the same finding A4).
+const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'answer_briefing', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check', 'turn_memory', 'conversation_flow', 'working_memory', 'work_placement'])
 const MODES = new Set(['advisory', 'on'])
 // How the draft check asked (egdesk-draft-check.mjs design).
 const DRAFT_DESIGNS = new Set(['choice', 'predicates'])
@@ -36,7 +37,9 @@ const QUESTIONS = new Set(['claim_supported', 'claim_tense', 'answer_type', 'tim
   // the command gate's yes/no content predicates (egdesk-terminal-command-gate.mjs RISK_PREDICATES)
   'risk_unrestorable', 'risk_outside', 'risk_personal_files',
   // the browser step's page-state yes/no predicates (lane L8 c16)
-  'ps_sign_in', 'ps_code', 'ps_challenge', 'ps_error', 'ps_sensitive', 'ps_covered'])
+  'ps_sign_in', 'ps_code', 'ps_challenge', 'ps_error', 'ps_sensitive', 'ps_covered',
+  // work placement's yes/no questions (egdesk-work-placement.mjs), and the Board reply's per-excerpt time question (egdesk-board-agent-context.mjs)
+  'same_matter', 'owner_action', 'in_effect'])
 const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed', 'none', 'act', 'hold', 'fetch'])
 // Turn memory (advisory): where in the session the turn was, what the fetch did, and how long each stage took.
 // Draft check (advisory): what the check would have done to the posted answer, and what it would fall back to without a revision.

@@ -16,7 +16,6 @@ export const EGRESS_KINDS = Object.freeze({
   page_text: Object.freeze({ data: 'browser', governedBy: 'Agent tool ceiling: browser (none = no page text) and this run\'s selected Browser Card grant' }),
   browser_task_record: Object.freeze({ data: 'browser', governedBy: 'Agent tool ceiling: browser and this run\'s selected Browser Card grant (records of the Browser task)' }),
   canvas_text: Object.freeze({ data: 'canvas', governedBy: 'Per-card maySend (host-computed: may this card go to a model) for step texts and card labels' }),
-  placement_facts: Object.freeze({ data: 'run', governedBy: 'Where a live run\'s work surface could go, as closed words only (option kinds, distance and direction classes, whose view, member aliases, task state); never card titles, text, ids or coordinates' }),
   run_facts: Object.freeze({ data: 'run', governedBy: 'This run\'s own state as numbers and closed labels only (heartbeat elapsed times, the current phase, step counts, whether the Agent asked a question); never text of the run, the person or a model' }),
   run_text: Object.freeze({ data: 'run', governedBy: 'This run\'s own conversation text, which its model already receives or wrote: the person\'s request, the Agent\'s notes to itself, the names of the tools it runs and the messages already posted in this run (bounded quotes for the heartbeat\'s message questions)' }),
   draft_text: Object.freeze({ data: 'run', governedBy: 'The run\'s own evidence: catalog items only by the kinds the model itself received; tool outputs stay content-free references' }),
@@ -99,7 +98,10 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-browser-task.mjs': ['page_text'],
   'egdesk-context-setup.mjs': ['speech_history', 'topic_history', 'memory_page'],
   'egdesk-conversation-flow.mjs': ['run_facts'],
-  'egdesk-work-placement.mjs': ['placement_facts'],
+  // Work placement (L1 cycle 12): where a surface goes is a code rule; only content predicates are asked. "Same matter?" quotes the run's own
+  // request (run_text) and a nearby card's label and excerpt, only for cards the host marked maySend (canvas_text); "does the result need the
+  // owner?" quotes the run's own request and answer (run_text). Each is asked of the run's gate (chat runtime placementContextFor) before it is sent.
+  'egdesk-work-placement.mjs': ['run_text', 'canvas_text'],
   'egdesk-draft-check.mjs': ['draft_text'],
   'egdesk-heartbeat-judge.mjs': ['run_facts', 'run_text', 'terminal_command', 'plus any other kind a heartbeat question or a provider\'s context declares, each checked by the run\'s gate before it is sent'],
   // Plan builder for the real measurement: the product client with a recording fetch that refuses. Nothing is sent from this file.

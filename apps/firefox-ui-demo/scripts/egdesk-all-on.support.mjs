@@ -100,6 +100,8 @@ export function featureOf(names, cacheKey = '') {
   if (names.includes('task_resume')) return 'browser_resume'
   if (names.includes('next_step')) return 'browser_step'
   if (names.some(n => /^(claim_|present_)/.test(n)) || cacheKey === 'draft-check') return 'draft_check'
+  // work placement (L1 c12): yes/no content questions (same_matter_R#, owner_action) under its own cache key
+  if (cacheKey === 'work-placement') return 'work_placement'
   if (names.includes('place') || names.includes('attention')) return cacheKey === 'work-placement' ? 'work_placement' : 'briefing'
   if (names.includes('answer_type') || names.includes('time_intent') || names.some(n => /^rel_/.test(n))) return 'turn_context'
   if (names.includes('terminal_state')) return 'command_judge'

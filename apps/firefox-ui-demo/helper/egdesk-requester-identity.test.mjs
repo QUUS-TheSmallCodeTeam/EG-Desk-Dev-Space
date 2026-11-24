@@ -81,14 +81,15 @@ function bridgeCalls(handlers) {
     return { status: 0, body: null };
   };
 }
-// A Decisions client for the placement judge that reads only the closed descriptions it was sent (as in L4's own test).
-function placementJudge(prefer) {
+// A Decisions client for the placement judge that answers its yes/no questions from the CONTENT it was sent (as in the placement suite, L1 c12):
+// "same matter?" from the card quoted under each question, "does the result need the owner?" from the quoted result.
+function placementJudge({ sameMatter = (card) => /주차/.test(card), ownerAction = (text) => /승인|정해 주세요/.test(text) } = {}) {
   const calls = [];
-  const WORDS = { near_requester: 'just outside the requester', quiet: 'away from everyone', leave: 'say nothing', point: 'tell the member' };
   return { calls, model: 'mock', async decide(req) {
     calls.push(JSON.stringify(req));
-    const q = req.questions[0], hit = prefer.map((kind) => q.choices.find((c) => c.description.includes(WORDS[kind]))).find(Boolean) ?? q.choices[0], other = q.choices.find((c) => c !== hit);
-    return { answers: { [q.name]: { type: 'choice', choice: hit.value, confidence: 0.93, probabilities: [{ value: hit.value, probability: 0.93 }, { value: other.value, probability: 0.07 }] } }, usage: { inputTokens: 9 } };
+    const answers = {};
+    for (const q of req.questions) answers[q.name] = { type: 'predicate', probability: (q.name === 'owner_action' ? ownerAction(req.input.map((row) => row.content).join('\n')) : sameMatter(q.instructions)) ? 0.97 : 0.03 };
+    return { answers, usage: { inputTokens: 9 } };
   } };
 }
 const OWNER_VIEW = r(0, 0, 1280, 800);            // region A: what the owner is looking at
@@ -257,20 +258,23 @@ async function endToEnd(t, { ownerMustAct, live }) {
   const mirror = createPresenceMirror({ now: () => w.clock.now });
   const registry = createRunRequesters({ presence: mirror, now: () => w.clock.now });
   const acks = [];
-  const judge = placementJudge(['near_requester', 'point']);
+  const judge = placementJudge();
   let placement = null;
   const hw = heartbeatWorld(t, { presence: mirror, audience: ({ run }) => registry.audience({ run }),
     policy: { message: (values) => (values.includes('pointer') ? 'pointer' : 'none') }, writer: (prompt) => (/on the desk/.test(prompt) ? POINTER : null),
     attentionPosted: (e) => { acks.push(e); if (e.provider === 'work_placement') placement.acknowledgePointer(e.key); } });
   // as the bridge builds it: enabled for advisory and on, live only for on; its clock and timers are the runtime's (virtual here)
-  placement = createWorkPlacement({ client: judge, mode: () => (live ? 'on' : 'advisory'), enabled: () => true, live: () => live, calibrationLog: { record() {} }, now: () => hw.at(), setTimer: (fn, ms) => hw.chat.setTimer(fn, ms) });
+  placement = createWorkPlacement({ client: judge, mode: () => (live ? 'on' : 'advisory'), enabled: () => true, live: () => live, calibrationLog: { record() {} }, now: () => hw.at(), setTimer: (fn, ms) => hw.chat.setTimer(fn, ms),
+    contextFor: (key, options) => hw.chat.placementContextFor(key, options) }); // the bridge's wiring: the run's own request and answer, through its own gate
   const call = bridgeCalls([createPresenceMirrorHttpHandler({ mirror, enabled: () => true }), createRunRequesterHttpHandler({ requesters: registry, enabled: () => true }),
     createWorkPlacementHttpHandler({ placement, heartbeatFor: (key) => hw.chat.heartbeatFor(key) })]);
   const push = async () => { assert.equal((await call(PRESENCE_MIRROR.path, { rows: a.presence.snapshot() })).status, 200); };
 
   // ---- the owner's Desk: a plain canvas model (cards, one camera, one focus) and the surface's two presence hooks ----
   const canvas = { camera: { ...OWNER_VIEW }, focus: 'own-note', seq: 0,
-    cards: [{ id: 'own-note', rect: r(100, 100, 500, 400), kind: 'memo', creator: 'user' }, { id: 'own-file', rect: r(700, 120, 400, 300), kind: 'file', creator: 'user' }] };
+    cards: [{ id: 'own-note', rect: r(100, 100, 500, 400), kind: 'memo', creator: 'user' }, { id: 'own-file', rect: r(700, 120, 400, 300), kind: 'file', creator: 'user' },
+      // a published result card near B's side whose words the host may send, about another matter: the same-matter question is asked about it
+      { id: 'res-lunch', rect: r(3700, 1200, 400, 300), kind: 'result', creator: 'agent', maySend: true, label: '점심 메뉴 투표 결과', excerpt: '이번 주 점심은 김치찌개로 정해졌습니다.' }] };
   const frozen = () => JSON.stringify({ camera: canvas.camera, focus: canvas.focus, own: canvas.cards.filter((x) => x.creator === 'user'), self: a.presence.snapshot()[0].viewport });
   const posts = [];
   const requesters = JP.createRunRequesters({ snapshot: () => a.presence.snapshot(), seated: (board, member) => a.joint.seated(board, member),
@@ -281,7 +285,7 @@ async function endToEnd(t, { ownerMustAct, live }) {
   const plainNote = (kind, landed, work) => {
     const taskId = work.runId || 'surface';
     const advisory = WP.advisoryPlacement({ presence: a.presence.snapshot(), cards: canvas.cards, obstacles: [], taskId, landed, surface: { kind, size: { width: landed.width, height: landed.height } },
-      tasks: [{ id: taskId, state: 'running', requester: work.requester || null, waiting: [], ownerMustAct: false, surfaces: [] }] });
+      tasks: [{ id: taskId, state: 'running', requester: work.requester || null, waiting: [work.requester || 'self'], ownerMustAct: false, surfaces: [] }] });
     advised.push({ requester: work.requester || null, advisory });
     return advisory;
   };
@@ -315,7 +319,7 @@ async function endToEnd(t, { ownerMustAct, live }) {
   // ---- 3. L4: the Agent opens a viewer for B's task. The option is near B; nothing is placed in, or moved inside, the owner's view. ----
   const advisory = note('file', landed, ref);
   assert.equal(advised.at(-1).requester, aliasB, 'the placement hook was handed the real requester');
-  assert.deepEqual(advisory.dto.task, { state: 'running', requester: 'M2', waiting: [], ownerMustAct: false }); assert.deepEqual(advisory.dto.members.map((m) => [m.alias, m.self]), [['M1', true], ['M2', false]]);
+  assert.deepEqual([advisory.dto.requester, advisory.dto.rule], ['M2', 'requester_working'], 'B waits for the run and is working: the rule is beside B\'s view'); assert.deepEqual(advisory.dto.members.map((m) => [m.alias, m.self]), [['M1', true], ['M2', false]]);
   assert.equal(advisory.would.kind, 'near_requester'); assert.equal(advisory.differs, true, 'today it lands in the owner\'s view; it would not');
   const tasks = () => [{ id: ref.runId, state: 'running', requester: requesters.for(ref), waiting: [aliasB], ownerMustAct: false, surfaces: [] }];
   const scene = () => ({ presence: a.presence.snapshot(), cards: canvas.cards.map((x) => ({ ...x, rect: { ...x.rect } })), tasks: tasks(), obstacles: [] });
@@ -326,21 +330,24 @@ async function endToEnd(t, { ownerMustAct, live }) {
   assert.ok(options.every((o) => o.kind !== 'in_requester_view'), 'B is active: nothing goes into B\'s view either');
   // The same request without the requester would have meant the owner's own surroundings.
   assert.deepEqual([asBefore.kind, asBefore.distance], ['near_requester', 'near']);
-  const ownerSide = WP.placementOptions(WP.enumerateWorkScene({ ...scene(), tasks: [{ ...tasks()[0], requester: null, waiting: [] }] }), { taskId: ref.runId, surface: FILE }).find((o) => o.kind === 'near_requester');
+  const ownerSide = WP.placementOptions(WP.enumerateWorkScene({ ...scene(), tasks: [{ ...tasks()[0], requester: null, waiting: ['self'] }] }), { taskId: ref.runId, surface: FILE }).find((o) => o.kind === 'near_requester');
   assert.ok(gapTo(ownerSide.rect, OWNER_VIEW) < gapTo(ownerSide.rect, B_VIEW) && gapTo(near.rect, B_VIEW) < gapTo(near.rect, OWNER_VIEW));
-  // The judge half picks at a beat of the run's REAL heartbeat, through the bridge route, from closed words only.
+  // The rule's spot is code. The only question, at a beat of the run's REAL heartbeat through the bridge route, is whether the nearby card is about
+  // the same matter as the run's own request (it is not), so the rule's spot stands.
   const placed = await WP.placeSurface({ scene, request: { taskId: ref.runId, surface: FILE }, judge: async (dto) => {
     const queued = await call('/decision/work-placement/request', { clientThreadId: ref.clientThreadId, conversationId: ref.conversationId, dto });
     assert.deepEqual([queued.status, queued.body.status], [200, 'queued']);
     await hw.advance(S.beatMs); await placement.idle();
     const result = (await call('/decision/work-placement/result', { clientThreadId: ref.clientThreadId, conversationId: ref.conversationId, id: queued.body.id })).body;
-    return result.status === 'decided' ? result.choice : null;
+    return result.status === 'decided' ? result : null;
   } });
-  assert.deepEqual([placed.option.kind, placed.source], ['near_requester', 'decision']); assert.deepEqual(placed.rect, near.rect);
+  assert.deepEqual([placed.option.kind, placed.source, placed.rule], ['near_requester', 'rule', 'requester_working']); assert.deepEqual(placed.rect, near.rect);
+  assert.equal(judge.calls.length, 1); assert.deepEqual(JSON.parse(judge.calls[0]).questions.map((q) => q.name), ['same_matter_R1']);
   const cardId = `agent-${++canvas.seq}`;
   canvas.cards.push({ id: cardId, rect: { ...placed.rect }, kind: 'file', creator: 'agent', taskId: ref.runId }); // opened, not activated
   assert.equal(frozen(), before, 'the owner\'s camera, focus, own cards and own presence row are exactly as they were');
-  for (const text of judge.calls) { assert.doesNotMatch(text, /m-[0-9a-f]{16}|주차|own-note|dm-task/); assert.match(text, /M2/); }
+  // what the judge read: the run's own request and the card's words (maySend); never a member alias, id, conversation key or coordinate
+  for (const text of judge.calls) { assert.doesNotMatch(text, /m-[0-9a-f]{16}|own-note|res-lunch|dm-task|M2|3700/); assert.match(text, /방문자 주차 안내 초안/); }
 
   // ---- 4. L3: who is waiting, and may a message go into this conversation ----
   const audience = hw.chat.flowAudience(ref);
@@ -355,7 +362,8 @@ async function endToEnd(t, { ownerMustAct, live }) {
   await w.round([a, b, c]); await push();
   const doneScene = () => WP.enumerateWorkScene({ ...scene(), tasks: [{ id: ref.runId, state: ownerMustAct ? 'waiting_owner' : 'finished', requester: requesters.for(ref), waiting: [aliasB], ownerMustAct, surfaces: [{ kind: 'file', cardId }] }] });
   const attention = WP.attentionRequest(doneScene(), { taskId: ref.runId, cardId });
-  assert.deepEqual(attention.options.map((o) => o.kind), ['leave', 'point']); assert.equal(attention.actor, ownerMustAct ? 'M1' : 'M2');
+  assert.deepEqual([attention.outcomes.owner.kind, attention.outcomes.owner.forMember, attention.outcomes.requester.kind, attention.outcomes.requester.forMember], ['point', 'M1', 'point', 'M2'],
+    'both outcomes by code: B is active, so B is told rather than moved to; the owner is never moved to');
   const messagesBefore = run.assistant().length, eventsBefore = hw.events.length;
   assert.equal((await call('/decision/work-placement/request', { clientThreadId: ref.clientThreadId, conversationId: ref.conversationId, dto: attention.dto })).body.status, 'queued');
   // The placement runtime nudges the heartbeat itself: judged within half a second of the request, not at the idle grid.
@@ -416,8 +424,9 @@ test('end to end: the same task now needs the OWNER\'s decision -> one pointer m
 test('end to end, advisory placement (the default): the requester is still B and the option is still near B, but a decided "point" is only RECORDED; no fact, no message, for either kind of result', async (t) => {
   for (const ownerMustAct of [true, false]) {
     const e = await endToEnd(t, { ownerMustAct, live: false }); // the first half of endToEnd already asserted: requester M2, near B, the owner's view untouched
-    assert.equal(e.judge.calls.length, 2, 'both scenes were judged: the surface\'s place and the attention');
-    assert.deepEqual([e.record.kind, e.record.would.kind, e.record.pointer, e.record.source], ['attention', 'point', 'advisory', 'decision'], 'recorded as what it WOULD do');
+    // the place's one content question, and for a finished result the owner question; the code already knows when the owner must act
+    assert.equal(e.judge.calls.length, ownerMustAct ? 1 : 2, 'questions only where code cannot know');
+    assert.deepEqual([e.record.kind, e.record.would.kind, e.record.pointer, e.record.source], ['attention', 'point', 'advisory', ownerMustAct ? 'rule' : 'decision'], 'recorded as what it WOULD do');
     assert.deepEqual([e.fact.pointerPending, e.fact.pointerFor, e.onHeartbeat.pointerPending], [false, undefined, false], 'no pointer fact is raised');
     assert.equal(e.placement.facts('dm-task').pointerPending, false);
     assert.deepEqual(e.posted, [], 'no message in the owner\'s conversation, even when the owner must act'); assert.deepEqual(e.acks, []);
@@ -450,7 +459,7 @@ test('default path: without the presence flag nothing of this exists; the bridge
   // The rig's two placement modes are the bridge's own: enabled for advisory and on, a pointer fact only when on.
   assert.match(server, /enabled: \(\) => \['advisory', 'on'\]\.includes\(process\.env\.EGDESK_WORK_PLACEMENT\),/); assert.match(server, /live: \(\) => process\.env\.EGDESK_WORK_PLACEMENT === 'on'/);
   // The surface: the placement hook's own line is L4's, unchanged; the wrapper and the request side are installed inside installDeskPresence only.
-  assert.ok(surface.includes("tasks: [{ id: taskId, state: 'running', requester: work.requester || null, waiting: [], ownerMustAct: false, surfaces: [] }] });"));
+  assert.ok(surface.includes("tasks: [{ id: taskId, state: 'running', requester: work.requester || null, waiting: [work.requester || 'self'], ownerMustAct: false, surfaces: [] }] });"));
   const install = surface.slice(surface.indexOf('function installDeskPresence()'), surface.indexOf('return state.presence;', surface.indexOf('function installDeskPresence()')));
   assert.match(install, /if \(state\.presence \|\| !JointPresence\.presenceEnabled\(readSurfacePref\(JointPresence\.PRESENCE_PREF\)\)\) return null;/);
   for (const piece of ['JointPresence.createRunRequesters(', 'state.runRequesters.wrap(state.noteWorkSurfacePlacement)', 'JointPresence.createRequestRequesters(', "'/presence/requester'"]) assert.ok(install.includes(piece), piece);

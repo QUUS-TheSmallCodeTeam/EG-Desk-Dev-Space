@@ -9,7 +9,7 @@ import { setImmediate } from 'node:timers/promises'
 import test from 'node:test'
 import { createBoardAgentAskHttpHandler } from './egdesk-board-agent-ask-http.mjs'
 import { createBoardAgentAskService } from './egdesk-board-agent-ask.mjs'
-import { selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
+import { localDay, readScreeningInput, selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
 import { BOARD_AGENT_DRAFT_CONFIG_FILE, createBoardAgentDraftConfigReader } from './egdesk-board-agent-draft-config.mjs'
 import { BOARD_AGENT_DRAFT_INSTRUCTIONS, BOARD_AGENT_DRAFT_REPLY_STYLES, createBoardAgentDraftTransport } from './egdesk-board-agent-draft.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
@@ -75,9 +75,10 @@ async function fixture(t, { config = 'dedicated', provider = response, decisions
     selectContext: selectBoardAgentContext,
     decisionStatus: () => decisions === 'off' ? null : ({ mode: 'on', model: 'fixture-decisions-model', bindingId: 'fixture-decisions-binding',
       client: { async decide(request) {
-        decisionsCount++; decisionInputs.push(JSON.parse(request.input))
+        decisionsCount++; decisionInputs.push(readScreeningInput(request.input))
         if (!decisionAnswer) throw new Error('Decisions must never be invoked in this test')
-        return decisionAnswer
+        // a provider answers exactly the questions it is asked (L1 c13: relevance first, then the time question for the relevant excerpts)
+        return { ...decisionAnswer, answers: Object.fromEntries(request.questions.map(q => [q.name, decisionAnswer.answers[q.name]]).filter(([, a]) => a)) }
       } } }),
     draft, draftPreview: tone => `${BOARD_AGENT_DRAFT_INSTRUCTIONS}\n${BOARD_AGENT_DRAFT_REPLY_STYLES[tone]}`,
   })
@@ -177,18 +178,18 @@ test('one confirmed draft reaches the real Responses adapter and returns only it
 })
 
 test('with the saved Decisions mode on, one confirmed draft screens the same approved excerpts once, then drafts once', async t => {
-  const f = await fixture(t, { decisions: 'on', decisionAnswer: { answers: { c1: { type: 'predicate', probability: 0.97 } } } })
+  const f = await fixture(t, { decisions: 'on', decisionAnswer: { answers: { c1: { type: 'predicate', probability: 0.97 }, c1_now: { type: 'predicate', probability: 0.97 } } } })
   const preview = await f.preview()
   assert.equal(preview.status, 200)
   assert.deepEqual([preview.body.decisionModel, preview.body.decisionMode, preview.body.draftModel], ['fixture-decisions-model', 'on', MODEL])
   noTraffic(f)
   assert.deepEqual(await f.run(preview), { status: 200, body: { mode: 'draft', answer: ANSWER, source: 'draft', screening: 'decision' } })
-  assert.equal(f.decisions(), 1)
-  assert.deepEqual(f.decisionInputs, [{ question: QUESTION, candidates: [{ alias: 'c1', text: EXCERPT }] }], 'only the question and the approved excerpts the drafting model may also receive')
+  assert.equal(f.decisions(), 2, 'L1 c13: relevance, then the time question for the one relevant excerpt')
+  assert.deepEqual(f.decisionInputs, [0, 1].map(() => ({ question: QUESTION, today: localDay(Date.now()), candidates: [{ alias: 'c1', text: EXCERPT }] })), 'only the question, the ask\'s day and the approved excerpts the drafting model may also receive')
   assert.equal(f.posts.length, 1)
   assert.deepEqual(JSON.parse(f.posts[0].body.input[0].content[0].text).excerpts, [EXCERPT])
   code(await f.run(preview), 409, 'STALE')
-  assert.deepEqual([f.decisions(), f.posts.length], [1, 1])
+  assert.deepEqual([f.decisions(), f.posts.length], [2, 1], 'the replay sends nothing more')
   trace('draft_with_decisions_on', f, { runStatus: 200, screening: 'decision', replayStatus: 409 })
 })
 

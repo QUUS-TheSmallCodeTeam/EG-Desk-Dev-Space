@@ -6,7 +6,7 @@ import path from 'node:path'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { createBoardAgentAsk } from '../overlay/resources/EGDeskBoardAgentAsk.sys.mjs'
 import { createBoardAgentAskService } from './egdesk-board-agent-ask.mjs'
-import { selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
+import { localDay, readScreeningInput, selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
 import { createBoardAgentDraftTransport } from './egdesk-board-agent-draft.mjs'
 import { openCalibrationLog, CALIBRATION_FILE } from './egdesk-decision-calibration-log.mjs'
 import { createDecisionClient, DECISION_MODEL } from './egdesk-decision-client.mjs'
@@ -24,7 +24,9 @@ const E = ['Friday visitors park behind the gym.', 'Meet in the atrium on Friday
 const KEY = 'egd-synthetic-not-a-key-0001'
 const profile = { lifecycle: 'active', activeRevision: 1, active: { revision: 1, hash: 'a'.repeat(64), body: { name: 'Calibration Sim Agent', model: null } } }
 const sha = text => createHash('sha256').update(text).digest('hex')
-const probs = list => body => Response.json({ model: DECISION_MODEL, answers: body.questions.map((q, i) => ({ name: q.name, type: 'predicate', probability: list[i] })) })
+// The provider answers every question it is sent: relevance from the list (those questions come first), and (L1 cycle 12) "still in effect
+// today?" for each excerpt, in effect unless the test says otherwise.
+const probs = (list, inEffect = () => 0.97) => (body) => Response.json({ model: DECISION_MODEL, answers: body.questions.map((q, i) => ({ name: q.name, type: 'predicate', probability: q.name.endsWith('_now') ? inEffect(q.name) : list[i] })) })
 const err = (status, code) => () => Response.json({ error: { code, type: code } }, { status })
 
 function machine(t, { mode, respond, draftFetch = draftOk, brokenLog = false }) {
@@ -73,8 +75,8 @@ for (const mode of ['off', 'advisory', 'on']) for (const [name, s] of Object.ent
       assert.deepEqual(m.draftExcerpts, [LOCAL]); assert.equal(Object.hasOwn(result, 'screening'), false)
       return
     }
-    assert.equal(m.decisionPosts.length, 1, 'allowed: exactly one screening request')
-    assert.deepEqual(JSON.parse(m.decisionPosts[0].input), { question: QUESTION, candidates: E.map((text, i) => ({ alias: `c${i + 1}`, text })) })
+    assert.equal(m.decisionPosts.length, s.fallback ? 1 : 1 + (s.picks > 0 ? 1 : 0), 'allowed: one relevance request, plus (L1 c13) the time question only when something is relevant')
+    assert.deepEqual(readScreeningInput(m.decisionPosts[0].input), { question: QUESTION, today: localDay(Date.now()), candidates: E.map((text, i) => ({ alias: `c${i + 1}`, text })) })
     assert.equal(entries.length, 1)
     const [entry] = entries
     t.diagnostic('ENTRY ' + JSON.stringify(entry))
@@ -87,9 +89,13 @@ for (const mode of ['off', 'advisory', 'on']) for (const [name, s] of Object.ent
       assert.equal(result.screening, 'fallback')
       assert.deepEqual(m.draftExcerpts, [LOCAL], 'a failed screening leaves the local selection for the draft')
     } else {
-      assert.deepEqual(entry.judgments.map(j => j.p), s.probs)
-      assert.ok(entry.judgments.every(j => j.q === 'relevance' && j.kind === 'board' && j.threshold === 0.6))
-      assert.deepEqual(entry.judgments.map(j => j.would), s.probs.map(p => p >= 0.6 ? 'attach' : 'skip'))
+      const relevance = entry.judgments.filter(j => j.q === 'relevance'), inEffect = entry.judgments.filter(j => j.q === 'in_effect')
+      assert.deepEqual(relevance.map(j => j.p), s.probs)
+      assert.ok(relevance.every(j => j.kind === 'board' && j.threshold === 0.6))
+      assert.deepEqual(relevance.map(j => j.would), s.probs.map(p => p >= 0.6 ? 'attach' : 'skip'))
+      // L1 cycle 13: the time judgment only for the excerpts decided relevant (R3), against its own bar, and nothing else
+      assert.deepEqual(inEffect.map(j => [j.p, j.threshold, j.would, j.kind]), Array.from({ length: s.picks }, () => [0.97, 0.5, 'accept', 'board']))
+      assert.equal(entry.judgments.length, relevance.length + inEffect.length)
       assert.equal(entry.attached, mode === 'on' && s.picks > 0, 'attached = the selection was applied to the reply')
       assert.equal(entry.fallback, undefined)
       assert.equal(result.screening, mode === 'advisory' ? 'advisory' : 'decision')

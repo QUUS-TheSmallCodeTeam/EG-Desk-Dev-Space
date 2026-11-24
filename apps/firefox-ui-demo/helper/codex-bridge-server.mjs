@@ -572,11 +572,13 @@ const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credent
     // EGDESK_BRIEFING_FILL_CHECK=facts: judge only the filled pieces that carry a number, a date, a Latin word or a name (fewer tokens). Developer switch, default off (every piece).
     fillCheck: process.env.EGDESK_BRIEFING_FILL_CHECK === 'facts' ? 'facts' : 'all' }) })
 // Work-surface placement (egdesk-work-placement.mjs): where an Agent's visible work surface should open, judged at the conversation's heartbeat among options the
-// canvas enumerated. Off unless EGDESK_WORK_PLACEMENT=advisory or on (and the Decisions mode is advisory or on, and the chrome's egdesk.workPlacement is "advisory"); it
+// canvas enumerated. Off unless EGDESK_WORK_PLACEMENT=advisory or on (and the Decisions mode is advisory or on, and the chrome's egdesk.workPlacement is "advisory" or "on"); it
 // records what it would choose and changes nothing on the canvas.
 const workPlacement = createWorkPlacement({ client: decisionClient, mode: () => bridgeSettings.decisionContext.mode, enabled: () => ['advisory', 'on'].includes(process.env.EGDESK_WORK_PLACEMENT),
   // 'on' additionally lets a decided "point" become a pointer fact, which the session heartbeat turns into ONE chat message (EGDESK_CONVERSATION_FLOW=on). Cards are never moved in either mode.
-  live: () => process.env.EGDESK_WORK_PLACEMENT === 'on', calibrationLog: decisionCalibrationLog })
+  live: () => process.env.EGDESK_WORK_PLACEMENT === 'on', calibrationLog: decisionCalibrationLog,
+  // the run's own request and answer and its egress gate, for the content questions (L1 cycle 12); the card words come from the chrome (maySend cards only)
+  contextFor: (key, options) => chat.placementContextFor(key, options) })
 // The window's event streams (/events): when the last one has been gone for 10 s, nobody can read a message, so idle live sessions end
 // (a working run keeps its heartbeat). A single conversation that is closed is told by the surface: POST /chat/session/close.
 const windowWatch = createWindowWatch({ onGone: () => chat.closeIdleSessions() })

@@ -6,7 +6,7 @@ import path from 'node:path'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { createReviewFlow } from '../overlay/resources/EGDeskReviewHandoff.sys.mjs'
 import { createBoardAgentAskService } from './egdesk-board-agent-ask.mjs'
-import { selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
+import { localDay, readScreeningInput, selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
 import { createBoardAgentDraftTransport } from './egdesk-board-agent-draft.mjs'
 import { createBoardAgentDraftConfigReader, BOARD_AGENT_DRAFT_CONFIG_FILE } from './egdesk-board-agent-draft-config.mjs'
 import { createDecisionClient, DECISION_MODEL } from './egdesk-decision-client.mjs'
@@ -33,7 +33,7 @@ function machine(t, { mode, respond, draftConfig = DRAFT_ON, excerpts = E }) {
   const posts = []
   const client = createDecisionClient({ getApiKey: () => DECISION_KEY, fetchImpl: async (url, init) => {
     const body = JSON.parse(init.body)
-    posts.push({ names: body.questions.map(q => q.name), input: JSON.parse(body.input), auth: init.headers.authorization === `Bearer ${DECISION_KEY}` })
+    posts.push({ names: body.questions.map(q => q.name), input: readScreeningInput(body.input), auth: init.headers.authorization === `Bearer ${DECISION_KEY}` })
     return respond(body, init)
   } })
   const draftPosts = []
@@ -72,7 +72,9 @@ async function ownerView(request, result) {
   return { note: flow.view().answerSource, answer: flow.view().review.answer ?? '' }
 }
 
-const probs = list => (body) => Response.json({ model: DECISION_MODEL, answers: body.questions.map((q, i) => ({ name: q.name, type: 'predicate', probability: list[i] })) })
+// The provider answers every question it is sent: relevance from the list (those questions come first), and (L1 cycle 12) "still in effect
+// today?" for each excerpt, in effect unless the test says otherwise.
+const probs = (list, inEffect = () => 0.97) => (body) => Response.json({ model: DECISION_MODEL, answers: body.questions.map((q, i) => ({ name: q.name, type: 'predicate', probability: q.name.endsWith('_now') ? inEffect(q.name) : list[i] })) })
 const err429 = code => () => Response.json({ error: { code, type: code } }, { status: 429 })
 const SCENARIOS = {
   confident: { respond: probs([0.1, 0.98, 0.02]) },
@@ -104,8 +106,12 @@ for (const mode of ['off', 'advisory', 'on']) for (const [name, scenario] of Obj
     assert.equal(Object.hasOwn(prepared, 'decisionEgress'), false, 'no per-request screening choice in the contract')
     if (mode === 'off') assert.equal(m.posts.length, 0, 'off: no egress to Decisions at all')
     else {
-      assert.equal(m.posts.length, 1, 'allowed: exactly one screening request')
-      assert.deepEqual(m.posts[0].input, { question: QUESTION, candidates: E.map((text, i) => ({ alias: `c${i + 1}`, text })) }, 'only question + approved candidates leave the host')
+      // L1 c13: one relevance request; a second one (the arrangement question, for the relevant excerpts only) exactly when the first found any
+      const anyRelevant = !FAILED.includes(name) && ['confident', 'outOfSet'].includes(name)
+      assert.equal(m.posts.length, anyRelevant ? 2 : 1, 'allowed: one relevance request, plus the time question only for what is relevant')
+      assert.deepEqual(m.posts[0].names, ['c1', 'c2', 'c3'])
+      if (anyRelevant) assert.ok(m.posts[1].names.length >= 1 && m.posts[1].names.every(n => /^c[1-3]_now$/.test(n)) && m.posts[1].names.length < 3 + (name === 'outOfSet' ? 1 : 0), m.posts[1].names.join())
+      assert.deepEqual(m.posts[0].input, { question: QUESTION, today: localDay(Date.now()), candidates: E.map((text, i) => ({ alias: `c${i + 1}`, text })) }, 'only question, the ask\'s day and approved candidates leave the host')
       assert.equal(m.posts[0].auth, true)
     }
     const failed = FAILED.includes(name)

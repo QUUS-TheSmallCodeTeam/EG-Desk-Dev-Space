@@ -8,7 +8,7 @@ import { Readable } from 'node:stream'
 import test from 'node:test'
 import { createBoardAgentAskHttpHandler } from './egdesk-board-agent-ask-http.mjs'
 import { createBoardAgentAskService } from './egdesk-board-agent-ask.mjs'
-import { selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
+import { localDay, readScreeningInput, selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
 import { createBoardAgentDraftTransport } from './egdesk-board-agent-draft.mjs'
 import { createDecisionBudget, createDecisionClient, DECISIONS_ENDPOINT } from './egdesk-decision-client.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
@@ -63,14 +63,17 @@ test('quota refresh on next explicit Board draft run uses the saved key without 
       const post = { phase, endpointMatched: url === DECISIONS_ENDPOINT, method: options.method,
         sameFixtureCredential: options.headers.authorization === `Bearer ${fixtureCredential}`,
         requestMatched: phase === 'check' ? body.input === 'EG-Desk key check' && body.questions.length === 1 :
-          body.input === JSON.stringify({ question: QUESTION, candidates: [{ alias: 'c1', text: LOCAL }, { alias: 'c2', text: SELECTED }] }) &&
-          body.questions.length === 2 && body.questions.every((q, i) => q.type === 'predicate' && q.name === `c${i + 1}`),
+          // L1 c13: relevance for both approved excerpts; then the time question for the relevant one (c2) only
+          (body.questions.every(q => q.name.endsWith('_now'))
+            ? JSON.stringify(readScreeningInput(body.input)) === JSON.stringify({ question: QUESTION, today: localDay(Date.now()), candidates: [{ alias: 'c2', text: SELECTED }] }) && body.questions.length === 1 && body.questions[0].name === 'c2_now'
+            : JSON.stringify(readScreeningInput(body.input)) === JSON.stringify({ question: QUESTION, today: localDay(Date.now()), candidates: [{ alias: 'c1', text: LOCAL }, { alias: 'c2', text: SELECTED }] }) &&
+              body.questions.length === 2 && body.questions.every((q, i) => q.type === 'predicate' && q.name === ['c1', 'c2'][i])),
         providerStatus: quota === 'exhausted' ? 429 : 200,
       }
       posts.push(post)
       if (post.providerStatus === 429) return Response.json({ error: { code: 'insufficient_quota', type: 'insufficient_quota' } }, { status: 429 })
       return Response.json({ model: client.model, usage: { input_tokens: 19, output_tokens: 2, total_tokens: 21 },
-        answers: [{ name: 'c1', type: 'predicate', probability: 0.1 }, { name: 'c2', type: 'predicate', probability: 0.98 }] })
+        answers: [{ name: 'c1', type: 'predicate', probability: 0.1 }, { name: 'c2', type: 'predicate', probability: 0.98 }, { name: 'c1_now', type: 'predicate', probability: 0.97 }, { name: 'c2_now', type: 'predicate', probability: 0.97 }] })
     },
   })
   const handleSettings = createDecisionHttpHandler({ store, mode, budget, model: client.model, verifyKey: client.verifyKey })
@@ -142,9 +145,11 @@ test('quota refresh on next explicit Board draft run uses the saved key without 
     assert.equal((await run(false)).status, 400)
     assert.equal(posts.length, previousPosts)
     const result = await run(true)
-    assert.equal(posts.length, previousPosts + 1)
+    // L1 c13: a screened run is the relevance request plus, when it answers, the time question for the relevant excerpt; an exhausted quota stops at the first
+    const sentNow = quota === 'exhausted' ? 1 : 2
+    assert.equal(posts.length, previousPosts + sentNow)
     assert.equal((await run(true)).status, 409)
-    assert.equal(posts.length, previousPosts + 1)
+    assert.equal(posts.length, previousPosts + sentNow)
     return result
   }
 
@@ -170,13 +175,13 @@ test('quota refresh on next explicit Board draft run uses the saved key without 
   assert.deepEqual(await approveDraft(2, 2), { status: 200, body: { mode: 'draft', answer: DRAFT_ANSWER, source: 'draft', screening: 'decision' } })
   assert.deepEqual(draftExcerpts, [[LOCAL], [SELECTED]], 'recovered: the draft gets the excerpt Decisions selected')
   credentialKept()
-  assert.equal(budget.snapshot().inputTokens, 19)
-  await noBackgroundPost(3)
+  assert.equal(budget.snapshot().inputTokens, 19 + 19, 'L1 c13: the relevance request and the time question are each metered once')
+  await noBackgroundPost(4)
   assert.equal(JSON.stringify(desk.board(BOARD).head) === boardBefore, true)
-  assert.deepEqual(posts, [['check', 429], ['extract', 429], ['extract', 200]].map(([phase, providerStatus]) => ({
+  assert.deepEqual(posts, [['check', 429], ['extract', 429], ['extract', 200], ['extract', 200]].map(([phase, providerStatus]) => ({
     phase, endpointMatched: true, method: 'POST', sameFixtureCredential: true, requestMatched: true, providerStatus,
   })))
-  t.diagnostic('BOARD_QUOTA_TRACE ' + JSON.stringify({ keyVerificationPosts: 1, featurePosts: 2,
+  t.diagnostic('BOARD_QUOTA_TRACE ' + JSON.stringify({ keyVerificationPosts: 1, featurePosts: 3,
     idleStatusPreviewReplayPosts: 0, verification: 'no_credit', exhausted: { provider: 429, screening: 'fallback', draftGot: 'local selection' },
-    recovered: { provider: 200, screening: 'decision', draftGot: 'Decisions selection', countedInputTokens: 19 }, extractRunPosts: 0, sameSavedKey: true, saves: 1, clears: 0, boardUnchanged: true }))
+    recovered: { provider: 200, screening: 'decision', draftGot: 'Decisions selection', countedInputTokens: 38 }, extractRunPosts: 0, sameSavedKey: true, saves: 1, clears: 0, boardUnchanged: true }))
 })
