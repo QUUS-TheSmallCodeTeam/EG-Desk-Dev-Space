@@ -103,17 +103,21 @@ export const INTERACTION_TYPES = Object.freeze({
   pushback: { re: /왜 (멈|안 ?하|물어|묻)|빨리|그냥 (진행|해)|계속 (진행|해)|이제야|하라고|라니까|몇 번|또 (물어|멈)/, q: 'Does the person push back on how the assistant works (stopping, asking permission, being slow or cautious) and tell it to go on?' },
   approval: { re: /^(그래|응|ㅇㅇ|ㅇㅋ|좋아|좋습니다|ok|okay|오케이|ㄱㄱ|고고|진행(해|해줘|하자)?|당연하지|해줘|해|넵|네|예|yes|go)[.!~ ]*$/i, q: 'Is the turn a short approval or go-ahead of what the assistant proposed?' },
   ambiguous: { short: 14, q: 'Is the turn so short or vague that what it approves, chooses or asks can only be guessed from the assistant\'s message?' },
-  referential: { re: /(방금|아까|위에|위의|그거|그것|그 내용|이거|저거|앞에서).{0,12}(정리|요약|다시|설명|말한|뭐|어떻게)/, q: 'Does the turn refer to something only by pointing at it ("that", "this", "the above", "what you said just now"), so that what it means can be found only in the earlier conversation? A turn that names what it is about is not.' },
-    // c22: the c19 wording ("point back to something earlier instead of naming it") was read as "is about something earlier": 2026-11-25 it
-    // labelled "오전 6시에 작업 중지 예약 걸었지?" (which names the stop it asks about) referential .99.
+  referential: { re: /(방금|아까|위에|위의|그거|그것|그 내용|이거|저거|앞에서).{0,12}(정리|요약|다시|설명|말한|뭐|어떻게)/, q: 'Does the turn contain a word that stands in for something said or shown earlier instead of naming it (for example "that", "this", "the above", "just now", "the earlier one", or the Korean 그거, 이거, 위, 방금, 아까)?' },
+    // c22/c23: referential is asked as ONE concrete condition, the presence of a pointer word. Measured 2026-11-25: the c19 wording ("point back ...
+    // instead of naming it") labelled "오전 6시에 작업 중지 예약 걸었지?" .99, and the c22 wording ("only by pointing at it ... A turn that names what
+    // it is about is not") still .93: a turn that asks about an earlier action reads as "about something earlier" whatever the wording says
+    // about naming. A pointer word is what the turn itself either has or has not.
   topic_switch: { re: /^(그리고|근데|그런데|참고로|아 그리고|다른 얘기|그건 그렇고)|이제 .{0,20}(하자|해보자|넘어가)/, q: 'Does the person move to a different topic from the assistant\'s message?' },
   topic_return: { re: /(다시|아까).{0,15}(돌아|얘기|그거|이어)|원래 (하던|얘기)/, q: 'Does the person return to a topic from earlier in the conversation (not the assistant\'s last message)?' },
   interruption: { re: /복구|되돌려|롤백|취소|멈춰|중지|그만|stop\b|^뭐야/i, q: 'Does the person stop the assistant, or ask it to undo or recover work?' },
   praise: { re: /좋네|좋다|잘했|완벽|훌륭|굿|나이스|고마워|감사|최고|great|nice|perfect/i, q: 'Does the person praise or thank the assistant?' },
   frustration: { re: /짜증|답답|기분 ?나|왜 이래|엉망|대충|도대체|대체 |ㅡㅡ|;;|\?\?|아오|하\.\.|진짜/, q: 'Does the person show frustration or annoyance?' },
-  reask: { re: /안 ?보여|무슨 .{0,12}\?|뭔 소리|무슨 말|이해가 안|다시 설명|모르겠|뭐라는|뭘 말하는/, q: 'Does the person say they could not understand or could not see something the assistant said or showed, and ask for it to be explained or shown again?' },
-    // c22: the c19 wording ("unclear or missing and ask again") was read as "repeats a request": it labelled a repeated instruction
-    // ("아니 앱화면 말고 … 인수인계 받으라고") re-ask .92.
+  reask: { re: /안 ?보여|무슨 .{0,12}\?|뭔 소리|무슨 말|이해가 안|다시 설명|모르겠|뭐라는|뭘 말하는/, q: 'Does the person say in this turn that they did not understand something, or could not see something, that the assistant said or showed?' },
+    // c22/c23: re-ask is asked as ONE condition about what the person says (that they did not understand or could not see), not about what they
+    // ask for next. Measured 2026-11-25: the c19 wording labelled a repeated instruction .92; the c22 wording ("... and ask for it to be explained
+    // or shown again") labelled "아까전 시나리오 다시 흐름을 설명해봐" .95 and "방금 그 내용 정리해줘" .71 (a request to explain or summarise again,
+    // which says nothing about not having understood).
   instruction_change: { re: /말고 |대신 |바꿔|변경|이제부터|앞으로는|기준(을|은) /, q: 'Does the person change the instructions or criteria of the task in progress?' },
 })
 export const TYPE_NAMES = Object.freeze(Object.keys(INTERACTION_TYPES))

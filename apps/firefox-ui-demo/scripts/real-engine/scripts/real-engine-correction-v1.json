@@ -1,0 +1,43 @@
+{
+  "set": "real-engine-correction-v1",
+  "description": "Pattern: a correction mid-task (\"아니, 그게 아니라 …\"). The person asks for one thing, the assistant answers a slightly different one, the person corrects what they meant, and the answer must now follow the correction. Pattern taken from the person's real turns (masked, re-worded); the folder is synthetic. Expectations are code checks only.",
+  "conversations": [
+    {
+      "id": "correction-mid-task",
+      "folder": {
+        "notes/price-list.md": "# 단가표\n- 모듈 A: 12,000원\n- 모듈 B: 8,500원\n- 모듈 C: 4,200원\n"
+      },
+      "turns": [
+        {
+          "say": "notes/price-list.md 를 읽고 모듈 이름만 알려 줘.",
+          "expect": {
+            "toolCalls": [
+              "egdesk_read_file"
+            ],
+            "answerIncludes": [
+              "모듈 A",
+              "모듈 B",
+              "모듈 C"
+            ],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "아니, 이름이 아니라 단가를 말한 거야. 단가만 다시 알려 줘.",
+          "expect": {
+            "answerIncludes": [
+              "12,000",
+              "8,500",
+              "4,200"
+            ],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}
