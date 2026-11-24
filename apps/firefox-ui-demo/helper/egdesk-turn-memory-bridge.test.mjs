@@ -26,17 +26,19 @@ test('the production wiring: the bridge builds turnMemory from the bridge settin
   assert.ok(!/wikiAdapter = createWikiAdapter|openWikiWrites\(/.test(source.replace(/getAdapter: \(\) => wikiAdapter \?\?= createWikiAdapter\(\{ writes: openWikiWrites\([^\n]*\n/, '')), 'the adapter and its store are created only inside the lazy getter')
 })
 
-test('the setting defaults to off, only "off" and "advisory" exist, and a file with anything else is treated as damaged', async () => {
+test('the setting defaults to off; "off", "advisory" and "on" exist, every one saved explicitly; a file with anything else is treated as damaged', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-tm-settings-')); await chmod(dir, 0o700)
   const dataDir = path.join(dir, 'settings')
   const fresh = openBridgeSettings({ dataDir, log: quiet })
-  assert.deepEqual([fresh.turnMemory.mode, fresh.turnMemory.saved, TURN_MEMORY_DEFAULT, TURN_MEMORY_MODES], ['off', false, 'off', ['off', 'advisory']])
-  assert.throws(() => fresh.turnMemory.save('on'), /Invalid bridge setting/, 'there is no "on"')
+  assert.deepEqual([fresh.turnMemory.mode, fresh.turnMemory.saved, TURN_MEMORY_DEFAULT, TURN_MEMORY_MODES], ['off', false, 'off', ['off', 'advisory', 'on']])
+  assert.throws(() => fresh.turnMemory.save('always'), /Invalid bridge setting/, 'not a mode')
   assert.equal(fresh.turnMemory.mode, 'off')
   assert.ok(await fresh.turnMemory.save('advisory'))
   assert.equal(openBridgeSettings({ dataDir, log: quiet }).turnMemory.mode, 'advisory', 'explicitly saved, it survives a restart')
   const file = path.join(dataDir, 'bridge-settings.json')
   await writeFile(file, JSON.stringify({ version: 1, turnMemory: 'on' }), { mode: 0o600 })
+  assert.equal(openBridgeSettings({ dataDir, log: quiet }).turnMemory.mode, 'on', 'explicitly written, "on" is read')
+  await writeFile(file, JSON.stringify({ version: 1, turnMemory: 'always' }), { mode: 0o600 })
   const damaged = openBridgeSettings({ dataDir, log: quiet })
   assert.equal(damaged.turnMemory.mode, 'off'); assert.ok((await readdir(dataDir)).some(n => n.includes('.corrupt-')))
 })

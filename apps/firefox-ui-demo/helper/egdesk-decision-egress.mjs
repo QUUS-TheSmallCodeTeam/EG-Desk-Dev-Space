@@ -91,6 +91,7 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-draft-check.mjs': ['draft_text'],
   'egdesk-terminal-command-gate.mjs': ['terminal_command'],
   'egdesk-terminal-judge.mjs': ['terminal_output'],
+  'egdesk-memory-live-runner.mjs': ['memory_page: measurement tool; the public synthetic wiki only, through guardClient'],
   'egdesk-turn-memory.mjs': ['memory_page', 'topic_history'],
   'egdesk-wiki-reconstruction.mjs': ['memory_page'],
 })

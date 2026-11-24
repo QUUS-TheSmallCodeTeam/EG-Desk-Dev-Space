@@ -11,7 +11,7 @@ import { CONTEXT_SUGGEST_DEFAULT, normalizeContextSuggest } from './egdesk-conte
 //     "contextSuggest": { "mode": "always" | "firstMessage" | "off",
 //                         "neverSuggest": [{ "kind": "site", "host": "bank.example.com" } | { "kind": "folder", "path": "/abs" }] },
 //     "decisionContext": "off" | "advisory" | "on",
-//     "turnMemory": "off" | "advisory" }
+//     "turnMemory": "off" | "advisory" | "on" }
 // - Missing file or missing field: the module default applies
 //   (DEFAULT_COMPUTER_CONTROL_POLICY in codex-computer-control.mjs,
 //   CONTEXT_SUGGEST_DEFAULT in egdesk-context-resolver.mjs: always suggest,
@@ -37,9 +37,10 @@ const normalizedSuggest = value => { try { return normalizeContextSuggest(value)
 // today's behaviour), 'advisory' (decide and record, attach nothing), 'on'.
 export const DECISION_CONTEXT_MODES = Object.freeze(['off', 'advisory', 'on'])
 export const DECISION_CONTEXT_DEFAULT = 'off'
-// Advisory turn memory (egdesk-turn-memory.mjs): 'off' (default: nothing is read, built or sent) or 'advisory' (runs in the background after
-// each turn starts and only records; what the answering model receives never changes). There is no 'on' yet.
-export const TURN_MEMORY_MODES = Object.freeze(['off', 'advisory'])
+// Turn memory (egdesk-turn-memory.mjs): 'off' (default: nothing is read, built or sent), 'advisory' (runs in the background after each turn
+// starts and only records; what the answering model receives never changes) or 'on' (the reconstructed / fetched pages are attached to the
+// turn input and the write judgment stores pending readings). 'on' attaches only while the decision model mode is also 'on'.
+export const TURN_MEMORY_MODES = Object.freeze(['off', 'advisory', 'on'])
 export const TURN_MEMORY_DEFAULT = 'off'
 /** Settings fields this build reads and writes, with their validity rule. */
 const FIELDS = Object.freeze({
@@ -228,7 +229,7 @@ export function openBridgeSettings({ dataDir, log = defaultLog, now = Date.now }
     get persisted() { return writable },
     save: mode => store.set('decisionContext', mode),
   })
-  // Advisory turn memory: the saved choice, or 'off'. Explicitly enabled only (edit the file or save through this accessor).
+  // Turn memory: the saved choice, or 'off'. Explicitly enabled only (edit the file or save through this accessor).
   store.turnMemory = Object.freeze({
     get mode() { return store.get('turnMemory') ?? TURN_MEMORY_DEFAULT },
     get saved() { return store.get('turnMemory') !== null },
