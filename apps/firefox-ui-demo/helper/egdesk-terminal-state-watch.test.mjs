@@ -229,12 +229,13 @@ test('terminalFacts() is a read-only, content-free fact provider; beat() is a ch
   const r = rig(t)
   r.registry.write('term-1', 'npm install zeta-synthetic-package\r'); r.pty.output('Proceed? (y/N) zeta-synthetic-output'); r.clock.t += 4000
   const before = r.watch.terminalFacts()
-  assert.deepEqual(before.map(f => [f.sessionId, f.alive, f.exitCode, f.quietMs, f.agentOwned, f.runBound, f.judged]), [['term-1', true, null, 4000, false, true, null]])
+  assert.deepEqual({ ...before[0] }, { sessionId: 'term-1', active: true, waitingOnUser: false, terminal: 'running', phase: 'tool_running', runningMs: 4000, quietMs: 4000, exitCode: null, agentOwned: false, runBound: true })
   assert.ok(Object.isFrozen(before) && Object.isFrozen(before[0]))
   const result = await r.watch.beat('term-1')
   assert.deepEqual([result.check, result.state, result.would], ['beat', 'waiting_yn_input', 'hand_yes_no'])
   const facts = r.watch.terminalFacts()
-  assert.deepEqual(facts[0].judged, { state: 'waiting_yn_input', source: 'fallback', would: 'hand_yes_no', at: r.clock.t })
+  // the same row shape as the engine-command facts and the objective-loop adapter: a judged waiting state, but the person is not asked through EG-Desk here
+  assert.deepEqual([facts[0].terminal, facts[0].terminalState, facts[0].terminalSource, facts[0].terminalWould, facts[0].waitingOnUser, facts[0].phase], ['waiting', 'waiting_yn_input', 'fallback', 'hand_yes_no', false, 'tool_running'])
   assert.doesNotMatch(JSON.stringify(facts), /zeta-synthetic|Proceed|npm/)
   assert.deepEqual(r.pty.writes, ['npm install zeta-synthetic-package\r'])
   r.pty.exit(0); await r.settle()

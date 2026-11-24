@@ -30,9 +30,10 @@ const SECRET = [/\b(?:sk|pk|ghp|gho|github_pat|xox[abprs]|AKIA|AIza)[A-Za-z0-9_\
   /\b(?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*\S+/gi, /\b[A-Za-z0-9+/_\-]{40,}={0,2}/g]
 
 /** The states that are possible for this process now. Decided from process facts only. */
-export function enumerateStateOptions({ alive, exitCode = null }) {
+// `failed`: the runtime was told the command failed without an exit code (an engine reports only a failed status).
+export function enumerateStateOptions({ alive, exitCode = null, failed = false }) {
   if (alive) return ['running_output', 'waiting_yn_input', 'waiting_password', 'stuck_in_pager', 'need_user_context', 'cannot_proceed']
-  if (Number.isInteger(exitCode) && exitCode !== 0) return ['completed_error', 'need_user_context', 'cannot_proceed']
+  if (failed === true || (Number.isInteger(exitCode) && exitCode !== 0)) return ['completed_error', 'need_user_context', 'cannot_proceed']
   return ['completed_ok', 'completed_error', 'need_user_context', 'cannot_proceed']
 }
 
@@ -61,8 +62,8 @@ export function stateResponse(state, { agentOwned = false } = {}) {
 }
 
 const hashOf = text => createHash('sha256').update(text).digest('hex').slice(0, 16)
-const fallbackState = ({ alive, exitCode, quietMs }, limits) => {
-  if (!alive) return Number.isInteger(exitCode) && exitCode !== 0 ? 'completed_error' : 'completed_ok'
+const fallbackState = ({ alive, exitCode, failed, quietMs }, limits) => {
+  if (!alive) return failed === true || (Number.isInteger(exitCode) && exitCode !== 0) ? 'completed_error' : 'completed_ok'
   return quietMs >= limits.maxQuietMs ? 'need_user_context' : 'running_output' // long silence: let the reasoning model look
 }
 
@@ -75,10 +76,10 @@ function record(calibration, mode, judgments, fallback) {
  *  → { state, source: 'runtime'|'rule'|'decision'|'fallback', requests, fallback?, shadow? }
  * `egress` is the run's shared gate (egdesk-decision-egress.mjs): terminal text leaves only when the models of this run may receive terminal output; there is no Decision-specific consent. Without a gate nothing is sent.
  */
-export async function judgeTerminalState({ tail = '', alive, exitCode = null, quietMs = 0, mode = 'off', client = null, thresholds, timeoutMs = TERMINAL_JUDGE_TIMEOUT_MS,
+export async function judgeTerminalState({ tail = '', alive, exitCode = null, failed = false, egressKind = 'terminal_output', quietMs = 0, mode = 'off', client = null, thresholds, timeoutMs = TERMINAL_JUDGE_TIMEOUT_MS,
   signal, calibration = null, egress = null, cache = null, limits = TERMINAL_JUDGE_LIMITS } = {}) {
-  const options = enumerateStateOptions({ alive, exitCode })
-  const base = fallbackState({ alive, exitCode, quietMs }, limits)
+  const options = enumerateStateOptions({ alive, exitCode, failed })
+  const base = fallbackState({ alive, exitCode, failed, quietMs }, limits)
   const text = redactTail(tail, limits)
   // Rule first: a secret prompt is never sent to a model.
   if (alive && PASSWORD_PROMPT.test(stripAnsi(String(tail)).trimEnd().split('\n').at(-1) || '')) return { state: 'waiting_password', source: 'rule', requests: 0 }
@@ -91,7 +92,7 @@ export async function judgeTerminalState({ tail = '', alive, exitCode = null, qu
   const done = (result, store = true) => { if (store && cache) cache.set(key, result); return result }
   if (mode !== 'advisory' && mode !== 'on') return { state: base, source: 'fallback', fallback: 'mode_off', requests: 0 }
   if (!client?.decide) return { state: base, source: 'fallback', fallback: 'not_configured', requests: 0 }
-  if (egress?.allows?.('terminal_output') !== true) return { state: base, source: 'fallback', fallback: 'evidence_unavailable', requests: 0 }
+  if (egress?.allows?.(egressKind) !== true) return { state: base, source: 'fallback', fallback: 'evidence_unavailable', requests: 0 }
   const th = decisionThresholds(thresholds)
   let answer
   try {
@@ -134,14 +135,14 @@ export function enumerateLogBlocks(output, limits = TERMINAL_JUDGE_LIMITS) {
  * One predicate per runtime block. Fallback (and advisory): the blocks the runtime marked as failures plus the last block.
  */
 export async function pickRelevantBlocks({ blocks, mode = 'off', client = null, thresholds, timeoutMs = TERMINAL_JUDGE_TIMEOUT_MS, signal, calibration = null,
-  egress = null, limits = TERMINAL_JUDGE_LIMITS } = {}) {
+  egress = null, egressKind = 'terminal_output', limits = TERMINAL_JUDGE_LIMITS } = {}) {
   const fallback = () => {
     const marked = blocks.filter(b => b.failureMarker), last = blocks.at(-1)
     return [...new Map([...marked, ...(last ? [last] : [])].map(b => [b.id, b])).values()].slice(0, limits.picked)
   }
   const trim = list => { let total = 0; return list.filter(b => (total += b.text.length) <= limits.pickedChars) }
   if (!blocks.length) return { blocks: [], source: 'runtime', requests: 0 }
-  if ((mode !== 'advisory' && mode !== 'on') || !client?.decide || egress?.allows?.('terminal_output') !== true) return { blocks: trim(fallback()), source: 'fallback', requests: 0 }
+  if ((mode !== 'advisory' && mode !== 'on') || !client?.decide || egress?.allows?.(egressKind) !== true) return { blocks: trim(fallback()), source: 'fallback', requests: 0 }
   const th = decisionThresholds(thresholds)
   let answer
   try {
@@ -155,8 +156,9 @@ export async function pickRelevantBlocks({ blocks, mode = 'off', client = null, 
   }
   const verdicts = blocks.map(b => ({ id: b.id, ...readPredicate(answer.answers, `log_${b.id}`, th.relevant) }))
   try { calibration?.record?.({ feature: 'terminal_state', mode, judgments: verdicts.map(v => ({ q: 'log_block', would: v.state === 'yes' ? 'attach' : 'skip', p: v.probability ?? undefined, threshold: th.relevant })) }) } catch { /* ignore */ }
-  if (mode === 'advisory') return { blocks: trim(fallback()), source: 'fallback', requests: 1 }
   const picked = blocks.filter(b => verdicts.find(v => v.id === b.id)?.state === 'yes').slice(0, limits.picked)
+  // Advisory acts on the runtime's own marks; `shadow` says which blocks the model's answers would have chosen.
+  if (mode === 'advisory') return { blocks: trim(fallback()), source: 'fallback', requests: 1, shadow: trim(picked).map(b => b.id) }
   return { blocks: trim(picked.length ? picked : fallback()), source: picked.length ? 'decision' : 'fallback', requests: 1 }
 }
 
@@ -216,4 +218,33 @@ export async function runObjectiveLoop({ command, agentOwned = true, deps, maxRe
     }
     if (!rerun) return finish('timed_out_waiting')
   }
+}
+
+// ---- One fact row for every terminal-like source (heartbeat providers and fact readers) ----
+// Numbers, booleans and closed labels only, with keys the heartbeat accepts (egdesk-heartbeat.mjs sanitize):
+//   active         a command / loop is running now
+//   phase          'waiting_user' | 'objective_step' (EG-Desk's own loop) | 'tool_running' (an engine's or a person's command); absent when idle
+//   waitingOnUser  true only when the person is really being asked through EG-Desk
+//   terminal       'gate' (before the command starts) | 'running' | 'waiting' (a judged waiting state or a pending human answer) | 'idle'
+//   terminalState / terminalSource / terminalWould   the judged state, where it came from and what the system would do (absent until judged)
+//   runningMs / quietMs / exitCode                    how long the command has run, the age of its last output, the last exit code (null when unknown)
+const WAITING_STATES = new Set(['waiting_yn_input', 'waiting_password', 'need_user_context'])
+const FACT_KINDS = new Set(['objective', 'engine', 'card'])
+const elapsed = value => (Number.isFinite(value) && value >= 0 ? Math.round(value) : null)
+export function terminalFactRow({ kind = 'engine', running = true, started = true, asking = false, state = null, source = null, would = null,
+  runningMs = null, quietMs = null, exitCode = null } = {}) {
+  const loop = FACT_KINDS.has(kind) ? kind : 'engine'
+  const judged = TERMINAL_STATE_NAMES.includes(state) ? state : null
+  const waitingState = WAITING_STATES.has(judged) || (loop !== 'objective' && judged === 'stuck_in_pager')
+  // Only EG-Desk's own loop asks the person itself; an engine's command or a person's own terminal is not answered through EG-Desk.
+  const waitingOnUser = asking === true || (loop === 'objective' && waitingState)
+  const row = { active: running === true, waitingOnUser,
+    terminal: !started ? 'gate' : waitingOnUser || (running && waitingState) ? 'waiting' : running ? 'running' : 'idle' }
+  if (waitingOnUser) row.phase = 'waiting_user'
+  else if (running) row.phase = loop === 'objective' ? 'objective_step' : 'tool_running'
+  if (judged) row.terminalState = judged
+  if (judged && typeof source === 'string') row.terminalSource = source
+  if (judged && typeof would === 'string') row.terminalWould = would
+  if (loop !== 'objective') { row.runningMs = running ? elapsed(runningMs) : null; row.quietMs = running ? elapsed(quietMs) : null; row.exitCode = Number.isInteger(exitCode) ? exitCode : null }
+  return row
 }

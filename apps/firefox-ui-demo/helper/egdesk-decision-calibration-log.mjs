@@ -61,7 +61,9 @@ function timing(raw) {
 const TERMINAL_STATES = new Set(['running_output', 'waiting_yn_input', 'waiting_password', 'stuck_in_pager', 'completed_ok', 'completed_error', 'need_user_context', 'cannot_proceed'])
 const TERMINAL_SOURCES = new Set(['runtime', 'rule', 'decision', 'fallback'])
 const TERMINAL_WOULD = new Set(['wait', 'hand_yes_no', 'hand_secret', 'quit_pager', 'hand_close_pager', 'report', 'repair', 'hand_subjective'])
-const TERMINAL_CHECKS = new Set(['read', 'exit', 'beat'])
+const TERMINAL_CHECKS = new Set(['read', 'exit', 'beat', 'quiet'])
+// Where the judged output came from: a Terminal card (the person's own shell) or a command the run's engine executed.
+const TERMINAL_STREAMS = new Set(['card', 'engine'])
 const GATE_REASONS = new Set(['unresolved_target', 'protected_target', 'outside_cwd', 'tracked_files', 'dirty_worktree', 'remote_irreversible', 'privileged', 'remote_script', 'risk_score', 'risk_unsure'])
 const GATE_ENGINES = new Set(['codex', 'claude'])
 const flagOf = value => (typeof value === 'boolean' ? value : null)
@@ -70,6 +72,10 @@ function terminalFields(raw) {
   const out = {}
   put(out, 'state', word(TERMINAL_STATES, raw.state)); put(out, 'source', word(TERMINAL_SOURCES, raw.source)); put(out, 'would', word(TERMINAL_WOULD, raw.would))
   put(out, 'check', word(TERMINAL_CHECKS, raw.check)); put(out, 'acted', flagOf(raw.acted)); put(out, 'agentOwned', flagOf(raw.agentOwned))
+  put(out, 'stream', word(TERMINAL_STREAMS, raw.stream)); put(out, 'engine', word(GATE_ENGINES, raw.engine))
+  // Which runtime-enumerated log blocks would be highlighted: their ordinal numbers only (1..12), never their text.
+  const picked = Array.isArray(raw.picked) ? [...new Set(raw.picked.filter(n => Number.isSafeInteger(n) && n >= 1 && n <= 12))].slice(0, 12) : []
+  if (picked.length) out.picked = picked
   return Object.keys(out).length ? out : null
 }
 function gateFields(raw) {

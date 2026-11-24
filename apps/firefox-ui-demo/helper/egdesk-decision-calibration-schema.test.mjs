@@ -173,3 +173,12 @@ test('terminal records are closed words, booleans and one rounded number: a comm
   assert.equal(normalizeEntry({ feature: 'dm_chooser', mode: 'on', terminal: { state: 'completed_ok' }, gate: { rule: true } }).terminal, undefined)
   assert.doesNotMatch(JSON.stringify([state, gate]), /git log|rm -rf|\/work/)
 })
+
+test('engine-command terminal records: stream, engine and the ordinals of the blocks that would be highlighted; never text', async () => {
+  const { normalizeEntry } = await import('./egdesk-decision-calibration-log.mjs')
+  const entry = normalizeEntry({ feature: 'terminal_state', mode: 'advisory', judgments: [], attached: false, candidates: 4, judgedTotal: 2,
+    terminal: { state: 'completed_error', source: 'fallback', would: 'repair', acted: false, check: 'exit', stream: 'engine', engine: 'codex', picked: [2, 3, 3, 99, 'b4', 0], output: 'not ok 2' } })
+  assert.deepEqual(entry.terminal, { state: 'completed_error', source: 'fallback', would: 'repair', check: 'exit', acted: false, stream: 'engine', engine: 'codex', picked: [2, 3] })
+  assert.equal(normalizeEntry({ feature: 'terminal_state', mode: 'advisory', terminal: { stream: 'ssh', engine: 'bash', check: 'poll', picked: ['not ok 2'] } }).terminal, undefined)
+  assert.equal(normalizeEntry({ feature: 'terminal_state', mode: 'advisory', terminal: { check: 'quiet', state: 'waiting_yn_input' } }).terminal.check, 'quiet')
+})
