@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { DECISION_MODEL } from './egdesk-decision-client.mjs'
 import { prepareTurnContext } from './egdesk-context-setup.mjs'
 import { DECISION_IDLE_MS } from './egdesk-decision-transport.mjs'
-import { independentEstimate } from './egdesk-decision-real-runner.mjs'
+import { TOKEN_MODEL, estimateBodyTokens, independentEstimate } from './egdesk-decision-real-runner.mjs'
 import { TURN_CONTEXT_BUDGET_MS, TURN_CONTEXT_COLD_BUDGET_MS } from './codex-chat-runtime.mjs'
 
 // PREPARED, NOT SENT. Cold vs warm latency of the turn-context request (lane L6 cycle 14). The same product-built turn_context request
@@ -145,4 +145,70 @@ export function analyzeIdle([a = {}, b = {}] = []) {
         : [A1, A2, A3, B1, B2].every(fast) ? 'all fast: the tail is intermittent; two samples cannot show it'
           : 'mixed: report the numbers'
   return { A1, A2, A3, B1, B2, reading, serverMs: Object.fromEntries([['A1', a, 'A1-realistic-first'], ['B1', b, 'B1-small-first']].map(([k, x, id]) => [k, x?.[id]?.openaiProcessingMs == null ? null : Number(x[id].openaiProcessingMs)])) }
+}
+
+// ---- cycle 16: the warm-up probe (PREPARED, NOT SENT) ----
+// The product question: after a long idle, does a TINY request sent first (the smallest real body: the one-item turn_context) make the
+// following turn_context fast? Every run starts after >= 10 minutes with no Decisions request from this machine (Main pauses all sends).
+//   A  the measured turn_context alone (cold after idle)
+//   B  the tiny warm-up, then the measured turn_context 1 s later
+//   C  the tiny warm-up, then the measured turn_context 10 s later
+// Two repetitions each, six runs, interleaved A1 B1 C1 A2 B2 C2 so the time of day is spread. The measured body is a 3-item turn_context
+// (~1k tokens), not the ~2.6k-token one: six 2.6k bodies alone are 15.6k, over the 10k bound. The recorded slow first requests ranged from
+// 325 to 2,057 tokens with the same slowdown, and warm requests differ by ~50 ms between 1k and 2.6k (cycle 15); the c15 idle probe
+// (turn-context-idle) is the one that asks about size on the cold path.
+// Registered readings (on the measured request; "slow" = over the 800 ms warm budget):
+//   inconclusive               A is fast in both repetitions: the idle tail did not occur, nothing follows about the warm-up
+//   warm-up works              A slow at least once, and B and C fast in both repetitions
+//   warm-up works with lead    A slow at least once, C fast in both, B slow at least once
+//   warm-up does not help      A slow at least once, and C slow at least once
+export const WARMUP_SET = 'turn-context-warmup-v1'
+export const WARMUP_DIR = 'proofs/decision-real-measure/turn-context-warmup'
+export const WARMUP_CEILING = 10000
+const MEASURED = Object.freeze(REALISTIC.slice(0, 3))
+export const WARMUP_RUNS = Object.freeze([
+  ['A-rep1', [['measured', 0, 'A사 견적은 지금 어디까지 진행됐어?']]],
+  ['B-rep1', [['warmup', 0, '견적 상태 알려 줘'], ['measured', 1000, 'v2 견적은 언제 보내기로 했어?']]],
+  ['C-rep1', [['warmup', 0, '견적 일정 알려 줘'], ['measured', 10000, 'A사 단가는 지금 얼마로 되어 있어?']]],
+  ['A-rep2', [['measured', 0, 'v1 견적은 언제 보냈었지?']]],
+  ['B-rep2', [['warmup', 0, '견적 진행 알려 줘'], ['measured', 1000, 'A사 건 남은 일이 뭐야?']]],
+  ['C-rep2', [['warmup', 0, '견적 내용 알려 줘'], ['measured', 10000, 'v2 납기는 언제로 잡혀 있어?']]],
+])
+/** -> { runs: [{ dir, plan, planBytes, files, est }], totals } — deterministic; sends nothing. */
+export async function buildWarmupPlan() {
+  const runs = []
+  for (const [dir, items] of WARMUP_RUNS) {
+    const files = [], requests = []
+    for (const [id, waitBeforeMs, message] of items) {
+      const body = await idleBody(message, id === 'warmup' ? CANDIDATES : MEASURED)
+      const bytes = Buffer.from(JSON.stringify(body), 'utf8'), file = `requests/${id}.json`
+      files.push({ file, bytes })
+      requests.push({ id, file, sha256: sha(bytes), estInputTokens: estimateBodyTokens(bytes.toString('utf8')), ...(waitBeforeMs ? { waitBeforeMs } : {}), expect: [], recordOnly: true })
+    }
+    const est = requests.reduce((t, r) => t + r.estInputTokens, 0)
+    const plan = { set: `${WARMUP_SET}/${dir}`, tokenCeiling: Math.ceil(est * TOKEN_MODEL.margin / 10) * 10, transport: 'product',
+      passRule: 'Record only (latency probe). PRECONDITION, not enforced by the runner: start this run only after at least 10 minutes with no Decisions request from this machine. ' +
+        'Run order A-rep1, B-rep1, C-rep1, A-rep2, B-rep2, C-rep2. Read the "measured" request with scripts/egdesk-turn-context-latency-plan.mjs analyze-warmup.',
+      requests }
+    runs.push({ dir, plan, planBytes: Buffer.from(JSON.stringify(plan, null, 2) + '\n'), files, est })
+  }
+  const ceilings = runs.reduce((t, r) => t + r.plan.tokenCeiling, 0)
+  if (ceilings > WARMUP_CEILING) throw new Error(`the warm-up runs' token ceilings add up to ${ceilings}, over ${WARMUP_CEILING}`)
+  return { runs, totals: { runs: runs.length, requests: runs.reduce((t, r) => t + r.plan.requests.length, 0), estInputTokens: runs.reduce((t, r) => t + r.est, 0), ceilings } }
+}
+/** { 'A-rep1': results, ... } -> per run the measured request (elapsed, server, socket) and the registered reading. */
+export function analyzeWarmup(byRun) {
+  const row = dir => { const x = byRun?.[dir]?.measured, w = byRun?.[dir]?.warmup
+    return x ? { elapsedMs: x.elapsedMs, serverMs: x.openaiProcessingMs == null ? null : Number(x.openaiProcessingMs), reusedSocket: x.reusedSocket ?? null, warmBefore: x.warmBefore ?? null,
+      connectMs: x.connectMs ?? null, tlsMs: x.tlsMs ?? null, ...(w ? { warmupMs: w.elapsedMs, warmupServerMs: w.openaiProcessingMs == null ? null : Number(w.openaiProcessingMs) } : {}) } : null }
+  const runs = Object.fromEntries(WARMUP_RUNS.map(([dir]) => [dir, row(dir)]))
+  const slow = r => r && r.elapsedMs > BUDGETS.warm
+  const pick = c => [runs[`${c}-rep1`], runs[`${c}-rep2`]]
+  const [A, B, C] = ['A', 'B', 'C'].map(pick)
+  const reading = [...A, ...B, ...C].some(r => !r) ? 'incomplete'
+    : !A.some(slow) ? 'inconclusive: the idle tail did not occur in A'
+      : C.some(slow) ? 'warm-up does not help'
+        : B.some(slow) ? 'warm-up works with lead time (10 s, not 1 s)'
+          : 'warm-up works'
+  return { runs, reading }
 }

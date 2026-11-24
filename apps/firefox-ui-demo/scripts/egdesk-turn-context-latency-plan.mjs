@@ -2,7 +2,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { IDLE_DIR, LATENCY_DIR, analyzeIdle, analyzeLatency, buildIdlePlan, buildLatencyPlan } from '../helper/egdesk-turn-context-latency-plan.mjs'
+import { IDLE_DIR, LATENCY_DIR, WARMUP_DIR, analyzeIdle, analyzeLatency, analyzeWarmup, buildIdlePlan, buildLatencyPlan, buildWarmupPlan } from '../helper/egdesk-turn-context-latency-plan.mjs'
 
 // Turn-context cold/warm latency probe. Sends nothing, reads no key.
 //   node scripts/egdesk-turn-context-latency-plan.mjs [--write]
@@ -17,6 +17,24 @@ if (args[0] === 'analyze') {
   for (const row of out.rows) console.log(JSON.stringify(row))
   console.log(JSON.stringify(out.byCondition))
   process.exit(0)
+}
+if (args[0] === 'analyze-warmup') {
+  // analyze-warmup A-rep1=<file> B-rep1=<file> ...
+  const byRun = Object.fromEntries(args.slice(1).map(a => { const [k, f] = a.split('='); return [k, JSON.parse(readFileSync(f, 'utf8')).results] }))
+  console.log(JSON.stringify(analyzeWarmup(byRun), null, 1)); process.exit(0)
+}
+if (args.includes('--warmup')) {
+  // node scripts/egdesk-turn-context-latency-plan.mjs --warmup [--write]: the cycle-16 warm-up probe (six runs)
+  const w = await buildWarmupPlan(), wDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', WARMUP_DIR), doWrite = args.includes('--write')
+  let diff = 0
+  for (const [name, bytes] of w.runs.flatMap(r => [[`${r.dir}/plan.json`, r.planBytes], ...r.files.map(f => [`${r.dir}/${f.file}`, f.bytes])])) {
+    const target = path.join(wDir, name)
+    if (doWrite) { mkdirSync(path.dirname(target), { recursive: true }); writeFileSync(target, bytes) }
+    else { let same = false; try { same = readFileSync(target).equals(bytes) } catch { same = false } if (!same) { diff++; console.log(`differs: ${name}`) } }
+  }
+  for (const r of w.runs) console.log(`${r.dir}: ${r.plan.requests.map(x => `${x.id}${x.waitBeforeMs ? `(+${x.waitBeforeMs / 1000}s)` : ''} est=${x.estInputTokens}`).join('  ')}  ceiling ${r.plan.tokenCeiling}`)
+  console.log(`${doWrite ? 'written' : diff ? 'DIFFERS' : 'matches'}: ${w.totals.runs} runs, ${w.totals.requests} requests, est input tokens ${w.totals.estInputTokens}, ceilings ${w.totals.ceilings}; nothing was sent`)
+  process.exit(diff ? 1 : 0)
 }
 if (args[0] === 'analyze-idle') { console.log(JSON.stringify(analyzeIdle(args.slice(1).map(file => JSON.parse(readFileSync(file, 'utf8')).results)))); process.exit(0) }
 const write = args.includes('--write')
