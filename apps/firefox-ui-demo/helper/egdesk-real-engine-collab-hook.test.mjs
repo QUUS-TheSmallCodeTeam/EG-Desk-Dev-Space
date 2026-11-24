@@ -206,9 +206,9 @@ test('restart: it needs --persisted-with-cleanup (preflight and the run refuse w
 
 test('restart, end to end on the fake engine: the room, its account and the invited member survive; the pending owner question is asked again and goes to the owner; nothing carried over is assumed', async t => {
   const w = persistedWorld(t)
-  // a file of the folder changed while the first engine ran (here: written when the second one starts): a restart must not rebuild the folder from the script
-  const spawnFirst = w.deps.spawn; let started = 0
-  w.deps.spawn = (...args) => { if (++started === 2) fs.writeFileSync(path.join(w.options.out, 'scratch', 'collab-restart-room', 'quotes', 'a-v1.md'), 'edited while the first engine ran\n'); return spawnFirst(...args) }
+  // a file of the folder changed while the first engine ran (written when the first engine is stopped): a restart must not rebuild the folder from the script
+  const stopFirst = w.deps.killGroup; let stopped = 0
+  w.deps.killGroup = async (...args) => { const out = await stopFirst(...args); if (++stopped === 1) fs.writeFileSync(path.join(w.options.out, 'scratch', 'collab-restart-room', 'quotes', 'a-v1.md'), 'edited while the first engine ran\n'); return out }
   const rec = (await runCheck(w.options, asScripts(buildCollabRestartScript()), w.deps)).records[0]
   assert.equal(fs.readFileSync(path.join(w.options.out, 'scratch', 'collab-restart-room', 'quotes', 'a-v1.md'), 'utf8'), 'edited while the first engine ran\n', 'the folder is as the turns left it after the restart')
   assert.equal(rec.aborted, null, rec.abortDetail)
