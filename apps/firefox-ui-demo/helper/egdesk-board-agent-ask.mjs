@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { secretReason } from './egdesk-portable-extras.mjs'
 import { REVIEW_TEXT_BYTES } from './egdesk-portable-review.mjs'
 
@@ -14,6 +15,7 @@ const MAX_PENDING = 64
 const MAX_RUNNING = 4
 const MAX_SELECTED = 6 // six reviewed excerpts at ≤1,500 UTF-8 bytes each
 const TONES = ['plain', 'warm', 'concise', 'formal', 'playful']
+const BOARD_ASK_TOOL_CEILING = Object.freeze({ browser: 'none', files: 'none', terminal: 'none', network: 'off', mcp: 'none' })
 const invalid = () => fail('INPUT', 'Invalid Board Agent ask fields')
 const stale = () => fail('STALE', 'Approval is no longer current; review again', 409)
 const unavailable = () => fail('UNAVAILABLE', 'Board Agent ask is unavailable', 503)
@@ -79,6 +81,11 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
     const status = draft?.status()
     return compatibleDraft(active) && status?.configured && status.model && status.bindingId ? status : null
   }
+  // The Decision model follows the same data permission as the other models of this ask (no separate choice):
+  // the approved excerpts may be screened by Decisions only when this ask sends them to the drafting model.
+  // A Board ask gives its model no tools, no Browser Card, no canvas, memory or chat history: only the excerpt class can open.
+  const egressFor = (mode, draftStatus) => createEgressGate(modelDataPermissions({ toolCeiling: BOARD_ASK_TOOL_CEILING, boardExcerptsToModel: mode === 'draft' && !!draftStatus }))
+  const readScreening = (mode, draftStatus) => egressFor(mode, draftStatus).allows('board_excerpt') ? readDecision() : null
   const profileFor = id => pin(profiles.get(id))
   const sameProfile = (active, policy) => active?.revision === policy.profileRevision && active?.hash === policy.profileHash
   function describe(boardId) {
@@ -142,9 +149,9 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
   }
   function prepare(input, { signal } = {}) {
     checkAvailable()
-    shape(input, ['boardId', 'request', 'mode', 'decisionEgress'])
-    const { boardId, mode, decisionEgress } = input
-    if (!['extract', 'draft'].includes(mode) || typeof decisionEgress !== 'boolean') invalid()
+    shape(input, ['boardId', 'request', 'mode'])
+    const { boardId, mode } = input
+    if (!['extract', 'draft'].includes(mode)) invalid()
     if (signal?.aborted) stale()
     const request = inspectedRequest(input.request)
     const board = desk.boardAgentAskIdentity(boardId)
@@ -154,10 +161,10 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
     }
     const active = profileFor(policy.profileId)
     if (!sameProfile(active, policy)) fail('PROFILE_STALE', 'The pinned profile changed; save a current policy', 409)
-    const d = decisionEgress ? readDecision() : null
-    if (decisionEgress && !d) fail('DECISION_OFF', 'The dedicated Decision service is off', 409)
     const f = mode === 'draft' ? readDraft(active) : null
     if (mode === 'draft' && !f) fail('DRAFT_OFF', 'The dedicated draft service is off or conflicts with this pinned profile', 409)
+    // Screening is not chosen here: it applies exactly when the saved Decisions mode/key are usable and the gate allows the excerpts.
+    const d = readScreening(mode, f)
     const excerpts = validateExcerpts(policy.excerpts)
     const replyStyle = TONES.includes(active.body.personality?.tone) ? active.body.personality.tone : 'plain'
     const publicInstructions = mode === 'draft' ? txt(policy.publicInstructions, 1200, { empty: true }) : ''
@@ -167,12 +174,12 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
     if (pending.size >= MAX_PENDING) fail('BUSY', 'Too many Board ask previews; cancel one or wait', 429)
     const ticket = randomBytes(32).toString('hex')
     const expiresAt = Math.min(now() + TICKET_TTL, policy.codeExpiresAt)
-    const entry = { boardId, board, mode, decisionEgress, expiresAt, version: policy.version, codeDigest: policy.codeDigest,
+    const entry = { boardId, board, mode, expiresAt, version: policy.version, codeDigest: policy.codeDigest,
       profileId: policy.profileId, profileHash: active.hash, profileRevision: active.revision, question, requestId, requestDigest,
       excerpts, publicInstructions, replyStyle, decisionMode: d?.mode, decisionModel: d?.model, decisionBinding: d?.bindingId,
       draftModel: f?.model, draftBinding: f?.bindingId }
     pending.set(ticket, entry)
-    return { ticket, expiresAt, mode, decisionEgress, profileName: policy.profileName, profileRevision: active.revision,
+    return { ticket, expiresAt, mode, profileName: policy.profileName, profileRevision: active.revision,
       model: f?.model ?? d?.model ?? null, question, excerpts, replyStyle, publicInstructions,
       provider: f || d ? 'openai' : null, payer: f ? 'Host’s dedicated OpenAI Responses API key' : d ? 'Host’s Decision API key' : null,
       decisionModel: d?.model ?? null, decisionMode: d?.mode ?? null, draftModel: f?.model ?? null,
@@ -187,8 +194,9 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
       if (policy?.version !== item.version || policy.codeDigest !== item.codeDigest || policy.codeUsed !== consumed || now() >= policy.codeExpiresAt) return false
       const active = profileFor(item.profileId)
       if (active?.revision !== item.profileRevision || active.hash !== item.profileHash) return false
-      const d = item.decisionEgress ? readDecision() : null
       const f = item.mode === 'draft' ? readDraft(active) : null
+      // A Decisions setting that changed after the preview (on, off, another key) makes the approval stale.
+      const d = readScreening(item.mode, f)
       return item.decisionMode === d?.mode && item.decisionModel === d?.model && item.decisionBinding === d?.bindingId && item.draftModel === f?.model && item.draftBinding === f?.bindingId
     } catch { return false }
   }
@@ -215,14 +223,15 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
     let calibrationId = null, finalRun = 'cancelled'
     try {
       if (!current()) stale()
-      const decision = item.decisionEgress ? readDecision() : null
+      const egress = egressFor(item.mode, item.draftBinding)
+      const decision = egress.allows('board_excerpt') ? readDecision() : null
       let observed = null
-      const selected = await selectContext({ question: item.question, scope, decisionEgress: item.decisionEgress },
-        { mode: decision?.mode ?? 'off', client: decision?.client ?? null, now, signal: item.controller.signal,
+      const selected = await selectContext({ question: item.question, scope },
+        { mode: decision?.mode ?? 'off', client: decision?.client ? egress.guardClient(decision.client, ['board_excerpt']) : null, egress, now, signal: item.controller.signal,
           isCurrent: offered => offered === scope && current(), observe: report => { observed = report } })
       if (!current()) stale()
-      // Tell the owner what the requested external screening actually did. The excerpt set is unchanged by this label.
-      const screening = !item.decisionEgress ? null : selected?.outcome === 'decision' ? 'decision'
+      // Tell the owner what the Decisions screening actually did. The excerpt set is unchanged by this label.
+      const screening = !decision ? null : selected?.outcome === 'decision' ? 'decision'
         : selected?.outcome === 'local' && decision?.mode === 'advisory' ? 'advisory'
         : selected?.outcome === 'local' || selected?.outcome === 'local_fallback' ? 'fallback' : null
       const allowed = new Map(scope.allowedSlices.map(slice => [slice.id, slice.text]))
@@ -242,7 +251,7 @@ export function createBoardAgentAskService({ desk, profiles, selectContext, deci
         return { mode: item.mode, answer: parts.join('\n\n'), source: selected?.outcome === 'decision' ? 'decision' : 'local', omittedCount: evidence.length - parts.length,
           ...(screening ? { screening } : {}) }
       }
-      // The preview authorizes an upper bound. Local or opted-in Decisions ranking can
+      // The preview authorizes an upper bound. Local or Decisions ranking can
       // narrow it; unselected evidence is never sent to the drafting provider.
       const result = await draft.draft({ question: item.question, excerpts: evidence, publicInstructions: item.publicInstructions,
         replyStyle: item.replyStyle, model: item.draftModel, bindingId: item.draftBinding, signal: item.controller.signal, isCurrent: current })

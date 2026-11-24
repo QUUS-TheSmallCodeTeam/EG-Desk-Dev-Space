@@ -75,7 +75,7 @@ export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, on
     if (!forStep(s, 'loading')) return;
     if (!snapshot) { update(s, { step: 'stopped', error: unavailable }); return; }
     if (binding.review) {
-      update(s, { ...snapshot, step: 'choose', mode: 'extract', decisionEgress: false, error: null });
+      update(s, { ...snapshot, step: 'choose', mode: 'extract', error: null });
     } else {
       const { policy } = snapshot;
       update(s, { ...snapshot, step: 'policy', profiles, profileId: policy?.profileId ?? '',
@@ -142,30 +142,29 @@ export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, on
     const s = active;
     if (forStep(s, 'choose') && (mode === 'extract' || (mode === 'draft' && draftAvailable(s.view.availability)))) update(s, { mode, error: null, focusKey: `mode-${mode}` });
   }
-  function chooseDecision(value) {
-    const s = active;
-    if (forStep(s, 'choose') && s.view.availability.decision) s.view.decisionEgress = value === true;
-  }
   async function prepare() {
     const s = active;
     if (!forStep(s, 'choose') || !s.view.policy || s.view.policy.stale) return;
-    const { mode, decisionEgress, policy, availability } = s.view;
-    if ((mode === 'draft' && !draftAvailable(availability)) || (decisionEgress && !availability.decision)) return;
+    const { mode, policy, availability } = s.view;
+    if (mode === 'draft' && !draftAvailable(availability)) return;
     update(s, { step: 'preparing', error: null });
     // Do not abort the prepare response: a ticket that arrives after Escape
     // or a Board change still needs best-effort cancellation, never a run.
-    const p = await call('prepare', { boardId: s.binding.board.id, request: s.binding.review, mode, decisionEgress }, true);
+    const p = await call('prepare', { boardId: s.binding.board.id, request: s.binding.review, mode }, true);
     if (!forStep(s, 'preparing')) { cancelTicket(p?.ticket); return; }
     if (p?.errorCode === 'BOARD_AGENT_ASK_CODE_INVALID' || p?.errorCode === 'BOARD_AGENT_ASK_CODE_REQUIRED') {
       update(s, { step: 'stopped', error: '이 Board에서 쓸 수 없는 질문 코드입니다. 이미 사용했거나 만료되었을 수 있습니다. 직접 회신은 계속 쓸 수 있습니다.' }); return;
     }
     const expiry = toDate(p?.expiresAt);
-    if (!isText(p?.ticket) || !Number.isFinite(expiry) || expiry <= now() || p.mode !== mode || p.decisionEgress !== decisionEgress ||
+    if (!isText(p?.ticket) || !Number.isFinite(expiry) || expiry <= now() || p.mode !== mode ||
       p.question !== s.binding.review.question || p.profileName !== policy.profileName || p.profileRevision !== policy.profileRevision ||
       !validExcerpts(p.excerpts) || JSON.stringify(p.excerpts) !== JSON.stringify(policy.excerpts) ||
       !Object.hasOwn(styles, p.replyStyle) || p.publicInstructions !== (mode === 'draft' ? policy.publicInstructions : '') ||
       (mode === 'draft' ? p.provider !== 'openai' || p.draftModel !== availability.model || p.model !== p.draftModel : p.draftModel !== null || p.model !== p.decisionModel) ||
-      (decisionEgress ? !isText(p.decisionModel) || p.provider !== 'openai' : p.decisionModel !== null) ||
+      // Decisions screening is never chosen here. The host may name it only for a draft run (the excerpts already go to a
+      // model then), and the preview must be able to say which mode applies; an extract run names no Decision model.
+      (p.decisionModel !== null && (mode !== 'draft' || !isText(p.decisionModel) || p.provider !== 'openai' || !['on', 'advisory'].includes(p.decisionMode))) ||
+      (p.decisionModel === null && p.decisionMode != null) ||
       (p.policyVersion != null && p.policyVersion !== policy.version)) {
       cancelTicket(p?.ticket);
       update(s, { step: 'stopped', error: stale }); return;
@@ -176,16 +175,16 @@ export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, on
     const s = active;
     if (!forStep(s, 'preview')) return;
     discard(s);
-    update(s, { step: 'choose', prepared: null, mode: 'extract', decisionEgress: false, focusKey: 'mode-extract' });
+    update(s, { step: 'choose', prepared: null, mode: 'extract', focusKey: 'mode-extract' });
   }
   async function run() {
     const s = active;
     if (!forStep(s, 'preview')) return;
     if (s.view.expiry <= now()) {
       discard(s);
-      update(s, { step: 'choose', prepared: null, mode: 'extract', decisionEgress: false, error: '확인 시간이 지났습니다. 다시 준비해 주세요.' }); return;
+      update(s, { step: 'choose', prepared: null, mode: 'extract', error: '확인 시간이 지났습니다. 다시 준비해 주세요.' }); return;
     }
-    const { ticket, mode, decisionEgress } = s.view.prepared;
+    const { ticket, mode } = s.view.prepared;
     update(s, { step: 'running', error: null });
     // No retry: a timeout or failed response does not prove nothing ran.
     const result = await call('run', { ticket, confirm: true });
@@ -198,10 +197,10 @@ export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, on
     const binding = s.binding;
     close();
     const screening = ['decision', 'advisory', 'fallback'].includes(result.screening) ? result.screening : null;
-    onAnswer(binding, { answer: result.answer, mode, decisionEgress, source: result.source, ...(screening ? { screening } : {}) });
+    onAnswer(binding, { answer: result.answer, mode, source: result.source, ...(screening ? { screening } : {}) });
   }
   return { view, open, close, invalidate: () => current(active), pickProfile, editExcerpt, editInstructions, addExcerpt,
-    save: () => changePolicy('save'), revoke: () => changePolicy('revoke'), issue: () => changePolicy('issue'), chooseMode, chooseDecision, prepare, back, run };
+    save: () => changePolicy('save'), revoke: () => changePolicy('revoke'), issue: () => changePolicy('issue'), chooseMode, prepare, back, run };
 }
 
 export function boardAgentAskContent(el, view, flow, onClose) {
@@ -259,13 +258,9 @@ export function boardAgentAskContent(el, view, flow, onClose) {
         input.checked = view.mode === value;
         return el('label', { class: 'egd-portable-check' }, input, caption);
       };
-      const decision = el('input', { type: 'checkbox', data: { testid: 'board-agent-ask-decision', focusKey: 'decision' },
-        onchange: ev => flow.chooseDecision(ev.currentTarget.checked) });
-      decision.checked = view.decisionEgress;
       content = [list(display('고정 Agent', `${policy.profileName} · 버전 ${policy.profileRevision}`)),
         mode('extract', '관련 공개 발췌문만 찾기 (이 기기에서 처리, 문장 생성 안 함)'),
         draftAvailable(availability) ? mode('draft', `OpenAI로 초안 만들기 · ${availability.model}`) : text('OpenAI 초안: 이 Agent의 고정 버전에서 전용 API 경로를 사용할 수 없습니다.'),
-        availability.decision ? el('label', { class: 'egd-portable-check' }, decision, '별도 Decisions API에 질문과 공개 발췌문을 보내 관련성을 판단하도록 허용') : null,
         row(button('prepare', '이 Board와 Agent로 실행 내용 확인', flow.prepare, true))];
     }
   } else if (step === 'preview' || step === 'running') {
@@ -276,7 +271,7 @@ export function boardAgentAskContent(el, view, flow, onClose) {
         p.mode === 'draft' ? display('공개 답변 말투', styles[p.replyStyle]) : null,
         p.mode === 'draft' && p.publicInstructions ? display('공개 답변 지침', p.publicInstructions) : null),
       p.mode === 'draft' ? text(`OpenAI의 ${p.draftModel} 모델이 표시된 질문·공개 말투와 지침·표시된 공개 발췌문 중 관련 항목만 봅니다. Board 운영 쪽의 전용 API 키로 비용을 부담하며, 개인 Chat·CLI와 구독 사용량을 쓰지 않습니다.`, 'warning') : text('관련 공개 발췌문을 원문 그대로 찾습니다. 새 답변 문장을 만들지 않습니다.'),
-      p.decisionEgress ? text(`관련성 판단을 위해 별도 OpenAI Decisions API (${p.decisionModel})에 표시된 질문과 공개 발췌문 전부를 보냅니다. Board 운영 쪽의 Decisions API 설정을 사용합니다.${p.decisionMode === 'advisory' ? ' 지금은 ‘기록만’ 모드라 그 판단은 선택에 반영되지 않고 이 기기의 단어 일치로 고릅니다. 그래도 전송되며 API 비용이 생길 수 있습니다.' : ''}`, 'warning') : text(p.mode === 'extract' ? '외부 API로 보내지 않습니다.' : '별도 Decisions API에는 보내지 않습니다.'),
+      p.decisionModel ? text(`관련 항목을 고르는 데 OpenAI Decisions (${p.decisionModel})도 씁니다. 표시된 질문과 공개 발췌문 전부를 보내며, 계정 설정에 저장한 결정 모델 모드와 키를 그대로 따릅니다.${p.decisionMode === 'advisory' ? ' 지금은 ‘기록만’ 모드라 그 판단은 선택에 반영되지 않고 이 기기의 단어 일치로 고릅니다. 그래도 전송되며 API 비용이 생길 수 있습니다.' : ''}`, 'warning') : text(p.mode === 'extract' ? '외부 API로 보내지 않습니다.' : '별도 Decisions API에는 보내지 않습니다.'),
       text('실행해도 회신 파일을 만들거나 전달하지 않습니다. 결과를 회신 작성 창에서 확인하고 편집할 수 있습니다.'),
       step === 'running' ? status('한 번 실행 중… 닫으면 결과를 회신에 넣지 않습니다.') : row(button('back', '뒤로', flow.back), button('run', '이 내용으로 한 번 실행', flow.run, true))];
   } else if (step === 'done') content = [status(view.message)];

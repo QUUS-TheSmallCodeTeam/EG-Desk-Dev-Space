@@ -9,6 +9,7 @@ import test from 'node:test'
 import { createBoardAgentAskHttpHandler } from './egdesk-board-agent-ask-http.mjs'
 import { createBoardAgentAskService } from './egdesk-board-agent-ask.mjs'
 import { selectBoardAgentContext } from './egdesk-board-agent-context.mjs'
+import { createBoardAgentDraftTransport } from './egdesk-board-agent-draft.mjs'
 import { createDecisionBudget, createDecisionClient, DECISIONS_ENDPOINT } from './egdesk-decision-client.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
@@ -31,7 +32,11 @@ async function call(handler, method, pathname, body) {
   return { status: res.status, body: res.body }
 }
 
-test('quota refresh on next explicit Board extract uses the saved key without polling or retry', async t => {
+// Since the per-request screening choice was removed, Decisions screens Board excerpts only in a draft run (the run that
+// already sends them to the drafting model). The quota journey is therefore an explicit Board draft run; an extract run is
+// checked to send nothing. (The file keeps its name so existing gate lists still find it.)
+const DRAFT_MODEL = 'synthetic-responses-model', DRAFT_ANSWER = 'Synthetic drafted reply.'
+test('quota refresh on next explicit Board draft run uses the saved key without polling or retry', async t => {
   // Observe timers from setup onward without mocking Date, the OS clock or a billing date.
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
   const dir = mkdtempSync(path.join(tmpdir(), 'egdesk-board-quota-'))
@@ -71,7 +76,15 @@ test('quota refresh on next explicit Board extract uses the saved key without po
   const handleSettings = createDecisionHttpHandler({ store, mode, budget, model: client.model, verifyKey: client.verifyKey })
   const bindingSecret = randomBytes(32)
   const profile = { lifecycle: 'active', activeRevision: 1, active: { revision: 1, hash: 'a'.repeat(64), body: { name: 'Fixture Agent', model: null } } }
-  const boardService = createBoardAgentAskService({ desk, profiles: { get: id => id === PROFILE ? profile : null }, selectContext: selectBoardAgentContext,
+  const draftExcerpts = []
+  const draftCredential = ['not-a-real-draft-credential', randomBytes(18).toString('hex')].join('.')
+  const draft = createBoardAgentDraftTransport({ readConfig: () => ({ apiKey: draftCredential, model: DRAFT_MODEL }),
+    fetchImpl: async (url, options) => {
+      draftExcerpts.push(JSON.parse(JSON.parse(options.body).input[0].content[0].text).excerpts)
+      return Response.json({ object: 'response', status: 'completed', model: DRAFT_MODEL, output: [{ type: 'message', role: 'assistant', status: 'completed',
+        content: [{ type: 'output_text', text: DRAFT_ANSWER }] }] })
+    } })
+  const boardService = createBoardAgentAskService({ desk, profiles: { get: id => id === PROFILE ? profile : null }, selectContext: selectBoardAgentContext, draft,
     decisionStatus: () => {
       const key = store.getApiKey()
       if (!key || mode.mode === 'off') return null
@@ -112,17 +125,18 @@ test('quota refresh on next explicit Board extract uses the saved key without po
   assert.equal(saved.status, 200)
   let policyVersion = saved.body.policy.version
 
-  async function approveExtract(serial, previousPosts) {
+  async function approveDraft(serial, previousPosts) {
     const issued = await policy('issue', { expectedVersion: policyVersion })
     assert.equal(issued.status, 200)
     policyVersion = issued.body.policy.version
-    const preview = await ask('prepare', { boardId: BOARD, mode: 'extract', decisionEgress: true,
+    const preview = await ask('prepare', { boardId: BOARD, mode: 'draft',
       request: { kind: 'request', requestId: serial === 1 ? '8878a7f3-df6b-4383-af12-6ae38ad4fe2e' : '8878a7f3-df6b-4383-af12-6ae38ad4fe2f',
         requestDigest: createHash('sha256').update(`synthetic-request-${serial}`).digest('hex'), question: QUESTION,
         recipient: 'Fixture recipient', excerpt: '', expectedReply: 'Human review only', askCode: issued.body.askCode } })
     assert.equal(preview.status, 200)
-    assert.equal(preview.body.decisionEgress, true)
-    assert.equal(preview.body.mode, 'extract')
+    assert.equal(Object.hasOwn(preview.body, 'decisionEgress'), false)
+    assert.deepEqual([preview.body.decisionModel, preview.body.decisionMode], [client.model, 'on'])
+    assert.equal(preview.body.mode, 'draft')
     assert.deepEqual(preview.body.excerpts, [LOCAL, SELECTED])
     const run = confirm => ask('run', { ticket: preview.body.ticket, confirm })
     assert.equal((await run(false)).status, 400)
@@ -134,13 +148,27 @@ test('quota refresh on next explicit Board extract uses the saved key without po
     return result
   }
 
-  assert.deepEqual(await approveExtract(1, 1), { status: 200, body: { mode: 'extract', answer: LOCAL, source: 'local', omittedCount: 0, screening: 'fallback' } })
+  // An extract run with the same saved key and mode on sends nothing: no model receives the excerpts.
+  {
+    const issued = await policy('issue', { expectedVersion: policyVersion })
+    policyVersion = issued.body.policy.version
+    const preview = await ask('prepare', { boardId: BOARD, mode: 'extract', request: { kind: 'request', requestId: '8878a7f3-df6b-4383-af12-6ae38ad4fe2d',
+      requestDigest: createHash('sha256').update('synthetic-request-extract').digest('hex'), question: QUESTION,
+      recipient: 'Fixture recipient', excerpt: '', expectedReply: 'Human review only', askCode: issued.body.askCode } })
+    assert.deepEqual([preview.status, preview.body.decisionModel, preview.body.decisionMode], [200, null, null])
+    assert.deepEqual(await ask('run', { ticket: preview.body.ticket, confirm: true }), { status: 200, body: { mode: 'extract', answer: LOCAL, source: 'local', omittedCount: 0 } })
+    assert.equal(posts.length, 1, 'only the key check so far')
+    assert.deepEqual(draftExcerpts, [])
+  }
+  assert.deepEqual(await approveDraft(1, 1), { status: 200, body: { mode: 'draft', answer: DRAFT_ANSWER, source: 'draft', screening: 'fallback' } })
+  assert.deepEqual(draftExcerpts, [[LOCAL]], 'quota exhausted: the draft gets the local selection')
   credentialKept()
   assert.equal(budget.snapshot().inputTokens, 0)
   // Change only the mock provider's quota state. Neither idle time nor reads dispatch.
   quota = 'recovered'
   await noBackgroundPost(2)
-  assert.deepEqual(await approveExtract(2, 2), { status: 200, body: { mode: 'extract', answer: SELECTED, source: 'decision', omittedCount: 0, screening: 'decision' } })
+  assert.deepEqual(await approveDraft(2, 2), { status: 200, body: { mode: 'draft', answer: DRAFT_ANSWER, source: 'draft', screening: 'decision' } })
+  assert.deepEqual(draftExcerpts, [[LOCAL], [SELECTED]], 'recovered: the draft gets the excerpt Decisions selected')
   credentialKept()
   assert.equal(budget.snapshot().inputTokens, 19)
   await noBackgroundPost(3)
@@ -149,6 +177,6 @@ test('quota refresh on next explicit Board extract uses the saved key without po
     phase, endpointMatched: true, method: 'POST', sameFixtureCredential: true, requestMatched: true, providerStatus,
   })))
   t.diagnostic('BOARD_QUOTA_TRACE ' + JSON.stringify({ keyVerificationPosts: 1, featurePosts: 2,
-    idleStatusPreviewReplayPosts: 0, verification: 'no_credit', exhausted: { provider: 429, source: 'local' },
-    recovered: { provider: 200, source: 'decision', countedInputTokens: 19 }, sameSavedKey: true, saves: 1, clears: 0, boardUnchanged: true }))
+    idleStatusPreviewReplayPosts: 0, verification: 'no_credit', exhausted: { provider: 429, screening: 'fallback', draftGot: 'local selection' },
+    recovered: { provider: 200, screening: 'decision', draftGot: 'Decisions selection', countedInputTokens: 19 }, extractRunPosts: 0, sameSavedKey: true, saves: 1, clears: 0, boardUnchanged: true }))
 })
