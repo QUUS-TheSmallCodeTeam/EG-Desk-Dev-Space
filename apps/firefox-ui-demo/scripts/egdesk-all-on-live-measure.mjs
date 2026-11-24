@@ -85,10 +85,10 @@ const RECORDING_CONTEXT = 'egdesk_recording'
 const carriesRecordingRule = w => Object.hasOwn(w.turnStarts().at(-1)?.params?.additionalContext ?? {}, RECORDING_CONTEXT)
 // (cycle 13) The scripted note writer words its note from the waited-on fact the prompt gives, and claims nothing else.
 // (cycle 15) The pointer note says what the prompt says the person is pointed at for: a decision, or a result that is ready to look at.
-const pointerNote = prompt => (/is ready for them to look at/.test(prompt) ? '결과는 지금 보고 계신 곳 왼쪽 작업 영역에 있습니다.' : null)
+export const pointerNote = prompt => (/is ready for them to look at/.test(prompt) ? '결과는 지금 보고 계신 곳 왼쪽 작업 영역에 있습니다.' : null)
 // L3 c22: the scripted writer also answers the heartbeat's in-run reply prompt (the person asked, while the work runs, what is happening): it
 // words that answer from the facts given, as a model would, and not as the wait note it already wrote.
-const waitNote = prompt => (/The person just wrote, while you work/.test(prompt) ? (/a command is still running/.test(prompt) ? '멈춘 게 아니라 명령이 아직 실행 중이에요. 끝나는 대로 알려 드릴게요.' : null)
+export const waitNote = prompt => (/The person just wrote, while you work/.test(prompt) ? (/a command is still running/.test(prompt) ? '멈춘 게 아니라 명령이 아직 실행 중이에요. 끝나는 대로 알려 드릴게요.' : null)
   : /a command is still running/.test(prompt) ? '명령이 아직 실행 중이라 조금 더 걸리고 있어요.' : null)
 // The result card needs its owner, who looks elsewhere; a second member is on the desk. The request body is the chrome builder's (attentionRequest),
 // posted the way the surface posts its placement requests ({ clientThreadId, conversationId, dto }). No surface code sends this request yet.

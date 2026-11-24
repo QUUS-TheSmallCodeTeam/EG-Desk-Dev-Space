@@ -5361,10 +5361,10 @@ export class CodexChatRuntime {
     const key = typeof target === 'string' ? target : idText(target?.clientThreadId)
     if (!key?.trim()) throw chatError('INVALID_CONVERSATION_FORGET', 'clientThreadId is required', 400)
     const native = new Set()
-    let storedEngine = null, storedProfile = null
+    let storedEngine = null, storedProfile = null, recordedId = null
     try {
       const thread = this.store?.getConversation?.(key)
-      if (typeof thread?.conversationId === 'string' && thread.conversationId) { native.add(thread.conversationId); storedEngine = thread.engineId ?? null; storedProfile = thread.engineProfileId ?? null }
+      if (typeof thread?.conversationId === 'string' && thread.conversationId) { native.add(thread.conversationId); recordedId = thread.conversationId; storedEngine = thread.engineId ?? null; storedProfile = thread.engineProfileId ?? null }
     } catch { /* not stored */ }
     for (const run of this.runs.values()) if (run?.clientThreadId === key && typeof run.conversationId === 'string' && run.conversationId) native.add(run.conversationId)
     const hb = this.heartbeats.get(key), subject = hb ? this.heartbeatSubjects.get(hb) : null
@@ -5405,15 +5405,17 @@ export class CodexChatRuntime {
       // The engine that holds this thread: the live binding, else the stored one (after a restart nothing is live).
       const live = this.threadEngines.has(cid), engineId = live ? this.threadEngine(cid) : storedEngine ?? 'codex'
       const engine = this.engines.get(engineId), slot = live ? this.threadOperationSlot(cid) : this.operationSlot(engineId, storedProfile)
-      let state = 'remains', reason = 'unsupported'
+      let state = 'remains', reason = 'unsupported', files = null
       try {
         if (typeof engine?.deleteThread === 'function' && engine.threadDeleteSupported?.(slot) === true) {
           reason = null
-          await engine.deleteThread(cid, slot)
-          state = 'deleted'
+          // recorded: the native id is the one EG-Desk's own chat store bound to this conversation (not just one a run mentioned).
+          const result = await engine.deleteThread(cid, slot, { recorded: recordedId === cid })
+          if (typeof result?.state === 'string') { state = result.state === 'deleted' ? 'deleted' : 'remains'; reason = state === 'remains' ? String(result.reason ?? 'failed') : null; files = Number.isSafeInteger(result.files) ? result.files : null }
+          else state = 'deleted'
         }
       } catch { state = 'remains'; reason = 'failed' }
-      out.engineHistory.push({ conversationId: cid, engineId, state, ...(reason ? { reason } : {}) })
+      out.engineHistory.push({ conversationId: cid, engineId, state, ...(reason ? { reason } : {}), ...(files !== null ? { files } : {}) })
     }
     // The stored history (messages, runs, events, requests, members, the room record) goes last, after the modules read what they need.
     try { out.history = this.store?.deleteConversation?.(key) ?? null } catch { out.history = { deleted: false, failed: true } }
