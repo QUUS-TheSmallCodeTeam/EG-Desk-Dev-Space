@@ -105,7 +105,7 @@ export function createCommandExecutorProvider({ mode = () => 'off', ledger = nul
       let result, output = null
       try { output = outputFor(run) } catch { output = null }
       // the runner enforces the hard limit itself (SIGTERM, then SIGKILL); a soft notice only updates the facts
-      try { result = await runner({ command, cwd, timeoutMs, itemId: `egdesk-cmd:${event.callId ?? ''}`, output,
+      try { result = await runner({ command, cwd, timeoutMs, itemId: `egdesk-cmd:${event.callId ?? ''}`, output, approved: decision.decision === 'allow',
         onFacts: row => { if (row?.softNotice) facts(run, terminalFactRow({ kind: 'engine', running: true, runningMs: row.runningMs })) } }) }
       catch { facts(run, terminalFactRow({ kind: 'engine', running: false })); return respond(false, { error: { code: 'COMMAND_RUN_FAILED' } }) }
       const exitCode = Number.isSafeInteger(result?.exitCode) ? result.exitCode : null

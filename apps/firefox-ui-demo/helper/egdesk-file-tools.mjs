@@ -18,8 +18,14 @@ import path from 'node:path'
 // ignored by git and not tracked (inspect facts, the same interface as the terminal gate's). Unknown facts count as not generated.
 // Creating a new file and a targeted edit (exact string or a diff hunk of an existing file) do not ask: they are shown as a diff, and
 // the rest of the file stays. Reads and searches never ask.
+//
+// Undo (c19): every edit that wrote something leaves one record (the file before it, the hash after it), kept with the run and its
+// conversation, bounded per conversation (UNDO_LIMITS). One record undoes one edit, newest first unless an editId is named, and only
+// while the file still is what that edit left (otherwise 'undo_conflict': a later change is never overwritten). Undo never asks: it
+// puts back what EG-Desk itself replaced.
 export const FILE_TOOLS_PROVIDER_ID = 'egdesk-files' // provisional
-export const FILE_TOOL_NAMES = Object.freeze({ read: 'egdesk_read_file', search: 'egdesk_search_files', edit: 'egdesk_edit_file' }) // provisional, model-facing
+export const FILE_TOOL_NAMES = Object.freeze({ read: 'egdesk_read_file', search: 'egdesk_search_files', edit: 'egdesk_edit_file', undo: 'egdesk_undo_edit' }) // model-facing
+export const UNDO_LIMITS = Object.freeze({ records: 50, bytes: 8 * 1024 * 1024 })
 export const FILE_TOOL_LIMITS = Object.freeze({ readBytes: 256 * 1024, fileBytes: 8 * 1024 * 1024, lineChars: 2000, lines: 400, maxLines: 2000, binaryHead: 3 * 1024,
   searchFiles: 2000, searchFileBytes: 1024 * 1024, searchMatches: 200, patternChars: 200, searchMs: 2000, editBytes: 1024 * 1024, previewBytes: 64 * 1024 })
 // Never read or edited: secrets stores. Never edited: version-control and engine/agent internals (Codex's own protected list, plus .egdesk).
@@ -41,6 +47,8 @@ export const FILE_TOOL_SPECS = Object.freeze([
       oldString: { type: 'string' }, newString: { type: 'string' }, replaceAll: { type: 'boolean' },
       diff: { type: 'string', description: 'mode diff: a unified diff of this one file (@@ hunks).' }, content: { type: 'string', description: 'mode write: the whole new content.' },
       expectedSha256: { type: 'string', description: 'Optional: refuse when the file changed since you read it.' }, dryRun: { type: 'boolean' } } } }),
+  Object.freeze({ type: 'function', name: FILE_TOOL_NAMES.undo, description: 'Undo one earlier edit of this conversation (the newest, or the one named by editId), if the file has not changed since.',
+    inputSchema: { type: 'object', additionalProperties: false, properties: { editId: { type: 'string' } } } }),
 ])
 
 const respond = (success, value) => ({ success, contentItems: [{ type: 'inputText', text: JSON.stringify(value) }] })
@@ -136,6 +144,18 @@ export function createFileToolsProvider({ mode = () => 'off', ledger = null, wor
   const L = { ...FILE_TOOL_LIMITS, ...limits }
   const on = () => { try { return mode() === 'on' } catch { return false } }
   const calls = new Map()
+  const undo = new Map() // conversationId → [{ editId, runKey, root, relative, kind, before, afterSha, bytes }] newest last
+  let editSeq = 0
+  const remember = (run, record) => {
+    const key = run?.conversationId ?? run?.answerId ?? ''
+    const list = undo.get(key) ?? []
+    list.push(record)
+    let bytes = list.reduce((sum, r) => sum + r.bytes, 0)
+    while (list.length > UNDO_LIMITS.records || (bytes > UNDO_LIMITS.bytes && list.length > 1)) bytes -= list.shift().bytes
+    if (bytes > UNDO_LIMITS.bytes) list.length = 0 // one edit larger than the whole budget keeps no record
+    undo.set(key, list)
+    while (undo.size > 64) undo.delete(undo.keys().next().value)
+  }
   const rootOf = run => { try { const root = workspaceOf(run); return typeof root === 'string' && path.isAbsolute(root) ? root : null } catch { return null } }
   const generated = async (root, target) => {
     if (typeof inspect !== 'function') return false
@@ -160,12 +180,13 @@ export function createFileToolsProvider({ mode = () => 'off', ledger = null, wor
       const name = event?.tool
       if (event?.namespace || !Object.values(FILE_TOOL_NAMES).includes(name)) return respond(false, { error: { code: 'FILE_TOOL_UNKNOWN' } })
       if (!on()) return respond(false, { error: { code: 'FILE_TOOLS_OFF' } })
-      if (run?.executionPolicy && name === FILE_TOOL_NAMES.edit) return respond(false, { error: { code: 'FILE_EDIT_FORBIDDEN' } })
+      if (run?.executionPolicy && (name === FILE_TOOL_NAMES.edit || name === FILE_TOOL_NAMES.undo)) return respond(false, { error: { code: 'FILE_EDIT_FORBIDDEN' } })
       const root = rootOf(run)
       if (!root) return respond(true, { status: 'no_folder', code: 'FILE_NO_FOLDER' })
       const args = event.arguments && typeof event.arguments === 'object' ? event.arguments : {}
       if (name === FILE_TOOL_NAMES.read) return this.read(root, args)
       if (name === FILE_TOOL_NAMES.search) return this.search(root, args)
+      if (name === FILE_TOOL_NAMES.undo) return this.undo(run, typeof args.editId === 'string' ? args.editId : null)
       return this.edit(run, root, args)
     },
     async read(root, args) {
@@ -292,7 +313,34 @@ export function createFileToolsProvider({ mode = () => 'off', ledger = null, wor
         await fs.rename(temp, r.target) // atomic within the folder
       }
       try { onFileChange(run, { path: r.relative, kind, diff: preview.diff }) } catch { /* the screen's change view is advisory */ }
-      return respond(true, { status: 'edited', kind, path: r.relative, ...(after === null ? {} : { sha256: sha256(after) }), ...preview })
+      const editId = `edit-${++editSeq}`
+      remember(run, { editId, runKey: run?.answerId ?? null, root: r.root, relative: r.relative, kind, before, afterSha: after === null ? null : sha256(after),
+        bytes: before === null ? 0 : Buffer.byteLength(before) })
+      return respond(true, { status: 'edited', editId, kind, path: r.relative, ...(after === null ? {} : { sha256: sha256(after) }), ...preview })
+    },
+    /** The undo records of a run's conversation (newest last), without file contents. */
+    undoRecords(run) { return (undo.get(run?.conversationId ?? run?.answerId ?? '') ?? []).map(r => ({ editId: r.editId, runKey: r.runKey, path: r.relative, kind: r.kind })) },
+    async undo(run, editId = null) {
+      if (!on()) return respond(false, { error: { code: 'FILE_TOOLS_OFF' } })
+      const list = undo.get(run?.conversationId ?? run?.answerId ?? '') ?? []
+      const index = editId === null ? list.length - 1 : list.findIndex(r => r.editId === editId)
+      if (index < 0) return respond(true, { status: 'nothing_to_undo' })
+      const record = list[index]
+      const r = await resolveTarget(record.root, record.relative, { write: true })
+      if (r.error) return refused(r.error)
+      let current = null
+      if (r.stat) { if (!r.stat.isFile()) return refused('FILE_NOT_A_FILE'); current = sha256(await fs.readFile(r.target)) }
+      if (current !== record.afterSha) return respond(true, { status: 'undo_conflict', editId: record.editId, path: record.relative })
+      if (record.before === null) { if (r.stat) await fs.unlink(r.target) }
+      else {
+        await fs.mkdir(path.dirname(r.target), { recursive: true })
+        const temp = path.join(path.dirname(r.target), `.egdesk-write-${randomBytes(6).toString('hex')}`)
+        await fs.writeFile(temp, record.before, { mode: r.stat ? r.stat.mode & 0o7777 : 0o644, flag: 'wx' })
+        await fs.rename(temp, r.target)
+      }
+      list.splice(index, 1)
+      try { onFileChange(run, { path: record.relative, kind: 'undo', diff: '' }) } catch { /* advisory */ }
+      return respond(true, { status: 'undone', editId: record.editId, path: record.relative, restored: record.before === null ? 'removed' : 'previous' })
     },
   }
 }

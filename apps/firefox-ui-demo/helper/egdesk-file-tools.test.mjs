@@ -149,3 +149,38 @@ test('identity and flag: the folder is the run\'s; profile and account play no p
   assert.match((await h.provider.dispatch(h.turn('d', 'U', { executionPolicy: 'read-only-qa' }), { callId: 'y', tool: FILE_TOOL_NAMES.edit, arguments: { path: 'notes.md', mode: 'delete' } })).contentItems[0].text, /FILE_EDIT_FORBIDDEN/)
   assert.equal((await h.call(h.turn('e', 'V', { folder: null }), FILE_TOOL_NAMES.read, { path: 'notes.md' })).code, 'FILE_NO_FOLDER')
 })
+
+test('undo (c19): one step back per edit, newest first or by editId, only while the file is what the edit left; bounded; never in QA', async t => {
+  const h = setup(t)
+  const run = h.turn('c', 'T')
+  const app = path.join(h.root, 'src', 'app.js'), original = fs.readFileSync(app, 'utf8')
+  const e1 = await h.call(run, FILE_TOOL_NAMES.edit, { path: 'src/app.js', mode: 'replace', oldString: 'const b = 2', newString: 'const b = 3' })
+  const e2 = await h.call(run, FILE_TOOL_NAMES.edit, { path: 'src/new.js', mode: 'write', content: 'fresh\n' })
+  assert.deepEqual(h.provider.undoRecords(run).map(r => [r.editId, r.path, r.kind]), [[e1.editId, 'src/app.js', 'update'], [e2.editId, 'src/new.js', 'create']])
+  // newest first: the created file goes away
+  assert.deepEqual(await h.call(run, FILE_TOOL_NAMES.undo, {}), { status: 'undone', editId: e2.editId, path: 'src/new.js', restored: 'removed' })
+  assert.ok(!fs.existsSync(path.join(h.root, 'src', 'new.js')))
+  // a later change by someone else: the undo refuses rather than overwrite it
+  fs.writeFileSync(app, 'changed by the person\n')
+  assert.equal((await h.call(run, FILE_TOOL_NAMES.undo, { editId: e1.editId })).status, 'undo_conflict')
+  assert.equal(fs.readFileSync(app, 'utf8'), 'changed by the person\n')
+  fs.writeFileSync(app, original.replace('const b = 2', 'const b = 3'))
+  assert.equal((await h.call(run, FILE_TOOL_NAMES.undo, { editId: e1.editId })).status, 'undone')
+  assert.equal(fs.readFileSync(app, 'utf8'), original)
+  assert.equal((await h.call(run, FILE_TOOL_NAMES.undo, {})).status, 'nothing_to_undo')
+  // an approved delete is undone too: the file comes back (the record keeps what EG-Desk removed)
+  const t1 = h.turn('conv', 'T1'); await h.call(t1, FILE_TOOL_NAMES.edit, { path: 'notes.md', mode: 'delete' }); h.ledger.turnEnded({ turnId: 'T1' })
+  await h.ledger.readReply({ conversationId: 'conv', reply: 'yes', client: replyClient(0.97, 0.01), egress: OPEN })
+  const t2 = h.turn('conv', 'T2')
+  assert.equal((await h.call(t2, FILE_TOOL_NAMES.edit, { path: 'notes.md', mode: 'delete' })).status, 'edited')
+  h.ledger.turnEnded({ turnId: 'T2' })
+  const later = h.turn('conv', 'T3') // a later turn of the same conversation can still undo it
+  assert.equal((await h.call(later, FILE_TOOL_NAMES.undo, {})).restored, 'previous')
+  assert.equal(fs.readFileSync(path.join(h.root, 'notes.md'), 'utf8'), 'TODO: ship it\n')
+  // bounded: at most 50 records per conversation, oldest dropped
+  const b = h.turn('bounded', 'B')
+  for (let i = 0; i < 55; i++) await h.call(b, FILE_TOOL_NAMES.edit, { path: `gen/f${i}.txt`, mode: 'write', content: `${i}\n` })
+  const records = h.provider.undoRecords(b)
+  assert.equal(records.length, 50); assert.equal(records[0].path, 'gen/f5.txt')
+  assert.match((await h.provider.dispatch(h.turn('qa', 'Q', { executionPolicy: 'read-only-qa' }), { callId: 'u', tool: FILE_TOOL_NAMES.undo, arguments: {} })).contentItems[0].text, /FILE_EDIT_FORBIDDEN/)
+})
