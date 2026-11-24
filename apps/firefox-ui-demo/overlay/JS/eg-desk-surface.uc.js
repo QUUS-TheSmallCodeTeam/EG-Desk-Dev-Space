@@ -4000,8 +4000,9 @@
     const thread = getCodexThreadById(state.codex, session.threadId);
     const route = ChatState.chatContextRequestScope(thread, state.codex);
     if (route.engineId !== 'codex') throw new Error('이 엔진에서는 브리핑 의견 저장을 지원하지 않습니다.');
-    const account = ChatState.codexAccountKey(state.codex.authStatus);
-    if (!thread || !account || state.codex.codexAccountKey !== account || !ChatState.canResumeNativeThread(thread, state.codex.authStatus)
+    // L1 c19: the room's own account (another engine profile's, or the default sign-in the window has cached)
+    const account = ChatState.codexRoomAccountCurrent(thread, state.codex.authStatus, state.codex.codexAccountKey, state.codex);
+    if (!thread || !account || !ChatState.canResumeNativeThread(thread, state.codex.authStatus, state.codex)
         || !route.conversationId || route.conversationId !== session.briefing.conversationId
         || ['conversationId', 'runId', 'answerId'].some(key => !session.identity?.[key] || session.identity[key] !== session.briefing[key])
         || state.codex.activeThreadId !== session.threadId) throw new Error('의견을 저장할 원래 대화와 계정 연결을 확인하지 못했습니다.');
@@ -4016,8 +4017,9 @@
       if (disposed) return false;
       const latest = getCodexThreadById(state.codex, session.threadId), shown = state.codex.briefingSession;
       let same = false;
-      try { same = !token.signal.aborted && epochScope.valid(token) && account === ChatState.codexAccountKey(state.codex.authStatus)
-        && state.codex.codexAccountKey === account && !!latest && ChatState.canResumeNativeThread(latest, state.codex.authStatus)
+      try { same = !token.signal.aborted && epochScope.valid(token) && !!latest
+        && account === ChatState.codexRoomAccountCurrent(latest, state.codex.authStatus, state.codex.codexAccountKey, state.codex)
+        && ChatState.canResumeNativeThread(latest, state.codex.authStatus, state.codex)
         && JSON.stringify(ChatState.chatContextRequestScope(latest, state.codex)) === binding
         && state.codex.activeThreadId === session.threadId
         && (session.preparationScope ? session.preparationScope.current() : (state.codex.activityRoomGeneration || 0) === generation)
@@ -15993,11 +15995,15 @@
       };
     };
     const resetThreadConversations = () => {
-      if (state.codex.threads.some(thread => thread.engineId === 'claude')) {
+      // L1 c19 (Contract §14.1): a Codex room on another engine profile runs on that profile's account, so the DEFAULT sign-in changing
+      // or signing out keeps it: its requests and runs in flight, its binding, and its profile's epoch tokens.
+      const otherProfileRooms = ChatState.codexDefaultSwitchKeeps(state.codex.threads, state.codex);
+      if (state.codex.threads.some(thread => thread.engineId === 'claude') || otherProfileRooms.size) {
         // Codex sign-out/account switching cannot revoke Claude's separate
         // native binding or abort its pending HTTP request with the shared epoch.
-        epochScope.reset('codex');
-        const codexThreads = state.codex.threads.filter(thread => thread.engineId !== 'claude');
+        // With rooms on other Codex profiles only the default profile's (and unrecorded) tokens end.
+        if (otherProfileRooms.size) epochScope.reset('codex', 'codex-default'); else epochScope.reset('codex');
+        const codexThreads = state.codex.threads.filter(thread => thread.engineId !== 'claude' && !otherProfileRooms.has(thread.id));
         const codexIds = new Set(codexThreads.map(thread => thread.id));
         const codexBindings = new Set(codexThreads.map(ChatState.clientThreadBinding));
         const codexConversations = new Set(codexThreads.map(thread => thread.conversationId).filter(Boolean));
@@ -16017,7 +16023,7 @@
         for (const id of codexConversations) refreshing.delete(id);
         for (const id of codexIds) if (state.contextSuggest?.byThread) delete state.contextSuggest.byThread[id];
         resumedNativeBindings.clear();
-        state.codex.threads = state.codex.threads.map(thread => thread.engineId === 'claude' ? thread
+        state.codex.threads = state.codex.threads.map(thread => thread.engineId === 'claude' || otherProfileRooms.has(thread.id) ? thread
           : { ...ChatState.detachNativeThread(thread, state.codex.codexAccountKey, chatBindingNonce()), updatedAt: Date.now() });
         clearBrowserToolTransport({ revoke: true });
         streamReady = false;
@@ -18613,7 +18619,7 @@
       forkAvailability(threadId, fromTurnId = null) {
         const thread = getCodexThreadById(state.codex, threadId);
         return ChatState.chatForkAvailability(thread, {
-          connected: state.codex.connected, auth: state.codex.authStatus, capabilities: state.codex.chatCapabilities,
+          connected: state.codex.connected, auth: state.codex.authStatus, capabilities: state.codex.chatCapabilities, engines: state.codex.engines,
           busy: !!thread && (threadBusy(thread) || forkingThreads.has(thread.id)),
           runs: ChatState.runsForThread(protocol, thread), fromTurnId,
         });
