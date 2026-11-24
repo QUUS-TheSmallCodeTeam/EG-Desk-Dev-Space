@@ -94,7 +94,9 @@ export function fillFromGuide(prompt) {
       let lines = item.shows === 'open_items'
         ? mine.flatMap(m => sentencesOf(m.text).filter(x => NOT_DONE.test(x)).map(x => ({ label: clip(m.title, field('label')?.max ?? 24), text: fitSentence([x], field('text')?.max ?? 90), from: m.alias })))
         : mine.map(m => ({ label: clip(dayOf(m.at) ?? m.title, field('label')?.max ?? 24), text: fitSentence(sentencesOf(m.text), field('text')?.max ?? 90), from: m.alias }))
-      lines = lines.filter((_, i) => !drop.includes(`line ${i + 1}`)).slice(0, spec.max ?? 6)
+      // c38: a rejected line is dropped where the card may have fewer lines; a sequence card has one line for EVERY material (spec.min), so there the line is written again, shorter
+      const kept = lines.filter((_, i) => !drop.includes(`line ${i + 1}`))
+      lines = (kept.length >= (spec.min ?? 1) ? kept : lines.map((x, i) => (drop.includes(`line ${i + 1}`) ? { ...x, text: fitSentence(sentencesOf(M[x.from].text).slice(0, 1), Math.min(40, field('text')?.max ?? 90)) } : x))).slice(0, spec.max ?? 6)
       if (lines.length < (spec.min ?? 1)) unfillable.push({ item: item.id, slot: 'lines', reason: 'the materials do not say it' })
       else slots.lines = lines
       // The explanation says only what the lines show: their dates for a sequence, the open line itself otherwise.

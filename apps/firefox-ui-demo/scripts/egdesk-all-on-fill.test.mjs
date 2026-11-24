@@ -47,8 +47,11 @@ test('fill: lines are whole sentences of the material they cite, compare values 
 
 test('fill redo: only the items asked again, without the rejected parts; never the same data again', async t => {
   const prompt = await productFillPrompt(t), guide = guideOf(prompt), first = parse(fillFromGuide(prompt))
-  const withLines = guide.items.find(i => (first.items[i.id].slots.lines ?? []).length >= 2)
-  assert.ok(withLines, 'an item with at least two lines')
+  const minOf = i => i.slots.find(s => s.name === 'lines')?.min ?? 1
+  const withLines = guide.items.find(i => (first.items[i.id].slots.lines ?? []).length >= 2 && (first.items[i.id].slots.lines ?? []).length > minOf(i))
+  const bound = guide.items.find(i => (first.items[i.id].slots.lines ?? []).length >= 2 && (first.items[i.id].slots.lines ?? []).length === minOf(i))
+  assert.ok(withLines || bound, 'an item with at least two lines')
+  if (!withLines) return redoBound(prompt, bound, first)
   const redo = prompt.replace('Design guide (decided; do not change it):', `Fill only these items again: ${withLines.id}.\nA check found these parts of your previous data not supported by the material they cite: ${withLines.id} line 2; ${withLines.id} explanation. Write them again from what the material says, keeping its actors, qualifiers, amounts and dates exactly, or report the slot as unfillable.\n\nDesign guide (decided; do not change it):`)
   const again = parse(fillFromGuide(redo))
   assert.deepEqual(Object.keys(again.items), [withLines.id])
@@ -56,3 +59,12 @@ test('fill redo: only the items asked again, without the rejected parts; never t
   assert.deepEqual(after, [before[0], ...before.slice(2)], 'line 2 dropped, the others kept')
   assert.equal(again.items[withLines.id].text, before[0].text, 'the explanation is rewritten from a line it shows')
 })
+
+// c38: a sequence card has one line for every material it shows (min = the number of materials), so a rejected line cannot be dropped: it is written again, from its own material, and
+// differently (never the same data again); the other lines and the number of lines stay.
+function redoBound(prompt, item, first) {
+  const redo = prompt.replace('Design guide (decided; do not change it):', `Fill only these items again: ${item.id}.\nA check found these parts of your previous data not supported by the material they cite: ${item.id} line 2. Write them again from what the material says, keeping its actors, qualifiers, amounts and dates exactly, or report the slot as unfillable.\n\nDesign guide (decided; do not change it):`)
+  const again = parse(fillFromGuide(redo)), before = first.items[item.id].slots.lines, after = again.items[item.id].slots.lines
+  assert.deepEqual(Object.keys(again.items), [item.id]); assert.equal(after.length, before.length, 'every material keeps its line')
+  assert.deepEqual([after[0], ...after.slice(2)], [before[0], ...before.slice(2)], 'the other lines are unchanged'); assert.equal(after[1].from, before[1].from); assert.notDeepEqual(after[1], before[1], 'line 2 is not the same data again')
+}
