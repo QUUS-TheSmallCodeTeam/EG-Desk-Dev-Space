@@ -17255,7 +17255,12 @@
         const codex = state.codex, thread = getCodexThreadById(codex, threadId);
         if (choiceSettingsWriting || !thread || codex.activeThreadId !== threadId || codex.hudView !== 'conversation'
             || thread.type !== 'dm' || thread.engineId !== 'codex' || thread.profileEnabled !== true
-            || thread.stateless || thread.startStateless || thread.executionBounded || thread.retainedNativeBinding
+            || thread.stateless || thread.startStateless || thread.executionBounded || ChatState.nativeBindingHeld(thread)
+            // A restored room keeps its retained pair after the owner check re-attaches it. Admit it only while that
+            // pair still names exactly this live binding and account; anything else stays held like an ordinary send.
+            || thread.retainedNativeBinding && (thread.retainedNativeBinding.conversationId !== thread.conversationId
+              || thread.retainedNativeBinding.clientThreadId !== ChatState.clientThreadBinding(thread)
+              || thread.retainedNativeBinding.accountKey !== thread.bindingAccountKey)
             || !ChatState.chatThreadReadiness(thread, codex).ready || !ChatState.canResumeNativeThread(thread, codex.authStatus, codex)
             || (codex.authStatus?.access?.state != null && codex.authStatus.access.state !== 'ok')
             || threadBusy(thread) || getCodexThreadDraft(codex, threadId) !== question) return null;
