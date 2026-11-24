@@ -33,15 +33,17 @@ const CHECKS = Object.freeze([
   ['briefing-coverage + briefing-coverage-facts', 'egdesk-briefing-coverage-plan.mjs', []],
   ['contamination', 'egdesk-contamination-plan.mjs', []],
   ['draft-overcorrection', 'egdesk-draft-overcorrection-plan.mjs', []],
-  ['memory-action', 'egdesk-memory-action-plan.mjs', []],
+  ['memory-action-v2', 'egdesk-memory-action-v2-plan.mjs', []],
+  ['split-wording', 'egdesk-split-wording-plan.mjs', []],
   ['turn-context-latency', 'egdesk-turn-context-latency-plan.mjs', []],
   ['turn-context-idle', 'egdesk-turn-context-latency-plan.mjs', ['--idle']],
   ['turn-context-warmup', 'egdesk-turn-context-latency-plan.mjs', ['--warmup']],
   ['utterance-threshold', 'egdesk-utterance-threshold-study.mjs', []],
   ['working-memory-judge', 'egdesk-working-memory-real-plan.mjs', []],
 ])
-// Committed plan directories that no script rebuilds: written by hand (static bytes, no clock involved).
-const HAND_WRITTEN = Object.freeze(['all-on-s3-faithful-fill', 'work-placement'])
+// Committed plan directories that no script rebuilds: written by hand, or kept as sent after a newer plan superseded them (static bytes, no
+// clock involved; memory-action is v1 as sent in c24, rebuilt as memory-action-v2).
+const HAND_WRITTEN = Object.freeze(['all-on-s3-faithful-fill', 'work-placement', 'memory-action'])
 
 class Exit extends Error { constructor(code) { super(`process.exit(${code})`); this.code = code } }
 async function runScript(script, argv, tag) {
@@ -80,7 +82,7 @@ test('every committed plan directory is covered by a compare mode above or is ha
   const root = path.join(app, 'proofs', 'decision-real-measure')
   const dirs = readdirSync(root).filter(d => statSync(path.join(root, d)).isDirectory())
   const covered = new Set(['action-relevance', 'axis-hybrid', 'axis-split', 'board-reply-screening', 'l1-remeasure-c13', 'briefing-coverage', 'briefing-coverage-facts',
-    'contamination', 'draft-overcorrection', 'memory-action', 'turn-context-latency', 'turn-context-idle', 'turn-context-warmup', 'utterance-threshold', 'working-memory-judge'])
+    'contamination', 'draft-overcorrection', 'memory-action-v2', 'split-wording', 'turn-context-latency', 'turn-context-idle', 'turn-context-warmup', 'utterance-threshold', 'working-memory-judge'])
   assert.deepEqual(dirs.filter(d => !covered.has(d) && !HAND_WRITTEN.includes(d)), [], 'a new committed plan directory needs a compare mode in CHECKS (or is declared hand-written)')
 })
 
