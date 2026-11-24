@@ -20,9 +20,10 @@ import { predicateQuestion } from './egdesk-decision-questions.mjs'
 //   turnStarted({ conversationId, turnId }) / turnEnded({ turnId })                          (the runtime's turn lifecycle)
 //   awaitingReply(conversationId) → boolean; readReply({ conversationId, reply, client, egress, timeoutMs }) → { approved }
 // One question at a time, in order (c14): in a turn only the first command that needs the person is asked about ('needs_person');
-// every other one that needs the person is 'queued' with its position, and is carried, in order, to the next turn (one hop), where
-// the head of that queue is the only one that can be asked. The person's reply is read against the one command asked about and
-// approves only that command.
+// every other one that needs the person is 'queued' with its position, and is carried, in order, to the next turn (one hop). In that
+// turn the question goes to the first carried command the model tries again: when the head is not retried, the next queued one takes
+// the question, so no turn is lost waiting for it (c15). A command that was not queued waits behind the carried ones for that turn.
+// The person's reply is read against the one command asked about and approves only that command.
 // Modes: off → every check is 'none' (nothing recorded); advisory → what WOULD be denied is recorded, the answer is 'none'; on → as above.
 export const GATE_HOOK_MODES = Object.freeze(['off', 'advisory', 'on'])
 export const GATE_HOOK_LIMITS = Object.freeze({ turns: 64, keysPerTurn: 64, approvalsPerTurn: 16, commandChars: 8000, replyChars: 2000, bodyBytes: 64 * 1024 })
@@ -58,7 +59,7 @@ export function commandKey(command, cwd) {
 }
 export const gateNote = body => JSON.stringify({ egdesk_command_gate: body })
 
-export function createGateHookBroker({ mode = () => 'off', assess = null, home, record = () => {}, onStop = () => {}, limits = {} } = {}) {
+export function createGateHookBroker({ mode = () => 'off', assess = null, home, record = () => {}, onStop = () => {}, onCheck = () => {}, limits = {} } = {}) {
   const L = { ...GATE_HOOK_LIMITS, ...limits }
   const turns = new Map() // turnId → { conversationId, approvals: Set(key), denies: Map(key → n), asks: [], checked: Set(key) }
   const awaiting = new Map() // conversationId → { ask, fromTurn } (one hop: the next message of that conversation)
@@ -99,6 +100,7 @@ export function createGateHookBroker({ mode = () => 'off', assess = null, home, 
     async check({ sessionId = null, turnId, cwd, command } = {}) {
       const m = currentMode()
       if (m === 'off' || typeof command !== 'string' || !command.trim() || command.length > L.commandChars || typeof cwd !== 'string' || !cwd.startsWith('/')) return { decision: 'none' }
+      try { onCheck() } catch { /* e.g. the runtime's engine-version notice; never affects the answer */ }
       const key = commandKey(command, cwd)
       // a turn the runtime started; or, when the hook is faster than the turn's registration, the turn a reply already approved for
       const turn = (typeof turnId === 'string' && turns.get(turnId)) || (typeof sessionId === 'string' && nextTurn.has(sessionId) ? turnOf(turnId, sessionId) : null)
@@ -121,8 +123,7 @@ export function createGateHookBroker({ mode = () => 'off', assess = null, home, 
       if (turn && turn.denies.size < L.keysPerTurn) turn.denies.set(key, count)
       if (count === 1) {
         const item = { key, command, cwd, reasons }
-        const head = turn.carry.find(c => c.key !== turn.asked?.key) ?? null
-        if (!turn.asked && (!head || head.key === key)) { // the one question of this turn
+        if (!turn.asked && (turn.carry.length === 0 || turn.carry.some(c => c.key === key))) { // the one question of this turn
           turn.asked = item
           note('denied_ask', { mode: m, rule: floor.length > 0, reasons })
           return { decision: 'deny', note: gateNote({ status: 'needs_person', reasons, options: GATE_HOOK_OPTIONS, next: 'ask_user_in_chat', retry: 'same_command_after_yes' }) }
