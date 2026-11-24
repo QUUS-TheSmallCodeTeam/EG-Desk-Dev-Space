@@ -175,3 +175,21 @@ test('flag off: no heartbeat exists and no timer is created; heartbeat without t
   assert.equal(m.beats.at(-1).phase, 'tool_running')
   assert.equal(HEARTBEAT_LIMITS.beatMs, 5000)
 })
+
+// c28 (L2 c24, v8 s14): after an answer the check WITHHELD, the person saw nothing, so the next check carries all the records of that check (up to 8), not the first four: the plan page the next
+// draft is about may be among the later ones. After a posted answer the first four are carried as before.
+test('earlier records: eight after a withheld answer, four after a posted one', async t => {
+  const w = world(t, { flags: { held: true } })
+  const records = prefix => Array.from({ length: 10 }, (_, i) => ({ id: `${prefix}${i + 1}`, kind: 'memory', time: 'past', status: 'done', source: 'document', text: `${prefix} record ${i + 1}` }))
+  const turn = prefix => ({ evidence: [], memory: records(prefix), skip: null })
+  const run = { clientThreadId: 'dm-carry', conversationId: 'c1' }
+  const ids = ready => ready.evidence.map(e => e.id).filter(id => id.startsWith('prev_'))
+  await w.chat.draftTurnEvidence(run, turn('a'), [])
+  const afterPosted = await w.chat.draftTurnEvidence(run, turn('b'), [])
+  assert.deepEqual(ids(afterPosted), ['prev_a1', 'prev_a2', 'prev_a3', 'prev_a4'], 'a posted answer: the first four')
+  const run2 = { clientThreadId: 'dm-carry-2', conversationId: 'c2' }
+  await w.chat.draftTurnEvidence(run2, turn('a'), [])
+  w.chat.earlierEvidence.get('dm-carry-2').withheld = true // what the check does when its outcome is 'withheld'
+  const afterWithheld = await w.chat.draftTurnEvidence(run2, turn('b'), [])
+  assert.deepEqual(ids(afterWithheld), ['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8'].map(id => `prev_${id}`), 'a withheld answer: all eight')
+})
