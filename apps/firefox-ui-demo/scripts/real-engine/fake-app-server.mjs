@@ -65,7 +65,7 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
     send({ id, method, params })
   })
 
-  async function runTurn(threadId, turnId, plan) {
+  async function runTurn(threadId, turnId, plan, state) {
     const thread = threads.get(threadId), items = []
     if (script.refuseEditsUnlessInstructed === true && (plan.steps ?? []).some(step => step.toolCall?.tool === 'egdesk_edit_file') &&
         !(thread.developerInstructions.includes('egdesk_edit_file') && thread.config?.include_permissions_instructions === false)) {
@@ -75,9 +75,9 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
     notify('turn/started', { threadId, turn: turn('inProgress') })
     const user = { type: 'userMessage', id: itemId(), content: [{ type: 'text', text: thread.lastText, text_elements: [] }] }
     notify('item/started', { threadId, turnId, startedAtMs: Date.now(), item: user }); notify('item/completed', { threadId, turnId, completedAtMs: Date.now(), item: user }); items.push(user)
-    const state = { threadId, interrupted: false, steers: [], emit: null }
-    running.set(turnId, state)
+    // the state was registered when turn/start was answered: an interrupt or steer that arrives before the first step finds the turn
     state.emit = text => { const item = { type: 'userMessage', id: itemId(), content: [{ type: 'text', text, text_elements: [] }] }; notify('item/started', { threadId, turnId, startedAtMs: Date.now(), item }); notify('item/completed', { threadId, turnId, completedAtMs: Date.now(), item }); items.push(item) }
+    for (const text of state.early ?? []) state.emit(text)
     const wait = async ms => { for (let left = ms; left > 0 && !state.interrupted; left -= 20) await sleep(Math.min(20, left)) }
     for (const step of plan.steps ?? []) {
       if (state.interrupted) break
@@ -150,7 +150,9 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
       const plan = (thread.fork ? chooseTurn(script.forkTurns ?? [], usedFork, thread.lastText) : chooseTurn(script.turns ?? [], used, thread.lastText)) ?? { steps: [], final: '(the fake has no script for this turn)' }
       const turnId = `turn-${++nextTurn}`
       result(id, 'turn/start', { turn: { id: turnId, items: [], status: 'inProgress' } })
-      setImmediate(() => { runTurn(params.threadId, turnId, plan).catch(error => fail('turn run', [String(error?.message ?? error)])) })
+      const state = { threadId: params.threadId, interrupted: false, steers: [], emit: null }
+      running.set(turnId, state)
+      setImmediate(() => { runTurn(params.threadId, turnId, plan, state).catch(error => fail('turn run', [String(error?.message ?? error)])) })
     },
     'thread/unsubscribe': (id) => result(id, 'thread/unsubscribe', { status: 'unsubscribed' }),
     'turn/interrupt': (id, params) => {
@@ -163,7 +165,7 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
       const state = running.get(params.expectedTurnId)
       if (!state || state.threadId !== params.threadId) return send({ id, error: { code: -32600, message: 'expected turn is not the active turn' } })
       const text = (params.input ?? []).filter(i => i?.type === 'text').map(i => i.text).join('\n')
-      state.steers.push(text); state.emit(text)
+      state.steers.push(text); if (state.emit) state.emit(text); else (state.early ??= []).push(text)
       result(id, 'turn/steer', { turnId: params.expectedTurnId })
     },
     'config/read': (id) => result(id, 'config/read', { config: {}, origins: {}, layers: (person.mcpServers.some(s => !s.pluginId) ? [{ name: { type: 'user', file: `${env.CODEX_HOME || home}/config.toml` }, version: 'v1', config: { mcp_servers: Object.fromEntries(person.mcpServers.filter(s => !s.pluginId).map(s => [s.name, { command: 'fake-server' }])) } }] : []) }),

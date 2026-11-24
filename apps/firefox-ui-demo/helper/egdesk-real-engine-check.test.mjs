@@ -429,7 +429,7 @@ const WHILE = { set: 'real-engine-while-v1', conversations: [{ id: 'while', flag
   { say: 'Where are you with it?', whileRunning: { afterMs: 60 }, expect: { posted: true, noNativeTools: true } }] }] }
 
 test('whileRunning: the second message goes into the working run (no new turn), both turns are awaited and each keeps its own expectations', async t => {
-  const fake = { turns: [{ steps: [{ delayMs: 400 }, { toolCall: { tool: 'egdesk_run_command', arguments: { command: 'npm test' } } }], final: 'The tests passed.' }] }
+  const fake = { turns: [{ steps: [{ delayMs: 1500 }, { toolCall: { tool: 'egdesk_run_command', arguments: { command: 'npm test' } } }], final: 'The tests passed.' }] }
   const w = world(t, fake)
   w.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: null })
   const rec = only(await runCheck(w.options, asScripts(WHILE), w.deps))
@@ -438,7 +438,7 @@ test('whileRunning: the second message goes into the working run (no new turn), 
   assert.equal(first.ok, true, JSON.stringify(first.expectations)); assert.equal(first.subTurns[0].status, 'completed', 'the working turn was not interrupted')
   assert.deepEqual(first.subTurns[0].commandsRan, ['npm test'])
   assert.equal(second.ok, true, JSON.stringify(second.expectations)); assert.deepEqual(second.whileRunning, { afterMs: 60 })
-  assert.equal(second.subTurns[0].accepted, true); assert.equal(second.expectations[0].check, 'sent_while_running'); assert.ok(second.subTurns[0].sentAtMs >= 60 && second.subTurns[0].sentAtMs < 400, 'sent ' + second.subTurns[0].sentAtMs + ' ms after the first turn started')
+  assert.equal(second.subTurns[0].accepted, true); assert.equal(second.expectations[0].check, 'sent_while_running'); assert.ok(second.subTurns[0].sentAtMs >= 60 && second.subTurns[0].sentAtMs < 1500, 'sent ' + second.subTurns[0].sentAtMs + ' ms after the first turn started')
   assert.match(second.posted.at(-1), /tests passed/, 'the messages after it was sent include the run\'s own answer')
   assert.equal(wireLog(w).filter(m => m.dir === 'in' && m.method === 'turn/start').length, 1, 'the message typed into the run started no turn of its own')
   assert.deepEqual(rec.engine.nativeContract, { version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: false, steerContract: false, threadDelete: false }, 'no steer contract on this (stubbed) binary')
@@ -546,4 +546,21 @@ test('delete action: the conversation is forgotten; the next message turn starts
   assert.equal(third.ok, true, JSON.stringify(third.expectations)); assert.deepEqual(third.posted, ['nothing yet'])
   assert.equal(wireLog(w).filter(m => m.dir === 'in' && m.method === 'thread/start').length, 2, 'two native threads: the new conversation is a new thread')
   assert.equal(rec.ok, true); noSchemaErrors(w)
+})
+
+test('extensions: one small registration point; a module sees the composed runtime, every turn record and the end; a broken one never changes the verdict', async t => {
+  const seen = []
+  const good = { name: 'stub-good', setup: ctx => { seen.push(['setup', Object.keys(ctx).sort()]); return { afterTurn: (record, info) => seen.push(['turn', record.index, info.index]), finish: () => ({ turns: seen.filter(x => x[0] === 'turn').length }) } } }
+  const broken = { name: 'stub-broken', setup: () => ({ afterTurn: () => { throw Object.assign(new Error('boom'), { code: 'EXT_BOOM' }) } }) }
+  const failing = { name: 'stub-setup-fails', setup: () => { throw new Error('no setup') } }
+  const script = { set: 'real-engine-ext-v1', conversations: [{ id: 'ext', turns: [{ say: 'one', expect: { posted: true } }, { say: 'two', expect: { posted: true } }] }] }
+  const w = world(t, { turns: [{ steps: [], final: 'a' }, { steps: [], final: 'b' }] })
+  w.deps.extensions = [good, broken, failing]
+  const rec = only(await runCheck(w.options, asScripts(script), w.deps))
+  assert.equal(rec.ok, true, 'the extensions did not change the verdict')
+  assert.deepEqual(seen.filter(x => x[0] === 'turn'), [['turn', 1, 0], ['turn', 2, 1]])
+  assert.deepEqual(seen[0][1], ['calibrationLog', 'chat', 'client', 'conversation', 'dataDir', 'flags', 'options', 'rec', 'request', 'scratch', 'store', 'wiring'])
+  assert.deepEqual(rec.extensions['stub-good'], { turns: 2 }); assert.deepEqual(rec.extensions['stub-broken'], { error: 'EXT_BOOM' }); assert.deepEqual(rec.extensions['stub-setup-fails'], { error: 'no setup' })
+  const plain = world(t, { turns: [{ steps: [], final: 'a' }, { steps: [], final: 'b' }] })
+  assert.equal(only(await runCheck(plain.options, asScripts(script), plain.deps)).extensions, undefined, 'no extension: nothing added to the record')
 })

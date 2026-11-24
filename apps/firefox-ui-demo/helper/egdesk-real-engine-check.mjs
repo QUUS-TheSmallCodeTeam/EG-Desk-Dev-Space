@@ -389,6 +389,18 @@ export async function runConversation({ options, set, conversation, deps = {} })
     chat.setConnection(true)
     try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
     rec.phases.composedMs = ms(t0)
+    // The one registration point for another lane's module (the briefing hook, memory seeding): deps.extensions = [{ name, setup(ctx) → { afterTurn?(record, info), finish?() } }].
+    // setup runs once the runtime is composed; afterTurn after every scripted turn record; finish at the end of the conversation (its value is kept in
+    // rec.extensions[name]). An extension that throws is recorded as { error } and never stops the check or changes a turn's verdict.
+    const extensions = []
+    for (const ext of deps.extensions ?? []) {
+      try { extensions.push({ name: String(ext.name).slice(0, 40), api: await ext.setup?.({ conversation, options, chat, store, wiring, client, calibrationLog, dataDir, scratch, flags: FLAG, rec, request }) ?? {} }) }
+      catch (error) { (rec.extensions ??= {})[String(ext?.name).slice(0, 40)] = { error: clip(error?.code ?? error?.message ?? 'error', 100) } }
+    }
+    const pushTurn = async record => {
+      rec.turns.push(record)
+      for (const { name, api } of extensions) { try { await api.afterTurn?.(record, { conversation, index: rec.turns.length - 1 }) } catch (error) { (rec.extensions ??= {})[name] = { error: clip(error?.code ?? error?.message ?? 'error', 100) } } }
+    }
 
     // ---- the scripted turns ----
     let clientThreadId = `check-${conversation.id}`, requestSeq = 0, nativeThread = null, first = true, seen = 0
@@ -458,7 +470,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       const gone = stored === false && messages === 0
       const summary = out ? { stored, messages, interrupted: out.interrupted ?? 0, history: out.history ?? null, engineHistory: (out.engineHistory ?? []).map(h => ({ state: h.state, reason: h.reason ?? null })) } : null
       const expectations = [{ check: 'action_taken', ok: out?.accepted === true, detail: { error } }, ...checkTurnExpectations(turn.expect ?? {}, { conversationGone: gone, posted: [], toolCalls: [], native: { commandExecution: 0, fileChange: 0, approvals: 0 } })]
-      rec.turns.push({ index: index + 1, action: 'delete', approve: [], subTurns: [{ action: 'delete', accepted: out?.accepted === true, error, conversationGone: gone, summary }], posted: [], asked: 0, undoRecords: undoCount(), expectations, ok: expectations.every(e => e.ok) })
+      await pushTurn({ index: index + 1, action: 'delete', approve: [], subTurns: [{ action: 'delete', accepted: out?.accepted === true, error, conversationGone: gone, summary }], posted: [], asked: 0, undoRecords: undoCount(), expectations, ok: expectations.every(e => e.ok) })
       clientThreadId = `check-${conversation.id}-${++generation}`; nativeThread = null; first = true; seen = 0
     }
 
@@ -491,7 +503,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       }
       const expectations = checkTurnExpectations(turn.expect ?? {}, flat)
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
-      rec.turns.push({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
+      await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
         posted, asked, undoRecords: flat.undoRecords, expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {
@@ -500,11 +512,12 @@ export async function runConversation({ options, set, conversation, deps = {} })
         const flat2 = { toolCalls: prev.toolCalls.slice(mark.tools), native: prev.native, posted: after, asked, commandsRan: prev.commandsRan.slice(mark.ran), files: readFiles(next), undoRecords: undoCount(), turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted) }
         const implicit = follow === 'message' ? 'sent_while_running' : 'action_taken'
         const expect2 = [{ check: implicit, ok: mark.accepted, detail: { afterMs: mark.afterMs, sentAtMs: mark.sentAtMs, error: mark.error } }, ...checkTurnExpectations(next.expect ?? {}, flat2)]
-        rec.turns.push({ index: index + 2, say: clip(next.say ?? '', 200), approve: [], ...(follow === 'message' ? { whileRunning: { afterMs: mark.afterMs } } : { action: follow, afterMs: mark.afterMs }), subTurns: [{ ...(follow === 'message' ? { whileRunning: true } : { action: follow }), accepted: mark.accepted, error: mark.error, sentAtMs: mark.sentAtMs }],
+        await pushTurn({ index: index + 2, say: clip(next.say ?? '', 200), approve: [], ...(follow === 'message' ? { whileRunning: { afterMs: mark.afterMs } } : { action: follow, afterMs: mark.afterMs }), subTurns: [{ ...(follow === 'message' ? { whileRunning: true } : { action: follow }), accepted: mark.accepted, error: mark.error, sentAtMs: mark.sentAtMs }],
           posted: after, asked, undoRecords: flat2.undoRecords, expectations: expect2, ok: expect2.every(e => e.ok) && !sub.some(failedRun) })
         index++
       }
     }
+    for (const { name, api } of extensions) { try { const value = await api.finish?.(); if (value !== undefined) (rec.extensions ??= {})[name] = value } catch (error) { (rec.extensions ??= {})[name] = { error: clip(error?.code ?? error?.message ?? 'error', 100) } } }
     rec.ok = !rec.aborted && !closed && rec.turns.length === conversation.turns.length && rec.turns.every(t => t.ok)
     rec.decisionCalls = decisionCall.length
   } catch (error) {
