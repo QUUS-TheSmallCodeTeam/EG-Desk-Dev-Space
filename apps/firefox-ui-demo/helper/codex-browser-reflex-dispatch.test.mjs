@@ -98,6 +98,7 @@ async function scenario(target, change, t) {
     assert.equal(dispatches.length, targetRead - (late ? 0 : 1), 'dispatch count before changing authority')
     try {
       if (change === 'off' || change === 'late-off') mode = 'off'
+      if (change === 'advisory' || change === 'late-advisory') mode = 'advisory'
       if (change === 'cancel') await provider.cancelRun(run)
       if (change === 'owner') owner = 'codex:other-fixture-owner'
       if (change === 'key') { key = 'rotated-synthetic-key'; savedAt++ }
@@ -162,7 +163,7 @@ async function scenario(target, change, t) {
 }
 
 for (const target of ['next_step', 'field_0']) {
-  for (const change of ['on', 'off', 'cancel', 'late-off']) {
+  for (const change of ['on', 'off', 'advisory', 'cancel', 'late-off', 'late-advisory']) {
     test(`B-10 ${target}: ${change}`, { timeout: 3000 }, t => scenario(target, change, t))
   }
 }
