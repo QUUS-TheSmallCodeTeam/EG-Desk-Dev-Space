@@ -6,6 +6,7 @@ import { normalizeEntry } from './egdesk-decision-calibration-log.mjs'
 import { runBrowserReflex } from './egdesk-browser-reflex.mjs'
 import { createBrowserTaskStore, createDirectBrowserEntry, entryQuestion, readBrowserEntry, subjectiveNote } from './egdesk-browser-task.mjs'
 import { PS_NAMES, pageStateAnswers, pageStateProbabilities, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
+import { entryAnswersOf, entryWire, isEntryQuestion } from './egdesk-browser-entry.fixture.mjs'
 
 // L8/C6: the user's chat message goes straight to an objective browser task; the judge picks only among
 // code-enumerated options plus fixed ones; need-context / cannot-proceed exit to the subjective model (a mock
@@ -53,10 +54,9 @@ async function world(t, { start, mode = 'on', hang = false }) {
       const stepQ = wire.questions.find(q => q.name === 'next_step') ?? (q0.choices ? q0 : { choices: [] }) // c16: a code-decided step asks no next_step
       decisions.push({ q: q0.name, image: /image/i.test(body), choices: q0.choices?.map(c => c.value) })
       if (hang) await new Promise((_, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }))
-      if (q0.name === 'browser_entry') {
-        const msg = /User message: (.*)/.exec(evidence)?.[1] ?? ''
-        const value = /세금계산서|다운로드/.test(msg) ? starts(q0.choices, '[C1]') : 'not_browser_task'
-        return { ok: true, text: async () => JSON.stringify({ answers: [choice('browser_entry', value, 0.95)] }) }
+      if (q0.name === 'browser_entry') { // c20: the entry predicates
+  const msg = /User message: (.*)/.exec(evidence)?.[1] ?? ''
+        return { ok: true, text: async () => JSON.stringify({ answers: entryWire(wire.questions, { web: /세금계산서|다운로드/.test(msg) ? 0.95 : 0.05 }) }) }
       }
       if (q0.name === 'task_resume') {
         const msg = /User message: (.*)/.exec(evidence)?.[1] ?? ''
@@ -220,20 +220,20 @@ test('S8 calibration records for the entry decision (and, since c18, for each st
   const entry = normalizeEntry(w.calibrationRaw[0])
   assert.equal(entry.feature, 'browser_reflex'); assert.equal(entry.mode, 'on')
   assert.doesNotMatch(JSON.stringify(entry), /세금|portal|example/)
-  assert.equal(entry.judgments[0].q, 'choice')
+  assert.equal(entry.judgments[0].q, 'browser_entry', 'c20: the entry predicates')
   const step = normalizeEntry(w.calibrationRaw[1])
   assert.doesNotMatch(JSON.stringify(w.calibrationRaw[1]), /세금|portal|example|사업자|https?:|\/invoices/, 'the raw step record holds no page text, label or address')
   assert.equal(step.judgments[0].q, 'next_step')
 })
 
-test('entry question rides on an existing request: options are code-enumerated cards plus two fixed options', () => {
+test('entry questions ride on an existing request (c20): the request predicate, then one predicate per code-enumerated card', () => {
   const cards = [{ cardId: 'a', host: 'one.example' }, { cardId: 'b', host: 'two.example' }]
-  const q = entryQuestion(cards)
-  assert.deepEqual(q.choices.map(c => c.value), ['[C1] one.example', '[C2] two.example', 'not_browser_task', 'ask_user'])
-  const answers = { browser_entry: { type: 'choice', choice: '[C2] two.example', confidence: 0.9, probabilities: [{ value: '[C2] two.example', probability: 0.9 }, { value: '[C1] one.example', probability: 0.05 }] } }
-  assert.deepEqual(readBrowserEntry(answers, cards).cardId, 'b')
-  // an invalid or low-confidence entry never starts a task
-  assert.equal(readBrowserEntry({ browser_entry: { type: 'choice', choice: '[C1] one.example', confidence: 0.5, probabilities: [{ value: '[C1] one.example', probability: 0.5 }] } }, cards).kind, 'uncertain')
+  const qs = entryQuestion(cards)
+  assert.deepEqual(qs.map(q => q.name), ['browser_entry', 'browser_entry_card_0', 'browser_entry_card_1'])
+  const P = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { type: 'predicate', probability: v }]))
+  assert.deepEqual(readBrowserEntry(P({ browser_entry: 0.9, browser_entry_card_0: 0.05, browser_entry_card_1: 0.9 }), cards).cardId, 'b')
+  // an undecided, refused or missing entry never starts a task
+  assert.equal(readBrowserEntry(P({ browser_entry: 0.5, browser_entry_card_0: 0.5, browser_entry_card_1: 0.4 }), cards).kind, 'uncertain')
   assert.equal(readBrowserEntry({ browser_entry: { type: 'refusal' } }, cards).kind, 'uncertain')
 })
 

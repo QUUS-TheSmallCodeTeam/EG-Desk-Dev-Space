@@ -52,9 +52,11 @@ test('building twice gives the same bytes; a body is one Decision request (model
   }
 })
 
-test('entry: options are the granted cards plus the two fixed options; the prior record rides only where declared', () => {
-  assert.deepEqual(question('entry-task', 'browser_entry').choices.map(c => c.value), ['[C1] portal.example.test', 'not_browser_task', 'ask_user'])
-  assert.deepEqual(question('entry-two-cards', 'browser_entry').choices.map(c => c.value), ['[C1] portal.example.test', '[C2] mail.example.test', 'not_browser_task', 'ask_user'])
+test('entry (c20): the request predicate and one predicate per granted card; the prior record rides only where declared', () => {
+  // c20: the entry predicates: the request, then one per card quoting that page alone
+  assert.deepEqual(wire('entry-task').questions.map(q => q.name), ['browser_entry', 'browser_entry_card_0'])
+  assert.deepEqual(wire('entry-two-cards').questions.map(q => q.name), ['browser_entry', 'browser_entry_card_0', 'browser_entry_card_1'])
+  assert.match(question('entry-two-cards', 'browser_entry_card_1').instructions, /mail\.example\.test/)
   assert.match(text('entry-with-prior'), /Stored memory fetched for this turn/); assert.match(text('entry-with-prior'), /사업자 987-65-43210/)
   for (const id of ['entry-task', 'entry-not-browser', 'entry-two-cards']) assert.doesNotMatch(text(id), /Stored memory|987-65/)
 })
@@ -100,5 +102,6 @@ test('every safety expectation is hard; hard expectations cover each stage', () 
   assert.ok(notes.filter(e => /^Safety:/.test(e.note)).every(e => e.severity === 'hard'))
   for (const r of built.plan.requests) assert.ok(r.expect.some(e => e.severity === 'hard'), `${r.id} has a hard expectation`)
   // c16: each ordinary-page check is six hard predicate bounds (was one page_state choice): 20 - 3 + 18 = 35
-  assert.equal(notes.filter(e => e.severity === 'hard').length, 35); assert.equal(notes.filter(e => e.severity === 'soft').length, 8)
+  // c20: the entry predicates add one hard bound each on entry-task, entry-two-cards and entry-with-prior: 35 + 3 = 38
+  assert.equal(notes.filter(e => e.severity === 'hard').length, 38); assert.equal(notes.filter(e => e.severity === 'soft').length, 8)
 })

@@ -172,7 +172,9 @@ export function scriptedDecisions({ policy = {} } = {}) {
   const answer = wire => {
     const flat = content => (typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => (typeof part?.text === 'string' ? part.text : JSON.stringify(part))).join('\n') : JSON.stringify(content))
     const names = wire.questions.map(q => q.name), text = (Array.isArray(wire.input) ? wire.input.map(m => flat(m.content)) : [String(wire.input)]).join('\n\n')
-    const entry = q => wireChoice('browser_entry', q, /세금계산서/.test(/(?:User message: |Message:\n)(.*)/.exec(text)?.[1] ?? '') ? q.choices.find(c => c.value.includes('[C1]'))?.value ?? 'not_browser_task' : 'not_browser_task')
+    // L8 c20: the entry is yes/no predicates (browser_entry: is it a web task; browser_entry_card_N: on this card)
+    const isTask = /세금계산서/.test(/(?:User message: |Message:\n)(.*)/.exec(text)?.[1] ?? '')
+    const entry = q => ({ name: q.name, type: 'predicate', probability: q.name === 'browser_entry' ? (isTask ? 0.95 : 0.05) : q.name === 'browser_entry_card_0' && isTask ? 0.95 : 0.03 })
     if (names.some(n => n.includes('__'))) {
       // L3 c15: the message judgment is yes/no questions (message__pointer / __ask / __note / __stalled); code derives the kind. The mock keeps
       // its policy over the kinds those questions stand for and answers yes to the picked kind's question only.
@@ -186,10 +188,10 @@ export function scriptedDecisions({ policy = {} } = {}) {
         return wireChoice(q.name, q, typeof policy[q.name] === 'function' ? policy[q.name](q, text) : values.includes('none') ? 'none' : values[0]) })
     }
     if (names.some(n => MEMORY_Q.test(n))) { // the lexical stand-in of the memory lane, plus the entry question when it rides the triage request
-      return judge.decide({ input: wire.input, questions: wire.questions.filter(q => q.name !== 'browser_entry') }).then(out => [
-        ...Object.entries(out.answers).map(([name, a]) => ({ name, ...a })), ...wire.questions.filter(q => q.name === 'browser_entry').map(entry)])
+      return judge.decide({ input: wire.input, questions: wire.questions.filter(q => !/^browser_entry/.test(q.name)) }).then(out => [
+        ...Object.entries(out.answers).map(([name, a]) => ({ name, ...a })), ...wire.questions.filter(q => /^browser_entry/.test(q.name)).map(entry)])
     }
-    if (names[0] === 'browser_entry') return [entry(wire.questions[0])]
+    if (names[0] === 'browser_entry') return wire.questions.map(entry)
     if (names[0] === 'task_resume') return [wireChoice('task_resume', wire.questions[0], /취소/.test(/User message: (.*)/.exec(text)?.[1] ?? '') ? 'cancel_task' : 'resume_task')]
     if (names.includes('next_step')) {
       const q0 = wire.questions[0], evidence = wire.input[1].content

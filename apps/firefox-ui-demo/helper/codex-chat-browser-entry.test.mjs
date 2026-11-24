@@ -11,6 +11,7 @@ import { createBrowserEntryConfig } from './egdesk-browser-entry-wiring.mjs'
 import { createTurnMemoryConfig } from './egdesk-turn-memory-wiring.mjs'
 import { mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { PS_NAMES, pageStateAnswers, pageStateProbabilities, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
+import { entryAnswersOf, entryWire, isEntryQuestion } from './egdesk-browser-entry.fixture.mjs'
 
 // L8/C9: the direct browser entry inside the REAL chat runtime (CodexChatRuntime.send), flag decisionContext.browserEntry.mode():
 //   absent / 'off'  -> native input byte-identical to today
@@ -75,7 +76,7 @@ function build({ entryMode, hang = false, withClient = true, outcomes = null, fa
       if (hang) await new Promise((_, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }))
       if (q0.name === 'browser_entry') {
         const msg = /User message: (.*)/.exec(evidence)?.[1] ?? ''
-        return { ok: true, text: async () => JSON.stringify({ answers: [choice('browser_entry', /세금계산서|두 번째/.test(msg) ? starts(q0.choices, '[C1]') : 'not_browser_task', 0.95)] }) }
+        return { ok: true, text: async () => JSON.stringify({ answers: entryWire(wire.questions, { web: /세금계산서|두 번째/.test(msg) ? 0.95 : 0.05 }) }) } // c20: the entry predicates
       }
       if (q0.name === 'task_resume') return { ok: true, text: async () => JSON.stringify({ answers: [choice('task_resume', 'resume_task', 0.95)] }) }
       const url = /URL: (\S+)/.exec(evidence)?.[1], ctx = /Context the user gave in the chat \(not page text\):\n([\s\S]*?)\n\n/.exec(evidence)?.[1] ?? ''

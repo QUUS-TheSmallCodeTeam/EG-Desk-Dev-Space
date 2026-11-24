@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
 import { runBrowserReflex } from './egdesk-browser-reflex.mjs'
-import { createBrowserTaskStore, createDirectBrowserEntry, decideResume, readBrowserEntry } from './egdesk-browser-task.mjs'
+import { codeEntryCard, createBrowserTaskStore, createDirectBrowserEntry, decideResume, entryQuestions, readBrowserEntry } from './egdesk-browser-task.mjs'
 import { decisionThresholds } from './egdesk-decision-questions.mjs'
 import { PS_NAMES, pageStateAnswers, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
 
@@ -63,7 +63,7 @@ test('R3 the task reports the person-only stop as human_step, with no question t
   const store = createBrowserTaskStore()
   const runDirectTask = async () => ({ outcome: 'escalated', reason: 'human_step', withheld: 2, steps: [{ url: `${O}/subscription`, actions: [], excluded: { gated: 2, sensitive: 0 } }], state: null })
   const written = []
-  const client = { decide: async request => ({ answers: { browser_entry: { type: 'choice', choice: request.questions[0].choices[0].value, confidence: 0.93, probabilities: [{ value: request.questions[0].choices[0].value, probability: 0.95 }] } } }) }
+  const client = { decide: async request => ({ answers: Object.fromEntries(request.questions.map(q => [q.name, { type: 'predicate', probability: 0.95 }])) }) }
   const entry = createDirectBrowserEntry({ store, outcomeSink: candidate => { written.push(candidate); return { status: 'stored' } },
     provider: { directEntryEnabled: () => true, reflexScope: () => ({ client, authorizeDispatch: () => true, isDecisionCurrent: () => true }), runDirectTask } })
   const out = await entry.handle({ run: { runId: 'r', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm', message: '구독 관리 화면 열어줘', hosts: { card: 'portal.example.test' } })
@@ -73,19 +73,62 @@ test('R3 the task reports the person-only stop as human_step, with no question t
 })
 
 // ---- the entry bar, against the real entry answers ----
+// ---- the entry (c20): code first, then yes/no predicates, combined by code ----
+const P = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, { type: 'predicate', probability: v }]))
 const cards1 = [{ cardId: 'card', host: 'portal.example.test' }], cards2 = [...cards1, { cardId: 'card2', host: 'mail.example.test' }]
-const C1 = '[C1] portal.example.test'
-const answer = (value, confidence, rows) => ({ browser_entry: choice('browser_entry', value, confidence, rows) })
-test('entry bar 0.75 / margin 0.2, kept: the real decided answers enter, the real undecided one does not', () => {
-  const t = decisionThresholds()
-  assert.deepEqual([t.choice, t.margin], [0.75, 0.2], 'the product bar is unchanged')
-  assert.equal(readBrowserEntry(answer(C1, 0.93, [[C1, 0.95], ['ask_user', 0.03]]), cards1).kind, 'browser', 'entry-task, real 0.93')
-  assert.equal(readBrowserEntry(answer('not_browser_task', 1.0, [['not_browser_task', 1.0]]), cards1).kind, 'not_browser', 'entry-not-browser, real 1.0')
-  const two = readBrowserEntry(answer('ask_user', 0.51, [['ask_user', 0.63], [C1, 0.20]]), cards2)
-  assert.deepEqual([two.kind, two.top], ['uncertain', 'ask_user'], 'entry-two-cards, real 0.51 (top 0.63 / 0.20): not decided')
-  // entry-with-prior: real 0.76 with the memory packet in the entry evidence; the packet is no longer entry evidence (see the report)
-  assert.equal(readBrowserEntry(answer(C1, 0.76, [[C1, 0.82], ['ask_user', 0.10]]), cards1).kind, 'browser')
-  assert.equal(readBrowserEntry(answer(C1, 0.74, [[C1, 0.82], ['ask_user', 0.10]]), cards1).kind, 'uncertain', 'one hundredth below the bar does not enter')
+// The real entry answers, mapped onto the new questions: the request predicate = 1 - P(not a browser task), the card's = P(that card).
+const REAL_ENTRY = {
+  invoice: { 'C1': 0.95, not: 0.03 }, // c14/c15 real: [C1] 0.93 (0.95 / 0.03)
+  statement: { 'C1': 0.72, not: 0.27 }, // c19 real: [C1] 0.58 (0.72 / 0.27)
+  delivery: { 'C1': 0.53, not: 0.46 }, // c19 real: [C1] 0.30 (0.53 / 0.46)
+  settings: { 'C1': 0.09, not: 0.90 }, // c19 real: not_browser_task 0.90
+}
+const asPredicates = real => P({ browser_entry: 1 - real.not, browser_entry_card_0: real.C1 })
+test('entry replay: the invoice family still enters; the old evidence alone did not decide the statement or the delivery entry (not entered, not refused)', () => {
+  assert.deepEqual(readBrowserEntry(asPredicates(REAL_ENTRY.invoice), cards1).kind, 'browser', 'invoice: decided')
+  assert.equal(readBrowserEntry(asPredicates(REAL_ENTRY.statement), cards1).kind, 'uncertain', 'statement: 0.73 / 0.72 is undecided')
+  assert.equal(readBrowserEntry(asPredicates(REAL_ENTRY.delivery), cards1).kind, 'uncertain')
+  assert.equal(readBrowserEntry(asPredicates(REAL_ENTRY.settings), cards1).kind, 'not_browser', 'settings: the request was judged an answer (0.90)')
+  // what the redesign adds: the card's title, and code naming the card the request names
+  const statement = [{ cardId: 'card', host: 'bank.example.test', title: '카드 명세서 | 은행' }]
+  assert.equal(codeEntryCard('이번 달 카드 명세서 내려받아줘', statement), 'card', 'the title names the service the request names')
+  assert.equal(readBrowserEntry(P({ browser_entry: 1 - REAL_ENTRY.statement.not }), statement, { codeCard: 'card' }).kind, 'browser', 'named by code; the request not decided an answer')
+  assert.equal(readBrowserEntry(P({ browser_entry: 0.1 }), statement, { codeCard: 'card' }).kind, 'not_browser', 'named, but decided an answer')
+  const invoice = [{ cardId: 'card', host: 'portal.example.test', title: '거래처 포털 - 세금계산서' }]
+  assert.equal(codeEntryCard('거래처 포털에서 이번 달 세금계산서 내려받아줘', invoice), 'card')
+})
+
+test('entry questions: the request predicate always; one per card quoting that page alone by title and host; none when code named the card', () => {
+  const cards = [{ cardId: 'a', host: 'shop.example.test', title: '주문 내역 | 쇼핑' }, { cardId: 'b', host: 'account.example.test', title: '' }]
+  const qs = entryQuestions(cards)
+  assert.deepEqual(qs.map(q => [q.name, q.type]), [['browser_entry', 'predicate'], ['browser_entry_card_0', 'predicate'], ['browser_entry_card_1', 'predicate']])
+  assert.equal(qs[0].instructions, 'Is this request something to do in a web page rather than an answer?')
+  assert.equal(qs[1].instructions, 'Does this request need to be done on this open page: "주문 내역 | 쇼핑" (shop.example.test)?')
+  assert.equal(qs[2].instructions, 'Does this request need to be done on this open page: the page at account.example.test?')
+  assert.doesNotMatch(qs[1].instructions, /account/, 'one page per predicate')
+  assert.deepEqual(entryQuestions(cards, { codeCard: 'a' }).map(q => q.name), ['browser_entry'])
+})
+
+test('code naming is strict: exactly one card; host labels as whole words and not generic; title parts of 4+ characters that are not generic', () => {
+  const cards = [{ cardId: 'a', host: 'portal.example.test', title: '거래처 포털 - 세금계산서' }, { cardId: 'b', host: 'mail.naver.com', title: '받은메일함 | 네이버 메일' }]
+  assert.equal(codeEntryCard('네이버 메일에서 영수증 찾아줘', cards), 'b')
+  assert.equal(codeEntryCard('naver 메일 확인', cards), 'b')
+  assert.equal(codeEntryCard('세금계산서랑 네이버 메일 둘 다', cards), null, 'two cards named: not code')
+  assert.equal(codeEntryCard('navermail 확인', cards), null, 'a host label inside another word is not a name')
+  assert.equal(codeEntryCard('example 사이트 열어줘', cards), null, 'the synthetic and generic labels name nothing')
+  assert.equal(codeEntryCard('홈으로 가줘', [{ cardId: 'h', host: 'x.example.test', title: '홈' }]), null, 'a generic title names nothing')
+})
+
+test('combination: one decided-yes card enters; all no is not a browser task; a decided web task (or two yes) on two cards asks which; an undecided request stays ordinary', () => {
+  assert.equal(readBrowserEntry(P({ browser_entry: 0.9, browser_entry_card_0: 0.1, browser_entry_card_1: 0.9 }), cards2).cardId, 'card2')
+  assert.equal(readBrowserEntry(P({ browser_entry: 0.6, browser_entry_card_0: 0.1, browser_entry_card_1: 0.1 }), cards2).kind, 'not_browser')
+  assert.equal(readBrowserEntry(P({ browser_entry: 0.9, browser_entry_card_0: 0.6, browser_entry_card_1: 0.5 }), cards2).kind, 'ask_user')
+  assert.equal(readBrowserEntry(P({ browser_entry: 0.6, browser_entry_card_0: 0.9, browser_entry_card_1: 0.8 }), cards2).kind, 'ask_user', 'two decided yes')
+  assert.equal(readBrowserEntry(P({ browser_entry: 0.45, browser_entry_card_0: 0.5, browser_entry_card_1: 0.4 }), cards2).kind, 'uncertain', 'not decided a web task: no which-card question')
+  assert.equal(readBrowserEntry(P({ browser_entry: 0.1, browser_entry_card_0: 0.9 }), cards1).kind, 'not_browser', 'an answer wins')
+  assert.equal(readBrowserEntry(P({ browser_entry: 0.9, browser_entry_card_0: 0.5 }), cards1).kind, 'browser', 'a web task and the only granted card')
+  assert.equal(readBrowserEntry(P({ browser_entry: 0.9, browser_entry_card_0: 0.2 }), cards1).kind, 'not_browser', 'the only card decided no')
+  assert.equal(readBrowserEntry({}, cards1).kind, 'uncertain', 'no answers: nothing starts')
 })
 
 function entryWorld({ answers }) {
@@ -95,36 +138,33 @@ function entryWorld({ answers }) {
   const runDirectTask = async (_run, args) => { runs.push({ cardId: args.cardId, context: args.userContext }); return { outcome: 'done', steps: [{ url: `${O}/download`, actions: [] }], state: null } }
   const entry = createDirectBrowserEntry({ store, provider: { directEntryEnabled: () => true, reflexScope: () => ({ client, authorizeDispatch: () => true, isDecisionCurrent: () => true }), runDirectTask } })
   const run = { runId: 'r', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }, { cardId: 'card2', permission: 'interact' }] } }
-  const say = message => entry.handle({ run, conversationKey: 'dm', message, hosts: { card: 'portal.example.test', card2: 'mail.example.test' } })
+  const say = message => entry.handle({ run, conversationKey: 'dm', message, hosts: { card: 'portal.example.test', card2: 'mail.example.test' }, titles: { card: '거래처 포털', card2: '받은 편지함' } })
   return { store, sent, runs, say }
 }
-const real051 = () => ({ browser_entry: { type: 'choice', choice: 'ask_user', confidence: 0.51, probabilities: [{ value: 'ask_user', probability: 0.63 }, { value: C1, probability: 0.20 }] } })
+const undecided = () => P({ browser_entry: 0.9, browser_entry_card_0: 0.55, browser_entry_card_1: 0.4 })
+const resumeYes = () => ({ task_resume: { type: 'choice', choice: 'resume_task', confidence: 0.99, probabilities: [{ value: 'resume_task', probability: 0.99 }] } })
 
-test('undecided entry with two cards asks the person which card (closed note, nothing touched); the answer starts the task on that card with the original goal', async () => {
-  const w = entryWorld({ answers: [real051,
-    () => ({ task_resume: { type: 'choice', choice: 'resume_task', confidence: 0.99, probabilities: [{ value: 'resume_task', probability: 0.99 }] } }),
-    () => ({ browser_entry: { type: 'choice', choice: C1, confidence: 0.95, probabilities: [{ value: C1, probability: 0.96 }] } })] })
+test('a web task on two cards, which one undecided: the person is asked which card (closed note, nothing touched); an answer naming a card is code, the task starts there', async () => {
+  const w = entryWorld({ answers: [undecided, resumeYes, () => P({ browser_entry: 0.95 })] })
   const asked = await w.say('거기서 이번 달 명세서 내려받아줘')
   const note = JSON.parse(asked.note).egdesk_browser_task
   assert.deepEqual([asked.handled, asked.status, note.status, note.code, note.candidates, w.runs.length], [true, 'paused', 'need_context', 'card_choice_needed', ['portal.example.test', 'mail.example.test'], 0])
   w.store.noteQuestion(w.store.paused('dm'), '어느 카드에서 받을까요? 거래처 포털인가요, 메일인가요?')
   const out = await w.say('거래처 포털 쪽')
   assert.deepEqual([out.status, out.resumed, w.runs.map(r => r.cardId)], ['done', true, ['card']])
-  // the second entry request judges the ORIGINAL request with the answer, and the resume request carries the question
   const [, resume, again] = w.sent
   assert.match(resume.input[1].content, /Asked: 어느 카드에서 받을까요\?/)
   assert.match(again.input[1].content, /User message: 거기서 이번 달 명세서 내려받아줘\nAsked which card it concerns, the user answered: 거래처 포털 쪽/)
-  assert.equal(w.store.get(note.id).goal, '거기서 이번 달 명세서 내려받아줘')
+  assert.deepEqual(again.questions.map(q => q.name), ['browser_entry'], 'the answer named the card (its title): only the request predicate is asked')
 })
 
-test('undecided entry asks at most twice, then goes back to the ordinary turn; a top answer of "not a browser task" never asks; a single card never asks', async () => {
-  const resume = () => ({ task_resume: { type: 'choice', choice: 'resume_task', confidence: 0.99, probabilities: [{ value: 'resume_task', probability: 0.99 }] } })
-  const w = entryWorld({ answers: [real051, resume, real051, resume, real051] })
+test('which-card asked at most twice, then the ordinary turn; a request not decided a web task never asks', async () => {
+  const w = entryWorld({ answers: [undecided, resumeYes, undecided, resumeYes, undecided] })
   assert.equal((await w.say('거기서 명세서 내려받아줘')).status, 'paused')
   assert.equal((await w.say('음 글쎄')).status, 'paused')
   const third = await w.say('잘 모르겠어')
   assert.deepEqual([third.handled, w.runs.length], [false, 0])
-  const not = entryWorld({ answers: [() => ({ browser_entry: { type: 'choice', choice: 'not_browser_task', confidence: 0.5, probabilities: [{ value: 'not_browser_task', probability: 0.55 }, { value: 'ask_user', probability: 0.3 }] } })] })
+  const not = entryWorld({ answers: [() => P({ browser_entry: 0.45, browser_entry_card_0: 0.4, browser_entry_card_1: 0.3 })] })
   assert.deepEqual(await not.say('오늘 날씨 어때?'), { handled: false, reason: 'uncertain' })
 })
 

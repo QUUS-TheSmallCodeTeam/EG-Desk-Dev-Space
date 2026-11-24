@@ -60,9 +60,10 @@ function browserWorld(store) {
     { outcome: 'max_steps', steps: [{ actions: [{ ok: true, tool: 'egdesk_browser_scroll' }] }, { actions: [] }, { actions: [] }], state: { at: 1 } },
     { outcome: 'needs_user_context', steps: [{ actions: [] }], candidates: [] },
   ]
+  // L8 c20: the entry is yes/no predicates; the double answers every question (a predicate yes, a choice its first value)
   const client = { async decide(request) {
-    const q = request.questions[0], value = q.choices[0].value
-    return { answers: { [q.name]: { type: 'choice', choice: value, confidence: 0.95, probabilities: [{ value, probability: 0.96 }, { value: q.choices[1].value, probability: 0.02 }] } }, usage: null }
+    return { answers: Object.fromEntries(request.questions.map(q => [q.name, q.type === 'predicate' ? { type: 'predicate', probability: 0.95 }
+      : { type: 'choice', choice: q.choices[0].value, confidence: 0.95, probabilities: [{ value: q.choices[0].value, probability: 0.96 }, { value: q.choices[1].value, probability: 0.02 }] }])), usage: null }
   } }
   const provider = { directEntryEnabled: () => true,
     reflexScope: () => ({ client, authorizeDispatch: () => true, isDecisionCurrent: () => true }),

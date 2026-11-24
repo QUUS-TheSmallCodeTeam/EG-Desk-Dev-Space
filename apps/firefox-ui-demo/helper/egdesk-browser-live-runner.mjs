@@ -335,7 +335,8 @@ function expectedAnswers(body) {
   const pick = (q, value, confidence = 0.95) => ({ name: q.name, type: 'choice', choice: value, confidence, probabilities: [{ value, probability: confidence }] })
   return body.questions.map(q => {
     const values = (q.choices ?? []).map(c => c.value)
-    if (q.name === 'browser_entry') return pick(q, values[0])
+    if (q.name === 'browser_entry') return { name: q.name, type: 'predicate', probability: 0.95 } // c20: the request predicate
+    if (/^browser_entry_card_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: q.name === 'browser_entry_card_0' ? 0.95 : 0.03 }
     if (q.name === 'task_resume') return pick(q, 'resume_task')
     if (q.name === 'ps_sign_in' && /URL: \S+\/login/.test(ev)) return { name: q.name, type: 'predicate', probability: 0.95 } // the sign-in page
     if (/^ps_/.test(q.name)) return { name: q.name, type: 'predicate', probability: 0.02 } // an ordinary page: every page-state predicate no

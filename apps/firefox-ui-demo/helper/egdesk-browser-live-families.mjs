@@ -130,7 +130,8 @@ export function familyAnswers(body) {
   const met = /다운로드 완료|배송 상태:/.test(ev)
   return body.questions.map(q => {
     const values = (q.choices ?? []).map(c => c.value)
-    if (q.name === 'browser_entry') return pick(q, values[0])
+    if (q.name === 'browser_entry') return { name: q.name, type: 'predicate', probability: 0.95 } // c20: the request predicate
+    if (/^browser_entry_card_\d+$/.test(q.name)) return { name: q.name, type: 'predicate', probability: q.name === 'browser_entry_card_0' ? 0.95 : 0.03 }
     if (q.name === 'task_resume') return pick(q, 'resume_task')
     if (/^ps_/.test(q.name)) return yesNo(q, q.name === state ? 0.95 : 0.02)
     if (q.name === 'goal_met') return yesNo(q, met ? 0.95 : 0.02)
