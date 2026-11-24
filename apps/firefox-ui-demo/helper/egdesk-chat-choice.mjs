@@ -112,6 +112,9 @@ export async function runChatChoice(request) {
   let gateUsed = false
   let authorized = false
   let sent = false // the client started its POST
+  // Our own deadline timer fired. A Node timer can fire up to ~1 ms before performance.now() reaches the deadline,
+  // so the clock alone must not decide whether this was a timeout.
+  let expired = false
   try {
     const boundedSignal = AbortSignal.any([signal, controller.signal])
     const live = () => open && !boundedSignal.aborted && performance.now() < deadline
@@ -138,7 +141,7 @@ export async function runChatChoice(request) {
     const cancelled = new Promise(resolve => {
       abortListener = addAbortListener(boundedSignal, () => resolve(null))
     })
-    timer = setTimeout(() => controller.abort(), Math.max(1, Math.ceil(deadline - performance.now())))
+    timer = setTimeout(() => { expired = true; controller.abort() }, Math.max(1, Math.ceil(deadline - performance.now())))
     const response = await Promise.race([cancelled, decide.call(client, {
       input, questions, signal: boundedSignal, strictChoiceResponse: true,
       timeoutMs: Math.max(1, Math.ceil(deadline - performance.now())), // the client default (1.5 s) must not undercut the foreground deadline
@@ -150,10 +153,11 @@ export async function runChatChoice(request) {
         return authorized
       },
     })])
-    if (!authorized || !current()) return performance.now() >= deadline ? manualWith(sent ? 'timeout' : 'timeout_unsent') : MANUAL
+    if (!authorized || !current()) return expired || performance.now() >= deadline ? manualWith(sent ? 'timeout' : 'timeout_unsent') : MANUAL
     return readRecommendation(response?.answers, optionIds, measure)
   } catch (error) {
     // Only a DecisionError code is forwarded, never its message.
+    if (expired && (error?.name !== 'DecisionError' || error.code === 'aborted' || error.code === 'timeout')) return manualWith(sent ? 'timeout' : 'timeout_unsent')
     return error?.name === 'DecisionError' ? manualWith(error.code === 'timeout' && !sent ? 'timeout_unsent' : error.code) : MANUAL
   } finally {
     open = false
