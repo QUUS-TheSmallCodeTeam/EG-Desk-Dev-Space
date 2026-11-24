@@ -114,6 +114,7 @@ test('all features on, one session: memory, briefing, a browser task, a long com
   assert.equal(ui.busy(), false); assert.equal(ui.working(), null)
 
   // ---- c4. after the run: the result card needs the owner, who is looking elsewhere (a second member is on the desk) ----
+  // Work placement is 'on' here: only then does a decided "point" become a pointer fact (see the advisory test below).
   w.step('c4')
   w.presenceMirror.accept(people)
   const cards = [{ id: 'own-doc', rect: rect(100, 100, 500, 400), kind: 'file', creator: 'user' }, { id: 'agent-result', rect: rect(-2600, 100, 720, 520), kind: 'result', creator: 'agent', taskId: 'run-1' }]
@@ -237,4 +238,45 @@ test('all features on: an ordinary message in a conversation that began as a bro
   const finding = { executionPolicy: w.runs().at(-1).executionPolicy?.mode ?? null, decisionRequests: w.byFeature('ordinary'), contextKeys: Object.keys(w.turnStarts().at(-1).params.additionalContext ?? {}),
     partialTextOnScreen: half.filter(([, bubble]) => bubble?.[0] === 'assistant' && bubble[1] === 'streaming' && bubble[2]).map(([event, bubble]) => [event, bubble[2]]) }
   if (process.env.EGDESK_ALL_ON_LEDGER) writeFileSync(process.env.EGDESK_ALL_ON_LEDGER.replace(/\.json$/, '') + '-browser-room.json', JSON.stringify(finding, null, 1))
+})
+
+// ---- work placement 'advisory' records the judgment and posts nothing (the pointer of step c4 needs 'on') ----
+test('work placement advisory: the same pointer judgment is recorded, no pointer fact is raised and nothing is posted', async t => {
+  const w = allOnWorld(t, { env: { EGDESK_WORK_PLACEMENT: 'advisory' } })
+  w.step('turn')
+  await w.send(Q.tests); await w.idle(); await w.advance(2000); await w.answer(A.tests); await w.idle()
+  const before = w.history()
+  w.step('pointer')
+  const people = [{ member: 'self', self: true, active: true, viewport: rect(0, 0, 1200, 800), focusCard: null, lastInputAgeMs: 500 }]
+  w.presenceMirror.accept(people)
+  const cards = [{ id: 'agent-result', rect: rect(-2600, 100, 720, 520), kind: 'result', creator: 'agent', taskId: 'run-1' }]
+  const scene = WP.enumerateWorkScene({ presence: w.presenceMirror.snapshot(), cards, tasks: [{ id: 'run-1', state: 'waiting_owner', requester: 'self', waiting: ['self'], ownerMustAct: true, surfaces: [{ kind: 'result', cardId: 'agent-result' }] }] })
+  const attention = WP.attentionRequest(scene, { taskId: 'run-1', cardId: 'agent-result' })
+  assert.equal((await w.http('POST', '/decision/work-placement/request', { clientThreadId: DM, dto: attention.dto })).body.status, 'queued')
+  await w.advance(25000); w.presenceMirror.accept(people); await w.advance(40000); await w.idle()
+  assert.deepEqual(w.byFeature('pointer'), { work_placement: 1 }, 'the placement judgment only: no heartbeat question follows')
+  assert.deepEqual(w.subjectiveTurnsIn('pointer'), { main: 0, fork: 0, steer: 0 })
+  assert.deepEqual(w.eventsIn('pointer'), [])
+  assert.deepEqual(w.history(), before)
+  assert.equal(w.workPlacement.facts(DM).pointerPending, false)
+  assert.deepEqual(w.workPlacement.records().map(r => [r.kind, r.source, r.would.kind]), [['attention', 'decision', 'point']], 'what it would have done is on record')
+})
+
+// ---- one packet: with the turn-memory option on, a page the context selection already carries is not sent a second time ----
+test('one packet (turn-memory option, no bridge switch yet): selection and memory share one packet and each page body is sent once', async t => {
+  const first = async onePacket => {
+    const w = allOnWorld(t, { onePacket })
+    await w.settings.turnMemory.save('on')
+    w.step('a1'); await w.send(Q.quote); await w.idle()
+    const start = w.turnStarts().at(-1).params
+    return { keys: Object.keys(start.additionalContext), bodies: JSON.stringify(start).split(PAGE_BODY).length - 1, byFeature: w.byFeature('a1'), rows: w.activityRowsIn('a1') }
+  }
+  const one = await first(true), two = await first(false)
+  assert.deepEqual(one.keys, ['egdesk_context', 'egdesk_decision_context', 'egdesk_channel'])
+  assert.equal(one.bodies, 1)
+  assert.deepEqual(one.byFeature, two.byFeature, 'the same Decision requests either way')
+  assert.deepEqual(one.rows, two.rows, 'and the same activity rows')
+  // The bridge's present behaviour (it does not pass the option): two packets, the body twice. Finding A3 stays open until a switch exists.
+  assert.deepEqual(two.keys, ['egdesk_context', 'egdesk_decision_context', 'egdesk_channel', 'egdesk_turn_memory'])
+  if (process.env.EGDESK_ALL_ON_LEDGER) writeFileSync(process.env.EGDESK_ALL_ON_LEDGER.replace(/\.json$/, '') + '-one-packet.json', JSON.stringify({ onePacket: one, bridgeDefault: two }, null, 1))
 })
