@@ -220,7 +220,8 @@ export async function openTaskSourceRegistry({ directory = null, store = null, l
 }
 
 /** POST /task-sources {boardId, message, cwd?} -> 201 {sourceRef}. Loopback + Origin guarded, signed-in only. */
-export function createTaskSourceHttpHandler({ sources, ensureAuth, port = 39218 }) {
+// hintsOfBoard(boardId) (L1 c26): the room a plan's Board belongs to, so its account is the one checked; undefined = the default sign-in, as before.
+export function createTaskSourceHttpHandler({ sources, ensureAuth, port = 39218, hintsOfBoard = () => undefined }) {
   if (typeof ensureAuth !== 'function') throw new TypeError('ensureAuth is required')
   return async (req, res, parsedUrl = null) => {
     let url
@@ -235,7 +236,7 @@ export function createTaskSourceHttpHandler({ sources, ensureAuth, port = 39218 
       if (req.method !== 'POST') throw nativeTaskError('TASK_ROUTE_NOT_FOUND', 'Use POST', 405)
       const body = await readJsonBody(req, { maxBytes: 128 * 1024 })
       if (Object.keys(body).some(key => !['boardId', 'message', 'cwd'].includes(key))) throw nativeTaskError('TASK_SOURCE_INPUT', 'Invalid task source fields', 400)
-      await ensureAuth()
+      await ensureAuth(hintsOfBoard(body.boardId))
       sendJson(res, 201, await sources.register(body))
     } catch (error) {
       const status = Number.isInteger(error?.httpStatus) && error.httpStatus >= 400 && error.httpStatus <= 599 ? error.httpStatus : 500

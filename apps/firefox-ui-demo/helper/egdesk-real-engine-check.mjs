@@ -38,7 +38,8 @@ import { createDecisionActivity, createDecisionWarmup, warmupConfigFromEnv } fro
 import { parseCodexUserAgent } from './egdesk-codex-version-pin.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { APPROVER_TEXT, checkTurnExpectations, folderPathProblem, validateEngineScript } from './egdesk-real-engine-script.mjs'
-import { createMemoryHook, memoryNeedsDecisions } from './egdesk-real-engine-memory.mjs' // memory hook (L7 c26)
+import { memoryNeedsDecisions } from './egdesk-real-engine-memory.mjs' // memory hook (L7 c26)
+import { createTurnHooks } from './egdesk-real-engine-extensions.mjs' // the lanes' per-turn hooks (memory, journey, ...): registered in egdesk-real-engine-registrations.mjs
 import { CHECK_HOOKS, hookDecisionFlags, hookFlags } from './egdesk-real-engine-hooks.mjs'
 
 export const DECISION_KEY_ENV = 'EGDESK_REAL_CHECK_DECISION_KEY'
@@ -317,7 +318,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
   const t0 = performance.now()
   const runnerLog = []
   const runnerSpawn = deps.runnerSpawn ?? nodeSpawn
-  const loggedRunnerSpawn = (file, args, opts) => { runnerLog.push(String(args?.at?.(-1) ?? '')); return runnerSpawn(file, args, opts) }
+  const loggedRunnerSpawn = (file, args, opts) => { runnerLog.push(String(args?.at?.(-1) ?? '')); const child = runnerSpawn(file, args, opts); turnHooks.observeCommand(args?.at?.(-1), child); return child } // registered hooks: how the command process ends
 
   // ---- the app-server child ----
   const argv = appServerArgs(options, deps.buildLaunch ?? buildCodexAppServerLaunch)
@@ -328,7 +329,8 @@ export async function runConversation({ options, set, conversation, deps = {} })
   child.on('error', error => { rec.aborted ??= `spawn_failed:${error?.code ?? 'error'}` })
   child.stderr?.on('data', chunk => { stderrTail = (stderrTail + chunk).slice(-1500) })
   let chat = null, store = null, wiring = null, threadClient = null
-  const memoryHook = createMemoryHook(conversation.memory) // memory hook: seeded pages, what the product sent, the memory expectations
+  const turnHooks = createTurnHooks(conversation) // the registered per-turn hooks: memory (seeded pages, what the product sent), journey (turn/steer, turn/interrupt), ...
+  const memoryHook = turnHooks.get('memory').hook // memory hook: the ontology graph and the turn-memory setting
   const completions = [], tasks = []
   const turnNow = { notifications: [], toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [], draftRows: [], flowRows: [], internal: [], writers: [] }
   const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = []; turnNow.flowRows = []; turnNow.internal = []; turnNow.writers = [] }
@@ -388,7 +390,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const request = async (method, params) => {
       if (!persisted && (method === 'thread/start' || method === 'thread/fork') && params?.ephemeral !== true) throw Object.assign(new Error('every thread of this check must be ephemeral'), { code: 'ephemeral_required' })
       const start = performance.now()
-      memoryHook.observe(method, params) // memory hook
+      turnHooks.observe(method, params) // registered hooks
       try {
         const result = await rpc.request(method, params)
         rec.requests.push({ method, ms: ms(start) })
@@ -591,9 +593,10 @@ export async function runConversation({ options, set, conversation, deps = {} })
       const follow = next?.whileRunning !== undefined ? 'message' : (next?.action === 'interrupt' || next?.action === 'steer') ? next.action : null, withMessage = follow !== null
       const sub = [], ledger = wiring.ledger, requestsFrom = rec.requests.length
       let asked = 0, mark = null
-      memoryHook.beginTurn() // memory hook
+      const hookCtx = { state: () => ({ store, clientThreadId }) }
+      turnHooks.beginTurn(hookCtx) // registered hooks
       const ctx = await beginTurn(turn.say)
-      if (follow === 'message') mark = await sendInRun(ctx, next.say, next.whileRunning.afterMs)
+      if (follow === 'message') { mark = await sendInRun(ctx, next.say, next.whileRunning.afterMs); turnHooks.inRun({ ...hookCtx, text: next.say }) } // registered hooks
       else if (follow) mark = await engineAction(follow, ctx, next)
       sub.push(await finishTurn(ctx))
       for (const answer of turn.approve ?? []) {
@@ -618,18 +621,18 @@ export async function runConversation({ options, set, conversation, deps = {} })
         hooks: hookRecords, toolCalls: sub.flatMap(s => s.toolCalls), native: sumNative(sub), posted, asked, commandsRan: sub.flatMap(s => s.commandsRan), files: readFiles(turn), undoRecords: undoCount(),
         turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted), draftCheckRows: sub.reduce((n, s) => n + (s.draftRows?.length ?? 0), 0), draftCheckRejects: sub.reduce((n, s) => n + (s.draftRows ?? []).reduce((m, row) => m + (row.judgments ?? []).filter(j => j.would === 'reject').length, 0), 0),
       }
-      const memory = memoryHook.finishTurn(turn.expect?.memory) // memory hook
-      const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...memory.expectations]
+      const ext = turnHooks.finishTurn({ ...hookCtx, expect: turn.expect, nextExpect: withMessage ? next.expect : null, latencyMs: sub[0].latencyMs, steerContract: FLAG.EGDESK_INRUN_MESSAGES === 'on' ? typeof nativeContract?.boardPeerContract === 'string' : null }) // registered hooks: records, expectations
+      const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...ext.expectations]
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
       await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
-        ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(sub.some(s => s.flowRows?.length) ? { flowRows: sub.flatMap(s => s.flowRows) } : {}), ...(sub.some(s => s.internal?.length) ? { internalTurns: sub.flatMap(s => s.internal) } : {}), ...(sub.some(s => s.writers?.length) ? { writers: sub.flatMap(s => s.writers) } : {}), ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...(memory.record ? { memory: memory.record } : {}), expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
+        ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(sub.some(s => s.flowRows?.length) ? { flowRows: sub.flatMap(s => s.flowRows) } : {}), ...(sub.some(s => s.internal?.length) ? { internalTurns: sub.flatMap(s => s.internal) } : {}), ...(sub.some(s => s.writers?.length) ? { writers: sub.flatMap(s => s.writers) } : {}), ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...ext.records, expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {
         // the message typed into the run: what happened after it was sent
         const prev = sub[0], after = texts.slice(mark.posted)
         const flat2 = { toolCalls: prev.toolCalls.slice(mark.tools), native: prev.native, posted: after, asked, commandsRan: prev.commandsRan.slice(mark.ran), files: readFiles(next), undoRecords: undoCount(), turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted) }
         const implicit = follow === 'message' ? 'sent_while_running' : 'action_taken'
-        const expect2 = [{ check: implicit, ok: mark.accepted, detail: { afterMs: mark.afterMs, sentAtMs: mark.sentAtMs, error: mark.error } }, ...checkTurnExpectations(next.expect ?? {}, flat2)]
+        const expect2 = [{ check: implicit, ok: mark.accepted, detail: { afterMs: mark.afterMs, sentAtMs: mark.sentAtMs, error: mark.error } }, ...checkTurnExpectations(next.expect ?? {}, flat2), ...(follow === 'message' ? ext.nextExpectations : [])] // registered hooks
         await pushTurn({ index: index + 2, say: clip(next.say ?? '', 200), approve: [], ...(follow === 'message' ? { whileRunning: { afterMs: mark.afterMs } } : { action: follow, afterMs: mark.afterMs }), subTurns: [{ ...(follow === 'message' ? { whileRunning: true } : { action: follow }), accepted: mark.accepted, error: mark.error, sentAtMs: mark.sentAtMs }],
           posted: after, postedCount: after.length, ...(sub.some(s => s.flowRows?.length) ? { flowRows: sub.flatMap(s => s.flowRows) } : {}), asked, undoRecords: flat2.undoRecords, expectations: expect2, ok: expect2.every(e => e.ok) && !sub.some(failedRun) })
         index++

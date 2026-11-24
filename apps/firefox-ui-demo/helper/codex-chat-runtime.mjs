@@ -1102,7 +1102,7 @@ export class CodexChatRuntime {
     return this.requestEngineRoute(body, { ...options, legacyAgentEngine: true }).engineId
   }
 
-  requestEngineRoute(body = {}, { verifyAccount = true, useAgent = false, legacyAgentEngine = false, profileRun, requireClientPair = false } = {}) {
+  requestEngineRoute(body = {}, { verifyAccount = true, useAgent = false, legacyAgentEngine = false, profileRun, requireClientPair = false, newRoomProfile = null } = {}) {
     if (this.requireStore) this.assertStore()
     const requested = this.requestedEngine(body)
     const cid = idText(body.conversationId)
@@ -1134,8 +1134,11 @@ export class CodexChatRuntime {
     }
     // A pre-slot native checkpoint is still checked against the active/legacy
     // identity. Never retrofit it with the Agent's account, even when equal.
-    const engineProfileId = pinned || (!boundCid ? savedSlot : null) || null
-    if (engineProfileId) this.assertEngineProfile(engineId, engineProfileId, { explicit: Boolean(savedSlot) || (roomKeeps && !boundCid && Boolean(thread?.engineProfileId)) })
+    // L1 c26 (flag roomAccount on; the plan runner's trusted path only, never a body field): a NEW room opened by a step of a plan that a room on an Agent profile
+    // proposed starts on THAT room's account, not the Agent's saved one or the default. An existing room keeps the account it is pinned to.
+    const inherited = !boundCid && !thread?.engineProfileId && engineId === 'codex' && this.roomAccountOn() ? idText(newRoomProfile) || null : null
+    const engineProfileId = pinned || inherited || (!boundCid ? savedSlot : null) || null
+    if (engineProfileId) this.assertEngineProfile(engineId, engineProfileId, { explicit: Boolean(savedSlot) || Boolean(inherited) || (roomKeeps && !boundCid && Boolean(thread?.engineProfileId)) })
     if (binding && verifyAccount) this.assertNativeAccount(thread.clientThreadId, boundCid, engineId, binding)
     return { engineId, engineProfileId }
   }
@@ -1802,7 +1805,7 @@ export class CodexChatRuntime {
 
   // internal (never reachable from HTTP, which passes one argument):
   // { board: run.board attribution + block, blocks: { key: text } } — extra
-  // turn context from sendBoard / reassignSubAgent.
+  // turn context from sendBoard / reassignSubAgent. { newRoomProfile } (L1 c26): the account a NEW room starts on, from the plan runner (flag roomAccount).
   async send(body, internal = null) {
     // A reply to an early question the run asked while it keeps working goes into that same run (flag decisionContext.conversationFlow).
     const inRun = internal ? null : this.openEarlyQuestion(idText(body?.clientThreadId) || idText(body?.thread?.id), idText(body?.conversationId))
@@ -1836,7 +1839,7 @@ export class CodexChatRuntime {
     // After a helper restart the binding, not the default engine or Codex's
     // connection state, determines both routing and the account to verify.
     const profileRun = internal?.profileRun ?? this.resolveProfile(body)
-    const route = this.requestEngineRoute(body, { verifyAccount: false, useAgent: true, profileRun })
+    const route = this.requestEngineRoute(body, { verifyAccount: false, useAgent: true, profileRun, newRoomProfile: internal?.newRoomProfile })
     const { engineId, engineProfileId } = route
     const boundId = conversationId || storedThread?.conversationId
     const boardTurn = !!internal?.board || body.expectedBoardDelivery !== undefined || this.isSavedBoardTarget(clientThreadId)
@@ -5445,8 +5448,8 @@ export class CodexChatRuntime {
         const cards = (preRun.browserBinding?.cards || []).filter(card => card.permission === 'interact').map(card => ({ cardId: card.cardId, host: hostsByCard[card.cardId] || '', title: titlesByCard[card.cardId] || '' }))
         // c20: the entry is yes/no predicates (the request; one per card unless code named the card); the host appends all of them.
         // c22: built like the standalone entry, observing each card's first lines under the same page_text gate and fallback.
-        const { codeCard, questions } = await rideAlongEntry({ provider, run: preRun, message: body.message, cards, cardText: egress.allows('page_text') === true })
-        try { const answers = cards.length ? await cfg.entryAnswers({ body, context, questions, question: questions[0], client: guarded(['page_text']) }) : null
+        const { codeCard, questions, evidence } = await rideAlongEntry({ provider, run: preRun, message: body.message, cards, cardText: egress.allows('page_text') === true })
+        try { const answers = cards.length ? await cfg.entryAnswers({ body, context, questions, question: questions[0], evidence, client: guarded(['page_text']) }) : null
           if (answers && answers.browser_entry?.type === 'predicate') {
             const picked = Object.fromEntries(questions.map(q => [q.name, answers[q.name]]).filter(([, a]) => a))
             entryAnswers = { ...picked, codeCard, kind: readBrowserEntry(picked, cards, { codeCard }).kind }

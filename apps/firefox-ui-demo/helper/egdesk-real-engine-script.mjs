@@ -16,7 +16,10 @@
 //   approve. Its expectations cover what happened after it was sent (messages posted after it, tool calls and commands after it); the previous
 //   turn's own expectations cover the whole window of both. A message the run no longer takes (it ended before afterMs) fails the turn's
 //   implicit check "sent_while_running".
-import { MEMORY_EXPECT_SCHEMA, MEMORY_SCHEMA, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
+// expect.engine { steers?, interrupts?, steerCarries?, flowMessages?, maxLatencyMs? } (L2 c21, helper/egdesk-real-engine-journey.mjs): what reached the engine (turn/steer,
+//   turn/interrupt) and how many system messages were posted, in the turn's window; on a whileRunning turn, after its message was sent.
+import { checkRegisteredExpect, conversationFieldSchemas, expectKeySchemas, registeredConversationFields, registeredExpectKeys, validateRegisteredConversation, validateRegisteredExpect } from './egdesk-real-engine-extensions.mjs'
+import './egdesk-real-engine-registrations.mjs' // the lanes' registrations (memory, journey, briefing, ...): their script keys are NOT listed in this file
 // action turns (c23, agreed with lane L3): { action: "interrupt" | "steer" | "delete", afterMs?, say?, expect? } instead of a message.
 //   interrupt  the person presses stop on the PREVIOUS turn's run, afterMs after that turn started (chat.interrupt). Give the previous turn
 //              expect.turnStatus "interrupted" (and posted false: only completed agent messages are posted).
@@ -38,7 +41,7 @@ export const IN_RUN_FLAG = 'EGDESK_INRUN_MESSAGES'
 export const LIMITS = Object.freeze({ whileRunningMs: 120_000, conversations: 8, turns: 12, files: 32, pathChars: 200, contentBytes: 64 * 1024, sayChars: 4000, approvals: 4, strings: 16, stringChars: 400 })
 // the scripted person's answers (test input, never product copy)
 export const APPROVER_TEXT = Object.freeze({ yes: '응, 그 명령 실행해 줘', no: '아니, 그건 실행하지 마' })
-export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'conversationGone', 'memory', 'briefing', 'draftCheck', 'resumes', 'unsubscribes', 'postedMin', 'commandsRanIncludes', 'commandsRanExcludes'])
+export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'conversationGone', 'draftCheck', 'resumes', 'unsubscribes', 'postedMin', 'commandsRanIncludes', 'commandsRanExcludes', ...registeredExpectKeys()])
 export const ACTIONS = Object.freeze(['interrupt', 'steer', 'delete'])
 // c25: conversation.agentProfile makes the conversation an Agent-profile DIRECT room (the room the product's draft check judges and the Agent turn's detach + resume belongs to):
 // a synthetic Agent, created in the check's isolated profile store (no person data), every send names it with replyDestination "direct". A direct room is not one-time, so it
@@ -47,7 +50,6 @@ export const AGENT_TONES = Object.freeze(['plain', 'warm', 'concise', 'formal', 
 export const AGENT_LIMITS = Object.freeze({ name: 40, role: 80, instructions: 2000, expertise: 4, expertiseChars: 80 })
 
 // `expect.briefing` belongs to the briefing hook (helper/egdesk-real-engine-briefing-hook.mjs): its shape and its checks live there (registered in helper/egdesk-real-engine-hooks.mjs)
-import { BRIEFING_EXPECT_SCHEMA, checkBriefingExpect, validateBriefingExpect } from './egdesk-real-engine-briefing-hook.mjs'
 const str = (max, extra = {}) => ({ type: 'string', minLength: 1, maxLength: max, ...extra })
 const strings = { type: 'array', maxItems: LIMITS.strings, items: str(LIMITS.stringChars) }
 export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
@@ -67,7 +69,7 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
           expertise: { type: 'array', maxItems: AGENT_LIMITS.expertise, items: str(AGENT_LIMITS.expertiseChars) } } },
         folder: { type: 'object', maxProperties: LIMITS.files, propertyNames: { maxLength: LIMITS.pathChars }, additionalProperties: { type: 'string', maxLength: LIMITS.contentBytes } },
         flags: { type: 'object', propertyNames: { pattern: FLAG_NAME.source, not: { enum: [...RESERVED_FLAGS] } }, additionalProperties: { type: 'string', pattern: FLAG_VALUE.source } },
-        memory: MEMORY_SCHEMA,
+        ...conversationFieldSchemas(),
         turns: { type: 'array', minItems: 1, maxItems: LIMITS.turns, items: {
           type: 'object', additionalProperties: false, anyOf: [{ required: ['say'] }, { required: ['action'] }],
           properties: {
@@ -96,8 +98,7 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
               resumes: { type: 'integer', minimum: 0, maximum: 20 },
               postedMin: { type: 'integer', minimum: 1, maximum: 20 },
               unsubscribes: { type: 'integer', minimum: 0, maximum: 20 },
-              memory: MEMORY_EXPECT_SCHEMA,
-              briefing: BRIEFING_EXPECT_SCHEMA,
+              ...expectKeySchemas(),
             } },
           } } },
       } } },
@@ -136,7 +137,7 @@ export function validateEngineScript(value) {
   for (const [ci, conv] of (Array.isArray(convs) ? convs : []).entries()) {
     const at = `$.conversations[${ci}]`
     if (!isObject(conv)) { bad(at, 'an object'); continue }
-    only(conv, ['id', 'folder', 'flags', 'memory', 'draftCheck', 'agentProfile', 'turns'], at)
+    only(conv, ['id', 'folder', 'flags', ...registeredConversationFields(), 'draftCheck', 'agentProfile', 'turns'], at)
     if (conv.agentProfile !== undefined) {
       const a = conv.agentProfile, here = `${at}.agentProfile`
       if (!isObject(a)) bad(here, 'an object { name, instructions, role?, tone?, expertise? }')
@@ -160,7 +161,7 @@ export function validateEngineScript(value) {
         if (own !== undefined && own !== d.mode) bad(`${at}.flags.EGDESK_DRAFT_CHECK`, 'contradicts draftCheck.mode')
       }
     }
-    if (conv.memory !== undefined) for (const why of validateMemory(conv.memory, `${at}.memory`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
+    validateRegisteredConversation(conv, { at, bad })
     if (typeof conv.id !== 'string' || !CONVERSATION_ID.test(conv.id)) bad(`${at}.id`, `matches ${CONVERSATION_ID.source}`)
     else if (ids.has(conv.id)) bad(`${at}.id`, 'unique'); else ids.add(conv.id)
     if (conv.folder !== undefined) {
@@ -225,7 +226,7 @@ export function validateEngineScript(value) {
       const e = turn.expect
       if (e === undefined) continue
       if (!isObject(e)) { bad(`${tt}.expect`, 'an object'); continue }
-      only(e, EXPECT_KEYS, `${tt}.expect`)
+      only(e, [...EXPECT_KEYS, ...registeredExpectKeys()], `${tt}.expect`) // keys registered after this module loaded count too
       if (e.toolCalls !== undefined && (!Array.isArray(e.toolCalls) || e.toolCalls.length > LIMITS.strings || e.toolCalls.some(n => typeof n !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(n)))) bad(`${tt}.expect.toolCalls`, 'tool names')
       for (const k of ['noToolCalls', 'noNativeTools']) if (e[k] !== undefined && e[k] !== true) bad(`${tt}.expect.${k}`, 'true')
       for (const k of ['posted', 'compacted', 'conversationGone']) if (e[k] !== undefined && typeof e[k] !== 'boolean') bad(`${tt}.expect.${k}`, 'a boolean')
@@ -239,18 +240,11 @@ export function validateEngineScript(value) {
       if (e.undoRecords !== undefined && !(Number.isInteger(e.undoRecords) && e.undoRecords >= 0 && e.undoRecords <= 50)) bad(`${tt}.expect.undoRecords`, 'an integer 0-50')
       if (e.turnStatus !== undefined && !['completed', 'failed', 'interrupted'].includes(e.turnStatus)) bad(`${tt}.expect.turnStatus`, 'completed / failed / interrupted')
       if (e.noToolCalls && e.toolCalls?.length) bad(`${tt}.expect`, 'noToolCalls and toolCalls contradict')
-      if (e.memory !== undefined) {
-        for (const why of validateMemoryExpect(e.memory, conv.memory, `${tt}.expect.memory`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
-        if (turn.whileRunning !== undefined) bad(`${tt}.expect.memory`, 'not checked on a whileRunning turn (the memory window is the scripted turn)')
-      }
+      validateRegisteredExpect(e, { conv, turn, tt, bad }) // the registered keys (memory, engine, briefing, ...)
       if (e.draftCheck !== undefined) {
         if (!isObject(e.draftCheck) || Object.keys(e.draftCheck).some(k => !['ran', 'rejects'].includes(k)) || typeof e.draftCheck.ran !== 'boolean' || (e.draftCheck.rejects !== undefined && !(Number.isInteger(e.draftCheck.rejects) && e.draftCheck.rejects >= 0 && e.draftCheck.rejects <= 50))) bad(`${tt}.expect.draftCheck`, 'an object { ran: boolean, rejects?: integer }')
         else if (e.draftCheck.rejects !== undefined && e.draftCheck.ran !== true) bad(`${tt}.expect.draftCheck`, 'rejects counts the check\'s rejections: it needs ran: true')
         if (!conv.draftCheck && !['advisory', 'on'].includes(conv.flags?.EGDESK_DRAFT_CHECK)) bad(`${tt}.expect.draftCheck`, 'needs conversation.draftCheck (or flags.EGDESK_DRAFT_CHECK) in this conversation')
-      }
-      if (e.briefing !== undefined) {
-        for (const why of validateBriefingExpect(e.briefing)) bad(`${tt}.expect.briefing`, why)
-        if (conv.flags?.EGDESK_BRIEFING_FLOW !== 'on') bad(`${tt}.expect.briefing`, 'needs flags.EGDESK_BRIEFING_FLOW = "on" in this conversation')
       }
       if (e.files !== undefined) {
         if (!isObject(e.files) || Object.keys(e.files).length > LIMITS.files) bad(`${tt}.expect.files`, 'an object')
@@ -307,6 +301,6 @@ export function checkTurnExpectations(expect = {}, record = {}) {
   // engine requests the runtime made in this scripted turn (an Agent-profile turn detaches and resumes its thread; EGDESK_AGENT_RELOAD_REUSE skips that when nothing changed)
   if (expect.resumes !== undefined) put('resumes', record.resumes === expect.resumes, { resumes: record.resumes ?? null })
   if (expect.unsubscribes !== undefined) put('unsubscribes', record.unsubscribes === expect.unsubscribes, { unsubscribes: record.unsubscribes ?? null })
-  if (expect.briefing !== undefined) out.push(...checkBriefingExpect(expect.briefing, record.hooks?.briefing ?? null))
+  out.push(...checkRegisteredExpect(expect, record)) // the registered keys that check against the turn record (briefing, ...)
   return out
 }

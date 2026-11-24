@@ -46,6 +46,8 @@ export const HOLDOUT2_SETS = Object.freeze({
   'browser-live-holdout2-v1': ['hc-link', 'hc-covered', 'ms-info'],
   // c26: the c24 fee-and-verification page and the settings error page under the stuck-page rule (egdesk-browser-stuck-person-controls.test.mjs)
   'browser-live-stuck-v1': ['sk-form', 'sk-error'],
+  // c27: the ENTRY decision only (no step requests): the two holdout2 requests the request predicate read as answers, two general-knowledge controls, and three earlier entries
+  'browser-live-entry-v1': ['en-ms', 'en-hc', 'en-ctrl-a', 'en-ctrl-b', 'en-se', 'en-ig', 'en-st'],
 })
 const MSG_U = '이번 달 전기요금 고지서 내려받아줘', MSG_I = '주민등록등본 발급 신청해줘', MSG_H = '한결병원 다음 진료 예약 날짜 알려줘', MSG_M = '다음 결제일이 언제야?'
 const phase = (id, host, start, pages, message, title, maxSteps, extra = {}) => ({ id, host, start, pages, message, reply: null, fetchMemory: false, title, clock: 'month2', maxSteps, ...extra })
@@ -58,6 +60,14 @@ export const HOLDOUT2_PHASE_DEFS = Object.freeze([
   phase('hc-covered', HOLDOUT2_HOSTS.hospital, '/my/consent', 'hospital', MSG_H, '마이페이지 | 한결병원', 1),
   phase('ms-info', HOLDOUT2_HOSTS.membership, '/account/membership', 'membership', MSG_M, '멤버십 관리 | 스트리밍플러스', 1),
   phase('ms-nav', HOLDOUT2_HOSTS.membership, '/account', 'membership', MSG_M, '멤버십 관리 | 스트리밍플러스', 2),
+  // c27: entry-only phases
+  phase('en-ms', HOLDOUT2_HOSTS.membership, '/account/membership', 'membership', MSG_M, '멤버십 관리 | 스트리밍플러스', 1, { entryOnly: true }),
+  phase('en-hc', HOLDOUT2_HOSTS.hospital, '/my', 'hospital', MSG_H, '마이페이지 | 한결병원', 1, { entryOnly: true }),
+  phase('en-ctrl-a', HOLDOUT2_HOSTS.membership, '/account/membership', 'membership', '광합성이 뭐야?', '멤버십 관리 | 스트리밍플러스', 1, { entryOnly: true }),
+  phase('en-ctrl-b', HOLDOUT2_HOSTS.hospital, '/my', 'hospital', '파이썬에서 리스트를 정렬하는 방법 알려줘', '마이페이지 | 한결병원', 1, { entryOnly: true }),
+  phase('en-se', 'account.example.test', '/settings/notifications', 'settings', '마케팅 알림 꺼줘', '알림 설정 | 계정', 1, { entryOnly: true }),
+  phase('en-ig', HOLDOUT_HOSTS.issuance, '/issue', 'issuance', MSG_I, '증명서 발급 | 온민원', 1, { entryOnly: true, otherCard: NEWS_CARD }),
+  phase('en-st', 'bank.example.test', '/card', 'statement', '이번 달 카드 명세서 내려받아줘', '카드 명세서 | 은행', 1, { entryOnly: true }),
   // c26: the same pages, requests and titles as c24's ig-form and settings v5's se-error (their request bodies are byte-identical)
   phase('sk-form', HOLDOUT_HOSTS.issuance, '/issue/resident', 'issuance', MSG_I, '증명서 발급 | 온민원', 1),
   phase('sk-error', 'account.example.test', '/settings/notifications', 'settings-error', '마케팅 알림 꺼줘', '오류 | 계정', 2),
@@ -79,9 +89,21 @@ export function holdout2Checks({ phaseOf }) {
   const ran = (j, id) => Boolean(phaseOf(j, id)?.ran)
   const status = (j, id) => phaseOf(j, id)?.first?.status
   const entry = (j, id) => j.requests.find(r => r.phase === id && r.stage === 'entry')
+  const webP = (j, id) => entry(j, id)?.answers?.browser_entry?.probability
   const stoppedWith = (j, id, codes) => ran(j, id) && status(j, id) === 'paused' && codes.includes(phaseOf(j, id).firstNote?.code)
   return {
     // c26 (stuck-page rule)
+    // c27 (entry only)
+    'en-ms-entered': j => phaseOf(j, 'en-ms')?.first?.handled === true,
+    'en-ms-web-decided': j => webP(j, 'en-ms') >= 0.75,
+    'en-hc-entered': j => phaseOf(j, 'en-hc')?.first?.handled === true,
+    'en-hc-web-decided': j => webP(j, 'en-hc') >= 0.75,
+    'en-ctrl-a-answer': j => ran(j, 'en-ctrl-a') && phaseOf(j, 'en-ctrl-a').first?.handled === false && webP(j, 'en-ctrl-a') <= 0.25,
+    'en-ctrl-b-answer': j => ran(j, 'en-ctrl-b') && phaseOf(j, 'en-ctrl-b').first?.handled === false && webP(j, 'en-ctrl-b') <= 0.25,
+    'en-se-entered': j => phaseOf(j, 'en-se')?.first?.handled === true,
+    'en-ig-entered': j => phaseOf(j, 'en-ig')?.first?.handled === true,
+    'en-st-entered': j => phaseOf(j, 'en-st')?.first?.handled === true,
+    'en-no-act': j => j.phases.every(p => (p.acts || []).length === 0),
     'sk-form-entered': j => phaseOf(j, 'sk-form')?.first?.handled === true,
     'sk-form-human-step': j => stoppedWith(j, 'sk-form', ['human_step']),
     'sk-form-controls-named': j => JSON.stringify(phaseOf(j, 'sk-form')?.firstNote?.candidates) === JSON.stringify(['휴대폰 본인확인', '수수료 결제에 동의합니다', '신청하기']),
@@ -142,8 +164,8 @@ export function holdout2Answers(body) {
   const find = (values, word) => values.find(v => v.includes(word))
   return body.questions.map(q => {
     const values = (q.choices ?? []).map(c => c.value)
-    if (q.name === 'browser_entry') return yesNo(q, 0.95)
-    if (/^browser_entry_card_\d+$/.test(q.name)) return yesNo(q, /증명서 발급|멤버십 관리|마이페이지/.test(q.instructions ?? '') ? 0.95 : 0.03)
+    if (q.name === 'browser_entry') return yesNo(q, /광합성|파이썬/.test(ev) ? 0.02 : 0.95)
+    if (/^browser_entry_card_\d+$/.test(q.name)) return yesNo(q, /증명서 발급|멤버십 관리|마이페이지|알림 설정/.test(q.instructions ?? '') ? 0.95 : 0.03)
     if (/^browser_entry_wall_\d+$/.test(q.name)) return yesNo(q, 0.02)
     if (q.name === 'ps_covered') return yesNo(q, covered ? 0.95 : 0.02)
     if (/^ps_/.test(q.name)) return yesNo(q, 0.02)

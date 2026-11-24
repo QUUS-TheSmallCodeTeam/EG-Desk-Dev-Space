@@ -394,8 +394,10 @@ test('S1 the classifier vocabulary (logout, leave, allow, order, contract, pay-s
     // c15 code rule: nothing on the page can be chosen and person-only controls were withheld -> the step is the person's, whatever the model would pick.
     assert.equal(note.code, 'human_step', guess)
     assert.equal(w.counts().next_step ?? 0, 0, `${guess}: the step is not even asked`)
-    assert.equal(note.candidates, undefined)
-    assert.doesNotMatch(JSON.stringify(note), /로그아웃|탈퇴|허용|주문|해지|제출|logout|cancel/, 'the note names none of them')
+    // c27 (owner decision, c26; an intended behaviour change, not a weakening: the nothing-can-be-chosen note used to name none of the withheld controls): the person is
+    // told which controls are theirs: the withheld BUTTONS, by their labels, in page order. Withheld links are not controls to operate and stay unnamed.
+    assert.deepEqual(note.candidates, ['알림 허용', '주문하기', '결제 제출'], guess)
+    assert.doesNotMatch(JSON.stringify(note), /로그아웃|탈퇴|해지|logout|cancel/, 'the withheld links are not named')
   }
 })
 
