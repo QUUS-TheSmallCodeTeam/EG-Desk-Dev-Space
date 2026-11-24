@@ -772,6 +772,9 @@ export class CodexChatRuntime {
     this.decisionContext = decisionContext
     this.choiceRequests = new Map() // requestId → expiry and fingerprint, never text or result
     this.choiceClock = 0 // wall-clock high water; an expired ID cannot revive after a clock adjustment
+    // The one-time receipts above live in memory. A request ID minted before this process started may already have been
+    // paid by the previous process, so it is refused (the UI mints a fresh ID for every explicit confirm).
+    this.choiceEpoch = now()
     this.activeChoices = new Set()
     this.toolProviders = [...(contexts ? [contexts] : []), ...toolProviders]
     this.threadToolOwners = new Map()
@@ -4311,7 +4314,7 @@ export class CodexChatRuntime {
       this.choiceClock = Math.max(this.choiceClock, now)
       return now
     }
-    if (createdAt > currentTime() || expiresAt <= this.choiceClock || signal?.aborted) return manual
+    if (createdAt > currentTime() || createdAt < this.choiceEpoch || expiresAt <= this.choiceClock || signal?.aborted) return manual
     const choice = validateChatChoice(body)
     if (!choice || choice.question !== body.question || choice.options.length !== body.options.length ||
         choice.options.some((option, index) => option !== body.options[index]) ||
@@ -4374,7 +4377,9 @@ export class CodexChatRuntime {
       })
       const measured = {}
       const result = await Promise.race([runChatChoice({ ...choice, client, isCurrent, signal: choiceSignal, onMeasure: m => Object.assign(measured, m) }), expired])
-      this.recordChoiceCalibration(choice.options.length, measured, result)
+      let changed = false
+      try { changed = setup.settingsGeneration() !== generation } catch { changed = true }
+      this.recordChoiceCalibration(choice.options.length, measured, result, { posted, changed })
       return result?.status === 'recommended' && Number.isSafeInteger(result.index) &&
         result.index >= 0 && result.index < choice.options.length && isCurrent()
         ? { status: 'recommended', index: result.index }
@@ -4458,12 +4463,17 @@ export class CodexChatRuntime {
   // One content-free calibration entry per chooser request that reached the model or failed with a closed code (canon section 5.3).
   // Numbers and closed words only: option count, top two probabilities, confidence, the bar and what it would do, and the error code.
   // Process-local until written to the calibration file; never part of the HTTP reply. Any failure is ignored.
-  recordChoiceCalibration(options, measured, result) {
+  // The request always started in mode 'on' (the chooser refuses otherwise), so the entry says 'on' even if settings changed since.
+  // `posted`: the POST started. A request that never left (timeout_unsent) is not an outcome of the provider and is not recorded as a timeout.
+  recordChoiceCalibration(options, measured, result, { posted = false, changed = false } = {}) {
     try {
       const log = this.decisionContext?.calibrationLog
-      if (!log || this.decisionContext?.mode?.() !== 'on') return
-      const reason = result?.status === 'manual' && typeof result.reason === 'string' ? (result.reason === 'timeout_unsent' ? 'timeout' : result.reason) : null
+      if (!log) return
       const hasNumbers = Number.isFinite(measured?.top)
+      let reason = result?.status === 'manual' && typeof result.reason === 'string' ? result.reason : null
+      if (reason === 'timeout_unsent') reason = null
+      // Settings (mode, key) changed under a request that was already sent: the closed word the log has for that.
+      else if (!reason && !hasNumbers && posted && changed) reason = 'mode_changed'
       if (!hasNumbers && !reason) return
       log.record({ feature: 'dm_chooser', mode: 'on', candidates: options, ...(reason ? { fallback: reason } : {}),
         judgments: hasNumbers ? [{ q: 'choice', top: measured.top, second: measured.second, p: measured.p, threshold: CHAT_CHOICE_BAR.confidence,
