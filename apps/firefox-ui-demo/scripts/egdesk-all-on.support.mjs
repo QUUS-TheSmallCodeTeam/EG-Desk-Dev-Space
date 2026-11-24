@@ -75,6 +75,19 @@ export function fillFromGuide(prompt) {
 const wireChoice = (name, q, value, p = 0.95) => { const other = q.choices.map(c => c.value).find(v => v !== value); return { name, type: 'choice', choice: value, confidence: p, probabilities: [{ value, probability: p + 0.01 }, ...(other === undefined ? [] : [{ value: other, probability: 0.02 }])] } }
 const MEMORY_Q = /^(pg_|st_|op_|tn_|tw_|speech_)/
 
+/**
+ * callerOf(stack) -> { caller, origin }: who handed this body to the provider. caller is the first module below this file on the stack (the
+ * product's Decision client for every request the product builds); origin lists the product modules on the stack, nearest first.
+ * Used to label requests and, in the live measurement, to refuse any body that did not come from the product client.
+ */
+const deepStack = () => { const limit = Error.stackTraceLimit; Error.stackTraceLimit = 60; try { return new Error().stack } finally { Error.stackTraceLimit = limit } }
+export function callerOf(stack) {
+  const mods = [...String(stack).matchAll(/\/(helper|overlay\/resources|overlay\/JS|scripts)\/([A-Za-z0-9._-]+\.m?js)/g)].map(m => `${m[1]}/${m[2]}`)
+  const self = mods.findIndex(m => m === 'scripts/egdesk-all-on.support.mjs')
+  const below = (self >= 0 ? mods.slice(self) : mods).filter(m => m !== 'scripts/egdesk-all-on.support.mjs')
+  return { caller: below[0] ?? null, origin: below.filter((m, i, list) => list.indexOf(m) === i && !m.startsWith('scripts/')).slice(0, 6) }
+}
+
 /** Which feature a Decisions request belongs to, from its question names and cache key only. */
 export function featureOf(names, cacheKey = '') {
   if (names.some(n => n.includes('__'))) return 'heartbeat'
@@ -94,33 +107,12 @@ export function featureOf(names, cacheKey = '') {
 }
 
 /**
- * allOnWorld(t, { on, env, onePacket }) → the world. on:true = every feature on; on:false = the bridge's default (every flag unset,
- * Decisions mode off); on:null = a runtime with no decisionContext at all (a bridge before any of these features).
- * env: flag values that differ from "every feature on" (for example { EGDESK_WORK_PLACEMENT: 'advisory' }).
- * onePacket: the turn-memory option that puts its pages under the context selection's packet. The bridge has no switch for it yet
- *   (createTurnMemoryConfig accepts it; codex-bridge-server.mjs does not pass it), so here it is a harness option, default off like the bridge.
+ * scriptedDecisions({ policy }) -> { answer(wire) -> answers[] }: the scripted Decision model of these journeys (keyed by question names; the
+ * memory questions go to the wiki fixture's lexical judge). It is used when no transport is given, and by tests as a mock provider behind the
+ * network layer. policy: per-question overrides, policy.message(kinds, text) for the heartbeat's message judgment.
  */
-export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = false } = {}) {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-all-on-')); chmodSync(dir, 0o700)
-  const cwd = path.join(dir, 'workspace'); mkdirSync(cwd)
-  const store = openChatStore({ dataDir: path.join(dir, 'chat'), ownerScope: 'synthetic-all-on' })
-  t.after(() => { try { store.close() } catch {} rmSync(dir, { recursive: true, force: true }) })
-  const settingsDir = path.join(dir, 'settings')
-  const settings = openBridgeSettings({ dataDir: settingsDir, log() {} })
-  const calibrationLog = openCalibrationLog({ dataDir: settingsDir, log() {} })
-  const ENV = on === true
-    ? { EGDESK_DRAFT_CHECK: 'on', EGDESK_CONVERSATION_FLOW: 'on', EGDESK_PRESENCE: 'on', EGDESK_BROWSER_ENTRY: 'on', EGDESK_COMMAND_JUDGE: 'advisory', EGDESK_TERMINAL_GATE: 'advisory',
-      EGDESK_WORKING_MEMORY: 'on', EGDESK_WORK_PLACEMENT: 'on', EGDESK_BRIEFING_FLOW: 'on', ...env }
-    : {}
-  let clock = Date.parse("2026-11-25T01:00:00Z"), step = 'setup'
-  const timers = [], events = [], native = [], decisions = [], forkPrompts = [], acts = [], steers = [], replies = [], anomalies = []
+export function scriptedDecisions({ policy = {} } = {}) {
   const judge = mockJudge()
-  const state = { cur: { url: `${PORTAL}/invoices`, documentId: 'doc1', revision: 1 }, docSeq: 1, threads: 0, forks: 0, turns: 0, turnsOf: new Map(), thread: DM, lastOf: new Map(), sends: 0, mode: on === true ? 'on' : 'off', fill: fillFromGuide, wording: {} }
-  Object.defineProperty(state, 'last', { get: () => state.lastOf.get(state.thread) ?? null })
-  const snap = () => ({ cardId: 'card', documentId: state.cur.documentId, revision: state.cur.revision, url: state.cur.url, readyState: 'complete', text: ['합성 포털'],
-    viewport: { width: 300, height: 200, devicePixelRatio: 1 }, interactiveElements: PAGES[state.cur.url] })
-
-  // ---- ONE Decisions provider for every feature: it records each request under its feature and the journey step ----
   const answer = wire => {
     const flat = content => (typeof content === 'string' ? content : Array.isArray(content) ? content.map(part => (typeof part?.text === 'string' ? part.text : JSON.stringify(part))).join('\n') : JSON.stringify(content))
     const names = wire.questions.map(q => q.name), text = (Array.isArray(wire.input) ? wire.input.map(m => flat(m.content)) : [String(wire.input)]).join('\n\n')
@@ -176,12 +168,59 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
       return wireChoice(q.name, q, /^claim_/.test(q.name) && values.includes('supported') ? 'supported' : values[0])
     })
   }
+  return { answer }
+}
+
+/**
+ * allOnWorld(t, { on, env, onePacket }) → the world. on:true = every feature on; on:false = the bridge's default (every flag unset,
+ * Decisions mode off); on:null = a runtime with no decisionContext at all (a bridge before any of these features).
+ * env: flag values that differ from "every feature on" (for example { EGDESK_WORK_PLACEMENT: 'advisory' }).
+ * transport: async ({ body, wire, row }) -> { status, json } | throws. Where each Decisions request body goes (default: the scripted answers).
+ *   body is the exact string the product's Decision client built. settleLimitMs: how long settle() waits for requests still on their way.
+ * onePacket: the turn-memory option that puts its pages under the context selection's packet. The bridge has no switch for it yet
+ *   (createTurnMemoryConfig accepts it; codex-bridge-server.mjs does not pass it), so here it is a harness option, default off like the bridge.
+ */
+export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = false, transport: decisionTransport = null, settleLimitMs = 60_000 } = {}) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-all-on-')); chmodSync(dir, 0o700)
+  const cwd = path.join(dir, 'workspace'); mkdirSync(cwd)
+  const store = openChatStore({ dataDir: path.join(dir, 'chat'), ownerScope: 'synthetic-all-on' })
+  t.after(() => { try { store.close() } catch {} rmSync(dir, { recursive: true, force: true }) })
+  const settingsDir = path.join(dir, 'settings')
+  const settings = openBridgeSettings({ dataDir: settingsDir, log() {} })
+  const calibrationLog = openCalibrationLog({ dataDir: settingsDir, log() {} })
+  const ENV = on === true
+    ? { EGDESK_DRAFT_CHECK: 'on', EGDESK_CONVERSATION_FLOW: 'on', EGDESK_PRESENCE: 'on', EGDESK_BROWSER_ENTRY: 'on', EGDESK_COMMAND_JUDGE: 'advisory', EGDESK_TERMINAL_GATE: 'advisory',
+      EGDESK_WORKING_MEMORY: 'on', EGDESK_WORK_PLACEMENT: 'on', EGDESK_BRIEFING_FLOW: 'on', ...env }
+    : {}
+  let clock = Date.parse("2026-11-25T01:00:00Z"), step = 'setup'
+  const timers = [], events = [], native = [], decisions = [], forkPrompts = [], acts = [], steers = [], replies = [], anomalies = []
+  const scripted = scriptedDecisions({ policy })
+  const state = { cur: { url: `${PORTAL}/invoices`, documentId: 'doc1', revision: 1 }, docSeq: 1, threads: 0, forks: 0, turns: 0, turnsOf: new Map(), thread: DM, lastOf: new Map(), sends: 0, mode: on === true ? 'on' : 'off', fill: fillFromGuide, wording: {} }
+  Object.defineProperty(state, 'last', { get: () => state.lastOf.get(state.thread) ?? null })
+  const snap = () => ({ cardId: 'card', documentId: state.cur.documentId, revision: state.cur.revision, url: state.cur.url, readyState: 'complete', text: ['합성 포털'],
+    viewport: { width: 300, height: 200, devicePixelRatio: 1 }, interactiveElements: PAGES[state.cur.url] })
+
+  // ---- ONE Decisions provider for every feature: it records each request under its feature and the journey step ----
+  // The body is the exact string the product's Decision client built; it goes to the transport unchanged (scripted answers unless one is given).
+  // A request whose caller (the product client) gave up on it (its signal aborted) is answered with an AbortError at once; the transport's work
+  // still runs to its end and is recorded (abandoned: true), and settle() waits for it.
+  let inflight = 0
+  const scriptedTransport = async ({ wire }) => ({ status: 200, json: { answers: await scripted.answer(wire), usage: { input_tokens: 10 } } })
   const provider = async (_endpoint, init, tag = null) => {
-    const wire = JSON.parse(init.body), names = wire.questions.map(q => q.name)
-    const row = { step, feature: tag ?? featureOf(names, wire.prompt_cache_key), names, bytes: Buffer.byteLength(init.body), at: clock, raw: init.body }
+    const body = String(init.body), wire = JSON.parse(body), names = wire.questions.map(q => q.name)
+    const row = { step, feature: tag ?? featureOf(names, wire.prompt_cache_key), names, bytes: Buffer.byteLength(body), at: clock, raw: body, ...callerOf(deepStack()) }
     decisions.push(row)
-    const answers = await answer(wire)
-    return { ok: true, status: 200, text: async () => JSON.stringify({ answers, usage: { input_tokens: 10 } }) }
+    inflight++
+    const started = performance.now()
+    const net = (async () => { try { return await (decisionTransport ?? scriptedTransport)({ body, wire, row }) } catch (error) { return { error: error?.code ?? error?.name ?? 'transport_failed' } } })()
+      .then(out => { Object.assign(row, { elapsedMs: Math.round(performance.now() - started), ...(out.error ? { error: out.error } : { status: out.status, answers: out.json?.answers ?? null, usage: out.json?.usage ?? null }) }); return out })
+      .finally(() => { inflight-- })
+    const signal = init.signal, ABANDONED = Symbol('abandoned')
+    const gaveUp = signal ? new Promise(resolve => (signal.aborted ? resolve(ABANDONED) : signal.addEventListener('abort', () => resolve(ABANDONED), { once: true }))) : new Promise(() => {})
+    const first = await Promise.race([net, gaveUp])
+    if (first === ABANDONED) { row.abandoned = true; throw Object.assign(new Error('aborted'), { name: 'AbortError' }) }
+    if (first.error) throw Object.assign(new Error('the Decisions transport failed'), { name: 'TypeError' })
+    return { ok: first.status === 200, status: first.status, headers: { get: () => null }, text: async () => JSON.stringify(first.json ?? {}) }
   }
   const budget = createDecisionBudget({ monthlyInputTokenCap: 5_000_000 })
   const client = createDecisionClient({ recipientForKey: (value, endpoint, model) => decisionTopicRecipient(value, 1, endpoint, model), getApiKey: async () => KEY, fetchImpl: provider, budget })
@@ -276,7 +315,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
   const placementHttp = createWorkPlacementHttpHandler({ placement: workPlacement, heartbeatFor: key => chat.heartbeatFor(key) })
   // The Board/Decisions handler with the briefing flow, as the bridge mounts it (same key, same budget, same calibration log, same provider).
   const board = createBoardPresentationHttpHandler({ credentials: { status: 'configured', writable: true, getApiKey: () => KEY, savedAt: () => 17, hint: () => null }, getMode: () => state.mode, budget, calibrationLog,
-    fetchImpl: async (endpoint, init) => { const out = await provider(endpoint, init, 'briefing'); return Response.json(JSON.parse(await out.text())) },
+    fetchImpl: async (endpoint, init) => { const out = await provider(endpoint, init, 'briefing'); return new Response(await out.text(), { status: out.status, headers: { 'content-type': 'application/json' } }) },
     briefing: briefingDeps({ chat, contexts, enabled: ENV.EGDESK_BRIEFING_FLOW === 'on', order: 'skeleton' }) })
   const http = async (method, p, body) => {
     const req = Object.assign(Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]), { url: p, method, socket: { remoteAddress: '127.0.0.1' }, headers: { host: '127.0.0.1:39218', origin: 'chrome://browser', 'content-type': 'application/json' } })
@@ -287,10 +326,13 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
   }
 
   // Settle without waiting on work that waits for virtual time.
+  // A Decision request still on its way counts as activity (a real provider answers in seconds), bounded by settleLimitMs of wall time.
   const settle = async () => {
     let quiet = 0, last = -1
+    const until = performance.now() + settleLimitMs
     for (let i = 0; i < 120 && quiet < 6; i++) {
       await new Promise(r => setTimeout(r, 2))
+      if (inflight > 0 && performance.now() < until) { quiet = 0; i--; continue }
       const mark = native.length + events.length + decisions.length + acts.length
       quiet = mark === last ? quiet + 1 : 0; last = mark
     }
@@ -298,7 +340,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
   const source = n => ({ id: 'selected-source', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
     sourceRef: { viewId: 'card', profileId: 'fixture', accountId: '', uri: `${PORTAL}/invoices` },
     browserToolIdentity: { cardEpoch: 'epoch', userContextId: 0, engineAccountKey: OWNER, authorityEpoch: 1 }, browserToolSelection: { token: `token-${n}`, threadId: state.thread } })
-  const w = { clock: () => clock, dir, cwd, chat, store, contexts, client, budget, calibrationLog, settings, turnMemoryConfig, presenceMirror, workPlacement, http, settle, notify,
+  const w = { inflight: () => inflight, clock: () => clock, dir, cwd, chat, store, contexts, client, budget, calibrationLog, settings, turnMemoryConfig, presenceMirror, workPlacement, http, settle, notify,
     events, native, decisions, forkPrompts, acts, steers, replies, anomalies, state, ENV,
     step(name) { step = name }, at: () => clock,
     async advance(ms) {
