@@ -6386,7 +6386,7 @@ export class CodexChatRuntime {
     const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position: turn.position, threadKey, scope,
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
       deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock, previous: turn.previous,
-      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(tm.speechDesign === 'split-isolated' || tm.speechDesign === 'hybrid-isolated' ? { speechDesign: tm.speechDesign } : {}),
+      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
         ...(this.decisionContext?.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
     // The first turn's recording triage answers on its own time; once it has, the rule knows whether a write judgment can still follow.
     if (result.triageLater) void result.triageLater.then(late => { turn.lateTriage = late ?? { record: { state: 'unknown' } } }, () => { turn.lateTriage = { record: { state: 'unknown' } } })
@@ -6764,7 +6764,7 @@ export class CodexChatRuntime {
       const threadKey = run.conversationId
       const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position, threadKey,
         scope: typeof tm.scope === 'function' ? await (async () => { const base = await tm.scope({ body, context }); return base ? egress.memoryScope(base) : base })() : null, live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null,
-        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal , writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(tm.speechDesign === 'split-isolated' || tm.speechDesign === 'hybrid-isolated' ? { speechDesign: tm.speechDesign } : {}),
+        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal , writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
         ...(this.decisionContext?.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
       const judged = result.judgeWrite ? await result.judgeWrite() : null
       if (typeof threadKey === 'string' && threadKey) {

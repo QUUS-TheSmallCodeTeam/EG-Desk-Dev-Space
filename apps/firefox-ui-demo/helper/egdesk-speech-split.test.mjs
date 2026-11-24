@@ -14,7 +14,7 @@ const srcN = { other: 'n', own: 'n', record: 'n', guess: 'n' }, timeN = { before
 test('the bar is the speech bar, not lowered: yes at >= .85, no at <= .15', () => {
   assert.equal(SPEECH_SPLIT_BARS.yes, SPEECH_THRESHOLDS.confidence)
   assert.deepEqual(SPEECH_SPLIT_BARS, { yes: 0.85, no: 0.15 })
-  assert.deepEqual(WRITE_SPEECH_DESIGNS, ['axes-isolated', 'split-isolated', 'hybrid-isolated'])
+  assert.deepEqual(WRITE_SPEECH_DESIGNS, ['axes-isolated', 'split-isolated', 'hybrid-isolated', 'hybrid-two-step'])
   assert.ok(!SPEECH_DESIGNS.includes(SPEECH_SPLIT), 'not a turn-level design')
 })
 

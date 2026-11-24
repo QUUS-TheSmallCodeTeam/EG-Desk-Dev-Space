@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { choiceQuestion, compactText, predicateQuestion, readChoice, sha256Hex } from './egdesk-decision-questions.mjs'
-import { WRITE_SPEECH_DESIGNS, speechDesignInterpretations, speechDesignQuestions, speechSegments } from './egdesk-speech-grounding.mjs'
+import { SPEECH_HYBRID_TWO_STEP, SPLIT_WORDINGS, WRITE_SPEECH_DESIGNS, speechDesignInterpretations, speechDesignQuestions, speechHybridSecondQuestions, speechSegments } from './egdesk-speech-grounding.mjs'
 import { ACTION_MEMORY_RULE, MIN_CALL_MS, PROVENANCE_BASES, REAL_CLOCK, YES, NO, allowsPage, clockLine, pageBlock, reconstructMemory, record, settleBefore, stableAlias, ternary } from './egdesk-wiki-reconstruction.mjs'
 
 // PROTOTYPE (not wired into the turn path): what the system does with a turn's memory, by turn position.
@@ -79,6 +79,14 @@ const TRIAGE_RULES = ['You are a system judge deciding what stored memory a turn
  * The fetch is skipped on a decided courtesy "yes", or on a decided need "no" only when the held content AND the complete list of the other stored
  * pages were shown and recall is a decided "no". Undecided or failed answers, a truncated list or a recall request always fetch.
  */
+// The real c24 answer (memory-action-v1): with the action rule the triage still said need .99 for "전체 테스트 돌리고 결과 알려줘", and that is
+// honest: the run needs facts that no held page covers (the repository, the test output), just not stored pages. So the triage is not where
+// an action request is stopped. What changes is what the fetch may return (R3, a code rule over one decided yes/no): for a decided "yes" to
+// tn_action no stored page is fetched by turn memory; the context selection, which judges every record against the action itself under the
+// same rule set (c23: all twelve 0 for the test run, the design record 1.0 for the design question), is the only path that may attach a
+// record to such a turn. Undecided or "no": as before.
+export const TN_ACTION = 'Does the message ask the assistant to carry out an operation outside the conversation, such as running a command or tests, building, deploying, opening a page or sending something, rather than to answer, explain, summarize or recall something?'
+
 export async function triageTurn({ message, heldTitles = [], heldDigest = null, stored = null, live = null, client, askedAt = null, signal, timeoutMs = 2000, extraQuestions = [], ruleSet = 'default' } = {}) {
   // extraQuestions: self-contained questions of another turn-start judgment (the browser entry) that ride on this one request. They are
   // appended AFTER the triage questions, never named tn_*, and their answers are returned untouched in `extra`; the triage reading ignores them.
@@ -90,6 +98,8 @@ export async function triageTurn({ message, heldTitles = [], heldDigest = null, 
       : 'Does the message ask for, or report, something that the held pages and the conversation do not already cover, so that stored notes or documents beyond the held ones would improve the answer?'),
     ...(Array.isArray(stored) ? [predicateQuestion('tn_recall', 'Does the message point back to something discussed or worked on earlier (for example by saying "earlier", "last time" or "again") and ask for it to be recalled, summarized or re-organized, rather than ask for one new fact or one narrow detail?')] : []),
     predicateQuestion('tn_record', 'Does this message state something worth keeping as a record: a new fact, a decision, a plan, or a change in the status of something already recorded? Greetings, thanks, small talk and pure questions are not.'),
+    // 'action' rule set only (L7 c22): is this a request to carry out an operation? Code then fetches no stored page for it (prepareTurnMemory).
+    ...(ruleSet === 'action' ? [predicateQuestion('tn_action', TN_ACTION)] : []),
     ...riders,
   ]
   const input = [{ role: 'developer', content: ruleSet === 'action' ? `${TRIAGE_RULES}\n${ACTION_MEMORY_RULE}` : TRIAGE_RULES },
@@ -100,6 +110,7 @@ export async function triageTurn({ message, heldTitles = [], heldDigest = null, 
   try {
     const result = await client.decide({ input, questions, timeoutMs, signal })
     return { status: 'ready', courtesy: ternary(result.answers?.tn_courtesy), need: ternary(result.answers?.tn_need), recall: ternary(result.answers?.tn_recall), record: ternary(result.answers?.tn_record),
+      ...(ruleSet === 'action' ? { action: ternary(result.answers?.tn_action) } : {}),
       catalog: Array.isArray(stored) ? { listed: Math.min(stored.length, CATALOG_LIMIT), complete: stored.length <= CATALOG_LIMIT } : null, usage: result.usage ?? null,
       held: Array.isArray(heldTitles) ? heldTitles.length : 0, // how many held pages the triage was shown (the skip rule needs at least one)
       ...(riders.length ? { extra: Object.fromEntries(riders.map(q => [q.name, result.answers?.[q.name] ?? { type: 'missing' }])) } : {}) }
@@ -190,6 +201,24 @@ export function deriveWriteTarget(abouts) {
   return yes.length === 1 ? { target: yes[0], reason: 'one_record' } : { target: 'new', reason: 'no_record_fits' }
 }
 
+// 'hybrid-two-step': after the first request, a second small one asks the split predicates of only the source / time axes the axes answers left
+// uninstalled (speechHybridSecondQuestions), with the same input. Its answers are merged under their own names; if it fails, those axes stay
+// unknown (never guessed). Any other design: the first answers as they are, no second request.
+export const SECOND_LABEL_RULES = 'You are a system judge reading one message. Every question is about ONE sentence of it: answer each on its own, whatever the others are.'
+async function secondLabelStep({ design, wording, answers, spans, message, input, client, signal, timeoutMs }) {
+  if (design !== SPEECH_HYBRID_TWO_STEP) return { answers }
+  const questions = speechHybridSecondQuestions(answers, spans, message, { wording })
+  if (!questions.length) return { answers, second: { questions: 0 } }
+  // The sentence questions need only the message (with its clock): the stored records of the first request are not sent again (up to 8
+  // records of 500 characters would otherwise ride along a second time).
+  const secondInput = [{ role: 'developer', content: SECOND_LABEL_RULES }, input.at(-1)]
+  try {
+    const second = await client.decide({ input: secondInput, questions, timeoutMs, signal })
+    const names = new Set(questions.map(q => q.name))
+    return { answers: { ...answers, ...Object.fromEntries(Object.entries(second.answers ?? {}).filter(([name]) => names.has(name))) }, second: { questions: questions.length, usage: second.usage ?? null } }
+  } catch (error) { return { answers, second: { questions: questions.length, failed: error?.code ?? 'unreachable' } } }
+}
+
 /**
  * The pages the write judgment may name, as at most `max` pages (judgeTurnWrite reads the first 8). Up to the cap the order is the old one:
  * this turn's picks, then the held pages in delivery order (the request is unchanged). Over the cap, code decides which pages stay, in this order:
@@ -215,13 +244,14 @@ export function writeCandidateOrder({ message = '', picks = [], held = [], previ
  * the new page relates to, and the isolated speech axes for each sentence. The proposal carries no text and is not applied.
  */
 // speechDesign: how the sentence labels are asked ('axes-isolated', the default, or 'split-isolated': egdesk-speech-grounding.mjs); anything else is the default.
-export async function judgeTurnWrite({ message, candidates = [], client, askedAt = null, signal, timeoutMs = 3000, maxCandidates = 8, targetDesign = 'choice', speechDesign = 'axes-isolated' } = {}) {
+export async function judgeTurnWrite({ message, candidates = [], client, askedAt = null, signal, timeoutMs = 3000, maxCandidates = 8, targetDesign = 'choice', speechDesign = 'axes-isolated', splitWording = 'v1' } = {}) {
   const design = WRITE_SPEECH_DESIGNS.includes(speechDesign) ? speechDesign : 'axes-isolated'
+  const wording = SPLIT_WORDINGS.includes(splitWording) ? splitWording : 'v1'
   const pages = candidates.slice(0, maxCandidates)
   const spans = speechSegments(message)
   const none = (reason, extra = {}) => ({ proposal: { op: 'none', reason }, receipt: { reason, ...extra } })
   if (!client || typeof message !== 'string' || !message.trim()) return none('not_configured')
-  if (targetDesign === 'about') return judgeWriteAbout({ message, pages, spans, client, askedAt, signal, timeoutMs, none, design })
+  if (targetDesign === 'about') return judgeWriteAbout({ message, pages, spans, client, askedAt, signal, timeoutMs, none, design, wording })
   const options = [...pages.map((p, i) => ({ value: stableAlias(i), description: `Record this as a status change of page ${stableAlias(i)}.` })),
     { value: 'new', description: 'Add a new page for this message.' }, { value: 'none', description: 'Do not add anything.' },
     { value: 'unsure', description: 'The options do not fit, or it cannot be told.' }]
@@ -236,9 +266,10 @@ export async function judgeTurnWrite({ message, candidates = [], client, askedAt
     { role: 'user', content: `${clockLine(askedAt)}\nMessage:\n${message}` }]
   let result
   try { result = await client.decide({ input, questions, timeoutMs, signal }) } catch (error) { return none('judge_failed', { code: error?.code ?? 'unreachable' }) }
+  const speechAnswers = await secondLabelStep({ design, wording, answers: result.answers, spans, message, input, client, signal, timeoutMs })
   const target = readChoice(result.answers, 'tw_target', { minConfidence: 0.75, minMargin: 0.2 })
   // One entry per sentence that got at least one label above its bar: offsets and label words only, never text, scores or runner-ups.
-  const installed = speechDesignInterpretations(design, result.answers, spans)
+  const installed = speechDesignInterpretations(design, speechAnswers.answers, spans)
   const labels = mergedLabels(installed)
   const rec = recordFromLabels(labels)
   const said = readChoice(result.answers, 'tw_status', { minConfidence: 0.75, minMargin: 0.2 })
@@ -264,7 +295,7 @@ export async function judgeTurnWrite({ message, candidates = [], client, askedAt
 // The 'about' design of judgeTurnWrite: same inputs, same proposal shapes. Differences: the target is derived (deriveWriteTarget); a
 // correction of a record is a pending reading "superseded" on that record, plus (followUp) a page for the correcting utterance that
 // supersedes it, which the host stores only where it may store an utterance page at all.
-async function judgeWriteAbout({ message, pages, spans, client, askedAt, signal, timeoutMs, none, design = 'axes-isolated' }) {
+async function judgeWriteAbout({ message, pages, spans, client, askedAt, signal, timeoutMs, none, design = 'axes-isolated', wording = 'v1' }) {
   const questions = [
     choiceQuestion('tw_status', 'What does the message say about the state of a plan, task or recorded detail?', [
       { value: 'done', description: 'It was carried out, finished or settled.' }, { value: 'plan', description: 'It is intended or scheduled, not done.' },
@@ -291,7 +322,8 @@ async function judgeWriteAbout({ message, pages, spans, client, askedAt, signal,
   try { result = await client.decide({ input, questions, timeoutMs, signal }) } catch (error) { return none('judge_failed', { code: error?.code ?? 'unreachable' }) }
   const abouts = pages.map((_, i) => ternary(result.answers?.[`tw_about_${i}`]))
   const derived = deriveWriteTarget(abouts)
-  const installed = speechDesignInterpretations(design, result.answers, spans)
+  const speechAnswers = await secondLabelStep({ design, wording, answers: result.answers, spans, message, input, client, signal, timeoutMs })
+  const installed = speechDesignInterpretations(design, speechAnswers.answers, spans)
   const labels = mergedLabels(installed)
   const rec = recordFromLabels(labels)
   const said = readChoice(result.answers, 'tw_status', { minConfidence: 0.75, minMargin: 0.2 })
@@ -299,7 +331,7 @@ async function judgeWriteAbout({ message, pages, spans, client, askedAt, signal,
   if (state === 'done' || state === 'plan') rec.status = state
   // Numbers only: each record's probability of being the one, never a title or an option label.
   const receipt = { design: 'about', target: { value: derived.target === 'new' ? 'new' : derived.target === null ? null : stableAlias(derived.target), reason: derived.reason, about: abouts.map(a => a.p), options: pages.length },
-    labels, spans: installed, sentences: spans.length, status: state, usage: result.usage ?? null, questions: questions.length }
+    labels, spans: installed, sentences: spans.length, status: state, usage: result.usage ?? null, questions: questions.length, ...(speechAnswers.second ? { speechSecond: speechAnswers.second } : {}) }
   if (derived.target === null) return { proposal: { op: 'none', reason: derived.reason }, receipt }
   if (!rec.recordable) return { proposal: { op: 'none', reason: 'question' }, receipt }
   const spokenAt = Number.isSafeInteger(askedAt) ? new Date(askedAt).toISOString() : null
@@ -471,7 +503,7 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
  * packetFirst (optional, first turn only): return as soon as the packet is ready; the triage that only decides recording keeps running and is
  *   awaited inside judgeWrite (triage is then null in the result and `triageLater` is its promise). It is not bound by the packet deadline.
  */
-export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = TURN_MEMORY_WRITE_TARGET, previous = null, speechDesign = 'axes-isolated', ruleSet = 'default' } = {}) {
+export async function prepareTurnMemory({ message, wiki, client, scope = null, askedAt = null, position, delivered = null, threadKey = null, live = null, budget = {}, ontologyWrite = false, skipOnNeed = true, heldExcerpts = true, signal, deadlineMs = null, packetFirst = false, clock = REAL_CLOCK, extraQuestions = [], writeTarget = TURN_MEMORY_WRITE_TARGET, previous = null, speechDesign = 'axes-isolated', splitWording = 'v1', ruleSet = 'default' } = {}) {
   // The deadline is ONE point on ONE clock, fixed here. Everything below asks that clock; a timer only wakes the wait up.
   const deadlineAt = Number.isFinite(deadlineMs) ? clock.now() + Math.max(0, deadlineMs) : null
   const remaining = () => (deadlineAt === null ? null : Math.max(0, deadlineAt - clock.now()))
@@ -504,6 +536,7 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
     // material, a needless fetch only costs tokens.
     memory = cutByDeadline ? { status: 'empty', partial: true, reason: 'deadline', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [], deadlineHit: true }, nextDelivered: () => receipts }
       : triageSkipsFetch(triage, { skipOnNeed, heldExcerpts }) ? { status: 'skipped', reason: 'nothing_needed', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [] }, nextDelivered: () => receipts }
+      : ruleSet === 'action' && triage?.action?.state === 'yes' ? { status: 'skipped', reason: 'action_request', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [] }, nextDelivered: () => receipts }
       : await reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget: loopBudget(), signal, clock, mode: 'next', live, previous, ruleSet })
   } else if (packetFirst === true) {
     triageLater = ontologyWrite ? triageCall() : null
@@ -512,6 +545,8 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
   } else {
     ;[triage, memory] = await Promise.all([ontologyWrite ? triageCall() : Promise.resolve(null),
       reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget: loopBudget(), signal, clock, mode: 'first', ruleSet })])
+    // first turn: the fetch ran beside the triage; for a decided action request its pages are not sent (the packet-first path cannot wait)
+    if (ruleSet === 'action' && triage?.action?.state === 'yes') memory = { status: 'skipped', reason: 'action_request', packet: null, picks: [], calls: memory.calls ?? 0, receipts: { mode: 'first', calls: memory.calls ?? 0, skippedDelivered: [] }, nextDelivered: () => receipts }
   }
   // What the model holds is known from the receipts, whether or not the fetch ran (a skipped fetch has no skippedDelivered list).
   const heldNow = [...new Set([...heldPages.map(p => p.id), ...(memory.receipts?.skippedDelivered ?? [])])]
@@ -523,11 +558,11 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
     judgeWrite = async () => {
       const late = await triageLater
       if (late?.record?.state !== 'yes') return { proposal: { op: 'none', reason: 'not_worth_recording' }, receipt: { triage: late } }
-      const judged = await judgeTurnWrite({ message, candidates: writeCandidates(), client, askedAt, signal, targetDesign: writeTarget, speechDesign })
+      const judged = await judgeTurnWrite({ message, candidates: writeCandidates(), client, askedAt, signal, targetDesign: writeTarget, speechDesign, splitWording })
       return { ...judged, receipt: { ...judged.receipt, triage: late } }
     }
   } else if (ontologyWrite === true && triage?.record?.state === 'yes') {
-    judgeWrite = () => judgeTurnWrite({ message, candidates: writeCandidates(), client, askedAt, signal, targetDesign: writeTarget, speechDesign })
+    judgeWrite = () => judgeTurnWrite({ message, candidates: writeCandidates(), client, askedAt, signal, targetDesign: writeTarget, speechDesign, splitWording })
   }
   return { position: pos, triage, ...(triageLater ? { triageLater } : {}), memory, packet: memory.packet ?? null, held: heldSame, nextDelivered, judgeWrite,
     writeSkipped: ontologyWrite !== true ? 'flag_off' : triageLater ? null : triage?.record?.state !== 'yes' ? 'not_worth_recording' : null }

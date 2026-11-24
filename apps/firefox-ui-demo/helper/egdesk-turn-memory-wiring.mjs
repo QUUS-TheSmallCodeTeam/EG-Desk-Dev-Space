@@ -10,17 +10,18 @@ import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 //   EGDESK_TURN_MEMORY_ONE_PACKET=on        the memory pages ride under the context selection's packet
 //   EGDESK_TURN_MEMORY_WRITE_TARGET=choice  the old N-way write target, for comparison ('about' is the default)
 //   EGDESK_TURN_MEMORY_CONFIRM=on           pending readings may be confirmed or refused through the conversation
-export const TURN_MEMORY_FLAGS = Object.freeze({ onePacket: 'EGDESK_TURN_MEMORY_ONE_PACKET', writeTarget: 'EGDESK_TURN_MEMORY_WRITE_TARGET', confirmInConversation: 'EGDESK_TURN_MEMORY_CONFIRM', pruneHeld: 'EGDESK_TURN_MEMORY_PRUNE_HELD', keepLate: 'EGDESK_TURN_MEMORY_KEEP_LATE', speechDesign: 'EGDESK_TURN_MEMORY_SPEECH_DESIGN' })
+export const TURN_MEMORY_FLAGS = Object.freeze({ onePacket: 'EGDESK_TURN_MEMORY_ONE_PACKET', writeTarget: 'EGDESK_TURN_MEMORY_WRITE_TARGET', confirmInConversation: 'EGDESK_TURN_MEMORY_CONFIRM', pruneHeld: 'EGDESK_TURN_MEMORY_PRUNE_HELD', keepLate: 'EGDESK_TURN_MEMORY_KEEP_LATE', speechDesign: 'EGDESK_TURN_MEMORY_SPEECH_DESIGN', splitWording: 'EGDESK_TURN_MEMORY_SPLIT_WORDING' })
 export function turnMemoryFlagsFromEnv(env = {}) {
   const get = name => (env && typeof env === 'object' && typeof env[name] === 'string' ? env[name] : null)
   return { ...(get(TURN_MEMORY_FLAGS.onePacket) === 'on' ? { onePacket: true } : {}), ...(get(TURN_MEMORY_FLAGS.writeTarget) === 'choice' ? { writeTarget: 'choice' } : {}),
     ...(get(TURN_MEMORY_FLAGS.confirmInConversation) === 'on' ? { confirmInConversation: true } : {}), ...(get(TURN_MEMORY_FLAGS.pruneHeld) === 'on' ? { pruneHeld: true } : {}),
-    ...(get(TURN_MEMORY_FLAGS.keepLate) === 'on' ? { keepLate: true } : {}), ...(get(TURN_MEMORY_FLAGS.speechDesign) === 'split' ? { speechDesign: 'split-isolated' } : get(TURN_MEMORY_FLAGS.speechDesign) === 'hybrid' ? { speechDesign: 'hybrid-isolated' } : {}) }
+    ...(get(TURN_MEMORY_FLAGS.keepLate) === 'on' ? { keepLate: true } : {}), ...(get(TURN_MEMORY_FLAGS.speechDesign) === 'split' ? { speechDesign: 'split-isolated' } : get(TURN_MEMORY_FLAGS.speechDesign) === 'hybrid' ? { speechDesign: 'hybrid-two-step' } : {}),
+    ...(get(TURN_MEMORY_FLAGS.splitWording) === 'v2' ? { splitWording: 'v2' } : {}) }
 }
 
 // createTurnMemoryConfig({ settings, getAdapter, ontologyStore, deskStore, budget?, deadlineMs? }) -> the object the runtime reads:
 //   { mode(), wiki({ body, context, sources }), scope({ context }), writer(wiki, options), budget, caps, deadlineMs, ontologyWrite }
-export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = null, deskStore = null, budget = { linksFirst: true }, deadlineMs = 15000, caps = null, onePacket = false, writeTarget = 'about', confirmInConversation = false, pruneHeld = false, keepLate = false, speechDesign = null } = {}) {
+export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = null, deskStore = null, budget = { linksFirst: true }, deadlineMs = 15000, caps = null, onePacket = false, writeTarget = 'about', confirmInConversation = false, pruneHeld = false, keepLate = false, speechDesign = null, splitWording = null } = {}) {
   const mode = () => (['advisory', 'on'].includes(settings?.turnMemory?.mode) ? settings.turnMemory.mode : 'off')
   return {
     // The same lazy adapter, for other consumers of the wiki write path (the direct browser entry); it opens nothing by itself.
@@ -39,7 +40,8 @@ export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = n
     // A turn_context answer that missed its budget is kept for the later steps of the same turn (never for the native turn; off by default).
     ...(keepLate === true ? { keepLate: true } : {}),
     // How the write judgment asks the sentence labels: 'split-isolated' (source and time as yes/no predicates) only when passed; default axes.
-    ...(speechDesign === 'split-isolated' || speechDesign === 'hybrid-isolated' ? { speechDesign } : {}),
+    ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step'].includes(speechDesign) ? { speechDesign } : {}),
+    ...(splitWording === 'v2' ? { splitWording: 'v2' } : {}),
     scope: ({ context, body }) => getAdapter().scopeFor(context, body),
     async wiki({ body, context, sources }) {
       const adapter = getAdapter()
