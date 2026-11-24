@@ -140,7 +140,8 @@ test('guard (static): the script and its plan build no request and know no quest
   const v2 = JSON.parse(readFileSync(PLAN_FILE_V2, 'utf8')), v3 = JSON.parse(readFileSync(PLAN_FILE_V3, 'utf8')), v4 = JSON.parse(readFileSync(PLAN_FILE_V4, 'utf8')), v5 = JSON.parse(readFileSync(PLAN_FILE_V5, 'utf8')), v6 = JSON.parse(readFileSync(PLAN_FILE_V6, 'utf8'))
   const source = readFileSync(SCRIPT_FILE, 'utf8'), plan = readFileSync(PLAN_FILE, 'utf8') + JSON.stringify([...v2.steps, ...v3.steps, ...v4.steps, ...v5.steps, ...v6.steps, { id: 'world', caps: null, expect: [{ id: 'env', check: null, args: v4.world }, { id: 'env5', check: null, args: v5.world }, { id: 'env6', check: null, args: v6.world }] }].map(s => ({ id: s.id, caps: s.caps, expect: s.expect.map(e => ({ id: e.id, check: e.check, args: e.args ?? null })) })))
   const imports = [...source.matchAll(/^import .* from '([^']+)'/gm)].map(m => m[1]).sort()
-  assert.deepEqual(imports, ['../helper/egdesk-decision-client.mjs', '../helper/egdesk-decision-real-runner.mjs', '../overlay/resources/EGDeskBriefingHost.sys.mjs',
+  // c17 (L6): the shared last-send stamp wraps the fetch handed in on --send; it builds no request and knows no question.
+  assert.deepEqual(imports, ['../helper/egdesk-decision-client.mjs', '../helper/egdesk-decision-real-runner.mjs', '../helper/egdesk-decision-send-stamp.mjs', '../overlay/resources/EGDeskBriefingHost.sys.mjs',
     '../overlay/resources/EGDeskWorkPlacement.sys.mjs', './egdesk-all-on.support.mjs', 'node:crypto', 'node:fs', 'node:path', 'node:url'])
   assert.match(source, /import \{ DECISIONS_ENDPOINT \} from '\.\.\/helper\/egdesk-decision-client\.mjs'/, 'only the endpoint constant, for printing')
   for (const pattern of [/api\.openai\.com/, /prompt_cache_key/, /questions:\s*\[/, /type:\s*'(?:predicate|choice|score)'/, /\.decide\(/])
