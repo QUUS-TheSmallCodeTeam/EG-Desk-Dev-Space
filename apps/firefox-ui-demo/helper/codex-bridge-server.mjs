@@ -514,7 +514,7 @@ const handleEngineProfilesHttp = createEngineProfilesHttpHandler({
 const handleHostControlHttp = createHostControlHttpHandler(hostControl, { port: BRIDGE_PORT })
 // Board arrangement gets a separate guarded client over the same isolated Decisions key and budget.
 const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credentials: decisionCredentials,
-  getMode: () => bridgeSettings.decisionContext.mode, budget: decisionBudget, port: BRIDGE_PORT })
+  getMode: () => bridgeSettings.decisionContext.mode, budget: decisionBudget, port: BRIDGE_PORT, calibrationLog: decisionCalibrationLog })
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
 const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
   budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT, boardPresentation: handleBoardPresentationHttp,
