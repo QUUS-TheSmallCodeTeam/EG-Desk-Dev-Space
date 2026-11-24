@@ -14,10 +14,10 @@ import { canvasViewSize, placeCanvasView } from '../overlay/resources/EGDeskSurf
 // (egdesk-briefing-catalog.mjs) and from the cards already on the board (with provenance). Nothing here talks to a network, publishes, moves a camera or writes the
 // Board: the host injects judge{} (bridge route) and fill().
 
-export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, maxMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 6, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
+export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, maxMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 8, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
 // A predicate counts as yes at or above `yes` and as no at or below `no`; anything between is undecided. Placeholders until calibrated (real predicates of the other features answer near 0 or 1).
 export const SKELETON_BARS = Object.freeze({ yes: .7, no: .3 })
-export const SKELETON_STAGES = Object.freeze(['place', 'fit', 'order', 'fill_check'])
+export const SKELETON_STAGES = Object.freeze(['place', 'fit', 'order', 'fill_check', 'coverage'])
 export const SKELETON_CHECKS = Object.freeze(['overflow', 'overlap', 'spread'])
 // Lane L7's closed vocabularies (memoryMaterials rows): link types and recorded status.
 const VERSION_LINKS = new Set(['supersedes', 'superseded_by']), LINK_TYPES = new Set(['same_task', 'follows_from', 'decided_in', 'supersedes', 'refers_to', 'superseded_by'])
@@ -206,9 +206,9 @@ const TRAITS = ['compare', 'sequence', 'open_items', 'single']
 //   single      fact_M#     does this material state a concrete fact?
 // A part whose only way of showing is a card already on the board for it (provenance or title, computed) is reused without a question.
 export const FIT_KINDS = Object.freeze({ compare: 'aspect', sequence: 'happened', open_items: 'todo', single: 'fact' })
-const STAGE_KINDS = { place: ['several', 'one_sentence', 'combines', 'about', 'same'], fit: ['aspect', 'happened', 'todo', 'fact'], order: ['before'], fill_check: ['slot', 'step'] }
+const STAGE_KINDS = { place: ['several', 'one_sentence', 'combines', 'about', 'same'], fit: ['aspect', 'happened', 'todo', 'fact'], order: ['before'], fill_check: ['slot', 'step'], coverage: ['covers'] }
 const SHOW = { compare: 'how these two versions differ', sequence: 'what happened across these materials, in date order', open_items: 'what is still not done in these materials', single: 'this one material' }
-export const questionName = q => (q.kind === 'several' || q.kind === 'one_sentence' || q.kind === 'combines' ? q.kind : q.kind === 'about' ? `about_${q.material}` : q.kind === 'same' ? `same_${q.materials[0]}_${q.materials[1]}` : q.kind === 'aspect' ? `aspect_${q.part}` : ['happened', 'todo', 'fact'].includes(q.kind) ? `${q.kind}_${q.material}` : q.kind === 'before' ? `before_${q.first.part}_${q.second.part}`
+export const questionName = q => (q.kind === 'several' || q.kind === 'one_sentence' || q.kind === 'combines' || q.kind === 'covers' ? q.kind : q.kind === 'about' ? `about_${q.material}` : q.kind === 'same' ? `same_${q.materials[0]}_${q.materials[1]}` : q.kind === 'aspect' ? `aspect_${q.part}` : ['happened', 'todo', 'fact'].includes(q.kind) ? `${q.kind}_${q.material}` : q.kind === 'before' ? `before_${q.first.part}_${q.second.part}`
   : q.kind === 'slot' ? `slot_${q.part}_r${q.row}${q.side ? `_${q.side}` : ''}` : `step_${q.part}`)
 
 /** The closed object for one judgment, re-validated here (the bridge route is reachable from the chrome): unknown fields, aliases, components or stages refuse the whole request. */
@@ -216,7 +216,7 @@ export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
   try {
     if (!exactKeys(raw, ['stage', 'request', 'materials', 'cards', 'questions'], ['answer']) || !SKELETON_STAGES.includes(raw.stage) || !plain(raw.request, SKELETON_LIMITS.requestMax)) return null
     // the answer being laid out, for the place request only (a request like "정리해줘" refers to it)
-    if (raw.answer !== undefined && (raw.stage !== 'place' || !plain(raw.answer, SKELETON_LIMITS.answerMax))) return null
+    if (raw.answer !== undefined && (!['place', 'coverage'].includes(raw.stage) || !plain(raw.answer, SKELETON_LIMITS.answerMax))) return null
     if (raw.questions?.some?.(q => q?.kind === 'combines') && raw.answer === undefined) return null // the content question needs the answer it quotes
     if (!Array.isArray(raw.materials) || !raw.materials.length || raw.materials.length > SKELETON_LIMITS.maxMaterials || !Array.isArray(raw.cards) || raw.cards.length > BRIEFING_LIMITS.maxCandidates ||
         !Array.isArray(raw.questions) || !raw.questions.length || raw.questions.length > SKELETON_LIMITS.maxQuestions) return null
@@ -241,6 +241,10 @@ export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
       if (!isObj(q) || !STAGE_KINDS[raw.stage].includes(q.kind)) throw 0
       let out
       if (q.kind === 'several' || q.kind === 'one_sentence' || q.kind === 'combines') { if (!exactKeys(q, ['kind'])) throw 0; out = { kind: q.kind } }
+      else if (q.kind === 'covers') {
+        if (!exactKeys(q, ['kind', 'board']) || !Array.isArray(q.board) || !q.board.length || q.board.length > SKELETON_LIMITS.maxParts) throw 0
+        out = { kind: 'covers', board: q.board.map(p => { if (!exactKeys(p, ['text', 'shown']) || !plain(p.text, BRIEFING_LIMITS.textMax) || !Array.isArray(p.shown) || !p.shown.length || p.shown.length > 3) throw 0; return { text: p.text, shown: p.shown.map(shownCard) } }) }
+      }
       else if (q.kind === 'about') { if (!exactKeys(q, ['kind', 'material']) || !mats.has(q.material)) throw 0; out = { kind: 'about', material: q.material } }
       else if (q.kind === 'same') { if (!exactKeys(q, ['kind', 'materials']) || !Array.isArray(q.materials) || q.materials.length !== 2 || q.materials[0] === q.materials[1] || !q.materials.every(a => mats.has(a))) throw 0; out = { kind: 'same', materials: [...q.materials] } }
       else if (q.kind === 'aspect') { if (!exactKeys(q, ['kind', 'part', 'materials']) || !PART_ALIAS.test(q.part) || !Array.isArray(q.materials) || q.materials.length !== 2 || q.materials[0] === q.materials[1] || !q.materials.every(a => mats.has(a))) throw 0; out = { kind: 'aspect', part: q.part, materials: [...q.materials] } }
@@ -277,6 +281,7 @@ const RULES = {
   place: 'You are a system judge. An assistant has answered a person in a chat; below are the person\'s request and the stored materials the assistant had. Each question is separate: answer each on its own, whatever the others are. Judge only what the person asked for, from the request and the materials as quoted.',
   fit: 'You are a system judge reading stored materials. Each question quotes ONE material or ONE pair of materials and asks ONE thing about what its text states. Answer each question on its own, whatever the others are. Judge only from the quoted text; never assume content it does not contain.',
   order: 'You are a system judge. Each question describes TWO parts of a briefing by the materials they show. Answer each question on its own. Judge only which part a reader who has seen none of it should be shown first to follow the other.',
+  coverage: 'You are a system judge checking a finished board briefing against what the person asked. Judge only from the quoted request, the quoted answer and the quoted parts of the board, in their order.',
   fill_check: 'You are a system judge checking a text against its source. Each question quotes ONE text and ONE source. Answer each question on its own, whatever the others are. Rewording, summarising and linking words are fine. A number, amount, date, name or event that the quoted source does not contain is NOT supported.',
 }
 // Only what the record has: no date when it has none, no status when the record does not say ("unknown" is not a status to judge from).
@@ -291,6 +296,8 @@ function questionText(q, c, catalog) {
   if (q.kind === 'aspect') return `Two materials, each quoted as JSON: ${q.materials.map(a => quoteMaterial(mat(a))).join('; ')}. Do both of these materials state a value for at least one same aspect (for example a price in each, or a date in each)?`
   if (q.kind === 'happened') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material state something that happened or was decided (an action, an event or a decision)?`
   if (q.kind === 'todo') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. According to this material, is something not done yet or still to happen?`
+  // Cycle 19: what is missing, as ONE condition over the whole board in order.
+  if (q.kind === 'covers') return `The person asked, quoted exactly as a JSON string: ${JSON.stringify(c.request)}. The board, its parts quoted in order as JSON: ${JSON.stringify(q.board)}. Does this board answer everything the person's request asks about${c.answer ? ' (the request may refer to the assistant\'s answer quoted above)' : ''}?`
   if (q.kind === 'about') return `The person asked, quoted exactly as a JSON string: ${JSON.stringify(c.request)}. Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material contain information that the person's request asks about${c.answer ? ' (the request may refer to the assistant\'s answer quoted above)' : ''}?`
   if (q.kind === 'same') return `Two materials, each quoted as JSON: ${q.materials.map(a => quoteMaterial(mat(a))).join('; ')}. Are these two materials an earlier and a later version of the same document, offer or plan?`
   if (q.kind === 'fact') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material state at least one concrete fact (for example a number, an amount, a date, a name or a decision)?`
@@ -312,7 +319,7 @@ export function createSkeletonJudge(catalog = BRIEFING_CATALOG) {
     if (!c) return manual
     // Plain text messages (the input shape of the requests that were really sent). The request and, for the placement questions, the materials are listed once;
     // every other question quotes its own material, text or source inside the question.
-    const listing = c.stage === 'place' ? `${c.answer ? `\n\nThe assistant's answer to it, quoted exactly as a JSON string: ${JSON.stringify(c.answer)}` : ''}\n\nMaterials the assistant had, each quoted as JSON:\n${c.materials.map(quoteMaterial).join('\n')}` : ''
+    const listing = c.stage === 'coverage' && c.answer ? `\n\nThe assistant's answer to it, quoted exactly as a JSON string: ${JSON.stringify(c.answer)}` : c.stage === 'place' ? `${c.answer ? `\n\nThe assistant's answer to it, quoted exactly as a JSON string: ${JSON.stringify(c.answer)}` : ''}\n\nMaterials the assistant had, each quoted as JSON:\n${c.materials.map(quoteMaterial).join('\n')}` : ''
     const packet = { input: [{ role: 'developer', content: RULES[c.stage] }, { role: 'user', content: `Request, quoted exactly as a JSON string: ${JSON.stringify(c.request)}${listing}` }],
       questions: c.questions.map(q => predicateQuestion(questionName(q), questionText(q, c, catalog))), promptCacheKey: `briefing-skeleton-${c.stage}` }
     return { status: 'prepared', kind: 'briefing-skeleton', mode, binding, dto: { ...c, purpose: `briefing skeleton: ${c.stage}`, items: [] }, options: c.questions.map(questionName), packet }
@@ -339,11 +346,14 @@ export const SKELETON_JUDGE = createSkeletonJudge()
 // ---- code combines the answers ----
 const isYes = p => typeof p === 'number' && p >= SKELETON_BARS.yes, isNo = p => typeof p === 'number' && p <= SKELETON_BARS.no
 /** Board only when several materials are needed together AND one sentence would not do. Anything undecided stays in the bubble. */
-export function decidePlace(answers) {
-  // With the answer quoted (cycle 18): board = several yes AND the answer combines several facts from different materials (yes); a no on either is the bubble.
+export function decidePlace(answers, { relevant = null } = {}) {
+  // With the answer quoted (cycle 19, Main's decision): board = the answer combines several facts from different materials (yes) AND, by code, at least two
+  // materials were decided relevant. "Several" is not asked then: the count of relevant materials is known to code (R3), and one condition per question (R4).
   if (answers && Object.hasOwn(answers, 'combines')) {
-    if (isYes(answers.several) && isYes(answers.combines)) return { value: 'board', reason: null }
-    return { value: 'bubble', reason: isNo(answers.several) || isNo(answers.combines) ? 'judged-bubble' : 'placement-undecided' }
+    if (isNo(answers.combines)) return { value: 'bubble', reason: 'judged-bubble' }
+    if (!isYes(answers.combines)) return { value: 'bubble', reason: 'placement-undecided' }
+    if (relevant !== null && relevant < 2) return { value: 'bubble', reason: relevant === 0 ? 'not-asked-about' : 'single-material' }
+    return { value: 'board', reason: null }
   }
   if (isYes(answers?.one_sentence)) return { value: 'bubble', reason: 'judged-bubble' }
   if (isYes(answers?.several) && isNo(answers?.one_sentence)) return { value: 'board', reason: null }
@@ -532,8 +542,7 @@ export function fillChecks(item, data, scene, catalog = BRIEFING_CATALOG, { mode
   })
   else if (item.component === 'result_compare') slots.rows.forEach((row, i) => { for (const side of ['left', 'right']) out.push({ kind: 'slot', part: item.id, row: i + 1, side, aspect: cut(row.aspect, 40), text: cut(row[side], SKELETON_LIMITS.slotTextMax), material: slots[side] }) })
   else if (item.component === 'result_text') out.push({ kind: 'slot', part: item.id, row: 1, text: cut(slots.body, SKELETON_LIMITS.slotTextMax), material: item.materials[0] })
-  const shown = [...(item.creates ? [shownOf(item, slots, cut)] : []),
-    ...item.reuse.map(a => { const t = scene.targets.find(x => x.alias === a); return { label: cut(t.label, BRIEFING_LIMITS.labelMax), text: cut(t.gist ?? '', SKELETON_LIMITS.contentMax) } })].slice(0, 3)
+  const shown = shownFor(item, data, scene)
   // 'facts' (internal switch, default off): only the pieces that carry a number, a date, a Latin word or a name are judged; every explanation still is.
   const kept = mode === 'facts' ? out.filter(q => FACTY.test(q.text)) : [...out]
   return { questions: [...kept, { kind: 'step', part: item.id, text: cut(data.text, BRIEFING_LIMITS.textMax), shown }], failures, skipped: out.length - kept.length }
@@ -541,6 +550,12 @@ export function fillChecks(item, data, scene, catalog = BRIEFING_CATALOG, { mode
 export const FILL_CHECK_MODES = Object.freeze(['all', 'facts'])
 // A number, a Latin word (v2, an id, a name), a role title (팀장, 대표, ...) or a name with its marker (A사, 김민수 님).
 const FACTY = /[0-9０-９]|[A-Za-z]|(?:^|[^가-힣])(?:팀장|대표|부장|과장|이사|담당자)|[가-힣](?:사|님|씨)(?![가-힣])/
+/** What one step shows, as structured fields: its new card (lines / rows / text) and the existing cards it points at. */
+export function shownFor(item, data, scene) {
+  const cut = (v, max) => clean(v, max)
+  return [...(item.creates ? [shownOf(item, data.slots ?? {}, cut)] : []),
+    ...item.reuse.map(a => { const t = scene.targets.find(x => x.alias === a); return { label: cut(t.label, BRIEFING_LIMITS.labelMax), text: cut(t.gist ?? '', SKELETON_LIMITS.contentMax) } })].slice(0, 3)
+}
 function shownOf(item, slots, cut) {
   const label = cut(slots.title, BRIEFING_LIMITS.labelMax)
   if (item.component === 'result_lines') return { label, lines: slots.lines.map(l => ({ heading: cut(l.label, 40), text: cut(l.text, SKELETON_LIMITS.slotTextMax) })) }
@@ -592,7 +607,7 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     cards: scene.targets.filter(t => t.targetable).map(t => ({ alias: t.alias, label: clean(t.label, BRIEFING_LIMITS.labelMax), ...(clean(t.gist, BRIEFING_LIMITS.gistMax) ? { gist: clean(t.gist, BRIEFING_LIMITS.gistMax) } : {}) })) }
   const ask = async (stage, questions) => {
     if (stats.judgeRequests >= SKELETON_LIMITS.maxRequests || stats.judgeMs >= SKELETON_LIMITS.judgeMs) return { unavailable: 'request-bound' }
-    const prepared = await judge.prepare({ stage, ...base, ...(stage === 'place' && said ? { answer: said } : {}), questions: questions.slice(0, SKELETON_LIMITS.maxQuestions) })
+    const prepared = await judge.prepare({ stage, ...base, ...((stage === 'place' || stage === 'coverage') && said ? { answer: said } : {}), questions: questions.slice(0, SKELETON_LIMITS.maxQuestions) })
     if (prepared?.status !== 'prepared') return { unavailable: prepared?.reason ?? 'unavailable' }
     if (!(await allow(`briefing-skeleton-${stage}`, prepared.preview))) { await judge.cancel(prepared.ticket); return { unavailable: 'declined' } }
     stats.judgeRequests++; stats.questions += Math.min(questions.length, SKELETON_LIMITS.maxQuestions); stats.stages.push(stage)
@@ -607,19 +622,19 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
   // and are the unresolved title-sharing pairs versions of one thing. One request instead of three; every question quotes its own material.
   const relevance = relevanceQuestions(scene.materials), pairs = versionCandidates(scene.materials)
   // the content question when the answer is at hand; the length question only without it (the earlier path)
-  const placed = await ask('place', [{ kind: 'several' }, { kind: said ? 'combines' : 'one_sentence' }, ...relevance.map(q => ({ kind: 'about', material: q.material })), ...pairs.map(materials => ({ kind: 'same', materials }))])
+  const placed = await ask('place', [...(said ? [{ kind: 'combines' }] : [{ kind: 'several' }, { kind: 'one_sentence' }]), ...relevance.map(q => ({ kind: 'about', material: q.material })), ...pairs.map(materials => ({ kind: 'same', materials }))])
   if (placed.unavailable) return unavailable(placed, false)
   if (placed.advisory !== undefined) {
     const fits0 = fitQuestions(scene)
     if (placed.advisory === 'board' && fits0.length) await ask('fit', fits0)
     return done('advisory-only', { verdict: placed.advisory, requested: true })
   }
-  const place = decidePlace(placed.answers)
-  if (place.value !== 'board') return done('bubble', { reason: place.reason, requested: true, place: placed.answers })
   // Code drops what the request does not ask about (decided no or undecided) and adds the version pairs the judge confirmed; the scene is built again from that.
   const kept = new Set(relevance.filter(q => isYes(placed.answers[`about_${q.material}`])).flatMap(q => q.covers))
   const dropped0 = scene.materials.filter(m => !kept.has(m.alias)).map(m => m.alias), versions = pairs.filter(([a, b]) => isYes(placed.answers[`same_${a}_${b}`]))
   relevanceOut = { kept: [...kept], dropped: dropped0, versions }
+  const place = decidePlace(placed.answers, { relevant: kept.size })
+  if (place.value !== 'board') return done('bubble', { reason: place.reason, requested: true, place: placed.answers })
   if (!kept.size) return done('bubble', { reason: 'not-asked-about', requested: true })
   scene = enumerateSkeleton({ materials: egress && !egress.allows('memory_page') ? [] : materials, candidates: egress && !egress.allows('canvas_text') ? [] : candidates, currentAnswerId, catalog, bindings, keep: kept, versionPairs: versions })
   base.materials = base.materials.filter(m => kept.has(m.alias))
@@ -722,6 +737,34 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     if (rewritten.bound || !rewritten.ok) return done('fallback-chat', { reason: rewritten.bound ? 'fill-bound' : 'fill-invalid', detail: rewritten.reason, rejections })
     Object.assign(filled, rewritten.items); issues = rewritten.issues
   }
+  // (e) Coverage (cycle 19): does the board, its parts in order, answer everything the request asks about? One question. A decided no gets ONE bounded re-design:
+  // add the one part the board could still show (a catalog part whose fit was UNDECIDED: a part judged not to fit stays out), fill and check only it, ask again.
+  // Nothing to add, an added part that does not pass, or a second no -> the chat answer. Undecided is not a no: the board is proposed (the check's result is recorded).
+  // Requests: at most two more (the added part's fill check and the second coverage question), one more fill turn; SKELETON_LIMITS.maxRequests bounds the rest.
+  const boardView = () => items.map(item => ({ text: clean(filled[item.id].text, BRIEFING_LIMITS.textMax), shown: shownFor(item, filled[item.id], scene) }))
+  const coverage = { asked: 0, p: null, redesign: null }
+  const askCoverage = async () => { coverage.asked++; const r0 = await ask('coverage', [{ kind: 'covers', board: boardView() }]); if (!r0.unavailable) coverage.p = r0.answers.covers ?? null; return r0 }
+  let covered = await askCoverage()
+  if (covered.unavailable) return unavailable(covered, true)
+  if (isNo(coverage.p)) {
+    const inItems = new Set(items.map(i => i.id))
+    const part = scene.parts.find(p => !inItems.has(p.alias) && decisions[p.alias] === 'undecided' && !dropped.some(d => d.part === p.alias) && p.options.some(o => o.component))
+    if (!part) return done('fallback-chat', { reason: 'not-covered', coverage })
+    const option = part.options.find(o => o.component)
+    const added = itemFor(part, option, scene, ++n)
+    coverage.redesign = { part: part.alias, trait: part.trait, component: option.value, from: 'undecided-part' }
+    items = [...items, added]; layout = layoutSkeleton(items, scene, viewport); guide = buildGuide(items, scene, retire())
+    const one = await fillOnce(new Set([added.id]))
+    if (one.bound || !one.ok || one.issues.length) return done('fallback-chat', { reason: one.bound ? 'fill-bound' : 'not-covered', coverage })
+    Object.assign(filled, one.items)
+    const checked = fillChecks(added, filled[added.id], scene, catalog, { mode: checkMode })
+    const verdict = await ask('fill_check', checked.questions)
+    if (verdict.unavailable) return unavailable(verdict, true)
+    if (checked.failures.length || checked.questions.some(q => !isYes(verdict.answers[questionName(q)]))) return done('fallback-chat', { reason: 'not-covered', coverage })
+    covered = await askCoverage()
+    if (covered.unavailable) return unavailable(covered, true)
+    if (isNo(coverage.p)) return done('fallback-chat', { reason: 'not-covered', coverage })
+  }
   guide = buildGuide(items, scene, retire())
 
   // The result, in the shape the host already publishes: new cards first (their text is rendered by CODE from the slot data), then the briefing that points at them.
@@ -733,5 +776,5 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     title: clean(filled[item.id].slots.title, BRIEFING_LIMITS.labelMax), markdown: markdownOf(item) }))
   return done('presented', { plan: { title, stepSpecs, pendingSteps: stepSpecs.filter(s => !s.refs.length).map(s => s.id) }, newComponents,
     retrievals: guide.retrievals.map(a => { const t = scene.targets.find(x => x.alias === a); return { alias: a, id: t.id, ref: t.ref } }),
-    reuse: { reuse: [...used()], retire: [...guide.retrievals], created: newComponents.map(c => c.component) }, guide, decisions, order: { ties: ordering.ties.map(([a, b]) => `${a.id}/${b.id}`), answers: orderAnswers }, repaired, rejections, dropped, revisions: rejections.filter(r => r.action === 'rewrite').length })
+    reuse: { reuse: [...used()], retire: [...guide.retrievals], created: newComponents.map(c => c.component) }, guide, decisions, coverage, order: { ties: ordering.ties.map(([a, b]) => `${a.id}/${b.id}`), answers: orderAnswers }, repaired, rejections, dropped, revisions: rejections.filter(r => r.action === 'rewrite').length })
 }
