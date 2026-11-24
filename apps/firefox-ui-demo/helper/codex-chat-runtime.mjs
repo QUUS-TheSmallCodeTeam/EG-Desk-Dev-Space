@@ -4162,8 +4162,8 @@ export class CodexChatRuntime {
           spokenAt: new Date(s.spokenAt).toISOString(), offsetMinutes: r.offsetMinutes, sequence: s.seq,
           verification: 'utterance-only', interpretations: r.interpretations }
       }
-      // Internal flag (setup.speechDesign); only 'predicates' changes anything, every other value is the current design.
-      return { allowed, modeActive, segments: speechSegments(body.message), design: setup.speechDesign === 'predicates' ? 'predicates' : 'axes', candidate: () => {
+      // Internal flag (setup.speechDesign); only the listed alternative designs change anything, every other value is the current design.
+      return { allowed, modeActive, segments: speechSegments(body.message), design: ['predicates', 'axes-isolated', 'predicates-isolated'].includes(setup.speechDesign) ? setup.speechDesign : 'axes', candidate: () => {
         if (!allowed()) return null
         const refs = evidence.recentSpeech(dm.scope, gen)
         if (!refs?.length) return null

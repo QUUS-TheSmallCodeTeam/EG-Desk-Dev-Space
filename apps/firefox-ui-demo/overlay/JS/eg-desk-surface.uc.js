@@ -22424,7 +22424,7 @@
       if (decision.busy) return;
       const keyField = () => card.querySelector('[data-testid="settings-decision-key"]');
       // The card's own document (any window); a harness without a global document simply skips focus repair.
-      const focusDoc = () => card.ownerDocument || globalThis.document;
+      const focusDoc = () => (typeof card !== 'undefined' && card?.ownerDocument) || globalThis.document;
       const inSection = () => { const doc = focusDoc(); return !!doc?.activeElement && card.contains(doc.activeElement); };
       const hadFocus = inSection();
       decision.busy = true; redrawDecision();
