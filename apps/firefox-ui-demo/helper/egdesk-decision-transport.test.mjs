@@ -9,7 +9,7 @@ const QUESTION = { type: 'predicate', name: 'p', instructions: 'Is it?' }
 
 // Loopback server that records connections, raw bytes per connection and requests.
 async function server(t, { onRequest } = {}) {
-  const log = { connections: 0, bytes: 0, requests: [] }
+  const log = { connections: 0, closed: 0, bytes: 0, requests: [] }
   const srv = http.createServer((req, res) => {
     const chunks = []
     req.on('data', c => chunks.push(c))
@@ -22,7 +22,7 @@ async function server(t, { onRequest } = {}) {
     })
   })
   srv.keepAliveTimeout = 0
-  srv.on('connection', socket => { socket._id = ++log.connections; socket.on('data', d => { log.bytes += d.length }) })
+  srv.on('connection', socket => { socket._id = ++log.connections; socket.on('close', () => { log.closed++ }); socket.on('data', d => { log.bytes += d.length }) })
   await new Promise(resolve => srv.listen(0, '127.0.0.1', resolve))
   t.after(() => { srv.closeAllConnections(); srv.close() })
   return { log, url: `http://127.0.0.1:${srv.address().port}/v1/decisions` }
@@ -139,4 +139,70 @@ test('optional trace reports phase names and times only (no content), and marks 
   assert.ok(phases.includes('connect'))
   assert.equal(events.at(-1).reused, true)
   assert.doesNotMatch(JSON.stringify(events), /body-text|egd-synthetic/)
+})
+
+test('hardening: Connection: close responses are never pooled and never error', async t => {
+  const { log, url } = await server(t, { onRequest: (req, res) => { res.writeHead(200, { connection: 'close' }); res.end('{"answers":[]}'); return true } })
+  const tr = mkTransport(t)
+  for (let i = 0; i < 3; i++) await (await post(tr, url, `{"i":${i}}`)).text()
+  assert.equal(log.connections, 3)
+  assert.equal(tr.stats().reusedSockets, 0)
+  assert.equal(tr.stats().reusedSocketErrors, 0)
+  assert.deepEqual(log.requests.map(r => r.body), ['{"i":0}', '{"i":1}', '{"i":2}'])
+})
+
+test('hardening: a silent (half-open) reused socket times out as dispatched, is destroyed, and the next call uses a fresh socket once', async t => {
+  let n = 0
+  const { log, url } = await server(t, { onRequest: () => { n++; return n === 2 } }) // 2nd request is received and never answered
+  const tr = mkTransport(t)
+  const client = createDecisionClient({ getApiKey: () => 'egd-synthetic-not-a-key-0005', endpoint: url, fetchImpl: tr.fetch })
+  await client.decide({ input: 'h1', questions: [QUESTION], timeoutMs: 2000 })
+  await assert.rejects(client.decide({ input: 'h2', questions: [QUESTION], timeoutMs: 150 }), e => e.code === 'timeout' && e.dispatched === true)
+  await client.decide({ input: 'h3', questions: [QUESTION], timeoutMs: 2000 })
+  assert.equal(log.connections, 2, 'the silent socket was not reused')
+  assert.deepEqual(log.requests.map(r => JSON.parse(r.body).input), ['h1', 'h2', 'h3'])
+  assert.equal(tr.stats().reusedSocketErrors, 0, 'our own timeout is not a stale-socket error')
+})
+
+test('hardening: twelve concurrent decisions are all sent once each and none is throttled behind a small socket cap', async t => {
+  const { log, url } = await server(t, { onRequest: (req, res) => { setTimeout(() => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ answers: [{ name: 'p', type: 'predicate', probability: 0.9 }] })) }, 200); return true } })
+  const tr = mkTransport(t)
+  const client = createDecisionClient({ getApiKey: () => 'egd-synthetic-not-a-key-0005', endpoint: url, fetchImpl: tr.fetch })
+  const results = await Promise.allSettled(Array.from({ length: 12 }, (_, i) => client.decide({ input: `f${i}`, questions: [QUESTION], timeoutMs: 450 })))
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 12)
+  const ids = log.requests.map(r => JSON.parse(r.body).input)
+  assert.equal(new Set(ids).size, 12)
+  assert.equal(ids.length, 12, 'never two sends for one intent')
+})
+
+test('hardening: rapid typing across two DMs warms once; an expired unused warm-up may warm again after the cooldown', async t => {
+  const { log, url } = await server(t)
+  let clock = 0
+  const tr = mkTransport(t, { warmIdleMs: 100, now: () => clock })
+  const results = Array.from({ length: 200 }, () => tr.preconnect(url))
+  await sleep(60)
+  assert.equal(results.filter(r => r === 'warmed').length, 1)
+  assert.equal(log.connections, 1)
+  assert.equal(log.bytes, 0)
+  await sleep(250) // unused: closed
+  assert.equal(tr.preconnect(url), 'skipped', 'still inside the cooldown')
+  clock += 61_000
+  assert.equal(tr.preconnect(url), 'warmed')
+  await sleep(60)
+  assert.equal(log.connections, 2)
+  assert.equal(log.bytes, 0, 'warm-ups never carry content')
+  assert.equal(log.requests.length, 0)
+})
+
+test('hardening: close() releases parked and warm sockets', async t => {
+  const { log, url } = await server(t)
+  const tr = createDecisionTransport()
+  await (await post(tr, url)).text() // parks a free socket
+  const other = createDecisionTransport(); other.preconnect(url) // a second, warm socket
+  await sleep(100)
+  assert.equal(log.connections, 2)
+  assert.equal(log.closed, 0)
+  tr.close(); other.close()
+  for (let i = 0; i < 40 && log.closed < 2; i++) await sleep(10)
+  assert.equal(log.closed, 2, 'both sockets were closed by shutdown')
 })

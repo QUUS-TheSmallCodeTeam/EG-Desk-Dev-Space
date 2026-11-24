@@ -260,3 +260,22 @@ test('timeout reason tells a started POST from one that never started', async ()
   assert.deepEqual(await stalled.run(), { status: 'manual', reason: 'timeout_unsent' })
   assert.equal(stalled.calls.length, 0)
 })
+
+test('deadline timeout is decided by the timer, not by a clock that may still read a hair early (deterministic)', async t => {
+  // A Node timer can fire up to ~1 ms before performance.now() reaches the deadline. Mock timers model the extreme:
+  // the deadline timer fires while performance.now() says almost no time has passed.
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const settle = async ready => { for (let i = 0; i < 50 && !ready(); i++) await new Promise(resolve => setImmediate(resolve)) }
+  const stalled = fixture({ getApiKey: () => new Promise(() => {}) })
+  const unsent = stalled.run()
+  await settle(() => stalled.lookups() === 1)
+  t.mock.timers.tick(4000)
+  assert.deepEqual(await unsent, { status: 'manual', reason: 'timeout_unsent' })
+  assert.equal(stalled.calls.length, 0)
+  const sentFx = fixture({ fetchImpl: (url, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })) })
+  const sent = sentFx.run()
+  await settle(() => sentFx.calls.length === 1)
+  t.mock.timers.tick(4000)
+  assert.deepEqual(await sent, { status: 'manual', reason: 'timeout' })
+  assert.equal(sentFx.calls.length, 1)
+})

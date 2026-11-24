@@ -1274,6 +1274,7 @@ async function shutdown() {
   bridgeServer.close()
   localCapacity.close()
   systemResourceMonitor.close()
+  try { decisionTransport.close() } catch {} // release parked and warm Decisions sockets
   try { await workflow?.close() }
   catch { console.error('[egdesk-codex-bridge] workflow runtime did not close cleanly') }
   try { await codexEngine.dispose() }

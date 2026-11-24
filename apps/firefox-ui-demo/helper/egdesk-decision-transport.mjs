@@ -17,14 +17,17 @@ import { Readable } from 'node:stream'
 export const DECISION_IDLE_MS = 55_000
 export const DECISION_HINT_MARGIN_MS = 1_000
 export const DECISION_WARM_IDLE_MS = 15_000
+// After an unused warm-up expired, a later typing burst may warm again once this much time has passed.
+export const DECISION_WARM_COOLDOWN_MS = 60_000
 
 const NULL_BODY = new Set([101, 204, 205, 304])
 const abortError = () => Object.assign(new Error('The operation was aborted'), { name: 'AbortError', code: 20 })
 
-export function createDecisionTransport({ idleMs = DECISION_IDLE_MS, warmIdleMs = DECISION_WARM_IDLE_MS, agentOptions = {}, trace = null } = {}) {
+export function createDecisionTransport({ idleMs = DECISION_IDLE_MS, warmIdleMs = DECISION_WARM_IDLE_MS, agentOptions = {}, trace = null, now = () => Date.now() } = {}) {
   const stats = { requests: 0, reusedSockets: 0, sockets: 0, warmups: 0, warmupsSkipped: 0, warmAdopted: 0, warmExpired: 0, reusedSocketErrors: 0 }
   let warm = null // { socket, host, port, onTimeout, onError, onClose }
   let warmedSinceRequest = false // one warm-up per idle period: reset by a real request
+  let lastWarmAt = -Infinity
 
   const dropWarm = (destroy = true) => {
     if (!warm) return
@@ -63,8 +66,8 @@ export function createDecisionTransport({ idleMs = DECISION_IDLE_MS, warmIdleMs 
   const HttpsAgent = make(https.Agent)
   const HttpAgent = make(http.Agent)
   const agents = {
-    'https:': new HttpsAgent({ keepAlive: true, maxSockets: 4, maxFreeSockets: 2, scheduling: 'lifo', timeout: idleMs, ...agentOptions }),
-    'http:': new HttpAgent({ keepAlive: true, maxSockets: 4, maxFreeSockets: 2, scheduling: 'lifo', timeout: idleMs, ...agentOptions }),
+    'https:': new HttpsAgent({ keepAlive: true, maxSockets: 16, maxFreeSockets: 4, scheduling: 'lifo', timeout: idleMs, ...agentOptions }),
+    'http:': new HttpAgent({ keepAlive: true, maxSockets: 16, maxFreeSockets: 4, scheduling: 'lifo', timeout: idleMs, ...agentOptions }),
   }
   const protocolOf = url => { if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new TypeError('Unsupported protocol'); return url.protocol }
 
@@ -97,7 +100,8 @@ export function createDecisionTransport({ idleMs = DECISION_IDLE_MS, warmIdleMs 
       req.on('response', () => mark('response'))
       req.on('error', error => {
         signal?.removeEventListener('abort', onAbort)
-        if (req.reusedSocket) stats.reusedSocketErrors++
+        // Only transport failures count; our own abort/timeout of a pending request is not a stale-socket error.
+        if (req.reusedSocket && !signal?.aborted) stats.reusedSocketErrors++
         // Never replayed here: the body may have reached the server.
         reject(Object.assign(error, { reusedSocket: req.reusedSocket === true }))
       })
@@ -111,8 +115,9 @@ export function createDecisionTransport({ idleMs = DECISION_IDLE_MS, warmIdleMs 
     const host = url.hostname, port = Number(url.port || (protocol === 'https:' ? 443 : 80))
     const parked = Object.values(agent.freeSockets).some(list => list.some(s => !s.destroyed))
     const busy = Object.values(agent.sockets).some(list => list.length > 0)
-    if (warm || parked || busy || warmedSinceRequest) { stats.warmupsSkipped++; return 'skipped' }
+    if (warm || parked || busy || (warmedSinceRequest && now() - lastWarmAt < DECISION_WARM_COOLDOWN_MS)) { stats.warmupsSkipped++; return 'skipped' }
     warmedSinceRequest = true
+    lastWarmAt = now()
     stats.warmups++
     const options = { ...agent.options, host, port, servername: protocol === 'https:' && !/^[\d.:]+$/.test(host) ? host : undefined, path: null }
     options._agentKey = agent.getName(options)
