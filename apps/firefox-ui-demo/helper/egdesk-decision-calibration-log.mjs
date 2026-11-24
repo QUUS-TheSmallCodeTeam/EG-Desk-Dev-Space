@@ -27,7 +27,7 @@ const MAX_JUDGMENTS = 64
 
 // answer_briefing: the Answer Briefing judgments (placement, reuse, flow check, skeleton predicates), recorded apart from the Board arrangement (lane L2 finding A4).
 // work_placement: L1 cycle 12 (work-surface placement judgments had been recorded as board_arrangement, the same finding A4).
-const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'answer_briefing', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check', 'turn_memory', 'conversation_flow', 'working_memory', 'work_placement'])
+const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'answer_briefing', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check', 'turn_memory', 'conversation_flow', 'working_memory', 'work_placement', 'own_tools_shadow'])
 const MODES = new Set(['advisory', 'on'])
 // How the draft check asked (egdesk-draft-check.mjs design).
 const DRAFT_DESIGNS = new Set(['choice', 'predicates'])
@@ -88,6 +88,9 @@ const GATE_REASONS = new Set(['unresolved_target', 'protected_target', 'outside_
 const GATE_METHODS = new Set(['predicates', 'score'])
 const GATE_ENGINES = new Set(['codex', 'claude'])
 const GATE_NOTICES = new Set(['unverified_engine_version'])
+const SHADOW_SUBJECTS = new Set(['command', 'file_change']), SHADOW_WOULDS = new Set(['would_run', 'would_ask', 'would_refuse'])
+const SHADOW_FILE_KINDS = new Set(['add', 'update', 'delete'])
+const SHADOW_REASON_WORDS = new Set(['no_folder', 'outside_folder', 'protected_path', 'symlink_escape', 'symlink', 'invalid_path', 'kept_file_delete'])
 const GATE_ENGINE_SCOPES = new Set(['shared', 'profile'])
 const flagOf = value => (typeof value === 'boolean' ? value : null)
 function terminalFields(raw) {
@@ -213,6 +216,15 @@ export function normalizeEntry(raw, now = Date.now()) {
   put(entry, 'fallback', word(FALLBACK, raw.fallback)); put(entry, 'attached', typeof raw.attached === 'boolean' ? raw.attached : null)
   if (feature === 'terminal_state') put(entry, 'terminal', terminalFields(raw.terminal))
   if (feature === 'terminal_gate') put(entry, 'gate', gateFields(raw.gate))
+  // own-tools shadow: what EG-Desk's own tools would have done; closed words only (no command, path or content)
+  if (feature === 'own_tools_shadow' && record(raw.shadow)) {
+    const s = {}
+    put(s, 'subject', word(SHADOW_SUBJECTS, raw.shadow.subject)); put(s, 'would', word(SHADOW_WOULDS, raw.shadow.would)); put(s, 'fileKind', word(SHADOW_FILE_KINDS, raw.shadow.fileKind))
+    put(s, 'engine', word(GATE_ENGINES, raw.shadow.engine))
+    const reasons = Array.isArray(raw.shadow.reasons) ? [...new Set(raw.shadow.reasons.filter(r => typeof r === 'string' && (GATE_REASONS.has(r) || SHADOW_REASON_WORDS.has(r))))].slice(0, 6) : []
+    if (reasons.length) s.reasons = reasons
+    if (s.subject && s.would) entry.shadow = s
+  }
   return entry
 }
 
