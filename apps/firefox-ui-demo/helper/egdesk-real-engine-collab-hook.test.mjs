@@ -145,5 +145,5 @@ test('the hook\'s timer: presence is posted again every 3 s while the conversati
   const ticks = []; let cleared = 0, fn = null
   const world = createCollabWorld({ setTimer: (f, ms) => { fn = f; ticks.push(ms); return { unref() {} } }, clearTimer: () => { cleared++ } })
   world.start(); world.start(); assert.deepEqual(ticks, [3000], 'one timer'); fn(); world.stop(); world.stop(); assert.equal(cleared, 1)
-  assert.equal(world.mirror.snapshot()?.length, 2, 'the snapshot is held for the flow and the registry')
+  assert.equal((await world.publish()).status, 200); assert.equal(world.mirror.snapshot()?.length, 2, 'the snapshot is held for the flow and the registry')
 })
