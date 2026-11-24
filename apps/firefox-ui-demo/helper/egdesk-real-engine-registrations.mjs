@@ -44,3 +44,9 @@ registerExpectKeys({ briefing: { schema: BRIEFING_EXPECT_SCHEMA,
 // ---- slot L6 ----
 
 // ---- slot L8 ----
+
+// ---- L5: deletion through the product's route (seeded memory writes, expect.deleted) ----
+import { DELETED_EXPECT_SCHEMA, SEEDED_WRITES_SCHEMA, checkDeleted, validateDeletedExpect, validateSeededWrites } from './egdesk-real-engine-delete.mjs'
+registerConversationFields({ seededWrites: { schema: SEEDED_WRITES_SCHEMA, validate: (value, { path, bad }) => { for (const why of validateSeededWrites(value, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerExpectKeys({ deleted: { schema: DELETED_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateDeletedExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) },
+  check: (value, record) => checkDeleted(value, record) } })

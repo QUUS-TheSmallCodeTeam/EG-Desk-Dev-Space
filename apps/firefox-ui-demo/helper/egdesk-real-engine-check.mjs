@@ -18,6 +18,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { constants } from 'node:fs'
 import { spawn as nodeSpawn } from 'node:child_process'
+import { Readable } from 'node:stream'
+import { EventEmitter } from 'node:events'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
 import { CodexChatRuntime, TURN_CONTEXT_BUDGET_MS, TURN_CONTEXT_COLD_BUDGET_MS } from './codex-chat-runtime.mjs'
 import { createOwnToolsWiring } from './egdesk-own-tools-wiring.mjs'
@@ -39,6 +41,9 @@ import { parseCodexUserAgent } from './egdesk-codex-version-pin.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { APPROVER_TEXT, checkTurnExpectations, folderPathProblem, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { memoryNeedsDecisions } from './egdesk-real-engine-memory.mjs' // memory hook (L7 c26)
+import { createChatHttpHandler } from './codex-bridge-http.mjs' // c28: the product's route handler (the window's own request for a conversation delete)
+import { registerConversationForgetters } from './egdesk-conversation-forgetters.mjs' // c28: the same per-conversation forgetters the bridge registers
+import { seedWrites, writesFacts } from './egdesk-real-engine-delete.mjs'
 import { createTurnHooks } from './egdesk-real-engine-extensions.mjs' // the lanes' per-turn hooks (memory, journey, ...): registered in egdesk-real-engine-registrations.mjs
 import { CHECK_HOOKS, hookDecisionFlags, hookFlags } from './egdesk-real-engine-hooks.mjs'
 
@@ -230,6 +235,8 @@ export function preflight(options, scripts, { env = process.env, exists = isExec
     const flagged = scripts.flatMap(({ script }) => script.conversations.filter(c => c.draftCheck || Object.keys(c.flags ?? {}).some(k => DECISION_DEPENDENT_FLAGS.includes(k))).map(c => `${script.set}/${c.id} (${[...(c.draftCheck ? ['draftCheck'] : []), ...Object.keys(c.flags ?? {}).filter(k => DECISION_DEPENDENT_FLAGS.includes(k))].join(', ')})`))
     const agentRooms = scripts.flatMap(({ script }) => script.conversations.filter(c => c.agentProfile).map(c => `${script.set}/${c.id}`))
     if (agentRooms.length && !options.persisted) problems.push(`an agentProfile conversation is a direct room, which is not one-time: it needs --persisted-with-cleanup: ${agentRooms.join(', ')}`)
+    const engineGone = scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => t.expect?.deleted?.engineGone)).map(c => `${script.set}/${c.id}`)) // c28
+    if (engineGone.length && !options.persisted) problems.push(`deleted.engineGone proves that the engine's saved thread is gone (thread/resume fails): the thread must be saved, so it needs --persisted-with-cleanup: ${engineGone.join(', ')}`)
     if (flagged.length) problems.push(`these flags act only through the Decision model, so they need --decisions: ${flagged.join('; ')}`)
   }
   return problems
@@ -444,8 +451,9 @@ export async function runConversation({ options, set, conversation, deps = {} })
     const OWNER = `codex:real-engine-check`
     const contexts = new ContextRuntime({ store: new ImmutableContextStore({ dataDir: path.join(dataDir, 'context'), allowedRoots: [scratch] }), getOwnerKey: () => OWNER })
     let wikiAdapter = null
+    const wikiWrites = openWikiWrites({ dataDir: settingsDir, log() {} }) // c28: eager, so a script's seeded memory and the deletion proof read the same store the adapter writes
     const ontologyStore = { readGraph: async () => memoryHook.graph() } // memory hook: empty unless the script seeds pages
-    const turnMemoryConfig = createTurnMemoryConfig({ settings, ontologyStore, ...turnMemoryFlagsFromEnv(FLAG), getAdapter: () => wikiAdapter ??= createWikiAdapter({ writes: openWikiWrites({ dataDir: settingsDir, log() {} }) }) })
+    const turnMemoryConfig = createTurnMemoryConfig({ settings, ontologyStore, ...turnMemoryFlagsFromEnv(FLAG), getAdapter: () => wikiAdapter ??= createWikiAdapter({ writes: wikiWrites }) })
     if (options.decisions) await settings.turnMemory.save(memoryHook.mode ?? 'advisory') // memory hook
     if (memoryHook.mode === 'on') turnMemoryConfig.eligible = memoryHook.eligible // memory hook: turn memory also on this conversation's one-time thread
     // EG-Desk's own model and effort (EGDESK_CODEX_MODEL / EGDESK_CODEX_EFFORT, as the bridge reads them) reach the wiring from the shell the check runs in:
@@ -484,6 +492,8 @@ export async function runConversation({ options, set, conversation, deps = {} })
       toolProviders: wiring.toolProviders, ownTools: wiring.ownTools, decisionContext,
       roomAccount: { mode: () => (FLAG.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') } })
     chat.setConnection(true)
+    registerConversationForgetters(chat, { turnMemoryConfig }) // c28: pending readings (c17) and conversation memory (c18), as the bridge registers them
+    const chatRoutes = createChatHttpHandler(chat, async () => { throw Object.assign(new Error('the forget route takes no engine account check'), { code: 'unexpected_auth' }) })
     try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
     attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests, limits: deps.hookLimits?.[h.name] }))
     rec.phases.composedMs = ms(t0)
@@ -573,16 +583,43 @@ export async function runConversation({ options, set, conversation, deps = {} })
     let generation = 0
     const deleteTurn = async (index, turn) => {
       const key = clientThreadId
-      let out = null, error = null
-      try { out = await chat.forgetConversation({ clientThreadId: key }) } catch (e) { error = String(e?.code ?? e?.message ?? 'error').slice(0, 60) }
-      let stored = null, messages = null
+      let out = null, error = null, route = null
+      // c28: what a deletion is judged against is read before it: the conversation's rows, its memory seeds (synthetic, written into this check's own store), its engine thread
+      const seeded = conversation.seededWrites ?? null
+      let before = { messages: null }, writesBefore = null
+      try { before = { messages: store.listMessages(key, { limit: 500 }).messages.length } } catch { before = { messages: 0 } }
+      try {
+        if (seeded) { seedWrites(wikiWrites, seeded, { clientThreadId: key, firstMessageRef: (store.localMessageIds?.(key) ?? [])[0] ? `chat-message:${store.localMessageIds(key)[0]}` : null }); writesBefore = writesFacts(wikiWrites, { clientThreadId: key, seeded }) }
+      } catch (e) { error = `seed_failed: ${String(e?.message ?? e).slice(0, 80)}` }
+      const threadAtDelete = nativeThread
+      // the window's own request: POST /chat/conversation/forget { clientThreadId }, handled by the product's route (it is a local write: no engine account check)
+      try {
+        const payload = Buffer.from(JSON.stringify({ clientThreadId: key }))
+        const req = Object.assign(Readable.from([payload]), { url: '/chat/conversation/forget', method: 'POST', socket: { remoteAddress: '127.0.0.1' }, headers: { host: '127.0.0.1:39218', origin: 'chrome://browser', 'content-type': 'application/json' } })
+        const res = Object.assign(new EventEmitter(), { setHeader() {}, writeHead(status) { this.status = status }, end(body) { this.body = body ? JSON.parse(body) : null; this.writableEnded = true } })
+        const handled = await chatRoutes(req, res, new URL('/chat/conversation/forget', 'http://127.0.0.1:39218'))
+        if (handled !== true) throw Object.assign(new Error('route not handled'), { code: 'route_unhandled' })
+        route = { status: res.status ?? null, body: res.body ?? null }; out = res.status === 200 ? res.body : null
+        if (res.status !== 200) error = `route_status_${res.status}`
+      } catch (e) { error = String(e?.code ?? e?.message ?? 'error').slice(0, 60) }
+      let stored = null, messages = null, listed = null, localIds = null
       try { stored = Boolean(store.getConversation?.(key)) } catch { stored = null }
       // a conversation the store no longer knows has no message list: listing it throws, which is the answer (0 messages)
       try { messages = store.listMessages(key, { limit: 5 }).messages.length } catch { messages = stored === false ? 0 : null }
+      try { listed = store.listConversations().threads.some(x => x.clientThreadId === key) } catch { listed = null }
+      try { localIds = (store.localMessageIds?.(key) ?? []).length } catch { localIds = null }
       const gone = stored === false && messages === 0
-      const summary = out ? { stored, messages, interrupted: out.interrupted ?? 0, history: out.history ?? null, engineHistory: (out.engineHistory ?? []).map(h => ({ state: h.state, reason: h.reason ?? null })) } : null
-      const expectations = [{ check: 'action_taken', ok: out?.accepted === true, detail: { error } }, ...checkTurnExpectations(turn.expect ?? {}, { conversationGone: gone, posted: [], toolCalls: [], native: { commandExecution: 0, fileChange: 0, approvals: 0 } })]
-      await pushTurn({ index: index + 1, action: 'delete', approve: [], subTurns: [{ action: 'delete', accepted: out?.accepted === true, error, conversationGone: gone, summary }], posted: [], asked: 0, undoRecords: undoCount(), expectations, ok: expectations.every(e => e.ok) })
+      // the engine's thread: a persisted thread that was deleted cannot be resumed (the engine answers an error); a thread that is still there resumes
+      let resume = null
+      if (persisted && threadAtDelete) {
+        try { await request('thread/resume', { threadId: threadAtDelete }); resume = { failed: false, error: null } }
+        catch (e) { resume = { failed: true, error: clip(String(e?.message ?? e?.code ?? 'error'), 120) } }
+      }
+      const writesAfter = seeded ? writesFacts(wikiWrites, { clientThreadId: key, seeded }) : null
+      const deletion = { route, before, store: { conversation: stored, messages, listed, localIds }, resume, writesBefore, writesAfter, seeded }
+      const summary = out ? { stored, messages, interrupted: out.interrupted ?? 0, history: out.history ?? null, engineHistory: (out.engineHistory ?? []).map(h => ({ state: h.state, reason: h.reason ?? null })), modules: out.modules ?? null } : null
+      const expectations = [{ check: 'action_taken', ok: out?.accepted === true, detail: { error } }, ...checkTurnExpectations(turn.expect ?? {}, { conversationGone: gone, posted: [], toolCalls: [], native: { commandExecution: 0, fileChange: 0, approvals: 0 }, deletion })]
+      await pushTurn({ index: index + 1, action: 'delete', approve: [], subTurns: [{ action: 'delete', accepted: out?.accepted === true, error, conversationGone: gone, summary }], posted: [], asked: 0, undoRecords: undoCount(), deletion: { route: route && { status: route.status, modules: route.body?.modules ?? null }, before, store: deletion.store, resume, writes: seeded ? { before: writesBefore && { pendingFromConversation: writesBefore.pendingFromConversation, conversationPages: writesBefore.conversationPages.length }, after: writesAfter && { pendingFromConversation: writesAfter.pendingFromConversation, conversationPages: writesAfter.conversationPages.length, pages: writesAfter.pages } } : null }, expectations, ok: expectations.every(e => e.ok) })
       clientThreadId = `check-${conversation.id}-${++generation}`; nativeThread = null; first = true; seen = 0
     }
 
@@ -709,6 +746,8 @@ export async function runCheck(options, scripts, deps = {}) {
   makeDirs(options.out)
   const agentRooms = scripts.flatMap(({ script }) => script.conversations.filter(c => c.agentProfile).map(c => `${script.set}/${c.id}`))
   if (agentRooms.length && !options.persisted) throw Object.assign(new Error(`an agentProfile conversation is a direct room, which is not one-time: it needs --persisted-with-cleanup (${agentRooms.join(', ')})`), { code: 'agent_room_needs_persisted' })
+  const engineGoneRooms = scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => t.expect?.deleted?.engineGone)).map(c => `${script.set}/${c.id}`)) // c28
+  if (engineGoneRooms.length && !options.persisted) throw Object.assign(new Error(`deleted.engineGone needs a saved engine thread: it needs --persisted-with-cleanup (${engineGoneRooms.join(', ')})`), { code: 'engine_gone_needs_persisted' })
   assertCleanupGuaranteed(options, deps, deps.env ?? process.env)
   for (const { script } of scripts) {
     for (const conversation of script.conversations) {
