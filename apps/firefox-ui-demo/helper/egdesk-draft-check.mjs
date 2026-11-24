@@ -133,15 +133,18 @@ export function evidenceFromPacket(packet) {
   return out
 }
 
-const normalizedEvidence = items => (Array.isArray(items) ? items : []).filter(item => typeof item?.text === 'string' && item.text.trim())
+// An item with opaque: true is a content-free reference (a tool output the checker may not receive). It stands in the list so the
+// checker knows material existed, but nothing can be concluded as "not in the evidence" while one is present.
+const normalizedEvidence = items => (Array.isArray(items) ? items : []).filter(item => item?.opaque === true || (typeof item?.text === 'string' && item.text.trim()))
   .slice(0, DRAFT_CHECK_LIMITS.evidenceItems).map((item, index) => ({ id: String(item.id ?? `item${index + 1}`), kind: item.kind ?? null, time: item.time ?? 'unknown',
-    status: item.status ?? null, source: item.source ?? null, text: compactText(item.text, DRAFT_CHECK_LIMITS.evidenceChars) }))
+    status: item.status ?? null, source: item.source ?? null, opaque: item.opaque === true,
+    text: item.opaque === true ? '(content not available to the checker)' : compactText(item.text, DRAFT_CHECK_LIMITS.evidenceChars) }))
 
 const words = text => new Set(lower(text).match(/[\p{L}\p{N}_]{3,}/gu) ?? [])
 /** Evidence items that share at least one distinctive word with a sentence (fixed lexical overlap, no judgment). */
 function related(spanText, evidence) {
   const mine = words(spanText)
-  return evidence.filter(item => { for (const w of words(item.text)) if (mine.has(w) && w.length >= 4) return true; return false })
+  return evidence.filter(item => !item.opaque).filter(item => { for (const w of words(item.text)) if (mine.has(w) && w.length >= 4) return true; return false })
 }
 
 // ---- the one Decision request -----------------------------------------------------------------------------
@@ -167,12 +170,12 @@ function readFindings({ answers, claims, terms, evidence, thresholds, checkableO
     const present = readPredicate(answers, `present_${i}`, DRAFT_CHECK_THRESHOLDS.finding)
     const near = related(span.text, evidence).map(item => ({ id: item.id, time: item.time, status: item.status }))
     const answer = answers?.[`claim_${i}`]
-    judgments.push({ q: 'claim_support', would: support.state === 'accepted' && (support.value === 'contradicted' || (isCheckable(span.text) && (support.value === 'not_mentioned' || support.value === 'insufficient'))) ? 'reject' : support.state === 'accepted' ? 'accept' : 'unknown',
+    judgments.push({ q: 'claim_support', would: support.state === 'accepted' && (support.value === 'contradicted' || (!evidence.some(item => item.opaque) && isCheckable(span.text) && (support.value === 'not_mentioned' || support.value === 'insufficient'))) ? 'reject' : support.state === 'accepted' ? 'accept' : 'unknown',
       value: support.state === 'accepted' ? support.value : null, confidence: answer?.confidence, top: answer?.probabilities?.[0]?.probability, second: answer?.probabilities?.[1]?.probability,
       options: CLAIM_SUPPORT.length, threshold: thresholds.choice, minMargin: thresholds.margin })
     judgments.push({ q: 'claim_present', would: present.state === 'yes' ? 'reject' : present.state === 'no' ? 'accept' : 'unknown', p: present.probability, threshold: DRAFT_CHECK_THRESHOLDS.finding })
     if (support.state === 'accepted' && support.value === 'contradicted') findings.push({ kind: 'contradicted', span: i, evidence: near })
-    else if (support.state === 'accepted' && (support.value === 'not_mentioned' || support.value === 'insufficient') && isCheckable(span.text)) findings.push({ kind: 'unverified', span: i, evidence: near })
+    else if (!evidence.some(item => item.opaque) && support.state === 'accepted' && (support.value === 'not_mentioned' || support.value === 'insufficient') && isCheckable(span.text)) findings.push({ kind: 'unverified', span: i, evidence: near })
     if (present.state === 'yes') findings.push({ kind: 'present_tense', span: i, evidence: near.filter(item => item.time !== 'present') })
   })
   terms.forEach((t, i) => {
@@ -204,6 +207,21 @@ function certainPart(draft, spans, flaggedIdx) {
   return { text: kept.map(s => s.text).join('\n').trim(), hasClaims: claimsLeft.length > 0 }
 }
 
+// The sentences a post without any revision would keep: everything the findings did not flag.
+function trimmed(state) {
+  const flagged = new Set(state.findings.flatMap(f => (f.span === undefined ? [] : [state.claimSpans[f.span].index])))
+  // An internal term is not a sentence-level finding: cut the sentences that contain it.
+  for (const f of state.findings) if (f.kind === 'internal_term') for (const s of state.claimSpans) if (lower(s.text).includes(lower(f.term))) flagged.add(s.index)
+  return certainPart(null, state.spans, flagged)
+}
+
+/** What the check would do, in closed words: { check: would_pass | would_revise, ifUnrevised: would_trim | would_ask | null }. */
+export function verdictOf(state) {
+  if (!state) return null
+  if (!state.findings.length) return { check: 'would_pass', ifUnrevised: null }
+  return { check: 'would_revise', ifUnrevised: trimmed(state).hasClaims ? 'would_trim' : 'would_ask' }
+}
+
 async function judge({ draft, evidence, userText, internalVocabulary, client, thresholds, timeoutMs, signal }) {
   const spans = segmentDraft(draft)
   const claimSpans = spans.map((s, i) => ({ ...s, index: i })).filter(s => s.kind === 'claim').slice(0, DRAFT_CHECK_LIMITS.claims)
@@ -216,6 +234,8 @@ async function judge({ draft, evidence, userText, internalVocabulary, client, th
     if (!findings.length && !terms.length) return { spans, claimSpans, terms, findings: [], judgments: [], called: false, skipped: 'nothing_checkable' }
     if (!terms.length) return { spans, claimSpans, terms, findings, judgments: [], called: false, skipped: null, local: true }
   }
+  // Only content-free references and no listed term: nothing the judge could compare the sentences with.
+  if (evidence.length && evidence.every(item => item.opaque) && !terms.length) return { spans, claimSpans, terms, findings: [], judgments: [], called: false, skipped: 'nothing_checkable' }
   const request = buildRequest({ claims: claimSpans, terms, evidence })
   const result = await client.decide({ ...request, timeoutMs, signal, promptCacheKey: 'draft-check' })
   const read = readFindings({ answers: result.answers, claims: claimSpans, terms, evidence, thresholds })
@@ -234,14 +254,19 @@ async function judge({ draft, evidence, userText, internalVocabulary, client, th
 export async function checkDraft({ draft, evidence = [], userText = '', internalVocabulary = [], mode = 'off', client, revise = null, budget = null,
   now = () => performance.now(), thresholds: overrides, signal } = {}) {
   const calibration = { feature: 'draft_check', mode: mode === 'advisory' ? 'advisory' : 'on', judgments: [] }
-  const out = (text, outcome, extra = {}) => ({ action: 'post', text, outcome, calls: extra.calls ?? 0, findings: extra.findings ?? [], calibration:
-    { ...calibration, ...(extra.fallback ? { fallback: extra.fallback } : {}), attached: text !== draft } })
+  let firstState = null
+  const out = (text, outcome, extra = {}) => ({ action: 'post', text, outcome, calls: extra.calls ?? 0, findings: extra.findings ?? [], verdict: verdictOf(firstState),
+    stats: firstState ? { sentences: firstState.claimSpans.length, terms: firstState.terms.length,
+      items: proofCount.items, opaque: proofCount.opaque } : null,
+    calibration: { ...calibration, ...(extra.fallback ? { fallback: extra.fallback } : {}), attached: text !== draft } })
+  const proofCount = { items: 0, opaque: 0 }
   if (typeof draft !== 'string' || !draft.trim()) return out(draft, 'unchecked')
   if (mode !== 'advisory' && mode !== 'on') return out(draft, 'unchecked')
   if (!client || typeof client.decide !== 'function') return out(draft, 'unchecked', { fallback: 'not_configured' })
   const started = now()
   const thresholds = decisionThresholds(overrides)
   const proof = normalizedEvidence(evidence)
+  proofCount.items = proof.filter(item => !item.opaque).length; proofCount.opaque = proof.filter(item => item.opaque).length
   let calls = 0
   const attempt = async (text, timeoutMs) => {
     if (budget && budget.canSpend() !== true) throw new DecisionError('budget_exceeded', 'budget')
@@ -255,6 +280,7 @@ export async function checkDraft({ draft, evidence = [], userText = '', internal
   let first
   try { first = await attempt(draft, DRAFT_CHECK_LIMITS.firstCheckMs) }
   catch (error) { return out(draft, 'unchecked', { calls, fallback: error instanceof DecisionError ? error.code : 'unreachable' }) }
+  firstState = first
   calibration.candidates = first.claimSpans.length + first.terms.length
   calibration.judgedTotal = first.judgments.length
   if (!first.findings.length) return out(draft, first.skipped ? 'unchecked' : 'passed', { calls, findings: [] })
@@ -273,10 +299,7 @@ export async function checkDraft({ draft, evidence = [], userText = '', internal
   return fallbackPost(draft, first, calls, first.findings)
 
   function fallbackPost(text, state, callCount, firstFindings) {
-    const flagged = new Set(state.findings.flatMap(f => (f.span === undefined ? [] : [state.claimSpans[f.span].index])))
-    // An internal term is not a sentence-level finding: cut the sentences that contain it.
-    for (const f of state.findings) if (f.kind === 'internal_term') for (const s of state.claimSpans) if (lower(s.text).includes(lower(f.term))) flagged.add(s.index)
-    const part = certainPart(text, state.spans, flagged)
+    const part = trimmed(state)
     if (!part.hasClaims) return out(DRAFT_CHECK_COPY.askUser, 'ask_user', { calls: callCount, findings: firstFindings })
     return out(`${part.text}\n\n${DRAFT_CHECK_COPY.partial}`, 'certain_part', { calls: callCount, findings: firstFindings })
   }

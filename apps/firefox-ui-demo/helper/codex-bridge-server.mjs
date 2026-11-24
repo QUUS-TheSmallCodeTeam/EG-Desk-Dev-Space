@@ -455,6 +455,8 @@ const chat = new CodexChatRuntime({
     configured: () => decisionCredentials.getApiKey() !== null,
     client: decisionClient,
     calibrationLog: decisionCalibrationLog,
+    // Advisory draft check after an answer is posted (records only). Developer flag, default off; it has no settings screen entry.
+    ...(process.env.EGDESK_DRAFT_CHECK === 'advisory' ? { draftCheck: { mode: () => 'advisory' } } : {}),
     topicRecipient: recipientForCodexDecisions,
     recipientForChatChoice: recipientForCodexDecisions,
     reviewRevision: () => handleBoardPresentationHttp.settingsRevision(),

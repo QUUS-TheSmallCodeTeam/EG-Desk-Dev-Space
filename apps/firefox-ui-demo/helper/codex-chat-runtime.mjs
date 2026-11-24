@@ -10,6 +10,7 @@ import { nativeQaCommandReceipt, validateQaCommandNonce, validateQaOutputMarkers
 import { MAX_COMPOSED } from './egdesk-profile-store.mjs'
 import { CHAT_CHOICE_BAR, chatChoiceManual, runChatChoice, validateChatChoice } from './egdesk-chat-choice.mjs'
 import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
+import { DRAFT_CHECK_LIMITS, checkDraft } from './egdesk-draft-check.mjs'
 import { browserRefusal, ceilingAllowsBrowserTool, ceilingAllowsComputerTool, ceilingApprovalRefusal, ceilingBrowserSelection, ceilingNarrows, ceilingReportNotices, CEILING_MESSAGES, computerRefusal, effectiveToolCeiling, liveBrowserSelected, loadCeilingThreadOverrides, mergeCeilingOverrides, recordedToolCeiling, verifyCeilingNativeThread } from './codex-chat-tool-ceiling.mjs'
 import { HOST_CONTROL_POLICIES, HOST_LEASE_CODES, requiresHostControl } from './egdesk-host-lease.mjs'
 import { COMPUTER_ADAPTER_CODES, refusedResult } from './egdesk-computer-adapter.mjs'
@@ -768,6 +769,9 @@ export class CodexChatRuntime {
     // { mode(): 'off'|'advisory'|'on', configured(): boolean, client, collect({ body, context }) → candidates, budgetMs? } or null.
     this.speechRuns = new WeakMap() // private runtime-only grants; never projected onto public runs
     this.calibrationRuns = new WeakMap() // run -> content-free calibration entry id; process-local
+    this.draftCheckRuns = new Set() // in-flight advisory draft checks (never awaited by a turn)
+    this.draftCheckTurns = new WeakMap() // run -> what the model had this turn, for the check after the answer is posted
+    this.draftCheckSeen = new WeakMap() // run -> final-answer item ids already handed to the check
     this.turnMemoryRuns = new Set() // in-flight advisory memory jobs (never awaited by a turn)
     this.turnMemoryShadow = new Map() // thread -> receipts of what advisory packets WOULD have delivered; in memory only, bounded
     this.turnMemoryCalibration = new WeakMap() // run -> calibration handle of the advisory memory entry
@@ -2623,6 +2627,7 @@ export class CodexChatRuntime {
         }
       }
       if (decision) this.noteDecisionContext(run, decision)
+      this.noteDraftCheckTurn(run, body, context, decision, bounded, Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'))
       if (memoryPosition) this.startTurnMemoryAdvisory(run, body, context, memoryPosition, performance.now() - memoryClock) // after dispatch, in the background: never delays or changes the turn
       // Notifications can precede the RPC response. Only the returned turn ID
       // may inherit this request's correlation; other turns remain unclaimed.
@@ -4521,6 +4526,81 @@ export class CodexChatRuntime {
     } catch { /* ignore */ }
   }
 
+  // ---- Advisory draft check (egdesk-draft-check.mjs). Record only: the posted answer is never held, changed or delayed. ----
+  // Config: decisionContext.draftCheck = { mode(): 'off'|'advisory', eligible?({ body, context }), internalVocabulary?({ run }) → string[], deadlineMs? }. Absent, or any
+  // mode other than 'advisory', means off. 'on' (hold, revise, post) is deliberately not implemented: it belongs at settleTopicAnswer
+  // (see the c8 report for the exact design). Gates: the Decision mode must be advisory/on with a saved key; only a direct, non-stateless
+  // DM turn without guarded evidence is checked; what leaves the machine is the posted sentences plus catalog text that already went to
+  // the decision model; tool outputs are sent as content-free references only.
+  draftCheckMode() {
+    try { return this.decisionContext?.draftCheck?.mode?.() === 'advisory' ? 'advisory' : 'off' } catch { return 'off' }
+  }
+
+  draftCheckIdle() { return Promise.allSettled([...this.draftCheckRuns]) }
+
+  noteDraftCheckTurn(run, body, context, decision, bounded, extraKeys = []) {
+    try {
+      if (this.draftCheckMode() !== 'advisory') return
+      const dc = this.decisionContext?.draftCheck
+      const eligible = !bounded && (typeof dc?.eligible === 'function' ? dc.eligible({ body, context }) === true
+        : context.channelKind === 'direct' && !context.stateless && !context.board && body.boardId == null)
+      let skip = eligible ? null : 'ineligible', evidence = []
+      if (!skip && decision?.result?.privateTopicBatch) skip = 'guarded'
+      if (!skip && decision?.mode === 'on' && decision.result?.status === 'ready') {
+        const list = decision.result.draftEvidence
+        if (!Array.isArray(list)) skip = 'unknown'
+        else if (list.some(item => item.guarded)) skip = 'guarded'
+        else evidence = list.map(({ guarded, ...item }) => item)
+      }
+      // Application blocks that rode along this turn (shared messages and the like): the model saw them, the checker may not.
+      const refs = extraKeys.slice(0, 4).map((key, i) => ({ id: `ctx${i + 1}`, kind: 'context', time: 'unknown', source: 'application', opaque: true }))
+      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...refs], userText: typeof body.message === 'string' ? body.message : '' })
+    } catch { /* the check must never affect the turn */ }
+  }
+
+  startDraftCheckAdvisory(run, itemId, text) {
+    try {
+      if (this.draftCheckMode() !== 'advisory') return
+      const turn = this.draftCheckTurns.get(run), setup = this.decisionContext
+      if (!turn || !setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return
+      let seen = this.draftCheckSeen.get(run)
+      if (!seen) this.draftCheckSeen.set(run, seen = new Set())
+      if (seen.has(itemId) || seen.size >= 4) return
+      seen.add(itemId)
+      const own = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
+      const tools = (run.activities || []).filter(a => !own.has(a.kind)).slice(0, 8)
+        .map((a, i) => ({ id: `tool${i + 1}`, kind: 'tool', time: 'present', status: typeof a.status === 'string' ? a.status : null, source: `tool:${a.kind}`, opaque: true }))
+      const job = this.runDraftCheckAdvisory(text, turn, tools).catch(() => {})
+      this.draftCheckRuns.add(job)
+      void job.finally(() => this.draftCheckRuns.delete(job))
+    } catch { /* the check must never affect the turn */ }
+  }
+
+  async runDraftCheckAdvisory(text, turn, tools) {
+    const setup = this.decisionContext, dc = setup.draftCheck, log = setup.calibrationLog
+    const controller = new AbortController(), t0 = performance.now()
+    const limit = Number.isSafeInteger(dc.deadlineMs) && dc.deadlineMs > 0 ? dc.deadlineMs : 15000
+    const timer = setTimeout(() => controller.abort(), limit)
+    timer.unref?.()
+    const record = fields => { try { log?.record?.({ feature: 'draft_check', mode: 'advisory', attached: false, judgments: [], ...fields }) } catch { /* ignore */ } }
+    try {
+      if (turn.skip) { record({ fallback: 'evidence_unavailable' }); return }
+      let vocabulary = []
+      try { vocabulary = (await dc.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
+      const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))
+      const check = checkDraft({ draft: text, evidence: [...turn.evidence, ...tools], userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
+        mode: 'advisory', client: setup.client, signal: controller.signal })
+      void check.catch(() => {}) // a check that outlives the deadline must not surface later
+      const result = await Promise.race([check, aborted])
+      const totalMs = performance.now() - t0
+      if (!result) { record({ fallback: 'timeout', timing: { totalMs, calls: null } }); return }
+      record({ ...result.calibration, mode: 'advisory', attached: false,
+        ...(result.verdict ? { check: result.verdict.check, ifUnrevised: result.verdict.ifUnrevised } : {}),
+        evidence: result.stats ? { items: result.stats.items, opaque: result.stats.opaque, sentences: result.stats.sentences, terms: result.stats.terms } : undefined,
+        timing: { totalMs, calls: result.calls, withinBudget: totalMs <= DRAFT_CHECK_LIMITS.firstCheckMs } })
+    } finally { clearTimeout(timer); controller.abort() }
+  }
+
   // ---- Advisory turn memory (egdesk-turn-memory.mjs). Record only: nothing here changes what the answering model receives. ----
   // Config: decisionContext.turnMemory = { mode(): 'off'|'advisory', wiki({ body, context }) → wiki|null, scope?, live?, eligible?, budget?, ontologyWrite?, deadlineMs? }.
   // Absent, or any mode other than 'advisory', means off. 'on' (attaching the packet) is deliberately not implemented here yet.
@@ -5132,6 +5212,8 @@ export class CodexChatRuntime {
             this.emitLegacy({ type: 'assistant-delta', conversationId: run.conversationId, messageId: run.answerId, delta })
           }
           this.emit(run, 'message.completed', { ...message, text: finalText, ...(finalText.length > MAX_TEXT ? { projectionTruncated: true } : {}) }, item.id)
+          // Advisory draft check (flag, default off): runs after the answer is posted, detached; it never changes or delays it.
+          if (item.phase === 'final_answer' && item.completionConfirmed === true) this.startDraftCheckAdvisory(run, item.id, finalText)
           this.noteBoardPeerSpeech(run, item, message)
         }
       }
