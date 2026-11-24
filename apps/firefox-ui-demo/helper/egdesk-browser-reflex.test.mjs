@@ -352,3 +352,12 @@ test('L8: a same-site link is judged by its href words as well as its label; uns
   assert.deepEqual(options.map(o => o.item.element.ref), ['c'])
   assert.equal(excluded.gated, 2)
 })
+
+test('L8 C4: session-end, ordering, grant and cancellation destinations are not candidates; plain paths are', () => {
+  const link = (ref, href) => ({ ref, role: 'link', label: 'Continue', tag: 'a', href, value: '' })
+  const hrefs = ['/logout', '/order/place', '/grant/allow', '/account/close', '/subscriptions/cancel', '/ko/로그아웃', '/permissions/allow']
+  const { options, excluded } = buildReflexCandidates({ url: 'https://example.com/cart', interactiveElements: [
+    ...hrefs.map((h, i) => link('d' + i, 'https://example.com' + h)), link('ok1', 'https://example.com/pricing'), link('ok2', 'https://example.com/orders/123') ] })
+  assert.deepEqual(options.map(o => o.item.element.ref), ['ok1', 'ok2'])
+  assert.equal(excluded.gated, hrefs.length)
+})

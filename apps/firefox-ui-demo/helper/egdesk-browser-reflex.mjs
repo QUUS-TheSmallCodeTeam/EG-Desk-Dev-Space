@@ -142,7 +142,7 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
     if (kind === 'navigate') {
       if (!isAllowedUrl(element.href, snapshot)) { excluded.offSite++; continue }
       const words = hrefWords(element.href)
-      if (words && classify({ mode: 'activate', label: words, role: element.role, tag: element.tag, url: snapshot.url })?.category !== 'none') { excluded.gated++; continue }
+      if (words && classify({ mode: 'activate', label: words, role: element.role, tag: element.tag, url: snapshot.url, href: true })?.category !== 'none') { excluded.gated++; continue }
       counters.navigate++
       entries.push({ label: `[L${counters.navigate}] ${label || pathOf(element.href)}`, description: `link to ${pathOf(element.href)}`, item: { kind, element } })
       continue

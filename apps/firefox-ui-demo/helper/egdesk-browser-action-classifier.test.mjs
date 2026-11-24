@@ -212,3 +212,25 @@ test('gates: today every classified action is allowed; the D-B3 preset hands pay
   for (const gate of ACTION_GATES) assert.ok(Object.hasOwn(ACTION_GATE_TEXT, gate))
   for (const category of ACTION_CATEGORIES) assert.ok(ACTION_CATEGORY_TEXT[category].ko)
 })
+
+// ---- L8 C4: same-site dangerous classes the c3 measurement missed (label and address paths) ----
+test('ordering, permission grants, session end, account closure and contract cancellation are never "none" (English and Korean)', () => {
+  const classes = {
+    pay: ['Place order', '주문하기', '주문 하기', '결제하기', 'Order now', 'order place', 'orders place', 'Proceed to checkout'],
+    grant: ['Allow notifications', 'Allow location access', '알림 허용', '위치 허용', '카메라 허용', '권한 부여', '권한 허용', 'Grant access', 'grant allow', 'Authorize'],
+    delete: ['Log out', 'Logout', 'Sign out', 'signout', '로그아웃', '로그 아웃', '로그오프', '탈퇴', '회원 탈퇴', 'Close my account', 'account close', '계정 폐쇄',
+      '구독 취소', '구독 해지', 'subscriptions cancel', 'Cancel my plan', 'Terminate contract', '계약 해지', 'membership cancel', 'plan cancel', 'contract cancellation'],
+  }
+  for (const [category, labels] of Object.entries(classes)) for (const label of labels) assert.equal(activate(label), category, label)
+})
+test('bare Allow stays a cookie banner outside consent pages for a button, but names a grant as a link destination', () => {
+  assert.equal(activate('Allow', { url: 'https://shop.example/' }), 'none')
+  assert.equal(activate('모두 허용', { url: 'https://shop.example/' }), 'none')
+  assert.equal(classifyAction({ label: 'permissions allow', role: 'link', href: true, url: 'https://shop.example/' }).category, 'grant')
+  assert.equal(classifyAction({ label: 'permissions allow', role: 'link', url: 'https://shop.example/' }).category, 'none', 'only the destination flag changes it')
+})
+test('benign labels that share a word stay ordinary', () => {
+  for (const label of ['Show details', 'Cancel', 'Orders', 'My orders', '주문 내역', '다음', '취소', '닫기', 'Close', 'Sign in', '로그인', 'Log in', 'Settings', 'Search']) {
+    assert.equal(activate(label), 'none', label)
+  }
+})
