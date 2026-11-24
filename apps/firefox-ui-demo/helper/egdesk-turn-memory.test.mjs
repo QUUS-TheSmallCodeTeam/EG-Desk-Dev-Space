@@ -17,9 +17,9 @@ const PG_HELD = ['db/pg-design', 'db/pg-plan', 'db/pg-rollback', 'db/sqlite-sche
 const hash = body => crypto.createHash('sha256').update(body).digest('hex')
 const receiptsFor = (wiki, ids, threadKey = THREAD) => ({ usable: true, threadKey, pages: Object.fromEntries(ids.map(id => [id, { revision: wiki.pages.get(id).revision, hash: hash(wiki.pages.get(id).body) }])) })
 const FIRST = { kind: 'first', reason: 'no_native_thread' }, MID = { kind: 'mid', reason: 'live_thread' }
-const turn = async (message, { position = MID, wiki = buildWiki(SYNTHETIC_PAGES), held = PG_HELD, ontologyWrite = false, budget = {}, client, delivered, skipOnNeed = false, heldExcerpts = false } = {}) => {
+const turn = async (message, { position = MID, wiki = buildWiki(SYNTHETIC_PAGES), held = PG_HELD, ontologyWrite = false, budget = {}, client, delivered, skipOnNeed, heldExcerpts } = {}) => {
   const log = []
-  const r = await prepareTurnMemory({ message, wiki, client: client ?? mockJudge(log), scope: SCOPE, askedAt: ASKED, position, threadKey: THREAD, ontologyWrite, budget, skipOnNeed, heldExcerpts,
+  const r = await prepareTurnMemory({ message, wiki, client: client ?? mockJudge(log), scope: SCOPE, askedAt: ASKED, position, threadKey: THREAD, ontologyWrite, budget, ...(skipOnNeed === undefined ? {} : { skipOnNeed }), ...(heldExcerpts === undefined ? {} : { heldExcerpts }),
     delivered: delivered ?? (held ? receiptsFor(wiki, held) : null) })
   return { r, log, wiki }
 }
@@ -48,9 +48,10 @@ test('receipts count only mid-session on the same native thread; a first turn, a
 test('mid-session never reconstructs: the judge gets the MID-CONVERSATION rules, held pages by header only, and the packet repeats none of them', async () => {
   const { r, log } = await turn('PostgreSQL 마이그레이션 배포 끝났어')
   assert.equal(r.position.kind, 'mid'); assert.equal(r.memory.receipts.mode, 'next')
-  const wire = log.map(l => l.input).join('\n')
+  // The triage request shows each held page's start (<= 200 chars, the default that makes "already covered" judgeable); the fetch requests never do.
+  const wire = log.filter(l => !l.questions.includes('tn_courtesy')).map(l => l.input).join('\n')
   assert.ok(log.filter(l => !l.questions.includes('tn_courtesy')).every(l => l.next), 'every fetch request is a next-judgment request')
-  assert.match(wire, /MID-CONVERSATION/); assert.match(wire, /Held in the answering model's context/)
+  assert.match(wire, /MID-CONVERSATION/); assert.match(log.map(l => l.input).join('\n'), /Held in the answering model's context/)
   const heldBodies = PG_HELD.map(id => SYNTHETIC_PAGES.find(p => p.id === id).body)
   for (const body of heldBodies) { assert.ok(!wire.includes(body), 'a held page body is never re-sent to the judge'); assert.ok(!r.packet.includes(body), 'nor to the answering model') }
   assert.deepEqual(ids(r).sort(), ['db/pg-followup', 'db/pg-health'])
@@ -161,9 +162,9 @@ test('write path is off by default, then checks permission, revision and idempot
   assert.deepEqual(writer.apply(proposal, opts), { ...stored, replay: true }, 'same operation, same input: the same receipt')
   assert.equal(writer.apply(proposal, { ...opts, message: 'another text' }).status, 'conflict', 'same operationId with different input is a conflict')
   assert.equal(writer.apply({ ...proposal, baseRevision: '1' }, { ...opts, operationId: 'op-2' }).status, 'conflict', 'the judge saw revision 1, the page is now 2')
-  const accepted = buildWiki(SYNTHETIC_PAGES), w2 = createWikiWriter(accepted, { enabled: true, canWrite: () => true, acceptStatus: ({ reading }) => reading.status === 'done' })
-  assert.equal(w2.apply(proposal, opts).status, 'status_updated'); assert.equal(accepted.pages.get('db/pg-plan').status, 'done')
-  assert.match(accepted.pages.get('db/pg-plan').statusReadings.at(-1).state, /accepted/)
+  const ignoring = buildWiki(SYNTHETIC_PAGES), w2 = createWikiWriter(ignoring, { enabled: true, canWrite: () => true, acceptStatus: () => true })
+  assert.equal(w2.apply(proposal, opts).status, 'recorded_pending', 'a policy callback can no longer promote a reading')
+  assert.equal(ignoring.pages.get('db/pg-plan').status, 'plan')
 })
 
 test('proposals are re-validated, never trusted: unknown ops, vocabulary outside the closed sets, missing pages, missing operation id or text', () => {
@@ -278,22 +279,48 @@ test('a report whose context is already held skips the fetch but is still judged
   assert.equal(proposal.op, 'update_status'); assert.equal(proposal.pageId, 'db/pg-plan', 'the held plan page is a candidate even though nothing was fetched')
 })
 
-test('real T4 ("그럼 롤백 조건은?", rollback page NOT held, need answered 0.02): by default a decided need "no" no longer skips the fetch, only a decided courtesy does', async () => {
+test('real T4/T6 data: with titles only a decided need "no" does not skip (the wrong skip); with the held content shown (the default) need "no" skips, need "yes" fetches', async () => {
   const judge = mockJudge()
-  const real = { async decide(req) { const r = await judge.decide(req); if (req.questions.some(q => q.name === 'tn_need')) { r.answers.tn_courtesy = { type: 'predicate', probability: 0 }; r.answers.tn_need = { type: 'predicate', probability: 0.02 }; r.answers.tn_record = { type: 'predicate', probability: 0 } } return r } }
+  const answering = (need) => ({ async decide(req) { const r = await judge.decide(req); if (req.questions.some(q => q.name === 'tn_need')) { r.answers.tn_courtesy = { type: 'predicate', probability: 0 }; r.answers.tn_need = { type: 'predicate', probability: need }; r.answers.tn_record = { type: 'predicate', probability: 0 } } return r } })
   const held = ['db/pg-plan', 'db/pg-health', 'db/pg-followup']
-  const byDefault = await turn('그럼 롤백 조건은?', { client: real, held })
-  assert.equal(byDefault.r.triage.need.state, 'no'); assert.notEqual(byDefault.r.memory.status, 'skipped', 'the rollback page was never held, so the answering model needs it')
-  const optedIn = await turn('그럼 롤백 조건은?', { client: real, held, skipOnNeed: true })
-  assert.equal(optedIn.r.memory.status, 'skipped')
+  const titlesOnly = await turn('그럼 롤백 조건은?', { client: answering(0.02), held, heldExcerpts: false })
+  assert.equal(titlesOnly.r.triage.need.state, 'no'); assert.notEqual(titlesOnly.r.memory.status, 'skipped', 'titles alone are not enough to skip on need')
+  const noSkip = await turn('그럼 롤백 조건은?', { client: answering(0.02), held, skipOnNeed: false })
+  assert.notEqual(noSkip.r.memory.status, 'skipped', 'opting out leaves only courtesy skipping')
+  const covered = await turn('그럼 롤백 조건은?', { client: answering(0), held: [...held, 'db/pg-rollback'] })
+  assert.equal(covered.r.memory.status, 'skipped', 'T6: the rollback page is held and shown, so "no" is right and the fetch is skipped')
+  const notHeld = await turn('그럼 롤백 조건은?', { client: answering(1), held })
+  assert.notEqual(notHeld.r.memory.status, 'skipped', 'T4x: rollback not held, need yes, fetch runs')
 })
 
-test('held pages can be shown with their status and the start of their content, so "already covered" is judgeable; titles only stays the default', async () => {
+test('held pages are shown with their status and the start of their content by default, so "already covered" is judgeable; titles only when switched off', async () => {
   const seen = []
   const capture = { async decide(req) { seen.push(req.input.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n')); return { answers: {} } } }
-  await turn('그럼 롤백 조건은?', { client: capture, held: ['db/pg-plan'] })
-  assert.ok(!/status=plan\n/.test(seen[0]) && !seen[0].includes('아직 배포 전이다'), 'titles only by default')
+  await turn('그럼 롤백 조건은?', { client: capture, held: ['db/pg-plan'], heldExcerpts: false })
+  assert.ok(!/status=plan\n/.test(seen[0]) && !seen[0].includes('아직 배포 전이다'), 'titles only when switched off')
   seen.length = 0
-  await turn('그럼 롤백 조건은?', { client: capture, held: ['db/pg-plan'], heldExcerpts: true })
+  await turn('그럼 롤백 조건은?', { client: capture, held: ['db/pg-plan'] })
   assert.match(seen[0], /- PostgreSQL 마이그레이션 배포 계획 \| status=plan\n  12월 첫째 주에 SQLite에서 PostgreSQL로/)
+})
+
+test('no auto-promotion: only the person\'s own later explicit confirmation turns a pending reading into the status', () => {
+  const wiki = buildWiki(SYNTHETIC_PAGES), writer = createWikiWriter(wiki, { enabled: true, canWrite: () => true, acceptStatus: () => true })
+  const proposal = { op: 'update_status', pageId: 'db/pg-plan', baseRevision: '1', proposedStatus: 'done', time: { slice: 'past' }, provenance: { kind: 'utterance', by: 'user' }, spokenAt: '2026-11-24T05:30:00.000Z' }
+  const opts = { message: '배포 끝났어', scope: SCOPE, operationId: 'op-1' }
+  assert.equal(writer.apply(proposal, opts).status, 'recorded_pending')
+  const page = wiki.pages.get('db/pg-plan')
+  const ok = { by: 'user', at: '2026-11-24T06:00:00.000Z' }
+  assert.equal(writer.promote('db/pg-plan', { scope: SCOPE, confirmation: ok }).reason, 'operation_id_required')
+  for (const bad of [null, {}, { by: 'agent', at: ok.at }, { by: 'policy', at: ok.at }, { by: 'user' }, { by: 'user', at: 'tomorrow' }, 'user', { by: 'USER', at: ok.at }]) {
+    assert.equal(writer.promote('db/pg-plan', { scope: SCOPE, confirmation: bad, operationId: 'p-bad' }).reason, 'user_confirmation_required', JSON.stringify(bad))
+  }
+  assert.equal(writer.promote('db/pg-plan', { scope: SCOPE, confirmation: { by: 'user', at: '2026-11-24T05:29:00.000Z' }, operationId: 'p-early' }).reason, 'confirmation_not_later', 'confirming at or before the reading is not a later confirmation')
+  assert.equal(createWikiWriter(wiki, { enabled: true }).promote('db/pg-plan', { scope: SCOPE, confirmation: ok, operationId: 'p-deny' }).status, 'denied')
+  assert.equal(createWikiWriter(wiki).promote('db/pg-plan', { scope: SCOPE, confirmation: ok, operationId: 'p-off' }).status, 'disabled')
+  assert.equal(page.status, 'plan', 'nothing above changed the status')
+  const promoted = writer.promote('db/pg-plan', { scope: SCOPE, confirmation: ok, operationId: 'p-ok' })
+  assert.deepEqual([promoted.status, promoted.revision], ['status_updated', '3'])
+  assert.deepEqual([page.status, page.statusReadings.map(r => r.state), page.statusReadings[0].confirmedAt], ['done', ['accepted'], ok.at])
+  assert.deepEqual(writer.promote('db/pg-plan', { scope: SCOPE, confirmation: ok, operationId: 'p-ok' }), { ...promoted, replay: true })
+  assert.equal(writer.promote('db/pg-plan', { scope: SCOPE, confirmation: ok, operationId: 'p-again' }).reason, 'no_pending_reading')
 })

@@ -72,7 +72,7 @@ const statusOf = (head, text) => {
 }
 const COMPLETION = /끝났|완료|마쳤/
 const CHIT = /^(고마워|감사|ㅎㅎ|ㅋㅋ|안녕|수고|넵|네$|응$)/
-const choiceAnswer = (question, value, top, confidence = null) => {
+export const choiceAnswer = (question, value, top, confidence = null) => {
   const values = question.choices.map(c => c.value), rest = (1 - top) / Math.max(1, values.length - 1)
   const rows = [{ value, probability: top }, ...values.filter(v => v !== value).map(v => ({ value: v, probability: rest }))]
   const n = values.length
@@ -81,7 +81,7 @@ const choiceAnswer = (question, value, top, confidence = null) => {
 const quoteOf = question => { const m = /quoted exactly as a JSON string: ("(?:[^"\\]|\\.)*")/.exec(question.instructions ?? ''); try { return m ? JSON.parse(m[1]) : '' } catch { return '' } }
 // Scripted, not a model: reads markers in the sentence and mimics the real isolated-axes result pattern (a decisive time/form,
 // a weak source label for an unmarked sentence, so a label is not installed when its confidence is low).
-function mockSpeechAnswer(question) {
+export function mockSpeechAnswer(question) {
   const text = quoteOf(question), axis = question.name.split('_')[1]
   if (axis === 'source') return /들었|라고 했|라고 함|전언/.test(text) ? choiceAnswer(question, 'attributed_report', 0.97) : choiceAnswer(question, 'unspecified', 0.55)
   if (axis === 'form') return /[?？]\s*$|지\?|까\?/.test(text) ? choiceAnswer(question, 'question', 0.97) : /예정|할게|할 거|겠/.test(text) ? choiceAnswer(question, 'plan', 0.97) : choiceAnswer(question, 'assertion', 0.93)

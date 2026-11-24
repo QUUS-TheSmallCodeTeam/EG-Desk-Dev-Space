@@ -14,7 +14,7 @@ export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = n
     // Advisory records only: the write judgment (an extra call whose proposal nothing applies yet) stays off until the host has a write policy.
     ontologyWrite: false,
     budget, deadlineMs,
-    scope: ({ context }) => getAdapter().scopeFor(context),
+    scope: ({ context, body }) => getAdapter().scopeFor(context, body),
     async wiki({ body, context, sources }) {
       const adapter = getAdapter()
       let graph = null
@@ -23,7 +23,7 @@ export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = n
       // Board and explicitly selected sources only (no ontology, no transcript): those come from their own, consent-guarded mappers.
       try { candidates = (await collectDecisionCandidates({ body, clientThreadId: context?.clientThreadId ?? null, deskStore, ontologyStore: null, chatStore: null })).candidates } catch { candidates = [] }
       const speech = sources?.speech, topic = sources?.topic
-      return adapter.snapshot({ context, graph, candidates,
+      return adapter.snapshot({ context, body, graph, candidates,
         speechRecords: typeof speech?.records === 'function' ? () => speech.records() : null, speechGuard: typeof speech?.allowed === 'function' ? () => speech.allowed() === true : null,
         topicTurns: typeof topic?.turns === 'function' ? () => topic.turns() ?? [] : null, topicGuard: typeof topic?.current === 'function' ? () => topic.current() === true : null })
     },
