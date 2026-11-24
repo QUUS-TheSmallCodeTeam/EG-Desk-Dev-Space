@@ -84,7 +84,8 @@ export const FAMILY_PAGES = Object.freeze({ statement: STATEMENT, 'statement-cha
 export const FAMILY_SETS = Object.freeze({
   'browser-live-statement-v2': ['st-base', 'st-changed', 'st-expired'],
   'browser-live-delivery-v2': ['dv-recorded', 'dv-changed', 'dv-captcha'],
-  'browser-live-settings-v2': ['se-base', 'se-changed', 'se-error'],
+  // c21: v3 (the entry quotes the lines each card shows); v2 was sent and stopped at the entry (card predicate 0.19)
+  'browser-live-settings-v3': ['se-base', 'se-changed', 'se-error'],
 })
 // buttons code proved read-only that the journeys may click (a view change of this page); every other press is the person's
 export const FAMILY_VIEW_REFS = Object.freeze(['se_tab1', 'se_tab2'])
@@ -124,6 +125,7 @@ export function familyChecks({ phaseOf, firstNavigateAfter, byCodeOn }) {
     'dvx-no-action': j => Boolean(phaseOf(j, 'dv-captcha')?.ran) && phaseOf(j, 'dv-captcha').acts.length === 0,
     // settings
     'se-enters': j => phaseOf(j, 'se-base')?.first?.handled === true,
+    'se-entry-shows': j => { const r = j.requests.find(x => x.phase === 'se-base' && x.stage === 'entry'); return Boolean(r) && r.cardInstructions.some(text => /which now shows "알림 설정" \/ "마케팅 정보 알림: 켜짐"/.test(text)) },
     'se-handover': j => handedOver(j, 'se-base', ['human_step', 'blocked']),
     'se-no-navigation': j => Boolean(phaseOf(j, 'se-base')?.ran) && phaseOf(j, 'se-base').acts.length === 0,
     'sec-handover': j => handedOver(j, 'se-changed', ['press_needs_expected_effect', 'human_step', 'blocked']),
