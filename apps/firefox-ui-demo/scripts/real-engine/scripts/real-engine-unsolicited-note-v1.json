@@ -1,0 +1,54 @@
+{
+  "set": "real-engine-unsolicited-note-v1",
+  "description": "Pattern (c27): a long command and no message from the person. The heartbeat's own progress note must be written (a private turn), checked against the run's live state and posted ONCE while the command runs, with true facts (any number of seconds it states is what the clock says; it knows no output the command has not produced yet), and it is not repeated. Needs the decision composition (--decisions with a key): EGDESK_CONVERSATION_FLOW and EGDESK_DRAFT_CHECK=on. The command's output marker is computed (`done-$((20+22))` prints done-42), so a note that contains 'done-42' invented a result. The earliest a note can come is 10 s (FLOW_LIMITS.firstAfterMs with a tool step running); a second one needs 30 s after the first and a new reason, so a 45 s command must give exactly one. Expectations are code checks only.",
+  "conversations": [
+    {
+      "id": "unsolicited-note",
+      "flags": {
+        "EGDESK_CONVERSATION_FLOW": "on",
+        "EGDESK_DRAFT_CHECK": "on"
+      },
+      "folder": {
+        "README.md": "scratch folder for the real-engine check\n"
+      },
+      "turns": [
+        {
+          "say": "다음 명령을 실행하고, 끝나면 결과를 알려 줘: sleep 45 && echo done-$((20+22))",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "commandsRan": [
+              "sleep 45 && echo done-$((20+22))"
+            ],
+            "answerIncludes": [
+              "done-42"
+            ],
+            "noNativeTools": true,
+            "posted": true,
+            "postedMin": 2,
+            "turnStatus": "completed",
+            "engine": {
+              "flowMessages": {
+                "equals": 1
+              }
+            },
+            "flow": {
+              "notes": {
+                "equals": 1
+              },
+              "firstNoteMs": {
+                "min": 10000,
+                "max": 40000
+              },
+              "statedSecondsTrue": true,
+              "noResult": [
+                "done-42"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
