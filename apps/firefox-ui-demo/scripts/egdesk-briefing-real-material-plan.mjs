@@ -134,7 +134,8 @@ for (const r of spec.requests) {
     const id = `${r.id}-${c.stage}${f.captured.filter(x => x.stage === c.stage).indexOf(c) ? `-${f.captured.filter(x => x.stage === c.stage).indexOf(c) + 1}` : ''}`
     const expect = c.names.map(n => {
       const rule = want.find(w => new RegExp(`^${w.match}$`).test(n))
-      return rule ? check(n, rule.severity, rule.yes ? YES : n === 'combines' ? { max: COMBINES_NOT_YES } : NO, rule.note) : null
+      // cycle 29: notDecidedNo (lane L6's runner) where the product rule is 'does not block' (p above the family's declared no bar)
+      return rule ? check(n, rule.severity, rule.notDecidedNo ? { notDecidedNo: true } : rule.yes ? YES : n === 'combines' ? { max: COMBINES_NOT_YES } : NO, rule.note) : null
     }).filter(Boolean)
     const bytes = Buffer.from(c.wire, 'utf8'), body = JSON.parse(c.wire)
     if (body.model !== DECISION_MODEL || body.questions.some(q => q.type !== 'predicate')) throw new Error(`${id}: not a plain predicate body`)
@@ -155,7 +156,7 @@ const plan = { set: spec.set, tokenCeiling: spec.tokenCeiling,
 writeFileSync(path.join(OUT, 'plan.json'), JSON.stringify(plan, null, 2) + '\n', { mode: 0o600 })
 const total = requests.reduce((s, x) => s + x.estInputTokens, 0)
 log.push(`== plan: ${requests.length} requests, est ${total} input tokens (ceiling ${spec.tokenCeiling}); hard ${requests.reduce((s, x) => s + x.expect.filter(e => e.severity === 'hard').length, 0)}, soft ${requests.reduce((s, x) => s + x.expect.filter(e => e.severity === 'soft').length, 0)}`)
-for (const x of requests) log.push(`   ${x.id.padEnd(26)} ~${String(x.estInputTokens).padStart(5)} tok  ${x.recordOnly ? 'record only' : x.expect.map(e => `${e.name}:${e.severity[0]}${e.min !== undefined ? '>=' + e.min : '<=' + e.max}`).join(' ')}`)
+for (const x of requests) log.push(`   ${x.id.padEnd(26)} ~${String(x.estInputTokens).padStart(5)} tok  ${x.recordOnly ? 'record only' : x.expect.map(e => `${e.name}:${e.severity[0]}${e.notDecidedNo ? '>no' : e.min !== undefined ? '>=' + e.min : '<=' + e.max}`).join(' ')}`)
 if (total > spec.tokenCeiling) throw Object.assign(new Error(`over the ceiling\n${log.join('\n')}`), { log })
 return { plan, log, total }
 }
