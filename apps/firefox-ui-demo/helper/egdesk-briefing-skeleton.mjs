@@ -67,14 +67,55 @@ export function versionOf(title) {
   return base ? { base, n: Number(m[1] ?? m[2] ?? m[3]) } : null
 }
 function withTitleVersions(mats) {
-  const versioned = mats.map(m => ({ m, v: versionOf(m.title) })).filter(x => x.v)
+  // A title without a mark that equals a marked title's base ("A사 견적서" / "A사 견적서 v2") is the earlier one (version 0).
+  const versioned = mats.map(m => ({ m, v: versionOf(m.title) ?? { base: norm(m.title), n: 0, unmarked: true } })).filter(x => x.v.base)
   for (const a of versioned) for (const b of versioned) {
-    if (a === b || a.v.base !== b.v.base || a.v.n <= b.v.n) continue
+    if (a === b || a.v.base !== b.v.base || a.v.n <= b.v.n || a.v.unmarked) continue
     const linked = a.m.links.some(l => l.to === b.m.alias && VERSION_LINKS.has(l.type)) || b.m.links.some(l => l.to === a.m.alias && VERSION_LINKS.has(l.type))
     if (!linked) a.m.links.push({ type: 'supersedes', to: b.m.alias, derived: 'title' })
   }
   return mats
 }
+// A pair the judge said is two versions of one thing: the later one (by its date; an undated plan is later; else the later alias) gets the version link.
+function withJudgedVersions(mats, pairs) {
+  for (const [a, b] of Array.isArray(pairs) ? pairs : []) {
+    const x = mats.find(m => m.alias === a), y = mats.find(m => m.alias === b)
+    if (!x || !y) continue
+    const later = (x.at ?? '9999') > (y.at ?? '9999') || ((x.at ?? '9999') === (y.at ?? '9999') && x.alias > y.alias) ? [x, y] : [y, x]
+    if (!later[0].links.some(l => l.to === later[1].alias && VERSION_LINKS.has(l.type))) later[0].links.push({ type: 'supersedes', to: later[1].alias, derived: 'judged' })
+  }
+  return mats
+}
+
+// ---------------- relevance and versions: asked in the place request, combined by code ----------------
+// Relevance (cycle 17). The memory loop attached what the answering model needed as CONTEXT; that is broader than what belongs on the board for this request. So
+// each material is asked on its own: "does it contain information the request asks about?" To save tokens, ONE question stands for a whole linked group: the record
+// links those materials as one matter (same task, follows from, decided in, refers to, supersedes), so a request about one of them is about the matter. The group is
+// asked through its first material (the memory loop's own order). Yes keeps the group; no or undecided drops it (the chat answer still has it). A material linked to
+// nothing is asked about by itself.
+export function relevanceQuestions(mats) {
+  return materialGroups(mats).map(group => ({ kind: 'about', material: group[0].alias, covers: group.map(m => m.alias) }))
+}
+// Versions (cycle 17). Code resolves what the record says: a version link or a version mark in the titles (versions); any other recorded link between the two
+// (they are related some other way: not versions); different companies in the titles (not versions). What is left is asked, for pairs whose titles share a word of
+// two or more letters (a prefix counts: 견적 / 견적서), most shared words first, at most VERSION_PAIRS per briefing.
+export const VERSION_PAIRS = 3
+const COMPANY = /^[A-Za-z0-9가-힣]{1,6}사$/
+const words = title => norm(String(title ?? '').replace(VERSION_MARK, ' ')).split(/[\s()\[\],.·:/-]+/).filter(w => w.length >= 2)
+export function versionCandidates(mats) {
+  const out = []
+  for (let i = 0; i < mats.length; i++) for (let j = i + 1; j < mats.length; j++) {
+    const a = mats[i], b = mats[j]
+    if (a.links.some(l => l.to === b.alias) || b.links.some(l => l.to === a.alias)) continue
+    if ((versionOf(a.title)?.base ?? norm(a.title)) === (versionOf(b.title)?.base ?? norm(b.title))) continue // the titles say it (code)
+    const wa = words(a.title), wb = words(b.title), ca = wa.filter(w => COMPANY.test(w)), cb = wb.filter(w => COMPANY.test(w))
+    if (ca.length && cb.length && !ca.some(c => cb.includes(c))) continue
+    const shared = wa.filter(w => !COMPANY.test(w) && wb.some(v => !COMPANY.test(v) && (v === w || v.startsWith(w) || w.startsWith(v)))).length
+    if (shared >= 1) out.push({ pair: [a.alias, b.alias], shared, at: i * 100 + j })
+  }
+  return out.sort((x, y) => y.shared - x.shared || x.at - y.at).slice(0, VERSION_PAIRS).map(x => x.pair)
+}
+
 /** Materials that the records link to each other (any recorded link, either direction) belong to one matter. Largest group first, then by first member. */
 export function materialGroups(mats) {
   const parent = new Map(mats.map(m => [m.alias, m.alias])), find = a => { while (parent.get(a) !== a) a = parent.get(a); return a }
@@ -95,8 +136,10 @@ export function materialGroups(mats) {
  * A card shows at most one material and a material is shown by at most one card. Folded, outdated or unbindable cards never count.
  * parts: per group of linked materials (materialGroups), [{ alias:'P#', trait, materials:[M#], options:[{ value, component? , reuse? }] }]. There is no "none" option: each option is asked about as its own yes/no.
  */
-export function enumerateSkeleton({ materials = [], candidates = [], currentAnswerId = null, catalog = BRIEFING_CATALOG, bindings = null } = {}) {
-  const mats = withTitleVersions(normalizeMaterials(materials))
+export function enumerateSkeleton({ materials = [], candidates = [], currentAnswerId = null, catalog = BRIEFING_CATALOG, bindings = null, keep = null, versionPairs = [] } = {}) {
+  // keep: the aliases the relevance answers kept (others are dropped with their links; aliases stay as they were). versionPairs: pairs the judge said are versions.
+  let mats = withJudgedVersions(withTitleVersions(normalizeMaterials(materials)), versionPairs)
+  if (keep) { mats = mats.filter(m => keep.has(m.alias)); for (const m of mats) m.links = m.links.filter(l => keep.has(l.to)) }
   const targets = enumerateBriefingFacts({ report: '', candidates, currentAnswerId }).targets.filter(t => t.onBoard)
   const usable = targets.filter(t => t.targetable && t.visibility !== 'collapsed' && !t.retrievable && !t.superseded && !t.stale)
   const bindingOf = t => { const b = typeof t.ref?.outputId === 'string' ? bindings?.get?.(t.ref.outputId) : null; return b && Array.isArray(b.keys) && b.keys.length ? b : null }
@@ -163,9 +206,9 @@ const TRAITS = ['compare', 'sequence', 'open_items', 'single']
 //   single      fact_M#     does this material state a concrete fact?
 // A part whose only way of showing is a card already on the board for it (provenance or title, computed) is reused without a question.
 export const FIT_KINDS = Object.freeze({ compare: 'aspect', sequence: 'happened', open_items: 'todo', single: 'fact' })
-const STAGE_KINDS = { place: ['several', 'one_sentence'], fit: ['aspect', 'happened', 'todo', 'fact'], order: ['before'], fill_check: ['slot', 'step'] }
+const STAGE_KINDS = { place: ['several', 'one_sentence', 'about', 'same'], fit: ['aspect', 'happened', 'todo', 'fact'], order: ['before'], fill_check: ['slot', 'step'] }
 const SHOW = { compare: 'how these two versions differ', sequence: 'what happened across these materials, in date order', open_items: 'what is still not done in these materials', single: 'this one material' }
-export const questionName = q => (q.kind === 'several' || q.kind === 'one_sentence' ? q.kind : q.kind === 'aspect' ? `aspect_${q.part}` : ['happened', 'todo', 'fact'].includes(q.kind) ? `${q.kind}_${q.material}` : q.kind === 'before' ? `before_${q.first.part}_${q.second.part}`
+export const questionName = q => (q.kind === 'several' || q.kind === 'one_sentence' ? q.kind : q.kind === 'about' ? `about_${q.material}` : q.kind === 'same' ? `same_${q.materials[0]}_${q.materials[1]}` : q.kind === 'aspect' ? `aspect_${q.part}` : ['happened', 'todo', 'fact'].includes(q.kind) ? `${q.kind}_${q.material}` : q.kind === 'before' ? `before_${q.first.part}_${q.second.part}`
   : q.kind === 'slot' ? `slot_${q.part}_r${q.row}${q.side ? `_${q.side}` : ''}` : `step_${q.part}`)
 
 /** The closed object for one judgment, re-validated here (the bridge route is reachable from the chrome): unknown fields, aliases, components or stages refuse the whole request. */
@@ -195,6 +238,8 @@ export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
       if (!isObj(q) || !STAGE_KINDS[raw.stage].includes(q.kind)) throw 0
       let out
       if (q.kind === 'several' || q.kind === 'one_sentence') { if (!exactKeys(q, ['kind'])) throw 0; out = { kind: q.kind } }
+      else if (q.kind === 'about') { if (!exactKeys(q, ['kind', 'material']) || !mats.has(q.material)) throw 0; out = { kind: 'about', material: q.material } }
+      else if (q.kind === 'same') { if (!exactKeys(q, ['kind', 'materials']) || !Array.isArray(q.materials) || q.materials.length !== 2 || q.materials[0] === q.materials[1] || !q.materials.every(a => mats.has(a))) throw 0; out = { kind: 'same', materials: [...q.materials] } }
       else if (q.kind === 'aspect') { if (!exactKeys(q, ['kind', 'part', 'materials']) || !PART_ALIAS.test(q.part) || !Array.isArray(q.materials) || q.materials.length !== 2 || q.materials[0] === q.materials[1] || !q.materials.every(a => mats.has(a))) throw 0; out = { kind: 'aspect', part: q.part, materials: [...q.materials] } }
       else if (q.kind === 'happened' || q.kind === 'todo' || q.kind === 'fact') { if (!exactKeys(q, ['kind', 'material']) || !mats.has(q.material)) throw 0; out = { kind: q.kind, material: q.material } }
       else if (q.kind === 'before') { if (!exactKeys(q, ['kind', 'first', 'second'])) throw 0; out = { kind: 'before', first: partRef(q.first), second: partRef(q.second) }; if (out.first.part === out.second.part) throw 0 }
@@ -239,7 +284,9 @@ function questionText(q, c, catalog) {
   if (q.kind === 'one_sentence') return 'Is this request fully answered by one short sentence or a single fact (for example one number, one date, or yes or no)?'
   if (q.kind === 'aspect') return `Two materials, each quoted as JSON: ${q.materials.map(a => quoteMaterial(mat(a))).join('; ')}. Do both of these materials state a value for at least one same aspect (for example a price in each, or a date in each)?`
   if (q.kind === 'happened') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material state something that happened or was decided (an action, an event or a decision)?`
-  if (q.kind === 'todo') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material name at least one concrete step that still has to be taken (for example an approval, a dispatch or a reply)?`
+  if (q.kind === 'todo') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. According to this material, is something not done yet or still to happen?`
+  if (q.kind === 'about') return `The person asked, quoted exactly as a JSON string: ${JSON.stringify(c.request)}. Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material contain information that the person's request asks about?`
+  if (q.kind === 'same') return `Two materials, each quoted as JSON: ${q.materials.map(a => quoteMaterial(mat(a))).join('; ')}. Are these two materials an earlier and a later version of the same document, offer or plan?`
   if (q.kind === 'fact') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material state at least one concrete fact (for example a number, an amount, a date, a name or a decision)?`
   if (q.kind === 'before') { const side = (p, x) => `Part ${x} shows ${SHOW[p.trait]}: ${p.materials.map(a => quoteMaterial(mat(a))).join('; ')}.`
     return `${side(q.first, 'X')} ${side(q.second, 'Y')} Should a reader who has seen none of it be shown part X before part Y?` }
@@ -519,10 +566,11 @@ export const rejectedWord = q => (q.kind === 'step' ? `${q.part} explanation` : 
 export async function runSkeletonFlow({ request = '', materials = [], candidates = [], currentAnswerId = null, viewport = null, judge, fill = null, egress = null, allow = async () => true, observeOnly = false, catalog = BRIEFING_CATALOG, now = Date.now, bindings = null, fillCheck = 'all' } = {}) {
   const checkMode = FILL_CHECK_MODES.includes(fillCheck) ? fillCheck : 'all'
   const stats = { judgeRequests: 0, judgeMs: 0, questions: 0, fillTurns: 0, checkSkipped: 0, stages: [], received: [] }
-  const done = (status, extra = {}) => ({ status, ...extra, stages: [...new Set(stats.stages)], stats })
+  let relevanceOut = null
+  const done = (status, extra = {}) => ({ status, ...(relevanceOut ? { relevance: relevanceOut } : {}), ...extra, stages: [...new Set(stats.stages)], stats })
   // The same permissions as the run's own models: memory pages only if the run's model had them, card labels only if the cards may be sent, the request as the run's own data.
   if (egress && !egress.allows('draft_text')) return done('bubble', { reason: 'declined', requested: false })
-  const scene = enumerateSkeleton({ materials: egress && !egress.allows('memory_page') ? [] : materials, candidates: egress && !egress.allows('canvas_text') ? [] : candidates, currentAnswerId, catalog, bindings })
+  let scene = enumerateSkeleton({ materials: egress && !egress.allows('memory_page') ? [] : materials, candidates: egress && !egress.allows('canvas_text') ? [] : candidates, currentAnswerId, catalog, bindings })
   const asked = clean(request, SKELETON_LIMITS.requestMax)
   if (!scene.materials.length) return done('bubble', { reason: 'no-materials', requested: false })
   if (!asked || !scene.parts.length) return done('bubble', { reason: asked ? 'no-component-fits' : 'no-request', requested: false })
@@ -541,17 +589,27 @@ export async function runSkeletonFlow({ request = '', materials = [], candidates
     return reply?.status === 'ok' && isObj(reply.answers) ? { answers: reply.answers } : { unavailable: reply?.reason ?? reply?.status ?? 'manual' }
   }
   const unavailable = (r, fallback) => (fallback ? done('fallback-chat', { reason: r.unavailable === 'request-bound' ? 'request-bound' : 'judge-unavailable', detail: r.unavailable }) : done('bubble', { reason: r.unavailable === 'declined' ? 'declined' : 'judge-unavailable', detail: r.unavailable, requested: false }))
-  const fits0 = fitQuestions(scene)
-
-  // (a) bubble or board: two predicates on the request and the materials; code combines them
-  const placed = await ask('place', [{ kind: 'several' }, { kind: 'one_sentence' }])
+  // (a) bubble or board (two predicates), and in the same request what code cannot resolve about the materials: is each linked group what the request asks about,
+  // and are the unresolved title-sharing pairs versions of one thing. One request instead of three; every question quotes its own material.
+  const relevance = relevanceQuestions(scene.materials), pairs = versionCandidates(scene.materials)
+  const placed = await ask('place', [{ kind: 'several' }, { kind: 'one_sentence' }, ...relevance.map(q => ({ kind: 'about', material: q.material })), ...pairs.map(materials => ({ kind: 'same', materials }))])
   if (placed.unavailable) return unavailable(placed, false)
   if (placed.advisory !== undefined) {
+    const fits0 = fitQuestions(scene)
     if (placed.advisory === 'board' && fits0.length) await ask('fit', fits0)
     return done('advisory-only', { verdict: placed.advisory, requested: true })
   }
   const place = decidePlace(placed.answers)
   if (place.value !== 'board') return done('bubble', { reason: place.reason, requested: true, place: placed.answers })
+  // Code drops what the request does not ask about (decided no or undecided) and adds the version pairs the judge confirmed; the scene is built again from that.
+  const kept = new Set(relevance.filter(q => isYes(placed.answers[`about_${q.material}`])).flatMap(q => q.covers))
+  const dropped0 = scene.materials.filter(m => !kept.has(m.alias)).map(m => m.alias), versions = pairs.filter(([a, b]) => isYes(placed.answers[`same_${a}_${b}`]))
+  relevanceOut = { kept: [...kept], dropped: dropped0, versions }
+  if (!kept.size) return done('bubble', { reason: 'not-asked-about', requested: true })
+  scene = enumerateSkeleton({ materials: egress && !egress.allows('memory_page') ? [] : materials, candidates: egress && !egress.allows('canvas_text') ? [] : candidates, currentAnswerId, catalog, bindings, keep: kept, versionPairs: versions })
+  base.materials = base.materials.filter(m => kept.has(m.alias))
+  if (!scene.parts.length) return done('bubble', { reason: 'no-component-fits', requested: true })
+  const fits0 = fitQuestions(scene)
 
   // (b) content sufficiency, one predicate per (part, requirement); code takes the best supported way, reuse first. All no = nothing fits. A part that is only reused asks nothing.
   const fits = fits0.length ? await ask('fit', fits0) : { answers: {} }
