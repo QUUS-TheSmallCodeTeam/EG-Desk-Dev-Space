@@ -16,8 +16,14 @@ export const SHARE_LEVELS = Object.freeze(['off', 'active', 'region']);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const alias = /^m-[0-9a-f]{16}$/;
 const tagShape = /^[0-9a-f]{64}$/;
-/** Requester identity: how long this Desk keeps announcing a request it made, how long it keeps asking about one it received, and how long a run keeps its requester. */
-export const REQUESTER = Object.freeze({ claimMs: 15 * 60_000, watchMs: 15 * 60_000, runMs: 30 * 60_000, maxTags: 4, maxRuns: 32 });
+/**
+ * Requester identity, the bounds on this Desk (memory only, gone when the window closes):
+ *   announceMs  how long the Desk that MADE a request keeps announcing its tag (a request file travels by hand; the owner may open it hours later)
+ *   claimMs     how long the service keeps a claim after the last announcement (the service's own bound, repeated here)
+ *   watchMs     how long the Desk that RECEIVED a request keeps asking who claimed it, counted from when its person opened the file
+ *   runMs       how long a run keeps its requester unless it is cleared earlier
+ */
+export const REQUESTER = Object.freeze({ announceMs: 24 * 60 * 60_000, claimMs: 15 * 60_000, watchMs: 15 * 60_000, runMs: 30 * 60_000, maxTags: 4, maxRuns: 32 });
 /**
  * The opaque tag of one review request: a hash of its id and digest, which only the holders of that request file know.
  * It says nothing about the question. sha256Hex(text) -> Promise<hex> is supplied by the host (WebCrypto in the window).
@@ -269,11 +275,11 @@ export function createJointPresence({ send, self, boards, cardAlias = () => null
       const feed = feeds.get(board);
       return !!feed && now() - feed.at <= PRESENCE.staleMs && feed.members.some((m) => m.member === member);
     },
-    /** Announce a request this person made (its opaque tag) on every Board they share presence on, for claimMs. Nothing is sent where sharing is off. */
+    /** Announce a request this person made (its opaque tag) on every Board they share presence on, for announceMs. Nothing is sent where sharing is off. */
     claimRequest(tag) {
       if (typeof tag !== 'string' || !tagShape.test(tag)) return false;
       if (claimed.size >= REQUESTER.maxTags && !claimed.has(tag)) claimed.delete(claimed.keys().next().value);
-      claimed.set(tag, now() + REQUESTER.claimMs);
+      claimed.set(tag, now() + REQUESTER.announceMs);
       return true;
     },
     /** Ask the service, at every exchange for watchMs, who claimed a request this person received. */

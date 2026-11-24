@@ -157,12 +157,18 @@ test('a request tag: claimed by the member who made the request, resolved by the
   await w.round([a, b]); await w.round([a, b]);
   assert.equal(a.requests.of(review), null); assert.equal(a.joint.seated(w.board, c.joint.aliasOn(w.board)), false);
 
-  // A claim that is no longer announced ends by itself (the claimer's Desk closed): claimMs at most.
+  // A request file travels by hand: the owner may open it long after it was written. While B's Desk stays open it keeps announcing,
+  // so an owner who opens the file an hour later still learns who (the owner's Desk asks again when its person opens the file).
   b.joint.setShare(w.board, 'active'); await b.joint.idle(); await w.round([a, b]); await w.round([a, b]);
   assert.equal(a.requests.of(review)?.alias, b.joint.aliasOn(w.board));
+  await w.round([a, b], 60 * 60_000);
+  assert.equal(a.requests.of(review), null, 'the owner\'s Desk stops asking after watchMs');
+  assert.equal(await a.requests.inspected(review), true); await w.round([a, b]); await w.round([a, b]);
+  assert.equal(a.requests.of(review)?.alias, b.joint.aliasOn(w.board), 'opened again an hour later: still vouched for');
+  // A claim that is no longer announced ends by itself (the claimer's Desk closed): claimMs at most.
   w.clock.now += PRESENCE_LIMITS.claimMs + 1000; a.touch(); await a.joint.tick();
   assert.equal(w.hub.claimCount(), 0); assert.equal(a.requests.of(review), null);
-  assert.equal(PRESENCE_LIMITS.claimMs, JP.REQUESTER.claimMs);
+  assert.equal(PRESENCE_LIMITS.claimMs, JP.REQUESTER.claimMs); assert.ok(JP.REQUESTER.announceMs <= 24 * 60 * 60_000);
 });
 
 // ================= 2. the ask's own records carry it, and nothing else does =================
