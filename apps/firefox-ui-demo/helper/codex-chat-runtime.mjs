@@ -6577,7 +6577,7 @@ export class CodexChatRuntime {
     try {
       if (!run || !record) return
       const summary = record.health?.summary ?? null
-      run.ownCommandLast = Object.freeze({ exitCode: Number.isSafeInteger(record.exitCode) ? record.exitCode : null, durationMs: Number.isFinite(record.durationMs) ? record.durationMs : null,
+      run.ownCommandLast = Object.freeze({ stopped: record.stopped === true, exitCode: Number.isSafeInteger(record.exitCode) ? record.exitCode : null, durationMs: Number.isFinite(record.durationMs) ? record.durationMs : null,
         health: record.health?.health ?? null, healthReasons: record.health?.reasons ?? [], summary: summary ? Object.freeze({ ...summary, line: String(summary.line).slice(0, 300) }) : null,
         worktree: record.worktree ? Object.freeze({ ...record.worktree }) : null })
       const hb = this.heartbeatThreads.get(run.conversationId)
@@ -6591,7 +6591,7 @@ export class CodexChatRuntime {
     const last = [...this.runs.values()].filter(r => r.conversationId === conversationId && r.ownCommandLast).at(-1)?.ownCommandLast
     if (!last) return null
     return { ...(last.exitCode !== null ? { exit_code: last.exitCode } : {}), ...(last.durationMs !== null ? { duration_ms: last.durationMs } : {}),
-      ...(last.health ? { health: last.health } : {}), test_summary: Boolean(last.summary),
+      ...(last.stopped ? { stopped: true } : {}), ...(last.health ? { health: last.health } : {}), test_summary: Boolean(last.summary),
       ...(last.summary ? { tests_passed: last.summary.passed, tests_failed: last.summary.failed, ...(Number.isSafeInteger(last.summary.total) ? { tests_total: last.summary.total } : {}) } : {}),
       ...(last.worktree ? { worktree: last.worktree.state, ...(Number.isSafeInteger(last.worktree.conflicts) ? { conflicts: last.worktree.conflicts, uncommitted: last.worktree.uncommitted } : {}) } : {}) }
   }
