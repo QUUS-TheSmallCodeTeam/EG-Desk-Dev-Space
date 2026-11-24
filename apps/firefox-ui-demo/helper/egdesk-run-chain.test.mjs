@@ -1,8 +1,8 @@
 // L6 c25: the run-chain counts of the two-passing-runs rule, on synthetic results of the three shapes (journey, multiuser, browser-live).
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { FRESH_BELOW, chain, requestKeys, runOutcome, summarize } from './egdesk-run-chain.mjs'
-import { run } from '../scripts/egdesk-run-chain.mjs'
+import { FRESH_BELOW, attributed, chain, requestKeys, runOutcome, summarize } from './egdesk-run-chain.mjs'
+import { run as cli } from '../scripts/egdesk-run-chain.mjs'
 
 const row = (family, names, sha256) => ({ family, questions: names, sha256 })
 const journey = (failed, rows) => ({ scorecard: { hard: { passed: 5, failed, notRun: 0 } }, steps: [{ id: 's1', requests: rows.slice(0, 2) }, { id: 's2', requests: rows.slice(2) }] })
@@ -47,12 +47,32 @@ test('the command: prints each run and the counts, --json prints the same as one
   const files = { 'a-results.json': browser(true, ['1', '2']), 'b-results.json': browser(true, ['1', '2']), 'c.json': journey(['s1.x'], [row('f', ['q'], '3')]) }
   const out = [], err = []
   const io = { print: l => out.push(l), printError: l => err.push(l), read: f => { const x = files[f.split('/').at(-1)]; if (!x) throw new Error('no file'); return x } }
-  assert.equal(run(['/r/a-results.json', '/r/b-results.json', '/r/c.json'], io), 0)
+  assert.equal(cli(['/r/a-results.json', '/r/b-results.json', '/r/c.json'], io), 0)
   assert.match(out[0], /^a\s+pass\s+hard 0\s+requests\s+2\s+identical to an earlier pass\s+0\s+FRESH$/)
   assert.match(out[1], /^b\s+pass\s+hard 0\s+requests\s+2\s+identical to an earlier pass\s+2$/)
   assert.match(out[2], /^c\s+FAIL\s+hard 1\s+requests\s+1/)
   assert.equal(out[3], 'passed 2, failed 1, fresh passes 1, last c FAIL 1')
   out.length = 0
-  assert.equal(run(['--json', '/r/a-results.json'], io), 0); assert.deepEqual(JSON.parse(out[0]), { runs: [{ name: 'a', pass: true, hardFailures: 0, requests: 2, sameAsEarlierPass: 0, fresh: true }], passed: 1, failed: 0, freshPasses: 1, last: 'a pass' })
-  assert.equal(run([], io), 2); assert.equal(run(['--bogus'], io), 2); assert.equal(run(['/r/missing.json'], io), 2); assert.equal(err.length, 3)
+  assert.equal(cli(['--json', '/r/a-results.json'], io), 0); assert.deepEqual(JSON.parse(out[0]), { runs: [{ name: 'a', pass: true, hardFailures: 0, requests: 2, sameAsEarlierPass: 0, fresh: true }], passed: 1, failed: 0, freshPasses: 1, last: 'a pass' })
+  assert.equal(cli([], io), 2); assert.equal(cli(['--bogus'], io), 2); assert.equal(cli(['/r/missing.json'], io), 2); assert.equal(err.length, 3)
+})
+
+test('attributed: the hard checks of one flag and which failed; a failure on another flag\'s checks does not count; not-run and soft checks are left out', () => {
+  const run = { scorecard: { hard: { failed: ['s13.x'] } }, steps: [{ id: 's4', checks: [{ id: 's4.wait', severity: 'hard', pass: true }, { id: 's4.soft', severity: 'soft', pass: false }, { id: 's4.later', severity: 'hard', pass: null }] },
+    { id: 's13', checks: [{ id: 's13.x', severity: 'hard', pass: false }, { id: 's13.y', severity: 'hard', pass: true }] }] }
+  assert.deepEqual(attributed(run, id => /^s4\./.test(id)), { hardChecks: 1, failed: [] })
+  assert.deepEqual(attributed(run, id => /^s13\./.test(id)), { hardChecks: 2, failed: ['s13.x'] })
+  assert.deepEqual(attributed({}, () => true), { hardChecks: 0, failed: [] })
+})
+
+test('the command: --checks adds each run\'s attributed checks; a bad pattern or a missing one is a usage error', () => {
+  const journeyRun = { scorecard: { hard: { failed: ['s13.x'] } }, steps: [{ id: 's13', checks: [{ id: 's13.x', severity: 'hard', pass: false }, { id: 's4.wait', severity: 'hard', pass: true }] }] }
+  const out = [], err = []
+  const io = { print: l => out.push(l), printError: l => err.push(l), read: () => journeyRun }
+  assert.equal(cli(['--checks', '^s4\\.', '/r/a.json'], io), 0)
+  assert.match(out[0], /^a\s+FAIL\s+hard 1.*\| checks 1, failed none$/)
+  out.length = 0
+  assert.equal(cli(['/r/a.json', '--checks', '^s13\\.', '--json'], io), 0)
+  assert.deepEqual(JSON.parse(out[0]).runs[0].checks, { hardChecks: 1, failed: ['s13.x'] })
+  assert.equal(cli(['--checks', '(', '/r/a.json'], io), 2); assert.equal(cli(['/r/a.json', '--checks'], io), 2); assert.equal(err.length, 2)
 })
