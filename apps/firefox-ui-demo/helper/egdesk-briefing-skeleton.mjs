@@ -668,30 +668,38 @@ export function answerFacts(answer) {
 // Cycle 29 (real answers are markdown): the answer's own structure first - one unit per bullet, numbered item, heading or table row (the header row and the
 // separator row of a table are not facts; a row's cells are joined by " · "), emphasis and code marks removed - then sentences within each unit.
 // Plain text (no line structure) is split as before.
-export function answerUnits(answer) {
+export function answerUnits(answer) { return taggedUnits(answer).map(u => u.text) }
+// The same units, each with whether it is a table row. Cycle 33: a row is ONE fact (its cells are one record: the date, the commit and the test count of the same line).
+// c32's real answer had "결제 모듈 병합 완료. 알림 설정 화면은 시안만 확정" in a cell; splitting the row at that period gave one fact with the date and no commit, and another
+// with the commit and no date, and the coverage check asked the board for both halves.
+function taggedUnits(answer) {
   const raw = String(answer ?? '').normalize('NFC').slice(0, SKELETON_LIMITS.answerMax)
-  if (!/\n/.test(raw)) return [raw]
+  if (!/\n/.test(raw)) return [{ text: raw, row: false }]
   const out = [], lines = raw.split(/\n/)
   for (let i = 0; i < lines.length; i++) {
-    let l = lines[i].trim()
+    let l = lines[i].trim(), row = false
     if (!l || /^```/.test(l) || /^#{1,6}\s/.test(l)) continue // a heading names a section, it states no fact
     if (/[:：]\s*(?:\*\*)?$/.test(l)) continue // a lead-in ("…정리:") introduces what follows, it states no fact
     if (/^(?:\*\*|__)[^*_]+(?:\*\*|__)$/.test(l)) continue // a line that is only a bold label names a section, it states no fact
     if (/^\|.*\|\s*$/.test(l)) {
       if (/^\|[\s:|-]+\|$/.test(l)) continue // separator row
       if (/^\|[\s:|-]+\|$/.test((lines[i + 1] ?? '').trim())) continue // header row (the next line is the separator)
-      l = l.replace(/^\||\|$/g, '').split('|').map(c => c.trim()).filter(Boolean).join(' · ')
+      l = l.replace(/^\||\|$/g, '').split('|').map(c => c.trim()).filter(Boolean).join(' · '); row = true
     }
     l = l.replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, '').replace(/\*\*|__|`/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').trim()
-    if (l) out.push(l)
+    if (l) out.push({ text: l, row })
   }
   return out
 }
 function factSentences(answer) {
   const anchored = t => { const a = factAnchors(t); return a.dates.length + a.versions.length + a.amounts.length > 0 }
-  const out = answerUnits(answer).map(u => clean(u, SKELETON_LIMITS.answerMax)).join('\n').split(/\n|(?<=[.!?。])\s+/).flatMap(sentence => {
-    const clauses = sentence.split(/[,;]\s+/).map(t => t.trim()).filter(Boolean)
-    return clauses.length > 1 && clauses.every(anchored) ? clauses : [sentence.trim()]
+  const out = taggedUnits(answer).flatMap(u => {
+    const text = clean(u.text, SKELETON_LIMITS.answerMax)
+    if (u.row) return [text]
+    return text.split(/\n|(?<=[.!?。])\s+/).flatMap(sentence => {
+      const clauses = sentence.split(/[,;]\s+/).map(t => t.trim()).filter(Boolean)
+      return clauses.length > 1 && clauses.every(anchored) ? clauses : [sentence.trim()]
+    })
   })
   return out.map(t => clean(t, SKELETON_LIMITS.factMax)).filter(Boolean)
 }
