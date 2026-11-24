@@ -341,7 +341,7 @@ test('presence never writes the shared ledger, never persists, and reads this De
   assert.equal(aliases.includes(hub2.exchange('a', { board: w.board, share: 'off' }).members[0].member), false);
   // the hub has nothing but the read-only check
   assert.throws(() => createHub({}), /read-only access check/);
-  assert.deepEqual(Object.keys(w.hub), ['exchange', 'size', 'clear']);
+  assert.deepEqual(Object.keys(w.hub), ['exchange', 'size', 'claimCount', 'clear']);
   assert.equal(w.real.presenceAccess('e', w.board), null); assert.equal(w.real.presenceAccess('d', w.board), null);
   assert.deepEqual(w.real.presenceAccess('c', w.board, [w.k1, w.k2, 'x', randomUUID()]).visible, [w.k2]);
   assert.equal(sha(w.file), before.file);

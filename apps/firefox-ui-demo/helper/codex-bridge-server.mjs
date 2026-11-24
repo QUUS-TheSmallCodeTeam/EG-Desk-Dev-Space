@@ -48,7 +48,7 @@ import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { createBoardPresentationHttpHandler } from './egdesk-board-presentation-http.mjs'
 import { briefingDeps } from './egdesk-briefing-engine.mjs'
 import { createWorkPlacement, createWorkPlacementHttpHandler } from './egdesk-work-placement.mjs'
-import { createPresenceMirror, createPresenceMirrorHttpHandler } from './egdesk-presence-mirror.mjs'
+import { createPresenceMirror, createPresenceMirrorHttpHandler, createRunRequesters, createRunRequesterHttpHandler } from './egdesk-presence-mirror.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 import { MemoryEvidenceStore } from './egdesk-memory-evidence.mjs'
 import { createMemoryEvidenceHttpHandler } from './egdesk-memory-http.mjs'
@@ -443,6 +443,9 @@ const browserEntryConfig = createBrowserEntryConfig({ flag: () => process.env.EG
 // unless the developer flag EGDESK_PRESENCE=on is set. Default off.
 const presenceMirror = createPresenceMirror()
 const handlePresenceMirrorHttp = createPresenceMirrorHttpHandler({ mirror: presenceMirror, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
+// Whose task a conversation's run is (another member's presence alias, told by the window; memory only). Same flag, default off.
+const runRequesters = createRunRequesters({ presence: presenceMirror })
+const handleRunRequesterHttp = createRunRequesterHttpHandler({ requesters: runRequesters, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
 const chat = new CodexChatRuntime({
   localCapacity,
   engines: engineRegistry,
@@ -482,7 +485,7 @@ const chat = new CodexChatRuntime({
     // Live-session heartbeat (egdesk-heartbeat.mjs) and, with EGDESK_DRAFT_CHECK=on (held, checked messages), intermediate messages while a run works. Developer flag, default off.
     // attentionPosted: the session posted its pointer message for a provider's attention fact; the placement runtime withdraws it.
     // With EGDESK_PRESENCE=on the audience rule also reads the Desk's presence snapshot (egdesk-presence-mirror.mjs); without it, as before, presence is unknown.
-    ...(process.env.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(process.env.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror } : {}),
+    ...(process.env.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(process.env.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror, audience: ({ run }) => runRequesters.audience({ run }) } : {}),
       attentionPosted: ({ key, provider }) => { if (provider === 'work_placement') workPlacement.acknowledgePointer(key) } } } : {}),
     // Advisory state judge on the engine's own command executions: developer flag EGDESK_COMMAND_JUDGE=advisory, default off. Records only.
     ...(process.env.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
@@ -1281,6 +1284,7 @@ const bridgeServer = createServer(async (req, res) => {
   if (await handleBoardPresentationHttp(req, res, url)) return
   if (await handleWorkPlacementHttp(req, res, url)) return
   if (await handlePresenceMirrorHttp(req, res, url)) return
+  if (await handleRunRequesterHttp(req, res, url)) return
   if (await handleEngineProfilesHttp(req, res, url)) return
   if (await handleProfileHttp(req, res, url)) return
   if (await handleDeskHttp(req, res, url)) return

@@ -140,7 +140,9 @@ function exportError(code) {
   return '검토 파일 생성 결과를 확인하지 못했습니다. 다시 만들기 전에 내보내기 폴더를 확인해 주세요.';
 }
 
-export function createReviewFlow({ request, pickFile, getContext, isContextCurrent, getBoard, isBoardCurrent, store, onState = () => {}, supported = () => true }) {
+// onRequestExported(review): optional, called once after a request file that carries a Board question code was written (the review as
+// written, with its id and digest). The flow does not depend on it and ignores what it does.
+export function createReviewFlow({ request, pickFile, getContext, isContextCurrent, getBoard, isBoardCurrent, store, onState = () => {}, supported = () => true, onRequestExported = null }) {
   let active = null;
   const view = () => active?.view || null;
   function update(session, delta) {
@@ -319,6 +321,7 @@ export function createReviewFlow({ request, pickFile, getContext, isContextCurre
       catch { warning = '파일은 만들었지만 이 Board의 로컬 요청 기록을 저장하지 못했습니다. 이 파일의 회신을 Board에 추가할 수 없을 수 있습니다.'; }
     }
     s.draft = s.inspected = null;
+    if (review.kind === 'request' && returned.askCode && typeof onRequestExported === 'function') { try { onRequestExported(returned); } catch { /* optional */ } }
     end(s, { step: 'exported', review: null, encrypted: body.encrypted, warning,
       where: typeof body.displayPath === 'string' && body.displayPath.startsWith('~/') ? body.displayPath : null,
       fileName: typeof body.fileName === 'string' ? body.fileName : null });
