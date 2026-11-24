@@ -47,6 +47,7 @@
       "file": "requests/same-matter-yes-O.json",
       "sha256": "1b576f68c2236d82c61b467f86e22b5d8f996e4a3251bc5bdc39391c0b93d5ae",
       "estInputTokens": 766,
+      "diagnostic": true,
       "expect": [
         {
           "name": "same_matter_R1",
@@ -97,6 +98,7 @@
       "file": "requests/same-matter-yes-S.json",
       "sha256": "2436ab85f3fb99a0bf04b8dc296b7e0b6b9c3a86a4b4d70d005f9c8ef1899555",
       "estInputTokens": 766,
+      "diagnostic": true,
       "expect": [
         {
           "name": "same_matter_R1",
@@ -169,6 +171,7 @@
       "file": "requests/same-matter-no-O.json",
       "sha256": "8d7072466e023bb9cd7ba1217261466f04394ee9b52917cf6841e4379c830287",
       "estInputTokens": 770,
+      "diagnostic": true,
       "expect": [
         {
           "name": "same_matter_R1",

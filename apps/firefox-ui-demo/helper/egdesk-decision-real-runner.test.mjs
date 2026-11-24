@@ -395,3 +395,29 @@ test('choice minMargin: the product margin (runner-up includes unreported mass) 
   assert.equal(scoreExpectation(e, a(0.8, [['done', 0.6], ['open', 0.05]])).pass, true) // .35 unreported: margin .25
   assert.equal(scoreExpectation(e, a(0.8, [['done', 0.5], ['open', 0.05]])).pass, false) // .45 unreported: margin .05
 })
+
+test('grouped-question lint: a request whose grouped questions do not each carry their own item is refused (dry run and send) unless it is diagnostic', async () => {
+  const same = 'Is the work about the same matter as the card quoted under this question?'
+  const c12 = bodyText([predicate('same_matter_R1', same), predicate('same_matter_R2', same)], [{ role: 'user', content: 'Question same_matter_R1:\n"""A사 견적서 v1"""' }, { role: 'user', content: 'Question same_matter_R2:\n"""점심 메뉴"""' }])
+  const add = (diagnostic, plan, files) => {
+    files.d = c12
+    plan.requests.push({ id: 'd', file: 'requests/d.json', sha256: sha(c12), estInputTokens: 200, ...(diagnostic === undefined ? {} : { diagnostic }), expect: [{ name: 'same_matter_R1', kind: 'predicate', min: 0.8, severity: 'hard', note: 'x' }] })
+  }
+  const refused = fixture((plan, files) => add(undefined, plan, files))
+  assert.throws(() => loadPlan(refused.planFile), /d: grouped questions do not each carry their own item \(same_matter_R#: identical_instructions\)/)
+  for (const args of [[refused.planFile], [refused.planFile, '--send']]) {
+    const io = capture(); let calls = 0
+    const code = await main(args, { env: { OPENAI_API_KEY: KEY }, fetchImpl: async () => { calls++; return new Response('{}') }, print: io.print, printError: io.printError })
+    assert.deepEqual([code, calls], [EXIT.usage, 0])
+  }
+  const marked = fixture((plan, files) => add(true, plan, files))
+  const loaded = loadPlan(marked.planFile)
+  const row = planTable(loaded).find(r => r.id === 'd')
+  assert.deepEqual([row.diagnostic, row.groupingLint], [true, 'fails'])
+  assert.equal(planTable(loaded).find(r => r.id === 'a').groupingLint, undefined, 'a clean request shows nothing')
+  assert.throws(() => loadPlan(fixture((plan, files) => add('yes', plan, files)).planFile), /diagnostic must be true when present/)
+  // the same two cards quoted INSIDE their questions (L1 c13) load without any mark
+  const c13 = bodyText([predicate('same_matter_R1', `${same}\nThe card:\n"""\nA사 견적서 v1\n"""`), predicate('same_matter_R2', `${same}\nThe card:\n"""\n점심 메뉴\n"""`)])
+  const fixed = fixture((plan, files) => { files.d = c13; plan.requests.push({ id: 'd', file: 'requests/d.json', sha256: sha(c13), estInputTokens: 200, expect: [{ name: 'same_matter_R1', kind: 'predicate', min: 0.8, severity: 'hard', note: 'x' }] }) })
+  assert.equal(loadPlan(fixed.planFile).requests.find(r => r.id === 'd').groupingOk, true)
+})

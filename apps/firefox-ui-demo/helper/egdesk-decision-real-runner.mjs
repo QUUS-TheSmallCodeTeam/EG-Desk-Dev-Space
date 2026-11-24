@@ -1,3 +1,4 @@
+import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 import { createHash } from 'node:crypto'
 import { chmodSync, lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -25,7 +26,7 @@ import { DECISIONS_ENDPOINT, DECISION_MODEL, normalizeDecisionResponse, validate
 //                    { "name", "kind": "choice", "equals"?: value, "oneOf"?: [values], "minConfidence"?: 0..1,
 //                      "minMargin"?: 0..1, "whenAccepted"?: { "minConfidence": 0..1, "minMargin": 0..1 }, "severity", "note" },
 //                    { "name", "kind": "score", "min"?: level, "max"?: level, "minConfidence"?: 0..1, "maxConfidence"?: 0..1, "severity", "note" } ],
-//        "recordOnly"?: true } ] }
+//        "recordOnly"?: true, "diagnostic"?: true } ] }
 // A request passes when it has no failed hard check. An answer that is refused, missing or malformed fails its check.
 // A request with no expectations is refused unless it says "recordOnly": true; a record-only request is sent and its answers kept,
 // but it is never counted as passed (its state is "recorded"), so a pass can never mean "nothing was checked".
@@ -39,6 +40,9 @@ import { DECISIONS_ENDPOINT, DECISION_MODEL, normalizeDecisionResponse, validate
 // a max above "no", a choice without minConfidence/minMargin at least the bar, a whenAccepted check at a stricter bar than the product's
 // (it would miss wrong installs the product makes), a score check without minConfidence at least the bar. A hard expectation with no
 // declared bar for its family or kind is refused too. Without productBars, the runner prints that the checks were not compared.
+// Every request body is checked with the grouped-question lint (helper/egdesk-decision-grouping.mjs): when one question family is asked
+// about several items, each question must carry its own item. A request that fails is REFUSED (dry run and send) unless the request says
+// "diagnostic": true (a deliberate reproduction, such as the contamination study's copy of the L1 c12 construction).
 // A score expectation is the conjunction of the bounds it gives (min <= score <= max, minConfidence <= confidence <= maxConfidence).
 const OFFICIAL = DECISIONS_ENDPOINT
 if (OFFICIAL !== 'https://api.openai.com/v1/decisions') throw new Error('unexpected Decisions endpoint')
@@ -145,10 +149,13 @@ export function loadPlan(planFile) {
     if (!item.expect.length && !recordOnly) bad(`${item.id}: no expectations; add expectations, or mark the request "recordOnly": true (it will be sent and kept, never counted as passed)`)
     if (item.expect.length && recordOnly) bad(`${item.id}: a recordOnly request carries no expectations`)
     const expect = item.expect.map(entry => checkExpectation(entry, item.id, body.questions))
+    if (item.diagnostic !== undefined && item.diagnostic !== true) bad(`${item.id}: diagnostic must be true when present`)
+    const grouping = lintGroupedRequest(body)
+    if (!grouping.ok && item.diagnostic !== true) bad(`${item.id}: grouped questions do not each carry their own item (${grouping.families.filter(f => f.problems.length).map(f => `${f.family}: ${[...new Set(f.problems.map(x => x.problem))].join('/')}`).join('; ')}); fix the request, or mark it "diagnostic": true if it reproduces the defect on purpose`)
     const counts = { choice: body.questions.filter(q => q.type === 'choice').length, predicate: body.questions.filter(q => q.type === 'predicate').length, score: body.questions.filter(q => q.type === 'score').length }
     const text = bytes.toString('utf8')
     return { id: item.id, file: item.file, sha256: item.sha256, bytes, estInputTokens: item.estInputTokens, independentEst: independentEstimate(counts.choice, counts.predicate + counts.score, bytes.length),
-      questions: body.questions, counts, images: (text.match(/"type"\s*:\s*"input_image"/g) || []).length, expect, recordOnly }
+      questions: body.questions, counts, images: (text.match(/"type"\s*:\s*"input_image"/g) || []).length, expect, recordOnly, diagnostic: item.diagnostic === true, groupingOk: grouping.ok }
   })
   const productBars = checkProductBars(raw.productBars)
   if (productBars) {
@@ -207,7 +214,7 @@ export function lintExpectation(e, request, productBars) {
 
 export function planTable(plan) {
   return plan.requests.map(r => ({ id: r.id, bytes: r.bytes.length, sha: r.sha256.slice(0, 12), choice: r.counts.choice, predicate: r.counts.predicate, score: r.counts.score, images: r.images,
-    estInputTokens: r.estInputTokens, independentEst: r.independentEst, recordOnly: r.recordOnly, hard: r.expect.filter(e => e.severity === 'hard').length, soft: r.expect.filter(e => e.severity === 'soft').length }))
+    estInputTokens: r.estInputTokens, independentEst: r.independentEst, recordOnly: r.recordOnly, ...(r.diagnostic ? { diagnostic: true } : {}), ...(r.groupingOk ? {} : { groupingLint: 'fails' }), hard: r.expect.filter(e => e.severity === 'hard').length, soft: r.expect.filter(e => e.severity === 'soft').length }))
 }
 
 /** What the answer says about one expectation. observed carries what a later threshold analysis needs: probability, or choice + top/second/margin/N. */
