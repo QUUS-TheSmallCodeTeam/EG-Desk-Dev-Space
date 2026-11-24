@@ -5963,9 +5963,7 @@ export class CodexChatRuntime {
       this.put(run, 'messages', message)
       if (assistant && announce) {
         if (!existing) {
-          // A message first seen already complete (a held answer, an intermediate message, a late-classified item) announces
-          // itself without text: the one delta below carries the whole text once, then message.completed confirms it.
-          this.emit(run, 'message.started', completed ? { ...message, text: '', status: 'streaming' } : { ...message }, item.id)
+          this.emit(run, 'message.started', { ...message }, item.id)
           if (!completed && message.text) this.visibleMessages.set(`${run.answerId}/${item.id}`, message.text)
         }
         if (completed) {

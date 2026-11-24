@@ -14268,7 +14268,7 @@
           const lastAnswerOfRun = new Map();
           for (const message of activeThread.messages) {
             const key = displayKey(message);
-            if (key && message.role === 'assistant' && !(message.status === 'streaming' && !message.content) && !ChatState.systemNoticeMessageView(message)) lastAnswerOfRun.set(key, message.id);
+            if (key && message.role === 'assistant' && !(message.status === 'streaming' && !message.content)) lastAnswerOfRun.set(key, message.id);
           }
           // AGENT-05: every busy run of this room gets its own bubble, so a Board
           // with several Agents at work shows each of them. The current run keeps

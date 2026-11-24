@@ -1125,10 +1125,16 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     }
     // CHAT-03: the store's name for this bubble rides on the event, so a live answer can be moved without a reload.
     if (typeof event.localMessageId === 'string' && event.localMessageId && !message.localMessageId) message.localMessageId = event.localMessageId;
-    if (event.event === 'message.started' && !message.content && typeof details.text === 'string') message.content = details.text;
+    if (event.event === 'message.started' && !message.content && typeof details.text === 'string') {
+      message.content = details.text;
+      // A message first seen already complete (a held answer, an intermediate message, a late-classified item) arrives whole in
+      // this event; the delta that follows repeats the same text and must not be added to it. It is never shown as streaming.
+      if (details.status === 'complete') { message.status = 'complete'; message.arrivedWhole = true; }
+    }
     if (details.phase) message.phase = details.phase;
     if (details.presentation === 'notice') message.presentation = 'notice';
-    if (event.event === 'message.delta' && message.completionConfirmed !== true) {
+    // (A hydrated 'complete' status alone is no proof of completion: only this start-as-complete marker skips the repeat.)
+    if (event.event === 'message.delta' && message.completionConfirmed !== true && message.arrivedWhole !== true) {
       message.content += details.delta || '';
       message.status = 'streaming';
     }

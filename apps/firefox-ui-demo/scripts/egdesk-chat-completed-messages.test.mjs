@@ -542,7 +542,6 @@ test('the notice field is the runtime\'s own: an engine item cannot mark itself,
   assert.equal(ChatState.systemNoticeMessageView({ role: 'assistant', presentation: 'notice', content: 'x', status: 'streaming' }), null)
   assert.equal(ChatState.systemNoticeMessageView({ role: 'assistant', presentation: 'notice', content: '  ', status: 'complete' }), null)
   assert.equal(ChatState.systemNoticeMessageView({ role: 'assistant', presentation: 'other', content: 'x', status: 'complete' }), null)
-  // The row never groups with, or counts as, an Agent answer.
+  // The row never groups with an Agent answer.
   assert.match(surface, /const groupRole = \(message\) => \(message && \(ChatState\.awaitResumeMessageView\(message\) \|\| ChatState\.systemNoticeMessageView\(message\)\) \? 'system' : message\?\.role\);/)
-  assert.match(surface, /&& !ChatState\.systemNoticeMessageView\(message\)\) lastAnswerOfRun\.set\(key, message\.id\);/)
 })
