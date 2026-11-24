@@ -12777,10 +12777,13 @@
     };
     // A Decisions settings save changes the scope key (not the edit key) while the panel is open. Keep only the raw
     // text the user typed, bound to the same room/owner/question edit key; review, approval and results are never kept.
-    const rawEditsOf = item => ['edit', 'checking', 'review', 'checkingConfirm'].includes(item.phase) && item.scope.editKey
+    // An in-flight request (pending) or a no-pick outcome (manual) never delivered a recommendation, so the user's raw text is
+    // kept like the earlier phases; retry authority is dropped. A delivered recommendation still leaves no reusable options.
+    const rawEditsOf = item => ['edit', 'checking', 'review', 'checkingConfirm', 'pending', 'manual'].includes(item.phase) && item.scope.editKey
       ? { key: item.scope.editKey, question: item.scope.question, options: [...item.options] } : null;
     const sync = () => {
-      if (entry && !current(entry)) { const kept = rawEditsOf(entry); reset(); savedEdits = kept; }
+      let refocus = false;
+      if (entry && !current(entry)) { refocus = ownsFocus(); const kept = rawEditsOf(entry); reset(); savedEdits = kept; }
       const scope = currentScope();
       // Native resume can briefly leave the same room without a fresh scope.
       if (listEdits?.returning && scope && !matchesListReturn(scope)) listEdits = null;
@@ -12789,6 +12792,8 @@
       trigger.disabled = !normalizeLine(scope?.question, 500);
       questionHint.hidden = !scope?.question || !trigger.disabled || !!entry;
       trigger.title = '작성창 질문 한 줄(최대 500자)과 직접 입력한 보기만 추천에 사용';
+      // The panel vanished under the user's focus (settings changed, account changed): keep focus in their task.
+      if (refocus) (!trigger.hidden && !trigger.disabled ? trigger : binding?.input?.isConnected ? binding.input : null)?.focus?.({ preventScroll: true });
     };
     const cancel = (edits = null) => { reset(); savedEdits = edits; sync(); trigger.focus(); };
     const useManual = (item, reason = null) => {
