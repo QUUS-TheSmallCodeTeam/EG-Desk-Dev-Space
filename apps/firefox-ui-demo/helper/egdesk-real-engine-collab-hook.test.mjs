@@ -10,10 +10,10 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runFakeAppServer } from '../scripts/real-engine/fake-app-server.mjs'
 import { BRIDGE_COMPOSITION, DECISION_DEPENDENT_FLAGS, DECISION_KEY_ENV, preflight, runCheck } from './egdesk-real-engine-check.mjs'
-import { validateEngineScript } from './egdesk-real-engine-script.mjs'
+import { APPROVER_TEXT, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { COLLAB_DECISION_FLAGS, COLLAB_FLAGS, COLLAB_PEOPLE, attentionScene, checkCollabExpect, createCollabTurnHook, createCollabWorld, identityLeak, presenceRows, validateCollabExpect } from './egdesk-real-engine-collab-hook.mjs'
 import { registeredDecisionFlags, registeredExpectKeys, registeredFlags, registeredTurnFields, registeredTurnHookNames } from './egdesk-real-engine-extensions.mjs'
-import { COLLAB_SAYS, COLLAB_SET, buildCollabScript } from './egdesk-collab-real-engine-script.mjs'
+import { COLLAB_RESTART_SAYS, COLLAB_RESTART_SET, COLLAB_SAYS, COLLAB_SET, FORCE_PUSH, buildCollabRestartScript, buildCollabScript } from './egdesk-collab-real-engine-script.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
 const tmp = t => { const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-real-engine-collab-')); t.after(() => fs.rmSync(base, { recursive: true, force: true })); return base }
@@ -31,24 +31,26 @@ forkTurns: [{ steps: [], final: '소유자 승인이 필요한 견적 비교 결
 /** The scripted Decision model: the owner question is yes for the answer that asks for the owner's approval (read from what it was shown), everything else says no. */
 const decisionFor = (body, q) => (q.name === 'owner_action' ? (/소유자께서 승인/.test(JSON.stringify(body.input)) ? .96 : .03) : .03)
 
-function world(t, fakeScript, { decisions = true, decisionDelayMs = 0 } = {}) {
+function world(t, fakeScript, { decisions = true, decisionDelayMs = 0, runCommands = false } = {}) {
   const base = tmp(t), out = path.join(base, 'out'), codexHome = path.join(base, 'codex-home'); fs.mkdirSync(codexHome)
-  const spawns = [], decisionBodies = [], stderrLines = []
+  const spawns = [], decisionBodies = [], stderrLines = [], ranCommands = []
+  const shared = { persisted: new Set(), threads: new Map(), used: new Set(), usedFork: new Set(), counters: { thread: 0, turn: 0, item: 0 } } // what a restarted app-server finds on disk
   const spawn = (bin, argv, options) => {
     const stdin = new PassThrough(), stdout = new PassThrough(), stderr = new PassThrough(), child = new EventEmitter()
     Object.assign(child, { pid: 4242 + spawns.length, stdin, stdout, stderr, exitCode: null, signalCode: null, kill: () => true }); spawns.push({ bin, argv, options })
-    runFakeAppServer({ script: fakeScript, log: path.join(base, 'fake-app-server.log'), input: stdin, output: stdout, stderr: { write: line => { stderrLines.push(line); stderr.write(line) } }, env: options.env, exit: code => { child.exitCode = code; child.emit('close', code, null) } })
+    runFakeAppServer({ script: fakeScript, log: path.join(base, 'fake-app-server.log'), input: stdin, output: stdout, shared, stderr: { write: line => { stderrLines.push(line); stderr.write(line) } }, env: options.env, exit: code => { child.exitCode = code; child.emit('close', code, null) } })
     return child
   }
   const killGroup = async child => { child.stdin.end(); await new Promise(resolve => { if (child.exitCode != null) return resolve(); child.once('close', resolve); setTimeout(resolve, 500) }); return { signal: 'SIGTERM' } }
   const fetchImpl = async (url, init) => {
     const body = JSON.parse(init.body); decisionBodies.push(body)
     if (decisionDelayMs && body.questions.some(q => q.name === 'owner_action')) await new Promise(resolve => setTimeout(resolve, decisionDelayMs)) // the real model takes seconds
-    return Response.json({ answers: body.questions.map(q => ({ name: q.name, type: 'predicate', probability: decisionFor(body, q) })), usage: { input_tokens: 20 } })
+    const reply = body.input.find(m => Array.isArray(m.content))?.content[0].data?.reply ?? null // the owner's reply to an approval question, read as two predicates
+    return Response.json({ answers: body.questions.map(q => ({ name: q.name, type: 'predicate', probability: q.name === 'reply_runs_command' ? (reply === APPROVER_TEXT.yes ? 0.96 : 0.03) : q.name === 'reply_declines_command' ? (reply === APPROVER_TEXT.yes ? 0.02 : 0.9) : decisionFor(body, q) })), usage: { input_tokens: 20 } })
   }
   const options = { mode: 'run', codexBin: '/fake/codex', home: { kind: 'person', dir: null }, scripts: [], out, decisions, model: null, effort: null, appServerConfig: [], turnTimeoutMs: 15000, json: false }
-  const deps = { spawn, runnerSpawn: () => { throw new Error('no command runs in this test') }, fetchImpl, killGroup, killGroupRunner: () => {}, gitStatus: async () => null, env: { PATH: '/usr/bin:/bin', HOME: path.join(base, 'home'), [DECISION_KEY_ENV]: 'egd-synthetic-not-a-key-0031' } }
-  return { base, options, deps, decisionBodies, stderrLines, wire: () => fs.readFileSync(path.join(base, 'fake-app-server.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line)) }
+  const deps = { spawn, runnerSpawn: runCommands ? (file, args) => { const child = new EventEmitter(); Object.assign(child, { pid: 9000 + ranCommands.length, stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true }); ranCommands.push(String(args.at(-1))); setImmediate(() => { child.stdout.write(`ran: ${args.at(-1)}\n`); setImmediate(() => child.emit('close', 0, null)) }); return child } : () => { throw new Error('no command runs in this test') }, fetchImpl, killGroup, killGroupRunner: () => {}, gitStatus: async () => null, env: { PATH: '/usr/bin:/bin', HOME: path.join(base, 'home'), [DECISION_KEY_ENV]: 'egd-synthetic-not-a-key-0031' } }
+  return { base, options, deps, decisionBodies, stderrLines, ranCommands, shared, spawns, wire: () => fs.readFileSync(path.join(base, 'fake-app-server.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line)) }
 }
 
 const asScripts = (...scripts) => scripts.map(script => ({ file: `${script.set}.json`, script }))
@@ -165,4 +167,66 @@ test('a slow Decision model (Main\'s first real run: seconds, not instant): the 
     assert.equal(turn.attention.result.status, 'decided', `${name}: ${JSON.stringify(turn.attention.result)}`); assert.equal(turn.attention.result.branch, branch)
   }
   for (const turn of rec.turns) for (const e of turn.expectations.filter(x => x.check.startsWith('collab.'))) assert.equal(e.ok, true, `${turn.index}: ${e.check} ${JSON.stringify(e.detail)}`)
+})
+
+// ---- c29: across a restart of the bridge and the engine ----
+const restartFake = () => ({ turns: [
+  { steps: [], final: ANSWER_LIST },
+  { steps: [{ toolCall: { tool: 'egdesk_run_command', arguments: { command: FORCE_PUSH } } }], final: 'That force push needs your OK. Should I run it?' },
+  // after the restart: the owner's "yes" reaches a bridge that holds no question: the Agent tries the command again and the person is asked once more; then the owner's reply to THAT question
+  { steps: [{ toolCall: { tool: 'egdesk_run_command', arguments: { command: FORCE_PUSH } } }], final: 'I need your OK for that force push. Run it?' },
+  { steps: [{ toolCall: { tool: 'egdesk_run_command', arguments: { command: FORCE_PUSH } } }], final: 'Done, it ran.' },
+  { steps: [], final: ANSWER_INFO }],
+forkTurns: [{ steps: [], final: '확인할 일이 없습니다.' }, { steps: [], final: '확인했습니다.' }, { steps: [], final: '요약했습니다.' }] })
+const persistedWorld = t => { const w = world(t, restartFake(), { runCommands: true }); w.options.persisted = true; w.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: null, steerContract: null, threadDelete: true }); return w }
+
+test('restart: the validator takes the action with its own rules (persisted, a message turn follows, no core expectation) and the new collab keys only where they belong', () => {
+  const script = turns => ({ set: 'real-engine-r-v1', conversations: [{ id: 'c', flags: { EGDESK_PRESENCE: 'on' }, turns }] })
+  const errors = turns => validateEngineScript(script(turns)).errors.join('\n')
+  assert.equal(validateEngineScript(script([{ say: 'a' }, { action: 'restart', expect: { collab: { roomKept: true, receiptsClosed: true } } }, { say: 'b', expect: { collab: { continuity: true } } }])).ok, true)
+  assert.match(errors([{ action: 'restart' }, { say: 'b' }]), /cannot be the first turn/); assert.match(errors([{ say: 'a' }, { action: 'restart' }]), /cannot be the last turn/)
+  assert.match(errors([{ say: 'a' }, { action: 'restart', say: 'x' }, { say: 'b' }]), /restart takes no say/); assert.match(errors([{ say: 'a' }, { action: 'restart', afterMs: 5 }, { say: 'b' }]), /restart takes no afterMs/)
+  assert.match(errors([{ say: 'a' }, { action: 'restart', approve: ['yes'] }, { say: 'b' }]), /takes no approve/); assert.match(errors([{ say: 'a' }, { action: 'restart' }, { action: 'restart' }, { say: 'b' }]), /followed by a plain message turn/)
+  assert.match(errors([{ say: 'a' }, { action: 'restart', expect: { posted: true } }, { say: 'b' }]), /takes no expectation of the core/)
+  assert.match(errors([{ say: 'a' }, { action: 'restart', expect: { collab: { requester: 'owner' } } }, { say: 'b' }]), /takes only roomKept and receiptsClosed/)
+  assert.match(errors([{ say: 'a', expect: { collab: { roomKept: true } } }]), /belongs to a restart turn/); assert.match(errors([{ say: 'a', expect: { collab: { continuity: true } } }]), /message turn right after a restart/)
+  const agent = { set: 'real-engine-r-v1', conversations: [{ id: 'c', agentProfile: { name: 'x' }, turns: [{ say: 'a' }, { action: 'restart' }, { say: 'b' }] }] }
+  assert.match(validateEngineScript(agent).errors.join('\n'), /not available in an agentProfile/)
+  // the committed restart script is the builder's and validates
+  const committed = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'real-engine', 'scripts', `${COLLAB_RESTART_SET}.json`), 'utf8'))
+  assert.deepEqual(committed, JSON.parse(JSON.stringify(buildCollabRestartScript()))); assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })
+})
+
+test('restart: it needs --persisted-with-cleanup (preflight and the run refuse without), and the dry plan names it', async t => {
+  const w = world(t, { turns: [] })
+  assert.match(preflight({ ...w.options, codexBin: '/x', persisted: false }, asScripts(buildCollabRestartScript()), { exists: () => true, env: { [DECISION_KEY_ENV]: 'k' } }).join('\n'), /a restart turn needs a saved engine thread/)
+  assert.deepEqual(preflight({ ...w.options, codexBin: '/x', persisted: true }, asScripts(buildCollabRestartScript()), { exists: () => true, env: { [DECISION_KEY_ENV]: 'k' } }).filter(p => /restart/.test(p)), [])
+  await assert.rejects(runCheck(w.options, asScripts(buildCollabRestartScript()), w.deps), { code: 'restart_needs_persisted' })
+})
+
+test('restart, end to end on the fake engine: the room, its account and the invited member survive; the pending owner question is asked again and goes to the owner; nothing carried over is assumed', async t => {
+  const w = persistedWorld(t)
+  const rec = (await runCheck(w.options, asScripts(buildCollabRestartScript()), w.deps)).records[0]
+  assert.equal(rec.aborted, null, rec.abortDetail)
+  assert.deepEqual(rec.turns.map(turn => [turn.index, turn.action ?? 'message']), [[1, 'message'], [2, 'message'], [3, 'restart'], [4, 'message'], [5, 'message']], 'the script\'s own turn numbers across the restart')
+  for (const turn of rec.turns) assert.equal(turn.ok, true, `${turn.index}: ${JSON.stringify(turn.expectations.filter(e => !e.ok))}`)
+  const [, push, restart, yes, due] = rec.turns
+  // before: the question is open (the old bridge's approval ledger), the invited member asked for it
+  assert.equal(push.asked, 1); assert.equal(push.collab.audience.requester, COLLAB_PEOPLE.invited.member)
+  // the restart turn: the same room (route, saved row, account), the new bridge holds nothing of the old one's memory
+  const r = restart.collab.restart
+  assert.equal(r.before.awaiting, true, 'the old bridge held the open question'); assert.equal(r.after.awaiting, false, 'the new one holds none'); assert.deepEqual([r.after.memoryReceipts, r.after.contextReceipts], [0, 0])
+  assert.deepEqual(r.before.route, r.after.route); assert.deepEqual(r.before.row, r.after.row); assert.equal(r.before.account, r.after.account); assert.ok(r.after.account)
+  assert.equal(r.requesterBefore, COLLAB_PEOPLE.invited.member); assert.equal(r.requesterAfter, null, 'the requester registry was the old process\'s memory: empty until the window tells again')
+  assert.deepEqual(restart.expectations.map(e => e.check), ['restart.resumed', 'collab.roomKept', 'collab.receiptsClosed'])
+  // after: the owner's yes did not approve a question the new bridge did not hold: it was asked again (asked 1), and only the reply to THAT question ran the command, once
+  assert.equal(yes.asked, 1); assert.deepEqual(w.ranCommands, [FORCE_PUSH], 'one run, after the owner\'s reply to the second question; none before the restart')
+  assert.deepEqual(yes.subTurns.map(s => s.approver), [null, 'yes']); assert.match(yes.subTurns[0].toolCalls[0].result.text, /needs_person|ask|approval/i, 'the first try after the restart was refused: needs the person')
+  assert.equal(yes.collab.audience.requester, null, 'the question is the owner\'s own room and the owner\'s own reply: nobody is named as requester'); assert.deepEqual([yes.collab.continuity.sameThread, yes.collab.continuity.resumed, yes.collab.continuity.sentOnce], [true, true, true])
+  // the invited member again: attributed through the new bridge, and the result card's attention goes to them
+  assert.equal(due.collab.audience.requester, COLLAB_PEOPLE.invited.member); assert.equal(due.collab.set, 'held'); assert.equal(due.collab.attention.result.branch, 'requester'); assert.equal(due.collab.attention.result.kind, 'surface_near_requester')
+  // two engines were started, the persisted thread was resumed on the second, and every thread of the check is gone at the end
+  assert.equal(rec.restarts.length, 1); assert.equal(w.spawns.length, 2)
+  assert.ok(w.wire().some(m => m.dir === 'in' && m.method === 'thread/resume'), 'the new engine was asked to resume the room\'s saved thread')
+  assert.equal(rec.cleanup.persisted, rec.cleanup.verifiedGone, 'the persisted threads of both engines are deleted and verified gone'); assert.ok(rec.cleanup.persisted >= 1)
 })
