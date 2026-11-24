@@ -1,3 +1,4 @@
+import { seedRefusal } from './egdesk-scenario-seed-guard.mjs'
 import { DECISIONS_ENDPOINT } from './egdesk-decision-client.mjs'
 import { RUNS, buildPlan, scorePlan, scoreRemeasure } from './egdesk-memory-real-plan.mjs'
 
@@ -41,6 +42,7 @@ export async function runMeasurement({ plan, key = null, send = false, fetchImpl
   for (const run of plan.runs) for (const r of run.requests) {
     const text = JSON.stringify(r.body)
     if (createHash('sha256').update(text).digest('hex') !== r.sha256) return { sent: 0, stoppedBecause: 'hash_mismatch', mismatch: r.name, results, scorecard: null, totals, ceiling }
+    if (seedRefusal(text)) return { sent: 0, stoppedBecause: 'scenario_seed', mismatch: r.name, results, scorecard: null, totals, ceiling }
   }
   let sent = 0, stoppedBecause = null
   outer: for (const run of plan.runs) for (const r of run.requests) {

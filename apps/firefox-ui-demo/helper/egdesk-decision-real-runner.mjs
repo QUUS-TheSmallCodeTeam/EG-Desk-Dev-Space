@@ -1,3 +1,4 @@
+import { seedRefusal } from './egdesk-scenario-seed-guard.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 import { createHash } from 'node:crypto'
 import { chmodSync, lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
@@ -150,6 +151,10 @@ export function loadPlan(planFile) {
     if (item.expect.length && recordOnly) bad(`${item.id}: a recordOnly request carries no expectations`)
     const expect = item.expect.map(entry => checkExpectation(entry, item.id, body.questions))
     if (item.diagnostic !== undefined && item.diagnostic !== true) bad(`${item.id}: diagnostic must be true when present`)
+    // Scenario seeds (helper/egdesk-scenario-seed-guard.mjs): a body carrying a local-only seed's material, or a declared seed that is not
+    // owner-approved, or an owner-approved seed's material with a secret left in it, is refused at load (dry run and send alike).
+    const seedProblem = seedRefusal(bytes.toString('utf8'), { declared: [...(Array.isArray(raw.seeds) ? raw.seeds : []), ...(Array.isArray(item.seeds) ? item.seeds : [])] })
+    if (seedProblem) bad(`${item.id}: ${seedProblem}`)
     const grouping = lintGroupedRequest(body)
     if (!grouping.ok && item.diagnostic !== true) bad(`${item.id}: grouped questions do not each carry their own item (${grouping.families.filter(f => f.problems.length).map(f => `${f.family}: ${[...new Set(f.problems.map(x => x.problem))].join('/')}`).join('; ')}); fix the request, or mark it "diagnostic": true if it reproduces the defect on purpose`)
     const counts = { choice: body.questions.filter(q => q.type === 'choice').length, predicate: body.questions.filter(q => q.type === 'predicate').length, score: body.questions.filter(q => q.type === 'score').length }
@@ -294,6 +299,7 @@ export async function runPlan({ plan, key = null, send = false, fetchImpl = glob
   let sent = 0, stoppedBecause = null, inputTokens = 0
   for (const request of plan.requests) {
     if (sha256(request.bytes) !== request.sha256) { stoppedBecause = 'hash_mismatch'; break }
+    if (seedRefusal(request.bytes.toString('utf8'))) { stoppedBecause = 'scenario_seed'; break }
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeoutMs)
     const started = now()
     try {

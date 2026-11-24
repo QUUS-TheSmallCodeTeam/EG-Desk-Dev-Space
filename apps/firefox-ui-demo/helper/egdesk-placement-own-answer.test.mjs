@@ -13,28 +13,34 @@ const FOLLOW_UP = '납기는 v1보다 1주 짧은 2주입니다. 따로 확인�
 const DECISION = '이 단가 인하를 소유자께서 승인해 주셔야 수정 견적서를 보낼 수 있습니다.'
 const never = { model: 'mock', async decide() { throw new Error('not asked') } }
 const reviseNever = async () => { throw new Error('not revised') }
+// The two fixed sentences the draft check appended or posted before c19 (owner decision 2026-11-25: no fixed fallback). Kept here only as
+// the historical text of the c21 run, to show what the owner question must never read again.
+const C21_PARTIAL = '확인되지 않은 부분은 답하지 않았습니다. 필요하면 기준으로 삼을 자료를 알려 주세요.'
+const C21_ASK = '확인할 수 있는 근거가 부족해 지금은 답하기 어렵습니다. 어떤 자료를 기준으로 할지 알려 주세요.'
 
-test('draft check: it says which part of what it hands back the answering model wrote: the kept part when it trims and adds its note, nothing when it asks instead, all of it otherwise', async () => {
-  // no evidence: the concrete claim cannot be supported, the rest is kept and the check's partial note is added (the c20/c21 condition)
+test('draft check: everything it hands back is the answering model\'s text (c19: it appends nothing and posts no sentence of its own)', async () => {
+  // no evidence: the concrete claims cannot be supported and are removed silently; what is left is the model's own sentence
   const trimmed = await checkDraft({ draft: `PostgreSQL 마이그레이션은 v14에서 v16으로 3월에 끝났습니다. ${FOLLOW_UP}`, evidence: [], mode: 'on', client: never, revise: reviseNever })
-  assert.equal(trimmed.outcome, 'certain_part'); assert.ok(trimmed.text.endsWith(DRAFT_CHECK_COPY.partial))
-  assert.equal(trimmed.own, trimmed.text.slice(0, trimmed.text.length - DRAFT_CHECK_COPY.partial.length).trim())
-  assert.ok(!trimmed.own.includes(DRAFT_CHECK_COPY.partial) && trimmed.own.includes('따로 확인하실 일은 없습니다.'))
+  assert.deepEqual([trimmed.outcome, trimmed.text, trimmed.own], ['certain_part', '따로 확인하실 일은 없습니다.', '따로 확인하실 일은 없습니다.'])
+  assert.ok(!trimmed.text.includes('자료를 알려 주세요'))
+  // nothing would be left and the rewrite could not run: the draft as written (no fixed question any more), all of it the model's
   const asked = await checkDraft({ draft: 'PostgreSQL 마이그레이션은 v14에서 v16으로 3월에 끝났습니다.', evidence: [], mode: 'on', client: never, revise: reviseNever })
-  assert.deepEqual([asked.outcome, asked.text, asked.own], ['ask_user', DRAFT_CHECK_COPY.askUser, ''])
+  assert.deepEqual([asked.outcome, asked.text, asked.own, asked.calibration.fallback], ['unchecked', 'PostgreSQL 마이그레이션은 v14에서 v16으로 3월에 끝났습니다.', 'PostgreSQL 마이그레이션은 v14에서 v16으로 3월에 끝났습니다.', 'revision_unavailable'])
+  assert.deepEqual(DRAFT_CHECK_COPY, {})
   for (const mode of ['off', 'advisory']) { const kept = await checkDraft({ draft: FOLLOW_UP, evidence: [], mode, client: never }); assert.equal(kept.own, kept.text, mode); assert.equal(kept.text, FOLLOW_UP) }
 })
 
 test('runtime: the run\'s own answer is the posted answer minus the check\'s copy only when the posted answer is exactly what the check handed back', () => {
   const own = CodexChatRuntime.prototype.runOwnAnswerText
-  const posted = `${FOLLOW_UP}\n\n${DRAFT_CHECK_COPY.partial}`
+  // (an answer posted with an earlier check's appended sentence: the runtime still quotes only the model's part)
+  const posted = `${FOLLOW_UP}\n\n${C21_PARTIAL}`
   const fake = (text, mark) => { const run = {}; return { run, self: { runAnswerText: () => text, draftOwnTexts: mark ? new WeakMap([[run, mark]]) : undefined } } }
   let r = fake(posted, { posted, own: FOLLOW_UP }); assert.equal(own.call(r.self, r.run), FOLLOW_UP)
   r = fake(posted.replace('\n\n', ' '), { posted, own: FOLLOW_UP }); assert.equal(own.call(r.self, r.run), FOLLOW_UP, 'the same text, other whitespace')
   r = fake(posted, null); assert.equal(own.call(r.self, r.run), posted, 'no check result: the posted answer as it is')
-  r = fake(`${FOLLOW_UP} 추가로 고친 문장. ${DRAFT_CHECK_COPY.partial}`, { posted, own: FOLLOW_UP }); assert.ok(own.call(r.self, r.run).includes('추가로 고친 문장'), 'another text was posted: never cut')
+  r = fake(`${FOLLOW_UP} 추가로 고친 문장. ${C21_PARTIAL}`, { posted, own: FOLLOW_UP }); assert.ok(own.call(r.self, r.run).includes('추가로 고친 문장'), 'another text was posted: never cut')
   r = fake('', { posted, own: FOLLOW_UP }); assert.equal(own.call(r.self, r.run), '')
-  r = fake(DRAFT_CHECK_COPY.askUser, { posted: DRAFT_CHECK_COPY.askUser, own: '' }); assert.equal(own.call(r.self, r.run), '', 'the check asked instead: nothing of the model\'s to quote')
+  r = fake(C21_ASK, { posted: C21_ASK, own: '' }); assert.equal(own.call(r.self, r.run), '', 'the check asked instead: nothing of the model\'s to quote')
   // the placement context quotes it
   const run = { status: 'completed' }, mark = new WeakMap([[run, { posted, own: FOLLOW_UP }]])
   const ctx = CodexChatRuntime.prototype.placementContextFor.call({ heartbeatFor: () => 'hb', heartbeatSubjects: new Map([['hb', { run }]]), runUserText: () => '납기만 다시 알려 주세요',
@@ -56,7 +62,7 @@ test('placement (the v2 follow-up): with a judge that reads "자료를 알려 �
     const reply = await judge.decide(q)
     return reply.answers.owner_action.probability >= 0.5 ? 'owner' : 'requester'
   }
-  const posted = `${FOLLOW_UP}\n\n${DRAFT_CHECK_COPY.partial}`
+  const posted = `${FOLLOW_UP}\n\n${C21_PARTIAL}`
   assert.equal(await outcomeFor(posted), 'owner', 'control: quoting the posted answer with the check\'s copy reproduces the c21 reading')
   assert.equal(await outcomeFor(FOLLOW_UP), 'requester', 'the model\'s own sentences: nothing for the owner')
   assert.ok(!seen[1].includes('자료를 알려 주세요') && seen[1].includes('따로 확인하실 일은 없습니다.'))

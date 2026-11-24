@@ -75,9 +75,13 @@ export function answerEvidence(turn, facts) {
 }
 // The next turn of a conversation whose last answer the draft check replaced or cut: what the person actually saw (all-on journey s2,
 // 2026-11-24: the Agent summarised its own unposted draft). Application context for the engine only; never shown in the chat.
+// c19: how many records of the last check of a conversation the next check of it may reuse.
+export const EARLIER_EVIDENCE_LIMIT = 4
 export const POSTED_ANSWER_KEY = 'egdesk_posted_answer'
-export const POSTED_OUTCOMES = Object.freeze(['revised', 'certain_part', 'ask_user'])
+// c19 (owner decision: no fixed fallback): 'withheld' = nothing could be posted; the next turn is told the person saw no answer.
+export const POSTED_OUTCOMES = Object.freeze(['revised', 'certain_part', 'withheld'])
 export function postedAnswerBlock({ outcome, posted }) {
+  if (outcome === 'withheld' || !posted) return 'Your previous answer in this conversation was not posted: a check before posting could not confirm anything in it from the material you were given, so the person saw no answer to that message. Answer from what the material supports, and say in your own words what you could not confirm.'
   return [`Your previous answer in this conversation was not posted as you wrote it (a check before posting: ${outcome}). The person saw exactly this instead:`,
     '"""', String(posted), '"""', 'Build on what the person saw, not on your earlier draft.'].join('\n')
 }
@@ -5832,7 +5836,7 @@ export class CodexChatRuntime {
         // The owner may have changed the mode or key meanwhile: then the check's result is not acted on.
         const current = this.draftCheckMode() === 'on' && ['advisory', 'on'].includes(setup?.mode?.()) && setup?.configured?.() === true &&
           (generation === null || typeof setup.settingsGeneration !== 'function' || setup.settingsGeneration() === generation)
-        if (checked && current && checked !== items[0].text) texts[0] = checked
+        if (typeof checked === 'string' && current && checked !== items[0].text) texts[0] = checked
         // What the person will see is not what the Agent wrote: its next turn in this conversation is told (POSTED_ANSWER_KEY).
         const outcome = this.draftOutcomes.get(run)
         if (texts[0] !== items[0].text && POSTED_OUTCOMES.includes(outcome)) this.notePostedInstead(run.clientThreadId, { outcome, posted: texts[0] })
@@ -5843,7 +5847,10 @@ export class CodexChatRuntime {
     if (flow?.sent.length && texts.length === 1) texts[0] = withoutRepeats(texts[0], flow.sent.map(row => row.text))
     guard.state = 'released'
     guard.items.clear()
+    // withheld (c19): an answer the check emptied is not posted at all (no fixed sentence stands in for it).
+    const withheld = items.length === 1 && !String(texts[0]).trim() && String(items[0].text).trim() !== ''
     items.forEach((item, i) => { item.text = texts[i] })
+    if (withheld) return
     for (const item of items) await this.applyItem(run, item, true, true, true)
   }
 
@@ -5855,12 +5862,14 @@ export class CodexChatRuntime {
     const controller = new AbortController(), t0 = performance.now()
     const timer = setTimeout(() => controller.abort(), limit)
     timer.unref?.()
+    const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))
     const tools = this.answerFactsEvidence(run)
+    const ready = await this.draftTurnEvidence(run, turn, tools, aborted)
+    if (ready.skip) { clearTimeout(timer); controller.abort(); return null }
     let vocabulary = []
     try { vocabulary = (await dc?.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
     const revise = ({ draft, note }) => this.reviseOnFork(run, draft, note, controller.signal)
-    const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))
-    const check = checkDraft({ draft: text, evidence: answerEvidence(turn, tools), userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
+    const check = checkDraft({ draft: text, evidence: ready.evidence, userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
       mode: 'on', design: this.draftCheckDesign(), client: setup.client, revise, signal: controller.signal, egress: this.decisionEgressFor(run) })
     void check.catch(() => {})
     try {
@@ -5876,8 +5885,36 @@ export class CodexChatRuntime {
       if (result?.outcome) this.draftOutcomes.set(run, result.outcome)
       // L1 c16: which part of what will be posted the answering model wrote (the check's own copy excluded), for readers of the answer's meaning
       if (result && typeof result.text === 'string') { try { (this.draftOwnTexts ??= new WeakMap()).set(run, { posted: result.text, own: typeof result.own === 'string' ? result.own : result.text }) } catch { /* recording only */ } }
+      // withheld: '' (nothing is posted; settleDraftAnswer holds the item back). Otherwise the text, or null for the original.
+      if (result?.outcome === 'withheld') return ''
       return result && typeof result.text === 'string' && result.text.trim() ? result.text : null
     } finally { clearTimeout(timer); controller.abort() }
+  }
+
+  // The evidence a check of this run's answer reads (c19): this turn's facts and materials (answerEvidence), its turn context's late result when the
+  // context missed its deadline (waited for within the check's own limit: 'until'), and the records the last check of this conversation used.
+  // The engine's thread still holds those records (the real collaboration v2 follow-up, 2026-11-24: its context chose no material in 268 ms and
+  // "납기는 2주입니다." was cut with no request); same conversation, same data permissions. After this turn's own items, before its memory.
+  async draftTurnEvidence(run, turn, tools, until = null) {
+    let now = turn
+    if (turn.late) {
+      const waited = await (until ? Promise.race([turn.late, until]) : turn.late)
+      if (waited?.skip) return { skip: waited.skip, evidence: [] }
+      // Lane L7's noteLateDecisionContext may already have put the same late items into the entry (flag keepLate): never twice.
+      const fresh = (waited?.evidence ?? []).filter(item => !turn.evidence.some(x => x.id === item.id && x.text === item.text))
+      if (fresh.length) now = { ...turn, evidence: [...fresh, ...turn.evidence] }
+    }
+    const own = answerEvidence(now, tools).filter(item => !item.opaque)
+    const earlier = this.earlierEvidence?.get(run.clientThreadId) ?? []
+    if (own.length) {
+      this.earlierEvidence ??= new Map()
+      this.earlierEvidence.delete(run.clientThreadId)
+      this.earlierEvidence.set(run.clientThreadId, own.slice(0, EARLIER_EVIDENCE_LIMIT).map(item => ({ ...item, id: `prev_${item.id}`, source: 'earlier_turn' })))
+      if (this.earlierEvidence.size > 64) this.earlierEvidence.delete(this.earlierEvidence.keys().next().value)
+    }
+    const carried = earlier.filter(e => !own.some(item => item.text === e.text))
+    if (!carried.length) return { skip: null, evidence: answerEvidence(now, tools) }
+    return { skip: null, evidence: answerEvidence({ ...now, evidence: [...now.evidence.filter(item => !item.opaque), ...carried, ...now.evidence.filter(item => item.opaque)] }, tools) }
   }
 
   // The run's own facts for the check of its answer (measured 2026-11-24, all-on journey s6: "테스트가 모두 통과했습니다." was checked against four
@@ -5894,14 +5931,17 @@ export class CodexChatRuntime {
     const out = (run.activities || []).filter(a => !own.has(a.kind)).slice(0, 8).map((a, i) => {
       if (a.kind !== 'commandExecution' || !terminal || typeof a.detail?.command !== 'string' || !a.detail.command.trim()) return ref(a, i)
       const exit = Number.isInteger(a.detail.exitCode) ? a.detail.exitCode : null
-      const ended = a.status === 'inProgress' ? 'is still running' : exit !== null ? `finished with exit code ${exit}` : a.status === 'failed' ? 'failed (no exit code reported)' : 'finished (no exit code reported)'
+      // The exit code's meaning is a convention of the process, said in words (c19: measured 2026-11-24, heartbeat-c18, "finished with exit code 0"
+      // next to an output tail without a pass line left "테스트가 모두 통과했습니다." at sup .37).
       const took = Number.isFinite(a.detail.durationMs) && a.detail.durationMs >= 1000 ? ` after about ${Math.round(a.detail.durationMs / 1000)} seconds` : ''
+      const ended = a.status === 'inProgress' ? 'is still running' : exit === 0 ? `finished${took} with exit code 0, which means the command itself reported success`
+        : exit !== null ? `finished${took} with exit code ${exit}, which means the command itself reported a failure` : a.status === 'failed' ? `failed${took} (no exit code reported)` : `finished${took} (no exit code reported)`
       const state = judged.filter(x => x.runKey === run.answerId && x.itemId === a.id).at(-1)?.state
       const reading = TERMINAL_STATES[state] ? ` The command check read its output as: ${TERMINAL_STATES[state]}` : ''
       let tail = ''
       // A short output is kept whole in the head; a long one as head + tail (the last lines are in the tail).
       try { const kept = this.runOutputs.commandOutput(run.answerId, a.id); tail = kept ? lastLines(kept.tail || kept.head) : '' } catch { tail = '' }
-      return { id: `cmd${i + 1}`, kind: 'terminal', time: 'present', source: 'run', text: `In this turn the assistant ran \`${publicText(a.detail.command, 300)}\`; it ${ended}${took}.${reading}${tail ? `\nLast lines of its output:\n${tail}` : ''}` }
+      return { id: `cmd${i + 1}`, kind: 'terminal', time: 'present', source: 'run', text: `In this turn the assistant ran \`${publicText(a.detail.command, 300)}\`; it ${ended}.${reading}${tail ? `\nLast lines of its output:\n${tail}` : ''}` }
     })
     const note = this.draftCheckTurns.get(run)?.browserNote
     if (typeof note === 'string' && note.trim() && egress.allows('browser_task_record')) out.push({ id: 'task', kind: 'browser', time: 'present', source: 'browser_task', text: `The browser task's outcome note: ${publicText(note, 1000)}` })
@@ -6204,7 +6244,7 @@ export class CodexChatRuntime {
       const dc = this.decisionContext?.draftCheck
       const eligible = !bounded && (typeof dc?.eligible === 'function' ? dc.eligible({ body, context }) === true
         : context.channelKind === 'direct' && !context.stateless && !context.board && body.boardId == null)
-      let skip = eligible ? null : 'ineligible', evidence = []
+      let skip = eligible ? null : 'ineligible', evidence = [], late = null
       if (!skip && decision?.result?.privateTopicBatch) skip = 'guarded'
       if (!skip && decision?.mode === 'on' && decision.result?.status === 'ready') {
         const list = decision.result.draftEvidence
@@ -6212,11 +6252,23 @@ export class CodexChatRuntime {
         else if (list.some(item => item.guarded)) skip = 'guarded'
         else evidence = list.map(({ guarded, ...item }) => item)
       }
+      // c19 (Main, real collaboration v2 2026-11-24: the context took 1,098 ms against 800 and the check had no evidence): when the turn's context
+      // missed its deadline and its result arrives later (decision.late: a promise of the result the turn would have used; lane L7 keeps it), the
+      // check uses that result, read under the same rules (a guarded or private-topic result skips the check). The turn itself is not changed.
+      else if (!skip && decision?.mode === 'on' && typeof decision?.late?.then === 'function') {
+        late = Promise.resolve(decision.late).then(result => {
+          if (!result || result.status !== 'ready') return { skip: null, evidence: [] }
+          if (result.privateTopicBatch) return { skip: 'guarded', evidence: [] }
+          if (!Array.isArray(result.draftEvidence)) return { skip: 'unknown', evidence: [] }
+          if (result.draftEvidence.some(item => item.guarded)) return { skip: 'guarded', evidence: [] }
+          return { skip: null, evidence: result.draftEvidence.map(({ guarded, ...item }) => item) }
+        }, () => ({ skip: null, evidence: [] }))
+      }
       // Application blocks that rode along this turn (shared messages and the like): the model saw them, the checker may not.
       // The browser task's note and the note of what the person saw are known text (answerFactsEvidence / the posted-answer note), not content-free blocks.
       const browserNote = typeof context.browserTaskNote === 'string' ? context.browserTaskNote : null
       const refs = extraKeys.filter(key => !(key === 'egdesk_browser_task' && browserNote) && key !== POSTED_ANSWER_KEY).slice(0, 4).map((key, i) => ({ id: `ctx${i + 1}`, kind: 'context', time: 'unknown', source: 'application', opaque: true }))
-      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...refs], memory: memoryItems, userText: typeof body.message === 'string' ? body.message : '', browserNote })
+      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...refs], memory: memoryItems, userText: typeof body.message === 'string' ? body.message : '', browserNote, late })
     } catch { /* the check must never affect the turn */ }
   }
 
@@ -6248,7 +6300,9 @@ export class CodexChatRuntime {
       let vocabulary = []
       try { vocabulary = (await dc.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
       const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))
-      const check = checkDraft({ draft: text, evidence: answerEvidence(turn, tools), userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
+      const ready = run ? await this.draftTurnEvidence(run, turn, tools, aborted) : { skip: null, evidence: answerEvidence(turn, tools) }
+      if (ready.skip) { record({ fallback: 'evidence_unavailable' }); return }
+      const check = checkDraft({ draft: text, evidence: ready.evidence, userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
         mode: 'advisory', design: this.draftCheckDesign(), client: setup.client, signal: controller.signal, egress: this.decisionEgressFor(run) })
       void check.catch(() => {}) // a check that outlives the deadline must not surface later
       const result = await Promise.race([check, aborted])

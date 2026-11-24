@@ -91,7 +91,7 @@ test('flag absent, off and advisory post byte-identical answers and an identical
   const [entry] = entries
   t.diagnostic(`advisory calibration entry: ${JSON.stringify(entry)}`)
   assert.equal(entry.mode, 'advisory'); assert.equal(entry.attached, false)
-  assert.equal(entry.check, 'would_revise'); assert.ok(['would_trim', 'would_ask'].includes(entry.ifUnrevised))
+  assert.equal(entry.check, 'would_revise'); assert.ok(['would_trim', 'would_withhold'].includes(entry.ifUnrevised), 'c19: no fixed question; nothing left = withheld')
   assert.ok(entry.timing.totalMs >= 0 && entry.timing.calls === 1 && typeof entry.timing.withinBudget === 'boolean')
   assert.deepEqual(entry.evidence, { items: 1, opaque: 0, sentences: 1, terms: 0 })
   const text = JSON.stringify(entry)
@@ -140,7 +140,7 @@ test('a command of the run reaches the checker as the run\'s own fact (command, 
   await w.ask()
   assert.equal(w.checkCalls.length, 1, 'the command\'s facts are something to compare with')
   const sent = w.checkCalls[0].input.map(row => row.content).join('\n')
-  assert.match(sent, /In this turn the assistant ran `ls`; it finished with exit code 0\. Last lines of its output: SECRET TOOL OUTPUT/)
+  assert.match(sent, /In this turn the assistant ran `ls`; it finished with exit code 0, which means the command itself reported success\. Last lines of its output: SECRET TOOL OUTPUT/)
   const entry = w.log.entries().find(e => e.feature === 'draft_check')
   assert.deepEqual(entry.evidence, { items: 1, opaque: 0, sentences: 1, terms: 0 })
   assert.ok(!JSON.stringify(entry).includes('SECRET'), 'the record stays content-free')
