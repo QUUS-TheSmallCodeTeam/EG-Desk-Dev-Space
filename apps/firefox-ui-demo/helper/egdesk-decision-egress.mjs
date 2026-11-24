@@ -112,6 +112,7 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-gate-hook-broker.mjs': ['run_text', 'terminal_command'],
   'egdesk-terminal-judge.mjs': ['terminal_output', 'command_output'],
   'egdesk-memory-live-runner.mjs': ['memory_page: measurement tool; the public synthetic wiki only, through guardClient'],
+  'egdesk-conversation-scenarios.mjs': ['run_text: scenario tool (L3 c21); rebuilds the beat\'s in-run person questions as the wire body through a recording fetch that never sends; the masked conversation examples are owner-approved and guarded by helper/egdesk-scenario-seed-guard.mjs'],
   // Measurement tool: drives the real runtime, whose own gates ask every kind before each request; synthetic pages in a temporary directory only.
   'egdesk-memory-journey.mjs': ['memory_page', 'speech_history: measurement tool over the real runtime and its own gates; public synthetic data only'],
   'egdesk-turn-memory.mjs': ['memory_page', 'topic_history'],
