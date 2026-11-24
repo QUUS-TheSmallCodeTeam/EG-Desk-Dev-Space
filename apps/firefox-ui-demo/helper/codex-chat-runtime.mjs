@@ -5170,15 +5170,18 @@ export class CodexChatRuntime {
     } catch { /* the judge never affects the run */ }
   }
 
-  // The run's command facts join its conversation's heartbeat (one provider, one beat listener per heartbeat).
+  // The run's command facts join its conversation's heartbeat under the heartbeat's provider contract (egdesk-heartbeat.mjs):
+  // a facts-only provider (it has no question of its own for a beat, so no propose/onVerdict) and one beat subscriber, once per heartbeat.
+  // The heartbeat is shared: other features' providers (the conversation flow's own, for one) live beside this one.
   feedCommandHeartbeat(run) {
     const hb = this.heartbeatThreads.get(run.conversationId)
     if (!hb || hb.state === 'stopped') return
     const fed = this.commandJudgeBeats.get(hb)
     if (fed) { fed.runKey = run.answerId; return }
     const slot = { runKey: run.answerId }
+    hb.register('engine_commands', { facts: () => this.engineCommands.facts(slot.runKey) })
+    if (!hb.snapshot().providers.includes('engine_commands')) return // the heartbeat is full or stopping: try again at the next command
     this.commandJudgeBeats.set(hb, slot)
-    hb.register('engine_commands', () => this.engineCommands.facts(slot.runKey))
     hb.subscribe(() => { this.engineCommands.beat(slot.runKey) })
   }
 

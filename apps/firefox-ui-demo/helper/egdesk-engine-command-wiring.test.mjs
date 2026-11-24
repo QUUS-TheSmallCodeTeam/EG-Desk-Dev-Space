@@ -125,11 +125,13 @@ test('heartbeat: the run\'s command facts join the conversation\'s heartbeat (on
   const run = await h.chat.send({ message: 'Run the long test suite', clientThreadId: 'ui-room', requestId: 'req-1' })
   const hb = h.chat.heartbeatFor('ui-room')
   assert.ok(hb, 'the conversation has a heartbeat (conversation flow flag on)')
-  assert.deepEqual(hb.snapshot().providers, [], 'no command yet: nothing registered')
+  // The heartbeat is shared: the conversation flow registers its own providers on it. This feature adds exactly one, and only once a command runs.
+  const others = hb.snapshot().providers
+  assert.equal(others.includes('engine_commands'), false, 'no command yet: nothing of this feature is registered')
   const base = { threadId: run.conversationId, turnId: run.runId }
   await h.notify('item/started', { ...base, item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test', cwd: '/work', status: 'inProgress' } })
   await h.notify('item/commandExecution/outputDelta', { ...base, itemId: 'cmd-1', delta: 'running 40 tests\n' })
-  assert.deepEqual(hb.snapshot().providers, ['engine_commands'])
+  assert.deepEqual(hb.snapshot().providers, [...others, 'engine_commands'], 'exactly one provider is added; the others are untouched')
   await h.advance(5000); await h.advance(5000) // two beats on the virtual clock
   const facts = hb.facts()
   const row = facts.sources.engine_commands
@@ -138,7 +140,7 @@ test('heartbeat: the run\'s command facts join the conversation\'s heartbeat (on
     '"tests are still running": running for 10 s, quiet for 10 s, judged still running')
   assert.equal(h.chat.engineCommands.advisories().length, 1, 'the quiet check and two beats on the same tail asked once')
   await h.notify('item/started', { ...base, item: { id: 'cmd-2', type: 'commandExecution', command: 'ls', cwd: '/work', status: 'inProgress' } })
-  assert.deepEqual(hb.snapshot().providers, ['engine_commands'], 'still one provider')
+  assert.deepEqual(hb.snapshot().providers, [...others, 'engine_commands'], 'still one provider')
   await h.notify('item/completed', { ...base, item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test', cwd: '/work', status: 'completed', exitCode: 0, aggregatedOutput: 'running 40 tests\nall passed\n' } })
   await h.notify('item/completed', { ...base, item: { id: 'cmd-2', type: 'commandExecution', command: 'ls', cwd: '/work', status: 'completed', exitCode: 0, aggregatedOutput: 'a\nb\n' } })
   const after = hb.facts().sources.engine_commands
@@ -147,7 +149,7 @@ test('heartbeat: the run\'s command facts join the conversation\'s heartbeat (on
   const plain = codexHarness(t, { flow: true })
   const run2 = await plain.chat.send({ message: 'Work', clientThreadId: 'ui-room', requestId: 'req-1' })
   await plain.notify('item/started', { threadId: run2.conversationId, turnId: run2.runId, item: { id: 'cmd-1', type: 'commandExecution', command: 'npm test', cwd: '/work', status: 'inProgress' } })
-  assert.deepEqual(plain.chat.heartbeatFor('ui-room').snapshot().providers, [])
+  assert.deepEqual(plain.chat.heartbeatFor('ui-room').snapshot().providers, others, 'the same heartbeat without this feature')
 })
 
 test('Claude: a Bash tool use arrives as started/completed with a status only; its output never reaches the bridge runtime, so nothing can be sent', async t => {

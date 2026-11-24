@@ -229,3 +229,22 @@ export function createEngineCommandWatch({ flag = () => 'off', decision = null, 
     snapshot: () => ({ runs: runs.size, commands: [...runs.values()].reduce((sum, run) => sum + run.commands.size, 0) }),
   })
 }
+
+/**
+ * The command facts as question facts for a heartbeat question (egdesk-heartbeat.mjs: numbers, booleans and closed labels with
+ * keys /^[a-z][a-z0-9_]{0,63}$/). Input: the row this watch gives the heartbeat (beat.facts.sources.engine_commands). Returns {}
+ * when there is no row, so a caller can spread it into its question's `facts` unconditionally.
+ */
+export function commandQuestionFacts(row) {
+  if (!row || typeof row !== 'object' || typeof row.terminal !== 'string') return {}
+  const seconds = value => (Number.isFinite(value) && value >= 0 ? Math.round(value / 1000) : null)
+  const count = value => (Number.isSafeInteger(value) && value >= 0 ? value : 0)
+  const out = { command_running: row.active === true, commands_finished: count(row.commandsDone), commands_failed: count(row.commandsFailed) }
+  if (row.active === true) {
+    const running = seconds(row.runningMs), quiet = seconds(row.quietMs)
+    if (running !== null) out.command_running_seconds = running
+    if (quiet !== null) out.seconds_since_command_output = quiet
+  }
+  if (typeof row.terminalState === 'string' && /^[a-z0-9_]{1,40}$/.test(row.terminalState)) out.command_state = row.terminalState
+  return out
+}
