@@ -395,6 +395,9 @@
                             }
                           }
                         },
+                        "commandStopped": {
+                          "const": true
+                        },
                         "maxLatencyMs": {
                           "type": "integer",
                           "minimum": 1000,

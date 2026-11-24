@@ -51,8 +51,9 @@ function memoryConversation() {
     { say: SAYS.tidy, expect: { memory: { noResends: true, notAttached: DB_IDS }, posted: true, answerIncludes: ['12,800'], noNativeTools: true, turnStatus: 'completed' } },
     // s3b: a genuine recall: the design page is fetched, no quote page, and the answer is about what was asked (not the other matter)
     { say: SAYS.recall, expect: { memory: { attached: ['db/pg-design'], notAttached: QUOTE_IDS, noResends: true }, posted: true, answerIncludes: ['PostgreSQL'], answerExcludes: ['A사', '12,800'], noNativeTools: true, turnStatus: 'completed' } },
-    // s9: a status remark about the migration: its deployment plan is brought (soft in the journey), nothing already delivered is sent again, no quote page
-    { say: SAYS.deployed, expect: { memory: { attached: ['db/pg-plan'], notAttached: QUOTE_IDS, noResends: true }, posted: true, noNativeTools: true, turnStatus: 'completed' } },
+    // s9: a status remark about the migration: nothing already delivered is sent again and no quote page is. The journey's soft "the deployment plan is brought"
+    // is not expressed: it accepts a page held since s3b (packetOrHeld), and the memory expectation names only pages with a body in THIS turn
+    { say: SAYS.deployed, expect: { memory: { notAttached: QUOTE_IDS, noResends: true }, posted: true, noNativeTools: true, turnStatus: 'completed' } },
   ] }
 }
 
@@ -74,15 +75,16 @@ function nudgeConversations() {
     nudge('journey-change', change, { posted: true, turnStatus: 'completed', engine: { interrupts: 0 } },
       SAYS.change, 12000, { posted: true, noNativeTools: true, engine: { steers: 1, interrupts: 0, steerCarries: true, flowMessages: { max: 0 } } }),
     // s12: the person says stop, 12 s into a 40 s command. The engine gets one interrupt of the working turn and no steer, the turn ends interrupted well before the
-    // command would have (30 s), and the Agent posts no answer for the stopped work (only the wait note may be posted)
-    nudge('journey-stop', stop, { turnStatus: 'interrupted', engine: { interrupts: 1, steers: 0, agentMessages: { equals: 0 }, flowMessages: { max: 1 }, maxLatencyMs: 30000 } },
+    // command would have (30 s), the command PROCESS is stopped by EG-Desk (commandStopped: it ended by a signal; the turn ending is the engine's doing), and the
+    // Agent posts no answer for the stopped work (only the wait note may be posted)
+    nudge('journey-stop', stop, { turnStatus: 'interrupted', engine: { interrupts: 1, steers: 0, agentMessages: { equals: 0 }, flowMessages: { max: 1 }, commandStopped: true, maxLatencyMs: 30000 } },
       SAYS.stop, 12000, { noNativeTools: true, engine: { interrupts: 1, steers: 0, flowMessages: { max: 0 } } }),
   ]
 }
 
 const DESCRIPTIONS = {
-  [MEMORY_SET]: 'The all-on journey\'s memory steps (L2 c21) with the journey\'s own synthetic pages seeded: s1 the A사 quote question, s2 the follow-up, s3b the PostgreSQL design recall, s9 the "deployment finished" remark. Needs --decisions with a key (the Decision model picks and reads the pages). Expectations are code checks on what the product sent the engine (memory.attached / notAttached / noResends) and on the posted answer (answerIncludes / answerExcludes). s9\'s attached page is soft in the journey; here every expectation counts.',
-  [NUDGES_SET]: 'The all-on journey\'s in-run message steps (L2 c21), one long command per conversation, the journey\'s pages seeded so that no page may be attached for an action request: journey-status (s4 + s4n: "why did it stop" 12 s in; the command is not interrupted, finishes, one short reply), journey-change (s4c: a change is steered into the working turn; needs the steer contract of the binary: on 0.171 the product recognizes it only for 0.162.1, so there the expectation fails with steerContract false in its detail), journey-stop (s12: the stop interrupts the turn once, the turn ends interrupted well before the command would have, the Agent posts no answer). Needs --decisions with a key: EGDESK_INRUN_MESSAGES, EGDESK_CONVERSATION_FLOW and EGDESK_DRAFT_CHECK=on.',
+  [MEMORY_SET]: 'The all-on journey\'s memory steps (L2 c21) with the journey\'s own synthetic pages seeded: s1 the A사 quote question, s2 the follow-up, s3b the PostgreSQL design recall, s9 the "deployment finished" remark. Needs --decisions with a key (the Decision model picks and reads the pages). Expectations are code checks on what the product sent the engine (memory.attached / notAttached / noResends) and on the posted answer (answerIncludes / answerExcludes). s9 asks only that nothing is sent twice and no quote page comes (the journey\'s soft "the plan is brought" accepts a page already held, which expect.memory cannot say).',
+  [NUDGES_SET]: 'The all-on journey\'s in-run message steps (L2 c21), one long command per conversation, the journey\'s pages seeded so that no page may be attached for an action request: journey-status (s4 + s4n: "why did it stop" 12 s in; the command is not interrupted, finishes, one short reply), journey-change (s4c: a change is steered into the working turn; needs the steer contract of the binary: on 0.171 the product recognizes it only for 0.162.1, so there the expectation fails with steerContract false in its detail), journey-stop (s12: the stop interrupts the turn once, the turn ends interrupted well before the command would have, EG-Desk stops the command process itself (commandStopped: today the own-tools executor passes the command runner no abort signal and has no cancelRun, so the expectation fails on a real engine until it does), the Agent posts no answer). Needs --decisions with a key: EGDESK_INRUN_MESSAGES, EGDESK_CONVERSATION_FLOW and EGDESK_DRAFT_CHECK=on.',
 }
 
 /** buildJourneyScripts() → { [set]: script } (validated). */

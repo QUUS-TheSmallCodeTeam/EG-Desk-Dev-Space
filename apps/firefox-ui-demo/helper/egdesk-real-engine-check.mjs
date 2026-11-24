@@ -252,7 +252,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
   const t0 = performance.now()
   const runnerLog = []
   const runnerSpawn = deps.runnerSpawn ?? nodeSpawn
-  const loggedRunnerSpawn = (file, args, opts) => { runnerLog.push(String(args?.at?.(-1) ?? '')); return runnerSpawn(file, args, opts) }
+  const loggedRunnerSpawn = (file, args, opts) => { runnerLog.push(String(args?.at?.(-1) ?? '')); const child = runnerSpawn(file, args, opts); journeyHook.observeCommand(args?.at?.(-1), child); return child } // journey hook: how the command process ends
 
   // ---- the app-server child ----
   const argv = appServerArgs(options, deps.buildLaunch ?? buildCodexAppServerLaunch)

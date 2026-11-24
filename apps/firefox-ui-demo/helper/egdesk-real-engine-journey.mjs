@@ -10,15 +10,17 @@
 //   flowMessages   the system's own short messages (the heartbeat's wait notes and replies; the store's "egdesk-flow:" messages) posted in the window:
 //                  { equals?, max?, min? }
 //   agentMessages  the Agent's own messages posted in the window (every assistant message that is not one of the system's): { equals?, max?, min? }
+//   commandStopped (scripted turn, not whileRunning) the command EG-Desk's own tool started in the window was stopped by EG-Desk: every command of the window had
+//                  ended by the end of it and the last one ended by a signal (not by finishing). The turn ending "interrupted" is the engine's doing; this is the command process.
 //   maxLatencyMs   (scripted turn, not whileRunning) the whole window ended within this many ms: a command that was to run longer was cut short
 // Windows are the check's own: on a scripted turn the whole window (the turn and the message typed into it); on a whileRunning turn only what
 // happened after that message was sent. Nothing here asks a model whether a turn went well.
-export const ENGINE_EXPECT_KEYS = Object.freeze(['steers', 'interrupts', 'steerCarries', 'flowMessages', 'agentMessages', 'maxLatencyMs'])
+export const ENGINE_EXPECT_KEYS = Object.freeze(['steers', 'interrupts', 'steerCarries', 'flowMessages', 'agentMessages', 'maxLatencyMs', 'commandStopped'])
 export const ENGINE_LIMITS = Object.freeze({ requests: 5, messages: 20, latencyMs: 3_600_000 })
 const count = { type: 'integer', minimum: 0, maximum: ENGINE_LIMITS.requests }
 const bounds = { type: 'object', additionalProperties: false, minProperties: 1, properties: { equals: { type: 'integer', minimum: 0, maximum: ENGINE_LIMITS.messages }, max: { type: 'integer', minimum: 0, maximum: ENGINE_LIMITS.messages }, min: { type: 'integer', minimum: 0, maximum: ENGINE_LIMITS.messages } } }
 export const ENGINE_EXPECT_SCHEMA = Object.freeze({ type: 'object', additionalProperties: false, minProperties: 1, properties: {
-  steers: count, interrupts: count, steerCarries: { const: true }, flowMessages: bounds, agentMessages: bounds,
+  steers: count, interrupts: count, steerCarries: { const: true }, flowMessages: bounds, agentMessages: bounds, commandStopped: { const: true },
   maxLatencyMs: { type: 'integer', minimum: 1000, maximum: ENGINE_LIMITS.latencyMs } } })
 const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v)
 const FLOW_PREFIX = 'egdesk-flow:'
@@ -33,6 +35,8 @@ export function validateEngineExpect(expect, { whileRunning = false } = {}, wher
   if (expect.steerCarries !== undefined && expect.steerCarries !== true) bad(`${where}.steerCarries`, 'true')
   if (expect.steerCarries === true && !whileRunning) bad(`${where}.steerCarries`, 'only on a whileRunning turn (the person\'s words are that turn\'s say)')
   if (expect.steerCarries === true && expect.steers === 0) bad(where, 'steerCarries and steers 0 contradict')
+  if (expect.commandStopped !== undefined && expect.commandStopped !== true) bad(`${where}.commandStopped`, 'true')
+  if (expect.commandStopped === true && whileRunning) bad(`${where}.commandStopped`, 'not on a whileRunning turn (state it on the turn that is running)')
   if (expect.maxLatencyMs !== undefined) {
     if (!(Number.isInteger(expect.maxLatencyMs) && expect.maxLatencyMs >= 1000 && expect.maxLatencyMs <= ENGINE_LIMITS.latencyMs)) bad(`${where}.maxLatencyMs`, `an integer 1000-${ENGINE_LIMITS.latencyMs}`)
     if (whileRunning) bad(`${where}.maxLatencyMs`, 'not on a whileRunning turn (state it on the turn that is running)')
@@ -60,19 +64,26 @@ export function validateEngineExpect(expect, { whileRunning = false } = {}, wher
 export function createJourneyHook() {
   let window = null
   const zero = { flows: 0, agents: 0 }
-  const fresh = counts => ({ requests: [], start: counts?.() ?? zero, mark: null })
+  const fresh = counts => ({ requests: [], commands: [], start: counts?.() ?? zero, mark: null })
   return {
     observe(method, params) {
       if (!window || (method !== 'turn/steer' && method !== 'turn/interrupt')) return
       window.requests.push({ method, threadId: params?.threadId ?? null, turnId: params?.expectedTurnId ?? params?.turnId ?? null, clientUserMessageId: typeof params?.clientUserMessageId === 'string' ? params.clientUserMessageId : null,
         texts: Array.isArray(params?.input) ? params.input.map(i => (i?.type === 'text' ? i.text : null)) : null, at: window.requests.length })
     },
+    /** The product's own tool started a command process (the check's spawn): remember how it ends. */
+    observeCommand(command, child) {
+      if (!window || !child || typeof child.on !== 'function') return
+      const entry = { command: String(command ?? '').slice(0, 200), closed: false, code: null, signal: null }
+      window.commands.push(entry)
+      child.on('close', (code, signal) => { entry.closed = true; entry.code = Number.isInteger(code) ? code : null; entry.signal = typeof signal === 'string' ? signal : null })
+    },
     beginTurn({ counts } = {}) { window = fresh(counts) },
     markInRun({ text, counts } = {}) { if (window) window.mark = { text: String(text ?? ''), requestsBefore: window.requests.length, at: counts?.() ?? zero } },
     finishTurn({ expect, nextExpect, latencyMs = null, counts, steerContract = null } = {}) {
       const w = window ?? fresh(counts), now = counts?.() ?? zero
       const steers = w.requests.filter(r => r.method === 'turn/steer'), interrupts = w.requests.filter(r => r.method === 'turn/interrupt')
-      const record = { steers: steers.map(s => ({ turnId: s.turnId, texts: s.texts, clientUserMessageId: s.clientUserMessageId })), interrupts: interrupts.map(i => ({ turnId: i.turnId })), flowMessages: now.flows - w.start.flows, agentMessages: now.agents - w.start.agents, steerContract }
+      const record = { steers: steers.map(s => ({ turnId: s.turnId, texts: s.texts, clientUserMessageId: s.clientUserMessageId })), interrupts: interrupts.map(i => ({ turnId: i.turnId })), flowMessages: now.flows - w.start.flows, agentMessages: now.agents - w.start.agents, commands: w.commands.map(c => ({ command: c.command, closed: c.closed, signal: c.signal })), steerContract }
       const judge = (e, { from, text }) => {
         const out = [], put = (check, ok, detail) => out.push({ check, ok: ok === true, detail })
         const rs = w.requests.slice(from?.requests ?? 0), s = rs.filter(r => r.method === 'turn/steer'), i = rs.filter(r => r.method === 'turn/interrupt')
@@ -83,13 +94,14 @@ export function createJourneyHook() {
         const within = (f, n) => (f.equals === undefined || n === f.equals) && (f.max === undefined || n <= f.max) && (f.min === undefined || n >= f.min)
         if (e.flowMessages) put('engine.flowMessages', within(e.flowMessages, flows), { seen: flows })
         if (e.agentMessages) put('engine.agentMessages', within(e.agentMessages, agents), { seen: agents })
+        if (e.commandStopped) put('engine.commandStopped', w.commands.length > 0 && w.commands.every(c => c.closed) && w.commands.at(-1).signal !== null, { commands: w.commands.map(c => ({ command: c.command, closed: c.closed, code: c.code, signal: c.signal })) })
         if (e.maxLatencyMs !== undefined) put('engine.maxLatencyMs', Number.isFinite(latencyMs) && latencyMs <= e.maxLatencyMs, { wanted: e.maxLatencyMs, latencyMs })
         return out
       }
       const expectations = expect?.engine ? judge(expect.engine, { from: null, text: null }) : []
       const nextExpectations = nextExpect?.engine && w.mark ? judge(nextExpect.engine, { from: { requests: w.mark.requestsBefore, at: w.mark.at }, text: w.mark.text }) : []
       window = null
-      return { record: steers.length || interrupts.length || now.flows !== w.start.flows ? record : null, expectations, nextExpectations }
+      return { record: steers.length || interrupts.length || now.flows !== w.start.flows || w.commands.some(c => c.signal !== null || !c.closed) ? record : null, expectations, nextExpectations }
     },
   }
 }
