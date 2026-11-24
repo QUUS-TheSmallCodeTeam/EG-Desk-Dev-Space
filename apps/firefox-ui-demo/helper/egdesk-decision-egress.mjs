@@ -112,6 +112,7 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-gate-hook-broker.mjs': ['run_text', 'terminal_command'],
   // c21: the auxiliary yes/no predicates of the condition arbiter on the output tail of a command EG-Desk ran for the run's engine.
   'egdesk-own-tools-wiring.mjs': ['command_output'],
+  'egdesk-run-conditions-plan.mjs': ['command_output: plan builder; a capturing fetch that answers locally, nothing is sent'],
   'egdesk-terminal-judge.mjs': ['terminal_output', 'command_output'],
   'egdesk-memory-live-runner.mjs': ['memory_page: measurement tool; the public synthetic wiki only, through guardClient'],
   // Measurement tool: drives the real runtime, whose own gates ask every kind before each request; synthetic pages in a temporary directory only.
