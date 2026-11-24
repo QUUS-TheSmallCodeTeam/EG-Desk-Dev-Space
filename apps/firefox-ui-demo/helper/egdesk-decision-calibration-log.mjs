@@ -49,6 +49,8 @@ function beat(raw) {
   return Object.keys(out).length ? out : null
 }
 const POSITIONS = new Set(['first', 'mid'])
+const WM_OUTPUT_KINDS = new Set(['build', 'terminal', 'search', 'page', 'subagent', 'tool'])
+const WM_BY = new Set(['rules', 'decision', 'none'])
 const MEMORY = new Set(['ran', 'skipped', 'partial', 'fallback', 'empty'])
 const ms = value => (Number.isFinite(value) && value >= 0 ? Math.min(120000, Math.round(value / 10) * 10) : null)
 function timing(raw) {
@@ -167,6 +169,15 @@ export function normalizeEntry(raw, now = Date.now()) {
     if (Object.keys(counts).length) entry.evidence = counts
   }
   put(entry, 'flow', word(FLOW_KINDS, raw.flow)); put(entry, 'posted', word(POSTED, raw.posted)); put(entry, 'beat', beat(raw.beat)); put(entry, 'questions', count(raw.questions, 16))
+  // Working-memory gate: sizes only (blocks, lines, estimated tokens before and after), the output kind and who chose. Never text.
+  if (feature === 'working_memory' && record(raw.wm)) {
+    const wm = {}
+    for (const key of ['blocks', 'omittedBlocks']) put(wm, key, count(raw.wm[key], 99))
+    for (const key of ['linesBefore', 'linesAfter', 'tokensBefore', 'tokensAfter']) put(wm, key, count(raw.wm[key], 10_000_000))
+    put(wm, 'kind', word(WM_OUTPUT_KINDS, raw.wm.kind)); put(wm, 'by', word(WM_BY, raw.wm.by)); put(wm, 'spill', typeof raw.wm.spill === 'boolean' ? raw.wm.spill : null)
+    put(wm, 'overLimit', raw.wm.overLimit === true ? true : null)
+    if (Object.keys(wm).length) entry.wm = wm
+  }
   put(entry, 'position', word(POSITIONS, raw.position)); put(entry, 'memory', word(MEMORY, raw.memory)); put(entry, 'timing', timing(raw.timing))
   put(entry, 'fallback', word(FALLBACK, raw.fallback)); put(entry, 'attached', typeof raw.attached === 'boolean' ? raw.attached : null)
   if (feature === 'terminal_state') put(entry, 'terminal', terminalFields(raw.terminal))

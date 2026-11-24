@@ -13,7 +13,7 @@ import { articleDump, buildLog, grepOutput, headingPolicy, mockDecisions, pageDu
 const allow = (extra = {}) => createEgressGate(modelDataPermissions({ browserGranted: true, runActive: true, topicConsent: true, ...extra }))
 const tmp = () => mkdtempSync(path.join(os.tmpdir(), 'egdesk-wm-'))
 const recorder = () => { const entries = []; return { entries, record: entry => { entries.push(entry); return 'id' } } }
-const pointer = text => [...text.matchAll(/Re-read: egdesk_read_source (\{.*?\})\]/g)].map(m => JSON.parse(m[1]))
+const pointer = text => [...text.matchAll(/Re-read: egdesk_read_source (\{.*?\}\})/g)].map(m => JSON.parse(m[1]))
 
 test('splitBlocks covers every line exactly once and never exceeds the block budget', () => {
   for (const fixture of [buildLog(), grepOutput(), shortResult()]) {
@@ -64,6 +64,8 @@ test('templates are fixed strings built from runtime numbers only', () => {
   assert.equal(omittedLine({ action: 'collapse_template', count: 320, startLine: 5, endLine: 324, label: 'build log', exitCode: 0 }), '[System: 320 lines of build log omitted (lines 5-324). Exit code: 0.]')
   assert.equal(omittedLine({ action: 'spill_scratch', count: 3, startLine: 2, endLine: 4, label: 'search results', spillId: '11111111-1111-4111-8111-111111111111' }),
     '[System: 3 lines of search results spilled (lines 2-4). Re-read: egdesk_read_source {"snapshotId":"11111111-1111-4111-8111-111111111111","intent":"re-read spilled tool output","range":{"startLine":2,"endLine":4}}]')
+  assert.equal(omittedLine({ action: 'spill_scratch', count: 900, startLine: 2, endLine: 901, readEnd: 40, label: 'search results', spillId: '11111111-1111-4111-8111-111111111111' }),
+    '[System: 900 lines of search results spilled (lines 2-901). Re-read: egdesk_read_source {"snapshotId":"11111111-1111-4111-8111-111111111111","intent":"re-read spilled tool output","range":{"startLine":2,"endLine":40}} This range fits one read; continue with later ranges up to line 901, or pass a literal "query" instead of "range".]')
   const lines = ['a', 'b', 'KEEP', 'd', 'e']
   const text = applyActions({ lines, anchors: new Set([2]), blocks: [{ id: 'b1', startLine: 1, endLine: 5 }], actions: { b1: 'collapse_template' }, kind: 'terminal' })
   assert.equal(text, '[System: 2 lines of command output omitted (lines 1-2).]\nKEEP\n[System: 2 lines of command output omitted (lines 4-5).]', 'an anchor inside a collapsed block stays verbatim')
@@ -118,7 +120,7 @@ test('on + flag: 300-line build log keeps the one real error, the edited path an
   for (const p of pointers) {
     assert.equal(p.snapshotId, result.spillId)
     const read = spill.read(p.snapshotId, p.range)
-    assert.equal(read.text, original.slice(p.range.startLine - 1, p.range.endLine).join('\n'), 'the pointer range returns exactly the lines it replaced')
+    assert.equal(read.text, original.slice(p.range.startLine - 1, p.range.endLine).join('\n'), 'the ready-made range returns exactly those lines of the output')
     assert.equal(read.range.totalLines, original.length)
   }
   // Every line is either still in the context or covered by a template line.
@@ -141,11 +143,14 @@ test('2,000-line grep: the two goal hits stay; the rest is one pointer away', as
   for (const must of grep.mustKeep) assert.ok(result.text.split('\n').includes(must))
   assert.ok(result.tokensAfter < result.tokensBefore * 0.1)
   const all = pointer(result.text), original = grep.text.split('\n')
-  assert.ok(all.length >= 4, 'a long spilled run is cut into ranges one read can serve')
+  assert.ok(all.length >= 1 && all.length <= 6, 'one pointer line per spilled run, not one per chunk')
   for (const each of all) {
     assert.ok(each.range.endLine - each.range.startLine < WM_LIMITS.pointerLines)
-    assert.equal(spill.read(each.snapshotId, each.range).text, original.slice(each.range.startLine - 1, each.range.endLine).join('\n'), 'every pointer works exactly as written')
+    const got = spill.read(each.snapshotId, each.range).text
+    assert.equal(got, original.slice(each.range.startLine - 1, each.range.endLine).join('\n'), 'the ready-made range works exactly as written')
+    assert.ok(estimateTokens(got) <= WM_LIMITS.pointerTokens + 60, 'and is sized to fit one read')
   }
+  assert.match(result.text, /continue with later ranges up to line \d+, or pass a literal "query" instead of "range"\.\]/)
   const p = all[0]
   assert.throws(() => spill.read(p.snapshotId, { startLine: 1, endLine: 501 }), { code: 'INVALID_RANGE' }, 'a re-read is bounded like the existing inspector (500 lines)')
   assert.equal(spill.read(p.snapshotId, { startLine: 1, endLine: 1 }).text, grep.text.split('\n')[0])

@@ -79,6 +79,10 @@ export function createCodexBrowserToolProvider({ transport, getOwnerKey, schemaR
   const fixtureAttestations = new Map()
   const provider = {
     providerId: 'egdesk-browser',
+    // Working-memory gate (flag, default off): in these results only the visible page text array is free text.
+    // Card ids, observation ids, element refs and receipts are never touched.
+    workingMemory: Object.freeze(Object.fromEntries(['egdesk_browser_observe', 'egdesk_browser_wait_text', 'egdesk_browser_wait']
+      .map(name => [name, Object.freeze({ kind: 'page', jsonTextArray: Object.freeze(['snapshot', 'text']) })]))),
     prepare(body) {
       const selectedSources = body.selectedSources ?? []
       if (!Array.isArray(selectedSources)) throw chatError('INVALID_BROWSER_SELECTION', 'Browser selection must be an array', 400)

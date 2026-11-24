@@ -6,7 +6,7 @@ import { stripAnsi } from './egdesk-run-result-parse.mjs'
 import { estimateTokens } from './egdesk-smart-read.mjs'
 import { redactTail } from './egdesk-terminal-judge.mjs'
 
-// Working-memory gate (system level; JEV §5.4 and Pillar 5). PROTOTYPE: not wired into the chat runtime.
+// Working-memory gate (system level; JEV §5.4 and Pillar 5). Wired at the EG-Desk tool-result boundary by egdesk-working-memory-wiring.mjs (flag, default off).
 //
 // When a tool or sub-agent output comes back, the RUNTIME (code, no generation) splits it into blocks, marks the
 // anchor lines that must survive verbatim, and enumerates what it can do with each remaining block. The Decision model
@@ -43,7 +43,9 @@ export const WM_LIMITS = Object.freeze({
   previewHead: 2, previewTail: 1, previewParagraphs: 3, previewLineChars: 160,
   minGain: 0.1, // the result must be at least 10% smaller in estimated tokens
   goalChars: 300,
-  pointerLines: 400, // one pointer never covers more than one read of the existing read tool (its range limit is 500 lines)
+  // The ready-made range in a pointer must fit ONE direct read of egdesk_read_source even when the run's context use is not
+  // measured yet (Smart Read then admits about 1,250 tokens of text), so the model can use it exactly as written.
+  pointerTokens: 1100, pointerLines: 200,
 })
 // Output kinds the caller declares. `label` is the only word a template may use for the content.
 export const WM_KINDS = Object.freeze({
@@ -176,28 +178,39 @@ export function ruleAction(block, kind = 'tool') {
 
 const READ_TOOL = 'egdesk_read_source'
 /** Fixed templates. Every number is the runtime's; `label` is a closed word; nothing here is generated. */
-export function omittedLine({ action, count, startLine, endLine, label, exitCode = null, spillId = null }) {
+export function omittedLine({ action, count, startLine, endLine, label, exitCode = null, spillId = null, readEnd = endLine }) {
   const exit = Number.isInteger(exitCode) ? ` Exit code: ${exitCode}.` : ''
   if (action === 'spill_scratch' && spillId) {
-    return `[System: ${count} lines of ${label} spilled (lines ${startLine}-${endLine}).${exit} Re-read: ${READ_TOOL} ${JSON.stringify({ snapshotId: spillId, intent: 're-read spilled tool output', range: { startLine, endLine } })}]`
+    const more = readEnd < endLine ? ` This range fits one read; continue with later ranges up to line ${endLine}, or pass a literal "query" instead of "range".` : ''
+    return `[System: ${count} lines of ${label} spilled (lines ${startLine}-${endLine}).${exit} Re-read: ${READ_TOOL} ${JSON.stringify({ snapshotId: spillId, intent: 're-read spilled tool output', range: { startLine, endLine: readEnd } })}${more}]`
   }
   return `[System: ${count} lines of ${label} omitted (lines ${startLine}-${endLine}).${exit}]`
 }
 
 /**
  * Apply per-block actions. Anchor lines stay verbatim inside collapsed and spilled blocks; adjacent omitted runs of one action share a line.
- * A spilled run is cut every `pointerLines` lines so each pointer can be used as it stands.
+ * A spilled run gets ONE line: its whole span, plus a ready-made first range sized (by estimated tokens and lines) to fit one read.
  */
 export function applyActions({ lines, anchors, blocks, actions, kind = 'tool', exitCode = null, spillId = null, limits = WM_LIMITS }) {
   const label = (WM_KINDS[kind] || WM_KINDS.tool).label
   const out = []
   let run = null // { action, start, end } 1-based
-  const flush = () => { if (run) { out.push(omittedLine({ action: run.action, count: run.end - run.start + 1, startLine: run.start, endLine: run.end, label, exitCode, spillId })); run = null } }
+  const firstFit = (start, end) => {
+    let tokens = 0, last = start
+    for (let n = start; n <= end && n - start < limits.pointerLines; n++) {
+      tokens += estimateTokens(lines[n - 1]) + 1
+      if (tokens > limits.pointerTokens && n > start) break
+      last = n
+    }
+    return last
+  }
+  const flush = () => { if (run) { out.push(omittedLine({ action: run.action, count: run.end - run.start + 1, startLine: run.start, endLine: run.end, label, exitCode, spillId,
+    readEnd: run.action === 'spill_scratch' && spillId ? firstFit(run.start, run.end) : run.end })); run = null } }
   for (const block of blocks) {
     const action = actions[block.id] === 'spill_scratch' && !spillId ? 'inject_full' : actions[block.id] || 'inject_full'
     for (let n = block.startLine; n <= block.endLine; n++) {
       if (action === 'inject_full' || anchors.has(n - 1)) { flush(); out.push(lines[n - 1]); continue }
-      if (run && run.action === action && run.end === n - 1 && !(action === 'spill_scratch' && run.end - run.start + 1 >= limits.pointerLines)) run.end = n
+      if (run && run.action === action && run.end === n - 1) run.end = n
       else { flush(); run = { action, start: n, end: n } }
     }
   }
@@ -305,7 +318,7 @@ export async function gateToolOutput({ text, kind = 'tool', exitCode = null, goa
 
   let spillId = null
   if (wantsSpill) {
-    try { spillId = spill.put(normalized)?.id ?? null } catch { spillId = null }
+    try { spillId = (await spill.put(normalized))?.id ?? null } catch { spillId = null }
     // The store refused (too large, full, unwritable): those blocks are injected, never silently dropped.
   }
   const result = build(spillId)
@@ -323,31 +336,37 @@ export async function gateToolOutput({ text, kind = 'tool', exitCode = null, goa
 }
 
 /**
- * gateToolResponse(response, options) for the native tool result shape { success, contentItems: [{ type: 'inputText', text }] }.
- * Only a successful single-text result is considered. A JSON result is left alone unless `jsonTextArray` names the path of ONE array of
- * strings (for example ['snapshot', 'text']); then only that array is gated and every other field, id and receipt stays byte-identical.
+ * toolResponseText(response, jsonTextArray) → { text, write(gatedText) → response } | { reason }
+ * Finds the ONE text a native tool result { success, contentItems } may have gated. Only a successful result with exactly one
+ * inputText item qualifies; images and other items are carried over untouched. A JSON text is left alone unless `jsonTextArray`
+ * names the path of one array of single-line strings (for example ['snapshot', 'text']); then only that array is the text and
+ * every other field, id and receipt stays byte-identical.
  */
-export async function gateToolResponse(response, { jsonTextArray = null, ...options } = {}) {
-  const untouched = reason => ({ response, touched: false, reason, requests: 0 })
+export function toolResponseText(response, jsonTextArray = null) {
   const items = response?.contentItems
-  if (response?.success !== true || !Array.isArray(items) || items.length !== 1 || items[0]?.type !== 'inputText' || typeof items[0].text !== 'string') return untouched('not_single_text')
-  const raw = items[0].text
+  if (response?.success !== true || !Array.isArray(items)) return { reason: 'not_single_text' }
+  const textItems = items.filter(item => item?.type === 'inputText')
+  if (textItems.length !== 1 || typeof textItems[0].text !== 'string') return { reason: 'not_single_text' }
+  const raw = textItems[0].text
+  const rebuild = text => ({ ...response, contentItems: items.map(item => (item === textItems[0] ? { type: 'inputText', text } : item)) })
   let parsed
   try { parsed = JSON.parse(raw) } catch { parsed = undefined }
-  if (parsed === undefined || typeof parsed !== 'object' || parsed === null) {
-    const gated = await gateToolOutput({ ...options, text: raw })
-    return { ...gated, response: gated.touched ? { success: true, contentItems: [{ type: 'inputText', text: gated.text }] } : response, text: undefined }
-  }
-  if (!Array.isArray(jsonTextArray) || !jsonTextArray.length) return untouched('structured')
+  if (parsed === undefined || typeof parsed !== 'object' || parsed === null) return { text: raw, write: rebuild }
+  if (!Array.isArray(jsonTextArray) || !jsonTextArray.length) return { reason: 'structured' }
   let holder = parsed
   for (const key of jsonTextArray.slice(0, -1)) holder = holder && typeof holder === 'object' ? holder[key] : undefined
   const leaf = jsonTextArray.at(-1)
   const array = holder && typeof holder === 'object' ? holder[leaf] : undefined
-  if (!Array.isArray(array) || !array.every(item => typeof item === 'string' && !item.includes('\n'))) return untouched('structured')
-  const gated = await gateToolOutput({ ...options, text: array.join('\n') })
-  if (!gated.touched) return { ...gated, response, text: undefined }
-  holder[leaf] = gated.text.split('\n')
-  return { ...gated, response: { success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(parsed) }] }, text: undefined }
+  if (!Array.isArray(array) || !array.every(item => typeof item === 'string' && !/[\r\n]/.test(item))) return { reason: 'structured' }
+  return { text: array.join('\n'), write: text => { holder[leaf] = text.split('\n'); return rebuild(JSON.stringify(parsed)) } }
+}
+
+/** gateToolResponse(response, { jsonTextArray?, ...gateToolOutput options }) → gateToolOutput result with `response` instead of `text`. */
+export async function gateToolResponse(response, { jsonTextArray = null, ...options } = {}) {
+  const target = toolResponseText(response, jsonTextArray)
+  if (target.reason) return { response, touched: false, reason: target.reason, requests: 0 }
+  const gated = await gateToolOutput({ ...options, text: target.text })
+  return { ...gated, response: gated.touched ? target.write(gated.text) : response, text: undefined }
 }
 
 /**
