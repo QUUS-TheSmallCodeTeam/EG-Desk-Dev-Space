@@ -349,12 +349,12 @@
       "perExtraItemGrouped": 246
     },
     "excerpt": {
-      "groupedOf3": 633,
-      "aloneOne": 231,
-      "splitOf3": 693,
-      "extraTokens": 60,
-      "ratio": 1.09,
-      "perExtraItemGrouped": 201
+      "groupedOf3": 711,
+      "aloneOne": 293,
+      "splitOf3": 879,
+      "extraTokens": 168,
+      "ratio": 1.24,
+      "perExtraItemGrouped": 209
     }
   }
 }

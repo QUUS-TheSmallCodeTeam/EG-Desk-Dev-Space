@@ -411,8 +411,8 @@
     {
       "id": "excerpt-yes-A",
       "file": "requests/excerpt-yes-A.json",
-      "sha256": "4b422f0b616b366ce23c3199467ce761fef809ac48cf465d86f82cd0118aefbe",
-      "estInputTokens": 233,
+      "sha256": "28a4c310e4502b82207190a1fc8c8166f790abc246e41194077f8ab4d3d84ab1",
+      "estInputTokens": 295,
       "expect": [
         {
           "name": "c1",
@@ -433,8 +433,8 @@
     {
       "id": "excerpt-yes-O",
       "file": "requests/excerpt-yes-O.json",
-      "sha256": "6e29f0017a3030e555e2d35271169de6924c0c6c375ea036e34d7f1bec6ee67b",
-      "estInputTokens": 623,
+      "sha256": "fab68331a2d1b8b5b99d812e4aa3a2c6de360c2da184018ba44ce83f24b516d3",
+      "estInputTokens": 701,
       "expect": [
         {
           "name": "c1",
@@ -483,8 +483,8 @@
     {
       "id": "excerpt-yes-S",
       "file": "requests/excerpt-yes-S.json",
-      "sha256": "a369df681f4785b79b8aa57ec460495007addbcbfa8e1dab893999060366a714",
-      "estInputTokens": 640,
+      "sha256": "eac6d00a468188d7b4b17be5656b63c53ea911a60d29e842c387be67f4adce2e",
+      "estInputTokens": 718,
       "expect": [
         {
           "name": "c1",
@@ -533,8 +533,8 @@
     {
       "id": "excerpt-no-A",
       "file": "requests/excerpt-no-A.json",
-      "sha256": "0e11dcbdac08b0f55a864e2781077ea3462d9451c32daa495609e0b0432e62d2",
-      "estInputTokens": 229,
+      "sha256": "790f467d67ae36c71b696f9ef246caa32a49e2df5c1a6b17b7e4f5282b8e94e6",
+      "estInputTokens": 291,
       "expect": [
         {
           "name": "c1",
@@ -555,8 +555,8 @@
     {
       "id": "excerpt-no-O",
       "file": "requests/excerpt-no-O.json",
-      "sha256": "67d7993191497a1818930e36ed7f52033eaf450f9f347894eba056b8524daf9f",
-      "estInputTokens": 636,
+      "sha256": "c679b01461a32e5ab821acfd9be4f5cb49341ffccd5bbb540288d0be2ba64c4a",
+      "estInputTokens": 714,
       "expect": [
         {
           "name": "c1",
