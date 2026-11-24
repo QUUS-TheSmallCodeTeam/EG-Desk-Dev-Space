@@ -388,7 +388,9 @@ const fingerprint = (proposal, message) => sha256Hex(JSON.stringify([proposal, c
 export function createWikiWriter(wiki, { enabled = false, canWrite = () => false, acceptStatus = () => false, idFor = null, persist = null } = {}) {
   const done = new Map()
   return {
-    apply(proposal, { message = null, messageRef = null, scope = null, operationId = null } = {}) {
+    // from: the local conversation the reading was heard in (kept beside the stored reading, never on the page), so deleting that
+    // conversation can withdraw a reading still pending (L2 c17). Optional; without it nothing changes.
+    apply(proposal, { message = null, messageRef = null, scope = null, operationId = null, from = null } = {}) {
       if (enabled !== true) return { status: 'disabled' }
       if (!record(proposal) || !OPS.has(proposal.op)) return { status: 'invalid' }
       if (proposal.op === 'none') return { status: 'noop' }
@@ -411,7 +413,7 @@ export function createWikiWriter(wiki, { enabled = false, canWrite = () => false
           const revision = nextRevision(page.revision)
           const stored = reading
           // Persist first: a store that cannot keep the reading means nothing changed.
-          if (typeof persist === 'function') persist({ kind: 'reading', pageId: page.id, sourceRevision: page.revision.replace(/\.r\d+$/, ''), reading: stored, revision })
+          if (typeof persist === 'function') persist({ kind: 'reading', pageId: page.id, sourceRevision: page.revision.replace(/\.r\d+$/, ''), reading: stored, revision, ...(typeof from === 'string' && from ? { from } : {}) })
           const patched = wiki.patch(page.id, { statusReadings: [...page.statusReadings, stored], revision })
           if (!patched) return { status: 'invalid', reason: 'write_failed' }
           return finish({ status: 'recorded_pending', pageId: page.id, revision })

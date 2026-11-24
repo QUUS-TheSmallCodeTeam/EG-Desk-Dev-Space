@@ -1392,6 +1392,19 @@ export function replyRunForThread(state, thread) {
   return busy.length === 1 && runReplyOpen(busy[0]) ? busy[0] : null;
 }
 
+// The bridge's developer flag EGDESK_INRUN_MESSAGES=on (capability 'in-run-messages'): a text message typed while the DM's one run works goes
+// into that run (the bridge stores it, tells the session heartbeat, and keeps it for the next turn if the run ends without acting on it).
+// An open early question takes precedence (replyRunForThread). Without the capability: null, the composer waits for the turn as before.
+export const IN_RUN_MESSAGES_CAPABILITY = 'in-run-messages';
+export function inRunMessageRunForThread(state, thread, capabilities) {
+  if (!Array.isArray(capabilities) || !capabilities.includes(IN_RUN_MESSAGES_CAPABILITY)) return null;
+  if (!state || !thread || thread.type !== 'dm' || thread.resuming || thread.preparingInput) return null;
+  if (Object.values(state.requests || {}).some(request => requestBelongsToThread(request, thread) && ['submitting', 'unconfirmed'].includes(request.status))) return null;
+  const busy = runsForThread(state, thread).filter(isRunBusy);
+  const run = busy.length === 1 ? busy[0] : null;
+  return run && run.status !== 'stopping' && !run.stopRequested && !run.stopPending && !runReplyOpen(run) ? run : null;
+}
+
 export function approvalRequestFor(run, approvalId, decision) {
   if (run?.localHistory === true || !['accept', 'acceptForSession', 'decline', 'cancel'].includes(decision)) return null;
   const approval = run?.pendingApprovals?.find(item => (item.approvalId || item.id) === approvalId);
