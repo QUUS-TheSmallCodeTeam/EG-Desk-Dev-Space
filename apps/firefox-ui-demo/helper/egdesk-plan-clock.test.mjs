@@ -1,15 +1,19 @@
 // Cycle 16 (L6): every committed real-measurement plan is what the code builds on ANY day. On 2026-11-25 the contamination plan's
 // product-built bodies stopped matching ("Today is 2026-11-24" vs the build machine's 25th): its builder read the system clock. This file
 // moves the system clock (Date.now and new Date()) far from the build day, in both directions, and
-//   1. runs every plan script's own compare mode in process (the same bytes check the script prints as matches / DIFFERS), and
-//   2. builds every builder whose plan is written outside the repo (Main's evidence directories) at both clocks and requires equal bytes.
+//   1. rebuilds every "rebuilt" entry of the register (helper/egdesk-committed-plans.mjs): a script's own compare mode run in process (the
+//      same bytes check it prints as matches / DIFFERS), a builder's files compared with the committed ones, or the heartbeat snapshot;
+//   2. requires every committed plan location to be registered (rebuilt, frozen or hand-written); a missing one is named with its likely lane;
+//   3. builds every builder whose plan is written outside the repo (Main's evidence directories) at both clocks and requires equal bytes.
+// (c17: the register replaced c16's fixed list, which failed on int/c14 as soon as another lane committed a plan folder.)
 // Nothing is sent: the scripts' compare modes and the builders use synthetic clients; process.exit is caught, console output is read.
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { COMMITTED_PLANS, coverageProblems, findCommittedPlans } from './egdesk-committed-plans.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url)), app = path.join(here, '..')
 const RealDate = globalThis.Date
@@ -24,26 +28,25 @@ function setClock(shift) {
   globalThis.Date = shift ? ShiftedDate : RealDate
 }
 
-// Script compare modes: [label, script, argv]. Each prints "matches" for every committed plan it covers and never "differs"/"DIFFERS"/"stale".
-const CHECKS = Object.freeze([
-  ['action-relevance', 'egdesk-action-relevance-plan.mjs', []],
-  ['axis-hybrid', 'egdesk-axis-hybrid-plan.mjs', []],
-  ['axis-split + its utterance chunks', 'egdesk-axis-split-plan.mjs', []],
-  ['board-reply-screening + l1-remeasure-c13', 'egdesk-board-reply-real-plan.mjs', []],
-  ['briefing-coverage + briefing-coverage-facts', 'egdesk-briefing-coverage-plan.mjs', []],
-  ['contamination', 'egdesk-contamination-plan.mjs', []],
-  ['draft-overcorrection', 'egdesk-draft-overcorrection-plan.mjs', []],
-  ['memory-action-v2', 'egdesk-memory-action-v2-plan.mjs', []],
-  ['split-wording', 'egdesk-split-wording-plan.mjs', []],
-  ['turn-context-latency', 'egdesk-turn-context-latency-plan.mjs', []],
-  ['turn-context-idle', 'egdesk-turn-context-latency-plan.mjs', ['--idle']],
-  ['turn-context-warmup', 'egdesk-turn-context-latency-plan.mjs', ['--warmup']],
-  ['utterance-threshold', 'egdesk-utterance-threshold-study.mjs', []],
-  ['working-memory-judge', 'egdesk-working-memory-real-plan.mjs', []],
-])
-// Committed plan directories that no script rebuilds: written by hand, or kept as sent after a newer plan superseded them (static bytes, no
-// clock involved; memory-action is v1 as sent in c24, rebuilt as memory-action-v2).
-const HAND_WRITTEN = Object.freeze(['all-on-s3-faithful-fill', 'work-placement', 'memory-action'])
+// What to rebuild comes from the register (helper/egdesk-committed-plans.mjs): one run per distinct compare mode or builder.
+const REBUILT = COMMITTED_PLANS.filter(e => e.rebuilt)
+const SCRIPT_RUNS = [...new Map(REBUILT.filter(e => e.rebuilt.script).map(e => {
+  const key = [e.rebuilt.script, ...(e.rebuilt.argv || [])].join(' ')
+  return [key, { key, script: e.rebuilt.script, argv: e.rebuilt.argv || [], matches: e.rebuilt.matches ?? 1, covers: REBUILT.filter(x => x.rebuilt.script === e.rebuilt.script && (x.rebuilt.argv || []).join(' ') === (e.rebuilt.argv || []).join(' ')).map(x => `${x.path} (${x.lane})`) }]
+})).values()]
+async function builderDiffs(entry) {
+  const [mod, name] = entry.rebuilt.builder
+  const built = await (await import(mod))[name]()
+  const files = built.files && !Array.isArray(built.files) ? Object.entries(built.files) : (built.files || []).map(f => [f.file, f.bytes])
+  if (built.planBytes) files.push(['plan.json', built.planBytes])
+  const dir = path.join(app, entry.path)
+  if (!files.length) return ['(the builder returned no files)']
+  return files.filter(([file, bytes]) => { try { return !readFileSync(path.join(dir, file)).equals(Buffer.from(bytes)) } catch { return true } }).map(([file]) => file)
+}
+async function heartbeatDiffs(entry) {
+  const { buildHeartbeatPlan, planFile } = await import('./egdesk-heartbeat-real-plan.mjs')
+  return JSON.stringify(planFile(await buildHeartbeatPlan())) === JSON.stringify(JSON.parse(readFileSync(path.join(app, entry.path), 'utf8'))) ? [] : [entry.path]
+}
 
 class Exit extends Error { constructor(code) { super(`process.exit(${code})`); this.code = code } }
 async function runScript(script, argv, tag) {
@@ -67,23 +70,41 @@ for (const [clock, shift] of CLOCKS) {
     setClock(shift)
     try {
       assert.notEqual(new Date().toISOString().slice(0, 10), new RealDate().toISOString().slice(0, 10), 'the clock moved')
-      for (const [label, script, argv] of CHECKS) {
-        const { code, out } = await runScript(script, argv, `${clock}-${argv.join('') || 'default'}`)
+      for (const run of SCRIPT_RUNS) {
+        const { code, out } = await runScript(run.script, run.argv, `${clock}-${run.argv.join('') || 'default'}`)
         const bad = out.filter(line => /\bdiffers\b|DIFFERS|^stale:/.test(line))
-        assert.deepEqual(bad, [], `${label}: rebuilt with the clock ${clock}, files differ`)
-        assert.equal(code, 0, `${label}: compare mode exited ${code}`)
-        assert.ok(out.some(line => /\bmatches\b/.test(line)), `${label}: the compare mode reported no match`)
+        assert.deepEqual(bad, [], `${run.covers.join(', ')}: rebuilt with the clock ${clock} by scripts/${run.key}, files differ`)
+        assert.equal(code, 0, `scripts/${run.key}: compare mode exited ${code}`)
+        assert.ok(out.filter(line => /\bmatches\b/.test(line)).length >= run.matches, `scripts/${run.key}: expected ${run.matches} "matches" line(s) for ${run.covers.join(', ')}`)
+      }
+      for (const entry of REBUILT.filter(e => e.rebuilt.builder || e.rebuilt.heartbeat)) {
+        const diffs = entry.rebuilt.heartbeat ? await heartbeatDiffs(entry) : await builderDiffs(entry)
+        assert.deepEqual(diffs, [], `${entry.path} (lane ${entry.lane}): rebuilt with the clock ${clock}, files differ`)
       }
     } finally { setClock(0) }
   })
 }
 
-test('every committed plan directory is covered by a compare mode above or is hand-written', () => {
-  const root = path.join(app, 'proofs', 'decision-real-measure')
-  const dirs = readdirSync(root).filter(d => statSync(path.join(root, d)).isDirectory())
-  const covered = new Set(['action-relevance', 'axis-hybrid', 'axis-split', 'board-reply-screening', 'l1-remeasure-c13', 'briefing-coverage', 'briefing-coverage-facts',
-    'contamination', 'draft-overcorrection', 'memory-action-v2', 'split-wording', 'turn-context-latency', 'turn-context-idle', 'turn-context-warmup', 'utterance-threshold', 'working-memory-judge'])
-  assert.deepEqual(dirs.filter(d => !covered.has(d) && !HAND_WRITTEN.includes(d)), [], 'a new committed plan directory needs a compare mode in CHECKS (or is declared hand-written)')
+test('every committed plan location is registered (rebuilt, frozen or hand-written), each failure names the location and the owning lane', () => {
+  const problems = coverageProblems(app)
+  assert.deepEqual(problems, [], `\n${problems.join('\n')}`)
+  assert.ok(findCommittedPlans(app).length >= COMMITTED_PLANS.length)
+})
+
+test('an unregistered plan location is reported with its folder and a lane', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'egdesk-committed-plans-'))
+  try {
+    for (const [dir, set] of [['proofs/decision-real-measure/l3-c21-scenarios', 'l3-c21-scenarios-v2'], ['proofs/decision-real-measure/terse-record', 'terse-record-v1'], ['scripts/real-plans/mystery', 'mystery-v1']]) {
+      mkdirSync(path.join(root, dir), { recursive: true }); writeFileSync(path.join(root, dir, 'plan.json'), JSON.stringify({ set }))
+    }
+    mkdirSync(path.join(root, 'scripts'), { recursive: true }); mkdirSync(path.join(root, 'helper'), { recursive: true })
+    writeFileSync(path.join(root, 'scripts', 'egdesk-browser-live-plan-settings-v3.json'), JSON.stringify({ set: 'browser-live-settings-v3' }))
+    const problems = coverageProblems(root).filter(p => p.includes('not covered'))
+    assert.deepEqual(problems.map(p => [p.split(':')[0], /owning lane (L\d|unknown)/.exec(p)[1]]), [
+      ['proofs/decision-real-measure/l3-c21-scenarios', 'L3'], ['proofs/decision-real-measure/terse-record', 'L7'],
+      ['scripts/egdesk-browser-live-plan-settings-v3.json', 'L8'], ['scripts/real-plans/mystery', 'unknown']])
+    assert.ok(problems.every(p => p.includes('helper/egdesk-committed-plans.mjs')))
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 test('the contamination plan records the clock its bodies were built with, and every product-built body carries that day', async () => {
