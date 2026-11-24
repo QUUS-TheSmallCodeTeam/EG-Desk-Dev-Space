@@ -22,6 +22,8 @@ import { CodexChatRuntime } from '../helper/codex-chat-runtime.mjs'
 import { createChatHttpHandler } from '../helper/codex-bridge-http.mjs'
 import { openChatStore } from '../helper/egdesk-chat-store.mjs'
 import { FLOW_COPY, FLOW_LIMITS } from '../helper/egdesk-conversation-flow.mjs'
+// The mock Decision model's policy is the flow owner's (L3): this rig drifted once when the message question was renamed.
+import { judge } from '../helper/egdesk-heartbeat-flow.fixture.mjs'
 
 const surface = fs.readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8')
 function section(from, to) {
@@ -38,30 +40,15 @@ const REPLY = '스테이징이요'
 const FINAL = '스테이징 환경에 배포했습니다. 결과는 세 단계로 정리했습니다.'
 const AUTH = { isLoggedIn: true, authMode: 'chatgpt', accountId: 'verified-account' }
 
-function judge(request) {
-  const answers = {}
-  for (const q of request.questions) {
-    if (q.name === 'intermediate_message') {
-      const values = q.choices.map(c => c.value), facts = String(request.input?.[1]?.content ?? '')
-      const num = name => Number(new RegExp(`${name}: (\\d+)`).exec(facts)?.[1] ?? 0)
-      const pick = values.includes('stalled') ? 'stalled' : values.includes('ask_missing') ? 'ask_missing'
-        : values.includes('explain_wait') && num('tool_steps_done') + num('tool_steps_running') > 0 ? 'explain_wait' : 'none'
-      answers[q.name] = { type: 'choice', choice: pick, confidence: 0.95, probabilities: [{ value: pick, probability: 0.96 }, { value: values.find(v => v !== pick), probability: 0.02 }] }
-    } else if (q.name === 'answer_type' || q.name === 'time_intent') answers[q.name] = { type: 'choice', choice: q.choices[0].value, confidence: 0.9, probabilities: [{ value: q.choices[0].value, probability: 0.9 }] }
-    else if (/^claim_/.test(q.name)) answers[q.name] = { type: 'choice', choice: 'supported', confidence: 0.95, probabilities: [{ value: 'supported', probability: 0.96 }, { value: 'insufficient', probability: 0.02 }] }
-    else answers[q.name] = { type: 'predicate', probability: 0.04 }
-  }
-  return { answers, model: 'mock', usage: { inputTokens: 5 }, latencyMs: 3 }
-}
-
 // ---- bridge side: real runtime + store + HTTP handlers over a scripted engine, virtual clock ---------------------------------
-function bridgeWorld(t, { held = true, flow = true, writer = {}, forkHangs = false } = {}) {
+function bridgeWorld(t, { held = true, flow = true, writer = {}, forkHangs = false, audience = null } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-l2c6-')); chmodSync(dir, 0o700)
   const store = openChatStore({ dataDir: dir, ownerScope: 'synthetic-l2c6' })
   t.after(() => { store.close(); rmSync(dir, { recursive: true, force: true }) })
   let clock = 1_000_000, timerId = 0, threads = 0, forks = 0, turns = 0
   const timers = [], events = [], native = [], steers = []
   const state = { usedReply: null, steerFails: false, decides: 0 }
+  const flowAsked = [] // every time the mock Decision model was asked the heartbeat's message question
   const chat = new CodexChatRuntime({
     store, requireStore: true, getOwnerKey: () => 'test-account', now: () => clock, monotonicNow: () => clock, // the heartbeat's counter follows the virtual clock
     setTimer: (fn, ms) => { const timer = { id: ++timerId, fn, at: clock + ms }; timers.push(timer); return timer },
@@ -91,8 +78,8 @@ function bridgeWorld(t, { held = true, flow = true, writer = {}, forkHangs = fal
       if (method === 'turn/interrupt') return {}
       assert.fail(`Unexpected native call: ${method}`)
     },
-    decisionContext: { mode: () => 'on', configured: () => true, client: { model: 'mock', decide: async request => { state.decides++; return judge(request) } }, budgetMs: 800, collect: async () => [],
-      draftCheck: held ? { mode: () => 'on' } : undefined, conversationFlow: flow ? { mode: () => 'on' } : undefined },
+    decisionContext: { mode: () => 'on', configured: () => true, client: { model: 'mock', decide: async request => { state.decides++; return judge(request, flowAsked) } }, budgetMs: 800, collect: async () => [],
+      draftCheck: held ? { mode: () => 'on' } : undefined, conversationFlow: flow ? { mode: () => 'on', ...(audience ? { audience } : {}) } : undefined },
   })
   chat.setConnection(true)
   const handler = createChatHttpHandler(chat, async () => {})
@@ -113,7 +100,9 @@ function bridgeWorld(t, { held = true, flow = true, writer = {}, forkHangs = fal
     assert.equal(await handler(req, res, new URL(url, 'http://127.0.0.1:39218')), true, url)
     return { status: res.status, data: res.body ? JSON.parse(res.body) : null }
   }
-  const w = { chat, store, events, native, steers, state, http, settleAll, timing: null, clock: () => clock,
+  const w = { chat, store, events, native, steers, state, http, settleAll, timing: null, clock: () => clock, flowAsked,
+    // Rig precondition, stated loudly: the flow's question reached the mock model and it picked this kind.
+    picked(kind) { assert.ok(flowAsked.length > 0, 'rig: the mock Decision model was never asked the message question (was it renamed?)'); assert.ok(flowAsked.some(row => row.pick === kind), `rig: the message question never led to ${kind}: ${JSON.stringify(flowAsked.map(row => [row.offered, row.pick]))}`) },
     async advance(ms) {
       const end = clock + ms
       for (;;) {
@@ -270,6 +259,7 @@ test('held answer + early question: only completed bubbles are ever drawn, the r
   await w.advance(4000)
   await w.note('n1', '배포 환경이 정해져 있지 않네요. 어느 환경에 배포할까요?')
   await w.advance(2000)
+  w.picked('ask_missing')
   ui.pump()
   assert.deepEqual(ui.bubbles().map(([role, status, text]) => [role, status, text]), [['user', 'complete', PROMPT], ['assistant', 'complete', ASK]])
   assert.equal(ui.working()?.state, 'working', 'the run keeps working; the indicator stays')
@@ -352,7 +342,7 @@ test('the reply event may arrive before the HTTP answer: still one user bubble, 
   const w = bridgeWorld(t, { writer: { ask: ASK } })
   const ui = screen(w)
   await ui.firstPrompt()
-  await w.advance(4000); await w.note('n1', '어느 환경에 배포할까요?'); await w.advance(2000); ui.pump()
+  await w.advance(4000); await w.note('n1', '어느 환경에 배포할까요?'); await w.advance(2000); w.picked('ask_missing'); ui.pump()
   ui.net.order = 'events-first'
   const c = ui.composer(); c.type(REPLY); c.key({})
   await c.sent[0]; ui.pump()
@@ -364,7 +354,7 @@ test('a reply the run no longer waits for is refused before anything is saved or
   const w = bridgeWorld(t, { writer: { ask: ASK } })
   const ui = screen(w)
   const first = await ui.firstPrompt()
-  await w.advance(4000); await w.note('n1', '어느 환경에 배포할까요?'); await w.advance(2000); ui.pump()
+  await w.advance(4000); await w.note('n1', '어느 환경에 배포할까요?'); await w.advance(2000); w.picked('ask_missing'); ui.pump()
   // The question is answered elsewhere (another window): this screen has not heard yet.
   const other = await w.http('POST', '/chat/send', { clientThreadId: DM, conversationId: first.conversationId, profileId: A, profileEnabled: true, replyDestination: 'direct', message: '운영이요', requestId: 'req-other', inRunReplyTo: first.runId })
   assert.equal(other.status, 202)
@@ -391,7 +381,7 @@ test('an unreachable bridge leaves the reply as unconfirmed and never resends it
   const w = bridgeWorld(t, { writer: { ask: ASK } })
   const ui = screen(w)
   await ui.firstPrompt()
-  await w.advance(4000); await w.note('n1', '어느 환경에 배포할까요?'); await w.advance(2000); ui.pump()
+  await w.advance(4000); await w.note('n1', '어느 환경에 배포할까요?'); await w.advance(2000); w.picked('ask_missing'); ui.pump()
   ui.net.fail = new TypeError('NetworkError when attempting to fetch resource.')
   const c = ui.composer(); c.type(REPLY); c.key({})
   const outcome = await c.sent[0]
@@ -410,6 +400,7 @@ test('a long run: the wait-explaining message and the final answer are each draw
   let at = 0
   for (const [id, when] of [['s1', 8000], ['s2', 18000], ['s3', 28000]]) { await w.advance(when - at); at = when; await w.tool(id, 'started'); await w.advance(2000); at += 2000; await w.tool(id, 'completed'); ui.pump() }
   await w.advance(40000 - at)
+  w.picked('explain_wait')
   await w.finalStreamed(FINAL); await w.endTurn(); ui.pump()
   const allowed = new Set([MID, FINAL])
   for (const frame of ui.frames) for (const text of assistantTexts(frame)) assert.ok(allowed.has(text), `${frame.event}: drew ${JSON.stringify(text)}`)
@@ -434,7 +425,7 @@ test('a reconnect snapshot carries the open question and keeps the reply the per
   const w = bridgeWorld(t, { writer: { ask: ASK } })
   const ui = screen(w)
   const first = await ui.firstPrompt()
-  await w.advance(4000); await w.note('n1', '어느 환경에 배포할까요?'); await w.advance(2000)
+  await w.advance(4000); await w.note('n1', '어느 환경에 배포할까요?'); await w.advance(2000); w.picked('ask_missing')
   // This screen missed the live events (SSE dropped): it only has the prompt, then reads /chat/state as the product does on reconnect.
   const readState = async () => {
     const snapshot = (await w.http('GET', `/chat/state?conversationId=${first.conversationId}`)).data
@@ -455,7 +446,7 @@ test('an unanswered question closes when the final answer is being prepared (flo
   const w = bridgeWorld(t, { writer: { ask: ASK } })
   const ui = screen(w)
   await ui.firstPrompt()
-  await w.advance(4000); await w.note('n1', '어느 환경에 배포할까요?'); await w.advance(2000); ui.pump()
+  await w.advance(4000); await w.note('n1', '어느 환경에 배포할까요?'); await w.advance(2000); w.picked('ask_missing'); ui.pump()
   assert.equal(ui.state.codex.replyOpen, true)
   await w.advance(3000)
   await w.finalStreamed(FINAL); ui.pump()
@@ -492,6 +483,7 @@ async function stalledRun(t, { asNotice }) {
   await w.advance(1000); await w.note('n1', '자료를 확인하는 중입니다.')
   await w.advance(24000)                                  // 24 s without an engine event: the stall is offered at this beat
   await w.advance(FLOW_LIMITS.stalledWriterMs); ui.pump() // the engine cannot write either: the fixed line is posted
+  w.picked('stalled')
   return { w, ui }
 }
 
@@ -544,4 +536,20 @@ test('the notice field is the runtime\'s own: an engine item cannot mark itself,
   assert.equal(ChatState.systemNoticeMessageView({ role: 'assistant', presentation: 'other', content: 'x', status: 'complete' }), null)
   // The row never groups with an Agent answer.
   assert.match(surface, /const groupRole = \(message\) => \(message && \(ChatState\.awaitResumeMessageView\(message\) \|\| ChatState\.systemNoticeMessageView\(message\)\) \? 'system' : message\?\.role\);/)
+})
+
+// ---- L3 c12 audience rule: a message is posted only where the waiting person takes part and everyone is requester or owner ------
+test('audience rule: with someone else in the conversation no question is posted (the model is not even asked), so no reply opens', async t => {
+  const w = bridgeWorld(t, { writer: { ask: ASK }, audience: () => ({ requester: 'self', participants: ['self', 'guest'] }) })
+  const ui = screen(w)
+  const first = await ui.firstPrompt()
+  await w.advance(4000); await w.note('n1', '어느 환경에 배포할까요?'); await w.advance(2000); ui.pump()
+  assert.deepEqual(w.flowAsked, [], 'a message that could not be posted costs no Decision request')
+  assert.deepEqual(ui.bubbles().map(([role, , text]) => [role, text]), [['user', PROMPT]], 'nothing is posted into a conversation with an outsider')
+  assert.equal(ui.state.codex.replyOpen, false); assert.equal(ui.frames.some(frame => frame.event === 'reply.opened'), false)
+  const c = ui.composer(); c.type(REPLY)
+  assert.equal(c.sendButton.disabled, true); assert.equal(c.sendButton.title, '요청을 보내는 중입니다.')
+  const refused = await w.http('POST', '/chat/send', { clientThreadId: DM, conversationId: first.conversationId, profileId: A, profileEnabled: true, replyDestination: 'direct', message: REPLY, requestId: 'req-x', inRunReplyTo: first.runId })
+  assert.deepEqual([refused.status, refused.data.code], [409, 'INRUN_REPLY_UNAVAILABLE'])
+  assert.equal(w.steers.length, 0); assert.deepEqual(w.stored(), [['user', PROMPT]])
 })
