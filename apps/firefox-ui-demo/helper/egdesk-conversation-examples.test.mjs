@@ -7,7 +7,7 @@ import { main as runnerMain } from './egdesk-decision-real-runner.mjs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CONTROL_EXAMPLES, TYPE_NAMES, areaOf, buildLabelPlan, dedupe, examplesOf, labelRequest, readLabels, scenariosOf, streamTurns, tagsOf } from './egdesk-conversation-examples.mjs'
+import { CONTROL_EXAMPLES, INTERACTION_TYPES, TYPE_NAMES, areaOf, buildLabelPlan, dedupe, examplesOf, labelRequest, readLabels, scenariosOf, streamTurns, tagsOf } from './egdesk-conversation-examples.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 import { DECISION_MODEL } from './egdesk-decision-client.mjs'
 
@@ -129,4 +129,11 @@ test('the stratified sample (c20): the controls in every chunk, labelled example
   const ids = chunks.flatMap(c => c.plan.requests.map(r => r.id))
   assert.ok(!ids.includes('ex-s0') && !ids.includes('ex-s1'), 'already labelled')
   assert.equal(new Set(ids.filter(id => id.startsWith('ex-'))).size, ids.filter(id => id.startsWith('ex-')).length, 'each candidate once')
+})
+
+test('c22: the referential and re-ask questions ask what they mean (one condition each), and a subset request carries only those questions', () => {
+  assert.match(INTERACTION_TYPES.referential.q, /only by pointing at it .* A turn that names what it is about is not\./)
+  assert.match(INTERACTION_TYPES.reask.q, /could not understand or could not see something the assistant said or showed, and ask for it to be explained or shown again\?$/)
+  const body = labelRequest({ id: 'x', prev: { text: '진행할까요?' }, user: { text: '방금 그 내용 정리해줘' } }, DECISION_MODEL, { types: ['referential', 'reask'] })
+  assert.deepEqual(body.questions.map(q => q.name), ['conv_referential', 'conv_reask'])
 })
