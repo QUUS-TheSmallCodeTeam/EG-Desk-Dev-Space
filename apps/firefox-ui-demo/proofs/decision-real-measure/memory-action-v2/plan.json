@@ -1,0 +1,71 @@
+{
+  "set": "memory-action-v2",
+  "tokenCeiling": 5000,
+  "productBars": {
+    "tn_need": {
+      "yes": 0.8,
+      "no": 0.2,
+      "source": "egdesk-wiki-reconstruction.mjs YES / NO (.8 / .2): the triage and the scan act on a decided yes or no"
+    },
+    "tn_action": {
+      "yes": 0.8,
+      "no": 0.2,
+      "source": "egdesk-turn-memory.mjs prepareTurnMemory: a decided tn_action yes (>= .8) fetches no stored page; ternary YES / NO .8 / .2"
+    }
+  },
+  "passRule": "All hard checks pass: the test-run request is a decided action request (no stored page is fetched); the design question and the deployment report are decided not, and the design question still needs its page. Built by the product (all-on journey, v4 flags plus EGDESK_CONTEXT_RELEVANCE=action, scripted model, offline).",
+  "requests": [
+    {
+      "id": "s4-triage",
+      "file": "requests/s4-triage.json",
+      "sha256": "25e6041d4dfcb55973f6016538ffbc0165d2f07f3a38537ec59a5cb2892d895a",
+      "estInputTokens": 1482,
+      "expect": [
+        {
+          "name": "tn_action",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "a request to run the tests: an operation outside the conversation"
+        }
+      ]
+    },
+    {
+      "id": "s3b-triage",
+      "file": "requests/s3b-triage.json",
+      "sha256": "84f9ce7d3318aabf320ada0bd175e55712afd1b7c58ece0ecde706a7bd607fae",
+      "estInputTokens": 1434,
+      "expect": [
+        {
+          "name": "tn_action",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "hard",
+          "note": "a question about a recorded design, not an operation"
+        },
+        {
+          "name": "tn_need",
+          "kind": "predicate",
+          "min": 0.8,
+          "severity": "hard",
+          "note": "the design question needs the design page (real v4 and c24: 1.0)"
+        }
+      ]
+    },
+    {
+      "id": "s9-triage",
+      "file": "requests/s9-triage.json",
+      "sha256": "af603c9915ceb89e08d61a6a69ff54d8d0153375f8a816db373a1d04f0cdb817",
+      "estInputTokens": 1537,
+      "expect": [
+        {
+          "name": "tn_action",
+          "kind": "predicate",
+          "max": 0.2,
+          "severity": "hard",
+          "note": "a report that the deployment finished asks for no operation"
+        }
+      ]
+    }
+  ]
+}

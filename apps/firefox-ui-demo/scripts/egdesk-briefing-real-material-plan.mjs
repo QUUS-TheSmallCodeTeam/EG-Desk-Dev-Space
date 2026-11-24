@@ -76,6 +76,13 @@ function faithfulFill(asked, materials) {
           return items.map(x => ({ label: cut(stamp ?? m.title, s.of.find(f => f.name === 'label').max), text: cut(x, s.of.find(f => f.name === 'text').max), from: alias }))
         }) : []
         slots[s.name] = openLines.length ? openLines.slice(0, s.max) : rows.slice(0, Math.max(s.min ?? 1, rows.length))
+        // Cycle 26 (the fill rule of the product, egdesk-briefing-engine.mjs FILL_RULES): more items than rows -> the title carries the total, copied as the material
+        // writes it ("8개 레인 동시 실행"); c25 listed six of eight with no total -> F5 .25
+        if (openLines.length > s.max) {
+          const titleSlot = item.slots.find(x => x.name === 'title'), m = ms[0], total = /\d+\s?개\s?[가-힣A-Za-z]+(?:\s[가-힣A-Za-z]+){0,2}/.exec(m.excerpt)
+          const stamp = /^\d{2}-\d{2} \d{2}:\d{2}/.exec(m.excerpt)?.[0]
+          if (titleSlot && total) slots.title = cut(`${stamp ? `${stamp} ` : ''}${total[0]}`, titleSlot.max)
+        }
       }
     }
     const first = slots.lines?.[0]?.text ?? slots.rows?.[0]?.left ?? sentences(slots.body ?? ms[0].title)[0] ?? ms[0].title

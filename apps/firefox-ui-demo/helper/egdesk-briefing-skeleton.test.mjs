@@ -11,7 +11,7 @@ import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 import { validBriefing } from '../overlay/resources/EGDeskBriefingState.sys.mjs'
 import { CANVAS_VIEW_SIZES } from '../overlay/resources/EGDeskSurfaceState.sys.mjs'
 import { BRIEFING_CATALOG, BRIEFING_RENDERERS, MATERIAL_TRAITS, RESULT_CARD_METRICS, STEP_SLOTS, registerComponent, resultCardCapacity, textLines } from './egdesk-briefing-catalog.mjs'
-import { answerFacts, factAnchors, factCites, COVERAGE_MODES, splitByPeriod, sequenceRows } from './egdesk-briefing-skeleton.mjs'
+import { answerFacts, factAnchors, factCites, COVERAGE_MODES, splitByPeriod, sequenceRows, requestIdentifiers, answerCited } from './egdesk-briefing-skeleton.mjs'
 import { SKELETON_JUDGE, SKELETON_LIMITS, VERSION_PAIRS, relevanceQuestions, versionCandidates, dateIn, dateMatches, fillChecks, fitQuestions, questionName, versionOf, materialGroups, buildGuide, chooseParts, createSkeletonJudge, decidePlace, enumerateSkeleton, fillRequest, layoutSkeleton, normalizeMaterials, normalizeSkeletonDto, orderItems, recordedBefore, runSkeletonFlow, skeletonChecks, validateFill } from './egdesk-briefing-skeleton.mjs'
 import { BRIEFING_ENGINE_LIMITS, briefingDeps, createBriefingEngine, fillPrompt } from './egdesk-briefing-engine.mjs'
 import { completeBriefingArgs, continuedBriefingOutput } from './egdesk-briefing-flow.mjs'
@@ -234,8 +234,8 @@ test('code combines the answers: board needs "several" yes AND "one sentence" no
 test('journey: v1 quote, v2 plan, meeting note, decision memo -> compare + ordered lines + open-items lines; the v1 card is reused; 4 judgment requests, 1 fill turn', async () => {
   const { out, judge, fills } = await run(ORDER)
   assert.equal(out.status, 'presented', JSON.stringify(out))
-  assert.deepEqual(judge.calls.map(c => c.stage), ['place', 'fit', 'order', 'fill_check', 'coverage']); assert.deepEqual([out.stats.judgeRequests, out.stats.fillTurns, out.stats.questions], [5, 1, 5 + 7 + 3 + 16 + 4])
-  assert.deepEqual(judge.calls.slice(0, 3).map(c => c.names), [['several', 'one_sentence', 'about_M1', 'same_M1_M4', 'same_M2_M4'], ['aspect_P1', 'happened_M1', 'happened_M2', 'happened_M3', 'happened_M4', 'todo_M2', 'todo_M4'], ['before_P1_P2', 'before_P1_P3', 'before_P2_P3']])
+  assert.deepEqual(judge.calls.map(c => c.stage), ['place', 'fit', 'order', 'fill_check', 'coverage']); assert.deepEqual([out.stats.judgeRequests, out.stats.fillTurns, out.stats.questions], [5, 1, 8 + 7 + 3 + 16 + 4])
+  assert.deepEqual(judge.calls.slice(0, 3).map(c => c.names), [['several', 'one_sentence', 'about_M1', 'about_M2', 'about_M3', 'about_M4', 'same_M1_M4', 'same_M2_M4'], ['aspect_P1', 'happened_M1', 'happened_M2', 'happened_M3', 'happened_M4', 'todo_M2', 'todo_M4'], ['before_P1_P2', 'before_P1_P3', 'before_P2_P3']])
   assert.deepEqual(judge.calls[3].names, ['slot_P1_r1_left', 'slot_P1_r1_right', 'slot_P1_r2_left', 'slot_P1_r2_right', 'slot_P1_r3_left', 'slot_P1_r3_right', 'step_P1', 'slot_P2_r1', 'slot_P2_r2', 'slot_P2_r3', 'slot_P2_r4', 'step_P2', 'slot_P3_r1', 'slot_P3_r2', 'slot_P3_r3', 'step_P3'])
   // the design guide: ordered components with their slot schemas, the reused card, the fold proposal (decided by rule: an outdated output of an earlier answer)
   assert.deepEqual(out.guide.items.map(i => [i.position, i.id, i.shows, i.component, i.materials.join(), i.pointsAt.map(p => `${p.alias}${p.new ? '+' : ''}`).join()]), [
@@ -531,8 +531,8 @@ test('mounted on the REAL turn memory: the materials are what lane L7 attached t
   // THIS request is its own question (cycle 17): one per linked group, quoted with the request. The SCRIPTED Decision model here answers no for the B사 page; whether
   // the real one does is what the re-measure plan checks (hard). The A사 pages are one linked group, so one question covers them.
   assert.equal(res.body.outcome, 'presented', JSON.stringify(res.body)); assert.equal(res.body.order, 'skeleton'); assert.deepEqual([res.body.steps, res.body.newComponents, res.body.fillTurns, res.body.judgeRequests], [3, 3, 1, 5])
-  assert.deepEqual(decisions[0].questions.map(q => q.name), ['combines', 'about_M1', 'about_M6', 'same_M3_M5'], 'relevance per linked group, and the one unresolved title-sharing pair (두 메모)')
-  assert.ok(decisions[0].questions[2].instructions.startsWith('The person asked, quoted exactly as a JSON string: "A사 견적 건 정리해줘". Material, quoted as JSON: M6 {"title":"B사 견적 요청"'))
+  assert.deepEqual(decisions[0].questions.map(q => q.name), ['combines', 'about_M1', 'about_M2', 'about_M3', 'about_M4', 'about_M5', 'about_M6', 'same_M3_M5'], 'relevance material by material (cycle 26: the request names no identifier), and the one unresolved title-sharing pair (두 메모)')
+  assert.ok(decisions[0].questions[6].instructions.startsWith('The person asked, quoted exactly as a JSON string: "A사 견적 건 정리해줘". Material, quoted as JSON: M6 {"title":"B사 견적 요청"'))
   // parts came from the recorded links and dates of the kept pages: v1 against the v2 plan, the dated A사 pages in order, the open plan
   const fit = decisions[1].questions
   assert.deepEqual(fit.map(q => q.name), ['aspect_P1', 'happened_M1', 'happened_M2', 'happened_M3', 'happened_M5', 'todo_M4'])
@@ -577,8 +577,8 @@ test('advisory recording: place and fit are asked and recorded for the finished 
   assert.equal(body.flow, undefined); const events = s.h.events.length
   const res = await R.http('POST', '/decision/briefing-observe', body)
   assert.deepEqual(res.body, { status: 'observed', stages: ['place', 'fit'], outcome: 'advisory-only', judgeRequests: 2, order: 'skeleton', fillTurns: 0 })
-  assert.deepEqual(s.decisions.map(d => d.questions.map(q => q.name).join()), ['combines,about_M1,same_M1_M4,same_M2_M4', 'aspect_P1,happened_M1,happened_M2,happened_M3,happened_M4,todo_M2,todo_M4']); assert.equal(s.h.events.length, events, 'no event'); assert.equal(s.h.forkPrompts.length, 0)
-  const recorded = R.calibration.entries().filter(e => e.feature === 'answer_briefing'); assert.deepEqual(recorded.map(e => [e.mode, e.judgments.length]), [['advisory', 4], ['advisory', 7]], 'content-free calibration entries of the skeleton judge, in their own family')
+  assert.deepEqual(s.decisions.map(d => d.questions.map(q => q.name).join()), ['combines,about_M1,about_M2,about_M3,about_M4,same_M1_M4,same_M2_M4', 'aspect_P1,happened_M1,happened_M2,happened_M3,happened_M4,todo_M2,todo_M4']); assert.equal(s.h.events.length, events, 'no event'); assert.equal(s.h.forkPrompts.length, 0)
+  const recorded = R.calibration.entries().filter(e => e.feature === 'answer_briefing'); assert.deepEqual(recorded.map(e => [e.mode, e.judgments.length]), [['advisory', 7], ['advisory', 7]], 'content-free calibration entries of the skeleton judge, in their own family')
   assert.equal(R.calibration.entries().filter(e => e.feature === 'board_arrangement').length, 0, 'nothing of the briefing is filed under the Board arrangement')
   assert.deepEqual((await R.http('POST', '/decision/briefing-observe', { ...body, runId: 'gone' })).body, { status: 'skipped', reason: 'run-gone' })
   // a handler without the bridge's dependency factory keeps the earlier recording (placement + reuse on the report)
@@ -650,12 +650,16 @@ test('open items: "not done" is the record (status plan), never asked; the one q
 
 // ================= 10. cycle 17: relevance for THIS request, unresolved version pairs, the "not done" wording =================
 const B_PAGE = row('M5', 'B사 견적 요청', 'B사가 11월 10일 케이스 500개 견적을 요청했다. 단가 협의 전이다.', '2026-11-10', 'done')
-test('relevance: one question per linked group (the record says it is one matter); a material linked to nothing is asked by itself; no or undecided drops it before fit', async () => {
+test('relevance: a linked group is asked through the member that names what the request names (cycle 26, picked by code), else material by material; no or undecided drops it before fit', async () => {
   const mats = normalizeMaterials([...QUOTE, B_PAGE])
-  assert.deepEqual(relevanceQuestions(mats).map(q => [q.material, q.covers.join()]), [['M1', 'M1,M2,M3,M4'], ['M5', 'M5']], 'four linked A사 materials: one question; the B사 page: its own')
-  // path 1 (skip): the A사 group is kept on its first material's answer, the other three are never asked
+  // the request names no identifier ("A사 견적 건 정리해줘"): every material is asked on its own (cycle 26, Main; c17-c25 asked the group through its first member)
+  assert.deepEqual(relevanceQuestions(mats, REQUEST).map(q => [q.material, q.covers.join()]), [['M1', 'M1'], ['M2', 'M2'], ['M3', 'M3'], ['M4', 'M4'], ['M5', 'M5']])
+  // the request names "v2": the group is asked once, through the member whose title names it first (the v2 page), and that answer stands for the group
+  assert.deepEqual(relevanceQuestions(mats, 'A사 견적 v2 안 정리해줘').map(q => [q.material, q.covers.join()]), [['M2', 'M1,M2,M3,M4'], ['M5', 'M5']])
+  assert.deepEqual(relevanceQuestions(mats, 'A사 견적 v9 정리해줘').map(q => q.material), ['M1', 'M2', 'M3', 'M4', 'M5'], 'an identifier no member names: material by material')
+  // path 1: each A사 page is kept on its own answer, the B사 page dropped on its own
   const kept = await run({ about_M5: .03 }, { materials: [...QUOTE, B_PAGE] })
-  assert.equal(kept.out.status, 'presented'); assert.deepEqual(kept.judge.calls[0].names, ['several', 'one_sentence', 'about_M1', 'about_M5', 'same_M1_M4', 'same_M2_M4'])
+  assert.equal(kept.out.status, 'presented'); assert.deepEqual(kept.judge.calls[0].names, ['several', 'one_sentence', 'about_M1', 'about_M2', 'about_M3', 'about_M4', 'about_M5', 'same_M1_M4', 'same_M2_M4'])
   assert.deepEqual(kept.out.relevance, { kept: ['M1', 'M2', 'M3', 'M4'], dropped: ['M5'], versions: [] })
   assert.ok(kept.judge.calls.slice(1).every(c => !JSON.stringify(c.packet).includes('B사')) && kept.fills.every(f => !JSON.stringify(f).includes('B사')), 'a dropped page is in no later request and not in the fill')
   assert.deepEqual(kept.out.guide.items.map(i => i.id), ['P1', 'P2', 'P3'], 'the same three parts as without the B사 page')
@@ -665,10 +669,10 @@ test('relevance: one question per linked group (the record says it is one matter
   // path 2 (asked by itself): the B사 page kept when the judge says yes; it is its own part
   const both = await run({}, { materials: [...QUOTE, B_PAGE] }); assert.ok(both.judge.calls[1].names.includes('fact_M5'), 'kept: its own part is asked about in fit')
   // a group whose question is no or undecided is dropped whole; nothing kept -> the chat answer, with no fit request
-  const lost = await run({ about_M1: .5 }, { materials: [...QUOTE, B_PAGE] }); assert.deepEqual(lost.out.relevance.dropped, ['M1', 'M2', 'M3', 'M4']); assert.deepEqual(lost.judge.calls[1].names, ['fact_M5'], 'only what was kept is asked about in fit')
-  const none = await run({ about_M1: .02, about_M5: .02 }, { materials: [...QUOTE, B_PAGE] })
+  const lost = await run(q => (/^about_M[1-4]$/.test(q.name) ? .5 : undefined), { materials: [...QUOTE, B_PAGE] }); assert.deepEqual(lost.out.relevance.dropped, ['M1', 'M2', 'M3', 'M4']); assert.deepEqual(lost.judge.calls[1].names, ['fact_M5'], 'only what was kept is asked about in fit')
+  const none = await run(q => (q.name.startsWith('about_') ? .02 : undefined), { materials: [...QUOTE, B_PAGE] })
   assert.deepEqual([none.out.status, none.out.reason, none.judge.calls.length, none.fills.length], ['bubble', 'not-asked-about', 1, 0])
-  const refused = await run({ about_M1: 'refuse' }); assert.deepEqual([refused.out.status, refused.out.reason], ['bubble', 'not-asked-about'], 'a refusal is not a yes')
+  const refused = await run(q => (q.name.startsWith('about_') ? 'refuse' : undefined)); assert.deepEqual([refused.out.status, refused.out.reason], ['bubble', 'not-asked-about'], 'a refusal is not a yes')
   // place decides first: a bubble does not look at relevance
   const bubble = await run({ about_M1: .02, one_sentence: .98 }); assert.deepEqual([bubble.out.status, bubble.out.reason], ['bubble', 'judged-bubble'])
 })
@@ -1021,4 +1025,56 @@ test('a long range (ten dated, linked materials): two sequence cards by period i
   // the coverage rule is unchanged: the second period's card judged not to fit -> its fact is missing -> the chat answer
   const half = await run(q => (q.name === 'onboard_F2' ? .02 : /^(?:aspect|todo|fact)_/.test(q.name) || /^happened_M(?:[6-9]|10)$/.test(q.name) ? .03 : undefined), { materials: LONG, candidates: [], answer, request: '브리핑 기능 c14부터 지금까지 뭐가 바뀌었지?', fill })
   assert.deepEqual([half.out.status, half.out.reason], ['fallback-chat', 'not-covered'])
+})
+
+// ================= 19. cycle 26: the group's representative by code; twelve materials only for a long range; the count a card cannot list =================
+test('relevance representative (Main, after the c25 run): the member whose title names the request\'s identifiers first; a decision that only mentions them is not it', () => {
+  assert.deepEqual(requestIdentifiers('L7 c19 언제 병합됐지?'), ['l7', 'c19']); assert.deepEqual(requestIdentifiers('오늘 Decision 루프 진행 상황 정리해줘'), [])
+  const lines = [row('M1', '11-24 22:41 사용자 결정: (4) 첫 턴 맥락 예산 증가 → L7 c19: 1,500ms', '사용자 결정', '2026-11-24', 'unknown', [{ type: 'same_task', toAlias: 'M3' }]),
+    row('M2', '11-24 22:50 사용자 정정: U10 Codex는 순수 엔진', '정정 L7 c19', '2026-11-24', 'unknown', [{ type: 'same_task', toAlias: 'M3' }]),
+    row('M3', '11-24 22:50 L7 c19 병합 → int/c14 c680638, 341개 파일 6707건 0 실패.', '병합', '2026-11-24', 'done')]
+  const mats = normalizeMaterials(lines)
+  assert.deepEqual(relevanceQuestions(mats, 'L7 c19 언제 병합됐지?').map(q => [q.material, q.covers.join()]), [['M3', 'M1,M2,M3']], 'the merge line names L7 c19 as its subject')
+  assert.deepEqual(relevanceQuestions(mats, '오늘 Decision 루프 진행 상황 정리해줘').map(q => q.material), ['M1', 'M2', 'M3'], 'nothing named: each line on its own')
+})
+test('twelve materials only for a long range (more dated materials than the usual eight); otherwise eight as before', () => {
+  const dated = n => Array.from({ length: n }, (_, i) => row(`M${i + 1}`, `기록 ${i + 1}`, `${i + 1}번째 일`, `2026-11-${String(i + 1).padStart(2, '0')}`, 'done'))
+  const undated = n => Array.from({ length: n }, (_, i) => row(`M${i + 1}`, `메모 ${i + 1}`, `${i + 1}번째 메모`, null, 'unknown'))
+  assert.equal(normalizeMaterials(dated(13)).length, 12); assert.equal(normalizeMaterials(dated(9)).length, 9, 'nine dated: a long range')
+  assert.equal(normalizeMaterials(dated(8)).length, 8); assert.equal(normalizeMaterials(undated(12)).length, 8, 'twelve undated: eight, as before')
+  assert.equal(normalizeMaterials([...dated(5), ...undated(7)]).length, 8, 'five dated among twelve: not a long range')
+})
+test('the fill rule: a material that lists more items than a card has rows still gives its total, in the title as the material writes it (c25: six of eight lanes, no count -> .25)', () => {
+  const prompt = fillPrompt({ guide: { items: [] }, materials: [] })
+  assert.ok(prompt.includes("If a material lists more items than a list slot has rows, list the first ones and put the total the material states in that item's title slot, as the material writes it."))
+})
+
+// ================= 20. cycle 27: what the answer cites stays on the board's materials, whatever request relevance said (Main, R3) =================
+test('answerCited by code: lane-cycle ids, version marks and amounts cite the materials that carry them; a date only when the fact has nothing more specific', () => {
+  const lines = normalizeMaterials([row('M1', '11-24 22:41 사용자 결정: 예산 → L3 c19', '사용자 결정', '2026-11-24', 'unknown'), row('M2', '11-24 22:50 L7 c19 병합 → int/c14 c680638', '병합', '2026-11-24', 'done'),
+    row('M3', '11-24 22:52 사용자 결정 대체 문구', '고정 문장 전부 제거', '2026-11-24', 'unknown'), row('M4', 'A사 견적서 v2', '총액 1,050만원', '2026-11-10', 'plan')])
+  assert.deepEqual(answerCited('L7 c19는 11월 24일 22:50에 병합되었습니다.', lines), ['M2'], 'the id is more specific than the day every line shares')
+  assert.deepEqual(answerCited('11월 24일에 사용자가 결정했습니다.', lines), ['M1', 'M2', 'M3'], 'a date alone cites that day')
+  assert.deepEqual(answerCited('v2 총액은 1,050만원입니다.', lines), ['M4']); assert.deepEqual(answerCited('남은 일이 있습니다.', lines), [], 'no anchor: cites nothing')
+  assert.deepEqual(answerCited('L3 c19 결정과 L7 c19 병합이 있었습니다. v2도 있습니다.', lines), ['M1', 'M2', 'M4'], 'every sentence of the answer counts')
+})
+test('a material the answer cites stays even when request relevance drops it (it is used by the answer); one it does not cite is dropped as before', async () => {
+  const C_PAGE = row('M6', 'C사 회식 일정', '다음 주 금요일 회식. 장소 미정.', null, 'unknown')
+  const answer = 'A사 견적은 v1에서 v2 안으로 조정되었습니다. B사도 케이스 500개 견적을 요청했습니다.'
+  const out = await run(q => (q.name === 'about_M5' || q.name === 'about_M6' ? .03 : undefined), { materials: [...QUOTE, B_PAGE, C_PAGE], answer })
+  assert.equal(out.out.status, 'presented', JSON.stringify(out.out))
+  assert.deepEqual(out.out.relevance, { kept: ['M1', 'M2', 'M3', 'M4', 'M5'], dropped: ['M6'], versions: [], cited: ['M5'] }, 'B사 (500개, in the answer) stays; the C사 page is dropped')
+  assert.ok(out.judge.calls.slice(1).every(c => !JSON.stringify(c.packet).includes('C사 회식')), 'the dropped page is in no later request')
+  assert.ok(out.judge.calls.some(c => c.stage === 'fit' && JSON.stringify(c.packet).includes('B사 견적 요청')), 'the cited page is designed for like any kept one')
+  // without an answer (the earlier path) nothing is cited: relevance alone decides
+  const plain = await run(q => (q.name === 'about_M5' || q.name === 'about_M6' ? .03 : undefined), { materials: [...QUOTE, B_PAGE, C_PAGE] })
+  assert.deepEqual(plain.out.relevance.dropped, ['M5', 'M6']); assert.equal(plain.out.relevance.cited, undefined)
+})
+test('the c25 case: tonight\'s merge line, judged only weakly about "today\'s progress" (.21), stays because the answer states it; an uncited line judged unrelated goes', async () => {
+  const LINES = [row('M1', '11-24 22:50 L7 c19 병합 → int/c14 c680638, 341개 파일 6707건 0 실패.', '11-24 22:50 L7 c19(e930372) 병합 → int/c14 c680638, 341개 파일 6707건 0 실패.', '2026-11-24', 'done'),
+    row('M2', '11-24 22:52 사용자 결정 대체 문구 (나) 고정 문장 전부 제거.', '11-24 22:52 사용자 결정: 고정 문장 전부 제거.', '2026-11-24', 'unknown'),
+    row('M3', '11-24 22:53 노트북 충전', '11-24 22:53 노트북 충전 중.', '2026-11-24', 'unknown')]
+  const answer = '22:50 L7 c19가 병합되어 int/c14는 c680638이 되었습니다. 22:52 사용자가 고정 문장을 전부 빼기로 결정했습니다.'
+  const out = await run(q => ({ about_M1: .21, about_M3: .05 })[q.name], { materials: LINES, candidates: [], answer, request: '오늘 Decision 루프 진행 상황 정리해줘' })
+  assert.deepEqual([out.out.relevance.kept, out.out.relevance.dropped, out.out.relevance.cited], [['M1', 'M2'], ['M3'], ['M1']])
 })

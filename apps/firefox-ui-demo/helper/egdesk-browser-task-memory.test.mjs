@@ -10,6 +10,7 @@ import { buildWiki } from './egdesk-wiki-reconstruction.mjs'
 import { SYNTHETIC_PAGES, mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { createWikiWriter, prepareTurnMemory } from './egdesk-turn-memory.mjs'
 import { PS_NAMES, pageStateAnswers, pageStateProbabilities, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
+import { entryAnswersOf, entryWire, isEntryQuestion } from './egdesk-browser-entry.fixture.mjs'
 
 // L8/C6: the user's chat message goes straight to an objective browser task; the judge picks only among
 // code-enumerated options plus fixed ones; need-context / cannot-proceed exit to the subjective model (a mock
@@ -62,10 +63,9 @@ async function world(t, { start, mode = 'on', hang = false, memory = null, sink 
       const stepQ = wire.questions.find(q => q.name === 'next_step') ?? (q0.choices ? q0 : { choices: [] }) // c16: a code-decided step asks no next_step
       decisions.push({ q: q0.name, body, image: /image/i.test(body), choices: q0.choices?.map(c => c.value) })
       if (hang) await new Promise((_, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }))
-      if (q0.name === 'browser_entry') {
-        const msg = /User message: (.*)/.exec(evidence)?.[1] ?? ''
-        const value = /세금계산서|다운로드/.test(msg) ? starts(q0.choices, '[C1]') : 'not_browser_task'
-        return { ok: true, text: async () => JSON.stringify({ answers: [choice('browser_entry', value, 0.95)] }) }
+      if (q0.name === 'browser_entry') { // c20: the entry predicates
+  const msg = /User message: (.*)/.exec(evidence)?.[1] ?? ''
+        return { ok: true, text: async () => JSON.stringify({ answers: entryWire(wire.questions, { web: /세금계산서|다운로드/.test(msg) ? 0.95 : 0.05 }) }) }
       }
       if (q0.name === 'task_resume') {
         const msg = /User message: (.*)/.exec(evidence)?.[1] ?? ''

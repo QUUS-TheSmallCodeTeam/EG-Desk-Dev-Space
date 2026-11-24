@@ -62,3 +62,19 @@ test('cycle 25 token estimate: fitted on real usage (per question, per ASCII and
   const byteModel = wire => Math.ceil(1.15 * (134.8 + 0.1983 * Buffer.byteLength(wire)))
   assert.ok(estimateTokens(korean) > byteModel(korean), 'the c24 byte model under-counted Korean text (the real run hit its ceiling)')
 })
+
+test('cycle 26 faithful fill: an assignment line with more items than the card has rows lists the first six under its stamp and puts the material\'s own total in the card title', async t => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'egd-c26-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  const loop = path.join(root, 'loop'); mkdirSync(path.join(loop, 'reports'), { recursive: true })
+  writeFileSync(path.join(loop, 'LEDGER.md'), ['# 원장', '- 11-24 22:50 L7 c19(e930372) 병합 → int/c14 c680638.', '- 11-24 22:52 사용자 결정: 고정 문장 전부 제거.',
+    '- 11-24 22:58 8개 레인 동시 실행. 배정: L1 c17 창 / L2 c15 여정 / L3 c19 예시 / L4 c24 실측 / L5 c17 실행기 / L6 c13 증거표 / L7 c20 문구 / L8 c19 브라우저'].join('\n'))
+  buildMaterials(['--loop', loop, '--out', path.join(root, 'm'), '--year', '2026', '--year-basis', 'synthetic fixture'])
+  writeFileSync(path.join(root, 'spec.json'), JSON.stringify({ set: 's', tokenCeiling: 99999, passRule: 's', requests: [{ id: 'today', request: '오늘 진행 상황 정리해줘',
+    answer: '22:50 L7 c19가 병합되었습니다. 22:52 사용자가 고정 문장을 전부 빼기로 결정했습니다. 남은 일로 22:58에 8개 레인이 다음 사이클을 배정받았습니다.', select: { rule: 'newest-ledger', n: 3 },
+    expect: { coverage: [{ match: 'onboard_F\\d', severity: 'hard', yes: true, note: 'copied' }] } }] }))
+  await buildPlan(['--pages', path.join(root, 'm', 'pages.json'), '--spec', path.join(root, 'spec.json'), '--out', path.join(root, 'plan')])
+  const fill = JSON.parse(readFileSync(path.join(root, 'plan', 'today-flow.json'), 'utf8')).fill
+  const open = Object.values(fill.items).find(i => i.slots.lines?.some(l => l.text.startsWith('L1 c17')))
+  assert.equal(open.slots.lines.length, 6, 'the card holds six rows'); assert.equal(open.slots.title, '11-24 22:58 8개 레인 동시 실행', 'the total the material states, as it writes it')
+  const board = readFileSync(path.join(root, 'plan', 'requests', 'today-coverage.json'), 'utf8'); assert.ok(board.includes('11-24 22:58 8개 레인 동시 실행'), 'the total is on the board the coverage question quotes')
+})

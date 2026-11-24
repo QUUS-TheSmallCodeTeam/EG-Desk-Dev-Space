@@ -47,7 +47,7 @@ test('permissions come only from the structures that govern the models; unknown 
   assert.equal(closed.allows('anything_else'), false)
   assert.equal(createEgressGate(null).allows('terminal_output'), false)
   // nothing here can be opened for Decisions alone: the only inputs are model-permission structures
-  assert.deepEqual(Object.keys(modelDataPermissions({})).sort(), ['board', 'browser', 'canvas', 'memory', 'run', 'speech', 'terminal', 'topic'])
+  assert.deepEqual(Object.keys(modelDataPermissions({})).sort(), ['board', 'browser', 'canvas', 'memory', 'run', 'speech', 'terminal', 'thread', 'topic'])
 })
 
 test('guarded client: refuses before any request, with the closed code every feature already falls back on', async () => {

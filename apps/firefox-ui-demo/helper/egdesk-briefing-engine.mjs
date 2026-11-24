@@ -67,6 +67,8 @@ const FILL_RULES = [
   'A text slot is a string no longer than its "max". A material slot is one of the item\'s material aliases. A list slot is an array of rows with exactly the listed fields, between "min" and "max" rows.',
   'Use ONLY what the materials say. If the materials do not contain the data for a slot, do not invent it: leave that slot out and report it in "unfillable".',
   'Where a line or value restates something a material says, keep its actors, qualifiers, amounts and dates exactly as the material has them: who does it, under what condition, how much, by when (for example write "팀장 승인 후 견적서 v2 발송", not "승인 후 견적서 v2 발송").',
+  // Cycle 26: a card holds a fixed number of rows; a material that lists more items than that still states how many there are (c25: "8개 레인" on a six-row card).
+  'If a material lists more items than a list slot has rows, list the first ones and put the total the material states in that item\'s title slot, as the material writes it.',
   'Write every text in the language of the materials.',
 ].join('\n')
 export function fillPrompt(request) {
