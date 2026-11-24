@@ -323,6 +323,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
     ...(ENV.EGDESK_CONTEXT_RELEVANCE === 'action' ? { relevanceRules: 'action' } : {}), // as the bridge: the selection's 'action' rule set (L7 c20), default off
     ...(ENV.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(ENV.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror, audience: ({ run }) => runRequesters.audience({ run }) } : {}),
       attentionPosted: ({ key, provider: name }) => { if (name === 'work_placement') workPlacement.acknowledgePointer(key) } } } : {}),
+    ...(ENV.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}), // as the bridge: a message typed while the run works (L2 c17), default off
     ...(ENV.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
     ...(['advisory', 'on'].includes(ENV.EGDESK_TERMINAL_GATE) ? { terminalGate: { mode: () => ENV.EGDESK_TERMINAL_GATE, inspect: async () => null } } : {}),
     ...(['advisory', 'on'].includes(ENV.EGDESK_WORKING_MEMORY) ? { workingMemory: { mode: () => ENV.EGDESK_WORKING_MEMORY } } : {}),
@@ -456,6 +457,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
     byFeature: name => decisions.filter(d => d.step === name).reduce((m, d) => (m[d.feature] = (m[d.feature] || 0) + 1, m), {}),
     subjectiveTurnsIn: name => ({ main: native.filter(c => c.step === name && c.method === 'turn/start' && !String(c.params.threadId).startsWith('fork-')).length,
       fork: native.filter(c => c.step === name && c.method === 'turn/start' && String(c.params.threadId).startsWith('fork-')).length, steer: native.filter(c => c.step === name && c.method === 'turn/steer').length }),
+    interruptsIn: name => native.filter(c => c.step === name && c.method === 'turn/interrupt').length,
     activityRowsIn: name => events.filter(e => e.step === name && e.event === 'activity.completed').map(e => { const a = e.details?.activity ?? e.details; return `${a?.kind}:${a?.title ?? ''}` }),
     eventsIn: name => events.filter(e => e.step === name).map(e => e.event),
   }

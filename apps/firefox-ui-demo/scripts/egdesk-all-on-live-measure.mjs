@@ -41,7 +41,9 @@ export const PLAN_FILE_V3 = fileURLToPath(new URL('./egdesk-all-on-live-measure.
 export const PLAN_FILE_V4 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v4.json', import.meta.url))
 // Plan v5 (cycle 16): v4, plus switches a run may turn on (--switch <name>, all off by default) and expectations judged only under them.
 export const PLAN_FILE_V5 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v5.json', import.meta.url))
-export const LATEST_PLAN_FILE = PLAN_FILE_V5
+// Plan v6 (cycle 17): v5, plus the in-run nudge step (EGDESK_INRUN_MESSAGES on in the world) and L7's turn-memory side in the switch.
+export const PLAN_FILE_V6 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v6.json', import.meta.url))
+export const LATEST_PLAN_FILE = PLAN_FILE_V6
 export const SCRIPT_FILE = fileURLToPath(import.meta.url)
 export const DEFAULT_CAPS = Object.freeze({ tokenCeiling: 80_000, maxRequests: 80 })
 const LIMITS = Object.freeze({ tokenCeilingMax: 200_000, maxRequestsMax: 200 })
@@ -51,7 +53,8 @@ const CLIENT = 'helper/egdesk-decision-client.mjs', SUPPORT = 'scripts/egdesk-al
 
 // ---- the journey: what the person says, and the scripted subjective model ----
 export const SAYS = Object.freeze({ quote: '지난주 A사 견적 건 어디까지 됐지?', tidy: '방금 그 내용 정리해줘', tests: '전체 테스트 돌리고 결과 알려줘',
-  recall: 'PostgreSQL 전환은 설계에서 어떻게 하기로 정했었지?', deployed: 'PostgreSQL 마이그레이션 배포 끝났어', portal: '거래처 포털에서 이번 달 세금계산서 내려받아줘', second: '두 번째 사업자로' })
+  recall: 'PostgreSQL 전환은 설계에서 어떻게 하기로 정했었지?', deployed: 'PostgreSQL 마이그레이션 배포 끝났어', portal: '거래처 포털에서 이번 달 세금계산서 내려받아줘', second: '두 번째 사업자로',
+  nudge: '아니 지금 왜 멈췄니?' }) // nudge: the person's real turn in L3's c25 evidence (a message typed while the command runs)
 const AGENT_SAYS = Object.freeze({ quote: 'A사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다.', tidy: 'A사 견적은 11월 3일 요청, 11월 6일 v1 발송, v2는 팀장 승인 후 발송 예정입니다.',
   recall: 'PostgreSQL 전환 설계에서 스키마 변환, 데이터 이관, 롤백 순서를 정하기로 확정했습니다.', tests: '테스트가 모두 통과했습니다.', noted: '네, 기록해 두겠습니다.', heard: '네, 알겠습니다.', ask: '사업자가 둘입니다. 어느 쪽으로 받을까요?', got: '세금계산서를 내려받았습니다.', stuck: '포털 작업을 마치지 못했습니다.',
   stuckAsk: '포털에서 다음 단계를 정하지 못했습니다. 어느 사업자의 세금계산서를 받을지 알려 주세요.' })
@@ -116,6 +119,13 @@ export const STEPS = Object.freeze([
     await w.notify('item/started', { ...timing, item: { id: 'cmd-1', type: 'commandExecution', command: COMMAND, cwd: '/work', status: 'inProgress', commandActions: [] } })
     await w.notify('item/commandExecution/outputDelta', { ...timing, itemId: 'cmd-1', delta: `${COMMAND_OUTPUT}\n` })
     await w.advance(9000)
+  } },
+  // (cycle 17) Ten seconds in, while the command still runs, the person asks why it stopped. The message is named for the working run, as
+  // the composer sends it with the in-run messages flag; five more seconds pass with the command running.
+  { id: 's4n-nudge', room: DM, since: 6, title: 'the person asks why it stopped while the command runs', run: async (w, j) => {
+    if (!j.note.command || !running(w)) return
+    await j.say(SAYS.nudge, { inRunMessageTo: w.runs().at(-1).runId })
+    await w.advance(5000)
   } },
   { id: 's5-silence', room: DM, title: 'the command ends; forty seconds without engine events', run: async (w, j) => {
     if (!j.note.command) return
@@ -334,6 +344,28 @@ const CHECKS = {
   },
   // (cycle 13) The answering turn of this step carried this context block (by its key).
   contextKey: ({ step, args }) => ({ pass: step.seen.packets.some(p => p.keys.includes(args.key)), observed: { keys: step.seen.packets.map(p => p.keys) } }),
+  // (cycle 17) The person's words were taken into the working run (not a new turn, not refused) and are shown once, as the person's own.
+  keptInRun: ({ step, args }) => {
+    const sent = step.sends[0] ?? null, mine = newMessages(step, step.room).filter(m => m.role === 'user')
+    return { pass: sent?.inRun === true && sent?.accepted === true && mine.length === 1 && mine[0].text === SAYS[args.said], observed: { send: sent, personMessages: mine.map(m => m.text) } }
+  },
+  // (cycle 17) The engine was left alone in this step: no new turn, no steer, no interrupt, and the run still works at its end.
+  runUntouched: ({ step }) => {
+    const t = step.seen.engineTurns, run = step.seen.runs[step.room]
+    return { pass: t.main === 0 && t.steer === 0 && step.seen.interrupts === 0 && run?.status === 'inProgress', observed: { engineTurns: t, interrupts: step.seen.interrupts, run } }
+  },
+  // (cycle 17) No system message of this step repeats one the person was already shown in this conversation.
+  noRepeatedFlowText: ({ step }) => {
+    const list = step.seen.conversation[step.room] ?? [], fresh = newMessages(step, step.room).filter(m => m.by === 'system_flow')
+    const earlier = list.slice(0, list.length - newMessages(step, step.room).length).filter(m => m.role === 'assistant').map(m => m.text)
+    const repeats = fresh.filter(m => earlier.includes(m.text)).map(m => m.text)
+    return { pass: repeats.length === 0, observed: { repeats, shown: fresh.map(m => m.text) } }
+  },
+  // (cycle 17) None of the main turns of this step carries the person's earlier words (one already answered must not come back as a request).
+  notInTurnInput: ({ step, args }) => {
+    const inputs = step.seen.packets.map(p => p.inputTexts ?? [])
+    return { pass: !inputs.some(list => list.includes(SAYS[args.said])), observed: { inputs } }
+  },
   placementRecorded: ({ step }) => ({ pass: step.seen.placement.records.length >= 1, observed: { records: step.seen.placement.records, submitted: step.seen.placement.submitted } }),
 }
 export const CHECK_NAMES = Object.freeze(Object.keys(CHECKS))
@@ -398,10 +430,10 @@ function seenAfter(w, id, before, j) {
     packets: w.native.filter(c => c.step === id && c.method === 'turn/start' && !String(c.params.threadId).startsWith('fork-')).map(c => {
       const ctx = c.params.additionalContext ?? {}
       const parsed = Object.values(ctx).map(v => packetPages(v?.value))
-      return { keys: Object.keys(ctx), pageIds: [...new Set(Object.values(ctx).flatMap(v => [...String(v?.value ?? '').matchAll(PAGE_ID)].map(m => m[1])))],
+      return { inputTexts: (c.params.input ?? []).map(i => i?.text ?? null), keys: Object.keys(ctx), pageIds: [...new Set(Object.values(ctx).flatMap(v => [...String(v?.value ?? '').matchAll(PAGE_ID)].map(m => m[1])))],
         bodyIds: [...new Set(parsed.flatMap(p => p.bodies))], refIds: [...new Set(parsed.flatMap(p => p.refs))] }
     }),
-    engineTurns: w.subjectiveTurnsIn(id),
+    engineTurns: w.subjectiveTurnsIn(id), interrupts: w.interruptsIn(id),
     runs,
     board: { observe: j.note.briefing && id === 's3-briefing' ? j.note.briefing : null, published: stepEvents.filter(e => e.event === 'briefing.published').length,
       cards: stepEvents.filter(e => e.event === 'output.published').map(e => ({ title: e.details?.output?.title ?? null, zone: 'board' })), parts },
