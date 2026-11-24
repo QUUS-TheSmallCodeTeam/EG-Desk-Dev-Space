@@ -50,7 +50,9 @@ export const PLAN_FILE_V7 = fileURLToPath(new URL('./egdesk-all-on-live-measure.
 // Plan v8 (cycle 22): v7, plus the empty-answer path as an explicit step pair (every sentence withheld: nothing posted, recorded, the next turn told, held pages stay held)
 // and the switch one-packet (L7's EGDESK_TURN_MEMORY_ONE_PACKET, off) with its expectations. The latest plan.
 export const PLAN_FILE_V8 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v8.json', import.meta.url))
-export const LATEST_PLAN_FILE = PLAN_FILE_V8
+// Plan v9 (cycle 24): v8 with the wrong s13.fetched withdrawn and two readings of what the draft check was given. The latest plan.
+export const PLAN_FILE_V9 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v9.json', import.meta.url))
+export const LATEST_PLAN_FILE = PLAN_FILE_V9
 export const SCRIPT_FILE = fileURLToPath(import.meta.url)
 export const DEFAULT_CAPS = Object.freeze({ tokenCeiling: 80_000, maxRequests: 80 })
 const LIMITS = Object.freeze({ tokenCeilingMax: 200_000, maxRequestsMax: 200 })
