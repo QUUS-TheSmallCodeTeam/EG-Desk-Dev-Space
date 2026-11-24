@@ -15707,7 +15707,7 @@
     let syncOpenConversation = null;
     const emit = () => {
       normalizeThreads();
-      syncOpenConversation?.();
+      if (typeof syncOpenConversation === 'function') syncOpenConversation();
       for (const watch of memoReadWatches.values()) observeMemoReadWatch(watch);
       taskAnswers?.sync();
       const projectPanel = document.getElementById('egd-codex-input-panel');

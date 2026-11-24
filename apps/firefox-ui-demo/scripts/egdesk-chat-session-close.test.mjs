@@ -77,7 +77,7 @@ test('rule: which conversation is open, and which one was left', () => {
 })
 
 test('source: emit() checks the open conversation after every normalize; toggleHUD writes the state this test writes', () => {
-  assert.match(surface, /const emit = \(\) => \{\n\s+normalizeThreads\(\);\n\s+syncOpenConversation\?\.\(\);/)
+  assert.match(surface, /const emit = \(\) => \{\n\s+normalizeThreads\(\);\n\s+if \(typeof syncOpenConversation === 'function'\) syncOpenConversation\(\);/)
   assert.equal(surface.split('/chat/session/close').length - 1, 2, 'one call site (and its comment)')
   const toggle = section('    if (!appId || (state.hudOpen && state.hudApp === appId)) {', '      mountCodexHUD(body, state.codexBridge, {')
   assert.match(toggle, /state\.hudOpen = false;\n\s+state\.hudApp = null;/)
