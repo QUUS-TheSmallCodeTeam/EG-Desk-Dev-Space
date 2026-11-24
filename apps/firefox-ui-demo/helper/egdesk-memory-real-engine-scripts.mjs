@@ -386,3 +386,48 @@ export function buildMemoryScaleV3Script() {
     description: 'Pattern: scale-v1 and scale-v2 with the engine-context split on (bytes limit 4000). Turn 1: one fact from each of four long pages (one of them is longer than a whole entry, so it is cut inside the item), every fact in the last fifth of its page: all four in the answer, no context key over 4,000 bytes, no body twice, two or more pages merged. Turn 2: whether the planned cut-over is done, when it is planned, and what happens if it goes wrong: the date and the number in the answer, neither stated as done or decided, nothing re-sent, no key over 4,000 bytes. Needs --decisions. Expectations by code.',
     conversations: [{ ...v2.conversations[0], id: 'memory-scale-v3', flags: { ...v2.conversations[0].flags, EGDESK_TURN_MEMORY_ENGINE_CONTEXT: 'split', EGDESK_TURN_MEMORY_ENGINE_BYTES: '4000' }, turns: [first, bar(v2.conversations[0].turns[1])] }] }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+// write-v1 (c34): the memory WRITE path on the real engine, through the check's extension API (helper/egdesk-real-engine-recording.mjs). SYNTHETIC records: three schedule matters whose
+// date is not set (a product-review meeting, a vendor-inspection visit, a legal-review deadline). Each conversation asks about its matter first (a question writes nothing), then the
+// person says something about it in passing, then a neutral question lets the answering model state what was noted:
+//   own-confirm  "아 그거 다음 주 화요일로 확정했어": the person's own statement. A PENDING reading on the review-meeting record, source axis = the person's own statement
+//                (self_reported_observation), status plan or done (decided), the record's status unchanged; still pending after the next turn (nothing auto-promotes); then
+//                "응 맞아" (the model has stated what was noted) confirms it: accepted with the person's confirmation, the record's status now the reading's.
+//   hedged       "아 그 점검 방문은 아마 화요일쯤일 거야": nothing may be confirmed or promoted; a reading, if one is proposed at all, is not the person's own settled statement
+//                (its source axis is not self_reported_observation), the record's status stays unknown.
+//   relayed      "법무팀 말로는 그 마감을 수요일로 정했대": a statement heard from someone else: a pending reading whose source axis is attributed_report (heard), not promoted.
+// The source axis is the sentence label the product installs (isolated axes above their bars), so a missing label shows as basis null: that fails the own and relayed turns, which is
+// the finding, not a script error. Decisions are needed (--decisions). The flags: CONFIRM (the confirmation through the conversation) and the two-step speech design.
+export const MEMORY_WRITE_SET = 'real-engine-memory-write-v1'
+export const WRITE_PAGES = Object.freeze([
+  Object.freeze({ id: 'schedule/product-review', title: '신제품 리뷰 회의 일정', time: 'planned', body: '신제품 리뷰 회의 일정은 아직 정해지지 않았다. 후보는 다음 주 화요일과 수요일이다.' }),
+  Object.freeze({ id: 'schedule/vendor-visit', title: '거래처 점검 방문 일정', time: 'planned', body: '거래처 점검 방문 일정은 아직 정해지지 않았다. 담당자가 거래처와 날짜를 조율 중이다.' }),
+  Object.freeze({ id: 'schedule/legal-deadline', title: '법무 검토 마감 일정', time: 'planned', body: '법무 검토 마감 일정은 아직 정해지지 않았다. 법무팀이 날짜를 알려 주기로 했다.' }),
+])
+export const WRITE_SAYS = Object.freeze({
+  own: ['신제품 리뷰 회의 일정 어떻게 돼 있어?', '아 그거 다음 주 화요일로 확정했어', '그 회의 일정 지금 어떻게 정리돼 있어?', '응 맞아'],
+  hedged: ['거래처 점검 방문 일정 어떻게 돼 있어?', '아 그 점검 방문은 아마 화요일쯤일 거야', '그 점검 방문 일정 지금 어떻게 정리돼 있어?'],
+  relayed: ['법무 검토 마감 일정 어떻게 돼 있어?', '법무팀 말로는 그 마감을 수요일로 정했대', '그 마감 일정 지금 어떻게 정리돼 있어?'],
+})
+export function buildMemoryWriteScript() {
+  const [review, vendor, legal] = WRITE_PAGES, common = { posted: true, noNativeTools: true, turnStatus: 'completed' }
+  const pages = WRITE_PAGES.map(p => ({ id: p.id, title: p.title, body: p.body, time: p.time }))
+  const flags = { EGDESK_TURN_MEMORY_CONFIRM: 'on', EGDESK_TURN_MEMORY_SPEECH_DESIGN: 'hybrid' }
+  // an Agent DIRECT room (the room the product's memory runs in) and the person's opt-in to reuse of the DM's utterances, which reading the previous reply needs (egdesk-real-engine-recording.mjs)
+  const room = { agentProfile: { name: 'Sol', role: '비서', tone: 'concise', instructions: '한국어로 한두 문장으로 짧게 답한다. 일정은 기록에 있는 내용만 말하고, 기록에 없으면 정해지지 않았다고 말한다.' }, speechConsent: true }
+  const turn = (say, recording) => ({ say, expect: { recording, ...common } })
+  const pendingOwn = { page: review.id, reading: 'pending', status: ['plan', 'done'], basis: ['self_reported_observation'], pageStatus: ['unknown'], confirmed: false, readings: 1 }
+  const nothingYet = page => ({ page, reading: 'none', readings: 0, newPages: 0 })
+  const notOwn = [null, 'inference', 'record_based', 'unspecified']
+  return { set: MEMORY_WRITE_SET,
+    description: 'Pattern: the memory write path on the real engine. Three synthetic schedule records without a date. own-confirm: a question (nothing written), "아 그거 다음 주 화요일로 확정했어" (a pending reading on the review-meeting record, source = the person\'s own statement, status plan or done, the record unchanged), a neutral question (still pending: nothing auto-promotes), then "응 맞아" (accepted with the person\'s confirmation, the record\'s status now the reading\'s). hedged: "아 그 점검 방문은 아마 화요일쯤일 거야": nothing confirmed or promoted, any reading is not the person\'s own settled statement, the record\'s status stays unknown. relayed: "법무팀 말로는 그 마감을 수요일로 정했대": a pending reading with source attributed_report (heard), not promoted. Expectations by code from the write store, after the turn\'s answer and background write settled. Each conversation is an Agent DM room with the person\'s speech opt-in: it needs --decisions and --persisted-with-cleanup.',
+    conversations: [
+      { id: 'own-confirm', ...room, flags, memory: { mode: 'on', pages }, turns: [turn(WRITE_SAYS.own[0], nothingYet(review.id)), turn(WRITE_SAYS.own[1], pendingOwn), turn(WRITE_SAYS.own[2], pendingOwn),
+        turn(WRITE_SAYS.own[3], { page: review.id, reading: 'accepted', status: ['plan', 'done'], basis: ['self_reported_observation'], pageStatus: ['plan', 'done'], confirmed: true, readings: 1 })] },
+      { id: 'hedged', ...room, flags, memory: { mode: 'on', pages }, turns: [turn(WRITE_SAYS.hedged[0], nothingYet(vendor.id)),
+        ...WRITE_SAYS.hedged.slice(1).map(say => turn(say, { page: vendor.id, reading: 'pending_or_none', basis: notOwn, pageStatus: ['unknown'], confirmed: false }))] },
+      { id: 'relayed', ...room, flags, memory: { mode: 'on', pages }, turns: [turn(WRITE_SAYS.relayed[0], nothingYet(legal.id)),
+        ...WRITE_SAYS.relayed.slice(1).map(say => turn(say, { page: legal.id, reading: 'pending', status: ['plan', 'done'], basis: ['attributed_report'], pageStatus: ['unknown'], confirmed: false, readings: 1 }))] },
+    ] }
+}

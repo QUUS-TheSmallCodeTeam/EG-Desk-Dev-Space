@@ -211,6 +211,9 @@
               }
             }
           },
+          "speechConsent": {
+            "type": "boolean"
+          },
           "seededWrites": {
             "type": "object",
             "additionalProperties": false,
@@ -605,6 +608,79 @@
                           "type": "integer",
                           "minimum": 1,
                           "maximum": 800000
+                        }
+                      }
+                    },
+                    "recording": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "page"
+                      ],
+                      "properties": {
+                        "page": {
+                          "type": "string"
+                        },
+                        "reading": {
+                          "enum": [
+                            "none",
+                            "pending",
+                            "accepted",
+                            "rejected",
+                            "pending_or_none"
+                          ]
+                        },
+                        "status": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 8,
+                          "items": {
+                            "enum": [
+                              "plan",
+                              "done",
+                              "superseded"
+                            ]
+                          }
+                        },
+                        "basis": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 8,
+                          "items": {
+                            "enum": [
+                              "self_reported_observation",
+                              "attributed_report",
+                              "inference",
+                              "record_based",
+                              "unspecified",
+                              null
+                            ]
+                          }
+                        },
+                        "pageStatus": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 8,
+                          "items": {
+                            "enum": [
+                              "unknown",
+                              "plan",
+                              "done"
+                            ]
+                          }
+                        },
+                        "confirmed": {
+                          "type": "boolean"
+                        },
+                        "readings": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 20
+                        },
+                        "newPages": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 20
                         }
                       }
                     },

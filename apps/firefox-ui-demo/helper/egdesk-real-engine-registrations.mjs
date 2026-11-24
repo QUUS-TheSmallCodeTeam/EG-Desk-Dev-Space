@@ -33,6 +33,15 @@ registerTurnHooks('memory', conversation => {
   return { hook, observe: (method, params) => hook.observe(method, params), beginTurn: () => hook.beginTurn(), finishTurn: ctx => hook.finishTurn(ctx.expect?.memory) }
 })
 
+// ---- L7 c34: recording (the memory write path: pending readings, their confirmation; expect.recording) ----
+import { RECORDING_EXPECT_SCHEMA, createRecordingHook, validateRecordingExpect, validateSpeechConsent } from './egdesk-real-engine-recording.mjs'
+registerConversationFields({ speechConsent: { schema: { type: 'boolean' }, validate: (value, { conv, path, bad }) => { for (const why of validateSpeechConsent(value, conv, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerExpectKeys({ recording: { schema: RECORDING_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => {
+  for (const why of validateRecordingExpect(value, conv, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
+  if (turn.whileRunning !== undefined || turn.action !== undefined) bad(path, 'not checked on a whileRunning or action turn')
+} } })
+registerTurnHooks('recording', conversation => createRecordingHook(conversation))
+
 // ---- L2: journey (what reached the engine for a message typed into a working run) ----
 import { ENGINE_EXPECT_SCHEMA, createJourneyHook, messageCounts, validateEngineExpect } from './egdesk-real-engine-journey.mjs'
 registerExpectKeys({ engine: { schema: ENGINE_EXPECT_SCHEMA, validate: (value, { turn, path, bad }) => { for (const why of validateEngineExpect(value, { whileRunning: turn.whileRunning !== undefined }, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
