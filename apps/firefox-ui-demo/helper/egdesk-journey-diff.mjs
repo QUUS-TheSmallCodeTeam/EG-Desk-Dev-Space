@@ -210,7 +210,7 @@ export function buildDiffReport({ old: a, new: b, commitsFor = () => [], pickaxe
     const symbols = (FAMILY_SYMBOLS[family] ?? []).map(([file, name]) => ({ file, name, commits: symbolCommits(file, name) }))
     return { family, changedBodies: bodies, builder: spec?.builder ?? null, wiring: spec?.wiring ?? null, mapped: spec !== null, builderCommits, wiringCommits, symbols }
   })
-  return { old: side(a, reproducedOld), new: side(b, reproducedNew), steps, families }
+  return { old: side(a, reproducedOld), new: side(b, reproducedNew), steps, families, draws: drawsOf(a.results, b.results) }
 }
 
 // ---- text ----
@@ -218,6 +218,31 @@ const clip = (text, n = 150) => (text.length > n ? `${text.slice(0, n - 1)}…` 
 const num = n => (n === null || n === undefined ? '-' : n.toLocaleString('en-US'))
 const names = list => (list ? list.join(',') : '-')
 const short = list => { const t = names(list); return t.length > 60 ? `${t.slice(0, 59)}…` : t }
+/**
+ * How much of the new run is a new draw from the model. A request whose body is byte-identical to one of the old run (same step, family and
+ * question names, same sha256) gets the same answer: measured 70 of 70 pairs (journeys v6/v7b 32, browser-live 18, a duplicate send 20). Such a request
+ * re-checks the code path around the model, not the model. Only recorded fields are read (sha256, answers), so no replay is needed.
+ */
+export function drawsOf(oldResults, newResults) {
+  const key = (step, row) => `${step}\u0000${row.family}\u0000${(row.questions ?? []).join(',')}`
+  const value = x => `${x?.name}|${x?.probability ?? x?.choice ?? x?.score ?? ''}|${x?.confidence ?? ''}`
+  const before = new Map()
+  for (const row of rowsOf(oldResults)) { const k = key(row.step, row); if (!before.has(k)) before.set(k, []); before.get(k).push(row) }
+  const byFamily = {}, out = { requests: 0, identical: 0, fresh: 0, freshInNewSteps: 0, identicalAnswersSame: 0, identicalAnswersDiffer: 0, byFamily }
+  const oldSteps = new Set((oldResults?.steps ?? []).map(step => step.id))
+  for (const row of rowsOf(newResults)) {
+    const f = (byFamily[row.family] ??= { requests: 0, identical: 0, fresh: 0 })
+    const twin = (before.get(key(row.step, row)) ?? []).find(x => x.sha256 === row.sha256)
+    out.requests++; f.requests++
+    if (twin) {
+      out.identical++; f.identical++
+      const same = Array.isArray(row.answers) && Array.isArray(twin.answers) && row.answers.length === twin.answers.length && row.answers.every((x, i) => value(x) === value(twin.answers[i]))
+      if (same) out.identicalAnswersSame++; else out.identicalAnswersDiffer++
+    } else { out.fresh++; f.fresh++; if (!oldSteps.has(row.step)) out.freshInNewSteps++ }
+  }
+  return out
+}
+
 /** The report as lines of text. */
 export function formatReport(report, { full = false } = {}) {
   const L = []
@@ -228,6 +253,10 @@ export function formatReport(report, { full = false } = {}) {
   }
   const failed = report.steps.flatMap(s => s.checks.newlyFailed.map(c => `${c.id}`)), fixed = report.steps.flatMap(s => s.checks.newlyPassed.map(c => c.id))
   L.push(`checks: newly failed ${failed.length}${failed.length ? ` (${failed.join(', ')})` : ''}; newly passed ${fixed.length}${fixed.length ? ` (${fixed.join(', ')})` : ''}; new in the plan ${report.steps.reduce((t, s) => t + s.checks.newFailing.length + s.checks.newPassing.length, 0)} (failing ${report.steps.reduce((t, s) => t + s.checks.newFailing.length, 0)})`)
+  if (report.draws && report.draws.requests) {
+    const d = report.draws, fresh = Object.entries(d.byFamily).filter(([, f]) => f.fresh > 0).map(([name, f]) => `${name} ${f.fresh}/${f.requests}`)
+    L.push(`draws: ${d.identical} of ${d.requests} request bodies are byte-identical to the old run (answers ${d.identicalAnswersSame === d.identical ? 'identical in all of them' : `identical in ${d.identicalAnswersSame}, different in ${d.identicalAnswersDiffer}`}); fresh by family: ${fresh.join(', ') || 'none'}`)
+  }
   // a digest first: the changed bodies that carry a hint or a named commit, grouped by family and hint, with the commits most likely behind them
   const groups = new Map(), famOf = new Map(report.families.map(f => [f.family, f]))
   for (const st of report.steps) for (const b of st.bodies) {
