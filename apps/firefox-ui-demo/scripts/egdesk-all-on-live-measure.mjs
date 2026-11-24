@@ -321,7 +321,7 @@ export function bodyFromProduct(stack) {
 }
 const estimateOf = (wire, body) => independentEstimate(wire.questions.filter(q => q.type === 'choice').length, wire.questions.filter(q => q.type !== 'choice').length, Buffer.byteLength(body))
 export function createMeasureTransport({ send = false, key = null, fetchImpl = globalThis.fetch, caps, plan, now = null, scripted = scriptedDecisions(), replay = null } = {}) {
-  const ledger = { requests: 0, sent: 0, tokens: 0, reportedTokens: 0, byStep: {}, stopped: null, refusedBodies: 0, onWire: 0, replayUnmatched: 0 }
+  const ledger = { requests: 0, sent: 0, tokens: 0, reportedTokens: 0, byStep: {}, stopped: null, refusedBodies: 0, onWire: 0, replayUnmatched: 0, replayChangedBody: 0 }
   const stop = (reason, step) => { if (!ledger.stopped) ledger.stopped = { reason, step } }
   const transport = async ({ body, wire, row }) => {
     const refusal = bodyFromProduct(deepStack())
@@ -341,7 +341,8 @@ export function createMeasureTransport({ send = false, key = null, fetchImpl = g
       // Replay: the answer the provider gave to the same request (same step, family and question names, in order) in an earlier run.
       // A request that run did not make is answered by the script and marked, so a replay shows where the code now asks something else.
       const recorded = replay ? replay.take(step, row.feature, wire.questions.map(q => q.name)) : null
-      if (replay) { row.replay = recorded ? 'recorded' : 'unmatched'; if (!recorded) ledger.replayUnmatched++ }
+      // The same request in name only: when the body differs (other evidence, other wording) the recorded answer was given to another body.
+      if (replay) { row.replay = !recorded ? 'unmatched' : recorded.sha256 === row.sha256 ? 'recorded' : 'recorded_changed_body'; if (!recorded) ledger.replayUnmatched++; else if (row.replay !== 'recorded') ledger.replayChangedBody++ }
       return { status: 200, json: { answers: recorded?.answers ?? await scripted.answer(wire), usage: { input_tokens: recorded?.usage?.input_tokens ?? est } } }
     }
     const id = `r${ledger.requests}`
@@ -426,7 +427,7 @@ export function replayAnswers(results) {
     if (row.status !== 200 || !Array.isArray(row.answers) || !Array.isArray(row.questions)) continue
     const key = keyOf(step.id, row.family, row.questions)
     if (!queues.has(key)) queues.set(key, [])
-    queues.get(key).push({ answers: row.answers, usage: row.usage ?? null })
+    queues.get(key).push({ answers: row.answers, usage: row.usage ?? null, sha256: row.sha256 ?? null })
   }
   return { take: (step, family, names) => queues.get(keyOf(step, family, names))?.shift() ?? null }
 }
@@ -451,10 +452,14 @@ export function diffJourneys(previous, current) {
     const prev = (previous?.steps ?? []).find(step => step.id === cur.id) ?? null, changes = []
     const pf = fam(prev?.requests), cf = fam(cur.requests)
     for (const family of [...new Set([...Object.keys(pf), ...Object.keys(cf)])]) if ((pf[family] ?? 0) !== (cf[family] ?? 0)) changes.push({ kind: 'requests', family, prev: pf[family] ?? 0, cur: cf[family] ?? 0 })
+    // In a replay, a request the earlier run did not make was answered by the script, and one whose body changed got an answer given to
+    // another body: both are named, and a scripted answer is not compared with a real one.
+    const scripted = (cur.requests ?? []).filter(row => row.replay === 'unmatched'), reused = (cur.requests ?? []).filter(row => row.replay === 'recorded_changed_body')
+    if (scripted.length || reused.length) changes.push({ kind: 'replay', scripted: scripted.map(row => row.family), changedBody: reused.map(row => row.family) })
     const pm = group(prev?.requests)
     for (const [family, list] of group(cur.requests)) list.forEach((row, i) => {
       const before = pm.get(family)?.[i]
-      if (!before) return
+      if (!before || row.replay === 'unmatched') return
       const a = answerMap(before.answers), b = answerMap(row.answers)
       for (const name of [...new Set([...Object.keys(a), ...Object.keys(b)])]) if (!sameAnswer(a[name], b[name])) changes.push({ kind: 'answer', family, index: i + 1, name, prev: answerWord(a[name]), cur: answerWord(b[name]) })
     })
@@ -484,13 +489,17 @@ const passWord = value => (value === true ? 'pass' : value === false ? 'fail' : 
 export function formatDiff(diff) {
   const lines = [`journey diff: ${diff.previous.at} (${diff.previous.mode}, plan ${String(diff.previous.plan).slice(0, 12)}) -> ${diff.current.at} (${diff.current.mode}, plan ${String(diff.current.plan).slice(0, 12)})`,
     `hard ${diff.scorecard.prev?.hard ?? '-'} -> ${diff.scorecard.cur?.hard ?? '-'}, soft ${diff.scorecard.prev?.soft ?? '-'} -> ${diff.scorecard.cur?.soft ?? '-'}`]
+  const marked = diff.steps.filter(step => step.changes.some(c => c.kind === 'replay')).map(step => step.step)
+  if (marked.length) lines.push(`replay: steps with scripted answers or answers reused for a changed body (their outcomes are not model results; re-run with --send): ${marked.join(', ')}`)
   for (const step of diff.steps) {
     lines.push(`== ${step.step} [${step.state}]${step.changes.length ? '' : ' no change'}`)
+    const replayNote = step.changes.some(c => c.kind === 'replay')
     for (const c of step.changes) {
       if (c.kind === 'requests') lines.push(`  requests     ${c.family} ${c.prev} -> ${c.cur}`)
       else if (c.kind === 'answer') lines.push(`  answer       ${c.family}#${c.index} ${c.name}: ${c.prev} -> ${c.cur}`)
       else if (c.kind === 'saw') { lines.push('  person saw   before:'); for (const line of c.prev) lines.push(`                 ${line}`); lines.push('               now:'); for (const line of c.cur) lines.push(`                 ${line}`) }
-      else if (c.kind === 'expectation') lines.push(`  expectation  ${c.id} (${c.severity}, ${c.owner}): ${passWord(c.prev)} -> ${passWord(c.cur)}`)
+      else if (c.kind === 'expectation') lines.push(`  expectation  ${c.id} (${c.severity}, ${c.owner}): ${passWord(c.prev)} -> ${passWord(c.cur)}${replayNote ? ' [not a model result: see replay above]' : ''}`)
+      else if (c.kind === 'replay') lines.push(`  replay       ${c.scripted.length ? `no recorded answer, scripted: ${c.scripted.join(', ')}` : ''}${c.scripted.length && c.changedBody.length ? '; ' : ''}${c.changedBody.length ? `recorded answer reused for a changed body: ${c.changedBody.join(', ')}` : ''}`)
       else lines.push(`  ${c.kind.padEnd(12)} ${JSON.stringify(c.prev)} -> ${JSON.stringify(c.cur)}`)
     }
   }
@@ -508,7 +517,7 @@ export function resultsPayload({ outcome, plan, send, caps, replayOf = null, at 
     ...(replayOf ? { replayOf } : {}),
     plan: { file: path.basename(PLAN_FILE), sha256: plan.sha256, registered: plan.registered }, script: { sha256: sha256(readFileSync(SCRIPT_FILE)) },
     caps: { tokenCeiling: caps.tokenCeiling, maxRequests: caps.maxRequests, perStep: Object.fromEntries(plan.steps.map(s => [s.id, s.caps])) },
-    totals: { requests: outcome.ledger.requests, sent: outcome.ledger.sent, inputTokensCounted: outcome.ledger.tokens, inputTokensReported: outcome.ledger.reportedTokens, refusedBodies: outcome.ledger.refusedBodies, ...(replayOf ? { replayUnmatched: outcome.ledger.replayUnmatched } : {}) },
+    totals: { requests: outcome.ledger.requests, sent: outcome.ledger.sent, inputTokensCounted: outcome.ledger.tokens, inputTokensReported: outcome.ledger.reportedTokens, refusedBodies: outcome.ledger.refusedBodies, ...(replayOf ? { replayUnmatched: outcome.ledger.replayUnmatched, replayChangedBody: outcome.ledger.replayChangedBody } : {}) },
     stoppedBecause: outcome.ledger.stopped?.reason ?? null, stoppedAt: outcome.ledger.stopped?.step ?? null,
     scorecard: outcome.scorecard, steps: outcome.steps }
 }
