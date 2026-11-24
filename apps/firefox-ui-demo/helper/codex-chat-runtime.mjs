@@ -8,7 +8,7 @@ import { classifyPublicToolError } from './codex-tool-errors.mjs'
 import { specManifestEntries, verifiedManifestOwners } from './codex-native-tool-manifest.mjs'
 import { nativeQaCommandReceipt, validateQaCommandNonce, validateQaOutputMarkers } from './codex-qa-command-receipt.mjs'
 import { MAX_COMPOSED } from './egdesk-profile-store.mjs'
-import { chatChoiceManual, runChatChoice, validateChatChoice } from './egdesk-chat-choice.mjs'
+import { CHAT_CHOICE_BAR, chatChoiceManual, runChatChoice, validateChatChoice } from './egdesk-chat-choice.mjs'
 import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { browserRefusal, ceilingAllowsBrowserTool, ceilingAllowsComputerTool, ceilingApprovalRefusal, ceilingBrowserSelection, ceilingNarrows, ceilingReportNotices, CEILING_MESSAGES, computerRefusal, effectiveToolCeiling, liveBrowserSelected, loadCeilingThreadOverrides, mergeCeilingOverrides, recordedToolCeiling, verifyCeilingNativeThread } from './codex-chat-tool-ceiling.mjs'
 import { HOST_CONTROL_POLICIES, HOST_LEASE_CODES, requiresHostControl } from './egdesk-host-lease.mjs'
@@ -4371,7 +4371,9 @@ export class CodexChatRuntime {
       const expired = new Promise(resolve => {
         timer = this.setTimer(() => { controller.abort(); resolve(chatChoiceManual(posted ? 'timeout' : 'timeout_unsent')) }, Math.max(1, Math.ceil(remaining())))
       })
-      const result = await Promise.race([runChatChoice({ ...choice, client, isCurrent, signal: choiceSignal }), expired])
+      const measured = {}
+      const result = await Promise.race([runChatChoice({ ...choice, client, isCurrent, signal: choiceSignal, onMeasure: m => Object.assign(measured, m) }), expired])
+      this.recordChoiceCalibration(choice.options.length, measured, result)
       return result?.status === 'recommended' && Number.isSafeInteger(result.index) &&
         result.index >= 0 && result.index < choice.options.length && isCurrent()
         ? { status: 'recommended', index: result.index }
@@ -4450,6 +4452,22 @@ export class CodexChatRuntime {
       const id = raw ? log.record(raw) : null
       if (id) this.calibrationRuns.set(run, id)
     } catch { /* recording must never affect the turn */ }
+  }
+
+  // One content-free calibration entry per chooser request that reached the model or failed with a closed code (canon section 5.3).
+  // Numbers and closed words only: option count, top two probabilities, confidence, the bar and what it would do, and the error code.
+  // Process-local until written to the calibration file; never part of the HTTP reply. Any failure is ignored.
+  recordChoiceCalibration(options, measured, result) {
+    try {
+      const log = this.decisionContext?.calibrationLog
+      if (!log || this.decisionContext?.mode?.() !== 'on') return
+      const reason = result?.status === 'manual' && typeof result.reason === 'string' ? (result.reason === 'timeout_unsent' ? 'timeout' : result.reason) : null
+      const hasNumbers = Number.isFinite(measured?.top)
+      if (!hasNumbers && !reason) return
+      log.record({ feature: 'dm_chooser', mode: 'on', candidates: options, ...(reason ? { fallback: reason } : {}),
+        judgments: hasNumbers ? [{ q: 'choice', top: measured.top, second: measured.second, p: measured.p, threshold: CHAT_CHOICE_BAR.confidence,
+          minMargin: CHAT_CHOICE_BAR.margin, would: measured.would === 'act' ? 'act' : 'hold' }] : [] })
+    } catch { /* recording must never affect the choice */ }
   }
 
   // The label that arrives after the turn: how it ended, and how many tool activities the reasoning model ran itself.

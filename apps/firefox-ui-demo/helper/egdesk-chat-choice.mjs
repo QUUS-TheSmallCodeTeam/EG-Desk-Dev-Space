@@ -59,7 +59,9 @@ export function validateChatChoice(request) {
 
 const probability = n => Number.isFinite(n) && n >= 0 && n <= 1
 
-function readRecommendation(answers, optionIds) {
+// `measure` (optional, process-local) receives numbers only: option count, the top two probabilities over all rows
+// (abstain included), the model's confidence and what the bar would do. No ids, text or labels.
+function readRecommendation(answers, optionIds, measure = null) {
   const answer = answers?.[NAME]
   const rows = answer?.probabilities
   const allowed = new Set([...optionIds, ABSTAIN])
@@ -75,14 +77,20 @@ function readRecommendation(answers, optionIds) {
   }
   if (allowed.size || Math.abs(total - 1) > MASS_TOLERANCE) return MANUAL
   // The model answered, but not with a pick. Say which kind of "no pick" it was.
-  if (rows[0].value === ABSTAIN) return manualWith('abstain')
+  const note = would => measure?.({ options: optionIds.length, top: rows[0].probability, second: rows[1].probability, p: answer.confidence, would })
+  if (rows[0].value === ABSTAIN) { note('hold'); return manualWith('abstain') }
   // unclear: the top two are (nearly) tied. low_confidence: a clear leader, but below the bar.
-  if (rows[0].probability - rows[1].probability < DEFAULT_DECISION_THRESHOLDS.margin) return manualWith('unclear')
-  if (rows[0].probability < MIN_CONFIDENCE || answer.confidence < MIN_CONFIDENCE) return manualWith('low_confidence')
+  if (rows[0].probability - rows[1].probability < DEFAULT_DECISION_THRESHOLDS.margin) { note('hold'); return manualWith('unclear') }
+  if (rows[0].probability < MIN_CONFIDENCE || answer.confidence < MIN_CONFIDENCE) { note('hold'); return manualWith('low_confidence') }
   const result = readChoice(answers, NAME, { minConfidence: MIN_CONFIDENCE, minMargin: DEFAULT_DECISION_THRESHOLDS.margin })
   const index = optionIds.indexOf(result.value)
-  return result.state === 'accepted' && index !== -1 ? { status: 'recommended', index } : MANUAL
+  const accepted = result.state === 'accepted' && index !== -1
+  note(accepted ? 'act' : 'hold')
+  return accepted ? { status: 'recommended', index } : MANUAL
 }
+
+/** The bar this chooser applies (it is not the 0.75 turn-context default): confidence and top-two margin. */
+export const CHAT_CHOICE_BAR = Object.freeze({ confidence: MIN_CONFIDENCE, margin: DEFAULT_DECISION_THRESHOLDS.margin })
 
 /** `isCurrent` is the host's synchronous scope, run, and authority check. `signal` is mandatory. */
 export async function runChatChoice(request) {
@@ -92,6 +100,8 @@ export async function runChatChoice(request) {
   const decide = client && typeof client === 'object' && !types.isProxy(client) ? ownValue(client, 'decide') : null
   const isCurrent = ownValue(request, 'isCurrent')
   const signal = ownValue(request, 'signal')
+  const onMeasure = ownValue(request, 'onMeasure')
+  const measure = typeof onMeasure === 'function' ? m => { try { onMeasure(m) } catch { /* recording never changes the outcome */ } } : null
   if (typeof isCurrent !== 'function' || types.isProxy(signal) || !(signal instanceof AbortSignal) ||
       typeof decide !== 'function') return MANUAL
 
@@ -141,7 +151,7 @@ export async function runChatChoice(request) {
       },
     })])
     if (!authorized || !current()) return performance.now() >= deadline ? manualWith(sent ? 'timeout' : 'timeout_unsent') : MANUAL
-    return readRecommendation(response?.answers, optionIds)
+    return readRecommendation(response?.answers, optionIds, measure)
   } catch (error) {
     // Only a DecisionError code is forwarded, never its message.
     return error?.name === 'DecisionError' ? manualWith(error.code === 'timeout' && !sent ? 'timeout_unsent' : error.code) : MANUAL
