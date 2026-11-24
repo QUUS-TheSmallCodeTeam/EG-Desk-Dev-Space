@@ -859,6 +859,7 @@ export class CodexChatRuntime {
     this.commandGateRuns = new Set() // in-flight command gate assessments (never awaited by an approval card)
     // c18: { mode() → 'off'|'on', neutralFolder() → absolute EG-Desk-owned empty folder }; absent = off
     this.ownTools = ownTools
+    this.ownCommandBeats = new WeakSet() // heartbeats that already carry the own_commands provider
     this.shadowSeen = new Set() // answerId:itemId already judged by the own-tools shadow (bounded)
     this.shadowRuns = new Set()
     this.ownFolders = new Map() // conversationId → the real folder EG-Desk's tools use (never given to Codex in own-tools mode)
@@ -6066,6 +6067,32 @@ export class CodexChatRuntime {
   }
 
   commandJudgeIdle() { return this.engineCommands.idle() }
+
+  // ---- c21: the conditions of the last command EG-Desk ran itself (egdesk-run-conditions.mjs via the command executor). ----
+  // Kept on the run for the message evidence (the runner's own summary line backs "the tests passed"), and offered to the conversation's
+  // heartbeat as flat facts (numbers, booleans, closed labels; no text), under the heartbeat's facts-only provider contract.
+  noteOwnCommand(run, record) {
+    try {
+      if (!run || !record) return
+      const summary = record.health?.summary ?? null
+      run.ownCommandLast = Object.freeze({ exitCode: Number.isSafeInteger(record.exitCode) ? record.exitCode : null, durationMs: Number.isFinite(record.durationMs) ? record.durationMs : null,
+        health: record.health?.health ?? null, healthReasons: record.health?.reasons ?? [], summary: summary ? Object.freeze({ ...summary, line: String(summary.line).slice(0, 300) }) : null,
+        worktree: record.worktree ? Object.freeze({ ...record.worktree }) : null })
+      const hb = this.heartbeatThreads.get(run.conversationId)
+      if (!hb || hb.state === 'stopped' || this.ownCommandBeats.has(hb)) return
+      hb.register('own_commands', { facts: () => this.ownCommandFacts(run.conversationId) })
+      this.ownCommandBeats.add(hb)
+    } catch { /* facts are advisory */ }
+  }
+
+  ownCommandFacts(conversationId) {
+    const last = [...this.runs.values()].filter(r => r.conversationId === conversationId && r.ownCommandLast).at(-1)?.ownCommandLast
+    if (!last) return null
+    return { ...(last.exitCode !== null ? { exit_code: last.exitCode } : {}), ...(last.durationMs !== null ? { duration_ms: last.durationMs } : {}),
+      ...(last.health ? { health: last.health } : {}), test_summary: Boolean(last.summary),
+      ...(last.summary ? { tests_passed: last.summary.passed, tests_failed: last.summary.failed, ...(Number.isSafeInteger(last.summary.total) ? { tests_total: last.summary.total } : {}) } : {}),
+      ...(last.worktree ? { worktree: last.worktree.state, ...(Number.isSafeInteger(last.worktree.conflicts) ? { conflicts: last.worktree.conflicts, uncommitted: last.worktree.uncommitted } : {}) } : {}) }
+  }
 
   // ---- Working-memory gate at the EG-Desk tool-result boundary (egdesk-working-memory-wiring.mjs). ----
   // Config: decisionContext.workingMemory = { mode(): 'off'|'advisory'|'on' }. Absent or 'off' → null and nothing changes.
