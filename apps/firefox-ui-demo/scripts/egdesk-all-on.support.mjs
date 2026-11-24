@@ -26,7 +26,7 @@ import { createCodexBrowserToolProvider } from '../helper/codex-browser-tool-pro
 import { createDecisionBudget, createDecisionClient, decisionTopicRecipient } from '../helper/egdesk-decision-client.mjs'
 import { openCalibrationLog } from '../helper/egdesk-decision-calibration-log.mjs'
 import { openBridgeSettings } from '../helper/egdesk-bridge-settings.mjs'
-import { createTurnMemoryConfig } from '../helper/egdesk-turn-memory-wiring.mjs'
+import { createTurnMemoryConfig, turnMemoryFlagsFromEnv } from '../helper/egdesk-turn-memory-wiring.mjs'
 import { createWikiAdapter, openWikiWrites } from '../helper/egdesk-wiki-adapter.mjs'
 import { createBrowserEntryConfig } from '../helper/egdesk-browser-entry-wiring.mjs'
 import { createPresenceMirror, createRunRequesters } from '../helper/egdesk-presence-mirror.mjs'
@@ -97,8 +97,8 @@ export function featureOf(names, cacheKey = '') {
  * allOnWorld(t, { on, env, onePacket }) → the world. on:true = every feature on; on:false = the bridge's default (every flag unset,
  * Decisions mode off); on:null = a runtime with no decisionContext at all (a bridge before any of these features).
  * env: flag values that differ from "every feature on" (for example { EGDESK_WORK_PLACEMENT: 'advisory' }).
- * onePacket: the turn-memory option that puts its pages under the context selection's packet. The bridge has no switch for it yet
- *   (createTurnMemoryConfig accepts it; codex-bridge-server.mjs does not pass it), so here it is a harness option, default off like the bridge.
+ * onePacket: shorthand for the bridge's developer flag EGDESK_TURN_MEMORY_ONE_PACKET=on (the turn-memory pages ride under the context
+ *   selection's packet). The flag goes through turnMemoryFlagsFromEnv exactly as in codex-bridge-server.mjs; default off like the bridge.
  */
 export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = false } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-all-on-')); chmodSync(dir, 0o700)
@@ -110,8 +110,8 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
   const calibrationLog = openCalibrationLog({ dataDir: settingsDir, log() {} })
   const ENV = on === true
     ? { EGDESK_DRAFT_CHECK: 'on', EGDESK_CONVERSATION_FLOW: 'on', EGDESK_PRESENCE: 'on', EGDESK_BROWSER_ENTRY: 'on', EGDESK_COMMAND_JUDGE: 'advisory', EGDESK_TERMINAL_GATE: 'advisory',
-      EGDESK_WORKING_MEMORY: 'on', EGDESK_WORK_PLACEMENT: 'on', EGDESK_BRIEFING_FLOW: 'on', ...env }
-    : {}
+      EGDESK_WORKING_MEMORY: 'on', EGDESK_WORK_PLACEMENT: 'on', EGDESK_BRIEFING_FLOW: 'on', ...env, ...(onePacket === true ? { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' } : {}) }
+    : { ...(onePacket === true ? { EGDESK_TURN_MEMORY_ONE_PACKET: 'on' } : {}) }
   let clock = Date.parse("2026-11-25T01:00:00Z"), step = 'setup'
   const timers = [], events = [], native = [], decisions = [], forkPrompts = [], acts = [], steers = [], replies = [], anomalies = []
   const judge = mockJudge()
@@ -205,7 +205,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
 
   // ---- the bridge's own wiring, flag by flag (see codex-bridge-server.mjs) ----
   let wikiAdapter = null
-  const turnMemoryConfig = createTurnMemoryConfig({ settings, ...(onePacket === true ? { onePacket: true } : {}), ontologyStore: { readGraph: async () => GRAPH },
+  const turnMemoryConfig = createTurnMemoryConfig({ settings, ...turnMemoryFlagsFromEnv(ENV), ontologyStore: { readGraph: async () => GRAPH },
     getAdapter: () => wikiAdapter ??= createWikiAdapter({ writes: openWikiWrites({ dataDir: settingsDir, log() {} }) }) })
   const browserEntryConfig = createBrowserEntryConfig({ now: () => clock, flag: () => ENV.EGDESK_BROWSER_ENTRY, getAdapter: () => turnMemoryConfig.getAdapter(), wiki: args => turnMemoryConfig.wiki(args) })
   const presenceMirror = createPresenceMirror({ now: () => clock })

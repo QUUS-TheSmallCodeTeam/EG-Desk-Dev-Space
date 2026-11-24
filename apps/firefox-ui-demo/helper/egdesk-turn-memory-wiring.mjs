@@ -5,6 +5,18 @@ import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 // lazily on the first advisory or on turn, so a default bridge does not even open its file.
 // 'advisory' records only. 'on' attaches the packet and lets the write judgment store what the write path accepts.
 //
+// Developer flags of the bridge for the turn-memory options (environment, read once at start; no settings screen entry, nothing user-facing).
+// Unset or any other value means the default: one packet off, write target 'about', confirmation in conversation off.
+//   EGDESK_TURN_MEMORY_ONE_PACKET=on        the memory pages ride under the context selection's packet
+//   EGDESK_TURN_MEMORY_WRITE_TARGET=choice  the old N-way write target, for comparison ('about' is the default)
+//   EGDESK_TURN_MEMORY_CONFIRM=on           pending readings may be confirmed or refused through the conversation
+export const TURN_MEMORY_FLAGS = Object.freeze({ onePacket: 'EGDESK_TURN_MEMORY_ONE_PACKET', writeTarget: 'EGDESK_TURN_MEMORY_WRITE_TARGET', confirmInConversation: 'EGDESK_TURN_MEMORY_CONFIRM' })
+export function turnMemoryFlagsFromEnv(env = {}) {
+  const get = name => (env && typeof env === 'object' && typeof env[name] === 'string' ? env[name] : null)
+  return { ...(get(TURN_MEMORY_FLAGS.onePacket) === 'on' ? { onePacket: true } : {}), ...(get(TURN_MEMORY_FLAGS.writeTarget) === 'choice' ? { writeTarget: 'choice' } : {}),
+    ...(get(TURN_MEMORY_FLAGS.confirmInConversation) === 'on' ? { confirmInConversation: true } : {}) }
+}
+
 // createTurnMemoryConfig({ settings, getAdapter, ontologyStore, deskStore, budget?, deadlineMs? }) -> the object the runtime reads:
 //   { mode(), wiki({ body, context, sources }), scope({ context }), writer(wiki, options), budget, caps, deadlineMs, ontologyWrite }
 export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = null, deskStore = null, budget = { linksFirst: true }, deadlineMs = 15000, caps = null, onePacket = false, writeTarget = 'about', confirmInConversation = false } = {}) {
