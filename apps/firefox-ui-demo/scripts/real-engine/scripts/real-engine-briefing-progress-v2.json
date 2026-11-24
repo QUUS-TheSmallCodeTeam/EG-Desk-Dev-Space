@@ -1,0 +1,113 @@
+{
+  "set": "real-engine-briefing-progress-v2",
+  "description": "Pattern: the board-design turn of the briefing on the REAL engine. The same synthetic dev log and the same progress request run in two conversations that differ in one flag, EGDESK_BRIEFING_OUTPUT_SCHEMA on and off. After the answer is posted the check runs the briefing flow (the production Board/Decisions handler, the Decision model, the real engine's private fork turn writing the fill) and records the board. Expectations, derived by code from the notes: a board is proposed, every commit id, test count and open item is on its cards, the schema is sent exactly when the flag is on, and with the flag on no reply of the engine breaks the schema. Runs only with --decisions.",
+  "conversations": [
+    {
+      "id": "briefing-schema-on",
+      "folder": {
+        "devlog/11-20.md": "# 11-20 기록\n\n- 로그인 화면 병합 완료 (커밋 a1b2c3d, 테스트 120건 통과).\n",
+        "devlog/11-22.md": "# 11-22 기록\n\n- 결제 모듈 병합 완료 (커밋 e4f5a6b, 테스트 98건 통과).\n- 알림 설정 화면은 시안만 확정.\n",
+        "devlog/11-24.md": "# 11-24 기록\n\n- 검색 화면 착수.\n- 남은 일: 알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성.\n"
+      },
+      "flags": {
+        "EGDESK_BRIEFING_FLOW": "on",
+        "EGDESK_BRIEFING_OUTPUT_SCHEMA": "on"
+      },
+      "turns": [
+        {
+          "say": "devlog 폴더의 기록을 읽고 진행 상황을 날짜 순서로 정리해줘. 커밋 id와 테스트 건수도 같이. 파일은 바꾸지 마.",
+          "expect": {
+            "toolCalls": [
+              "egdesk_read_file"
+            ],
+            "posted": true,
+            "answerIncludes": [
+              "로그인 화면",
+              "a1b2c3d",
+              "120",
+              "결제 모듈",
+              "e4f5a6b",
+              "98",
+              "검색 화면"
+            ],
+            "files": {
+              "devlog/11-20.md": "# 11-20 기록\n\n- 로그인 화면 병합 완료 (커밋 a1b2c3d, 테스트 120건 통과).\n",
+              "devlog/11-22.md": "# 11-22 기록\n\n- 결제 모듈 병합 완료 (커밋 e4f5a6b, 테스트 98건 통과).\n- 알림 설정 화면은 시안만 확정.\n",
+              "devlog/11-24.md": "# 11-24 기록\n\n- 검색 화면 착수.\n- 남은 일: 알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성.\n"
+            },
+            "undoRecords": 0,
+            "noNativeTools": true,
+            "turnStatus": "completed",
+            "briefing": {
+              "outcome": "presented",
+              "schemaSent": true,
+              "schemaInvalid": 0,
+              "factsOnBoard": [
+                "a1b2c3d",
+                "120",
+                "e4f5a6b",
+                "98",
+                "알림 설정 구현",
+                "검색 성능 점검",
+                "배포 체크리스트 작성"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "briefing-schema-off",
+      "folder": {
+        "devlog/11-20.md": "# 11-20 기록\n\n- 로그인 화면 병합 완료 (커밋 a1b2c3d, 테스트 120건 통과).\n",
+        "devlog/11-22.md": "# 11-22 기록\n\n- 결제 모듈 병합 완료 (커밋 e4f5a6b, 테스트 98건 통과).\n- 알림 설정 화면은 시안만 확정.\n",
+        "devlog/11-24.md": "# 11-24 기록\n\n- 검색 화면 착수.\n- 남은 일: 알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성.\n"
+      },
+      "flags": {
+        "EGDESK_BRIEFING_FLOW": "on"
+      },
+      "turns": [
+        {
+          "say": "devlog 폴더의 기록을 읽고 진행 상황을 날짜 순서로 정리해줘. 커밋 id와 테스트 건수도 같이. 파일은 바꾸지 마.",
+          "expect": {
+            "toolCalls": [
+              "egdesk_read_file"
+            ],
+            "posted": true,
+            "answerIncludes": [
+              "로그인 화면",
+              "a1b2c3d",
+              "120",
+              "결제 모듈",
+              "e4f5a6b",
+              "98",
+              "검색 화면"
+            ],
+            "files": {
+              "devlog/11-20.md": "# 11-20 기록\n\n- 로그인 화면 병합 완료 (커밋 a1b2c3d, 테스트 120건 통과).\n",
+              "devlog/11-22.md": "# 11-22 기록\n\n- 결제 모듈 병합 완료 (커밋 e4f5a6b, 테스트 98건 통과).\n- 알림 설정 화면은 시안만 확정.\n",
+              "devlog/11-24.md": "# 11-24 기록\n\n- 검색 화면 착수.\n- 남은 일: 알림 설정 구현, 검색 성능 점검, 배포 체크리스트 작성.\n"
+            },
+            "undoRecords": 0,
+            "noNativeTools": true,
+            "turnStatus": "completed",
+            "briefing": {
+              "outcome": "presented",
+              "schemaSent": false,
+              "schemaInvalid": null,
+              "factsOnBoard": [
+                "a1b2c3d",
+                "120",
+                "e4f5a6b",
+                "98",
+                "알림 설정 구현",
+                "검색 성능 점검",
+                "배포 체크리스트 작성"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
