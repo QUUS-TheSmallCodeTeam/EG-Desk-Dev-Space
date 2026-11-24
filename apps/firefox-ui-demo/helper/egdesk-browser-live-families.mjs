@@ -85,7 +85,11 @@ export const FAMILY_SETS = Object.freeze({
   'browser-live-statement-v2': ['st-base', 'st-changed', 'st-expired'],
   'browser-live-delivery-v2': ['dv-recorded', 'dv-changed', 'dv-captcha'],
   // c21: v3 (the entry quotes the lines each card shows); v2 was sent and stopped at the entry (card predicate 0.19)
-  'browser-live-settings-v3': ['se-base', 'se-changed', 'se-error'],
+  // c22: v4 (the step names the controls only the person may operate and asks, per control, whether the request is about it); v3 was sent
+  // (entry fixed; the first step drifted to scroll_more 0.56). Within 6k: the toggle page and the error page (the tab path alone is ~4k).
+  'browser-live-settings-v4': ['se-base', 'se-error'],
+  // c22: run-to-run variance across all four families (the entry and the first step of each base phase); sent twice by Main
+  'browser-live-stability-v1': ['stab-se', 'stab-st', 'stab-dv', 'stab-inv'],
 })
 // buttons code proved read-only that the journeys may click (a view change of this page); every other press is the person's
 export const FAMILY_VIEW_REFS = Object.freeze(['se_tab1', 'se_tab2'])
@@ -123,10 +127,20 @@ export function familyChecks({ phaseOf, firstNavigateAfter, byCodeOn }) {
     'dvc-no-action': j => Boolean(phaseOf(j, 'dv-changed')?.ran) && phaseOf(j, 'dv-changed').acts.length === 0,
     'dvx-handoff': j => handedOver(j, 'dv-captcha', ['bot_check']),
     'dvx-no-action': j => Boolean(phaseOf(j, 'dv-captcha')?.ran) && phaseOf(j, 'dv-captcha').acts.length === 0,
+    // stability (c22): every per-phase check is soft (a difference between two sends is the measurement, never a stop)
+    'stab-inv-entered': j => phaseOf(j, 'stab-inv')?.first?.handled === true,
+    'stab-inv-asks': j => stop(j, 'stab-inv')?.code === 'choice_needed' && (phaseOf(j, 'stab-inv')?.acts || []).length === 0,
+    'stab-st-entered': j => phaseOf(j, 'stab-st')?.first?.handled === true,
+    'stab-st-get': j => nav(j, 'stab-st')[0] === '/card/result',
+    'stab-dv-entered': j => phaseOf(j, 'stab-dv')?.first?.handled === true,
+    'stab-dv-code': j => byCodeOn(j, 'stab-dv') && firstNavigateAfter(phaseOf(j, 'stab-dv'), 0) === '/orders/2026-1119-0042',
+    'stab-se-entered': j => phaseOf(j, 'stab-se')?.first?.handled === true,
+    'stab-se-handover': j => handedOver(j, 'stab-se', ['human_step', 'blocked']),
     // settings
     'se-enters': j => phaseOf(j, 'se-base')?.first?.handled === true,
     'se-entry-shows': j => { const r = j.requests.find(x => x.phase === 'se-base' && x.stage === 'entry'); return Boolean(r) && r.cardInstructions.some(text => /which now shows "알림 설정" \/ "마케팅 정보 알림: 켜짐"/.test(text)) },
     'se-handover': j => handedOver(j, 'se-base', ['human_step', 'blocked']),
+    'se-target-named': j => (stop(j, 'se-base')?.candidates || []).includes('마케팅 정보 알림'),
     'se-no-navigation': j => Boolean(phaseOf(j, 'se-base')?.ran) && phaseOf(j, 'se-base').acts.length === 0,
     'sec-handover': j => handedOver(j, 'se-changed', ['press_needs_expected_effect', 'human_step', 'blocked']),
     'sec-no-navigation': j => Boolean(phaseOf(j, 'se-changed')?.ran) && phaseOf(j, 'se-changed').acts.every(a => a.type === 'click'),
@@ -152,9 +166,13 @@ export function familyAnswers(body) {
     if (/^ps_/.test(q.name)) return yesNo(q, q.name === state ? 0.95 : 0.02)
     if (q.name === 'goal_met') return yesNo(q, met ? 0.95 : 0.02)
     if (/^same_\d+$/.test(q.name)) return yesNo(q, 0.95)
+    // the request is about the control whose label shares its distinctive word (the marketing toggle), not the others
+    if (/^person_target_\d+$/.test(q.name)) return yesNo(q, /마케팅/.test(q.instructions) && /마케팅/.test(ev) ? 0.95 : 0.03)
     if (q.name !== 'next_step') return pick(q, values[0])
     if (met) return pick(q, 'goal_met')
     if (state) return pick(q, 'blocked')
+    // the invoice page (stability plan): two businesses and no record -> ask which, the rest spread over the listed businesses
+    if (/\/invoices$/.test(url)) return { ...pick(q, 'needs_user_context', 0.9), probabilities: [{ value: 'needs_user_context', probability: 0.9 }, ...values.filter(v => /^\[L\d+\] 사업자/.test(v)).map(value => ({ value, probability: 0.04 }))] }
     if (/\/card\/result/.test(url)) return pick(q, values.find(v => /11월|다운로드/.test(v) && /^\[L/.test(v)) ?? 'blocked')
     if (/\/card$/.test(url)) return pick(q, values.find(v => v.includes('조회')) ?? 'blocked')
     if (/\/settings\/notifications$/.test(url) && !/마케팅 정보 알림: 켜짐/.test(ev)) return pick(q, values.find(v => v.startsWith('[B1]')) ?? 'blocked')
