@@ -135,7 +135,8 @@ test('Claude, flag on: approval is added exactly where the floor or the predicat
   }
   for (const [command, expected, session, oneTime] of rows) {
     assert.equal(oneTime, 'accept/decline/cancel', `${command}: one-time approval and decline are always the person's`)
-    assert.equal(session, expected === 'floor' ? 'not_offered' : expected === 'predicates' ? 'refused' : 'granted', command)
+    // (c13, decision 3) a predicate-risky card never shows the session choice; a harmless one gets it once the predicates allow it
+    assert.equal(session, expected === 'none' ? 'granted' : 'not_offered', command)
   }
   assert.equal(h.answers().filter(a => a.startsWith('allow')).length, SAFE.length + LOOK_ALIKES.length, 'the only grants are the person\'s own session choices on harmless commands')
   // the floor needed no model request; the predicates were asked only for changing commands the floor did not settle
@@ -240,4 +241,44 @@ test('session rule coverage is code over the floor probes; the rule contents nev
   await h.chat.replyApproval({ ...run, approvalId: card.approvalId, decision: 'decline' })
   assert.doesNotMatch(JSON.stringify(h.events), /zeta-rule-content/); assert.doesNotMatch(JSON.stringify(h.chat.snapshot()), /zeta-rule-content/)
   assert.doesNotMatch(JSON.stringify(h.calibrationLog.entries()), /zeta-rule-content/)
+})
+
+test('decision 3: the card appears at once without the session choice; it is added on the same card when the predicates allow it, never when they do not', async t => {
+  const h = claudeHarness(t, { flag: 'on' })
+  const run = await h.send()
+  const key = `${run.conversationId}/${run.runId}`
+  const raw = (id, command) => h.transports[0].control(id, { subtype: 'can_use_tool', tool_name: 'Bash', tool_use_id: `toolu-${id}`, input: { command },
+    permission_suggestions: [{ type: 'addRules', behavior: 'allow', rules: [{ toolName: 'Bash', ruleContent: command }], destination: 'userSettings' }] })
+  for (const [id, command, offered] of [['d3-safe', 'rm -rf node_modules', true], ['d3-risky', 'scp db-backup.sql backup.example.test:/srv/backups/', false], ['d3-plain', 'npm test', true]]) {
+    const before = h.events.length
+    raw(id, command)
+    await h.chat.queue; await tick(); await h.chat.queue
+    const card = h.chat.runs.get(key).pendingApprovals.at(-1)
+    // not destructive: nothing to wait for, the choice is there at once; destructive: shown at once without it
+    // what the screen got first (the event is emitted when the card is created, before any answer of the model)
+    const first = h.events.slice(before).find(e => e.event === 'approval.required')
+    assert.equal(JSON.stringify(first).includes('acceptForSession'), command === 'npm test', `${command}: first view`)
+    await h.chat.commandGateIdle()
+    assert.equal(card.choices.includes('acceptForSession'), offered, `${command}: after the predicates`)
+    const shown = h.events.slice(before).filter(e => e.event === 'approval.required')
+    assert.ok(shown.every(e => JSON.stringify(e).includes(card.approvalId)), 'the same card is updated, never a second card')
+    assert.equal(shown.length, command === 'rm -rf node_modules' ? 2 : 1, 'one update when the choice is added, none otherwise')
+    await h.chat.replyApproval({ ...run, approvalId: card.approvalId, decision: 'decline' })
+  }
+  assert.doesNotMatch(JSON.stringify(h.events), /COMMAND_RISK_SESSION_FORBIDDEN/)
+})
+
+test('decision 3: git facts that never arrive keep the session choice away after the 4 s foreground deadline (no late change)', async t => {
+  const h = claudeHarness(t, { flag: 'on' })
+  h.decisionContext.terminalGate.inspect = () => new Promise(() => {}) // the lookup hangs
+  const run = await h.send()
+  const id = 'd3-hang'
+  h.transports[0].control(id, { subtype: 'can_use_tool', tool_name: 'Bash', tool_use_id: 'toolu-hang', input: { command: 'rm -rf src/' },
+    permission_suggestions: [{ type: 'addRules', behavior: 'allow', rules: [{ toolName: 'Bash', ruleContent: 'rm -rf src/' }], destination: 'userSettings' }] })
+  await h.chat.queue; await tick(); await h.chat.queue
+  const card = h.chat.runs.get(`${run.conversationId}/${run.runId}`).pendingApprovals.at(-1)
+  assert.deepEqual(card.choices, ['accept', 'decline', 'cancel'])
+  await new Promise(resolve => setTimeout(resolve, 4200))
+  assert.deepEqual(card.choices, ['accept', 'decline', 'cancel'])
+  await h.chat.replyApproval({ ...run, approvalId: card.approvalId, decision: 'decline' })
 })

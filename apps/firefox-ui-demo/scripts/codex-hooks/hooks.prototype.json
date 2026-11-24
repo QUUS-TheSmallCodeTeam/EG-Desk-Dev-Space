@@ -1,0 +1,13 @@
+{
+  "description": "EG-Desk command gate (prototype, c13). Not installed: a person would have to place it in a hooks location and trust it with /hooks.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          { "type": "command", "command": "node \"$EGDESK_GATE_HOOK_SCRIPT\"", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

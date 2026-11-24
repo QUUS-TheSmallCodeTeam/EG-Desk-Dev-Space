@@ -2685,6 +2685,7 @@ export class CodexChatRuntime {
         : noteOnly !== null ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: withNote(noteOnly) } }
         : memoryPacket || memoryNote ? { [TURN_MEMORY_KEY]: { kind: 'application', value: withNote(memoryPacket) } } : null
       const turnAdditionalContext = browserTaskContext || memoryContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}) } : additionalContext
+      await this.readGateHookReply(cid, body.message)
       turnStartAttempted = context.turnStartAttempted = true
       const result = await engine.startTurn({
         threadId: cid,
@@ -2728,6 +2729,7 @@ export class CodexChatRuntime {
       }
       const run = this.ensureRun(cid, result?.turn?.id, context)
       if (!run) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
+      try { this.gateHookBroker()?.turnStarted({ conversationId: cid, turnId: run.runId }) } catch { /* the gate hook never affects a turn */ }
       if (topicRoute && intake.current()) {
         const { topic, parent, needs } = topicRoute // discard the plaintext packet at this boundary
         const current = decision.result.privateBatchCurrent
@@ -4123,6 +4125,26 @@ export class CodexChatRuntime {
     this.pendingApprovals.set(approvalId, { ...pending, rpcId: event.rpcId, conversationId: run.conversationId, runId: run.runId, ...(gate ? { commandGate: gate } : {}) })
     run.pendingApprovals.push(pending)
     this.emit(run, 'approval.required', pending, event.itemId)
+    if (gate?.pendingSession && event.choices.includes('acceptForSession') && !acceptDisabledReason &&
+        !ceilingApprovalRefusal(run.toolCeiling, { kind, network: event.isNetworkApproval, session: true })) this.offerSessionWhenAllowed(run, approvalId, pending, event, gate)
+  }
+
+  // The session choice comes back on the same card (same approvalId; the screen upserts it) only when the gate's answer arrived in time
+  // and does not require approval. A gate that could not judge (fallback) leaves today's behaviour (P2): the choice comes back too.
+  offerSessionWhenAllowed(run, approvalId, pending, event, gate) {
+    let timer = null
+    const late = new Promise(resolve => { timer = setTimeout(() => resolve('late'), COMMAND_GATE_TIMEOUT_MS); timer.unref?.() })
+    const done = Promise.race([gate.result, late]).then(assessed => {
+      clearTimeout(timer)
+      const stored = this.pendingApprovals.get(approvalId)
+      if (assessed === 'late' || !stored || stored.status !== 'pending' || TERMINAL.has(run.status)) return
+      if (assessed?.approval === true) return
+      const choices = event.choices.filter(choice => choice === 'acceptForSession' || pending.choices.includes(choice))
+      stored.choices = choices; pending.choices = choices
+      this.emit(run, 'approval.required', pending, event.itemId)
+    }).catch(() => {})
+    this.commandGateRuns.add(done)
+    void done.finally(() => this.commandGateRuns.delete(done))
   }
 
   receiveUserInput(run, event) {
@@ -5823,11 +5845,39 @@ export class CodexChatRuntime {
       this.commandGateRuns.add(result)
       void result.finally(() => this.commandGateRuns.delete(result))
       // Rules that need no lookup are known at once: with the flag on the session choice is not offered at all for those.
-      return { enforce, withholdSession: enforce && (first.floor.length > 0 || broadSession), result }
+      // c13 (decision 3): while the predicates (or the git facts a rule needs) are still coming, the card shows no session choice; it is
+      // added when they arrive and allow it, within the foreground deadline. No refusal after the fact, so no message is needed.
+      const pendingSession = enforce && !first.floor.length && !broadSession && first.destructive &&
+        (mode === 'on' || (typeof cfg.inspect === 'function' && where !== null && first.paths.length > 0))
+      return { enforce, withholdSession: enforce && (first.floor.length > 0 || broadSession || pendingSession), pendingSession, result }
     } catch { return null }
   }
 
   commandGateIdle() { return Promise.allSettled([...this.commandGateRuns]) }
+
+  // ---- Codex PreToolUse hook broker (c13 prototype: egdesk-gate-hook-broker.mjs; decisionContext.terminalGate.hookBroker, absent by default). ----
+  gateHookBroker() { try { return this.decisionContext?.terminalGate?.hookBroker ?? null } catch { return null } }
+
+  /** The broker's predicate question for a command of a live run: the same gate as an approval card (flags, Decision mode, egress). */
+  async gateHookAssess({ conversationId, turnId, command, cwd }) {
+    const run = this.runs.get(runKey(conversationId, turnId))
+    if (!run || TERMINAL.has(run.status)) return null
+    const gate = this.startCommandGate(run, { command, cwd })
+    return gate && gate.enforce ? await gate.result : null
+  }
+
+  /** The person's next message after the hook denied a command: read once (yes/no predicates) before the turn starts. */
+  async readGateHookReply(conversationId, message) {
+    try {
+      const broker = this.gateHookBroker()
+      if (!broker?.awaitingReply(conversationId)) return
+      const setup = this.decisionContext
+      const usable = setup?.client && setup.configured?.() === true && setup.mode?.() === 'on'
+      const previous = [...this.runs.values()].filter(r => r.conversationId === conversationId).at(-1) ?? null
+      await broker.readReply({ conversationId, reply: typeof message === 'string' ? message : '', client: usable ? setup.client : null,
+        egress: previous ? this.decisionEgressFor(previous) : null, timeoutMs: COMMAND_GATE_TIMEOUT_MS })
+    } catch { /* an unread reply approves nothing */ }
+  }
 
   // ---- Commands the engine ran WITHOUT asking (c12), record only. ----
   // With Codex's default permissions (workspace-write sandbox, on-request approvals) a command inside the sandbox runs with no approval
@@ -5854,7 +5904,8 @@ export class CodexChatRuntime {
       const ruled = classifyCommand(command, { cwd, home })
       const engine = this.threadEngine(run.conversationId) === 'claude' ? 'claude' : 'codex'
       setup.calibrationLog?.record?.({ feature: 'terminal_gate', mode: flag, judgments: [], attached: false,
-        gate: { unasked: true, rule: ruled.floor.length > 0, would: ruled.floor.length > 0, scored: false, reasons: ruled.floor, engine } })
+        gate: { unasked: true, rule: ruled.floor.length > 0, would: ruled.floor.length > 0, scored: false, reasons: ruled.floor, engine,
+          hooked: this.gateHookBroker()?.wasChecked?.(run.runId, command, cwd) === true } })
     } catch { /* recording only */ }
   }
 
@@ -7090,6 +7141,7 @@ export class CodexChatRuntime {
   }
 
   async finish(run, turn) {
+    try { this.gateHookBroker()?.turnEnded({ turnId: run.runId }) } catch { /* the gate hook never affects a turn */ }
     const epoch = this.runEpoch(run)
     if (TERMINAL.has(run.status) && run.error?.origin !== 'bridge') return
     const guard = this.heldGuard(run)
