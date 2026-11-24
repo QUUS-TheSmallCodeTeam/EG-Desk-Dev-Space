@@ -107,12 +107,17 @@ const WALL_ASK = 'an error page, a sign-in page or a check that stops it from sh
 // read as a question for general knowledge. R1: that judgment needs what the pages are, so the evidence now lists the open pages (each quoted on its own,
 // its first lines too where the run may receive page text, R4) and the question says what counts: reading something an open page shows is a web task, a
 // question that needs no page is an answer. The bar is unchanged. The other questions (card, interruption) and the card quotes are as before.
-export const ENTRY_WEB_ASK = 'Is this request something to do in a web page rather than an answer? (Reading something that one of the open pages shows is a web task; a question that needs no page is an answer.)'
+// c28 (real, browser-live-entry-v1, 2026-11-25): with the page's lines SHOWN ("다음 결제일: 2026-12-14", the card predicate 0.98) the request predicate was still 0.01 for
+// "다음 결제일이 언제야?" (the hospital request, whose page does not show the date, went to 1.0). The listed line answers the question, so the judge took it for an answer
+// it could give. It could not: the lines are shown only to route the request; the answering model does not see them, and a fact that belongs to the person's own
+// account can only be read from the page that holds it. The heading and the question now say exactly that (R1): no bar, no other request changes.
+export const ENTRY_WEB_ASK = "Is this request something to do in a web page rather than an answer? (Account data such as a date, an amount or a status can only be read from the page that holds it, even when a line listed here shows it: a web task. A question that needs no page is an answer.)"
+export const ENTRY_PAGES_HEADING = 'The pages the user has open:'
 /** The open pages as evidence lines for the request predicate: title and host, and the first lines each shows (when known). [] without any card. */
 export function entryEvidence(cards) {
   const list = (Array.isArray(cards) ? cards : []).slice(0, MAX_ENTRY_CARDS).filter(card => card && (card.title || card.host))
   if (!list.length) return []
-  return ['The pages the user has open:', ...list.map(card => { const lines = shownLines(card); return `- ${quoteIdentity(card)}${lines.length ? ` shows ${lines.map(q).join(' / ')}` : ''}` })]
+  return [ENTRY_PAGES_HEADING, ...list.map(card => { const lines = shownLines(card); return `- ${quoteIdentity(card)}${lines.length ? ` shows ${lines.map(q).join(' / ')}` : ''}` })]
 }
 /** The entry questions: the request predicate, then (unless code chose the card) one predicate per card, that page alone. */
 export function entryQuestions(cards, { codeCard = null } = {}) {

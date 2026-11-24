@@ -183,10 +183,25 @@ test('c27: the request predicate sees the open pages (title, site, first lines; 
   assert.equal(body.input[1].content, 'User message: 한결병원 다음 진료 예약 날짜 알려줘\nThe pages the user has open:\n- "마이페이지 | 한결병원" at "carehosp.example.test" shows "알림 설정" / "마케팅 정보 알림: 켜짐" / "보안 알림: 켜짐"'.replace(/ shows .*$/, ''), 'named by code: the lines are not read (nothing is observed for it)')
   assert.deepEqual(w.observed, [])
   assert.equal(lintGroupedRequest({ input: body.input, questions: body.questions }).ok, true)
-  assert.match(ENTRY_WEB_ASK, /^Is this request something to do in a web page rather than an answer\? \(Reading something that one of the open pages shows is a web task; a question that needs no page is an answer\.\)$/)
+  assert.ok(ENTRY_WEB_ASK.startsWith('Is this request something to do in a web page rather than an answer? (') && ENTRY_WEB_ASK.includes('Account data such as a date, an amount or a status can only be read from the page that holds it') && ENTRY_WEB_ASK.includes('even when a line listed here shows it') && ENTRY_WEB_ASK.endsWith('A question that needs no page is an answer.)'))
   // the ride-along host receives the same evidence
   const { rideAlongEntry } = await import('./egdesk-browser-task.mjs')
   const ride = await rideAlongEntry({ provider: { reflexScope: () => ({ callTool: async () => ({ snapshot: { text: ['멤버십 관리', '다음 결제일: 2026-12-14'] } }) }) }, run: {}, message: '다음 결제일이 언제야?', cards: [{ cardId: 'card', host: 'streamly.example.test', title: '멤버십 관리 | 스트리밍플러스' }], cardText: true })
   assert.equal(ride.evidence, 'The pages the user has open:\n- "멤버십 관리 | 스트리밍플러스" at "streamly.example.test" shows "멤버십 관리" / "다음 결제일: 2026-12-14"')
   assert.equal(ride.questions[0].instructions, ENTRY_WEB_ASK)
+})
+
+test('c28: the ride-along host appends the entry evidence after the message (triage request); without it the triage request is byte for byte what it was', async () => {
+  const { triageTurn } = await import('./egdesk-turn-memory.mjs')
+  const bodies = []
+  const client = { decide: async request => { bodies.push(JSON.stringify(request.input)); return { answers: {} } } }
+  await triageTurn({ message: '다음 결제일이 언제야?', client, askedAt: 1 })
+  await triageTurn({ message: '다음 결제일이 언제야?', client, askedAt: 1, extraEvidence: '' })
+  await triageTurn({ message: '다음 결제일이 언제야?', client, askedAt: 1, extraEvidence: '   ' })
+  assert.equal(new Set(bodies.slice(0, 3)).size, 1, 'no evidence: identical requests')
+  const evidence = entryEvidence([{ cardId: 'a', host: 'streamly.example.test', title: '멤버십 관리 | 스트리밍플러스', shows: ['다음 결제일: 2026-12-14'] }]).join('\n')
+  await triageTurn({ message: '다음 결제일이 언제야?', client, askedAt: 1, extraEvidence: evidence })
+  const base = JSON.parse(bodies[0]), withEvidence = JSON.parse(bodies[3])
+  assert.deepEqual(withEvidence.slice(0, base.length), base, 'everything before is unchanged')
+  assert.deepEqual(withEvidence.slice(base.length), [{ role: 'user', content: evidence }], 'one extra user item, after the message')
 })
