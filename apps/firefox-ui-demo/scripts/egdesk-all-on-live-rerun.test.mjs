@@ -205,12 +205,12 @@ test('--rerun compares v3 with an earlier run that had no recall step: that step
 })
 
 // ---- plan v4 (cycle 15) ----
-const REGISTERED_PLAN_V4_SHA256 = 'ce0b3c751231a315ac88faf80143c52405581970f5a4a9da382619e06d5ed981'
+const REGISTERED_PLAN_V4_SHA256 = '9a0fe4aae6eb3c51f111c8d7181a30dffd01e0700bb0fc2f1b0a17a5026e1b9f'
 test('plan v4: pinned, based on v3 by hash, keeps every v3 expectation; the only changes are body counting and the held-page rule for s9.packet, each marked', () => {
   const bytes = readFileSync(PLAN_FILE_V4), raw = JSON.parse(bytes.toString('utf8')), v3 = JSON.parse(readFileSync(PLAN_FILE_V3, 'utf8'))
   assert.equal(sha256(bytes), REGISTERED_PLAN_V4_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V4)
   assert.equal(raw.version, 4); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V3)))
-  assert.deepEqual(raw.world.env, { EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', EGDESK_TURN_MEMORY_KEEP_LATE: 'on' })
+  assert.deepEqual(raw.world.env, { EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', EGDESK_TURN_MEMORY_KEEP_LATE: 'on' }); assert.equal(raw.world.budgets, 'bridge')
   assert.deepEqual(raw.steps.map(s => s.id).filter(id => id !== 's8b-finished-result'), v3.steps.map(s => s.id))
   assert.ok(raw.steps.findIndex(s => s.id === 's8b-finished-result') === raw.steps.findIndex(s => s.id === 's8-pointer-on') + 1)
   for (const step of v3.steps) {
@@ -231,7 +231,7 @@ test('plan v4: pinned, based on v3 by hash, keeps every v3 expectation; the only
   assert.ok(raw.steps.find(s => s.id === 's8b-finished-result').expect.some(e => e.check === 'quotesOwnAnswer' && e.severity === 'hard'))
   assert.equal(STEPS.find(s => s.id === 's8b-finished-result').since, 4)
   for (const file of [PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3]) assert.ok(!loadJourneyPlan(file).steps.some(s => s.id === 's8b-finished-result'))
-  assert.deepEqual(loadJourneyPlan(PLAN_FILE_V3).world.env, {}, 'older plans keep the world as it was')
+  assert.deepEqual(loadJourneyPlan(PLAN_FILE_V3).world, { env: {}, budgets: 'single' }, 'older plans keep the world as it was')
 })
 
 test('packet parsing: a page header with its content is a body; a "not re-sent" header, a header followed by another, or the "not repeated here" line is a reference', () => {
@@ -278,4 +278,13 @@ test('new checks fail for what they forbid: an answer that ends in an appended c
     assert.equal(quotes(JSON.stringify({ input: [{ content: `Result: ${own} ${caveat}` }] })), false, 'the appended caveat is quoted')
     assert.equal(quotes(JSON.stringify({ input: [{ content: 'Result: (none)' }] })), false, 'the answer is not quoted at all')
   })
+})
+
+test('world budgets: "bridge" gives the runtime the bridge\'s warm and cold turn_context budgets; the default keeps the single 800 ms budget', async t => {
+  const { allOnWorld } = await import('./egdesk-all-on.support.mjs')
+  const { TURN_CONTEXT_BUDGET_MS, TURN_CONTEXT_COLD_BUDGET_MS } = await import('../helper/codex-chat-runtime.mjs')
+  const bridge = allOnWorld(t, { budgets: 'bridge' }).chat.decisionContext, single = allOnWorld(t).chat.decisionContext
+  assert.deepEqual([bridge.budgetMs, bridge.coldBudgetMs, typeof bridge.warm], [TURN_CONTEXT_BUDGET_MS, TURN_CONTEXT_COLD_BUDGET_MS, 'function'])
+  assert.equal(bridge.warm(), false, 'cold until a Decisions request of the world has been answered')
+  assert.deepEqual([single.budgetMs, single.coldBudgetMs, single.warm], [TURN_CONTEXT_BUDGET_MS, undefined, undefined])
 })

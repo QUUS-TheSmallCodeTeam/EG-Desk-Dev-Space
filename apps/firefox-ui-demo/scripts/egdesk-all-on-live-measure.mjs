@@ -161,7 +161,9 @@ export function loadJourneyPlan(file = PLAN_FILE) {
   // (cycle 15) A plan may set developer flags of the all-on world (never the product's defaults): EGDESK_* names with string values.
   const env = raw.world?.env ?? {}
   if (typeof env !== 'object' || Array.isArray(env) || Object.entries(env).some(([k, v]) => !/^EGDESK_[A-Z_]+$/.test(k) || typeof v !== 'string')) bad('world.env must map EGDESK_* flags to strings')
-  return { set: raw.set, registered: raw.registered, sha256: sha256(bytes), version: Number.isSafeInteger(raw.version) ? raw.version : 1, world: { env: { ...env } }, steps }
+  // world.budgets 'bridge': the bridge's warm/cold turn_context budgets; absent: the single 800 ms budget of the earlier plans.
+  if (raw.world?.budgets !== undefined && raw.world.budgets !== 'bridge') bad('world.budgets must be "bridge" when given')
+  return { set: raw.set, registered: raw.registered, sha256: sha256(bytes), version: Number.isSafeInteger(raw.version) ? raw.version : 1, world: { env: { ...env }, budgets: raw.world?.budgets ?? 'single' }, steps }
 }
 
 // ---- checks: each judges one expectation from the step's results (and the world, for request bodies that are not written out) ----
@@ -487,7 +489,7 @@ export async function runJourney({ plan, send = false, key = null, fetchImpl = g
   const steps = []
   try {
     // The plan's world flags, then any the caller adds.
-    const w = allOnWorld(t, { transport, settleLimitMs: 60_000, env: { ...(plan.world?.env ?? {}), ...env } })
+    const w = allOnWorld(t, { transport, settleLimitMs: 60_000, env: { ...(plan.world?.env ?? {}), ...env }, budgets: plan.world?.budgets ?? 'single' })
     w.state.wording.wait = waitNote; w.state.wording.pointer = pointerNote
     await w.settings.turnMemory.save('on')
     const j = { note: {}, sends: [], said: [],

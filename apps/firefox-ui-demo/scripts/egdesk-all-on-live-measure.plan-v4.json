@@ -12,7 +12,8 @@
    "EGDESK_TURN_MEMORY_PRUNE_HELD": "on",
    "EGDESK_TURN_MEMORY_KEEP_LATE": "on"
   },
-  "note": "developer flags of the all-on world only; the product defaults stay off. The world also uses the bridge's turn_context budgets (warm 800 / cold 1,500 ms)."
+  "budgets": "bridge",
+  "note": "developer flags of the all-on world only; the product defaults stay off. budgets \"bridge\": the bridge's turn_context budgets (warm 800 / cold 1,500 ms)."
  },
  "how": "Judged only from the results file of a run: what the person sees after each step and the Decision requests of that step. Hard = the journey is broken for the person if it fails; soft = expected but known to be fragile or already reported. \"predicted\" records what this lane expects to fail and why, written before the real run. v2 adds expectations for what the first real run (c16) showed was wrong or misleading for the person although no v1 expectation covered it. v3 adds a genuine recall step and person-level checks of what changed since c16. The scripted subjective model now follows what the product hands it: the recording rule (no promise to record), the choices a task note lists, and the waited-on fact of a note prompt. v4 turns on L7's two turn-memory flags in the world, counts page bodies rather than page headers, and adds the owner question.",
  "caps": "Per step: about three times the requests and two and a half times the estimated input tokens of the dry run (independentEstimate of helper/egdesk-decision-real-runner.mjs), at least 4 requests and 4000 tokens. The journey total is capped separately (default 80000 tokens, 80 requests). The recall step s3b uses the same rule. The owner-question step s8b uses the same rule.",

@@ -240,7 +240,7 @@ export function scriptedDecisions({ policy = {} } = {}) {
  * onePacket: shorthand for the bridge's developer flag EGDESK_TURN_MEMORY_ONE_PACKET=on (the turn-memory pages ride under the context
  *   selection's packet). The flag goes through turnMemoryFlagsFromEnv exactly as in codex-bridge-server.mjs; default off like the bridge.
  */
-export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = false, transport: decisionTransport = null, settleLimitMs = 60_000 } = {}) {
+export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = false, transport: decisionTransport = null, settleLimitMs = 60_000, budgets = 'single' } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-all-on-')); chmodSync(dir, 0o700)
   const cwd = path.join(dir, 'workspace'); mkdirSync(cwd)
   const store = openChatStore({ dataDir: path.join(dir, 'chat'), ownerScope: 'synthetic-all-on' })
@@ -313,9 +313,10 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
   const contexts = new ContextRuntime({ store: new ImmutableContextStore({ dataDir: path.join(dir, 'context'), allowedRoots: [cwd] }), getOwnerKey: () => OWNER })
   const decisionContext = on === null ? undefined : {
     settingsGeneration: () => 0, mode: () => state.mode, configured: () => on === true, client, calibrationLog,
-    // (cycle 15) The bridge's turn_context budgets: warm 800 ms, cold 1,500 ms (first turn of a conversation, or no warm Decisions socket).
-    // Warm here once a Decisions request of this world has been answered (a kept-alive connection), as the bridge's transport is after its first.
-    budgetMs: TURN_CONTEXT_BUDGET_MS, coldBudgetMs: TURN_CONTEXT_COLD_BUDGET_MS, warm: () => decisions.some(row => row.status === 200),
+    // budgets 'bridge' (cycle 15, opt-in): the bridge's turn_context budgets, warm 800 ms and cold 1,500 ms (first turn of a conversation, or
+    // no warm Decisions socket; warm here once a Decisions request of this world has been answered). Default: one 800 ms budget, as before
+    // (other lanes' tests reproduce runs made with it).
+    budgetMs: TURN_CONTEXT_BUDGET_MS, ...(budgets === 'bridge' ? { coldBudgetMs: TURN_CONTEXT_COLD_BUDGET_MS, warm: () => decisions.some(row => row.status === 200) } : {}),
     turnMemory: turnMemoryConfig, browserEntry: browserEntryConfig,
     ...(['advisory', 'on'].includes(ENV.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => ENV.EGDESK_DRAFT_CHECK } } : {}),
     ...(ENV.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(ENV.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror, audience: ({ run }) => runRequesters.audience({ run }) } : {}),
