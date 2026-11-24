@@ -39,6 +39,7 @@ import { openDeskStore } from './egdesk-desk-store.mjs'
 import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
 import { createDecisionBudget, createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
 import { createDecisionTransport } from './egdesk-decision-transport.mjs'
+import { createDecisionActivity, createDecisionWarmup, warmupConfigFromEnv } from './egdesk-decision-warmup.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
@@ -253,7 +254,15 @@ const decisionBudget = createDecisionBudget({ monthlyInputTokenCap: decisionBudg
 const recipientForDecisionKey = (key, endpoint, model) => decisionTopicRecipient(key, decisionCredentials.savedAt(), endpoint, model)
 // One keep-alive transport for the single Decisions endpoint (never retries; see egdesk-decision-transport.mjs).
 const decisionTransport = createDecisionTransport()
-const decisionClient = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget, recipientForKey: recipientForDecisionKey, fetchImpl: decisionTransport.fetch })
+// Idle warm-up (c18; developer flag EGDESK_DECISION_WARMUP=advisory|on, default off; helper/egdesk-decision-warmup.mjs). Off: the client's fetch is the
+// transport itself and nothing below exists. On or advisory: every Decisions request is noted (times only) so that "the last request was N
+// minutes ago" is known for any kind of request, and one fixed content-free request may be sent when a composer is used or a turn starts.
+const decisionWarmupConfig = warmupConfigFromEnv(process.env)
+const decisionActivity = decisionWarmupConfig.mode === 'off' ? null : createDecisionActivity({ idleMs: decisionWarmupConfig.idleMs })
+const decisionClient = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget, recipientForKey: recipientForDecisionKey,
+  fetchImpl: decisionActivity ? decisionActivity.wrap(decisionTransport.fetch) : decisionTransport.fetch })
+const decisionWarmup = decisionActivity ? createDecisionWarmup({ client: decisionClient, activity: decisionActivity, mode: () => decisionWarmupConfig.mode,
+  decisionsMode: () => bridgeSettings.decisionContext.mode, hasKey: () => decisionCredentials.getApiKey() !== null, idleMs: decisionWarmupConfig.idleMs, joinMs: decisionWarmupConfig.joinMs }) : null
 const recipientForCodexDecisions = ({ engineId, engineProfileId, ownerKey }) => {
   if (engineId !== 'codex') return null
   const auth = !engineProfileId || engineProfileId === CODEX_ENGINE_PROFILE_ID ? authState : codexProfileServers.snapshot(engineProfileId)?.auth
@@ -507,6 +516,8 @@ const chat = new CodexChatRuntime({
     // turn_context budget (codex-chat-runtime.mjs TURN_CONTEXT_BUDGET_MS 800 / TURN_CONTEXT_COLD_BUDGET_MS 1500): cold = first turn of a
     // conversation or no warm Decisions socket (egdesk-decision-transport.mjs warm()).
     budgetMs: TURN_CONTEXT_BUDGET_MS, coldBudgetMs: TURN_CONTEXT_COLD_BUDGET_MS, warm: () => decisionTransport.warm(),
+    // Idle warm-up (EGDESK_DECISION_WARMUP, default off): a turn tells it before its first Decisions request; null when off.
+    ...(decisionWarmup ? { warmup: decisionWarmup } : {}),
     // The selection's 'action' rule set (egdesk-context-setup.mjs CONTEXT_RULE_SETS): developer flag EGDESK_CONTEXT_RELEVANCE=action, default off.
     ...(process.env.EGDESK_CONTEXT_RELEVANCE === 'action' ? { relevanceRules: 'action' } : {}),
     calibrationLog: decisionCalibrationLog,
@@ -637,7 +648,7 @@ const handleRoomAccountHttp = createRoomAccountHttpHandler({ chat, enabled: () =
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
 const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
   budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT, boardPresentation: handleBoardPresentationHttp,
-  onSettingsChanged: () => { browserDecisionGeneration++ } })
+  warmup: decisionWarmup, onSettingsChanged: () => { browserDecisionGeneration++ } })
 const handleOntologyHttp = createOntologyHttpHandler({ binding: () => ontologyBinding, store: ensureOntologyStore, runtime: sqliteRuntime, port: BRIDGE_PORT })
 const handleMemoryEvidenceHttp = createMemoryEvidenceHttpHandler({ port: BRIDGE_PORT,
   ensureAuth: hints => ensureChatAuth(hints, { allowIsolated: true, requireClientPair: true }),

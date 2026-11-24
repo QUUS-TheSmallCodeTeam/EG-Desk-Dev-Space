@@ -29,6 +29,22 @@ export const EGRESS_KINDS = Object.freeze({
   hud_text: Object.freeze({ data: 'hud', governedBy: 'No model permission covers typed search-field text yet: refused everywhere (owner decision pending)' }),
   board_excerpt: Object.freeze({ data: 'board', governedBy: 'This Board ask itself: the owner chose and confirmed a run that sends the approved public excerpts to the drafting model. An extract-only ask sends them to no model, so not to Decisions either' }),
 })
+// Requests that carry NO data of any class: one fixed body each, byte for byte (c18, the idle warm-up). They are not in EGRESS_KINDS because a
+// kind is a class of the run's data that a model permission opens; these have nothing to open. The gate lets exactly this body through
+// (guardContentFree) and refuses anything else under the name, so the name cannot be used to send data.
+export const CONTENT_FREE_REQUESTS = Object.freeze({
+  warmup: Object.freeze({
+    input: 'EG-Desk warm-up',
+    questions: Object.freeze([Object.freeze({ type: 'predicate', name: 'warmup_check', instructions: 'Is the input a warm-up message?' })]),
+    governedBy: 'No data: a fixed message that names no person, run, page or text (the same shape as the key check). Sent only after a long idle, only when the Decisions mode is not off and a key is saved (egdesk-decision-warmup.mjs)',
+  }),
+})
+const sameContentFree = (name, request) => {
+  const fixed = Object.hasOwn(CONTENT_FREE_REQUESTS, name) ? CONTENT_FREE_REQUESTS[name] : null
+  if (!fixed || !request || typeof request !== 'object') return false
+  const extra = Object.keys(request).filter(key => !['input', 'questions', 'timeoutMs', 'signal'].includes(key))
+  return extra.length === 0 && request.input === fixed.input && JSON.stringify(request.questions) === JSON.stringify(fixed.questions)
+}
 const DATA_CLASSES = Object.freeze(['terminal', 'browser', 'canvas', 'run', 'memory', 'speech', 'topic', 'board', 'thread'])
 // Evidence kinds a draft-check catalog may carry, and the data class that already lets a model see them.
 // Items of the decision context packet were already admitted for this run's answering model, so they count as the run's own data.
@@ -82,6 +98,11 @@ export function createEgressGate(permissions) {
       return Object.freeze({ ...(client && typeof client === 'object' ? client : {}),
         async decide(request) { for (const kind of list) if (!allows(kind)) throw refuse(); return client.decide(request) } })
     },
+    /** A client whose decide() sends only the fixed content-free request registered under `name` (CONTENT_FREE_REQUESTS); anything else is refused before any key lookup. */
+    guardContentFree(client, name) {
+      return Object.freeze({ ...(client && typeof client === 'object' ? client : {}),
+        async decide(request) { if (!sameContentFree(name, request)) throw refuse(); return client.decide(request) } })
+    },
     /** Evidence items for a draft-check catalog: keep an item only when the class its kind belongs to is allowed; opaque references stay. */
     filterEvidence(items) {
       return (Array.isArray(items) ? items : []).filter(item => item?.opaque === true || (Object.hasOwn(EVIDENCE_CLASS, item?.kind) && perms[EVIDENCE_CLASS[item.kind]] === true))
@@ -112,6 +133,8 @@ export const EGRESS_SITES = Object.freeze({
   // L1 c20 Desk HUD routing: the typed text (hud_text: refused until a permission covering all models exists) and maySend card labels
   'egdesk-hud-routing.mjs': ['hud_text', 'canvas_text'],
   'egdesk-draft-check.mjs': ['draft_text'],
+  // c18: the idle warm-up sends the one fixed content-free request (CONTENT_FREE_REQUESTS.warmup) through gate.guardContentFree; no data class.
+  'egdesk-decision-warmup.mjs': ['content-free: the fixed warm-up request only (CONTENT_FREE_REQUESTS.warmup), no data of any class'],
   'egdesk-heartbeat-judge.mjs': ['run_facts', 'run_text', 'terminal_command', 'plus any other kind a heartbeat question or a provider\'s context declares, each checked by the run\'s gate before it is sent'],
   // Plan builder for the real measurement: the product client with a recording fetch that refuses. Nothing is sent from this file.
   'egdesk-heartbeat-real-plan.mjs': ['run_facts: plan builder; a recording fetch that refuses, nothing is sent'],

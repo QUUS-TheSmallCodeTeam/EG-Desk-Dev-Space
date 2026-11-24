@@ -4443,6 +4443,9 @@ export class CodexChatRuntime {
       mode = setup.mode()
       if ((mode !== 'advisory' && mode !== 'on') || setup.configured() !== true) return null
     } catch { return null }
+    // Idle warm-up (c18, flag EGDESK_DECISION_WARMUP, default off: setup.warmup is then absent): tell it a turn is about to ask. It never throws; it
+    // returns a promise only when its joinMs > 0 and a warm-up is in flight, and that wait ends at joinMs at the latest.
+    try { const joined = setup.warmup?.beforeTurn?.(); if (joined && typeof joined.then === 'function') await joined } catch { /* the turn goes on */ }
     const budgetMs = this.turnContextBudget(setup, context)
     const started = performance.now(), deadline = started + budgetMs
     const inBudget = () => performance.now() < deadline
