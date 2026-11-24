@@ -13,7 +13,8 @@ import { validDecisionApiKey } from './egdesk-decision-credential.mjs'
 // A key the provider authenticated but that has no usable balance (no_credit),
 // is stopped by a spend or usage limit (spend_limit_reached)
 // or is momentarily rate limited is saved and reported, so the person can
-// claim credits later without typing it again.
+// claim credits later without typing it again. With a key already saved, only a
+// verified key replaces it (DECISION_KEY_NOT_REPLACED keeps the old one).
 
 const SAVE_ON = new Set(['verified', 'no_credit', 'spend_limit_reached', 'rate_limited'])
 const BODY_LIMIT = 4096
@@ -60,6 +61,13 @@ export function createDecisionHttpHandler({ store, verifyKey, budget = null, mod
         const verified = await verifyKey(body.apiKey)
         if (!SAVE_ON.has(verified?.status)) {
           sendJson(res, 422, { error: 'The provider did not accept this key', code: 'DECISION_KEY_REJECTED', verification: verified?.status || 'unreachable' })
+          return true
+        }
+        // A saved key stays unless the new one verifies. An authenticated key that cannot
+        // be used right now (no credit, limit, rate limit) is only worth saving when there is
+        // nothing saved yet; replacing a working key with it would silently stop decisions.
+        if (verified.status !== 'verified' && store.getApiKey() !== null && body.apiKey !== store.getApiKey()) {
+          sendJson(res, 422, { error: 'The saved key was kept', code: 'DECISION_KEY_NOT_REPLACED', verification: verified.status })
           return true
         }
         if (!store.save(body.apiKey)) { sendJson(res, 500, { error: 'The key could not be saved', code: 'DECISION_STORE_FAILED' }); return true }

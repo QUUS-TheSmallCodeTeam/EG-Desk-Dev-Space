@@ -118,3 +118,18 @@ test('a clock set back keeps the persisted later-month tally across restarts', (
   assert.equal(b.budget.canSpend(), false)
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, DECISION_BUDGET_FILE), 'utf8')).inputTokens, 500)
 })
+
+test('estimated sent-without-usage tokens persist beside the measured tally and reset with the month', () => {
+  const dir = tmp()
+  const a = wire(dir, JAN); a.budget.setCap(1000); a.budget.record({ inputTokens: 600 }); a.budget.recordEstimate(300)
+  const b = wire(dir, JAN)
+  assert.deepEqual({ ...b.budget.snapshot() }, { month: '2026-11', inputTokens: 600, cap: 1000, estimatedInputTokens: 300, unmeteredRequests: 1 })
+  assert.equal(b.budget.canSpend(), true)
+  b.budget.recordEstimate(200)
+  assert.equal(wire(dir, JAN).budget.canSpend(), false)
+  const next = wire(dir, () => Date.parse('2026-12-02T00:00:00Z'))
+  assert.deepEqual({ ...next.budget.snapshot() }, { month: '2026-12', inputTokens: 0, cap: 1000 })
+  // A file written before the estimate fields existed still loads.
+  const old = tmp(); fs.writeFileSync(path.join(old, DECISION_BUDGET_FILE), '{"version":1,"month":"2026-11","inputTokens":5,"cap":null}', { mode: 0o600 })
+  assert.equal(wire(old, JAN).budget.snapshot().estimatedInputTokens, undefined)
+})

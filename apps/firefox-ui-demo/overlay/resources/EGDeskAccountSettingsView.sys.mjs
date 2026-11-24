@@ -443,9 +443,20 @@ const DECISION_VERIFICATION_TEXT = Object.freeze({
   spend_limit_reached: '지출·사용 한도에 도달 · 키는 저장했습니다. OpenAI에서 한도를 올리거나 다음 달 초기화 뒤에 쓸 수 있습니다.',
   rate_limited: '요청 한도에 걸림 · 키는 저장했습니다. 잠시 뒤 다시 시도하세요.',
   invalid_key: '키가 올바르지 않습니다',
+  not_verified: 'OpenAI가 키 확인 질문에 통과시키지 않았습니다',
+  server_error: 'OpenAI 서버 오류입니다. 잠시 뒤 다시 시도하세요',
+  bad_response: 'OpenAI의 답을 해석하지 못했습니다',
+  budget_exceeded: '이번 달 로컬 사용 한도에 도달해 확인하지 못했습니다',
   model_unavailable: '이 키로는 결정 모델(gpt-6-luna)을 쓸 수 없습니다',
   unreachable: 'OpenAI에 연결하지 못했습니다',
   timeout: 'OpenAI가 제때 답하지 않았습니다',
+});
+
+// Why a new key was not swapped in while a saved key exists (it could be saved on its own).
+const DECISION_NOT_REPLACED_TEXT = Object.freeze({
+  no_credit: '새 키에 크레딧이 없습니다',
+  spend_limit_reached: '새 키가 지출·사용 한도에 막혀 있습니다',
+  rate_limited: '새 키가 요청 한도에 걸렸습니다',
 });
 
 /** Korean line for a /decision/credential verification status. */
@@ -480,8 +491,8 @@ export function decisionSettingsView(status, { connected = false } = {}) {
     modes: DECISION_MODES.map(choice => ({ ...choice, selected: choice.value === mode })),
     modeNote: !mode ? '저장된 모드를 확인할 수 없습니다.' : DECISION_MODES.find(choice => choice.value === mode).note
       + (mode !== 'off' && !configured ? ' 저장된 키가 없어 지금은 요청하지 않습니다.'
-        : mode !== 'off' && budget?.cap != null && budget.inputTokens >= budget.cap ? ' 이번 달 설정한 한도에 도달해 새 선별 요청을 보내지 않습니다.' : ''),
-    budgetLine: budget ? `이번 달 집계된 입력 ${budget.inputTokens.toLocaleString('en-US')} 토큰${Number.isSafeInteger(budget.cap) ? ` / 상한 ${budget.cap.toLocaleString('en-US')}` : ''}` : null,
+        : mode !== 'off' && budget?.cap != null && budget.inputTokens + (Number.isSafeInteger(budget.estimatedInputTokens) ? budget.estimatedInputTokens : 0) >= budget.cap ? ' 이번 달 설정한 한도에 도달해 새 선별 요청을 보내지 않습니다.' : ''),
+    budgetLine: budget ? `이번 달 집계된 입력 ${budget.inputTokens.toLocaleString('en-US')} 토큰${budget.estimatedInputTokens > 0 ? ` + 응답 없이 보낸 요청 ${budget.unmeteredRequests}건 추정 ${budget.estimatedInputTokens.toLocaleString('en-US')}` : ''}${Number.isSafeInteger(budget.cap) ? ` / 상한 ${budget.cap.toLocaleString('en-US')}` : ''}` : null,
     creditNote: DECISION_CREDIT_NOTE,
   };
 }
@@ -495,6 +506,11 @@ export function decisionCredentialOutcome({ result = null, error = null } = {}) 
   if (result && !error) {
     const verification = typeof result.verification === 'string' ? result.verification : 'verified';
     return { phase: verification === 'verified' ? 'done' : 'warning', verification, text: decisionVerificationText(verification) };
+  }
+  if (error?.code === 'DECISION_KEY_NOT_REPLACED') {
+    const verification = typeof error.verification === 'string' ? error.verification : 'unreachable';
+    const why = DECISION_NOT_REPLACED_TEXT[verification] || decisionVerificationText(verification);
+    return { phase: 'error', verification, text: `${why} · 새 키로 바꾸지 않았습니다. 지금 쓰는 키는 그대로입니다. 기존 키를 지운 뒤에는 이 키도 저장할 수 있습니다.` };
   }
   if (error?.code === 'DECISION_KEY_REJECTED') {
     const verification = typeof error.verification === 'string' ? error.verification : 'unreachable';

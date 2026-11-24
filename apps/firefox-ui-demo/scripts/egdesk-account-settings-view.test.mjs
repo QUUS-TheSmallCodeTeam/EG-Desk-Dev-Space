@@ -474,3 +474,21 @@ test('a spend or usage limit is told apart from a missing balance and from a rat
   assert.match(View.decisionVerificationText('spend_limit_reached'), /^지출·사용 한도에 도달/);
   assert.doesNotMatch(View.decisionVerificationText('spend_limit_reached'), /잠시 뒤 다시 시도/);
 });
+
+test('every verify outcome has its own line; a kept old key is said plainly', () => {
+  for (const status of ['not_verified', 'server_error', 'bad_response', 'budget_exceeded']) {
+    assert.notEqual(View.decisionVerificationText(status), View.decisionVerificationText('unreachable'), status);
+  }
+  for (const verification of ['no_credit', 'spend_limit_reached', 'rate_limited']) {
+    const out = View.decisionCredentialOutcome({ error: { status: 422, code: 'DECISION_KEY_NOT_REPLACED', verification } });
+    assert.equal(out.phase, 'error');
+    assert.match(out.text, /지금 쓰는 키는 그대로입니다/);
+    assert.doesNotMatch(out.text, /키는 저장했습니다/);
+  }
+});
+
+test('the budget line labels estimated sent-without-usage requests and the cap counts them', () => {
+  const view = View.decisionSettingsView({ configured: true, mode: 'on', budget: { month: '2026-11', inputTokens: 600, cap: 1000, estimatedInputTokens: 400, unmeteredRequests: 3 } }, { connected: true });
+  assert.match(view.budgetLine, /600 토큰 \+ 응답 없이 보낸 요청 3건 추정 400 \/ 상한 1,000/);
+  assert.match(view.modeNote, /한도에 도달/);
+});
