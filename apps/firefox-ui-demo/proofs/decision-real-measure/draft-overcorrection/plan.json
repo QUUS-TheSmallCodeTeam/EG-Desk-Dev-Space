@@ -18,8 +18,8 @@
     {
       "id": "c-quote",
       "file": "requests/c-quote.json",
-      "sha256": "805463876742cf019b30da6f69e0d50494a1633723ed5864e431f4dda37e1e89",
-      "estInputTokens": 1801,
+      "sha256": "7b33dbea0190529c356a7f22349835ba7265ce2d76083dc54ed1d8d837324c31",
+      "estInputTokens": 1696,
       "expect": [
         {
           "name": "sup_0",
@@ -110,8 +110,8 @@
     {
       "id": "c-sales",
       "file": "requests/c-sales.json",
-      "sha256": "82a57c6d99d5bfa54a1dab1ecfb7de7f7882f82c401001b223807deb0bd5734a",
-      "estInputTokens": 933,
+      "sha256": "5e2070cee964bb40b8098b0cee7c8d95796f67dd54e669fcc52241a5f42a83ec",
+      "estInputTokens": 881,
       "expect": [
         {
           "name": "sup_0",
@@ -160,8 +160,8 @@
     {
       "id": "c-schedule",
       "file": "requests/c-schedule.json",
-      "sha256": "072fb2eadba6762fd5c94a2ebdeda4e3fdbc2e1989ea18662c87d06e24e3a5f7",
-      "estInputTokens": 2159,
+      "sha256": "f7dc3a52aeeb7c9c0b7adc4847439bed85f9575513128987e2fc1491d18ea0d0",
+      "estInputTokens": 2027,
       "expect": [
         {
           "name": "sup_0",
@@ -259,8 +259,8 @@
     {
       "id": "c-server",
       "file": "requests/c-server.json",
-      "sha256": "09b9374fccd2938da7ffbd12e7b3ca39ebe5d68c1f0035be4e3766e820b9fd4f",
-      "estInputTokens": 926,
+      "sha256": "05f7e7782dda430c26e81e2ea45e51b2ae5d4f514a511d176c965c6d34eecfe7",
+      "estInputTokens": 874,
       "expect": [
         {
           "name": "sup_0",
@@ -309,8 +309,8 @@
     {
       "id": "w-v2-done",
       "file": "requests/w-v2-done.json",
-      "sha256": "8fd0c85f7951f2b6b81743f063bea240b9ee997ab96aaca4f0a1af09db6890bc",
-      "estInputTokens": 559,
+      "sha256": "d08da40114f5dd0afb0e8aa6e349e17ee51d48a777ae8e98cecb83ccd739199a",
+      "estInputTokens": 533,
       "expect": [
         {
           "name": "tense_0",
@@ -331,8 +331,8 @@
     {
       "id": "w-sales-number",
       "file": "requests/w-sales-number.json",
-      "sha256": "b4dc712e3664704d9cfcbccb87468e70d9817cb3ca99ac741d1d61499b25168e",
-      "estInputTokens": 546,
+      "sha256": "313495b4bda9abf2cc6b4ad621c43ae2995406b01a7a836e551a926892088b77",
+      "estInputTokens": 520,
       "expect": [
         {
           "name": "sup_0",
@@ -346,8 +346,8 @@
     {
       "id": "w-vendor-fact",
       "file": "requests/w-vendor-fact.json",
-      "sha256": "6b3b93cc4334735e4048fb4d043b37d56cc81315ff0b32ac42f9fa0afd8c1bde",
-      "estInputTokens": 526,
+      "sha256": "e4ab277e89e28bc41cbea30dac9446e45d69d001606295c14bb47ace2c7be45f",
+      "estInputTokens": 500,
       "expect": [
         {
           "name": "sup_0",
@@ -361,8 +361,8 @@
     {
       "id": "w-disk-now",
       "file": "requests/w-disk-now.json",
-      "sha256": "030febf42201d8fc4761f2fc7645ec3a19b55cb570ff6244dedc5e0175f9a16a",
-      "estInputTokens": 520,
+      "sha256": "cccc87d44e53f4232d1e494cf1203420063ee02a8fcbb0a6ad970ada0081e9c4",
+      "estInputTokens": 493,
       "expect": [
         {
           "name": "tense_0",
@@ -383,8 +383,8 @@
     {
       "id": "w-renew-fact",
       "file": "requests/w-renew-fact.json",
-      "sha256": "c42711096f796dcb01a8d9f4849d217ab8294ac75a05d5184d01a3d51e61c590",
-      "estInputTokens": 914,
+      "sha256": "0364222e70a1d4c0a4b058a725a4e9494a6ec86b8899d141180f552af706b30e",
+      "estInputTokens": 862,
       "expect": [
         {
           "name": "tense_0",
