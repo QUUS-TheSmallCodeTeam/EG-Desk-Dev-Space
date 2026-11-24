@@ -41,7 +41,7 @@ const FINAL = '스테이징 환경에 배포했습니다. 결과는 세 단계�
 const AUTH = { isLoggedIn: true, authMode: 'chatgpt', accountId: 'verified-account' }
 
 // ---- bridge side: real runtime + store + HTTP handlers over a scripted engine, virtual clock ---------------------------------
-function bridgeWorld(t, { held = true, flow = true, writer = {}, forkHangs = false, audience = null } = {}) {
+function bridgeWorld(t, { held = true, flow = true, writer = {}, forkHangs = false, audience = null, inRunMessages = false } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-l2c6-')); chmodSync(dir, 0o700)
   const store = openChatStore({ dataDir: dir, ownerScope: 'synthetic-l2c6' })
   t.after(() => { store.close(); rmSync(dir, { recursive: true, force: true }) })
@@ -79,7 +79,8 @@ function bridgeWorld(t, { held = true, flow = true, writer = {}, forkHangs = fal
       assert.fail(`Unexpected native call: ${method}`)
     },
     decisionContext: { mode: () => 'on', configured: () => true, client: { model: 'mock', decide: async request => { state.decides++; return judge(request, flowAsked) } }, budgetMs: 800, collect: async () => [],
-      draftCheck: held ? { mode: () => 'on' } : undefined, conversationFlow: flow ? { mode: () => 'on', ...(audience ? { audience } : {}) } : undefined },
+      draftCheck: held ? { mode: () => 'on' } : undefined, conversationFlow: flow ? { mode: () => 'on', ...(audience ? { audience } : {}) } : undefined,
+      ...(inRunMessages ? { inRunMessages: { mode: () => 'on' } } : {}) }, // as the bridge with EGDESK_INRUN_MESSAGES=on (L2 c17)
   })
   chat.setConnection(true)
   const handler = createChatHttpHandler(chat, async () => {})
@@ -178,8 +179,9 @@ function screen(w, { capabilities = ['send', 'stream'] } = {}) {
   let cursor = 0
   const api = {
     state, protocol, posts, notices, net, mounted, thread, frames,
-    // Mirror of the two busy lines of normalizeThreads (the function itself needs the whole Desk).
-    normalize() { state.codex.isSending = mounted.threadBusy(thread()); state.codex.replyOpen = !!ChatState.replyRunForThread?.(protocol, thread()) },
+    // Mirror of the busy lines of normalizeThreads (the function itself needs the whole Desk; the source lines are asserted in L2 c17's test).
+    normalize() { state.codex.isSending = mounted.threadBusy(thread()); state.codex.replyOpen = !!ChatState.replyRunForThread?.(protocol, thread())
+      state.codex.inRunMessageOpen = !!ChatState.inRunMessageRunForThread?.(protocol, thread(), state.codex.chatCapabilities) },
     // The render loop skips exactly one kind of row (asserted from source below); everything else is drawn with its text.
     bubbles: () => [...thread().messages].filter(m => !(m.role === 'assistant' && m.status === 'streaming' && !m.content)).map(m => [m.role, m.status, m.content]),
     working: () => ChatState.agentWorkingView(mounted.codexCurrentRun(thread()), { connected: true }),
@@ -552,4 +554,124 @@ test('audience rule: with someone else in the conversation no question is posted
   const refused = await w.http('POST', '/chat/send', { clientThreadId: DM, conversationId: first.conversationId, profileId: A, profileEnabled: true, replyDestination: 'direct', message: REPLY, requestId: 'req-x', inRunReplyTo: first.runId })
   assert.deepEqual([refused.status, refused.data.code], [409, 'INRUN_REPLY_UNAVAILABLE'])
   assert.equal(w.steers.length, 0); assert.deepEqual(w.stored(), [['user', PROMPT]])
+})
+
+// ---- L2 cycle 17: a message typed while the run works (developer flag EGDESK_INRUN_MESSAGES, capability 'in-run-messages') ----------
+const NUDGE = '아니 지금 왜 멈췄니?', NUDGE2 = '테스트만 돌리면 돼'
+const IN_RUN = ['send', 'stream', ChatState.IN_RUN_MESSAGES_CAPABILITY]
+const runOf = (w, runId) => [...w.chat.runs.values()].find(run => run.runId === runId)
+async function working(w, ui) { const first = await ui.firstPrompt(); await w.advance(2000); await w.tool('t1', 'started'); ui.pump(); return first }
+
+test('c17 the mirrored busy lines are the product\'s own', () => {
+  assert.ok(surface.includes('state.codex.replyOpen = !!ChatState.replyRunForThread(protocol, active);'))
+  assert.ok(surface.includes('state.codex.inRunMessageOpen = !!ChatState.inRunMessageRunForThread(protocol, active, state.codex.chatCapabilities);'))
+})
+
+test('c17 flag off (today): while the run works the composer waits, nothing is sent; a named message is refused before anything is stored', async t => {
+  const w = bridgeWorld(t), ui = screen(w)
+  const first = await working(w, ui)
+  const c = ui.composer(); c.type(NUDGE)
+  assert.equal(ui.state.codex.inRunMessageOpen, false); assert.equal(c.sendButton.disabled, true)
+  c.key({}); assert.equal(c.sent.length, 0); assert.equal(ui.posts.length, 0)
+  const storedBefore = w.stored(), callsBefore = w.native.length
+  const refused = await w.http('POST', '/chat/send', { clientThreadId: DM, conversationId: first.conversationId, profileId: A, profileEnabled: true, replyDestination: 'direct', message: NUDGE, requestId: 'req-n', inRunMessageTo: first.runId })
+  assert.deepEqual([refused.status, refused.data.code, refused.data.accepted], [409, 'INRUN_MESSAGE_UNAVAILABLE', false])
+  assert.deepEqual(w.stored(), storedBefore); assert.equal(w.native.slice(callsBefore).filter(([m]) => /^turn\//.test(m)).length, 0)
+  // An ordinary send while it works is refused as before.
+  const plain = await w.http('POST', '/chat/send', { clientThreadId: DM, conversationId: first.conversationId, profileId: A, profileEnabled: true, replyDestination: 'direct', message: NUDGE, requestId: 'req-p' })
+  assert.deepEqual([plain.status, plain.data.code], [409, 'RUN_IN_PROGRESS'])
+})
+
+test('c17 a screen that offers it to a bridge without the flag: refused, nothing stored, the words return to the composer (existing copy)', async t => {
+  const w = bridgeWorld(t), ui = screen(w, { capabilities: IN_RUN })
+  await working(w, ui)
+  const storedBefore = w.stored()
+  const c = ui.composer(); c.type(NUDGE);; assert.equal(c.sendButton.disabled, false); c.key({})
+  const outcome = await c.sent[0]
+  assert.deepEqual({ accepted: outcome.accepted, status: outcome.status }, { accepted: false, status: 'failed' })
+  assert.deepEqual(w.stored(), storedBefore); assert.equal(ui.state.codex.threadDrafts[DM], NUDGE); assert.equal(ui.thread().sendError, '아직 보낼 수 없습니다.')
+})
+
+test('c17 flag on: messages typed while the run works are accepted, stored in order, shown as sent once, handed to the heartbeat; the run is not touched', async t => {
+  const w = bridgeWorld(t, { inRunMessages: true }), ui = screen(w, { capabilities: IN_RUN })
+  const first = await working(w, ui)
+  const run = runOf(w, first.runId), flow = w.chat.flowRuns.get(run), hb = flow.heartbeat
+  // Counted through the run's flow (the heartbeat object itself is frozen); restored before any beat can run.
+  let nudges = 0; flow.heartbeat = { ...hb, nudge: () => { nudges++; return hb.nudge() } }
+  const callsBefore = w.native.length
+  for (const [i, text] of [NUDGE, NUDGE2].entries()) {
+    const c = ui.composer(); c.type(text)
+    assert.equal(ui.state.codex.inRunMessageOpen, true); assert.equal(c.sendButton.disabled, false, 'the composer takes a message while the run works')
+    c.key({})
+    const outcome = await c.sent[0]
+    assert.deepEqual([outcome.accepted, outcome.inRun], [true, true], JSON.stringify(outcome))
+    const post = ui.posts.at(-1)
+    assert.deepEqual([post.path, post.body.inRunMessageTo, 'inRunReplyTo' in post.body, post.body.message], ['/chat/send', first.runId, false, text])
+    assert.equal(nudges, i + 1, 'the heartbeat is told at once')
+    ui.pump()
+  }
+  flow.heartbeat = hb
+  assert.deepEqual(w.stored().filter(([role]) => role === 'user').map(([, text]) => text), [PROMPT, NUDGE, NUDGE2], 'stored in the order typed')
+  assert.deepEqual(ui.bubbles().filter(([role]) => role === 'user').map(([, status, text]) => [status, text]), [['complete', PROMPT], ['complete', NUDGE], ['complete', NUDGE2]], 'each shown once, as sent')
+  assert.deepEqual(w.chat.pendingInRunMessages(run).map(m => m.text), [NUDGE, NUDGE2])
+  assert.deepEqual(w.native.slice(callsBefore).map(([m]) => m).filter(m => m === 'turn/steer' || m === 'turn/interrupt' || m === 'turn/start'), [], 'nothing reaches the engine by itself')
+  assert.equal(run.status, 'inProgress')
+  // The same request again is one message.
+  const again = await w.http('POST', '/chat/send', { clientThreadId: DM, conversationId: first.conversationId, profileId: A, profileEnabled: true, replyDestination: 'direct', message: NUDGE, requestId: ui.posts.at(-2).body.requestId, inRunMessageTo: first.runId })
+  assert.equal(again.data.inRun, true); assert.equal(w.stored().filter(([, text]) => text === NUDGE).length, 1)
+  // A message named for another run is refused before anything is stored.
+  const wrong = await w.http('POST', '/chat/send', { clientThreadId: DM, conversationId: first.conversationId, profileId: A, profileEnabled: true, replyDestination: 'direct', message: 'x', requestId: 'req-w', inRunMessageTo: 'turn-other' })
+  assert.deepEqual([wrong.status, wrong.data.code], [409, 'INRUN_MESSAGE_UNAVAILABLE']); assert.equal(w.stored().filter(([, text]) => text === 'x').length, 0)
+})
+
+test('c17 the heartbeat settles each message once: reply (nothing to the engine), steer (turn/steer into the same turn), interrupt (turn/interrupt)', async t => {
+  const w = bridgeWorld(t, { inRunMessages: true }), ui = screen(w, { capabilities: IN_RUN })
+  const first = await working(w, ui), run = runOf(w, first.runId)
+  const say = async (text, id) => (await w.http('POST', '/chat/send', { clientThreadId: DM, conversationId: first.conversationId, profileId: A, profileEnabled: true, replyDestination: 'direct', message: text, requestId: id, inRunMessageTo: first.runId })).data
+  await say(NUDGE, 'req-a'); await say(NUDGE2, 'req-b'); await say('그만', 'req-c')
+  const calls = () => w.native.map(([m]) => m).filter(m => m === 'turn/steer' || m === 'turn/interrupt')
+  assert.equal(await w.chat.settleInRunMessage(run, 'req-a', 'reply'), 'reply'); assert.deepEqual(calls(), [])
+  assert.equal(await w.chat.settleInRunMessage(run, 'req-a', 'steer'), null, 'once per message')
+  assert.equal(await w.chat.settleInRunMessage(run, 'req-b', 'steer'), 'steer')
+  assert.deepEqual(w.steers.at(-1), { threadId: first.conversationId, expectedTurnId: first.runId, clientUserMessageId: 'req-b', input: [{ type: 'text', text: NUDGE2, text_elements: [] }] })
+  assert.equal(await w.chat.settleInRunMessage(run, 'req-c', 'bogus'), null)
+  assert.equal(await w.chat.settleInRunMessage(run, 'req-c', 'interrupt'), 'interrupt')
+  assert.deepEqual(calls(), ['turn/steer', 'turn/interrupt']); assert.equal(run.stopRequested, true)
+  assert.deepEqual(w.chat.pendingInRunMessages(run), [])
+  // A refused steer leaves the message pending.
+  const w2 = bridgeWorld(t, { inRunMessages: true }), ui2 = screen(w2, { capabilities: IN_RUN })
+  const f2 = await working(w2, ui2), run2 = runOf(w2, f2.runId)
+  await w2.http('POST', '/chat/send', { clientThreadId: DM, conversationId: f2.conversationId, profileId: A, profileEnabled: true, replyDestination: 'direct', message: NUDGE2, requestId: 'req-s', inRunMessageTo: f2.runId })
+  w2.state.steerFails = true
+  assert.equal(await w2.chat.settleInRunMessage(run2, 'req-s', 'steer'), 'failed'); assert.deepEqual(w2.chat.pendingInRunMessages(run2).map(m => m.requestId), ['req-s'])
+})
+
+test('c17 never lost: a message the run ended without acting on opens the next turn, in order and once; deleting the conversation drops it', async t => {
+  const w = bridgeWorld(t, { inRunMessages: true, held: false }), ui = screen(w, { capabilities: IN_RUN })
+  const first = await working(w, ui)
+  await w.http('POST', '/chat/send', { clientThreadId: DM, conversationId: first.conversationId, profileId: A, profileEnabled: true, replyDestination: 'direct', message: NUDGE, requestId: 'req-a', inRunMessageTo: first.runId })
+  await w.tool('t1', 'completed'); await w.finalStreamed(FINAL); await w.endTurn()
+  const next = async (text, id) => { const out = await w.http('POST', '/chat/send', { clientThreadId: DM, conversationId: first.conversationId, profileId: A, profileEnabled: true, replyDestination: 'direct', message: text, requestId: id }); assert.equal(out.status, 202, JSON.stringify(out.data)); w.timing = { threadId: out.data.conversationId, turnId: out.data.runId }; return out.data }
+  await next('결과 알려줘', 'req-2')
+  const starts = () => w.native.filter(([m, p]) => m === 'turn/start' && !String(p.threadId).startsWith('fork-')).map(([, p]) => p.input.map(i => i.text))
+  assert.deepEqual(starts().at(-1), [NUDGE, '결과 알려줘'])
+  await w.endTurn(); await next('고마워', 'req-3')
+  assert.deepEqual(starts().at(-1), ['고마워'], 'taken once')
+  await w.endTurn()
+  // Carried again, then the conversation is deleted: nothing is left for a next turn.
+  const r3 = await next('하나 더', 'req-4')
+  await w.http('POST', '/chat/send', { clientThreadId: DM, conversationId: first.conversationId, profileId: A, profileEnabled: true, replyDestination: 'direct', message: NUDGE2, requestId: 'req-5', inRunMessageTo: r3.runId })
+  await w.endTurn()
+  assert.equal(w.chat.forgetConversation(DM).carriedMessages, 1)
+  assert.equal(w.chat.carriedInputFor(DM).length, 0)
+})
+
+test('c17 an open early question still takes the message as its reply (inRunReplyTo), flag on', async t => {
+  const w = bridgeWorld(t, { inRunMessages: true, writer: { ask: ASK } }), ui = screen(w, { capabilities: IN_RUN })
+  const first = await ui.firstPrompt()
+  await w.advance(4000); await w.note('n1', '어느 환경에 배포할까요?'); await w.advance(2000); w.picked('ask_missing'); ui.pump()
+  assert.equal(ui.state.codex.replyOpen, true); assert.equal(ui.state.codex.inRunMessageOpen, false)
+  const c = ui.composer(); c.type(REPLY); c.key({}); await c.sent[0]
+  assert.deepEqual([ui.posts.at(-1).body.inRunReplyTo, 'inRunMessageTo' in ui.posts.at(-1).body], [first.runId, false])
+  assert.equal(w.steers.at(-1).input[0].text, REPLY)
 })
