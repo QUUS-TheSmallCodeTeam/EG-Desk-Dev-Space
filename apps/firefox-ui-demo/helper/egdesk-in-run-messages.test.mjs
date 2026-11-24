@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { world } from './egdesk-heartbeat-flow.fixture.mjs'
-import { PERSON_PREDICATES, personDecision, personPredicates } from './egdesk-conversation-flow.mjs'
+import { PERSON_PREDICATES, personDecision, personPredicates, workMsOf, writerPrompt } from './egdesk-conversation-flow.mjs'
 
 // c21/c22 (Main): a person's message that arrives while a run works (lane L2's contract: inRunMessageTo, the inRunMessages flag, its queue)
 // is judged at the next beat (quoted alone) and settled through settleInRunMessage: a short true progress reply ('reply'), the message
@@ -83,4 +83,29 @@ test('a stop request stops the run; a judge failure hands the message to the run
   const off = await scene(t, { flags: { held: true, flow: true } })
   await assert.rejects(send(off.w, off.d, STATUS, 3), error => error.code === 'INRUN_MESSAGE_UNAVAILABLE' && error.httpStatus === 409)
   assert.ok(!off.d.history().some(([, text]) => text === STATUS))
+})
+
+// c24 (lane L2's v6 real run): the reply prompt said "about 1 seconds so far" for a command that had run about 10 s. The person's message into the
+// working run marks "user" again, so sinceUserMs restarts at the nudge; the work's age is measured from the run's start on the heartbeat clock.
+test('the reply is told how long the WORK has gone (fake clock), not how long since the person wrote into it', async t => {
+  const { w, d } = await scene(t, { writer: prompt => (/The person just wrote, while you work/.test(prompt) ? '멈춘 게 아니라 아직 실행 중이에요.' : null) })
+  await send(w, d, STATUS, 1); await w.advance(6000)
+  const prompt = w.forkPrompts.find(p => /The person just wrote, while you work/.test(p))
+  assert.ok(prompt, 'the reply was written')
+  const seconds = Number(/has taken about (\d+) seconds?/.exec(prompt)?.[1] ?? /about (\d+) seconds so far/.exec(prompt)?.[1])
+  assert.ok(seconds >= 12 && seconds <= 14, `the work had run 12 s when the person wrote: said ${seconds}`)
+  assert.ok(!/about [0-3] seconds? so far/.test(prompt))
+  // the beat's own request carries both times, as facts
+  const asked = judged(w)[0]
+  assert.match(JSON.stringify(asked.input), /The work began 1[2-9] seconds ago \(the person wrote again into the running work [0-2] seconds? ago\)/)
+})
+
+test('workMsOf and the prompts (pure): the work\'s age wins over the time since the last message; unknown start falls back to it', () => {
+  assert.equal(workMsOf({ internalMs: 15_000 }, { runStartedMs: 4_600 }), 10_400)
+  assert.equal(workMsOf({ internalMs: 15_000 }, {}), null); assert.equal(workMsOf({}, { runStartedMs: 1 }), null)
+  const facts = { elapsedMs: 800, workMs: 10_400, stepsDone: 1, personMessage: STATUS, waits: [] }
+  assert.match(writerPrompt('reply_status', facts), /about 10 seconds so far/)
+  assert.match(writerPrompt('explain_wait', facts), /about 10 seconds so far/)
+  assert.match(writerPrompt('reply_status', { ...facts, workMs: null }), /about 1 seconds so far/, 'unknown start: the old figure, as before')
+  assert.match(writerPrompt('stalled', { ...facts, sinceEngineMs: 21_000 }), /about 21 seconds/, 'silence is its own figure'); assert.match(writerPrompt('stalled', { ...facts, sinceEngineMs: null }), /about 10 seconds/, 'unknown silence: the work\'s age')
 })

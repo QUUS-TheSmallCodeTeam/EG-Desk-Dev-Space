@@ -5593,6 +5593,8 @@ export class CodexChatRuntime {
       // message question never opens an in-run question there: the task's own question is this turn's message (see holdRunForBrowserReply).
       const flow = { heartbeat: hb, held, canSpeak: (held && context.holdOnly !== true) || (this.flowSpeakers.has(hb) && this.draftCheckMode() === 'on'), taskTurn: context.browserTaskTurn === true, sent: [], kinds: new Set(), askedNotes: new Set(), stepsAtLast: 0,
         closed: false, question: null, startedAt: 0, lastSentAt: null, pendingFacts: null,
+        // c24: when this run began, on the heartbeat's own clock (the work's age; sinceUserMs restarts at every message the person sends into the run)
+        runStartedMs: typeof hb.internalMs === 'function' ? hb.internalMs() : null,
         audience: () => this.flowAudience(run), reasoningOpen: () => (this.heartbeatReasoning.get(hb)?.size ?? 0) > 0 }
       this.flowRuns.set(run, flow)
       const subject = this.heartbeatSubjects.get(hb)
