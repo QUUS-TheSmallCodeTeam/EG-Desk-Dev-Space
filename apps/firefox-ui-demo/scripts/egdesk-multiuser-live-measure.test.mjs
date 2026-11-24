@@ -204,8 +204,10 @@ test('the v1 send, reproduced (c20): a first request slower than the turn\'s 800
   assert.deepEqual(result.checks.filter(c => c.severity === 'hard' && c.pass !== true).map(c => c.id), [], 'R1 (v3: the answering model\'s own sentences of what A saw are quoted, no check copy), R3 and R4 hold')
 })
 
-// L3 c19: with no appended caveat the v2 plan's F1 (the whole posted answer quoted) no longer meets the check's copy.
-const V2_F1_AFTER_C19 = true
+// L3 c19: with no appended caveat the v2 plan's F1 (the whole posted answer quoted) no longer meets the check's copy. But since L1 c17 the
+// follow-up opens its OWN viewer (a run's attention is about the surface that run opened), so the follow-up makes two placement requests
+// (same_matter, then owner_action) and v2's F1 ("one placement request") fails for that runner-side reason, not for the caveat. v2 stays as registered.
+const V2_F1_AFTER_C19 = false
 test('the v2 send, reproduced (c21 conditions; since L3 c19 the draft check appends nothing): what A sees is the answering model\'s own sentences, the owner question reads no check copy, so "nothing to do" stays the requester\'s branch and A gets no pointer for it', async t => {
   const fast = provider(), slowFirst = async (url, init) => { const names = JSON.parse(Buffer.from(init.body).toString('utf8')).questions.map(q => q.name)
     if (names.includes('answer_type')) await new Promise(resolve => setTimeout(resolve, 950)); return fast.fetchImpl(url, init) }
@@ -230,6 +232,7 @@ test('the v2 send, reproduced (c21 conditions; since L3 c19 the draft check appe
   const v2 = await runScenario({ plan: loadScenarioPlan(PLAN_FILE_V2), send: true, key: KEY, fetchImpl: slowFirst })
   const f1 = v2.steps.find(s => s.id === 'followup').checks.find(c => c.id === 'F1'); t.diagnostic(`v2 F1: ${JSON.stringify(f1)}`)
   assert.equal(f1.pass, V2_F1_AFTER_C19)
+  assert.deepEqual(f1.observed.failed, ['requests:2'], 'v2 F1 fails only on the request count (two placement requests since L1 c17), never on quoting the caveat')
 })
 
 // ================= L1 c17: the window's own attention trigger; no runner-side attention call =================
