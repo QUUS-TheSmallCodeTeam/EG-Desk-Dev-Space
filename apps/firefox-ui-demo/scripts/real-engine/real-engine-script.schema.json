@@ -330,6 +330,9 @@
                         },
                         "noResends": {
                           "const": true
+                        },
+                        "noDuplicates": {
+                          "const": true
                         }
                       }
                     },
