@@ -41,6 +41,7 @@ import { createDecisionTransport } from './egdesk-decision-transport.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
 import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
+import { openBriefingBindings } from './egdesk-briefing-bindings.mjs'
 import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
 import { createTurnMemoryConfig, turnMemoryFlagsFromEnv } from './egdesk-turn-memory-wiring.mjs'
 import { createBrowserEntryConfig } from './egdesk-browser-entry-wiring.mjs'
@@ -566,6 +567,8 @@ const handleHostControlHttp = createHostControlHttpHandler(hostControl, { port: 
 // Board arrangement gets a separate guarded client over the same isolated Decisions key and budget.
 const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credentials: decisionCredentials,
   getMode: () => bridgeSettings.decisionContext.mode, budget: decisionBudget, port: BRIDGE_PORT, calibrationLog: decisionCalibrationLog, fetchImpl: decisionTransport.fetch,
+  // L4 c23: the briefing version chain survives a bridge restart (ids, kinds, material-key hashes, versions and content hashes only; 0600 in the bridge's data dir).
+  briefingBindings: openBriefingBindings({ dataDir: path.join(dataDir, 'briefing') }),
   // Briefing flow, `on` path. Publishing goes through the real context runtime; the design / redesign / new-component text comes from the answer's own model on a
   // private fork (egdesk-briefing-engine.mjs over codex-internal-turn.mjs). Off unless EGDESK_BRIEFING_FLOW=on here AND the chrome's egdesk.briefingFlow is "on" AND
   // the Decisions mode is on; otherwise the route answers 'no-engine' / 'mode' and does nothing. The advisory observe needs none of this.
