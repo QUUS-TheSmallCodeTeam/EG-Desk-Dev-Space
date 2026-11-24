@@ -21,11 +21,15 @@ const copy = value => JSON.parse(JSON.stringify(value))
 // This is provenance only, never an authority object. Do not persist or expose
 // subscription ownerKey or process-local epoch, even from an internal caller.
 const engineProvenance = engine => ({ engineId: engine.engineId, ...(small(engine.engineProfileId) ? { engineProfileId: engine.engineProfileId } : {}) })
-const RECORD_KINDS = ['sources', 'blobs', 'bindings', 'packets', 'briefings', 'readers', 'scratch', 'deliveries', 'threads', 'outputs', 'briefing-comments']
+const RECORD_KINDS = ['sources', 'blobs', 'bindings', 'packets', 'briefings', 'readers', 'scratch', 'deliveries', 'threads', 'outputs', 'briefing-comments', 'tool-outputs']
 // Everything else is write-once. A briefing comment keeps its anchor; its
 // resolved state and (by revision) its text may change, and delete leaves a
 // tombstone without text (CHAT-05).
 const MUTABLE_KINDS = new Set(['briefing-comments'])
+// Spilled tool results (working-memory gate): the full text of an EG-Desk tool result that was replaced by pointer lines in the
+// model's context. Each is an ordinary immutable source (kind 'tool-output') so egdesk_read_source can serve it by line range,
+// plus one index record here. They are the only sources with a retention bound: the oldest go first.
+export const TOOL_OUTPUT_LIMITS = Object.freeze({ maxBytes: 4 * 1024 * 1024, maxCount: 64, maxTotalBytes: 64 * 1024 * 1024, maxAgeMs: 24 * 60 * 60 * 1000 })
 
 // A conversation keeps the context tools it was started with. Tools added
 // later (only new conversations receive them) do not invalidate it, but every
@@ -212,10 +216,11 @@ export class ImmutableContextStore {
     return captures
   }
 
-  async capture(ownerKey, clientThreadId, attachment, { scopedRoot = null, assertActive = () => {}, engine = undefined } = {}) {
+  async capture(ownerKey, clientThreadId, attachment, { scopedRoot = null, assertActive = () => {}, engine = undefined, toolOutput = false } = {}) {
     assertActive()
     const kind = attachment?.kind
-    if (!['file', 'browser', 'board'].includes(kind)) fail('INVALID_CAPTURE', 'Unsupported attachment kind')
+    // 'tool-output' is created only by captureToolOutput() below, never from a screen or HTTP attachment.
+    if (!['file', 'browser', 'board'].includes(kind) && !(kind === 'tool-output' && toolOutput === true)) fail('INVALID_CAPTURE', 'Unsupported attachment kind')
     const sourceRef = attachment.sourceRef || attachment.source || {}
     const viewId = small(sourceRef.viewId) || small(attachment.source?.viewId)
     const source = {
@@ -226,12 +231,13 @@ export class ImmutableContextStore {
       ...(small(sourceRef.browserProfileId) ? { browserProfileId: sourceRef.browserProfileId } : {}),
       ...(small(sourceRef.siteAccount) ? { siteAccount: publicText(sourceRef.siteAccount, 512) } : {}),
     }
-    const scope = attachment.captureScope || { type: kind === 'file' ? 'file' : kind === 'board' ? 'board-selection' : 'selection' }
-    if (!['file', 'document-text', 'dom-range', 'selection', 'board-selection'].includes(scope.type)) fail('INVALID_CAPTURE_SCOPE', 'Name the captured file, DOM range or selection')
+    const scope = attachment.captureScope || { type: kind === 'file' ? 'file' : kind === 'board' ? 'board-selection' : kind === 'tool-output' ? 'tool-output' : 'selection' }
+    if (!['file', 'document-text', 'dom-range', 'selection', 'board-selection', 'tool-output'].includes(scope.type)) fail('INVALID_CAPTURE_SCOPE', 'Name the captured file, DOM range or selection')
     if ((kind === 'file') !== (scope.type === 'file')) fail('INVALID_CAPTURE_SCOPE', 'File byte captures and UI selection captures must retain their actual scope')
+    if ((kind === 'tool-output') !== (scope.type === 'tool-output')) fail('INVALID_CAPTURE_SCOPE', 'A tool result capture keeps its own scope')
     const coverage = attachment.capture?.coverage || {}
     let bytes, text, mime = attachment.content?.mime || 'text/plain', truncated = false
-    let fileName = '', provenance = kind === 'file' ? 'local-file-bytes' : 'explicit-ui-capture'
+    let fileName = '', provenance = kind === 'file' ? 'local-file-bytes' : kind === 'tool-output' ? 'egdesk-tool-result' : 'explicit-ui-capture'
     let managedCheck = null
     if (kind === 'file') {
       if (attachment.managedFileView !== undefined) {
@@ -387,6 +393,63 @@ export class ImmutableContextStore {
     const binding = { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId, clientThreadId: run.clientThreadId, sourceIds: [...sourceIds], capabilities: { read: capabilities.read === true, reader: capabilities.reader === true, publishBriefing: capabilities.publishBriefing === true }, readerConfiguration, capturedAt: this.now(), ...(engine ? { engine: engineProvenance(engine) } : {}), ...(resolver ? { resolver: copy(resolver) } : {}) }
     const id = await this.putRecord(ownerKey, 'bindings', binding)
     return { bindingId: id, ...binding, captures }
+  }
+
+  /**
+   * captureToolOutput(ownerKey, run, { text, tool, engine }) → public manifest (kind 'tool-output', complete, immutable) with `lines`.
+   * `text` is the exact text the gate numbered its lines on. The stored projection may mask credentials but must keep the same
+   * line count, or the capture is refused (a pointer must never name a different line). Old spills are pruned first.
+   */
+  async captureToolOutput(ownerKey, run, { text, tool, engine = undefined } = {}, { assertActive = () => {}, limits = TOOL_OUTPUT_LIMITS } = {}) {
+    assertActive()
+    if (typeof text !== 'string' || !text || typeof tool !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(tool)) fail('INVALID_CAPTURE', 'A tool result capture needs its text and the tool name')
+    if (!small(run?.conversationId) || !small(run?.runId) || !small(run?.answerId)) fail('INVALID_CAPTURE', 'A tool result capture belongs to one run')
+    const bytes = Buffer.byteLength(text)
+    if (bytes > limits.maxBytes) fail('CAPTURE_LIMIT', 'This tool result exceeds the spill byte limit; nothing was stored', 413)
+    if (publicText(text, Infinity).split('\n').length !== text.split('\n').length) fail('CAPTURE_LIMIT', 'Masking changed the line count of this tool result; nothing was stored', 409)
+    await this.pruneToolOutputs(ownerKey, { limits, incomingBytes: bytes })
+    assertActive()
+    const id = randomUUID()
+    const manifest = await this.capture(ownerKey, run.clientThreadId || run.conversationId, { id, kind: 'tool-output', label: `Tool result: ${tool}`,
+      sourceRef: { resourceId: id }, captureScope: { type: 'tool-output', locator: tool }, content: { text, mime: 'text/plain', truncated: false } }, { assertActive, engine, toolOutput: true })
+    await this.putRecord(ownerKey, 'tool-outputs', { hash: manifest.hash, projectionHash: manifest.payloads.projection.hash, byteLength: bytes, createdAt: this.now(),
+      conversationId: run.conversationId, runId: run.runId, answerId: run.answerId, tool }, manifest.sourceId)
+    return { ...manifest, lines: text.split('\n').length }
+  }
+
+  /** The binding record of a spilled tool result. Marked so a restore can tell it from the sources the person sent, and tolerate its expiry. */
+  async bindToolOutput(ownerKey, run, sourceId, capabilities, readerConfiguration, engine = undefined) {
+    const index = await this.getRecord(ownerKey, 'tool-outputs', sourceId)
+    if (index.conversationId !== run.conversationId || index.runId !== run.runId || index.answerId !== run.answerId) fail('CONTEXT_FORBIDDEN', 'This tool result belongs to another run', 403)
+    const binding = { conversationId: run.conversationId, runId: run.runId, answerId: run.answerId, clientThreadId: run.clientThreadId, sourceIds: [sourceId], toolOutput: true,
+      capabilities: { read: capabilities.read === true, reader: capabilities.reader === true, publishBriefing: capabilities.publishBriefing === true }, readerConfiguration, capturedAt: this.now(), ...(engine ? { engine: engineProvenance(engine) } : {}) }
+    return { bindingId: await this.putRecord(ownerKey, 'bindings', binding), ...binding }
+  }
+
+  /**
+   * Bounded retention for spilled tool results only: older than maxAgeMs, beyond maxCount, or beyond maxTotalBytes → the oldest are removed.
+   * A removed spill loses its source record and its index record; a payload blob is removed only when no remaining source uses the same bytes.
+   * Returns the removed source ids.
+   */
+  async pruneToolOutputs(ownerKey, { limits = TOOL_OUTPUT_LIMITS, incomingBytes = 0 } = {}) {
+    const index = (await this.listRecords(ownerKey, 'tool-outputs')).sort((a, b) => a.createdAt - b.createdAt)
+    const now = this.now(), victims = []
+    let count = index.length + (incomingBytes ? 1 : 0), total = index.reduce((sum, row) => sum + row.byteLength, 0) + incomingBytes
+    for (const row of index) {
+      if (now - row.createdAt <= limits.maxAgeMs && count <= limits.maxCount && total <= limits.maxTotalBytes) break
+      victims.push(row); count--; total -= row.byteLength
+    }
+    if (!victims.length) return []
+    const gone = new Set(victims.map(row => row.id))
+    const hashes = new Set(victims.flatMap(row => [row.hash, row.projectionHash]))
+    const stillUsed = new Set((await this.listRecords(ownerKey, 'sources', record => !gone.has(record.id)))
+      .flatMap(record => [record.hash, record.payloads?.source?.hash, record.payloads?.projection?.hash]).filter(hash => hashes.has(hash)))
+    for (const row of victims) {
+      await rm(path.join(await this.directory(ownerKey, 'sources'), `${row.id}.json`), { force: true })
+      await rm(path.join(await this.directory(ownerKey, 'tool-outputs'), `${row.id}.json`), { force: true })
+      for (const hash of new Set([row.hash, row.projectionHash])) if (/^[\da-f]{64}$/.test(hash) && !stillUsed.has(hash)) await rm(path.join(await this.directory(ownerKey, 'blobs'), hash), { force: true })
+    }
+    return [...gone]
   }
 
   async captureOutput(ownerKey, run, artifact, cwd, { assertActive = () => {} } = {}) {
