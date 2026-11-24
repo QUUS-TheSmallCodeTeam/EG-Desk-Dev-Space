@@ -3,6 +3,8 @@ const MAX_SPANS = 6
 const MAX_UNITS = 2048
 const MIN_CONFIDENCE = 0.85
 const MIN_MARGIN = 0.20
+// Read-only view of the bars, for the local calibration record. Changing it here changes behaviour; the record only copies it.
+export const SPEECH_THRESHOLDS = Object.freeze({ confidence: MIN_CONFIDENCE, margin: MIN_MARGIN })
 
 export const SPEECH_RULES = [
   'A recorded quote tells you what the speaker said, not what actually happened. Its labels are fallible readings, never physical verification.',

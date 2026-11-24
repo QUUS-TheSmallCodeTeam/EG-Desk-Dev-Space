@@ -765,6 +765,7 @@ export class CodexChatRuntime {
     // Decision model context setup (DECISION_MODEL_CONTEXT_SETUP.md §3.1):
     // { mode(): 'off'|'advisory'|'on', configured(): boolean, client, collect({ body, context }) → candidates, budgetMs? } or null.
     this.speechRuns = new WeakMap() // private runtime-only grants; never projected onto public runs
+    this.calibrationRuns = new WeakMap() // run -> content-free calibration entry id; process-local
     this.topicAnswerGuards = new WeakMap() // private, bounded proof; never checkpointed
     this.topicIntakes = new WeakMap() // accepted local request -> prospective generation, never copied to checkpoints
     this.topicRuns = new WeakMap() // live turn -> routing refs until one confirmed final + successful terminal event
@@ -4423,6 +4424,7 @@ export class CodexChatRuntime {
   // 'advisory' mode that nothing was attached. Nothing to show when it skipped.
   noteDecisionContext(run, { mode, result }) {
     if (!result || result.status === 'skipped' || result.privateTopicBatch) return
+    this.recordCalibration(run, mode, result)
     const activity = decisionContextActivity({ answerId: run.answerId, selected: result.selected || [], latencyMs: result.latencyMs ?? null, model: result.model ?? null,
       speech: result.receipt?.speech ?? null, dropped: result.receipt?.dropped ?? [] })
     const attached = mode === 'on' && result.status === 'ready'
@@ -4433,6 +4435,30 @@ export class CodexChatRuntime {
     run.decisionContextReceipt = result.receipt || null
     this.put(run, 'activities', activity)
     this.emit(run, 'activity.completed', activity)
+  }
+
+  // Content-free numbers for later threshold calibration (canon section 5.3). Recording only: it never
+  // changes what is attached, shown or sent, and any failure is ignored.
+  recordCalibration(run, mode, result) {
+    try {
+      const log = this.decisionContext?.calibrationLog
+      if (!log || (mode !== 'advisory' && mode !== 'on')) return
+      const raw = result.status === 'fallback' ? { feature: 'turn_context', mode, fallback: result.reason, judgments: [] }
+        : result.calibration ? { ...result.calibration, mode, attached: mode === 'on' && result.status === 'ready' } : null
+      const id = raw ? log.record(raw) : null
+      if (id) this.calibrationRuns.set(run, id)
+    } catch { /* recording must never affect the turn */ }
+  }
+
+  // The label that arrives after the turn: how it ended, and how many tool activities the reasoning model ran itself.
+  completeCalibration(run) {
+    try {
+      const id = this.calibrationRuns.get(run), log = this.decisionContext?.calibrationLog
+      if (!id || !log) return
+      this.calibrationRuns.delete(run)
+      const own = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
+      log.complete(id, { run: run.status, toolActivities: (run.activities || []).filter(a => !own.has(a.kind)).length })
+    } catch { /* ignore */ }
   }
 
   // One computer-control activity row (metadata and fixed wording only).
@@ -5077,6 +5103,7 @@ export class CodexChatRuntime {
     }
     if (epoch !== this.runEpoch(run)) return
     run.status = turn.status
+    this.completeCalibration(run)
     for (const provider of this.toolProviders) provider.cancelRun?.(run)
     run.stopConfirmed = turn.status === 'interrupted'
     run.error = turn.error
