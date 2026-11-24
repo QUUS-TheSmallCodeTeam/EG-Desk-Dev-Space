@@ -253,16 +253,26 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
         visibility: VIS_WORDS.has(c.visibility) ? c.visibility : 'visible' }]
     })
   }
+  const briefingFlows = new Set() // answers whose `on` flow has started (bounded)
   async function observe(body) {
     const mode = getMode(), want = body?.flow === 'on' ? 'on' : 'advisory'
     if (!['advisory', 'on'].includes(mode) || want !== mode) return { status: 'skipped', reason: 'mode' }
     if (!body || typeof body.report !== 'string' || !body.report.trim() || body.report.length > 20000) return { status: 'skipped', reason: 'invalid' }
     const live = mode === 'on'
     // The full flow needs the subjective model, the run of that answer and the publish path. Without all three nothing runs at all (never a half flow).
-    if (live && !(typeof briefing?.engine === 'function' && typeof briefing?.runFor === 'function' && typeof briefing?.propose === 'function')) return { status: 'skipped', reason: 'no-engine' }
+    if (live && !((typeof briefing?.engine === 'function' || typeof briefing?.engineFor === 'function') && typeof briefing?.runFor === 'function' && typeof briefing?.propose === 'function')) return { status: 'skipped', reason: 'no-engine' }
     const ids = { conversationId: body.conversationId, runId: body.runId, answerId: body.currentAnswerId }
     const answerRun = live ? briefing.runFor(ids) : null
     if (live && !answerRun) return { status: 'skipped', reason: 'run-gone' }
+    // Completed messages only (D1): the briefing is proposed for an answer that is already posted in full. A run that is still working, failed or was stopped gets none.
+    if (live && answerRun.status !== 'completed') return { status: 'skipped', reason: 'run-not-completed' }
+    // One flow per answer, whatever asks again.
+    const flowKey = live ? `${ids.conversationId}/${ids.answerId}` : null
+    if (live && briefingFlows.has(flowKey)) return { status: 'skipped', reason: 'already' }
+    // The same model that wrote the answer, on a private fork (egdesk-briefing-engine.mjs); null when it is switched off or that engine cannot fork.
+    const engine = !live ? null : typeof briefing.engineFor === 'function' ? briefing.engineFor(answerRun, { report: body.report }) : briefing.engine
+    if (live && typeof engine !== 'function') return { status: 'skipped', reason: 'no-engine' }
+    if (live) { briefingFlows.add(flowKey); if (briefingFlows.size > 200) briefingFlows.delete(briefingFlows.values().next().value) }
     const sink = { destroyed: false, writableEnded: false, once() {}, off() {} }
     const route = judge => ({ prepare: async dto => prepareJudge(judge, dto).body, run: ticket => run(ticket, sink), cancel: async ticket => { discard(ticket) } })
     const list = observeCandidates(body.candidates)
@@ -271,16 +281,21 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     const gate = createEgressGate(modelDataPermissions({ canvasMaySend: list.some(c => c.maySend === true) }))
     const out = await runBriefingFlow({ report: body.report, candidates: list, egress: gate, currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null,
       decide: { placement: route(JUDGES['/decision/briefing-placement']), reuse: route(JUDGES['/decision/briefing-reuse']), ...(live ? { check: route(JUDGES['/decision/briefing-check']) } : {}) },
-      engine: live ? briefing.engine : null, observeOnly: !live, allow: async () => true })
+      engine, observeOnly: !live, allow: async () => true })
     const summary = { status: 'observed', stages: out.stages ?? [], outcome: out.status, judgeRequests: out.stats?.judgeRequests ?? 0, ...(out.reason ? { reason: out.reason } : {}) }
     if (!live || out.status !== 'presented') return summary
     // Passed the flow check: create the (0..n) allowed new components, then propose through the same validation as the tool. Any failure leaves chat only.
     try {
-      const created = {}
+      // Every new component's text is written first; only when all of them exist is anything published (no half-made set).
+      const drafts = []
       for (const component of out.newComponents) {
-        const drafted = await briefing.engine({ kind: 'briefing_component', part: component.part, title: component.title, summary: component.summary })
+        const drafted = await engine({ kind: 'briefing_component', part: component.part, title: component.title, summary: component.summary })
         if (typeof drafted?.markdown !== 'string' || !drafted.markdown.trim() || typeof briefing.publishOutput !== 'function') throw new Error('component')
-        const published = await briefing.publishOutput(answerRun, { title: component.title, markdown: drafted.markdown, outputKey: `briefing-${randomBytes(5).toString('hex')}` })
+        drafts.push({ component, markdown: drafted.markdown })
+      }
+      const created = {}
+      for (const { component, markdown } of drafts) {
+        const published = await briefing.publishOutput(answerRun, { title: component.title, markdown, outputKey: `briefing-${randomBytes(5).toString('hex')}` })
         created[component.alias] = { outputId: published.output.id }
       }
       const args = completeBriefingArgs(out, created)

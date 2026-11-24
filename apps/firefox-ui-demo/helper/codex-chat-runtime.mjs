@@ -4887,6 +4887,19 @@ export class CodexChatRuntime {
     } catch { return null }
   }
 
+  // Cycle 11: one private fork turn for the model that wrote this run's answer (the briefing flow's design / redesign / component text). Like reviseOnFork:
+  // nothing of the turn reaches the chat, the fork cannot act, only the final text is read back. Null when the engine cannot fork or anything fails.
+  canInternalTurn(run) {
+    try { const engine = this.engineOf(run.conversationId); return engine?.capabilities?.(this.threadOperationSlot(run.conversationId))?.has('threadFork') === true } catch { return false }
+  }
+  async internalText(run, text, { timeoutMs = 20_000, signal = null } = {}) {
+    try {
+      if (!this.canInternalTurn(run)) return null
+      const out = await this.internalTurns.run({ engine: this.engineOf(run.conversationId), slot: this.threadOperationSlot(run.conversationId), parentThreadId: run.conversationId, signal, timeoutMs, text })
+      return out.text || null
+    } catch { return null }
+  }
+
   // ---- Advisory draft check (egdesk-draft-check.mjs). Record only: the posted answer is never held, changed or delayed. ----
   // Config: decisionContext.draftCheck = { mode(): 'off'|'advisory', eligible?({ body, context }), internalVocabulary?({ run }) → string[], deadlineMs? }. Absent, or any
   // mode other than 'advisory', means off. 'on' (hold, revise, post) is deliberately not implemented: it belongs at settleTopicAnswer

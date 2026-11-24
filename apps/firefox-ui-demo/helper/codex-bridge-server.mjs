@@ -44,6 +44,7 @@ import { createTurnMemoryConfig } from './egdesk-turn-memory-wiring.mjs'
 import { createBrowserEntryConfig } from './egdesk-browser-entry-wiring.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
 import { createBoardPresentationHttpHandler } from './egdesk-board-presentation-http.mjs'
+import { briefingDeps } from './egdesk-briefing-engine.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 import { MemoryEvidenceStore } from './egdesk-memory-evidence.mjs'
 import { createMemoryEvidenceHttpHandler } from './egdesk-memory-http.mjs'
@@ -535,9 +536,10 @@ const handleHostControlHttp = createHostControlHttpHandler(hostControl, { port: 
 // Board arrangement gets a separate guarded client over the same isolated Decisions key and budget.
 const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credentials: decisionCredentials,
   getMode: () => bridgeSettings.decisionContext.mode, budget: decisionBudget, port: BRIDGE_PORT, calibrationLog: decisionCalibrationLog, fetchImpl: decisionTransport.fetch,
-  // Briefing flow, `on` path (cycle 9). The publish side is the real context runtime; the subjective model's design turn has no adapter yet, so with engine null the `on` path
-  // answers 'no-engine' and does nothing (the advisory observe is unaffected). `egress` (the shared data-sharing permission) plugs in here when it lands.
-  briefing: { engine: null, runFor: ids => chat.runFor(ids), propose: (run, args) => contexts.proposeBriefing(run, args), publishOutput: (run, args) => contexts.publishOutput(run, args) } })
+  // Briefing flow, `on` path. Publishing goes through the real context runtime; the design / redesign / new-component text comes from the answer's own model on a
+  // private fork (egdesk-briefing-engine.mjs over codex-internal-turn.mjs). Off unless EGDESK_BRIEFING_FLOW=on here AND the chrome's egdesk.briefingFlow is "on" AND
+  // the Decisions mode is on; otherwise the route answers 'no-engine' / 'mode' and does nothing. The advisory observe needs none of this.
+  briefing: briefingDeps({ chat, contexts, enabled: process.env.EGDESK_BRIEFING_FLOW === 'on' }) })
 // Settings → 결정 모델 · OpenAI Decisions: key status/save/remove and the mode (works signed out).
 const handleDecisionHttp = createDecisionHttpHandler({ store: decisionCredentials, verifyKey: key => decisionClient.verifyKey(key),
   budget: decisionBudget, model: decisionClient.model, mode: bridgeSettings.decisionContext, port: BRIDGE_PORT, boardPresentation: handleBoardPresentationHttp,
