@@ -821,3 +821,44 @@ test('expect.postedMin counts the messages posted in the turn\'s window (an in-r
   const none = world(t, { turns: [{ steps: [], final: 'a' }] })
   assert.equal(only(await runCheck(none.options, asScripts(script(1)), none.deps)).turns[0].flowRows, undefined)
 })
+
+// ---- c25: the two committed Agent-room scripts ----
+const agentScriptFile = name => readJson(path.join(app, 'scripts', 'real-engine', 'scripts', `real-engine-${name}-v1.json`))
+
+test('the committed Agent-room scripts validate; the preflight says what each needs', () => {
+  const draft = agentScriptFile('agent-draft-check'), reuse = agentScriptFile('agent-reload-reuse')
+  assert.deepEqual(validateEngineScript(draft), { ok: true, errors: [] }); assert.deepEqual(validateEngineScript(reuse), { ok: true, errors: [] })
+  const needs = (script, options) => preflight({ codexBin: '/x', home: { kind: 'person' }, decisions: false, ...options }, asScripts(script), { exists: () => true, env: { [DECISION_KEY_ENV]: 'k' } }).join('\n')
+  assert.match(needs(draft, {}), /direct room, which is not one-time: it needs --persisted-with-cleanup/); assert.match(needs(draft, {}), /need --decisions/)
+  assert.match(needs(draft, {}), /seeded memory pages .* need --decisions/)
+  assert.equal(needs(draft, { persisted: true, decisions: true }), '')
+  assert.match(needs(reuse, {}), /needs --persisted-with-cleanup/); assert.doesNotMatch(needs(reuse, {}), /--decisions/, 'the reload-reuse script needs no Decision model')
+  assert.equal(needs(reuse, { persisted: true }), '')
+  // the draft-check script: the records say what the sentence that tripped v7 says (a done step and a planned step), and the expectation is a correct answer passing the check
+  const pages = draft.conversations[0].memory.pages
+  assert.ok(pages.some(p => p.id === 'quote/a-v1' && p.status === 'done' && /v1을 발송했다/.test(p.body))); assert.ok(pages.some(p => p.id === 'quote/a-v2-plan' && p.status === 'plan' && /팀장 승인 후 발송한다/.test(p.body)))
+  assert.deepEqual(draft.conversations[0].turns[0].expect.draftCheck, { ran: true, rejects: 0 })
+  assert.deepEqual(reuse.conversations[0].turns.map(x => x.expect.resumes), [0, undefined, 0])
+})
+
+test('reload reuse script on the fake: turn 1 has no resume, turn 3 skips the detach and resume; without the flag turn 3 fails by code', async t => {
+  const fake = { turns: [{ steps: [{ toolCall: { tool: 'egdesk_read_file', arguments: { path: 'notes.txt' } } }], final: '첫째 줄: 발주 마감은 오후 3시입니다.' }, { steps: [], final: '둘째 줄: 출고는 금요일입니다.' }, { steps: [], final: '셋째 줄: 세금계산서는 경리팀으로 보냅니다.' }] }
+  const w = withDelete(world(t, fake))
+  const rec = only(await runCheck(w.options, asScripts(agentScriptFile('agent-reload-reuse')), w.deps))
+  assert.equal(rec.aborted, null); assert.equal(rec.ok, true, JSON.stringify(rec.turns.map(x => x.expectations.filter(c => !c.ok))))
+  assert.deepEqual(rec.turns.map(x => x.engineRequests['thread/resume'] ?? 0), [0, 1, 0]); assert.deepEqual(rec.cleanup.failures, [])
+  const off = agentScriptFile('agent-reload-reuse'); delete off.conversations[0].flags
+  const o = withDelete(world(t, fake))
+  const bad = only(await runCheck(o.options, asScripts(off), o.deps))
+  assert.equal(bad.ok, false); assert.deepEqual(bad.turns.map(x => x.ok), [true, true, false]); assert.equal(bad.turns[2].expectations.find(c => c.check === 'resumes').ok, false)
+})
+
+test('draft-check script on the fake (memory selection and the product\'s verdict are the real run\'s business): an Agent direct room, the main answer is judged, no rejection for a correct sentence', async t => {
+  const script = agentScriptFile('agent-draft-check'); delete script.conversations[0].turns[0].expect.memory // the fake Decision model does not pick pages; the real run does
+  const w = withDelete(world(t, { turns: [{ steps: [], final: 'A사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다.' }] }, { decisions: true }))
+  w.deps.fetchImpl = async (url, init) => Response.json({ answers: JSON.parse(init.body).questions.map(q => ({ name: q.name, type: 'predicate', probability: /^sup_|^claim_support/.test(q.name) ? 0.95 : 0.05 })), usage: { input_tokens: 30 } })
+  const rec = only(await runCheck(w.options, asScripts(script), w.deps))
+  assert.equal(rec.aborted, null); const turn = rec.turns[0]
+  assert.equal(turn.expectations.find(c => c.check === 'draftCheck')?.ok, true, JSON.stringify(turn.draftCheck)); assert.equal(rec.ok, true, JSON.stringify(turn.expectations.filter(c => !c.ok)))
+  assert.deepEqual(rec.cleanup.failures, []); assert.ok(rec.agentProfile)
+})
