@@ -44,6 +44,7 @@ const QUESTIONS = new Set(['claim_supported', 'claim_tense', 'answer_type', 'tim
   'person_target_0', 'person_target_1', 'person_target_2',
   // the browser entry's yes/no predicates (lane L8 c20; MAX_ENTRY_CARDS = 6)
   'browser_entry', 'browser_entry_card_0', 'browser_entry_card_1', 'browser_entry_card_2', 'browser_entry_card_3', 'browser_entry_card_4', 'browser_entry_card_5',
+  'browser_entry_wall_0', 'browser_entry_wall_1', 'browser_entry_wall_2', 'browser_entry_wall_3', 'browser_entry_wall_4', 'browser_entry_wall_5',
   // work placement's yes/no questions (egdesk-work-placement.mjs), and the Board reply's per-excerpt time question (egdesk-board-agent-context.mjs)
   'same_matter', 'owner_action', 'in_effect'])
 const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed', 'none', 'act', 'hold', 'fetch'])

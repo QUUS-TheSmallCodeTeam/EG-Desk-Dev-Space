@@ -36,6 +36,7 @@
 // Never logged or kept: message text, tool inputs, answers, credentials.
 
 import { randomUUID as nodeRandomUUID } from 'node:crypto'
+import { deleteClaudeSessionFiles } from './claude-session-files.mjs'
 import os from 'node:os'
 import path from 'node:path'
 import { chatError } from './codex-chat-values.mjs'
@@ -183,6 +184,8 @@ export function createClaudeEngineAdapter(options = {}) {
     clearTimer = timer => clearTimeout(timer),
     mcpOutputLimitTokens = CLAUDE_MCP_OUTPUT_LIMIT_TOKENS, collectContextUsage = true,
     profiles = null,
+    // Deleting a conversation also removes the session files Claude Code keeps for it (claude-session-files.mjs). Developer flag, default off.
+    deleteSessionFiles = () => false, claudeHome = null,
   } = options
   const limits = { ...CLAUDE_ADAPTER_DEFAULTS }
   for (const key of Object.keys(limits)) if (Number.isSafeInteger(options[key]) && options[key] > 0) limits[key] = options[key]
@@ -675,6 +678,24 @@ export function createClaudeEngineAdapter(options = {}) {
       }
       session.lastUsedAt = now()
       return { thread: { id: threadId, turns: [], cwd: session.spec.cwd }, cwd: session.spec.cwd, model: session.spec.model, ...boundedDescriptor(session.spec) }
+    },
+
+    // The files Claude Code kept for a conversation EG-Desk started (L2 c19). Only with the flag, only for an id EG-Desk's own record binds
+    // to that conversation (recorded), under the config folder of the profile the conversation was bound to. The process is closed first.
+    threadDeleteSupported: () => { try { return deleteSessionFiles() === true } catch { return false } },
+    async deleteThread(threadId, profileId, { recorded = false } = {}) {
+      let allowed = false
+      try { allowed = deleteSessionFiles() === true } catch { allowed = false }
+      if (!allowed) throw chatError('THREAD_DELETE_UNSUPPORTED', 'Deleting Claude session files is not enabled', 409)
+      const id = typeof threadId === 'string' ? threadId.toLowerCase() : ''
+      const slot = profileId && profileId !== 'claude-default' ? profileList().find(row => row.id === profileId) : null
+      if (profileId && profileId !== 'claude-default' && !(slot && typeof slot.configDir === 'string')) return { state: 'remains', files: 0, reason: 'profile_unavailable' }
+      const home = claudeHome ?? env.HOME ?? os.homedir()
+      const configured = typeof env.CLAUDE_CONFIG_DIR === 'string' && isAbsolute(env.CLAUDE_CONFIG_DIR) ? env.CLAUDE_CONFIG_DIR : null
+      const configDir = slot ? slot.configDir : configured ?? path.join(home, '.claude')
+      const session = sessions.get(id)
+      if (session) { session.loaded = false; session.dispatchEpoch++; await closeProcess(session); sessions.delete(id) }
+      return deleteClaudeSessionFiles({ configDir, sessionId: id, recorded: recorded === true, platform })
     },
 
     async releaseThread(threadId) {
