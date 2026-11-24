@@ -14,13 +14,13 @@ const yesIf = (request, text) => quoted(request).includes(text)
 const policy = Object.fromEntries(Object.entries(sound).map(([name, f]) => [name, f]))
 // On the wire the heartbeat prefixes its provider: message__person_status.
 function judged(w) { return w.beatRequests.filter(r => r.names.includes('message__person_status')) }
-async function scene(t, { flags = { held: true, flow: true, inRun: true }, writer = null, steer = 'ok' } = {}) {
-  const w = world(t, { flags, writer, steer, policy: {} })
+async function scene(t, { flags = { held: true, flow: true, inRun: true }, writer = null, steer = 'ok', fork = 'ok', draft = null } = {}) {
+  const w = world(t, { flags, writer, steer, fork, policy: {} })
   // the fixture judge answers predicates 0.03 unless a policy says otherwise: answer the person questions here
   const decide = w.chat.decisionContext.client.decide
   w.chat.decisionContext.client.decide = async request => {
     const out = await decide(request)
-    for (const q of request.questions) { const f = sound[q.name.replace(/^message__/, '')]; if (f) out.answers[q.name] = { type: 'predicate', probability: f(q, request) ? 0.95 : 0.03 } }
+    for (const q of request.questions) { const f = sound[q.name.replace(/^message__/, '')]; if (f) out.answers[q.name] = { type: 'predicate', probability: f(q, request) ? 0.95 : 0.03 }; const g = draft?.[q.name.replace(/_\d+$/, '')]; if (g !== undefined) out.answers[q.name] = { type: 'predicate', probability: g } }
     return out
   }
   const d = await w.dm('dm-a', '전체 테스트 돌리고 A 모듈부터 고쳐줘')
@@ -130,4 +130,36 @@ test('a stop one second after another message is acted on at the next beat (0.5 
   // the assistant's own notes were not moved by those two rounds: the beat record says the person rounds did not count as asks
   const rounds = w.flowEntries().filter(e => e.judgments?.some(j => /^beat_person_/.test(j.q)))
   assert.equal(rounds.length, 2)
+})
+
+// c26 (Main's real-engine check-6, why-stopped): the engine refused the fork of an ephemeral thread, so the writer ran on a fresh thread and wrote a plain
+// present-tense status reply; the draft check read the tense question yes (.95, sup .5) on it, nothing was posted, and the person got no answer. A message
+// composed only from the run's present facts has no past/planned record to be mistaken for, so code drops that finding (egdesk-draft-check.mjs).
+const REPLY = '멈춘 게 아니라 명령이 12초째 실행 중이에요. 끝나면 바로 알려 드릴게요.'
+const writesReply = prompt => (/The person just wrote, while you work/.test(prompt) ? REPLY : null)
+test('check-6 replayed: fork refused (fresh private thread), the check says tense .95 / sup .5 on the present-tense reply: the reply is posted, the row says why (write: passed)', async t => {
+  const { w, d } = await scene(t, { fork: 'norollout', writer: writesReply, draft: { tense: 0.95, sup: 0.5 } })
+  const before = d.assistant().length
+  await send(w, d, STATUS, 1); await w.advance(6000)
+  assert.deepEqual(d.assistant().slice(before), [REPLY], 'the person sees the reply')
+  assert.ok(w.startedFresh.length >= 1, 'the writer ran on a fresh thread (the fork was refused)')
+  assert.ok(w.native.some(([m]) => m === 'thread/fork'), 'a fork was tried first')
+  assert.equal(w.native.filter(([m]) => m === 'turn/steer').length, 0, 'answered, so nothing is steered'); assert.equal(settled(w, 'req-in-1'), 'reply')
+  const rec = w.flowEntries().find(e => e.judgments?.some(j => j.q === 'beat_person_status'))
+  assert.deepEqual([rec.flow, rec.posted, rec.write], ['reply', 'model', 'passed'])
+})
+test('a reply the check really rejects (a concrete detail the facts do not hold) is not posted; the row says check_failed; the message goes to the run (safe default)', async t => {
+  const { w, d } = await scene(t, { fork: 'norollout', writer: writesReply, draft: { sup: 0.02 } })
+  const before = d.assistant().length
+  await send(w, d, STATUS, 1); await w.advance(6000)
+  assert.deepEqual(d.assistant().slice(before), [], 'an unsupported sentence is not posted')
+  assert.equal(w.native.filter(([m]) => m === 'turn/steer').length, 1, 'the run gets what the person wrote')
+  const rec = w.flowEntries().find(e => e.judgments?.some(j => j.q === 'beat_person_status'))
+  assert.deepEqual([rec.flow, rec.posted, rec.write], ['reply', 'none', 'check_failed'])
+})
+test('the record names the writer when it gave nothing (writer_empty)', async t => {
+  const { w, d } = await scene(t, { writer: prompt => (/The person just wrote, while you work/.test(prompt) ? ' ' : null) })
+  await send(w, d, STATUS, 1); await w.advance(6000)
+  const rec = w.flowEntries().find(e => e.judgments?.some(j => j.q === 'beat_person_status'))
+  assert.deepEqual([rec.posted, rec.write], ['none', 'writer_empty'])
 })

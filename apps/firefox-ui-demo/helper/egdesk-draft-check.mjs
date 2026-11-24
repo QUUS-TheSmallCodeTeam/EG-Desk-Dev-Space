@@ -322,7 +322,15 @@ async function judge({ draft, evidence, userText, internalVocabulary, client, th
   const predicates = design === 'predicates'
   const request = predicates ? buildPredicateRequest({ claims: claimSpans, terms, evidence }) : buildRequest({ claims: claimSpans, terms, evidence })
   const result = await client.decide({ ...request, timeoutMs, signal, promptCacheKey: 'draft-check' })
-  const read = predicates ? readPredicateFindings({ answers: result.answers, claims: claimSpans, terms, evidence }) : readFindings({ answers: result.answers, claims: claimSpans, terms, evidence, thresholds })
+  let read = predicates ? readPredicateFindings({ answers: result.answers, claims: claimSpans, terms, evidence }) : readFindings({ answers: result.answers, claims: claimSpans, terms, evidence, thresholds })
+  // c26 (real engine, check-6 why-stopped): a short message composed only from facts of the present cannot state "as done or true now" something the
+  // evidence records "only as planned or only as past" when no item is recorded so. The tense question was still answered yes (.95) on a plain
+  // present-tense status reply, the finding named no record at all (its evidence list was empty), and the person's reply was never posted. Code knows
+  // the evidence's time tags (R3): with every item tagged present the tense finding cannot hold, so it is dropped (the judgment stays in the record as
+  // unknown). A message with any past/planned/hypothetical/untagged item is judged as before. Answers (concreteOnly false) are unchanged.
+  if (concreteOnly && evidence.length && evidence.every(item => item.time === 'present')) {
+    read = { ...read, findings: read.findings.filter(f => f.kind !== 'present_tense'), judgments: read.judgments.map(j => (j.q === 'claim_tense' && j.would === 'reject' ? { ...j, would: 'unknown' } : j)) }
+  }
   const local = !evidence.length
     ? claimSpans.filter(s => isCheckable(s.text)).map(s => ({ kind: 'unverified', span: claimSpans.indexOf(s), evidence: [], reason: 'no_evidence' })) : []
   return { spans, claimSpans, terms, findings: [...local, ...read.findings.filter(f => !local.some(l => l.span === f.span && f.kind === 'unverified'))], judgments: read.judgments, called: true, usage: result.usage ?? null }

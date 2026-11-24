@@ -85,3 +85,20 @@ test('concreteOnly (heartbeat messages, composed from facts of the present): a s
   await checkDraft({ draft: '확인하는 데 시간이 조금 걸리고 있어요.', evidence: facts, mode: 'on', client: all, design: 'choice' })
   assert.equal(all.requests.length, 1, 'without concreteOnly the plain sentence is still asked about (answers, unchanged)')
 })
+
+// c26 (real engine check-6, why-stopped): a short heartbeat message (concreteOnly) is composed only from present facts. The tense question said yes (.95) on a plain
+// present-tense status reply and nothing was posted; with every evidence item tagged present no record exists that the sentence could state as done or true now
+// "while it was only planned or past", so code drops the finding. One past/planned item (or an answer check, concreteOnly false) is judged as before.
+test('concreteOnly with only present evidence: a tense yes is dropped; with a past or planned item it stands; an answer check is unchanged', async () => {
+  const draft = '멈춘 게 아니라 명령이 12초째 실행 중이에요.'
+  const present = [{ id: 'now', kind: 'run_state', time: 'present', source: 'runtime', text: '12 seconds have passed since the person wrote.\nThe assistant is running the tool egdesk_run_command.' }]
+  const past = [...present, { id: 'log', kind: 'document', time: 'past', source: 'document', text: '명령은 어제 12초 걸렸다.' }]
+  const ask = () => client(q => p(q.name.startsWith('sup_') ? 0.5 : 0.95))
+  const a = await checkDraft({ draft, evidence: present, mode: 'on', client: ask(), concreteOnly: true })
+  assert.equal(a.text, draft, 'posted unchanged'); assert.equal(a.findings.length, 0)
+  assert.deepEqual(a.calibration.judgments.filter(j => j.q === 'claim_tense').map(j => [j.would, j.p]), [['unknown', 0.95]], 'the answer stays in the record, not as a rejection')
+  const b = await checkDraft({ draft, evidence: past, mode: 'on', client: ask(), concreteOnly: true })
+  assert.notEqual(b.text, draft, 'a past record exists: the tense finding stands'); assert.ok(b.findings.some(f => f.kind === 'present_tense'))
+  const c = await checkDraft({ draft, evidence: present, mode: 'on', client: ask(), concreteOnly: false })
+  assert.ok(c.findings.some(f => f.kind === 'present_tense'), 'an answer check keeps the finding (unchanged)')
+})

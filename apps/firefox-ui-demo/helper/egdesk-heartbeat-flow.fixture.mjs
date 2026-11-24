@@ -58,7 +58,7 @@ export function world(t, { flags = { held: true, flow: true }, fork = 'ok', fail
   const log = openCalibrationLog({ dataDir: dir, log() {} })
   t.after(() => { store.close(); rmSync(dir, { recursive: true, force: true }) })
   let clock = 9_000_000, threads = 0, forks = 0, turns = 0
-  const timers = [], events = [], native = [], flowAsked = [], beatRequests = [], requests = { flow: 0, draft: 0, other: 0 }, forkPrompts = []
+  const timers = [], events = [], native = [], flowAsked = [], beatRequests = [], requests = { flow: 0, draft: 0, other: 0 }, forkPrompts = [], startedFresh = []
   const client = { model: 'mock', async decide(request) {
     if (request.promptCacheKey === 'heartbeat-beat') requests.flow++
     else if (request.promptCacheKey === 'draft-check') requests.draft++
@@ -89,10 +89,12 @@ export function world(t, { flags = { held: true, flow: true }, fork = 'ok', fail
       if (method === 'experimentalFeature/list') return { data: ['browser_use', 'browser_use_external', 'computer_use'].map(name => ({ name, enabled: false, stage: 'stable' })), nextCursor: null }
       if (method === 'mcpServerStatus/list') return { data: [], nextCursor: null }
       if (method === 'config/read') return { config: { developer_instructions: 'Ordinary instructions' }, layers: [] }
+      // c26: a private turn's fresh thread (fork 'norollout': the engine refused the fork, so the writer runs on a fresh ephemeral thread) is told by its instructions
+      if (method === 'thread/start' && /private one-off task/.test(JSON.stringify(params))) { startedFresh.push(params); return { thread: { id: `fork-${++forks}` }, cwd: '/work', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' } }
       if (method === 'thread/start') return { thread: { id: `native-${++threads}` }, cwd: '/work', model: 'm', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
       if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [] }, cwd: '/work', sandbox: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' }
       if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
-      if (method === 'thread/fork') { if (fork === 'hang') return new Promise(() => {}); return { thread: { id: `fork-${++forks}`, forkedFromId: params.threadId } } }
+      if (method === 'thread/fork') { if (fork === 'hang') return new Promise(() => {}); if (fork === 'norollout') throw Object.assign(new Error(`no rollout found for thread id ${params.threadId}`), { code: -32600 }); return { thread: { id: `fork-${++forks}`, forkedFromId: params.threadId } } }
       if (method === 'turn/start' && String(params.threadId).startsWith('fork-')) {
         const prompt = params.input[0].text
         forkPrompts.push(prompt)
@@ -127,7 +129,7 @@ export function world(t, { flags = { held: true, flow: true }, fork = 'ok', fail
       quiet = mark === last ? quiet + 1 : 0; last = mark
     }
   }
-  const w = { chat, store, log, events, native, requests, flowAsked, beatRequests, forkPrompts, timers, at: () => clock - 9_000_000, settle, notify: n,
+  const w = { chat, store, log, events, native, requests, flowAsked, beatRequests, forkPrompts, startedFresh, timers, at: () => clock - 9_000_000, settle, notify: n,
     async advance(ms) {
       const end = clock + ms
       for (;;) {
