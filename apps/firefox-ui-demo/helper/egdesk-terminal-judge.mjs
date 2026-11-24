@@ -115,6 +115,19 @@ export async function judgeTerminalState({ tail = '', alive, exitCode = null, fa
 }
 
 /** Runtime-enumerated log blocks: paragraphs and failure markers, each with the runtime's own facts. */
+// A failure line that starts at column 0 opens a block of its own; its indented details (message, stack) stay with it; the block
+// ends when plain output resumes. Everything else is split at blank lines.
+const BLOCK_START = /^(?:not ok|✖|FAIL\b|AssertionError|Error:|TypeError:)/
+const FAILURE_WORDS = /(?:not ok|✖|FAIL\b|AssertionError|Error:|error TS\d+|expected|actual)/i
+const BLOCK_LINES = 12
+/** The head of a block: a failure is at the top of its block, so the first lines are kept (never the last), bounded and secret-masked. */
+function blockHead(text, limits) {
+  const lines = text.split('\n')
+  let out = lines.slice(0, BLOCK_LINES).map(line => (line.length > limits.lineChars ? line.slice(0, limits.lineChars) + '…' : line)).join('\n')
+  for (const pattern of SECRET) out = out.replace(pattern, '[redacted]')
+  const cut = out.length > limits.blockChars
+  return (cut ? out.slice(0, limits.blockChars) : out) + (cut || lines.length > BLOCK_LINES ? '\n…' : '')
+}
 export function enumerateLogBlocks(output, limits = TERMINAL_JUDGE_LIMITS) {
   const lines = stripAnsi(String(output ?? '')).split('\n')
   const blocks = []
@@ -122,12 +135,16 @@ export function enumerateLogBlocks(output, limits = TERMINAL_JUDGE_LIMITS) {
   const flush = () => { const text = current.join('\n').trim(); if (text) blocks.push(text); current = [] }
   for (const line of lines) {
     if (!line.trim()) { flush(); continue }
-    if (/^(?:not ok|✖|FAIL\b|\s*AssertionError|\s*Error:|\s*TypeError:)/.test(line) && current.some(l => !/^\s+at /.test(l) && !/^\s/.test(l))) flush()
+    const opens = BLOCK_START.test(line)
+    if (current.length && (opens || (BLOCK_START.test(current[0]) && !/^\s/.test(line)))) flush()
     current.push(line)
   }
   flush()
-  return blocks.slice(-limits.blocks).map((text, i) => ({ id: `b${i + 1}`, text: text.length > limits.blockChars ? text.slice(0, limits.blockChars) + '…' : text,
-    failureMarker: /(?:not ok|✖|FAIL\b|AssertionError|Error:|error TS\d+|expected|actual)/i.test(text) }))
+  // At most limits.blocks blocks, in output order: the blocks the runtime marks as failures are kept first, the rest are the latest ones.
+  const marked = blocks.map((text, index) => (FAILURE_WORDS.test(text) ? index : -1)).filter(index => index >= 0).slice(-limits.blocks)
+  const keep = new Set(marked)
+  for (let index = blocks.length - 1; index >= 0 && keep.size < limits.blocks; index--) keep.add(index)
+  return [...keep].sort((x, y) => x - y).map((index, i) => ({ id: `b${i + 1}`, text: blockHead(blocks[index], limits), failureMarker: FAILURE_WORDS.test(blocks[index]) }))
 }
 
 /**
@@ -146,7 +163,7 @@ export async function pickRelevantBlocks({ blocks, mode = 'off', client = null, 
   const th = decisionThresholds(thresholds)
   let answer
   try {
-    const safe = blocks.map(b => ({ ...b, text: redactTail(b.text, { ...limits, tailLines: 12, tailChars: limits.blockChars }) }))
+    const safe = blocks // already bounded, head-kept and secret-masked by enumerateLogBlocks
     answer = await client.decide({ input: [{ role: 'user', content: [{ type: 'input_json', data: { blocks: safe.map(b => ({ id: b.id, text: b.text })) } }] }],
       questions: safe.map(b => predicateQuestion(`log_${b.id}`, `Is log block ${b.id} needed to understand and fix the failure of this command?`)), timeoutMs, signal })
   } catch (error) {

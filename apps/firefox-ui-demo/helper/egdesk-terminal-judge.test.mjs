@@ -267,3 +267,18 @@ test('requests carry only the redacted tail and runtime facts, never the whole t
   assert.ok(sent.length < 6000)
   assert.doesNotMatch(sent, /line 0 /)
 })
+
+test('log blocks: a failure and its details are one block, the head of a block is what is kept, and marked blocks survive the cap', () => {
+  const out = ['ok 1 - a', 'ok 2 - b', 'not ok 3 - merges', '  AssertionError: expected 2 but got 3', '      at merge (lib/merge.mjs:4:1)', ...Array.from({ length: 40 }, (_, i) => `ok ${i + 4} - later`), '', '# fail 1'].join('\n')
+  const blocks = enumerateLogBlocks(out)
+  assert.deepEqual(blocks.map(b => b.text.split('\n')[0]), ['ok 1 - a', 'not ok 3 - merges', 'ok 4 - later', '# fail 1'])
+  assert.equal(blocks[1].text, 'not ok 3 - merges\n  AssertionError: expected 2 but got 3\n      at merge (lib/merge.mjs:4:1)', 'the message and the stack stay with their failure line')
+  assert.deepEqual(blocks.map(b => b.failureMarker), [false, true, false, true], 'the runtime marks the failure and the summary that counts it')
+  assert.ok(blocks[2].text.startsWith('ok 4 - later\nok 5 - later') && blocks[2].text.endsWith('\n…') && blocks[2].text.split('\n').length === 13, 'a long block keeps its first 12 lines')
+  // an early failure among many later paragraphs is not pushed out by the 12-block cap
+  const long = ['not ok 1 - early failure', '  Error: boom', '', ...Array.from({ length: 30 }, (_, i) => `section ${i}\n`)].join('\n')
+  const kept = enumerateLogBlocks(long)
+  assert.equal(kept.length, 12); assert.equal(kept[0].text, 'not ok 1 - early failure\n  Error: boom'); assert.equal(kept.at(-1).text, 'section 29')
+  // secrets are masked inside a block too
+  assert.doesNotMatch(enumerateLogBlocks('Error: bad login\n  token=abcdef123456 was rejected')[0].text, /abcdef123456/)
+})

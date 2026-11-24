@@ -50,6 +50,7 @@ export function classifyCommand(command, { cwd, home = '/home/user', inspect = (
   if (/\b(?:curl|wget)\b[^|;&]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b/.test(text)) reasons.add('remote_script')
   for (const raw of tokenize(text)) {
     const words = [...raw]
+    const before = destructive
     if (words[0] === 'sudo' || words[0] === 'doas') { reasons.add('privileged'); words.shift() }
     const cmd = path.posix.basename(words[0] || ''), args = words.slice(1)
     const rest = args.filter(a => !isFlag(a) || a === '--')
@@ -87,8 +88,16 @@ export function classifyCommand(command, { cwd, home = '/home/user', inspect = (
     } else if (['dd', 'mkfs', 'truncate', 'kill', 'killall', 'pkill', 'chmod', 'chown'].includes(cmd) || cmd.startsWith('mkfs.')) {
       destructive = true
       if (cmd === 'dd' && args.some(a => a.startsWith('of=/dev/')) || cmd.startsWith('mkfs')) reasons.add('protected_target')
-      if ((cmd === 'chmod' || cmd === 'chown') && !args.some(a => /^-[a-zA-Z]*R/.test(a))) destructive = false
+      // A non-recursive chmod/chown is not scored. (Only this command: an earlier destructive command in the same line stays destructive.)
+      if ((cmd === 'chmod' || cmd === 'chown') && !args.some(a => /^-[a-zA-Z]*R/.test(a))) destructive = before
     } else if (cmd === 'find' && args.includes('-delete')) { destructive = true; reasons.add('unresolved_target') }
+    // Irreversible without deleting a file of the working tree: publishing a package, pruning or removing container data.
+    // No rule decides these; they are scored like the other destructive commands instead of passing unseen.
+    else if (['npm', 'pnpm', 'yarn', 'cargo'].includes(cmd) && args.find(a => !isFlag(a)) === 'publish') destructive = true
+    else if (cmd === 'docker' || cmd === 'podman') {
+      const words = args.filter(a => !isFlag(a))
+      if (words.includes('prune') || ['rm', 'rmi'].includes(words[0]) || (['volume', 'image', 'container', 'network'].includes(words[0]) && words[1] === 'rm')) destructive = true
+    }
   }
   return { destructive, floor: [...reasons], targets, paths: [...new Set(absolute)] }
 }

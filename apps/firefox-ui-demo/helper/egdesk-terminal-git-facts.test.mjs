@@ -58,3 +58,14 @@ test('the facts drive the gate rules: tracked files and a dirty worktree require
   assert.deepEqual(classifyCommand('rm -rf build', { cwd: null }).floor, ['unresolved_target'])
   assert.deepEqual(classifyCommand('rm -rf /work/app/build', { cwd: undefined }).floor, ['outside_cwd'])
 })
+
+test('irreversible commands that delete no file of the working tree are scored, not waved through; one command line keeps its worst command', () => {
+  for (const command of ['npm publish', 'pnpm publish --access public', 'cargo publish', 'docker system prune -af', 'docker volume rm data', 'docker rm -f web', 'podman image prune -a'])
+    assert.deepEqual([classifyCommand(command, { cwd: '/work/app' }).destructive, classifyCommand(command, { cwd: '/work/app' }).floor], [true, []], command)
+  for (const command of ['npm test', 'npm run publish-docs', 'docker ps', 'docker build .', 'cargo build'])
+    assert.equal(classifyCommand(command, { cwd: '/work/app' }).destructive, false, command)
+  // a harmless chmod after a destructive command must not clear it
+  assert.equal(classifyCommand('rm -rf dist && chmod 644 notes.txt', { cwd: '/work/app' }).destructive, true)
+  assert.equal(classifyCommand('chmod 644 notes.txt', { cwd: '/work/app' }).destructive, false)
+  assert.equal(classifyCommand('chmod -R 777 .', { cwd: '/work/app' }).destructive, true)
+})
