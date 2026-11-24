@@ -1246,6 +1246,8 @@ export class ContextRuntime {
               reject('SPILL_EXPIRED', 'The spilled tool result is no longer kept', 410)
             }
             assertActive()
+            // The working-memory re-read counter (absent unless the gate's flag set it): the model went back to a spill of this run.
+            try { this.onSpillRead?.(run, { sourceId: args.snapshotId, range: args.range ?? null }) } catch { /* counting never changes a read */ }
           }
           const readId = randomUUID()
           this.runtime.emit(run, 'context.read.started', { readId, sourceId: args.snapshotId })

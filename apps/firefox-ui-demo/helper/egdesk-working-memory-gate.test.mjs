@@ -75,11 +75,11 @@ test('templates are fixed strings built from runtime numbers only', () => {
 
 test('off = unchanged and zero requests; a short result is never touched in any mode', async () => {
   const log = buildLog(), mock = mockDecisions(sensiblePolicy)
-  const off = await gateToolOutput({ ...log, mode: 'off', enabled: true, client: mock.client, egress: allow() })
+  const off = await gateToolOutput({ design: 'choice', ...log, mode: 'off', enabled: true, client: mock.client, egress: allow() })
   assert.deepEqual([off.text === log.text, off.touched, off.reason, off.requests], [true, false, 'mode_off', 0])
   const short = shortResult()
   for (const mode of ['advisory', 'on']) {
-    const result = await gateToolOutput({ ...short, mode, enabled: true, rules: true, client: mock.client, egress: allow(), spill: createSpillStore({ dir: tmp() }) })
+    const result = await gateToolOutput({ design: 'choice', ...short, mode, enabled: true, rules: true, client: mock.client, egress: allow(), spill: createSpillStore({ dir: tmp() }) })
     assert.deepEqual([result.text === short.text, result.touched, result.reason, result.requests], [true, false, 'below_threshold', 0])
   }
   assert.equal(mock.calls.length, 0)
@@ -89,7 +89,7 @@ test('advisory records what it WOULD do and changes nothing; on without the flag
   const log = buildLog()
   for (const [mode, reason] of [['advisory', 'advisory'], ['on', 'flag_off']]) {
     const mock = mockDecisions(sensiblePolicy), calibration = recorder(), dir = tmp()
-    const result = await gateToolOutput({ ...log, mode, client: mock.client, egress: allow(), spill: createSpillStore({ dir }), calibration })
+    const result = await gateToolOutput({ design: 'choice', ...log, mode, client: mock.client, egress: allow(), spill: createSpillStore({ dir }), calibration })
     assert.equal(result.text, log.text); assert.equal(result.touched, false); assert.equal(result.reason, reason); assert.equal(result.requests, 1)
     assert.ok(result.shadow.tokensAfter < result.tokensBefore * 0.3, 'the shadow plan shows the saving it would have made')
     assert.ok(result.shadow.plan.some(row => row.action !== 'inject_full' && row.by === 'decision'))
@@ -105,10 +105,10 @@ test('advisory records what it WOULD do and changes nothing; on without the flag
 test('on + flag: 300-line build log keeps the one real error, the edited path and the summary verbatim; spilled lines can be read back exactly', async () => {
   // A judge that prefers to keep everything reachable: spill instead of collapse.
   const log = buildLog(), mock = mockDecisions((block, values) => (block.anchor_lines > 0 && block.lines <= 12 ? 'inject_full' : values.includes('spill_scratch') ? 'spill_scratch' : 'collapse_template')), dir = tmp(), spill = createSpillStore({ dir })
-  const result = await gateToolOutput({ ...log, mode: 'on', enabled: true, client: mock.client, egress: allow(), spill })
+  const result = await gateToolOutput({ design: 'choice', ...log, mode: 'on', enabled: true, client: mock.client, egress: allow(), spill })
   assert.equal(result.touched, true); assert.equal(result.source, 'decision'); assert.equal(result.requests, 1)
   // The same log with a judge that calls progress lines noise: collapsed, nothing stored, no pointer, anchors still there.
-  const collapseDir = tmp(), collapsed = await gateToolOutput({ ...log, mode: 'on', enabled: true, client: mockDecisions(sensiblePolicy).client, egress: allow(), spill: createSpillStore({ dir: collapseDir }) })
+  const collapseDir = tmp(), collapsed = await gateToolOutput({ design: 'choice', ...log, mode: 'on', enabled: true, client: mockDecisions(sensiblePolicy).client, egress: allow(), spill: createSpillStore({ dir: collapseDir }) })
   assert.deepEqual([collapsed.touched, collapsed.text.includes('Re-read:'), readdirSync(collapseDir).length, collapsed.spillId], [true, false, 0, undefined])
   for (const must of log.mustKeep) assert.ok(collapsed.text.split('\n').includes(must), must)
   for (const must of log.mustKeep) assert.ok(result.text.split('\n').includes(must), must)
@@ -138,7 +138,7 @@ test('on + flag: 300-line build log keeps the one real error, the edited path an
 
 test('2,000-line grep: the two goal hits stay; the rest is one pointer away', async () => {
   const grep = grepOutput(), mock = mockDecisions(sensiblePolicy), spill = createSpillStore({ dir: tmp() })
-  const result = await gateToolOutput({ ...grep, mode: 'on', enabled: true, client: mock.client, egress: allow(), spill })
+  const result = await gateToolOutput({ design: 'choice', ...grep, mode: 'on', enabled: true, client: mock.client, egress: allow(), spill })
   assert.equal(result.touched, true)
   for (const must of grep.mustKeep) assert.ok(result.text.split('\n').includes(must))
   assert.ok(result.tokensAfter < result.tokensBefore * 0.1)
@@ -159,9 +159,9 @@ test('2,000-line grep: the two goal hits stay; the rest is one pointer away', as
 test('browser page dump: only the named text array is gated; ids, refs and every other field stay byte-identical', async () => {
   const page = pageDump(), mock = mockDecisions(sensiblePolicy), spill = createSpillStore({ dir: tmp() })
   const before = JSON.parse(page.response.contentItems[0].text)
-  const untouched = await gateToolResponse(page.response, { kind: 'page', goal: page.goal, mode: 'on', enabled: true, client: mock.client, egress: allow(), spill })
+  const untouched = await gateToolResponse(page.response, { design: 'choice', kind: 'page', goal: page.goal, mode: 'on', enabled: true, client: mock.client, egress: allow(), spill })
   assert.deepEqual([untouched.touched, untouched.reason, untouched.response === page.response], [false, 'structured', true], 'a JSON result is left alone unless one text array is named')
-  const result = await gateToolResponse(page.response, { jsonTextArray: ['snapshot', 'text'], kind: 'page', goal: page.goal, mode: 'on', enabled: true, client: mock.client, egress: allow(), spill })
+  const result = await gateToolResponse(page.response, { design: 'choice', jsonTextArray: ['snapshot', 'text'], kind: 'page', goal: page.goal, mode: 'on', enabled: true, client: mock.client, egress: allow(), spill })
   assert.equal(result.touched, true)
   const after = JSON.parse(result.response.contentItems[0].text)
   assert.deepEqual({ ...after, snapshot: { ...after.snapshot, text: null } }, { ...before, snapshot: { ...before.snapshot, text: null } })
@@ -174,10 +174,10 @@ test('browser page dump: only the named text array is gated; ids, refs and every
 
 test('non-repetitive prose: the code rule leaves it alone; only a judgment about meaning can pick the one section the goal needs', async () => {
   const article = articleDump()
-  const codeOnly = await gateToolOutput({ ...article, mode: 'on', enabled: true, rules: true, client: null, spill: createSpillStore({ dir: tmp() }) })
+  const codeOnly = await gateToolOutput({ design: 'choice', ...article, mode: 'on', enabled: true, rules: true, client: null, spill: createSpillStore({ dir: tmp() }) })
   assert.deepEqual([codeOnly.touched, codeOnly.reason, codeOnly.text === article.text], [false, 'nothing_to_omit', true], 'no pattern links the goal to the section, so the rule keeps everything')
   const mock = mockDecisions(headingPolicy), spill = createSpillStore({ dir: tmp() })
-  const result = await gateToolOutput({ ...article, mode: 'on', enabled: true, client: mock.client, egress: allow(), spill })
+  const result = await gateToolOutput({ design: 'choice', ...article, mode: 'on', enabled: true, client: mock.client, egress: allow(), spill })
   assert.equal(result.touched, true); assert.equal(result.source, 'decision')
   const kept = result.text.split('\n')
   for (const must of [...article.mustKeep, article.relevantHeading]) assert.ok(kept.includes(must), must)
@@ -194,14 +194,14 @@ test('egress: text leaves only when the run\'s own model permissions allow that 
   const log = buildLog(), page = pageDump()
   const noTerminal = createEgressGate(modelDataPermissions({ toolCeiling: { terminal: 'none', browser: 'read' }, browserGranted: true, runActive: true }))
   const mock = mockDecisions(sensiblePolicy), calibration = recorder()
-  const refused = await gateToolOutput({ ...log, mode: 'on', enabled: true, client: mock.client, egress: noTerminal, spill: createSpillStore({ dir: tmp() }), calibration })
+  const refused = await gateToolOutput({ design: 'choice', ...log, mode: 'on', enabled: true, client: mock.client, egress: noTerminal, spill: createSpillStore({ dir: tmp() }), calibration })
   assert.deepEqual([refused.text === log.text, refused.requests, refused.fallback, mock.calls.length], [true, 0, 'evidence_unavailable', 0])
   const noBrowser = createEgressGate(modelDataPermissions({ runActive: true }))
-  const pageResult = await gateToolResponse(page.response, { jsonTextArray: ['snapshot', 'text'], kind: 'page', mode: 'on', enabled: true, client: mock.client, egress: noBrowser })
+  const pageResult = await gateToolResponse(page.response, { design: 'choice', jsonTextArray: ['snapshot', 'text'], kind: 'page', mode: 'on', enabled: true, client: mock.client, egress: noBrowser })
   assert.deepEqual([pageResult.touched, pageResult.requests, mock.calls.length], [false, 0, 0])
-  const sub = await gateToolOutput({ text: log.text, kind: 'subagent', mode: 'on', enabled: true, client: mock.client, egress: allow() })
+  const sub = await gateToolOutput({ design: 'choice', text: log.text, kind: 'subagent', mode: 'on', enabled: true, client: mock.client, egress: allow() })
   assert.deepEqual([sub.touched, sub.requests, sub.fallback], [false, 0, 'evidence_unavailable'], 'a kind with no egress class is never sent')
-  const none = await gateToolOutput({ ...log, mode: 'on', enabled: true, client: mock.client, egress: null })
+  const none = await gateToolOutput({ design: 'choice', ...log, mode: 'on', enabled: true, client: mock.client, egress: null })
   assert.deepEqual([none.touched, none.requests], [false, 0], 'without the shared gate nothing is sent')
 })
 
@@ -209,26 +209,26 @@ test('a Decision failure or an unsure answer is today\'s behaviour (inject); the
   const log = buildLog()
   for (const code of ['timeout', 'budget_exceeded', 'bad_response']) {
     const mock = mockDecisions(sensiblePolicy, { fail: code }), calibration = recorder()
-    const result = await gateToolOutput({ ...log, mode: 'on', enabled: true, client: mock.client, egress: allow(), spill: createSpillStore({ dir: tmp() }), calibration })
+    const result = await gateToolOutput({ design: 'choice', ...log, mode: 'on', enabled: true, client: mock.client, egress: allow(), spill: createSpillStore({ dir: tmp() }), calibration })
     assert.deepEqual([result.text === log.text, result.touched, result.fallback, result.requests], [true, false, code, 1])
     assert.equal(normalizeEntry(calibration.entries[0]).fallback, code)
   }
   const unsure = mockDecisions(sensiblePolicy, { top: 0.5 }), calibration = recorder()
-  const held = await gateToolOutput({ ...log, mode: 'on', enabled: true, client: unsure.client, egress: allow(), spill: createSpillStore({ dir: tmp() }), calibration })
+  const held = await gateToolOutput({ design: 'choice', ...log, mode: 'on', enabled: true, client: unsure.client, egress: allow(), spill: createSpillStore({ dir: tmp() }), calibration })
   assert.deepEqual([held.text === log.text, held.touched, held.reason], [true, false, 'nothing_to_omit'])
   assert.ok(calibration.entries[0].judgments.every(j => j.would === 'hold' && j.confidence < 0.75))
   const down = mockDecisions(sensiblePolicy, { fail: 'timeout' }), spill = createSpillStore({ dir: tmp() })
-  const ruled = await gateToolOutput({ ...log, mode: 'on', enabled: true, rules: true, client: down.client, egress: allow(), spill })
+  const ruled = await gateToolOutput({ design: 'choice', ...log, mode: 'on', enabled: true, rules: true, client: down.client, egress: allow(), spill })
   assert.deepEqual([ruled.touched, ruled.source, ruled.fallback], [true, 'rules', 'timeout'])
   for (const must of log.mustKeep) assert.ok(ruled.text.split('\n').includes(must))
-  const codeOnly = await gateToolOutput({ ...log, mode: 'on', enabled: true, rules: true, client: null, spill: createSpillStore({ dir: tmp() }) })
+  const codeOnly = await gateToolOutput({ design: 'choice', ...log, mode: 'on', enabled: true, rules: true, client: null, spill: createSpillStore({ dir: tmp() }) })
   assert.deepEqual([codeOnly.touched, codeOnly.source, codeOnly.requests], [true, 'rules', 0], 'the deterministic policy needs no model and no egress')
 })
 
 test('a model that tries to drop anchors cannot: anchors are kept by code whatever it answers', async () => {
   const log = buildLog()
   const hostile = mockDecisions((block, values) => (values.includes('collapse_template') ? 'collapse_template' : values[0]))
-  const result = await gateToolOutput({ ...log, mode: 'on', enabled: true, client: hostile.client, egress: allow() })
+  const result = await gateToolOutput({ design: 'choice', ...log, mode: 'on', enabled: true, client: hostile.client, egress: allow() })
   assert.equal(result.touched, true)
   for (const must of log.mustKeep) assert.ok(result.text.split('\n').includes(must), must)
   assert.equal(result.text.includes('Re-read:'), false, 'no store, no pointer')
@@ -294,7 +294,7 @@ test('long-session blocks: the runtime fixes the first goal and the current turn
 test('request shape: previews are bounded and secret-masked, and the goal is cut to its limit', () => {
   const text = ['$ deploy', ...Array.from({ length: 200 }, (_, i) => `step ${i} token=sk-abcdefghijklmnopqrstuvwxyz0123456789 ${'x'.repeat(300)}`), 'done'].join('\n')
   const { lines, blocks } = enumerateBlockOptions(text, { kind: 'terminal', canSpill: true })
-  const { request, asked } = buildGateRequest({ lines, blocks, kind: 'terminal', exitCode: 0, goal: 'g'.repeat(1000) })
+  const { request, asked } = buildGateRequest({ design: 'choice', lines, blocks, kind: 'terminal', exitCode: 0, goal: 'g'.repeat(1000) })
   const data = request.input.at(-1).content[0].data
   assert.equal(data.goal.length, WM_LIMITS.goalChars)
   assert.equal(asked.length, request.questions.length)
@@ -335,8 +335,9 @@ test('predicate design: every open block is quoted and asked about on its own; t
   const cut = buildGateRequest({ lines: big.lines, blocks: big.blocks, kind: 'page', goal: '요약', design: 'predicates', limits: { ...WM_LIMITS, blockQuoteChars: 300 } })
   assert.match(cut.request.input.at(-1).content, /\[… \d+ more characters of this block are not shown\]/)
   assert.equal(cut.request.input.at(-1).content.includes('sk-abcdefghijklmnopqrstuvwxyz'), false)
-  // The default design is still the N-way choice with previews.
-  assert.equal(buildGateRequest({ lines, blocks, kind: 'page', goal: article.goal }).request.questions[0].type, 'choice')
+  // Since cycle 11 the default design is the quoted yes/no; the N-way choice with previews is still there when asked for.
+  assert.equal(buildGateRequest({ lines, blocks, kind: 'page', goal: article.goal }).request.questions.every(q => q.type === 'predicate'), true)
+  assert.equal(buildGateRequest({ lines, blocks, kind: 'page', goal: article.goal, design: 'choice' }).request.questions[0].type, 'choice')
 })
 
 test('predicate design: the code turns answers into actions; anchors stay; undecided and "needed" blocks are never dropped; a failure is today\'s behaviour', async () => {
@@ -355,18 +356,18 @@ test('predicate design: the code turns answers into actions; anchors stay; undec
   // Undecided (.5) keeps every block.
   const unsure = await gateToolOutput({ ...article, mode: 'on', enabled: true, client: predicateMock(() => 0.5).client, egress: allow(), spill: createSpillStore({ dir: tmp() }), design: 'predicates' })
   assert.deepEqual([unsure.touched, unsure.text === article.text], [false, true])
-  // A judge that says "not needed" to everything: anchors stay verbatim, and every other line of the page is spilled behind a
-  // pointer (re-readable), never dropped. Prose sentences the goal needs are NOT anchors (no pattern links them), so this is the
-  // case the measurement must watch: a wrong "no" costs the model one re-read, not the content.
-  const hostileStore = createSpillStore({ dir: tmp() })
-  const hostile = await gateToolOutput({ ...article, mode: 'on', enabled: true, client: predicateMock(() => 0).client, egress: allow(), spill: hostileStore, design: 'predicates' })
-  const { anchors } = enumerateBlockOptions(article.text, { kind: 'page', goal: article.goal, canSpill: true })
-  for (const index of anchors) assert.ok(hostile.text.split('\n').includes(original[index]), 'anchor ' + index)
-  const covered = new Set()
-  for (const m of hostile.text.matchAll(/spilled \(lines (\d+)-(\d+)\)/g)) for (let n = Number(m[1]); n <= Number(m[2]); n++) covered.add(n)
-  const keptLines = new Set(hostile.text.split('\n'))
-  original.forEach((line, i) => assert.ok(covered.has(i + 1) || keptLines.has(line), 'line ' + (i + 1) + ' is kept or re-readable'))
-  assert.equal(hostile.text.split('\n').includes(article.mustKeep[0]), false, 'and the needed sentence is then only re-readable, which is what a measurement must catch')
+  // Safeguard 2: a judge that says "not needed" to every block is taken as a failed judgment; nothing it decided is applied.
+  const hostileStore = createSpillStore({ dir: tmp() }), hostileCalibration = recorder()
+  const hostile = await gateToolOutput({ ...article, mode: 'on', enabled: true, client: predicateMock(() => 0).client, egress: allow(), spill: hostileStore, calibration: hostileCalibration, design: 'predicates' })
+  assert.deepEqual([hostile.touched, hostile.text === article.text, hostile.fallback], [false, true, 'all_not_needed'])
+  assert.equal(normalizeEntry(hostileCalibration.entries[0]).fallback, 'all_not_needed')
+  // ... also as the default design (no design given), and with the code rules on, which then act as if the judge had not answered
+  const hostileDefault = await gateToolOutput({ ...article, mode: 'on', enabled: true, client: predicateMock(() => 0).client, egress: allow(), spill: createSpillStore({ dir: tmp() }) })
+  assert.deepEqual([hostileDefault.touched, hostileDefault.text === article.text], [false, true])
+  const withRules = await gateToolOutput({ ...article, mode: 'on', enabled: true, rules: true, client: predicateMock(() => 0).client, egress: allow(), spill: createSpillStore({ dir: tmp() }) })
+  const rulesOnly = await gateToolOutput({ ...article, mode: 'on', enabled: true, rules: true, client: null, spill: createSpillStore({ dir: tmp() }) })
+  assert.equal(withRules.text, rulesOnly.text)
+  // One block kept ("needed") and the rest "not needed" is a real judgment: applied (the result above).
   const down = await gateToolOutput({ ...article, mode: 'on', enabled: true, client: predicateMock(needed, { fail: 'timeout' }).client, egress: allow(), spill: createSpillStore({ dir: tmp() }), design: 'predicates' })
   assert.deepEqual([down.touched, down.fallback, down.text === article.text], [false, 'timeout', true])
   // Advisory records the per-block probabilities, content-free.
@@ -376,9 +377,20 @@ test('predicate design: the code turns answers into actions; anchors stay; undec
   const stored = normalizeEntry(calibration.entries[0])
   assert.ok(stored.judgments.length >= 5 && stored.judgments.every(j => j.q === 'wm_block' && Number.isFinite(j.p) && j.threshold === 0.8))
   assert.equal(JSON.stringify(stored).includes('보상'), false)
-  // Process output answered "no" without a store collapses (progress lines), as the rule path does.
+  // Safeguard 1: without a spill store a "not needed" never takes lines out, even of process output (a collapse cannot be read back).
+  // The first asked block is "needed", every other one "not needed" (a real judgment, so safeguard 2 does not apply).
   const log = buildLog()
-  const collapsed = await gateToolOutput({ ...log, mode: 'on', enabled: true, client: predicateMock((id, block) => (/error TS2345|exit code/.test(block) ? 0.99 : 0.01)).client, egress: allow(), design: 'predicates' })
-  assert.equal(collapsed.touched, true); for (const must of log.mustKeep) assert.ok(collapsed.text.split('\n').includes(must))
-  assert.equal(collapsed.text.includes('Re-read:'), false)
+  const firstNeeded = () => { let first = null; return id => { first ??= id; return id === first ? 0.99 : 0.01 } }
+  const kept = await gateToolOutput({ ...log, mode: 'on', enabled: true, client: predicateMock(firstNeeded()).client, egress: allow(), design: 'predicates' })
+  assert.deepEqual([kept.touched, kept.text === log.text], [false, true])
+  // With a store the same answers spill, and every spilled line reads back exactly.
+  const logStore = createSpillStore({ dir: tmp() })
+  const spilled = await gateToolOutput({ ...log, mode: 'on', enabled: true, client: predicateMock(firstNeeded()).client, egress: allow(), spill: logStore, design: 'predicates' })
+  assert.equal(spilled.touched, true); for (const must of log.mustKeep) assert.ok(spilled.text.split('\n').includes(must))
+  const logLines = log.text.split('\n')
+  assert.ok(pointer(spilled.text).length > 0)
+  for (const p of pointer(spilled.text)) assert.equal(logStore.read(p.snapshotId, p.range).text, logLines.slice(p.range.startLine - 1, p.range.endLine).join('\n'))
+  // ... and when the judge calls every open block of the log "not needed" (only the anchored error lines would be left), everything stays.
+  const allNo = await gateToolOutput({ ...log, mode: 'on', enabled: true, client: predicateMock(() => 0.01).client, egress: allow(), spill: createSpillStore({ dir: tmp() }), design: 'predicates' })
+  assert.deepEqual([allNo.touched, allNo.text === log.text, allNo.fallback], [false, true, 'all_not_needed'])
 })

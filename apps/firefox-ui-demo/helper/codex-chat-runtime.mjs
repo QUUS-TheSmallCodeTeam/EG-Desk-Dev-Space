@@ -14,7 +14,7 @@ import { DRAFT_CHECK_LIMITS, checkDraft } from './egdesk-draft-check.mjs'
 import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { COMMAND_GATE_TIMEOUT_MS, assessCommand, classifyCommand, sessionRuleCoversFloor } from './egdesk-terminal-command-gate.mjs'
 import { createEngineCommandWatch } from './egdesk-engine-command-watch.mjs'
-import { gateRuntimeToolResult, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
+import { createSpillRereadCounter, gateRuntimeToolResult, toolResultConsumer, workingMemoryActivity } from './egdesk-working-memory-wiring.mjs'
 import { homedir } from 'node:os'
 import { createInternalTurns } from './codex-internal-turn.mjs'
 import { FLOW_COPY, FLOW_LIMITS, attentionOf, audienceFacts, beatFlowFacts, cleanIntermediate, deriveFlowKind, enumerateOptions, flowPredicates, idleFlowFacts, messageEvidence, pointerDecision, pointerPredicates, pointerPrompt, pointerRoute, runContext, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
@@ -5781,8 +5781,11 @@ export class CodexChatRuntime {
     let goal = ''
     try { goal = this.store?.getAcceptedText?.(run.clientThreadId, run.requestId) || '' } catch { /* anchors then come from the output alone */ }
     const paths = (run.activities || []).filter(item => item.kind === 'fileChange').flatMap(item => (item.detail?.changes || []).map(change => change?.path)).filter(value => typeof value === 'string').slice(-16)
+    // The spilled-block re-read counter exists only while the gate's flag is set: the context runtime reports reads of this run's spills.
+    this.spillRereads ||= createSpillRereadCounter({ calibrationLog: { record: raw => this.decisionContext?.calibrationLog?.record?.(raw) } })
+    if (this.contexts && typeof this.contexts === 'object' && !this.contexts.onSpillRead) this.contexts.onSpillRead = (readRun, info) => this.spillRereads.read({ run: readRun, ...info })
     return gateRuntimeToolResult({ response, flag, provider, tool: event.tool, namespace: event.namespace || null, engineId: this.runEngine(run), run, contexts: this.contexts, goal, paths,
-      egress: this.decisionEgressFor(run), decision: { mode: () => setup.mode(), configured: () => setup.configured(), client: setup.client }, calibrationLog: setup.calibrationLog })
+      egress: this.decisionEgressFor(run), decision: { mode: () => setup.mode(), configured: () => setup.configured(), client: setup.client }, calibrationLog: setup.calibrationLog, rereads: this.spillRereads })
       .then(result => { if (result.touched) this.noteWorkingMemory(run, result); return result.response }, () => response)
   }
 

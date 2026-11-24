@@ -45,7 +45,7 @@ export function claudeOverLimit(response, engineId, limitTokens = CLAUDE_MCP_OUT
  * `response` is returned as the same object whenever nothing is applied. `judge` is the not-awaited advisory promise (tests only).
  */
 export async function gateRuntimeToolResult({ response, flag, provider, tool, namespace = null, engineId = 'codex', run = null, contexts = null, goal = '', paths = [],
-  egress = null, decision = null, calibrationLog = null, limits = WM_LIMITS, claudeLimitTokens = CLAUDE_MCP_OUTPUT_LIMIT_TOKENS } = {}) {
+  egress = null, decision = null, calibrationLog = null, limits = WM_LIMITS, claudeLimitTokens = CLAUDE_MCP_OUTPUT_LIMIT_TOKENS, rereads = null } = {}) {
   const same = reason => ({ response, touched: false, reason })
   if (flag !== 'advisory' && flag !== 'on') return same('flag_off')
   if (provider === contexts) return same('receipt_hashed')
@@ -72,7 +72,45 @@ export async function gateRuntimeToolResult({ response, flag, provider, tool, na
     try { calibrationLog?.record?.({ feature: 'working_memory', mode: flag, judgments: [], attached: gated.touched === true, candidates: plan.length, wm: report }) } catch { /* recording never changes a result */ }
   }
   const judge = adviseOnProse({ text: target.text, consumer, goal, paths, egress, decision, calibrationLog, limits })
+  // A real spill (flag 'on'): remember which line ranges the code rules took out, and what the advisory judge said about the same ranges.
+  if (gated.touched && gated.spillId && rereads?.note) { try { rereads.note({ run, spillId: gated.spillId, plan, judge, mode: flag }) } catch { /* counting never changes a result */ } }
   return { response: gated.touched ? gated.response : response, touched: gated.touched === true, reason: gated.reason ?? null, report, ...(gated.spillId ? { spillId: gated.spillId } : {}), ...(judge ? { judge } : {}) }
+}
+
+/**
+ * The spilled-block re-read counter (cycle 11). Content-free: line ranges and counts, never text, ids or tool names in the record.
+ * note() is called when the code rules really spilled a tool result (flag 'on'); read() when the model reads that spill back with
+ * egdesk_read_source. A spilled block the model reads again is direct evidence it was needed. Each re-read block is also matched with
+ * what the advisory judge said about the same line range, so the record says how often a judge "not needed" would have hidden a
+ * block the model went back for (judgedNotNeeded), against judgedNeeded and unjudged.
+ */
+export function createSpillRereadCounter({ calibrationLog = null } = {}) {
+  // Keyed by the run's request id (the chat runtime and the context runtime may hold different objects for one run); bounded.
+  const byRun = new Map(), MAX_RUNS = 64
+  const keyOf = run => (run && typeof run === 'object' ? (typeof run.requestId === 'string' && run.requestId ? `r:${run.requestId}` : run) : null)
+  return {
+    note({ run, spillId, plan, judge = null, mode = 'on' }) {
+      const k = keyOf(run); if (!k || typeof spillId !== 'string') return
+      const spilled = (plan || []).filter(row => row.action === 'spill_scratch' && Number.isInteger(row.start) && Number.isInteger(row.end)).map(row => ({ start: row.start, end: row.end }))
+      if (!spilled.length) return
+      if (!byRun.has(k)) { byRun.set(k, new Map()); while (byRun.size > MAX_RUNS) byRun.delete(byRun.keys().next().value) }
+      const entry = { spilled, judged: null, mode, reads: 0 }
+      byRun.get(k).set(spillId, entry)
+      if (judge?.then) judge.then(result => { entry.judged = result?.shadow?.plan ?? null }, () => {})
+    },
+    read({ run, sourceId, range = null }) {
+      const entry = byRun.get(keyOf(run))?.get(sourceId)
+      if (!entry) return null
+      const lo = Number.isInteger(range?.startLine) ? range.startLine : 1, hi = Number.isInteger(range?.endLine) ? range.endLine : Number.MAX_SAFE_INTEGER
+      const hit = entry.spilled.filter(b => b.start <= hi && b.end >= lo)
+      const verdict = b => { const j = (entry.judged || []).find(row => row.start === b.start && row.end === b.end && row.by === 'decision'); return !j ? 'unjudged' : j.action === 'inject_full' ? 'needed' : 'notNeeded' }
+      entry.reads++
+      const counts = { rereadBlocks: hit.length, rereadJudgedNotNeeded: hit.filter(b => verdict(b) === 'notNeeded').length, rereadJudgedNeeded: hit.filter(b => verdict(b) === 'needed').length,
+        rereadUnjudged: hit.filter(b => verdict(b) === 'unjudged').length, spilledBlocks: entry.spilled.length, rereadWholeSpill: !range }
+      try { calibrationLog?.record?.({ feature: 'working_memory', mode: entry.mode, judgments: [], attached: true, wm: { reread: counts } }) } catch { /* recording never changes a result */ }
+      return counts
+    },
+  }
 }
 
 /** Counts read back from the fixed lines of a gated text: how many lines were left out, in how many collapsed and spilled runs. Numbers only. */
@@ -124,8 +162,8 @@ function adviseOnProse({ text, consumer, goal, paths, egress, decision, calibrat
     if (leftByRules < WM_JUDGE_MIN_TOKENS) return null
     const calibration = calibrationLog?.record ? { record: raw => calibrationLog.record({ ...raw, mode: 'advisory', attached: false }) } : null
     // mode 'advisory' in the gate: ask, record, change nothing, write nothing. The spill object only makes the option visible.
-    // decision.judgeDesign: 'choice' (default, unchanged) or 'predicates' (content-quoting yes/no per block); either way advisory only.
-    return gateToolOutput({ text, kind: consumer.kind, goal, paths, mode: 'advisory', client: decision.client, egress, calibration, spill: { put: () => null }, limits, design: decision.judgeDesign === 'predicates' ? 'predicates' : 'choice' })
+    // decision.judgeDesign: 'predicates' (default since cycle 11: content-quoting yes/no per block) or 'choice'; either way advisory only.
+    return gateToolOutput({ text, kind: consumer.kind, goal, paths, mode: 'advisory', client: decision.client, egress, calibration, spill: { put: () => null }, limits, design: decision.judgeDesign === 'choice' ? 'choice' : 'predicates' })
       .then(result => ({ requests: result.requests, shadow: result.shadow ?? null, fallback: result.fallback ?? null }), () => null)
   } catch { return null }
 }
