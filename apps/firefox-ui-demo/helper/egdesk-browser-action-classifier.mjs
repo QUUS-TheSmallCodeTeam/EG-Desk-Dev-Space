@@ -60,28 +60,36 @@ const CANCEL_WORDS = new RegExp([
   '\\bcancel\\s*(?:my\\s*)?(?:subscription|order|booking|reservation|payment|purchase|membership|plan)\\b',
   '(?:구독|주문|예약|예매|결제|구매|후원|정기\\s*결제|자동\\s*결제|멤버십)\\s*(?:취소|해지|중단|철회)',
   '取消订阅',
+  // L8 C4: the plural and reversed word order of an address path ("subscriptions cancel"), contracts and accounts.
+  '\\b(?:subscription|order|booking|reservation|membership|contract|plan|payment|account)s?\\s*cancel(?:l?ation)?\\b',
+  '\\bcancel(?:l?ation)?\\s*(?:of\\s*)?(?:my\\s*|your\\s*)?(?:contract|account)s?\\b',
+  '\\b(?:terminate|end)\\s*(?:my\\s*|your\\s*)?(?:subscription|contract|membership|plan)\\b',
+  '(?:계약|약정|서비스|회원|요금제|정기\\s*구독|정기\\s*배송|이용권)\\s*(?:취소|해지|중단|철회|탈퇴)',
 ].join('|'), 'i')
 const PAY_WORDS = vocabulary(
   ['pay', 'payment', 'pay now', 'buy', 'buy now', 'purchase', 'checkout', 'check out', 'place order', 'place the order',
     'place your order', 'confirm order', 'confirm purchase', 'submit order', 'order now', 'complete order', 'complete purchase', 'complete booking', 'book now', 'subscribe', 'donate',
     'confirm and pay', 'transfer money', 'send money', 'top up', 'add funds', 'withdraw', 'place bid', 'bid',
-    'start trial', 'start free trial', 'upgrade'],
-  ['결제', '지불', '구매', '구입', '주문하기', '주문 완료', '주문 확정', '바로 주문', '주문 결제', '송금', '이체',
+    'start trial', 'start free trial', 'upgrade',
+    'order place', 'orders place', 'order confirm', 'order submit', 'order complete', 'confirm your order', 'proceed to payment', 'proceed to checkout'],
+  ['주문 하기', '결제', '지불', '구매', '구입', '주문하기', '주문 완료', '주문 확정', '바로 주문', '주문 결제', '송금', '이체',
     '충전하기', '포인트 충전', '머니 충전', '선물하기', '후원', '기부', '구독', '예약하기', '예약 확정', '예약 완료',
     '예매', '입찰', '매수', '매도', '환전', '출금', '인출', '할부', '카드 등록', '무료 체험 시작', '업그레이드',
     '付款', '支付', '购买', '下单', '结账', '结算', '充值', '订阅', '转账', '捐款'],
 )
 const GRANT_WORDS = vocabulary(
   ['authorize', 'authorise', 'allow access', 'grant access', 'give access', 'grant permission', 'give permission',
-    'connect account', 'link account'],
-  ['권한 허용', '권한 부여', '접근 허용', '액세스 허용', '엑세스 허용', '계정 연결', '계정 연동', '연동하기', '앱 연결',
+    'connect account', 'link account',
+    'grant', 'permission grant', 'allow notifications', 'allow location', 'allow camera', 'allow microphone', 'allow permission', 'allow permissions'],
+  ['알림 허용', '위치 허용', '카메라 허용', '마이크 허용', '쓰기 허용', '권한 승인', '권한 허용', '권한 부여', '접근 허용', '액세스 허용', '엑세스 허용', '계정 연결', '계정 연동', '연동하기', '앱 연결',
     '정보 제공 동의', '정보 제공에 동의', '授权', '允许访问', '授予访问'],
 )
 const DELETE_WORDS = vocabulary(
   ['delete', 'remove', 'discard', 'deactivate', 'destroy', 'erase', 'purge', 'trash', 'unsubscribe', 'uninstall',
     'revoke', 'disconnect', 'terminate', 'wipe', 'empty trash', 'clear all', 'clear history', 'clear data',
-    'cancel subscription', 'cancel my subscription', 'cancel account', 'cancel membership', 'cancel order', 'close account'],
-  ['삭제', '제거', '지우기', '비우기', '휴지통', '탈퇴', '해지', '초기화', '비활성화', '폐기', '연결 해제', '연동 해제',
+    'cancel subscription', 'cancel my subscription', 'cancel account', 'cancel membership', 'cancel order', 'close account',
+    'log out', 'logout', 'log off', 'logoff', 'sign out', 'signout', 'sign off', 'close my account', 'close your account', 'account close', 'account closure'],
+  ['로그아웃', '로그 아웃', '로그오프', '계정 폐쇄', '계정 닫기', '삭제', '제거', '지우기', '비우기', '휴지통', '탈퇴', '해지', '초기화', '비활성화', '폐기', '연결 해제', '연동 해제',
     '권한 해제', '등록 해제', '删除', '移除', '清空', '注销', '取消订阅'],
 )
 const SUBMIT_WORDS = vocabulary(
@@ -96,6 +104,9 @@ const SUBMIT_WORDS = vocabulary(
 const COOKIE_REJECT = /cookie|쿠키|^reject\s*all$|^(?:모두|전체)\s*거부$|^(?:拒绝所有|全部拒绝|拒绝全部)$/i
 // Affirmative labels grant access on a consent page; "Allow" alone elsewhere is a cookie banner's.
 const AFFIRMATIVE = /^(?:allow|continue|accept|approve|agree|yes)(?:\b|$)|^(?:허용|계속|수락|승인|동의|확인)|^(?:예|네)$|^(?:允许|继续|接受|同意|批准)/i
+// A link's destination (input.href === true) is not a cookie banner's button: a bare allow/permit/허용 in
+// the address path names a grant.
+const HREF_GRANT = /\b(?:allow|permit)\b|허용/i
 const CONSENT_PATH = /oauth|authori[sz]e|consent/i
 // A generic confirmation label: pay when a money amount is next to it.
 const GENERIC_CONFIRM = /^(?:confirm|ok|okay|continue|next|proceed|agree|submit|yes)(?:\b|$)|^(?:확인|확정|다음|계속|진행|동의|완료)|^(?:예|네)$|^(?:确认|确定|继续|下一步)/i
@@ -144,13 +155,14 @@ function result(category, reason, extra = {}) {
 
 // The label decides pay, grant and delete (nanobrowser byName order: pay, grant,
 // consent affirmative, money next to a generic confirm, delete); cancellations first.
-function byName(label, amount, url) {
+function byName(label, amount, url, href = false) {
   if (!label) return null
   let found
   if ((found = term(CANCEL_WORDS, label))) return result('delete', 'cancel-vocabulary', { term: found })
   if ((found = term(PAY_WORDS, label))) return result('pay', 'pay-vocabulary', { term: found })
   // Grant before submit, so a consent form's submit button is a grant.
   if ((found = term(GRANT_WORDS, label))) return result('grant', 'grant-vocabulary', { term: found })
+  if (href && (found = term(HREF_GRANT, label))) return result('grant', 'grant-destination', { term: found })
   if (onConsentPage(url) && (found = term(AFFIRMATIVE, label))) return result('grant', 'consent-affirmative', { term: found })
   if (amount && (found = term(GENERIC_CONFIRM, label))) return result('pay', 'amount-with-confirm', { term: found })
   if ((found = term(DELETE_WORDS, label))) return result('delete', 'delete-vocabulary', { term: found })
@@ -222,7 +234,7 @@ function classifyEnter(input, label, role, amount) {
 
 function classifyActivate(input, label, role, amount) {
   if (NON_ACTIVATING_ROLES.has(role)) return result('none', 'non-activating-role', { source: 'role' })
-  const named = byName(label, amount, input.url)
+  const named = byName(label, amount, input.url, input.href === true)
   if (named) return { ...named, source: 'label' }
   if (DELETE_CLASSES.test(text(input.classes, 300))) return result('delete', 'delete-class', { source: 'class' })
   const form = input.form
