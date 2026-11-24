@@ -22,12 +22,16 @@ import { DECISIONS_ENDPOINT, DECISION_MODEL, normalizeDecisionResponse, validate
 //  { "set": name, "tokenCeiling": int, "passRule": text,
 //    "requests": [ { "id", "file": "requests/<id>.json", "sha256": hex of the exact file bytes, "estInputTokens": int,
 //        "expect": [ { "name", "kind": "predicate", "min"?: 0..1, "max"?: 0..1, "severity": "hard"|"soft", "note" },
-//                    { "name", "kind": "choice", "equals"?: value, "oneOf"?: [values], "minConfidence"?: 0..1, "severity", "note" },
+//                    { "name", "kind": "choice", "equals"?: value, "oneOf"?: [values], "minConfidence"?: 0..1,
+//                      "whenAccepted"?: { "minConfidence": 0..1, "minMargin": 0..1 }, "severity", "note" },
 //                    { "name", "kind": "score", "min"?: level, "max"?: level, "minConfidence"?: 0..1, "maxConfidence"?: 0..1, "severity", "note" } ],
 //        "recordOnly"?: true } ] }
 // A request passes when it has no failed hard check. An answer that is refused, missing or malformed fails its check.
 // A request with no expectations is refused unless it says "recordOnly": true; a record-only request is sent and its answers kept,
 // but it is never counted as passed (its state is "recorded"), so a pass can never mean "nothing was checked".
+// A choice expectation with whenAccepted checks only an answer the product would install at that bar (confidence >= minConfidence and
+// top minus the runner-up >= minMargin, the runner-up being at least the unreported mass): below the bar it passes, because nothing is
+// installed; at or above it, the choice must be one of the expected values. A hard whenAccepted check therefore fails only on a wrong install.
 // A score expectation is the conjunction of the bounds it gives (min <= score <= max, minConfidence <= confidence <= maxConfidence).
 const OFFICIAL = DECISIONS_ENDPOINT
 if (OFFICIAL !== 'https://api.openai.com/v1/decisions') throw new Error('unexpected Decisions endpoint')
@@ -65,7 +69,14 @@ function checkExpectation(raw, where, questions) {
     const wanted = hasEquals ? [raw.equals] : raw.oneOf
     if (!Array.isArray(wanted) || !wanted.length || wanted.some(value => !values.includes(value))) bad(`${where} ${raw.name}: expected value is not one of the question's choices`)
     if (raw.minConfidence !== undefined && !unit(raw.minConfidence)) bad(`${where} ${raw.name}: minConfidence must be a probability`)
-    return { ...base, ...(hasEquals ? { equals: raw.equals } : { oneOf: [...raw.oneOf] }), ...(raw.minConfidence !== undefined ? { minConfidence: raw.minConfidence } : {}), options: values.length }
+    if (raw.whenAccepted !== undefined) {
+      const w = raw.whenAccepted
+      if (!w || typeof w !== 'object' || Array.isArray(w) || Object.keys(w).sort().join() !== 'minConfidence,minMargin' || !unit(w.minConfidence) || !unit(w.minMargin))
+        bad(`${where} ${raw.name}: whenAccepted needs exactly { minConfidence, minMargin }, both probabilities`)
+      if (raw.minConfidence !== undefined) bad(`${where} ${raw.name}: give either minConfidence or whenAccepted, not both`)
+    }
+    return { ...base, ...(hasEquals ? { equals: raw.equals } : { oneOf: [...raw.oneOf] }), ...(raw.minConfidence !== undefined ? { minConfidence: raw.minConfidence } : {}),
+      ...(raw.whenAccepted !== undefined ? { whenAccepted: { minConfidence: raw.whenAccepted.minConfidence, minMargin: raw.whenAccepted.minMargin } } : {}), options: values.length }
   }
   if (raw.kind === 'score') {
     if (question.type !== 'score') bad(`${where} ${raw.name}: expected a score but the question is ${question.type}`)
@@ -166,9 +177,18 @@ export function scoreExpectation(expectation, answer) {
   const wanted = expectation.equals !== undefined ? [expectation.equals] : expectation.oneOf
   const picked = wanted.includes(answer.choice)
   const confident = expectation.minConfidence === undefined || answer.confidence >= expectation.minConfidence
-  return { ...out, ...(expectation.equals !== undefined ? { equals: expectation.equals } : { oneOf: expectation.oneOf }), ...(expectation.minConfidence !== undefined ? { minConfidence: expectation.minConfidence } : {}),
-    pass: picked && confident, ...(picked && !confident ? { reason: 'below_min_confidence' } : !picked ? { reason: 'other_choice' } : {}),
-    observed: { choice: answer.choice, confidence: answer.confidence, top, second, margin: top !== null && second !== null ? Math.round((top - second) * 1e6) / 1e6 : null, options: expectation.options } }
+  const observed = { choice: answer.choice, confidence: answer.confidence, top, second, margin: top !== null && second !== null ? Math.round((top - second) * 1e6) / 1e6 : null, options: expectation.options }
+  const head = { ...out, ...(expectation.equals !== undefined ? { equals: expectation.equals } : { oneOf: expectation.oneOf }), ...(expectation.minConfidence !== undefined ? { minConfidence: expectation.minConfidence } : {}) }
+  if (expectation.whenAccepted) {
+    const { minConfidence, minMargin } = expectation.whenAccepted
+    const chosen = ranked.find(row => row.value === answer.choice)?.probability ?? top
+    const rest = ranked.filter(row => row.value !== answer.choice).map(row => row.probability)
+    const unreported = Math.max(0, 1 - ranked.reduce((sum, row) => sum + (Number.isFinite(row.probability) ? row.probability : 0), 0))
+    const runnerUp = Math.max(0, ...rest, ranked.length < expectation.options ? unreported : 0)
+    const accepted = Number.isFinite(answer.confidence) && answer.confidence >= minConfidence && Number.isFinite(chosen) && chosen - runnerUp >= minMargin - 1e-9
+    return { ...head, whenAccepted: expectation.whenAccepted, pass: !accepted || picked, ...(accepted && !picked ? { reason: 'wrong_install' } : {}), observed: { ...observed, accepted } }
+  }
+  return { ...head, pass: picked && confident, ...(picked && !confident ? { reason: 'below_min_confidence' } : !picked ? { reason: 'other_choice' } : {}), observed }
 }
 
 export function scoreRequest(request, result) {

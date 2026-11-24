@@ -318,3 +318,32 @@ test('the existing guarantees hold with score and record-only requests in the pl
   assert.equal(refusedRun.calls.length, 0)
   for (const call of stop.calls) { assert.equal(call.url, 'https://api.openai.com/v1/decisions'); assert.equal(call.init.redirect, 'error') }
 })
+
+test('whenAccepted: a choice check that fails only on a wrong install at the given bar; validated at load', () => {
+  const ok = fixture(plan => { plan.requests[2].expect = [{ name: 'target', kind: 'choice', oneOf: ['p1', 'p2'], whenAccepted: { minConfidence: 0.85, minMargin: 0.2 }, severity: 'hard', note: 'no wrong install' }] })
+  const loaded = loadPlan(ok.planFile)
+  const e = loaded.requests[2].expect[0]
+  assert.deepEqual(e.whenAccepted, { minConfidence: 0.85, minMargin: 0.2 })
+  const answer = (value, confidence, rows) => ({ type: 'choice', choice: value, confidence, probabilities: rows.map(([v, p]) => ({ value: v, probability: p })) })
+  // Wrong top choice, but below the bar: nothing would be installed, so the check passes.
+  assert.equal(scoreExpectation(e, answer('none', 0.6, [['none', 0.73], ['p1', 0.2], ['p2', 0.07]])).pass, true)
+  // Wrong top choice above both bars: a wrong install.
+  const wrong = scoreExpectation(e, answer('none', 0.95, [['none', 0.97], ['p1', 0.02], ['p2', 0.01]]))
+  assert.deepEqual([wrong.pass, wrong.reason, wrong.observed.accepted], [false, 'wrong_install', true])
+  // Confidence clears the bar but the margin does not: not installed.
+  assert.equal(scoreExpectation(e, answer('none', 0.9, [['none', 0.55], ['p1', 0.4], ['p2', 0.05]])).pass, true)
+  // A partial distribution: the unreported mass counts as the runner-up, as the product does.
+  assert.equal(scoreExpectation(e, answer('none', 0.9, [['none', 0.5], ['p1', 0.05]])).pass, true) // 0.45 unreported: margin 0.05
+  assert.equal(scoreExpectation(e, answer('none', 0.9, [['none', 0.6], ['p1', 0.05]])).pass, false) // 0.35 unreported: margin 0.25, installed
+  // Exactly at the bar is accepted (inclusive), and an expected value installed is a pass.
+  assert.equal(scoreExpectation(e, answer('none', 0.85, [['none', 0.6], ['p1', 0.4], ['p2', 0]])).pass, false)
+  assert.equal(scoreExpectation(e, answer('p2', 0.99, [['p2', 0.99], ['p1', 0.01], ['none', 0]])).pass, true)
+  // A refused or missing answer still fails its check.
+  assert.equal(scoreExpectation(e, undefined).pass, false)
+  for (const [bad, why] of [[{ minConfidence: 0.85 }, /whenAccepted needs exactly/], [{ minConfidence: 2, minMargin: 0.2 }, /whenAccepted needs exactly/], [[0.85, 0.2], /whenAccepted needs exactly/]]) {
+    const f = fixture(plan => { plan.requests[2].expect = [{ name: 'target', kind: 'choice', oneOf: ['p1'], whenAccepted: bad, severity: 'hard', note: 'x' }] })
+    assert.throws(() => loadPlan(f.planFile), why)
+  }
+  const both = fixture(plan => { plan.requests[2].expect = [{ name: 'target', kind: 'choice', oneOf: ['p1'], minConfidence: 0.5, whenAccepted: { minConfidence: 0.85, minMargin: 0.2 }, severity: 'hard', note: 'x' }] })
+  assert.throws(() => loadPlan(both.planFile), /either minConfidence or whenAccepted/)
+})
