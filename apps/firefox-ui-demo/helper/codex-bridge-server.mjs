@@ -510,6 +510,9 @@ const inheritedMcp = createInheritedMcpSync({
   onChange: servers => broadcast({ type: 'mcp.inherited', v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, inheritedMcp: servers, ts: Date.now() }),
 })
 const ensureChatAuth = createChatEngineAuth({ chat, refreshCodexAccount: refreshAccountState, getCodexAuth: () => authState })
+// DM [보기 추천] (the person types options and asks for a recommendation) is hidden pending the owner's decision: it contradicts
+// "the person just talks". Developer flag, default off: without it the capability is not listed and the route does not exist.
+const CHAT_CHOICE_ENABLED = process.env.EGDESK_CHAT_CHOICE === 'on'
 const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)
 const handleComputerControlHttp = createComputerControlHttpHandler(chat, { port: BRIDGE_PORT })
 // SUB-11: switching the Claude profile waits until no Claude turn runs (a
@@ -994,6 +997,8 @@ const bridgeServer = createServer(async (req, res) => {
   }
   const route = url.pathname
   // The paid closed-choice route is POST-only, including at the server's preflight boundary.
+  // Flag off: the route does not exist (no later handler may serve it either).
+  if (route === '/chat/choice' && !CHAT_CHOICE_ENABLED) { sendJson(res, 404, { code: 'CHAT_CHOICE_DISABLED' }); return }
   if (route === '/chat/choice' && await handleChatHttp(req, res, url)) return
   // Private management has its own POST-only contract, including preflight.
   if (route.startsWith('/memory-evidence/') && await handleMemoryEvidenceHttp(req, res, url)) return
@@ -1084,7 +1089,7 @@ const bridgeServer = createServer(async (req, res) => {
       chat: chat.snapshot(),
       capabilities: {
         auth: ['status', 'start', 'cancel', 'signout', 'usage', 'device-code'],
-        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', 'stateless', 'fork', 'choice', ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
+        chat: chatStore && chat.storeHealthy ? ['send', 'stream', 'resume', 'interrupt', 'approvals', 'user-input', 'subagent-status', 'typed-activity', 'artifact-refs', 'local-history', 'legacy-import', 'stateless', 'fork', ...(CHAT_CHOICE_ENABLED ? ['choice'] : []), ...(nativeCapabilities.qaReadOnly ? ['read-only-qa'] : [])] : ['local-history-unavailable'],
         context: nativeCapabilities.schemaMatch ? ['capture', 'immutable-inspect', 'native-dynamic-tools', 'smart-read', 'read-only-reader', 'answer-briefing'] : ['capture', 'immutable-inspect'],
         files: ['native-picker', 'scoped-read', 'managed-drafts', 'create-only-save-as'],
         profiles: profileStore ? ['local-store', 'revisions', 'run-binding'] : ['local-store-unavailable'],

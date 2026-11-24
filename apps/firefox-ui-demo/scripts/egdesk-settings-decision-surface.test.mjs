@@ -97,7 +97,7 @@ async function mount({ mode = 'on', configured = true, savedKey = true } = {}) {
   const accountKey = ChatState.codexAccountKey(auth);
   const room = { id: 'room', type: 'dm', engineId: 'codex', profileEnabled: true, agentProfileId: profile.id,
     bindingAccountKey: accountKey, bindingState: 'verified', conversationId: 'synthetic-dm', agent: { profileId: profile.id, revision: 1 } };
-  const state = { sourceRefs: { cardsByKey: {} }, codex: { activeThreadId: room.id, hudView: 'conversation', authStatus: auth, connected: true,
+  const state = { sourceRefs: { cardsByKey: {} }, codex: { activeThreadId: room.id, hudView: 'conversation', chatCapabilities: ['choice'], authStatus: auth, connected: true,
     threadDraftRevisions: { room: 0 }, activityRoomGeneration: 1 }, contextSuggest: { byThread: {} } };
   const server = { configured, mode, keyHint: savedKey ? '…WXYZ' : null, boardRevision: 'b'.repeat(64), posts: [], choicePosts: 0, scenario: 'verified', externalWriteWaits: 0 };
   const statusBody = () => ({ configured: server.configured, mode: server.mode, store: server.configured ? 'configured' : 'missing', keyHint: server.keyHint, savedAt: 1, model: 'gpt-6-luna', boardRevision: server.boardRevision, budget: { month: '2026-11', inputTokens: 0, cap: null } });

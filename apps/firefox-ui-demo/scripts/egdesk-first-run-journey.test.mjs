@@ -315,7 +315,7 @@ function createRoomProjection(f) {
   const account = ChatState.codexAccountKey(authStatus)
   assert.ok(account, 'same synthetic signed-in account used by HTTP/runtime')
   const codex = { authStatus, codexAccountKey: account, connected: true, threads: [], threadDrafts: {},
-    threadDraftRevisions: {}, activeThreadId: null, hudView: 'conversation' }
+    threadDraftRevisions: {}, activeThreadId: null, hudView: 'conversation', chatCapabilities: ['choice'] }
   const state = { codex }
   const projectDefaults = new Map()
   function projectRoom(accepted, clientThreadId, profile) {

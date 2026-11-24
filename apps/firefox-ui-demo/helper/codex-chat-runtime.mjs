@@ -1606,6 +1606,10 @@ export class CodexChatRuntime {
   async send(body, internal = null) {
     // A reply to an early question the run asked while it keeps working goes into that same run (flag decisionContext.conversationFlow).
     const inRun = internal ? null : this.openEarlyQuestion(idText(body?.clientThreadId) || idText(body?.thread?.id), idText(body?.conversationId))
+    // The screen names the run it replies to. If that question is no longer open, refuse before anything is stored or started:
+    // a reply must never turn into a second turn (or a saved message without one).
+    const replyTo = internal || body?.inRunReplyTo === undefined ? null : idText(body.inRunReplyTo) || ''
+    if (replyTo !== null && (!inRun || inRun.runId !== replyTo)) throw chatError('INRUN_REPLY_UNAVAILABLE', 'The running turn is not waiting for a reply', 409)
     if (inRun) return this.answerEarlyQuestion(inRun, body)
     validateChatCwd(body)
     if (this.requireStore) this.assertStore()
@@ -4697,10 +4701,20 @@ export class CodexChatRuntime {
     flow.timer?.unref?.()
   }
 
+  // What the screen needs to know about an open early question: one public field on the run and one event each way (ids only).
+  // While it is set and the run works, a message sent in this DM is taken as the reply (see send / answerEarlyQuestion).
+  setReplyOpen(run, messageId) {
+    const open = typeof messageId === 'string' && messageId.length > 0
+    if (Boolean(run.replyOpen) === open) return
+    run.replyOpen = open ? { messageId } : null
+    if (run.status === 'inProgress') this.emit(run, open ? 'reply.opened' : 'reply.closed', open ? { messageId } : {})
+  }
+
   stopConversationFlow(run) {
     const flow = this.flowRuns.get(run)
     if (!flow || flow.closed) return
     flow.closed = true
+    this.setReplyOpen(run, null)
     if (flow.timer != null) this.clearTimer(flow.timer)
   }
 
@@ -4739,7 +4753,7 @@ export class CodexChatRuntime {
     const id = `egdesk-flow:${randomUUID()}`
     await this.applyItem(run, { id, type: 'agentMessage', phase: null, text, completionConfirmed: true }, true, true, true)
     flow.sent.push({ id, text, kind: verdict.kind, at: now }); flow.kinds.add(verdict.kind); flow.lastSentAt = this.now(); flow.stepsAtLast = facts.stepsDone
-    if (verdict.kind === 'ask_missing') { flow.question = { id, pending: true, at: now }; if (facts.question) flow.askedNotes.add(facts.question.id) }
+    if (verdict.kind === 'ask_missing') { flow.question = { id, pending: true, at: now }; if (facts.question) flow.askedNotes.add(facts.question.id); this.setReplyOpen(run, id) }
   }
 
   async writeIntermediate(run, flow, kind, facts) {
@@ -4803,6 +4817,7 @@ export class CodexChatRuntime {
       status: 'complete', localMessageId, createdAt: this.now() }
     this.put(run, 'messages', row)
     this.emit(run, 'message.completed', { ...row }, row.id)
+    this.setReplyOpen(run, null)
     return { accepted: true, durable: true, inRun: true, requestId, clientThreadId: run.clientThreadId, conversationId: run.conversationId, runId: run.runId, localMessageId }
   }
 
@@ -5600,7 +5615,9 @@ export class CodexChatRuntime {
       this.put(run, 'messages', message)
       if (assistant && announce) {
         if (!existing) {
-          this.emit(run, 'message.started', { ...message }, item.id)
+          // A message first seen already complete (a held answer, an intermediate message, a late-classified item) announces
+          // itself without text: the one delta below carries the whole text once, then message.completed confirms it.
+          this.emit(run, 'message.started', completed ? { ...message, text: '', status: 'streaming' } : { ...message }, item.id)
           if (!completed && message.text) this.visibleMessages.set(`${run.answerId}/${item.id}`, message.text)
         }
         if (completed) {
