@@ -89,6 +89,19 @@ function pathOf(href) {
   try { const url = new URL(href); return compactText(`${url.pathname}${url.search}`, 80) || '/' } catch { return compactText(href, 80) }
 }
 
+// The runtime does not classify egdesk_browser_navigate, so a link labelled
+// "Continue" that points at /account/delete would otherwise be followed. The
+// words of the observed href path and query are judged like a label; any
+// non-'none' class keeps the link out of the options (fail closed).
+export function hrefWords(href) {
+  try {
+    const url = new URL(href)
+    let text = `${url.pathname} ${url.search}`
+    try { text = decodeURIComponent(text) } catch { /* keep the raw text */ }
+    return compactText(text.replace(/[/\-_.+=&?%]+/g, ' '), 200)
+  } catch { return '' }
+}
+
 function defaultAllowedUrl(href, snapshot) {
   return sameSiteNavigation(snapshot?.url, href)
 }
@@ -128,6 +141,8 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
     if (judged?.category !== 'none') { excluded.gated++; continue }
     if (kind === 'navigate') {
       if (!isAllowedUrl(element.href, snapshot)) { excluded.offSite++; continue }
+      const words = hrefWords(element.href)
+      if (words && classify({ mode: 'activate', label: words, role: element.role, tag: element.tag, url: snapshot.url })?.category !== 'none') { excluded.gated++; continue }
       counters.navigate++
       entries.push({ label: `[L${counters.navigate}] ${label || pathOf(element.href)}`, description: `link to ${pathOf(element.href)}`, item: { kind, element } })
       continue
