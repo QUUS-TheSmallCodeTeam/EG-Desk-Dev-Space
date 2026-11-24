@@ -111,7 +111,7 @@ import { pruneContextCandidates } from './egdesk-context-pruning.mjs'
 import { previousReplyExcerpt } from './egdesk-previous-reply.mjs'
 import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory, recordStateEvidence } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
-import { BROWSER_TASK_TTL_MS, codeEntryCard, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, entryQuestions, readBrowserEntry } from './egdesk-browser-task.mjs'
+import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, readBrowserEntry, rideAlongEntry } from './egdesk-browser-task.mjs'
 import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
@@ -5190,8 +5190,9 @@ export class CodexChatRuntime {
       if (!resuming && typeof cfg.entryAnswers === 'function' && egress.allows('page_text')) {
         const hostsByCard = this.browserEntryHosts(body), titlesByCard = this.browserEntryTitles(body)
         const cards = (preRun.browserBinding?.cards || []).filter(card => card.permission === 'interact').map(card => ({ cardId: card.cardId, host: hostsByCard[card.cardId] || '', title: titlesByCard[card.cardId] || '' }))
-        // c20: the entry is yes/no predicates (the request; one per card unless code named the card); the host appends all of them
-        const codeCard = codeEntryCard(body.message, cards), questions = entryQuestions(cards, { codeCard })
+        // c20: the entry is yes/no predicates (the request; one per card unless code named the card); the host appends all of them.
+        // c22: built like the standalone entry, observing each card's first lines under the same page_text gate and fallback.
+        const { codeCard, questions } = await rideAlongEntry({ provider, run: preRun, message: body.message, cards, cardText: egress.allows('page_text') === true })
         try { const answers = cards.length ? await cfg.entryAnswers({ body, context, questions, question: questions[0], client: guarded(['page_text']) }) : null
           if (answers && answers.browser_entry?.type === 'predicate') {
             const picked = Object.fromEntries(questions.map(q => [q.name, answers[q.name]]).filter(([, a]) => a))

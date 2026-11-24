@@ -68,7 +68,7 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
       const wire = JSON.parse(body), names = wire.questions.map(q => q.name), q0 = wire.questions[0]
       const stepQ = wire.questions.find(q => q.name === 'next_step') ?? (q0.choices ? q0 : { choices: [] }) // c16: a code-decided step asks no next_step
       const text = wire.input.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n\n')
-      decisions.push({ q: q0.name, names, bytes: Buffer.byteLength(body), image: /input_image|image_url/.test(body), input: text }); timeline.push(`decide:${names.join('+')}`)
+      decisions.push({ q: q0.name, names, bytes: Buffer.byteLength(body), image: /input_image|image_url/.test(body), input: text, instructions: wire.questions.map(q => q.instructions ?? '') }); timeline.push(`decide:${names.join('+')}`)
       // c20: the entry predicates (the request, and one per card)
       const entryAnswer = q => { const msg = /(?:User message: |Message:\n)(.*)/.exec(text)?.[1] ?? ''
         return entryWire([q], { web: /세금계산서/.test(msg) ? 0.95 : 0.05 })[0] }
@@ -700,4 +700,14 @@ test('B4 c19 a wait message begun while the task ran is dropped when the task st
   assert.equal(w.note().code, 'confirm_needed', 'the task stopped for the person again (one candidate left on /biz/2)')
   held.open(); w.holdWriter(false); await w.settle(); await w.chat.flowIdle()
   assert.deepEqual(w.posted(), [question], 'the begun wait message is not posted on top of the task\'s stop')
+})
+
+test('C5 c22 ride-along through the runtime quotes what the card shows, exactly as the standalone entry does (same gate, one observation)', async t => {
+  const ride = world(t, { entry: rideHook }); await ride.send(MSG)
+  const alone = world(t); await alone.send(MSG)
+  const card = d => d.instructions.find(text => /^Does this request need to be done on this open page: /.test(text)) ?? null
+  const rideCard = card(ride.decisions[0]), aloneCard = card(alone.decisions[0])
+  assert.match(rideCard, /which now shows "합성 포털"\?/)
+  assert.equal(rideCard, aloneCard, 'the same quoting on both paths')
+  assert.deepEqual(ride.decisions[0].names.slice(-2), ['browser_entry', 'browser_entry_card_0'])
 })

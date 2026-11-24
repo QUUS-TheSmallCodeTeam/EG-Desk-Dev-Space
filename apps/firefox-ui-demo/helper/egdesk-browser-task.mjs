@@ -134,6 +134,36 @@ export function readBrowserEntry(answers, cards, { codeCard = null } = {}) {
 
 const ENTRY_RULES = 'You route one user chat message for EG-Desk: is it something to do in a web page the user opened, and on which one? Each question is about one thing only; answer each on its own.'
 
+/**
+ * observeCardLines({ provider, run, message, cards, replyTo?, enabled }) -> cards, each with `shows` (its first ENTRY_LINES visible lines) when known.
+ * One observation per card (a UI read; no Decision request), only when enabled (the run may receive page text) and code did not name the
+ * card (then no card question is asked). A card that cannot be observed keeps its title and host only. Shared by the standalone entry and
+ * the ride-along questions (c22), so both quote the same thing under the same permission.
+ */
+export async function observeCardLines({ provider, run, message, cards, replyTo = null, enabled = false }) {
+  if (enabled !== true || (typeof replyTo === 'string' && codeEntryCard(replyTo, cards)) || codeEntryCard(message, cards)) return cards
+  const seen = await Promise.all(cards.slice(0, MAX_ENTRY_CARDS).map(async card => {
+    try {
+      const scope = provider?.reflexScope?.(run, { callId: 'direct-entry-observe', namespace: null }, card.cardId)
+      if (typeof scope?.callTool !== 'function') return card
+      const observed = await scope.callTool('egdesk_browser_observe', { cardId: card.cardId })
+      const text = Array.isArray(observed?.snapshot?.text) ? observed.snapshot.text : []
+      return text.length ? { ...card, shows: text.slice(0, ENTRY_LINES) } : card
+    } catch { return card }
+  }))
+  return [...seen, ...cards.slice(MAX_ENTRY_CARDS)]
+}
+
+/**
+ * rideAlongEntry({ provider, run, message, cards, cardText }) -> { codeCard, cards, questions }: the entry questions a host appends to its
+ * turn-start request (the optional ride-along cost path), built exactly as the standalone entry builds them (c22).
+ */
+export async function rideAlongEntry({ provider, run, message, cards, cardText = false }) {
+  const codeCard = codeEntryCard(message, cards)
+  const seen = await observeCardLines({ provider, run, message, cards, enabled: cardText === true })
+  return { codeCard, cards: seen, questions: entryQuestions(seen, { codeCard }) }
+}
+
 /** decideBrowserEntry({ message, cards, client, ... }) -> readBrowserEntry result + usage. Throws DecisionError. */
 // replyTo: when the person was asked which card, the message is the original request and replyTo is their answer.
 export async function decideBrowserEntry({ message, cards, memoryPacket = null, replyTo = null, client, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, signal, authorizeDispatch }) {
@@ -440,18 +470,7 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
   // The task waits for the person to say which card. Nothing is recorded as an outcome (no page was touched).
   // The first lines each card shows now, by one observation per card (a UI read; no Decision request). Only when code did not name the card
   // and the run may receive page text; a card that cannot be observed is quoted by title and host alone.
-  async function withShownLines(run, message, cards, replyTo = null) {
-    if (cardTextInEntry() !== true || (typeof replyTo === 'string' && codeEntryCard(replyTo, cards)) || codeEntryCard(message, cards)) return cards
-    return Promise.all(cards.slice(0, MAX_ENTRY_CARDS).map(async card => {
-      try {
-        const scope = provider.reflexScope(run, { callId: 'direct-entry-observe', namespace: null }, card.cardId)
-        if (typeof scope?.callTool !== 'function') return card
-        const observed = await scope.callTool('egdesk_browser_observe', { cardId: card.cardId })
-        const text = Array.isArray(observed?.snapshot?.text) ? observed.snapshot.text : []
-        return text.length ? { ...card, shows: text.slice(0, ENTRY_LINES) } : card
-      } catch { return card }
-    })).then(seen => [...seen, ...cards.slice(MAX_ENTRY_CARDS)])
-  }
+  const withShownLines = (run, message, cards, replyTo = null) => observeCardLines({ provider, run, message, cards, replyTo, enabled: cardTextInEntry() === true })
 
   function askWhichCard(task, cards, extra = {}) {
     task.entryAsks++

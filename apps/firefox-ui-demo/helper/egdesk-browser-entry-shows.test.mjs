@@ -69,3 +69,30 @@ test('two cards, each quoting its own lines: the grouped request passes the grou
   const body = JSON.parse(w.bodies[0])
   assert.equal(lintGroupedRequest(body).ok, true)
 })
+
+// ---- c22: the ride-along questions (appended to the turn-start request) are built exactly like the standalone entry's ----
+import { decideBrowserEntry, observeCardLines, rideAlongEntry } from './egdesk-browser-task.mjs'
+const RIDE_CARDS = [{ cardId: 'card', host: 'account.example.test', title: '알림 설정 | 계정' }]
+const rideProvider = (calls = []) => ({ reflexScope: (_run, _call, cardId) => ({ callTool: async (name, args) => { calls.push([name, args.cardId, cardId]); return { observationId: 'o', snapshot: { text: SHOWS } } } }) })
+test('ride-along, off (the run may not receive page text): the questions are the c21 ones byte for byte and no card is observed', async () => {
+  const calls = []
+  const ride = await rideAlongEntry({ provider: rideProvider(calls), run: {}, message: MSG, cards: RIDE_CARDS, cardText: false })
+  assert.equal(JSON.stringify(ride.questions), JSON.stringify(entryQuestions(RIDE_CARDS)))
+  assert.deepEqual([ride.codeCard, calls], [null, []])
+})
+test('ride-along, on: one observation per card, the same quoting as the standalone entry, the same fallback, nothing when code named the card', async () => {
+  const calls = []
+  const ride = await rideAlongEntry({ provider: rideProvider(calls), run: {}, message: MSG, cards: RIDE_CARDS, cardText: true })
+  assert.deepEqual(calls, [['egdesk_browser_observe', 'card', 'card']])
+  // the standalone entry, for the same cards and lines, asks the very same questions
+  let standalone = null
+  const client = { decide: async request => { standalone = request.questions; return { answers: {} } } }
+  await decideBrowserEntry({ message: MSG, cards: await observeCardLines({ provider: rideProvider(), run: {}, message: MSG, cards: RIDE_CARDS, enabled: true }), client })
+  assert.equal(JSON.stringify(ride.questions), JSON.stringify(standalone))
+  assert.match(ride.questions[1].instructions, /which now shows "알림 설정" \/ "마케팅 정보 알림: 켜짐" \/ "보안 알림: 켜짐"\?$/)
+  const failing = { reflexScope: () => ({ callTool: async () => { throw new Error('gone') } }) }
+  assert.equal(JSON.stringify((await rideAlongEntry({ provider: failing, run: {}, message: MSG, cards: RIDE_CARDS, cardText: true })).questions), JSON.stringify(entryQuestions(RIDE_CARDS)), 'a card that cannot be observed: title and host')
+  const named = []
+  const byCode = await rideAlongEntry({ provider: rideProvider(named), run: {}, message: '알림 설정에서 마케팅 꺼줘', cards: RIDE_CARDS, cardText: true })
+  assert.deepEqual([byCode.codeCard, byCode.questions.map(q => q.name), named], ['card', ['browser_entry'], []])
+})
