@@ -71,7 +71,8 @@ test('grouping lint: builders asked directly (turn context catalog, draft check,
   const log = ['> build', ...Array.from({ length: 30 }, (_, i) => `compiling module ${i}`), 'src/a.ts(3,1): error TS2345: Argument of type string', '', 'npm ERR! code 1', ...Array.from({ length: 10 }, (_, i) => `at frame ${i}`)].join('\n')
   await pickRelevantBlocks({ blocks: enumerateLogBlocks(log), mode: 'on', client, egress: { allows: () => true } }).catch(() => null)
   const { checkDraft } = await import('./egdesk-draft-check.mjs')
-  await checkDraft({ draft: 'A사 견적서 v1은 11월 6일에 12,800원으로 발송했습니다. v2는 12월 20일 납기로 보낼 예정입니다. 팀장 승인이 남았습니다.', evidence: [{ time: 'past', status: 'done', text: '11월 6일 단가 12,800원으로 견적서 v1을 발송했다.' }, { time: 'planned', status: 'plan', text: '납기 12월 20일로 견적서 v2를 보낼 예정이다.' }],
+  // L3 c18 made the predicate design the default (sup_#/tense_#); the choice design (claim_#/present_#) stays selectable: lint both
+  for (const design of ['predicates', 'choice']) await checkDraft({ design, draft: 'A사 견적서 v1은 11월 6일에 12,800원으로 발송했습니다. v2는 12월 20일 납기로 보낼 예정입니다. 팀장 승인이 남았습니다.', evidence: [{ time: 'past', status: 'done', text: '11월 6일 단가 12,800원으로 견적서 v1을 발송했다.' }, { time: 'planned', status: 'plan', text: '납기 12월 20일로 견적서 v2를 보낼 예정이다.' }],
     userText: 'A사 견적 정리', mode: 'on', client }).catch(() => null)
   const { buildGateRequest, enumerateBlockOptions } = await import('./egdesk-working-memory-gate.mjs')
   const text = Array.from({ length: 6 }, (_, k) => [`## 절 ${k}`, ...Array.from({ length: 8 }, (_, i) => `절 ${k}의 ${i}번째 문장은 서로 다른 내용을 담고 있습니다.`)].join('\n')).join('\n\n')
@@ -79,7 +80,7 @@ test('grouping lint: builders asked directly (turn context catalog, draft check,
   captured.push(buildGateRequest({ lines, blocks, kind: 'page', goal: '요약', design: 'choice' }).request, buildGateRequest({ lines, blocks, kind: 'page', goal: '요약' }).request)
   const families = new Set()
   for (const body of captured) { const r = lintGroupedRequest(body); assert.equal(r.ok, true, JSON.stringify(r.families.filter(f => f.problems.length))); r.families.forEach(f => families.add(f.family)) }
-  for (const family of ['rel_#', 'claim_#', 'present_#', 'log_b#', 'wm_b#', 'wm_need_b#']) assert.ok(families.has(family), `${family} was linted (got ${[...families].join(',')})`)
+  for (const family of ['rel_#', 'claim_#', 'present_#', 'sup_#', 'tense_#', 'log_b#', 'wm_b#', 'wm_need_b#']) assert.ok(families.has(family), `${family} was linted (got ${[...families].join(',')})`)
 })
 
 test('grouping lint: the browser reflex (same_#, field_#) and session topic (topic_need_#) builders, through their own code', async () => {
