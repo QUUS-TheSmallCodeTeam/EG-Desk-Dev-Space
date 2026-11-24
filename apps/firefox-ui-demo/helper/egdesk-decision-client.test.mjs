@@ -646,3 +646,33 @@ test('the month roll is forward only: a later month resets, an earlier clock kee
   assert.deepEqual({ ...budget.snapshot() }, { month: '2027-01', inputTokens: 0, cap: 100 })
   assert.equal(budget.canSpend(), true)
 })
+
+test('a request sent without a usage report (timeout, cancel after dispatch) counts a labelled estimate; errors and pre-send cancels do not', async () => {
+  const { estimateInputTokens } = await import('./egdesk-decision-client.mjs')
+  const stall = (_u, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(new Error('aborted'))))
+  const budget = createDecisionBudget({ monthlyInputTokenCap: 100000 })
+  const input = '한국어 합성 입력 '.repeat(40)
+  const request = { input, questions: [QUESTIONS[0]] }
+  const slow = createDecisionClient({ getApiKey: () => KEY, fetchImpl: stall, budget, timeoutMs: 20 })
+  await assert.rejects(slow.decide(request), e => e.code === 'timeout')
+  const first = budget.snapshot()
+  assert.equal(first.inputTokens, 0)
+  assert.equal(first.unmeteredRequests, 1)
+  assert.ok(first.estimatedInputTokens > 300 && first.estimatedInputTokens < 1000, String(first.estimatedInputTokens))
+  const controller = new AbortController(); setTimeout(() => controller.abort(), 10)
+  await assert.rejects(slow.decide({ ...request, signal: controller.signal, timeoutMs: 1000 }), e => e.code === 'aborted')
+  assert.equal(budget.snapshot().unmeteredRequests, 2)
+  const gone = new AbortController(); gone.abort()
+  await assert.rejects(slow.decide({ ...request, signal: gone.signal }), e => e.code === 'aborted')
+  assert.equal(budget.snapshot().unmeteredRequests, 2, 'never sent')
+  for (const [status, body] of [[429, { error: { code: 'rate_limit_exceeded' } }], [500, 'x']]) {
+    const { fetchImpl } = fakeFetch(() => respond(status, body))
+    await assert.rejects(createDecisionClient({ getApiKey: () => KEY, fetchImpl, budget }).decide(request))
+  }
+  assert.equal(budget.snapshot().unmeteredRequests, 2)
+  const capped = createDecisionBudget({ monthlyInputTokenCap: 1000, initial: { month: createDecisionBudget().snapshot().month, inputTokens: 900, estimatedInputTokens: 100 } })
+  assert.equal(capped.canSpend(), false)
+  // Inline images count by detail, not by base64 size.
+  const wire = JSON.stringify({ input: [{ content: [{ type: 'input_image', detail: 'low', image_url: `data:image/png;base64,${'A'.repeat(50000)}` }] }] })
+  assert.ok(estimateInputTokens(wire) < 200)
+})

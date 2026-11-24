@@ -122,3 +122,26 @@ test('decision mode: read, saved through the settings adapter, bad values refuse
   assert.equal((await call('GET', '/decision/mode', undefined, bare)).status, 404)
   assert.equal((await call('GET', '/decision/status', undefined, bare)).data.mode, null)
 })
+
+test('a saved key is replaced only by a verified key; an unusable new key leaves it in place', async t => {
+  const OLD_KEY = 'sk-proj-OLDKEY-0123456789abcdefWXYZ'
+  for (const status of ['no_credit', 'spend_limit_reached', 'rate_limited', 'invalid_key', 'timeout', 'server_error']) {
+    const f = fixture(t, status)
+    assert.equal(f.store.save(OLD_KEY), true)
+    const savedAt = f.store.savedAt()
+    const response = await f.call('POST', '/decision/credential', { apiKey: KEY })
+    assert.equal(response.status, 422, status)
+    assert.equal(f.store.getApiKey(), OLD_KEY, status)
+    assert.equal(f.store.savedAt(), savedAt, status)
+    assert.ok(!response.raw.includes(KEY) && !response.raw.includes(OLD_KEY))
+    if (['no_credit', 'spend_limit_reached', 'rate_limited'].includes(status)) assert.equal(response.data.code, 'DECISION_KEY_NOT_REPLACED')
+  }
+  const ok = fixture(t)
+  ok.store.save(OLD_KEY)
+  assert.equal((await ok.call('POST', '/decision/credential', { apiKey: KEY })).status, 200)
+  assert.equal(ok.store.getApiKey(), KEY)
+  // Entering the key that is already saved again still refreshes it, even when it has no credit.
+  const same = fixture(t, 'no_credit')
+  same.store.save(KEY)
+  assert.equal((await same.call('POST', '/decision/credential', { apiKey: KEY })).status, 200)
+})

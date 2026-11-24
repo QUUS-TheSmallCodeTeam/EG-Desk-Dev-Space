@@ -10,6 +10,8 @@ import { isOwnedAndPrivate } from './egdesk-private-files.mjs'
 //   it never contains the key, a hint of it, prompts or answers.
 // - Same atomic routine as egdesk-decision-credential.mjs (private temp file,
 //   fsync, rename, directory fsync).
+// - estimatedInputTokens / unmeteredRequests: requests sent without a usage report, kept apart
+//   from the measured inputTokens (optional in older files, read as 0).
 // - Deleting the key does not touch it: usage belongs to the month, not the key.
 // - A damaged file is set aside and logged; a newer version is left untouched.
 // Opening never throws; a broken store only means the tally is not kept.
@@ -54,7 +56,10 @@ function parseBudget(text) {
   if (data.version !== DECISION_BUDGET_VERSION || typeof data.month !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(data.month) ||
     !Number.isSafeInteger(data.inputTokens) || data.inputTokens < 0 ||
     !(data.cap === null || (Number.isSafeInteger(data.cap) && data.cap > 0))) throw new BudgetContentError('not a decision budget')
-  return { state: { month: data.month, inputTokens: data.inputTokens, cap: data.cap } }
+  const optional = value => (value === undefined ? 0 : value)
+  const estimated = optional(data.estimatedInputTokens), unmetered = optional(data.unmeteredRequests)
+  if (!Number.isSafeInteger(estimated) || estimated < 0 || !Number.isSafeInteger(unmetered) || unmetered < 0) throw new BudgetContentError('not a decision budget')
+  return { state: { month: data.month, inputTokens: data.inputTokens, cap: data.cap, ...(unmetered > 0 ? { estimatedInputTokens: estimated, unmeteredRequests: unmetered } : {}) } }
 }
 
 /**
@@ -101,7 +106,8 @@ export function openDecisionBudgetStore({ dataDir, log = defaultLog, now = Date.
   }
 
   function write(next) {
-    const body = `${JSON.stringify({ version: DECISION_BUDGET_VERSION, month: next.month, inputTokens: next.inputTokens, cap: next.cap }, null, 2)}\n`
+    const body = `${JSON.stringify({ version: DECISION_BUDGET_VERSION, month: next.month, inputTokens: next.inputTokens, cap: next.cap,
+      ...(next.unmeteredRequests > 0 ? { estimatedInputTokens: next.estimatedInputTokens ?? 0, unmeteredRequests: next.unmeteredRequests } : {}) }, null, 2)}\n`
     const tmp = path.join(dir, `${DECISION_BUDGET_FILE}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`)
     let fd = null
     try {

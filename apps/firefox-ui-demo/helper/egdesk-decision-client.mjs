@@ -310,7 +310,7 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
     signal?.addEventListener?.('abort', onAbort, { once: true })
     const started = clock()
     let response, parsed
-    let denied = false
+    let denied = false, dispatched = false
     try {
       // getApiKey() may have yielded. Use the actual credential selected for THIS
       // POST; finish serialization and all preparation before the last synchronous check.
@@ -328,6 +328,7 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
         if (!allowed) { denied = true; throw new Error('denied') }
       }
       if (signal?.aborted) throw new Error('cancelled')
+      dispatched = true
       response = await fetchImpl(endpoint, { method: 'POST', redirect: 'error', credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller.signal,
         headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }, body: wire })
       // A server can send headers promptly and then stall the body. Keep the
@@ -336,6 +337,9 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
       catch (error) { throw error instanceof DecisionError ? error : new DecisionError('bad_response', 'The decision response could not be read') }
     } catch (error) {
       if (denied) throw new DecisionError('evidence_unavailable', 'The scoped history transfer is no longer authorized')
+      // Sent, but no usage came back (timeout, or a cancel after dispatch): the provider
+      // may have processed and billed it, so the local guard counts a labelled estimate.
+      if (dispatched && (timedOut || signal?.aborted)) { try { budget?.recordEstimate?.(estimateInputTokens(wire)) } catch {} }
       if (timedOut) throw new DecisionError('timeout', 'The decision model did not answer in time', { retryable: true })
       if (signal?.aborted) throw new DecisionError('aborted', 'The decision request was cancelled')
       if (error instanceof DecisionError) throw error
@@ -390,11 +394,29 @@ export function createDecisionClient({ getApiKey, fetchImpl = globalThis.fetch, 
 }
 
 /**
+ * estimateInputTokens(wireBody) → an input-token estimate for a request that was sent
+ * without a usage report. Text counts utf8 bytes / 3 (a Korean character is 3 bytes and
+ * about one token, English runs lower, so this leans high); inline images count by their
+ * declared detail (85 for low, 765 otherwise) and not by their base64 size. An estimate, not a bill.
+ */
+export function estimateInputTokens(wireBody) {
+  const text = String(wireBody)
+  const images = (text.match(/"type":"input_image"/g) || []).length
+  const lows = (text.match(/"detail":"low"/g) || []).length
+  const bare = text.replace(/data:[a-z]+\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/gi, '')
+  return Math.ceil(Buffer.byteLength(bare, 'utf8') / 3) + Math.min(lows, images) * 85 + (images - Math.min(lows, images)) * 765
+}
+
+/**
  * createDecisionBudget({ monthlyInputTokenCap?, now?, initial? }) → budget
  * A local guard on top of the provider's own limits: EG-Desk cannot read the
  * organization's credit balance without an admin key, so it counts the input
  * tokens it spent. A cap of null means no local cap.
  * budget.canSpend() / budget.record(usage) / budget.snapshot() → { month, inputTokens, cap }
+ * snapshot also carries estimatedInputTokens and unmeteredRequests: requests that were sent
+ * but ended without a usage report (timeout, cancel after dispatch). They count toward the
+ * cap as an estimate (estimateInputTokens) and are never mixed into the measured inputTokens.
+ * budget.recordEstimate(tokens)
  * budget.setCap(positiveInteger | null): the owner's choice; null removes the cap.
  * onChange(state) runs after every change of the tally or cap so a store can keep
  * it across restarts (egdesk-decision-budget-store.mjs); its failure never reaches a caller.
@@ -406,14 +428,19 @@ export function createDecisionBudget({ monthlyInputTokenCap = null, now = Date.n
   const monthOf = time => { const date = new Date(time); return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}` }
   let month = record(initial) && typeof initial.month === 'string' ? initial.month : monthOf(now())
   let inputTokens = record(initial) ? count(initial.inputTokens) : 0
-  const changed = () => { if (typeof onChange === 'function') { try { onChange({ month, inputTokens, cap: monthlyInputTokenCap }) } catch {} } }
+  let estimatedInputTokens = record(initial) ? count(initial.estimatedInputTokens) : 0
+  let unmeteredRequests = record(initial) ? count(initial.unmeteredRequests) : 0
+  // The estimate fields appear only once a request was sent without a usage report.
+  const shape = () => ({ month, inputTokens, cap: monthlyInputTokenCap, ...(unmeteredRequests > 0 ? { estimatedInputTokens, unmeteredRequests } : {}) })
+  const changed = () => { if (typeof onChange === 'function') { try { onChange(shape()) } catch {} } }
   // Forward only: a later month resets the tally; a clock that reads an earlier month than
   // the stored one (clock set back, wrong time at boot) keeps the stored tally and month.
-  const roll = () => { const current = monthOf(now()); if (current > month) { month = current; inputTokens = 0; return true } return false }
+  const roll = () => { const current = monthOf(now()); if (current > month) { month = current; inputTokens = 0; estimatedInputTokens = 0; unmeteredRequests = 0; return true } return false }
   return Object.freeze({
-    canSpend() { roll(); return monthlyInputTokenCap === null || inputTokens < monthlyInputTokenCap },
+    canSpend() { roll(); return monthlyInputTokenCap === null || inputTokens + estimatedInputTokens < monthlyInputTokenCap },
     record(usage) { const rolled = roll(); const spent = count(usage?.inputTokens); inputTokens += spent; if (rolled || spent > 0) changed() },
-    snapshot() { roll(); return Object.freeze({ month, inputTokens, cap: monthlyInputTokenCap }) },
+    recordEstimate(tokens) { const rolled = roll(); const n = count(tokens); if (n > 0) { estimatedInputTokens += n; unmeteredRequests += 1 } if (rolled || n > 0) changed() },
+    snapshot() { roll(); return Object.freeze(shape()) },
     setCap(cap) {
       if (cap !== null && !(Number.isSafeInteger(cap) && cap > 0)) throw new TypeError('cap must be a positive integer or null')
       roll(); monthlyInputTokenCap = cap; changed()
