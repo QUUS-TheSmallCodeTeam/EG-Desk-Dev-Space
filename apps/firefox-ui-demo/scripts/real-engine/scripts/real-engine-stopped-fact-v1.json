@@ -1,0 +1,56 @@
+{
+  "set": "real-engine-stopped-fact-v1",
+  "description": "Pattern: the person stops a running command and asks the next turn what happened to it (c26; Main's check-7w answer was \"it cannot be confirmed whether it finished or was cut off\"). EG-Desk stops the command itself (cancelRun), the engine never gets the tool result of an interrupted turn, so the runtime gives the NEXT turn the command fact (the command line, stopped at the person's request after N s, the signal, not completed) as EG-Desk context. The third turn must say it was stopped, not that it finished and not that it cannot be told: answerExcludes the command's own never-printed word and the Korean words for \"cannot be confirmed\" (확인할 수 없). Same flags and --decisions as real-engine-pause-v1. Expectations are code checks only.",
+  "conversations": [
+    {
+      "id": "stopped-fact",
+      "flags": {
+        "EGDESK_INRUN_MESSAGES": "on",
+        "EGDESK_CONVERSATION_FLOW": "on",
+        "EGDESK_DRAFT_CHECK": "on"
+      },
+      "folder": {
+        "README.md": "scratch folder for the real-engine check\n"
+      },
+      "turns": [
+        {
+          "say": "다음 명령을 실행하고, 끝나면 알려 줘: sleep 30 && echo cleanup-finished",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "answerExcludes": [
+              "cleanup-finished"
+            ],
+            "noNativeTools": true,
+            "turnStatus": "interrupted",
+            "engine": {
+              "commandStopped": true
+            }
+          }
+        },
+        {
+          "say": "아니 잠깐, 그거 하지 마",
+          "whileRunning": {
+            "afterMs": 10000
+          },
+          "expect": {
+            "noNativeTools": true
+          }
+        },
+        {
+          "say": "방금 그 명령은 끝까지 실행된 거야, 아니면 중간에 멈춘 거야?",
+          "expect": {
+            "answerExcludes": [
+              "cleanup-finished",
+              "확인할 수 없"
+            ],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}

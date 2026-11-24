@@ -81,6 +81,7 @@ export function answerEvidence(turn, facts) {
 // c19: how many records of the last check of a conversation the next check of it may reuse.
 export const EARLIER_EVIDENCE_LIMIT = 4
 export const POSTED_ANSWER_KEY = 'egdesk_posted_answer'
+import { STOPPED_COMMAND_KEY, stoppedCommandBlock, stoppedCommandEvidence, stoppedCommandFact } from './egdesk-stopped-command.mjs' // c26: the command the person stopped, told to the next turn once
 // c19 (owner decision: no fixed fallback): 'withheld' = nothing could be posted; the next turn is told the person saw no answer.
 export const POSTED_OUTCOMES = Object.freeze(['revised', 'certain_part', 'withheld'])
 export function postedAnswerBlock({ outcome, posted }) {
@@ -903,6 +904,7 @@ export class CodexChatRuntime {
     this.deletedConversations = new Set() // clientThreadId of a conversation the person deleted (forgetConversation): its runs say nothing more
     this.inRunMessageQueue = new WeakMap() // run -> [{ requestId, localMessageId, text, at, state }]: messages typed while it works (inRunMessages flag)
     this.carriedInRun = new Map() // clientThreadId -> [text]: messages its run ended without acting on; they open the next turn's input
+    this.stoppedCommands = new Map() // clientThreadId -> the fact of the command the person stopped (consumed by the next turn)
     this.postedInstead = new Map() // clientThreadId -> { outcome, posted }: the answer the person saw instead of the Agent's draft (consumed by the next turn)
     this.draftOutcomes = new WeakMap() // run -> the draft check's outcome for its answer
     this.draftCheckTurns = new WeakMap() // run -> what the model had this turn, for the check after the answer is posted
@@ -2593,8 +2595,11 @@ export class CodexChatRuntime {
     // The person saw something else than the Agent's last draft in this conversation: the Agent is told, once (consumed here).
     const postedInstead = !bounded ? this.postedInstead.get(context.clientThreadId) ?? null : null
     if (postedInstead) this.postedInstead.delete(context.clientThreadId)
+    // c26: the engine never got the result of a command the person stopped (its turn was interrupted): the next turn is told, once
+    const stoppedCommand = !bounded ? this.stoppedCommands.get(context.clientThreadId) ?? null : null
+    if (stoppedCommand) { this.stoppedCommands.delete(context.clientThreadId); context.stoppedCommand = stoppedCommand }
     const extraContext = bounded ? {} : { ...(context.extraContext || {}), ...decisionExtra, ...channel, ...(shares.length ? { egdesk_shared_messages: sharedMessagesBlock(shares) } : {}),
-      ...(postedInstead ? { [POSTED_ANSWER_KEY]: postedAnswerBlock(postedInstead) } : {}) }
+      ...(postedInstead ? { [POSTED_ANSWER_KEY]: postedAnswerBlock(postedInstead) } : {}), ...(stoppedCommand ? { [STOPPED_COMMAND_KEY]: stoppedCommandBlock(stoppedCommand) } : {}) }
     const toolContext = this.additionalToolContext(preparedProviders)
     if (Object.keys(extraContext).some(key => toolContext && Object.hasOwn(toolContext, key))) throw chatError('INVALID_TOOL_PROVIDER', 'Tool providers returned conflicting native context keys', 500)
     const additionalContext = Object.keys(extraContext).length
@@ -5589,6 +5594,7 @@ export class CodexChatRuntime {
     if (hb && hb.state !== 'stopped') { this.stopHeartbeat(hb, 'deleted'); out.heartbeat = true }
     for (const [threadId, live] of [...this.heartbeatThreads]) if (native.has(threadId) || (hb && live === hb)) this.heartbeatThreads.delete(threadId)
     out.postedNote = this.postedInstead.delete(key)
+    this.stoppedCommands.delete(key)
     out.carriedMessages = this.carriedInRun.get(key)?.length ?? 0; this.carriedInRun.delete(key)
     const held = this.heldAttention?.length ?? 0
     this.heldAttention = (this.heldAttention ?? []).filter(row => row.sourceKey !== key && !native.has(row.sourceKey))
@@ -6616,6 +6622,10 @@ export class CodexChatRuntime {
   noteOwnCommand(run, record) {
     try {
       if (!run || !record) return
+      try { // c26: a stopped command is remembered for the next turn; any later command of the conversation that was not stopped replaces it (then the engine saw that result)
+        const fact = stoppedCommandFact(record), key = run.clientThreadId
+        if (key) { this.stoppedCommands.delete(key); if (fact) { this.stoppedCommands.set(key, fact); while (this.stoppedCommands.size > 64) this.stoppedCommands.delete(this.stoppedCommands.keys().next().value) } }
+      } catch { /* the note is advisory */ }
       const summary = record.health?.summary ?? null
       run.ownCommandLast = Object.freeze({ stopped: record.stopped === true, exitCode: Number.isSafeInteger(record.exitCode) ? record.exitCode : null, durationMs: Number.isFinite(record.durationMs) ? record.durationMs : null,
         health: record.health?.health ?? null, healthReasons: record.health?.reasons ?? [], summary: summary ? Object.freeze({ ...summary, line: String(summary.line).slice(0, 300) }) : null,
@@ -6931,8 +6941,10 @@ export class CodexChatRuntime {
       // Application blocks that rode along this turn (shared messages and the like): the model saw them, the checker may not.
       // The browser task's note and the note of what the person saw are known text (answerFactsEvidence / the posted-answer note), not content-free blocks.
       const browserNote = typeof context.browserTaskNote === 'string' ? context.browserTaskNote : null
-      const refs = extraKeys.filter(key => !(key === 'egdesk_browser_task' && browserNote) && key !== POSTED_ANSWER_KEY).slice(0, 4).map((key, i) => ({ id: `ctx${i + 1}`, kind: 'context', time: 'unknown', source: 'application', opaque: true }))
-      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...refs], memory: memoryItems, userText: typeof body.message === 'string' ? body.message : '', browserNote, late })
+      const refs = extraKeys.filter(key => !(key === 'egdesk_browser_task' && browserNote) && key !== POSTED_ANSWER_KEY && key !== STOPPED_COMMAND_KEY).slice(0, 4).map((key, i) => ({ id: `ctx${i + 1}`, kind: 'context', time: 'unknown', source: 'application', opaque: true }))
+      // c26: the command the person stopped, told to this turn: known text for the check (its output only where the run's models may receive terminal data)
+      const stoppedEvidence = context.stoppedCommand ? [stoppedCommandEvidence(context.stoppedCommand, { outputAllowed: this.decisionEgressFor(run).allows('terminal_output') })] : []
+      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...stoppedEvidence, ...refs], memory: memoryItems, userText: typeof body.message === 'string' ? body.message : '', browserNote, late })
     } catch { /* the check must never affect the turn */ }
   }
 
