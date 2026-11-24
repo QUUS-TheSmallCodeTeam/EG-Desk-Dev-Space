@@ -22423,13 +22423,15 @@
     const runDecision = async (work) => {
       if (decision.busy) return;
       const keyField = () => card.querySelector('[data-testid="settings-decision-key"]');
-      const inSection = () => !!document.activeElement && card.contains(document.activeElement);
+      // The card's own document (any window); a harness without a global document simply skips focus repair.
+      const focusDoc = () => card.ownerDocument || globalThis.document;
+      const inSection = () => { const doc = focusDoc(); return !!doc?.activeElement && card.contains(doc.activeElement); };
       const hadFocus = inSection();
       decision.busy = true; redrawDecision();
       try { await work(); } finally {
         decision.busy = false; redrawDecision();
-        const active = document.activeElement;
-        if (hadFocus && (!active || active === document.body || !active.isConnected)) keyField()?.focus?.({ preventScroll: true });
+        const doc = focusDoc(), active = doc?.activeElement;
+        if (doc && hadFocus && (!active || active === doc.body || !active.isConnected)) keyField()?.focus?.({ preventScroll: true });
       }
     };
     const saveDecisionKey = (input) => runDecision(async () => {
