@@ -1,0 +1,422 @@
+{
+  "set": "real-engine-rewrite-b-quote-v1",
+  "description": "The draft check's REWRITE with the real answering model, case b-quote (L2 c26): the quote pages seeded, the journey's own question (\"지난주 A사 견적 건 어디까지 됐지?\"). A correct done+planned sentence is what the real judge's tense question read as done-now in the v7 run (.91/.92): a finding here is a false positive, and the rewrite after it is what is measured. Expectations by code: an answer is posted, the v2 fact is kept, no number outside the records reaches the person. Replicas are fresh conversations. Tally: scripts/egdesk-real-engine-rewrite-score.mjs. Needs --decisions and --persisted-with-cleanup.",
+  "conversations": [
+    {
+      "id": "rewrite-b-quote-1",
+      "agentProfile": {
+        "name": "견적 담당",
+        "role": "견적 진행 확인",
+        "tone": "concise",
+        "expertise": [
+          "견적"
+        ],
+        "instructions": "사람이 묻는 견적 건의 진행 상황을 기록에 근거해 한국어로 짧게 답한다. 이미 끝난 단계와 앞으로 할 단계를 구분해서 말하고, 기록에 없는 것은 말하지 않는다."
+      },
+      "draftCheck": {
+        "mode": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "quote/a-request",
+            "title": "A사 견적 요청 접수",
+            "body": "A사 구매팀이 11월 3일 스피커 모듈 200개 견적을 요청했다. 희망 납기는 12월 중순이다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "quote/a-v1",
+            "title": "A사 견적서 v1 발송",
+            "body": "11월 6일 단가 12,800원으로 견적서 v1을 발송했다. A사 회신을 기다리는 중이다.",
+            "time": "past",
+            "status": "done",
+            "links": [
+              {
+                "to": "quote/a-request",
+                "type": "follows_from"
+              },
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          },
+          {
+            "id": "quote/a-meeting",
+            "title": "A사 단가 협의 메모",
+            "body": "팀장 말로는 A사가 단가를 11,900원으로 낮춰 달라고 했다고 함. 직접 확인한 것은 아니고 확정도 아니다.",
+            "time": "past",
+            "links": [
+              {
+                "to": "quote/a-v1",
+                "type": "refers_to"
+              },
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          },
+          {
+            "id": "quote/a-v2-plan",
+            "title": "A사 견적서 v2 수정 계획",
+            "body": "단가 12,200원, 납기 12월 20일로 견적서 v2를 보낼 예정이다. 아직 발송하지 않았다. 팀장 승인 후 발송한다.",
+            "time": "planned",
+            "status": "plan",
+            "links": [
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          },
+          {
+            "id": "quote/a-decision",
+            "title": "A사 건 결정 메모",
+            "body": "11월 18일 회의에서 v2는 팀장 승인 후 발송하기로 결정했다. 승인 기한은 11월 25일이다.",
+            "time": "past",
+            "status": "done",
+            "links": [
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "지난주 A사 견적 건 어디까지 됐지?",
+          "expect": {
+            "rewrite": {
+              "answered": true,
+              "neverShown": {
+                "numbers": true
+              }
+            },
+            "answerIncludes": [
+              "v2"
+            ],
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "rewrite-b-quote-2",
+      "agentProfile": {
+        "name": "견적 담당",
+        "role": "견적 진행 확인",
+        "tone": "concise",
+        "expertise": [
+          "견적"
+        ],
+        "instructions": "사람이 묻는 견적 건의 진행 상황을 기록에 근거해 한국어로 짧게 답한다. 이미 끝난 단계와 앞으로 할 단계를 구분해서 말하고, 기록에 없는 것은 말하지 않는다."
+      },
+      "draftCheck": {
+        "mode": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "quote/a-request",
+            "title": "A사 견적 요청 접수",
+            "body": "A사 구매팀이 11월 3일 스피커 모듈 200개 견적을 요청했다. 희망 납기는 12월 중순이다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "quote/a-v1",
+            "title": "A사 견적서 v1 발송",
+            "body": "11월 6일 단가 12,800원으로 견적서 v1을 발송했다. A사 회신을 기다리는 중이다.",
+            "time": "past",
+            "status": "done",
+            "links": [
+              {
+                "to": "quote/a-request",
+                "type": "follows_from"
+              },
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          },
+          {
+            "id": "quote/a-meeting",
+            "title": "A사 단가 협의 메모",
+            "body": "팀장 말로는 A사가 단가를 11,900원으로 낮춰 달라고 했다고 함. 직접 확인한 것은 아니고 확정도 아니다.",
+            "time": "past",
+            "links": [
+              {
+                "to": "quote/a-v1",
+                "type": "refers_to"
+              },
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          },
+          {
+            "id": "quote/a-v2-plan",
+            "title": "A사 견적서 v2 수정 계획",
+            "body": "단가 12,200원, 납기 12월 20일로 견적서 v2를 보낼 예정이다. 아직 발송하지 않았다. 팀장 승인 후 발송한다.",
+            "time": "planned",
+            "status": "plan",
+            "links": [
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          },
+          {
+            "id": "quote/a-decision",
+            "title": "A사 건 결정 메모",
+            "body": "11월 18일 회의에서 v2는 팀장 승인 후 발송하기로 결정했다. 승인 기한은 11월 25일이다.",
+            "time": "past",
+            "status": "done",
+            "links": [
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "지난주 A사 견적 건 어디까지 됐지?",
+          "expect": {
+            "rewrite": {
+              "answered": true,
+              "neverShown": {
+                "numbers": true
+              }
+            },
+            "answerIncludes": [
+              "v2"
+            ],
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "rewrite-b-quote-3",
+      "agentProfile": {
+        "name": "견적 담당",
+        "role": "견적 진행 확인",
+        "tone": "concise",
+        "expertise": [
+          "견적"
+        ],
+        "instructions": "사람이 묻는 견적 건의 진행 상황을 기록에 근거해 한국어로 짧게 답한다. 이미 끝난 단계와 앞으로 할 단계를 구분해서 말하고, 기록에 없는 것은 말하지 않는다."
+      },
+      "draftCheck": {
+        "mode": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "quote/a-request",
+            "title": "A사 견적 요청 접수",
+            "body": "A사 구매팀이 11월 3일 스피커 모듈 200개 견적을 요청했다. 희망 납기는 12월 중순이다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "quote/a-v1",
+            "title": "A사 견적서 v1 발송",
+            "body": "11월 6일 단가 12,800원으로 견적서 v1을 발송했다. A사 회신을 기다리는 중이다.",
+            "time": "past",
+            "status": "done",
+            "links": [
+              {
+                "to": "quote/a-request",
+                "type": "follows_from"
+              },
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          },
+          {
+            "id": "quote/a-meeting",
+            "title": "A사 단가 협의 메모",
+            "body": "팀장 말로는 A사가 단가를 11,900원으로 낮춰 달라고 했다고 함. 직접 확인한 것은 아니고 확정도 아니다.",
+            "time": "past",
+            "links": [
+              {
+                "to": "quote/a-v1",
+                "type": "refers_to"
+              },
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          },
+          {
+            "id": "quote/a-v2-plan",
+            "title": "A사 견적서 v2 수정 계획",
+            "body": "단가 12,200원, 납기 12월 20일로 견적서 v2를 보낼 예정이다. 아직 발송하지 않았다. 팀장 승인 후 발송한다.",
+            "time": "planned",
+            "status": "plan",
+            "links": [
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          },
+          {
+            "id": "quote/a-decision",
+            "title": "A사 건 결정 메모",
+            "body": "11월 18일 회의에서 v2는 팀장 승인 후 발송하기로 결정했다. 승인 기한은 11월 25일이다.",
+            "time": "past",
+            "status": "done",
+            "links": [
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "지난주 A사 견적 건 어디까지 됐지?",
+          "expect": {
+            "rewrite": {
+              "answered": true,
+              "neverShown": {
+                "numbers": true
+              }
+            },
+            "answerIncludes": [
+              "v2"
+            ],
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "rewrite-b-quote-4",
+      "agentProfile": {
+        "name": "견적 담당",
+        "role": "견적 진행 확인",
+        "tone": "concise",
+        "expertise": [
+          "견적"
+        ],
+        "instructions": "사람이 묻는 견적 건의 진행 상황을 기록에 근거해 한국어로 짧게 답한다. 이미 끝난 단계와 앞으로 할 단계를 구분해서 말하고, 기록에 없는 것은 말하지 않는다."
+      },
+      "draftCheck": {
+        "mode": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "quote/a-request",
+            "title": "A사 견적 요청 접수",
+            "body": "A사 구매팀이 11월 3일 스피커 모듈 200개 견적을 요청했다. 희망 납기는 12월 중순이다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "quote/a-v1",
+            "title": "A사 견적서 v1 발송",
+            "body": "11월 6일 단가 12,800원으로 견적서 v1을 발송했다. A사 회신을 기다리는 중이다.",
+            "time": "past",
+            "status": "done",
+            "links": [
+              {
+                "to": "quote/a-request",
+                "type": "follows_from"
+              },
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          },
+          {
+            "id": "quote/a-meeting",
+            "title": "A사 단가 협의 메모",
+            "body": "팀장 말로는 A사가 단가를 11,900원으로 낮춰 달라고 했다고 함. 직접 확인한 것은 아니고 확정도 아니다.",
+            "time": "past",
+            "links": [
+              {
+                "to": "quote/a-v1",
+                "type": "refers_to"
+              },
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          },
+          {
+            "id": "quote/a-v2-plan",
+            "title": "A사 견적서 v2 수정 계획",
+            "body": "단가 12,200원, 납기 12월 20일로 견적서 v2를 보낼 예정이다. 아직 발송하지 않았다. 팀장 승인 후 발송한다.",
+            "time": "planned",
+            "status": "plan",
+            "links": [
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          },
+          {
+            "id": "quote/a-decision",
+            "title": "A사 건 결정 메모",
+            "body": "11월 18일 회의에서 v2는 팀장 승인 후 발송하기로 결정했다. 승인 기한은 11월 25일이다.",
+            "time": "past",
+            "status": "done",
+            "links": [
+              {
+                "to": "quote/a-request",
+                "type": "same_task"
+              }
+            ]
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "지난주 A사 견적 건 어디까지 됐지?",
+          "expect": {
+            "rewrite": {
+              "answered": true,
+              "neverShown": {
+                "numbers": true
+              }
+            },
+            "answerIncludes": [
+              "v2"
+            ],
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}

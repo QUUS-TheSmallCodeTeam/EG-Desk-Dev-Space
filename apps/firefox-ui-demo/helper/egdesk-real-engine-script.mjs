@@ -42,7 +42,9 @@ export const LIMITS = Object.freeze({ whileRunningMs: 120_000, conversations: 8,
 // the scripted person's answers (test input, never product copy)
 export const APPROVER_TEXT = Object.freeze({ yes: '응, 그 명령 실행해 줘', no: '아니, 그건 실행하지 마' })
 export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'conversationGone', 'draftCheck', 'resumes', 'unsubscribes', 'postedMin', 'commandsRanIncludes', 'commandsRanExcludes', ...registeredExpectKeys()])
-export const ACTIONS = Object.freeze(['interrupt', 'steer', 'delete'])
+// restart (c29): the bridge and the engine are stopped and started again between two turns (the conversation's persisted thread, store and folder stay); it takes no say, no approve, no afterMs
+// and no expectation of the core's (only a registered key, e.g. expect.collab), it needs --persisted-with-cleanup, and a message turn follows it
+export const ACTIONS = Object.freeze(['interrupt', 'steer', 'delete', 'restart'])
 // c25: conversation.agentProfile makes the conversation an Agent-profile DIRECT room (the room the product's draft check judges and the Agent turn's detach + resume belongs to):
 // a synthetic Agent, created in the check's isolated profile store (no person data), every send names it with replyDestination "direct". A direct room is not one-time, so it
 // needs --persisted-with-cleanup (the preflight says so). { name, role?, instructions, tone?, expertise? }
@@ -199,9 +201,15 @@ export function validateEngineScript(value) {
           if (ti === 0) bad(`${tt}.action`, 'cannot be the first turn')
           if (turn.whileRunning !== undefined) bad(`${tt}.whileRunning`, 'an action turn is not also a whileRunning turn')
           if (turn.approve?.length) bad(`${tt}.approve`, 'an action turn takes no approve')
+          if (turn.action === 'restart') {
+            const next = turns[ti + 1]
+            if (next === undefined) bad(`${tt}.action`, 'restart cannot be the last turn (a message turn follows it)')
+            else if (next.action !== undefined || next.whileRunning !== undefined) bad(`${tt}.action`, 'restart is followed by a plain message turn')
+            if (conv.agentProfile !== undefined) bad(`${tt}.action`, 'restart is not available in an agentProfile conversation')
+          }
           if (turn.action === 'steer') { if (typeof turn.say !== 'string' || !turn.say.trim() || turn.say.length > LIMITS.sayChars) bad(`${tt}.say`, `steer needs a string of 1-${LIMITS.sayChars} characters`) }
           else if (turn.say !== undefined) bad(`${tt}.say`, `${turn.action} takes no say`)
-          if (turn.action === 'delete') { if (turn.afterMs !== undefined) bad(`${tt}.afterMs`, 'delete takes no afterMs') }
+          if (turn.action === 'delete' || turn.action === 'restart') { if (turn.afterMs !== undefined) bad(`${tt}.afterMs`, `${turn.action} takes no afterMs`) }
           else {
             if (turn.afterMs !== undefined && !(Number.isInteger(turn.afterMs) && turn.afterMs >= 0 && turn.afterMs <= LIMITS.whileRunningMs)) bad(`${tt}.afterMs`, `an integer 0-${LIMITS.whileRunningMs}`)
             if (ti > 0 && (prev?.whileRunning !== undefined || prev?.action !== undefined)) bad(`${tt}.action`, `${turn.action} must follow a plain message turn (not a whileRunning or action turn)`)
@@ -228,7 +236,8 @@ export function validateEngineScript(value) {
       const e = turn.expect
       if (e === undefined) continue
       if (!isObject(e)) { bad(`${tt}.expect`, 'an object'); continue }
-      only(e, [...EXPECT_KEYS, ...registeredExpectKeys()], `${tt}.expect`) // keys registered after this module loaded count too
+      only(e, [...EXPECT_KEYS, ...registeredExpectKeys()], `${tt}.expect`)
+      if (turn.action === 'restart') for (const k of Object.keys(e)) if (EXPECT_KEYS.includes(k) && !registeredExpectKeys().includes(k)) bad(`${tt}.expect.${k}`, 'a restart turn takes no expectation of the core (there is no answer to judge)') // keys registered after this module loaded count too
       if (e.toolCalls !== undefined && (!Array.isArray(e.toolCalls) || e.toolCalls.length > LIMITS.strings || e.toolCalls.some(n => typeof n !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(n)))) bad(`${tt}.expect.toolCalls`, 'tool names')
       for (const k of ['noToolCalls', 'noNativeTools']) if (e[k] !== undefined && e[k] !== true) bad(`${tt}.expect.${k}`, 'true')
       for (const k of ['posted', 'compacted', 'conversationGone']) if (e[k] !== undefined && typeof e[k] !== 'boolean') bad(`${tt}.expect.${k}`, 'a boolean')

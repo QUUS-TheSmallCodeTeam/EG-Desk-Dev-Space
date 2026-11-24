@@ -195,12 +195,13 @@ function boundedEvidence(items, draftText = '') {
 // withheld is one opaque reference (checkDraft); everything else is read, and a sentence the readable evidence does not support is caught.
 const normalizedEvidence = (items, draftText = '') => {
   const { rows: bounded, leftOut } = boundedEvidence(items, draftText)
+  const used = bounded.filter(item => item.opaque !== true) // the readable items this check was given (the originals), for the caller's next check
   const rows = bounded.map((item, index) => {
     const opaque = item.opaque === true, full = opaque ? '' : compactText(item.text, 1_000_000), text = opaque ? '(content not available to the checker)' : compactText(item.text, DRAFT_CHECK_LIMITS.evidenceChars)
     const raw = item.facts, facts = !opaque && raw && raw.kind === 'own_command' ? { kind: 'own_command', passed: Number.isFinite(raw.passed) ? raw.passed : null, failed: Number.isFinite(raw.failed) ? raw.failed : null, exitCode: Number.isSafeInteger(raw.exitCode) ? raw.exitCode : null, stopped: raw.stopped === true, hasSummary: raw.hasSummary === true } : null
     return { id: String(item.id ?? `item${index + 1}`), kind: item.kind ?? null, time: item.time ?? 'unknown', status: item.status ?? null, source: item.source ?? null, opaque, cut: !opaque && (item.cut === true || full.length > text.length), ...(facts ? { facts } : {}), text }
   })
-  return { rows, leftOut }
+  return { rows, leftOut, used }
 }
 const unseen = evidence => evidence.some(item => item.opaque || item.cut)
 
@@ -391,10 +392,12 @@ export async function checkDraft({ draft, evidence = [], userText = '', internal
   // check trimmed the draft and added its partial note (own = the kept part) or replaced it with its own question (own = ''). Readers that judge the
   // answer's meaning (work placement's "does the result need the owner?") quote only this, never the check's copy.
   const out = (text, outcome, extra = {}) => ({ action: 'post', text, own: Object.hasOwn(extra, 'own') ? extra.own : text, outcome, calls: extra.calls ?? 0, findings: extra.findings ?? [], verdict: verdictOf(firstState),
+    evidenceUsed,
     stats: firstState ? { sentences: firstState.claimSpans.length, terms: firstState.terms.length,
       items: proofCount.items, opaque: proofCount.opaque, cut: proofCount.cut, leftOut: proofCount.leftOut } : null,
     calibration: { ...calibration, ...(extra.fallback ? { fallback: extra.fallback } : {}), attached: text !== draft } })
   const proofCount = { items: 0, opaque: 0, cut: 0, leftOut: 0 }
+  let evidenceUsed = []
   if (typeof draft !== 'string' || !draft.trim()) return out(draft, 'unchecked')
   if (mode !== 'advisory' && mode !== 'on') return out(draft, 'unchecked')
   if (!client || typeof client.decide !== 'function') return out(draft, 'unchecked', { fallback: 'not_configured' })
@@ -405,7 +408,8 @@ export async function checkDraft({ draft, evidence = [], userText = '', internal
   // What the run's gate keeps out of the check is content the model had and the checker may not read: one opaque reference stands for it (not a silent absence).
   const allowedEvidence = egress ? egress.filterEvidence(evidence) : evidence
   const withheld = egress && (Array.isArray(evidence) ? evidence : []).filter(item => item?.opaque !== true).length > allowedEvidence.filter(item => item?.opaque !== true).length
-  const { rows: proof, leftOut } = normalizedEvidence(withheld ? [...allowedEvidence, { id: 'withheld', kind: 'context', time: 'unknown', source: 'application', opaque: true }] : allowedEvidence, draft)
+  const { rows: proof, leftOut, used } = normalizedEvidence(withheld ? [...allowedEvidence, { id: 'withheld', kind: 'context', time: 'unknown', source: 'application', opaque: true }] : allowedEvidence, draft)
+  evidenceUsed = used
   proofCount.items = proof.filter(item => !item.opaque).length; proofCount.opaque = proof.filter(item => item.opaque).length; proofCount.cut = proof.filter(item => item.cut).length; proofCount.leftOut = leftOut
   let calls = 0
   const attempt = async (text, timeoutMs, recheck = false) => {

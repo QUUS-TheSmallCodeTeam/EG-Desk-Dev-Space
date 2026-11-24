@@ -22,6 +22,8 @@
 //     "the filesystem is read-only" and calls no tool.
 //   A turn may carry steerFinal: the final text when a turn/steer arrived while it ran (the model followed the steer). An interrupt ends the running turn
 //   as Main saw on 0.171: turn/completed "interrupted", no completed agent message for a partial text.
+//   shared (in-process only, c29): { persisted, threads, used, usedFork, counters } handed to every instance of one test, so a restarted app-server finds the persisted threads and the
+//     scripted turns already used (a process restart of the real binary keeps its threads on disk).
 //   (in-process scripts only) turn.finalFor(inputText, params) → the final text, instead of `final`
 //   step: { agentMessage: "text", phase? } | { toolCall: { tool, arguments } } | { nativeCommand: { command, cwd } } | { compaction: true }
 //         | { usage: { input, cached, output, reasoning } } | { errorNotification: "text" } | { delayMs: n }
@@ -35,18 +37,20 @@ const MESSAGE_PHASES = { commentary: 'commentary', final: 'final_answer' }
 
 // exit(code): what ends the fake. The process entry below passes process.exit; a test that runs the fake in-process passes its own.
 // stderr: where the schema-error line goes.
-export function runFakeAppServer({ script, input = process.stdin, output = process.stdout, log = null, home = '/fake/codex-home', env = {}, exit = code => process.exit(code), stderr = process.stderr } = {}) {
+export function runFakeAppServer({ script, input = process.stdin, output = process.stdout, log = null, home = '/fake/codex-home', env = {}, exit = code => process.exit(code), stderr = process.stderr, shared = null } = {}) {
   const logLine = entry => { if (log) fs.appendFileSync(log, `${JSON.stringify(entry)}\n`) }
   const person = { mcpServers: [], hooks: 0, features: {}, instructionSources: [], ...(script.person ?? {}) }
-  const persisted = new Set() // thread ids that were started or forked without ephemeral:true
-  const threads = new Map(), used = new Set(), usedFork = new Set(), pending = new Map(), running = new Map() // turnId -> { threadId, interrupted, steers: [text] }
-  let nextThread = 0, nextTurn = 0, nextItem = 0, nextServerRequest = 100
+  // shared (c29, in-process tests): what a restarted app-server finds on disk. The persisted threads and their contents, which scripted turns were used, and the id counters outlive one instance
+  const persisted = shared?.persisted ?? new Set() // thread ids that were started or forked without ephemeral:true
+  const threads = shared?.threads ?? new Map(), used = shared?.used ?? new Set(), usedFork = shared?.usedFork ?? new Set(), pending = new Map(), running = new Map() // turnId -> { threadId, interrupted, steers: [text] }
+  const counters = shared?.counters ?? { thread: 0, turn: 0, item: 0 }
+  let nextServerRequest = 100
   const send = message => { output.write(`${JSON.stringify(message)}\n`); logLine({ dir: 'out', ...message }) }
   let exitCode = 0
   const fail = (what, errors) => { stderr.write(`fake app-server: ${what} is off the 0.171 schema: ${errors.slice(0, 3).join('; ')}\n`); logLine({ dir: 'schema_error', what, errors }); exitCode = 3; setImmediate(() => exit(3)) }
   const notify = (method, params) => { const errors = validateMessage('notification', method, params); if (errors.length) return fail(`notification ${method}`, errors); send({ method, params }) }
   const result = (id, method, value) => { const errors = validateMessage('result', method, value); if (errors.length) return fail(`result of ${method}`, errors); send({ id, result: value }) }
-  const itemId = () => `item-${++nextItem}`
+  const itemId = () => `item-${++counters.item}`
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
   const textOf = params => (params.input ?? []).filter(i => i?.type === 'text').map(i => i.text).join('\n')
 
@@ -140,7 +144,7 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
   const handlers = {
     initialize: (id) => result(id, 'initialize', { userAgent: `codex_cli_rs/${script.version ?? FAKE_VERSION} (Mac OS 26.0.0; arm64) fake`, codexHome: script.home || env.CODEX_HOME || home, platformFamily: 'unix', platformOs: 'macos' }),
     'thread/start': (id, params) => {
-      const threadId = `thr-${++nextThread}`
+      const threadId = `thr-${++counters.thread}`
       if (params.ephemeral !== true) persisted.add(threadId)
       threads.set(threadId, { id: threadId, cwd: params.cwd ?? '/fake/cwd', config: params.config ?? {}, developerInstructions: params.developerInstructions ?? '', internal: String(params.developerInstructions ?? '').includes('private one-off task'), ephemeral: params.ephemeral === true, dynamicTools: (params.dynamicTools ?? []).map(t => t.name) })
       result(id, 'thread/start', { thread: threadObject(threadId, { ...params, ephemeral: script.reportEphemeral === false ? false : params.ephemeral }), cwd: params.cwd ?? '/fake/cwd', model: script.model ?? 'fake-model', modelProvider: 'openai', reasoningEffort: script.effort ?? 'low',
@@ -151,7 +155,7 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
     'thread/fork': (id, params) => {
       const parent = threads.get(params.threadId)
       if (script.refuseEphemeralFork === true && parent?.ephemeral === true) return send({ id, error: { code: -32600, message: `no rollout found for thread id ${params.threadId}` } })
-      const threadId = `fork-${++nextThread}`
+      const threadId = `fork-${++counters.thread}`
       if (params.ephemeral !== true) persisted.add(threadId)
       threads.set(threadId, { id: threadId, cwd: params.cwd ?? parent?.cwd ?? '/fake/cwd', config: params.config ?? parent?.config ?? {}, ephemeral: params.ephemeral === true, fork: true })
       result(id, 'thread/fork', { thread: threadObject(threadId, params), cwd: params.cwd ?? parent?.cwd ?? '/fake/cwd', model: script.model ?? 'fake-model', modelProvider: 'openai', approvalPolicy: 'never', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false } })
@@ -179,7 +183,7 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
       // finalFor(inputText, params): the final message as a function of the turn's input (a script object passed in-process only; a JSON script cannot hold a function). c31: the
       // briefing's fill answers a guide that the product builds at run time, so a fake model must read it from the prompt.
       if (typeof plan.finalFor === 'function') plan = { ...plan, final: plan.finalFor(thread.lastText, params) }
-      const turnId = `turn-${++nextTurn}`
+      const turnId = `turn-${++counters.turn}`
       result(id, 'turn/start', { turn: { id: turnId, items: [], status: 'inProgress' } })
       const state = { threadId: params.threadId, interrupted: false, steers: [], emit: null }
       running.set(turnId, state)

@@ -284,7 +284,8 @@
                   "enum": [
                     "interrupt",
                     "steer",
-                    "delete"
+                    "delete",
+                    "restart"
                   ]
                 },
                 "afterMs": {
@@ -590,6 +591,9 @@
                         "cameraUntouched": {
                           "const": true
                         },
+                        "continuity": {
+                          "const": true
+                        },
                         "noIdentity": {
                           "const": true
                         },
@@ -621,11 +625,17 @@
                           },
                           "type": "object"
                         },
+                        "receiptsClosed": {
+                          "const": true
+                        },
                         "requester": {
                           "enum": [
                             "owner",
                             "invited"
                           ]
+                        },
+                        "roomKept": {
+                          "const": true
                         }
                       },
                       "type": "object"
@@ -857,6 +867,56 @@
                       "maximum": 20,
                       "minimum": 0,
                       "type": "integer"
+                    },
+                    "rewrite": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "answered": {
+                          "type": "boolean"
+                        },
+                        "finding": {
+                          "type": "boolean"
+                        },
+                        "neverShown": {
+                          "additionalProperties": false,
+                          "minProperties": 1,
+                          "properties": {
+                            "numbers": {
+                              "const": true
+                            },
+                            "phrases": {
+                              "items": {
+                                "maxLength": 40,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "maxItems": 8,
+                              "minItems": 1,
+                              "type": "array"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "posted": {
+                          "items": {
+                            "enum": [
+                              "as_written",
+                              "revised",
+                              "certain_part",
+                              "withheld"
+                            ]
+                          },
+                          "maxItems": 4,
+                          "minItems": 1,
+                          "type": "array",
+                          "uniqueItems": true
+                        },
+                        "rewrote": {
+                          "type": "boolean"
+                        }
+                      },
+                      "type": "object"
                     },
                     "toolCalls": {
                       "items": {

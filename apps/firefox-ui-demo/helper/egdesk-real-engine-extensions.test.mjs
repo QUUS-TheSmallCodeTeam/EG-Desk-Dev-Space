@@ -114,3 +114,18 @@ test('turn hooks that need the live runtime: flowOptions merge, attach once with
   hooks.dispose()
   assert.deepEqual(order, [['attach', 'the-chat'], ['before', 0, 'native-1'], ['after', 1], ['after', 2], ['dispose']])
 })
+
+// c29: around a restart action (the bridge and the engine stopped and started again between two turns): the old hook hands something to its successor, the new one reports on the restart turn
+test('turn hooks around a restart: beforeRestart\'s result is handed to the same hook\'s successor under its name; afterRestart\'s record and expectations are collected; a hook without them is skipped', async () => {
+  const seen = []
+  registerTurnHooks('probeRestart', () => ({
+    beforeRestart: async ctx => { seen.push(['before', ctx.state().clientThreadId]); return { room: 'r1', n: 2 } },
+    afterRestart: async ctx => { seen.push(['after', ctx.carried, ctx.expect?.k]); return { record: { carried: ctx.carried }, expectations: [{ check: 'restart.probe', ok: ctx.carried?.n === 2 }] } } }))
+  const state = () => ({ store: null, clientThreadId: 'room-9', conversationId: 'native-9' })
+  const old = createTurnHooks({ id: 'old' }), carried = await old.beforeRestart({ state })
+  assert.deepEqual(carried.probeRestart, { room: 'r1', n: 2 }); assert.equal(carried.memory, undefined, 'a hook with nothing to carry hands over nothing')
+  const fresh = createTurnHooks({ id: 'new' }), out = await fresh.afterRestart({ state, expect: { k: 1 }, carried })
+  assert.deepEqual(out.records, { probeRestart: { carried: { room: 'r1', n: 2 } } }); assert.deepEqual(out.expectations, [{ check: 'restart.probe', ok: true }])
+  assert.deepEqual(seen, [['before', 'room-9'], ['after', { room: 'r1', n: 2 }, 1]])
+  assert.deepEqual(await fresh.afterRestart({ state, carried: {} }), { records: { probeRestart: { carried: undefined } }, expectations: [{ check: 'restart.probe', ok: false }] }, 'nothing carried: the successor sees undefined')
+})
