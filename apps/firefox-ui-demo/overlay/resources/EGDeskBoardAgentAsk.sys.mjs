@@ -192,7 +192,7 @@ export function createBoardAgentAsk({ post, loadProfiles, isCurrent, onState, on
     if (!forStep(s, 'running')) return;
     if (result?.mode !== mode || typeof result.answer !== 'string' || !['local', 'decision', 'draft'].includes(result.source)) {
       discard(s);
-      update(s, { step: 'stopped', prepared: null, error: '실행 결과를 확인하지 못했습니다. 자동으로 다시 실행하지 않습니다.' }); return;
+      update(s, { step: 'stopped', prepared: null, error: '실행 결과를 확인하지 못했습니다. 자동으로 다시 실행하지 않습니다. 이 질문 코드는 이미 사용되었을 수 있습니다. 직접 회신을 쓰거나 새 질문 코드를 받아 다시 시도해 주세요.' }); return;
     }
     s.view.prepared = null;
     const binding = s.binding;

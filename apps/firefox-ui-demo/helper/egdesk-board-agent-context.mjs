@@ -1,6 +1,7 @@
 import { Buffer } from 'node:buffer'
 import { types } from 'node:util'
 
+export const BOARD_AGENT_RELEVANCE_BAR = 0.6
 export const BOARD_AGENT_CONTEXT_LIMITS = Object.freeze({
   question: 2_048, slices: 32, sliceText: 4_000, totalText: 24_000, id: 200, selected: 6, timeoutMs: 1_000,
 })
@@ -78,7 +79,7 @@ function decisionRequest(question, candidates, signal) {
   }
 }
 
-function decisionRank(response, candidates) {
+function decisionRank(response, candidates, probabilities = null) {
   const scores = plain(response) ? data(response, 'answers') : null
   if (!plain(scores) || Reflect.ownKeys(scores).length !== candidates.length) return null
   const ranked = []
@@ -87,7 +88,8 @@ function decisionRank(response, candidates) {
     if (!exact(answer, ['type', 'probability']) || data(answer, 'type') !== 'predicate') return null
     const score = data(answer, 'probability')
     if (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 1) return null
-    if (score >= 0.6) ranked.push({ id, index, score })
+    probabilities?.push(score)
+    if (score >= BOARD_AGENT_RELEVANCE_BAR) ranked.push({ id, index, score })
   }
   return ranked.sort((a, b) => b.score - a.score || a.index - b.index)
     .slice(0, limits.selected).map(({ id }) => id)
@@ -101,7 +103,7 @@ const nativeAborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'ab
 // This selector never derives authority from IDs supplied inside the scope.
 export async function selectBoardAgentContext(input, options) {
   const { question, scope, decisionEgress = false } = input ?? {}
-  const { mode = 'off', client = null, now = Date.now, signal, isCurrent } = options ?? {}
+  const { mode = 'off', client = null, now = Date.now, signal, isCurrent, observe = null } = options ?? {}
   const snapshot = snapshotScope(scope, question)
   const status = () => {
     if (signal?.aborted) return 'cancelled'
@@ -163,21 +165,30 @@ export async function selectBoardAgentContext(input, options) {
   const timer = setTimeout(() => stop('timeout'), limits.timeoutMs)
   let selected = null
   let unconfigured = false
+  const probabilities = []
+  let failureCode = null
   try {
     const request = decisionRequest(question, candidates, guardedSignal)
     if (!checkpoint()) {
       const pending = decide.call(client, request)
       const response = await Promise.race([pending, stopped])
-      if (!checkpoint()) selected = decisionRank(response, candidates)
+      if (!checkpoint()) selected = decisionRank(response, candidates, probabilities)
     }
   } catch (error) {
-    unconfigured = error !== null && typeof error === 'object' && !types.isProxy(error) && data(error, 'code') === 'not_configured'
+    failureCode = error !== null && typeof error === 'object' && !types.isProxy(error) && typeof data(error, 'code') === 'string' ? data(error, 'code') : null
+    unconfigured = failureCode === 'not_configured'
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener?.('abort', onAbort)
   }
   const final = checkpoint()
   if (final === 'invalid_scope' || final === 'cancelled') return result(final)
+  // Content-free report for threshold calibration: numbers and closed words only, never text or ids. Observing
+  // never changes the selection and a throwing observer is ignored.
+  try {
+    observe?.({ probabilities: selected ? probabilities : [], bar: BOARD_AGENT_RELEVANCE_BAR, candidates: candidates.length,
+      failure: selected ? null : (firstFailure === 'timeout' ? 'timeout' : failureCode ?? 'bad_response') })
+  } catch { /* ignore */ }
   // Advisory may evaluate the disclosed candidates, but must never change the answer inputs.
   if (selected && !final) return mode === 'advisory' ? result('local', local) : result('decision', selected)
   return result(unconfigured && !final ? 'local' : 'local_fallback', local)

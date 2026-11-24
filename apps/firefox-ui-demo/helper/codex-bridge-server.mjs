@@ -536,7 +536,7 @@ const portableAttachments = createContextAttachmentProvider({ store: contextStor
 const portableFileDrafts = createManagedDraftProvider({ directory: path.join(dataDir, 'file-drafts') })
 const boardAskBindingKey = randomBytes(32)
 const boardAgentAsk = createBoardAgentAskService({
-  desk: deskStore, profiles: profileStore, selectContext: selectBoardAgentContext,
+  desk: deskStore, profiles: profileStore, selectContext: selectBoardAgentContext, calibrationLog: decisionCalibrationLog,
   decisionStatus: () => {
     const key = decisionCredentials.getApiKey()
     const mode = bridgeSettings.decisionContext.mode
