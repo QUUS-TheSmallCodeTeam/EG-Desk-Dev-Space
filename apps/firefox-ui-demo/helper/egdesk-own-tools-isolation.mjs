@@ -16,6 +16,26 @@
 // (mcpServerStatus/list, experimentalFeature/list and hooks/list with the thread id; instructionSources on the thread/start result).
 import { NATIVE_COMPUTER_FEATURES, disabledNativeMcpConfig, listNativeMcpServers, readNativeDirectMcpServerIds } from './codex-chat-execution-policy.mjs'
 
+// c23 (model-facing text, not user copy). Main's check-1 on the official 0.171: asked to edit a file, the engine answered that "the session's
+// filesystem permissions are read-only" and never called egdesk_edit_file. Two causes, both fixed here and both behind the own-tools flag:
+//   1. Codex injects a <permissions instructions> developer block that describes the read-only sandbox and the never-asking approval policy
+//      (config key include_permissions_instructions, core/config.schema.json: "Whether to inject the <permissions instructions> developer
+//      block"). It is true for Codex's own tools and false for ours, so the block is switched off for the thread.
+//   2. Nothing told the model that the egdesk_* tools act with EG-Desk's permissions. ThreadStartParams.developerInstructions (0.171 schema,
+//      string | null; it is the same field an Agent profile's instructions use) carries one short factual block. It is thread-level
+//      (TurnStartParams has no such field), so it is set at thread start and again on every thread resume.
+export const OWN_TOOLS_INSTRUCTIONS = [
+  'Your own shell and patch tools are off in this session, and this session\'s read-only filesystem setting does not apply to the egdesk_* tools.',
+  'EG-Desk carries out file and command work with its own permissions on the person\'s project folder: egdesk_read_file and egdesk_search_files read; egdesk_edit_file changes a file (replace an exact string, apply a diff, write or delete a whole file), applies the change directly, returns a diff, keeps an undo record for egdesk_undo_edit, and with dryRun true only previews; egdesk_run_command runs a command.',
+  'When a tool result has status needs_person (a risky command, or deleting or overwriting a whole file), ask the person in your own words, end your turn, and do not repeat that call until they have answered.',
+].join('\n')
+
+/** The thread's developer instructions: an Agent's own (if any) first, then the own-tools block. Never empty. */
+export function composeOwnToolsInstructions(base) {
+  const own = typeof base === 'string' && base.trim() ? base.trim() : ''
+  return own ? `${own}\n\n${OWN_TOOLS_INSTRUCTIONS}` : OWN_TOOLS_INSTRUCTIONS
+}
+
 export const OWN_TOOLS_ISOLATION_FEATURES = Object.freeze(['apps', 'hooks', 'plugins', 'remote_plugin', 'multi_agent', 'memories', 'skill_search', ...NATIVE_COMPUTER_FEATURES])
 
 /** The thread overrides for a given inventory. servers/directIds null: the inventory could not be read (features and skills only). */
@@ -24,6 +44,7 @@ export function ownToolsIsolationOverrides(servers = null, directIds = null) {
     features: { ...Object.fromEntries(OWN_TOOLS_ISOLATION_FEATURES.map(name => [name, false])), code_mode: { enabled: false } },
     skills: { include_instructions: false, bundled: { enabled: false } },
     include_apps_instructions: false,
+    include_permissions_instructions: false,
   }
   if (Array.isArray(servers) && directIds instanceof Set) {
     const { mcp_servers, plugins } = disabledNativeMcpConfig(servers, directIds)

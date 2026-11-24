@@ -10,6 +10,9 @@
 //   { version, person: { mcpServers: [{ name, tools: [..] }], hooks: n, features: { name: bool }, instructionSources: [path] },
 //     turns: [ { match?: "text the person's message contains", steps: [ step ], status?: "completed"|"failed", final?: "text", error?: "text" } ],
 //     forkTurns?: [ … same … ] }
+//   refuseEditsUnlessInstructed: models what Main's check-1 saw on the real 0.171 (a hypothesis, not a fact about every build): a thread whose
+//     <permissions instructions> block is on, or that was never told its egdesk_* tools act with EG-Desk's permissions, answers an edit request with
+//     "the filesystem is read-only" and calls no tool.
 //   step: { agentMessage: "text", phase? } | { toolCall: { tool, arguments } } | { nativeCommand: { command, cwd } } | { compaction: true }
 //         | { usage: { input, cached, output, reasoning } } | { errorNotification: "text" } | { delayMs: n }
 import fs from 'node:fs'
@@ -62,6 +65,10 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
 
   async function runTurn(threadId, turnId, plan) {
     const thread = threads.get(threadId), items = []
+    if (script.refuseEditsUnlessInstructed === true && (plan.steps ?? []).some(step => step.toolCall?.tool === 'egdesk_edit_file') &&
+        !(thread.developerInstructions.includes('egdesk_edit_file') && thread.config?.include_permissions_instructions === false)) {
+      plan = { steps: [], final: 'The edit was not applied because this session\'s filesystem permissions are read-only.' }
+    }
     const turn = status => ({ id: turnId, items: [], status })
     notify('turn/started', { threadId, turn: turn('inProgress') })
     const user = { type: 'userMessage', id: itemId(), content: [{ type: 'text', text: thread.lastText, text_elements: [] }] }
@@ -114,7 +121,7 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
     initialize: (id) => result(id, 'initialize', { userAgent: `codex_cli_rs/${script.version ?? FAKE_VERSION} (Mac OS 26.0.0; arm64) fake`, codexHome: script.home || env.CODEX_HOME || home, platformFamily: 'unix', platformOs: 'macos' }),
     'thread/start': (id, params) => {
       const threadId = `thr-${++nextThread}`
-      threads.set(threadId, { id: threadId, cwd: params.cwd ?? '/fake/cwd', config: params.config ?? {}, ephemeral: params.ephemeral === true, dynamicTools: (params.dynamicTools ?? []).map(t => t.name) })
+      threads.set(threadId, { id: threadId, cwd: params.cwd ?? '/fake/cwd', config: params.config ?? {}, developerInstructions: params.developerInstructions ?? '', ephemeral: params.ephemeral === true, dynamicTools: (params.dynamicTools ?? []).map(t => t.name) })
       result(id, 'thread/start', { thread: threadObject(threadId, { ...params, ephemeral: script.reportEphemeral === false ? false : params.ephemeral }), cwd: params.cwd ?? '/fake/cwd', model: script.model ?? 'fake-model', modelProvider: 'openai', reasoningEffort: script.effort ?? 'low',
         approvalPolicy: params.approvalPolicy ?? 'never', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false }, instructionSources: effective(threads.get(threadId)).sources })
       // like the real binary (Main's 0.171 finding): every MCP server that will be active starts when the thread starts

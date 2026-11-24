@@ -65,6 +65,19 @@ const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', '
 // envOverrides.CODEX_HOME for the spawn. The bridge passes none today: Codex
 // runs one app-server on the shared ~/.codex login until per-profile
 // app-servers (own port, own process) are added.
+/**
+ * c23: EG-Desk's own model and effort for an own-tools thread (the same EGDESK_CODEX_MODEL / EGDESK_CODEX_EFFORT the launch builder reads, same
+ * validation). null when neither is set; { model?, effort? } otherwise. Throws the launch builder's coded errors on a bad value.
+ */
+export function egdeskCodexSelectionFromEnv(env = process.env) {
+  const hasModel = Object.hasOwn(env, 'EGDESK_CODEX_MODEL'), hasEffort = Object.hasOwn(env, 'EGDESK_CODEX_EFFORT')
+  if (!hasModel && !hasEffort) return null
+  const model = hasModel ? env.EGDESK_CODEX_MODEL : null, effort = hasEffort ? env.EGDESK_CODEX_EFFORT : null
+  if (hasModel && (typeof model !== 'string' || !MODEL_ID.test(model))) throw Object.assign(new Error('EGDESK_CODEX_MODEL must be a bounded model identifier'), { code: 'INVALID_CODEX_MODEL_OVERRIDE' })
+  if (hasEffort && (typeof effort !== 'string' || !REASONING_EFFORTS.has(effort))) throw Object.assign(new Error('EGDESK_CODEX_EFFORT must be a supported reasoning effort'), { code: 'INVALID_CODEX_EFFORT_OVERRIDE' })
+  return { ...(hasModel ? { model } : {}), ...(hasEffort ? { effort } : {}) }
+}
+
 export function buildCodexAppServerLaunch({ env = process.env, listen, codexHome = null } = {}) {
   if (typeof listen !== 'string' || !listen) throw new TypeError('An app-server listen URL is required')
   if (codexHome != null && (typeof codexHome !== 'string' || !path.isAbsolute(codexHome) || codexHome.includes('\0') || codexHome.length > 4096)) {

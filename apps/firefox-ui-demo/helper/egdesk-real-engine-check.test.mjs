@@ -27,7 +27,7 @@ function tmp(t) {
 }
 
 // ---- fakes ----
-function world(t, fakeScript, { decisions = false, home = { kind: 'person', dir: null }, model = null, effort = null } = {}) {
+function world(t, fakeScript, { decisions = false, home = { kind: 'person', dir: null }, model = null, effort = null, downgrade = false } = {}) {
   const base = tmp(t), out = path.join(base, 'out'), codexHome = path.join(base, 'codex-home')
   fs.mkdirSync(codexHome)
   const spawns = [], ranCommands = [], decisionCalls = [], stderrLines = []
@@ -36,7 +36,14 @@ function world(t, fakeScript, { decisions = false, home = { kind: 'person', dir:
     const child = new EventEmitter()
     Object.assign(child, { pid: 4242 + spawns.length, stdin, stdout, stderr, exitCode: null, signalCode: null, kill: () => true })
     spawns.push({ bin, argv, options })
-    runFakeAppServer({ script: fakeScript, log: path.join(base, 'fake-app-server.log'), input: stdin, output: stdout, stderr: { write: line => { stderrLines.push(line); stderr.write(line) } }, env: options.env, exit: code => { child.exitCode = code; child.emit('close', code, null) } })
+    // downgrade: the thread/start of the product before c23 (no developer instructions, the permissions block on), for a control run
+    let fakeInput = stdin
+    if (downgrade) {
+      fakeInput = new PassThrough()
+      stdin.on('data', chunk => { for (const line of String(chunk).split('\n').filter(Boolean)) { const m = JSON.parse(line); if (m.method === 'thread/start') { delete m.params.developerInstructions; delete m.params.config?.include_permissions_instructions } fakeInput.write(`${JSON.stringify(m)}\n`) } })
+      stdin.on('end', () => fakeInput.end())
+    }
+    runFakeAppServer({ script: fakeScript, log: path.join(base, 'fake-app-server.log'), input: fakeInput, output: stdout, stderr: { write: line => { stderrLines.push(line); stderr.write(line) } }, env: options.env, exit: code => { child.exitCode = code; child.emit('close', code, null) } })
     return child
   }
   const killGroup = async child => { child.stdin.end(); await new Promise(resolve => { if (child.exitCode != null) return resolve(); child.once('close', resolve); setTimeout(resolve, 500) }); return { signal: 'SIGTERM' } }
@@ -267,6 +274,24 @@ test('starter (c): an edit with a preview and an undo record; the undo restores 
   assert.equal(t2.ok, true, JSON.stringify(t2.expectations))
   assert.equal(fs.readFileSync(path.join(w.out, 'scratch', 'edit-undo', 'app.js'), 'utf8'), "const greeting = 'hello'\nmodule.exports = { greeting }\n")
   assert.deepEqual(w.ranCommands, []); noSchemaErrors(w)
+})
+
+test('c23: the engine that refuses edits "because the filesystem is read-only" (Main\'s check-1 on 0.171) edits through egdesk_edit_file once it is told what the tools are', async t => {
+  const fake = { refuseEditsUnlessInstructed: true, turns: [
+    { steps: [{ toolCall: { tool: 'egdesk_edit_file', arguments: { path: 'app.js', mode: 'replace', oldString: "'hello'", newString: "'hi'", dryRun: true } } },
+      { toolCall: { tool: 'egdesk_edit_file', arguments: { path: 'app.js', mode: 'replace', oldString: "'hello'", newString: "'hi'" } } }], final: 'Changed hello to hi.' },
+    { steps: [{ toolCall: { tool: 'egdesk_undo_edit', arguments: {} } }], final: 'Undone.' }] }
+  const w = world(t, fake)
+  const rec = only(await runCheck(w.options, asScripts(starter('edit-undo')), w.deps))
+  assert.equal(rec.aborted, null); assert.equal(rec.ok, true, JSON.stringify(rec.turns.map(x => x.expectations)))
+  const start = wireLog(w).find(m => m.dir === 'in' && m.method === 'thread/start').params
+  assert.match(start.developerInstructions, /egdesk_edit_file/); assert.equal(start.config.include_permissions_instructions, false)
+  // the control: the same fake and script through the thread/start of the product before c23 refuses, and the check reports a failed turn
+  const bare = world(t, fake, { downgrade: true })
+  const old = only(await runCheck(bare.options, asScripts(starter('edit-undo')), bare.deps))
+  assert.equal(old.ok, false); assert.equal(old.turns[0].expectations.find(c => c.check === 'toolCalls').ok, false)
+  assert.match(old.turns[0].posted.at(-1), /filesystem permissions are read-only/)
+  assert.equal(fs.readFileSync(path.join(bare.out, 'scratch', 'edit-undo', 'app.js'), 'utf8').includes("'hello'"), true, 'nothing was changed')
 })
 
 test('a native command or file change is declined by the runtime and the check reports it (noNativeTools fails)', async t => {
