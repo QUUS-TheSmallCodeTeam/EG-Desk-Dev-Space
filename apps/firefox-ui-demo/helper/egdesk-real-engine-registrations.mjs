@@ -1,8 +1,25 @@
 // The registrations of the real-engine check's extensions (API: ./egdesk-real-engine-extensions.mjs). One self-contained section per lane (its imports sit in its section), with an
 // untouched line between sections so that two lanes adding a section never touch adjacent lines. Add yours in your slot; do not edit the core of the script format or the check.
-import { registerConversationFields, registerExpectKeys, registerTurnHooks } from './egdesk-real-engine-extensions.mjs'
+import { registerConversationFields, registerExpectKeys, registerFlags, registerTurnFields, registerTurnHooks } from './egdesk-real-engine-extensions.mjs'
 
-// ---- slot L1 ----
+// ---- L1: collaboration (two synthetic requesters in one room: `from` on a turn, expect.collab; its hook needs the live runtime and registers as a turn hook) ----
+import { COLLAB_DECISION_FLAGS, COLLAB_EXPECT_SCHEMA, COLLAB_FLAGS, COLLAB_FROM, createCollabTurnHook, validateCollabExpect, validateCollabFrom } from './egdesk-real-engine-collab-hook.mjs'
+registerFlags({ reproduced: COLLAB_FLAGS, decisionDependent: COLLAB_DECISION_FLAGS })
+registerTurnFields({ from: { schema: { enum: [...COLLAB_FROM] }, validate: (value, { conv, turn, path, bad }) => {
+  for (const why of validateCollabFrom(value)) bad(path, why)
+  if (conv.flags?.EGDESK_PRESENCE !== 'on') bad(path, 'needs flags.EGDESK_PRESENCE = "on" in this conversation (the requester goes through the presence path)')
+  if (turn.action !== undefined || turn.whileRunning !== undefined) bad(path, 'only a plain message turn has a sender')
+} } })
+registerExpectKeys({ collab: { schema: COLLAB_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => {
+  for (const why of validateCollabExpect(value)) bad(path, why)
+  if (conv.flags?.EGDESK_PRESENCE !== 'on') bad(path, 'needs flags.EGDESK_PRESENCE = "on" in this conversation')
+  if (value.attention !== undefined) {
+    for (const flag of ['EGDESK_WORK_PLACEMENT', 'EGDESK_CONVERSATION_FLOW']) if (conv.flags?.[flag] !== 'on') bad(`${path}.attention`, `needs flags.${flag} = "on" in this conversation (the scene is judged at the room's live heartbeat)`)
+    if (['raised', 'posted'].includes(value.attention.pointer) && !(conv.draftCheck?.mode === 'on' || conv.flags?.EGDESK_DRAFT_CHECK === 'on')) bad(`${path}.attention.pointer`, 'a pointer message needs the draft check on in this conversation')
+  }
+  if (turn.whileRunning !== undefined || turn.action !== undefined) bad(path, 'not checked on a whileRunning or action turn')
+} } })
+registerTurnHooks('collab', conversation => createCollabTurnHook(conversation))
 
 // ---- L7: memory (seeded pages and expect.memory) ----
 import { MEMORY_EXPECT_SCHEMA, MEMORY_SCHEMA, createMemoryHook, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
