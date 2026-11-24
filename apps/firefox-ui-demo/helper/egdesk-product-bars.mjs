@@ -11,6 +11,7 @@ import { BEAT_PREDICATE_YES } from './egdesk-heartbeat-judge.mjs'
 import { CONFIRM_BARS } from './egdesk-record-confirmation.mjs'
 import { SPEECH_PREDICATE_BARS, SPEECH_SPLIT_BARS, SPEECH_THRESHOLDS } from './egdesk-speech-grounding.mjs'
 import { RISK_PREDICATE_NO } from './egdesk-terminal-command-gate.mjs'
+import { CONDITION_NO, CONDITION_YES } from './egdesk-run-conditions.mjs'
 import { NO as TERNARY_NO, YES as TERNARY_YES } from './egdesk-wiki-reconstruction.mjs'
 import { PLACEMENT_PREDICATE_YES } from './egdesk-work-placement.mjs'
 
@@ -33,6 +34,9 @@ export const PRODUCT_BARS = Object.freeze([
   [/^heartbeat-c1[7-9]$|^draft-overcorrection-v\d+$/, /^(tense_#|present_#)$/, single(DRAFT_CHECK_THRESHOLDS.finding, 'egdesk-draft-check.mjs: a finding iff p >= finding')],
   [/^heartbeat-c1[7-9]$/, /^claim_#$/, choice(T.choice, T.margin, 'egdesk-draft-check.mjs readChoice thresholds.choice / margin')],
   [/^command-risk-v2$/, /^risk_/, onlyNo(RISK_PREDICATE_NO, 'egdesk-terminal-command-gate.mjs RISK_PREDICATE_NO: no approval iff p <= bar; otherwise approval')],
+  // c21 condition arbiter: output_reports_problem keeps exit-0 health only at <= no (yes and between lower it to unknown); the two hints
+  // (output_says_listening, output_reports_conflict) are added only at >= yes; a predicate never declares success
+  [/^run-conditions-v\d+$/, /^output_(reports_problem|says_listening|reports_conflict)$/, three(CONDITION_YES, CONDITION_NO, 'egdesk-run-conditions.mjs CONDITION_YES / CONDITION_NO: problem lowers health above no; hints only at yes')],
   [/^command-judgments-v1$/, /^log_b#$/, single(T.relevant, 'egdesk-terminal-judge.mjs readPredicate(th.relevant): attached iff p >= relevant')],
   [/^command-judgments-v1$/, /^terminal_state$/, choice(T.choice, T.margin, 'egdesk-terminal-judge.mjs readChoice th.choice / th.margin')],
   [/^browser-task-v1$/, /^goal_met$/, single(T.done, 'egdesk-browser-reflex.mjs readPredicate(thresholds.done)')],
