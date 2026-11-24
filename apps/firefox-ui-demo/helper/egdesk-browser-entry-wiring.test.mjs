@@ -96,3 +96,21 @@ test('W6 production wiring: the bridge installs the config from the developer fl
   assert.doesNotMatch(source, /EGDESK_BROWSER_ENTRY\s*=\s*['"]|process\.env\.EGDESK_BROWSER_ENTRY\s*=/, 'nothing in the bridge turns it on')
   assert.equal((source.match(/createWikiAdapter\(/g) || []).length, 1, 'one adapter, one write store')
 })
+
+test('W7 an utterance page kept only as a chat-message reference sits in the same store: the browser hook still returns the outcome page with its body, and the outcome is never stored as a reference', async () => {
+  const x = setup('on')
+  const utterance = x.adapter.writerFor(await x.adapter.snapshot({ context: ctx }), { enabled: true, canWrite: () => true })
+    .apply({ op: 'new_page', time: { slice: 'past' }, status: 'done', provenance: { kind: 'utterance' }, links: [], spokenAt: null },
+      { message: '지난달 세금계산서는 두 번째 사업자로 받았어', messageRef: 'chat-message:m-1', scope: x.adapter.scopeFor(ctx), operationId: 'utterance-1' })
+  assert.equal(utterance.status, 'stored')
+  assert.equal((await writeOutcome(x, 'bt_0123456789ab')).status, 'stored')
+  const stored = JSON.parse(readFileSync(path.join(x.dir, 'egdesk-wiki-writes.json'), 'utf8')).pages
+  assert.deepEqual(stored.map(p => [p.provenance.kind, typeof p.body, p.ref ?? null]), [['utterance', 'undefined', 'chat-message:m-1'], ['agent_note', 'string', null]])
+  // a fresh adapter over the same file; no speech record is supplied, so the reference cannot be resolved and only the outcome page is a page
+  const again = createWikiAdapter({ writes: openWikiWrites({ dataDir: x.dir }) })
+  const config = createBrowserEntryConfig({ flag: () => 'on', getAdapter: () => again, wiki: ({ context }) => again.snapshot({ context }) })
+  const got = await config.memory({ body: { message: GOAL }, context: ctx, client: x.judge })
+  assert.deepEqual(got.pages.map(p => [p.id, p.provenance.kind, typeof p.body]), [['browser-task/bt_0123456789ab', 'agent_note', 'string']])
+  assert.match(got.packet, /선택: 사업자 987-65-43210 @ \/invoices/)
+  assert.doesNotMatch(got.packet, /두 번째 사업자로 받았어/, 'the unresolved utterance contributes no text')
+})
