@@ -32,7 +32,9 @@ const QUESTIONS = new Set(['answer_type', 'time_intent', 'relevance', 'speech_ax
   // the heartbeat's yes/no message questions (egdesk-conversation-flow.mjs FLOW_PREDICATES)
   'beat_note', 'beat_ask', 'beat_stalled', 'beat_pointer', 'beat_told',
   // the command gate's yes/no content predicates (egdesk-terminal-command-gate.mjs RISK_PREDICATES)
-  'risk_unrestorable', 'risk_outside', 'risk_personal_files'])
+  'risk_unrestorable', 'risk_outside', 'risk_personal_files',
+  // the browser step's page-state yes/no predicates (lane L8 c16)
+  'ps_sign_in', 'ps_code', 'ps_challenge', 'ps_error', 'ps_sensitive', 'ps_covered'])
 const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed', 'none', 'act', 'hold', 'fetch'])
 // Turn memory (advisory): where in the session the turn was, what the fetch did, and how long each stage took.
 // Draft check (advisory): what the check would have done to the posted answer, and what it would fall back to without a revision.
