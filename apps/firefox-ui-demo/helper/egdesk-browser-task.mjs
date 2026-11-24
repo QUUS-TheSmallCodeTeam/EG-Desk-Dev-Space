@@ -124,6 +124,8 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = BROWSER_TASK_TT
       return null
     },
     touch(task) { task.updatedAt = now() },
+    // The conversation was deleted (chat forgetConversation): its tasks go, running or paused. -> how many.
+    forget(conversationKey) { let n = 0; for (const [id, task] of [...tasks]) if (task.conversationKey === conversationKey) { tasks.delete(id); n++ } return n },
     // The host tells the task when its question (or its "cannot proceed") has reached the person as a posted message.
     markAsked(task, asked = true) { if (task) { task.asked = asked === true; task.updatedAt = now() } },
     // The host records the message in which the person was asked (bounded); the resume judgment reads it.

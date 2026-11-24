@@ -293,6 +293,8 @@ export function createWorkPlacement({ client, mode = () => 'off', enabled = () =
     facts,
     /** The conversation flow posted its pointer message: the fact is withdrawn. */
     acknowledgePointer(key) { const c = convs.get(key); if (!c?.pointer) return false; c.pointer = null; return true },
+    // The conversation was deleted (chat forgetConversation): its queue, results and pointer fact go. keys: its local and native ids. -> how many.
+    forget(keys) { let n = 0; for (const key of Array.isArray(keys) ? keys : [keys]) if (convs.delete(key)) n++; return n },
     records: () => records.map(r => structuredClone(r)),
     idle: () => Promise.allSettled([...running]),
   })

@@ -77,12 +77,14 @@ const CHAT_ACTIONS = Object.freeze({
   '/chat/rooms/agent': 'setRoomAgent',
   // The surface closed this conversation or left this room: { clientThreadId } → its live session ends (closeSession; 200, memory only).
   '/chat/session/close': 'closeSession',
+  // The person deleted this conversation in the surface: { clientThreadId } -> its ephemeral per-conversation state ends (forgetConversation; 200, memory and module state only).
+  '/chat/conversation/forget': 'forgetConversation',
 })
 const SENDS = new Set(['/chat/send', '/chat/board/send'])
 // CHAT-01: a local-store write like /chat/history/import — no engine, no turn —
 // so it takes no engine account check: a pick made while signed out is still
 // kept for the next start, and the offline QA restart probe can record one.
-const LOCAL_WRITES = new Set(['/chat/rooms/agent', '/chat/session/close'])
+const LOCAL_WRITES = new Set(['/chat/rooms/agent', '/chat/session/close', '/chat/conversation/forget'])
 
 export function createChatHttpHandler(chat, ensureAuth, history = chat) {
   return async (req, res, url) => {

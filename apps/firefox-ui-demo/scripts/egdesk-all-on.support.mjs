@@ -33,6 +33,7 @@ import { createPresenceMirror, createRunRequesters } from '../helper/egdesk-pres
 import { createWorkPlacement, createWorkPlacementHttpHandler } from '../helper/egdesk-work-placement.mjs'
 import { createBoardPresentationHttpHandler } from '../helper/egdesk-board-presentation-http.mjs'
 import { briefingDeps } from '../helper/egdesk-briefing-engine.mjs'
+import { openBriefingBindings } from '../helper/egdesk-briefing-bindings.mjs'
 import { collectDecisionCandidates } from '../helper/egdesk-decision-candidates.mjs'
 import { SYNTHETIC_PAGES, mockJudge } from '../helper/egdesk-wiki-reconstruction.fixture.mjs'
 import { PS_NAMES } from '../helper/egdesk-browser-page-state.fixture.mjs'
@@ -384,7 +385,12 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
   const chatHttp = createChatHttpHandler(chat, async () => {})
   const placementHttp = createWorkPlacementHttpHandler({ placement: workPlacement, heartbeatFor: key => chat.heartbeatFor(key) })
   // The Board/Decisions handler with the briefing flow, as the bridge mounts it (same key, same budget, same calibration log, same provider).
-  const board = createBoardPresentationHttpHandler({ credentials: { status: 'configured', writable: true, getApiKey: () => KEY, savedAt: () => 17, hint: () => null }, getMode: () => state.mode, budget, calibrationLog,
+  // As the bridge: the briefing bindings in the data dir, and the modules' per-conversation state registered for a deleted conversation.
+  const briefingBindings = openBriefingBindings({ dataDir: path.join(dir, 'briefing'), log() {} })
+  chat.onForgetConversation('briefing_bindings', ({ conversationIds }) => conversationIds.reduce((n, id) => n + briefingBindings.forgetConversation(id), 0))
+  chat.onForgetConversation('run_requesters', ({ clientThreadId, conversationIds }) => (runRequesters.set([clientThreadId, ...conversationIds], null) === 'cleared' ? 1 : 0))
+  chat.onForgetConversation('work_placement', ({ clientThreadId, conversationIds }) => workPlacement.forget([clientThreadId, ...conversationIds]))
+  const board = createBoardPresentationHttpHandler({ briefingBindings, credentials: { status: 'configured', writable: true, getApiKey: () => KEY, savedAt: () => 17, hint: () => null }, getMode: () => state.mode, budget, calibrationLog,
     fetchImpl: async (endpoint, init) => { const out = await provider(endpoint, init, 'briefing'); return new Response(await out.text(), { status: out.status, headers: { 'content-type': 'application/json' } }) },
     briefing: briefingDeps({ chat, contexts, enabled: ENV.EGDESK_BRIEFING_FLOW === 'on', order: 'skeleton' }) })
   const http = async (method, p, body) => {
@@ -410,7 +416,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
   const source = n => ({ id: 'selected-source', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
     sourceRef: { viewId: 'card', profileId: 'fixture', accountId: '', uri: `${PORTAL}/invoices` },
     browserToolIdentity: { cardEpoch: 'epoch', userContextId: 0, engineAccountKey: OWNER, authorityEpoch: 1 }, browserToolSelection: { token: `token-${n}`, threadId: state.thread } })
-  const w = { inflight: () => inflight, clock: () => clock, dir, cwd, chat, store, contexts, client, budget, calibrationLog, settings, turnMemoryConfig, presenceMirror, runRequesters, workPlacement, http, settle, notify,
+  const w = { runRequesters, briefingBindings, inflight: () => inflight, clock: () => clock, dir, cwd, chat, store, contexts, client, budget, calibrationLog, settings, turnMemoryConfig, presenceMirror, runRequesters, workPlacement, http, settle, notify,
     events, native, decisions, forkPrompts, acts, steers, replies, anomalies, state, ENV,
     step(name) { step = name }, at: () => clock,
     async advance(ms) {
