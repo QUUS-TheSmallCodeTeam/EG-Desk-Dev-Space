@@ -92,3 +92,13 @@ test('v2 (c21): picked by the Decision labels only, the strongest per kind and a
   const built = scenarioPlan([fake('triage_recall', 'a', 3000), fake('triage_recall', 'b', 3000), fake('triage_correction', 'c', 3000)], { estimate: body => Buffer.byteLength(body), budget: 6100 })
   assert.deepEqual(built.plan.requests.map(q => q.id), ['triage_recall-a', 'triage_correction-c']); assert.deepEqual(built.dropped, ['triage_recall-b'])
 })
+
+test('c24: the recall scenario follows the product\'s triage rule (the stored pages are fetched: tn_need, hard); tn_recall is a soft check; a check of an earlier action has its own kind', () => {
+  const recall = SCENARIO_KINDS.triage_recall.expect, check = SCENARIO_KINDS.triage_check_earlier
+  assert.deepEqual(recall.map(e => [e.name, e.severity]), [['tn_need', 'hard'], ['tn_recall', 'soft']])
+  assert.deepEqual([check.types, check.v2, check.expect.map(e => [e.name, e.severity, e.min])], [['check_earlier'], true, [['tn_need', 'hard', 0.8]]])
+  const scores = new Map([['x1', Object.fromEntries(['correction', 'pushback', 'approval', 'ambiguous', 'referential', 'topic_switch', 'topic_return', 'interruption', 'praise', 'frustration', 'reask', 'instruction_change'].map(t => [t, 0]))]])
+  assert.deepEqual(pickByLabels([ex('x1', '오전 6시에 작업 중지 예약 걸었지?', [])], scores), [], 'a label set without the new type picks nothing for it')
+  scores.get('x1').check_earlier = 0.97
+  assert.deepEqual(pickByLabels([ex('x1', '오전 6시에 작업 중지 예약 걸었지?', [])], scores).map(p => p.kind), ['triage_check_earlier'])
+})

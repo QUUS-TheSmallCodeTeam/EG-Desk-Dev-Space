@@ -95,14 +95,14 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
     // (older callers, tests) the previous peer-input hook still answers and nothing else is claimed.
     let capabilities = null
     if (typeof inspectCapabilities === 'function') { try { capabilities = inspectCapabilities(bin) ?? null } catch { capabilities = null } }
-    let boardPeerContract = null
+    let boardPeerContract = null, steerContract = null
     // With a probe configured nothing is borrowed, not even when this binary's probe failed (then it claims nothing).
-    if (typeof inspectCapabilities === 'function') boardPeerContract = capabilities?.boardPeerContract ?? null
+    if (typeof inspectCapabilities === 'function') { boardPeerContract = capabilities?.boardPeerContract ?? null; steerContract = capabilities?.steerContract ?? null }
     else { try { boardPeerContract = getBoardPeerContract(bin) } catch { /* optional; chat remains available */ } }
     const child = spawnChild(bin, [...plan.args, '-c', 'cli_auth_credentials_store=file'], {
       cwd, env: isolatedCodexEnv(env, plan.envOverrides.CODEX_HOME), shell: false, stdio: ['pipe', 'pipe', 'pipe'],
     })
-    const client = { id, home, identity, child, boardPeerContract, capabilities, auth: null, models: null, check: null, authRejected: false,
+    const client = { id, home, identity, child, boardPeerContract, steerContract, capabilities, auth: null, models: null, check: null, authRejected: false,
       pending: new Map(), nativeRequests: new Map(), answered: new Set() }
     const rpc = client.rpc = new AppServerRpc({
       experimentalApi: true,
@@ -235,9 +235,10 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
       readyClient(id)
     },
     boardPeerContract(id) { return readyClient(id).boardPeerContract },
+    steerContract(id) { return readyClient(id).steerContract ?? null },
     /** What this profile's own binary can do (dynamicTools, ephemeral, turnSteer, threadDelete), for a ready profile; all false otherwise. */
     capabilities(id) {
-      const none = Object.freeze({ version: null, dynamicTools: false, qaReadOnly: false, ephemeral: false, turnSteer: false, threadDelete: false, boardPeerContract: null, executable: null })
+      const none = Object.freeze({ version: null, dynamicTools: false, qaReadOnly: false, ephemeral: false, turnSteer: false, threadDelete: false, boardPeerContract: null, steer: false, steerContract: null, executable: null })
       try {
         const client = clients.get(id), owned = resolveHome(id)
         if (!client || !current(client) || client.home !== owned.home || client.identity !== owned.identity || !client.rpc.ready || !client.auth?.isLoggedIn) return none

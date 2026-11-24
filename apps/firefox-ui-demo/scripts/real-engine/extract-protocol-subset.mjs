@@ -17,8 +17,7 @@ export const WANTED = Object.freeze([
   ['serverRequest', 'item/tool/call', 'ServerRequest.json'], ['serverRequest', 'item/commandExecution/requestApproval', 'ServerRequest.json'],
   ['serverRequest', 'item/fileChange/requestApproval', 'ServerRequest.json'],
   ['clientRequest', 'initialize', 'ClientRequest.json'], ['clientRequest', 'thread/start', 'ClientRequest.json'], ['clientRequest', 'turn/start', 'ClientRequest.json'],
-  ['clientRequest', 'thread/unsubscribe', 'ClientRequest.json'], ['clientRequest', 'turn/interrupt', 'ClientRequest.json'], ['clientRequest', 'thread/fork', 'ClientRequest.json'],
-  ['clientRequest', 'turn/steer', 'ClientRequest.json'], // L2 c21: a message typed into a working run is steered into its turn
+  ['clientRequest', 'thread/unsubscribe', 'ClientRequest.json'], ['clientRequest', 'turn/interrupt', 'ClientRequest.json'], ['clientRequest', 'turn/steer', 'ClientRequest.json'], ['clientRequest', 'thread/fork', 'ClientRequest.json'],
   ['clientRequest', 'config/read', 'ClientRequest.json'], ['clientRequest', 'mcpServerStatus/list', 'ClientRequest.json'],
   ['clientRequest', 'experimentalFeature/list', 'ClientRequest.json'], ['clientRequest', 'hooks/list', 'ClientRequest.json'],
   ['result', 'initialize', 'v1/InitializeResponse.json'], ['result', 'thread/start', 'v2/ThreadStartResponse.json'], ['result', 'turn/start', 'v2/TurnStartResponse.json'],

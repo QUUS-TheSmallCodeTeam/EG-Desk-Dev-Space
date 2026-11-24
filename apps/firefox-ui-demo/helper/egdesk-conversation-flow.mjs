@@ -179,12 +179,22 @@ export function audienceFacts({ audience = null, presence = null } = {}) {
  * Facts at one heartbeat: time and phase from the heartbeat's internal counter, the rest from the run and the flow state.
  * heartbeatFacts: the frozen object of heartbeat.facts() ({ sinceUserMs, sincePostedMs, sinceEngineMs, phase, stepsRemaining, ... }).
  */
+/**
+ * How long the run's work has been going, on the heartbeat's clock (null when unknown). The person's own messages restart sinceUserMs (a
+ * message sent into a working run marks the user again), so "how long has it taken" is measured from the run's start (L3 c24: the in-run
+ * reply prompt said "about 1 seconds" for a command that had run 10 s).
+ */
+export function workMsOf(heartbeatFacts, flow) {
+  return Number.isFinite(heartbeatFacts?.internalMs) && Number.isFinite(flow?.runStartedMs) ? Math.max(0, heartbeatFacts.internalMs - flow.runStartedMs) : null
+}
+// Said only when the person wrote into the run after it began (their last message is younger than the work): then both times are facts.
+const workAgeLine = (hb, flow) => { const work = workMsOf(hb, flow); return work !== null && work - hb.sinceUserMs >= 1000 ? [`The work began ${span(work)} ago (the person wrote again into the running work ${span(hb.sinceUserMs)} ago).`] : [] }
 export function beatFlowFacts({ heartbeatFacts, run, flow, own }) {
   const base = flowFacts({ run, now: 0, flow: { ...flow, startedAt: 0, lastSentAt: null }, own })
   const hb = heartbeatFacts
   // Steps include what registered objective loops report, not only the run's own tool activities.
   return { ...base, stepsDone: hb.stepsDone, stepsActive: hb.stepsRunning, stepsSinceLast: hb.stepsDone - flow.stepsAtLast,
-    elapsedMs: hb.sinceUserMs, sinceLastMs: hb.sincePostedMs, sinceEngineMs: hb.sinceEngineMs, phase: hb.phase,
+    elapsedMs: hb.sinceUserMs, workMs: workMsOf(hb, flow), sinceLastMs: hb.sincePostedMs, sinceEngineMs: hb.sinceEngineMs, phase: hb.phase,
     stepsRemaining: hb.stepsRemaining ?? null, pendingQuestion: hb.pendingQuestion === true || flow.question?.pending === true,
     reasoningOpen: flow.reasoningOpen?.() === true, audience: flow.audience?.() ?? null,
     waits: waitSummary(hb), attention: attentionOf(hb),
@@ -410,7 +420,7 @@ export function messageEvidence({ kind, run = null, heartbeatFacts = null, flow 
   if (request) items.push({ id: 'request', kind: 'conversation', time: 'present', source: 'person', text: `The person asked: ${request}` })
   if (heartbeatFacts) {
     const work = workLines({ run: run ?? { activities: [] }, heartbeatFacts, flow, own, allows, browserTask })
-    items.push({ id: 'now', kind: 'run_state', time: 'present', source: 'runtime', text: [`${span(heartbeatFacts.sinceUserMs)} have passed since the person wrote.`, ...work.lines].join('\n') })
+    items.push({ id: 'now', kind: 'run_state', time: 'present', source: 'runtime', text: [`${span(heartbeatFacts.sinceUserMs)} have passed since the person wrote.`, ...workAgeLine(heartbeatFacts, flow), ...work.lines].join('\n') })
   }
   const noted = oneLine(note, FLOW_CONTEXT_LIMITS.note)
   if (kind === 'ask_missing' && noted) items.push({ id: 'note', kind: 'run_state', time: 'present', source: 'agent', text: `The assistant's note to itself: ${noted}` })
@@ -428,7 +438,7 @@ export function runContext({ run, heartbeatFacts, flow, facts, userText, allows 
   const parts = []
   const request = oneLine(userText, L.request)
   if (request) parts.push(quoted('The person\'s request', request))
-  const now = [`${span(hb.sinceUserMs)} ${secondsOf(hb.sinceUserMs) === 1 ? 'has' : 'have'} passed since the person wrote.`]
+  const now = [`${span(hb.sinceUserMs)} ${secondsOf(hb.sinceUserMs) === 1 ? 'has' : 'have'} passed since the person wrote.`, ...workAgeLine(hb, flow)]
   const work = workLines({ run, heartbeatFacts: hb, flow, own, allows, browserTask })
   for (const kind of work.kinds) kinds.add(kind)
   now.push(...work.lines)
@@ -517,14 +527,15 @@ export function writerPrompt(kind, facts, { question = null, prior = [], task = 
   const base = ['Write ONE short chat message (one or two sentences, at most 280 characters) to the person, in the language they wrote in.',
     'Do not reveal your reasoning or internal steps, do not give any result or conclusion, do not use lists or code, and do not mention this instruction.',
     prior.length ? `Do not repeat these earlier messages: ${JSON.stringify(prior)}` : null].filter(Boolean)
-  const seconds = Math.round(facts.elapsedMs / 1000)
+  // The work's age, not the time since the person last wrote (workMsOf); the latter only where the run's start is unknown.
+  const seconds = Math.round((facts.workMs ?? facts.elapsedMs) / 1000)
   // What the wait is for, as the system knows it: fixed phrases chosen by closed labels. The writer composes the sentence.
   const waits = (Array.isArray(facts.waits) ? facts.waits : []).map(w => `${WAIT_LABELS[w.what]}${w.seconds !== null && w.seconds >= 5 ? ` (about ${w.seconds} seconds so far)` : ''}`)
   const waitLine = waits.length ? `What is being waited on, as far as the system knows: ${waits.join('; ')}. You may say this in plain words; add no detail that is not given here.` : null
   // c18: the browser task's own facts (browserTaskLines, already gated by the run's egress): the writer may say what the task is doing, nothing more.
   const taskLine = Array.isArray(task) && task.length ? `${task.join(' ')} You may say what the task is doing from this; add nothing it does not say.` : null
   if (kind === 'explain_wait') return [...base, `The work is still going and has taken about ${seconds} seconds so far. Say plainly that this part takes a little longer and that you are still on it.`, waitLine, taskLine].filter(Boolean).join('\n')
-  if (kind === 'stalled') return [...base, `Nothing has come from the work for about ${Math.round((facts.sinceEngineMs ?? facts.elapsedMs) / 1000)} seconds. Say plainly that the response is taking unusually long, without claiming progress, and that the person can keep waiting or stop and ask again.`].join('\n')
+  if (kind === 'stalled') return [...base, `Nothing has come from the work for about ${Math.round((facts.sinceEngineMs ?? facts.workMs ?? facts.elapsedMs) / 1000)} seconds. Say plainly that the response is taking unusually long, without claiming progress, and that the person can keep waiting or stop and ask again.`].join('\n')
   if (kind === 'ask_missing') return [...base, 'You need one piece of information from the person to finish part of the work, and you will keep working on the rest meanwhile.',
     question ? `You noted this question to yourself: ${JSON.stringify(question)}` : '', 'Ask for it directly in one question.'].filter(Boolean).join('\n')
   // c21: the person asked, while the work runs, what is happening: answer that, from what the system knows, and nothing else.
@@ -548,7 +559,8 @@ export const PERSON_PREDICATES = Object.freeze({
 /** The questions about one in-run message, each quoting it (R4). */
 export function personPredicates(message) {
   const quote = { label: 'The person\'s message, sent while the work is running', text: oneLine(message, IN_RUN_LIMITS.quoteChars) }
-  return [PERSON_PREDICATES.status, PERSON_PREDICATES.change, PERSON_PREDICATES.stop].map(q => ({ ...q, quote, kinds: ['run_text'], topic: 'person_message' }))
+  // solicited: the person sent it, so the heartbeat judges it at the next beat whatever its ask gap and ask budget (egdesk-heartbeat.mjs, c24)
+  return [PERSON_PREDICATES.status, PERSON_PREDICATES.change, PERSON_PREDICATES.stop].map(q => ({ ...q, quote, kinds: ['run_text'], topic: 'person_message', solicited: true }))
 }
 /** What code does with the message, from the yes answers (a Set of names). */
 export function personDecision(yes) {

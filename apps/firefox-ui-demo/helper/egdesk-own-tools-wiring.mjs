@@ -5,6 +5,7 @@ import { createCommandExecutorProvider, executorAssess } from './egdesk-command-
 import { createCommandRunner } from './egdesk-command-runner.mjs'
 import { createFileToolsProvider } from './egdesk-file-tools.mjs'
 import { createGateHookBroker } from './egdesk-gate-hook-broker.mjs'
+import { egdeskCodexSelectionFromEnv } from './egdesk-native-capabilities.mjs'
 
 // The bridge's wiring of EG-Desk's own tools (c19). Developer flag EGDESK_OWN_TOOLS=on, default off: without it this returns null and
 // the bridge passes nothing new (no provider, no ownTools, no ledger), so every current path is unchanged.
@@ -54,6 +55,7 @@ export function createOwnToolsWiring({ env = process.env, dataDir, spawn, getCha
   if (ownToolsShadow(env)) return { shadow: true, toolProviders: [], ownTools: { mode: () => 'shadow', neutralFolder: () => null }, terminalGate: base => base }
   if (!ownToolsEnabled(env)) return null
   if (typeof spawn !== 'function' || typeof getChat !== 'function') throw new TypeError('own tools need spawn and getChat')
+  const selection = egdeskCodexSelectionFromEnv(env)
   const ledger = createGateHookBroker({ mode: () => 'on', home, assess: executorAssess(args => getChat().gateHookAssess(args), { home }) })
   const runner = createCommandRunner({ spawn, env, killGroup })
   const workspaceOf = run => getChat().runFolder(run)
@@ -74,7 +76,8 @@ export function createOwnToolsWiring({ env = process.env, dataDir, spawn, getCha
     ledger, executor, files, toolProviders: [executor, files],
     // c22: EGDESK_OWN_TOOLS_ENVIRONMENTS=none (developer flag, default unset) also starts the thread with environments: [] ("disables environment access" in the
     // 0.171 ThreadStartParams). A candidate for keeping the person's MCP servers and Codex's own exec environment away; not confirmed on a real binary.
-    ownTools: { mode: () => 'on', neutralFolder: () => prepareEngineFolder(dataDir), ...(env?.EGDESK_OWN_TOOLS_ENVIRONMENTS === 'none' ? { environments: () => 'none' } : {}) },
+    // c23: EG-Desk's own model and effort (EGDESK_CODEX_MODEL / EGDESK_CODEX_EFFORT) for threads that name none; the person's Codex config model is not used
+    ownTools: { mode: () => 'on', neutralFolder: () => prepareEngineFolder(dataDir), profile: () => selection, ...(env?.EGDESK_OWN_TOOLS_ENVIRONMENTS === 'none' ? { environments: () => 'none' } : {}) },
     // the executor's judgement needs the command gate on (predicates through the run's egress) and the ledger for replies and turns
     terminalGate: base => ({ ...(base ?? { inspect }), mode: base?.mode ?? (() => 'on'), hookBroker: ledger }),
   }

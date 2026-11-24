@@ -154,14 +154,35 @@
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": [
-                "say"
+              "anyOf": [
+                {
+                  "required": [
+                    "say"
+                  ]
+                },
+                {
+                  "required": [
+                    "action"
+                  ]
+                }
               ],
               "properties": {
                 "say": {
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 4000
+                },
+                "action": {
+                  "enum": [
+                    "interrupt",
+                    "steer",
+                    "delete"
+                  ]
+                },
+                "afterMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 120000
                 },
                 "approve": {
                   "type": "array",
@@ -240,6 +261,24 @@
                         "maxLength": 2000
                       }
                     },
+                    "commandsRanIncludes": {
+                      "type": "array",
+                      "maxItems": 16,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 400
+                      }
+                    },
+                    "commandsRanExcludes": {
+                      "type": "array",
+                      "maxItems": 16,
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 400
+                      }
+                    },
                     "files": {
                       "type": "object",
                       "maxProperties": 32,
@@ -264,6 +303,9 @@
                       ]
                     },
                     "compacted": {
+                      "type": "boolean"
+                    },
+                    "conversationGone": {
                       "type": "boolean"
                     },
                     "memory": {
@@ -357,6 +399,43 @@
                           "type": "integer",
                           "minimum": 1000,
                           "maximum": 3600000
+                        }
+                      }
+                    },
+                    "briefing": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "outcome": {
+                          "enum": [
+                            "presented",
+                            "fallback-chat",
+                            "bubble"
+                          ]
+                        },
+                        "reason": {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9-]{0,40}$"
+                        },
+                        "schemaSent": {
+                          "type": "boolean"
+                        },
+                        "schemaInvalid": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ],
+                          "minimum": 0,
+                          "maximum": 20
+                        },
+                        "factsOnBoard": {
+                          "type": "array",
+                          "maxItems": 16,
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 400
+                          }
                         }
                       }
                     }

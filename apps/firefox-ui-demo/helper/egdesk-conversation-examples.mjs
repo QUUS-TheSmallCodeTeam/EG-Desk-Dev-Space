@@ -118,6 +118,10 @@ export const INTERACTION_TYPES = Object.freeze({
     // ask for next. Measured 2026-11-25: the c19 wording labelled a repeated instruction .92; the c22 wording ("... and ask for it to be explained
     // or shown again") labelled "아까전 시나리오 다시 흐름을 설명해봐" .95 and "방금 그 내용 정리해줘" .71 (a request to explain or summarise again,
     // which says nothing about not having understood).
+  // c24: "a turn that checks an earlier action" is its own type. The referential question labelled "오전 6시에 작업 중지 예약 걸었지?" .99 in three
+  // wordings (c19, c22, c23: it has no pointer word and names its subject, yet it asks about something earlier), and the product treats it as a
+  // fetch (tn_need .99; tn_recall .13): a yes/no check of something the assistant did or said earlier is a different act from asking for it again.
+  check_earlier: { re: /(했지|걸었지|보냈지|넣었지|바꿨지|됐지|맞지|했나|했어|했니|했었지|그랬지)\s*[?？]\s*$/, q: 'Does the person ask whether something the assistant did or said earlier was done, or is so (a yes/no check of an earlier action or statement)?' },
   instruction_change: { re: /말고 |대신 |바꿔|변경|이제부터|앞으로는|기준(을|은) /, q: 'Does the person change the instructions or criteria of the task in progress?' },
 })
 export const TYPE_NAMES = Object.freeze(Object.keys(INTERACTION_TYPES))
@@ -212,6 +216,7 @@ export const FEATURE_OF = Object.freeze({
   topic_return: { feature: 'topic_return', expect: 'The earlier topic is picked up with its own materials, not the materials of the assistant\'s last message.' },
   topic_switch: { feature: 'topic_return', expect: 'The new topic does not inherit the previous topic\'s materials or pending readings.' },
   reask: { feature: 'closed_open_switch', expect: 'The person could not use the closed (option) answer: the next turn explains in plain words or opens the question (U4), not the same options again.' },
+  check_earlier: { feature: 'memory_fetch', expect: 'A yes/no check of something the assistant did or said earlier is answered from the stored record of it: the product fetches (tn_need), whether or not it counts as a recall.' },
   praise: { feature: 'confirmation_reading', expect: 'Praise is not read as an approval of a pending proposal it does not name.' },
 })
 /** scenarioOf(example, labels?) → a scenario seed per feature the turn exercises (labels: readLabels output; else the heuristic tags). */
@@ -236,6 +241,16 @@ export const CONTROL_EXAMPLES = Object.freeze([
   { id: 'control-praise', area: 'egdesk', privacy: 'owner-approved', prev: { text: '테스트를 모두 통과했고 보고서를 남겼습니다.' }, user: { text: '고마워요, 깔끔하게 잘했어' },
     expect: [{ name: 'conv_praise', kind: 'predicate', min: 0.8, severity: 'hard' }, { name: 'conv_correction', kind: 'predicate', max: 0.2, severity: 'hard' }, { name: 'conv_frustration', kind: 'predicate', max: 0.2, severity: 'hard' }] },
 ])
+// c24: controls for the re-label of referential / re-ask / check_earlier (synthetic turns; expectations by the questions' own meaning)
+export const RELABEL_TYPES = Object.freeze(['referential', 'reask', 'check_earlier'])
+export const RELABEL_CONTROLS = Object.freeze([
+  { id: 'control-points-back', area: 'egdesk', privacy: 'owner-approved', prev: { text: '배포 전 체크리스트와 롤백 절차를 정리해 두었습니다. 다음 단계로 넘어갈까요?' }, user: { text: '방금 그 내용 정리해줘' },
+    expect: [{ name: 'conv_referential', kind: 'predicate', min: 0.8, severity: 'hard', note: '"방금 그 내용": a pointer word' }, { name: 'conv_reask', kind: 'predicate', max: 0.2, severity: 'hard' }, { name: 'conv_check_earlier', kind: 'predicate', max: 0.2, severity: 'hard', note: 'a request, not a yes/no check' }] },
+  { id: 'control-not-understood', area: 'egdesk', privacy: 'owner-approved', prev: { text: '캐시를 워밍하고 인덱스를 재빌드했습니다.' }, user: { text: '무슨 말인지 모르겠어' },
+    expect: [{ name: 'conv_reask', kind: 'predicate', min: 0.8, severity: 'hard', note: 'says it did not understand' }, { name: 'conv_check_earlier', kind: 'predicate', max: 0.2, severity: 'hard' }] },
+  { id: 'control-checks-earlier', area: 'egdesk', privacy: 'owner-approved', prev: { text: '견적서 v2를 팀장 승인 뒤에 보내기로 하고 초안을 저장해 두었습니다.' }, user: { text: '어제 견적서 v2 보냈지?' },
+    expect: [{ name: 'conv_check_earlier', kind: 'predicate', min: 0.8, severity: 'hard', note: 'a yes/no check of something done earlier' }, { name: 'conv_reask', kind: 'predicate', max: 0.2, severity: 'hard' }] },
+])
 export const LABEL_PRODUCT_BARS = Object.freeze({ '*predicate': Object.freeze({ yes: LABEL_BAR, no: 0.2, source: 'helper/egdesk-conversation-examples.mjs readLabels (LABEL_BAR .8; a labelling study, no product action)' }) })
 // The real-measure runner's own estimate (bytes and per-question overhead), so a chunk's declared estimate is what the runner checks.
 const estimate = body => independentEstimate(0, JSON.parse(body).questions.length, Buffer.byteLength(body))
@@ -253,8 +268,9 @@ export function candidateOrder(examples) {
 /** buildLabelPlan(examples, { model, chunkTokens, sha }) → [{ plan, requests: [{ file, body }], preregistration }] */
 // options (c20, Main: a stratified sample first): controlsEvery (the two controls in every chunk), estimateCap (a chunk's estimate stays
 // at or under it; the ceiling is min(estimate x 1.25, chunkTokens)), exclude (ids already labelled), maxChunks (stop after that many).
-export function buildLabelPlan(examples, { model, chunkTokens = 12_000, sha, controlsEvery = false, estimateCap = chunkTokens / 1.25, exclude = [], maxChunks = Infinity, setPrefix = 'conversation-labels' }) {
-  const controls = CONTROL_EXAMPLES.map(c => ({ id: `control-${c.id.replace(/^control-/, '')}`, body: JSON.stringify(labelRequest(c, model)), expect: c.expect, control: c }))
+// types / controlSet (c24): a subset of the questions (the re-label of referential, re-ask and check_earlier) with controls that expect those names.
+export function buildLabelPlan(examples, { model, chunkTokens = 12_000, sha, controlsEvery = false, estimateCap = chunkTokens / 1.25, exclude = [], maxChunks = Infinity, setPrefix = 'conversation-labels', types = TYPE_NAMES, controlSet = CONTROL_EXAMPLES }) {
+  const controls = controlSet.map(c => ({ id: `control-${c.id.replace(/^control-/, '')}`, body: JSON.stringify(labelRequest(c, model, { types })), expect: c.expect, control: c }))
   const controlTokens = controls.reduce((n, c) => n + estimate(c.body), 0)
   const chunks = []
   let cur = null
@@ -262,7 +278,7 @@ export function buildLabelPlan(examples, { model, chunkTokens = 12_000, sha, con
   const open = () => { const first = !chunks.length || controlsEvery; cur = { items: first ? [...controls] : [], tokens: first ? controlTokens : 0, base: first ? controls.length : 0 }; chunks.push(cur) }
   const skip = new Set(exclude)
   for (const e of candidateOrder(examples.filter(x => !skip.has(x.id)))) {
-    const body = JSON.stringify(labelRequest(e, model)), t = estimate(body)
+    const body = JSON.stringify(labelRequest(e, model, { types })), t = estimate(body)
     // A chunk's estimate stays within estimateCap, so its ceiling is at most chunkTokens.
     if (!cur || (cur.tokens + t > estimateCap && cur.items.length > cur.base)) { if (chunks.length >= maxChunks) break; open() }
     cur.items.push({ id: `ex-${e.id}`, body, example: e }); cur.tokens += t
