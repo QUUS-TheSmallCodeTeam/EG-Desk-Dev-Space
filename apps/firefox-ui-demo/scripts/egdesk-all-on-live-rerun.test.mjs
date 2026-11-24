@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
 import { scriptedDecisions } from './egdesk-all-on.support.mjs'
-import { LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, PLAN_FILE_V6, STEPS, diffJourneys, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
+import { CHECK_FUNCTIONS, LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, PLAN_FILE_V6, PLAN_FILE_V7, STEPS, diffJourneys, faithfulRevision, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
 
 const KEY = 'sk-synthetic-not-a-key-l2c12-000000000002'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -338,7 +338,7 @@ const V6_NEW = [['s4n.kept', 'hard', 'L2'], ['s4n.not-interrupted', 'hard', 'L2'
   ['s4n.no-duplicate-wait', 'hard', 'L3'], ['s4n.heard', 'soft', 'L3'], ['s9.nudge-not-repeated', 'hard', 'L3']]
 test('plan v6: pinned, based on v5 by hash, every v5 expectation kept (one prediction revised and marked), the nudge step and its flag in the world', () => {
   const bytes = readFileSync(PLAN_FILE_V6), raw = JSON.parse(bytes.toString('utf8')), v5 = JSON.parse(readFileSync(PLAN_FILE_V5, 'utf8'))
-  assert.equal(sha256(bytes), REGISTERED_PLAN_V6_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V6)
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V6_SHA256)
   assert.equal(raw.version, 6); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V5)))
   assert.deepEqual(raw.world.env, { ...v5.world.env, EGDESK_INRUN_MESSAGES: 'on' }); assert.equal(raw.world.budgets, v5.world.budgets)
   assert.deepEqual(raw.world.switches['action-relevance'].env, v5.world.switches['action-relevance'].env, 'one flag covers both sides of L7 (c20, c21)')
@@ -369,4 +369,94 @@ test('v6 dry run: the nudge is kept in the run and the command left alone (L2); 
   assert.deepEqual(verdict(v6, 's9.nudge-not-repeated').observed.inputs, [['PostgreSQL 마이그레이션 배포 끝났어']], 'settled as reply: not carried into the next turn')
   const others = run => run.steps.flatMap(s => s.checks).filter(c => !V6_NEW.some(([id]) => id === c.id)).map(c => [c.id, c.pass])
   assert.deepEqual(others(v6), others(v5))
+})
+
+// ---- plan v7 (cycle 20) ----
+const REGISTERED_PLAN_V7_SHA256 = '0a8b4a02231157e8c095015b87257b614cb5c74d30dd1358455f604cc2fd94a5'
+const V7_NEW = [['s3b.on-topic', 'hard', 'L3'], ['s3b.not-off-topic', 'hard', 'L3'], ['s3b.answer-kept', 'soft', 'L3'], ['s4.elapsed-true', 'hard', 'L3'], ['s4n.elapsed-true', 'hard', 'L3'],
+  ['s4c.kept', 'hard', 'L2'], ['s4c.model-says-change', 'hard', 'L3'], ['s4c.model-not-stop', 'hard', 'L3'], ['s4c.decided-steer', 'hard', 'L3'], ['s4c.steered', 'hard', 'L2'],
+  ['s4c.nothing-posted', 'hard', 'L3'], ['s4c.command-continues', 'hard', 'L2'], ['s4c.not-carried', 'hard', 'L2'], ['s9.change-not-repeated', 'hard', 'L3'],
+  ['s12.kept', 'hard', 'L2'], ['s12.model-says-stop', 'hard', 'L3'], ['s12.decided-stop', 'hard', 'L3'], ['s12.interrupted', 'hard', 'L2'], ['s12.no-agent-answer', 'hard', 'L3'],
+  ['s12.no-command-shown', 'hard', 'L3'], ['s12.not-carried', 'hard', 'L2'], ['s12.system-messages', 'soft', 'L3']]
+test('plan v7: pinned, based on v6 by hash, every v6 expectation verbatim, the world as v6 plus faithful wording, the two new steps and the listed additions', () => {
+  const bytes = readFileSync(PLAN_FILE_V7), raw = JSON.parse(bytes.toString('utf8')), v6 = JSON.parse(readFileSync(PLAN_FILE_V6, 'utf8'))
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V7_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V7)
+  assert.equal(raw.version, 7); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V6)))
+  assert.deepEqual({ ...raw.world, wording: undefined, note: undefined }, { ...v6.world, wording: undefined, note: undefined }); assert.equal(raw.world.wording, 'faithful')
+  assert.deepEqual(raw.steps.map(s => s.id).filter(id => !['s4c-change-nudge', 's12-stop-nudge'].includes(id)), v6.steps.map(s => s.id))
+  assert.equal(raw.steps[raw.steps.findIndex(s => s.id === 's4n-nudge') + 1].id, 's4c-change-nudge'); assert.equal(raw.steps.at(-1).id, 's12-stop-nudge')
+  for (const step of v6.steps) {
+    const now = raw.steps.find(s => s.id === step.id)
+    assert.deepEqual(now.caps, step.caps); assert.deepEqual(now.expect.slice(0, step.expect.length), step.expect, `${step.id}: every v6 expectation verbatim`)
+  }
+  const added = raw.steps.flatMap(s => s.expect).filter(e => !v6.steps.flatMap(x => x.expect).some(x => x.id === e.id))
+  assert.deepEqual(added.map(e => [e.id, e.severity, e.owner]), V7_NEW)
+  assert.ok(added.every(e => typeof e.predicted === 'string' && e.predicted.length > 0), 'every new expectation says what is predicted')
+})
+
+test('v7 checks on made-up steps: each one fails when what it guards goes wrong', () => {
+  const C = CHECK_FUNCTIONS, step = over => ({ id: 'x', room: 'dm-all-on', sends: [], seen: { newMessages: [], flows: [], runs: { 'dm-all-on': { status: 'inProgress' } }, steers: [], interruptCalls: [], carried: 0, writerSeconds: [], workingTurn: 'turn-1', engineTurns: { main: 0, fork: 0, steer: 0 }, interrupts: 0, calibration: [] }, ...over })
+  const msg = (role, by, text) => ({ room: 'dm-all-on', role, by, text })
+  // the answer the person sees: about PostgreSQL, not the fixed A사 sentence
+  const answer = text => step({ seen: { ...step().seen, newMessages: [msg('assistant', 'agent', text)] } })
+  assert.equal(C.messageMentions({ step: answer('PostgreSQL 전환은 확정했습니다.'), args: { needles: ['PostgreSQL'] } }).pass, true)
+  assert.equal(C.messageMentions({ step: answer('A사 견적은 요청을 받은 뒤 첫 견적서를 보냈습니다.'), args: { needles: ['PostgreSQL'] } }).pass, false)
+  assert.equal(C.messageAvoids({ step: answer('A사 견적은 요청을 받은 뒤 첫 견적서를 보냈습니다.'), args: { needles: ['A사'] } }).pass, false)
+  assert.equal(C.messageAvoids({ step: answer('PostgreSQL 전환은 확정했습니다.'), args: { needles: ['A사'] } }).pass, true)
+  assert.equal(C.messageAvoids({ step: step(), args: { needles: ['A사'] } }).pass, false, 'no answer at all is not an answer about the topic')
+  // elapsed time: the number in the writer prompt against the run's real age
+  const secs = rows => step({ seen: { ...step().seen, writerSeconds: rows } })
+  assert.equal(C.elapsedTrue({ step: secs([{ kind: 'reply_status', claimed: 10, actual: 11 }]), args: { kind: 'reply_status', within: 2 } }).pass, true)
+  assert.equal(C.elapsedTrue({ step: secs([{ kind: 'reply_status', claimed: 1, actual: 11 }]), args: { kind: 'reply_status', within: 2 } }).pass, false)
+  assert.equal(C.elapsedTrue({ step: secs([]), args: { kind: 'reply_status', within: 2 } }).pass, false, 'no writer prompt: nothing was checked')
+  assert.equal(C.elapsedTrue({ step: secs([{ kind: 'explain_wait', claimed: 10, actual: 10 }]), args: { kind: 'reply_status', within: 2 } }).pass, false, 'only the named kind counts')
+  // the change: one steer, only the person's words, the working turn, no interrupt
+  const steered = (steers, over = {}) => step({ seen: { ...step().seen, steers, ...over } })
+  const one = { threadId: 't', turnId: 'turn-1', clientUserMessageId: 'req-6', texts: ['그거 말고 B부터 해줘'] }
+  assert.equal(C.steeredWith({ step: steered([one]), args: { said: 'change' } }).pass, true)
+  for (const bad of [[], [one, one], [{ ...one, turnId: 'turn-9' }], [{ ...one, texts: ['그거 말고 B부터 해줘', '더'] }], [{ ...one, texts: ['다른 말'] }], [{ ...one, clientUserMessageId: null }]]) assert.equal(C.steeredWith({ step: steered(bad), args: { said: 'change' } }).pass, false, JSON.stringify(bad))
+  assert.equal(C.steeredWith({ step: steered([one], { interruptCalls: [{ threadId: 't', turnId: 'turn-1' }] }), args: { said: 'change' } }).pass, false, 'a steer with an interrupt is not a change')
+  // the command goes on / the stop reaches the engine once
+  assert.equal(C.runWorking({ step: step() }).pass, true)
+  assert.equal(C.runWorking({ step: step({ seen: { ...step().seen, interrupts: 1 } }) }).pass, false)
+  assert.equal(C.runWorking({ step: step({ seen: { ...step().seen, engineTurns: { main: 1, fork: 0, steer: 0 } } }) }).pass, false)
+  const stopped = (calls, over = {}) => step({ seen: { ...step().seen, interruptCalls: calls, runs: { 'dm-all-on': { status: 'interrupted' } }, ...over } })
+  const call = { threadId: 't', turnId: 'turn-1' }
+  assert.equal(C.interruptedRun({ step: stopped([call]) }).pass, true)
+  for (const bad of [stopped([]), stopped([call, call]), stopped([{ ...call, turnId: 'turn-9' }]), stopped([call], { steers: [one] }), step({ seen: { ...step().seen, interruptCalls: [call] } })]) assert.equal(C.interruptedRun({ step: bad }).pass, false)
+  assert.equal(C.nothingCarried({ step: step() }).pass, true); assert.equal(C.nothingCarried({ step: step({ seen: { ...step().seen, carried: 1 } }) }).pass, false)
+  // the person's words kept once; the derived kind
+  const sent = (sends, texts) => step({ sends, seen: { ...step().seen, newMessages: texts.map(t => msg('user', 'person', t)) } })
+  assert.equal(C.keptInRunSend({ step: sent([{ inRun: false, accepted: true }, { inRun: true, accepted: true }], ['전체 테스트 한 번 더 돌려줘', '그만해, 그거 하지 마']), args: { said: 'stop' } }).pass, true)
+  assert.equal(C.keptInRunSend({ step: sent([{ inRun: false, accepted: true }], ['그만해, 그거 하지 마']), args: { said: 'stop' } }).pass, false, 'sent as a new turn, not into the run')
+  assert.equal(C.keptInRunSend({ step: sent([{ inRun: true, accepted: true }], ['그만해, 그거 하지 마', '그만해, 그거 하지 마']), args: { said: 'stop' } }).pass, false, 'shown twice')
+  assert.equal(C.derivedFlow({ step: step({ seen: { ...step().seen, flows: [{ flow: 'steer', posted: 'none' }] } }), args: { kind: 'steer' } }).pass, true)
+  assert.equal(C.derivedFlow({ step: step({ seen: { ...step().seen, flows: [{ flow: 'reply', posted: 'model' }] } }), args: { kind: 'steer' } }).pass, false)
+})
+
+test('faithful revision: keeps the unlisted sentences, restates the listed one as the record, never changes the subject; the old plans keep the fixed sentence', () => {
+  const prompt = (draft, listed) => `Here is your draft answer to the person's last message:\n\n${draft}\n\nBefore posting, a check of your draft against the material you were given found these sentences:\n${listed.map(s => `- "${s}": wrong tense. It states as done...`).join('\n')}\n\nRewrite your answer.`
+  const s1 = 'PostgreSQL 전환 설계에서 스키마 변환, 데이터 이관, 롤백 순서를 정하기로 확정했습니다.', s2 = '롤백은 먼저 확인했습니다.'
+  assert.equal(faithfulRevision(prompt(s1, [s1])), `기록에 따르면 ${s1}`)
+  assert.equal(faithfulRevision(prompt(`${s1} ${s2}`, [s1])), `기록에 따르면 ${s1} ${s2}`)
+  assert.equal(faithfulRevision(prompt(`${s1} ${s2}`, [s2])), `${s1} 기록에 따르면 ${s2}`)
+  assert.equal(faithfulRevision('Write ONE short chat message'), null)
+  assert.ok(!faithfulRevision(prompt(s1, [s1])).includes('A사'))
+  // v1-v6 never set it (they keep the fixed sentence of the scripted world); a value other than "faithful" is refused
+  assert.equal(loadJourneyPlan(PLAN_FILE_V6).world.wording, undefined); assert.equal(loadJourneyPlan(PLAN_FILE_V7).world.wording, 'faithful')
+})
+
+test('v7 dry run with the switch: what the scripted world shows about the new steps (the nudge steps pass by code; the elapsed check fails until L3 c24; the model-side checks use the scripted judge here)', async () => {
+  const noNet = async () => { throw new Error('no network') }
+  const run = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V7), fetchImpl: noNet, switches: ['action-relevance'] })
+  const checks = run.steps.flatMap(s => s.checks), by = id => checks.find(c => c.id === id)
+  assert.deepEqual(V7_NEW.filter(([id]) => by(id).pass !== true).map(([id]) => id), ['s4n.elapsed-true'])
+  assert.deepEqual(by('s4n.elapsed-true').observed.writerSeconds.map(r => r.kind), ['reply_status'])
+  assert.deepEqual(by('s4.elapsed-true').observed.writerSeconds.map(r => [r.kind, r.claimed === r.actual]), [['explain_wait', true]])
+  assert.deepEqual(run.steps.find(s => s.id === 's12-stop-nudge').seen.flows.map(f => f.flow), ['explain_wait', 'stop'])
+  assert.deepEqual(run.steps.find(s => s.id === 's4c-change-nudge').seen.flows.map(f => f.flow), ['steer'])
+  // every v6 expectation is judged as in v6, except the one the added steps could change: none
+  const v6 = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V6), fetchImpl: noNet, switches: ['action-relevance'] })
+  const verdicts = r => r.steps.flatMap(s => s.checks).filter(c => !V7_NEW.some(([id]) => id === c.id)).map(c => [c.id, c.pass])
+  assert.deepEqual(verdicts(run), verdicts(v6))
 })
