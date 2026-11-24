@@ -12,26 +12,19 @@ import { runSkeletonFlow, SKELETON_BARS, normalizeMaterials, answerFacts } from 
 import { DECISION_MODEL } from '../helper/egdesk-decision-client.mjs'
 import { rig } from './egdesk-briefing-rig.support.mjs'
 
-const arg = name => { const i = process.argv.indexOf(`--${name}`); return i > 0 ? process.argv[i + 1] : undefined }
-const pagesFile = arg('pages'), specFile = arg('spec'), OUT = arg('out')
-if (!pagesFile || !specFile || !OUT) { console.error('usage: --pages <pages.json> --spec <spec.json> --out <dir>'); process.exit(2) }
-const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
-if (path.resolve(OUT).startsWith(repo + path.sep)) { console.error('refused: the plan quotes real material; it stays outside the repository'); process.exit(2) }
-const pages = JSON.parse(readFileSync(pagesFile, 'utf8')), spec = JSON.parse(readFileSync(specFile, 'utf8'))
-mkdirSync(path.join(OUT, 'requests'), { recursive: true, mode: 0o700 })
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const est = wire => { const body = JSON.parse(wire); return Math.ceil(1.15 * (134.8 * body.questions.length + 0.1983 * Buffer.byteLength(wire))) }
 const byTime = (a, b) => `${a.time.at ?? ''} ${a.clock ?? ''}`.localeCompare(`${b.time.at ?? ''} ${b.clock ?? ''}`)
 
 // ---- selection BY CODE (the memory loop that would choose in the product is not part of this measurement; the rule is named in the plan) ----
-const SELECT = {
+const selectors = pages => ({
   // the newest n dated ledger events, in time order
   'newest-ledger': ({ n = 8 }) => pages.filter(p => p.source === 'ledger' && p.time.at).sort(byTime).slice(-n),
   // a lane's report pages from a cycle on, the newest n (the skeleton takes at most 8 materials), in cycle order
   'lane-reports': ({ lane, from, n = 8 }) => pages.filter(p => p.source === 'report' && p.lane === lane && p.cycle >= from).sort((a, b) => a.cycle - b.cycle).slice(-n),
   // the ledger lines that name one lane-cycle (where its merge is recorded with its date), in time order
   naming: ({ laneCycle, n = 8 }) => pages.filter(p => p.source === 'ledger' && p.lanes.includes(laneCycle)).sort(byTime).slice(0, n),
-}
+})
 
 // ---- the faithful fill: every slot copied from the material it cites (as lane L2 did for s3) ----
 const cut = (t, max) => (t.length <= max ? t : t.slice(0, max).replace(/\s+\S*$/, ''))
@@ -88,6 +81,15 @@ async function flow({ request, answer, materials, script = () => undefined }) {
 
 const YES = { min: SKELETON_BARS.yes }, NO = { max: SKELETON_BARS.no }
 const check = (name, sev, bar, note) => ({ name, kind: 'predicate', ...bar, severity: sev, note })
+/** main(argv) -> { plan, log, total } (writes the plan and the bodies under --out). Throws on a refusal or an over-ceiling plan. */
+export async function main(argv = process.argv.slice(2)) {
+const arg = name => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : undefined }
+const pagesFile = arg('pages'), specFile = arg('spec'), OUT = arg('out')
+if (!pagesFile || !specFile || !OUT) throw new Error('usage: --pages <pages.json> --spec <spec.json> --out <dir>')
+const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
+if (path.resolve(OUT).startsWith(repo + path.sep)) throw new Error('refused: the plan quotes real material; it stays outside the repository')
+const pages = JSON.parse(readFileSync(pagesFile, 'utf8')), spec = JSON.parse(readFileSync(specFile, 'utf8')), SELECT = selectors(pages)
+mkdirSync(path.join(OUT, 'requests'), { recursive: true, mode: 0o700 })
 const requests = [], log = []
 for (const r of spec.requests) {
   const rows = SELECT[r.select.rule](r.select)
@@ -124,5 +126,9 @@ writeFileSync(path.join(OUT, 'plan.json'), JSON.stringify(plan, null, 2) + '\n',
 const total = requests.reduce((s, x) => s + x.estInputTokens, 0)
 log.push(`== plan: ${requests.length} requests, est ${total} input tokens (ceiling ${spec.tokenCeiling}); hard ${requests.reduce((s, x) => s + x.expect.filter(e => e.severity === 'hard').length, 0)}, soft ${requests.reduce((s, x) => s + x.expect.filter(e => e.severity === 'soft').length, 0)}`)
 for (const x of requests) log.push(`   ${x.id.padEnd(26)} ~${String(x.estInputTokens).padStart(5)} tok  ${x.recordOnly ? 'record only' : x.expect.map(e => `${e.name}:${e.severity[0]}${e.min !== undefined ? '>=' + e.min : '<=' + e.max}`).join(' ')}`)
-console.log(log.join('\n'))
-if (total > spec.tokenCeiling) { console.error('over the ceiling'); process.exit(1) }
+if (total > spec.tokenCeiling) throw Object.assign(new Error(`over the ceiling\n${log.join('\n')}`), { log })
+return { plan, log, total }
+}
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().then(r => console.log(r.log.join('\n')), error => { console.error(error.message); process.exit(2) })
+}

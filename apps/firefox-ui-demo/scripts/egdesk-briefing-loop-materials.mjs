@@ -9,12 +9,13 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildLoopPages } from '../helper/egdesk-briefing-ledger-materials.mjs'
 
-const arg = name => { const i = process.argv.indexOf(`--${name}`); return i > 0 ? process.argv[i + 1] : undefined }
+export function main(argv = process.argv.slice(2)) {
+  const arg = name => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : undefined }
 const loop = arg('loop'), out = arg('out'), year = arg('year') ? Number(arg('year')) : null, basis = arg('year-basis') ?? null
-if (!loop || !out) { console.error('usage: --loop <loop root> --out <dir> [--year YYYY --year-basis TEXT]'); process.exit(2) }
+if (!loop || !out) throw new Error('usage: --loop <loop root> --out <dir> [--year YYYY --year-basis TEXT]')
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
-if (path.resolve(out).startsWith(repo + path.sep)) { console.error('refused: the materials stay outside the repository'); process.exit(2) }
-if (year !== null && !basis) { console.error('refused: a declared year needs its basis (--year-basis)'); process.exit(2) }
+if (path.resolve(out).startsWith(repo + path.sep)) throw new Error('refused: the materials stay outside the repository')
+if (year !== null && !basis) throw new Error('refused: a declared year needs its basis (--year-basis)')
 const ledger = readFileSync(path.join(loop, 'LEDGER.md'), 'utf8')
 const dir = path.join(loop, 'reports'), reports = readdirSync(dir).filter(f => /^l[1-9]-c\d{1,3}\.md$/.test(f)).sort().map(fileName => ({ fileName, text: readFileSync(path.join(dir, fileName), 'utf8') }))
 const pages = buildLoopPages({ ledger, reports, year })
@@ -26,4 +27,8 @@ const summary = { builtFrom: { ledgerLines: ledger.split('\n').length, ledgerSha
   bySource: count(pages, r => r.source), byStatus: count(pages, r => `${r.source}:${r.status}`), dated: pages.filter(r => r.time.at).length, undated: pages.filter(r => !r.time.at).length }
 writeFileSync(path.join(out, 'pages.json'), JSON.stringify(pages, null, 1), { mode: 0o600 })
 writeFileSync(path.join(out, 'summary.json'), JSON.stringify(summary, null, 1), { mode: 0o600 })
-console.log(JSON.stringify(summary))
+return summary
+}
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try { console.log(JSON.stringify(main())) } catch (error) { console.error(error.message); process.exit(2) }
+}
