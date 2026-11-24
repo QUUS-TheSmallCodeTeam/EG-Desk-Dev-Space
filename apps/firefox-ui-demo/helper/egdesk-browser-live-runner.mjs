@@ -37,7 +37,9 @@ export const FAMILY_PLAN_FILES = Object.freeze({ statement: new URL('../scripts/
   delivery: new URL('../scripts/egdesk-browser-live-plan-delivery.json', import.meta.url), settings: new URL('../scripts/egdesk-browser-live-plan-settings.json', import.meta.url),
   stability: new URL('../scripts/egdesk-browser-live-plan-stability.json', import.meta.url),
   'settings-error': new URL('../scripts/egdesk-browser-live-plan-settings-error.json', import.meta.url),
-  holdout: new URL('../scripts/egdesk-browser-live-plan-holdout.json', import.meta.url) })
+  holdout: new URL('../scripts/egdesk-browser-live-plan-holdout.json', import.meta.url),
+  'holdout-rerun': new URL('../scripts/egdesk-browser-live-plan-holdout-rerun.json', import.meta.url),
+  holdout2: new URL('../scripts/egdesk-browser-live-plan-holdout2.json', import.meta.url) })
 // The plan sets this runner knows, with their phases in order. A phase with seed writes, before it runs and by code only, the record a
 // month-1 run writes (the same outcome layout through the same write path), so a small plan need not pay for month 1 again.
 const PLAN_SETS = Object.freeze({ 'browser-live-v2': ['month1', 'changed'], 'browser-live-recorded-v3': ['month2', 'renamed'], 'browser-live-allon-v1': ['allon'],
@@ -388,7 +390,7 @@ async function estimateWith(plan) {
   const record = { requests: [], tokens: 0, stopped: null, phase: null, clock: MONTH1 }
   const key = 'egd-synthetic-not-a-key-0008' // never sent: the scripted stand-in answers every request in process
   const client = createDecisionClient({ getApiKey: async () => key, recipientForKey: (value, endpoint, model) => decisionTopicRecipient(value, 1, endpoint, model),
-    fetchImpl: guardedFetchFor({ record, limits: plan, scripted: FAMILY_SETS[plan.set] ? familyAnswers : expectedAnswers }) })
+    fetchImpl: guardedFetchFor({ record, limits: plan, scripted: FAMILY_SETS[plan.set] ? body => familyAnswers(body, plan.set) : expectedAnswers }) })
   const phases = await runJourney({ plan, client, key, record })
   const journey = { phases, requests: record.requests, usage: { inputTokens: record.tokens }, limits: plan }
   return { requests: record.requests.length, estInputTokens: record.tokens, stoppedBecause: record.stopped, perPhase: Object.fromEntries(plan.phases.map(p => [p.id, record.requests.filter(r => r.phase === p.id).length])),
