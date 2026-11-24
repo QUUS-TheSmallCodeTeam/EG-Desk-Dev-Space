@@ -1,0 +1,117 @@
+{
+  "set": "l4-briefing-coverage",
+  "tokenCeiling": 4000,
+  "productBars": {
+    "combines": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs:19,347 SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "covers": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs:19,347 SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "about_M#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs:19,347 SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "same_M#_M#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs:19,347 SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    }
+  },
+  "passRule": "PASS when every hard check passes at the product bar: the s3 answer is still judged to combine several facts without the \"several\" question next to it (yes >= .7), the complete s3 board is judged to cover the request (yes >= .7) and the board without its remaining-work part is judged not to (decided no <= .3). q-cov-as-attached is recorded only.",
+  "requests": [
+    {
+      "id": "q-s3-place-new",
+      "file": "requests/q-s3-place-new.json",
+      "sha256": "635d92d8fc715cc5c8397ae06492d17cf86c119a2092d926b3a7a2f02dee029a",
+      "estInputTokens": 1619,
+      "expect": [
+        {
+          "name": "combines",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "product bar: yes >= .7. The body the product now sends for s3 (no \"several\"); c18 measured .98 with \"several\" next to it"
+        },
+        {
+          "name": "about_M1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "c18 .99"
+        },
+        {
+          "name": "about_M2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "c18 .98"
+        },
+        {
+          "name": "about_M3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "c18 .97"
+        },
+        {
+          "name": "same_M1_M2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "c18 .96"
+        }
+      ]
+    },
+    {
+      "id": "q-cov-complete",
+      "file": "requests/q-cov-complete.json",
+      "sha256": "0e0e5a3117aaa9f34b68c62ddf35629124f2c24f825c631baf9b666af56533f6",
+      "estInputTokens": 531,
+      "expect": [
+        {
+          "name": "covers",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "product bar: yes >= .7 proposes the board. Every fact of the answer is on the board: 11/3 request (part 1), 11/6 v1 vs v2 not sent yet (part 2), v2 after the team lead approval, by 11/25 (part 3)"
+        }
+      ]
+    },
+    {
+      "id": "q-cov-incomplete",
+      "file": "requests/q-cov-incomplete.json",
+      "sha256": "67c952de4c75a58b02cd31308481ab32acfdb7eef5b9715b3c2121f333a3948d",
+      "estInputTokens": 470,
+      "expect": [
+        {
+          "name": "covers",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "hard",
+          "note": "product bar: a decided no (<= .3) starts the one re-design. FLAGGED: the remaining-work part is removed; the compare text still says v2 is not sent, but not that it waits for the team lead approval or the 11/25 deadline. A reading of \"not sent yet\" as enough would answer yes"
+        }
+      ]
+    },
+    {
+      "id": "q-cov-as-attached",
+      "file": "requests/q-cov-as-attached.json",
+      "sha256": "2a953f555607e9454fae702731d2821d8f141a33325f007b713ee91e2a5e9daa",
+      "estInputTokens": 480,
+      "expect": [
+        {
+          "name": "covers",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "soft",
+          "note": "product bar: decided no <= .3. Recorded, not a pass condition: the s3 board as the all-on run attached it (no request page). The 11/3 request date of the answer is on no material, so the board cannot show it; a no here would send s3 back to chat for a memory gap (lane L7)"
+        }
+      ]
+    }
+  ]
+}
