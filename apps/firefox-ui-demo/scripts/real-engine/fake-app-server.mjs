@@ -15,6 +15,7 @@
 //     "the filesystem is read-only" and calls no tool.
 //   A turn may carry steerFinal: the final text when a turn/steer arrived while it ran (the model followed the steer). An interrupt ends the running turn
 //   as Main saw on 0.171: turn/completed "interrupted", no completed agent message for a partial text.
+//   (in-process scripts only) turn.finalFor(inputText, params) → the final text, instead of `final`
 //   step: { agentMessage: "text", phase? } | { toolCall: { tool, arguments } } | { nativeCommand: { command, cwd } } | { compaction: true }
 //         | { usage: { input, cached, output, reasoning } } | { errorNotification: "text" } | { delayMs: n }
 import fs from 'node:fs'
@@ -147,7 +148,10 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
       const thread = threads.get(params.threadId)
       if (!thread) return send({ id, error: { code: -32600, message: `thread not found: ${params.threadId}` } })
       thread.lastText = textOf(params)
-      const plan = (thread.fork ? chooseTurn(script.forkTurns ?? [], usedFork, thread.lastText) : chooseTurn(script.turns ?? [], used, thread.lastText)) ?? { steps: [], final: '(the fake has no script for this turn)' }
+      let plan = (thread.fork ? chooseTurn(script.forkTurns ?? [], usedFork, thread.lastText) : chooseTurn(script.turns ?? [], used, thread.lastText)) ?? { steps: [], final: '(the fake has no script for this turn)' }
+      // finalFor(inputText, params): the final message as a function of the turn's input (a script object passed in-process only; a JSON script cannot hold a function). c31: the
+      // briefing's fill answers a guide that the product builds at run time, so a fake model must read it from the prompt.
+      if (typeof plan.finalFor === 'function') plan = { ...plan, final: plan.finalFor(thread.lastText, params) }
       const turnId = `turn-${++nextTurn}`
       result(id, 'turn/start', { turn: { id: turnId, items: [], status: 'inProgress' } })
       const state = { threadId: params.threadId, interrupted: false, steers: [], emit: null }

@@ -38,9 +38,11 @@ export const IN_RUN_FLAG = 'EGDESK_INRUN_MESSAGES'
 export const LIMITS = Object.freeze({ whileRunningMs: 120_000, conversations: 8, turns: 12, files: 32, pathChars: 200, contentBytes: 64 * 1024, sayChars: 4000, approvals: 4, strings: 16, stringChars: 400 })
 // the scripted person's answers (test input, never product copy)
 export const APPROVER_TEXT = Object.freeze({ yes: '응, 그 명령 실행해 줘', no: '아니, 그건 실행하지 마' })
-export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'conversationGone', 'memory', 'commandsRanIncludes', 'commandsRanExcludes'])
+export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'conversationGone', 'memory', 'briefing', 'commandsRanIncludes', 'commandsRanExcludes'])
 export const ACTIONS = Object.freeze(['interrupt', 'steer', 'delete'])
 
+// `expect.briefing` belongs to the briefing hook (helper/egdesk-real-engine-briefing-hook.mjs): its shape and its checks live there (registered in helper/egdesk-real-engine-hooks.mjs)
+import { BRIEFING_EXPECT_SCHEMA, checkBriefingExpect, validateBriefingExpect } from './egdesk-real-engine-briefing-hook.mjs'
 const str = (max, extra = {}) => ({ type: 'string', minLength: 1, maxLength: max, ...extra })
 const strings = { type: 'array', maxItems: LIMITS.strings, items: str(LIMITS.stringChars) }
 export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
@@ -83,6 +85,7 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
               compacted: { type: 'boolean' },
               conversationGone: { type: 'boolean' },
               memory: MEMORY_EXPECT_SCHEMA,
+              briefing: BRIEFING_EXPECT_SCHEMA,
             } },
           } } },
       } } },
@@ -202,6 +205,10 @@ export function validateEngineScript(value) {
         for (const why of validateMemoryExpect(e.memory, conv.memory, `${tt}.expect.memory`)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
         if (turn.whileRunning !== undefined) bad(`${tt}.expect.memory`, 'not checked on a whileRunning turn (the memory window is the scripted turn)')
       }
+      if (e.briefing !== undefined) {
+        for (const why of validateBriefingExpect(e.briefing)) bad(`${tt}.expect.briefing`, why)
+        if (conv.flags?.EGDESK_BRIEFING_FLOW !== 'on') bad(`${tt}.expect.briefing`, 'needs flags.EGDESK_BRIEFING_FLOW = "on" in this conversation')
+      }
       if (e.files !== undefined) {
         if (!isObject(e.files) || Object.keys(e.files).length > LIMITS.files) bad(`${tt}.expect.files`, 'an object')
         else for (const [p, content] of Object.entries(e.files)) {
@@ -251,5 +258,6 @@ export function checkTurnExpectations(expect = {}, record = {}) {
   if (expect.turnStatus) put('turnStatus', record.turnStatus === expect.turnStatus, { turnStatus: record.turnStatus ?? null })
   if (expect.conversationGone !== undefined) put('conversationGone', (record.conversationGone === true) === expect.conversationGone, { conversationGone: record.conversationGone === true })
   if (expect.compacted !== undefined) put('compacted', (record.compacted === true) === expect.compacted, { compacted: record.compacted === true })
+  if (expect.briefing !== undefined) out.push(...checkBriefingExpect(expect.briefing, record.hooks?.briefing ?? null))
   return out
 }
