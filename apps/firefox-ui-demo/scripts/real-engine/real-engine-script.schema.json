@@ -312,6 +312,12 @@
                   "minLength": 1,
                   "maxLength": 4000
                 },
+                "from": {
+                  "enum": [
+                    "owner",
+                    "invited"
+                  ]
+                },
                 "action": {
                   "enum": [
                     "interrupt",
@@ -479,6 +485,80 @@
                       "type": "integer",
                       "minimum": 0,
                       "maximum": 20
+                    },
+                    "collab": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "requester": {
+                          "enum": [
+                            "owner",
+                            "invited"
+                          ]
+                        },
+                        "attention": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "minProperties": 1,
+                          "properties": {
+                            "branch": {
+                              "enum": [
+                                "owner",
+                                "requester"
+                              ]
+                            },
+                            "kind": {
+                              "enum": [
+                                "leave",
+                                "point",
+                                "surface_near_requester"
+                              ]
+                            },
+                            "pointer": {
+                              "enum": [
+                                "posted",
+                                "raised",
+                                "none"
+                              ]
+                            }
+                          }
+                        },
+                        "ownerQuestion": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "minProperties": 1,
+                          "properties": {
+                            "questions": {
+                              "type": "array",
+                              "minItems": 1,
+                              "maxItems": 4,
+                              "items": {
+                                "type": "string",
+                                "pattern": "^[a-z][a-z0-9_]{0,40}$"
+                              }
+                            },
+                            "quotesRequest": {
+                              "type": "array",
+                              "maxItems": 8,
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200
+                              }
+                            },
+                            "quotesOwnAnswer": {
+                              "const": true
+                            }
+                          }
+                        },
+                        "noIdentity": {
+                          "const": true
+                        },
+                        "cameraUntouched": {
+                          "const": true
+                        }
+                      }
                     },
                     "memory": {
                       "type": "object",
