@@ -1,3 +1,4 @@
+import { localDay } from './egdesk-browser-reflex.mjs'
 import { randomBytes } from 'node:crypto'
 import { DecisionError, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { hostOf, labelKey, outcomeCandidate, priorFromMemory, safePath } from './egdesk-browser-task-memory.mjs'
@@ -264,7 +265,7 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
       const remaining = MAX_TASK_STEPS - task.steps
       if (remaining <= 0) return finishPause(task, { kind: 'cannot_proceed', code: 'step_limit' }, null)
       const result = await provider.runDirectTask(run, { cardId: task.cardId, goal: task.goal, userContext: task.userContext, resumeState: task.state, priorRun: task.prior, memoryPacket: task.memoryPacket,
-        maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: info => store.progress?.(task, info) })
+        maxSteps: Math.min(SEGMENT_STEPS, remaining), callId: `${task.taskId}.s${++task.segments}`, onStep: info => store.progress?.(task, info), today: localDay(now()) })
       task.liveStep = 0
       recordSteps(result)
       tally(task, result)
@@ -323,7 +324,8 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
       case 'handoff': return finishPause(task, { kind: 'cannot_proceed', code: typeof result.pageState === 'string' ? result.pageState : 'sensitive_flow' }, result)
       case 'escalated': {
         const last = (result.steps || []).at(-1)
-        const humanStep = result.reason === 'human_step' || (result.reason === 'blocked' && (last?.excluded?.gated ?? 0) > 0)
+        // c19: a control the loop cannot operate (excluded.unsupported) is the person's step as much as a person-only one
+        const humanStep = result.reason === 'human_step' || (result.reason === 'blocked' && (last?.excluded?.gated ?? 0) + (last?.excluded?.unsupported ?? 0) > 0)
         const code = humanStep ? 'human_step' : CANNOT.has(result.reason) ? result.reason : 'blocked'
         return finishPause(task, { kind: 'cannot_proceed', code }, result, { detail: result.code })
       }
