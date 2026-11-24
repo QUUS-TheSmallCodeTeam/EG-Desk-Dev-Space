@@ -1,4 +1,3 @@
-import { MAX_TASK_STEPS } from './egdesk-browser-task.mjs'
 import { TERMINAL_STATE_NAMES, runObjectiveLoop } from './egdesk-terminal-judge.mjs'
 
 // Read-only fact providers that let the objective loops feed a heartbeat (egdesk-heartbeat.mjs). They observe; they never
@@ -7,33 +6,33 @@ import { TERMINAL_STATE_NAMES, runObjectiveLoop } from './egdesk-terminal-judge.
 
 // ---- Browser task loop (egdesk-browser-task.mjs) ----
 
-/** A store that behaves exactly like `store` and tells `onTask` which task object is live for a conversation (create / paused lookups). */
-export function observeBrowserTaskStore(store, onTask) {
-  const tell = task => { try { if (task) onTask(task) } catch { /* observing never changes the task */ } return task }
-  return {
-    create: args => tell(store.create(args)),
-    paused: conversationKey => tell(store.paused(conversationKey)),
-    touch: task => store.touch(task),
-    get: taskId => store.get(taskId),
-    get size() { return store.size },
-  }
+/**
+ * The ONE browser-task fact provider: the task store's own read-only facts() (egdesk-browser-task.mjs), reduced to what a heartbeat
+ * takes (numbers, booleans, closed labels; no task id, no nested counts). Null unless a task of the conversation is running or paused.
+ *
+ * A heartbeat lives from the moment the person's message is accepted until that turn ends. Inside that window a PAUSED task means
+ * the loop has handed off and the subjective model is still wording the question: the person has not been asked yet. So the row says
+ * phase 'handing_off' and waitingOnUser false (the heartbeat stays able to speak if that turn is slow), and names what is being
+ * handed off in `awaiting`. By the time the person really is awaited the turn, and with it the heartbeat, has ended.
+ */
+export function browserTaskRow(facts) {
+  if (!facts || facts.active !== true) return null
+  const paused = facts.status === 'paused'
+  return { active: true, phase: paused ? 'handing_off' : 'objective_step', waitingOnUser: false, stepsDone: facts.stepsDone, stepsRemaining: facts.stepsRemaining,
+    task: paused ? 'handing_off' : 'running', awaiting: paused ? facts.waitingKind : null, awaitingCode: paused ? facts.waitingCode : null,
+    lastActionAgeMs: facts.lastActionAgeMs, idleMs: facts.idleMs }
 }
 
-/** Facts of one browser task object (the loop mutates it; this only reads). */
-export function browserTaskFacts(task) {
-  if (!task || (task.status !== 'running' && task.status !== 'paused')) return null
-  const steps = Number.isSafeInteger(task.steps) ? task.steps : 0
-  const paused = task.status === 'paused'
-  return { active: true, phase: paused ? 'waiting_user' : 'objective_step', waitingOnUser: paused, stepsDone: steps, stepBudgetLeft: Math.max(0, MAX_TASK_STEPS - steps),
-    task: paused ? (task.pause?.kind === 'need_context' ? 'need_context' : 'cannot_proceed') : 'running' }
-}
-
-/** Registers the browser task of a conversation with a heartbeat. Returns { store, unregister }: pass `store` to createDirectBrowserEntry. */
-export function feedBrowserTask(heartbeat, store) {
-  let current = null
-  const observed = observeBrowserTaskStore(store, task => { current = task })
-  const unregister = heartbeat ? heartbeat.register('browser_task', () => browserTaskFacts(current)) : () => {}
-  return { store: observed, unregister, facts: () => browserTaskFacts(current) }
+/**
+ * Registers the browser task of a conversation with a heartbeat (read-only; the store is used as is, nothing wraps it).
+ * conversationKey defaults to the heartbeat's own key (the runtime keys both by the local chat id).
+ * Returns { store, unregister, facts }: `store` is the same object that was passed in.
+ */
+export function feedBrowserTask(heartbeat, store, conversationKey = null) {
+  const key = conversationKey ?? heartbeat?.snapshot?.().key ?? null
+  const facts = () => { try { return browserTaskRow(typeof key === 'string' && key ? store.facts(key) : null) } catch { return null } }
+  const unregister = heartbeat ? heartbeat.register('browser_task', facts) : () => {}
+  return { store, unregister, facts }
 }
 
 // ---- Terminal objective loop (egdesk-terminal-judge.mjs) ----

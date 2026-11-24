@@ -279,3 +279,45 @@ test('subjectiveNote never carries a URL or free text; an unsafe detail is dropp
   assert.doesNotMatch(text, /secret|https/)
   assert.match(subjectiveNote(task, { status: 'cannot_proceed', code: 'tool_failed', detail: 'BROWSER_OBSERVATION_STALE' }), /BROWSER_OBSERVATION_STALE/)
 })
+
+// ---- L8 cycle 11: read-only progress facts and the step observer ----
+test('C11 task store facts: null without a task; running / waiting / done; an active task wins over a finished one; nothing but numbers and closed words', () => {
+  let clock = 1000
+  const store = createBrowserTaskStore({ now: () => clock })
+  assert.equal(store.facts('dm'), null)
+  const task = store.create({ conversationKey: 'dm', cardId: 'card', goal: '비밀 목표 portal.example.test' })
+  store.progress(task, { step: 2 }); clock += 500
+  store.progress(task, { step: 2, action: 'egdesk_browser_observe' }) // reading the page is not an action
+  assert.deepEqual([store.facts('dm').stepsDone, store.facts('dm').lastActionAgeMs, store.facts('dm').phase], [2, null, 'objective_step'])
+  store.progress(task, { step: 3, action: 'egdesk_browser_navigate' }); clock += 250
+  assert.deepEqual([store.facts('dm').stepsDone, store.facts('dm').lastActionAgeMs, store.facts('dm').stepsRemaining], [3, 250, 21])
+  task.status = 'paused'; task.pause = { kind: 'need_context', code: 'choice_needed' }; task.steps = 3; task.liveStep = 0
+  assert.deepEqual([store.facts('dm').waitingOnUser, store.facts('dm').waitingKind, store.facts('dm').waitingCode, store.facts('dm').phase], [true, 'need_context', 'choice_needed', 'waiting_user'])
+  task.pause = { kind: 'cannot_proceed', code: 'free text with spaces' }
+  assert.equal(store.facts('dm').waitingCode, null, 'a code that is not a closed word is not passed on')
+  task.status = 'done'; task.pause = null
+  const second = store.create({ conversationKey: 'dm', cardId: 'card', goal: 'x' })
+  assert.equal(store.facts('dm').taskId, second.taskId, 'the running task, not the finished one')
+  assert.doesNotMatch(JSON.stringify(store.facts('dm')), /비밀|portal|card/)
+  clock += 31 * 60 * 1000
+  assert.equal(store.facts('dm'), null, 'expired tasks give no facts')
+})
+
+test('C11 the step observer cannot change the loop: a throwing observer and no observer give the same result and the same tool calls', async () => {
+  const page = { url: 'https://x.example.test/a', documentId: 'd1', revision: 1, text: ['p'], interactiveElements: [el('l1', 'link', '다음', { href: 'https://x.example.test/b' })] }
+  const runOnce = async onStep => {
+    const calls = []
+    const callTool = async (name, args) => { calls.push(name); return name === 'egdesk_browser_observe' ? { observationId: `o${calls.length}`, snapshot: page } : { status: 'ok' } }
+    const client = createDecisionClient({ recipientForKey: (value, endpoint, model) => decisionTopicRecipient(value, 1, endpoint, model), getApiKey: async () => KEY,
+      fetchImpl: async (_e, { body }) => { const q0 = JSON.parse(body).questions[0]
+        return { ok: true, text: async () => JSON.stringify({ answers: [choice('next_step', q0.choices[0].value, 0.95), choice('page_state', 'content', 0.95), { name: 'goal_met', type: 'predicate', probability: 0 }] }) } } })
+    const { steps, state, ...result } = await runBrowserReflex({ cardId: 'c', goal: 'g', callTool, client, maxSteps: 2, ...(onStep ? { onStep } : {}) })
+    return { result, calls, actions: steps.map(s => s.actions) }
+  }
+  const seen = []
+  const plain = await runOnce(null)
+  const observed = await runOnce(info => { seen.push(info); throw new Error('observer failed') })
+  assert.deepEqual(observed, plain)
+  assert.deepEqual(seen.filter(i => i.action).map(i => i.action), ['egdesk_browser_navigate', 'egdesk_browser_wait', 'egdesk_browser_navigate', 'egdesk_browser_wait'])
+  assert.deepEqual([...new Set(seen.map(i => i.step))], [1, 2])
+})

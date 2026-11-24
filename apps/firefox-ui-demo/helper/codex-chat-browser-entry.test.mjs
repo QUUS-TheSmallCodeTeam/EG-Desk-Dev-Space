@@ -317,8 +317,10 @@ test('C11 on + heartbeat: the task loop feeds step count and waiting state to th
     const hb = w.h.chat.heartbeatFor('selected-chat')
     assert.equal(hb.state, 'running')
     const facts = hb.facts()
-    assert.equal(facts.phase, 'waiting_user')
-    assert.deepEqual(facts.sources.browser_task, { active: true, phase: 'waiting_user', waitingOnUser: true, stepsDone: 1, stepBudgetLeft: 23, task: 'need_context' })
+    assert.equal(facts.phase, 'thinking', 'the question is still being worded: the person is not awaited yet')
+    const row = facts.sources.browser_task
+    assert.deepEqual([row.active, row.phase, row.waitingOnUser, row.stepsDone, row.stepsRemaining, row.task, row.awaiting, row.awaitingCode], [true, 'handing_off', false, 1, 23, 'handing_off', 'need_context', 'choice_needed'])
+    assert.deepEqual(Object.keys(row).sort(), ['active', 'awaiting', 'awaitingCode', 'idleMs', 'lastActionAgeMs', 'phase', 'stepsDone', 'stepsRemaining', 'task', 'waitingOnUser'])
     assert.doesNotMatch(JSON.stringify(facts), /세금|portal|example|사업자/)
     assert.equal(base.h.chat.heartbeatFor('selected-chat'), null, 'no heartbeat without the flag')
     w.h.finish(first)
