@@ -35,8 +35,8 @@ test('what is re-measured is what changed: every other case still has the bytes 
   const same = [], changed = [], fresh = []
   for (const r of all.requests) (measured[r.id] === undefined ? fresh : measured[r.id] === r.sha256 ? same : changed).push(r.id)
   assert.deepEqual(same, ['need-quick-3s', 'need-thinking-12s', 'need-thinking-30s', 'need-command-45s', 'need-objective-40s', 'need-missing-10s', 'need-just-posted-8s', 'ask-plain-note-10s', 'ask-no-question-mark-10s',
-    'pointer-owner-elsewhere', 'pointer-requester-present', 'pointer-owner-decision', 'wait-check-choice', 'wait-check-predicates', 'wait-check-invented-result'])
-  assert.deepEqual(changed, ['need-silence-25s', 'need-reasoning-70s', 'pointer-already-told', 'pointer-nothing-to-look-at', 'pointer-new-run', 'pointer-held-3min'])
+    'pointer-owner-elsewhere', 'pointer-requester-present', 'pointer-owner-decision'])
+  assert.deepEqual(changed, ['need-silence-25s', 'need-reasoning-70s', 'pointer-already-told', 'pointer-nothing-to-look-at', 'pointer-new-run', 'pointer-held-3min', 'wait-check-choice', 'wait-check-predicates', 'wait-check-invented-result'])
   assert.deepEqual(fresh, ['ride-along-needs-10s'])
   for (const id of [...changed, ...fresh]) assert.ok(HEARTBEAT_REMEASURE.includes(id) || Object.hasOwn(HEARTBEAT_NOT_SENT, id), `${id} changed: sent, or a reason why not`)
 })
