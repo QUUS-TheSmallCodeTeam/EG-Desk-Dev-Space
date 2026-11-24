@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { EXIT, independentEstimate, loadPlan, main, planTable, runPlan, scoreExpectation, scoreRequest, writeResults } from './egdesk-decision-real-runner.mjs'
+import { EXIT, TOKEN_MODEL, estimateBodyTokens, independentEstimate, loadPlan, main, planTable, runPlan, scoreExpectation, scoreRequest, writeResults } from './egdesk-decision-real-runner.mjs'
 
 const KEY = 'sk-test-not-a-real-key-0123456789'
 const sha = text => createHash('sha256').update(text).digest('hex')
@@ -68,6 +68,7 @@ test('loadPlan: exact file bytes are hashed and kept; the table shows what would
   assert.equal(plan.requests[0].bytes.toString('utf8'), f.files.a, 'the body is the file, byte for byte (not re-serialised)')
   assert.deepEqual(planTable(plan).map(row => [row.id, row.choice, row.predicate, row.hard, row.soft, row.sha.length]), [['a', 1, 1, 2, 0, 12], ['b', 0, 2, 1, 1, 12], ['c', 1, 0, 0, 1, 12]])
   assert.equal(plan.requests[0].independentEst, independentEstimate(1, 1, Buffer.byteLength(f.files.a)))
+  assert.equal(plan.requests[0].fittedEst, estimateBodyTokens(f.files.a))
   assert.equal(plan.requests[2].expect[0].options, 3)
 })
 
@@ -474,4 +475,24 @@ test('transport "product": a real send goes through the product transport, recor
   assert.deepEqual(transportPhases([{ phase: 'start', t: 10 }, { phase: 'lookup', t: 12 }, { phase: 'connect', t: 50 }, { phase: 'secureConnect', t: 110 }, { phase: 'response', t: 410, reused: false }]),
     { reusedSocket: false, dnsMs: 2, connectMs: 40, tlsMs: 100, responseMs: 400 })
   assert.deepEqual(transportPhases([{ phase: 'start', t: 0 }, { phase: 'response', t: 200, reused: true }]), { reusedSocket: true, responseMs: 200 })
+})
+
+test('independent token estimate: per question type and per ASCII / non-ASCII character; Korean weighs about four ASCII characters; the dry run warns when the margin would pass the ceiling', async () => {
+  const q = [{ type: 'predicate', name: 'a', instructions: 'x' }]
+  const en = JSON.stringify({ model: 'm', input: 'a'.repeat(400), questions: q }), ko = JSON.stringify({ model: 'm', input: '가'.repeat(400), questions: q })
+  assert.ok(estimateBodyTokens(ko) - estimateBodyTokens(en) > 250, 'four hundred Hangul characters cost far more than four hundred ASCII ones')
+  assert.equal(estimateBodyTokens(JSON.stringify({ questions: [] })), Math.round(TOKEN_MODEL.ascii * 16))
+  assert.ok(TOKEN_MODEL.nonAscii / TOKEN_MODEL.ascii > 4 && TOKEN_MODEL.margin === 1.1)
+  // the legacy byte model under-weights Korean: a Hangul character is 3 bytes but about 4 ASCII characters of tokens
+  assert.ok(independentEstimate(0, 1, Buffer.byteLength(ko)) < estimateBodyTokens(ko))
+  const fitted = loadPlan(fixture().planFile).totals.fittedEst
+  const tight = fixture(plan => { plan.tokenCeiling = fitted + 1 })
+  const loaded = loadPlan(tight.planFile)
+  const io = capture()
+  await main([tight.planFile], { env: {}, print: io.print, printError: io.printError })
+  const head = JSON.parse(io.out[0])
+  assert.deepEqual([head.independentEst, head.fittedEst, head.fittedWithMargin], [loaded.totals.independentEst, loaded.totals.fittedEst, Math.round(loaded.totals.fittedEst * TOKEN_MODEL.margin)])
+  assert.ok(loaded.totals.fittedEst * TOKEN_MODEL.margin > loaded.tokenCeiling, 'the fixture is tight')
+  assert.match(head.warning, /fitted estimate x 1.1 \(\d+\) is over the token ceiling/)
+  assert.equal(planTable(loaded)[0].fittedEst, loaded.requests[0].fittedEst)
 })

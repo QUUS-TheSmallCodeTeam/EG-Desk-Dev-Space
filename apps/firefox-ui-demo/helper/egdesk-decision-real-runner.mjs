@@ -61,7 +61,25 @@ const record = value => value !== null && typeof value === 'object' && !Array.is
 const unit = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
 const plausibleKey = key => typeof key === 'string' && key.length >= 20 && !/\s/.test(key)
 // Typed input-token model solved from real requests of 2026-11-24 (egdesk-memory-real-plan.mjs). Only a cross-check of declared estimates.
+// LEGACY byte model (loadPlan's `independentEst`), kept because plan builders' committed estimates and their tests are tied to it.
+// The runner's corrected estimate is `fittedEst` (estimateBodyTokens), which the dry run prints and checks against the ceiling. Measured against 358 distinct real bodies (2026-11-25):
+// mean -3.2%, but Korean-heavy bodies (> 10% non-ASCII characters) -10.7% on average and down to -30%; 26 of those 49 exceeded the
+// estimate x 1.10. New plans should declare estimateBodyTokens(text) instead.
 export const independentEstimate = (choiceQuestions, predicateQuestions, bytes) => Math.round(56.5 * choiceQuestions + 134.8 * predicateQuestions + 0.1983 * bytes)
+
+// The runner's independent input-token estimate (cycle L6-16): least squares on every real result whose exact body we have (358 distinct
+// bodies, 58 sets, 2026-11-22..25), per question type and per ASCII / non-ASCII character of the body text. Leave-one-set-out error:
+// median |error| 1.8%, Korean-heavy bodies mean 0.0%; per plan (set) the worst under-estimate is -7.6%, so the 1.10 margin covered every
+// set. Lane L4's independent fit (132 per question, .223 per ASCII, .984 per non-ASCII) agrees on the character weights.
+// Known residual: terminal-log bodies (dense ASCII symbols) run up to 25% above it; score questions cost about 100 tokens less than this.
+export const TOKEN_MODEL = Object.freeze({ choice: 27.85, predicate: 124.63, ascii: 0.224, nonAscii: 0.9482, margin: 1.10 })
+export function estimateBodyTokens(text) {
+  const body = JSON.parse(text), questions = Array.isArray(body?.questions) ? body.questions : []
+  let ascii = 0, nonAscii = 0
+  for (const ch of text) { if (ch.codePointAt(0) <= 127) ascii++; else nonAscii++ }
+  const choice = questions.filter(q => q?.type === 'choice').length
+  return Math.round(TOKEN_MODEL.choice * choice + TOKEN_MODEL.predicate * (questions.length - choice) + TOKEN_MODEL.ascii * ascii + TOKEN_MODEL.nonAscii * nonAscii)
+}
 
 class PlanError extends Error { constructor(message) { super(message); this.name = 'PlanError' } }
 const bad = message => { throw new PlanError(message) }
@@ -166,7 +184,7 @@ export function loadPlan(planFile) {
     if (!grouping.ok && item.diagnostic !== true) bad(`${item.id}: grouped questions do not each carry their own item (${grouping.families.filter(f => f.problems.length).map(f => `${f.family}: ${[...new Set(f.problems.map(x => x.problem))].join('/')}`).join('; ')}); fix the request, or mark it "diagnostic": true if it reproduces the defect on purpose`)
     const counts = { choice: body.questions.filter(q => q.type === 'choice').length, predicate: body.questions.filter(q => q.type === 'predicate').length, score: body.questions.filter(q => q.type === 'score').length }
     const text = bytes.toString('utf8')
-    return { id: item.id, file: item.file, sha256: item.sha256, bytes, estInputTokens: item.estInputTokens, independentEst: independentEstimate(counts.choice, counts.predicate + counts.score, bytes.length),
+    return { id: item.id, file: item.file, sha256: item.sha256, bytes, estInputTokens: item.estInputTokens, independentEst: independentEstimate(counts.choice, counts.predicate + counts.score, bytes.length), fittedEst: estimateBodyTokens(text),
       questions: body.questions, counts, images: (text.match(/"type"\s*:\s*"input_image"/g) || []).length, expect, recordOnly, diagnostic: item.diagnostic === true, groupingOk: grouping.ok, waitBeforeMs: item.waitBeforeMs ?? 0 }
   })
   if (raw.transport !== undefined && raw.transport !== 'product') bad('transport must be "product" when present')
@@ -177,7 +195,7 @@ export function loadPlan(planFile) {
     const problems = requests.flatMap(r => r.expect.filter(e => e.severity === 'hard' && !e.diagnostic).map(e => lintExpectation(e, r, productBars)).filter(Boolean).map(text => `${r.id} ${text}`))
     if (problems.length) bad(`hard checks looser than the declared product bars (mark a deliberate one "diagnostic": true): ${problems.join('; ')}`)
   }
-  const totals = { requests: requests.length, estInputTokens: requests.reduce((sum, r) => sum + r.estInputTokens, 0), independentEst: requests.reduce((sum, r) => sum + r.independentEst, 0),
+  const totals = { requests: requests.length, estInputTokens: requests.reduce((sum, r) => sum + r.estInputTokens, 0), independentEst: requests.reduce((sum, r) => sum + r.independentEst, 0), fittedEst: requests.reduce((sum, r) => sum + r.fittedEst, 0),
     bytes: requests.reduce((sum, r) => sum + r.bytes.length, 0) }
   return { set: raw.set, tokenCeiling: raw.tokenCeiling, passRule: raw.passRule, dir, requests, totals: { ...totals, waitMs: totalWaitMs }, productBars, transport: raw.transport ?? null,
     diagnostic: requests.reduce((n, r) => n + r.expect.filter(e => e.diagnostic).length, 0) }
@@ -229,7 +247,7 @@ export function lintExpectation(e, request, productBars) {
 
 export function planTable(plan) {
   return plan.requests.map(r => ({ id: r.id, bytes: r.bytes.length, sha: r.sha256.slice(0, 12), choice: r.counts.choice, predicate: r.counts.predicate, score: r.counts.score, images: r.images,
-    estInputTokens: r.estInputTokens, independentEst: r.independentEst, recordOnly: r.recordOnly, ...(r.waitBeforeMs ? { waitBeforeMs: r.waitBeforeMs } : {}), ...(r.diagnostic ? { diagnostic: true } : {}), ...(r.groupingOk ? {} : { groupingLint: 'fails' }), hard: r.expect.filter(e => e.severity === 'hard').length, soft: r.expect.filter(e => e.severity === 'soft').length }))
+    estInputTokens: r.estInputTokens, independentEst: r.independentEst, fittedEst: r.fittedEst, recordOnly: r.recordOnly, ...(r.waitBeforeMs ? { waitBeforeMs: r.waitBeforeMs } : {}), ...(r.diagnostic ? { diagnostic: true } : {}), ...(r.groupingOk ? {} : { groupingLint: 'fails' }), hard: r.expect.filter(e => e.severity === 'hard').length, soft: r.expect.filter(e => e.severity === 'soft').length }))
 }
 
 /** What the answer says about one expectation. observed carries what a later threshold analysis needs: probability, or choice + top/second/margin/N. */
@@ -392,8 +410,9 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
   }
   const send = flag('--send')
   print(JSON.stringify({ set: plan.set, mode: send ? 'send' : 'dry_run', endpoint: OFFICIAL, requests: plan.totals.requests, bytes: plan.totals.bytes, estInputTokens: plan.totals.estInputTokens,
-    independentEst: plan.totals.independentEst, tokenCeiling: plan.tokenCeiling, withinCeiling: plan.totals.estInputTokens <= plan.tokenCeiling,
-    ...(plan.totals.independentEst > plan.totals.estInputTokens * 1.5 ? { warning: 'declared estimates are much lower than the independent estimate' } : {}),
+    independentEst: plan.totals.independentEst, fittedEst: plan.totals.fittedEst, fittedWithMargin: Math.round(plan.totals.fittedEst * TOKEN_MODEL.margin), tokenCeiling: plan.tokenCeiling, withinCeiling: plan.totals.estInputTokens <= plan.tokenCeiling,
+    ...(plan.totals.fittedEst * TOKEN_MODEL.margin > plan.tokenCeiling ? { warning: `the fitted estimate x ${TOKEN_MODEL.margin} (${Math.round(plan.totals.fittedEst * TOKEN_MODEL.margin)}) is over the token ceiling: the run may stop before its last request` }
+      : plan.totals.fittedEst > plan.totals.estInputTokens * TOKEN_MODEL.margin ? { warning: 'declared estimates are lower than the fitted estimate by more than the margin' } : {}),
     ...(plan.totals.waitMs ? { waitMs: plan.totals.waitMs } : {}), ...(plan.transport ? { transport: plan.transport } : {}), passRule: plan.passRule }))
   for (const row of planTable(plan)) print(JSON.stringify(row))
   print(JSON.stringify(plan.productBars ? { productBars: 'declared and checked', families: Object.keys(plan.productBars), diagnosticChecks: plan.diagnostic }
