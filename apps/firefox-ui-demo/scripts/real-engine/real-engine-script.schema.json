@@ -302,6 +302,81 @@
                   "maxItems": 4,
                   "type": "array"
                 },
+                "browserTask": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "actions": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "fill": {
+                          "maximum": 12,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "navigate": {
+                          "maximum": 12,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "scroll": {
+                          "maximum": 12,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "candidates": {
+                      "items": {
+                        "maxLength": 100,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "maxItems": 3,
+                      "type": "array"
+                    },
+                    "code": {
+                      "maxLength": 40,
+                      "minLength": 1,
+                      "pattern": "^[a-z][a-z0-9_]{0,39}$",
+                      "type": "string"
+                    },
+                    "identifiers": {
+                      "items": {
+                        "maxLength": 40,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "maxItems": 4,
+                      "type": "array"
+                    },
+                    "pageText": {
+                      "items": {
+                        "maxLength": 400,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "maxItems": 16,
+                      "type": "array"
+                    },
+                    "status": {
+                      "enum": [
+                        "done",
+                        "cannot_proceed",
+                        "need_context"
+                      ]
+                    },
+                    "steps": {
+                      "maximum": 12,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "type": "object"
+                },
                 "expect": {
                   "additionalProperties": false,
                   "properties": {
@@ -384,6 +459,48 @@
                         },
                         "schemaSent": {
                           "type": "boolean"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "browserAnswer": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "mentionsDates": {
+                          "items": {
+                            "maxLength": 10,
+                            "minLength": 1,
+                            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                            "type": "string"
+                          },
+                          "maxItems": 4,
+                          "type": "array"
+                        },
+                        "namesAllOf": {
+                          "items": {
+                            "maxLength": 100,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 6,
+                          "minItems": 1,
+                          "type": "array"
+                        },
+                        "namesAnyOf": {
+                          "items": {
+                            "maxLength": 100,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 6,
+                          "minItems": 1,
+                          "type": "array"
+                        },
+                        "noInventedAmounts": {
+                          "const": true
+                        },
+                        "noInventedDates": {
+                          "const": true
                         }
                       },
                       "type": "object"
