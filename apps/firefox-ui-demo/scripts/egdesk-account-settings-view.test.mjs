@@ -354,6 +354,9 @@ test('decision model section: unknown offline, key hint only, Korean verificatio
   assert.match(View.decisionVerificationText('something-else'), /연결하지 못했습니다/);
   assert.deepEqual(View.decisionCredentialOutcome({ result: { verification: 'verified' } }), { phase: 'done', verification: 'verified', text: '확인됨' });
   assert.equal(View.decisionCredentialOutcome({ result: { verification: 'no_credit' } }).phase, 'warning');
+  // A saved key with the mode still 끔 points to the mode switch; 기록만/사용 add nothing.
+  assert.match(View.decisionCredentialOutcome({ result: { verification: 'verified', mode: 'off' } }).text, /^확인됨 모드가 ‘끔’이라 아직 쓰이지 않습니다\. 아래에서 ‘사용’을 고르면 쓸 수 있습니다\.$/);
+  for (const mode of ['advisory', 'on']) assert.equal(View.decisionCredentialOutcome({ result: { verification: 'verified', mode } }).text, '확인됨');
   const rejected = View.decisionCredentialOutcome({ error: { code: 'DECISION_KEY_REJECTED', verification: 'invalid_key' } });
   assert.equal(rejected.phase, 'error');
   assert.match(rejected.text, /키가 올바르지 않습니다 · 키를 저장하지 않았습니다/);
