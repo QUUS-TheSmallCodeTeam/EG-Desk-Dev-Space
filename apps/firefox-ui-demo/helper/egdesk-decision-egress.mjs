@@ -93,4 +93,6 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-terminal-judge.mjs': ['terminal_output'],
   'egdesk-turn-memory.mjs': ['memory_page', 'topic_history'],
   'egdesk-wiki-reconstruction.mjs': ['memory_page'],
+  // Prototype, not wired into the runtime: block previews of a tool output the run's model is about to receive (by output kind), and older session blocks.
+  'egdesk-working-memory-gate.mjs': ['terminal_output', 'page_text', 'topic_history'],
 })
