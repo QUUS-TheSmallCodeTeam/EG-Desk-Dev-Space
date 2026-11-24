@@ -37,6 +37,7 @@ const FIXTURE_BROWSER_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egd
 import { planSessionTopic, SESSION_TOPIC_LIMITS } from './egdesk-session-topic.mjs'
 import { TOPIC_ANSWER_LIMIT, TOPIC_ANSWER_HOLD_MS, topicAnswerContradiction } from './egdesk-topic-answer-grounding.mjs'
 import { speechSegments } from './egdesk-speech-grounding.mjs'
+import { deriveTurnPosition } from './egdesk-turn-memory.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
 // Reviewed requests expire after two minutes; only canonical v4 UUID IDs are accepted.
@@ -766,6 +767,7 @@ export class CodexChatRuntime {
     // { mode(): 'off'|'advisory'|'on', configured(): boolean, client, collect({ body, context }) → candidates, budgetMs? } or null.
     this.speechRuns = new WeakMap() // private runtime-only grants; never projected onto public runs
     this.calibrationRuns = new WeakMap() // run -> content-free calibration entry id; process-local
+    this.compactedThreads = new Set() // native threads whose context the host knows was compacted (no engine signal is wired yet)
     this.topicAnswerGuards = new WeakMap() // private, bounded proof; never checkpointed
     this.topicIntakes = new WeakMap() // accepted local request -> prospective generation, never copied to checkpoints
     this.topicRuns = new WeakMap() // live turn -> routing refs until one confirmed final + successful terminal event
@@ -4446,6 +4448,22 @@ export class CodexChatRuntime {
     this.put(run, 'activities', activity)
     this.emit(run, 'activity.completed', activity)
   }
+
+  // First turn or mid-session, from real runtime facts: is there a native thread with completed turns in the store whose context
+  // is still intact. Doubtful or unknown means 'first' (reconstructing again is wasteful, a lost context is a wrong answer).
+  // The decision to use it for memory is a separate, flagged feature (egdesk-turn-memory.mjs); nothing calls this on the turn path yet.
+  turnPosition(context) {
+    try {
+      const cid = context?.conversationId
+      if (!cid) return deriveTurnPosition({ threadId: null })
+      let prior = 0
+      try { prior = (this.store?.listMessages?.(context.clientThreadId)?.messages ?? []).filter(m => m.role === 'assistant' && m.status !== 'streaming' && m.status !== 'error').length } catch { prior = 0 }
+      return deriveTurnPosition({ threadId: cid, priorCompletedTurns: prior, compacted: this.compactedThreads.has(cid), resumed: !this.loadedThreads.has(cid) })
+    } catch { return { kind: 'first', reason: 'unknown_state' } }
+  }
+
+  /** The host learned that this thread's native context was compacted: the next turn is a first turn for memory purposes. */
+  markContextCompacted(cid) { if (typeof cid === 'string' && cid) this.compactedThreads.add(cid) }
 
   // Content-free numbers for later threshold calibration (canon section 5.3). Recording only: it never
   // changes what is attached, shown or sent, and any failure is ignored.
