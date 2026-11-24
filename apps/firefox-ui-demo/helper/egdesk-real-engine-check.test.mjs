@@ -355,3 +355,15 @@ test('a turn that does not finish in time is interrupted once and ends the conve
   assert.equal(wireLog(w).filter(m => m.dir === 'in' && m.method === 'turn/start').length, 1, 'no retry, no second turn')
   await new Promise(resolve => setTimeout(resolve, 700)) // the fake's own delayed turn ends before the temp folder goes
 })
+
+test('a binary that exits at once ends the conversation with a closed code and records its stderr tail', async t => {
+  const w = world(t, { turns: [] })
+  w.deps.spawn = () => {
+    const child = new EventEmitter()
+    Object.assign(child, { pid: 1, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, signalCode: null, kill: () => true })
+    setImmediate(() => { child.stderr.write('not a codex\n'); child.exitCode = 2; child.emit('close', 2, null) })
+    return child
+  }
+  const rec = only(await runCheck(w.options, asScripts({ set: 'real-engine-exit-v1', conversations: [{ id: 'exit', turns: [{ say: 'hi' }] }] }), w.deps))
+  assert.equal(rec.aborted, 'engine_exited'); assert.equal(rec.ok, false); assert.equal(rec.turns.length, 0); assert.match(rec.engineStderrTail, /not a codex/)
+})

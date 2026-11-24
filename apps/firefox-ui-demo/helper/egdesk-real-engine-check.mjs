@@ -239,7 +239,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
   const child = spawn(options.codexBin, argv, { cwd: dataDir, env: childEnv(options, env), shell: false, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
   rec.phases.spawnMs = ms(t0)
   let closed = false, stderrTail = ''
-  child.on('close', () => { closed = true; try { rpc.close(new Error('the Codex app-server exited')) } catch {} })
+  child.on('close', () => { closed = true; try { rpc.close(Object.assign(new Error('the Codex app-server exited'), { code: 'engine_exited' })) } catch {} })
   child.on('error', error => { rec.aborted ??= `spawn_failed:${error?.code ?? 'error'}` })
   child.stderr?.on('data', chunk => { stderrTail = (stderrTail + chunk).slice(-1500) })
   let chat = null, store = null, wiring = null, threadClient = null
