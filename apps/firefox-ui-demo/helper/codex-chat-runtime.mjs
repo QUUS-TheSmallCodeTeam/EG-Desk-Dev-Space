@@ -79,6 +79,15 @@ export function postedAnswerBlock({ outcome, posted }) {
     '"""', String(posted), '"""', 'Build on what the person saw, not on your earlier draft.'].join('\n')
 }
 export const TURN_MEMORY_CAPS = Object.freeze({ firstMs: 4000, midMs: 2500 })
+// How long after its budget a turn_context request already in flight may still answer, for the later steps of the turn only (flag keepLate).
+// The real first-turn asks took 946 and 1,098 ms against the 800 ms budget (L1 c20/c21); 1.5 s more covers them with room.
+export const LATE_CONTEXT_MS = 1500
+// The context setup's (turn_context) budget. Owner decision 2026-11-25 ("일단 늘려"): 800 ms when the Decisions connection is warm, 1,500 ms
+// for the first turn of a conversation and whenever the transport has no warm connection (cold process, or idle past its window; read from
+// the transport's warm(), never guessed). Real first asks: 946 / 1,098 ms (L1 c20 / c21); warm asks 216-598 ms (all-on c16 / c17).
+// The bridge passes both explicitly (decisionContext.budgetMs / coldBudgetMs / warm); a setup without coldBudgetMs keeps one budget.
+export const TURN_CONTEXT_BUDGET_MS = 800
+export const TURN_CONTEXT_COLD_BUDGET_MS = 1500
 // How the app-server says a thread's context was compacted: a `contextCompaction` item (item/started, item/completed), and on older builds the
 // deprecated `thread/compacted` notification. Either one means the answering model may no longer hold what was delivered to it.
 export function compactionSignal(message) {
@@ -90,6 +99,7 @@ export function compactionSignal(message) {
 }
 const FLOW_OWN_KINDS = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
 import { SPEECH_AT_PAGE, speechSegments } from './egdesk-speech-grounding.mjs'
+import { pruneContextCandidates } from './egdesk-context-pruning.mjs'
 import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory, recordStateEvidence } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
 import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, entryQuestion, readBrowserEntry } from './egdesk-browser-task.mjs'
@@ -860,6 +870,7 @@ export class CodexChatRuntime {
     this.turnMemoryDelivered = new Map() // 'on': native thread -> receipts (revision + hash, never text) of pages really attached to its turns; memory only, bounded
     this.turnMemoryWrites = new WeakMap() // 'on': run -> the write judgment to run once its answer completed
     this.turnMemoryTurns = new WeakMap() // 'on': the turn's request context, and later its run -> that turn's memory state (memoryMaterialsFor)
+    this.contextDelivered = new Map() // native thread -> Map(candidate id -> content key) of what the context setup attached to its turns; memory only, bounded
     this.turnMemoryNoted = new Map() // 'on' + confirmInConversation: native thread -> pending readings noted in this session (page id, status, how often mentioned); memory only
     this.turnMemoryLatest = new Map() // 'on': native thread -> the memory state of its latest accepted turn; an older turn's materials are no longer served
     this.turnMemoryWriteReceipts = new WeakMap() // 'on': run -> { proposal, applied } of that write (closed words only)
@@ -2804,6 +2815,8 @@ export class CodexChatRuntime {
       for (const notice of context.ceilingNotices) this.noteCeiling(run, notice.key, notice)
       if (decision?.mode === 'on' && decision.result.status === 'ready') {
         decision.result.noteSent?.()
+        // receipts of what the selection really sent (its key may have been dropped at dispatch, or carry the merged memory packet)
+        if (turnAdditionalContext?.[DECISION_CONTEXT_KEY]) this.noteContextDelivered(run, context, decision.result)
         if (Array.isArray(decision.result.speechInterpretations) && decision.speech?.allowed()) {
           this.speechRuns.set(run, decision.speech)
           // A speech record is immutable once stored. Under 'at-page' the labels do not exist yet, so the record is written after the answer
@@ -2815,6 +2828,7 @@ export class CodexChatRuntime {
       if (decision) this.noteDecisionContext(run, decision)
       this.noteDraftCheckTurn(run, body, context, decision, bounded, [...Object.keys(extraContext).filter(key => key !== DECISION_CONTEXT_KEY && key !== 'egdesk_channel'), ...(memoryPacket || memoryNote ? [TURN_MEMORY_KEY] : [])],
         memoryReady ? this.turnMemoryDraftEvidence(memoryTurn, memoryPacket !== null, run.conversationId) : [])
+      if (decision?.late) this.noteLateDecisionContext(run, decision)
       this.startConversationFlow(run, body, context)
       this.turnMemoryLatest.delete(run.conversationId) // this turn is now the conversation's latest: the previous turn's materials end here
       if (memoryTurn) this.noteTurnMemoryOn(run, body, context, memoryTurn, memoryPacket !== null, confirmNote !== null)
@@ -4301,29 +4315,84 @@ export class CodexChatRuntime {
       mode = setup.mode()
       if ((mode !== 'advisory' && mode !== 'on') || setup.configured() !== true) return null
     } catch { return null }
-    const budgetMs = Number.isSafeInteger(setup.budgetMs) && setup.budgetMs > 0 ? setup.budgetMs : 800
+    const budgetMs = this.turnContextBudget(setup, context)
     const started = performance.now(), deadline = started + budgetMs
     const inBudget = () => performance.now() < deadline
     const askedAt = context.askedAt ?? this.now()
     const controller = new AbortController()
-    let timer = null
-    const expired = new Promise(resolve => { timer = setTimeout(() => { controller.abort(); resolve(null) }, budgetMs) })
+    // Internal flag turnMemory.keepLate (bridge EGDESK_TURN_MEMORY_KEEP_LATE=on), off by default: a request already in flight at the budget is not
+    // aborted there but may answer until LATE_CONTEXT_MS after it. The turn still goes without it (the race below is unchanged, so what the
+    // answering model receives is the same); the late result only reaches the later steps of the same turn (decision.late: the draft check's
+    // evidence and the calibration record). No request is started after the budget.
+    const keepLate = this.keepLateFlag()
+    let timer = null, lateTimer = null
+    const expired = new Promise(resolve => { timer = setTimeout(() => { if (!keepLate) controller.abort(); resolve(null) }, budgetMs) })
+    if (keepLate) lateTimer = setTimeout(() => controller.abort(), budgetMs + LATE_CONTEXT_MS)
     let speech = null
     const work = (async () => {
       speech = mode === 'on' ? this.directSpeech(body, context, controller.signal) : null
       const memoryEvidenceFor = mode === 'on' ? this.directEvidenceReader(body, context, controller.signal) : null
-      const candidates = await setup.collect({ body, context, signal: controller.signal, memoryEvidenceFor, speech })
+      const collected = await setup.collect({ body, context, signal: controller.signal, memoryEvidenceFor, speech })
+      // What code can rule out is not asked (egdesk-context-pruning.mjs): records the model already holds unchanged in this conversation. Only
+      // under 'on' and where delivery receipts are trusted: a Codex thread (compaction is reported there and clears them). Advisory records only.
+      // Internal flag turnMemory.pruneHeld (bridge EGDESK_TURN_MEMORY_PRUNE_HELD=on), off by default.
+      const thread = mode === 'on' && this.pruneHeldFlag() && context.engine?.id === 'codex' && typeof context.conversationId === 'string' && context.conversationId ? context.conversationId : null
+      const { kept: candidates, pruned } = thread ? await pruneContextCandidates(Array.isArray(collected) ? collected : [], {
+        sent: this.contextDelivered.get(thread) ?? null, memoryReceipts: this.turnMemoryDelivered.get(thread)?.pages ?? null }) : { kept: Array.isArray(collected) ? collected : [], pruned: [] }
       const topic = mode === 'on' ? this.topicIntakes.get(context)?.prepare(controller.signal, inBudget) : null
       if (controller.signal.aborted || !inBudget()) return { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null }
-      return prepareTurnContext({ message: body.message, candidates: Array.isArray(candidates) ? candidates : [], client: setup.client, askedAt, speech, topic,
-        timeoutMs: Math.max(1, Math.ceil(deadline - performance.now())), signal: controller.signal, cacheScope: 'ctx' })
+      const out = await prepareTurnContext({ message: body.message, candidates, client: setup.client, askedAt, speech, topic,
+        timeoutMs: Math.max(1, Math.ceil(deadline + (keepLate ? LATE_CONTEXT_MS : 0) - performance.now())), signal: controller.signal, cacheScope: 'ctx' })
+      if (out?.receipt && pruned.length) out.receipt = { ...out.receipt, pruned: { held: pruned.length } } // a count only, never ids
+      return out
     })().catch(() => ({ status: 'fallback', reason: 'unreachable', selected: [], extraContext: {}, receipt: null }))
+    let late = null
     try {
       const result = await Promise.race([work, expired])
       let generation = null
       try { generation = typeof setup.settingsGeneration === 'function' ? setup.settingsGeneration() : null } catch {}
-      return { mode, speech, generation, result: result || { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null } }
-    } catch { return null } finally { clearTimeout(timer) }
+      if (!result && keepLate) {
+        const missedAt = performance.now()
+        late = work.then(out => (out?.status === 'ready' && !controller.signal.aborted ? Object.assign(out, { lateMs: Math.round(performance.now() - missedAt) }) : null), () => null)
+          .finally(() => clearTimeout(lateTimer))
+      }
+      return { mode, speech, generation, result: result || { status: 'fallback', reason: 'timeout', selected: [], extraContext: {}, receipt: null }, ...(late ? { late } : {}) }
+    } catch { return null } finally { clearTimeout(timer); if (!late) clearTimeout(lateTimer) }
+  }
+
+  // Which budget this turn's context setup gets (TURN_CONTEXT_BUDGET_MS / TURN_CONTEXT_COLD_BUDGET_MS, passed by the bridge).
+  turnContextBudget(setup, context) {
+    const warmMs = Number.isSafeInteger(setup.budgetMs) && setup.budgetMs > 0 ? setup.budgetMs : TURN_CONTEXT_BUDGET_MS
+    const coldMs = Number.isSafeInteger(setup.coldBudgetMs) && setup.coldBudgetMs > warmMs ? setup.coldBudgetMs : null
+    if (coldMs === null) return warmMs
+    let first = true
+    try { first = ['no_native_thread', 'fresh_native_thread', 'no_prior_turns'].includes(this.turnPosition(context).reason) } catch { first = true }
+    if (first) return coldMs
+    let warm = false
+    try { warm = typeof setup.warm === 'function' && setup.warm() === true } catch { warm = false }
+    return warm ? warmMs : coldMs
+  }
+
+  keepLateFlag() {
+    try { return this.decisionContext?.turnMemory?.keepLate === true } catch { return false }
+  }
+
+  // A turn_context result that answered after the budget (prepareDecisionContext, flag keepLate). It never reaches the native turn. Under
+  // 'on' its unguarded items become the draft check's evidence for this run (what EG-Desk holds, as the selection would have attached it;
+  // the entry also counts them as lateEvidence so the check can tell), and it is recorded for calibration with its lateness. Guarded items
+  // and a private topic batch are dropped: they were not sent, so nothing about them is shown.
+  noteLateDecisionContext(run, decision) {
+    void decision.late.then(result => {
+      if (!result) return
+      try {
+        if (decision.mode === 'on' && !result.privateTopicBatch && Array.isArray(result.draftEvidence)) {
+          const entry = this.draftCheckTurns.get(run)
+          const items = result.draftEvidence.filter(item => !item.guarded).map(({ guarded, ...item }) => item)
+          if (entry && entry.skip === null && items.length) { entry.evidence = [...items, ...entry.evidence]; entry.lateEvidence = items.length }
+        }
+        if (result.calibration) this.decisionContext?.calibrationLog?.record?.({ ...result.calibration, mode: decision.mode, attached: false, late: true, lateMs: result.lateMs ?? null })
+      } catch { /* recording only */ }
+    }).catch(() => {})
   }
 
   // Local-only entry ticket. Saving ordinary history or selecting an Agent is not
@@ -4727,6 +4796,22 @@ export class CodexChatRuntime {
 
   // One decision-context activity row: what the decision model chose, and in
   // 'advisory' mode that nothing was attached. Nothing to show when it skipped.
+  // The context setup's delivery receipts: the content key of each attached candidate, per Codex thread (where compaction is reported).
+  // Recorded after the turn was accepted, like turn memory's receipts. Keys come from the selection itself (no text is read again here).
+  noteContextDelivered(run, context, result) {
+    try {
+      const cid = run.conversationId
+      if (!this.pruneHeldFlag() || context.engine?.id !== 'codex' || typeof cid !== 'string' || !cid || !(result?.deliveredKeys instanceof Map) || !result.deliveredKeys.size) return
+      const map = new Map([...(this.contextDelivered.get(cid) ?? []), ...result.deliveredKeys])
+      this.contextDelivered.delete(cid); this.contextDelivered.set(cid, map)
+      while (this.contextDelivered.size > 50) this.contextDelivered.delete(this.contextDelivered.keys().next().value)
+    } catch { /* receipts are an optimisation; never affects the turn */ }
+  }
+
+  pruneHeldFlag() {
+    try { return this.decisionContext?.turnMemory?.pruneHeld === true } catch { return false }
+  }
+
   noteDecisionContext(run, { mode, result }) {
     if (!result || result.status === 'skipped' || result.privateTopicBatch) return
     this.recordCalibration(run, mode, result)
@@ -4761,7 +4846,7 @@ export class CodexChatRuntime {
     this.compactedThreads.delete(cid); this.compactedThreads.add(cid)
     while (this.compactedThreads.size > 200) this.compactedThreads.delete(this.compactedThreads.values().next().value)
     // What was delivered may be gone from the model's context: neither the real nor the advisory receipts count any more.
-    this.turnMemoryDelivered.delete(cid); this.turnMemoryShadow.delete(cid)
+    this.turnMemoryDelivered.delete(cid); this.turnMemoryShadow.delete(cid); this.contextDelivered.delete(cid)
   }
 
   // Content-free numbers for later threshold calibration (canon section 5.3). Recording only: it never

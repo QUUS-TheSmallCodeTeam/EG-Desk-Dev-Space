@@ -191,6 +191,25 @@ export function deriveWriteTarget(abouts) {
 }
 
 /**
+ * The pages the write judgment may name, as at most `max` pages (judgeTurnWrite reads the first 8). Up to the cap the order is the old one:
+ * this turn's picks, then the held pages in delivery order (the request is unchanged). Over the cap, code decides which pages stay, in this order:
+ *   1 this turn's picks;  2 held pages the message names (title, as the selection's own name rule);  3 the pages the previous reply was given with
+ *   (`previous`: the referent of "그 내용");  4 the other held pages, the most recently delivered first.
+ * The pages kept are listed in the old order. Nothing here reads page text or asks a model.
+ */
+export function writeCandidateOrder({ message = '', picks = [], held = [], previous = [], pages, scope = null, max = 8 } = {}) {
+  const all = [...new Set([...picks, ...held])].map(id => pages?.get?.(id)).filter(p => p && allowsPage(p, scope))
+  if (all.length <= max) return all
+  const ids = new Set(all.map(p => p.id)), pickSet = new Set(picks)
+  const text = String(message || '').toLowerCase()
+  const named = p => { const t = String(p.title ?? '').trim().toLowerCase(); return t.length >= (/^[\x00-\x7f]+$/.test(t) ? 3 : 2) && text.includes(t) }
+  const rank = [...picks.filter(id => ids.has(id)), ...all.filter(p => !pickSet.has(p.id) && named(p)).map(p => p.id),
+    ...(Array.isArray(previous) ? previous : []).filter(id => ids.has(id)), ...[...held].reverse().filter(id => ids.has(id))]
+  const keep = new Set([...new Set(rank)].slice(0, max))
+  return all.filter(p => keep.has(p.id))
+}
+
+/**
  * judgeTurnWrite({ message, candidates, client, askedAt, signal, timeoutMs, maxCandidates, targetDesign }) -> { proposal, followUp?, receipt }
  * candidates: pages (already permission-filtered by the caller). One stateless call: which page/new/none, which candidates
  * the new page relates to, and the isolated speech axes for each sentence. The proposal carries no text and is not applied.
@@ -496,7 +515,7 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
   const heldNow = [...new Set([...heldPages.map(p => p.id), ...(memory.receipts?.skippedDelivered ?? [])])]
   const nextDelivered = () => ({ ...memory.nextDelivered(), threadKey })
   let judgeWrite = null
-  const writeCandidates = () => [...new Set([...memory.picks.map(p => p.id), ...heldNow])].map(id => wiki.pages.get(id)).filter(p => p && allowsPage(p, scope))
+  const writeCandidates = () => writeCandidateOrder({ message, picks: memory.picks.map(p => p.id), held: heldNow, previous, pages: wiki.pages, scope })
   if (ontologyWrite === true && triageLater) {
     // The recording triage is still running: the thunk waits for it, and judges only when it says the turn is worth recording.
     judgeWrite = async () => {

@@ -148,3 +148,15 @@ test('hardening: close() releases parked sockets', async t => {
   for (let i = 0; i < 40 && log.closed < 2; i++) await sleep(10)
   assert.equal(log.closed, 2, 'both parked sockets were closed by shutdown')
 })
+
+test('warm() reads the pool: false on a cold transport, true while a kept-alive socket is free, false once it is dropped after the idle cap', async t => {
+  const { url } = await server(t)
+  const tr = mkTransport(t, { idleMs: 150 })
+  assert.equal(tr.warm(), false, 'cold process: no socket yet')
+  const res = await post(tr, url)
+  await res.text()
+  await sleep(20)
+  assert.equal(tr.warm(), true, 'the socket went back to the free pool')
+  await sleep(400)
+  assert.equal(tr.warm(), false, 'idle past the cap: the pool dropped it')
+})

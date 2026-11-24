@@ -154,6 +154,15 @@ async function itemText(candidate, itemChars) {
   return { text, source }
 }
 
+// The delivery key of an item: the hash of the block the answering model receives for it (its header and text). Process-local, never in a receipt.
+// Only an unguarded item has one: a guarded row is all-or-nothing and re-checked at dispatch, so it is never skipped as already held.
+export async function contextDeliveryKey(raw, { itemChars = 6000 } = {}) {
+  const candidate = normalizeCandidate(raw)
+  if (!candidate || candidate.mayRead) return null
+  const loaded = await itemText(candidate, itemChars)
+  return loaded ? sha256Hex(`${itemHeader(candidate)}\n${loaded.text}`) : null
+}
+
 // rows: [{ candidate, probability, reason }] in priority order.
 async function assemble(rows, { maxChars, itemChars }) {
   const items = []
@@ -169,7 +178,7 @@ async function assemble(rows, { maxChars, itemChars }) {
       block = block.slice(0, maxChars)
     }
     used += block.length
-    items.push({ ...row, block, textSource: source })
+    items.push({ ...row, block, blockText: text, textSource: source })
   }
   return items
 }
@@ -367,7 +376,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
   if (topicRoute?.packet) parts.push(topicRoute.packet)
   const packet = parts.join('\n\n') || null
   const status = packet ? 'ready' : 'empty'
-  return {
+  const ready = {
     status,
     answerType: answerType.state === 'accepted' ? answerType.value : null,
     timeIntent: timeIntent.state === 'accepted' ? timeIntent.value : null,
@@ -393,6 +402,11 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
       unknown: scored.filter(row => row.unknown).map(row => row.candidate.id),
       ...(dropped.length ? { dropped } : {}), ...(speechTrace ? { speech: speechTrace } : {}) },
   }
+  // What each unguarded attached item was sent as (contextDeliveryKey of the same item): the host's receipt of what the model now holds.
+  // Non-enumerable and process-local: never copied into a receipt, a trace or history.
+  Object.defineProperty(ready, 'deliveredKeys', { value: new Map(items.filter(item => !item.candidate.mayRead && item.block === `${itemHeader(item.candidate)}\n${item.blockText}`)
+    .map(item => [item.candidate.id, sha256Hex(item.block)])), enumerable: false })
+  return ready
 }
 
 // Content-free numbers for later threshold calibration (egdesk-decision-calibration-log.mjs). It holds
