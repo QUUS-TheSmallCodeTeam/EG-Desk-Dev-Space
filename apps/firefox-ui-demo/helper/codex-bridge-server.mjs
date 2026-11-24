@@ -76,6 +76,7 @@ import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { buildCodexAppServerLaunch, createNativeCapabilityCache, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 import { createSlotReadiness, isProfileSlot } from './egdesk-slot-readiness.mjs'
+import { createProfileReaders } from './egdesk-profile-readers.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
 import { createSystemResourceMonitor } from './system-resource-monitor.mjs'
 import { createLocalCapacity } from './egdesk-local-capacity.mjs'
@@ -333,8 +334,12 @@ const claudeReader = {
   },
   disconnect(options) { return claudeReaderClient?.disconnect(options) },
 }
+// L1 c24 (flag EGDESK_ROOM_ACCOUNT=on, default off): a room on an Agent profile reads big sources on THAT profile's app-server as that account (owner decision,
+// U11); off, every Codex read goes through the shared reader as before.
+const profileReaders = createProfileReaders({ enabled: () => process.env.EGDESK_ROOM_ACCOUNT === 'on', isProfileSlot,
+  request: (id, method, params) => codexEngine.request(method, params, id), respond: (id, rpcId, result, error) => codexEngine.respond(rpcId, result, error, id), ownerKey: id => codexEngine.ownerKey(id) })
 contexts = new ContextRuntime({
-  store: contextStore, reader: nativeReader, readers: { claude: claudeReader }, getReadCapacity: getClaudeReadCapacity,
+  store: contextStore, reader: nativeReader, readers: { claude: claudeReader }, profileReaders, getReadCapacity: getClaudeReadCapacity,
   getOwnerKey: () => publicAuthIdentityKey(authState),
   getAuthority: hints => chat.contextAuthority(hints),
   // L1 c22: a run on another Codex engine profile is judged by THAT profile's server and binary (its own probe), not by the shared server being up
@@ -377,8 +382,9 @@ const profileCapabilityCache = createNativeCapabilityCache()
 const codexProfileServers = createCodexProfileAppServers({
   resolveHome: id => engineProfiles.ownedCodexHome(id),
   inspectCapabilities: bin => profileCapabilityCache(bin),
-  onNotification: (id, message) => codexEngine.notify(message, id),
-  onServerRequest: (id, message) => codexEngine.serverRequest(message, id),
+  // L1 c24: a profile's reader (flag) consumes the events of its own read-only child threads; everything else goes on as before
+  onNotification: (id, message) => { if (!profileReaders.handleNotification(id, message)) codexEngine.notify(message, id) },
+  onServerRequest: (id, message) => { if (!profileReaders.handleServerRequest(id, message)) codexEngine.serverRequest(message, id) },
   onConnection: (id, state) => codexEngine.connection(state, id),
   onChange: () => engineStatus.check(),
   // Hooks can run in a profile's app-server too (reports/l5-c16.md): the same version pin, one session per profile process.
