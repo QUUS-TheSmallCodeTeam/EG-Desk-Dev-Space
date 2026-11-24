@@ -35,6 +35,9 @@ import { allOnWorld, callerOf, scriptedDecisions, DM } from './egdesk-all-on.sup
 export const PLAN_FILE = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan.json', import.meta.url))
 // Plan v2 (cycle 12): every v1 expectation plus the misleading outputs found in the first real run. v1 stays as registered.
 export const PLAN_FILE_V2 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v2.json', import.meta.url))
+// Plan v3 (cycle 13): every v2 expectation, a genuine recall step, and the person-level checks of what changed since c16. The latest plan.
+export const PLAN_FILE_V3 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v3.json', import.meta.url))
+export const LATEST_PLAN_FILE = PLAN_FILE_V3
 export const SCRIPT_FILE = fileURLToPath(import.meta.url)
 export const DEFAULT_CAPS = Object.freeze({ tokenCeiling: 80_000, maxRequests: 80 })
 const LIMITS = Object.freeze({ tokenCeilingMax: 200_000, maxRequestsMax: 200 })
@@ -44,9 +47,9 @@ const CLIENT = 'helper/egdesk-decision-client.mjs', SUPPORT = 'scripts/egdesk-al
 
 // ---- the journey: what the person says, and the scripted subjective model ----
 export const SAYS = Object.freeze({ quote: '지난주 A사 견적 건 어디까지 됐지?', tidy: '방금 그 내용 정리해줘', tests: '전체 테스트 돌리고 결과 알려줘',
-  deployed: 'PostgreSQL 마이그레이션 배포 끝났어', portal: '거래처 포털에서 이번 달 세금계산서 내려받아줘', second: '두 번째 사업자로' })
+  recall: 'PostgreSQL 전환은 설계에서 어떻게 하기로 정했었지?', deployed: 'PostgreSQL 마이그레이션 배포 끝났어', portal: '거래처 포털에서 이번 달 세금계산서 내려받아줘', second: '두 번째 사업자로' })
 const AGENT_SAYS = Object.freeze({ quote: 'A사 견적은 v1 발송 후 v2 수정 계획 단계이며 팀장 승인 후 발송 예정입니다.', tidy: 'A사 견적은 11월 3일 요청, 11월 6일 v1 발송, v2는 팀장 승인 후 발송 예정입니다.',
-  tests: '테스트가 모두 통과했습니다.', noted: '네, 기록해 두겠습니다.', ask: '사업자가 둘입니다. 어느 쪽으로 받을까요?', got: '세금계산서를 내려받았습니다.', stuck: '포털 작업을 마치지 못했습니다.',
+  recall: 'PostgreSQL 전환 설계에서 스키마 변환, 데이터 이관, 롤백 순서를 정하기로 확정했습니다.', tests: '테스트가 모두 통과했습니다.', noted: '네, 기록해 두겠습니다.', heard: '네, 알겠습니다.', ask: '사업자가 둘입니다. 어느 쪽으로 받을까요?', got: '세금계산서를 내려받았습니다.', stuck: '포털 작업을 마치지 못했습니다.',
   stuckAsk: '포털에서 다음 단계를 정하지 못했습니다. 어느 사업자의 세금계산서를 받을지 알려 주세요.' })
 export const COMMAND = 'npm test -- --suite=payroll-secret', COMMAND_OUTPUT = 'running 40 tests'
 const rect = (x, y, width, height) => ({ x, y, width, height })
@@ -60,11 +63,17 @@ const running = w => w.state.last && w.runs().at(-1)?.status === 'inProgress'
 async function agentSays(w, text, j) { if (running(w)) { j.said.push(text); await w.answer(text) } }
 // The browser turn follows the task note the runtime handed it: the choices when it lists them, a question when it says to tell the person
 // and ask (cycle 12: the first real run's note said so and the scripted turn ignored it), a report when the task is done.
+// (cycle 13) A question names the choices the note lists, as a model handed them would.
 async function agentAnswersTask(w, j) {
-  const note = w.note()
-  const text = note?.next === 'ask_user_in_chat' ? AGENT_SAYS.ask : note?.next === 'tell_user_and_ask_in_chat' ? AGENT_SAYS.stuckAsk : note?.status === 'done' ? AGENT_SAYS.got : AGENT_SAYS.stuck
+  const note = w.note(), choices = Array.isArray(note?.candidates) && note.candidates.length ? ` ${note.candidates.join(' / ')}` : ''
+  const text = note?.next === 'ask_user_in_chat' ? AGENT_SAYS.ask + choices : note?.next === 'tell_user_and_ask_in_chat' ? AGENT_SAYS.stuckAsk + choices : note?.status === 'done' ? AGENT_SAYS.got : AGENT_SAYS.stuck
   await agentSays(w, text, j)
 }
+// (cycle 13) The answering model follows the recording rule when its turn carries it (do not say you recorded or will record anything).
+const RECORDING_CONTEXT = 'egdesk_recording'
+const carriesRecordingRule = w => Object.hasOwn(w.turnStarts().at(-1)?.params?.additionalContext ?? {}, RECORDING_CONTEXT)
+// (cycle 13) The scripted note writer words its note from the waited-on fact the prompt gives, and claims nothing else.
+const waitNote = prompt => (/a command is still running/.test(prompt) ? '명령이 아직 실행 중이라 조금 더 걸리고 있어요.' : null)
 // The result card needs its owner, who looks elsewhere; a second member is on the desk. The request body is the chrome builder's (attentionRequest),
 // posted the way the surface posts its placement requests ({ clientThreadId, conversationId, dto }). No surface code sends this request yet.
 async function resultNeedsOwner(w, j) {
@@ -88,6 +97,7 @@ export const STEPS = Object.freeze([
       candidates: BriefingHost.canvasBriefingCandidates([]), request: SAYS.tidy, viewport: rect(0, 0, 1200, 800) }) : null
     j.note.briefing = body ? (await w.http('POST', '/decision/briefing-observe', body)).body : { status: 'not_asked' }
   } },
+  { id: 's3b-recall', room: DM, since: 3, title: 'a genuine recall: stored material the conversation does not hold', run: async (w, j) => { await j.say(SAYS.recall); await w.advance(3000); await agentSays(w, AGENT_SAYS.recall, j) } },
   { id: 's4-long-command', room: DM, title: 'a long command: ten seconds in', run: async (w, j) => {
     w.presenceMirror.accept(people())
     await j.say(SAYS.tests)
@@ -106,7 +116,7 @@ export const STEPS = Object.freeze([
   { id: 's6-answer', room: DM, title: 'the answer', run: async (w, j) => { await agentSays(w, AGENT_SAYS.tests, j) } },
   { id: 's7-pointer-advisory', room: DM, title: 'the result needs the owner elsewhere; work placement advisory', run: async (w, j) => { w.ENV.EGDESK_WORK_PLACEMENT = 'advisory'; await resultNeedsOwner(w, j) } },
   { id: 's8-pointer-on', room: DM, title: 'the same, work placement on', run: async (w, j) => { w.ENV.EGDESK_WORK_PLACEMENT = 'on'; await resultNeedsOwner(w, j) } },
-  { id: 's9-status-remark', room: DM, title: 'a status remark', run: async (w, j) => { await j.say(SAYS.deployed); await w.advance(2000); await agentSays(w, AGENT_SAYS.noted, j); await j.pause() } },
+  { id: 's9-status-remark', room: DM, title: 'a status remark', run: async (w, j) => { await j.say(SAYS.deployed); await w.advance(2000); await agentSays(w, carriesRecordingRule(w) ? AGENT_SAYS.heard : AGENT_SAYS.noted, j); await j.pause() } },
   { id: 's10-browser-task', room: BROWSER_ROOM, title: 'a browser task in a conversation of its own', run: async (w, j) => { w.use(BROWSER_ROOM); await j.say(SAYS.portal, w.browserExtra()); await agentAnswersTask(w, j) } },
   { id: 's11-browser-reply', room: BROWSER_ROOM, title: 'the person answers the task question', run: async (w, j) => { w.use(BROWSER_ROOM); await j.say(SAYS.second, w.browserExtra()); await agentAnswersTask(w, j); await j.pause() } },
 ])
@@ -119,10 +129,15 @@ export function loadJourneyPlan(file = PLAN_FILE) {
   let bytes, raw
   try { bytes = readFileSync(file); raw = JSON.parse(bytes.toString('utf8')) } catch { bad('cannot read the plan file') }
   if (typeof raw?.set !== 'string' || !raw.set || typeof raw.registered !== 'string' || !raw.registered) bad('the plan needs a set name and its registration time')
-  if (!Array.isArray(raw.steps) || raw.steps.length !== STEPS.length) bad(`the plan needs exactly the ${STEPS.length} steps of the journey`)
+  // A plan lists every step of the journey that has no `since` (the core of v1), plus any later-added step it judges, in journey order.
+  if (!Array.isArray(raw.steps)) bad('the plan needs its steps')
+  const listed = raw.steps.map(step => step?.id), positions = listed.map(id => STEPS.findIndex(def => def.id === id))
+  if (positions.some(p => p < 0)) bad(`unknown plan step ${listed[positions.indexOf(-1)]}`)
+  if (positions.some((p, i) => i > 0 && p <= positions[i - 1])) bad('plan steps must follow the journey order')
+  const missing = STEPS.filter(def => def.since === undefined && !listed.includes(def.id))
+  if (missing.length) bad(`the plan needs the journey step ${missing[0].id}`)
   const steps = raw.steps.map((step, index) => {
-    const def = STEPS[index]
-    if (step?.id !== def.id) bad(`plan step ${index + 1} must be ${def.id}`)
+    const def = STEPS[positions[index]]
     if (!posInt(step.caps?.maxRequests) || !posInt(step.caps?.maxEstTokens)) bad(`${def.id}: caps.maxRequests and caps.maxEstTokens must be positive integers`)
     if (!Array.isArray(step.expect) || !step.expect.length) bad(`${def.id}: at least one expectation`)
     const ids = new Set()
@@ -137,7 +152,7 @@ export function loadJourneyPlan(file = PLAN_FILE) {
     })
     return { id: def.id, caps: { maxRequests: step.caps.maxRequests, maxEstTokens: step.caps.maxEstTokens }, expect }
   })
-  return { set: raw.set, registered: raw.registered, sha256: sha256(bytes), steps }
+  return { set: raw.set, registered: raw.registered, sha256: sha256(bytes), version: Number.isSafeInteger(raw.version) ? raw.version : 1, steps }
 }
 
 // ---- checks: each judges one expectation from the step's results (and the world, for request bodies that are not written out) ----
@@ -237,6 +252,35 @@ const CHECKS = {
     const needs = note && ['ask_user_in_chat', 'tell_user_and_ask_in_chat'].includes(note.next)
     return { pass: Boolean(needs) && (note.candidates?.length ?? 0) >= args.min, observed: { note } }
   },
+  // (cycle 13) A logged judgment of this step (calibration word, not a question name): measured, and within bounds when bounds are given.
+  calibrationValue: ({ step, args }) => {
+    const found = step.seen.calibration.filter(e => e.feature === args.feature).flatMap(e => e.judgments ?? []).find(x => x.q === args.q)
+    const p = found?.p ?? null
+    return { pass: p !== null && (args.min === undefined || p >= args.min) && (args.max === undefined || p <= args.max), observed: { [args.q]: p } }
+  },
+  // (cycle 13) One Agent message of the step names every one of these words.
+  messageMentions: ({ step, args }) => {
+    const agent = newMessages(step, step.room).filter(m => m.role === 'assistant' && m.by === 'agent')
+    return { pass: agent.some(m => args.needles.every(n => m.text.includes(n))), observed: { messages: agent.map(m => m.text) } }
+  },
+  // (cycle 13) The board's cards: at least min of them, and (only) cards whose title has this word.
+  boardCards: ({ step, args }) => {
+    const cards = step.seen.board.cards.map(c => c.title ?? ''), matching = cards.filter(title => title.includes(args.titleIncludes))
+    return { pass: matching.length >= args.min && (args.onlyMatching !== true || matching.length === cards.length), observed: { cards } }
+  },
+  // (cycle 13) The system's flow message of the step: how many, and that it says what it must and nothing it must not.
+  flowText: ({ step, args }) => {
+    const shown = newMessages(step).filter(m => m.by === 'system_flow')
+    const ok = shown.length === (args.equals ?? 1) && shown.every(m => (args.mustInclude ?? []).every(n => m.text.includes(n)) && !(args.mustNot ?? []).some(n => m.text.includes(n)))
+    return { pass: ok, observed: { shown: shown.map(m => m.text) } }
+  },
+  // (cycle 13) Some Decision request of this step (of these families) carries every one of these words (checked on the exact bodies).
+  sentIn: ({ step, args, world }) => {
+    const rows = world.decisionsIn(step.id).filter(d => !args.families || args.families.includes(d.feature))
+    return { pass: rows.some(d => args.needles.every(n => d.raw.includes(n))), observed: { requests: rows.length, withIt: rows.filter(d => args.needles.every(n => d.raw.includes(n))).length } }
+  },
+  // (cycle 13) The answering turn of this step carried this context block (by its key).
+  contextKey: ({ step, args }) => ({ pass: step.seen.packets.some(p => p.keys.includes(args.key)), observed: { keys: step.seen.packets.map(p => p.keys) } }),
   placementRecorded: ({ step }) => ({ pass: step.seen.placement.records.length >= 1, observed: { records: step.seen.placement.records, submitted: step.seen.placement.submitted } }),
 }
 export const CHECK_NAMES = Object.freeze(Object.keys(CHECKS))
@@ -295,7 +339,9 @@ function seenAfter(w, id, before, j) {
     browser: { note: note ? { status: note.status, next: note.next, code: note.code ?? null, candidates: note.candidates ?? [], stepsDone: note.stepsDone ?? null } : null,
       acts: w.acts.slice(before.acts).map(a => ({ type: a.type, url: a.url })) },
     writes: readWrites(w),
-    calibration: w.calibrationLog.entries().slice(before.calibration).map(e => ({ feature: e.feature, mode: e.mode, ...(e.flow !== undefined ? { flow: e.flow } : {}), ...(e.fallback ? { fallback: e.fallback } : {}) })),
+    calibration: w.calibrationLog.entries().slice(before.calibration).map(e => ({ feature: e.feature, mode: e.mode, ...(e.flow !== undefined ? { flow: e.flow } : {}), ...(e.fallback ? { fallback: e.fallback } : {}),
+      // (cycle 13) the entry's judgments by their logged word and probability, so values such as the memory triage are measured per step
+      judgments: (Array.isArray(e.judgments) ? e.judgments : []).filter(x => typeof x?.q === 'string' && Number.isFinite(x.p)).map(x => ({ q: x.q, p: x.p })) })),
   }
 }
 const requestRow = d => ({ ...(d.replay ? { replay: d.replay } : {}), family: d.feature, caller: d.caller, origin: d.origin, sha256: d.sha256, bytes: d.bytes, questions: d.names, estInputTokens: d.estInputTokens ?? null,
@@ -385,6 +431,7 @@ export async function runJourney({ plan, send = false, key = null, fetchImpl = g
   const steps = []
   try {
     const w = allOnWorld(t, { transport, settleLimitMs: 60_000 })
+    w.state.wording.wait = waitNote
     await w.settings.turnMemory.save('on')
     const j = { note: {}, sends: [], said: [],
       async say(text, extra) {
@@ -393,7 +440,7 @@ export async function runJourney({ plan, send = false, key = null, fetchImpl = g
         await w.idle()
       },
       async pause() { await new Promise(resolve => setTimeout(resolve, 60)); await w.idle() } }
-    for (const def of STEPS) {
+    for (const def of STEPS.filter(def => plan.steps.some(step => step.id === def.id))) {
       if (ledger.stopped) { steps.push({ id: def.id, room: def.room, title: def.title, state: 'not_run' }); continue }
       w.step(def.id); j.sends = []; j.said = []
       const before = counts(w)
@@ -450,12 +497,16 @@ export function diffJourneys(previous, current) {
   const group = list => { const m = new Map(); for (const row of list ?? []) { if (!m.has(row.family)) m.set(row.family, []); m.get(row.family).push(row) } return m }
   const steps = current.steps.map(cur => {
     const prev = (previous?.steps ?? []).find(step => step.id === cur.id) ?? null, changes = []
-    const pf = fam(prev?.requests), cf = fam(cur.requests)
-    for (const family of [...new Set([...Object.keys(pf), ...Object.keys(cf)])]) if ((pf[family] ?? 0) !== (cf[family] ?? 0)) changes.push({ kind: 'requests', family, prev: pf[family] ?? 0, cur: cf[family] ?? 0 })
     // In a replay, a request the earlier run did not make was answered by the script, and one whose body changed got an answer given to
     // another body: both are named, and a scripted answer is not compared with a real one.
     const scripted = (cur.requests ?? []).filter(row => row.replay === 'unmatched'), reused = (cur.requests ?? []).filter(row => row.replay === 'recorded_changed_body')
-    if (scripted.length || reused.length) changes.push({ kind: 'replay', scripted: scripted.map(row => row.family), changedBody: reused.map(row => row.family) })
+    const replayed = scripted.length || reused.length ? [{ kind: 'replay', scripted: scripted.map(row => row.family), changedBody: reused.map(row => row.family) }] : []
+    // A step the earlier run did not have (added by a later plan): its requests and expectations are new, nothing in it is a change.
+    if (!prev) return { step: cur.id, state: cur.state, added: true, changes: [{ kind: 'new_step', requests: fam(cur.requests) }, ...replayed,
+      ...(cur.checks ?? []).map(c => ({ kind: 'expectation', id: c.id, severity: c.severity, owner: c.owner, prev: 'new', cur: c.pass }))] }
+    changes.push(...replayed)
+    const pf = fam(prev?.requests), cf = fam(cur.requests)
+    for (const family of [...new Set([...Object.keys(pf), ...Object.keys(cf)])]) if ((pf[family] ?? 0) !== (cf[family] ?? 0)) changes.push({ kind: 'requests', family, prev: pf[family] ?? 0, cur: cf[family] ?? 0 })
     const pm = group(prev?.requests)
     for (const [family, list] of group(cur.requests)) list.forEach((row, i) => {
       const before = pm.get(family)?.[i]
@@ -492,13 +543,14 @@ export function formatDiff(diff) {
   const marked = diff.steps.filter(step => step.changes.some(c => c.kind === 'replay')).map(step => step.step)
   if (marked.length) lines.push(`replay: steps with scripted answers or answers reused for a changed body (their outcomes are not model results; re-run with --send): ${marked.join(', ')}`)
   for (const step of diff.steps) {
-    lines.push(`== ${step.step} [${step.state}]${step.changes.length ? '' : ' no change'}`)
+    lines.push(`== ${step.step} [${step.added ? `new in this plan, ${step.state}` : step.state}]${step.changes.length ? '' : ' no change'}`)
     const replayNote = step.changes.some(c => c.kind === 'replay')
     for (const c of step.changes) {
       if (c.kind === 'requests') lines.push(`  requests     ${c.family} ${c.prev} -> ${c.cur}`)
       else if (c.kind === 'answer') lines.push(`  answer       ${c.family}#${c.index} ${c.name}: ${c.prev} -> ${c.cur}`)
       else if (c.kind === 'saw') { lines.push('  person saw   before:'); for (const line of c.prev) lines.push(`                 ${line}`); lines.push('               now:'); for (const line of c.cur) lines.push(`                 ${line}`) }
       else if (c.kind === 'expectation') lines.push(`  expectation  ${c.id} (${c.severity}, ${c.owner}): ${passWord(c.prev)} -> ${passWord(c.cur)}${replayNote ? ' [not a model result: see replay above]' : ''}`)
+      else if (c.kind === 'new_step') lines.push(`  new step     not in the earlier run; requests ${Object.entries(c.requests).map(([k, v]) => `${k} ${v}`).join(', ') || 'none'}`)
       else if (c.kind === 'replay') lines.push(`  replay       ${c.scripted.length ? `no recorded answer, scripted: ${c.scripted.join(', ')}` : ''}${c.scripted.length && c.changedBody.length ? '; ' : ''}${c.changedBody.length ? `recorded answer reused for a changed body: ${c.changedBody.join(', ')}` : ''}`)
       else lines.push(`  ${c.kind.padEnd(12)} ${JSON.stringify(c.prev)} -> ${JSON.stringify(c.cur)}`)
     }
@@ -545,7 +597,7 @@ export async function main(argv, { env = {}, fetchImpl = globalThis.fetch, print
   const replayRun = replayFile ? readRun(replayFile) : null, diffRun = diffFile ? readRun(diffFile) : null
   if ((replayFile && !replayRun) || (diffFile && !diffRun)) { printError('the earlier results file cannot be read'); return EXIT.usage }
   let plan
-  try { plan = loadJourneyPlan(valueOf('--plan') ?? (rerun ? PLAN_FILE_V2 : PLAN_FILE)) } catch (error) { printError(error?.name === 'PlanError' ? `plan refused: ${error.message}` : 'plan refused'); return EXIT.usage }
+  try { plan = loadJourneyPlan(valueOf('--plan') ?? (rerun ? LATEST_PLAN_FILE : PLAN_FILE)) } catch (error) { printError(error?.name === 'PlanError' ? `plan refused: ${error.message}` : 'plan refused'); return EXIT.usage }
   const send = args.includes('--send')
   const key = send ? env.OPENAI_API_KEY ?? null : null
   if (send && !plausibleKey(key)) { printError('OPENAI_API_KEY is not set (or not a plausible key); nothing was sent'); return EXIT.noKey }

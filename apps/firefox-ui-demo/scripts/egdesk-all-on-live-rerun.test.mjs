@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
 import { scriptedDecisions } from './egdesk-all-on.support.mjs'
-import { PLAN_FILE, PLAN_FILE_V2, diffJourneys, formatDiff, loadJourneyPlan, main } from './egdesk-all-on-live-measure.mjs'
+import { LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, STEPS, diffJourneys, formatDiff, loadJourneyPlan, main } from './egdesk-all-on-live-measure.mjs'
 
 const KEY = 'sk-synthetic-not-a-key-l2c12-000000000002'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -63,7 +63,7 @@ test('plan v2: pinned, based on v1 by hash, keeps every v1 expectation verbatim,
 // ---- --rerun without --send: a replay of the earlier answers on today's code ----
 test('--rerun <earlier> (no --send): replays the recorded answers, sends nothing, judges plan v2 and prints the step-by-step diff', async t => {
   const { file, results } = await earlierRun(t), net = noNetwork(), out = path.join(tmp(t), 'rerun.json')
-  const run = await cli(['--rerun', file, '--out', out], { fetchImpl: net.fetchImpl })
+  const run = await cli(['--rerun', file, '--plan', PLAN_FILE_V2, '--out', out], { fetchImpl: net.fetchImpl })
   assert.equal(run.code, EXIT.ok, run.err.join('\n'))
   assert.equal(net.calls.length, 0)
   const now = JSON.parse(readFileSync(out, 'utf8'))
@@ -87,7 +87,7 @@ test('--rerun <earlier> --send: sends through the guarded path and the diff show
   // Another day: the draft check now calls every sentence a present-tense restatement.
   // L3 c18: the draft check asks per-sentence predicates by default; its tense question is tense_N (was present_N).
   const net = provider(a => (/^(present|tense)_\d+$/.test(a.name) ? { ...a, probability: 0.97 } : a))
-  const run = await cli(['--rerun', file, '--send', '--out', out], { fetchImpl: net.fetchImpl })
+  const run = await cli(['--rerun', file, '--plan', PLAN_FILE_V2, '--send', '--out', out], { fetchImpl: net.fetchImpl })
   const now = JSON.parse(readFileSync(out, 'utf8'))
   assert.equal(now.mode, 'send'); assert.equal(net.calls.length, now.totals.sent); assert.ok(net.calls.every(c => c.authorization === `Bearer ${KEY}`))
   assert.ok(!('replayOf' in now))
@@ -154,4 +154,52 @@ test('diffJourneys: requests per family, answers by threshold, what the person s
   const lines = formatDiff(diff)
   assert.equal(lines[0], 'journey diff: a (send, plan p1) -> b (replay, plan p2)')
   assert.ok(lines.includes('  expectation  z (hard, L8): new -> fail') && lines.includes('  expectation  x (hard, L7): fail -> pass'))
+})
+
+// ---- plan v3 (cycle 13) ----
+const REGISTERED_PLAN_V3_SHA256 = '2c1c5d8b4f03ba23fd16f17c84ff9e1164b1dde09c3f4c8469e6b1bb4dbc3988'
+test('plan v3: pinned, based on v2 by hash, keeps every v2 expectation verbatim, adds the recall step after s3, and every new expectation has an owner and a prediction', () => {
+  const bytes = readFileSync(PLAN_FILE_V3), raw = JSON.parse(bytes.toString('utf8')), v2 = JSON.parse(readFileSync(PLAN_FILE_V2, 'utf8'))
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V3_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V3)
+  assert.equal(raw.version, 3); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V2)))
+  assert.deepEqual(raw.steps.map(s => s.id), [...v2.steps.slice(0, 3).map(s => s.id), 's3b-recall', ...v2.steps.slice(3).map(s => s.id)])
+  for (const step of v2.steps) {
+    const now = raw.steps.find(s => s.id === step.id)
+    assert.deepEqual(now.caps, step.caps); assert.deepEqual(now.expect.slice(0, step.expect.length), step.expect, `${step.id}: v2 expectations kept as they were`)
+    for (const added of now.expect.slice(step.expect.length)) assert.ok(added.owner && added.severity && typeof added.predicted === 'string' && added.predicted.length > 10, added.id)
+  }
+  const recall = raw.steps.find(s => s.id === 's3b-recall')
+  assert.ok(recall.expect.some(e => e.severity === 'hard' && e.check === 'packet' && e.args.include.includes('ontology:db/pg-design')), 'the needed page must be fetched (hard)')
+  assert.ok(recall.expect.filter(e => e.check === 'calibrationValue').every(e => e.severity === 'soft'), 'the triage values are measured as soft')
+  assert.equal(STEPS.find(s => s.id === 's3b-recall').since, 3)
+  // The three plans still load; v1 and v2 do not judge (and so do not run) the recall step.
+  for (const file of [PLAN_FILE, PLAN_FILE_V2]) assert.ok(!loadJourneyPlan(file).steps.some(s => s.id === 's3b-recall'))
+  assert.ok(loadJourneyPlan(PLAN_FILE_V3).steps.some(s => s.id === 's3b-recall'))
+})
+
+test('plan loading: a plan must list every core step, in journey order, and no unknown step', t => {
+  const dir = tmp(t), v3 = JSON.parse(readFileSync(PLAN_FILE_V3, 'utf8'))
+  const write = (name, plan) => { const file = path.join(dir, name); writeFileSync(file, JSON.stringify(plan)); return file }
+  assert.throws(() => loadJourneyPlan(write('missing.json', { ...v3, steps: v3.steps.filter(s => s.id !== 's4-long-command') })), /needs the journey step s4-long-command/)
+  assert.throws(() => loadJourneyPlan(write('order.json', { ...v3, steps: [v3.steps[1], v3.steps[0], ...v3.steps.slice(2)] })), /journey order/)
+  assert.throws(() => loadJourneyPlan(write('unknown.json', { ...v3, steps: [...v3.steps, { ...v3.steps[0], id: 's99-other' }] })), /unknown plan step s99-other/)
+})
+
+test('--rerun compares v3 with an earlier run that had no recall step: that step shows as new (its expectations "new"), not as changes or failures of the earlier run', async t => {
+  const { file, results } = await earlierRun(t), out = path.join(tmp(t), 'rerun-v3.json'), net = noNetwork()
+  assert.ok(!results.steps.some(s => s.id === 's3b-recall'), 'the earlier run (plan v1) has no recall step')
+  const run = await cli(['--rerun', file, '--out', out], { fetchImpl: net.fetchImpl })
+  assert.equal(run.code, EXIT.ok, run.err.join('\n')); assert.equal(net.calls.length, 0)
+  const now = JSON.parse(readFileSync(out, 'utf8'))
+  assert.equal(now.plan.sha256, REGISTERED_PLAN_V3_SHA256, 'the latest plan by default')
+  const recall = now.diff.steps.find(s => s.step === 's3b-recall')
+  assert.equal(recall.added, true)
+  assert.deepEqual(recall.changes.filter(c => c.kind !== 'expectation').map(c => c.kind), ['new_step', 'replay'], 'new, and (in a replay) scripted')
+  assert.ok(recall.changes.filter(c => c.kind === 'expectation').length >= 5 && recall.changes.filter(c => c.kind === 'expectation').every(c => c.prev === 'new'))
+  assert.ok(now.steps.find(s => s.id === 's3b-recall').requests.every(r => r.replay === 'unmatched'), 'no recorded answers exist for it: scripted, and counted')
+  assert.ok(now.diff.steps.filter(s => !s.added).every(s => s.changes.filter(c => c.kind === 'expectation').every(c => c.prev !== undefined)))
+  const text = run.out.join('\n')
+  assert.match(text, /^== s3b-recall \[new in this plan, done\]$/m); assert.match(text, /^ {2}new step {5}not in the earlier run; requests /m)
+  assert.match(text, /^ {2}expectation {2}s3b\.fetched \(hard, L7\): new -> \w+ \[not a model result: see replay above\]$/m)
+  assert.doesNotMatch(text.split('== s3b-recall')[1].split('\n== ')[0], /requests {5}|answer {7}|person saw/)
 })
