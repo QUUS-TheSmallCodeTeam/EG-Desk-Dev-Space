@@ -103,15 +103,15 @@ test('identity: the folder is EG-Desk\'s, not the engine\'s; profile, account, C
   assert.deepEqual(h.ran, [])
 })
 
-test('terminal facts in the c10 row shape: waiting at the gate for the person, running, ended', async () => {
+test('terminal facts in the c10 row shape: waiting at the gate for the person, running, ended (kind engine since c18)', async () => {
   const h = harness()
   await h.call(turn(h, 'c', 'T'), 'git clean -fdx')
   await h.call(turn(h, 'd', 'U'), 'npm test')
-  // kind 'objective' (EG-Desk's own loop): the row carries no exit code (terminalFactRow, c10); the exit code is in the tool result
+  // c18: kind 'engine' (the engine asked for the command), so the rows carry the exit code; the mock runner reports no duration
   assert.deepEqual(h.rows, [
-    { active: false, waitingOnUser: true, terminal: 'gate', phase: 'waiting_user' },
-    { active: true, waitingOnUser: false, terminal: 'running', phase: 'objective_step' },
-    { active: false, waitingOnUser: false, terminal: 'idle' },
+    { active: false, waitingOnUser: true, terminal: 'gate', phase: 'waiting_user', runningMs: null, quietMs: null, exitCode: null },
+    { active: true, waitingOnUser: false, terminal: 'running', phase: 'tool_running', runningMs: 0, quietMs: null, exitCode: null },
+    { active: false, waitingOnUser: false, terminal: 'idle', runningMs: null, quietMs: null, exitCode: 0 },
   ])
 })
 
