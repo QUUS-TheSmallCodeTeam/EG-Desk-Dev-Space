@@ -593,6 +593,20 @@ export function codexSlotAccountKey(engineProfileId, context = {}) {
 export function codexRoomAccountKey(thread, authStatus, context = {}) {
   return codexSlotProfile(thread?.engineProfileId, context) ? codexSlotAccountKey(thread.engineProfileId, context) : codexAccountKey(authStatus);
 }
+// L1 c19 (Contract §14.1: a Run keeps its engineProfileId). A Codex room on another engine profile this window knows: its account is
+// that profile's, so the DEFAULT sign-in changing or signing out leaves the room, its requests, runs and binding alone.
+export function codexRoomOnOtherProfile(thread, context = {}) {
+  return !!thread && thread.engineId !== 'claude' && !!codexSlotProfile(thread.engineProfileId, context);
+}
+/** The rooms a default sign-in change keeps (ids): every Codex room on another known engine profile. */
+export function codexDefaultSwitchKeeps(threads, context = {}) {
+  return new Set((Array.isArray(threads) ? threads : []).filter(thread => codexRoomOnOtherProfile(thread, context)).map(thread => thread.id));
+}
+/** A room's account fence: its account key while it is current (the default room also needs the window's cached default to name it), else null. */
+export function codexRoomAccountCurrent(thread, authStatus, cachedDefaultKey, context = {}) {
+  const key = codexRoomAccountKey(thread, authStatus, context);
+  return key && (codexRoomOnOtherProfile(thread, context) || cachedDefaultKey === key) ? key : null;
+}
 export function knownCodexAccountKey(key) {
   if (typeof key !== 'string' || !key.startsWith('codex:')) return false;
   const [, mode, ...identity] = key.split(':');
@@ -2720,15 +2734,18 @@ export function chatMessageForkPoint(thread, message) {
  * when it cannot. A one-time or bounded room never can; others wait for the
  * connection, the account and any running turn.
  */
-export function chatForkAvailability(thread, { connected = false, auth = null, capabilities = null, busy = false, runs = [], fromTurnId = null } = {}) {
+export function chatForkAvailability(thread, { connected = false, auth = null, capabilities = null, busy = false, runs = [], fromTurnId = null, engines = null } = {}) {
   const no = reason => ({ available: false, reason });
+  // L1 c19: a room on another engine profile is checked against that profile's sign-in and account, not the default sign-in
+  const context = { engines };
+  const signedIn = codexRoomOnOtherProfile(thread, context) ? !!codexSlotAccountKey(thread.engineProfileId, context) : !!auth?.isLoggedIn;
   if (!thread) return no('대화방을 찾지 못했습니다.');
   if (chatSessionKind(thread) === 'stateless') return no('일회성 대화는 코덱스에 기록이 남지 않아 분기할 수 없습니다.');
   if (chatThreadBounded(thread, runs)) return no('점검이나 Browser 조작으로 제한해 실행한 대화는 분기할 수 없습니다.');
   if (!thread.conversationId) return no(nativeBindingHeld(thread) ? '이전 대화의 계정 소유를 확인한 뒤 분기할 수 있습니다.' : '아직 시작하지 않은 대화는 분기할 수 없습니다.');
-  if (!connected || !auth?.isLoggedIn) return no('코덱스에 연결해 로그인하면 분기할 수 있습니다.');
+  if (!connected || !signedIn) return no('코덱스에 연결해 로그인하면 분기할 수 있습니다.');
   if (!capabilityListed(capabilities, 'fork')) return no('지금 연결된 브리지는 대화 분기를 지원하지 않습니다.');
-  if (!canResumeNativeThread(thread, auth)) return no('지금 로그인한 계정의 대화인지 확인한 뒤 분기할 수 있습니다.');
+  if (!canResumeNativeThread(thread, auth, context)) return no('지금 로그인한 계정의 대화인지 확인한 뒤 분기할 수 있습니다.');
   const from = fromTurnId ? (Array.isArray(runs) ? runs : []).find(run => run?.runId === fromTurnId && run.conversationId === thread.conversationId) : null;
   if (from && isRunBusy(from)) return no('이 응답이 끝난 뒤 이 지점에서 분기할 수 있습니다.');
   if (busy) return no('진행 중인 실행이 끝난 뒤 분기할 수 있습니다.');
