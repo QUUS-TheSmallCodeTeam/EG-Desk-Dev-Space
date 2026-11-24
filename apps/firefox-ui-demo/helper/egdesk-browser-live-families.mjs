@@ -9,7 +9,7 @@
 
 import { HOLDOUT_HANDOVER_CODES, HOLDOUT_HOSTS, HOLDOUT_NEVER_OFFERED, HOLDOUT_PAGES, HOLDOUT_PERSON_ONLY_REFS, HOLDOUT_SETS, holdoutAnswers, holdoutChecks } from './egdesk-browser-live-holdout.mjs'
 void HOLDOUT_HANDOVER_CODES
-import { HOLDOUT2_HOSTS, HOLDOUT2_NEVER_OFFERED, HOLDOUT2_PAGES, HOLDOUT2_PERSON_ONLY_REFS, HOLDOUT2_SETS, HOLDOUT2_VIEW_REFS, holdout2Answers, holdout2Checks } from './egdesk-browser-live-holdout2.mjs'
+import { stuckFormAnswers, HOLDOUT2_HOSTS, HOLDOUT2_NEVER_OFFERED, HOLDOUT2_PAGES, HOLDOUT2_PERSON_ONLY_REFS, HOLDOUT2_SETS, HOLDOUT2_VIEW_REFS, holdout2Answers, holdout2Checks } from './egdesk-browser-live-holdout2.mjs'
 
 const el = (ref, role, label, extra = {}) => ({ ref, role, label, tag: role === 'link' ? 'a' : role === 'button' || role === 'tab' ? 'button' : 'input', href: '', value: '', ...extra })
 export const FAMILY_HOSTS = Object.freeze({ statement: 'bank.example.test', delivery: 'shop.example.test', settings: 'account.example.test', ...HOLDOUT_HOSTS, ...HOLDOUT2_HOSTS })
@@ -172,7 +172,9 @@ export function familyChecks({ phaseOf, firstNavigateAfter, byCodeOn }) {
 // The scripted stand-in for the dry estimate (NOT a model): it answers the way the pre-registered journeys expect.
 export function familyAnswers(body, set = null) {
   const ev = body.input.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n')
-  if (HOLDOUT2_SETS[set] || /한결병원|다음 결제일/.test(ev)) return holdout2Answers(body) // c25: the re-run (same requests as c24, answered as the fixed rules allow) and the new families
+  if (set === 'browser-live-stuck-v1' && /주민등록등본/.test(ev)) return stuckFormAnswers(body) // c26: the form page as the real model answered it
+  // (the stuck set's second phase, the settings error page, is answered by the settings family's stand-in below)
+  if (set !== 'browser-live-stuck-v1' && (HOLDOUT2_SETS[set] || /한결병원|다음 결제일/.test(ev))) return holdout2Answers(body) // c25: the re-run (same requests as c24, answered as the fixed rules allow) and the new families
   if (/전기요금|주민등록등본/.test(ev)) return holdoutAnswers(body) // c24: the hold-out families' requests
   const url = /URL: (\S+)/.exec(ev)?.[1] ?? ''
   const pick = (q, value, confidence = 0.95) => ({ name: q.name, type: 'choice', choice: value, confidence, probabilities: [{ value, probability: confidence }] })

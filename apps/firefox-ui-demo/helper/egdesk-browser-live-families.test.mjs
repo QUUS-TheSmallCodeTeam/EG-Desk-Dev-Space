@@ -36,7 +36,8 @@ test('the three family plans are pre-registered within the hard limits (<= 14 re
   assert.deepEqual(sizes, { statement: [9, { 'st-base': 4, 'st-changed': 3, 'st-expired': 2 }], delivery: [7, { 'dv-recorded': 3, 'dv-changed': 2, 'dv-captcha': 2 }], settings: [6, { 'se-base': 3, 'se-error': 3 }],
     'settings-error': [3, { 'se-error': 3 }],
     holdout: [7, { 'ub-base': 3, 'ig-list': 2, 'ig-form': 2 }], // c24
-    'holdout-rerun': [7, { 'rr-ub-base': 3, 'rr-ig-list': 4 }], // c25
+    'holdout-rerun': [6, { 'rr-ub-base': 2, 'rr-ig-list': 4 }], // c25, rr-ub-base cut to one step (c26)
+    stuck: [6, { 'sk-form': 3, 'sk-error': 3 }], // c26
     holdout2: [7, { 'hc-link': 3, 'hc-covered': 2, 'ms-info': 2 }], // c25
     stability: [9, { 'stab-se': 3, 'stab-st': 2, 'stab-dv': 2, 'stab-inv': 2 }] })
 })

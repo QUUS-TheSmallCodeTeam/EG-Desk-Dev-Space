@@ -1,0 +1,92 @@
+// L8 c26: a page whose offered options do not move toward the goal, but which holds controls withheld as the person's own, is the person's step: the task
+// hands over as human_step naming them (nothing is acted on) instead of scrolling or ending without a word. Decided by code from the step's answers and the
+// snapshot's scroll state. Real: the c24 fee-and-verification page (all six page-state predicates 0, scroll_more 0.91, person_target 0.49).
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { buildReflexCandidates, contentBelow, runBrowserReflex } from './egdesk-browser-reflex.mjs'
+import { createBrowserTaskStore, createDirectBrowserEntry } from './egdesk-browser-task.mjs'
+import { HOLDOUT_PAGES } from './egdesk-browser-live-holdout.mjs'
+import { FAMILY_PAGES } from './egdesk-browser-live-families.mjs'
+import { pageStateAnswers } from './egdesk-browser-page-state.fixture.mjs'
+
+const FORM = HOLDOUT_PAGES.issuance['/issue/resident']
+const snap = (page, url, extra = {}) => ({ cardId: 'card', documentId: 'doc1', revision: 1, url, readyState: 'complete', text: page.text, viewport: { width: 1200, height: 800, devicePixelRatio: 1 }, interactiveElements: page.elements, ...extra })
+const FORM_SNAP = snap(FORM, 'https://minwon.example.test/issue/resident')
+const choice = (value, confidence = 0.91) => ({ type: 'choice', choice: value, confidence, probabilities: [{ value, probability: confidence }] })
+const P = p => ({ type: 'predicate', probability: p })
+const base = (next, extra = {}) => ({ next_step: next, ...pageStateAnswers('content', 0.98), goal_met: P(0.02), person_target_0: P(0.49), ...extra })
+async function step(answers, snapshot = FORM_SNAP, goal = '주민등록등본 발급 신청해줘') {
+  const tools = [], sent = []
+  const callTool = async name => { tools.push(name); return name === 'egdesk_browser_observe' ? { observationId: 'o1', snapshot } : { status: 'ok' } }
+  const client = { decide: async request => { sent.push(request); return { answers: answers(request) } } }
+  const result = await runBrowserReflex({ cardId: 'card', goal, maxSteps: 1, callTool, client })
+  return { result, sent, acts: tools.filter(n => n !== 'egdesk_browser_observe') }
+}
+
+test('withheld controls are collected in page order (a button withheld by vocabulary, a control with no action); a proven read-only button is not one', () => {
+  const { withheld, options } = buildReflexCandidates(FORM_SNAP)
+  assert.deepEqual(withheld, [{ label: '휴대폰 본인확인', role: 'button' }, { label: '수수료 결제에 동의합니다', role: 'checkbox' }, { label: '신청하기', role: 'button' }])
+  assert.deepEqual(options.map(o => o.value), ['[L1] 발급 수수료 안내', '[L2] 목록'])
+  const bill = buildReflexCandidates(snap(HOLDOUT_PAGES.utility['/bill'], 'https://power.example.test/bill'))
+  assert.deepEqual([bill.withheld, bill.options.map(o => o.value)], [[{ label: '청구 월', role: 'combobox' }], ['[B1] 확인', '[L1] 이용 안내']])
+  assert.equal(buildReflexCandidates({ url: 'https://x.example.test/', interactiveElements: Array.from({ length: 6 }, (_, i) => ({ ref: `b${i}`, role: 'button', label: `삭제 ${i}`, tag: 'button' })) }).withheld.length, 3, 'at most three are named')
+})
+
+test('real replay (c24 form page): scroll_more 0.91, the one person-target undecided (0.49): the task hands over as human_step naming the controls, nothing acted on', async () => {
+  const { result, sent, acts } = await step(() => base(choice('scroll_more')))
+  assert.deepEqual([result.outcome, result.reason, result.controls, acts], ['escalated', 'human_step', ['휴대폰 본인확인', '수수료 결제에 동의합니다', '신청하기'], []])
+  assert.equal(sent.length, 2, 'the step request and the existing person-target follow-up: no new question')
+  assert.equal(result.steps.at(-1).rule, 'stuck_person_controls')
+})
+
+test('the same hand-over for a decided blocked; an undecided step is not touched; with no withheld control nothing changes', async () => {
+  const blocked = await step(() => base(choice('blocked', 0.9)))
+  assert.deepEqual([blocked.result.outcome, blocked.result.reason, blocked.result.controls, blocked.acts], ['escalated', 'human_step', ['휴대폰 본인확인', '수수료 결제에 동의합니다', '신청하기'], []])
+  const unsure = await step(() => base(choice('scroll_more', 0.56)))
+  assert.deepEqual([unsure.result.outcome, unsure.result.reason], ['escalated', 'uncertain'], 'undecided stays as it was')
+  const links = snap({ text: FORM.text, elements: FORM.elements.filter(e => e.role === 'link') }, FORM_SNAP.url)
+  const plain = await step(() => base(choice('blocked', 0.9)), links)
+  assert.deepEqual([plain.result.outcome, plain.result.reason, plain.result.controls], ['escalated', 'blocked', undefined], 'nothing withheld: the old outcome')
+  const scrolled = await step(() => base(choice('scroll_more')), links)
+  assert.ok(scrolled.acts.includes('egdesk_browser_scroll'), 'nothing withheld: scroll_more still scrolls')
+})
+
+test('scroll_more is still scrolled when the page reports content below; at the bottom, or without scroll facts, the page is the person\'s', async () => {
+  const below = await step(() => base(choice('scroll_more')), { ...FORM_SNAP, scroll: { x: 0, y: 0, maxY: 1800 } })
+  assert.ok(below.acts.includes('egdesk_browser_scroll') && below.result.controls === undefined, 'content below: scroll')
+  const bottom = await step(() => base(choice('scroll_more')), { ...FORM_SNAP, scroll: { x: 0, y: 1800, maxY: 1800 } })
+  assert.deepEqual([bottom.result.reason, bottom.acts], ['human_step', []])
+  const fits = await step(() => base(choice('scroll_more')), { ...FORM_SNAP, scroll: { x: 0, y: 0, maxY: 8 } })
+  assert.deepEqual([fits.result.reason, fits.acts], ['human_step', []], 'a few pixels is not more content')
+  assert.deepEqual([contentBelow(FORM_SNAP), contentBelow({ scroll: { y: 0, maxY: 2000 } }), contentBelow({ scroll: { y: 1990, maxY: 2000 } })], [false, true, false])
+})
+
+test('a forward option still proceeds; a sensitive or error page state still comes first; a decided person target keeps its own outcome', async () => {
+  const go = await step(() => base(choice('[L1] 발급 수수료 안내', 0.95)))
+  assert.deepEqual([go.result.outcome, go.acts.includes('egdesk_browser_navigate')], ['max_steps', true], 'a decided link is taken even though controls are withheld')
+  const sensitive = await step(() => base(choice('scroll_more'), pageStateAnswers('sensitive_flow', 0.95)))
+  assert.deepEqual([sensitive.result.outcome, sensitive.result.pageState, sensitive.result.controls], ['handoff', 'sensitive_flow', undefined])
+  const err = await step(() => base(choice('scroll_more'), pageStateAnswers('error_page', 0.95)))
+  assert.deepEqual([err.result.outcome, err.result.reason, err.result.controls], ['escalated', 'error_page', undefined], 'an error page is reported as one, not as the person\'s step')
+  const target = await step(() => base(choice('scroll_more'), { person_target_0: P(0.93) }))
+  assert.deepEqual([target.result.reason, target.result.target, target.result.controls], ['human_step', '수수료 결제에 동의합니다', undefined])
+})
+
+test('statement page: 결제하기 is named when the one link left does not move toward the goal', async () => {
+  const statement = FAMILY_PAGES.statement['/card/result']
+  const page = { text: statement.text, elements: statement.elements.filter(e => e.ref !== 'st_dl') }
+  const { result } = await step(() => base(choice('blocked', 0.9)), snap(page, 'https://bank.example.test/card/result'), '이번 달 카드 명세서 내려받아줘')
+  assert.deepEqual([result.reason, result.controls], ['human_step', ['결제하기']])
+})
+
+test('the task note names them: code human_step with the control labels as candidates (at most three), nothing acted on', async () => {
+  const run = async result => {
+    const provider = { directEntryEnabled: () => true, reflexScope: () => ({ client: { decide: async () => ({ answers: {} }) }, isDecisionCurrent: () => true, callTool: async () => ({ snapshot: { text: [] } }) }), runDirectTask: async () => result }
+    const entry = createDirectBrowserEntry({ provider, store: createBrowserTaskStore(), cardTextInEntry: () => false })
+    const out = await entry.handle({ run: { runId: 'r', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm', message: '주민등록등본 발급 신청해줘', hosts: { card: 'minwon.example.test' }, titles: { card: '증명서 발급 | 온민원' },
+      entryAnswers: { browser_entry: { type: 'predicate', probability: 0.9 }, browser_entry_card_0: { type: 'predicate', probability: 0.95 }, codeCard: null } })
+    return JSON.parse(out.note).egdesk_browser_task
+  }
+  const note = await run({ outcome: 'escalated', reason: 'human_step', withheld: 3, controls: ['휴대폰 본인확인', '수수료 결제에 동의합니다', '신청하기', '넷째'], steps: [{ url: 'https://minwon.example.test/issue/resident', actions: [], excluded: { gated: 2, unsupported: 1 } }], decisions: 1 })
+  assert.deepEqual([note.status, note.code, note.candidates], ['cannot_proceed', 'human_step', ['휴대폰 본인확인', '수수료 결제에 동의합니다', '신청하기']])
+})

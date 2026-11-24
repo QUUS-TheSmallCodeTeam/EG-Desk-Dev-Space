@@ -19,7 +19,8 @@ test('both plans carry only pre-registered check ids, run the phases the pre-reg
   const rerun = loadLivePlan(FAMILY_PLAN_FILES['holdout-rerun']), fresh = loadLivePlan(FAMILY_PLAN_FILES.holdout2)
   assert.deepEqual(rerun.phases.map(p => p.id), ['rr-ub-base', 'rr-ig-list'])
   assert.deepEqual(fresh.phases.map(p => p.id), ['hc-link', 'hc-covered', 'ms-info'], 'ms-nav and hc-tab dropped, in the pre-registered order')
-  assert.deepEqual(rerun.phases.map(p => p.maxSteps), [2, 2])
+  assert.deepEqual(rerun.phases.map(p => p.maxSteps), [1, 2], 'rr-ub-base cut to one step (the pre-registered cut, c26 at the owner\'s request)')
+  assert.ok(!rerun.checks.some(c => c.id === 'rr-ub-this-month'), 'the second navigation is not run, so its check is not in the plan')
   for (const plan of [rerun, fresh]) {
     for (const c of plan.checks) assert.ok(PREREG.includes(`\`${c.id}\``), `${c.id} is pre-registered`)
     assert.ok(plan.tokenCeiling <= 8000)
@@ -35,7 +36,7 @@ test('both plans carry only pre-registered check ids, run the phases the pre-reg
 
 test('all seven pre-registered phases, stand-in: every code-determined prediction holds, and the journeys the stand-in plays are reachable', async () => {
   const base = loadLivePlan(FAMILY_PLAN_FILES.holdout2)
-  const ids = Object.keys(holdout2Checks({ phaseOf: () => null }))
+  const ids = Object.keys(holdout2Checks({ phaseOf: () => null })).filter(id => !id.startsWith('sk-')) // the c26 stuck plan has its own test below
   // the runner's own hard limits (14 requests, 12k tokens) hold here too: the seven phases run as three journeys
   const groups = [['rr-ub-base', 'rr-ig-list'], ['hc-link', 'hc-tab'], ['hc-covered', 'ms-info', 'ms-nav']]
   const outs = []
@@ -65,4 +66,20 @@ test('the membership and hospital pages: the answer text is on the pages the pre
   assert.ok(HOLDOUT2_PAGES.membership['/account/membership'].text.includes('다음 결제일: 2026-12-14'))
   assert.ok(HOLDOUT2_PAGES.hospital['/my/appointments'].text.some(line => line.includes('2026-12-03 10:30')))
   assert.ok(HOLDOUT2_PAGES.hospital['/my'].elements.every(e => !e.href || e.href.startsWith('https://carehosp.example.test/')))
+})
+
+test('c26 stuck plan: the c24 form page and the settings error page send the request bytes the real runs sent, so the real answers turn into a hand-over naming the controls (and the error page stays an error page); it fits 6k', async () => {
+  const plan = loadLivePlan(FAMILY_PLAN_FILES.stuck)
+  assert.ok(plan.tokenCeiling <= 6000)
+  const est = await estimateLive({ plan })
+  assert.ok(est.estInputTokens <= 6000 && est.stoppedBecause === null, `${est.estInputTokens} ${est.stoppedBecause}`)
+  assert.deepEqual([est.scorecard.pass, est.scorecard.hardFailures, est.scorecard.absolute, est.scorecard.softMisses], [true, [], [], []])
+  const seen = []
+  const out = await runLive({ key: KEY, send: true, fetchImpl: standIn(plan.set, seen), plan })
+  // sha256 of the real requests: c24 ig-form (entry, step, person-target follow-up) and c28/c29 settings-error-v2 (entry, wall follow-up, step)
+  assert.deepEqual(out.requests.map(r => r.sha256.slice(0, 8)), ['22478e6b', '854910d2', '784e4b64', '6c01471c', 'fe1d1885', '18706a5e'])
+  const phase = id => out.phases.find(p => p.id === id)
+  assert.deepEqual([phase('sk-form').firstNote.code, phase('sk-form').firstNote.candidates, phase('sk-form').acts.length], ['human_step', ['휴대폰 본인확인', '수수료 결제에 동의합니다', '신청하기'], 0])
+  assert.deepEqual([phase('sk-error').firstNote.code, phase('sk-error').acts.length], ['error_page', 0])
+  for (const body of seen) assert.equal(lintGroupedRequest({ input: body.input, questions: body.questions }).ok, true)
 })
