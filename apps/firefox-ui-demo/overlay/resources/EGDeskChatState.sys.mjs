@@ -1127,6 +1127,7 @@ export function reduceChatEvent(state, event, engineIds = [DEFAULT_CHAT_ENGINE_I
     if (typeof event.localMessageId === 'string' && event.localMessageId && !message.localMessageId) message.localMessageId = event.localMessageId;
     if (event.event === 'message.started' && !message.content && typeof details.text === 'string') message.content = details.text;
     if (details.phase) message.phase = details.phase;
+    if (details.presentation === 'notice') message.presentation = 'notice';
     if (event.event === 'message.delta' && message.completionConfirmed !== true) {
       message.content += details.delta || '';
       message.status = 'streaming';
@@ -3586,6 +3587,16 @@ const AWAIT_CONDITION_TEXT = [['task', ['앞 단계 완료']], ['approval', ['�
   ['file', ['파일 도착', '파일 대기 건너뜀']], ['terminalExit', ['터미널 종료', '터미널 대기 건너뜀']], ['userAction', ['확인됨']]];
 const xmlText = value => String(value).replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
   .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+
+/**
+ * A completed line the system wrote itself (message.presentation === 'notice'), drawn as one quiet system row instead of an
+ * Agent bubble; null for every other message. The field is the only switch: without it the same text stays an Agent bubble.
+ */
+export function systemNoticeMessageView(message) {
+  if (message?.role !== 'assistant' || message.presentation !== 'notice' || message.status === 'streaming') return null;
+  const line = (typeof message.content === 'string' && message.content ? message.content : typeof message.text === 'string' ? message.text : '').trim();
+  return line ? { line } : null;
+}
 
 /** The system line for a plan step resumed in place, or null for any other message. */
 export function awaitResumeMessageView(message) {

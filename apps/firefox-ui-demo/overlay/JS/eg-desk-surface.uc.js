@@ -14250,7 +14250,7 @@
             }
           };
           // A plan step resumed in place is a system line; it never groups with 대표님's bubbles.
-          const groupRole = (message) => (message && ChatState.awaitResumeMessageView(message) ? 'system' : message?.role);
+          const groupRole = (message) => (message && (ChatState.awaitResumeMessageView(message) || ChatState.systemNoticeMessageView(message)) ? 'system' : message?.role);
           // BRW-13: 대표님 took a Browser Card back from this room's Agent. One quiet line, in time order.
           const controlNotices = ChatState.browserUserControlNoticesFor(codex.browserUserControlNotices, ChatState.clientThreadBinding(activeThread));
           let controlNoticeIndex = 0;
@@ -14268,7 +14268,7 @@
           const lastAnswerOfRun = new Map();
           for (const message of activeThread.messages) {
             const key = displayKey(message);
-            if (key && message.role === 'assistant' && !(message.status === 'streaming' && !message.content)) lastAnswerOfRun.set(key, message.id);
+            if (key && message.role === 'assistant' && !(message.status === 'streaming' && !message.content) && !ChatState.systemNoticeMessageView(message)) lastAnswerOfRun.set(key, message.id);
           }
           // AGENT-05: every busy run of this room gets its own bubble, so a Board
           // with several Agents at work shows each of them. The current run keeps
@@ -14327,6 +14327,16 @@
                 data: { testid: 'chat-await-resume', messageId: message.id || '', runId: message.runId || '' },
               }, deskIcon('check', 'egd-codex-await-resume-mark'),
               el('span', { class: 'egd-codex-await-resume-text' }, resumed.line),
+              message.createdAt ? el('span', { class: 'egd-codex-message-time' }, formatMessageTime(message.createdAt)) : null));
+              return;
+            }
+            // A line the system wrote itself, when marked so (message.presentation === 'notice'): the same quiet row, no face, no bubble.
+            const systemNotice = ChatState.systemNoticeMessageView(message);
+            if (systemNotice) {
+              messages.appendChild(el('div', {
+                class: 'egd-codex-await-resume egd-codex-system-notice', role: 'note',
+                data: { testid: 'chat-system-notice', messageId: message.id || '', runId: message.runId || '' },
+              }, el('span', { class: 'egd-codex-await-resume-text' }, systemNotice.line),
               message.createdAt ? el('span', { class: 'egd-codex-message-time' }, formatMessageTime(message.createdAt)) : null));
               return;
             }

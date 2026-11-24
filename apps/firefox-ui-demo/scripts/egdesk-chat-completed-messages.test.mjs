@@ -21,6 +21,7 @@ import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 import { CodexChatRuntime } from '../helper/codex-chat-runtime.mjs'
 import { createChatHttpHandler } from '../helper/codex-bridge-http.mjs'
 import { openChatStore } from '../helper/egdesk-chat-store.mjs'
+import { FLOW_COPY, FLOW_LIMITS } from '../helper/egdesk-conversation-flow.mjs'
 
 const surface = fs.readFileSync(new URL('../overlay/JS/eg-desk-surface.uc.js', import.meta.url), 'utf8')
 function section(from, to) {
@@ -41,8 +42,10 @@ function judge(request) {
   const answers = {}
   for (const q of request.questions) {
     if (q.name === 'intermediate_message') {
-      const values = q.choices.map(c => c.value)
-      const pick = values.includes('ask_missing') ? 'ask_missing' : values.includes('explain_wait') ? 'explain_wait' : 'none'
+      const values = q.choices.map(c => c.value), facts = String(request.input?.[1]?.content ?? '')
+      const num = name => Number(new RegExp(`${name}: (\\d+)`).exec(facts)?.[1] ?? 0)
+      const pick = values.includes('stalled') ? 'stalled' : values.includes('ask_missing') ? 'ask_missing'
+        : values.includes('explain_wait') && num('tool_steps_done') + num('tool_steps_running') > 0 ? 'explain_wait' : 'none'
       answers[q.name] = { type: 'choice', choice: pick, confidence: 0.95, probabilities: [{ value: pick, probability: 0.96 }, { value: values.find(v => v !== pick), probability: 0.02 }] }
     } else if (q.name === 'answer_type' || q.name === 'time_intent') answers[q.name] = { type: 'choice', choice: q.choices[0].value, confidence: 0.9, probabilities: [{ value: q.choices[0].value, probability: 0.9 }] }
     else if (/^claim_/.test(q.name)) answers[q.name] = { type: 'choice', choice: 'supported', confidence: 0.95, probabilities: [{ value: 'supported', probability: 0.96 }, { value: 'insufficient', probability: 0.02 }] }
@@ -52,15 +55,15 @@ function judge(request) {
 }
 
 // ---- bridge side: real runtime + store + HTTP handlers over a scripted engine, virtual clock ---------------------------------
-function bridgeWorld(t, { held = true, flow = true, writer = {} } = {}) {
+function bridgeWorld(t, { held = true, flow = true, writer = {}, forkHangs = false } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'egd-l2c6-')); chmodSync(dir, 0o700)
   const store = openChatStore({ dataDir: dir, ownerScope: 'synthetic-l2c6' })
   t.after(() => { store.close(); rmSync(dir, { recursive: true, force: true }) })
   let clock = 1_000_000, timerId = 0, threads = 0, forks = 0, turns = 0
   const timers = [], events = [], native = [], steers = []
-  const state = { usedReply: null, steerFails: false }
+  const state = { usedReply: null, steerFails: false, decides: 0 }
   const chat = new CodexChatRuntime({
-    store, requireStore: true, getOwnerKey: () => 'test-account', now: () => clock,
+    store, requireStore: true, getOwnerKey: () => 'test-account', now: () => clock, monotonicNow: () => clock, // the heartbeat's counter follows the virtual clock
     setTimer: (fn, ms) => { const timer = { id: ++timerId, fn, at: clock + ms }; timers.push(timer); return timer },
     clearTimer: timer => { const i = timers.indexOf(timer); if (i >= 0) timers.splice(i, 1) },
     getBoardPeerContract: () => 'c'.repeat(64),
@@ -71,7 +74,7 @@ function bridgeWorld(t, { held = true, flow = true, writer = {} } = {}) {
       if (method === 'thread/start') return { thread: { id: `native-${++threads}` } }
       if (method === 'thread/resume') return { thread: { id: params.threadId, turns: [] } }
       if (method === 'thread/unsubscribe') return { status: 'unsubscribed' }
-      if (method === 'thread/fork') return { thread: { id: `fork-${++forks}`, forkedFromId: params.threadId } }
+      if (method === 'thread/fork') { if (forkHangs) return new Promise(() => {}); return { thread: { id: `fork-${++forks}`, forkedFromId: params.threadId } } }
       if (method === 'turn/steer') { if (state.steerFails) throw new Error('steer refused'); steers.push(params); state.usedReply = params.input[0].text; return { turnId: params.expectedTurnId } }
       if (method === 'turn/start' && String(params.threadId).startsWith('fork-')) {
         const prompt = params.input[0].text
@@ -88,13 +91,21 @@ function bridgeWorld(t, { held = true, flow = true, writer = {} } = {}) {
       if (method === 'turn/interrupt') return {}
       assert.fail(`Unexpected native call: ${method}`)
     },
-    decisionContext: { mode: () => 'on', configured: () => true, client: { model: 'mock', decide: async request => judge(request) }, budgetMs: 800, collect: async () => [],
+    decisionContext: { mode: () => 'on', configured: () => true, client: { model: 'mock', decide: async request => { state.decides++; return judge(request) } }, budgetMs: 800, collect: async () => [],
       draftCheck: held ? { mode: () => 'on' } : undefined, conversationFlow: flow ? { mode: () => 'on' } : undefined },
   })
   chat.setConnection(true)
   const handler = createChatHttpHandler(chat, async () => {})
   const n = (m, p) => chat.handleNotification({ method: m, params: p })
-  const settleAll = async () => { for (let i = 0; i < 12; i++) { await chat.flowIdle(); await chat.draftCheckIdle(); await new Promise(r => setTimeout(r, 3)) } }
+  // Settle without waiting on jobs that wait for virtual time (a hung writer fork waits for its virtual deadline).
+  const settleAll = async () => {
+    let quiet = 0, last = -1
+    for (let i = 0; i < 80 && quiet < 5; i++) {
+      await new Promise(r => setTimeout(r, 2))
+      const mark = native.length + events.length + state.decides
+      quiet = mark === last ? quiet + 1 : 0; last = mark
+    }
+  }
   const http = async (method, url, body) => {
     const req = Object.assign(Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]), { method, url, socket: { remoteAddress: '127.0.0.1' },
       headers: { host: '127.0.0.1:39218', origin: 'chrome://browser', ...(body === undefined ? {} : { 'content-type': 'application/json' }) } })
@@ -437,4 +448,101 @@ test('a reconnect snapshot carries the open question and keeps the reply the per
   await readState()
   assert.deepEqual(ui.bubbles().map(([role, status, text]) => [role, status, text]), [['user', 'complete', PROMPT], ['assistant', 'complete', ASK], ['user', 'complete', REPLY]])
   assert.equal(ui.state.codex.replyOpen, false); assert.equal(w.steers.length, 1)
+})
+
+// ---- heartbeat path (int/c11): the question closes when the flow pauses; the system-written stalled line -----------------------
+test('an unanswered question closes when the final answer is being prepared (flow pause): the composer returns to the busy rule', async t => {
+  const w = bridgeWorld(t, { writer: { ask: ASK } })
+  const ui = screen(w)
+  await ui.firstPrompt()
+  await w.advance(4000); await w.note('n1', '어느 환경에 배포할까요?'); await w.advance(2000); ui.pump()
+  assert.equal(ui.state.codex.replyOpen, true)
+  await w.advance(3000)
+  await w.finalStreamed(FINAL); ui.pump()
+  assert.equal(ui.state.codex.replyOpen, true, 'the answer is only held: the question is still open while the turn runs')
+  await w.endTurn(); ui.pump()
+  const names = ui.frames.map(frame => frame.event)
+  assert.ok(names.indexOf('reply.closed') > names.indexOf('reply.opened'))
+  assert.ok(names.indexOf('reply.closed') < names.lastIndexOf('message.completed'), 'closed before the final answer is posted')
+  assert.equal(ui.frames[names.indexOf('reply.closed')].replyOpen, false)
+  assert.equal(ui.frames[names.indexOf('reply.closed')].isSending, true, 'busy rule while the answer is checked')
+  assert.equal(w.steers.length, 0)
+  assert.deepEqual(ui.bubbles().map(([role, , text]) => [role, text]), [['user', PROMPT], ['assistant', ASK], ['assistant', FINAL]])
+  assert.equal(w.chat.snapshot().runs[0].replyOpen, null, 'the stored run does not keep an open question')
+})
+
+// The production render block for a system notice row, run on one message: returns the drawn row or 'agent-bubble' (falls through).
+function drawRow(message) {
+  const drawn = []
+  const el = (tag, props = {}, ...children) => ({ tag, props, children: children.filter(child => child != null) })
+  const out = vm.runInNewContext(`(function (message) {\n${section('            const systemNotice = ChatState.systemNoticeMessageView(message);', '            const previous = activeThread.messages[index - 1] || null;')}\n return 'agent-bubble' })`,
+    { ChatState, el, messages: { appendChild: node => drawn.push(node) }, formatMessageTime: () => '오후 3:00' })(message)
+  return out === 'agent-bubble' ? out : drawn[0]
+}
+
+async function stalledRun(t, { asNotice }) {
+  const w = bridgeWorld(t, { forkHangs: true })
+  if (asNotice) {
+    // The one-line switch, applied from the test: the runtime's own stalled fallback item carries presentation 'notice'.
+    const apply = w.chat.applyItem.bind(w.chat)
+    w.chat.applyItem = (run, item, ...rest) => apply(run, String(item?.id).startsWith('egdesk-flow:') && item.text === FLOW_COPY.stalled ? { ...item, presentation: 'notice' } : item, ...rest)
+  }
+  const ui = screen(w)
+  await ui.firstPrompt('상태 알려 주세요')
+  await w.advance(1000); await w.note('n1', '자료를 확인하는 중입니다.')
+  await w.advance(24000)                                  // 24 s without an engine event: the stall is offered at this beat
+  await w.advance(FLOW_LIMITS.stalledWriterMs); ui.pump() // the engine cannot write either: the fixed line is posted
+  return { w, ui }
+}
+
+test('stalled fallback line, default rendering (today): one whole Agent bubble, never doubled', async t => {
+  const { w, ui } = await stalledRun(t, { asNotice: false })
+  for (const frame of ui.frames) for (const text of assistantTexts(frame)) assert.equal(text, FLOW_COPY.stalled, `${frame.event}: drew ${JSON.stringify(text)}`)
+  const row = ui.thread().messages.find(m => m.content === FLOW_COPY.stalled)
+  assert.equal(row.role, 'assistant'); assert.equal(row.status, 'complete'); assert.equal(row.presentation, undefined)
+  assert.equal(ChatState.systemNoticeMessageView(row), null)
+  assert.equal(drawRow(row), 'agent-bubble', 'falls through to the ordinary Agent bubble')
+  assert.equal(ui.state.codex.replyOpen, false, 'the fallback line is not a question')
+  await w.advance(2000); await w.finalStreamed(FINAL); await w.endTurn(); ui.pump()
+  assert.deepEqual(ui.bubbles().map(([role, , text]) => [role, text]), [['user', '상태 알려 주세요'], ['assistant', FLOW_COPY.stalled], ['assistant', FINAL]])
+})
+
+test('stalled fallback line, notice rendering (prepared option, not the default): a system row, live and after restore', async t => {
+  const { w, ui } = await stalledRun(t, { asNotice: true })
+  const row = ui.thread().messages.find(m => m.content === FLOW_COPY.stalled)
+  assert.equal(row.presentation, 'notice'); assert.equal(row.role, 'assistant')
+  assert.deepEqual(ChatState.systemNoticeMessageView(row), { line: FLOW_COPY.stalled })
+  const drawn = drawRow(row)
+  assert.equal(drawn.props.role, 'note'); assert.equal(drawn.props.data.testid, 'chat-system-notice'); assert.equal(drawn.props.class, 'egd-codex-await-resume egd-codex-system-notice')
+  assert.deepEqual(drawn.children.map(child => [child.props.class, child.children[0]]), [['egd-codex-await-resume-text', FLOW_COPY.stalled], ['egd-codex-message-time', '오후 3:00']])
+  for (const frame of ui.frames) for (const text of assistantTexts(frame)) assert.equal(text, FLOW_COPY.stalled, `${frame.event}: drew ${JSON.stringify(text)}`)
+  await w.advance(2000); await w.finalStreamed(FINAL); await w.endTurn(); ui.pump()
+  const final = ui.thread().messages.find(m => m.content === FINAL)
+  assert.equal(drawRow(final), 'agent-bubble', 'the Agent\'s own answer stays an Agent bubble')
+  // Restore from the local store: the same line is still a system row.
+  const restored = screen(w)
+  const summary = (await w.http('GET', '/chat/history/threads?limit=50')).data.threads.find(item => item.clientThreadId === DM)
+  const page = (await w.http('GET', `/chat/history?clientThreadId=${DM}&afterSeq=0&limit=100`)).data
+  const normalized = ChatState.normalizeLocalHistoryPage({ ...page, thread: { ...summary, ...(page.thread || {}) } }, DM)
+  restored.mounted.updateThreadById(DM, current => ChatState.hydrateLocalChatThread(current, normalized, { liveFenceRevision: 0 }))
+  assert.deepEqual(restored.bubbles().map(([role, , text]) => [role, text]), [['user', '상태 알려 주세요'], ['assistant', FLOW_COPY.stalled], ['assistant', FINAL]])
+  assert.equal(drawRow(restored.thread().messages[1]).props.data.testid, 'chat-system-notice')
+  assert.equal(drawRow(restored.thread().messages[2]), 'agent-bubble')
+})
+
+test('the notice field is the runtime\'s own: an engine item cannot mark itself, and unfinished or other-role rows are never notices', async t => {
+  const w = bridgeWorld(t, { held: false, flow: false })
+  const ui = screen(w)
+  await ui.firstPrompt('상태 알려 주세요')
+  await w.notify('item/completed', { ...w.timing, item: { id: 'ans', type: 'agentMessage', phase: 'final_answer', text: FINAL, presentation: 'notice' } })
+  await w.endTurn(); ui.pump()
+  const row = ui.thread().messages.find(m => m.content === FINAL)
+  assert.equal(row.presentation, undefined); assert.equal(drawRow(row), 'agent-bubble')
+  assert.equal(ChatState.systemNoticeMessageView({ role: 'user', presentation: 'notice', content: 'x', status: 'complete' }), null)
+  assert.equal(ChatState.systemNoticeMessageView({ role: 'assistant', presentation: 'notice', content: 'x', status: 'streaming' }), null)
+  assert.equal(ChatState.systemNoticeMessageView({ role: 'assistant', presentation: 'notice', content: '  ', status: 'complete' }), null)
+  assert.equal(ChatState.systemNoticeMessageView({ role: 'assistant', presentation: 'other', content: 'x', status: 'complete' }), null)
+  // The row never groups with, or counts as, an Agent answer.
+  assert.match(surface, /const groupRole = \(message\) => \(message && \(ChatState\.awaitResumeMessageView\(message\) \|\| ChatState\.systemNoticeMessageView\(message\)\) \? 'system' : message\?\.role\);/)
+  assert.match(surface, /&& !ChatState\.systemNoticeMessageView\(message\)\) lastAnswerOfRun\.set\(key, message\.id\);/)
 })

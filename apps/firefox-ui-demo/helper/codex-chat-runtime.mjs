@@ -5946,6 +5946,9 @@ export class CodexChatRuntime {
         createdAt: existing?.createdAt || this.now(),
         ...(assistant && item.text.length > MAX_TEXT ? { projectionTruncated: true } : {}),
         ...(assistant ? { completionConfirmed: item.completionConfirmed === true } : {}),
+        // Rendering option for a line the system wrote itself (not the Agent): shown as a system notice row when set. Only the
+        // runtime's own flow items may carry it; an engine item cannot. Nothing sets it today (see the report: one line switches it).
+        ...(assistant && item.presentation === 'notice' && String(item.id).startsWith('egdesk-flow:') ? { presentation: 'notice' } : {}),
       }
       if (assistant && !completed) {
         const key = `${run.answerId}/${item.id}`
