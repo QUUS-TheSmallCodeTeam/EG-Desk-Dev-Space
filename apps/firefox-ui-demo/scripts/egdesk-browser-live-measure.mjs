@@ -24,7 +24,7 @@ console.log(JSON.stringify({ plan: plan.set, planSha256: plan.sha256, note: 'siz
   estimatedRequests: estimate.requests, perPhase: estimate.perPhase, estimatedInputTokens: estimate.estInputTokens, requestLimit: plan.maxRequests, tokenCeiling: plan.tokenCeiling,
   hardLimits: HARD_LIMITS, standInPasses: estimate.scorecard.pass }))
 const outcome = await runLive({ key: flag('--send') ? process.env.OPENAI_API_KEY ?? null : null, send: flag('--send'), plan,
-  ...(flag('--send') ? { fetchImpl: stampingFetch(globalThis.fetch, { file: sendStampPath(process.env), runner: `browser-live-measure ${plan.set}` }) } : {}) })
+  ...(flag('--send') ? { fetchImpl: stampingFetch(globalThis.fetch, { file: sendStampPath(), runner: `browser-live-measure ${plan.set}` }) } : {}) })
 console.log(JSON.stringify({ sent: outcome.sent, stoppedBecause: outcome.stoppedBecause, inputTokens: outcome.usage.inputTokens, limits: outcome.limits }))
 if (outcome.scorecard) {
   console.log(JSON.stringify({ pass: outcome.scorecard.pass, hardFailures: outcome.scorecard.hardFailures, absolute: outcome.scorecard.absolute, softMisses: outcome.scorecard.softMisses,

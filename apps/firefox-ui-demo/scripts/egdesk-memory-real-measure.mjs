@@ -23,7 +23,7 @@ if (planFile) {
 console.table(planTable(plan).map(({ run, name, stage, questions, bytes, estInputTokens, sha256 }) => ({ run, name, stage, questions, bytes, estInputTokens, sha: sha256.slice(0, 12) })))
 const maxTokens = value('--max-tokens') ? Number(value('--max-tokens')) : null
 const key = flag('--send') ? process.env.OPENAI_API_KEY ?? null : null
-const outcome = await runMeasurement({ plan, key, send: flag('--send'), ...(flag('--send') ? { fetchImpl: stampingFetch(globalThis.fetch, { file: sendStampPath(process.env), runner: 'memory-real-measure' }) } : {}), maxEstimatedTokens: maxTokens, ...(remeasure ? { score: scoreRemeasure } : firstScan ? { score: scoreFirstScan } : utterances ? { score: scoreUtteranceLabels } : {}) })
+const outcome = await runMeasurement({ plan, key, send: flag('--send'), ...(flag('--send') ? { fetchImpl: stampingFetch(globalThis.fetch, { file: sendStampPath(), runner: 'memory-real-measure' }) } : {}), maxEstimatedTokens: maxTokens, ...(remeasure ? { score: scoreRemeasure } : firstScan ? { score: scoreFirstScan } : utterances ? { score: scoreUtteranceLabels } : {}) })
 console.log(JSON.stringify({ sent: outcome.sent, stoppedBecause: outcome.stoppedBecause, totals: outcome.totals, ceiling: outcome.ceiling }))
 if (outcome.scorecard) {
   const out = value('--out')

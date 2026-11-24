@@ -141,3 +141,18 @@ test('--stamp-now --at: records a known earlier send, never a future one, never 
     io = capture(); assert.equal(await main(['--status', '--at', '2026-11-25T00:40:00+09:00'], { env, now, ...io }), 2)
   } finally { rmSync(h, { recursive: true, force: true }) }
 })
+
+test('every measurement script that reads --send (outside comments) writes the shared stamp, or delegates to the generic runner that does', async () => {
+  const { readdirSync } = await import('node:fs')
+  const dir = path.dirname(new URL(import.meta.url).pathname)
+  const senders = readdirSync(dir).filter(f => f.endsWith('.mjs') && !f.endsWith('.test.mjs') && /measure|warmup-run/.test(f))
+    .filter(f => /['"`]--send['"`]/.test(readFileSync(path.join(dir, f), 'utf8').replace(/\/\/.*$/gm, '')))
+  assert.ok(senders.length >= 6, `found ${senders.join(', ')}`)
+  for (const f of senders) {
+    const code = readFileSync(path.join(dir, f), 'utf8')
+    const stamps = /egdesk-decision-send-stamp\.mjs/.test(code), delegates = /main\(process\.argv\.slice\(2\)/.test(code) && /egdesk-decision-real-runner\.mjs/.test(code)
+    assert.ok(stamps || delegates, `scripts/${f} reads --send but neither stamps nor delegates to the stamping runner`)
+  }
+  // the generic runner and the point runner themselves
+  assert.match(readFileSync(path.join(dir, '..', 'helper', 'egdesk-decision-real-runner.mjs'), 'utf8'), /stampingFetch\(network/)
+})
