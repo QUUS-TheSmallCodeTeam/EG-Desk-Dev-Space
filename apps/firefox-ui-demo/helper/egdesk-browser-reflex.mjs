@@ -145,6 +145,34 @@ function defaultAllowedUrl(href, snapshot) {
   return sameSiteNavigation(snapshot?.url, href)
 }
 
+// c20 (owner decision, c19 review): a button is pressed ONLY when code proves it is read-only navigation, the same risk class as following a
+// GET link: a GET form submission to the same site (its exact destination known), with no credential, payment, permission or consent field
+// on the form, or a plain button that only changes what this page shows (it controls a panel), and in either case not inside a sensitive
+// region (data-sensitive, or a region whose label is payment, permission or delete vocabulary). A POST or any other submission, and any
+// button without these facts (an older runtime), stays with the person (press_needs_expected_effect).
+// A region is sensitive by its label too (the action vocabulary names actions, not sections): payment, billing, permission, consent,
+// privacy, credential, security, sign-in. Fail-closed: a region label that merely mentions one of them withholds its buttons.
+const SENSITIVE_REGION = /결제|지불|청구|카드\s*정보|계좌|권한|동의|약관|개인\s*정보|비밀\s*번호|인증|보안|로그인|payment|billing|checkout|card\s*details|permission|consent|privacy|password|credential|security|sign[\s-]?in|log[\s-]?in/i
+const SAFE_GET_FIELDS = new Set(['hidden', 'text', 'search', 'select', 'select-one', 'select-multiple', 'radio', 'checkbox', 'number', 'date', 'month', 'week', 'range', 'submit', 'button', 'image', 'reset'])
+export function readOnlyPress(element, snapshot, { classify = classifyAction, isAllowedUrl = defaultAllowedUrl } = {}) {
+  const nav = element?.nav
+  if (!record(nav) || nav.sensitiveRegion === true) return null
+  if (typeof nav.regionLabel === 'string' && nav.regionLabel.trim() && (SENSITIVE_REGION.test(nav.regionLabel) || classify({ mode: 'activate', label: nav.regionLabel, role: 'region', url: snapshot?.url })?.category !== 'none')) return null
+  if (record(nav.form)) {
+    const form = nav.form
+    if (form.method !== 'get' || form.sensitive === true || !Array.isArray(form.fields) || !form.fields.every(kind => SAFE_GET_FIELDS.has(kind))) return null
+    if (!['submit', 'image'].includes(nav.type)) return null
+    if (!httpUrl(form.submitUrl) || !isAllowedUrl(form.submitUrl, snapshot)) return null
+    const words = hrefWords(form.submitUrl)
+    if (words && classify({ mode: 'activate', label: words, role: 'link', tag: 'a', url: snapshot?.url, href: true })?.category !== 'none') return null
+    return { kind: 'get_form', url: form.submitUrl }
+  }
+  if (nav.form === null && record(nav.controls) && typeof nav.controls.text === 'string' && nav.controls.text.trim() && (nav.type === 'button' || element.role === 'tab')) {
+    return { kind: 'view', text: compactText(nav.controls.text, 60) }
+  }
+  return null
+}
+
 function elementKind(element) {
   const role = String(element.role || '')
   if (role === 'link') return httpUrl(element.href) ? 'navigate' : 'press'
@@ -188,7 +216,9 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
     }
     if (!label) { excluded.unlabeled++; continue }
     counters.press++
-    entries.push({ label: `[B${counters.press}] ${label}`, description: `${element.role} on this page`, item: { kind, element } })
+    const readOnly = readOnlyPress(element, snapshot, { classify, isAllowedUrl })
+    entries.push({ label: `[B${counters.press}] ${label}`, description: readOnly?.kind === 'get_form' ? `${element.role} on this page; opens ${pathOf(readOnly.url)} (a read-only search)`
+      : readOnly?.kind === 'view' ? `${element.role} on this page; shows another part of this page` : `${element.role} on this page`, item: { kind, element, ...(readOnly ? { readOnly } : {}) } })
   }
   const kept = entries.slice(0, Math.max(0, maxOptions))
   excluded.overflow = entries.length - kept.length
@@ -225,6 +255,12 @@ export function reflexActionArgs(option, { cardId, observationId, snapshot, text
     return { tool: 'egdesk_browser_fill', args: { ...base, ref: element.ref, expectedTarget: expectedTargetOf(element), text,
       postcondition: { kind: 'target-value', value: text } } }
   }
+  // c20: a button code proved read-only is clicked with its exact expected effect; any other press stays with the person
+  const readOnly = option.item.readOnly
+  // A GET submission is the GET link it loads: it goes as that navigation (the runtime verifies a navigation across documents; a click that
+  // leaves its document cannot be confirmed by a readback and would leave the card uncertain)
+  if (readOnly?.kind === 'get_form') return { tool: 'egdesk_browser_navigate', args: { ...base, url: readOnly.url, postcondition: { kind: 'url', value: readOnly.url } } }
+  if (readOnly?.kind === 'view') return { tool: 'egdesk_browser_click', args: { ...base, ref: element.ref, expectedTarget: expectedTargetOf(element), postcondition: { kind: 'visible-text', value: readOnly.text } } }
   return { escalate: 'press_needs_expected_effect' }
 }
 
@@ -581,7 +617,8 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
     }
 
     switch (decision.kind) {
-      case 'done': return finish('done', { url: snapshot.url, observationId })
+      // c20: the visible text of the finished page, for the caller's code (bounded; the task locates the status next to its identifier)
+      case 'done': return finish('done', { url: snapshot.url, observationId, text: (Array.isArray(snapshot.text) ? snapshot.text : []).slice(0, 40).map(part => compactText(part, 180)) })
       case 'handoff': return finish('handoff', { pageState: decision.pageState, url: snapshot.url })
       // A blocked page names its state; "no listed element moves toward the goal" on an ordinary page is plain 'blocked'.
       case 'blocked': return finish('escalated', { reason: BLOCKED_STATES.has(decision.pageState) ? decision.pageState : 'blocked', ranked: decision.ranked })
@@ -620,9 +657,10 @@ export async function runBrowserReflex({ cardId, goal, values = {}, maxSteps = D
           continue
         }
         history.push(`opened ${option.value}`)
-        entry.opened = { option: option.value, to: action.args.url, ...(recorded && decision.next?.by === 'code' ? { recordedAsked: recorded.item.asked } : {}) } // for the caller's content-minimal task record
+        entry.opened = { option: option.value, to: action.args.url ?? action.url, ...(recorded && decision.next?.by === 'code' ? { recordedAsked: recorded.item.asked } : {}) } // for the caller's content-minimal task record
         if (signal?.aborted) return finish('aborted')
-        await act(entry, 'egdesk_browser_wait', { cardId, for: 'load', timeoutMs: 10000 })
+        // a view change loads nothing: wait for the page to settle instead of a load
+        await act(entry, 'egdesk_browser_wait', option.item.readOnly?.kind === 'view' ? { cardId, for: 'idle', timeoutMs: 5000 } : { cardId, for: 'load', timeoutMs: 10000 })
       }
     }
   }

@@ -11,6 +11,7 @@ import { outcomeCandidate } from './egdesk-browser-task-memory.mjs'
 import { triageTurn } from './egdesk-turn-memory.mjs'
 import { mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { PS_NAMES, pageStateAnswers, pageStateProbabilities, pageStateWire } from './egdesk-browser-page-state.fixture.mjs'
+import { entryAnswersOf, entryWire, isEntryQuestion } from './egdesk-browser-entry.fixture.mjs'
 const STEP = `decide:${['next_step', ...PS_NAMES, 'goal_met'].join('+')}`
 
 // L8/C11: the objective browser loop <-> chat round trip in the 'on' path of the REAL chat runtime under completed-messages-only
@@ -68,8 +69,9 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
       const stepQ = wire.questions.find(q => q.name === 'next_step') ?? (q0.choices ? q0 : { choices: [] }) // c16: a code-decided step asks no next_step
       const text = wire.input.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n\n')
       decisions.push({ q: q0.name, names, bytes: Buffer.byteLength(body), image: /input_image|image_url/.test(body), input: text }); timeline.push(`decide:${names.join('+')}`)
+      // c20: the entry predicates (the request, and one per card)
       const entryAnswer = q => { const msg = /(?:User message: |Message:\n)(.*)/.exec(text)?.[1] ?? ''
-        return choice('browser_entry', /세금계산서/.test(msg) ? starts(q.choices, '[C1]') : 'not_browser_task', 0.95) }
+        return entryWire([q], { web: /세금계산서/.test(msg) ? 0.95 : 0.05 })[0] }
       if (names.some(name => name.includes('__'))) { // one heartbeat request for every question proposed at this beat (provider__name)
         // L3 c15: the message judgment is asked as yes/no questions (message__ask / __pointer / __note / __stalled) and code derives the kind.
         // This mock keeps its old policy (a wait message when one is possible, else a stall notice) and reports the kinds the questions stand for.
@@ -88,10 +90,10 @@ function world(t, { start = `${O}/invoices`, held = true, flow = true, entry = {
         return { ok: true, text: async () => JSON.stringify({ answers }) }
       }
       if (names.includes('tn_courtesy')) { // a turn-start triage request, possibly carrying the entry question
-        const answers = wire.questions.map(q => (q.name === 'browser_entry' ? entryAnswer(q) : { name: q.name, type: 'predicate', probability: q.name === 'tn_need' ? 0.9 : 0.03 }))
+        const answers = wire.questions.map(q => (isEntryQuestion(q.name) ? entryAnswer(q) : { name: q.name, type: 'predicate', probability: q.name === 'tn_need' ? 0.9 : 0.03 }))
         return { ok: true, text: async () => JSON.stringify({ answers, usage: { input_tokens: 1 } }) }
       }
-      if (q0.name === 'browser_entry') return { ok: true, text: async () => JSON.stringify({ answers: [entryAnswer(q0)] }) }
+      if (q0.name === 'browser_entry') return { ok: true, text: async () => JSON.stringify({ answers: wire.questions.map(entryAnswer) }) }
       if (q0.name === 'task_resume') { const msg = /User message: (.*)/.exec(text)?.[1] ?? ''
         return { ok: true, text: async () => JSON.stringify({ answers: [choice('task_resume', /취소/.test(msg) ? 'cancel_task' : /점심/.test(msg) ? 'unrelated' : 'resume_task', 0.95)] }) } }
       const evidence = wire.input[1].content
@@ -255,7 +257,7 @@ test('R1 one live run: question (completed message) -> run.replyOpen -> in-run r
   assert.equal(w.decisions.filter(d => d.image).length, 0)
   // each objective phase ran before its native turn: the subjective model only ever worded a finished note
   const order = w.timeline.filter(x => /^(decide:|native:turn\/start)/.test(x))
-  assert.deepEqual(order, ['decide:browser_entry', STEP, 'native:turn/start', 'decide:task_resume',
+  assert.deepEqual(order, ['decide:browser_entry+browser_entry_card_0', STEP, 'native:turn/start', 'decide:task_resume',
     STEP, STEP, STEP, 'native:turn/start'])
   // no intermediate-message job started for a browser-task turn (its reply must reach the task, not an in-run steer)
   assert.equal(w.calls.some(c => c.method === 'thread/fork' || c.method === 'turn/steer' || c.method === 'turn/interrupt'), false, 'the reply is never steered into a native turn: it belongs to the task')
@@ -318,12 +320,12 @@ test('R4 held mode on, not a browser task: the ordinary turn of a Browser conver
 })
 
 // ---- cost: the entry decision riding on a turn-start triage request ----
-const rideHook = { entryAnswers: async ({ body, question, client }) => (await triageTurn({ message: body.message, client, extraQuestions: [question] })).extra ?? null }
+const rideHook = { entryAnswers: async ({ body, questions, client }) => (await triageTurn({ message: body.message, client, extraQuestions: questions })).extra ?? null }
 
 test('C1 ride-along: one turn-start request carries triage + the entry question; no separate entry request; the task runs the same', async t => {
   const alone = world(t); await alone.send(MSG)
   const ride = world(t, { entry: rideHook }); await ride.send(MSG)
-  assert.deepEqual(ride.decisions[0].names, ['tn_courtesy', 'tn_need', 'tn_record', 'browser_entry'])
+  assert.deepEqual(ride.decisions[0].names, ['tn_courtesy', 'tn_need', 'tn_record', 'browser_entry', 'browser_entry_card_0'], 'c20: the entry predicates ride along')
   assert.deepEqual(ride.counts(), { tn_courtesy: 1, next_step: 1 }, 'no standalone browser_entry request')
   assert.deepEqual(alone.counts(), { browser_entry: 1, next_step: 1 })
   assert.deepEqual([ride.note().status, ride.note().code], [alone.note().status, alone.note().code])
@@ -368,7 +370,7 @@ test('C4 ride-along answer that is unusable or refused by egress: the standalone
   assert.deepEqual(broken.counts(), { browser_entry: 1, next_step: 1 })
   const thrown = world(t, { entry: { entryAnswers: async () => { throw new Error('host failed') } } }); await thrown.send(MSG)
   assert.deepEqual(thrown.counts(), { browser_entry: 1, next_step: 1 })
-  const lowConfidence = world(t, { entry: { entryAnswers: async ({ question }) => ({ browser_entry: choice('browser_entry', question.choices[0].value, 0.4) }) } }); await lowConfidence.send(MSG)
+  const lowConfidence = world(t, { entry: { entryAnswers: async ({ questions }) => Object.fromEntries(questions.map(q => [q.name, { type: 'predicate', probability: 0.5 }])) } }); await lowConfidence.send(MSG)
   assert.deepEqual([lowConfidence.note(), lowConfidence.acts.length, lowConfidence.counts().browser_entry ?? 0], [null, 0, 0], 'an uncertain shared answer starts no task and is not asked again')
 })
 

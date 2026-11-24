@@ -61,7 +61,8 @@ export function outcomeCandidate({ taskId, goal, host, outcome, trail = [], reso
   for (const item of (Array.isArray(resolved) ? resolved : []).slice(0, MAX_RESOLVED)) {
     if (!record(item) || !ASKED.has(item.asked)) continue
     const chose = labelKey(item.chose), at = safePath(item.at || '')
-    if (chose && at) lines.push(`선택: ${chose} @ ${at} [${item.asked}]`)
+    const ids = (Array.isArray(item.ids) ? item.ids : []).filter(id => /^\d{8,20}$/.test(id)).slice(0, 3)
+    if (chose && at) lines.push(`선택: ${chose} @ ${at} [${item.asked}]${ids.length ? ` #${ids.join(',')}` : ''}`)
   }
   for (const step of (Array.isArray(trail) ? trail : []).slice(0, MAX_TRAIL)) {
     if (!record(step) || step.op !== 'open') continue
@@ -84,7 +85,7 @@ export function parseOutcomeText(text) {
   const resolved = [], trail = []
   for (const line of lines.slice(3, -1)) {
     let m
-    if ((m = /^선택: (.+) @ (\/\S*) \[(choice_needed|detail_needed)\]$/.exec(line))) resolved.push({ asked: m[3], chose: m[1], at: m[2] })
+    if ((m = /^선택: (.+) @ (\/\S*) \[(choice_needed|detail_needed)\](?: #(\d{8,20}(?:,\d{8,20}){0,2}))?$/.exec(line))) resolved.push({ asked: m[3], chose: m[1], at: m[2], ...(m[4] ? { ids: m[4].split(',') } : {}) })
     else if ((m = /^연 항목: (.+) \((\/\S*) -> (\/\S*)\)$/.exec(line))) trail.push({ op: 'open', label: m[1], from: m[2], to: m[3] })
     else return null
   }
@@ -171,11 +172,17 @@ const names = (text, option) => {
  *  'different' both carry long identifiers and share none (two registration numbers that differ are two businesses);
  *  'unknown'   at least one side has no long identifier; whether they are the same thing is a judgment, asked only when they share a word.
  */
-export function sameByCode(recorded, label) {
-  if (normLabel(recorded) === normLabel(labelKey(label))) return 'same'
-  const a = identifiersOf(recorded), b = identifiersOf(label)
+export function sameByCode(recorded, label, { recordedIds = [], labelIds = [] } = {}) {
+  // c20: identifiers from the chosen link's address count with the label's own; when both sides carry identifiers they decide, also
+  // over equal labels (two rows both labelled "배송 조회" are told apart by the order numbers in their addresses)
+  const a = [...new Set([...identifiersOf(recorded), ...recordedIds])], b = [...new Set([...identifiersOf(label), ...labelIds])]
   if (a.length && b.length) return a.some(id => b.includes(id)) ? 'same' : 'different'
+  if (normLabel(recorded) === normLabel(labelKey(label))) return 'same'
   return 'unknown'
+}
+/** The long identifiers in a link's address (path and query), digits only. */
+export function hrefIdentifiers(href) {
+  try { const url = new URL(href); return identifiersOf(`${decodeURIComponent(url.pathname)} ${decodeURIComponent(url.search)}`.replace(/[/?=&_+]+/g, ' ')) } catch { return [] }
 }
 
 /**
@@ -197,7 +204,7 @@ export function recordedChoice(prior, snapshot, options, { goal = '', userContex
   if ((Array.isArray(userContext) ? userContext : []).some(line => typeof line === 'string' && line.trim())) return null
   const offered = (options || []).filter(option => option.item?.kind !== 'fill')
   const key = normLabel(item.chose)
-  const verdict = new Map(offered.map(option => [option, sameByCode(item.chose, option.value)]))
+  const verdict = new Map(offered.map(option => [option, sameByCode(item.chose, option.value, { recordedIds: Array.isArray(item.ids) ? item.ids : [], labelIds: hrefIdentifiers(option.item?.element?.href) })]))
   const matches = offered.filter(option => verdict.get(option) === 'same')
   const recordedWords = new Set(wordsOf(item.chose))
   const sharesWord = option => wordsOf(labelKey(option.value)).some(word => recordedWords.has(word))

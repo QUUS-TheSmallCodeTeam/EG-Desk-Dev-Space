@@ -110,7 +110,7 @@ import { SPEECH_AT_PAGE, speechSegments } from './egdesk-speech-grounding.mjs'
 import { pruneContextCandidates } from './egdesk-context-pruning.mjs'
 import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory, recordStateEvidence } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
-import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, entryQuestion, readBrowserEntry } from './egdesk-browser-task.mjs'
+import { BROWSER_TASK_TTL_MS, codeEntryCard, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, entryQuestions, readBrowserEntry } from './egdesk-browser-task.mjs'
 import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
@@ -2832,7 +2832,7 @@ export class CodexChatRuntime {
           // after its question so the reply resumes the task INSIDE the run (see holdRunForBrowserReply). Everything a later native turn
           // of the same run needs is kept here; nothing is decided yet.
           if (context.browserTaskTurn === true && context.heartbeat && this.store) this.browserRunHolds.set(run, { phase: 'turn', turnId: run.runId, questionId: null, timer: null, cancelled: false, handedOff: browserPre.handedOff === true,
-            engine, slot, epoch, key: context.clientThreadId || cid, hosts: this.browserEntryHosts(body), additionalContext: additionalContext || null,
+            engine, slot, epoch, key: context.clientThreadId || cid, hosts: this.browserEntryHosts(body), titles: this.browserEntryTitles(body), additionalContext: additionalContext || null,
             base: { threadId: cid, ...QA_TURN_OVERRIDES, ...(overrides.cwd ? { cwd: overrides.cwd } : {}), ...(overrides.model ? { model: overrides.model } : {}), ...(effort !== undefined ? { effort } : {}) } })
           continue
         }
@@ -5031,8 +5031,10 @@ export class CodexChatRuntime {
       this.allowIntermediateMessages(hold.key)
       const cfg = this.decisionContext?.browserEntry, provider = this.browserToolProvider()
       const entry = createDirectBrowserEntry({ provider, store: this.browserTaskStore, outcomeSink: typeof cfg?.outcomeSink === 'function' ? cfg.outcomeSink : null, now: this.now,
-        calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null })
-      const out = await entry.handle({ run, conversationKey: hold.key, message, hosts: hold.hosts })
+        calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null,
+        // c20: the finished task's status text goes into the note only where this run's models may receive Browser data
+        pageTextInNote: () => { try { return this.decisionEgressFor(run).allows('page_text') === true } catch { return false } } })
+      const out = await entry.handle({ run, conversationKey: hold.key, message, hosts: hold.hosts, titles: hold.titles || {} })
       if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
     } catch { note = null; handedOff = false }
     hold.handedOff = handedOff
@@ -5086,6 +5088,15 @@ export class CodexChatRuntime {
   }
 
   browserToolProvider() { return this.toolProviders.find(provider => provider.providerId === 'egdesk-browser') || null }
+
+  // c20: each selected card's title as the card shows it (the source label), for the entry's per-card question (Browser data, page_text)
+  browserEntryTitles(body) {
+    const titles = {}
+    for (const source of Array.isArray(body?.selectedSources) ? body.selectedSources : []) {
+      if (source?.kind === 'browser' && typeof source?.sourceRef?.viewId === 'string' && typeof source.label === 'string' && source.label.trim()) titles[source.sourceRef.viewId] = source.label.trim().slice(0, 120)
+    }
+    return titles
+  }
 
   browserEntryHosts(body) {
     const hosts = {}
@@ -5151,10 +5162,15 @@ export class CodexChatRuntime {
       const guarded = kinds => (rawClient ? egress.guardClient(rawClient, kinds) : null)
       let entryAnswers = null
       if (!resuming && typeof cfg.entryAnswers === 'function' && egress.allows('page_text')) {
-        const hostsByCard = this.browserEntryHosts(body)
-        const cards = (preRun.browserBinding?.cards || []).filter(card => card.permission === 'interact').map(card => ({ cardId: card.cardId, host: hostsByCard[card.cardId] || '' }))
-        try { const answers = cards.length ? await cfg.entryAnswers({ body, context, question: entryQuestion(cards), client: guarded(['page_text']) }) : null
-          if (answers && ['choice', 'refusal'].includes(answers.browser_entry?.type)) entryAnswers = { browser_entry: answers.browser_entry, kind: readBrowserEntry(answers, cards).kind }
+        const hostsByCard = this.browserEntryHosts(body), titlesByCard = this.browserEntryTitles(body)
+        const cards = (preRun.browserBinding?.cards || []).filter(card => card.permission === 'interact').map(card => ({ cardId: card.cardId, host: hostsByCard[card.cardId] || '', title: titlesByCard[card.cardId] || '' }))
+        // c20: the entry is yes/no predicates (the request; one per card unless code named the card); the host appends all of them
+        const codeCard = codeEntryCard(body.message, cards), questions = entryQuestions(cards, { codeCard })
+        try { const answers = cards.length ? await cfg.entryAnswers({ body, context, questions, question: questions[0], client: guarded(['page_text']) }) : null
+          if (answers && answers.browser_entry?.type === 'predicate') {
+            const picked = Object.fromEntries(questions.map(q => [q.name, answers[q.name]]).filter(([, a]) => a))
+            entryAnswers = { ...picked, codeCard, kind: readBrowserEntry(picked, cards, { codeCard }).kind }
+          }
         } catch { entryAnswers = null }
       }
       const skipMemory = resuming || (entryAnswers !== null && entryAnswers.kind !== 'browser')
@@ -5162,8 +5178,10 @@ export class CodexChatRuntime {
       // Read-only: the task loop's step count and waiting state feed this conversation's heartbeat; the store behaves exactly as before.
       if (context.heartbeat) feedBrowserTask(context.heartbeat, this.browserTaskStore, context.clientThreadId)
       const entry = createDirectBrowserEntry({ provider, store: this.browserTaskStore, outcomeSink: typeof cfg.outcomeSink === 'function' ? cfg.outcomeSink : null, now: this.now,
-        calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null })
-      const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), memory, entryAnswers })
+        calibration: this.decisionContext?.calibrationLog ? { record: raw => this.decisionContext.calibrationLog.record({ ...raw, mode: 'on' }) } : null,
+        // c20: the finished task's status text goes into the note only where this run's models may receive Browser data
+        pageTextInNote: () => { try { return this.decisionEgressFor(preRun).allows('page_text') === true } catch { return false } } })
+      const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), titles: this.browserEntryTitles(body), memory, entryAnswers })
       if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
     } catch { note = null; handedOff = false }
     return { preRun, provider, note, handedOff, adopted: false }
