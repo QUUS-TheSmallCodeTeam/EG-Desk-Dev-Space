@@ -111,7 +111,7 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = BROWSER_TASK_TT
       for (const task of tasks.values()) if (task.conversationKey === conversationKey && live(task)) task.status = 'cancelled'
       while (tasks.size >= maxTasks) tasks.delete(tasks.keys().next().value)
       const task = { taskId: `bt_${randomBytes(6).toString('hex')}`, conversationKey, cardId, goal: compactText(goal, MAX_MESSAGE), status: 'running',
-        pause: null, userContext: [], state: null, prior: null, memoryPacket: null, memoryPages: [], memory: null, pendingWrite: null, trail: [], resolved: [], pendingAsk: null, host: '', steps: 0, actions: { fill: 0, navigate: 0, scroll: 0 }, segments: 0, liveStep: 0, lastActionAt: null, asked: false, question: null, entryAsks: 0, createdAt: now(), updatedAt: now() }
+        pause: null, userContext: [], state: null, prior: null, memoryPacket: null, memoryPages: [], memory: null, pendingWrite: null, trail: [], resolved: [], pendingAsk: null, confirm: null, host: '', steps: 0, actions: { fill: 0, navigate: 0, scroll: 0 }, segments: 0, liveStep: 0, lastActionAt: null, asked: false, question: null, entryAsks: 0, createdAt: now(), updatedAt: now() }
       tasks.set(task.taskId, task)
       return task
     },
@@ -185,9 +185,11 @@ const tally = (task, result) => {
 }
 
 /** The one structured line the subjective model receives. Closed vocabulary, counts, and (for a choice) up to three element labels. */
-export function subjectiveNote(task, { status, code, candidates = [], detail }) {
+export function subjectiveNote(task, { status, code, candidates = [], detail, recorded = null }) {
   const body = { id: task.taskId, status, ...(code ? { code } : {}),
     ...(candidates.length ? { candidates: candidates.slice(0, 3).map(item => compactText(item.replace(/^\[[A-Z]\d+\]\s*/, ''), 60)) } : {}),
+    // c17: a confirmation names what it confirms against (the label the earlier run settled on, from this app's own record)
+    ...(typeof recorded === 'string' && recorded.trim() ? { recorded: compactText(recorded.replace(/^\[[A-Z]\d+\]\s*/, ''), 60) } : {}),
     ...(typeof detail === 'string' && PUBLIC_CODE.test(detail) ? { detail } : {}),
     stepsDone: task.steps, actions: { ...task.actions } }
   const next = status === 'done' ? 'report_to_user' : status === 'need_context' ? 'ask_user_in_chat' : 'tell_user_and_ask_in_chat'
@@ -243,11 +245,13 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
 
   function finishPause(task, pause, result, extra = {}) {
     task.status = 'paused'; task.pause = pause; task.question = null; store.touch(task)
-    if (pause.kind === 'need_context' && ASKED_CODES.has(pause.code)) task.pendingAsk = pause.code
+    // a confirmation settles the same "which one?" as a choice: the record keeps the closed layout (choice_needed)
+    const asked = pause.code === 'confirm_needed' ? 'choice_needed' : pause.code
+    if (pause.kind === 'need_context' && ASKED_CODES.has(asked)) task.pendingAsk = asked
     else if (pause.code !== 'page_unclear') remember(task, { status: 'stuck', code: pause.code }) // a page to look at is a pause, not an outcome
     const status = pause.kind === 'need_context' ? 'need_context' : 'cannot_proceed'
     return { handled: true, status: 'paused', taskId: task.taskId,
-      note: subjectiveNote(task, { status, code: pause.code, candidates: extra.candidates, detail: extra.detail }) }
+      note: subjectiveNote(task, { status, code: pause.code, candidates: extra.candidates, detail: extra.detail, recorded: extra.recorded }) }
   }
 
   function fromResult(task, result) {
@@ -256,7 +260,16 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
         task.status = 'done'; task.pause = null; store.touch(task)
         remember(task, { status: 'done' })
         return { handled: true, status: 'done', taskId: task.taskId, note: subjectiveNote(task, { status: 'done' }) }
-      case 'needs_user_context': return finishPause(task, { kind: 'need_context', code: 'choice_needed' }, result, { candidates: result.candidates || [] })
+      case 'needs_user_context': {
+        const candidates = result.candidates || []
+        // c17: with exactly one candidate there is nothing to choose between: the person is asked to confirm it (closed code, worded by the
+        // subjective model), e.g. whether the business on the page now is the one chosen last time. Real c16: "which" with one candidate.
+        if (candidates.length === 1) {
+          task.confirm = { candidate: compactText(candidates[0].replace(/^\[[A-Z]\d+\]\s*/, ''), 60), recorded: typeof result.recordedLabel === 'string' ? result.recordedLabel : null }
+          return finishPause(task, { kind: 'need_context', code: 'confirm_needed' }, result, { candidates, recorded: task.confirm.recorded })
+        }
+        return finishPause(task, { kind: 'need_context', code: 'choice_needed' }, result, { candidates })
+      }
       case 'needs_free_text': return finishPause(task, { kind: 'need_context', code: 'detail_needed' }, result)
       // c16: the page-state predicates did not decide; the person is asked to look at the page (closed code, worded by the subjective model)
       case 'page_unclear': return finishPause(task, { kind: 'need_context', code: 'page_unclear' }, result)
@@ -317,7 +330,10 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
             }
             startOnCard(paused, picked.cardId, cards)
           }
-          paused.userContext.push(compactText(message, MAX_MESSAGE)); paused.status = 'running'; paused.pause = null; paused.asked = false
+          // c17: a bare "응" says nothing without what was asked; code names what the person confirmed (R1)
+          const confirm = paused.confirm
+          paused.userContext.push(confirm ? `Asked to confirm "${confirm.candidate}"${confirm.recorded ? ` as the earlier choice "${confirm.recorded}"` : ''}, the user answered: ${compactText(message, MAX_MESSAGE)}` : compactText(message, MAX_MESSAGE))
+          paused.confirm = null; paused.status = 'running'; paused.pause = null; paused.asked = false
           const out = await finalize(await loop(run, paused, hosts), paused)
           return { ...out, resumed: true }
         }

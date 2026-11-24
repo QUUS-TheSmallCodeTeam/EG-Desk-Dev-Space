@@ -1,6 +1,6 @@
 {
- "set": "browser-live-recorded-v2",
- "description": "LIVE, c16: the recorded choice by code. The month-1 record is written by code before month 2 (the outcome layout a real month 1 writes, through the same write path and local stand-in judge). Month 2: code takes the recorded business with no which-question (page state and goal still asked) and writes the choice again. Renamed (next month, uses month 2's record): both businesses carry new trade names, the numbers are unchanged; one quoted same-thing predicate for the only candidate carrying the recorded number; code takes it on a decided yes. Only browser judgments go to the Decision model.",
+ "set": "browser-live-recorded-v3",
+ "description": "LIVE, c16: the recorded choice by code. The month-1 record is written by code before month 2 (the outcome layout a real month 1 writes, through the same write path and local stand-in judge). Month 2: code takes the recorded business with no which-question (page state and goal still asked) and writes the choice again. Renamed (next month, uses month 2's record): both businesses carry new trade names, the numbers are unchanged; code finds the recorded registration number on exactly one candidate and takes it (c17: an identical long identifier is a code match; real c16: the same-thing predicate answered 0.75 and the task paused). Only browser judgments go to the Decision model.",
  "maxRequests": 10,
  "tokenCeiling": 12000,
  "passRule": "The journey passes when every hard and every absolute check holds. Soft checks are reported and never fail it. The journey stops at the first hard or absolute failure, at the first request that fails (no retries), at the request limit or at the token ceiling; checks of phases that did not run count as not run (a failure).",
@@ -67,10 +67,10 @@
    "note": "The request starts the task."
   },
   {
-   "id": "r-asked-same",
+   "id": "r-by-code",
    "phase": "renamed",
    "severity": "hard",
-   "note": "The /invoices request asks the page-state predicates, goal_met and same_0 only (one predicate, for 가나상사 (987-65-43210)): no which-question."
+   "note": "The /invoices request asks the page-state predicates and goal_met only: no which-question and no same-thing predicate (an identical registration number is a code match)."
   },
   {
    "id": "r-no-question",
@@ -89,12 +89,6 @@
    "phase": "renamed",
    "severity": "hard",
    "note": "The task reports done."
-  },
-  {
-   "id": "r-same-decided",
-   "phase": "renamed",
-   "severity": "soft",
-   "note": "The same-thing predicate answered at or above 0.85."
   },
   {
    "id": "never-offered",
