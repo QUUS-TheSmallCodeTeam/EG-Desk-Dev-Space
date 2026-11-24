@@ -15,7 +15,8 @@ import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress
 import { COMMAND_GATE_TIMEOUT_MS, assessCommand, classifyCommand } from './egdesk-terminal-command-gate.mjs'
 import { homedir } from 'node:os'
 import { createInternalTurns } from './codex-internal-turn.mjs'
-import { FLOW_COPY, FLOW_LIMITS, beatFlowFacts, cleanIntermediate, decideFlow, enumerateOptions, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
+import { FLOW_COPY, FLOW_LIMITS, audienceFacts, beatFlowFacts, cleanIntermediate, enumerateOptions, flowQuestion, withoutRepeats, writerPrompt } from './egdesk-conversation-flow.mjs'
+import { BEAT_JUDGE_TIMEOUT_MS, createBeatJudge } from './egdesk-heartbeat-judge.mjs'
 import { createHeartbeats } from './egdesk-heartbeat.mjs'
 import { feedBrowserTask } from './egdesk-heartbeat-providers.mjs'
 import { browserRefusal, ceilingAllowsBrowserTool, ceilingAllowsComputerTool, ceilingApprovalRefusal, ceilingBrowserSelection, ceilingNarrows, ceilingReportNotices, CEILING_MESSAGES, computerRefusal, effectiveToolCeiling, liveBrowserSelected, loadCeilingThreadOverrides, mergeCeilingOverrides, recordedToolCeiling, verifyCeilingNativeThread } from './codex-chat-tool-ceiling.mjs'
@@ -802,6 +803,9 @@ export class CodexChatRuntime {
     // Live-session heartbeats (egdesk-heartbeat.mjs): one per live conversation, on its own monotonic counter, independent of engine events.
     this.heartbeats = createHeartbeats({ monotonicNow: () => this.monotonicNow(), setTimer: (fn, ms) => this.setTimer(fn, ms), clearTimer: handle => this.clearTimer(handle) })
     this.heartbeatThreads = new Map() // native thread id -> heartbeat (to mark engine events on its clock)
+    this.heartbeatReasoning = new WeakMap() // heartbeat -> ids of reasoning items the engine has started and not finished
+    this.heartbeatSubjects = new WeakMap() // heartbeat -> { run, flow, context }: what its judge and its record speak for
+    this.flowSpeakers = new WeakSet() // heartbeats whose run was opted in to intermediate messages without a held answer
     this.internalTurns = createInternalTurns({ setTimer: (fn, ms) => this.setTimer(fn, ms), clearTimer: handle => this.clearTimer(handle) }) // short private fork turns (draft revision, intermediate messages); never a run
     this.flowRuns = new WeakMap() // run -> intermediate-message state (flag decisionContext.conversationFlow, default off)
     this.flowJobs = new Set()
@@ -3700,6 +3704,7 @@ export class CodexChatRuntime {
 
   handleNotification(message, engineId, slot) {
     if (this.internalTurns.feed(message)) return Promise.resolve() // a private fork turn, not a run
+    this.markEngineActivity(message)
     const inbound = this.inboundEventRoute(message, engineId, slot)
     if (!this.eventRouteMatches(inbound)) return Promise.resolve()
     // Read before the public-event filter below, which drops item types it does not show.
@@ -3728,6 +3733,7 @@ export class CodexChatRuntime {
       this.respond(message.id, null, { code: -32000, message: 'Not available in a private turn' }, slot || this.threadOperationSlot(idText(message.params?.threadId)))
       return Promise.resolve()
     }
+    this.markEngineActivity(message)
     const inbound = this.inboundEventRoute(message, engineId, slot)
     if (!this.eventRouteMatches(inbound)) return Promise.resolve()
     const p = message.params || {}
@@ -3767,11 +3773,8 @@ export class CodexChatRuntime {
 
   enqueue(event) {
     // Anything that comes from the engine for a live conversation moves the "last engine event" mark on its heartbeat's clock.
-    if (this.heartbeatThreads.size) {
-      const hb = this.heartbeatThreads.get(event.threadId) || this.heartbeatThreads.get(event.parentThreadId)
-      if (hb?.state === 'stopped') this.stopHeartbeat(hb, hb.stopReason) // it stopped itself (limit, superseded): drop the stale entry
-      else hb?.mark('engine')
-    }
+    // A child Agent's events count for its parent conversation (the conversation's own events are marked on arrival, see markEngineActivity).
+    if (this.heartbeatThreads.size && event.parentThreadId && !this.heartbeatThreads.has(event.threadId)) this.heartbeatThreads.get(event.parentThreadId)?.mark('engine', 'tool')
     const pending = this.pendingStarts.get(event.threadId) || this.pendingResumes.get(event.threadId)
     const live = this.runs.get(runKey(event.threadId, event.turnId))
     const heldNow = live ? this.heldGuard(live) : null
@@ -4763,6 +4766,10 @@ export class CodexChatRuntime {
       hb.start({ sinceMs: Math.max(0, this.monotonicNow() - accepted) })
       this.heartbeatThreads.set(cid, hb)
       context.heartbeat = hb
+      // The heartbeat's judge: one Decision request per asked beat for every proposed question, through this conversation's egress gate.
+      const subject = { run: null, flow: null, toolCeiling: context.toolCeiling ?? null }
+      this.heartbeatSubjects.set(hb, subject)
+      hb.setJudge(round => this.judgeBeat(subject, round), { onRound: summary => this.recordBeatRound(subject, summary) })
       return hb
     } catch { return null }
   }
@@ -4773,20 +4780,75 @@ export class CodexChatRuntime {
     for (const [threadId, live] of this.heartbeatThreads) if (live === hb) this.heartbeatThreads.delete(threadId)
   }
 
-  // The run joins its conversation's heartbeat: the run's own facts become the heartbeat's source and every beat is offered to the flow.
+  // Any message the engine sends for a live conversation moves the "last engine event" mark on its heartbeat's clock, including the ones
+  // this runtime does not otherwise use (reasoning deltas and part boundaries, token usage updates, progress). So a run that is
+  // visibly thinking is not silent. Reasoning items that have started and not finished are remembered: they stretch the stall bound.
+  markEngineActivity(message) {
+    try {
+      if (!this.heartbeatThreads.size) return
+      const p = message?.params, threadId = idText(p?.threadId)
+      const hb = threadId ? this.heartbeatThreads.get(threadId) : null
+      if (!hb) return
+      if (hb.state === 'stopped') { this.stopHeartbeat(hb, hb.stopReason); return } // it stopped itself (limit, superseded): drop the stale entry
+      const method = String(message.method ?? ''), type = p?.item?.type
+      const kind = method.startsWith('item/reasoning/') || type === 'reasoning' ? 'reasoning' : method === 'item/agentMessage/delta' || method === 'item/plan/delta' || type === 'agentMessage' ? 'output'
+        : method === 'thread/tokenUsage/updated' ? 'usage' : method.startsWith('turn/') ? 'turn' : method.startsWith('item/') ? 'tool' : 'other'
+      hb.mark('engine', kind)
+      let open = this.heartbeatReasoning.get(hb)
+      if (type === 'reasoning' && idText(p.item.id)) {
+        if (!open) this.heartbeatReasoning.set(hb, open = new Set())
+        if (method === 'item/started' && open.size < 32) open.add(p.item.id)
+        else if (method === 'item/completed') open.delete(p.item.id)
+      } else if (method === 'turn/completed') open?.clear()
+    } catch { /* marking never affects the event */ }
+  }
+
+  // Who is waiting for this run's task and whether a message may go into its conversation (egdesk-conversation-flow.mjs audienceFacts).
+  // conversationFlow.audience({ run }) → { requester, owner, participants } and conversationFlow.presence.snapshot() are optional; without
+  // them the local person asked in their own DM and presence is unknown (today's single-user behaviour).
+  flowAudience(run) {
+    const cf = this.decisionContext?.conversationFlow
+    let audience = null, rows = null
+    try { audience = typeof cf?.audience === 'function' ? cf.audience({ run: { clientThreadId: run.clientThreadId, conversationId: run.conversationId, board: Boolean(run.board) } }) : null } catch { audience = null }
+    try { rows = typeof cf?.presence?.snapshot === 'function' ? cf.presence.snapshot() : null } catch { rows = null }
+    return audienceFacts({ audience, presence: Array.isArray(rows) ? rows : null })
+  }
+
+  /**
+   * Opt a live conversation's run in to intermediate messages although its final answer is not held (a bounded run such as the
+   * browser task). The messages are still completed, checked messages posted through the same path; nothing else about the run
+   * changes, and other bounded runs are not affected. Needs the draft check to be on. Returns false when there is no live heartbeat.
+   */
+  allowIntermediateMessages(key) {
+    const hb = this.heartbeats.get(key)
+    if (!hb) return false
+    this.flowSpeakers.add(hb)
+    const flow = this.heartbeatSubjects.get(hb)?.flow
+    if (flow && !flow.closed) flow.canSpeak = flow.held || this.draftCheckMode() === 'on'
+    return true
+  }
+
+  // The run joins its conversation's heartbeat: the run's own facts become the heartbeat's source, and the message question is
+  // one proposer among the heartbeat's providers (see the contract in egdesk-heartbeat.mjs).
   startConversationFlow(run, body, context) {
     try {
       const hb = context.heartbeat
       if (!hb || hb.state === 'stopped') return
-      const flow = { heartbeat: hb, canSpeak: context.draftHold === true, sent: [], kinds: new Set(), askedNotes: new Set(), offered: new Set(['none']), stepsAtLast: 0,
-        beats: 0, evals: 0, requests: 0, noneStreak: 0, lastEvalAt: -Infinity, busy: false, closed: false, question: null, startedAt: 0, lastSentAt: null }
+      const held = context.draftHold === true
+      const flow = { heartbeat: hb, held, canSpeak: held || (this.flowSpeakers.has(hb) && this.draftCheckMode() === 'on'), sent: [], kinds: new Set(), askedNotes: new Set(), stepsAtLast: 0,
+        closed: false, question: null, startedAt: 0, lastSentAt: null, pendingFacts: null,
+        audience: () => this.flowAudience(run), reasoningOpen: () => (this.heartbeatReasoning.get(hb)?.size ?? 0) > 0 }
       this.flowRuns.set(run, flow)
+      const subject = this.heartbeatSubjects.get(hb)
+      if (subject) { subject.run = run; subject.flow = flow }
       hb.setSource(() => {
         const tools = (run.activities || []).filter(a => !FLOW_OWN_KINDS.has(a.kind))
         return { stepsDone: tools.filter(a => a.status === 'completed').length, stepsRunning: tools.filter(a => a.status === 'inProgress').length,
           waitingOnUser: Boolean(run.pendingApprovals?.length) || Boolean(run.pendingUserInputs?.length), pendingQuestion: flow.question?.pending === true }
       })
-      hb.subscribe(beat => this.onHeartbeat(run, flow, beat))
+      // Read-only for the other providers of this heartbeat: closed labels, never a member id.
+      hb.register('audience', () => { const a = flow.audience(); return { waiting: a.waiting, addressee: a.addressee, addresseePresent: a.addresseePresent, addresseeInConversation: a.addresseeInConversation, postable: a.postable, reasoningOpen: flow.reasoningOpen() } })
+      hb.register('message', { propose: beat => this.flowPropose(run, flow, beat), onVerdict: round => this.flowVerdict(run, flow, round) })
     } catch { /* never affects the turn */ }
   }
 
@@ -4805,52 +4867,61 @@ export class CodexChatRuntime {
     this.stopHeartbeat(flow.heartbeat, reason)
   }
 
-  // One beat. Beats are free: the Decision model is asked only when the prefilter leaves a real choice and the rate bounds allow it.
-  onHeartbeat(run, flow, beat) {
-    if (flow.closed) return
-    flow.beats++
-    if (run.status !== 'inProgress' || !flow.canSpeak || flow.busy) return
-    flow.busy = true
-    const job = this.flowEvaluate(run, flow, beat).catch(() => {}).finally(() => { flow.busy = false })
-    this.flowJobs.add(job)
-    void job.finally(() => this.flowJobs.delete(job))
-  }
-
   flowIdle() { return Promise.allSettled([...this.flowJobs]) }
 
-  async flowEvaluate(run, flow, beat) {
+  // A streamed (not held) final answer has begun: nothing more is said in between.
+  finalAnswerBegun(run, flow) { return !flow.held && run.messages.some(m => m.role === 'assistant' && m.phase === 'final_answer') }
+
+  // The message question for this beat, or nothing (a quiet beat costs no request). The request bounds are the heartbeat's.
+  flowPropose(run, flow, beat) {
     const setup = this.decisionContext
-    if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return
+    if (flow.closed || run.status !== 'inProgress' || !flow.canSpeak || this.finalAnswerBegun(run, flow)) return null
+    if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return null
     const facts = beatFlowFacts({ heartbeatFacts: beat.facts, run, flow, own: FLOW_OWN_KINDS })
     const options = enumerateOptions(facts)
-    if (options.length < 2 || flow.evals >= FLOW_LIMITS.maxEvals) return // a quiet beat costs no request
-    // At most one request per evalGapMs, unless a kind is possible now that was never offered in this run (each kind can do that once).
-    // After an answer of 'none' the same question is not worth asking again soon: the gap doubles with each 'none' in a row (10, 20, 40, 80 s).
-    const fresh = options.some(kind => !flow.offered.has(kind))
-    if (!fresh && beat.internalMs - flow.lastEvalAt < FLOW_LIMITS.evalGapMs * 2 ** Math.min(flow.noneStreak, 3)) return
-    for (const kind of options) flow.offered.add(kind)
-    flow.evals++; flow.lastEvalAt = beat.internalMs; flow.requests++
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), FLOW_LIMITS.decisionMs)
+    if (options.length < 2) return null
+    flow.pendingFacts = facts
+    return flowQuestion(facts, options)
+  }
+
+  // The verdict for the message question: write, check and post, and say what happened in a closed word for the record.
+  flowVerdict(run, flow, { verdicts }) {
+    const verdict = verdicts[0], facts = flow.pendingFacts
+    flow.pendingFacts = null
+    if (!verdict?.accepted || verdict.value === 'none' || !facts || flow.closed || run.status !== 'inProgress') return 'none'
+    const job = this.postIntermediate(run, flow, verdict.value, facts).catch(() => 'none')
+    this.flowJobs.add(job)
+    void job.finally(() => this.flowJobs.delete(job))
+    return job
+  }
+
+  // One Decision request for every question proposed at this beat. Run facts are numbers and closed labels (egress kind run_facts);
+  // a question that declares a further kind the run's models may not receive is dropped alone.
+  async judgeBeat(subject, round) {
+    const setup = this.decisionContext
+    if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) throw Object.assign(new Error('The decision model is off'), { code: 'not_configured' })
+    const egress = this.decisionEgressFor(subject.run ?? { toolCeiling: subject.toolCeiling })
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), BEAT_JUDGE_TIMEOUT_MS)
     timer.unref?.()
-    const asked = this.monotonicNow()
-    let verdict = null, fallback = null, posted = 'none'
-    // The request carries run facts as numbers and closed labels only; it still goes through the one egress gate (kind run_facts).
-    try { verdict = await decideFlow({ facts, options, client: this.decisionEgressFor(run).guardClient(setup.client, ['run_facts']), signal: controller.signal, timeoutMs: FLOW_LIMITS.decisionMs }) }
-    catch (error) { fallback = ['timeout', 'unreachable', 'bad_response', 'budget_exceeded', 'evidence_unavailable', 'not_configured', 'rate_limited', 'no_credit', 'spend_limit_reached', 'server_error'].includes(error?.code) ? error.code : 'unreachable' }
+    try { return await createBeatJudge({ client: egress.guardClient(setup.client, ['run_facts']), allows: kind => egress.allows(kind), signal: controller.signal })(round) }
     finally { clearTimeout(timer) }
-    const decisionMs = this.monotonicNow() - asked
-    flow.noneStreak = verdict && verdict.kind !== 'none' ? 0 : flow.noneStreak + 1
+  }
+
+  // Content-free record of every asked beat: numbers and closed words for each question, what the message question led to, the beat's facts.
+  recordBeatRound(subject, summary) {
     try {
-      if (verdict && verdict.kind !== 'none' && !flow.closed && run.status === 'inProgress') posted = await this.postIntermediate(run, flow, verdict.kind, facts)
-    } finally {
-      // Content-free record of every asked beat (numbers and closed words).
-      try {
-        setup.calibrationLog?.record?.({ feature: 'conversation_flow', mode: 'on', attached: posted !== 'none', judgments: verdict ? [verdict.judgment] : [], candidates: options.length,
-          ...(fallback ? { fallback } : {}), flow: verdict?.kind ?? null, posted,
-          beat: { n: beat.beat, phase: facts.phase, sinceUserMs: facts.elapsedMs, sincePostedMs: facts.sinceLastMs, sinceEngineMs: facts.sinceEngineMs,
-            stepsDone: facts.stepsDone, stepsRunning: facts.stepsActive, decisionMs } })
-      } catch { /* ignore */ }
-    }
+      const log = this.decisionContext?.calibrationLog
+      if (!log) return
+      const f = summary.beat.facts, message = summary.questions.find(q => q.provider === 'message')
+      const posted = summary.outcomes.message ?? 'none'
+      const known = ['timeout', 'unreachable', 'bad_response', 'budget_exceeded', 'evidence_unavailable', 'not_configured', 'rate_limited', 'no_credit', 'spend_limit_reached', 'server_error']
+      log.record({ feature: 'conversation_flow', mode: 'on', attached: posted !== 'none', candidates: summary.questions.reduce((n, q) => n + q.options, 0), questions: summary.questions.length,
+        judgments: summary.questions.filter(q => !q.verdict.failed && !q.verdict.skipped).map(q => ({ q: 'choice', provider: q.provider, would: q.verdict.value === q.none ? 'none' : 'act',
+          top: q.verdict.top, second: q.verdict.second, confidence: q.verdict.confidence, margin: q.verdict.margin, options: q.options, threshold: 0.75, minMargin: 0.2 })),
+        ...(summary.failure ? { fallback: known.includes(summary.failure) ? summary.failure : 'unreachable' } : {}),
+        ...(message ? { flow: message.verdict.failed ? null : message.verdict.value, posted } : {}),
+        beat: { n: summary.beat.beat, phase: f.phase, sinceUserMs: f.sinceUserMs, sincePostedMs: f.sincePostedMs, sinceEngineMs: f.sinceEngineMs, stepsDone: f.stepsDone, stepsRunning: f.stepsRunning, decisionMs: summary.decisionMs } })
+    } catch { /* recording never affects the session */ }
   }
 
   // Writes (subjective model, private fork), checks and posts one intermediate message. Returns 'model', 'fallback' or 'none'.
@@ -4860,7 +4931,10 @@ export class CodexChatRuntime {
     let by = 'model'
     // A stalled engine usually cannot write either: then, and only then, the fixed line is used.
     if (!text && stalled && (kind === 'stalled' || kind === 'explain_wait') && !flow.sent.some(row => row.text === FLOW_COPY.stalled)) { text = FLOW_COPY.stalled; by = 'fallback' }
-    if (!text || flow.closed || run.status !== 'inProgress' || this.heldGuard(run)?.state === 'checking') return 'none'
+    if (!text || flow.closed || run.status !== 'inProgress' || this.heldGuard(run)?.state === 'checking' || this.finalAnswerBegun(run, flow)) return 'none'
+    // Read again at posting time: the message goes only into the conversation of the person who is waiting, and never where someone
+    // other than the task's requester or owner takes part.
+    if (flow.audience().postable !== true) return 'none'
     const id = `egdesk-flow:${randomUUID()}`
     await this.applyItem(run, { id, type: 'agentMessage', phase: null, text, completionConfirmed: true }, true, true, true)
     flow.sent.push({ id, text, kind, by }); flow.kinds.add(kind); if (by === 'fallback') flow.kinds.add('stalled')
@@ -4879,12 +4953,14 @@ export class CodexChatRuntime {
       const text = cleanIntermediate(out.text)
       if (!text || flow.sent.some(row => row.text === text)) return null
       // Checked like any posted message; there is no revision for a short note: a message that fails is not posted.
+      // When the turn's evidence may not be used (guarded, or a bounded run) the check runs with none: a message that states something
+      // concrete then fails and is not posted.
       const setup = this.decisionContext, turn = this.draftCheckTurns.get(run)
-      if (!turn || turn.skip) return text
+      if (!turn) return null
       const controller = new AbortController(), timer = setTimeout(() => controller.abort(), DRAFT_CHECK_LIMITS.firstCheckMs)
       timer.unref?.()
       try {
-        const checked = await Promise.race([checkDraft({ draft: text, evidence: turn.evidence, userText: turn.userText, mode: 'on', client: setup.client, revise: null, signal: controller.signal, egress: this.decisionEgressFor(run) }),
+        const checked = await Promise.race([checkDraft({ draft: text, evidence: turn.skip ? [] : turn.evidence, userText: turn.userText, mode: 'on', client: setup.client, revise: null, signal: controller.signal, egress: this.decisionEgressFor(run) }),
           new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))])
         return checked && checked.text === text ? text : null
       } finally { clearTimeout(timer); controller.abort() }

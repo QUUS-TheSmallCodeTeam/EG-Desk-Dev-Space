@@ -92,6 +92,7 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-context-setup.mjs': ['speech_history', 'topic_history', 'memory_page'],
   'egdesk-conversation-flow.mjs': ['run_facts'],
   'egdesk-draft-check.mjs': ['draft_text'],
+  'egdesk-heartbeat-judge.mjs': ['run_facts', 'plus the kinds a heartbeat question declares, each checked by the run\'s gate before it is sent'],
   'egdesk-terminal-command-gate.mjs': ['terminal_command'],
   'egdesk-terminal-judge.mjs': ['terminal_output'],
   'egdesk-memory-live-runner.mjs': ['memory_page: measurement tool; the public synthetic wiki only, through guardClient'],

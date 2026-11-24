@@ -15,7 +15,7 @@ const PLAN = { id: 'doc:pg', kind: 'document', title: 'PostgreSQL 이전 계획'
 function judge(request) {
   const answers = {}
   for (const q of request.questions) {
-    if (q.name === 'intermediate_message') {
+    if (q.name === 'message__need') {
       const values = q.choices.map(c => c.value)
       const pick = values.includes('ask_missing') ? 'ask_missing' : values.includes('explain_wait') ? 'explain_wait' : 'none'
       answers[q.name] = { type: 'choice', choice: pick, confidence: 0.95, probabilities: [{ value: pick, probability: 0.96 }, { value: values.find(v => v !== pick), probability: 0.02 }] }
@@ -36,7 +36,7 @@ function world(t, { flags = { held: true, flow: true }, candidates = [], writer 
   const timers = [], events = [], native = [], requests = { flow: 0, draft: 0, context: 0 }, steers = [], forkTexts = []
   const state = { usedReply: null }
   const client = { model: 'mock', async decide(request) {
-    if (request.promptCacheKey === 'conversation-flow') requests.flow++
+    if (request.promptCacheKey === 'heartbeat-beat') requests.flow++
     else if (request.promptCacheKey === 'draft-check') requests.draft++
     else requests.context++
     return judge(request)
