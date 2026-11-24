@@ -162,9 +162,9 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
     return wire.questions.map(q => {
       if (typeof policy[q.name] === 'function') return wireChoice(q.name, q, policy[q.name](q, text))
       if (/^rel_\d+$/.test(q.name) && names.includes('answer_type')) { const line = new RegExp(`^#${q.name.slice(4)}\\b[^\\n]*`, 'm').exec(text)?.[0] ?? ''; return { name: q.name, type: 'predicate', probability: topicKey && topicKey.test(line) ? 0.95 : 0.03 } }
-      // briefing skeleton (L4 cycle 15: yes/no predicates only): several materials are needed together, one sentence is not enough, every listed way fits, the tied pairs
+      // briefing skeleton (L4 cycles 15-16: yes/no predicates only): several materials are needed together, one sentence is not enough, every content requirement holds, the tied pairs
       // keep the code's order, every filled piece is supported by its source
-      if (q.type === 'predicate' && (q.name === 'several' || /^(?:fit|before|slot|step)_/.test(q.name))) return { name: q.name, type: 'predicate', probability: 0.96 }
+      if (q.type === 'predicate' && (q.name === 'several' || /^(?:aspect|happened|todo|fact|before|slot|step)_/.test(q.name))) return { name: q.name, type: 'predicate', probability: 0.96 }
       if (q.type !== 'choice') return { name: q.name, type: 'predicate', probability: 0.03 }
       const values = q.choices.map(c => c.value)
       if (q.name === 'place' && values.includes('board')) return wireChoice(q.name, q, 'board')

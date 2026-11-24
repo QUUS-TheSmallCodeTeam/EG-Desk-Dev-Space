@@ -25,7 +25,8 @@ export const MAX_BYTES = 192 * 1024
 export const RETENTION_DAYS = 30
 const MAX_JUDGMENTS = 64
 
-const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check', 'turn_memory', 'conversation_flow', 'working_memory'])
+// answer_briefing: the Answer Briefing judgments (placement, reuse, flow check, skeleton predicates), recorded apart from the Board arrangement (lane L2 finding A4).
+const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'answer_briefing', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check', 'turn_memory', 'conversation_flow', 'working_memory'])
 const MODES = new Set(['advisory', 'on'])
 const QUESTIONS = new Set(['answer_type', 'time_intent', 'relevance', 'speech_axis', 'speech_predicate', 'recall', 'topic_route', 'choice', 'next_step', 'page_state', 'goal_met', 'terminal_state', 'terminal_risk', 'log_block', 'claim_support', 'claim_present', 'term_internal', 'triage_courtesy', 'triage_need', 'triage_recall', 'triage_record', 'write_target', 'wm_block', 'wm_role',
   // the heartbeat's yes/no message questions (egdesk-conversation-flow.mjs FLOW_PREDICATES)

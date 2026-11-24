@@ -52,7 +52,8 @@ const ENTRIES = [
   { id: 'result_lines', label: 'an ordered list of short lines, one per item', renderer: CARD, suits: ['sequence', 'open_items'],
     purpose: { sequence: 'a new card with a short list in date order: one line of plain text per material, saying what happened then. It is a plain list, not a table and not a chart.',
       open_items: 'a new card with a short list of what is not done yet: one line of plain text per open item. It is a plain list, not a table and not a chart.' }, needs: { materials: { min: 1, max: 8 }, existing: 0 }, emphasis: 'spotlight',
-    slots: [text('title', 40), list('lines', 2, 6, [text('label', 24), text('text', 90), material('from')])], size: card(0, 3) },
+    // At least one line (cycle 16): an open plan may name a single remaining step. A sequence has two or more lines by construction (code enumerates it from two or more dated materials).
+    slots: [text('title', 40), list('lines', 1, 6, [text('label', 24), text('text', 90), material('from')])], size: card(0, 3) },
   { id: 'result_text', label: 'one short text card', renderer: CARD, suits: ['single'],
     purpose: { single: 'a new card with one short paragraph of plain text about this one material. It is plain text, not a table and not a chart.' }, needs: { materials: { min: 1, max: 1 }, existing: 0 }, emphasis: 'spotlight',
     slots: [text('title', 40), text('body', 600)], size: card(0, 0) },
