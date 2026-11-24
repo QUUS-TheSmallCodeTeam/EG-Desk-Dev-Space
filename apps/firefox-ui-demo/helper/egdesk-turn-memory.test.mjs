@@ -436,11 +436,12 @@ test('deadline, mid-session: a triage that has not answered when the clock reach
   // minCallMs 0 removes the "too little time left to ask" rule, so these rows rest on the cut alone: once cut, nothing is fetched.
   for (const [earlyMs, extra] of [[0, {}], [1.2, {}], [30, {}], [0, { budget: { minCallMs: 0 } }], [1.2, { budget: { minCallMs: 0 } }]]) {
     const clock = createFakeClock({ earlyMs }), g = gatedClient(/^tn_/)
-    const pending = midCall(g, clock, extra)
+    let returned = false
+    const pending = midCall(g, clock, extra).finally(() => { returned = true })
     await clock.settle()
     assert.deepEqual(g.requests, ['triage'])
     await clock.advance(199)
-    assert.equal(g.gates.length, 1, `earlyMs ${earlyMs}: one millisecond before the deadline the triage is still awaited (an early timer does not cut it)`)
+    assert.equal(returned, false, `earlyMs ${earlyMs}: one millisecond before the deadline the triage is still awaited (an early timer does not cut it)`)
     await clock.advance(2) // the wake-up that finds the clock at or past the deadline comes within a timer's one-millisecond grain
     const r = await pending
     assert.deepEqual([r.triage.status, r.triage.need.state, r.memory.status, r.packet], ['fallback', 'unknown', 'empty', null], `earlyMs ${earlyMs}`)
@@ -495,12 +496,13 @@ test('deadline, mid-session: decided by the clock alone. A late timer does not l
 
 test('deadline, first turn: the scan answers, the link round does not; the scan picks are kept and marked partial, and nothing is asked after the deadline', async () => {
   const clock = createFakeClock(), g = gatedClient(/^(st_|op_)/)
-  const pending = prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: g.client, scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD, deadlineMs: 300, clock })
+  let returned = false
+  const pending = prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki: buildWiki(SYNTHETIC_PAGES), client: g.client, scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD, deadlineMs: 300, clock }).finally(() => { returned = true })
   await clock.settle()
   assert.deepEqual(g.requests, ['scan', 'expand'])
   await clock.advance(299)
-  assert.equal(g.gates.length, 1, 'still waiting one millisecond before the deadline')
-  await clock.advance(1)
+  assert.equal(returned, false, 'still waiting one millisecond before the deadline')
+  await clock.advance(2)
   const cut = await pending
   assert.deepEqual([cut.memory.status, cut.memory.partial, cut.memory.reason], ['ready', true, 'timeout'])
   assert.ok(cut.memory.picks.some(p => p.id === 'db/pg-plan') && cut.memory.picks.every(p => p.statusRead === undefined))
