@@ -7,6 +7,7 @@ import path from 'node:path'
 import { DECISION_MODEL, validateDecisionRequest } from './egdesk-decision-client.mjs'
 import { COMMAND_PLAN_SET, COMMAND_PLAN_TOKEN_CEILING, riskOutcome, scoreRiskAnswer } from './egdesk-command-real-plan.mjs'
 import { classifyCommand } from './egdesk-terminal-command-gate.mjs'
+import { loadPlan, runPlan } from './egdesk-decision-real-runner.mjs'
 
 const DIR = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'scripts', 'real-plans', 'command-judgments-v1')
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -45,4 +46,30 @@ test('the v1 risk answers are still scored by the product rule of that time (app
   const real = scoreRiskAnswer('risk-git-reset', answer(2.14, 0.8))
   assert.deepEqual([real.pass, real.observed.approval, real.hardFailures.length], [false, false, 1])
   assert.equal(scoreRiskAnswer('risk-npm-publish', answer(1.66, 0.43)).observed.reason, 'risk_unsure', 'npm publish got approval only through low confidence')
+})
+
+// c12: the runner of 2026-11-25 (L6, 0ca1350) refuses a request with no expectations unless it is marked recordOnly. The six risk-*
+// requests asked the 0-4 score and were scored outside the runner (score-expectations.json), so they are marked "recordOnly": true.
+// That mark is the ONLY change to the frozen record: with it removed, plan.json is canonically the file sent on 2026-11-24.
+const SENT_PLAN_CANONICAL_SHA256 = '3648855f86ede0bdc8b2712ae06de62e92f4336400de914f74832e7d5c84c096'
+test('the frozen v1 plan.json differs from the sent one only by recordOnly on the six score requests', () => {
+  const plan = JSON.parse(readFileSync(path.join(DIR, 'plan.json'), 'utf8'))
+  assert.deepEqual(plan.requests.filter(r => r.recordOnly !== undefined).map(r => [r.id, r.recordOnly, r.expect.length]),
+    ['risk-rm-node-modules', 'risk-rm-build', 'risk-git-clean', 'risk-git-reset', 'risk-npm-publish', 'risk-docker-prune'].map(id => [id, true, 0]))
+  for (const request of plan.requests) delete request.recordOnly
+  assert.equal(sha256(JSON.stringify(plan)), SENT_PLAN_CANONICAL_SHA256)
+})
+
+test('the v1 and v2 command plans load under the generic runner; a dry run sends nothing and v1 counts its six score requests as recorded', async () => {
+  const v1 = loadPlan(path.join(DIR, 'plan.json'))
+  assert.equal(v1.requests.length, 13)
+  assert.deepEqual(v1.requests.filter(r => r.recordOnly).map(r => r.id), ['risk-rm-node-modules', 'risk-rm-build', 'risk-git-clean', 'risk-git-reset', 'risk-npm-publish', 'risk-docker-prune'])
+  const v2 = loadPlan(path.join(DIR, '..', 'command-risk-v2', 'plan.json'))
+  assert.equal(v2.requests.length, 11); assert.equal(v2.requests.filter(r => r.recordOnly).length, 0)
+  let calls = 0
+  for (const plan of [v1, v2]) {
+    const outcome = await runPlan({ plan, send: false, fetchImpl: async () => { calls++; throw new Error('a dry run must not send') } })
+    assert.ok(outcome && typeof outcome === 'object')
+  }
+  assert.equal(calls, 0)
 })

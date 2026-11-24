@@ -191,42 +191,48 @@
       "file": "requests/risk-rm-node-modules.json",
       "sha256": "891825e89ffc555c56de953021f780f9e135faa53da0a0449753985089b81c54",
       "estInputTokens": 344,
-      "expect": []
+      "expect": [],
+      "recordOnly": true
     },
     {
       "id": "risk-rm-build",
       "file": "requests/risk-rm-build.json",
       "sha256": "986fec1088c477531acb9f5e1d62d1762e49a4bd476a136bc188ce8858562ab6",
       "estInputTokens": 342,
-      "expect": []
+      "expect": [],
+      "recordOnly": true
     },
     {
       "id": "risk-git-clean",
       "file": "requests/risk-git-clean.json",
       "sha256": "382ba0456592cab6e3ce88701913c1eaf370a221ccea3a4dca57fe25b127a1d1",
       "estInputTokens": 314,
-      "expect": []
+      "expect": [],
+      "recordOnly": true
     },
     {
       "id": "risk-git-reset",
       "file": "requests/risk-git-reset.json",
       "sha256": "e55d7184ff262b6e9af6fa6a19b73c9a66726d599a1c050218d467d8ea13e304",
       "estInputTokens": 305,
-      "expect": []
+      "expect": [],
+      "recordOnly": true
     },
     {
       "id": "risk-npm-publish",
       "file": "requests/risk-npm-publish.json",
       "sha256": "5302f5e37fe035027c91603df6ea8f37b0a45868bb883e4cb7c5e4d578a8e29d",
       "estInputTokens": 305,
-      "expect": []
+      "expect": [],
+      "recordOnly": true
     },
     {
       "id": "risk-docker-prune",
       "file": "requests/risk-docker-prune.json",
       "sha256": "70d778a3a01a77789eea4b7c282f50c01e665a28ea949a02c872dcf48b0dec8d",
       "estInputTokens": 306,
-      "expect": []
+      "expect": [],
+      "recordOnly": true
     }
   ]
 }
