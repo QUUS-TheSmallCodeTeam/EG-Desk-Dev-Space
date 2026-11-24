@@ -221,3 +221,26 @@ test('least privilege through the adapter: a Board item reaches the judge only f
   const otherBoard = await run({ clientThreadId: 'thread-1' }, { boardId: 'other' })
   assert.ok(!otherBoard.includes('결제 안정화 목표 문서'), 'sent from another Board: not readable')
 })
+
+test('one page per utterance: once a written page points at an utterance, the bare utterance page gives way and the conversation chain runs through the written page', async () => {
+  const dataDir = await tmpDir(), writes = openWikiWrites({ dataDir, log: quiet }), adapter = createWikiAdapter({ writes })
+  const rec = (id, quote, sequence) => ({ localMessageId: id, role: 'user', quote, spokenAt: '2026-11-24T05:30:00.000Z', sequence, hash: String(sequence).repeat(64).slice(0, 64), interpretations: [] })
+  const speechRecords = async () => [rec('m8', '오늘 회의 정리부터 하자.', 8), rec('m9', '거래처 D사가 어제 단가를 올렸다고 들었어.', 9), rec('m10', '그건 다음 주에 다시 보자.', 10)]
+  const snap = () => adapter.snapshot({ context: { clientThreadId: 'thread-1' }, speechRecords, speechGuard: () => true })
+  let wiki = await snap()
+  assert.deepEqual([...wiki.pages.keys()], ['speech/m8', 'speech/m9', 'speech/m10'])
+  const stored = adapter.writerFor(wiki, { enabled: true, canWrite: () => true }).apply({ op: 'new_page', time: { slice: 'past' }, status: 'done', provenance: { kind: 'reported_by_other', basis: 'attributed_report' }, links: [], spokenAt: '2026-11-24T05:30:00.000Z' },
+    { message: '거래처 D사가 어제 단가를 올렸다고 들었어.', messageRef: 'chat-message:m9', scope: adapter.scopeFor({ clientThreadId: 'thread-1' }), operationId: 'op-1' })
+  assert.equal(stored.status, 'stored')
+  wiki = await snap()
+  const ids = [...wiki.pages.keys()], written = ids.find(id => !id.startsWith('speech/'))
+  assert.deepEqual(ids.filter(id => id.startsWith('speech/')), ['speech/m8', 'speech/m10'], 'no second page for the same words')
+  const page = wiki.pages.get(written)
+  assert.deepEqual([page.body, page.ref, page.time.slice, page.provenance.kind, page.provenance.basis], ['거래처 D사가 어제 단가를 올렸다고 들었어.', 'chat-message:m9', 'past', 'reported_by_other', 'attributed_report'])
+  assert.deepEqual(wiki.links(written), [{ type: 'follows_from', to: 'speech/m8' }], 'it took the utterance\'s place in the chain')
+  assert.deepEqual(wiki.links('speech/m10'), [{ type: 'follows_from', to: written }])
+  assert.equal(wiki.adapter.dropped.droppedLinks, 0)
+  // consent withdrawn (no speech records): the reference no longer resolves, so neither page exists
+  const gone = await adapter.snapshot({ context: { clientThreadId: 'thread-1' } })
+  assert.equal(gone.pages.size, 0)
+})

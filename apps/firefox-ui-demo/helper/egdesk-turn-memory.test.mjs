@@ -529,3 +529,85 @@ test('settleBefore: in time means the clock is before the deadline when the answ
   d.reject(Object.assign(new Error('x'), { code: 'rate_limited' })); await clock.settle(); assert.deepEqual(outcome, ['error', 'rate_limited']); assert.equal(clock.pending(), 0)
   assert.deepEqual([typeof REAL_CLOCK.now(), MIN_CALL_MS], ['number', 150])
 })
+
+// ---- the turn's materials as data; the packet rendered again without a body that is already elsewhere ----
+import { MATERIAL_KINDS, MATERIAL_LIMITS, MATERIAL_LINK_TYPES, memoryMaterials } from './egdesk-turn-memory.mjs'
+import { BODY_ELSEWHERE, SAME_SOURCE, mergeIntoSelection, renderMemoryPacket } from './egdesk-wiki-reconstruction.mjs'
+const firstTurn = (message = 'PostgreSQL 마이그레이션 계획 알려줘', wiki = buildWiki(SYNTHETIC_PAGES)) => prepareTurnMemory({ message, wiki, client: mockJudge(), scope: SCOPE, askedAt: ASKED, position: FIRST, threadKey: THREAD, budget: { linksFirst: true } })
+
+test('memoryMaterials: closed row shape, packet order, bounded excerpts, links only between listed rows, no id or score; frozen', async () => {
+  const wiki = buildWiki(SYNTHETIC_PAGES), result = await firstTurn(undefined, wiki)
+  const rows = memoryMaterials(result, wiki, { scope: SCOPE })
+  assert.deepEqual(rows.map(r => r.alias), rows.map((_, i) => `M${i + 1}`))
+  assert.deepEqual(rows.map(r => r.title), Object.keys(result.memory.delivered).map(id => wiki.pages.get(id).title), 'the pages of the packet, in its order')
+  for (const r of rows) {
+    assert.deepEqual(Object.keys(r).filter(k => !['statusReading', 'statusPending'].includes(k)), ['alias', 'kind', 'time', 'provenance', 'status', 'title', 'excerpt', 'links', 'held'])
+    assert.ok(MATERIAL_KINDS.includes(r.kind) && r.held === false && Object.isFrozen(r) && Object.isFrozen(r.links) && Object.isFrozen(r.time) && Object.isFrozen(r.provenance))
+    assert.deepEqual(Object.keys(r.time), ['slice', 'at']); assert.deepEqual(Object.keys(r.provenance), ['kind', 'by', 'basis'])
+    for (const l of r.links) assert.ok(MATERIAL_LINK_TYPES.includes(l.type) && rows.some(o => o.alias === l.toAlias) && l.toAlias !== r.alias)
+  }
+  assert.doesNotMatch(JSON.stringify(rows), /db\/|"id"|rev|"p"|probab|via/)
+  const plan = rows.find(r => r.title === 'PostgreSQL 마이그레이션 배포 계획')
+  assert.deepEqual([plan.time, plan.status, plan.statusReading], [{ slice: 'planned', at: null }, 'plan', 'plan'])
+  assert.deepEqual(rows.find(r => r.title === 'PostgreSQL 전환 설계').time, { slice: 'past', at: '2026-11-12' })
+  // the plan WILL replace the current schema: recorded on the plan row only; the schema is not marked replaced by a record that is not settled
+  const schema = rows.find(r => r.title === '현재 SQLite 스키마(운영)')
+  assert.ok(plan.links.some(l => l.type === 'supersedes' && l.toAlias === schema.alias)); assert.ok(!schema.links.some(l => l.type === 'superseded_by'))
+  // bounds: the excerpt and the count are clamped, whatever is asked for
+  assert.ok(memoryMaterials(result, wiki, { scope: SCOPE, excerptChars: 12 }).every(r => r.excerpt.length <= 12 + 4 && r.excerpt.endsWith(' […]')))
+  assert.equal(memoryMaterials(result, wiki, { scope: SCOPE, max: 2 }).length, 2); assert.equal(memoryMaterials(result, wiki, { scope: SCOPE, max: 0 }).length, 0)
+  assert.ok(memoryMaterials(result, wiki, { scope: SCOPE, max: 1e9 }).length <= MATERIAL_LIMITS.hardMax)
+  assert.deepEqual([memoryMaterials(null, wiki), memoryMaterials(result, null), memoryMaterials({}, wiki)], [[], [], []])
+})
+
+test('memoryMaterials: a settled replacement is shown on the replaced row; a page that may not be read is absent with its links; held rows follow, without a reading', async () => {
+  // the v2 quote is done here, so it really replaces v1
+  const settled = buildWiki(SYNTHETIC_PAGES.map(p => (p.id === 'quote/a-v2-plan' ? { ...p, status: 'done', time: { slice: 'past' } } : p)))
+  const quotes = await firstTurn('A사 견적 v1이랑 v2 비교해줘', settled)
+  const rows = memoryMaterials(quotes, settled, { scope: SCOPE })
+  const v1 = rows.find(r => r.title === settled.pages.get('quote/a-v1').title), v2 = rows.find(r => r.title === settled.pages.get('quote/a-v2-plan').title)
+  assert.ok(v1 && v2, 'both versions are in the packet')
+  assert.ok(v1.links.some(l => l.type === 'superseded_by' && l.toAlias === v2.alias) && v2.links.some(l => l.type === 'supersedes' && l.toAlias === v1.alias))
+  // permission is asked again at the call, page by page
+  let open = true
+  const guarded = buildWiki(SYNTHETIC_PAGES.map(p => (p.id === 'db/pg-design' ? { ...p, mayRead: () => open } : p)))
+  const result = await firstTurn(undefined, guarded)
+  const before = memoryMaterials(result, guarded, { scope: SCOPE })
+  open = false
+  const after = memoryMaterials(result, guarded, { scope: SCOPE })
+  assert.equal(after.length, before.length - 1); assert.ok(!after.some(r => r.title === 'PostgreSQL 전환 설계'))
+  for (const r of after) for (const l of r.links) assert.ok(after.some(o => o.alias === l.toAlias))
+  assert.deepEqual(memoryMaterials(result, guarded, { scope: { allowedScopes: [] } }).map(r => r.title), after.filter(r => !guarded.pages.get([...guarded.pages.keys()].find(id => guarded.pages.get(id).title === r.title)).scope).map(r => r.title), 'a scope that allows nothing leaves only unscoped pages')
+  // mid-session: what this turn attaches first, then what the thread already holds (unchanged), which nobody judged this turn
+  open = true
+  const wiki = buildWiki(SYNTHETIC_PAGES), held = receiptsFor(wiki, PG_HELD)
+  const mid = await prepareTurnMemory({ message: 'PostgreSQL 마이그레이션 배포 끝났어', wiki, client: mockJudge(), scope: SCOPE, askedAt: ASKED, position: MID, threadKey: THREAD, delivered: held, budget: { linksFirst: true } })
+  assert.deepEqual(mid.held.slice().sort(), PG_HELD.slice().sort())
+  const midRows = memoryMaterials(mid, wiki, { scope: SCOPE })
+  assert.deepEqual(midRows.filter(r => r.held).map(r => r.title).sort(), PG_HELD.map(id => wiki.pages.get(id).title).sort())
+  assert.ok(midRows.some(r => !r.held) && midRows.findIndex(r => r.held) > midRows.findLastIndex(r => !r.held) && midRows.filter(r => r.held).every(r => r.statusReading === undefined))
+  // the host did not send the packet: the model does not have the new pages, so they are not listed
+  assert.ok(memoryMaterials(mid, wiki, { scope: SCOPE, attached: false }).every(r => r.held))
+  // a held page that changed since it was delivered is not "held"
+  const stale = { ...held, pages: { ...held.pages, 'db/pg-plan': { revision: '0', hash: held.pages['db/pg-plan'].hash } } }
+  const changed = await prepareTurnMemory({ message: '고마워', wiki, client: mockJudge(), scope: SCOPE, askedAt: ASKED, position: MID, threadKey: THREAD, delivered: stale })
+  assert.ok(!changed.held.includes('db/pg-plan') && changed.held.includes('db/pg-design'))
+})
+
+test('renderMemoryPacket: byte-identical to the loop\'s packet when nothing is left out; mergeIntoSelection sends each body once', async () => {
+  const wiki = buildWiki(SYNTHETIC_PAGES), result = await firstTurn(undefined, wiki), parts = result.memory.packetParts
+  assert.equal(renderMemoryPacket(parts), result.packet); assert.equal(renderMemoryPacket(parts, { omitBodies: [], sameSource: new Set() }), result.packet)
+  assert.equal(renderMemoryPacket(null), null); assert.equal((await prepareTurnMemory({ message: '고마워', wiki, client: mockJudge(), scope: SCOPE, askedAt: ASKED, position: FIRST })).memory.packetParts, null)
+  const body = id => wiki.pages.get(id).body, count = (text, part) => text.split(part).length - 1
+  const selection = `SELECTED ITEMS\n\n[item A]\n${body('db/pg-plan')}\n\n[item B]\n요약만 있는 다른 표현`
+  const merged = mergeIntoSelection(selection, parts, ['db/pg-plan', 'db/pg-rollback', 'not/in-packet'])
+  assert.ok(merged.value.startsWith(`${selection}\n\n`))
+  assert.deepEqual([merged.omitted, merged.sameSource], [['db/pg-plan'], ['db/pg-rollback']])
+  for (const id of Object.keys(result.memory.delivered)) assert.equal(count(merged.value, body(id)), 1, id)
+  assert.equal(count(merged.value, BODY_ELSEWHERE), 1); assert.ok(merged.value.includes(`${SAME_SOURCE}\n${body('db/pg-rollback')}`))
+  assert.match(merged.value, /\[page id=db\/pg-plan [^\]]*status-read=plan[^\]]*\]\n\[content not repeated here/, 'the header (time, provenance, status reading) stays')
+  assert.ok(merged.value.includes('[links among held pages]'), 'links are untouched')
+  // nothing selected: the memory part is the packet itself; nothing to merge into: null
+  assert.equal(mergeIntoSelection(selection, parts, []).value, `${selection}\n\n${result.packet}`)
+  assert.deepEqual([mergeIntoSelection('', parts, []), mergeIntoSelection(selection, null, []), mergeIntoSelection('  ', parts, ['db/pg-plan'])], [null, null, null])
+})

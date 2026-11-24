@@ -199,12 +199,23 @@ export function createWikiAdapter({ writes = null } = {}) {
       try { written = writes ? writes.read() : written } catch { /* a broken store only means no written pages */ }
       // Written pages: a body-less page keeps a reference into the chat store and exists only while that reference still resolves for this caller.
       const resolvable = new Map(speech.map(p => [p.ref, p]))
-      const pages = []
+      const pages = [], replaced = new Map()
       for (const p of written.pages) {
         if (p.scope && p.scope !== scope) continue
         if (p.body) { pages.push({ ...p, body: p.body }); continue }
         const source = resolvable.get(p.ref)
-        if (source) pages.push({ ...p, title: source.title, body: source.body, contentKey: source.contentKey, mayRead: source.mayRead })
+        if (!source) continue
+        // The written page IS that utterance (same words, by reference) with what was recorded about it. One page, not two: the bare
+        // utterance page gives way, and its place in the conversation chain (its links, and links to it) moves to the written page.
+        const first = !replaced.has(source.id)
+        if (first) replaced.set(source.id, p.id)
+        pages.push({ ...p, title: source.title, body: source.body, contentKey: source.contentKey, mayRead: source.mayRead,
+          links: [...(Array.isArray(p.links) ? p.links : []), ...(first ? source.links ?? [] : [])] })
+      }
+      if (replaced.size) {
+        const moved = link => (replaced.has(link.to) ? { ...link, to: replaced.get(link.to) } : link)
+        raw = raw.filter(p => !replaced.has(p.id)).map(p => (Array.isArray(p.links) && p.links.some(l => replaced.has(l.to)) ? { ...p, links: p.links.map(moved) } : p))
+        for (const p of pages) if (Array.isArray(p.links)) p.links = p.links.map(moved).filter(l => l.to !== p.id)
       }
       counts.written = pages.length
       raw = overlayWrites([...raw, ...pages.slice(-MAX.written)], written)

@@ -149,13 +149,15 @@ export async function judgeTurnWrite({ message, candidates = [], client, askedAt
   let result
   try { result = await client.decide({ input, questions, timeoutMs, signal }) } catch (error) { return none('judge_failed', { code: error?.code ?? 'unreachable' }) }
   const target = readChoice(result.answers, 'tw_target', { minConfidence: 0.75, minMargin: 0.2 })
-  const labels = mergedLabels(speechDesignInterpretations('axes-isolated', result.answers, spans))
+  // One entry per sentence that got at least one label above its bar: offsets and label words only, never text, scores or runner-ups.
+  const installed = speechDesignInterpretations('axes-isolated', result.answers, spans)
+  const labels = mergedLabels(installed)
   const rec = recordFromLabels(labels)
   const said = readChoice(result.answers, 'tw_status', { minConfidence: 0.75, minMargin: 0.2 })
   if (said.state === 'accepted' && (said.value === 'done' || said.value === 'plan')) rec.status = said.value // a three-way state question; the axes decide time and provenance
   // Numbers only (never the option labels): the winner and runner-up probabilities and how many options there were.
   const rows = (Array.isArray(result.answers?.tw_target?.probabilities) ? result.answers.tw_target.probabilities : []).map(r => r?.probability).filter(Number.isFinite).sort((x, y) => y - x)
-  const receipt = { target: { value: target.state === 'accepted' ? target.value : null, confidence: target.confidence, margin: target.margin, top: rows[0] ?? null, second: rows[1] ?? null, options: options.length }, labels, status: said.state === 'accepted' ? said.value : null, usage: result.usage ?? null, questions: questions.length }
+  const receipt = { target: { value: target.state === 'accepted' ? target.value : null, confidence: target.confidence, margin: target.margin, top: rows[0] ?? null, second: rows[1] ?? null, options: options.length }, labels, spans: installed, sentences: spans.length, status: said.state === 'accepted' ? said.value : null, usage: result.usage ?? null, questions: questions.length }
   if (target.state !== 'accepted' || target.value === 'none' || target.value === 'unsure') return { proposal: { op: 'none', reason: target.state !== 'accepted' ? 'target_undecided' : target.value === 'none' ? 'not_recorded' : 'unsure' }, receipt }
   if (!rec.recordable) return { proposal: { op: 'none', reason: 'question' }, receipt }
   const spokenAt = Number.isSafeInteger(askedAt) ? new Date(askedAt).toISOString() : null

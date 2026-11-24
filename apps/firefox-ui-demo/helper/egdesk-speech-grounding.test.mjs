@@ -219,7 +219,9 @@ test('predicate design: mixed or undecided readings stay unknown; no label witho
 
 test('design flag: absent or unrecognised means the current axes design byte for byte', () => {
   const spans = [{ start: 0, end: 39 }]
-  assert.deepEqual(SPEECH_DESIGNS, ['axes', 'predicates', 'axes-isolated', 'predicates-isolated', 'compare-isolated'])
+  assert.deepEqual(SPEECH_DESIGNS, ['axes', 'predicates', 'axes-isolated', 'predicates-isolated', 'compare-isolated', 'at-page'])
+  // 'at-page': nothing is asked on the turn and nothing is read from its answers (the utterance is labelled after the answer, once)
+  assert.deepEqual(speechDesignQuestions('at-page', spans, 'x'.repeat(39)), []); assert.deepEqual(speechDesignInterpretations('at-page', answersAt(0), spans), [])
   for (const flag of [undefined, null, 'axes', 'PREDICATES', 1, {}]) {
     assert.deepEqual(speechDesignQuestions(flag, spans), speechQuestions(spans))
     assert.deepEqual(speechDesignInterpretations(flag, answersAt(0), spans), speechInterpretations(answersAt(0), spans))

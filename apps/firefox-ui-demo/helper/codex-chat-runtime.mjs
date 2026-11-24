@@ -69,7 +69,7 @@ export function compactionSignal(message) {
   return null
 }
 const FLOW_OWN_KINDS = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
-import { speechSegments } from './egdesk-speech-grounding.mjs'
+import { SPEECH_AT_PAGE, speechSegments } from './egdesk-speech-grounding.mjs'
 import { deriveTurnPosition, memoryMaterials, prepareTurnMemory } from './egdesk-turn-memory.mjs'
 import { createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry } from './egdesk-browser-task.mjs'
 import { hostOf } from './egdesk-browser-task-memory.mjs'
@@ -803,6 +803,7 @@ export class CodexChatRuntime {
     // Decision model context setup (DECISION_MODEL_CONTEXT_SETUP.md §3.1):
     // { mode(): 'off'|'advisory'|'on', configured(): boolean, client, collect({ body, context }) → candidates, budgetMs? } or null.
     this.speechRuns = new WeakMap() // private runtime-only grants; never projected onto public runs
+    this.speechDeferred = new WeakMap() // speech design 'at-page': run -> the person's utterance, recorded once after the answer with the labels installed then
     this.calibrationRuns = new WeakMap() // run -> content-free calibration entry id; process-local
     // Live-session heartbeats (egdesk-heartbeat.mjs): one per live conversation, on its own monotonic counter, independent of engine events.
     this.heartbeats = createHeartbeats({ monotonicNow: () => this.monotonicNow(), setTimer: (fn, ms) => this.setTimer(fn, ms), clearTimer: handle => this.clearTimer(handle) })
@@ -2726,7 +2727,10 @@ export class CodexChatRuntime {
         decision.result.noteSent?.()
         if (Array.isArray(decision.result.speechInterpretations) && decision.speech?.allowed()) {
           this.speechRuns.set(run, decision.speech)
-          decision.speech.record(context.localMessageId, 'user', body.message, decision.result.speechInterpretations)
+          // A speech record is immutable once stored. Under 'at-page' the labels do not exist yet, so the record is written after the answer
+          // (startTurnMemoryWrite), once, with whatever the write judgment installed, or with none when the turn was not judged.
+          if (decision.speech.design === SPEECH_AT_PAGE && memoryTurn) this.speechDeferred.set(run, { speech: decision.speech, localMessageId: context.localMessageId, message: body.message })
+          else decision.speech.record(context.localMessageId, 'user', body.message, decision.result.speechInterpretations)
         }
       }
       if (decision) this.noteDecisionContext(run, decision)
@@ -4336,7 +4340,10 @@ export class CodexChatRuntime {
         }
         return out
       }
-      return { allowed, modeActive, records, segments: speechSegments(body.message), design: ['predicates', 'axes-isolated', 'predicates-isolated'].includes(setup.speechDesign) ? setup.speechDesign : 'axes', candidate: () => {
+      // 'at-page' needs the write judgment that labels after the answer: it is honoured only while turn memory is 'on' with its write path;
+      // anywhere else it would leave every utterance unlabelled for good, so it falls back to the current design.
+      const atPage = setup.speechDesign === SPEECH_AT_PAGE && this.turnMemoryMode() === 'on' && setup.turnMemory?.ontologyWrite === true && typeof setup.turnMemory?.writer === 'function'
+      return { allowed, modeActive, records, segments: speechSegments(body.message), design: atPage ? SPEECH_AT_PAGE : ['predicates', 'axes-isolated', 'predicates-isolated'].includes(setup.speechDesign) ? setup.speechDesign : 'axes', candidate: () => {
         if (!allowed()) return null
         const refs = evidence.recentSpeech(dm.scope, gen)
         if (!refs?.length) return null
@@ -5512,13 +5519,25 @@ export class CodexChatRuntime {
   startTurnMemoryWrite(run) {
     try {
       const pending = this.turnMemoryWrites.get(run)
-      if (!pending) return
+      if (!pending) { this.recordDeferredSpeech(run, []); return }
       this.turnMemoryWrites.delete(run)
-      if (run.status !== 'completed') { pending.record(null); return }
+      if (run.status !== 'completed') { this.recordDeferredSpeech(run, []); pending.record(null); return }
       const job = this.runTurnMemoryWrite(run, pending).catch(() => {})
       this.turnMemoryRuns.add(job)
       void job.finally(() => this.turnMemoryRuns.delete(job))
     } catch { /* ignore */ }
+  }
+
+  // 'at-page': the person's utterance of this run enters the consented speech record now, once, with the labels given (per sentence,
+  // installed ones only). Without a judgment it is recorded unlabelled, exactly as an utterance whose labels were all undecided.
+  recordDeferredSpeech(run, spans) {
+    try {
+      const entry = this.speechDeferred.get(run)
+      if (!entry) return false
+      this.speechDeferred.delete(run)
+      entry.speech.record(entry.localMessageId, 'user', entry.message, Array.isArray(spans) ? spans : [])
+      return true
+    } catch { return false }
   }
 
   async runTurnMemoryWrite(run, { turn, body, context, record }) {
@@ -5526,6 +5545,8 @@ export class CodexChatRuntime {
     let judged = null, applied = null
     try {
       judged = await turn.result.judgeWrite()
+      // Before anything is stored that points at this utterance: its speech record, with the labels this judgment installed.
+      const deferred = this.recordDeferredSpeech(run, judged?.receipt?.spans)
       const proposal = judged?.proposal
       if (proposal && proposal.op !== 'none' && this.turnMemoryMode() === 'on' && typeof tm?.writer === 'function') {
         // A fresh snapshot, so the revision the judge saw is checked against the page as it is now.
@@ -5535,7 +5556,7 @@ export class CodexChatRuntime {
         const writeScope = turn.baseScope ?? null
         const canWrite = ({ op, page }) => (op === 'update_status' ? !!page && memoryAllowsPage(page, turn.scope) : op === 'new_page' ? speechOk && typeof writeScope?.writeScope === 'string' : false)
         if (wiki?.pages) {
-          if (proposal.op === 'new_page' && speechOk) {
+          if (proposal.op === 'new_page' && speechOk && !deferred) {
             // The page will point at this utterance in the chat store; make sure the consented speech record of it exists (a no-op when it does).
             const labels = judged.receipt?.labels
             turn.sources.speech.record?.(context.localMessageId, 'user', body.message, labels ? [{ start: 0, end: body.message.length, source: labels.source, form: labels.form, time: labels.time }] : [])
@@ -5544,6 +5565,7 @@ export class CodexChatRuntime {
         }
       }
     } catch { applied = { status: 'invalid' } }
+    this.recordDeferredSpeech(run, []) // the judgment failed before it could be recorded: still once, unlabelled
     this.turnMemoryWriteReceipts.set(run, { proposal: judged?.proposal?.op ?? null, reason: judged?.proposal?.reason ?? null, applied: applied?.status ?? null })
     record(judged)
   }

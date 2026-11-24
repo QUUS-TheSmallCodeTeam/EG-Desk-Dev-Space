@@ -1,4 +1,4 @@
-import { SPEECH_RULES, SPEECH_THRESHOLDS, SPEECH_PREDICATE_BARS, SPEECH_PREDICATE_KEYS, speechDesignQuestions, speechDesignInterpretations, speechDesignFamily } from './egdesk-speech-grounding.mjs'
+import { SPEECH_AT_PAGE, SPEECH_RULES, SPEECH_THRESHOLDS, SPEECH_PREDICATE_BARS, SPEECH_PREDICATE_KEYS, speechDesignQuestions, speechDesignInterpretations, speechDesignFamily } from './egdesk-speech-grounding.mjs'
 import { DecisionError } from './egdesk-decision-client.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, readPredicate, sha256Hex, tableOptions, uniqueOptions } from './egdesk-decision-questions.mjs'
 
@@ -351,15 +351,18 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
   if (modeStopped()) return skipped('mode_changed')
   const withSpeech = speechDispatched && speech.allowed()
   const interpretations = withSpeech ? speechDesignInterpretations(speech.design, result.answers, speech.segments) : null
+  // 'at-page': this message carries no label questions (it is labelled once, after the answer, if it is recorded), so there is nothing to
+  // report about it here and the trace and the calibration record count no label axes for it. The recall question and its rules are unchanged.
+  const labelsOnTurn = withSpeech && speech.design !== SPEECH_AT_PAGE
   const speechRule = withSpeech ? '\n' + SPEECH_RULES + '\nQuestion clock: ' + (anchor ? anchor.toISOString() + ' (UTC offset minutes ' + (-anchor.getTimezoneOffset()) + ')' : 'unknown')
-    + '. Current user message: fallible semantic labels by UTF-16 offsets in its exact text: ' + JSON.stringify(interpretations) : ''
+    + (labelsOnTurn ? '. Current user message: fallible semantic labels by UTF-16 offsets in its exact text: ' + JSON.stringify(interpretations) : '.') : ''
   // What the person can inspect: how many labels cleared the bar, and what the recall verdict was. Never any text.
-  const speechTrace = withSpeech ? { segments: speech.segments.length, axes: speech.segments.length * 3,
+  const speechTrace = withSpeech ? { segments: speech.segments.length, axes: labelsOnTurn ? speech.segments.length * 3 : 0,
     accepted: interpretations.reduce((n, k) => n + ['source', 'form', 'time'].filter(axis => k[axis] !== 'unknown').length, 0),
     anchor: anchor ? anchor.toISOString() : null,
     recall: recall ? { state: recall.state, probability: recall.probability } : null } : null
   const calibration = buildCalibration({ answers: result.answers, thresholds, answerType, timeIntent, scored, recall, withSpeech,
-    interpretations, segments: withSpeech ? speech.segments : [], design: withSpeech ? speechDesignFamily(speech.design) : 'axes', topicRoute, topicQuestions: topicQuestions.length, candidates: list.length, discarded: discardJudgments })
+    interpretations, segments: labelsOnTurn ? speech.segments : [], design: withSpeech ? speechDesignFamily(speech.design) : 'axes', topicRoute, topicQuestions: topicQuestions.length, candidates: list.length, discarded: discardJudgments })
   const parts = items.length || withSpeech ? [PACKET_HEAD + evidenceRule + speechRule, ...items.map(item => item.block)] : []
   if (topicRoute?.packet) parts.push(topicRoute.packet)
   const packet = parts.join('\n\n') || null
