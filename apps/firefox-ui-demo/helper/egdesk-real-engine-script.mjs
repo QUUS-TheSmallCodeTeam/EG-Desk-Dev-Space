@@ -41,11 +41,13 @@ export const IN_RUN_FLAG = 'EGDESK_INRUN_MESSAGES'
 export const LIMITS = Object.freeze({ whileRunningMs: 120_000, conversations: 8, turns: 12, files: 32, pathChars: 200, contentBytes: 64 * 1024, sayChars: 4000, approvals: 4, strings: 16, stringChars: 400 })
 // the scripted person's answers (test input, never product copy)
 export const APPROVER_TEXT = Object.freeze({ yes: '응, 그 명령 실행해 줘', no: '아니, 그건 실행하지 마' })
-export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'engine', 'conversationGone', 'memory', 'briefing', 'draftCheck', 'commandsRanIncludes', 'commandsRanExcludes'])
+export const EXPECT_KEYS = Object.freeze(['toolCalls', 'noToolCalls', 'posted', 'answerIncludes', 'answerExcludes', 'noNativeTools', 'asked', 'commandsRan', 'files', 'undoRecords', 'turnStatus', 'compacted', 'engine', 'conversationGone', 'memory', 'briefing', 'collab', 'draftCheck', 'commandsRanIncludes', 'commandsRanExcludes'])
 export const ACTIONS = Object.freeze(['interrupt', 'steer', 'delete'])
 
 // `expect.briefing` belongs to the briefing hook (helper/egdesk-real-engine-briefing-hook.mjs): its shape and its checks live there (registered in helper/egdesk-real-engine-hooks.mjs)
 import { BRIEFING_EXPECT_SCHEMA, checkBriefingExpect, validateBriefingExpect } from './egdesk-real-engine-briefing-hook.mjs'
+// `from` (who sends a turn) and `expect.collab` belong to the collaboration hook (helper/egdesk-real-engine-collab-hook.mjs), lane L1
+import { COLLAB_EXPECT_SCHEMA, COLLAB_FROM, checkCollabExpect, validateCollabExpect, validateCollabFrom } from './egdesk-real-engine-collab-hook.mjs'
 const str = (max, extra = {}) => ({ type: 'string', minLength: 1, maxLength: max, ...extra })
 const strings = { type: 'array', maxItems: LIMITS.strings, items: str(LIMITS.stringChars) }
 export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
@@ -68,6 +70,7 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
           type: 'object', additionalProperties: false, anyOf: [{ required: ['say'] }, { required: ['action'] }],
           properties: {
             say: str(LIMITS.sayChars),
+            from: { enum: [...COLLAB_FROM] },
             action: { enum: [...ACTIONS] },
             afterMs: { type: 'integer', minimum: 0, maximum: LIMITS.whileRunningMs },
             approve: { type: 'array', maxItems: LIMITS.approvals, items: { enum: ['yes', 'no'] } },
@@ -92,6 +95,7 @@ export const REAL_ENGINE_SCRIPT_SCHEMA = Object.freeze({
               memory: MEMORY_EXPECT_SCHEMA,
               engine: ENGINE_EXPECT_SCHEMA,
               briefing: BRIEFING_EXPECT_SCHEMA,
+              collab: COLLAB_EXPECT_SCHEMA,
             } },
           } } },
       } } },
@@ -171,7 +175,12 @@ export function validateEngineScript(value) {
     for (const [ti, turn] of turns.entries()) {
       const tt = `${at}.turns[${ti}]`
       if (!isObject(turn)) { bad(tt, 'an object'); continue }
-      only(turn, ['say', 'approve', 'whileRunning', 'action', 'afterMs', 'expect'], tt)
+      only(turn, ['say', 'from', 'approve', 'whileRunning', 'action', 'afterMs', 'expect'], tt)
+      if (turn.from !== undefined) {
+        for (const why of validateCollabFrom(turn.from)) bad(`${tt}.from`, why)
+        if (conv.flags?.EGDESK_PRESENCE !== 'on') bad(`${tt}.from`, 'needs flags.EGDESK_PRESENCE = "on" in this conversation (the requester goes through the presence path)')
+        if (turn.action !== undefined || turn.whileRunning !== undefined) bad(`${tt}.from`, 'only a plain message turn has a sender')
+      }
       const prev = turns[ti - 1]
       if (turn.action !== undefined) {
         if (!ACTIONS.includes(turn.action)) bad(`${tt}.action`, `one of ${ACTIONS.join(', ')}`)
@@ -232,6 +241,15 @@ export function validateEngineScript(value) {
         for (const why of validateBriefingExpect(e.briefing)) bad(`${tt}.expect.briefing`, why)
         if (conv.flags?.EGDESK_BRIEFING_FLOW !== 'on') bad(`${tt}.expect.briefing`, 'needs flags.EGDESK_BRIEFING_FLOW = "on" in this conversation')
       }
+      if (e.collab !== undefined) {
+        for (const why of validateCollabExpect(e.collab)) bad(`${tt}.expect.collab`, why)
+        if (conv.flags?.EGDESK_PRESENCE !== 'on') bad(`${tt}.expect.collab`, 'needs flags.EGDESK_PRESENCE = "on" in this conversation')
+        if (e.collab.attention !== undefined) {
+          for (const flag of ['EGDESK_WORK_PLACEMENT', 'EGDESK_CONVERSATION_FLOW']) if (conv.flags?.[flag] !== 'on') bad(`${tt}.expect.collab.attention`, `needs flags.${flag} = "on" in this conversation (the scene is judged at the room's live heartbeat)`)
+          if (e.collab.attention.pointer === 'raised' && !(conv.draftCheck?.mode === 'on' || conv.flags?.EGDESK_DRAFT_CHECK === 'on')) bad(`${tt}.expect.collab.attention.pointer`, 'a pointer message needs the draft check on in this conversation')
+        }
+        if (turn.whileRunning !== undefined || turn.action !== undefined) bad(`${tt}.expect.collab`, 'not checked on a whileRunning or action turn')
+      }
       if (e.files !== undefined) {
         if (!isObject(e.files) || Object.keys(e.files).length > LIMITS.files) bad(`${tt}.expect.files`, 'an object')
         else for (const [p, content] of Object.entries(e.files)) {
@@ -283,5 +301,6 @@ export function checkTurnExpectations(expect = {}, record = {}) {
   if (expect.compacted !== undefined) put('compacted', (record.compacted === true) === expect.compacted, { compacted: record.compacted === true })
   if (expect.draftCheck) put('draftCheck', ((record.draftCheckRows ?? 0) > 0) === expect.draftCheck.ran, { rows: record.draftCheckRows ?? 0 })
   if (expect.briefing !== undefined) out.push(...checkBriefingExpect(expect.briefing, record.hooks?.briefing ?? null))
+  if (expect.collab !== undefined) out.push(...checkCollabExpect(expect.collab, record.hooks?.collab ?? null))
   return out
 }

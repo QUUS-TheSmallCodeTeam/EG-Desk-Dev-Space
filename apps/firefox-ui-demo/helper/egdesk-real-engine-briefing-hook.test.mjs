@@ -62,7 +62,8 @@ const asScripts = (...scripts) => scripts.map(script => ({ file: `${script.set}.
 const turnStarts = w => w.wire().filter(m => m.dir === 'in' && m.method === 'turn/start')
 
 test('the registration point: the check lists the briefing flags and the decision-dependent one from the hook; the committed v2 script validates and is the builder\'s', () => {
-  assert.deepEqual(CHECK_HOOKS.map(h => h.name), ['briefing']); assert.deepEqual(hookFlags(), [...BRIEFING_FLAGS]); assert.deepEqual(hookDecisionFlags(), ['EGDESK_BRIEFING_FLOW'])
+  // the briefing hook, then lane L1's collaboration hook (its flags and its decision-dependent flag are listed beside the briefing's)
+  assert.deepEqual(CHECK_HOOKS.map(h => h.name), ['briefing', 'collab']); assert.deepEqual(hookFlags(), [...BRIEFING_FLAGS, 'EGDESK_PRESENCE', 'EGDESK_WORK_PLACEMENT']); assert.deepEqual(hookDecisionFlags(), ['EGDESK_BRIEFING_FLOW', 'EGDESK_WORK_PLACEMENT'])
   for (const flag of BRIEFING_FLAGS) assert.ok(BRIDGE_COMPOSITION.flags.includes(flag) && !BRIDGE_COMPOSITION.notReproduced.flags.includes(flag), `${flag} is reproduced now, not listed as missing`)
   assert.ok(DECISION_DEPENDENT_FLAGS.includes('EGDESK_BRIEFING_FLOW'))
   const v2 = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'real-engine', 'scripts', 'real-engine-briefing-progress-v2.json'), 'utf8'))

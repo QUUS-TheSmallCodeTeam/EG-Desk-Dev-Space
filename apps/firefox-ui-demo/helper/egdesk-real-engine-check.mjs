@@ -65,7 +65,7 @@ export const BRIDGE_COMPOSITION = Object.freeze({
   notReproduced: {
     keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration'],
     runtimeKeys: ['localCapacity', 'engines', 'resolveProjectWorkspace', 'resolveRunProjectOrigin', 'expectedProcessConfiguration', 'qaReady', 'getNativeContractFingerprint', 'profiles', 'mcpServerKind', 'computerControlStore', 'onComputerControlChange', 'hostLease'],
-    flags: ['EGDESK_PRESENCE', 'EGDESK_BROWSER_ENTRY', 'EGDESK_WORK_PLACEMENT', 'EGDESK_BRIEFING_ORDER', 'EGDESK_BRIEFING_FILL_CHECK', 'EGDESK_BRIEFING_COVERAGE', // the briefing flow and its output schema are reproduced by the hook (hookFlags)
+    flags: ['EGDESK_BROWSER_ENTRY', 'EGDESK_BRIEFING_ORDER', 'EGDESK_BRIEFING_FILL_CHECK', 'EGDESK_BRIEFING_COVERAGE', // the briefing flow and its output schema are reproduced by the hook (hookFlags)
            'EGDESK_HUD_ROUTING', 'EGDESK_TERMINAL_JUDGE', 'EGDESK_CONTEXT_ROOTS', 'EGDESK_FIREFOX_PROFILE', 'EGDESK_CLAUDE_READER', 'EGDESK_CLAUDE_DELETE_SESSION', 'EGDESK_CHAT_CHOICE'],
   },
 })
@@ -439,7 +439,8 @@ export async function runConversation({ options, set, conversation, deps = {} })
       ...(FLAG.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}),
       calibrationLog, turnMemory: turnMemoryConfig,
       ...(['advisory', 'on'].includes(FLAG.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => FLAG.EGDESK_DRAFT_CHECK, design: () => (FLAG.EGDESK_DRAFT_CHECK_DESIGN === 'choice' ? 'choice' : 'predicates') } } : {}),
-      ...(FLAG.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on' } } : {}),
+      // a registered feature may add keys to the flow, as the bridge does (the collaboration hook: presence, audience and attentionPosted with EGDESK_PRESENCE=on)
+      ...(FLAG.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...Object.assign({}, ...hooks.map(h => h.conversationFlow?.(FLAG, conversation) ?? {})) } } : {}),
       ...(FLAG.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
       ...(wiring && !wiring.shadow ? { terminalGate: wiring.terminalGate(terminalGateConfig) } : terminalGateConfig ? { terminalGate: terminalGateConfig } : {}),
       ...(['advisory', 'on'].includes(FLAG.EGDESK_WORKING_MEMORY) ? { workingMemory: { mode: () => FLAG.EGDESK_WORKING_MEMORY } } : {}),
@@ -462,7 +463,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       roomAccount: { mode: () => (FLAG.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') } })
     chat.setConnection(true)
     try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
-    attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests }))
+    attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests, client, store }))
     rec.phases.composedMs = ms(t0)
     // The one registration point for another lane's module (the briefing hook, memory seeding): deps.extensions = [{ name, setup(ctx) → { afterTurn?(record, info), finish?() } }].
     // setup runs once the runtime is composed; afterTurn after every scripted turn record; finish at the end of the conversation (its value is kept in
@@ -562,6 +563,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       memoryHook.beginTurn() // memory hook
       const counts = () => messageCounts(store, clientThreadId) // journey hook: the system's own and the Agent's own messages the store holds
       journeyHook.beginTurn({ counts }) // journey hook
+      for (const a of attached) { try { await a.beforeTurn?.({ turn, index, clientThreadId, conversationId: nativeThread }) } catch (error) { (rec.hookErrors ??= []).push({ hook: a.name, error: clip(error?.code ?? error?.message ?? 'error', 100) }) } } // a registered feature's per-turn setup (who sends this turn)
       const ctx = await beginTurn(turn.say)
       if (follow === 'message') { mark = await sendInRun(ctx, next.say, next.whileRunning.afterMs); journeyHook.markInRun({ text: next.say, counts }) } // journey hook
       else if (follow) mark = await engineAction(follow, ctx, next)
@@ -618,6 +620,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       rec.cleanup.ephemeral = createdThreads.length - ids.length
       if (rec.cleanup.failures.length) { rec.ok = false; rec.cleanupFailed = true }
     }
+    for (const a of attached) { try { a.dispose?.() } catch { /* a hook's timers only */ } }
     await stop()
     try { store?.close() } catch {}
     rec.totalMs = ms(t0)
