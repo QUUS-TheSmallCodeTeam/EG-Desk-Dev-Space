@@ -16,6 +16,7 @@ import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress
 import { COMMAND_GATE_TIMEOUT_MS, assessCommand, classifyCommand, sessionRuleCoversFloor } from './egdesk-terminal-command-gate.mjs'
 import { ENGINE_VERSION_NOTICE, checkEngineVersion } from './egdesk-codex-version-pin.mjs'
 import { pureEngineThreadOverrides } from './egdesk-command-executor.mjs'
+import { loadOwnToolsIsolation } from './egdesk-own-tools-isolation.mjs'
 import { shadowCommand, shadowFileChange } from './egdesk-own-tools-shadow.mjs'
 // c18 own tools: every turn of such a thread is read-only with no approval prompts, so Codex's apply_patch can neither write nor ask.
 const OWN_TOOLS_TURN_OVERRIDES = Object.freeze({ approvalPolicy: 'never', sandboxPolicy: Object.freeze({ type: 'readOnly', networkAccess: false }) })
@@ -2655,6 +2656,15 @@ export class CodexChatRuntime {
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       }
       if (ownTools) mergeCeilingOverrides(overrides, pureEngineThreadOverrides())
+      // c22: nothing from the person's own Codex setup (MCP servers, plugins, apps, hooks, skills, memories, sub-agents) rides into an
+      // own-tools thread (egdesk-own-tools-isolation.mjs). An unreadable MCP inventory leaves the feature switches only (mcp 'unchecked').
+      if (ownTools) {
+        const isolation = await loadOwnToolsIsolation(request, neutralFolder)
+        if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
+        mergeCeilingOverrides(overrides, isolation.overrides)
+        context.ownToolsIsolation = isolation.mcp
+        try { if (this.ownTools?.environments?.() === 'none') overrides.environments = [] } catch { /* the flag only adds */ }
+      }
       await assertWorkspaceCurrent()
       assertPreparationActive()
       const result = await engine.startThread(overrides, slot)
