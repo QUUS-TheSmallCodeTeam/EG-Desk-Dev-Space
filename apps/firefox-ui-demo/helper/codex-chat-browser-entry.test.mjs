@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
 import { createBrowserEntryConfig } from './egdesk-browser-entry-wiring.mjs'
+import { createTurnMemoryConfig } from './egdesk-turn-memory-wiring.mjs'
 import { mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
 
 // L8/C9: the direct browser entry inside the REAL chat runtime (CodexChatRuntime.send), flag decisionContext.browserEntry.mode():
@@ -58,7 +59,7 @@ function qaHarness(override = {}) {
   return { chat, calls, events, replies, finish }
 }
 
-function build({ entryMode, hang = false, withClient = true, outcomes = null, failTurn = false, entryConfig = null, judge = null } = {}) {
+function build({ entryMode, hang = false, withClient = true, outcomes = null, failTurn = false, entryConfig = null, judge = null, contextExtra = null } = {}) {
   const timeline = [], decisions = [], acts = [], uiKinds = []
   let docSeq = 1
   let cur = { url: `${O}/invoices`, documentId: 'doc1', revision: 1 }
@@ -112,7 +113,7 @@ function build({ entryMode, hang = false, withClient = true, outcomes = null, fa
   const MEMORY_Q = /^(pg_|st_|op_|tn_|tw_|speech_)/
   const ctxClient = judge ? { decide: request => (request.questions.some(q => MEMORY_Q.test(q.name)) ? judge.decide(request) : client.decide(request)) } : client
   const decisionContext = entryMode === undefined && !entryConfig ? undefined : { mode: () => (withClient ? 'on' : 'off'), configured: () => withClient, client: ctxClient, calibrationLog: { record: raw => { calibration.push(raw); return {} }, complete() {} },
-    ...(entryConfig ? { browserEntry: entryConfig } : entryMode === 'absent' ? {} : { browserEntry: { mode: () => entryMode, ...(outcomes ? { outcomeSink: outcomes } : {}) } }) }
+    ...(entryConfig ? { browserEntry: entryConfig } : entryMode === 'absent' ? {} : { browserEntry: { mode: () => entryMode, ...(outcomes ? { outcomeSink: outcomes } : {}) } }), ...(contextExtra || {}) }
   const h = qaHarness({ toolProviders: [provider], getOwnerKey: () => OWNER, decisionContext, failTurn, onRequest: method => timeline.push(`native:${method}`) })
   const source = { id: 'selected-source', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact',
     sourceRef: { viewId: 'card', profileId: 'fixture', accountId: '', uri: `${O}/invoices` },
@@ -330,4 +331,53 @@ test('C11 on + heartbeat: the task loop feeds step count and waiting state to th
     assert.equal(w.h.chat.closeSession('selected-chat'), true)
     assert.deepEqual([hb.state, hb.stopReason, w.h.chat.heartbeats.size], ['stopped', 'closed', 0])
   } finally { w.h.chat.heartbeats.stopAll('restart') }
+})
+
+// ---- C14: the merged memory code with its newer switches on (turn memory 'on', one packet, the at-page speech design) ----
+test('C14 turn memory on + onePacket + at-page: the browser hook still gets last month\'s outcome page with its body, and the bounded turn carries only the task note', { timeout: 30000 }, async () => {
+  const dir = newDir()
+  const wired = () => {
+    const log = [], judge = mockJudge(log)
+    const adapter = createWikiAdapter({ writes: openWikiWrites({ dataDir: dir }) })
+    const tm = createTurnMemoryConfig({ settings: { turnMemory: { mode: 'on' } }, getAdapter: () => adapter, onePacket: true })
+    // bridge-style: the browser entry shares the turn-memory adapter and its snapshot builder
+    const config = createBrowserEntryConfig({ flag: () => 'on', getAdapter: () => tm.getAdapter(), wiki: args => tm.wiki(args) })
+    // The runtime reads the switch as decisionContext.turnMemory.onePacket; it is set here exactly where the runtime looks for it.
+    return { log, judge, adapter, tm, config, contextExtra: { turnMemory: { ...tm, onePacket: true }, speechDesign: 'at-page' } }
+  }
+  const file = path.join(dir, 'egdesk-wiki-writes.json')
+  // What the at-page design leaves in the same store: an utterance page that is only a reference to the chat message (no body).
+  const seed = wired(), ctx = { clientThreadId: 'selected-chat' }
+  const referenced = seed.adapter.writerFor(await seed.adapter.snapshot({ context: ctx }), { enabled: true, canWrite: () => true })
+    .apply({ op: 'new_page', time: { slice: 'past' }, status: 'done', provenance: { kind: 'utterance' }, links: [], spokenAt: null },
+      { message: '지난달 세금계산서는 두 번째 사업자로 받았어', messageRef: 'chat-message:m-1', scope: seed.adapter.scopeFor(ctx), operationId: 'utterance-1' })
+  assert.equal(referenced.status, 'stored')
+  assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')).pages.map(p => [typeof p.body, p.ref]), [['undefined', 'chat-message:m-1']])
+
+  // month 1: asks, the answer resumes, the outcome page is written with its body
+  const m1 = wired()
+  assert.deepEqual([m1.contextExtra.turnMemory.mode(), m1.contextExtra.turnMemory.onePacket, m1.contextExtra.turnMemory.ontologyWrite, m1.contextExtra.speechDesign], ['on', true, true, 'at-page'])
+  const w1 = build({ entryConfig: m1.config, judge: m1.judge, contextExtra: m1.contextExtra })
+  const first = await w1.send(MSG)
+  w1.h.finish(first)
+  await w1.send('두 번째 사업자로', { conversationId: first.conversationId })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  const stored = JSON.parse(readFileSync(file, 'utf8')).pages
+  const outcome = stored.find(p => p.id.startsWith('browser-task/'))
+  assert.deepEqual([stored.length, outcome.provenance.kind, typeof outcome.body, outcome.ref], [2, 'agent_note', 'string', undefined], 'the outcome keeps its own text; it is not turned into a reference')
+  assert.match(outcome.body, /선택: 사업자 987-65-43210 @ \/invoices \[choice_needed\]/)
+
+  // month 2: a new runtime over the same file, the same switches on
+  const m2 = wired()
+  const got = await m2.config.memory({ body: { message: MSG }, context: ctx, client: m2.judge, askedAt: Date.parse('2026-11-19T09:00:00Z') })
+  assert.deepEqual(got.pages.map(p => [p.id.startsWith('browser-task/'), typeof p.body]), [[true, 'string']], 'the hook is handed the outcome page, body included')
+  assert.match(got.packet, /사업자 987-65-43210/)
+  const w2 = build({ entryConfig: m2.config, judge: m2.judge, contextExtra: m2.contextExtra })
+  await w2.send(MSG)
+  const turn = w2.h.calls.find(c => c.method === 'turn/start').params
+  const note = JSON.parse(turn.additionalContext.egdesk_browser_task.value).egdesk_browser_task
+  assert.deepEqual([note.status, w2.acts.map(a => a.url)], ['done', [`${O}/biz/2`, `${O}/download/2.pdf`]], 'no question: the record answered it')
+  // the general turn-memory packet and the one-packet merge are for ordinary turns: a bounded browser turn gets neither
+  assert.deepEqual(Object.keys(turn.additionalContext).filter(k => /memory|decision|context/i.test(k)), [])
+  assert.deepEqual(w2.decisions.reduce((m, d) => (m[d.q] = (m[d.q] || 0) + 1, m), {}), { browser_entry: 1, next_step: 3 })
 })
