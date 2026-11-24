@@ -227,7 +227,7 @@ test('the bridge opens the workflow runtime after Chat, mounts its routes behind
   const auth = at('const ensureChatAuth = createChatEngineAuth({ chat, refreshCodexAccount: refreshAccountState, getCodexAuth: () => authState })')
   assert.ok(at('const chat = new CodexChatRuntime({') < auth && auth < open)
   assert.ok(auth < at('const handleChatHttp = createChatHttpHandler(chat, ensureChatAuth)'))
-  at("  ensureAuth: () => ensureChatAuth(), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2,")
+  at("  ensureAuth: hints => ensureChatAuth(hints), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2,")
   // CODE-06 added the typed-command watch: it shares the workflow bus and owner scope, and the registry still feeds exits to the runtime.
   const runWatch = at('const terminalRunWatch = createTerminalRunWatch({ bus: workflow?.bus ?? null, owner: WORKFLOW_OWNER })')
   assert.ok(open < runWatch, 'the watch reads workflow.bus, so the runtime opens first')

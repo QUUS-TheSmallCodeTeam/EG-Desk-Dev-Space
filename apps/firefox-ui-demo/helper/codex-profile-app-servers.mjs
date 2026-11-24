@@ -272,6 +272,8 @@ export function createCodexProfileAppServers({ resolveHome, env = process.env, c
     },
     reconcile() { for (const id of clients.keys()) { try { resolve(id) } catch {} } },
     residentCount: () => clients.size,
+    /** The Agent profile accounts with a resident server (L1 c25: which accounts hold captures to export). */
+    residentIds: () => [...clients.keys()],
     killAll() {
       for (const { child } of clients.values()) { try { child.kill('SIGKILL') } catch {} }
       for (const { child } of stopping) { try { child.kill('SIGKILL') } catch {} }

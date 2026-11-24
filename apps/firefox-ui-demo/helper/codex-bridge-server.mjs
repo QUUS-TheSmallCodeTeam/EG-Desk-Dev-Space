@@ -679,7 +679,9 @@ const handleDeskHttp = createDeskHttpHandler({ store: () => deskStore, port: BRI
 // RT-03 .egdesk export/inspect/import over the same local stores (signed out too).
 // Exports go to ~/Downloads/EG-Desk, or <app data>/exports without a Downloads folder.
 // RT-03 opt-in extras: captures of the signed-in account and local File drafts (off unless asked, D-R3).
-const portableAttachments = createContextAttachmentProvider({ store: contextStore, ownerKey: () => publicAuthIdentityKey(authState) })
+const portableAttachments = createContextAttachmentProvider({ store: contextStore, ownerKey: () => publicAuthIdentityKey(authState),
+  // L1 c25 (flag EGDESK_ROOM_ACCOUNT=on): captures of rooms on Agent profiles are stored under those accounts; the export lists them too
+  ...(process.env.EGDESK_ROOM_ACCOUNT === 'on' ? { ownerKeys: () => [publicAuthIdentityKey(authState), ...codexProfileServers.residentIds().map(id => codexEngine.ownerKey(id))] } : {}) })
 const portableFileDrafts = createManagedDraftProvider({ directory: path.join(dataDir, 'file-drafts') })
 const boardAskBindingKey = randomBytes(32)
 const boardAgentAsk = createBoardAgentAskService({
@@ -700,7 +702,15 @@ const handlePortableHttp = createPortableHttpHandler({ desk: () => deskStore, ch
 // /events/recent; SSE workflow.event and task.graph frames on /events.
 workflow = await openWorkflowRuntime({
   dataDir, chat, port: BRIDGE_PORT, broadcast: event => broadcast(event),
-  ensureAuth: () => ensureChatAuth(), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2, localCapacity,
+  ensureAuth: hints => ensureChatAuth(hints), getOwnerKey: () => publicAuthIdentityKey(authState), maxConcurrency: 2, localCapacity,
+  // L1 c25 (flag EGDESK_ROOM_ACCOUNT=on, default off; owner decision U11): a plan belongs to the account of its room's profile slot; steps, sources and the
+  // delegation scope use that account. Off: roomSlotOf answers nothing and every plan uses the default sign-in, as before.
+  ownerKeyFor: browserOwnerKeyFor, roomKeyed: () => process.env.EGDESK_ROOM_ACCOUNT === 'on',
+  roomSlotOf: origin => {
+    if (process.env.EGDESK_ROOM_ACCOUNT !== 'on') return undefined
+    const slot = origin?.engineProfileId ?? chat.threadEngineProfile(origin?.conversationId)
+    return isProfileSlot(slot) ? slot : undefined
+  },
 })
 const detachContextServices = contexts.attachServices({ bus: workflow.bus, settings: bridgeSettings.contextSuggest, boards: deskStore })
 for (const root of pendingFileRoots.values()) workflow.watchRoot(root)
