@@ -22,6 +22,7 @@
   const BriefingState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBriefingState.sys.mjs');
   const BriefingHost = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBriefingHost.sys.mjs');
   const WorkPlacement = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskWorkPlacement.sys.mjs');
+  const JointPresence = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskJointPresence.sys.mjs');
   const FileCardState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileCardState.sys.mjs');
   const BrowserAgentReceipts = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs');
   const BrowserGrant = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserGrant.sys.mjs');
@@ -6884,6 +6885,10 @@
       reveal,
       readLayout: () => readSurfacePref('egdesk.jointBoard.poses.v1') || {},
       writeLayout: (v) => writeSurfacePref('egdesk.jointBoard.poses.v1', v),
+      // Presence (flag egdesk.presence, default off): this person's own row for the joint provider, and their private per-Board sharing choice (a pref of this profile).
+      ...(typeof state.presenceSelf === 'function' ? { selfPresence: state.presenceSelf } : {}),
+      readPresenceShare: () => readSurfacePref(JointPresence.PRESENCE_SHARE_PREF),
+      writePresenceShare: (v) => writeSurfacePref(JointPresence.PRESENCE_SHARE_PREF, v),
       geometry: persistentEntityGeometry,
       applyGeometry: applyPersistentEntityGeometry,
       open(snapshot, epoch, offset) {
@@ -9392,6 +9397,21 @@
     } catch { /* advisory: never affects where the surface opens */ }
   }
   state.noteWorkSurfacePlacement = noteWorkSurfacePlacement;
+
+  // Cycle 9 (EGDeskJointPresence.sys.mjs). ONE presence.snapshot() for the placement runtime above and, mirrored to the bridge, for the heartbeat's audience rule.
+  // Flag-gated and OFF by default: the first line is the whole default path. Unless the pref egdesk.presence is exactly "on" nothing below it runs, state.presence stays
+  // undefined and workPresence() keeps answering with this window alone. The own row is always the single-user provider's (this window's camera, focus and input).
+  function installDeskPresence() {
+    if (state.presence || !JointPresence.presenceEnabled(readSurfacePref(JointPresence.PRESENCE_PREF))) return null;
+    const single = workPresence();
+    state.presenceSelf = () => single.snapshot()[0] ?? null;
+    state.presence = JointPresence.createDeskPresence({ single, joint: () => (typeof jointDesk !== 'undefined' && jointDesk ? jointDesk.presence : null) });
+    // The same rows go to the bridge every 3 s (content-free: aliases, booleans, numbers). Without the bridge flag the route answers 404 and nothing is kept.
+    const post = () => { try { const rows = state.presence.snapshot(); if (rows.length) void deskStoreRequest('POST', '/presence/snapshot', { rows }, { timeoutMs: 4000 }).catch(() => {}); } catch { /* optional signal */ } };
+    state.presenceMirrorTimer = window.setInterval(post, 3000);
+    return state.presence;
+  }
+  state.installDeskPresence = installDeskPresence;
 
   // The camera follows a View placed outside the view once its caller is done.
   // A restore that writes the saved rect, or a camera move made meanwhile (a
@@ -32579,6 +32599,7 @@
       installBrowserShortcuts();
       installNativeGestureHelperBridge();
       state.codexBridge = installCodexBridge(legacyChatRecords);
+      try { installDeskPresence(); } catch { /* optional: the Desk works the same without presence */ }
       window.__egdesk = {
         state,
         semantic,
