@@ -657,13 +657,16 @@ export const COVERAGE_MODES = Object.freeze(['facts', 'board'])
  *  each stands alone as a fact; a comma inside a number, "12,800", never splits). A list ("법무 검토, 대표 승인, 최종본 발송") stays one sentence, one fact.
  *  At most SKELETON_LIMITS.maxFacts; the rest are counted (cut), never asked. -> { facts: [text], cut } */
 export function answerFacts(answer) {
+  const facts = factSentences(answer)
+  return { facts: facts.slice(0, SKELETON_LIMITS.maxFacts), cut: Math.max(0, facts.length - SKELETON_LIMITS.maxFacts) }
+}
+function factSentences(answer) {
   const anchored = t => { const a = factAnchors(t); return a.dates.length + a.versions.length + a.amounts.length > 0 }
   const out = clean(answer, SKELETON_LIMITS.answerMax).split(/(?<=[.!?。])\s+/).flatMap(sentence => {
     const clauses = sentence.split(/[,;]\s+/).map(t => t.trim()).filter(Boolean)
     return clauses.length > 1 && clauses.every(anchored) ? clauses : [sentence.trim()]
   })
-  const facts = out.map(t => clean(t, SKELETON_LIMITS.factMax)).filter(Boolean)
-  return { facts: facts.slice(0, SKELETON_LIMITS.maxFacts), cut: Math.max(0, facts.length - SKELETON_LIMITS.maxFacts) }
+  return out.map(t => clean(t, SKELETON_LIMITS.factMax)).filter(Boolean)
 }
 const DATE_ANY = /(?<!\d)(\d{1,2})\s?월\s?(\d{1,2})\s?일|(?<![\d/.])(\d{1,2})[/.](\d{1,2})(?![\d/.])/g
 const AMOUNT = /\d{1,3}(?:,\d{3})+|\d+(?=\s?(?:원|개|%|명|건|대|일간))/g
@@ -685,6 +688,26 @@ export function factCites(text, materials) {
     const marks = [...body.matchAll(new RegExp(VERSION_MARK.source, 'gi'))].map(x => Number(x[1] ?? x[2] ?? x[3]))
     return a.dates.some(d => dateMatches(d, { at: m.at, text: body })) || a.versions.some(n => marks.includes(n)) || a.amounts.some(x => body.includes(x))
   }).map(m => m.alias)
+}
+
+// Cycle 27 (Main, R3): the materials the ANSWER cites stay on the board even when request relevance dropped them, so a fact the answer states is not lost to the chat.
+// Found by code, per fact of the answer (all its sentences, not only the six the coverage asks): its specific anchors - lane-cycle ids ("L7 c19"), version marks,
+// amounts - cite the materials that carry them; a date cites only when the fact has no specific anchor (a date alone is shared by a whole day of records).
+const LANE_CYCLE_ID = /(?<![A-Za-z0-9])([A-Za-z]\d{1,2})\s?(c\d{1,3})(?![A-Za-z0-9])/gi
+const laneCycleIds = t => [...String(t).matchAll(LANE_CYCLE_ID)].map(m => `${m[1]} ${m[2]}`.toLowerCase())
+export function answerCited(answer, materials) {
+  const cited = new Set()
+  for (const fact of factSentences(answer)) {
+    const a = factAnchors(fact), ids = laneCycleIds(fact)
+    const specific = ids.length || a.versions.length || a.amounts.length
+    for (const m of materials) {
+      const body = `${m.title} ${m.text}`
+      const marks = [...body.matchAll(new RegExp(VERSION_MARK.source, 'gi'))].map(x => Number(x[1] ?? x[2] ?? x[3])), own = laneCycleIds(body)
+      const hit = specific ? ids.some(id => own.includes(id)) || a.versions.some(n => marks.includes(n)) || a.amounts.some(x => body.includes(x)) : a.dates.some(d => dateMatches(d, { at: m.at, text: body }))
+      if (hit) cited.add(m.alias)
+    }
+  }
+  return [...cited]
 }
 
 // ---------------- 6. the bounded loop ----------------
@@ -740,9 +763,11 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     return done('advisory-only', { verdict: placed.advisory, requested: true })
   }
   // Code drops what the request does not ask about (decided no or undecided) and adds the version pairs the judge confirmed; the scene is built again from that.
-  const kept = new Set(relevance.filter(q => isYes(placed.answers[`about_${q.material}`])).flatMap(q => q.covers))
+  const relevant = new Set(relevance.filter(q => isYes(placed.answers[`about_${q.material}`])).flatMap(q => q.covers))
+  // (cycle 27) and what the answer itself cites stays, whatever relevance said; recorded apart
+  const citedOnly = (said ? answerCited(said, scene.materials) : []).filter(a => !relevant.has(a)), kept = new Set(scene.materials.map(m => m.alias).filter(a => relevant.has(a) || citedOnly.includes(a)))
   const dropped0 = scene.materials.filter(m => !kept.has(m.alias)).map(m => m.alias), versions = pairs.filter(([a, b]) => isYes(placed.answers[`same_${a}_${b}`]))
-  relevanceOut = { kept: [...kept], dropped: dropped0, versions }
+  relevanceOut = { kept: [...kept], dropped: dropped0, versions, ...(citedOnly.length ? { cited: citedOnly } : {}) }
   const place = decidePlace(placed.answers, { relevant: kept.size })
   if (place.value !== 'board') return done('bubble', { reason: place.reason, requested: true, place: placed.answers })
   if (!kept.size) return done('bubble', { reason: 'not-asked-about', requested: true })
