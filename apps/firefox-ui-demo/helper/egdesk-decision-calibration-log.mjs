@@ -25,10 +25,21 @@ export const MAX_BYTES = 192 * 1024
 export const RETENTION_DAYS = 30
 const MAX_JUDGMENTS = 64
 
-const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check'])
+const FEATURES = new Set(['turn_context', 'dm_chooser', 'board_arrangement', 'board_reply', 'browser_reflex', 'terminal_state', 'terminal_gate', 'draft_check', 'turn_memory'])
 const MODES = new Set(['advisory', 'on'])
-const QUESTIONS = new Set(['answer_type', 'time_intent', 'relevance', 'speech_axis', 'speech_predicate', 'recall', 'topic_route', 'choice', 'next_step', 'page_state', 'goal_met', 'terminal_state', 'terminal_risk', 'log_block', 'claim_support', 'claim_present', 'term_internal'])
-const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed', 'none', 'act', 'hold'])
+const QUESTIONS = new Set(['answer_type', 'time_intent', 'relevance', 'speech_axis', 'speech_predicate', 'recall', 'topic_route', 'choice', 'next_step', 'page_state', 'goal_met', 'terminal_state', 'terminal_risk', 'log_block', 'claim_support', 'claim_present', 'term_internal', 'triage_courtesy', 'triage_need', 'triage_record', 'write_target'])
+const WOULD = new Set(['accept', 'reject', 'attach', 'skip', 'unknown', 'routed', 'none', 'act', 'hold', 'fetch'])
+// Turn memory (advisory): where in the session the turn was, what the fetch did, and how long each stage took.
+const POSITIONS = new Set(['first', 'mid'])
+const MEMORY = new Set(['ran', 'skipped', 'partial', 'fallback', 'empty'])
+const ms = value => (Number.isFinite(value) && value >= 0 ? Math.min(120000, Math.round(value / 10) * 10) : null)
+function timing(raw) {
+  if (!record(raw)) return null
+  const out = {}
+  for (const key of ['prepMs', 'triageMs', 'fetchMs', 'writeMs', 'totalMs']) put(out, key, ms(raw[key]))
+  put(out, 'calls', count(raw.calls, 50)); put(out, 'withinBudget', typeof raw.withinBudget === 'boolean' ? raw.withinBudget : null)
+  return Object.keys(out).length ? out : null
+}
 const FORCED = new Set(['mentioned', 'mandatory'])
 const KINDS = new Set(['board', 'source', 'conversation', 'timeline', 'document'])
 const SLICES = new Set(['past', 'present', 'planned', 'hypothetical', 'unknown'])
@@ -97,6 +108,7 @@ export function normalizeEntry(raw, now = Date.now()) {
   const list = Array.isArray(raw.judgments) ? raw.judgments.slice(0, MAX_JUDGMENTS).map(judgment).filter(Boolean) : []
   entry.judgments = list
   put(entry, 'candidates', count(raw.candidates, 1000)); put(entry, 'judgedTotal', count(raw.judgedTotal, 1000))
+  put(entry, 'position', word(POSITIONS, raw.position)); put(entry, 'memory', word(MEMORY, raw.memory)); put(entry, 'timing', timing(raw.timing))
   put(entry, 'fallback', word(FALLBACK, raw.fallback)); put(entry, 'attached', typeof raw.attached === 'boolean' ? raw.attached : null)
   return entry
 }

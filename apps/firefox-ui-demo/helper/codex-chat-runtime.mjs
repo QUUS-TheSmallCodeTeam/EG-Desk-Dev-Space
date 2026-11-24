@@ -37,7 +37,8 @@ const FIXTURE_BROWSER_TOOL_NAMES = Object.freeze(['egdesk_browser_observe', 'egd
 import { planSessionTopic, SESSION_TOPIC_LIMITS } from './egdesk-session-topic.mjs'
 import { TOPIC_ANSWER_LIMIT, TOPIC_ANSWER_HOLD_MS, topicAnswerContradiction } from './egdesk-topic-answer-grounding.mjs'
 import { speechSegments } from './egdesk-speech-grounding.mjs'
-import { deriveTurnPosition } from './egdesk-turn-memory.mjs'
+import { deriveTurnPosition, prepareTurnMemory } from './egdesk-turn-memory.mjs'
+import { NO as MEMORY_NO, YES as MEMORY_YES } from './egdesk-wiki-reconstruction.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
 // Reviewed requests expire after two minutes; only canonical v4 UUID IDs are accepted.
@@ -767,6 +768,9 @@ export class CodexChatRuntime {
     // { mode(): 'off'|'advisory'|'on', configured(): boolean, client, collect({ body, context }) → candidates, budgetMs? } or null.
     this.speechRuns = new WeakMap() // private runtime-only grants; never projected onto public runs
     this.calibrationRuns = new WeakMap() // run -> content-free calibration entry id; process-local
+    this.turnMemoryRuns = new Set() // in-flight advisory memory jobs (never awaited by a turn)
+    this.turnMemoryShadow = new Map() // thread -> receipts of what advisory packets WOULD have delivered; in memory only, bounded
+    this.turnMemoryCalibration = new WeakMap() // run -> calibration handle of the advisory memory entry
     this.compactedThreads = new Set() // native threads whose context the host knows was compacted (no engine signal is wired yet)
     this.topicAnswerGuards = new WeakMap() // private, bounded proof; never checkpointed
     this.topicIntakes = new WeakMap() // accepted local request -> prospective generation, never copied to checkpoints
@@ -2277,6 +2281,9 @@ export class CodexChatRuntime {
     const shares = bounded ? [] : this.pendingShares(context.clientThreadId)
     // Decision model context setup: 'on' attaches the selected items, 'advisory' only records them.
     const decision = bounded ? null : await this.prepareDecisionContext(body, context)
+    // Advisory turn memory (flag decisionContext.turnMemory.mode() === 'advisory', default off): the position is read before the thread is prepared.
+    const memoryPosition = !bounded && this.turnMemoryMode() === 'advisory' ? this.turnPosition(context) : null
+    const memoryClock = memoryPosition ? performance.now() : null // thread preparation time from here to dispatch is recorded as prepMs
     const decisionExtra = decision?.mode === 'on' ? decision.result.extraContext || {} : {}
     const channel = !bounded && context.channelKind ? { egdesk_channel: channelContextBlock(context.channelKind, {
       project: !!workspace, captures: preparedProviders.get(this.contexts)?.captures?.length || 0, shared: shares.length,
@@ -2616,6 +2623,7 @@ export class CodexChatRuntime {
         }
       }
       if (decision) this.noteDecisionContext(run, decision)
+      if (memoryPosition) this.startTurnMemoryAdvisory(run, body, context, memoryPosition, performance.now() - memoryClock) // after dispatch, in the background: never delays or changes the turn
       // Notifications can precede the RPC response. Only the returned turn ID
       // may inherit this request's correlation; other turns remain unclaimed.
       while (pending.buffer.length) await this.apply(pending.buffer.shift())
@@ -4503,12 +4511,107 @@ export class CodexChatRuntime {
 
   // The label that arrives after the turn: how it ended, and how many tool activities the reasoning model ran itself.
   completeCalibration(run) {
+    this.completeTurnMemoryCalibration(run)
     try {
       const id = this.calibrationRuns.get(run), log = this.decisionContext?.calibrationLog
       if (!id || !log) return
       this.calibrationRuns.delete(run)
       const own = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
       log.complete(id, { run: run.status, toolActivities: (run.activities || []).filter(a => !own.has(a.kind)).length })
+    } catch { /* ignore */ }
+  }
+
+  // ---- Advisory turn memory (egdesk-turn-memory.mjs). Record only: nothing here changes what the answering model receives. ----
+  // Config: decisionContext.turnMemory = { mode(): 'off'|'advisory', wiki({ body, context }) → wiki|null, scope?, live?, eligible?, budget?, ontologyWrite?, deadlineMs? }.
+  // Absent, or any mode other than 'advisory', means off. 'on' (attaching the packet) is deliberately not implemented here yet.
+  turnMemoryMode() {
+    try { return this.decisionContext?.turnMemory?.mode?.() === 'advisory' ? 'advisory' : 'off' } catch { return 'off' }
+  }
+
+  turnMemoryIdle() { return Promise.allSettled([...this.turnMemoryRuns]) }
+
+  startTurnMemoryAdvisory(run, body, context, position, prepMs = null) {
+    try {
+      const setup = this.decisionContext, tm = setup?.turnMemory
+      if (!tm || !setup.client || typeof tm.wiki !== 'function' || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return
+      const eligible = typeof tm.eligible === 'function' ? tm.eligible({ body, context }) === true : context.channelKind === 'direct' && !context.stateless && !context.board
+      if (!eligible) return
+      const job = this.runTurnMemoryAdvisory(run, body, context, position, prepMs).catch(() => {})
+      this.turnMemoryRuns.add(job)
+      void job.finally(() => this.turnMemoryRuns.delete(job))
+    } catch { /* memory must never affect the turn */ }
+  }
+
+  async runTurnMemoryAdvisory(run, body, context, position, prepMs = null) {
+    const setup = this.decisionContext, tm = setup.turnMemory
+    const wiki = await tm.wiki({ body, context })
+    if (!wiki?.pages) return
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), Number.isSafeInteger(tm.deadlineMs) && tm.deadlineMs > 0 ? tm.deadlineMs : 15000)
+    timer.unref?.()
+    const t0 = performance.now(), spans = []
+    // Every Decisions call is timed by stage (triage / fetch / write) so a later 'on' wiring can be sized from real usage.
+    const client = { decide: async request => {
+      const start = performance.now() - t0
+      try { return await setup.client.decide(request) } finally {
+        const names = request.questions.map(q => q.name)
+        spans.push({ stage: names.some(n => n.startsWith('tn_')) ? 'triage' : names.some(n => n.startsWith('tw_')) ? 'write' : 'fetch', start, end: performance.now() - t0 })
+      }
+    } }
+    try {
+      const threadKey = run.conversationId
+      const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position, threadKey,
+        scope: typeof tm.scope === 'function' ? await tm.scope({ body, context }) : null, live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null,
+        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, signal: controller.signal })
+      const judged = result.judgeWrite ? await result.judgeWrite() : null
+      if (typeof threadKey === 'string' && threadKey) {
+        this.turnMemoryShadow.set(threadKey, result.nextDelivered())
+        while (this.turnMemoryShadow.size > 50) this.turnMemoryShadow.delete(this.turnMemoryShadow.keys().next().value)
+      }
+      this.recordTurnMemory(run, { setup, position, wiki, result, judged, spans, prepMs })
+    } finally { clearTimeout(timer) }
+  }
+
+  recordTurnMemory(run, { setup, position, wiki, result, judged, spans, prepMs }) {
+    try {
+      const log = setup.calibrationLog
+      if (!log) return
+      const triage = result.triage, judgments = []
+      const yesNo = { threshold: MEMORY_YES, minMargin: MEMORY_NO }
+      if (triage) {
+        judgments.push({ q: 'triage_courtesy', p: triage.courtesy.p, ...yesNo, would: triage.courtesy.state === 'yes' ? 'skip' : 'fetch' },
+          { q: 'triage_need', p: triage.need.p, ...yesNo, would: triage.need.state === 'no' ? 'skip' : 'fetch' },
+          { q: 'triage_record', p: triage.record.p, ...yesNo, would: triage.record.state === 'yes' ? 'attach' : 'skip' })
+      }
+      const target = judged?.receipt?.target
+      if (target) judgments.push({ q: 'write_target', top: target.top, second: target.second, confidence: target.confidence, margin: target.margin, options: target.options,
+        threshold: 0.75, minMargin: 0.2, would: target.value ? 'accept' : 'reject' })
+      const stage = name => spans.filter(x => x.stage === name)
+      const last = list => (list.length ? Math.max(...list.map(x => x.end)) : null), span = list => (list.length ? Math.max(...list.map(x => x.end)) - Math.min(...list.map(x => x.start)) : null)
+      const status = result.memory?.status
+      const budgetMs = Number.isSafeInteger(setup.budgetMs) && setup.budgetMs > 0 ? setup.budgetMs : 800
+      const handle = log.record({ feature: 'turn_memory', mode: 'advisory', position: position.kind, attached: false, judgments,
+        memory: status === 'ready' ? (result.memory.partial ? 'partial' : 'ran') : status === 'skipped' ? 'skipped' : status === 'empty' ? 'empty' : 'fallback',
+        ...(status === 'fallback' ? { fallback: result.memory.reason } : {}),
+        candidates: wiki.pages.size, judgedTotal: result.memory?.picks?.length ?? 0,
+        timing: { prepMs, triageMs: last(stage('triage')), fetchMs: span(stage('fetch')), writeMs: span(stage('write')), totalMs: last(spans), calls: spans.length,
+          withinBudget: stage('triage').length ? last(stage('triage')) <= budgetMs : null } })
+      if (!handle) return
+      if (TERMINAL.has(run.status)) this.labelTurnMemory(run, handle)
+      else this.turnMemoryCalibration.set(run, handle)
+    } catch { /* recording must never affect the turn */ }
+  }
+
+  labelTurnMemory(run, handle) {
+    const own = new Set(['decisionContext', 'plan', 'summary', 'hostNotice', 'workNote', 'toolCeiling', 'computerControl', 'quota', 'reasoning'])
+    this.decisionContext?.calibrationLog?.complete(handle, { run: run.status, toolActivities: (run.activities || []).filter(a => !own.has(a.kind)).length })
+  }
+
+  completeTurnMemoryCalibration(run) {
+    try {
+      const handle = this.turnMemoryCalibration.get(run)
+      if (!handle) return
+      this.turnMemoryCalibration.delete(run)
+      this.labelTurnMemory(run, handle)
     } catch { /* ignore */ }
   }
 

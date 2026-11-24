@@ -38,10 +38,18 @@ export function usableReceipts(delivered, position, threadKey) {
 }
 
 const TRIAGE_RULES = 'You are a system judge deciding what stored memory a turn needs. Judge only from the message, the list of what the answering model already holds, and any live conversation shown. Never invent anything.'
-/** One small call, no page content: does the turn need stored material beyond what is held, and is it worth recording? */
+/**
+ * One small call, no page content, three independent yes/no questions:
+ *  - tn_courtesy: is the message only thanks, a greeting, an acknowledgement or other small talk? (a plain social-act question;
+ *    the first real run answered "does it need stored material?" with 1.0 for "고마워", so the skip no longer rests on that question)
+ *  - tn_need: does it ask for or report something the held pages do not already cover?
+ *  - tn_record: is it worth keeping as a record?
+ * The fetch is skipped only on a decided courtesy "yes" or a decided need "no". Undecided or failed answers still fetch.
+ */
 export async function triageTurn({ message, heldTitles = [], live = null, client, askedAt = null, signal, timeoutMs = 2000 } = {}) {
   const questions = [
-    predicateQuestion('tn_need', 'Does the answering model need any stored material beyond what it already holds in order to handle this message? Thanks, greetings and small talk need none.'),
+    predicateQuestion('tn_courtesy', 'Is the message only a courtesy: thanks, a greeting, an acknowledgement or other social small talk, with no question, request, report or decision in it?'),
+    predicateQuestion('tn_need', 'Does the message ask for, or report, something that the held pages and the conversation do not already cover, so that stored notes or documents beyond the held ones would improve the answer?'),
     predicateQuestion('tn_record', 'Does this message state something worth keeping as a record: a new fact, a decision, a plan, or a change in the status of something already recorded? Greetings, thanks, small talk and pure questions are not.'),
   ]
   const input = [{ role: 'developer', content: TRIAGE_RULES },
@@ -50,8 +58,8 @@ export async function triageTurn({ message, heldTitles = [], live = null, client
     { role: 'user', content: `${clockLine(askedAt)}\nMessage:\n${message}` }]
   try {
     const result = await client.decide({ input, questions, timeoutMs, signal })
-    return { status: 'ready', need: ternary(result.answers?.tn_need), record: ternary(result.answers?.tn_record), usage: result.usage ?? null }
-  } catch (error) { return { status: 'fallback', reason: error?.code ?? 'unreachable', need: { state: 'unknown', p: null }, record: { state: 'unknown', p: null }, usage: null } }
+    return { status: 'ready', courtesy: ternary(result.answers?.tn_courtesy), need: ternary(result.answers?.tn_need), record: ternary(result.answers?.tn_record), usage: result.usage ?? null }
+  } catch (error) { return { status: 'fallback', reason: error?.code ?? 'unreachable', courtesy: { state: 'unknown', p: null }, need: { state: 'unknown', p: null }, record: { state: 'unknown', p: null }, usage: null } }
 }
 
 const WRITE_RULES = [
@@ -110,7 +118,9 @@ export async function judgeTurnWrite({ message, candidates = [], client, askedAt
   const rec = recordFromLabels(labels)
   const said = readChoice(result.answers, 'tw_status', { minConfidence: 0.75, minMargin: 0.2 })
   if (said.state === 'accepted' && (said.value === 'done' || said.value === 'plan')) rec.status = said.value // a three-way state question; the axes decide time and provenance
-  const receipt = { target: { value: target.state === 'accepted' ? target.value : null, confidence: target.confidence, margin: target.margin }, labels, status: said.state === 'accepted' ? said.value : null, usage: result.usage ?? null, questions: questions.length }
+  // Numbers only (never the option labels): the winner and runner-up probabilities and how many options there were.
+  const rows = (Array.isArray(result.answers?.tw_target?.probabilities) ? result.answers.tw_target.probabilities : []).map(r => r?.probability).filter(Number.isFinite).sort((x, y) => y - x)
+  const receipt = { target: { value: target.state === 'accepted' ? target.value : null, confidence: target.confidence, margin: target.margin, top: rows[0] ?? null, second: rows[1] ?? null, options: options.length }, labels, status: said.state === 'accepted' ? said.value : null, usage: result.usage ?? null, questions: questions.length }
   if (target.state !== 'accepted' || target.value === 'none' || target.value === 'unsure') return { proposal: { op: 'none', reason: target.state !== 'accepted' ? 'target_undecided' : target.value === 'none' ? 'not_recorded' : 'unsure' }, receipt }
   if (!rec.recordable) return { proposal: { op: 'none', reason: 'question' }, receipt }
   const spokenAt = Number.isSafeInteger(askedAt) ? new Date(askedAt).toISOString() : null
@@ -197,14 +207,15 @@ export async function prepareTurnMemory({ message, wiki, client, scope = null, a
   let triage, memory
   if (pos.kind === 'mid') {
     triage = await triageCall()
-    // "no" is the only answer that skips the fetch; undecided or failed triage still fetches.
-    memory = triage.need.state === 'no' ? { status: 'skipped', reason: 'nothing_needed', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [] }, nextDelivered: () => receipts }
+    // Only a decided courtesy "yes" or a decided need "no" skips the fetch; undecided or failed triage still fetches.
+    memory = triage.courtesy.state === 'yes' || triage.need.state === 'no' ? { status: 'skipped', reason: 'nothing_needed', packet: null, picks: [], calls: 0, receipts: { mode: 'next', calls: 0, skippedDelivered: [] }, nextDelivered: () => receipts }
       : await reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget, signal, mode: 'next', live })
   } else {
     ;[triage, memory] = await Promise.all([ontologyWrite ? triageCall() : Promise.resolve(null),
       reconstructMemory({ message, wiki, client, scope, askedAt, delivered: receipts, budget, signal, mode: 'first' })])
   }
-  const heldNow = memory.receipts?.skippedDelivered ?? []
+  // What the model holds is known from the receipts, whether or not the fetch ran (a skipped fetch has no skippedDelivered list).
+  const heldNow = [...new Set([...heldPages.map(p => p.id), ...(memory.receipts?.skippedDelivered ?? [])])]
   const nextDelivered = () => ({ ...memory.nextDelivered(), threadKey })
   let judgeWrite = null
   if (ontologyWrite === true && triage?.record?.state === 'yes') {
