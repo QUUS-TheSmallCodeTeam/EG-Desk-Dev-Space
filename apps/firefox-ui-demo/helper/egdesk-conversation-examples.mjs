@@ -13,12 +13,12 @@
 // Per user turn: the assistant message before it (the end of it, bounded), the turn, the next assistant message (its start, bounded),
 // timestamps, source file + line, code features and heuristic tags (cheap; the Decision model labels candidates afterwards, one yes/no
 // predicate per type, each request quoting the turn and the assistant excerpt before it in isolation: labelRequest). Secrets are masked
-// always (maskSecrets of helper/egdesk-scenario-seeds.mjs). The owner approved real sends of these masked examples (2026-11-24, relayed
+// always (maskSecrets of helper/egdesk-secret-mask.mjs). The owner approved real sends of these masked examples (2026-11-24, relayed
 // by Main: "당연하지"): privacy 'owner-approved'.
 import { createReadStream } from 'node:fs'
 import { createHash } from 'node:crypto'
 import readline from 'node:readline'
-import { maskSecrets } from './egdesk-scenario-seeds.mjs'
+import { maskSecrets } from './egdesk-secret-mask.mjs'
 import { independentEstimate } from './egdesk-decision-real-runner.mjs'
 
 export const EXAMPLE_SCHEMA = 'egdesk.conversation-example/1'
@@ -147,8 +147,11 @@ export function examplesOf(turns, { source, file, project = '' }) {
     if (!area) { dropped.no_area++; prev = null; continue }
     const next = turns.slice(i + 1).find(x => x.role === 'assistant' || x.role === 'user')
     const prevText = prev ? maskSecrets(tail(prev.text, EXAMPLE_LIMITS.prev)) : ''
+    // before: the person's turn the assistant message answered (bounded), so a scenario can replay the exchange in order (c20).
+    const before = prev ? [...turns.slice(0, turns.indexOf(prev))].reverse().find(x => x.role === 'user') : null
     const example = { schema: EXAMPLE_SCHEMA, area, privacy: 'owner-approved', source: { kind: source, file, line: t.line, ...(t.cwd ? { cwd: t.cwd } : {}) },
-      at: t.at, prev: prev ? { text: prevText, at: prev.at, line: prev.line } : null, user: { text: userText },
+      at: t.at, ...(before ? { before: { text: maskSecrets(head(before.text, EXAMPLE_LIMITS.user)), line: before.line } } : {}),
+      prev: prev ? { text: prevText, at: prev.at, line: prev.line } : null, user: { text: userText },
       next: next?.role === 'assistant' ? { text: maskSecrets(head(next.text, EXAMPLE_LIMITS.next)), at: next.at, line: next.line } : null,
       features: featuresOf(userText, prevText), tags: tagsOf(userText, prevText) }
     example.id = sha(`${source}|${file}|${t.line}|${userText}`).slice(0, 16)

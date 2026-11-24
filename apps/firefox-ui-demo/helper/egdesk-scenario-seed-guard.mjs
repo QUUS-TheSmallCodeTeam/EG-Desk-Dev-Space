@@ -1,4 +1,5 @@
-// The real-measure runners' guard for requests built from scenario seeds (helper/egdesk-scenario-seeds.mjs).
+// The real-measure runners' guard for requests built from scenario material (the conversation examples of
+// helper/egdesk-conversation-examples.mjs; their manifest lists each example as a 'seed' with its privacy).
 //
 // Every request body a runner is about to send (or a plan it loads) is compared with the fingerprints of the seeds it can see:
 //   - a body that carries material of a 'local-only' seed is REFUSED (dry run and send alike);
@@ -14,7 +15,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { secretsIn } from './egdesk-scenario-seeds.mjs'
+import { secretsIn } from './egdesk-secret-mask.mjs'
 
 export const FINGERPRINT_WINDOW = 24
 export const FINGERPRINT_MIN = 10
