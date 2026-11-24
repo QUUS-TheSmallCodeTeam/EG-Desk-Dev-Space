@@ -36,7 +36,8 @@ export const ALLON_PLAN_FILE = new URL('../scripts/egdesk-browser-live-allon-pla
 export const FAMILY_PLAN_FILES = Object.freeze({ statement: new URL('../scripts/egdesk-browser-live-plan-statement.json', import.meta.url),
   delivery: new URL('../scripts/egdesk-browser-live-plan-delivery.json', import.meta.url), settings: new URL('../scripts/egdesk-browser-live-plan-settings.json', import.meta.url),
   stability: new URL('../scripts/egdesk-browser-live-plan-stability.json', import.meta.url),
-  'settings-error': new URL('../scripts/egdesk-browser-live-plan-settings-error.json', import.meta.url) })
+  'settings-error': new URL('../scripts/egdesk-browser-live-plan-settings-error.json', import.meta.url),
+  holdout: new URL('../scripts/egdesk-browser-live-plan-holdout.json', import.meta.url) })
 // The plan sets this runner knows, with their phases in order. A phase with seed writes, before it runs and by code only, the record a
 // month-1 run writes (the same outcome layout through the same write path), so a small plan need not pay for month 1 again.
 const PLAN_SETS = Object.freeze({ 'browser-live-v2': ['month1', 'changed'], 'browser-live-recorded-v3': ['month2', 'renamed'], 'browser-live-allon-v1': ['allon'],
@@ -92,7 +93,9 @@ export function loadLivePlan(file = LIVE_PLAN_FILE) {
   if (!Array.isArray(plan.phases) || plan.phases.map(p => p.id).join(',') !== PLAN_SETS[plan.set].join(',')) bad('phases')
   for (const phase of plan.phases) if (!LIVE_PAGES[phase.pages] || !LIVE_PAGES[phase.pages][phase.start] || typeof phase.message !== 'string' || typeof phase.fetchMemory !== 'boolean' || !validSeed(phase.seed) || (phase.host !== undefined && !HOSTS.has(phase.host)) ||
     (phase.personDoes !== undefined && !LIVE_PAGES[phase.pages][phase.personDoes]) || (phase.title !== undefined && (typeof phase.title !== 'string' || phase.title.length > 120)) || (phase.clock !== undefined && !['month1', 'month2', 'month3'].includes(phase.clock)) ||
-    (phase.maxSteps !== undefined && !(Number.isSafeInteger(phase.maxSteps) && phase.maxSteps >= 1 && phase.maxSteps <= 8))) bad(`phase ${phase.id}`)
+    (phase.maxSteps !== undefined && !(Number.isSafeInteger(phase.maxSteps) && phase.maxSteps >= 1 && phase.maxSteps <= 8)) ||
+    // c24: a second, unrelated selected card (its own host, page set and title); only the entry reads it
+    (phase.otherCard !== undefined && !(phase.otherCard && HOSTS.has(phase.otherCard.host) && LIVE_PAGES[phase.otherCard.pages]?.[phase.otherCard.start] && typeof phase.otherCard.title === 'string' && phase.otherCard.title.length <= 120))) bad(`phase ${phase.id}`)
   const phaseIds = new Set([...plan.phases.map(p => p.id), 'all'])
   if (!Array.isArray(plan.checks) || plan.checks.some(c => !CHECKS[c.id] || !phaseIds.has(c.phase) || !['hard', 'soft', 'absolute'].includes(c.severity) || typeof c.note !== 'string')) bad('checks')
   return { ...plan, sha256: sha(text) }
@@ -165,20 +168,20 @@ export function scoreJourney(plan, journey) {
 }
 
 // ---- the journey ----
-function pageWorld(variant, host = HOST) {
+function pageWorld(variant, host = HOST, cardId = 'card') {
   const origin = `https://${host}`
   const state = { pages: LIVE_PAGES[variant], cur: null, docSeq: 0, acts: [] }
   const go = (path, href = null) => { state.cur = { path, href, documentId: `doc${++state.docSeq}`, revision: 1 } }
   const showView = path => { state.cur = { ...state.cur, path, revision: state.cur.revision + 1 } } // same document, same address
   const snap = () => { const page = state.pages[state.cur.path]
-    return { cardId: 'card', documentId: state.cur.documentId, revision: state.cur.revision, url: state.cur.href ?? `${origin}${state.cur.path}`, readyState: 'complete', text: page.text,
+    return { cardId, documentId: state.cur.documentId, revision: state.cur.revision, url: state.cur.href ?? `${origin}${state.cur.path}`, readyState: 'complete', text: page.text,
       viewport: { width: 1200, height: 800, devicePixelRatio: 1 }, interactiveElements: page.elements } }
   const transport = { runs: new Map(), hasClient: id => id === 'ui',
     bindRun: (id, thread, transportId) => { transport.runs.set(id, { clientThreadId: thread, transportId, ownerKey: OWNER }) },
     unbindRun: id => transport.runs.delete(id),
     async sendToUi(request) {
       const reply = { requestId: request.requestId }
-      if (request.kind === 'bind') return { ...reply, status: 'bound', binding: { cardId: 'card', cardEpoch: 'epoch', profileId: 'synthetic', accountId: '', userContextId: 0, url: `${origin}${state.cur.path}`, engineAccountKey: OWNER, authorityEpoch: 1 } }
+      if (request.kind === 'bind') return { ...reply, status: 'bound', binding: { cardId, cardEpoch: 'epoch', profileId: 'synthetic', accountId: '', userContextId: 0, url: `${origin}${state.cur.path}`, engineAccountKey: OWNER, authorityEpoch: 1 } }
       if (request.kind === 'observe') { const wait = request.options?.wait
         return { ...reply, status: 'observed', snapshot: wait ? { ...snap(), wait: { for: wait.for, outcome: 'met', elapsedMs: 1 } } : snap() } }
       if (request.kind === 'act') {
@@ -218,15 +221,22 @@ async function runJourney({ plan, client, key, record }) {
     const host = def.host ?? HOST, origin = `https://${host}`
     const world = pageWorld(def.pages, host)
     world.go(def.start)
+    const otherWorld = def.otherCard ? pageWorld(def.otherCard.pages, def.otherCard.host, 'other') : null
+    otherWorld?.go(def.otherCard.start)
+    // the requests of the second card go to its own page state; everything else (binding, runs) is the first card's
+    const transport = otherWorld ? { ...world.transport, sendToUi: request => (request.cardId === 'other' || request.binding?.cardId === 'other' ? otherWorld.transport : world.transport).sendToUi(request) } : world.transport
     phase.acts = world.state.acts
-    const provider = createCodexBrowserToolProvider({ transport: world.transport, getOwnerKey: () => OWNER, decision: { mode: () => 'on', configured: () => true, client,
+    const provider = createCodexBrowserToolProvider({ transport, getOwnerKey: () => OWNER, decision: { mode: () => 'on', configured: () => true, client,
       recipient: () => decisionTopicRecipient(key, 1, undefined, client.model), generation: () => 0 } })
     provider.runtime = { emit: () => {} }
     const run = { answerId: `live-${def.id}`, runId: `live-${def.id}`, clientThreadId: 'live-dm', status: 'inProgress', executionPolicy: { mode: 'browserBounded' } }
     const prepared = provider.prepare({ clientThreadId: 'live-dm', effectiveExecutionPolicy: 'browserBounded', browserTransportId: 'ui', selectedSources: [{
       id: 'source', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact', browserToolSelection: { token: `token-${def.id}`, threadId: 'live-dm' },
       browserToolIdentity: { cardEpoch: 'epoch', userContextId: 0, engineAccountKey: OWNER, authorityEpoch: 1 },
-      sourceRef: { viewId: 'card', profileId: 'synthetic', accountId: '', uri: `${origin}${def.start}` } }] })
+      sourceRef: { viewId: 'card', profileId: 'synthetic', accountId: '', uri: `${origin}${def.start}` } },
+      ...(def.otherCard ? [{ id: 'source-other', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact', browserToolSelection: { token: `token-${def.id}-other`, threadId: 'live-dm' },
+        browserToolIdentity: { cardEpoch: 'epoch', userContextId: 0, engineAccountKey: OWNER, authorityEpoch: 1 },
+        sourceRef: { viewId: 'other', profileId: 'synthetic', accountId: '', uri: `https://${def.otherCard.host}${def.otherCard.start}` } }] : [])] })
     await provider.bindRun(run, prepared)
     // Measurement cap only (phase.maxSteps): the product loop runs unchanged until the phase has taken that many steps in total; the last
     // segment then ends the task the way a rejected final step does (cannot_proceed / step_rejected), so no further request is made.
@@ -259,8 +269,8 @@ async function runJourney({ plan, client, key, record }) {
       const fetched = await prepareTurnMemory({ message: def.message, wiki, client: memoryJudge, scope: SCOPE, askedAt: record.clock, position: { kind: 'first', reason: 'no_native_thread' }, threadKey: 'live-native', ontologyWrite: false })
       memory = { packet: fetched.packet, pages: fetched.memory.picks.map(p => wiki.pages.get(p.id)).filter(Boolean), scope: SCOPE }
     }
-    const hosts = { card: host }
-    const titles = def.title ? { card: def.title } : {}
+    const hosts = { card: host, ...(def.otherCard ? { other: def.otherCard.host } : {}) }
+    const titles = { ...(def.title ? { card: def.title } : {}), ...(def.otherCard ? { other: def.otherCard.title } : {}) }
     phase.first = await entry.handle({ run, conversationKey: `live-${def.id}`, message: def.message, hosts, titles, memory })
     if (phase.first?.note) phase.firstNote = JSON.parse(phase.first.note).egdesk_browser_task
     if (phase.first?.status === 'paused') phase.paused++
