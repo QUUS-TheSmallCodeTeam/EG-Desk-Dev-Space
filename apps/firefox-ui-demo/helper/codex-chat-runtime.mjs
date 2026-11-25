@@ -4735,7 +4735,19 @@ export class CodexChatRuntime {
 
   // Answers a computer card: an engine question goes back to the engine, an app-look card (askComputerApp) to the tool provider waiting for it.
   answerComputerCard(approval, reply, decision) {
-    if (typeof approval.resolve === 'function') { approval.resolve(decision === 'accept' ? 'accept' : decision === 'expired' || decision === 'cancel' ? decision : 'decline'); return true }
+    if (typeof approval.resolve === 'function') {
+      const answered = decision === 'accept' || (decision !== 'expired' && decision !== 'cancel')
+      approval.resolve(decision === 'accept' ? 'accept' : answered ? 'decline' : decision)
+      // No engine request is waiting here, so no native "resolved" notification will come: the person's answer closes the card itself.
+      // (Expiry and a run's end are closed by their own callers.)
+      if (answered) {
+        this.pendingApprovals.delete(approval.approvalId)
+        this.dropElicitationTimer(approval.approvalId)
+        const run = this.runs.get(runKey(approval.conversationId, approval.runId))
+        if (run) { run.pendingApprovals = run.pendingApprovals.filter(item => item.approvalId !== approval.approvalId); this.emit(run, 'approval.resolved', { approvalId: approval.approvalId, outcome: decision === 'accept' ? 'accepted' : 'declined' }) }
+      }
+      return true
+    }
     return this.respond(approval.rpcId, reply, undefined, this.threadOperationSlot(approval.conversationId))
   }
 
@@ -4759,10 +4771,10 @@ export class CodexChatRuntime {
         approvalId, kind: 'computerElicitation', status: 'pending', choices: ['accept', 'decline'], itemId: null, scope: 'request',
         serverName: COMPUTER_PROVIDER_ID, appName, message, fields: [], reason: message, expiresAt: this.now() + COMPUTER_ELICITATION_TIMEOUT_MS,
       }
-      this.pendingApprovals.set(approvalId, { ...pending, rpcId: null, conversationId: run.conversationId, runId: run.runId, answer: [], resolve })
-      run.pendingApprovals.push(pending)
       const timer = this.setTimer(() => this.expireComputerElicitation(approvalId), COMPUTER_ELICITATION_TIMEOUT_MS)
       timer?.unref?.()
+      this.pendingApprovals.set(approvalId, { ...pending, rpcId: null, conversationId: run.conversationId, runId: run.runId, answer: [], resolve })
+      run.pendingApprovals.push(pending)
       this.elicitationTimers.set(approvalId, timer)
       this.emit(run, 'approval.required', pending)
     })

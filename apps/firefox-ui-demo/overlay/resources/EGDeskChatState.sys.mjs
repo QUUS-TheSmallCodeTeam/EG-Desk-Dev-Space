@@ -1456,7 +1456,23 @@ export function approvalRequestFor(run, approvalId, decision) {
   return { approvalId, conversationId: run.conversationId, runId: run.runId, decision };
 }
 
+// A computer permission card ('computerElicitation': Codex Computer Use's question, or EG-Desk's own first look at an app) is a one-off
+// question about one request (scope 'request'; the helper never offers a session or permanent choice). It can be allowed from the screen when
+// every field it asks is already answered the way the helper would send it without the person's input (a boolean always has a value; a
+// required choice needs a preselected, listed option), because this screen sends no answers. Anything else stays refuse-only.
+function computerCardScopeKnown(approval) {
+  if (approval.scope !== 'request' || approval.acceptDisabledReason || !Array.isArray(approval.fields) || approval.fields.length > 16) return false;
+  return approval.fields.every(field => {
+    if (!field || typeof field !== 'object') return false;
+    if (field.type === 'boolean') return typeof field.value === 'boolean';
+    if (field.type !== 'enum' || !Array.isArray(field.options)) return false;
+    const chosen = Number.isInteger(field.choice) && field.choice >= 0 && field.choice < field.options.length;
+    return field.choice == null ? field.required !== true : chosen;
+  });
+}
+
 export function approvalScopeKnown(approval) {
+  if (approval?.kind === 'computerElicitation') return computerCardScopeKnown(approval);
   if (!['commandExecution', 'fileChange'].includes(approval?.kind)) return false;
   if (approval.acceptDisabledReason) return false;
   if (approval.networkApprovalContext != null) {
