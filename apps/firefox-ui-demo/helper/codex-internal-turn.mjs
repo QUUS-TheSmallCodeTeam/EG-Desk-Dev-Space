@@ -43,8 +43,8 @@ export function createInternalTurns({ setTimer = (fn, ms) => setTimeout(fn, ms),
       return true
     },
     /** The deadline covers everything, including an engine that never answers the fork or the turn start (a hung engine).
-     *  c30 (L6; Main's real planted run check-25pl: 7 of 12 revision forks never completed and were cut at the 25 s deadline, while the 5 that completed took 6.9-8.3 s and the
-     *  other real runs' 12 completed internal turns 5.9-10.7 s: a stall, not slowness; the same accepted-then-silent signature hit two main turns in other real runs):
+     *  c30 (L6; Main's real planted run check-25pl: 7 of 12 revision forks never completed and were cut at the 25 s deadline, while the 5 that completed took 6.9-8.3 s and all 12 completed internal turns of
+     *  the real runs (these 5 and 7 earlier ones) 5.9-10.7 s: a stall, not slowness; the same accepted-then-silent signature hit two main turns in other real runs):
      *    hedgeMs   when a FORK has not completed after this long, and `fresh` is given, the same task also starts on a FRESH thread (freshText instead of text when given: the fresh
      *              thread has not seen the conversation, so the material must be in its text). The first turn that completes wins; the other is released. The overall deadline
      *              (timeoutMs) is unchanged, so the worst case costs nothing extra. Without hedgeMs nothing changes.

@@ -6622,8 +6622,8 @@ export class CodexChatRuntime {
   }
 
   // The subjective model's one revision, on a private fork of the conversation. Null when the fork cannot run or fails.
-  // c30 (L6; Main's real planted run check-25pl, reports/l6-c30.md): 7 of 12 revision forks never completed and were cut at the 25 s deadline (the 5 that completed took 6.9-8.3 s, the
-  // earlier real runs' 12 internal turns 5.9-10.7 s: an engine-side stall, which also hit two main turns in other runs), and an empty revision means nothing is posted. So after
+  // c30 (L6; Main's real planted run check-25pl, reports/l6-c30.md): 7 of 12 revision forks never completed and were cut at the 25 s deadline (the 5 that completed took 6.9-8.3 s, all 12 completed internal turns of the real runs
+  // (these 5 and 7 earlier ones) 5.9-10.7 s: an engine-side stall, which also hit two main turns in other runs), and an empty revision means nothing is posted. So after
   // REVISE_FORK_HEDGE_MS (above every completed internal turn measured) the same revision also starts on a fresh thread; the first to complete wins; the deadline is the same 25 s.
   // The fresh thread has not seen the conversation, so its text carries the material the check read the draft against (evidence: the check's items, readable ones only, as the
   // check cut them); the fork has it in its history. The same text is used when the room is one-time (ephemeral) and a fresh thread is the only path.
