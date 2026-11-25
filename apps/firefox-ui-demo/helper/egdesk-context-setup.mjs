@@ -191,8 +191,14 @@ function selectedSummary(items) {
 
 // Process-local list of what was attached, as the draft check's evidence options: time and provenance tags plus the catalog text
 // (title and summary) that already went to the decision model, never the loaded body. guarded marks items that need a grant.
-const draftEvidenceOf = items => items.map(item => ({ id: item.candidate.id, kind: item.candidate.kind, time: item.candidate.timeSlice, status: item.candidate.status,
-  source: item.candidate.sourceRef, text: [item.candidate.title, item.candidate.summary].filter(Boolean).join(' — '), guarded: Boolean(item.candidate.mayRead) }))
+// u5 (D18): with fileText, a prefetched WORKSPACE file whose text was delivered to the engine is evidence with that text (kind 'file', the same range the engine got: the loaded text of the item), because the
+// summary of such a file is only "N bytes, date" and a correct summary of its content could never be supported by that. Other items stay catalog text. The class 'files' of the egress gate decides whether the check may read it.
+const draftEvidenceOf = (items, { fileText = false } = {}) => items.map(item => {
+  const catalog = [item.candidate.title, item.candidate.summary].filter(Boolean).join(' — ')
+  const file = fileText === true && typeof item.candidate.id === 'string' && item.candidate.id.startsWith('workspace:') && /^full/.test(item.textSource ?? '') && typeof item.blockText === 'string' && item.blockText.trim()
+  return { id: item.candidate.id, kind: file ? 'file' : item.candidate.kind, time: item.candidate.timeSlice, status: item.candidate.status,
+    source: item.candidate.sourceRef, text: file ? `${catalog}\n${item.blockText}` : catalog, guarded: Boolean(item.candidate.mayRead) }
+})
 
 const reasonRank = reason => (reason === 'mandatory' ? 0 : reason === 'mentioned' ? 1 : 2)
 
@@ -225,7 +231,7 @@ function cacheKey(scope, hash) {
  * message comes after it.
  */
 export async function prepareTurnContext({ message, candidates = [], client, thresholds: overrides, maxItems = 8, maxChars = 24000,
-  itemChars = 6000, timeoutMs, signal, cacheScope = 'ctx', askedAt = null, speech = null, topic = null, ruleSet = 'default', previousReply = null } = {}) {
+  itemChars = 6000, draftFileText = false, timeoutMs, signal, cacheScope = 'ctx', askedAt = null, speech = null, topic = null, ruleSet = 'default', previousReply = null } = {}) {
   const thresholds = decisionThresholds(overrides)
   if (!client) return skipped('not_configured')
   if (typeof message !== 'string' || !message.trim()) return skipped('no_message')
@@ -362,7 +368,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     const safe = fileItems.filter(item => mayRead(item.candidate))
     if (!safe.length) return skipped('evidence_unavailable')
     const guardedSafe = safe.filter(item => item.candidate.mayRead)
-    return { status: 'ready', selected: selectedSummary(safe), receipt: null, draftEvidence: draftEvidenceOf(safe),
+    return { status: 'ready', selected: selectedSummary(safe), receipt: null, draftEvidence: draftEvidenceOf(safe, { fileText: draftFileText }),
       extraContext: { [DECISION_CONTEXT_KEY]: [PACKET_HEAD + evidenceRule, ...safe.map(item => item.block)].join('\n\n') },
       ...(guardedSafe.length ? { mayDispatch: () => guardedSafe.every(item => mayRead(item.candidate)),
         noteSent: () => { for (const item of guardedSafe) { try { item.candidate.noteSent?.() } catch {} } } } : {}) }
@@ -401,7 +407,7 @@ export async function prepareTurnContext({ message, candidates = [], client, thr
     // Process-local numbers for the calibration record; never part of the receipt, activity or any event.
     calibration,
     localOnly,
-    draftEvidence: draftEvidenceOf(items),
+    draftEvidence: draftEvidenceOf(items, { fileText: draftFileText }),
     extraContext: packet ? { [DECISION_CONTEXT_KEY]: packet } : {},
     latencyMs: result.latencyMs,
     model: result.model,

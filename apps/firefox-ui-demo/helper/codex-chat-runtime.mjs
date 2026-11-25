@@ -4899,7 +4899,7 @@ export class CodexChatRuntime {
       const previousReply = this.previousReplyFor(context, speech)
       const out = await prepareTurnContext({ message: body.message, candidates, client: setup.client, askedAt, speech, topic, ...(previousReply ? { previousReply } : {}),
         timeoutMs: Math.max(1, Math.ceil(deadline + (keepLate ? LATE_CONTEXT_MS : 0) - performance.now())), signal: controller.signal, cacheScope: 'ctx',
-        ...(setup.relevanceRules === 'action' || setup.relevanceRules === 'action+status' ? { ruleSet: setup.relevanceRules } : {}) })
+        ...(this.draftFilesOn() ? { draftFileText: true } : {}), ...(setup.relevanceRules === 'action' || setup.relevanceRules === 'action+status' ? { ruleSet: setup.relevanceRules } : {}) })
       if (out?.receipt && pruned.length) out.receipt = { ...out.receipt, pruned: { held: pruned.length } } // a count only, never ids
       return out
     })().catch(() => ({ status: 'fallback', reason: 'unreachable', selected: [], extraContext: {}, receipt: null }))
@@ -6851,7 +6851,7 @@ export class CodexChatRuntime {
     try { vocabulary = (await dc?.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
     const revise = ({ draft, note }) => this.reviseOnFork(run, draft, note, controller.signal, ready.evidence)
     const check = checkDraft({ draft: text, evidence: ready.evidence, evidenceIncomplete: ready.incomplete === true, userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
-      mode: 'on', design: this.draftCheckDesign(), client: setup.client, revise, signal: controller.signal, egress: this.decisionEgressFor(run), onStage: stage => this.noteDecisionStage?.(run, stage.stage, { startAt: stage.startAt, endAt: stage.endAt, outcome: stage.outcome }) })
+      mode: 'on', design: this.draftCheckDesign(), client: setup.client, revise, signal: controller.signal, egress: this.checkEgressFor(run), onStage: stage => this.noteDecisionStage?.(run, stage.stage, { startAt: stage.startAt, endAt: stage.endAt, outcome: stage.outcome }) })
     void check.catch(() => {})
     try {
       const result = await Promise.race([check, aborted])
@@ -7024,8 +7024,18 @@ export class CodexChatRuntime {
   // DM turn without guarded evidence is checked; what leaves the machine is the posted sentences plus catalog text that already went to
   // the decision model; tool outputs are sent as content-free references only.
   // The one egress gate for a run (egdesk-decision-egress.mjs): the decision model receives only what this run's models may receive.
-  decisionEgressFor(run, { memoryScope = {}, canvasMaySend = false } = {}) {
-    return createEgressGate(modelDataPermissions({ toolCeiling: run?.toolCeiling ?? null, browserGranted: Boolean(run?.browserBinding?.cards?.length), canvasMaySend, memoryScope, runActive: Boolean(run) }))
+  decisionEgressFor(run, { memoryScope = {}, canvasMaySend = false, workspaceRead = false } = {}) {
+    return createEgressGate(modelDataPermissions({ toolCeiling: run?.toolCeiling ?? null, browserGranted: Boolean(run?.browserBinding?.cards?.length), canvasMaySend, memoryScope, runActive: Boolean(run), workspaceRead }))
+  }
+
+  /**
+   * u5 (D18; flag decisionContext.draftCheck.fileText, EGDESK_DRAFT_CHECK_FILES=on, default off): the draft check and its revision read the TEXT of a prefetched working-folder file the engine was given.
+   * The data is the engine's own (it read the same text), so the gate's class 'files' is open for a run with a bound folder whose Agent ceiling does not shut both terminal and files.
+   */
+  draftFilesOn() { try { return this.decisionContext?.draftCheck?.fileText?.() === true } catch { return false } }
+  checkEgressFor(run) {
+    const ceiling = run?.toolCeiling ?? null
+    return this.decisionEgressFor(run, { workspaceRead: this.draftFilesOn() && typeof run?.ownFolder === 'string' && !!run.ownFolder && !(ceiling && ceiling.terminal === 'none' && ceiling.files === 'none') })
   }
 
   // ---- Advisory state judge on the engine's own commands (flag decisionContext.commandJudge = { mode(): 'off'|'advisory' }, default off). ----
@@ -7616,7 +7626,9 @@ export class CodexChatRuntime {
       const stoppedEvidence = context.stoppedCommand ? [stoppedCommandEvidence(context.stoppedCommand, { outputAllowed: this.decisionEgressFor(run).allows('terminal_output') })] : []
       // u5 (D18): the turn's context step answered nothing (fallback: its call was cut by the turn budget or failed): the material the model was meant to have is simply not here, so the check cannot call a sentence
       // UNSUPPORTED for want of it (the evidence is incomplete, not empty by the model's choice): see egdesk-draft-check.mjs evidenceIncomplete. A context step that ran and chose nothing is not this.
-      const contextMissing = !skip && decision?.mode === 'on' && decision.result?.status === 'fallback'
+      // Opt-in (decisionContext.draftCheck.incompleteEvidence() === 'hold', EGDESK_DRAFT_CHECK_INCOMPLETE=hold, default off): without it a cut context step changes nothing (the check judges as before: a pinned behavior of the
+      // multiuser v1 reproduction: a sentence the model had no material for is trimmed, and the model had none either).
+      const contextMissing = !skip && decision?.mode === 'on' && decision.result?.status === 'fallback' && (() => { try { return this.decisionContext?.draftCheck?.incompleteEvidence?.() === 'hold' } catch { return false } })()
       this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...stoppedEvidence, ...refs], memory: memoryItems, userText: typeof body.message === 'string' ? body.message : '', browserNote, late, contextMissing })
     } catch { /* the check must never affect the turn */ }
   }
@@ -7653,7 +7665,7 @@ export class CodexChatRuntime {
       const ready = run ? await this.draftTurnEvidence(run, turn, tools, aborted) : { skip: null, evidence: answerEvidence(turn, tools) }
       if (ready.skip) { record({ fallback: 'evidence_unavailable' }); return }
       const check = checkDraft({ draft: text, evidence: ready.evidence, evidenceIncomplete: ready.incomplete === true, userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
-        mode: 'advisory', design: this.draftCheckDesign(), client: setup.client, signal: controller.signal, egress: this.decisionEgressFor(run) })
+        mode: 'advisory', design: this.draftCheckDesign(), client: setup.client, signal: controller.signal, egress: this.checkEgressFor(run) })
       void check.catch(() => {}) // a check that outlives the deadline must not surface later
       const result = await Promise.race([check, aborted])
       const totalMs = performance.now() - t0
