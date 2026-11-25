@@ -470,12 +470,14 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
 
   // Editors go through the same hints as fields; their text itself is never
   // observed (see valueFor/labelFor/isSensitiveText).
-  isSensitiveControl(node) {
+  // allowHidden (u8, D19): the form-submission proof asks whether a field is sensitive by what it IS (password, private mark, a name or label that says secret); a type=hidden field is masked from
+  // reading (the default, unchanged) but is not by itself a reason to call a form sensitive: Google's search form carries six (ei, hl, source, ...). A hidden field named like a secret still is.
+  isSensitiveControl(node, { allowHidden = false } = {}) {
     if (!node) return false;
     const tag = String(node.tagName || "").toLowerCase();
     if (!node.isContentEditable && !["input", "textarea", "select"].includes(tag)) return false;
     const type = String(node.type || node.getAttribute?.("type") || "").toLowerCase();
-    if (["password", "hidden"].includes(type)) return true;
+    if (type === "password" || (type === "hidden" && !allowHidden)) return true;
     if (this.privateMarked(node)) return true;
     const hints = ["autocomplete", "name", "id", "aria-label", "placeholder"].map(key =>
       String(node.getAttribute?.(key) || (key === "id" ? node.id : "") || "")
@@ -980,7 +982,9 @@ export class EGDeskBrowserAgentRuntimeChild extends JSWindowActorChild {
         for (const field of Array.from(form.elements || []).slice(0, 40)) {
           const ftag = String(field.tagName || "").toLowerCase();
           const ftype = ftag === "input" ? String(field.getAttribute?.("type") || "text").toLowerCase() : ftag;
-          if (ftype === "password" || ftype === "file" || this.isSensitiveControl(field) || isSensitiveAutocomplete(field.getAttribute?.("autocomplete"))) sensitive = true;
+          // u8 (D19): a file input with no name, or a disabled one, is never part of a submission (Google's search form carries an unnamed hidden one for image search); it is neither a field kind nor a reason to call the form sensitive. A NAMED file input still is both.
+          if (ftype === "file" && (!field.getAttribute?.("name") || field.disabled)) continue;
+          if (ftype === "password" || ftype === "file" || this.isSensitiveControl(field, { allowHidden: true }) || isSensitiveAutocomplete(field.getAttribute?.("autocomplete"))) sensitive = true;
           fields.push(ftype);
           const name = field.getAttribute?.("name");
           if (!name || field.disabled || ["submit", "button", "image", "reset", "file"].includes(ftype)) continue;
