@@ -37,7 +37,7 @@ test('u3/D11: switching a room to another engine never takes a name another room
   assert.equal(ChatState.relabelDefaultRoom(room, 'Claude', '나', { threads: [room] }).title, 'Claude 2', 'free: the number is kept')
   assert.equal(ChatState.relabelDefaultRoom(room, 'Claude').title, 'Claude 2', 'without the list: as before')
   assert.match(surface, /ChatState\.relabelDefaultRoom\(thread, engineLabel, SELF_MEMBER, \{ threads: state\.codex\.threads \}\)/)
-  assert.match(surface, /const nextNonce = normalizedType === 'group' \? state\.codex\.threadNonce \+ 1 : ChatState\.nextDefaultRoomNumber\(state\.codex\.threads, state\.codex\.threadNonce\);/)
+  assert.match(surface, /const nextNonce = normalizedType === 'group' \|\| typeof ChatState === 'undefined' \|\| !ChatState\.nextDefaultRoomNumber \? state\.codex\.threadNonce \+ 1 : ChatState\.nextDefaultRoomNumber\(state\.codex\.threads, state\.codex\.threadNonce\);/)
 })
 
 // ---- D13: the list preview is the last message with words ----

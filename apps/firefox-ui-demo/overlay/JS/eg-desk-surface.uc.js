@@ -19145,7 +19145,7 @@
       createThread(type = 'dm', options = {}) {
         const normalizedType = type === 'group' ? 'group' : 'dm';
         // u3 (D11): a default room number is one above every default-named room already there (the counter is not saved)
-        const nextNonce = normalizedType === 'group' ? state.codex.threadNonce + 1 : ChatState.nextDefaultRoomNumber(state.codex.threads, state.codex.threadNonce);
+        const nextNonce = normalizedType === 'group' || typeof ChatState === 'undefined' || !ChatState.nextDefaultRoomNumber ? state.codex.threadNonce + 1 : ChatState.nextDefaultRoomNumber(state.codex.threads, state.codex.threadNonce);
         // u1: a new DM room is named for the engine that will answer it (the recent or default one), as setThreadEngine renames it when another is chosen
         let peerName = 'Codex';
         if (normalizedType !== 'group' && options.engineId !== 'codex') {
