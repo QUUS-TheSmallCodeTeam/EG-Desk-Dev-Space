@@ -14,14 +14,16 @@ import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { DECISION_KEY_ENV, loadScripts, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { REAL_ENGINE_SCRIPT_SCHEMA, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createMemoryHook, memoryGraph, memoryNeedsDecisions, pagesIn, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
-import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryHeldV4Script, buildMemoryRecallScript, buildMemoryScaleScript, buildMemoryScaleV2Script, buildMemoryScaleV3Script, buildMemorySpillProbeScript, buildMemorySpillProbeV2Script, SPILL_PROBE_PAGES, PURGE, RETENTION, SCALE_FACTS, SCALE_PAGES } from './egdesk-memory-real-engine-scripts.mjs'
+import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryHeldV4Script, buildMemoryRecallScript, buildMemoryScaleScript, buildMemoryScaleV2Script, buildMemoryScaleV3Script, buildMemoryWriteScript, WRITE_PAGES, buildMemorySpillProbeScript, buildMemorySpillProbeV2Script, SPILL_PROBE_PAGES, PURGE, RETENTION, SCALE_FACTS, SCALE_PAGES } from './egdesk-memory-real-engine-scripts.mjs'
 import { candidatesFromOntologyGraph } from './egdesk-context-setup.mjs'
+import { choiceAnswer, mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
+import { checkRecording, recordingFacts, validateRecordingExpect, validateSpeechConsent } from './egdesk-real-engine-recording.mjs'
 
 const app = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scriptFile = name => path.join(app, 'scripts', 'real-engine', 'scripts', `real-engine-${name}${/-v\d+$/.test(name) ? '' : '-v1'}.json`)
 
 test('the committed scripts are what the builders produce, validate, and need the Decision model', () => {
-  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-scale-v3', buildMemoryScaleV3Script], ['memory-spill-probe', buildMemorySpillProbeScript], ['memory-spill-probe-v2', buildMemorySpillProbeV2Script]]) {
+  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-scale-v3', buildMemoryScaleV3Script], ['memory-write', buildMemoryWriteScript], ['memory-spill-probe', buildMemorySpillProbeScript], ['memory-spill-probe-v2', buildMemorySpillProbeV2Script]]) {
     const committed = JSON.parse(fs.readFileSync(scriptFile(name), 'utf8'))
     assert.deepEqual(committed, JSON.parse(JSON.stringify(build())))
     assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })
@@ -96,7 +98,7 @@ test('the hook: attached, notAttached and noResends are judged on what turn/star
 
 // ---- the whole check against the fake app-server ----
 const core = ({ bodies, refs, keys, copies }) => ({ bodies, refs, keys, copies })
-function world(t, fakeScript, { lexicalScan = false } = {}) {
+function world(t, fakeScript, { lexicalScan = false, decide = null } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-real-engine-memory-'))
   t.after(() => fs.rmSync(base, { recursive: true, force: true }))
   const out = path.join(base, 'out'), spawns = [], decisionCalls = [], scanInputs = []
@@ -112,7 +114,7 @@ function world(t, fakeScript, { lexicalScan = false } = {}) {
   const fetchImpl = async (url, init) => {
     const wire = JSON.parse(init.body); decisionCalls.push(wire.questions.map(q => q.name))
     if (wire.questions.some(q => /^pg_/.test(q.name))) scanInputs.push(wire.input.map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n'))
-    let answers = await scripted.answer(wire)
+    let answers = (decide ? await decide(wire) : null) ?? await scripted.answer(wire)
     // the context selection: the retention line ('보관 기간') is needed when the message is about the backup or the period (turn 2 says only 그 기간), the others are not
     if (wire.questions.some(q => q.name === 'answer_type')) {
       const flat = wire.input.map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n')
@@ -411,4 +413,103 @@ test('maxKeyBytes: judged on the largest key in UTF-8 bytes (Korean is 3 bytes a
   hook.beginTurn(); hook.observe('turn/start', { additionalContext: { k: { value: '가'.repeat(1400) } } })
   assert.deepEqual(hook.finishTurn({ maxKeyBytes: 4000, maxKeyChars: 2000 }).expectations.map(e => [e.check, e.ok]), [['memory.maxKeyChars', true], ['memory.maxKeyBytes', false]])
   assert.ok(validateMemoryExpect({ maxKeyBytes: 0 }, { pages: [{ id: 'a' }] }).length > 0)
+})
+
+// ---- c34: the memory write path, through the extension API ----
+// A stand-in for the Decision model on the write conversations (a test double of what the real model must do): triage says a statement is worth recording, the write judgment is about the
+// record whose title the statement names, the sentence labels follow the markers of the statement (heard: …대 / 말로는, hedged: 아마 / 쯤), the confirmation is the fixture's.
+function writeJudge() {
+  const base = mockJudge()
+  return async wire => {
+    const names = wire.questions.map(q => q.name)
+    if (names.includes('answer_type')) return null
+    const texts = wire.input.map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))), joined = texts.join('\n\n')
+    const message = /Message:\n([\s\S]*)$/.exec(joined)?.[1]?.trim() ?? '', statement = /확정했어|쯤일 거야|정했대/.test(message)
+    const answers = (await base.decide(wire)).answers, wireForm = () => Object.entries(answers).map(([name, answer]) => ({ name, ...answer }))
+    if (!statement) return wireForm()
+    for (const q of wire.questions) {
+      if (q.name === 'tn_record') answers[q.name] = { type: 'predicate', probability: 0.95 }
+      else if (q.name === 'tn_need') answers[q.name] = { type: 'predicate', probability: 0.03 }
+      else if (q.name === 'tw_status') answers[q.name] = choiceAnswer(q, 'plan', 0.95)
+      else if (/^speech_/.test(q.name)) {
+        const axis = q.name.split('_')[1], heard = /대$|말로는/.test(message), hedged = /아마|쯤/.test(message)
+        answers[q.name] = axis === 'source' ? choiceAnswer(q, heard ? 'attributed_report' : hedged ? 'inference' : 'self_reported_observation', 0.92)
+          : axis === 'form' ? choiceAnswer(q, 'plan', 0.97) : choiceAnswer(q, 'future_anchored', 0.95)
+      }
+    }
+    // "그거" names nothing: it is the record whose text offers the same day (다음 주 화요일); the others name their matter
+    const key = /다음 주 화요일/.test(message) ? '다음 주 화요일' : /점검 방문/.test(message) ? '점검 방문' : /마감/.test(message) ? '검토 마감' : null
+    for (const block of (/Stored records:\n([\s\S]*?)\n\n(?:Message|\d{4}-|Question clock)/.exec(joined)?.[1] ?? '').split(/\n\n(?=P\d+ \|)/)) {
+      const alias = /^P(\d+) \|/.exec(block)?.[1]
+      if (alias && wire.questions.some(q => q.name === `tw_about_${Number(alias) - 1}`)) answers[`tw_about_${Number(alias) - 1}`] = { type: 'predicate', probability: key && block.includes(key) ? 0.95 : 0.03 }
+    }
+    return wireForm()
+  }
+}
+const finalsFor = statesNote => [['알겠어요.', '네, 알겠어요.', '네. 회의 일정은 다음 주 화요일로 계획됐다고 적어 둘게요.', '네.'], ['알겠어요.', '네, 알겠어요.', '네, 정리했어요.'], ['알겠어요.', '네, 알겠어요.', '네, 정리했어요.']].flat()
+  .map((final, i) => ({ steps: [], final: statesNote ? final : final.replace('적어 둘게요', '말씀드릴게요') }))
+
+const persistedRoom = w => { w.options.persisted = true; w.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: null, steerContract: null, threadDelete: true }); return w }
+
+test('write-v1: the recording hook records the store after each turn; the whole script passes against the fake engine and the stand-in judge (a pending reading, never auto-promoted, confirmed by "응 맞아")', async t => {
+  const w = persistedRoom(world(t, { turns: finalsFor(true) }, { decide: writeJudge() }))
+  const result = await runCheck(w.options, asScripts(buildMemoryWriteScript()), w.deps)
+  assert.equal(result.records.length, 3)
+  for (const rec of result.records) { assert.equal(rec.aborted, null, rec.abortDetail); assert.equal(rec.ok, true, `${rec.id}: ${JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok)))}`) }
+  const own = result.records.find(r => r.id === 'own-confirm'), seen = turn => own.turns[turn].recording.seeded['schedule/product-review']
+  assert.deepEqual(seen(0).readings, []); assert.deepEqual(seen(1).readings.map(r => [r.state, r.status, r.basis]), [['pending', 'plan', 'self_reported_observation']]); assert.equal(seen(1).status, 'unknown')
+  assert.equal(seen(2).readings[0].state, 'pending', 'one more turn: still pending')
+  assert.equal(seen(3).readings[0].state, 'accepted'); assert.ok(seen(3).readings[0].confirmedAt); assert.equal(seen(3).status, 'plan')
+  const relayed = result.records.find(r => r.id === 'relayed'); assert.equal(relayed.turns[1].recording.seeded['schedule/legal-deadline'].readings[0].basis, 'attributed_report')
+  const hedged = result.records.find(r => r.id === 'hedged'); assert.notEqual(hedged.turns[1].recording.seeded['schedule/vendor-visit'].readings[0]?.basis, 'self_reported_observation')
+})
+
+test('write-v1: when the model does not state the note, "응 맞아" confirms nothing (not stated, so it stays pending) and the script says so by code', async t => {
+  const w = persistedRoom(world(t, { turns: finalsFor(false) }, { decide: writeJudge() }))
+  const own = (await runCheck(w.options, asScripts(buildMemoryWriteScript()), w.deps)).records.find(r => r.id === 'own-confirm')
+  assert.equal(own.turns[3].recording.seeded['schedule/product-review'].readings[0].state, 'pending')
+  assert.equal(own.turns[3].expectations.find(e => e.check === 'recording.reading').ok, false); assert.equal(own.ok, false)
+})
+
+test('recording expectations: judged on the latest reading of the page and the page status; validation refuses unknown pages and keys; facts come from a wiki snapshot', () => {
+  const page = { id: 'ontology:p', status: 'unknown', statusReadings: [{ state: 'pending', status: 'plan', basis: 'attributed_report', spokenAt: '2026-11-25T00:00:00.000Z' }] }
+  const facts = recordingFacts({ pages: new Map([[page.id, page], ['w1', { id: 'w1', scope: 'dm:t1', time: { slice: 'planned' }, provenance: { kind: 'utterance', basis: null } }]]) }, { seededIds: ['p'], clientThreadId: 't1' })
+  assert.equal(facts.seeded.p.readings[0].basis, 'attributed_report'); assert.deepEqual(facts.written.map(x => x.id), ['w1'])
+  const ok = expect => checkRecording({ page: 'p', ...expect }, facts).every(c => c.ok)
+  assert.equal(ok({ reading: 'pending', status: ['plan', 'done'], basis: ['attributed_report'], pageStatus: ['unknown'], confirmed: false, readings: 1, newPages: 1 }), true)
+  for (const bad of [{ reading: 'accepted' }, { status: ['superseded'] }, { basis: ['self_reported_observation', null] }, { pageStatus: ['plan'] }, { confirmed: true }, { readings: 2 }, { newPages: 0 }, { reading: 'none' }]) assert.equal(ok(bad), false, JSON.stringify(bad))
+  assert.equal(checkRecording({ page: 'nope', reading: 'none' }, facts)[0].ok, false)
+  assert.equal(checkRecording({ page: 'p', reading: 'pending_or_none', basis: [null] }, { seeded: { p: { status: 'unknown', readings: [] } }, written: [] }).every(c => c.ok), true, 'no reading at all is allowed by pending_or_none')
+  const conv = { memory: { mode: 'on', pages: [{ id: 'p', title: 'P', body: 'x' }] } }
+  assert.deepEqual(validateRecordingExpect({ page: 'p', reading: 'pending' }, conv), [])
+  for (const bad of [{ page: 'q' }, { page: 'p', reading: 'maybe' }, { page: 'p', x: 1 }, { page: 'p', basis: ['own'] }, { page: 'p', readings: -1 }, { page: 'p', reading: 'none', status: ['plan'] }]) assert.ok(validateRecordingExpect(bad, conv).length > 0, JSON.stringify(bad))
+  assert.ok(validateRecordingExpect({ page: 'p' }, { memory: { mode: 'advisory', pages: [{ id: 'p' }] } }).length > 0)
+})
+
+test('write-v1: the person\'s speech opt-in is what lets the previous reply be read: with it (recorded as granted) "응 맞아" promotes; without it the same conversation stays pending (no_previous_answer) and the script fails by code', async t => {
+  const script = buildMemoryWriteScript(); script.conversations = [script.conversations[0]]
+  assert.equal(script.conversations[0].speechConsent, true)
+  const withOptIn = persistedRoom(world(t, { turns: finalsFor(true) }, { decide: writeJudge() }))
+  const rec = (await runCheck(withOptIn.options, asScripts(script), withOptIn.deps)).records[0]
+  assert.equal(rec.ok, true, JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok)))); assert.deepEqual(rec.turns[0].recording.speechConsent, { granted: true })
+  const without = JSON.parse(JSON.stringify(script)); delete without.conversations[0].speechConsent
+  const w = persistedRoom(world(t, { turns: finalsFor(true) }, { decide: writeJudge() }))
+  const rec2 = (await runCheck(w.options, asScripts(without), w.deps)).records[0]
+  assert.equal(rec2.turns[3].recording.seeded['schedule/product-review'].readings[0].state, 'pending'); assert.equal(rec2.ok, false)
+  assert.equal(rec2.turns[0].recording.speechConsent, undefined)
+})
+
+test('speechConsent: a boolean; true needs an Agent profile and memory mode on', () => {
+  const room = { agentProfile: { name: 'a' }, memory: { mode: 'on', pages: [{ id: 'p', title: 'P', body: 'x' }] } }
+  assert.deepEqual(validateSpeechConsent(true, room), []); assert.deepEqual(validateSpeechConsent(false, { memory: { mode: 'advisory' } }), [])
+  for (const [value, conv] of [['yes', room], [true, { memory: room.memory }], [true, { agentProfile: room.agentProfile, memory: { mode: 'advisory', pages: room.memory.pages } }]]) assert.ok(validateSpeechConsent(value, conv).length > 0)
+})
+
+test('the scorer shows what the write path stored after each turn', async () => {
+  const { scoreMemoryRecord, formatScore } = await import('./egdesk-real-engine-memory-score.mjs')
+  const rec = { set: 'real-engine-memory-write-v1', id: 'own-confirm', ok: true, turns: [{ index: 2, say: 's', ok: true, posted: ['a'], memory: { attached: [], referenced: [], resent: [], keys: [], duplicatesInTurn: 0 }, subTurns: [{ usage: { input: 1, cached: 0 }, status: 'completed' }], expectations: [],
+    recording: { seeded: { p: { status: 'unknown', readings: [{ state: 'pending', status: 'plan', basis: 'self_reported_observation', confirmedAt: null }] }, q: { status: 'unknown', readings: [] } }, written: [], speechConsent: { granted: true } } }] }
+  const score = scoreMemoryRecord(rec)
+  assert.deepEqual(score.turns[0].recording, { readings: { p: { status: 'unknown', readings: ['pending:plan:self_reported_observation'] } }, written: 0, consent: true })
+  assert.match(formatScore(score), /turn 2 store: \{"p":\{"status":"unknown","readings":\["pending:plan:self_reported_observation"\]\}\}, speech opt-in granted/)
 })

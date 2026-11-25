@@ -173,7 +173,7 @@ export function createRewriteHook(conversation) {
 
 // ---- scoring a run: how often does each thing happen with a real rewrite ----
 /** caseOf(conversationId) → 'a-number' from 'rewrite-a-number-2' (the case is the id without the replica number). */
-export const caseOf = id => String(id ?? '').replace(/^rewrite-/, '').replace(/-\d+$/, '')
+export const caseOf = id => String(id ?? '').replace(/^rewrite-/, '').replace(/-\d+$/, '') // 'rewrite-a-number-2' -> 'a-number'; 'journey-memory' stays
 
 /**
  * scoreRewriteRecords(records) → { cases: { <case>: tally }, total } from the check's conversation records (<out>/records/<set>/<id>.json); a turn's record is turn.rewrite. Pure.
@@ -183,7 +183,8 @@ export const caseOf = id => String(id ?? '').replace(/^rewrite-/, '').replace(/-
 export function scoreRewriteRecords(records) {
   const cases = {}
   for (const rec of records) {
-    if (!rec?.set || !/^real-engine-rewrite-/.test(rec.set)) continue
+    if (!rec?.set || !Array.isArray(rec.turns)) continue // any conversation with a turn.rewrite record counts (the rewrite sets, and c27's journey-memory-v2 whose answers the check reads too)
+    if (!(rec.turns ?? []).some(t => t?.rewrite)) continue
     const c = (cases[caseOf(rec.id)] ??= { n: 0, aborted: 0, checked: 0, noFinding: 0, finding: 0, rewrote: 0, rewritePassed: 0, certainPart: 0, withheld: 0, revisionUnavailable: 0, elicited: 0, notElicited: 0, leakedNumbers: 0, leakedPhrases: 0, answered: 0, outcomes: {}, turns: [] })
     if (rec.aborted) c.aborted += 1
     for (const turn of rec.turns ?? []) {

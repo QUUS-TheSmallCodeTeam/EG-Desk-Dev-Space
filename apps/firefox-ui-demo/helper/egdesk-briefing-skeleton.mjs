@@ -14,7 +14,7 @@ import { canvasViewSize, placeCanvasView } from '../overlay/resources/EGDeskSurf
 // (egdesk-briefing-catalog.mjs) and from the cards already on the board (with provenance). Nothing here talks to a network, publishes, moves a camera or writes the
 // Board: the host injects judge{} (bridge route) and fill().
 
-export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, maxFacts: 6, factMax: 300, maxMaterials: 12, usualMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 8, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, pieceTurns: 4, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
+export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, maxFacts: 6, factRequests: 2, factMax: 300, maxMaterials: 12, usualMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 10, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, pieceTurns: 4, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
 // A predicate counts as yes at or above `yes` and as no at or below `no`; anything between is undecided. Placeholders until calibrated (real predicates of the other features answer near 0 or 1).
 export const SKELETON_BARS = Object.freeze({ yes: .7, no: .3 })
 export const SKELETON_STAGES = Object.freeze(['place', 'fit', 'order', 'fill_check', 'coverage'])
@@ -309,7 +309,7 @@ export function normalizeSkeletonDto(raw, catalog = BRIEFING_CATALOG) {
         out = { kind: 'covers', board: boardFields(q.board) }
       }
       else if (q.kind === 'onboard' || q.kind === 'stated') {
-        if (!exactKeys(q, ['kind', 'fact', 'text']) || !/^F[1-9]$/.test(q.fact) || !plain(q.text, SKELETON_LIMITS.factMax)) throw 0
+        if (!exactKeys(q, ['kind', 'fact', 'text']) || !/^F(?:[1-9]|1[0-2])$/.test(q.fact) || !plain(q.text, SKELETON_LIMITS.factMax)) throw 0
         out = { kind: q.kind, fact: q.fact, text: q.text }
       }
       else if (q.kind === 'about') { if (!exactKeys(q, ['kind', 'material']) || !mats.has(q.material)) throw 0; out = { kind: 'about', material: q.material } }
@@ -354,8 +354,8 @@ const RULES = {
   fit: 'You are a system judge reading stored materials. Each question quotes ONE material or ONE pair of materials and asks ONE thing about what its text states. Answer each question on its own, whatever the others are. Judge only from the quoted text; never assume content it does not contain.',
   order: 'You are a system judge. Each question describes TWO parts of a briefing by the materials they show. Answer each question on its own. Judge only which part a reader who has seen none of it should be shown first to follow the other.',
   coverage: 'You are a system judge checking a finished board briefing against what the person asked. Judge only from the quoted request, the quoted answer and the quoted parts of the board, in their order.',
-  coverage_facts: 'You are a system judge checking whether a finished board briefing shows given facts. Judge only from the quoted parts of the board and the quoted fact.',
-  coverage_stated: 'You are a system judge checking whether a finished board briefing shows given facts, and whether a sentence states what the materials say. Judge only from the quoted parts of the board, the quoted materials and the quoted sentence or fact.',
+  coverage_facts: 'You are a system judge checking whether a finished board briefing shows given facts. Judge only from the quoted parts of the board and the quoted fact. A fact that is several values joined by " · " (the cells of a table row) is shown when every value is on the board, in any order or form; a date may be written as month-day in the fact and in full on the board.',
+  coverage_stated: 'You are a system judge checking whether a finished board briefing shows given facts, and whether a sentence states what the materials say. Judge only from the quoted parts of the board, the quoted materials and the quoted sentence or fact. A fact that is several values joined by " · " (the cells of a table row) is shown when every value is on the board, in any order or form; a date may be written as month-day in the fact and in full on the board.',
   fill_check: 'You are a system judge checking a text against its source. Each question quotes ONE text and ONE source. Answer each question on its own, whatever the others are. Rewording, summarising and linking words are fine. A number, amount, date, name or event that the quoted source does not contain is NOT supported.',
 }
 // Only what the record has: no date when it has none, no status when the record does not say ("unknown" is not a status to judge from).
@@ -373,6 +373,9 @@ function questionText(q, c, catalog) {
   // Cycle 19: what is missing, as ONE condition over the whole board in order.
   if (q.kind === 'covers') return `The person asked, quoted exactly as a JSON string: ${JSON.stringify(c.request)}. The board, its parts quoted in order as JSON: ${JSON.stringify(q.board)}. Does this board answer everything the person's request asks about${c.answer ? ' (the request may refer to the assistant\'s answer quoted above)' : ''}?`
   // Cycle 21 (R4): one fact per question, quoted alone; the board is quoted once, above.
+  // Cycle 38 (the c21 plan sent in c40: f-meta-sentences F5 "11-24 · 검색 화면 착수" .66 and F4 .73 although the board's third line has the date 2026-11-24 and "검색 화면 착수" word for word):
+  // a fact that came from a table row is its cells joined by " · ", and a date may be written month-day in the fact and in full on the board. The request's RULE text says so (once per request,
+  // not in every question: the c21 plan's token ceiling is tight).
   if (q.kind === 'onboard') return `The fact, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Is this fact shown on the board quoted above (in the text or the shown fields of any of its parts)?`
   // Cycle 36 (check-11): a sentence of the answer that no code anchor ties to a material may be a statement ABOUT the answer ("정리했습니다", "파일은 변경하지 않았습니다") that no board can show.
   // Only the judge can tell it from a content fact, from the materials quoted once above.
@@ -553,7 +556,10 @@ function itemFor(part, option, scene, n) {
   const reuse = option.reuse ? [option.reuse] : entry.id === 'step_pair' ? existing.slice(0, 2) : part.trait === 'compare' ? existing.slice(0, 2) : []
   return { id: part.alias, trait: part.trait, materials: [...part.materials], component: option.component ?? null, reuse, creates: entry?.renderer.creates ? 'N' + n : null, emphasis: entry?.emphasis ?? 'spotlight', tried: [option.value] }
 }
-const slotsOf = (item, catalog) => (catalog.get(item.component)?.slots ?? []).map(s => (s.type === 'list' && item.maxRows ? { ...s, max: Math.min(s.max, item.maxRows) } : s))
+// Cycle 38 (check-17b: the real model filled 2 of 6 rows and reported the rest "unfillable" because all ids and figures do not fit 90 characters): a SEQUENCE card has a line for EVERY
+// material it shows, so its list needs at least as many rows as the item has materials (when the card holds that many); validateFill also checks that each material is named.
+const slotsOf = (item, catalog) => (catalog.get(item.component)?.slots ?? []).map(s => { const max = s.type === 'list' && item.maxRows ? Math.min(s.max, item.maxRows) : s.max; const base = s.type === 'list' && item.maxRows ? { ...s, max } : s
+  return s.type === 'list' && item.trait === 'sequence' && Array.isArray(s.of) && s.of.some(f => f.name === 'from' && f.type === 'material') && item.materials.length <= max ? { ...base, min: Math.max(base.min ?? 1, item.materials.length) } : base })
 /** The design guide: ordered components with their slot schemas, the existing cards they reuse, and the fold proposals. This, and the materials, is all the subjective model gets. */
 export function buildGuide(items, scene, retire = []) {
   const label = a => scene.targets.find(t => t.alias === a)?.label ?? ''
@@ -625,6 +631,8 @@ export function validateFill(guide, reply, { only = null, needTitle = false, mat
     for (const s of item.step) { const r = readSlot(s, s.name === 'fallback' && got.fallback === undefined ? got.text : got[s.name], item, reported.has(`${item.id}/${s.name}`)); if (r.issue) issues.push({ item: item.id, slot: s.name, kind: r.issue }); else out[s.name] = r.value }
     for (const s of item.slots) { const r = readSlot(s, given[s.name], item, reported.has(`${item.id}/${s.name}`), byAlias); if (r.issue) issues.push({ item: item.id, slot: s.name, kind: r.issue }); else out.slots[s.name] = r.value }
     if (out.slots.left !== undefined && out.slots.left === out.slots.right) issues.push({ item: item.id, slot: 'right', kind: 'mismatch' })
+    // c38: a sequence card names every material it shows (one row each); a card that leaves one out is a mismatch of its list, which the flow rewrites
+    if (item.shows === 'sequence') for (const s of item.slots) if (s.type === 'list' && Array.isArray(out.slots[s.name]) && s.of?.some(f => f.name === 'from') && item.materials.length <= s.max) { const named = new Set(out.slots[s.name].map(r => r.from)); if (item.materials.some(a => !named.has(a))) { issues.push({ item: item.id, slot: s.name, kind: 'mismatch' }); delete out.slots[s.name] } }
     items[item.id] = out
   }
   return { ok: true, title: whole ? title : null, items, issues }
@@ -683,10 +691,11 @@ export const rejectedWord = q => (q.kind === 'step' ? `${q.part} explanation` : 
 export const COVERAGE_MODES = Object.freeze(['facts', 'board'])
 /** The answer as facts: its sentences; a sentence is split at ", " / "; " into its clauses only when EVERY clause carries its own date, version mark or amount (then
  *  each stands alone as a fact; a comma inside a number, "12,800", never splits). A list ("법무 검토, 대표 승인, 최종본 발송") stays one sentence, one fact.
- *  At most SKELETON_LIMITS.maxFacts; the rest are counted (cut), never asked. -> { facts: [text], cut } */
+ *  Cycle 38 (Main): at most SKELETON_LIMITS.maxFacts per coverage request and SKELETON_LIMITS.factRequests requests (6 x 2 = 12 facts); the rest are counted (cut), never asked. -> { facts: [text], cut } */
 export function answerFacts(answer) {
   const facts = factSentences(answer)
-  return { facts: facts.slice(0, SKELETON_LIMITS.maxFacts), cut: Math.max(0, facts.length - SKELETON_LIMITS.maxFacts) }
+  const cap = SKELETON_LIMITS.maxFacts * SKELETON_LIMITS.factRequests
+  return { facts: facts.slice(0, cap), cut: Math.max(0, facts.length - cap) }
 }
 // Cycle 29 (real answers are markdown): the answer's own structure first - one unit per bullet, numbered item, heading or table row (the header row and the
 // separator row of a table are not facts; a row's cells are joined by " · "), emphasis and code marks removed - then sentences within each unit.
@@ -1015,15 +1024,26 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     }
   } else {
     const keptMats = scene.materials.filter(m => kept.has(m.alias))
-    const split = said ? answerFacts(answer) : { facts: keptMats.slice(0, SKELETON_LIMITS.maxFacts).map(m => clean(m.text.split(/(?<=[.!?。])\s+/)[0], SKELETON_LIMITS.factMax)).filter(Boolean), cut: Math.max(0, keptMats.length - SKELETON_LIMITS.maxFacts) }
+    const factCap = SKELETON_LIMITS.maxFacts * SKELETON_LIMITS.factRequests
+    const split = said ? answerFacts(answer) : { facts: keptMats.slice(0, factCap).map(m => clean(m.text.split(/(?<=[.!?。])\s+/)[0], SKELETON_LIMITS.factMax)).filter(Boolean), cut: Math.max(0, keptMats.length - factCap) }
     const facts = split.facts.map((text, i) => ({ id: `F${i + 1}`, text, cites: said ? factCites(text, keptMats) : [keptMats[i].alias], p: null }))
     Object.assign(coverage, { from: said ? 'answer' : 'materials', facts, cut: split.cut, missing: [], unshowable: [] })
     // Cycle 36: a fact with no code anchor (cites null) also gets the question "does it restate something the materials say?" in the same request (first ask only). Decided NO
     // (a sentence about the answer itself) = no board can show it: recorded as unshowable, not missing. Yes or undecided = it is enforced as before.
-    const askFacts = async (list, withStated = false) => { coverage.asked++
-      const stated = withStated ? list.filter(f => f.cites === null).map(f => ({ kind: 'stated', fact: f.id, text: f.text })) : []
-      const r0 = await ask('coverage', [...list.map(f => ({ kind: 'onboard', fact: f.id, text: f.text })), ...stated], { board: boardView() })
-      if (!r0.unavailable) for (const f of list) { f.p = r0.answers[`onboard_${f.id}`] ?? null; if (withStated && f.cites === null) f.stated = r0.answers[`stated_${f.id}`] ?? null } return r0 }
+    // Cycle 38 (Main): at most SKELETON_LIMITS.maxFacts facts per request; an answer of more facts (up to 12) gets ONE more request for the rest, bounded. Each request quotes the
+    // board once; the stated question is only for the facts of that request.
+    const askFacts = async (list, withStated = false) => {
+      let last = null
+      for (let i = 0; i < list.length && i < SKELETON_LIMITS.maxFacts * SKELETON_LIMITS.factRequests; i += SKELETON_LIMITS.maxFacts) {
+        const chunk = list.slice(i, i + SKELETON_LIMITS.maxFacts); coverage.asked++
+        const stated = withStated ? chunk.filter(f => f.cites === null).map(f => ({ kind: 'stated', fact: f.id, text: f.text })) : []
+        const r0 = await ask('coverage', [...chunk.map(f => ({ kind: 'onboard', fact: f.id, text: f.text })), ...stated], { board: boardView() })
+        if (r0.unavailable) return r0
+        for (const f of chunk) { f.p = r0.answers[`onboard_${f.id}`] ?? null; if (withStated && f.cites === null) f.stated = r0.answers[`stated_${f.id}`] ?? null }
+        last = r0
+      }
+      return last ?? { answers: {} }
+    }
     const moot = f => f.cites?.length === 0 || (f.cites === null && isNo(f.stated))
     const sortOut = () => { const no = facts.filter(f => isNo(f.p)); coverage.unshowable = no.filter(moot).map(f => f.id); coverage.missing = no.filter(f => !moot(f)).map(f => f.id); return facts.filter(f => coverage.missing.includes(f.id)) }
     if (facts.length) {

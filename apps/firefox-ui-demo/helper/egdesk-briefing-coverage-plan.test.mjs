@@ -64,5 +64,5 @@ test('c37 coverage plan: the check-11 request is what the product sends today (s
   assert.deepEqual(boardIn(wire).map(p => p.shown[0].label), ['진행 경과', '남은 일']); assert.equal(boardIn(wire)[0].shown[0].lines.length, 3)
   assert.match(body.questions.find(q => q.name === 'stated_F1').instructions, /^The sentence, quoted exactly as a JSON string: "devlog 기록을 날짜순으로 정리했습니다\."/)
   assert.ok(!wire.includes('| 날짜 | 진행 상황 |'), 'the answer itself is not in the request, only its facts'); assert.doesNotMatch(wire, /"key"|outputId|viewId|"rect"|\/Users\//)
-  assert.deepEqual(built.flows.metaSentences, { status: 'presented', stages: ['place', 'fit', 'order', 'fill_check', 'coverage'], unshowable: [] })
+  assert.deepEqual(built.flows.metaSentences, { status: 'presented', stages: ['place', 'fit', 'order', 'fill_check', 'coverage', 'coverage'], unshowable: [] }) // c38: the answer has 7 facts: 6 in the first coverage request (the one in the plan), the 7th in a second
 })

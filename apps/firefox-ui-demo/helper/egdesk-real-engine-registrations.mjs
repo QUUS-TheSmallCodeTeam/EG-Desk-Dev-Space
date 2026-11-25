@@ -39,6 +39,15 @@ registerTurnHooks('memory', conversation => {
   return { hook, observe: (method, params) => hook.observe(method, params), beginTurn: () => hook.beginTurn(), finishTurn: ctx => hook.finishTurn(ctx.expect?.memory) }
 })
 
+// ---- L7 c34: recording (the memory write path: pending readings, their confirmation; expect.recording) ----
+import { RECORDING_EXPECT_SCHEMA, createRecordingHook, validateRecordingExpect, validateSpeechConsent } from './egdesk-real-engine-recording.mjs'
+registerConversationFields({ speechConsent: { schema: { type: 'boolean' }, validate: (value, { conv, path, bad }) => { for (const why of validateSpeechConsent(value, conv, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerExpectKeys({ recording: { schema: RECORDING_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => {
+  for (const why of validateRecordingExpect(value, conv, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
+  if (turn.whileRunning !== undefined || turn.action !== undefined) bad(path, 'not checked on a whileRunning or action turn')
+} } })
+registerTurnHooks('recording', conversation => createRecordingHook(conversation))
+
 // ---- L2: journey (what reached the engine for a message typed into a working run) ----
 import { ENGINE_EXPECT_SCHEMA, createJourneyHook, messageCounts, validateEngineExpect } from './egdesk-real-engine-journey.mjs'
 registerExpectKeys({ engine: { schema: ENGINE_EXPECT_SCHEMA, validate: (value, { turn, path, bad }) => { for (const why of validateEngineExpect(value, { whileRunning: turn.whileRunning !== undefined }, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
@@ -95,3 +104,8 @@ import { DELETED_EXPECT_SCHEMA, SEEDED_WRITES_SCHEMA, checkDeleted, validateDele
 registerConversationFields({ seededWrites: { schema: SEEDED_WRITES_SCHEMA, validate: (value, { path, bad }) => { for (const why of validateSeededWrites(value, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
 registerExpectKeys({ deleted: { schema: DELETED_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateDeletedExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) },
   check: (value, record) => checkDeleted(value, record) } })
+
+// ---- L5: a coding task on own tools (expect.coding: the fix lands in the right file, the arbiter's reading of the re-run, the draft check's evidence, nothing outside) ----
+import { CODING_EXPECT_SCHEMA, createCodingHook, validateCodingExpect } from './egdesk-real-engine-coding.mjs'
+registerExpectKeys({ coding: { schema: CODING_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateCodingExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('coding', conversation => createCodingHook(conversation))
