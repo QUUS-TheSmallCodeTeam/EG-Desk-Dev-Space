@@ -946,6 +946,7 @@
                         "path": {
                           "enum": [
                             "fast",
+                            "action",
                             "engine"
                           ]
                         },
@@ -1096,6 +1097,11 @@
                       "minProperties": 1,
                       "properties": {
                         "maxFirstEventMs": {
+                          "maximum": 600000,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "maxFirstProgressMs": {
                           "maximum": 600000,
                           "minimum": 1,
                           "type": "integer"
@@ -1273,6 +1279,49 @@
                     "noToolCalls": {
                       "const": true
                     },
+                    "openItems": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "approvalWaiting": {
+                          "type": "boolean"
+                        },
+                        "maxResolverMs": {
+                          "exclusiveMinimum": 0,
+                          "maximum": 60000,
+                          "type": "number"
+                        },
+                        "reason": {
+                          "anyOf": [
+                            {
+                              "pattern": "^[a-z][a-z_]{2,39}$",
+                              "type": "string"
+                            },
+                            {
+                              "items": {
+                                "pattern": "^[a-z][a-z_]{2,39}$",
+                                "type": "string"
+                              },
+                              "maxItems": 8,
+                              "minItems": 1,
+                              "type": "array"
+                            }
+                          ]
+                        },
+                        "settled": {
+                          "enum": [
+                            "approval",
+                            "question",
+                            "browser_task",
+                            "run",
+                            "memory",
+                            "proposal",
+                            "none"
+                          ]
+                        }
+                      },
+                      "type": "object"
+                    },
                     "posted": {
                       "type": "boolean"
                     },
@@ -1336,6 +1385,11 @@
                         },
                         "conflict": {
                           "type": "boolean"
+                        },
+                        "contradictions": {
+                          "maximum": 6,
+                          "minimum": 0,
+                          "type": "integer"
                         },
                         "newPages": {
                           "maximum": 20,
@@ -1443,6 +1497,36 @@
                         },
                         "rewrote": {
                           "type": "boolean"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "timing": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "answerMaxMs": {
+                          "maximum": 600000,
+                          "minimum": 100,
+                          "type": "integer"
+                        },
+                        "engineStarted": {
+                          "type": "boolean"
+                        },
+                        "firstVisibleMaxMs": {
+                          "maximum": 600000,
+                          "minimum": 100,
+                          "type": "integer"
+                        },
+                        "layersMaxMs": {
+                          "maximum": 600000,
+                          "minimum": 100,
+                          "type": "integer"
+                        },
+                        "maxEngineRounds": {
+                          "maximum": 30,
+                          "minimum": 0,
+                          "type": "integer"
                         }
                       },
                       "type": "object"

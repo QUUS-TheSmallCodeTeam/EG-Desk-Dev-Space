@@ -278,6 +278,14 @@ export function enumerateOptions(facts, limits = FLOW_LIMITS) {
 export const FLOW_CONTEXT_LIMITS = Object.freeze({ request: 600, note: 400, said: 280, command: 160, answer: 500, tools: 2 })
 // kind → the predicate that stands for it. 'explain_wait' and 'milestone' are the same question; code picks the wording.
 const PREDICATE_OF = Object.freeze({ ask_missing: 'ask', pointer: 'pointer', stalled: 'note', explain_wait: 'note', milestone: 'note' })
+// c34: the note question's wording is an opt-in value of the flow (conversationFlow.noteWording() === 'waiting', EGDESK_FLOW_NOTE_WORDING=waiting; default 'standard', unchanged).
+// Measured (c32 plan, Main's c53, 2026-11-15): the standard wording gave .83 on the original request words and .75 on a rephrasing of the same facts (bar .8), because it asks an open
+// judgment ("would a considerate collaborator send a note"). The 'waiting' wording asks the one concrete condition the note exists for, and gave 1.0 on three phrasings. It has no timing
+// in it on purpose: WHEN the question is offered is code (enumerateOptions, firstAfterMs); a 3 s guard on the question itself measured 1.0, because the question never asks about time.
+export const NOTE_WORDING = Object.freeze({
+  standard: 'Would a considerate collaborator send the waiting person a short progress note right now (one or two sentences on what is taking time), given what they asked, what is happening and what was already said?',
+  waiting: 'Has the person been left waiting with nothing said to them while the work they asked for is still running?',
+})
 export const FLOW_PREDICATES = Object.freeze({
   note: Object.freeze({ name: 'note', type: 'predicate', instructions: 'Would a considerate collaborator send the waiting person a short progress note right now (one or two sentences on what is taking time), given what they asked, what is happening and what was already said?' }),
   ask: Object.freeze({ name: 'ask', type: 'predicate', instructions: 'Does the quoted note show that the assistant needs a piece of information that only the person can give before it can finish, so that asking the person now would help?' }),
@@ -484,7 +492,7 @@ const POINTER_LIMITS = Object.freeze({ result: 600, posted: 2 })
  *   the one who requested the work (code: the run's requester). Each item is quoted on its own: `pointer` (does it hold something they
  *   must act on or decide) only for a finished result they did not request; `told_N` per posted message.
  */
-export function flowPredicates(options, { note = null, pointer = null } = {}) {
+export function flowPredicates(options, { note = null, pointer = null, noteWording = 'standard' } = {}) {
   const out = []
   if (options.includes('ask_missing')) {
     const text = oneLine(note?.text, FLOW_CONTEXT_LIMITS.note)
@@ -493,7 +501,7 @@ export function flowPredicates(options, { note = null, pointer = null } = {}) {
   if (options.includes('pointer') && pointer) out.push(...pointerPredicates(pointer))
   // The note question's topic is the kinds it stands for now: when code first allows a stall, that is new and asks at once.
   const noteKinds = ['explain_wait', 'milestone', 'stalled'].filter(kind => options.includes(kind))
-  if (noteKinds.length) out.push({ ...FLOW_PREDICATES.note, topic: noteKinds.join('_') })
+  if (noteKinds.length) out.push({ ...FLOW_PREDICATES.note, ...(noteWording === 'waiting' ? { instructions: NOTE_WORDING.waiting } : {}), topic: noteKinds.join('_') })
   return out
 }
 

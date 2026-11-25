@@ -1,0 +1,202 @@
+{
+  "set": "real-engine-journey-u13-v10",
+  "description": "Journey v10 for the real-engine check (L2 c32): the merged layer-first (U13) flags as -off / -on pairs for the timing measure (scripts/egdesk-real-engine-timing.mjs compare <off> <on> --normalize \"-off|-on\"). prefetch-notes and prefetch-code (L7, EGDESK_TURN_MEMORY_PREFETCH=files: the named file is in the engine's turn context, no tool round) and tests (L3/L5, EGDESK_DECISION_FIRST=on: the decision model picks the command, EG-Desk runs it, a healthy run ends without an engine turn). The lanes' own scenarios and expectations are kept; added: expect.timing bounds from measured numbers (layers before the engine starts at most 3,000 ms; prefetch-on at most one engine round; tests-on no engine turn and the whole turn within 8,000 ms, an estimate until the first real run). Not in yet (flags not merged): approvals fast (L3), L1 open items, L7 memory-first. Needs --decisions.",
+  "conversations": [
+    {
+      "id": "prefetch-notes-off",
+      "folder": {
+        "notes/2026-11-18.md": "# 11월 18일 회의\n메모 1: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 2: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 3: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 4: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 5: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 6: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 7: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 8: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n결정: 본 전환 일정은 다음 주에 다시 이야기한다.\n",
+        "notes/2026-11-20.md": "# 11월 20일 회의\n메모 1: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 2: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 3: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 4: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 5: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 6: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n결정: 서버 이전 예산은 4,730만 원으로 승인한다.\n메모 1: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 2: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 3: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 4: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n",
+        "notes/2026-11-22.md": "# 11월 22일 회의\n메모 1: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 2: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 3: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 4: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 5: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 6: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 7: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 8: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n결정: 외주 업체 선정은 보류한다.\n",
+        "notes/todo.md": "# 할 일\n- 견적 정리\n- 주간 보고\n"
+      },
+      "flags": {
+        "EGDESK_TURN_MEMORY_PRUNE_HELD": "on",
+        "EGDESK_TURN_MEMORY_ENGINE_CONTEXT": "split"
+      },
+      "turns": [
+        {
+          "say": "notes/2026-11-20.md 에서 정한 예산이 얼마야?",
+          "expect": {
+            "posted": true,
+            "answerIncludes": [
+              "4,730만 원"
+            ],
+            "turnStatus": "completed",
+            "timing": {
+              "layersMaxMs": 3000
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "prefetch-notes-on",
+      "folder": {
+        "notes/2026-11-18.md": "# 11월 18일 회의\n메모 1: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 2: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 3: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 4: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 5: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 6: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 7: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 8: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n결정: 본 전환 일정은 다음 주에 다시 이야기한다.\n",
+        "notes/2026-11-20.md": "# 11월 20일 회의\n메모 1: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 2: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 3: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 4: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 5: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 6: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n결정: 서버 이전 예산은 4,730만 원으로 승인한다.\n메모 1: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 2: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 3: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 4: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n",
+        "notes/2026-11-22.md": "# 11월 22일 회의\n메모 1: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 2: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 3: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 4: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 5: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 6: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 7: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n메모 8: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n결정: 외주 업체 선정은 보류한다.\n",
+        "notes/todo.md": "# 할 일\n- 견적 정리\n- 주간 보고\n"
+      },
+      "flags": {
+        "EGDESK_TURN_MEMORY_PRUNE_HELD": "on",
+        "EGDESK_TURN_MEMORY_ENGINE_CONTEXT": "split",
+        "EGDESK_TURN_MEMORY_PREFETCH": "files"
+      },
+      "turns": [
+        {
+          "say": "notes/2026-11-20.md 에서 정한 예산이 얼마야?",
+          "expect": {
+            "posted": true,
+            "answerIncludes": [
+              "4,730만 원"
+            ],
+            "turnStatus": "completed",
+            "noToolCalls": true,
+            "timing": {
+              "layersMaxMs": 3000,
+              "maxEngineRounds": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "prefetch-code-off",
+      "folder": {
+        "package.json": "{ \"name\": \"price-demo\", \"type\": \"module\", \"scripts\": { \"test\": \"node --test\" } }\n",
+        "src/price.mjs": "// 가격 계산\nexport const round = value => Math.round(value)\n// 1: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n// 2: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n// 3: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n// 4: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n// 5: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n// 할인: 10만 원 이상이면 15%, 5만 원 이상이면 5%를 깎는다.\nexport function applyDiscount(total) {\n  if (total >= 100000) return round(total * 0.85)\n  if (total >= 50000) return round(total * 0.95)\n  return total\n}\n",
+        "src/tax.mjs": "// 세금\nexport const tax = value => Math.round(value * 0.1)\n",
+        "test/price.test.mjs": "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { applyDiscount } from '../src/price.mjs'\ntest('no discount under 50k', () => assert.equal(applyDiscount(40000), 40000))\n"
+      },
+      "flags": {
+        "EGDESK_TURN_MEMORY_PRUNE_HELD": "on",
+        "EGDESK_TURN_MEMORY_ENGINE_CONTEXT": "split"
+      },
+      "turns": [
+        {
+          "say": "src/price.mjs 의 applyDiscount 는 10만 원 이상이면 몇 퍼센트를 깎아?",
+          "expect": {
+            "posted": true,
+            "answerIncludes": [
+              "15%"
+            ],
+            "turnStatus": "completed",
+            "timing": {
+              "layersMaxMs": 3000
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "prefetch-code-on",
+      "folder": {
+        "package.json": "{ \"name\": \"price-demo\", \"type\": \"module\", \"scripts\": { \"test\": \"node --test\" } }\n",
+        "src/price.mjs": "// 가격 계산\nexport const round = value => Math.round(value)\n// 1: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n// 2: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n// 3: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n// 4: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n// 5: 이 항목은 이번 건과 관계없는 일상 기록이며 참고용으로만 남긴다.\n// 할인: 10만 원 이상이면 15%, 5만 원 이상이면 5%를 깎는다.\nexport function applyDiscount(total) {\n  if (total >= 100000) return round(total * 0.85)\n  if (total >= 50000) return round(total * 0.95)\n  return total\n}\n",
+        "src/tax.mjs": "// 세금\nexport const tax = value => Math.round(value * 0.1)\n",
+        "test/price.test.mjs": "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { applyDiscount } from '../src/price.mjs'\ntest('no discount under 50k', () => assert.equal(applyDiscount(40000), 40000))\n"
+      },
+      "flags": {
+        "EGDESK_TURN_MEMORY_PRUNE_HELD": "on",
+        "EGDESK_TURN_MEMORY_ENGINE_CONTEXT": "split",
+        "EGDESK_TURN_MEMORY_PREFETCH": "files"
+      },
+      "turns": [
+        {
+          "say": "src/price.mjs 의 applyDiscount 는 10만 원 이상이면 몇 퍼센트를 깎아?",
+          "expect": {
+            "posted": true,
+            "answerIncludes": [
+              "15%"
+            ],
+            "turnStatus": "completed",
+            "noToolCalls": true,
+            "timing": {
+              "layersMaxMs": 3000,
+              "maxEngineRounds": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "tests-off",
+      "folder": {
+        "package.json": "{\n  \"name\": \"price-demo\",\n  \"type\": \"module\",\n  \"scripts\": { \"test\": \"node --test\" }\n}\n",
+        "src/price.mjs": "// Discounted price in won, rounded to the nearest won.\nexport function applyDiscount(price, percent) {\n  if (percent <= 0) return price\n  return Math.round(price * (100 - percent) / 100)\n}\n",
+        "src/format.mjs": "import { applyDiscount } from './price.mjs'\n\nexport function formatWon(amount) {\n  return `${amount.toLocaleString('en-US')}원`\n}\n\nexport function priceLabel(price, percent) {\n  return formatWon(applyDiscount(price, percent))\n}\n",
+        "test/price.test.mjs": "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { applyDiscount } from '../src/price.mjs'\nimport { formatWon, priceLabel } from '../src/format.mjs'\n\ntest('no discount keeps the price', () => {\n  assert.equal(applyDiscount(10000, 0), 10000)\n})\n\ntest('10% off 10000 is 9000', () => {\n  assert.equal(applyDiscount(10000, 10), 9000)\n})\n\ntest('15% off 9990 is rounded to the nearest won', () => {\n  assert.equal(applyDiscount(9990, 15), 8492)\n})\n\ntest('formatWon groups thousands', () => {\n  assert.equal(formatWon(1234567), '1,234,567원')\n})\n\ntest('priceLabel shows the discounted price', () => {\n  assert.equal(priceLabel(20000, 25), '15,000원')\n})\n"
+      },
+      "turns": [
+        {
+          "say": "테스트 돌려줘",
+          "approve": [
+            "yes"
+          ],
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed",
+            "coding": {
+              "changed": [],
+              "lastTests": {
+                "health": "healthy",
+                "failed": 0,
+                "minPassed": 5
+              }
+            },
+            "timing": {
+              "layersMaxMs": 3000
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "tests-on",
+      "flags": {
+        "EGDESK_DECISION_FIRST": "on"
+      },
+      "folder": {
+        "package.json": "{\n  \"name\": \"price-demo\",\n  \"type\": \"module\",\n  \"scripts\": { \"test\": \"node --test\" }\n}\n",
+        "src/price.mjs": "// Discounted price in won, rounded to the nearest won.\nexport function applyDiscount(price, percent) {\n  if (percent <= 0) return price\n  return Math.round(price * (100 - percent) / 100)\n}\n",
+        "src/format.mjs": "import { applyDiscount } from './price.mjs'\n\nexport function formatWon(amount) {\n  return `${amount.toLocaleString('en-US')}원`\n}\n\nexport function priceLabel(price, percent) {\n  return formatWon(applyDiscount(price, percent))\n}\n",
+        "test/price.test.mjs": "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { applyDiscount } from '../src/price.mjs'\nimport { formatWon, priceLabel } from '../src/format.mjs'\n\ntest('no discount keeps the price', () => {\n  assert.equal(applyDiscount(10000, 0), 10000)\n})\n\ntest('10% off 10000 is 9000', () => {\n  assert.equal(applyDiscount(10000, 10), 9000)\n})\n\ntest('15% off 9990 is rounded to the nearest won', () => {\n  assert.equal(applyDiscount(9990, 15), 8492)\n})\n\ntest('formatWon groups thousands', () => {\n  assert.equal(formatWon(1234567), '1,234,567원')\n})\n\ntest('priceLabel shows the discounted price', () => {\n  assert.equal(priceLabel(20000, 25), '15,000원')\n})\n"
+      },
+      "turns": [
+        {
+          "say": "테스트 돌려줘",
+          "expect": {
+            "turnStatus": "completed",
+            "decisionFirst": {
+              "path": "fast",
+              "reason": "healthy",
+              "engineTurns": 0,
+              "maxDecisionMs": 4000
+            },
+            "engine": {
+              "maxLatencyMs": 15000
+            },
+            "coding": {
+              "changed": [],
+              "lastTests": {
+                "health": "healthy",
+                "failed": 0,
+                "minPassed": 5
+              },
+              "nothingOutside": true
+            },
+            "timing": {
+              "engineStarted": false,
+              "answerMaxMs": 8000
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

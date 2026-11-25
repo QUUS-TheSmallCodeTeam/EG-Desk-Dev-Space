@@ -1,0 +1,102 @@
+{
+  "set": "real-engine-action-first-off-v1",
+  "description": "c34 compare pair, the OFF copy: three requests on scratch projects (tests pass, tests fail, build). OFF: flags none, the engine runs the command with egdesk_run_command and then writes (the engine path). ON: EGDESK_DECISION_FIRST=on, the Decision model picks the command, code runs it, ONE engine round with the result and no tool call. Run both with --decisions into two --out folders, then: node scripts/egdesk-real-engine-timing.mjs compare <off>/records <on>/records --normalize '-off|-on' (the conversation ids are the same in both copies; the set names differ by -off/-on).",
+  "conversations": [
+    {
+      "id": "tests-pass",
+      "folder": {
+        "package.json": "{\n  \"name\": \"price-demo\",\n  \"type\": \"module\",\n  \"scripts\": { \"test\": \"node --test\" }\n}\n",
+        "src/price.mjs": "// Discounted price in won, rounded to the nearest won.\nexport function applyDiscount(price, percent) {\n  if (percent <= 0) return price\n  return Math.round(price * (100 - percent) / 100)\n}\n",
+        "src/format.mjs": "import { applyDiscount } from './price.mjs'\n\nexport function formatWon(amount) {\n  return `${amount.toLocaleString('en-US')}원`\n}\n\nexport function priceLabel(price, percent) {\n  return formatWon(applyDiscount(price, percent))\n}\n",
+        "test/price.test.mjs": "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { applyDiscount } from '../src/price.mjs'\nimport { formatWon, priceLabel } from '../src/format.mjs'\n\ntest('no discount keeps the price', () => {\n  assert.equal(applyDiscount(10000, 0), 10000)\n})\n\ntest('10% off 10000 is 9000', () => {\n  assert.equal(applyDiscount(10000, 10), 9000)\n})\n\ntest('15% off 9990 is rounded to the nearest won', () => {\n  assert.equal(applyDiscount(9990, 15), 8492)\n})\n\ntest('formatWon groups thousands', () => {\n  assert.equal(formatWon(1234567), '1,234,567원')\n})\n\ntest('priceLabel shows the discounted price', () => {\n  assert.equal(priceLabel(20000, 25), '15,000원')\n})\n"
+      },
+      "turns": [
+        {
+          "say": "테스트 돌려줘",
+          "approve": [
+            "yes"
+          ],
+          "expect": {
+            "turnStatus": "completed",
+            "noNativeTools": true,
+            "posted": true,
+            "answerIncludes": [
+              "통과"
+            ],
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "coding": {
+              "changed": [],
+              "lastTests": {
+                "health": "healthy",
+                "failed": 0,
+                "minPassed": 5
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "tests-fail",
+      "folder": {
+        "package.json": "{\n  \"name\": \"price-demo\",\n  \"type\": \"module\",\n  \"scripts\": { \"test\": \"node --test\" }\n}\n",
+        "src/price.mjs": "// Discounted price in won, rounded to the nearest won.\nexport function applyDiscount(price, percent) {\n  if (percent <= 0) return price\n  return Math.floor(price * (100 - percent) / 100)\n}\n",
+        "src/format.mjs": "import { applyDiscount } from './price.mjs'\n\nexport function formatWon(amount) {\n  return `${amount.toLocaleString('en-US')}원`\n}\n\nexport function priceLabel(price, percent) {\n  return formatWon(applyDiscount(price, percent))\n}\n",
+        "test/price.test.mjs": "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { applyDiscount } from '../src/price.mjs'\nimport { formatWon, priceLabel } from '../src/format.mjs'\n\ntest('no discount keeps the price', () => {\n  assert.equal(applyDiscount(10000, 0), 10000)\n})\n\ntest('10% off 10000 is 9000', () => {\n  assert.equal(applyDiscount(10000, 10), 9000)\n})\n\ntest('15% off 9990 is rounded to the nearest won', () => {\n  assert.equal(applyDiscount(9990, 15), 8492)\n})\n\ntest('formatWon groups thousands', () => {\n  assert.equal(formatWon(1234567), '1,234,567원')\n})\n\ntest('priceLabel shows the discounted price', () => {\n  assert.equal(priceLabel(20000, 25), '15,000원')\n})\n"
+      },
+      "turns": [
+        {
+          "say": "테스트 돌려줘",
+          "approve": [
+            "yes"
+          ],
+          "expect": {
+            "turnStatus": "completed",
+            "noNativeTools": true,
+            "posted": true,
+            "answerIncludes": [
+              "실패"
+            ],
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "coding": {
+              "changed": [],
+              "lastTests": {
+                "health": "unhealthy",
+                "minFailed": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "build",
+      "folder": {
+        "package.json": "{\n  \"name\": \"price-demo\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"test\": \"node --test\",\n    \"build\": \"node -e \\\"console.log('built')\\\"\"\n  }\n}\n",
+        "src/price.mjs": "// Discounted price in won, rounded to the nearest won.\nexport function applyDiscount(price, percent) {\n  if (percent <= 0) return price\n  return Math.round(price * (100 - percent) / 100)\n}\n",
+        "src/format.mjs": "import { applyDiscount } from './price.mjs'\n\nexport function formatWon(amount) {\n  return `${amount.toLocaleString('en-US')}원`\n}\n\nexport function priceLabel(price, percent) {\n  return formatWon(applyDiscount(price, percent))\n}\n",
+        "test/price.test.mjs": "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { applyDiscount } from '../src/price.mjs'\nimport { formatWon, priceLabel } from '../src/format.mjs'\n\ntest('no discount keeps the price', () => {\n  assert.equal(applyDiscount(10000, 0), 10000)\n})\n\ntest('10% off 10000 is 9000', () => {\n  assert.equal(applyDiscount(10000, 10), 9000)\n})\n\ntest('15% off 9990 is rounded to the nearest won', () => {\n  assert.equal(applyDiscount(9990, 15), 8492)\n})\n\ntest('formatWon groups thousands', () => {\n  assert.equal(formatWon(1234567), '1,234,567원')\n})\n\ntest('priceLabel shows the discounted price', () => {\n  assert.equal(priceLabel(20000, 25), '15,000원')\n})\n"
+      },
+      "turns": [
+        {
+          "say": "빌드해 봐",
+          "approve": [
+            "yes"
+          ],
+          "expect": {
+            "turnStatus": "completed",
+            "noNativeTools": true,
+            "posted": true,
+            "toolCalls": [
+              "egdesk_run_command"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

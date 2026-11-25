@@ -1,6 +1,6 @@
 {
   "set": "real-engine-engine-stall-v1",
-  "description": "Measure and arm (c33, U13: a silent engine must not cost 180 s). A stall cannot be forced on a real engine, so this script does two things. first-event-times: six one-word turns with the watchdog OFF: every turn record carries firstEventMs (from the turn/start answer to the first event of the turn, 0 when it came before the answer) and latencyMs, which is the data the watchdog's N is chosen from (p99 of the first-event times plus a margin; run it several times and at the effort EG-Desk uses). watchdog-armed: the same kind of turns with EGDESK_ENGINE_STALL_FIRST_EVENT_MS=45000 (the provisional N): no turn may stall (engineStall stalled false, firstEventMs under the limit); if the engine really goes silent during the run the record shows the fact (recovered or failed) and the turn's expectation fails, which is the finding. No Decision model needed.",
+  "description": "Measure and arm (c33, c34 fix; U13: a silent engine must not cost 180 s). A stall cannot be forced on a real engine, so this script does two things. first-event-times: six one-word turns with the watchdog OFF: every turn record carries firstEventMs (the first event of the turn, which is only the preamble: turn started and the user message, a few ms), firstProgressMs (the first event BEYOND the preamble: an assistant or reasoning item, a delta, a tool call; what the watchdog waits for) and latencyMs; N is chosen from the p99 of firstProgressMs (run it several times and at the effort EG-Desk uses). watchdog-armed: the same kind of turns with EGDESK_ENGINE_STALL_FIRST_EVENT_MS=30000: no turn may stall (engineStall stalled false, firstProgressMs under the limit). c34: check-29st had a REAL stall in this script (preamble within 2 ms, then silence for 180 s): the watchdog now waits for progress, not for any event, so it fires there and retries once. No Decision model needed.",
   "conversations": [
     {
       "id": "first-event-times",
@@ -58,7 +58,7 @@
     {
       "id": "watchdog-armed",
       "flags": {
-        "EGDESK_ENGINE_STALL_FIRST_EVENT_MS": "45000"
+        "EGDESK_ENGINE_STALL_FIRST_EVENT_MS": "30000"
       },
       "turns": [
         {
@@ -69,7 +69,7 @@
             "turnStatus": "completed",
             "engineStall": {
               "stalled": false,
-              "maxFirstEventMs": 45000
+              "maxFirstProgressMs": 30000
             }
           }
         },
@@ -81,7 +81,7 @@
             "turnStatus": "completed",
             "engineStall": {
               "stalled": false,
-              "maxFirstEventMs": 45000
+              "maxFirstProgressMs": 30000
             }
           }
         },
@@ -93,7 +93,7 @@
             "turnStatus": "completed",
             "engineStall": {
               "stalled": false,
-              "maxFirstEventMs": 45000
+              "maxFirstProgressMs": 30000
             }
           }
         }

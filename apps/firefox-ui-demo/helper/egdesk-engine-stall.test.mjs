@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
-import { ENGINE_STALL_FLAG, ENGINE_STALL_LIMITS, eventTurnId, stallConfigFromEnv, stallFact } from './egdesk-engine-stall.mjs'
+import { ENGINE_STALL_FLAG, ENGINE_STALL_LIMITS, eventTurnId, isProgressEvent, stallConfigFromEnv, stallFact } from './egdesk-engine-stall.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
 test('the flag: an integer number of milliseconds within the limits, anything else is off; the turn id of an event; the closed fact', () => {
@@ -13,6 +13,14 @@ test('the flag: an integer number of milliseconds within the limits, anything el
   assert.deepEqual([ENGINE_STALL_LIMITS.minMs, ENGINE_STALL_LIMITS.maxMs], [5000, 120000])
   assert.deepEqual([eventTurnId({ params: { turnId: 't1' } }), eventTurnId({ params: { turn: { id: 't2' } } }), eventTurnId({ params: { item: { turnId: 't3' } } }), eventTurnId({ params: { threadId: 'x' } }), eventTurnId(null)], ['t1', 't2', 't3', null, null])
   assert.deepEqual(stallFact({ afterMs: 45000, stalls: 1, recovered: true }), { stalled: true, afterMs: 45000, count: 1, retried: true, recovered: true, outcome: 'recovered' }); assert.equal(stallFact({ afterMs: 1, stalls: 2, recovered: false }).outcome, 'failed')
+})
+
+test('progress: the preamble (turn/started, the user message items) and thread-level messages are not; an assistant or reasoning item, a delta, a tool call, an approval and the completion are', () => {
+  const t = 't1', th = 'c'
+  for (const m of [{ method: 'turn/started', params: { threadId: th, turn: { id: t } } }, { method: 'item/started', params: { threadId: th, turnId: t, item: { type: 'userMessage', id: 'u' } } }, { method: 'item/completed', params: { threadId: th, turnId: t, item: { type: 'userMessage', id: 'u' } } }, { method: 'thread/status/changed', params: { threadId: th } }, null])
+    assert.equal(isProgressEvent(m), false, JSON.stringify(m))
+  for (const m of [{ method: 'item/started', params: { threadId: th, turnId: t, item: { type: 'agentMessage', id: 'a' } } }, { method: 'item/started', params: { threadId: th, turnId: t, item: { type: 'reasoning', id: 'r' } } }, { method: 'item/agentMessage/delta', params: { threadId: th, turnId: t, itemId: 'a', delta: 'x' } }, { method: 'item/started', params: { threadId: th, turnId: t, item: { type: 'commandExecution', id: 'c' } } }, { method: 'item/tool/call', params: { threadId: th, turnId: t } }, { method: 'turn/completed', params: { threadId: th, turn: { id: t, status: 'completed' } } }])
+    assert.equal(isProgressEvent(m), true, JSON.stringify(m))
 })
 
 const MS = 80
@@ -27,9 +35,13 @@ function world(t, options = {}) {
     if (method === 'turn/interrupt') return options.hangInterrupt ? new Promise(() => {}) : {}
     if (method === 'turn/start') {
       const id = `turn-${++n}`, behaviour = plan[n - 1] ?? 'events'; turns.push(id)
-      const emit = () => chat.handleNotification({ method: 'turn/started', params: { threadId: 'conv-1', turn: { id, status: 'inProgress', items: [] } } })
+      const user = { type: 'userMessage', id: 'u-' + id, content: [] }, said = { type: 'agentMessage', id: 'a-' + id, text: '', phase: 'final_answer' }
+      const preamble = () => { for (const [method, item] of [['turn/started'], ['item/started', user], ['item/completed', user]]) chat.handleNotification(method === 'turn/started' ? { method, params: { threadId: 'conv-1', turn: { id, status: 'inProgress', items: [] } } } : { method, params: { threadId: 'conv-1', turnId: id, item } }) }
+      const emit = () => { preamble(); chat.handleNotification({ method: 'item/started', params: { threadId: 'conv-1', turnId: id, item: said } }) }
       if (behaviour === 'events') setTimeout(emit, 5)
       else if (behaviour === 'before') { void emit() }                                    // an event BEFORE the answer
+      else if (behaviour === 'preamble') setTimeout(preamble, 5)                         // the real stall of check-29st: turn started + the user message within ms, then nothing
+      else if (behaviour === 'slowThinking') { setTimeout(preamble, 5); setTimeout(() => chat.handleNotification({ method: 'item/started', params: { threadId: 'conv-1', turnId: id, item: { type: 'reasoning', id: 'r-' + id } } }), MS - 30) } // progress just inside the limit
       else if (behaviour === 'threadLevel') setTimeout(() => chat.handleNotification({ method: 'thread/status/changed', params: { threadId: 'conv-1', status: 'active' } }), 5) // belongs to no turn
       else if (behaviour === 'tool') setTimeout(() => chat.handleServerRequest({ id: 'rq-1', method: 'item/tool/call', params: { threadId: 'conv-1', turnId: id, callId: 'c1', tool: 'unknown_tool', arguments: {} } }).catch(() => {}), 5)
       else if (behaviour === 'oldTurnLate') setTimeout(() => chat.handleNotification({ method: 'turn/completed', params: { threadId: 'conv-1', turn: { id: 'turn-1', status: 'interrupted', items: [] } } }), MS + 20) // after the stall was detected and turn-1 interrupted: the second turn is waiting
@@ -81,4 +93,16 @@ test('an interrupt that never answers does not hold the retry for longer than it
   const w = world(t, { plan: ['silent', 'events'], hangInterrupt: true })
   const started = Date.now(); const sent = await send(w), took = Date.now() - started
   assert.ok(took >= MS + ENGINE_STALL_LIMITS.interruptMs - 200 && took < MS + ENGINE_STALL_LIMITS.interruptMs + 1500, 'waited the interrupt\'s bound, no longer: ' + took); assert.equal(sent.runId, 'turn-2'); assert.equal(w.of('turn/interrupt').length, 1)
+})
+
+// ---- c34: the real stall of check-29st: turn/started and the user message item came within ms, then nothing for 180 s. The preamble is not progress. ----
+test('preamble then silence (the real shape): the first-event rule would have been satisfied; the progress rule interrupts and starts the turn once more, nothing ran so the retry is allowed', async t => {
+  const w = world(t, { plan: ['preamble', 'events'] }), started = Date.now(), sent = await send(w), run = w.chat.runFor(sent)
+  assert.ok(Date.now() - started >= MS, 'it waited the limit although the preamble came at once'); assert.equal(w.of('turn/start').length, 2); assert.deepEqual(w.of('turn/interrupt').map(p => p.turnId), ['turn-1'])
+  assert.equal(sent.runId, 'turn-2'); assert.deepEqual([run.engineStall.stalled, run.engineStall.recovered, run.engineStall.count], [true, true, 1])
+})
+
+test('preamble twice: ENGINE_STALLED after one retry, not 180 s; progress inside the limit (thinking) or a tool call is never touched, however long the turn then runs', async t => {
+  const w = world(t, { plan: ['preamble', 'preamble', 'events'] }); await assert.rejects(send(w), error => error.code === 'ENGINE_STALLED'); assert.equal(w.of('turn/start').length, 2)
+  for (const plan of [['slowThinking'], ['tool']]) { const x = world(t, { plan }); await send(x); await new Promise(r => setTimeout(r, MS * 2)); assert.equal(x.of('turn/start').length, 1, plan[0]); assert.equal(x.of('turn/interrupt').length, 0, plan[0]) }
 })
