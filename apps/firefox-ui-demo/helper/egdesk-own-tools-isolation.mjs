@@ -14,6 +14,7 @@
 // config/read layers (shape only; commands, URLs and env are never copied or kept).
 // Whether each key holds at thread/start on the real binary is NOT confirmed here: the real-engine check reads it back per thread
 // (mcpServerStatus/list, experimentalFeature/list and hooks/list with the thread id; instructionSources on the thread/start result).
+import { loadPureEngineOverrides } from './egdesk-pure-engine-config.mjs' // c30
 import { NATIVE_COMPUTER_FEATURES, disabledNativeMcpConfig, listNativeMcpServers, readNativeDirectMcpServerIds } from './codex-chat-execution-policy.mjs'
 
 // c23 (model-facing text, not user copy). Main's check-1 on the official 0.171: asked to edit a file, the engine answered that "the session's
@@ -60,7 +61,12 @@ export function ownToolsIsolationOverrides(servers = null, directIds = null) {
  * loadOwnToolsIsolation(request, cwd) → { overrides, mcp: 'disabled_by_name' | 'none_found' | 'unchecked' }
  * Never throws: an inventory that cannot be read leaves the features and skills switches only and says so ('unchecked', P2).
  */
-export async function loadOwnToolsIsolation(request, cwd = null) {
+export async function loadOwnToolsIsolation(request, cwd = null, { pure = null } = {}) {
+  // c30 (developer flag EGDESK_OWN_TOOLS_PURE = names | candidates, default off): the inventory is read from config/read and skills/list, which start nothing; the old inventory
+  // (mcpServerStatus/list without a thread) starts every server the person has configured, which is the startup the person's servers showed under the pure engine.
+  if (pure === 'names' || pure === 'candidates') {
+    try { const out = await loadPureEngineOverrides(request, cwd, { tier: pure }); return { overrides: out.overrides, mcp: out.mcp, pure: out.report } } catch { /* never throws: fall back below */ }
+  }
   try {
     const directIds = await readNativeDirectMcpServerIds(request, cwd)
     const servers = await listNativeMcpServers(request, null, { detail: 'toolsAndAuthOnly' })
