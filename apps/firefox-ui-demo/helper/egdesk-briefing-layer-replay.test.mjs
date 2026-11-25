@@ -31,9 +31,9 @@ test('the runner loads it as a plan (dry run): product bars declared for every f
 })
 test('the bodies carry the recorded real inputs: the request, the twelve ledger materials, the one-sentence answer of check-29br; the coverage is the table of check-25br with its six first facts', () => {
   const place = JSON.parse(built.files[0].bytes.toString('utf8')), text = JSON.stringify(place)
-  assert.deepEqual(namesOf('layer-place').filter(n => n.startsWith('about_')).sort((x, y) => Number(x.slice(7)) - Number(y.slice(7))), Array.from({ length: 12 }, (_, i) => `about_M${i + 1}`), 'every entry is asked about (one question each, a log after a log)'); assert.equal(namesOf('layer-place')[0], 'combines')
+  assert.deepEqual(namesOf('layer-place').filter(n => n.startsWith('about_')).sort((x, y) => Number(x.slice('about_M'.length)) - Number(y.slice('about_M'.length))), Array.from({ length: 12 }, (_, i) => `about_M${i + 1}`), 'every entry is asked about (one question each, a log after a log)'); assert.equal(namesOf('layer-place')[0], 'combines')
   assert.ok(text.includes('ledger 폴더의 기록을 읽고') && text.includes('첨부했습니다') && text.includes('1,812'))
-  assert.deepEqual(namesOf('layer-fit').sort((x, y) => Number(x.slice(9)) - Number(y.slice(9))), Array.from({ length: 12 }, (_, i) => `happened_M${i + 1}`))
+  assert.deepEqual(namesOf('layer-fit').sort((x, y) => Number(x.slice('happened_M'.length)) - Number(y.slice('happened_M'.length))), Array.from({ length: 12 }, (_, i) => `happened_M${i + 1}`))
   const cov = built.files.find(f => f.file === 'requests/layer-coverage.json').bytes.toString('utf8')
   assert.deepEqual(factsOf(cov).map(f => f.name), ['onboard_F1', 'onboard_F2', 'onboard_F3', 'onboard_F4', 'onboard_F5', 'onboard_F6'])
   assert.ok(!/api[-_ ]?key|OPENAI|Bearer/i.test(JSON.stringify(built.plan)), 'no key anywhere')
