@@ -191,7 +191,7 @@ export const personTargetAsk = control => (PRESSED_ROLES.has(String(control.role
   ? `Is pressing this control, ${quoteControl(control)}, the step that completes what this request asks for?`
   : `Is this control, ${quoteControl(control)}, the one this request asks to change?`)
 const quoteControl = control => `"${String(control.label).replace(/"/g, "'")}" (${control.role}${control.value ? `, now "${String(control.value).replace(/"/g, "'")}"` : ''})`
-const SAFE_GET_FIELDS = new Set(['hidden', 'text', 'search', 'select', 'select-one', 'select-multiple', 'radio', 'checkbox', 'number', 'date', 'month', 'week', 'range', 'submit', 'button', 'image', 'reset'])
+const SAFE_GET_FIELDS = new Set(['hidden', 'text', 'search', 'textarea', 'select', 'select-one', 'select-multiple', 'radio', 'checkbox', 'number', 'date', 'month', 'week', 'range', 'submit', 'button', 'image', 'reset'])
 export function readOnlyPress(element, snapshot, { classify = classifyAction, isAllowedUrl = defaultAllowedUrl } = {}) {
   const nav = element?.nav
   if (!record(nav) || nav.sensitiveRegion === true) return null
@@ -218,10 +218,14 @@ export function contentBelow(snapshot) {
   return record(scroll) && Number.isFinite(scroll.y) && Number.isFinite(scroll.maxY) && scroll.maxY - scroll.y > MORE_BELOW_PX
 }
 
-function elementKind(element) {
+// u7 (D19): a search box that announces itself as a combobox (role=combobox on a <textarea>, as Google's does) is still a text field; a <select> is not. Only the caller that asks gets it (the page tools);
+// the objective loop keeps treating every combobox as the person's.
+const isTextCombobox = element => String(element.role || '') === 'combobox' && String(element.tag || '').toLowerCase() === 'textarea'
+function elementKind(element, { textComboboxes = false } = {}) {
   const role = String(element.role || '')
   if (role === 'link') return httpUrl(element.href) ? 'navigate' : 'press'
   if (FIELD_ROLES.has(role)) return 'fill'
+  if (textComboboxes && isTextCombobox(element)) return 'fill'
   if (PRESS_ROLES.has(role)) return 'press'
   return null
 }
@@ -231,7 +235,7 @@ function elementKind(element) {
  * options: [{ value, description, item: { kind: 'navigate'|'press'|'fill', element } }]
  * Values are '[L1] label' (links), '[B1] label' (buttons, tabs), '[F1] label' (text fields).
  */
-export function buildReflexCandidates(snapshot, { classify = classifyAction, isAllowedUrl = defaultAllowedUrl, maxOptions = MAX_ELEMENT_OPTIONS } = {}) {
+export function buildReflexCandidates(snapshot, { classify = classifyAction, isAllowedUrl = defaultAllowedUrl, maxOptions = MAX_ELEMENT_OPTIONS, textComboboxes = false } = {}) {
   const elements = Array.isArray(snapshot?.interactiveElements) ? snapshot.interactiveElements : []
   const entries = []
   const excluded = { disabled: 0, gated: 0, offSite: 0, sensitive: 0, unlabeled: 0, overflow: 0, unsupported: 0 }
@@ -240,7 +244,7 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
   const withheld = [] // c26: every control withheld as the person's own (a button withheld by vocabulary, a control with no action), in page order, named for the note
   for (const element of elements) {
     if (!record(element) || typeof element.ref !== 'string' || !element.ref) continue
-    const kind = elementKind(element)
+    const kind = elementKind(element, { textComboboxes })
     if (!kind) {
       if (UNSUPPORTED_ROLES.has(String(element.role || '')) && element.disabled !== true) {
         excluded.unsupported++

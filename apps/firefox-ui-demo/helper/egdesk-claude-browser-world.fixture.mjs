@@ -31,7 +31,7 @@ const PAGES = () => ({ '/home': { text: ['쇼핑몰'], elements: [{ ref: 'q', ro
  * world(t, { harness, pageTools, codexReady, oldReadiness }): the bridge's wiring in miniature. harness / pageTools: the two flags (EGDESK_CLAUDE_HARNESS, EGDESK_PAGE_TOOLS).
  * codexReady: the Codex slot's own answer (qaReady), false = no Codex app-server (the real-window case). oldReadiness: the Browser provider's readiness as u4 left it (the Codex slot's, for every engine).
  */
-export function world(t, { harness = true, pageTools = true, codexReady = false, oldReadiness = false, init = 'minimal', extraTools = [] } = {}) {
+export function world(t, { harness = true, pageTools = true, codexReady = false, oldReadiness = false, init = 'minimal', extraTools = [], host = H, pages = PAGES, start = '/home', hold = false } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-claude-route-')); t.after(() => fs.rmSync(base, { recursive: true, force: true }))
   const root = path.join(base, 'project'); fs.mkdirSync(root); const dataDir = path.join(base, 'data'); fs.mkdirSync(dataDir)
   const transports = [], events = []
@@ -55,8 +55,11 @@ export function world(t, { harness = true, pageTools = true, codexReady = false,
               options.onMessage({ type: 'system', subtype: 'init', session_id: sid, model: 'claude-test', cwd: options.cwd, claude_code_version: '2.1.328', apiKeySource: 'ANTHROPIC_API_KEY',
                 ...(bounded ? { permissionMode: 'dontAsk', tools: init === 'real' ? ['EndConversation', ...extraTools, ...tools] : init === 'lists' ? [...extraTools, ...tools] : tools, mcp_servers: [{ name: 'egdesk', status: 'connected' }], capabilities: [], ...(init === 'real' || init === 'lists' ? REAL_INIT_LISTS : {}) } : {}) })
             }
-            options.onMessage({ session_id: sid, type: 'assistant', parent_tool_use_id: null, message: { id: `m-${this.sent.length}`, role: 'assistant', content: [{ type: 'text', text: '네' }], usage: { input_tokens: 3, output_tokens: 2 } } })
-            options.onMessage({ session_id: sid, type: 'result', subtype: 'success', is_error: false })
+            const finish = () => {
+              options.onMessage({ session_id: sid, type: 'assistant', parent_tool_use_id: null, message: { id: `m-${this.sent.length}`, role: 'assistant', content: [{ type: 'text', text: '네' }], usage: { input_tokens: 3, output_tokens: 2 } } })
+              options.onMessage({ session_id: sid, type: 'result', subtype: 'success', is_error: false })
+            }
+            if (hold) this.finish = finish; else finish()
           })
         },
       }
@@ -66,7 +69,9 @@ export function world(t, { harness = true, pageTools = true, codexReady = false,
   })
   const codex = createCodexEngineAdapter({ request: async method => { throw new Error(`the Codex engine is not used here: ${method}`) }, respond: () => false })
   const wiring = createOwnToolsWiring({ env: { EGDESK_OWN_TOOLS: 'on', ...(harness ? { EGDESK_CLAUDE_HARNESS: 'on' } : {}), PATH: '/usr/bin:/bin', HOME: '/home/synthetic' }, dataDir, spawn: () => { throw new Error('no command runs here') }, getChat: () => chat, home: '/home/synthetic', gitStatus: async () => '' })
-  const pw = pageWorld('x', H, 'card', { pages: PAGES() }); pw.go('/home')
+  const pw = pageWorld('x', host, 'card', { pages: pages() }); pw.go(start)
+  const send0 = pw.transport.sendToUi.bind(pw.transport)
+  pw.transport.sendToUi = async request => { if (request.kind === 'act' && request.action.type === 'fill') { const page = pw.state.pages[pw.state.cur.path]; const target = page.elements.find(e => e.ref === request.action.ref); if (target) { target.value = request.action.text; pw.state.cur = { ...pw.state.cur, revision: pw.state.cur.revision + 1 } } } return send0(request) }
   const readiness = oldReadiness ? route => codexReady : browserSchemaReady({ claudeLive: () => chat.claudeBrowserLive() === true, claudeReady: () => claude.isReady() && claude.capabilities().has('boundedQa'), codexReady: () => codexReady })
   const browser = createCodexBrowserToolProvider({ transport: pw.transport, getOwnerKey: () => OWNER, schemaReady: readiness })
   const page = createPageToolsProvider({ mode: () => 'on', browser: { dispatch: (run, event) => browser.dispatch(run, event) }, ledger: wiring.ledger })
@@ -77,7 +82,7 @@ export function world(t, { harness = true, pageTools = true, codexReady = false,
   const drain = async () => { await chat.queue; await tick(); await chat.queue }
   t.after(async () => { unsubscribe(); await claude.dispose(); await drain() })
   const selected = (threadId = 'ui-claude') => [{ id: 'source', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact', browserToolSelection: { token: `tok-${Math.random()}`, threadId },
-    browserToolIdentity: { cardEpoch: 'epoch', userContextId: 0, engineAccountKey: OWNER, authorityEpoch: 1 }, sourceRef: { viewId: 'card', profileId: 'synthetic', accountId: '', uri: `https://${H}/home` } }]
+    browserToolIdentity: { cardEpoch: 'epoch', userContextId: 0, engineAccountKey: OWNER, authorityEpoch: 1 }, sourceRef: { viewId: 'card', profileId: 'synthetic', accountId: '', uri: `https://${host}${start}` } }]
   const send = (message, extra = {}) => chat.send({ message, engineId: 'claude', clientThreadId: 'ui-claude', requestId: `r-${Math.random()}`, browserTransportId: 'ui', ...extra })
   const browserSend = (message, extra = {}) => send(message, { executionPolicy: { mode: 'browserBounded' }, selectedSources: selected(), ...extra })
   const runOf = sent => chat.runs.get(`${sent.conversationId}/${sent.runId}`)
@@ -86,3 +91,35 @@ export function world(t, { harness = true, pageTools = true, codexReady = false,
 }
 export const refusal = async promise => { try { await promise; return null } catch (error) { return { code: error.code, status: error.httpStatus } } }
 
+
+/** a card tool call as Claude's process makes it (the SDK MCP control request), answered through the permission broker and the real providers: the parsed JSON the tool returned */
+let callSeq = 100
+export async function callTool(w, name, args) {
+  const transport = w.transports.at(-1), id = ++callSeq, requestId = `call-${id}`
+  await transport.options.controlHandlers.mcp_message({ subtype: 'mcp_message', server_name: 'egdesk', message: { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } } }, { requestId })
+  for (let i = 0; i < 600 && !transport.replies.some(r => r.id === requestId); i++) await new Promise(resolve => setTimeout(resolve, 5))
+  const reply = transport.replies.find(r => r.id === requestId)
+  const response = reply?.write?.response?.response?.mcp_response ?? reply?.response?.mcp_response
+  assert.ok(response, 'the tool call was answered')
+  return JSON.parse(response.result?.content?.[0]?.text ?? '{}')
+}
+
+/**
+ * Google's first page as the real window showed it (D19): the search box is a <textarea role="combobox" aria-label="검색" name="q"> in a form that GETs /search; the buttons are inputs of
+ * type submit in that form; the sign-in is a link to accounts.google.com. Facts as the Firefox child reports them (elementItem + navigationFacts).
+ */
+export const GOOGLE_HOST = 'www.google.com'
+const gel = (ref, role, label, extra = {}) => ({ ref, role, label, tag: extra.tag ?? (role === 'link' ? 'a' : role === 'button' ? 'input' : 'textarea'), href: '', value: '', disabled: false, ...extra })
+const searchForm = { method: 'get', sensitive: false, fields: ['hidden', 'hidden', 'textarea', 'submit', 'submit'], submitUrl: `https://${GOOGLE_HOST}/search?q=%EC%9A%B0%EC%82%B0` }
+const submitNav = { type: 'submit', sensitiveRegion: false, regionLabel: '', form: searchForm, controls: null }
+export const GOOGLE_PAGES = () => ({
+  '/': { text: ['Google', '검색', '한국어'], elements: [
+    gel('gmail', 'link', 'Gmail', { href: 'https://mail.google.com/mail/&ogbl' }), gel('img', 'link', '이미지', { href: `https://${GOOGLE_HOST}/imghp?hl=ko&ogbl` }),
+    gel('login', 'link', '로그인', { href: 'https://accounts.google.com/ServiceLogin?hl=ko&passive=true&continue=https://www.google.com/&ec=GAZAAQ' }),
+    gel('q', 'combobox', '검색', { tag: 'textarea' }),
+    gel('btnK', 'button', 'Google 검색', { tag: 'input', nav: submitNav }),
+    gel('btnI', 'button', "I'm Feeling Lucky", { tag: 'input', nav: { ...submitNav, form: { ...searchForm, submitUrl: `https://${GOOGLE_HOST}/doodles/` } } }),
+    gel('sel', 'combobox', '언어', { tag: 'select' }),
+  ] },
+  '/search': { text: ['우산 - Google 검색', '검색결과 약 1억 개'], elements: [gel('back', 'link', '홈', { href: `https://${GOOGLE_HOST}/` })] },
+})

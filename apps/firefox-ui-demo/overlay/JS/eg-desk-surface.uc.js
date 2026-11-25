@@ -19620,7 +19620,9 @@
         const clearAcceptedClaudeDraft = () => {
           if (submittedBoard || engineId !== 'claude' || !ChatState.chatDraftMatches(getCodexThreadById(state.codex, activeThread.id),
               getCodexThreadDraft(state.codex, activeThread.id), state.codex.threadDraftRevisions[activeThread.id] || 0, submittedDraft)) return;
-          updateThreadById(activeThread.id, thread => ChatState.applyRequestProjectTarget({ ...thread, inputSources: [], briefingInputs: [] }, null));
+          // u7 (D20): a live Claude send (the Claude browser capability) keeps the Browser Cards the person granted to operate, as a Codex send does: the grant lasts for the conversation
+          // (the card menu's 조작 허용 해제 ends it), so the next turn carries the same Card without asking again. Everything else a Claude send carried is spent, as before.
+          updateThreadById(activeThread.id, thread => ChatState.applyRequestProjectTarget({ ...thread, inputSources: ChatState.claudeKeptInputs(claudeBrowserPlan.live, thread.inputSources), briefingInputs: [] }, null));
           chatRequestProjectDisplays.delete(activeThread.id);
           state.codex.threadDrafts[activeThread.id] = '';
           state.codex.draft = getCodexThreadDraft(state.codex, state.codex.activeThreadId);
@@ -27864,7 +27866,17 @@
       try { const thread = getCodexThreadById(state.codex, state.codex.activeThreadId); activeClientThreadId = thread ? ChatState.clientThreadBinding(thread) : null; } catch {}
       const standingGrant = browserToolGrantFor(activeClientThreadId, card.id);
       const revokeItem = standingGrant ? item('조작 허용 해제', '이 대화에서 이 Browser에 준 조작 허용을 지금 끝냅니다. 다음 턴부터 Agent는 다시 허락을 받아야 합니다.',
-        () => { revokeBrowserToolGrants({ clientThreadId: activeClientThreadId, cardId: card.id }); showAgentActivity('이 대화의 조작 허용을 끝냄'); },
+        () => {
+          revokeBrowserToolGrants({ clientThreadId: activeClientThreadId, cardId: card.id });
+          // u7: a Claude conversation keeps the granted chip between turns; ending the grant takes that chip away too (a Codex conversation is left as it was)
+          try {
+            const thread = getCodexThreadById(state.codex, state.codex.activeThreadId);
+            if (thread && ChatState.chatThreadEngineId(thread, state.codex) === 'claude') {
+              for (const input of (thread.inputSources || [])) if (input.kind === 'browser' && input.sourceRef?.viewId === card.id && input.browserToolPermission === 'interact') state.codexBridge.removeInputSource(thread.id, input.id);
+            }
+          } catch {}
+          showAgentActivity('이 대화의 조작 허용을 끝냄');
+        },
         { testid: 'browser-grant-revoke' }) : null;
       const items = [
         item('복제', '현재 URL을 새 Desk Window로 열기', safeDuplicateBrowser),

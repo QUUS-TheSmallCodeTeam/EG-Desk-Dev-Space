@@ -80,7 +80,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     const snapshot = out.data?.snapshot
     if (!out.ok || !snapshot) return { error: out.data?.error?.code ?? 'PAGE_OBSERVE_FAILED', detail: out.data?.error }
     if (opaque(snapshot.url)) return { error: 'BROWSER_CARD_OPAQUE' }
-    const value = { observationId: out.data.observationId, snapshot, options: buildReflexCandidates(snapshot).options }
+    const value = { observationId: out.data.observationId, snapshot, options: buildReflexCandidates(snapshot, { textComboboxes: true }).options }
     remember(run, cardId, value)
     return value
   }

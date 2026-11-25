@@ -29,3 +29,10 @@ export function claudeBrowserSendPlan({ engineId, capable = false, selectedInput
   if (briefingInputs > 0 || inputs.some(input => !isBrowser(input)) || !inputs.some(operates)) return Object.freeze({ refuse: true, live: false, captureInputs: inputs })
   return Object.freeze({ refuse: false, live: true, captureInputs: Object.freeze([]) })
 }
+
+/**
+ * u7 (D20): what a Claude conversation keeps in its input row after a LIVE send was accepted. A Claude send spends everything it carried (captures are one-shot) EXCEPT the Browser Cards the person
+ * granted to operate: that grant lasts for the conversation until the card menu's 조작 허용 해제 ends it (as it does for a Codex conversation, which never cleared them), so the next turn carries the
+ * same Card again with a fresh token from the standing grant. Not live (no capability, or no operate grant): nothing is kept, exactly as before.
+ */
+export const claudeKeptInputs = (live, inputs) => (live === true && Array.isArray(inputs) ? inputs.filter(input => input?.kind === 'browser' && input.selectedByUser === true && operates(input)) : [])
