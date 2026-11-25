@@ -27,6 +27,9 @@ export const EGRESS_KINDS = Object.freeze({
   // field promises to search this device first), and Decisions gets no permission of its own, so this kind is refused by every gate: its
   // class is not a model data class. It opens only if the owner decides a permission that covers all models (owner decision pending).
   hud_text: Object.freeze({ data: 'hud', governedBy: 'No model permission covers typed search-field text yet: refused everywhere (owner decision pending)' }),
+  // L7 c37 (prefetch): the relative paths, sizes and dates of the files of the folder the run's engine works in: the engine reads that folder itself, so the decision model may read its listing.
+  // Never file text (that goes to the engine only). Open only when the run has a bound working folder the engine may read (workspaceRead).
+  workspace_names: Object.freeze({ data: 'files', governedBy: 'The run\'s own working folder, which its engine reads: only the listing (path, size, date), only for a run with a bound folder' }),
   board_excerpt: Object.freeze({ data: 'board', governedBy: 'This Board ask itself: the owner chose and confirmed a run that sends the approved public excerpts to the drafting model. An extract-only ask sends them to no model, so not to Decisions either' }),
 })
 // Requests that carry NO data of any class: one fixed body each, byte for byte (c18, the idle warm-up). They are not in EGRESS_KINDS because a
@@ -45,7 +48,7 @@ const sameContentFree = (name, request) => {
   const extra = Object.keys(request).filter(key => !['input', 'questions', 'timeoutMs', 'signal'].includes(key))
   return extra.length === 0 && request.input === fixed.input && JSON.stringify(request.questions) === JSON.stringify(fixed.questions)
 }
-const DATA_CLASSES = Object.freeze(['terminal', 'browser', 'canvas', 'run', 'memory', 'speech', 'topic', 'board', 'thread'])
+const DATA_CLASSES = Object.freeze(['terminal', 'browser', 'canvas', 'run', 'memory', 'speech', 'topic', 'board', 'thread', 'files'])
 // Evidence kinds a draft-check catalog may carry, and the data class that already lets a model see them.
 // Items of the decision context packet were already admitted for this run's answering model, so they count as the run's own data.
 // run_state: what the run is doing now, from the runtime's own facts (the heartbeat's material a message was composed from).
@@ -63,7 +66,7 @@ const EVIDENCE_CLASS = Object.freeze({ source: 'run', document: 'run', conversat
  *   boardExcerptsToModel: this Board ask sends the owner-approved excerpts to a model (the drafting model of a confirmed draft run)
  *   threadReply: the answering model holds the previous assistant message in its own live native thread (mid-session, not compacted)
  */
-export function modelDataPermissions({ toolCeiling = null, browserGranted = false, canvasMaySend = false, memoryScope = null, speechConsent = false, topicConsent = false, runActive = false, boardExcerptsToModel = false, threadReply = false } = {}) {
+export function modelDataPermissions({ toolCeiling = null, browserGranted = false, canvasMaySend = false, memoryScope = null, speechConsent = false, topicConsent = false, runActive = false, boardExcerptsToModel = false, workspaceRead = false, threadReply = false } = {}) {
   const ceiling = toolCeiling && typeof toolCeiling === 'object' ? toolCeiling : null
   return Object.freeze({
     terminal: ceiling ? ceiling.terminal !== 'none' : true,
@@ -75,6 +78,7 @@ export function modelDataPermissions({ toolCeiling = null, browserGranted = fals
     topic: topicConsent === true,
     board: boardExcerptsToModel === true,
     thread: threadReply === true,
+    files: workspaceRead === true,
   })
 }
 

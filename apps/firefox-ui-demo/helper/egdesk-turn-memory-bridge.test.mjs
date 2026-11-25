@@ -120,7 +120,7 @@ test('the wiring passes its internal flags to the runtime only when the bridge s
 test('the bridge builds its turn-memory config with the options of its developer flags; unset or any other value leaves the defaults', async () => {
   const { TURN_MEMORY_FLAGS, turnMemoryFlagsFromEnv } = await import('./egdesk-turn-memory-wiring.mjs')
   assert.deepEqual(TURN_MEMORY_FLAGS, { onePacket: 'EGDESK_TURN_MEMORY_ONE_PACKET', writeTarget: 'EGDESK_TURN_MEMORY_WRITE_TARGET', confirmInConversation: 'EGDESK_TURN_MEMORY_CONFIRM',
-    pruneHeld: 'EGDESK_TURN_MEMORY_PRUNE_HELD', keepLate: 'EGDESK_TURN_MEMORY_KEEP_LATE', speechDesign: 'EGDESK_TURN_MEMORY_SPEECH_DESIGN', splitWording: 'EGDESK_TURN_MEMORY_SPLIT_WORDING', previousReply: 'EGDESK_TURN_MEMORY_PREVIOUS_REPLY', selectionHeld: 'EGDESK_TURN_MEMORY_SELECTION_HELD', engineContext: 'EGDESK_TURN_MEMORY_ENGINE_CONTEXT', engineChars: 'EGDESK_TURN_MEMORY_ENGINE_CHARS', engineBytes: 'EGDESK_TURN_MEMORY_ENGINE_BYTES' })
+    pruneHeld: 'EGDESK_TURN_MEMORY_PRUNE_HELD', keepLate: 'EGDESK_TURN_MEMORY_KEEP_LATE', speechDesign: 'EGDESK_TURN_MEMORY_SPEECH_DESIGN', splitWording: 'EGDESK_TURN_MEMORY_SPLIT_WORDING', previousReply: 'EGDESK_TURN_MEMORY_PREVIOUS_REPLY', selectionHeld: 'EGDESK_TURN_MEMORY_SELECTION_HELD', engineContext: 'EGDESK_TURN_MEMORY_ENGINE_CONTEXT', engineChars: 'EGDESK_TURN_MEMORY_ENGINE_CHARS', engineBytes: 'EGDESK_TURN_MEMORY_ENGINE_BYTES', prefetch: 'EGDESK_TURN_MEMORY_PREFETCH' })
   assert.deepEqual(turnMemoryFlagsFromEnv({}), {})
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_ONE_PACKET: 'on', EGDESK_TURN_MEMORY_WRITE_TARGET: 'choice', EGDESK_TURN_MEMORY_CONFIRM: 'on' }), { onePacket: true, writeTarget: 'choice', confirmInConversation: true })
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_PRUNE_HELD: 'on', EGDESK_TURN_MEMORY_KEEP_LATE: 'on' }), { pruneHeld: true, keepLate: true })
@@ -133,6 +133,7 @@ test('the bridge builds its turn-memory config with the options of its developer
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_PREVIOUS_REPLY: '1' }), {})
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_SELECTION_HELD: 'on' }), { selectionHeld: true })
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_SELECTION_HELD: '1' }), {})
+  assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_PREFETCH: 'files' }), { prefetch: 'files' }); assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_PREFETCH: 'on' }), {})
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_ENGINE_CONTEXT: 'split' }), { engineContext: 'split' })
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_ENGINE_CONTEXT: 'mark', EGDESK_TURN_MEMORY_ENGINE_CHARS: '2500' }), { engineContext: 'mark', engineChars: 2500 })
   assert.deepEqual(turnMemoryFlagsFromEnv({ EGDESK_TURN_MEMORY_ENGINE_CHARS: '2500' }), {}, 'the size alone does nothing')

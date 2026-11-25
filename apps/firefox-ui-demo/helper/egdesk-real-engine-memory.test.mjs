@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runFakeAppServer } from '../scripts/real-engine/fake-app-server.mjs'
@@ -17,6 +18,7 @@ import { createMemoryHook, memoryGraph, memoryNeedsDecisions, pagesIn, validateM
 import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryHeldV4Script, buildMemoryRecallScript, buildMemoryScaleScript, buildMemoryScaleV2Script, buildMemoryScaleV3Script, buildMemoryWriteScript, buildMemoryWriteV2Script, WRITE_PAGES, buildMemorySpillProbeScript, buildMemorySpillProbeV2Script, SPILL_PROBE_PAGES, PURGE, RETENTION, SCALE_FACTS, SCALE_PAGES } from './egdesk-memory-real-engine-scripts.mjs'
 import { candidatesFromOntologyGraph } from './egdesk-context-setup.mjs'
 import { choiceAnswer, mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
+import { PREFETCH_SCENARIOS, buildPrefetchScript } from './egdesk-prefetch-real-engine-scripts.mjs'
 import { checkRecording, recordingFacts, validateRecordingExpect, validateSpeechConsent } from './egdesk-real-engine-recording.mjs'
 
 const app = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -528,4 +530,37 @@ test('write-v2: check-20mw reproduced and fixed (fake engine, the stand-in judge
   assert.equal(own2[1].recording.seeded['schedule/product-review'].readings[0].basis, 'self_reported_observation'); assert.equal(own2[3].recording.seeded['schedule/product-review'].readings[0].state, 'accepted')
   const strict = buildMemoryWriteV2Script(), strictV1 = buildMemoryWriteScript()
   assert.deepEqual(strict.conversations.map(c => c.turns), strictV1.conversations.map(c => c.turns), 'the expectations are v1\'s, none loosened')
+})
+
+// ---- c37: the prefetch script through the check's composition ----
+function prefetchJudge() {
+  const scripted = scriptedDecisions()
+  return async wire => {
+    if (!wire.questions.some(q => q.name === 'answer_type')) return null
+    const answers = await scripted.answer(wire), text = wire.input.map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n')
+    const message = /Message:\n([\s\S]*)$/.exec(text)?.[1]?.trim() ?? '', catalog = /Catalog:\n([\s\S]*?)\n(?:\n|Message|\[)/.exec(text)?.[1] ?? text
+    return answers.map(a => { const m = /^rel_(\d+)$/.exec(a.name); if (!m) return a; const line = new RegExp(`#${m[1]} \\|[^\\n]*`).exec(catalog)?.[0] ?? ''; const path = line.split(' | ')[3] ?? '\u0000'; return { ...a, probability: line.includes('workspace') || /\.(md|mjs|json)/.test(path) ? (message.includes(path) ? 0.97 : 0.02) : a.probability } })
+  }
+}
+test('prefetch-v1 through the check (fake engine): each -on conversation hands its engine the named file in the turn context and makes no tool call; each -off conversation has no workspace item; both answer', async t => {
+  const script = buildPrefetchScript()
+  assert.deepEqual(script.conversations.map(c => c.id), ['notes-off', 'notes-on', 'code-off', 'code-on', 'ledger-off', 'ledger-on'])
+  const names = ['notes', 'code', 'ledger'], finals = [{ steps: [], final: `${names.map(n => PREFETCH_SCENARIOS[n].fact).join(', ')} 입니다.` }] // every conversation of the fake run starts its engine afresh: one answer holding all three facts
+  const w = persistedRoom(world(t, { turns: finals }, { decide: prefetchJudge() }))
+  const result = await runCheck(w.options, asScripts(script), w.deps)
+  assert.equal(result.records.length, 6)
+  const starts = fs.readFileSync(path.join(w.base, 'fake.log'), 'utf8').trim().split('\n').map(l => JSON.parse(l)).filter(m => m.params?.additionalContext !== undefined || (m.params?.input && m.method === 'turn/start'))
+  for (const rec of result.records) assert.equal(rec.ok, true, `${rec.id}: ${JSON.stringify(rec.turns[0].expectations.filter(e => !e.ok))} ${rec.abortDetail ?? ''}`)
+  const textOf = i => Object.values(starts[i]?.params?.additionalContext ?? {}).map(v => v.value).join('\n')
+  names.forEach((name, k) => { const off = textOf(2 * k), on = textOf(2 * k + 1), fact = PREFETCH_SCENARIOS[name].fact
+    assert.ok(on.includes(fact) && /\[item id=workspace:/.test(on), `${name}-on carries the file text`); assert.ok(!off.includes(fact) && !/workspace:/.test(off), `${name}-off carries none`) })
+})
+
+test('prefetch compare script: pairs the -off and -on records and prints the saving', async t => {
+  const { execFileSync } = await import('node:child_process')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prefetch-compare-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const rec = (id, ms, calls) => ({ set: 'real-engine-prefetch-v1', id, ok: true, turns: [{ posted: ['4,730만 원 입니다.'], contextKeys: ['egdesk_decision_context'], subTurns: [{ latencyMs: ms, toolCalls: Array.from({ length: calls }, () => ({ tool: 'egdesk_read_source' })), items: { agentMessage: 1 }, usage: { input: 13000 } }] }] })
+  for (const [id, ms, calls] of [['notes-off', 12400, 2], ['notes-on', 4600, 0], ['code-off', 11800, 2], ['code-on', 5000, 0], ['ledger-off', 13100, 3], ['ledger-on', 4900, 0]]) fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(rec(id, ms, calls)))
+  const out = execFileSync(process.execPath, [path.join(app, 'scripts/egdesk-prefetch-compare.mjs'), dir], { encoding: 'utf8' })
+  assert.match(out, /\| notes \| saving \| \| 2 calls \| 7\.8/); assert.match(out, /mean saving over 3 pairs: 7\.6 s per turn/); assert.match(out, /\| ledger \| off \| ok \| 3 \(egdesk_read_source\)/)
 })
