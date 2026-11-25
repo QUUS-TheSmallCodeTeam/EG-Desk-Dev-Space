@@ -37,7 +37,7 @@ function world(t, { yes = true } = {}) {
   const fetchImpl = async (url, init) => {
     const body = JSON.parse(init.body); decisionBodies.push(body)
     const paragraph = (body.input.map(m => /^The last paragraph of the assistant's answer:\n"""\n([\s\S]*?)\n"""$/.exec(String(m.content))?.[1]).find(Boolean)) ?? ''
-    return Response.json({ answers: body.questions.map(q => ({ name: q.name, type: 'predicate', probability: q.name === 'pw' ? (yes && /수정하지 않았습니다/.test(paragraph) ? 0.93 : 0.04) : 0.04 })), usage: { input_tokens: 20 } })
+    return Response.json({ answers: body.questions.map(q => ({ name: q.name, type: 'predicate', probability: q.name === 'pa' ? (yes ? 0.93 : 0.04) : q.name === 'pw' ? (yes && /수정하지 않았습니다/.test(paragraph) ? 0.93 : 0.04) : 0.04 })), usage: { input_tokens: 20 } })
   }
   const options = { mode: 'run', codexBin: '/fake/codex', home: { kind: 'dir', dir: codexHome }, scripts: [], out, decisions: true, model: null, effort: null, appServerConfig: [], turnTimeoutMs: 8000, json: false }
   const deps = { spawn, runnerSpawn: () => { throw new Error('no command runs here') }, fetchImpl, killGroup, killGroupRunner: () => {}, gitStatus: async () => null, env: { PATH: '/usr/bin:/bin', HOME: path.join(base, 'home'), [DECISION_KEY_ENV]: 'egd-synthetic-not-a-key-0036' } }

@@ -17,9 +17,12 @@ export const PROPOSAL_YES = 0.8
 export const PROPOSAL_PREDICATES = Object.freeze({
   proposal: index => ({ name: `pq_${index}`, instructions: 'Does this sentence offer to do something that has not been done yet and ask the person whether to go ahead with it, or to choose between ways of doing it?' }),
   request: index => ({ name: `ph_${index}`, instructions: 'Does this sentence ask the person for something the assistant is waiting for: to do something themselves, or to tell the assistant something or answer a question about the facts?' }),
-  // c37: one concrete condition. The earlier wording ("…report that and leave the action itself waiting, not done, for the person's go-ahead?") asked three things at once and scored
-  // .56 on the engine's "파일은 변경하지 않았습니다." (c56) and .82 on "…아직 수정하지 않았습니다." (c59). This one scored 1.0 on both phrasings and 0 on the two real "already done" answers (c59, 4/4).
-  waiting: { name: 'pw', instructions: 'The person asked the assistant to hold off on an action and only report first. Does this paragraph say that the action has not been done?' },
+  // c39: two predicates, each about ONE quoted thing, and CODE combines them (R2, R4). Candidate A of c37 put the person's request into the question as a premise ("The person asked the assistant
+  // to hold off on an action and only report first. Does this paragraph say that the action has not been done?"): it separated the engine's two phrasings (1.0/1.0, c59) but a reply that
+  // says an action is undone for ANOTHER reason (read-only file, card authentication) scored .46 and .53 (c62, need <= .2), because "has not been done" is true there too and the premise was
+  // simply given. Whether the person asked to wait is a fact about the person's message (pa); whether the paragraph says the action is undone is a fact about the paragraph (pw).
+  holdAsked: { name: 'pa', instructions: 'Does the person\'s message ask the assistant to hold off on an action and only report first, so that the assistant should not do it yet?' },
+  waiting: { name: 'pw', instructions: 'Does this paragraph say that the action the person\'s message describes has not been done?' },
 })
 
 const clip = (text, n) => String(text ?? '').replace(/[ \t]+/g, ' ').trim().slice(0, n)
@@ -76,7 +79,7 @@ export function registrationRequest({ request, candidates, questionOf }) {
     input.push({ role: 'user', content: `Sentence ${s.index + 1} of the assistant's answer:\n"""\n${s.text}\n"""` })
     for (const kind of ['proposal', 'request']) { const p = PROPOSAL_PREDICATES[kind](s.index); questions.push(questionOf(p.name, p.instructions)) }
   }
-  if (candidates.paragraph) { input.push({ role: 'user', content: `The last paragraph of the assistant's answer:\n"""\n${candidates.paragraph}\n"""` }); questions.push(questionOf(PROPOSAL_PREDICATES.waiting.name, PROPOSAL_PREDICATES.waiting.instructions)) }
+  if (candidates.paragraph) { input.push({ role: 'user', content: `The last paragraph of the assistant's answer:\n"""\n${candidates.paragraph}\n"""` }); for (const w of [PROPOSAL_PREDICATES.holdAsked, PROPOSAL_PREDICATES.waiting]) questions.push(questionOf(w.name, w.instructions)) }
   return { input, questions }
 }
 
@@ -91,8 +94,8 @@ export function readRegistration({ candidates, answers, runId = null, answerId =
     if (kind) items.push({ id: idOf(s.text), kind, text: s.text, steps: kind === 'proposal' ? candidates.steps : [], options: kind === 'proposal' ? s.options : [], runId, answerId, at })
   }
   if (!items.length && candidates.paragraph) {
-    const waits = p(answers, PROPOSAL_PREDICATES.waiting.name)
-    if (waits !== null && waits >= PROPOSAL_YES) items.push({ id: idOf(candidates.paragraph), kind: 'waiting_action', text: candidates.paragraph, steps: candidates.steps, options: [], runId, answerId, at })
+    const asked = p(answers, PROPOSAL_PREDICATES.holdAsked.name), waits = p(answers, PROPOSAL_PREDICATES.waiting.name)
+    if (asked !== null && asked >= PROPOSAL_YES && waits !== null && waits >= PROPOSAL_YES) items.push({ id: idOf(candidates.paragraph), kind: 'waiting_action', text: candidates.paragraph, steps: candidates.steps, options: [], runId, answerId, at })
   }
   return items.slice(0, PROPOSAL_LIMITS.items)
 }
