@@ -184,7 +184,7 @@ test('the memory item: present while a note the person was told of waits for the
 test('the run\'s gate: when the person\'s words may not be sent to the Decision model nothing is resolved and nothing is sent; the waiting command is read as before', async () => {
   const log = [], broker = brokerStub()
   const x = await rig({ memoryMode: null, client: scripted(() => 0.99, log) }); await on(x, broker)
-  x.chat.decisionEgressFor = () => ({ allows: () => false, require() { throw new Error('refused') } })
+  x.chat.decisionEgressFor = () => ({ allows: c => c === 'terminal_command', require(c) { if (c === 'run_text') throw new Error('refused') } }) // the command may be quoted, the person's words may not go out
   await first(x, broker); await x.send('그냥 해', 'r1'); await x.done(2)
   assert.equal(log.length, 0); assert.equal(x.chat.openItemRecord('r1'), null); assert.deepEqual(broker.reads, ['그냥 해'])
   x.store.close()
