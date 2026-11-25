@@ -111,3 +111,14 @@ export function buildLoopScript(entries = LOOP_ENTRIES) {
       { id: 'realistic-schema-off', folder, flags: { EGDESK_BRIEFING_FLOW: 'on' }, turns: [turn(false)] },
     ] }
 }
+
+// ---- v2 of the realistic script (cycle 42, owner direction U13): the same twelve entries and the same expectations, one conversation (output schema on) with
+// EGDESK_BRIEFING_HAND_MATERIALS=on: the notes are handed to the answering turn after the person's message (what the product's turn memory does with the pages the Decision model picked),
+// so the engine does not spend a tool round per note. check-25br measured 13 tool rounds and 68.0 s for the answer of the schema-on conversation (4 rounds, 33.6 s when the engine read
+// the folder with one rg), and the U13 audit measured 2.5 to 2.9 s per round: about 30 to 35 s less for the answer turn is the expectation (an estimate, not a measurement).
+export const LOOP_HANDED_SET = 'real-engine-briefing-realistic-v2'
+export function buildLoopHandedScript(entries = LOOP_ENTRIES) {
+  const base = buildLoopScript(entries), on = base.conversations[0]
+  return { set: LOOP_HANDED_SET, description: `${base.description} Version 2 hands the notes to the answering turn (EGDESK_BRIEFING_HAND_MATERIALS=on, default off in every other script) instead of letting the engine read the folder with tool rounds: one conversation, schema on.`,
+    conversations: [{ ...on, id: 'realistic-handed-schema-on', flags: { ...on.flags, EGDESK_BRIEFING_HAND_MATERIALS: 'on' } }] }
+}

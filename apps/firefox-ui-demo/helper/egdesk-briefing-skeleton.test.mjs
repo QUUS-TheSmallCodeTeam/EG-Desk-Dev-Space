@@ -1151,9 +1151,14 @@ test('c34 not-covered: no part to add, but a fact a material holds is not on the
   const still = await run(q => (q.name === 'onboard_F1' ? .05 : undefined), { answer, fill: rewrite })
   assert.deepEqual([still.out.status, still.out.reason, still.out.coverage.missing, still.fills.length, still.out.stats.judgeRequests], ['fallback-chat', 'not-covered', ['F1'], 2, 7])
   // the rewritten cards are checked like any fill: a piece the material does not support in the rewrite -> the chat answer (nothing half-fixed is proposed)
-  let slotAsked = 0
-  const unsupported = await run(q => (q.name === 'onboard_F1' ? .05 : q.name === 'step_P1' ? (slotAsked++ ? .02 : .97) : undefined), { answer, fill: rewrite })
-  assert.deepEqual([unsupported.out.status, unsupported.out.reason, unsupported.judge.calls.map(c => c.stage), unsupported.fills.length], ['fallback-chat', 'not-covered', ['place', 'fit', 'order', 'fill_check', 'coverage', 'fill_check'], 2], 'the rewrite was checked and refused; coverage was not asked again')
+  let covered = false // the rows are refused only in the rewrite's own check, which comes after the first coverage request
+  const unsupported = await run(q => (q.name === 'onboard_F1' ? (covered = true, .05) : q.name.startsWith('slot_P1_') && covered ? .02 : undefined), { answer, fill: rewrite })
+  assert.deepEqual([unsupported.out.status, unsupported.out.reason, unsupported.judge.calls.map(c => c.stage), unsupported.fills.length], ['fallback-chat', 'not-covered', ['place', 'fit', 'order', 'fill_check', 'coverage', 'fill_check'], 2], 'the rewrite was checked and a ROW of it refused (c42: an explanation alone no longer ends the round); coverage was not asked again')
+  // c42: a refused EXPLANATION alone keeps the cards and brings back the explanation that was judged supported before the rewrite
+  let stepAsked = 0, keepAsked = 0
+  const keep = await run(q => (q.name === 'onboard_F1' ? (keepAsked++ >= 1 ? .95 : .05) : q.name === 'step_P1' ? (stepAsked++ ? .42 : .97) : undefined), { answer, fill: (want, n) => { const r = fillReply(ids(want)); if (n > 1) for (const id of Object.keys(r.items)) r.items[id] = { ...r.items[id], text: `다시 쓴 설명 ${id}` }; return r } })
+  assert.equal(keep.out.status, 'presented', JSON.stringify(keep.out.coverage)); assert.deepEqual(keep.out.coverage.explanationKept, ['P1'])
+  assert.ok(!keep.out.plan.stepSpecs.some(x => x.text === '다시 쓴 설명 P1') && keep.out.plan.stepSpecs.some(x => x.text === '다시 쓴 설명 P2'), 'P1 keeps its first explanation, P2 its rewritten one')
   // an unusable rewrite (a reply that is not the asked shape) -> the chat answer
   const bad = await run(q => (q.name === 'onboard_F1' ? .05 : undefined), { answer, fill: (want, n) => (n === 1 ? fillReply(ids(want)) : { nonsense: true }) })
   assert.deepEqual([bad.out.status, bad.out.reason], ['fallback-chat', 'not-covered'])
