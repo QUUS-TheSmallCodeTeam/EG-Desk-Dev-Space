@@ -107,6 +107,8 @@ test('every doubt is the engine: under the bar, unanswered, a second candidate, 
   assert.deepEqual([silent.use, silent.reason], [false, 'unanswered'])
   const noMore = await decideFastAnswer({ message: RETENTION, result, wiki, scope: SCOPE, client: { async decide(r) { return { answers: Object.fromEntries(r.questions.filter(q => q.name !== 'fa_ans_1').map(q => [q.name, { type: 'predicate', probability: q.name === 'fa_ans_0' ? 0.97 : 0.02 }])) } } } })
   assert.deepEqual([noMore.use, noMore.reason], [false, 'unanswered'], 'a sentence without an answer is never taken as a "no"')
+  const noMessage = await decideFastAnswer({ message: RETENTION, result, wiki, scope: SCOPE, client: { async decide(r) { return { answers: Object.fromEntries(r.questions.filter(q => q.name !== 'fa_more').map(q => [q.name, { type: 'predicate', probability: q.name === 'fa_ans_0' ? 0.97 : 0.02 }])) } } } })
+  assert.deepEqual([noMessage.use, noMessage.reason], [false, 'unanswered'], 'a message question without an answer is never taken as a "no"')
 })
 
 test('a message that is empty or long is never judged', async () => {
