@@ -24860,6 +24860,7 @@
       const activity = browserToolActivityStart(card, activityRequest);
       // u9 (D25): the question is on THIS Card; a Card the Agent opened, or one out of the person's sight, left it unseen for its whole 55 s. Bring the Card forward and into view first.
       try { if (!isCardFullscreen(card)) card.style.zIndex = String(++cardZ); revealOpenCanvasCard(card, { kind: 'browser' }); } catch {}
+      const askedAtMs = Date.now(), askedLeftMs = Math.round(request.deadlineMs - askedAtMs);
       const answer = await card._browserControls.toolAskSite?.({ site, deadlineMs: request.deadlineMs });
       if (browserToolRunBindings.get(key) !== authorized) throw new Error('Browser run was cancelled during the site question');
       if (answer === 'allowed') {
@@ -24867,8 +24868,9 @@
         const grant = browserToolThreadGrants.get(browserToolGrantKey(clientThreadId, card.id));
         if (grant) grant.lastUsedAt = Date.now();
       }
+      // u10: how much time the question was given and how long it took (numbers only): tells a short deadline from an unanswered question
       const result = { requestId, status: answer === 'allowed' ? 'site-allowed' : answer === 'refused' ? 'site-refused' : 'site-pending',
-        site, navigationPolicy: policy(), timing: timing() };
+        site, navigationPolicy: policy(), timing: timing(), diag: { leftMs: askedLeftMs, waitedMs: Math.max(0, Math.round(Date.now() - askedAtMs)) } };
       browserToolActivityEnd(activity, result, false);
       return result;
     }

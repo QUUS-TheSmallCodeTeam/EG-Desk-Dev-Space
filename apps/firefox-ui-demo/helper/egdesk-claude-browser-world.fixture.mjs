@@ -11,6 +11,7 @@ import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
 import { createClaudeEngineAdapter } from './claude-engine-adapter.mjs'
 import { createCodexBrowserToolProvider } from './codex-browser-tool-provider.mjs'
+import { BrowserToolTransport } from './codex-browser-tool-transport.mjs'
 import { OWNER, pageWorld } from './egdesk-browser-live-runner.mjs'
 import { createPageToolsProvider } from './egdesk-page-tools.mjs'
 import { createOwnToolsWiring } from './egdesk-own-tools-wiring.mjs'
@@ -35,10 +36,10 @@ const PAGES = () => ({ '/home': { text: ['쇼핑몰'], elements: [{ ref: 'q', ro
  * world(t, { harness, pageTools, codexReady, oldReadiness }): the bridge's wiring in miniature. harness / pageTools: the two flags (EGDESK_CLAUDE_HARNESS, EGDESK_PAGE_TOOLS).
  * codexReady: the Codex slot's own answer (qaReady), false = no Codex app-server (the real-window case). oldReadiness: the Browser provider's readiness as u4 left it (the Codex slot's, for every engine).
  */
-export function world(t, { harness = true, pageTools = true, codexReady = false, oldReadiness = false, init = 'minimal', extraTools = [], host = H, pages = PAGES, start = '/home', hold = false, decisions = null, siteAnswer = null } = {}) {
+export function world(t, { harness = true, pageTools = true, codexReady = false, oldReadiness = false, init = 'minimal', extraTools = [], host = H, pages = PAGES, start = '/home', hold = false, decisions = null, siteAnswer = null, realTransport = false, siteUnreflected = false } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-claude-route-')); t.after(() => fs.rmSync(base, { recursive: true, force: true }))
   const root = path.join(base, 'project'); fs.mkdirSync(root); const dataDir = path.join(base, 'data'); fs.mkdirSync(dataDir)
-  const transports = [], events = [], ran = [], decisionBodies = []
+  const transports = [], events = [], ran = [], decisionBodies = [], receiveErrors = []
   let chat = null
   const claude = createClaudeEngineAdapter({
     snapshot: () => ({ installed: true, version: '2.1.328', versionStatus: 'untested', auth: { status: 'signedIn', method: 'apiKey', account: 'synthetic', label: 'Claude API' } }),
@@ -88,13 +89,30 @@ export function world(t, { harness = true, pageTools = true, codexReady = false,
       siteQuestions.push(request.site)
       const answer = typeof siteAnswer === 'function' ? await siteAnswer(request.site) : siteAnswer
       if (answer === 'allowed') sites.add(request.site)
-      return { requestId: request.requestId, status: answer === 'allowed' ? 'site-allowed' : answer === 'refused' ? 'site-refused' : 'site-pending', site: request.site, navigationPolicy: browserNavigationPolicy([...sites]), timing: {} }
+      return { requestId: request.requestId, status: answer === 'allowed' ? 'site-allowed' : answer === 'refused' ? 'site-refused' : 'site-pending', site: request.site, navigationPolicy: browserNavigationPolicy(siteUnreflected ? [] : [...sites]), timing: {}, diag: { leftMs: request.deadlineMs - Date.now(), waitedMs: 3 } }
     }
     if (request.kind === 'act' && request.action.type === 'navigate' && typeof request.action.url === 'string' && new URL(request.action.url).host !== host) pw.state.pages[`offsite:${request.action.url}`] ||= { text: ['외부 사이트'], elements: [] } // another site's page, so the move can be observed
     return send1(request)
   }
   const readiness = oldReadiness ? route => codexReady : browserSchemaReady({ claudeLive: () => chat.claudeBrowserLive() === true, claudeReady: () => claude.isReady() && claude.capabilities().has('boundedQa'), codexReady: () => codexReady })
-  const browser = createCodexBrowserToolProvider({ transport: pw.transport, getOwnerKey: () => OWNER, schemaReady: readiness })
+  // realTransport: the REAL BrowserToolTransport (SSE frames, wire request ids, deadlines, receive checks) with a client that answers as the overlay does (browserToolCardRequest 'allow-site' and its Card
+  // question; every other kind is the page world's). The test's siteAnswer may be a function (delay, then 'allowed' | 'refused' | 'pending').
+  let transport = pw.transport, uiId = 'ui'
+  if (realTransport) {
+    const real = new BrowserToolTransport({ getOwnerKey: () => OWNER })
+    const client = { chatProtocol: 2, closed: false, send(frame) {
+      const data = JSON.parse(/data: (.*)\n/.exec(frame)[1])
+      setImmediate(async () => {
+        let response
+        try { response = await pw.transport.sendToUi(data) } catch (error) { return }
+        try { real.receive(uiId, { ...response, requestId: data.requestId }) } catch (error) { receiveErrors.push(error.code) }
+      })
+      return true
+    } }
+    uiId = real.registerClient(client)
+    transport = real
+  }
+  const browser = createCodexBrowserToolProvider({ transport, getOwnerKey: () => OWNER, schemaReady: readiness })
   const page = createPageToolsProvider({ mode: () => 'on', browser: { dispatch: (run, event) => browser.dispatch(run, event) }, ledger: wiring.ledger })
   // the decision model: a scripted answer per question name (predicates by name; a pick is 'none'); every request body is kept
   const predicates = decisions?.predicates ?? {}
@@ -112,11 +130,11 @@ export function world(t, { harness = true, pageTools = true, codexReady = false,
   t.after(async () => { unsubscribe(); await claude.dispose(); await drain() })
   const selected = (threadId = 'ui-claude') => [{ id: 'source', kind: 'browser', selectedByUser: true, browserToolPermission: 'interact', browserToolSelection: { token: `tok-${Math.random()}`, threadId },
     browserToolIdentity: { cardEpoch: 'epoch', userContextId: 0, engineAccountKey: OWNER, authorityEpoch: 1 }, sourceRef: { viewId: 'card', profileId: 'synthetic', accountId: '', uri: `https://${host}${start}` } }]
-  const send = (message, extra = {}) => chat.send({ message, engineId: 'claude', clientThreadId: 'ui-claude', requestId: `r-${Math.random()}`, browserTransportId: 'ui', ...extra })
+  const send = (message, extra = {}) => chat.send({ message, engineId: 'claude', clientThreadId: 'ui-claude', requestId: `r-${Math.random()}`, browserTransportId: uiId, ...extra })
   const browserSend = (message, extra = {}) => send(message, { executionPolicy: { mode: 'browserBounded' }, selectedSources: selected(), ...extra })
   const runOf = sent => chat.runs.get(`${sent.conversationId}/${sent.runId}`)
   const settled = async sent => { await until(() => ['completed', 'failed', 'interrupted'].includes(runOf(sent)?.status)); await drain(); return runOf(sent) }
-  return { chat, claude, transports, events, root, send, browserSend, runOf, settled, drain, pw, ran, decisionBodies, wiring, siteQuestions, sites }
+  return { chat, claude, transports, events, root, send, browserSend, runOf, settled, drain, pw, ran, decisionBodies, wiring, siteQuestions, sites, receiveErrors }
 }
 export const refusal = async promise => { try { await promise; return null } catch (error) { return { code: error.code, status: error.httpStatus } } }
 

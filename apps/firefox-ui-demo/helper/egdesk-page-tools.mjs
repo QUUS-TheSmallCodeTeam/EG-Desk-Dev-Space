@@ -188,7 +188,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
         && evaluateNavigation(element.href, DEFAULT_NAVIGATION_POLICY, { fromUrl: snapshot.url, layer: 'tool' }).reason === 'outside-site') {
       const site = hostOf(element.href)
       const asked = await call(run, event, 'egdesk_browser_request_site', { cardId, site }, 'site')
-      if (!asked.ok || asked.data?.status !== 'site-allowed') return respond(true, { status: 'not_done', code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE', site: typeof asked.data?.status === 'string' ? asked.data.status : 'site-refused', cardId, label, written: false })
+      if (!asked.ok || asked.data?.status !== 'site-allowed') return respond(true, { status: 'not_done', code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE', site: typeof asked.data?.status === 'string' ? asked.data.status : 'site-refused', ...(typeof asked.data?.pendingBy === 'string' ? { pendingBy: asked.data.pendingBy } : {}), ...(Number.isSafeInteger(asked.data?.waitedMs) ? { waitedMs: asked.data.waitedMs } : {}), cardId, label, written: false })
       const fresh = await observe(run, event, cardId)
       if (fresh.error) return respond(true, { status: 'refused', code: fresh.error })
       const same = (fresh.snapshot.interactiveElements ?? []).find(item => item.ref === args.ref && item.href === element.href)
