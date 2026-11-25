@@ -84,6 +84,7 @@ export const EARLIER_EVIDENCE_LIMIT = 4
 // its records are kept for the next check (the check's own ranking keeps the ones related to the next draft). After a posted answer the limit above stays.
 export const EARLIER_WITHHELD_LIMIT = 8
 export const POSTED_ANSWER_KEY = 'egdesk_posted_answer'
+import { OWN_EDIT_LIMITS, EDIT_TOOL_NAMES, ownEditEvidence } from './egdesk-own-edit-evidence.mjs' // c30b: the edits EG-Desk made, as readable evidence for the check of the answer
 import { OWN_COMMAND_LIMITS, ownCommandEntry, ownCommandEvidence } from './egdesk-own-command-evidence.mjs' // c29: what the check of an answer may know about the commands EG-Desk ran
 import { STOPPED_COMMAND_KEY, stoppedCommandBlock, stoppedCommandEvidence, stoppedCommandFact } from './egdesk-stopped-command.mjs' // c26: the command the person stopped, told to the next turn once
 // c19 (owner decision: no fixed fallback): 'withheld' = nothing could be posted; the next turn is told the person saw no answer.
@@ -2231,7 +2232,7 @@ export class CodexChatRuntime {
    */
   async ownToolsThreadOverrides(request, neutralFolder, base, context) {
     const own = mergeCeilingOverrides({}, pureEngineThreadOverrides())
-    const isolation = await loadOwnToolsIsolation(request, neutralFolder)
+    const isolation = await loadOwnToolsIsolation(request, neutralFolder, { pure: this.ownTools?.pureEngine?.() ?? null })
     mergeCeilingOverrides(own, isolation.overrides)
     context.ownToolsIsolation = isolation.mcp
     // c25: on the real 0.171 the inventory read costs 1-2 s (mcpServerStatus/list); the room's first internal thread reuses this one for 5 minutes instead of paying it again
@@ -6190,7 +6191,7 @@ export class CodexChatRuntime {
     const cwd = thread?.cwd ?? this.ownNeutralFolder() ?? null
     const memo = this.isolationMemo
     const reused = memo && memo.key === (cwd ?? null) && this.now() - memo.at < 300_000 ? memo.value : null
-    const isolation = reused ? { overrides: structuredClone(reused) } : await loadOwnToolsIsolation(this.scopedRequest(slot), cwd)
+    const isolation = reused ? { overrides: structuredClone(reused) } : await loadOwnToolsIsolation(this.scopedRequest(slot), cwd, { pure: this.ownTools?.pureEngine?.() ?? null })
     mergeCeilingOverrides(base, isolation.overrides)
     if (cwd) base.cwd = cwd
     this.freshInternalCache.set(cid, { at: this.now(), value: structuredClone(base) })
@@ -6588,7 +6589,9 @@ export class CodexChatRuntime {
     // c29: the commands EG-Desk ran itself are dynamic tool calls of the run; their facts (exit code, the test runner's summary line) are the evidence, not a content-free reference
     const ownEntries = Array.isArray(run.ownCommands) ? run.ownCommands : [], ownTool = a => a.kind === 'dynamicToolCall' && (a.detail?.tool ?? a.title) === 'egdesk_run_command'
     const useOwn = terminal && ownEntries.length > 0
-    const out = (run.activities || []).filter(a => !own.has(a.kind) && !(useOwn && ownTool(a))).slice(0, 8).map((a, i) => {
+    // c30b: the edits EG-Desk made are run state (class run): readable facts, in place of the content-free references to the edit tool calls
+    const editEntries = Array.isArray(run.ownEdits) ? run.ownEdits : [], editTool = a => a.kind === 'dynamicToolCall' && EDIT_TOOL_NAMES.includes(a.detail?.tool ?? a.title), useEdits = editEntries.length > 0
+    const out = (run.activities || []).filter(a => !own.has(a.kind) && !(useOwn && ownTool(a)) && !(useEdits && editTool(a))).slice(0, 8).map((a, i) => {
       if (a.kind !== 'commandExecution' || !terminal || typeof a.detail?.command !== 'string' || !a.detail.command.trim()) return ref(a, i)
       const exit = Number.isInteger(a.detail.exitCode) ? a.detail.exitCode : null
       // The exit code's meaning is a convention of the process, said in words (c19: measured 2026-11-24, heartbeat-c18, "finished with exit code 0"
@@ -6604,6 +6607,7 @@ export class CodexChatRuntime {
       return { id: `cmd${i + 1}`, kind: 'terminal', time: 'present', source: 'run', pinned: true, text: `In this turn the assistant ran \`${publicText(a.detail.command, 300)}\`; it ${ended}.${reading}${tail ? `\nLast lines of its output:\n${tail}` : ''}` }
     })
     if (useOwn) { const quote = egress.allows('command_output'); ownEntries.forEach((entry, i) => out.push(ownCommandEvidence(entry, i, { quoteLine: quote }))) }
+    if (useEdits) editEntries.forEach((entry, i) => out.push(ownEditEvidence(entry, i, editEntries)))
     const note = this.draftCheckTurns.get(run)?.browserNote
     if (typeof note === 'string' && note.trim() && egress.allows('browser_task_record')) out.push({ id: 'task', kind: 'browser', time: 'present', source: 'browser_task', pinned: true, text: `The browser task's outcome note: ${publicText(note, 1000)}` })
     return out
@@ -6704,6 +6708,9 @@ export class CodexChatRuntime {
       if (timer !== null) this.clearTimer(timer)
     } catch { /* the wait only avoids a missed note */ }
   }
+
+  /** c30b: one call of an edit tool, as facts (no file content); kept on the run in order. */
+  noteOwnEdit(run, fact) { try { if (run && fact) run.ownEdits = [...(run.ownEdits ?? []), fact].slice(-OWN_EDIT_LIMITS.edits) } catch { /* the evidence is advisory */ } }
 
   noteOwnCommand(run, record) {
     try {
@@ -7162,7 +7169,7 @@ export class CodexChatRuntime {
     const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position: turn.position, threadKey, scope,
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
       deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock, previous: turn.previous, previousReply: this.previousReplyFor(context, turn.sources?.speech ?? null),
-      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
+      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step', 'hybrid-two-step-ask'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
         ...(this.decisionContext?.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
     // The first turn's recording triage answers on its own time; once it has, the rule knows whether a write judgment can still follow.
     if (result.triageLater) void result.triageLater.then(late => { turn.lateTriage = late ?? { record: { state: 'unknown' } } }, () => { turn.lateTriage = { record: { state: 'unknown' } } })
@@ -7279,7 +7286,7 @@ export class CodexChatRuntime {
         try { return await setup.client.decide(request) } finally { turn.spans.push({ stage: 'confirm', start, end: clock.now() - t0 }) }
       } }
       const deadlineAt = t0 + turn.capMs - 200
-      const judged = await memorySettleBefore(judgeConfirmation({ message: body.message, previousAnswer: previous, records: offered.map(entry => ({ title: wiki.pages.get(entry.pageId).title, status: entry.status })),
+      const judged = await memorySettleBefore(judgeConfirmation({ message: body.message, previousAnswer: previous, records: offered.map(entry => ({ title: wiki.pages.get(entry.pageId).title, status: entry.status, ...(typeof entry.said === 'string' ? { said: entry.said } : {}) })),
         client, askedAt: context.askedAt ?? this.now(), signal: turn.controller.signal, timeoutMs: Math.max(1, Math.min(CONFIRM_LIMITS.timeoutMs, Math.ceil(deadlineAt - clock.now()))) }), deadlineAt, clock).catch(() => null)
       const actions = []
       if (judged?.status === 'ready') {
@@ -7529,7 +7536,8 @@ export class CodexChatRuntime {
           // Noted for this session, so a later reply can say what was noted and the person's next message can confirm or refuse it.
           if (applied?.status === 'recorded_pending' && proposal.op === 'update_status' && this.turnMemoryConfirmOn() && typeof run.conversationId === 'string' && run.conversationId) {
             const list = (this.turnMemoryNoted.get(run.conversationId) ?? []).filter(entry => entry.pageId !== proposal.pageId)
-            list.push({ pageId: proposal.pageId, status: proposal.proposedStatus, offers: 0, offered: false, offeredAt: 0 })
+            // said: the person's own message, kept in memory beside the note so the confirmation question can quote what was reported (L7 c35)
+            list.push({ pageId: proposal.pageId, status: proposal.proposedStatus, offers: 0, offered: false, offeredAt: 0, ...(typeof body.message === 'string' && body.message.trim() ? { said: body.message.trim().slice(0, 200) } : {}) })
             this.turnMemoryNoted.delete(run.conversationId); this.turnMemoryNoted.set(run.conversationId, list.slice(-CONFIRM_LIMITS.records))
             while (this.turnMemoryNoted.size > 50) this.turnMemoryNoted.delete(this.turnMemoryNoted.keys().next().value)
           }
@@ -7577,7 +7585,7 @@ export class CodexChatRuntime {
       const threadKey = run.conversationId
       const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position, threadKey,
         scope: typeof tm.scope === 'function' ? await (async () => { const base = await tm.scope({ body, context }); return base ? egress.memoryScope(base) : base })() : null, live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null,
-        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal , writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
+        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal , writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step', 'hybrid-two-step-ask'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
         ...(this.decisionContext?.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
       const judged = result.judgeWrite ? await result.judgeWrite() : null
       if (typeof threadKey === 'string' && threadKey) {

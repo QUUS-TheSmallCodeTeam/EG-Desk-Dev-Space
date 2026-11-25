@@ -15,7 +15,7 @@ export function turnMemoryFlagsFromEnv(env = {}) {
   const get = name => (env && typeof env === 'object' && typeof env[name] === 'string' ? env[name] : null)
   return { ...(get(TURN_MEMORY_FLAGS.onePacket) === 'on' ? { onePacket: true } : {}), ...(get(TURN_MEMORY_FLAGS.writeTarget) === 'choice' ? { writeTarget: 'choice' } : {}),
     ...(get(TURN_MEMORY_FLAGS.confirmInConversation) === 'on' ? { confirmInConversation: true } : {}), ...(get(TURN_MEMORY_FLAGS.pruneHeld) === 'on' ? { pruneHeld: true } : {}),
-    ...(get(TURN_MEMORY_FLAGS.keepLate) === 'on' ? { keepLate: true } : {}), ...(get(TURN_MEMORY_FLAGS.speechDesign) === 'split' ? { speechDesign: 'split-isolated' } : get(TURN_MEMORY_FLAGS.speechDesign) === 'hybrid' ? { speechDesign: 'hybrid-two-step' } : {}),
+    ...(get(TURN_MEMORY_FLAGS.keepLate) === 'on' ? { keepLate: true } : {}), ...(get(TURN_MEMORY_FLAGS.speechDesign) === 'split' ? { speechDesign: 'split-isolated' } : get(TURN_MEMORY_FLAGS.speechDesign) === 'hybrid' ? { speechDesign: 'hybrid-two-step' } : get(TURN_MEMORY_FLAGS.speechDesign) === 'hybrid-ask' ? { speechDesign: 'hybrid-two-step-ask' } : {}),
     ...(get(TURN_MEMORY_FLAGS.splitWording) === 'v2' ? { splitWording: 'v2' } : {}), ...(get(TURN_MEMORY_FLAGS.previousReply) === 'on' ? { previousReply: true } : {}), ...(get(TURN_MEMORY_FLAGS.selectionHeld) === 'on' ? { selectionHeld: true } : {}),
     ...(['split', 'mark'].includes(get(TURN_MEMORY_FLAGS.engineContext)) ? { engineContext: get(TURN_MEMORY_FLAGS.engineContext), ...(/^\d{3,6}$/.test(get(TURN_MEMORY_FLAGS.engineChars) ?? '') ? { engineChars: Number(get(TURN_MEMORY_FLAGS.engineChars)) } : {}), ...(/^\d{4,6}$/.test(get(TURN_MEMORY_FLAGS.engineBytes) ?? '') ? { engineBytes: Number(get(TURN_MEMORY_FLAGS.engineBytes)) } : {}) } : {}) }
 }
@@ -46,7 +46,7 @@ export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = n
     // A turn_context answer that missed its budget is kept for the later steps of the same turn (never for the native turn; off by default).
     ...(keepLate === true ? { keepLate: true } : {}),
     // How the write judgment asks the sentence labels: 'split-isolated' (source and time as yes/no predicates) only when passed; default axes.
-    ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step'].includes(speechDesign) ? { speechDesign } : {}),
+    ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step', 'hybrid-two-step-ask'].includes(speechDesign) ? { speechDesign } : {}),
     ...(splitWording === 'v2' ? { splitWording: 'v2' } : {}),
     // The assistant message right before the turn, for the triage and the selection (egress-gated; off by default).
     ...(previousReply === true ? { previousReply: true } : {}),

@@ -12,6 +12,7 @@
 // sentence names ("payroll 테스트") is one the command's own line carries; a named scope the command does not carry is another suite: not this rule's business.
 // facts (on an evidence item from egdesk-own-command-evidence.mjs): { kind: 'own_command', passed, failed, exitCode, stopped, hasSummary, topic, command } (numbers, booleans, a closed word and
 // the command line the evidence text already quotes; in-process only, never sent as a field).
+const NEGATED = /(?:^|\s)안\s?(?:됐|돼|되|했|함|통과|성공|패스)/
 const FAIL_WORDS = /실패|오류|에러|않|못|아니|아닙|아닌|제외|빼고|제외하고|예외|(?:^|\s)안\s?(?:됐|돼|되|했|함|통과|성공|패스)|fail|error|not\b|n't|\bnever\b|except|but\b|still|지만|는데|하나|일부/i
 const EARLIER = /이전|앞서|예전|지난|처음에는|처음엔|원래|수정 전|고치기 전|바꾸기 전|전에는|전엔|그때|\bearlier\b|\bbefore\b|\bpreviously\b|\bused to\b|\boriginally\b|\bat first\b|\blast time\b|\bthen\b|\bhad passed\b/i
 const PLAN = /겠|ㄹ 것|을 것|할 것|될 것|예정|도록|하면|되면|려면|면 됩니다|\bif\b|\bonce\b|\bshould\b|\bwill\b|\bwould\b|\bcould\b|'ll\b|\bgoing to\b|\bneed(?:s)? to\b|\bhope\b|확인해 보|해 보|해볼|돌려 보|지켜보/i
@@ -58,6 +59,46 @@ export function passClaim(text) {
 /** Does a sentence say that the tests (or the run) passed, with no word of failure? */
 export const claimsPass = text => passClaim(text) !== null
 
+// c30b: a claim that a file was changed, against the edits EG-Desk made (facts of kind own_edit: path, state previewed | applied | undone | not_applied | not_undone, tool, editId).
+// A sentence that says a change was made (no negation, no plan, no mention of a preview) is contradicted when the file it names was only previewed, undone or never applied, when it names
+// a file the run made no edit to, or, naming no file, when the run applied no edit at all. A sentence about a preview ("dryRun 미리보기로 확인했습니다") is not a claim of a change.
+const EDIT_DONE = /수정했|고쳤|고쳐 ?놓|바꿨|바꾸었|변경했|적용했|반영했|편집했|교체했|추가했|삭제했|지웠|작성했|만들었|\b(?:edited|changed|fixed|applied|updated|modified|replaced|wrote|written|patched)\b/i
+// one exclusion for both rules (c30): a plan or condition (PLAN), a question (QUESTION) and the negation "안 했/안 됐" (NEGATED); the edit rule adds what is its own (a preview, an undo, "not yet")
+const EDIT_OWN_NOT_CLAIM = /하지 않|않았|않습|못했|아직|할 수 있|할게|하려|계획|제안|가능|필요|미리보기|dryRun|\bpreview|\bnot\b|n't|되돌|undo|undid|restor|복원|취소|다면|면 /i
+const PATH_TOKEN = /[\w./-]+\.(?:mjs|cjs|js|jsx|ts|tsx|py|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp|sh|json|md|css|scss|html|yml|yaml|toml|txt|sql|xml)\b/gi
+const base = p => String(p).split('/').pop()
+export const claimsEdit = text => { const t = String(text ?? ''); return EDIT_DONE.test(t) && !EDIT_OWN_NOT_CLAIM.test(t) && !PLAN.test(t) && !QUESTION.test(t) && !NEGATED.test(t) }
+
+export function editFacts(evidence) {
+  return (Array.isArray(evidence) ? evidence : []).filter(item => item && item.opaque !== true && item.facts?.kind === 'own_edit').map(item => ({ ...item.facts, id: item.id }))
+}
+
+/** Findings of kind 'contradicted' for the sentences that claim a change the run's edits do not show. */
+export function editClaimFindings({ claims, evidence }) {
+  const facts = editFacts(evidence)
+  if (!facts.length) return []
+  const finalState = new Map() // path → the state after the run's calls in order; an undo of an edit id takes that edit back
+  for (const fact of facts) {
+    if (!fact.path) continue
+    if (fact.state === 'applied' || fact.state === 'previewed' || fact.state === 'not_applied') finalState.set(fact.path, fact.state)
+    else if (fact.state === 'undone') finalState.set(fact.path, 'undone')
+  }
+  const anyApplied = [...finalState.values()].some(state => state === 'applied')
+  const out = []
+  ;(Array.isArray(claims) ? claims : []).forEach((span, index) => {
+    const text = String(span?.text ?? '')
+    if (!claimsEdit(text)) return
+    const mentioned = [...finalState.keys()].filter(p => text.includes(p) || text.includes(base(p)))
+    const tokens = (text.match(PATH_TOKEN) ?? []).filter(tok => ![...finalState.keys()].some(p => p === tok || base(p) === base(tok)))
+    let bad = false
+    if (mentioned.length) bad = !mentioned.some(p => finalState.get(p) === 'applied')
+    else if (tokens.length) bad = true
+    else bad = !anyApplied
+    if (bad) out.push({ kind: 'contradicted', span: index, evidence: facts.map(f => f.id), reason: 'run_facts' })
+  })
+  return out
+}
+
 /** The reading of the last own command in the evidence, or null. */
 export function lastRunFacts(evidence, topic = null) {
   const facts = (Array.isArray(evidence) ? evidence : []).filter(item => item && item.opaque !== true && item.facts?.kind === 'own_command')
@@ -69,6 +110,12 @@ const didNotPass = f => f.stopped === true || (Number.isFinite(f.failed) && f.fa
 
 /** Findings of kind 'contradicted' for the sentences (claims: [{ text }]) that state a pass while the last command of that topic did not pass. */
 export function runFactFindings({ claims, evidence }) {
+  const edits = editClaimFindings({ claims, evidence }), tests = testClaimFindings({ claims, evidence })
+  return [...tests, ...edits.filter(e => !tests.some(t => t.span === e.span))]
+}
+
+// c30: pass claims by topic (tests, build, lint, type check), each against the last own command of that topic
+function testClaimFindings({ claims, evidence }) {
   const out = []
   ;(Array.isArray(claims) ? claims : []).forEach((span, index) => {
     const claim = passClaim(span?.text)

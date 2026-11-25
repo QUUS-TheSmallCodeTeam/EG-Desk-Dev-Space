@@ -102,3 +102,14 @@ test('c30 the rule inside the check: an honest sentence that mentions an earlier
   const out = await checkDraft({ draft, evidence: FAILING, mode: 'on', client: model() })
   assert.equal(out.outcome, 'passed', JSON.stringify(out.findings)); assert.equal(out.text, draft)
 })
+
+// c30 merge with L5 c30b: the pass rule and the edit rule share one exclusion for a plan or condition, a question and "안 했/안 됐"; both rules still find their own claims
+import { claimsEdit } from './egdesk-draft-run-facts.mjs'
+test('shared exclusions: a plan, a question and a negation are no claim of a change either; a plain claim of a change still is one', () => {
+  for (const no of ['src/a.js를 수정할 것입니다.', 'src/a.js를 고치면 됩니다.', 'src/a.js를 수정했나요?', 'src/a.js는 수정 안 했어요.', 'I will edit src/a.js.', 'Should I change src/a.js?']) assert.equal(claimsEdit(no), false, no)
+  for (const yes of ['src/a.js를 수정했습니다.', '설정 파일을 고쳤습니다.', 'I fixed src/a.js.']) assert.equal(claimsEdit(yes), true, yes)
+  const tests = [{ text: '모든 테스트가 통과했습니다.' }, { text: 'src/a.js를 수정했습니다.' }]
+  const edit = { id: 'edit1', kind: 'run_state', time: 'present', facts: { kind: 'own_edit', path: 'src/b.js', state: 'applied' }, text: 'b' }
+  const found = runFactFindings({ claims: tests, evidence: [...FAILING, edit] })
+  assert.deepEqual(found.map(f => f.span).sort(), [0, 1], 'the failing test run contradicts sentence 0, the edit of another file contradicts sentence 1')
+})

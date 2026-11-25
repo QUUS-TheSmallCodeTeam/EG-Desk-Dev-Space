@@ -102,9 +102,12 @@ export function fillPrompt(request) {
   const rejected = Array.isArray(request?.rejected) ? request.rejected.filter(w => typeof w === 'string' && /^P[1-6] (?:explanation|line \d{1,2}|row \d{1,2} (?:left|right))$/.test(w)).slice(0, 24) : []
   // Cycle 34 (owner rule U5, one bounded re-design round): the materials whose statements the board must ALSO carry, by alias only (never the answer's text).
   const cover = Array.isArray(request?.cover) ? request.cover.filter(a => typeof a === 'string' && /^M\d{1,2}$/.test(a)).slice(0, 12) : []
+  // Cycle 40: lines that ran over their limit, by line (closed words "P1 line 3"), for the one rewrite
+  const long = Array.isArray(request?.long) ? request.long.filter(w => typeof w === 'string' && /^P[1-6] line \d{1,2}$/.test(w)).slice(0, 24) : []
   const scope = (Array.isArray(request?.only) && request.only.length ? `Fill only these items again: ${request.only.join(', ')}.\n` : '') +
+    (long.length ? `These lines were longer than their "max" characters and were refused: ${long.join('; ')}. Write every line of those items at most "max" characters, shortening the lines named here: keep ids and figures, cut explanations first.\n` : '') +
     (cover.length ? `A check found that the board does not yet show everything these materials state: ${cover.join(', ')}. Write the listed items so that they carry the ids, numbers and dates those materials state, as the material writes them (a sequence card keeps one row for every material it shows).\n` : '') +
-    (rejected.length ? `A check found these parts of your previous data not supported by the material they cite: ${rejected.join('; ')}. Write them again from what the material says, keeping its actors, qualifiers, amounts and dates exactly, or report the slot as unfillable.\n` : '') + (request?.only?.length || rejected.length || cover.length ? '\n' : '')
+    (rejected.length ? `A check found these parts of your previous data not supported by the material they cite: ${rejected.join('; ')}. Write them again from what the material says, keeping its actors, qualifiers, amounts and dates exactly, or report the slot as unfillable.\n` : '') + (request?.only?.length || rejected.length || cover.length || long.length ? '\n' : '')
   return `${FILL_FRAME}\n\n${scope}${dataBlock('Design guide (decided; do not change it)', request?.guide ?? null)}\n\n${dataBlock('Materials', request?.materials ?? [])}\n\nRules:\n${fillRules(request)}\n\nJSON shape: ${wantsFallback(request) || !request?.guide ? FILL_SHAPE_FULL : FILL_SHAPE_COMPACT}`
 }
 const unfence = value => { const m = /^\s*```[a-zA-Z]*\n([\s\S]*?)\n```\s*$/.exec(value); return (m ? m[1] : value).trim() }

@@ -354,12 +354,14 @@ const RULES = {
   fit: 'You are a system judge reading stored materials. Each question quotes ONE material or ONE pair of materials and asks ONE thing about what its text states. Answer each question on its own, whatever the others are. Judge only from the quoted text; never assume content it does not contain.',
   order: 'You are a system judge. Each question describes TWO parts of a briefing by the materials they show. Answer each question on its own. Judge only which part a reader who has seen none of it should be shown first to follow the other.',
   coverage: 'You are a system judge checking a finished board briefing against what the person asked. Judge only from the quoted request, the quoted answer and the quoted parts of the board, in their order.',
-  coverage_facts: 'You are a system judge checking whether a finished board briefing shows given facts. Judge only from the quoted parts of the board and the quoted fact. A fact that is several values joined by " · " (the cells of a table row) is shown when every value is on the board, in any order or form; a date may be written as month-day in the fact and in full on the board.',
-  coverage_stated: 'You are a system judge checking whether a finished board briefing shows given facts, and whether a sentence states what the materials say. Judge only from the quoted parts of the board, the quoted materials and the quoted sentence or fact. A fact that is several values joined by " · " (the cells of a table row) is shown when every value is on the board, in any order or form; a date may be written as month-day in the fact and in full on the board.',
+  coverage_facts: 'You are a system judge checking whether a finished board briefing shows given facts. Judge only from the quoted parts of the board and the quoted fact.',
+  coverage_stated: 'You are a system judge checking whether a finished board briefing shows given facts, and whether a sentence states what the materials say. Judge only from the quoted parts of the board, the quoted materials and the quoted sentence or fact.',
   fill_check: 'You are a system judge checking a text against its source. Each question quotes ONE text and ONE source. Answer each question on its own, whatever the others are. Rewording, summarising and linking words are fine. A number, amount, date, name or event that the quoted source does not contain is NOT supported.',
 }
 // Only what the record has: no date when it has none, no status when the record does not say ("unknown" is not a status to judge from).
 const quoteMaterial = m => `${m.alias} ${JSON.stringify({ title: m.title, ...(m.at ? { date: m.at } : {}), ...(m.status && m.status !== 'unknown' ? { status: m.status } : {}), text: m.text })}`
+const TABLE_ROW_NOTE = / · /
+const ROW_GUIDANCE = ' This fact is the cells of a table row joined by " · ": it is shown when every value is on the board, in any order or form; a date may be written as month-day in the fact and in full on the board.'
 function questionText(q, c, catalog) {
   // The request is the one user message of the request; each question quotes its own materials, text or source.
   const mat = a => c.materials.find(m => m.alias === a)
@@ -376,7 +378,10 @@ function questionText(q, c, catalog) {
   // Cycle 38 (the c21 plan sent in c40: f-meta-sentences F5 "11-24 · 검색 화면 착수" .66 and F4 .73 although the board's third line has the date 2026-11-24 and "검색 화면 착수" word for word):
   // a fact that came from a table row is its cells joined by " · ", and a date may be written month-day in the fact and in full on the board. The request's RULE text says so (once per request,
   // not in every question: the c21 plan's token ceiling is tight).
-  if (q.kind === 'onboard') return `The fact, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Is this fact shown on the board quoted above (in the text or the shown fields of any of its parts)?`
+  // Cycle 39: c38 put the table-row guidance in the request's RULE text, which applies to every fact of the request. The c43 re-send showed what that does to a plain fact: "11월 6일 v1 발송"
+  // (board: "11월 6일 보낸 v1") went from .96 to .21 / .04, the judge reading "every value" literally. The guidance belongs only to a fact that IS a table row (its cells joined by " · "):
+  // it is in that fact's own question, and a plain fact's question and the request's rule are exactly what they were before c38.
+  if (q.kind === 'onboard') return `The fact, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Is this fact shown on the board quoted above (in the text or the shown fields of any of its parts)?${TABLE_ROW_NOTE.test(q.text) ? ROW_GUIDANCE : ''}`
   // Cycle 36 (check-11): a sentence of the answer that no code anchor ties to a material may be a statement ABOUT the answer ("정리했습니다", "파일은 변경하지 않았습니다") that no board can show.
   // Only the judge can tell it from a content fact, from the materials quoted once above.
   if (q.kind === 'stated') return `The sentence, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Does this sentence restate something that the materials quoted above say? (A sentence that only describes what the assistant did, how its answer is organised, or what it did not do is not a statement of the materials.)`
@@ -573,7 +578,12 @@ export function buildGuide(items, scene, retire = []) {
 // asked for (the validator uses the step's text when the reply has none), and in a SEQUENCE line the label (the material's date) and the text (the material's own sentences, as many
 // as fit the line) may be null: code copies them from the material the line cites, exactly. The model is left only with choosing and ordering the lines.
 export const copyField = (item, field) => item?.shows === 'sequence' && (field?.name === 'label' || field?.name === 'text')
-const compactItem = item => ({ ...item, step: (item.step ?? []).filter(s => s.name !== 'fallback'), slots: (item.slots ?? []).map(s => (s.type === 'list' && Array.isArray(s.of) && s.of.some(f => f.name === 'from' && f.type === 'material') ? { ...s, of: s.of.map(f => (copyField(item, f) ? { ...f, copy: true } : f)) } : s)) })
+// Cycle 40 (check-20br): the real model wrote six rows per card, as asked, and aimed at the limit: row texts of 73 to 103 characters against a max of 90 (3 to 5 of 6 rows over), so the whole
+// list was refused, rewritten, refused again and the card dropped ("nothing-left"). A model overshoots a limit it is given; so the request shows a MARGIN: the model is asked for at most 85 % of
+// a row's label and text limits (`max`), while the validator keeps the real limit (the card holds it). Rows that still run over are named to the model by line in the one rewrite.
+export const ROW_MARGIN = 0.85
+const advised = f => (f.type === 'text' && Number.isFinite(f.max) ? { ...f, max: Math.max(1, Math.floor(f.max * ROW_MARGIN)) } : f)
+const compactItem = item => ({ ...item, step: (item.step ?? []).filter(s => s.name !== 'fallback'), slots: (item.slots ?? []).map(s => (s.type === 'list' && Array.isArray(s.of) && s.of.some(f => f.name === 'from' && f.type === 'material') ? { ...s, of: s.of.map(f => advised(copyField(item, f) ? { ...f, copy: true } : f)) } : s)) })
 /** The copy a null line text stands for: the material's WHOLE text when it fits `max` characters (a line of a card), else ''. Cycle 37: never a prefix of it. c35 copied the whole
  *  sentences that fit; for a long ledger entry ("... 표준 게이트 교체: 242개 파일 5752건 통과") that is a first sentence WITHOUT the figure, a fact lost to the line without any check
  *  noticing (the text is still "supported by its material"). A line the material does not fit in is the model's to write, keeping the ids, numbers and dates. */
@@ -582,8 +592,8 @@ export function copyThatFits(text, max) {
   return whole.length > 0 && whole.length <= max ? whole : ''
 }
 /** only: fill just these items again. rejected: closed words for what was not supported last time (e.g. "P2 line 2", "P1 explanation"). cover: material aliases the cards must carry. */
-export function fillRequest(guide, materials, only = null, rejected = [], cover = []) {
-  return { kind: 'briefing_fill', ...(only ? { only: [...only] } : {}), ...(rejected.length ? { rejected: [...rejected] } : {}), ...(cover.length ? { cover: [...cover] } : {}), guide: { ...guide, items: guide.items.filter(i => !only || only.has(i.id)).map(compactItem) },
+export function fillRequest(guide, materials, only = null, rejected = [], cover = [], long = []) {
+  return { kind: 'briefing_fill', ...(only ? { only: [...only] } : {}), ...(rejected.length ? { rejected: [...rejected] } : {}), ...(cover.length ? { cover: [...cover] } : {}), ...(long.length ? { long: [...long] } : {}), guide: { ...guide, items: guide.items.filter(i => !only || only.has(i.id)).map(compactItem) },
     materials: materials.map(m => ({ alias: m.alias, title: m.title, text: m.text, at: m.at, status: m.status })) }
 }
 function readSlot(schema, value, item, reported, materials = null) {
@@ -592,17 +602,21 @@ function readSlot(schema, value, item, reported, materials = null) {
   if (schema.type === 'material') return value === undefined || value === null || value === '' ? { issue: 'empty' } : item.materials.includes(value) ? { value } : { issue: 'mismatch' }
   if (!Array.isArray(value) || !value.length) return { issue: 'empty' }
   if (value.length > schema.max) return { issue: 'mismatch' }
-  const rows = []
-  for (const row of value) {
+  const rows = [], long = []
+  for (const [index, row] of value.entries()) {
     if (!isObj(row) || Object.keys(row).some(k => !schema.of.some(f => f.name === k))) return { issue: 'mismatch' }
     const out = {}
     for (const f of schema.of) {
       // a sequence line's label / text left null is the cited material's own date / sentences (copyField), never a value the model had to retype
       let given = row[f.name]
       if (copyField(item, f) && (given === null || given === undefined || given === '') && materials) { const m = materials.get(row.from); given = !m ? null : f.name === 'label' ? (m.at ?? null) : (copyThatFits(m.text, f.max) || null) }
-      const r = readSlot(f, given, item, false, materials); if (r.issue) return { issue: r.issue === 'empty' && value.length === 1 ? 'empty' : 'mismatch' }; out[f.name] = r.value }
+      const r = readSlot(f, given, item, false, materials)
+      // c40: a text longer than its limit is noted by line (the model is told which lines to shorten) and the scan goes on; anything else refuses the list at once
+      if (r.issue === 'mismatch' && f.type === 'text' && typeof given === 'string' && clean(given, 4000).length > f.max) { if (!long.includes(index + 1)) long.push(index + 1); continue }
+      if (r.issue) return { issue: r.issue === 'empty' && value.length === 1 ? 'empty' : 'mismatch' }; out[f.name] = r.value }
     rows.push(out)
   }
+  if (long.length) return { issue: 'mismatch', long }
   return rows.length < schema.min ? { issue: 'mismatch' } : { value: rows }
 }
 /**
@@ -629,7 +643,7 @@ export function validateFill(guide, reply, { only = null, needTitle = false, mat
     if (Object.keys(given).some(k => !item.slots.some(s => s.name === k))) return { ok: false, reason: 'extra-slot' }
     const out = { slots: {} }
     for (const s of item.step) { const r = readSlot(s, s.name === 'fallback' && got.fallback === undefined ? got.text : got[s.name], item, reported.has(`${item.id}/${s.name}`)); if (r.issue) issues.push({ item: item.id, slot: s.name, kind: r.issue }); else out[s.name] = r.value }
-    for (const s of item.slots) { const r = readSlot(s, given[s.name], item, reported.has(`${item.id}/${s.name}`), byAlias); if (r.issue) issues.push({ item: item.id, slot: s.name, kind: r.issue }); else out.slots[s.name] = r.value }
+    for (const s of item.slots) { const r = readSlot(s, given[s.name], item, reported.has(`${item.id}/${s.name}`), byAlias); if (r.issue) issues.push({ item: item.id, slot: s.name, kind: r.issue, ...(r.long ? { long: r.long } : {}) }); else out.slots[s.name] = r.value }
     if (out.slots.left !== undefined && out.slots.left === out.slots.right) issues.push({ item: item.id, slot: 'right', kind: 'mismatch' })
     // c38: a sequence card names every material it shows (one row each); a card that leaves one out is a mismatch of its list, which the flow rewrites
     if (item.shows === 'sequence') for (const s of item.slots) if (s.type === 'list' && Array.isArray(out.slots[s.name]) && s.of?.some(f => f.name === 'from') && item.materials.length <= s.max) { const named = new Set(out.slots[s.name].map(r => r.from)); if (item.materials.some(a => !named.has(a))) { issues.push({ item: item.id, slot: s.name, kind: 'mismatch' }); delete out.slots[s.name] } }
@@ -891,11 +905,11 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
   const filled = {}
   // Why the last request produced nothing: the engine says 'timeout' | 'no-reply' | 'refused' | 'unusable' (a fill function without lastFailure is read as unusable).
   const failureOf = () => (typeof fill.lastFailure === 'function' ? fill.lastFailure() : null)
-  const fillOnce = async (only, rejected = [], cover = []) => {
+  const fillOnce = async (only, rejected = [], cover = [], long = []) => {
     if (stats.fillTurns >= SKELETON_LIMITS.fillTurns) return { bound: true }
     stats.fillTurns++
-    const want = fillRequest(guide, scene.materials, only, rejected, cover)
-    stats.received.push({ turn: stats.fillTurns, keys: Object.keys(want), items: want.guide.items.map(i => `${i.id}:${i.component}`), materials: want.materials.map(m => m.alias), ...(rejected.length ? { rejected } : {}), ...(cover.length ? { cover } : {}) })
+    const want = fillRequest(guide, scene.materials, only, rejected, cover, long)
+    stats.received.push({ turn: stats.fillTurns, keys: Object.keys(want), items: want.guide.items.map(i => `${i.id}:${i.component}`), materials: want.materials.map(m => m.alias), ...(rejected.length ? { rejected } : {}), ...(cover.length ? { cover } : {}), ...(long.length ? { long } : {}) })
     const reply = await fill(want)
     return { ...validateFill(guide, reply, { only, materials: scene.materials }), failure: reply === null || reply === undefined ? failureOf() : null }
   }
@@ -931,7 +945,8 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     for (const item of items) {
       if (!pending.has(item.id)) continue
       const mine = issues.filter(x => x.item === item.id)
-      if (mine.length) { failing.set(item.id, { problem: mine.some(x => x.kind === 'empty') ? 'slot_empty' : 'slot_mismatch', words: [] }); continue }
+      // c40: the lines that ran over their limit are named by line ("P1 line 3") for the one rewrite
+      if (mine.length) { failing.set(item.id, { problem: mine.some(x => x.kind === 'empty') ? 'slot_empty' : 'slot_mismatch', words: [], long: mine.flatMap(x => (x.long ?? []).map(n => `${item.id} line ${n}`)) }); continue }
       const cap = layout.capacity.get(item.id), md = markdownOf(item)
       if (md !== null && cap && textLines(md, cap.widthPx) > cap.lines) failing.set(item.id, { problem: 'overflow', words: [] })
     }
@@ -950,19 +965,19 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     if (!failing.size) break
     // What happens to a failing part is a rule: missing data -> the next way of showing it that was judged to fit, else leave it out; anything else -> written again
     // once, with the closed words for what was not supported, else leave it out.
-    const again = new Set(), words = []
+    const again = new Set(), words = [], longs = []
     for (const [id, f] of failing) {
       const index = items.findIndex(i => i.id === id), item = items[index], part = scene.parts.find(p => p.alias === id)
       const next = f.problem === 'slot_empty' ? (alternatives.get(id) ?? []).find(o => !item.tried.includes(o.value)) : null
       if (next) { const swapped = itemFor({ ...part, materials: item.materials }, next, scene, 0); items[index] = { ...swapped, creates: swapped.creates ? item.creates ?? 'N' + (++n) : null, tried: [...item.tried, next.value] }; delete filled[id]; again.add(id); rejections.push({ part: id, problem: f.problem, action: next.value }); continue }
-      if (f.problem !== 'slot_empty' && !item.refilled) { items[index] = { ...item, refilled: true }; again.add(id); words.push(...f.words); rejections.push({ part: id, problem: f.problem, action: 'rewrite', words: f.words }); continue }
+      if (f.problem !== 'slot_empty' && !item.refilled) { items[index] = { ...item, refilled: true }; again.add(id); words.push(...f.words); longs.push(...(f.long ?? [])); rejections.push({ part: id, problem: f.problem, action: 'rewrite', words: f.words }); continue }
       items.splice(index, 1); delete filled[id]; dropped.push({ part: id, why: f.problem, words: f.words }); rejections.push({ part: id, problem: f.problem, action: 'drop', words: f.words })
     }
     if (!items.length) return done('fallback-chat', { reason: 'nothing-left', rejections })
     issues = []; pending = again
     if (!again.size) break
     layout = layoutSkeleton(items, scene, viewport); guide = buildGuide(items, scene, retire())
-    const rewritten = await fillOnce(again, words)
+    const rewritten = await fillOnce(again, words, [], longs)
     if (rewritten.bound || !rewritten.ok) return done('fallback-chat', { reason: rewritten.bound ? 'fill-bound' : 'fill-invalid', detail: rewritten.reason, rejections })
     Object.assign(filled, rewritten.items); issues = rewritten.issues
   }
