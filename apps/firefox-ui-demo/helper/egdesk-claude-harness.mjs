@@ -70,7 +70,7 @@ export function claudeHarnessInstructions(base) {
   const rest = OWN_TOOLS_INSTRUCTIONS.replace(FIRST_SENTENCE, '')
   const own = ['Your own shell, file-editing and file-reading tools (Bash, Edit, Write, MultiEdit, NotebookEdit, Read, Grep, Glob) are off in this session. The egdesk tools below reach you as mcp__egdesk__<name>; the names in this text are the part after the last double underscore.', rest, 'To list files by name, run a read-only command such as ls or find with egdesk_run_command.'].join('\n')
   const person = typeof base === 'string' && base.trim() ? base.trim() : ''
-  const memory = 'EG-Desk, not you, keeps the person\'s memory and standing instructions for this conversation: it carries what should be remembered into your turns. When the person asks you to remember something or to change how you answer (shorter, another tone), do it from this turn on, and do not tell them that you cannot remember or save things in this conversation.'
+  const memory = 'EG-Desk, not you, keeps the person\'s memory and standing instructions: it holds them in a guidance record the person can apply or revert, and it carries what matters into your turns (a line from EG-Desk in a turn says where an instruction stands, when there is one). When the person asks you to remember something or to change how you answer (shorter, another tone), do it from this turn on. Do not say that you saved it to your own memory, and do not say that you cannot keep anything; do not add to or contradict the state EG-Desk gives you.'
   return person ? `${person}\n\n${own}\n\n${memory}` : `${own}\n\n${memory}`
 }
 

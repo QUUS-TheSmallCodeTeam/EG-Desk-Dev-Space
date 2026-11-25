@@ -295,8 +295,8 @@ test('u2 D6: the EG-Desk MCP tools load upfront (no ToolSearch round before the 
 })
 
 test('u2 D4: the harness instructions say EG-Desk keeps memory and standing instructions, and that Claude must not claim it cannot remember (no new text for the person)', async t => {
-  const text = claudeHarnessInstructions(null); assert.match(text, /EG-Desk, not you, keeps the person's memory and standing instructions/); assert.match(text, /do not tell them that you cannot remember or save things/)
-  const w = harnessWorld(t, { script: n => [...text_(n), ...result()] }); const sent = await w.send('안녕'); await w.settled(sent); assert.match(w.transports[0].options.appendPrompt, /EG-Desk, not you, keeps the person's memory/)
+  const text = claudeHarnessInstructions(null); assert.match(text, /EG-Desk, not you, keeps the person's memory and standing instructions: it holds them in a guidance record the person can apply or revert/); assert.match(text, /do not say that you saved it to your own memory, and do not say that you cannot keep anything/)
+  const w = harnessWorld(t, { script: n => [...text_(n), ...result()] }); const sent = await w.send('안녕'); await w.settled(sent); assert.match(w.transports[0].options.appendPrompt, /guidance record the person can apply or revert/)
   function text_(n) { return [{ msg: { type: 'assistant', parent_tool_use_id: null, message: { id: 'm', role: 'assistant', content: [{ type: 'text', text: '네' }], usage: { input_tokens: 1, output_tokens: 1 } } } }] }
 })
 
