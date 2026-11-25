@@ -159,7 +159,7 @@ export function createCommandExecutorProvider({ mode = () => 'off', ledger = nul
         try { porcelain = await gitStatus(cwd) } catch { porcelain = null }
         try { worktree = await judgeWorktree({ porcelain: typeof porcelain === 'string' ? porcelain : null, output: tailText, command, ask: askRun }) } catch { worktree = null }
       }
-      try { onConditions(run, { exitCode, durationMs: Number.isFinite(result?.durationMs) ? result.durationMs : null, health, worktree, ...(stopped ? { stopped: true, command: command.slice(0, 300), signal: typeof result?.signal === 'string' ? result.signal : null, outputTail: tailText.slice(-1000) } : {}) }) } catch { /* facts are advisory */ }
+      try { onConditions(run, { exitCode, durationMs: Number.isFinite(result?.durationMs) ? result.durationMs : null, health, worktree, command: command.slice(0, 300), ...(stopped ? { stopped: true, signal: typeof result?.signal === 'string' ? result.signal : null, outputTail: tailText.slice(-1000) } : {}) }) } catch { /* facts are advisory */ }
       controller.markSettled()
       // the c10 row keeps runningMs only while running; the ended row adds how long it ran (an extra field, the row shape is unchanged)
       facts(run, { ...terminalFactRow({ kind: 'engine', running: false, exitCode }), ...(Number.isFinite(result?.durationMs) ? { durationMs: result.durationMs } : {}), ...(stopped ? { stopped: true } : {}) })

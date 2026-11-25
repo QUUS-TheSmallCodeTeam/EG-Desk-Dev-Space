@@ -522,7 +522,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     const chatRoutes = createChatHttpHandler(chat, async () => { throw Object.assign(new Error('the forget route takes no engine account check'), { code: 'unexpected_auth' }) })
     try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
     attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests, limits: deps.hookLimits?.[h.name] }))
-    turnHooks.attach({ chat, contexts, client, store, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests, limits: deps.hookLimits }) // the registered turn hooks that need the live runtime
+    turnHooks.attach({ chat, contexts, client, store, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests, limits: deps.hookLimits, scratch, engineFolder: path.join(dataDir, 'engine-folders', 'empty') }) // the registered turn hooks that need the live runtime
     rec.phases.composedMs = ms(t0)
     // c25: what the runtime's private turns did, per turn (Main's check-6: a status reply never reached the chat and the record could not say where it stopped).
     // internalTurns: each private turn (draft revision, heartbeat writer, briefing fill): by which path (fork or a fresh thread), how long, how many characters, the text the model
@@ -579,7 +579,8 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     // a message typed into the working run, afterMs after that turn started; not a turn of its own (the run's turn keeps going)
     const sendInRun = async (ctx, text, afterMs) => {
       const wait = afterMs - (performance.now() - ctx.started)
-      if (wait > 0) await (deps.sleep ?? sleep)(wait) // deps.sleep: a test drives the wait from events instead of the wall clock
+      // deps.sleep: a test drives the wait from events instead of the wall clock; it is asked even when afterMs has already passed (a loaded machine may be late), never skipped
+      if (deps.sleep) await deps.sleep(Math.max(0, wait)); else if (wait > 0) await sleep(wait)
       while (performance.now() - ctx.started < afterMs) await sleep(1) // a timer may fire a millisecond early: never act before afterMs
       const mark = { afterMs, sentAtMs: ms(ctx.started), tools: turnNow.toolCalls.size, ran: runnerLog.length, posted: assistantTexts().length, accepted: false, error: null }
       try { const out = await chat.send({ clientThreadId, conversationId: nativeThread, message: text, requestId: `req-${++requestSeq}`, inRunMessageTo: ctx.run.runId }); mark.accepted = out?.accepted === true && out?.inRun === true } catch (error) { mark.error = String(error?.code ?? 'error').slice(0, 60) }
@@ -593,7 +594,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     const engineAction = async (kind, ctx, step) => {
       const afterMs = step.afterMs ?? 0
       const wait = afterMs - (performance.now() - ctx.started)
-      if (wait > 0) await (deps.sleep ?? sleep)(wait)
+      if (deps.sleep) await deps.sleep(Math.max(0, wait)); else if (wait > 0) await sleep(wait)
       while (performance.now() - ctx.started < afterMs) await sleep(1) // a timer may fire a millisecond early: never act before afterMs
       const mark = { afterMs, sentAtMs: ms(ctx.started), tools: turnNow.toolCalls.size, ran: runnerLog.length, posted: assistantTexts().length, accepted: false, error: null }
       try {

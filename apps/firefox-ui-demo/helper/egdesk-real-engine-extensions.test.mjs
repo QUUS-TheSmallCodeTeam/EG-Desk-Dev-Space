@@ -6,22 +6,49 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EXPECT_KEYS, REAL_ENGINE_SCRIPT_SCHEMA, checkTurnExpectations, validateEngineScript } from './egdesk-real-engine-script.mjs'
+import { SCHEMA_FILE, renderSchemaFile } from './egdesk-real-engine-schema-file.mjs'
 import { createTurnHooks, registerConversationFields, registerExpectKeys, registerFlags, registerTurnFields, registerTurnHooks, registeredConversationFields, registeredDecisionFlags, registeredExpectKeys, registeredFlags, registeredTurnFields, registeredTurnHookNames } from './egdesk-real-engine-extensions.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const turnEntry = REAL_ENGINE_SCRIPT_SCHEMA.properties.conversations.items.properties.turns.items.properties.expect.properties
-const script = expect => ({ set: 'real-engine-ext-v1', conversations: [{ id: 'c', turns: [{ say: 'hi', expect }] }] })
+const script0 = expect => ({ set: 'real-engine-ext-v1', conversations: [{ id: 'c', turns: [{ say: 'hi', expect }] }] })
 
-test('the lanes\' keys are registered, not listed in the core: the same keys, schemas and validators as before the move', () => {
-  // lanes add their own keys over time: the three moved ones (and the deletion proof, L5) are there, in this order among themselves; no key is registered twice
-  const keys = registeredExpectKeys(), at = k => keys.indexOf(k); assert.ok(at('memory') >= 0 && at('memory') < at('engine') && at('engine') < at('briefing') && at('deleted') > at('briefing'), keys.join()); assert.equal(new Set(keys).size, keys.length)
-  assert.ok(registeredConversationFields().includes('memory') && registeredConversationFields().includes('seededWrites')); assert.ok(registeredTurnHookNames().indexOf('memory') < registeredTurnHookNames().indexOf('journey')); assert.ok(registeredTurnFields().includes('from') && registeredTurnFields().includes('browserTask')); assert.ok(registeredExpectKeys().includes('browserAnswer') && registeredTurnHookNames().includes('browserAnswer')) // L8 c31
-  for (const k of ['engine', 'memory', 'briefing']) { assert.ok(EXPECT_KEYS.includes(k)); assert.ok(turnEntry[k]) }
-  const core = fs.readFileSync(path.join(here, 'egdesk-real-engine-script.mjs'), 'utf8') + fs.readFileSync(path.join(here, 'egdesk-real-engine-check.mjs'), 'utf8')
-  for (const lane of ['egdesk-real-engine-memory.mjs', 'egdesk-real-engine-journey.mjs', 'egdesk-real-engine-briefing-hook.mjs']) assert.ok(!core.includes(`from './${lane}'`) || lane === 'egdesk-real-engine-memory.mjs', `${lane} is not imported by the core`)
-  assert.equal(validateEngineScript(script({ engine: { steers: 1 } })).ok, true)
-  assert.match(validateEngineScript(script({ briefing: { outcome: 'presented' } })).errors.join(), /EGDESK_BRIEFING_FLOW/)
-  assert.match(validateEngineScript(script({ memory: { attached: ['x'] } })).errors.join(), /expect\.memory/)
+// What each lane registers (per-lane invariants; a lane's line is the only thing to touch when it registers more). No exact global list: another lane's keys never break this test.
+// `before` pairs are the only ordering rules that matter (c25: the records and expectations of memory come before journey's, byte-identical to before the move).
+const LANES = {
+  L1: { expectKeys: ['collab'], turnFields: ['from'], turnHooks: ['collab'] },
+  L2: { expectKeys: ['engine'], turnHooks: ['journey'] },
+  L4: { expectKeys: ['briefing'] },
+  L5: { expectKeys: ['deleted', 'coding'], conversationFields: ['seededWrites'], turnHooks: ['coding'] },
+  L8: { expectKeys: ['browserAnswer'], turnFields: ['browserTask'], turnHooks: ['browserAnswer'] },
+  L7: { expectKeys: ['memory'], conversationFields: ['memory'], turnHooks: ['memory'] },
+}
+const BEFORE = { turnHooks: [['memory', 'journey']] }
+const registered = { expectKeys: registeredExpectKeys, conversationFields: registeredConversationFields, turnFields: registeredTurnFields, turnHooks: registeredTurnHookNames }
+
+test('registrations: every lane\'s keys are registered, once, with a schema in the generated script schema; the core lists none of them', () => {
+  for (const [lane, wanted] of Object.entries(LANES)) for (const [kind, names] of Object.entries(wanted)) for (const name of names) assert.ok(registered[kind]().includes(name), `${lane}: ${kind} ${name} is registered`)
+  for (const [kind, list] of Object.entries(registered)) { const names = list(); assert.equal(new Set(names).size, names.length, `${kind}: no name twice`) }
+  for (const [kind, pairs] of Object.entries(BEFORE)) for (const [first, second] of pairs) assert.ok(registered[kind]().indexOf(first) < registered[kind]().indexOf(second), `${kind}: ${first} before ${second}`)
+  const conversationProps = REAL_ENGINE_SCRIPT_SCHEMA.properties.conversations.items.properties, turnProps = conversationProps.turns.items.properties
+  for (const name of registeredExpectKeys()) { assert.ok(EXPECT_KEYS.includes(name), `${name} is an accepted expect key`); assert.ok(turnEntry[name], `${name} has its schema in expect`) }
+  for (const name of registeredConversationFields()) assert.ok(conversationProps[name], `${name} has its schema on the conversation`)
+  for (const name of registeredTurnFields()) assert.ok(turnProps[name], `${name} has its schema on the turn`)
+  // the core files do not list a lane's key as their own: every registered expect key's name appears in the core only inside registry calls, never as an own EXPECT_KEYS literal
+  const script = fs.readFileSync(path.join(here, 'egdesk-real-engine-script.mjs'), 'utf8'), literal = script.match(/export const EXPECT_KEYS = Object\.freeze\(\[([^\]]*)\.\.\.registeredExpectKeys\(\)\]\)/)
+  assert.ok(literal, 'EXPECT_KEYS is the core list plus the registered keys')
+  for (const name of registeredExpectKeys()) assert.ok(!literal[1].includes(`'${name}'`), `the core list has no literal ${name}`)
+  assert.equal(validateEngineScript(script0({ engine: { steers: 1 } })).ok, true)
+  assert.match(validateEngineScript(script0({ briefing: { outcome: 'presented' } })).errors.join(), /EGDESK_BRIEFING_FLOW/)
+  assert.match(validateEngineScript(script0({ memory: { attached: ['x'] } })).errors.join(), /expect\.memory/)
+})
+
+test('the schema file is a pure function of the registrations: regenerated text equals the committed text (after a merge conflict, run node scripts/real-engine/regenerate-schema.mjs)', () => {
+  const file = path.join(here, '..', SCHEMA_FILE), committed = fs.readFileSync(file, 'utf8'), fresh = renderSchemaFile(REAL_ENGINE_SCRIPT_SCHEMA)
+  assert.equal(committed, fresh, 'real-engine-script.schema.json is stale or hand-edited: run node scripts/real-engine/regenerate-schema.mjs')
+  assert.doesNotMatch(committed, /^(<<<<<<<|=======|>>>>>>>)/m, 'no conflict markers')
+  assert.equal(fresh, renderSchemaFile(JSON.parse(fresh)), 'rendering is stable (a fixed point)')
+  const o = { b: 1, a: { d: [3, 1], c: 2 } }; assert.equal(renderSchemaFile(o), '{\n  "a": {\n    "c": 2,\n    "d": [\n      3,\n      1\n    ]\n  },\n  "b": 1\n}\n', 'keys are sorted, arrays keep their order')
 })
 
 test('registering: a key with a schema, a validator and a check; duplicates and malformed registrations are refused', () => {
@@ -31,8 +58,8 @@ test('registering: a key with a schema, a validator and a check; duplicates and 
   assert.throws(() => registerExpectKeys({ 'bad name': { schema: {} } }), /bad name/); assert.throws(() => registerExpectKeys({ y: { schema: {}, check: 3 } }), /must be a function/)
   assert.throws(() => registerTurnHooks('memory', () => ({})), /already registered/)
   // the key joins the validator (unknown keys are still refused), the evaluator and the converted core list of keys; the script's own conversation field too
-  const bad = validateEngineScript(script({ probeKey: 0 })); assert.equal(bad.ok, false); assert.match(bad.errors.join(), /probeKey: at least 1|probeKey.*at least 1/)
-  assert.equal(validateEngineScript(script({ probeKey: 2 })).ok, true); assert.match(validateEngineScript(script({ nopeKey: 2 })).errors.join(), /nopeKey/)
+  const bad = validateEngineScript(script0({ probeKey: 0 })); assert.equal(bad.ok, false); assert.match(bad.errors.join(), /probeKey: at least 1|probeKey.*at least 1/)
+  assert.equal(validateEngineScript(script0({ probeKey: 2 })).ok, true); assert.match(validateEngineScript(script0({ nopeKey: 2 })).errors.join(), /nopeKey/)
   assert.deepEqual(checkTurnExpectations({ probeKey: 2 }, { n: 2 }).map(c => c.ok), [true]); assert.deepEqual(checkTurnExpectations({ probeKey: 2 }, { n: 3 }).map(c => c.ok), [false])
   const conv = { set: 'real-engine-ext-v1', conversations: [{ id: 'c', probeField: 'no', turns: [{ say: 'hi' }] }] }
   assert.match(validateEngineScript(conv).errors.join(), /probeField: must be ok/); conv.conversations[0].probeField = 'ok'; assert.equal(validateEngineScript(conv).ok, true)
