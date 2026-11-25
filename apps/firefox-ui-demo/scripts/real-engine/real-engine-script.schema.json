@@ -319,8 +319,35 @@
                       "enum": [
                         "membership",
                         "delivery",
-                        "settings"
+                        "settings",
+                        "library",
+                        "ticket",
+                        "room",
+                        "queue",
+                        "pension"
                       ]
+                    },
+                    "staleSwap": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "from": {
+                          "maxLength": 80,
+                          "minLength": 1,
+                          "pattern": "^/",
+                          "type": "string"
+                        },
+                        "to": {
+                          "maxLength": 80,
+                          "minLength": 1,
+                          "pattern": "^/",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "from",
+                        "to"
+                      ],
+                      "type": "object"
                     },
                     "start": {
                       "maxLength": 80,
@@ -548,6 +575,24 @@
                     "browserLoop": {
                       "additionalProperties": false,
                       "properties": {
+                        "afterStaleSees": {
+                          "items": {
+                            "maxLength": 120,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 3,
+                          "type": "array"
+                        },
+                        "clickedOnly": {
+                          "items": {
+                            "maxLength": 40,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 4,
+                          "type": "array"
+                        },
                         "entered": {
                           "const": true
                         },
@@ -583,6 +628,9 @@
                         "noActs": {
                           "const": true
                         },
+                        "noFills": {
+                          "const": true
+                        },
                         "noInventedAmounts": {
                           "const": true
                         },
@@ -603,6 +651,15 @@
                           "minLength": 1,
                           "type": "string"
                         },
+                        "noteExcludes": {
+                          "items": {
+                            "maxLength": 120,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 4,
+                          "type": "array"
+                        },
                         "noteIncludes": {
                           "items": {
                             "maxLength": 200,
@@ -618,6 +675,9 @@
                             "cannot_proceed",
                             "need_context"
                           ]
+                        },
+                        "staleSeen": {
+                          "const": true
                         }
                       },
                       "type": "object"
