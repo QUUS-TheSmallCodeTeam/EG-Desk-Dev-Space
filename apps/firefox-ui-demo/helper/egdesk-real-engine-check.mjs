@@ -21,6 +21,11 @@ import { spawn as nodeSpawn } from 'node:child_process'
 import { Readable } from 'node:stream'
 import { EventEmitter } from 'node:events'
 import { AppServerRpc } from './codex-app-server-rpc.mjs'
+import { createClaudeEngineAdapter } from './claude-engine-adapter.mjs' // c37: --engine claude drives EG-Desk's own adapter, as the product does
+import { createClaudeEngineStatus, probeClaudeEngine, resolveClaudeExecutable } from './claude-engine-auth.mjs'
+import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
+import { CLAUDE_DEFAULT_MAX_CONVERSATIONS, CLAUDE_USAGE_STOP_PERCENT, claudeApplicability, claudeRequest, createUsageGuard, fileUsageState, validateClaudeOptions, wrapClaudeAdapter } from './egdesk-real-engine-claude.mjs'
+import { formatClaudePlan, planClaudeRun } from './egdesk-real-engine-claude-plan.mjs'
 import { CodexChatRuntime, TURN_CONTEXT_BUDGET_MS, TURN_CONTEXT_COLD_BUDGET_MS } from './codex-chat-runtime.mjs'
 import { createOwnToolsWiring } from './egdesk-own-tools-wiring.mjs'
 import { readOwnToolsIsolation } from './egdesk-own-tools-isolation.mjs'
@@ -151,6 +156,13 @@ export const HELP = `Usage: node scripts/egdesk-real-engine-check.mjs --codex-bi
   --person-home    leave CODEX_HOME unset: the app-server uses the person's own Codex home and login (the check never reads that folder)
   --script         a conversation script (set real-engine-<name>-v<N>); repeatable
   --out            where scratch folders, the isolated data folder and records go (owner-only; never inside a .codex folder)
+  --engine <codex|claude>    (c37) the engine; default codex. claude: EG-Desk's own Claude adapter drives the installed claude CLI exactly as the product does (the CLI keeps its login; EG-Desk never reads it); no --codex-bin / home. A conversation that needs something Claude does not have (steer, thread delete, restart, fork, ...) is recorded as "not applicable", never failed
+  --claude-bin <path>        (claude) the CLI (else EGDESK_CLAUDE_BIN, PATH, ~/.local/bin/claude: the product's own resolution)
+  --max-conversations <n>    stop after n conversations that ran (claude: default ${CLAUDE_DEFAULT_MAX_CONVERSATIONS}); a conversation that is not applicable does not count
+  --usage-stop <percent>     (claude) stop the run, before each conversation and each turn, when any rate-limit window the CLI reported is at or above this (default ${CLAUDE_USAGE_STOP_PERCENT}) or reports a warning or a rejection
+  --usage-state <file>       (claude) remember the last observed windows between runs (numbers and window names only) so the next run can refuse to start
+  --allow-subscription-smoke (claude) NOT FOR BATCHES: let the check start on a claude.ai SUBSCRIPTION login. Without it the check starts only on an API-key login (claude auth login --console, or the key the CLI itself is configured with: EG-Desk never reads or passes a key) and refuses a subscription: Anthropic's terms expect API-key authentication for products and automation
+  --require-usage-signal     (claude) stop after the first conversation when the CLI has reported no usage window at all (it reports on a state change only)
   --decisions      use the Decision model (key from ${DECISION_KEY_ENV}); without it no Decision call is made and "yes" approvals cannot be read
   --model <id>, --effort <low|medium|high|…>   per-turn model and effort (otherwise the home's configuration applies)
   --app-server-config k=v    an extra -c k=v for the app-server (repeatable)
@@ -166,8 +178,8 @@ export const stallFlag = (options, conversation) => (Number.isFinite(options?.st
 
 /** parseArgs(argv, env) → options. Throws { code: 'usage' }. */
 export function parseArgs(argv, env = process.env) {
-  const o = { mode: 'dry', codexBin: null, home: null, scripts: [], out: null, decisions: false, model: null, effort: null, appServerConfig: [], persisted: false, stallWatchdogMs: null, cleanupLeftovers: false, turnTimeoutMs: DEFAULT_TURN_TIMEOUT_MS, json: false, help: false }
-  const takes = new Set(['--codex-bin', '--codex-home', '--script', '--out', '--model', '--effort', '--app-server-config', '--turn-timeout-ms', '--stall-watchdog'])
+  const o = { mode: 'dry', codexBin: null, home: null, scripts: [], out: null, decisions: false, model: null, effort: null, appServerConfig: [], persisted: false, stallWatchdogMs: null, engine: 'codex', claudeBin: null, maxConversations: null, usageStopPercent: CLAUDE_USAGE_STOP_PERCENT, usageState: null, requireUsageSignal: false, allowSubscriptionSmoke: false, cleanupLeftovers: false, turnTimeoutMs: DEFAULT_TURN_TIMEOUT_MS, json: false, help: false }
+  const takes = new Set(['--codex-bin', '--codex-home', '--script', '--out', '--model', '--effort', '--app-server-config', '--turn-timeout-ms', '--stall-watchdog', '--engine', '--claude-bin', '--max-conversations', '--usage-stop', '--usage-state'])
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') { o.help = true; continue }
@@ -177,6 +189,8 @@ export function parseArgs(argv, env = process.env) {
     if (arg === '--json') { o.json = true; continue }
     if (arg === '--persisted-with-cleanup') { o.persisted = true; continue }
     if (arg === '--cleanup-leftovers') { o.cleanupLeftovers = true; continue }
+    if (arg === '--require-usage-signal') { o.requireUsageSignal = true; continue }
+    if (arg === '--allow-subscription-smoke') { o.allowSubscriptionSmoke = true; continue }
     if (arg === '--person-home') { if (o.home) throw usage('give --codex-home or --person-home, not both'); o.home = { kind: 'person', dir: null }; continue }
     if (!takes.has(arg)) throw usage(`unknown argument ${arg}`)
     const value = argv[++i]
@@ -188,14 +202,28 @@ export function parseArgs(argv, env = process.env) {
     else if (arg === '--model') o.model = value
     else if (arg === '--effort') o.effort = value
     else if (arg === '--app-server-config') { if (!/^[A-Za-z0-9_.]+=.+$/.test(value)) throw usage('--app-server-config needs key=value'); o.appServerConfig.push(value) }
+    else if (arg === '--engine') { if (!['codex', 'claude'].includes(value)) throw usage('--engine is codex or claude'); o.engine = value }
+    else if (arg === '--claude-bin') o.claudeBin = value
+    else if (arg === '--max-conversations') { const n = /^\d{1,3}$/.test(value) ? Number(value) : NaN; if (!(n >= 1)) throw usage('--max-conversations is a whole number, 1 or more'); o.maxConversations = n }
+    else if (arg === '--usage-stop') { const n = /^\d{1,3}$/.test(value) ? Number(value) : NaN; if (!(n >= 1 && n <= 100)) throw usage('--usage-stop is 1-100 (percent)'); o.usageStopPercent = n }
+    else if (arg === '--usage-state') o.usageState = value
     else if (arg === '--stall-watchdog') { const n = /^\d{4,6}$/.test(value) ? Number(value) : NaN; if (!(n >= ENGINE_STALL_LIMITS.minMs && n <= ENGINE_STALL_LIMITS.maxMs)) throw usage(`--stall-watchdog is ${ENGINE_STALL_LIMITS.minMs}-${ENGINE_STALL_LIMITS.maxMs} (milliseconds)`); o.stallWatchdogMs = n }
     else if (arg === '--turn-timeout-ms') { const n = Number(value); if (!Number.isInteger(n) || n < 1000 || n > 3_600_000) throw usage('--turn-timeout-ms is 1000-3600000'); o.turnTimeoutMs = n }
   }
   if (o.help) return o
-  if (!o.codexBin) throw usage('--codex-bin is required (no binary is searched for)')
-  if (!path.isAbsolute(o.codexBin)) throw usage('--codex-bin must be an absolute path')
-  if (!o.home) throw usage('give --codex-home <dir> or --person-home')
-  if (o.home.kind === 'dir' && !path.isAbsolute(o.home.dir)) throw usage('--codex-home must be an absolute path')
+  if (o.engine === 'claude') { // c37: the Claude engine is EG-Desk's own adapter driving the installed CLI: no Codex binary or home
+    if (o.codexBin || o.home) throw usage('--codex-bin, --codex-home and --person-home are for the Codex engine: not with --engine claude')
+    if (o.claudeBin && !path.isAbsolute(o.claudeBin)) throw usage('--claude-bin must be an absolute path')
+    if (o.usageState && !path.isAbsolute(o.usageState)) throw usage('--usage-state must be an absolute path')
+    if (o.maxConversations === null) o.maxConversations = CLAUDE_DEFAULT_MAX_CONVERSATIONS
+    const bad = validateClaudeOptions(o); if (bad.length) throw usage(bad.join('; '))
+  } else {
+    if (o.claudeBin || o.usageState || o.requireUsageSignal || o.allowSubscriptionSmoke) throw usage('--claude-bin, --usage-state, --require-usage-signal and --allow-subscription-smoke are for --engine claude')
+    if (!o.codexBin) throw usage('--codex-bin is required (no binary is searched for)')
+    if (!path.isAbsolute(o.codexBin)) throw usage('--codex-bin must be an absolute path')
+    if (!o.home) throw usage('give --codex-home <dir> or --person-home')
+    if (o.home.kind === 'dir' && !path.isAbsolute(o.home.dir)) throw usage('--codex-home must be an absolute path')
+  }
   if (!o.scripts.length && !o.cleanupLeftovers) throw usage('at least one --script is required')
   if (!o.out) throw usage('--out is required')
   if (!path.isAbsolute(o.out)) o.out = path.resolve(o.out)
@@ -238,8 +266,12 @@ export function loadScripts(files, read = file => fs.readFileSync(file, 'utf8'))
 /** The problems that stop a --run (a dry run reports them as warnings). */
 export function preflight(options, scripts, { env = process.env, exists = isExecutable } = {}) {
   const problems = []
-  if (!exists(options.codexBin)) problems.push(`the Codex binary is not an existing executable: ${options.codexBin}`)
-  if (options.home.kind === 'dir' && !fs.existsSync(options.home.dir)) problems.push(`the Codex home does not exist: ${options.home.dir}`)
+  const claude = options.engine === 'claude'
+  if (claude) { if (options.claudeBin && !exists(options.claudeBin)) problems.push(`the Claude binary is not an existing executable: ${options.claudeBin}`) } // c37: otherwise the product's own resolution at run time
+  else {
+    if (!exists(options.codexBin)) problems.push(`the Codex binary is not an existing executable: ${options.codexBin}`)
+    if (options.home.kind === 'dir' && !fs.existsSync(options.home.dir)) problems.push(`the Codex home does not exist: ${options.home.dir}`)
+  }
   if (options.decisions && !(typeof env[DECISION_KEY_ENV] === 'string' && env[DECISION_KEY_ENV].trim())) problems.push(`--decisions needs the key in ${DECISION_KEY_ENV}`)
   if (!options.decisions) {
     const needs = scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => (t.approve ?? []).includes('yes'))).map(c => `${script.set}/${c.id}`))
@@ -247,19 +279,20 @@ export function preflight(options, scripts, { env = process.env, exists = isExec
     const seeded = scripts.flatMap(({ script }) => script.conversations.filter(memoryNeedsDecisions).map(c => `${script.set}/${c.id}`)) // memory hook
     if (seeded.length) problems.push(`seeded memory pages are picked and read by the Decision model, so they need --decisions: ${seeded.join(', ')}`)
     const flagged = scripts.flatMap(({ script }) => script.conversations.filter(c => c.draftCheck || Object.keys(c.flags ?? {}).some(k => DECISION_DEPENDENT_FLAGS.includes(k))).map(c => `${script.set}/${c.id} (${[...(c.draftCheck ? ['draftCheck'] : []), ...Object.keys(c.flags ?? {}).filter(k => DECISION_DEPENDENT_FLAGS.includes(k))].join(', ')})`))
-    const agentRooms = scripts.flatMap(({ script }) => script.conversations.filter(c => c.agentProfile).map(c => `${script.set}/${c.id}`))
+    const agentRooms = claude ? [] : scripts.flatMap(({ script }) => script.conversations.filter(c => c.agentProfile).map(c => `${script.set}/${c.id}`))
     if (agentRooms.length && !options.persisted) problems.push(`an agentProfile conversation is a direct room, which is not one-time: it needs --persisted-with-cleanup: ${agentRooms.join(', ')}`)
-    const engineGone = scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => t.expect?.deleted?.engineGone)).map(c => `${script.set}/${c.id}`)) // c28
+    const engineGone = claude ? [] : scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => t.expect?.deleted?.engineGone)).map(c => `${script.set}/${c.id}`)) // c28
     if (engineGone.length && !options.persisted) problems.push(`deleted.engineGone proves that the engine's saved thread is gone (thread/resume fails): the thread must be saved, so it needs --persisted-with-cleanup: ${engineGone.join(', ')}`)
     if (flagged.length) problems.push(`these flags act only through the Decision model, so they need --decisions: ${flagged.join('; ')}`)
   }
-  const restarting = scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => t.action === 'restart')).map(c => `${script.set}/${c.id}`)) // c29
+  const restarting = claude ? [] : scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => t.action === 'restart')).map(c => `${script.set}/${c.id}`)) // c29
   if (restarting.length && !options.persisted) problems.push(`a restart turn needs a saved engine thread to come back to, so it needs --persisted-with-cleanup: ${restarting.join(', ')}`)
   return problems
 }
 
 /** What a --run would do, as data (nothing is started). */
-export function planRun(options, scripts, { env = process.env, buildLaunch = buildCodexAppServerLaunch } = {}) {
+export function planRun(options, scripts, { env = process.env, buildLaunch = buildCodexAppServerLaunch, resolveClaude = resolveClaudeExecutable } = {}) {
+  if (options.engine === 'claude') return planClaudeRun(options, scripts, { env, resolveClaude, defaultDecisionFlags: DEFAULT_DECISION_FLAGS, stallFlag, clip, decisionKeyEnv: DECISION_KEY_ENV })
   return {
     mode: options.mode, codexBin: options.codexBin,
     home: options.home.kind === 'person' ? { kind: 'person', note: 'CODEX_HOME unset: the person\'s own Codex home and login; the check never reads that folder' } : { kind: 'dir', dir: options.home.dir },
@@ -274,6 +307,7 @@ export function planRun(options, scripts, { env = process.env, buildLaunch = bui
 }
 
 export function formatPlan(plan, warnings = []) {
+  if (plan.engine === 'claude') return formatClaudePlan(plan, warnings, { decisionKeyEnv: DECISION_KEY_ENV })
   const lines = [`real-engine check (${plan.mode === 'dry' ? 'DRY: nothing is started' : 'RUN'})`, `  binary: ${plan.codexBin}`, `  home: ${plan.home.kind === 'person' ? plan.home.note : plan.home.dir}`, `  out: ${plan.out}`,
     `  threads: ${plan.threads.kind === 'ephemeral' ? 'ephemeral only' : `PERSISTED, then deleted and verified gone (${plan.threads.note}; ledger ${plan.threads.ledger})`}`, `  decisions: ${plan.decisions ? `on (key from ${DECISION_KEY_ENV})` : 'off'}`, `  app-server: ${plan.appServer.argv.join(' ')}   (env: ${plan.appServer.env.join(', ')}${plan.home.kind === 'dir' ? ', CODEX_HOME' : ''})`]
   for (const c of plan.conversations) {
@@ -350,6 +384,9 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
   const env = deps.env ?? process.env
   const spawn = deps.spawn ?? nodeSpawn
   const killGroup = deps.killGroup ?? createGroupKiller()
+  const claudeMode = options.engine === 'claude' // c37: EG-Desk's own Claude adapter instead of the Codex app-server
+  const claudeRef = { adapter: null }, claudeSessions = []
+  const usageHolder = deps.claudeUsage ?? { row: null } // the run's last usage() row (the adapter lives one conversation, the guard spans the run)
   const conversationDir = path.join(options.out, 'data', conversation.id)
   const scratch = path.join(options.out, 'scratch', conversation.id), dataDir = conversationDir
   makeDirs(options.out); makeDirs(path.join(options.out, 'scratch')); makeDirs(path.join(options.out, 'data')); makeDirs(dataDir)
@@ -369,14 +406,15 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
   const loggedRunnerSpawn = (file, args, opts) => { runnerLog.push(String(args?.at?.(-1) ?? '')); const child = runnerSpawn(file, args, opts); turnHooks.observeCommand(args?.at?.(-1), child); return child } // registered hooks: how the command process ends
 
   // ---- the app-server child ----
-  const argv = appServerArgs(options, deps.buildLaunch ?? buildCodexAppServerLaunch)
-  const child = spawn(options.codexBin, argv, { cwd: dataDir, env: childEnv(options, env), shell: false, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  const argv = claudeMode ? [] : appServerArgs(options, deps.buildLaunch ?? buildCodexAppServerLaunch)
+  const child = claudeMode ? { stdin: { write() {} }, stdout: null, stderr: null, on() {}, once() {}, pid: null, exitCode: null, signalCode: null } : spawn(options.codexBin, argv, { cwd: dataDir, env: childEnv(options, env), shell: false, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
   rec.phases.spawnMs = ms(t0)
   let closed = false, stderrTail = ''
   child.on('close', () => { closed = true; try { rpc.close(Object.assign(new Error('the Codex app-server exited'), { code: 'engine_exited' })) } catch {} })
   child.on('error', error => { rec.aborted ??= `spawn_failed:${error?.code ?? 'error'}` })
   child.stderr?.on('data', chunk => { stderrTail = (stderrTail + chunk).slice(-1500) })
   let chat = null, store = null, wiring = null, threadClient = null
+  const refreshUsage = () => { try { const row = claudeRef.adapter?.usage?.(); if (row) usageHolder.row = row } catch { /* the guard then knows less */ } }
   const turnHooks = createTurnHooks(conversation) // the registered per-turn hooks: memory (seeded pages, what the product sent), journey (turn/steer, turn/interrupt), ...
   const memoryHook = turnHooks.get('memory').hook // memory hook: the ontology graph and the turn-memory setting
   const completions = [], tasks = []
@@ -387,9 +425,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
   const offsetNow = () => (turnNow.t0 === null ? null : Math.round(performance.now() - turnNow.t0))
   const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.engineMessages = {}; turnNow.pendingRequests = new Map(); turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = []; turnNow.flowRows = []; turnNow.internal = []; turnNow.writers = []; turnNow.turnStartAt = null; turnNow.firstEventAt = null; turnNow.firstProgressAt = null; turnNow.t0 = null; turnNow.timing = { sendMs: null, engineStartMs: null, events: [], items: [], tools: [] } }
   let initializeResult = null, lastThreadStart = null
-  const rpc = new AppServerRpc({
-    send: payload => child.stdin.write(`${payload}\n`), experimentalApi: true, timeoutMs: 60_000,
-    onNotification: message => {
+  const onEngineNotification = message => {
       const p = message.params ?? {}
       if (turnNow.firstEventAt === null && turnNow.turnStartAt !== null && p.threadId && (p.turnId || p.turn?.id)) turnNow.firstEventAt = performance.now() // c33: the first event of the turn
       if (turnNow.firstProgressAt == null && turnNow.turnStartAt !== null && isProgressEvent(message)) turnNow.firstProgressAt = performance.now() // c34: the first event beyond the preamble (what the watchdog waits for)
@@ -416,14 +452,18 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       else if (message.method === 'mcpServer/startupStatus/updated') { const k = ['starting', 'ready', 'failed'].includes(p.status) ? p.status : 'other'; rec.mcpStartup[k]++ }
       else if (message.method === 'error') turnNow.errors.push(clip(p.error?.message ?? 'error', 300))
       else if (message.method === 'turn/completed') { completions.push({ threadId: p.threadId, turnId: p.turn?.id, status: p.turn?.status, error: p.turn?.error?.message ? clip(p.turn.error.message, 300) : null, at: performance.now() }) }
-      if (chat) tasks.push(Promise.resolve(chat.handleNotification(message, 'codex')).catch(() => {}))
-    },
-    onRequest: message => {
+  }
+  const onEngineRequest = message => {
       { const m = `request:${String(message.method ?? '?').slice(0, 60)}`; if (Object.keys(turnNow.engineMessages).length < 40 || m in turnNow.engineMessages) turnNow.engineMessages[m] = (turnNow.engineMessages[m] ?? 0) + 1; turnNow.pendingRequests.set(message.id, String(message.method ?? '?').slice(0, 60)) }
       if (message.method === 'item/tool/call') { turnNow.toolCalls.set(message.id, { tool: message.params?.tool, arguments: clip(message.params?.arguments, 1500), result: null }); try { if (turnNow.t0 !== null && turnNow.timing.tools.length < 100) turnNow.timing.tools.push({ id: message.id, tool: String(message.params?.tool ?? '').slice(0, 60), startMs: offsetNow(), endMs: null }) } catch { /* recording only */ } }
       else if (/requestApproval$|^applyPatchApproval$|^execCommandApproval$/.test(message.method)) turnNow.native.approvals++
-      if (chat) tasks.push(Promise.resolve(chat.handleServerRequest(message, 'codex')).catch(error => turnNow.errors.push(`server_request_failed:${clip(error?.code ?? error?.message, 80)}`)))
-    },
+  }
+  // Claude: the same request names the check and its hooks use, answered by the adapter; the adapter's events reach the runtime through its own subscription (wrapClaudeAdapter)
+  const claudeRpc = { request: (method, params) => claudeRequest(claudeRef.adapter)(method, params), respond: (id, result, error) => claudeRef.adapter.respond(id, result, error), initialize: async () => {}, close() {}, receive() {}, serverInfo: null }
+  const rpc = claudeMode ? claudeRpc : new AppServerRpc({
+    send: payload => child.stdin.write(`${payload}\n`), experimentalApi: true, timeoutMs: 60_000,
+    onNotification: message => { onEngineNotification(message); if (chat) tasks.push(Promise.resolve(chat.handleNotification(message, 'codex')).catch(() => {})) },
+    onRequest: message => { onEngineRequest(message); if (chat) tasks.push(Promise.resolve(chat.handleServerRequest(message, 'codex')).catch(error => turnNow.errors.push(`server_request_failed:${clip(error?.code ?? error?.message, 80)}`))) },
   })
   // stdout lines go to the RPC; the initialize answer is also read here, because the product's RPC keeps only the user agent
   let buffer = ''
@@ -437,23 +477,42 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       rpc.receive(line)
     }
   })
-  const stop = async () => { try { chat?.setConnection?.(false) } catch {} try { rpc.close() } catch {} rec.phases.killed = (await killGroup(child))?.signal ?? null }
+  const stop = async () => { try { chat?.setConnection?.(false) } catch {} try { rpc.close() } catch {} rec.phases.killed = claudeMode ? (await Promise.resolve(claudeRef.adapter?.dispose?.('check finished')).catch(() => {}), null) : (await killGroup(child))?.signal ?? null }
 
   try {
     // ---- initialize, home and version ----
     const t1 = performance.now()
+    let agent = null
+    if (claudeMode) { // the product's own static check (claude --version, claude auth status --json): who is signed in and how, never a credential
+      const claudeEnv = { PATH: env.PATH ?? '', HOME: env.HOME ?? '', ...(options.claudeBin ? { EGDESK_CLAUDE_BIN: options.claudeBin } : typeof env.EGDESK_CLAUDE_BIN === 'string' && env.EGDESK_CLAUDE_BIN.trim() ? { EGDESK_CLAUDE_BIN: env.EGDESK_CLAUDE_BIN } : {}) }
+      const status = createClaudeEngineStatus({ probe: deps.claudeProbe ?? (() => probeClaudeEngine({ env: claudeEnv })), onChange: () => { try { claudeRef.adapter?.syncStatus() } catch { /* the gate follows */ } } })
+      claudeRef.adapter = createClaudeEngineAdapter({ snapshot: () => status.snapshot(), refreshStatus: o => status.refresh(o), env: claudeEnv, defaultCwd: dataDir, ...(deps.claudeAdapterOptions ?? {}) })
+      await status.refresh({ force: true })
+      const snap = status.snapshot()
+      rec.phases.initializeMs = ms(t1)
+      rec.engine = { id: 'claude', installed: snap.installed === true, version: snap.version ?? null, versionStatus: snap.versionStatus ?? null, signedIn: snap.auth?.status === 'signedIn', authMethod: snap.auth?.method ?? null }
+      if (snap.installed !== true) throw Object.assign(new Error('the Claude CLI was not found (--claude-bin, EGDESK_CLAUDE_BIN, PATH, ~/.local/bin/claude)'), { code: 'claude_not_installed' })
+      if (snap.versionStatus === 'unsupported') throw Object.assign(new Error('this Claude CLI version is not supported by the adapter'), { code: 'claude_version_unsupported' })
+      if (snap.auth?.status !== 'signedIn') throw Object.assign(new Error('the Claude CLI is not signed in: sign in inside EG-Desk (or the CLI) first; the check never logs in'), { code: 'claude_login_required' })
+      // c37 (compliance): automated real checks run on an API-key (Console) login; a subscription login is refused unless the person's explicit --allow-subscription-smoke is given. Only the method is recorded, never the account.
+      const method = snap.auth?.method ?? null
+      rec.engine.authAllowed = method === 'apiKey' ? 'apiKey' : method === 'claudeai' && options.allowSubscriptionSmoke === true ? 'subscription-smoke' : null
+      if (rec.engine.authAllowed === null) throw Object.assign(new Error(method === 'claudeai' ? 'the Claude CLI is signed in with a claude.ai SUBSCRIPTION: automated checks use an API-key login (claude auth login --console); --allow-subscription-smoke is only for a person who chose it' : `the Claude CLI login method (${method ?? 'unknown'}) is not an API-key login`), { code: method === 'claudeai' ? 'claude_subscription_refused' : 'claude_auth_method_refused' })
+      claudeRef.adapter.syncStatus()
+    } else {
     await rpc.initialize()
     rec.phases.initializeMs = ms(t1)
-    const agent = rpc.serverInfo?.userAgent ?? null
+    agent = rpc.serverInfo?.userAgent ?? null
     rec.engine = { version: parseCodexUserAgent(agent)?.version ?? null, userAgent: agent ? agent.slice(0, 120) : null, homeMode: options.home.kind, homeMatchesFlag: null }
     if (options.home.kind === 'dir') {
       rec.engine.homeMatchesFlag = initializeResult?.codexHome === options.home.dir || (() => { try { return fs.realpathSync(initializeResult?.codexHome) === fs.realpathSync(options.home.dir) } catch { return false } })()
       if (!rec.engine.homeMatchesFlag) throw Object.assign(new Error('the app-server reports another Codex home than --codex-home'), { code: 'home_mismatch' })
     } else rec.engine.homeMatchesFlag = null
+    }
 
     // ---- the runtime, composed the way codex-bridge-server.mjs composes it ----
     const request = async (method, params) => {
-      if (!persisted && (method === 'thread/start' || method === 'thread/fork') && params?.ephemeral !== true) throw Object.assign(new Error('every thread of this check must be ephemeral'), { code: 'ephemeral_required' })
+      if (!persisted && !claudeMode && (method === 'thread/start' || method === 'thread/fork') && params?.ephemeral !== true) throw Object.assign(new Error('every thread of this check must be ephemeral'), { code: 'ephemeral_required' })
       const start = performance.now()
       if (method === 'turn/start' && turnNow.t0 !== null && turnNow.timing.engineStartMs === null) turnNow.timing.engineStartMs = offsetNow() // c31: the engine is asked to start: what came before is the memory and action layers
       turnHooks.observe(method, params) // registered hooks
@@ -462,7 +521,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
         // contextKeys (c27): the NAMES of the additionalContext blocks a turn/start carried (never their text): whether EG-Desk's own blocks (egdesk_stopped_command, ...) rode along
         if (method === 'turn/start') turnNow.turnStartAt = performance.now()
         rec.requests.push({ method, ms: ms(start), ...(method === 'turn/start' && params?.additionalContext && typeof params.additionalContext === 'object' ? { contextKeys: Object.keys(params.additionalContext).filter(k => /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(k)).slice(0, 16) } : {}) })
-        if (method === 'thread/start') { lastThreadStart = result; if (!persisted && result?.thread?.ephemeral !== true) { rec.aborted ??= 'thread_not_ephemeral' } }
+        if (method === 'thread/start') { lastThreadStart = result; if (claudeMode) { if (typeof result?.thread?.id === 'string' && claudeSessions.length < 50) claudeSessions.push(result.thread.id) } else if (!persisted && result?.thread?.ephemeral !== true) { rec.aborted ??= 'thread_not_ephemeral' } }
         // persisted mode: every thread the engine reports is in the ledger before anything else happens with it (a crash leaves the record of what to delete)
         if (persisted && (method === 'thread/start' || method === 'thread/fork') && typeof result?.thread?.id === 'string') {
           const row = { id: result.thread.id, ephemeral: result.thread.ephemeral === true }; createdThreads.push(row); ledger.append({ op: 'created', via: method, ...row })
@@ -545,21 +604,27 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     // verified (inspectNativeCapabilities → boardPeerContract). The check reads the same thing from the given binary (it runs the binary's
     // --version and schema generation, as the bridge does at start) and records it; without a contract the message stays pending and is carried.
     let nativeContract = null
-    const needsNative = FLAG.EGDESK_INRUN_MESSAGES === 'on' || conversation.turns.some(t => t.action === 'steer' || t.action === 'delete')
+    const needsNative = !claudeMode && (FLAG.EGDESK_INRUN_MESSAGES === 'on' || conversation.turns.some(t => t.action === 'steer' || t.action === 'delete'))
     if (needsNative) {
       try { nativeContract = (deps.inspectNative ?? inspectNativeCapabilities)({ executable: options.codexBin, env: childEnv(options, env), cwd: dataDir, ...(deps.run ? { run: deps.run } : {}) }) } catch { nativeContract = null }
       rec.engine.nativeContract = { version: nativeContract?.version ?? null, schemaMatch: nativeContract?.schemaMatch === true, boardPeerContract: typeof nativeContract?.boardPeerContract === 'string', steerContract: typeof nativeContract?.steerContract === 'string', threadDelete: nativeContract?.threadDelete === true }
     }
-    chat = new CodexChatRuntime({ request, respond, ...(profileStore ? { profiles: profileStore } : {}),
+    const claudeWrapped = claudeMode ? wrapClaudeAdapter({ adapter: claudeRef.adapter, request, respond, tapNotification: m => { onEngineNotification(m); if (m?.method === 'turn/completed') refreshUsage() }, tapRequest: onEngineRequest }) : null
+    const codexStub = claudeMode ? createCodexEngineAdapter({ request: async method => { throw Object.assign(new Error(`${method}: the Codex engine is not used with --engine claude`), { code: 'not_applicable_on_claude' }) }, respond: () => false }) : null
+    chat = new CodexChatRuntime({ request, respond, ...(claudeMode ? { engines: [codexStub, claudeWrapped] } : {}), ...(profileStore ? { profiles: profileStore } : {}),
       ...(needsNative ? { getBoardPeerContract: () => nativeContract?.boardPeerContract ?? null, getSteerContract: () => nativeContract?.steerContract ?? null, getThreadDelete: () => nativeContract?.threadDelete === true } : {}), emit: event => { try { if (turnNow.t0 !== null && VISIBLE_EVENTS.has(event?.event) && turnNow.timing.events.length < 200) turnNow.timing.events.push({ event: event.event, atMs: offsetNow(), ...(/^activity\./.test(event.event) ? { kind: String(event.details?.activity?.kind ?? event.details?.kind ?? '').slice(0, 40) } : {}) }) } catch { /* recording only */ } }, emitLegacy: () => {}, store, requireStore: true, contexts, getOwnerKey: () => OWNER, verifyFile: async () => null, resolveProjectWorkspace: async () => null,
       ...(FLAG.EGDESK_AGENT_RELOAD_REUSE === 'on' ? { agentReloadReuse: true } : {}), // inert without an Agent-profile conversation (L7 c27)
       ...(stallConfigFromEnv(FLAG) ? { engineStall: stallConfigFromEnv(FLAG) } : {}), // c33: the first-event watchdog (flag EGDESK_ENGINE_STALL_FIRST_EVENT_MS)
       toolProviders: wiring.toolProviders, ownTools: wiring.ownTools, decisionContext,
       roomAccount: { mode: () => (FLAG.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') } })
-    chat.setConnection(true)
+    if (claudeMode) {
+      claudeWrapped.subscribe({ notification: (_, m) => { tasks.push(Promise.resolve(chat.handleNotification(m)).catch(() => {})) }, serverRequest: (_, m) => { tasks.push(Promise.resolve(chat.handleServerRequest(m)).catch(error => turnNow.errors.push(`server_request_failed:${clip(error?.code ?? error?.message, 80)}`))) }, connection: (id, state) => chat.setConnection(id, state.ready, state) })
+      claudeRef.adapter.syncStatus() // a change after this reaches the runtime through the subscription; the state the adapter already reached is set here
+      if (claudeRef.adapter.isReady()) chat.setConnection('claude', true, {})
+    } else chat.setConnection(true)
     registerConversationForgetters(chat, { turnMemoryConfig }) // c28: pending readings (c17) and conversation memory (c18), as the bridge registers them
     const chatRoutes = createChatHttpHandler(chat, async () => { throw Object.assign(new Error('the forget route takes no engine account check'), { code: 'unexpected_auth' }) })
-    try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
+    if (!claudeMode) try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
     attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests, limits: deps.hookLimits?.[h.name] }))
     turnHooks.attach({ chat, contexts, client, store, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests, limits: deps.hookLimits, scratch, engineFolder: path.join(dataDir, 'engine-folders', 'empty'), git: deps.git }) // the registered turn hooks that need the live runtime
     rec.phases.composedMs = ms(t0)
@@ -598,7 +663,8 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     const beginTurn = async text => {
       resetTurnNow(); runnerLog.length = 0
       const started = performance.now(); turnNow.t0 = started
-      const run = await chat.send({ message: text, clientThreadId, requestId: `req-${++requestSeq}`, cwd: scratch, ...(agentRoom ? { profileId: agentRoom.id, replyDestination: 'direct' } : {}), ...Object.assign({}, ...attached.map(a => a.sendExtra?.({ text }) ?? {})), ...(first ? (persisted ? {} : { stateless: true }) : { conversationId: nativeThread }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
+      if (claudeMode && deps.claudeGuard) { refreshUsage(); const verdict = deps.claudeGuard.assess('turn', { conversationsDone: deps.claudeProgress?.done ?? 0 }); if (verdict.stop) throw Object.assign(new Error(`the usage guard stops the run: ${verdict.reason}`), { code: 'usage_guard_stop', guard: verdict }) } // c37: also between turns
+      const run = await chat.send({ message: text, clientThreadId, requestId: `req-${++requestSeq}`, cwd: scratch, ...(claudeMode ? { engineId: 'claude' } : {}), ...(agentRoom ? { profileId: agentRoom.id, replyDestination: 'direct' } : {}), ...Object.assign({}, ...attached.map(a => a.sendExtra?.({ text }) ?? {})), ...(first ? (persisted || claudeMode ? {} : { stateless: true }) : { conversationId: nativeThread }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
       first = false; nativeThread = run.conversationId; turnNow.timing.sendMs = ms(started)
       return { run, started }
     }
@@ -720,7 +786,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       if (turn.alongside) {
         const room = { id: `check-${conversation.id}-alongside-${index + 1}` }
         await turnHooks.beforeSend({ state: () => ({ store, clientThreadId: room.id, conversationId: null }), turn: turn.alongside, index, room: 'alongside' })
-        const sent = await chat.send({ message: turn.alongside.say, clientThreadId: room.id, requestId: `req-${++requestSeq}`, cwd: scratch, ...Object.assign({}, ...attached.map(a => a.sendExtra?.() ?? {})), ...(persisted ? {} : { stateless: true }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
+        const sent = await chat.send({ message: turn.alongside.say, clientThreadId: room.id, requestId: `req-${++requestSeq}`, cwd: scratch, ...Object.assign({}, ...attached.map(a => a.sendExtra?.() ?? {})), ...(persisted || claudeMode ? {} : { stateless: true }), ...(claudeMode ? { engineId: 'claude' } : {}), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
         side = { room, run: sent, started: performance.now(), status: null, posted: [] }
       }
       if (follow === 'message') { mark = await sendInRun(ctx, next.say, next.whileRunning.afterMs); turnHooks.inRun({ ...hookCtx, text: next.say }) } // registered hooks
@@ -795,6 +861,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       rec.cleanup.ephemeral = createdThreads.length - ids.length
       if (rec.cleanup.failures.length) { rec.ok = false; rec.cleanupFailed = true }
     }
+    if (claudeMode) { refreshUsage(); try { rec.claude = { sessions: claudeSessions.slice(), billing: claudeRef.adapter?.usage?.()?.billing ?? null, usage: deps.claudeGuard?.log?.().slice(-20) ?? [], sessionFiles: 'left by the CLI (listed above); the check deletes nothing' } } catch { /* advisory */ } }
     try { rec.stallWatchdog = stallRecord({ armed: stallConfigFromEnv(FLAG)?.firstEventMs ?? null, source: conversation.flags?.[ENGINE_STALL_FLAG] !== undefined ? 'script' : 'option', log: chat?.engineStallLog ?? [] }) } catch { /* the record is advisory */ } // c36
     turnHooks.dispose() // registered hooks: timers and the like
     await stop()
@@ -848,22 +915,42 @@ export async function cleanupLeftovers(options, deps = {}) {
 export async function runCheck(options, scripts, deps = {}) {
   const records = []
   makeDirs(options.out)
-  const agentRooms = scripts.flatMap(({ script }) => script.conversations.filter(c => c.agentProfile).map(c => `${script.set}/${c.id}`))
+  const claude = options.engine === 'claude'
+  // c37: the Claude run's guards: the usage guard (before each conversation and each turn), the cap, and what does not apply to Claude
+  const usageHolder = { row: null }, progress = { done: 0 }
+  const guard = claude ? createUsageGuard({ readUsage: () => usageHolder.row, stopAtPercent: options.usageStopPercent, requireSignal: options.requireUsageSignal, ...(options.usageState ? { state: fileUsageState(options.usageState, deps.fs ?? fs) } : {}) }) : null
+  const claudeDeps = claude ? { ...deps, claudeUsage: usageHolder, claudeGuard: guard, claudeProgress: progress } : deps
+  const notApplicable = [], stopped = { by: null }
+  const agentRooms = claude ? [] : scripts.flatMap(({ script }) => script.conversations.filter(c => c.agentProfile).map(c => `${script.set}/${c.id}`))
   if (agentRooms.length && !options.persisted) throw Object.assign(new Error(`an agentProfile conversation is a direct room, which is not one-time: it needs --persisted-with-cleanup (${agentRooms.join(', ')})`), { code: 'agent_room_needs_persisted' })
-  const engineGoneRooms = scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => t.expect?.deleted?.engineGone)).map(c => `${script.set}/${c.id}`)) // c28
+  const engineGoneRooms = claude ? [] : scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => t.expect?.deleted?.engineGone)).map(c => `${script.set}/${c.id}`)) // c28
   if (engineGoneRooms.length && !options.persisted) throw Object.assign(new Error(`deleted.engineGone needs a saved engine thread: it needs --persisted-with-cleanup (${engineGoneRooms.join(', ')})`), { code: 'engine_gone_needs_persisted' })
-  const restartRooms = scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => t.action === 'restart')).map(c => `${script.set}/${c.id}`)) // c29
+  const restartRooms = claude ? [] : scripts.flatMap(({ script }) => script.conversations.filter(c => c.turns.some(t => t.action === 'restart')).map(c => `${script.set}/${c.id}`)) // c29
   if (restartRooms.length && !options.persisted) throw Object.assign(new Error(`a restart turn needs a saved engine thread to come back to: it needs --persisted-with-cleanup (${restartRooms.join(', ')})`), { code: 'restart_needs_persisted' })
-  assertCleanupGuaranteed(options, deps, deps.env ?? process.env)
+  if (!claude) assertCleanupGuaranteed(options, deps, deps.env ?? process.env)
   for (const { script } of scripts) {
     for (const conversation of script.conversations) {
-      const rec = await runConversation({ options, set: script.set, conversation, deps })
+      if (stopped.by) break
+      if (claude) {
+        const verdict = claudeApplicability(conversation)
+        if (!verdict.applicable) { // not a failure: the conversation needs something Claude does not have, so it is not run (and does not count against the cap)
+          notApplicable.push({ set: script.set, id: conversation.id, features: verdict.notApplicable.map(n => n.feature) })
+          const skipped = { set: script.set, id: conversation.id, engine: 'claude', notApplicable: verdict.notApplicable, turns: [], aborted: null, ok: true, totalMs: 0, skipped: 'not_applicable' }
+          records.push(skipped); const dir = path.join(options.out, 'records', script.set); makeDirs(dir); fs.writeFileSync(path.join(dir, `${conversation.id}.json`), `${JSON.stringify(skipped, null, 2)}\n`, { mode: 0o600 }); continue
+        }
+        if (options.maxConversations !== null && progress.done >= options.maxConversations) { stopped.by = { reason: 'max_conversations', cap: options.maxConversations, before: `${script.set}/${conversation.id}` }; break }
+        const verdictNow = guard.assess('conversation', { conversationsDone: progress.done })
+        if (verdictNow.stop) { stopped.by = { reason: verdictNow.reason, guard: true, before: `${script.set}/${conversation.id}`, windows: verdictNow.windows }; break }
+      }
+      const rec = await runConversation({ options, set: script.set, conversation, deps: claudeDeps })
+      if (claude) { progress.done++; if (rec.aborted === 'usage_guard_stop') stopped.by = { reason: 'usage_guard_stop', guard: true, inside: `${script.set}/${conversation.id}` } }
       records.push(rec)
       const dir = path.join(options.out, 'records', script.set); makeDirs(dir)
       fs.writeFileSync(path.join(dir, `${conversation.id}.json`), `${JSON.stringify(rec, null, 2)}\n`, { mode: 0o600 })
     }
   }
-  const summary = { at: new Date().toISOString(), ok: records.every(r => r.ok), conversations: records.map(r => ({ set: r.set, id: r.id, ok: r.ok, aborted: r.aborted, ...(r.cleanup ? { cleanup: { persisted: r.cleanup.persisted, deleted: r.cleanup.deleted, verifiedGone: r.cleanup.verifiedGone, failures: r.cleanup.failures.length } } : {}), turns: r.turns.length, failedChecks: r.turns.flatMap(t => t.expectations.filter(e => !e.ok).map(e => `${t.index}:${e.check}`)), totalMs: r.totalMs, ...(r.stallWatchdog ? { stallWatchdog: r.stallWatchdog } : {}) })), stalls: stallTotals(records) }
+  if (claude) guard.persist()
+  const summary = { at: new Date().toISOString(), ...(claude ? { engine: 'claude', stoppedBy: stopped.by, notApplicable, usageGuard: { stopAtPercent: options.usageStopPercent, maxConversations: options.maxConversations, ran: progress.done, log: guard.log().slice(-40) } } : {}), ok: records.every(r => r.ok) && !stopped.by?.guard, conversations: records.map(r => ({ set: r.set, id: r.id, ok: r.ok, aborted: r.aborted, ...(r.cleanup ? { cleanup: { persisted: r.cleanup.persisted, deleted: r.cleanup.deleted, verifiedGone: r.cleanup.verifiedGone, failures: r.cleanup.failures.length } } : {}), turns: r.turns.length, failedChecks: r.turns.flatMap(t => t.expectations.filter(e => !e.ok).map(e => `${t.index}:${e.check}`)), totalMs: r.totalMs, ...(r.stallWatchdog ? { stallWatchdog: r.stallWatchdog } : {}) })), stalls: stallTotals(records) }
   fs.writeFileSync(path.join(options.out, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o600 })
   return { records, summary, ok: summary.ok }
 }

@@ -35,7 +35,12 @@ async function main(argv) {
     throw error
   }
   const lines = result.summary.conversations.map(c => `${c.ok ? 'ok  ' : 'FAIL'} ${c.set}/${c.id}  turns=${c.turns}  ${c.aborted ? `aborted=${c.aborted}  ` : ''}${c.failedChecks.length ? `failed=${c.failedChecks.join(',')}  ` : ''}${c.cleanup ? `cleanup=${c.cleanup.verifiedGone}/${c.cleanup.persisted} gone${c.cleanup.failures ? ` (${c.cleanup.failures} FAILED)` : ''}  ` : ''}${c.totalMs} ms`)
-  const dirty = leftoverThreads(createLedger(options.out).read())
+  if (options.engine === 'claude' && !options.json) {
+    const sm = result.summary
+    if (sm.notApplicable?.length) lines.push(`not applicable (skipped, not failed): ${sm.notApplicable.map(n => `${n.set}/${n.id} (${n.features.join('; ')})`).join(', ')}`)
+    lines.push(sm.stoppedBy ? `STOPPED: ${sm.stoppedBy.reason}${sm.stoppedBy.before ? ` before ${sm.stoppedBy.before}` : sm.stoppedBy.inside ? ` inside ${sm.stoppedBy.inside}` : ''} (conversations run: ${sm.usageGuard.ran})` : `conversations run: ${sm.usageGuard.ran}, guard stop at ${sm.usageGuard.stopAtPercent}%: not reached`)
+  }
+  const dirty = options.engine === 'claude' ? [] : leftoverThreads(createLedger(options.out).read())
   console.log(options.json ? JSON.stringify(result.summary, null, 2) : [`records: ${options.out}/records`, ...lines, ...(options.stallWatchdogMs || result.summary.stalls?.stalls ? [stallLine(result.summary.stalls)] : [])].join('\n'))
   if (options.persisted && dirty.length) console.error(`CLEANUP FAILED: ${dirty.length} persisted thread(s) are not verified gone (${dirty.join(', ')}); listed in ${options.out}/${LEDGER_FILE}. Run again with --cleanup-leftovers --run before anything else.`)
   return result.ok ? 0 : 1
