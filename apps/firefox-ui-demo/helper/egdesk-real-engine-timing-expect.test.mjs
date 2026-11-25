@@ -49,18 +49,22 @@ test('through the check on the fake app-server: bounds that hold pass, bounds th
 
 // ---- journey v10 ----
 const load = name => JSON.parse(fs.readFileSync(path.join(SCRIPTS_DIR, `${name}.json`), 'utf8'))
-test('journey v10: the committed file is the builder\'s output; six conversations as three -off/-on pairs; the lanes\' own scenarios kept, only ids and timing bounds are ours', () => {
+test('journey v10: the committed file is the builder\'s output; eight conversations as four -off/-on pairs; the lanes\' own scenarios kept, only ids and timing bounds are ours', () => {
   const built = buildU13Script(), file = load(U13_SET)
   assert.equal(fs.readFileSync(path.join(SCRIPTS_DIR, `${U13_SET}.json`), 'utf8'), scriptText(built)); assert.deepEqual(validateEngineScript(file), { ok: true, errors: [] }); assert.deepEqual(secretsIn(JSON.stringify(file)), [])
-  assert.deepEqual(file.conversations.map(c => c.id), ['prefetch-notes-off', 'prefetch-notes-on', 'prefetch-code-off', 'prefetch-code-on', 'tests-off', 'tests-on']); assert.ok(file.conversations.length <= 8)
+  assert.deepEqual(file.conversations.map(c => c.id), ['prefetch-notes-off', 'prefetch-notes-on', 'prefetch-code-off', 'prefetch-code-on', 'tests-off', 'tests-on', 'tests-card-off', 'tests-card-on']); assert.ok(file.conversations.length <= 8)
   const strip = c => ({ ...c, turns: c.turns.map(t => { const { timing, noToolCalls, decisionFirst, engine, ...rest } = t.expect; return { ...t, expect: rest } }) })
   for (const pair of ['prefetch-notes', 'prefetch-code']) { const off = file.conversations.find(c => c.id === `${pair}-off`), on = file.conversations.find(c => c.id === `${pair}-on`); assert.deepEqual(strip({ ...on, id: off.id, flags: off.flags }), strip(off), `${pair}: the pair differs only in the flag and what the flag must change`); assert.equal(on.flags.EGDESK_TURN_MEMORY_PREFETCH, 'files'); assert.equal(off.flags.EGDESK_TURN_MEMORY_PREFETCH, undefined) }
   const [off, on] = [file.conversations.find(c => c.id === 'tests-off'), file.conversations.find(c => c.id === 'tests-on')]
-  assert.equal(on.flags.EGDESK_DECISION_FIRST, 'on'); assert.equal(off.flags, undefined); assert.deepEqual(on.folder, off.folder)
-  // the bounds: layers 3,000 where the engine starts; prefetch-on one engine round; tests-on no engine turn and 8,000 ms for the whole turn (no layers bound: there the layers are the whole turn)
-  for (const c of file.conversations) assert.equal(c.turns[0].expect.timing.layersMaxMs, c.id === 'tests-on' ? undefined : LAYERS_BOUND_MS, c.id)
-  assert.deepEqual(file.conversations.filter(c => c.turns[0].expect.timing.maxEngineRounds !== undefined).map(c => c.id), ['prefetch-notes-on', 'prefetch-code-on'])
-  assert.deepEqual(on.turns[0].expect.timing, { engineStarted: false, answerMaxMs: TESTS_ON_TURN_MS })
+  const [cardOff, cardOn] = [file.conversations.find(c => c.id === 'tests-card-off'), file.conversations.find(c => c.id === 'tests-card-on')]
+  assert.equal(on.flags.EGDESK_DECISION_FIRST, 'on'); assert.equal(cardOn.flags.EGDESK_DECISION_FIRST, 'card'); assert.equal(off.flags, undefined); assert.equal(cardOff.flags, undefined)
+  assert.deepEqual([on.folder, cardOn.folder, cardOff.folder], [off.folder, off.folder, off.folder]); assert.deepEqual({ ...cardOff, id: off.id }, off, 'the card pair\'s -off side is the engine-path conversation again (so --pairs pairs it)')
+  assert.equal(on.turns[0].expect.decisionFirst.path, 'action'); assert.equal(cardOn.turns[0].expect.decisionFirst.path, 'fast')
+  // the bounds: layers 3,000 where the engine starts and nothing runs before it; prefetch-on and tests-on (action-first) one engine round; tests-card-on no engine turn and 8,000 ms for the whole turn
+  // (no layers bound on the two decision-first -on sides: there the layers include the command's run, or are the whole turn)
+  for (const c of file.conversations) assert.equal(c.turns[0].expect.timing.layersMaxMs, ['tests-on', 'tests-card-on'].includes(c.id) ? undefined : LAYERS_BOUND_MS, c.id)
+  assert.deepEqual(file.conversations.filter(c => c.turns[0].expect.timing.maxEngineRounds !== undefined).map(c => c.id), ['prefetch-notes-on', 'prefetch-code-on', 'tests-on'])
+  assert.deepEqual(on.turns[0].expect.timing, { engineStarted: true, maxEngineRounds: 1 }); assert.deepEqual(cardOn.turns[0].expect.timing, { engineStarted: false, answerMaxMs: TESTS_ON_TURN_MS })
 })
 
 test('journey v10 placeholders: each unmerged flag says who owns it and what to add; none of them is in the script yet', () => {
