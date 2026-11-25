@@ -1028,6 +1028,20 @@
                     "invited"
                   ]
                 },
+                "plant": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "draft": {
+                      "maxLength": 400,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "draft"
+                  ],
+                  "type": "object"
+                },
                 "say": {
                   "maxLength": 4000,
                   "minLength": 1,

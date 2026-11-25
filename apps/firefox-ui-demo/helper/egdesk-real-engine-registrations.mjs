@@ -70,6 +70,11 @@ registerExpectKeys({ rewrite: { schema: REWRITE_EXPECT_SCHEMA, validate: (value,
 } } })
 registerTurnHooks('rewrite', conversation => createRewriteHook(conversation))
 
+// ---- L6 c28: the planted-draft mode of the rewrite tool: a turn's `plant` replaces the draft the check reads (registered AFTER the rewrite hook: attach order) ----
+import { PLANT_SCHEMA, createPlantedHook, validatePlant } from './egdesk-real-engine-planted.mjs'
+registerTurnFields({ plant: { schema: PLANT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validatePlant(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('planted', () => createPlantedHook())
+
 // ---- slot L3 ----
 
 // ---- L4: briefing (the briefing flow; its hook itself is registered in egdesk-real-engine-hooks.mjs) ----
