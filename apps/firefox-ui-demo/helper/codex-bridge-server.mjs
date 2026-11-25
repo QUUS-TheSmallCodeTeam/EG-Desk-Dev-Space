@@ -575,6 +575,8 @@ const chat = new CodexChatRuntime({
     topicRecipient: recipientForCodexDecisions,
     recipientForChatChoice: recipientForCodexDecisions,
     reviewRevision: () => handleBoardPresentationHttp.settingsRevision(),
+    // c45: the briefing's fill turn starts while the answer is written (EGDESK_BRIEFING_PREFILL=on, default off: the key is absent and the runtime does nothing)
+    ...(process.env.EGDESK_BRIEFING_PREFILL === 'on' && process.env.EGDESK_BRIEFING_FLOW === 'on' ? { briefingPrefill: args => handleBoardPresentationHttp.prefill?.(args) } : {}),
     get memoryEvidence() { return getMemoryEvidence() },
     collect: async ({ body, context, memoryEvidenceFor, speech }) => (await collectDecisionCandidates({ body, memoryEvidenceFor, speech, clientThreadId: context.clientThreadId,
       excludeMessageId: context.localMessageId, chatStore, deskStore, ontologyStore: ensureOntologyStore })).candidates,
@@ -652,6 +654,8 @@ const handleBoardPresentationHttp = createBoardPresentationHttpHandler({ credent
     coverage: process.env.EGDESK_BRIEFING_COVERAGE === 'board' ? 'board' : 'facts',
     // EGDESK_BRIEFING_LAYERS=on (c44, default off): what the Decision settled before the fill is not reopened by the engine's wording (an undecided step sentence over sure cards stays).
     layers: process.env.EGDESK_BRIEFING_LAYERS === 'on' ? 'on' : 'off',
+    // EGDESK_BRIEFING_PREFILL=on (c45, default off): the fill turn is sent while the answer is still being written and its reply is used when the request after the answer is identical.
+    prefill: process.env.EGDESK_BRIEFING_PREFILL === 'on' ? 'on' : 'off',
     // EGDESK_BRIEFING_OUTPUT_SCHEMA=on: the briefing's fill / design turn is sent with a JSON Schema (Codex outputSchema) built from the render components' accepted shape. Default off.
     outputSchema: process.env.EGDESK_BRIEFING_OUTPUT_SCHEMA === 'on' ? 'on' : 'off' }) })
 // Work-surface placement (egdesk-work-placement.mjs): where an Agent's visible work surface should open, judged at the conversation's heartbeat among options the

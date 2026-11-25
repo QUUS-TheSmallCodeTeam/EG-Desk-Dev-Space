@@ -173,8 +173,10 @@ export function createBriefingEngine({ runText, report = '', now = Date.now, lim
  * The bridge's dependencies for the `on` path, in one place so a test mounts exactly what the bridge mounts.
  * enabled === false (the default) leaves the engine out: the route then answers 'no-engine' and does nothing.
  */
-export function briefingDeps({ chat, contexts, enabled = false, limits, order = 'skeleton', fillCheck = 'all', coverage = 'facts', outputSchema = 'off', layers = 'off' } = {}) {
+export function briefingDeps({ chat, contexts, enabled = false, limits, order = 'skeleton', fillCheck = 'all', coverage = 'facts', outputSchema = 'off', layers = 'off', prefill = 'off' } = {}) {
   return {
+    // Cycle 45: 'on' = the fill turn starts while the answer is written (egdesk-briefing-prefill.mjs). Default off.
+    prefill: prefill === 'on' ? 'on' : 'off',
     // Cycle 44: 'on' = the layers the Decision model settled before the fill stay settled (see runSkeletonFlow `layers`). Default off.
     layers: layers === 'on' ? 'on' : 'off',
     // Cycle 30: 'on' sends the fill / design request with its outputSchema (the engine's final message must be a valid fill / design). Default off: the request is as before.

@@ -383,3 +383,14 @@ test('c44 layers: off by default in every other script; the v3 realistic script 
   assert.deepEqual(v3.conversations.map(c => [c.id, c.flags.EGDESK_BRIEFING_LAYERS, c.flags.EGDESK_BRIEFING_HAND_MATERIALS, c.flags.EGDESK_BRIEFING_OUTPUT_SCHEMA]), [['realistic-layers-schema-on', 'on', 'on', 'on']])
   assert.deepEqual(v3.conversations[0].turns[0].expect.briefing, buildLoopScript().conversations[0].turns[0].expect.briefing, 'the same expectations')
 })
+
+// ---- c45: EGDESK_BRIEFING_PREFILL (default off; owner direction U13) ----
+import { LOOP_PREFILL_SET, buildLoopPrefillScript } from './egdesk-briefing-real-engine-script.mjs'
+test('c45 prefill: off by default in every other script; the v4 realistic script is the v3 conversation with EGDESK_BRIEFING_PREFILL=on, and the flag is a registered briefing flag', () => {
+  assert.ok(BRIEFING_FLAGS.includes('EGDESK_BRIEFING_PREFILL'))
+  for (const c of [...buildLoopScript().conversations, ...buildBoardScript().conversations, ...buildLoopHandedScript().conversations, ...buildLoopLayersScript().conversations]) assert.equal(c.flags.EGDESK_BRIEFING_PREFILL, undefined, c.id)
+  const v4 = buildLoopPrefillScript(), file = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'real-engine', 'scripts', `${LOOP_PREFILL_SET}.json`), 'utf8'))
+  assert.deepEqual(file, JSON.parse(JSON.stringify(v4))); assert.deepEqual(validateEngineScript(file), { ok: true, errors: [] })
+  assert.deepEqual(v4.conversations.map(c => [c.id, c.flags.EGDESK_BRIEFING_PREFILL, c.flags.EGDESK_BRIEFING_LAYERS, c.flags.EGDESK_BRIEFING_HAND_MATERIALS, c.flags.EGDESK_BRIEFING_OUTPUT_SCHEMA]), [['realistic-prefill-schema-on', 'on', 'on', 'on', 'on']])
+  assert.deepEqual(v4.conversations[0].turns[0].expect.briefing, buildLoopScript().conversations[0].turns[0].expect.briefing, 'the same expectations')
+})

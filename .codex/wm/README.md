@@ -30,3 +30,6 @@ shasum -a 256 .codex/wm/file-inventory.txt | awk '{print $1}' > .codex/wm/file-i
 - When the inventory hash changes, review whether `file-map.json` or `routing-policy.json` became stale.
 - Prefer inline context transfer. Persist context only when it will be reused, relayed repeatedly, compared for drift, or resumed after interruption/compaction.
 - Do not persist worker prompt bundles here by default. If a large or reusable context bundle must be persisted for a live mission, place it under `.tmp/codex-swarm/<mission-id>/`, not durable WM memory.
+
+## Loop-copy note [2026-11-25 KST]
+- This loop copy (`$L/int-c14`) file-map.json v10 / routing-policy.json v7 were refreshed for the Decision-model loop (apps/firefox-ui-demo growth, conflict hotspots). `file-inventory.txt`/`-hash` are not regenerated here (absent in loop copy) and the original project was not touched. Report: `$L/reports/wm-20261125.md`.

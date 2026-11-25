@@ -1,6 +1,6 @@
 {
-  "version": 9,
-  "updated": "2026-09-09T00:56:31+09:00",
+  "version": 10,
+  "updated": "2026-11-25T23:00:00+09:00",
   "directories": {
     ".codex/": "[present] Codex-local project operating area.",
     ".codex/agents/": "[present] Project-scoped Codex custom subagent profiles.",
@@ -9,10 +9,10 @@
     "apps/firefox-ui-demo/": "[present] Firefox shell product/runtime surface currently used for EG-Desk work.",
     "apps/firefox-ui-demo/overlay/JS/": "[present] Firefox chrome UI/runtime scripts. Main runtime file is eg-desk-surface.uc.js.",
     "apps/firefox-ui-demo/overlay/CSS/": "[present] Firefox chrome UI styling.",
-    "apps/firefox-ui-demo/overlay/resources/": "[present] Chrome-loadable HTML, vendor code, and assets for overlay surfaces.",
-    "apps/firefox-ui-demo/helper/": "[present] Node bridge server for Codex chat and terminal HTTP endpoints.",
+    "apps/firefox-ui-demo/overlay/resources/": "[present][loop-2026-11-25 KST][int/c14 vs loop-base] 신규 .sys.mjs 7개(EGDeskBriefingHost, CanvasDesignCheck, CanvasRedesign, DecisionWarmup, HudRouting, JointPresence, WorkPlacement) + 기존 11개 수정.",
+    "apps/firefox-ui-demo/helper/": "[present][loop-2026-11-25 KST][int/c14 vs loop-base] Bridge는 더 이상 codex-bridge-server 단일 파일이 아님: 신규 약 190개 helper 모듈(+테스트) = 런타임(turn-memory, working-memory, browser-task/reflex/open-items, heartbeat*, work-placement, hud-routing, briefing-*, own-tools-*/command-*/terminal-*/gate-hook-*, joint-presence, run-conditions, engine-stall), 판정 모듈(decision-egress/calibration-log/budget-store/grouping/warmup/first-*), 실엔진 점검(real-engine-*). 신규 기능은 기본 꺼짐 플래그(EGDESK_*)로 codex-bridge-server.mjs에서 배선.",
     "apps/firefox-ui-demo/helper-rust/": "[alt] Rust PTY helper candidate alongside the Node helper path.",
-    "apps/firefox-ui-demo/scripts/": "[present] Install, sync, run, and repeatable Firefox/Marionette verification scripts.",
+    "apps/firefox-ui-demo/scripts/": "[present][loop-2026-11-25 KST][int/c14 vs loop-base] 측정·계획 러너(egdesk-*-live-measure, *-plan*.json, all-on-*), 사전등록 md 3개, codex-hooks/ 프로토타입(U10에 따라 제품 경로 아님).",
     "src/": "[past] Earlier Electron/Vite POC; useful as prior evidence for canvas, offscreen browser, and Codex IPC experiments.",
     ".claude/": "[past][alt] Claude-style swarm materials and historical operating model references. Path-specific current decision records are exceptions noted in key_files.",
     ".claude/wm/": "[past][alt] Earlier Claude WM operating memory. Use as reference when explicitly comparing formats or prior swarm behavior.",
@@ -23,7 +23,12 @@
     "ontology/": "[present][vision] Ontology source seed for time, space, virtual, and related EG-Desk concepts.",
     "ontology/concepts/": "[present][vision] Ontology concept pages.",
     "ontology/concepts/axes/": "[present][vision] Primary ontology axis definitions.",
-    "references/": "[present][reference] Local external-reference library. WM maps paths, freshness, duplicates, and relevant code areas; PM evaluates product fit and license-policy implications; checkouts remain local-only."
+    "references/": "[present][reference] Local external-reference library. WM maps paths, freshness, duplicates, and relevant code areas; PM evaluates product fit and license-policy implications; checkouts remain local-only.",
+    "apps/firefox-ui-demo/scripts/real-engine/": "[present][loop-2026-11-25 KST][int/c14 vs loop-base] 실엔진 점검 스크립트 JSON ~73개 + real-engine-script.schema.json(재생성: regenerate-schema.mjs; 레지스트리 확장 필드 포함) + fake-app-server.mjs + protocol-0171.json. 새 시나리오 = 새 JSON 파일(충돌 없음); schema.json은 생성물.",
+    "apps/firefox-ui-demo/scripts/real-plans/": "[present][loop-2026-11-25 KST][int/c14 vs loop-base] 실모델 계획 폴더 40파일(command-judgments-v1, command-risk-v2, run-conditions-v1: plan/requests/cases). 레인별 폴더 분리 = 충돌 없음.",
+    "apps/firefox-ui-demo/proofs/decision-real-measure/": "[present][loop-2026-11-25 KST][int/c14 vs loop-base] 실측 증거 JSON 248개(추가 전용). 읽을 때만; 편집 금지.",
+    "apps/firefox-ui-demo/helper/fixtures/": "[present][loop-2026-11-25 KST][int/c14 vs loop-base] memory-e2e-real-20261124.json 등 실측 고정 입력.",
+    "[loop] $L=.../tmp/decision-loop": "[present][loop-2026-11-25 KST][int/c14 vs loop-base] 소유 사본. repo/(lane/* 브랜치), int-c14(int/c14, base loop-base), LEDGER.md, PHILOSOPHY.md(P1-P10,U1-U13,R1-R6), reports/*.md(~330, 결정은 REPORT-DECISIONS-INDEX.md/open-decisions-20261125.md). 원본 저장소로 아직 반영 안 됨."
   },
   "key_files": {
     "AGENTS.md": "[present] Main Codex profile for the current project folder.",
@@ -36,9 +41,9 @@
     ".codex/wm/file-inventory-hash": "[present] Hash paired with file-inventory.txt for detecting changed observed file state.",
     ".codex/wm/file-map.json": "[present] WM path map in the .claude file-map shape: directories plus key_files. Values are time-tagged semantic notes.",
     ".codex/wm/routing-policy.json": "[present] Main/PM/WM/visual-designer routing policy, research return path, and Main-owned approval-queue contract. Role and task-routing rules live here, not in file-map entries.",
-    "apps/firefox-ui-demo/overlay/JS/eg-desk-surface.uc.js": "[present] Main Firefox chrome UI/runtime script.",
+    "apps/firefox-ui-demo/overlay/JS/eg-desk-surface.uc.js": "[present][hotspot][loop-2026-11-25 KST][int/c14 vs loop-base] 33,115줄(+707). UI 문구/렌더는 owner 승인 대기 항목(N1)이 많음.",
     "apps/firefox-ui-demo/overlay/CSS/eg-desk-surface.uc.css": "[present] Main Firefox chrome UI stylesheet.",
-    "apps/firefox-ui-demo/helper/codex-bridge-server.mjs": "[present] Node bridge server for Codex chat and terminal HTTP endpoints.",
+    "apps/firefox-ui-demo/helper/codex-bridge-server.mjs": "[present][hotspot][loop-2026-11-25 KST][int/c14 vs loop-base] 1,492줄(+226). 플래그 읽기·서비스 배선 지점(~65 커밋).",
     "ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md": "[present][product-decision] Living product direction and development index; PM must separate decided concepts from open implementation items.",
     "ideas/confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md": "[present][product-decision][technical-contract] Canonical normative implementation guarantees for the product behavior exposed by the Atlas; not runtime evidence and not a PM/Main authoring guide.",
     "ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md": "[present][product-decision][uiux-manual] Canonical user manual and UI-action specification for product-user input, visible response, System/Agent processing, recovery, and completion evidence; not runtime evidence or an AI authoring prompt.",
@@ -52,6 +57,23 @@
     ".claude/docs/decisions/002-external-reference-license-policy.md": "[present][product-decision][legacy-path] Current Green/Red external-reference license policy; PM evaluates, WM locates evidence, and Main persists approved changes.",
     ".claude/docs/decisions/007-firefox-shell-over-electron.md": "[present][product-decision][legacy-path] Decided Firefox-shell platform pivot.",
     ".claude/wm/file-map.json": "[past][alt] Earlier Claude WM map and format reference for Codex WM file-map structure.",
-    ".claude/wm/project-profile.md": "[past][stale] Earlier onboarding profile containing Electron-era assumptions. Do not use as current PM identity unless WM selects a specific current section."
+    ".claude/wm/project-profile.md": "[past][stale] Earlier onboarding profile containing Electron-era assumptions. Do not use as current PM identity unless WM selects a specific current section.",
+    "apps/firefox-ui-demo/helper/codex-chat-runtime.mjs": "[present][hotspot][loop-2026-11-25 KST][int/c14 vs loop-base] 8,928줄(+3,726/-95 vs base). 모든 레인이 건드림(~130 커밋·다수 레인). 신규 로직은 별도 모듈에 두고 이 파일엔 플래그 게이트 한 줄 배선만 허용 권장.",
+    "apps/firefox-ui-demo/helper/egdesk-real-engine-check.mjs": "[present][hotspot][loop-2026-11-25 KST][int/c14 vs loop-base] 861줄 신설. 실엔진 점검 러너 본체. 확장은 egdesk-real-engine-extensions.mjs 레지스트리(registerFlags/TurnFields/ExpectKeys/TurnHooks/ConversationFields) 경유.",
+    "apps/firefox-ui-demo/helper/egdesk-real-engine-registrations.mjs": "[present][hotspot][loop-2026-11-25 KST][int/c14 vs loop-base] 레인별 등록 구간(L1 collab, memory …). 한 레인=한 구간.",
+    "apps/firefox-ui-demo/helper/egdesk-real-engine-extensions.mjs": "[present][loop-2026-11-25 KST][int/c14 vs loop-base] 레인 모듈을 import하지 않는 확장 이음매(병합 충돌 원인을 없애기 위해 도입).",
+    "apps/firefox-ui-demo/scripts/real-engine/real-engine-script.schema.json": "[present][generated][loop-2026-11-25 KST][int/c14 vs loop-base] 직접 편집 금지, regenerate-schema.mjs로 재생성; 충돌 시 재생성이 해법.",
+    "apps/firefox-ui-demo/helper/egdesk-committed-plans.mjs": "[present][hotspot][loop-2026-11-25 KST][int/c14 vs loop-base] L6 c24 병합 충돌 사례(HANDOVER 04:41). 계획 등록 목록.",
+    "apps/firefox-ui-demo/helper/egdesk-turn-memory.mjs": "[present][loop-2026-11-25 KST][int/c14 vs loop-base] 기억 층: tn_*(분류) / tw_*(쓰기 판단). 층 감사 M1: 쓰기 판단이 엔진 답 뒤(codex-chat-runtime.mjs ~8398).",
+    "apps/firefox-ui-demo/helper/egdesk-wiki-reconstruction.mjs": "[present][loop-2026-11-25 KST][int/c14 vs loop-base] 기억 층 읽기: pg_*/op_*/st_P* (상태 5값).",
+    "apps/firefox-ui-demo/helper/egdesk-decision-egress.mjs": "[present][loop-2026-11-25 KST][int/c14 vs loop-base] 결정 모델 외부 전송 공통 게이트(U9). 신규 전송은 반드시 여기 통과.",
+    "apps/firefox-ui-demo/helper/egdesk-decision-calibration-log.mjs": "[present][hotspot][loop-2026-11-25 KST][int/c14 vs loop-base] 판정 보정 로그.",
+    "apps/firefox-ui-demo/helper/egdesk-own-tools-wiring.mjs": "[present][loop-2026-11-25 KST][int/c14 vs loop-base] U10 자체 도구(명령·편집·승인) 배선; Codex 훅 의존 아님(scripts/codex-hooks는 프로토타입).",
+    "apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md": "[present][changed][loop-2026-11-25 KST][int/c14 vs loop-base] loop가 3줄 수정(브라우저 reflex step_rejected, Board 외부 선별 = U9 공통 허용). 정본 쪽 반영 시 이 문서가 1차 대상.",
+    "apps/firefox-ui-demo/docs/JOINT_BOARD_RUNTIME.md": "[present][changed][loop-2026-11-25 KST][int/c14 vs loop-base] 1줄 수정.",
+    "ideas/brainstorming/JEV_INTEGRATION_SUGGESTIONS.md": "[present][design-canon-for-loop][loop-2026-11-25 KST][int/c14 vs loop-base] loop의 설계 정본(§2·4·5·6·9). §9 검증 상태 'NOT-RUN'은 loop 실측으로 낡음.",
+    "$L/PHILOSOPHY.md": "[loop][loop-2026-11-25 KST][int/c14 vs loop-base] P1-P10(D/C/V 정본 인용) + U1-U13(사용자 정정) + R1-R6(실측 규칙). 정본 후보 원천.",
+    "$L/reports/open-decisions-20261125.md": "[loop][loop-2026-11-25 KST][int/c14 vs loop-base] 열린 결정 13개(P1-P7,N1,C1,C2,D1,D2,I1) + 임시 승인 + 부록 110절 분류. owner 결정 전까지 정본 승격 금지.",
+    "$L/reports/l1-c31b-layer-audit.md": "[loop][loop-2026-11-25 KST][int/c14 vs loop-base] U13 정정 이후 층(기억/행동) 감사: M1 층 역전 등."
   }
 }

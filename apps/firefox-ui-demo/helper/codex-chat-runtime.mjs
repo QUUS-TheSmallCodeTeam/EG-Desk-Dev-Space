@@ -3140,6 +3140,7 @@ export class CodexChatRuntime {
       this.startConversationFlow(run, body, context)
       this.turnMemoryLatest.delete(run.conversationId) // this turn is now the conversation's latest: the previous turn's materials end here
       if (memoryTurn) this.noteTurnMemoryOn(run, body, context, memoryTurn, memoryPacket !== null, confirmNote !== null)
+      this.startBriefingPrefill(run, body) // c45: the briefing's fill turn may start now (EGDESK_BRIEFING_PREFILL=on, default off: no hook, nothing happens)
       if (memoryPosition) this.startTurnMemoryAdvisory(run, body, context, memoryPosition, performance.now() - memoryClock, { speech: decision?.speech ?? null, topic: this.topicIntakes.get(context) ?? null }) // after dispatch, in the background: never delays or changes the turn
       if (bounded && policy === BROWSER_BOUNDED && browserInteractionRequested && this.browserEntryMode() === 'advisory') this.startBrowserEntryAdvisory(run, body, context) // same: record only
       // Notifications can precede the RPC response. Only the returned turn ID
@@ -5922,6 +5923,12 @@ export class CodexChatRuntime {
 
   // The run joins its conversation's session heartbeat: the run's own facts become the heartbeat's source and the session's message
   // question speaks for this run until it ends (see the contract in egdesk-heartbeat.mjs).
+  // c45 (L4): after dispatch, in the background, never delays the turn and never throws: hands { run, request } to the board handler's prefill (the bridge sets decisionContext.briefingPrefill only
+  // behind EGDESK_BRIEFING_PREFILL=on), which starts the briefing's fill turn while the answer is being written. Absent hook = nothing.
+  startBriefingPrefill(run, body) {
+    try { const hook = this.decisionContext?.briefingPrefill; if (typeof hook === 'function') void Promise.resolve(hook({ run, request: body?.message })).catch(() => {}) } catch { /* the prefill never affects the run */ }
+  }
+
   startConversationFlow(run, body, context) {
     try {
       const hb = context.heartbeat

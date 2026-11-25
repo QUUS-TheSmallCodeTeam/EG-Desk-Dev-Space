@@ -1,6 +1,6 @@
 {
-  "version": 6,
-  "updated": "2026-09-09T00:56:31+09:00",
+  "version": 7,
+  "updated": "2026-11-25T23:00:00+09:00",
   "purpose": "Reusable routing policy and default role/file boundaries for Codex-native Main, EG-Desk PM, WM, visual designer, and bounded worker operation. This is not a worker prompt bundle or a live communication channel.",
   "persistence_policy": {
     "default_context_delivery": "inline",
@@ -208,6 +208,33 @@
         "materially irreversible external commitment"
       ],
       "local_work_policy": "Continue local capabilities and other independent work while the external decision is pending."
+    },
+    "decision_loop_parallel_lanes": {
+      "as_of": "2026-11-25 KST [loop-copy only; not applied to the original project]",
+      "scope": "lane/* 병렬 작업이 apps/firefox-ui-demo에서 반복 충돌",
+      "hotspots": [
+        "helper/codex-chat-runtime.mjs",
+        "helper/codex-bridge-server.mjs",
+        "overlay/JS/eg-desk-surface.uc.js",
+        "helper/egdesk-real-engine-check.mjs",
+        "helper/egdesk-real-engine-registrations.mjs",
+        "scripts/real-engine/real-engine-script.schema.json",
+        "helper/egdesk-committed-plans.mjs",
+        "helper/egdesk-decision-calibration-log.mjs",
+        "helper/egdesk-decision-egress.mjs"
+      ],
+      "rules": [
+        "새 판정/런타임 = 새 helper 모듈(egdesk-<feature>.mjs) + 테스트; 핫스팟 파일에는 플래그 게이트 한 줄 배선만",
+        "실엔진 점검 확장은 egdesk-real-engine-extensions.mjs 레지스트리로, registrations.mjs는 레인당 한 구간(구간 머리 주석 소유자 표기)",
+        "schema.json은 생성물: 충돌 시 regenerate-schema.mjs 재실행(수작업 병합 금지)",
+        "새 시나리오/계획/증거는 새 파일(scripts/real-engine/scripts/, scripts/real-plans/<name>/, proofs/)만 추가",
+        "UI 문구·이름은 N1 승인 전 도입 금지(제안만)"
+      ],
+      "route_to_wm_before": [
+        "핫스팟 파일을 둘 이상 레인이 동시에 수정하게 되는 배정",
+        "loop 결과를 원본 정본 문서로 반영하는 편집 (반영 계획은 reports/wm-20261125.md §4)"
+      ],
+      "canon_promotion": "PHILOSOPHY의 [추론]/Main 기본값과 open-decisions 열린 13개는 owner 결정 전 정본 반영 금지; U1-U13 중 사용자 인용 있는 것만 후보"
     }
   }
 }
