@@ -354,12 +354,14 @@ const RULES = {
   fit: 'You are a system judge reading stored materials. Each question quotes ONE material or ONE pair of materials and asks ONE thing about what its text states. Answer each question on its own, whatever the others are. Judge only from the quoted text; never assume content it does not contain.',
   order: 'You are a system judge. Each question describes TWO parts of a briefing by the materials they show. Answer each question on its own. Judge only which part a reader who has seen none of it should be shown first to follow the other.',
   coverage: 'You are a system judge checking a finished board briefing against what the person asked. Judge only from the quoted request, the quoted answer and the quoted parts of the board, in their order.',
-  coverage_facts: 'You are a system judge checking whether a finished board briefing shows given facts. Judge only from the quoted parts of the board and the quoted fact. A fact that is several values joined by " · " (the cells of a table row) is shown when every value is on the board, in any order or form; a date may be written as month-day in the fact and in full on the board.',
-  coverage_stated: 'You are a system judge checking whether a finished board briefing shows given facts, and whether a sentence states what the materials say. Judge only from the quoted parts of the board, the quoted materials and the quoted sentence or fact. A fact that is several values joined by " · " (the cells of a table row) is shown when every value is on the board, in any order or form; a date may be written as month-day in the fact and in full on the board.',
+  coverage_facts: 'You are a system judge checking whether a finished board briefing shows given facts. Judge only from the quoted parts of the board and the quoted fact.',
+  coverage_stated: 'You are a system judge checking whether a finished board briefing shows given facts, and whether a sentence states what the materials say. Judge only from the quoted parts of the board, the quoted materials and the quoted sentence or fact.',
   fill_check: 'You are a system judge checking a text against its source. Each question quotes ONE text and ONE source. Answer each question on its own, whatever the others are. Rewording, summarising and linking words are fine. A number, amount, date, name or event that the quoted source does not contain is NOT supported.',
 }
 // Only what the record has: no date when it has none, no status when the record does not say ("unknown" is not a status to judge from).
 const quoteMaterial = m => `${m.alias} ${JSON.stringify({ title: m.title, ...(m.at ? { date: m.at } : {}), ...(m.status && m.status !== 'unknown' ? { status: m.status } : {}), text: m.text })}`
+const TABLE_ROW_NOTE = / · /
+const ROW_GUIDANCE = ' This fact is the cells of a table row joined by " · ": it is shown when every value is on the board, in any order or form; a date may be written as month-day in the fact and in full on the board.'
 function questionText(q, c, catalog) {
   // The request is the one user message of the request; each question quotes its own materials, text or source.
   const mat = a => c.materials.find(m => m.alias === a)
@@ -376,7 +378,10 @@ function questionText(q, c, catalog) {
   // Cycle 38 (the c21 plan sent in c40: f-meta-sentences F5 "11-24 · 검색 화면 착수" .66 and F4 .73 although the board's third line has the date 2026-11-24 and "검색 화면 착수" word for word):
   // a fact that came from a table row is its cells joined by " · ", and a date may be written month-day in the fact and in full on the board. The request's RULE text says so (once per request,
   // not in every question: the c21 plan's token ceiling is tight).
-  if (q.kind === 'onboard') return `The fact, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Is this fact shown on the board quoted above (in the text or the shown fields of any of its parts)?`
+  // Cycle 39: c38 put the table-row guidance in the request's RULE text, which applies to every fact of the request. The c43 re-send showed what that does to a plain fact: "11월 6일 v1 발송"
+  // (board: "11월 6일 보낸 v1") went from .96 to .21 / .04, the judge reading "every value" literally. The guidance belongs only to a fact that IS a table row (its cells joined by " · "):
+  // it is in that fact's own question, and a plain fact's question and the request's rule are exactly what they were before c38.
+  if (q.kind === 'onboard') return `The fact, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Is this fact shown on the board quoted above (in the text or the shown fields of any of its parts)?${TABLE_ROW_NOTE.test(q.text) ? ROW_GUIDANCE : ''}`
   // Cycle 36 (check-11): a sentence of the answer that no code anchor ties to a material may be a statement ABOUT the answer ("정리했습니다", "파일은 변경하지 않았습니다") that no board can show.
   // Only the judge can tell it from a content fact, from the materials quoted once above.
   if (q.kind === 'stated') return `The sentence, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Does this sentence restate something that the materials quoted above say? (A sentence that only describes what the assistant did, how its answer is organised, or what it did not do is not a statement of the materials.)`
