@@ -98,6 +98,15 @@ registerTurnFields({ browserTask: { schema: BROWSER_TASK_SCHEMA, validate: (valu
 } } })
 registerExpectKeys({ browserAnswer: { schema: BROWSER_ANSWER_EXPECT_SCHEMA, validate: (value, { turn, path, bad }) => { for (const why of validateBrowserAnswerExpect(value, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
 registerTurnHooks('browserAnswer', () => createBrowserAnswerHook())
+// L8 c34: the whole browser loop (the product's entry judged by the real Decision model, the steps on fixture pages, the note into the same turn, the real reply)
+import { BROWSER_LOOP_EXPECT_SCHEMA, BROWSER_LOOP_FLAG, BROWSER_LOOP_SCHEMA, createBrowserLoopHook, validateBrowserLoop, validateBrowserLoopExpect } from './egdesk-real-engine-browser-loop-hook.mjs'
+registerFlags({ decisionDependent: [BROWSER_LOOP_FLAG] })
+registerTurnFields({ browserLoop: { schema: BROWSER_LOOP_SCHEMA, validate: (value, { conv, turn, path, bad }) => {
+  for (const why of validateBrowserLoop(value, conv, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
+  if (turn.action !== undefined || turn.whileRunning !== undefined || turn.browserTask !== undefined) bad(path, 'only a plain message turn, and not together with browserTask')
+} } })
+registerExpectKeys({ browserLoop: { schema: BROWSER_LOOP_EXPECT_SCHEMA, validate: (value, { turn, path, bad }) => { for (const why of validateBrowserLoopExpect(value, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('browserLoop', () => createBrowserLoopHook())
 
 // ---- L5: deletion through the product's route (seeded memory writes, expect.deleted) ----
 import { DELETED_EXPECT_SCHEMA, SEEDED_WRITES_SCHEMA, checkDeleted, validateDeletedExpect, validateSeededWrites } from './egdesk-real-engine-delete.mjs'
