@@ -3299,7 +3299,7 @@ export class CodexChatRuntime {
       items: ({ cid }) => { const ask = egress.allows('terminal_command') === true ? this.gateHookBroker()?.pendingAsk?.(cid) : null; return ask ? [{ id: `approval:${cid}`, kind: 'approval', summary: `A command waits for the person's yes or no before it runs: ${quoted(ask.command).slice(0, 200)}` }] : [] },
       apply: async ({ cid, message, dfLocal }) => { // L3's approvals-fast path may have read the reply already (its own judgment, once): then its outcome is the state
         const fast = typeof dfLocal?.diag?.reason === 'string' && dfLocal.diag.reason.startsWith('approval_') ? dfLocal.diag.reason : null
-        if (fast) return { handled: true, settled: ['approval_ran', 'approved'].includes(fast) ? 'approved' : fast === 'approval_declined' ? 'not_approved' : 'unclear' }
+        if (fast) return { handled: true, settled: ['approval_ran', 'approval_recorded', 'approved'].includes(fast) ? 'approved' : fast === 'approval_declined' ? 'not_approved' : 'unclear' }
         const read = await this.readGateHookReply(cid, message); return { handled: true, settled: read?.approved === true ? 'approved' : read?.read ? 'not_approved' : 'unclear' } } }
     const question = { id: 'question',
       items: ({ cid, clientThreadId }) => { const run = this.openEarlyQuestion(clientThreadId, cid), flow = run ? this.flowRuns.get(run) : null, row = flow?.sent?.find(x => x.id === flow.question?.id); return row ? [{ id: `question:${run.runId}`, kind: 'question', summary: `The run asked the person: ${quoted(row.text).slice(0, 240)}` }] : [] } }
@@ -7337,6 +7337,8 @@ export class CodexChatRuntime {
     const read = await broker.readReply({ conversationId: cid, reply: body.message, client: setup.client, egress, timeoutMs: APPROVALS_FAST_LIMITS.timeoutMs })
     if (read.declined) return { diag: diag('engine', 'approval_declined', { option: 'declined' }), context: approvalOutcomeBlock({ outcome: 'declined', command: ask.command }) }
     if (!read.approved) return { diag: diag('engine', read.read ? 'approval_unclear' : 'approval_unread') }
+    // u8 (D24): what a PAGE tool asked about is not a shell command: code does not run it. The approval stays recorded in the ledger for the engine's turn, where the identical call goes through once.
+    if (ask.own) return { diag: diag('engine', 'approval_recorded', { option: 'approved' }) }
     const out = await this.decisionFirstRun({ cid, command: ask.command, context, ownFolder: ask.cwd, picked: { option: 'approved', confidence: null, margin: null }, diag })
     if (!out?.entry) return out
     return { diag: diag('engine', 'approval_ran', { option: 'approved' }), context: approvalOutcomeBlock({ outcome: 'ran', command: ask.command, exitCode: out.entry.exitCode, durationMs: out.entry.durationMs, tail: out.entry.tail }), preRun: out.preRun, entry: out.entry, surface: true } // u1: the command the person approved and EG-Desk ran now also shows as its card, with the trace

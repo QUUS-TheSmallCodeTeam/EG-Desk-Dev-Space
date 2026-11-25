@@ -9,7 +9,7 @@ import path from 'node:path'
 import { claudeKeptInputs } from '../overlay/resources/EGDeskClaudeBrowserSend.sys.mjs'
 import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 import { buildReflexCandidates, readOnlyPress } from './egdesk-browser-reflex.mjs'
-import { GOOGLE_HOST, GOOGLE_PAGES, callTool, world } from './egdesk-claude-browser-world.fixture.mjs'
+import { GOOGLE_HOST, GOOGLE_PAGES, callTool, googleSearchFacts, world } from './egdesk-claude-browser-world.fixture.mjs'
 
 const here = path.dirname(new URL(import.meta.url).pathname)
 const surface = fs.readFileSync(path.join(here, '..', 'overlay', 'JS', 'eg-desk-surface.uc.js'), 'utf8')
@@ -105,4 +105,36 @@ test('D20, no leak: a Card granted in one conversation is not carried by another
   const stranger = await other.send('읽어줘', { clientThreadId: 'ui-other', executionPolicy: { mode: 'browserBounded' }, selectedSources: [] })
   assert.equal(stranger.accepted, true); await other.drain()
   assert.notEqual((await callTool(other, 'egdesk_card_read', {})).status, 'read'); other.transports.at(-1).finish()
+})
+
+test('D19 (u8), the facts of Google\'s real search form: the unnamed hidden file input and the six hidden inputs no longer make the GET form "sensitive", so the button is provably a read-only search', () => {
+  const { btnK, btnI } = googleSearchFacts()
+  for (const nav of [btnK, btnI]) {
+    assert.deepEqual([nav.form.method, nav.form.sensitive, nav.sensitiveRegion], ['get', false, false])
+    assert.ok(!nav.form.fields.includes('file'), 'an unnamed file input is not part of a submission')
+    assert.equal(nav.form.fields.filter(kind => kind === 'hidden').length, 6)
+    assert.match(nav.form.submitUrl, /^https:\/\/www\.google\.com\/search\?.*q=%EC%9A%B0%EC%82%B0/)
+  }
+  assert.equal(readOnlyPress({ ref: 'b', role: 'button', tag: 'input', label: 'Google 검색', nav: btnK }, { url: `https://${GOOGLE_HOST}/` })?.kind, 'get_form')
+  // no method attribute = GET (as on the real page); an explicit POST has no URL and no proof
+  assert.equal(googleSearchFacts({ method: null }).btnK.form.method, 'get')
+  const post = googleSearchFacts({ method: 'POST' }).btnK
+  assert.deepEqual([post.form.method, post.form.submitUrl], ['post', null])
+})
+
+test('D19 (u8), what still makes a GET form sensitive, with the same real-shaped form: a password field, a NAMED file input, a hidden field named like a secret, a data-sensitive mark, and an AI-service-style sign-in field', () => {
+  const sensitive = extra => googleSearchFacts({ extraFields: [extra] }).btnK.form
+  const make = googleSearchFacts().node
+  assert.equal(sensitive(make('INPUT', { type: 'password', name: 'pw' })).sensitive, true)
+  const named = sensitive(make('INPUT', { type: 'file', name: 'upload' })); assert.deepEqual([named.sensitive, named.submitUrl], [true, null]); assert.ok(named.fields.length)
+  assert.equal(sensitive(make('INPUT', { type: 'hidden', name: 'csrf_token' }, { value: 'x' })).sensitive, true)
+  assert.equal(sensitive(make('INPUT', { type: 'hidden', name: 'note', 'data-private': 'true' }, { value: 'x' })).sensitive, true)
+  assert.equal(sensitive(make('INPUT', { type: 'text', name: 'otp_code' })).sensitive, true)
+  // an unnamed or a disabled file input stays out; a disabled NAMED one too
+  assert.equal(sensitive(make('INPUT', { type: 'file' })).sensitive, false)
+  assert.equal(sensitive(make('INPUT', { type: 'file', name: 'x' }, { disabled: true })).sensitive, false)
+  // the default of the field-sensitivity check (masking what is read) still treats every hidden field as sensitive
+  const { actor } = googleSearchFacts()
+  assert.equal(actor.isSensitiveControl(make('INPUT', { type: 'hidden', name: 'ei' })), true)
+  assert.equal(actor.isSensitiveControl(make('INPUT', { type: 'hidden', name: 'ei' }), { allowHidden: true }), false)
 })

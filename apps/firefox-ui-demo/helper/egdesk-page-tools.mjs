@@ -138,7 +138,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
   async function ask(run, { command, reason, identity }) {
     if (typeof ledger?.check !== 'function') return { unavailable: true }
     let decision
-    try { decision = await ledger.check({ sessionId: run.conversationId, turnId: run.runId, cwd: '/', command, floor: [reason], identity }) } catch { return { unavailable: true } }
+    try { decision = await ledger.check({ sessionId: run.conversationId, turnId: run.runId, cwd: '/', command, floor: [reason], identity, own: 'page' }) } catch { return { unavailable: true } }
     if (decision?.decision === 'allow' || decision?.decision === 'none') return { allowed: true }
     if (decision?.decision === 'deny') { let gate = { status: 'needs_person' }; try { gate = JSON.parse(decision.note).egdesk_command_gate ?? gate } catch { /* closed default */ } return { gate } }
     return { unavailable: true }
@@ -180,7 +180,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     const link = String(element.tag).toLowerCase() === 'a' && typeof element.href === 'string' && element.href
     if (!link && !expectText) return respond(true, { status: 'needs_expect_text', cardId, label, written: false })
     const reason = verdict.why === 'unproven' || verdict.why === undefined ? 'page_press_unproven' : `page_${verdict.why}`
-    const decision = await ask(run, { command: `press "${label}" on ${hostOf(snapshot.url)}`, reason, identity: `page:press:${hostOf(snapshot.url)}:${sha(`${args.ref}|${label}|${expectText}`)}` })
+    const decision = await ask(run, { command: `press "${label}" on ${hostOf(snapshot.url)}`, reason, identity: `page:press:${hostOf(snapshot.url)}:${sha(`${args.ref}|${label}`)}` }) // u8 (D24): the person approves pressing THIS control on THIS site; the words the engine expects to see afterwards (expectText) are not part of what was approved, so the engine's retry may word them differently
     if (decision.unavailable) return respond(false, { error: { code: 'PAGE_APPROVAL_UNAVAILABLE' } })
     if (decision.gate) return respond(true, { ...decision.gate, kind: 'press', cardId, label, written: false })
     const tool = link ? 'egdesk_browser_navigate' : 'egdesk_browser_click'
