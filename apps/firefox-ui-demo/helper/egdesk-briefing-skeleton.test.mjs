@@ -388,7 +388,7 @@ test('egress: one shared gate; no run -> nothing asked; no memory class -> no ma
 // ================= 7. mounted: the production handler, the real runtime, the answer's own model on a private fork =================
 const thread = { id: 'thread-1', title: 'Room', engineId: 'codex', profileEnabled: true, agentProfileId: 'prof-agent-1' }
 const ANSWER = 'A사 견적은 v1에서 v2 안으로 조정되었고, 11월 14일에 v2로 진행하기로 결정했습니다. 남은 일은 법무 검토, 대표 승인, 최종본 발송입니다.'
-async function mounted(t, { materials = QUOTE, script = ORDER, forkReply, order = undefined, enabled = true, bindings = undefined, outputSchema = undefined } = {}) {
+async function mounted(t, { materials = QUOTE, script = ORDER, forkReply, order = undefined, enabled = true, bindings = undefined, outputSchema = undefined, prefill = undefined } = {}) {
   const h = await harness(t, { forkReply })
   const publish = async (title, markdown, outputKey, id) => toolJson(await h.tool('egdesk_publish_output', { title, markdown, outputKey }, id)).output
   const v1 = await publish('A사 견적서 v1', '# A사 견적서 v1\n총액 1,200만원, 납기 6주', 'a-quote-v1', 'o1')
@@ -401,7 +401,7 @@ async function mounted(t, { materials = QUOTE, script = ORDER, forkReply, order 
   const provider = async (_url, init) => { const body = JSON.parse(init.body); decisions.push(body); return Response.json({ answers: answersFor(body.questions, script), usage: { input_tokens: 11 } }) }
   // materialsFor models lane L7's accessor (chat.memoryMaterialsFor, not merged): the rows the answering model was given this turn.
   let current = materials
-  const deps = { ...briefingDeps({ chat: h.chat, contexts: h.contexts, enabled, ...(order ? { order } : {}), ...(outputSchema ? { outputSchema } : {}) }), materialsFor: () => current }
+  const deps = { ...briefingDeps({ chat: h.chat, contexts: h.contexts, enabled, ...(order ? { order } : {}), ...(outputSchema ? { outputSchema } : {}), ...(prefill ? { prefill } : {}) }), materialsFor: () => current }
   const R = rig(t, { mode: 'on', handlerOptions: { briefing: deps, fetchImpl: provider, ...(bindings ? { briefingBindings: bindings } : {}) } })
   // cycle 23: the same bridge started again (a fresh handler) over the same dependencies and the given bindings store
   const remount = next => rig(t, { mode: 'on', handlerOptions: { briefing: deps, fetchImpl: provider, ...(next ? { briefingBindings: next } : {}) } })
@@ -1176,4 +1176,62 @@ test('c34: the fill prompt names the cover materials by alias only (closed words
   const ok = validateFill(gd, reply(['가'.repeat(30), '나'.repeat(30), '다'.repeat(30)].join(' ')))
   assert.equal(ok.ok, true); assert.ok(ok.title.length <= gd.titleMax && ok.title.length > 0 && !/\s$/.test(ok.title) && ok.title.endsWith('나'.repeat(30)) === false)
   assert.equal(validateFill(gd, reply('')).reason, 'no-title'); assert.equal(validateFill(gd, reply('짧은 제목')).title, '짧은 제목')
+})
+
+// ================= c45: the fill turn runs concurrently with the answer turn (EGDESK_BRIEFING_PREFILL, default off) =================
+const stagesOf = s => s.decisions.map(d => d.prompt_cache_key.replace('briefing-skeleton-', ''))
+const titlesOf = s => s.h.events.filter(e => e.event === 'output.published').map(e => e.details.output.title)
+test('c45 prefill: started at the turn, the fill turn is sent once and its reply serves the identical request after the answer; nothing is published by the prefill and the board is the one the normal flow builds', async t => {
+  const control = await mounted(t, { forkReply: () => fence(fillReply(['P1', 'P2', 'P3'])) }); await control.R.http('POST', '/decision/briefing-observe', control.body)
+  const s = await mounted(t, { prefill: 'on', forkReply: () => fence(fillReply(['P1', 'P2', 'P3'])) })
+  const before = s.count('output.published'), proposedBefore = s.count('briefing.published')
+  const pre = await s.R.board.prefill({ run: s.h.run, request: REQUEST, candidates: s.body.candidates, viewport: s.body.viewport })
+  assert.deepEqual([pre.status, pre.outcome, pre.sent, pre.served], ['prefilled', 'prefilled', 1, 0]); assert.equal(s.h.forkPrompts.length, 1)
+  assert.deepEqual(stagesOf(s), ['place', 'fit', 'order'], 'the prefill stops at its fill: no fill check, no coverage')
+  assert.ok(!JSON.stringify(s.decisions[0]).includes(ANSWER.slice(0, 20)), 'no answer exists yet: the earlier placement path, nothing quoted')
+  assert.deepEqual([s.count('output.published'), s.count('briefing.published')], [before, proposedBefore], 'a prefill publishes and proposes nothing')
+  const res = await s.R.http('POST', '/decision/briefing-observe', s.body)
+  assert.equal(res.body.outcome, 'presented', JSON.stringify(res.body)); assert.deepEqual(res.body.prefill, { sent: 1, served: 1, missed: 0, nullReplies: 0 })
+  assert.equal(s.h.forkPrompts.length, 1, 'the fill was NOT asked again: the reply of the prefill was used')
+  assert.deepEqual(stagesOf(s), ['place', 'fit', 'order', 'place', 'fit', 'order', 'fill_check', 'coverage'], 'after the answer the whole flow runs as before (placement with the answer, the fill check, the coverage)')
+  assert.ok(JSON.stringify(s.decisions[3]).includes(ANSWER.slice(0, 20)))
+  assert.deepEqual(titlesOf(s).slice(-3), titlesOf(control).slice(-3), 'the same cards'); assert.equal(s.count('briefing.published'), proposedBefore + 1)
+  assert.deepEqual(res.body.steps, 3); assert.deepEqual((await s.R.http('POST', '/decision/briefing-observe', s.body)).body, { status: 'skipped', reason: 'already' })
+})
+test('c45 prefill: the post-answer flow does not wait for a prefill that is still in flight to be ASKED again: it waits for its reply (one fork turn), and its own Decision requests wait for the prefill\'s', async t => {
+  const s = await mounted(t, { prefill: 'on', forkReply: () => fence(fillReply(['P1', 'P2', 'P3'])) })
+  const pre = s.R.board.prefill({ run: s.h.run, request: REQUEST, candidates: s.body.candidates, viewport: s.body.viewport }) // not awaited: the turn is still being written
+  const res = await s.R.http('POST', '/decision/briefing-observe', s.body); await pre
+  assert.equal(res.body.outcome, 'presented', JSON.stringify(res.body)); assert.equal(s.h.forkPrompts.length, 1); assert.deepEqual(res.body.prefill, { sent: 1, served: 1, missed: 0, nullReplies: 0 })
+  assert.equal(res.body.judgeRequests, 5, 'none of the flow\'s own Decision requests was answered manual by a prefill request in flight')
+})
+test('c45 prefill: a request after the answer that is not identical (other materials) is a miss and the engine is asked as before; a null reply is never served; off by default does nothing', async t => {
+  const miss = await mounted(t, { prefill: 'on', forkReply: () => fence(fillReply(['P1', 'P2', 'P3'])) })
+  await miss.R.board.prefill({ run: miss.h.run, request: REQUEST, candidates: miss.body.candidates, viewport: miss.body.viewport }); miss.setMaterials(SINGLE_VERSION)
+  const res = await miss.R.http('POST', '/decision/briefing-observe', miss.body)
+  assert.equal(miss.h.forkPrompts.length, 2, 'asked again'); assert.deepEqual([res.body.prefill.sent, res.body.prefill.served, res.body.prefill.missed], [1, 0, 1])
+  const nothing = await mounted(t, { prefill: 'on', forkReply: (_p, i) => (i === 0 ? null : fence(fillReply(['P1', 'P2', 'P3']))) })
+  const pre = await nothing.R.board.prefill({ run: nothing.h.run, request: REQUEST, candidates: nothing.body.candidates, viewport: nothing.body.viewport }); assert.equal(pre.nullReplies, 1)
+  const res2 = await nothing.R.http('POST', '/decision/briefing-observe', nothing.body)
+  assert.equal(res2.body.outcome, 'presented', JSON.stringify(res2.body)); assert.equal(nothing.h.forkPrompts.length, 2); assert.deepEqual([res2.body.prefill.served, res2.body.prefill.nullReplies], [0, 1])
+  const off = await mounted(t, { forkReply: () => fence(fillReply(['P1', 'P2', 'P3'])) })
+  assert.deepEqual(await off.R.board.prefill({ run: off.h.run, request: REQUEST }), { status: 'skipped', reason: 'off' }); assert.equal(off.h.forkPrompts.length, 0); assert.equal(off.decisions.length, 0)
+  const res3 = await off.R.http('POST', '/decision/briefing-observe', off.body); assert.equal(res3.body.prefill, undefined)
+  const empty = await mounted(t, { prefill: 'on', materials: [], forkReply: () => fence(fillReply(['P1'])) })
+  assert.deepEqual(await empty.R.board.prefill({ run: empty.h.run, request: REQUEST }), { status: 'skipped', reason: 'no-materials' }); assert.deepEqual(await empty.R.board.prefill({ run: empty.h.run, request: '  ' }), { status: 'skipped', reason: 'invalid' })
+})
+test('c45 runtime hook: an accepted turn hands { run, request } to decisionContext.briefingPrefill, in the background; a hook that throws or rejects never touches the turn; without the key nothing happens', async t => {
+  const seen = []
+  const h = await harness(t, { message: 'ledger를 정리해줘', decisionContext: { briefingPrefill: args => { seen.push(args); return Promise.resolve() } } })
+  assert.equal(seen.length, 1); assert.deepEqual([seen[0].request, seen[0].run.runId, seen[0].run.answerId], ['ledger를 정리해줘', h.run.runId, h.run.answerId])
+  const thrower = await harness(t, { decisionContext: { briefingPrefill: () => { throw new Error('boom') } } }); assert.equal(thrower.run.conversationId.length > 0, true)
+  const rejecter = await harness(t, { decisionContext: { briefingPrefill: () => Promise.reject(new Error('boom')) } }); assert.equal(rejecter.run.runId.length > 0, true)
+  const none = await harness(t, { decisionContext: {} }); assert.equal(none.run.runId.length > 0, true)
+  const bridge = readFileSync(new URL('helper/codex-bridge-server.mjs', root), 'utf8')
+  assert.ok(/EGDESK_BRIEFING_PREFILL === 'on' && process\.env\.EGDESK_BRIEFING_FLOW === 'on' \? \{ briefingPrefill:/.test(bridge) && /prefill: process\.env\.EGDESK_BRIEFING_PREFILL === 'on' \? 'on' : 'off'/.test(bridge), 'the bridge sets both only behind the flag (default off)')
+})
+test('c45 prefill: without the board the chrome showed (none given, none seen yet) the prefill assumes an empty board; with cards on it the request after the answer differs and the fill is asked again (the documented limit)', async t => {
+  const s = await mounted(t, { prefill: 'on', forkReply: () => fence(fillReply(['P1', 'P2', 'P3'])) })
+  await s.R.board.prefill({ run: s.h.run, request: REQUEST }); const res = await s.R.http('POST', '/decision/briefing-observe', s.body)
+  assert.equal(res.body.outcome, 'presented'); assert.equal(s.h.forkPrompts.length, 2); assert.deepEqual([res.body.prefill.served, res.body.prefill.missed], [0, 1])
 })

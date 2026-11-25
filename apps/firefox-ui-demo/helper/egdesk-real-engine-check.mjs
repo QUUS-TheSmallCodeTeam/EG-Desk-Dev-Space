@@ -63,7 +63,7 @@ export const DEFAULT_DECISION_FLAGS = Object.freeze({})
 export const BRIDGE_COMPOSITION = Object.freeze({
   // decisionContext keys the bridge sets, and the developer flags behind them, that this composition reproduces
   keys: ['settingsGeneration', 'mode', 'configured', 'client', 'budgetMs', 'coldBudgetMs', 'warm', 'warmup', 'inRunMessages', 'proposalRegistry', 'calibrationLog', 'turnMemory', 'browserEntry', 'draftCheck', 'conversationFlow',
-    'relevanceRules', 'commandJudge', 'terminalGate', 'workingMemory', 'topicRecipient', 'recipientForChatChoice', 'reviewRevision', 'memoryEvidence', 'collect'],
+    'relevanceRules', 'commandJudge', 'terminalGate', 'workingMemory', 'topicRecipient', 'recipientForChatChoice', 'reviewRevision', 'memoryEvidence', 'collect', 'briefingPrefill'],
   // top-level options of the bridge's new CodexChatRuntime({ … }) that this composition passes (request / respond / toolProviders etc. are the check's own)
   runtimeKeys: ['contexts', 'toolProviders', 'ownToolsWiring', 'roomAccount', 'store', 'requireStore', 'getOwnerKey', 'emit', 'emitLegacy', 'agentReloadReuse', 'engineStall'],
   flags: ['EGDESK_DRAFT_CHECK', 'EGDESK_DRAFT_CHECK_DESIGN', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_TERMINAL_GATE', 'EGDESK_TERMINAL_GATE_METHOD',

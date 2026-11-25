@@ -816,7 +816,7 @@ export function answerCited(answer, materials) {
  * Judgment requests: place (1), fit (1), order (0 or 1, only for pairs the record leaves open), fill check (1, plus 1 per rewrite round): 3 or 4 on the usual path, at most 6.
  * Bounds: SKELETON_LIMITS. stats counts requests and fill turns and keeps what the subjective model received.
  */
-export async function runSkeletonFlow({ request = '', answer = '', materials = [], candidates = [], currentAnswerId = null, viewport = null, judge, fill = null, egress = null, allow = async () => true, observeOnly = false, catalog = BRIEFING_CATALOG, now = Date.now, bindings = null, fillCheck = 'all', coverageCheck = 'facts', layers = false } = {}) {
+export async function runSkeletonFlow({ request = '', answer = '', materials = [], candidates = [], currentAnswerId = null, viewport = null, judge, fill = null, egress = null, allow = async () => true, observeOnly = false, catalog = BRIEFING_CATALOG, now = Date.now, bindings = null, fillCheck = 'all', coverageCheck = 'facts', layers = false, prefill = false } = {}) {
   const checkMode = FILL_CHECK_MODES.includes(fillCheck) ? fillCheck : 'all', coverageMode = COVERAGE_MODES.includes(coverageCheck) ? coverageCheck : 'facts'
   const stats = { judgeRequests: 0, judgeMs: 0, questions: 0, fillTurns: 0, checkSkipped: 0, stages: [], received: [] }
   let relevanceOut = null, gaps = null
@@ -969,6 +969,9 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     return all
   }
   let got = await fillOnce(null)
+  // Cycle 45 (EGDESK_BRIEFING_PREFILL=on): a prefill run, started while the answer is still being written, stops after its first fill request, whatever came back: that request is the point of it (the
+  // route keeps the reply by the request's hash, egdesk-briefing-prefill.mjs). No retry, no pieces, no check, no coverage: everything that is published comes only from the run after the answer.
+  if (prefill) return done(got.ok ? 'prefilled' : 'prefill-failed', { requested: true })
   if (!got.bound && !got.ok && got.failure !== 'timeout') got = await fillOnce(null) // one retry for a reply that is not the asked shape (not after a timeout: the same request would time out again)
   if (!got.bound && !got.ok) { const pieces = await fillInPieces(); if (pieces) { stats.pieceRound = true; if (pieces.ok) got = pieces } } // a failed round keeps the whole fill's reason as the detail (the pieces' own are in stats.pieces)
   if (got.bound || !got.ok) return done('fallback-chat', { reason: got.bound ? 'fill-bound' : 'fill-invalid', detail: got.reason })
