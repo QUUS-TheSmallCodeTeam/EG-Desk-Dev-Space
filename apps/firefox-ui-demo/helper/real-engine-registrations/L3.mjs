@@ -13,6 +13,11 @@ import { PROPOSALS_EXPECT_SCHEMA, createProposalsHook, validateProposalsExpect }
 registerExpectKeys({ proposals: { schema: PROPOSALS_EXPECT_SCHEMA, validate: (value, { conv, path, bad }) => { for (const why of validateProposalsExpect(value, { conv }, path)) bad(path, why.split(': ').slice(1).join(': ')) } } })
 registerTurnHooks('proposals', conversation => createProposalsHook(conversation))
 
+// u1: the order of a turn (memory/action -> engine -> check) as the runtime marked it; expect.stages { order | includes } (helper/egdesk-real-engine-stages-hook.mjs)
+import { STAGES_EXPECT_SCHEMA, createStagesHook, validateStagesExpect } from '../egdesk-real-engine-stages-hook.mjs'
+registerExpectKeys({ stages: { schema: STAGES_EXPECT_SCHEMA, validate: (value, { path, bad }) => { for (const why of validateStagesExpect(value, path)) bad(path, why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('stages', () => createStagesHook())
+
 // ---- L3: the heartbeat's own messages (expect.flow: notes, firstNoteMs, statedSecondsTrue, noResult) ----
 import { FLOW_EXPECT_SCHEMA, createFlowHook, validateFlowExpect } from '../egdesk-real-engine-flow.mjs'
 registerExpectKeys({ flow: { schema: FLOW_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateFlowExpect(value, { conv, turn }, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })

@@ -147,3 +147,21 @@ test('every flag of the bundle reaches the product wiring from process.env (the 
   }
   for (const row of UPPER_BUNDLE) assert.ok(bridge.includes(`process.env.${row.flag}`) || (reads[row.flag] ?? '').includes(row.flag), `${row.flag} is read on the product path`)
 })
+
+// ---- the stages hook of the real-engine check, through the dispatcher the check uses ----
+import './egdesk-real-engine-registrations.mjs'
+import { createTurnHooks } from './egdesk-real-engine-extensions.mjs'
+import { judgeStages, validateStagesExpect } from './egdesk-real-engine-stages-hook.mjs'
+test('stages hook through the dispatcher: records the marked order for the turn\'s request, judges expect.stages, and an expectation it cannot evaluate fails', async () => {
+  const marks = [{ stage: 'memory', at: 1 }, { stage: 'action', at: 2 }, { stage: 'engine', at: 3 }]
+  const chat = { turnStagesFor: id => (id === 'req-1' ? marks : []) }
+  const run = async (expect, attached = true, requestId = 'req-1') => { const hooks = createTurnHooks({ id: 'c', flags: {} }); if (attached) hooks.attach({ chat }); return hooks.afterTurn({ state: () => ({ conversationId: 'n' }), expect, run: { requestId } }) }
+  const ok = await run({ stages: { order: ['memory', 'action', 'engine'] } })
+  assert.deepEqual(ok.records.stages, { stages: ['memory', 'action', 'engine'], inTimeOrder: true }); assert.deepEqual(ok.expectations.map(e => [e.check, e.ok]), [['stages.order', true], ['stages.inTimeOrder', true]])
+  assert.deepEqual((await run({ stages: { order: ['engine', 'memory', 'action'] } })).expectations.map(e => e.ok), [false, true], 'a different order fails')
+  assert.deepEqual((await run({ stages: { includes: ['check'] } })).expectations.map(e => [e.check, e.ok]), [['stages.includes', false], ['stages.inTimeOrder', true]])
+  assert.deepEqual((await run({ stages: { order: ['memory'] } }, false)).expectations.map(e => [e.check, e.ok]), [['stages.evaluated', false]], 'no runtime: fails, not passes')
+  assert.deepEqual((await run({}, true)).expectations, [], 'nothing expected: records only')
+  assert.deepEqual(judgeStages({ order: ['memory'] }, [{ stage: 'memory', at: 5 }, { stage: 'engine', at: 4 }]).map(e => [e.check, e.ok]), [['stages.order', false], ['stages.inTimeOrder', false]])
+  assert.equal(validateStagesExpect({ order: ['engine'], includes: ['engine'] }).length, 1); assert.equal(validateStagesExpect({ order: ['engine'] }).length, 0)
+})
