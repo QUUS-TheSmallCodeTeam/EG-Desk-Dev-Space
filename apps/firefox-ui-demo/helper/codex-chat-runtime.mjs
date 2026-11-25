@@ -5560,6 +5560,9 @@ export class CodexChatRuntime {
   // the run and from registered objective loops. Speaking needs the held-answer mode as well: every posted message, intermediate or final,
   // is a completed, checked message. At a beat the kinds possible right now are listed from the facts and only then the Decision model is
   // asked one choice. The subjective model writes the message on a private fork; the run itself is never touched.
+  // c34: conversationFlow.noteWording() === 'waiting' asks the note question in its concrete wording (default 'standard': the wording as before; no text the person sees changes).
+  flowNoteWording() { try { return this.decisionContext?.conversationFlow?.noteWording?.() === 'waiting' ? 'waiting' : 'standard' } catch { return 'standard' } }
+
   // c31 (owner decision P2, option (다)): conversationFlow.stalledCopy() === 'none' sends NOTHING when the writing model fails for a stalled engine (default 'fixed': the one fixed line,
   // FLOW_COPY.stalled, pending the owner's approval, is posted as before). No new text either way.
   flowStalledCopy() {
@@ -6074,7 +6077,7 @@ export class CodexChatRuntime {
     if (!context) return null
     const note = facts.question ? run.activities.find(a => a.id === facts.question.id) : null
     const pointer = options.includes('pointer') && subject ? this.pointerMaterial(subject, facts.attention, facts.pointerTarget) : null
-    const questions = flowPredicates(options, { note: note ? { text: note.detail?.text } : null, pointer })
+    const questions = flowPredicates(options, { note: note ? { text: note.detail?.text } : null, pointer, noteWording: this.flowNoteWording() })
     if (!questions.length) {
       // Only a pointer was possible and code decided it entirely.
       if (pointer && subject) this.postCodePointer(subject, facts.attention, beat)
