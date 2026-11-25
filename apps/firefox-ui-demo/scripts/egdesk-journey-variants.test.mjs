@@ -128,10 +128,10 @@ test('a send above the ceiling a plan declares is refused before any key is read
     const stamp = path.join(dir, 'last-send.json')
     const run = (argv, env = {}) => main(argv, { env: { EGDESK_DECISION_SEND_STAMP: stamp, ...env }, fetchImpl: async () => { fetched++; throw new Error('no network in a test') }, print: l => out.push(l), printError: l => err.push(l) })
     const key = 'k'.repeat(40)
-    assert.equal(await run(['--plan', planPath('V1'), '--send', '--token-ceiling', '80001'], { OPENAI_API_KEY: key }), EXIT.usage)
-    assert.match(err.at(-1), /--token-ceiling 80001 is above the ceiling this plan declares \(80000\); nothing was sent/)
-    assert.equal(await run(['--plan', planPath('V1'), '--send', '--max-requests', '71'], { OPENAI_API_KEY: key }), EXIT.usage)
-    assert.match(err.at(-1), /--max-requests 71 is above the ceiling this plan declares \(70\)/)
+    assert.equal(await run(['--plan', planPath('V1'), '--send', '--token-ceiling', '100001'], { OPENAI_API_KEY: key }), EXIT.usage)
+    assert.match(err.at(-1), /--token-ceiling 100001 is above the ceiling this plan declares \(100000\); nothing was sent/)
+    assert.equal(await run(['--plan', planPath('V1'), '--send', '--max-requests', '83'], { OPENAI_API_KEY: key }), EXIT.usage)
+    assert.match(err.at(-1), /--max-requests 83 is above the ceiling this plan declares \(82\)/)
     assert.equal(fetched, 0)
     // a lower flag is taken (the first request is bigger than 1,000 tokens: the guard refuses it before the network)
     out.length = 0
@@ -140,7 +140,7 @@ test('a send above the ceiling a plan declares is refused before any key is read
     // a send without flags takes the plan's own ceiling; the first request reaches the (failing) network once and the run stops there
     out.length = 0
     await run(['--plan', planPath('V1'), '--send'], { OPENAI_API_KEY: key })
-    assert.deepEqual([JSON.parse(out[0]).tokenCeiling, JSON.parse(out[0]).maxRequests], [80000, 70])
+    assert.deepEqual([JSON.parse(out[0]).tokenCeiling, JSON.parse(out[0]).maxRequests], [100000, 82])
     assert.equal(fetched, 1)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
@@ -186,7 +186,12 @@ for (const id of ['V1', 'V2', 'V3']) {
 test('the variants do not share request bodies with each other either, and the variant plan declares a ceiling its replay estimate fits (the V1 plan is the one meant to be sent)', () => {
   const sha = id => new Set(dry[id].steps.flatMap(s => (s.requests ?? []).map(q => q.sha256)))
   for (const [a, b] of [['V1', 'V2'], ['V1', 'V3'], ['V2', 'V3']]) assert.ok([...sha(a)].filter(x => sha(b).has(x)).length <= 2, `${a} and ${b} share request bodies`)
-  assert.equal(VARIANTS.V1.ceiling.tokenCeiling, 80_000)
+  assert.deepEqual(VARIANTS.V1.ceiling, { tokenCeiling: 100_000, maxRequests: 82 }, 'c28: the ceiling Main approved for the V1 send (its dry run was 74 requests, 90,465 tokens: over the earlier 80,000 / 70)')
+  // c28: every variant's SCRIPTED dry estimate fits the ceiling it declares (the scripted run over-selects pages, so it is above a real run: if it fits, a real send is not stopped by it). V1 was not sent because it did not.
+  for (const [id, v] of Object.entries(VARIANTS)) {
+    const requests = dry[id].steps.flatMap(st => st.requests ?? []), tokens = requests.reduce((n, q) => n + (q.estInputTokens ?? 0), 0)
+    assert.ok(tokens > 0 && tokens <= v.ceiling.tokenCeiling && requests.length <= v.ceiling.maxRequests, `${id}: ${requests.length} requests, ${tokens} tokens against ${JSON.stringify(v.ceiling)}`)
+  }
   for (const v of Object.values(VARIANTS)) assert.ok(v.ceiling.tokenCeiling <= 200_000 && v.ceiling.maxRequests <= 200)
   // the registered builder is deterministic: building twice gives the same bytes
   assert.equal(planBytesOf(buildVariantPlan(baseRaw, baseBytes, 'V2')), planBytesOf(buildVariantPlan(baseRaw, baseBytes, 'V2')))

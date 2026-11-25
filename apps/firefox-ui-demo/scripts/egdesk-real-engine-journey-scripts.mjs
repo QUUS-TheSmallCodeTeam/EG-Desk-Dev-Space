@@ -27,6 +27,8 @@ export const SCRIPTS_DIR = path.join(here, 'real-engine', 'scripts')
 export const MEMORY_SET = 'real-engine-journey-memory-v1', NUDGES_SET = 'real-engine-journey-nudges-v1'
 // c27: v2 of both (v1 stays as committed): what changed in the product since c21 is in the comments above each v2 builder and in reports/l2-c27.md
 export const MEMORY_SET_V2 = 'real-engine-journey-memory-v2', NUDGES_SET_V2 = 'real-engine-journey-nudges-v2'
+// c28: nudges-v3 = v2 with two expectations corrected after the real run check-20nj (v2 stays as it was run; reports/l2-c28.md has the records)
+export const NUDGES_SET_V3 = 'real-engine-journey-nudges-v3'
 
 // ---- the journey's synthetic world: the A사 quote pages and the PostgreSQL migration pages (scripts/egdesk-all-on.support.mjs GRAPH) ----
 const JOURNEY_PAGES = SYNTHETIC_PAGES.filter(p => /^(quote\/a-|db\/pg-|db\/sqlite)/.test(p.id) && !p.scope)
@@ -113,10 +115,27 @@ function nudgeConversationsV2() {
   return [status, change, stop]
 }
 
+// nudges-v3 (c28), the two wrong expectations of v2 found by the real run (check-20nj, official 0.171):
+//   journey-change: v2 said the engine ran exactly the one command ("commandsRan"). The steer WORKED (steers 1, carrying the person's words, steerContract true on the install) and the real model
+//     acted on it: it ran a second command for B ("sleep 25 && echo build-B-finished") and answered about both. What the step guards is that the first command is not interrupted and the
+//     steer reaches the model: commandsRanIncludes the first command, engine.interrupts 0, engine.steers 1 (unchanged). Which commands the model then chooses to run is the model's.
+//   journey-stop: v3's third turn excluded the word "never-printed". That word is in the COMMAND LINE ("echo never-printed"), so a true answer that quotes the command ("echo never-printed까지 도달하지
+//     않아 출력은 없었습니다") failed it. The command now prints a value that its text does not contain ($((3*3*3*3*3*3*3)) = 2187), and the answer must not contain that value (nor say it cannot tell).
+const STOP_VALUE = '2187', STOP_COMMAND = 'sleep 40 && echo $((3*3*3*3*3*3*3))'
+function nudgeConversationsV3() {
+  const [status, change, stop] = nudgeConversationsV2()
+  change.turns[0].expect = Object.fromEntries(Object.entries(change.turns[0].expect).map(([k, v]) => (k === 'commandsRan' ? ['commandsRanIncludes', v] : [k, v])))
+  const swap = text => (typeof text === 'string' ? text.replace('sleep 40 && echo never-printed', STOP_COMMAND) : text)
+  stop.turns[0].say = swap(stop.turns[0].say); stop.turns[0].expect.commandsRan = [STOP_COMMAND]
+  stop.turns[2].expect.answerExcludes = [STOP_VALUE, ...stop.turns[2].expect.answerExcludes.filter(w => w !== 'never-printed')]
+  return [status, change, stop]
+}
+
 const DESCRIPTIONS = {
   [MEMORY_SET]: 'The all-on journey\'s memory steps (L2 c21) with the journey\'s own synthetic pages seeded: s1 the A사 quote question, s2 the follow-up, s3b the PostgreSQL design recall, s9 the "deployment finished" remark. Needs --decisions with a key (the Decision model picks and reads the pages). Expectations are code checks on what the product sent the engine (memory.attached / notAttached / noResends) and on the posted answer (answerIncludes / answerExcludes). s9 asks only that nothing is sent twice and no quote page comes (the journey\'s soft "the plan is brought" accepts a page already held, which expect.memory cannot say).',
   [MEMORY_SET_V2]: 'The all-on journey\'s memory steps, v2 (L2 c27): the same four steps and seeded pages as v1, now in an Agent-profile direct room with the draft check ON (so the real check reads the four answers and the posting outcome is recorded), with L7\'s candidate defaults on (one packet, selection held, split engine context): no page body twice, no key over 4,000 bytes, an answer posted each time, no number outside the records. Needs --decisions and --persisted-with-cleanup.',
   [NUDGES_SET_V2]: 'The all-on journey\'s in-run message steps, v2 (L2 c27): the three conversations of v1 after the steer contract became recognised on 0.171 and the product learned to stop the command itself: the status nudge must post both the reply and the final answer; the stop is followed by a third turn that asks what happened to the command (it must not claim the output, nor say it cannot tell). One long command per conversation as in v1. Needs --decisions.',
+  [NUDGES_SET_V3]: 'The all-on journey\'s in-run message steps, v3 (L2 c28): v2 with the two expectations the real run (check-20nj, 0.171) showed to be wrong corrected: journey-change asserts that the first command ran (commandsRanIncludes), not that it was the only one (the model followed the steer and ran a second command for B); journey-stop\'s command prints a value its text does not contain (2187) and the third answer must not contain it (the old word was in the command line, which a true answer may quote). Needs --decisions.',
   [NUDGES_SET]: 'The all-on journey\'s in-run message steps (L2 c21), one long command per conversation, the journey\'s pages seeded so that no page may be attached for an action request: journey-status (s4 + s4n: "why did it stop" 12 s in; the command is not interrupted, finishes, one short reply), journey-change (s4c: a change is steered into the working turn; needs the steer contract of the binary: on 0.171 the product recognizes it only for 0.162.1, so there the expectation fails with steerContract false in its detail), journey-stop (s12: the stop interrupts the turn once, the turn ends interrupted well before the command would have, EG-Desk stops the command process itself (commandStopped: today the own-tools executor passes the command runner no abort signal and has no cancelRun, so the expectation fails on a real engine until it does), the Agent posts no answer). Needs --decisions with a key: EGDESK_INRUN_MESSAGES, EGDESK_CONVERSATION_FLOW and EGDESK_DRAFT_CHECK=on.',
 }
 
@@ -127,6 +146,7 @@ export function buildJourneyScripts() {
     [NUDGES_SET]: { set: NUDGES_SET, description: DESCRIPTIONS[NUDGES_SET], conversations: nudgeConversations() },
     [MEMORY_SET_V2]: { set: MEMORY_SET_V2, description: DESCRIPTIONS[MEMORY_SET_V2], conversations: [memoryConversationV2()] },
     [NUDGES_SET_V2]: { set: NUDGES_SET_V2, description: DESCRIPTIONS[NUDGES_SET_V2], conversations: nudgeConversationsV2() },
+    [NUDGES_SET_V3]: { set: NUDGES_SET_V3, description: DESCRIPTIONS[NUDGES_SET_V3], conversations: nudgeConversationsV3() },
   }
   for (const script of Object.values(scripts)) { const verdict = validateEngineScript(script); if (!verdict.ok) throw new Error(`${script.set}: ${verdict.errors.join('; ')}`) }
   return scripts

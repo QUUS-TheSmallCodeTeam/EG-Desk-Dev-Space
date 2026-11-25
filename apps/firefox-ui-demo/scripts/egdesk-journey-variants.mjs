@@ -40,7 +40,7 @@ const sha256 = text => createHash('sha256').update(text).digest('hex')
 // order: null (the base order) or the step order of the variant.
 export const VARIANTS = deepFreeze({
   V1: {
-    id: 'V1', ceiling: { tokenCeiling: 80_000, maxRequests: 70 }, intent: 'spoken rephrasing; another company\'s quote page as a decoy; four pages renamed',
+    id: 'V1', ceiling: { tokenCeiling: 100_000, maxRequests: 82 }, intent: 'spoken rephrasing; another company\'s quote page as a decoy; four pages renamed',
     says: {
       quote: { text: 'A사 견적 지금 어떻게 돼 있어?', kind: 'spoken' }, tidy: { text: '그 내용 한번 정리해 줘', kind: 'spoken' }, tests: { text: '테스트 전부 돌려서 결과 말해 줘', kind: 'spoken' },
       recall: { text: 'PostgreSQL 전환 설계 어떻게 잡았었지?', kind: 'spoken' }, deployed: { text: 'PostgreSQL 마이그레이션 배포 방금 끝났어', kind: 'spoken' },
@@ -58,7 +58,7 @@ export const VARIANTS = deepFreeze({
       decoys: ['quote/b-request'] },
     order: null },
   V2: {
-    id: 'V2', ceiling: { tokenCeiling: 85_000, maxRequests: 75 }, intent: 'terse rephrasing; the parts list of the same product as a decoy; four pages renamed',
+    id: 'V2', ceiling: { tokenCeiling: 90_000, maxRequests: 73 }, intent: 'terse rephrasing; the parts list of the same product as a decoy; four pages renamed',
     says: {
       quote: { text: 'A사 견적?', kind: 'terse' }, tidy: { text: '정리', kind: 'terse' }, tests: { text: '테스트 돌려', kind: 'terse' }, recall: { text: 'PostgreSQL 설계 뭐였지', kind: 'terse' },
       deployed: { text: 'PostgreSQL 배포 끝났어', kind: 'terse' }, portal: { text: '이번 달 세금계산서 받아줘', kind: 'terse' }, second: { text: '두번째', kind: 'terse' }, nudge: { text: '멈춘 거야?', kind: 'terse' },
@@ -75,7 +75,7 @@ export const VARIANTS = deepFreeze({
       decoys: ['quote/parts'] },
     order: null },
   V3: {
-    id: 'V3', ceiling: { tokenCeiling: 85_000, maxRequests: 75 }, intent: 'formal, longer rephrasing; a Redis note as a decoy; four pages renamed; the browser pair runs last, after the withheld-answer pair',
+    id: 'V3', ceiling: { tokenCeiling: 116_000, maxRequests: 88 }, intent: 'formal, longer rephrasing; a Redis note as a decoy; four pages renamed; the browser pair runs last, after the withheld-answer pair',
     says: {
       quote: { text: '지난주에 요청받은 A사 견적 건이 지금 어느 단계인지 알려 주세요', kind: 'formal' }, tidy: { text: '방금 말씀하신 내용을 항목별로 정리해 주세요', kind: 'formal' },
       tests: { text: '전체 테스트를 실행하고 결과를 알려 주세요', kind: 'formal' }, recall: { text: '예전에 잡아 둔 PostgreSQL 전환 설계를 다시 알려 주세요', kind: 'formal' },

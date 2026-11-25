@@ -1,7 +1,7 @@
 {
  "set": "all-on-live-journey-variant-v1",
  "version": 8,
- "registered": "2026-11-25 (lane L6 cycle 24), before any send of the variant; variant V1 of plan v8 (egdesk-all-on-live-measure.plan-v8.json, sha256 33740f2ec5cc230f): spoken rephrasing; another company's quote page as a decoy; four pages renamed. Same steps, same hard checks under the same ids; the person's words, the scripted answering model's words, the page set and the order are the variant's (scripts/egdesk-journey-variants.mjs, sha256 d99d90798c393fc5)",
+ "registered": "2026-11-25 (lane L6 cycle 24), before any send of the variant; variant V1 of plan v8 (egdesk-all-on-live-measure.plan-v8.json, sha256 33740f2ec5cc230f): spoken rephrasing; another company's quote page as a decoy; four pages renamed. Same steps, same hard checks under the same ids; the person's words, the scripted answering model's words, the page set and the order are the variant's (scripts/egdesk-journey-variants.mjs, sha256 7e9f3d8fd3a1f819)",
  "basedOn": {
   "file": "egdesk-all-on-live-measure.plan-v8.json",
   "sha256": "33740f2ec5cc230f94be6c5c62b1b4113bbe4ddab469327e64f72502588a34ee",
@@ -1416,10 +1416,10 @@
   }
  ],
  "variant": "V1",
- "variantSha256": "d99d90798c393fc5323bd844e48cdec2edb9aedd44a89caf965a40cc603b8616",
+ "variantSha256": "7e9f3d8fd3a1f8195e860927a911dddf90dd77b0785a57a1e06184cb01854b38",
  "ceiling": {
-  "tokenCeiling": 80000,
-  "maxRequests": 70,
+  "tokenCeiling": 100000,
+  "maxRequests": 82,
   "note": "declared before the send: the run stops before a request that would go over it, and a higher one is refused for a send. The scripted dry run over-selects memory pages (about twice the fetch requests of a real run), so its estimate is above the real count; the replay estimate (the answers of the last real journey drive the requests, the estimate is converted with that journey's per-family reported/estimated ratios) is what the ceiling is set against"
  }
 }
