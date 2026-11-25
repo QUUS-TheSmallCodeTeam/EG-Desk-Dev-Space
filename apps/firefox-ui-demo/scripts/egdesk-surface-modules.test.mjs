@@ -389,7 +389,7 @@ test('real ESM factories and actual installer use one frozen dependency object w
   const installed = await install(core, await importModules());
   const required = sorted(new Set(zones.flatMap(zone => factoryDeps(read(modulePath(zone))))));
   assert.deepEqual(installerDeps(core), required, 'installer supplies exactly the actual factory dependency union');
-  assert.equal(required.length, 33, 'CNV-05 annotation layer (AnnotationState, revealOpenCanvasCard, scheduleDeskSessionSave), stage1 plus explicit project target, Terminal Card callbacks and the CODE-06 result card (RunResult, openBoardProjectFileAt); the Terminal window now takes its frame, drag, resize and close from the shared Desk Window shell');
+  assert.equal(required.length, 34, 'c34 adds spawnBrowserCard (the Terminal zone opens a Browser Card for an address its program asked to open); CNV-05 annotation layer (AnnotationState, revealOpenCanvasCard, scheduleDeskSessionSave), stage1 plus explicit project target, Terminal Card callbacks and the CODE-06 result card (RunResult, openBoardProjectFileAt); the Terminal window now takes its frame, drag, resize and close from the shared Desk Window shell');
   assert.equal(installed.received[1].deps.getProjectTarget, installed.bindings.getProjectTarget);
   assert.equal(installed.received[1].deps.spawnTerminalCard, installed.forwards.spawnTerminalCard);
   const api = readBootApi(core, installed.forwards);
