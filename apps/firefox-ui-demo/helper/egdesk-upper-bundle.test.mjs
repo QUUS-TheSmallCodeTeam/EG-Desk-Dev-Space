@@ -30,7 +30,7 @@ test('bundle on: every flag of the bundle is filled with its value; the input of
   assert.equal(out.flags.UNRELATED, 'x')
   const env = { EGDESK_UPPER: 'on' }, applied = applyUpperBundle(env)
   assert.equal(applied.applied.length, NAMES.length); for (const row of UPPER_BUNDLE) assert.equal(env[row.flag], row.value)
-  assert.match(describeUpperBundle(applied), /^EGDESK_UPPER=on: 11 flags set, 0 kept/)
+  assert.equal(describeUpperBundle(applied), `EGDESK_UPPER=on: ${NAMES.length} flags set, 0 kept (explicitly set)`); assert.equal(NAMES.length, 13)
 })
 
 test('any single flag stays overridable: an explicit value (including off, none, advisory, empty is NOT explicit) wins over the bundle, the rest are filled', () => {
@@ -42,7 +42,7 @@ test('any single flag stays overridable: an explicit value (including off, none,
 
 test('bundle contents are consistent: each flag is read by product code, requires point inside the bundle, the excluded list is disjoint and every dormant flag names its feature', () => {
   const product = ['codex-bridge-server.mjs', 'egdesk-own-tools-wiring.mjs', 'egdesk-turn-memory-wiring.mjs', 'egdesk-prefetch.mjs', 'egdesk-decision-first-approvals.mjs', 'egdesk-open-items.mjs', 'egdesk-open-proposals.mjs', 'codex-chat-runtime.mjs'].map(read).join('\n')
-  for (const row of UPPER_BUNDLE) { assert.ok(product.includes(row.flag), `${row.flag} is read by product code`); assert.ok(['prerequisite', 'turn', 'dormant'].includes(row.role)); assert.ok(row.why.length > 20, row.flag) }
+  for (const row of UPPER_BUNDLE) { assert.ok(row.lands || product.includes(row.flag), `${row.flag} is read by product code (or its lane has not merged: lands)`); assert.ok(['prerequisite', 'turn', 'tool', 'dormant'].includes(row.role)); assert.ok(row.why.length > 20, row.flag) }
   for (const row of UPPER_BUNDLE) for (const need of row.requires ?? []) assert.ok(NAMES.includes(need), `${row.flag} requires ${need}`)
   for (const flag of Object.keys(NOT_IN_BUNDLE)) assert.ok(!NAMES.includes(flag), `${flag} is excluded and not in the bundle`)
   assert.equal(new Set(NAMES).size, NAMES.length); assert.ok(!NAMES.includes('EGDESK_UPPER'))
@@ -145,7 +145,8 @@ test('every flag of the bundle reaches the product wiring from process.env (the 
     EGDESK_OWN_TOOLS: ownTools, EGDESK_DECISION_FIRST: ownTools, EGDESK_DECISION_FIRST_APPROVALS: read('egdesk-decision-first-approvals.mjs') + ownTools,
     EGDESK_TURN_MEMORY_WRITE_FIRST: turnMemory, EGDESK_TURN_MEMORY_PREFETCH: turnMemory,
   }
-  for (const row of UPPER_BUNDLE) assert.ok(bridge.includes(`process.env.${row.flag}`) || (reads[row.flag] ?? '').includes(row.flag), `${row.flag} is read on the product path`)
+  for (const row of UPPER_BUNDLE.filter(r => !r.lands)) assert.ok(bridge.includes(`process.env.${row.flag}`) || (reads[row.flag] ?? '').includes(row.flag), `${row.flag} is read on the product path`)
+  assert.deepEqual(UPPER_BUNDLE.filter(r => r.lands).map(r => [r.flag, r.lands]), [['EGDESK_PAGE_TOOLS', 'lane/u1-browser-tools']], 'only the L8 page tools are waiting for their lane to merge')
 })
 
 // ---- the stages hook of the real-engine check, through the dispatcher the check uses ----

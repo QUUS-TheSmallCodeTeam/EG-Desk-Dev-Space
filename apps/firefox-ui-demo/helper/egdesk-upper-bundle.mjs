@@ -9,7 +9,8 @@
 // The order of a turn (U13 "끼릭끼릭 탁탁"): memory and action layers settle first (turn context, record write first, the open item the reply settles, a command the person asked for), then
 // the engine speaks ONCE, then the answer is checked before it is posted. markStage / stagesOf record that order per run (state only).
 
-/** role: 'prerequisite' = a flag another flag needs in order to do anything; 'turn' = a turn-judgment flag; 'dormant' = a safe-direction setting that only matters when its feature is on. */
+/** role: 'prerequisite' = a flag another flag needs in order to do anything; 'turn' = a turn-judgment flag; 'tool' = tools the conversation engine may call; 'dormant' = a safe-direction setting that only matters when its feature is on.
+ *  lands: the flag's code is on another lane's branch that is not merged yet (the value is set anyway and is inert until it merges). */
 export const UPPER_BUNDLE = Object.freeze([
   Object.freeze({ flag: 'EGDESK_OWN_TOOLS', value: 'on', role: 'prerequisite', lane: 'L5', why: 'EG-Desk runs the engine\'s commands and file edits itself; decision-first (commands, approvals) acts only on a run that has these tools (Codex)' }),
   Object.freeze({ flag: 'EGDESK_TERMINAL_GATE', value: 'on', role: 'prerequisite', lane: 'L5', why: 'the command gate and the ledger of a waiting question; decision-first approvals read the reply to that question' }),
@@ -19,6 +20,8 @@ export const UPPER_BUNDLE = Object.freeze([
   Object.freeze({ flag: 'EGDESK_PROPOSAL_REGISTRY', value: 'on', role: 'turn', lane: 'L3', why: 'the answer\'s own proposals and questions to the person are registered as items the resolver can settle' }),
   Object.freeze({ flag: 'EGDESK_TURN_MEMORY_WRITE_FIRST', value: 'on', role: 'turn', lane: 'L7', why: 'memory layer first: the record write judgment runs at the start of the turn and the engine is handed the settled state' }),
   Object.freeze({ flag: 'EGDESK_TURN_MEMORY_PREFETCH', value: 'files', role: 'turn', lane: 'L7', why: 'the working folder\'s text files are context candidates, read by code when the Decision model picks them' }),
+  Object.freeze({ flag: 'EGDESK_TERMINAL_OPEN_URL', value: 'on', role: 'prerequisite', lane: 'L8', why: 'an address a program in a Terminal card asks the system to open opens in an EG-Desk Browser Card; the page tools\' AI-service sign-in opacity relies on it' }),
+  Object.freeze({ flag: 'EGDESK_PAGE_TOOLS', value: 'on', role: 'tool', lane: 'L8', requires: ['EGDESK_OWN_TOOLS', 'EGDESK_TERMINAL_OPEN_URL'], lands: 'lane/u1-browser-tools', why: 'the browser as EG-Desk tools for Claude and Codex (egdesk_card_*), offered only in a run bound to a Card the person granted; code decides what needs approval, the approval ledger of the own tools carries it; no Decision model is involved' }),
   Object.freeze({ flag: 'EGDESK_DRAFT_CHECK', value: 'on', role: 'turn', lane: 'L6', why: 'the answer is checked before it is posted (held answer mode)' }),
   Object.freeze({ flag: 'EGDESK_FLOW_NOTE_WORDING', value: 'waiting', role: 'dormant', lane: 'L3', why: 'the concrete progress-note question; only matters when EGDESK_CONVERSATION_FLOW is on (not part of the bundle)' }),
   Object.freeze({ flag: 'EGDESK_FLOW_STALLED_COPY', value: 'none', role: 'dormant', lane: 'L3', why: 'no fixed sentence is posted when the engine stalls (owner option (다)); only matters when EGDESK_CONVERSATION_FLOW is on' }),
