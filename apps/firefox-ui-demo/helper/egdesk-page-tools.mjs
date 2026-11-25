@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { RECOMMENDED_ACTION_GATE_POLICY, actionGate, classifyAction } from './egdesk-browser-action-classifier.mjs'
 import { authOpaqueOn, isAuthOpaqueUrl } from './egdesk-auth-opaque.mjs'
 import { grantHint } from './egdesk-browser-grant-path.mjs'
+import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation } from './egdesk-browser-url-policy.mjs'
 import { buildReflexCandidates, expectedTargetOf, reflexActionArgs } from './egdesk-browser-reflex.mjs'
 
 // L8 u1 ('위': up to the conversation): the browser as EG-Desk tools (the tools are named after the Card: egdesk_card_*; egdesk_page_* is the working-memory fixture's stand-in) the conversation engine calls (Claude through the EG-Desk MCP catalog, Codex through the own-tools path: both read
@@ -178,6 +179,22 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     if (verdict.act === 'auto') {
       const planned = reflexActionArgs(verdict.option, { cardId, observationId: obs.observationId, snapshot })
       if (planned.tool) { const done = await call(run, event, planned.tool, planned.args, 'press'); return result(done, { status: 'pressed', via: 'auto', cardId, label }, run, cardId) }
+    }
+    // u9 (D25): a link to ANOTHER site (outside the conversation's sites). The person's consent for that is the site question the Card already asks (egdesk_browser_request_site: "Agent가 이 대화에서 … 사이트도
+    // 열려고 합니다. 허용할까요?"), so the tool asks it ITSELF, in this run on this Card, instead of leaving the engine to call it (a Claude run's question stayed unanswered for its whole 55 s: nobody saw it) or
+    // to ask for a chat approval first and the site question after (two questions, and the approval is spent by the first). Allowed: the link is followed once, on a fresh observation. Refused or unanswered:
+    // nothing moves, in closed words. Sign-in, payment and the other person-only kinds were already decided above; a link that is not a plain unproven one (a submit or delete word) still needs the person's yes.
+    if (verdict.act === 'approval' && verdict.why === 'unproven' && String(element.tag).toLowerCase() === 'a' && typeof element.href === 'string' && /^https?:\/\//i.test(element.href)
+        && evaluateNavigation(element.href, DEFAULT_NAVIGATION_POLICY, { fromUrl: snapshot.url, layer: 'tool' }).reason === 'outside-site') {
+      const site = hostOf(element.href)
+      const asked = await call(run, event, 'egdesk_browser_request_site', { cardId, site }, 'site')
+      if (!asked.ok || asked.data?.status !== 'site-allowed') return respond(true, { status: 'not_done', code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE', site: typeof asked.data?.status === 'string' ? asked.data.status : 'site-refused', cardId, label, written: false })
+      const fresh = await observe(run, event, cardId)
+      if (fresh.error) return respond(true, { status: 'refused', code: fresh.error })
+      const same = (fresh.snapshot.interactiveElements ?? []).find(item => item.ref === args.ref && item.href === element.href)
+      if (!same) return respond(true, { status: 'refused', code: 'PAGE_REF_UNKNOWN', next: 'read_again' })
+      const moved = await call(run, event, 'egdesk_browser_navigate', { cardId, observationId: fresh.observationId, expectedRevision: fresh.snapshot.revision, url: element.href, postcondition: { kind: 'url', value: element.href } }, 'press')
+      return result(moved, { status: 'pressed', via: 'site', cardId, label }, run, cardId)
     }
     const expectText = short(args.expectText, 200)
     const link = String(element.tag).toLowerCase() === 'a' && typeof element.href === 'string' && element.href
