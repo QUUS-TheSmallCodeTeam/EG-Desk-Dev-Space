@@ -11,6 +11,7 @@ import {
   createComputerObserveProvider,
 } from './egdesk-computer-observe.mjs'
 import { createComputerObserveWiring } from './egdesk-computer-observe-wiring.mjs'
+import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
 
 const APPS = [
   { bundleId: 'com.apple.calculator', pid: 701, name: 'Calculator', active: true, policy: 'regular' },
@@ -291,9 +292,17 @@ test('through the runtime: Codex gets the four tools, the first look is a card o
   assert.equal(h.replies.some(reply => reply[0] === 'cap-1'), false, 'nothing is answered until the person answers')
   assert.equal(host.calls.some(entry => entry.startsWith('capture')), false)
 
-  const reply = await h.chat.replyApproval({ approvalId: card.approvalId, conversationId: run.conversationId, runId: run.runId, decision: 'accept' })
+  // U2: the screen's own state builder (not the runtime) must allow this card; it did not before (D2 2026-11-26)
+  const screen = ChatState.createChatProtocolState()
+  for (const event of h.events) ChatState.reduceChatEvent(screen, event, ['codex', 'claude'])
+  const screenRun = screen.runs[ChatState.runKey(run.conversationId, run.runId)]
+  const request = ChatState.approvalRequestFor(screenRun, card.approvalId, 'accept')
+  assert.deepEqual(request, { approvalId: card.approvalId, conversationId: run.conversationId, runId: run.runId, decision: 'accept' })
+  const reply = await h.chat.replyApproval(request)
   assert.equal(reply.status, 'replySent')
   await h.tick()
+  assert.equal(h.events.some(event => event.event === 'approval.resolved' && event.details.approvalId === card.approvalId), true, 'the answer closes the card')
+  assert.equal(h.chat.snapshot().runs[0].pendingApprovals.length, 0)
   const [id, response] = h.replies.find(entry => entry[0] === 'cap-1')
   assert.equal(id, 'cap-1')
   assert.equal(response.success, true)
