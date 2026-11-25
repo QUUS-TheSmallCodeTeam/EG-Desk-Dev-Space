@@ -1114,6 +1114,26 @@ test('action first through the check: the same three requests, flag off and on (
   }
 })
 
+// ---- c35: git in the action layer through the check (the compare pair real-engine-git-action-first-off-v1 / -on-v1 on the c31 git scratch) ----
+test('git action first through the check: the same three requests, flag off and on; on: one Decision pick over the git options built from the repo files, the command runs before the engine, ONE engine round, the conflict is read from git status and the answer check still holds', async t => {
+  const picks = [], answers = { 'git-status': '작업 트리가 깨끗합니다.', 'what-changed': '바뀐 파일이 없습니다.', 'git-merge': '`app.txt`에서 충돌이 발생해 머지를 완료하지 못했습니다. 충돌 표시는 그대로 두었고 커밋하지 않았습니다.' }
+  const commands = { 'git-status': 'git status', 'what-changed': 'git diff --stat', 'git-merge': 'git merge feature' }
+  for (const name of ['off', 'on']) {
+    const script = starter('git-action-first-' + name); assert.deepEqual(validateEngineScript(script), { ok: true, errors: [] }); assert.deepEqual(script.conversations.map(c => c.id), ['git-status', 'what-changed', 'git-merge'])
+    for (const conv of script.conversations) {
+      const command = commands[conv.id], w = gitWorld(t, { turns: [{ steps: name === 'off' ? [{ toolCall: { tool: 'egdesk_run_command', arguments: { command } } }] : [], final: answers[conv.id] }] }, { runner: conv.id === 'git-merge' ? {} : { status: '' } })
+      const plain = w.deps.fetchImpl; w.deps.fetchImpl = async (url, init) => { const body = JSON.parse(init.body), q = body.questions.find(x => x.name === 'df_pick'); if (!q) return plain(url, init)
+        const message = /"""\n([\s\S]*?)\n"""/.exec(body.input.find(m => m.role === 'user')?.content ?? '')?.[1] ?? '', want = /머지/.test(message) ? /git merge feature\b/ : /바뀌/.test(message) ? /git diff --stat/ : /git status/, value = q.choices.find(c => want.test(c.description ?? ''))?.value ?? 'none'
+        picks.push({ name, id: conv.id, message, offered: q.choices.map(c => c.description) }); return Response.json({ model: 'gpt-6-luna', answers: [{ type: 'choice', name: 'df_pick', choice: value, confidence: 0.96, probabilities: [{ value: 'none', probability: 0.02 }, { value, probability: 0.96 }].sort((a, b) => a.probability - b.probability) }], usage: { input_tokens: 40 } }) }
+      const rec = only(await runCheck(w.options, asScripts({ ...script, conversations: [conv] }), w.deps)); assert.equal(rec.aborted, null, name + ' ' + conv.id + ' ' + rec.abortDetail); assert.equal(rec.ok, true, name + ' ' + conv.id + ' ' + JSON.stringify(rec.turns[0].expectations.filter(c => !c.ok)))
+      assert.deepEqual(w.ranCommands, [command], name + ' ' + conv.id); assert.equal(callsOf(w, 'turn/start').length, 1, 'one engine round in both')
+      if (name === 'on') { const turn = rec.turns[0]; assert.equal(turn.decisionFirst.engineTurns, 1); if (conv.id === 'git-merge') assert.deepEqual(turn.gitScene.commands.map(c => [c.command, c.exitCode, c.worktree.state, c.worktree.files]), [['git merge feature', 1, 'conflict', ['app.txt']]]); else assert.equal(turn.decisionFirst.path, 'action')
+        assert.match(JSON.stringify(callsOf(w, 'turn/start')[0].params.additionalContext), /egdesk_command_result/) }
+    }
+  }
+  const merge = picks.find(p => p.id === 'git-merge'); assert.ok(merge.offered.some(d => /git merge feature/.test(d)), 'the named branch was offered'); assert.ok(!merge.offered.some(d => /git merge main/.test(d)), 'the current branch is not'); assert.ok(picks.filter(p => p.id !== 'git-merge').every(p => !p.offered.some(d => /git merge/.test(d))), 'no merge option when the message names no branch')
+})
+
 // ---- c33: the first-event watchdog through the check (the fake engine accepts the first turn and stays silent; the flag's minimum is 5 s) ----
 const stallScript = flag => ({ set: 'real-engine-stall-test-v1', conversations: [{ id: 's', ...(flag ? { flags: { EGDESK_ENGINE_STALL_FIRST_EVENT_MS: flag } } : {}), turns: [{ say: '한 단어로만 답해: 하나', expect: { posted: true, turnStatus: 'completed', ...(flag ? { engineStall: { stalled: true, recovered: true } } : {}) } }] }] })
 

@@ -3053,7 +3053,7 @@ export class CodexChatRuntime {
       try { this.gateHookBroker()?.turnStarted({ conversationId: cid, turnId: run.runId }) } catch { /* the gate hook never affects a turn */ }
       if (ownTools) { run.ownTools = true; run.ownFolder = ownFolder; if (ownFolder) this.ownFolders.set(cid, ownFolder) }
       if (context.engineStall) run.engineStall = context.engineStall // c33: this run's first turn stayed silent and was started again
-      if (dfLocal?.entry) run.localCommand = Object.freeze({ command: dfLocal.entry.command, status: dfLocal.entry.status, exitCode: dfLocal.entry.exitCode, health: dfLocal.entry.health, worktree: dfLocal.entry.worktree?.state ?? null, tests: dfLocal.entry.tests ? { passed: dfLocal.entry.tests.passed, failed: dfLocal.entry.tests.failed } : null }) // c34: for the open-item list
+      if (dfLocal?.entry) run.localCommand = Object.freeze({ command: dfLocal.entry.command, status: dfLocal.entry.status, exitCode: dfLocal.entry.exitCode, health: dfLocal.entry.health, worktree: dfLocal.entry.worktree?.state ?? null, conflicts: Number.isSafeInteger(dfLocal.entry.worktree?.conflicts) ? dfLocal.entry.worktree.conflicts : null, tests: dfLocal.entry.tests ? { passed: dfLocal.entry.tests.passed, failed: dfLocal.entry.tests.failed } : null }) // c34: for the open-item list
       if (dfLocal) { run.decisionFirst = dfLocal.diag; if (dfLocal.preRun?.ownCommands) { run.ownCommands = dfLocal.preRun.ownCommands; run.ownCommandLast = dfLocal.preRun.ownCommandLast } } // c32: the command EG-Desk ran for this run, as evidence like any own command
       if (topicRoute && intake.current()) {
         const { topic, parent, needs } = topicRoute // discard the plaintext packet at this boundary
@@ -6846,7 +6846,7 @@ export class CodexChatRuntime {
       if (this.decisionEgressFor({ toolCeiling: context.toolCeiling ?? null }).allows('run_text') !== true) return { diag: diag('engine', 'egress_closed') }
       // c32: a pending approval (the ledger waits on the reply to the engine's own question): the reply is settled here, before anything else
       if (this.decisionFirstApprovalsOn() && this.gateHookBroker()?.awaitingReply(cid)) return await this.decisionFirstReply({ cid, body, context, diag })
-      const options = buildCommandOptions(ownFolder)
+      const options = buildCommandOptions(ownFolder, { message: body.message })
       const pick = await decidePick({ client: setup.client, message: body.message, options })
       if (pick.status !== 'picked') return { diag: diag('engine', pick.reason, { confidence: pick.confidence ?? null, margin: pick.margin ?? null }) }
       const option = pick.option, floor = classifyCommand(option.command, { cwd: ownFolder, home: process.env.HOME })
@@ -6901,7 +6901,7 @@ export class CodexChatRuntime {
         const pending = c.status === 'needs_person', failed = !pending && (c.exitCode !== 0 || c.health === 'unhealthy')
         out.push({ id: `command:${run.answerId}`, kind: 'conversation', title: c.command, aliases: [c.command], sourceRef: `run:${run.answerId}`,
           timeSlice: pending ? 'planned' : run.status === 'inProgress' ? 'present' : 'past', status: pending ? 'plan' : failed ? 'unresolved' : 'done',
-          summary: pending ? 'waiting for the person\'s approval' : `ran, exit code ${c.exitCode ?? 'unknown'}${c.tests ? `, ${c.tests.passed} passed, ${c.tests.failed} failed` : ''}${c.worktree === 'conflict' ? ', files in conflict' : ''}` })
+          summary: pending ? 'waiting for the person\'s approval' : `ran, exit code ${c.exitCode ?? 'unknown'}${c.tests ? `, ${c.tests.passed} passed, ${c.tests.failed} failed` : ''}${c.worktree === 'conflict' ? `, ${c.conflicts ?? 'some'} files in conflict` : ''}` })
       }
     }
     return out.slice(-5)

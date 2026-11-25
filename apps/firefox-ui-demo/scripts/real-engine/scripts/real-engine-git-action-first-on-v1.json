@@ -1,0 +1,109 @@
+{
+  "set": "real-engine-git-action-first-on-v1",
+  "description": "c35 compare pair on the c31 git scratch (main and feature change the same line of app.txt), the ON copy: git in the action layer. OFF: flags none, the engine runs each git command itself with egdesk_run_command and writes. ON: EGDESK_DECISION_FIRST=on: code builds the git options from the repo files (git status, git diff --stat, git log, git merge <named local branch>), the Decision model picks, EG-Desk's runner runs it under the existing approval rules (the gate decides whether the merge needs the person: a merge that needs approval is the engine path with the result block saying it was not run), the run-conditions arbiter records the conflict from git status --porcelain, and the engine talks ONCE. Three turns on the same scratch: git-status, what-changed, git-merge (a conflict). Run both copies with --decisions into two --out folders, then: node scripts/egdesk-real-engine-timing.mjs compare <off>/records <on>/records --normalize '-off|-on'.",
+  "conversations": [
+    {
+      "id": "git-status",
+      "flags": {
+        "EGDESK_DECISION_FIRST": "on"
+      },
+      "gitScenario": "merge-conflict-v1",
+      "turns": [
+        {
+          "say": "git 상태 봐줘",
+          "expect": {
+            "turnStatus": "completed",
+            "noNativeTools": true,
+            "posted": true,
+            "noToolCalls": true,
+            "decisionFirst": {
+              "path": "action",
+              "reason": "healthy",
+              "engineTurns": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "what-changed",
+      "flags": {
+        "EGDESK_DECISION_FIRST": "on"
+      },
+      "gitScenario": "merge-conflict-v1",
+      "turns": [
+        {
+          "say": "뭐 바뀌었어?",
+          "expect": {
+            "turnStatus": "completed",
+            "noNativeTools": true,
+            "posted": true,
+            "noToolCalls": true,
+            "decisionFirst": {
+              "path": "action",
+              "reason": "healthy",
+              "engineTurns": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "git-merge",
+      "agentProfile": {
+        "name": "개발 도우미",
+        "role": "코드 수정과 git",
+        "instructions": "사람이 맡긴 폴더에서 git 작업을 하고 결과를 한국어로 짧게 알려 준다. 명령의 실제 결과(충돌 여부, 파일 이름)만 말하고, 사람의 확인 없이 커밋하거나 충돌을 임의로 해결하지 않는다.",
+        "tone": "concise",
+        "expertise": [
+          "git"
+        ]
+      },
+      "draftCheck": {
+        "mode": "on"
+      },
+      "gitScenario": "merge-conflict-v1",
+      "turns": [
+        {
+          "say": "feature 브랜치 머지해 줘",
+          "approve": [
+            "yes",
+            "yes"
+          ],
+          "expect": {
+            "commandsRanIncludes": [
+              "merge"
+            ],
+            "noNativeTools": true,
+            "posted": true,
+            "answerIncludes": [
+              "app.txt"
+            ],
+            "turnStatus": "completed",
+            "draftCheck": {
+              "ran": true,
+              "rejects": 0
+            },
+            "git": {
+              "conflictedFiles": [
+                "app.txt"
+              ],
+              "headUnchanged": true,
+              "markersRemain": true,
+              "mergePending": true,
+              "answerNamesFiles": true,
+              "answerNoMergeClaim": true,
+              "nothingOutside": true
+            },
+            "decisionFirst": {
+              "engineTurns": 1
+            }
+          }
+        }
+      ],
+      "flags": {
+        "EGDESK_DECISION_FIRST": "on"
+      }
+    }
+  ]
+}

@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import fs from 'node:fs'
 import path from 'node:path'
-import { COMMAND_RESULT_KEY, DECISION_FIRST_LIMITS, DECISION_FIRST_PICK, buildCommandOptions, commandResultBlock, decidePick, pickRequest } from './egdesk-decision-first-commands.mjs'
+import { COMMAND_RESULT_KEY, DECISION_FIRST_LIMITS, DECISION_FIRST_PICK, buildCommandOptions, commandResultBlock, decidePick, namesBranch, pickRequest, readGitState } from './egdesk-decision-first-commands.mjs'
 import { createOwnToolsWiring } from './egdesk-own-tools-wiring.mjs'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
@@ -13,8 +13,10 @@ import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
 const tmp = t => { const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-decision-first-')); t.after(() => fs.rmSync(base, { recursive: true, force: true })); return base }
-const folder = (t, { scripts = { test: 'node --test', build: 'tsc', dev: 'vite', start: 'node server.js', deploy: 'rm -rf x && ./ship.sh' }, git = false, tests = false, pkg = true } = {}) => {
-  const root = tmp(t); if (pkg) fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'demo', scripts })); if (git) fs.mkdirSync(path.join(root, '.git')); if (tests) fs.mkdirSync(path.join(root, 'test')); return root
+const folder = (t, { scripts = { test: 'node --test', build: 'tsc', dev: 'vite', start: 'node server.js', deploy: 'rm -rf x && ./ship.sh' }, git = false, tests = false, pkg = true, branches = null, head = 'main', packed = null, merging = false } = {}) => {
+  const root = tmp(t); if (pkg) fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'demo', scripts })); if (git || branches) fs.mkdirSync(path.join(root, '.git')); if (tests) fs.mkdirSync(path.join(root, 'test'))
+  if (branches) { const g = path.join(root, '.git'); fs.writeFileSync(path.join(g, 'HEAD'), `ref: refs/heads/${head}\n`); for (const b of branches) { fs.mkdirSync(path.dirname(path.join(g, 'refs', 'heads', b)), { recursive: true }); fs.writeFileSync(path.join(g, 'refs', 'heads', b), 'a'.repeat(40) + '\n') } if (packed) fs.writeFileSync(path.join(g, 'packed-refs'), packed); if (merging) fs.writeFileSync(path.join(g, 'MERGE_HEAD'), 'b'.repeat(40) + '\n') }
+  return root
 }
 
 test('options come from the folder only and only in fixed forms: safe script names, a test folder, read-only git; servers, watchers and anything else are never offered', t => {
@@ -37,7 +39,9 @@ const clientFor = pickOf => createDecisionClient({ getApiKey: () => 'egd-synthet
 const byWord = ({ message, choices }) => {
   const by = (re) => choices.find(c => re.test(c.description ?? ''))?.value
   if (/테스트|test/i.test(message)) return { value: by(/tests/) ?? 'none', confidence: 0.96, others: [{ value: 'none', probability: 0.02 }] }
-  if (/git|깃/i.test(message)) return { value: by(/git status/) ?? 'none', confidence: 0.95, others: [{ value: 'none', probability: 0.03 }] }
+  if (/머지|merge/i.test(message)) return { value: by(/git merge feature\b/) ?? 'none', confidence: 0.94, others: [{ value: 'none', probability: 0.04 }] }
+  if (/뭐 바뀌|바뀐/.test(message)) return { value: by(/git diff --stat/) ?? 'none', confidence: 0.93, others: [{ value: 'none', probability: 0.05 }] }
+  if (/git|깃|상태/i.test(message)) return { value: by(/git status/) ?? 'none', confidence: 0.95, others: [{ value: 'none', probability: 0.03 }] }
   if (/빌드|build/i.test(message)) return { value: by(/"build"/) ?? 'none', confidence: 0.9, others: [{ value: 'none', probability: 0.05 }] }
   if (/애매/.test(message)) return { value: choices[0].value, confidence: 0.5, others: [{ value: 'none', probability: 0.4 }] }
   return { value: 'none', confidence: 0.97, others: [] }
@@ -172,4 +176,53 @@ test('open items for the memory layer: a command that ran is one item in the sha
   assert.match(item.summary, /^ran, exit code 1, 4 passed, 1 failed$/); assert.doesNotMatch(JSON.stringify(item), /ℹ tests/); assert.deepEqual(w.chat.openCommandItems('other-thread'), [])
   // the shape is the one the memory resolver reads (kinds and time slices as its closed lists)
   assert.ok(['board', 'source', 'conversation', 'timeline', 'document'].includes(item.kind)); assert.ok(['past', 'present', 'planned', 'hypothetical', 'unknown'].includes(item.timeSlice))
+})
+
+// ---- c35: git in the action layer: status, diff --stat, log, and merge <branch> for existing local branches the person names ----
+test('git state is read from the files only: the current branch, the local branches (loose and packed), a merge in progress; a worktree\'s .git file and odd names are not read', t => {
+  const root = folder(t, { branches: ['main', 'feature', 'topic/x', '-bad', 'a;b', 'x..y'], packed: '# pack-refs\n' + 'c'.repeat(40) + ' refs/heads/packed-one\n' + 'c'.repeat(40) + ' refs/remotes/origin/remote-only\n' })
+  assert.deepEqual(readGitState(root), { branch: 'main', branches: ['feature', 'main', 'packed-one', 'topic/x'], merging: false }, 'remote branches and unsafe names are not listed')
+  assert.equal(readGitState(folder(t, { branches: ['main'], merging: true })).merging, true); assert.equal(readGitState(folder(t, { pkg: false })), null, 'no .git'); const wt = tmp(t); fs.writeFileSync(path.join(wt, '.git'), 'gitdir: /elsewhere'); assert.equal(readGitState(wt), null, 'a .git FILE (a worktree) is not read')
+  assert.equal(readGitState(folder(t, { branches: ['main'], head: 'main' }), {}).branch, 'main'); fs.writeFileSync(path.join(folder(t, { branches: ['main'] }), 'x'), ''); const detached = folder(t, { branches: ['main'] }); fs.writeFileSync(path.join(detached, '.git', 'HEAD'), 'c'.repeat(40) + '\n'); assert.equal(readGitState(detached).branch, null, 'a detached HEAD has no branch')
+  for (const [message, name, expected] of [['feature 브랜치 머지해 줘', 'feature', true], ['Feature를 머지', 'feature', true], ['topic/x 머지', 'topic/x', true], ['feature-2 머지', 'feature', false], ['myfeature 머지', 'feature', false], ['머지해 줘', 'feature', false], ['feature', 'feature', true]]) assert.equal(namesBranch(message, name), expected, message)
+})
+
+test('merge options: only existing LOCAL branches other than the current one that the message names; none while a merge is in progress; the read-only git options stay', t => {
+  const root = folder(t, { branches: ['main', 'feature', 'topic'], head: 'main' })
+  assert.deepEqual(buildCommandOptions(root, { message: 'feature 브랜치 머지해 줘' }).filter(o => o.kind === 'git-merge').map(o => [o.command, o.what.includes('"feature"') && o.what.includes('"main"')]), [['git merge feature', true]])
+  assert.deepEqual(buildCommandOptions(root, { message: 'feature랑 topic 머지해 줘' }).filter(o => o.kind === 'git-merge').map(o => o.command), ['git merge feature', 'git merge topic'])
+  for (const message of ['머지해 줘', 'main 머지해 줘', 'nothere 머지해 줘', '']) assert.deepEqual(buildCommandOptions(root, { message }).filter(o => o.kind === 'git-merge'), [], message)
+  assert.deepEqual(buildCommandOptions(root).map(o => o.command), ['npm test', 'npm run build', 'git status', 'git diff --stat', 'git log --oneline -n 10'], 'without a message, exactly the c32 options')
+  assert.deepEqual(buildCommandOptions(folder(t, { branches: ['main', 'feature'], merging: true }), { message: 'feature 머지해 줘' }).filter(o => o.kind === 'git-merge'), [], 'a merge is already in progress')
+  const many = folder(t, { branches: ['main', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6'], scripts: Object.fromEntries(['test', 'build', 'lint', 'typecheck', 'check', 'format:check', 'test:unit', 'test:ci', 'compile'].map(n => [n, 'x'])) })
+  const opts = buildCommandOptions(many, { message: 'a1 a2 a3 a4 a5 a6 머지' }); assert.equal(opts.filter(o => o.kind === 'git-merge').length, DECISION_FIRST_LIMITS.merges, 'at most four merges, however many are named'); assert.equal(opts.filter(o => o.kind !== 'git-merge').length, DECISION_FIRST_LIMITS.options)
+  assert.match(pickRequest('x', opts).input[0].content, /choose it only when the person asks for exactly that action to be done now/)
+})
+
+test('action first, git: "상태 봐줘" and "뭐 바뀌었어?" run the read-only forms and the engine talks once with the facts; "feature 브랜치 머지해 줘" runs git merge feature and a conflict reaches the engine as files and counts', async t => {
+  const project = { branches: ['main', 'feature'], head: 'main', pkg: false }
+  const status = world(t, { project, outputs: { 'git status': { text: 'On branch main\nnothing to commit, working tree clean\n', code: 0 } } }), s1 = await send(status, '상태 봐줘')
+  assert.deepEqual(status.ran, ['git status']); assert.equal(status.turnStarts().length, 1); assert.deepEqual([status.chat.runFor(s1).decisionFirst.path, status.chat.runFor(s1).decisionFirst.option], ['action', 'git'])
+  assert.match(status.turnStarts()[0].additionalContext[COMMAND_RESULT_KEY].value, /Git status after the command: the working tree is clean/)
+  const diff = world(t, { project, porcelain: ' M app.txt\n M README.md\n?? new.txt\n', outputs: { 'git diff --stat': { text: ' app.txt | 2 +-\n README.md | 1 +\n', code: 0 } } }); await send(diff, '뭐 바뀌었어?')
+  assert.deepEqual(diff.ran, ['git diff --stat']); assert.match(diff.turnStarts()[0].additionalContext[COMMAND_RESULT_KEY].value, /2 changed tracked files, 1 untracked files/)
+  const merge = world(t, { project, porcelain: 'UU app.txt\nM  README.md\n', outputs: { 'git merge feature': { text: 'Auto-merging app.txt\nCONFLICT (content): Merge conflict in app.txt\nAutomatic merge failed; fix conflicts and then commit the result.\n', code: 1 } } })
+  const m = await send(merge, 'feature 브랜치 머지해 줘'), run = merge.chat.runFor(m)
+  assert.deepEqual(merge.ran, ['git merge feature']); assert.equal(merge.turnStarts().length, 1); assert.deepEqual([run.decisionFirst.path, run.decisionFirst.reason, run.decisionFirst.option], ['action', 'result_for_engine', 'git-merge'])
+  const block = merge.turnStarts()[0].additionalContext[COMMAND_RESULT_KEY].value; assert.match(block, /Command: `git merge feature`/); assert.match(block, /exit code 1/); assert.match(block, /files in conflict: app\.txt/)
+  assert.equal(run.activities.find(a => a.kind === 'commandExecution').detail.exitCode, 1); assert.equal(run.ownCommands[0].worktree.state, 'conflict', 'the arbiter\'s porcelain reading is on the run for the answer check')
+  const [item] = merge.chat.openCommandItems('ui'); assert.deepEqual([item.title, item.status, item.timeSlice, item.kind], ['git merge feature', 'unresolved', 'present', 'conversation']); assert.match(item.summary, /^ran, exit code 1, 1 files in conflict$/)
+})
+
+test('action first, git: a merge of a branch the person did not name, or that does not exist, is not offered: the engine runs as today and nothing ran', async t => {
+  for (const message of ['머지해 줘', 'nothere 브랜치 머지해 줘']) {
+    const w = world(t, { project: { branches: ['main', 'feature'], pkg: false } }), sent = await send(w, message)
+    assert.deepEqual(w.ran, [], message); assert.equal(w.turnStarts().length, 1); assert.equal(w.turnStarts()[0].additionalContext?.[COMMAND_RESULT_KEY], undefined); assert.equal(w.chat.runFor(sent).decisionFirst.path, 'engine', message)
+  }
+})
+
+test('open items for a command that waits for the person\'s approval: planned, plan, a closed summary', () => {
+  const chat = new CodexChatRuntime({ request: async () => ({}), respond: () => {}, emit: () => {}, emitLegacy: () => {}, verifyFile: async () => null, getOwnerKey: () => 'codex:x' })
+  chat.runs.set('conv/t1', { clientThreadId: 'ui', answerId: 'conv/t1', status: 'inProgress', localCommand: Object.freeze({ command: 'git merge feature', status: 'needs_person', exitCode: null, health: null, worktree: null, conflicts: null, tests: null }) })
+  assert.deepEqual(chat.openCommandItems('ui'), [{ id: 'command:conv/t1', kind: 'conversation', title: 'git merge feature', aliases: ['git merge feature'], sourceRef: 'run:conv/t1', timeSlice: 'planned', status: 'plan', summary: 'waiting for the person\'s approval' }])
 })
