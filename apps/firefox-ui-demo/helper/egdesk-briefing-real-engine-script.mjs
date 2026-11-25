@@ -60,7 +60,9 @@ export function buildBoardScript(entries = PROGRESS_ENTRIES) {
 // development record Main approved as a source; EG-Desk only, nothing of a customer; the text is the ledger line verbatim, masked by maskSecrets, none above the 400
 // characters a material keeps), two topics interleaved in time: "integration" (the merges and their gates) and "measure" (the real-call measurements). Every entry is
 // longer than the 90 characters of a sequence line (95 to 243), so no line can simply be copied: the model must keep each entry's key `fact` inside its line. The key facts are
-// ids and figures exactly as the ledger writes them; the builder and a test check that each is in its entry's text.
+// ids and figures exactly as the ledger writes them; the builder and a test check that each is in its entry's text. An entry with many figures (the 11-25 02:31 warm-up entry has nine)
+// is held to its HEADLINE figure, the first it states ("1,812"): a line of 76 requested characters cannot hold the trailing S1 "248ms" as well, and check-22br's schema-on line kept six figures and
+// dropped that one. The key fact is what a line must keep, not every figure of a dense entry.
 export const LOOP_SET = 'real-engine-briefing-realistic-v1'
 export const LOOP_SAY = 'ledger 폴더의 기록을 읽고 두 흐름(통합 게이트, 실호출 측정)을 각각 날짜와 시간 순서로 정리해줘. 항목마다 커밋 id나 건수·측정값을 기록에 적힌 그대로 같이 적어줘. 파일은 바꾸지 마.'
 export const LOOP_ENTRIES = Object.freeze([
@@ -86,7 +88,7 @@ export const LOOP_ENTRIES = Object.freeze([
     text: "실호출(승인 범위) 첫 턴 스캔 재확인 2건(13,579토큰): PG 첫 턴 통과(계획 .99·헬스체크 .98·후속 .97·롤백 .82, 무관한 jev 메모 0.2 미만), jev 첫 턴 통과(흐름 메모 1.0)." }),
   Object.freeze({ file: "ledger/11-25-0152-measure.md", topic: "measure", day: "11-25", time: "01:52", fact: "269ms",
     text: "대기 측정 C1(예열 10초 뒤) 269ms, A2(예열 없음, 10분 쉼) 561ms. 브라우저 안정성 2회차 = 1회차와 모든 판정 값 동일(같은 본문이면 같은 답)." }),
-  Object.freeze({ file: "ledger/11-25-0231-measure.md", topic: "measure", day: "11-25", time: "02:31", fact: "248ms",
+  Object.freeze({ file: "ledger/11-25-0231-measure.md", topic: "measure", day: "11-25", time: "02:31", fact: "1,812",
     text: "예열 측정 6지점 완료: A1 1,812 / A2 561(예열 없음), B1 324 / B2 322(1초 전 예열), C1 269 / C2 316(10초 전 예열) → 등록 판정 '예열 효과 있음'(L6: 느린 꼬리는 1회차에만 나타나 증거는 약함). 크기 측정 S1(작은 예열) 248ms." }),
 ])
 const loopText = e => `# ${e.day} ${e.time}\n\n- ${e.text}\n`
@@ -98,7 +100,9 @@ export function buildLoopScript(entries = LOOP_ENTRIES) {
   const topics = [...new Set(entries.map(e => e.topic))], facts = entries.map(e => e.fact)
   // c38: no `toolCalls` expectation: check-17b's engine read the twelve files with egdesk_run_command (cat) in one conversation and egdesk_read_file in the other; both are the engine's own
   // tools, and what the turn must not do is checked by `files` (nothing changed) and `noNativeTools`.
-  const turn = schema => ({ say: LOOP_SAY, expect: { posted: true, answerIncludes: facts, files: folder, undoRecords: 0, noNativeTools: true, turnStatus: 'completed',
+  // c41: no `answerIncludes` either. check-22br's schema-off engine published the summary as an output card (egdesk_publish_output) and posted "attached"; its chat message then carries
+  // none of the facts and that is a valid answer to "정리해줘". What the briefing must keep is checked on the cards by factsInCards, whatever form the answer took.
+  const turn = schema => ({ say: LOOP_SAY, expect: { posted: true, files: folder, undoRecords: 0, noNativeTools: true, turnStatus: 'completed',
     briefing: { outcome: 'presented', schemaSent: schema, schemaInvalid: schema ? 0 : null, factsInCards: facts, inOrder: topics.map(inTime) } } })
   return { set: LOOP_SET,
     description: 'Pattern: the board-design turn of the briefing on REAL material. Twelve entries of the decision loop\'s own ledger (EG-Desk only), two topics interleaved in time, every entry longer than the 90 characters of a sequence line. The engine reads them, writes the progress answer, and after it is posted the check runs the briefing flow (the production Board/Decisions handler, the Decision model, the engine\'s private fresh-thread turns writing the fill). Expectations, derived by code from the entries: the board is presented, every key fact (commit id, count or measurement, as the ledger writes it) is in the text of the published cards, and within each topic the facts are in time order. Two conversations: EGDESK_BRIEFING_OUTPUT_SCHEMA on and off. Runs only with --decisions.',

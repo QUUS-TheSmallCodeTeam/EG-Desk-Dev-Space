@@ -53,7 +53,7 @@ test('the direction stays conservative: an undecided or a yes on "states the mat
   for (const stated of [.5, .97]) {
     const h = harness({ stated: text => (META.has(text) ? stated : .97), fillReplies: [REAL_FILL, REAL_FILL] }), out = await h.run()
     assert.deepEqual([out.status, out.reason, out.coverage.missing], ['fallback-chat', 'not-covered', ['F1', 'F2']], `stated ${stated}`)
-    assert.equal(h.fills.length, 2, 'the one bounded rewrite ran'); assert.deepEqual(h.calls.map(c => c.stage).slice(-4), ['coverage', 'coverage', 'fill_check', 'coverage'])
+    assert.equal(h.fills.length, 2, 'the one bounded rewrite ran'); assert.deepEqual(h.calls.map(c => c.stage).slice(-4), ['fill_check', 'coverage', 'coverage', 'coverage'], 'c41: the rewrite returned the same cards, so its fill check is the identical request and is answered from the earlier answer (no request)'); assert.equal(out.stats.reused, 1)
     assert.deepEqual(h.calls.at(-1).names, ['onboard_F1', 'onboard_F2'], 'the second ask is only the missing facts, without the stated question')
   }
 })

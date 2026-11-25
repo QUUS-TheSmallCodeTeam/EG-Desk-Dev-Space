@@ -303,7 +303,7 @@ test('c37 the script: committed file is the builder\'s and validates; its folder
   assert.deepEqual(file.conversations.map(c => [c.id, c.flags.EGDESK_BRIEFING_OUTPUT_SCHEMA ?? null]), [['realistic-schema-on', 'on'], ['realistic-schema-off', null]])
   const turn = file.conversations[0].turns[0], b = turn.expect.briefing
   assert.equal(turn.say, LOOP_SAY); assert.deepEqual(b.factsInCards, LOOP_ENTRIES.map(e => e.fact)); assert.equal(b.inOrder.length, 2)
-  assert.deepEqual(b.inOrder[0], ['9aeed73', '5752건', '5930건', '5990건', '6085건', '218c711']); assert.deepEqual(b.inOrder[1], ['2.48s', '0.27~0.29s', '13,404토큰', '13,579토큰', '269ms', '248ms'])
+  assert.deepEqual(b.inOrder[0], ['9aeed73', '5752건', '5930건', '5990건', '6085건', '218c711']); assert.deepEqual(b.inOrder[1], ['2.48s', '0.27~0.29s', '13,404토큰', '13,579토큰', '269ms', '1,812'])
   const rows = folderMaterials(file.conversations[0].folder), scene = enumerateSkeleton({ materials: rows, candidates: [] })
   assert.equal(rows.length, 12); assert.deepEqual(scene.parts.map(p => [p.trait, p.materials.length]), [['sequence', 6], ['sequence', 6]])
   for (const part of scene.parts) { const ats = part.materials.map(a => scene.materials.find(m => m.alias === a).at); assert.deepEqual(ats, [...ats].sort(), 'a part is in date order') }

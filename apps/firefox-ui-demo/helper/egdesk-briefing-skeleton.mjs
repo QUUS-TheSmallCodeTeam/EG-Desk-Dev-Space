@@ -384,7 +384,7 @@ function questionText(q, c, catalog) {
   if (q.kind === 'onboard') return `The fact, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Is this fact shown on the board quoted above (in the text or the shown fields of any of its parts)?${TABLE_ROW_NOTE.test(q.text) ? ROW_GUIDANCE : ''}`
   // Cycle 36 (check-11): a sentence of the answer that no code anchor ties to a material may be a statement ABOUT the answer ("정리했습니다", "파일은 변경하지 않았습니다") that no board can show.
   // Only the judge can tell it from a content fact, from the materials quoted once above.
-  if (q.kind === 'stated') return `The sentence, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Does this sentence restate something that the materials quoted above say? (A sentence that only describes what the assistant did, how its answer is organised, or what it did not do is not a statement of the materials.)`
+  if (q.kind === 'stated') return `The sentence, quoted exactly as a JSON string: ${JSON.stringify(q.text)}. Does this sentence restate something that the materials quoted above say? (A sentence that only names or introduces the topic of the answer, such as a title or "X 정리입니다" or "the results are below", that only describes what the assistant did or how its answer is organised, or that says what it did not do, is not a statement of the materials, even if the topic is the materials' own.)`
   if (q.kind === 'about') return `The person asked, quoted exactly as a JSON string: ${JSON.stringify(c.request)}. Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material contain information that the person's request asks about${c.answer ? ' (the request may refer to the assistant\'s answer quoted above)' : ''}?`
   if (q.kind === 'same') return `Two materials, each quoted as JSON: ${q.materials.map(a => quoteMaterial(mat(a))).join('; ')}. Are these two materials an earlier and a later version of the same document, offer or plan?`
   if (q.kind === 'fact') return `Material, quoted as JSON: ${quoteMaterial(mat(q.material))}. Does this material state at least one concrete fact (for example a number, an amount, a date, a name or a decision)?`
@@ -824,7 +824,17 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
   const said = clean(answer, SKELETON_LIMITS.answerMax)
   const base = { request: asked, materials: scene.materials.map(m => ({ alias: m.alias, title: m.title, text: m.text, at: m.at, status: m.status })),
     cards: scene.targets.filter(t => t.targetable).map(t => ({ alias: t.alias, label: clean(t.label, BRIEFING_LIMITS.labelMax), ...(clean(t.gist, BRIEFING_LIMITS.gistMax) ? { gist: clean(t.gist, BRIEFING_LIMITS.gistMax) } : {}) })) }
+  // Cycle 41 (L2's V1 analysis: request 6 was byte-identical to request 4, 3,813 tokens, its answers the same by construction): a judgment asked again with exactly the same stage, questions
+  // and quoted board is answered from the earlier answer, not asked again. Only an answer that came back is kept (never an unavailable one).
+  const answered = new Map()
   const ask = async (stage, questions, extra = {}) => {
+    const key = JSON.stringify([stage, questions.slice(0, SKELETON_LIMITS.maxQuestions), extra])
+    if (answered.has(key)) { stats.reused = (stats.reused ?? 0) + 1; return { answers: answered.get(key) } }
+    const reply = await askNew(stage, questions, extra)
+    if (reply.answers) answered.set(key, reply.answers)
+    return reply
+  }
+  const askNew = async (stage, questions, extra = {}) => {
     if (stats.judgeRequests >= SKELETON_LIMITS.maxRequests || stats.judgeMs >= SKELETON_LIMITS.judgeMs) return { unavailable: 'request-bound' }
     const quoteAnswer = said && (stage === 'place' || (stage === 'coverage' && !extra.board))
     const prepared = await judge.prepare({ stage, ...base, ...(quoteAnswer ? { answer: said } : {}), ...extra, questions: questions.slice(0, SKELETON_LIMITS.maxQuestions) })
@@ -852,9 +862,14 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
   // Code drops what the request does not ask about (decided no or undecided) and adds the version pairs the judge confirmed; the scene is built again from that.
   const relevant = new Set(relevance.filter(q => isYes(placed.answers[`about_${q.material}`])).flatMap(q => q.covers))
   // (cycle 27) and what the answer itself cites stays, whatever relevance said; recorded apart
-  const citedOnly = (said ? answerCited(answer, scene.materials) : []).filter(a => !relevant.has(a)), kept = new Set(scene.materials.map(m => m.alias).filter(a => relevant.has(a) || citedOnly.includes(a)))
+  const citedOnly = (said ? answerCited(answer, scene.materials) : []).filter(a => !relevant.has(a))
+  // Cycle 41 (check-22br, schema-off: about_M11 .56): a material the judge is UNDECIDED about stays when the records link it to a material it is sure about (one matter: the follows_from chain of
+  // a log). Leaving it out removed one entry from the middle of a sequence and its figure ("269ms") from the board. A decided no still drops it; the rule is one step, not transitive.
+  const linked = new Set(relevance.filter(q => { const p = placed.answers[`about_${q.material}`]; return Number.isFinite(p) && !isYes(p) && !isNo(p) && q.covers.some(a => !relevant.has(a)) })
+    .flatMap(q => q.covers).filter(a => !relevant.has(a) && scene.materials.some(m => (m.alias === a && m.links.some(l => relevant.has(l.to))) || (relevant.has(m.alias) && m.links.some(l => l.to === a)))))
+  const kept = new Set(scene.materials.map(m => m.alias).filter(a => relevant.has(a) || citedOnly.includes(a) || linked.has(a)))
   const dropped0 = scene.materials.filter(m => !kept.has(m.alias)).map(m => m.alias), versions = pairs.filter(([a, b]) => isYes(placed.answers[`same_${a}_${b}`]))
-  relevanceOut = { kept: [...kept], dropped: dropped0, versions, ...(citedOnly.length ? { cited: citedOnly } : {}) }
+  relevanceOut = { kept: [...kept], dropped: dropped0, versions, ...(citedOnly.length ? { cited: citedOnly } : {}), ...(linked.size ? { linked: [...linked] } : {}) }
   const place = decidePlace(placed.answers, { relevant: kept.size })
   if (place.value !== 'board') return done('bubble', { reason: place.reason, requested: true, place: placed.answers })
   if (!kept.size) return done('bubble', { reason: 'not-asked-about', requested: true })
