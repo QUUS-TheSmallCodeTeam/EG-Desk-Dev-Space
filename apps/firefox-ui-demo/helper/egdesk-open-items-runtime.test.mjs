@@ -180,3 +180,30 @@ test('the memory item: present while a note the person was told of waits for the
   assert.deepEqual(await src().apply({}), { handled: true, settled: 'confirmation_read' })
   x.store.close()
 })
+
+test('the run\'s gate: when the person\'s words may not be sent to the Decision model nothing is resolved and nothing is sent; the waiting command is read as before', async () => {
+  const log = [], broker = brokerStub()
+  const x = await rig({ memoryMode: null, client: scripted(() => 0.99, log) }); await on(x, broker)
+  x.chat.decisionEgressFor = () => ({ allows: () => false, require() { throw new Error('refused') } })
+  await first(x, broker); await x.send('그냥 해', 'r1'); await x.done(2)
+  assert.equal(log.length, 0); assert.equal(x.chat.openItemRecord('r1'), null); assert.deepEqual(broker.reads, ['그냥 해'])
+  x.store.close()
+})
+
+test('the memory confirmation runs for the memory item only: skipped for a message about something else, run when the message settles it, and as before without the flag', async () => {
+  const run = async (name, ref, flag) => {
+    let confirms = 0
+    const x = await rig({ tm: { confirmInConversation: true }, client: scripted(ref) })
+    if (flag) x.chat.decisionContext.openItems = true
+    x.chat.confirmNotedRecords = async () => { confirms += 1 }
+    x.chat.openMemoryItems = () => [{ kind: 'memory_confirm', pageId: 'p', status: 'plan' }]
+    await x.send('안녕, 폴더 정리 좀 해 줄래', 'r0'); await x.done(1)
+    confirms = 0 // turn 1 had no open item
+    await x.send(name, 'r1'); await x.done(2)
+    const out = { confirms, status: x.chat.openItemRecord('r1')?.status ?? null }
+    x.store.close(); return out
+  }
+  assert.deepEqual(await run('응 맞아', () => 0.97, true), { confirms: 1, status: 'settled' })
+  assert.deepEqual(await run('그건 그렇고 폴더에 뭐 있어?', () => 0.03, true), { confirms: 0, status: 'none' })
+  assert.deepEqual(await run('응 맞아', () => 0.97, false), { confirms: 1, status: null })
+})
