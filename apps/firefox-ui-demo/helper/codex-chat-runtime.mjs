@@ -93,7 +93,7 @@ export function reviseFreshText({ draft, note, evidence = [] }) {
   return `The material you were given:\n${material}\n\nHere is your draft answer to the person's last message:\n\n${draft}\n\n${note}\n\nReply with only the revised answer text.`
 }
 import { APPROVALS_FAST_LIMITS, approvalOutcomeBlock } from './egdesk-decision-first-approvals.mjs' // c32 (U13): approvals decision-first
-import { ENGINE_STALL_LIMITS, eventTurnId, stallFact } from './egdesk-engine-stall.mjs' // c33: the first-event watchdog
+import { ENGINE_STALL_LIMITS, eventTurnId, isProgressEvent, stallFact } from './egdesk-engine-stall.mjs' // c33: the first-event watchdog
 import { PROPOSAL_LIMITS, proposalCandidates, readRegistration, registrationRequest } from './egdesk-open-proposals.mjs' // c33: the answer's open proposals as defined items
 import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
 import { OWN_EDIT_LIMITS, EDIT_TOOL_NAMES, ownEditEvidence } from './egdesk-own-edit-evidence.mjs' // c30b: the edits EG-Desk made, as readable evidence for the check of the answer
@@ -3053,6 +3053,7 @@ export class CodexChatRuntime {
       try { this.gateHookBroker()?.turnStarted({ conversationId: cid, turnId: run.runId }) } catch { /* the gate hook never affects a turn */ }
       if (ownTools) { run.ownTools = true; run.ownFolder = ownFolder; if (ownFolder) this.ownFolders.set(cid, ownFolder) }
       if (context.engineStall) run.engineStall = context.engineStall // c33: this run's first turn stayed silent and was started again
+      if (dfLocal?.entry) run.localCommand = Object.freeze({ command: dfLocal.entry.command, status: dfLocal.entry.status, exitCode: dfLocal.entry.exitCode, health: dfLocal.entry.health, worktree: dfLocal.entry.worktree?.state ?? null, conflicts: Number.isSafeInteger(dfLocal.entry.worktree?.conflicts) ? dfLocal.entry.worktree.conflicts : null, tests: dfLocal.entry.tests ? { passed: dfLocal.entry.tests.passed, failed: dfLocal.entry.tests.failed } : null }) // c34: for the open-item list
       if (dfLocal) { run.decisionFirst = dfLocal.diag; if (dfLocal.preRun?.ownCommands) { run.ownCommands = dfLocal.preRun.ownCommands; run.ownCommandLast = dfLocal.preRun.ownCommandLast } } // c32: the command EG-Desk ran for this run, as evidence like any own command
       if (topicRoute && intake.current()) {
         const { topic, parent, needs } = topicRoute // discard the plaintext packet at this boundary
@@ -3126,6 +3127,8 @@ export class CodexChatRuntime {
       if (bounded && policy === BROWSER_BOUNDED && browserInteractionRequested && this.browserEntryMode() === 'advisory') this.startBrowserEntryAdvisory(run, body, context) // same: record only
       // Notifications can precede the RPC response. Only the returned turn ID
       // may inherit this request's correlation; other turns remain unclaimed.
+      // c34: the card of the command the code ran joins the buffered events of this turn (the buffer is applied next, in order)
+      if (dfLocal?.surface) await this.surfaceLocalCommand(run, dfLocal).catch(() => {})
       while (pending.buffer.length) await this.apply(pending.buffer.shift())
       if (TERMINAL.has(result.turn.status) && !TERMINAL.has(run.status)) await this.finish(run, safeTurn(result.turn, engine.id))
       if (dfLocal?.finished) void this.finishDecisionFirstTurn(run, dfLocal).catch(() => {}) // c32: the local turn ends here, no engine call
@@ -6769,13 +6772,13 @@ export class CodexChatRuntime {
     try {
       if (!this.engineStall) return
       const threadId = idText(message?.params?.threadId); if (!threadId) return
-      const turnId = eventTurnId(message)
+      const turnId = isProgressEvent(message) ? eventTurnId(message) : null // c34: the preamble (turn/started, the user message items) is not progress
       if (turnId) { const seen = this.engineSeen.get(threadId) ?? new Set(); seen.add(turnId); this.engineSeen.set(threadId, seen); while (seen.size > 16) seen.delete(seen.values().next().value); while (this.engineSeen.size > 64) this.engineSeen.delete(this.engineSeen.keys().next().value) }
       for (const waiter of [...this.engineWaiters]) if (waiter.threadId === threadId && turnId === waiter.turnId) { this.engineWaiters.delete(waiter); waiter.resolve(true) }
     } catch { /* the watchdog never affects a message */ }
   }
 
-  /** true when the engine sent an event for this turn (before or within ms), false when it stayed silent. */
+  /** true when the engine made progress on this turn (before or within ms: an event beyond the preamble), false when it stayed silent or only sent the preamble. */
   waitFirstEvent(threadId, turnId, ms) {
     if (this.engineSeen.get(threadId)?.has(turnId)) return Promise.resolve(true)
     return new Promise(resolve => {
@@ -6821,7 +6824,10 @@ export class CodexChatRuntime {
   }
 
   // ---- c32 (U13): the decision-first command path ----
-  decisionFirstOn() { try { return this.ownTools?.decisionFirst?.() === 'on' } catch { return false } }
+  // value 'on' (c34, owner correction U13: the decision model's place is the ACTION layer, the engine talks): the Decision model picks the command, EG-Desk's runner runs it, then ONE engine round with the
+  // result as context. value 'card' (PROPOSAL, c32): a healthy result ends the turn locally with only the terminal card and no words.
+  decisionFirstMode() { try { const v = this.ownTools?.decisionFirst?.(); return v === 'on' || v === 'card' ? v : null } catch { return null } }
+  decisionFirstOn() { return this.decisionFirstMode() !== null }
 
   /**
    * → null (the flag is off, or nothing to decide: the engine runs as today, no diagnostics) | { diag } (the engine runs as today) | { diag, finished: true, turnId, preRun, entry } (a healthy
@@ -6840,7 +6846,7 @@ export class CodexChatRuntime {
       if (this.decisionEgressFor({ toolCeiling: context.toolCeiling ?? null }).allows('run_text') !== true) return { diag: diag('engine', 'egress_closed') }
       // c32: a pending approval (the ledger waits on the reply to the engine's own question): the reply is settled here, before anything else
       if (this.decisionFirstApprovalsOn() && this.gateHookBroker()?.awaitingReply(cid)) return await this.decisionFirstReply({ cid, body, context, diag })
-      const options = buildCommandOptions(ownFolder)
+      const options = buildCommandOptions(ownFolder, { message: body.message })
       const pick = await decidePick({ client: setup.client, message: body.message, options })
       if (pick.status !== 'picked') return { diag: diag('engine', pick.reason, { confidence: pick.confidence ?? null, margin: pick.margin ?? null }) }
       const option = pick.option, floor = classifyCommand(option.command, { cwd: ownFolder, home: process.env.HOME })
@@ -6865,9 +6871,42 @@ export class CodexChatRuntime {
     const healthy = r.status === 'ran' && r.exitCode === 0 && r.timedOut !== true && r.health === 'healthy' && r.worktree?.state !== 'conflict'
     const entry = { command, status: r.status, exitCode: Number.isSafeInteger(r.exitCode) ? r.exitCode : null, durationMs: Number.isFinite(r.durationMs) ? r.durationMs : null, health: r.health ?? null,
       tests: r.tests ?? null, worktree: r.worktree ?? null, tail: [r.stdout, r.stderr].filter(t => typeof t === 'string' && t).join('\n'), callId, cwd: ownFolder }
-    if (healthy) return { diag: diag('fast', 'healthy', picked), finished: true, turnId, preRun, entry }
+    const ran = r.status === 'ran' && r.timedOut !== true
+    if (healthy && this.decisionFirstMode() === 'card') return { diag: diag('fast', 'healthy', picked), finished: true, turnId, preRun, entry }
+    // value 'on' (c34): a command that ran (healthy or not) is followed by ONE engine round with the result as context, and its card is shown on that run
+    if (ran && this.decisionFirstMode() === 'on') return { diag: diag('action', healthy ? 'healthy' : 'result_for_engine', picked), context: commandResultBlock(entry), preRun, entry, surface: true }
     return { diag: diag('engine', r.status === 'needs_person' ? 'needs_person' : 'result_for_engine', picked), context: commandResultBlock(entry), preRun, entry }
   }
+
+  /** c34: the card of the command the code ran, on the engine's run: the same item notifications the engine's own command would send. */
+  async surfaceLocalCommand(run, df) {
+    const { entry } = df, itemId = `egdesk-cmd:${entry.callId}`
+    const item = { type: 'commandExecution', id: itemId, command: entry.command, cwd: entry.cwd, status: 'completed', exitCode: entry.exitCode, aggregatedOutput: entry.tail, durationMs: entry.durationMs ?? 0 }
+    const base = { threadId: run.conversationId, turnId: run.runId }
+    await this.handleNotification({ method: 'item/started', params: { ...base, item: { ...item, status: 'inProgress', exitCode: null, aggregatedOutput: '' } } })
+    await this.handleNotification({ method: 'item/completed', params: { ...base, item } })
+  }
+
+  /**
+   * c34: the commands of a conversation that are OPEN or just done, for the memory layer's resolver (L1): items in the shape of its context candidates ({ id, kind, title, summary, timeSlice, status,
+   * aliases, sourceRef }), closed words and numbers in summary. A command waiting for the person's approval is a planned open item; one that ran is a present/past item with its reading.
+   * Never output text, never a script body. At most 5, newest last.
+   */
+  openCommandItems(clientThreadId) {
+    const out = []
+    for (const run of this.runs.values()) {
+      if (run.clientThreadId !== clientThreadId) continue
+      const c = run.localCommand
+      if (c) {
+        const pending = c.status === 'needs_person', failed = !pending && (c.exitCode !== 0 || c.health === 'unhealthy')
+        out.push({ id: `command:${run.answerId}`, kind: 'conversation', title: c.command, aliases: [c.command], sourceRef: `run:${run.answerId}`,
+          timeSlice: pending ? 'planned' : run.status === 'inProgress' ? 'present' : 'past', status: pending ? 'plan' : failed ? 'unresolved' : 'done',
+          summary: pending ? 'waiting for the person\'s approval' : `ran, exit code ${c.exitCode ?? 'unknown'}${c.tests ? `, ${c.tests.passed} passed, ${c.tests.failed} failed` : ''}${c.worktree === 'conflict' ? `, ${c.conflicts ?? 'some'} files in conflict` : ''}` })
+      }
+    }
+    return out.slice(-5)
+  }
+
 
   /**
    * c32: the person's reply to the question the engine asked about one command. The Decision reads it against that one command (the existing approval judgement); code acts at once: an approved
