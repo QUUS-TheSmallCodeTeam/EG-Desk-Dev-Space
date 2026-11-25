@@ -74,6 +74,13 @@ export const claimsEdit = text => { const t = String(text ?? ''); return EDIT_DO
 // a failure, a plan or a question is not a claim of completion.
 const MERGE_DONE = /머지(?:를|가|는)?\s*(?:완료|끝|성공|마쳤|됐|되었)|머지했|병합(?:을|이|은)?\s*(?:완료|끝|성공|마쳤|됐|되었)|병합했|합쳤|합쳐졌|충돌(?:을|이|은)?\s*(?:모두\s*)?(?:해결|정리)(?:했|됐|되었|완료)|해결했|\bmerged\b|\bmerge (?:is |was |has been )?(?:complete|completed|done|finished|succeeded|successful)|\bconflicts? (?:is |are |was |were |have been )?resolved|\bresolved (?:all|the) conflicts?/i
 const MERGE_NOT_CLAIM = /않|못|아직|실패|중단|취소|예정|하겠|할까|할게|하려|해야|필요|할 수|하면|한 뒤|한 후|수 있|발생했|발생하여|남아|남았|미해결|해결되지|\?|\bnot\b|n't|\bfail|\bunable|\bif\b|\bunresolved\b|\bremain|\bconflict(?:s|ed)? (?:in|detected|found)|\babort/i
+// u4 (a real window run, Claude, 04:03): "이번 실행에서 계산기를 보는 권한이 허용되지 않았습니다." said with no tool called this turn, from a refusal in an earlier turn of the same room. The sentence has no number, name or
+// identifier, so the check, which acts only on a concrete sentence, never judged it. A sentence that says what THIS run was or was not allowed to do (this run, this turn + a permission, approval, refusal or block word)
+// is a claim about the run's own state, which the run's evidence either carries or does not: it counts as checkable. Not a question, a plan, or an earlier run's state. After a tool call the evidence has a
+// content-free reference to it (opaque), and the check does not act against a sentence the references could back: only a turn without any basis for the sentence is caught.
+const RUN_DEIXIS = /이번\s*(?:실행|턴|요청|작업|차례)|\bthis (?:run|turn)\b/i
+const RUN_STATE = /권한|허용|승인|거절|거부|차단|막혀|막혔|잠겨|잠겼|permission|\ballow|\bdenied|\bapprov|\bblocked|\brefus/i
+export const claimsRunState = text => { const t = String(text ?? ''); return RUN_DEIXIS.test(t) && RUN_STATE.test(t) && !EARLIER.test(t) && !PLAN.test(t) && !QUESTION.test(t) }
 export const claimsMerge = text => { const t = String(text ?? ''); return MERGE_DONE.test(t) && !MERGE_NOT_CLAIM.test(t) }
 
 export function mergeClaimFindings({ claims, evidence }) {

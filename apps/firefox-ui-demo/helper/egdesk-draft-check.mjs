@@ -1,6 +1,6 @@
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, readPredicate } from './egdesk-decision-questions.mjs'
 import { DecisionError } from './egdesk-decision-client.mjs'
-import { claimsEdit, claimsMerge, claimsPass, runFactFindings } from './egdesk-draft-run-facts.mjs' // c29: a completion claim the run's own command contradicts is found by code
+import { claimsEdit, claimsMerge, claimsPass, claimsRunState, runFactFindings } from './egdesk-draft-run-facts.mjs' // c29: a completion claim the run's own command contradicts is found by code
 
 // Pre-posting check of the subjective model's draft (system-level judge, not a recommender).
 // The code fixes everything that can be fixed: it cuts the draft into sentence spans, collects the
@@ -103,7 +103,7 @@ export function segmentDraft(text) {
 const CHECKABLE = /\d|`[^`]+`|[A-Za-z][A-Za-z0-9]*(?:[._/-][A-Za-z0-9]+)+|\b[A-Z][A-Za-z]{2,}\b|[A-Z]{2,}/
 
 /** A sentence worth checking against evidence: it carries something concrete (number, name, identifier, path). */
-export function isCheckable(spanText) { return CHECKABLE.test(spanText) }
+export function isCheckable(spanText) { return CHECKABLE.test(spanText) || claimsRunState(spanText) } // u4: a sentence about THIS run's own permission or approval state counts as concrete
 
 // ---- internal-looking terms -------------------------------------------------------------------------------
 
