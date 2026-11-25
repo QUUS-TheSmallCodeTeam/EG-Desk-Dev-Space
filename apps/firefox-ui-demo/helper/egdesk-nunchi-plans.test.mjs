@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { NUNCHI_CONTROLS, NUNCHI_CHUNK, PRIOR_CLASSES, buildNunchiEvalPlans, loadExamples, nunchiAgreement, priorClassOf, readPriorLabels } from './egdesk-nunchi-plans.mjs'
+import { NUNCHI_CONTROLS, NUNCHI_CHUNK, PRIOR_CLASSES, buildNunchiEvalPlans, loadExamples, nunchiAgreement, priorClassOf, readPriorLabels, readWire, NUNCHI_MERGED_CONTROLS, buildNunchiMergedPlans, nunchiMergedReport } from './egdesk-nunchi-plans.mjs'
 import { createOwnerExclusions } from './egdesk-scenario-exclusion.mjs'
 import { loadPlan } from './egdesk-decision-real-runner.mjs'
 import { nunchiRequest } from './egdesk-nunchi.mjs'
@@ -71,6 +71,44 @@ test('the agreement report: per prior class how often the installed kind is in t
   const r = nunchiAgreement(results, pre)
   assert.deepEqual(r.byClass, { correction: { n: 2, agree: 1, disagree: 1, unread: 0, not_sent: 0 }, approval: { n: 1, agree: 0, disagree: 0, unread: 1, not_sent: 0 }, praise: { n: 2, agree: 1, disagree: 0, unread: 0, not_sent: 1 } })
   assert.deepEqual([r.totals.agreementWhereRead, r.totals.readRate, r.totals.unread, r.totals.notSent], [0.667, 0.6, 1, 1])
-  assert.match(r.text, /- ex-2 prior correction -> kind praise/); assert.match(r.text, /- control-language: kind correction, about language, strength clear, direction not_applicable, language korean \(230 ms\)/); assert.ok(!r.text.includes('x'.repeat(5)))
+  assert.match(r.text, /- ex-2 prior correction -> kind praise/); assert.match(r.text, /- control-language: kind correction, change true \(0\.\d+\), about language, strength clear, forceful true, direction not_applicable, language korean \(230 ms\)/); assert.ok(!r.text.includes('x'.repeat(5)))
   assert.deepEqual(nunchiAgreement({}, pre).totals, { examples: 5, agree: 0, disagree: 0, unread: 0, notSent: 5, agreementWhereRead: null, readRate: 0 })
+})
+
+test('u2: the report reads the runner\'s wire answers the way the product does (options in question order, sorted by the client first), and a split between neighbouring kinds counts as a change', () => {
+  const q = nunchiRequest({ message: 'x' }).questions
+  const row = (name, dist) => { const top = Object.entries(dist).sort((a, b) => b[1] - a[1])[0]; const n = q.find(x => x.name === name).choices.length
+    return { type: 'choice', name, choice: top[0], confidence: (top[1] - 1 / n) / (1 - 1 / n), probabilities: q.find(x => x.name === name).choices.map(c => ({ value: c.value, probability: dist[c.value] ?? 0 })) } }
+  // the real answers of the control "야 한글로 보고해": correction .78 / instruction_change .14 (option order: praise first)
+  const wire = [row('nk_kind', { correction: 0.78, instruction_change: 0.14, praise: 0.01, complaint: 0.01, none: 0.06 }), row('nk_about', { language: 0.98, length: 0.02 }), row('nk_strength', { clear: 0.96, mild: 0.03, strong: 0.01 }), row('nk_direction', { not_applicable: 0.9, keep: 0.1 }), row('nk_language', { korean: 0.98, none: 0.02 })]
+  const pre = [{ id: 'ex-1', priorClass: 'instruction_change', allow: ['instruction_change', 'correction'] }, { id: 'ex-2', priorClass: 'approval', allow: ['short_approval'] }]
+  const r = nunchiAgreement({ results: { 'ex-1': { answers: wire }, 'ex-2': { answers: wire } } }, pre)
+  assert.deepEqual(r.rows.map(x => [x.id, x.state, x.kind]), [['ex-1', 'agree', 'change'], ['ex-2', 'disagree', 'change']], 'the merged reading is what is compared')
+  assert.equal(readWire(wire).about, 'language'); assert.equal(readWire([]).change, null); assert.equal(readWire('garbage').kind, null)
+})
+
+test('u2: the validation plan of the merged reading is twelve NEW synthetic turns in two chunks (six that ask for a change, six that do not), recordOnly, built by the product\'s request function, loadable by the runner', () => {
+  const chunks = buildNunchiMergedPlans()
+  assert.deepEqual(chunks.map(c => c.plan.requests.length), [6, 6]); assert.ok(chunks.every(c => c.plan.tokenCeiling <= NUNCHI_CHUNK.tokenCeiling && c.plan.requests.every(r => r.recordOnly === true && r.expect.length === 0)))
+  assert.equal(NUNCHI_MERGED_CONTROLS.filter(c => c.expect.change === true).length, 6); assert.equal(NUNCHI_MERGED_CONTROLS.filter(c => c.expect.change === false).length, 6)
+  const earlier = new Set(NUNCHI_CONTROLS.map(c => c.user)); assert.ok(NUNCHI_MERGED_CONTROLS.every(c => !earlier.has(c.user)), 'none of the turns of the first set: the rule was tuned on those')
+  const body = JSON.parse(chunks[0].files.find(f => f.file === 'requests/m-language-ask.json').bytes), mine = nunchiRequest({ message: '한국어로 말해줘', previousReply: NUNCHI_MERGED_CONTROLS[0].prev })
+  assert.deepEqual([body.input, body.questions], [mine.input, mine.questions])
+  assert.ok(chunks.every(c => c.preregistration.every(p => p.merged === true && ['hard', 'soft'].includes(p.expect.severity))))
+})
+
+test('u2: the merged report reads the answers like the product: change true or false exactly (undecided is a miss), the named about / direction / language, forceful for a change; hard and soft counted apart', () => {
+  const q = nunchiRequest({ message: 'x' }).questions
+  const row = (name, dist) => { const top = Object.entries(dist).sort((a, b) => b[1] - a[1])[0]; const n = q.find(x => x.name === name).choices.length
+    return { type: 'choice', name, choice: top[0], confidence: (top[1] - 1 / n) / (1 - 1 / n), probabilities: q.find(x => x.name === name).choices.map(c => ({ value: c.value, probability: dist[c.value] ?? 0 })) } }
+  const asks = (about, extra = {}) => [row('nk_kind', { correction: 0.7, instruction_change: 0.2, none: 0.1 }), row('nk_about', { [about]: 0.97, other: 0.03 }), row('nk_strength', { clear: 0.95, mild: 0.05 }), row('nk_direction', { less: 0.97, none: 0 }), row('nk_language', { korean: 0.97, none: 0.03 }), ...Object.values(extra)]
+  const no = [row('nk_kind', { none: 0.97, praise: 0.03 }), row('nk_about', { no_particular: 0.98 }), row('nk_strength', { mild: 0.95, clear: 0.05 }), row('nk_direction', { not_applicable: 1 }), row('nk_language', { none: 1 })]
+  const pre = [{ id: 'm-language-ask', merged: true, expect: { change: true, about: 'language', language: 'korean', severity: 'hard' } }, { id: 'm-length-standing', merged: true, expect: { change: true, about: 'length', direction: 'less', severity: 'hard' } },
+    { id: 'm-remark', merged: true, expect: { change: false, severity: 'hard' } }, { id: 'm-table-format', merged: true, expect: { change: true, about: 'format', severity: 'soft' } }, { id: 'm-ok', merged: true, expect: { change: false, severity: 'hard' } }]
+  const r = nunchiMergedReport({ results: { 'm-language-ask': { answers: asks('language') }, 'm-length-standing': { answers: asks('language') }, 'm-remark': { answers: no }, 'm-table-format': { answers: asks('format') } } }, pre)
+  assert.deepEqual(r.rows.map(x => [x.id, x.pass]), [['m-language-ask', true], ['m-length-standing', false], ['m-remark', true], ['m-table-format', true], ['m-ok', false]])
+  assert.match(r.rows[1].misses.join(' '), /about language, wanted length/); assert.equal(r.rows[4].state, 'not_sent'); assert.deepEqual([r.hard, r.soft], [{ passed: 2, total: 4 }, { passed: 1, total: 1 }])
+  const undecided = nunchiMergedReport({ results: { 'm-remark': { answers: [row('nk_kind', { correction: 0.45, none: 0.4, complaint: 0.15 }), ...no.slice(1)] } } }, [pre[2]])
+  assert.equal(undecided.rows[0].pass, false); assert.match(undecided.rows[0].misses[0], /change null/)
+  assert.match(r.text, /hard: 2\/4; soft: 1\/1/)
 })

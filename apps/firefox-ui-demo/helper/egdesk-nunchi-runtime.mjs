@@ -23,6 +23,14 @@ export function nunchiOn(rt) {
 const stateOf = rt => (rt.nunchiState ??= new Map())
 const receiptsOf = rt => (rt.nunchiReceipts ??= new WeakMap())
 const linesOf = (rt, thread) => (stateOf(rt).get(thread) ?? []).map(e => e.line)
+// What the guidance record holds of this conversation's instructions now: 'candidate' while one of them awaits the person, else 'applied' where the person applied one, else null
+const recordStateOf = (rt, thread) => {
+  try {
+    const store = rt.decisionContext?.nunchi?.store
+    const states = (stateOf(rt).get(thread) ?? []).map(e => (e.candidateId ? store?.get?.(e.candidateId)?.status : null)).filter(Boolean)
+    return states.includes('candidate') ? 'candidate' : states.includes('applied') ? 'applied' : null
+  } catch { return null }
+}
 
 /** The reading's effect: this conversation's line, and a durable candidate. Once per job. */
 function applyReading(rt, job) {
@@ -33,13 +41,17 @@ function applyReading(rt, job) {
   if (!directive) return
   const cfg = rt.decisionContext?.nunchi, map = stateOf(rt)
   const list = (map.get(job.thread) ?? []).filter(e => e.guidance !== directive.guidance)
-  list.push({ guidance: directive.guidance, line: directive.line, at: job.clock.now(), ref: job.ref })
+  const item = { guidance: directive.guidance, line: directive.line, at: job.clock.now(), ref: job.ref, candidateId: null }
+  list.push(item)
   map.delete(job.thread); map.set(job.thread, list.slice(-NUNCHI_LIMITS.conversationLines))
   while (map.size > MAX_THREADS) map.delete(map.keys().next().value)
   if (directive.durable && cfg?.store) {
     try {
-      const entry = cfg.store.propose({ ...directive.durable, kind: job.result.reading.kind, strength: job.result.reading.strength, sourceRef: job.ref, thread: String(job.thread ?? '') })
+      // the kind and strength of the record are the closed words of the strongest single readings (the merged reading decided that a change is asked)
+      const reading = job.result.reading, strength = reading.strength ?? (reading.forceMass >= 0.95 ? 'strong' : 'clear')
+      const entry = cfg.store.propose({ ...directive.durable, kind: reading.kind ?? 'change', strength: ['clear', 'strong'].includes(strength) ? strength : 'clear', sourceRef: job.ref, thread: String(job.thread ?? '') })
       job.receipt.candidate = entry ? { id: entry.id, status: entry.status, seen: entry.seen } : null
+      item.candidateId = entry?.id ?? null
     } catch { job.receipt.candidate = null }
   }
 }
@@ -70,7 +82,7 @@ export function standingNunchi(rt, context) {
     if (!nunchiOn(rt)) return null
     let standing = []
     try { standing = rt.decisionContext.nunchi.store?.appliedLines?.() ?? [] } catch { standing = [] }
-    return nunchiContextText({ standing, conversation: linesOf(rt, context.clientThreadId) })
+    return nunchiContextText({ standing, conversation: linesOf(rt, context.clientThreadId), record: recordStateOf(rt, context.clientThreadId) })
   } catch { return null }
 }
 

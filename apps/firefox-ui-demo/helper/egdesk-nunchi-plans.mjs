@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
-import { DECISION_MODEL } from './egdesk-decision-client.mjs'
+import { DECISION_MODEL, normalizeDecisionResponse } from './egdesk-decision-client.mjs'
 import { LABEL_BAR, TYPE_NAMES } from './egdesk-conversation-examples.mjs'
-import { NUNCHI_BAR, nunchiRequest, readNunchi } from './egdesk-nunchi.mjs'
+import { ACTIONABLE_KINDS, NUNCHI_BAR, nunchiRequest, readNunchi } from './egdesk-nunchi.mjs'
 import { adder, finish } from './egdesk-c36-plans.mjs'
 
 // L7 u1 (U17): the measurement of the nunchi judgment (egdesk-nunchi.mjs) on the person's REAL reactions, Decisions only. NOTHING here sends or reads a key; Main sends after approval.
@@ -127,30 +127,105 @@ export function buildNunchiEvalPlans({ examples = [], labels = new Map(), perCla
 }
 
 /**
- * nunchiAgreement(results, preregistration) -> { rows, byClass, totals, text }
- * results: the runner's results file (outcome of one chunk); preregistration: that chunk's list. For a real example: agree (the installed kind is in the prior class's allowed set), disagree, or
- * unread (the kind is not installed at the bar). Controls are reported from their hard checks by the runner's scorecard; here only the installed reading is listed.
+ * readWire(answers) -> the reading of a runner results file's answers, the way the product reads them: the wire list is normalized first (the runner keeps the options in the order the
+ * question listed them; the product's client sorts them by probability), then read at the bars. u2: the first report read the wire order and counted every answer as under the bar.
+ */
+export function readWire(answers) {
+  try { return readNunchi(normalizeDecisionResponse({ answers }, nunchiRequest({ message: 'x' }).questions).answers) } catch { return readNunchi(null) }
+}
+
+/**
+ * nunchiAgreement(results, preregistration) -> { rows, byClass, totals, controls, text }
+ * results: the runner's results file (outcome of one chunk); preregistration: that chunk's list. For a real example the reading's KIND is the installed single kind, or "change" when the merged
+ * options (correction, instruction_change, complaint, urging) are installed together (u2): agree when it is in the prior class's allowed set ("change" agrees with a prior class that allows
+ * any asking-for-change kind), disagree, or unread (neither is installed at the bars). Controls are checked by the runner's hard checks; here only the installed reading is listed.
  */
 export function nunchiAgreement(results, preregistration) {
   const res = results?.results ?? {}
+  const kindOf = r => r.kind ?? (r.change === true ? 'change' : null)
   const rows = preregistration.filter(p => !p.control).map(p => {
     const answers = res[p.id]?.answers
     if (!Array.isArray(answers)) return { id: p.id, priorClass: p.priorClass, state: 'not_sent', reading: null }
-    const reading = readNunchi(answers)
-    return { id: p.id, priorClass: p.priorClass, state: reading.kind === null ? 'unread' : p.allow.includes(reading.kind) ? 'agree' : 'disagree', reading }
+    const reading = readWire(answers), kind = kindOf(reading)
+    const ok = kind === null ? null : kind === 'change' ? p.allow.some(k => ACTIONABLE_KINDS.includes(k)) : p.allow.includes(kind)
+    return { id: p.id, priorClass: p.priorClass, state: ok === null ? 'unread' : ok ? 'agree' : 'disagree', kind, reading }
   })
   const byClass = {}
   for (const r of rows) { const c = (byClass[r.priorClass] ??= { n: 0, agree: 0, disagree: 0, unread: 0, not_sent: 0 }); c.n++; c[r.state]++ }
   const sum = key => rows.filter(r => r.state === key).length, agree = sum('agree'), disagree = sum('disagree'), unread = sum('unread')
   const totals = { examples: rows.length, agree, disagree, unread, notSent: sum('not_sent'), agreementWhereRead: agree + disagree ? Number((agree / (agree + disagree)).toFixed(3)) : null, readRate: rows.length ? Number(((agree + disagree) / rows.length).toFixed(3)) : null }
-  const controls = preregistration.filter(p => p.control).map(p => ({ id: p.id, reading: res[p.id]?.answers ? readNunchi(res[p.id].answers) : null, elapsedMs: res[p.id]?.elapsedMs ?? null }))
-  const lines = ['| prior class | examples | agree | disagree | unread (under the bar) |', '|---|---|---|---|---|', ...Object.entries(byClass).map(([k, v]) => `| ${k} | ${v.n} | ${v.agree} | ${v.disagree} | ${v.unread} |`), '',
+  const controls = preregistration.filter(p => p.control).map(p => ({ id: p.id, reading: res[p.id]?.answers ? readWire(res[p.id].answers) : null, elapsedMs: res[p.id]?.elapsedMs ?? null }))
+  const show = r => `kind ${r.kind ?? '-'}, change ${r.change === null ? '-' : r.change}${r.changeMass === null ? '' : ` (${r.changeMass})`}, about ${r.about ?? '-'}, strength ${r.strength ?? '-'}, forceful ${r.forceful === null ? '-' : r.forceful}, direction ${r.direction ?? '-'}, language ${r.language ?? '-'}`
+  const lines = ['| prior class | examples | agree | disagree | unread (under the bars) |', '|---|---|---|---|---|', ...Object.entries(byClass).map(([k, v]) => `| ${k} | ${v.n} | ${v.agree} | ${v.disagree} | ${v.unread} |`), '',
     `agreement where the kind is read: ${totals.agreementWhereRead ?? '-'} (${agree}/${agree + disagree}); read rate: ${totals.readRate ?? '-'}; unread: ${unread}; not sent: ${totals.notSent}`,
-    ...(rows.some(r => r.state === 'disagree') ? ['', 'disagreements (ids only; read the turns locally):', ...rows.filter(r => r.state === 'disagree').map(r => `- ${r.id} prior ${r.priorClass} -> kind ${r.reading.kind}, about ${r.reading.about ?? '-'}, strength ${r.reading.strength ?? '-'}`)] : []),
-    ...(controls.length ? ['', 'controls:', ...controls.map(c => `- ${c.id}: ${c.reading ? `kind ${c.reading.kind ?? '-'}, about ${c.reading.about ?? '-'}, strength ${c.reading.strength ?? '-'}, direction ${c.reading.direction ?? '-'}, language ${c.reading.language ?? '-'}` : 'not sent'}${c.elapsedMs ? ` (${c.elapsedMs} ms)` : ''}`)] : [])]
+    ...(rows.some(r => r.state === 'disagree') ? ['', 'disagreements (ids only; read the turns locally):', ...rows.filter(r => r.state === 'disagree').map(r => `- ${r.id} prior ${r.priorClass} -> ${show(r.reading)}`)] : []),
+    ...(controls.length ? ['', 'controls:', ...controls.map(c => `- ${c.id}: ${c.reading ? show(c.reading) : 'not sent'}${c.elapsedMs ? ` (${c.elapsedMs} ms)` : ''}`)] : [])]
   return { rows, byClass, totals, controls, text: lines.join('\n') }
 }
 
 export const defaultExamplesDir = home => path.join(home, '.aside', 'u', '0', 'sessions', '2026-11-15_5yGDgeI9gUvBBXY9', 'tmp', 'decision-loop', 'evidence', 'conversation-examples', 'examples')
 export const listFiles = (dir, pattern) => (existsSync(dir) ? readdirSync(dir, { recursive: true }).map(String).filter(f => pattern.test(f)).map(f => path.join(dir, f)).sort() : [])
 export { KIND_FIELDS, sha }
+
+// ---- u2: validation of the merged reading on turns the rule was NOT tuned on ----
+// The merged rule (egdesk-nunchi.mjs: a change is asked when correction + instruction_change + complaint + urging hold at least .85 together) was designed on the recorded answers of
+// nunchi-eval-v1, so those 26 answers cannot validate it. These twelve synthetic turns are new: six that ask for a change (the person's own kinds of sentence in the window of 02:51 and
+// after it: language, length, "don't ask, just do it", a format, fuller, English) and six that do not (a remark, a new question, thanks, an approval, a plain question, "ㅇㅋ").
+// They are recordOnly for the runner (the merged reading is not a single answer a runner expectation can read); nunchiMergedReport checks them by code.
+export const NUNCHI_MERGED_CONTROLS = Object.freeze([
+  { id: 'm-language-ask', prev: 'Here is the summary in English: the review meeting is on Tuesday at 2 pm, the vendor visit is still open, and the legal deadline is not set. Let me know if you want details on any item.', user: '한국어로 말해줘', expect: { change: true, about: 'language', language: 'korean', severity: 'hard' } },
+  { id: 'm-length-standing', prev: '요청하신 내용을 정리하면 다음과 같습니다. 첫째, 배포 일정은 12월 첫째 주이며 사전 점검이 필요합니다. 둘째, 롤백 절차는 문서화되어 있고 담당자는 두 명입니다. 셋째, 모니터링 대시보드는 이번 주 안에 준비됩니다. 넷째, 고객사 공지는 배포 사흘 전에 나갑니다. 자세한 설명이 필요하시면 말씀해 주세요.', user: '너무 길어. 앞으로는 짧게 말해', expect: { change: true, about: 'length', direction: 'less', severity: 'hard' } },
+  { id: 'm-dont-ask', prev: '정리를 마쳤습니다. 이대로 저장해도 될까요? 다음 단계로 넘어가기 전에 한 번 더 확인드립니다.', user: '묻지 말고 그냥 알아서 해', expect: { change: true, about: 'repeated_question', severity: 'hard' } },
+  { id: 'm-already-said', prev: '어떤 파일을 기준으로 할까요? 기준 파일을 알려 주세요.', user: '또 그 질문이야? 이미 말했잖아', expect: { change: true, about: 'repeated_question', severity: 'hard' } },
+  { id: 'm-english-from-now', prev: '네, 알겠습니다. 오늘 일정은 오후 두 시 회의 하나입니다.', user: '앞으로는 영어로 답해', expect: { change: true, about: 'language', language: 'english', severity: 'hard' } },
+  { id: 'm-table-format', prev: '항목은 세 가지입니다. 하나는 일정 관리, 둘은 비용 정리, 셋은 위험 목록이며 각각 담당자가 다릅니다. 일정은 12월, 비용은 11월 말, 위험 목록은 상시 갱신입니다.', user: '표로 정리해줘', expect: { change: true, about: 'format', severity: 'soft' } },
+  { id: 'm-remark', prev: '회의는 화요일 오후 2시입니다.', user: '아 그렇구나', expect: { change: false, severity: 'hard' } },
+  { id: 'm-other-way', prev: '그 방법은 시간이 많이 걸립니다.', user: '그럼 다른 방법은 없어?', expect: { change: false, severity: 'hard' } },
+  { id: 'm-thanks', prev: '보고서를 저장했고 요약을 보냈습니다.', user: '고마워, 도움 됐어', expect: { change: false, severity: 'hard' } },
+  { id: 'm-approval', prev: 'A안으로 진행할까요?', user: '응 A로 해줘', expect: { change: false, severity: 'hard' } },
+  { id: 'm-plain-question', prev: '배포는 다음 주에 합니다.', user: '회의는 몇 시야?', expect: { change: false, severity: 'hard' } },
+  { id: 'm-ok', prev: '파일 이름을 바꿨습니다.', user: 'ㅇㅋ', expect: { change: false, severity: 'hard' } },
+])
+
+/** buildNunchiMergedPlans() -> [{ plan, files, estInputTokens, preregistration }]: two chunks of six (the declared ceiling of each is at most 12,000). */
+export function buildNunchiMergedPlans({ setPrefix = 'nunchi-merge-v1' } = {}) {
+  const chunks = []
+  for (let i = 0; i < NUNCHI_MERGED_CONTROLS.length; i += 6) {
+    const a = adder(), pre = []
+    for (const c of NUNCHI_MERGED_CONTROLS.slice(i, i + 6)) {
+      const { input, questions } = nunchiRequest({ message: c.user, previousReply: c.prev })
+      a.add(c.id, { model: DECISION_MODEL, input, questions }, [])
+      a.requests.at(-1).recordOnly = true
+      pre.push({ id: c.id, merged: true, expect: c.expect })
+    }
+    const built = finish(`${setPrefix}-${String(chunks.length + 1).padStart(3, '0')}`, a.requests, a.files, { '*choice': { minConfidence: BAR.minConfidence, minMargin: BAR.minMargin, source: 'egdesk-nunchi.mjs NUNCHI_BAR (.85 / .2) for single choices; the merged readings use NUNCHI_MASS (.85)' } },
+      'Record only: nunchiMergedReport reads each answer the way the product does (the merged "asks for a change" and "forceful" readings at .85, the choices at their bar) and checks it against the expectation of its control: hard ones must hold, soft ones are reported. The twelve turns are new: the rule was not tuned on them.')
+    built.plan.tokenCeiling = Math.min(built.plan.tokenCeiling, NUNCHI_CHUNK.tokenCeiling)
+    built.plan.seeds = []
+    chunks.push({ plan: built.plan, files: built.files, estInputTokens: built.estInputTokens, preregistration: pre })
+  }
+  return chunks
+}
+
+/**
+ * nunchiMergedReport(results, preregistration) -> { rows, hard: { passed, total }, soft: { passed, total }, text }
+ * A row passes when every field its expectation names is read as expected: change true / false exactly (undecided is a miss), and for a change the about, direction, language the expectation names.
+ */
+export function nunchiMergedReport(results, preregistration) {
+  const res = results?.results ?? {}
+  const rows = preregistration.filter(p => p.merged).map(p => {
+    const answers = res[p.id]?.answers
+    if (!Array.isArray(answers)) return { id: p.id, severity: p.expect.severity, pass: false, state: 'not_sent', reading: null }
+    const r = readWire(answers), e = p.expect
+    const misses = []
+    if (r.change !== e.change) misses.push(`change ${r.change} (mass ${r.changeMass}), wanted ${e.change}`)
+    for (const f of ['about', 'direction', 'language']) if (e[f] !== undefined && r[f] !== e[f]) misses.push(`${f} ${r[f] ?? 'unread'}, wanted ${e[f]}`)
+    if (e.change === true && r.forceful !== true) misses.push(`forceful ${r.forceful} (mass ${r.forceMass})`)
+    return { id: p.id, severity: e.severity, pass: misses.length === 0, state: 'read', misses, reading: r, elapsedMs: res[p.id]?.elapsedMs ?? null }
+  })
+  const tally = sev => ({ passed: rows.filter(r => r.severity === sev && r.pass).length, total: rows.filter(r => r.severity === sev).length })
+  const text = ['| control | severity | result | change (mass) | about | forceful (mass) | direction | language |', '|---|---|---|---|---|---|---|---|',
+    ...rows.map(r => (r.reading ? `| ${r.id} | ${r.severity} | ${r.pass ? 'pass' : `MISS: ${r.misses.join('; ')}`} | ${r.reading.change} (${r.reading.changeMass}) | ${r.reading.about ?? '-'} | ${r.reading.forceful} (${r.reading.forceMass}) | ${r.reading.direction ?? '-'} | ${r.reading.language ?? '-'} |` : `| ${r.id} | ${r.severity} | not sent | | | | | |`)),
+    '', `hard: ${tally('hard').passed}/${tally('hard').total}; soft: ${tally('soft').passed}/${tally('soft').total}`].join('\n')
+  return { rows, hard: tally('hard'), soft: tally('soft'), text }
+}
