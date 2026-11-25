@@ -664,3 +664,17 @@ test('c36: the Browser Cards a session\'s program asked for are linked to it and
     } finally { h.restore(); }
   }
 });
+
+test('c36: the terminal card reports its linked sign-in cards and whether its session ended for good (exit, or a disconnect after it had been connected)', async () => {
+  const mk = () => ({ isConnected: true, dataset: {}, _deskWindowShell: { requestClose() {} } });
+  const run = async (events) => {
+    const h = await terminalWindow({ api: { ptyId: 'pty-1', isConnected: () => true }, depOverrides: { spawnBrowserCard: () => mk() } });
+    try { const card = h.card; const before = { count: card._linkedSigninCount(), ended: card._sessionEnded === true }; for (const e of events) h.message(e); return { before, count: card._linkedSigninCount(), ended: card._sessionEnded === true }; } finally { h.restore(); }
+  };
+  const r1 = await run([{ type: 'terminal-open-url', sessionId: 'pty-1', urls: ['https://claude.com/cai/oauth/authorize?state=s'] }]);
+  assert.deepEqual([r1.before.count, r1.count, r1.ended], [0, 1, false]);
+  assert.equal((await run([{ type: 'terminal-exit-confirmed' }])).ended, true);
+  assert.equal((await run([{ type: 'terminal-no-session' }])).ended, false, 'no session at the start is the start failing, not a session that ended');
+  assert.equal((await run([{ type: 'terminal-disconnected' }])).ended, false, 'a connection that never came up');
+  assert.equal((await run([{ type: 'terminal-ready' }, { type: 'terminal-disconnected' }])).ended, true);
+});

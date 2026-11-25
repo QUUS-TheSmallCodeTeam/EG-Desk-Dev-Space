@@ -55,3 +55,16 @@ test('wiring in the surface: sign-in cards are never saved, saves and restores g
   assert.match(surface, /state\.codex\.chatCapabilities\.includes\('terminal-open-url'\)/)
   assert.match(readFileSync(new URL('../helper/codex-bridge-server.mjs', import.meta.url), 'utf8'), /process\.env\.EGDESK_TERMINAL_OPEN_URL === 'on' \? \['terminal-open-url'\] : \[\]/)
 })
+
+test('c36 wiring: the login flow\'s timings and the engine watch are on only with the capability, the watch clears a signed-in state and shows the ended error', () => {
+  const login = surface.slice(surface.indexOf('let loginCard = null;'), surface.indexOf('let loginCard = null;') + 3600)
+  assert.match(login, /const progress = typeof signinGuardOn === 'function' && signinGuardOn\(\) \? \{ timeoutMs: AccountSettingsView\.CLAUDE_LOGIN_WATCH\.terminalReadyMs, signinCardMs: AccountSettingsView\.CLAUDE_LOGIN_WATCH\.signinCardMs \} : \{\};/)
+  assert.match(login, /openTerminal: \(\) => \(loginCard = spawnTerminalCard\(/)
+  assert.match(login, /if \(loginCard && outcome\.phase === 'started' && typeof signinGuardOn === 'function' && signinGuardOn\(\)\) \{/)
+  assert.match(login, /api\.refreshClaudeEngine \? api\.refreshClaudeEngine\(\) : api\.refreshAuthStatus\?\.\(\)/)
+  assert.match(login, /\.status === 'signedIn'/); assert.match(login, /sessionEnded: \(\) => loginCard\._sessionEnded === true \|\| loginCard\.isConnected === false/)
+  assert.match(login, /if \(result === 'signedIn'\) claudeAction = null;/); assert.match(login, /result === 'ended'\) claudeAction = \{ action: 'login', phase: 'error', text: AccountSettingsView\.CLAUDE_LOGIN_ENDED_TEXT \}/)
+  const terminal = readFileSync(new URL('../overlay/resources/surface/EGDeskSurfaceTerminal.mjs', import.meta.url), 'utf8')
+  assert.match(terminal, /card\._linkedSigninCount = \(\) => linkedCards\.size/)
+  assert.match(terminal, /ev\.data\?\.type === 'terminal-exit-confirmed' \|\| \(ev\.data\?\.type === 'terminal-disconnected' && everConnected\)\) card\._sessionEnded = true/)
+})

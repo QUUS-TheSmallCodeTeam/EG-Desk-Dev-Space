@@ -157,6 +157,7 @@ export function createTerminalZone(deps) {
     // c36: a Browser Card opened for this session's program (the Claude sign-in page) lives only as long as the session. When the session ends (exit, no session, disconnect (a bridge restart),
     // or this terminal card closing) the card is closed, so a sign-in whose CLI is gone cannot be finished into a callback nobody listens to.
     const linkedCards = new Set();
+    card._linkedSigninCount = () => linkedCards.size; // c36: the login flow asks whether a sign-in card was opened for this terminal
     const closeLinkedCards = () => {
       for (const linked of [...linkedCards]) {
         linkedCards.delete(linked);
@@ -345,6 +346,8 @@ export function createTerminalZone(deps) {
       }
       if (ev.data?.type === 'terminal-run-result') { showRunResult(ev.data.runResult); return; }
       if (ev.data?.type === 'terminal-open-url') { openRequestedUrls(ev.data.urls, ev.data.sessionId); return; }
+      // c36: the session ended for good (exited, or lost the connection after it had been up): the login flow reads this to show the failure at once
+      if (ev.data?.type === 'terminal-exit-confirmed' || (ev.data?.type === 'terminal-disconnected' && everConnected)) card._sessionEnded = true;
       if (['terminal-exit-confirmed', 'terminal-no-session', 'terminal-disconnected'].includes(ev.data?.type)) closeLinkedCards();
       if (ev.data?.type === 'terminal-new-session') {
         const shellId = ev.data.shellId;

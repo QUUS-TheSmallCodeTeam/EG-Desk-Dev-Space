@@ -22519,12 +22519,29 @@
           // happens to be active when the command or the Terminal is ready.
           const isCurrent = () => Boolean(loginProfileId) && bridge() === api &&
             AccountSettingsView.claudeAccountView(state.codex.engines, { connected: state.codex.connected }).loginProfileId === loginProfileId;
-          const options = { isCurrent, openTerminal: () => spawnTerminalCard({ keepVisible: (() => { try { return document.querySelector?.('.egd-settings-card') ?? null; } catch { return null; } })() }) }; // c35: the Settings card stays in view
+          let loginCard = null;
+          // c36 (capability terminal-open-url): the terminal must be ready within 5 s and the CLI must have opened its sign-in card within 10 s of the typed line, else the existing error shows at once
+          const progress = typeof signinGuardOn === 'function' && signinGuardOn() ? { timeoutMs: AccountSettingsView.CLAUDE_LOGIN_WATCH.terminalReadyMs, signinCardMs: AccountSettingsView.CLAUDE_LOGIN_WATCH.signinCardMs } : {};
+          const options = { isCurrent, ...progress, openTerminal: () => (loginCard = spawnTerminalCard({ keepVisible: (() => { try { return document.querySelector?.('.egd-settings-card') ?? null; } catch { return null; } })() })) }; // c35: the Settings card stays in view
           const outcome = loginProfileId === 'claude-default'
             ? await AccountSettingsView.runClaudeLoginInTerminal({ ...options, requestCommand: method => api.claudeLoginCommand(method) })
             : await AccountSettingsView.runEngineProfileLoginInTerminal({ ...options, engineId: 'claude', profileId: loginProfileId,
               requestCommand: () => api.engineProfileLoginCommand(loginProfileId) });
           claudeAction = { action, ...outcome };
+          // c36: while the person signs in, the screen checks the engine every 3 s (bounded), so a successful login shows at once; a login whose terminal session ended shows the error at once
+          if (loginCard && outcome.phase === 'started' && typeof signinGuardOn === 'function' && signinGuardOn()) {
+            const waitOn = loginCard.ownerDocument?.defaultView || window;
+            void AccountSettingsView.watchClaudeLogin({ refresh: () => (api.refreshClaudeEngine ? api.refreshClaudeEngine() : api.refreshAuthStatus?.()),
+              isSignedIn: () => AccountSettingsView.claudeAccountView(state.codex.engines, { connected: state.codex.connected }).status === 'signedIn',
+              sessionEnded: () => loginCard._sessionEnded === true || loginCard.isConnected === false, isCurrent, wait: ms => new Promise(resolve => waitOn.setTimeout(resolve, ms)) })
+              .then(result => {
+                if (claudeAction?.action !== 'login' || claudeAction.phase !== 'started') return;
+                if (result === 'signedIn') claudeAction = null;
+                else if (result === 'ended') claudeAction = { action: 'login', phase: 'error', text: AccountSettingsView.CLAUDE_LOGIN_ENDED_TEXT };
+                else return;
+                renderAccountTab();
+              }).catch(() => {});
+          }
         } else if (action === 'keyConfirm' || action === 'keyDecline') {
           claudeKeyEnv = await api.claudeApiKeyEnv(action === 'keyConfirm');
           claudeAction = { action, phase: 'done', text: action === 'keyConfirm'
