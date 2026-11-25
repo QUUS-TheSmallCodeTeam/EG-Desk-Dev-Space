@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { DecisionError, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { hostOf, hrefIdentifiers, identifiersOf, labelKey, outcomeCandidate, priorFromMemory, safePath } from './egdesk-browser-task-memory.mjs'
 import { decideOpenItem, settledNote } from './egdesk-browser-open-items.mjs'
+import { choiceContextLine } from './egdesk-browser-choice-reply.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, tableOptions } from './egdesk-decision-questions.mjs'
 
 // Direct chat -> objective browser entry (L8 cycle 6; JEV_INTEGRATION_SUGGESTIONS.md §2 Pillar 1, §4.3, §9.3).
@@ -592,6 +593,8 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
     task.status = 'paused'; task.pause = pause; task.question = null; store.touch(task)
     // a confirmation settles the same "which one?" as a choice: the record keeps the closed layout (choice_needed)
     const asked = pause.code === 'confirm_needed' ? 'choice_needed' : pause.code
+    // c44: what the person was asked to choose between, in the order the question listed it (the note's own candidates): the reply "두번째" is read against it (egdesk-browser-choice-reply.mjs)
+    task.askedCandidates = pause.kind === 'need_context' && asked === 'choice_needed' ? (extra.candidates || []).slice(0, 3).map(item => compactText(String(item).replace(/^\[[A-Z]\d+\]\s*/, ''), 60)) : []
     if (pause.kind === 'need_context' && ASKED_CODES.has(asked)) task.pendingAsk = asked
     else if (pause.code !== 'page_unclear') remember(task, { status: 'stuck', code: pause.code }) // a page to look at is a pause, not an outcome
     const status = pause.kind === 'need_context' ? 'need_context' : 'cannot_proceed'
@@ -670,7 +673,8 @@ export function createDirectBrowserEntry({ provider, store, openItems = () => fa
       }
       // c17: a bare "응" says nothing without what was asked; code names what the person confirmed (R1)
       const confirm = paused.confirm
-      void (how === 'retry' ? store.retry(paused) /* c37: try again from this page */ : how === 'change' ? store.changeGoal(conversationKey, message) /* c23: the message replaces the request: it is the goal now, not an answer */ : paused.userContext.push(confirm ? `Asked to confirm "${confirm.candidate}"${confirm.recorded ? ` as the earlier choice "${confirm.recorded}"` : ''}, the user answered: ${compactText(message, MAX_MESSAGE)}` : compactText(message, MAX_MESSAGE)))
+      void (how === 'retry' ? store.retry(paused) /* c37: try again from this page */ : how === 'change' ? store.changeGoal(conversationKey, message) /* c23: the message replaces the request: it is the goal now, not an answer */ : paused.userContext.push(confirm ? `Asked to confirm "${confirm.candidate}"${confirm.recorded ? ` as the earlier choice "${confirm.recorded}"` : ''}, the user answered: ${compactText(message, MAX_MESSAGE)}` : choiceContextLine(compactText(message, MAX_MESSAGE), paused.askedCandidates, { maxChars: MAX_MESSAGE })))
+      paused.askedCandidates = []
       paused.confirm = null; paused.status = 'running'; paused.pause = null; paused.asked = false
       const out = await finalize(await loop(run, paused, hosts), paused)
       return { ...out, resumed: true }

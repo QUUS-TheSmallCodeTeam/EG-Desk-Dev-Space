@@ -131,6 +131,7 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-browser-task.mjs': ['page_text'],
   'egdesk-entry-placeless-measure.mjs': ['page_text'], // L8 c43: measurement only: the entry request (the message, the open card's title, host and first lines) exactly as the product sends it
   'egdesk-browser-open-item-combined.mjs': ['run_text', 'terminal_command', 'browser_task_record', 'page_text'], // L8 c42: measurement only: the resolver's request for a browser task and another open item, as the runtime sends it
+  'egdesk-ordinal-step-measure.mjs': ['page_text', 'browser_task_record'], // L8 c44: measurement only: the objective step request (the goal, the person's reply with the asked list, the page's text) exactly as the product sends it
   'egdesk-browser-open-items.mjs': ['browser_task_record', 'page_text'], // L8 c37: the open task's goal and question, and the message, as yes/no predicates
   'egdesk-real-engine-browser-loop-hook.mjs': ['page_text'], // L8 c34: forwards the product's own browser-entry and step requests of a fixture turn (a logging wrapper; it declares nothing of its own)
   'egdesk-context-setup.mjs': ['speech_history', 'topic_history', 'memory_page'],
