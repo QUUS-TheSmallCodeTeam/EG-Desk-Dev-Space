@@ -1090,3 +1090,59 @@ export function snapshotBoardProjection(projection, records, now = Date.now()) {
   if (project) snapshot.agenda.project = project; else delete snapshot.agenda.project;
   return snapshot;
 }
+
+// ---- c36: stale sign-in cards (flag EGDESK_TERMINAL_OPEN_URL; capability 'terminal-open-url') ----
+// A Browser Card left over from an earlier CLI login can finish the sign-in after its CLI is gone: the provider redirects to the CLI's loopback listener (http://localhost:<port>/callback?code=...),
+// Firefox shows "can't connect" and the AUTHORIZATION CODE sits in the address bar, the history and the saved session. None of that may be kept.
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+const CREDENTIAL_PARAMS = ['code', 'state', 'access_token', 'id_token', 'token', 'refresh_token'];
+// the AI providers' sign-in domains (the same list as helper/egdesk-auth-opaque.mjs AUTH_OPAQUE_HOSTS; a test keeps them equal)
+export const SIGNIN_HOSTS = Object.freeze(['claude.ai', 'claude.com', 'anthropic.com', 'auth.openai.com', 'auth0.openai.com', 'platform.openai.com', 'chatgpt.com']);
+
+/** true for a loopback http(s) address whose query or fragment carries an authorization code, state or token. */
+export function loopbackCredentialUrl(value) {
+  try {
+    const url = new URL(String(value));
+    if (!['http:', 'https:'].includes(url.protocol) || !LOOPBACK_HOSTS.has(url.hostname.toLowerCase())) return false;
+    const names = [...url.searchParams.keys(), ...new URLSearchParams(url.hash.replace(/^#/, '')).keys()].map(name => name.toLowerCase());
+    return CREDENTIAL_PARAMS.some(name => names.includes(name));
+  } catch { return false; }
+}
+/** Firefox's error page for a failed load keeps the original address in its u= parameter (about:neterror?e=connectionFailure&u=http%3A//localhost...): that address, or null. */
+export function errorPageOriginalUrl(value) {
+  try {
+    const url = new URL(String(value));
+    if (url.protocol !== 'about:' || !/^(neterror|certerror|blocked)$/.test(url.pathname)) return null;
+    return url.searchParams.get('u');
+  } catch { return null; }
+}
+/** the address, or the address an error page stands for, carries a credential to a loopback callback */
+export const credentialBearingUrl = value => loopbackCredentialUrl(value) || loopbackCredentialUrl(errorPageOriginalUrl(value));
+/** an AI provider's sign-in or authorization page (host and subdomains, an /oauth/ path) */
+export function signinPageUrl(value) {
+  try {
+    const url = new URL(String(value));
+    if (!['http:', 'https:'].includes(url.protocol)) return false;
+    const host = url.hostname.toLowerCase().replace(/\.$/, '');
+    return SIGNIN_HOSTS.some(h => host === h || host.endsWith(`.${h}`)) && /\/(oauth|login|log-in|signin|sign-in|authorize)\b/i.test(url.pathname);
+  } catch { return false; }
+}
+/** What a restored Browser Card may load: never a sign-in page left from an earlier login (guard on) and never an address carrying a loopback credential: those restore blank. */
+export function restorableBrowserUri(uri, { guard = false } = {}) {
+  if (credentialBearingUrl(uri)) return 'about:blank';
+  if (guard && signinPageUrl(uri)) return 'about:blank';
+  return uri;
+}
+/** A saved Browser Card record without such an address (blank instead), the same record object when nothing needed changing. */
+export function scrubBrowserRecord(record, { guard = false } = {}) {
+  if (!record || record.type !== 'browser') return record;
+  const bad = value => typeof value === 'string' && restorableBrowserUri(value, { guard }) !== value;
+  const runtime = record.runtimeState, source = record.sourceRef;
+  const urlFields = [runtime?.uri, runtime?.homeUrl, source?.uri, ...(Array.isArray(runtime?.history) ? runtime.history : [])];
+  if (!urlFields.some(bad)) return record;
+  const clean = value => (bad(value) ? 'about:blank' : value);
+  return { ...record,
+    ...(runtime ? { runtimeState: { ...runtime, ...(runtime.uri !== undefined ? { uri: clean(runtime.uri) } : {}), ...(runtime.homeUrl !== undefined ? { homeUrl: clean(runtime.homeUrl) } : {}),
+      ...(Array.isArray(runtime.history) ? { history: runtime.history.map(clean) } : {}), ...(runtime.title !== undefined && urlFields.some(bad) ? { title: '' } : {}) } } : {}),
+    ...(source ? { sourceRef: { ...source, ...(source.uri !== undefined ? { uri: clean(source.uri) } : {}) } } : {}) };
+}

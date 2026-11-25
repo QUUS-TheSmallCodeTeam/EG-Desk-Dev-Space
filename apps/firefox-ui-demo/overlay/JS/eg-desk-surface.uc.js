@@ -5737,13 +5737,21 @@
     return {};
   }
 
+  // c36: the bridge announces the open-url flag as the chat capability 'terminal-open-url' (the same flag turns on the sign-in guards below)
+  function signinGuardOn() {
+    try { return Array.isArray(state.codex?.chatCapabilities) && state.codex.chatCapabilities.includes('terminal-open-url'); } catch { return false; }
+  }
+
   function serializeCardState(card) {
     if (!card || !card.isConnected || card.dataset.codexRole === 'auth') return null;
     if (card.dataset?.jointManaged) return null; // Never cache restricted card bodies or private reply drafts in general Desk history.
     if (card._savedBoardMember) return { ...cloneJson(card._savedBoardMember), id: card.id, geometry: persistentEntityGeometry(card) };
+    // c36: a Browser Card opened for a terminal session's sign-in lives only as long as that session: never saved
+    if (card._signinSessionId) return null;
     const type = cardKindForPersistence(card);
     if (type === 'card') return null;
-    return {
+    // c36: an address carrying a loopback credential (or, with the bridge's open-url capability, an old sign-in page) is saved blank
+    const record = {
       id: card.id,
       type,
       geometry: persistentEntityGeometry(card),
@@ -5751,6 +5759,7 @@
       runtimeState: runtimeStateForCard(card, type),
       ...(typeof surfaceZones === 'undefined' ? {} : cardAnnotationField(card)),
     };
+    try { return typeof SurfaceState !== 'undefined' && SurfaceState.scrubBrowserRecord ? SurfaceState.scrubBrowserRecord(record, { guard: typeof signinGuardOn === 'function' && signinGuardOn() }) : record; } catch { return record; }
   }
 
   // CNV-05: the AI marks kept on a card travel with its record (proposals
@@ -6041,7 +6050,8 @@
       if (member.kind === 'shape') view = restoreShapeFromState({ ...record, id: member.viewId, geometry }, { reservedIds: options.reservedIds });
       else if (record.type === 'joint-item' && projection.jointAccess && typeof jointDesk !== 'undefined' && jointDesk) view = jointDesk.mount(record.runtimeState, projection.boardId);
       else if (record.type === 'browser') {
-        const uri = record.runtimeState?.uri || record.sourceRef?.uri;
+        const savedUri = record.runtimeState?.uri || record.sourceRef?.uri;
+        const uri = savedUri && typeof SurfaceState !== 'undefined' && SurfaceState.restorableBrowserUri ? SurfaceState.restorableBrowserUri(savedUri, { guard: typeof signinGuardOn === 'function' && signinGuardOn() }) : savedUri; // c36
         if (!uri) throw new Error('저장된 주소가 없습니다.');
         if (/^file:/i.test(uri)) {
           const file = servicesRef().io.newURI(uri).QueryInterface(Ci.nsIFileURL).file;
@@ -7079,7 +7089,8 @@
       if ((cardState.sourceRef?.browserIdentityRequired === true || cardState.sourceRef?.browserIdentityKey) && !Object.hasOwn(runtime, 'browserIdentity')) {
         throw new Error('저장된 분리 환경의 연결 정보가 없어 안전하게 열 수 없습니다.');
       }
-      card = spawnBrowserCard(runtime.uri || cardState.sourceRef?.uri || 'https://duckduckgo.com', {
+      const savedUri = runtime.uri || cardState.sourceRef?.uri || 'https://duckduckgo.com';
+      card = spawnBrowserCard(typeof SurfaceState !== 'undefined' && SurfaceState.restorableBrowserUri ? SurfaceState.restorableBrowserUri(savedUri, { guard: typeof signinGuardOn === 'function' && signinGuardOn() }) : savedUri, { // c36
         openMode: 'new',
         sourceRef: cardState.sourceRef || {},
         ...(Object.hasOwn(runtime, 'browserIdentity') ? { browserIdentity: runtime.browserIdentity } : {}),
@@ -22508,12 +22519,29 @@
           // happens to be active when the command or the Terminal is ready.
           const isCurrent = () => Boolean(loginProfileId) && bridge() === api &&
             AccountSettingsView.claudeAccountView(state.codex.engines, { connected: state.codex.connected }).loginProfileId === loginProfileId;
-          const options = { isCurrent, openTerminal: () => spawnTerminalCard({ keepVisible: (() => { try { return document.querySelector?.('.egd-settings-card') ?? null; } catch { return null; } })() }) }; // c35: the Settings card stays in view
+          let loginCard = null;
+          // c36 (capability terminal-open-url): the terminal must be ready within 5 s and the CLI must have opened its sign-in card within 10 s of the typed line, else the existing error shows at once
+          const progress = typeof signinGuardOn === 'function' && signinGuardOn() ? { timeoutMs: AccountSettingsView.CLAUDE_LOGIN_WATCH.terminalReadyMs, signinCardMs: AccountSettingsView.CLAUDE_LOGIN_WATCH.signinCardMs } : {};
+          const options = { isCurrent, ...progress, openTerminal: () => (loginCard = spawnTerminalCard({ keepVisible: (() => { try { return document.querySelector?.('.egd-settings-card') ?? null; } catch { return null; } })() })) }; // c35: the Settings card stays in view
           const outcome = loginProfileId === 'claude-default'
             ? await AccountSettingsView.runClaudeLoginInTerminal({ ...options, requestCommand: method => api.claudeLoginCommand(method) })
             : await AccountSettingsView.runEngineProfileLoginInTerminal({ ...options, engineId: 'claude', profileId: loginProfileId,
               requestCommand: () => api.engineProfileLoginCommand(loginProfileId) });
           claudeAction = { action, ...outcome };
+          // c36: while the person signs in, the screen checks the engine every 3 s (bounded), so a successful login shows at once; a login whose terminal session ended shows the error at once
+          if (loginCard && outcome.phase === 'started' && typeof signinGuardOn === 'function' && signinGuardOn()) {
+            const waitOn = loginCard.ownerDocument?.defaultView || window;
+            void AccountSettingsView.watchClaudeLogin({ refresh: () => (api.refreshClaudeEngine ? api.refreshClaudeEngine() : api.refreshAuthStatus?.()),
+              isSignedIn: () => AccountSettingsView.claudeAccountView(state.codex.engines, { connected: state.codex.connected }).status === 'signedIn',
+              sessionEnded: () => loginCard._sessionEnded === true || loginCard.isConnected === false, isCurrent, wait: ms => new Promise(resolve => waitOn.setTimeout(resolve, ms)) })
+              .then(result => {
+                if (claudeAction?.action !== 'login' || claudeAction.phase !== 'started') return;
+                if (result === 'signedIn') claudeAction = null;
+                else if (result === 'ended') claudeAction = { action: 'login', phase: 'error', text: AccountSettingsView.CLAUDE_LOGIN_ENDED_TEXT };
+                else return;
+                renderAccountTab();
+              }).catch(() => {});
+          }
         } else if (action === 'keyConfirm' || action === 'keyDecline') {
           claudeKeyEnv = await api.claudeApiKeyEnv(action === 'keyConfirm');
           claudeAction = { action, phase: 'done', text: action === 'keyConfirm'
@@ -28427,6 +28455,13 @@
     // Top-level location changes between loads (redirect landings, route
     // changes) are reported too. Reporting only; the card state keeps its own
     // sync. The progress list holds listeners weakly, so the card keeps it.
+    const scrubCredentialPage = (spec) => {
+      if (!SurfaceState.credentialBearingUrl(spec)) return;
+      try { browserState.history = (browserState.history || []).map(url => (SurfaceState.credentialBearingUrl(url) ? 'about:blank' : url)); } catch {}
+      try { const sh = xulBrowser.browsingContext?.sessionHistory; if (sh?.count > 0) sh.purgeHistory(sh.count); } catch {}
+      try { navigateBrowser('about:blank', { replaceHistory: true, markDirty: true }); } catch {}
+      try { browserState.title = ''; syncBrowserChrome(); } catch {}
+    };
     const browserLocationListener = {
       QueryInterface: ChromeUtils.generateQI(['nsIWebProgressListener', 'nsISupportsWeakReference']),
       onLocationChange(webProgress, _request, location) {
@@ -28435,6 +28470,9 @@
         enforceAgentNavigationGuard(location?.spec || '');
         // c35 (UX-6): a page popup's first navigation finished before the card's load events were listened to, so its address bar stayed 'about:blank'; the location change itself syncs it
         try { syncBrowserStateFromBrowser({ markDirtyOnLocationChange: true }); } catch {}
+        // c36 (UX/security): a sign-in that finishes in a card whose CLI is gone lands on the loopback callback with the code in its address; a failed load keeps that address in about:neterror?u=.
+        // The card goes blank and its history forgets the address.
+        if (card._signinSessionId || signinGuardOn()) scrubCredentialPage(location?.spec || '');
       },
       onStateChange(webProgress, _request, stateFlags) {
         if (webProgress && webProgress.isTopLevel === false) return;

@@ -512,3 +512,36 @@ test('c35: the Terminal login waits for the shell to print and settle before typ
   let current = true
   const changed = await run({ idles: [null], isCurrent: () => { const was = current; current = false; return was } }); assert.equal(changed.out.phase, 'error'); assert.deepEqual(changed.typed, [])
 })
+
+// c36: fast visible progress and failure of the Claude login (flag: capability terminal-open-url)
+const fakeClock = () => { let t = 0; return { now: () => t, sleep: async ms => { t += ms; }, at: () => t }; };
+
+test('c36: the login watch checks every 3 s for at most 5 min; signed in, ended, changed and timeout are told apart; a failed check is tried again', async () => {
+  assert.deepEqual({ ...View.CLAUDE_LOGIN_WATCH }, { pollMs: 3000, boundMs: 300000, terminalReadyMs: 5000, signinCardMs: 10000 });
+  let c = fakeClock(), checks = 0;
+  assert.equal(await View.watchClaudeLogin({ refresh: async () => { checks++; if (checks === 2) throw new Error('bridge busy'); }, isSignedIn: () => checks >= 4, sessionEnded: () => false, wait: c.sleep, now: c.now }), 'signedIn');
+  assert.equal(checks, 4); assert.equal(c.at(), 9000, 'a check every 3 s; the failed check did not stop the watch');
+  c = fakeClock(); checks = 0;
+  assert.equal(await View.watchClaudeLogin({ refresh: async () => { checks++; }, isSignedIn: () => false, sessionEnded: () => checks >= 3, wait: c.sleep, now: c.now }), 'ended'); assert.equal(c.at(), 6000);
+  c = fakeClock(); checks = 0;
+  assert.equal(await View.watchClaudeLogin({ refresh: async () => { checks++; }, isSignedIn: () => checks >= 2, sessionEnded: () => true, wait: c.sleep, now: c.now }), 'ended', 'ended before the first check that sees the login is not hidden...');
+  c = fakeClock(); checks = 0;
+  assert.equal(await View.watchClaudeLogin({ refresh: async () => { checks++; }, isSignedIn: () => true, sessionEnded: () => true, wait: c.sleep, now: c.now }), 'signedIn', '...but a session that ends right after a successful login is a success');
+  c = fakeClock(); checks = 0;
+  assert.equal(await View.watchClaudeLogin({ refresh: async () => { checks++; }, isSignedIn: () => false, sessionEnded: () => false, isCurrent: () => checks < 2, wait: c.sleep, now: c.now }), 'changed');
+  c = fakeClock(); checks = 0;
+  assert.equal(await View.watchClaudeLogin({ refresh: async () => { checks++; }, isSignedIn: () => false, sessionEnded: () => false, wait: c.sleep, now: c.now }), 'timeout');
+  assert.equal(checks, 100, '5 min / 3 s'); assert.equal(c.at(), 300000);
+});
+
+test('c36: after the typed line a sign-in card must be there within the bound, else the existing "run it yourself" error shows; without the option nothing waits', async () => {
+  const mk = (count) => { const typed = [], card = { isConnected: true, _linkedSigninCount: () => count(), _termBrowser: { contentWindow: { terminalAPI: { isConnected: () => true, write: data => typed.push(data) } } } }; return { typed, card }; };
+  const run = async (card, extra = {}) => { const c = fakeClock(); const out = await View.runClaudeLoginInTerminal({ requestCommand: async method => claudeLoginTerminalCommand(method), openTerminal: () => card, sleep: c.sleep, now: c.now, ...extra }); return { out, at: c.at() }; };
+  let t = mk(() => 0); let r = await run(t.card, { signinCardMs: 10000 });
+  assert.equal(r.out.phase, 'error'); assert.match(r.out.text, /^터미널 준비를 확인하지 못했습니다\. 터미널에서 claude auth login --claudeai 을 직접 실행해 주세요\.$/); assert.ok(r.at >= 10000 && r.at < 10200, `waited ${r.at} ms`); assert.equal(t.typed.length, 1, 'the line was typed once');
+  let polls = 0; t = mk(() => (++polls > 30 ? 1 : 0)); r = await run(t.card, { signinCardMs: 10000 });
+  assert.equal(r.out.phase, 'started'); assert.ok(r.at < 10000);
+  t = mk(() => 0); r = await run(t.card); assert.equal(r.out.phase, 'started', 'option off: as before'); assert.equal(r.at < 1000, true);
+  t = mk(() => 0); delete t.card._linkedSigninCount; r = await run(t.card, { signinCardMs: 10000 }); assert.equal(r.out.phase, 'started', 'a terminal without the link count is not judged');
+  t = mk(() => 0); r = await run(t.card, { signinCardMs: 10000, isCurrent: (() => { let n = 0; return () => ++n < 12; })() }); assert.equal(r.out.phase, 'error'); assert.match(r.out.text, /바뀌어 명령을 입력하지 않았습니다|계정이나 연결 상태/);
+});

@@ -291,7 +291,7 @@ const CLAUDE_LOGIN_LINES = Object.freeze({ claudeai: 'claude auth login --claude
  * Returns { phase: 'started' | 'error', text }.
  */
 export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, terminalApi = card => card?._termBrowser?.contentWindow?.terminalAPI ?? null,
-  sleep = null, now = Date.now, method = 'claudeai', timeoutMs = 15000, quietMs = 400, readyTimeoutMs = 8000,
+  sleep = null, now = Date.now, method = 'claudeai', timeoutMs = 15000, quietMs = 400, readyTimeoutMs = 8000, signinCardMs = 0,
   isCurrent = () => true,
   checkLine = command => Object.hasOwn(CLAUDE_LOGIN_LINES, method) && command?.method === method && command.line === CLAUDE_LOGIN_LINES[method] ? command.line : null,
   startedText = '터미널에서 Anthropic 공식 로그인을 마친 뒤 다시 확인을 눌러 주세요. EG-Desk는 로그인 정보를 보관하지 않습니다.' } = {}) {
@@ -339,6 +339,19 @@ export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, t
   if (!api) return { phase: 'error', text: `터미널 준비를 확인하지 못했습니다. 터미널에서 ${line} 을 직접 실행해 주세요.` };
   try { await api.write(`${line}\r`); } catch {
     return { phase: 'error', text: `터미널에 입력하지 못했습니다. 터미널에서 ${line} 을 직접 실행해 주세요.` };
+  }
+  // c36 (flag, capability terminal-open-url): the CLI opens its sign-in page within a second or two; when no Browser Card was opened for this terminal within `signinCardMs`, say so now
+  // (the existing "terminal not ready" sentence: the line is to be run by hand) instead of leaving the person with nothing to do for minutes.
+  if (signinCardMs > 0 && wait && typeof card._linkedSigninCount === 'function') {
+    const typedAt = now();
+    let opened = false;
+    while (now() - typedAt < signinCardMs) {
+      if (!isCurrent()) return changed();
+      try { opened = card._linkedSigninCount() > 0; } catch { opened = false; }
+      if (opened || card.isConnected === false) break;
+      try { await wait(100); } catch { break; }
+    }
+    if (!opened) return { phase: 'error', text: `터미널 준비를 확인하지 못했습니다. 터미널에서 ${line} 을 직접 실행해 주세요.` };
   }
   return { phase: 'started', text: startedText };
 }
@@ -535,4 +548,27 @@ export function decisionCredentialOutcome({ result = null, error = null } = {}) 
   if (error?.code === 'DECISION_KEY_INVALID') return { phase: 'error', verification: null, text: 'API 키 형식이 아닙니다. sk-로 시작하는 키를 붙여 넣어 주세요.' };
   if (error?.code === 'DECISION_STORE_UNAVAILABLE' || error?.code === 'DECISION_STORE_FAILED') return { phase: 'error', verification: null, text: '이 컴퓨터에서 키를 저장하지 못했습니다.' };
   return { phase: 'error', verification: null, text: '브리지에 연결하지 못했습니다. 잠시 뒤 다시 시도해 주세요.' };
+}
+
+// c36 (flag): after the login line was typed the Claude section waits visibly and the screen checks the engine itself, so a successful sign-in shows at once and a login that ended without
+// success shows an error at once. watchClaudeLogin polls `refresh()` every pollMs (the bridge coalesces checks), for at most boundMs:
+//   'signedIn' (isSignedIn() true), 'ended' (sessionEnded() true and not signed in: the terminal's session exited or lost its connection), 'changed' (isCurrent() false), 'timeout' (the bound).
+// The words of 'ended' are the existing error form (no new copy); a better sentence is a proposal in the report.
+export const CLAUDE_LOGIN_WATCH = Object.freeze({ pollMs: 3000, boundMs: 300_000, terminalReadyMs: 5000, signinCardMs: 10_000 });
+export const CLAUDE_LOGIN_ENDED_TEXT = 'Claude 상태를 바꾸지 못했습니다: 연결 프로그램 오류';
+export async function watchClaudeLogin({ refresh, isSignedIn, sessionEnded, isCurrent = () => true, wait, now = Date.now, pollMs = CLAUDE_LOGIN_WATCH.pollMs, boundMs = CLAUDE_LOGIN_WATCH.boundMs } = {}) {
+  const started = now();
+  while (now() - started < boundMs) {
+    if (!isCurrent()) return 'changed';
+    try { await refresh(); } catch { /* a failed check is tried again at the next poll */ }
+    if (!isCurrent()) return 'changed';
+    let signed = false;
+    try { signed = isSignedIn() === true; } catch { signed = false; }
+    if (signed) return 'signedIn';
+    let ended = false;
+    try { ended = sessionEnded() === true; } catch { ended = false; }
+    if (ended) return 'ended';
+    try { await wait(pollMs); } catch { return 'changed'; }
+  }
+  return 'timeout';
 }
