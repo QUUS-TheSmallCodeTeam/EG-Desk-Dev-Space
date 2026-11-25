@@ -125,6 +125,7 @@ export function createTurnHooks(conversation) {
       const records = {}, expectations = [], nextExpectations = []
       for (const [name, h] of hooks) {
         const r = h.finishTurn?.(ctx)
+        if (typeof r?.then === 'function') throw new Error(`turn hook '${name}': finishTurn is synchronous and returned a Promise, so its record and expectations would never be read; use afterTurn for work that waits`)
         if (!r) continue
         if (r.record) records[name] = r.record
         expectations.push(...(r.expectations ?? [])); nextExpectations.push(...(r.nextExpectations ?? []))
