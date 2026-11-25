@@ -11,11 +11,11 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 
 export const DECISION_CALL_LOG_FLAG = 'EGDESK_DECISION_CALL_LOG'
-export const DECISION_CALL_KINDS = Object.freeze(['context', 'pick', 'approval_reply', 'open_items', 'nunchi', 'check', 'command_gate', 'run_conditions', 'terminal_state', 'memory', 'working_memory', 'record', 'browser', 'placement', 'hud_routing', 'heartbeat', 'warmup', 'other'])
+export const DECISION_CALL_KINDS = Object.freeze(['context', 'pick', 'approval_reply', 'open_items', 'nunchi', 'check', 'command_gate', 'run_conditions', 'terminal_state', 'memory', 'working_memory', 'record', 'browser', 'placement', 'hud_routing', 'heartbeat', 'warmup', 'proposals', 'observe_pick', 'observe_app', 'check_local', 'recheck', 'revise', 'other'])
 export const DECISION_CALL_OUTCOMES = Object.freeze(['ok', 'refused', 'timeout', 'budget', 'unreachable', 'bad_response', 'aborted', 'error'])
 export const DECISION_CALL_LIMITS = Object.freeze({ turns: 64, callsPerTurn: 48 })
 
-const CACHE_KEYS = new Map([['decision-first-commands', 'pick'], ['draft-check', 'check'], ['heartbeat-beat', 'heartbeat'], ['hud-routing', 'hud_routing'], ['work-placement', 'placement']])
+const CACHE_KEYS = new Map([['decision-first-commands', 'pick'], ['draft-check', 'check'], ['heartbeat-beat', 'heartbeat'], ['hud-routing', 'hud_routing'], ['work-placement', 'placement'], ['decision-first-observe', 'observe_pick'], ['decision-first-observe-app', 'observe_app']])
 // question-name prefixes (names only: the table never reads a question's text); the first match wins, so a prefix that two features share (same_) stays with the narrower feature
 const NAME_KINDS = Object.freeze([
   [/^df_pick$/, 'pick'], [/^reply_(runs|declines)_command$/, 'approval_reply'], [/^oi_ref_/, 'open_items'], [/^nk_/, 'nunchi'],
@@ -24,6 +24,8 @@ const NAME_KINDS = Object.freeze([
   [/^(tn_|tw_)/, 'memory'], [/^(wm_|role_|topic_need_)/, 'working_memory'], [/^(rc_|cf_|ct_)/, 'record'],
   [/^(owner_action$|same_matter_)/, 'placement'], [/^(assistant_request$|web_search$|goes_to_)/, 'hud_routing'],
   [/^(ps_|next_step$|goal_met$|same_|field_|task_resume$)/, 'browser'], [/^warmup$/, 'warmup'],
+  // u5: the proposal registry (sentence checks pq_/ph_, the hold question pa and the 'not done' question pw) and the open-proposal items; the app pick of the observe-first path
+  [/^(pq_|ph_|pa$|pw$|open_prop_)/, 'proposals'], [/^ov_app$/, 'observe_app'],
 ])
 
 /** The closed kind of a decision request, from its prompt cache key and the NAMES of its questions. */
@@ -85,6 +87,11 @@ export function createDecisionCallLog({ now = Date.now, limits = {} } = {}) {
     recent(limit = 10) {
       const n = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, L.turns) : 10
       return [...turns.values()].slice(-n).map(turn => ({ requestId: turn.key, startedAt: turn.t0, calls: this.callsFor(turn.key) }))
+    },
+    /** A stage of the turn that ended without a model call (a check settled by code, a private rewrite turn): the same closed row with no token numbers. */
+    recordStage(key, kind, { startAt, endAt, outcome = 'ok' } = {}) {
+      if (!Number.isFinite(startAt) || !Number.isFinite(endAt)) return null
+      return this.record({ key, kind, startAt, endAt, usage: null, outcome })
     },
     onCall(fn) { listeners.add(fn); return () => listeners.delete(fn) },
   }

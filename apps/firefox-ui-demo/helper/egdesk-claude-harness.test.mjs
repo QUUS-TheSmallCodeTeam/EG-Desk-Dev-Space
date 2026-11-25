@@ -12,6 +12,8 @@ import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
 import { createClaudeEngineAdapter } from './claude-engine-adapter.mjs'
 import { buildClaudeArgs } from './claude-engine-transport.mjs'
 import { createOwnToolsWiring } from './egdesk-own-tools-wiring.mjs'
+import { createComputerObserveProvider } from './egdesk-computer-observe.mjs'
+import { OBSERVE_RESULT_KEY } from './egdesk-observe-first.mjs'
 import { routePermissionRequest } from './claude-engine-permissions.mjs'
 import { CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, CLAUDE_BUILTIN_COMPUTER_USE_RULES, CLAUDE_BUILTIN_FLOW_TOOLS, CLAUDE_BUILTIN_OUTWARD_TOOLS, CLAUDE_BUILTIN_READ_TOOLS, CLAUDE_BUILTIN_WEB_TOOLS, claudeHarnessFromEnv, claudeHarnessInstructions, claudeHarnessThreadOverrides } from './egdesk-claude-harness.mjs'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
@@ -40,7 +42,7 @@ test('the harness flag: only "on" is on; the built-in command and file tools are
  * script(n) → the CLI's output for the n-th user message: [{ msg }] (a stream-json line) | [{ tool: { name, arguments } }] (an SDK MCP tools/call control request, then the replay waits for the
  * result EG-Desk sends back, like the real CLI) | [{ check: fn }]. The init line comes first, once per process.
  */
-function harnessWorld(t, { env = {}, script, outputs = { 'npm test': { text: PASS, code: 0 } }, decisions = true, pick = () => ({ value: 'none', confidence: 0.97 }), predicates = {}, porcelain = '', project = {}, judge = null, candidates = [], agent = false, turnMemory = null } = {}) {
+function harnessWorld(t, { env = {}, script, outputs = { 'npm test': { text: PASS, code: 0 } }, decisions = true, pick = () => ({ value: 'none', confidence: 0.97 }), predicates = {}, porcelain = '', project = {}, judge = null, candidates = [], agent = false, turnMemory = null, computerHost = null } = {}) {
   const base = tmp(t), dataDir = path.join(base, 'egdesk-data'); fs.mkdirSync(dataDir)
   const root = path.join(base, 'project'); fs.mkdirSync(root); fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'demo', scripts: { test: 'node --test' } })); for (const [name, text] of Object.entries(project)) fs.writeFileSync(path.join(root, name), text)
   const ran = [], transports = [], decisionBodies = [], events = [], serverRequests = []
@@ -52,7 +54,7 @@ function harnessWorld(t, { env = {}, script, outputs = { 'npm test': { text: PAS
     const body = JSON.parse(init.body); decisionBodies.push(body)
     const q = body.questions.find(x => x.name === 'df_pick'), message = /"""\n([\s\S]*?)\n"""/.exec(body.input.find(m => m.role === 'user')?.content ?? '')?.[1] ?? ''
     const answers = body.questions.map(x => {
-      if (x.name === 'df_pick') { const p = pick({ message, choices: q.choices }); return { type: 'choice', name: 'df_pick', choice: p.value, confidence: p.confidence, probabilities: [{ value: 'none', probability: 0.02 }, { value: p.value, probability: p.confidence }].sort((a, b) => a.probability - b.probability) } }
+      if (x.name === 'df_pick' || x.name === 'ov_app') { const p = pick({ message, choices: x.choices, name: x.name }); return { type: 'choice', name: x.name, choice: p.value, confidence: p.confidence, probabilities: [{ value: 'none', probability: 0.02 }, { value: p.value, probability: p.confidence }].sort((a, b) => a.probability - b.probability) } }
       if (judge) { // the draft check's and the context's own questions, answered the way the draft-check test's judge does
         if (x.name === 'answer_type' || x.name === 'time_intent') return { type: 'choice', name: x.name, choice: x.choices[0].value, confidence: 0.9, probabilities: [{ value: x.choices[0].value, probability: 0.9 }] }
         if (/^claim_/.test(x.name)) { const verdict = judge.claim ?? 'supported'; return { type: 'choice', name: x.name, choice: verdict, confidence: 0.95, probabilities: [{ value: verdict, probability: 0.96 }, { value: verdict === 'supported' ? 'insufficient' : 'supported', probability: 0.02 }] } }
@@ -97,7 +99,7 @@ function harnessWorld(t, { env = {}, script, outputs = { 'npm test': { text: PAS
   const store = openChatStore({ dataDir: path.join(base, 'chat'), ownerScope: 'claude-harness' }); t.after(() => store.close())
   let profileStore = null, room = null
   if (agent) { profileStore = openProfileStore({ dataDir: path.join(base, 'profiles'), ownerHash: 'claude-harness' }); t.after(() => profileStore.close?.()); const created = profileStore.createDraft({ name: '개발 도우미', avatar: { kind: 'initial', value: '개' }, role: '코드', personality: { tone: 'plain' }, expertise: [], instructions: '짧게 답한다.' }); profileStore.activate(created.id, 1, null); room = { profileId: created.id, replyDestination: 'direct' } }
-  chat = new CodexChatRuntime({ engines: [codex, claude], store, requireStore: true, ...(profileStore ? { profiles: profileStore } : {}), getOwnerKey: () => 'claude:harness', toolProviders: wiring.toolProviders, ownTools: wiring.ownTools, verifyFile: async () => null,
+  chat = new CodexChatRuntime({ engines: [codex, claude], store, requireStore: true, ...(profileStore ? { profiles: profileStore } : {}), getOwnerKey: () => 'claude:harness', toolProviders: computerHost ? [...wiring.toolProviders, createComputerObserveProvider({ host: computerHost, ask: (run, card) => chat.askComputerApp(run, card) })] : wiring.toolProviders, ownTools: wiring.ownTools, verifyFile: async () => null,
     emit: event => events.push(event), emitLegacy: () => {},
     decisionContext: { mode: () => (decisions ? 'on' : 'off'), configured: () => decisions, client, settingsGeneration: () => 0, budgetMs: 800, collect: async () => [...candidates], ...(turnMemory ? { turnMemory } : {}), calibrationLog: openCalibrationLog({ dataDir: path.join(base, 'calibration'), log: () => {} }), terminalGate: wiring.terminalGate(null), ...(env.EGDESK_OPEN_ITEMS === 'on' ? { openItems: true } : {}), ...(env.EGDESK_DRAFT_CHECK ? { draftCheck: { mode: () => env.EGDESK_DRAFT_CHECK } } : {}) } })
   const unsubscribe = claude.subscribe({ notification: (_, m) => chat.handleNotification(m), serverRequest: (_, m) => { serverRequests.push(m); chat.handleServerRequest(m) }, connection: (id, s) => chat.setConnection(id, s.ready, s) })
@@ -132,6 +134,7 @@ test('the harness on a Claude thread: the engine runs in the empty folder, the b
 
 const userResult = id => ({ msg: { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } } })
 const toolReply = (transport, requestId) => JSON.parse(transport.replies.find(r => r.id === requestId).write.response.response.mcp_response.result.content[0].text)
+const pickObserve = ({ message, choices, name }) => name === 'ov_app' ? { value: choices.find(c => /Calculator/.test(c.description))?.value ?? 'none', confidence: 0.97 } : /계산기/.test(message) ? { value: choices.find(c => /read the on-screen elements/.test(c.description))?.value ?? 'none', confidence: 0.96 } : { value: 'none', confidence: 0.97 }
 const pickTests = ({ message, choices }) => (/테스트/.test(message) ? { value: choices.find(c => /tests/.test(c.description))?.value ?? 'none', confidence: 0.96 } : { value: 'none', confidence: 0.97 })
 
 test('replay: tool call → EG-Desk\'s runner → the result back to Claude and into the run: the command ran through EG-Desk, the row says so, the facts are the arbiter\'s', async t => {
@@ -300,3 +303,20 @@ test('u2 D4: the harness instructions say EG-Desk keeps memory and standing inst
   function text_(n) { return [{ msg: { type: 'assistant', parent_tool_use_id: null, message: { id: 'm', role: 'assistant', content: [{ type: 'text', text: '네' }], usage: { input_tokens: 1, output_tokens: 1 } } } }] }
 })
 
+
+test('observe first on Claude (u5): in a room with history the decision model picks read_elements(Calculator), code runs it before the turn, Claude is asked once with the result as context; a locked screen is the fact it is told', async t => {
+  const apps = [{ name: 'Calculator', bundleId: 'com.apple.calculator', pid: 101, policy: 'regular', active: true }]
+  let locked = false
+  const host = { ready: async () => {}, permissions: async () => ({ screenLocked: locked }), listApps: async () => ({ apps }), listWindows: async () => ({ windows: [] }), readElements: async () => { throw new Error('must not be read before the person allows it') }, capture: async () => { throw new Error('no') } }
+  const w = harnessWorld(t, { env: { EGDESK_DECISION_FIRST: 'on', EGDESK_COMPUTER_OBSERVE: 'on' }, computerHost: host, pick: pickObserve, script: n => [...text(n, n === 1 ? '알겠습니다' : '계산기 창을 읽으려면 허락이 필요합니다.'), ...result()] })
+  const first = await w.send('지난번에 계산기 허락을 거절했어'); await w.settled(first)
+  const sent = await w.send('계산기 앱 창의 화면 요소를 읽어서 알려줘', { conversationId: first.conversationId, requestId: 'r-2' }), run = await w.settled(sent)
+  const second = JSON.stringify(w.transports[0].sent[1]); assert.equal(w.transports[0].sent.length, 2, 'one Claude round per turn')
+  assert.ok(second.includes(OBSERVE_RESULT_KEY) || second.includes('read-only computer tools'), second.slice(0, 600)); assert.match(second, /Tool: egdesk_computer_read_elements \(app: com\.apple\.calculator\)/); assert.match(second, /not been asked in this run/)
+  assert.equal(w.chat.pendingApprovals.size, 0, 'no card for a run nobody can see')
+  assert.deepEqual([run.decisionFirst.path, run.decisionFirst.reason, run.decisionFirst.option], ['action', 'observe_refused', 'observe'])
+  const row = run.activities.find(a => a.kind === 'dynamicToolCall' && a.detail?.tool === 'egdesk_computer_read_elements'); assert.equal(row?.detail.executedBy, 'egdesk')
+  locked = true
+  const again = await w.settled(await w.send('계산기 앱 창의 화면 요소를 읽어서 알려줘', { conversationId: first.conversationId, requestId: 'r-3' })); assert.equal(again.decisionFirst.reason, 'observe_refused')
+  assert.match(JSON.stringify(w.transports[0].sent[2]), /the Mac's screen is locked/)
+})

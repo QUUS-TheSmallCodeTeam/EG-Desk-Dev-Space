@@ -33,6 +33,9 @@ export const EGRESS_KINDS = Object.freeze({
   // U1 B1 (EG-Desk's own computer tools): pixels of a Mac window and the labels read from it. They go to the run's engine model only; no model
   // permission covers the decision model, so this kind is refused by every gate (owner decision pending, same as hud_text).
   screen_capture: Object.freeze({ data: 'screen', governedBy: 'No model permission covers a screen image yet: the pixels of a window the Agent looked at go to the run\'s engine model only, never to the decision model (owner decision pending)' }),
+  // u5 (observe first): the names of the open apps that EG-Desk's own list_apps returned (never an app the provider denies), asked of the decision model to pick the one the person means. The run's engine model
+  // receives the same list as the result of its own list_apps call, so this is the run's own data (PROPOSAL until the owner confirms: window titles, elements and pixels are NOT covered, see screen_capture).
+  app_names: Object.freeze({ data: 'run', governedBy: 'The names of the apps EG-Desk\'s own list_apps returned for this run (denied apps are never listed), which the run\'s engine model receives in the same tool result; never a window title, an element or a picture' }),
   board_excerpt: Object.freeze({ data: 'board', governedBy: 'This Board ask itself: the owner chose and confirmed a run that sends the approved public excerpts to the drafting model. An extract-only ask sends them to no model, so not to Decisions either' }),
 })
 // Requests that carry NO data of any class: one fixed body each, byte for byte (c18, the idle warm-up). They are not in EGRESS_KINDS because a
@@ -128,6 +131,7 @@ export const EGRESS_SITES = Object.freeze({
     'briefing_judgments: /decision/briefing-placement (counts only), -reuse and -check (card labels, short summaries, step texts) are each asked of the gate with canvas_text by runBriefingFlow before they are sent',
     'briefing_skeleton: /decision/briefing-skeleton (the request of the run and, in the place request, the run\'s own answer as draft_text, the turn\'s memory materials as memory_page, card labels as canvas_text) asked of the gate by runSkeletonFlow before anything is sent; without draft_text nothing is asked, without memory_page there are no materials, without canvas_text no existing card is listed'],
   'egdesk-board-agent-context.mjs': ['board_excerpt'],
+  'egdesk-observe-first.mjs': ['run_text: the person\'s own message (up to 600 characters) and the fixed description of the observe action', 'app_names: the names and bundle ids of the open apps EG-Desk\'s own list_apps returned (denied apps never), asked once to pick the one the person means; never a window title, an element or a picture'],
   'egdesk-decision-first-commands.mjs': ['run_text: the person\'s own message (up to 600 characters) and EG-Desk\'s fixed descriptions of the options built from the folder; never a script body or a command the person typed'],
   'egdesk-chat-choice.mjs': ['dm_chooser: the user\'s own typed question and options, confirmed in the panel'],
   'egdesk-browser-reflex.mjs': ['page_text'],

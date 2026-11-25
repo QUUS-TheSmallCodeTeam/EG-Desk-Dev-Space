@@ -21,7 +21,9 @@ test('call kinds come from the prompt cache key and the NAMES of the questions: 
     [{ promptCacheKey: 'draft-check', questions: q('sup_0', 'tense_0') }, 'check'], [{ questions: q('claim_0') }, 'check'], [{ questions: q('risk_outside', 'risk_unrestorable') }, 'command_gate'],
     [{ questions: q('output_reports_problem') }, 'run_conditions'], [{ questions: q('terminal_state') }, 'terminal_state'], [{ questions: q('tn_action', 'tw_about_1') }, 'memory'], [{ questions: q('wm_need_1') }, 'working_memory'],
     [{ questions: q('rc_confirms_1') }, 'record'], [{ questions: q('same_matter_1') }, 'placement'], [{ questions: q('same_1') }, 'browser'], [{ questions: q('goal_met') }, 'browser'], [{ questions: q('goes_to_1') }, 'hud_routing'],
-    [{ promptCacheKey: 'heartbeat-beat', questions: q('whatever') }, 'heartbeat'], [{ promptCacheKey: 'work-placement', questions: q('x') }, 'placement'], [{ questions: q('warmup') }, 'warmup'], [{ questions: q('brand_new_question') }, 'other'], [{}, 'other'], [null, 'other'],
+    [{ promptCacheKey: 'heartbeat-beat', questions: q('whatever') }, 'heartbeat'], [{ promptCacheKey: 'work-placement', questions: q('x') }, 'placement'], [{ questions: q('warmup') }, 'warmup'],
+    [{ questions: q('pq_0', 'ph_0') }, 'proposals'], [{ questions: q('pa', 'pw') }, 'proposals'], [{ questions: q('open_prop_1_accept') }, 'proposals'],
+    [{ promptCacheKey: 'decision-first-observe', questions: q('df_pick') }, 'observe_pick'], [{ promptCacheKey: 'decision-first-observe-app', questions: q('ov_app') }, 'observe_app'], [{ questions: q('ov_app') }, 'observe_app'], [{ questions: q('brand_new_question') }, 'other'], [{}, 'other'], [null, 'other'],
   ]
   for (const [request, kind] of table) { assert.equal(callKindOf(request), kind, JSON.stringify(request)); assert.ok(DECISION_CALL_KINDS.includes(kind)) }
   const outcomes = [[{ code: 'decision_mode_off' }, 'refused'], [{ code: 'request_timeout' }, 'timeout'], [{ code: 'budget_exceeded' }, 'budget'], [{ code: 'bad_response' }, 'bad_response'], [{ code: 'unreachable' }, 'unreachable'], [{ name: 'AbortError' }, 'aborted'], [new Error('x'), 'error'], [null, 'error']]
@@ -136,4 +138,17 @@ test('the table from a real store: the stage times come from the run\'s events, 
   const asJson = []; assert.equal(tableMain(['db', file, '--json'], { print: line => asJson.push(line) }), 0); const parsed = JSON.parse(asJson.join('\n')); assert.equal(parsed.turns[0].summary.count, 2)
   assert.equal(tableMain(['db', file, '--since', '2999-01-01T00:00:00Z'], { print() {} }), 1, 'no rows is exit 1'); assert.equal(tableMain(['db'], { printError() {} }), 2); assert.equal(tableMain(['db', file, '--since', 'x'], { printError() {} }), 2)
   const routeFile = path.join(dir, 'route.json'); fs.writeFileSync(routeFile, JSON.stringify({ turns: w.chat.decisionCallTurns(5).turns })); assert.equal(tableMain(['route', routeFile], { print() {} }), 0)
+})
+
+test('u5: a stage that ended without a model call is a closed row with no token numbers; unknown kinds are other', () => {
+  let t = 1000
+  const log = createDecisionCallLog({ now: () => t })
+  log.beginTurn('r1', 1000)
+  assert.equal(log.recordStage('r1', 'check_local', { startAt: 1100, endAt: 1110 }).inputTokens, null)
+  log.recordStage('r1', 'revise', { startAt: 1200, endAt: 6000, outcome: 'error' })
+  log.recordStage('r1', 'made_up_kind', { startAt: 1300, endAt: 1301 })
+  assert.equal(log.recordStage('r1', 'recheck', { startAt: 'x', endAt: 2 }), null)
+  assert.deepEqual(log.callsFor('r1').map(c => [c.kind, c.startMs, c.endMs, c.inputTokens, c.cachedTokens, c.outcome]),
+    [['check_local', 100, 110, null, null, 'ok'], ['revise', 200, 5000, null, null, 'error'], ['other', 300, 301, null, null, 'ok']])
+  for (const kind of ['check_local', 'recheck', 'revise', 'proposals', 'observe_pick', 'observe_app']) assert.ok(DECISION_CALL_KINDS.includes(kind))
 })

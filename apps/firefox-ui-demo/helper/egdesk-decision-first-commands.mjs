@@ -9,6 +9,7 @@
 import path from 'node:path'
 import fs from 'node:fs'
 import { choiceQuestion, decisionThresholds, readChoice } from './egdesk-decision-questions.mjs'
+import { OBSERVE_PICK_CACHE_KEY, OBSERVE_RULES } from './egdesk-observe-first.mjs' // u5: read-only computer viewing joins the same pick when its candidates are offered
 
 export const DECISION_FIRST_PICK = 'df_pick'
 export const DECISION_FIRST_LIMITS = Object.freeze({ options: 12, merges: 4, branches: 64, messageChars: 600, timeoutMs: 2500, scriptNameChars: 40 })
@@ -76,7 +77,7 @@ const RULES = 'You choose which of a short list of fixed actions a person asked 
 export function pickRequest(message, options) {
   const text = String(message ?? '').replace(/\s+/g, ' ').trim().slice(0, DECISION_FIRST_LIMITS.messageChars)
   const choices = [...options.map(o => ({ value: o.id, description: o.what })), { value: 'none', description: 'the person does not ask to run any of the listed actions now' }]
-  return { input: [{ role: 'developer', content: RULES }, { role: 'user', content: `The person wrote:\n"""\n${text}\n"""` }],
+  return { input: [{ role: 'developer', content: options.some(o => o.kind === 'observe') ? `${RULES} ${OBSERVE_RULES}` : RULES }, { role: 'user', content: `The person wrote:\n"""\n${text}\n"""` }],
     questions: [choiceQuestion(DECISION_FIRST_PICK, 'Which action does the person ask to run now?', choices)] }
 }
 
@@ -86,7 +87,7 @@ export async function decidePick({ client, message, options, thresholds, timeout
   if (!client || typeof client.decide !== 'function' || typeof message !== 'string' || !message.trim()) return { status: 'engine', reason: 'unreachable' }
   const t = decisionThresholds(thresholds)
   let result
-  try { result = await client.decide({ ...pickRequest(message, options), timeoutMs, signal, promptCacheKey: 'decision-first-commands' }) } catch { return { status: 'engine', reason: 'unreachable' } }
+  try { result = await client.decide({ ...pickRequest(message, options), timeoutMs, signal, promptCacheKey: options.some(o => o.kind === 'observe') ? OBSERVE_PICK_CACHE_KEY : 'decision-first-commands' }) } catch { return { status: 'engine', reason: 'unreachable' } }
   const read = readChoice(result?.answers, DECISION_FIRST_PICK, { minConfidence: t.choice, minMargin: t.margin })
   if (read.state !== 'accepted') return { status: 'engine', reason: 'below_threshold', confidence: read.confidence, margin: read.margin }
   if (read.value === 'none') return { status: 'engine', reason: 'none', confidence: read.confidence, margin: read.margin }
