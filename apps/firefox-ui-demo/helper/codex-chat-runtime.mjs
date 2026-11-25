@@ -164,7 +164,7 @@ import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
 import { predicateQuestion, sha256Hex } from './egdesk-decision-questions.mjs'
-import { workspaceCandidates } from './egdesk-prefetch.mjs'
+import { readNowWorkspaceFile, workspaceCandidates } from './egdesk-prefetch.mjs'
 import { NUNCHI_KEY, beginNunchi, noteNunchi, nunchiReceiptFor, recentNunchi, settleNunchi, standingNunchi } from './egdesk-nunchi-runtime.mjs'
 import { CONTRADICTION_LIMITS, contradictionPairs, judgeContradictions, judgeRecordConflict, settledRecordText } from './egdesk-record-settled.mjs'
 import { engineContextConfig, spilledKeys, splitEngineContext } from './egdesk-engine-context.mjs'
@@ -6926,6 +6926,28 @@ export class CodexChatRuntime {
     } catch { return [] }
   }
 
+  /**
+   * u7 (D21; only with the file evidence of EGDESK_DRAFT_CHECK_FILES): a prefetched file's text is the text it had when the turn STARTED. If EG-Desk's own edit tool changed that file in this turn, the check
+   * must not read the turn-start text as current (it made the true "I added the start script" a contradiction, and the revision then said the change could not be seen). Such an item carries the file as it is
+   * now (the edit's result) instead, or is dropped when it cannot be read. Items of files no edit touched, and every turn without an edit, are exactly as before.
+   */
+  async refreshEditedFiles(run, evidence) {
+    try {
+      const list = Array.isArray(evidence) ? evidence : []
+      if (!list.some(item => item?.kind === 'file')) return list
+      const touched = new Set((Array.isArray(run?.ownEdits) ? run.ownEdits : []).map(entry => (typeof entry?.path === 'string' ? entry.path.replace(/^\.\//, '') : null)).filter(Boolean))
+      if (!touched.size || typeof run?.ownFolder !== 'string' || !run.ownFolder) return list
+      const out = []
+      for (const item of list) {
+        const rel = item?.kind === 'file' && typeof item.id === 'string' && item.id.startsWith('workspace:') ? item.id.slice('workspace:'.length) : null
+        if (!rel || !touched.has(rel)) { out.push(item); continue }
+        const now = await readNowWorkspaceFile(run.ownFolder, rel)
+        if (now) out.push({ ...item, text: `${rel} — as it is now, after the edit made in this turn:\n${now}` })
+      }
+      return out
+    } catch { return Array.isArray(evidence) ? evidence : [] }
+  }
+
   async draftTurnEvidence(run, turn, tools, until = null) {
     let now = turn, incomplete = turn.contextMissing === true
     if (turn.late) {
@@ -6936,6 +6958,7 @@ export class CodexChatRuntime {
       const fresh = (waited?.evidence ?? []).filter(item => !turn.evidence.some(x => x.id === item.id && x.text === item.text))
       if (fresh.length) now = { ...turn, evidence: [...fresh, ...turn.evidence] }
     }
+    now = { ...now, evidence: await this.refreshEditedFiles(run, now.evidence) } // u7: a file this turn's own edit changed is read as it is now
     const own = answerEvidence(now, tools).filter(item => !item.opaque)
     const entry = this.earlierEvidence?.get(run.clientThreadId)
     const earlier = entry ? (entry.withheld ? entry.records : entry.records.slice(0, EARLIER_EVIDENCE_LIMIT)) : []
