@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SKELETON_JUDGE, SKELETON_LIMITS, buildGuide, enumerateSkeleton, fillRequest, runSkeletonFlow, validateFill } from './egdesk-briefing-skeleton.mjs'
-import { fillPrompt } from './egdesk-briefing-engine.mjs'
+import { briefingDeps, fillPrompt } from './egdesk-briefing-engine.mjs'
 import { fillOutputSchema, stripNulls, violation } from './egdesk-briefing-output-schema.mjs'
 import { folderMaterials } from './egdesk-real-engine-briefing-hook.mjs'
 import { LOOP_ENTRIES, LOOP_SAY, buildLoopScript } from './egdesk-briefing-real-engine-script.mjs'
@@ -18,13 +18,13 @@ const ANSWER = ['ledger 기록을 두 흐름으로 정리했습니다.', '', '| 
 /** A model that follows the compact request: one row per material, the key fact inside a line of at most `max` characters. */
 const faithful = want => ({ title: '두 흐름 정리', unfillable: [], items: Object.fromEntries(want.guide.items.map(i => [i.id, { text: `${i.shows} 흐름`, slots: Object.fromEntries(i.slots.map(s => [s.name, s.type === 'text' ? `${i.id} 정리` : i.materials.map(alias => {
   const m = want.materials.find(x => x.alias === alias); return { label: null, text: `${m.text.slice(0, 30)}… ${factOf(m.text)}`, from: alias } })])) }])) })
-function harness(replies, probability = name => (name.startsWith('same_') ? .03 : name.startsWith('before_') ? .9 : .97), materials = rows, answer = ANSWER) {
+function harness(replies, probability = name => (name.startsWith('same_') ? .03 : name.startsWith('before_') ? .9 : .97), materials = rows, answer = ANSWER, extra = {}) {
   const tickets = new Map(), calls = [], fills = []
   const judge = { prepare: async dto => { const p = SKELETON_JUDGE.prepare({ mode: 'on', binding: 'b', dto }); assert.equal(p.status, 'prepared'); const t = `t${tickets.size + 1}`; tickets.set(t, { p, dto }); return { status: 'prepared', ticket: t, preview: { packet: p.packet } } },
     run: async t => { const { p, dto } = tickets.get(t); calls.push({ stage: dto.stage, names: p.packet.questions.map(q => q.name) })
       const answers = Object.fromEntries(p.packet.questions.map(q => [q.name, { name: q.name, type: 'predicate', probability: probability(q.name, dto) }])); return SKELETON_JUDGE.read(p, answers, 'b').reply }, cancel: async () => {} }
   const fill = async want => { fills.push(want); const r = replies[Math.min(fills.length, replies.length) - 1]; return typeof r === 'function' ? r(want) : structuredClone(r) }
-  return { calls, fills, run: () => runSkeletonFlow({ request: LOOP_SAY, answer, materials, candidates: [], currentAnswerId: null, viewport: { x: 0, y: 0, width: 2400, height: 1400 }, judge, fill, observeOnly: false }) }
+  return { calls, fills, run: () => runSkeletonFlow({ request: LOOP_SAY, answer, materials, candidates: [], currentAnswerId: null, viewport: { x: 0, y: 0, width: 2400, height: 1400 }, judge, fill, observeOnly: false, ...extra }) }
 }
 const scene = enumerateSkeleton({ materials: rows, candidates: [] })
 const GUIDE = buildGuide(scene.parts.map((p, i) => ({ id: p.alias, trait: p.trait, materials: p.materials, component: p.options[0].component, reuse: [], creates: `N${i + 1}`, emphasis: 'spotlight', tried: [p.options[0].component] })), scene)
@@ -129,8 +129,10 @@ test('check-22br schema-off: M11 judged .56 (undecided) but linked to M9 and M12
 test('the rule is one step and only for the undecided: an unlinked undecided material, a decided no, and a material linked only to another dropped one all stay out', async () => {
   const unlinked = await harness([faithful], RECORDED_ABOUT, rows.map(r => ({ ...r, links: [] }))).run()
   assert.ok(unlinked.relevance.dropped.includes('M11') && unlinked.relevance.linked === undefined, 'no link, no rescue')
-  const no = await harness([faithful], name => (name === 'about_M11' ? 0.1 : RECORDED_ABOUT(name))).run()
-  assert.ok(no.relevance.dropped.includes('M11') && no.relevance.linked === undefined, 'a decided no is dropped')
+  // c44 (deliberate change of the c41 assertion "a decided no is dropped"): a decided no for ONE entry of a log whose other entries are sure now stays (relevance.voted, see the c44 tests below);
+  // a decided no that the rest of its log does not back is still dropped
+  const no = await harness([faithful], name => (name === 'about_M11' || name === 'about_M3' || name === 'about_M6' || name === 'about_M8' ? 0.1 : RECORDED_ABOUT(name))).run()
+  assert.ok(no.relevance.dropped.includes('M11') && no.relevance.linked === undefined && no.relevance.voted === undefined, 'a decided no the log does not back is dropped')
   // M3 and M6 both undecided (their figures, "2.48s" and "0.27~0.29s", are not code anchors, so the answer does not cite them): M6 is linked to M8 (sure) and is rescued; M3 is linked
   // only to M6, which is not "sure", so it is not rescued (the rule is one step, not transitive)
   const chain = await harness([faithful], name => (name === 'about_M3' || name === 'about_M6' ? 0.5 : RECORDED_ABOUT(name))).run()
@@ -194,4 +196,48 @@ test('check-25br schema-off: the real whole fill keeps ".04·기록 1" of the 11
   const m6 = CHECK25BR_OFF[0].items.P2.slots.lines[1]
   assert.equal(m6.from, 'M6'); assert.ok(m6.text.includes('.04') && !m6.text.includes('0.27~0.29s') && m6.text.length <= 76 + 14, m6.text)
   const entry = LOOP_ENTRIES.find(e => e.file.endsWith('1609-measure.md')); assert.ok(entry.text.includes('0.27~0.29s') && entry.text.includes('.04') && entry.text.length > 150)
+})
+
+// ---- cycle 44: Main's check-29br (int/c14 cbad751). Recorded Decision answers of the place request (about_M#), copied from the run records. ----
+const ABOUT_29BR_ON = { combines: .97, about_M1: 1, about_M2: 1, about_M4: .99, about_M5: 1, about_M7: 1, about_M10: .94, about_M3: .99, about_M6: .99, about_M8: .99, about_M9: .99, about_M11: .65, about_M12: .26, same_M2_M10: .32, same_M10_M12: .03, same_M4_M10: .19 }
+const ABOUT_25BR_ON = { ...ABOUT_29BR_ON, about_M10: .05, about_M11: .95, about_M12: .74 }
+// the real answer of check-29br schema-on: the engine published the table as a card and posted only this sentence, so the answer cites nothing
+const ANSWER_29BR = '두 흐름을 각각 날짜·시간순으로 정리한 결과를 첨부했습니다. 항목마다 원문 링크와 커밋 ID·건수·측정값을 그대로 담았으며, 파일은 수정하지 않았습니다.'
+const recorded = table => name => (name in table ? table[name] : name.startsWith('same_') ? .1 : name.startsWith('before_') ? .9 : .97)
+
+test('check-29br schema-on: about_M12 (the 02:31 entry, "1,812") was judged .26 and dropped before the fill, so no later check could see the loss; the six other entries of its log are sure -> it stays (voted), its row and "1,812" are on the card', async () => {
+  const h = harness([faithful], recorded(ABOUT_29BR_ON), rows, ANSWER_29BR), out = await h.run()
+  assert.equal(out.status, 'presented', JSON.stringify({ reason: out.reason, relevance: out.relevance }))
+  assert.deepEqual(out.relevance.voted, ['M12']); assert.deepEqual(out.relevance.linked, ['M11']); assert.deepEqual(out.relevance.dropped, [])
+  assert.deepEqual(out.guide.items.map(i => [i.id, i.materials.length]), [['P1', 6], ['P2', 6]]); const text = cardsOf(out)
+  for (const e of LOOP_ENTRIES) assert.ok(text.includes(e.fact), `${e.fact} is on a card`)
+  assert.ok(text.includes('1,812'))
+})
+
+test('the vote is for an entry of a log only: the integration entry judged .05 in check-25br (M10) stays; a short chain, an entry with no log, and a log that does not back the entry (fewer than three sure others, or under two thirds) stay out', async () => {
+  const m10 = await harness([faithful], recorded(ABOUT_25BR_ON), rows, ANSWER_29BR).run(); assert.deepEqual(m10.relevance.voted, ['M10']); assert.ok(m10.relevance.kept.includes('M10'))
+  // no recorded link, no log
+  const unlinked = await harness([faithful], recorded(ABOUT_29BR_ON), rows.map(r => ({ ...r, links: [] })), ANSWER_29BR).run(); assert.ok(unlinked.relevance.dropped.includes('M12') && unlinked.relevance.voted === undefined)
+  // the measurement log (M3 M6 M8 M9 M11 M12): M12 is backed by M3 and M6 only when M8, M9 and M11 are not sure (2 < 3)
+  const thin = await harness([faithful], name => (['about_M8', 'about_M9', 'about_M11'].includes(name) ? .1 : recorded(ABOUT_29BR_ON)(name)), rows, ANSWER_29BR).run(); assert.ok(thin.relevance.dropped.includes('M12') && thin.relevance.voted === undefined)
+  // three sure of five others is under two thirds
+  const under = await harness([faithful], name => (['about_M8', 'about_M9'].includes(name) ? .1 : recorded(ABOUT_29BR_ON)(name)), rows, ANSWER_29BR).run(); assert.ok(under.relevance.dropped.includes('M12') && under.relevance.voted === undefined)
+  // a log of three entries is not voted on: cutting the link before M9 splits the measurement log into M3 M6 M8 and M9 M11 M12
+  const cut = rows.map((r, i) => (i === 8 ? { ...r, links: [] } : r)), short = await harness([faithful], recorded(ABOUT_29BR_ON), cut, ANSWER_29BR).run()
+  assert.ok(short.relevance.dropped.includes('M12') && short.relevance.voted === undefined)
+})
+
+test('EGDESK_BRIEFING_LAYERS=on (default off): check-29br schema-off step_P2 .65 (a sentence with no figure over six sure rows) cost a whole fill turn; with the flag the sentence stays, the fill is one turn, and without it the rewrite still happens', async () => {
+  const probability = name => (name === 'step_P2' ? .65 : name.startsWith('same_') ? .03 : name.startsWith('before_') ? .9 : .97)
+  const off = harness([faithful, faithful], probability), offOut = await off.run()
+  assert.equal(offOut.status, 'presented'); assert.deepEqual(off.fills.map(f => f.only ?? null), [null, ['P2']], 'the default: the undecided sentence is written again'); assert.equal(offOut.stats.stepKept, undefined)
+  const on = harness([faithful, faithful], probability, rows, ANSWER, { layers: true }), onOut = await on.run()
+  assert.equal(onOut.status, 'presented'); assert.deepEqual(on.fills.map(f => f.only ?? null), [null]); assert.deepEqual(onOut.stats.stepKept, ['P2'])
+  // a decided no of the sentence, or a card piece that is not sure, is still written again
+  const no = harness([faithful, faithful], name => (name === 'step_P2' ? .1 : probability(name)), rows, ANSWER, { layers: true }); await no.run(); assert.deepEqual(no.fills.map(f => f.only ?? null), [null, ['P2']])
+  const piece = harness([faithful, faithful], name => (name === 'step_P2' ? .65 : name === 'slot_P2_r3' ? .5 : probability(name)), rows, ANSWER, { layers: true }); await piece.run(); assert.deepEqual(piece.fills.map(f => f.only ?? null), [null, ['P2']])
+})
+
+test('the layers switch is a dependency option: off unless the word is exactly on', () => {
+  assert.deepEqual([undefined, 'off', 'yes', 'on'].map(layers => briefingDeps({ layers }).layers), ['off', 'off', 'off', 'on']); assert.equal(briefingDeps({}).layers, 'off')
 })
