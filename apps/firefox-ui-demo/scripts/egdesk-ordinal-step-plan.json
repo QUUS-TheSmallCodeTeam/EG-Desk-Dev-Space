@@ -1,0 +1,75 @@
+{
+ "set": "ordinal-step-v1",
+ "description": "LIVE, c44 (Decisions only, no page, no engine): after \"두번째\" resumes the portal task (V4, c63: the step read the right element, [L2] 사업자 987-65-43210, at 0.60, under the 0.75 bar, and the loop asked the same question again; \"두 번째 사업자로 해 줘\" read 0.98 on the same page), the product now resolves an ordinal reply against the recorded candidates in code (egdesk-browser-choice-reply.mjs) and, when it cannot, gives the step the asked list. This plan measures the step request (the product's own: the real objective step over the portal fixture's /invoices page, captured with a stand-in and sent unchanged) for four ways the reply reaches the step: (bare) the old line, the bare reply \"두번째\" (the c63 shape: sanity, the V4 value was 0.60); (code) the code-resolved line the product now sends for \"두번째\"; (list) the reply \"두번째\" with the asked list and no resolution (what the model sees when code cannot resolve); (below) \"아래 거\", which code does not resolve, with the asked list. Verdict by code from readChoice (the product's bar: confidence 0.75, margin 0.2): the [L2] option accepted = correct (for \"아래 거\" also correct: the second listed is the lower one on this page); another option accepted = WRONG (the other business would be opened); not accepted = safe_miss (the person is asked again). Pre-registered BEFORE the measurement module. Sent once.",
+ "goal": "포털 세금계산서 이번 달 거 받아줘",
+ "host": "portal.example.test",
+ "today": "2026-11-25",
+ "asked": [
+  "사업자 123-45-67890",
+  "사업자 987-65-43210"
+ ],
+ "wantOption": "사업자 987-65-43210",
+ "maxRequests": 4,
+ "tokenCeiling": 5000,
+ "passRule": "No request accepts the wrong business (hard). Counts per verdict are reported; a safe miss never fails the plan.",
+ "dropOrder": [
+  "below"
+ ],
+ "replies": [
+  {
+   "id": "bare",
+   "message": "두번째",
+   "line": "bare",
+   "want": "correct",
+   "predicted": {
+    "correct": 0.35,
+    "safe_miss": 0.63,
+    "wrong": 0.02
+   },
+   "note": "The c63 shape: the bare reply with no asked list. V4 measured 0.60 on this page (under the bar). Expected to repeat."
+  },
+  {
+   "id": "code",
+   "message": "두번째",
+   "line": "code",
+   "want": "correct",
+   "predicted": {
+    "correct": 0.93,
+    "safe_miss": 0.05,
+    "wrong": 0.02
+   },
+   "note": "The product now: the reply is resolved in code, the step sees the chosen business by name and the asked order, as it did for \"두 번째 사업자로 해 줘\" (0.98)."
+  },
+  {
+   "id": "list",
+   "message": "두번째",
+   "line": "list",
+   "want": "correct",
+   "predicted": {
+    "correct": 0.8,
+    "safe_miss": 0.17,
+    "wrong": 0.03
+   },
+   "note": "If code could not resolve it: the bare reply plus the asked list in the order the person saw it."
+  },
+  {
+   "id": "below",
+   "message": "아래 거",
+   "line": "below",
+   "want": "correct",
+   "predicted": {
+    "correct": 0.55,
+    "safe_miss": 0.4,
+    "wrong": 0.05
+   },
+   "note": "A position word code does not resolve; the model sees the asked list. Unsure by nature: \"아래\" may be read against the page."
+  }
+ ],
+ "prediction": {
+  "correct": "3 of 4 (range 2 to 4)",
+  "wrong": "0 wrong with probability 0.90",
+  "hypothesis": "the c63 failure was the missing asked list: bare 0.35 correct, code-resolved 0.93, list-only 0.80",
+  "decision": "if list is correct and bare is not, the asked list is what the step lacked and the code resolution is a safe shortcut for the unambiguous ordinals; if bare is correct too, the c63 miss was run variance and the fix is harmless; if code is not correct, the resolved line wording must change"
+ },
+ "preRegistrationNote": "dropOrder is filled after the estimate and before any send. The step request is about 1.2k tokens (a choice question and seven predicates), so four requests are about the 5,000 ceiling."
+}
