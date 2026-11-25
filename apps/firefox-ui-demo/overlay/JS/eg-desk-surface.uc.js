@@ -28481,6 +28481,7 @@
         if (timer) window.clearTimeout(timer);
         try { panel.remove(); } catch {}
         if (siteAskPanel === panel) siteAskPanel = null;
+        card.classList.remove('egd-site-ask-open'); // u11
         resolve(answer);
       };
       const button = (label, answer, testid, primary) => el('button', { type: 'button',
@@ -28494,6 +28495,9 @@
         button('거절', 'refused', 'browser-site-refuse', false)));
       siteAskPanel = panel;
       wrap.appendChild(panel);
+      // u11 (D25): a Card that is not the active one keeps a transparent capture layer over its whole body (z-index 12, above this panel inside the scaled wrap): a real pointer click on [이 대화에서 허용]
+      // landed on that layer, which only activates the Card, so the answer never came (a script's click() skips hit-testing and worked). While the question is open the layer steps aside.
+      card.classList.add('egd-site-ask-open');
       try { panel.querySelector('.egd-browser-site-ask-allow')?.focus(); } catch {}
       timer = window.setTimeout(() => finish('pending'), Math.max(0, (Number.isFinite(deadlineMs) ? deadlineMs : Date.now()) - Date.now() - 500));
     });

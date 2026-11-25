@@ -102,3 +102,12 @@ test('u10, the screen: the site answer carries numbers only (time given, time ta
   const at = surface.indexOf("const answer = await card._browserControls.toolAskSite?.({ site, deadlineMs: request.deadlineMs });")
   assert.ok(surface.slice(at, at + 600).includes("if (answer === 'allowed') {"), 'allowed still joins the conversation\'s set exactly as before')
 })
+
+test('u11, the screen: while the site question is open the Card\'s body-capture layer (z-index 12, over the question) steps aside, so a real pointer click reaches [이 대화에서 허용]; it is restored on any end of the question', () => {
+  const css = fs.readFileSync(path.join(here, '..', 'overlay', 'CSS', 'eg-desk-surface.uc.css'), 'utf8')
+  assert.match(css, /\.egd-card-body-capture \{\s*position: absolute;\s*inset: 0;\s*z-index: 12;/)
+  assert.match(css, /\.egd-canvas-card\.egd-entity-active \.egd-card-body-capture,\n\.egd-canvas-card\.egd-site-ask-open \.egd-card-body-capture \{\n  display: none;\n\}/)
+  assert.match(surface, /wrap\.appendChild\(panel\);[\s\S]{0,700}card\.classList\.add\('egd-site-ask-open'\);/)
+  const finish = surface.slice(surface.indexOf('const finish = (answer) => {', surface.indexOf('const browserToolAskSite')), surface.indexOf('const button = (label, answer'))
+  assert.match(finish, /card\.classList\.remove\('egd-site-ask-open'\);[\s\S]*resolve\(answer\)/, 'every way out (answer or the timer) goes through finish')
+})
