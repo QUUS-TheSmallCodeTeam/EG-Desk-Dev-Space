@@ -84,6 +84,7 @@ export const EARLIER_EVIDENCE_LIMIT = 4
 // its records are kept for the next check (the check's own ranking keeps the ones related to the next draft). After a posted answer the limit above stays.
 export const EARLIER_WITHHELD_LIMIT = 8
 export const POSTED_ANSWER_KEY = 'egdesk_posted_answer'
+import { ENGINE_STALL_LIMITS, eventTurnId, stallFact } from './egdesk-engine-stall.mjs' // c33: the first-event watchdog
 import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
 import { OWN_EDIT_LIMITS, EDIT_TOOL_NAMES, ownEditEvidence } from './egdesk-own-edit-evidence.mjs' // c30b: the edits EG-Desk made, as readable evidence for the check of the answer
 import { OWN_COMMAND_LIMITS, ownCommandEntry, ownCommandEvidence } from './egdesk-own-command-evidence.mjs' // c29: what the check of an answer may know about the commands EG-Desk ran
@@ -765,7 +766,7 @@ function cleanNotification(method, p, engineId = 'codex') {
 export const STOP_RECORD_WAIT_MS = 2500 // c27: how long the next send waits for a stopped command's record (the runner's kill grace is 2 s)
 const INTERNAL_WORD = /^[A-Za-z][A-Za-z0-9._:-]{0,63}$/ // an effort or a model name a caller may pick for an internal turn (the engine rejects what it does not know)
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], agentReloadReuse = false, expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null }) {
+  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], agentReloadReuse = false, expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null, engineStall = null }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer, monotonicNow })
     if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
     this.resolveProjectWorkspace = resolveProjectWorkspace
@@ -914,6 +915,11 @@ export class CodexChatRuntime {
     this.deletedConversations = new Set() // clientThreadId of a conversation the person deleted (forgetConversation): its runs say nothing more
     this.inRunMessageQueue = new WeakMap() // run -> [{ requestId, localMessageId, text, at, state }]: messages typed while it works (inRunMessages flag)
     this.carriedInRun = new Map() // clientThreadId -> [text]: messages its run ended without acting on; they open the next turn's input
+    // c33: the first-event watchdog (developer flag, default off): engineStall = { firstEventMs } | null
+    this.engineStall = engineStall && Number.isFinite(engineStall.firstEventMs) && engineStall.firstEventMs >= 1 ? { firstEventMs: engineStall.firstEventMs } : null
+    this.engineSeen = new Map() // threadId -> Set of turn ids that sent an event (bounded)
+    this.engineWaiters = new Set() // { threadId, turnId, resolve }
+    this.engineStalls = new Map() // clientThreadId -> the last stall fact of the conversation (bounded)
     this.stoppedCommands = new Map() // clientThreadId -> the fact of the command the person stopped (consumed by the next turn)
     this.postedInstead = new Map() // clientThreadId -> { outcome, posted }: the answer the person saw instead of the Agent's draft (consumed by the next turn)
     this.draftOutcomes = new WeakMap() // run -> the draft check's outcome for its answer
@@ -2983,7 +2989,7 @@ export class CodexChatRuntime {
       const engineShape = this.shapeEngineContext(dfContext)
       await this.readGateHookReply(cid, body.message)
       turnStartAttempted = context.turnStartAttempted = true
-      const result = dfLocal?.finished ? { turn: { id: dfLocal.turnId, status: 'inProgress', items: [] } } : await engine.startTurn({
+      const result = dfLocal?.finished ? { turn: { id: dfLocal.turnId, status: 'inProgress', items: [] } } : await this.startTurnWatched(engine, {
         threadId: cid,
         input: [...this.carriedInputFor(context.clientThreadId), { type: 'text', text: body.message, text_elements: [] }],
         clientUserMessageId: context.requestId,
@@ -2993,7 +2999,7 @@ export class CodexChatRuntime {
         ...(overrides.cwd ? { cwd: overrides.cwd } : {}),
         ...(overrides.model ? { model: overrides.model } : {}),
         ...(effort !== undefined ? { effort } : {}),
-      }, slot)
+      }, slot, context)
       if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       context.nativeTurnId = idText(result?.turn?.id)
       if (reservedTopicAnswer) {
@@ -3028,6 +3034,7 @@ export class CodexChatRuntime {
       if (!run) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
       try { this.gateHookBroker()?.turnStarted({ conversationId: cid, turnId: run.runId }) } catch { /* the gate hook never affects a turn */ }
       if (ownTools) { run.ownTools = true; run.ownFolder = ownFolder; if (ownFolder) this.ownFolders.set(cid, ownFolder) }
+      if (context.engineStall) run.engineStall = context.engineStall // c33: this run's first turn stayed silent and was started again
       if (dfLocal) { run.decisionFirst = dfLocal.diag; if (dfLocal.preRun?.ownCommands) { run.ownCommands = dfLocal.preRun.ownCommands; run.ownCommandLast = dfLocal.preRun.ownCommandLast } } // c32: the command EG-Desk ran for this run, as evidence like any own command
       if (topicRoute && intake.current()) {
         const { topic, parent, needs } = topicRoute // discard the plaintext packet at this boundary
@@ -4103,6 +4110,7 @@ export class CodexChatRuntime {
 
   handleNotification(message, engineId, slot) {
     if (this.internalTurns.feed(message)) return Promise.resolve() // a private fork turn, not a run
+    this.noteEngineEvent(message)
     this.markEngineActivity(message)
     const inbound = this.inboundEventRoute(message, engineId, slot)
     if (!this.eventRouteMatches(inbound)) return Promise.resolve()
@@ -4128,6 +4136,7 @@ export class CodexChatRuntime {
   }
 
   handleServerRequest(message, engineId, slot) {
+    this.noteEngineEvent(message)
     if (this.internalTurns.declines(message)) { // the private fork may not act: every request is refused
       this.respond(message.id, null, { code: -32000, message: 'Not available in a private turn' }, slot || this.threadOperationSlot(idText(message.params?.threadId)))
       return Promise.resolve()
@@ -6725,6 +6734,63 @@ export class CodexChatRuntime {
       await Promise.race([Promise.all(waits), new Promise(resolve => { timer = this.setTimer(resolve, STOP_RECORD_WAIT_MS) })])
       if (timer !== null) this.clearTimer(timer)
     } catch { /* the wait only avoids a missed note */ }
+  }
+
+  // ---- c33: the first-event watchdog ----
+  /** Every message the engine sends for a thread: remembers the turn ids that spoke and wakes a watchdog waiting for this turn (a thread-level message belongs to no turn: it does not count). */
+  noteEngineEvent(message) {
+    try {
+      if (!this.engineStall) return
+      const threadId = idText(message?.params?.threadId); if (!threadId) return
+      const turnId = eventTurnId(message)
+      if (turnId) { const seen = this.engineSeen.get(threadId) ?? new Set(); seen.add(turnId); this.engineSeen.set(threadId, seen); while (seen.size > 16) seen.delete(seen.values().next().value); while (this.engineSeen.size > 64) this.engineSeen.delete(this.engineSeen.keys().next().value) }
+      for (const waiter of [...this.engineWaiters]) if (waiter.threadId === threadId && turnId === waiter.turnId) { this.engineWaiters.delete(waiter); waiter.resolve(true) }
+    } catch { /* the watchdog never affects a message */ }
+  }
+
+  /** true when the engine sent an event for this turn (before or within ms), false when it stayed silent. */
+  waitFirstEvent(threadId, turnId, ms) {
+    if (this.engineSeen.get(threadId)?.has(turnId)) return Promise.resolve(true)
+    return new Promise(resolve => {
+      const waiter = { threadId, turnId, resolve: v => { this.clearTimer(timer); resolve(v) } }
+      const timer = this.setTimer(() => { this.engineWaiters.delete(waiter); resolve(false) }, ms)
+      this.engineWaiters.add(waiter)
+    })
+  }
+
+  /**
+   * engine.startTurn with the watchdog (flag EGDESK_ENGINE_STALL_FIRST_EVENT_MS; off: exactly engine.startTurn). The turn was accepted; if no event for it comes within firstEventMs, it is
+   * interrupted and, because nothing ran (no event at all), started ONCE more with the same parameters; a second silence ends the request with the closed code ENGINE_STALLED. The fact
+   * goes to context.engineStall (the run, the heartbeat). A turn that did send an event is never touched, whatever it does later.
+   */
+  async startTurnWatched(engine, params, slot, context = {}) {
+    if (!this.engineStall) return engine.startTurn(params, slot)
+    const ms = this.engineStall.firstEventMs, cid = params.threadId
+    let stalls = 0
+    for (;;) {
+      const result = await engine.startTurn(stalls ? { ...params, clientUserMessageId: `${params.clientUserMessageId ?? 'egdesk'}:retry${stalls}` } : params, slot)
+      const turnId = idText(result?.turn?.id)
+      if (!turnId || TERMINAL.has(result?.turn?.status) || await this.waitFirstEvent(cid, turnId, ms)) {
+        if (stalls) this.noteEngineStall(context, stallFact({ afterMs: ms, stalls, recovered: true }))
+        return result
+      }
+      stalls++
+      let timer = null
+      try { await Promise.race([engine.interruptTurn(cid, turnId, slot), new Promise(resolve => { timer = this.setTimer(resolve, ENGINE_STALL_LIMITS.interruptMs) })]) } catch { /* best effort: the turn is abandoned either way */ } finally { if (timer !== null) this.clearTimer(timer) }
+      if (stalls > 1) {
+        this.noteEngineStall(context, stallFact({ afterMs: ms, stalls, recovered: false }))
+        throw chatError('ENGINE_STALLED', 'The engine accepted the turn and stayed silent', 504)
+      }
+    }
+  }
+
+  noteEngineStall(context, fact) {
+    try {
+      context.engineStall = fact
+      const key = context.clientThreadId
+      if (key) { this.engineStalls.delete(key); this.engineStalls.set(key, fact); while (this.engineStalls.size > 64) this.engineStalls.delete(this.engineStalls.keys().next().value) }
+      context.heartbeat?.register?.('engine_stall', { facts: () => ({ stalled: true, after_ms: fact.afterMs, stalls: fact.count, recovered: fact.recovered }) })
+    } catch { /* the fact is advisory */ }
   }
 
   // ---- c32 (U13): the decision-first command path ----
