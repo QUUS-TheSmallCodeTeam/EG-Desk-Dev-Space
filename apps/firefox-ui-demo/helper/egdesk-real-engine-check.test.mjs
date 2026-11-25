@@ -255,7 +255,7 @@ test('a scripted "yes" is read by the Decision model through the egress gate and
   assert.ok(w.decisionCalls.some(c => c.names.includes('reply_runs_command') && c.reply === APPROVER_TEXT.yes), 'the reply was read by the Decision model')
   // decision calls are recorded as names and numbers only
   const calls = rec.turns[0].subTurns.flatMap(s => s.decisions)
-  assert.ok(calls.length > 0); for (const c of calls) { assert.deepEqual(Object.keys(c).sort(), ['inputTokens', 'ms', 'names', 'p', 'status']); assert.equal(c.inputTokens, 20, 'the Decision input tokens of each call'); assert.ok(Object.values(c.p).every(v => typeof v === 'number' || typeof v === 'string')) }
+  assert.ok(calls.length > 0); for (const c of calls) { assert.deepEqual(Object.keys(c).sort(), ['atMs', 'inputTokens', 'ms', 'names', 'p', 'status']); assert.ok(Number.isInteger(c.atMs) && c.atMs >= 0, 'c31: when the call began, ms from the turn start'); assert.equal(c.inputTokens, 20, 'the Decision input tokens of each call'); assert.ok(Object.values(c.p).every(v => typeof v === 'number' || typeof v === 'string')) }
   assert.doesNotMatch(JSON.stringify(rec), /egd-synthetic-not-a-key|sk-synthetic/, 'no key in any record')
   noSchemaErrors(w)
 })
