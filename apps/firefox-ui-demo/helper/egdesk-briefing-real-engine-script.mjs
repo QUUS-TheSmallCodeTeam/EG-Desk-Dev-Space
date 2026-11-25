@@ -131,3 +131,13 @@ export function buildLoopLayersScript(entries = LOOP_ENTRIES) {
   return { set: LOOP_LAYERS_SET, description: `${base.description} Version 3 also sets EGDESK_BRIEFING_LAYERS=on (default off in every other script).`,
     conversations: [{ ...on, id: 'realistic-layers-schema-on', flags: { ...on.flags, EGDESK_BRIEFING_LAYERS: 'on' } }] }
 }
+
+// ---- v4 of the realistic script (cycle 45, owner direction U13): v3 (notes handed to the answering turn, EGDESK_BRIEFING_LAYERS=on) with EGDESK_BRIEFING_PREFILL=on (default off in every other script):
+// the briefing's fill turn starts when the turn is accepted, while the answer is being written, and its reply is used after the answer when the request is identical. One conversation, schema on.
+// The expectations are v1's (the board after the answer must be the same); what changes is the time: the record's flow.prefill says whether the early reply was used.
+export const LOOP_PREFILL_SET = 'real-engine-briefing-realistic-v4'
+export function buildLoopPrefillScript(entries = LOOP_ENTRIES) {
+  const base = buildLoopLayersScript(entries), on = base.conversations[0]
+  return { set: LOOP_PREFILL_SET, description: `${base.description} Version 4 also sets EGDESK_BRIEFING_PREFILL=on (default off in every other script).`,
+    conversations: [{ ...on, id: 'realistic-prefill-schema-on', flags: { ...on.flags, EGDESK_BRIEFING_PREFILL: 'on' } }] }
+}

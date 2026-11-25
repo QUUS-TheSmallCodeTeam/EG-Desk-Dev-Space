@@ -17,7 +17,7 @@ import * as BriefingHost from '../overlay/resources/EGDeskBriefingHost.sys.mjs'
 import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
 
-export const BRIEFING_FLAGS = Object.freeze(['EGDESK_BRIEFING_FLOW', 'EGDESK_BRIEFING_OUTPUT_SCHEMA', 'EGDESK_BRIEFING_HAND_MATERIALS', 'EGDESK_BRIEFING_LAYERS'])
+export const BRIEFING_FLAGS = Object.freeze(['EGDESK_BRIEFING_FLOW', 'EGDESK_BRIEFING_OUTPUT_SCHEMA', 'EGDESK_BRIEFING_HAND_MATERIALS', 'EGDESK_BRIEFING_LAYERS', 'EGDESK_BRIEFING_PREFILL'])
 export const BRIEFING_LIMITS = Object.freeze({ timeoutMs: 150_000, year: 2026, viewport: Object.freeze({ x: 0, y: 0, width: 2400, height: 1400 }), tokenCap: 5_000_000, strings: 16, stringChars: 400, replyChars: 6000, inputChars: 6000 })
 export const BRIEFING_OUTCOMES = Object.freeze(['presented', 'fallback-chat', 'bubble'])
 const clip = (text, n) => String(text ?? '').slice(0, n)
@@ -131,7 +131,7 @@ export const briefingHook = Object.freeze({
     const recContexts = { publishOutput: async (run, args) => { published.push({ title: clip(args.title, 200), markdown: clip(args.markdown, 8000) }); return contexts.publishOutput(run, args) },
       proposeBriefing: async (run, args) => { const out = await contexts.proposeBriefing(run, args); proposed.push({ id: out?.id ?? null, steps: (out?.steps ?? []).map(s => ({ id: s.id, text: clip(s.text, 600) })) }); return out } }
     const deps = briefingDeps({ chat: recChat, contexts: recContexts, enabled: true, ...(L.engine ? { limits: L.engine } : {}), outputSchema: schema ? 'on' : 'off',
-      order: FLAG.EGDESK_BRIEFING_ORDER === 'design-first' ? 'design-first' : 'skeleton', fillCheck: FLAG.EGDESK_BRIEFING_FILL_CHECK === 'facts' ? 'facts' : 'all', coverage: FLAG.EGDESK_BRIEFING_COVERAGE === 'board' ? 'board' : 'facts', layers: FLAG.EGDESK_BRIEFING_LAYERS === 'on' ? 'on' : 'off' })
+      order: FLAG.EGDESK_BRIEFING_ORDER === 'design-first' ? 'design-first' : 'skeleton', fillCheck: FLAG.EGDESK_BRIEFING_FILL_CHECK === 'facts' ? 'facts' : 'all', coverage: FLAG.EGDESK_BRIEFING_COVERAGE === 'board' ? 'board' : 'facts', layers: FLAG.EGDESK_BRIEFING_LAYERS === 'on' ? 'on' : 'off', prefill: FLAG.EGDESK_BRIEFING_PREFILL === 'on' ? 'on' : 'off' })
     const engineFor = deps.engineFor, engineCalls = []
     // each request of the engine, with why it gave nothing (the engine's lastFailure: timeout | no-reply | refused | unusable) and what it asked (kind, only, cover)
     deps.engineFor = (run, options) => {
@@ -180,18 +180,25 @@ export const briefingHook = Object.freeze({
     }
     const budget = createDecisionBudget({ monthlyInputTokenCap: L.tokenCap })
     const board = createBoardPresentationHttpHandler({ credentials: { getApiKey: () => key, savedAt: () => 1 }, getMode: () => 'on', budget, fetchImpl: decisionFetch, calibrationLog, briefing: deps })
+    // c45: EGDESK_BRIEFING_PREFILL=on (default off) is what the bridge does with the flag: the runtime hands { run, request } to the board handler when the turn is accepted, and the fill turn starts
+    // while the answer is being written. The records of that early work (its private turn, its engine request, its Decision requests) belong to the turn: marks are taken at the send then.
+    const prefillOn = FLAG.EGDESK_BRIEFING_PREFILL === 'on' && FLAG.EGDESK_BRIEFING_FLOW === 'on'
+    let startMark = null
+    if (prefillOn && chat.decisionContext && typeof chat.decisionContext === 'object') chat.decisionContext.briefingPrefill = args => board.prefill?.(args)
     return {
       name: 'briefing',
       // the same capabilities the chrome sends for a Codex room (EGDeskChatState.sys.mjs contextCapabilitiesForRequest)
       // Cycle 42 (owner direction U13, audit reports/l6-c29-u13-audit.md): EGDESK_BRIEFING_HAND_MATERIALS=on (default OFF) hands the folder's notes to the answering turn, as the product's turn
       // memory hands the pages the Decision model picked (additionalContext): the engine then needs no tool round to read them. Here the "pick" is all of the conversation's notes; the person's
       // message is followed by them, the briefing's own request text is still the person's message alone.
-      sendExtra: ({ text } = {}) => ({ contextCapabilities: { read: true, reader: true, publishBriefing: true },
+      sendExtra: ({ text } = {}) => { if (prefillOn) startMark = { trace: trace.length, calls: engineCalls.length, requests: requestLog.length, forks: forkCalls.length, published: published.length, proposed: proposed.length, engines: engines.length, decisions: decisions.length }
+        return { contextCapabilities: { read: true, reader: true, publishBriefing: true },
         ...(FLAG.EGDESK_BRIEFING_HAND_MATERIALS === 'on' && typeof text === 'string' && Object.keys(conversation?.folder ?? {}).length
-          ? { message: `${text}\n\n${Object.entries(conversation.folder).map(([file, body]) => `--- ${file}\n${String(body).trim()}`).join('\n\n')}` } : {}) }),
+          ? { message: `${text}\n\n${Object.entries(conversation.folder).map(([file, body]) => `--- ${file}\n${String(body).trim()}`).join('\n\n')}` } : {}) } },
       async afterTurn({ run, say, answer, turnIndex = 0 }) {
         const started = Date.now()
         const mark = { trace: trace.length, calls: engineCalls.length, requests: requestLog.length, forks: forkCalls.length, published: published.length, proposed: proposed.length, engines: engines.length, decisions: decisions.length }
+        if (prefillOn && startMark) { for (const k of ['trace', 'calls', 'requests', 'forks', 'decisions']) mark[k] = Math.min(mark[k], startMark[k]); startMark = null } // the early work of the prefill is part of this turn's record
         const base = { turnIndex, request: clip(say, 200), schemaFlag: schema, year: L.year, viewport: L.viewport, materialsFrom: null, materials: 0, outcome: null, reason: null }
         const none = reason => ({ ...base, outcome: 'skipped', reason, forkRequests: [], forkErrors: [], forkReplies: [], forkTrace: [], engineCalls: [], flow: null, forkTurns: 0, forkSchemaTurns: 0, schemaInvalid: null, published: [], steps: [], decisions: [], wallMs: 0 })
         if (typeof answer !== 'string' || !answer.trim()) return none('no-answer')
@@ -206,7 +213,7 @@ export const briefingHook = Object.freeze({
         return { ...base, materialsFrom, materials: materialCount,
           // the observe summary: outcome presented | fallback-chat | bubble (the handler's own words), or a skipped answer
           outcome: summary?.outcome ?? (summary?.status === 'skipped' ? 'skipped' : error ? 'error' : null), reason: summary?.reason ?? error ?? null,
-          flow: summary ? { status: summary.status ?? null, stages: summary.stages ?? [], judgeRequests: summary.judgeRequests ?? 0, fillTurns: summary.fillTurns ?? 0 } : null,
+          flow: summary ? { status: summary.status ?? null, stages: summary.stages ?? [], judgeRequests: summary.judgeRequests ?? 0, fillTurns: summary.fillTurns ?? 0, ...(summary.prefill ? { prefill: summary.prefill } : {}) } : null,
           // forkRequests: every thread/fork, thread/start and turn/start the briefing's private turns sent, with the error code of a refusal
           forkRequests: requests, forkErrors: requests.filter(r => r.error).map(r => `${r.method}:${r.error}`),
           // forkTrace: per private turn, its time and ending (c34: a null reply says whether it timed out), the kinds of item it produced and its last token usage;

@@ -8,6 +8,7 @@ import { normalizeBoardPresentationScene, prepareBoardPresentation, readBoardPre
 import { canvasCheckCalibrationEntry, prepareCanvasDesignCheck, readCanvasDesignCheck } from './egdesk-canvas-design-check.mjs'
 import { completeBriefingArgs, continuedBriefingOutput, runBriefingFlow, briefingCheckCalibrationEntry, briefingReuseCalibrationEntry, placementCalibrationEntry, prepareBriefingCheck, prepareBriefingPlacement, prepareBriefingReuse, readBriefingCheck, readBriefingPlacement, readBriefingReuse } from './egdesk-briefing-flow.mjs'
 import { runSkeletonFlow, SKELETON_JUDGE } from './egdesk-briefing-skeleton.mjs'
+import { cachingFill, createPrefillStore } from './egdesk-briefing-prefill.mjs'
 import { attachBoardVisual, MAX_BOARD_VISUAL_IMAGE_CHARS, validateBoardVisual } from './egdesk-board-visual-packet.mjs'
 
 const ROOT = '/decision/board-presentation'
@@ -261,6 +262,9 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
   // It lets a later answer recognise "this card already shows these materials" by the card's provenance instead of by its title, and continue the version chain.
   // Cycle 23: the bridge passes a persisted Map (egdesk-briefing-bindings.mjs, its own data dir, ids/keys/hashes only); without it, in memory as before.
   const briefingBindings = persistedBindings instanceof Map ? persistedBindings : new Map()
+  // Cycle 45: prefill entries by answer (egdesk-briefing-prefill.mjs), and the last board the chrome showed per conversation (cards and viewport), which a prefill uses because it starts
+  // before the chrome asks. A prefill whose view was not the real one is a miss, never a different board.
+  const prefills = createPrefillStore(), lastViews = new Map()
   async function observe(body) {
     const mode = getMode(), want = body?.flow === 'on' ? 'on' : 'advisory'
     if (!['advisory', 'on'].includes(mode) || want !== mode) return { status: 'skipped', reason: 'mode' }
@@ -281,11 +285,14 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     if (live && briefingFlows.has(flowKey)) return { status: 'skipped', reason: 'already' }
     // The same model that wrote the answer, on a private fork (egdesk-briefing-engine.mjs); null when it is switched off or that engine cannot fork.
     const engine = !live ? null : typeof briefing.engineFor === 'function' ? briefing.engineFor(answerRun, { report: body.report }) : briefing.engine
+    const claimed = live && briefing.prefill === 'on' ? prefills.claim(`${ids.conversationId}/${ids.answerId}`) : null // c45: what a prefill already asked of the engine for this answer
+    if (claimed) await claimed.idle() // its Decision requests (a few seconds at the start of the turn) are over before this flow asks its own
     if (live && typeof engine !== 'function') return { status: 'skipped', reason: 'no-engine' }
     if (live) { briefingFlows.add(flowKey); if (briefingFlows.size > 200) briefingFlows.delete(briefingFlows.values().next().value) }
     const sink = { destroyed: false, writableEnded: false, once() {}, off() {} }
     const route = judge => ({ prepare: async dto => prepareJudge(judge, dto).body, run: ticket => run(ticket, sink), cancel: async ticket => { discard(ticket) } })
     const list = observeCandidates(body.candidates)
+    if (typeof ids.conversationId === 'string' && briefing?.prefill === 'on') { lastViews.delete(ids.conversationId); lastViews.set(ids.conversationId, { list, viewport: body.viewport ?? null }); while (lastViews.size > 50) lastViews.delete(lastViews.keys().next().value) }
     // ONE egress mechanism (D2): the Decision model follows the same data-sharing permissions as the other models, through the shared gate. There is no separate consent here:
     // every judgment request of the flow (placement, reuse/retrieve, flow check) is asked of the gate by runBriefingFlow before it is sent.
     // Skeleton-first (default of the `on` path since cycle 13; briefing.order, set by the bridge's dependency factory): the Decision model decides the design guide from the
@@ -295,11 +302,11 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
     const view = body.viewport, viewport = view && [view.x, view.y, view.width, view.height].every(Number.isFinite) && view.width > 0 && view.height > 0 ? { x: view.x, y: view.y, width: view.width, height: view.height } : null
     const gate = createEgressGate(modelDataPermissions({ canvasMaySend: list.some(c => c.maySend === true), ...(skeleton ? { runActive: true, memoryScope: Array.isArray(materials) && materials.length ? { attachedThisTurn: materials.length } : null } : {}) }))
     const out = skeleton ? await runSkeletonFlow({ request: typeof body.request === 'string' ? body.request.slice(0, 2000) : '', answer: body.report, materials, candidates: list, egress: gate, viewport,
-      currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null, judge: route(JUDGES['/decision/briefing-skeleton']), fill: engine, observeOnly: !live, bindings: briefingBindings, fillCheck: briefing.fillCheck, coverageCheck: briefing.coverage, layers: briefing.layers === 'on', allow: async () => true })
+      currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null, judge: route(JUDGES['/decision/briefing-skeleton']), fill: claimed ? cachingFill(engine, claimed) : engine, observeOnly: !live, bindings: briefingBindings, fillCheck: briefing.fillCheck, coverageCheck: briefing.coverage, layers: briefing.layers === 'on', allow: async () => true })
       : await runBriefingFlow({ report: body.report, candidates: list, egress: gate, currentAnswerId: typeof body.currentAnswerId === 'string' ? body.currentAnswerId.slice(0, 256) : null,
       decide: { placement: route(JUDGES['/decision/briefing-placement']), reuse: route(JUDGES['/decision/briefing-reuse']), ...(live ? { check: route(JUDGES['/decision/briefing-check']) } : {}) },
       engine, observeOnly: !live, allow: async () => true })
-    const summary = { status: 'observed', stages: out.stages ?? [], outcome: out.status, judgeRequests: out.stats?.judgeRequests ?? 0, ...(out.reason ? { reason: out.reason } : {}), ...(skeleton ? { order: 'skeleton', fillTurns: out.stats?.fillTurns ?? 0 } : {}) }
+    const summary = { status: 'observed', stages: out.stages ?? [], outcome: out.status, judgeRequests: out.stats?.judgeRequests ?? 0, ...(out.reason ? { reason: out.reason } : {}), ...(skeleton ? { order: 'skeleton', fillTurns: out.stats?.fillTurns ?? 0 } : {}), ...(claimed ? { prefill: { ...claimed.counts } } : {}) }
     if (!live || out.status !== 'presented') return summary
     // Passed the flow check: create the (0..n) allowed new components, then propose through the same validation as the tool. Any failure leaves chat only.
     try {
@@ -337,6 +344,41 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
       const retrievals = [...new Set([...out.retrievals.map(r => r.id), ...stale])].map(viewId => ({ viewId }))
       return { ...summary, outcome: 'presented', briefingId: proposed.id, steps: proposed.steps.length, newComponents: out.newComponents.length, retrievals }
     } catch { return { ...summary, outcome: 'fallback-chat', reason: 'publish-failed' } }
+  }
+  // Cycle 45 (EGDESK_BRIEFING_PREFILL=on, default off): called by the runtime when a turn is accepted (decisionContext.briefingPrefill), while the answer is still being written. It runs the same flow
+  // as observe up to the first fill with NO answer text (the earlier placement path) and sends that fill turn at once; nothing is published or proposed, no flow is marked started. The route after
+  // the answer claims the entry and uses a reply whose request is identical (egdesk-briefing-prefill.mjs); a different request is a miss. Never throws, never delays the turn.
+  async function prefill({ run: answerRun, request, candidates, viewport: given } = {}) {
+    try {
+      if (briefing?.prefill !== 'on' || getMode() !== 'on') return { status: 'skipped', reason: 'off' }
+      const text = typeof request === 'string' ? request.trim().slice(0, 2000) : ''
+      if (!text || !answerRun || typeof answerRun.conversationId !== 'string' || typeof answerRun.answerId !== 'string') return { status: 'skipped', reason: 'invalid' }
+      if (briefing.order !== 'skeleton' || typeof briefing.engineFor !== 'function' || typeof briefing.materialsFor !== 'function') return { status: 'skipped', reason: 'no-engine' }
+      const key = `${answerRun.conversationId}/${answerRun.answerId}`
+      if (briefingFlows.has(key) || prefills.has(key)) return { status: 'skipped', reason: 'already' }
+      const materials = briefing.materialsFor(answerRun)
+      if (!Array.isArray(materials) || !materials.length) return { status: 'skipped', reason: 'no-materials' }
+      const engine = briefing.engineFor(answerRun, { report: '' })
+      if (typeof engine !== 'function') return { status: 'skipped', reason: 'no-engine' }
+      const entry = prefills.begin(key)
+      if (!entry) return { status: 'skipped', reason: 'already' }
+      // the board the chrome showed: given with the call when the caller has it, else the last one this conversation's briefing saw (none yet = an empty board; the request after the answer
+      // is then different when the board has cards, which is a miss, never a different board)
+      const last = lastViews.get(answerRun.conversationId) ?? { list: [], viewport: null }
+      const view = Array.isArray(candidates) ? { list: observeCandidates(candidates), viewport: given ?? last.viewport } : given ? { list: last.list, viewport: given } : last, vp = view.viewport
+      const viewport = vp && [vp.x, vp.y, vp.width, vp.height].every(Number.isFinite) && vp.width > 0 && vp.height > 0 ? { x: vp.x, y: vp.y, width: vp.width, height: vp.height } : null
+      const gate = createEgressGate(modelDataPermissions({ canvasMaySend: view.list.some(c => c.maySend === true), runActive: true, memoryScope: { attachedThisTurn: materials.length } }))
+      const sink = { destroyed: false, writableEnded: false, once() {}, off() {} }
+      // one Decision request at a time in this handler: wait (bounded) for a request in flight rather than be answered 'manual'
+      const route = judge => ({ prepare: async dto => prepareJudge(judge, dto).body, cancel: async ticket => { discard(ticket) },
+        run: async ticket => { for (let i = 0; i < 60 && active; i++) await new Promise(resolve => setTimeout(resolve, 50)); entry.judging(1); try { return await run(ticket, sink) } finally { entry.judging(-1) } } })
+      const fill = want => entry.speculate(engine, want)
+      fill.lastFailure = () => (typeof engine.lastFailure === 'function' ? engine.lastFailure() : null)
+      let out
+      try { out = await runSkeletonFlow({ request: text, answer: '', materials, candidates: view.list, egress: gate, viewport, currentAnswerId: answerRun.answerId, judge: route(JUDGES['/decision/briefing-skeleton']), fill,
+        observeOnly: false, bindings: briefingBindings, fillCheck: briefing.fillCheck, coverageCheck: briefing.coverage, layers: briefing.layers === 'on', prefill: true, allow: async () => true }) } finally { entry.judgesFinished() }
+      return { status: 'prefilled', outcome: out.status, ...(out.reason ? { reason: out.reason } : {}), ...entry.counts }
+    } catch { return { status: 'skipped', reason: 'unavailable' } }
   }
   async function observeRoute(req, res) {
     const reply = (code, body) => { if (!res.destroyed && !res.writableEnded) sendJson(res, code, body); return true }
@@ -434,6 +476,7 @@ export function createBoardPresentationHttpHandler({ credentials, getMode, budge
   }
 
   // Public authority epoch; never expose the credential binding or its secret.
+  handle.prefill = prefill
   handle.settingsRevision = () => createHmac('sha256', bindingKey).update('egdesk:board-settings:v1').digest('hex')
   handle.invalidate = () => {
     bindingKey = randomBytes(32)

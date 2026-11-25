@@ -62,7 +62,7 @@ export function rig(t, { mode = 'on', script, cap = 100000, hang = false, handle
     return { status: res.status, body: res.body };
   };
   const route = root => ({ prepare: async dto => (await http('POST', `${root}/prepare`, dto)).body, run: async ticket => (await http('POST', `${root}/run`, { ticket, confirm: true })).body, cancel: async ticket => (await http('POST', `${root}/cancel`, { ticket })).body });
-  return { S, calls, budget, calibration, http, decide: { placement: route('/decision/briefing-placement'), reuse: route('/decision/briefing-reuse'), check: route('/decision/briefing-check') } };
+  return { S, calls, budget, calibration, http, board, decide: { placement: route('/decision/briefing-placement'), reuse: route('/decision/briefing-reuse'), check: route('/decision/briefing-check') } };
 }
 export const engineOf = (log, fn) => async request => { log.push(request); return fn(request, log.length - 1); };
 
