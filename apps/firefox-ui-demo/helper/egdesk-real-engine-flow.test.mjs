@@ -160,3 +160,45 @@ test('the sub-turn record names every engine message by method and the server re
   assert.equal(sub.engineMessages['request:item/tool/call'], 1, 'the tool call is a server request'); assert.deepEqual(sub.unansweredRequests, [], 'and it was answered')
   assert.ok(rec.turns[1].subTurns[0].engineMessages['turn/completed'] === 1, 'the second turn is counted on its own (reset per turn)')
 })
+
+// ---- c32: real-engine-approvals-fast-v1 (the compare script of the approvals decision-first path) on the fake ----
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+const FORCE_PUSH = 'git push --force origin main'
+function fastWorld(t, { second }) {
+  // turn 1: the engine calls the tool (the gate says the person is needed) and words the question itself; turn 2 (after the reply): the engine only talks
+  const fake = { turns: [{ steps: [{ toolCall: { tool: 'egdesk_run_command', arguments: { command: FORCE_PUSH } } }], final: '이 명령은 되돌릴 수 없어서 확인이 필요해요. 실행할까요?' }, second], forkTurns: [] }
+  const w = journeyWorld(t, fake, { commandMs: () => 30 })
+  const spawned = []
+  w.deps.runnerSpawn = (file, args) => { // the force push fails (exit 128, "not a git repository"), as in the real folder
+    const command = String(args.at(-1)), child = new EventEmitter(); spawned.push(command)
+    Object.assign(child, { pid: 9100 + spawned.length, stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true })
+    setTimeout(() => { child.stderr.write('fatal: not a git repository\n'); child.stdout.end(); child.stderr.end(); child.emit('close', 128, null) }, 20); return child
+  }
+  w.spawned = spawned
+  const original = w.deps.fetchImpl
+  w.deps.fetchImpl = async (url, init) => {
+    const body = JSON.parse(init.body), names = body.questions.map(q => q.name)
+    if (!names.some(n => /^(risk_|reply_|df_)/.test(n))) return original(url, init)
+    const text = JSON.stringify(body.input), json = { answers: [], usage: { input_tokens: 40 } }
+    for (const q of body.questions) {
+      if (q.name === 'df_pick') { json.answers.push({ name: q.name, type: 'choice', choice: 'none', confidence: 0.97, probabilities: [{ value: 'none', probability: 0.97 }, { value: q.choices.find(c => c.value !== 'none')?.value ?? 'x', probability: 0.01 }] }); continue }
+      const p = q.name === 'reply_runs_command' ? (/그냥 해/.test(text) ? 0.96 : 0.03) : q.name === 'reply_declines_command' ? (/아니 잠깐/.test(text) ? 0.96 : 0.03) : q.name === 'risk_unrestorable' ? 0.95 : 0.03
+      json.answers.push({ type: 'predicate', name: q.name, probability: p })
+    }
+    return Response.json(json)
+  }
+  return w
+}
+test('real-engine-approvals-fast-v1 on the fake: the engine words the question; the reply is settled by the Decision and CODE at once (run once / cancel, no tool call by the engine, nothing posted by code); the engine continues once with the result as context; every expectation passes', async t => {
+  const script = load('real-engine-approvals-fast-v1')
+  const w1 = fastWorld(t, { second: { steps: [], final: '명령이 실패했어요: 저장소가 아니에요.' } })
+  const yes = await runJourneyConversation(w1, script, 'approvals-fast-just-do-it')
+  assert.equal(yes.aborted, null, yes.abortDetail); assert.deepEqual(failed(yes), [], JSON.stringify(yes.turns.map(x => x.expectations.filter(e => !e.ok))))
+  assert.deepEqual(w1.spawned, [FORCE_PUSH], 'run once, by code, after the reply'); assert.deepEqual(yes.turns[1].subTurns[0].toolCalls, [], 'the engine made no tool call')
+  assert.deepEqual([yes.turns[1].decisionFirst.reason, yes.turns[1].decisionFirst.engineTurns], ['approval_ran', 1]); assert.deepEqual(yes.turns[1].posted, ['명령이 실패했어요: 저장소가 아니에요.'], 'the words are the engine\'s')
+  const w2 = fastWorld(t, { second: { steps: [], final: '알겠어요, 실행하지 않았어요.' } })
+  const no = await runJourneyConversation(w2, script, 'approvals-fast-wait-no')
+  assert.equal(no.aborted, null, no.abortDetail); assert.deepEqual(failed(no), [], JSON.stringify(no.turns.map(x => x.expectations.filter(e => !e.ok))))
+  assert.deepEqual(w2.spawned, []); assert.deepEqual([no.turns[1].decisionFirst.reason, no.turns[1].decisionFirst.engineTurns], ['approval_declined', 1]); assert.deepEqual(no.turns[1].posted, ['알겠어요, 실행하지 않았어요.'])
+})

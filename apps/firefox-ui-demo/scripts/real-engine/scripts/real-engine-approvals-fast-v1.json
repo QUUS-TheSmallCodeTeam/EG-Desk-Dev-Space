@@ -1,0 +1,92 @@
+{
+  "set": "real-engine-approvals-fast-v1",
+  "description": "Compare script (c32, owner direction U13 as corrected: the approval STATE is the action layer, the words are the conversation layer): the scenario of real-engine-approval-words-v1 with the approvals decision-first path on (flags EGDESK_DECISION_FIRST and EGDESK_DECISION_FIRST_APPROVALS; needs --decisions). The engine still words the question (turn 1 is as today). The reply is settled by the Decision against the one command the ledger waits on, and code acts at once: it runs the approved command once (\"그냥 해\") or cancels the declined one (\"아니 잠깐\"); the engine then continues ONCE with what became of the command as context and no tool call (noToolCalls). No sentence is posted by code. Run it next to real-engine-approval-words-v1 and compare the second turn's latencyMs with scripts/egdesk-approvals-fast-compare.mjs (expected: the run 8.1 s -> about 1 s before the engine speaks, and the decline no longer stalls). The folder is no repository, so the force push itself fails harmlessly (exit non-zero). Expectations are code checks only.",
+  "conversations": [
+    {
+      "id": "approvals-fast-just-do-it",
+      "flags": {
+        "EGDESK_TERMINAL_GATE": "on",
+        "EGDESK_DECISION_FIRST": "on",
+        "EGDESK_DECISION_FIRST_APPROVALS": "on"
+      },
+      "folder": {
+        "README.md": "scratch folder for the real-engine check\n"
+      },
+      "turns": [
+        {
+          "say": "Run this command: git push --force origin main",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "commandsRan": [],
+            "asked": 1,
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "그냥 해",
+          "expect": {
+            "decisionFirst": {
+              "path": "engine",
+              "reason": "approval_ran",
+              "engineTurns": 1,
+              "maxDecisionMs": 4000
+            },
+            "commandsRan": [
+              "git push --force origin main"
+            ],
+            "noToolCalls": true,
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "approvals-fast-wait-no",
+      "flags": {
+        "EGDESK_TERMINAL_GATE": "on",
+        "EGDESK_DECISION_FIRST": "on",
+        "EGDESK_DECISION_FIRST_APPROVALS": "on"
+      },
+      "folder": {
+        "README.md": "scratch folder for the real-engine check\n"
+      },
+      "turns": [
+        {
+          "say": "Run this command: git push --force origin main",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "commandsRan": [],
+            "asked": 1,
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "아니 잠깐",
+          "expect": {
+            "decisionFirst": {
+              "path": "engine",
+              "reason": "approval_declined",
+              "engineTurns": 1,
+              "maxDecisionMs": 4000
+            },
+            "commandsRan": [],
+            "noToolCalls": true,
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -89,6 +89,9 @@ registerTurnFields({ plant: { schema: PLANT_SCHEMA, validate: (value, { conv, tu
 registerTurnHooks('planted', () => createPlantedHook())
 
 
+// ---- L3 c32: decision-first approvals (flag EGDESK_DECISION_FIRST_APPROVALS, with EGDESK_DECISION_FIRST: the reply to the engine's question is settled by the Decision and code at once; the reasons approval_* are in the decisionFirst expectation) ----
+registerFlags({ reproduced: ['EGDESK_DECISION_FIRST_APPROVALS'], decisionDependent: ['EGDESK_DECISION_FIRST_APPROVALS'] })
+
 // ---- L3: the heartbeat's own messages (expect.flow: notes, firstNoteMs, statedSecondsTrue, noResult) ----
 import { FLOW_EXPECT_SCHEMA, createFlowHook, validateFlowExpect } from './egdesk-real-engine-flow.mjs'
 registerExpectKeys({ flow: { schema: FLOW_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateFlowExpect(value, { conv, turn }, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
