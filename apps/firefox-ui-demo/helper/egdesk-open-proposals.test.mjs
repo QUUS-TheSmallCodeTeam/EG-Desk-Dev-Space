@@ -148,3 +148,17 @@ test('runtime, flag on: while the ledger waits for an approval reply the registr
   const w = world(t); w.chat.gateHookBroker = () => ({ awaitingReply: () => true, turnStarted() {}, rekey() {} })
   const run = await answered(w, REAL.conditionalYes); assert.deepEqual(w.chat.openItemsFor(run.conversationId), []); assert.equal(w.decisionBodies.length, 0)
 })
+
+// c36: the REAL Decision model's answers to the c56 registration plan (evidence/main-real/c56/proposal-registration-results.json), fed through the code that combines them.
+// "ph" was broadened in c33 (a question about the facts also counts), so a proposal's closing question is ALSO a request the person must answer: both predicates say yes and the kind is decided by code (a proposal wins).
+test('recorded real Decision answers (c56): the kind each answer combination yields; a proposal wins over a person request; the 2b held-back phrasing (pw .56) is a known miss', () => {
+  const answers = list => Object.fromEntries(list.map(([name, probability]) => [name, { name, type: 'predicate', probability }]))
+  const kinds = (reply, list) => register(reply, Object.values(answers(list))).items.map(i => [i.kind, i.steps.length, i.options.length])
+  assert.deepEqual(kinds(REAL.conditionalYes, [['pq_0', 0.92], ['ph_0', 1]]), [['proposal', 3, 0]], 'both said yes: the proposal wins')
+  assert.deepEqual(kinds(REAL.journey, [['pq_0', 0], ['ph_0', 0.97]]), [['person_request', 0, 0]])
+  assert.deepEqual(kinds(REAL.handover, [['pq_0', 0], ['ph_0', 1]]), [['person_request', 0, 0]])
+  assert.deepEqual(kinds({ request: '배포 방식 정해줘', answer: '두 가지 방식이 있습니다. 한 번에 전체 배포할까요, 아니면 단계별로 나눠 배포할까요?' }, [['pq_0', 1], ['ph_0', 1]]), [['proposal', 0, 2]], 'the A-or-B question: a proposal with its two options')
+  assert.deepEqual(kinds(REAL.afterYes, [['pw', 0]]), []); assert.deepEqual(kinds({ request: 'x', answer: '명령이 끝났습니다. 출력은 build-finished 입니다.' }, [['pw', 0]]), [])
+  assert.deepEqual(kinds(REAL.terseYes, [['pw', 0.56]]), [], 'c56: "파일은 변경하지 않았습니다." was .56 under the current wording: nothing is registered (the wording measurement of c36 is about this)')
+  assert.deepEqual(kinds(REAL.terseYes, [['pw', 0.93]]), [['waiting_action', 2, 0]], 'the check-31pr phrasing registered')
+})
