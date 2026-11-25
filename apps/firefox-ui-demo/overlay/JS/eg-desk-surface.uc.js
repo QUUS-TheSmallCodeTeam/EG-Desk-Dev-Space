@@ -13454,6 +13454,9 @@
     let pendingMessageScroll = null;
     // A43: an answer arrived below while 대표님 reads further up ({ threadId, messageId }).
     let newMessageNotice = null;
+    // u5: the requests each room waited on at its last drawing, and the room whose log is to follow the newest message because that number changed
+    const waitingAskSeen = new Map();
+    let askRevealThreadId = null;
     let sendNoticeDetailsThreadId = null;
     const composerViewport = createChatComposerViewport();
     const taskAnswerReveal = createChatTaskAnswerReveal(body);
@@ -15327,6 +15330,14 @@
       if (!allowComposer) choice.dispose(isHudListView ? activeThread?.id : null);
       body.appendChild(el('div', { class: shellClasses }, ...contentChildren));
       choice.sync();
+      if (typeof waitingAskSeen !== 'undefined' && typeof activeThread !== 'undefined') {
+        askRevealThreadId = null;
+        if (activeThread) try {
+          const waitingNow = ChatStatusView.waitingAskCount(codexRuns(activeThread)), waitingBefore = waitingAskSeen.get(activeThread.id);
+          waitingAskSeen.set(activeThread.id, waitingNow);
+          if (ChatHistoryView.askChanged(waitingBefore, waitingNow)) askRevealThreadId = activeThread.id;
+        } catch { askRevealThreadId = null; }
+      }
       const currentNotices = body.querySelector('[data-testid="chat-notices"]');
       if (currentNotices && noticeScroll?.threadId === currentNotices.dataset.threadId) currentNotices.scrollTop = noticeScroll.top;
       taskAnswerReveal.restoreLayout();
@@ -15337,7 +15348,9 @@
       const msgEl = body.querySelector(".egd-codex-messages");
       if (msgEl) {
         const sentNewMessage = msgEl.dataset.lastUserMessageId !== messageState?.lastUserMessageId;
-        const preserveAnchor = messageState?.threadId === activeThread?.id && !messageState.atBottom && !sentNewMessage;
+        // u5: a request for 대표님 arrived or was answered in this room: the log goes to the newest message (the request's card is at its foot), wherever it had been left
+        const askReveal = typeof askRevealThreadId !== 'undefined' && askRevealThreadId !== null && askRevealThreadId === activeThread?.id;
+        const preserveAnchor = messageState?.threadId === activeThread?.id && !messageState.atBottom && !sentNewMessage && !askReveal;
         // A43: reading further up when an answer arrives shows '새 메시지' at the
         // foot of the log. Pressing it, or scrolling down to the newest message,
         // clears it; at the bottom the log keeps following by itself.
