@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { FACT_VARIANTS, FACT_WORDING_CEILING, FACT_WORDING_DIR, buildFactWordingPlan } from './egdesk-briefing-fact-wording.mjs'
 import { V2_S3_COVERAGE, V2_S3_COVERAGE_SHA, V2_S3_RECOVERAGE } from './egdesk-briefing-fact-wording.fixture.mjs'
-import { answerFacts } from './egdesk-briefing-skeleton.mjs'
+import { answerFacts, trimCopular } from './egdesk-briefing-skeleton.mjs'
 import { loadPlan, scoreRequest } from './egdesk-decision-real-runner.mjs'
 
 const app = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -32,7 +32,9 @@ test('only the quoted facts differ from the recorded request: the board, the dev
   assert.equal(JSON.parse(V2_S3_RECOVERAGE).questions.length, 1, 'the second coverage asked the one missing fact again (.29 again)')
 })
 test('what the splitter hands the judge today, and why a connective trim is not obviously right: V2\'s F2 keeps "이고", V1\'s facts that the judge accepted (1.0) keep "으며", and a trim would leave "받았" / "보냈"', () => {
-  assert.deepEqual(answerFacts('A사 견적은 11월 3일 요청 접수, 11월 6일 v1 발송 순서이고, v2는 팀장 승인 후 발송할 예정입니다.').facts, ['A사 견적은 11월 3일 요청 접수', '11월 6일 v1 발송 순서이고', 'v2는 팀장 승인 후 발송할 예정입니다.'])
+  // c50 (deliberate change of this c49 assertion, after c64 measured the plan: recorded .29, ending cut .84): the copular "이고" is now cut from a clause split at a comma
+  assert.deepEqual(answerFacts('A사 견적은 11월 3일 요청 접수, 11월 6일 v1 발송 순서이고, v2는 팀장 승인 후 발송할 예정입니다.').facts, ['A사 견적은 11월 3일 요청 접수', '11월 6일 v1 발송 순서', 'v2는 팀장 승인 후 발송할 예정입니다.'])
+  assert.equal(trimCopular('11월 6일 v1 발송 순서이고'), '11월 6일 v1 발송 순서')
   const v1 = answerFacts('A사 견적 정리입니다. 11월 3일에 요청을 받았고, 11월 6일에 v1을 보냈으며, v2는 팀장 승인 후 보낼 예정입니다.').facts
   assert.deepEqual(v1, ['A사 견적 정리입니다.', '11월 3일에 요청을 받았고', '11월 6일에 v1을 보냈으며', 'v2는 팀장 승인 후 보낼 예정입니다.'])
   assert.deepEqual(v1.filter(x => /(?:고|으며)$/.test(x)).map(x => x.replace(/(?:고|으며)$/, '')), ['11월 3일에 요청을 받았', '11월 6일에 v1을 보냈'], 'a bare cut of the connective leaves a verb stem, not a clause')
