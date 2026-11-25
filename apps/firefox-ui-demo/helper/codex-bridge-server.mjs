@@ -573,7 +573,7 @@ const chat = new CodexChatRuntime({
     configured: () => decisionCredentials.getApiKey() !== null,
     // u1 (U9): every turn-judgment feature reaches the Decision model through this client, which refuses to send while the person's mode is 끔 or no key is saved, whatever flag is on
     client: modeGatedClient(decisionClient, { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null }),
-    // turn_context budget (codex-chat-runtime.mjs TURN_CONTEXT_BUDGET_MS 800 / TURN_CONTEXT_COLD_BUDGET_MS 1500): cold = first turn of a
+    // turn_context budget (values in codex-chat-runtime.mjs TURN_CONTEXT_BUDGET_MS / TURN_CONTEXT_COLD_BUDGET_MS): cold = first turn of a
     // conversation or no warm Decisions socket (egdesk-decision-transport.mjs warm()).
     budgetMs: TURN_CONTEXT_BUDGET_MS, coldBudgetMs: TURN_CONTEXT_COLD_BUDGET_MS, warm: () => decisionTransport.warm(),
     // Idle warm-up (EGDESK_DECISION_WARMUP, default off): a turn tells it before its first Decisions request; null when off.

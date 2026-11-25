@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { TURN_CONTEXT_BUDGET_MS, TURN_CONTEXT_COLD_BUDGET_MS } from './codex-chat-runtime.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 import { DECISION_IDLE_MS } from './egdesk-decision-transport.mjs'
 import { loadPlan } from './egdesk-decision-real-runner.mjs'
@@ -27,7 +26,7 @@ test('latency probe: committed files are what the product builds; two record-onl
   assert.ok(built.totals.estInputTokens * 1.1 <= LATENCY_CEILING)
   // the 70 s gap is past the transport's idle window; the 20 s gap is inside it
   assert.ok(CONDITIONS[3][1] > DECISION_IDLE_MS && CONDITIONS[2][1] < DECISION_IDLE_MS)
-  assert.deepEqual(BUDGETS, { warm: TURN_CONTEXT_BUDGET_MS, cold: TURN_CONTEXT_COLD_BUDGET_MS })
+  assert.deepEqual(BUDGETS, { warm: 800, cold: 1500 }, 'the budgets the probes were registered against (the product moved to 1,200 / 1,800 in u5; the registered plans keep theirs)')
 })
 
 test('latency analysis: budgets per request from the product\'s warm() reading; a missing request is reported, not counted', () => {
@@ -35,7 +34,7 @@ test('latency analysis: budgets per request from the product\'s warm() reading; 
   const out = analyzeLatency([{ 'a-first': r(1098, false, false), 'b-immediate': r(300, true, true), 'c-after-20s': r(820, true, true), 'd-after-70s': r(1200, false, false) }, { 'a-first': r(950, false, false) }])
   const row = (rep, id) => out.rows.find(x => x.rep === rep && x.id === id)
   assert.deepEqual([row(1, 'a-first').within800, row(1, 'a-first').within1500, row(1, 'a-first').withinProductBudget], [false, true, true])
-  assert.deepEqual([row(1, 'c-after-20s').productBudget, row(1, 'c-after-20s').withinProductBudget], [TURN_CONTEXT_BUDGET_MS, false], 'warm means the 800 ms budget')
+  assert.deepEqual([row(1, 'c-after-20s').productBudget, row(1, 'c-after-20s').withinProductBudget], [BUDGETS.warm, false], 'warm means the 800 ms budget of the registered plan')
   assert.equal(row(2, 'b-immediate').sent, false)
   assert.deepEqual([out.byCondition['a-first'].n, out.byCondition['a-first'].within800, out.byCondition['a-first'].within1500], [2, 0, 2])
 })

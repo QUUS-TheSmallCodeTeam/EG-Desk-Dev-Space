@@ -64,7 +64,7 @@ test('the latency bounds are the ones the code enforces (imported, not retyped),
   assert.deepEqual(by('decisionContext').latency.boundsMs, { warm: TURN_CONTEXT_BUDGET_MS, cold: TURN_CONTEXT_COLD_BUDGET_MS })
   assert.equal(by('terminalGate').latency.boundsMs.request, COMMAND_GATE_TIMEOUT_MS)
   assert.equal(by('draftCheck').latency.boundsMs.first, DRAFT_CHECK_LIMITS.firstCheckMs)
-  assert.match(by('decisionContext').latency.text, /800 ms warm \/ 1,500 ms cold/)
+  assert.match(by('decisionContext').latency.text, /1,200 ms warm \/ 1,800 ms cold/)
   assert.match(by('draftCheck').latency.text, /first check up to 1,500 ms, a re-check up to 1,200 ms/)
   assert.match(by('conversationFlow').latency.text, /A beat every 5 s .* not before 10 s, at least 30 s apart, at most 3 per run/)
   for (const f of COST_FEATURES) {

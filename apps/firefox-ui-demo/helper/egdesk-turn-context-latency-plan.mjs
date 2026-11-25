@@ -4,7 +4,6 @@ import { CONTENT_FREE_REQUESTS } from './egdesk-decision-egress.mjs'
 import { prepareTurnContext } from './egdesk-context-setup.mjs'
 import { DECISION_IDLE_MS } from './egdesk-decision-transport.mjs'
 import { TOKEN_MODEL, estimateBodyTokens, independentEstimate } from './egdesk-decision-real-runner.mjs'
-import { TURN_CONTEXT_BUDGET_MS, TURN_CONTEXT_COLD_BUDGET_MS } from './codex-chat-runtime.mjs'
 
 // PREPARED, NOT SENT. Cold vs warm latency of the turn-context request (lane L6 cycle 14). The same product-built turn_context request
 // shape (prepareTurnContext through a recording client: one catalog, a different short message each time, so the catalog prefix is the
@@ -19,7 +18,10 @@ export const LATENCY_SET = 'turn-context-latency-v1'
 export const LATENCY_DIR = 'proofs/decision-real-measure/turn-context-latency'
 export const LATENCY_CEILING = 6000
 export const CONDITIONS = Object.freeze([['a-first', 0, 'first request of a fresh process'], ['b-immediate', 0, 'immediately after a'], ['c-after-20s', 20_000, '20 s idle'], ['d-after-70s', 70_000, `70 s idle (past the ${DECISION_IDLE_MS / 1000} s transport idle window)`]])
-export const BUDGETS = Object.freeze({ warm: TURN_CONTEXT_BUDGET_MS, cold: TURN_CONTEXT_COLD_BUDGET_MS })
+// The turn-context budgets these probes were registered and read against (11-25: 800 ms warm / 1,500 ms cold). Pinned here, no longer imported: the
+// product's budgets moved on 11-26 (u5: 1,200 / 1,800, codex-chat-runtime.mjs), and the committed plans, their request files and the registered readings
+// (slow = over 800 ms, within800 / within1500) must keep meaning what was registered. A new probe against the new budgets is a new plan.
+export const BUDGETS = Object.freeze({ warm: 800, cold: 1500 })
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 
 // One catalog item: the smallest real turn_context body (answer_type, time_intent and one relevance question) keeps 8 requests in 6k.

@@ -9,6 +9,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { DECISIONS_ENDPOINT, DECISION_MODEL } from '../helper/egdesk-decision-client.mjs'
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
+import { TURN_CONTEXT_BUDGET_MS } from '../helper/codex-chat-runtime.mjs'
 import { createMeasureTransport } from './egdesk-all-on-live-measure.mjs'
 import { allOnWorld, DM } from './egdesk-all-on.support.mjs'
 import { DRAFT_CHECK_COPY } from '../helper/egdesk-draft-check.mjs'
@@ -188,9 +189,9 @@ test('v1 stays runnable as registered (five steps): the same product path, judge
   assert.deepEqual(outcome.scorecard.hard.failed, [], 'with the faithful revision and the decision answer, v1\'s hard expectations hold too')
 })
 
-test('the v1 send, reproduced (c20): a first request slower than the turn\'s 800 ms Decision-context budget -> the draft check works without evidence (it trims); the owner question quotes what A saw, and A still gets the pointer', async () => {
+test('the v1 send, reproduced (c20): a first request slower than the turn\'s Decision-context budget (800 ms in v1\'s send; 1,200 ms since u5, so the request here takes budget + 150 ms) -> the draft check works without evidence (it trims); the owner question quotes what A saw, and A still gets the pointer', async () => {
   const fast = provider(), slowFirst = async (url, init) => { const names = JSON.parse(Buffer.from(init.body).toString('utf8')).questions.map(q => q.name)
-    if (names.includes('answer_type')) await new Promise(resolve => setTimeout(resolve, 950)); return fast.fetchImpl(url, init) }
+    if (names.includes('answer_type')) await new Promise(resolve => setTimeout(resolve, TURN_CONTEXT_BUDGET_MS + 150)); return fast.fetchImpl(url, init) }
   const outcome = await runScenario({ plan: loadScenarioPlan(), send: true, key: KEY, fetchImpl: slowFirst })
   const ask = outcome.steps.find(s => s.id === 'ask'), result = outcome.steps.find(s => s.id === 'result')
   assert.equal(ask.checks.find(c => c.id === 'K5').pass, false, 'the soft budget check names what decided v1: the turn context came back after 800 ms')

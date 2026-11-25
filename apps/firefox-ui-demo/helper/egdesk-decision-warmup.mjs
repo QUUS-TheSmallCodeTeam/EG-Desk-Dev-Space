@@ -25,7 +25,7 @@ import { CONTENT_FREE_REQUESTS, createEgressGate } from './egdesk-decision-egres
 
 export const WARMUP_IDLE_MS = 5 * 60_000 // first requests over 800 ms: 0 of 6 at 2 to 5 min, 3 of 7 at 5 to 10 min, 6 of 9 at 10 min or more (latency-v7.json)
 export const WARMUP_TIMEOUT_MS = 5_000
-export const WARMUP_MAX_JOIN_MS = 1_500 // the turn's cold budget (TURN_CONTEXT_COLD_BUDGET_MS): a longer wait than the turn itself allows is never useful
+export const WARMUP_MAX_JOIN_MS = 1_500 // the turn's cold budget when this was set (1,500 ms; it is 1,800 since u5, a join this short stays inside it): a longer wait than the turn itself allows is never useful
 export const WARMUP_RECENT_PERIODS = 50
 export const WARMUP_REASONS = Object.freeze(['composer', 'turn'])
 export const WARMUP_SKIP_CODES = Object.freeze(['disabled', 'mode_off', 'no_key', 'recent_traffic', 'in_flight', 'paused_after_failure', 'bad_reason'])
