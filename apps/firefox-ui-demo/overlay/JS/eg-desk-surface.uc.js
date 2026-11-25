@@ -15330,9 +15330,9 @@
       if (!allowComposer) choice.dispose(isHudListView ? activeThread?.id : null);
       body.appendChild(el('div', { class: shellClasses }, ...contentChildren));
       choice.sync();
-      askRevealThreadId = null;
-      if (activeThread) {
-        try {
+      if (typeof waitingAskSeen !== 'undefined' && typeof activeThread !== 'undefined') {
+        askRevealThreadId = null;
+        if (activeThread) try {
           const waitingNow = ChatStatusView.waitingAskCount(codexRuns(activeThread)), waitingBefore = waitingAskSeen.get(activeThread.id);
           waitingAskSeen.set(activeThread.id, waitingNow);
           if (ChatHistoryView.askChanged(waitingBefore, waitingNow)) askRevealThreadId = activeThread.id;

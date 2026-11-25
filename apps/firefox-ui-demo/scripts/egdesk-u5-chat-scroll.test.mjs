@@ -61,7 +61,7 @@ test('u5: a request in another room does not move this room\'s log; a person who
 })
 
 test('u5: wiring: the count is taken at each drawing with the room\'s last number; first drawing and other rooms do not trigger; the reveal is part of preserveAnchor', () => {
-  assert.match(surface, /const waitingNow = ChatStatusView\.waitingAskCount\(codexRuns\(activeThread\)\), waitingBefore = waitingAskSeen\.get\(activeThread\.id\);\n\s+waitingAskSeen\.set\(activeThread\.id, waitingNow\);\n\s+if \(ChatHistoryView\.askChanged\(waitingBefore, waitingNow\)\) askRevealThreadId = activeThread\.id;/)
+  assert.match(surface, /if \(typeof waitingAskSeen !== 'undefined' && typeof activeThread !== 'undefined'\) \{\n\s+askRevealThreadId = null;\n\s+if \(activeThread\) try \{\n\s+const waitingNow = ChatStatusView\.waitingAskCount\(codexRuns\(activeThread\)\), waitingBefore = waitingAskSeen\.get\(activeThread\.id\);\n\s+waitingAskSeen\.set\(activeThread\.id, waitingNow\);\n\s+if \(ChatHistoryView\.askChanged\(waitingBefore, waitingNow\)\) askRevealThreadId = activeThread\.id;/)
   assert.match(surface, /const askReveal = typeof askRevealThreadId !== 'undefined' && askRevealThreadId !== null && askRevealThreadId === activeThread\?\.id;/)
   assert.match(surface, /!messageState\.atBottom && !sentNewMessage && !askReveal;/)
 })
