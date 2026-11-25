@@ -159,6 +159,20 @@ test('recorded real Decision answers (c56): the kind each answer combination yie
   assert.deepEqual(kinds(REAL.handover, [['pq_0', 0], ['ph_0', 1]]), [['person_request', 0, 0]])
   assert.deepEqual(kinds({ request: '배포 방식 정해줘', answer: '두 가지 방식이 있습니다. 한 번에 전체 배포할까요, 아니면 단계별로 나눠 배포할까요?' }, [['pq_0', 1], ['ph_0', 1]]), [['proposal', 0, 2]], 'the A-or-B question: a proposal with its two options')
   assert.deepEqual(kinds(REAL.afterYes, [['pw', 0]]), []); assert.deepEqual(kinds({ request: 'x', answer: '명령이 끝났습니다. 출력은 build-finished 입니다.' }, [['pw', 0]]), [])
-  assert.deepEqual(kinds(REAL.terseYes, [['pw', 0.56]]), [], 'c56: "파일은 변경하지 않았습니다." was .56 under the current wording: nothing is registered (the wording measurement of c36 is about this)')
-  assert.deepEqual(kinds(REAL.terseYes, [['pw', 0.93]]), [['waiting_action', 2, 0]], 'the check-31pr phrasing registered')
+  // the superseded wording (c56/c59): .56 on this phrasing was a miss, .82 on the 31pr phrasing a pass by .02
+  assert.deepEqual(kinds(REAL.terseYes, [['pw', 0.56]]), [], 'a .56 is below the bar'); assert.deepEqual(kinds(REAL.terseYes, [['pw', 0.82]]), [['waiting_action', 2, 0]])
+})
+
+// c37: the wording that won the c59 measurement (Decisions only; evidence/main-real/c59/pw-wording-results.json, 9/9): both real phrasings of the engine 1.0, both real "already done" answers 0.
+const WORDING_C59 = 'The person asked the assistant to hold off on an action and only report first. Does this paragraph say that the action has not been done?'
+test('pw wording (c59 winner): the request the product builds carries it, quotes the person and the last paragraph alone, and the recorded numbers register / do not register', () => {
+  assert.equal(PROPOSAL_PREDICATES.waiting.instructions, WORDING_C59)
+  const REAL_31PR = { request: REAL.terseYes.request, answer: REAL.terseYes.answer.replace('파일은 변경하지 않았습니다.', '파일은 아직 수정하지 않았습니다.') }
+  const ALREADY_DONE = { request: 'ㅇㅇ', answer: '완료된 두 항목을 삭제했습니다. 미완료 항목인 `일정 확인`은 남겨 두었습니다.' } // check-31pr T2
+  for (const [reply, pw, kinds] of [[REAL.terseYes, 1, ['waiting_action']], [REAL_31PR, 1, ['waiting_action']], [REAL.afterYes, 0, []], [ALREADY_DONE, 0, []]]) {
+    const { req, items } = register(reply, [{ name: 'pw', type: 'predicate', probability: pw }])
+    assert.deepEqual(req.questions.map(q => [q.name, q.instructions]), [['pw', WORDING_C59]]); assert.equal(req.input.length, 3, 'the developer line, the person, the last paragraph: nothing else is quoted')
+    assert.match(req.input[2].content, /^The last paragraph of the assistant's answer:/); assert.deepEqual(items.map(i => i.kind), kinds)
+  }
+  assert.match(register(REAL_31PR).req.input[2].content, /파일은 아직 수정하지 않았습니다\./); assert.doesNotMatch(register(REAL.terseYes).req.input[2].content, /견적서/, 'the list is not in the quoted span')
 })
