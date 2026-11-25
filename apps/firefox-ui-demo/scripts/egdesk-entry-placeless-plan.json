@@ -36,9 +36,13 @@
   }
  },
  "maxRequests": 13,
- "tokenCeiling": 8000,
+ "tokenCeiling": 7500,
  "passRule": "No control enters a page task (hard). Counts per verdict are reported; a safe miss never fails the plan.",
- "dropOrder": [],
+ "dropOrder": [
+  "c2-e3",
+  "c1-e1",
+  "m2-e1"
+ ],
  "replies": [
   {
    "id": "m1-e1",
@@ -220,5 +224,6 @@
   "wrong": "0 controls enter with probability 0.90",
   "decision": "if E2 and E3 enter (>= 0.75), no product change: the V2 message needs a card whose title or lines say what the page is; if E2 or E3 do not enter, the entry question (\"holds or shows\") is weak for placeless requests and a wording change is proposed with this evidence"
  },
- "preRegistrationNote": "dropOrder is filled in after the estimate and before any send, from the ceiling."
+ "preRegistrationNote": "dropOrder is filled in after the estimate and before any send, from the ceiling.",
+ "dropOrderNote": "Filled in after the estimate and before any send. The typed estimate is about 625 to 667 tokens per request (three predicates + the card evidence): all 13 are 8,353, over the 8,000 ceiling, and the combined measures ran at +3% of the estimate. The default ceiling is 7,500: it drops c2-e3 (a general-knowledge control against the lines; c1-e3 already is a control against the lines) and c1-e1 (a control against the neutral title; the placeless messages on E1 are expected not to enter anyway), keeps 11 requests at about 7,070 estimated (about 7.3k real). m2-e1 (a shorter wording on E1, redundant with m1-e1) goes third if the ceiling is lowered further."
 }
