@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
 import { scriptedDecisions } from './egdesk-all-on.support.mjs'
-import { CHECK_FUNCTIONS, DEFAULT_CAPS, LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, PLAN_FILE_V6, PLAN_FILE_V7, PLAN_FILE_V8, PLAN_FILE_V9, STEPS, diffJourneys, faithfulRevision, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
+import { CHECK_FUNCTIONS, DEFAULT_CAPS, LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, PLAN_FILE_V6, PLAN_FILE_V7, PLAN_FILE_V8, PLAN_FILE_V9, PLAN_FILE_V10, STEPS, diffJourneys, faithfulRevision, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
 
 const KEY = 'sk-synthetic-not-a-key-l2c12-000000000002'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -522,7 +522,7 @@ test('v8 dry run: both ways of running the scripted world (the packet expectatio
 const REGISTERED_PLAN_V9_SHA256 = '3275a8b97dc2783441598391a2d65e237ad4a500e5bdee63fc5f8c27f189b29a'
 test('plan v9: pinned, based on v8 by hash, every v8 expectation verbatim except the withdrawn s13.fetched, three added, the real v8 run reproduced by replay', async () => {
   const bytes = readFileSync(PLAN_FILE_V9), raw = JSON.parse(bytes.toString('utf8')), v8 = JSON.parse(readFileSync(PLAN_FILE_V8, 'utf8'))
-  assert.equal(sha256(bytes), REGISTERED_PLAN_V9_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V9)
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V9_SHA256)
   assert.equal(raw.version, 9); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V8)))
   assert.deepEqual(raw.world, v8.world); assert.deepEqual(raw.steps.map(s => s.id), v8.steps.map(s => s.id))
   assert.deepEqual(raw.withdrawn.map(w => [w.id, w.step]), [['s13.fetched', 's13-withheld']])
@@ -542,4 +542,38 @@ test('v9 dry run: the scripted world passes the three new readings\' counterpart
   assert.equal(by('s13.fetched'), undefined, 'withdrawn')
   assert.deepEqual(checks.filter(c => c.severity === 'hard' && c.pass === false).map(c => c.id), ['s4.no-page-for-the-action', 's13.not-resent'])
   assert.equal(by('s13.check-saw-the-plan').pass, true); assert.equal(by('s14.check-saw-the-plan').pass, true, 'in the scripted world the follow-up check has the plan page; in the real v8 run (c37) it had not')
+})
+
+// ---- plan v10 (cycle 32) ----
+const REGISTERED_PLAN_V10_SHA256 = '81eb4d89b2ec00f1cf0941a177a170b0387abb17b61c1b22801e6d3705e2daac'
+// in the order of the plan's steps: s4's twin comes before s4's layer bound
+const V10_NEW = [['s1.layers-fast', 'soft', 'L7'], ['s2.layers-fast', 'soft', 'L7'], ['s3b.layers-fast', 'soft', 'L7'], ['s4.no-page-for-the-action.status', 'hard', 'L7'], ...['s4', 's9', 's13', 's14'].map(t => [`${t}.layers-fast`, 'soft', 'L7'])]
+test('plan v10: pinned, based on v9 by hash, every v9 expectation verbatim, the status-relevance switch, the twin of the action expectation and seven soft layer-time bounds', () => {
+  const bytes = readFileSync(PLAN_FILE_V10), raw = JSON.parse(bytes.toString('utf8')), v9 = JSON.parse(readFileSync(PLAN_FILE_V9, 'utf8'))
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V10_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V10); assert.equal(raw.version, 10); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V9)))
+  assert.deepEqual(Object.keys(raw.world.switches), [...Object.keys(v9.world.switches), 'status-relevance']); assert.deepEqual(raw.world.switches['status-relevance'].env, { EGDESK_CONTEXT_RELEVANCE: 'action+status' })
+  assert.deepEqual({ ...raw.world, switches: undefined }, { ...v9.world, switches: undefined }); assert.deepEqual(raw.steps.map(s => s.id), v9.steps.map(s => s.id))
+  for (const step of v9.steps) { const now = raw.steps.find(s => s.id === step.id); assert.deepEqual(now.caps, step.caps); assert.deepEqual(now.expect.slice(0, step.expect.length), step.expect, `${step.id}: every v9 expectation verbatim`) }
+  const added = raw.steps.flatMap(s => s.expect).filter(e => !v9.steps.flatMap(x => x.expect).some(x => x.id === e.id))
+  assert.deepEqual(added.map(e => [e.id, e.severity, e.owner]), V10_NEW); assert.ok(added.every(e => typeof e.predicted === 'string' && e.predicted.length > 0))
+  const twin = added.find(e => e.id === 's4.no-page-for-the-action.status'), action = raw.steps.flatMap(s => s.expect).find(e => e.id === 's4.no-page-for-the-action')
+  assert.deepEqual([twin.check, twin.args, twin.when], [action.check, action.args, { switch: 'status-relevance' }]); assert.ok(added.filter(e => e !== twin).every(e => e.check === 'layersMs' && e.args.maxMs === 2500 && e.args.families.join() === 'turn_context,memory_triage,memory_fetch'))
+})
+
+test('layersMs: the memory and action layers\' requests of a step in total against the bound; no recorded time is nothing to measure (it passes and says so)', () => {
+  const C = CHECK_FUNCTIONS, args = { families: ['turn_context', 'memory_triage', 'memory_fetch'], maxMs: 2500 }, row = (family, elapsedMs) => ({ family, elapsedMs })
+  const run = requests => C.layersMs({ step: { requests }, args })
+  assert.deepEqual([run([row('turn_context', 800), row('memory_triage', 900), row('memory_fetch', 700), row('draft_check', 9000)]).pass, run([row('turn_context', 800), row('memory_triage', 900), row('memory_fetch', 801)]).pass], [true, false])
+  assert.deepEqual(run([row('turn_context', null), row('draft_check', 5000)]).observed, { measured: false, requests: 0, totalMs: null, maxMs: 2500 }); assert.equal(run([row('turn_context', null)]).pass, true)
+  assert.equal(run([row('turn_context', 1500), row('memory_fetch', 1000)]).pass, true, 'the bound itself passes')
+})
+
+test('v10 dry run with the new switch: only the scripted-judge failures (the twin of the action expectation and s13.not-resent), the layer bounds pass on the scripted transport few ms', async () => {
+  const noNet = async () => { throw new Error('no network') }
+  const run = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V10), fetchImpl: noNet, switches: ['status-relevance'], caps: { ...DEFAULT_CAPS, tokenCeiling: 100000 } })
+  const checks = run.steps.flatMap(s => s.checks), by = id => checks.find(c => c.id === id)
+  assert.deepEqual(checks.filter(c => c.severity === 'hard' && c.pass === false).map(c => c.id), ['s4.no-page-for-the-action.status', 's13.not-resent'])
+  assert.deepEqual(V10_NEW.filter(([id]) => id.endsWith('layers-fast')).map(([id]) => [by(id).pass, by(id).observed.totalMs < 2500]), Array(7).fill([true, true]), 'a dry run times only the scripted transport: a few ms'); assert.equal(by('s4.no-page-for-the-action').pass, null, 'the action twin is judged only under its own switch')
+  const off = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V10), fetchImpl: noNet, switches: ['action-relevance'], caps: { ...DEFAULT_CAPS, tokenCeiling: 100000 } })
+  assert.equal(off.steps.flatMap(s => s.checks).find(c => c.id === 's4.no-page-for-the-action.status').pass, null)
 })

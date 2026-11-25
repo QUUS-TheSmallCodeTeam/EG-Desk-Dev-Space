@@ -154,3 +154,8 @@ import { STALL_EXPECT_SCHEMA, createStallHook, validateStallExpect } from './egd
 registerFlags({ reproduced: ['EGDESK_ENGINE_STALL_FIRST_EVENT_MS'] })
 registerExpectKeys({ engineStall: { schema: STALL_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateStallExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
 registerTurnHooks('engineStall', () => createStallHook())
+
+// ---- L2 c32: timing expectations (layers before the engine starts, engine rounds, first visible, final answer) ----
+import { TIMING_EXPECT_SCHEMA, createTimingHook, validateTimingExpect } from './egdesk-real-engine-timing-expect.mjs'
+registerExpectKeys({ timing: { schema: TIMING_EXPECT_SCHEMA, validate: (value, { turn, path, bad }) => { for (const why of validateTimingExpect(value, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('timing', () => createTimingHook())

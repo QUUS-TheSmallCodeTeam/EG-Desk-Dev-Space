@@ -101,6 +101,10 @@ test('the CLI (in process): table with per-script summaries, compare, --set, --n
     const cmp = run('compare', path.join(dir, 'off'), path.join(dir, 'on')); assert.equal(cmp.code, 0); assert.match(cmp.out, /seconds saved over the answered turns: turn 3/)
     put('on', { set: 'real-engine-x-on-v1', id: 'c-on', turns: [timed()] }); put('off', { set: 'real-engine-x-off-v1', id: 'c-off', turns: [timed()] })
     const n = run('compare', path.join(dir, 'off'), path.join(dir, 'on'), '--normalize', '-off|-on', '--set', 'real-engine-x-o'); assert.equal(n.code, 0, n.err); assert.match(n.out, /real-engine-x-v1\/c#1/)
+    // --pairs: one folder, ids ending -off / -on, matched with the suffix dropped (a set id such as ...-off-v1 is not a pair marker: only the conversation id's end counts)
+    put('pairs', { set: 'real-engine-pairs-v1', id: 'x-off', turns: [timed()] }); put('pairs', { set: 'real-engine-pairs-v1', id: 'x-on', turns: [{ ...timed(), subTurns: [{ ...timed().subTurns[0], latencyMs: 4000 }] }] })
+    const pr = run('compare', path.join(dir, 'pairs'), '--pairs'); assert.equal(pr.code, 0, pr.err); assert.match(pr.out, /real-engine-pairs-v1\/x#1: turn \+5\.0s/)
+    assert.equal(run('compare', path.join(dir, 'off'), '--pairs').code, 1, 'no -off / -on pair in a folder without them')
     assert.equal(run('compare', path.join(dir, 'off')).code, 2); assert.equal(run().code, 2); assert.match(run().err, /usage/)
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
