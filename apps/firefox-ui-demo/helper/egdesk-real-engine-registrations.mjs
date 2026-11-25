@@ -151,3 +151,9 @@ import { DF_EXPECT_SCHEMA, createDecisionFirstHook, validateDecisionFirstExpect 
 registerFlags({ reproduced: ['EGDESK_DECISION_FIRST'], decisionDependent: ['EGDESK_DECISION_FIRST'] })
 registerExpectKeys({ decisionFirst: { schema: DF_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateDecisionFirstExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
 registerTurnHooks('decisionFirst', () => createDecisionFirstHook())
+
+// ---- L5: the first-event watchdog (flag EGDESK_ENGINE_STALL_FIRST_EVENT_MS in a conversation; expect.engineStall; firstEventMs is in every turn record) ----
+import { STALL_EXPECT_SCHEMA, createStallHook, validateStallExpect } from './egdesk-real-engine-stall.mjs'
+registerFlags({ reproduced: ['EGDESK_ENGINE_STALL_FIRST_EVENT_MS'] })
+registerExpectKeys({ engineStall: { schema: STALL_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateStallExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('engineStall', () => createStallHook())

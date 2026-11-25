@@ -114,16 +114,12 @@ test('bad replies and bad flows fail for the right reason', async t => {
   assert.equal(run({ staleSeen: true }).stale_seen, true)
 })
 
-test('FINDING (c35, not fixed here): a booking-history link named 예매 내역 (보기) is withheld as a payment by the pay word 예매, so a loop on a ticket site cannot open it; the fixture says 내 공연 내역 보기', async () => {
+test('c35 findings 1 and 3 are fixed in c36 (Main\'s precision fix); finding 2 (apply in an address) stays as the accepted fail-closed rule', async () => {
   const { buildReflexCandidates } = await import('./egdesk-browser-reflex.mjs')
-  const snap = label => ({ url: 'https://ticket.example.test/my', interactiveElements: [{ ref: 'l', role: 'link', label, tag: 'a', href: 'https://ticket.example.test/my/bookings', value: '' }] })
-  assert.deepEqual(buildReflexCandidates(snap('예매 내역 보기')).options.map(o => o.value), [], 'withheld today (pay vocabulary: 예매)')
-  assert.deepEqual(buildReflexCandidates(snap('예약 내역 보기')).options.map(o => o.value), ['[L1] 예약 내역 보기'])
-  assert.deepEqual(buildReflexCandidates(snap('내 공연 내역 보기')).options.map(o => o.value), ['[L1] 내 공연 내역 보기'])
-  // finding 2: the word apply in an address (fail-closed address words); finding 3: 확인 in a LINK label (the c25 fix covers a proven GET button, not a link)
-  const at = (label, href) => buildReflexCandidates({ url: 'https://room.example.test/rooms', interactiveElements: [{ ref: 'l', role: 'link', label, tag: 'a', href, value: '' }] }).options.map(o => o.value)
-  assert.deepEqual(at('회의실 대관하기', 'https://room.example.test/rooms/apply'), [], 'withheld today: apply in the address')
-  assert.deepEqual(at('회의실 대관하기', 'https://room.example.test/rooms/form'), ['[L1] 회의실 대관하기'])
-  assert.deepEqual(at('내 순번 확인', 'https://room.example.test/queue/me'), [], 'withheld today: 확인 in a link label')
-  assert.deepEqual(at('내 순번 보기', 'https://room.example.test/queue/me'), ['[L1] 내 순번 보기'])
+  const at = (label, href, url = 'https://ticket.example.test/my') => buildReflexCandidates({ url, interactiveElements: [{ ref: 'l', role: 'link', label, tag: 'a', href, value: '' }] }).options.map(o => o.value)
+  assert.deepEqual(at('예매 내역 보기', 'https://ticket.example.test/my/bookings'), ['[L1] 예매 내역 보기'], 'finding 1: fixed')
+  assert.deepEqual(at('예매하기', 'https://ticket.example.test/book'), [], 'a real booking stays a payment')
+  assert.deepEqual(at('내 순번 확인', 'https://queue.example.test/queue/me', 'https://queue.example.test/queue'), ['[L1] 내 순번 확인'], 'finding 3: fixed')
+  assert.deepEqual(at('회의실 대관하기', 'https://room.example.test/rooms/apply', 'https://room.example.test/rooms'), [], 'finding 2: apply in an address stays withheld (accepted rule)')
+  assert.deepEqual(at('회의실 대관하기', 'https://room.example.test/rooms/form', 'https://room.example.test/rooms'), ['[L1] 회의실 대관하기'])
 })

@@ -63,3 +63,24 @@ test('(b) the certificate links are offered; a registering link on the same site
   closed(el('r', 'button', '등록하기'), 'a 등록하기 submit button (no proof)')
   closed(el('r', 'button', '등록하기', { nav: form('post') }), 'a 등록하기 POST button')
 })
+
+// ---- c36 (Main's precision fix): link phrases 예매 내역 and … 확인 ----
+test('c36: a same-site link ending in 확인 and a booking-history link are page changes; 예매하기, 결제 확인, other sites, buttons and risky addresses stay withheld', () => {
+  const T = 'https://ticket.example.test'
+  const link = (label, href) => offered([el('l', 'link', label, { href })], `${T}/my`)
+  assert.deepEqual(link('내 순번 확인', `${T}/queue/me`), ['[L1] 내 순번 확인'])
+  assert.deepEqual(link('예매 내역 보기', `${T}/my/bookings`), ['[L1] 예매 내역 보기'])
+  assert.deepEqual(link('예매 확인', `${T}/my/bookings`), ['[L1] 예매 확인'])
+  assert.deepEqual(link('예매 조회', `${T}/my/bookings`), ['[L1] 예매 조회'])
+  // look-alikes that stay withheld
+  assert.deepEqual(link('예매하기', `${T}/book`), [], '예매하기 is a payment')
+  assert.deepEqual(link('콘서트 예매', `${T}/book`), [], '예매 alone is a payment')
+  assert.deepEqual(link('결제 확인', `${T}/pay/confirm`), [], 'pay vocabulary never yields')
+  assert.deepEqual(link('주문 취소 확인', `${T}/orders/cancel`), [], 'delete vocabulary never yields')
+  assert.deepEqual(link('내 순번 확인', 'https://elsewhere.test/queue/me'), [], 'another site')
+  assert.deepEqual(link('내 순번 확인', `${T}/queue/delete`), [], 'a risky address stays classified')
+  assert.deepEqual(link('내 순번 확인', `${T}/login?next=/queue`), [], 'a sign-in address stays withheld')
+  assert.deepEqual(link('신청 확인', `${T}/apply/status`), [], 'only 확인 as the term (신청 comes first here and stays submit)')
+  assert.deepEqual(offered([el('b', 'button', '확인')], `${T}/my`), [], 'a button is not a link (no proof: withheld)')
+  assert.deepEqual(offered([el('b', 'button', '예매 내역')], `${T}/my`), [], 'a button named 예매 내역 stays withheld (no proof)')
+})

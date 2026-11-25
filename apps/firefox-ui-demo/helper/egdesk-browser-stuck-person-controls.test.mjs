@@ -12,6 +12,7 @@ import { pageStateAnswers } from './egdesk-browser-page-state.fixture.mjs'
 const FORM = HOLDOUT_PAGES.issuance['/issue/resident']
 const snap = (page, url, extra = {}) => ({ cardId: 'card', documentId: 'doc1', revision: 1, url, readyState: 'complete', text: page.text, viewport: { width: 1200, height: 800, devicePixelRatio: 1 }, interactiveElements: page.elements, ...extra })
 const FORM_SNAP = snap(FORM, 'https://minwon.example.test/issue/resident')
+const snapSettings = snap(FAMILY_PAGES.settings['/settings/notifications'], 'https://account.example.test/settings/notifications')
 const choice = (value, confidence = 0.91) => ({ type: 'choice', choice: value, confidence, probabilities: [{ value, probability: confidence }] })
 const P = p => ({ type: 'predicate', probability: p })
 const base = (next, extra = {}) => ({ next_step: next, ...pageStateAnswers('content', 0.98), goal_met: P(0.02), person_target_0: P(0.49), ...extra })
@@ -68,8 +69,8 @@ test('a forward option still proceeds; a sensitive or error page state still com
   assert.deepEqual([sensitive.result.outcome, sensitive.result.pageState, sensitive.result.controls], ['handoff', 'sensitive_flow', undefined])
   const err = await step(() => base(choice('scroll_more'), pageStateAnswers('error_page', 0.95)))
   assert.deepEqual([err.result.outcome, err.result.reason, err.result.controls], ['escalated', 'error_page', undefined], 'an error page is reported as one, not as the person\'s step')
-  const target = await step(() => base(choice('scroll_more'), { person_target_0: P(0.93) }))
-  assert.deepEqual([target.result.reason, target.result.target, target.result.controls], ['human_step', '수수료 결제에 동의합니다', undefined])
+  const target = await step(() => base(choice('scroll_more'), { person_target_0: P(0.03), person_target_1: P(0.93) }))
+  assert.deepEqual([target.result.reason, target.result.target, target.result.controls], ['human_step', '수수료 결제에 동의합니다', ['수수료 결제에 동의합니다']], 'c36: the decided controls are named')
 })
 
 test('statement page: 결제하기 is named when the one link left does not move toward the goal', async () => {
@@ -89,4 +90,32 @@ test('the task note names them: code human_step with the control labels as candi
   }
   const note = await run({ outcome: 'escalated', reason: 'human_step', withheld: 3, controls: ['휴대폰 본인확인', '수수료 결제에 동의합니다', '신청하기', '넷째'], steps: [{ url: 'https://minwon.example.test/issue/resident', actions: [], excluded: { gated: 2, unsupported: 1 } }], decisions: 1 })
   assert.deepEqual([note.status, note.code, note.candidates], ['cannot_proceed', 'human_step', ['휴대폰 본인확인', '수수료 결제에 동의합니다', '신청하기']])
+})
+
+// ---- c36 (real, check-26bl, loop-form-submit): the submit button is a person-target too, and every decided control is named ----
+test('c36: the person-target follow-up asks about the withheld BUTTONS too (page order, at most three); every control decided yes is named, so the 신청서 제출 step is not dropped', async () => {
+  const { HOLDOUT_PAGES: _unused } = await import('./egdesk-browser-live-holdout.mjs')
+  const { HARD_PAGES } = await import('./egdesk-browser-live-hard.mjs')
+  const room = HARD_PAGES.room['/rooms/form']
+  const roomSnap = { cardId: 'card', documentId: 'doc1', revision: 1, url: 'https://room.example.test/rooms/form', readyState: 'complete', text: room.text, viewport: { width: 1200, height: 800, devicePixelRatio: 1 }, interactiveElements: room.elements }
+  const goal = '회의실 대관 신청해줘'
+  const asks = []
+  const run = answers => step(req => { asks.push(req); return answers(req) }, roomSnap, goal)
+  const base2 = extra => base(choice('scroll_more'), { person_target_0: P(0.03), person_target_1: P(0.03), person_target_2: P(0.03), ...extra })
+  // the real run: only the agreement box decided yes (the button was never asked about): its note named only the box. Now the button is asked, and named when decided
+  const both = await run(() => base2({ person_target_1: P(0.93), person_target_2: P(0.97) }))
+  const follow = asks.find(r => r.questions.some(q => q.name.startsWith('person_target')))
+  assert.deepEqual(follow.questions.map(q => q.instructions), ['대관 시간', '이용 약관에 동의합니다', '신청서 제출'].map(label => `Is this control, "${label}" (${label === '신청서 제출' ? 'button' : label === '대관 시간' ? 'combobox' : 'checkbox'}${label === '대관 시간' ? ', now "14:00"' : ''}), the one this request asks to change?`))
+  assert.deepEqual([both.result.reason, both.result.target, both.result.controls, both.acts], ['human_step', '이용 약관에 동의합니다', ['이용 약관에 동의합니다', '신청서 제출'], []], 'both decided controls are named, page order')
+  const onlyButton = await run(() => base2({ person_target_2: P(0.97) }))
+  assert.deepEqual([onlyButton.result.target, onlyButton.result.controls], ['신청서 제출', ['신청서 제출']])
+  // the note carries them (a hand-over names exactly the decided controls)
+  const { createBrowserTaskStore, createDirectBrowserEntry } = await import('./egdesk-browser-task.mjs')
+  const provider = { directEntryEnabled: () => true, reflexScope: () => ({ client: { decide: async () => ({ answers: {} }) }, isDecisionCurrent: () => true, callTool: async () => ({ snapshot: { text: [] } }) }), runDirectTask: async () => both.result }
+  const out = await createDirectBrowserEntry({ provider, store: createBrowserTaskStore(), cardTextInEntry: () => false }).handle({ run: { runId: 'r', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm', message: goal, hosts: { card: 'room.example.test' }, titles: { card: '대관 | 시민회관' },
+    entryAnswers: { browser_entry: { type: 'predicate', probability: 0.97 }, browser_entry_answer: { type: 'predicate', probability: 0 }, browser_entry_card_0: { type: 'predicate', probability: 0.95 }, codeCard: null } })
+  assert.deepEqual(JSON.parse(out.note).egdesk_browser_task.candidates, ['이용 약관에 동의합니다', '신청서 제출'])
+  // a toggle page keeps its one named control (the v1 loop-toggle expectation)
+  const toggles = await step(() => base(choice('scroll_more'), { person_target_0: P(0.96), person_target_1: P(0.03) }), snapSettings, '마케팅 알림 꺼줘')
+  assert.deepEqual([toggles.result.target, toggles.result.controls], ['마케팅 정보 알림', ['마케팅 정보 알림']])
 })

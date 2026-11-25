@@ -14,7 +14,7 @@ import { canvasViewSize, placeCanvasView } from '../overlay/resources/EGDeskSurf
 // (egdesk-briefing-catalog.mjs) and from the cards already on the board (with provenance). Nothing here talks to a network, publishes, moves a camera or writes the
 // Board: the host injects judge{} (bridge route) and fill().
 
-export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, maxFacts: 6, factRequests: 2, factMax: 300, maxMaterials: 12, usualMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 10, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, pieceTurns: 4, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
+export const SKELETON_LIMITS = Object.freeze({ answerMax: 1200, factsAnswerMax: 8000, maxFacts: 6, factRequests: 2, factMax: 300, maxMaterials: 12, usualMaterials: 8, maxParts: 6, softSteps: 5, maxRequests: 10, maxQuestions: 60, judgeMs: 40_000, fillTurns: 3, pieceTurns: 4, requestMax: 400, titleMax: 80, excerptMax: 400, contentMax: 600, slotTextMax: 600, readZoom: BRIEFING_LIMITS.readZoom, overlapShare: BRIEFING_LIMITS.overlapShare })
 // A predicate counts as yes at or above `yes` and as no at or below `no`; anything between is undecided. Placeholders until calibrated (real predicates of the other features answer near 0 or 1).
 export const SKELETON_BARS = Object.freeze({ yes: .7, no: .3 })
 export const SKELETON_STAGES = Object.freeze(['place', 'fit', 'order', 'fill_check', 'coverage'])
@@ -707,9 +707,12 @@ export const COVERAGE_MODES = Object.freeze(['facts', 'board'])
  *  each stands alone as a fact; a comma inside a number, "12,800", never splits). A list ("법무 검토, 대표 승인, 최종본 발송") stays one sentence, one fact.
  *  Cycle 38 (Main): at most SKELETON_LIMITS.maxFacts per coverage request and SKELETON_LIMITS.factRequests requests (6 x 2 = 12 facts); the rest are counted (cut), never asked. -> { facts: [text], cut } */
 export function answerFacts(answer) {
-  const facts = factSentences(answer)
+  const units = factUnits(answer), all = units.map(u => u.text)
   const cap = SKELETON_LIMITS.maxFacts * SKELETON_LIMITS.factRequests
-  return { facts: facts.slice(0, cap), cut: Math.max(0, facts.length - cap) }
+  // Cycle 42: over the cap, the answer's STRUCTURED facts (table rows, list items) are asked first and its prose (a lead sentence like "…정리했습니다", whose "12개" is an amount to code) fills what is
+  // left; within each group the answer's own order. Within the cap nothing is reordered.
+  const facts = all.length > cap ? [...units.filter(u => u.structured), ...units.filter(u => !u.structured)].map(u => u.text) : all
+  return { facts: facts.slice(0, cap), cut: Math.max(0, all.length - cap) }
 }
 // Cycle 29 (real answers are markdown): the answer's own structure first - one unit per bullet, numbered item, heading or table row (the header row and the
 // separator row of a table are not facts; a row's cells are joined by " · "), emphasis and code marks removed - then sentences within each unit.
@@ -721,11 +724,15 @@ export function answerUnits(answer) { return taggedUnits(answer).map(u => u.text
 // a table cell that carries no value (an empty marker), not a statement
 const NO_VALUE_CELL = /^(?:[-–—]+|없음|해당\s?없음|기록\s?없음|n\/a|none)$/i
 function taggedUnits(answer) {
-  const raw = String(answer ?? '').normalize('NFC').slice(0, SKELETON_LIMITS.answerMax)
-  if (!/\n/.test(raw)) return [{ text: raw, row: false }]
+  // Cycle 42 (check-25br): the answer was cut at answerMax (1200) BEFORE its facts were split, and a real answer is a table whose rows each start with a link to an absolute path: 4,488
+  // characters, the fourth row cut in the middle ("| 11-24 15:29 | int/c5 = ...", "| 258개 파일 5930") and eight rows never seen. The link targets go first (they are not facts), then the
+  // facts-sized limit; the answer quoted to the judge is still the answerMax one.
+  const raw = String(answer ?? '').normalize('NFC').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').slice(0, SKELETON_LIMITS.factsAnswerMax)
+  if (!/\n/.test(raw)) return [{ text: raw, row: false, structured: false }]
   const out = [], lines = raw.split(/\n/)
   for (let i = 0; i < lines.length; i++) {
     let l = lines[i].trim(), row = false
+    const listItem = /^(?:[-*+]|\d+[.)])\s+/.test(l)
     if (!l || /^```/.test(l) || /^#{1,6}\s/.test(l)) continue // a heading names a section, it states no fact
     if (/[:：]\s*(?:\*\*)?$/.test(l)) continue // a lead-in ("…정리:") introduces what follows, it states no fact
     if (/^(?:\*\*|__)[^*_]+(?:\*\*|__)$/.test(l)) continue // a line that is only a bold label names a section, it states no fact
@@ -737,22 +744,23 @@ function taggedUnits(answer) {
       l = l.replace(/^\||\|$/g, '').split('|').map(c => c.replace(/\*\*|__|`/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').trim()).filter(c => c && !NO_VALUE_CELL.test(c)).join(' · '); row = true
     }
     l = l.replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, '').replace(/\*\*|__|`/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').trim()
-    if (l) out.push({ text: l, row })
+    if (l) out.push({ text: l, row, structured: row || listItem })
   }
   return out
 }
-function factSentences(answer) {
+function factUnits(answer) {
   const anchored = t => { const a = factAnchors(t); return a.dates.length + a.versions.length + a.amounts.length > 0 }
   const out = taggedUnits(answer).flatMap(u => {
     const text = clean(u.text, SKELETON_LIMITS.answerMax)
-    if (u.row) return [text]
+    if (u.row) return [{ text, structured: true }]
     return text.split(/\n|(?<=[.!?。])\s+/).flatMap(sentence => {
       const clauses = sentence.split(/[,;]\s+/).map(t => t.trim()).filter(Boolean)
-      return clauses.length > 1 && clauses.every(anchored) ? clauses : [sentence.trim()]
+      return (clauses.length > 1 && clauses.every(anchored) ? clauses : [sentence.trim()]).map(t => ({ text: t, structured: u.structured }))
     })
   })
-  return out.map(t => clean(t, SKELETON_LIMITS.factMax)).filter(Boolean)
+  return out.map(u => ({ ...u, text: clean(u.text, SKELETON_LIMITS.factMax) })).filter(u => u.text)
 }
+function factSentences(answer) { return factUnits(answer).map(u => u.text) }
 const DATE_ANY = /(?<!\d)(\d{1,2})\s?월\s?(\d{1,2})\s?일|(?<![\d/.])(\d{1,2})[/.](\d{1,2})(?![\d/.])/g
 const AMOUNT = /\d{1,3}(?:,\d{3})+|\d+(?=\s?(?:원|개|%|명|건|대|일간))/g
 /** Cycle 30: an amount is in a text only as a whole number (never inside another number or a date): c29 cited every material containing the digit 9 for "9개 파일". */
@@ -1022,8 +1030,16 @@ export async function runSkeletonFlow({ request = '', answer = '', materials = [
     Object.assign(filled, one.items)
     for (const item of targets) { const cap = layout.capacity.get(item.id), md = markdownOf(item); if (md !== null && cap && textLines(md, cap.widthPx) > cap.lines) { Object.assign(filled, before); return done('fallback-chat', { reason: 'not-covered', coverage }) } }
     const checked = targets.map(item => fillChecks(item, filled[item.id], scene, catalog, { mode: checkMode })), questions = checked.flatMap(c => c.questions)
-    if (questions.length) { const verdict = await ask('fill_check', questions); if (verdict.unavailable) return unavailable(verdict, true); if (checked.some(c => c.failures.length) || questions.some(q => !isYes(verdict.answers[questionName(q)]))) return done('fallback-chat', { reason: 'not-covered', coverage }) }
-    else if (checked.some(c => c.failures.length)) return done('fallback-chat', { reason: 'not-covered', coverage })
+    if (checked.some(c => c.failures.length)) return done('fallback-chat', { reason: 'not-covered', coverage })
+    if (questions.length) {
+      const verdict = await ask('fill_check', questions); if (verdict.unavailable) return unavailable(verdict, true)
+      const failed = questions.filter(q => !isYes(verdict.answers[questionName(q)]))
+      // Cycle 42 (check-25br, schema-on: step_P2 .42 after a rewrite whose 12 rows were all supported): when only a step EXPLANATION is refused, the cards stay and the explanation that was already
+      // judged supported before the rewrite (step_P2 .86) comes back; a refused row still ends the round (the chat answer stays).
+      if (failed.some(q => q.kind !== 'step')) return done('fallback-chat', { reason: 'not-covered', coverage })
+      for (const q of failed) { if (before[q.part]) { filled[q.part] = { ...filled[q.part], text: before[q.part].text, ...(before[q.part].fallback !== undefined ? { fallback: before[q.part].fallback } : {}) } } }
+      if (failed.length) coverage.explanationKept = failed.map(q => q.part)
+    }
     return null
   }
   const redesign = async (parts, because) => {
