@@ -903,6 +903,7 @@
                         "path": {
                           "enum": [
                             "fast",
+                            "action",
                             "engine"
                           ]
                         },
