@@ -67,7 +67,7 @@ export const BRIDGE_COMPOSITION = Object.freeze({
   // top-level options of the bridge's new CodexChatRuntime({ … }) that this composition passes (request / respond / toolProviders etc. are the check's own)
   runtimeKeys: ['contexts', 'toolProviders', 'ownToolsWiring', 'roomAccount', 'store', 'requireStore', 'getOwnerKey', 'emit', 'emitLegacy', 'agentReloadReuse', 'engineStall'],
   flags: ['EGDESK_DRAFT_CHECK', 'EGDESK_DRAFT_CHECK_DESIGN', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_TERMINAL_GATE', 'EGDESK_TERMINAL_GATE_METHOD',
-    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_FLOW_STALLED_COPY', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP', 'EGDESK_AGENT_RELOAD_REUSE', ...hookFlags(), ...registeredFlags()],
+    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_FLOW_STALLED_COPY', 'EGDESK_FLOW_NOTE_WORDING', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP', 'EGDESK_AGENT_RELOAD_REUSE', ...hookFlags(), ...registeredFlags()],
   // present in the bridge, deliberately not reproduced: each needs a window, the Desk, a store this check does not open, or another lane's module
   notReproduced: {
     keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration'],
@@ -527,7 +527,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       ...(FLAG.EGDESK_PROPOSAL_REGISTRY === 'on' ? { proposalRegistry: { mode: () => 'on' } } : {}),
       calibrationLog, turnMemory: turnMemoryConfig,
       ...(['advisory', 'on'].includes(FLAG.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => FLAG.EGDESK_DRAFT_CHECK, design: () => (FLAG.EGDESK_DRAFT_CHECK_DESIGN === 'choice' ? 'choice' : 'predicates') } } : {}),
-      ...(FLAG.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...turnHooks.flowOptions({ FLAG, conversation }), ...(FLAG.EGDESK_FLOW_STALLED_COPY === 'none' ? { stalledCopy: () => 'none' } : {}) } } : {}), // a registered feature may add keys to the flow, as the bridge does (the collaboration hook: presence, audience, attentionPosted)
+      ...(FLAG.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...turnHooks.flowOptions({ FLAG, conversation }), ...(FLAG.EGDESK_FLOW_STALLED_COPY === 'none' ? { stalledCopy: () => 'none' } : {}), ...(FLAG.EGDESK_FLOW_NOTE_WORDING === 'waiting' ? { noteWording: () => 'waiting' } : {}) } } : {}), // a registered feature may add keys to the flow, as the bridge does (the collaboration hook: presence, audience, attentionPosted)
       ...(FLAG.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
       ...(wiring && !wiring.shadow ? { terminalGate: wiring.terminalGate(terminalGateConfig) } : terminalGateConfig ? { terminalGate: terminalGateConfig } : {}),
       ...(['advisory', 'on'].includes(FLAG.EGDESK_WORKING_MEMORY) ? { workingMemory: { mode: () => FLAG.EGDESK_WORKING_MEMORY } } : {}),
