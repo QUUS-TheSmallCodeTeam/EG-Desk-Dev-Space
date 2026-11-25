@@ -2770,12 +2770,26 @@ export function chatSessionKind(thread) {
 
 // u1: a new DM room is named "Codex N" (peer "Codex") whatever engine will answer. Choosing another engine before the first send renames a room that still has that default name ("Claude N",
 // peer "Claude"); a name the person changed is never touched. Returns { title, from, to } (the peer's old and new name) or null. `engineLabel` is the chosen engine's own label.
-export function relabelDefaultRoom(thread, engineLabel, selfName = '나') {
+// u3 (D11): the number of a default room name ("Codex N", "Claude N") comes from one counter for every engine, but the counter is not saved: after a restart it starts again at 1 and a new room
+// was named like an existing one ("Claude 1" twice), and a room renamed for another engine could take a name another room already had. The number is now one above the highest number any
+// default-named room already has (never below the counter), so default names stay unique across engines and restarts. Names the person chose never count.
+const DEFAULT_ROOM_NAME = /^(?:Codex|Claude) (\d{1,6})$/;
+export function nextDefaultRoomNumber(threads, counter = 0) {
+  let highest = Number.isFinite(counter) ? Math.max(0, Math.floor(counter)) : 0;
+  for (const thread of Array.isArray(threads) ? threads : []) {
+    const match = DEFAULT_ROOM_NAME.exec(typeof thread?.title === 'string' ? thread.title : '');
+    if (match) highest = Math.max(highest, Number(match[1]));
+  }
+  return highest + 1;
+}
+export function relabelDefaultRoom(thread, engineLabel, selfName = '나', { threads = null } = {}) {
   const label = typeof engineLabel === 'string' ? engineLabel.trim().slice(0, 40) : '';
   const match = /^(Codex|Claude)(?: (\d{1,6}))?$/.exec(typeof thread?.title === 'string' ? thread.title : '');
   if (!label || !match || thread.type !== 'dm' || chatThreadEngineLocked(thread)) return null;
-  const title = match[2] ? `${label} ${match[2]}` : label;
+  let title = match[2] ? `${label} ${match[2]}` : label;
   if (title === thread.title) return null;
+  // u3: a name another room already has is not taken a second time
+  if (match[2] && Array.isArray(threads) && threads.some(other => other && other.id !== thread.id && other.title === title)) title = `${label} ${nextDefaultRoomNumber(threads)}`;
   const peers = Array.isArray(thread.participants) ? thread.participants.filter(name => name !== selfName) : [];
   const from = peers.length === 1 && (peers[0] === match[1] || peers[0] === thread.title) ? peers[0] : null;
   return { title, from, to: from ? label : null };

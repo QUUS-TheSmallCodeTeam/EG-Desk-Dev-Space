@@ -567,7 +567,7 @@
 
   // u1: the fields a default-named room changes when its engine is chosen (ChatState.relabelDefaultRoom): title, the peer's name in participants and roles, the subtitle
   function relabelRoomPatch(thread, engineLabel) {
-    const relabel = ChatState.relabelDefaultRoom(thread, engineLabel, SELF_MEMBER);
+    const relabel = ChatState.relabelDefaultRoom(thread, engineLabel, SELF_MEMBER, { threads: state.codex.threads });
     if (!relabel) return {};
     const participants = relabel.from ? thread.participants.map((name) => (name === relabel.from ? relabel.to : name)) : thread.participants;
     const roles = { ...(thread.participantRoles || {}) };
@@ -814,8 +814,10 @@
     return nextThreads;
   }
 
+  // u3 (D13): the row's preview is the last message that HAS words. It used to be the very last message, and a room whose last message carries no text (an answer kept only as work, a
+  // placeholder, a tool-only turn) read "아직 메시지가 없습니다" in the list while the opened room showed its whole history.
   function codexThreadPreview(thread) {
-    const lastMessage = thread.messages[thread.messages.length - 1];
+    const lastMessage = (Array.isArray(thread?.messages) ? thread.messages : []).findLast(message => message && message.content) || null;
     if (!lastMessage || !lastMessage.content) {
       return codexThreadKindMeta(thread.type).emptyPreview;
     }
@@ -14181,7 +14183,7 @@
           });
           item.addEventListener('click', () => { choice.selectListRoom(thread.id); codexBridge.selectThread(thread.id, { openConversation: true }); });
           bindChatRoomRowKeys(item, () => openRoomFromKeyboard(thread.id));
-          const lastMsg = thread.messages && thread.messages.length > 0 ? thread.messages[thread.messages.length - 1] : null;
+          const lastMsg = (Array.isArray(thread.messages) ? thread.messages : []).findLast(message => message && message.content) || null; // u3 (D13): the last message with words, as the preview
           const lastTime = lastMsg && lastMsg.createdAt ? formatRelativeTime(lastMsg.createdAt) : '';
           const profile = codexThreadAgentProfile(thread);
           const engine = ChatState.chatEngineChipView(thread, engineContext);
@@ -19142,7 +19144,8 @@
       },
       createThread(type = 'dm', options = {}) {
         const normalizedType = type === 'group' ? 'group' : 'dm';
-        const nextNonce = state.codex.threadNonce + 1;
+        // u3 (D11): a default room number is one above every default-named room already there (the counter is not saved)
+        const nextNonce = normalizedType === 'group' || typeof ChatState === 'undefined' || !ChatState.nextDefaultRoomNumber ? state.codex.threadNonce + 1 : ChatState.nextDefaultRoomNumber(state.codex.threads, state.codex.threadNonce);
         // u1: a new DM room is named for the engine that will answer it (the recent or default one), as setThreadEngine renames it when another is chosen
         let peerName = 'Codex';
         if (normalizedType !== 'group' && options.engineId !== 'codex') {

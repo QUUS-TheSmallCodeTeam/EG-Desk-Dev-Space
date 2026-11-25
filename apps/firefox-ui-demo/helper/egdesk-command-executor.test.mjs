@@ -99,6 +99,7 @@ test('identity: the folder is EG-Desk\'s, not the engine\'s; profile, account, C
   const h = harness()
   assert.equal((await h.call(turn(h, 'c', 'T'), 'ls', { cwd: '../other' })).code, 'COMMAND_CWD_OUTSIDE')
   assert.equal((await h.call({ ...turn(h, 'd', 'U'), folder: null }, 'ls')).code, 'COMMAND_NO_FOLDER')
+  assert.deepEqual(await h.call({ ...turn(h, 'd2', 'U2'), folder: null }, 'ls'), { status: 'no_folder', code: 'COMMAND_NO_FOLDER', message: '연결된 프로젝트 폴더가 없습니다.', hint: { needs: 'project_folder' } }, 'u3 (D10): the person\'s sentence and a closed hint come with the code')
   assert.equal((await h.call({ ...turn(h, 'e', 'V'), executionPolicy: 'read-only-qa' }, 'ls'))?.error?.code, 'COMMAND_FORBIDDEN')
   assert.deepEqual(h.ran, [])
 })
