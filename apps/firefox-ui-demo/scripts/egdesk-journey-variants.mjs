@@ -24,8 +24,9 @@ import { fileURLToPath } from 'node:url'
 import { SYNTHETIC_PAGES } from '../helper/egdesk-wiki-reconstruction.fixture.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-export const BASE_PLAN = 'egdesk-all-on-live-measure.plan-v8.json'
-export const variantPlanFile = id => `egdesk-all-on-live-measure.plan-v8-variant-${id}.json`
+// c30: the base is plan v9 (v8's s13.fetched was a wrong expectation, withdrawn in v9 after the v8 run c37; V1 on a v8 base failed it again, c47). Variant plans: plan-v9-variant-<id>.
+export const BASE_PLAN = 'egdesk-all-on-live-measure.plan-v9.json'
+export const variantPlanFile = id => `egdesk-all-on-live-measure.plan-v9-variant-${id}.json`
 export const SAYS_KEYS = Object.freeze(['quote', 'tidy', 'tests', 'recall', 'deployed', 'portal', 'second', 'nudge', 'change', 'stop', 'again', 'bench', 'benchFollow'])
 export const AGENT_KEYS = Object.freeze(['quote', 'tidy', 'recall', 'tests', 'noted', 'heard', 'ask', 'got', 'stuck', 'stuckAsk', 'bench', 'benchFollow'])
 
@@ -195,6 +196,8 @@ export function buildVariantPlan(baseRaw, baseBytes, id) {
     if (e.check === 'readingPending') a.pageId = idMap[a.pageId] ?? a.pageId
     if (e.id === 's4n.heard') a.needles = [saysTitle('nudge')]
     if (e.id === 's9.target-offered') a.needles = a.needles.map(n => titles[n] ?? n)
+    // v9's two readings of what the draft check was given name the plan page by its title (and a sentence of its body, which a rename keeps)
+    if (e.id === 's13.check-saw-the-plan' || e.id === 's14.check-saw-the-plan') a.needles = a.needles.map(n => titles[n] ?? n)
     if (e.args !== undefined) e.args = a
   }
   for (const step of plan.steps) {
