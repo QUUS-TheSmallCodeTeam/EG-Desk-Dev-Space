@@ -84,7 +84,7 @@ export const EARLIER_EVIDENCE_LIMIT = 4
 // its records are kept for the next check (the check's own ranking keeps the ones related to the next draft). After a posted answer the limit above stays.
 export const EARLIER_WITHHELD_LIMIT = 8
 export const POSTED_ANSWER_KEY = 'egdesk_posted_answer'
-import { ENGINE_STALL_LIMITS, eventTurnId, stallFact } from './egdesk-engine-stall.mjs' // c33: the first-event watchdog
+import { ENGINE_STALL_LIMITS, eventTurnId, isProgressEvent, stallFact } from './egdesk-engine-stall.mjs' // c33: the first-event watchdog
 import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
 import { OWN_EDIT_LIMITS, EDIT_TOOL_NAMES, ownEditEvidence } from './egdesk-own-edit-evidence.mjs' // c30b: the edits EG-Desk made, as readable evidence for the check of the answer
 import { OWN_COMMAND_LIMITS, ownCommandEntry, ownCommandEvidence } from './egdesk-own-command-evidence.mjs' // c29: what the check of an answer may know about the commands EG-Desk ran
@@ -6745,13 +6745,13 @@ export class CodexChatRuntime {
     try {
       if (!this.engineStall) return
       const threadId = idText(message?.params?.threadId); if (!threadId) return
-      const turnId = eventTurnId(message)
+      const turnId = isProgressEvent(message) ? eventTurnId(message) : null // c34: the preamble (turn/started, the user message items) is not progress
       if (turnId) { const seen = this.engineSeen.get(threadId) ?? new Set(); seen.add(turnId); this.engineSeen.set(threadId, seen); while (seen.size > 16) seen.delete(seen.values().next().value); while (this.engineSeen.size > 64) this.engineSeen.delete(this.engineSeen.keys().next().value) }
       for (const waiter of [...this.engineWaiters]) if (waiter.threadId === threadId && turnId === waiter.turnId) { this.engineWaiters.delete(waiter); waiter.resolve(true) }
     } catch { /* the watchdog never affects a message */ }
   }
 
-  /** true when the engine sent an event for this turn (before or within ms), false when it stayed silent. */
+  /** true when the engine made progress on this turn (before or within ms: an event beyond the preamble), false when it stayed silent or only sent the preamble. */
   waitFirstEvent(threadId, turnId, ms) {
     if (this.engineSeen.get(threadId)?.has(turnId)) return Promise.resolve(true)
     return new Promise(resolve => {

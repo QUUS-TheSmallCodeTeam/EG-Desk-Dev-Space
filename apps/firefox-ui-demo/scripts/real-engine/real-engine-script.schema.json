@@ -1053,6 +1053,11 @@
                           "minimum": 1,
                           "type": "integer"
                         },
+                        "maxFirstProgressMs": {
+                          "maximum": 600000,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
                         "recovered": {
                           "const": true
                         },

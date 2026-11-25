@@ -1115,6 +1115,15 @@ test('action first through the check: the same three requests, flag off and on (
 // ---- c33: the first-event watchdog through the check (the fake engine accepts the first turn and stays silent; the flag's minimum is 5 s) ----
 const stallScript = flag => ({ set: 'real-engine-stall-test-v1', conversations: [{ id: 's', ...(flag ? { flags: { EGDESK_ENGINE_STALL_FIRST_EVENT_MS: flag } } : {}), turns: [{ say: '한 단어로만 답해: 하나', expect: { posted: true, turnStatus: 'completed', ...(flag ? { engineStall: { stalled: true, recovered: true } } : {}) } }] }] })
 
+test('engine stall through the check (the check-29st shape): turn/started and the user message come at once, then silence; the first-event time is ms but the progress time waits for the retry; the watchdog interrupts and the retry answers', async t => {
+  const armed = world(t, { silentTurns: 1, silentPreamble: true, turns: [{ steps: [], final: '하나' }] })
+  const rec = only(await runCheck(armed.options, asScripts(stallScript('5000')), armed.deps)); assert.equal(rec.aborted, null, rec.abortDetail); const turn = rec.turns[0]
+  assert.equal(rec.ok, true, JSON.stringify(turn.expectations.filter(c => !c.ok))); assert.equal(turn.engineStall.fact.recovered, true); assert.equal(callsOf(armed, 'turn/start').length, 2); assert.equal(callsOf(armed, 'turn/interrupt').length, 1)
+  assert.ok(Number.isFinite(turn.subTurns[0].firstProgressMs) && turn.subTurns[0].firstProgressMs >= 0, 'firstProgressMs recorded: ' + turn.subTurns[0].firstProgressMs)
+  const ok = world(t, { turns: [{ steps: [], final: '하나' }] }), script = stallScript('30000'); script.conversations[0].turns[0].expect.engineStall = { stalled: false, maxFirstProgressMs: 30000 }
+  const healthy = only(await runCheck(ok.options, asScripts(script), ok.deps)); assert.equal(healthy.ok, true, JSON.stringify(healthy.turns[0].expectations.filter(c => !c.ok))); assert.ok(healthy.turns[0].subTurns[0].firstProgressMs >= healthy.turns[0].subTurns[0].firstEventMs, 'progress is never before the first event')
+}, { timeout: 60000 })
+
 test('engine stall through the check: the first turn is silent, the watchdog interrupts it and starts it once more; the record has the fact and the first-event time; no flag, no watchdog', async t => {
   const armed = world(t, { silentTurns: 1, turns: [{ steps: [], final: '하나' }] })
   const rec = only(await runCheck(armed.options, asScripts(stallScript('5000')), armed.deps)); assert.equal(rec.aborted, null, rec.abortDetail); const turn = rec.turns[0]
