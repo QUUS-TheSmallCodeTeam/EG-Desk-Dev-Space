@@ -74,7 +74,8 @@ export function createInternalTurns({ setTimer = (fn, ms) => setTimeout(fn, ms),
             const tr = at.trace, now = Date.now() - t0, item = message.params?.item
             if (tr.firstEventMs === null) tr.firstEventMs = now
             if (tr.events.length < 30) tr.events.push([now, String(message.method ?? '').slice(0, 40), item?.type ? String(item.type).slice(0, 24) : null, item?.phase ? String(item.phase).slice(0, 24) : (message.params?.turn?.status ? String(message.params.turn.status).slice(0, 24) : null)])
-            if (message.method === 'item/completed' && item?.type === 'agentMessage' && item.phase === 'final_answer') at.parts.push(String(item.text ?? ''))
+            // u5: a Claude answer has no phase (null): on a fresh-only turn (Claude under the harness) every completed agent message is the answer. Before this the private turn's text was always '' (the turn ran, its reply was dropped).
+            if (message.method === 'item/completed' && item?.type === 'agentMessage' && (item.phase === 'final_answer' || (freshOnly === true && item.phase == null))) at.parts.push(String(item.text ?? ''))
             else if (message.method === 'turn/completed') {
               tr.completed = String(message.params?.turn?.status ?? 'unknown').slice(0, 24)
               if (message.params?.turn?.status === 'completed') { winner ??= at; settle.resolve(at.parts.join('\n').trim()) }

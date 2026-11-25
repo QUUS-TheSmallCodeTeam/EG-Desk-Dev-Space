@@ -6849,7 +6849,7 @@ export class CodexChatRuntime {
     try { vocabulary = (await dc?.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
     const revise = ({ draft, note }) => this.reviseOnFork(run, draft, note, controller.signal, ready.evidence)
     const check = checkDraft({ draft: text, evidence: ready.evidence, userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
-      mode: 'on', design: this.draftCheckDesign(), client: setup.client, revise, signal: controller.signal, egress: this.decisionEgressFor(run) })
+      mode: 'on', design: this.draftCheckDesign(), client: setup.client, revise, signal: controller.signal, egress: this.decisionEgressFor(run), onStage: stage => this.noteDecisionStage?.(run, stage.stage, { startAt: stage.startAt, endAt: stage.endAt, outcome: stage.outcome }) })
     void check.catch(() => {})
     try {
       const result = await Promise.race([check, aborted])
@@ -6965,9 +6965,13 @@ export class CodexChatRuntime {
       const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
       if (!engine?.capabilities?.(slot)?.has('threadFork') && !this.privateFreshOnly(run)) return null
       const text = `Here is your draft answer to the person's last message:\n\n${draft}\n\n${note}\n\nReply with only the revised answer text.`
-      const out = await this.internalTurns.run({ engine, slot, freshOnly: this.privateFreshOnly(run), parentThreadId: run.conversationId, signal, timeoutMs: 25_000, hedgeMs: this.reviseHedgeMs ?? REVISE_FORK_HEDGE_MS, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run),
-        text, freshText: reviseFreshText({ draft, note, evidence }) })
-      return out.text || null
+      const reviseAt = Date.now()
+      let revised = null
+      try { revised = await this.internalTurns.run({ engine, slot, freshOnly: this.privateFreshOnly(run), parentThreadId: run.conversationId, signal, timeoutMs: 25_000, hedgeMs: this.reviseHedgeMs ?? REVISE_FORK_HEDGE_MS, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run),
+        text, freshText: reviseFreshText({ draft, note, evidence }) }) } catch (error) { this.noteDecisionStage?.(run, 'revise', { startAt: reviseAt, endAt: Date.now(), outcome: /timeout/i.test(String(error?.code)) ? 'timeout' : 'error' }); throw error }
+      // u5: the private revision turn (a fork, or a fresh Claude thread) is a stage of the turn that no Decision call stands for: told to the call log by closed name (when it is on)
+      this.noteDecisionStage?.(run, 'revise', { startAt: reviseAt, endAt: Date.now(), outcome: revised?.text ? 'ok' : 'bad_response' })
+      return revised.text || null
     } catch { return null }
   }
 
