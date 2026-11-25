@@ -17,13 +17,13 @@ const ANSWER = ['ledger 기록을 두 흐름으로 정리했습니다.', '', '| 
 /** A model that follows the compact request: one row per material, the key fact inside a line of at most `max` characters. */
 const faithful = want => ({ title: '두 흐름 정리', unfillable: [], items: Object.fromEntries(want.guide.items.map(i => [i.id, { text: `${i.shows} 흐름`, slots: Object.fromEntries(i.slots.map(s => [s.name, s.type === 'text' ? `${i.id} 정리` : i.materials.map(alias => {
   const m = want.materials.find(x => x.alias === alias); return { label: null, text: `${m.text.slice(0, 30)}… ${factOf(m.text)}`, from: alias } })])) }])) })
-function harness(replies) {
+function harness(replies, probability = name => (name.startsWith('same_') ? .03 : name.startsWith('before_') ? .9 : .97), materials = rows) {
   const tickets = new Map(), calls = [], fills = []
   const judge = { prepare: async dto => { const p = SKELETON_JUDGE.prepare({ mode: 'on', binding: 'b', dto }); assert.equal(p.status, 'prepared'); const t = `t${tickets.size + 1}`; tickets.set(t, { p, dto }); return { status: 'prepared', ticket: t, preview: { packet: p.packet } } },
     run: async t => { const { p, dto } = tickets.get(t); calls.push({ stage: dto.stage, names: p.packet.questions.map(q => q.name) })
-      const answers = Object.fromEntries(p.packet.questions.map(q => [q.name, { name: q.name, type: 'predicate', probability: q.name.startsWith('same_') ? .03 : q.name.startsWith('before_') ? .9 : .97 }])); return SKELETON_JUDGE.read(p, answers, 'b').reply }, cancel: async () => {} }
+      const answers = Object.fromEntries(p.packet.questions.map(q => [q.name, { name: q.name, type: 'predicate', probability: probability(q.name) }])); return SKELETON_JUDGE.read(p, answers, 'b').reply }, cancel: async () => {} }
   const fill = async want => { fills.push(want); const r = replies[Math.min(fills.length, replies.length) - 1]; return typeof r === 'function' ? r(want) : structuredClone(r) }
-  return { calls, fills, run: () => runSkeletonFlow({ request: LOOP_SAY, answer: ANSWER, materials: rows, candidates: [], currentAnswerId: null, viewport: { x: 0, y: 0, width: 2400, height: 1400 }, judge, fill, observeOnly: false }) }
+  return { calls, fills, run: () => runSkeletonFlow({ request: LOOP_SAY, answer: ANSWER, materials, candidates: [], currentAnswerId: null, viewport: { x: 0, y: 0, width: 2400, height: 1400 }, judge, fill, observeOnly: false }) }
 }
 const scene = enumerateSkeleton({ materials: rows, candidates: [] })
 const GUIDE = buildGuide(scene.parts.map((p, i) => ({ id: p.alias, trait: p.trait, materials: p.materials, component: p.options[0].component, reuse: [], creates: `N${i + 1}`, emphasis: 'spotlight', tried: [p.options[0].component] })), scene)
@@ -109,4 +109,45 @@ test('what the real engine did stays bounded: both recorded replies over the lim
   const h = harness([CHECK20BR_ON[0], CHECK20BR_ON[1]]), out = await h.run()
   assert.deepEqual([out.status, out.reason], ['fallback-chat', 'nothing-left'])
   assert.deepEqual(out.rejections.map(r => [r.part, r.action]), [['P1', 'rewrite'], ['P2', 'rewrite'], ['P1', 'drop'], ['P2', 'drop']]); assert.equal(h.fills.length, 2)
+})
+
+
+// ---- c41: check-22br ----
+// What the judge said about relevance in the schema-off conversation: M11 (the 11-25 01:52 wait measurement, "269ms") .56, everything else decided yes.
+const RECORDED_ABOUT = name => (name === 'about_M11' ? 0.56 : name.startsWith('same_') ? 0.1 : name.startsWith('before_') ? 0.9 : 0.97)
+const cardsOf = out => out.newComponents.map(c => c.markdown).join('\n')
+
+test('check-22br schema-off: M11 judged .56 (undecided) but linked to M9 and M12 of the same log -> it stays; the measurement card has all six rows and "269ms" is on the board', async () => {
+  const h = harness([faithful], RECORDED_ABOUT), out = await h.run()
+  assert.equal(out.status, 'presented', JSON.stringify({ reason: out.reason, relevance: out.relevance }))
+  assert.deepEqual(out.relevance.linked, ['M11']); assert.ok(out.relevance.kept.includes('M11') && !out.relevance.dropped.includes('M11'))
+  assert.deepEqual(out.guide.items.map(i => [i.id, i.materials.length]), [['P1', 6], ['P2', 6]]); const text = cardsOf(out)
+  for (const e of LOOP_ENTRIES) assert.ok(text.includes(e.fact), `${e.fact} is on a card`)
+})
+
+test('the rule is one step and only for the undecided: an unlinked undecided material, a decided no, and a material linked only to another dropped one all stay out', async () => {
+  const unlinked = await harness([faithful], RECORDED_ABOUT, rows.map(r => ({ ...r, links: [] }))).run()
+  assert.ok(unlinked.relevance.dropped.includes('M11') && unlinked.relevance.linked === undefined, 'no link, no rescue')
+  const no = await harness([faithful], name => (name === 'about_M11' ? 0.1 : RECORDED_ABOUT(name))).run()
+  assert.ok(no.relevance.dropped.includes('M11') && no.relevance.linked === undefined, 'a decided no is dropped')
+  // M3 and M6 both undecided (their figures, "2.48s" and "0.27~0.29s", are not code anchors, so the answer does not cite them): M6 is linked to M8 (sure) and is rescued; M3 is linked
+  // only to M6, which is not "sure", so it is not rescued (the rule is one step, not transitive)
+  const chain = await harness([faithful], name => (name === 'about_M3' || name === 'about_M6' ? 0.5 : RECORDED_ABOUT(name))).run()
+  assert.deepEqual([chain.relevance.linked.includes('M6'), chain.relevance.linked.includes('M3'), chain.relevance.dropped.includes('M3')], [true, false, true])
+})
+
+test('c41 the framing sentence: the judge is told that a title or an introduction of the topic ("X 정리입니다") is not a statement of the materials, even if the topic is theirs; a decided no still excuses, anything else still enforces', async () => {
+  const wire = await (async () => { const h = harness([faithful]); await h.run(); return h })()
+  assert.ok(wire.calls.every(c => !c.names.some(n => n.startsWith('stated_')) || true))
+  // the packet text, from the product's own judge
+  const p = SKELETON_JUDGE.prepare({ mode: 'on', binding: 'b', dto: { stage: 'coverage', request: 'q', materials: [{ alias: 'M1', title: 't', text: 'x', at: null, status: 'unknown' }], cards: [], board: [{ text: 'a', shown: [{ label: 'l', text: 't' }] }], questions: [{ kind: 'onboard', fact: 'F1', text: 'A사 견적 정리입니다.' }, { kind: 'stated', fact: 'F1', text: 'A사 견적 정리입니다.' }] } })
+  assert.equal(p.status, 'prepared'); const instructions = p.packet.questions.find(q => q.name === 'stated_F1').instructions
+  assert.ok(instructions.includes('names or introduces the topic of the answer') && instructions.includes('X 정리입니다') && instructions.includes('even if the topic is the materials\' own'), instructions)
+  assert.ok(instructions.startsWith('The sentence, quoted exactly as a JSON string: "A사 견적 정리입니다."'))
+})
+
+test('c41 an identical judgment is not asked twice: the same stage, questions and board are answered from the earlier answer, and only a real answer is remembered', async () => {
+  // the rewrite of the two cards returns the cards it was given, so its fill check is byte for byte the first one
+  const h = harness([faithful, faithful]), out = await h.run()
+  assert.equal(out.status, 'presented'); assert.equal(h.calls.filter(c => c.stage === 'fill_check').length, 1); assert.equal(out.stats.reused ?? 0, 0, 'nothing was repeated when the first fill was accepted')
 })
