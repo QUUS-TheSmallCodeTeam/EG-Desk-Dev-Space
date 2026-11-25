@@ -320,3 +320,15 @@ test('observe first on Claude (u5): in a room with history the decision model pi
   const again = await w.settled(await w.send('계산기 앱 창의 화면 요소를 읽어서 알려줘', { conversationId: first.conversationId, requestId: 'r-3' })); assert.equal(again.decisionFirst.reason, 'observe_refused')
   assert.match(JSON.stringify(w.transports[0].sent[2]), /the Mac's screen is locked/)
 })
+
+test('u8 (D23): the harness instructions tell Claude to comment between tool calls in plain words and never to say EG-Desk\'s markings or tool names; the earlier lines are all still there, in order', () => {
+  for (const base of ['Be brief.', null]) {
+    const text = claudeHarnessInstructions(base)
+    assert.match(text, /Between tool calls, say what you are doing in one short plain sentence in the person's own language/)
+    for (const word of ['auto', 'approval', 'person', 'needs_person', 'status', 'via', 'why', 'egdesk_*', 'mcp__*']) assert.ok(text.includes(word), word)
+    const at = pattern => text.search(pattern)
+    assert.ok(at(/are off in this session/) < at(/needs_person \(a risky command/) && at(/needs_person \(a risky command/) < at(/keeps the person's memory/) && at(/keeps the person's memory/) < at(/Between tool calls/), 'the new line is last: nothing before it moved')
+    assert.equal(text.split('Between tool calls').length, 2, 'once')
+  }
+  assert.ok(claudeHarnessInstructions('Be brief.').startsWith('Be brief.\n\n'))
+})
