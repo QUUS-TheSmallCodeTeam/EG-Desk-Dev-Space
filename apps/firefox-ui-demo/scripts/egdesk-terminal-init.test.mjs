@@ -215,7 +215,7 @@ class Element {
   querySelector(selector) { return selector === '.xterm-helper-textarea' ? this.textarea : null; }
 }
 
-async function uiFixture({ search = '', platform = 'win32', transport = 'conpty', respond = null, timeouts = null } = {}) {
+async function uiFixture({ search = '', platform = 'win32', transport = 'conpty', respond = null, timeouts = null, webLinks = null } = {}) {
   const ids = ['status-overlay', 'terminal-container', 'terminal-shell-select', 'terminal-shell-start', 'terminal-shell-label', 'terminal-operation-status'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id)]));
   elements['terminal-shell-select'].disabled = true;
@@ -267,7 +267,7 @@ async function uiFixture({ search = '', platform = 'win32', transport = 'conpty'
   assert.notEqual(source, initializer);
   const run = compileFunction(source, ['TerminalState', 'Terminal', 'FitAddon', 'WebLinksAddon', 'document', 'window', 'fetch',
     'requestAnimationFrame', 'ResizeObserver', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'AbortController', 'URLSearchParams', 'console']);
-  await run(TerminalState, FakeTerminal, { FitAddon: class { fit() {} } }, undefined, document, window, fetch,
+  await run(TerminalState, FakeTerminal, { FitAddon: class { fit() {} } }, webLinks ? { WebLinksAddon: class { constructor(handler) { webLinks.handler = handler; } } } : undefined, document, window, fetch,
     fn => frames.push(fn), class { constructor(fn) { observer = this; this.callback = fn; } observe() {} disconnect() { this.disconnected = true; } },
     timeouts?.set || setTimeout, timeouts?.clear || clearTimeout, fn => { intervals.set(++intervalId, fn); return intervalId; }, id => intervals.delete(id),
     AbortController, URLSearchParams, { warn: (...args) => warnings.push(args) });
@@ -954,3 +954,38 @@ test('c34: a read that carries openUrls tells the host once (terminal-open-url),
   assert.equal(posted.length, 1); assert.equal(posted[0].sessionId, 'held-pty'); assert.equal(posted[0].urls.length, 4, 'at most four');
   assert.equal(posted[0].urls[0], 'https://claude.com/cai/oauth/authorize?state=s');
 });
+
+// ---- c35 desk UX fixes ----
+const darwinFixture = (extra = {}) => uiFixture({ platform: 'darwin', transport: 'pty', ...extra });
+test('c35: a pipe session is never asked to resize and shows no resize error (logged once); a PTY session still resizes', async () => {
+  const pipe = await darwinFixture({ respond: (route, body, defaults) => (route === '/terminal/spawn' ? { ...defaults(route, body), usePty: false, transport: 'pipe' } : defaults(route, body)) });
+  await pipe.boot()
+  assert.equal(pipe.api.sessionInfo().usePty, false)
+  const before = pipe.requests.length
+  assert.deepEqual(await pipe.api.resize(100, 30), { ok: true, resized: false, skipped: 'pipe' }); await pipe.api.resize(90, 20)
+  assert.equal(pipe.requests.filter(r => r.route === '/terminal/resize').length, 0, 'nothing is sent to the bridge')
+  assert.ok(!/적용하지 못했습니다|Pipe terminal sessions/.test(pipe.elements['terminal-operation-status'].textContent), 'no resize error text (the one-line pipe notice at connect is the existing Korean notice)')
+  assert.equal(pipe.warnings.filter(w => String(w[0]).includes('resize skipped')).length, 1, 'logged once')
+  assert.equal(pipe.requests.length, before)
+  const pty = await darwinFixture(); await pty.boot()
+  assert.equal((await pty.api.resize(100, 30)).resized, true); assert.equal(pty.requests.filter(r => r.route === '/terminal/resize').length >= 1, true)
+})
+
+test('c35: a click on an address in the terminal opens it in an EG-Desk Browser Card when the bridge says so (the shell catalog\'s openUrl); otherwise xterm\'s default', async () => {
+  const on = { handler: null }, off = { handler: null }, opened = []
+  const flagged = await darwinFixture({ webLinks: on, respond: (route, body, defaults) => (route === '/terminal/shells' ? { ...defaults(route, body), openUrl: true } : defaults(route, body)) })
+  await flagged.boot(); let prevented = 0
+  on.handler({ preventDefault: () => { prevented++; } }, 'https://claude.com/cai/oauth/authorize?state=s')
+  const posted = flagged.messages.filter(m => m.type === 'terminal-open-url')
+  assert.equal(posted.length, 1); assert.deepEqual(posted[0].urls, ['https://claude.com/cai/oauth/authorize?state=s']); assert.equal(posted[0].sessionId, 'owned-pty'); assert.equal(prevented, 1)
+  const plain = await darwinFixture({ webLinks: off }); plain.window.open = (...args) => opened.push(args)
+  await plain.boot(); off.handler({ preventDefault() {} }, 'https://example.test/x')
+  assert.equal(plain.messages.filter(m => m.type === 'terminal-open-url').length, 0); assert.deepEqual(opened.map(a => a[0]), ['https://example.test/x'])
+})
+
+test('c35: the terminal reports how long it has been quiet (null until it printed something): the login line waits for the shell', async () => {
+  const h = await darwinFixture({ respond: (route, body, defaults) => (route === '/terminal/read' ? { ...defaults(route, body), data: 'prompt % ' } : defaults(route, body)) })
+  assert.equal(h.api.outputIdleMs(), null)
+  await h.boot(); await settle()
+  assert.ok(Number.isFinite(h.api.outputIdleMs()) && h.api.outputIdleMs() >= 0)
+})

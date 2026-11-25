@@ -291,7 +291,7 @@ const CLAUDE_LOGIN_LINES = Object.freeze({ claudeai: 'claude auth login --claude
  * Returns { phase: 'started' | 'error', text }.
  */
 export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, terminalApi = card => card?._termBrowser?.contentWindow?.terminalAPI ?? null,
-  sleep = null, now = Date.now, method = 'claudeai', timeoutMs = 15000,
+  sleep = null, now = Date.now, method = 'claudeai', timeoutMs = 15000, quietMs = 400, readyTimeoutMs = 8000,
   isCurrent = () => true,
   checkLine = command => Object.hasOwn(CLAUDE_LOGIN_LINES, method) && command?.method === method && command.line === CLAUDE_LOGIN_LINES[method] ? command.line : null,
   startedText = '터미널에서 Anthropic 공식 로그인을 마친 뒤 다시 확인을 눌러 주세요. EG-Desk는 로그인 정보를 보관하지 않습니다.' } = {}) {
@@ -321,6 +321,19 @@ export async function runClaudeLoginInTerminal({ requestCommand, openTerminal, t
     api = null;
     if (card.isConnected === false || !wait) break;
     try { await wait(50); } catch { break; }
+  }
+  // c35: a line typed before the shell printed its prompt is echoed twice. Wait (bounded) until the session has printed something and been quiet for a moment; a terminal API that
+  // does not report output timing is typed to at once, as before.
+  if (api && typeof api.outputIdleMs === 'function' && wait) {
+    const readyStarted = now();
+    while (now() - readyStarted < readyTimeoutMs) {
+      if (!isCurrent()) return changed();
+      let idle = null;
+      try { idle = api.outputIdleMs(); } catch { idle = null; }
+      if (idle !== null && idle >= quietMs) break;
+      if (card.isConnected === false) break;
+      try { await wait(50); } catch { break; }
+    }
   }
   if (!isCurrent()) return changed();
   if (!api) return { phase: 'error', text: `터미널 준비를 확인하지 못했습니다. 터미널에서 ${line} 을 직접 실행해 주세요.` };

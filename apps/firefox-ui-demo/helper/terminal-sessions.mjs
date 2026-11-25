@@ -102,7 +102,8 @@ export class TerminalSessionRegistry {
     const entry = this.active.get(id)
     const { shell, ...state } = this.snapshot(id)
     return { ...state, bridgeInstance: this.bridgeInstance,
-      detachSupported: !!(entry?.local && entry.usePty && typeof entry.process.kill === 'function'
+      detachSupported: !!(entry?.local && typeof entry.process.kill === 'function' // c35 (UX-8): a pipe session is held like a PTY one (a login in a pipe terminal survived nothing before)
+
         && !entry.stopRequested && !entry.nativeError) }
   }
 
@@ -155,7 +156,7 @@ export class TerminalSessionRegistry {
       return this.localError('TERMINAL_DETACH_EXPIRED')
     }
     if (!entry) return this.localError('ORIGINAL_EXITED')
-    if (entry.stopRequested || entry.nativeError || !entry.usePty) return this.localError('ORIGINAL_UNAVAILABLE')
+    if (entry.stopRequested || entry.nativeError) return this.localError('ORIGINAL_UNAVAILABLE')
     // Retry only for the same destination view (lost response); an old view
     // and a second destination cannot acquire a live attached channel.
     if (lease.phase === 'attached' && lease.resumedView === view) return this.localSnapshot(id)

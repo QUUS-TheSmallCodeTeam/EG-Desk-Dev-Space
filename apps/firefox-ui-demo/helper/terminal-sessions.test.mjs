@@ -260,7 +260,7 @@ test('hold expiry, native exit, bridge restart and missing identity stay distinc
   const instance = registry.bridgeInstance
   const one = register(registry, new PtyProcess(), 'one')
   const two = register(registry, new PtyProcess(), 'two')
-  register(registry, new ChildProcess(), 'pipe', false)
+  register(registry, Object.assign(new ChildProcess(), { kill: undefined }), 'pipe', false) // c35: a pipe session CAN be held now; one whose process cannot be killed still cannot
   for (const id of ['one', 'two', 'pipe']) registry.ownLocal(id, 'desk-a', id)
   assert.equal(registry.detachLocal('pipe', 'desk-a', 'pipe', instance).code, 'TERMINAL_DETACH_UNAVAILABLE')
   assert.equal(registry.detachLocal('one', 'desk-a', 'one', instance).expiresAt, 10)
@@ -298,4 +298,17 @@ test('closing a Desk scope requests native stop on its held sessions only', () =
   assert.equal(registry.snapshot('own').exitConfirmed, true)
   other.exit()
   assert.equal(registry.active.size, 0)
+})
+
+test('c35: a pipe session is held across a window restart like a PTY one and can be taken back (a login in a pipe terminal survives the window)', () => {
+  let time = 0
+  const registry = new TerminalSessionRegistry({ now: () => time, detachedTtlMs: 1000 })
+  const instance = registry.bridgeInstance
+  const pipe = register(registry, new ChildProcess(), 'pipe', false)
+  registry.ownLocal('pipe', 'desk-a', 'view-1')
+  assert.equal(registry.localSnapshot('pipe').detachSupported, true)
+  assert.equal(registry.detachLocal('pipe', 'desk-a', 'view-1', instance).status, 'HELD')
+  assert.equal(pipe.killCalls ?? 0, 0, 'holding does not end the process')
+  assert.equal(registry.attachLocal('pipe', 'desk-a', 'view-2', instance).status !== undefined, true)
+  assert.notEqual(registry.attachLocal('pipe', 'desk-a', 'view-3', instance).code, 'ORIGINAL_UNAVAILABLE')
 })
