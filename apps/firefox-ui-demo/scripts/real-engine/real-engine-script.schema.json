@@ -804,6 +804,70 @@
                       "maxProperties": 32,
                       "type": "object"
                     },
+                    "flow": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "firstNoteMs": {
+                          "additionalProperties": false,
+                          "minProperties": 1,
+                          "properties": {
+                            "equals": {
+                              "maximum": 600000,
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "max": {
+                              "maximum": 600000,
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "min": {
+                              "maximum": 600000,
+                              "minimum": 0,
+                              "type": "integer"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "noResult": {
+                          "items": {
+                            "maxLength": 80,
+                            "minLength": 3,
+                            "type": "string"
+                          },
+                          "maxItems": 4,
+                          "minItems": 1,
+                          "type": "array"
+                        },
+                        "notes": {
+                          "additionalProperties": false,
+                          "minProperties": 1,
+                          "properties": {
+                            "equals": {
+                              "maximum": 5,
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "max": {
+                              "maximum": 5,
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "min": {
+                              "maximum": 5,
+                              "minimum": 0,
+                              "type": "integer"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "statedSecondsTrue": {
+                          "const": true
+                        }
+                      },
+                      "type": "object"
+                    },
                     "memory": {
                       "additionalProperties": false,
                       "properties": {

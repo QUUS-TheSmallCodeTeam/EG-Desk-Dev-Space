@@ -17,6 +17,7 @@ const script0 = expect => ({ set: 'real-engine-ext-v1', conversations: [{ id: 'c
 // `before` pairs are the only ordering rules that matter (c25: the records and expectations of memory come before journey's, byte-identical to before the move).
 const LANES = {
   L1: { expectKeys: ['collab'], turnFields: ['from'], turnHooks: ['collab'] },
+  L3: { expectKeys: ['flow'], turnHooks: ['flow'] },
   L2: { expectKeys: ['engine'], turnHooks: ['journey'] },
   L4: { expectKeys: ['briefing'] },
   L5: { expectKeys: ['deleted', 'coding'], conversationFields: ['seededWrites'], turnHooks: ['coding'] },

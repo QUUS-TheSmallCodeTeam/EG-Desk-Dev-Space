@@ -70,7 +70,14 @@ registerExpectKeys({ rewrite: { schema: REWRITE_EXPECT_SCHEMA, validate: (value,
 } } })
 registerTurnHooks('rewrite', conversation => createRewriteHook(conversation))
 
-// ---- slot L3 ----
+
+// ---- L3: the heartbeat's own messages (expect.flow: notes, firstNoteMs, statedSecondsTrue, noResult) ----
+import { FLOW_EXPECT_SCHEMA, createFlowHook, validateFlowExpect } from './egdesk-real-engine-flow.mjs'
+registerExpectKeys({ flow: { schema: FLOW_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateFlowExpect(value, { conv, turn }, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('flow', () => {
+  const hook = createFlowHook()
+  return { hook, beginTurn: ctx => hook.beginTurn(ctx), finishTurn: ctx => hook.finishTurn(ctx) }
+})
 
 // ---- L4: briefing (the briefing flow; its hook itself is registered in egdesk-real-engine-hooks.mjs) ----
 import { BRIEFING_EXPECT_SCHEMA, checkBriefingExpect, validateBriefingExpect } from './egdesk-real-engine-briefing-hook.mjs'
