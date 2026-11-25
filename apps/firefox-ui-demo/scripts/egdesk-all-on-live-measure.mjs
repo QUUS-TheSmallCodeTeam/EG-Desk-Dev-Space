@@ -536,6 +536,14 @@ function readWrites(w) {
       readings: (data.readings ?? []).map(r => ({ pageId: r.pageId, status: r.reading?.status ?? null, state: r.reading?.state ?? null })) }
   } catch { return { pages: [], readings: [], unreadable: true } }
 }
+// Cycle 49 (L4; Main's c60, V2 s3): the parts of a briefing step were read from the LAST fork prompt, but after a missing fact the one rewrite asks only the cards that hold the cited materials, so a
+// step whose whole fill had three cards showed two ("the redesign drops the open-items part": it did not). The parts are the guide of the prompt with the most items (the whole fill; the first of equals).
+const GUIDE_IN_PROMPT = /Design guide \(decided; do not change it\):\n(.*)\n\nMaterials:/s
+export function guidePartsOf(forkPrompts) {
+  let best = null
+  for (const p of forkPrompts ?? []) { let guide; try { guide = JSON.parse(GUIDE_IN_PROMPT.exec(p?.prompt ?? '')?.[1] ?? 'null') } catch { guide = null } if (Array.isArray(guide?.items) && (!best || guide.items.length > best.length)) best = guide.items }
+  return (best ?? []).map(item => ({ shows: item.shows, component: item.component, materials: item.materials }))
+}
 function seenAfter(w, id, before, j) {
   const conversation = {}, newOnes = [], forkTexts = w.forkPrompts.slice(before.forks).map(p => p.text).filter(text => typeof text === 'string')
   for (const room of [DM, BROWSER_ROOM]) {
@@ -546,9 +554,7 @@ function seenAfter(w, id, before, j) {
     newOnes.push(...list.slice(before.rooms[room]).map(m => ({ room, ...m, ...(m.role === 'assistant' ? { authored: j.said.includes(m.text) ? 'own' : forkTexts.includes(m.text) ? 'model' : 'system' } : {}) })))
   }
   const stepEvents = w.events.slice(before.events)
-  const guide = w.forkPrompts.slice(before.forks).map(p => /Design guide \(decided; do not change it\):\n(.*)\n\nMaterials:/s.exec(p.prompt)?.[1]).filter(Boolean).at(-1)
-  let parts = []
-  try { parts = guide ? JSON.parse(guide).items.map(item => ({ shows: item.shows, component: item.component, materials: item.materials })) : [] } catch { parts = [] }
+  const parts = guidePartsOf(w.forkPrompts.slice(before.forks))
   const runs = {}
   for (const room of [DM, BROWSER_ROOM]) {
     const cid = w.state.lastOf.get(room)?.conversationId
