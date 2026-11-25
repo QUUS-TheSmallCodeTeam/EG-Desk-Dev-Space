@@ -84,6 +84,7 @@ import { ContextRuntime } from './egdesk-context-runtime.mjs'
 import { createContextHttpHandler } from './egdesk-context-http.mjs'
 import { buildCodexAppServerLaunch, createNativeCapabilityCache, inspectNativeCapabilities, preflightOwnedAppServer, resolveCodexExecutable, NATIVE_SCHEMA_VERSION } from './egdesk-native-capabilities.mjs'
 import { createSlotReadiness, isProfileSlot } from './egdesk-slot-readiness.mjs'
+import { browserSchemaReady } from './egdesk-claude-browser-route.mjs' // u5 (U19): a Claude turn's Browser tools are judged by Claude's readiness, not the Codex slot's
 import { createProfileReaders } from './egdesk-profile-readers.mjs'
 import { createProfileAccessFailures } from './egdesk-profile-access.mjs'
 import { createEGDeskFileMount, requireEGDeskNodeRuntime } from './egdesk-file-mount.mjs'
@@ -375,7 +376,7 @@ let browserDecisionGeneration = 0
 // OWN binary's probe and ITS OWN server (ready and signed in), so neither server being down affects the other's rooms.
 const slotReadiness = createSlotReadiness({ shared: () => ({ schemaMatch: nativeCapabilities.schemaMatch, qaReadOnly: nativeCapabilities.qaReadOnly, ready: appServerReady }),
   profiles: { capabilities: id => codexProfileServers.capabilities(id) } })
-const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), ownerKeyFor: browserOwnerKeyFor, schemaReady: route => slotReadiness.qaReady(route?.engineProfileId), fixtureQa: fixtureBrowserQaFromEnv(process.env),
+const browserProvider = createCodexBrowserToolProvider({ transport: browserTransport, getOwnerKey: () => publicAuthIdentityKey(authState), ownerKeyFor: browserOwnerKeyFor, schemaReady: browserSchemaReady({ claudeLive: () => { try { return chat.claudeBrowserLive() === true } catch { return false } }, claudeReady: () => claudeEngine.isReady() && claudeEngine.capabilities().has('boundedQa'), codexReady: route => slotReadiness.qaReady(route?.engineProfileId) }), fixtureQa: fixtureBrowserQaFromEnv(process.env),
   // DECISION_MODEL_CONTEXT_SETUP.md §3.3: egdesk_browser_reflex only with a key and mode 'on'.
   decision: { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null,
     recipient: () => recipientForDecisionKey(decisionCredentials.getApiKey(), undefined, decisionClient.model),
