@@ -342,7 +342,7 @@ export function verdictOf(state) {
   return { check: 'would_revise', ifUnrevised: trimmed(state).text ? 'would_trim' : 'would_withhold' }
 }
 
-async function judge({ draft, evidence, userText, internalVocabulary, client, thresholds, timeoutMs, signal, design = 'predicates', concreteOnly = false }) {
+async function judge({ draft, evidence, userText, internalVocabulary, client, thresholds, timeoutMs, signal, design = 'predicates', concreteOnly = false, evidenceIncomplete = false }) {
   const spans = segmentDraft(draft)
   // concreteOnly: only sentences with a concrete detail are judged (see checkDraft).
   const claimSpans = spans.map((s, i) => ({ ...s, index: i })).filter(s => s.kind === 'claim' && (!concreteOnly || isCheckable(s.text) || claimsPass(s.text) || claimsEdit(s.text) || claimsMerge(s.text))).slice(0, DRAFT_CHECK_LIMITS.claims)
@@ -350,6 +350,9 @@ async function judge({ draft, evidence, userText, internalVocabulary, client, th
   const wantsCall = claimSpans.length > 0 && (evidence.length > 0 || claimSpans.some(s => isCheckable(s.text))) || terms.length > 0
   if (!wantsCall) return { spans, claimSpans, terms, findings: [], judgments: [], called: false, skipped: 'nothing_checkable' }
   // No evidence at all: every concrete sentence is unverified by construction; the model cannot add basis.
+  // u5 (D18): evidence known to be INCOMPLETE (the turn's context step delivered nothing) is not evidence of absence: no sentence is called unverified for want of it. Contradictions and the
+  // run-fact rules (the tests the run's own command counted) are not about the missing material and still act.
+  if (!evidence.length && evidenceIncomplete && !terms.length) return { spans, claimSpans, terms, findings: [], judgments: [], called: false, skipped: 'evidence_incomplete' }
   if (!evidence.length) {
     const findings = claimSpans.filter(s => isCheckable(s.text)).map(s => ({ kind: 'unverified', span: claimSpans.indexOf(s), evidence: [], reason: 'no_evidence' }))
     if (!findings.length && !terms.length) return { spans, claimSpans, terms, findings: [], judgments: [], called: false, skipped: 'nothing_checkable' }
@@ -367,7 +370,8 @@ async function judge({ draft, evidence, userText, internalVocabulary, client, th
   const read = predicates ? readPredicateFindings({ answers: result.answers, claims: claimSpans, terms, evidence }) : readFindings({ answers: result.answers, claims: claimSpans, terms, evidence, thresholds })
   const local = !evidence.length
     ? claimSpans.filter(s => isCheckable(s.text)).map(s => ({ kind: 'unverified', span: claimSpans.indexOf(s), evidence: [], reason: 'no_evidence' })) : []
-  return { spans, claimSpans, terms, findings: [...local, ...read.findings.filter(f => !local.some(l => l.span === f.span && f.kind === 'unverified') && !ruled.some(r => r.span === f.span)), ...ruled], judgments: read.judgments, called: true, usage: result.usage ?? null }
+  const kept = findings => (evidenceIncomplete ? findings.filter(f => f.kind !== 'unverified') : findings)
+  return { spans, claimSpans, terms, findings: kept([...local, ...read.findings.filter(f => !local.some(l => l.span === f.span && f.kind === 'unverified') && !ruled.some(r => r.span === f.span)), ...ruled]), judgments: read.judgments, called: true, usage: result.usage ?? null }
 }
 
 /**
@@ -378,7 +382,7 @@ async function judge({ draft, evidence, userText, internalVocabulary, client, th
  * 'advisory' judges and records but always posts the draft unchanged. 'off' calls nothing.
  */
 export async function checkDraft({ draft, evidence = [], userText = '', internalVocabulary = [], mode = 'off', client, revise = null, budget = null,
-  now = () => performance.now(), onStage = null, thresholds: overrides, signal, egress = null, design = 'predicates', concreteOnly = false } = {}) {
+  now = () => performance.now(), onStage = null, evidenceIncomplete = false, thresholds: overrides, signal, egress = null, design = 'predicates', concreteOnly = false } = {}) {
   // concreteOnly: for a short message composed only from facts of the present (the heartbeat's messages: every evidence item is the run's
   // state now). Such a check can find only two things: a concrete detail (number, name, identifier) the facts do not hold, and a tense
   // mismatch, which cannot exist when every item is of the present. So a sentence without a concrete detail is not sent; with none left,
@@ -417,7 +421,7 @@ export async function checkDraft({ draft, evidence = [], userText = '', internal
     if (budget && budget.canSpend() !== true) throw new DecisionError('budget_exceeded', 'budget')
     const spent = now() - started
     if (spent >= DRAFT_CHECK_LIMITS.holdMs) throw new DecisionError('timeout', 'hold limit')
-    const result = await judge({ draft: text, evidence: proof, userText, internalVocabulary, client, thresholds, timeoutMs: Math.max(1, Math.min(timeoutMs, DRAFT_CHECK_LIMITS.holdMs - spent)), signal, design: asked, concreteOnly: recheck || concreteOnly === true })
+    const result = await judge({ draft: text, evidence: proof, evidenceIncomplete, userText, internalVocabulary, client, thresholds, timeoutMs: Math.max(1, Math.min(timeoutMs, DRAFT_CHECK_LIMITS.holdMs - spent)), signal, design: asked, concreteOnly: recheck || concreteOnly === true })
     if (result.called) calls++
     calibration.judgments.push(...result.judgments)
     return result
