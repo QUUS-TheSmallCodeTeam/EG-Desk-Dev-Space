@@ -76,7 +76,14 @@
   term.loadAddon(fitAddon);
 
   if (typeof WebLinksAddon !== 'undefined') {
-    term.loadAddon(new WebLinksAddon.WebLinksAddon());
+    // c35: with the bridge's open-url flag (the shell catalog says openUrl) a click on an address in the terminal opens it in an EG-Desk Browser Card (the card's own terminal-open-url
+    // handling, http(s) only); without it xterm's default (which does nothing visible here) stays.
+    const openLink = (event, uri) => {
+      if (shellCatalog?.openUrl !== true) return undefined;
+      try { event?.preventDefault?.(); notifyTerminalHost({ type: 'terminal-open-url', sessionId: ptyId, urls: [String(uri)] }); } catch {}
+      return undefined;
+    };
+    term.loadAddon(new WebLinksAddon.WebLinksAddon((event, uri) => { if (shellCatalog?.openUrl === true) openLink(event, uri); else window.open?.(uri, '_blank', 'noopener'); }));
   }
 
   term.open(containerEl);
@@ -95,7 +102,7 @@
   let confirmedExitSessionId = null;
   let closeRequested = false;
   let unloaded = false, connectionGeneration = 0, connectPending = null, readPending = false;
-  let shellCatalog = null, sessionInfo = null;
+  let shellCatalog = null, sessionInfo = null, lastOutputAtMs = 0;
   let activeScript = null;
   let inputRevision = 0;
   let frameWheelHandler = null;
@@ -155,6 +162,7 @@
   // keyboard/input traffic, even when it happens to contain an exit marker.
   function receiveTerminalOutput(data, sessionId) {
     if (typeof data !== 'string' || !data) return;
+    lastOutputAtMs = Date.now(); // c35: the shell's own output (its prompt) tells when it is ready for a typed line
     // xterm may emit device replies during output parsing. A restored view
     // must never send those replies (or any previously queued input) to the PTY.
     if (resumed) { renderingResumedOutput++; term.write(data, () => { renderingResumedOutput--; }); }
@@ -483,6 +491,8 @@
         return ptyId;
       },
       isConnected: () => connected,
+      // c35: ms since the session last printed anything, or null when it has printed nothing yet (a shell that is still starting up has not shown its prompt)
+      outputIdleMs: () => (lastOutputAtMs ? Date.now() - lastOutputAtMs : null),
       bufferText: () => {
         const buffer = term.buffer.active;
         const lines = [];
@@ -524,8 +534,14 @@
     operationStatus.classList.remove('hidden');
   }
 
+  let pipeResizeLogged = false;
   async function resizeTerminal(cols, rows) {
     if (!ptyId || !connected || closeRequested || unloaded) return { ok: false, code: 'TERMINAL_INPUT_INACTIVE' };
+    // c35: a pipe session cannot be resized: nothing is asked of the bridge and nothing is shown (the connection line already says "pipe"); logged once
+    if (sessionInfo && sessionInfo.usePty === false) {
+      if (!pipeResizeLogged) { pipeResizeLogged = true; try { console.warn('[terminal] resize skipped: this session is a pipe, not a PTY'); } catch {} }
+      return { ok: true, resized: false, skipped: 'pipe' };
+    }
     const sessionId = ptyId;
     try {
       const result = await postTerminal('/terminal/resize', { sessionId, cols, rows });

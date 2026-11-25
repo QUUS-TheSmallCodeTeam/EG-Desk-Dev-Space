@@ -420,6 +420,15 @@ export function canvasViewSize(kind, room = null) {
   };
 }
 
+// c35 (UX-1): a View whose minimum height is larger than the room above the dock would end partly under it (the Settings card at 600 px in a 720 px window hid its lower controls and a
+// Terminal's last lines). It gives up the overflow when it can stay at least `floor` px high; a View that cannot (a Chat at its minimum) keeps its size, as before.
+export function trimToSafeBottom(placed, safe, { floor = 320 } = {}) {
+  if (!placed || !safe || ![placed.y, placed.height, safe.bottom].every(Number.isFinite)) return placed;
+  const overflow = placed.y + placed.height - safe.bottom;
+  if (overflow <= 0 || placed.height - overflow < floor) return placed;
+  return { ...placed, height: Math.floor(placed.height - overflow) };
+}
+
 const worldBox = rect => !!rect && [rect.x, rect.y, rect.width, rect.height].every(Number.isFinite)
   && rect.width > 0 && rect.height > 0;
 

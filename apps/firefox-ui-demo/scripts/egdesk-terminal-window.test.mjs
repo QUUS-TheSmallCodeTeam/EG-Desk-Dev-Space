@@ -632,3 +632,16 @@ test('the surface hands the Terminal zone spawnBrowserCard, and the frame page f
   assert.match(surface, /singletonSourceRef,\n\s+spawnBrowserCard,\n\s+spawnDeskWindowShell,/);
   assert.match(initializer, /Array\.isArray\(result\.openUrls\)[\s\S]{0,200}type: 'terminal-open-url'/);
 });
+
+// c35 (UX-7): a Terminal opened from another card (the login button's terminal from the Settings card) asks the camera to keep that requester in view.
+test('c35: spawnTerminalCard passes the requesting card to the reveal as keepVisible; without one the reveal is as before', async () => {
+  const reveals = [];
+  const h = await terminalWindow({ api: { ptyId: null, isConnected: () => false }, depOverrides: { revealPlacedCanvasCard: (card, placement, options) => reveals.push(options) } });
+  try {
+    assert.deepEqual(reveals, [{ kind: 'terminal' }], 'no requester: only the kind');
+    const requester = { id: 'egd-settings-card-1' };
+    const second = h.zone.spawnTerminalCard({ keepVisible: requester });
+    assert.ok(second); assert.equal(reveals.at(-1).keepVisible, requester); assert.equal(reveals.at(-1).kind, 'terminal');
+    h.zone.spawnTerminalCard({ reveal: false }); assert.equal(reveals.length, 2, 'reveal: false reveals nothing');
+  } finally { h.restore(); }
+});

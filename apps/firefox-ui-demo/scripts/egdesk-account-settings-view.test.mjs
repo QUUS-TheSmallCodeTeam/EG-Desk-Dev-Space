@@ -495,3 +495,20 @@ test('the budget line labels estimated sent-without-usage requests and the cap c
   assert.match(view.budgetLine, /600 토큰 \+ 응답 없이 보낸 요청 3건 추정 400 \/ 상한 1,000/);
   assert.match(view.modeNote, /한도에 도달/);
 });
+
+// c35 (UX-3): the login line is typed only after the shell has printed its prompt and been quiet for a moment (typed earlier it was echoed twice).
+test('c35: the Terminal login waits for the shell to print and settle before typing; without output timing it types at once; a stuck shell is typed to after the bound; a changed account types nothing', async () => {
+  const run = async ({ idles, readyTimeoutMs = 8000, isCurrent = () => true, noTiming = false }) => {
+    let clock = 0, i = 0; const typed = [], writes = []
+    const api = { isConnected: () => true, write: data => { typed.push(data); writes.push(clock) }, ...(noTiming ? {} : { outputIdleMs: () => (i < idles.length ? idles[i++] : idles.at(-1)) }) }
+    const card = { isConnected: true, _termBrowser: { contentWindow: { terminalAPI: api } } }
+    const out = await View.runClaudeLoginInTerminal({ requestCommand: async method => ({ method, line: `claude auth login --${method}` }), openTerminal: () => card, sleep: async ms => { clock += ms }, now: () => clock, readyTimeoutMs, isCurrent })
+    return { out, typed, at: writes[0] ?? null, polls: i }
+  }
+  const ready = await run({ idles: [null, null, 50, 120, 410] })
+  assert.equal(ready.out.phase, 'started'); assert.deepEqual(ready.typed, ['claude auth login --claudeai\r']); assert.ok(ready.polls >= 5, 'it polled until the shell had been quiet for 400 ms')
+  const immediate = await run({ idles: [], noTiming: true }); assert.equal(immediate.out.phase, 'started'); assert.equal(immediate.at, 0, 'an API without output timing: as before, no wait')
+  const stuck = await run({ idles: [null], readyTimeoutMs: 1000 }); assert.equal(stuck.out.phase, 'started'); assert.ok(stuck.at >= 1000 && stuck.at < 2000, `typed after the bound (${stuck.at})`)
+  let current = true
+  const changed = await run({ idles: [null], isCurrent: () => { const was = current; current = false; return was } }); assert.equal(changed.out.phase, 'error'); assert.deepEqual(changed.typed, [])
+})

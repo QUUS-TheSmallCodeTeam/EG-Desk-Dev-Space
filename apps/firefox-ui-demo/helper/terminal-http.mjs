@@ -34,7 +34,7 @@ export function createTerminalHttpHandler({ registry, factory, port = 39218, url
     try {
       if (route === '/terminal/shells') {
         if (req.method !== 'GET') throw bad('METHOD_NOT_ALLOWED', 'Use GET for terminal shell capabilities', 405)
-        sendJson(res, 200, factory.catalog())
+        sendJson(res, 200, { ...factory.catalog(), ...(urlOpen ? { openUrl: true } : {}) }) // c34/c35: the card learns that addresses may open in an EG-Desk Browser Card
         return true
       }
       if (req.method !== 'POST') throw bad('METHOD_NOT_ALLOWED', 'Use POST for terminal operations', 405)

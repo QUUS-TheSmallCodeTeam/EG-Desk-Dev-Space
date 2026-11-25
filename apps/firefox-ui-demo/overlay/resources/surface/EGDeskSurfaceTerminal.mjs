@@ -134,7 +134,7 @@ export function createTerminalZone(deps) {
     });
     const card = shell.root;
     const body = shell.slots.content;
-    if (reveal) revealPlacedCanvasCard(card, placement);
+    if (reveal) revealPlacedCanvasCard(card, placement, { kind: 'terminal', ...(options?.keepVisible ? { keepVisible: options.keepVisible } : {}) });
 
     // ---- Header: name and session state ----
     const title = el('strong', { class: 'egd-terminal-title', title: '터미널' }, '터미널');

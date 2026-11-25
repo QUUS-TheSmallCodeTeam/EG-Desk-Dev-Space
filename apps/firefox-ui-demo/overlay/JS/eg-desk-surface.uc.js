@@ -9446,7 +9446,9 @@
       ? viewportToCanvasPoint(options.anchorClientX, options.anchorClientY) : null;
     const occupied = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape, .egd-board-region'))
       .map(persistentEntityGeometry);
-    const placed = SurfaceState.placeCanvasView({ size, safe, occupied, anchor, gap: 24 });
+    let placed = SurfaceState.placeCanvasView({ size, safe, occupied, anchor, gap: 24 });
+    // c35: a View taller than the room above the dock gives up the overflow (down to 320 px) so the dock never covers its lower part
+    placed = SurfaceState.trimToSafeBottom?.(placed, safe) ?? placed;
     // Cycle 12, advisory and OFF by default: an Agent's work surface (a run's file viewer, a result card) is also shown to the placement runtime; the placement
     // returned is unchanged. L1 c13: with the pref "on" the hook returns the code rule's spot instead, marked quiet (no camera move, no activation).
     if (options.workSurface) return state.noteWorkSurfacePlacement?.(kind, placed, options.workSurface) || placed;
@@ -9661,6 +9663,17 @@
       if (rect.x !== Math.round(placement.x) || rect.y !== Math.round(placement.y)) return;
       const safe = safeViewportRect();
       const view = { pan: state.panTarget, zoom: state.zoomTarget };
+      // c35 (UX-7): a View opened FROM a card (the login button's terminal from the Settings card) keeps that requester in view: both are framed when they fit, otherwise the camera stays
+      // (the new View is one edge dot away) instead of pushing the requester off-screen.
+      const requester = options.keepVisible?.isConnected && options.keepVisible !== card ? options.keepVisible : null;
+      if (requester) {
+        const other = persistentEntityGeometry(requester);
+        let minZoom = 0;
+        try { minZoom = SurfaceState.semanticDetailZoomFloor([{ ...rect, kind: options.kind }, { ...other, kind: 'settings' }]); } catch { minZoom = 0; }
+        const paired = SurfaceState.pairedRevealCamera([rect, other], safe, { ...view, minZoom });
+        if (paired) state.setCanvasViewportTarget?.(paired);
+        return;
+      }
       const opener = options.opener?.isConnected && options.opener !== card ? options.opener : null;
       if (opener) {
         const chat = chatOpenerView(opener);
@@ -22496,7 +22509,7 @@
           // happens to be active when the command or the Terminal is ready.
           const isCurrent = () => Boolean(loginProfileId) && bridge() === api &&
             AccountSettingsView.claudeAccountView(state.codex.engines, { connected: state.codex.connected }).loginProfileId === loginProfileId;
-          const options = { isCurrent, openTerminal: () => spawnTerminalCard() };
+          const options = { isCurrent, openTerminal: () => spawnTerminalCard({ keepVisible: (() => { try { return document.querySelector?.('.egd-settings-card') ?? null; } catch { return null; } })() }) }; // c35: the Settings card stays in view
           const outcome = loginProfileId === 'claude-default'
             ? await AccountSettingsView.runClaudeLoginInTerminal({ ...options, requestCommand: method => api.claudeLoginCommand(method) })
             : await AccountSettingsView.runEngineProfileLoginInTerminal({ ...options, engineId: 'claude', profileId: loginProfileId,
@@ -28421,11 +28434,15 @@
         if (webProgress && webProgress.isTopLevel === false) return;
         reportBrowserLocation(location?.spec || '');
         enforceAgentNavigationGuard(location?.spec || '');
+        // c35 (UX-6): a page popup's first navigation finished before the card's load events were listened to, so its address bar stayed 'about:blank'; the location change itself syncs it
+        try { syncBrowserStateFromBrowser({ markDirtyOnLocationChange: true }); } catch {}
       },
       onStateChange(webProgress, _request, stateFlags) {
         if (webProgress && webProgress.isTopLevel === false) return;
         const flags = Ci.nsIWebProgressListener;
         if ((stateFlags & flags.STATE_STOP) && (stateFlags & flags.STATE_IS_WINDOW)) reportBrowserLoaded();
+        // c35 (UX-6): a popup is no longer shown as loading, and shows its real address and title, once its load stopped
+        if ((stateFlags & flags.STATE_STOP) && (stateFlags & flags.STATE_IS_WINDOW)) { try { setBrowserLoading(false); syncBrowserStateFromBrowser({ markDirtyOnLocationChange: true }); } catch {} }
       },
       onProgressChange() {}, onStatusChange() {}, onSecurityChange() {}, onContentBlockingEvent() {},
     };
@@ -30074,6 +30091,8 @@
         const sets = windowAttentionSets(cards);
         dots = ViewportExtras.edgeDotModel(points, { titles, priority: id => SurfaceKeys.windowPriorityRank(id, sets),
           bounds: { left: safe.left + 6, top: safe.top + 6, right: safe.right - 6, bottom: safe.bottom - 6 } });
+        // c35: the bottom-side dots sit beside the dock, not on top of the card above it
+        try { const dockRect = document.getElementById('egd-dock')?.getBoundingClientRect(); if (dockRect?.height > 0) dots = ViewportExtras.edgeDotsBesideDock(dots, { dock: dockRect, viewport: { width: window.innerWidth, height: window.innerHeight } }); } catch {}
       }
       const live = new Set(dots.map(dot => dot.key));
       for (const [key, node] of edgeDotNodes) {

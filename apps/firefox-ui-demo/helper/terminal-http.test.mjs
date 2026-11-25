@@ -124,3 +124,13 @@ test('local lifecycle HTTP scopes the original PTY data channel without opening 
   assert.equal((await request('read', session, owner, second)).exitConfirmed, true)
   assert.equal(registry.active.size, 0)
 })
+
+test('c35: the shell catalog tells the card that addresses may open in a Browser Card only when the open-url flag is on', async () => {
+  const mk = urlOpen => {
+    const registry = { authorizeLocal: () => null, snapshot: id => ({ ok: true, sessionId: id }), read: id => ({ ok: true, sessionId: id }) }
+    const factory = { catalog: () => ({ ok: true, platform: 'darwin', defaultShellId: 'default', shells: [], transport: 'pty', ptyRequired: false }), create: async () => ({ id: 'x' }) }
+    const handle = createTerminalHttpHandler({ registry, factory, port: () => 41001, ...(urlOpen ? { urlOpen } : {}) })
+    return async () => { let out; const req = Object.assign(Readable.from([]), { url: '/terminal/shells', method: 'GET', headers: { host: '127.0.0.1:41001' } }); await handle(req, { setHeader() {}, writeHead() {}, end(text) { out = JSON.parse(text) } }, new URL('/terminal/shells', 'http://127.0.0.1:41001')); return out }
+  }
+  assert.equal((await mk(null)()).openUrl, undefined); assert.equal((await mk({ accept: () => ({ ok: true }) })()).openUrl, true)
+})

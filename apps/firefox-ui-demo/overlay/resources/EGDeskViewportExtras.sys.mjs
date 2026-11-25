@@ -233,3 +233,27 @@ function spreadAlongSide(dots, side, gap, bounds) {
 export function edgeDotsVisible({ minimapOpen = false, fullscreen = false, browserFocus = false, restoring = false } = {}) {
   return !minimapOpen && !fullscreen && !browserFocus && !restoring;
 }
+
+// c35 (UX-2): the dots for Views below the visible area sat on the safe area's bottom edge, right above the dock, on top of the words of the card behind them. The bottom-side dots go
+// to the dock's own band (its vertical middle), beside the dock (never over it), spread so they never overlap. Other sides are untouched.
+export function edgeDotsBesideDock(dots = [], { dock = null, viewport = null, step = 26, margin = 16 } = {}) {
+  const list = Array.isArray(dots) ? dots : [];
+  if (!dock || !viewport || ![dock.left, dock.right, dock.top, dock.height, viewport.width].every(Number.isFinite) || !(dock.height > 0)) return list;
+  const y = Math.round(dock.top + dock.height / 2);
+  const bottom = list.filter(dot => dot?.side === 'bottom' && Number.isFinite(dot.x));
+  if (!bottom.length) return list;
+  const lo = dock.left - margin, hi = dock.right + margin;
+  const place = new Map();
+  for (const dot of bottom) {
+    let x = dot.x;
+    if (x > lo && x < hi) x = (x - lo) < (hi - x) ? lo : hi; // the nearer side of the dock
+    place.set(dot, Math.min(Math.max(x, margin), viewport.width - margin));
+  }
+  // spread dots that would touch: keep order along the edge, push apart on the side they are on
+  const sorted = [...bottom].sort((a, b) => place.get(a) - place.get(b));
+  const left = sorted.filter(dot => place.get(dot) <= lo), right = sorted.filter(dot => place.get(dot) >= hi);
+  for (let i = left.length - 1, edge = lo; i >= 0; i--) { place.set(left[i], Math.min(place.get(left[i]), edge)); edge = place.get(left[i]) - step; }
+  for (let i = 0, edge = hi; i < right.length; i++) { place.set(right[i], Math.max(place.get(right[i]), edge)); edge = place.get(right[i]) + step; }
+  const out = new Map(bottom.map(dot => [dot, { ...dot, x: Math.min(Math.max(place.get(dot), margin), viewport.width - margin), y }]));
+  return list.map(dot => out.get(dot) ?? dot);
+}
