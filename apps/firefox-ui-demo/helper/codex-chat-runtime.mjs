@@ -84,6 +84,7 @@ export const EARLIER_EVIDENCE_LIMIT = 4
 // its records are kept for the next check (the check's own ranking keeps the ones related to the next draft). After a posted answer the limit above stays.
 export const EARLIER_WITHHELD_LIMIT = 8
 export const POSTED_ANSWER_KEY = 'egdesk_posted_answer'
+import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
 import { OWN_EDIT_LIMITS, EDIT_TOOL_NAMES, ownEditEvidence } from './egdesk-own-edit-evidence.mjs' // c30b: the edits EG-Desk made, as readable evidence for the check of the answer
 import { OWN_COMMAND_LIMITS, ownCommandEntry, ownCommandEvidence } from './egdesk-own-command-evidence.mjs' // c29: what the check of an answer may know about the commands EG-Desk ran
 import { STOPPED_COMMAND_KEY, stoppedCommandBlock, stoppedCommandEvidence, stoppedCommandFact } from './egdesk-stopped-command.mjs' // c26: the command the person stopped, told to the next turn once
@@ -2972,10 +2973,14 @@ export class CodexChatRuntime {
       const recordingContext = recordRule ? { [RECORDING_KEY]: { kind: 'application', value: recordRule } } : null
       const turnAdditionalContext = browserTaskContext || memoryContext || recordingContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}), ...(recordingContext || {}) } : additionalContext
       // What the engine will really show of the entries (flag turnMemory.engineContext, default off): 'split' sends an over-limit entry as parts that each stay under it.
-      const engineShape = this.shapeEngineContext(turnAdditionalContext)
+      // c32 (U13, flag EGDESK_DECISION_FIRST=on, default off): a request to run something is picked by the decision model from options code built from the folder and run by EG-Desk's own
+      // runner before any engine call; a healthy result ends the turn without the engine, anything else goes to the engine with the result as context. Absent the flag: dfLocal is null.
+      const dfLocal = ownTools && !bounded && ownFolder ? await this.decisionFirstTry({ cid, body, context, ownFolder }) : null
+      const dfContext = dfLocal?.context ? { ...(turnAdditionalContext || {}), [COMMAND_RESULT_KEY]: { kind: 'application', value: dfLocal.context } } : turnAdditionalContext
+      const engineShape = this.shapeEngineContext(dfContext)
       await this.readGateHookReply(cid, body.message)
       turnStartAttempted = context.turnStartAttempted = true
-      const result = await engine.startTurn({
+      const result = dfLocal?.finished ? { turn: { id: dfLocal.turnId, status: 'inProgress', items: [] } } : await engine.startTurn({
         threadId: cid,
         input: [...this.carriedInputFor(context.clientThreadId), { type: 'text', text: body.message, text_elements: [] }],
         clientUserMessageId: context.requestId,
@@ -3020,6 +3025,7 @@ export class CodexChatRuntime {
       if (!run) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
       try { this.gateHookBroker()?.turnStarted({ conversationId: cid, turnId: run.runId }) } catch { /* the gate hook never affects a turn */ }
       if (ownTools) { run.ownTools = true; run.ownFolder = ownFolder; if (ownFolder) this.ownFolders.set(cid, ownFolder) }
+      if (dfLocal) { run.decisionFirst = dfLocal.diag; if (dfLocal.preRun?.ownCommands) { run.ownCommands = dfLocal.preRun.ownCommands; run.ownCommandLast = dfLocal.preRun.ownCommandLast } } // c32: the command EG-Desk ran for this run, as evidence like any own command
       if (topicRoute && intake.current()) {
         const { topic, parent, needs } = topicRoute // discard the plaintext packet at this boundary
         const current = decision.result.privateBatchCurrent
@@ -3094,6 +3100,7 @@ export class CodexChatRuntime {
       // may inherit this request's correlation; other turns remain unclaimed.
       while (pending.buffer.length) await this.apply(pending.buffer.shift())
       if (TERMINAL.has(result.turn.status) && !TERMINAL.has(run.status)) await this.finish(run, safeTurn(result.turn, engine.id))
+      if (dfLocal?.finished) void this.finishDecisionFirstTurn(run, dfLocal).catch(() => {}) // c32: the local turn ends here, no engine call
       return {
         accepted: true, durable: !this.store || this.storeHealthy,
         conversationId: cid, requestId: context.requestId, runId: run.runId, answerId: run.answerId,
@@ -6707,6 +6714,55 @@ export class CodexChatRuntime {
       await Promise.race([Promise.all(waits), new Promise(resolve => { timer = this.setTimer(resolve, STOP_RECORD_WAIT_MS) })])
       if (timer !== null) this.clearTimer(timer)
     } catch { /* the wait only avoids a missed note */ }
+  }
+
+  // ---- c32 (U13): the decision-first command path ----
+  decisionFirstOn() { try { return this.ownTools?.decisionFirst?.() === 'on' } catch { return false } }
+
+  /**
+   * → null (the flag is off, or nothing to decide: the engine runs as today, no diagnostics) | { diag } (the engine runs as today) | { diag, finished: true, turnId, preRun, entry } (a healthy
+   * result: the turn ends locally) | { diag, context, preRun } (a result the engine must explain or fix: it runs with the result as context, needing no tool call).
+   * diag: closed words and numbers only: { path: 'fast' | 'engine', reason, option, confidence, margin, ms }.
+   */
+  async decisionFirstTry({ cid, body, context, ownFolder }) {
+    if (!this.decisionFirstOn()) return null
+    const started = performance.now(), setup = this.decisionContext
+    const diag = (path, reason, extra = {}) => ({ path, reason, option: null, confidence: null, margin: null, ms: Math.round(performance.now() - started), ...extra })
+    try {
+      if (typeof body?.message !== 'string' || !body.message.trim() || context.board || context.peerDispatch || body.boardId != null) return null
+      if (!setup?.client || setup.mode?.() !== 'on' || setup.configured?.() !== true) return { diag: diag('engine', 'decisions_off') }
+      if (this.decisionEgressFor({ toolCeiling: context.toolCeiling ?? null }).allows('run_text') !== true) return { diag: diag('engine', 'egress_closed') }
+      const options = buildCommandOptions(ownFolder)
+      const pick = await decidePick({ client: setup.client, message: body.message, options })
+      if (pick.status !== 'picked') return { diag: diag('engine', pick.reason, { confidence: pick.confidence ?? null, margin: pick.margin ?? null }) }
+      const option = pick.option, floor = classifyCommand(option.command, { cwd: ownFolder, home: process.env.HOME })
+      const picked = { option: option.kind, confidence: pick.confidence, margin: pick.margin }
+      if (floor.destructive || floor.floor.length) return { diag: diag('engine', 'approval_floor', picked) }
+      const provider = this.toolProviders.find(p => p.providerId === 'egdesk-command')
+      if (!provider) return { diag: diag('engine', 'no_executor', picked) }
+      const turnId = `egdesk-local-${randomUUID()}`
+      const preRun = { conversationId: cid, runId: turnId, answerId: runKey(cid, turnId), clientThreadId: context.clientThreadId, ownTools: true, ownFolder, activities: [], status: 'inProgress', stopRequested: false }
+      const callId = `df-${turnId}`
+      const response = await provider.dispatch(preRun, { callId, tool: 'egdesk_run_command', arguments: { command: option.command } })
+      let r = null
+      try { r = JSON.parse(response?.contentItems?.[0]?.text ?? '') } catch { r = null }
+      if (!r || typeof r.status !== 'string') return { diag: diag('engine', 'result_unreadable', picked) }
+      const healthy = r.status === 'ran' && r.exitCode === 0 && r.timedOut !== true && r.health === 'healthy' && r.worktree?.state !== 'conflict'
+      const entry = { command: option.command, status: r.status, exitCode: Number.isSafeInteger(r.exitCode) ? r.exitCode : null, durationMs: Number.isFinite(r.durationMs) ? r.durationMs : null, health: r.health ?? null,
+        tests: r.tests ?? null, worktree: r.worktree ?? null, tail: [r.stdout, r.stderr].filter(t => typeof t === 'string' && t).join('\n'), callId, cwd: ownFolder }
+      if (healthy) return { diag: diag('fast', 'healthy', picked), finished: true, turnId, preRun, entry }
+      return { diag: diag('engine', r.status === 'needs_person' ? 'needs_person' : 'result_for_engine', picked), context: commandResultBlock(entry), preRun }
+    } catch { return { diag: diag('engine', 'error') } }
+  }
+
+  /** c32: the local turn's items as the engine's own command items would arrive (the existing terminal card), then the turn's end. No assistant text: no new words. */
+  async finishDecisionFirstTurn(run, df) {
+    const { entry } = df, itemId = `egdesk-cmd:${entry.callId}`
+    const item = { type: 'commandExecution', id: itemId, command: entry.command, cwd: entry.cwd, status: 'completed', exitCode: entry.exitCode, aggregatedOutput: entry.tail, durationMs: entry.durationMs ?? 0 }
+    const base = { threadId: run.conversationId, turnId: run.runId }
+    await this.handleNotification({ method: 'item/started', params: { ...base, item: { ...item, status: 'inProgress', exitCode: null, aggregatedOutput: '' } } })
+    await this.handleNotification({ method: 'item/completed', params: { ...base, item } })
+    await this.handleNotification({ method: 'turn/completed', params: { threadId: run.conversationId, turn: { id: run.runId, status: 'completed', items: [] } } })
   }
 
   /** c30b: one call of an edit tool, as facts (no file content); kept on the run in order. */
