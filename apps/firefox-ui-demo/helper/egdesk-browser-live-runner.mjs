@@ -51,7 +51,7 @@ export const FAMILY_PLAN_FILES = Object.freeze({ statement: new URL('../scripts/
 const PLAN_SETS = Object.freeze({ 'browser-live-v2': ['month1', 'changed'], 'browser-live-recorded-v3': ['month2', 'renamed'], 'browser-live-allon-v1': ['allon'],
   'browser-live-renamed-v3': ['renamed', 'sso'], ...FAMILY_SETS })
 export const HARD_LIMITS = Object.freeze({ maxRequests: 14, tokenCeiling: 12000 })
-const OWNER = 'codex:live-measure', HOST = 'portal.example.test', O = `https://${HOST}`
+export const OWNER = 'codex:live-measure'; const HOST = 'portal.example.test', O = `https://${HOST}`
 const SCOPE = Object.freeze({ allowedScopes: ['dm:live'], writeScope: 'dm:live' })
 const MONTH1 = Date.parse('2026-10-19T09:00:00Z'), MONTH2 = Date.parse('2026-11-19T09:00:00Z'), MONTH3 = Date.parse('2026-12-19T09:00:00Z')
 const sha = text => createHash('sha256').update(text, 'utf8').digest('hex')
@@ -177,7 +177,7 @@ export function scoreJourney(plan, journey) {
 }
 
 // ---- the journey ----
-function pageWorld(variant, host = HOST, cardId = 'card') {
+export function pageWorld(variant, host = HOST, cardId = 'card') {
   const origin = `https://${host}`
   const state = { pages: LIVE_PAGES[variant], cur: null, docSeq: 0, acts: [] }
   const go = (path, href = null) => { state.cur = { path, href, documentId: `doc${++state.docSeq}`, revision: 1 } }

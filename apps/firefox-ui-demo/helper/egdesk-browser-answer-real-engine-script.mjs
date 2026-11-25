@@ -59,3 +59,29 @@ export function buildBrowserAnswerScriptV2() {
     ],
   }
 }
+
+// ---- c34: the whole loop (helper/egdesk-real-engine-browser-loop-hook.mjs): entry, steps on fixture pages, note, reply ----
+export const BROWSER_LOOP_SET = 'real-engine-browser-loop-v1'
+export function buildBrowserLoopScript() {
+  const flags = { EGDESK_BROWSER_LOOP: 'on' }
+  return {
+    set: BROWSER_LOOP_SET,
+    description: 'The person\'s message goes through the product\'s turn-start entry (judged by the real Decision model), the product\'s objective loop runs on recorded fixture page states (no Firefox, no network), and the closed note goes into the same engine turn: the real reply is checked by code. Needs --decisions.',
+    conversations: [
+      { id: 'loop-membership', folder: { 'README.txt': 'scratch' }, flags, turns: [{ say: '다음 결제일이 언제야?',
+        browserLoop: { pages: 'membership', host: 'streamly.example.test', start: '/account/membership', title: '멤버십 관리 | 스트리밍플러스' },
+        // the date is on the card's first page: the entry picks the card, the first step finishes (goal met) with no action, the note carries the page's lines
+        expect: { turnStatus: 'completed', posted: true, browserLoop: { entered: true, noActs: true, noteStatus: 'done', noteIncludes: ['다음 결제일: 2026-12-14'], mentionsDates: ['2026-12-14'], noInventedDates: true, noInventedAmounts: true } } }] },
+      { id: 'loop-delivery', folder: { 'README.txt': 'scratch' }, flags, turns: [{ say: '주문번호 2026-1119-0042 배송 어디까지 왔어?',
+        browserLoop: { pages: 'delivery', host: 'shop.example.test', start: '/orders', title: '주문 내역 | 쇼핑' },
+        // three orders are listed (two carry the customer's name): the step opens the one whose number the person gave, the note locates its status by that number
+        expect: { turnStatus: 'completed', posted: true, answerIncludes: ['배송 중'], answerExcludes: ['배송 완료', '상품 준비 중', '2026-1118-0007', '2026-1119-0051'],
+          browserLoop: { entered: true, navigatedTo: ['/orders/2026-1119-0042'], noteStatus: 'done', noteIncludes: ['배송 상태: 배송 중'], noInventedDates: true } } }] },
+      { id: 'loop-toggle', folder: { 'README.txt': 'scratch' }, flags, turns: [{ say: '마케팅 알림 꺼줘',
+        browserLoop: { pages: 'settings', host: 'account.example.test', start: '/settings/notifications', title: '알림 설정 | 계정' },
+        // a toggle the loop never operates: the step hands over naming the control (the person-target follow-up), nothing is acted on, the reply says it is the person's and claims nothing
+        expect: { turnStatus: 'completed', posted: true, answerExcludes: ['껐습니다', '껐어요', '꺼 드렸', '꺼 두었', '꺼두었', '꺼졌습니다', '해제했습니다', '변경했습니다', '끄기를 완료', '꺼놨'],
+          browserLoop: { entered: true, noActs: true, noteStatus: 'cannot_proceed', noteCode: 'human_step', noteCandidates: ['마케팅 정보 알림'], namesAnyOf: ['마케팅 정보 알림', '마케팅 알림'] } } }] },
+    ],
+  }
+}
