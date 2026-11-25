@@ -47,6 +47,7 @@ import { publicEpochMs } from './codex-account-usage.mjs'
 // Read tools work with an observe grant; interaction tools still require the
 // provider's Card, same-site, focus and wait-budget checks on every call.
 import { BROWSER_INTERACTION_TOOL_NAMES as BROWSER_STEP_TOOL_NAMES, BROWSER_READ_TOOL_NAMES } from './egdesk-browser-tool-runtime.mjs'
+import { PAGE_TOOLS_PROVIDER_ID, PAGE_TOOL_NAMES, pageToolBrowserEquivalent, pageToolGate } from './egdesk-page-tools.mjs' // u1: the page tools are Browser tools for the run's policy, grant and ceiling checks
 import { BROWSER_REFLEX_TOOL_NAME } from './egdesk-browser-reflex.mjs'
 import { isCurrentBrowserReflexHandoff } from './codex-browser-tool-provider.mjs'
 // The reflex only runs interaction steps, so it is visible and callable exactly
@@ -987,6 +988,7 @@ export class CodexChatRuntime {
     this.browserRegisteredThreads = new Set()
     const providerRuntime = Object.freeze({ emit: (...args) => this.emit(...args), browserRegisteredThreads: this.browserRegisteredThreads, currentEpoch: () => this.epoch })
     for (const provider of this.toolProviders) provider.runtime = provider === contexts ? this : providerRuntime
+    this.providerRuntime = providerRuntime // u1: for registerToolProvider
     this.ownedRuns = new WeakSet()
     this.qaOutputMarkersByRun = new Map()
     this.streamId = randomUUID()
@@ -1346,6 +1348,7 @@ export class CodexChatRuntime {
       // actor grants. Keep older persisted Browser manifests verifiable without
       // advertising new uncallable Browser tools on ordinary native threads.
       if (policy === null && providerId === 'egdesk-browser' && !forManifest) continue
+      if (policy === null && providerId === PAGE_TOOLS_PROVIDER_ID && !forManifest) continue // u1: an ordinary thread holds no Card grant
       // CU-03: computer tools only on ordinary threads, with a host lease and
       // computer control not turned off. Older manifests stay verifiable.
       const computerTools = providerId === COMPUTER_PROVIDER_ID
@@ -1361,14 +1364,16 @@ export class CodexChatRuntime {
         if (engineId === 'claude' && provider === this.contexts && !['egdesk_list_context', 'egdesk_read_source'].includes(spec?.name)) continue
         const contextRead = provider === this.contexts && ['egdesk_list_context', 'egdesk_read_source'].includes(spec?.name)
         const browser = provider.providerId === 'egdesk-browser' && spec?.name?.startsWith('egdesk_browser_')
+        const page = provider.providerId === PAGE_TOOLS_PROVIDER_ID && Boolean(pageToolBrowserEquivalent(spec?.name)) // u1
         // AGENT-04: an Agent limited to watching gets only the computer tools that read.
         if (computerTools && !forManifest && !ceilingAllowsComputerTool(toolCeiling, spec?.type === 'function' ? computerToolMethod(spec.name) : '')) continue
-        if (policy === READ_ONLY_QA && !contextRead && !(browser && BROWSER_READ_TOOL_NAMES.includes(spec.name))) continue
-        if (policy === BROWSER_BOUNDED && !contextRead && !(browser && (BROWSER_READ_TOOL_NAMES.includes(spec.name)
+        if (policy === READ_ONLY_QA && !contextRead && !(browser && BROWSER_READ_TOOL_NAMES.includes(spec.name)) && !(page && spec.name === PAGE_TOOL_NAMES.read)) continue
+        if (policy === BROWSER_BOUNDED && !contextRead && !(page && (spec.name === PAGE_TOOL_NAMES.read || browserInteraction)) && !(browser && (BROWSER_READ_TOOL_NAMES.includes(spec.name)
           || (browserInteraction && BROWSER_INTERACTION_TOOL_NAMES.includes(spec.name))))) continue
         if (policy === FIXTURE_BROWSER_QA && !contextRead && !(browser && FIXTURE_BROWSER_TOOL_NAMES.includes(spec.name))) continue
         // AGENT-04: a new thread's catalog never offers Browser tools the Agent may not use.
         if (browser && !ceilingAllowsBrowserTool(toolCeiling, spec.name)) continue
+        if (page && !ceilingAllowsBrowserTool(toolCeiling, pageToolBrowserEquivalent(spec.name))) continue // u1: the Agent's ceiling for the Browser tool the page tool needs
         const names = spec?.type === 'function' && typeof spec.name === 'string' ? [toolKey(null, spec.name)]
           : spec?.type === 'namespace' && typeof spec.name === 'string' && Array.isArray(spec.tools)
             ? spec.tools.map(tool => tool?.type === 'function' && typeof tool.name === 'string' ? toolKey(spec.name, tool.name) : null)
@@ -4430,20 +4435,23 @@ export class CodexChatRuntime {
       }
       const mode = run.executionPolicy?.mode || null
       const contextRead = !event.namespace && ['egdesk_list_context', 'egdesk_read_source'].includes(event.tool)
-      const browser = !event.namespace && typeof event.tool === 'string' && event.tool.startsWith('egdesk_browser_')
-      const selectedBrowser = browser && run.browserBinding?.cards?.find(card => card.cardId === event.arguments?.cardId)
+      // u1: a page tool is checked here as the Browser tool it needs (its Card: the one it names, else the first interact Card); the Browser provider checks again for every action
+      const pageGate = pageToolGate(run, event)
+      const gateTool = pageGate?.tool ?? event.tool
+      const browser = Boolean(pageGate) || (!event.namespace && typeof event.tool === 'string' && event.tool.startsWith('egdesk_browser_'))
+      const selectedBrowser = browser && run.browserBinding?.cards?.find(card => card.cardId === (pageGate ? pageGate.cardId : event.arguments?.cardId))
       const boundedBrowser = selectedBrowser && ['observe', 'interact'].includes(selectedBrowser.permission)
-        && (BROWSER_READ_TOOL_NAMES.includes(event.tool) || (selectedBrowser.permission === 'interact'
-          && BROWSER_INTERACTION_TOOL_NAMES.includes(event.tool)))
-      if ((mode === READ_ONLY_QA && !contextRead && !(browser && BROWSER_READ_TOOL_NAMES.includes(event.tool))) ||
+        && (BROWSER_READ_TOOL_NAMES.includes(gateTool) || (selectedBrowser.permission === 'interact'
+          && BROWSER_INTERACTION_TOOL_NAMES.includes(gateTool)))
+      if ((mode === READ_ONLY_QA && !contextRead && !(browser && BROWSER_READ_TOOL_NAMES.includes(gateTool))) ||
           (mode === BROWSER_BOUNDED && !contextRead && !boundedBrowser) ||
-          (mode === FIXTURE_BROWSER_QA && !contextRead && !(browser && FIXTURE_BROWSER_TOOL_NAMES.includes(event.tool))) ||
+          (mode === FIXTURE_BROWSER_QA && !contextRead && !(browser && !pageGate && FIXTURE_BROWSER_TOOL_NAMES.includes(event.tool))) ||
           (!mode && browser)) {
         this.respond(event.rpcId, null, { code: -32601, message: 'This run does not authorize the requested dynamic tool' }, this.threadOperationSlot(event.threadId))
         return
       }
       // AGENT-04: the Agent's ceiling wins over a Card's interaction grant.
-      if (browser && !ceilingAllowsBrowserTool(run.toolCeiling, event.tool)) {
+      if (browser && !ceilingAllowsBrowserTool(run.toolCeiling, gateTool)) {
         this.respond(event.rpcId, null, { code: -32601, message: 'This Agent profile does not allow the requested Browser tool' }, this.threadOperationSlot(event.threadId))
         this.noteCeiling(run, `rpc:${typeof event.rpcId}:${event.rpcId}`, { ...browserRefusal(run.toolCeiling), tool: event.tool })
         return
@@ -5427,6 +5435,14 @@ export class CodexChatRuntime {
 
   // c37: the open browser task's options are Decision predicates (decisionContext.browserEntry.openItems(), EGDESK_BROWSER_OPEN_ITEMS=on; default off)
   browserOpenItemsOn() { try { return this.decisionContext?.browserEntry?.openItems?.() === true } catch { return false } }
+
+  // u1: one more tool provider after construction (the bridge's optional wiring); the catalog reads this.toolProviders at every turn
+  registerToolProvider(provider) {
+    if (!provider || typeof provider.providerId !== 'string' || this.toolProviders.includes(provider)) return false
+    provider.runtime = this.providerRuntime
+    this.toolProviders.push(provider)
+    return true
+  }
 
   browserEntryIdle() { return Promise.allSettled([...this.browserEntryRuns]) }
 

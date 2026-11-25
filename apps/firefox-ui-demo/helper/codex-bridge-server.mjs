@@ -27,6 +27,7 @@ import { createTerminalRunWatch } from './egdesk-terminal-run-watch.mjs'
 import { createTerminalStateWatch } from './egdesk-terminal-state-watch.mjs'
 import { createGitTargetInspector } from './egdesk-terminal-git-facts.mjs'
 import { createOwnToolsWiring } from './egdesk-own-tools-wiring.mjs'
+import { createPageToolsWiring } from './egdesk-page-tools-wiring.mjs'
 import { createTerminalSessionFactory } from './terminal-platform.mjs'
 import { createTerminalHttpHandler } from './terminal-http.mjs'
 import { createTerminalOpenUrl } from './egdesk-terminal-open-url.mjs'
@@ -500,6 +501,8 @@ const handleRunRequesterHttp = createRunRequesterHttpHandler({ requesters: runRe
 const handleRunRequesterReadHttp = createRunRequesterReadHttpHandler({ requesters: runRequesters, presence: presenceMirror, enabled: () => process.env.EGDESK_PRESENCE === 'on', port: BRIDGE_PORT })
 // EG-Desk's own command and file tools, Codex as a pure model engine: developer flag EGDESK_OWN_TOOLS=on, default off (null: nothing changes).
 const ownToolsWiring = createOwnToolsWiring({ env: process.env, dataDir, spawn, getChat: () => chat, inspect: createGitTargetInspector() })
+// u1: the browser as EG-Desk tools for the conversation (a developer flag, default off: see egdesk-page-tools-wiring.mjs); approvals go through the own tools' ledger when that is on
+const pageToolsWiring = createPageToolsWiring({ env: process.env, getChat: () => chat, ledger: ownToolsWiring?.ledger ?? null })
 const terminalGateConfig = ['advisory', 'on'].includes(process.env.EGDESK_TERMINAL_GATE) ? { mode: () => process.env.EGDESK_TERMINAL_GATE, inspect: createGitTargetInspector(),
   // EGDESK_TERMINAL_GATE_METHOD=score selects the old 0-4 score question, only to compare; content predicates are the default.
   method: process.env.EGDESK_TERMINAL_GATE_METHOD === 'score' ? 'score' : 'predicates' } : null
@@ -591,6 +594,8 @@ codexEngine.subscribe({
   connection: (engineId, state, engineProfileId) => { chat.setConnection(engineId, state.ready, { processLost: state.processLost, engineProfileId }) },
 })
 // Claude conversation events reach the same runtime as app-server traffic.
+// u1: the page tools join the runtime's providers after it is made (nothing when the wiring is off)
+for (const provider of pageToolsWiring ? pageToolsWiring.toolProviders : []) chat.registerToolProvider(provider)
 claudeEngine.subscribe({
   notification: (_engineId, message) => { void chat.handleNotification(message) },
   serverRequest: (_engineId, message) => { void chat.handleServerRequest(message) },
