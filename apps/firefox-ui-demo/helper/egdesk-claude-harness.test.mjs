@@ -238,3 +238,19 @@ test('open items on Claude: while a command waits for the person, the next messa
   const second = JSON.stringify(w.transports[0].sent[1]); assert.match(second, /egdesk_open_items/); assert.match(second, /approval: still open/)
   assert.ok(w.decisionBodies.some(x => x.questions.some(q => /^oi_ref_/.test(q.name))), 'the decision model read the message against the open approval')
 })
+
+test('replay, file tools: Claude reads through EG-Desk, previews an edit (dryRun changes nothing), applies one with an undo record, and a whole-file delete needs the person: the project file changes only through EG-Desk\'s tools', async t => {
+  const calls = [
+    ['egdesk_read_file', { path: 'notes.txt' }],
+    ['egdesk_edit_file', { path: 'notes.txt', mode: 'replace', oldString: 'rate: 10', newString: 'rate: 12', dryRun: true }],
+    ['egdesk_edit_file', { path: 'notes.txt', mode: 'replace', oldString: 'rate: 10', newString: 'rate: 12' }],
+    ['egdesk_edit_file', { path: 'notes.txt', mode: 'delete' }],
+  ]
+  const w = harnessWorld(t, { project: { 'notes.txt': 'title: price\nrate: 10\n' }, script: n => [...calls.flatMap(([name, args], i) => [toolUse(`toolu_${i}`, name, args), { tool: { name, arguments: args } }, userResult(`toolu_${i}`)]), ...text(n, '끝'), ...result()] })
+  const sent = await w.send('notes.txt 의 rate를 12로 고쳐줘'), run = await w.settled(sent), file = path.join(w.root, 'notes.txt')
+  const [read, preview, applied, del] = [1, 2, 3, 4].map(i => toolReply(w.transports[0], `tool-1-${i}`))
+  assert.match(JSON.stringify(read), /rate: 10/); assert.match(JSON.stringify(preview), /rate: 12/); assert.equal(fs.readFileSync(file, 'utf8').includes('rate: 12'), true, 'the applied edit changed the file')
+  assert.ok(applied.editId || applied.undo || JSON.stringify(applied).includes('editId'), 'an undo record: ' + JSON.stringify(applied).slice(0, 200)); assert.equal(del.status, 'needs_person', 'deleting a whole file needs the person'); assert.equal(fs.existsSync(file), true, 'it is still there')
+  assert.deepEqual(run.activities.filter(a => a.kind === 'dynamicToolCall').map(a => [a.detail.tool, a.detail.executedBy]), calls.map(([name]) => [name, 'egdesk']))
+  assert.deepEqual(w.ran, [], 'no command ran for file work'); assert.equal(w.transports[0].options.disallowedTools.includes('Edit'), true)
+})
