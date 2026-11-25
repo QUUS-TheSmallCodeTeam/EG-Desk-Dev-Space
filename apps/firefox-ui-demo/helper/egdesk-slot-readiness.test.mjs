@@ -135,7 +135,8 @@ test('the browser provider offers and prepares by the slot: tools only where tha
 test('the bridge uses the module for the browser, plan and annotation providers and qaReady; nothing global is left', () => {
   const source = readFileSync(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
   assert.match(source, /const slotReadiness = createSlotReadiness\(\{ shared: \(\) => \(\{ schemaMatch: nativeCapabilities\.schemaMatch, qaReadOnly: nativeCapabilities\.qaReadOnly, ready: appServerReady \}\)/)
-  assert.match(source, /createCodexBrowserToolProvider\(\{[^\n]*schemaReady: route => slotReadiness\.qaReady\(route\?\.engineProfileId\)/)
+  // u5: the Codex answer is still the slot's own (codexReady); only a Claude route with the Claude browser capability live leaves it (egdesk-claude-browser-route)
+  assert.match(source, /createCodexBrowserToolProvider\(\{[^\n]*schemaReady: browserSchemaReady\(\{[^\n]*codexReady: route => slotReadiness\.qaReady\(route\?\.engineProfileId\) \}\)/)
   assert.match(source, /createPlanToolProvider\(\{ plans: \(\) => workflow\?\.plans \?\? null, schemaReady: route => slotReadiness\.schemaReady\(route\) \}\)/)
   assert.match(source, /createAnnotationToolProvider\(\{ schemaReady: route => slotReadiness\.schemaReady\(route\) \}\)/)
   assert.match(source, /qaReady: slot => slotReadiness\.qaReady\(slot\),/)

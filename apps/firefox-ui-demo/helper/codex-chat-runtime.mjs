@@ -102,6 +102,7 @@ import { markStage, stagesOf } from './egdesk-upper-bundle.mjs' // u1: the order
 import { PROPOSAL_LIMITS, proposalCandidates, readRegistration, registrationRequest } from './egdesk-open-proposals.mjs' // c33: the answer's open proposals as defined items
 import { claudeHarnessThreadOverrides } from './egdesk-claude-harness.mjs' // u1
 import { OBSERVE_RESULT_KEY, observeOptions, runObserveOption } from './egdesk-observe-first.mjs' // u5: read-only computer viewing, picked by the decision model and run by code before the engine
+import { claudeBrowserLive } from './egdesk-claude-browser-route.mjs' // u5
 import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
 import { OWN_EDIT_LIMITS, EDIT_TOOL_NAMES, ownEditEvidence } from './egdesk-own-edit-evidence.mjs' // c30b: the edits EG-Desk made, as readable evidence for the check of the answer
 import { OWN_COMMAND_LIMITS, ownCommandEntry, ownCommandEvidence } from './egdesk-own-command-evidence.mjs' // c29: what the check of an answer may know about the commands EG-Desk ran
@@ -7421,6 +7422,8 @@ export class CodexChatRuntime {
 
   /** u1: the Claude harness config ({ disallowed }) when the flag and own tools are on, else null. */
   claudeHarness() { try { return this.ownToolsOn() ? this.ownTools?.claudeHarness?.() ?? null : null } catch { return null } }
+  /** u5: the Claude browser capability is live (harness on and the page tools provider registered) */
+  claudeBrowserLive() { try { return claudeBrowserLive({ harness: this.claudeHarness(), toolProviders: this.toolProviders }) } catch { return false } }
 
   /** u1: an own-tools thread's overrides for the engine: Codex's (pure engine switches, isolation, instructions) or Claude's (instructions and the built-in tools to switch off). */
   async ownToolsOverridesFor(engine, request, neutralFolder, base, context) {

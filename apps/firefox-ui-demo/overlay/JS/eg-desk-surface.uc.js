@@ -19887,7 +19887,8 @@
             }));
             return { requestId, accepted: eventAccepted, status: eventAccepted ? 'accepted' : 'unconfirmed' };
           }
-          if (error.code === 'BROWSER_TOOLS_UNAVAILABLE') {
+          // u5: only the 409 (a native thread that has no Browser tools) is "made before the tools"; the 503 (the engine's tool contract is not verified) keeps the runtime's own message
+          if (error.code === 'BROWSER_TOOLS_UNAVAILABLE' && error.status === 409) {
             error.message = '이 대화는 Browser 조작 도구가 등록되기 전에 만들어졌습니다. 기존 기록과 초안은 유지됩니다. 새 Chat을 만든 뒤 Browser에서 이번 실행의 조작 대상을 다시 선택해 주세요.';
           }
           if (engineId === 'claude' && ['CWD_CHANGE_UNSUPPORTED', 'NATIVE_CWD_UNVERIFIED'].includes(error.code)) {
