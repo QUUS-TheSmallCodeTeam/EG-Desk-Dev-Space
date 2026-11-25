@@ -334,11 +334,34 @@
                 "browserLoop": {
                   "additionalProperties": false,
                   "properties": {
+                    "continues": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "none": {
+                          "const": true
+                        },
+                        "personStep": {
+                          "enum": [
+                            "ticket_signed_in"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "personStep"
+                      ],
+                      "type": "object"
+                    },
                     "host": {
                       "maxLength": 80,
                       "minLength": 1,
                       "pattern": "^[a-z0-9.-]+\\.example\\.test$",
                       "type": "string"
+                    },
+                    "keep": {
+                      "const": true
+                    },
+                    "openItems": {
+                      "const": true
                     },
                     "pages": {
                       "enum": [
@@ -703,11 +726,31 @@
                           "maxItems": 3,
                           "type": "array"
                         },
+                        "noteSettled": {
+                          "enum": [
+                            "continue",
+                            "retry",
+                            "abandon",
+                            "ask_page"
+                          ]
+                        },
                         "noteStatus": {
                           "enum": [
                             "done",
                             "cannot_proceed",
-                            "need_context"
+                            "need_context",
+                            "cancelled"
+                          ]
+                        },
+                        "openItemNone": {
+                          "const": true
+                        },
+                        "openItemSettled": {
+                          "enum": [
+                            "continue",
+                            "retry",
+                            "abandon",
+                            "ask_page"
                           ]
                         },
                         "staleSeen": {
@@ -1266,6 +1309,7 @@
                             "browser_task",
                             "run",
                             "memory",
+                            "proposal",
                             "none"
                           ]
                         }
@@ -1279,6 +1323,38 @@
                       "maximum": 20,
                       "minimum": 1,
                       "type": "integer"
+                    },
+                    "proposals": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "kinds": {
+                          "items": {
+                            "enum": [
+                              "proposal",
+                              "person_request",
+                              "waiting_action"
+                            ]
+                          },
+                          "maxItems": 4,
+                          "minItems": 1,
+                          "type": "array"
+                        },
+                        "none": {
+                          "const": true
+                        },
+                        "optionsAtLeast": {
+                          "maximum": 4,
+                          "minimum": 2,
+                          "type": "integer"
+                        },
+                        "stepsAtLeast": {
+                          "maximum": 8,
+                          "minimum": 1,
+                          "type": "integer"
+                        }
+                      },
+                      "type": "object"
                     },
                     "recording": {
                       "additionalProperties": false,

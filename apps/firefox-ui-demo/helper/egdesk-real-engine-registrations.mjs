@@ -91,6 +91,11 @@ registerTurnHooks('planted', () => createPlantedHook())
 
 // ---- L3 c32: decision-first approvals (flag EGDESK_DECISION_FIRST_APPROVALS, with EGDESK_DECISION_FIRST: the reply to the engine's question is settled by the Decision and code at once; the reasons approval_* are in the decisionFirst expectation) ----
 registerFlags({ reproduced: ['EGDESK_DECISION_FIRST_APPROVALS'], decisionDependent: ['EGDESK_DECISION_FIRST_APPROVALS'] })
+// ---- L3 c33: the answer's open proposals as defined items (flag EGDESK_PROPOSAL_REGISTRY; state only, no copy)
+registerFlags({ reproduced: ['EGDESK_PROPOSAL_REGISTRY'], decisionDependent: ['EGDESK_PROPOSAL_REGISTRY'] })
+import { PROPOSALS_EXPECT_SCHEMA, createProposalsHook, validateProposalsExpect } from './egdesk-real-engine-proposals-hook.mjs'
+registerExpectKeys({ proposals: { schema: PROPOSALS_EXPECT_SCHEMA, validate: (value, { conv, path, bad }) => { for (const why of validateProposalsExpect(value, { conv }, path)) bad(path, why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('proposals', () => createProposalsHook())
 
 // ---- L3: the heartbeat's own messages (expect.flow: notes, firstNoteMs, statedSecondsTrue, noResult) ----
 import { FLOW_EXPECT_SCHEMA, createFlowHook, validateFlowExpect } from './egdesk-real-engine-flow.mjs'
@@ -121,7 +126,8 @@ registerExpectKeys({ browserAnswer: { schema: BROWSER_ANSWER_EXPECT_SCHEMA, vali
 registerTurnHooks('browserAnswer', () => createBrowserAnswerHook())
 // L8 c34: the whole browser loop (the product's entry judged by the real Decision model, the steps on fixture pages, the note into the same turn, the real reply)
 import { BROWSER_LOOP_EXPECT_SCHEMA, BROWSER_LOOP_FLAG, BROWSER_LOOP_SCHEMA, createBrowserLoopHook, validateBrowserLoop, validateBrowserLoopExpect } from './egdesk-real-engine-browser-loop-hook.mjs'
-registerFlags({ decisionDependent: [BROWSER_LOOP_FLAG] })
+import { OPEN_ITEMS_FLAG } from './egdesk-browser-open-items.mjs'
+registerFlags({ decisionDependent: [BROWSER_LOOP_FLAG, OPEN_ITEMS_FLAG] }) // c37: OPEN_ITEMS_FLAG = EGDESK_BROWSER_OPEN_ITEMS
 registerTurnFields({ browserLoop: { schema: BROWSER_LOOP_SCHEMA, validate: (value, { conv, turn, path, bad }) => {
   for (const why of validateBrowserLoop(value, conv, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
   if (turn.action !== undefined || turn.whileRunning !== undefined || turn.browserTask !== undefined) bad(path, 'only a plain message turn, and not together with browserTask')

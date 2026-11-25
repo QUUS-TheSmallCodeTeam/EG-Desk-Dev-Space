@@ -487,7 +487,7 @@ const turnMemoryConfig = createTurnMemoryConfig({ settings: bridgeSettings, onto
 // Direct browser entry: developer flag EGDESK_BROWSER_ENTRY=advisory|on, default off (no settings screen entry). It reuses the turn-memory
 // snapshot builder and the same adapter/write store; nothing opens while it is off.
 const browserEntryConfig = createBrowserEntryConfig({ flag: () => process.env.EGDESK_BROWSER_ENTRY, getAdapter: () => turnMemoryConfig.getAdapter(),
-  wiki: args => turnMemoryConfig.wiki(args) })
+  wiki: args => turnMemoryConfig.wiki(args), openItemsFlag: () => process.env.EGDESK_BROWSER_OPEN_ITEMS })
 // The Desk's presence snapshot as the window posts it (same rows the placement runtime reads there). Memory only; the route is off (404)
 // unless the developer flag EGDESK_PRESENCE=on is set. Default off.
 const presenceMirror = createPresenceMirror()
@@ -566,6 +566,7 @@ const chat = new CodexChatRuntime({
     // Advisory state judge on the engine's own command executions: developer flag EGDESK_COMMAND_JUDGE=advisory, default off. Records only.
     ...(IN_RUN_MESSAGES_ENABLED ? { inRunMessages: { mode: () => 'on' } } : {}),
     ...(process.env.EGDESK_OPEN_ITEMS === 'on' ? { openItems: true } : {}), // c32: the open-item resolver (default off)
+    ...(process.env.EGDESK_PROPOSAL_REGISTRY === 'on' ? { proposalRegistry: { mode: () => 'on' } } : {}), // c33: the answer's open proposals as defined items (L3), default off
     ...(process.env.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
     // Command gate before an engine approval card: developer flag EGDESK_TERMINAL_GATE=advisory|on, default off. It never answers an approval.
     ...(ownToolsWiring && !ownToolsWiring.shadow ? { terminalGate: ownToolsWiring.terminalGate(terminalGateConfig) } : terminalGateConfig ? { terminalGate: terminalGateConfig } : {}),

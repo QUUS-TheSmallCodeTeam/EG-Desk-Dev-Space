@@ -42,8 +42,8 @@ test('the committed script is the builder\'s and validates; the flag, the expect
   assert.deepEqual(committed, JSON.parse(JSON.stringify(buildOpenItemsScript()))); assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })
   assert.ok(registeredExpectKeys().includes('openItems') && registeredTurnHookNames().includes('openItems') && registeredFlags().includes(OPEN_FLAG) && registeredDecisionFlags().includes(OPEN_FLAG))
   assert.ok(DECISION_DEPENDENT_FLAGS.includes(OPEN_FLAG) && BRIDGE_COMPOSITION.flags.includes(OPEN_FLAG) && !BRIDGE_COMPOSITION.notReproduced.flags.includes(OPEN_FLAG))
-  assert.deepEqual(committed.conversations.map(c => c.id), ['open-off-approve', 'open-on-approve', 'open-on-unrelated', 'open-on-ambiguous', 'open-off-unrelated'])
-  assert.ok(committed.conversations.every(c => c.flags.EGDESK_TERMINAL_GATE === 'on')); assert.deepEqual(committed.conversations.map(c => c.flags[OPEN_FLAG] ?? null), [null, 'on', 'on', 'on', null])
+  assert.deepEqual(committed.conversations.map(c => c.id), ['open-off-approve', 'open-on-approve', 'open-on-unrelated', 'open-on-ambiguous', 'open-off-unrelated', 'open-off-proposal', 'open-on-proposal'])
+  assert.ok(committed.conversations.slice(0, 5).every(c => c.flags.EGDESK_TERMINAL_GATE === 'on')); assert.deepEqual(committed.conversations.map(c => c.flags[OPEN_FLAG] ?? null), [null, 'on', 'on', 'on', null, null, 'on']); assert.equal(committed.conversations[6].flags.EGDESK_PROPOSAL_REGISTRY, 'on')
   assert.equal(OPEN_SAYS.ask, `Run this command: ${FORCE_PUSH}`)
   const second = committed.conversations[2].turns
   assert.deepEqual(second[1].expect.openItems, { settled: 'none', reason: ['no_item_referred', 'several_items'], approvalWaiting: true }); assert.deepEqual(second[1].expect.commandsRan, [])

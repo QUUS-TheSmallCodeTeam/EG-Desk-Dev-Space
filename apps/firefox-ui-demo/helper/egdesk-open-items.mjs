@@ -10,7 +10,7 @@ import { NO, clockLine, ternary } from './egdesk-wiki-reconstruction.mjs'
 //
 // Who decides what (PHILOSOPHY R1-R6): code builds the items and their ids and applies; the Decision model answers one question per item, quoting the
 // message and that one item; anything unclear, two items at once, or no answer settles NOTHING and the message is an ordinary turn.
-export const OPEN_ITEM_KINDS = Object.freeze(['approval', 'question', 'browser_task', 'run', 'memory'])
+export const OPEN_ITEM_KINDS = Object.freeze(['approval', 'question', 'browser_task', 'run', 'memory', 'proposal'])
 export const OPEN_ITEM_LIMITS = Object.freeze({ items: 5, summaryChars: 300, messageChars: 600, timeoutMs: 2500 })
 // ref: the yes bar of "this message settles this item" (above the loop's 0.8). no: an item at or below this is not referred to. Between them: unsure -> settle nothing.
 export const OPEN_ITEM_BARS = Object.freeze({ ref: 0.85, unsure: 0.5, no: NO })
@@ -34,7 +34,7 @@ export function buildRegistry(sources, key) {
   const out = []
   for (const source of sources) {
     let rows = []
-    try { rows = source.items(key) } catch { rows = [] }
+    try { rows = source.items(source.builtin === true ? key : (key?.clientThreadId ?? key?.cid ?? key)) } catch { rows = [] } // a registered provider (L8's browser) takes the conversation key as a string; the built-ins take { cid, clientThreadId }
     for (const row of Array.isArray(rows) ? rows : []) {
       if (out.length >= OPEN_ITEM_LIMITS.items) return out
       const kind = OPEN_ITEM_KINDS.includes(row?.kind) ? row.kind : null

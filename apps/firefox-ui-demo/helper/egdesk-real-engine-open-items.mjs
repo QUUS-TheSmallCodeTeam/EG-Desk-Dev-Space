@@ -9,7 +9,7 @@
 // conversation with the flag on, and for a turn that expects it, so the same dialogue with the flag off can be compared (scripts/egdesk-open-items-compare.mjs).
 export const OPEN_FLAG = 'EGDESK_OPEN_ITEMS'
 const WORD = /^[a-z][a-z_]{2,39}$/
-const KINDS = ['approval', 'question', 'browser_task', 'run', 'memory', 'none']
+const KINDS = ['approval', 'question', 'browser_task', 'run', 'memory', 'proposal', 'none']
 export const OPEN_EXPECT_SCHEMA = Object.freeze({ type: 'object', additionalProperties: false, minProperties: 1, properties: {
   settled: { enum: KINDS }, reason: { anyOf: [{ type: 'string', pattern: WORD.source }, { type: 'array', minItems: 1, maxItems: 8, items: { type: 'string', pattern: WORD.source } }] },
   approvalWaiting: { type: 'boolean' }, maxResolverMs: { type: 'number', exclusiveMinimum: 0, maximum: 60000 } } })

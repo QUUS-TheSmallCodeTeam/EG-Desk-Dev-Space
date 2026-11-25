@@ -227,3 +227,44 @@ test('L3\'s approvals-fast reply is read only for the item the message settles: 
   assert.equal(broker.reads.length, 0)
   x.store.close()
 })
+
+test('L3\'s proposal registry through the resolver: "응 근데 테스트는 빼고" settles the proposal, its step 2 is left out, the item is closed, the engine is told in closed words', async () => {
+  const seen = []
+  const client = { async decide(req) {
+    if (!req.questions.some(q => q.name.startsWith('oi_'))) return mockJudge().decide(req)
+    seen.push(req.questions.map(q => q.name))
+    const by = { oi_ref_1: 0.97, open_prop_0_accept: 0.97, open_prop_0_decline: 0.02, open_prop_0_skip_1: 0.02, open_prop_0_skip_2: 0.95, open_prop_0_skip_3: 0.02 }
+    return { answers: Object.fromEntries(req.questions.map(q => [q.name, { type: 'predicate', probability: by[q.name] ?? 0.02 }])) }
+  } }
+  const x = await rig({ memoryMode: null, client }); await on(x)
+  x.chat.proposalRegistryOn = () => true
+  await first(x)
+  const cid = x.cid
+  x.chat.openProposals.set(cid, { at: Date.now(), items: [{ id: 'p1', kind: 'proposal', text: '이 순서대로 실행해도 될까요?', steps: [{ n: 1, text: '빌드' }, { n: 2, text: '테스트' }, { n: 3, text: '배포' }], options: [], runId: 'r', answerId: 'a', at: Date.now() }] })
+  await x.send('응 근데 테스트는 빼고', 'r1'); await x.done(2)
+  assert.deepEqual(seen[0], ['oi_ref_1', 'open_prop_0_accept', 'open_prop_0_decline', 'open_prop_0_skip_1', 'open_prop_0_skip_2', 'open_prop_0_skip_3'], 'one request: the referent and the proposal\'s own questions')
+  const rec = x.chat.openItemRecord('r1')
+  assert.deepEqual([rec.status, rec.kind, rec.states.oi1], ['settled', 'proposal', 'accepted_without_steps'])
+  assert.deepEqual(x.chat.openItemsFor(cid).filter(i => i.id === 'p1'), [], 'closed: a later "응" cannot answer it again')
+  assert.match(block(x), /oi1 proposal: settled by this message, state=accepted_without_steps/); assert.match(block(x), /oi1 accepted_without_steps; steps left out: 2/)
+  x.store.close()
+})
+
+test('a provider that reads its own options (the browser task\'s shape): its read is called with the conversation key as a string, only a settled reading is applied', async () => {
+  const calls = []
+  const provider = { id: 'fake_b', items: key => { calls.push(['items', key]); return [{ id: 'task-9', kind: 'browser_task', summary: 'A browser task waits.', options: [{ id: 'continue' }, { id: 'abandon' }] }] },
+    questions: () => [{ type: 'predicate', name: 'open_browser_continue', instructions: 'go on?' }],
+    read: (answers, key) => { calls.push(['read', key]); return answers.open_browser_continue?.probability >= 0.85 ? { kind: 'settled', itemId: 'task-9', optionId: 'continue' } : { kind: 'uncertain' } },
+    apply: async ctx => { calls.push(['apply', ctx.optionId, ctx.conversationKey]); return { handled: true, settled: ctx.optionId, note: 'browser task: continue' } } }
+  const undo = registerOpenItemProvider(provider)
+  try {
+    for (const [yes, expected] of [[0.96, 'continue'], [0.4, 'not_settled']]) {
+      calls.length = 0
+      const x = await rig({ memoryMode: null, client: { async decide(req) { if (!req.questions.some(q => q.name.startsWith('oi_'))) return mockJudge().decide(req); return { answers: Object.fromEntries(req.questions.map(q => [q.name, { type: 'predicate', probability: q.name === 'oi_ref_1' ? 0.97 : q.name === 'open_browser_continue' ? yes : 0.02 }])) } } } }); await on(x)
+      await first(x); await x.send('계속해', 'r1'); await x.done(2)
+      assert.equal(x.chat.openItemRecord('r1').states.oi1, expected)
+      assert.ok(calls.some(c => c[0] === 'items' && c[1] === 'dm-1'), 'a registered provider is given the conversation key as a string')
+      assert.equal(calls.some(c => c[0] === 'apply'), expected === 'continue'); x.store.close()
+    }
+  } finally { undo() }
+})

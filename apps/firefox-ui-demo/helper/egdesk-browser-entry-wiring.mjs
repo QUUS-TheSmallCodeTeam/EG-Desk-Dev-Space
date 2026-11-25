@@ -14,10 +14,13 @@ import { createOutcomeToOntology } from './egdesk-browser-task-memory.mjs'
 //   outcomeSink: the task outcome goes through the general write judgment and the persistent write path (adapter.writerFor ->
 //     openWikiWrites, 0600, bounded). The page body stays the outcome text (an agent_note); there is no message reference.
 //     Allowed: a new page in this DM's own write scope. Never a status change of another page.
-export function createBrowserEntryConfig({ flag = () => 'off', getAdapter, wiki, now = Date.now } = {}) {
+export function createBrowserEntryConfig({ flag = () => 'off', openItemsFlag = () => 'off', getAdapter, wiki, now = Date.now } = {}) {
   const mode = () => { try { const value = flag(); return value === 'advisory' || value === 'on' ? value : 'off' } catch { return 'off' } }
+  // c37: the open task's options as Decision predicates (EGDESK_BROWSER_OPEN_ITEMS=on, default off)
+  const openItems = () => { try { return openItemsFlag() === 'on' } catch { return false } }
   return {
     mode,
+    openItems,
     async memory({ body, context, client, egress = null, askedAt = null } = {}) {
       if (!client || typeof body?.message !== 'string' || typeof wiki !== 'function') return null
       const adapter = getAdapter(), snapshot = await wiki({ body, context })
