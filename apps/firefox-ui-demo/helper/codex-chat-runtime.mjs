@@ -1874,6 +1874,15 @@ export class CodexChatRuntime {
     return log.scope(key, () => this.sendTurn(body, internal))
   }
 
+  /** u5: a stage that ended without a decision-model call (check_local, recheck, revise, ...) as a closed row of the turn; run or request id; a no-op without the log. */
+  noteDecisionStage(runOrRequestId, kind, { startAt, endAt, outcome } = {}) {
+    try {
+      const log = this.callLog(), key = typeof runOrRequestId === 'string' ? runOrRequestId : runOrRequestId?.requestId
+      if (!log || typeof key !== 'string' || !key) return null
+      return log.recordStage(key, kind, { startAt, endAt, outcome })
+    } catch { return null }
+  }
+
   /** Work that follows the answer (the events queue) runs in the scope of its run's request, so a check or a heartbeat after the answer is the same turn's. */
   applyScoped(event) {
     const log = this.callLog()
