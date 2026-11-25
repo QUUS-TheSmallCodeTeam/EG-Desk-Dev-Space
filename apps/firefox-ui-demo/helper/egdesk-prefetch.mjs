@@ -62,6 +62,29 @@ export async function readWorkspaceFile(folder, listed, limits = PREFETCH_LIMITS
   } catch { return null }
 }
 
+/**
+ * u7 (D21): the text of a working-folder file AS IT IS NOW, by its path relative to the folder (no listing): inside the folder (real path), a regular file, text (no NUL byte), the first readBytes.
+ * Used for a file EG-Desk's own edit tool changed in the turn, whose turn-start text the check must not read as current. null when it cannot be read.
+ */
+export async function readNowWorkspaceFile(folder, rel, limits = PREFETCH_LIMITS) {
+  try {
+    if (typeof rel !== 'string' || !rel || rel.includes('\0')) return null
+    const root = await realpath(folder), full = path.join(root, ...rel.replace(/^\.\//, '').split('/'))
+    const real = await realpath(full)
+    if (real !== root && !real.startsWith(root + path.sep)) return null
+    const stat = await lstat(real)
+    if (!stat.isFile()) return null
+    const handle = await open(real, 'r')
+    try {
+      const buffer = Buffer.alloc(Math.min(stat.size, limits.readBytes)), { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+      const bytes = buffer.subarray(0, bytesRead)
+      if (bytes.includes(0)) return null
+      const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes).replace(/\uFFFD+$/u, '')
+      return text.trim() ? text : null
+    } finally { await handle.close() }
+  } catch { return null }
+}
+
 /** Selection candidates for the files of a folder: one per file, unguarded (a file delivered unchanged is held and not asked again), text read only when picked. */
 export async function workspaceCandidates(folder, limits = PREFETCH_LIMITS) {
   const files = await listWorkspaceFiles(folder, limits)
