@@ -19,6 +19,7 @@ export const UPPER_BUNDLE = Object.freeze([
   Object.freeze({ flag: 'EGDESK_OPEN_ITEMS', value: 'on', role: 'turn', lane: 'L1', why: 'the open item a short reply ("응", "그거", "~빼고") refers to is resolved before the engine speaks' }),
   Object.freeze({ flag: 'EGDESK_PROPOSAL_REGISTRY', value: 'on', role: 'turn', lane: 'L3', why: 'the answer\'s own proposals and questions to the person are registered as items the resolver can settle' }),
   Object.freeze({ flag: 'EGDESK_TURN_MEMORY_WRITE_FIRST', value: 'on', role: 'turn', lane: 'L7', why: 'memory layer first: the record write judgment runs at the start of the turn and the engine is handed the settled state' }),
+  Object.freeze({ flag: 'EGDESK_TURN_MEMORY_KEEP_LATE', value: 'on', role: 'turn', lane: 'L7', why: 'a context call cut by its budget is not thrown away: it may finish in the background and its picked materials become the same turn\'s pre-posting check evidence (engine input unchanged; u5)' }),
   Object.freeze({ flag: 'EGDESK_TURN_MEMORY_PREFETCH', value: 'files', role: 'turn', lane: 'L7', why: 'the working folder\'s text files are context candidates, read by code when the Decision model picks them' }),
   Object.freeze({ flag: 'EGDESK_TERMINAL_OPEN_URL', value: 'on', role: 'prerequisite', lane: 'L8', why: 'an address a program in a Terminal card asks the system to open opens in an EG-Desk Browser Card; the page tools\' AI-service sign-in opacity relies on it' }),
   Object.freeze({ flag: 'EGDESK_PAGE_TOOLS', value: 'on', role: 'tool', lane: 'L8', requires: ['EGDESK_OWN_TOOLS', 'EGDESK_TERMINAL_OPEN_URL'], lands: 'lane/u1-browser-tools', why: 'the browser as EG-Desk tools for Claude and Codex (egdesk_card_*), offered only in a run bound to a Card the person granted; code decides what needs approval, the approval ledger of the own tools carries it; no Decision model is involved' }),
@@ -32,7 +33,7 @@ export const UPPER_BUNDLE = Object.freeze([
 export const NOT_IN_BUNDLE = Object.freeze({
   EGDESK_CONVERSATION_FLOW: 'posts model-written intermediate messages to the person: an owner decision of its own (open decision P2 is the fixed stalled sentence; with the bundle its copy is none)',
   EGDESK_INRUN_MESSAGES: 'changes how a message typed while a run works is handled (L2); part of the conversation-flow decision',
-  EGDESK_TURN_MEMORY_ONE_PACKET: 'engine input reduction, owner decision open (C2)', EGDESK_TURN_MEMORY_PRUNE_HELD: 'engine input reduction, owner decision open (C2)', EGDESK_TURN_MEMORY_KEEP_LATE: 'engine input reduction, owner decision open (C2)',
+  EGDESK_TURN_MEMORY_ONE_PACKET: 'engine input reduction, owner decision open (C2)', EGDESK_TURN_MEMORY_PRUNE_HELD: 'engine input reduction, owner decision open (C2)',
   EGDESK_TURN_MEMORY_ENGINE_CONTEXT: 'split of over-limit context entries, owner decision open (C2)', EGDESK_CONTEXT_RELEVANCE: 'action rule set not cleared for default (open decision C2)',
   EGDESK_BROWSER_OPEN_ITEMS: 'browser task items for the resolver (L8); no bundle owner yet', EGDESK_BROWSER_ENTRY: 'browser entry judgment (L8); needs its own settings re-measure',
   EGDESK_WORKING_MEMORY: 'tool-result shortening whose activity-row wording awaits approval', EGDESK_COMMAND_JUDGE: 'advisory record of terminal state, no turn effect',

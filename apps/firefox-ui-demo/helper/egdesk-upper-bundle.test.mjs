@@ -30,7 +30,7 @@ test('bundle on: every flag of the bundle is filled with its value; the input of
   assert.equal(out.flags.UNRELATED, 'x')
   const env = { EGDESK_UPPER: 'on' }, applied = applyUpperBundle(env)
   assert.equal(applied.applied.length, NAMES.length); for (const row of UPPER_BUNDLE) assert.equal(env[row.flag], row.value)
-  assert.equal(describeUpperBundle(applied), `EGDESK_UPPER=on: ${NAMES.length} flags set, 0 kept (explicitly set)`); assert.equal(NAMES.length, 14)
+  assert.equal(describeUpperBundle(applied), `EGDESK_UPPER=on: ${NAMES.length} flags set, 0 kept (explicitly set)`); assert.equal(NAMES.length, 15)
 })
 
 test('any single flag stays overridable: an explicit value (including off, none, advisory, empty is NOT explicit) wins over the bundle, the rest are filled', () => {
@@ -143,7 +143,7 @@ test('every flag of the bundle reaches the product wiring from process.env (the 
   assert.match(bridge, /createOwnToolsWiring\(\{ env: process\.env,/); assert.match(bridge, /\.\.\.turnMemoryFlagsFromEnv\(process\.env\)/)
   const reads = {
     EGDESK_OWN_TOOLS: ownTools, EGDESK_DECISION_FIRST: ownTools, EGDESK_DECISION_FIRST_APPROVALS: read('egdesk-decision-first-approvals.mjs') + ownTools,
-    EGDESK_TURN_MEMORY_WRITE_FIRST: turnMemory, EGDESK_TURN_MEMORY_PREFETCH: turnMemory,
+    EGDESK_TURN_MEMORY_WRITE_FIRST: turnMemory, EGDESK_TURN_MEMORY_PREFETCH: turnMemory, EGDESK_TURN_MEMORY_KEEP_LATE: turnMemory,
   }
   for (const row of UPPER_BUNDLE.filter(r => !r.lands)) assert.ok(bridge.includes(`process.env.${row.flag}`) || (reads[row.flag] ?? '').includes(row.flag), `${row.flag} is read on the product path`)
   assert.deepEqual(UPPER_BUNDLE.filter(r => r.lands).map(r => [r.flag, r.lands]), [['EGDESK_PAGE_TOOLS', 'lane/u1-browser-tools']], 'only the L8 page tools are waiting for their lane to merge')

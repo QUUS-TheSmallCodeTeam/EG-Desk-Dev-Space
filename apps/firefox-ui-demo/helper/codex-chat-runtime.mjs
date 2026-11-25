@@ -116,12 +116,15 @@ export const TURN_MEMORY_CAPS = Object.freeze({ firstMs: 4000, midMs: 2500 })
 // How long after its budget a turn_context request already in flight may still answer, for the later steps of the turn only (flag keepLate).
 // The real first-turn asks took 946 and 1,098 ms against the 800 ms budget (L1 c20/c21); 1.5 s more covers them with room.
 export const LATE_CONTEXT_MS = 1500
-// The context setup's (turn_context) budget. Owner decision 2026-11-25 ("일단 늘려"): 800 ms when the Decisions connection is warm, 1,500 ms
-// for the first turn of a conversation and whenever the transport has no warm connection (cold process, or idle past its window; read from
-// the transport's warm(), never guessed). Real first asks: 946 / 1,098 ms (L1 c20 / c21); warm asks 216-598 ms (all-on c16 / c17).
-// The bridge passes both explicitly (decisionContext.budgetMs / coldBudgetMs / warm); a setup without coldBudgetMs keeps one budget.
-export const TURN_CONTEXT_BUDGET_MS = 800
-export const TURN_CONTEXT_COLD_BUDGET_MS = 1500
+// The context setup's (turn_context) budget. Owner decision 2026-11-25 ("일단 늘려"): warm when the Decisions connection is warm, cold for the
+// first turn of a conversation and whenever the transport has no warm connection (cold process, or idle past its window; read from the
+// transport's warm(), never guessed). The bridge passes both explicitly (decisionContext.budgetMs / coldBudgetMs / warm); a setup without
+// coldBudgetMs keeps one budget. THE ONE PLACE for the two values.
+// u5 (11-26): 800 / 1,500 -> 1,200 / 1,800 (Main's approved ceilings). The context call is now 110 questions, about 20,245 input tokens. Real
+// calls (19: 3 from the decision-call log 11-26 04:47, 16 from L5 u3's turn table): p50 660, p90 934, p99 1,439 ms, max 1,520 (the one fallback,
+// cut at its budget so a lower bound); 813 ms was cut at 800. 1,200 covers every uncut call (max 1,070) with 12% room; 1,800 covers the 1,520.
+export const TURN_CONTEXT_BUDGET_MS = 1200
+export const TURN_CONTEXT_COLD_BUDGET_MS = 1800
 // Continuity check after a resume (checkContinuity): how many pages of 100 turns / runs are compared before the thread counts as foreign.
 export const CONTINUITY_MAX_PAGES = 20
 // How the app-server says a thread's context was compacted: a `contextCompaction` item (item/started, item/completed), and on older builds the
