@@ -148,6 +148,11 @@ test('identity and flag: the folder is the run\'s; profile and account play no p
   assert.deepEqual(h.provider.specs().map(s => s.name), FILE_TOOL_SPECS.map(s => s.name))
   assert.match((await h.provider.dispatch(h.turn('d', 'U', { executionPolicy: 'read-only-qa' }), { callId: 'y', tool: FILE_TOOL_NAMES.edit, arguments: { path: 'notes.md', mode: 'delete' } })).contentItems[0].text, /FILE_EDIT_FORBIDDEN/)
   assert.equal((await h.call(h.turn('e', 'V', { folder: null }), FILE_TOOL_NAMES.read, { path: 'notes.md' })).code, 'FILE_NO_FOLDER')
+  // u3 (D10): the refusal carries the person's sentence and a closed hint, so the engine does not read the code aloud (status and code unchanged)
+  for (const tool of [FILE_TOOL_NAMES.read, FILE_TOOL_NAMES.search]) {
+    const body = await h.call(h.turn('e2', 'V2', { folder: null }), tool, tool === FILE_TOOL_NAMES.read ? { path: 'notes.md' } : { query: 'x' })
+    assert.deepEqual(body, { status: 'no_folder', code: 'FILE_NO_FOLDER', message: '연결된 프로젝트 폴더가 없습니다.', hint: { needs: 'project_folder' } }, tool)
+  }
 })
 
 test('undo (c19): one step back per edit, newest first or by editId, only while the file is what the edit left; bounded; never in QA', async t => {

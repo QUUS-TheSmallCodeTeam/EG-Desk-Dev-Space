@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { ownEditFact } from './egdesk-own-edit-evidence.mjs' // c30b
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { noFolderBody } from './egdesk-no-folder.mjs'
 
 // EG-Desk's own file tools (c18 prototype, flag default off): read, search and edit, offered to the engine as dynamic tools, so that
 // with the pure-engine switch (egdesk-command-executor.mjs pureEngineThreadOverrides) every file the model reads or changes goes
@@ -184,7 +185,7 @@ export function createFileToolsProvider({ mode = () => 'off', ledger = null, wor
       if (!on()) return respond(false, { error: { code: 'FILE_TOOLS_OFF' } })
       if (run?.executionPolicy && (name === FILE_TOOL_NAMES.edit || name === FILE_TOOL_NAMES.undo)) return respond(false, { error: { code: 'FILE_EDIT_FORBIDDEN' } })
       const root = rootOf(run)
-      if (!root) return respond(true, { status: 'no_folder', code: 'FILE_NO_FOLDER' })
+      if (!root) return respond(true, noFolderBody('FILE_NO_FOLDER'))
       const args = event.arguments && typeof event.arguments === 'object' ? event.arguments : {}
       if (name === FILE_TOOL_NAMES.read) return this.read(root, args)
       if (name === FILE_TOOL_NAMES.search) return this.search(root, args)

@@ -2,6 +2,7 @@ import path from 'node:path'
 import { classifyCommand } from './egdesk-terminal-command-gate.mjs'
 import { terminalFactRow } from './egdesk-terminal-judge.mjs'
 import { judgeHealth, judgeWorktree } from './egdesk-run-conditions.mjs'
+import { noFolderBody } from './egdesk-no-folder.mjs'
 
 // EG-Desk's own command tool (c17 prototype, flag default off). Owner decision (2026-11-25): Codex is used as a pure model engine;
 // running commands, and the approval in front of them, is EG-Desk's own function (as in OpenCode, whose shell tool asks the
@@ -117,7 +118,7 @@ export function createCommandExecutorProvider({ mode = () => 'off', ledger = nul
       if (!command.trim() || command.length > L.commandChars) return respond(true, { status: 'invalid', code: 'COMMAND_INVALID' })
       let root = null
       try { root = workspaceOf(run) } catch { root = null }
-      if (typeof root !== 'string' || !path.isAbsolute(root)) return respond(true, { status: 'no_folder', code: 'COMMAND_NO_FOLDER' })
+      if (typeof root !== 'string' || !path.isAbsolute(root)) return respond(true, noFolderBody('COMMAND_NO_FOLDER'))
       const cwd = path.resolve(root, typeof args.cwd === 'string' && args.cwd ? args.cwd : '.')
       if (cwd !== root && !cwd.startsWith(`${root}${path.sep}`)) return respond(true, { status: 'invalid', code: 'COMMAND_CWD_OUTSIDE' })
       if (!ledger?.check) return respond(false, { error: { code: 'COMMAND_GATE_UNAVAILABLE' } })
