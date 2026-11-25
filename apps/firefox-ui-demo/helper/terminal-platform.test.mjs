@@ -124,3 +124,25 @@ test('ambiguous Windows startup failure never becomes a definite no-session erro
   error => error.code === 'WINDOWS_SPAWN_UNCONFIRMED' && error.nativeCreated === null)
   assert.equal(registry.active.size, 0)
 })
+
+// u1 item 4: the shell of an EG-Desk terminal does not inherit Aside's private runtime settings
+test('the terminal environment drops Aside runtime variables (NPM_CONFIG_PREFIX, NODE_PATH, TMPDIR, VIRTUAL_ENV, ASIDE_*) and keeps the person\'s own', async () => {
+  const { terminalEnvironment, withoutAsideRuntimeEnv } = await import('./terminal-platform.mjs')
+  const aside = '/Users/p/.aside/runtime'
+  const env = { PATH: `${aside}/node/bin:/usr/bin`, HOME: '/Users/p', SHELL: '/bin/zsh', LANG: 'ko_KR.UTF-8', PWD: `${aside}/work`,
+    NPM_CONFIG_PREFIX: `${aside}/node`, NPM_CONFIG_USERCONFIG: `${aside}/.npmrc`, NPM_CONFIG_CACHE: `${aside}/tmp/npm-cache`, npm_config_prefix: `${aside}/node`,
+    NODE_PATH: `${aside}/node/lib/node_modules`, VIRTUAL_ENV: `${aside}/venv`, OPENSSL_CONF: `${aside}/openssl.cnf`, TMPDIR: '/Users/p/.aside/u/0/sessions/s/tmp', ASIDE_SKILL_RUNTIME: '1', ASIDE_ANYTHING: 'x',
+    // the person's own
+    EDITOR: 'vim', NVM_DIR: '/Users/p/.nvm', NPM_CONFIG_REGISTRY: 'https://registry.example/', MY_ASIDE_NOTE: 'aside' }
+  const kept = withoutAsideRuntimeEnv(env)
+  for (const name of ['NPM_CONFIG_PREFIX', 'NPM_CONFIG_USERCONFIG', 'NPM_CONFIG_CACHE', 'npm_config_prefix', 'NODE_PATH', 'VIRTUAL_ENV', 'OPENSSL_CONF', 'TMPDIR', 'ASIDE_SKILL_RUNTIME', 'ASIDE_ANYTHING']) assert.equal(name in kept, false, name)
+  for (const name of ['PATH', 'HOME', 'SHELL', 'LANG', 'PWD', 'EDITOR', 'NVM_DIR', 'NPM_CONFIG_REGISTRY', 'MY_ASIDE_NOTE']) assert.equal(kept[name], env[name], name)
+  const own = { HOME: '/Users/p', NPM_CONFIG_PREFIX: '/Users/p/.npm-global' }
+  assert.equal(terminalEnvironment(own, 'darwin').NPM_CONFIG_PREFIX, '/Users/p/.npm-global', 'a person\'s own prefix is not touched')
+  const made = terminalEnvironment(env, 'darwin')
+  assert.equal(made.NPM_CONFIG_PREFIX, undefined); assert.equal(made.TERM, 'xterm-256color'); assert.equal(made.COLORTERM, 'truecolor'); assert.equal(made.PATH, env.PATH)
+  assert.equal(withoutAsideRuntimeEnv({ X: 'C:\\Users\\p\\.aside\\runtime', Y: 'C:\\Users\\p\\.asideX\\r' }).X, undefined)
+  assert.equal(withoutAsideRuntimeEnv({ Y: 'C:\\Users\\p\\.asideX\\r' }).Y, 'C:\\Users\\p\\.asideX\\r')
+  assert.deepEqual(withoutAsideRuntimeEnv(null), {})
+  assert.deepEqual(env.NPM_CONFIG_PREFIX, `${aside}/node`, 'the input is not mutated')
+})

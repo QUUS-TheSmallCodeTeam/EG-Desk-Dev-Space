@@ -565,6 +565,16 @@
     return Array.from(new Set((Array.isArray(list) ? list : []).filter((name) => typeof name === 'string' && name.trim())));
   }
 
+  // u1: the fields a default-named room changes when its engine is chosen (ChatState.relabelDefaultRoom): title, the peer's name in participants and roles, the subtitle
+  function relabelRoomPatch(thread, engineLabel) {
+    const relabel = ChatState.relabelDefaultRoom(thread, engineLabel, SELF_MEMBER);
+    if (!relabel) return {};
+    const participants = relabel.from ? thread.participants.map((name) => (name === relabel.from ? relabel.to : name)) : thread.participants;
+    const roles = { ...(thread.participantRoles || {}) };
+    if (relabel.from && relabel.from !== relabel.to) { roles[relabel.to] = roles[relabel.from] || 'member'; delete roles[relabel.from]; }
+    return { title: relabel.title, participants, participantRoles: roles, subtitle: buildThreadSubtitle(thread.type, participants) };
+  }
+
   function buildThreadSubtitle(type, participants) {
     if (type === 'group') {
       const count = Math.max(0, participants.length);
@@ -5742,6 +5752,34 @@
     try { return Array.isArray(state.codex?.chatCapabilities) && state.codex.chatCapabilities.includes('terminal-open-url'); } catch { return false; }
   }
 
+  // u1: when a Claude sign-in card was opened for a terminal session, the engine's own state (/engines/claude, the same refresh the Settings row uses) says when the login worked: the card is
+  // then closed by the terminal zone. One watch per terminal card (the Settings login row shares it). Null when the guard is off, the address is not Claude's sign-in page, or there is no bridge.
+  // 'already': the engine was signed in before the card opened (a second account): nothing to read, the card goes with the session as before.
+  function watchClaudeSignedIn(card, href) {
+    try {
+      if (!card || !signinGuardOn() || typeof AccountSettingsView === 'undefined') return null;
+      if (href !== undefined && !SurfaceState.claudeSigninPageUrl(href)) return null;
+      if (card._claudeSigninWatch) return card._claudeSigninWatch;
+      const api = state.codexBridge;
+      if (!api) return null;
+      const signed = () => AccountSettingsView.claudeAccountView(state.codex.engines, { connected: state.codex.connected }).status === 'signedIn';
+      const waitOn = card.ownerDocument?.defaultView || window;
+      const refresh = () => (api.refreshClaudeEngine ? api.refreshClaudeEngine() : api.refreshAuthStatus?.());
+      const watching = (async () => {
+        try { await refresh(); } catch { /* the first poll below tries again */ }
+        if (signed()) return 'already';
+        return AccountSettingsView.watchClaudeLogin({ refresh, isSignedIn: signed, sessionEnded: () => card._sessionEnded === true || card.isConnected === false,
+          isCurrent: () => card.isConnected !== false, wait: ms => new Promise(resolve => waitOn.setTimeout(resolve, ms)) });
+      })();
+      card._claudeSigninWatch = watching;
+      // a finished watch is forgotten: a later login in the same terminal card is read afresh, never closed by the earlier success
+      const forget = () => { if (card._claudeSigninWatch === watching) card._claudeSigninWatch = null; };
+      watching.then(forget, forget);
+      return watching;
+    } catch { return null; }
+  }
+  state.watchClaudeSignedIn = watchClaudeSignedIn;
+
   function serializeCardState(card) {
     if (!card || !card.isConnected || card.dataset.codexRole === 'auth') return null;
     if (card.dataset?.jointManaged) return null; // Never cache restricted card bodies or private reply drafts in general Desk history.
@@ -8511,7 +8549,7 @@
   // text is unchanged and the person has not moved it; "advisory" records what it would highlight. Rules: EGDeskHudRouting.sys.mjs.
   const HudRouting = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskHudRouting.sys.mjs');
   let hudRoutingTimer = null, hudRoutingSeq = 0;
-  function hudRoutingModeNow() { return HudRouting.hudRoutingMode(readSurfacePref(HudRouting.HUD_ROUTING_PREF)); }
+  function hudRoutingModeNow() { return HudRouting.hudRoutingModeFor(readSurfacePref(HudRouting.HUD_ROUTING_PREF), state.codex?.chatCapabilities); } // u1: the pref wins, else the bridge's announcement, else off
   function scheduleHudRouting() {
     if (hudRoutingModeNow() === 'off') return;
     if (hudRoutingTimer) window.clearTimeout(hudRoutingTimer);
@@ -9450,6 +9488,18 @@
   // 24px clear of other Views and Board regions. Without room there it takes
   // the closest empty Canvas spot and revealPlacedCanvasCard brings the camera.
   // Existing Views never move or shrink.
+  // u1: a View a program asked for opens beside the View it came from (SurfaceState.placeBesideOpener); the usual rule when that cannot be computed
+  function resolveBesideOpenerPlacement(kind, opener, options = {}) {
+    try {
+      if (!opener?.isConnected) return resolveCanvasCardPlacement(kind, options);
+      const safe = safeViewportWorldRect(options);
+      const size = SurfaceState.canvasViewSize(kind, { width: safe.right - safe.left, height: safe.bottom - safe.top });
+      const occupied = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape, .egd-board-region')).filter(node => node !== opener).map(persistentEntityGeometry);
+      const placed = SurfaceState.placeBesideOpener({ size, opener: persistentEntityGeometry(opener), safe, occupied, gap: 24 });
+      return placed ? (SurfaceState.trimToSafeBottom?.(placed, safe) ?? placed) : resolveCanvasCardPlacement(kind, options);
+    } catch { return resolveCanvasCardPlacement(kind, options); }
+  }
+
   function resolveCanvasCardPlacement(kind, options = {}) {
     const safe = safeViewportWorldRect(options);
     const size = SurfaceState.canvasViewSize(kind, { width: safe.right - safe.left, height: safe.bottom - safe.top });
@@ -9682,6 +9732,7 @@
         try { minZoom = SurfaceState.semanticDetailZoomFloor([{ ...rect, kind: options.kind }, { ...other, kind: 'settings' }]); } catch { minZoom = 0; }
         const paired = SurfaceState.pairedRevealCamera([rect, other], safe, { ...view, minZoom });
         if (paired) state.setCanvasViewportTarget?.(paired);
+        else if (options.revealAlone === true) state.setCanvasPanTarget?.(SurfaceState.revealRectPan(rect, safe, view)); // u1: they cannot share the screen: the new View is shown
         return;
       }
       const opener = options.opener?.isConnected && options.opener !== card ? options.opener : null;
@@ -12852,7 +12903,7 @@
       { now: Date.now(), accountKey: ChatState.roomAccountScope(thread, codex).accountKey || null }); // L1 c24: the room's own account
     const options = {
       clientThreadId: ChatState.clientThreadBinding(thread), engine, browserScope,
-      stateless: ChatState.chatStatelessStartView(thread, codex.chatCapabilities).on,
+      stateless: ChatState.chatStatelessStartView(thread, codex.chatCapabilities, codex).on,
       profileEnabled: thread.profileEnabled === true, profileId: runtime.profileId, profileRevision: runtime.profileRevision,
       roomAgentName: thread.profileEnabled ? runtime.agentProfile?.name : null,
       profiles: codexProfileCatalog.profiles, contextResolution,
@@ -14073,7 +14124,7 @@
         }, ThreadRouting.RETURN_TO_DM_LABEL);
       };
       const renderStatelessStart = (thread) => {
-        const view = ChatState.chatStatelessStartView(thread, codex.chatCapabilities);
+        const view = ChatState.chatStatelessStartView(thread, codex.chatCapabilities, codex);
         return el('div', { class: 'egd-codex-stateless-start', data: { testid: 'chat-stateless-start', state: view.on ? 'on' : 'off' } },
           el('button', {
             class: `egd-codex-stateless-toggle${view.on ? ' egd-codex-stateless-toggle-on' : ''}`,
@@ -14520,7 +14571,7 @@
           }
           messages.appendChild(el('div', { class: 'egd-codex-empty-state' }, ...emptyChildren));
           // The conversation header has the same engine choices in HUD and Canvas.
-          const stateless = ChatState.chatStatelessStartView(activeThread, codex.chatCapabilities);
+          const stateless = ChatState.chatStatelessStartView(activeThread, codex.chatCapabilities, codex);
           if (canStart && (stateless.available || stateless.on)) messages.appendChild(renderStatelessStart(activeThread));
         } else {
           // Agent answers carry the Profile avatar captured at send; older answers
@@ -18687,8 +18738,11 @@
         // A refused first send may have recorded an engine slot without a
         // native binding. A different engine must resolve its own active slot.
         // Keep selected sources/references intact; never relabel a capture.
+        // u1: a room that still has its default name ("Codex 1") is named for the engine that will answer ("Claude 1")
+        const engineLabel = ChatState.chatEngineChoices(state.codex.engines, state.codex.authStatus).find((choice) => choice.id === engineId)?.label;
         updateThreadById(threadId, (current) => ({ ...current, engineId,
-          ...(ChatState.chatThreadEngineId(current, state.codex) !== engineId ? { engineProfileId: null } : {}) }));
+          ...(ChatState.chatThreadEngineId(current, state.codex) !== engineId ? { engineProfileId: null } : {}),
+          ...(typeof relabelRoomPatch === 'function' ? relabelRoomPatch(current, engineLabel) : {}) }));
         emit();
       },
       // Model and effort apply per turn, so a started room can change them.
@@ -19069,10 +19123,19 @@
       createThread(type = 'dm', options = {}) {
         const normalizedType = type === 'group' ? 'group' : 'dm';
         const nextNonce = state.codex.threadNonce + 1;
-        const label = normalizedType === 'group' ? `대화 ${nextNonce}` : `Codex ${nextNonce}`;
+        // u1: a new DM room is named for the engine that will answer it (the recent or default one), as setThreadEngine renames it when another is chosen
+        let peerName = 'Codex';
+        if (normalizedType !== 'group' && options.engineId !== 'codex') {
+          try {
+            const engineId = ChatState.chatThreadEngineId({}, state.codex);
+            const named = engineId === 'codex' ? null : ChatState.chatEngineChoices(state.codex.engines, state.codex.authStatus).find((choice) => choice.id === engineId)?.label;
+            if (named) peerName = named;
+          } catch { peerName = 'Codex'; }
+        }
+        const label = normalizedType === 'group' ? `대화 ${nextNonce}` : `${peerName} ${nextNonce}`;
         const participants = normalizedType === 'group'
           ? [SELF_MEMBER, 'Codex']
-          : [SELF_MEMBER, 'Codex'];
+          : [SELF_MEMBER, peerName];
         const thread = createCodexThread(normalizedType, label, '', {
           participants,
           agentProfileId: options.agentProfileId,
@@ -19644,7 +19707,7 @@
           if (runtimeConfig.contextResolution?.chosen.length && !runtimeConfig.contextCapabilities) {
             runtimeConfig.contextCapabilities = { read: true, reader: true, publishBriefing: true };
           }
-          runtimeConfig.stateless = ChatState.chatStatelessStartView(activeThread, state.codex.chatCapabilities).on;
+          runtimeConfig.stateless = ChatState.chatStatelessStartView(activeThread, state.codex.chatCapabilities, state.codex).on;
           runtimeConfig.projectTarget = submittedDraft.requestProjectTarget;
           const chatRequest = ChatState.buildChatRequest(activeThread, content, requestId, runtimeConfig);
           if (expectedRoomProject) {
@@ -22531,9 +22594,10 @@
           // c36: while the person signs in, the screen checks the engine every 3 s (bounded), so a successful login shows at once; a login whose terminal session ended shows the error at once
           if (loginCard && outcome.phase === 'started' && typeof signinGuardOn === 'function' && signinGuardOn()) {
             const waitOn = loginCard.ownerDocument?.defaultView || window;
-            void AccountSettingsView.watchClaudeLogin({ refresh: () => (api.refreshClaudeEngine ? api.refreshClaudeEngine() : api.refreshAuthStatus?.()),
+            // u1: the terminal zone starts the watch when the sign-in card opens (it also closes that card on success); this row shares it, and starts its own when none is running
+            void Promise.resolve(loginCard._claudeSigninWatch || AccountSettingsView.watchClaudeLogin({ refresh: () => (api.refreshClaudeEngine ? api.refreshClaudeEngine() : api.refreshAuthStatus?.()),
               isSignedIn: () => AccountSettingsView.claudeAccountView(state.codex.engines, { connected: state.codex.connected }).status === 'signedIn',
-              sessionEnded: () => loginCard._sessionEnded === true || loginCard.isConnected === false, isCurrent, wait: ms => new Promise(resolve => waitOn.setTimeout(resolve, ms)) })
+              sessionEnded: () => loginCard._sessionEnded === true || loginCard.isConnected === false, isCurrent, wait: ms => new Promise(resolve => waitOn.setTimeout(resolve, ms)) }))
               .then(result => {
                 if (claudeAction?.action !== 'login' || claudeAction.phase !== 'started') return;
                 if (result === 'signedIn') claudeAction = null;
@@ -26160,7 +26224,8 @@
     // The first Browser fills the window at the world origin; any other opens in an empty spot.
     const placement = options.firstUse
       ? { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight, inView: true }
-      : options.placement ? { ...options.placement, inView: true } : resolveCanvasCardPlacement('browser');
+      : options.placement ? { ...options.placement, inView: true }
+      : options.besideOpener ? resolveBesideOpenerPlacement('browser', options.besideOpener) : resolveCanvasCardPlacement('browser');
     const deskWindow = spawnDeskWindowShell({
       id,
       kind: 'browser',
@@ -26191,6 +26256,8 @@
       card.dataset.openerCardId = options.popupOpenerCardId;
     }
     if (!options.background) revealPlacedCanvasCard(card, placement, { kind: 'browser', opener: options.opener });
+    // u1: a background card that came from a View (the sign-in page of a terminal) is still brought into view next to it; the camera never leaves that View out of frame, and the card takes no input focus
+    else if (options.revealBackground === true && options.besideOpener) revealPlacedCanvasCard(card, placement, { kind: 'browser', keepVisible: options.besideOpener, revealAlone: true });
 
     const urlInput = el('input', {
       type: 'text',
@@ -30129,7 +30196,11 @@
         dots = ViewportExtras.edgeDotModel(points, { titles, priority: id => SurfaceKeys.windowPriorityRank(id, sets),
           bounds: { left: safe.left + 6, top: safe.top + 6, right: safe.right - 6, bottom: safe.bottom - 6 } });
         // c35: the bottom-side dots sit beside the dock, not on top of the card above it
+        // u1: and no dot sits on a View (the dots of the other sides did, and a bottom dot beside a dock a View reaches)
+        const avoidCards = () => { try { dots = ViewportExtras.edgeDotsAvoidCards(dots, { viewport: { width: window.innerWidth, height: window.innerHeight },
+          cards: cards.map(card => { const r = card.getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom }; }) }); } catch (error) { console.warn(TAG, 'edge dots could not avoid the Views:', error?.message || error); } };
         try { const dockRect = document.getElementById('egd-dock')?.getBoundingClientRect(); if (dockRect?.height > 0) dots = ViewportExtras.edgeDotsBesideDock(dots, { dock: dockRect, viewport: { width: window.innerWidth, height: window.innerHeight } }); } catch {}
+        avoidCards();
       }
       const live = new Set(dots.map(dot => dot.key));
       for (const [key, node] of edgeDotNodes) {
@@ -30479,6 +30550,13 @@
     // - Focus cmd/ctrl+wheel zooms the camera; only zoom-out reveals the Desk
     // Both chrome and Terminal frames share this session. The caller consumes
     // the original event only when true; false leaves its native scroll alone.
+    // u1 (item 6, pref egdesk.wheelScrollGuard = "on"; default off): see routeCanvasWheel
+    let wheelGuardReadAt = -Infinity, wheelGuardIsOn = false;
+    const wheelScrollGuardOn = () => {
+      const at = performance.now();
+      if (at - wheelGuardReadAt > 2000) { wheelGuardReadAt = at; try { wheelGuardIsOn = readSurfacePref('egdesk.wheelScrollGuard') === 'on'; } catch { wheelGuardIsOn = false; } }
+      return wheelGuardIsOn;
+    };
     const routeCanvasWheel = (ev) => {
       if (ev.target instanceof Element && ev.target.closest('.egd-ontology-stage')) {
         return false;
@@ -30486,6 +30564,11 @@
       const now = performance.now();
       const sessionExpired = !wheelSession.nativeActive
         && (!wheelSession.owner || (now - wheelSession.lastTs) > WHEEL_SESSION_IDLE_MS);
+      // u1: a scroll gesture that started in the active card keeps its owner: one wheel event of that gesture carrying ctrlKey (a trackpad's pinch component) is a scroll, not a zoom that
+      // would also hand the rest of the gesture to the canvas. A ctrl/pinch wheel that starts its own gesture (the session had ended) zooms as before. Pref-gated until confirmed in a window.
+      const continuesEntityScroll = !sessionExpired && wheelSession.owner === 'entity' && ev.ctrlKey && !ev.metaKey && wheelScrollGuardOn()
+        && !!wheelSession.entityId && wheelSession.entityId === state.activeEntityId && shouldAllowActiveEntityScroll(ev.target);
+      if (continuesEntityScroll) { wheelSession.lastTs = now; return false; }
       if (sessionExpired || (wheelSession.nativeActive && !wheelSession.owner)) {
         resolveWheelSessionOwner(ev.target);
       }

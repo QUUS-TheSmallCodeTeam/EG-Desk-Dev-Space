@@ -80,7 +80,27 @@ export function resolveTerminalShell({ shellId, shell } = {}, options = {}) {
   return { id: 'default', label: path.posix.basename(executable), executable, args: [], available: true }
 }
 
+// u1 (item 4): the bridge runs under Aside's own runtime, and its environment carries that runtime's private settings (NPM_CONFIG_PREFIX, NODE_PATH, VIRTUAL_ENV, TMPDIR, ... all pointing
+// into ~/.aside). A shell started with them prints "nvm is not compatible with the NPM_CONFIG_PREFIX environment variable" on its first line and lets npm/pip/node of the person's own
+// tools write into Aside's folders. These variables are not the person's: a value that points into an Aside directory, or a name that starts with ASIDE_, is not handed to the shell.
+// PATH, PWD and OLDPWD are kept as they are (a missing tool is worse than an extra folder; the shell and the person's rc files own PATH). Every other variable, including a person's own
+// NPM_CONFIG_PREFIX, is passed unchanged, and the shell still reads the person's rc files itself.
+const ASIDE_DIR = /(^|[\\/])\.aside([\\/]|$)/
+const KEEP_AS_IS = new Set(['PATH', 'PWD', 'OLDPWD', 'HOME', 'USERPROFILE'])
+export function withoutAsideRuntimeEnv(env = process.env) {
+  const out = {}
+  for (const [name, value] of Object.entries(env ?? {})) {
+    if (!KEEP_AS_IS.has(name.toUpperCase())) {
+      if (/^ASIDE_/i.test(name)) continue
+      if (typeof value === 'string' && ASIDE_DIR.test(value)) continue
+    }
+    out[name] = value
+  }
+  return out
+}
+
 export function terminalEnvironment(env = process.env, platform = process.platform) {
+  env = withoutAsideRuntimeEnv(env)
   const result = { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' }
   if (platform !== 'win32') {
     const utf8 = value => typeof value === 'string' && /utf-?8/i.test(value)

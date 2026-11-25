@@ -545,3 +545,34 @@ test('c36: after the typed line a sign-in card must be there within the bound, e
   t = mk(() => 0); delete t.card._linkedSigninCount; r = await run(t.card, { signinCardMs: 10000 }); assert.equal(r.out.phase, 'started', 'a terminal without the link count is not judged');
   t = mk(() => 0); r = await run(t.card, { signinCardMs: 10000, isCurrent: (() => { let n = 0; return () => ++n < 12; })() }); assert.equal(r.out.phase, 'error'); assert.match(r.out.text, /바뀌어 명령을 입력하지 않았습니다|계정이나 연결 상태/);
 });
+
+// u1 item 3: the login line is typed when the shell's line editor is up, not after a quiet moment (a start-up file's warning, then silence, proved the quiet moment wrong in a real shell)
+test('u1: shellReadyToType: the editor decides when it reports; silence alone decides only for shells that cannot report', () => {
+  const ready = View.shellReadyToType;
+  assert.equal(ready({ idleMs: 900, editorReady: false }), false, 'a start-up warning and 900 ms of silence is not a prompt');
+  assert.equal(ready({ idleMs: 2499, editorReady: false }), false); assert.equal(ready({ idleMs: 2500, editorReady: false }), true, 'a shell without bracketed paste: long silence');
+  assert.equal(ready({ idleMs: null, editorReady: false }), false);
+  assert.equal(ready({ idleMs: 0, editorReady: true }), false, 'the prompt is still being painted'); assert.equal(ready({ idleMs: 120, editorReady: true }), true); assert.equal(ready({ idleMs: null, editorReady: true }), true);
+  assert.equal(ready({ idleMs: 399, editorReady: null }), false); assert.equal(ready({ idleMs: 400, editorReady: null }), true, 'c35 rule for a terminal that cannot tell'); assert.equal(ready({ idleMs: null, editorReady: null }), false);
+  assert.equal(ready({ idleMs: 600 }), true, 'defaults'); assert.equal(ready(), false);
+  assert.deepEqual([View.PROMPT_SETTLE_MS, View.NO_EDITOR_IDLE_MS], [120, 2500]);
+});
+
+test('u1: the real-shell timeline: a warning at 0.02 s, silence, the editor up at 1.53 s: the line is typed at 1.53 s + settle, once, not at 0.4 s', async () => {
+  const c = fakeClock(), typed = [];
+  const out = { at: 0.02 * 1000 };
+  const api = { isConnected: () => true, write: data => typed.push({ at: c.at(), data }),
+    outputIdleMs: () => (c.at() < 20 ? null : c.at() < 1530 ? c.at() - 20 : c.at() - 1530), lineEditorReady: () => c.at() >= 1530 };
+  const card = { isConnected: true, _termBrowser: { contentWindow: { terminalAPI: api } } };
+  const res = await View.runClaudeLoginInTerminal({ requestCommand: async method => claudeLoginTerminalCommand(method), openTerminal: () => card, sleep: c.sleep, now: c.now });
+  assert.equal(res.phase, 'started'); assert.equal(typed.length, 1); assert.equal(typed[0].data, 'claude auth login --claudeai\r');
+  assert.ok(typed[0].at >= 1650 && typed[0].at < 1750, `typed at ${typed[0].at} ms (editor at 1530 + 120)`);
+  // a shell that never reports the editor (bash 3.2): long silence, never later than the bound
+  const c2 = fakeClock(), typed2 = []; const api2 = { isConnected: () => true, write: data => typed2.push(c2.at()), outputIdleMs: () => (c2.at() < 20 ? null : c2.at() - 20), lineEditorReady: () => false };
+  await View.runClaudeLoginInTerminal({ requestCommand: async method => claudeLoginTerminalCommand(method), openTerminal: () => ({ isConnected: true, _termBrowser: { contentWindow: { terminalAPI: api2 } } }), sleep: c2.sleep, now: c2.now });
+  assert.ok(typed2[0] >= 2520 && typed2[0] < 2650, `bash 3.2 typed at ${typed2[0]} ms`);
+  // an editor that never comes up and a shell that keeps printing: the bound (8 s) ends the wait, the line is typed once
+  const c3 = fakeClock(), typed3 = []; const api3 = { isConnected: () => true, write: () => typed3.push(c3.at()), outputIdleMs: () => 10, lineEditorReady: () => false };
+  await View.runClaudeLoginInTerminal({ requestCommand: async method => claudeLoginTerminalCommand(method), openTerminal: () => ({ isConnected: true, _termBrowser: { contentWindow: { terminalAPI: api3 } } }), sleep: c3.sleep, now: c3.now });
+  assert.equal(typed3.length, 1); assert.ok(typed3[0] >= 8000 && typed3[0] < 8200, `bound: ${typed3[0]}`);
+});

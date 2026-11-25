@@ -488,6 +488,31 @@ export function placeCanvasView({ size, safe, occupied = [], anchor = null, gap 
   return { x: Math.round(outside.x), y: Math.round(outside.y), width, height, inView: false };
 }
 
+// u1: a View a program asked for (the sign-in page the Claude CLI opens) opens beside the View it came from, not in "the closest empty spot of the visible area", which with a large Terminal
+// is off screen. Order: right of the opener, left, below, above (aligned with its top or left edge, slid along the edge to stay inside `safe` when the room allows), the first spot that
+// is free of every `occupied` rect by `gap` and fully inside `safe` (inView true). When no such spot exists (the opener fills the view) the first FREE one is returned with inView false:
+// the caller then frames both. Occupied rects never move. Null for unusable input.
+export function placeBesideOpener({ size, opener, safe, occupied = [], gap = 24 } = {}) {
+  const width = size?.width, height = size?.height;
+  if (!(width > 0 && height > 0) || !worldBox(opener) || !safe || ![safe.left, safe.top, safe.right, safe.bottom].every(Number.isFinite)) return null;
+  const clamp = (value, low, high) => Math.round(high < low ? low : Math.min(high, Math.max(low, value)));
+  const rects = (Array.isArray(occupied) ? occupied : []).filter(worldBox);
+  const free = (x, y) => rects.every(r => x + width + gap <= r.x || x >= r.x + r.width + gap || y + height + gap <= r.y || y >= r.y + r.height + gap);
+  const inside = (x, y) => x >= safe.left && y >= safe.top && x + width <= safe.right && y + height <= safe.bottom;
+  const spots = [
+    { x: opener.x + opener.width + gap, y: clamp(opener.y, safe.top, safe.bottom - height) },
+    { x: opener.x - gap - width, y: clamp(opener.y, safe.top, safe.bottom - height) },
+    { x: clamp(opener.x, safe.left, safe.right - width), y: opener.y + opener.height + gap },
+    { x: clamp(opener.x, safe.left, safe.right - width), y: opener.y - gap - height },
+  ].map(spot => ({ x: Math.round(spot.x), y: Math.round(spot.y) }));
+  const visible = spots.find(spot => free(spot.x, spot.y) && inside(spot.x, spot.y));
+  if (visible) return { ...visible, width, height, inView: true };
+  const first = spots.find(spot => free(spot.x, spot.y));
+  if (first) return { ...first, width, height, inView: false };
+  const near = nearestFreeCanvasSpot({ width, height, target: spots[0], occupied: rects, gap, reach: { width: safe.right - safe.left, height: safe.bottom - safe.top } });
+  return near ? { x: Math.round(near.x), y: Math.round(near.y), width, height, inView: false } : null;
+}
+
 // The smallest camera pan that shows a world rect inside the safe area
 // (client px). On an axis where the rect is larger than the area, its top or
 // left edge, where the bar is, is aligned instead.
@@ -1125,6 +1150,14 @@ export function signinPageUrl(value) {
     if (!['http:', 'https:'].includes(url.protocol)) return false;
     const host = url.hostname.toLowerCase().replace(/\.$/, '');
     return SIGNIN_HOSTS.some(h => host === h || host.endsWith(`.${h}`)) && /\/(oauth|login|log-in|signin|sign-in|authorize)\b/i.test(url.pathname);
+  } catch { return false; }
+}
+/** u1: the sign-in page of Claude (not OpenAI's): the login card whose success is read from the Claude engine's state. */
+export function claudeSigninPageUrl(value) {
+  try {
+    if (!signinPageUrl(value)) return false;
+    const host = new URL(String(value)).hostname.toLowerCase().replace(/\.$/, '');
+    return ['claude.ai', 'claude.com', 'anthropic.com'].some(h => host === h || host.endsWith(`.${h}`));
   } catch { return false; }
 }
 /** What a restored Browser Card may load: never a sign-in page left from an earlier login (guard on) and never an address carrying a loopback credential: those restore blank. */

@@ -493,6 +493,9 @@
       isConnected: () => connected,
       // c35: ms since the session last printed anything, or null when it has printed nothing yet (a shell that is still starting up has not shown its prompt)
       outputIdleMs: () => (lastOutputAtMs ? Date.now() - lastOutputAtMs : null),
+      // u1: true while the shell's line editor is reading a line (zsh's zle and bash 5's readline switch bracketed paste on at each prompt: xterm's `modes.bracketedPasteMode`), false before
+      // that (the shell is still running its start-up files), null when this terminal cannot tell. A line typed before the editor is up is echoed by the tty and again by the editor.
+      lineEditorReady: () => { try { const on = term.modes?.bracketedPasteMode; return typeof on === 'boolean' ? on : null; } catch { return null; } },
       bufferText: () => {
         const buffer = term.buffer.active;
         const lines = [];

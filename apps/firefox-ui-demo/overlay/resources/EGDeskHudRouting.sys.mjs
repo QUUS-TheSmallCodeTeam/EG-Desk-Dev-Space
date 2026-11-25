@@ -16,6 +16,17 @@ export const HUD_ROUTING_PREF = 'egdesk.hudRouting';
 export const HUD_ROUTING_LIMITS = Object.freeze({ debounceMs: 300, waitMs: 1500, enterGuardMs: 300, items: 4 });
 export const HUD_ROUTING_BARS = Object.freeze({ yes: 0.8, no: 0.2 });
 export const hudRoutingMode = value => (value === 'advisory' || value === 'on' ? value : 'off');
+// u1: the search field asks when (1) the bridge flag lets /decision/hud-routing answer, (2) the Decisions mode is advisory or on, and (3) this mode, read in the window, is not "off". The window's
+// own switch is the pref (about:config); a bundle setting kept by the bridge cannot write a Firefox pref, so the bridge may also announce the mode as a capability (hud-routing-advisory |
+// hud-routing-on, in the state's chatCapabilities, like terminal-open-url). A pref the person set ("advisory", "on", or an explicit "off") wins; with no pref the announcement decides; none: off.
+export const HUD_ROUTING_CAPABILITIES = Object.freeze({ advisory: 'hud-routing-advisory', on: 'hud-routing-on' });
+export function hudRoutingModeFor(pref, capabilities = null) {
+  if (pref === 'advisory' || pref === 'on' || pref === 'off') return pref;
+  const list = Array.isArray(capabilities) ? capabilities : [];
+  if (list.includes(HUD_ROUTING_CAPABILITIES.on)) return 'on';
+  if (list.includes(HUD_ROUTING_CAPABILITIES.advisory)) return 'advisory';
+  return 'off';
+}
 
 const norm = text => String(text ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
 const NAMED = new Set(['card', 'thread', 'agenda']);
