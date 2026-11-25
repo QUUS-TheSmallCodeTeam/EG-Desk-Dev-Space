@@ -99,6 +99,14 @@ export function leftoverThreads(entries) {
   for (const e of entries) { if (e.op === 'created' && e.ephemeral !== true && typeof e.id === 'string') created.set(e.id, e); else if (e.op === 'gone') gone.add(e.id) }
   return [...created.keys()].filter(id => !gone.has(id))
 }
+/** c30: the internal turn's trace as the record keeps it: per attempt, closed words and numbers only (at most 3 attempts, 30 events each). */
+export function closedTrace(trace) {
+  if (!Array.isArray(trace)) return null
+  const word = v => (typeof v === 'string' ? v.slice(0, 40) : null)
+  return trace.slice(0, 3).map(t => ({ via: word(t?.via), startMs: Number.isFinite(t?.startMs) ? t.startMs : null, firstEventMs: Number.isFinite(t?.firstEventMs) ? t.firstEventMs : null, completed: word(t?.completed),
+    events: (Array.isArray(t?.events) ? t.events : []).slice(0, 30).map(e => [Number.isFinite(e?.[0]) ? e[0] : null, word(e?.[1]), word(e?.[2]), word(e?.[3])]), requests: (Array.isArray(t?.requests) ? t.requests : []).slice(0, 10).map(word) }))
+}
+
 /** deleteAndVerify(request, ids, ledger) → { persisted, deleted, verifiedGone, failures: [{ id, step, error }] }. Never throws; no retries. */
 export async function deleteAndVerify(request, ids, ledger) {
   const out = { persisted: ids.length, deleted: 0, alreadyGone: 0, verifiedGone: 0, failures: [] }
@@ -539,8 +547,8 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     const runPrivate = chat.internalTurns.run.bind(chat.internalTurns)
     chat.internalTurns.run = async args => {
       const began = performance.now()
-      try { const out = await runPrivate(args); turnNow.internal.push({ via: out.via ?? null, ms: ms(began), chars: out.text.length, model: out.model ?? null, effort: out.effort ?? null, source: out.source ?? null, text: clip(out.text, 400), schema: Boolean(args.outputSchema), preamble: out.via === 'fresh' && Boolean(args.fresh?.preamble) }); return out }
-      catch (error) { turnNow.internal.push({ ms: ms(began), error: String(error?.code ?? 'error').slice(0, 60), message: clip(error?.message ?? '', 200) }); throw error }
+      try { const out = await runPrivate(args); turnNow.internal.push({ via: out.via ?? null, ms: ms(began), chars: out.text.length, model: out.model ?? null, effort: out.effort ?? null, source: out.source ?? null, text: clip(out.text, 400), schema: Boolean(args.outputSchema), preamble: out.via === 'fresh' && Boolean(args.fresh?.preamble), ...(out.hedged ? { hedged: true } : {}), trace: closedTrace(out.trace) }); return out }
+      catch (error) { turnNow.internal.push({ ms: ms(began), error: String(error?.code ?? 'error').slice(0, 60), message: clip(error?.message ?? '', 200), trace: closedTrace(error?.trace) }); throw error }
     }
     const composeWriter = chat.writeChecked.bind(chat)
     chat.writeChecked = async (run, prompt, options) => { const text = await composeWriter(run, prompt, options); turnNow.writers.push({ promptChars: String(prompt).length, posted: text !== null && text !== undefined, ...(typeof text === 'string' ? { text: clip(text, 300) } : {}) }); return text }
@@ -726,7 +734,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
         turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted), draftCheckRows: sub.reduce((n, s) => n + (s.draftRows?.length ?? 0), 0), draftCheckRejects: sub.reduce((n, s) => n + (s.draftRows ?? []).reduce((m, row) => m + (row.judgments ?? []).filter(j => j.would === 'reject').length, 0), 0),
       }
       // registered hooks that wait on the live runtime after the answer is posted (their record goes under their name, their expectations join the turn's)
-      const after = await turnHooks.afterTurn({ ...hookCtx, firstEventMs: sub[0]?.firstEventMs ?? null, run: sub.at(-1).run, say: turn.say, answer: posted.at(-1) ?? null, turnIndex: index + 1, expect: turn.expect, ...(side ? { alongside: { run: side.run, clientThreadId: side.room.id, say: turn.alongside.say, answer: side.posted.at(-1) ?? null, status: side.status } } : {}) })
+      const after = await turnHooks.afterTurn({ ...hookCtx, firstEventMs: sub[0]?.firstEventMs ?? null, run: sub.at(-1).run, say: turn.say, answer: posted.at(-1) ?? null, turnIndex: index + 1, expect: turn.expect, toolTexts: sub.flatMap(x => x.toolCalls ?? []).map(c => c.result?.text).filter(t => typeof t === 'string'), ...(side ? { alongside: { run: side.run, clientThreadId: side.room.id, say: turn.alongside.say, answer: side.posted.at(-1) ?? null, status: side.status } } : {}) })
       const ext = turnHooks.finishTurn({ ...hookCtx, expect: turn.expect, nextExpect: withMessage ? next.expect : null, latencyMs: sub[0].latencyMs, steerContract: FLAG.EGDESK_INRUN_MESSAGES === 'on' ? (typeof nativeContract?.steerContract === 'string' || typeof nativeContract?.boardPeerContract === 'string') : null /* c28: the proof the runtime uses is steerContract ?? boardPeerContract (the real 0.171 record said false while engine.nativeContract.steerContract was true) */ }) // registered hooks: records, expectations
       Object.assign(ext.records, after.records); ext.expectations.push(...after.expectations)
       const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...(side ? [{ check: 'alongside.completed', ok: side.status === 'completed' && side.posted.length >= 1, detail: { status: side.status, posted: side.posted.length } }] : []), ...ext.expectations]

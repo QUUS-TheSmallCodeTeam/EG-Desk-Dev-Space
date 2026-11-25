@@ -804,7 +804,9 @@ test('records: each private turn (path, time, characters, the text) and each hea
   const rec = only(await runCheck(w.options, asScripts(ONE), w.deps))
   const turn = rec.turns[0]
   assert.equal(turn.internalTurns.length, 2)
-  assert.deepEqual(turn.internalTurns[0], { via: 'fresh', ms: turn.internalTurns[0].ms, chars: 'ok from the internal thread'.length, model: 'fake-model', effort: 'low', source: 'engine', text: 'ok from the internal thread', schema: false, preamble: true })
+  assert.deepEqual({ ...turn.internalTurns[0], trace: undefined }, { via: 'fresh', ms: turn.internalTurns[0].ms, chars: 'ok from the internal thread'.length, model: 'fake-model', effort: 'low', source: 'engine', text: 'ok from the internal thread', schema: false, preamble: true, trace: undefined })
+  // c30: and the closed trace of the attempt (where a stalled private turn would have stopped)
+  assert.deepEqual(turn.internalTurns[0].trace.map(x => [x.via, x.completed, x.requests, x.events.at(-1)?.[1]]), [['fresh', 'completed', [], 'turn/completed']])
   assert.equal(turn.writers.length, 1); assert.equal(turn.writers[0].posted, false); assert.equal(turn.writers[0].promptChars, 'Write one short message'.length)
   const plain = world(t, { turns: [{ steps: [], final: 'a' }] })
   const quiet = only(await runCheck(plain.options, asScripts(ONE), plain.deps)).turns[0]
