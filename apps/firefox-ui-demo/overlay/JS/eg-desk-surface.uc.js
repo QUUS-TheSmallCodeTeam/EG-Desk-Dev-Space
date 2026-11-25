@@ -33096,6 +33096,7 @@
       scheduleDeskSessionSave,
       setActiveEntity,
       singletonSourceRef,
+      spawnBrowserCard,
       spawnDeskWindowShell,
       spawnTerminalCard,
       state,

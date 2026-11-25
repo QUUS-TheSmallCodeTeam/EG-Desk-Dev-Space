@@ -29,6 +29,7 @@ import { createGitTargetInspector } from './egdesk-terminal-git-facts.mjs'
 import { createOwnToolsWiring } from './egdesk-own-tools-wiring.mjs'
 import { createTerminalSessionFactory } from './terminal-platform.mjs'
 import { createTerminalHttpHandler } from './terminal-http.mjs'
+import { createTerminalOpenUrl } from './egdesk-terminal-open-url.mjs'
 import { chatError, publicText } from './codex-chat-values.mjs'
 import { createHmac, randomBytes } from 'node:crypto'
 import * as os from 'node:os'
@@ -1133,8 +1134,11 @@ try {
   }
 } catch {}
 
-const terminalFactory = createTerminalSessionFactory({ registry: terminalRegistry })
-const handleTerminalHttp = createTerminalHttpHandler({ registry: terminalRegistry, factory: terminalFactory, port: BRIDGE_PORT })
+// c34 (flag EGDESK_TERMINAL_OPEN_URL=on, default off): an address a program in a Terminal card asks the system to open opens in an EG-Desk Browser Card instead (egdesk-terminal-open-url.mjs)
+const terminalOpenUrl = process.env.EGDESK_TERMINAL_OPEN_URL === 'on' ? createTerminalOpenUrl({ dir: path.join(dataDir, 'terminal-opener'), port: BRIDGE_PORT }) : null
+if (terminalOpenUrl) { try { terminalOpenUrl.install(); terminalRegistry.urlOpen = terminalOpenUrl } catch (error) { console.warn('[terminal] open-url opener could not be installed:', error?.code ?? 'error') } }
+const terminalFactory = createTerminalSessionFactory({ registry: terminalRegistry, ...(terminalRegistry.urlOpen ? { openUrl: terminalOpenUrl } : {}) })
+const handleTerminalHttp = createTerminalHttpHandler({ registry: terminalRegistry, factory: terminalFactory, port: BRIDGE_PORT, ...(terminalRegistry.urlOpen ? { urlOpen: terminalOpenUrl } : {}) })
 
 const bridgeServer = createServer(async (req, res) => {
   if (!req.url) {

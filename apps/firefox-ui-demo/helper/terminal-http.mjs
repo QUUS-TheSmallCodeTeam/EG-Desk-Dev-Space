@@ -12,10 +12,11 @@ const POST_FIELDS = new Map([
   ['/terminal/detach', ['sessionId', 'bridgeInstance']],
   ['/terminal/attach', ['sessionId', 'bridgeInstance']],
   ['/terminal/close-local-scope', []],
+  ['/terminal/open-url', ['sessionId', 'token', 'url']],
 ])
 const bad = (code, message, httpStatus = 400) => Object.assign(new Error(message), { code, httpStatus })
 
-export function createTerminalHttpHandler({ registry, factory, port = 39218 } = {}) {
+export function createTerminalHttpHandler({ registry, factory, port = 39218, urlOpen = null } = {}) {
   if (!registry || !factory || typeof factory.create !== 'function' || typeof factory.catalog !== 'function') {
     throw new TypeError('Terminal HTTP requires a registry and session factory')
   }
@@ -24,6 +25,7 @@ export function createTerminalHttpHandler({ registry, factory, port = 39218 } = 
   return async (req, res, url) => {
     const route = url?.pathname || new URL(req.url, 'http://127.0.0.1').pathname
     if (route !== '/terminal/shells' && !POST_FIELDS.has(route)) return false
+    if (route === '/terminal/open-url' && !urlOpen) return false // flag off: the route does not exist
     if (!guardBridgeRequest(req, typeof port === 'function' ? port() : port)) {
       sendJson(res, 403, { ok: false, code: 'LOOPBACK_REQUIRED', error: 'Loopback origin required' })
       return true
@@ -40,6 +42,8 @@ export function createTerminalHttpHandler({ registry, factory, port = 39218 } = 
       if (Object.keys(body).some(key => !POST_FIELDS.get(route).includes(key))) {
         throw bad('INVALID_TERMINAL_REQUEST', 'Terminal request has an unsupported field')
       }
+      // c34: the opener of a terminal session posts the address a program wants opened (its own per-session token, no owner/view scope: it runs in the shell, not in the card)
+      if (route === '/terminal/open-url') { sendJson(res, 200, urlOpen.accept(body)); return true }
       const owner = req.headers['x-egdesk-terminal-owner']
       const view = req.headers['x-egdesk-terminal-view']
       if ((owner !== undefined || view !== undefined) &&

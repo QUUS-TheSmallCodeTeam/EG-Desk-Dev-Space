@@ -95,7 +95,7 @@ function dispatch(target, type, init = {}) {
   return event;
 }
 
-async function terminalWindow({ api, options = {}, windowOverrides = {} } = {}) {
+async function terminalWindow({ api, options = {}, windowOverrides = {}, depOverrides = {} } = {}) {
   const { createTerminalZone } = await import(new URL('resources/surface/EGDeskSurfaceTerminal.mjs', overlay));
   const events = [], messages = new Map(), documentListeners = [];
   const host = makeNode('main'); host.isRoot = true;
@@ -132,6 +132,7 @@ async function terminalWindow({ api, options = {}, windowOverrides = {} } = {}) 
       return shell;
     },
   });
+  Object.assign(deps, depOverrides);
   const frameWindow = { terminalAPI: api ? { hostEventKey: '00000000-0000-4000-8000-000000000001', focus: () => events.push('terminal-focus'), kill: async () => { events.push('session-killed'); return { ok: true }; }, ...api } : undefined };
   const el = deps.el;
   deps.el = (tag, props, ...children) => {
@@ -595,4 +596,39 @@ test('managed Terminal can verify the exact bound File project without widening 
     assert.throws(() => transport(url, request), /Invalid terminal transport/);
     assert.equal(requests.length, 3);
   } finally { h.restore(); }
+});
+
+// L1 c34 (bridge flag EGDESK_TERMINAL_OPEN_URL): addresses a program of this session asked to open come to the card as 'terminal-open-url'; each opens a Browser Card beside it, in the background.
+test('a terminal-open-url message opens a Browser Card for each http(s) address, in the background, beside this terminal; only the card\'s own authenticated frame can ask', async () => {
+  const opened = [];
+  const h = await terminalWindow({ api: { ptyId: 'pty-1', isConnected: () => true }, depOverrides: { spawnBrowserCard: (url, options) => { opened.push([url, options]); return {}; } } });
+  try {
+    const SIGN_IN = 'https://claude.com/cai/oauth/authorize?code=true&state=synthetic';
+    h.message({ type: 'terminal-open-url', sessionId: 'pty-1', urls: [SIGN_IN] });
+    assert.deepEqual(opened.map(([url]) => url), [SIGN_IN]);
+    assert.equal(opened[0][1].background, true, 'no camera move, no activation: the person is typing in the terminal');
+    assert.equal(opened[0][1].opener, h.card, 'placed with the terminal card as the opener');
+    assert.equal(opened[0][1].openMode, 'new');
+    h.message({ type: 'terminal-open-url', urls: [SIGN_IN] });
+    assert.equal(opened.length, 1, 'the same address twice within seconds opens one card');
+    h.message({ type: 'terminal-open-url', urls: ['file:///etc/passwd', 'javascript:alert(1)', 'chrome://browser/content', 'https://user:pw@a.example/', 'not a url', 5, null] });
+    h.message({ type: 'terminal-open-url', urls: 'https://a.example/' }); h.message({ type: 'terminal-open-url' });
+    assert.equal(opened.length, 1, 'anything but a plain http(s) address is ignored');
+    h.message({ type: 'terminal-open-url', urls: ['https://a.example/1', 'https://a.example/2', 'https://a.example/3', 'https://a.example/4', 'https://a.example/5', 'https://a.example/6'] });
+    assert.equal(opened.length, 1 + 4, 'at most four addresses per message');
+    const before = opened.length;
+    for (const envelope of [{ source: {} }, { source: undefined }, { source: null, origin: 'https://example.invalid' }, { source: null, origin: 'chrome://userchrome.evil' }]) h.message({ type: 'terminal-open-url', urls: ['https://forged.example/'] }, envelope);
+    for (const hostEventKey of [undefined, null, '', 'other-card-key']) h.message({ type: 'terminal-open-url', urls: ['https://forged.example/'], hostEventKey }, { source: null });
+    assert.equal(opened.length, before, 'a forged message opens nothing');
+  } finally { h.restore(); }
+});
+
+test('a Browser Card that cannot be opened is logged and the terminal keeps working', async () => {
+  const h = await terminalWindow({ api: { ptyId: 'pty-1', isConnected: () => true }, depOverrides: { spawnBrowserCard: () => { throw new Error('card limit'); } } });
+  try { h.message({ type: 'terminal-open-url', urls: ['https://a.example/'] }); h.message({ type: 'terminal-ready', shellLabel: 'zsh' }); assert.equal(h.shell.slots.identity.children[1].textContent, 'zsh'); } finally { h.restore(); }
+});
+
+test('the surface hands the Terminal zone spawnBrowserCard, and the frame page forwards openUrls of a read to its host', () => {
+  assert.match(surface, /singletonSourceRef,\n\s+spawnBrowserCard,\n\s+spawnDeskWindowShell,/);
+  assert.match(initializer, /Array\.isArray\(result\.openUrls\)[\s\S]{0,200}type: 'terminal-open-url'/);
 });

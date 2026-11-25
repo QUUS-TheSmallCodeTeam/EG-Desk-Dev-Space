@@ -940,3 +940,17 @@ test('managed detach waits for a matching hold ACK and unload never kills a held
   assert.equal(h.observer.disconnected, true);
   assert.equal(h.requests.some(r => r.route === '/terminal/kill' || r.route === '/terminal/write'), false);
 });
+
+test('c34: a read that carries openUrls tells the host once (terminal-open-url), a read without them says nothing', async () => {
+  let reads = 0;
+  const h = await uiFixture({ search: '?managed=1', respond(route, body, defaults) {
+    if (route === '/terminal/attach') return { sessionId: 'held-pty', bridgeInstance: body.bridgeInstance, ok: true, status: 'RUNNING', usePty: true, transport: 'conpty', detachSupported: true };
+    if (route === '/terminal/read') return { ...defaults(route, body), data: 'x', ...(++reads === 1 ? { openUrls: ['https://claude.com/cai/oauth/authorize?state=s', 'https://a.example/2', 'https://a.example/3', 'https://a.example/4', 'https://a.example/5'] } : {}) };
+    return defaults(route, body);
+  } });
+  await h.boot(); h.api.configureLocal(h.fetch, true); await settle();
+  await h.api.attachLocal({ sessionId: 'held-pty', bridgeInstance: crypto.randomUUID() }); await settle();
+  const posted = h.messages.filter(m => m.type === 'terminal-open-url');
+  assert.equal(posted.length, 1); assert.equal(posted[0].sessionId, 'held-pty'); assert.equal(posted[0].urls.length, 4, 'at most four');
+  assert.equal(posted[0].urls[0], 'https://claude.com/cai/oauth/authorize?state=s');
+});

@@ -195,6 +195,10 @@
       if (result.runResult && typeof result.runResult === 'object') {
         try { notifyTerminalHost({ type: 'terminal-run-result', sessionId: sessionAtRead, runResult: result.runResult }); } catch {}
       }
+      // c34 (bridge flag EGDESK_TERMINAL_OPEN_URL): addresses a program of this session asked to open (the Claude CLI's sign-in page); the card opens a Browser Card for them.
+      if (Array.isArray(result.openUrls) && result.openUrls.length) {
+        try { notifyTerminalHost({ type: 'terminal-open-url', sessionId: sessionAtRead, urls: result.openUrls.slice(0, 4) }); } catch {}
+      }
       if (terminalExitEvidence(result, sessionAtRead)) {
         invalidateScriptRun();
         exitConfirmed = true;

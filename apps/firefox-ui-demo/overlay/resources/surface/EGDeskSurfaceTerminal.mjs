@@ -17,6 +17,7 @@ export function createTerminalZone(deps) {
     resolveCanvasCardPlacement,
     revealPlacedCanvasCard,
     setActiveEntity,
+    spawnBrowserCard,
     spawnDeskWindowShell,
     state,
   } = deps;
@@ -148,6 +149,23 @@ export function createTerminalZone(deps) {
       title: '최근 명령 결과 보기/숨기기', data: { testid: 'terminal-run-chip' },
       onclick: (ev) => { ev.stopPropagation(); runResultPanel.hidden = !runResultPanel.hidden; runChip.setAttribute('aria-expanded', String(!runResultPanel.hidden)); } });
     shell.slots.actions.appendChild(runChip);
+
+    // ---- Addresses a program in this terminal asked to open (flag EGDESK_TERMINAL_OPEN_URL of the bridge; c34) ----
+    // The bridge hands over only http(s) addresses of this session. Each opens in an EG-Desk Browser Card placed by the usual placement rule, in the BACKGROUND: the camera and the
+    // active card stay where they are (the person is typing in this terminal). The card shows the page; nothing here reads the page or the code it may show.
+    const openedUrls = new Map();
+    const openRequestedUrls = (urls) => {
+      if (!Array.isArray(urls) || typeof spawnBrowserCard !== 'function') return;
+      for (const raw of urls.slice(0, 4)) {
+        let url;
+        try { url = new URL(String(raw)); } catch { continue; }
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) continue;
+        const at = Date.now(), last = openedUrls.get(url.href);
+        if (last !== undefined && at - last < 5000) continue;
+        openedUrls.set(url.href, at);
+        try { spawnBrowserCard(url.href, { openMode: 'new', opener: card, background: true }); } catch (error) { console.warn(TAG, 'terminal address could not be opened in a Browser Card:', error?.message || error); }
+      }
+    };
 
     // ---- Result of a typed test/build command (CODE-06) ----
     // The bridge reads this session's own output; nothing is run for the card
@@ -310,6 +328,7 @@ export function createTerminalZone(deps) {
         return;
       }
       if (ev.data?.type === 'terminal-run-result') { showRunResult(ev.data.runResult); return; }
+      if (ev.data?.type === 'terminal-open-url') { openRequestedUrls(ev.data.urls); return; }
       if (ev.data?.type === 'terminal-new-session') {
         const shellId = ev.data.shellId;
         if (typeof shellId === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(shellId)) spawnTerminalCard({ shellId });
