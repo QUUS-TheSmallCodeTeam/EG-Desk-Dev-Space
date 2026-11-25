@@ -176,7 +176,7 @@ test('read_elements returns the element list; a sensitive field carries no value
 
 test('helper failures become closed codes with one fixed hint; no helper text is passed on', async () => {
   const refuse = helperCode => Object.assign(new Error('The host helper refused the request'), { code: 'HOST_AGENT_REFUSED', helperCode, helperMessage: 'ignored /Users/x/secret' })
-  for (const [helperCode, expected] of [['permission_missing', 'permission_missing'], ['mask_unavailable', 'mask_unavailable'], ['window_changed', 'window_changed'], ['ambiguous_window', 'ambiguous_window'], ['observe_only', 'content_off']]) {
+  for (const [helperCode, expected] of [['permission_missing', 'permission_missing'], ['mask_unavailable', 'mask_unavailable'], ['window_changed', 'window_changed'], ['ambiguous_window', 'ambiguous_window'], ['observe_only', 'content_off'], ['screen_locked', 'screen_locked'], ['ax_unavailable', 'accessibility_unavailable'], ['window_mismatch', 'window_mismatch']]) {
     const provider = createComputerObserveProvider({ host: fakeHost({ capture: async () => { throw refuse(helperCode) } }), ask: async () => 'accept' })
     const response = await call(provider, {}, COMPUTER_OBSERVE_TOOLS.capture, { app: 'Calculator' })
     const body = parse(response)
@@ -354,4 +354,43 @@ test('Claude sees the computer tools only from a provider that declares exposeTo
   const noLease = new CodexChatRuntime({ request: async () => ({}), respond: () => {}, emit: () => {}, toolProviders: [createComputerObserveProvider({ host: fakeHost(), ask: async () => 'accept' })],
     getOwnerKey: () => 'x', setTimer: () => ({}), clearTimer: () => {}, verifyFile: async () => null })
   assert.deepEqual(noLease.collectToolSpecs(null, { engineId: 'claude' }).specs, [])
+})
+
+test('U3 (D12): a locked screen is named, not reported as a missing window; list_windows says so too', async () => {
+  const locked = Object.assign(new Error('x'), { code: 'HOST_AGENT_REFUSED', helperCode: 'screen_locked' })
+  const host = fakeHost({ capture: async () => { throw locked }, readElements: async () => { throw locked }, permissions: async () => ({ accessibility: true, screenRecording: false, screenLocked: true }) })
+  const provider = createComputerObserveProvider({ host, ask: async () => 'accept' })
+  for (const tool of [COMPUTER_OBSERVE_TOOLS.readElements, COMPUTER_OBSERVE_TOOLS.capture]) {
+    const body = parse(await call(provider, {}, tool, { app: 'Calculator' }))
+    assert.equal(body.error.code, 'screen_locked')
+    assert.match(body.error.hint, /unlock/)
+    assert.notEqual(body.error.code, 'window_not_found')
+  }
+  let asked = 0
+  const noCard = createComputerObserveProvider({ host, ask: async () => { asked++; return 'accept' } })
+  assert.equal(parse(await call(noCard, {}, COMPUTER_OBSERVE_TOOLS.readElements, { app: 'Calculator' })).error.code, 'screen_locked')
+  assert.equal(asked, 0, 'no card is shown for a screen that is locked')
+  const listed = parse(await call(provider, {}, COMPUTER_OBSERVE_TOOLS.listWindows, { app: 'Calculator' }))
+  assert.equal(listed.screenLocked, true)
+  assert.match(listed.hint, /unlock/)
+  assert.equal(listed.windows.length, 1, 'the list itself is unchanged')
+  const open = createComputerObserveProvider({ host: fakeHost({ permissions: async () => ({ screenLocked: false }) }), ask: async () => 'accept' })
+  assert.equal(parse(await call(open, {}, COMPUTER_OBSERVE_TOOLS.listWindows, { app: 'Calculator' })).screenLocked, undefined)
+  const none = createComputerObserveProvider({ host: fakeHost(), ask: async () => 'accept' }) // a host without permissions(): nothing is claimed
+  assert.equal(parse(await call(none, {}, COMPUTER_OBSERVE_TOOLS.listWindows, { app: 'Calculator' })).screenLocked, undefined)
+})
+
+test('U3: an app is found by bundle id, by its localized name, or by the last part of its bundle id (Calculator for 계산기)', async () => {
+  const apps = [{ bundleId: 'com.apple.calculator', pid: 71204, name: '계산기', active: false, policy: 'regular' }, { bundleId: 'com.apple.Notes', pid: 702, name: '메모', active: false, policy: 'regular' }]
+  const windows = [{ windowId: 6340, pid: 71204, layer: 0, onScreen: true, bounds: { x: 691, y: 51, width: 230, height: 408 } }, { windowId: 12, pid: 702, layer: 0, onScreen: true, bounds: { x: 0, y: 0, width: 900, height: 700 } }]
+  const reads = []
+  const host = fakeHost({ listApps: async () => ({ apps }), listWindows: async () => ({ windows }), readElements: async query => { reads.push(query); return { window: { windowId: query.windowId, pid: query.pid, bounds: { x: 0, y: 0, width: 1, height: 1 } }, elements: [], truncated: false, complete: true, sensitiveOmitted: 0, geometryRevision: 1 } } })
+  const provider = createComputerObserveProvider({ host, ask: async () => 'accept' })
+  for (const app of ['com.apple.calculator', '계산기', 'Calculator', 'calculator']) {
+    const body = parse(await call(provider, {}, COMPUTER_OBSERVE_TOOLS.readElements, { app }))
+    assert.equal(body.status, 'elements', app)
+  }
+  assert.deepEqual(reads, Array(4).fill({ windowId: 6340, pid: 71204 }))
+  assert.equal(parse(await call(provider, {}, COMPUTER_OBSERVE_TOOLS.readElements, { app: 'Notes' })).status, 'elements', 'Notes → com.apple.Notes whose localized name is 메모')
+  assert.equal(parse(await call(provider, {}, COMPUTER_OBSERVE_TOOLS.readElements, { app: 'Nope' })).error.code, 'app_not_found')
 })

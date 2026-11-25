@@ -355,6 +355,11 @@ pub fn mask_pixels(regions: &[MaskRegion], window: &Rect, out_width: u32, out_he
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameMatch {
+    /// The application exposes no windows through accessibility at all.
+    NoWindows,
+    /// It lists windows but none has a readable frame (the tree is not really there: a locked screen, an app that has not built its tree).
+    NoFrames,
+    /// Windows with frames exist, none is this window's frame.
     None,
     Ambiguous,
 }
@@ -362,8 +367,14 @@ pub enum FrameMatch {
 /// Which accessibility window is the CGWindow `target`: the one whose frame is
 /// within tolerance. Several equal frames (stacked windows) are told apart by
 /// title when both titles are known; still not exactly one → Ambiguous.
-pub fn match_window_frame(target: &Rect, target_title: Option<&str>, candidates: &[(Rect, Option<String>)]) -> Result<usize, FrameMatch> {
-    let near: Vec<usize> = (0..candidates.len()).filter(|&i| candidates[i].0.close_to(target, FRAME_TOLERANCE)).collect();
+pub fn match_window_frame(target: &Rect, target_title: Option<&str>, candidates: &[(Option<Rect>, Option<String>)]) -> Result<usize, FrameMatch> {
+    if candidates.is_empty() {
+        return Err(FrameMatch::NoWindows);
+    }
+    if candidates.iter().all(|candidate| candidate.0.is_none()) {
+        return Err(FrameMatch::NoFrames);
+    }
+    let near: Vec<usize> = (0..candidates.len()).filter(|&i| candidates[i].0.as_ref().is_some_and(|frame| frame.close_to(target, FRAME_TOLERANCE))).collect();
     match near.len() {
         0 => Err(FrameMatch::None),
         1 => Ok(near[0]),
@@ -631,14 +642,18 @@ mod tests {
     #[test]
     fn window_frames_match_one_or_refuse() {
         let target = Rect::new(100.0, 100.0, 800.0, 600.0);
-        let cands = vec![(Rect::new(0.0, 0.0, 50.0, 50.0), None), (Rect::new(101.0, 99.5, 800.0, 601.0), Some("A".into()))];
+        let cands = vec![(Some(Rect::new(0.0, 0.0, 50.0, 50.0)), None), (Some(Rect::new(101.0, 99.5, 800.0, 601.0)), Some("A".into()))];
         assert_eq!(match_window_frame(&target, None, &cands), Ok(1));
         assert_eq!(match_window_frame(&target, None, &cands[..1]), Err(FrameMatch::None));
-        let twins = vec![(target, Some("A".into())), (target, Some("B".into()))];
+        // U3: no accessibility windows, or windows without a frame, are told apart from a frame that does not match
+        assert_eq!(match_window_frame(&target, None, &[]), Err(FrameMatch::NoWindows));
+        assert_eq!(match_window_frame(&target, None, &[(None, Some("A".into())), (None, None)]), Err(FrameMatch::NoFrames));
+        assert_eq!(match_window_frame(&target, None, &[(None, None), (Some(target), None)]), Ok(1));
+        let twins = vec![(Some(target), Some("A".into())), (Some(target), Some("B".into()))];
         assert_eq!(match_window_frame(&target, None, &twins), Err(FrameMatch::Ambiguous));
         assert_eq!(match_window_frame(&target, Some("B"), &twins), Ok(1));
         assert_eq!(match_window_frame(&target, Some("C"), &twins), Err(FrameMatch::Ambiguous));
-        let same_title = vec![(target, Some("A".into())), (target, Some("A".into()))];
+        let same_title = vec![(Some(target), Some("A".into())), (Some(target), Some("A".into()))];
         assert_eq!(match_window_frame(&target, Some("A"), &same_title), Err(FrameMatch::Ambiguous));
     }
 
