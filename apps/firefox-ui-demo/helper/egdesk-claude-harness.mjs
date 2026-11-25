@@ -23,6 +23,13 @@ export const CLAUDE_HARNESS_PRIVATE_FLAG = 'EGDESK_CLAUDE_HARNESS_PRIVATE'
 /** The built-in Claude Code tools that run commands or change files: what EG-Desk's own tools replace. */
 export const CLAUDE_BUILTIN_COMMAND_FILE_TOOLS = Object.freeze(['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 /**
+ * The built-in tools that read the project (u1b): EG-Desk's own egdesk_read_file and egdesk_search_files replace them, so the folder is read through EG-Desk's one door. What EG-Desk's tools do not cover (reported):
+ * listing or globbing files by NAME (egdesk_search_files matches file CONTENT; use a read-only command through egdesk_run_command, e.g. ls or find), reading images, PDFs and notebooks (egdesk_read_file is text only: a
+ * binary file is described), and Grep's output modes and context lines.
+ */
+export const CLAUDE_BUILTIN_READ_TOOLS = Object.freeze(['Read', 'Grep', 'Glob'])
+
+/**
  * Built-in tools that run commands or change the machine through another door, or reach outside the conversation (messages, notifications, remote triggers, scheduled or unattended runs, worktrees):
  * an EG-Desk conversation does that only through EG-Desk's own tools and the person's own approval, so they are off under the harness too. Names as the CLI lists them (a name this CLI version does not have is
  * harmless in --disallowedTools). Read, Grep, Glob, ListAgents, ToolSearch, TaskStop, the plan-mode tools, ReportFindings and DesignSync stay: they read, or only steer this one conversation.
@@ -43,14 +50,14 @@ export const CLAUDE_HARNESS_ACTIVITY = 'egdesk-tool'
 /** → { disallowed: [...] } or null (off). Anything but 'on' is off. */
 export function claudeHarnessFromEnv(env = {}) {
   if (env?.[CLAUDE_HARNESS_FLAG] !== 'on') return null
-  return Object.freeze({ privateTurns: env?.EGDESK_CLAUDE_HARNESS_PRIVATE === 'on', disallowed: Object.freeze([...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...CLAUDE_BUILTIN_COMPUTER_USE_RULES, ...(env?.[CLAUDE_HARNESS_WEB_FLAG] === 'off' || env?.[EGDESK_PAGE_TOOLS_FLAG] === 'on' ? CLAUDE_BUILTIN_WEB_TOOLS : [])]) })
+  return Object.freeze({ privateTurns: env?.EGDESK_CLAUDE_HARNESS_PRIVATE === 'on', disallowed: Object.freeze([...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_READ_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...CLAUDE_BUILTIN_COMPUTER_USE_RULES, ...(env?.[CLAUDE_HARNESS_WEB_FLAG] === 'off' || env?.[EGDESK_PAGE_TOOLS_FLAG] === 'on' ? CLAUDE_BUILTIN_WEB_TOOLS : [])]) })
 }
 
 const FIRST_SENTENCE = /^Your own shell and patch tools are off in this session[^\n]*\n?/
 /** Codex's own-tools block, said for Claude: its own shell and editor are off, EG-Desk's tools are the way. The rest of the block is the same words. */
 export function claudeHarnessInstructions(base) {
   const rest = OWN_TOOLS_INSTRUCTIONS.replace(FIRST_SENTENCE, '')
-  const own = ['Your own shell and file-editing tools (Bash, Edit, Write, MultiEdit, NotebookEdit) are off in this session. The egdesk tools below reach you as mcp__egdesk__<name>; the names in this text are the part after the last double underscore.', rest].join('\n')
+  const own = ['Your own shell, file-editing and file-reading tools (Bash, Edit, Write, MultiEdit, NotebookEdit, Read, Grep, Glob) are off in this session. The egdesk tools below reach you as mcp__egdesk__<name>; the names in this text are the part after the last double underscore.', rest, 'To list files by name, run a read-only command such as ls or find with egdesk_run_command.'].join('\n')
   const person = typeof base === 'string' && base.trim() ? base.trim() : ''
   return person ? `${person}\n\n${own}` : own
 }

@@ -2599,6 +2599,8 @@ export class CodexChatRuntime {
       neutralFolder = this.ownNeutralFolder()
       if (!neutralFolder) throw Object.assign(chatError('OWN_TOOLS_UNAVAILABLE', 'EG-Desk tools are on but no engine folder is prepared; no message was sent', 503), { definite: true })
       ownFolder = workspace?.absolutePath ?? this.ownFolders.get(context.conversationId) ?? (overrides.cwd && overrides.cwd !== neutralFolder ? overrides.cwd : null)
+      // u1b: no project chosen under the Claude harness: the bridge's own folder (the development copy) is not a project; EG-Desk's tools then answer no_folder (their existing refusal)
+      if (engine.id === 'claude' && !workspace && ownFolder && ownFolder === process.cwd() && !this.ownFolders.get(context.conversationId)) ownFolder = null
       overrides.cwd = neutralFolder
     }
     // AGENT-04: the Agent's tool ceiling narrows this run; it never widens it.
