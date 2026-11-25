@@ -71,6 +71,13 @@ export function nextNewMessageNotice(prior, { threadId, readingAbove, previousAn
   return { threadId, messageId: answerId };
 }
 
+// u5: the log goes to the newest message (or the card) when the number of requests the room waits on changes: one arrived (a question or an approval 대표님 must answer: its card is at the foot
+// of the log) or one was resolved (대표님 answered or decided: the engine's reply follows). Not when the room is drawn for the first time (`before` unknown), and not for the engine's own words,
+// which keep '새 메시지' while 대표님 reads further up.
+export function askChanged(before, now) {
+  return Number.isFinite(before) && Number.isFinite(now) && before !== now;
+}
+
 export const NEW_MESSAGE_LABEL = '새 메시지';
 export const NEW_MESSAGE_HINT = '최신 메시지로 이동';
 // Same slack the log uses to decide it is following the newest message.
