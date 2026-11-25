@@ -1,4 +1,4 @@
-// c29: a realistic coding task on EG-Desk's own tools, judged by code (registered in helper/egdesk-real-engine-registrations.mjs, slot L5). A small scratch project (two source
+// c29: a realistic coding task on EG-Desk's own tools, judged by code (registered in helper/real-engine-registrations/L5.mjs). A small scratch project (two source
 // files, a node --test file with one failing test), the person asks "테스트 실패 고쳐 주고 다시 돌려 줘"; the engine reads, edits with preview and undo records, runs the tests
 // through EG-Desk's runner; the run-conditions arbiter (egdesk-run-conditions.mjs) reads the test summary line; the draft check judges the answer's "all passed" against it.
 //

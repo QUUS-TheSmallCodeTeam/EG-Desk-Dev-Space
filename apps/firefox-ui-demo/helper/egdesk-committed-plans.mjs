@@ -14,45 +14,17 @@
 //   handWritten: reason            written by hand (no builder; static bytes, no clock)
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
+import { PLANS_L1 } from './committed-plans/L1.mjs'
+import { PLANS_L2 } from './committed-plans/L2.mjs'
+import { PLANS_L3 } from './committed-plans/L3.mjs'
+import { PLANS_L4 } from './committed-plans/L4.mjs'
+import { PLANS_L5 } from './committed-plans/L5.mjs'
+import { PLANS_L6 } from './committed-plans/L6.mjs'
+import { PLANS_L7 } from './committed-plans/L7.mjs'
+import { PLANS_L8 } from './committed-plans/L8.mjs'
 
-export const COMMITTED_PLANS = Object.freeze([
-  // proofs/decision-real-measure
-  { path: 'proofs/decision-real-measure/action-relevance', lane: 'L7', rebuilt: { script: 'egdesk-action-relevance-plan.mjs' } },
-  { path: 'proofs/decision-real-measure/all-on-s3-faithful-fill', lane: 'L2', handWritten: 'two hand-built s3 requests (161609b); no builder' },
-  { path: 'proofs/decision-real-measure/axis-hybrid', lane: 'L7', rebuilt: { script: 'egdesk-axis-hybrid-plan.mjs' } },
-  { path: 'proofs/decision-real-measure/axis-split', lane: 'L7', rebuilt: { script: 'egdesk-axis-split-plan.mjs' } },
-  { path: 'proofs/decision-real-measure/board-reply-screening', lane: 'L1', rebuilt: { script: 'egdesk-board-reply-real-plan.mjs', matches: 3 } },
-  { path: 'proofs/decision-real-measure/briefing-coverage', lane: 'L4', rebuilt: { script: 'egdesk-briefing-coverage-plan.mjs', matches: 2 } },
-  { path: 'proofs/decision-real-measure/briefing-coverage-facts', lane: 'L4', rebuilt: { script: 'egdesk-briefing-coverage-plan.mjs', matches: 2 } },
-  { path: 'proofs/decision-real-measure/contamination', lane: 'L6', rebuilt: { script: 'egdesk-contamination-plan.mjs' } },
-  { path: 'proofs/decision-real-measure/draft-overcorrection', lane: 'L6', rebuilt: { script: 'egdesk-draft-overcorrection-plan.mjs' } },
-  { path: 'proofs/decision-real-measure/hud-routing', lane: 'L1', rebuilt: { builder: ['./egdesk-hud-routing-real-plan.mjs', 'buildHudPlan'] } },
-  { path: 'proofs/decision-real-measure/l1-remeasure-c13', lane: 'L1', rebuilt: { script: 'egdesk-board-reply-real-plan.mjs', matches: 3 } },
-  { path: 'proofs/decision-real-measure/memory-action', lane: 'L7', frozen: 'memory-action-v1 as sent in c24, superseded by memory-action-v2 (helper/egdesk-speech-hybrid.test.mjs checks the bodies as sent)' },
-  { path: 'proofs/decision-real-measure/memory-action-v2', lane: 'L7', rebuilt: { script: 'egdesk-memory-action-v2-plan.mjs' } },
-  { path: 'proofs/decision-real-measure/split-wording', lane: 'L7', rebuilt: { script: 'egdesk-split-wording-plan.mjs' } },
-  { path: 'proofs/decision-real-measure/turn-context-idle', lane: 'L6', rebuilt: { script: 'egdesk-turn-context-latency-plan.mjs', argv: ['--idle'] } },
-  { path: 'proofs/decision-real-measure/turn-context-latency', lane: 'L6', rebuilt: { script: 'egdesk-turn-context-latency-plan.mjs' } },
-  { path: 'proofs/decision-real-measure/turn-context-warmup-size', lane: 'L6', rebuilt: { script: 'egdesk-turn-context-latency-plan.mjs', argv: ['--size'] } },
-  { path: 'proofs/decision-real-measure/turn-context-warmup-sep', lane: 'L6', rebuilt: { script: 'egdesk-turn-context-latency-plan.mjs', argv: ['--sep'] } },
-  { path: 'proofs/decision-real-measure/turn-context-warmup', lane: 'L6', rebuilt: { script: 'egdesk-turn-context-latency-plan.mjs', argv: ['--warmup'] } },
-  { path: 'proofs/decision-real-measure/utterance-threshold', lane: 'L6', rebuilt: { script: 'egdesk-utterance-threshold-study.mjs' } },
-  { path: 'proofs/decision-real-measure/work-placement', lane: 'L1', rebuilt: { script: 'egdesk-board-reply-real-plan.mjs', matches: 3 } },
-  { path: 'proofs/decision-real-measure/working-memory-judge', lane: 'L6', rebuilt: { script: 'egdesk-working-memory-real-plan.mjs' } },
-  // scripts/real-plans
-  { path: 'scripts/real-plans/command-judgments-v1', lane: 'L5', frozen: 'sent 2026-11-24; a frozen record integrity-checked by helper/egdesk-command-real-plan.test.mjs' },
-  { path: 'scripts/real-plans/command-risk-v2', lane: 'L5', rebuilt: { builder: ['./egdesk-command-risk-plan.mjs', 'buildCommandRiskPlanV2'] } },
-  { path: 'scripts/real-plans/run-conditions-v1', lane: 'L5', rebuilt: { builder: ['./egdesk-run-conditions-plan.mjs', 'buildRunConditionsPlan'] } },
-  // single-file plans
-  { path: 'helper/egdesk-heartbeat-real-plan.snapshot.json', lane: 'L3', rebuilt: { heartbeat: true } },
-  ...['c15', 'c16', 'c17'].map(c => ({ path: `helper/egdesk-heartbeat-real-plan.${c}.json`, lane: 'L3', frozen: `the ${c} heartbeat registration as measured (2026-11-24); helper/egdesk-heartbeat-real-plan.test.mjs` })),
-  ...['', '-v2', '-v3', '-v4', '-v5', '-v6', '-v7', '-v8', '-v9', '-v10'].map(v => ({ path: `scripts/egdesk-all-on-live-measure.plan${v}.json`, lane: 'L2', handWritten: 'all-on journey scenario plan (steps and checks written by hand; the live runner builds bodies at run time)' })),
-  // L6 c24: variants of the all-on journey plan, built from it by scripts/egdesk-journey-variants.mjs (its compare mode prints one "matches" per variant)
-  ...['V1', 'V2', 'V3'].map(id => ({ path: `scripts/egdesk-all-on-live-measure.plan-v10-variant-${id}.json`, lane: 'L6', rebuilt: { script: 'egdesk-journey-variants.mjs', matches: 3 } })),
-  ...['', '-v2', '-v3', '-v4'].map(v => ({ path: `scripts/egdesk-multiuser-live-measure.plan${v}.json`, lane: 'L1', handWritten: 'collaboration scenario plan (written by hand; the live runner builds bodies at run time)' })),
-  ...['allon-plan', 'plan', 'plan-delivery', 'plan-holdout', 'plan-holdout-rerun', 'plan-holdout2', 'plan-settings', 'plan-stuck', 'plan-entry', 'plan-entry2', 'plan-entry3', 'plan-holdout2-v2', 'plan-regression', 'plan-settings-error', 'plan-stability', 'plan-statement', 'recorded-plan', 'renamed-plan'].map(v => ({ path: `scripts/egdesk-browser-live-${v}.json`, lane: 'L8', handWritten: 'browser journey plan (written by hand; the live runner builds bodies at run time)' })),
-  { path: 'scripts/egdesk-browser-open-item-plan.json', lane: 'L8', handWritten: 'c38: 12 replies after a hand-over for the open browser task option predicates, pre-registered with predictions before any dry run; the requests are the product\'s own (helper/egdesk-browser-open-item-measure.mjs)' },
-])
+// c33: the register is the concatenation of one append-only list per lane (helper/committed-plans/L<n>.mjs); this file changes only when the format or a lane list is added.
+export const COMMITTED_PLANS = Object.freeze([...PLANS_L1, ...PLANS_L2, ...PLANS_L3, ...PLANS_L4, ...PLANS_L5, ...PLANS_L6, ...PLANS_L7, ...PLANS_L8])
 
 /** Every committed plan location under the app root (see the header), sorted. */
 export function findCommittedPlans(appRoot) {

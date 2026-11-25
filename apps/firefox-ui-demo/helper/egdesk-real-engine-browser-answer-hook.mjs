@@ -1,4 +1,4 @@
-// L8 c31: the browser-answer hook of the real-engine check (registered in helper/egdesk-real-engine-registrations.mjs, slot L8).
+// L8 c31: the browser-answer hook of the real-engine check (registered in helper/real-engine-registrations/L8.mjs).
 //
 // What it is for: the browser task's last step is the model that WRITES the reply. The product hands it a closed note (egdesk_browser_task: status, code, the control labels
 // a task named, what the page said) in the turn's additionalContext. Everything before that is measured against the Decision model; this is the one place where the REAL
