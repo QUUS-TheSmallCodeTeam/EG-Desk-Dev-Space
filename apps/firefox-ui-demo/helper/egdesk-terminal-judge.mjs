@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { choiceQuestion, decisionThresholds, predicateQuestion, readChoice, readPredicate, tableOptions } from './egdesk-decision-questions.mjs'
 import { stripAnsi } from './egdesk-run-result-parse.mjs'
 
-// Terminal state judge (system level; JEV Pillar 2). The Decision model is not a recommender shown to the user:
+// Terminal state judge (system level; Decision Model design Pillar 2). The Decision model is not a recommender shown to the user:
 // the RUNTIME enumerates the states that are possible for this process right now, the model picks one, and the
 // SYSTEM responds per state (wait / hand the answer to the human / quit the pager / report / repair).
 //   Options exist first: they come from process facts (alive, exit code) and the real output tail, never from the model.

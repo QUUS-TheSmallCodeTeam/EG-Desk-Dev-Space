@@ -6,7 +6,7 @@ import { decideOpenItem, settledNote } from './egdesk-browser-open-items.mjs'
 import { choiceContextLine } from './egdesk-browser-choice-reply.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, tableOptions } from './egdesk-decision-questions.mjs'
 
-// Direct chat -> objective browser entry (L8 cycle 6; JEV_INTEGRATION_SUGGESTIONS.md §2 Pillar 1, §4.3, §9.3).
+// Direct chat -> objective browser entry (L8 cycle 6; DECISION_MODEL_INTEGRATION_SUGGESTIONS.md §2 Pillar 1, §4.3, §9.3).
 //
 // Paradigm: the Decision model is a system-level judge. It never speaks to the user and its probability is never
 // execution permission. The user's own chat message becomes the goal of an objective browser task directly (no

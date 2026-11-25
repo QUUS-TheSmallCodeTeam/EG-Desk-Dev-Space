@@ -1,7 +1,7 @@
 import { predicateQuestion } from './egdesk-decision-questions.mjs'
 
-// Condition arbiter for the commands EG-Desk runs itself (c21; Jev Pillar 2 "semantic condition arbiter" as REVIEWED in
-// ideas/brainstorming/JEV_INTEGRATION_SUGGESTIONS.md: "UI 의미는 보조 신호. 실제 계정·권한·health·완료는 독립 검사. 구조화 결과가 있으면
+// Condition arbiter for the commands EG-Desk runs itself (c21; Decision Model design Pillar 2 "semantic condition arbiter" as REVIEWED in
+// ideas/brainstorming/DECISION_MODEL_INTEGRATION_SUGGESTIONS.md: "UI 의미는 보조 신호. 실제 계정·권한·health·완료는 독립 검사. 구조화 결과가 있으면
 // 코드 사용"; canon §13: a boundary is said to have failed only when that was observed, otherwise "unknown" and the last checked state).
 //   build/test health   from the exit status and the test runner's own summary line (code); the model only on the quoted output tail,
 //                       and only when the summary is missing, and it can only take health DOWN to unknown (R5: never success by a predicate)

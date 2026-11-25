@@ -1,4 +1,4 @@
-// L1 c20: Desk HUD routing (Jev Pillar 4 as reviewed). Code first; one yes/no question per row the list already has; code ranks; nothing runs
+// L1 c20: Desk HUD routing (Decision Model design Pillar 4 as reviewed). Code first; one yes/no question per row the list already has; code ranks; nothing runs
 // and focus never moves because an answer arrived. Mocks only: the Decision client is a mock that reads the CONTENT it is sent.
 import assert from 'node:assert/strict'
 import test from 'node:test'

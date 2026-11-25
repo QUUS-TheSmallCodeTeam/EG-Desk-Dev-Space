@@ -71,7 +71,7 @@
     "apps/firefox-ui-demo/helper/egdesk-own-tools-wiring.mjs": "[present][loop-2026-11-25 KST][int/c14 vs loop-base] U10 자체 도구(명령·편집·승인) 배선; Codex 훅 의존 아님(scripts/codex-hooks는 프로토타입).",
     "apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md": "[present][changed][loop-2026-11-25 KST][int/c14 vs loop-base] loop가 3줄 수정(브라우저 reflex step_rejected, Board 외부 선별 = U9 공통 허용). 정본 쪽 반영 시 이 문서가 1차 대상.",
     "apps/firefox-ui-demo/docs/JOINT_BOARD_RUNTIME.md": "[present][changed][loop-2026-11-25 KST][int/c14 vs loop-base] 1줄 수정.",
-    "ideas/brainstorming/JEV_INTEGRATION_SUGGESTIONS.md": "[present][design-canon-for-loop][loop-2026-11-25 KST][int/c14 vs loop-base] loop의 설계 정본(§2·4·5·6·9). §9 검증 상태 'NOT-RUN'은 loop 실측으로 낡음.",
+    "ideas/brainstorming/DECISION_MODEL_INTEGRATION_SUGGESTIONS.md": "[present][renamed 2026-11-25 from JEV_INTEGRATION_SUGGESTIONS.md][design-canon-for-loop][loop-2026-11-25 KST][int/c14 vs loop-base] loop의 설계 정본(§2·4·5·6·9). §9 검증 상태 'NOT-RUN'은 loop 실측으로 낡음.",
     "$L/PHILOSOPHY.md": "[loop][loop-2026-11-25 KST][int/c14 vs loop-base] P1-P10(D/C/V 정본 인용) + U1-U13(사용자 정정) + R1-R6(실측 규칙). 정본 후보 원천.",
     "$L/reports/open-decisions-20261125.md": "[loop][loop-2026-11-25 KST][int/c14 vs loop-base] 열린 결정 13개(P1-P7,N1,C1,C2,D1,D2,I1) + 임시 승인 + 부록 110절 분류. owner 결정 전까지 정본 승격 금지.",
     "$L/reports/l1-c31b-layer-audit.md": "[loop][loop-2026-11-25 KST][int/c14 vs loop-base] U13 정정 이후 층(기억/행동) 감사: M1 층 역전 등."

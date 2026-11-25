@@ -2,7 +2,7 @@ import { predicateQuestion, readPredicate } from './egdesk-decision-questions.mj
 import { createEgressGate, modelDataPermissions } from './egdesk-decision-egress.mjs'
 import { guardBridgeRequest, readJsonBody, sendJson } from './codex-bridge-http.mjs'
 
-// Desk HUD routing, judge half (L1 c20; Jev design Pillar 4 as reviewed: "명시 대상과 허용 command 우선. 추천 도착만으로 실행·focus 전환하지
+// Desk HUD routing, judge half (L1 c20; Decision Model design Pillar 4 as reviewed: "명시 대상과 허용 command 우선. 추천 도착만으로 실행·focus 전환하지
 // 않음"). The Desk's search field (Ctrl/⌘ K, rail search UX-04) is where typed text is routed today. The window (EGDeskHudRouting.sys.mjs)
 // routes an EXPLICIT target by code (an address, the exact name of an open card or room) with no model call, and for the rest builds the
 // candidates from what exists now: its own result rows (an open card whose words may leave, the web row, the "ask an Agent" row). Only

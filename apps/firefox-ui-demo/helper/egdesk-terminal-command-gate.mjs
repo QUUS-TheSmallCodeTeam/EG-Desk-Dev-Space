@@ -2,7 +2,7 @@ import path from 'node:path'
 import { decisionThresholds, predicateQuestion, scoreQuestion } from './egdesk-decision-questions.mjs'
 import { parseShell, SHELL_PARSE_LIMITS } from './egdesk-shell-parse.mjs'
 
-// Contextual safety gate for a command, before it runs (JEV Pillar 3; design rules R1-R5 from the real measurements).
+// Contextual safety gate for a command, before it runs (Decision Model design Pillar 3; design rules R1-R5 from the real measurements).
 //   1. The RULE FLOOR (R5) is deterministic and always wins. A command whose effect cannot be undone from this machine's working
 //      tree, or that leaves this machine irreversibly, requires approval by rule, whatever any model says. The floor is built
 //      from the tools' own documentation (see the c11 report): git history and untracked files, registry publishing, container

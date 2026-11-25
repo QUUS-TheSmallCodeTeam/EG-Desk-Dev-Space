@@ -1,7 +1,7 @@
 # 결정 모델 컨텍스트 세팅·브라우저 반사
 
 **작성**: 2026-11-17 · **현황**: 2026-11-20 로컬 기능판. 별도로 허용한 기존 Codex Agent DM에는 [세션 주제 기억](#membrain-turn-wire)이 연결됐다. 일반 Chat의 턴 전 선별과 조건부 브라우저 반사 도구는 연결됐다(기본 꺼짐). 시간선 분기·전이 도우미는 독립 시험 단계이며 사용자용 시뮬레이션 흐름은 없다. [현재 사용법](../../../ideas/confirmed/EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-accounts) · [제품 방향](../../../ideas/confirmed/EGDESK_PRODUCT_VISION_AND_DEV_TODO.md#vision-membrain)
-**관련**: [`ideas/brainstorming/JEV_INTEGRATION_SUGGESTIONS.md`](../../../ideas/brainstorming/JEV_INTEGRATION_SUGGESTIONS.md)(Jev 초안, 미채택) · [`BROWSER_AGENT_OBSERVATION_RUNTIME.md`](BROWSER_AGENT_OBSERVATION_RUNTIME.md)
+**관련**: [`ideas/brainstorming/DECISION_MODEL_INTEGRATION_SUGGESTIONS.md`](../../../ideas/brainstorming/DECISION_MODEL_INTEGRATION_SUGGESTIONS.md)(Decision Model 초안, 미채택) · [`BROWSER_AGENT_OBSERVATION_RUNTIME.md`](BROWSER_AGENT_OBSERVATION_RUNTIME.md)
 
 ## 1. 목적과 원칙
 
@@ -56,9 +56,9 @@
 사용자가 `[이유 묻기]`를 누르면 질문·보기·표시된 추천을 포함한 편집 가능한 초안만 만든다. 일반 `[보내기]`를 눌러야 같은 방의 구독 답변 경로가 시작된다. 이 일반 턴은 기존 자료 선별 정책을 그대로 따르므로, 허용된 근거 후보가 있으면 별도의 문맥 판정이 일어날 수 있다. 자유문을 무조건 두 모델로 보내 분류하지 않으며, Agent가 제시한 승인이나 도구 요청을 대신 결정하지 않는다.
 
 <a id="session-topic-tree"></a>
-### 같은 세션에서 어느 대화를 이어가는가 (태화 Jev 원안과 로컬 구현의 대응)
+### 같은 세션에서 어느 대화를 이어가는가 (태화 Decision Model 원안(원문 명칭 Jev)과 로컬 구현의 대응)
 
-**원출처.** 태화트랜스 Codex 대화 「jev 문서인가 skill인가 설치해줘. 전역으로」, 스레드 `01a0c300-c2c1-7b60-83de-34d730e68544` (2026-09-21 시작, 이하 KST). 9/24 00:10 사용자는 대화쌍을 늘려 ‘이어지는가’를 묻는 초기안을 냈다. 9/26 20:50에는 세부 문제 해결에 필요한 결정과 작업 분할의 **수직 구조**가 있어야 큰 목적을 놓치지 않는다고 했다. 10/1 09:54에는 그 구조로 실제 과거 대화를 복원하는 단계가 **문서 본문 판정보다 먼저**라고 바로잡았다. 10/2 22:10·22:24에는 단위를 스레드·턴·토픽·서브토픽·자료로 나누고, “T sub n 이 들어올때마다 그 T sub n 이 배정되는 토픽을 그냥 찾는거잖아”라고 정리했다. 저장소의 [Jev 브레인스토밍](../../../ideas/brainstorming/JEV_INTEGRATION_SUGGESTIONS.md)은 별도 문서다.
+**원출처.** 태화트랜스 Codex 대화 「jev 문서인가 skill인가 설치해줘. 전역으로」, 스레드 `01a0c300-c2c1-7b60-83de-34d730e68544` (2026-09-21 시작, 이하 KST). 9/24 00:10 사용자는 대화쌍을 늘려 ‘이어지는가’를 묻는 초기안을 냈다. 9/26 20:50에는 세부 문제 해결에 필요한 결정과 작업 분할의 **수직 구조**가 있어야 큰 목적을 놓치지 않는다고 했다. 10/1 09:54에는 그 구조로 실제 과거 대화를 복원하는 단계가 **문서 본문 판정보다 먼저**라고 바로잡았다. 10/2 22:10·22:24에는 단위를 스레드·턴·토픽·서브토픽·자료로 나누고, “T sub n 이 들어올때마다 그 T sub n 이 배정되는 토픽을 그냥 찾는거잖아”라고 정리했다. 저장소의 [Jev 브레인스토밍](../../../ideas/brainstorming/DECISION_MODEL_INTEGRATION_SUGGESTIONS.md)은 별도 문서다.
 
 **원문의 예시.** 10/5 21:20에 당시 어시스턴트가 설명한 **기대 배정**이다. `T31`에서 대화가 온톨로지 리더 Hook으로 문서 탐색 시간을 줄이자는 목적으로 시작했다. `T70–71`은 장비 Hook 문제와 확인, `T72–74`는 그 과정에서 검사할 계정 범위를 정정한 대화다. `T75`에서 사용자가 “jev hook 흐름 정리해줘봐”라고 하면 마지막 계정 이야기의 연장도, 별개 새 토픽도 아니다. `T31`의 토픽으로 돌아가되 `T70–74`의 결정 경위를 함께 쓴다. 두 끝점만 남기면 설명에 왜 검사 범위가 바뀌었는지가 빠진다. 다른 형제 토픽까지 일괄 첨부하는 것도 아니다.
 

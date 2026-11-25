@@ -1,6 +1,8 @@
-# Jev 기반 EG-Desk 시스템 고도화 제안서 (JEV Integration Suggestions)
+# Decision Model 기반 EG-Desk 시스템 고도화 제안서 (Decision Model Integration Suggestions)
 
 **Date**: 2026-09-19  
+**Note (2026-11-25, 소유자 지시)**: EG-Desk는 Jev를 사용하지 않는다. 현재 결정 모델은 OpenAI Decisions(`gpt-6-luna`)이며, 이 문서의 "결정 모델(Decision Model)"은 그 역할을 가리킨다. Jev 및 Jev 파생 모델명(NanoJev, openjev 등)은 §3 비교·재현 서술과 §9 공식 자료 서술에서 **외부 제품의 이름으로만** 남긴다. 안정 ID(`JEV-BRIEF-01`, `JEV-BF-10`, `POV-01` 등)의 `JEV-` 접두는 다른 문서·코드가 인용하므로 참조 안정성을 위해 유지한다. 구 파일명: `JEV_INTEGRATION_SUGGESTIONS.md`.
+
 **Status**: Brainstorming / Draft  
 **Target Systems**: EG-Desk Firefox Shell (`apps/firefox-ui-demo`), Codex Bridge, Desk Windows (Browser, Terminal, HUD, Board, Ontology)  
 **Core References**:
@@ -16,8 +18,8 @@
 
 ## 1. 개요 (Overview)
 
-### 1.1 Jev란 무엇인가?
-Jev는 TypeSafe AI에서 개발한 **소프트웨어 자동화 전용 System 1(직관적·신속한 판단) AI 모델**이다.
+### 1.1 결정 모델(Decision Model)의 역할
+결정 모델은 EG-Desk에서 **소프트웨어 자동화 전용 System 1(직관적·신속한 판단) 역할**을 맡는 모델이다. 현재 구현 후보는 OpenAI Decisions API(`gpt-6-luna`)다. (이 문서 초안은 외부 제품 Jev의 성격을 전제로 작성되었고, Jev는 EG-Desk가 쓰지 않는 외부 제품이다. 아래 특성은 Decisions API 기준으로 실제 확인한 값이 아니라 초안 가정이며 §9의 검증 계획으로 확인한다.)
 - **비생성형(Non-Autoregressive)**: 문장을 단어 단위로 생성(text generation)하지 않고, 비정형 상태(DOM 트리, 로그, diff, JSON 등)를 입력받아 엄격한 타입의 결정(`Choice`, `Score`, `Noul/Boolean`)과 RLCD(Reinforcement Learning for Calibrated Decisions) 기반의 보정된 확률(Confidence)을 반환한다.
 - **초저지연 & 초저비용**: 일반 프론티어 LLM(GPT-4o, Claude 등) 대비 **40~200배 빠르고(20ms~100ms)**, 비용은 **40~400배 저렴**하다.
 
@@ -25,7 +27,7 @@ Jev는 TypeSafe AI에서 개발한 **소프트웨어 자동화 전용 System 1(�
 EG-Desk는 브라우저(Firefox Shell), 터미널, 온톨로지, 코덱스 챗(Codex HUD), 보드(Board)가 단일 캔버스에 유기적으로 연결된 **컴퓨터 레벨 작업 환경(Live Work Surface)**이다.
 기존 에이전트 시스템은 단순한 버튼 클릭, 쉘 프롬프트 대기, 로그 파싱 등 사소한 상태 체크에도 무거운 LLM(System 2, Codex)을 호출하여 **레이턴시 누적(매 액션마다 2~5초 대기)**, **토큰 비용 폭증**, **컨텍스트 오염**을 겪었다.
 
-Jev를 **System 1(감각 및 반사신경, 센서, 가드레일)**으로 배치하고, Codex를 **System 2(고수준 계획, 추론, 최종 코드/답변 생성)**로 분리함으로써 EG-Desk의 실시간 반응성과 안정성을 비약적으로 향상시킬 수 있다.
+결정 모델을 **System 1(감각 및 반사신경, 센서, 가드레일)**으로 배치하고, Codex를 **System 2(고수준 계획, 추론, 최종 코드/답변 생성)**로 분리함으로써 EG-Desk의 실시간 반응성과 안정성을 비약적으로 향상시킬 수 있다.
 
 ---
 
@@ -35,8 +37,8 @@ Jev를 **System 1(감각 및 반사신경, 센서, 가드레일)**으로 배치�
 
 ### Pillar 1. [Browser Card] 초고속 DOM 액션 리플렉스 (System 1/2 하이브리드 제어)
 
-#### 문제 의식 & 챌린지: 챗(Codex) ↔ 브라우저(Jev) 연동 및 싱크
-브라우저 제어에서 Jev가 20ms 단위로 초고속 클릭/입력을 수행할 때, "상위 챗(Codex)과의 상태 동기화, 사용자 시각적 확인, 롤백/에스컬레이션"을 어떻게 처리할 것인가?
+#### 문제 의식 & 챌린지: 챗(Codex) ↔ 브라우저(결정 모델) 연동 및 싱크
+브라우저 제어에서 결정 모델이 20ms 단위로 초고속 클릭/입력을 수행할 때, "상위 챗(Codex)과의 상태 동기화, 사용자 시각적 확인, 롤백/에스컬레이션"을 어떻게 처리할 것인가?
 
 #### 해결 레퍼런스 및 아키텍처 모델
 * **레퍼런스 프로젝트**: `jev-ultrafast`, BrowserGym/WorkArena의 Macro-Micro 계층형 에이전트 구조.
@@ -49,7 +51,7 @@ Jev를 **System 1(감각 및 반사신경, 센서, 가드레일)**으로 배치�
       ▼
 [EG-Desk Browser Window Shell]
       │ 
-      ├─► [Jev Reflex Loop (Firefox Chrome 내부, sub-30ms)]
+      ├─► [결정 모델 Reflex Loop (Firefox Chrome 내부, sub-30ms)]
       │     ├─ DOM Snapshot + Sub-goal -> Choice(action)
       │     ├─ act(cardId, action) -> DOM diff 발생
       │     ├─ history.push(actionEntry)
@@ -64,10 +66,10 @@ Jev를 **System 1(감각 및 반사신경, 센서, 가드레일)**으로 배치�
 
 #### 핵심 구현 규칙
 1. **Chat은 '채팅', Canvas는 '행동'**:
-   - Jev의 미세 액션(클릭 1회, 포커스 1회)마다 챗창에 말풍선을 띄우지 않는다.
+   - 결정 모델의 미세 액션(클릭 1회, 포커스 1회)마다 챗창에 말풍선을 띄우지 않는다.
    - 미세 액션은 `browserAgent.history(cardId)` 및 브라우저 카드의 시각적 런 인스펙터(Run Playback/Briefing)에만 실시간 기록된다.
 2. **에스컬레이션 트리거**:
-   - 예상치 못한 팝업, 캡차, 신규 권한 요구 시 Jev가 `ESCALATE`를 즉시 반환하여 Codex에게 제어권을 넘긴다.
+   - 예상치 못한 팝업, 캡차, 신규 권한 요구 시 결정 모델이 `ESCALATE`를 즉시 반환하여 Codex에게 제어권을 넘긴다.
 
 ---
 
@@ -76,11 +78,11 @@ Jev를 **System 1(감각 및 반사신경, 센서, 가드레일)**으로 배치�
 #### 문제 의식
 터미널이나 브라우저 자동화에서 조건 분기(`if ... else`)나 정규식 매칭은 매우 취약(brittle)하다. CLI 라이브러리 버전이나 웹사이트 UI가 조금만 바뀌어도 정규식이 깨져 워크플로가 멈추거나 무한 대기에 빠진다.
 
-#### 해결 방식: Jev `Noul`(Boolean) & `Choice`로 컨디션 체크 대체
+#### 해결 방식: 결정 모델 `Noul`(Boolean) & `Choice`로 컨디션 체크 대체
 
 #### 구체적 적용 예시 목록
 
-| 대상 영역 | 기존의 취약한 방식 | Jev 시맨틱 컨디션 체크 방식 | 반환 타입 |
+| 대상 영역 | 기존의 취약한 방식 | 결정 모델 시맨틱 컨디션 체크 방식 | 반환 타입 |
 | :--- | :--- | :--- | :--- |
 | **OAuth / SSO 로그인** | 리디렉트 URL 정규식 검사 (특정 쿼리 파라미터 확인) | `Noul: "사용자가 인증을 마치고 최종 로그인 상태에 도달했는가?"` | Boolean |
 | **개발 서버 준비 상태** | stdout에서 `/ready/i`, `/compiled/i` 정규식 파싱 | `Noul: "개발 서버가 에러 없이 포트를 열고 연결 가능한 상태인가?"` | Boolean |
@@ -98,8 +100,8 @@ Jev를 **System 1(감각 및 반사신경, 센서, 가드레일)**으로 배치�
 - 반면 `rm -rf src/`, `rm -rf /`, `rm -rf ~`, `rm -rf "$TARGET/*"`(TARGET 변수가 빈 경우)는 치명적인 재앙이다.
 - 정규식 블랙리스트는 정상 작업의 피로도를 극대화하거나, 교묘한 우회(변수 치환 등)에 뚫린다.
 
-#### Jev 기반 해결 모델: 맥락적 위험도 스코어링 (`Score`)
-- **실행 전 검사(Pre-flight Gate)**: 터미널 PTY helper(`helper-rust`) 또는 Node Bridge가 명령어를 OS에 전달하기 직전 Jev를 호출 (지연시간 < 30ms).
+#### 결정 모델 기반 해결 모델: 맥락적 위험도 스코어링 (`Score`)
+- **실행 전 검사(Pre-flight Gate)**: 터미널 PTY helper(`helper-rust`) 또는 Node Bridge가 명령어를 OS에 전달하기 직전 결정 모델을 호출 (지연시간 < 30ms).
 - **입력 데이터**:
   ```json
   {
@@ -109,7 +111,7 @@ Jev를 **System 1(감각 및 반사신경, 센서, 가드레일)**으로 배치�
     "git_tracked_status": "untracked / gitignored"
   }
   ```
-- **Jev 질의**: `Score(0 ~ 100, "Destructive/Irreversible Risk")`
+- **결정 모델 질의**: `Score(0 ~ 100, "Destructive/Irreversible Risk")`
   - `rm -rf node_modules` -> **Score: 8** (무시하고 즉각 실행)
   - `rm -rf src/` -> **Score: 92** (즉각 인터럽트 -> `approval-required` 카드 띄움)
   - `git reset --hard HEAD~5` -> **Score: 85** (사용자 승인 모달 호출)
@@ -119,8 +121,8 @@ Jev를 **System 1(감각 및 반사신경, 센서, 가드레일)**으로 배치�
 
 ### Pillar 4. [Desk HUD] 초고속 인텐트 라우팅 및 액션 랭킹
 
-#### 주의: Jev는 텍스트를 '생성'하지 않는다
-Jev는 자동완성 문장을 작문하는 모델이 아니다. 따라서 HUD에서의 역할은 **"입력 텍스트의 의도 분류(Classification)"**와 **"등록된 시스템 액션 후보의 랭킹(Action Ranking)"**이다.
+#### 주의: 결정 모델은 텍스트를 '생성'하지 않는다
+결정 모델은 자동완성 문장을 작문하는 모델이 아니다. 따라서 HUD에서의 역할은 **"입력 텍스트의 의도 분류(Classification)"**와 **"등록된 시스템 액션 후보의 랭킹(Action Ranking)"**이다.
 
 #### 동작 방식
 1. **타깃 윈도우/앱 즉시 라우팅 (`Choice`)**:
@@ -147,18 +149,18 @@ Jev는 자동완성 문장을 작문하는 모델이 아니다. 따라서 HUD에
   80k 토큰 전체를 LLM(Claude/GPT)에 전달 -> 5~10초 대기 -> 
   "이전 작업들을 요약해줘" -> LLM이 긴 줄글로 요약 (환각 위험, 높은 비용)
 
-[Jev 구조적 압축 방식]
-  메시지/툴 블록 리스트 -> 각 블록을 Jev가 30ms 만에 분류/채점 -> 
+[결정 모델 구조적 압축 방식]
+  메시지/툴 블록 리스트 -> 각 블록을 결정 모델이 30ms 만에 분류/채점 ->
   결정론적 템플릿으로 슬롯 치환 (0초 생성, 제로 환각, 90% 토큰 절감)
 ```
 
 #### 구체적 압축 단계
 1. **블록별 역할 및 수명 분류 (`Choice`)**:
-   컨텍스트 창의 개별 블록에 대해 Jev가 판단:
+   컨텍스트 창의 개별 블록에 대해 결정 모델이 판단:
    - `Choice: ["USER_GOAL", "CURRENT_ACTIVE_TASK", "STALE_INTERMEDIATE_LOG", "ERROR_TRACE_RESOLVED", "CRITICAL_FACT"]`
 2. **템플릿 기반 치환 (Template Replacement - 생성 불필요)**:
    - 예를 들어 300줄짜리 `grep`이나 터미널 빌드 로그:
-     - Jev가 `STALE_INTERMEDIATE_LOG`로 분류 (결과가 이미 다음 스텝에 반영됨).
+     - 결정 모델이 `STALE_INTERMEDIATE_LOG`로 분류 (결과가 이미 다음 스텝에 반영됨).
      - 자의적인 텍스트 요약 대신, 시스템이 사전에 준비한 **고정 템플릿**으로 치환:
        ```text
        [System: 320 lines of build log omitted. Exit code: 0, Output verified]
@@ -166,11 +168,12 @@ Jev는 자동완성 문장을 작문하는 모델이 아니다. 따라서 HUD에
    - 연속된 5번의 파일 읽기/실패 탐색 과정:
      - `[System: Inspected 5 files; active context preserved for path/to/target.ts]`
 3. **단절(Gap)이 생기지 않는 이유**:
-   - **앵커(Anchor) 보존**: 사용자의 최초 목표(Goal), 최종 수정된 파일 경로, 핵심 에러 메시지는 Jev 점수(`Criticality Score > 80`)에 의해 무조건 원본 그대로 유지된다.
+   - **앵커(Anchor) 보존**: 사용자의 최초 목표(Goal), 최종 수정된 파일 경로, 핵심 에러 메시지는 결정 모델 점수(`Criticality Score > 80`)에 의해 무조건 원본 그대로 유지된다.
    - 중간 탐색 과정(삽질했던 grep 결과, 이전 DOM 스냅샷 차분 5개 등)만 구조화된 템플릿 한 줄로 접히기(collapse) 때문에, Codex 입장에서 논리적 맥락은 100% 보존되면서 토큰만 극적으로 줄어든다.
 
 ---
 
+<!-- 이 절의 Jev·openjev·NanoJev 등은 외부 제품/프로젝트의 이름이며 EG-Desk는 Jev를 사용하지 않는다. -->
 ## 3. Jev 오픈소스 대안 생태계 및 로컬 구현 모델 분석 (Open Source Reproductions & Alternatives)
 
 ### 3.1 배경 및 커뮤니티 동향 (Hugging Face Tracker)
@@ -297,7 +300,7 @@ Apple Silicon(Mac) 기반의 로컬 데스크 환경인 EG-Desk에서는 **"단�
 
 ---
 
-## 4. 인지 아키텍처 관점의 대전환: Decision Making(Jev) vs Creative Generation(LLM)
+## 4. 인지 아키텍처 관점의 대전환: Decision Making(결정 모델) vs Creative Generation(LLM)
 
 ### 4.1 "업무의 50%는 결정이고, 50%는 창작이다"
 인간의 지식 노동을 분석하면 크게 두 단계로 양분된다:
@@ -322,7 +325,7 @@ Apple Silicon(Mac) 기반의 로컬 데스크 환경인 EG-Desk에서는 **"단�
 ### 4.3 듀얼 코어 인지 모델 (Dual-Core Cognitive Model)
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│  Jev (System 1 / Neuromorphic Decision Fabric)              │
+│  결정 모델 (System 1 / Neuromorphic Decision Fabric)              │
 │  - 초저지연 (20~50ms), 초저비용, RLCD 기반 확률 보정         │
 │  - 역할: 라우터, 상태 센서, 세이프티 가드, 기억 게이트, 스케줄러  │
 │  - 산출물: Typed Decision (Choice, Score, Noul/Boolean)     │
@@ -344,48 +347,48 @@ Apple Silicon(Mac) 기반의 로컬 데스크 환경인 EG-Desk에서는 **"단�
   3. LLM 호출 ("본문 작성") -> 5초 대기
   4. LLM 호출 ("발송 툴 실행할까?") -> 3초 대기
   * 총 14초 소요, 매 단계마다 토큰 낭비 및 오작동 위험.
-* **Jev + LLM 분리 방식**:
-  1. 이메일 도착 -> **Jev**: `Noul: "긴급 답장 대상인가?"` -> 30ms (True)
-  2. **Jev**: `Choice: "수신자 선택"` -> 30ms (DevOps Lead)
-  3. **Jev**: `Choice: "답장 톤/템플릿 골격"` -> 30ms (Urgent Bug Fix Notice)
+* **결정 모델 + LLM 분리 방식**:
+  1. 이메일 도착 -> **결정 모델**: `Noul: "긴급 답장 대상인가?"` -> 30ms (True)
+  2. **결정 모델**: `Choice: "수신자 선택"` -> 30ms (DevOps Lead)
+  3. **결정 모델**: `Choice: "답장 톤/템플릿 골격"` -> 30ms (Urgent Bug Fix Notice)
   4. **LLM**: "위 조건과 버그 로그를 바탕으로 본문 3문장 작성" -> 3초 만에 텍스트 생성
-  5. **Jev**: `Score(0-100, "발송 안전성 검사")` -> 30ms (Score 95 -> 자동 발송 승인)
+  5. **결정 모델**: `Score(0-100, "발송 안전성 검사")` -> 30ms (Score 95 -> 자동 발송 승인)
   * 총 3.1초 소요, 비용 80% 절감, 결정 과정의 엄격한 타입 보장!
 
 ---
 
-## 5. 해마(Hippocampus)와 파일·메모리 시스템의 Jev 전면 전환 구상
+## 5. 해마(Hippocampus)와 파일·메모리 시스템의 결정 모델 전면 전환 구상
 
 > **참조**: [`ideas/brainstorming/COGNITIVE_ARCHITECTURE_ANALOGY.md`](file:///Users/minsoocha/Projects/EG-Desk-Dev-Space/ideas/brainstorming/COGNITIVE_ARCHITECTURE_ANALOGY.md) (해마, 4-type 인지 태깅, 기저핵, 작업기억 스코프)
 
 > **2026-11-25 주석 (owner 확인)**: 이 절의 해마·4-Type·GC·공고화 구상은 기억을 *관리하는 방식*에 대한 아이디어이며, 기억의 주인이나 경계를 정하지 않는다. 기억·대화 내역의 주인은 Agent(인격체)이고 Board·대화는 출처이며, 조직/개인 소유는 Agent별 설정이다. 정본은 [Contract Memory 소유](../confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-memory-agent-owner)다. 이 절의 4-Type은 현재 코드에 채택되어 있지 않다.
 
 `COGNITIVE_ARCHITECTURE_ANALOGY.md`에서 지적되었던 가장 큰 병목은 **"LLM은 전두엽일 뿐, 기억을 저장/정리/망각하는 해마(Hippocampus) 역할을 파일시스템 위에서 제대로 수행하지 못한다"**는 점이었다. 
-Jev는 이 해마의 빈자리를 100% 채울 수 있는 최적의 아키텍처다.
+결정 모델은 이 해마의 빈자리를 100% 채울 수 있는 최적의 아키텍처다.
 
 ```text
 ┌──────────────────┬──────────────────────┬──────────────────────────────────┐
-│ 뇌 부위           │ 원래 인지적 역할      │ Jev 기반 시스템 구현              │
+│ 뇌 부위           │ 원래 인지적 역할      │ 결정 모델 기반 시스템 구현              │
 ├──────────────────┼──────────────────────┼──────────────────────────────────┤
-│ 해마 (망각/GC)    │ 맥락 종료 시 잔여 기억 │ **Jev Autonomic GC Daemon**      │
+│ 해마 (망각/GC)    │ 맥락 종료 시 잔여 기억 │ **결정 모델 Autonomic GC Daemon**      │
 │                  │ 폐기 (Garbage Collect)│ 세션/에피소드 종료 시 임시 파일 정리│
 ├──────────────────┼──────────────────────┼──────────────────────────────────┤
-│ 해마 (인지 태깅)  │ 일화/의미/현실/상상   │ **Jev 4-Type Tagging Classifier**│
+│ 해마 (인지 태깅)  │ 일화/의미/현실/상상   │ **결정 모델 4-Type Tagging Classifier**│
 │                  │ 기억의 종류 분리      │ 파일 생성 즉시 4-type 자동 분류   │
 ├──────────────────┼──────────────────────┼──────────────────────────────────┤
-│ 해마 (공고화)     │ 일화 기억(log)에서    │ **Jev Consolidation Arbiter**    │
+│ 해마 (공고화)     │ 일화 기억(log)에서    │ **결정 모델 Consolidation Arbiter**    │
 │                  │ 핵심 지식(knowledge)  │ 공고화 승격 타이밍 감지 및 트리거│
 │                  │ 으로의 변환 타이밍    │                                  │
 ├──────────────────┼──────────────────────┼──────────────────────────────────┤
-│ 중앙 집행기 게이트│ 작업 기억(WM) 오염    │ **Jev Working Memory Gatekeeper**│
+│ 중앙 집행기 게이트│ 작업 기억(WM) 오염    │ **결정 모델 Working Memory Gatekeeper**│
 │ (Baddeley Gating)│ 방지, 상세 결과 차단  │ 툴 결과의 주입/파일 스필/폐기 결정│
 └──────────────────┴──────────────────────┴──────────────────────────────────┘
 ```
 
 ### 5.1 4-Type 인지 태깅 자동화 (`asset`, `knowledge`, `log`, `hypothetical`)
 * **기존 난제**: 파일 생성 시 LLM에게 일일이 태그를 붙이라고 하면 프롬프트가 길어지고 자주 누락됨. 정적 룰은 파일 내용을 모름.
-* **Jev 솔루션**:
-  * `PreToolUse(Write)` 또는 파일 쓰기 훅에서 Jev가 생성 파일의 내용과 경로를 보고 30ms 만에 분류:
+* **결정 모델 솔루션**:
+  * `PreToolUse(Write)` 또는 파일 쓰기 훅에서 결정 모델이 생성 파일의 내용과 경로를 보고 30ms 만에 분류:
     `Choice: ["asset", "knowledge", "log", "hypothetical"]`
   * 분류 결과를 `.gitattributes`에 자동 등록하거나 파일 상단 YAML Frontmatter에 즉시 주입.
   * 결과:
@@ -396,8 +399,8 @@ Jev는 이 해마의 빈자리를 100% 채울 수 있는 최적의 아키텍처�
 
 ### 5.2 해마의 망각(Forgetting)과 자율 GC (Background Daemon)
 * **기존 난제**: LLM에게 "작업 끝나면 임시 파일 지워"라고 부탁하면 바빠서 안 지움. 시간 기반(7일 경과) 훅은 맥락을 모르고 지움.
-* **Jev 솔루션**:
-  * 세션 종료 또는 Idle 시점에 **Jev Background Hippocampus**가 백그라운드 구동:
+* **결정 모델 솔루션**:
+  * 세션 종료 또는 Idle 시점에 **결정 모델 Background Hippocampus**가 백그라운드 구동:
   * 각 임시/작업 파일(`type: log`, `type: hypothetical`)에 대해 질의:
     `Choice: ["PRUNE_DISCARD", "CONSOLIDATE_NEEDED", "KEEP_ACTIVE"]`
     * 이미 상위 문서로 병합된 탐색 로그 $\rightarrow$ 즉각 삭제 (GC)
@@ -407,15 +410,15 @@ Jev는 이 해마의 빈자리를 100% 채울 수 있는 최적의 아키텍처�
 ### 5.3 공고화(Consolidation) 중재자 (Arbiter)
 * **해마의 공고화**: 구체적인 일화(에피소드)에서 맥락 독립적인 일반 지식을 추출하여 신피질로 보냄.
 * **동작 메커니즘**:
-  1. Jev가 에피소드 진행 상황을 모니터링하다가 `Noul: "이 작업에서 재사용 가능한 핵심 지식/패턴이 도출되었는가?"`가 `true`가 되는 순간을 포착.
-  2. Jev는 LLM(Codex)을 단 1회 호출하여 **"이 에피소드 로그에서 핵심 규칙 1줄을 뽑아 `MEMORY.md`에 추가하라"**고 지시.
-  3. 공고화가 끝나면 원본 로그는 Jev가 삭제(망각) 처리.
+  1. 결정 모델이 에피소드 진행 상황을 모니터링하다가 `Noul: "이 작업에서 재사용 가능한 핵심 지식/패턴이 도출되었는가?"`가 `true`가 되는 순간을 포착.
+  2. 결정 모델은 LLM(Codex)을 단 1회 호출하여 **"이 에피소드 로그에서 핵심 규칙 1줄을 뽑아 `MEMORY.md`에 추가하라"**고 지시.
+  3. 공고화가 끝나면 원본 로그는 결정 모델이 삭제(망각) 처리.
 
 ### 5.4 작업 기억 스코프 게이팅 (Baddeley Working Memory Gatekeeper)
 * **기존 난제 (`COGNITIVE_ARCHITECTURE_ANALOGY.md` Section 11)**:
   서브에이전트나 툴이 200줄의 장황한 출력을 뱉으면 메인 스레드 컨텍스트에 그대로 주입되어 작업 기억이 오염됨.
-* **Jev 솔루션**:
-  툴 출력이 반환되는 순간 Jev가 게이트키퍼로 가로챔:
+* **결정 모델 솔루션**:
+  툴 출력이 반환되는 순간 결정 모델이 게이트키퍼로 가로챔:
   `Choice: ["INJECT_FULL_TO_CONTEXT", "COLLAPSE_TO_TEMPLATE", "SPILL_TO_SCRATCH_FILE"]`
   * 결정에 따라:
     * 중요한 2줄만 LLM 컨텍스트에 남김.
@@ -428,7 +431,7 @@ Jev는 이 해마의 빈자리를 100% 채울 수 있는 최적의 아키텍처�
 
 ---
 
-## 6. 시간축 온톨로지·스마트 폴더 체계에서 챗 에이전트의 Jev 판단 보완 설계
+## 6. 시간축 온톨로지·스마트 폴더 체계에서 챗 에이전트의 결정 모델 판단 보완 설계
 
 > **참조**:  
 > - [`docs/vision/ontology-bridge.md`](file:///Users/minsoocha/Projects/EG-Desk-Dev-Space/docs/vision/ontology-bridge.md) (온톨로지 브릿지: 객체와 장소의 평탄화 극복)  
@@ -451,29 +454,29 @@ EG-Desk 작업 공간에는 **과거(완료 로그, 이전 스냅샷)**, **현�
 
 ---
 
-### 6.2 챗 에이전트의 4단계 Jev 판단 보완 파이프라인
+### 6.2 챗 에이전트의 4단계 결정 모델 판단 보완 파이프라인
 
-챗 대화가 진행되는 동안 Jev는 에이전트의 뒤에서 **"시제·온톨로지 센서 및 라우터"**로 작동하며 LLM의 판단을 실시간으로 보완한다.
+챗 대화가 진행되는 동안 결정 모델은 에이전트의 뒤에서 **"시제·온톨로지 센서 및 라우터"**로 작동하며 LLM의 판단을 실시간으로 보완한다.
 
 ```text
 [사용자 챗 입력] 
       │ 
-      ├─► [1. Jev 질의 시제 분석 (Temporal Intent Slicing, 20ms)]
+      ├─► [1. 결정 모델 질의 시제 분석 (Temporal Intent Slicing, 20ms)]
       │     └─► 판정: time=PRESENT, layer=VIRTUAL -> 스마트 폴더 타깃 범위 확정
       │
       ├─► [2. 스마트 폴더 기반 파일 인출 (Scaped Retrieval)]
-      │     └─► Jev가 인출된 파일에 시제 태그 주입: [SOURCE: time=present, type=asset]
+      │     └─► 결정 모델이 인출된 파일에 시제 태그 주입: [SOURCE: time=present, type=asset]
       │
       ├─► [3. LLM 답변/산출물 생성 (System 2)]
-      │     ├─ [답변 시] Jev 시제 왜곡 검증 가드 (Anti-Hallucination Guard, 20ms)
-      │     └─ [파일 생성 시] Jev 온톨로지 폴더 자동 배치 (Zero-Friction Placement)
+      │     ├─ [답변 시] 결정 모델 시제 왜곡 검증 가드 (Anti-Hallucination Guard, 20ms)
+      │     └─ [파일 생성 시] 결정 모델 온톨로지 폴더 자동 배치 (Zero-Friction Placement)
       │
       └─► [4. 대화 기반 온톨로지 상태 전이 (Conversation-Driven State Promotion)]
             └─► "배포 끝났다" 감지 시: future 스냅샷 -> present로 자동 승격 집행
 ```
 
 #### ① [Stage 1] 질의 시제 분석 및 온톨로지 타깃 슬라이싱 (Temporal Slicing)
-* 사용자의 챗 입력을 받자마자 Jev가 20ms 만에 의도를 분류:
+* 사용자의 챗 입력을 받자마자 결정 모델이 20ms 만에 의도를 분류:
   * `Choice(TimeIntent): ["PAST_EPISODIC", "PRESENT_LIVE", "FUTURE_PLANNED", "CROSS_TEMPORAL_DIFF"]`
   * `Choice(LayerTarget): ["VIRTUAL_LOGIC", "PHYSICAL_INFRA", "COMPOSITE"]`
 * **동작**:
@@ -483,19 +486,19 @@ EG-Desk 작업 공간에는 **과거(완료 로그, 이전 스냅샷)**, **현�
 
 #### ② [Stage 2] 정보 인출 시 시제 왜곡 차단 가드 (Anti-Hallucination Guard)
 * 만약 복합 질문으로 인해 여러 시간대의 파일이 인출되더라도:
-  * Jev가 파일 주입 시 메타 헤더를 강제 부착:
+  * 결정 모델이 파일 주입 시 메타 헤더를 강제 부착:
     * `[ONTOLOGY: time=future, status=hypothetical, path=ideas/brainstorming/...]`
     * `[ONTOLOGY: time=past, status=archived_log, path=subagent_reports/...]`
     * `[ONTOLOGY: time=present, status=live_asset, path=src/...]`
 * **사전 검증(Pre-flight Check)**:
-  * LLM이 답변 초안을 낼 때 Jev가 30ms 만에 검증:
+  * LLM이 답변 초안을 낼 때 결정 모델이 30ms 만에 검증:
     `Noul: "에이전트가 future(미래 가설)나 past(과거 로그)를 present(현재 사실)인 것처럼 단정 서술하고 있는가?"`
   * 적발 시 즉각 인터셉트하여 *"참조 문서는 아직 미래 기획안입니다"*라는 보정을 답변에 반영하도록 강제.
 
 #### ③ [Stage 3] 에이전트 산출물의 스마트 폴더 자동 안착 (Zero-Friction Placement)
 * 사용자가 챗으로 "이 기능 아키텍처 구상해봐"라고 요청하여 에이전트가 문서를 작성할 때:
   * 에이전트(LLM)는 저장 경로를 고민할 필요 없이 내용만 작성.
-  * **Jev가 산출물의 온톨로지 위치를 즉시 결정**:
+  * **결정 모델이 산출물의 온톨로지 위치를 즉시 결정**:
     * `Choice(TimeSlice): future`
     * `Choice(CognitiveType): hypothetical`
     * `Choice(Layer): virtual`
@@ -504,10 +507,10 @@ EG-Desk 작업 공간에는 **과거(완료 로그, 이전 스냅샷)**, **현�
 #### ④ [Stage 4] 대화 맥락 기반 온톨로지 상태 전이 자동화 (Conversation-Driven State Promotion)
 * 사용자: *"아까 말한 PostgreSQL 마이그레이션 배포 완료했어. 헬스체크 통과함."*
 * 일반 에이전트: *"네, 배포가 성공했군요!"* (끝. 문서는 방치됨)
-* **Jev 보완 에이전트**:
-  1. Jev가 대화 턴에서 상태 전이 신호를 포착:
+* **결정 모델 보완 에이전트**:
+  1. 결정 모델이 대화 턴에서 상태 전이 신호를 포착:
      `Noul: "사용자가 future 계획의 실행 및 완료를 확인했는가?"` $\rightarrow$ **True (Confidence 0.98)**
-  2. Jev가 백그라운드에서 즉각 온톨로지 전이를 집행:
+  2. 결정 모델이 백그라운드에서 즉각 온톨로지 전이를 집행:
      * `future/db-migration.md` $\rightarrow$ `present/db-schema.md`로 승격
      * 기존 `present/sqlite-schema.md` $\rightarrow$ `past/archive/`로 동결 보존
      * 스마트 폴더의 `[현재 운영 DB]` 뷰 인덱스 갱신
@@ -523,16 +526,16 @@ EG-Desk 작업 공간에는 **과거(완료 로그, 이전 스냅샷)**, **현�
 * **기존 LLM 에이전트**:
   * 전체 검색 수행 $\rightarrow$ `ideas/brainstorming/JWT_REFRESH_V2.md` 발견
   * ❌ *"현재 Silent Refresh 패턴을 통해 백그라운드에서 토큰을 자동 갱신하도록 구현되어 있습니다."* (거짓말: 이건 지난주에 아이디어만 적어둔 미구현 문서)
-* **Jev 보완 에이전트**:
-  * Jev가 질의를 `time=present`로 슬라이싱하여 실제 소스코드 `src/auth/` 및 `company-server.present.md`만 제공.
+* **결정 모델 보완 에이전트**:
+  * 결정 모델이 질의를 `time=present`로 슬라이싱하여 실제 소스코드 `src/auth/` 및 `company-server.present.md`만 제공.
   * ⭕ *"현재(Present)는 토큰 만료 시 사용자에게 팝업을 띄워 재로그인을 요구하는 단순 만료 방식으로 동작 중입니다. (참고: 미래 계획으로 Silent Refresh 기획안이 ideas/brainstorming에 보관되어 있습니다.)"*
 
 #### 시나리오 B: 대화 기반의 무마찰 온톨로지 상태 승격
 * **상황**: 에이전트와 대화하며 버그를 잡고 핫픽스를 적용한 직후.
 * **유저 질의**: *"패치 커밋하고 서버에 반영 끝났어. 이제 문제없음."*
 * **기존 LLM 에이전트**: *"수고하셨습니다. 추가로 도와드릴 일이 있으신가요?"* (디버그 보고서와 원인 분석 파일들이 작업공간에 너저분하게 방치됨)
-* **Jev 보완 에이전트**:
-  * Jev가 에피소드 종료를 감지하고 상태 전이 실행:
+* **결정 모델 보완 에이전트**:
+  * 결정 모델이 에피소드 종료를 감지하고 상태 전이 실행:
     1. 작업 로그(`subagent_reports/debug-0919.md`) $\rightarrow$ 자율 GC 데몬이 핵심 1줄 교훈만 `MEMORY.md`에 공고화하고 원본 로그 폐기(망각).
     2. 핫픽스 패치 내용 $\rightarrow$ `present/` 운영 온톨로지에 커밋 반영.
   * ⭕ *"핫픽스 반영을 확인했습니다. 현재(Present) 시스템 온톨로지를 최신 패치 상태로 갱신하고, 임시 디버깅 로그를 정리하여 핵심 교훈을 MEMORY에 공고화했습니다."*
@@ -541,11 +544,11 @@ EG-Desk 작업 공간에는 **과거(완료 로그, 이전 스냅샷)**, **현�
 
 ## 7. 결론: EG-Desk Cognitive OS의 완성
 
-Jev를 단순한 "빠른 모델"로 보는 것을 넘어, **인간 인지 체계의 무의식/자율신경/해마/시제 감각 레이어**로 정의하면 EG-Desk의 모든 구성 요소가 명쾌하게 제자리를 찾는다:
+결정 모델을 단순한 "빠른 모델"로 보는 것을 넘어, **인간 인지 체계의 무의식/자율신경/해마/시제 감각 레이어**로 정의하면 EG-Desk의 모든 구성 요소가 명쾌하게 제자리를 찾는다:
 
-1. **Firefox Chrome Surface / Browser Window**: Jev의 20ms 리플렉스로 동작하는 초고속 감각-운동 기관.
-2. **Terminal / OS Execution**: Jev 세이프티 게이트가 지키는 안전한 신체.
-3. **Filesystem & Memory**: Jev 해마가 4-type으로 태깅하고, 불필요한 기억을 망각(GC)시키며, 장기 기억으로 공고화하는 자율 인지 저장소.
+1. **Firefox Chrome Surface / Browser Window**: 결정 모델의 20ms 리플렉스로 동작하는 초고속 감각-운동 기관.
+2. **Terminal / OS Execution**: 결정 모델 세이프티 게이트가 지키는 안전한 신체.
+3. **Filesystem & Memory**: 결정 모델 해마가 4-type으로 태깅하고, 불필요한 기억을 망각(GC)시키며, 장기 기억으로 공고화하는 자율 인지 저장소.
 4. **Smart Folder & Temporal Ontology**: 챗 에이전트가 시제 왜곡(과거/현재/미래 혼동) 없이 정확한 지점에 접근하고 산출물을 배치하도록 돕는 시공간 나침반.
 5. **Codex / Frontier LLM**: 결정을 내리거나 파일 위치를 고민하느라 지치지 않고, 정제된 시공간 작업 기억 위에서 고도의 창작과 설계에만 전념하는 순수 전두엽 코프로세서.
 
@@ -556,14 +559,14 @@ Jev를 단순한 "빠른 모델"로 보는 것을 넘어, **인간 인지 체계
 ### Phase 1: 센서, 가드레일, 그리고 4-Type 인지 태깅 (Quick Win)
 - **과제 1.1**: 초경량 Tier 1 엔진(`Verdict 151M` 또는 `NanoJev 0.6B`) 상주 데몬을 검증하고, `helper-rust` 또는 Node bridge에 터미널 맥락 기반 세이프티 가드(`Contextual Safety Gate`) 연동.
 - **과제 1.2**: `HUMAN_IN_LOOP_WORKFLOW_AWAIT_MODEL`의 OAuth/SSO/개발서버 완료 판정 센서 도입.
-- **과제 1.3**: 파일 생성 훅에 Jev/NanoJev를 연결하여 `asset / knowledge / log / hypothetical` 4-type 태깅 자동화 및 `.gitattributes` 바인딩.
+- **과제 1.3**: 파일 생성 훅에 결정 모델(또는 NanoJev)를 연결하여 `asset / knowledge / log / hypothetical` 4-type 태깅 자동화 및 `.gitattributes` 바인딩.
 
 ### Phase 2: 브라우저 액션 리플렉스 & 작업 기억 게이트
-- **과제 2.1**: `browserAgent.act()`에 Jev `Choice` 기반 초고속 DOM 클릭/입력 루프 연동. (단순 네비게이션 시 코덱스 호출 생략)
-- **과제 2.2**: 툴 결과(200줄 이상) 반환 시 Jev가 스크래치 파일 스필 및 요약 템플릿 치환을 수행하는 Working Memory Gatekeeper 구축.
+- **과제 2.1**: `browserAgent.act()`에 결정 모델 `Choice` 기반 초고속 DOM 클릭/입력 루프 연동. (단순 네비게이션 시 코덱스 호출 생략)
+- **과제 2.2**: 툴 결과(200줄 이상) 반환 시 결정 모델이 스크래치 파일 스필 및 요약 템플릿 치환을 수행하는 Working Memory Gatekeeper 구축.
 
 ### Phase 3: 자율신경 해마 GC 및 공고화 자동화
-- **과제 3.1**: 세션 종료/유휴 상태에서 동작하는 Jev Background Hippocampus 데몬 구현 (일화 로그 자동 GC 및 망각).
+- **과제 3.1**: 세션 종료/유휴 상태에서 동작하는 결정 모델 Background Hippocampus 데몬 구현 (일화 로그 자동 GC 및 망각).
 - **과제 3.2**: 에피소드 종료 시점 감지 및 LLM 1회 호출을 통한 `MEMORY.md` 지식 공고화 파이프라인 완성.
 
 ### Phase 4: 스마트 폴더 및 온톨로지 시간축 전이 엔진
@@ -579,10 +582,10 @@ Jev를 단순한 "빠른 모델"로 보는 것을 넘어, **인간 인지 체계
 
 **기준일**: 2026-09-26 · **상태**: 준비안 / Draft  
 **수신자**: Main, 제품·기술 검토자와 후속 문서 편집 담당자  
-**검증 상태**: 문헌·지정 설계 문서 대조만 수행. 구현, 제품 채택, 실제 Jev 평가, 사용자 시뮬레이션은 모두 **NOT-RUN**이다.  
+**검증 상태**: 문헌·지정 설계 문서 대조만 수행. 구현, 제품 채택, 실제 결정 모델 평가, 사용자 시뮬레이션은 모두 **NOT-RUN**이다.<br>
 **현재 편집 범위**: 이 문서의 §9만 추가한다. 기존 §1–8은 당시 초안으로 그대로 보존한다. §9의 재검토 표는 과거 본문을 현재 제품 보장으로 읽지 않기 위한 검토 결과다.
 
-사용자의 요청은 “Jev로 적용할 수 있는 EG-Desk 전반을 검토하고 전체 문서 업데이트를 준비”하는 것이다. 후보 발굴은 정본 일괄 채택이나 새 서비스·비용·권한의 승인이 아니다. [현행 CAP 13개][cap-section]는 모두 `PM-PROPOSAL`이며 구현 증거가 아니다. 아래 입력도 계약이 요구하거나 확보할 것으로 예상하는 값이지, 실제 runtime에서 수집·전달됐음을 확인한 값은 아니다.
+사용자의 요청은 “결정 모델로 적용할 수 있는 EG-Desk 전반을 검토하고 전체 문서 업데이트를 준비”하는 것이다. 후보 발굴은 정본 일괄 채택이나 새 서비스·비용·권한의 승인이 아니다. [현행 CAP 13개][cap-section]는 모두 `PM-PROPOSAL`이며 구현 증거가 아니다. 아래 입력도 계약이 요구하거나 확보할 것으로 예상하는 값이지, 실제 runtime에서 수집·전달됐음을 확인한 값은 아니다.
 
 이 절은 브라우저·파일 10개, Chat·Agent·읽기·실행·산출물 12개, Canvas·Board·Ontology·협업 11개의 연구 입력을 통합한다. 현재 주장 검사 `C-ANS-01`과 당시 Snapshot 근거 검사는 [JEV-BF-10](#jev-bf-10)의 공통 판단으로 묶되 두 사용상황을 남겼다. 따라서 **32개 판단 후보가 33개 사용상황을 다룬다.** `JEV-*`는 이 준비안의 식별자이며 Atlas의 `CHAT-01`, `READ-01` 같은 제품 trace ID와 별개다.
 
@@ -596,7 +599,7 @@ Jev를 단순한 "빠른 모델"로 보는 것을 넘어, **인간 인지 체계
 | browser-first | Google Drive와 Microsoft 등 웹문서를 Browser에서 읽고 탐색하는 공통 경로를 먼저 검토한다. 공급자 API는 선택 가능한 보완 수단이다. | DOM은 문서 전체와 같지 않다. Canvas·가상화·미로드 영역은 별도 추출·탐색·인쇄/내보내기 경로와 coverage가 필요하다. [Browser][a-tool1]·[읽기][c-read]·[파일 지원][h-code] |
 | 비로그인으로 연 카드에 계정 적용 후 같은 자리 재로드 | 단순 열람 중인 visible card의 자리·원 업무 연결을 유지한 채 지정한 browsing context로 다시 로드하는 흐름을 준비한다. 새 browsing context가 반드시 새 visible card를 뜻하지는 않는다. | 입력 중인 form·미저장 내용은 단순 열람과 구별한다. 현 [계정 UX][u-identity]의 form 보존·새 context 경로와 함께 검토하며, 비밀값·cookie·권한을 임의 복제하지 않는다. 실제 사이트 신원과 접근을 재검증한다. [HUM-ENGINE-001][h-engine]·[HUM-SURFACE-001][h-surface] |
 | 같은 문서도 보드별 사용 부분이 다름 | 출처 문서 identity, 각 보드의 read intent·부분 anchor, 해당 보드가 이미 읽은 원문·관측 시각을 별도로 연결한다. | 문서 단위 변경 신호만으로 모든 보드에 업무 영향 경고를 만들지 않는다. 부분 대응이 불명확하면 재연결·검토 상태를 남긴다. [Context][c-context]·[Snapshot][c-storage] |
-| 전 기능 적용 검토와 전체 문서 업데이트 준비 | 기술적으로 도움이 되는 의미 판단을 찾고 정본별 변경 이유·검증 조건을 제시한다. | 모든 사용자 수동 조작에 Jev 호출을 넣는 요구가 아니다. 정확 검색·의미 검색·규칙·상위 Agent의 비용과 품질을 비교해 호출 위치를 정한다. |
+| 전 기능 적용 검토와 전체 문서 업데이트 준비 | 기술적으로 도움이 되는 의미 판단을 찾고 정본별 변경 이유·검증 조건을 제시한다. | 모든 사용자 수동 조작에 결정 모델 호출을 넣는 요구가 아니다. 정확 검색·의미 검색·규칙·상위 Agent의 비용과 품질을 비교해 호출 위치를 정한다. |
 
 최신 원본을 기본 추종할지 과거 참조를 고정할지, Board 저장 범위, 추가 오프라인 원문·form 보관, 권한 철회 뒤 과거 사본, 삭제·가림 연동의 기존 질문은 이번 방향으로 답변된 것으로 처리하지 않는다. [HUM-AGENDA-001][h-board]·[HUM-SNAPSHOT-001][h-snapshot]·[HUM-EXPORT-001][h-export]를 따른다. 확인한 Owner 원장은 **OPEN 15개**를 유지한다. `HUM-READ-001`은 이미 `RESOLVED-BY-DESIGN`인 읽기 설계 참조이며 새 승인 질문으로 다시 열지 않는다.
 
@@ -609,9 +612,9 @@ Jev를 단순한 "빠른 모델"로 보는 것을 넘어, **인간 인지 체계
 |---|---|
 | 관측·원문 확보 | System이 권한 있는 범위에서 원문을 확보하고 source identity·locator·revision/확인 불가·시각·추출기·관측 범위·오류를 기록한다. 원문 전체를 확보하지 않았으면 그 범위만 원문 관측으로 명명한다. |
 | 텍스트 준비 | 원문 capture, OCR·정규화 text, Reader packet, 요약, 실제 Agent 전달 payload를 각 역할로 구분한다. 파생본은 원문과 연결하며 원문 byte·과거 전달 기록을 덮지 않는다. |
-| Jev 질문 | 이미 확보한 자료와 허용 후보만 넣고 한 질문에 한 판단을 요구한다. 입력의 문서·행·구간 ID를 선택하게 하고 자유 생성한 문장을 원문 인용으로 사용하지 않는다. |
+| 결정 모델 질문 | 이미 확보한 자료와 허용 후보만 넣고 한 질문에 한 판단을 요구한다. 입력의 문서·행·구간 ID를 선택하게 하고 자유 생성한 문장을 원문 인용으로 사용하지 않는다. |
 | 코드의 결과 적용 | 후보 ID·현재 revision·권한·명시 binding·위임·비용·전송·실행 한도를 검사하고 다음 읽기/제안/검토 경로를 선택한다. raw probability와 execution permission은 서로 다른 값이다. |
-| 보존·완료 증거 | identity, ACL, credential 격리, lease, 조건부 저장, receipt, 실제 완료·coverage, retention·GC는 System 계약이다. Jev 확률은 이를 생성하거나 대체하지 않는다. |
+| 보존·완료 증거 | identity, ACL, credential 격리, lease, 조건부 저장, receipt, 실제 완료·coverage, retention·GC는 System 계약이다. 결정 모델 확률은 이를 생성하거나 대체하지 않는다. |
 | 장애·불확실 | 미확보·접근 거부·timeout·429·잘못된 응답·stale 입력·모델 불확실을 구분한다. 같은 의미의 질문·입력 revision을 확인해 결과를 재사용하고, 늦은 응답은 현재 상태에 재검증한다. 사용할 수 없는 판단은 정해진 코드 경로·상위 Agent·사용자 선택으로 돌아간다. |
 
 `Choice`는 정의된 후보 중 선택과 분포를, `Noul`은 yes 확률을, `Score`는 구체적으로 설명한 순서형 수준의 위치와 분포를 반환한다. Noul에는 별도 confidence가 없다. Choice/Score confidence는 분포의 집중도를 나타내며 정확성·권한의 증거가 아니다. 후보가 맞지 않을 수 있으면 `없음/불명`을 두고, 검색 순위와 답 존재 여부를 나눠 검사한다. [Choice][ts-choice]·[Noul][ts-noul]·[Score][ts-score]·[Confidence][ts-confidence]·[semantic_find][ts-find].
@@ -623,7 +626,7 @@ source identity + locator + 접근 context
   → 관측 revision/시각/범위 + immutable raw capture
   → 추출·정규화·Reader packet + 변환 관계
   → Board별 read intent + 부분 anchor + 이미 읽은 내용
-  → Jev 질문·모델 version·raw 판단
+  → 결정 모델 질문·모델 version·raw 판단
   → 코드의 현재 권한/revision 검사 + 담당 Agent의 업무 판단
   → 필요한 보드/보고 항목의 안내 또는 후속 요청
 ```
@@ -635,17 +638,17 @@ source identity + locator + 접근 context
 
 이 표의 출처 자료는 실제 다음 행동이나 보드의 판단 근거를 선택하기 위해 사용한다. raw 관측을 보존하는 책임은 [Contract §15][c-storage]에 남긴다. 각 후보의 CAP/ECS 링크는 [전체 coverage](#jev-capability-coverage)에서 다시 이 후보로 돌아온다.
 
-| 준비안 ID·실제 사용상황 | 확보할 입력 | Jev의 좁은 질문·출력형 | System·담당 Agent의 책임 | 불확실·공급자 장애 시 대안 | 검증할 실패 예·정본 연결 |
+| 준비안 ID·실제 사용상황 | 확보할 입력 | 결정 모델의 좁은 질문·출력형 | System·담당 Agent의 책임 | 불확실·공급자 장애 시 대안 | 검증할 실패 예·정본 연결 |
 |---|---|---|---|---|---|
 | <a id="jev-bf-01"></a>**JEV-BF-01** 카드에서 원하는 문서로 탐색 | 현재 관측 text·링크/버튼 ID·사용자 목적·target binding | 다음 읽기 대상은? `Choice(후보 ID/없음/불명)` | System이 context·lease·이동·reload·재관측을 집행. 담당 Agent는 허용 행동만 요청 | 직접 URL·명령 검색·수동 선택 | 동명 문서의 잘못된 링크, stale handle. [CAP-05](#jev-cap-05)·[ECS-03](#jev-ecs-03); [TOOL-01][a-tool1]·[BROWSER-01][a-b1]·[§14][c-binding]·[HUM-SURFACE][h-surface] |
 | <a id="jev-bf-02"></a>**JEV-BF-02** 로드·접근 상태를 이해 | 표시 문구·로딩/차단 흔적·범위·현재 probe와 시각 | 로그인 화면/권한 오류/본문/불명 중 관측 상태는? `Choice` | System이 사이트 신원·권한·실제 접근을 검증. 보이는 제목만으로 로그인 성공을 만들지 않음 | 비교 불가 표시·현재 상태 재조회·필요한 인증만 사용자에게 연결 | 본문은 차단됐지만 제목만 보임; 미로드를 삭제로 처리. [CAP-05/06](#jev-cap-06)·[ECS-03/05](#jev-ecs-05); [BROWSER-02][a-b2]·[§2.4][c-recovery]·[§14.1][c-identity]·[HUM-ENGINE][h-engine] |
-| <a id="jev-bf-03"></a>**JEV-BF-03** 여러 링크의 출처 후보 연결 | locator·리디렉션·제목·확보 구절·공급자 ID가 있으면 그 값 | 어느 기존 source 후보와 대응하는가? `Choice(+불명)` | System이 안정 identity·권한·View·내용 동등성의 각 증거를 관리. Jev는 병합 확정자가 아님 | 별도 자료로 유지·연결 후보 검토 | 같은 제목의 다른 문서, 내용 hash는 같지만 출처·계정은 다름. [CAP-05/08](#jev-cap-08)·[ECS-02/03](#jev-ecs-02); [TOOL-01][a-tool1]·[SourceRef][a-source-ref]·[§14.1][c-identity]·[HUM-SURFACE][h-surface] |
+| <a id="jev-bf-03"></a>**JEV-BF-03** 여러 링크의 출처 후보 연결 | locator·리디렉션·제목·확보 구절·공급자 ID가 있으면 그 값 | 어느 기존 source 후보와 대응하는가? `Choice(+불명)` | System이 안정 identity·권한·View·내용 동등성의 각 증거를 관리. 결정 모델은 병합 확정자가 아님 | 별도 자료로 유지·연결 후보 검토 | 같은 제목의 다른 문서, 내용 hash는 같지만 출처·계정은 다름. [CAP-05/08](#jev-cap-08)·[ECS-02/03](#jev-ecs-02); [TOOL-01][a-tool1]·[SourceRef][a-source-ref]·[§14.1][c-identity]·[HUM-SURFACE][h-surface] |
 | <a id="jev-bf-04"></a>**JEV-BF-04** PDF·DOCX·저장 HTML에서 관련 파일/구간 탐색 | 파일 metadata·권한 필터 후 추출 text·구간 ID·OCR/판독 상태 | 관련 후보는? `Choice`; 확보 범위에 답이 있는가? `Noul` | System이 추출·OCR·전체/지정 범위·hash를 관리. 담당 Agent가 최종 비교를 소유 | 제목·정확 검색·FTS·다른 parser·허용된 수동 판독 | OCR 숫자 오독, 부록을 읽지 않고 전체 검토 완료. [CAP-02](#jev-cap-02)·[ECS-02](#jev-ecs-02); [TOOL-02][a-tool2]·[READ-01/03][a-r1]·[§2.1–2.4][c-read]·[HUM-CODE][h-code] |
 | <a id="jev-bf-05"></a>**JEV-BF-05** 화면·인쇄본·다운로드 표현 대조 | 표현별 추출 구간·source/revision·추출 방식·coverage | 두 구간이 같은 내용을 나타내는가? `Noul` | System이 각 원본·변환 관계·누락 범위를 보존. 담당 Agent가 내용상 차이를 검토 | 각 표현을 따로 제시·대응 불명 표시 | 화면에 없는 주석·표가 인쇄본에 존재, Canvas text 누락. [CAP-02/08](#jev-cap-08)·[ECS-02](#jev-ecs-02); [BROWSER-03][a-b3]·[AI-04][a-ai4]·[§2.2][c-reader]·[§15][c-storage]·[HUM-CODE][h-code] |
 | <a id="jev-bf-06"></a>**JEV-BF-06** 보드에서 처음 사용할 부분 선택 | Board 목적·read intent·허용 source·문맥을 포함한 구간 ID | 어느 구간이 조건에 답하는가? `Choice`+존재 `Noul` | System이 Board별 anchor·선택 이유·읽은 원문을 연결. 전체 문서 검토 요청은 전 범위 coverage 유지 | 정확 검색·구간 직접 선택·담당 Agent 추가 읽기 | 최고 순위 무관 구절을 정답 처리, 다른 보드의 anchor 덮기. [CAP-02/08](#jev-cap-02)·[ECS-02](#jev-ecs-02); [AI-02][a-ai2]·[READ-02][a-r2]·[§2][c-context]·[HUM-AGENDA][h-board] |
 | <a id="jev-bf-07"></a>**JEV-BF-07** 편집 후 참조 부분 재찾기 | 이전 구절·주변 문맥·anchor·새 원문의 확보 후보·범위 | 이전 참조와 대응하는 부분은? `Choice(+없음/불명)` | System이 새 snapshot·coverage를 만들고 과거 참조를 보존. 불명확한 재연결은 검토 대상으로 둠 | 이전 근거 유지·후보 병렬 제시·재탐색 | 문단 이동·중복 구절·일부 삭제·미로드를 모두 같은 실패로 처리. [CAP-02/08](#jev-cap-08)·[ECS-01/02](#jev-ecs-01); [READ-03][a-r3]·[AI-04][a-ai4]·[§2.2][c-reader]·[§15][c-storage]·[HUM-SNAPSHOT][h-snapshot] |
 | <a id="jev-bf-08"></a>**JEV-BF-08** 관측된 부분의 의미 변화 판단 | 이전/현재 원문·기계적 diff·추출 범위·확인 시각 | 내용상 변경/표현만 변경/불명인가? `Choice` | System이 raw diff·version·출처를 보존. 담당 Agent가 의미 결과를 해석 | 원문 diff 제공·재읽기·미검토 표시 | 부정어·금액 한 자리 변경을 사소한 표현으로 무시. [CAP-08](#jev-cap-08)·[ECS-02/06](#jev-ecs-06); [AI-04][a-ai4]·[§14][c-binding]·[답변 변경 UX][u-answer]·[HUM-ANSWER][h-answer] |
-| <a id="jev-bf-09"></a>**JEV-BF-09** 파일 수정 전 연결 보드 확인·외부 수정 후 보드별 영향 | 원본을 사용하는 Board 연결 record·보드별 참조/목적·수정 예정 diff 또는 외부 수정 후 확보한 변경 구간 | 예정/관측된 변화가 이 보드의 사용 조건에 영향을 주는가? `Noul` | System은 EG-Desk가 수행할 파일 수정 전에 다른 보드 연결을 조회하고, 외부 앱 수정은 사후 변경 감지·재조회로 확인. 연결 record·변경 증거·기존 정책에 따른 원문 보존은 코드, Jev는 보드별 의미 영향만 제안 | 연결/영향 불명 표시·담당 Agent 검토·독립 업무 계속. 자동 과거 버전 보관·최신 추종 정책은 미확정 유지 | 연결 보드 확인 없이 원본부터 수정; 외부 수정을 사전에 막았다고 주장; 무관한 변경을 모든 보드의 실패로 확정. [CAP-08/02](#jev-cap-08)·[ECS-01/02/06](#jev-ecs-02); [AI-02/04][a-ai2]·[§2][c-context]·[§14][c-binding]·[HUM-AGENDA][h-board]·[HUM-ANSWER][h-answer] |
+| <a id="jev-bf-09"></a>**JEV-BF-09** 파일 수정 전 연결 보드 확인·외부 수정 후 보드별 영향 | 원본을 사용하는 Board 연결 record·보드별 참조/목적·수정 예정 diff 또는 외부 수정 후 확보한 변경 구간 | 예정/관측된 변화가 이 보드의 사용 조건에 영향을 주는가? `Noul` | System은 EG-Desk가 수행할 파일 수정 전에 다른 보드 연결을 조회하고, 외부 앱 수정은 사후 변경 감지·재조회로 확인. 연결 record·변경 증거·기존 정책에 따른 원문 보존은 코드, 결정 모델은 보드별 의미 영향만 제안 | 연결/영향 불명 표시·담당 Agent 검토·독립 업무 계속. 자동 과거 버전 보관·최신 추종 정책은 미확정 유지 | 연결 보드 확인 없이 원본부터 수정; 외부 수정을 사전에 막았다고 주장; 무관한 변경을 모든 보드의 실패로 확정. [CAP-08/02](#jev-cap-08)·[ECS-01/02/06](#jev-ecs-02); [AI-02/04][a-ai2]·[§2][c-context]·[§14][c-binding]·[HUM-AGENDA][h-board]·[HUM-ANSWER][h-answer] |
 | <a id="jev-bf-10"></a>**JEV-BF-10** 당시 Snapshot 근거 확인 + 현재 답변의 주장·근거 검사 | 주장·적용 시점·당시 source 문맥·quote/span·현재 자료를 볼 경우 별도 revision | 이 근거가 주장을 지지/반박/언급하지 않음/판단 불충분인가? `Choice` | System이 인용 존재·원문·실제 전달 lineage를 확인. 담당 Agent가 주장 수정. 현재 자료로 과거 근거를 대체하지 않음 | 원문 재진입·작성자 검토·검증 한계 표시 | 접수증을 처리완료 증거로 사용; 현재 변경을 과거 오류로 단정. `C-ANS-01` 통합. [CAP-08/09](#jev-cap-08)·[ECS-01/02/06](#jev-ecs-06); [AI-04][a-ai4]·[DATA-01][a-data]·[§4.1][c-observation]·[§15][c-storage]·[HUM-SNAPSHOT][h-snapshot] |
 
 <a id="jev-chat-agent-candidates"></a>
@@ -653,10 +656,10 @@ source identity + locator + 접근 context
 
 원 연구의 `C-*`는 아래 `JEV-*`로 대응한다. `C-ANS-01`의 현재 주장 검사 상황은 [JEV-BF-10](#jev-bf-10)에 남겼다. 명시적인 Codex/사용자 선택 모델·계정 binding을 유지하며 기본 personality를 필수화하지 않는다.
 별도 persona/Profile을 생성하기 전에도 기본 Codex 경험을 유지하며 Agent는 선택적이다.
-Jev 판정·진행 로그가 사람 간 대화처럼 이어지는 Chat 타임라인을 채우지 않도록 한다.
+결정 모델 판정·진행 로그가 사람 간 대화처럼 이어지는 Chat 타임라인을 채우지 않도록 한다.
 필요할 때 기존 활동 상세에서 확인하는 방식은 검토 후보이며 새로운 UI 기본값·알림 정책을 확정하지 않는다.
 
-| 준비안 ID·실제 사용상황 | 확보할 입력 | Jev의 좁은 질문·출력형 | System·담당 Agent의 책임 | 불확실·공급자 장애 시 대안 | 검증할 실패 예·정본 연결 |
+| 준비안 ID·실제 사용상황 | 확보할 입력 | 결정 모델의 좁은 질문·출력형 | System·담당 Agent의 책임 | 불확실·공급자 장애 시 대안 | 검증할 실패 예·정본 연결 |
 |---|---|---|---|---|---|
 | <a id="jev-chat-01"></a>**JEV-CHAT-01** “이것도 고쳐줘”의 업무 대상 확인 (`C-CHAT-01`) | 명시 targetRunId·후보 업무·최근 관련 지시·선택 대상 | 어느 업무/새 업무/확인 필요한가? `Choice` | 명시 binding 우선. System은 귀속을 기록하고 담당 Agent는 선택 범위만 처리 | 대상 선택 요청·독립 작업 계속 | Canvas를 바라봤다는 이유만으로 대상 업무 변경. [CAP-03/04](#jev-cap-04)·[ECS-02/06](#jev-ecs-06); [CHAT-01][a-chat]·[요청 계약][c-chat]·[HUM-CONV][h-conv] |
 | <a id="jev-chat-02"></a>**JEV-CHAT-02** Memo에서 후속 대화가 필요한지 판단 (`C-CHAT-02`) | 질문·Memo revision·허용 근거·짧은 답 초안 | 짧은 답만으로는 의도 확인이 필요한가? `Noul` | System이 trigger·수신자·중복 알림·응답 권한을 적용. 담당 Agent가 답변/후속 초안 작성 | 담당 모델 검토·기존 Memo와 초안 유지 | 답글·위치 이동 때마다 반복 질문, proactive 기본값 임의 채택. [CAP-08](#jev-cap-08)·[ECS-02/06](#jev-ecs-02); [CANVAS-01][a-memo]·[Memo 계약][c-memo]·[HUM-CONV][h-conv] |
@@ -675,7 +678,7 @@ Jev 판정·진행 로그가 사람 간 대화처럼 이어지는 Chat 타임라
 
 원 연구의 `S-*-J01/J02/J03`을 아래 `JEV-*`로 대응한다. 명시 요청·현재 정책·허용 입력이 준비됐을 때의 후보이며, 일반 화면 조작이나 매 저장에 새 모델 호출·사용자 확인을 의무화하지 않는다.
 
-| 준비안 ID·실제 사용상황 | 확보할 입력 | Jev의 좁은 질문·출력형 | System·담당 Agent의 책임 | 불확실·공급자 장애 시 대안 | 검증할 실패 예·정본 연결 |
+| 준비안 ID·실제 사용상황 | 확보할 입력 | 결정 모델의 좁은 질문·출력형 | System·담당 Agent의 책임 | 불확실·공급자 장애 시 대안 | 검증할 실패 예·정본 연결 |
 |---|---|---|---|---|---|
 | <a id="jev-disc-01"></a>**JEV-DISC-01** 의미로 자료·Board 찾기 (`S-DISC-J01`) | 명시 검색·ACL 필터 후 제목/본문·ID·revision | 후보 관련도 `Score`+답 존재 `Noul` | System이 검색 범위·권한·열기 재검증. 정확 검색과 의미 판단의 결합 방식은 비용·정확도로 비교 | 제목·정확 검색·FTS | 무관한 최고 순위를 정답 처리, 비공개 제목/count 노출. [CAP-09](#jev-cap-09)·[ECS-01](#jev-ecs-01); [V-03][a-v3]·[검색 계약][c-discovery]·[HUM-SURFACE][h-surface] |
 | <a id="jev-board-01"></a>**JEV-BOARD-01** 저장 구성의 포함 후보 (`S-BOARD-J01`) | 업무 목적·선택 View·유형·참조 설명 | 이 항목이 재개에 유용한가? 항목별 `Noul` | System이 현재 저장 정책·확정 범위·revision·권한 집행. 점수만으로 범위를 넓히거나 매 저장에 확인을 추가하지 않음 | 기존 선택·저장 정책 유지 | 미선택 원문·credential·실행 소유권 자동 포함. [CAP-09](#jev-cap-09)·[ECS-01](#jev-ecs-01); [AG-03][a-ag3]·[Board 계약][c-board]·[HUM-AGENDA][h-board] |
@@ -692,7 +695,7 @@ Jev 판정·진행 로그가 사람 간 대화처럼 이어지는 Chat 타임라
 <a id="jev-capability-coverage"></a>
 ### 9.6 현행 CAP 13개·ECS 7개 적용 coverage
 
-`적용 검토`는 기술 후보가 있다는 뜻이고 제품 채택·검증 완료가 아니다. `조건부`는 입력·권한·비용·효과가 확인될 때 유용성을 평가한다. `코드 전담`은 해당 보장을 Jev 판단에 맡기지 않는다는 뜻이다. 표에 직접 후보가 약한 부분도 그대로 남긴다. 전체 현황은 [후보 목록](#jev-browser-file-candidates)과 [검증 계획](#jev-validation-plan)으로 왕복한다.
+`적용 검토`는 기술 후보가 있다는 뜻이고 제품 채택·검증 완료가 아니다. `조건부`는 입력·권한·비용·효과가 확인될 때 유용성을 평가한다. `코드 전담`은 해당 보장을 결정 모델 판단에 맡기지 않는다는 뜻이다. 표에 직접 후보가 약한 부분도 그대로 남긴다. 전체 현황은 [후보 목록](#jev-browser-file-candidates)과 [검증 계획](#jev-validation-plan)으로 왕복한다.
 
 | 현행 CAP | 후보·현재 판정 | 적용/보류/비적용 이유와 코드 전담 |
 |---|---|---|
@@ -701,7 +704,7 @@ Jev 판정·진행 로그가 사람 간 대화처럼 이어지는 Chat 타임라
 | <a id="jev-cap-03"></a>[CAP-03 Multi-Agent 감독][cap-03] | 조건부: [CHAT-01](#jev-chat-01), [AGENT-01](#jev-agent-01), [ORCH-01](#jev-orch-01)·[02](#jev-orch-02) | 담당·dependency·기여 재사용 검토. graph·lease·dispatch·완료 증거는 코드; 담당 Agent의 계획 책임 유지 |
 | <a id="jev-cap-04"></a>[CAP-04 교정·clean-room][cap-04] | 적용 검토: [CHAT-01](#jev-chat-01), [CTX-02](#jev-ctx-02), [ORCH-02](#jev-orch-02), [POV-01](#jev-pov-01), [BF-10](#jev-bf-10) | 대상·조건·주장·화자 검사. source 격리·교정 이력·stale 연결·사용자 결정은 코드와 담당자 |
 | <a id="jev-cap-05"></a>[CAP-05 Live identity·lease][cap-05] | 적용 검토: [BF-01](#jev-bf-01)–[BF-03](#jev-bf-03) | 후보 선택·관측 문구 분류. 권한·identity·focus·single-writer lease·인증 성공 확정에는 비적용 |
-| <a id="jev-cap-06"></a>[CAP-06 경계별 복구][cap-06] | 조건부: [BF-02](#jev-bf-02), [RUN-01](#jev-run-01) | 코딩·Terminal의 비정형 오류 분류와 다음 read-only probe 선택에도 재사용. 구조화 오류·PTY 존속·입력 전달·권한·종료 상태·health·복구 receipt는 코드와 관측 증거. 모든 Terminal 호출 앞에 Jev를 필수화하지 않음 |
+| <a id="jev-cap-06"></a>[CAP-06 경계별 복구][cap-06] | 조건부: [BF-02](#jev-bf-02), [RUN-01](#jev-run-01) | 코딩·Terminal의 비정형 오류 분류와 다음 read-only probe 선택에도 재사용. 구조화 오류·PTY 존속·입력 전달·권한·종료 상태·health·복구 receipt는 코드와 관측 증거. 모든 Terminal 호출 앞에 결정 모델을 필수화하지 않음 |
 | <a id="jev-cap-07"></a>[CAP-07 외부 효과 승인·receipt][cap-07] | 핵심 보장 비적용; 보조: [BF-10](#jev-bf-10), [SHARE-01](#jev-share-01), [RUN-01](#jev-run-01) | 승인·idempotency·provider 접수·업무 완료를 확률로 통과시키지 않음. 근거 표현 검사·위험 신호·다음 조회 추천만 조건부 검토 |
 | <a id="jev-cap-08"></a>[CAP-08 Answer·Snapshot·Live][cap-08] | 적용 검토: [BF-03](#jev-bf-03), [BF-05](#jev-bf-05)–[BF-10](#jev-bf-10), [CHAT-02](#jev-chat-02), [BRIEF-01](#jev-brief-01), [POV-01](#jev-pov-01), [DATA-01](#jev-data-01) | 출처 후보 연결·의미·업무 영향·설명 대상·주장 근거 판단. 원문·실제 전달·Answer identity·revision·보존은 코드 |
 | <a id="jev-cap-09"></a>[CAP-09 Desk·Board·checkpoint][cap-09] | 조건부: [DISC-01](#jev-disc-01), [BOARD-01](#jev-board-01), [CANVAS-01](#jev-canvas-01), [DATA-01](#jev-data-01), [UX-01](#jev-ux-01), [BF-07](#jev-bf-07)·[10](#jev-bf-10) | 재개 자료 선택·배치·검토 순위 보조. 저장 범위 정책·복원 identity·checkpoint·실제 실행 복구는 코드 |
@@ -715,7 +718,7 @@ Jev 판정·진행 로그가 사람 간 대화처럼 이어지는 Chat 타임라
 |---|---|---|
 | <a id="jev-ecs-01"></a>[ECS-01 업무 재개][ecs-01] | [DISC-01](#jev-disc-01)·[BOARD-01](#jev-board-01)·[DEVICE-01](#jev-device-01), [BF-07](#jev-bf-07)·[09](#jev-bf-09)·[10](#jev-bf-10), [AGENT-01](#jev-agent-01), [CTX-01](#jev-ctx-01)·[02](#jev-ctx-02), [ONT-01](#jev-ont-01); 인접 확장: [SHARE-01](#jev-share-01) | 현재 identity·권한·복구는 System. CANVAS/COL/UX와 반출 검토 SHARE 후보는 이 상황의 **확장 제안**이며 원 ECS에 이미 명시된 기능으로 주장하지 않음 |
 | <a id="jev-ecs-02"></a>[ECS-02 자료 검토][ecs-02] | [BF-03](#jev-bf-03)–[BF-10](#jev-bf-10), [CHAT-01](#jev-chat-01)·[02](#jev-chat-02), [AGENT-01](#jev-agent-01), [CTX-01](#jev-ctx-01), [READ-01](#jev-read-01) | 원문 확보·coverage·읽기 범위·최종 Answer는 기존 책임 유지 |
-| <a id="jev-ecs-03"></a>[ECS-03 Live 조작 관찰][ecs-03] | [BF-01](#jev-bf-01)–[BF-03](#jev-bf-03) | 실제 입력·secret·lease·사용자 양보·재관측은 코드. 직접 클릭 전부에 Jev를 끼우지 않음 |
+| <a id="jev-ecs-03"></a>[ECS-03 Live 조작 관찰][ecs-03] | [BF-01](#jev-bf-01)–[BF-03](#jev-bf-03) | 실제 입력·secret·lease·사용자 양보·재관측은 코드. 직접 클릭 전부에 결정 모델을 끼우지 않음 |
 | <a id="jev-ecs-04"></a>[ECS-04 새 권한·외부 효과][ecs-04] | 직접 자동 승인 후보 없음. [SHARE-01](#jev-share-01)·[BF-10](#jev-bf-10)의 보조 검토를 조건부 사용 | exact target·approval·receipt·query-before-replay는 코드. 기존 위임 안 행동마다 새 승인 요구 없음 |
 | <a id="jev-ecs-05"></a>[ECS-05 단절 후 복구][ecs-05] | [BF-02](#jev-bf-02)·[RUN-01](#jev-run-01) | 경계 probe·복구 선택·checkpoint·중복 효과 방지는 코드. 미확인 원인 유지 |
 | <a id="jev-ecs-06"></a>[ECS-06 분담·통합 결과 검토][ecs-06] | [ORCH-01](#jev-orch-01)·[02](#jev-orch-02), [CHAT-01](#jev-chat-01)·[02](#jev-chat-02), [AGENT-01](#jev-agent-01), [READ-01](#jev-read-01), [BF-08](#jev-bf-08)–[10](#jev-bf-10), [BRIEF-01](#jev-brief-01), [POV-01](#jev-pov-01) | 계획·통합·최종 답변은 담당 Agent; lifecycle·권한·판정 대상 revision은 System |
@@ -732,7 +735,7 @@ Jev 판정·진행 로그가 사람 간 대화처럼 이어지는 Chat 타임라
 |---|---|---|---|
 | [§1.1][old-1] typed 판단 | 채택 후보 | Choice/Noul/Score의 현재 계약을 사용. Noul을 반환 Boolean이나 별도 confidence로 표기한 부분은 재검토. typed 출력은 정확성을 보장하지 않음. [공식 primitives][ts-choice] | §9.2와 전체 후보 |
 | [§1.1–1.2][old-1] Non-Autoregressive·20–100ms·40–200배·40–400배 | 재검토 | 현재 읽은 공식 자료만으로 모델 내부 구조와 해당 비교 수치를 EG-Desk 보장으로 확정할 수 없음. 추출·네트워크·질문 수·fallback 포함 실측 필요 | [계측 계획](#jev-validation-plan) |
-| [§2 Pillar 1][old-2] Firefox 내부 sub-30ms 직접 액션 | 재검토 | Jev는 텍스트 판단. Browser action·event wait·재관측은 코드. Canvas·가상화로 DOM 전체성 불명. [모델][ts-models]·[CAP-05][cap-05] | BF-01–03·05 |
+| [§2 Pillar 1][old-2] Firefox 내부 sub-30ms 직접 액션 | 재검토 | 결정 모델은 텍스트 판단. Browser action·event wait·재관측은 코드. Canvas·가상화로 DOM 전체성 불명. [모델][ts-models]·[CAP-05][cap-05] | BF-01–03·05 |
 | [§2 Pillar 2][old-2] 확률로 OAuth/SSO·서버 준비·성공 확정 | 해당 확정 방식 제외 후보 | UI 의미는 보조 신호. 실제 계정·권한·health·완료는 독립 검사. 구조화 결과가 있으면 코드 사용. [§14.1][c-identity]·[§13][c-failure] | BF-02, RUN-01 |
 | [§2 Pillar 3][old-2] 위험 Score 하나로 명령 자동 통과 | 단독 안전 gate 제외 후보 | 낮은 위험 점수는 실행 권한이 아님. 정확 대상·sandbox·권한·비가역성·실행 조건은 코드. 언어적 위험 검토를 붙일지는 별도 측정 | CAP-07 코드 책임, SHARE-01 인접 보조 |
 | [§2 Pillar 4][old-2] HUD 인텐트·액션 순위 | 채택 후보 | 명시 대상과 허용 command 우선. 추천 도착만으로 실행·focus 전환하지 않음 | CHAT-01, AGENT-01, UX-01 |
@@ -759,9 +762,9 @@ Jev 판정·진행 로그가 사람 간 대화처럼 이어지는 Chat 타임라
 | JEV-V02 · BF-04/05, READ-01 | “긴 한글 PDF와 웹문서를 전부 비교한다.” → 읽은/미확보/미판독 범위와 OCR 오류를 확인 | 요청 읽기 범위·누락·추출 실패·전 partition coverage 추적. 내부 검사 구성과 관계없이 전체 읽기 누락·허위 완료가 없는지 검사 | packet의 누락 요구를 찾아 기존 위임 안 원문 재진입; 별도 검사 Agent나 매번 사용자 답변을 필수화하지 않음 |
 | JEV-V03 · BF-06/07/08/09 | “같은 원본을 A/B보드에서 쓰다가 수정한다.” → EG-Desk 수정 전 연결 보드 확인과 외부 앱 수정 후 변경 감지·재조회가 구분됨 | 코드의 연결 record 조회·수정 전 검사·외부 변경 관측·revision·기존 정책상 원문 보존을 대조. 자동 과거 버전 보관/최신 추종은 확정하지 않음 | 예정 diff와 관측 diff를 구분해 보드별 의미 영향만 제안; 연결 불명·미로드를 영향 없음/삭제로 단정하지 않음 |
 | JEV-V04 · BF-10, BRIEF-01, POV-01 | “보고서의 당시 근거와 현재 자료를 비교하고 고객용 설명을 확인한다.” → 당시/현재·지지/불명·설명 대상이 구분됨 | 원문 인용 존재·당시 payload·Step target·권한 검증 | 주장 지원과 화자/내부 지시 누출을 각각 검사; 숨은 추론을 공개하지 않음 |
-| JEV-V05 · CHAT-01/02, CTX-01 | “기본 Codex 또는 선택 Agent에서 두 업무 중 하나에 ‘이것도 고쳐줘’라고 쓴다.” → 대상·자료를 확인하고 다른 업무는 계속 | Profile 생성 전 기본 사용·명시 binding·Memo revision·trigger·수신자·중복 방지 확인. Jev 판정/로그로 대화가 혼잡해지는지 검사 | 모호성만 보정; 시선·View 이동으로 대상/응답 권한을 바꾸지 않음. 필요한 상세 확인 경로는 기존 정책 안의 후보로 검토 |
+| JEV-V05 · CHAT-01/02, CTX-01 | “기본 Codex 또는 선택 Agent에서 두 업무 중 하나에 ‘이것도 고쳐줘’라고 쓴다.” → 대상·자료를 확인하고 다른 업무는 계속 | Profile 생성 전 기본 사용·명시 binding·Memo revision·trigger·수신자·중복 방지 확인. 결정 모델 판정/로그로 대화가 혼잡해지는지 검사 | 모호성만 보정; 시선·View 이동으로 대상/응답 권한을 바꾸지 않음. 필요한 상세 확인 경로는 기존 정책 안의 후보로 검토 |
 | JEV-V06 · AGENT-01, CTX-02 | “선택 모델로 B사 업무를 계속한다.” → 실제 계정·모델과 적용 기억을 확인 | pin·ACL·기억 조건·만료·비용·전송 범위 검사 | 허용 후보 추천·조건 내 기억 판단; A사 규칙을 재사용하지 않음 |
-| JEV-V07 · ORCH-01/02, BF-08/09, READ-01, RUN-01, POV-01 | “코딩 분담 업무의 diff를 검토하고 Terminal 오류·끊긴 분기를 확인한다.” → 성공 기여·실제 검사 결과·취소/늦은 결과·unknown을 구별 | 실제 파일 쓰기·컴파일/테스트 판정·검사 revision·PTY 존속·입력 전달·권한·종료 증거, dependency·lease·취소 이후 실행 차단을 대조 | diff의 업무 영향·비정형 오류·늦은 기여·결과 설명을 검토. Terminal 호출마다 Jev를 요구하거나 미확인 외부 행동을 재전송하지 않음 |
+| JEV-V07 · ORCH-01/02, BF-08/09, READ-01, RUN-01, POV-01 | “코딩 분담 업무의 diff를 검토하고 Terminal 오류·끊긴 분기를 확인한다.” → 성공 기여·실제 검사 결과·취소/늦은 결과·unknown을 구별 | 실제 파일 쓰기·컴파일/테스트 판정·검사 revision·PTY 존속·입력 전달·권한·종료 증거, dependency·lease·취소 이후 실행 차단을 대조 | diff의 업무 영향·비정형 오류·늦은 기여·결과 설명을 검토. Terminal 호출마다 결정 모델을 요구하거나 미확인 외부 행동을 재전송하지 않음 |
 | JEV-V08 · BF-04, DISC-01, BOARD-01, CANVAS-01, UX-01 | “편집·코딩에 관련된 파일과 업무 자료를 찾고 선택한 화면만 정리·저장한다.” → 관련 후보·배치 미리보기·실제 저장 범위 확인 | ACL·명시 선택·기존 저장 정책·좌표·undo·IME/focus 처리. 파일 추천·화면 저장을 실제 파일 쓰기 권한으로 해석하지 않음 | 의미 추천은 요청 범위 안에서; 매 클릭/저장/다음 버튼에 재추론을 강제하지 않음 |
 | JEV-V09 · DEVICE-01, SHARE-01 | “검토만 허용한 자료를 다른 PC의 담당자에게 전달한다.” → 제외 자료·조건·전달/접근 상태 구분 | 외부 처리 허용을 선확인; identity·manifest·credential 제외·현재 권한 검사 | 허용 text에서 조건 누락·위험만 판단; 낮은 점수로 공유 허가하지 않음 |
 | JEV-V10 · ONT-01/02/03 | “규칙 변경 후보를 검토한다.” → 원문·조건·예외·구조/의미 검사와 활성 상태 분리 | 필수 closure·stable ID·schema·source revision·승격 정책 집행 | 참고 순위·분류·예외 누락 finding; 구조 PASS를 의미 PASS로 확대하지 않음 |
@@ -772,17 +775,17 @@ Jev 판정·진행 로그가 사람 간 대화처럼 이어지는 Chat 타임라
 
 | 비교/측정 | 계획 |
 |---|---|
-| 기준선 | 같은 입력·권한·source revision에서 기존 코드/정확 검색/FTS·규칙, 기존 담당 Agent, Jev 보조 경로를 비교한다. 현행 구현 성능을 확인한 것으로 쓰지 않는다. |
+| 기준선 | 같은 입력·권한·source revision에서 기존 코드/정확 검색/FTS·규칙, 기존 담당 Agent, 결정 모델 보조 경로를 비교한다. 현행 구현 성능을 확인한 것으로 쓰지 않는다. |
 | 정답·실패 분류 | 사람 검토 라벨과 근거 구간을 준비하고 누락 입력, 모델 오판, 코드 적용 오류, 서비스 실패를 분리한다. held-out 사례에서 검토하며 정답을 prompt로 재주입하지 않는다. |
 | 의미 검색 | 후보 recall, 관련 구간 precision, no-match 오판, 중복/이동 anchor 정확도, 미확보 범위가 잘못 제외된 수를 측정한다. |
 | 변경·영향·인용 | 의미 변경 누락/과잉 경고, 보드별 영향 precision/recall, 주장 지지 오판, 숫자·부정·조건·예외 오류를 측정한다. |
 | 불확실 | Noul calibration, Choice/Score 분포와 실제 오류, abstention 비율, 자동 처리 범위별 오류와 검토 부담을 측정한다. cookbook의 0.8/0.9 등을 제품 임계치로 복사하지 않는다. |
 | 한국어/CJK | 한글·영문 혼합, 띄어쓰기·OCR·약어·회사명·숫자·법인/역할 구분과 부정/예외 문장을 별도 층으로 평가한다. 영어 결과를 한국어 정확도로 환산하지 않는다. |
-| 비용·시간 | 추출/OCR·상태 구성·네트워크·Jev·재시도·fallback 포함 p50/p95와 호출 수·입력 token·업무당 비용·사용자 대기 시간을 비교한다. 공급자 수치는 로컬 end-to-end 결과가 아니다. |
+| 비용·시간 | 추출/OCR·상태 구성·네트워크·결정 모델·재시도·fallback 포함 p50/p95와 호출 수·입력 token·업무당 비용·사용자 대기 시간을 비교한다. 공급자 수치는 로컬 end-to-end 결과가 아니다. |
 | 필수 불변조건 | 무권한 입력·실행·전송, 원문 덮어쓰기, credential 보존, 잘못된 identity 병합, 미완료 완료 표시, 취소된 작업 재개가 시험에서 발생하는지 검사한다. “0건 목표”는 달성 결과가 아니다. |
 | 검증 결과 기록 | 모델 version·질문/후보 version·입력 hash·범위·코드 적용 결과·측정 시각을 연결한다. 실제 평가 전 값은 NOT-RUN으로 둔다. |
 
-외부 평가 입력은 합성 자료 또는 별도로 외부 처리가 허용된 최소 자료부터 준비한다. 민감정보 탐지를 명분으로 원문을 먼저 전송하지 않는다. 실제 Jev 호출·실사용 데이터 전송·추가 비용은 이번 문서 편집에서 수행하지 않았다.
+외부 평가 입력은 합성 자료 또는 별도로 외부 처리가 허용된 최소 자료부터 준비한다. 민감정보 탐지를 명분으로 원문을 먼저 전송하지 않는다. 실제 결정 모델 호출·실사용 데이터 전송·추가 비용은 이번 문서 편집에서 수행하지 않았다.
 
 <a id="jev-priority-approvals"></a>
 ### 9.9 적용 준비 순서와 기존 정책 연결
@@ -799,7 +802,7 @@ Jev 판정·진행 로그가 사람 간 대화처럼 이어지는 Chat 타임라
 
 | 기존 결정 위치 | 이번 준비안이 연결할 질문/검사 |
 |---|---|
-| [HUM-ENGINE-001][h-engine]·[HUM-RUN-001][h-run] | 선택 모델·계정 pin, 허용 후보 추천, Jev provider·credential·추가 비용·전송 범위, 기억/자동 조정 사전 위임 |
+| [HUM-ENGINE-001][h-engine]·[HUM-RUN-001][h-run] | 선택 모델·계정 pin, 허용 후보 추천, 결정 모델 provider·credential·추가 비용·전송 범위, 기억/자동 조정 사전 위임 |
 | [HUM-SURFACE-001][h-surface]·[HUM-AGENDA-001][h-board] | 같은 자리 reload의 form/미저장 처리, live 재사용, 보드별 참조 부분과 기존 저장/복구 범위. 최신 추종/과거 고정 질문을 답변 완료로 처리하지 않음 |
 | [HUM-CONV-001][h-conv] | Memo 후속 대화·proactive trigger·수신자·중복 알림·공유 범위 |
 | [HUM-ANSWER-001][h-answer]·[HUM-BRIEF-001][h-brief] | 영향 제안 뒤 설명 갱신 방식, 수정본·Step·주석의 현재 정책 |
@@ -815,29 +818,29 @@ Jev 판정·진행 로그가 사람 간 대화처럼 이어지는 Chat 타임라
 <a id="jev-document-matrix"></a>
 ### 9.10 문서 반영 matrix
 
-기술 선택이 사용자 경험·보장·책임을 바꾸는 곳만 수정 후보로 삼는다. 모든 문서에 Jev라는 단어를 삽입하는 작업이 아니다. 아래 링크는 현재 파일과 절을 확인한 상대 경로다. 이번 쓰기는 이 §9뿐이며, 대상 문서에서 §9로 돌아오는 역링크는 해당 문서 편집이 별도로 승인·채택될 때 같은 stable ID로 추가한다. 기존 ID·alias를 다시 번호 매기지 않는다.
+기술 선택이 사용자 경험·보장·책임을 바꾸는 곳만 수정 후보로 삼는다. 모든 문서에 결정 모델라는 단어를 삽입하는 작업이 아니다. 아래 링크는 현재 파일과 절을 확인한 상대 경로다. 이번 쓰기는 이 §9뿐이며, 대상 문서에서 §9로 돌아오는 역링크는 해당 문서 편집이 별도로 승인·채택될 때 같은 stable ID로 추가한다. 기존 ID·alias를 다시 번호 매기지 않는다.
 
 | 문서·검토할 절 | 원문이 사용되는 이유 | 반영할 내용·조건 | 이번 상태 |
 |---|---|---|---|
-| [Jev 초안 §9](#jev-preparation-20260926) | 기술 후보·과거 아이디어 재검토의 통합 위치 | 32개 후보·33개 상황·coverage·검증·변경 계획. [기존 절 검토](#jev-legacy-review)와 후보를 연결 | **현재 유일한 편집 대상** |
+| [결정 모델 초안 §9](#jev-preparation-20260926) | 기술 후보·과거 아이디어 재검토의 통합 위치 | 32개 후보·33개 상황·coverage·검증·변경 계획. [기존 절 검토](#jev-legacy-review)와 후보를 연결 | **현재 유일한 편집 대상** |
 | [Atlas 기능 색인][a-index]·[Browser][a-tool1]·[파일][a-tool2]·[읽기][a-r1]·[Answer][a-ai4] | 사람이 하는 UI 행동·화면 결과의 기준 | 채택 후 target 선택·수정 전 연결 보드 확인/외부 수정 후 감지·근거/영향·복귀를 각 trace에 반영. 파일·diff·코딩·Terminal의 적용/비적용 경계와 기본 Codex 대화 흐름도 확인. JEV 준비안 ID를 제품 객체로 승격하지 않음 | 후속 수정 후보 |
-| [Contract §2][c-context]·[§14][c-binding]·[§15][c-storage]·[§17][c-details] | 입력·판단·실행권한·실패·보존 보장의 기준 | 요청 읽기 범위·미확보 추적과 내부 구조 재량, Jev 판정·authority·fallback·원문/packet lineage를 계약화. §6·7의 파일/코딩·Terminal에서는 실제 쓰기·컴파일/테스트 판정·PTY·입력 전달·종료 증거의 코드 책임을 유지 | 후속 수정 후보 |
+| [Contract §2][c-context]·[§14][c-binding]·[§15][c-storage]·[§17][c-details] | 입력·판단·실행권한·실패·보존 보장의 기준 | 요청 읽기 범위·미확보 추적과 내부 구조 재량, 결정 모델 판정·authority·fallback·원문/packet lineage를 계약화. §6·7의 파일/코딩·Terminal에서는 실제 쓰기·컴파일/테스트 판정·PTY·입력 전달·종료 증거의 코드 책임을 유지 | 후속 수정 후보 |
 | [ECS 7개][ecs-section]·[CAP 13개][cap-section] | 실제 사용 목적·전환·책임·실패 범위 | 기존 ID에서 도움 되는 좁은 판단과 미적용 보장을 설명. 전용 상황 없는 후보는 확장/인접으로 명시 | 후속 수정 후보 |
 | [UX §3][u-reading]·[§4][u-policy]·[§6][u-observation] | 구체 반응·불확실·재연결·사용자 조작 | 같은 자리 reload·부분 대응·불명/미판독·영향 제안·기존 코드 fallback·비간섭을 필요한 화면에만 설명 | 후속 수정 후보 |
 | [Owner 원장][h-top] | 실제 미결정과 결정 상태의 소유자 | 이번 영향은 기존 HUM에 연결. 사용자 답 없이 OPEN을 닫거나 새 확정값을 넣지 않음 | OPEN 15 유지 |
 | [Governance][gov-top]·[3관점 검토][gov-three] | 문서 권위·화자·stable ID·검증 근거 관리 | source/모델/질문 revision·실측·문서 검사와 NOT-RUN을 구분. 기술 검토 문장을 사용자 매뉴얼/백서 발화로 복사하지 않음 | 후속 근거 동기화 후보 |
 | [docs/README][docs-start] | 목적별 읽기 입구 | 채택된 준비안·정본의 읽기 경로만 동기화 | 채택 후 동기화 |
 | [project-context의 source precedence][project-context] | 채택 범위·구현 상태와 정본 우선순위 | 준비/채택/구현/실증을 구별해 프로젝트 context에 반영 | 채택 후 동기화 |
-| [Production_v8 백서의 근거 설명][whitepaper] | 업무 담당자·의사결정자에게 사용자 효과 설명 | 사용자 효과가 실제로 달라질 때만 영향 검토. Jev 브랜드·개발 메타·편집 지시를 삽입하지 않음 | 조건부 영향 검토 |
+| [Production_v8 백서의 근거 설명][whitepaper] | 업무 담당자·의사결정자에게 사용자 효과 설명 | 사용자 효과가 실제로 달라질 때만 영향 검토. 결정 모델 브랜드·개발 메타·편집 지시를 삽입하지 않음 | 조건부 영향 검토 |
 | [firefox-ui-demo README][app-readme] | 실제 데모·사용·검증 범위 안내 | 실제 채택·구현 뒤 사용 가능한 동작과 검증을 동기화 | 현 단계 변경 없음 |
-| [Browser observation runtime][browser-runtime] | before/action/after/diff/notification 계약 | raw 관측과 의미 판단·부분 범위·stale·미로드·Jev 장애의 구분을 직접 수정 후보로 검토. 문서의 Implemented 표기를 새 Jev 구현 증거로 확대하지 않음 | 직접 수정 후보, 이번에는 읽기만 |
+| [Browser observation runtime][browser-runtime] | before/action/after/diff/notification 계약 | raw 관측과 의미 판단·부분 범위·stale·미로드·결정 모델 장애의 구분을 직접 수정 후보로 검토. 문서의 Implemented 표기를 새 결정 모델 구현 증거로 확대하지 않음 | 직접 수정 후보, 이번에는 읽기만 |
 | [Human-in-the-loop Await][await-model] | 조건·대기·재개 책임 | 의미 신호와 실제 authority/완료 조건·checkpoint·재조회 경계를 직접 수정 후보로 검토 | 직접 수정 후보, 이번에는 읽기만 |
 | [Chat/Canvas Agent layer][layer-model] | 대화·작업·생각 공간·관찰 투영 | 채택된 대상 선택·Memo·Briefing·원문/요약·화자 검사 부분의 영향만 검토 | 해당 부분 영향 검토 |
-| [Desk/Board runtime][board-runtime]·[SourceRef][runtime-source] | 저장·view/runtime 수명·출처 참조 | 보드별 사용 부분·source identity와 수정 전 다른 보드 연결 조회/외부 수정 후 감지·재조회 관계를 검토. 연결·보존은 코드, 의미 영향은 Jev 보조로 구분하며 자동 과거 버전 보관·최신 추종은 기존 미결 정책 유지 | 해당 부분 영향 검토 |
-| [Ontology schema 관계][schema-relations]·[읽기 규칙][schema-context] | 채택된 개념/관계·필수 읽기 경계 | 원본 Markdown/frontmatter의 관계 의미가 채택됐을 때만 schema·해당 원본 수정. Jev 점수만으로 원본을 이동·승격하지 않음 | 조건부 원본 수정 후보 |
+| [Desk/Board runtime][board-runtime]·[SourceRef][runtime-source] | 저장·view/runtime 수명·출처 참조 | 보드별 사용 부분·source identity와 수정 전 다른 보드 연결 조회/외부 수정 후 감지·재조회 관계를 검토. 연결·보존은 코드, 의미 영향은 결정 모델 보조로 구분하며 자동 과거 버전 보관·최신 추종은 기존 미결 정책 유지 | 해당 부분 영향 검토 |
+| [Ontology schema 관계][schema-relations]·[읽기 규칙][schema-context] | 채택된 개념/관계·필수 읽기 경계 | 원본 Markdown/frontmatter의 관계 의미가 채택됐을 때만 schema·해당 원본 수정. 결정 모델 점수만으로 원본을 이동·승격하지 않음 | 조건부 원본 수정 후보 |
 | [ontology/index][ontology-index]·[generated graph][generated-graph] | 원본 선택 경로와 파생 표시 | 원본이 실제로 바뀔 때만 index·생성 graph 동기화. 생성 graph를 정본으로 편집하지 않음 | 원본 변경 전 동기화 없음 |
 | [AGENTS.md][main-profile]·[egdesk-pm.toml][pm-profile] | 운영 역할·라우팅 지침 | 후보 기술 추가만으로 역할·권한·프로필을 바꿀 필요 없음 | **변경 불필요** |
-| [기존 사례·원문 인용 경계][gov-top] | 과거 사실과 결정 근거 | 과거 사례를 Jev로 수행한 것처럼 역사 수정하지 않음. 필요한 경우 현재의 별도 적용 제안으로 연결 | 원문 보존 |
+| [기존 사례·원문 인용 경계][gov-top] | 과거 사실과 결정 근거 | 과거 사례를 결정 모델로 수행한 것처럼 역사 수정하지 않음. 필요한 경우 현재의 별도 적용 제안으로 연결 | 원문 보존 |
 
 JSON/TOML 대상은 문서 section anchor가 없는 파일 링크다. Markdown은 확인한 명시 anchor 또는 현 heading anchor를 사용한다. 후보→CAP/ECS→후보, 후보→정본, 검토표→기존 초안, matrix→후보/검증 계획의 탐색 관계를 유지한다.
 
@@ -863,7 +866,7 @@ JSON/TOML 대상은 문서 section anchor가 없는 파일 링크다. Markdown�
 
 - 이번 산출물은 기존 파일 뒤에 추가한 §9다. 기존 48,121 bytes·572줄 prefix, 다른 dirty/untracked 자료와 Git index·HEAD·branch는 변경 대상이 아니다.
 - 자체 점검은 §9의 상대 경로·fragment·명시 anchor 중복, 32개 후보/33개 상황, CAP 13개/ECS 7개, 공식 text-only/CJK·권한·보존 경계와 원 prefix 일치를 대상으로 한다. 최종 전체 QA와 제품 검토는 별도 담당자가 수행한다.
-- 실제 Jev 평가·한국어 실측·앱 구현·사용자 시뮬레이션·실사용 데이터 전송은 **NOT-RUN**이다. 문서 링크/편집 검사를 이 결과와 혼동하지 않는다.
+- 실제 결정 모델 평가·한국어 실측·앱 구현·사용자 시뮬레이션·실사용 데이터 전송은 **NOT-RUN**이다. 문서 링크/편집 검사를 이 결과와 혼동하지 않는다.
 - 후속 문서 반영은 [matrix](#jev-document-matrix)의 해당 범위만 별도로 진행한다. 검토 결과가 추가되면 이 준비안의 후보 ID와 기존 stable ID를 유지해 수정한다.
 
 <a id="jev-briefing-latency-review"></a>
@@ -879,12 +882,12 @@ JSON/TOML 대상은 문서 section anchor가 없는 파일 링크다. Markdown�
 
 | 지연 구간 | 검토할 최적화 | 책임·한계 |
 |---|---|---|
-| 자료 선택 | 기존 tool 결과·고정 Snapshot·Answer reportItems를 후보로 재사용하고 코드로 범위를 좁힌 뒤 Jev가 설명 목적별 관련성을 평가 | System이 source·범위·권한을 확인. Jev는 확보된 text/검증된 구조 표현만 판단하며 이미지·차트의 보이지 않는 내용을 추측하지 않음 |
-| 근거 연결 | 코드가 ID·revision·인용 위치·lineage를 검사하고, 필요한 주장–근거 후보쌍에만 Jev의 지지/반박/무관/불명 판단을 적용 | 실제 확보 근거와 의미 검토를 함께 확인. Jev 확신을 사실 인증·전체 판독 완료로 승격하지 않음 |
-| 단계·순서 구성 | 제한된 비교/타임라인/요약+근거 표현형 중 적합한 후보를 Jev가 추천하고 코드가 지원 템플릿을 준비 | 해당 없음·기존 구성 유지도 가능. 담당 모델이 설명의 이야기 순서와 단계 연결을 구성하며 점수순 정렬로 발표 순서를 대체하지 않음 |
-| 설명문 작성 | 선별된 자료와 근거를 담당 모델에 함께 전달하고, 변경된 단계의 설명만 필요한 범위에서 재작성 | 실제 한국어 문장·서사·조건/예외 설명은 담당 모델 소유. Jev는 설명 생성기를 대신하지 않음 |
-| 레이아웃·렌더 | 코드 템플릿으로 target 배치·강조·framing을 계산하고 인접 Step의 필요한 렌더 자원을 선행 준비 | Firefox layout·GPU·이미지/문서 디코딩·viewer mount 비용은 별도 프로파일링. Jev 판단 속도로 해결됐다고 주장하지 않음 |
-| 게시 후 탐색 | 고정 Step 설명·targetRefs·focus plan을 사용해 로컬에서 다음/이전/전체 보기 전환 | **Next/Previous 클릭마다 LLM/Jev 왕복하지 않음.** 권한·target 유효성 검사와 기존 오류/재연결 경로는 계속 적용 |
+| 자료 선택 | 기존 tool 결과·고정 Snapshot·Answer reportItems를 후보로 재사용하고 코드로 범위를 좁힌 뒤 결정 모델이 설명 목적별 관련성을 평가 | System이 source·범위·권한을 확인. 결정 모델은 확보된 text/검증된 구조 표현만 판단하며 이미지·차트의 보이지 않는 내용을 추측하지 않음 |
+| 근거 연결 | 코드가 ID·revision·인용 위치·lineage를 검사하고, 필요한 주장–근거 후보쌍에만 결정 모델의 지지/반박/무관/불명 판단을 적용 | 실제 확보 근거와 의미 검토를 함께 확인. 결정 모델 확신을 사실 인증·전체 판독 완료로 승격하지 않음 |
+| 단계·순서 구성 | 제한된 비교/타임라인/요약+근거 표현형 중 적합한 후보를 결정 모델이 추천하고 코드가 지원 템플릿을 준비 | 해당 없음·기존 구성 유지도 가능. 담당 모델이 설명의 이야기 순서와 단계 연결을 구성하며 점수순 정렬로 발표 순서를 대체하지 않음 |
+| 설명문 작성 | 선별된 자료와 근거를 담당 모델에 함께 전달하고, 변경된 단계의 설명만 필요한 범위에서 재작성 | 실제 한국어 문장·서사·조건/예외 설명은 담당 모델 소유. 결정 모델은 설명 생성기를 대신하지 않음 |
+| 레이아웃·렌더 | 코드 템플릿으로 target 배치·강조·framing을 계산하고 인접 Step의 필요한 렌더 자원을 선행 준비 | Firefox layout·GPU·이미지/문서 디코딩·viewer mount 비용은 별도 프로파일링. 결정 모델 판단 속도로 해결됐다고 주장하지 않음 |
+| 게시 후 탐색 | 고정 Step 설명·targetRefs·focus plan을 사용해 로컬에서 다음/이전/전체 보기 전환 | **Next/Previous 클릭마다 LLM/결정 모델 왕복하지 않음.** 권한·target 유효성 검사와 기존 오류/재연결 경로는 계속 적용 |
 
 #### 후보 준비·독립 질문·점수 재사용
 
@@ -901,8 +904,8 @@ JSON/TOML 대상은 문서 section anchor가 없는 파일 링크다. Markdown�
 - 출처 유효성·현재 권한·필수 근거 충족은 별도의 하드 조건이다. 미감·관련성·설명 적합성 점수로 보상 통과시키지 않는다.
   의미상 지지가 불확실하면 담당 모델의 재검토 대상으로 남기고, 검사 완료처럼 표시하지 않는다.
 - 필수 자료·미확보 pending을 낮은 점수로 제거하지 않는다. 전체 읽기 coverage는 기존 System 기록과 추가 읽기로 확인한다.
-- Jev 단계 자체의 상태 구성·네트워크·재시도 시간이 추가된다. 선별·재검토 감소보다 크면 전체 준비가 느려질 수 있다.
-  기존 경로와 비교해 이득이 없는 질문은 생략하며 모든 Step에 Jev 검사를 강제하지 않는다.
+- 결정 모델 단계 자체의 상태 구성·네트워크·재시도 시간이 추가된다. 선별·재검토 감소보다 크면 전체 준비가 느려질 수 있다.
+  기존 경로와 비교해 이득이 없는 질문은 생략하며 모든 Step에 결정 모델 검사를 강제하지 않는다.
 
 #### 캐시·프레이밍·자원 선행 준비
 
@@ -910,7 +913,7 @@ JSON/TOML 대상은 문서 section anchor가 없는 파일 링크다. Markdown�
 
 - source snapshot/hash·source revision·Answer revision;
 - goal/read intent·설명 목적·독자/화자 등 판단에 영향을 주는 맥락;
-- 질문·criteria/rubric version·Jev model version·후보 manifest와 평가 대상쌍;
+- 질문·criteria/rubric version·결정 모델 model version·후보 manifest와 평가 대상쌍;
 - 평가에 사용한 자료 범위와 공개 조건. 권한은 캐시 적중과 별도로 전송·표시 직전에 재검사한다.
 
 source/Answer revision, 질문이나 맥락이 바뀌면 영향받은 캐시를 재검증하고 필요한 판단만 다시 수행한다.
@@ -936,12 +939,12 @@ Chat에 단계 목록·진행 로그를 자동 누적하는 기본 UX를 확정�
 사용자가 브리핑을 열거나 단계를 이동할 때 해당 presentation 전환을 적용한다.
 target 유실·권한 변경에는 기존 정책이 허용하는 당시 자료 보기·재연결·제외/대체·오류 안내를 적용한다.
 그 경로에서 필요한 명시적 요청과 검사를 유지하며, 이번 속도 검토로 새로운 일괄 복구 금지 정책을 만들지 않는다.
-Jev 불확실·공급자 장애에는 담당 모델의 기존 경로로 복귀한다. 준비 실패에도 기존 Answer·게시본·초안을 보존한다.
+결정 모델 불확실·공급자 장애에는 담당 모델의 기존 경로로 복귀한다. 준비 실패에도 기존 Answer·게시본·초안을 보존한다.
 
 #### 비교 평가 — NOT-RUN
 
 같은 Answer/source revision·요청·권한·기기·Firefox 환경에서 아래 세 경로를 비교한다.
-A는 기존 담당 LLM 경로, B는 **코드 템플릿·선별·사전계산만 추가**한 경로, C는 **B에 좁은 Jev 판단을 추가**한 경로다.
+A는 기존 담당 LLM 경로, B는 **코드 템플릿·선별·사전계산만 추가**한 경로, C는 **B에 좁은 결정 모델 판단을 추가**한 경로다.
 B/C에서도 실제 설명문은 같은 담당 모델이 작성하며 설명 생성 조건을 고정해 비교한다.
 
 | 측정 축 | 기록할 값·실패 조건 |
@@ -949,13 +952,13 @@ B/C에서도 실제 설명문은 같은 담당 모델이 작성하며 설명 생
 | 최초 유용한 Step | 요청 수락부터 검증된 실자료·설명이 함께 사용 가능할 때까지의 시간; 빈 목차·spinner 제외 |
 | 전체 준비 | 전체 Step·설명·필수 근거 검사·게시 완료까지의 시간; 시안 표시를 전체 완료로 집계하지 않음 |
 | Next 전환 p95 | 사용자 입력부터 대상·설명이 안정적으로 표시될 때까지; cache hit/miss·자료형·기기 조건을 분리 |
-| 호출·입력·후보량 | LLM/Jev 호출 수·입력 token·실제 후보/평가쌍 수·재시도·fallback·업무당 비용과 cache hit/miss |
+| 호출·입력·후보량 | LLM/결정 모델 호출 수·입력 token·실제 후보/평가쌍 수·재시도·fallback·업무당 비용과 cache hit/miss |
 | 근거·설명 품질 | 잘못된 근거 연결·조건/예외 누락, Step 간 설명 일관성, 한국어 자연스러움·부정/생략 해석 |
 | 화면 품질·렌더 | 좁은 화면 혼잡·가독성·대상 식별·프리패치 메모리/IO, Firefox layout·GPU·디코딩·mount 구간별 시간 |
 | 경계·회복 | 권한 철회·stale/유실 target·캐시 무효화·공급자 장애, 강제 카메라 이동·Next 모델 호출·미완 게시 오인 여부 |
 
 이는 측정 항목 제안이며 속도 목표치·개선율·통과 실적을 부여하지 않는다. 실제 API/UI 시뮬레이션은 **NOT-RUN**이다.
-외부 자료 전송·Jev credential·추가 비용·서버 도입은 [기존 승인 범위](#jev-priority-approvals)를 따르며 이 문서 보완으로 승인되지 않는다.
+외부 자료 전송·결정 모델 credential·추가 비용·서버 도입은 [기존 승인 범위](#jev-priority-approvals)를 따르며 이 문서 보완으로 승인되지 않는다.
 
 [ts-models]: https://docs.typesafe.ai/models
 [ts-state]: https://docs.typesafe.ai/concepts/state
@@ -1094,8 +1097,8 @@ B/C에서도 실제 설명문은 같은 담당 모델이 작성하며 설명 생
 [old-1]: #1-개요-overview
 [old-2]: #2-세부-제안-및-아키텍처-분석
 [old-3]: #3-jev-오픈소스-대안-생태계-및-로컬-구현-모델-분석-open-source-reproductions--alternatives
-[old-4]: #4-인지-아키텍처-관점의-대전환-decision-makingjev-vs-creative-generationllm
-[old-5]: #5-해마hippocampus와-파일메모리-시스템의-jev-전면-전환-구상
-[old-6]: #6-시간축-온톨로지스마트-폴더-체계에서-챗-에이전트의-jev-판단-보완-설계
+[old-4]: #4-인지-아키텍처-관점의-대전환-decision-making결정-모델-vs-creative-generationllm
+[old-5]: #5-해마hippocampus와-파일메모리-시스템의-결정-모델-전면-전환-구상
+[old-6]: #6-시간축-온톨로지스마트-폴더-체계에서-챗-에이전트의-결정-모델-판단-보완-설계
 [old-7]: #7-결론-eg-desk-cognitive-os의-완성
 [old-8]: #8-단계별-실증-및-도입-로드맵-roadmap

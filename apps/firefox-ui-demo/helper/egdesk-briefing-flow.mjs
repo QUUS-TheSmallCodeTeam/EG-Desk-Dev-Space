@@ -1,7 +1,7 @@
 import { predicateQuestion, choiceQuestion, readPredicate, readChoice } from './egdesk-decision-questions.mjs'
 import { BRIEFING_EMPHASIS, BRIEFING_MAX_TARGETS, validBriefing } from '../overlay/resources/EGDeskBriefingState.sys.mjs'
 
-// Answer Briefing flow (canon: INTERACTION_AND_ORCHESTRATION_CONTRACT section 8; JEV doc 9.4 JEV-BRIEF-01 "Briefing explanation matches its targets").
+// Answer Briefing flow (canon: INTERACTION_AND_ORCHESTRATION_CONTRACT section 8; Decision Model design doc 9.4 JEV-BRIEF-01 "Briefing explanation matches its targets").
 // The Decision model is a system-level judge at two points: (1) does a final report belong in a chat bubble or on the board, (2) is the designed
 // briefing's flow sound, step by step. It only answers closed questions about options THIS runtime enumerated from real facts (counts, steps,
 // targets, closed issue kinds, geometry). The subjective model (Codex/Claude) designs and redesigns; the user gets the briefing only after it passes,

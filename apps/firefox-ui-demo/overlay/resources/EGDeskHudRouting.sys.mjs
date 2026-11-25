@@ -1,4 +1,4 @@
-// Desk HUD routing, window half (L1 c20; Jev design Pillar 4 as reviewed: "명시 대상과 허용 command 우선. 추천 도착만으로 실행·focus 전환하지
+// Desk HUD routing, window half (L1 c20; Decision Model design Pillar 4 as reviewed: "명시 대상과 허용 command 우선. 추천 도착만으로 실행·focus 전환하지
 // 않음", CHAT-01 / AGENT-01 / UX-01). The Desk's search field (Ctrl/⌘ K, UX-04) already lists rows for what is typed: open cards, rooms,
 // Boards, history and files, the web row, and the "ask an Agent" row, and plain Enter runs the highlighted row (the first one unless the
 // person moved it). This module only decides WHICH ROW IS HIGHLIGHTED:

@@ -6,7 +6,7 @@ import { stripAnsi } from './egdesk-run-result-parse.mjs'
 import { estimateTokens } from './egdesk-smart-read.mjs'
 import { redactTail } from './egdesk-terminal-judge.mjs'
 
-// Working-memory gate (system level; JEV §5.4 and Pillar 5). Wired at the EG-Desk tool-result boundary by egdesk-working-memory-wiring.mjs (flag, default off).
+// Working-memory gate (system level; Decision Model design §5.4 and Pillar 5). Wired at the EG-Desk tool-result boundary by egdesk-working-memory-wiring.mjs (flag, default off).
 //
 // When a tool or sub-agent output comes back, the RUNTIME (code, no generation) splits it into blocks, marks the
 // anchor lines that must survive verbatim, and enumerates what it can do with each remaining block. The Decision model
