@@ -277,7 +277,8 @@ test('C3-6 [이유 묻기] draft, then mode off: the draft is an ordinary messag
     server[name] = { returned: out === null ? 'null (no setup ran)' : out.result.status, collectCalls: calls.collect }
   }
   note('draft after mode off -> ordinary send', { draftHasNoDecisionFields: !/choice-|reviewRevision|probab|requestId|confidence/i.test(draft), ordinaryArgs, sentText: d.sent[0].text === draft + '\n내가 덧붙인 말', server, ...posts, provider: d.counts().provider })
-  assert.deepEqual(ordinaryArgs, ['manualOwner'])
+  // u2 (D1): the composer also hands the send a UI callback (onBlocked) that shows the existing blocked line when the owner is refused; still no Decision field
+  assert.deepEqual(ordinaryArgs, ['manualOwner', 'onBlocked'])
   assert.doesNotMatch(draft, /choice-|reviewRevision|probab|requestId|confidence/i)
   assert.equal(d.counts().provider, posts.provider, 'sending the draft makes no Decisions request')
   assert.equal(d.counts().ui, posts.ui)
