@@ -220,12 +220,13 @@ export function nunchiMergedReport(results, preregistration) {
     const misses = []
     if (r.change !== e.change) misses.push(`change ${r.change} (mass ${r.changeMass}), wanted ${e.change}`)
     for (const f of ['about', 'direction', 'language']) if (e[f] !== undefined && r[f] !== e[f]) misses.push(`${f} ${r[f] ?? 'unread'}, wanted ${e[f]}`)
-    if (e.change === true && r.forceful !== true) misses.push(`forceful ${r.forceful} (mass ${r.forceMass})`)
+    // u4: the product's gate is "not decidedly mild" (directiveFor): a miss only when the strength reads mild at the bar
+    if (e.change === true && r.forceful === false) misses.push(`forceful ${r.forceful} (mass ${r.forceMass})`)
     return { id: p.id, severity: e.severity, pass: misses.length === 0, state: 'read', misses, reading: r, elapsedMs: res[p.id]?.elapsedMs ?? null }
   })
   const tally = sev => ({ passed: rows.filter(r => r.severity === sev && r.pass).length, total: rows.filter(r => r.severity === sev).length })
   const text = ['| control | severity | result | change (mass) | about | forceful (mass) | direction | language |', '|---|---|---|---|---|---|---|---|',
-    ...rows.map(r => (r.reading ? `| ${r.id} | ${r.severity} | ${r.pass ? 'pass' : `MISS: ${r.misses.join('; ')}`} | ${r.reading.change} (${r.reading.changeMass}) | ${r.reading.about ?? '-'} | ${r.reading.forceful} (${r.reading.forceMass}) | ${r.reading.direction ?? '-'} | ${r.reading.language ?? '-'} |` : `| ${r.id} | ${r.severity} | not sent | | | | | |`)),
+    ...rows.map(r => (r.reading ? `| ${r.id} | ${r.severity} | ${r.pass ? 'pass' : `MISS: ${r.misses.join('; ')}`} | ${r.reading.change} (${r.reading.changeMass}${r.reading.mannerMass == null ? '' : `, manner ${r.reading.mannerMass}`}) | ${r.reading.about ?? '-'}${r.reading.inferred?.includes('about') ? ' (inferred)' : ''} | ${r.reading.forceful} (${r.reading.forceMass}) | ${r.reading.direction ?? '-'} | ${r.reading.language ?? '-'} |` : `| ${r.id} | ${r.severity} | not sent | | | | | |`)),
     '', `hard: ${tally('hard').passed}/${tally('hard').total}; soft: ${tally('soft').passed}/${tally('soft').total}`].join('\n')
   return { rows, hard: tally('hard'), soft: tally('soft'), text }
 }
@@ -253,3 +254,27 @@ export const NUNCHI_FRESH_CONTROLS = Object.freeze([
   { id: 'f-when-deploy', user: '그럼 배포는 언제 해?', expect: { change: false, severity: 'hard' } },
 ])
 export const buildNunchiFreshPlans = () => buildNunchiMergedPlans({ setPrefix: 'nunchi-merge-v2', controls: NUNCHI_FRESH_CONTROLS, perChunk: 8 })
+
+// ---- u4: a third fresh set. nunchi-merge-v2 (u3, no previous message) read 0/6 of the instructions: about unread (no_particular took the probability), and a plain instruction read as kind none. The fix (nk_about
+// asks what the turn says about HOW the assistant answers; one yes/no question nk_manner; the subject read again among the options that name something; the strength gate "not decidedly mild") was designed
+// on those answers, so v2 cannot validate it. These sixteen turns are new, carry no assistant message (the Claude path), and spread over length, language, format, repeated question, speed and scope. ----
+export const NUNCHI_FRESH3_CONTROLS = Object.freeze([
+  { id: 'g-korean-only', user: '앞으로는 한국어로만 답해', expect: { change: true, about: 'language', language: 'korean', severity: 'hard' } },
+  { id: 'g-simpler', user: '조금만 더 간단하게 말해줘', expect: { change: true, about: 'length', direction: 'less', severity: 'hard' } },
+  { id: 'g-stop-asking', user: '확인 질문은 그만하고 그냥 해', expect: { change: true, about: 'repeated_question', severity: 'hard' } },
+  { id: 'g-paragraph', user: '목록 말고 문단으로 써줘', expect: { change: true, about: 'format', severity: 'soft' } },
+  { id: 'g-only-what-asked', user: '내가 요청한 것만 해, 다른 건 건드리지 마', expect: { change: true, about: 'scope', direction: 'less', severity: 'soft' } },
+  { id: 'g-ok-go', user: '괜찮네, 이대로 가자', expect: { change: false, severity: 'hard' } },
+  { id: 'g-error-cause', user: '이 에러 원인이 뭐야?', expect: { change: false, severity: 'hard' } },
+  { id: 'g-string-length', user: '이 문자열 길이가 몇이야?', expect: { change: false, severity: 'hard' } },
+  { id: 'g-english', user: '답변은 영어로 해주세요', expect: { change: true, about: 'language', language: 'english', severity: 'hard' } },
+  { id: 'g-wordy', user: '설명이 너무 장황해, 핵심만', expect: { change: true, about: 'length', direction: 'less', severity: 'hard' } },
+  { id: 'g-dont-ask-again', user: '같은 걸 자꾸 되묻지 마', expect: { change: true, about: 'repeated_question', severity: 'hard' } },
+  { id: 'g-code-block', user: '코드는 코드 블록으로 줘', expect: { change: true, about: 'format', severity: 'soft' } },
+  { id: 'g-slow', user: '답이 너무 느려, 바로바로 해줘', expect: { change: true, about: 'speed', severity: 'soft' } },
+  { id: 'g-show-log', user: '서버 로그 좀 보여줘', expect: { change: false, severity: 'hard' } },
+  { id: 'g-solved', user: '덕분에 해결됐어, 고마워요', expect: { change: false, severity: 'hard' } },
+  { id: 'g-okay', user: '오케이', expect: { change: false, severity: 'hard' } },
+])
+// six requests per chunk: a request is now about 1.45k tokens (six questions), and the estimate of eight (11.6k) plus the usual +5 to 10% of real use would pass the 12,000 ceiling
+export const buildNunchiFresh3Plans = () => buildNunchiMergedPlans({ setPrefix: 'nunchi-merge-v3', controls: NUNCHI_FRESH3_CONTROLS, perChunk: 6 })

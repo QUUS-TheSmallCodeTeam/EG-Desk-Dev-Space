@@ -3,7 +3,7 @@ import os from 'node:os'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { loadOwnerExclusions } from '../helper/egdesk-scenario-exclusion.mjs'
-import { buildNunchiEvalPlans, buildNunchiFreshPlans, buildNunchiMergedPlans, defaultExamplesDir, listFiles, loadExamples, nunchiAgreement, nunchiMergedReport, readPriorLabels } from '../helper/egdesk-nunchi-plans.mjs'
+import { buildNunchiEvalPlans, buildNunchiFresh3Plans, buildNunchiFreshPlans, buildNunchiMergedPlans, defaultExamplesDir, listFiles, loadExamples, nunchiAgreement, nunchiMergedReport, readPriorLabels } from '../helper/egdesk-nunchi-plans.mjs'
 
 // L7 u1: the measurement plan of the nunchi judgment (U17), Decisions only. It only writes files (and reads results); it never sends. Main sends each chunk with
 // scripts/egdesk-decision-real-measure.mjs after the owner approves; the first chunk holds the synthetic controls.
@@ -11,6 +11,7 @@ import { buildNunchiEvalPlans, buildNunchiFreshPlans, buildNunchiMergedPlans, de
 //   node scripts/egdesk-nunchi-plan.mjs report <results.json> <preregistration.json>
 //   node scripts/egdesk-nunchi-plan.mjs merged-plan <outDir>             u2: twelve NEW synthetic turns that validate the merged reading (no conversation example, no exclusion needed)
 //   node scripts/egdesk-nunchi-plan.mjs fresh-plan <outDir>              u3: sixteen more NEW synthetic turns with no assistant message before them (the Claude path); read with merged-report
+//   node scripts/egdesk-nunchi-plan.mjs fresh-plan-v3 <outDir>           u4: sixteen more NEW synthetic turns (no assistant message) for the about / nk_manner fix; read with merged-report
 //   node scripts/egdesk-nunchi-plan.mjs merged-report <results.json> <preregistration.json>
 // The owner's exclusion file (local, outside the repository; default <examples>/../local/exclude.json, or --exclude) is applied before anything is built; what it excludes is counted, never named.
 // A missing or broken exclusion file stops the run (fail closed).
@@ -35,8 +36,8 @@ if (mode === 'plan' && a) {
     console.log(JSON.stringify({ set: plan.set, requests: plan.requests.length, estInputTokens, tokenCeiling: plan.tokenCeiling }))
   }
   console.log(JSON.stringify({ examples: { read: counts.read, excludedByOwner: counts.excludedByOwner, usable: examples.length, labelled: labels.size, exclusionActive: exclusions.active } }))
-} else if ((mode === 'merged-plan' || mode === 'fresh-plan') && a) {
-  for (const { plan, files, estInputTokens, preregistration } of (mode === 'fresh-plan' ? buildNunchiFreshPlans() : buildNunchiMergedPlans())) {
+} else if ((mode === 'merged-plan' || mode === 'fresh-plan' || mode === 'fresh-plan-v3') && a) {
+  for (const { plan, files, estInputTokens, preregistration } of (mode === 'fresh-plan-v3' ? buildNunchiFresh3Plans() : mode === 'fresh-plan' ? buildNunchiFreshPlans() : buildNunchiMergedPlans())) {
     const out = path.join(a, plan.set)
     mkdirSync(path.join(out, 'requests'), { recursive: true })
     for (const { file, bytes } of files) writeFileSync(path.join(out, file), bytes)
@@ -48,4 +49,4 @@ if (mode === 'plan' && a) {
   console.log(nunchiMergedReport(JSON.parse(readFileSync(a, 'utf8')), JSON.parse(readFileSync(b, 'utf8'))).text)
 } else if (mode === 'report' && a && b) {
   console.log(nunchiAgreement(JSON.parse(readFileSync(a, 'utf8')), JSON.parse(readFileSync(b, 'utf8'))).text)
-} else { console.error('usage: egdesk-nunchi-plan.mjs plan <outDir> [--examples <dir>] [--labels <dir>] [--per-class n] | report <results.json> <preregistration.json> | merged-plan <outDir> | fresh-plan <outDir> | merged-report <results.json> <preregistration.json>'); process.exit(2) }
+} else { console.error('usage: egdesk-nunchi-plan.mjs plan <outDir> [--examples <dir>] [--labels <dir>] [--per-class n] | report <results.json> <preregistration.json> | merged-plan <outDir> | fresh-plan <outDir> | fresh-plan-v3 <outDir> | merged-report <results.json> <preregistration.json>'); process.exit(2) }

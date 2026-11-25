@@ -3,15 +3,16 @@ import assert from 'node:assert/strict'
 import { ABOUT, ACTIONABLE_KINDS, DIRECTIONS, KINDS, LANGUAGES, NUNCHI_BAR, NUNCHI_LIMITS, NUNCHI_MASS, RECORD_HINTS, STRENGTHS, directiveFor, judgeNunchi, nunchiContextText, nunchiRequest, readNunchi, standingLine } from './egdesk-nunchi.mjs'
 import { normalizeDecisionResponse } from './egdesk-decision-client.mjs'
 import { choiceAnswer } from './egdesk-wiki-reconstruction.fixture.mjs'
+import { nunchiAnswer } from './egdesk-nunchi.fixture.mjs'
 
 const askedBody = nunchiRequest({ message: '야 한글로 보고해', previousReply: 'I have summarized the schedule in English: the review is on Tuesday.' })
 const q = name => askedBody.questions.find(x => x.name === name)
 // the answers of a decision model that read the turn as `want` (top probability `top` on the chosen option of each question)
-const answers = (want, top = 0.95) => Object.fromEntries(askedBody.questions.map(question => [question.name, choiceAnswer(question, want[question.name], top)]))
+const answers = (want, top = 0.95) => Object.fromEntries(askedBody.questions.map(question => [question.name, nunchiAnswer(question, want, top)]))
 const KOREAN_CORRECTION = { nk_kind: 'correction', nk_about: 'language', nk_strength: 'clear', nk_direction: 'not_applicable', nk_language: 'korean' }
 
 test('the request: five separate choice questions over closed tables, the turn and the previous message quoted as data; nothing about a word list', () => {
-  assert.deepEqual(askedBody.questions.map(x => x.name), ['nk_kind', 'nk_about', 'nk_strength', 'nk_direction', 'nk_language']); assert.ok(askedBody.questions.every(x => x.type === 'choice'))
+  assert.deepEqual(askedBody.questions.map(x => x.name), ['nk_kind', 'nk_about', 'nk_strength', 'nk_direction', 'nk_language', 'nk_manner']); assert.deepEqual(askedBody.questions.map(x => x.type), ['choice', 'choice', 'choice', 'choice', 'choice', 'predicate'])
   assert.deepEqual(q('nk_kind').choices.map(c => c.value), Object.keys(KINDS)); assert.deepEqual(q('nk_about').choices.map(c => c.value), Object.keys(ABOUT))
   assert.deepEqual(q('nk_strength').choices.map(c => c.value), Object.keys(STRENGTHS)); assert.deepEqual(q('nk_direction').choices.map(c => c.value), Object.keys(DIRECTIONS)); assert.deepEqual(q('nk_language').choices.map(c => c.value), Object.keys(LANGUAGES))
   assert.deepEqual(Object.keys(KINDS), ['praise', 'correction', 'urging', 'complaint', 'instruction_change', 'short_approval', 'ambiguous', 'none'], 'the eight reactions of the task')
@@ -25,12 +26,12 @@ test('the request: five separate choice questions over closed tables, the turn a
 
 test('reading: a choice is installed only at the bar (confidence (top - 1/N)/(1 - 1/N) >= .85 and margin .2); under it nothing is installed, never a guess', () => {
   assert.deepEqual(NUNCHI_BAR, { confidence: 0.85, margin: 0.2 })
-  assert.deepEqual(readNunchi(answers(KOREAN_CORRECTION)), { kind: 'correction', about: 'language', strength: 'clear', direction: 'not_applicable', language: 'korean', change: true, forceful: true, changeMass: 0.971, forceMass: 0.975 })
+  assert.deepEqual(readNunchi(answers(KOREAN_CORRECTION)), { kind: 'correction', about: 'language', strength: 'clear', direction: 'not_applicable', language: 'korean', change: true, forceful: true, changeMass: 0.971, forceMass: 0.975, mannerMass: 0.97, inferred: [] })
   const weak = answers(KOREAN_CORRECTION, 0.7)   // 8 options: (0.7 - .125) / .875 = .657
-  const w = readNunchi(weak); assert.deepEqual([w.kind, w.about, w.strength, w.direction, w.language], [null, null, null, null, null], 'every single choice is under its bar'); assert.ok(w.changeMass > 0.8 && w.changeMass < 0.85, 'the merged options hold .83 of the answer: at the yes bar of .8 (and under the .85 of u2)'); assert.equal(w.change, true)
+  const w = readNunchi(weak); assert.deepEqual([w.kind, w.strength, w.direction], [null, null, null], 'every single choice is under its bar'); assert.deepEqual([w.about, w.language, w.inferred], ['language', 'korean', ['about', 'language']], 'the change is asked (merged), so the subject and the language are read again among the options that name something (u4)'); assert.ok(w.changeMass > 0.8 && w.changeMass < 0.85, 'the merged options hold .83 of the answer: at the yes bar of .8 (and under the .85 of u2)'); assert.equal(w.change, true)
   const mixed = { ...answers(KOREAN_CORRECTION), nk_kind: choiceAnswer(q('nk_kind'), 'correction', 0.6) }
   assert.deepEqual([readNunchi(mixed).kind, readNunchi(mixed).about], [null, 'language'], 'each question on its own')
-  assert.deepEqual(readNunchi({}), { kind: null, about: null, strength: null, direction: null, language: null, change: null, forceful: null, changeMass: null, forceMass: null }); assert.deepEqual(readNunchi(null).kind, null)
+  assert.deepEqual(readNunchi({}), { kind: null, about: null, strength: null, direction: null, language: null, change: null, forceful: null, changeMass: null, forceMass: null, mannerMass: null, inferred: [] }); assert.deepEqual(readNunchi(null).kind, null)
   assert.equal(readNunchi(Object.entries(answers(KOREAN_CORRECTION)).map(([name, a]) => ({ name, ...a }))).kind, 'correction', 'a wire list reads the same')
   assert.equal(readNunchi({ nk_kind: { type: 'choice', choice: 'bogus', confidence: 0.99, probabilities: [{ value: 'bogus', probability: 0.99 }] } }).kind, null, 'a value outside the table is not installed')
 })
@@ -38,7 +39,7 @@ test('reading: a choice is installed only at the bar (confidence (top - 1/N)/(1 
 test('the judgment: one request, never throws; an unreachable or empty call reads as no reading; the previous message is optional', async () => {
   const seen = [], client = a => ({ decide: async req => { seen.push(req); if (a === 'throw') throw Object.assign(new Error('x'), { code: 'down' }); return { answers: a, usage: { input_tokens: 1 } } } })
   const ok = await judgeNunchi({ message: '야 한글로 보고해', previousReply: 'English reply.', client: client(answers(KOREAN_CORRECTION)) })
-  assert.deepEqual([ok.status, ok.withPrevious, ok.reading.kind, ok.reading.language], ['ready', true, 'correction', 'korean']); assert.equal(seen.length, 1); assert.equal(seen[0].questions.length, 5)
+  assert.deepEqual([ok.status, ok.withPrevious, ok.reading.kind, ok.reading.language], ['ready', true, 'correction', 'korean']); assert.equal(seen.length, 1); assert.equal(seen[0].questions.length, 6)
   assert.equal((await judgeNunchi({ message: 'hi', client: client(answers(KOREAN_CORRECTION)) })).withPrevious, false)
   const down = await judgeNunchi({ message: 'hi', client: client('throw') }); assert.deepEqual([down.status, down.reason, down.reading.kind], ['fallback', 'down', null])
   assert.equal((await judgeNunchi({ message: '  ', client: client({}) })).status, 'fallback'); assert.equal((await judgeNunchi({ message: 'x', client: null })).status, 'fallback')
@@ -118,4 +119,49 @@ test('u2: what EG-Desk did with the instruction is told to the engine as a state
   assert.ok(nunchiContextText({ ...lines, record: 'applied' }).endsWith(`- ${RECORD_HINTS.applied}`)); assert.equal(nunchiContextText({ ...lines, record: null }), nunchiContextText(lines)); assert.equal(nunchiContextText({ ...lines, record: 'bogus' }), nunchiContextText(lines))
   assert.equal(nunchiContextText({ standing: ['Reply in Korean in every conversation, as the person asked.'], record: 'candidate' }).includes('guidance record'), false, 'no hint without a line of this conversation')
   assert.equal(nunchiContextText({ record: 'candidate' }), null)
+})
+
+// ---- u4: the subject of a change that the turn does not name at the bar (real window 11-26 04:02, no assistant message before the turn) ----
+// The distributions are the REAL recorded answers of nunchi-merge-v2-001 (the Decision model, no previous message) for the sentences below; manner (nk_manner) did not exist then, so it is a stand-in
+// for what the new question answers (said so in each case). The rule was designed on these answers: they show the code does what it was built to do, they do not validate it (a fresh plan does).
+const fromDist = (dist, manner) => Object.fromEntries(askedBody.questions.map(question => [question.name, nunchiAnswer(question, { dist, manner })]))
+const V2 = {
+  'too-long-from-now': { nk_kind: { instruction_change: 0.70, complaint: 0.20, none: 0.06, praise: 0.01 }, nk_about: { length: 0.49, no_particular: 0.47, language: 0.02, format: 0.01 }, nk_strength: { clear: 0.95, mild: 0.04, strong: 0.01 }, nk_direction: { less: 0.98, more: 0.01 }, nk_language: { none: 0.48, korean: 0.47 } },
+  'three-lines': { nk_kind: { instruction_change: 0.86, none: 0.13, praise: 0.01 }, nk_about: { no_particular: 0.70, length: 0.23, language: 0.02, format: 0.02 }, nk_strength: { clear: 0.67, mild: 0.32, strong: 0.01 }, nk_direction: { less: 0.96, not_applicable: 0.03 }, nk_language: { none: 0.53, korean: 0.34 } },
+  'korean-not-english': { nk_kind: { none: 0.81, instruction_change: 0.15, praise: 0.01 }, nk_about: { language: 0.51, no_particular: 0.42, length: 0.02, format: 0.01 }, nk_strength: { clear: 0.67, mild: 0.33 }, nk_direction: { not_applicable: 0.66, less: 0.25 }, nk_language: { korean: 1 } },
+  'shorter-please': { nk_kind: { none: 0.91, instruction_change: 0.07, praise: 0.01 }, nk_about: { no_particular: 0.55, length: 0.40, language: 0.03, format: 0.01 }, nk_strength: { clear: 0.75, mild: 0.25 }, nk_direction: { less: 0.80, not_applicable: 0.19 }, nk_language: { none: 0.64, korean: 0.32 } },
+  'no-need-to-ask': { nk_kind: { urging: 0.57, none: 0.36, praise: 0.02 }, nk_about: { no_particular: 0.42, repeated_question: 0.24, other: 0.17, factual_error: 0.06 }, nk_strength: { clear: 0.98, strong: 0.02 }, nk_direction: { less: 0.57, not_applicable: 0.39 }, nk_language: { korean: 0.49, none: 0.49 } },
+  'nice': { nk_kind: { praise: 0.9, none: 0.1 }, nk_about: { no_particular: 0.98 }, nk_strength: { mild: 0.91, clear: 0.09 }, nk_direction: { not_applicable: 1 }, nk_language: { none: 0.54, korean: 0.39 } },
+}
+test('u4: the real 04:02 answers ("너무 길어. 앞으로는 짧게 말해": about length .49 / no_particular .47) read as about length, direction less: the subject is taken among the options that name something', () => {
+  const r = readNunchi(fromDist(V2['too-long-from-now']))
+  assert.deepEqual([r.change, r.changeMass, r.forceful, r.about, r.direction, r.inferred], [true, 0.9, true, 'length', 'less', ['about']], 'before: about null (the choice is at .49, under the .85 bar)')
+  assert.deepEqual(directiveFor(r), { line: 'Keep replies short for the rest of this conversation, as the person asked.', guidance: 'length', value: 'less', durable: { guidance: 'length', value: 'less' } })
+  const t = readNunchi(fromDist(V2['three-lines'])); assert.deepEqual([t.change, t.about, t.direction, t.forceful, t.inferred], [true, 'length', 'less', null, ['about']], 'no_particular .70 and length .23: what is left (.30) is .77 length')
+  assert.equal(directiveFor(t).guidance, 'length', 'a plain instruction (clear .67 / mild .32: not decided either way) is not dropped')
+})
+test('u4: with no assistant message before the turn a plain instruction reads as kind none; nk_manner (yes) decides that it is a change, the subject is read among what names something', () => {
+  const k = readNunchi(fromDist(V2['korean-not-english'], 0.95))
+  assert.deepEqual([k.kind, k.changeMass, k.mannerMass, k.change, k.about, k.language, k.inferred], [null, 0.15, 0.95, true, 'language', 'korean', ['about']])
+  assert.deepEqual(directiveFor(k) && [directiveFor(k).guidance, directiveFor(k).value], ['language', 'korean'])
+  const s = readNunchi(fromDist(V2['shorter-please'], 0.93)); assert.deepEqual([s.change, s.about, s.direction], [true, 'length', 'less'], 'length .40 with no_particular .55: .89 of what is left')
+  const without = readNunchi(fromDist(V2['korean-not-english'])); assert.deepEqual([without.change, without.about], [false, null], 'the recorded kinds alone (.15) say no change and nothing is read: the manner question is what moves it, and only a fresh plan can say what the model answers to it')
+})
+test('u4: the vote: manner yes -> change; manner no -> not a change unless the kinds say change (then undecided); manner unsure or missing -> the kinds alone; the old answer set (no nk_manner) reads as before', () => {
+  const pick = (kindDist, manner) => readNunchi(fromDist({ ...V2['nice'], nk_kind: kindDist }, manner))
+  assert.equal(pick({ none: 0.9 }, 0.95).change, true); assert.equal(pick({ none: 0.9 }, 0.02).change, false)
+  assert.equal(pick({ instruction_change: 0.9 }, 0.02).change, null, 'the two disagree: no reading'); assert.equal(pick({ instruction_change: 0.9 }, 0.5).change, true); assert.equal(pick({ none: 0.9 }, 0.5).change, false)
+  const old = { ...fromDist(V2['too-long-from-now']) }; delete old.nk_manner; const o = readNunchi(old); assert.deepEqual([o.change, o.mannerMass, o.about], [true, null, 'length'])
+})
+test('u4: what must NOT be read: the "nothing" option that holds nearly all of the answer is not overruled; a turn that asks for no change reads no subject; an unclear second place stays unread', () => {
+  const quiet = readNunchi(fromDist({ ...V2['too-long-from-now'], nk_about: { no_particular: 0.95, length: 0.05 } }, 0.95)); assert.deepEqual([quiet.change, quiet.about, quiet.inferred], [true, 'no_particular', []], 'installed at the bar: no overruling')
+  const lowLeft = readNunchi(fromDist({ ...V2['too-long-from-now'], nk_about: { no_particular: 0.85, length: 0.15 } }, 0.95)); assert.deepEqual([lowLeft.about, lowLeft.inferred], [null, []], 'what is left is .15 (< .2)')
+  const nice = readNunchi(fromDist(V2['nice'])); assert.deepEqual([nice.change, nice.about, nice.inferred], [false, 'no_particular', []])
+  const split = readNunchi(fromDist(V2['no-need-to-ask'], 0.95)); assert.deepEqual([split.change, split.about, split.inferred], [true, null, []], 'repeated_question .41 / other .29 of what is left: margin .12 (< .3): unread, as it was; no candidate')
+  assert.equal(directiveFor(split), null)
+})
+test('u4: the strength gate is "not decidedly mild": a turn the model reads clear .6 / mild .4 still makes guidance; mild .8 or more does not', () => {
+  const base = { change: true, about: 'length', direction: 'less', language: null }
+  assert.equal(directiveFor({ ...base, forceful: null }).guidance, 'length'); assert.equal(directiveFor({ ...base, forceful: true }).guidance, 'length'); assert.equal(directiveFor({ ...base, forceful: false }), null)
+  assert.equal(directiveFor({ kind: 'correction', strength: 'mild', about: 'language', language: 'korean' }), null, 'an older reading shape: the single strength as before'); assert.equal(directiveFor({ kind: 'correction', strength: 'clear', about: 'language', language: 'korean' }).guidance, 'language')
 })
