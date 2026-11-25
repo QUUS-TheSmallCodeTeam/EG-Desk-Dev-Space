@@ -355,3 +355,13 @@ test('c30 with c33: the first-event watchdog (L5, person turns, startTurnWatched
   assert.equal(w.of('turn/start').filter(x => x.threadId.startsWith('fork-')).length, 1, 'the fork turn was started once (no watchdog retry)')
   assert.equal(w.chat.engineSeen.has(w.of('turn/start').find(x => x.threadId.startsWith('fork-')).threadId), false, 'private-turn events never reach the watchdog\'s bookkeeping')
 })
+
+test('c32: the revision hedge is 9 s inside the unchanged 25 s deadline: above every healthy planted fork (5.8-8.3 s), and the slowest fresh thread measured (13.8 s to its answer) still finishes before the deadline', async t => {
+  const { REVISE_FORK_HEDGE_MS } = await import('./codex-chat-runtime.mjs')
+  assert.equal(REVISE_FORK_HEDGE_MS, 9000); assert.ok(REVISE_FORK_HEDGE_MS > 8300, 'a healthy fork is never hedged'); assert.ok(REVISE_FORK_HEDGE_MS + 13800 < 25000, 'the slowest measured fresh answer fits the deadline: 22.8 s')
+  const w = runtimeOn(t, { refuseFork: false }); const seen = []
+  const run = w.chat.runFor(await w.chat.send({ message: 'q', clientThreadId: 'ui', requestId: 'r1', cwd: w.real }))
+  const original = w.chat.internalTurns.run.bind(w.chat.internalTurns); w.chat.internalTurns.run = args => { seen.push({ hedgeMs: args.hedgeMs, timeoutMs: args.timeoutMs }); return original(args) }
+  await w.chat.reviseOnFork(run, 'd', 'n', null, [])
+  assert.deepEqual(seen, [{ hedgeMs: 9000, timeoutMs: 25000 }], 'the product call: hedge 9 s, deadline 25 s')
+})
