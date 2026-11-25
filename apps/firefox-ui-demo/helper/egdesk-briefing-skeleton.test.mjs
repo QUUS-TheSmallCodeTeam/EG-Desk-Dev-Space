@@ -1235,3 +1235,24 @@ test('c45 prefill: without the board the chrome showed (none given, none seen ye
   await s.R.board.prefill({ run: s.h.run, request: REQUEST }); const res = await s.R.http('POST', '/decision/briefing-observe', s.body)
   assert.equal(res.body.outcome, 'presented'); assert.equal(s.h.forkPrompts.length, 2); assert.deepEqual([res.body.prefill.served, res.body.prefill.missed], [0, 1])
 })
+
+// ================= c49: V2's s3 (Main c60): "the redesign drops the open-items part" =================
+import { guidePartsOf } from '../scripts/egdesk-all-on-live-measure.mjs'
+const promptOf = want => fillPrompt(want)
+const P3_OPEN49 = () => undefined // every part fits (the open-items part M2, M4 is a card, as in V2's s3: three cards in the whole fill)
+test('c49: the one rewrite after a missing fact asks only the cards that hold the cited materials (a targeted rewrite, not a drop): the open-items card stays on the board, and the harness\'s "parts" of such a step is the whole fill\'s guide, not the rewrite\'s', async () => {
+  const answer = '11월 3일 v1 견적서를 냈습니다. 남은 일은 법무 검토, 대표 승인, 최종본 발송입니다.'
+  let seen = 0
+  const fixed = await run(q => (q.name === 'onboard_F1' ? (seen++ ? .95 : .05) : P3_OPEN49(q)), { answer, fill: want => fillReply(ids(want)) })
+  assert.equal(fixed.out.status, 'presented', JSON.stringify(fixed.out.coverage))
+  assert.deepEqual(fixed.fills.map(f => f.only ?? null), [null, ['P1', 'P2']], 'the whole fill asks the three cards; the rewrite asks only the two that hold M1')
+  assert.deepEqual(fixed.fills[0].guide.items.map(i => i.id), ['P1', 'P2', 'P3']); assert.deepEqual(fixed.fills[1].guide.items.map(i => i.id), ['P1', 'P2'], 'the rewrite request lists two items: this is what the journey harness read as "the parts"')
+  assert.deepEqual(fixed.out.guide.items.map(i => i.id), ['P1', 'P2', 'P3'], 'the board still has the open-items card: nothing was dropped'); assert.equal(fixed.out.newComponents.length, 3)
+  assert.deepEqual(guidePartsOf([{ prompt: promptOf(fixed.fills[0]) }, { prompt: promptOf(fixed.fills[1]) }]).map(p => p.shows), fixed.out.guide.items.map(i => i.shows), 'the parts of the step are those of the whole fill (the one with the most items), whichever order the prompts come in')
+  assert.deepEqual(guidePartsOf([{ prompt: promptOf(fixed.fills[1]) }, { prompt: promptOf(fixed.fills[0]) }]).length, 3)
+})
+test('c49: a missing fact that the judge keeps refusing ends in the chat answer with no board at all, so a check that asks for "a part on the board" fails for that reason (the outcome), not because a part was dropped', async () => {
+  const answer = '11월 3일 v1 견적서를 냈습니다. 남은 일은 법무 검토, 대표 승인, 최종본 발송입니다.'
+  const off = await run(q => (q.name === 'onboard_F1' ? .05 : P3_OPEN49(q)), { answer, fill: want => fillReply(ids(want)) })
+  assert.deepEqual([off.out.status, off.out.reason, off.out.coverage.redesign.items], ['fallback-chat', 'not-covered', ['P1', 'P2']]); assert.equal(off.out.newComponents, undefined)
+})

@@ -748,6 +748,16 @@ function taggedUnits(answer) {
   }
   return out
 }
+// Cycle 50 (c64, Main's measure of c49's plan on the recorded V2 request: "11월 6일 v1 발송 순서이고" .29, the same fact with its ending cut "11월 6일 v1 발송 순서" .84, the natural noun phrase 1.0, the
+// V1 clause "11월 6일에 v1을 보냈으며" 1.0): the cause is the COPULAR connective on a noun ("…순서이고"), not the noun. A clause cut from its sentence at the comma keeps the copula that joined it to the next
+// clause, and the judge reads "X이고" as an unfinished claim. Only the copular endings (이고, 이며, 이지만, 이면서) are cut, and only from a clause split at a comma, never from a whole sentence, a
+// table row or a list item. A VERB connective ("보냈으며", "받았고") is left as it is (the judge reads it, c59 1.0, and a cut would leave a bare verb stem), and so is a verb whose stem ends in 이 ("줄이고",
+// "높이고", "보이고": the common ones are listed): the cut must leave at least two characters.
+const IY_VERB = /(?:높|줄|먹|붙|보|쌓|깎|섞|속|녹|끓|맡|넓|좁|죽|굽|묶|엮|갚|밝|낮|맞|웃|울|비|씻|꾸미|바꾸|드러내)$/
+export function trimCopular(clause) {
+  const m = /^(.*\S)(이고|이며|이지만|이면서)$/.exec(String(clause ?? '').trim())
+  return m && m[1].length >= 2 && !IY_VERB.test(m[1]) ? m[1] : String(clause ?? '').trim()
+}
 function factUnits(answer) {
   const anchored = t => { const a = factAnchors(t); return a.dates.length + a.versions.length + a.amounts.length > 0 }
   const out = taggedUnits(answer).flatMap(u => {
@@ -755,7 +765,7 @@ function factUnits(answer) {
     if (u.row) return [{ text, structured: true }]
     return text.split(/\n|(?<=[.!?。])\s+/).flatMap(sentence => {
       const clauses = sentence.split(/[,;]\s+/).map(t => t.trim()).filter(Boolean)
-      return (clauses.length > 1 && clauses.every(anchored) ? clauses : [sentence.trim()]).map(t => ({ text: t, structured: u.structured }))
+      return (clauses.length > 1 && clauses.every(anchored) ? clauses.map(trimCopular) : [sentence.trim()]).map(t => ({ text: t, structured: u.structured }))
     })
   })
   return out.map(u => ({ ...u, text: clean(u.text, SKELETON_LIMITS.factMax) })).filter(u => u.text)
