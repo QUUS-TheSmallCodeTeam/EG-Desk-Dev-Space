@@ -13,6 +13,45 @@ const UNIVERSAL = /모든|전부|모두|전체|\ball\b|\bevery\b|\beverything\b/
 /** Does a sentence say that the tests (or the run) passed, with no word of failure? */
 export const claimsPass = text => { const t = String(text ?? ''); return PASS_CLAIM.test(t) && !FAIL_WORDS.test(t) && (TESTWORD.test(t) || UNIVERSAL.test(t)) }
 
+// c30b: a claim that a file was changed, against the edits EG-Desk made (facts of kind own_edit: path, state previewed | applied | undone | not_applied | not_undone, tool, editId).
+// A sentence that says a change was made (no negation, no plan, no mention of a preview) is contradicted when the file it names was only previewed, undone or never applied, when it names
+// a file the run made no edit to, or, naming no file, when the run applied no edit at all. A sentence about a preview ("dryRun 미리보기로 확인했습니다") is not a claim of a change.
+const EDIT_DONE = /수정했|고쳤|고쳐 ?놓|바꿨|바꾸었|변경했|적용했|반영했|편집했|교체했|추가했|삭제했|지웠|작성했|만들었|\b(?:edited|changed|fixed|applied|updated|modified|replaced|wrote|written|patched)\b/i
+const EDIT_NOT_CLAIM = /하지 않|않았|않습|못했|안 했|아직|예정|할 수 있|하겠|할게|하려|계획|제안|가능|필요|미리보기|dryRun|\bpreview|\bwould\b|\bwill\b|\bcould\b|\bnot\b|n't|되돌|undo|undid|restor|복원|취소|\?|\bif\b|다면|면 /i
+const PATH_TOKEN = /[\w./-]+\.(?:mjs|cjs|js|jsx|ts|tsx|py|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp|sh|json|md|css|scss|html|yml|yaml|toml|txt|sql|xml)\b/gi
+const base = p => String(p).split('/').pop()
+export const claimsEdit = text => { const t = String(text ?? ''); return EDIT_DONE.test(t) && !EDIT_NOT_CLAIM.test(t) }
+
+export function editFacts(evidence) {
+  return (Array.isArray(evidence) ? evidence : []).filter(item => item && item.opaque !== true && item.facts?.kind === 'own_edit').map(item => ({ ...item.facts, id: item.id }))
+}
+
+/** Findings of kind 'contradicted' for the sentences that claim a change the run's edits do not show. */
+export function editClaimFindings({ claims, evidence }) {
+  const facts = editFacts(evidence)
+  if (!facts.length) return []
+  const finalState = new Map() // path → the state after the run's calls in order; an undo of an edit id takes that edit back
+  for (const fact of facts) {
+    if (!fact.path) continue
+    if (fact.state === 'applied' || fact.state === 'previewed' || fact.state === 'not_applied') finalState.set(fact.path, fact.state)
+    else if (fact.state === 'undone') finalState.set(fact.path, 'undone')
+  }
+  const anyApplied = [...finalState.values()].some(state => state === 'applied')
+  const out = []
+  ;(Array.isArray(claims) ? claims : []).forEach((span, index) => {
+    const text = String(span?.text ?? '')
+    if (!claimsEdit(text)) return
+    const mentioned = [...finalState.keys()].filter(p => text.includes(p) || text.includes(base(p)))
+    const tokens = (text.match(PATH_TOKEN) ?? []).filter(tok => ![...finalState.keys()].some(p => p === tok || base(p) === base(tok)))
+    let bad = false
+    if (mentioned.length) bad = !mentioned.some(p => finalState.get(p) === 'applied')
+    else if (tokens.length) bad = true
+    else bad = !anyApplied
+    if (bad) out.push({ kind: 'contradicted', span: index, evidence: facts.map(f => f.id), reason: 'run_facts' })
+  })
+  return out
+}
+
 /** The reading of the last own command in the evidence, or null. */
 export function lastRunFacts(evidence) {
   const facts = (Array.isArray(evidence) ? evidence : []).filter(item => item && item.opaque !== true && item.facts?.kind === 'own_command')
@@ -21,6 +60,11 @@ export function lastRunFacts(evidence) {
 
 /** Findings of kind 'contradicted' for the sentences (claims: [{ text }]) that say the tests passed while the last run says otherwise. */
 export function runFactFindings({ claims, evidence }) {
+  const edits = editClaimFindings({ claims, evidence }), tests = testClaimFindings({ claims, evidence })
+  return [...tests, ...edits.filter(e => !tests.some(t => t.span === e.span))]
+}
+
+function testClaimFindings({ claims, evidence }) {
   const last = lastRunFacts(evidence)
   if (!last) return []
   const f = last.facts
