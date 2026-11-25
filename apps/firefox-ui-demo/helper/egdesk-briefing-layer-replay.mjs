@@ -78,13 +78,15 @@ export async function buildLayerReplayPlan() {
     : n.startsWith('about_') ? mk('soft', n, YES, 'the request asks to read the ledger folder: every entry is asked about. Real runs saw .05 to .32 for one entry (M10, M12) in five of twelve runs; c41 (linked) and c44 (voted) keep it, which replayLayers() checks')
     : mk('soft', n, NO, 'a title shared by two entries is not a version pair (they are different records of one log): real .03 to .32'))])
   specs.push(['layer-fit', fit, fit.names.map(n => mk('soft', n, YES, 'a dated entry of a log records something that happened: the card kind of both parts (a sequence of rows) rests on it; real 1 / .99'))])
-  // coverage: the first six facts of the real check-25br answer (a table row each). A fact whose key figure is on the recorded board is expected shown; one whose figure is not is the known loss, recorded.
+  // coverage: the first six facts of the real check-25br answer (a table row each). A fact whose key figure is on the recorded board is expected NOT DECIDED "no" (hard: the product's own bar: only a decided no, p <= .3,
+  // marks a fact missing and starts the re-design; an undecided one does not block) and, softly, shown (yes >= .7). c48 (Main's c59 run: F2 .53, F3 .69, F4 .67 failed the c46 hard yes): the board's rows are 76-90
+  // characters and drop the prose cells of a table row (see egdesk-briefing-coverage-replay.mjs), the question asks for EVERY value, so those rows are rightly undecided, never a decided no. One that is not on the board is the known loss, recorded.
   { const board = JSON.stringify(boardIn(cov.wire)), facts = factsOf(cov.wire)
-    specs.push(['layer-coverage', cov, cov.names.map(n => {
-      if (n.startsWith('stated_')) return mk('soft', n, NO, 'a sentence about the answer itself restates nothing the materials say (c36)')
+    specs.push(['layer-coverage', cov, cov.names.flatMap(n => {
+      if (n.startsWith('stated_')) return [mk('soft', n, NO, 'a sentence about the answer itself restates nothing the materials say (c36)')]
       const fact = facts.find(x => x.name === n)?.fact ?? '', key = factOfRow(fact)
-      return key === null ? mk('soft', n, NO, 'a sentence about the answer itself (no entry key figure): no board can show it')
-        : board.includes(key) ? mk('hard', n, YES, `the key figure "${key}" of this entry is on the recorded board`) : mk('soft', n, NO, `the key figure "${key}" is NOT on the recorded board (the known loss of a dense row): recorded`)
+      return key === null ? [mk('soft', n, NO, 'a sentence about the answer itself (no entry key figure): no board can show it')]
+        : board.includes(key) ? [{ name: n, kind: 'predicate', notDecidedNo: true, severity: 'hard', note: `the key figure "${key}" of this entry is on the recorded board: the product acts only on a decided no (p <= .3)` }, mk('soft', n, YES, `shown in full (yes >= .7): the board's row may leave out the row's prose cells (the 76-90 character row), which the question counts`)] : mk('soft', n, NO, `the key figure "${key}" is NOT on the recorded board (the known loss of a dense row): recorded`)
     })]) }
 
   const files = [], requests = []

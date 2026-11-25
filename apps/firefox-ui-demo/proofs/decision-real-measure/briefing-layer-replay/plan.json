@@ -271,44 +271,86 @@
         {
           "name": "onboard_F1",
           "kind": "predicate",
-          "min": 0.7,
+          "notDecidedNo": true,
           "severity": "hard",
-          "note": "the key figure \"9aeed73\" of this entry is on the recorded board"
+          "note": "the key figure \"9aeed73\" of this entry is on the recorded board: the product acts only on a decided no (p <= .3)"
+        },
+        {
+          "name": "onboard_F1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full (yes >= .7): the board's row may leave out the row's prose cells (the 76-90 character row), which the question counts"
+        },
+        {
+          "name": "onboard_F2",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the key figure \"5752건\" of this entry is on the recorded board: the product acts only on a decided no (p <= .3)"
         },
         {
           "name": "onboard_F2",
           "kind": "predicate",
           "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full (yes >= .7): the board's row may leave out the row's prose cells (the 76-90 character row), which the question counts"
+        },
+        {
+          "name": "onboard_F3",
+          "kind": "predicate",
+          "notDecidedNo": true,
           "severity": "hard",
-          "note": "the key figure \"5752건\" of this entry is on the recorded board"
+          "note": "the key figure \"5930건\" of this entry is on the recorded board: the product acts only on a decided no (p <= .3)"
         },
         {
           "name": "onboard_F3",
           "kind": "predicate",
           "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full (yes >= .7): the board's row may leave out the row's prose cells (the 76-90 character row), which the question counts"
+        },
+        {
+          "name": "onboard_F4",
+          "kind": "predicate",
+          "notDecidedNo": true,
           "severity": "hard",
-          "note": "the key figure \"5930건\" of this entry is on the recorded board"
+          "note": "the key figure \"5990건\" of this entry is on the recorded board: the product acts only on a decided no (p <= .3)"
         },
         {
           "name": "onboard_F4",
           "kind": "predicate",
           "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full (yes >= .7): the board's row may leave out the row's prose cells (the 76-90 character row), which the question counts"
+        },
+        {
+          "name": "onboard_F5",
+          "kind": "predicate",
+          "notDecidedNo": true,
           "severity": "hard",
-          "note": "the key figure \"5990건\" of this entry is on the recorded board"
+          "note": "the key figure \"6085건\" of this entry is on the recorded board: the product acts only on a decided no (p <= .3)"
         },
         {
           "name": "onboard_F5",
           "kind": "predicate",
           "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full (yes >= .7): the board's row may leave out the row's prose cells (the 76-90 character row), which the question counts"
+        },
+        {
+          "name": "onboard_F6",
+          "kind": "predicate",
+          "notDecidedNo": true,
           "severity": "hard",
-          "note": "the key figure \"6085건\" of this entry is on the recorded board"
+          "note": "the key figure \"218c711\" of this entry is on the recorded board: the product acts only on a decided no (p <= .3)"
         },
         {
           "name": "onboard_F6",
           "kind": "predicate",
           "min": 0.7,
-          "severity": "hard",
-          "note": "the key figure \"218c711\" of this entry is on the recorded board"
+          "severity": "soft",
+          "note": "shown in full (yes >= .7): the board's row may leave out the row's prose cells (the 76-90 character row), which the question counts"
         }
       ]
     }
