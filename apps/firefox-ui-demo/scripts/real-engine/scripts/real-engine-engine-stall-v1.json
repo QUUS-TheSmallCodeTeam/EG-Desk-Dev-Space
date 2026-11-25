@@ -1,0 +1,103 @@
+{
+  "set": "real-engine-engine-stall-v1",
+  "description": "Measure and arm (c33, U13: a silent engine must not cost 180 s). A stall cannot be forced on a real engine, so this script does two things. first-event-times: six one-word turns with the watchdog OFF: every turn record carries firstEventMs (from the turn/start answer to the first event of the turn, 0 when it came before the answer) and latencyMs, which is the data the watchdog's N is chosen from (p99 of the first-event times plus a margin; run it several times and at the effort EG-Desk uses). watchdog-armed: the same kind of turns with EGDESK_ENGINE_STALL_FIRST_EVENT_MS=45000 (the provisional N): no turn may stall (engineStall stalled false, firstEventMs under the limit); if the engine really goes silent during the run the record shows the fact (recovered or failed) and the turn's expectation fails, which is the finding. No Decision model needed.",
+  "conversations": [
+    {
+      "id": "first-event-times",
+      "turns": [
+        {
+          "say": "한 단어로만 답해: 하나",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "한 단어로만 답해: 둘",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "한 단어로만 답해: 셋",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "한 단어로만 답해: 넷",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "한 단어로만 답해: 다섯",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "한 단어로만 답해: 여섯",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "watchdog-armed",
+      "flags": {
+        "EGDESK_ENGINE_STALL_FIRST_EVENT_MS": "45000"
+      },
+      "turns": [
+        {
+          "say": "한 단어로만 답해: 하나",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed",
+            "engineStall": {
+              "stalled": false,
+              "maxFirstEventMs": 45000
+            }
+          }
+        },
+        {
+          "say": "한 단어로만 답해: 둘",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed",
+            "engineStall": {
+              "stalled": false,
+              "maxFirstEventMs": 45000
+            }
+          }
+        },
+        {
+          "say": "한 단어로만 답해: 셋",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed",
+            "engineStall": {
+              "stalled": false,
+              "maxFirstEventMs": 45000
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

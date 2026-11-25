@@ -142,3 +142,15 @@ import { GIT_EXPECT_SCHEMA, GIT_SCENARIO_SCHEMA, GIT_SCENARIOS, createGitSceneHo
 registerConversationFields({ gitScenario: { schema: GIT_SCENARIO_SCHEMA, validate: (value, { path, bad }) => { if (!GIT_SCENARIOS.includes(value)) bad(path, `one of ${GIT_SCENARIOS.join(', ')}`) } } })
 registerExpectKeys({ git: { schema: GIT_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateGitExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
 registerTurnHooks('gitScene', conversation => createGitSceneHook(conversation))
+
+// ---- L5: the decision-first command path (flag EGDESK_DECISION_FIRST in a conversation, expect.decisionFirst: fast or engine, engine turns, why) ----
+import { DF_EXPECT_SCHEMA, createDecisionFirstHook, validateDecisionFirstExpect } from './egdesk-real-engine-decision-first.mjs'
+registerFlags({ reproduced: ['EGDESK_DECISION_FIRST'], decisionDependent: ['EGDESK_DECISION_FIRST'] })
+registerExpectKeys({ decisionFirst: { schema: DF_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateDecisionFirstExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('decisionFirst', () => createDecisionFirstHook())
+
+// ---- L5: the first-event watchdog (flag EGDESK_ENGINE_STALL_FIRST_EVENT_MS in a conversation; expect.engineStall; firstEventMs is in every turn record) ----
+import { STALL_EXPECT_SCHEMA, createStallHook, validateStallExpect } from './egdesk-real-engine-stall.mjs'
+registerFlags({ reproduced: ['EGDESK_ENGINE_STALL_FIRST_EVENT_MS'] })
+registerExpectKeys({ engineStall: { schema: STALL_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateStallExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('engineStall', () => createStallHook())

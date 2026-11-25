@@ -694,6 +694,15 @@
                           "maxItems": 4,
                           "type": "array"
                         },
+                        "noteNames": {
+                          "items": {
+                            "maxLength": 100,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 3,
+                          "type": "array"
+                        },
                         "noteStatus": {
                           "enum": [
                             "done",
@@ -877,6 +886,46 @@
                     "conversationGone": {
                       "type": "boolean"
                     },
+                    "decisionFirst": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "engineTurns": {
+                          "maximum": 5,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "maxDecisionMs": {
+                          "maximum": 60000,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "path": {
+                          "enum": [
+                            "fast",
+                            "engine"
+                          ]
+                        },
+                        "reason": {
+                          "enum": [
+                            "healthy",
+                            "none",
+                            "below_threshold",
+                            "unreachable",
+                            "no_options",
+                            "approval_floor",
+                            "no_executor",
+                            "needs_person",
+                            "result_for_engine",
+                            "result_unreadable",
+                            "decisions_off",
+                            "egress_closed",
+                            "error"
+                          ]
+                        }
+                      },
+                      "type": "object"
+                    },
                     "deleted": {
                       "additionalProperties": false,
                       "minProperties": 1,
@@ -990,6 +1039,24 @@
                           "maximum": 5,
                           "minimum": 0,
                           "type": "integer"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "engineStall": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "maxFirstEventMs": {
+                          "maximum": 600000,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "recovered": {
+                          "const": true
+                        },
+                        "stalled": {
+                          "type": "boolean"
                         }
                       },
                       "type": "object"

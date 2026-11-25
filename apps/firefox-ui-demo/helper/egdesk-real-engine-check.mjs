@@ -41,6 +41,7 @@ import { parseCodexUserAgent } from './egdesk-codex-version-pin.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { APPROVER_TEXT, checkTurnExpectations, folderPathProblem, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { memoryNeedsDecisions } from './egdesk-real-engine-memory.mjs' // memory hook (L7 c26)
+import { stallConfigFromEnv } from './egdesk-engine-stall.mjs' // c33
 import { createChatHttpHandler } from './codex-bridge-http.mjs' // c28: the product's route handler (the window's own request for a conversation delete)
 import { registerConversationForgetters } from './egdesk-conversation-forgetters.mjs' // c28: the same per-conversation forgetters the bridge registers
 import { seedWrites, writesFacts } from './egdesk-real-engine-delete.mjs'
@@ -64,9 +65,9 @@ export const BRIDGE_COMPOSITION = Object.freeze({
   keys: ['settingsGeneration', 'mode', 'configured', 'client', 'budgetMs', 'coldBudgetMs', 'warm', 'warmup', 'inRunMessages', 'calibrationLog', 'turnMemory', 'browserEntry', 'draftCheck', 'conversationFlow',
     'relevanceRules', 'commandJudge', 'terminalGate', 'workingMemory', 'topicRecipient', 'recipientForChatChoice', 'reviewRevision', 'memoryEvidence', 'collect'],
   // top-level options of the bridge's new CodexChatRuntime({ … }) that this composition passes (request / respond / toolProviders etc. are the check's own)
-  runtimeKeys: ['contexts', 'toolProviders', 'ownToolsWiring', 'roomAccount', 'store', 'requireStore', 'getOwnerKey', 'emit', 'emitLegacy', 'agentReloadReuse'],
+  runtimeKeys: ['contexts', 'toolProviders', 'ownToolsWiring', 'roomAccount', 'store', 'requireStore', 'getOwnerKey', 'emit', 'emitLegacy', 'agentReloadReuse', 'engineStall'],
   flags: ['EGDESK_DRAFT_CHECK', 'EGDESK_DRAFT_CHECK_DESIGN', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_TERMINAL_GATE', 'EGDESK_TERMINAL_GATE_METHOD',
-    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP', 'EGDESK_AGENT_RELOAD_REUSE', ...hookFlags(), ...registeredFlags()],
+    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_FLOW_STALLED_COPY', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP', 'EGDESK_AGENT_RELOAD_REUSE', ...hookFlags(), ...registeredFlags()],
   // present in the bridge, deliberately not reproduced: each needs a window, the Desk, a store this check does not open, or another lane's module
   notReproduced: {
     keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration'],
@@ -373,13 +374,16 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
   const turnHooks = createTurnHooks(conversation) // the registered per-turn hooks: memory (seeded pages, what the product sent), journey (turn/steer, turn/interrupt), ...
   const memoryHook = turnHooks.get('memory').hook // memory hook: the ontology graph and the turn-memory setting
   const completions = [], tasks = []
-  const turnNow = { notifications: [], toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [], draftRows: [], flowRows: [], internal: [], writers: [] }
-  const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = []; turnNow.flowRows = []; turnNow.internal = []; turnNow.writers = [] }
+  const turnNow = { notifications: [], engineMessages: {}, pendingRequests: new Map(), toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [], draftRows: [], flowRows: [], internal: [], writers: [], turnStartAt: null, firstEventAt: null }
+  const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.engineMessages = {}; turnNow.pendingRequests = new Map(); turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = []; turnNow.flowRows = []; turnNow.internal = []; turnNow.writers = []; turnNow.turnStartAt = null; turnNow.firstEventAt = null }
   let initializeResult = null, lastThreadStart = null
   const rpc = new AppServerRpc({
     send: payload => child.stdin.write(`${payload}\n`), experimentalApi: true, timeoutMs: 60_000,
     onNotification: message => {
       const p = message.params ?? {}
+      if (turnNow.firstEventAt === null && turnNow.turnStartAt !== null && p.threadId && (p.turnId || p.turn?.id)) turnNow.firstEventAt = performance.now() // c33: the first event of the turn
+      // c31 (the two 180 s turns of check-24un/22mw: items {userMessage:1}, no completion): every engine message by method, content-free, so a silent turn names itself
+      { const m = String(message.method ?? '?').slice(0, 60); if (Object.keys(turnNow.engineMessages).length < 40 || m in turnNow.engineMessages) turnNow.engineMessages[m] = (turnNow.engineMessages[m] ?? 0) + 1 }
       if (message.method === 'item/started' || message.method === 'item/completed') {
         const type = p.item?.type
         if (message.method === 'item/completed') {
@@ -396,6 +400,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       if (chat) tasks.push(Promise.resolve(chat.handleNotification(message, 'codex')).catch(() => {}))
     },
     onRequest: message => {
+      { const m = `request:${String(message.method ?? '?').slice(0, 60)}`; if (Object.keys(turnNow.engineMessages).length < 40 || m in turnNow.engineMessages) turnNow.engineMessages[m] = (turnNow.engineMessages[m] ?? 0) + 1; turnNow.pendingRequests.set(message.id, String(message.method ?? '?').slice(0, 60)) }
       if (message.method === 'item/tool/call') turnNow.toolCalls.set(message.id, { tool: message.params?.tool, arguments: clip(message.params?.arguments, 1500), result: null })
       else if (/requestApproval$|^applyPatchApproval$|^execCommandApproval$/.test(message.method)) turnNow.native.approvals++
       if (chat) tasks.push(Promise.resolve(chat.handleServerRequest(message, 'codex')).catch(error => turnNow.errors.push(`server_request_failed:${clip(error?.code ?? error?.message, 80)}`)))
@@ -435,6 +440,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       try {
         const result = await rpc.request(method, params)
         // contextKeys (c27): the NAMES of the additionalContext blocks a turn/start carried (never their text): whether EG-Desk's own blocks (egdesk_stopped_command, ...) rode along
+        if (method === 'turn/start') turnNow.turnStartAt = performance.now()
         rec.requests.push({ method, ms: ms(start), ...(method === 'turn/start' && params?.additionalContext && typeof params.additionalContext === 'object' ? { contextKeys: Object.keys(params.additionalContext).filter(k => /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(k)).slice(0, 16) } : {}) })
         if (method === 'thread/start') { lastThreadStart = result; if (!persisted && result?.thread?.ephemeral !== true) { rec.aborted ??= 'thread_not_ephemeral' } }
         // persisted mode: every thread the engine reports is in the ledger before anything else happens with it (a crash leaves the record of what to delete)
@@ -445,6 +451,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       } catch (error) { rec.requests.push({ method, ms: ms(start), error: String(error?.code ?? 'error').slice(0, 40), message: clip(error?.message ?? '', 300) }); throw error }
     }
     const respond = (id, result, error) => {
+      turnNow.pendingRequests.delete(id)
       const call = turnNow.toolCalls.get(id)
       if (call) { try { call.result = { success: result?.success ?? null, error: error ? clip(error.message ?? error, 300) : null, text: clip(result?.contentItems?.[0]?.text ?? '', 1500) } } catch {} }
       rpc.respond(id, result, error)
@@ -504,7 +511,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       ...(FLAG.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}),
       calibrationLog, turnMemory: turnMemoryConfig,
       ...(['advisory', 'on'].includes(FLAG.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => FLAG.EGDESK_DRAFT_CHECK, design: () => (FLAG.EGDESK_DRAFT_CHECK_DESIGN === 'choice' ? 'choice' : 'predicates') } } : {}),
-      ...(FLAG.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...turnHooks.flowOptions({ FLAG, conversation }) } } : {}), // a registered feature may add keys to the flow, as the bridge does (the collaboration hook: presence, audience, attentionPosted)
+      ...(FLAG.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...turnHooks.flowOptions({ FLAG, conversation }), ...(FLAG.EGDESK_FLOW_STALLED_COPY === 'none' ? { stalledCopy: () => 'none' } : {}) } } : {}), // a registered feature may add keys to the flow, as the bridge does (the collaboration hook: presence, audience, attentionPosted)
       ...(FLAG.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
       ...(wiring && !wiring.shadow ? { terminalGate: wiring.terminalGate(terminalGateConfig) } : terminalGateConfig ? { terminalGate: terminalGateConfig } : {}),
       ...(['advisory', 'on'].includes(FLAG.EGDESK_WORKING_MEMORY) ? { workingMemory: { mode: () => FLAG.EGDESK_WORKING_MEMORY } } : {}),
@@ -523,6 +530,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     chat = new CodexChatRuntime({ request, respond, ...(profileStore ? { profiles: profileStore } : {}),
       ...(needsNative ? { getBoardPeerContract: () => nativeContract?.boardPeerContract ?? null, getSteerContract: () => nativeContract?.steerContract ?? null, getThreadDelete: () => nativeContract?.threadDelete === true } : {}), emit: () => {}, emitLegacy: () => {}, store, requireStore: true, contexts, getOwnerKey: () => OWNER, verifyFile: async () => null, resolveProjectWorkspace: async () => null,
       ...(FLAG.EGDESK_AGENT_RELOAD_REUSE === 'on' ? { agentReloadReuse: true } : {}), // inert without an Agent-profile conversation (L7 c27)
+      ...(stallConfigFromEnv(FLAG) ? { engineStall: stallConfigFromEnv(FLAG) } : {}), // c33: the first-event watchdog (flag EGDESK_ENGINE_STALL_FIRST_EVENT_MS)
       toolProviders: wiring.toolProviders, ownTools: wiring.ownTools, decisionContext,
       roomAccount: { mode: () => (FLAG.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') } })
     chat.setConnection(true)
@@ -567,21 +575,23 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     const beginTurn = async text => {
       resetTurnNow(); runnerLog.length = 0
       const started = performance.now()
-      const run = await chat.send({ message: text, clientThreadId, requestId: `req-${++requestSeq}`, cwd: scratch, ...(agentRoom ? { profileId: agentRoom.id, replyDestination: 'direct' } : {}), ...Object.assign({}, ...attached.map(a => a.sendExtra?.() ?? {})), ...(first ? (persisted ? {} : { stateless: true }) : { conversationId: nativeThread }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
+      const run = await chat.send({ message: text, clientThreadId, requestId: `req-${++requestSeq}`, cwd: scratch, ...(agentRoom ? { profileId: agentRoom.id, replyDestination: 'direct' } : {}), ...Object.assign({}, ...attached.map(a => a.sendExtra?.({ text }) ?? {})), ...(first ? (persisted ? {} : { stateless: true }) : { conversationId: nativeThread }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
       first = false; nativeThread = run.conversationId
       return { run, started }
     }
     const finishTurn = async ({ run, started }) => {
       const deadline = started + options.turnTimeoutMs
       let done = null
-      while (!done && performance.now() < deadline && !closed && !rec.aborted) { done = completions.find(c => c.threadId === run.conversationId && c.turnId === run.runId); if (!done) await sleep(10) }
+      // c32: a decision-first turn ends locally (no engine turn): the runtime's own run says completed, the engine never sends turn/completed for it
+      const localDone = () => { const r = chat.runFor(run); return r?.decisionFirst?.path === 'fast' && ['completed', 'failed', 'interrupted'].includes(r.status) ? { threadId: run.conversationId, turnId: run.runId, status: r.status, error: null } : null }
+      while (!done && performance.now() < deadline && !closed && !rec.aborted) { done = completions.find(c => c.threadId === run.conversationId && c.turnId === run.runId) ?? localDone(); if (!done) await sleep(10) }
       let status = done?.status ?? null
       if (!done) {
         status = closed ? 'engine_exited' : rec.aborted ? 'aborted' : 'timeout'
         if (status === 'timeout') { try { await rpc.request('turn/interrupt', { threadId: run.conversationId, turnId: run.runId }) } catch {} rec.aborted ??= 'turn_timeout' }
       }
       await Promise.allSettled(tasks.splice(0)); try { await chat.queue } catch {} try { await chat.draftCheckIdle() } catch {} await sleep(30); await Promise.allSettled(tasks.splice(0))
-      return { run, status, error: done?.error ?? null, latencyMs: ms(started), toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], draftRows: [...turnNow.draftRows], flowRows: [...turnNow.flowRows], internal: [...turnNow.internal], writers: [...turnNow.writers], commandsRan: [...runnerLog] }
+      return { run, status, error: done?.error ?? null, latencyMs: ms(started), firstEventMs: turnNow.turnStartAt !== null && turnNow.firstEventAt !== null ? Math.max(0, Math.round(turnNow.firstEventAt - turnNow.turnStartAt)) : null, toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, engineMessages: { ...turnNow.engineMessages }, unansweredRequests: [...turnNow.pendingRequests.values()], native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], draftRows: [...turnNow.draftRows], flowRows: [...turnNow.flowRows], internal: [...turnNow.internal], writers: [...turnNow.writers], commandsRan: [...runnerLog] }
     }
     const sendAndWait = async text => finishTurn(await beginTurn(text))
     // a message typed into the working run, afterMs after that turn started; not a turn of its own (the run's turn keeps going)
@@ -724,12 +734,12 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
         turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted), draftCheckRows: sub.reduce((n, s) => n + (s.draftRows?.length ?? 0), 0), draftCheckRejects: sub.reduce((n, s) => n + (s.draftRows ?? []).reduce((m, row) => m + (row.judgments ?? []).filter(j => j.would === 'reject').length, 0), 0),
       }
       // registered hooks that wait on the live runtime after the answer is posted (their record goes under their name, their expectations join the turn's)
-      const after = await turnHooks.afterTurn({ ...hookCtx, run: sub.at(-1).run, say: turn.say, answer: posted.at(-1) ?? null, turnIndex: index + 1, expect: turn.expect, toolTexts: sub.flatMap(x => x.toolCalls ?? []).map(c => c.result?.text).filter(t => typeof t === 'string'), ...(side ? { alongside: { run: side.run, clientThreadId: side.room.id, say: turn.alongside.say, answer: side.posted.at(-1) ?? null, status: side.status } } : {}) })
+      const after = await turnHooks.afterTurn({ ...hookCtx, firstEventMs: sub[0]?.firstEventMs ?? null, run: sub.at(-1).run, say: turn.say, answer: posted.at(-1) ?? null, turnIndex: index + 1, expect: turn.expect, toolTexts: sub.flatMap(x => x.toolCalls ?? []).map(c => c.result?.text).filter(t => typeof t === 'string'), ...(side ? { alongside: { run: side.run, clientThreadId: side.room.id, say: turn.alongside.say, answer: side.posted.at(-1) ?? null, status: side.status } } : {}) })
       const ext = turnHooks.finishTurn({ ...hookCtx, expect: turn.expect, nextExpect: withMessage ? next.expect : null, latencyMs: sub[0].latencyMs, steerContract: FLAG.EGDESK_INRUN_MESSAGES === 'on' ? (typeof nativeContract?.steerContract === 'string' || typeof nativeContract?.boardPeerContract === 'string') : null /* c28: the proof the runtime uses is steerContract ?? boardPeerContract (the real 0.171 record said false while engine.nativeContract.steerContract was true) */ }) // registered hooks: records, expectations
       Object.assign(ext.records, after.records); ext.expectations.push(...after.expectations)
       const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...(side ? [{ check: 'alongside.completed', ok: side.status === 'completed' && side.posted.length >= 1, detail: { status: side.status, posted: side.posted.length } }] : []), ...ext.expectations]
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
-      await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
+      await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, firstEventMs: s.firstEventMs ?? null, items: s.items, engineMessages: s.engineMessages ?? {}, unansweredRequests: s.unansweredRequests ?? [], native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
         ...(side ? { alongside: { clientThreadId: side.room.id, status: side.status, posted: side.posted.map(t => clip(t, 400)) } } : {}), ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(contextKeys.length ? { contextKeys } : {}), ...(sub.some(s => s.flowRows?.length) ? { flowRows: sub.flatMap(s => s.flowRows) } : {}), ...(sub.some(s => s.internal?.length) ? { internalTurns: sub.flatMap(s => s.internal) } : {}), ...(sub.some(s => s.writers?.length) ? { writers: sub.flatMap(s => s.writers) } : {}), ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...ext.records, expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {

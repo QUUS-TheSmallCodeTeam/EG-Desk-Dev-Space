@@ -193,3 +193,21 @@ test('earlier records: eight after a withheld answer, four after a posted one', 
   const afterWithheld = await w.chat.draftTurnEvidence(run2, turn('b'), [])
   assert.deepEqual(ids(afterWithheld), ['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8'].map(id => `prev_${id}`), 'a withheld answer: all eight')
 })
+
+// c31 (owner decision P2, option (다)): conversationFlow.stalledCopy() === 'none' sends nothing when the writing model fails for a stalled engine. Default ('fixed' or absent): the fixed line, as before.
+test('stalled engine and the writer fails: the fixed line by default; with stalledCopy none nothing at all is sent (the run is not touched, the final answer still comes)', async t => {
+  for (const mode of [undefined, 'fixed', 'none']) {
+    const w = world(t, { fork: 'hang', flags: { held: true, flow: true, ...(mode ? { stalledCopy: mode } : {}) } }), d = await w.dm(`dm-stalled-${mode}`)
+    await w.advance(1000); await d.note('n1', '자료를 확인하는 중입니다.'); await w.advance(24000) // the 25 s stall beat asks; the writer is given its 6 s
+    assert.equal(w.flowAsked.at(-1).pick, 'stalled'); await w.advance(FLOW_LIMITS.stalledWriterMs + 1000)
+    await w.advance(29000)
+    assert.deepEqual(d.assistant(), mode === 'none' ? [] : [FLOW_COPY.stalled], `stalledCopy ${mode ?? '(absent)'}`)
+    const entry = w.flowEntries().at(-1); assert.deepEqual([entry.flow, entry.posted], ['stalled', mode === 'none' ? 'none' : 'fallback'])
+    await w.advance(2000); await d.final('늦어서 죄송합니다. 확인을 마쳤습니다.')
+    assert.equal(d.assistant().at(-1), '늦어서 죄송합니다. 확인을 마쳤습니다.', 'the answer is the run\'s own')
+  }
+})
+test('the bridge reads the opt-in from EGDESK_FLOW_STALLED_COPY=none and nothing else changes the default', async () => {
+  const src = (await import('node:fs')).readFileSync(new URL('./codex-bridge-server.mjs', import.meta.url), 'utf8')
+  assert.match(src, /process\.env\.EGDESK_FLOW_STALLED_COPY === 'none' \? \{ stalledCopy: \(\) => 'none' \} : \{\}/)
+})

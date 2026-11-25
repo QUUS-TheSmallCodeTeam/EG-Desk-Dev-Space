@@ -100,7 +100,7 @@ test('the fresh thread is declined like a fork: its tool and approval requests a
 })
 
 // ---- the runtime's three callers (heartbeat writer, draft revision, briefing fill) ride on it ----
-function runtimeOn(t, { refuseFork = true, stallFork = false, profile = () => ({ model: 'egdesk-model', effort: 'low' }) } = {}) {
+function runtimeOn(t, { refuseFork = true, stallFork = false, engineStall = null, profile = () => ({ model: 'egdesk-model', effort: 'low' }) } = {}) {
   const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-internal-turn-'))
   t.after(() => fs.rmSync(base, { recursive: true, force: true }))
   const real = path.join(base, 'project'), empty = path.join(base, 'engine-folder'); fs.mkdirSync(real); fs.mkdirSync(empty)
@@ -125,7 +125,7 @@ function runtimeOn(t, { refuseFork = true, stallFork = false, profile = () => ({
   const store = openChatStore({ dataDir: path.join(base, 'chat'), ownerScope: 'internal-turn' })
   t.after(() => { try { store.close() } catch {} })
   chat = new CodexChatRuntime({ request, respond: () => {}, emit: () => {}, emitLegacy: () => {}, verifyFile: async () => null, store, requireStore: true, getOwnerKey: () => 'codex:internal-turn-test', decisionContext: { mode: () => 'off', configured: () => false, client: null },
-    ownTools: { mode: () => 'on', neutralFolder: () => empty, profile } })
+    ownTools: { mode: () => 'on', neutralFolder: () => empty, profile }, ...(engineStall ? { engineStall } : {}) })
   chat.setConnection(true)
   return { chat, calls, real, empty, of: m => calls.filter(([x]) => x === m).map(([, p]) => p) }
 }
@@ -341,4 +341,17 @@ test('the runtime (c30): a persisted room whose revision fork stalls (the record
   const ok = runtimeOn(t, { refuseFork: false }); ok.chat.reviseHedgeMs = 40
   const run2 = ok.chat.runFor(await ok.chat.send({ message: 'q', clientThreadId: 'ui', requestId: 'r1', cwd: ok.real }))
   assert.equal(await ok.chat.reviseOnFork(run2, 'd', 'n', null, evidence), 'internal answer for fork-2'); assert.equal(ok.of('thread/start').length, 1)
+})
+
+test('c30 with c33: the first-event watchdog (L5, person turns, startTurnWatched) never touches a private fork turn; the revision hedge (internal turns only) works with the watchdog on and never interrupts a person turn', async t => {
+  const w = runtimeOn(t, { refuseFork: false, stallFork: true })
+  w.chat.reviseHedgeMs = 40
+  const run = w.chat.runFor(await w.chat.send({ message: 'q', clientThreadId: 'ui', requestId: 'r1', cwd: w.real }))
+  w.chat.engineStall = { firstEventMs: 5000 } // on from here: the person's turn is already started (this mock engine sends no event for it)
+  const began = Date.now()
+  assert.match(await w.chat.reviseOnFork(run, 'd', 'n', null, []), /^internal answer for thr-/)
+  assert.ok(Date.now() - began < 2000, 'the hedge answered; the 5 s watchdog was not what ended the wait')
+  assert.equal(w.of('turn/interrupt').length, 0, 'the watchdog does not interrupt or restart the silent fork: it watches person turns only')
+  assert.equal(w.of('turn/start').filter(x => x.threadId.startsWith('fork-')).length, 1, 'the fork turn was started once (no watchdog retry)')
+  assert.equal(w.chat.engineSeen.has(w.of('turn/start').find(x => x.threadId.startsWith('fork-')).threadId), false, 'private-turn events never reach the watchdog\'s bookkeeping')
 })
