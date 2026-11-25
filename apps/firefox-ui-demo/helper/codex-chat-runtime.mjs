@@ -2727,7 +2727,7 @@ export class CodexChatRuntime {
       throw Object.assign(chatError('ACCOUNT_CHANGED', 'AI engine account changed before dispatch', 409), { definite: true })
     }
     if (bounded && engine.id !== 'claude' && !this.qaReady(slot)) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
-    const qaOverrides = bounded && engine.id === 'claude' ? claudeBoundedThreadOverrides(policy) : bounded ? await loadQaThreadOverrides(request, {
+    const qaOverrides = bounded && engine.id === 'claude' ? claudeBoundedThreadOverrides(policy, { relaxed: this.claudeBrowserLive() }) : bounded ? await loadQaThreadOverrides(request, {
       threadId: context.conversationId && this.loadedThreads.has(context.conversationId) ? context.conversationId : null,
       cwd: overrides.cwd || this.threads.get(context.conversationId)?.cwd || null,
     }) : null
@@ -3563,7 +3563,7 @@ export class CodexChatRuntime {
     try {
       const bounded = [READ_ONLY_QA, BROWSER_BOUNDED, FIXTURE_BROWSER_QA].includes(boundPolicy)
       if (bounded && engineId !== 'claude' && !this.qaReady(slot)) throw chatError('QA_POLICY_UNAVAILABLE', 'Bounded execution requires a verified native policy contract', 503)
-      const qaOverrides = bounded && engineId === 'claude' ? claudeBoundedThreadOverrides(boundPolicy) : bounded ? await loadQaThreadOverrides(this.scopedRequest(slot), {
+      const qaOverrides = bounded && engineId === 'claude' ? claudeBoundedThreadOverrides(boundPolicy, { relaxed: this.claudeBrowserLive() }) : bounded ? await loadQaThreadOverrides(this.scopedRequest(slot), {
         threadId: this.loadedThreads.has(cid) ? cid : null,
         cwd: this.threads.get(cid)?.cwd || null,
       }) : {}

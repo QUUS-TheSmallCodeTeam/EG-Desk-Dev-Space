@@ -51,7 +51,7 @@ import {
 import { createClaudePermissionBroker } from './claude-engine-permissions.mjs'
 import { EGDESK_MCP_SERVER_NAME, createEgdeskClaudeMcp, egdeskAllowedToolsRule, egdeskMcpConfig } from './egdesk-claude-mcp.mjs'
 import { applyClaudeRateLimit, createClaudeTranslator } from './claude-stream-translate.mjs'
-import { CLAUDE_BOUNDED_MIN_VERSION, CLAUDE_BOUNDED_POLICIES, claudeBoundedInitViolation, claudeBoundedLaunch } from './egdesk-claude-bounded.mjs'
+import { CLAUDE_BOUNDED_MIN_VERSION, CLAUDE_BOUNDED_POLICIES, claudeBoundedInitDiagnosis, claudeBoundedLaunch } from './egdesk-claude-bounded.mjs'
 import { CLAUDE_MCP_OUTPUT_LIMIT_TOKENS, claudeParentLimitEnv, createClaudeProcessBudget } from './egdesk-claude-limits.mjs'
 
 export const CLAUDE_ENGINE_ID = 'claude'
@@ -313,6 +313,7 @@ export function createClaudeEngineAdapter(options = {}) {
     if (p.egdeskBoundedPolicy !== undefined && p.egdeskBoundedPolicy !== null) {
       if (!CLAUDE_BOUNDED_POLICIES.includes(p.egdeskBoundedPolicy)) throw definite(chatError('QA_POLICY_UNAVAILABLE', 'Claude supports only the bounded Browser policy', 503))
       spec.bounded = p.egdeskBoundedPolicy
+      spec.boundedRelaxed = p.egdeskBoundedRelaxed === true // u6: the init check of the Claude browser capability (egdesk-claude-bounded)
     }
     if (p.cwd !== undefined && p.cwd !== null) {
       if (!isAbsolute(p.cwd)) throw definite(chatError('INVALID_CWD', 'The working folder must be an absolute path', 400))
@@ -434,10 +435,11 @@ export function createClaudeEngineAdapter(options = {}) {
       session.activeTurn = null
       const interrupted = turn.interruptRequested === true
       const code = proc.gateCode || 'RUNTIME_LOST'
+      const detail = proc.gateDetail ? `:${proc.gateDetail}` : ''
       deliver('notification', { method: 'turn/completed', params: {
         threadId: session.threadId, turnId: turn.turnId,
         turn: { id: turn.turnId, status: interrupted ? 'interrupted' : 'failed', items: [],
-          error: interrupted ? null : { message: `The Claude process ended before the turn finished (${code})`, code, kind: 'unknown', origin: 'claude' } },
+          error: interrupted ? null : { message: `The Claude process ended before the turn finished (${code}${detail})`, code, kind: 'unknown', origin: 'claude' } },
       } })
     }
     statusChanged()
@@ -450,10 +452,11 @@ export function createClaudeEngineAdapter(options = {}) {
   function onProcessMessage(session, proc, message) {
     if (proc.blocked) return // a bounded process that failed its init check: nothing it says is accepted
     if (proc.bounded && message?.type === 'system' && message.subtype === 'init') {
-      const violation = claudeBoundedInitViolation(message, { serverName: EGDESK_MCP_SERVER_NAME })
+      const violation = claudeBoundedInitDiagnosis(message, { serverName: EGDESK_MCP_SERVER_NAME, relaxed: proc.boundedRelaxed === true })
       if (violation) {
         proc.blocked = true
         proc.gateCode = 'CLAUDE_BOUNDED_UNVERIFIED'
+        proc.gateDetail = `${violation.kind}=${violation.count}` // u6: closed words and a count, never a name or text from the CLI
         void proc.transport.close({ graceMs: 0 }).catch(() => {})
         return
       }
@@ -513,8 +516,8 @@ export function createClaudeEngineAdapter(options = {}) {
       const proc = {
         transport: null, exited: false, gateCode: null, owner: ownerKey(), ownerEpoch, mcpPending: new Map(), // rpc id → control request id
         lease, engineBuild: typeof check.version === 'string' ? check.version : null,
-        bounded: spec.bounded || null, blocked: false, boundedVerified: false,
-        flags: { cwd: spec.cwd, model: spec.model, effort: spec.effort, appendPrompt: spec.appendPrompt, tools: spec.tools, bounded: spec.bounded || null, disallowed: spec.disallowed ?? null, builtin: spec.builtin ?? null, alwaysLoad: spec.alwaysLoad === true },
+        bounded: spec.bounded || null, boundedRelaxed: spec.bounded ? spec.boundedRelaxed === true : false, blocked: false, boundedVerified: false,
+        flags: { cwd: spec.cwd, model: spec.model, effort: spec.effort, appendPrompt: spec.appendPrompt, tools: spec.tools, bounded: spec.bounded || null, boundedRelaxed: spec.boundedRelaxed === true, disallowed: spec.disallowed ?? null, builtin: spec.builtin ?? null, alwaysLoad: spec.alwaysLoad === true },
         broker: createClaudePermissionBroker({ threadId, egdeskServer: EGDESK_MCP_SERVER_NAME, offerSessionGrant: true,
           nextRpcId: () => nextRpcId(threadId, 'perm') }),
         mcp: createEgdeskClaudeMcp({ alwaysLoad: spec.alwaysLoad === true, threadId, tools: spec.tools, serverName: EGDESK_MCP_SERVER_NAME,
@@ -613,7 +616,7 @@ export function createClaudeEngineAdapter(options = {}) {
 
   // Process flags fixed at spawn; a turn that changes one restarts with --resume.
   const flagsDiffer = (flags, spec) => flags.cwd !== spec.cwd || flags.model !== spec.model || flags.effort !== spec.effort
-    || flags.appendPrompt !== spec.appendPrompt || flags.tools !== spec.tools || flags.bounded !== (spec.bounded || null) || JSON.stringify(flags.disallowed ?? null) !== JSON.stringify(spec.disallowed ?? null) || JSON.stringify(flags.builtin ?? null) !== JSON.stringify(spec.builtin ?? null) || flags.alwaysLoad !== (spec.alwaysLoad === true)
+    || flags.appendPrompt !== spec.appendPrompt || flags.tools !== spec.tools || flags.bounded !== (spec.bounded || null) || flags.boundedRelaxed !== (spec.boundedRelaxed === true) || JSON.stringify(flags.disallowed ?? null) !== JSON.stringify(spec.disallowed ?? null) || JSON.stringify(flags.builtin ?? null) !== JSON.stringify(spec.builtin ?? null) || flags.alwaysLoad !== (spec.alwaysLoad === true)
 
   function syncStatus() {
     const ready = isReady()
