@@ -4,9 +4,9 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { compareRuns, enginePhases, formatCompare, formatSummary, formatTable, recordTimings, summarize, turnTiming, unionMs } from './egdesk-real-engine-timing.mjs'
+import { main } from '../scripts/egdesk-real-engine-timing.mjs'
 import { MEMORY_FAKE, commandFake, fastScript, journeyWorld, runJourneyConversation } from '../scripts/egdesk-real-engine-journey.support.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url)), app = path.join(here, '..')
@@ -80,16 +80,18 @@ test('compare with --normalize: an -off and an -on copy of a script match turn b
   assert.equal(compareRuns([{ set: 'a-off', id: 'x', turns: [timed()] }], [{ set: 'a-on', id: 'x', turns: [timed()] }]).unmatched.length, 2, 'without it they do not match')
 })
 
-test('the CLI: table (with per-script summaries) and compare read a records folder and write nothing', () => {
+test('the CLI (in process): table with per-script summaries, compare, --set, --normalize, usage; it reads a records folder and writes nothing', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'egdesk-timing-'))
   try {
     const put = (side, rec) => { const d = path.join(dir, side, rec.set); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, `${rec.id}.json`), JSON.stringify(rec)) }
     put('off', { set: 'real-engine-x-v1', id: 'c', turns: [timed()] }); put('on', { set: 'real-engine-x-v1', id: 'c', turns: [{ ...timed(), subTurns: [{ ...timed().subTurns[0], latencyMs: 6000 }] }] }); fs.writeFileSync(path.join(dir, 'off', 'noise.json'), '{"a":1}')
-    const run = (...a) => spawnSync(process.execPath, [path.join(app, 'scripts', 'egdesk-real-engine-timing.mjs'), ...a], { encoding: 'utf8', env: { ...process.env, HOME: dir } })
-    const table = run('table', path.join(dir, 'off')); assert.equal(table.status, 0, table.stderr); assert.match(table.stdout, /ALL\n/); assert.match(table.stdout, /real-engine-x-v1\nturns 1/)
-    assert.equal(JSON.parse(run('table', path.join(dir, 'off'), '--json').stdout).rows.length, 1); assert.equal(run('table', path.join(dir, 'off'), '--set', 'nope').status, 1)
-    const cmp = run('compare', path.join(dir, 'off'), path.join(dir, 'on')); assert.equal(cmp.status, 0, cmp.stderr); assert.match(cmp.stdout, /seconds saved over the answered turns: turn 3/)
-    assert.equal(run('compare', path.join(dir, 'off')).status, 2); assert.equal(run().status, 2)
+    const run = (...a) => { const out = [], err = []; const code = main(a, { print: l => out.push(l), printError: l => err.push(l) }); return { code, out: out.join('\n'), err: err.join('\n') } }
+    const table = run('table', path.join(dir, 'off')); assert.equal(table.code, 0); assert.match(table.out, /ALL\n/); assert.match(table.out, /real-engine-x-v1\nturns 1/)
+    assert.equal(JSON.parse(run('table', path.join(dir, 'off'), '--json').out).rows.length, 1); assert.equal(run('table', path.join(dir, 'off'), '--set', 'nope').code, 1)
+    const cmp = run('compare', path.join(dir, 'off'), path.join(dir, 'on')); assert.equal(cmp.code, 0); assert.match(cmp.out, /seconds saved over the answered turns: turn 3/)
+    put('on', { set: 'real-engine-x-on-v1', id: 'c-on', turns: [timed()] }); put('off', { set: 'real-engine-x-off-v1', id: 'c-off', turns: [timed()] })
+    const n = run('compare', path.join(dir, 'off'), path.join(dir, 'on'), '--normalize', '-off|-on', '--set', 'real-engine-x-o'); assert.equal(n.code, 0, n.err); assert.match(n.out, /real-engine-x-v1\/c#1/)
+    assert.equal(run('compare', path.join(dir, 'off')).code, 2); assert.equal(run().code, 2); assert.match(run().err, /usage/)
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
 
