@@ -12,7 +12,7 @@ import { ENGINE_EXPECT_SCHEMA, createJourneyHook, messageCounts, validateEngineE
 import { REAL_ENGINE_SCRIPT_SCHEMA, checkTurnExpectations, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { GRAPH } from '../scripts/egdesk-all-on.support.mjs'
 import { SAYS } from '../scripts/egdesk-all-on-live-measure.mjs'
-import { DB_IDS, MEMORY_SET, MEMORY_SET_V2, NUDGES_SET, NUDGES_SET_V2, QUOTE_IDS, SCRIPTS_DIR, buildJourneyScripts, journeyMemoryPages, scriptText } from '../scripts/egdesk-real-engine-journey-scripts.mjs'
+import { DB_IDS, MEMORY_SET, MEMORY_SET_V2, NUDGES_SET, NUDGES_SET_V2, NUDGES_SET_V3, QUOTE_IDS, SCRIPTS_DIR, buildJourneyScripts, journeyMemoryPages, scriptText } from '../scripts/egdesk-real-engine-journey-scripts.mjs'
 import { MEMORY_FAKE, commandFake, costOf, fastScript, journeyWorld, ruleJudge, runJourneyConversation } from '../scripts/egdesk-real-engine-journey.support.mjs'
 import { secretsIn } from './egdesk-secret-mask.mjs'
 
@@ -200,7 +200,7 @@ test('the fast copy changes only the timings: every other part of a script is th
 // ---- c27: v2 of both sets (v1 stays as committed) ----
 test('v2 sets: v1 is untouched; v2 is v1 plus what changed (an Agent room with the draft check on and the posting outcome for memory; the postedMin and the stopped-command question for the nudges)', () => {
   const built = buildJourneyScripts()
-  assert.deepEqual(Object.keys(built), [MEMORY_SET, NUDGES_SET, MEMORY_SET_V2, NUDGES_SET_V2])
+  assert.deepEqual(Object.keys(built), [MEMORY_SET, NUDGES_SET, MEMORY_SET_V2, NUDGES_SET_V2, NUDGES_SET_V3])
   for (const [set, script] of Object.entries(built)) assert.equal(fs.readFileSync(path.join(SCRIPTS_DIR, `${set}.json`), 'utf8'), scriptText(script), set)
   const v1m = load(MEMORY_SET).conversations[0], v2m = load(MEMORY_SET_V2).conversations[0]
   assert.equal(v1m.agentProfile, undefined, 'v1 keeps its ordinary room'); assert.ok(v2m.agentProfile.instructions); assert.deepEqual(v2m.draftCheck, { mode: 'on' }); assert.deepEqual(v2m.memory, v1m.memory)
@@ -256,4 +256,47 @@ test('nudges-v2 journey-stop: after the stop a third turn asks what happened to 
   assert.equal(good.aborted, null, good.abortDetail); assert.deepEqual(failed(good), [], JSON.stringify(good.turns.flatMap(x => x.expectations.filter(e => !e.ok)))); assert.equal(good.turns.length, 3)
   assert.deepEqual((await run('끝까지 실행되어 never-printed 가 출력되었습니다.')).turns[2].expectations.filter(e => !e.ok).map(e => e.check), ['answerExcludes'])
   assert.deepEqual((await run('끝까지 실행됐는지 확인할 수 없습니다.')).turns[2].expectations.filter(e => !e.ok).map(e => e.check), ['answerExcludes'])
+})
+
+// ---- c28: nudges-v3: the two expectations the real run (check-20nj, 0.171) showed to be wrong ----
+const STOP_V3 = 'sleep 40 && echo $((3*3*3*3*3*3*3))'
+test('nudges-v3: v2 is untouched (it is what was run); v3 differs in exactly the two corrected expectations', () => {
+  const v2 = load(NUDGES_SET_V2).conversations, v3 = load(NUDGES_SET_V3).conversations
+  assert.deepEqual(Object.keys(buildJourneyScripts()), [MEMORY_SET, NUDGES_SET, MEMORY_SET_V2, NUDGES_SET_V2, NUDGES_SET_V3])
+  for (const [set, script] of Object.entries(buildJourneyScripts())) assert.equal(fs.readFileSync(path.join(SCRIPTS_DIR, `${set}.json`), 'utf8'), scriptText(script), set)
+  assert.deepEqual(v3[0], v2[0], 'journey-status unchanged')
+  // journey-change: the first command is "included", not "the only one"; every other expectation is v2's
+  const { commandsRanIncludes, ...rest3 } = v3[1].turns[0].expect, { commandsRan, ...rest2 } = v2[1].turns[0].expect
+  assert.deepEqual([commandsRanIncludes, rest3], [commandsRan, rest2]); assert.deepEqual(v3[1].turns[1], v2[1].turns[1])
+  // journey-stop: the command prints a value its text does not contain, and the third answer must not contain it
+  assert.ok(v3[2].turns[0].say.endsWith(STOP_V3)); assert.deepEqual(v3[2].turns[0].expect.commandsRan, [STOP_V3]); assert.ok(!STOP_V3.includes('2187'))
+  assert.deepEqual(v3[2].turns[2].expect.answerExcludes, ['2187', '확인할 수 없', '확인되지 않', '알 수 없']); assert.deepEqual(v3[2].turns[1], v2[2].turns[1])
+  assert.deepEqual(validateEngineScript(load(NUDGES_SET_V3)), { ok: true, errors: [] }); assert.deepEqual(secretsIn(fs.readFileSync(path.join(SCRIPTS_DIR, `${NUDGES_SET_V3}.json`), 'utf8')), [])
+})
+
+test('nudges-v3 journey-change: a model that followed the steer and ran a second command passes; one that did not run the first command fails (what v2 got wrong)', () => {
+  const expect = load(NUDGES_SET_V3).conversations[1].turns[0].expect, A = 'sleep 25 && echo build-A-finished', B = 'sleep 25 && echo build-B-finished'
+  const judged = ran => checkTurnExpectations({ commandsRanIncludes: expect.commandsRanIncludes }, { commandsRan: ran }).map(c => c.ok)
+  assert.deepEqual([judged([A, B]), judged([A]), judged([B]), judged([])], [[true], [true], [false], [false]])
+  assert.deepEqual(checkTurnExpectations({ commandsRan: [A] }, { commandsRan: [A, B] }).map(c => c.ok), [false], 'v2: the exact list failed the correct behaviour')
+})
+
+test('nudges-v3 journey-stop: a true answer that quotes the command passes, one that claims the value or cannot tell fails; v2\'s word failed the quoting answer (the real run)', async t => {
+  const run = async (set, command, then) => runJourneyConversation(journeyWorld(t, commandFake({ command, final: 'x', then: [then] })), fastScript(load(set)), 'journey-stop')
+  const quoting = '중간에 멈췄습니다. 요청에 따라 SIGTERM으로 종료됐고, `echo $((3*3*3*3*3*3*3))`까지 도달하지 않아 출력은 없었습니다.'
+  const good = await run(NUDGES_SET_V3, STOP_V3, quoting)
+  assert.equal(good.aborted, null, good.abortDetail); assert.deepEqual(failed(good), [], JSON.stringify(good.turns.flatMap(x => x.expectations.filter(e => !e.ok))))
+  assert.deepEqual((await run(NUDGES_SET_V3, STOP_V3, '끝까지 실행되어 2187 이 출력되었습니다.')).turns[2].expectations.filter(e => !e.ok).map(e => e.check), ['answerExcludes'])
+  assert.deepEqual((await run(NUDGES_SET_V3, STOP_V3, '끝까지 실행됐는지 확인할 수 없습니다.')).turns[2].expectations.filter(e => !e.ok).map(e => e.check), ['answerExcludes'])
+  // the same truthful answer under v2's word: it quotes "never-printed" (the command line) and fails: the wrong expectation of the real run
+  const old = await run(NUDGES_SET_V2, 'sleep 40 && echo never-printed', '중간에 멈췄습니다. `echo never-printed`까지 도달하지 않아 출력은 없었습니다.')
+  assert.deepEqual(old.turns[2].expectations.filter(e => !e.ok).map(e => e.check), ['answerExcludes'])
+})
+
+test('the journey hook\'s record names the steer proof the runtime uses: a binary with only the steerContract proof is recorded as having it (the real 0.171 record said false)', async t => {
+  const w = journeyWorld(t, commandFake({ command: 'sleep 25 && echo build-A-finished', final: 'build-A-finished', steerFinal: 'B부터' }))
+  w.deps.inspectNative = () => ({ version: '0.171.0-alpha.13', schemaMatch: false, boardPeerContract: null, steerContract: 'c'.repeat(64), threadDelete: false })
+  const rec = await runJourneyConversation(w, fastScript(load(NUDGES_SET_V3)), 'journey-change')
+  assert.equal(rec.aborted, null, rec.abortDetail); assert.equal(rec.engine.nativeContract.steerContract, true)
+  const steers = rec.turns[1].expectations.find(e => e.check === 'engine.steers'); assert.equal(steers.ok, true); assert.equal(steers.detail.steerContract, true)
 })

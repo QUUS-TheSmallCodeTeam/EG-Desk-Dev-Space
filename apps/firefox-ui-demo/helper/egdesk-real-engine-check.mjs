@@ -702,7 +702,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       }
       // registered hooks that wait on the live runtime after the answer is posted (their record goes under their name, their expectations join the turn's)
       const after = await turnHooks.afterTurn({ ...hookCtx, run: sub.at(-1).run, say: turn.say, answer: posted.at(-1) ?? null, turnIndex: index + 1, expect: turn.expect })
-      const ext = turnHooks.finishTurn({ ...hookCtx, expect: turn.expect, nextExpect: withMessage ? next.expect : null, latencyMs: sub[0].latencyMs, steerContract: FLAG.EGDESK_INRUN_MESSAGES === 'on' ? typeof nativeContract?.boardPeerContract === 'string' : null }) // registered hooks: records, expectations
+      const ext = turnHooks.finishTurn({ ...hookCtx, expect: turn.expect, nextExpect: withMessage ? next.expect : null, latencyMs: sub[0].latencyMs, steerContract: FLAG.EGDESK_INRUN_MESSAGES === 'on' ? (typeof nativeContract?.steerContract === 'string' || typeof nativeContract?.boardPeerContract === 'string') : null /* c28: the proof the runtime uses is steerContract ?? boardPeerContract (the real 0.171 record said false while engine.nativeContract.steerContract was true) */ }) // registered hooks: records, expectations
       Object.assign(ext.records, after.records); ext.expectations.push(...after.expectations)
       const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...ext.expectations]
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
