@@ -13,7 +13,8 @@
  "tokenCeiling": 5000,
  "passRule": "No request accepts the wrong business (hard). Counts per verdict are reported; a safe miss never fails the plan.",
  "dropOrder": [
-  "below"
+  "below",
+  "bare"
  ],
  "replies": [
   {
@@ -71,5 +72,6 @@
   "hypothesis": "the c63 failure was the missing asked list: bare 0.35 correct, code-resolved 0.93, list-only 0.80",
   "decision": "if list is correct and bare is not, the asked list is what the step lacked and the code resolution is a safe shortcut for the unambiguous ordinals; if bare is correct too, the c63 miss was run variance and the fix is harmless; if code is not correct, the resolved line wording must change"
  },
- "preRegistrationNote": "dropOrder is filled after the estimate and before any send. The step request is about 1.2k tokens (a choice question and seven predicates), so four requests are about the 5,000 ceiling."
+ "preRegistrationNote": "dropOrder is filled after the estimate and before any send. The step request is about 1.2k tokens (a choice question and seven predicates), so four requests are about the 5,000 ceiling.",
+ "dropOrderNote": "Filled in after the estimate and before any send. The step request is about 1,650 to 1,690 estimated tokens (a choice question over the page's options, seven predicates and the page text), not 1.2k: four requests are about 6.7k, over the 5,000 ceiling. Dropped first: below (\"아래 거\": the position word is the least informative and the most ambiguous) and bare (the c63 shape: its value is already measured, V4 read 0.60 on this page; re-measuring it would only spend a third of the ceiling on a sanity value). Kept: code (what the product now sends for \"두번째\") and list (the model alone with the asked list, the fallback when code cannot resolve): two requests, about 3.4k estimated (about 3.5k real), under 5,000. --budget 6800 runs all four (the hard cap stays 5,000: raise it only with the owner's approval of the cost)."
 }

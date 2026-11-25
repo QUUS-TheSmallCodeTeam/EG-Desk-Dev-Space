@@ -36,12 +36,20 @@ export function resolveChoiceReply(message, candidates) {
   return null
 }
 
+/** The reply with the asked list in the order the person saw it (what the step gets when code cannot resolve the reply). */
+export function choiceListLine(message, candidates, { maxChars = 400 } = {}) {
+  const list = (Array.isArray(candidates) ? candidates : []).map(cleanLabel).filter(Boolean)
+  const said = String(message ?? '').replace(/\s+/g, ' ').trim().slice(0, maxChars)
+  return list.length < 2 ? said : `${said}\n(The person had been asked to choose between, in this order: ${list.map((label, i) => `${i + 1}. ${label}`).join(' / ')})`
+}
+
 /** The user-context line for the step: the resolved choice by name, or the reply with the asked list in the order the person saw it. */
 export function choiceContextLine(message, candidates, { maxChars = 400 } = {}) {
   const list = (Array.isArray(candidates) ? candidates : []).map(cleanLabel).filter(Boolean)
   const said = String(message ?? '').replace(/\s+/g, ' ').trim().slice(0, maxChars)
   if (list.length < 2) return said
-  const order = list.map((label, i) => `${i + 1}. ${label}`).join(' / ')
   const hit = resolveChoiceReply(message, list)
-  return hit ? `Chose "${hit.label}" (option ${hit.index + 1} of the options the person was asked to choose between, in this order: ${order}); the person said: ${said}` : `${said}\n(The person had been asked to choose between, in this order: ${order})`
+  if (!hit) return choiceListLine(message, list, { maxChars })
+  const order = list.map((label, i) => `${i + 1}. ${label}`).join(' / ')
+  return `Chose "${hit.label}" (option ${hit.index + 1} of the options the person was asked to choose between, in this order: ${order}); the person said: ${said}`
 }

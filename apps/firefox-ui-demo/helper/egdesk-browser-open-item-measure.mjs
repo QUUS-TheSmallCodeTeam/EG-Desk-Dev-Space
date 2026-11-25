@@ -89,7 +89,7 @@ export async function selectReplies(plan, budget = plan.tokenCeiling) {
 
 const sha = text => createHash('sha256').update(text).digest('hex')
 
-function guardedFetch({ record, limits, fetchImpl, scripted }) {
+export function guardedFetch({ record, limits, fetchImpl, scripted }) {
   const refuse = why => { record.stopped ??= why; throw Object.assign(new Error(`measurement stopped: ${why}`), { name: 'MeasurementStopped' }) }
   return async (url, init) => {
     if (url !== OFFICIAL) refuse('unofficial_endpoint')
