@@ -365,13 +365,15 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
   const turnHooks = createTurnHooks(conversation) // the registered per-turn hooks: memory (seeded pages, what the product sent), journey (turn/steer, turn/interrupt), ...
   const memoryHook = turnHooks.get('memory').hook // memory hook: the ontology graph and the turn-memory setting
   const completions = [], tasks = []
-  const turnNow = { notifications: [], toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [], draftRows: [], flowRows: [], internal: [], writers: [] }
-  const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = []; turnNow.flowRows = []; turnNow.internal = []; turnNow.writers = [] }
+  const turnNow = { notifications: [], engineMessages: {}, pendingRequests: new Map(), toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [], draftRows: [], flowRows: [], internal: [], writers: [] }
+  const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.engineMessages = {}; turnNow.pendingRequests = new Map(); turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = []; turnNow.flowRows = []; turnNow.internal = []; turnNow.writers = [] }
   let initializeResult = null, lastThreadStart = null
   const rpc = new AppServerRpc({
     send: payload => child.stdin.write(`${payload}\n`), experimentalApi: true, timeoutMs: 60_000,
     onNotification: message => {
       const p = message.params ?? {}
+      // c31 (the two 180 s turns of check-24un/22mw: items {userMessage:1}, no completion): every engine message by method, content-free, so a silent turn names itself
+      { const m = String(message.method ?? '?').slice(0, 60); if (Object.keys(turnNow.engineMessages).length < 40 || m in turnNow.engineMessages) turnNow.engineMessages[m] = (turnNow.engineMessages[m] ?? 0) + 1 }
       if (message.method === 'item/started' || message.method === 'item/completed') {
         const type = p.item?.type
         if (message.method === 'item/completed') {
@@ -388,6 +390,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       if (chat) tasks.push(Promise.resolve(chat.handleNotification(message, 'codex')).catch(() => {}))
     },
     onRequest: message => {
+      { const m = `request:${String(message.method ?? '?').slice(0, 60)}`; if (Object.keys(turnNow.engineMessages).length < 40 || m in turnNow.engineMessages) turnNow.engineMessages[m] = (turnNow.engineMessages[m] ?? 0) + 1; turnNow.pendingRequests.set(message.id, String(message.method ?? '?').slice(0, 60)) }
       if (message.method === 'item/tool/call') turnNow.toolCalls.set(message.id, { tool: message.params?.tool, arguments: clip(message.params?.arguments, 1500), result: null })
       else if (/requestApproval$|^applyPatchApproval$|^execCommandApproval$/.test(message.method)) turnNow.native.approvals++
       if (chat) tasks.push(Promise.resolve(chat.handleServerRequest(message, 'codex')).catch(error => turnNow.errors.push(`server_request_failed:${clip(error?.code ?? error?.message, 80)}`)))
@@ -437,6 +440,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       } catch (error) { rec.requests.push({ method, ms: ms(start), error: String(error?.code ?? 'error').slice(0, 40), message: clip(error?.message ?? '', 300) }); throw error }
     }
     const respond = (id, result, error) => {
+      turnNow.pendingRequests.delete(id)
       const call = turnNow.toolCalls.get(id)
       if (call) { try { call.result = { success: result?.success ?? null, error: error ? clip(error.message ?? error, 300) : null, text: clip(result?.contentItems?.[0]?.text ?? '', 1500) } } catch {} }
       rpc.respond(id, result, error)
@@ -573,7 +577,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
         if (status === 'timeout') { try { await rpc.request('turn/interrupt', { threadId: run.conversationId, turnId: run.runId }) } catch {} rec.aborted ??= 'turn_timeout' }
       }
       await Promise.allSettled(tasks.splice(0)); try { await chat.queue } catch {} try { await chat.draftCheckIdle() } catch {} await sleep(30); await Promise.allSettled(tasks.splice(0))
-      return { run, status, error: done?.error ?? null, latencyMs: ms(started), toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], draftRows: [...turnNow.draftRows], flowRows: [...turnNow.flowRows], internal: [...turnNow.internal], writers: [...turnNow.writers], commandsRan: [...runnerLog] }
+      return { run, status, error: done?.error ?? null, latencyMs: ms(started), toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, engineMessages: { ...turnNow.engineMessages }, unansweredRequests: [...turnNow.pendingRequests.values()], native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], draftRows: [...turnNow.draftRows], flowRows: [...turnNow.flowRows], internal: [...turnNow.internal], writers: [...turnNow.writers], commandsRan: [...runnerLog] }
     }
     const sendAndWait = async text => finishTurn(await beginTurn(text))
     // a message typed into the working run, afterMs after that turn started; not a turn of its own (the run's turn keeps going)
@@ -706,7 +710,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       Object.assign(ext.records, after.records); ext.expectations.push(...after.expectations)
       const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...ext.expectations]
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
-      await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
+      await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, engineMessages: s.engineMessages ?? {}, unansweredRequests: s.unansweredRequests ?? [], native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
         ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(contextKeys.length ? { contextKeys } : {}), ...(sub.some(s => s.flowRows?.length) ? { flowRows: sub.flatMap(s => s.flowRows) } : {}), ...(sub.some(s => s.internal?.length) ? { internalTurns: sub.flatMap(s => s.internal) } : {}), ...(sub.some(s => s.writers?.length) ? { writers: sub.flatMap(s => s.writers) } : {}), ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...ext.records, expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {
