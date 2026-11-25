@@ -304,7 +304,7 @@ test('two runs, end to end on the fake engine: both runs work at once; each work
   assert.deepEqual(tr.people, { main: 'invited', side: 'owner' }); assert.equal(tr.runs.length, 2)
   const [a, b] = tr.runs
   for (const run of tr.runs) { assert.ok(run.spot); assert.equal(run.outsideViews, true, run.run); assert.equal(run.outsideCards, true, run.run) }
-  assert.equal(tr.overlap, false); assert.notDeepEqual(a.spot, b.spot)
+  assert.equal(tr.overlap, false); assert.notDeepEqual(a.spot, b.spot); assert.deepEqual(tr.told, { main: COLLAB_PEOPLE.invited.member, side: null }, 'the invited member sent the shared room\'s request, the owner the other room\'s')
   assert.equal(tr.ownerBefore, tr.ownerAfter); assert.equal(tr.inputsUnchanged, true); assert.deepEqual(tr.moves, [])
   // a requester who is WORKING (input a few seconds ago) is pointed to the result (nothing moves); the card moves next to a requester only when they are idle (the placement rules)
   assert.deepEqual([a.attention.result.branch, a.attention.result.kind, a.attention.result.forMember === a.requester], ['requester', 'point', true], 'the invited member\'s result is for the invited member')
@@ -317,12 +317,12 @@ test('two runs, end to end on the fake engine: both runs work at once; each work
 test('two runs, record level: each check fails on the record that breaks it', () => {
   const run = (id, requester, patch = {}) => ({ run: id, requester, rule: 'requester_working', spot: { x: 0, y: 0, width: 10, height: 10 }, outsideViews: true, outsideCards: true,
     attention: { submitted: 'queued', result: { status: 'decided', branch: 'requester', kind: 'point', forMember: requester }, otherRequesterTold: false }, judgments: [{ questions: ['owner_action'], quotesOwn: true, quotesOther: false, identityLeak: false }], ...patch })
-  const good = { from: 'invited', set: 'held', audience: { requester: COLLAB_PEOPLE.invited.member }, flowAudience: [], twoRuns: { runs: [run('run-main', 'M2'), run('run-side', 'M1')], overlap: false, ownerBefore: '{"v":1}', ownerAfter: '{"v":1}', inputsUnchanged: true, moves: [], judgments: 2 } }
+  const good = { from: 'invited', set: 'held', audience: { requester: COLLAB_PEOPLE.invited.member }, flowAudience: [], twoRuns: { runs: [run('run-main', 'M2'), run('run-side', 'M1')], overlap: false, told: { main: COLLAB_PEOPLE.invited.member, side: null }, ownerBefore: '{"v":1}', ownerAfter: '{"v":1}', inputsUnchanged: true, moves: [], judgments: 2 } }
   const failing = patch => checkCollabExpect({ twoRuns: true }, { ...good, twoRuns: { ...good.twoRuns, ...patch } }).filter(c => !c.ok).map(c => c.check)
   const runsWith = (i, patch) => ({ runs: good.twoRuns.runs.map((r, j) => (j === i ? { ...r, ...patch } : r)) })
   assert.deepEqual(failing({}), [])
   assert.deepEqual(failing(runsWith(1, { outsideViews: false })), ['collab.twoRuns.placed'], 'inside someone\'s view'); assert.deepEqual(failing(runsWith(0, { outsideCards: false })), ['collab.twoRuns.placed'], 'on another card')
-  assert.deepEqual(failing(runsWith(0, { spot: null })), ['collab.twoRuns.placed']); assert.deepEqual(failing({ overlap: true }), ['collab.twoRuns.separate'])
+  assert.deepEqual(failing(runsWith(0, { spot: null })), ['collab.twoRuns.placed']); assert.deepEqual(failing({ overlap: true }), ['collab.twoRuns.separate']); assert.deepEqual(failing({ told: { main: COLLAB_PEOPLE.invited.member, side: COLLAB_PEOPLE.invited.member } }), ['collab.twoRuns.separate'], 'the owner\'s own run attributed to the invited member')
   assert.deepEqual(failing({ ownerAfter: '{"v":2}' }), ['collab.twoRuns.stillness'], 'the owner\'s view or focus changed'); assert.deepEqual(failing({ inputsUnchanged: false }), ['collab.twoRuns.stillness']); assert.deepEqual(failing({ moves: [{ camera: 1 }] }), ['collab.twoRuns.stillness'])
   assert.deepEqual(failing(runsWith(0, { attention: { ...good.twoRuns.runs[0].attention, result: { status: 'decided', branch: 'requester', kind: 'point', forMember: 'M1' } } })), ['collab.twoRuns.surfacing'], 'the other person told')
   assert.deepEqual(failing(runsWith(1, { attention: { ...good.twoRuns.runs[1].attention, otherRequesterTold: true } })), ['collab.twoRuns.surfacing']); assert.deepEqual(failing(runsWith(1, { attention: { ...good.twoRuns.runs[1].attention, result: { status: 'unknown', branch: null, kind: null, forMember: null } } })), ['collab.twoRuns.surfacing'])

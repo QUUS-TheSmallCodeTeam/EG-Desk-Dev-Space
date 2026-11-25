@@ -117,7 +117,7 @@ export function checkCollabExpect(expect, rec) {
   if (expect.twoRuns === true) {
     const t = rec.twoRuns ?? null, runs = t?.runs ?? [], put2 = (name, ok, detail) => put(`twoRuns.${name}`, ok, detail)
     put2('placed', runs.length === 2 && runs.every(r => r.spot && r.outsideViews === true && r.outsideCards === true), { runs: runs.map(r => ({ run: r.run, rule: r.rule, outsideViews: r.outsideViews, outsideCards: r.outsideCards, spot: !!r.spot })) })
-    put2('separate', runs.length === 2 && t.overlap === false, { overlap: t?.overlap ?? null })
+    put2('separate', runs.length === 2 && t.overlap === false && t.told?.main === (rec.from === 'invited' ? COLLAB_PEOPLE.invited.member : null) && t.told?.side === null, { overlap: t?.overlap ?? null, told: t?.told ?? null })
     put2('stillness', !!t && t.inputsUnchanged === true && t.ownerBefore === t.ownerAfter && t.moves.length === 0, { inputsUnchanged: t?.inputsUnchanged ?? null, ownerBefore: t?.ownerBefore ?? null, ownerAfter: t?.ownerAfter ?? null, moves: t?.moves ?? null })
     put2('surfacing', runs.length === 2 && runs.every(r => r.attention?.result?.status === 'decided' && r.attention.result.branch === 'requester' && r.attention.result.forMember === r.requester && r.attention.otherRequesterTold === false),
       { runs: runs.map(r => ({ run: r.run, requester: r.requester, result: r.attention?.result ? { status: r.attention.result.status, branch: r.attention.result.branch, kind: r.attention.result.kind, forMember: r.attention.result.forMember } : null, otherRequesterTold: r.attention?.otherRequesterTold ?? null })) })
@@ -406,6 +406,8 @@ export function createCollabTurnHook(conversation, { world = createCollabWorld()
       run.attention = { submitted: s.out.status, result: s.result, otherRequesterTold: submitted[1 - i].requester !== run.requester && s.result?.forMember === submitted[1 - i].requester }
       run.judgments = mentioning(mine).map(request => { const shared = (request.input ?? []).map(m => m.content).join('\n'); return { questions: (request.questions ?? []).map(q => q.name), quotesOwn: shared.includes(mine), quotesOther: shared.includes(theirs), identityLeak: identityLeak(JSON.stringify(request)) } })
     }
-    return { people: { main: main.from, side: 'owner' }, runs, overlap: !!card1 && !!card2 && hit(card1.rect, card2.rect), ownerBefore, ownerAfter: ownerView(), inputsUnchanged: JSON.stringify(frozen) === inputsBefore, moves: [], judgments: runs.reduce((n, r) => n + r.judgments.length, 0) }
+    // who the bridge's own registry names as the requester of each room, as the turn was sent
+    const told = key => world.requesters.audience({ run: { clientThreadId: key, conversationId: null } })?.requester ?? null
+    return { people: { main: main.from, side: 'owner' }, told: { main: told(main.key), side: told(side.clientThreadId) }, runs, overlap: !!card1 && !!card2 && hit(card1.rect, card2.rect), ownerBefore, ownerAfter: ownerView(), inputsUnchanged: JSON.stringify(frozen) === inputsBefore, moves: [], judgments: runs.reduce((n, r) => n + r.judgments.length, 0) }
   }
 }
