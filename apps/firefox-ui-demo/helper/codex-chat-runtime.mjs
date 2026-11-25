@@ -4616,7 +4616,7 @@ export class CodexChatRuntime {
       const previousReply = this.previousReplyFor(context, speech)
       const out = await prepareTurnContext({ message: body.message, candidates, client: setup.client, askedAt, speech, topic, ...(previousReply ? { previousReply } : {}),
         timeoutMs: Math.max(1, Math.ceil(deadline + (keepLate ? LATE_CONTEXT_MS : 0) - performance.now())), signal: controller.signal, cacheScope: 'ctx',
-        ...(setup.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
+        ...(setup.relevanceRules === 'action' || setup.relevanceRules === 'action+status' ? { ruleSet: setup.relevanceRules } : {}) })
       if (out?.receipt && pruned.length) out.receipt = { ...out.receipt, pruned: { held: pruned.length } } // a count only, never ids
       return out
     })().catch(() => ({ status: 'fallback', reason: 'unreachable', selected: [], extraContext: {}, receipt: null }))
@@ -7169,8 +7169,8 @@ export class CodexChatRuntime {
     const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position: turn.position, threadKey, scope,
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
       deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock, previous: turn.previous, previousReply: this.previousReplyFor(context, turn.sources?.speech ?? null),
-      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step', 'hybrid-two-step-ask'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
-        ...(this.decisionContext?.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
+      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step', 'hybrid-two-step-ask'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' || tm.splitWording === 'v4' ? { splitWording: tm.splitWording } : {}),
+        ...(['action', 'action+status'].includes(this.decisionContext?.relevanceRules) ? { ruleSet: 'action' } : {}) })
     // The first turn's recording triage answers on its own time; once it has, the rule knows whether a write judgment can still follow.
     if (result.triageLater) void result.triageLater.then(late => { turn.lateTriage = late ?? { record: { state: 'unknown' } } }, () => { turn.lateTriage = { record: { state: 'unknown' } } })
     if (this.turnMemoryConfirmOn()) this.prepareTurnMemoryNote(turn, { wiki, scope, threadKey })
@@ -7286,7 +7286,7 @@ export class CodexChatRuntime {
         try { return await setup.client.decide(request) } finally { turn.spans.push({ stage: 'confirm', start, end: clock.now() - t0 }) }
       } }
       const deadlineAt = t0 + turn.capMs - 200
-      const judged = await memorySettleBefore(judgeConfirmation({ message: body.message, previousAnswer: previous, records: offered.map(entry => ({ title: wiki.pages.get(entry.pageId).title, status: entry.status, ...(typeof entry.said === 'string' ? { said: entry.said } : {}) })),
+      const judged = await memorySettleBefore(judgeConfirmation({ message: body.message, previousAnswer: previous, records: offered.map(entry => ({ title: wiki.pages.get(entry.pageId).title, status: entry.status, ...(typeof entry.said === 'string' ? { said: entry.said } : {}) })), ...(['v2', 'v3'].includes(tm.confirmWording) ? { wording: tm.confirmWording } : {}),
         client, askedAt: context.askedAt ?? this.now(), signal: turn.controller.signal, timeoutMs: Math.max(1, Math.min(CONFIRM_LIMITS.timeoutMs, Math.ceil(deadlineAt - clock.now()))) }), deadlineAt, clock).catch(() => null)
       const actions = []
       if (judged?.status === 'ready') {
@@ -7585,8 +7585,8 @@ export class CodexChatRuntime {
       const threadKey = run.conversationId
       const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position, threadKey,
         scope: typeof tm.scope === 'function' ? await (async () => { const base = await tm.scope({ body, context }); return base ? egress.memoryScope(base) : base })() : null, live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null,
-        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal , writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step', 'hybrid-two-step-ask'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
-        ...(this.decisionContext?.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
+        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal , writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step', 'hybrid-two-step-ask'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' || tm.splitWording === 'v4' ? { splitWording: tm.splitWording } : {}),
+        ...(['action', 'action+status'].includes(this.decisionContext?.relevanceRules) ? { ruleSet: 'action' } : {}) })
       const judged = result.judgeWrite ? await result.judgeWrite() : null
       if (typeof threadKey === 'string' && threadKey) {
         this.turnMemoryShadow.set(threadKey, result.nextDelivered())
