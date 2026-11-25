@@ -124,6 +124,7 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-chat-choice.mjs': ['dm_chooser: the user\'s own typed question and options, confirmed in the panel'],
   'egdesk-browser-reflex.mjs': ['page_text'],
   'egdesk-browser-task.mjs': ['page_text'],
+  'egdesk-browser-fast-answer.mjs': ['page_text'], // L8 c36 (U13 R-C): the finished task's page lines and the request, per line
   'egdesk-real-engine-browser-loop-hook.mjs': ['page_text'], // L8 c34: forwards the product's own browser-entry and step requests of a fixture turn (a logging wrapper; it declares nothing of its own)
   'egdesk-context-setup.mjs': ['speech_history', 'topic_history', 'memory_page'],
   'egdesk-conversation-flow.mjs': ['run_facts'],

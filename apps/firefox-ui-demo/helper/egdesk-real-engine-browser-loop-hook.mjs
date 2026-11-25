@@ -13,6 +13,7 @@ import { decisionTopicRecipient } from './egdesk-decision-client.mjs'
 import { OWNER, pageWorld } from './egdesk-browser-live-runner.mjs'
 import { HARD_PAGES } from './egdesk-browser-live-hard.mjs'
 import { NOTE_KEY, checkBrowserAnswer, runDates } from './egdesk-real-engine-browser-answer-hook.mjs'
+import { decideFastAnswer } from './egdesk-browser-fast-answer.mjs'
 
 export const BROWSER_LOOP_FLAG = 'EGDESK_BROWSER_LOOP'
 export const LOOP_PAGES = Object.freeze(['membership', 'delivery', 'settings', 'library', 'ticket', 'room', 'queue', 'pension'])
@@ -20,6 +21,8 @@ const str = (max, extra = {}) => ({ type: 'string', minLength: 1, maxLength: max
 export const BROWSER_LOOP_SCHEMA = Object.freeze({ type: 'object', additionalProperties: false, required: ['pages', 'host', 'start', 'title'], properties: {
   pages: { enum: [...LOOP_PAGES] }, host: str(80, { pattern: '^[a-z0-9.-]+\\.example\\.test$' }), start: str(80, { pattern: '^/' }), title: str(120),
   // c35: the live page changes under the loop (the first navigate or click is refused as stale and the page at `from` becomes the page kept at `to`)
+  // c36 (U13 R-C): also decide the fast answer (the Decision picks the line to show; code shows it) beside the engine turn and measure both
+  fast: { const: true },
   staleSwap: { type: 'object', additionalProperties: false, required: ['from', 'to'], properties: { from: str(80, { pattern: '^/' }), to: str(80, { pattern: '^/' }) } } } })
 export const BROWSER_LOOP_EXPECT_SCHEMA = Object.freeze({ type: 'object', additionalProperties: false, properties: {
   entered: { const: true },
@@ -37,6 +40,8 @@ export const BROWSER_LOOP_EXPECT_SCHEMA = Object.freeze({ type: 'object', additi
   staleSeen: { const: true },
   afterStaleSees: { type: 'array', maxItems: 3, items: str(120) },
   noteExcludes: { type: 'array', maxItems: 4, items: str(120) },
+  // c36: the fast answer: what the Decision decided (show the one picked line / the engine / nothing to show), the line shown verbatim, and that it was faster than the engine turn
+  fast: { type: 'object', additionalProperties: false, required: ['kind'], properties: { kind: { enum: ['show', 'engine', 'none'] }, line: str(200), fasterThanEngine: { const: true } } },
   namesAnyOf: { type: 'array', minItems: 1, maxItems: 6, items: str(100) },
 } })
 const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v)
@@ -44,7 +49,8 @@ const textList = (v, max, chars) => Array.isArray(v) && v.length <= max && v.eve
 export function validateBrowserLoop(value, conv, path = 'browserLoop') {
   const bad = []
   if (!isObject(value)) return [`${path}: must be an object`]
-  for (const key of Object.keys(value)) if (!['pages', 'host', 'start', 'title', 'staleSwap'].includes(key)) bad.push(`${path}.${key}: not a field`)
+  for (const key of Object.keys(value)) if (!['pages', 'host', 'start', 'title', 'staleSwap', 'fast'].includes(key)) bad.push(`${path}.${key}: not a field`)
+  if (value.fast !== undefined && value.fast !== true) bad.push(`${path}.fast: true`)
   if (value.staleSwap !== undefined && !(isObject(value.staleSwap) && Object.keys(value.staleSwap).sort().join() === 'from,to' && [value.staleSwap.from, value.staleSwap.to].every(p => typeof p === 'string' && p.startsWith('/') && p.length <= 80))) bad.push(`${path}.staleSwap: { from, to } paths of the fixture`)
   if (!LOOP_PAGES.includes(value.pages)) bad.push(`${path}.pages: one of ${LOOP_PAGES.join(', ')}`)
   if (!(typeof value.host === 'string' && /^[a-z0-9.-]+\.example\.test$/.test(value.host))) bad.push(`${path}.host: a synthetic *.example.test host`)
@@ -60,6 +66,8 @@ export function validateBrowserLoopExpect(value, turn, path = 'expect.browserLoo
   for (const key of Object.keys(value)) if (!allowed.includes(key)) bad.push(`${path}.${key}: not a check`)
   if (turn?.browserLoop === undefined) bad.push(`${path}: needs browserLoop on the same turn`)
   if (!Object.keys(value).length) bad.push(`${path}: names no check`)
+  if (value.fast !== undefined && !(isObject(value.fast) && ['show', 'engine', 'none'].includes(value.fast.kind) && Object.keys(value.fast).every(k => ['kind', 'line', 'fasterThanEngine'].includes(k)) && (value.fast.line === undefined || typeof value.fast.line === 'string') && (value.fast.fasterThanEngine === undefined || value.fast.fasterThanEngine === true))) bad.push(`${path}.fast: { kind: show|engine|none, line?, fasterThanEngine? }`)
+  if (value.fast !== undefined && turn?.browserLoop?.fast !== true) bad.push(`${path}.fast: needs browserLoop.fast on the same turn`)
   for (const key of ['entered', 'noActs', 'noInventedDates', 'noInventedAmounts', 'noFills', 'staleSeen']) if (value[key] !== undefined && value[key] !== true) bad.push(`${path}.${key}: true`)
   for (const [key, max, chars] of [['navigatedTo', 4, 120], ['noteCandidates', 3, 100], ['noteIncludes', 4, 200], ['namesAnyOf', 6, 100], ['clickedOnly', 4, 40], ['afterStaleSees', 3, 120], ['noteExcludes', 4, 120]]) if (value[key] !== undefined && !textList(value[key], max, chars)) bad.push(`${path}.${key}: up to ${max} strings`)
   if (value.mentionsDates !== undefined && !(Array.isArray(value.mentionsDates) && value.mentionsDates.length <= 4 && value.mentionsDates.every(d => /^\d{4}-\d{2}-\d{2}$/.test(d)))) bad.push(`${path}.mentionsDates: YYYY-MM-DD`)
@@ -90,14 +98,21 @@ export function checkBrowserLoop(expect, record) {
     add('after_stale_sees', later.length > 0 && later.some(d => expect.afterStaleSees.every(s => d.text.includes(s))), `${later.length} decision(s) after the refused action; the new lines ${later.some(d => expect.afterStaleSees.every(s => d.text.includes(s))) ? 'were in the evidence' : 'were NOT in the evidence: acted on old lines'}`)
   }
   if (expect.noteExcludes) { const lines = [...(note?.found || []), ...(note?.page || [])]; add('note_excludes', !expect.noteExcludes.some(text => lines.some(line => line.includes(text))), `note lines ${JSON.stringify(lines)}`) }
-  const { entered, navigatedTo, noActs, noteStatus, noteCode, noteCandidates, noteIncludes, noFills, clickedOnly, staleSeen, afterStaleSees, noteExcludes, ...replyExpect } = expect
+  if (expect.fast) {
+    const f = record.fast ?? null
+    add('fast_kind', f?.kind === expect.fast.kind, `the Decision said ${f?.kind} (${f?.reason}); lines p=${JSON.stringify(f?.p)}`)
+    if (expect.fast.line !== undefined) add('fast_line', f?.kind === 'show' && f.line === expect.fast.line && f.text === expect.fast.line, `shown ${JSON.stringify(f?.text)}`)
+    if (f?.kind === 'show') { const lines = [...(note?.found || []), ...(note?.page || [])]; add('fast_line_grounded', lines.includes(f.line), 'the shown line is one of the note\'s own lines, verbatim') }
+    if (expect.fast.fasterThanEngine) add('fast_faster_than_engine', Number.isFinite(f?.ms) && Number.isFinite(record.engineMs) && f.ms < record.engineMs, `fast decision ${f?.ms} ms, engine turn ${record.engineMs} ms`)
+  }
+  const { entered, navigatedTo, noActs, noteStatus, noteCode, noteCandidates, noteIncludes, noFills, clickedOnly, staleSeen, afterStaleSees, noteExcludes, fast: _fast, ...replyExpect } = expect
   out.push(...checkBrowserAnswer(replyExpect, record))
   return out
 }
 
 /** The per-conversation hook. `makeProvider` is injectable for tests; the default is the product's own browser tool provider over the fixture world. */
 export function createBrowserLoopHook({ now = Date.now } = {}) {
-  let deps = null, startedAt = null, pending = null, seen = null
+  let deps = null, startedAt = null, pending = null, seen = null, sentAt = null
   const state = { n: 0 }
   return {
     attach(d) {
@@ -129,11 +144,15 @@ export function createBrowserLoopHook({ now = Date.now } = {}) {
       const entry = createDirectBrowserEntry({ provider, store: createBrowserTaskStore(), now, pageTextInNote: () => true, cardTextInEntry: () => true })
       const out = await entry.handle({ run, conversationKey: id, message: turn.say, hosts: { card: spec.host }, titles: { card: spec.title } })
       try { await provider.cancelRun(run) } catch { /* the run is a fixture */ }
+      // c36 (U13 R-C): the fast answer is decided now, by the real Decision model, beside the engine turn that follows; both are timed (the engine's from the moment the message goes out)
+      const fast = spec.fast === true ? await decideFastAnswer({ message: turn.say, note: out?.note ? JSON.parse(out.note)[NOTE_KEY] : null, client: logged }) : null
       const noteParsed = out?.note ? JSON.parse(out.note)[NOTE_KEY] : null
       const entryRequest = decisions.find(d => d.names.includes('browser_entry'))
       pending = { note: out?.note ?? null, noteParsed, entry: { handled: out?.handled === true, reason: out?.reason ?? null, status: out?.status ?? null }, acts: world.state.acts.map(a => ({ type: a.type, ref: a.ref, path: a.path, ...(a.rejected ? { rejected: true } : {}) })), observes: world.state.observes,
         decisions, entryAnswers: entryRequest ? Object.fromEntries(Object.entries(entryRequest.answers ?? {}).map(([k, a]) => [k, a?.probability ?? a?.choice ?? a?.type ?? null])) : null }
+      pending.fast = fast
       seen = { delivered: false, deliveredWhy: pending.note ? null : 'the entry produced no note' }
+      sentAt = performance.now()
     },
     observe(method, params) {
       if (!pending?.note || !seen || method !== 'turn/start' || seen.delivered) return
@@ -146,7 +165,7 @@ export function createBrowserLoopHook({ now = Date.now } = {}) {
       if (!pending || !seen) return null
       const spec = turnExpect?.browserLoop ?? {}
       const record = { ...seen, say, note: pending.note ?? '', noteParsed: pending.noteParsed, entry: pending.entry, entryAnswers: pending.entryAnswers, acts: pending.acts, observes: pending.observes, decisions: pending.decisions.map(d => d.names), decisionRows: pending.decisions,
-        reply: typeof answer === 'string' ? answer : null, runDates: runDates([startedAt, now()]) }
+        reply: typeof answer === 'string' ? answer : null, runDates: runDates([startedAt, now()]), fast: pending.fast ?? null, engineMs: Number.isFinite(sentAt) ? Math.round(performance.now() - sentAt) : null }
       const expectations = checkBrowserLoop(spec, record)
       pending = null
       return { record, expectations }

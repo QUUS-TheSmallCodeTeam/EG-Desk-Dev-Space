@@ -314,6 +314,9 @@
                 "browserLoop": {
                   "additionalProperties": false,
                   "properties": {
+                    "fast": {
+                      "const": true
+                    },
                     "host": {
                       "maxLength": 80,
                       "minLength": 1,
@@ -600,6 +603,30 @@
                         },
                         "entered": {
                           "const": true
+                        },
+                        "fast": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "fasterThanEngine": {
+                              "const": true
+                            },
+                            "kind": {
+                              "enum": [
+                                "show",
+                                "engine",
+                                "none"
+                              ]
+                            },
+                            "line": {
+                              "maxLength": 200,
+                              "minLength": 1,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ],
+                          "type": "object"
                         },
                         "mentionsDates": {
                           "items": {

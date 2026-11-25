@@ -1,0 +1,234 @@
+{
+  "set": "real-engine-browser-fast-v1",
+  "description": "U13 R-C: after a finished browser task the Decision model picks the line that answers the request and code shows it at once; the engine answers only when the question needs more than a line. Each conversation runs the whole loop (as browser-loop-v1/v2), decides the fast answer with the real Decision model, and the real engine turn still runs beside it so the seconds can be compared (record: fast.ms and engineMs). Needs --decisions.",
+  "conversations": [
+    {
+      "id": "fast-membership",
+      "folder": {
+        "README.txt": "scratch"
+      },
+      "flags": {
+        "EGDESK_BROWSER_LOOP": "on"
+      },
+      "turns": [
+        {
+          "say": "다음 결제일이 언제야?",
+          "browserLoop": {
+            "pages": "membership",
+            "host": "streamly.example.test",
+            "start": "/account/membership",
+            "title": "멤버십 관리 | 스트리밍플러스",
+            "fast": true
+          },
+          "expect": {
+            "turnStatus": "completed",
+            "posted": true,
+            "browserLoop": {
+              "entered": true,
+              "noteStatus": "done",
+              "mentionsDates": [
+                "2026-12-14"
+              ],
+              "noInventedDates": true,
+              "noInventedAmounts": true,
+              "fast": {
+                "kind": "show",
+                "line": "다음 결제일: 2026-12-14",
+                "fasterThanEngine": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "fast-membership-inference",
+      "folder": {
+        "README.txt": "scratch"
+      },
+      "flags": {
+        "EGDESK_BROWSER_LOOP": "on"
+      },
+      "turns": [
+        {
+          "say": "다음 결제일까지 며칠 남았어?",
+          "browserLoop": {
+            "pages": "membership",
+            "host": "streamly.example.test",
+            "start": "/account/membership",
+            "title": "멤버십 관리 | 스트리밍플러스",
+            "fast": true
+          },
+          "expect": {
+            "turnStatus": "completed",
+            "posted": true,
+            "browserLoop": {
+              "entered": true,
+              "noteStatus": "done",
+              "fast": {
+                "kind": "engine"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "fast-delivery",
+      "folder": {
+        "README.txt": "scratch"
+      },
+      "flags": {
+        "EGDESK_BROWSER_LOOP": "on"
+      },
+      "turns": [
+        {
+          "say": "주문번호 2026-1119-0042 배송 어디까지 왔어?",
+          "browserLoop": {
+            "pages": "delivery",
+            "host": "shop.example.test",
+            "start": "/orders",
+            "title": "주문 내역 | 쇼핑",
+            "fast": true
+          },
+          "expect": {
+            "turnStatus": "completed",
+            "posted": true,
+            "answerIncludes": [
+              "배송 중"
+            ],
+            "browserLoop": {
+              "entered": true,
+              "navigatedTo": [
+                "/orders/2026-1119-0042"
+              ],
+              "noteStatus": "done",
+              "fast": {
+                "kind": "show",
+                "line": "배송 상태: 배송 중 (11월 21일 도착 예정)",
+                "fasterThanEngine": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "fast-library",
+      "folder": {
+        "README.txt": "scratch"
+      },
+      "flags": {
+        "EGDESK_BROWSER_LOOP": "on"
+      },
+      "turns": [
+        {
+          "say": "모래의 도시 반납 예정일 알려줘",
+          "browserLoop": {
+            "pages": "library",
+            "host": "library.example.test",
+            "start": "/mylib",
+            "title": "도서관 | 내 서재",
+            "fast": true
+          },
+          "expect": {
+            "turnStatus": "completed",
+            "posted": true,
+            "browserLoop": {
+              "entered": true,
+              "navigatedTo": [
+                "/loans",
+                "/loans/771"
+              ],
+              "noteStatus": "done",
+              "mentionsDates": [
+                "2026-12-09"
+              ],
+              "noInventedDates": true,
+              "fast": {
+                "kind": "show",
+                "line": "반납 예정일: 2026-12-09",
+                "fasterThanEngine": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "fast-dashboard-tab",
+      "folder": {
+        "README.txt": "scratch"
+      },
+      "flags": {
+        "EGDESK_BROWSER_LOOP": "on"
+      },
+      "turns": [
+        {
+          "say": "다음 연금 수령일 언제야?",
+          "browserLoop": {
+            "pages": "pension",
+            "host": "pension.example.test",
+            "start": "/dash",
+            "title": "연금 | 내 연금",
+            "fast": true
+          },
+          "expect": {
+            "turnStatus": "completed",
+            "posted": true,
+            "browserLoop": {
+              "entered": true,
+              "clickedOnly": [
+                "pn_t2"
+              ],
+              "noteStatus": "done",
+              "mentionsDates": [
+                "2026-12-25"
+              ],
+              "noInventedDates": true,
+              "fast": {
+                "kind": "show",
+                "line": "다음 수령일: 2026-12-25",
+                "fasterThanEngine": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "fast-toggle-handover",
+      "folder": {
+        "README.txt": "scratch"
+      },
+      "flags": {
+        "EGDESK_BROWSER_LOOP": "on"
+      },
+      "turns": [
+        {
+          "say": "마케팅 알림 꺼줘",
+          "browserLoop": {
+            "pages": "settings",
+            "host": "account.example.test",
+            "start": "/settings/notifications",
+            "title": "알림 설정 | 계정",
+            "fast": true
+          },
+          "expect": {
+            "turnStatus": "completed",
+            "posted": true,
+            "browserLoop": {
+              "entered": true,
+              "noActs": true,
+              "noteStatus": "cannot_proceed",
+              "noteCode": "human_step",
+              "fast": {
+                "kind": "none"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

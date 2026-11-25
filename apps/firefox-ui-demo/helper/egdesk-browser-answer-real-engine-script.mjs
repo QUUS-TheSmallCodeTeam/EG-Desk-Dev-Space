@@ -113,3 +113,31 @@ export function buildBrowserLoopScriptV2() {
     ],
   }
 }
+
+// ---- c36 (owner direction U13, audit R-C): the fast answer beside the engine turn, on the v1 and v2 loops (helper/egdesk-browser-fast-answer.mjs) ----
+export const BROWSER_FAST_SET = 'real-engine-browser-fast-v1'
+export function buildBrowserFastScript() {
+  const flags = { EGDESK_BROWSER_LOOP: 'on' }
+  const conv = (id, say, browserLoop, expect) => ({ id, folder: { 'README.txt': 'scratch' }, flags, turns: [{ say, browserLoop: { ...browserLoop, fast: true }, expect: { turnStatus: 'completed', posted: true, ...expect } }] })
+  const show = line => ({ kind: 'show', line, fasterThanEngine: true })
+  return {
+    set: BROWSER_FAST_SET,
+    description: 'U13 R-C: after a finished browser task the Decision model picks the line that answers the request and code shows it at once; the engine answers only when the question needs more than a line. Each conversation runs the whole loop (as browser-loop-v1/v2), decides the fast answer with the real Decision model, and the real engine turn still runs beside it so the seconds can be compared (record: fast.ms and engineMs). Needs --decisions.',
+    conversations: [
+      conv('fast-membership', '다음 결제일이 언제야?', { pages: 'membership', host: 'streamly.example.test', start: '/account/membership', title: '멤버십 관리 | 스트리밍플러스' },
+        { browserLoop: { entered: true, noteStatus: 'done', mentionsDates: ['2026-12-14'], noInventedDates: true, noInventedAmounts: true, fast: show('다음 결제일: 2026-12-14') } }),
+      // the same page and task, a question that needs a calculation: the engine answers
+      conv('fast-membership-inference', '다음 결제일까지 며칠 남았어?', { pages: 'membership', host: 'streamly.example.test', start: '/account/membership', title: '멤버십 관리 | 스트리밍플러스' },
+        { browserLoop: { entered: true, noteStatus: 'done', fast: { kind: 'engine' } } }),
+      conv('fast-delivery', '주문번호 2026-1119-0042 배송 어디까지 왔어?', { pages: 'delivery', host: 'shop.example.test', start: '/orders', title: '주문 내역 | 쇼핑' },
+        { answerIncludes: ['배송 중'], browserLoop: { entered: true, navigatedTo: ['/orders/2026-1119-0042'], noteStatus: 'done', fast: show('배송 상태: 배송 중 (11월 21일 도착 예정)') } }),
+      conv('fast-library', '모래의 도시 반납 예정일 알려줘', { pages: 'library', host: 'library.example.test', start: '/mylib', title: '도서관 | 내 서재' },
+        { browserLoop: { entered: true, navigatedTo: ['/loans', '/loans/771'], noteStatus: 'done', mentionsDates: ['2026-12-09'], noInventedDates: true, fast: show('반납 예정일: 2026-12-09') } }),
+      conv('fast-dashboard-tab', '다음 연금 수령일 언제야?', { pages: 'pension', host: 'pension.example.test', start: '/dash', title: '연금 | 내 연금' },
+        { browserLoop: { entered: true, clickedOnly: ['pn_t2'], noteStatus: 'done', mentionsDates: ['2026-12-25'], noInventedDates: true, fast: show('다음 수령일: 2026-12-25') } }),
+      // a hand-over has no finished page to show from: nothing is shown early, the engine tells the person what is theirs
+      conv('fast-toggle-handover', '마케팅 알림 꺼줘', { pages: 'settings', host: 'account.example.test', start: '/settings/notifications', title: '알림 설정 | 계정' },
+        { browserLoop: { entered: true, noActs: true, noteStatus: 'cannot_proceed', noteCode: 'human_step', fast: { kind: 'none' } } }),
+    ],
+  }
+}
