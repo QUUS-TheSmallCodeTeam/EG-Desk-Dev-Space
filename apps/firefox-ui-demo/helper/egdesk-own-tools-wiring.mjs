@@ -50,6 +50,8 @@ export function gitPorcelain(execFile = nodeExecFile) {
   })
 }
 
+import { claudeHarnessFromEnv } from './egdesk-claude-harness.mjs' // u1: EGDESK_CLAUDE_HARNESS (default off)
+
 export function createOwnToolsWiring({ env = process.env, dataDir, spawn, getChat, inspect = null, killGroup = processGroupKill(), home = env?.HOME, gitStatus = gitPorcelain() } = {}) {
   // shadow: no provider, no ledger, no spawn, no engine folder, no gate change; the runtime only records (codex-chat-runtime observeOwnToolsShadow)
   if (ownToolsShadow(env)) return { shadow: true, toolProviders: [], ownTools: { mode: () => 'shadow', neutralFolder: () => null }, terminalGate: base => base }
@@ -72,7 +74,7 @@ export function createOwnToolsWiring({ env = process.env, dataDir, spawn, getCha
   const executor = createCommandExecutorProvider({ mode: () => 'on', ledger, workspaceOf, runner, outputFor, ask, gitStatus,
     onConditions: (run, record) => getChat().noteOwnCommand(run, record) })
   const files = createFileToolsProvider({ mode: () => 'on', ledger, workspaceOf, inspect, onEdit: (run, fact) => getChat().noteOwnEdit(run, fact) })
-  return {
+  const wiring = {
     ledger, executor, files, toolProviders: [executor, files],
     // c22: EGDESK_OWN_TOOLS_ENVIRONMENTS=none (developer flag, default unset) also starts the thread with environments: [] ("disables environment access" in the
     // 0.171 ThreadStartParams). A candidate for keeping the person's MCP servers and Codex's own exec environment away; not confirmed on a real binary.
@@ -81,4 +83,7 @@ export function createOwnToolsWiring({ env = process.env, dataDir, spawn, getCha
     // the executor's judgement needs the command gate on (predicates through the run's egress) and the ledger for replies and turns
     terminalGate: base => ({ ...(base ?? { inspect }), mode: base?.mode ?? (() => 'on'), hookBroker: ledger }),
   }
+  const harness = claudeHarnessFromEnv(env) // u1 (U19): a Claude conversation under EG-Desk's harness: the runtime reads it from ownTools.claudeHarness()
+  if (harness) wiring.ownTools.claudeHarness = () => harness
+  return wiring
 }

@@ -322,6 +322,10 @@ export function createClaudeEngineAdapter(options = {}) {
     // '' is the runtime's explicit "no instructions" (profile off).
     if (p.developerInstructions !== undefined) spec.appendPrompt = typeof p.developerInstructions === 'string' && p.developerInstructions.trim() ? p.developerInstructions : null
     if (Array.isArray(p.dynamicTools)) spec.tools = p.dynamicTools
+    // u1 (EG-Desk harness, flag EGDESK_CLAUDE_HARNESS): the built-in Claude Code tools EG-Desk's own tools replace are switched off with --disallowedTools (names only; the CLI binary is untouched)
+    // u1: a private turn's thread has NO built-in tools (--tools ""): names only, [] disables them all
+    if (Array.isArray(p.egdeskBuiltinTools)) spec.builtin = Object.freeze(p.egdeskBuiltinTools.filter(name => typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)).slice(0, 32))
+    if (Array.isArray(p.egdeskDisallowedTools)) spec.disallowed = Object.freeze(p.egdeskDisallowedTools.filter(name => typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)).slice(0, 32))
     return spec
   }
 
@@ -508,7 +512,7 @@ export function createClaudeEngineAdapter(options = {}) {
         transport: null, exited: false, gateCode: null, owner: ownerKey(), ownerEpoch, mcpPending: new Map(), // rpc id → control request id
         lease, engineBuild: typeof check.version === 'string' ? check.version : null,
         bounded: spec.bounded || null, blocked: false, boundedVerified: false,
-        flags: { cwd: spec.cwd, model: spec.model, effort: spec.effort, appendPrompt: spec.appendPrompt, tools: spec.tools, bounded: spec.bounded || null },
+        flags: { cwd: spec.cwd, model: spec.model, effort: spec.effort, appendPrompt: spec.appendPrompt, tools: spec.tools, bounded: spec.bounded || null, disallowed: spec.disallowed ?? null, builtin: spec.builtin ?? null },
         broker: createClaudePermissionBroker({ threadId, egdeskServer: EGDESK_MCP_SERVER_NAME, offerSessionGrant: true,
           nextRpcId: () => nextRpcId(threadId, 'perm') }),
         mcp: createEgdeskClaudeMcp({ threadId, tools: spec.tools, serverName: EGDESK_MCP_SERVER_NAME,
@@ -531,6 +535,8 @@ export function createClaudeEngineAdapter(options = {}) {
         ...(session.hasHistory ? { resume: threadId } : { sessionId: threadId }),
         mcpConfig: hasTools ? egdeskMcpConfig(EGDESK_MCP_SERVER_NAME) : null,
         allowedTools: hasTools ? [egdeskAllowedToolsRule(EGDESK_MCP_SERVER_NAME)] : null,
+        ...(spec.disallowed?.length && !spec.bounded ? { disallowedTools: [...spec.disallowed] } : {}),
+        ...(spec.builtin && !spec.bounded ? { tools: [...spec.builtin] } : {}),
         controlHandlers: {
           can_use_tool: (request, { requestId }) => {
             // dontAsk already denies; a bounded process never shows an approval card.
@@ -605,7 +611,7 @@ export function createClaudeEngineAdapter(options = {}) {
 
   // Process flags fixed at spawn; a turn that changes one restarts with --resume.
   const flagsDiffer = (flags, spec) => flags.cwd !== spec.cwd || flags.model !== spec.model || flags.effort !== spec.effort
-    || flags.appendPrompt !== spec.appendPrompt || flags.tools !== spec.tools || flags.bounded !== (spec.bounded || null)
+    || flags.appendPrompt !== spec.appendPrompt || flags.tools !== spec.tools || flags.bounded !== (spec.bounded || null) || JSON.stringify(flags.disallowed ?? null) !== JSON.stringify(spec.disallowed ?? null) || JSON.stringify(flags.builtin ?? null) !== JSON.stringify(spec.builtin ?? null)
 
   function syncStatus() {
     const ready = isReady()

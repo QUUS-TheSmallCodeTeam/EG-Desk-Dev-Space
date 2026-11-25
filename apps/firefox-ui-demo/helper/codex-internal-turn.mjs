@@ -51,8 +51,9 @@ export function createInternalTurns({ setTimer = (fn, ms) => setTimeout(fn, ms),
      *    trace     every result and every timeout / failure error carries `trace`: per attempt { via, startMs, firstEventMs, events: [[ms, method, itemType, phase|status]] (at most 30),
      *              requests: [refused server-request methods], completed }: closed words and numbers only, never a text. It says where a stalled turn stopped: no event at all, or
      *              events and no completion. */
-    async run({ engine, slot, parentThreadId, text, timeoutMs = 20000, signal = null, outputSchema = null, parentEphemeral = false, fresh = null, onStart = null, hedgeMs = null, freshText = null }) {
-      if (!engine?.forkThread || !engine.startTurn) throw fail('INTERNAL_TURN_UNSUPPORTED', 'Engine cannot run an internal turn')
+    async run({ engine, slot, parentThreadId, text, timeoutMs = 20000, signal = null, outputSchema = null, parentEphemeral = false, fresh = null, onStart = null, hedgeMs = null, freshText = null, freshOnly = false }) {
+      // u1: freshOnly (an engine with no fork and no ephemeral threads, Claude under the harness): the turn runs on a fresh, saved thread that is released at once; no fork, no hedge
+      if ((!engine?.forkThread && !(freshOnly && fresh)) || !engine.startTurn) throw fail('INTERNAL_TURN_UNSUPPORTED', 'Engine cannot run an internal turn')
       let timer = null, hedgeTimer = null, over = false, settle = null, winner = null
       const t0 = Date.now(), attempts = []
       const done = new Promise((resolve, reject) => { settle = { resolve, reject } })
@@ -82,7 +83,7 @@ export function createInternalTurns({ setTimer = (fn, ms) => setTimeout(fn, ms),
           },
         }
         let id = null, input = text
-        if (wanted === 'fork' && !(parentEphemeral && fresh)) {
+        if (wanted === 'fork' && !(parentEphemeral && fresh) && !freshOnly) {
           try {
             const forked = await engine.forkThread({ threadId: parentThreadId, excludeTurns: true, ephemeral: true }, slot)
             id = forked?.thread?.id
@@ -98,11 +99,11 @@ export function createInternalTurns({ setTimer = (fn, ms) => setTimeout(fn, ms),
           at.via = at.trace.via = 'fresh'
           const overrides = typeof fresh.overrides === 'function' ? await fresh.overrides() : (fresh.overrides ?? {})
           if (over) return
-          const started = await engine.startThread({ ...overrides, ephemeral: true, developerInstructions: INTERNAL_INSTRUCTIONS }, slot)
+          const started = await engine.startThread({ ...overrides, ...(freshOnly ? {} : { ephemeral: true }), developerInstructions: INTERNAL_INSTRUCTIONS }, slot)
           id = started?.thread?.id
           if (typeof id !== 'string' || !id || id === parentThreadId) throw fail('INTERNAL_TURN_FAILED', 'No internal thread id')
           // never leave a saved thread: an engine that says it kept this one is not used
-          if (started.thread.ephemeral === false) { release(id); throw fail('INTERNAL_TURN_FAILED', 'The engine saved the internal thread') }
+          if (!freshOnly && started.thread.ephemeral === false) { release(id); throw fail('INTERNAL_TURN_FAILED', 'The engine saved the internal thread') }
           const body = typeof freshText === 'string' ? freshText : text
           input = fresh.preamble ? `${fresh.preamble}\n\n${body}` : body
         }
@@ -122,7 +123,7 @@ export function createInternalTurns({ setTimer = (fn, ms) => setTimeout(fn, ms),
       // the first attempt is the fork (or the fresh thread when the parent is ephemeral); its failure to start settles the run unless a hedge is still to come or running
       const first = attempt('fork')
       first.then(() => {}, error => { if (!attempts.some(x => x !== attempts[0] && x.id)) settle.reject(error) })
-      const hedgeable = Number.isFinite(hedgeMs) && hedgeMs > 0 && hedgeMs < timeoutMs && fresh && typeof engine.startThread === 'function' && !(parentEphemeral && fresh)
+      const hedgeable = !freshOnly && Number.isFinite(hedgeMs) && hedgeMs > 0 && hedgeMs < timeoutMs && fresh && typeof engine.startThread === 'function' && !(parentEphemeral && fresh)
       if (hedgeable) {
         hedgeTimer = setTimer(() => {
           if (over || winner) return
