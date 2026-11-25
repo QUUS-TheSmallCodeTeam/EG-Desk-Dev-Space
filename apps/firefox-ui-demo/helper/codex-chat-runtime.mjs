@@ -84,8 +84,11 @@ export const EARLIER_EVIDENCE_LIMIT = 4
 // its records are kept for the next check (the check's own ranking keeps the ones related to the next draft). After a posted answer the limit above stays.
 export const EARLIER_WITHHELD_LIMIT = 8
 export const POSTED_ANSWER_KEY = 'egdesk_posted_answer'
-// c30: when a draft revision on a private fork has not completed after this long, it also starts on a fresh thread (every completed internal turn measured took 5.9-10.7 s; reports/l6-c30.md).
-export const REVISE_FORK_HEDGE_MS = 11_000
+// c30: when a draft revision on a private fork has not completed after this long, it also starts on a fresh thread; the first to complete wins; the 25 s deadline is unchanged.
+// c32: 9 s, was 11 s. Why (Main's planted re-run check-30pl, reports/l6-c31.md): 6 of 12 revision forks stalled in one stretch (18:27-18:31, 6 of 6 in it, none outside); the fallback rescued 5 of them
+// in 19.7-24.0 s (11 s + a fresh thread's 8.7-13.0 s), and the remaining one's fresh thread started its answer at 24.8 s, 0.2 s before the deadline. Forks that completed took 5.8-7.1 s there
+// (5.8-8.3 s in check-25pl), so 9 s still waits out every healthy fork seen in the planted runs, and the slowest fresh thread (13.8 s to its answer) now finishes at about 22.8 s.
+export const REVISE_FORK_HEDGE_MS = 9_000
 // c30: the text of a revision on a FRESH thread: it has not seen the conversation, so the draft, the check's note and the material (the check's readable evidence items) are all in it.
 export function reviseFreshText({ draft, note, evidence = [] }) {
   const items = (Array.isArray(evidence) ? evidence : []).filter(item => item && !item.opaque && typeof item.text === 'string' && item.text.trim()).slice(0, 8)
@@ -6664,7 +6667,7 @@ export class CodexChatRuntime {
   // The subjective model's one revision, on a private fork of the conversation. Null when the fork cannot run or fails.
   // c30 (L6; Main's real planted run check-25pl, reports/l6-c30.md): 7 of 12 revision forks never completed and were cut at the 25 s deadline (the 5 that completed took 6.9-8.3 s, all 12 completed internal turns of the real runs
   // (these 5 and 7 earlier ones) 5.9-10.7 s: an engine-side stall, which also hit two main turns in other runs), and an empty revision means nothing is posted. So after
-  // REVISE_FORK_HEDGE_MS (above every completed internal turn measured) the same revision also starts on a fresh thread; the first to complete wins; the deadline is the same 25 s.
+  // REVISE_FORK_HEDGE_MS (above every completed revision fork of the planted runs, 5.8-8.3 s) the same revision also starts on a fresh thread; the first to complete wins; the deadline is the same 25 s.
   // The fresh thread has not seen the conversation, so its text carries the material the check read the draft against (evidence: the check's items, readable ones only, as the
   // check cut them); the fork has it in its history. The same text is used when the room is one-time (ephemeral) and a fresh thread is the only path.
   async reviseOnFork(run, draft, note, signal, evidence = []) {
