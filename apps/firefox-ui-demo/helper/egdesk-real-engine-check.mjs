@@ -563,7 +563,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     const beginTurn = async text => {
       resetTurnNow(); runnerLog.length = 0
       const started = performance.now()
-      const run = await chat.send({ message: text, clientThreadId, requestId: `req-${++requestSeq}`, cwd: scratch, ...(agentRoom ? { profileId: agentRoom.id, replyDestination: 'direct' } : {}), ...Object.assign({}, ...attached.map(a => a.sendExtra?.() ?? {})), ...(first ? (persisted ? {} : { stateless: true }) : { conversationId: nativeThread }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
+      const run = await chat.send({ message: text, clientThreadId, requestId: `req-${++requestSeq}`, cwd: scratch, ...(agentRoom ? { profileId: agentRoom.id, replyDestination: 'direct' } : {}), ...Object.assign({}, ...attached.map(a => a.sendExtra?.({ text }) ?? {})), ...(first ? (persisted ? {} : { stateless: true }) : { conversationId: nativeThread }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
       first = false; nativeThread = run.conversationId
       return { run, started }
     }
