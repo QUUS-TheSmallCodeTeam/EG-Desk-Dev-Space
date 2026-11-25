@@ -417,8 +417,12 @@ const splitV2 = {
 // own v3 (L7 c23, a candidate, measured in plan terse-record-v1): v2 left c12 at own .19 and c10 at .16, just above the no bar .15.
 // It names the two exclusions with the Korean forms that carried them ("메일 보니까", "내역을 보니", "~걸 보니 ~것 같아").
 const ownV3 = ['self_reported_observation', 'Does the sentence say that the speaker personally saw, heard, checked, tried or did the thing the sentence is mainly about (for example "내가 봤어", "내가 고쳤어", "확인했어", "해 봤는데")? Reading it in a mail, log, record or document ("메일 보니까", "주문 내역을 보니", "기록상") is not this; being told it is not this. When the sentence states a conclusion and what it was drawn from ("~걸 보니 ~것 같아"), the thing it is mainly about is the conclusion, which the speaker did not see. A statement of a fact that does not say how the speaker knows it is no.']
-const VERSIONS = { v1: split, v2: splitV2, v3: { source: { ...splitV2.source, own: ownV3 }, time: splitV2.time } }
-export const SPLIT_WORDINGS = Object.freeze(['v1', 'v2'])
+// own v4 (L7 c36, from check-22mw and own-statement-v1): "아 그거 다음 주 화요일로 확정했어" got own .01 under v3, which names only seeing, hearing, checking, trying and doing, although a person
+// who decides or arranges something does it themself. v4 adds decided / fixed / arranged (with Korean forms that are not "내가 ..."), and names what stays out: a promise or plan for later
+// ("보낼게", "하자"), a request, a record read, being told, a conclusion, a plain fact. It is a candidate: not the default until its plan (own-wording-v4) passed.
+const ownV4 = ['self_reported_observation', 'Does the sentence say that the speaker themself saw, heard, checked, tried, did, decided, fixed or arranged the thing the sentence is mainly about (for example "내가 봤어", "내가 고쳤어", "확인했어", "해 봤는데", "목요일로 정했어", "회의는 내가 잡았어")? A decision or arrangement the speaker reports as made counts, also without "내가". A promise or plan for later ("보낼게", "하자") and a request are not this. Reading it in a mail, log, record or document ("메일 보니까", "주문 내역을 보니", "기록상", "회의록에 따르면") is not this; being told it is not this. When the sentence states a conclusion and what it was drawn from ("~걸 보니 ~것 같아"), the thing it is mainly about is the conclusion, which the speaker did not see. A statement of a fact that does not say how the speaker knows it is no.']
+const VERSIONS = { v1: split, v2: splitV2, v3: { source: { ...splitV2.source, own: ownV3 }, time: splitV2.time }, v4: { source: { ...splitV2.source, own: ownV4 }, time: splitV2.time } }
+export const SPLIT_WORDINGS = Object.freeze(['v1', 'v2', 'v4'])
 // Per-predicate choice (L7 c23, from the real c23 v1 / c26 v2 answers on the five targets and five guards, evidence/l7-c23/per-predicate.txt):
 // v2 is at least as good as v1 for every changed predicate and loses no guard (c10 was not installed by the split reading under v1 either:
 // own .58, guess .71; under v2 own .16). So 'v2' is v2 for all five. A per-predicate object ({ own: 'v3', ... }) selects a version per key
@@ -426,9 +430,12 @@ export const SPLIT_WORDINGS = Object.freeze(['v1', 'v2'])
 // c24 (Main's rule, terse-record-v1 real, 2026-11-25): own v3 passed both requests (c10 guard .12, c12 target .06; v2 was .16 / .19), so own is v3.
 export const SPLIT_WORDING_CHOICE = Object.freeze({ other: 'v2', own: 'v3', guess: 'v2', before: 'v2', now: 'v2' })
 // The wording split-wording-v2 was sent with (c26): v2 for all five, own included. Kept so that plan rebuilds byte for byte.
+// 'v4' as a wording string: the product's choice with own v4.
+export const SPLIT_WORDING_CHOICE_V4 = Object.freeze({ ...SPLIT_WORDING_CHOICE, own: 'v4' })
 export const SPLIT_WORDING_V2_AS_SENT = Object.freeze({ other: 'v2', own: 'v2', guess: 'v2', before: 'v2', now: 'v2' })
 function splitTable(wording) {
   if (wording === 'v2') wording = SPLIT_WORDING_CHOICE
+  else if (wording === 'v4') wording = SPLIT_WORDING_CHOICE_V4
   if (!wording || typeof wording !== 'object') return split
   const pickKey = (axis, key) => (VERSIONS[wording[key]] ?? split)[axis][key]
   return Object.fromEntries(Object.entries(split).map(([axis, group]) => [axis, Object.fromEntries(Object.keys(group).map(key => [key, pickKey(axis, key)]))]))

@@ -125,6 +125,7 @@ export const EGRESS_SITES = Object.freeze({
     'briefing_judgments: /decision/briefing-placement (counts only), -reuse and -check (card labels, short summaries, step texts) are each asked of the gate with canvas_text by runBriefingFlow before they are sent',
     'briefing_skeleton: /decision/briefing-skeleton (the request of the run and, in the place request, the run\'s own answer as draft_text, the turn\'s memory materials as memory_page, card labels as canvas_text) asked of the gate by runSkeletonFlow before anything is sent; without draft_text nothing is asked, without memory_page there are no materials, without canvas_text no existing card is listed'],
   'egdesk-board-agent-context.mjs': ['board_excerpt'],
+  'egdesk-decision-first-commands.mjs': ['run_text: the person\'s own message (up to 600 characters) and EG-Desk\'s fixed descriptions of the options built from the folder; never a script body or a command the person typed'],
   'egdesk-chat-choice.mjs': ['dm_chooser: the user\'s own typed question and options, confirmed in the panel'],
   'egdesk-browser-reflex.mjs': ['page_text'],
   'egdesk-browser-task.mjs': ['page_text'],

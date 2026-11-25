@@ -17,7 +17,7 @@ import * as BriefingHost from '../overlay/resources/EGDeskBriefingHost.sys.mjs'
 import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
 
-export const BRIEFING_FLAGS = Object.freeze(['EGDESK_BRIEFING_FLOW', 'EGDESK_BRIEFING_OUTPUT_SCHEMA'])
+export const BRIEFING_FLAGS = Object.freeze(['EGDESK_BRIEFING_FLOW', 'EGDESK_BRIEFING_OUTPUT_SCHEMA', 'EGDESK_BRIEFING_HAND_MATERIALS'])
 export const BRIEFING_LIMITS = Object.freeze({ timeoutMs: 150_000, year: 2026, viewport: Object.freeze({ x: 0, y: 0, width: 2400, height: 1400 }), tokenCap: 5_000_000, strings: 16, stringChars: 400, replyChars: 6000, inputChars: 6000 })
 export const BRIEFING_OUTCOMES = Object.freeze(['presented', 'fallback-chat', 'bubble'])
 const clip = (text, n) => String(text ?? '').slice(0, n)
@@ -183,7 +183,12 @@ export const briefingHook = Object.freeze({
     return {
       name: 'briefing',
       // the same capabilities the chrome sends for a Codex room (EGDeskChatState.sys.mjs contextCapabilitiesForRequest)
-      sendExtra: () => ({ contextCapabilities: { read: true, reader: true, publishBriefing: true } }),
+      // Cycle 42 (owner direction U13, audit reports/l6-c29-u13-audit.md): EGDESK_BRIEFING_HAND_MATERIALS=on (default OFF) hands the folder's notes to the answering turn, as the product's turn
+      // memory hands the pages the Decision model picked (additionalContext): the engine then needs no tool round to read them. Here the "pick" is all of the conversation's notes; the person's
+      // message is followed by them, the briefing's own request text is still the person's message alone.
+      sendExtra: ({ text } = {}) => ({ contextCapabilities: { read: true, reader: true, publishBriefing: true },
+        ...(FLAG.EGDESK_BRIEFING_HAND_MATERIALS === 'on' && typeof text === 'string' && Object.keys(conversation?.folder ?? {}).length
+          ? { message: `${text}\n\n${Object.entries(conversation.folder).map(([file, body]) => `--- ${file}\n${String(body).trim()}`).join('\n\n')}` } : {}) }),
       async afterTurn({ run, say, answer, turnIndex = 0 }) {
         const started = Date.now()
         const mark = { trace: trace.length, calls: engineCalls.length, requests: requestLog.length, forks: forkCalls.length, published: published.length, proposed: proposed.length, engines: engines.length, decisions: decisions.length }

@@ -56,13 +56,14 @@ test('the committed variant plan files are what the generator builds from the ba
   assert.deepEqual(buildAll().map(x => x.id), ['V1', 'V2', 'V3'])
 })
 
-test('every hard check of the base plan is in each variant plan under the same id, check, severity and owner; only page ids, two needles and decoy exclusions differ', () => {
+test('every hard check of the base plan is in each variant plan under the same id, check, severity and owner; only page ids, the needles that name a page title and decoy exclusions differ', () => {
   const base = new Map(baseRaw.steps.flatMap(s => s.expect.map(e => [e.id, { ...e, step: s.id }])))
   for (const id of Object.keys(VARIANTS)) {
     const raw = JSON.parse(readFileSync(planPath(id), 'utf8')), got = new Map(raw.steps.flatMap(s => s.expect.map(e => [e.id, { ...e, step: s.id }])))
     assert.deepEqual([...got.keys()].sort(), [...base.keys()].sort(), `${id}: the same expectations`)
     assert.equal([...got.values()].filter(e => e.severity === 'hard').length, [...base.values()].filter(e => e.severity === 'hard').length)
     const idMap = idMapOf(VARIANTS[id]), decoys = decoyIdsOf(VARIANTS[id])
+    const titles = Object.fromEntries((VARIANTS[id].pages.rename ?? []).map(r => [GRAPH_PAGES.find(p => p.id === r.from).title, r.title]))
     for (const [eid, e] of got) {
       const b = base.get(eid)
       for (const field of ['severity', 'owner', 'check', 'text', 'step', 'when', 'predicted']) assert.deepEqual(e[field], b[field], `${id} ${eid}.${field}`)
@@ -70,6 +71,8 @@ test('every hard check of the base plan is in each variant plan under the same i
       if (b.check === 'packet' || b.check === 'packetOrHeld') { want.include = want.include.map(x => idMap[x] ?? x); if (want.excludePrefix?.length) want.excludePrefix = [...want.excludePrefix.map(x => idMap[x] ?? x), ...decoys] }
       if (b.check === 'readingPending') want.pageId = idMap[want.pageId] ?? want.pageId
       if (eid === 's4n.heard') want.needles = [VARIANTS[id].says.nudge.text]
+      // c30: v9's two readings of what the draft check was given name the plan page by its title: the variant's title where the page is renamed (a body sentence is kept by a rename)
+      if (eid === 's13.check-saw-the-plan' || eid === 's14.check-saw-the-plan') want.needles = want.needles.map(n => titles[n] ?? n)
       const have = clone(e.args ?? {})
       if (eid === 's9.target-offered') { assert.equal(have.needles.length, 1); assert.notEqual(have.needles[0], b.args.needles[0], `${id}: the page title is the variant's`); continue }
       assert.deepEqual(have, want, `${id} ${eid}.args`)
@@ -154,7 +157,8 @@ async function dryRun(id) {
 test('dry run of the base plan with the switch (the reference for the variants): eighteen steps, the one hard check the scripted double cannot satisfy', async () => {
   dry.base = await dryRun('base')
   assert.equal(dry.base.ledger.stopped, null); assert.equal(dry.base.steps.length, 18)
-  assert.deepEqual(dry.base.scorecard.hard.failed, ['s4.no-page-for-the-action'], 'the scripted double does not implement the action rule (a real run does)')
+  // c30: the base is plan v9: the scripted triage always says need, so besides the action rule (a real run applies it) it also fetches the plan page again at s13 (the real v8/v9/V1 runs held it: nothing fetched)
+  assert.deepEqual(dry.base.scorecard.hard.failed, ['s4.no-page-for-the-action', 's13.not-resent'], 'the scripted double does not implement the action rule and over-selects pages (a real run does not)')
 })
 
 for (const id of ['V1', 'V2', 'V3']) {

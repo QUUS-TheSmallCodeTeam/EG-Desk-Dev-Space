@@ -8,7 +8,8 @@ import { fillPrompt } from './egdesk-briefing-engine.mjs'
 import { fillOutputSchema, stripNulls, violation } from './egdesk-briefing-output-schema.mjs'
 import { folderMaterials } from './egdesk-real-engine-briefing-hook.mjs'
 import { LOOP_ENTRIES, LOOP_SAY, buildLoopScript } from './egdesk-briefing-real-engine-script.mjs'
-import { CHECK17B_UNFILLABLE, CHECK17B_WHOLE_FILL, CHECK20BR_OFF, CHECK20BR_ON } from './egdesk-briefing-real-run.fixture.mjs'
+import { CHECK17B_UNFILLABLE, CHECK17B_WHOLE_FILL, CHECK20BR_OFF, CHECK20BR_ON, CHECK25BR_ANSWER, CHECK25BR_OFF, CHECK25BR_ON } from './egdesk-briefing-real-run.fixture.mjs'
+import { answerFacts } from './egdesk-briefing-skeleton.mjs'
 import { ROW_MARGIN } from './egdesk-briefing-skeleton.mjs'
 
 const rows = folderMaterials(buildLoopScript().conversations[0].folder)
@@ -17,13 +18,13 @@ const ANSWER = ['ledger 기록을 두 흐름으로 정리했습니다.', '', '| 
 /** A model that follows the compact request: one row per material, the key fact inside a line of at most `max` characters. */
 const faithful = want => ({ title: '두 흐름 정리', unfillable: [], items: Object.fromEntries(want.guide.items.map(i => [i.id, { text: `${i.shows} 흐름`, slots: Object.fromEntries(i.slots.map(s => [s.name, s.type === 'text' ? `${i.id} 정리` : i.materials.map(alias => {
   const m = want.materials.find(x => x.alias === alias); return { label: null, text: `${m.text.slice(0, 30)}… ${factOf(m.text)}`, from: alias } })])) }])) })
-function harness(replies, probability = name => (name.startsWith('same_') ? .03 : name.startsWith('before_') ? .9 : .97), materials = rows) {
+function harness(replies, probability = name => (name.startsWith('same_') ? .03 : name.startsWith('before_') ? .9 : .97), materials = rows, answer = ANSWER) {
   const tickets = new Map(), calls = [], fills = []
   const judge = { prepare: async dto => { const p = SKELETON_JUDGE.prepare({ mode: 'on', binding: 'b', dto }); assert.equal(p.status, 'prepared'); const t = `t${tickets.size + 1}`; tickets.set(t, { p, dto }); return { status: 'prepared', ticket: t, preview: { packet: p.packet } } },
     run: async t => { const { p, dto } = tickets.get(t); calls.push({ stage: dto.stage, names: p.packet.questions.map(q => q.name) })
-      const answers = Object.fromEntries(p.packet.questions.map(q => [q.name, { name: q.name, type: 'predicate', probability: probability(q.name) }])); return SKELETON_JUDGE.read(p, answers, 'b').reply }, cancel: async () => {} }
+      const answers = Object.fromEntries(p.packet.questions.map(q => [q.name, { name: q.name, type: 'predicate', probability: probability(q.name, dto) }])); return SKELETON_JUDGE.read(p, answers, 'b').reply }, cancel: async () => {} }
   const fill = async want => { fills.push(want); const r = replies[Math.min(fills.length, replies.length) - 1]; return typeof r === 'function' ? r(want) : structuredClone(r) }
-  return { calls, fills, run: () => runSkeletonFlow({ request: LOOP_SAY, answer: ANSWER, materials, candidates: [], currentAnswerId: null, viewport: { x: 0, y: 0, width: 2400, height: 1400 }, judge, fill, observeOnly: false }) }
+  return { calls, fills, run: () => runSkeletonFlow({ request: LOOP_SAY, answer, materials, candidates: [], currentAnswerId: null, viewport: { x: 0, y: 0, width: 2400, height: 1400 }, judge, fill, observeOnly: false }) }
 }
 const scene = enumerateSkeleton({ materials: rows, candidates: [] })
 const GUIDE = buildGuide(scene.parts.map((p, i) => ({ id: p.alias, trait: p.trait, materials: p.materials, component: p.options[0].component, reuse: [], creates: `N${i + 1}`, emphasis: 'spotlight', tried: [p.options[0].component] })), scene)
@@ -150,4 +151,47 @@ test('c41 an identical judgment is not asked twice: the same stage, questions an
   // the rewrite of the two cards returns the cards it was given, so its fill check is byte for byte the first one
   const h = harness([faithful, faithful]), out = await h.run()
   assert.equal(out.status, 'presented'); assert.equal(h.calls.filter(c => c.stage === 'fill_check').length, 1); assert.equal(out.stats.reused ?? 0, 0, 'nothing was repeated when the first fill was accepted')
+})
+
+
+// ---- c42: check-25br ----
+test('check-25br: the real answer is a 3.7 KB table; its facts were split from the first 1,200 characters (cut in the middle of the fourth row); now all twelve rows are facts and the two sentences about the answer are the ones left out', () => {
+  assert.ok(CHECK25BR_ANSWER.length > 3000 && CHECK25BR_ANSWER.length > SKELETON_LIMITS.answerMax * 2)
+  const { facts, cut } = answerFacts(CHECK25BR_ANSWER)
+  assert.equal(facts.length, 12); assert.ok(cut >= 2, `cut ${cut}`)
+  assert.ok(facts.every(f => /\d/.test(f)) && !facts.some(f => f.startsWith('|')), 'whole rows: no half row, no pipe left')
+  assert.ok(facts.some(f => f.includes('int/c5 = int/c4') && f.includes('5930건')), 'the fact that was cut in half has its composition and its figure')
+  assert.ok(!facts.some(f => f.includes('12개 기록을 두 흐름으로')) && !facts.some(f => f.includes('파일은 변경하지 않았습니다')), 'over the cap the anchored facts are asked first; the sentences about the answer wait')
+  // within the cap nothing is reordered, links are removed and the order is the answer's
+  const small = answerFacts('| 시각 | 값 |\n|---|---|\n| [11-24](/a/b/c.md) | 5752건 |\n| [11-25](/a/b/d.md) | 5930건 |\n\n끝.')
+  assert.deepEqual(small.facts, ['11-24 · 5752건', '11-25 · 5930건', '끝.'])
+})
+
+const BOARD_IDS = /int\/c\d+|[0-9a-f]{7}\b|\d{1,3}(?:,\d{3})+|\d+개 파일 \d+건/g
+/** A judge that reads the ids and figures: a fact is on the board when every id and figure it carries is in the board's text; a sentence with none is not a statement of the materials. */
+const idJudge = (name, dto) => {
+  if (name.startsWith('same_')) return .03
+  if (name.startsWith('before_')) return .9
+  const q = dto.questions.find(x => name === `onboard_${x.fact}` || name === `stated_${x.fact}`)
+  if (!q) return .97
+  const ids = q.text.match(BOARD_IDS) ?? []
+  if (name.startsWith('stated_')) return ids.length ? .97 : .02
+  return ids.every(id => JSON.stringify(dto.board).includes(id)) ? .97 : .02
+}
+test('check-25br schema-on through the flow: the real whole fill leaves out the composition ids of three rows, the coverage of the twelve facts says so, the real rewrite carries them; the refused explanation (step_P2 .42) is kept as it was; the board is presented', async () => {
+  let stepAsked = 0
+  const probability = (name, dto) => (name === 'step_P2' ? (stepAsked++ ? 0.42 : 0.98) : idJudge(name, dto))
+  const h = harness([CHECK25BR_ON[0], CHECK25BR_ON[1]], probability, rows, CHECK25BR_ANSWER), out = await h.run()
+  assert.equal(out.status, 'presented', JSON.stringify({ reason: out.reason, coverage: out.coverage }))
+  assert.deepEqual(out.coverage.missing, [], 'after the rewrite nothing is missing'); assert.ok(out.coverage.facts.length === 12 && out.coverage.facts.every(f => f.p !== null))
+  assert.deepEqual(h.fills.map(f => f.only ?? null), [null, ['P1', 'P2']], 'the whole fill, then the one rewrite'); assert.deepEqual(out.coverage.redesign.from, 'rewrite')
+  assert.deepEqual(out.coverage.explanationKept, ['P2'], 'the explanation of the measurement card that the judge could not confirm after the rewrite is the one it confirmed before')
+  assert.equal(h.calls.filter(c => c.stage === 'coverage').length, 3, 'twelve facts in two requests, then the missing ones once more')
+  const text = out.newComponents.map(c => c.markdown).join('\n'); for (const f of ['9aeed73', '5752건', '5930건', '5990건', '6085건', '218c711', '2.48s', '13,404토큰', '13,579토큰', '269ms', '1,812']) assert.ok(text.includes(f), f)
+})
+
+test('check-25br schema-off: the real whole fill keeps ".04·기록 1" of the 11-24 16:09 entry and drops its trailing latency figures (1.8s, 0.27~0.29s, 3.4k토큰): a 76-character line cannot hold nine figures, and the model chose the first ones', () => {
+  const m6 = CHECK25BR_OFF[0].items.P2.slots.lines[1]
+  assert.equal(m6.from, 'M6'); assert.ok(m6.text.includes('.04') && !m6.text.includes('0.27~0.29s') && m6.text.length <= 76 + 14, m6.text)
+  const entry = LOOP_ENTRIES.find(e => e.file.endsWith('1609-measure.md')); assert.ok(entry.text.includes('0.27~0.29s') && entry.text.includes('.04') && entry.text.length > 150)
 })

@@ -444,3 +444,13 @@ export function buildMemoryWriteV2Script() {
     description: v1.description + ' v2: the source axis of a sentence the axes request calls "unspecified" is asked again with the split predicates (design hybrid-two-step-ask), and the confirmation quotes the person\'s own words.',
     conversations: v1.conversations.map(c => ({ ...c, flags: { ...c.flags, EGDESK_TURN_MEMORY_SPEECH_DESIGN: 'hybrid-ask' } })) }
 }
+
+// write-v3 (c36), run AFTER the plans own-wording-v4 and confirmation-stated-v1 passed (Main's order): write-v2 with the two candidate wordings on: the own predicate v4
+// (EGDESK_TURN_MEMORY_SPLIT_WORDING=v4: a decision the person made is their own act) and the confirmation's quote and stated question v2 (EGDESK_TURN_MEMORY_CONFIRM_WORDING=v2).
+// The expectations are v1's, none loosened.
+export const MEMORY_WRITE_V3_SET = 'real-engine-memory-write-v3'
+export function buildMemoryWriteV3Script() {
+  const v2 = buildMemoryWriteV2Script()
+  return { ...v2, set: MEMORY_WRITE_V3_SET, description: v2.description + ' v3: the own predicate wording v4 and the confirmation wording v2 (candidates; measured by the plans own-wording-v4 and confirmation-stated-v1).',
+    conversations: v2.conversations.map(c => ({ ...c, flags: { ...c.flags, EGDESK_TURN_MEMORY_SPLIT_WORDING: 'v4', EGDESK_TURN_MEMORY_CONFIRM_WORDING: 'v2' } })) }
+}

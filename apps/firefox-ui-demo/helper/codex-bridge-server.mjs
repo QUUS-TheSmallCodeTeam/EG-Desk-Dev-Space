@@ -547,7 +547,7 @@ const chat = new CodexChatRuntime({
     // Idle warm-up (EGDESK_DECISION_WARMUP, default off): a turn tells it before its first Decisions request; null when off.
     ...(decisionWarmup ? { warmup: decisionWarmup } : {}),
     // The selection's 'action' rule set (egdesk-context-setup.mjs CONTEXT_RULE_SETS): developer flag EGDESK_CONTEXT_RELEVANCE=action, default off.
-    ...(process.env.EGDESK_CONTEXT_RELEVANCE === 'action' ? { relevanceRules: 'action' } : {}),
+    ...(['action', 'action+status'].includes(process.env.EGDESK_CONTEXT_RELEVANCE) ? { relevanceRules: process.env.EGDESK_CONTEXT_RELEVANCE } : {}),
     calibrationLog: decisionCalibrationLog,
     turnMemory: turnMemoryConfig,
     browserEntry: browserEntryConfig,
@@ -558,7 +558,7 @@ const chat = new CodexChatRuntime({
     // attentionPosted: the session posted its pointer message for a provider's attention fact; the placement runtime withdraws it.
     // With EGDESK_PRESENCE=on the audience rule also reads the Desk's presence snapshot (egdesk-presence-mirror.mjs); without it, as before, presence is unknown.
     ...(process.env.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(process.env.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror, audience: ({ run }) => runRequesters.audience({ run }) } : {}),
-      attentionPosted: ({ key, provider }) => { if (provider === 'work_placement') workPlacement.acknowledgePointer(key) } } } : {}),
+      attentionPosted: ({ key, provider }) => { if (provider === 'work_placement') workPlacement.acknowledgePointer(key) }, ...(process.env.EGDESK_FLOW_STALLED_COPY === 'none' ? { stalledCopy: () => 'none' } : {}) } } : {}),
     // Advisory state judge on the engine's own command executions: developer flag EGDESK_COMMAND_JUDGE=advisory, default off. Records only.
     ...(IN_RUN_MESSAGES_ENABLED ? { inRunMessages: { mode: () => 'on' } } : {}),
     ...(process.env.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),

@@ -1056,3 +1056,43 @@ test('git conflict, each proof fails by code: a commit, a forced resolution, an 
   const claims = await run([MERGE_STEP], '머지를 마쳤습니다. `app.txt`도 확인했습니다.')
   assert.equal(claims['git.answerNoMergeClaim'], false)
 })
+
+// ---- c32 (U13): the decision-first command path through the check (real-engine-decision-first-v1; the real run compares the seconds) ----
+const dfScript = id => { const s = starter('decision-first'); s.conversations = s.conversations.filter(c => c.id === id); return s }
+/** The Decision model for this path: a choice over the options built from the folder; "테스트" picks the option whose description is about tests. */
+const dfDecisions = (picks = []) => async (url, init) => {
+  const body = JSON.parse(init.body), q = body.questions.find(x => x.name === 'df_pick')
+  if (!q) return Response.json({ answers: body.questions.map(x => ({ name: x.name, type: 'predicate', probability: 0.05 })), usage: { input_tokens: 10 } })
+  const message = /"""\n([\s\S]*?)\n"""/.exec(body.input.find(m => m.role === 'user')?.content ?? '')?.[1] ?? '', value = /테스트/.test(message) ? q.choices.find(c => /tests/.test(c.description ?? ''))?.value ?? 'none' : 'none'
+  picks.push({ message, value })
+  return Response.json({ model: 'gpt-6-luna', answers: [{ type: 'choice', name: 'df_pick', choice: value, confidence: 0.96, probabilities: [{ value: 'none', probability: 0.02 }, { value, probability: 0.96 }].sort((a, b) => a.probability - b.probability) }], usage: { input_tokens: 40 } })
+}
+const dfWorld = (t, fake, picks) => { const w = world(t, fake, { decisions: true }); w.deps.runnerSpawn = projectRunner(w); w.deps.fetchImpl = dfDecisions(picks); return w }
+
+test('decision-first through the check: the same request, engine path and fast path; the fast turn has no engine turn, an engine-less local run, and is judged by the arbiter', async t => {
+  const picks = []
+  const engine = dfWorld(t, { turns: [{ steps: [{ toolCall: { tool: 'egdesk_run_command', arguments: { command: 'npm test' } } }], final: '테스트 5개가 모두 통과했습니다.' }] }, picks)
+  const e = only(await runCheck(engine.options, asScripts(dfScript('engine-path')), engine.deps)); assert.equal(e.aborted, null, e.abortDetail); assert.equal(e.ok, true, JSON.stringify(e.turns[0].expectations.filter(c => !c.ok)))
+  assert.equal(picks.length, 0, 'the engine path asks the Decision model nothing about commands (flag off)')
+  const fast = dfWorld(t, { turns: [{ steps: [], final: 'must not be asked' }] }, picks)
+  const f = only(await runCheck(fast.options, asScripts(dfScript('decision-first')), fast.deps)); assert.equal(f.aborted, null, f.abortDetail); const turn = f.turns[0]
+  assert.equal(f.ok, true, JSON.stringify(turn.expectations.filter(c => !c.ok)))
+  assert.deepEqual([turn.decisionFirst.path, turn.decisionFirst.reason, turn.decisionFirst.option, turn.decisionFirst.engineTurns, turn.decisionFirst.runLocal], ['fast', 'healthy', 'script', 0, true]); assert.deepEqual(picks.map(p => p.message), ['테스트 돌려줘'])
+  assert.equal(callsOf(fast, 'turn/start').length, 0, 'the engine received no turn'); assert.deepEqual(turn.posted, [], 'no assistant text'); assert.deepEqual(turn.coding.commands.map(c => [c.command, c.health, c.summary.passed, c.summary.failed]), [['npm test', 'healthy', 5, 0]]); assert.deepEqual(fast.ranCommands, ['npm test'])
+  assert.equal(turn.status ?? turn.subTurns[0].status, 'completed'); assert.ok(turn.subTurns[0].latencyMs < e.turns[0].subTurns[0].latencyMs + 5000, 'recorded: ' + turn.subTurns[0].latencyMs + ' ms vs ' + e.turns[0].subTurns[0].latencyMs + ' ms')
+})
+
+test('decision-first through the check: a failing test run goes to the engine once, with the result as context and no tool call', async t => {
+  const w = dfWorld(t, { turns: [{ steps: [], final: '테스트 5개 중 1개가 실패했습니다. 반올림이 내림으로 되어 있습니다.' }] })
+  const rec = only(await runCheck(w.options, asScripts(dfScript('decision-first-failing')), w.deps)); assert.equal(rec.aborted, null, rec.abortDetail); const turn = rec.turns[0]
+  assert.equal(rec.ok, true, JSON.stringify(turn.expectations.filter(c => !c.ok)))
+  assert.deepEqual([turn.decisionFirst.path, turn.decisionFirst.reason, turn.decisionFirst.engineTurns], ['engine', 'result_for_engine', 1]); assert.equal(callsOf(w, 'turn/start').length, 1)
+  const sent = callsOf(w, 'turn/start')[0].params; assert.match(JSON.stringify(sent.additionalContext), /egdesk_command_result/); assert.match(JSON.stringify(sent.additionalContext), /4 passed, 1 failed/); assert.deepEqual(w.ranCommands, ['npm test'], 'the command ran once, before the engine')
+})
+
+test('decision-first expectations need the flag in the conversation and refuse the wrong shapes', () => {
+  const base = expect => ({ set: 'real-engine-df-v1', conversations: [{ id: 'c', flags: { EGDESK_DECISION_FIRST: 'on' }, turns: [{ say: '테스트 돌려줘', expect }] }] })
+  assert.equal(validateEngineScript(base({ decisionFirst: { path: 'fast', engineTurns: 0 } })).ok, true)
+  assert.match(validateEngineScript({ set: 'real-engine-df-v1', conversations: [{ id: 'c', turns: [{ say: 'x', expect: { decisionFirst: { path: 'fast' } } }] }] }).errors.join(), /needs flags\.EGDESK_DECISION_FIRST/)
+  assert.match(validateEngineScript(base({ decisionFirst: { path: 'fast', engineTurns: 1 } })).errors.join(), /a fast turn has none/); assert.match(validateEngineScript(base({ decisionFirst: { reason: 'because' } })).errors.join(), /reason/); assert.match(validateEngineScript(base({ decisionFirst: {} })).errors.join(), /at least one/)
+})

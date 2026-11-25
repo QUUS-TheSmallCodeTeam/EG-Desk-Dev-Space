@@ -1,0 +1,115 @@
+{
+  "set": "real-engine-decision-first-v1",
+  "description": "Pattern (c32, owner direction U13 \"끼릭끼릭 탁탁\"): the same request on the same scratch project, three ways. engine-path: flags none, the engine reads the request, calls egdesk_run_command, waits, writes. decision-first: EGDESK_DECISION_FIRST=on, code builds the options from the folder (npm test, ...), the Decision model picks one (warm about 0.3 s), EG-Desk's own runner runs it, the arbiter reads it healthy from the runner's summary line, and the turn ends locally with NO engine turn (decisionFirst path fast, engineTurns 0); no assistant text (no new words). decision-first-failing: the same flag on a project with one failing test: the command ran before the engine, the arbiter reads it unhealthy, and the engine is asked ONCE with the result as context: it writes the explanation and needs no tool call (noToolCalls). The latency of each turn is in the record (subTurns[0].latencyMs): compare engine-path with decision-first. Needs --decisions; no model is asked for the fast path except the Decision model.",
+  "conversations": [
+    {
+      "id": "engine-path",
+      "folder": {
+        "package.json": "{\n  \"name\": \"price-demo\",\n  \"type\": \"module\",\n  \"scripts\": { \"test\": \"node --test\" }\n}\n",
+        "src/price.mjs": "// Discounted price in won, rounded to the nearest won.\nexport function applyDiscount(price, percent) {\n  if (percent <= 0) return price\n  return Math.round(price * (100 - percent) / 100)\n}\n",
+        "src/format.mjs": "import { applyDiscount } from './price.mjs'\n\nexport function formatWon(amount) {\n  return `${amount.toLocaleString('en-US')}원`\n}\n\nexport function priceLabel(price, percent) {\n  return formatWon(applyDiscount(price, percent))\n}\n",
+        "test/price.test.mjs": "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { applyDiscount } from '../src/price.mjs'\nimport { formatWon, priceLabel } from '../src/format.mjs'\n\ntest('no discount keeps the price', () => {\n  assert.equal(applyDiscount(10000, 0), 10000)\n})\n\ntest('10% off 10000 is 9000', () => {\n  assert.equal(applyDiscount(10000, 10), 9000)\n})\n\ntest('15% off 9990 is rounded to the nearest won', () => {\n  assert.equal(applyDiscount(9990, 15), 8492)\n})\n\ntest('formatWon groups thousands', () => {\n  assert.equal(formatWon(1234567), '1,234,567원')\n})\n\ntest('priceLabel shows the discounted price', () => {\n  assert.equal(priceLabel(20000, 25), '15,000원')\n})\n"
+      },
+      "turns": [
+        {
+          "say": "테스트 돌려줘",
+          "approve": [
+            "yes"
+          ],
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed",
+            "coding": {
+              "changed": [],
+              "lastTests": {
+                "health": "healthy",
+                "failed": 0,
+                "minPassed": 5
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "decision-first",
+      "flags": {
+        "EGDESK_DECISION_FIRST": "on"
+      },
+      "folder": {
+        "package.json": "{\n  \"name\": \"price-demo\",\n  \"type\": \"module\",\n  \"scripts\": { \"test\": \"node --test\" }\n}\n",
+        "src/price.mjs": "// Discounted price in won, rounded to the nearest won.\nexport function applyDiscount(price, percent) {\n  if (percent <= 0) return price\n  return Math.round(price * (100 - percent) / 100)\n}\n",
+        "src/format.mjs": "import { applyDiscount } from './price.mjs'\n\nexport function formatWon(amount) {\n  return `${amount.toLocaleString('en-US')}원`\n}\n\nexport function priceLabel(price, percent) {\n  return formatWon(applyDiscount(price, percent))\n}\n",
+        "test/price.test.mjs": "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { applyDiscount } from '../src/price.mjs'\nimport { formatWon, priceLabel } from '../src/format.mjs'\n\ntest('no discount keeps the price', () => {\n  assert.equal(applyDiscount(10000, 0), 10000)\n})\n\ntest('10% off 10000 is 9000', () => {\n  assert.equal(applyDiscount(10000, 10), 9000)\n})\n\ntest('15% off 9990 is rounded to the nearest won', () => {\n  assert.equal(applyDiscount(9990, 15), 8492)\n})\n\ntest('formatWon groups thousands', () => {\n  assert.equal(formatWon(1234567), '1,234,567원')\n})\n\ntest('priceLabel shows the discounted price', () => {\n  assert.equal(priceLabel(20000, 25), '15,000원')\n})\n"
+      },
+      "turns": [
+        {
+          "say": "테스트 돌려줘",
+          "expect": {
+            "turnStatus": "completed",
+            "decisionFirst": {
+              "path": "fast",
+              "reason": "healthy",
+              "engineTurns": 0,
+              "maxDecisionMs": 4000
+            },
+            "engine": {
+              "maxLatencyMs": 15000
+            },
+            "coding": {
+              "changed": [],
+              "lastTests": {
+                "health": "healthy",
+                "failed": 0,
+                "minPassed": 5
+              },
+              "nothingOutside": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "decision-first-failing",
+      "flags": {
+        "EGDESK_DECISION_FIRST": "on"
+      },
+      "folder": {
+        "package.json": "{\n  \"name\": \"price-demo\",\n  \"type\": \"module\",\n  \"scripts\": { \"test\": \"node --test\" }\n}\n",
+        "src/price.mjs": "// Discounted price in won, rounded to the nearest won.\nexport function applyDiscount(price, percent) {\n  if (percent <= 0) return price\n  return Math.floor(price * (100 - percent) / 100)\n}\n",
+        "src/format.mjs": "import { applyDiscount } from './price.mjs'\n\nexport function formatWon(amount) {\n  return `${amount.toLocaleString('en-US')}원`\n}\n\nexport function priceLabel(price, percent) {\n  return formatWon(applyDiscount(price, percent))\n}\n",
+        "test/price.test.mjs": "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { applyDiscount } from '../src/price.mjs'\nimport { formatWon, priceLabel } from '../src/format.mjs'\n\ntest('no discount keeps the price', () => {\n  assert.equal(applyDiscount(10000, 0), 10000)\n})\n\ntest('10% off 10000 is 9000', () => {\n  assert.equal(applyDiscount(10000, 10), 9000)\n})\n\ntest('15% off 9990 is rounded to the nearest won', () => {\n  assert.equal(applyDiscount(9990, 15), 8492)\n})\n\ntest('formatWon groups thousands', () => {\n  assert.equal(formatWon(1234567), '1,234,567원')\n})\n\ntest('priceLabel shows the discounted price', () => {\n  assert.equal(priceLabel(20000, 25), '15,000원')\n})\n"
+      },
+      "turns": [
+        {
+          "say": "테스트 돌려줘",
+          "expect": {
+            "noToolCalls": true,
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed",
+            "answerIncludes": [
+              "실패"
+            ],
+            "decisionFirst": {
+              "path": "engine",
+              "reason": "result_for_engine",
+              "engineTurns": 1
+            },
+            "coding": {
+              "changed": [],
+              "lastTests": {
+                "health": "unhealthy",
+                "minFailed": 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -301,6 +301,26 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "alongside": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "from": {
+                      "enum": [
+                        "owner",
+                        "invited"
+                      ]
+                    },
+                    "say": {
+                      "maxLength": 4000,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "say"
+                  ],
+                  "type": "object"
+                },
                 "approve": {
                   "items": {
                     "enum": [
@@ -324,8 +344,35 @@
                       "enum": [
                         "membership",
                         "delivery",
-                        "settings"
+                        "settings",
+                        "library",
+                        "ticket",
+                        "room",
+                        "queue",
+                        "pension"
                       ]
+                    },
+                    "staleSwap": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "from": {
+                          "maxLength": 80,
+                          "minLength": 1,
+                          "pattern": "^/",
+                          "type": "string"
+                        },
+                        "to": {
+                          "maxLength": 80,
+                          "minLength": 1,
+                          "pattern": "^/",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "from",
+                        "to"
+                      ],
+                      "type": "object"
                     },
                     "start": {
                       "maxLength": 80,
@@ -553,6 +600,24 @@
                     "browserLoop": {
                       "additionalProperties": false,
                       "properties": {
+                        "afterStaleSees": {
+                          "items": {
+                            "maxLength": 120,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 3,
+                          "type": "array"
+                        },
+                        "clickedOnly": {
+                          "items": {
+                            "maxLength": 40,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 4,
+                          "type": "array"
+                        },
                         "entered": {
                           "const": true
                         },
@@ -588,6 +653,9 @@
                         "noActs": {
                           "const": true
                         },
+                        "noFills": {
+                          "const": true
+                        },
                         "noInventedAmounts": {
                           "const": true
                         },
@@ -608,6 +676,15 @@
                           "minLength": 1,
                           "type": "string"
                         },
+                        "noteExcludes": {
+                          "items": {
+                            "maxLength": 120,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 4,
+                          "type": "array"
+                        },
                         "noteIncludes": {
                           "items": {
                             "maxLength": 200,
@@ -617,12 +694,24 @@
                           "maxItems": 4,
                           "type": "array"
                         },
+                        "noteNames": {
+                          "items": {
+                            "maxLength": 100,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 3,
+                          "type": "array"
+                        },
                         "noteStatus": {
                           "enum": [
                             "done",
                             "cannot_proceed",
                             "need_context"
                           ]
+                        },
+                        "staleSeen": {
+                          "const": true
                         }
                       },
                       "type": "object"
@@ -757,6 +846,9 @@
                         },
                         "roomKept": {
                           "const": true
+                        },
+                        "twoRuns": {
+                          "const": true
                         }
                       },
                       "type": "object"
@@ -793,6 +885,46 @@
                     },
                     "conversationGone": {
                       "type": "boolean"
+                    },
+                    "decisionFirst": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "engineTurns": {
+                          "maximum": 5,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "maxDecisionMs": {
+                          "maximum": 60000,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "path": {
+                          "enum": [
+                            "fast",
+                            "engine"
+                          ]
+                        },
+                        "reason": {
+                          "enum": [
+                            "healthy",
+                            "none",
+                            "below_threshold",
+                            "unreachable",
+                            "no_options",
+                            "approval_floor",
+                            "no_executor",
+                            "needs_person",
+                            "result_for_engine",
+                            "result_unreadable",
+                            "decisions_off",
+                            "egress_closed",
+                            "error"
+                          ]
+                        }
+                      },
+                      "type": "object"
                     },
                     "deleted": {
                       "additionalProperties": false,

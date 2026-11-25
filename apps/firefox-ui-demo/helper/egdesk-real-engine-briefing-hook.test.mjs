@@ -353,3 +353,22 @@ test('c37 a null copy of a long entry is refused (the copy is the whole text or 
   const reversed = await runLoop(t, { ...loopFaithful, reverse: true })
   for (const rec of reversed.records) { const b = briefingOf(rec), failed = rec.turns[0].expectations.filter(e => !e.ok); assert.equal(b.outcome, 'presented'); assert.deepEqual(failed.map(e => e.check), ['briefing.inOrder'], rec.id); assert.equal(failed[0].detail.problems.length, 2) }
 })
+
+// ---- c42: EGDESK_BRIEFING_HAND_MATERIALS (default off; owner direction U13) ----
+import { LOOP_HANDED_SET, buildLoopHandedScript } from './egdesk-briefing-real-engine-script.mjs'
+test('c42 hand-materials: off by default in every script; the v2 realistic script is the v1 schema-on conversation with the flag on, and the flag is a registered briefing flag', () => {
+  assert.ok(BRIEFING_FLAGS.includes('EGDESK_BRIEFING_HAND_MATERIALS'))
+  for (const c of [...buildLoopScript().conversations, ...buildBoardScript().conversations]) assert.equal(c.flags.EGDESK_BRIEFING_HAND_MATERIALS, undefined, c.id)
+  const v2 = buildLoopHandedScript(), file = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'real-engine', 'scripts', `${LOOP_HANDED_SET}.json`), 'utf8'))
+  assert.deepEqual(file, JSON.parse(JSON.stringify(v2))); assert.deepEqual(validateEngineScript(file), { ok: true, errors: [] })
+  assert.deepEqual(v2.conversations.map(c => [c.id, c.flags.EGDESK_BRIEFING_HAND_MATERIALS, c.flags.EGDESK_BRIEFING_OUTPUT_SCHEMA]), [['realistic-handed-schema-on', 'on', 'on']])
+  assert.deepEqual(v2.conversations[0].turns[0].expect.briefing, buildLoopScript().conversations[0].turns[0].expect.briefing, 'the same expectations')
+})
+test('c42 hand-materials: with the flag the answering turn\'s message is the person\'s text followed by the twelve notes; without it the message is the person\'s text alone; the briefing request keeps the person\'s text', async t => {
+  const answerStart = w => turnStarts(w).find(m => !/You are filling in/.test(textOf(m)))
+  const on = world(t, loopFake(loopFaithful)), s1 = buildLoopHandedScript(); s1.conversations[0].turns[0].expect = { ...s1.conversations[0].turns[0].expect }
+  const r1 = (await runCheck(on.options, asScripts(s1), on.deps)).records[0], text1 = textOf(answerStart(on))
+  assert.ok(text1.startsWith(LOOP_SAY) && LOOP_ENTRIES.every(e => text1.includes(e.text.slice(0, 40)) && text1.includes(e.file)), 'the notes follow the message'); assert.equal(r1.turns[0].hooks.briefing.request, LOOP_SAY.slice(0, 200))
+  const off = world(t, loopFake(loopFaithful)), s2 = buildLoopScript(); s2.conversations.length = 1
+  await runCheck(off.options, asScripts(s2), off.deps); assert.equal(textOf(answerStart(off)), LOOP_SAY, 'the person\'s message alone')
+})

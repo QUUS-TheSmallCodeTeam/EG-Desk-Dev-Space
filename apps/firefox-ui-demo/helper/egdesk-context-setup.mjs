@@ -204,9 +204,12 @@ const CONTEXT_RULES = [
 // Selectable rule set 'action' (internal; NOT the default, which stays byte for byte CONTEXT_RULES). All-on v3, 2026-11-25, s4: the request
 // "전체 테스트 돌리고 결과 알려줘" got the deployment plan (0.56) and the health-check list (0.69) attached although it asks for no record.
 // One added rule says when an item is needed for a request to carry out an action; the questions are unchanged (L7 c20 plan).
-export const CONTEXT_RULE_SETS = Object.freeze(['default', 'action'])
+export const CONTEXT_RULE_SETS = Object.freeze(['default', 'action', 'action+status'])
 const ACTION_RULE = 'An item is needed only when the response has to use what the item says. A request to carry out an action (run, build, test, deploy, open, send) needs an item only when the item is about that very action (its procedure, target or expected result); records of other work are not needed because they are recent or belong to the same project.'
-const rulesFor = set => (set === 'action' ? `${CONTEXT_RULES}\n${ACTION_RULE}` : CONTEXT_RULES)
+// 'action+status' (L7 c36, V1 s1.packet): the action rule and one more. The real V1 run (L2 c29): "A사 견적 지금 어떻게 돼 있어?" read as a question about the present, and the page that began the
+// matter ("A사 견적 문의 접수", slice past) got .40 against .99 for the past-tense wording of the same question; the page that says how the matter began is part of its state.
+export const STATUS_RULE = 'When the message asks how a matter stands (its progress or state) without naming a time, the items that record how that matter began and developed (the request, sent versions, notes, decisions) are needed with the latest one. A planned item is still not a current fact.'
+const rulesFor = set => (set === 'action' ? `${CONTEXT_RULES}\n${ACTION_RULE}` : set === 'action+status' ? `${CONTEXT_RULES}\n${ACTION_RULE}\n${STATUS_RULE}` : CONTEXT_RULES)
 
 function cacheKey(scope, hash) {
   return `egd-${compactText(scope, 20).replace(/[^A-Za-z0-9_-]/g, '') || 'ctx'}-${hash.slice(0, 32)}`
