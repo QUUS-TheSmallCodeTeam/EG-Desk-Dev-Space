@@ -920,7 +920,12 @@
                             "result_unreadable",
                             "decisions_off",
                             "egress_closed",
-                            "error"
+                            "error",
+                            "approval_ran",
+                            "approval_declined",
+                            "approval_expired",
+                            "approval_unclear",
+                            "approval_unread"
                           ]
                         }
                       },

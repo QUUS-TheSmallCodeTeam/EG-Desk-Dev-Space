@@ -100,6 +100,8 @@ export function createGateHookBroker({ mode = () => 'off', assess = null, home, 
       if (next.length) carried.set(turn.conversationId, next); else carried.delete(turn.conversationId)
     },
     awaitingReply: conversationId => awaiting.has(conversationId),
+    /** c32: the one command a conversation's pending question is about (a copy; null when none): what the person's reply will be read against. */
+    pendingAsk: conversationId => { const w = awaiting.get(conversationId); return w ? { command: w.ask.command, cwd: w.ask.cwd, reasons: [...(w.ask.reasons ?? [])] } : null },
     // L1 c21: a room continued on another account (a new native thread): its unanswered question, the commands still waiting for the
     // person and an approval not yet bound to a turn move to the new thread. Nothing else changes; an existing entry there is kept.
     rekey(from, to) {
@@ -171,9 +173,10 @@ export function createGateHookBroker({ mode = () => 'off', assess = null, home, 
       const p = name => { const a = answer?.answers?.[name]; return a?.type === 'predicate' && Number.isFinite(a.probability) ? a.probability : null }
       const runs = p('reply_runs_command'), declines = p('reply_declines_command')
       const approved = runs !== null && declines !== null && runs >= GATE_HOOK_YES && declines <= GATE_HOOK_NO
+      const declined = !approved && runs !== null && declines !== null && declines >= GATE_HOOK_YES && runs <= GATE_HOOK_NO // c32: said no (decision-first approvals cancel at once)
       note('reply_read', { approved })
       if (approved) { const set = nextTurn.get(conversationId) ?? new Set(); set.add(waiting.ask.key); nextTurn.set(conversationId, set) }
-      return { approved, read: true }
+      return { approved, read: true, declined }
     },
     state: () => ({ turns: turns.size, awaiting: awaiting.size, nextTurn: nextTurn.size, carried: carried.size }),
   })

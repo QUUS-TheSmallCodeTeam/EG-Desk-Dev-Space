@@ -84,6 +84,7 @@ export const EARLIER_EVIDENCE_LIMIT = 4
 // its records are kept for the next check (the check's own ranking keeps the ones related to the next draft). After a posted answer the limit above stays.
 export const EARLIER_WITHHELD_LIMIT = 8
 export const POSTED_ANSWER_KEY = 'egdesk_posted_answer'
+import { APPROVALS_FAST_LIMITS, approvalOutcomeBlock } from './egdesk-decision-first-approvals.mjs' // c32 (U13): approvals decision-first
 import { ENGINE_STALL_LIMITS, eventTurnId, stallFact } from './egdesk-engine-stall.mjs' // c33: the first-event watchdog
 import { PROPOSAL_LIMITS, proposalCandidates, readRegistration, registrationRequest } from './egdesk-open-proposals.mjs' // c33: the answer's open proposals as defined items
 import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
@@ -137,7 +138,7 @@ import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, 
 import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
-import { sha256Hex } from './egdesk-decision-questions.mjs'
+import { predicateQuestion, sha256Hex } from './egdesk-decision-questions.mjs'
 import { workspaceCandidates } from './egdesk-prefetch.mjs'
 import { engineContextConfig, spilledKeys, splitEngineContext } from './egdesk-engine-context.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
@@ -2992,6 +2993,7 @@ export class CodexChatRuntime {
       const dfLocal = ownTools && !bounded && ownFolder ? await this.decisionFirstTry({ cid, body, context, ownFolder }) : null
       const dfContext = dfLocal?.context ? { ...(turnAdditionalContext || {}), [COMMAND_RESULT_KEY]: { kind: 'application', value: dfLocal.context } } : turnAdditionalContext
       const engineShape = this.shapeEngineContext(dfContext)
+      // c32: the message that made code ask the question is not the reply to it (the question was posted in this very call)
       await this.readGateHookReply(cid, body.message)
       turnStartAttempted = context.turnStartAttempted = true
       const result = dfLocal?.finished ? { turn: { id: dfLocal.turnId, status: 'inProgress', items: [] } } : await this.startTurnWatched(engine, {
@@ -6806,6 +6808,8 @@ export class CodexChatRuntime {
    * result: the turn ends locally) | { diag, context, preRun } (a result the engine must explain or fix: it runs with the result as context, needing no tool call).
    * diag: closed words and numbers only: { path: 'fast' | 'engine', reason, option, confidence, margin, ms }.
    */
+  decisionFirstApprovalsOn() { try { return this.decisionFirstOn() && this.ownTools?.decisionFirstApprovals?.() === 'on' } catch { return false } }
+
   async decisionFirstTry({ cid, body, context, ownFolder }) {
     if (!this.decisionFirstOn()) return null
     const started = performance.now(), setup = this.decisionContext
@@ -6814,27 +6818,52 @@ export class CodexChatRuntime {
       if (typeof body?.message !== 'string' || !body.message.trim() || context.board || context.peerDispatch || body.boardId != null) return null
       if (!setup?.client || setup.mode?.() !== 'on' || setup.configured?.() !== true) return { diag: diag('engine', 'decisions_off') }
       if (this.decisionEgressFor({ toolCeiling: context.toolCeiling ?? null }).allows('run_text') !== true) return { diag: diag('engine', 'egress_closed') }
+      // c32: a pending approval (the ledger waits on the reply to the engine's own question): the reply is settled here, before anything else
+      if (this.decisionFirstApprovalsOn() && this.gateHookBroker()?.awaitingReply(cid)) return await this.decisionFirstReply({ cid, body, context, diag })
       const options = buildCommandOptions(ownFolder)
       const pick = await decidePick({ client: setup.client, message: body.message, options })
       if (pick.status !== 'picked') return { diag: diag('engine', pick.reason, { confidence: pick.confidence ?? null, margin: pick.margin ?? null }) }
       const option = pick.option, floor = classifyCommand(option.command, { cwd: ownFolder, home: process.env.HOME })
       const picked = { option: option.kind, confidence: pick.confidence, margin: pick.margin }
       if (floor.destructive || floor.floor.length) return { diag: diag('engine', 'approval_floor', picked) }
-      const provider = this.toolProviders.find(p => p.providerId === 'egdesk-command')
-      if (!provider) return { diag: diag('engine', 'no_executor', picked) }
-      const turnId = `egdesk-local-${randomUUID()}`
-      const preRun = { conversationId: cid, runId: turnId, answerId: runKey(cid, turnId), clientThreadId: context.clientThreadId, ownTools: true, ownFolder, activities: [], status: 'inProgress', stopRequested: false }
-      const callId = `df-${turnId}`
-      const response = await provider.dispatch(preRun, { callId, tool: 'egdesk_run_command', arguments: { command: option.command } })
-      let r = null
-      try { r = JSON.parse(response?.contentItems?.[0]?.text ?? '') } catch { r = null }
-      if (!r || typeof r.status !== 'string') return { diag: diag('engine', 'result_unreadable', picked) }
-      const healthy = r.status === 'ran' && r.exitCode === 0 && r.timedOut !== true && r.health === 'healthy' && r.worktree?.state !== 'conflict'
-      const entry = { command: option.command, status: r.status, exitCode: Number.isSafeInteger(r.exitCode) ? r.exitCode : null, durationMs: Number.isFinite(r.durationMs) ? r.durationMs : null, health: r.health ?? null,
-        tests: r.tests ?? null, worktree: r.worktree ?? null, tail: [r.stdout, r.stderr].filter(t => typeof t === 'string' && t).join('\n'), callId, cwd: ownFolder }
-      if (healthy) return { diag: diag('fast', 'healthy', picked), finished: true, turnId, preRun, entry }
-      return { diag: diag('engine', r.status === 'needs_person' ? 'needs_person' : 'result_for_engine', picked), context: commandResultBlock(entry), preRun }
+      const out = await this.decisionFirstRun({ cid, command: option.command, context, ownFolder, picked, diag })
+      return out
     } catch { return { diag: diag('engine', 'error') } }
+  }
+
+  /** c32: run a decided command through the executor (its own gate still decides); a healthy result ends the turn locally, anything else goes to the engine with the result as context. */
+  async decisionFirstRun({ cid, command, context, ownFolder, picked, diag }) {
+    const provider = this.toolProviders.find(p => p.providerId === 'egdesk-command')
+    if (!provider) return { diag: diag('engine', 'no_executor', picked) }
+    const turnId = `egdesk-local-${randomUUID()}`
+    const preRun = { conversationId: cid, runId: turnId, answerId: runKey(cid, turnId), clientThreadId: context.clientThreadId, ownTools: true, ownFolder, activities: [], status: 'inProgress', stopRequested: false }
+    const callId = `df-${turnId}`
+    const response = await provider.dispatch(preRun, { callId, tool: 'egdesk_run_command', arguments: { command } })
+    let r = null
+    try { r = JSON.parse(response?.contentItems?.[0]?.text ?? '') } catch { r = null }
+    if (!r || typeof r.status !== 'string') return { diag: diag('engine', 'result_unreadable', picked) }
+    const healthy = r.status === 'ran' && r.exitCode === 0 && r.timedOut !== true && r.health === 'healthy' && r.worktree?.state !== 'conflict'
+    const entry = { command, status: r.status, exitCode: Number.isSafeInteger(r.exitCode) ? r.exitCode : null, durationMs: Number.isFinite(r.durationMs) ? r.durationMs : null, health: r.health ?? null,
+      tests: r.tests ?? null, worktree: r.worktree ?? null, tail: [r.stdout, r.stderr].filter(t => typeof t === 'string' && t).join('\n'), callId, cwd: ownFolder }
+    if (healthy) return { diag: diag('fast', 'healthy', picked), finished: true, turnId, preRun, entry }
+    return { diag: diag('engine', r.status === 'needs_person' ? 'needs_person' : 'result_for_engine', picked), context: commandResultBlock(entry), preRun, entry }
+  }
+
+  /**
+   * c32: the person's reply to the question the engine asked about one command. The Decision reads it against that one command (the existing approval judgement); code acts at once: an approved
+   * command is run once now, a declined one is cancelled. The engine continues once, as an ordinary turn, with what became of the command as context (it words the answer; no tool call is needed).
+   * No sentence is posted by code. A reply that neither approves nor declines is the engine's message as today (the question is closed: one hop).
+   */
+  async decisionFirstReply({ cid, body, context, diag }) {
+    const broker = this.gateHookBroker(), setup = this.decisionContext, ask = broker.pendingAsk(cid)
+    if (!ask) return { diag: diag('engine', 'approval_expired') }
+    const egress = this.decisionEgressFor({ toolCeiling: context.toolCeiling ?? null })
+    const read = await broker.readReply({ conversationId: cid, reply: body.message, client: setup.client, egress, timeoutMs: APPROVALS_FAST_LIMITS.timeoutMs })
+    if (read.declined) return { diag: diag('engine', 'approval_declined', { option: 'declined' }), context: approvalOutcomeBlock({ outcome: 'declined', command: ask.command }) }
+    if (!read.approved) return { diag: diag('engine', read.read ? 'approval_unclear' : 'approval_unread') }
+    const out = await this.decisionFirstRun({ cid, command: ask.command, context, ownFolder: ask.cwd, picked: { option: 'approved', confidence: null, margin: null }, diag })
+    if (!out?.entry) return out
+    return { diag: diag('engine', 'approval_ran', { option: 'approved' }), context: approvalOutcomeBlock({ outcome: 'ran', command: ask.command, exitCode: out.entry.exitCode, durationMs: out.entry.durationMs, tail: out.entry.tail }), preRun: out.preRun }
   }
 
   /** c32: the local turn's items as the engine's own command items would arrive (the existing terminal card), then the turn's end. No assistant text: no new words. */
