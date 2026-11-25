@@ -26,7 +26,6 @@
   const FileCardState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskFileCardState.sys.mjs');
   const BrowserAgentReceipts = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserAgentRuntimeParent.sys.mjs');
   const BrowserGrant = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBrowserGrant.sys.mjs');
-  const ClaudeBrowserSend = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskClaudeBrowserSend.sys.mjs'); // u4 (U19): Browser Cards on a Claude send, behind the bridge capability 'claude-browser'
   const PortableState = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskPortableState.sys.mjs');
   const ReviewHandoff = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskReviewHandoff.sys.mjs');
   const BoardAgentAsk = ChromeUtils.importESModule('chrome://userchrome/content/EGDeskBoardAgentAsk.sys.mjs');
@@ -19458,8 +19457,8 @@
           } catch { return reportBoardBlock(); }
         }
         // u4: with the bridge capability 'claude-browser' a Claude send may carry Browser Cards live (claudeBrowserSendPlan); otherwise this is the refusal it always was
-        const claudeBrowserCapable = ClaudeBrowserSend.claudeBrowserCapable(state.codex.chatCapabilities);
-        const claudeBrowserGate = ClaudeBrowserSend.claudeBrowserSendPlan({ engineId, capable: claudeBrowserCapable, selectedInputs: activeThread?.inputSources, threadInputs: activeThread?.inputSources,
+        const claudeBrowserCapable = ChatState.claudeBrowserCapable(state.codex.chatCapabilities);
+        const claudeBrowserGate = ChatState.claudeBrowserSendPlan({ engineId, capable: claudeBrowserCapable, selectedInputs: activeThread?.inputSources, threadInputs: activeThread?.inputSources,
           contextPicked: state.contextSuggest?.byThread?.[activeThread?.id]?.picked?.length || 0, briefingInputs: activeThread?.briefingInputs?.length || 0 });
         if (activeThread && engineId === 'claude' && claudeBrowserGate.refuse) {
           updateThreadById(activeThread.id, thread => ({ ...thread, sendError: ChatState.claudeContextSendErrorText('CLAUDE_CONTEXT_UNSUPPORTED') }));
@@ -19570,7 +19569,7 @@
         };
         const selectedInputs = submittedDraft.inputSources;
         // u4: the same plan on what this send actually carries (the draft snapshot); a plan that would now refuse falls back to today's behaviour, which then stops at the interaction check below
-        const claudeBrowserPlan = ClaudeBrowserSend.claudeBrowserSendPlan({ engineId, capable: claudeBrowserCapable, selectedInputs, threadInputs: selectedInputs, contextPicked: 0, briefingInputs: submittedDraft.briefingInputs.length });
+        const claudeBrowserPlan = ChatState.claudeBrowserSendPlan({ engineId, capable: claudeBrowserCapable, selectedInputs, threadInputs: selectedInputs, contextPicked: 0, briefingInputs: submittedDraft.briefingInputs.length });
         let submittedWasCleared = false;
         let inputReferences;
         // Preserve the specific foreign-engine/room refusal before the more

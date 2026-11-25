@@ -1,3 +1,5 @@
+// u4 (U19): the send plan for Browser Cards on a Claude conversation lives in its own lane module; re-exported here because the surface reaches the chat modules through ChatState
+export { claudeBrowserCapable, claudeBrowserSendPlan } from './EGDeskClaudeBrowserSend.sys.mjs'
 // Pure reducer for the additive Codex chat protocol v2.
 const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
 // Provider commentary is a public work note, not a statement to the people in a chat.

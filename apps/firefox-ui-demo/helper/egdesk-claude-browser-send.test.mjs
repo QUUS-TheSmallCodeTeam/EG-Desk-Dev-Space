@@ -5,7 +5,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CLAUDE_BROWSER_CAPABILITY, claudeBrowserCapable, claudeBrowserSendPlan } from '../overlay/resources/EGDeskClaudeBrowserSend.sys.mjs'
-import { claudeContextSendErrorText } from '../overlay/resources/EGDeskChatState.sys.mjs'
+import * as ChatState from '../overlay/resources/EGDeskChatState.sys.mjs'
+const { claudeContextSendErrorText } = ChatState
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const surface = fs.readFileSync(path.join(here, '..', 'overlay', 'JS', 'eg-desk-surface.uc.js'), 'utf8')
@@ -51,8 +52,9 @@ test('another engine is untouched: the plan hands the inputs back and refuses no
 })
 
 test('the screen uses the plan at the three places the old Claude special cases were, with the same sentence; the capability comes from the bridge only with the Claude harness AND the page tools', () => {
-  assert.ok(surface.includes("ChromeUtils.importESModule('chrome://userchrome/content/EGDeskClaudeBrowserSend.sys.mjs')"))
-  assert.ok(surface.includes('const claudeBrowserCapable = ClaudeBrowserSend.claudeBrowserCapable(state.codex.chatCapabilities);'))
+  assert.ok(surface.includes('const claudeBrowserCapable = ChatState.claudeBrowserCapable(state.codex.chatCapabilities);'), 'reached through ChatState: every send harness already has it in scope')
+  assert.ok(!surface.includes('ClaudeBrowserSend'), 'no new global in the send function')
+  assert.equal(ChatState.claudeBrowserSendPlan, claudeBrowserSendPlan); assert.equal(ChatState.claudeBrowserCapable, claudeBrowserCapable)
   assert.ok(surface.includes("if (activeThread && engineId === 'claude' && claudeBrowserGate.refuse) {\n          updateThreadById(activeThread.id, thread => ({ ...thread, sendError: ChatState.claudeContextSendErrorText('CLAUDE_CONTEXT_UNSUPPORTED') }));"))
   assert.ok(surface.includes('captureThreadInputs(activeThread, claudeBrowserPlan.captureInputs, token, prepareOwnerCurrent)'))
   assert.ok(surface.includes("engineId === 'claude' && !claudeBrowserPlan.live ? [] : browserToolSelectedSources(activeThread.id, selectedInputs)"))
