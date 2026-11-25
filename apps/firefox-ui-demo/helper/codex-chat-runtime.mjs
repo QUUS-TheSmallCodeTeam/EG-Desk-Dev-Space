@@ -6727,6 +6727,18 @@ export class CodexChatRuntime {
   // ---- Held answers, on mode (flag decisionContext.draftCheck.mode() === 'on', default off) ----
   // The final answer is held (no stream, no partial) while the working bubble shows; at the end of the turn it is checked once, revised
   // once on a private fork if needed, and posted as one completed message. Any failure, a timeout or a settings change posts the original.
+  /** u4: the Claude texts held so far are narration before a tool call: post them as they are (never checked) and keep holding for the answer that follows the tools. */
+  async releaseHeldNarration(run) {
+    try {
+      const guard = this.topicAnswerGuards.get(run)
+      if (!guard || guard.kind !== 'draft' || guard.state !== 'holding' || !guard.items.size || this.runEngine(run) !== 'claude') return
+      const items = [...guard.items.values()]
+      guard.items.clear(); guard.finalIds.clear(); guard.size = 0
+      clearTimeout(guard.timer); guard.timer = null
+      for (const item of items) await this.applyItem(run, { ...item, phase: null }, true, true, true)
+    } catch { /* the narration is posted at the end instead */ }
+  }
+
   async releaseDraftOriginal(run, guard) {
     if (!guard || guard.state !== 'holding') return
     clearTimeout(guard.timer)
@@ -6745,18 +6757,20 @@ export class CodexChatRuntime {
     const items = [...guard.items.values()]
     const setup = this.decisionContext
     const texts = items.map(item => item.text), originalTexts = [...texts]
+    // u4: one held message is the answer; a Claude run that held several (text after text, no tool between) is judged on the LAST one, the answer, the earlier ones are posted as written
+    const at = items.length === 1 ? 0 : this.runEngine(run) === 'claude' && items.length > 1 ? items.length - 1 : -1
     try {
-      if (status === 'completed' && items.length === 1 && items[0].text.trim()) {
+      if (status === 'completed' && at >= 0 && items[at].text.trim()) {
         const generation = typeof setup?.settingsGeneration === 'function' ? setup.settingsGeneration() : null
-        const checked = await this.checkHeldDraft(run, items[0].text)
+        const checked = await this.checkHeldDraft(run, items[at].text)
         // The owner may have changed the mode or key meanwhile: then the check's result is not acted on.
         const current = this.draftCheckMode() === 'on' && ['advisory', 'on'].includes(setup?.mode?.()) && setup?.configured?.() === true &&
           (generation === null || typeof setup.settingsGeneration !== 'function' || setup.settingsGeneration() === generation)
-        if (typeof checked === 'string' && current && checked !== items[0].text) texts[0] = checked
+        if (typeof checked === 'string' && current && checked !== items[at].text) texts[at] = checked
         // What the person will see is not what the Agent wrote: its next turn in this conversation is told (POSTED_ANSWER_KEY).
         const outcome = this.draftOutcomes.get(run)
-        if (texts[0] !== items[0].text && POSTED_OUTCOMES.includes(outcome)) this.notePostedInstead(run.clientThreadId, { outcome, posted: texts[0] })
-        else if (texts[0] === items[0].text) this.postedInstead.delete(run.clientThreadId)
+        if (texts[at] !== items[at].text && POSTED_OUTCOMES.includes(outcome)) this.notePostedInstead(run.clientThreadId, { outcome, posted: texts[at] })
+        else if (texts[at] === items[at].text) this.postedInstead.delete(run.clientThreadId)
       }
     } catch { /* the original is posted */ }
     const flow = this.flowRuns.get(run)
@@ -6764,12 +6778,11 @@ export class CodexChatRuntime {
     guard.state = 'released'
     guard.items.clear()
     // withheld (c19): an answer the check emptied is not posted at all (no fixed sentence stands in for it).
-    const withheld = items.length === 1 && !String(texts[0]).trim() && String(items[0].text).trim() !== ''
+    const withheld = at >= 0 && !String(texts[at]).trim() && String(items[at].text).trim() !== ''
     items.forEach((item, i) => { item.text = texts[i] })
     // What the person is shown for this checked answer, as a word in the calibration record (the log keeps no text): written by the Agent, revised, only the certain part, or nothing.
-    if (items.length === 1) this.labelPosted(run, withheld ? 'withheld' : texts[0] === originalTexts[0] ? 'as_written' : this.draftOutcomes.get(run) === 'certain_part' ? 'certain_part' : 'revised')
-    if (withheld) return
-    for (const item of items) await this.applyItem(run, item, true, true, true)
+    if (at >= 0) this.labelPosted(run, withheld ? 'withheld' : texts[at] === originalTexts[at] ? 'as_written' : this.draftOutcomes.get(run) === 'certain_part' ? 'certain_part' : 'revised')
+    for (let i = 0; i < items.length; i++) { if (withheld && i === at) continue; await this.applyItem(run, items[i], true, true, true) } // the withheld answer is not posted; the narration before it still is
   }
 
   // The calibration entry of this run's draft check gets the word for what was posted. Never throws, never changes what is posted; no entry (no check ran) is no label.
@@ -7504,8 +7517,7 @@ export class CodexChatRuntime {
     try {
       if (this.draftCheckMode() === 'off') return
       const dc = this.decisionContext?.draftCheck
-      const eligible = !bounded && (typeof dc?.eligible === 'function' ? dc.eligible({ body, context }) === true
-        : context.channelKind === 'direct' && !context.stateless && !context.board && body.boardId == null)
+      const eligible = !bounded && this.draftCheckEligibleFor(body, context)
       let skip = eligible ? null : 'ineligible', evidence = [], late = null
       if (!skip && decision?.result?.privateTopicBatch) skip = 'guarded'
       if (!skip && decision?.mode === 'on' && decision.result?.status === 'ready') {
@@ -8678,9 +8690,21 @@ export class CodexChatRuntime {
       if (this.draftCheckMode() !== 'on') return false
       const setup = this.decisionContext, dc = setup?.draftCheck
       if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return false
-      if (typeof dc?.eligible === 'function') return dc.eligible({ body, context }) === true
-      return context.channelKind === 'direct' && !context.stateless && !context.board && body.boardId == null && !context.topicAnswerGuard
+      return this.draftCheckEligibleFor(body, context) && !context.topicAnswerGuard
     } catch { return false }
+  }
+
+  /**
+   * Which sends the draft check applies to. A configured `eligible` decides alone. Otherwise: a direct send (an Agent room's reply) as before, and (u4, U19) a Claude conversation that runs under EG-Desk's own
+   * harness (EGDESK_CLAUDE_HARNESS with own tools on): there the harness runs the turn, so the turn's judgments run too, in a plain thread as well. Never a Board send, a stateless one, an unverified binding,
+   * or a Claude thread outside the harness. No flag of its own: it needs the draft check on (EGDESK_DRAFT_CHECK) and the harness on, both default off.
+   */
+  draftCheckEligibleFor(body, context) {
+    const dc = this.decisionContext?.draftCheck
+    if (typeof dc?.eligible === 'function') return dc.eligible({ body, context }) === true
+    if (context.stateless || context.board || body?.boardId != null) return false
+    if (context.channelKind === 'direct') return true
+    return context.channelKind == null && context.engine?.id === 'claude' && this.claudeHarness() !== null
   }
 
   startTopicAnswerGuard(run, kind = 'topic') {
@@ -8825,6 +8849,9 @@ export class CodexChatRuntime {
       if (typeof text !== 'string') return
       item = { ...item, text, truncated: false }
     }
+    // u4 (Claude, stream-json): a text a tool call follows is narration, not the answer. A Claude answer held for the draft check releases what it holds when the turn goes on to a tool, so
+    // the narration appears as it is written and only the last message (the answer) is held for the check.
+    if (announce && item.type !== 'agentMessage' && item.type !== 'userMessage' && item.type !== 'reasoning') await this.releaseHeldNarration(run)
     if (item.type === 'agentMessage' && run.ownTools && typeof item.text === 'string') item = { ...item, text: this.mapOwnPaths(run, item.text) }
     let staged = ''
     if (item.type === 'agentMessage') {

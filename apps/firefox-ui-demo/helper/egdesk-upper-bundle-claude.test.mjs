@@ -55,7 +55,7 @@ test('Claude engine without the check: memory -> action -> engine, and with the 
   assert.ok(off.chat.turnStagesFor(id2).some(s => s.stage === 'engine'))
 })
 
-test('FINDING (documented, not changed): with the bridge\'s draft check configuration (no `eligible`) a plain Claude chat thread is NOT held and checked: only Agent-room direct sends are; the order is then memory -> action -> engine', async t => {
+test('a Claude chat thread OUTSIDE the harness (no EGDESK_CLAUDE_HARNESS) with the bridge\'s draft check configuration (no `eligible`) is not held and checked: only Agent-room direct sends are (u4: under the harness a plain thread is too, see egdesk-claude-turn-checks.test.mjs); the order is then memory -> action -> engine', async t => {
   const w = claudeWorld(t, { draftCheck: 'on', eligible: false }), requestId = await claudeTurn(w)
   assert.deepEqual(w.chat.turnStagesFor(requestId).map(s => s.stage), ['memory', 'action', 'engine'])
   assert.deepEqual(w.fetched, [], 'no check ran, so no Decision request left')
