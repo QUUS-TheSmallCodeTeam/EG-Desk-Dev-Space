@@ -495,12 +495,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       ...(warmup ? { warmup } : {}),
       ...(FLAG.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}),
       calibrationLog, turnMemory: turnMemoryConfig,
-      // c27 (L3): the product's own rule for which turns are checked is a direct DM (channelKind 'direct') that is not a Board turn and not a one-time (stateless) conversation. Every
-      // conversation of this check is one-time by construction (ephemeral engine threads) and has no channel kind (it is not a DM through a profile), so under the product's rule NO turn here was ever held: no draft check on an answer, and the heartbeat could not speak
-      // on its own (canSpeak false at every beat; only a person's in-run message, which does not need the hold, got a reply). A script that opts in to the draft check (the flag, or
-      // conversation.draftCheck) wants those paths measured, so its turns are eligible when they are not Board turns.
-      ...(['advisory', 'on'].includes(FLAG.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => FLAG.EGDESK_DRAFT_CHECK, design: () => (FLAG.EGDESK_DRAFT_CHECK_DESIGN === 'choice' ? 'choice' : 'predicates'),
-        eligible: ({ body, context }) => !context?.board && body?.boardId == null } } : {}),
+      ...(['advisory', 'on'].includes(FLAG.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => FLAG.EGDESK_DRAFT_CHECK, design: () => (FLAG.EGDESK_DRAFT_CHECK_DESIGN === 'choice' ? 'choice' : 'predicates') } } : {}),
       ...(FLAG.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...turnHooks.flowOptions({ FLAG, conversation }) } } : {}), // a registered feature may add keys to the flow, as the bridge does (the collaboration hook: presence, audience, attentionPosted)
       ...(FLAG.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
       ...(wiring && !wiring.shadow ? { terminalGate: wiring.terminalGate(terminalGateConfig) } : terminalGateConfig ? { terminalGate: terminalGateConfig } : {}),

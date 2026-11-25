@@ -71,7 +71,7 @@ test('the committed scripts validate, name the flags that need the decision comp
   const note = load('real-engine-unsolicited-note-v1'), words = load('real-engine-approval-words-v1')
   for (const s of [note, words]) assert.equal(validateEngineScript(s).ok, true, s.set)
   const c = note.conversations[0], turn = c.turns[0]
-  assert.deepEqual([c.flags.EGDESK_CONVERSATION_FLOW, c.flags.EGDESK_DRAFT_CHECK], ['on', 'on'])
+  assert.deepEqual([c.flags.EGDESK_CONVERSATION_FLOW, c.draftCheck.mode], ['on', 'on']); assert.ok(c.agentProfile.name, 'an Agent room: only a direct DM of an Agent is held and may be spoken in (an ordinary one-time room never reaches the check or the heartbeat\'s own notes)')
   assert.match(turn.say, /sleep 45/); assert.equal(c.turns.length, 1, 'no message from the person: the note is unsolicited')
   assert.deepEqual(turn.expect.flow, { notes: { equals: 1 }, firstNoteMs: { min: 10000, max: 40000 }, statedSecondsTrue: true, noResult: ['done-42'] })
   assert.deepEqual(turn.expect.engine, { flowMessages: { equals: 1 } }); assert.ok(turn.expect.postedMin >= 2, 'the note and the final answer'); assert.deepEqual(turn.expect.answerIncludes, ['done-42'])
@@ -89,7 +89,7 @@ test('real-engine-unsolicited-note-v1 on the fake: one note is written, checked 
   const script = load('real-engine-unsolicited-note-v1')
   const fake = commandFake({ command: 'sleep 45 && echo done-$((20+22))', final: '다 끝났어요. 출력은 done-42 입니다.' })
   fake.forkTurns = Array.from({ length: 4 }, () => ({ steps: [], final: '명령이 아직 실행 중이에요. 끝나는 대로 알려 드릴게요.' }))
-  const w = journeyWorld(t, fake, { commandMs: () => 24_000 })
+  const w = journeyWorld(t, fake, { commandMs: () => 24_000, persisted: true })
   w.options.turnTimeoutMs = 60_000
   // the journey's mock judge reads "a command is running" from a native command item; EG-Desk's own command runner is a dynamic tool (run facts: "running the tool egdesk_run_command"):
   // a sound judge says yes to the progress-note question for it (the real judge decides this on the real run)
