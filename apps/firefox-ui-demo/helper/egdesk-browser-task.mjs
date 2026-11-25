@@ -2,6 +2,7 @@ import { localDay } from './egdesk-browser-reflex.mjs'
 import { randomBytes } from 'node:crypto'
 import { DecisionError, FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 import { hostOf, hrefIdentifiers, identifiersOf, labelKey, outcomeCandidate, priorFromMemory, safePath } from './egdesk-browser-task-memory.mjs'
+import { decideOpenItem, settledNote } from './egdesk-browser-open-items.mjs'
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, tableOptions } from './egdesk-decision-questions.mjs'
 
 // Direct chat -> objective browser entry (L8 cycle 6; JEV_INTEGRATION_SUGGESTIONS.md §2 Pillar 1, §4.3, §9.3).
@@ -330,6 +331,20 @@ export function createBrowserTaskStore({ now = Date.now, ttlMs = BROWSER_TASK_TT
       return pick
     },
     touch(task) { task.updatedAt = now() },
+    // c37 (open items): the conversation's newest live task (running or paused inside the TTL), or null. Read-only.
+    active(conversationKey) {
+      let pick = null
+      for (const task of tasks.values()) if (task.conversationKey === conversationKey && live(task) && (!pick || task.updatedAt >= pick.updatedAt)) pick = task
+      return pick
+    },
+    // c37: "try again": the task goes on from the page as it is now, with its goal and what the person said, but its step memory and step budget start over.
+    // Settled choices (resolved) stay: they are still the person's choices. Only a paused task with a card can retry.
+    retry(task) {
+      if (!task || task.status !== 'paused' || !task.cardId) return false
+      task.state = null; task.steps = 0; task.actions = { fill: 0, navigate: 0, scroll: 0 }; task.liveStep = 0; task.trail = []
+      task.pendingAsk = null; task.confirm = null; task.asked = false; task.question = null; task.pause = null; task.status = 'running'; task.updatedAt = now()
+      return true
+    },
     // The conversation was deleted (chat forgetConversation): its tasks go, running or paused. -> how many.
     forget(conversationKey) { let n = 0; for (const [id, task] of [...tasks]) if (task.conversationKey === conversationKey) { tasks.delete(id); n++ } return n },
     // The host tells the task when its question (or its "cannot proceed") has reached the person as a posted message.
@@ -491,7 +506,7 @@ export function subjectiveNote(task, { status, code, candidates = [], detail, re
 // pageTextInNote(): whether this run's models may receive Browser data (the run's egress gate, page_text); off by default.
 // cardTextInEntry(): whether the entry may quote what each card shows (the run's egress gate, page_text); off by default.
 // inRunChange(): whether a message that replaces the task is recognised (the in-run messages flag); off by default.
-export function createDirectBrowserEntry({ provider, store, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false, cardTextInEntry = () => false, inRunChange = () => false } = {}) {
+export function createDirectBrowserEntry({ provider, store, openItems = () => false, outcomeSink = null, now = Date.now, calibration = null, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, pageTextInNote = () => false, cardTextInEntry = () => false, inRunChange = () => false } = {}) {
   if (!provider || typeof provider.runDirectTask !== 'function' || typeof provider.reflexScope !== 'function') throw new TypeError('provider must offer runDirectTask')
   const note = (key, raw) => { try { calibration?.record?.(raw) } catch { /* recording never changes behaviour */ } return key }
   const record1 = (answers, count, would, fallback) => {
@@ -641,10 +656,70 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
       note: subjectiveNote(task, { status: 'need_context', code: 'card_choice_needed', candidates: entryOptions(cards).map(option => option.value) }) }
   }
 
+  // The shared continuation of a paused task (the answer, a retry, a changed request): the card is settled first when the person was asked which, then the loop goes on.
+  async function continueOn(paused, { run, conversationKey, message, cards, hosts, gateScope, how }) {
+      if (!paused.cardId) { // the person was asked which card: the entry is decided again with their answer, then the task starts there
+        const picked = await decideBrowserEntry({ message: paused.goal, replyTo: message, cards: await withShownLines(run, paused.goal, cards, message), client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
+        if (!gateScope.isDecisionCurrent()) return { handled: false, reason: 'evidence_unavailable' }
+        if (picked.kind !== 'browser') {
+          if (picked.kind === 'ask_user' && cards.length > 1 && paused.entryAsks < MAX_ENTRY_ASKS) return askWhichCard(paused, cards, { resumed: true })
+          paused.status = 'cancelled'
+          return { handled: false, reason: picked.kind }
+        }
+        startOnCard(paused, picked.cardId, cards)
+      }
+      // c17: a bare "응" says nothing without what was asked; code names what the person confirmed (R1)
+      const confirm = paused.confirm
+      void (how === 'retry' ? store.retry(paused) /* c37: try again from this page */ : how === 'change' ? store.changeGoal(conversationKey, message) /* c23: the message replaces the request: it is the goal now, not an answer */ : paused.userContext.push(confirm ? `Asked to confirm "${confirm.candidate}"${confirm.recorded ? ` as the earlier choice "${confirm.recorded}"` : ''}, the user answered: ${compactText(message, MAX_MESSAGE)}` : compactText(message, MAX_MESSAGE)))
+      paused.confirm = null; paused.status = 'running'; paused.pause = null; paused.asked = false
+      const out = await finalize(await loop(run, paused, hosts), paused)
+      return { ...out, resumed: true }
+  }
+
+  // c37 (open items): the person's message settles one option of the conversation's open browser task. Applied BEFORE the engine turn; the engine gets the
+  // settled state as a closed note. abandon and ask_page need no loop; continue, retry and change go on with it.
+  const observeTaskLines = async (run, task) => {
+    try {
+      if (cardTextInEntry() !== true || !task.cardId) return []
+      const scope = provider.reflexScope?.(run, { callId: 'open-item-observe', namespace: null }, task.cardId)
+      if (typeof scope?.callTool !== 'function') return []
+      const observed = await scope.callTool('egdesk_browser_observe', { cardId: task.cardId })
+      return pageLines(Array.isArray(observed?.snapshot?.text) ? observed.snapshot.text : [])
+    } catch { return [] }
+  }
+  async function settleWith(task, optionId, ctx) {
+    if (optionId === 'abandon') {
+      task.status = 'cancelled'; try { task.abort?.abort() } catch { /* the segment may be over */ }
+      store.touch(task)
+      return { handled: true, status: 'cancelled', taskId: task.taskId, settled: optionId, note: settledNote(task, optionId) }
+    }
+    if (optionId === 'ask_page') {
+      const lines = await observeTaskLines(ctx.run, task)
+      return { handled: true, status: task.status === 'paused' ? 'paused' : 'running', taskId: task.taskId, settled: optionId, note: settledNote(task, optionId, { lines }) }
+    }
+    if (task.status !== 'paused') return { handled: false, reason: 'not_paused' }
+    if (optionId === 'retry' && !task.cardId) return { handled: false, reason: 'cannot_retry' }
+    if (!['continue', 'retry', 'change'].includes(optionId)) return { handled: false, reason: 'unknown_option' }
+    const out = await continueOn(task, { ...ctx, how: optionId === 'continue' ? 'answer' : optionId })
+    return out?.handled === true ? { ...out, settled: optionId } : out
+  }
+  const cardsOf = (run, hosts, titles) => (run?.browserBinding?.cards || []).filter(card => card.permission === 'interact').map(card => ({ cardId: card.cardId, host: hosts[card.cardId] || '',
+    title: typeof titles[card.cardId] === 'string' ? compactText(titles[card.cardId], 120) : '' }))
   return {
+    // c37: the registry's apply() (lane L1): the option the Decision settled, applied to the conversation's open task. Same gates as handle().
+    async settle({ run, conversationKey, optionId, message, hosts = {}, titles = {} }) {
+      const task = store.active(conversationKey), cards = cardsOf(run, hosts, titles)
+      if (!task) return { handled: false, reason: 'no_task' }
+      if (optionId === 'abandon') return settleWith(task, optionId, { run, conversationKey, message, cards, hosts })
+      if (!cards.length) return { handled: false, reason: 'no_card' }
+      if (typeof provider.directEntryEnabled !== 'function' || !provider.directEntryEnabled()) return { handled: false, reason: 'mode_off' }
+      const gateScope = provider.reflexScope(run, { callId: 'direct-entry', namespace: null }, cards[0].cardId)
+      if (!gateScope.client) return { handled: false, reason: 'mode_off' }
+      try { return await settleWith(task, optionId, { run, conversationKey, message, cards, hosts, gateScope }) } catch (error) { return { handled: false, reason: error instanceof DecisionError ? `fallback:${error.code}` : 'error' } }
+    },
     // entryAnswers: normalized answers of a request the host already sent at turn start with entryQuestion(cards) appended
     // (one request instead of two). When it holds a usable browser_entry answer no separate entry request is made.
-    async handle({ run, conversationKey, message, hosts = {}, titles = {}, memory = null, entryAnswers = null }) {
+    async handle({ run, conversationKey, message, hosts = {}, titles = {}, memory = null, entryAnswers = null, openItemRead = null }) {
       if (typeof message !== 'string' || !message.trim()) return { handled: false, reason: 'empty' }
       const cards = (run?.browserBinding?.cards || []).filter(card => card.permission === 'interact').map(card => ({ cardId: card.cardId, host: hosts[card.cardId] || '',
         title: typeof titles[card.cardId] === 'string' ? compactText(titles[card.cardId], 120) : '' }))
@@ -654,27 +729,24 @@ export function createDirectBrowserEntry({ provider, store, outcomeSink = null, 
       if (!gateScope.client) return { handled: false, reason: 'mode_off' }
       const paused = store.paused(conversationKey)
       try {
+        // c37 (flag EGDESK_BROWSER_OPEN_ITEMS, default off; or a read the registry already made): the open task's options are Decision predicates, one request,
+        // and the settled option is applied by code. Not settled (several yes, an unknown, all no) changes nothing: the ordinary turn.
+        if (paused && (openItems() === true || openItemRead)) {
+          const change = inRunChange() === true
+          const read = openItemRead && typeof openItemRead.kind === 'string' ? openItemRead
+            : await decideOpenItem({ message, task: paused, change, client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
+          if (!gateScope.isDecisionCurrent()) return { handled: false, reason: 'evidence_unavailable' }
+          const bar = decisionThresholds(thresholds).done
+          note(null, { feature: 'browser_open_item', mode: 'on', candidates: Object.keys(read.p || {}).length, judgments: Object.entries(read.p || {}).map(([id, p]) => ({ q: `open_browser_${id}`, would: !Number.isFinite(p) ? 'unknown' : p >= bar ? 'act' : p <= 1 - bar ? 'none' : 'hold', p: Number.isFinite(p) ? p : null, threshold: bar })) })
+          if (read.kind !== 'settled') return { handled: false, reason: read.kind === 'none' ? 'unrelated' : 'uncertain' }
+          return await settleWith(paused, read.optionId, { run, conversationKey, message, cards, hosts, gateScope })
+        }
         if (paused) {
           const resume = await decideResume({ message, pause: paused.pause, question: paused.question, detectChange: inRunChange() === true, client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
           if (!gateScope.isDecisionCurrent()) return { handled: false, reason: 'evidence_unavailable' }
           if (resume.kind === 'cancel_task') { paused.status = 'cancelled'; return { handled: false, reason: 'task_cancelled' } }
           if (resume.kind !== 'resume_task') return { handled: false, reason: resume.kind === 'unrelated' ? 'unrelated' : 'uncertain' }
-          if (!paused.cardId) { // the person was asked which card: the entry is decided again with their answer, then the task starts there
-            const picked = await decideBrowserEntry({ message: paused.goal, replyTo: message, cards: await withShownLines(run, paused.goal, cards, message), client: gateScope.client, thresholds, timeoutMs, authorizeDispatch: gateScope.authorizeDispatch })
-            if (!gateScope.isDecisionCurrent()) return { handled: false, reason: 'evidence_unavailable' }
-            if (picked.kind !== 'browser') {
-              if (picked.kind === 'ask_user' && cards.length > 1 && paused.entryAsks < MAX_ENTRY_ASKS) return askWhichCard(paused, cards, { resumed: true })
-              paused.status = 'cancelled'
-              return { handled: false, reason: picked.kind }
-            }
-            startOnCard(paused, picked.cardId, cards)
-          }
-          // c17: a bare "응" says nothing without what was asked; code names what the person confirmed (R1)
-          const confirm = paused.confirm
-          void (resume.change === true ? store.changeGoal(conversationKey, message) /* c23: the message replaces the request: it is the goal now, not an answer */ : paused.userContext.push(confirm ? `Asked to confirm "${confirm.candidate}"${confirm.recorded ? ` as the earlier choice "${confirm.recorded}"` : ''}, the user answered: ${compactText(message, MAX_MESSAGE)}` : compactText(message, MAX_MESSAGE)))
-          paused.confirm = null; paused.status = 'running'; paused.pause = null; paused.asked = false
-          const out = await finalize(await loop(run, paused, hosts), paused)
-          return { ...out, resumed: true }
+          return await continueOn(paused, { run, conversationKey, message, cards, hosts, gateScope, how: resume.change === true ? 'change' : 'answer' })
         }
         // The turn's memory packet (fetched once by the general memory feature for this turn) is evidence for the objective steps, not for the
         // entry. Real measurement (2026-11-25): the same request with the packet in the entry evidence fell from 0.93 to 0.76 against a 0.75 bar.

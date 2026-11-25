@@ -487,7 +487,7 @@ const turnMemoryConfig = createTurnMemoryConfig({ settings: bridgeSettings, onto
 // Direct browser entry: developer flag EGDESK_BROWSER_ENTRY=advisory|on, default off (no settings screen entry). It reuses the turn-memory
 // snapshot builder and the same adapter/write store; nothing opens while it is off.
 const browserEntryConfig = createBrowserEntryConfig({ flag: () => process.env.EGDESK_BROWSER_ENTRY, getAdapter: () => turnMemoryConfig.getAdapter(),
-  wiki: args => turnMemoryConfig.wiki(args) })
+  wiki: args => turnMemoryConfig.wiki(args), openItemsFlag: () => process.env.EGDESK_BROWSER_OPEN_ITEMS })
 // The Desk's presence snapshot as the window posts it (same rows the placement runtime reads there). Memory only; the route is off (404)
 // unless the developer flag EGDESK_PRESENCE=on is set. Default off.
 const presenceMirror = createPresenceMirror()

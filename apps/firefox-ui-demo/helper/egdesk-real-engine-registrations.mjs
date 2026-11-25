@@ -118,7 +118,8 @@ registerExpectKeys({ browserAnswer: { schema: BROWSER_ANSWER_EXPECT_SCHEMA, vali
 registerTurnHooks('browserAnswer', () => createBrowserAnswerHook())
 // L8 c34: the whole browser loop (the product's entry judged by the real Decision model, the steps on fixture pages, the note into the same turn, the real reply)
 import { BROWSER_LOOP_EXPECT_SCHEMA, BROWSER_LOOP_FLAG, BROWSER_LOOP_SCHEMA, createBrowserLoopHook, validateBrowserLoop, validateBrowserLoopExpect } from './egdesk-real-engine-browser-loop-hook.mjs'
-registerFlags({ decisionDependent: [BROWSER_LOOP_FLAG] })
+import { OPEN_ITEMS_FLAG } from './egdesk-browser-open-items.mjs'
+registerFlags({ decisionDependent: [BROWSER_LOOP_FLAG, OPEN_ITEMS_FLAG] }) // c37: OPEN_ITEMS_FLAG = EGDESK_BROWSER_OPEN_ITEMS
 registerTurnFields({ browserLoop: { schema: BROWSER_LOOP_SCHEMA, validate: (value, { conv, turn, path, bad }) => {
   for (const why of validateBrowserLoop(value, conv, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': '))
   if (turn.action !== undefined || turn.whileRunning !== undefined || turn.browserTask !== undefined) bad(path, 'only a plain message turn, and not together with browserTask')

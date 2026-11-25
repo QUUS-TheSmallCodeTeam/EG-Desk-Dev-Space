@@ -5278,6 +5278,9 @@ export class CodexChatRuntime {
     try { const mode = this.decisionContext?.browserEntry?.mode?.(); return mode === 'advisory' || mode === 'on' ? mode : 'off' } catch { return 'off' }
   }
 
+  // c37: the open browser task's options are Decision predicates (decisionContext.browserEntry.openItems(), EGDESK_BROWSER_OPEN_ITEMS=on; default off)
+  browserOpenItemsOn() { try { return this.decisionContext?.browserEntry?.openItems?.() === true } catch { return false } }
+
   browserEntryIdle() { return Promise.allSettled([...this.browserEntryRuns]) }
 
   // The same gate as held answers, without the per-turn eligibility (a browser-task turn is bounded): the held mode is on and Decisions is usable.
@@ -5376,7 +5379,7 @@ export class CodexChatRuntime {
         // c21: the entry quotes the first lines each card shows, under the same gate
         cardTextInEntry: () => { try { return this.decisionEgressFor(run).allows('page_text') === true } catch { return false } },
         // c23: with in-run messages on, a message that replaces the task is recognised (the same flag, EGDESK_INRUN_MESSAGES)
-        inRunChange: () => this.inRunMessagesOn() })
+        inRunChange: () => this.inRunMessagesOn(), openItems: () => this.browserOpenItemsOn() })
       const out = await entry.handle({ run, conversationKey: hold.key, message, hosts: hold.hosts, titles: hold.titles || {} })
       if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
     } catch { note = null; handedOff = false }
@@ -5527,7 +5530,7 @@ export class CodexChatRuntime {
         pageTextInNote: () => { try { return this.decisionEgressFor(preRun).allows('page_text') === true } catch { return false } },
         // c21: the entry quotes the first lines each card shows, under the same gate
         cardTextInEntry: () => { try { return this.decisionEgressFor(preRun).allows('page_text') === true } catch { return false } },
-        inRunChange: () => this.inRunMessagesOn() })
+        inRunChange: () => this.inRunMessagesOn(), openItems: () => this.browserOpenItemsOn() })
       const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), titles: this.browserEntryTitles(body), memory, entryAnswers })
       if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
     } catch { note = null; handedOff = false }

@@ -113,3 +113,28 @@ export function buildBrowserLoopScriptV2() {
     ],
   }
 }
+
+// ---- c37 (owner direction U13, corrected): the open browser task's options settled by the Decision model before the engine turn (helper/egdesk-browser-open-items.mjs) ----
+export const BROWSER_OPEN_ITEMS_SET = 'real-engine-browser-open-items-v1'
+export function buildBrowserOpenItemsScript() {
+  const flags = { EGDESK_BROWSER_LOOP: 'on', EGDESK_BROWSER_OPEN_ITEMS: 'on' }
+  const site = { pages: 'ticket', host: 'ticket.example.test', start: '/my', title: '예매 | 마이티켓' }
+  // turn 1 (every conversation): the c35 sign-in wall. The loop hands over; the real engine words the hand-over; the task now waits for the person (an open item).
+  const first = { say: '내 다음 공연 예매 내역 알려줘', browserLoop: { ...site, openItems: true, keep: true },
+    expect: { turnStatus: 'completed', posted: true, answerExcludes: ['로그인했습니다', '로그인을 완료', '입력했습니다'], browserLoop: { entered: true, navigatedTo: ['/my/bookings'], noFills: true, clickedOnly: [], noteStatus: 'cannot_proceed', noteCode: 'login_required', namesAnyOf: ['로그인'] } } }
+  const next = (say, continues, expect, keep = false) => ({ say, browserLoop: { ...site, openItems: true, continues, ...(keep ? { keep: true } : {}) }, expect: { turnStatus: 'completed', posted: true, ...expect } })
+  const signed = { personStep: 'ticket_signed_in' }, idle = { personStep: 'ticket_signed_in', none: true }
+  const resumed = { entered: true, navigatedTo: ['/my/bookings/9001'], noFills: true, clickedOnly: [], noteStatus: 'done', noteIncludes: ['공연일: 2026-12-20'], mentionsDates: ['2026-12-20'], noInventedDates: true }
+  const conv = (id, second) => ({ id, folder: { 'README.txt': 'scratch' }, flags, turns: [first, second] })
+  return {
+    set: BROWSER_OPEN_ITEMS_SET,
+    description: 'U13 (corrected): the Decision model settles the DEFINED layers first. After a hand-over the browser task is an open item of the conversation with options code can apply (continue after the person\'s step, retry, abandon, ask what is on the page). Each conversation: turn 1 is the c35 sign-in wall (entry judged by the real model, the loop hands over, the real engine words it); turn 2 is the person\'s next message. The product\'s entry decides which option it settles (one request, one yes/no predicate per option), code applies it BEFORE the engine turn, and the engine words the reply on the settled state (closed note). Checks by code: the settled option, what the loop did (continue and retry go on from the next step on the page after the person\'s step; abandon and ask_page do nothing on the page), the note, and the reply; an unrelated message leaves the task and is an ordinary turn. Needs --decisions.',
+    conversations: [
+      conv('oi-continue', next('했어', signed, { browserLoop: { ...resumed, openItemSettled: 'continue' } })),
+      conv('oi-retry', next('다시 해줘', signed, { browserLoop: { ...resumed, openItemSettled: 'retry' } })),
+      conv('oi-abandon', next('아냐 됐어, 그만할래', idle, { answerExcludes: ['계속 진행', '이어서 진행'], browserLoop: { entered: true, noActs: true, openItemSettled: 'abandon', noteSettled: 'abandon', noteStatus: 'cancelled' } })),
+      conv('oi-ask-page', next('지금 화면에 뭐라고 나와?', idle, { browserLoop: { entered: true, noActs: true, openItemSettled: 'ask_page', noteSettled: 'ask_page', noteStatus: 'cannot_proceed', noteCode: 'login_required', noteIncludes: ['로그인이 필요합니다'], namesAnyOf: ['로그인'] } })),
+      conv('oi-unrelated', next('고마워. 그런데 자바스크립트 배열 정렬은 어떻게 해?', idle, { answerIncludes: ['sort'], browserLoop: { openItemNone: true, noActs: true } })),
+    ],
+  }
+}

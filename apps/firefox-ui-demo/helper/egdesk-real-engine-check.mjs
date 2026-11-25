@@ -72,7 +72,7 @@ export const BRIDGE_COMPOSITION = Object.freeze({
   notReproduced: {
     keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration'],
     runtimeKeys: ['localCapacity', 'engines', 'resolveProjectWorkspace', 'resolveRunProjectOrigin', 'expectedProcessConfiguration', 'qaReady', 'getNativeContractFingerprint', 'profiles', 'mcpServerKind', 'computerControlStore', 'onComputerControlChange', 'hostLease'],
-    flags: ['EGDESK_BROWSER_ENTRY', 'EGDESK_BRIEFING_ORDER', 'EGDESK_BRIEFING_FILL_CHECK', 'EGDESK_BRIEFING_COVERAGE', // the briefing flow and its output schema are reproduced by the hook (hookFlags)
+    flags: ['EGDESK_BROWSER_ENTRY', 'EGDESK_BROWSER_OPEN_ITEMS', 'EGDESK_BRIEFING_ORDER', 'EGDESK_BRIEFING_FILL_CHECK', 'EGDESK_BRIEFING_COVERAGE', // the briefing flow and its output schema are reproduced by the hook (hookFlags)
            'EGDESK_HUD_ROUTING', 'EGDESK_TERMINAL_JUDGE', 'EGDESK_CONTEXT_ROOTS', 'EGDESK_FIREFOX_PROFILE', 'EGDESK_CLAUDE_READER', 'EGDESK_CLAUDE_DELETE_SESSION', 'EGDESK_CHAT_CHOICE'],
   },
 })
