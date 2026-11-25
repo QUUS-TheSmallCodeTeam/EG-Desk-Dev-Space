@@ -148,3 +148,15 @@ test('the approval expectations can fail: a command that ran while the question 
   const rec = await runJourneyConversation(w, load('real-engine-approval-words-v1'), 'approval-wait-no')
   assert.ok(failed(rec).some(name => /commandsRan/.test(name)), `a run after "아니 잠깐" is a failure: ${JSON.stringify(failed(rec))}`)
 })
+
+// c31: the two 180 s turns of Main's real runs (check-24un approval-wait-no turn 2, check-22mw hedged turn 3) had items {userMessage: 1} and, in one, 25 output tokens, but no completion:
+// nothing in the record said what the engine had sent or what the product left unanswered. Every sub-turn record now carries engineMessages (method -> count, content-free)
+// and unansweredRequests (server requests the product had not answered when the turn ended).
+test('the sub-turn record names every engine message by method and the server requests left unanswered', async t => {
+  const w = approvalWorld(t, { second: { steps: [], final: '알겠어요, 실행하지 않았어요.' } })
+  const rec = await runJourneyConversation(w, load('real-engine-approval-words-v1'), 'approval-wait-no')
+  const sub = rec.turns[0].subTurns[0]
+  assert.ok(sub.engineMessages['item/completed'] >= 1 && sub.engineMessages['turn/completed'] === 1, JSON.stringify(sub.engineMessages))
+  assert.equal(sub.engineMessages['request:item/tool/call'], 1, 'the tool call is a server request'); assert.deepEqual(sub.unansweredRequests, [], 'and it was answered')
+  assert.ok(rec.turns[1].subTurns[0].engineMessages['turn/completed'] === 1, 'the second turn is counted on its own (reset per turn)')
+})
