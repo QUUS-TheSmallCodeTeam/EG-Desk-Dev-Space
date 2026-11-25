@@ -67,11 +67,15 @@ const MAX_MESSAGE = 500
 const asked = question => (typeof question === 'string' && question.trim() ? `the question ${quoted(compactText(question, 200))}` : 'what was asked')
 const ASKS = {
   continue: (message, task) => `Does this message, ${quoted(compactText(message, 200))}, say that the person has done the step the paused browser task waits for, or give what it asked for (${asked(task?.question)})?`,
-  retry: message => `Does this message, ${quoted(compactText(message, 200))}, ask to try the browser task again?`,
+  // c40 (real, c57, browser-open-item-v1 sent 19:08): the v1 predicates fired on what they were not about: retry 0.88 on "했어", 0.95 on "로그인햇어", 0.93 on a changed request, 0.36 on a page question. Each now names its near misses.
+  retry: message => `Is this message, ${quoted(compactText(message, 200))}, a request to run the browser task again (redo it, or try once more)? A message that only says the person did their own step, or that says or asks anything else, is not.`,
   abandon: message => `Does this message, ${quoted(compactText(message, 200))}, say the person no longer wants the browser task, or ask to stop it?`,
   // c39 (real, check-31bo, oi-unrelated): "고마워. 그런데 자바스크립트 배열 정렬은 어떻게 해?" read ask_page 1.0: any question matched a question about the page. The page is the anchor: a question about anything else is not it.
-  ask_page: message => `Is this message, ${quoted(compactText(message, 200))}, a question about the web page the browser task is on (what it shows, or what the task has found so far)? A question about anything else is not.`,
-  change: (message, task) => `Does this message, ${quoted(compactText(message, 200))}, replace what the task was asked to do (a different target or request) instead of answering ${asked(task?.question)}?`,
+  // v1 measured ask_page 0.99 on "그만해", 1.0 on "됐어 안 할래", 0.97 on "ㅇㅇ"; c39's anchor alone would have exposed the next error (below), so the near misses are named
+  ask_page: message => `Is this message, ${quoted(compactText(message, 200))}, a question about what the web page the browser task is on shows, or what the task found there? A request to go on, stop, redo or change the task, an acknowledgement, and a question about anything else are not.`,
+  // v1 measured change 1.0 on "오늘 날씨 어때?": a different request IS "a different target or request". It was not settled only because ask_page read 0.48; once ask_page is anchored it would have been, and the open
+  // task would have been replaced by a weather question (the unsafe error). Change is a change of what THIS task looks for.
+  change: (message, task) => `Does this message, ${quoted(compactText(message, 200))}, change what the browser task is looking for on its page (a different item, period or detail of the same kind of request) instead of answering ${asked(task?.question)}? An unrelated question or request, an acknowledgement and a request to stop are not.`,
 }
 
 export function openItemQuestions(task, message, options = {}) {
@@ -95,6 +99,8 @@ export function readOpenItem(answers, task, { thresholds, change = false } = {})
   // and the person's own "I did it" went unanswered. Those two are not rivals: retry is continue that also forgets the step memory. When they are the ONLY yes and the rest are decided
   // no, the weaker action is applied (continue: from where it stopped, nothing discarded). Any other pair stays uncertain.
   if (yes.length === 2 && yes.every(row => row.id === 'continue' || row.id === 'retry') && read.every(row => yes.includes(row) || no(row))) return { kind: 'settled', optionId: 'continue', p, overlap: 'continue_retry' }
+  // c40 (c57: "아 그거 말고 지난달 공연으로 알려줘": retry 0.93, change 0.89): a changed request re-asks, so retry reads yes too; change is the more specific of the two (it applies the new request and goes on)
+  if (yes.length === 2 && yes.every(row => row.id === 'retry' || row.id === 'change') && read.every(row => yes.includes(row) || no(row))) return { kind: 'settled', optionId: 'change', p, overlap: 'retry_change' }
   if (!yes.length && read.length && read.every(no)) return { kind: 'none', p }
   return { kind: 'uncertain', p }
 }

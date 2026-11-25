@@ -14,7 +14,7 @@ test('the plan is pre-registered and valid: 12 short realistic replies, each wit
   assert.ok(plan.replies.every(r => r.message.length <= 40), 'short replies')
   assert.deepEqual(plan.replies.filter(r => r.want === 'none').map(r => [r.id, r.acceptable]), [['okok', ['continue']], ['notyet', []], ['offtopic', []]])
   assert.ok(plan.prediction.correct && plan.prediction.wrong && plan.prediction.mostLikelyMisses.length)
-  assert.deepEqual([plan.maxRequests, plan.tokenCeiling], [12, 4000]); assert.ok(OPEN_ITEM_HARD_LIMITS.tokenCeiling <= 13000)
+  assert.deepEqual([plan.maxRequests, plan.tokenCeiling], [12, 4000]); assert.ok(OPEN_ITEM_HARD_LIMITS.tokenCeiling <= 14000)
 })
 
 test('the task is built by the product\'s store as a handed-over task, and the five options (change included) are the ones asked', () => {
@@ -39,17 +39,17 @@ test('verdict by code: correct, acceptable, safe miss and wrong', () => {
   assert.deepEqual(scoreOpenItemRun({ replies: [1, 2] }, [{ id: 'a', verdict: 'correct' }, { id: 'b', verdict: 'wrong' }]), { ran: 2, notRun: 0, correct: 1, acceptable: 0, safeMiss: 0, wrong: 1, wrongReplies: ['b'], pass: false })
 })
 
-test('selectReplies: the budget keeps what fits, dropping in the pre-registered order; 4000 keeps three (again, notyet, ack), 13000 keeps all twelve; the estimate is of the product\'s own requests', async () => {
+test('selectReplies: the budget keeps what fits, dropping in the pre-registered order; 4000 keeps three (again, notyet, ack), 14000 keeps all twelve; the estimate is of the product\'s own requests', async () => {
   const small = await selectReplies(plan, 4000)
   assert.deepEqual([small.kept, small.dropped], [['ack', 'again', 'notyet'], plan.dropOrder.slice(0, 9)])
   assert.ok(small.estInputTokens <= 4000 && small.estInputTokens > 2900, `estimated ${small.estInputTokens}`)
-  const all = await selectReplies(plan, 13000)
-  assert.deepEqual([all.kept.length, all.dropped], [12, []]); assert.ok(Object.values(all.perReply).reduce((a, b) => a + b, 0) > 12000, 'twelve replies are about 12k tokens by the typed estimate, not 4k')
+  const all = await selectReplies(plan, 14000)
+  assert.deepEqual([all.kept.length, all.dropped], [12, []]); assert.ok(Object.values(all.perReply).reduce((a, b) => a + b, 0) > 13000, 'twelve replies are about 13.4k tokens by the typed estimate (the c40 wording), not 4k')
 })
 
 test('a full run with the stand-in: twelve requests, each byte for byte the product\'s decideOpenItem request; the plan\'s own expectations pass; nothing wrong', async () => {
   const bodies = []
-  const out = await runOpenItemPlan({ plan, budget: 13000, scripted: body => { bodies.push(body); return standIn(plan)(body) } })
+  const out = await runOpenItemPlan({ plan, budget: 14000, scripted: body => { bodies.push(body); return standIn(plan)(body) } })
   assert.deepEqual([out.sent, out.rows.length, out.stoppedBecause, out.score.pass, out.score.wrong], [12, 12, null, true, 0])
   // the same request, built directly by the product's function
   const direct = []
@@ -62,7 +62,7 @@ test('a full run with the stand-in: twelve requests, each byte for byte the prod
 
 test('a model that settles continue on everything is caught: "아직", "그만해", the page question and the weather are WRONG, so the plan fails', async () => {
   const always = body => body.questions.map(q => ({ name: q.name, type: 'predicate', probability: q.name === 'open_browser_continue' ? 0.97 : 0.02 }))
-  const out = await runOpenItemPlan({ plan, budget: 13000, scripted: always })
+  const out = await runOpenItemPlan({ plan, budget: 14000, scripted: always })
   assert.equal(out.score.pass, false)
   assert.deepEqual(out.score.wrongReplies, ['stop', 'stop2', 'page', 'notyet', 'offtopic', 'change'])
 })
@@ -79,7 +79,20 @@ test('guards: a dry run sends nothing; a missing key sends nothing; the first fa
   assert.equal(ok.stoppedBecause, 'token_ceiling', 'real usage above the estimate stops the run at the ceiling, never past it')
   assert.deepEqual([ok.sent, ok.usage.inputTokens], [2, 3000])
   assert.equal(JSON.stringify(ok).includes(KEY), false)
-  const limited = await runOpenItemPlan({ plan: { ...plan, maxRequests: 12 }, send: true, key: KEY, budget: 13000, fetchImpl: async (url, init) => ({ status: 200, text: async () => JSON.stringify({ answers: standIn(plan)(JSON.parse(init.body)), usage: { input_tokens: 500 } }) }) })
+  const limited = await runOpenItemPlan({ plan: { ...plan, maxRequests: 12 }, send: true, key: KEY, budget: 14000, fetchImpl: async (url, init) => ({ status: 200, text: async () => JSON.stringify({ answers: standIn(plan)(JSON.parse(init.body)), usage: { input_tokens: 500 } }) }) })
   assert.deepEqual([limited.sent, limited.score.pass], [12, true])
   assert.equal(OPEN_ITEM_HARD_LIMITS.maxRequests, 12)
+})
+
+test('c40: plan v2 is v1\'s replies, wants and acceptable sets unchanged (the two runs compare reply by reply), with its own pre-registered predictions; the v1 predictions are kept; all twelve fit 14000', async () => {
+  const { OPEN_ITEM_PLAN_FILES } = await import('./egdesk-browser-open-item-measure.mjs')
+  const v2 = loadOpenItemPlan(OPEN_ITEM_PLAN_FILES.v2)
+  assert.equal(v2.set, 'browser-open-item-v2')
+  assert.deepEqual(v2.replies.map(r => [r.id, r.message, r.want, r.acceptable, r.uncertainOk ?? null]), plan.replies.map(r => [r.id, r.message, r.want, r.acceptable, r.uncertainOk ?? null]))
+  assert.deepEqual(v2.replies.map(r => r.predictedV1Wording), plan.replies.map(r => r.predicted))
+  assert.deepEqual(v2.dropOrder, plan.dropOrder)
+  const all = await selectReplies(v2, 14000)
+  assert.deepEqual([all.kept.length, all.dropped], [12, []]); assert.ok(all.estInputTokens < 14000 && all.estInputTokens > 13000, `estimated ${all.estInputTokens}`)
+  const out = await runOpenItemPlan({ plan: v2, budget: 14000, scripted: standIn(v2) })
+  assert.deepEqual([out.sent, out.score.pass, out.score.wrong], [12, true, 0])
 })

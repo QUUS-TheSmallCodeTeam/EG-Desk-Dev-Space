@@ -49,7 +49,9 @@ test('questions: one yes/no predicate per option named open_browser_<id>, each q
   assert.ok(qs.every(q => q.instructions.includes(`"했어 '방금'"`)), 'the message is quoted, inner quotes neutralised')
   assert.ok(qs[0].instructions.includes('the question "약관에 동의하고 신청서 제출을 눌러 주세요."'))
   assert.ok(!qs.some(q => /^open_browser_(none|other|else|anything)/.test(q.name)), 'no catch-all option')
-  assert.ok(qs.find(q => q.name === 'open_browser_ask_page').instructions.includes('a question about the web page the browser task is on'), 'c39: the page is the anchor of ask_page: a question about anything else is not it')
+  assert.ok(qs.find(q => q.name === 'open_browser_ask_page').instructions.includes('a question about what the web page the browser task is on shows'), 'c39/c40: the page is the anchor of ask_page; a request to go on, stop, redo or change the task, an acknowledgement and any other question are named as not it')
+  assert.ok(qs.find(q => q.name === 'open_browser_change').instructions.includes('An unrelated question or request, an acknowledgement and a request to stop are not.'), 'c40: change is a change of what THIS task looks for')
+  assert.ok(qs.find(q => q.name === 'open_browser_retry').instructions.includes('only says the person did their own step'), 'c40: retry names the message that only says the step is done')
   assert.deepEqual(openItemQuestions(store.create({ conversationKey: 'x', cardId: 'c', goal: 'g' }), 'hi').map(q => q.name), ['open_browser_abandon', 'open_browser_ask_page'], 'a running task: only what code can apply while it runs')
 })
 
@@ -247,4 +249,19 @@ test('readFromResolver: settled to the browser task -> the provider\'s own read 
   assert.equal(readFromResolver({ status: 'settled', item: { provider: 'approval' }, answers: {} }, provider, 'dm').kind, 'none')
   for (const reason of ['no_item_referred', 'several_items']) assert.equal(readFromResolver({ status: 'none', reason }, provider, 'dm').kind, 'none')
   for (const verdict of [null, undefined, { status: 'none', reason: 'timeout' }, { status: 'none', reason: 'unanswered' }, { status: 'none', reason: 'no_items' }]) assert.equal(readFromResolver(verdict, provider, 'dm'), null)
+})
+
+// ---- c40: the real answers of c57 (browser-open-item-v1, sent 2026-11-25 19:08), replayed through the reading rules ----
+const C57 = { // id -> recorded probabilities { continue, retry, abandon, ask_page, change }; the v1 wording, the real model
+  ack: [0.95, 0.88, 0.05, 0.01, 0], typo: [1, 0.95, 0, 0.25, 0], okok: [0, 0.52, 0.05, 0.97, 0.01], again: [0, 0.99, 0.03, 0, 0], again2: [0, 1, 0, 0.01, 0], stop: [0, 0, 0.99, 0.99, 0.64],
+  stop2: [0, 0, 0.98, 1, 0], page: [0, 0.36, 0, 0.97, 0.06], notyet: [0.03, 0.74, 0.06, 0.6, 0.01], offtopic: [0, 0, 0.01, 0.48, 1], change: [0, 0.93, 0.02, 0, 0.89], compound: [1, 0.93, 0, 0.95, 0],
+}
+test('c40: the recorded c57 answers through the rules: "했어" (continue .95, retry .88) settles continue, a changed request (retry .93, change .89) settles change, and nothing the v1 wording got wrong is settled', () => {
+  const store = createBrowserTaskStore({ now: () => NOW }), task = pausedTask(store)
+  const read = id => readOpenItem(answersOf(Object.fromEntries(['continue', 'retry', 'abandon', 'ask_page', 'change'].map((o, i) => [o, C57[id][i]]))), task, { change: true })
+  const outcome = id => { const r = read(id); return r.kind === 'settled' ? r.optionId : r.kind }
+  assert.deepEqual(Object.fromEntries(Object.keys(C57).map(id => [id, outcome(id)])), { ack: 'continue', typo: 'uncertain', okok: 'uncertain', again: 'retry', again2: 'retry', stop: 'uncertain', stop2: 'uncertain', page: 'uncertain', notyet: 'uncertain', offtopic: 'uncertain', change: 'change', compound: 'uncertain' })
+  assert.equal(read('change').overlap, 'retry_change'); assert.equal(read('ack').overlap, 'continue_retry')
+  // the near miss c39's anchor alone would have exposed: with ask_page read ~0 on the weather question, change 1.0 is the ONE yes and would be settled (the open task replaced by a weather question). The wording of change is what prevents it, not the rule.
+  assert.deepEqual(readOpenItem(answersOf({ continue: 0, retry: 0, abandon: 0.01, ask_page: 0, change: 1 }), task, { change: true }).optionId, 'change', 'the rule alone settles a lone change: the guard is the predicate\'s wording')
 })
