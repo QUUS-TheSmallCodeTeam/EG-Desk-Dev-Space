@@ -23,8 +23,8 @@ test('u2/D1: opening the activity record of the active room moves the composer o
   assert.equal(current.roomGeneration, 4, 'the composer of the active room stays able to send'); assert.equal(stale.roomGeneration, 1, 'an owner that was already stale stays stale (left and returned to)'); assert.equal(other.roomGeneration, 3)
   rig.openCodexActivityPanel('room-a', { runId: 'r1' }); assert.equal(rig.state.codex.activityRoomGeneration, 4, 'once per change'); assert.equal(current.roomGeneration, 4)
   // a record of a room that is not the active one: nobody is re-stamped
-  const o2 = { threadId: 'room-a', roomGeneration: 3 }, rig2 = activityRig('room-a', [o2]); rig2.openCodexActivityPanel('room-b')
-  assert.equal(rig2.state.codex.activityRoomGeneration, 4); assert.equal(o2.roomGeneration, 3)
+  const o2 = { threadId: 'room-a', roomGeneration: 3 }, ob = { threadId: 'room-b', roomGeneration: 3 }, rig2 = activityRig('room-a', [o2, ob]); rig2.openCodexActivityPanel('room-b')
+  assert.equal(rig2.state.codex.activityRoomGeneration, 4); assert.equal(o2.roomGeneration, 3); assert.equal(ob.roomGeneration, 3, 'room-b is not the active room: its composer is not made current by opening its record')
   // without the registry (older callers) nothing breaks
   const src = surface.slice(surface.indexOf('  function openCodexActivityPanel(threadId, focus = null) {'), surface.indexOf('  // A file condition names its folder as the File card that connected it does.'))
   const state = { codex: { activeThreadId: 'room-a', activityRoomGeneration: 0 } }
