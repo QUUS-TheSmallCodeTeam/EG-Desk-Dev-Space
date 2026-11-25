@@ -1096,3 +1096,23 @@ test('decision-first expectations need the flag in the conversation and refuse t
   assert.match(validateEngineScript({ set: 'real-engine-df-v1', conversations: [{ id: 'c', turns: [{ say: 'x', expect: { decisionFirst: { path: 'fast' } } }] }] }).errors.join(), /needs flags\.EGDESK_DECISION_FIRST/)
   assert.match(validateEngineScript(base({ decisionFirst: { path: 'fast', engineTurns: 1 } })).errors.join(), /a fast turn has none/); assert.match(validateEngineScript(base({ decisionFirst: { reason: 'because' } })).errors.join(), /reason/); assert.match(validateEngineScript(base({ decisionFirst: {} })).errors.join(), /at least one/)
 })
+
+// ---- c33: the first-event watchdog through the check (the fake engine accepts the first turn and stays silent; the flag's minimum is 5 s) ----
+const stallScript = flag => ({ set: 'real-engine-stall-test-v1', conversations: [{ id: 's', ...(flag ? { flags: { EGDESK_ENGINE_STALL_FIRST_EVENT_MS: flag } } : {}), turns: [{ say: '한 단어로만 답해: 하나', expect: { posted: true, turnStatus: 'completed', ...(flag ? { engineStall: { stalled: true, recovered: true } } : {}) } }] }] })
+
+test('engine stall through the check: the first turn is silent, the watchdog interrupts it and starts it once more; the record has the fact and the first-event time; no flag, no watchdog', async t => {
+  const armed = world(t, { silentTurns: 1, turns: [{ steps: [], final: '하나' }] })
+  const rec = only(await runCheck(armed.options, asScripts(stallScript('5000')), armed.deps)); assert.equal(rec.aborted, null, rec.abortDetail); const turn = rec.turns[0]
+  assert.equal(rec.ok, true, JSON.stringify(turn.expectations.filter(c => !c.ok)))
+  assert.equal(turn.engineStall.fact.recovered, true); assert.equal(callsOf(armed, 'turn/start').length, 2); assert.equal(callsOf(armed, 'turn/interrupt').length, 1, 'the silent turn was interrupted'); assert.ok(turn.subTurns[0].latencyMs >= 5000, 'it waited the limit: ' + turn.subTurns[0].latencyMs)
+  assert.ok(Number.isFinite(turn.subTurns[0].firstEventMs), 'firstEventMs of the turn that spoke is recorded: ' + turn.subTurns[0].firstEventMs)
+}, { timeout: 60000 })
+
+test('engine stall through the check: a healthy engine records firstEventMs and never trips the watchdog; the expectations refuse stalled/recovered without the flag', async t => {
+  const w = world(t, { turns: [{ steps: [], final: '하나' }] }), script = stallScript('45000'); script.conversations[0].turns[0].expect.engineStall = { stalled: false, maxFirstEventMs: 45000 }
+  const rec = only(await runCheck(w.options, asScripts(script), w.deps)); assert.equal(rec.ok, true, JSON.stringify(rec.turns[0].expectations.filter(c => !c.ok)))
+  assert.equal(rec.turns[0].engineStall.fact, null); assert.ok(rec.turns[0].subTurns[0].firstEventMs >= 0 && rec.turns[0].subTurns[0].firstEventMs < 5000); assert.equal(callsOf(w, 'turn/interrupt').length, 0)
+  assert.match(validateEngineScript(stallScript(null).conversations ? { ...stallScript(null), conversations: [{ id: 's', turns: [{ say: 'x', expect: { engineStall: { stalled: true } } }] }] } : {}).errors.join(), /needs flags\.EGDESK_ENGINE_STALL_FIRST_EVENT_MS/)
+  assert.match(validateEngineScript({ set: 'real-engine-stall-test-v1', conversations: [{ id: 's', turns: [{ say: 'x', expect: { engineStall: { recovered: true } } }] }] }).errors.join(), /needs stalled: true/)
+  assert.deepEqual(validateEngineScript(starter('engine-stall')), { ok: true, errors: [] })
+})

@@ -1,3 +1,4 @@
+import { stallConfigFromEnv } from './egdesk-engine-stall.mjs'
 import { registerConversationForgetters } from './egdesk-conversation-forgetters.mjs'
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
@@ -515,6 +516,8 @@ const chat = new CodexChatRuntime({
   ...(ownToolsWiring ? { ownTools: ownToolsWiring.ownTools } : {}),
   // developer flag, default off (L7 c27): an Agent-profile turn on a loaded thread skips the per-turn detach + resume while its resume parameters are unchanged
   ...(agentReloadReuse ? { agentReloadReuse: true } : {}),
+  // developer flag, default off (L5 c33): a turn the engine accepted and then stayed silent on (no event for it within the flag's milliseconds) is interrupted and started once more
+  ...(stallConfigFromEnv(process.env) ? { engineStall: stallConfigFromEnv(process.env) } : {}),
   // L1 c21 (owner decision, provisional): a room keeps its account; an explicit switch continues the same room. Off unless EGDESK_ROOM_ACCOUNT=on.
   roomAccount: { mode: () => (process.env.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') },
   store: chatStore,

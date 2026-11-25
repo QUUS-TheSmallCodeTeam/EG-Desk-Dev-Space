@@ -20,7 +20,7 @@ const LANES = {
   L3: { expectKeys: ['flow'], turnHooks: ['flow'] },
   L2: { expectKeys: ['engine'], turnHooks: ['journey'] },
   L4: { expectKeys: ['briefing'] },
-  L5: { expectKeys: ['deleted', 'coding', 'git', 'decisionFirst'], conversationFields: ['seededWrites', 'gitScenario'], turnHooks: ['coding', 'gitScene', 'decisionFirst'] },
+  L5: { expectKeys: ['deleted', 'coding', 'git', 'decisionFirst', 'engineStall'], conversationFields: ['seededWrites', 'gitScenario'], turnHooks: ['coding', 'gitScene', 'decisionFirst', 'engineStall'] },
   L8: { expectKeys: ['browserAnswer'], turnFields: ['browserTask'], turnHooks: ['browserAnswer'] },
   L7: { expectKeys: ['memory'], conversationFields: ['memory'], turnHooks: ['memory'] },
   L6: { turnFields: ['plant'], turnHooks: ['planted'] }, // c28: the planted-draft mode of L2's rewrite tool
