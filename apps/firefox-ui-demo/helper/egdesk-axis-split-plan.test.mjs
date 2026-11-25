@@ -70,7 +70,7 @@ test('action-relevance plan: <= 5k, loads with its bar, s4 is the real v3 body p
   assert.deepEqual(Object.keys(plan.productBars), ['rel_#'])
   const s4 = JSON.parse(readFileSync(new URL('../proofs/decision-real-measure/action-relevance/requests/s4-action.json', import.meta.url)))
   const { CONTEXT_RULE_SETS } = await import('./egdesk-context-setup.mjs')
-  assert.deepEqual(CONTEXT_RULE_SETS, ['default', 'action'])
+  assert.deepEqual(CONTEXT_RULE_SETS, ['default', 'action', 'action+status'])
   const lines = s4.input[0].content.split('\n')
   assert.equal(lines.length, 4)
   assert.match(lines[3], /^An item is needed only when the response has to use what the item says\. A request to carry out an action/)
