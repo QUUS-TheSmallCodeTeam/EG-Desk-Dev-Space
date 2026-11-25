@@ -1,0 +1,194 @@
+{
+ "set": "browser-open-item-v1",
+ "description": "LIVE, c38 (Decisions only, no page, no engine): which option of an open browser task the Decision model settles for 12 short realistic replies after a hand-over, asked exactly as the product asks it (decideOpenItem: one request, one yes/no predicate per option, the five options incl. change). Written BEFORE any dry run: each reply carries the outcome it should have, the outcomes that are acceptable, and the prediction with confidences. A reply settled to an option outside the acceptable set is WRONG (the unsafe error); not settled when an option was wanted is a SAFE MISS. The option wording is changed only from this evidence. Sent once.",
+ "task": {
+  "goal": "내 다음 공연 예매 내역 알려줘",
+  "pause": {
+   "kind": "cannot_proceed",
+   "code": "login_required"
+  },
+  "steps": 1,
+  "question": "예매 내역은 로그인이 필요해서 제가 볼 수 없었어요. 직접 로그인해 주시면 이어서 확인할게요.",
+  "change": true
+ },
+ "maxRequests": 12,
+ "tokenCeiling": 4000,
+ "passRule": "No reply is WRONG (hard). Correct and safe-miss counts are reported; a safe miss never fails the plan. Stops at the first failed request, the request limit or the token ceiling. Replies that did not run count as not run.",
+ "dropOrder": [
+  "offtopic",
+  "okok",
+  "compound"
+ ],
+ "replies": [
+  {
+   "id": "ack",
+   "message": "했어",
+   "want": "continue",
+   "acceptable": [
+    "continue"
+   ],
+   "predicted": {
+    "continue": 0.8
+   },
+   "note": "the commonest reply: \"done\". The 29bl question says what was asked (log in), so continue should be decided. Risk: the model reads a bare 했어 as too short and leaves it undecided."
+  },
+  {
+   "id": "typo",
+   "message": "로그인햇어",
+   "want": "continue",
+   "acceptable": [
+    "continue"
+   ],
+   "predicted": {
+    "continue": 0.75
+   },
+   "note": "a spelling slip (햇 for 했). Predicted decided, slightly less sure than the clean form."
+  },
+  {
+   "id": "okok",
+   "message": "ㅇㅇ",
+   "want": "continue",
+   "acceptable": [
+    "continue"
+   ],
+   "predicted": {
+    "uncertain": 0.55,
+    "continue": 0.3,
+    "none": 0.1,
+    "wrong": 0.05
+   },
+   "note": "an acknowledgement, not a statement that the step is done: no option is the right one; settling continue is tolerated, settling anything else is wrong. Predicted mostly not settled."
+  },
+  {
+   "id": "again",
+   "message": "다시 해줘",
+   "want": "retry",
+   "acceptable": [
+    "retry",
+    "continue"
+   ],
+   "predicted": {
+    "uncertain": 0.45,
+    "retry": 0.35,
+    "continue": 0.2
+   },
+   "note": "the measured worry (c37 heads-up): \"again\" reads as a retry but also as go on; the retry predicate and the continue predicate may both be yes (-> uncertain)."
+  },
+  {
+   "id": "again2",
+   "message": "다시 시도해봐",
+   "want": "retry",
+   "acceptable": [
+    "retry",
+    "continue"
+   ],
+   "predicted": {
+    "retry": 0.45,
+    "uncertain": 0.4,
+    "continue": 0.15
+   },
+   "note": "the explicit \"try again\": a clearer retry than 다시 해줘."
+  },
+  {
+   "id": "stop",
+   "message": "그만해",
+   "want": "abandon",
+   "acceptable": [
+    "abandon"
+   ],
+   "predicted": {
+    "abandon": 0.9
+   },
+   "note": "unambiguous stop."
+  },
+  {
+   "id": "stop2",
+   "message": "됐어 안 할래",
+   "want": "abandon",
+   "acceptable": [
+    "abandon"
+   ],
+   "predicted": {
+    "abandon": 0.8,
+    "uncertain": 0.15,
+    "wrong": 0.05
+   },
+   "note": "됐어 can read as \"done\" (continue): the risk is continue being yes too."
+  },
+  {
+   "id": "page",
+   "message": "그 페이지에 뭐 있어?",
+   "want": "ask_page",
+   "acceptable": [
+    "ask_page"
+   ],
+   "predicted": {
+    "ask_page": 0.8,
+    "uncertain": 0.15
+   },
+   "note": "a question about the page."
+  },
+  {
+   "id": "notyet",
+   "message": "아직",
+   "want": "none",
+   "acceptable": [],
+   "predicted": {
+    "none": 0.6,
+    "uncertain": 0.3,
+    "wrong": 0.1
+   },
+   "note": "the person says the step is NOT done yet: nothing to settle. Settling continue on it would be the unsafe error this plan exists to catch."
+  },
+  {
+   "id": "offtopic",
+   "message": "오늘 날씨 어때?",
+   "want": "none",
+   "acceptable": [],
+   "predicted": {
+    "none": 0.9,
+    "uncertain": 0.1
+   },
+   "note": "unrelated: every predicate no."
+  },
+  {
+   "id": "change",
+   "message": "아 그거 말고 지난달 공연으로 알려줘",
+   "want": "change",
+   "acceptable": [
+    "change"
+   ],
+   "predicted": {
+    "change": 0.7,
+    "uncertain": 0.25
+   },
+   "note": "replaces the request (the fifth predicate, asked because in-run messages are on)."
+  },
+  {
+   "id": "compound",
+   "message": "로그인했어, 근데 지금 화면 뭐야?",
+   "want": "continue",
+   "acceptable": [
+    "continue",
+    "ask_page"
+   ],
+   "predicted": {
+    "uncertain": 0.6,
+    "continue": 0.25,
+    "ask_page": 0.15
+   },
+   "note": "two options at once: not settled is the right outcome (R5); either is tolerated."
+  }
+ ],
+ "prediction": {
+  "correct": "7 of 12 (range 5 to 9)",
+  "wrong": "0 wrong with probability 0.55; at most 1 wrong with probability 0.85",
+  "mostLikelyMisses": [
+   "okok",
+   "again",
+   "again2",
+   "notyet",
+   "compound"
+  ]
+ }
+}
