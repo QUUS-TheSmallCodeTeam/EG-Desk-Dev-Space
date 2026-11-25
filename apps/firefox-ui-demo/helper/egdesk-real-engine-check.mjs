@@ -41,7 +41,7 @@ import { parseCodexUserAgent } from './egdesk-codex-version-pin.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { APPROVER_TEXT, checkTurnExpectations, folderPathProblem, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { memoryNeedsDecisions } from './egdesk-real-engine-memory.mjs' // memory hook (L7 c26)
-import { isProgressEvent, stallConfigFromEnv } from './egdesk-engine-stall.mjs' // c33
+import { ENGINE_STALL_FLAG, ENGINE_STALL_LIMITS, isProgressEvent, mergeStallRecords, stallConfigFromEnv, stallLine, stallRecord, stallTotals } from './egdesk-engine-stall.mjs' // c33
 import { createChatHttpHandler } from './codex-bridge-http.mjs' // c28: the product's route handler (the window's own request for a conversation delete)
 import { registerConversationForgetters } from './egdesk-conversation-forgetters.mjs' // c28: the same per-conversation forgetters the bridge registers
 import { seedWrites, writesFacts } from './egdesk-real-engine-delete.mjs'
@@ -154,16 +154,20 @@ export const HELP = `Usage: node scripts/egdesk-real-engine-check.mjs --codex-bi
   --decisions      use the Decision model (key from ${DECISION_KEY_ENV}); without it no Decision call is made and "yes" approvals cannot be read
   --model <id>, --effort <low|medium|high|…>   per-turn model and effort (otherwise the home's configuration applies)
   --app-server-config k=v    an extra -c k=v for the app-server (repeatable)
+  --stall-watchdog <ms>      (c36) arm the engine's progress watchdog (flag ${ENGINE_STALL_FLAG}, ${ENGINE_STALL_LIMITS.minMs}-${ENGINE_STALL_LIMITS.maxMs}) in EVERY conversation unless its script sets that flag itself: a turn that the engine accepted and then left silent (nothing beyond the preamble) is interrupted and started once more; each record says armed value, stalls, rescued, failed, interrupts, retries; the run prints "stalls: n, rescued: n, failed: n"
   --turn-timeout-ms <n>      per scripted turn (default ${DEFAULT_TURN_TIMEOUT_MS}); on timeout the turn is interrupted once and the conversation ends
   --persisted-with-cleanup   persisted source threads (so product-like forks work); every thread the check creates is deleted with thread/delete and verified gone at the end of its
                    conversation; refuses to start when the binary has no thread/delete or an earlier run left threads (see --cleanup-leftovers); default: ephemeral threads only
   --cleanup-leftovers        delete and verify gone the threads an earlier killed run left in <out>/created-threads.jsonl (needs --codex-bin, a home, --out; no script)
   --json           print the plan or the summary as JSON`
 
+/** c36: the run-wide watchdog (--stall-watchdog) for a conversation: the flag, unless the script sets it itself (an explicit script value, even an invalid one, wins). */
+export const stallFlag = (options, conversation) => (Number.isFinite(options?.stallWatchdogMs) && conversation?.flags?.[ENGINE_STALL_FLAG] === undefined ? { [ENGINE_STALL_FLAG]: String(options.stallWatchdogMs) } : {})
+
 /** parseArgs(argv, env) → options. Throws { code: 'usage' }. */
 export function parseArgs(argv, env = process.env) {
-  const o = { mode: 'dry', codexBin: null, home: null, scripts: [], out: null, decisions: false, model: null, effort: null, appServerConfig: [], persisted: false, cleanupLeftovers: false, turnTimeoutMs: DEFAULT_TURN_TIMEOUT_MS, json: false, help: false }
-  const takes = new Set(['--codex-bin', '--codex-home', '--script', '--out', '--model', '--effort', '--app-server-config', '--turn-timeout-ms'])
+  const o = { mode: 'dry', codexBin: null, home: null, scripts: [], out: null, decisions: false, model: null, effort: null, appServerConfig: [], persisted: false, stallWatchdogMs: null, cleanupLeftovers: false, turnTimeoutMs: DEFAULT_TURN_TIMEOUT_MS, json: false, help: false }
+  const takes = new Set(['--codex-bin', '--codex-home', '--script', '--out', '--model', '--effort', '--app-server-config', '--turn-timeout-ms', '--stall-watchdog'])
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') { o.help = true; continue }
@@ -184,6 +188,7 @@ export function parseArgs(argv, env = process.env) {
     else if (arg === '--model') o.model = value
     else if (arg === '--effort') o.effort = value
     else if (arg === '--app-server-config') { if (!/^[A-Za-z0-9_.]+=.+$/.test(value)) throw usage('--app-server-config needs key=value'); o.appServerConfig.push(value) }
+    else if (arg === '--stall-watchdog') { const n = /^\d{4,6}$/.test(value) ? Number(value) : NaN; if (!(n >= ENGINE_STALL_LIMITS.minMs && n <= ENGINE_STALL_LIMITS.maxMs)) throw usage(`--stall-watchdog is ${ENGINE_STALL_LIMITS.minMs}-${ENGINE_STALL_LIMITS.maxMs} (milliseconds)`); o.stallWatchdogMs = n }
     else if (arg === '--turn-timeout-ms') { const n = Number(value); if (!Number.isInteger(n) || n < 1000 || n > 3_600_000) throw usage('--turn-timeout-ms is 1000-3600000'); o.turnTimeoutMs = n }
   }
   if (o.help) return o
@@ -264,7 +269,7 @@ export function planRun(options, scripts, { env = process.env, buildLaunch = bui
     rules: [options.persisted ? 'persisted threads, each deleted and verified gone at the end of its conversation (the binary must have thread/delete; the ledger must be clean)' : 'ephemeral threads only (thread/start and thread/fork without ephemeral:true are refused)', 'own tools ON; the engine runs in EG-Desk\'s empty folder', 'scripted approver: yes/no answers sent as the person\'s next message',
       'no retries', `Decision calls only with --decisions (key from ${DECISION_KEY_ENV}), through the run's egress gate`],
     conversations: scripts.flatMap(({ file, script }) => script.conversations.map(c => ({ set: script.set, file, id: c.id, scratch: path.join(options.out, 'scratch', c.id), files: Object.keys(c.folder ?? {}).length,
-      flags: { ...(options.decisions ? DEFAULT_DECISION_FLAGS : {}), ...(c.flags ?? {}), EGDESK_OWN_TOOLS: 'on' }, turns: c.turns.map(t => ({ say: t.action === 'restart' ? '(restart: the bridge and the engine stop and start again)' : clip(t.say, 80), approve: t.approve ?? [], expects: Object.keys(t.expect ?? {}) })) }))),
+      flags: { ...(options.decisions ? DEFAULT_DECISION_FLAGS : {}), ...stallFlag(options, c), ...(c.flags ?? {}), EGDESK_OWN_TOOLS: 'on' }, turns: c.turns.map(t => ({ say: t.action === 'restart' ? '(restart: the bridge and the engine stop and start again)' : clip(t.say, 80), approve: t.approve ?? [], expects: Object.keys(t.expect ?? {}) })) }))),
   }
 }
 
@@ -332,6 +337,7 @@ export async function runConversation({ options, set, conversation, deps = {} })
       merged.turns.push(...rec.turns); merged.requests.push(...rec.requests); merged.aborted ??= rec.aborted; merged.abortDetail ??= rec.abortDetail
       merged.ok = merged.ok && rec.ok; merged.decisionCalls = (merged.decisionCalls ?? 0) + (rec.decisionCalls ?? 0); merged.totalMs = (merged.totalMs ?? 0) + (rec.totalMs ?? 0)
       if (rec.cleanup) merged.cleanup = rec.cleanup; if (rec.cleanupFailed) merged.cleanupFailed = true
+      merged.stallWatchdog = mergeStallRecords(merged.stallWatchdog, rec.stallWatchdog)
       ;(merged.restarts ??= []).push({ afterTurn: bounds[s], engine: rec.engine, phases: { spawnMs: rec.phases.spawnMs, initializeMs: rec.phases.initializeMs, composedMs: rec.phases.composedMs } })
     }
     previous = out
@@ -350,7 +356,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
   if (!carry?.resumed) writeScratch(scratch, conversation.folder) // after a restart the folder is as the turns left it
   // the draft check is the conversation's own opt-in (conversation.draftCheck: { mode, design? }), like memory; explicit flags still win
   const dc = conversation.draftCheck
-  const flags = { ...(options.decisions ? DEFAULT_DECISION_FLAGS : {}), ...(dc ? { EGDESK_DRAFT_CHECK: dc.mode, ...(dc.design === 'choice' ? { EGDESK_DRAFT_CHECK_DESIGN: 'choice' } : {}) } : {}), ...(conversation.flags ?? {}), EGDESK_OWN_TOOLS: 'on' }
+  const flags = { ...(options.decisions ? DEFAULT_DECISION_FLAGS : {}), ...stallFlag(options, conversation), ...(dc ? { EGDESK_DRAFT_CHECK: dc.mode, ...(dc.design === 'choice' ? { EGDESK_DRAFT_CHECK_DESIGN: 'choice' } : {}) } : {}), ...(conversation.flags ?? {}), EGDESK_OWN_TOOLS: 'on' }
   let profileStore = null, agentRoom = null // c25: the synthetic Agent of an agentProfile conversation
   const persisted = options.persisted === true, ledger = persisted ? (deps.ledger ?? createLedger(options.out)) : null, createdThreads = [...(carry?.state?.createdThreads ?? [])]
   const FLAG = { ...flags }
@@ -789,6 +795,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       rec.cleanup.ephemeral = createdThreads.length - ids.length
       if (rec.cleanup.failures.length) { rec.ok = false; rec.cleanupFailed = true }
     }
+    try { rec.stallWatchdog = stallRecord({ armed: stallConfigFromEnv(FLAG)?.firstEventMs ?? null, source: conversation.flags?.[ENGINE_STALL_FLAG] !== undefined ? 'script' : 'option', log: chat?.engineStallLog ?? [] }) } catch { /* the record is advisory */ } // c36
     turnHooks.dispose() // registered hooks: timers and the like
     await stop()
     try { store?.close() } catch {}
@@ -856,7 +863,7 @@ export async function runCheck(options, scripts, deps = {}) {
       fs.writeFileSync(path.join(dir, `${conversation.id}.json`), `${JSON.stringify(rec, null, 2)}\n`, { mode: 0o600 })
     }
   }
-  const summary = { at: new Date().toISOString(), ok: records.every(r => r.ok), conversations: records.map(r => ({ set: r.set, id: r.id, ok: r.ok, aborted: r.aborted, ...(r.cleanup ? { cleanup: { persisted: r.cleanup.persisted, deleted: r.cleanup.deleted, verifiedGone: r.cleanup.verifiedGone, failures: r.cleanup.failures.length } } : {}), turns: r.turns.length, failedChecks: r.turns.flatMap(t => t.expectations.filter(e => !e.ok).map(e => `${t.index}:${e.check}`)), totalMs: r.totalMs })) }
+  const summary = { at: new Date().toISOString(), ok: records.every(r => r.ok), conversations: records.map(r => ({ set: r.set, id: r.id, ok: r.ok, aborted: r.aborted, ...(r.cleanup ? { cleanup: { persisted: r.cleanup.persisted, deleted: r.cleanup.deleted, verifiedGone: r.cleanup.verifiedGone, failures: r.cleanup.failures.length } } : {}), turns: r.turns.length, failedChecks: r.turns.flatMap(t => t.expectations.filter(e => !e.ok).map(e => `${t.index}:${e.check}`)), totalMs: r.totalMs, ...(r.stallWatchdog ? { stallWatchdog: r.stallWatchdog } : {}) })), stalls: stallTotals(records) }
   fs.writeFileSync(path.join(options.out, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o600 })
   return { records, summary, ok: summary.ok }
 }

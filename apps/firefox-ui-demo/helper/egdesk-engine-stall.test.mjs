@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { CodexChatRuntime } from './codex-chat-runtime.mjs'
-import { ENGINE_STALL_FLAG, ENGINE_STALL_LIMITS, eventTurnId, isProgressEvent, stallConfigFromEnv, stallFact } from './egdesk-engine-stall.mjs'
+import { ENGINE_STALL_FLAG, ENGINE_STALL_LIMITS, eventTurnId, isProgressEvent, mergeStallRecords, stallConfigFromEnv, stallFact, stallLine, stallRecord, stallTotals } from './egdesk-engine-stall.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
 test('the flag: an integer number of milliseconds within the limits, anything else is off; the turn id of an event; the closed fact', () => {
@@ -105,4 +105,19 @@ test('preamble then silence (the real shape): the first-event rule would have be
 test('preamble twice: ENGINE_STALLED after one retry, not 180 s; progress inside the limit (thinking) or a tool call is never touched, however long the turn then runs', async t => {
   const w = world(t, { plan: ['preamble', 'preamble', 'events'] }); await assert.rejects(send(w), error => error.code === 'ENGINE_STALLED'); assert.equal(w.of('turn/start').length, 2)
   for (const plan of [['slowThinking'], ['tool']]) { const x = world(t, { plan }); await send(x); await new Promise(r => setTimeout(r, MS * 2)); assert.equal(x.of('turn/start').length, 1, plan[0]); assert.equal(x.of('turn/interrupt').length, 0, plan[0]) }
+})
+
+// ---- c36: the record of a conversation and the totals of a run ----
+test('stallRecord: stalls, rescued, failed, interrupts and retries from the runtime\'s facts; merged across a restart; totals and the one line', () => {
+  const rescued = stallFact({ afterMs: 30000, stalls: 1, recovered: true }), failed = stallFact({ afterMs: 30000, stalls: 2, recovered: false })
+  assert.deepEqual(stallRecord({ armed: 30000, source: 'option', log: [rescued, failed, rescued] }), { armed: 30000, source: 'option', stalls: 3, rescued: 2, failed: 1, interrupts: 4, retries: 3 })
+  assert.deepEqual(stallRecord({}), { armed: null, source: null, stalls: 0, rescued: 0, failed: 0, interrupts: 0, retries: 0 }); assert.equal(stallRecord({ armed: null, source: 'option' }).source, null, 'no armed value, no source')
+  const a = stallRecord({ armed: 5000, source: 'script', log: [rescued] }), b = stallRecord({ armed: 5000, source: 'script', log: [failed] })
+  assert.deepEqual(mergeStallRecords(a, b), { armed: 5000, source: 'script', stalls: 2, rescued: 1, failed: 1, interrupts: 3, retries: 2 }); assert.equal(mergeStallRecords(null, b), b); assert.equal(mergeStallRecords(a, null), a)
+  const totals = stallTotals([{ stallWatchdog: a }, { stallWatchdog: b }, { stallWatchdog: stallRecord({}) }, {}]); assert.deepEqual(totals, { armed: 2, stalls: 2, rescued: 1, failed: 1, interrupts: 3, retries: 2 }); assert.equal(stallLine(totals), 'stalls: 2, rescued: 1, failed: 1')
+})
+
+test('the runtime keeps every stall fact in order for the check\'s record (bounded)', async t => {
+  const w = world(t, { plan: ['silent', 'events'] }); await send(w); assert.deepEqual(w.chat.engineStallLog.map(f => [f.count, f.recovered]), [[1, true]])
+  const x = world(t, { plan: ['silent', 'silent', 'events'] }); await assert.rejects(send(x)); assert.deepEqual(x.chat.engineStallLog.map(f => [f.count, f.recovered]), [[2, false]]); assert.equal(world(t, { stall: null }).chat.engineStallLog.length, 0)
 })

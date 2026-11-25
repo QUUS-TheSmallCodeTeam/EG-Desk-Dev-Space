@@ -5,6 +5,7 @@
 // failed or a conversation aborted, 2 usage or preflight problem.
 // c24: --persisted-with-cleanup (persisted threads, each deleted with thread/delete and verified gone; refuses to start when that cannot be guaranteed)
 // and --cleanup-leftovers (removes what a killed earlier run left, from <out>/created-threads.jsonl).
+import { stallLine } from '../helper/egdesk-engine-stall.mjs'
 import { HELP, LEDGER_FILE, cleanupLeftovers, createLedger, formatPlan, leftoverThreads, loadScripts, parseArgs, planRun, preflight, runCheck } from '../helper/egdesk-real-engine-check.mjs'
 
 async function main(argv) {
@@ -35,7 +36,7 @@ async function main(argv) {
   }
   const lines = result.summary.conversations.map(c => `${c.ok ? 'ok  ' : 'FAIL'} ${c.set}/${c.id}  turns=${c.turns}  ${c.aborted ? `aborted=${c.aborted}  ` : ''}${c.failedChecks.length ? `failed=${c.failedChecks.join(',')}  ` : ''}${c.cleanup ? `cleanup=${c.cleanup.verifiedGone}/${c.cleanup.persisted} gone${c.cleanup.failures ? ` (${c.cleanup.failures} FAILED)` : ''}  ` : ''}${c.totalMs} ms`)
   const dirty = leftoverThreads(createLedger(options.out).read())
-  console.log(options.json ? JSON.stringify(result.summary, null, 2) : [`records: ${options.out}/records`, ...lines].join('\n'))
+  console.log(options.json ? JSON.stringify(result.summary, null, 2) : [`records: ${options.out}/records`, ...lines, ...(options.stallWatchdogMs || result.summary.stalls?.stalls ? [stallLine(result.summary.stalls)] : [])].join('\n'))
   if (options.persisted && dirty.length) console.error(`CLEANUP FAILED: ${dirty.length} persisted thread(s) are not verified gone (${dirty.join(', ')}); listed in ${options.out}/${LEDGER_FILE}. Run again with --cleanup-leftovers --run before anything else.`)
   return result.ok ? 0 : 1
 }
