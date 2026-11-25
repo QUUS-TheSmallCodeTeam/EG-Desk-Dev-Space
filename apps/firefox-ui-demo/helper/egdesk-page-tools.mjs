@@ -78,8 +78,8 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     if (typeof args.cardId === 'string' && args.cardId) { const card = cards.find(item => item.cardId === args.cardId); return card ? { card } : { error: 'PAGE_CARD_NOT_GRANTED' } }
     return cards.length === 1 ? { card: cards[0] } : { error: 'PAGE_CARD_REQUIRED', cardIds: cards.map(card => card.cardId).slice(0, 4) }
   }
-  async function observe(run, event, cardId) {
-    const out = await call(run, event, 'egdesk_browser_observe', { cardId }, 'obs')
+  async function observe(run, event, cardId, suffix = 'obs') {
+    const out = await call(run, event, 'egdesk_browser_observe', { cardId }, suffix)
     const snapshot = out.data?.snapshot
     if (!out.ok || !snapshot) return { error: out.data?.error?.code ?? 'PAGE_OBSERVE_FAILED', detail: out.data?.error }
     if (opaque(snapshot.url)) return { error: 'BROWSER_CARD_OPAQUE' }
@@ -189,11 +189,17 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
       const site = hostOf(element.href)
       const asked = await call(run, event, 'egdesk_browser_request_site', { cardId, site }, 'site')
       if (!asked.ok || asked.data?.status !== 'site-allowed') return respond(true, { status: 'not_done', code: 'BROWSER_NAVIGATE_OUT_OF_SCOPE', site: typeof asked.data?.status === 'string' ? asked.data.status : 'site-refused', ...(typeof asked.data?.pendingBy === 'string' ? { pendingBy: asked.data.pendingBy } : {}), ...(Number.isSafeInteger(asked.data?.waitedMs) ? { waitedMs: asked.data.waitedMs } : {}), cardId, label, written: false })
-      const fresh = await observe(run, event, cardId)
-      if (fresh.error) return respond(true, { status: 'refused', code: fresh.error })
-      const same = (fresh.snapshot.interactiveElements ?? []).find(item => item.ref === args.ref && item.href === element.href)
-      if (!same) return respond(true, { status: 'refused', code: 'PAGE_REF_UNKNOWN', next: 'read_again' })
-      const moved = await call(run, event, 'egdesk_browser_navigate', { cardId, observationId: fresh.observationId, expectedRevision: fresh.snapshot.revision, url: element.href, postcondition: { kind: 'url', value: element.href } }, 'press')
+      // What changed since the engine read the page is the POLICY only; the link is found again on a new observation by what it is (the same address and the same words), not by its ref (refs may be renumbered when
+      // the page re-renders). Another address or other words: refused as before. A new call id each time (a call id repeated with the same arguments returns the earlier observation).
+      const linkOf = snapshot => { const items = (snapshot.interactiveElements ?? []).filter(item => item.href === element.href && String(item.label ?? '') === String(element.label ?? '') && String(item.tag).toLowerCase() === 'a'); return items.find(item => item.ref === args.ref) ?? items[0] ?? null }
+      let moved = null
+      for (const attempt of [1, 2]) {
+        const fresh = await observe(run, event, cardId, `siteobs${attempt}`)
+        if (fresh.error) return respond(true, { status: 'refused', code: fresh.error })
+        if (!linkOf(fresh.snapshot)) return respond(true, { status: 'refused', code: 'PAGE_REF_UNKNOWN', next: 'read_again' })
+        moved = await call(run, event, 'egdesk_browser_navigate', { cardId, observationId: fresh.observationId, expectedRevision: fresh.snapshot.revision, url: element.href, postcondition: { kind: 'url', value: element.href } }, `sitepress${attempt}`)
+        if (moved.ok || moved.data?.error?.code !== 'BROWSER_OBSERVATION_STALE') break // one more new observation when the page moved under the first
+      }
       return result(moved, { status: 'pressed', via: 'site', cardId, label }, run, cardId)
     }
     const expectText = short(args.expectText, 200)
