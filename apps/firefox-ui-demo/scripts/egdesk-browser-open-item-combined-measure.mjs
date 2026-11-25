@@ -2,16 +2,19 @@
 import { writeFileSync } from 'node:fs'
 import { sendStampPath, stampingFetch } from '../helper/egdesk-decision-send-stamp.mjs'
 import { OPEN_ITEM_HARD_LIMITS } from '../helper/egdesk-browser-open-item-measure.mjs'
-import { combinedStandIn, loadCombinedPlan, runCombined, selectCombined } from '../helper/egdesk-browser-open-item-combined.mjs'
+import { COMBINED_PLAN_FILES, combinedStandIn, loadCombinedPlan, runCombined, selectCombined } from '../helper/egdesk-browser-open-item-combined.mjs'
 
 // c42: the product's own turn-start request when a browser task is open (the resolver's referent question + the option predicates, one request) on 12 short replies after a
 // hand-over and 4 controls with another open item. Pre-registered in scripts/egdesk-browser-open-item-combined-plan.json. Decisions only. Dry by default.
 //   node scripts/egdesk-browser-open-item-combined-measure.mjs                                   # dry: sizes, drop order, the plan
-//   OPENAI_API_KEY=... node scripts/egdesk-browser-open-item-combined-measure.mjs --send [--budget 16000] [--out results.json]
+//   --plan v1 (as sent in c62) | v2 (c43: after the summary change)
+//   OPENAI_API_KEY=... node scripts/egdesk-browser-open-item-combined-measure.mjs [--plan v2] --send [--budget 16000] [--out results.json]
 // The key is read from OPENAI_API_KEY only and is never printed or written. No retries; the request limit and the token ceiling (16k) stop it.
 const args = process.argv.slice(2)
 const flag = name => args.includes(name), value = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : null }
-const plan = loadCombinedPlan()
+const planName = value('--plan') ?? 'v1'
+if (!COMBINED_PLAN_FILES[planName]) { console.error(`unknown --plan (${Object.keys(COMBINED_PLAN_FILES).join(' | ')})`); process.exit(2) }
+const plan = loadCombinedPlan(COMBINED_PLAN_FILES[planName])
 const budget = Number.isSafeInteger(Number(value('--budget'))) && Number(value('--budget')) > 0 ? Number(value('--budget')) : plan.tokenCeiling
 if (budget > OPEN_ITEM_HARD_LIMITS.tokenCeiling) { console.error(`--budget is at most ${OPEN_ITEM_HARD_LIMITS.tokenCeiling}`); process.exit(2) }
 console.table(plan.replies.map(r => ({ reply: r.id, message: r.message, items: r.items.join('+'), wantItem: r.wantItem, wantOption: r.wantOption ?? '' })))

@@ -84,7 +84,7 @@ test('decideOpenItem: one request, the evidence is the closed summary + what was
   const client = { decide: async request => { sent.push(request); return { answers: answersOf({ continue: 0.96, retry: 0.03, abandon: 0.01, ask_page: 0.02 }), usage: { input_tokens: 90 } } } }
   const out = await decideOpenItem({ message: '했어', task, client })
   assert.equal(sent.length, 1); assert.deepEqual(sent[0].questions.map(q => q.name), ['continue', 'retry', 'abandon', 'ask_page'].map(optionQuestionName))
-  assert.equal(sent[0].input[1].content, 'Browser task "회의실 대관 신청해줘": handed_over (login_required), 2 steps done.\nAsked: 직접 로그인해 주세요.\nUser message: 했어')
+  assert.equal(sent[0].input[1].content, 'Browser task "회의실 대관 신청해줘": handed_over (login_required), 2 steps done. Asked of the person: "직접 로그인해 주세요."\nAsked: 직접 로그인해 주세요.\nUser message: 했어')
   assert.deepEqual([out.kind, out.optionId, out.usage, Number.isFinite(out.ms)], ['settled', 'continue', { input_tokens: 90 }, true])
 })
 
@@ -210,7 +210,9 @@ test('the provider contract for the registry: items() is synchronous and read-on
   await startWall(w)
   const items = provider.items('dm')
   assert.deepEqual([items.length, items[0].kind, items[0].state, items[0].options.map(o => o.id)], [1, 'browser_task', 'handed_over', ['continue', 'retry', 'abandon', 'ask_page']])
-  assert.ok(items[0].summary.length <= 300 && !items[0].summary.includes('로그인'))
+  assert.ok(items[0].summary.length <= 300)
+  assert.ok(items[0].summary.includes('Asked of the person: "직접 로그인해 주시면 이어서 확인할게요."'), 'c43: what the person was asked is in the summary the resolver reads')
+  assert.ok(!/https?:|\/\w+\/\w+/.test(items[0].summary), 'no address, no page text')
   assert.deepEqual(provider.questions('dm', '했어').map(q => q.name), ['continue', 'retry', 'abandon', 'ask_page'].map(optionQuestionName))
   assert.deepEqual(provider.questions('nobody', '했어'), [])
   const read = provider.read(answersOf({ continue: 0.97, retry: 0.02, abandon: 0.01, ask_page: 0.02 }), 'dm')
@@ -282,4 +284,14 @@ test('c41: the recorded c59 answers: "했어" (continue .95, retry .70, ask_page
   // the wants of the plan: no recorded reply of either run settles to an option outside its acceptable set
   const accept = { ack: ['continue'], typo: ['continue'], okok: ['continue'], again: ['retry', 'continue'], again2: ['retry', 'continue'], stop: ['abandon'], stop2: ['abandon'], page: ['ask_page'], notyet: [], offtopic: [], change: ['change'], compound: ['continue', 'ask_page'] }
   for (const rec of [C57, C59]) for (const [id, probs] of Object.entries(rec)) { const o = outcome(probs); assert.ok(['uncertain', 'none'].includes(o) || accept[id].includes(o), `${id} settled ${o}`) }
+})
+
+test('c43: the summary carries what the person was asked (bounded, quotes neutralised), so a bare "했어" has a referent; without a question it is as before; the whole stays within 300 characters', () => {
+  const store = createBrowserTaskStore({ now: () => NOW })
+  const task = pausedTask(store, { code: 'login_required' })
+  assert.equal(openItemSummary(task), 'Browser task "회의실 대관 신청해줘": handed_over (login_required), 2 steps done.')
+  task.question = '예매 내역은 로그인이 필요해서 제가 볼 수 없었어요. 직접 "로그인"해 주시면 이어서 확인할게요.'
+  assert.equal(openItemSummary(task), 'Browser task "회의실 대관 신청해줘": handed_over (login_required), 2 steps done. Asked of the person: "예매 내역은 로그인이 필요해서 제가 볼 수 없었어요. 직접 \'로그인\'해 주시면 이어서 확인할게요."')
+  task.goal = '아주 긴 요청 '.repeat(40); task.question = '아주 긴 질문 '.repeat(40)
+  assert.ok(openItemSummary(task).length <= 300 && openItemSummary(task).includes('Asked of the person'), `${openItemSummary(task).length} characters`)
 })

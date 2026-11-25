@@ -6,4 +6,5 @@ export const PLANS_L8 = [
   { path: 'scripts/egdesk-browser-open-item-plan-v2.json', lane: 'L8', handWritten: 'c40: the same 12 replies as v1 with predictions for the narrowed option wording, pre-registered before the wording change' },
   { path: 'scripts/egdesk-browser-open-item-plan-v3.json', lane: 'L8', handWritten: 'c41: the same 12 replies as v1 and v2, predictions for the c41 reading rules written before the change (only ack and change expected to move)' },
   { path: 'scripts/egdesk-browser-open-item-combined-plan.json', lane: 'L8', handWritten: 'c42: the resolver referent question and the browser option predicates in one request on 12 replies and 4 controls, pre-registered before any code of the measurement (helper/egdesk-browser-open-item-combined.mjs)' },
+  { path: 'scripts/egdesk-browser-open-item-combined-plan-v2.json', lane: 'L8', handWritten: 'c43: combined-v1\'s replies with predictions for the summary that carries what the person was asked, pre-registered before the change' },
 ]

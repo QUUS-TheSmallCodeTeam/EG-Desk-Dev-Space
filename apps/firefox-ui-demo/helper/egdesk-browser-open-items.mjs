@@ -18,7 +18,7 @@ import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 export const OPEN_ITEMS_FLAG = 'EGDESK_BROWSER_OPEN_ITEMS'
 export const OPEN_ITEM_KIND = 'browser_task'
 export const MAX_ITEM_SUMMARY = 300
-export const MAX_ITEM_GOAL = 120
+export const MAX_ITEM_GOAL = 90, MAX_ITEM_ASKED = 110 // c43: the goal and what the person was asked share the 300 characters of the summary
 
 // state of a live task (code: no judgment). waiting: it asked the person something; handed_over: the next step is the person's (a sign-in, a code, a
 // control only the person operates, a checkout); stuck: it cannot go on for another reason; running: the loop is working.
@@ -52,7 +52,10 @@ export function openItemSummary(task) {
   const state = openItemState(task)
   if (!state) return null
   const code = state === 'running' ? null : word(task.pause?.code)
-  return compactText(`Browser task "${compactText(String(task.goal ?? '').replace(/"/g, "'"), MAX_ITEM_GOAL)}": ${state}${code ? ` (${code})` : ''}, ${task.steps + (state === 'running' ? task.liveStep : 0)} steps done.`, MAX_ITEM_SUMMARY)
+  // c43 (real, c62, combined-v1): the resolver reads the message against THIS text only. Without what the person was asked, a bare "했어" had no referent (0.01) while "로그인했어" had one (0.96), and a vague "응 실행해"
+  // read 0.94 as going on with it. The line the person was asked (the engine's own message, already quoted in the option request) goes in, bounded; code-built, no page text.
+  const asked = typeof task.question === 'string' && task.question.trim() ? ` Asked of the person: "${compactText(task.question.replace(/"/g, "'"), MAX_ITEM_ASKED)}"` : ''
+  return compactText(`Browser task "${compactText(String(task.goal ?? '').replace(/"/g, "'"), MAX_ITEM_GOAL)}": ${state}${code ? ` (${code})` : ''}, ${task.steps + (state === 'running' ? task.liveStep : 0)} steps done.${asked}`, MAX_ITEM_SUMMARY)
 }
 
 export function openItemOf(task, options = {}) {

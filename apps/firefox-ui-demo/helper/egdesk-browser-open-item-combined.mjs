@@ -12,6 +12,7 @@ import { OPEN_ITEM_HARD_LIMITS, guardedFetch } from './egdesk-browser-open-item-
 // runtime's own words: a test checks the runtime's source for them). Items are listed in the runtime's order: the built-ins first, the browser task last.
 // Pre-registered in scripts/egdesk-browser-open-item-combined-plan.json. Verdicts by code from the plan alone.
 export const COMBINED_PLAN_FILE = new URL('../scripts/egdesk-browser-open-item-combined-plan.json', import.meta.url)
+export const COMBINED_PLAN_FILES = Object.freeze({ v1: COMBINED_PLAN_FILE, v2: new URL('../scripts/egdesk-browser-open-item-combined-plan-v2.json', import.meta.url) })
 export const APPROVAL_SUMMARY = command => `A command waits for the person's yes or no before it runs: ${String(command).replace(/\s+/g, ' ').trim().slice(0, 200)}`
 export const MEMORY_SUMMARY = 'EG-Desk told the person it noted something from the conversation and is waiting for the person to confirm or refuse it.'
 const KEY = { cid: 'dm-1', clientThreadId: 'dm-1' }
@@ -140,6 +141,8 @@ export async function runCombined({ plan = loadCombinedPlan(), key = null, send 
     const wrapped = { decide: async request => { captured = await client.decide(request); return captured } }
     try {
       const verdict = await resolveOpenItem({ message: reply.message, items, client: wrapped, askedAt: NOW, extraQuestions })
+      // c43: a measurement stop (the ceiling, the limit) is not a reply that ran: c62 counted the unrun last control as a safe miss
+      if (verdict.status === 'none' && !['no_item_referred', 'several_items'].includes(verdict.reason) && record.stopped) break
       if (verdict.status === 'none' && !['no_item_referred', 'several_items'].includes(verdict.reason)) { record.stopped ??= `resolver_${verdict.reason}`; rows.push({ id: reply.id, message: reply.message, error: verdict.reason, verdict: 'safe_miss' }); break }
       const o = outcomeOf(items, verdict, browser)
       const refs = items.map((_, i) => captured?.answers?.[`oi_ref_${i + 1}`]?.probability ?? null)

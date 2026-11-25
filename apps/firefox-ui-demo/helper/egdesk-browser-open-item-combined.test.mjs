@@ -4,12 +4,13 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { APPROVAL_SUMMARY, MEMORY_SUMMARY, combinedStandIn, combinedVerdict, loadCombinedPlan, outcomeOf, planRequest, runCombined, scoreCombined, selectCombined } from './egdesk-browser-open-item-combined.mjs'
+import { APPROVAL_SUMMARY, COMBINED_PLAN_FILES, MEMORY_SUMMARY, combinedStandIn, combinedVerdict, loadCombinedPlan, outcomeOf, planRequest, runCombined, scoreCombined, selectCombined } from './egdesk-browser-open-item-combined.mjs'
 import { OPEN_ITEM_HARD_LIMITS, loadOpenItemPlan } from './egdesk-browser-open-item-measure.mjs'
 import { resolveOpenItem } from './egdesk-open-items.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const plan = loadCombinedPlan()
+const plan = loadCombinedPlan() // v1: as sent in c62 (its requests are the old summary; the sizes below are v2's)
+const plan2 = loadCombinedPlan(COMBINED_PLAN_FILES.v2)
 const KEY = 'egd-synthetic-not-a-key-0008-long-enough'
 
 test('the plan is pre-registered and valid: the 12 replies of v1 unchanged plus 4 controls with another open item, every prediction sums to one, the ceiling is 16000, the drop order is fixed', () => {
@@ -61,23 +62,27 @@ test('verdict by code: the right item and option, the wrong item, an option on a
   assert.deepEqual(scoreCombined({ replies: [1, 2] }, [{ id: 'a', verdict: 'correct' }, { id: 'b', verdict: 'wrong' }]), { ran: 2, notRun: 0, correct: 1, acceptable: 0, safeMiss: 0, wrong: 1, wrongReplies: ['b'], pass: false })
 })
 
-test('selectCombined: under 16000 the pre-registered order drops typo, again2, stop2, compound, okok; all 16 would be about 22.5k; the kept 11 fit', async () => {
-  const all = await selectCombined(plan, 99999)
-  assert.ok(Object.values(all.perReply).reduce((a, b) => a + b, 0) > 22000)
-  const fit = await selectCombined(plan, 16000)
-  assert.deepEqual(fit.dropped, ['typo', 'again2', 'stop2', 'compound', 'okok'])
-  assert.equal(fit.kept.length, 11); assert.ok(fit.estInputTokens <= 16000 && fit.estInputTokens > 15000, `estimated ${fit.estInputTokens}`)
-  assert.ok(fit.kept.includes('page') && fit.kept.includes('notyet') && fit.kept.includes('offtopic') && fit.kept.filter(id => id.startsWith('ctl-')).length === 4)
+test('selectCombined (plan v2): under 16000 the pre-registered order drops typo, again2, stop2, compound, okok, offtopic; all 16 are about 23k; the kept 10 fit with room for the +3% the real requests ran at', async () => {
+  const all = await selectCombined(plan2, 99999)
+  assert.ok(Object.values(all.perReply).reduce((a, b) => a + b, 0) > 22500)
+  const fit = await selectCombined(plan2, 16000)
+  assert.deepEqual(fit.dropped, ['typo', 'again2', 'stop2', 'compound', 'okok', 'offtopic'])
+  assert.equal(fit.kept.length, 10); assert.ok(fit.estInputTokens * 1.03 <= 16000 && fit.estInputTokens > 13500, `estimated ${fit.estInputTokens}`)
+  assert.ok(fit.kept.includes('page') && fit.kept.includes('notyet') && fit.kept.filter(id => id.startsWith('ctl-')).length === 4)
 })
 
-test('a full run with the stand-in: every request is one resolver request; the plan\'s own expectations pass; nothing wrong; what was dropped is recorded', async () => {
+test('a full run with the stand-in (plan v2): every request is one resolver request; the plan\'s own expectations pass; nothing wrong; what was dropped is recorded; an unrun reply is not counted as run', async () => {
   const bodies = []
-  const out = await runCombined({ plan, scripted: body => { bodies.push(body); return combinedStandIn(plan)(body) } })
-  assert.deepEqual([out.sent, out.rows.length, out.stoppedBecause, out.score.pass, out.score.wrong], [11, 11, null, true, 0])
-  assert.deepEqual(out.dropped, ['typo', 'again2', 'stop2', 'compound', 'okok'])
-  assert.deepEqual(out.rows.map(r => [r.id, r.outcome]), [['ack', 'browser:continue'], ['again', 'browser:retry'], ['stop', 'browser:abandon'], ['page', 'browser:ask_page'], ['notyet', 'none'], ['offtopic', 'none'], ['change', 'browser:change'], ['ctl-appr', 'approval'], ['ctl-appr-browser', 'browser:continue'], ['ctl-mem', 'memory'], ['ctl-mem-page', 'browser:ask_page']])
+  const out = await runCombined({ plan: plan2, scripted: body => { bodies.push(body); return combinedStandIn(plan2)(body) } })
+  assert.deepEqual([out.sent, out.rows.length, out.stoppedBecause, out.score.pass, out.score.wrong], [10, 10, null, true, 0])
+  assert.deepEqual(out.dropped, ['typo', 'again2', 'stop2', 'compound', 'okok', 'offtopic'])
+  assert.deepEqual(out.rows.map(r => [r.id, r.outcome]), [['ack', 'browser:continue'], ['again', 'browser:retry'], ['stop', 'browser:abandon'], ['page', 'browser:ask_page'], ['notyet', 'none'], ['change', 'browser:change'], ['ctl-appr', 'approval'], ['ctl-appr-browser', 'browser:continue'], ['ctl-mem', 'memory'], ['ctl-mem-page', 'browser:ask_page']])
   assert.ok(bodies.every(b => b.questions.filter(q => q.name.startsWith('oi_ref_')).length === (b.questions.length === 6 ? 1 : 2)), 'one referent question per open item')
+  assert.ok(bodies.every(b => b.questions.find(q => q.name === 'oi_ref_' + b.questions.filter(x => x.name.startsWith('oi_ref_')).length).instructions.includes('Asked of the person')), 'the browser item the resolver reads says what the person was asked')
   assert.ok(out.rows.every(r => Array.isArray(r.refs)), 'every referent probability is recorded')
+  // c62: the ceiling stopped the run after 10 of 11 and the unrun control was counted as a safe miss; now a stop is not a row
+  const ceiling = await runCombined({ plan: plan2, budget: 6000, scripted: combinedStandIn(plan2) })
+  assert.equal(ceiling.stoppedBecause, 'token_ceiling'); assert.equal(ceiling.rows.length, ceiling.sent); assert.ok(ceiling.score.notRun > 0 && ceiling.rows.every(r => !r.error))
 })
 
 test('a model that settles every message to the browser task is caught; one that answers yes to the wrong item is caught; the guards hold', async () => {
