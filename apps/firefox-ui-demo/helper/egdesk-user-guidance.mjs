@@ -98,12 +98,13 @@ export function createUserGuidanceStore({ dataDir, now = Date.now, log = () => {
 /**
  * createUserGuidanceHttpHandler({ store, enabled, port, guard, readJson, send }) -> async (req, res, url) => boolean
  * GET  /v1/user-guidance                       the record (closed words, sources by reference, history)
+ * GET  /v1/user-guidance/receipts?recent=5      what the nunchi did on the latest turns (u3: turns it did not start included, with the reason)
  * POST /v1/user-guidance/<id>/<action>         action: apply | revert | dismiss | restore   (the person's explicit action)
  * Off (404) unless enabled(); loopback only (the bridge's guard); no body is read for the action.
  */
 export const USER_GUIDANCE_PATH = '/v1/user-guidance'
 const ACTIONS = Object.freeze({ apply: 'applied', revert: 'reverted', dismiss: 'dismissed', restore: 'candidate' })
-export function createUserGuidanceHttpHandler({ store, enabled = () => false, port = 39218, guard, send } = {}) {
+export function createUserGuidanceHttpHandler({ store, enabled = () => false, port = 39218, guard, send, receipts = null } = {}) {
   if (!store) throw new TypeError('a user guidance store is required')
   return async (req, res, url) => {
     if (url.pathname !== USER_GUIDANCE_PATH && !url.pathname.startsWith(`${USER_GUIDANCE_PATH}/`)) return false
@@ -112,6 +113,13 @@ export function createUserGuidanceHttpHandler({ store, enabled = () => false, po
     try { on = enabled() === true } catch { on = false }
     if (!on) return reply(404, { status: 'off' })
     if (!guard(req, port)) return reply(403, { status: 'refused', reason: 'loopback-required' })
+    // GET /v1/user-guidance/receipts?recent=5 (u3, for checking the feature in the real window): what the nunchi did on the latest turns, closed words and numbers only, never what anybody wrote
+    if (url.pathname === `${USER_GUIDANCE_PATH}/receipts`) {
+      if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); return reply(405, { status: 'refused', reason: 'get-required' }) }
+      if (typeof receipts !== 'function') return reply(404, { status: 'off' })
+      const asked = Number(url.searchParams.get('recent') ?? 5)
+      return reply(200, { status: 'ok', receipts: receipts(Number.isSafeInteger(asked) ? asked : 5) })
+    }
     if (url.pathname === USER_GUIDANCE_PATH) {
       if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); return reply(405, { status: 'refused', reason: 'get-required' }) }
       return reply(200, { status: 'ok', entries: store.list() })

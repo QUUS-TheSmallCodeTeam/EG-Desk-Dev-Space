@@ -188,12 +188,12 @@ export const NUNCHI_MERGED_CONTROLS = Object.freeze([
 ])
 
 /** buildNunchiMergedPlans() -> [{ plan, files, estInputTokens, preregistration }]: two chunks of six (the declared ceiling of each is at most 12,000). */
-export function buildNunchiMergedPlans({ setPrefix = 'nunchi-merge-v1' } = {}) {
+export function buildNunchiMergedPlans({ setPrefix = 'nunchi-merge-v1', controls = NUNCHI_MERGED_CONTROLS, perChunk = 6 } = {}) {
   const chunks = []
-  for (let i = 0; i < NUNCHI_MERGED_CONTROLS.length; i += 6) {
+  for (let i = 0; i < controls.length; i += perChunk) {
     const a = adder(), pre = []
-    for (const c of NUNCHI_MERGED_CONTROLS.slice(i, i + 6)) {
-      const { input, questions } = nunchiRequest({ message: c.user, previousReply: c.prev })
+    for (const c of controls.slice(i, i + perChunk)) {
+      const { input, questions } = nunchiRequest({ message: c.user, previousReply: c.prev ?? null })
       a.add(c.id, { model: DECISION_MODEL, input, questions }, [])
       a.requests.at(-1).recordOnly = true
       pre.push({ id: c.id, merged: true, expect: c.expect })
@@ -229,3 +229,27 @@ export function nunchiMergedReport(results, preregistration) {
     '', `hard: ${tally('hard').passed}/${tally('hard').total}; soft: ${tally('soft').passed}/${tally('soft').total}`].join('\n')
   return { rows, hard: tally('hard'), soft: tally('soft'), text }
 }
+
+// ---- u3: a second fresh set, asked the way the Claude path asks (no assistant message before the turn) ----
+// nunchi-merge-v1 (u2) found, on turns the rule was not tuned on, 6/6 negatives, and two misses among the instructions (한국어로 말해줘 at .83, a "묻지 말고" turn whose subject was not read) plus the soft
+// format one. The bar was then lowered to the product's yes/no bars (.8 / .2), which the v1 answers were seen by, so v1 cannot validate that change either. These sixteen turns are new and carry
+// NO previous message: the Claude path does not send one (egress gate: Codex live threads only), and the real-window sentence "너무 길어. 앞으로는 짧게 말해" has to be read from the person's words alone.
+export const NUNCHI_FRESH_CONTROLS = Object.freeze([
+  { id: 'f-korean-not-english', user: '영어 말고 한국어로 답해줘', expect: { change: true, about: 'language', language: 'korean', severity: 'hard' } },
+  { id: 'f-shorter-please', user: '좀 짧게 부탁해', expect: { change: true, about: 'length', direction: 'less', severity: 'hard' } },
+  { id: 'f-three-lines', user: '앞으로 답변은 세 줄 이내로', expect: { change: true, about: 'length', direction: 'less', severity: 'hard' } },
+  { id: 'f-too-long-from-now', user: '너무 길어. 앞으로는 짧게 말해', expect: { change: true, about: 'length', direction: 'less', severity: 'hard' } },
+  { id: 'f-no-need-to-ask', user: '그건 묻지 않아도 돼, 바로 진행해', expect: { change: true, about: 'repeated_question', severity: 'hard' } },
+  { id: 'f-japanese', user: '일본어로 써줘', expect: { change: true, about: 'language', language: 'japanese', severity: 'hard' } },
+  { id: 'f-only-the-function', user: '아니 파일 전체가 아니라 함수 하나만 고치라고', expect: { change: true, about: 'scope', direction: 'less', severity: 'soft' } },
+  { id: 'f-hurry', user: '빨리 좀 해줘, 너무 오래 걸려', expect: { change: true, about: 'speed', severity: 'soft' } },
+  { id: 'f-nice', user: '오 좋네', expect: { change: false, severity: 'hard' } },
+  { id: 'f-when-possible', user: '그거 언제까지 가능해?', expect: { change: false, severity: 'hard' } },
+  { id: 'f-next-step', user: '다음 단계 진행해', expect: { change: false, severity: 'hard' } },
+  { id: 'f-i-see', user: '음 그렇구나 알겠어', expect: { change: false, severity: 'hard' } },
+  { id: 'f-show-file', user: '이 파일 내용 알려줘', expect: { change: false, severity: 'hard' } },
+  { id: 'f-yes', user: '응', expect: { change: false, severity: 'hard' } },
+  { id: 'f-thanks', user: '고마워 수고했어', expect: { change: false, severity: 'hard' } },
+  { id: 'f-when-deploy', user: '그럼 배포는 언제 해?', expect: { change: false, severity: 'hard' } },
+])
+export const buildNunchiFreshPlans = () => buildNunchiMergedPlans({ setPrefix: 'nunchi-merge-v2', controls: NUNCHI_FRESH_CONTROLS, perChunk: 8 })

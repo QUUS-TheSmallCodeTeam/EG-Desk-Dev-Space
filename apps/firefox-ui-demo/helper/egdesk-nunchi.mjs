@@ -1,5 +1,6 @@
 import { choiceQuestion, compactText, readChoice } from './egdesk-decision-questions.mjs'
 import { previousReplyExcerpt } from './egdesk-previous-reply.mjs'
+import { NO, YES } from './egdesk-wiki-reconstruction.mjs'
 
 // L7 u1 (U17, "눈치"): the Decision model reads the person's REACTION to what the assistant just did or said, and the guidance is adjusted. Not a word list: the reading is a
 // closed-answer judgment (the decision model answers fixed questions, the code turns the accepted answers into guidance from a closed table).
@@ -15,7 +16,7 @@ import { previousReplyExcerpt } from './egdesk-previous-reply.mjs'
 //    u2 (real window, 11-26 02:51: "너무 길어. 앞으로는 짧게 말해" left no candidate): the reactions that ask the assistant to work differently (correction, instruction_change, complaint, urging)
 //    are NEIGHBOURS to the model: the same turn read correction .78 / instruction_change .14, a repeated-question complaint urging .68 / complaint .29, a "shorter please" complaint .44 /
 //    correction .24 / urging .11: the top option is under the bar although the model is sure the person asks for a change. Whether the turn asks for a change is therefore read from the MERGED
-//    options (an implicit yes/no): P(yes) = the probability of those four options together, installed when it is at least .85 (P(no) at least .85 reads "no change"); the same for how forceful
+//    options (an implicit yes/no): P(yes) = the probability of those four options together, installed when it is at least .8 (at most .2 reads "no change": the product's yes/no bars, u3); the same for how forceful
 //    the turn is (clear + strong together against mild). What the change is about, its direction and its language keep their own choice bar. The single kind (praise, short approval, none ...)
 //    keeps the choice bar as before. Validated on the recorded answers of nunchi-eval-v1 (reports/l7-u2.md).
 // 2. What is done with a reading (code, from a closed table; nothing the person wrote is copied, nothing free-form comes from the model):
@@ -27,7 +28,10 @@ export const NUNCHI_KEY = 'egdesk_nunchi'
 export const ACTIONABLE_KINDS = Object.freeze(['correction', 'complaint', 'instruction_change', 'urging'])
 export const NUNCHI_BAR = Object.freeze({ confidence: 0.85, margin: 0.2 })
 // the merged readings (does the turn ask for a change; is it more than a passing remark): the probability of the merged options together
-export const NUNCHI_MASS = 0.85
+// u3: the merged readings are yes/no readings and take the product's yes/no bars (YES .8, NO .2: egdesk-wiki-reconstruction.mjs, the same bars every predicate of the memory layer uses). u2 set
+// .85 (the choice bar) and the first fresh validation (nunchi-merge-v1, 11-26) read "한국어로 말해줘" at .83: a plain instruction missed by two hundredths. The negatives of both sets stay far
+// from either bar (at most .17 in the real examples that carry no request, .03 in the fresh controls), so the lower bar costs no false install on the recorded answers.
+export const NUNCHI_MASS = Object.freeze({ yes: YES, no: NO })
 export const NUNCHI_LIMITS = Object.freeze({ messageChars: 600, previousChars: 600, conversationLines: 4, standingLines: 4, timeoutMs: 3000 })
 
 export const KINDS = Object.freeze({
@@ -95,13 +99,13 @@ const massOf = (answers, name, values) => {
   if (a?.type !== 'choice' || !Array.isArray(a.probabilities)) return null
   return a.probabilities.reduce((n, row) => n + (values.includes(row?.value) && Number.isFinite(row.probability) ? row.probability : 0), 0)
 }
-const decided = mass => (mass === null ? null : mass >= NUNCHI_MASS ? true : 1 - mass >= NUNCHI_MASS ? false : null)
+const decided = mass => (mass === null ? null : mass >= NUNCHI_MASS.yes ? true : mass <= NUNCHI_MASS.no ? false : null)
 
 /**
  * readNunchi(answers) -> { kind, about, strength, direction, language, change, forceful, changeMass, forceMass }. Pure.
  * kind, about, strength, direction, language: a value only where that choice is installed at the bar, else null.
- * change: true / false / null: whether the turn asks the assistant to work differently, read from the merged options (correction, instruction_change, complaint, urging) at .85.
- * forceful: true / false / null: clear or strong together against mild, at .85. changeMass, forceMass: the merged probabilities (numbers, for receipts and calibration).
+ * change: true / false / null: whether the turn asks the assistant to work differently, read from the merged options (correction, instruction_change, complaint, urging) at the yes/no bars (.8 / .2).
+ * forceful: true / false / null: clear or strong together against mild, at the same bars. changeMass, forceMass: the merged probabilities (numbers, for receipts and calibration).
  */
 export function readNunchi(answers) {
   const a = normalize(answers), out = {}

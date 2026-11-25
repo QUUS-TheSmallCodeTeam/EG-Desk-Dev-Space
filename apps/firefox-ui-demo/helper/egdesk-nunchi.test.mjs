@@ -27,7 +27,7 @@ test('reading: a choice is installed only at the bar (confidence (top - 1/N)/(1 
   assert.deepEqual(NUNCHI_BAR, { confidence: 0.85, margin: 0.2 })
   assert.deepEqual(readNunchi(answers(KOREAN_CORRECTION)), { kind: 'correction', about: 'language', strength: 'clear', direction: 'not_applicable', language: 'korean', change: true, forceful: true, changeMass: 0.971, forceMass: 0.975 })
   const weak = answers(KOREAN_CORRECTION, 0.7)   // 8 options: (0.7 - .125) / .875 = .657
-  const w = readNunchi(weak); assert.deepEqual([w.kind, w.about, w.strength, w.direction, w.language, w.change], [null, null, null, null, null, null], 'the single choices and the merged kind are all under their bars'); assert.ok(w.changeMass < 0.85)
+  const w = readNunchi(weak); assert.deepEqual([w.kind, w.about, w.strength, w.direction, w.language], [null, null, null, null, null], 'every single choice is under its bar'); assert.ok(w.changeMass > 0.8 && w.changeMass < 0.85, 'the merged options hold .83 of the answer: at the yes bar of .8 (and under the .85 of u2)'); assert.equal(w.change, true)
   const mixed = { ...answers(KOREAN_CORRECTION), nk_kind: choiceAnswer(q('nk_kind'), 'correction', 0.6) }
   assert.deepEqual([readNunchi(mixed).kind, readNunchi(mixed).about], [null, 'language'], 'each question on its own')
   assert.deepEqual(readNunchi({}), { kind: null, about: null, strength: null, direction: null, language: null, change: null, forceful: null, changeMass: null, forceMass: null }); assert.deepEqual(readNunchi(null).kind, null)
@@ -82,7 +82,7 @@ const wire = (kind, strength) => {
 const readWire = (kind, strength, extra = []) => readNunchi(normalizeDecisionResponse({ answers: [...wire(kind, strength), ...extra] }, nunchiRequest({ message: 'x' }).questions).answers)
 
 test('u2: a turn that asks for a change is read from the merged options: the real answers that split between neighbours (correction .78 / instruction_change .14 ...) now install; praise, approval and a new question do not', () => {
-  assert.equal(NUNCHI_MASS, 0.85); assert.deepEqual(ACTIONABLE_KINDS, ['correction', 'complaint', 'instruction_change', 'urging'])
+  assert.deepEqual(NUNCHI_MASS, { yes: 0.8, no: 0.2 }, 'the product\'s yes/no bars'); assert.deepEqual(ACTIONABLE_KINDS, ['correction', 'complaint', 'instruction_change', 'urging'])
   // real answers of the control "야 한글로 보고해" (the single choice read 0.75 under the .85 bar: nothing was installed, the window of 02:51 left no candidate)
   const language = readWire({ correction: 0.78, instruction_change: 0.14, praise: 0.01, complaint: 0.01, none: 0.06 }, { clear: 0.96, mild: 0.03, strong: 0.01 })
   assert.deepEqual([language.kind, language.change, language.changeMass, language.forceful], [null, true, 0.93, true], 'the single kind is under the bar, the merged reading is not')
@@ -92,8 +92,10 @@ test('u2: a turn that asks for a change is read from the merged options: the rea
     const r = readWire(kind, strength); assert.deepEqual([r.change, r.changeMass], [false, 0], name)
   }
   assert.equal(readWire({ none: 1 }, { mild: 0.88, clear: 0.12 }).forceful, false, 'mild: not more than a passing remark'); assert.equal(readWire({ correction: 1 }, { clear: 0.85, strong: 0.01, mild: 0.14 }).forceful, true, 'clear and strong together')
-  // the boundary: .84 is not enough (a real instruction_change answer at 0.82 + 0.02), .85 is
-  assert.equal(readWire({ instruction_change: 0.82, correction: 0.02, none: 0.14 }, { clear: 1 }).change, null); assert.equal(readWire({ instruction_change: 0.8, correction: 0.05, none: 0.15 }, { clear: 1 }).change, true)
+  // the boundary: .78 is not enough, .81 is (u3: "한국어로 말해줘" read .83 in the fresh validation and missed the .85 of u2); at most .2 reads "no change", between is not read
+  assert.equal(readWire({ instruction_change: 0.76, correction: 0.02, none: 0.22 }, { clear: 1 }).change, null); assert.equal(readWire({ instruction_change: 0.76, correction: 0.05, none: 0.19 }, { clear: 1 }).change, true)
+  assert.equal(readWire({ none: 0.8, correction: 0.15, praise: 0.05 }, { clear: 1 }).change, false); assert.equal(readWire({ none: 0.7, correction: 0.25, praise: 0.05 }, { clear: 1 }).change, null)
+  assert.equal(readWire({ correction: 0.62, complaint: 0.21, none: 0.17 }, { clear: 1 }).change, true, 'the fresh "한국어로 말해줘" shape: .83 in total')
   assert.equal(readWire({ correction: 0.45, none: 0.35, complaint: 0.1 }, { clear: 0.6, mild: 0.4 }).change, null, 'a mix of "asks for a change" and "none" is not read')
 })
 
