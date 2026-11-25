@@ -2,7 +2,7 @@
 // one-question form read "다음 결제일이 언제야?" as an answer at 0.01, in c31, c34 and c35 (three wordings).
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { ENTRY_ANSWER, ENTRY_ANSWER_ASK, ENTRY_WEB, ENTRY_WEB_ASK, decideBrowserEntry, entryQuestions, readBrowserEntry } from './egdesk-browser-task.mjs'
+import { ENTRY_ANSWER, ENTRY_ANSWER_ASK, ENTRY_WEB, ENTRY_WEB_ASK, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, entryQuestions, readBrowserEntry, wallCandidates } from './egdesk-browser-task.mjs'
 import { lintGroupedRequest } from './egdesk-decision-grouping.mjs'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
 import { triageTurn } from './egdesk-turn-memory.mjs'
@@ -58,4 +58,43 @@ test('the ride-along carries all the entry predicates (the two request predicate
   const out = await triageTurn({ message: 'x', client, askedAt: 1, extraQuestions: riders })
   assert.deepEqual(sent[0].slice(-4), ['browser_entry', 'browser_entry_answer', 'browser_entry_card_0', 'browser_entry_card_1'])
   assert.deepEqual(Object.keys(out.extra), ['browser_entry', 'browser_entry_answer', 'browser_entry_card_0', 'browser_entry_card_1'])
+})
+
+// ---- c33: the settings error page (real, browser-live-settings-current, 5 runs, 0 passes on the current bytes) ----
+const errorCards = [{ cardId: 'card', host: 'account.example.test', title: '오류 | 계정', shows: ['일시적인 오류가 발생했습니다.', '잠시 후 다시 시도해 주세요. (오류 500)'] }]
+const REAL = { browser_entry: 0.14, browser_entry_answer: 0, browser_entry_card_0: 0.52 } // the real numbers
+
+test('c33: a request that cannot be answered without a page, on an open page the page predicate says does not hold it, asks the interruption follow-up; a decided interruption enters, an ordinary page does not', () => {
+  const first = read(REAL, errorCards)
+  assert.equal(first.kind, 'not_browser', 'without the follow-up this is the failed real run')
+  assert.deepEqual(wallCandidates(first, errorCards), [0], 'the follow-up is asked (it was not: it ran only for a decided web task)')
+  assert.equal(read({ ...REAL, browser_entry_wall_0: 1 }, errorCards).cardId, 'card', 'the page is an interruption: it enters, the step hands the page over')
+  assert.equal(read({ ...REAL, browser_entry_wall_0: 0.02 }, errorCards).kind, 'not_browser', 'an ordinary page that does not hold the request is still not entered')
+  assert.equal(read({ ...REAL, browser_entry_wall_0: 0.5 }, errorCards).kind, 'not_browser', 'an undecided interruption does not enter')
+  // the controls stay out: answerable without a page never reaches the follow-up, whatever the page shows
+  const control = read({ browser_entry: 0.02, browser_entry_answer: 0.95, browser_entry_card_0: 0.1 }, errorCards)
+  assert.deepEqual([control.kind, wallCandidates(control, errorCards)], ['not_browser', []])
+  assert.equal(read({ browser_entry: 0.02, browser_entry_answer: 0.95, browser_entry_card_0: 0.1, browser_entry_wall_0: 1 }, errorCards).kind, 'not_browser', 'even a decided interruption does not enter an answer')
+  // a page without known lines is not asked; a card decided yes already enters
+  assert.deepEqual(wallCandidates(first, [{ cardId: 'card', host: 'account.example.test', title: '오류 | 계정' }]), [])
+  assert.deepEqual(wallCandidates(read({ ...REAL, browser_entry_card_0: 0.9 }, errorCards), errorCards), [])
+  // two cards: exactly one interruption and every other card decided no
+  const two = [...errorCards, { cardId: 'mail', host: 'mail.example.test', title: '받은 편지함', shows: ['받은 편지함'] }]
+  assert.equal(read({ ...REAL, browser_entry_card_1: 0.05, browser_entry_wall_0: 1, browser_entry_wall_1: 0.02 }, two).cardId, 'card')
+  assert.equal(read({ ...REAL, browser_entry_card_1: 0.05, browser_entry_wall_0: 1, browser_entry_wall_1: 1 }, two).kind, 'not_browser', 'two interruptions: no card')
+  assert.notEqual(read({ ...REAL, browser_entry_card_1: 0.5, browser_entry_wall_0: 1 }, two).kind, 'browser', 'another card undecided: not entered on a wall')
+})
+
+test('c33: through the entry the real numbers end as an error_page hand-over after one follow-up request that quotes the page', async () => {
+  const sent = []
+  const answers = wire => wire.questions.map(q => ({ name: q.name, type: 'predicate', probability: q.name === 'browser_entry_wall_0' ? 1 : REAL[q.name] ?? 0 }))
+  const client = createDecisionClient({ getApiKey: async () => 'egd-synthetic-not-a-key-0008', fetchImpl: async (_u, init) => { const wire = JSON.parse(init.body); sent.push(wire); return { ok: true, text: async () => JSON.stringify({ answers: answers(wire) }) } } })
+  const provider = { directEntryEnabled: () => true, reflexScope: () => ({ client, isDecisionCurrent: () => true, callTool: async () => ({ observationId: 'o', snapshot: { text: errorCards[0].shows } }) }),
+    runDirectTask: async () => ({ outcome: 'handoff', pageState: 'error_page', steps: [{ url: 'https://account.example.test/x', actions: [] }], state: null }) }
+  const entry = createDirectBrowserEntry({ provider, store: createBrowserTaskStore(), cardTextInEntry: () => true })
+  const out = await entry.handle({ run: { runId: 'r', browserBinding: { cards: [{ cardId: 'card', permission: 'interact' }] } }, conversationKey: 'dm', message: '마케팅 알림 꺼줘', hosts: { card: 'account.example.test' }, titles: { card: '오류 | 계정' } })
+  assert.deepEqual([out.handled, JSON.parse(out.note).egdesk_browser_task.code], [true, 'error_page'])
+  assert.deepEqual(sent.map(b => b.questions.map(q => q.name)), [['browser_entry', 'browser_entry_answer', 'browser_entry_card_0'], ['browser_entry_wall_0']])
+  assert.match(sent[1].input[1].content, /"일시적인 오류가 발생했습니다\."/)
+  assert.equal(lintGroupedRequest({ input: sent[1].input, questions: sent[1].questions }).ok, true)
 })

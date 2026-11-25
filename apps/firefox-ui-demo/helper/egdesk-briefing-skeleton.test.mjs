@@ -838,7 +838,7 @@ test('coverage request per fact: the board quoted ONCE in the user message, each
   const out = await run(ORDER, { answer: S3_ANSWER, request: S3_REQUEST })
   const cov = out.judge.calls.at(-1)
   assert.deepEqual([cov.stage, cov.names], ['coverage', ['onboard_F1', 'onboard_F2', 'onboard_F3']])
-  assert.equal(cov.packet.input[0].content, 'You are a system judge checking whether a finished board briefing shows given facts. Judge only from the quoted parts of the board and the quoted fact. A fact that is several values joined by " · " (the cells of a table row) is shown when every value is on the board, in any order or form; a date may be written as month-day in the fact and in full on the board.' /* c38 */)
+  assert.equal(cov.packet.input[0].content, 'You are a system judge checking whether a finished board briefing shows given facts. Judge only from the quoted parts of the board and the quoted fact.' /* c39: exactly the c21 text again */)
   const user = cov.packet.input[1].content
   assert.ok(user.startsWith(`Request, quoted exactly as a JSON string: "${S3_REQUEST}"\n\nThe board, its parts quoted in order as JSON: [{"text":"v1과 v2 안을 나란히`)); assert.equal(user.split('The board, its parts quoted').length, 2)
   assert.ok(!JSON.stringify(cov.packet).includes(S3_ANSWER), 'the whole answer is not sent again: only its facts, one per question')

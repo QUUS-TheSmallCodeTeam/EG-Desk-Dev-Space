@@ -945,7 +945,7 @@ test('coding task, positive: the fix lands in src/price.mjs; the arbiter reads t
   for (const name of ['coding.changed', 'coding.lastTests', 'coding.earlierFailure', 'coding.answerEvidence', 'coding.nothingOutside', 'draftCheck', 'undoRecords']) assert.equal(checks[name]?.ok, true, name)
   assert.deepEqual(turn.coding.tree, { changed: ['src/price.mjs'], added: [], removed: [] })
   assert.deepEqual(turn.coding.commands.map(c => [c.exitCode, c.health, c.summary.passed, c.summary.failed]), [[1, 'unhealthy', 4, 1], [0, 'healthy', 5, 0]])
-  assert.equal(turn.coding.evidenceItems, 2); assert.equal(turn.coding.opaqueTools, 3, 'only the read and the two edits stay content-free references: the two test runs are evidence')
+  assert.equal(turn.coding.evidenceItems, 2); assert.equal(turn.coding.opaqueTools, 1, 'only the read stays a content-free reference: the two test runs and the two edits (preview, applied) are evidence')
   assert.ok(seen.some(s => s.claimsPass && !s.failed), 'the check judged the claim against evidence whose last counts show no failure')
   assert.deepEqual(w.ranCommands, ['node --test', 'node --test']); assert.deepEqual(rec.cleanup.failures, [])
 })

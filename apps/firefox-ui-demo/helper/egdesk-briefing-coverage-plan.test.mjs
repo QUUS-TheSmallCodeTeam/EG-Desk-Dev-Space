@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -65,4 +66,14 @@ test('c37 coverage plan: the check-11 request is what the product sends today (s
   assert.match(body.questions.find(q => q.name === 'stated_F1').instructions, /^The sentence, quoted exactly as a JSON string: "devlog 기록을 날짜순으로 정리했습니다\."/)
   assert.ok(!wire.includes('| 날짜 | 진행 상황 |'), 'the answer itself is not in the request, only its facts'); assert.doesNotMatch(wire, /"key"|outputId|viewId|"rect"|\/Users\//)
   assert.deepEqual(built.flows.metaSentences, { status: 'presented', stages: ['place', 'fit', 'order', 'fill_check', 'coverage', 'coverage'], unshowable: [] }) // c38: the answer has 7 facts: 6 in the first coverage request (the one in the plan), the 7th in a second
+})
+
+test('c39: the plain-fact requests are the c21 bytes again (F2 measured .96 / .99 on them); the table-row guidance is in the question of a fact that IS a table row only', async () => {
+  const sha = f => createHash('sha256').update(readFileSync(path.join(factsDir, 'requests', `${f}.json`))).digest('hex').slice(0, 12)
+  // c43 (plan v3): c38 had put the guidance in the request's rule text, and "11월 6일 v1 발송" fell from .96 to .21 (complete) and .04 (incomplete). These are the sha256 of the bytes that were .96.
+  assert.deepEqual(['f-complete', 'f-incomplete', 'f-as-attached'].map(sha), ['8411a0b3a438', '911d93d653cf', '1246a2d3a5bd'])
+  const wire = readFileSync(path.join(factsDir, 'requests', 'f-meta-sentences.json'), 'utf8'), body = JSON.parse(wire), text = n => body.questions.find(q => q.name === n).instructions
+  for (const n of ['onboard_F3', 'onboard_F4', 'onboard_F5']) assert.match(text(n), /This fact is the cells of a table row joined by " · "/, n)
+  for (const n of ['onboard_F1', 'onboard_F2', 'onboard_F6', 'stated_F1', 'stated_F2', 'stated_F5']) assert.doesNotMatch(text(n), /table row/, `${n}: a plain sentence gets no row guidance`)
+  assert.doesNotMatch(body.input[0].content, /table row|month-day/, 'the request rule is the c21 text (plus the materials phrase of the stated request)')
 })
