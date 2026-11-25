@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { CURRENT_ACTION_GATE_POLICY, actionGate, classifyAction } from './egdesk-browser-action-classifier.mjs'
+import { authOpaqueOn, isAuthOpaqueUrl } from './egdesk-auth-opaque.mjs'
 import { DEFAULT_NAVIGATION_POLICY, evaluateNavigation, normalizeNavigationPolicy, sitePatternsFromInput } from './egdesk-browser-url-policy.mjs'
 
 // Lane A/native adapter: chrome /chat/send includes selectedSources from the
@@ -466,6 +467,8 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
   // budgetMs is the same deadline as a relative budget, so Firefox can spend
   // it on its own monotonic clock (REA 웹8, BRW-12).
   async function requestUi(payload, binding, run, trace = {}, { budgetMs = timeoutMs } = {}) {
+    // c34 (flag EGDESK_TERMINAL_OPEN_URL): a card showing an AI provider's sign-in or account page, and any request to go to one, is opaque to the Agent (no observe, screenshot, click, fill, navigate, open)
+    if (payload.kind !== 'cancel' && authOpaqueOn() && (isAuthOpaqueUrl(payload.binding?.url) || isAuthOpaqueUrl(payload.url) || isAuthOpaqueUrl(payload.action?.url))) reject('BROWSER_CARD_OPAQUE', 'This Browser Card shows a sign-in page of an AI service. The person signs in themselves; EG-Desk does not observe or operate it')
     const requestId = randomUUID()
     const targetCardEpoch = payload.selection?.cardEpoch || payload.binding?.cardEpoch || payload.cardEpoch
     if (!short(targetCardEpoch, 160)) reject('BROWSER_UI_PROTOCOL', 'Browser request has no exact Card generation')

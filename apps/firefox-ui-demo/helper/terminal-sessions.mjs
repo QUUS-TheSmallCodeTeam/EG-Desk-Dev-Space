@@ -17,8 +17,8 @@ export class TerminalSessionRegistry {
   // runWatch (CODE-06, egdesk-terminal-run-watch.mjs) reads output and typed
   // lines to prepare a test/build result that read() hands out once.
   constructor({ now = Date.now, maxExitReceipts = 128, exitReceiptTtlMs = 10 * 60 * 1000, maxOutputBytes = 256 * 1024, onExit = null, runWatch = null,
-    detachedTtlMs = 10 * 60_000, maxDetached = 8, schedule = setTimeout, cancel = clearTimeout } = {}) {
-    Object.assign(this, { now, maxExitReceipts, exitReceiptTtlMs, maxOutputBytes, onExit, runWatch })
+    detachedTtlMs = 10 * 60_000, maxDetached = 8, schedule = setTimeout, cancel = clearTimeout, urlOpen = null } = {}) {
+    Object.assign(this, { now, maxExitReceipts, exitReceiptTtlMs, maxOutputBytes, onExit, runWatch, urlOpen })
     Object.assign(this, { detachedTtlMs, maxDetached, schedule, cancel, bridgeInstance: randomUUID() })
     this.active = new Map()
     this.exitReceipts = new Map()
@@ -267,7 +267,8 @@ export class TerminalSessionRegistry {
     const data = entry?.output.toString('utf8') || ''
     if (entry) entry.output = Buffer.alloc(0)
     const runResult = this.runWatch?.take?.(id) ?? null
-    return { ...state, data, ...(runResult ? { runResult } : {}) }
+    const openUrls = this.urlOpen?.take?.(id) ?? [] // c34 (flag EGDESK_TERMINAL_OPEN_URL): addresses a program of this session asked to open, once
+    return { ...state, data, ...(runResult ? { runResult } : {}), ...(openUrls.length ? { openUrls } : {}) }
   }
 
   kill(id) {

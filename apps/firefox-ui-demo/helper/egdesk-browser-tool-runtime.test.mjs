@@ -31,7 +31,7 @@ function omitDispatchFields(receipt, ...fields) {
   for (const field of fields) delete dispatchReceipt[field]
   return { ...receipt, dispatchReceipt }
 }
-function fixture(permission = 'interact') {
+function fixture(permission = 'interact', { bindUrl = 'https://example.test/local' } = {}) {
   let owner = 'engine-account-1'
   let current = snapshot()
   let actionCalls = 0
@@ -43,7 +43,7 @@ function fixture(permission = 'interact') {
     requests.push(request)
     if (request.kind === 'bind') return { requestId: request.requestId, status: 'bound',
       binding: { cardId: 'browser-1', cardEpoch: 'card-epoch-1', profileId: 'firefox-default',
-        accountId: 'fixture-account', userContextId: 0, url: 'https://example.test/local',
+        accountId: 'fixture-account', userContextId: 0, url: bindUrl,
         engineAccountKey: 'codex:chatgpt:fixture@example.test', authorityEpoch: 0 } }
     if (request.kind === 'observe') return { requestId: request.requestId, status: 'observed', snapshot: current }
     if (request.kind === 'act') {
@@ -1998,4 +1998,25 @@ test('BRW-10: click, pointer press and typing share the action-classifier gate; 
   seen = await open.observe()
   open.setAct(request => clicked(open, request))
   assert.equal((await open.dispatch('egdesk_browser_click', clickArgs(seen))).status, 'postcondition-observed')
+})
+
+// L1 c34 compliance: with the terminal-opener flag (EGDESK_TERMINAL_OPEN_URL=on) a Browser Card that shows an AI provider's sign-in page is opaque to the Agent.
+test('c34: a card on an AI provider\'s sign-in domain cannot be observed, screenshotted, clicked or navigated by an Agent when the flag is on; flag off and other sites are unchanged', async () => {
+  const saved = process.env.EGDESK_TERMINAL_OPEN_URL, at = uri => ({ ...source(), sourceRef: { ...source().sourceRef, uri } })
+  try {
+    for (const url of ['https://claude.com/cai/oauth/authorize?state=s', 'https://platform.claude.com/oauth/code/callback?code=c', 'https://claude.ai/login', 'https://auth.openai.com/log-in']) {
+      process.env.EGDESK_TERMINAL_OPEN_URL = 'on'
+      const f = fixture('interact', { bindUrl: url }), prepared = f.service.prepare({ selectedSources: [at(url)] })
+      await f.service.bind(run, prepared)
+      const before = f.requests.length
+      for (const tool of ['egdesk_browser_observe', 'egdesk_browser_screenshot']) await assert.rejects(f.service.dispatch(run, { tool, arguments: { cardId: 'browser-1' } }), { code: 'BROWSER_CARD_OPAQUE' }, `${tool} on ${url}`)
+      assert.equal(f.requests.length, before, 'nothing was sent to the card')
+      delete process.env.EGDESK_TERMINAL_OPEN_URL
+      const off = fixture('interact', { bindUrl: url }); await off.service.bind(run, off.service.prepare({ selectedSources: [at(url)] }))
+      assert.equal((await off.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })).status, 'observed', 'flag off: as before')
+    }
+    process.env.EGDESK_TERMINAL_OPEN_URL = 'on'
+    const other = fixture('interact', { bindUrl: 'https://example.test/local' }); await other.service.bind(run, other.service.prepare({ selectedSources: [at('https://example.test/local')] }))
+    assert.equal((await other.service.dispatch(run, { tool: 'egdesk_browser_observe', arguments: { cardId: 'browser-1' } })).status, 'observed')
+  } finally { if (saved === undefined) delete process.env.EGDESK_TERMINAL_OPEN_URL; else process.env.EGDESK_TERMINAL_OPEN_URL = saved }
 })
