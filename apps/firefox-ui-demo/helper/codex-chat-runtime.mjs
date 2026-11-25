@@ -2231,7 +2231,7 @@ export class CodexChatRuntime {
    */
   async ownToolsThreadOverrides(request, neutralFolder, base, context) {
     const own = mergeCeilingOverrides({}, pureEngineThreadOverrides())
-    const isolation = await loadOwnToolsIsolation(request, neutralFolder)
+    const isolation = await loadOwnToolsIsolation(request, neutralFolder, { pure: this.ownTools?.pureEngine?.() ?? null })
     mergeCeilingOverrides(own, isolation.overrides)
     context.ownToolsIsolation = isolation.mcp
     // c25: on the real 0.171 the inventory read costs 1-2 s (mcpServerStatus/list); the room's first internal thread reuses this one for 5 minutes instead of paying it again
@@ -6190,7 +6190,7 @@ export class CodexChatRuntime {
     const cwd = thread?.cwd ?? this.ownNeutralFolder() ?? null
     const memo = this.isolationMemo
     const reused = memo && memo.key === (cwd ?? null) && this.now() - memo.at < 300_000 ? memo.value : null
-    const isolation = reused ? { overrides: structuredClone(reused) } : await loadOwnToolsIsolation(this.scopedRequest(slot), cwd)
+    const isolation = reused ? { overrides: structuredClone(reused) } : await loadOwnToolsIsolation(this.scopedRequest(slot), cwd, { pure: this.ownTools?.pureEngine?.() ?? null })
     mergeCeilingOverrides(base, isolation.overrides)
     if (cwd) base.cwd = cwd
     this.freshInternalCache.set(cid, { at: this.now(), value: structuredClone(base) })
