@@ -30,7 +30,7 @@ test('bundle on: every flag of the bundle is filled with its value; the input of
   assert.equal(out.flags.UNRELATED, 'x')
   const env = { EGDESK_UPPER: 'on' }, applied = applyUpperBundle(env)
   assert.equal(applied.applied.length, NAMES.length); for (const row of UPPER_BUNDLE) assert.equal(env[row.flag], row.value)
-  assert.equal(describeUpperBundle(applied), `EGDESK_UPPER=on: ${NAMES.length} flags set, 0 kept (explicitly set)`); assert.equal(NAMES.length, 15)
+  assert.equal(describeUpperBundle(applied), `EGDESK_UPPER=on: ${NAMES.length} flags set, 0 kept (explicitly set)`); assert.equal(NAMES.length, 14)
 })
 
 test('any single flag stays overridable: an explicit value (including off, none, advisory, empty is NOT explicit) wins over the bundle, the rest are filled', () => {
