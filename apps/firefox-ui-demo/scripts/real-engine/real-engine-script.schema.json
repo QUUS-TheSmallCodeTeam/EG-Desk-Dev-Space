@@ -264,6 +264,9 @@
             },
             "type": "object"
           },
+          "speechConsent": {
+            "type": "boolean"
+          },
           "turns": {
             "items": {
               "additionalProperties": false,
@@ -862,6 +865,79 @@
                       "maximum": 20,
                       "minimum": 1,
                       "type": "integer"
+                    },
+                    "recording": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "basis": {
+                          "items": {
+                            "enum": [
+                              "self_reported_observation",
+                              "attributed_report",
+                              "inference",
+                              "record_based",
+                              "unspecified",
+                              null
+                            ]
+                          },
+                          "maxItems": 8,
+                          "minItems": 1,
+                          "type": "array"
+                        },
+                        "confirmed": {
+                          "type": "boolean"
+                        },
+                        "newPages": {
+                          "maximum": 20,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "page": {
+                          "type": "string"
+                        },
+                        "pageStatus": {
+                          "items": {
+                            "enum": [
+                              "unknown",
+                              "plan",
+                              "done"
+                            ]
+                          },
+                          "maxItems": 8,
+                          "minItems": 1,
+                          "type": "array"
+                        },
+                        "reading": {
+                          "enum": [
+                            "none",
+                            "pending",
+                            "accepted",
+                            "rejected",
+                            "pending_or_none"
+                          ]
+                        },
+                        "readings": {
+                          "maximum": 20,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "status": {
+                          "items": {
+                            "enum": [
+                              "plan",
+                              "done",
+                              "superseded"
+                            ]
+                          },
+                          "maxItems": 8,
+                          "minItems": 1,
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "page"
+                      ],
+                      "type": "object"
                     },
                     "resumes": {
                       "maximum": 20,

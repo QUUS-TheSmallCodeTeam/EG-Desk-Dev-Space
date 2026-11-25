@@ -27,6 +27,8 @@ export function scoreMemoryRecord(record) {
       // what was sent and what the engine counted (c31: a key the engine cuts shows as a small input growth and missing facts in the answer)
       sizes: { maxKeyChars: memory?.maxKeyChars ?? null, keyBytes: memory?.keyBytes ?? null, engineInput: turn.subTurns?.at(-1)?.usage?.input ?? null, engineCached: turn.subTurns?.at(-1)?.usage?.cached ?? null,
         answerMissing: (turn.expectations ?? []).find(e => e.check === 'answerIncludes')?.detail?.missing ?? [] },
+      // c34: what the write path stored after this turn (the recording hook's record): the readings per seeded page and the pages written in scope
+      recording: turn.recording ? { readings: Object.fromEntries(Object.entries(turn.recording.seeded ?? {}).filter(([, p]) => p.readings.length).map(([id, p]) => [id, { status: p.status, readings: p.readings.map(r => `${r.state}:${r.status}:${r.basis ?? 'none'}${r.confirmedAt ? ':confirmed' : ''}`) }])), written: (turn.recording.written ?? []).length, consent: turn.recording.speechConsent?.granted ?? null } : null,
       latencyMs: turn.subTurns?.[0]?.latencyMs ?? null, status: turn.subTurns?.at(-1)?.status ?? null, checks, ok: turn.ok === true,
     }
   })
@@ -45,6 +47,7 @@ export function formatScore(score) {
     const m = t.memory ?? {}
     lines.push(`| ${t.index} | ${(m.attached ?? []).join(', ') || '-'} | ${(m.referenced ?? []).join(', ') || '-'} | ${(m.resent ?? []).join(', ') || '-'} | ${m.duplicatesInTurn ?? 0} | ${[m.selectionRan ? 'selection' : null, m.turnMemoryRan ? 'memory' : null].filter(Boolean).join('+') || '-'} | ${JSON.stringify(t.decisions.selection.rel)} | ${JSON.stringify(t.decisions.triage)} | ${JSON.stringify(t.decisions.scan)} | ${t.answer ?? '-'} | ${t.checks.map(c => `${c.ok ? 'ok' : 'FAIL'} ${c.check}`).join('; ')} |`)
   }
+  for (const t of score.turns) if (t.recording) lines.push(`turn ${t.index} store: ${JSON.stringify(t.recording.readings)}${t.recording.written ? `, ${t.recording.written} written page(s)` : ''}${t.recording.consent === null ? '' : `, speech opt-in ${t.recording.consent ? 'granted' : 'NOT granted'}`}`)
   for (const t of score.turns) lines.push(`turn ${t.index}: key chars ${t.sizes?.maxKeyChars ?? '?'}, key bytes ${JSON.stringify(t.sizes?.keyBytes ?? {})}, engine input ${t.sizes?.engineInput ?? '?'} (cached ${t.sizes?.engineCached ?? '?'}), answer missing ${JSON.stringify(t.sizes?.answerMissing ?? [])}`)
   return lines.join('\n')
 }
