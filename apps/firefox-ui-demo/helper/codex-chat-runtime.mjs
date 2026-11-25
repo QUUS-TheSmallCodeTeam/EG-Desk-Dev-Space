@@ -94,6 +94,7 @@ export function reviseFreshText({ draft, note, evidence = [] }) {
 }
 import { APPROVALS_FAST_LIMITS, approvalOutcomeBlock } from './egdesk-decision-first-approvals.mjs' // c32 (U13): approvals decision-first
 import { ENGINE_STALL_LIMITS, eventTurnId, stallFact } from './egdesk-engine-stall.mjs' // c33: the first-event watchdog
+import { PROPOSAL_LIMITS, proposalCandidates, readRegistration, registrationRequest } from './egdesk-open-proposals.mjs' // c33: the answer's open proposals as defined items
 import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
 import { OWN_EDIT_LIMITS, EDIT_TOOL_NAMES, ownEditEvidence } from './egdesk-own-edit-evidence.mjs' // c30b: the edits EG-Desk made, as readable evidence for the check of the answer
 import { OWN_COMMAND_LIMITS, ownCommandEntry, ownCommandEvidence } from './egdesk-own-command-evidence.mjs' // c29: what the check of an answer may know about the commands EG-Desk ran
@@ -930,6 +931,10 @@ export class CodexChatRuntime {
     this.engineSeen = new Map() // threadId -> Set of turn ids that sent an event (bounded)
     this.engineWaiters = new Set() // { threadId, turnId, resolve }
     this.engineStalls = new Map() // clientThreadId -> the last stall fact of the conversation (bounded)
+    this.openProposals = new Map() // c33: conversationId -> { items, at } what the last posted answer left open to the person (flag decisionContext.proposalRegistry)
+    this.proposalJobs = new Set()
+    this.openItemProviders = new Map() // c33: name -> (conversationId) => [open item]; the resolver of lane L1 reads them through openItemsFor
+    this.registerOpenItemProvider('proposals', cid => { const e = this.openProposals.get(cid); return e && this.now() - e.at <= PROPOSAL_LIMITS.ageMs ? e.items.map(item => ({ ...item, steps: item.steps.map(x => ({ ...x })), options: item.options.map(x => ({ ...x })) })) : [] })
     this.stoppedCommands = new Map() // clientThreadId -> the fact of the command the person stopped (consumed by the next turn)
     this.postedInstead = new Map() // clientThreadId -> { outcome, posted }: the answer the person saw instead of the Agent's draft (consumed by the next turn)
     this.draftOutcomes = new WeakMap() // run -> the draft check's outcome for its answer
@@ -7763,6 +7768,58 @@ export class CodexChatRuntime {
   // page this DM may read, or a new utterance page kept as a reference into the chat store (only with the speech consent that already lets
   // past utterances be reused). Nothing is promoted here; a pending reading becomes a status only through writer.promote on the person's
   // own later explicit confirmation.
+  // ---- c33: the answer's open proposals and questions, registered as defined items (flag decisionContext.proposalRegistry = { mode(): 'on' }, EGDESK_PROPOSAL_REGISTRY=on; default off) ----
+  // No text is posted and no copy is added. See helper/egdesk-open-proposals.mjs for the item shape and the contract with the open-item resolver (lane L1).
+  proposalRegistryOn() { try { return this.decisionContext?.proposalRegistry?.mode?.() === 'on' } catch { return false } }
+
+  /** Every provider's open items for a conversation (the resolver's input): [{ provider, kind, id, text, steps, options, ... }]. A provider that throws offers none. */
+  openItemsFor(conversationId) {
+    const out = []
+    for (const [provider, list] of this.openItemProviders) { try { for (const item of list(conversationId) ?? []) out.push({ provider, ...item }) } catch { /* a provider never breaks the others */ } }
+    return out
+  }
+
+  registerOpenItemProvider(name, list) { if (typeof name === 'string' && name && typeof list === 'function') this.openItemProviders.set(name, list) }
+
+  /** Close one registered proposal (the resolver took the reply as accepting, declining or changing it): it is not open any more. Returns whether it was open. */
+  closeOpenItem(conversationId, id, outcome = 'closed') {
+    const entry = this.openProposals.get(conversationId)
+    if (!entry) return false
+    const before = entry.items.length
+    entry.items = entry.items.filter(item => item.id !== id)
+    return entry.items.length < before
+  }
+
+  proposalRegistryIdle() { return Promise.allSettled([...this.proposalJobs]) }
+
+  startProposalRegistration(run) {
+    try {
+      if (!this.proposalRegistryOn() || !run || run.executionPolicy || run.status !== 'completed') return
+      // The answer is the run's last completed assistant message that the heartbeat did not post; the request is the person's last message in the run.
+      const flow = this.flowRuns.get(run), messages = [...(run.messages ?? [])].reverse()
+      const answer = messages.find(m => m.role === 'assistant' && m.status === 'complete' && typeof m.text === 'string' && m.text.trim() && !flow?.sent.some(row => row.id === m.id))
+      const asked = messages.find(m => m.role === 'user' && typeof m.text === 'string')
+      const job = this.registerProposals(run, answer?.text ?? '', asked?.text ?? '').catch(() => {})
+      this.proposalJobs.add(job)
+      void job.finally(() => this.proposalJobs.delete(job))
+    } catch { /* the registry never affects a turn */ }
+  }
+
+  async registerProposals(run, answerText, requestText) {
+    const cid = run.conversationId, setup = this.decisionContext
+    this.openProposals.set(cid, { items: [], at: this.now() }) // a new answer supersedes what an earlier one left open
+    while (this.openProposals.size > 64) this.openProposals.delete(this.openProposals.keys().next().value)
+    const candidates = proposalCandidates(answerText)
+    if (!candidates.sentences.length && !candidates.paragraph) return
+    if (this.gateHookBroker()?.awaitingReply(cid)) return // a pending approval has its own state in the ledger
+    if (!setup?.client || setup.mode?.() !== 'on' || setup.configured?.() !== true || this.decisionEgressFor(run).allows('run_text') !== true) return
+    const request = registrationRequest({ request: requestText, candidates, questionOf: predicateQuestion })
+    const result = await setup.client.decide({ ...request, timeoutMs: 3000 })
+    const items = readRegistration({ candidates, answers: result?.answers, runId: run.runId, answerId: run.answerId, at: this.now(), idOf: text => `prop-${sha256Hex(`${cid}\u0000${text}`).slice(0, 12)}` })
+    const entry = this.openProposals.get(cid)
+    if (entry && items.length) entry.items = items
+  }
+
   startTurnMemoryWrite(run) {
     try {
       const pending = this.turnMemoryWrites.get(run)
@@ -8623,6 +8680,7 @@ export class CodexChatRuntime {
     this.carryInRunMessages(run)
     this.completeCalibration(run)
     this.startTurnMemoryWrite(run) // 'on': the write judgment runs after the answer, in the background
+    this.startProposalRegistration(run) // c33 (flag, default off): what the answer left open to the person, as defined items
     for (const provider of this.toolProviders) provider.cancelRun?.(run)
     run.stopConfirmed = turn.status === 'interrupted'
     run.error = turn.error

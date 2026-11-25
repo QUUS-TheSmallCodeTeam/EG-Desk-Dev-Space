@@ -62,7 +62,7 @@ export const DEFAULT_DECISION_FLAGS = Object.freeze({})
 // codex-bridge-server.mjs, so a key or flag the bridge gains and this composition lacks fails loudly instead of being silently absent.
 export const BRIDGE_COMPOSITION = Object.freeze({
   // decisionContext keys the bridge sets, and the developer flags behind them, that this composition reproduces
-  keys: ['settingsGeneration', 'mode', 'configured', 'client', 'budgetMs', 'coldBudgetMs', 'warm', 'warmup', 'inRunMessages', 'calibrationLog', 'turnMemory', 'browserEntry', 'draftCheck', 'conversationFlow',
+  keys: ['settingsGeneration', 'mode', 'configured', 'client', 'budgetMs', 'coldBudgetMs', 'warm', 'warmup', 'inRunMessages', 'proposalRegistry', 'calibrationLog', 'turnMemory', 'browserEntry', 'draftCheck', 'conversationFlow',
     'relevanceRules', 'commandJudge', 'terminalGate', 'workingMemory', 'topicRecipient', 'recipientForChatChoice', 'reviewRevision', 'memoryEvidence', 'collect'],
   // top-level options of the bridge's new CodexChatRuntime({ … }) that this composition passes (request / respond / toolProviders etc. are the check's own)
   runtimeKeys: ['contexts', 'toolProviders', 'ownToolsWiring', 'roomAccount', 'store', 'requireStore', 'getOwnerKey', 'emit', 'emitLegacy', 'agentReloadReuse', 'engineStall'],
@@ -523,6 +523,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       ...(['action', 'action+status'].includes(FLAG.EGDESK_CONTEXT_RELEVANCE) ? { relevanceRules: FLAG.EGDESK_CONTEXT_RELEVANCE } : {}),
       ...(warmup ? { warmup } : {}),
       ...(FLAG.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}),
+      ...(FLAG.EGDESK_PROPOSAL_REGISTRY === 'on' ? { proposalRegistry: { mode: () => 'on' } } : {}),
       calibrationLog, turnMemory: turnMemoryConfig,
       ...(['advisory', 'on'].includes(FLAG.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => FLAG.EGDESK_DRAFT_CHECK, design: () => (FLAG.EGDESK_DRAFT_CHECK_DESIGN === 'choice' ? 'choice' : 'predicates') } } : {}),
       ...(FLAG.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...turnHooks.flowOptions({ FLAG, conversation }), ...(FLAG.EGDESK_FLOW_STALLED_COPY === 'none' ? { stalledCopy: () => 'none' } : {}) } } : {}), // a registered feature may add keys to the flow, as the bridge does (the collaboration hook: presence, audience, attentionPosted)
@@ -702,7 +703,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       const follow = next?.whileRunning !== undefined ? 'message' : (next?.action === 'interrupt' || next?.action === 'steer') ? next.action : null, withMessage = follow !== null
       const sub = [], ledger = wiring.ledger, requestsFrom = rec.requests.length
       let asked = 0, mark = null
-      const hookCtx = { state: () => ({ store, clientThreadId, conversationId: nativeThread }) }
+      const hookCtx = { state: () => ({ store, clientThreadId, conversationId: nativeThread }), chat: () => chat }
       turnHooks.beginTurn(hookCtx) // registered hooks
       await turnHooks.beforeSend({ ...hookCtx, turn, index }) // registered hooks: set up this turn before its message is sent (who sends it)
       const ctx = await beginTurn(turn.say)

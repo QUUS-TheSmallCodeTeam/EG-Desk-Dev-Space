@@ -565,6 +565,7 @@ const chat = new CodexChatRuntime({
       attentionPosted: ({ key, provider }) => { if (provider === 'work_placement') workPlacement.acknowledgePointer(key) }, ...(process.env.EGDESK_FLOW_STALLED_COPY === 'none' ? { stalledCopy: () => 'none' } : {}) } } : {}),
     // Advisory state judge on the engine's own command executions: developer flag EGDESK_COMMAND_JUDGE=advisory, default off. Records only.
     ...(IN_RUN_MESSAGES_ENABLED ? { inRunMessages: { mode: () => 'on' } } : {}),
+    ...(process.env.EGDESK_PROPOSAL_REGISTRY === 'on' ? { proposalRegistry: { mode: () => 'on' } } : {}), // c33: the answer's open proposals as defined items (L3), default off
     ...(process.env.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
     // Command gate before an engine approval card: developer flag EGDESK_TERMINAL_GATE=advisory|on, default off. It never answers an approval.
     ...(ownToolsWiring && !ownToolsWiring.shadow ? { terminalGate: ownToolsWiring.terminalGate(terminalGateConfig) } : terminalGateConfig ? { terminalGate: terminalGateConfig } : {}),
