@@ -128,6 +128,7 @@ const FLOW_OWN_KINDS = new Set(['decisionContext', 'plan', 'summary', 'hostNotic
 import { SPEECH_AT_PAGE, speechSegments } from './egdesk-speech-grounding.mjs'
 import { pruneContextCandidates } from './egdesk-context-pruning.mjs'
 import { previousReplyExcerpt } from './egdesk-previous-reply.mjs'
+import { decideFastAnswer, fastCarryText, fastTurn } from './egdesk-memory-fast-answer.mjs'
 import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory, recordStateEvidence } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
 import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, readBrowserEntry, rideAlongEntry } from './egdesk-browser-task.mjs'
@@ -2951,12 +2952,16 @@ export class CodexChatRuntime {
       const browserTaskContext = browserPre?.note ? { egdesk_browser_task: { kind: 'application', value: browserPre.note } } : null
       if (browserPre?.note) context.browserTaskNote = browserPre.note
       // Re-checked at the last moment: the mode, every page's permission and the key must still hold, or nothing is attached.
-      const memoryPacket = memoryReady && this.turnMemoryMayDispatch(memoryTurn, additionalContext) ? memoryTurn.result.packet : null
+      // c31 (flag turnMemory.fastAnswer, default off): when the loop's picked record has ONE sentence that is the answer, code posts it and no engine turn starts.
+      const fast = memoryReady && !context.board && !context.peerDispatch && !bounded && !browserPre && !topicRoute && !context.topicAnswerGuard && shares.length === 0 && !(Array.isArray(body.selectedSources) && body.selectedSources.length)
+        ? await this.memoryFastAnswer(memoryTurn, body, context) : null
+      if (fast) context.draftHold = pending.draftHold = false // a recalled sentence is the record itself: nothing for the draft check to compare it with
+      const memoryPacket = memoryReady && !fast && this.turnMemoryMayDispatch(memoryTurn, additionalContext) ? memoryTurn.result.packet : null
       // One packet (flag turnMemory.onePacket, default off): with both features attaching, the memory pages ride under the selection's key and
       // a page that is already a selected item is not sent a second time. Without the flag, or with only one of the two present, nothing changes.
       const onePacket = memoryPacket ? this.mergeTurnMemory(memoryTurn, decision, additionalContext) : null
       // What the selection delivers in full is held by the model too (flag turnMemory.selectionHeld, default off): kept on the turn, committed with the receipts once the turn was accepted.
-      if (memoryReady) memoryTurn.selectionHeld = this.selectionHeldPages(memoryTurn, decision, additionalContext)
+      if (memoryReady && !fast) memoryTurn.selectionHeld = this.selectionHeldPages(memoryTurn, decision, additionalContext)
       // What was noted in this session and is not confirmed (flag turnMemory.confirmInConversation, default off): a few lines for the
       // answering model to state, after the pages. null without the flag, so nothing below changes then.
       // The confirmation note (flag confirmInConversation) and the recording rule (when a record may follow this turn) ride after the pages.
@@ -2975,7 +2980,7 @@ export class CodexChatRuntime {
       const engineShape = this.shapeEngineContext(turnAdditionalContext)
       await this.readGateHookReply(cid, body.message)
       turnStartAttempted = context.turnStartAttempted = true
-      const result = await engine.startTurn({
+      const result = fast ? fast.result : await engine.startTurn({
         threadId: cid,
         input: [...this.carriedInputFor(context.clientThreadId), { type: 'text', text: body.message, text_elements: [] }],
         clientUserMessageId: context.requestId,
@@ -3064,9 +3069,9 @@ export class CodexChatRuntime {
       if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
       for (const notice of context.ceilingNotices) this.noteCeiling(run, notice.key, notice)
       if (decision?.mode === 'on' && decision.result.status === 'ready') {
-        decision.result.noteSent?.()
+        if (!fast) decision.result.noteSent?.()
         // receipts of what the selection really sent (its key may have been dropped at dispatch, or carry the merged memory packet)
-        if (turnAdditionalContext?.[DECISION_CONTEXT_KEY]) this.noteContextDelivered(run, context, decision.result)
+        if (!fast && turnAdditionalContext?.[DECISION_CONTEXT_KEY]) this.noteContextDelivered(run, context, decision.result)
         if (Array.isArray(decision.result.speechInterpretations) && decision.speech?.allowed()) {
           this.speechRuns.set(run, decision.speech)
           // A speech record is immutable once stored. Under 'at-page' the labels do not exist yet, so the record is written after the answer
@@ -3094,6 +3099,7 @@ export class CodexChatRuntime {
       // may inherit this request's correlation; other turns remain unclaimed.
       while (pending.buffer.length) await this.apply(pending.buffer.shift())
       if (TERMINAL.has(result.turn.status) && !TERMINAL.has(run.status)) await this.finish(run, safeTurn(result.turn, engine.id))
+      if (fast) this.carryFastExchange(context.clientThreadId, body.message, fast.text)
       return {
         accepted: true, durable: !this.store || this.storeHealthy,
         conversationId: cid, requestId: context.requestId, runId: run.runId, answerId: run.answerId,
@@ -3144,6 +3150,38 @@ export class CodexChatRuntime {
       }
       throw error
     } finally { if (this.pendingStarts.get(cid) === pending) this.pendingStarts.delete(cid) }
+  }
+
+  // ---- Fast answer from a picked record (L1 c31; flag turnMemory.fastAnswer, default off; see egdesk-memory-fast-answer.mjs) ----
+  turnMemoryFastOn() {
+    try {
+      const tm = this.decisionContext?.turnMemory, flag = tm?.fastAnswer
+      return (typeof flag === 'function' ? flag() : flag) === true && this.turnMemoryMode() === 'on' && typeof this.decisionContext?.client?.decide === 'function'
+    } catch { return false }
+  }
+
+  // null: the engine answers (every doubt, failure and unmet floor ends here). { result, text }: the turn result of an engine turn that already finished with the sentence.
+  async memoryFastAnswer(turn, body, context) {
+    try {
+      if (!this.turnMemoryFastOn() || !turn || turn.ready !== true || !turn.result || !turn.wiki) return null
+      const egress = this.turnMemoryEgress(turn.baseScope, turn.sources)
+      const client = { decide: async request => { egress.require('memory_page'); return this.decisionContext.client.decide(request) } }
+      const t0 = performance.now()
+      const outcome = await decideFastAnswer({ message: body.message, result: turn.result, wiki: turn.wiki, scope: turn.scope, client, askedAt: context.askedAt ?? this.now() })
+      turn.fast = { used: outcome.use === true, reason: outcome.use ? 'answered' : outcome.reason, calls: outcome.calls, ms: Math.round(performance.now() - t0), ...(outcome.use ? { pageId: outcome.pageId, p: outcome.p } : {}) }
+      return outcome.use ? { result: fastTurn(outcome.text), text: outcome.text } : null
+    } catch { return null }
+  }
+
+  // The engine did not see this exchange: its next turn is told the question and the sentence (taken once, like an in-run reply).
+  carryFastExchange(clientThreadId, message, answer) {
+    if (!clientThreadId) return
+    this.carriedInRun.set(clientThreadId, [...(this.carriedInRun.get(clientThreadId) ?? []), fastCarryText(message, answer)])
+  }
+
+  // The fast-answer record of a turn's run or request context: { used, reason, calls, ms, pageId?, p? } or null (flag off, no memory turn, no decision made).
+  fastAnswerRecord(key) {
+    try { const turn = key && typeof key === 'object' ? this.turnMemoryTurns.get(key) : null; return turn?.fast ? { ...turn.fast } : null } catch { return null }
   }
 
   async restoreClaudeContext(cid, clientThreadId, authority) {

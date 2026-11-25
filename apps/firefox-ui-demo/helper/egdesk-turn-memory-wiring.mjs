@@ -11,7 +11,7 @@ import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 //   EGDESK_TURN_MEMORY_WRITE_TARGET=choice  the old N-way write target, for comparison ('about' is the default)
 //   EGDESK_TURN_MEMORY_CONFIRM=on           pending readings may be confirmed or refused through the conversation
 export const TURN_MEMORY_FLAGS = Object.freeze({ onePacket: 'EGDESK_TURN_MEMORY_ONE_PACKET', writeTarget: 'EGDESK_TURN_MEMORY_WRITE_TARGET', confirmInConversation: 'EGDESK_TURN_MEMORY_CONFIRM', pruneHeld: 'EGDESK_TURN_MEMORY_PRUNE_HELD', keepLate: 'EGDESK_TURN_MEMORY_KEEP_LATE', speechDesign: 'EGDESK_TURN_MEMORY_SPEECH_DESIGN', splitWording: 'EGDESK_TURN_MEMORY_SPLIT_WORDING', previousReply: 'EGDESK_TURN_MEMORY_PREVIOUS_REPLY', selectionHeld: 'EGDESK_TURN_MEMORY_SELECTION_HELD', engineContext: 'EGDESK_TURN_MEMORY_ENGINE_CONTEXT', engineChars: 'EGDESK_TURN_MEMORY_ENGINE_CHARS', engineBytes: 'EGDESK_TURN_MEMORY_ENGINE_BYTES' })
-export function turnMemoryFlagsFromEnv(env = {}) {
+function baseTurnMemoryFlagsFromEnv(env = {}) {
   const get = name => (env && typeof env === 'object' && typeof env[name] === 'string' ? env[name] : null)
   return { ...(get(TURN_MEMORY_FLAGS.onePacket) === 'on' ? { onePacket: true } : {}), ...(get(TURN_MEMORY_FLAGS.writeTarget) === 'choice' ? { writeTarget: 'choice' } : {}),
     ...(get(TURN_MEMORY_FLAGS.confirmInConversation) === 'on' ? { confirmInConversation: true } : {}), ...(get(TURN_MEMORY_FLAGS.pruneHeld) === 'on' ? { pruneHeld: true } : {}),
@@ -22,7 +22,7 @@ export function turnMemoryFlagsFromEnv(env = {}) {
 
 // createTurnMemoryConfig({ settings, getAdapter, ontologyStore, deskStore, budget?, deadlineMs? }) -> the object the runtime reads:
 //   { mode(), wiki({ body, context, sources }), scope({ context }), writer(wiki, options), budget, caps, deadlineMs, ontologyWrite }
-export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = null, deskStore = null, budget = { linksFirst: true }, deadlineMs = 15000, caps = null, onePacket = false, writeTarget = 'about', confirmInConversation = false, pruneHeld = false, keepLate = false, speechDesign = null, splitWording = null, previousReply = false, selectionHeld = false, engineContext = null, engineChars = null, engineBytes = null } = {}) {
+function createBaseTurnMemoryConfig({ settings, getAdapter, ontologyStore = null, deskStore = null, budget = { linksFirst: true }, deadlineMs = 15000, caps = null, onePacket = false, writeTarget = 'about', confirmInConversation = false, pruneHeld = false, keepLate = false, speechDesign = null, splitWording = null, previousReply = false, selectionHeld = false, engineContext = null, engineChars = null, engineBytes = null } = {}) {
   const mode = () => (['advisory', 'on'].includes(settings?.turnMemory?.mode) ? settings.turnMemory.mode : 'off')
   return {
     // The same lazy adapter, for other consumers of the wiki write path (the direct browser entry); it opens nothing by itself.
@@ -64,4 +64,15 @@ export function createTurnMemoryConfig({ settings, getAdapter, ontologyStore = n
         topicTurns: typeof topic?.turns === 'function' ? () => topic.turns() ?? [] : null, topicGuard: typeof topic?.current === 'function' ? () => topic.current() === true : null })
     },
   }
+}
+
+// L1 c31: the fast answer from a picked record (egdesk-memory-fast-answer.mjs), default off. Added around the two functions above (not inside them).
+//   EGDESK_TURN_MEMORY_FAST_ANSWER=on   a picked record's one answering sentence is posted by code; the engine answers only what needs more
+export const FAST_ANSWER_FLAG = 'EGDESK_TURN_MEMORY_FAST_ANSWER'
+export function turnMemoryFlagsFromEnv(env = {}) {
+  return { ...baseTurnMemoryFlagsFromEnv(env), ...(env && typeof env === 'object' && env[FAST_ANSWER_FLAG] === 'on' ? { fastAnswer: true } : {}) }
+}
+export function createTurnMemoryConfig({ fastAnswer = false, ...options } = {}) {
+  const config = createBaseTurnMemoryConfig(options)
+  return fastAnswer === true ? Object.defineProperty(config, 'fastAnswer', { value: true, enumerable: true }) : config
 }

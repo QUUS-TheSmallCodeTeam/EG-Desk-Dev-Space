@@ -136,6 +136,8 @@ export const EGRESS_SITES = Object.freeze({
   // L1 c20 Desk HUD routing: the typed text (hud_text: refused until a permission covering all models exists) and maySend card labels
   'egdesk-hud-routing.mjs': ['hud_text', 'canvas_text'],
   'egdesk-draft-check.mjs': ['draft_text'],
+  // c31: the fast answer's questions quote the person's message and one stored sentence each (memory_page); the runtime passes them through the turn-memory gate before they are sent.
+  'egdesk-memory-fast-answer.mjs': ['memory_page'],
   // c18: the idle warm-up sends the one fixed content-free request (CONTENT_FREE_REQUESTS.warmup) through gate.guardContentFree; no data class.
   'egdesk-decision-warmup.mjs': ['content-free: the fixed warm-up request only (CONTENT_FREE_REQUESTS.warmup), no data of any class'],
   'egdesk-heartbeat-judge.mjs': ['run_facts', 'run_text', 'terminal_command', 'plus any other kind a heartbeat question or a provider\'s context declares, each checked by the run\'s gate before it is sent'],
