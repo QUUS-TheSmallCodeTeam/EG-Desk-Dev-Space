@@ -155,7 +155,7 @@ import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsP
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
 import { predicateQuestion, sha256Hex } from './egdesk-decision-questions.mjs'
 import { workspaceCandidates } from './egdesk-prefetch.mjs'
-import { NUNCHI_KEY, beginNunchi, noteNunchi, nunchiReceiptFor, settleNunchi } from './egdesk-nunchi-runtime.mjs'
+import { NUNCHI_KEY, beginNunchi, noteNunchi, nunchiReceiptFor, settleNunchi, standingNunchi } from './egdesk-nunchi-runtime.mjs'
 import { CONTRADICTION_LIMITS, contradictionPairs, judgeContradictions, judgeRecordConflict, settledRecordText } from './egdesk-record-settled.mjs'
 import { engineContextConfig, spilledKeys, splitEngineContext } from './egdesk-engine-context.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
@@ -2900,7 +2900,7 @@ export class CodexChatRuntime {
     if (engine.id === 'codex') this.assertProcessConfiguration(this.threads.get(cid), { model: overrides.model, effort })
     // The only wait turn memory adds: what is left of its cap after preparation. Before the synchronous claim below, never inside it.
     const memoryReady = memoryTurn ? await this.awaitTurnMemory(memoryTurn) : false
-    const nunchiText = !bounded ? await settleNunchi(this, nunchiJob, context) : null
+    const nunchiText = bounded ? null : nunchiJob ? await settleNunchi(this, nunchiJob, context) : standingNunchi(this, context)
     if (memoryReady && memoryTurn.writeFirst) await this.awaitWriteFirst(memoryTurn)
     if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
       throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)

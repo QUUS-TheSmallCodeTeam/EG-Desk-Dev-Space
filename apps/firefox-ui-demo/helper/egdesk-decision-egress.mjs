@@ -167,6 +167,8 @@ export const EGRESS_SITES = Object.freeze({
   'egdesk-turn-memory.mjs': ['memory_page', 'topic_history'],
   // The note (a memory page's title and reported status) and the previous reply of this DM (a past utterance): asked of the run's gate by the runtime before the call.
   'egdesk-record-confirmation.mjs': ['memory_page', 'speech_history'],
+  // u1 (nunchi): the person's own turn and the assistant message right before it (bounded tail), the latter only where the run's gate allows the conversation's own messages (previous_reply, asked by the runtime through previousReplyFor).
+  'egdesk-nunchi.mjs': ['previous_reply'],
   // c38 (write first): the (record, message) pair of the conflict question: one stored record the run's DM may read; asked of the run's gate by the runtime (the turn memory client) before the call.
   'egdesk-record-settled.mjs': ['memory_page'],
   // c41: a measurement tool that BUILDS the memory-first requests from the recorded turns with a capturing client and a scripted walk; nothing is sent from it (the runner sends, after approval).

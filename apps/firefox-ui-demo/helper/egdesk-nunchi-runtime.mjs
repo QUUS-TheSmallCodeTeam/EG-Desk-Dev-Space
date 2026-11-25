@@ -64,24 +64,28 @@ export function beginNunchi(rt, body, context) {
   } catch { return null }
 }
 
-/** The entry text for this turn's engine context, or null. Waits for the judgment only until the turn-memory cap (measured from its start), never longer. */
-export async function settleNunchi(rt, job, context) {
+/** The entry text without a judgment of this turn (flag off: null, synchronously: the turn pays nothing, not even an await): the person's applied guidance and this conversation's lines. */
+export function standingNunchi(rt, context) {
   try {
     if (!nunchiOn(rt)) return null
-    const cfg = rt.decisionContext.nunchi
-    if (job) {
-      try { await settleBefore(job.promise, job.startedAt + job.capMs, job.clock) } catch { /* the cap */ }
-      const inTime = job.result !== null && job.receipt.ms !== null && job.startedAt + job.receipt.ms < job.startedAt + job.capMs
-      job.receipt.inTime = inTime
-      if (inTime) applyReading(rt, job)
-      else { job.receipt.late = true; void job.promise.then(() => applyReading(rt, job)) } // the next turn gets it
-      receiptsOf(rt).set(context, job.receipt)
-      context.nunchi = job.receipt
-    }
     let standing = []
-    try { standing = cfg.store?.appliedLines?.() ?? [] } catch { standing = [] }
+    try { standing = rt.decisionContext.nunchi.store?.appliedLines?.() ?? [] } catch { standing = [] }
     return nunchiContextText({ standing, conversation: linesOf(rt, context.clientThreadId) })
   } catch { return null }
+}
+
+/** The entry text for this turn's engine context, or null. Waits for the judgment only until the turn-memory cap (measured from its start), never longer. Only called with a job. */
+export async function settleNunchi(rt, job, context) {
+  try {
+    try { await settleBefore(job.promise, job.startedAt + job.capMs, job.clock) } catch { /* the cap */ }
+    const inTime = job.result !== null && job.receipt.ms !== null && job.startedAt + job.receipt.ms < job.startedAt + job.capMs
+    job.receipt.inTime = inTime
+    if (inTime) applyReading(rt, job)
+    else { job.receipt.late = true; void job.promise.then(() => applyReading(rt, job)) } // the next turn gets it
+    receiptsOf(rt).set(context, job.receipt)
+    context.nunchi = job.receipt
+    return standingNunchi(rt, context)
+  } catch { return standingNunchi(rt, context) }
 }
 
 /** Links the receipt of a turn's context to its run once the run exists. */
