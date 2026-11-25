@@ -645,3 +645,22 @@ test('c35: spawnTerminalCard passes the requesting card to the reveal as keepVis
     h.zone.spawnTerminalCard({ reveal: false }); assert.equal(reveals.length, 2, 'reveal: false reveals nothing');
   } finally { h.restore(); }
 });
+
+// c36: a Browser Card opened for a terminal session's sign-in is closed when that session ends; the person's own cards never are.
+test('c36: the Browser Cards a session\'s program asked for are linked to it and closed when the session ends (exit, no session, disconnect) or the terminal card closes; unlinked cards stay', async () => {
+  const closed = [], make = name => { const c = { name, isConnected: true, dataset: {}, _deskWindowShell: { requestClose: () => { closed.push(name); c.isConnected = false; } } }; return c; };
+  for (const endEvent of ['terminal-exit-confirmed', 'terminal-no-session', 'terminal-disconnected', 'card-closed']) {
+    closed.length = 0; const spawned = [], own = make('own');
+    const h = await terminalWindow({ api: { ptyId: 'pty-1', isConnected: () => true }, depOverrides: { spawnBrowserCard: (url) => { const c = make(`signin-${spawned.length}`); spawned.push(c); return c; } } });
+    try {
+      h.message({ type: 'terminal-open-url', sessionId: 'pty-1', urls: ['https://claude.com/cai/oauth/authorize?state=s', 'https://a.example/2'] });
+      assert.equal(spawned.length, 2); assert.ok(spawned.every(c => c._signinSessionId === 'pty-1' && c.dataset.egdSigninSession === 'pty-1'), 'linked to the session');
+      for (const forged of [{ source: {} }, { source: null, origin: 'https://example.invalid' }]) h.message({ type: endEvent === 'card-closed' ? 'terminal-exit-confirmed' : endEvent }, forged);
+      assert.deepEqual(closed, [], 'a forged end message closes nothing');
+      if (endEvent === 'card-closed') { dispatch(h.closeDot, 'click'); dispatch(h.go, 'click'); await new Promise(resolve => setImmediate(resolve)); assert.ok(h.events.includes('window-closed'), 'the terminal card closed: ' + JSON.stringify(h.events)); }
+      else h.message({ type: endEvent });
+      assert.deepEqual(closed, ['signin-0', 'signin-1'], endEvent); assert.equal(own.isConnected, true, 'a card the person opened is not touched')
+      h.message({ type: 'terminal-exit-confirmed' }); assert.deepEqual(closed, ['signin-0', 'signin-1'], 'closed once');
+    } finally { h.restore(); }
+  }
+});

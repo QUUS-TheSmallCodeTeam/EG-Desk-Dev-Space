@@ -154,7 +154,16 @@ export function createTerminalZone(deps) {
     // The bridge hands over only http(s) addresses of this session. Each opens in an EG-Desk Browser Card placed by the usual placement rule, in the BACKGROUND: the camera and the
     // active card stay where they are (the person is typing in this terminal). The card shows the page; nothing here reads the page or the code it may show.
     const openedUrls = new Map();
-    const openRequestedUrls = (urls) => {
+    // c36: a Browser Card opened for this session's program (the Claude sign-in page) lives only as long as the session. When the session ends (exit, no session, disconnect (a bridge restart),
+    // or this terminal card closing) the card is closed, so a sign-in whose CLI is gone cannot be finished into a callback nobody listens to.
+    const linkedCards = new Set();
+    const closeLinkedCards = () => {
+      for (const linked of [...linkedCards]) {
+        linkedCards.delete(linked);
+        try { if (linked.isConnected !== false) { if (typeof linked._deskWindowShell?.requestClose === 'function') linked._deskWindowShell.requestClose(); else linked.remove?.(); } } catch (error) { console.warn(TAG, 'linked sign-in card could not be closed:', error?.message || error); }
+      }
+    };
+    const openRequestedUrls = (urls, sessionId) => {
       if (!Array.isArray(urls) || typeof spawnBrowserCard !== 'function') return;
       for (const raw of urls.slice(0, 4)) {
         let url;
@@ -163,7 +172,14 @@ export function createTerminalZone(deps) {
         const at = Date.now(), last = openedUrls.get(url.href);
         if (last !== undefined && at - last < 5000) continue;
         openedUrls.set(url.href, at);
-        try { spawnBrowserCard(url.href, { openMode: 'new', opener: card, background: true }); } catch (error) { console.warn(TAG, 'terminal address could not be opened in a Browser Card:', error?.message || error); }
+        try {
+          const opened = spawnBrowserCard(url.href, { openMode: 'new', opener: card, background: true });
+          if (opened && typeof opened === 'object') {
+            opened._signinSessionId = typeof sessionId === 'string' && sessionId ? sessionId : 'terminal';
+            try { opened.dataset.egdSigninSession = opened._signinSessionId; } catch {}
+            linkedCards.add(opened);
+          }
+        } catch (error) { console.warn(TAG, 'terminal address could not be opened in a Browser Card:', error?.message || error); }
       }
     };
 
@@ -328,7 +344,8 @@ export function createTerminalZone(deps) {
         return;
       }
       if (ev.data?.type === 'terminal-run-result') { showRunResult(ev.data.runResult); return; }
-      if (ev.data?.type === 'terminal-open-url') { openRequestedUrls(ev.data.urls); return; }
+      if (ev.data?.type === 'terminal-open-url') { openRequestedUrls(ev.data.urls, ev.data.sessionId); return; }
+      if (['terminal-exit-confirmed', 'terminal-no-session', 'terminal-disconnected'].includes(ev.data?.type)) closeLinkedCards();
       if (ev.data?.type === 'terminal-new-session') {
         const shellId = ev.data.shellId;
         if (typeof shellId === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(shellId)) spawnTerminalCard({ shellId });
@@ -460,6 +477,7 @@ export function createTerminalZone(deps) {
     // ---- Cleanup ----
     const cleanupCard = () => {
       terminalDisposed = true;
+      closeLinkedCards();
       document.removeEventListener('mousedown', onPressOutsideConfirm, true);
       window.removeEventListener('message', onTerminalReady);
       termBrowser.removeEventListener('load', onTerminalFrameLoad);
