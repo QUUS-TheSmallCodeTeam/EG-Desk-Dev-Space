@@ -1,3 +1,4 @@
+  { path: 'scripts/egdesk-browser-open-item-plan-v2.json', lane: 'L8', handWritten: 'c40: the same 12 replies as v1 with predictions for the narrowed option wording, pre-registered before the wording change' },
 // L6 cycle 17: the register of every committed real-measurement plan and how it is kept reproducible. Analysis tooling only; nothing here
 // sends, and no product code reads it. helper/egdesk-plan-clock.test.mjs checks that every committed plan location is registered and that
 // every "rebuilt" entry rebuilds byte-identically with the system clock moved.
