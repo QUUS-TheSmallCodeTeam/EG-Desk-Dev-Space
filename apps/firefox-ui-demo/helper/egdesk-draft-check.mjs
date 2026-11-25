@@ -378,7 +378,7 @@ async function judge({ draft, evidence, userText, internalVocabulary, client, th
  * 'advisory' judges and records but always posts the draft unchanged. 'off' calls nothing.
  */
 export async function checkDraft({ draft, evidence = [], userText = '', internalVocabulary = [], mode = 'off', client, revise = null, budget = null,
-  now = () => performance.now(), thresholds: overrides, signal, egress = null, design = 'predicates', concreteOnly = false } = {}) {
+  now = () => performance.now(), onStage = null, thresholds: overrides, signal, egress = null, design = 'predicates', concreteOnly = false } = {}) {
   // concreteOnly: for a short message composed only from facts of the present (the heartbeat's messages: every evidence item is the run's
   // state now). Such a check can find only two things: a concrete detail (number, name, identifier) the facts do not hold, and a tense
   // mismatch, which cannot exist when every item is of the present. So a sentence without a concrete detail is not sent; with none left,
@@ -423,9 +423,13 @@ export async function checkDraft({ draft, evidence = [], userText = '', internal
     return result
   }
   let first
+  // u5: stages that left no Decision call are told to the caller (onStage({ stage, startAt, endAt, outcome }), wall-clock ms): the first check decided by code alone, and the re-check. Never throws, changes nothing.
+  const told = (stage, startAt, outcome = 'ok') => { try { onStage?.({ stage, startAt, endAt: Date.now(), outcome }) } catch { /* telling never affects the check */ } }
+  const firstAt = Date.now()
   try { first = await attempt(draft, DRAFT_CHECK_LIMITS.firstCheckMs) }
   catch (error) { return out(draft, 'unchecked', { calls, fallback: error instanceof DecisionError ? error.code : 'unreachable' }) }
   firstState = first
+  if (!first.called) told('check_local', firstAt)
   calibration.candidates = first.claimSpans.length + first.terms.length
   calibration.judgedTotal = first.judgments.length
   if (!first.findings.length) return out(draft, first.skipped ? 'unchecked' : 'passed', { calls, findings: [] })
@@ -438,7 +442,9 @@ export async function checkDraft({ draft, evidence = [], userText = '', internal
   if (typeof revised === 'string' && revised.trim()) {
     let second
     // The re-check judges only sentences with a concrete detail: the model's own short "could not confirm" sentence has none.
+    const recheckAt = Date.now()
     try { second = await attempt(revised, DRAFT_CHECK_LIMITS.recheckMs, true) } catch { second = null }
+    told('recheck', recheckAt, second ? 'ok' : 'error')
     if (second && !second.findings.length) return out(revised, 'revised', { calls, findings: first.findings })
     if (second) return fallbackPost(revised, second, calls, first.findings)
   }
