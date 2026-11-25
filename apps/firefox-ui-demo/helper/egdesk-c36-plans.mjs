@@ -10,17 +10,17 @@ import { clockLine } from './egdesk-wiki-reconstruction.mjs'
 //  confirmation-stated-v1  the "stated" question of the confirmation and the quote of the note (CONFIRM_WORDINGS v2 / v3), on the real reply of check-20mw turn 3.
 //  own-wording-v4          the own predicate of the source split, wording v4 (decided / fixed / arranged count), on targets and guards.
 //  status-question-v1      the context selection's 'action+status' rule on the V1 catalog (L2 c29's s1.packet).
-const estimate = (choice, predicate, bytes) => Math.round(56.5 * choice + 134.8 * predicate + 0.1983 * bytes)
+export const estimate = (choice, predicate, bytes) => Math.round(56.5 * choice + 134.8 * predicate + 0.1983 * bytes)
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
-const ASKED = Date.parse('2026-11-24T14:30:00+09:00')
-const p = (name, bound, value, severity, note) => ({ name, kind: 'predicate', [bound]: value, severity, note })
-const YES = 0.8, NO = 0.2, NOT_YES = 0.79
-const bars = (names, yes, no, source) => Object.fromEntries(names.map(k => [k, { yes, no, source }]))
-function finish(set, requests, files, productBars, passRule) {
+export const ASKED = Date.parse('2026-11-24T14:30:00+09:00')
+export const p = (name, bound, value, severity, note) => ({ name, kind: 'predicate', [bound]: value, severity, note })
+export const YES = 0.8, NO = 0.2, NOT_YES = 0.79
+export const bars = (names, yes, no, source) => Object.fromEntries(names.map(k => [k, { yes, no, source }]))
+export function finish(set, requests, files, productBars, passRule) {
   const total = requests.reduce((n, r) => n + r.estInputTokens, 0)
   return { plan: { set, tokenCeiling: Math.ceil(total * 1.3 / 100) * 100, productBars, passRule, requests }, files, estInputTokens: total }
 }
-function adder() {
+export function adder() {
   const requests = [], files = []
   return { requests, files, add(id, body, expect) {
     const bytes = Buffer.from(JSON.stringify(body), 'utf8'), names = new Set(body.questions.map(q => q.name))
