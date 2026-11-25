@@ -1238,6 +1238,38 @@
                       "minimum": 1,
                       "type": "integer"
                     },
+                    "proposals": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "kinds": {
+                          "items": {
+                            "enum": [
+                              "proposal",
+                              "person_request",
+                              "waiting_action"
+                            ]
+                          },
+                          "maxItems": 4,
+                          "minItems": 1,
+                          "type": "array"
+                        },
+                        "none": {
+                          "const": true
+                        },
+                        "optionsAtLeast": {
+                          "maximum": 4,
+                          "minimum": 2,
+                          "type": "integer"
+                        },
+                        "stepsAtLeast": {
+                          "maximum": 8,
+                          "minimum": 1,
+                          "type": "integer"
+                        }
+                      },
+                      "type": "object"
+                    },
                     "recording": {
                       "additionalProperties": false,
                       "properties": {

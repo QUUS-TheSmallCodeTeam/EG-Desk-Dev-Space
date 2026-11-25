@@ -338,6 +338,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
     ...(ENV.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(ENV.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror, audience: ({ run }) => runRequesters.audience({ run }) } : {}),
       attentionPosted: ({ key, provider: name }) => { if (name === 'work_placement') workPlacement.acknowledgePointer(key) } } } : {}),
     ...(ENV.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}), // as the bridge: a message typed while the run works (L2 c17), default off
+    ...(ENV.EGDESK_PROPOSAL_REGISTRY === 'on' ? { proposalRegistry: { mode: () => 'on' } } : {}), // as the bridge (L3 c33), default off
     ...(ENV.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
     ...(['advisory', 'on'].includes(ENV.EGDESK_TERMINAL_GATE) ? { terminalGate: { mode: () => ENV.EGDESK_TERMINAL_GATE, inspect: async () => null } } : {}),
     ...(['advisory', 'on'].includes(ENV.EGDESK_WORKING_MEMORY) ? { workingMemory: { mode: () => ENV.EGDESK_WORKING_MEMORY } } : {}),

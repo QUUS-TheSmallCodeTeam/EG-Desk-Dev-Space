@@ -1,0 +1,119 @@
+{
+ "set": "real-engine-proposal-registry-v1",
+ "description": "c33 (L3, layer audit c31b item 3): after each posted answer the proposal registry (flag EGDESK_PROPOSAL_REGISTRY, with the Decision on) registers what the answer left open to the person as defined items. The two scenarios of conditional-yes-v1 and terse-yes-v1: turn 1 must leave one item (a proposal with the three steps; the waiting action with the two items), the turn after the person's yes must leave none. State only: no copy is posted. Run with --decisions.",
+ "conversations": [
+  {
+   "id": "conditional-yes",
+   "folder": {
+    "notes/steps.md": "1. printf ok > build.done\n2. printf ok > test.done\n3. printf ok > deploy.done\n"
+   },
+   "turns": [
+    {
+     "say": "notes/steps.md 에 적힌 명령을 순서대로 실행하려고 해. 아직 실행하지 말고, 어떤 단계들인지 알려 주고 실행해도 되는지 나에게 물어봐 줘.",
+     "expect": {
+      "toolCalls": [
+       "egdesk_read_file"
+      ],
+      "answerIncludes": [
+       "build.done",
+       "test.done",
+       "deploy.done"
+      ],
+      "files": {
+       "build.done": null,
+       "test.done": null,
+       "deploy.done": null
+      },
+      "noNativeTools": true,
+      "posted": true,
+      "turnStatus": "completed",
+      "proposals": {
+       "kinds": [
+        "proposal"
+       ],
+       "stepsAtLeast": 3
+      }
+     }
+    },
+    {
+     "say": "응 근데 테스트는 빼고",
+     "expect": {
+      "toolCalls": [
+       "egdesk_run_command"
+      ],
+      "files": {
+       "build.done": "ok",
+       "test.done": null,
+       "deploy.done": "ok"
+      },
+      "noNativeTools": true,
+      "posted": true,
+      "turnStatus": "completed",
+      "proposals": {
+       "none": true
+      }
+     }
+    }
+   ],
+   "flags": {
+    "EGDESK_DECISION_FIRST": "on",
+    "EGDESK_PROPOSAL_REGISTRY": "on"
+   }
+  },
+  {
+   "id": "terse-yes",
+   "folder": {
+    "notes/todo.md": "- [x] 견적서 보내기\n- [ ] 일정 확인\n- [x] 폴더 정리\n"
+   },
+   "turns": [
+    {
+     "say": "notes/todo.md 에서 완료된([x]) 항목을 지우려고 해. 파일은 아직 바꾸지 말고, 어떤 항목을 지울지만 먼저 알려 줘.",
+     "expect": {
+      "toolCalls": [
+       "egdesk_read_file"
+      ],
+      "answerIncludes": [
+       "견적서 보내기",
+       "폴더 정리"
+      ],
+      "files": {
+       "notes/todo.md": "- [x] 견적서 보내기\n- [ ] 일정 확인\n- [x] 폴더 정리\n"
+      },
+      "undoRecords": 0,
+      "noNativeTools": true,
+      "posted": true,
+      "turnStatus": "completed",
+      "proposals": {
+       "kinds": [
+        "waiting_action"
+       ],
+       "stepsAtLeast": 2
+      }
+     }
+    },
+    {
+     "say": "ㅇㅇ",
+     "expect": {
+      "toolCalls": [
+       "egdesk_edit_file"
+      ],
+      "files": {
+       "notes/todo.md": "- [ ] 일정 확인\n"
+      },
+      "undoRecords": 1,
+      "noNativeTools": true,
+      "posted": true,
+      "turnStatus": "completed",
+      "proposals": {
+       "none": true
+      }
+     }
+    }
+   ],
+   "flags": {
+    "EGDESK_DECISION_FIRST": "on",
+    "EGDESK_PROPOSAL_REGISTRY": "on"
+   }
+  }
+ ]
+}

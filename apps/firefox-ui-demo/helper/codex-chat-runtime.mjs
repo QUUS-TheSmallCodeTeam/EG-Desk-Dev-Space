@@ -7688,14 +7688,17 @@ export class CodexChatRuntime {
   startProposalRegistration(run) {
     try {
       if (!this.proposalRegistryOn() || !run || run.executionPolicy || run.status !== 'completed') return
-      const last = [...(run.messages ?? [])].reverse().find(m => m.role === 'assistant' && typeof m.text === 'string' && m.text.trim())
-      const job = this.registerProposals(run, last?.text ?? '').catch(() => {})
+      // The answer is the run's last completed assistant message that the heartbeat did not post; the request is the person's last message in the run.
+      const flow = this.flowRuns.get(run), messages = [...(run.messages ?? [])].reverse()
+      const answer = messages.find(m => m.role === 'assistant' && m.status === 'complete' && typeof m.text === 'string' && m.text.trim() && !flow?.sent.some(row => row.id === m.id))
+      const asked = messages.find(m => m.role === 'user' && typeof m.text === 'string')
+      const job = this.registerProposals(run, answer?.text ?? '', asked?.text ?? '').catch(() => {})
       this.proposalJobs.add(job)
       void job.finally(() => this.proposalJobs.delete(job))
     } catch { /* the registry never affects a turn */ }
   }
 
-  async registerProposals(run, answerText) {
+  async registerProposals(run, answerText, requestText) {
     const cid = run.conversationId, setup = this.decisionContext
     this.openProposals.set(cid, { items: [], at: this.now() }) // a new answer supersedes what an earlier one left open
     while (this.openProposals.size > 64) this.openProposals.delete(this.openProposals.keys().next().value)
@@ -7703,7 +7706,7 @@ export class CodexChatRuntime {
     if (!candidates.sentences.length && !candidates.paragraph) return
     if (this.gateHookBroker()?.awaitingReply(cid)) return // a pending approval has its own state in the ledger
     if (!setup?.client || setup.mode?.() !== 'on' || setup.configured?.() !== true || this.decisionEgressFor(run).allows('run_text') !== true) return
-    const request = registrationRequest({ request: this.runUserText(run), candidates, questionOf: predicateQuestion })
+    const request = registrationRequest({ request: requestText, candidates, questionOf: predicateQuestion })
     const result = await setup.client.decide({ ...request, timeoutMs: 3000 })
     const items = readRegistration({ candidates, answers: result?.answers, runId: run.runId, answerId: run.answerId, at: this.now(), idOf: text => `prop-${sha256Hex(`${cid}\u0000${text}`).slice(0, 12)}` })
     const entry = this.openProposals.get(cid)
