@@ -12,7 +12,8 @@ import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
 import { createClaudeEngineAdapter } from './claude-engine-adapter.mjs'
 import { buildClaudeArgs } from './claude-engine-transport.mjs'
 import { createOwnToolsWiring } from './egdesk-own-tools-wiring.mjs'
-import { CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, CLAUDE_BUILTIN_COMPUTER_USE_RULES, CLAUDE_BUILTIN_OUTWARD_TOOLS, CLAUDE_BUILTIN_READ_TOOLS, CLAUDE_BUILTIN_WEB_TOOLS, claudeHarnessFromEnv, claudeHarnessInstructions, claudeHarnessThreadOverrides } from './egdesk-claude-harness.mjs'
+import { routePermissionRequest } from './claude-engine-permissions.mjs'
+import { CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, CLAUDE_BUILTIN_COMPUTER_USE_RULES, CLAUDE_BUILTIN_FLOW_TOOLS, CLAUDE_BUILTIN_OUTWARD_TOOLS, CLAUDE_BUILTIN_READ_TOOLS, CLAUDE_BUILTIN_WEB_TOOLS, claudeHarnessFromEnv, claudeHarnessInstructions, claudeHarnessThreadOverrides } from './egdesk-claude-harness.mjs'
 import { createDecisionClient } from './egdesk-decision-client.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
@@ -27,11 +28,11 @@ const until = async (predicate, ms = 4000) => { const end = Date.now() + ms; whi
 // ---- the pure module ----
 test('the harness flag: only "on" is on; the built-in command and file tools are the ones EG-Desk\'s own tools replace; the web tools stay unless their own switch says off', () => {
   assert.equal(claudeHarnessFromEnv({}), null); assert.equal(claudeHarnessFromEnv({ EGDESK_CLAUDE_HARNESS: 'yes' }), null)
-  const DEFAULT_OFF = [...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_READ_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...CLAUDE_BUILTIN_COMPUTER_USE_RULES]; assert.deepEqual([...CLAUDE_BUILTIN_READ_TOOLS], ['Read', 'Grep', 'Glob']); assert.deepEqual([...CLAUDE_BUILTIN_COMPUTER_USE_RULES], ['mcp__computer-use', 'mcp__computer_use']); assert.deepEqual(claudeHarnessFromEnv({ EGDESK_CLAUDE_HARNESS: 'on' }).disallowed, DEFAULT_OFF); assert.deepEqual([...CLAUDE_BUILTIN_OUTWARD_TOOLS].sort(), ['CronCreate', 'CronDelete', 'CronList', 'EnterWorktree', 'ExitWorktree', 'Monitor', 'PushNotification', 'RemoteTrigger', 'ScheduleWakeup', 'SendMessage', 'SendToProject', 'Workflow']); assert.deepEqual(claudeHarnessFromEnv({ EGDESK_CLAUDE_HARNESS: 'on', EGDESK_PAGE_TOOLS: 'on' }).disallowed, [...DEFAULT_OFF, 'WebFetch', 'WebSearch'], 'with EG-Desk\'s card tools on, the built-in web tools are off'); assert.deepEqual(claudeHarnessFromEnv({ EGDESK_CLAUDE_HARNESS: 'on', EGDESK_PAGE_TOOLS: 'off' }).disallowed, DEFAULT_OFF); assert.equal(claudeHarnessFromEnv({ EGDESK_PAGE_TOOLS: 'on' }), null, 'the browser flag alone does not switch the harness on')
-  for (const kept of ['WebFetch', 'WebSearch', 'ToolSearch', 'ListAgents', 'TaskStop']) assert.ok(!DEFAULT_OFF.includes(kept), kept + ' stays'); assert.deepEqual([...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS], ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+  const DEFAULT_OFF = [...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_READ_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...CLAUDE_BUILTIN_FLOW_TOOLS, ...CLAUDE_BUILTIN_COMPUTER_USE_RULES]; assert.deepEqual([...CLAUDE_BUILTIN_FLOW_TOOLS], ['Agent', 'Task', 'ListAgents', 'EnterPlanMode', 'ExitPlanMode']); assert.deepEqual([...CLAUDE_BUILTIN_READ_TOOLS], ['Read', 'Grep', 'Glob']); assert.deepEqual([...CLAUDE_BUILTIN_COMPUTER_USE_RULES], ['mcp__computer-use', 'mcp__computer_use']); assert.deepEqual(claudeHarnessFromEnv({ EGDESK_CLAUDE_HARNESS: 'on' }).disallowed, DEFAULT_OFF); assert.deepEqual([...CLAUDE_BUILTIN_OUTWARD_TOOLS].sort(), ['CronCreate', 'CronDelete', 'CronList', 'DesignSync', 'EnterWorktree', 'ExitWorktree', 'Monitor', 'PushNotification', 'RemoteTrigger', 'ScheduleWakeup', 'SendMessage', 'SendToProject', 'SendToProjectContext', 'Workflow']); assert.deepEqual(claudeHarnessFromEnv({ EGDESK_CLAUDE_HARNESS: 'on', EGDESK_PAGE_TOOLS: 'on' }).disallowed, [...DEFAULT_OFF, 'WebFetch', 'WebSearch'], 'with EG-Desk\'s card tools on, the built-in web tools are off'); assert.deepEqual(claudeHarnessFromEnv({ EGDESK_CLAUDE_HARNESS: 'on', EGDESK_PAGE_TOOLS: 'off' }).disallowed, DEFAULT_OFF); assert.equal(claudeHarnessFromEnv({ EGDESK_PAGE_TOOLS: 'on' }), null, 'the browser flag alone does not switch the harness on')
+  for (const kept of ['AskUserQuestion', 'ToolSearch', 'TaskStop', 'ReportFindings', 'WebFetch', 'WebSearch']) assert.ok(!DEFAULT_OFF.includes(kept), kept + ' stays'); assert.deepEqual([...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS], ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
   assert.deepEqual(claudeHarnessFromEnv({ EGDESK_CLAUDE_HARNESS: 'on', EGDESK_CLAUDE_HARNESS_WEB: 'off' }).disallowed, [...DEFAULT_OFF, 'WebFetch', 'WebSearch']); assert.deepEqual([...CLAUDE_BUILTIN_WEB_TOOLS], ['WebFetch', 'WebSearch'])
   const text = claudeHarnessInstructions('Be brief.'); assert.ok(text.startsWith('Be brief.\n\n')); assert.match(text, /Bash, Edit, Write, MultiEdit, NotebookEdit, Read, Grep, Glob\) are off/); assert.match(text, /ls or find with egdesk_run_command/); assert.match(text, /mcp__egdesk__/); assert.match(text, /egdesk_run_command/); assert.match(text, /needs_person/); assert.doesNotMatch(text, /read-only filesystem setting/)
-  assert.deepEqual(claudeHarnessThreadOverrides({}), {}); assert.deepEqual(Object.keys(claudeHarnessThreadOverrides({ harness: claudeHarnessFromEnv({ EGDESK_CLAUDE_HARNESS: 'on' }) })).sort(), ['developerInstructions', 'egdesk_disallowed'.replace('egdesk_disallowed', 'egdeskDisallowedTools')].sort())
+  assert.deepEqual(claudeHarnessThreadOverrides({}), {}); assert.deepEqual(Object.keys(claudeHarnessThreadOverrides({ harness: claudeHarnessFromEnv({ EGDESK_CLAUDE_HARNESS: 'on' }) })).sort(), ['developerInstructions', 'egdeskAlwaysLoad', 'egdeskDisallowedTools'])
 })
 
 // ---- the world: the real runtime and adapter, a replayed CLI ----
@@ -119,9 +120,9 @@ const toolUse = (id, name, input) => ({ msg: { type: 'assistant', parent_tool_us
 
 test('the harness on a Claude thread: the engine runs in the empty folder, the built-in command and edit tools are switched off with --disallowedTools, EG-Desk\'s instructions are the Claude version; flag off: nothing of this', async t => {
   const w = harnessWorld(t, { script: n => [...text(n, '알겠습니다'), ...result()] }), sent = await w.send('안녕'); assert.equal(sent.accepted, true); await w.settled(sent)
-  const opts = w.transports[0].options; assert.deepEqual(opts.disallowedTools, [...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_READ_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...CLAUDE_BUILTIN_COMPUTER_USE_RULES]); assert.notEqual(opts.cwd, w.root, 'not the person\'s folder'); assert.match(opts.cwd, /engine-folders/)
+  const opts = w.transports[0].options; assert.deepEqual(opts.disallowedTools, [...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_READ_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...CLAUDE_BUILTIN_FLOW_TOOLS, ...CLAUDE_BUILTIN_COMPUTER_USE_RULES]); assert.notEqual(opts.cwd, w.root, 'not the person\'s folder'); assert.match(opts.cwd, /engine-folders/)
   assert.match(opts.appendPrompt, /Bash, Edit, Write, MultiEdit, NotebookEdit, Read, Grep, Glob\) are off/); assert.deepEqual(opts.allowedTools, ['mcp__egdesk'])
-  const argv = buildClaudeArgs({ ...opts, mcpConfig: opts.mcpConfig, platform: 'darwin' }); const at = argv.indexOf('--disallowedTools'); assert.ok(at >= 0, argv.join(' ')); assert.equal(argv[at + 1], [...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_READ_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...CLAUDE_BUILTIN_COMPUTER_USE_RULES].join(','))
+  const argv = buildClaudeArgs({ ...opts, mcpConfig: opts.mcpConfig, platform: 'darwin' }); const at = argv.indexOf('--disallowedTools'); assert.ok(at >= 0, argv.join(' ')); assert.equal(argv[at + 1], [...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_READ_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...CLAUDE_BUILTIN_FLOW_TOOLS, ...CLAUDE_BUILTIN_COMPUTER_USE_RULES].join(','))
   // the CLI's own computer-use server: blocked by rule AND not loaded at all (strict MCP config: only EG-Desk's server; settings carry nothing but the hooks switch; no claude.ai connectors)
   assert.ok(argv[at + 1].split(',').includes('mcp__computer-use')); assert.ok(argv.includes('--strict-mcp-config')); assert.deepEqual(JSON.parse(argv[argv.indexOf('--settings') + 1]), { disableAllHooks: true }); assert.equal(JSON.parse(argv[argv.indexOf('--mcp-config') + 1]).mcpServers.egdesk.type, 'sdk'); assert.deepEqual(Object.keys(JSON.parse(argv[argv.indexOf('--mcp-config') + 1]).mcpServers), ['egdesk']); assert.ok(!argv.includes('--tools'), 'no --tools whitelist: the web and read tools are left as they are')
   const tools = w.transports[0].options.controlHandlers && w.claude.stats?.(); void tools
@@ -271,3 +272,31 @@ test('the built-in read tools are off too: Read, Grep and Glob are in the argv o
   assert.match(JSON.stringify(toolReply(w.transports[0], 'tool-1-1')), /rate: 10/); assert.match(JSON.stringify(toolReply(w.transports[0], 'tool-1-2')), /notes\.txt/)
   assert.match(w.transports[0].options.appendPrompt, /ls or find with egdesk_run_command/, 'listing by name is said to go through the runner: EG-Desk has no glob tool')
 })
+
+test('u2 D5: the flow tools are off (Agent, ListAgents, plan mode, ...); AskUserQuestion stays because EG-Desk answers it as the conversation\'s own question card, while plan mode\'s approval is refused by EG-Desk\'s broker (a plan could not be left)', () => {
+  const ask = routePermissionRequest({ tool_name: 'AskUserQuestion', tool_use_id: 'toolu_q', input: { questions: [{ question: '어느 쪽?', header: 'h', multiSelect: false, options: [{ label: 'A', description: 'a' }, { label: 'B', description: 'b' }] }] } }, { threadId: 'c', rpcId: 'claude:x:perm:1' })
+  assert.equal(ask.route, 'userInput', 'a question is EG-Desk\'s: a runtime question the person answers in the conversation'); assert.equal(ask.serverRequest.method, 'item/tool/requestUserInput')
+  for (const tool of ['ExitPlanMode', 'EnterPlanMode', 'Agent', 'ListAgents', 'DesignSync']) { const r = routePermissionRequest({ tool_name: tool, tool_use_id: 'toolu_x', input: { plan: 'x' } }, { threadId: 'c', rpcId: 'claude:x:perm:2' }); assert.equal(r.route, 'deny', tool + ' would be refused by the broker if it asked'); assert.equal(r.reason, 'unsupportedTool') }
+  const off = claudeHarnessFromEnv({ EGDESK_CLAUDE_HARNESS: 'on' }).disallowed
+  for (const name of ['Agent', 'Task', 'ListAgents', 'EnterPlanMode', 'ExitPlanMode', 'SendToProjectContext', 'DesignSync']) assert.ok(off.includes(name), name + ' is off')
+  for (const name of ['AskUserQuestion', 'ToolSearch', 'TaskStop', 'ReportFindings']) assert.ok(!off.includes(name), name + ' stays')
+})
+
+test('u2 D6: the EG-Desk MCP tools load upfront (no ToolSearch round before the first use): server alwaysLoad in --mcp-config, the per-tool _meta in tools/list and ENABLE_TOOL_SEARCH=false; flag off: none of the three', async t => {
+  const w = harnessWorld(t, { script: n => [...text(n, '알겠습니다'), ...result()] }), sent = await w.send('안녕'); await w.settled(sent)
+  const opts = w.transports[0].options, server = opts.mcpConfig.mcpServers.egdesk
+  assert.deepEqual(server, { type: 'sdk', name: 'egdesk', alwaysLoad: true }); assert.equal(opts.extraEnv.ENABLE_TOOL_SEARCH, 'false')
+  const argv = buildClaudeArgs({ ...opts, platform: 'darwin' }); assert.deepEqual(JSON.parse(argv[argv.indexOf('--mcp-config') + 1]).mcpServers.egdesk, { type: 'sdk', name: 'egdesk', alwaysLoad: true })
+  const answer = await opts.controlHandlers.mcp_message({ subtype: 'mcp_message', server_name: 'egdesk', message: { jsonrpc: '2.0', id: 7, method: 'tools/list', params: {} } }, { requestId: 'list-1' })
+  const listed = answer.write.response.response.mcp_response.result.tools
+  assert.ok(listed.some(x => x.name === 'egdesk_run_command') && listed.length >= 5); assert.ok(listed.every(x => x._meta?.['anthropic/alwaysLoad'] === true), 'every EG-Desk tool says load upfront')
+  const off = harnessWorld(t, { env: { EGDESK_CLAUDE_HARNESS: 'off' }, script: n => [...text(n, '네'), ...result()] }), s2 = await off.send('안녕'); await off.settled(s2)
+  const o = off.transports[0].options; assert.equal(o.mcpConfig?.mcpServers?.egdesk?.alwaysLoad, undefined); assert.equal(o.extraEnv?.ENABLE_TOOL_SEARCH, undefined)
+})
+
+test('u2 D4: the harness instructions say EG-Desk keeps memory and standing instructions, and that Claude must not claim it cannot remember (no new text for the person)', async t => {
+  const text = claudeHarnessInstructions(null); assert.match(text, /EG-Desk, not you, keeps the person's memory and standing instructions: it holds them in a guidance record the person can apply or revert/); assert.match(text, /Do not say that you saved it to your own memory, and do not say that you cannot keep anything/)
+  const w = harnessWorld(t, { script: n => [...text_(n), ...result()] }); const sent = await w.send('안녕'); await w.settled(sent); assert.match(w.transports[0].options.appendPrompt, /guidance record the person can apply or revert/)
+  function text_(n) { return [{ msg: { type: 'assistant', parent_tool_use_id: null, message: { id: 'm', role: 'assistant', content: [{ type: 'text', text: '네' }], usage: { input_tokens: 1, output_tokens: 1 } } } }] }
+})
+

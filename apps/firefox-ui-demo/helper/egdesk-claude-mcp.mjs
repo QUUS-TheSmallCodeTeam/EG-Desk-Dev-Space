@@ -52,10 +52,11 @@ const jsonRpcId = value => typeof value === 'string' ? (value.length <= 300 ? va
   : Number.isSafeInteger(value) ? value : undefined
 
 /** The --mcp-config value that registers the server with the CLI. */
-export function egdeskMcpConfig(serverName = EGDESK_MCP_SERVER_NAME) {
+export function egdeskMcpConfig(serverName = EGDESK_MCP_SERVER_NAME, { alwaysLoad = false } = {}) {
   const name = serverToken(serverName)
   if (!name) throw new TypeError('egdeskMcpConfig requires a server name token')
-  return { mcpServers: { [name]: { type: 'sdk', name } } }
+  // u2: `alwaysLoad: true` exempts the server's tools from the CLI's tool-search deferral (https://code.claude.com/docs/en/mcp, "Exempt a server from deferral"; changelog 2.1.121), so the first use of an EG-Desk tool needs no ToolSearch round
+  return { mcpServers: { [name]: { type: 'sdk', name, ...(alwaysLoad ? { alwaysLoad: true } : {}) } } }
 }
 
 /**
@@ -76,7 +77,7 @@ export function egdeskAllowedToolsRule(serverName = EGDESK_MCP_SERVER_NAME) {
  *   namespace spec {type:'namespace', name: ns, tools:[function...]} → tool `ns__name`
  * Returns { tools: [{name, description, inputSchema}], routes: Map(mcpName → {namespace, tool}), skipped }.
  */
-export function mcpToolsFromSpecs(specs, { serverName = EGDESK_MCP_SERVER_NAME, limits = {} } = {}) {
+export function mcpToolsFromSpecs(specs, { serverName = EGDESK_MCP_SERVER_NAME, limits = {}, alwaysLoad = false } = {}) {
   const L = { ...EGDESK_MCP_LIMITS, ...limits }
   const server = serverToken(serverName)
   if (!server) throw new TypeError('mcpToolsFromSpecs requires a server name token')
@@ -91,7 +92,9 @@ export function mcpToolsFromSpecs(specs, { serverName = EGDESK_MCP_SERVER_NAME, 
     let inputSchema
     try { inputSchema = structuredClone(schema) } catch { skipped++; return }
     routes.set(mcpName, Object.freeze({ namespace: namespace || null, tool: name }))
-    tools.push({ name: mcpName, ...(typeof fn.description === 'string' && fn.description ? { description: fn.description.slice(0, L.maxDescription) } : {}), inputSchema })
+    tools.push({ name: mcpName, ...(typeof fn.description === 'string' && fn.description ? { description: fn.description.slice(0, L.maxDescription) } : {}), inputSchema,
+      // u2: the tool's own mark to load upfront (docs: "Mark a tool to load upfront or stay deferred", `_meta` "anthropic/alwaysLoad"): a second way to the same end as the server's alwaysLoad
+      ...(alwaysLoad ? { _meta: { 'anthropic/alwaysLoad': true } } : {}) })
   }
   for (const spec of Array.isArray(specs) ? specs : []) {
     if (spec?.type === 'namespace') {
@@ -159,13 +162,13 @@ export function boundedCallToolResult(result, limitTokens = CLAUDE_MCP_OUTPUT_LI
  *   owns(rpcId) / listTools() / stats()
  * rpcIds are strings `claude:<threadId>:mcp:<n>` unless nextRpcId is given.
  */
-export function createEgdeskClaudeMcp({ threadId, tools = [], serverName = EGDESK_MCP_SERVER_NAME, serverVersion = '1', nextRpcId = null, limits = {}, outputLimitTokens = CLAUDE_MCP_OUTPUT_LIMIT_TOKENS } = {}) {
+export function createEgdeskClaudeMcp({ alwaysLoad = false, threadId, tools = [], serverName = EGDESK_MCP_SERVER_NAME, serverVersion = '1', nextRpcId = null, limits = {}, outputLimitTokens = CLAUDE_MCP_OUTPUT_LIMIT_TOKENS } = {}) {
   if (!idText(threadId)) throw new TypeError('createEgdeskClaudeMcp requires a threadId')
   if (!Number.isSafeInteger(outputLimitTokens) || outputLimitTokens <= 0) throw new TypeError('createEgdeskClaudeMcp requires a positive outputLimitTokens')
   const L = { ...EGDESK_MCP_LIMITS, ...limits }
   const server = serverToken(serverName)
   if (!server) throw new TypeError('createEgdeskClaudeMcp requires a server name token')
-  const catalog = mcpToolsFromSpecs(tools, { serverName: server, limits: L })
+  const catalog = mcpToolsFromSpecs(tools, { serverName: server, limits: L, alwaysLoad: alwaysLoad === true })
   let counter = 0
   const makeId = typeof nextRpcId === 'function' ? nextRpcId : () => `claude:${threadId}:mcp:${++counter}`
   const pending = new Map() // rpcId → { requestId, jsonId, cancelled }

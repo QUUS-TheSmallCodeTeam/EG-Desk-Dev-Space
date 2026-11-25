@@ -34,7 +34,18 @@ export const CLAUDE_BUILTIN_READ_TOOLS = Object.freeze(['Read', 'Grep', 'Glob'])
  * an EG-Desk conversation does that only through EG-Desk's own tools and the person's own approval, so they are off under the harness too. Names as the CLI lists them (a name this CLI version does not have is
  * harmless in --disallowedTools). Read, Grep, Glob, ListAgents, ToolSearch, TaskStop, the plan-mode tools, ReportFindings and DesignSync stay: they read, or only steer this one conversation.
  */
-export const CLAUDE_BUILTIN_OUTWARD_TOOLS = Object.freeze(['Monitor', 'Workflow', 'EnterWorktree', 'ExitWorktree', 'SendMessage', 'SendToProject', 'PushNotification', 'RemoteTrigger', 'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup'])
+export const CLAUDE_BUILTIN_OUTWARD_TOOLS = Object.freeze(['Monitor', 'Workflow', 'EnterWorktree', 'ExitWorktree', 'SendMessage', 'SendToProject', 'PushNotification', 'RemoteTrigger', 'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'SendToProjectContext', 'DesignSync'])
+
+/**
+ * u2 (D5): tools that move work or the conversation's flow outside EG-Desk.
+ *   Agent (and its old name Task), ListAgents: a sub-agent runs its own tools and its messages are withheld from EG-Desk (the translator keeps one row per call only), so its work is outside the harness.
+ *   EnterPlanMode, ExitPlanMode: a plan mode is the CLI's own flow, and the approval it asks for (a tool that is not a command, a file change or a question) is refused by EG-Desk's permission broker: a conversation
+ *   that entered plan mode could not leave it.
+ * Kept on purpose: AskUserQuestion (EG-Desk answers it: the broker turns it into the conversation's own question card and returns the person's answer), ToolSearch (the fallback that still reaches the EG-Desk
+ * tools if the CLI ever defers them: switching it off could make them unreachable), TaskStop (stops a task of this conversation), ReportFindings (no outward effect documented: it hands structured findings back to the
+ * session; not verified), Read/Grep/Glob are off for another reason (above).
+ */
+export const CLAUDE_BUILTIN_FLOW_TOOLS = Object.freeze(['Agent', 'Task', 'ListAgents', 'EnterPlanMode', 'ExitPlanMode'])
 
 /**
  * Claude Code's own computer-use MCP server (documented 2026-11 for macOS, an interactive session feature, not available with -p). It is not in the --mcp-config EG-Desk gives (the CLI is started with
@@ -50,7 +61,7 @@ export const CLAUDE_HARNESS_ACTIVITY = 'egdesk-tool'
 /** → { disallowed: [...] } or null (off). Anything but 'on' is off. */
 export function claudeHarnessFromEnv(env = {}) {
   if (env?.[CLAUDE_HARNESS_FLAG] !== 'on') return null
-  return Object.freeze({ privateTurns: env?.EGDESK_CLAUDE_HARNESS_PRIVATE === 'on', disallowed: Object.freeze([...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_READ_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...CLAUDE_BUILTIN_COMPUTER_USE_RULES, ...(env?.[CLAUDE_HARNESS_WEB_FLAG] === 'off' || env?.[EGDESK_PAGE_TOOLS_FLAG] === 'on' ? CLAUDE_BUILTIN_WEB_TOOLS : [])]) })
+  return Object.freeze({ privateTurns: env?.EGDESK_CLAUDE_HARNESS_PRIVATE === 'on', disallowed: Object.freeze([...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_READ_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...CLAUDE_BUILTIN_FLOW_TOOLS, ...CLAUDE_BUILTIN_COMPUTER_USE_RULES, ...(env?.[CLAUDE_HARNESS_WEB_FLAG] === 'off' || env?.[EGDESK_PAGE_TOOLS_FLAG] === 'on' ? CLAUDE_BUILTIN_WEB_TOOLS : [])]) })
 }
 
 const FIRST_SENTENCE = /^Your own shell and patch tools are off in this session[^\n]*\n?/
@@ -59,11 +70,12 @@ export function claudeHarnessInstructions(base) {
   const rest = OWN_TOOLS_INSTRUCTIONS.replace(FIRST_SENTENCE, '')
   const own = ['Your own shell, file-editing and file-reading tools (Bash, Edit, Write, MultiEdit, NotebookEdit, Read, Grep, Glob) are off in this session. The egdesk tools below reach you as mcp__egdesk__<name>; the names in this text are the part after the last double underscore.', rest, 'To list files by name, run a read-only command such as ls or find with egdesk_run_command.'].join('\n')
   const person = typeof base === 'string' && base.trim() ? base.trim() : ''
-  return person ? `${person}\n\n${own}` : own
+  const memory = 'EG-Desk, not you, keeps the person\'s memory and standing instructions: it holds them in a guidance record the person can apply or revert, and it carries what matters into your turns (a line from EG-Desk in a turn says where an instruction stands, when there is one). When the person asks you to remember something or to change how you answer (shorter, another tone), do it from this turn on. Do not say that you saved it to your own memory, and do not say that you cannot keep anything; do not add to or contradict the state EG-Desk gives you.'
+  return person ? `${person}\n\n${own}\n\n${memory}` : `${own}\n\n${memory}`
 }
 
 /** The thread overrides of a Claude harness thread: instructions and the built-in tools to switch off. */
 export function claudeHarnessThreadOverrides({ base = null, harness } = {}) {
   if (!harness) return {}
-  return { developerInstructions: claudeHarnessInstructions(base), egdeskDisallowedTools: [...harness.disallowed] }
+  return { developerInstructions: claudeHarnessInstructions(base), egdeskDisallowedTools: [...harness.disallowed], egdeskAlwaysLoad: true }
 }

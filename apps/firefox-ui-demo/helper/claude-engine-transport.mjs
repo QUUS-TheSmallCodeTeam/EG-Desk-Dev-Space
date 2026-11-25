@@ -316,7 +316,7 @@ function normalizeMcpConfig(value) {
     if (!SERVER_NAME.test(name) || plainObject(config)?.type !== 'sdk' || config.name !== name) {
       throw optionError('mcpConfig servers must be in-process EG-Desk servers ({ type: "sdk", name })')
     }
-    out[name] = { type: 'sdk', name }
+    out[name] = { type: 'sdk', name, ...(config.alwaysLoad === true ? { alwaysLoad: true } : {}) } // u2: the one extra key: load this server's tools upfront (docs: code.claude.com/docs/en/mcp)
   }
   return entries.length ? { mcpServers: out } : null
 }
