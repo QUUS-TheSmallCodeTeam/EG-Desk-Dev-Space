@@ -51,6 +51,7 @@ export const COMMITTED_PLANS = Object.freeze([
   ...['V1', 'V2', 'V3'].map(id => ({ path: `scripts/egdesk-all-on-live-measure.plan-v9-variant-${id}.json`, lane: 'L6', rebuilt: { script: 'egdesk-journey-variants.mjs', matches: 3 } })),
   ...['', '-v2', '-v3', '-v4'].map(v => ({ path: `scripts/egdesk-multiuser-live-measure.plan${v}.json`, lane: 'L1', handWritten: 'collaboration scenario plan (written by hand; the live runner builds bodies at run time)' })),
   ...['allon-plan', 'plan', 'plan-delivery', 'plan-holdout', 'plan-holdout-rerun', 'plan-holdout2', 'plan-settings', 'plan-stuck', 'plan-entry', 'plan-entry2', 'plan-entry3', 'plan-holdout2-v2', 'plan-regression', 'plan-settings-error', 'plan-stability', 'plan-statement', 'recorded-plan', 'renamed-plan'].map(v => ({ path: `scripts/egdesk-browser-live-${v}.json`, lane: 'L8', handWritten: 'browser journey plan (written by hand; the live runner builds bodies at run time)' })),
+  { path: 'scripts/egdesk-browser-open-item-plan.json', lane: 'L8', handWritten: 'c38: 12 replies after a hand-over for the open browser task option predicates, pre-registered with predictions before any dry run; the requests are the product\'s own (helper/egdesk-browser-open-item-measure.mjs)' },
 ])
 
 /** Every committed plan location under the app root (see the header), sorted. */

@@ -16,8 +16,17 @@
  "passRule": "No reply is WRONG (hard). Correct and safe-miss counts are reported; a safe miss never fails the plan. Stops at the first failed request, the request limit or the token ceiling. Replies that did not run count as not run.",
  "dropOrder": [
   "offtopic",
+  "compound",
+  "stop",
+  "change",
+  "page",
+  "typo",
   "okok",
-  "compound"
+  "stop2",
+  "again2",
+  "ack",
+  "notyet",
+  "again"
  ],
  "replies": [
   {
@@ -28,7 +37,9 @@
     "continue"
    ],
    "predicted": {
-    "continue": 0.8
+    "continue": 0.8,
+    "uncertain": 0.15,
+    "wrong": 0.05
    },
    "note": "the commonest reply: \"done\". The 29bl question says what was asked (log in), so continue should be decided. Risk: the model reads a bare 했어 as too short and leaves it undecided."
   },
@@ -40,14 +51,16 @@
     "continue"
    ],
    "predicted": {
-    "continue": 0.75
+    "continue": 0.75,
+    "uncertain": 0.2,
+    "wrong": 0.05
    },
    "note": "a spelling slip (햇 for 했). Predicted decided, slightly less sure than the clean form."
   },
   {
    "id": "okok",
    "message": "ㅇㅇ",
-   "want": "continue",
+   "want": "none",
    "acceptable": [
     "continue"
    ],
@@ -97,7 +110,9 @@
     "abandon"
    ],
    "predicted": {
-    "abandon": 0.9
+    "abandon": 0.9,
+    "uncertain": 0.08,
+    "wrong": 0.02
    },
    "note": "unambiguous stop."
   },
@@ -124,7 +139,8 @@
    ],
    "predicted": {
     "ask_page": 0.8,
-    "uncertain": 0.15
+    "uncertain": 0.15,
+    "wrong": 0.05
    },
    "note": "a question about the page."
   },
@@ -160,7 +176,8 @@
    ],
    "predicted": {
     "change": 0.7,
-    "uncertain": 0.25
+    "uncertain": 0.25,
+    "wrong": 0.05
    },
    "note": "replaces the request (the fifth predicate, asked because in-run messages are on)."
   },
@@ -177,7 +194,8 @@
     "continue": 0.25,
     "ask_page": 0.15
    },
-   "note": "two options at once: not settled is the right outcome (R5); either is tolerated."
+   "note": "two options at once: not settled is the right outcome (R5); either is tolerated.",
+   "uncertainOk": true
   }
  ],
  "prediction": {
@@ -190,5 +208,7 @@
    "notyet",
    "compound"
   ]
- }
+ },
+ "preRegistrationNote": "The residual probability mass of five predictions (ack, typo, stop, page, change) was written out explicitly before the first dry run; the stated confidences were not changed. okok: want none, acceptable [continue] (its note already said so).",
+ "dropOrderNote": "Fixed before any dry run, from the typed estimator (134.8 tokens per predicate + 0.198 per byte): one reply is a request of five predicates, about 1,010 estimated tokens, so 12 replies are about 12k, not 4k. Under a budget the replies are dropped in this order (first dropped first) until the estimate fits: at 4,000 the three that stay are again (the retry/continue overlap the c37 heads-up worried about), notyet (the unsafe error: continue settled on \"아직\") and ack (the baseline). --budget 13000 runs all twelve. Nothing is dropped silently: the run records what was dropped."
 }
