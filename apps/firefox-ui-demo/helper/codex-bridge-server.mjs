@@ -92,6 +92,7 @@ import { createOntologyHttpHandler, ontologyHealth, openBoundOntologyStore, read
 import { inspectSqliteRuntime } from './egdesk-sqlite-runtime.mjs'
 import { createHostAgent, resolveHostAgentExecutable } from './egdesk-host-agent.mjs'
 import { createHostControl, createHostControlHttpHandler } from './egdesk-host-control.mjs'
+import { createComputerObserveWiring } from './egdesk-computer-observe-wiring.mjs'
 
 // Ignore prerelease variables; do not pass them on in direct bridge launches.
 for (const name of Object.keys(process.env)) {
@@ -473,8 +474,15 @@ const claudeEngineStatus = createClaudeEngineStatus({
 // the observe-only host helper (started when the host-activity view first
 // asks) and the activity timeline. Lease events reach chat.noteHostControl.
 // No shutdown step: the helper exits on its stdin EOF when the bridge exits.
+// U1 B1 (developer flag EGDESK_COMPUTER_OBSERVE=on, default off: null): EG-Desk's own computer observe tools for both engines. The same host helper
+// is started with --observe-content and the provider asks that agent (attach).
+const computerObserve = createComputerObserveWiring({ env: process.env, getChat: () => chat, getHostControl: () => hostControl })
 const hostControl = createHostControl({
-  makeAgent: onEvent => createHostAgent({ executable: resolveHostAgentExecutable(), onEvent }),
+  makeAgent: onEvent => {
+    const agent = createHostAgent({ executable: resolveHostAgentExecutable(), onEvent, ...(computerObserve ? computerObserve.agentOptions : {}) })
+    computerObserve?.attach(agent)
+    return agent
+  },
   onLeaseEvent: event => chat.noteHostControl(event),
   emit: event => broadcast({ ...event, v: BRIDGE_PROTOCOL_VERSION, provider: PROVIDER_ID, ts: Date.now() }),
 })
@@ -583,6 +591,9 @@ const chat = new CodexChatRuntime({
       excludeMessageId: context.localMessageId, chatStore, deskStore, ontologyStore: ensureOntologyStore })).candidates,
   },
 })
+// U1 B1: EG-Desk's own computer observe tools (flag EGDESK_COMPUTER_OBSERVE=on; otherwise null and nothing is added). Registered after the runtime is built, so the
+// toolProviders list above (which the own-tools wiring test pins) stays as it is. The provider needs no runtime handle; collectToolSpecs reads the live list.
+if (computerObserve) chat.toolProviders.push(computerObserve.provider)
 // Owned Codex events reach only Chat on their originating profile, never
 // the shared Reader, WebSocket, default account state, or inherited MCP sync.
 codexEngine.subscribe({
