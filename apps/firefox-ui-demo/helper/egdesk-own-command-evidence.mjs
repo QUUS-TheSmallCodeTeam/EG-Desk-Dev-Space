@@ -2,6 +2,7 @@
 // reference (the run's activity is a dynamic tool call, not a commandExecution), so "테스트가 모두 통과했습니다" had nothing to be supported by, and a false one had nothing
 // to be caught by. The facts are the arbiter's (egdesk-run-conditions.mjs): the exit code, how it ended, the test runner's own summary line and its counts. The same words
 // as the heartbeat's evidence (egdesk-conversation-flow.mjs): the quoted line only where the run may send command output.
+import { commandTopic } from './egdesk-draft-run-facts.mjs'
 export const OWN_COMMAND_LIMITS = Object.freeze({ commands: 8, commandChars: 300, lineChars: 300 })
 const oneLine = (text, n) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, n)
 
@@ -33,6 +34,7 @@ export function ownCommandEvidence(entry, index, { quoteLine = false } = {}) {
   if (entry.worktree?.state === 'conflict') parts.push(`Git status reports ${entry.worktree.conflicts ?? entry.worktree.files?.length ?? 'some'} file${(entry.worktree.conflicts ?? 1) === 1 ? '' : 's'} in conflict${entry.worktree.files?.length ? `: ${entry.worktree.files.map(p => `\`${p}\``).join(', ')}` : ''}; the merge is not finished and nothing was committed by the command.`)
   else if (entry.worktree?.state === 'clean' && entry.vcs) parts.push('Git status reports a clean worktree after it.')
   // facts: the same reading as numbers, for the draft check's rule on completion claims (helper/egdesk-draft-run-facts.mjs)
-  const facts = { kind: 'own_command', passed: entry.summary ? entry.summary.passed : null, failed: entry.summary ? entry.summary.failed : null, exitCode: entry.exitCode, stopped: entry.stopped === true, hasSummary: Boolean(entry.summary), worktree: entry.worktree ? entry.worktree.state : null, conflicts: entry.worktree ? entry.worktree.conflicts : null, vcs: entry.vcs === true }
+  const facts = { kind: 'own_command', passed: entry.summary ? entry.summary.passed : null, failed: entry.summary ? entry.summary.failed : null, exitCode: entry.exitCode, stopped: entry.stopped === true, hasSummary: Boolean(entry.summary), worktree: entry.worktree ? entry.worktree.state : null, conflicts: entry.worktree ? entry.worktree.conflicts : null, vcs: entry.vcs === true,
+    topic: commandTopic(entry.command, { hasSummary: Boolean(entry.summary) }), command: entry.command ?? null } // c30: what the command is for (code), and its line for the rule's scope check (in-process only)
   return { id: `own${index + 1}`, kind: 'terminal', time: 'present', source: 'run', pinned: true, facts, text: parts.join(' ') }
 }

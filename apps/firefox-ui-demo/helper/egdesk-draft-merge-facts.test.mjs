@@ -52,3 +52,12 @@ test('checkDraft: "머지 완료했습니다" after a conflict is revised even t
   const clean2 = await checkDraft({ draft: '머지 완료했습니다.', evidence: evidence(clean), mode: 'on', client: model(), revise: async () => 'x' })
   assert.equal(clean2.outcome, 'passed', 'a clean merge makes the same sentence true')
 })
+
+test('merge of the two sides (c30 topics, c31 worktree): both kinds of facts survive the check\'s evidence normalization, so a claim about another topic is not judged by a failed test run', async () => {
+  const failedTests = ownCommandEvidence(entry('npm test', 1, null), 0)
+  assert.equal(failedTests.facts.topic, 'test'); assert.equal(failedTests.facts.command, 'npm test')
+  const lint = await checkDraft({ draft: '린트는 모두 통과했습니다.', evidence: [failedTests], mode: 'on', client: model(), revise: async () => 'x' })
+  assert.equal(lint.outcome, 'passed', 'a lint claim is not contradicted by a failing test command')
+  const tests = await checkDraft({ draft: '모든 테스트가 통과했습니다.', evidence: [failedTests], mode: 'on', client: model(), revise: async () => '테스트가 실패했습니다.' })
+  assert.equal(tests.outcome, 'revised', 'the test claim is'); assert.deepEqual([conflict.worktree.state, evidence(conflict)[0].facts.worktree, evidence(conflict)[0].facts.topic], ['conflict', 'conflict', 'other'])
+})

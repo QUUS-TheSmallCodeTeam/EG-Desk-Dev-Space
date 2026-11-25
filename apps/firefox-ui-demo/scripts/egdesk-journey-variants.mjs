@@ -32,6 +32,14 @@ export const AGENT_KEYS = Object.freeze(['quote', 'tidy', 'recall', 'tests', 'no
 const deepFreeze = value => { if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.freeze(value); for (const v of Object.values(value)) deepFreeze(v) } return value }
 const sha256 = text => createHash('sha256').update(text).digest('hex')
 
+// ---- per-step caps of a variant (c29) ----
+// A variant plan keeps the base plan's per-step caps, except where a variant is allowed more. The briefing step's cap was set for ONE fill turn (v9 real: 5 requests, 8,460 tokens, cap 14,000).
+// The product allows a second fill turn when the first leaves a fact off the board, and that turn repeats the design request and the fill check: the real V1 run (c45) used 13,629 tokens
+// in six requests (a second fill turn after a framing sentence of the answer was not on the board) and stopped at the cap before its seventh request, which made s3.board and
+// s3.board-a-pages fail as a consequence. The cap now holds the base's single round plus one more round (3.8k + 1.8k tokens measured, with 25% margin): 21,000 tokens / 14 requests. The total
+// ceiling of the variant still bounds the run. Caps are only ever raised, never lowered.
+export const VARIANT_STEP_CAPS = Object.freeze({ 's3-briefing': Object.freeze({ maxRequests: 14, maxEstTokens: 21_000 }) })
+
 // ---- the variants ----
 // says: the person's words per turn ('kind' says how it differs from the base wording: spoken, terse or formal). agent: the scripted answering
 // model's texts: the same facts, tenses and claims as the base text (the draft check must find them supported), in other words. pages.rename:
@@ -189,12 +197,16 @@ export function buildVariantPlan(baseRaw, baseBytes, id) {
     if (e.id === 's9.target-offered') a.needles = a.needles.map(n => titles[n] ?? n)
     if (e.args !== undefined) e.args = a
   }
+  for (const step of plan.steps) {
+    const raised = VARIANT_STEP_CAPS[step.id]
+    if (raised) { if (raised.maxRequests < step.caps.maxRequests || raised.maxEstTokens < step.caps.maxEstTokens) throw new Error(`${step.id}: a variant cap only raises the base cap`); step.caps = { ...step.caps, ...raised } }
+  }
   // the plan lists its steps in the variant's order (the loader checks the plan against it)
   if (variant.order) plan.steps = variant.order.map(stepId => plan.steps.find(step => step.id === stepId))
   const sha = sha256(baseBytes)
   plan.set = `${baseRaw.set}-variant-${id.toLowerCase()}`
   plan.registered = `2026-11-25 (lane L6 cycle 24), before any send of the variant; variant ${id} of plan v${baseRaw.version} (${path.basename(BASE_PLAN)}, sha256 ${sha.slice(0, 16)}): ${variant.intent}. Same steps, same hard checks under the same ids; the person's words, the scripted answering model's words, the page set and the order are the variant's (scripts/egdesk-journey-variants.mjs, sha256 ${variantSha256(id).slice(0, 16)})`
-  plan.basedOn = { file: path.basename(BASE_PLAN), sha256: sha, note: 'every step and expectation of the base plan; page ids and the two needles mapped; decoy pages added to the prefix exclusions' }
+  plan.basedOn = { file: path.basename(BASE_PLAN), sha256: sha, note: 'every step and expectation of the base plan; page ids and the two needles mapped; decoy pages added to the prefix exclusions; the briefing step\'s cap raised for its second fill turn (VARIANT_STEP_CAPS)' }
   plan.variant = id
   plan.variantSha256 = variantSha256(id)
   plan.ceiling = { ...variant.ceiling, note: 'declared before the send: the run stops before a request that would go over it, and a higher one is refused for a send. The scripted dry run over-selects memory pages (about twice the fetch requests of a real run), so its estimate is above the real count; the replay estimate (the answers of the last real journey drive the requests, the estimate is converted with that journey\'s per-family reported/estimated ratios) is what the ceiling is set against' }

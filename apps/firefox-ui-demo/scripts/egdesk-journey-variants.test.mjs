@@ -7,7 +7,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { AGENT_SAYS, SAYS, loadJourneyPlan, main, runJourney } from './egdesk-all-on-live-measure.mjs'
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
-import { AGENT_KEYS, BASE_PLAN, SAYS_KEYS, VARIANTS, buildAll, buildVariantPlan, decoyIdsOf, idMapOf, planBytesOf, variantPages, variantPlanFile, variantProblems, variantSha256 } from './egdesk-journey-variants.mjs'
+import { AGENT_KEYS, BASE_PLAN, SAYS_KEYS, VARIANTS, VARIANT_STEP_CAPS, buildAll, buildVariantPlan, decoyIdsOf, idMapOf, planBytesOf, variantPages, variantPlanFile, variantProblems, variantSha256 } from './egdesk-journey-variants.mjs'
 import { GRAPH_PAGES, graphOf } from './egdesk-all-on.support.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -196,4 +196,25 @@ test('the variants do not share request bodies with each other either, and the v
   // the registered builder is deterministic: building twice gives the same bytes
   assert.equal(planBytesOf(buildVariantPlan(baseRaw, baseBytes, 'V2')), planBytesOf(buildVariantPlan(baseRaw, baseBytes, 'V2')))
   assert.equal(graphOf(variantPages(GRAPH_PAGES, VARIANTS.V1)).nodes.some(n => n.id === 'quote/b-request'), true)
+})
+
+// ---- c29: the per-step caps of a variant ----
+test('step caps: a variant keeps the base plan\'s caps except where it is allowed more (the briefing step\'s second fill turn); caps only rise; every scripted dry step fits its cap', () => {
+  const baseCaps = Object.fromEntries(baseRaw.steps.map(st => [st.id, st.caps]))
+  assert.deepEqual(VARIANT_STEP_CAPS, { 's3-briefing': { maxRequests: 14, maxEstTokens: 21_000 } })
+  for (const id of Object.keys(VARIANTS)) {
+    const plan = JSON.parse(readFileSync(path.join(here, variantPlanFile(id)), 'utf8'))
+    for (const st of plan.steps) {
+      const want = VARIANT_STEP_CAPS[st.id] ?? baseCaps[st.id]
+      assert.deepEqual(st.caps, want, `${id} ${st.id}`)
+      assert.ok(st.caps.maxRequests >= baseCaps[st.id].maxRequests && st.caps.maxEstTokens >= baseCaps[st.id].maxEstTokens, 'caps only rise')
+      const ran = (dry[id].steps.find(x => x.id === st.id)?.requests ?? []), est = ran.reduce((n, q) => n + (q.estInputTokens ?? 0), 0)
+      assert.ok(ran.length <= st.caps.maxRequests && est <= st.caps.maxEstTokens, `${id} ${st.id}: ${ran.length} requests, ${est} tokens against ${JSON.stringify(st.caps)}`)
+    }
+  }
+  // the real V1 run (c45): the first round plus the second fill turn's design request, in reported tokens, and the fill check that was refused: it fits the raised cap with room
+  const realV1 = 1977 + 1321 + 953 + 3813 + 1752 + 3813, refused = 561, secondCheck = 1800
+  assert.ok(realV1 + refused > 14_000, 'the base cap stopped it'); assert.ok(realV1 + secondCheck + 1000 <= VARIANT_STEP_CAPS['s3-briefing'].maxEstTokens)
+  // a cap lower than the base is refused by the builder
+  assert.throws(() => buildVariantPlan(baseRaw, baseBytes, 'NOPE'), /no variant/)
 })
