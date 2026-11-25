@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
+import { ownEditFact } from './egdesk-own-edit-evidence.mjs' // c30b
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
@@ -140,7 +141,7 @@ export function applyUnifiedDiff(source, diff) {
  * createFileToolsProvider({ mode, ledger, workspaceOf, inspect?, onFileChange?, limits? })
  *   inspect({ cwd, paths }) → { targets: { [abs]: { exists, trackedFiles, ignored } }, git } (the terminal gate's interface), or absent
  */
-export function createFileToolsProvider({ mode = () => 'off', ledger = null, workspaceOf = () => null, inspect = null, onFileChange = () => {}, limits = {} } = {}) {
+export function createFileToolsProvider({ mode = () => 'off', ledger = null, workspaceOf = () => null, inspect = null, onFileChange = () => {}, onEdit = () => {}, limits = {} } = {}) {
   const L = { ...FILE_TOOL_LIMITS, ...limits }
   const on = () => { try { return mode() === 'on' } catch { return false } }
   const calls = new Map()
@@ -172,7 +173,8 @@ export function createFileToolsProvider({ mode = () => 'off', ledger = null, wor
     dispatch(run, event) {
       const key = `${run?.answerId ?? run?.runId ?? ''}/${event?.callId ?? ''}`
       if (event?.callId && calls.has(key)) return calls.get(key)
-      const work = this.handle(run, event).catch(() => respond(false, { error: { code: 'FILE_TOOL_FAILED' } }))
+      // c30b: what an edit tool call did, as facts from its own response (helper/egdesk-own-edit-evidence.mjs), for the check of the run's answer; advisory
+      const work = this.handle(run, event).catch(() => respond(false, { error: { code: 'FILE_TOOL_FAILED' } })).then(response => { try { const fact = ownEditFact(event?.tool, response); if (fact) onEdit(run, fact) } catch { /* advisory */ } return response })
       if (event?.callId) { calls.set(key, work); while (calls.size > 256) calls.delete(calls.keys().next().value) }
       return work
     },

@@ -71,7 +71,7 @@ export function createOwnToolsWiring({ env = process.env, dataDir, spawn, getCha
   }
   const executor = createCommandExecutorProvider({ mode: () => 'on', ledger, workspaceOf, runner, outputFor, ask, gitStatus,
     onConditions: (run, record) => getChat().noteOwnCommand(run, record) })
-  const files = createFileToolsProvider({ mode: () => 'on', ledger, workspaceOf, inspect })
+  const files = createFileToolsProvider({ mode: () => 'on', ledger, workspaceOf, inspect, onEdit: (run, fact) => getChat().noteOwnEdit(run, fact) })
   return {
     ledger, executor, files, toolProviders: [executor, files],
     // c22: EGDESK_OWN_TOOLS_ENVIRONMENTS=none (developer flag, default unset) also starts the thread with environments: [] ("disables environment access" in the
