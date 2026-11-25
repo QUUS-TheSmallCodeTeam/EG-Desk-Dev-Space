@@ -79,7 +79,7 @@ const FILL_RULES_BASE = [
   '@@ITEM_RULE@@',
   'A text slot is a string no longer than its "max". A material slot is one of the item\'s material aliases. A list slot is an array of rows with exactly the listed fields, between "min" and "max" rows.',
   'Use ONLY what the materials say. If the materials do not contain the data for a slot, do not invent it: leave that slot out and report it in "unfillable".',
-  'Where a line or value restates something a material says, keep its actors, qualifiers, amounts and dates exactly as the material has them: who does it, under what condition, how much, by when (for example write "팀장 승인 후 견적서 v2 발송", not "승인 후 견적서 v2 발송").',
+  'Where a line or value restates something a material says, keep its actors, qualifiers, amounts and dates exactly as the material has them: who does it, under what condition, how much, by when (for example write "팀장 승인 후 견적서 v2 발송", not "승인 후 견적서 v2 발송"). When a line is too short for all of it, keep ids, amounts and dates first and shorten the rest.',
   // Cycle 26: a card holds a fixed number of rows; a material that lists more items than that still states how many there are (c25: "8개 레인" on a six-row card).
   'If a material lists more items than a list slot has rows, list the first ones and put the total the material states in that item\'s title slot, as the material writes it.',
   'Write every text in the language of the materials.',
@@ -93,15 +93,17 @@ const hasCopy = request => (request?.guide?.items ?? []).some(i => (i.slots ?? [
 const itemRule = request => (wantsFallback(request)
   ? 'Each item has "text" (the step explanation, saying only what the item shows) and "fallback" (one sentence for when it cannot be shown), plus the slots its component lists.'
   : 'Each item has "text" (the step explanation: one short phrase of at most 80 characters that says what the item shows, without repeating what its slots show), plus the slots its component lists.')
-const COPY_RULE = 'A list field marked "copy": true may be null: the label as null is the cited material\'s date; the text as null is the cited material\'s whole text, copied by the code exactly, and only when that whole text is no longer than the field\'s "max". If the material\'s text is longer than "max", do not use null: write a line of at most "max" characters that keeps every id, number, date and name the material states (leave out explanations first).'
-const fillRules = request => FILL_RULES_BASE.replace('@@ITEM_RULE@@', itemRule(request)) + (hasCopy(request) ? `\n${COPY_RULE}` : '')
+const COPY_RULE = 'A list field marked "copy": true may be null: the label as null is the cited material\'s date; the text as null is the cited material\'s whole text, copied by the code exactly, and only when that whole text is no longer than the field\'s "max". If the material\'s text is longer than "max", do not use null: write a line of at most "max" characters that keeps the material\'s ids and figures (commit ids, counts, measurements) exactly as written, and shorten everything else (explanations, conditions) first.'
+const SEQUENCE_RULE = 'A list of a "shows": "sequence" item has one row for EVERY material of that item (see its "materials"), in date order, each row naming its material in "from". Never leave a material out or report the list as unfillable because its text is long: shorten the row\'s text to fit its "max", keeping ids and figures first.'
+const hasSequence = request => (request?.guide?.items ?? []).some(i => i.shows === 'sequence')
+const fillRules = request => FILL_RULES_BASE.replace('@@ITEM_RULE@@', itemRule(request)) + (hasCopy(request) ? `\n${COPY_RULE}` : '') + (hasSequence(request) ? `\n${SEQUENCE_RULE}` : '')
 export function fillPrompt(request) {
   // A rewrite after the check: closed words only for what was not supported by its material ("P2 line 2", "P1 explanation"); never the reviewer's text.
   const rejected = Array.isArray(request?.rejected) ? request.rejected.filter(w => typeof w === 'string' && /^P[1-6] (?:explanation|line \d{1,2}|row \d{1,2} (?:left|right))$/.test(w)).slice(0, 24) : []
   // Cycle 34 (owner rule U5, one bounded re-design round): the materials whose statements the board must ALSO carry, by alias only (never the answer's text).
   const cover = Array.isArray(request?.cover) ? request.cover.filter(a => typeof a === 'string' && /^M\d{1,2}$/.test(a)).slice(0, 12) : []
   const scope = (Array.isArray(request?.only) && request.only.length ? `Fill only these items again: ${request.only.join(', ')}.\n` : '') +
-    (cover.length ? `A check found that the board does not yet show everything these materials state: ${cover.join(', ')}. Write the listed items so that they carry every id, number, date, name and condition those materials state, as the material writes it.\n` : '') +
+    (cover.length ? `A check found that the board does not yet show everything these materials state: ${cover.join(', ')}. Write the listed items so that they carry the ids, numbers and dates those materials state, as the material writes them (a sequence card keeps one row for every material it shows).\n` : '') +
     (rejected.length ? `A check found these parts of your previous data not supported by the material they cite: ${rejected.join('; ')}. Write them again from what the material says, keeping its actors, qualifiers, amounts and dates exactly, or report the slot as unfillable.\n` : '') + (request?.only?.length || rejected.length || cover.length ? '\n' : '')
   return `${FILL_FRAME}\n\n${scope}${dataBlock('Design guide (decided; do not change it)', request?.guide ?? null)}\n\n${dataBlock('Materials', request?.materials ?? [])}\n\nRules:\n${fillRules(request)}\n\nJSON shape: ${wantsFallback(request) || !request?.guide ? FILL_SHAPE_FULL : FILL_SHAPE_COMPACT}`
 }

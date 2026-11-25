@@ -823,8 +823,11 @@ test('coverage facts by code: sentences; a sentence splits at commas only when e
   assert.deepEqual(answerFacts(S3_ANSWER), { facts: ['A사 견적은 11월 3일 요청', '11월 6일 v1 발송', 'v2는 팀장 승인 후 발송 예정입니다.'], cut: 0 })
   assert.deepEqual(answerFacts('남은 일은 법무 검토, 대표 승인, 최종본 발송입니다.').facts, ['남은 일은 법무 검토, 대표 승인, 최종본 발송입니다.'], 'a list is one fact, not fragments')
   assert.deepEqual(answerFacts('단가는 12,800원입니다.').facts, ['단가는 12,800원입니다.'], 'a comma inside a number never splits')
+  // c38 (Main): 6 facts per coverage request and at most two requests, so 12; the rest are counted, never asked
   const seven = answerFacts('하나입니다. 둘입니다. 셋입니다. 넷입니다. 다섯입니다. 여섯입니다. 일곱입니다.')
-  assert.deepEqual([seven.facts.length, seven.cut], [6, 1], 'bounded; the rest are counted, never asked')
+  assert.deepEqual([seven.facts.length, seven.cut], [7, 0], 'seven facts: two requests')
+  const fourteen = answerFacts(Array.from({ length: 14 }, (_, i) => `${i + 1}번째 항목입니다.`).join(' '))
+  assert.deepEqual([fourteen.facts.length, fourteen.cut, SKELETON_LIMITS.maxFacts * SKELETON_LIMITS.factRequests], [12, 2, 12], 'bounded at twelve; the rest are counted, never asked')
   assert.deepEqual(factAnchors('11월 6일 v1 발송, 단가 12,800원, 200개'), { dates: [{ month: 11, day: 6 }], versions: [1], amounts: ['12,800', '200'] })
   const mats = normalizeMaterials(QUOTE)
   assert.deepEqual(factCites('11월 14일에 v2로 진행하기로 결정했습니다.', mats), ['M2', 'M4'], 'the date (M4) and the version mark (M2 title, M4 text)')
@@ -835,7 +838,7 @@ test('coverage request per fact: the board quoted ONCE in the user message, each
   const out = await run(ORDER, { answer: S3_ANSWER, request: S3_REQUEST })
   const cov = out.judge.calls.at(-1)
   assert.deepEqual([cov.stage, cov.names], ['coverage', ['onboard_F1', 'onboard_F2', 'onboard_F3']])
-  assert.equal(cov.packet.input[0].content, 'You are a system judge checking whether a finished board briefing shows given facts. Judge only from the quoted parts of the board and the quoted fact.')
+  assert.equal(cov.packet.input[0].content, 'You are a system judge checking whether a finished board briefing shows given facts. Judge only from the quoted parts of the board and the quoted fact. A fact that is several values joined by " · " (the cells of a table row) is shown when every value is on the board, in any order or form; a date may be written as month-day in the fact and in full on the board.' /* c38 */)
   const user = cov.packet.input[1].content
   assert.ok(user.startsWith(`Request, quoted exactly as a JSON string: "${S3_REQUEST}"\n\nThe board, its parts quoted in order as JSON: [{"text":"v1과 v2 안을 나란히`)); assert.equal(user.split('The board, its parts quoted').length, 2)
   assert.ok(!JSON.stringify(cov.packet).includes(S3_ANSWER), 'the whole answer is not sent again: only its facts, one per question')

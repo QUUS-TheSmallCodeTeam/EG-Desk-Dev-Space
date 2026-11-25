@@ -60,7 +60,7 @@ test('schemaProblems names what a strict schema may not contain; violation check
   assert.match(violation('text', schema), /expected an object/)
 })
 const fillReply = (guide = GUIDE) => ({ title: 'A사 견적 정리', unfillable: [], items: Object.fromEntries(guide.items.map(i => [i.id, { text: `${i.shows} 설명`, fallback: '카드를 열어 보세요.', slots: Object.fromEntries(i.slots.map(s => [s.name,
-  s.type === 'text' ? `${s.name} 값` : s.type === 'material' ? i.materials[s.name === 'right' ? 1 : 0] : [Object.fromEntries(s.of.map(f => [f.name, f.type === 'material' ? i.materials[0] : `${f.name} 값`]))]])) }])) })
+  s.type === 'text' ? `${s.name} 값` : s.type === 'material' ? i.materials[s.name === 'right' ? 1 : 0] : (i.shows === 'sequence' ? i.materials : [i.materials[0]]).map(alias => Object.fromEntries(s.of.map(f => [f.name, f.type === 'material' ? alias : `${f.name} 값`])))])) }])) }) // c38: a sequence card has a row for every material it shows
 test('stripNulls: a null slot is a slot left out (validateFill reads it as an issue, never a value); null emphasis and empty lists are absent', () => {
   const item = GUIDE.items.find(i => i.component === 'result_text'), schema = fillOutputSchema(GUIDE)
   const reply = fillReply()
