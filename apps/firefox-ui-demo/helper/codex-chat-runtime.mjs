@@ -84,6 +84,8 @@ export const EARLIER_EVIDENCE_LIMIT = 4
 // its records are kept for the next check (the check's own ranking keeps the ones related to the next draft). After a posted answer the limit above stays.
 export const EARLIER_WITHHELD_LIMIT = 8
 export const POSTED_ANSWER_KEY = 'egdesk_posted_answer'
+import { ENGINE_STALL_LIMITS, eventTurnId, stallFact } from './egdesk-engine-stall.mjs' // c33: the first-event watchdog
+import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
 import { OWN_EDIT_LIMITS, EDIT_TOOL_NAMES, ownEditEvidence } from './egdesk-own-edit-evidence.mjs' // c30b: the edits EG-Desk made, as readable evidence for the check of the answer
 import { OWN_COMMAND_LIMITS, ownCommandEntry, ownCommandEvidence } from './egdesk-own-command-evidence.mjs' // c29: what the check of an answer may know about the commands EG-Desk ran
 import { STOPPED_COMMAND_KEY, stoppedCommandBlock, stoppedCommandEvidence, stoppedCommandFact } from './egdesk-stopped-command.mjs' // c26: the command the person stopped, told to the next turn once
@@ -135,6 +137,7 @@ import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
 import { sha256Hex } from './egdesk-decision-questions.mjs'
+import { workspaceCandidates } from './egdesk-prefetch.mjs'
 import { engineContextConfig, spilledKeys, splitEngineContext } from './egdesk-engine-context.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
@@ -763,7 +766,7 @@ function cleanNotification(method, p, engineId = 'codex') {
 export const STOP_RECORD_WAIT_MS = 2500 // c27: how long the next send waits for a stopped command's record (the runner's kill grace is 2 s)
 const INTERNAL_WORD = /^[A-Za-z][A-Za-z0-9._:-]{0,63}$/ // an effort or a model name a caller may pick for an internal turn (the engine rejects what it does not know)
 export class CodexChatRuntime {
-  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], agentReloadReuse = false, expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null }) {
+  constructor({ request, respond, engines = null, localCapacity = null, emit = () => {}, emitLegacy = () => {}, verifyFile = verifyLocalFile, now = Date.now, contexts = null, toolProviders = [], agentReloadReuse = false, expectedProcessConfiguration = null, store = null, requireStore = false, getOwnerKey = () => null, qaReady = () => true, getNativeContractFingerprint = () => null, getBoardPeerContract = () => null, getSteerContract = () => null, getThreadDelete = () => false, profiles = null, resolveProjectWorkspace = null, resolveRunProjectOrigin = null, mcpServerKind = null, computerControlPolicy = null, computerControlStore = null, onComputerControlChange = () => {}, hostLease = null, setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = handle => clearTimeout(handle), decisionContext = null, monotonicNow = () => performance.now(), ownTools = null, roomAccount = null, engineStall = null }) {
     Object.assign(this, { emitEvent: emit, emitLegacy, verifyFile, now, setTimer, clearTimer, monotonicNow })
     if (resolveProjectWorkspace !== null && typeof resolveProjectWorkspace !== 'function') throw new TypeError('resolveProjectWorkspace must be a server-owned callback')
     this.resolveProjectWorkspace = resolveProjectWorkspace
@@ -912,6 +915,11 @@ export class CodexChatRuntime {
     this.deletedConversations = new Set() // clientThreadId of a conversation the person deleted (forgetConversation): its runs say nothing more
     this.inRunMessageQueue = new WeakMap() // run -> [{ requestId, localMessageId, text, at, state }]: messages typed while it works (inRunMessages flag)
     this.carriedInRun = new Map() // clientThreadId -> [text]: messages its run ended without acting on; they open the next turn's input
+    // c33: the first-event watchdog (developer flag, default off): engineStall = { firstEventMs } | null
+    this.engineStall = engineStall && Number.isFinite(engineStall.firstEventMs) && engineStall.firstEventMs >= 1 ? { firstEventMs: engineStall.firstEventMs } : null
+    this.engineSeen = new Map() // threadId -> Set of turn ids that sent an event (bounded)
+    this.engineWaiters = new Set() // { threadId, turnId, resolve }
+    this.engineStalls = new Map() // clientThreadId -> the last stall fact of the conversation (bounded)
     this.stoppedCommands = new Map() // clientThreadId -> the fact of the command the person stopped (consumed by the next turn)
     this.postedInstead = new Map() // clientThreadId -> { outcome, posted }: the answer the person saw instead of the Agent's draft (consumed by the next turn)
     this.draftOutcomes = new WeakMap() // run -> the draft check's outcome for its answer
@@ -2593,6 +2601,8 @@ export class CodexChatRuntime {
     // thread preparation below. It is awaited once, capped, just before the turn is claimed. null when off, advisory or not eligible.
     const memoryTurn = !bounded && this.turnMemoryMode() === 'on' ? this.beginTurnMemory(body, context) : null
     // Decision model context setup: 'on' attaches the selected items, 'advisory' only records them.
+    // The folder the engine works in (own tools: the real folder behind the neutral one), for the prefetch candidates (flag turnMemory.prefetch, default off)
+    context.prefetchFolder = bounded ? null : (ownFolder ?? (overrides.cwd && overrides.cwd !== neutralFolder ? overrides.cwd : null))
     const decision = bounded ? null : await this.prepareDecisionContext(body, context)
     // Advisory turn memory (flag decisionContext.turnMemory.mode() === 'advisory', default off): the position is read before the thread is prepared.
     const memoryPosition = !bounded && this.turnMemoryMode() === 'advisory' ? this.turnPosition(context) : null
@@ -2972,10 +2982,14 @@ export class CodexChatRuntime {
       const recordingContext = recordRule ? { [RECORDING_KEY]: { kind: 'application', value: recordRule } } : null
       const turnAdditionalContext = browserTaskContext || memoryContext || recordingContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}), ...(recordingContext || {}) } : additionalContext
       // What the engine will really show of the entries (flag turnMemory.engineContext, default off): 'split' sends an over-limit entry as parts that each stay under it.
-      const engineShape = this.shapeEngineContext(turnAdditionalContext)
+      // c32 (U13, flag EGDESK_DECISION_FIRST=on, default off): a request to run something is picked by the decision model from options code built from the folder and run by EG-Desk's own
+      // runner before any engine call; a healthy result ends the turn without the engine, anything else goes to the engine with the result as context. Absent the flag: dfLocal is null.
+      const dfLocal = ownTools && !bounded && ownFolder ? await this.decisionFirstTry({ cid, body, context, ownFolder }) : null
+      const dfContext = dfLocal?.context ? { ...(turnAdditionalContext || {}), [COMMAND_RESULT_KEY]: { kind: 'application', value: dfLocal.context } } : turnAdditionalContext
+      const engineShape = this.shapeEngineContext(dfContext)
       await this.readGateHookReply(cid, body.message)
       turnStartAttempted = context.turnStartAttempted = true
-      const result = await engine.startTurn({
+      const result = dfLocal?.finished ? { turn: { id: dfLocal.turnId, status: 'inProgress', items: [] } } : await this.startTurnWatched(engine, {
         threadId: cid,
         input: [...this.carriedInputFor(context.clientThreadId), { type: 'text', text: body.message, text_elements: [] }],
         clientUserMessageId: context.requestId,
@@ -2985,7 +2999,7 @@ export class CodexChatRuntime {
         ...(overrides.cwd ? { cwd: overrides.cwd } : {}),
         ...(overrides.model ? { model: overrides.model } : {}),
         ...(effort !== undefined ? { effort } : {}),
-      }, slot)
+      }, slot, context)
       if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
       context.nativeTurnId = idText(result?.turn?.id)
       if (reservedTopicAnswer) {
@@ -3020,6 +3034,8 @@ export class CodexChatRuntime {
       if (!run) throw chatError('INVALID_TURN_RESPONSE', 'Codex did not return a turn ID', 502)
       try { this.gateHookBroker()?.turnStarted({ conversationId: cid, turnId: run.runId }) } catch { /* the gate hook never affects a turn */ }
       if (ownTools) { run.ownTools = true; run.ownFolder = ownFolder; if (ownFolder) this.ownFolders.set(cid, ownFolder) }
+      if (context.engineStall) run.engineStall = context.engineStall // c33: this run's first turn stayed silent and was started again
+      if (dfLocal) { run.decisionFirst = dfLocal.diag; if (dfLocal.preRun?.ownCommands) { run.ownCommands = dfLocal.preRun.ownCommands; run.ownCommandLast = dfLocal.preRun.ownCommandLast } } // c32: the command EG-Desk ran for this run, as evidence like any own command
       if (topicRoute && intake.current()) {
         const { topic, parent, needs } = topicRoute // discard the plaintext packet at this boundary
         const current = decision.result.privateBatchCurrent
@@ -3094,6 +3110,7 @@ export class CodexChatRuntime {
       // may inherit this request's correlation; other turns remain unclaimed.
       while (pending.buffer.length) await this.apply(pending.buffer.shift())
       if (TERMINAL.has(result.turn.status) && !TERMINAL.has(run.status)) await this.finish(run, safeTurn(result.turn, engine.id))
+      if (dfLocal?.finished) void this.finishDecisionFirstTurn(run, dfLocal).catch(() => {}) // c32: the local turn ends here, no engine call
       return {
         accepted: true, durable: !this.store || this.storeHealthy,
         conversationId: cid, requestId: context.requestId, runId: run.runId, answerId: run.answerId,
@@ -4093,6 +4110,7 @@ export class CodexChatRuntime {
 
   handleNotification(message, engineId, slot) {
     if (this.internalTurns.feed(message)) return Promise.resolve() // a private fork turn, not a run
+    this.noteEngineEvent(message)
     this.markEngineActivity(message)
     const inbound = this.inboundEventRoute(message, engineId, slot)
     if (!this.eventRouteMatches(inbound)) return Promise.resolve()
@@ -4118,6 +4136,7 @@ export class CodexChatRuntime {
   }
 
   handleServerRequest(message, engineId, slot) {
+    this.noteEngineEvent(message)
     if (this.internalTurns.declines(message)) { // the private fork may not act: every request is refused
       this.respond(message.id, null, { code: -32000, message: 'Not available in a private turn' }, slot || this.threadOperationSlot(idText(message.params?.threadId)))
       return Promise.resolve()
@@ -4603,6 +4622,8 @@ export class CodexChatRuntime {
       speech = mode === 'on' ? this.directSpeech(body, context, controller.signal) : null
       const memoryEvidenceFor = mode === 'on' ? this.directEvidenceReader(body, context, controller.signal) : null
       const collected = await setup.collect({ body, context, signal: controller.signal, memoryEvidenceFor, speech })
+      const prefetch = mode === 'on' ? await this.prefetchCandidates(context) : []
+      if (prefetch.length) collected.push(...prefetch)
       // What code can rule out is not asked (egdesk-context-pruning.mjs): records the model already holds unchanged in this conversation. Only
       // under 'on' and where delivery receipts are trusted: a Codex thread (compaction is reported there and clears them). Advisory records only.
       // Internal flag turnMemory.pruneHeld (bridge EGDESK_TURN_MEMORY_PRUNE_HELD=on), off by default.
@@ -4616,7 +4637,7 @@ export class CodexChatRuntime {
       const previousReply = this.previousReplyFor(context, speech)
       const out = await prepareTurnContext({ message: body.message, candidates, client: setup.client, askedAt, speech, topic, ...(previousReply ? { previousReply } : {}),
         timeoutMs: Math.max(1, Math.ceil(deadline + (keepLate ? LATE_CONTEXT_MS : 0) - performance.now())), signal: controller.signal, cacheScope: 'ctx',
-        ...(setup.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
+        ...(setup.relevanceRules === 'action' || setup.relevanceRules === 'action+status' ? { ruleSet: setup.relevanceRules } : {}) })
       if (out?.receipt && pruned.length) out.receipt = { ...out.receipt, pruned: { held: pruned.length } } // a count only, never ids
       return out
     })().catch(() => ({ status: 'fallback', reason: 'unreachable', selected: [], extraContext: {}, receipt: null }))
@@ -5518,6 +5539,12 @@ export class CodexChatRuntime {
   // the run and from registered objective loops. Speaking needs the held-answer mode as well: every posted message, intermediate or final,
   // is a completed, checked message. At a beat the kinds possible right now are listed from the facts and only then the Decision model is
   // asked one choice. The subjective model writes the message on a private fork; the run itself is never touched.
+  // c31 (owner decision P2, option (다)): conversationFlow.stalledCopy() === 'none' sends NOTHING when the writing model fails for a stalled engine (default 'fixed': the one fixed line,
+  // FLOW_COPY.stalled, pending the owner's approval, is posted as before). No new text either way.
+  flowStalledCopy() {
+    try { return this.decisionContext?.conversationFlow?.stalledCopy?.() === 'none' ? 'none' : 'fixed' } catch { return 'fixed' }
+  }
+
   heartbeatMode() {
     try { return this.decisionContext?.conversationFlow?.mode?.() === 'on' ? 'on' : 'off' } catch { return 'off' }
   }
@@ -6125,7 +6152,7 @@ export class CodexChatRuntime {
     let text = await this.writeIntermediate(run, flow, kind, facts, stalled ? FLOW_LIMITS.stalledWriterMs : FLOW_LIMITS.writerMs, report)
     let by = 'model'
     // A stalled engine usually cannot write either: then, and only then, the fixed line is used.
-    if (!text && stalled && (kind === 'stalled' || kind === 'explain_wait') && !flow.sent.some(row => row.text === FLOW_COPY.stalled)) { text = FLOW_COPY.stalled; by = 'fallback' }
+    if (!text && stalled && (kind === 'stalled' || kind === 'explain_wait') && this.flowStalledCopy() === 'fixed' && !flow.sent.some(row => row.text === FLOW_COPY.stalled)) { text = FLOW_COPY.stalled; by = 'fallback' }
     if (!text) return 'none'
     // A checked message that could not be posted (c26 record): the run moved on, or the audience no longer allows it.
     if (flow.closed || run.status !== 'inProgress' || this.heldGuard(run)?.state === 'checking' || this.finalAnswerBegun(run, flow)) { report.outcome = 'run_moved_on'; return 'none' }
@@ -6709,6 +6736,112 @@ export class CodexChatRuntime {
     } catch { /* the wait only avoids a missed note */ }
   }
 
+  // ---- c33: the first-event watchdog ----
+  /** Every message the engine sends for a thread: remembers the turn ids that spoke and wakes a watchdog waiting for this turn (a thread-level message belongs to no turn: it does not count). */
+  noteEngineEvent(message) {
+    try {
+      if (!this.engineStall) return
+      const threadId = idText(message?.params?.threadId); if (!threadId) return
+      const turnId = eventTurnId(message)
+      if (turnId) { const seen = this.engineSeen.get(threadId) ?? new Set(); seen.add(turnId); this.engineSeen.set(threadId, seen); while (seen.size > 16) seen.delete(seen.values().next().value); while (this.engineSeen.size > 64) this.engineSeen.delete(this.engineSeen.keys().next().value) }
+      for (const waiter of [...this.engineWaiters]) if (waiter.threadId === threadId && turnId === waiter.turnId) { this.engineWaiters.delete(waiter); waiter.resolve(true) }
+    } catch { /* the watchdog never affects a message */ }
+  }
+
+  /** true when the engine sent an event for this turn (before or within ms), false when it stayed silent. */
+  waitFirstEvent(threadId, turnId, ms) {
+    if (this.engineSeen.get(threadId)?.has(turnId)) return Promise.resolve(true)
+    return new Promise(resolve => {
+      const waiter = { threadId, turnId, resolve: v => { this.clearTimer(timer); resolve(v) } }
+      const timer = this.setTimer(() => { this.engineWaiters.delete(waiter); resolve(false) }, ms)
+      this.engineWaiters.add(waiter)
+    })
+  }
+
+  /**
+   * engine.startTurn with the watchdog (flag EGDESK_ENGINE_STALL_FIRST_EVENT_MS; off: exactly engine.startTurn). The turn was accepted; if no event for it comes within firstEventMs, it is
+   * interrupted and, because nothing ran (no event at all), started ONCE more with the same parameters; a second silence ends the request with the closed code ENGINE_STALLED. The fact
+   * goes to context.engineStall (the run, the heartbeat). A turn that did send an event is never touched, whatever it does later.
+   */
+  async startTurnWatched(engine, params, slot, context = {}) {
+    if (!this.engineStall) return engine.startTurn(params, slot)
+    const ms = this.engineStall.firstEventMs, cid = params.threadId
+    let stalls = 0
+    for (;;) {
+      const result = await engine.startTurn(stalls ? { ...params, clientUserMessageId: `${params.clientUserMessageId ?? 'egdesk'}:retry${stalls}` } : params, slot)
+      const turnId = idText(result?.turn?.id)
+      if (!turnId || TERMINAL.has(result?.turn?.status) || await this.waitFirstEvent(cid, turnId, ms)) {
+        if (stalls) this.noteEngineStall(context, stallFact({ afterMs: ms, stalls, recovered: true }))
+        return result
+      }
+      stalls++
+      let timer = null
+      try { await Promise.race([engine.interruptTurn(cid, turnId, slot), new Promise(resolve => { timer = this.setTimer(resolve, ENGINE_STALL_LIMITS.interruptMs) })]) } catch { /* best effort: the turn is abandoned either way */ } finally { if (timer !== null) this.clearTimer(timer) }
+      if (stalls > 1) {
+        this.noteEngineStall(context, stallFact({ afterMs: ms, stalls, recovered: false }))
+        throw chatError('ENGINE_STALLED', 'The engine accepted the turn and stayed silent', 504)
+      }
+    }
+  }
+
+  noteEngineStall(context, fact) {
+    try {
+      context.engineStall = fact
+      const key = context.clientThreadId
+      if (key) { this.engineStalls.delete(key); this.engineStalls.set(key, fact); while (this.engineStalls.size > 64) this.engineStalls.delete(this.engineStalls.keys().next().value) }
+      context.heartbeat?.register?.('engine_stall', { facts: () => ({ stalled: true, after_ms: fact.afterMs, stalls: fact.count, recovered: fact.recovered }) })
+    } catch { /* the fact is advisory */ }
+  }
+
+  // ---- c32 (U13): the decision-first command path ----
+  decisionFirstOn() { try { return this.ownTools?.decisionFirst?.() === 'on' } catch { return false } }
+
+  /**
+   * → null (the flag is off, or nothing to decide: the engine runs as today, no diagnostics) | { diag } (the engine runs as today) | { diag, finished: true, turnId, preRun, entry } (a healthy
+   * result: the turn ends locally) | { diag, context, preRun } (a result the engine must explain or fix: it runs with the result as context, needing no tool call).
+   * diag: closed words and numbers only: { path: 'fast' | 'engine', reason, option, confidence, margin, ms }.
+   */
+  async decisionFirstTry({ cid, body, context, ownFolder }) {
+    if (!this.decisionFirstOn()) return null
+    const started = performance.now(), setup = this.decisionContext
+    const diag = (path, reason, extra = {}) => ({ path, reason, option: null, confidence: null, margin: null, ms: Math.round(performance.now() - started), ...extra })
+    try {
+      if (typeof body?.message !== 'string' || !body.message.trim() || context.board || context.peerDispatch || body.boardId != null) return null
+      if (!setup?.client || setup.mode?.() !== 'on' || setup.configured?.() !== true) return { diag: diag('engine', 'decisions_off') }
+      if (this.decisionEgressFor({ toolCeiling: context.toolCeiling ?? null }).allows('run_text') !== true) return { diag: diag('engine', 'egress_closed') }
+      const options = buildCommandOptions(ownFolder)
+      const pick = await decidePick({ client: setup.client, message: body.message, options })
+      if (pick.status !== 'picked') return { diag: diag('engine', pick.reason, { confidence: pick.confidence ?? null, margin: pick.margin ?? null }) }
+      const option = pick.option, floor = classifyCommand(option.command, { cwd: ownFolder, home: process.env.HOME })
+      const picked = { option: option.kind, confidence: pick.confidence, margin: pick.margin }
+      if (floor.destructive || floor.floor.length) return { diag: diag('engine', 'approval_floor', picked) }
+      const provider = this.toolProviders.find(p => p.providerId === 'egdesk-command')
+      if (!provider) return { diag: diag('engine', 'no_executor', picked) }
+      const turnId = `egdesk-local-${randomUUID()}`
+      const preRun = { conversationId: cid, runId: turnId, answerId: runKey(cid, turnId), clientThreadId: context.clientThreadId, ownTools: true, ownFolder, activities: [], status: 'inProgress', stopRequested: false }
+      const callId = `df-${turnId}`
+      const response = await provider.dispatch(preRun, { callId, tool: 'egdesk_run_command', arguments: { command: option.command } })
+      let r = null
+      try { r = JSON.parse(response?.contentItems?.[0]?.text ?? '') } catch { r = null }
+      if (!r || typeof r.status !== 'string') return { diag: diag('engine', 'result_unreadable', picked) }
+      const healthy = r.status === 'ran' && r.exitCode === 0 && r.timedOut !== true && r.health === 'healthy' && r.worktree?.state !== 'conflict'
+      const entry = { command: option.command, status: r.status, exitCode: Number.isSafeInteger(r.exitCode) ? r.exitCode : null, durationMs: Number.isFinite(r.durationMs) ? r.durationMs : null, health: r.health ?? null,
+        tests: r.tests ?? null, worktree: r.worktree ?? null, tail: [r.stdout, r.stderr].filter(t => typeof t === 'string' && t).join('\n'), callId, cwd: ownFolder }
+      if (healthy) return { diag: diag('fast', 'healthy', picked), finished: true, turnId, preRun, entry }
+      return { diag: diag('engine', r.status === 'needs_person' ? 'needs_person' : 'result_for_engine', picked), context: commandResultBlock(entry), preRun }
+    } catch { return { diag: diag('engine', 'error') } }
+  }
+
+  /** c32: the local turn's items as the engine's own command items would arrive (the existing terminal card), then the turn's end. No assistant text: no new words. */
+  async finishDecisionFirstTurn(run, df) {
+    const { entry } = df, itemId = `egdesk-cmd:${entry.callId}`
+    const item = { type: 'commandExecution', id: itemId, command: entry.command, cwd: entry.cwd, status: 'completed', exitCode: entry.exitCode, aggregatedOutput: entry.tail, durationMs: entry.durationMs ?? 0 }
+    const base = { threadId: run.conversationId, turnId: run.runId }
+    await this.handleNotification({ method: 'item/started', params: { ...base, item: { ...item, status: 'inProgress', exitCode: null, aggregatedOutput: '' } } })
+    await this.handleNotification({ method: 'item/completed', params: { ...base, item } })
+    await this.handleNotification({ method: 'turn/completed', params: { threadId: run.conversationId, turn: { id: run.runId, status: 'completed', items: [] } } })
+  }
+
   /** c30b: one call of an edit tool, as facts (no file content); kept on the run in order. */
   noteOwnEdit(run, fact) { try { if (run && fact) run.ownEdits = [...(run.ownEdits ?? []), fact].slice(-OWN_EDIT_LIMITS.edits) } catch { /* the evidence is advisory */ } }
 
@@ -7169,8 +7302,8 @@ export class CodexChatRuntime {
     const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position: turn.position, threadKey, scope,
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
       deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock, previous: turn.previous, previousReply: this.previousReplyFor(context, turn.sources?.speech ?? null),
-      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step', 'hybrid-two-step-ask'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
-        ...(this.decisionContext?.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
+      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step', 'hybrid-two-step-ask'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' || tm.splitWording === 'v4' ? { splitWording: tm.splitWording } : {}),
+        ...(['action', 'action+status'].includes(this.decisionContext?.relevanceRules) ? { ruleSet: 'action' } : {}) })
     // The first turn's recording triage answers on its own time; once it has, the rule knows whether a write judgment can still follow.
     if (result.triageLater) void result.triageLater.then(late => { turn.lateTriage = late ?? { record: { state: 'unknown' } } }, () => { turn.lateTriage = { record: { state: 'unknown' } } })
     if (this.turnMemoryConfirmOn()) this.prepareTurnMemoryNote(turn, { wiki, scope, threadKey })
@@ -7286,7 +7419,7 @@ export class CodexChatRuntime {
         try { return await setup.client.decide(request) } finally { turn.spans.push({ stage: 'confirm', start, end: clock.now() - t0 }) }
       } }
       const deadlineAt = t0 + turn.capMs - 200
-      const judged = await memorySettleBefore(judgeConfirmation({ message: body.message, previousAnswer: previous, records: offered.map(entry => ({ title: wiki.pages.get(entry.pageId).title, status: entry.status, ...(typeof entry.said === 'string' ? { said: entry.said } : {}) })),
+      const judged = await memorySettleBefore(judgeConfirmation({ message: body.message, previousAnswer: previous, records: offered.map(entry => ({ title: wiki.pages.get(entry.pageId).title, status: entry.status, ...(typeof entry.said === 'string' ? { said: entry.said } : {}) })), ...(['v2', 'v3'].includes(tm.confirmWording) ? { wording: tm.confirmWording } : {}),
         client, askedAt: context.askedAt ?? this.now(), signal: turn.controller.signal, timeoutMs: Math.max(1, Math.min(CONFIRM_LIMITS.timeoutMs, Math.ceil(deadlineAt - clock.now()))) }), deadlineAt, clock).catch(() => null)
       const actions = []
       if (judged?.status === 'ready') {
@@ -7380,6 +7513,18 @@ export class CodexChatRuntime {
       const { context, oversize } = splitEngineContext(additionalContext, { limit })
       return { context, spilled: new Set(oversize) }
     } catch { return { context: additionalContext, spilled: new Set() } }
+  }
+
+  // Prefetch (flag turnMemory.prefetch === 'files', default off; egdesk-prefetch.mjs): the working folder's files as selection candidates, only where the run may let the decision model read the
+  // folder's listing (egress 'workspace_names': a bound folder, and an Agent whose ceiling does not shut both terminal and files). [] otherwise.
+  async prefetchCandidates(context) {
+    try {
+      if (this.decisionContext?.turnMemory?.prefetch !== 'files' || typeof context?.prefetchFolder !== 'string' || !context.prefetchFolder) return []
+      const ceiling = context.profileRun?.toolCeiling ?? null
+      const gate = createEgressGate(modelDataPermissions({ workspaceRead: !(ceiling && ceiling.terminal === 'none' && ceiling.files === 'none') }))
+      if (!gate.allows('workspace_names')) return []
+      return await workspaceCandidates(context.prefetchFolder)
+    } catch { return [] }
   }
 
   // Pages the dispatched selection carries WORD FOR WORD (its item has the page's whole body): the answering model holds them as much as the ones the memory packet
@@ -7585,8 +7730,8 @@ export class CodexChatRuntime {
       const threadKey = run.conversationId
       const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position, threadKey,
         scope: typeof tm.scope === 'function' ? await (async () => { const base = await tm.scope({ body, context }); return base ? egress.memoryScope(base) : base })() : null, live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null,
-        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal , writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step', 'hybrid-two-step-ask'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
-        ...(this.decisionContext?.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
+        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal , writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step', 'hybrid-two-step-ask'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' || tm.splitWording === 'v4' ? { splitWording: tm.splitWording } : {}),
+        ...(['action', 'action+status'].includes(this.decisionContext?.relevanceRules) ? { ruleSet: 'action' } : {}) })
       const judged = result.judgeWrite ? await result.judgeWrite() : null
       if (typeof threadKey === 'string' && threadKey) {
         this.turnMemoryShadow.set(threadKey, result.nextDelivered())

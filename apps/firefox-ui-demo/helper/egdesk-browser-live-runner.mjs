@@ -177,9 +177,12 @@ export function scoreJourney(plan, journey) {
 }
 
 // ---- the journey ----
-export function pageWorld(variant, host = HOST, cardId = 'card') {
+// options.staleSwap { from, to } (c35): the live page CHANGES under the loop: the first navigate or click is refused as stale (not dispatched) and the page at `from` becomes the page
+// kept at `to`, as a fresh document; the loop must observe again. state.observes counts the observations.
+export function pageWorld(variant, host = HOST, cardId = 'card', options = {}) {
   const origin = `https://${host}`
-  const state = { pages: LIVE_PAGES[variant], cur: null, docSeq: 0, acts: [] }
+  const state = { pages: options.pages ?? LIVE_PAGES[variant], cur: null, docSeq: 0, acts: [], observes: 0 } // options.pages: a site that is not one of the live plans' (c35)
+  let swap = options.staleSwap ?? null
   const go = (path, href = null) => { state.cur = { path, href, documentId: `doc${++state.docSeq}`, revision: 1 } }
   const showView = path => { state.cur = { ...state.cur, path, revision: state.cur.revision + 1 } } // same document, same address
   const snap = () => { const page = state.pages[state.cur.path]
@@ -191,12 +194,18 @@ export function pageWorld(variant, host = HOST, cardId = 'card') {
     async sendToUi(request) {
       const reply = { requestId: request.requestId }
       if (request.kind === 'bind') return { ...reply, status: 'bound', binding: { cardId, cardEpoch: 'epoch', profileId: 'synthetic', accountId: '', userContextId: 0, url: `${origin}${state.cur.path}`, engineAccountKey: OWNER, authorityEpoch: 1 } }
-      if (request.kind === 'observe') { const wait = request.options?.wait
+      if (request.kind === 'observe') { state.observes++; const wait = request.options?.wait
         return { ...reply, status: 'observed', snapshot: wait ? { ...snap(), wait: { for: wait.for, outcome: 'met', elapsedMs: 1 } } : snap() } }
       if (request.kind === 'act') {
         const a = request.action
         const path = typeof a.url === 'string' && new URL(a.url).host === host ? new URL(a.url).pathname : typeof a.url === 'string' ? `offsite:${a.url}` : null
         state.acts.push({ type: a.type, ref: a.ref ?? null, path })
+        if (swap && (a.type === 'navigate' || a.type === 'click')) { // the page changed between the decision and the action
+          state.acts.at(-1).rejected = true
+          state.pages = { ...state.pages, [swap.from]: state.pages[swap.to] }; swap = null
+          state.cur = { path: state.cur.path, href: null, documentId: `doc${++state.docSeq}`, revision: 1 }
+          return { ...reply, status: 'rejected', dispatchPhase: 'not-dispatched', receipt: { dispatchReceipt: { eventDispatched: false, documentStillCurrent: false } }, timing: {} }
+        }
         if (a.type === 'navigate' && path && state.pages[path]) go(path, new URL(a.url).search ? new URL(a.url).href : null)
         if (a.type === 'click') {
           const target = state.pages[state.cur.path].elements.find(e => e.ref === a.ref)

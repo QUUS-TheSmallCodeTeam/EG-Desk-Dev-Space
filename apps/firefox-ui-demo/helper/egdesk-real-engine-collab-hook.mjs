@@ -25,6 +25,7 @@ import * as DraftCheck from './egdesk-draft-check.mjs'
 // the draft check's fixed fallback sentences (the owner removed them; L3): read when the module still has them, else none (the same reading as the multiuser measure)
 const DRAFT_CHECK_COPY = DraftCheck.DRAFT_CHECK_COPY ?? {}
 import { messageCounts } from './egdesk-real-engine-journey.mjs'
+import * as WP from '../overlay/resources/EGDeskWorkPlacement.sys.mjs'
 
 export const COLLAB_FLAGS = Object.freeze(['EGDESK_PRESENCE', 'EGDESK_WORK_PLACEMENT'])
 export const COLLAB_FROM = Object.freeze(['owner', 'invited'])
@@ -40,7 +41,7 @@ const oneLine = text => String(text ?? '').replace(/\s+/g, ' ').trim()
 // ---- the `expect.collab` entry of a script turn: its shape (validator + JSON schema) and its checks ----
 // c29: roomKept and receiptsClosed belong to a restart turn; continuity to the first message turn after it
 export const COLLAB_RESTART_KEYS = Object.freeze(['roomKept', 'receiptsClosed'])
-export const COLLAB_EXPECT_KEYS = Object.freeze(['requester', 'attention', 'ownerQuestion', 'noIdentity', 'cameraUntouched', ...COLLAB_RESTART_KEYS, 'continuity'])
+export const COLLAB_EXPECT_KEYS = Object.freeze(['requester', 'attention', 'ownerQuestion', 'noIdentity', 'cameraUntouched', ...COLLAB_RESTART_KEYS, 'continuity', 'twoRuns'])
 const ATTENTION_KEYS = ['branch', 'kind', 'pointer']
 const OWNER_QUESTION_KEYS = ['questions', 'quotesRequest', 'quotesOwnAnswer']
 const strings = { type: 'array', maxItems: COLLAB_LIMITS.strings, items: { type: 'string', minLength: 1, maxLength: COLLAB_LIMITS.stringChars } }
@@ -55,6 +56,7 @@ export const COLLAB_EXPECT_SCHEMA = Object.freeze({
     roomKept: { const: true },
     receiptsClosed: { const: true },
     continuity: { const: true },
+    twoRuns: { const: true },
   },
 })
 const plain = v => v !== null && typeof v === 'object' && !Array.isArray(v)
@@ -84,7 +86,7 @@ export function validateCollabExpect(e) {
     }
     if (e.attention === undefined) out.push('ownerQuestion: needs attention (the question is the attention scene\'s)')
   }
-  for (const k of [...COLLAB_RESTART_KEYS, 'continuity']) if (e[k] !== undefined && e[k] !== true) out.push(`${k}: true`)
+  for (const k of [...COLLAB_RESTART_KEYS, 'continuity', 'twoRuns']) if (e[k] !== undefined && e[k] !== true) out.push(`${k}: true`)
   if (e.noIdentity !== undefined && e.noIdentity !== true) out.push('noIdentity: true')
   if (e.cameraUntouched !== undefined && e.cameraUntouched !== true) out.push('cameraUntouched: true')
   if (e.cameraUntouched === true && e.attention === undefined) out.push('cameraUntouched: needs attention (it reads the attention outcome)')
@@ -110,6 +112,17 @@ export function checkCollabExpect(expect, rec) {
       // nothing carried over: no receipt of what was attached or sent, no approval question assumed still open (an unread question is asked again, never taken as answered); and the old one DID have its question open
       put('receiptsClosed', r?.before?.awaiting === true && !!a && a.memoryReceipts === 0 && a.contextReceipts === 0 && a.awaiting === false, { before: r?.before ? { awaiting: r.before.awaiting } : null, after: a ? { memoryReceipts: a.memoryReceipts, contextReceipts: a.contextReceipts, awaiting: a.awaiting } : null })
     }
+  }
+  // c30 (U7): two runs at the same time on one Desk, judged by code on what the placement did for each
+  if (expect.twoRuns === true) {
+    const t = rec.twoRuns ?? null, runs = t?.runs ?? [], put2 = (name, ok, detail) => put(`twoRuns.${name}`, ok, detail)
+    put2('placed', runs.length === 2 && runs.every(r => r.spot && r.outsideViews === true && r.outsideCards === true), { runs: runs.map(r => ({ run: r.run, rule: r.rule, outsideViews: r.outsideViews, outsideCards: r.outsideCards, spot: !!r.spot })) })
+    put2('separate', runs.length === 2 && t.overlap === false && t.told?.main === (rec.from === 'invited' ? COLLAB_PEOPLE.invited.member : null) && t.told?.side === null, { overlap: t?.overlap ?? null, told: t?.told ?? null })
+    put2('stillness', !!t && t.inputsUnchanged === true && t.ownerBefore === t.ownerAfter && t.moves.length === 0, { inputsUnchanged: t?.inputsUnchanged ?? null, ownerBefore: t?.ownerBefore ?? null, ownerAfter: t?.ownerAfter ?? null, moves: t?.moves ?? null })
+    put2('surfacing', runs.length === 2 && runs.every(r => r.attention?.result?.status === 'decided' && r.attention.result.branch === 'requester' && r.attention.result.forMember === r.requester && r.attention.otherRequesterTold === false),
+      { runs: runs.map(r => ({ run: r.run, requester: r.requester, result: r.attention?.result ? { status: r.attention.result.status, branch: r.attention.result.branch, kind: r.attention.result.kind, forMember: r.attention.result.forMember } : null, otherRequesterTold: r.attention?.otherRequesterTold ?? null })) })
+    put2('judged', runs.length === 2 && t.judgments === 2 && runs.every(r => r.judgments?.length === 1 && r.judgments[0].questions.join() === 'owner_action' && r.judgments[0].quotesOwn === true && r.judgments[0].quotesOther === false && r.judgments[0].identityLeak === false),
+      { runs: runs.map(r => ({ run: r.run, judgments: (r.judgments ?? []).map(j => ({ questions: j.questions, quotesOwn: j.quotesOwn, quotesOther: j.quotesOther, identityLeak: j.identityLeak })) })), total: t?.judgments ?? null })
   }
   if (expect.continuity === true) {
     const c = rec.continuity ?? null
@@ -212,6 +225,7 @@ export const identityLeak = text => text.includes(COLLAB_PEOPLE.invited.member) 
 
 // ---- the hook ----
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+const deepFreeze = value => { if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.freeze(value); for (const v of Object.values(value)) deepFreeze(v) } return value }
 
 /** The product flag that needs the Decision model (the attention scene's owner question); registered with the others in helper/egdesk-real-engine-registrations.mjs. */
 export const COLLAB_DECISION_FLAGS = Object.freeze(['EGDESK_WORK_PLACEMENT'])
@@ -256,9 +270,13 @@ export function createCollabTurnHook(conversation, { world = createCollabWorld()
       ready = true
     },
     // before a message turn: who sends it (the script's `from`, the owner by default), told through the bridge's own routes
-    async beforeSend({ turn, state }) {
+    async beforeSend({ turn, state, room }) {
       if (!ready) return
       const { clientThreadId, conversationId = null } = state()
+      if (room === 'alongside') { // the concurrent run's room: its own sender, told the same way; the main room's own record is not touched
+        await world.tell(COLLAB_FROM.includes(turn?.from) ? turn.from : 'owner', { clientThreadId, conversationId })
+        return
+      }
       const from = COLLAB_FROM.includes(turn?.from) ? turn.from : 'owner'
       // The check's one-time threads are not the owner's direct conversation (whose answers the draft check holds and whose flow may speak). Once the room's live session exists (from the
       // second turn on) it is opted in to the flow's messages, the pointer, as the runtime does for a bounded run, without holding any answer (chat.allowIntermediateMessages, draft check on):
@@ -281,7 +299,7 @@ export function createCollabTurnHook(conversation, { world = createCollabWorld()
       const rec = { restart: { before: carried?.facts ?? null, after, requesterBefore: carried?.requester ?? null, requesterAfter: world.requesters.audience({ run: { clientThreadId, conversationId } })?.requester ?? null } }
       return { record: rec, expectations: expect?.collab === undefined ? [] : checkCollabExpect(expect.collab, rec) }
     },
-    async afterTurn({ run, say, answer, turnIndex = 0, expect: turnExpect }) {
+    async afterTurn({ run, say, answer, turnIndex = 0, expect: turnExpect, alongside = null }) {
       const expect = turnExpect?.collab
       if (!ready || expect === undefined) return null
         const keys = { clientThreadId: run?.clientThreadId ?? last.clientThreadId, conversationId: run?.conversationId ?? null }
@@ -300,6 +318,7 @@ export function createCollabTurnHook(conversation, { world = createCollabWorld()
           rec.continuity = { sameThread: !!restartedFrom && row?.conversationId === restartedFrom && (run?.conversationId ?? restartedFrom) === restartedFrom, resumes, resumed: resumes >= 1, userMessages: users, sentOnce: users === 1,
             asRequester: rec.audience.requester === COLLAB_PEOPLE.invited.member ? 'invited' : 'owner' }
         }
+        if (expect.twoRuns === true && alongside) rec.twoRuns = await recordTwoRuns({ main: { run, say, answer, key: keys.clientThreadId, from: last.from }, side: alongside })
         // the answering model's own sentences of this turn's answer (the posted answer without the draft check's appended copy), as the placement judge is given them
         try { const live = chat.runFor?.({ conversationId: run?.conversationId, runId: run?.runId, answerId: run?.answerId }); rec.ownAnswer = live ? clip(chat.runOwnAnswerText(live), 1200) : null } catch { rec.ownAnswer = null }
         // the attention scene costs Decision calls and may post a message: only for a turn whose expectation asks for it
@@ -337,5 +356,58 @@ export function createCollabTurnHook(conversation, { world = createCollabWorld()
         return { record: rec, expectations: checkCollabExpect(expect, rec) }
     },
     dispose() { world.stop() },
+  }
+
+  // c30 (U7): the placement of two concurrent runs on one Desk, and what became of each. The people are the hook's two (presence rows as the bridge holds them), the runs are the turn's two rooms.
+  async function recordTwoRuns({ main, side }) {
+    const { owner, invited } = COLLAB_PEOPLE
+    const rows = world.mirror.snapshot() ?? presenceRows()
+    const frozen = deepFreeze(JSON.parse(JSON.stringify(rows)))
+    const ownerView = () => { const row = world.mirror.snapshot()?.find(r => r.self); return JSON.stringify(row ? { viewport: row.viewport, focusCard: row.focusCard } : null) }
+    const ownerBefore = ownerView(), inputsBefore = JSON.stringify(frozen)
+    const surface = { kind: 'file', size: { width: 720, height: 520 } }
+    const userCards = [{ id: 'owner-memo', rect: { x: 100, y: 100, width: 500, height: 400 }, kind: 'memo', creator: 'user' }]
+    const requesters = { main: main.from === 'invited' ? invited.member : owner.member, side: owner.member }
+    const tasks = state => [{ id: 'run-main', state, requester: requesters.main, waiting: [requesters.main], ownerMustAct: false, surfaces: [] }, { id: 'run-side', state, requester: requesters.side, waiting: [requesters.side], ownerMustAct: false, surfaces: [] }]
+    const hit = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+    // the first run opens its surface, then the second (it finds the first's card already on the canvas)
+    const a1 = WP.advisoryPlacement({ presence: frozen, cards: userCards, tasks: tasks('running'), obstacles: [], taskId: 'run-main', surface })
+    const card1 = a1?.spot ? { id: 'run-main-viewer', rect: a1.spot, kind: 'file', creator: 'agent', taskId: 'run-main', movable: true } : null
+    const a2 = WP.advisoryPlacement({ presence: frozen, cards: [...userCards, ...(card1 ? [card1] : [])], tasks: tasks('running'), obstacles: [], taskId: 'run-side', surface })
+    const card2 = a2?.spot ? { id: 'run-side-viewer', rect: a2.spot, kind: 'file', creator: 'agent', taskId: 'run-side', movable: true } : null
+    const views = frozen.filter(r => r.active).map(r => r.viewport)
+    const placed = (adv, card, run, others) => ({ run, requester: null, rule: adv?.would?.rule ?? null, spot: card ? { ...card.rect } : null,
+      outsideViews: !!card && views.every(v => !hit(card.rect, v)), outsideCards: !!card && [...userCards, ...others].every(c => !hit(card.rect, c.rect)) })
+    const runs = [placed(a1, card1, 'run-main', []), placed(a2, card2, 'run-side', card1 ? [card1] : [])]
+    // the results: both finished; the attention scene of each, built from the canvas and sent to ITS room's live heartbeat
+    const finished = (id, requester, cardId) => ({ id, state: 'finished', requester, waiting: [requester], ownerMustAct: false, surfaces: [{ kind: 'result', cardId }] })
+    const scene = WP.enumerateWorkScene({ presence: frozen, cards: [...userCards, card1, card2].filter(Boolean), tasks: [finished('run-main', requesters.main, 'run-main-viewer'), finished('run-side', requesters.side, 'run-side-viewer')], obstacles: [] })
+    const aliasOf = member => scene.members.find(m => m.member === member)?.alias ?? null
+    const rooms = [{ run: 'run-main', key: main.key, card: 'run-main-viewer', requester: requesters.main }, { run: 'run-side', key: side.clientThreadId, card: 'run-side-viewer', requester: requesters.side }]
+    const submitted = []
+    for (const r of rooms) {
+      const req = WP.attentionRequest(scene, { taskId: r.run, cardId: r.card })
+      const out = req ? (await route(placementHttp, '/decision/work-placement/request', { clientThreadId: r.key, conversationId: null, dto: req.dto })).body ?? { status: 'invalid' } : { status: 'no-scene' }
+      submitted.push({ r, out, requester: aliasOf(r.requester), result: null })
+    }
+    await Promise.all(submitted.map(async s => {
+      if (s.out.status !== 'queued') return
+      const deadline = Date.now() + L.attentionWaitMs
+      let result = { status: 'pending' }
+      while (Date.now() < deadline) { result = (await route(placementHttp, '/decision/work-placement/result', { clientThreadId: s.r.key, conversationId: null, id: s.out.id })).body ?? { status: 'unknown' }; if (result.status !== 'pending') break; await sleep(100) }
+      s.result = { status: result.status, branch: result.branch ?? null, kind: result.kind ?? null, forMember: result.forMember ?? null }
+    }))
+    await placement.idle()
+    // each run's Decision judgments: the requests that quote ITS request, and whether they also quote the other run's
+    const mentioning = text => bodies.filter(request => (request.input ?? []).map(m => m.content).join('\n').includes(text))
+    for (const [i, run] of runs.entries()) {
+      const s = submitted[i], mine = i === 0 ? main.say : side.say, theirs = i === 0 ? side.say : main.say
+      run.requester = s.requester
+      run.attention = { submitted: s.out.status, result: s.result, otherRequesterTold: submitted[1 - i].requester !== run.requester && s.result?.forMember === submitted[1 - i].requester }
+      run.judgments = mentioning(mine).map(request => { const shared = (request.input ?? []).map(m => m.content).join('\n'); return { questions: (request.questions ?? []).map(q => q.name), quotesOwn: shared.includes(mine), quotesOther: shared.includes(theirs), identityLeak: identityLeak(JSON.stringify(request)) } })
+    }
+    // who the bridge's own registry names as the requester of each room, as the turn was sent
+    const told = key => world.requesters.audience({ run: { clientThreadId: key, conversationId: null } })?.requester ?? null
+    return { people: { main: main.from, side: 'owner' }, told: { main: told(main.key), side: told(side.clientThreadId) }, runs, overlap: !!card1 && !!card2 && hit(card1.rect, card2.rect), ownerBefore, ownerAfter: ownerView(), inputsUnchanged: JSON.stringify(frozen) === inputsBefore, moves: [], judgments: runs.reduce((n, r) => n + r.judgments.length, 0) }
   }
 }

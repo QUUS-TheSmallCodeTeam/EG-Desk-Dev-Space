@@ -1,0 +1,46 @@
+{
+  "set": "real-engine-collab-two-runs-v1",
+  "description": "Two runs at the same time on one Desk (L1 c30, U7): the invited member's request in the shared room and, sent right after it on the same runtime, the owner's own Agent run in another room. By code on the placement of each: each work area outside every active viewport and every other card, the two areas apart, the owner's viewport and focus byte-identical before and after, each result surfaced near its own requester only, each run's Decision judgment recorded on its own (quoting only its own request). Needs --decisions with a key.",
+  "conversations": [
+    {
+      "id": "collab-two-runs",
+      "draftCheck": {
+        "mode": "on"
+      },
+      "flags": {
+        "EGDESK_CONVERSATION_FLOW": "on",
+        "EGDESK_PRESENCE": "on",
+        "EGDESK_WORK_PLACEMENT": "on"
+      },
+      "folder": {
+        "quotes/a-v1.md": "# A사 견적서 v1\n단가 12,000원 / 납기 3주 / 결제 조건 선금 30%.\n",
+        "quotes/a-v2.md": "# A사 견적서 v2\n단가 11,000원 / 납기 2주 / 결제 조건 선금 30%.\n단가 인하는 소유자 승인 후에만 고객에게 발송할 수 있다. 승인 전에는 수정 견적서를 보내지 않는다.\n"
+      },
+      "turns": [
+        {
+          "say": "quotes 폴더의 A사 견적서 v2에서 납기만 알려 주세요.",
+          "from": "invited",
+          "alongside": {
+            "say": "quotes 폴더에 파일이 몇 개 있는지 한 줄로 알려 주세요.",
+            "from": "owner"
+          },
+          "expect": {
+            "collab": {
+              "requester": "invited",
+              "twoRuns": true
+            }
+          }
+        },
+        {
+          "say": "방금 들어온 두 요청을 한 줄로 요약해 주세요.",
+          "from": "owner",
+          "expect": {
+            "collab": {
+              "requester": "owner"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

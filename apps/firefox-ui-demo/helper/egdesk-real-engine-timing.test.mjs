@@ -14,9 +14,9 @@ const load = set => JSON.parse(fs.readFileSync(path.join(app, 'scripts', 'real-e
 
 // a turn the way the check records it from c31 on: two tool rounds then the final text; a Decision call before the first round, two overlapping ones after
 const timed = (over = {}) => ({ index: 1, say: 'q', posted: ['A사는 12,800원입니다.'], expectations: [{ check: 'posted', ok: true }], ok: true,
-  subTurns: [{ status: 'completed', latencyMs: 9000, toolCalls: [{ tool: 'a' }, { tool: 'b' }],
+  subTurns: [{ status: 'completed', latencyMs: 9000, firstEventMs: 700, toolCalls: [{ tool: 'a' }, { tool: 'b' }],
     decisions: [{ names: ['answer_type'], atMs: 100, ms: 400 }, { names: ['pg_0'], atMs: 600, ms: 800 }, { names: ['sup_0'], atMs: 1000, ms: 500 }],
-    timing: { sendMs: 20, doneMs: 9000,
+    timing: { sendMs: 20, engineStartMs: 1000, doneMs: 9000,
       events: [{ event: 'run.started', atMs: 30 }, { event: 'activity.completed', atMs: 40, kind: 'decisionContext' }, { event: 'activity.completed', atMs: 2600, kind: 'commandExecution' }, { event: 'message.completed', atMs: 8800 }],
       items: [{ id: 'i1', type: 'dynamicToolCall', startMs: 2500, endMs: 2700 }, { id: 'i3', type: 'agentMessage', startMs: 8000, endMs: 8700 }],
       tools: [{ id: 1, tool: 'a', startMs: 2500, endMs: 2700 }, { id: 2, tool: 'b', startMs: 5200, endMs: 5400 }] } }], ...over })
@@ -28,17 +28,18 @@ test('unionMs: overlapping calls count once, a gap does not', () => {
 
 test('engine rounds: a round ends with a tool call or the final text and runs from the previous round\'s end; tools are their own ms; a native item is not counted twice', () => {
   const t = timed().subTurns[0].timing, p = enginePhases(t, 9000)
-  assert.deepEqual(p.roundMs, [2500, 2500, 3300]); assert.deepEqual([p.rounds, p.ms, p.tools], [3, 8300, { count: 2, ms: 400 }]) // 0->2500, 2700->5200, 5400->8700; assert.equal(p.finalTextMs, 8700)
+  assert.deepEqual(p.roundMs, [1500, 2500, 3300]); assert.deepEqual([p.rounds, p.ms, p.tools, p.engineStartMs], [3, 7300, { count: 2, ms: 400 }, 1000]) // 1000 (the engine was asked)->2500, 2700->5200, 5400->8700: the layers before 1000 are not engine time; assert.equal(p.finalTextMs, 8700)
   // a native command item that overlaps a recorded tool call is the same call; one that does not is another tool
   const withNative = { ...t, items: [...t.items, { id: 'n1', type: 'commandExecution', startMs: 2550, endMs: 2650 }, { id: 'n2', type: 'commandExecution', startMs: 6000, endMs: 6500 }] }
   assert.deepEqual(enginePhases(withNative, 9000).tools, { count: 3, ms: 900 })
-  assert.deepEqual(enginePhases({ tools: [], items: [] }, 100), { rounds: 0, ms: 0, roundMs: [], tools: { count: 0, ms: 0 }, finalTextMs: null, turnMs: 100 })
+  assert.deepEqual(enginePhases({ tools: [], items: [] }, 100), { rounds: 0, ms: 0, roundMs: [], engineStartMs: null, tools: { count: 0, ms: 0 }, finalTextMs: null, turnMs: 100 })
 })
 
 test('turnTiming: first visible skips the runtime\'s own bookkeeping rows; the final answer is the last posted message; Decision wall counts overlaps once; the outcome word', () => {
   const t = turnTiming(timed({ rewrite: { posted: 'revised' } }))
   assert.deepEqual([t.hasTiming, t.turnMs, t.firstVisibleMs, t.firstMessageMs, t.finalAnswerMs, t.posted, t.outcome], [true, 9000, 2600, 8800, 8800, 1, 'revised'])
   assert.deepEqual({ count: t.decisions.count, sumMs: t.decisions.sumMs, wallMs: t.decisions.wallMs }, { count: 3, sumMs: 1700, wallMs: 1300 }); assert.deepEqual([t.engine.rounds, t.engine.derived, t.tools.count, t.tools.ms], [3, false, 2, 400])
+  assert.deepEqual(t.layers, { ms: 1000, calls: 2, sumMs: 1200, wallMs: 1200, engineStarted: true }, 'the memory and action layers: the two Decision calls that began before the engine was asked'); assert.deepEqual([t.engine.startMs, t.engine.firstEventMs], [1000, 700])
   assert.deepEqual(t.answerNumbers, ['12800원']); assert.equal(t.expectations.posted, true)
   assert.equal(turnTiming(timed({ posted: [], draftCheck: { rows: [{}] } })).outcome, 'withheld'); assert.equal(turnTiming(timed({ posted: [] })).outcome, 'none'); assert.equal(turnTiming(timed()).outcome, 'posted')
   assert.equal(turnTiming(timed({ posted: [] })).finalAnswerMs, 8800, 'the last message event, even if the check lists no text')
@@ -49,8 +50,17 @@ test('an older record (no timing): what it can say is derived and marked, the re
   const old = { index: 1, say: 'q', posted: ['x'], subTurns: [{ status: 'completed', latencyMs: 12000, toolCalls: [{}, {}, {}], decisions: [{ names: ['a'], ms: 300 }, { names: ['b'], ms: 200 }] }] }
   const t = turnTiming(old)
   assert.deepEqual([t.hasTiming, t.turnMs, t.firstVisibleMs, t.finalAnswerMs, t.decisions.wallMs, t.decisions.sumMs, t.decisions.count], [false, 12000, null, 12000, null, 500, 2])
-  assert.deepEqual(t.engine, { rounds: 4, ms: null, roundMs: [], finalTextMs: null, derived: true }); assert.deepEqual(t.tools, { count: 3, ms: null })
+  assert.deepEqual(t.engine, { rounds: 4, ms: null, roundMs: [], finalTextMs: null, startMs: null, firstEventMs: null, derived: true }); assert.deepEqual(t.tools, { count: 3, ms: null })
   assert.match(formatTable([{ key: 'k', ...t }]), /rounds derived/)
+})
+
+test('the two layers: a decision-first turn (no engine turn) is all layers; an older record has no layers; summaries carry the layers and the engine\'s first event', () => {
+  const local = timed(); local.subTurns[0].timing = { ...local.subTurns[0].timing, engineStartMs: null, tools: [], items: [] }
+  const t = turnTiming(local)
+  assert.deepEqual(t.layers, { ms: 9000, calls: 3, sumMs: 1700, wallMs: 1300, engineStarted: false }); assert.deepEqual([t.engine.rounds, t.engine.startMs], [0, null])
+  assert.deepEqual(turnTiming({ index: 1, posted: [], subTurns: [{ latencyMs: 1000, decisions: [] }] }).layers, { ms: null, calls: null, sumMs: null, wallMs: null, engineStarted: null })
+  const s = summarize(recordTimings([{ set: 's', id: 'a', turns: [timed(), { ...timed(), index: 2 }] }]))
+  assert.deepEqual([s.layersMs.median, s.layerCalls.median, s.engineFirstEventMs.median], [1000, 2, 700]); assert.match(formatSummary(s), /layers \(memory and action, before the engine starts\) n=2 median 1\.0s/)
 })
 
 test('summarize: medians and 90th percentiles over the turns that have the number', () => {
@@ -67,7 +77,7 @@ test('compare: matched by set, conversation and turn; seconds saved are off minu
   const c = compareRuns(off, on)
   assert.equal(c.turns.length, 2); assert.deepEqual(c.unmatched.map(u => [u.key, u.side]).sort(), [['s/c#3', 'off only'], ['s/c#9', 'on only']])
   const [one, two] = c.turns
-  assert.deepEqual(one.savedMs, { turn: 5000, firstVisible: -900, finalAnswer: 5300, decisionsWall: 900, engine: 5100, tools: 200 }, JSON.stringify(one.savedMs))
+  assert.deepEqual(one.savedMs, { turn: 5000, layers: 0, firstVisible: -900, finalAnswer: 5300, decisionsWall: 900, engine: 5100, tools: 200 }, JSON.stringify(one.savedMs))
   assert.deepEqual(one.decisions, { off: 3, on: 1 }); assert.deepEqual(one.rounds, { off: 3, on: 2 }); assert.deepEqual(one.factChanges, [])
   assert.deepEqual(two.factChanges, ['numbers only with the flag on: 11900원', 'numbers only with the flag off: 12800원', 'expectation posted: true -> false'])
   assert.deepEqual([c.summary.matched, c.summary.answeredBoth, c.summary.faster, c.summary.slower, c.summary.savedSeconds.turn, c.summary.decisionCalls, c.summary.turnsWithChangedFacts], [2, 2, 2, 0, 10, { off: 6, on: 2 }, 1])
@@ -110,6 +120,8 @@ test('the check records timing per scripted turn: events, engine items, own tool
   assert.ok(timing.items.length > 0 && timing.items.every(i => i.type)); assert.ok(sub.decisions.length > 0 && sub.decisions.every(d => Number.isInteger(d.atMs) && d.atMs >= 0 && d.atMs <= timing.doneMs))
   const row = turnTiming(rec.turns[0])
   assert.equal(row.hasTiming, true); assert.ok(row.firstVisibleMs !== null && row.firstVisibleMs <= row.finalAnswerMs, JSON.stringify(row)); assert.ok(row.finalAnswerMs <= row.turnMs + 50)
+  assert.ok(Number.isInteger(timing.engineStartMs) && timing.engineStartMs >= 0 && timing.engineStartMs <= timing.tools[0].startMs, 'the engine was asked before its first tool call'); assert.ok(row.layers.engineStarted && row.layers.ms === timing.engineStartMs)
+  assert.ok(row.layers.calls >= 1 && row.layers.calls <= row.decisions.count, 'the memory and action layers\' Decision calls came before the engine start'); assert.ok(Number.isFinite(row.engine.firstEventMs) || row.engine.firstEventMs === null)
   assert.deepEqual([row.tools.count, row.engine.derived, row.decisions.count > 0], [1, false, true]); assert.ok(row.tools.ms >= 1000, 'the command is mostly the tool time'); assert.ok(row.engine.rounds >= 2)
   // no key and no text beyond what the record already held
   assert.doesNotMatch(JSON.stringify(timing), /egd-synthetic|sk-synthetic|tests-passed/)

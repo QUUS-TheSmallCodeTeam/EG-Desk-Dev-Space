@@ -334,7 +334,7 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
     budgetMs: TURN_CONTEXT_BUDGET_MS, ...(budgets === 'bridge' ? { coldBudgetMs: TURN_CONTEXT_COLD_BUDGET_MS, warm: () => decisions.some(row => row.status === 200) } : {}),
     turnMemory: turnMemoryConfig, browserEntry: browserEntryConfig,
     ...(['advisory', 'on'].includes(ENV.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => ENV.EGDESK_DRAFT_CHECK } } : {}),
-    ...(ENV.EGDESK_CONTEXT_RELEVANCE === 'action' ? { relevanceRules: 'action' } : {}), // as the bridge: the selection's 'action' rule set (L7 c20), default off
+    ...(['action', 'action+status'].includes(ENV.EGDESK_CONTEXT_RELEVANCE) ? { relevanceRules: ENV.EGDESK_CONTEXT_RELEVANCE } : {}), // as the bridge: the selection's 'action' rule set (L7 c20), default off
     ...(ENV.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(ENV.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror, audience: ({ run }) => runRequesters.audience({ run }) } : {}),
       attentionPosted: ({ key, provider: name }) => { if (name === 'work_placement') workPlacement.acknowledgePointer(key) } } } : {}),
     ...(ENV.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}), // as the bridge: a message typed while the run works (L2 c17), default off

@@ -10,6 +10,17 @@ registerTurnFields({ from: { schema: { enum: [...COLLAB_FROM] }, validate: (valu
   if (conv.flags?.EGDESK_PRESENCE !== 'on') bad(path, 'needs flags.EGDESK_PRESENCE = "on" in this conversation (the requester goes through the presence path)')
   if (turn.action !== undefined || turn.whileRunning !== undefined) bad(path, 'only a plain message turn has a sender')
 } } })
+// c30: a CONCURRENT run: another room's message (from the owner or the invited member) sent right after this turn's, on the same runtime, while this one works (the core sends it)
+registerTurnFields({ alongside: { schema: { type: 'object', additionalProperties: false, required: ['say'], properties: { say: { type: 'string', minLength: 1, maxLength: 4000 }, from: { enum: [...COLLAB_FROM] } } },
+  validate: (value, { conv, turn, path, bad }) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return bad(path, 'an object { say, from? }')
+    for (const k of Object.keys(value)) if (!['say', 'from'].includes(k)) bad(`${path}.${k}`, 'unknown key')
+    if (typeof value.say !== 'string' || !value.say.trim() || value.say.length > 4000) bad(`${path}.say`, 'a string of 1-4000 characters')
+    if (value.from !== undefined) for (const why of validateCollabFrom(value.from)) bad(`${path}.from`, why)
+    if (conv.flags?.EGDESK_PRESENCE !== 'on') bad(path, 'needs flags.EGDESK_PRESENCE = "on" in this conversation')
+    if (turn.action !== undefined || turn.whileRunning !== undefined || turn.approve?.length) bad(path, 'only a plain message turn without approvals has a concurrent run')
+    if (value.say === turn.say) bad(`${path}.say`, 'must differ from the turn\'s own say (each run quotes only its own request)')
+  } } })
 registerExpectKeys({ collab: { schema: COLLAB_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => {
   for (const why of validateCollabExpect(value)) bad(path, why)
   if (conv.flags?.EGDESK_PRESENCE !== 'on') bad(path, 'needs flags.EGDESK_PRESENCE = "on" in this conversation')
@@ -17,6 +28,8 @@ registerExpectKeys({ collab: { schema: COLLAB_EXPECT_SCHEMA, validate: (value, {
   if (restartTurn) { for (const k of Object.keys(value)) if (!COLLAB_RESTART_KEYS.includes(k)) bad(`${path}.${k}`, 'a restart turn takes only roomKept and receiptsClosed') }
   else {
     for (const k of COLLAB_RESTART_KEYS) if (value[k] !== undefined) bad(`${path}.${k}`, 'belongs to a restart turn')
+    if (value.twoRuns !== undefined && turn.alongside === undefined) bad(`${path}.twoRuns`, 'needs the turn\'s alongside (two runs at the same time)')
+    if (value.twoRuns !== undefined) for (const flag of ['EGDESK_WORK_PLACEMENT', 'EGDESK_CONVERSATION_FLOW']) if (conv.flags?.[flag] !== 'on') bad(`${path}.twoRuns`, `needs flags.${flag} = "on" in this conversation`)
     if (value.continuity !== undefined && prev?.action !== 'restart') bad(`${path}.continuity`, 'belongs to the message turn right after a restart')
     if (turn.whileRunning !== undefined || turn.action !== undefined) bad(path, 'not checked on a whileRunning or action turn')
   }
@@ -129,3 +142,15 @@ import { GIT_EXPECT_SCHEMA, GIT_SCENARIO_SCHEMA, GIT_SCENARIOS, createGitSceneHo
 registerConversationFields({ gitScenario: { schema: GIT_SCENARIO_SCHEMA, validate: (value, { path, bad }) => { if (!GIT_SCENARIOS.includes(value)) bad(path, `one of ${GIT_SCENARIOS.join(', ')}`) } } })
 registerExpectKeys({ git: { schema: GIT_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateGitExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
 registerTurnHooks('gitScene', conversation => createGitSceneHook(conversation))
+
+// ---- L5: the decision-first command path (flag EGDESK_DECISION_FIRST in a conversation, expect.decisionFirst: fast or engine, engine turns, why) ----
+import { DF_EXPECT_SCHEMA, createDecisionFirstHook, validateDecisionFirstExpect } from './egdesk-real-engine-decision-first.mjs'
+registerFlags({ reproduced: ['EGDESK_DECISION_FIRST'], decisionDependent: ['EGDESK_DECISION_FIRST'] })
+registerExpectKeys({ decisionFirst: { schema: DF_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateDecisionFirstExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('decisionFirst', () => createDecisionFirstHook())
+
+// ---- L5: the first-event watchdog (flag EGDESK_ENGINE_STALL_FIRST_EVENT_MS in a conversation; expect.engineStall; firstEventMs is in every turn record) ----
+import { STALL_EXPECT_SCHEMA, createStallHook, validateStallExpect } from './egdesk-real-engine-stall.mjs'
+registerFlags({ reproduced: ['EGDESK_ENGINE_STALL_FIRST_EVENT_MS'] })
+registerExpectKeys({ engineStall: { schema: STALL_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateStallExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('engineStall', () => createStallHook())
