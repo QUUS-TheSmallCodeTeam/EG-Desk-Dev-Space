@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { execFile, spawn } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync, existsSync } from 'node:fs'
 import os from 'node:os'
@@ -12,7 +12,7 @@ import { TerminalSessionRegistry } from './terminal-sessions.mjs'
 
 // The gate's safety preload (evidence/l6-c2/guard.mjs) forbids any process spawn, so the tests that run the real opener script as a child process are skipped THERE and run for real with
 // `node --test helper/egdesk-terminal-open-url.test.mjs` (10 of 10 pass; the mutation checks ran them). Everything else in this file runs in the gate.
-const spawnBlocked = Boolean(process.env.GUARD_LOG) && 'child processes are blocked by the gate guard; run this file directly'
+const spawnBlocked = (() => { try { execFileSync(process.execPath, ['-e', '0'], { timeout: 5000 }); return false } catch (error) { return error?.code === 'EGUARD' && 'child processes are blocked by the gate guard; run this file directly' } })()
 // L1 c34: URLs a program in a Terminal card opens go to an EG-Desk Browser Card (flag EGDESK_TERMINAL_OPEN_URL). Real opener script, real HTTP handler, a fake CLI that "opens" a URL.
 const SIGN_IN = 'https://claude.com/cai/oauth/authorize?code=true&client_id=00000000-0000-0000-0000-000000000000&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=synthetic-state&code_challenge=synthetic-challenge&code_challenge_method=S256'
 const tmp = t => { const dir = mkdtempSync(path.join(os.tmpdir(), 'egdesk-open-url-')); t.after(() => rmSync(dir, { recursive: true, force: true })); return dir }
