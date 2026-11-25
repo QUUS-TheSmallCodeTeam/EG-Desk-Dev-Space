@@ -16,7 +16,7 @@ const tmp = t => { const dir = mkdtempSync(path.join(os.tmpdir(), 'egdesk-open-u
 
 test('normalizeOpenUrl: absolute http(s) only, no credentials, no whitespace or control characters, bounded', () => {
   assert.equal(normalizeOpenUrl(SIGN_IN), new URL(SIGN_IN).href)
-  for (const bad of ['', null, 5, 'file:///etc/passwd', 'javascript:alert(1)', 'chrome://browser/content', 'about:blank', 'data:text/html,x', '/relative', 'https://', 'https://user:pw@claude.com/x', 'https://a.com/ x', 'https://a.com/\n', 'https://a.com/\u0000', `https://a.com/${'a'.repeat(OPEN_URL_LIMITS.urlChars)}`]) assert.equal(normalizeOpenUrl(bad), null, JSON.stringify(bad)?.slice(0, 40))
+  for (const bad of ['', null, 5, 'file:///etc/passwd', 'file://localhost/etc/passwd', 'ftp://a.example/x', 'ws://a.example/', 'javascript:alert(1)', 'chrome://browser/content', 'about:blank', 'data:text/html,x', '/relative', 'https://', 'https://user:pw@claude.com/x', 'https://a.com/ x', 'https://a.com/\n', 'https://a.com/\u0000', `https://a.com/${'a'.repeat(OPEN_URL_LIMITS.urlChars)}`]) assert.equal(normalizeOpenUrl(bad), null, JSON.stringify(bad)?.slice(0, 40))
 })
 
 test('the registry of one flagged bridge: a session\'s own token, closed refusals, once-only take, a bounded queue that expires', () => {
