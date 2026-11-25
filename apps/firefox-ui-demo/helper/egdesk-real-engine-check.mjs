@@ -33,6 +33,7 @@ import { createDecisionTransport } from './egdesk-decision-transport.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
 import { createTurnMemoryConfig, turnMemoryFlagsFromEnv } from './egdesk-turn-memory-wiring.mjs'
+import { FAST_RUN_PREFIX } from './egdesk-memory-fast-answer.mjs'
 import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 import { createGitTargetInspector } from './egdesk-terminal-git-facts.mjs'
@@ -566,7 +567,9 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     const finishTurn = async ({ run, started }) => {
       const deadline = started + options.turnTimeoutMs
       let done = null
-      while (!done && performance.now() < deadline && !closed && !rec.aborted) { done = completions.find(c => c.threadId === run.conversationId && c.turnId === run.runId); if (!done) await sleep(10) }
+      // c31: a fast answer (the bridge posted a stored sentence itself) has no engine turn and so no turn/completed: the runtime's own finished run is its completion
+      const settledHere = () => { if (!String(run.runId).startsWith(FAST_RUN_PREFIX)) return null; const r = [...chat.runs.values()].find(x => x.conversationId === run.conversationId && x.runId === run.runId); return r && r.status !== 'inProgress' ? { status: r.status, error: r.error ?? null } : null }
+      while (!done && performance.now() < deadline && !closed && !rec.aborted) { done = completions.find(c => c.threadId === run.conversationId && c.turnId === run.runId) ?? settledHere(); if (!done) await sleep(10) }
       let status = done?.status ?? null
       if (!done) {
         status = closed ? 'engine_exited' : rec.aborted ? 'aborted' : 'timeout'

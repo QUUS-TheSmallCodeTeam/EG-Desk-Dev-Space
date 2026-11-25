@@ -1,0 +1,423 @@
+{
+  "set": "real-engine-memory-fast-answer-v1",
+  "description": "Pattern: a question that one sentence of a stored record answers, asked with the fast answer off (the engine writes the answer) and on (code posts the record's sentence, no engine turn). Six conversations over the same synthetic pages (a server-backup retention record, a scheduled visit, an undecided dinner, two decoys): fast-off and fast-on ask the same question and are compared on seconds and on the answer's facts (47 days, and not the record's other fact); fast-on turn 2 asks what the person asked a moment ago, which only the carried exchange can tell the engine (the engine never saw turn 1); fast-compute, fast-whole and fast-dinner are questions the fast path must leave to the engine (a calculation, two answering sentences, a record whose time is hypothetical: a code floor, time_unsettled, or the loop's own status reading disagreeing with the record, status_read_differs; either way no Decision request); fast-visit is a scheduled line (a recalled plan). Needs --decisions. The reasons are the Decision model's own reading: a real model that reads a question differently fails the expectation, and that is the finding.",
+  "conversations": [
+    {
+      "id": "fast-off",
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "backup/retention",
+            "title": "서버 백업 보관 기간 결정",
+            "body": "11월 5일 점검 회의에서 서버 백업 보관 기간을 47일로 정했다. 47일이 지나면 자동 삭제하고, 월 1회 복원 시험을 한다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "visit/inspection",
+            "title": "고객사 설비 점검 방문 일정",
+            "body": "고객사 설비 점검 방문은 11월 19일 화요일 오후 2시로 확정했다. 담당자는 박 대리다.",
+            "time": "planned",
+            "status": "plan"
+          },
+          {
+            "id": "office/dinner",
+            "title": "12월 회식 장소",
+            "body": "12월 회식 장소는 아직 정하지 못했고, 후보는 두 곳이다.",
+            "time": "hypothetical",
+            "status": "plan"
+          },
+          {
+            "id": "office/room-rules",
+            "title": "회의실 예약 규칙",
+            "body": "3층 회의실은 사용 30분 전까지 예약하고, 취소는 10분 전까지 할 수 있다.",
+            "time": "present",
+            "status": "done"
+          },
+          {
+            "id": "lunch/survey",
+            "title": "점심 설문 결과",
+            "body": "11월 둘째 주 점심 설문에서 한식을 고른 사람이 가장 많았다.",
+            "time": "past",
+            "status": "done"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "지난번 점검 회의에서 서버 백업을 며칠 보관하기로 정했는지 알려줘.",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed",
+            "answerIncludes": [
+              "47"
+            ],
+            "answerExcludes": [
+              "자동 삭제"
+            ],
+            "memory": {
+              "attached": [
+                "backup/retention"
+              ]
+            },
+            "fastAnswer": {
+              "used": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "fast-on",
+      "flags": {
+        "EGDESK_TURN_MEMORY_FAST_ANSWER": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "backup/retention",
+            "title": "서버 백업 보관 기간 결정",
+            "body": "11월 5일 점검 회의에서 서버 백업 보관 기간을 47일로 정했다. 47일이 지나면 자동 삭제하고, 월 1회 복원 시험을 한다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "visit/inspection",
+            "title": "고객사 설비 점검 방문 일정",
+            "body": "고객사 설비 점검 방문은 11월 19일 화요일 오후 2시로 확정했다. 담당자는 박 대리다.",
+            "time": "planned",
+            "status": "plan"
+          },
+          {
+            "id": "office/dinner",
+            "title": "12월 회식 장소",
+            "body": "12월 회식 장소는 아직 정하지 못했고, 후보는 두 곳이다.",
+            "time": "hypothetical",
+            "status": "plan"
+          },
+          {
+            "id": "office/room-rules",
+            "title": "회의실 예약 규칙",
+            "body": "3층 회의실은 사용 30분 전까지 예약하고, 취소는 10분 전까지 할 수 있다.",
+            "time": "present",
+            "status": "done"
+          },
+          {
+            "id": "lunch/survey",
+            "title": "점심 설문 결과",
+            "body": "11월 둘째 주 점심 설문에서 한식을 고른 사람이 가장 많았다.",
+            "time": "past",
+            "status": "done"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "지난번 점검 회의에서 서버 백업을 며칠 보관하기로 정했는지 알려줘.",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed",
+            "answerIncludes": [
+              "47"
+            ],
+            "answerExcludes": [
+              "자동 삭제"
+            ],
+            "fastAnswer": {
+              "used": true,
+              "answerIs": "11월 5일 점검 회의에서 서버 백업 보관 기간을 47일로 정했다.",
+              "maxSeconds": 8
+            }
+          }
+        },
+        {
+          "say": "방금 내가 뭘 물어봤더라? 한 문장으로만 알려줘.",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed",
+            "answerIncludes": [
+              "백업"
+            ],
+            "fastAnswer": {
+              "used": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "fast-compute",
+      "flags": {
+        "EGDESK_TURN_MEMORY_FAST_ANSWER": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "backup/retention",
+            "title": "서버 백업 보관 기간 결정",
+            "body": "11월 5일 점검 회의에서 서버 백업 보관 기간을 47일로 정했다. 47일이 지나면 자동 삭제하고, 월 1회 복원 시험을 한다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "visit/inspection",
+            "title": "고객사 설비 점검 방문 일정",
+            "body": "고객사 설비 점검 방문은 11월 19일 화요일 오후 2시로 확정했다. 담당자는 박 대리다.",
+            "time": "planned",
+            "status": "plan"
+          },
+          {
+            "id": "office/dinner",
+            "title": "12월 회식 장소",
+            "body": "12월 회식 장소는 아직 정하지 못했고, 후보는 두 곳이다.",
+            "time": "hypothetical",
+            "status": "plan"
+          },
+          {
+            "id": "office/room-rules",
+            "title": "회의실 예약 규칙",
+            "body": "3층 회의실은 사용 30분 전까지 예약하고, 취소는 10분 전까지 할 수 있다.",
+            "time": "present",
+            "status": "done"
+          },
+          {
+            "id": "lunch/survey",
+            "title": "점심 설문 결과",
+            "body": "11월 둘째 주 점심 설문에서 한식을 고른 사람이 가장 많았다.",
+            "time": "past",
+            "status": "done"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "백업을 47일 보관하기로 했으면, 11월 5일에 만든 백업은 몇 월 며칠에 지워지는지 날짜를 계산해서 알려줘.",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed",
+            "answerIncludes": [
+              "12월 22일"
+            ],
+            "fastAnswer": {
+              "used": false,
+              "reason": [
+                "needs_more_than_a_sentence",
+                "no_sentence_is_the_answer",
+                "sentence_needs_context"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "fast-whole",
+      "flags": {
+        "EGDESK_TURN_MEMORY_FAST_ANSWER": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "backup/retention",
+            "title": "서버 백업 보관 기간 결정",
+            "body": "11월 5일 점검 회의에서 서버 백업 보관 기간을 47일로 정했다. 47일이 지나면 자동 삭제하고, 월 1회 복원 시험을 한다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "visit/inspection",
+            "title": "고객사 설비 점검 방문 일정",
+            "body": "고객사 설비 점검 방문은 11월 19일 화요일 오후 2시로 확정했다. 담당자는 박 대리다.",
+            "time": "planned",
+            "status": "plan"
+          },
+          {
+            "id": "office/dinner",
+            "title": "12월 회식 장소",
+            "body": "12월 회식 장소는 아직 정하지 못했고, 후보는 두 곳이다.",
+            "time": "hypothetical",
+            "status": "plan"
+          },
+          {
+            "id": "office/room-rules",
+            "title": "회의실 예약 규칙",
+            "body": "3층 회의실은 사용 30분 전까지 예약하고, 취소는 10분 전까지 할 수 있다.",
+            "time": "present",
+            "status": "done"
+          },
+          {
+            "id": "lunch/survey",
+            "title": "점심 설문 결과",
+            "body": "11월 둘째 주 점심 설문에서 한식을 고른 사람이 가장 많았다.",
+            "time": "past",
+            "status": "done"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "지난번 점검 회의에서 백업에 대해 정한 것을 전부 알려줘.",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed",
+            "answerIncludes": [
+              "47",
+              "복원"
+            ],
+            "fastAnswer": {
+              "used": false,
+              "reason": [
+                "several_sentences",
+                "needs_more_than_a_sentence",
+                "another_sentence_unsure"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "fast-dinner",
+      "flags": {
+        "EGDESK_TURN_MEMORY_FAST_ANSWER": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "backup/retention",
+            "title": "서버 백업 보관 기간 결정",
+            "body": "11월 5일 점검 회의에서 서버 백업 보관 기간을 47일로 정했다. 47일이 지나면 자동 삭제하고, 월 1회 복원 시험을 한다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "visit/inspection",
+            "title": "고객사 설비 점검 방문 일정",
+            "body": "고객사 설비 점검 방문은 11월 19일 화요일 오후 2시로 확정했다. 담당자는 박 대리다.",
+            "time": "planned",
+            "status": "plan"
+          },
+          {
+            "id": "office/dinner",
+            "title": "12월 회식 장소",
+            "body": "12월 회식 장소는 아직 정하지 못했고, 후보는 두 곳이다.",
+            "time": "hypothetical",
+            "status": "plan"
+          },
+          {
+            "id": "office/room-rules",
+            "title": "회의실 예약 규칙",
+            "body": "3층 회의실은 사용 30분 전까지 예약하고, 취소는 10분 전까지 할 수 있다.",
+            "time": "present",
+            "status": "done"
+          },
+          {
+            "id": "lunch/survey",
+            "title": "점심 설문 결과",
+            "body": "11월 둘째 주 점심 설문에서 한식을 고른 사람이 가장 많았다.",
+            "time": "past",
+            "status": "done"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "12월 회식 장소는 어디로 정했지?",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed",
+            "answerIncludes": [
+              "아직"
+            ],
+            "fastAnswer": {
+              "used": false,
+              "reason": [
+                "time_unsettled",
+                "status_read_differs"
+              ],
+              "noDecisionCall": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "fast-visit",
+      "flags": {
+        "EGDESK_TURN_MEMORY_FAST_ANSWER": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "backup/retention",
+            "title": "서버 백업 보관 기간 결정",
+            "body": "11월 5일 점검 회의에서 서버 백업 보관 기간을 47일로 정했다. 47일이 지나면 자동 삭제하고, 월 1회 복원 시험을 한다.",
+            "time": "past",
+            "status": "done"
+          },
+          {
+            "id": "visit/inspection",
+            "title": "고객사 설비 점검 방문 일정",
+            "body": "고객사 설비 점검 방문은 11월 19일 화요일 오후 2시로 확정했다. 담당자는 박 대리다.",
+            "time": "planned",
+            "status": "plan"
+          },
+          {
+            "id": "office/dinner",
+            "title": "12월 회식 장소",
+            "body": "12월 회식 장소는 아직 정하지 못했고, 후보는 두 곳이다.",
+            "time": "hypothetical",
+            "status": "plan"
+          },
+          {
+            "id": "office/room-rules",
+            "title": "회의실 예약 규칙",
+            "body": "3층 회의실은 사용 30분 전까지 예약하고, 취소는 10분 전까지 할 수 있다.",
+            "time": "present",
+            "status": "done"
+          },
+          {
+            "id": "lunch/survey",
+            "title": "점심 설문 결과",
+            "body": "11월 둘째 주 점심 설문에서 한식을 고른 사람이 가장 많았다.",
+            "time": "past",
+            "status": "done"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "고객사 설비 점검 방문이 언제로 잡혔는지 알려줘.",
+          "expect": {
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed",
+            "answerIncludes": [
+              "19일"
+            ],
+            "answerExcludes": [
+              "박 대리"
+            ],
+            "fastAnswer": {
+              "used": true,
+              "answerIs": "고객사 설비 점검 방문은 11월 19일 화요일 오후 2시로 확정했다.",
+              "maxSeconds": 8
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

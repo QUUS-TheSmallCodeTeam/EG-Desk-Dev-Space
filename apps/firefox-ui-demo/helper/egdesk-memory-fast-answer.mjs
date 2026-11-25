@@ -20,6 +20,11 @@ import { NO, allowsPage, clockLine, ternary } from './egdesk-wiki-reconstruction
 export const FAST_ANSWER_LIMITS = Object.freeze({ pages: 3, sentences: 10, sentenceChars: 220, messageChars: 400 })
 // answer: the yes bar of "this sentence is the answer" (higher than the loop's 0.8). unsure: another sentence at or above this is a second candidate.
 export const FAST_ANSWER_BARS = Object.freeze({ answer: 0.9, unsure: 0.5, no: NO })
+// every reason decideFastAnswer can give for NOT answering (plus the Decision client's own error codes, e.g. timeout); 'answered' is the one success
+export const FAST_REASONS = Object.freeze(['answered', 'message_unsuited', 'no_picked_record', 'too_many_records', 'record_missing', 'not_permitted', 'guarded_record', 'status_not_settled', 'status_read_differs',
+  'reading_pending', 'superseded', 'time_unsettled', 'provenance_not_own', 'sentence_too_long', 'too_many_sentences', 'no_sentences', 'unanswered', 'needs_more_than_a_sentence',
+  'no_sentence_is_the_answer', 'several_sentences', 'another_sentence_unsure', 'sentence_needs_context'])
+export const FAST_RUN_PREFIX = 'egdesk-fast-'
 export const FAST_SETTLED = Object.freeze(['done', 'plan'])
 const SLICES = Object.freeze(['past', 'present', 'planned'])
 const PROVENANCE = Object.freeze(['own_record', 'document', 'agent_note'])
@@ -121,7 +126,7 @@ export async function decideFastAnswer({ message, result, wiki, scope = null, cl
 /** The turn result the runtime treats as an engine turn that already finished: one final answer, completed. */
 export function fastTurn(text) {
   const id = randomUUID()
-  return { turn: { id: `egdesk-fast-${id}`, status: 'completed', itemsView: 'full', items: [{ id: `egdesk-fast-answer-${id}`, type: 'agentMessage', phase: 'final_answer', text }] } }
+  return { turn: { id: `${FAST_RUN_PREFIX}${id}`, status: 'completed', itemsView: 'full', items: [{ id: `egdesk-fast-answer-${id}`, type: 'agentMessage', phase: 'final_answer', text }] } }
 }
 
 /**

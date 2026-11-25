@@ -129,3 +129,9 @@ import { GIT_EXPECT_SCHEMA, GIT_SCENARIO_SCHEMA, GIT_SCENARIOS, createGitSceneHo
 registerConversationFields({ gitScenario: { schema: GIT_SCENARIO_SCHEMA, validate: (value, { path, bad }) => { if (!GIT_SCENARIOS.includes(value)) bad(path, `one of ${GIT_SCENARIOS.join(', ')}`) } } })
 registerExpectKeys({ git: { schema: GIT_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateGitExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
 registerTurnHooks('gitScene', conversation => createGitSceneHook(conversation))
+
+// ---- L1 c31: the fast answer from a picked record (flag EGDESK_TURN_MEMORY_FAST_ANSWER; expect.fastAnswer; the hook counts the engine's turn/start and reads the runtime's own record) ----
+import { FAST_EXPECT_SCHEMA, FAST_FLAG, createFastAnswerHook, validateFastExpect } from './egdesk-real-engine-fast-answer.mjs'
+registerFlags({ reproduced: [FAST_FLAG], decisionDependent: [FAST_FLAG] })
+registerExpectKeys({ fastAnswer: { schema: FAST_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateFastExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('fastAnswer', conversation => createFastAnswerHook(conversation))

@@ -911,6 +911,46 @@
                       },
                       "type": "object"
                     },
+                    "fastAnswer": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "answerIs": {
+                          "maxLength": 400,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "maxSeconds": {
+                          "exclusiveMinimum": 0,
+                          "maximum": 600,
+                          "type": "number"
+                        },
+                        "noDecisionCall": {
+                          "const": true
+                        },
+                        "reason": {
+                          "anyOf": [
+                            {
+                              "pattern": "^[a-z][a-z_]{2,39}$",
+                              "type": "string"
+                            },
+                            {
+                              "items": {
+                                "pattern": "^[a-z][a-z_]{2,39}$",
+                                "type": "string"
+                              },
+                              "maxItems": 8,
+                              "minItems": 1,
+                              "type": "array"
+                            }
+                          ]
+                        },
+                        "used": {
+                          "type": "boolean"
+                        }
+                      },
+                      "type": "object"
+                    },
                     "files": {
                       "additionalProperties": {
                         "maxLength": 65536,
