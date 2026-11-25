@@ -72,7 +72,7 @@ const ASKS = {
   abandon: message => `Does this message, ${quoted(compactText(message, 200))}, say the person no longer wants the browser task, or ask to stop it?`,
   // c39 (real, check-31bo, oi-unrelated): "고마워. 그런데 자바스크립트 배열 정렬은 어떻게 해?" read ask_page 1.0: any question matched a question about the page. The page is the anchor: a question about anything else is not it.
   // v1 measured ask_page 0.99 on "그만해", 1.0 on "됐어 안 할래", 0.97 on "ㅇㅇ"; c39's anchor alone would have exposed the next error (below), so the near misses are named
-  ask_page: message => `Is this message, ${quoted(compactText(message, 200))}, a question about what the web page the browser task is on shows, or what the task found there? A request to go on, stop, redo or change the task, an acknowledgement, and a question about anything else are not.`,
+  ask_page: message => `Is this message, ${quoted(compactText(message, 200))}, a question about what the web page the browser task is on shows, or what the task found there? A request to go on, stop, redo or change the task, a request for something different from what the task was asked for, an acknowledgement, and a question about anything else are not.`,
   // v1 measured change 1.0 on "오늘 날씨 어때?": a different request IS "a different target or request". It was not settled only because ask_page read 0.48; once ask_page is anchored it would have been, and the open
   // task would have been replaced by a weather question (the unsafe error). Change is a change of what THIS task looks for.
   change: (message, task) => `Does this message, ${quoted(compactText(message, 200))}, change what the browser task is looking for on its page (a different item, period or detail of the same kind of request) instead of answering ${asked(task?.question)}? An unrelated question or request, an acknowledgement and a request to stop are not.`,
@@ -87,20 +87,25 @@ export function openItemQuestions(task, message, options = {}) {
  * R5: exactly one option decided yes (the product's done bar) and every other decided no -> settled. Everything no -> none (an ordinary turn, the task
  * stays as it is). Anything else (two yes, an unknown, a middle probability) -> uncertain: nothing is applied and nothing is asked of the person here.
  */
+export const OPEN_ITEM_NO = 0.25 // c41: a competing option at or below this reads as no (it was 1 - done = 0.15; see readOpenItem)
 export function readOpenItem(answers, task, { thresholds, change = false } = {}) {
   const bar = decisionThresholds(thresholds).done
   const ids = openItemOptions(task, { change })
   const read = ids.map(id => ({ id, ...readPredicate(answers, optionQuestionName(id), bar) }))
   const p = Object.fromEntries(read.map(row => [row.id, row.probability]))
-  const no = row => row.state === 'no' && row.probability <= 1 - bar
+  // c41 (real, c59, browser-open-item-v2 on 6187635: 8 correct, 2 acceptable, 2 safe_miss, 0 wrong): "했어" read continue 0.95 with ask_page 0.20 and retry 0.70, and was not settled: the commonest reply
+  // of all. A rival at 0.20 is not a rival; the bound for "decided no" is 0.25 (it was 0.15). Replayed on the recorded answers of v1 (c57) and v2 (c59), 24 replies: no reply becomes WRONG, and the two
+  // runs gain one correct each (evidence/l8-c41/replay.txt).
+  const no = row => row.state === 'no' && row.probability <= OPEN_ITEM_NO
   const yes = read.filter(row => row.state === 'yes')
+  // retry is continue that also forgets the step memory (c39) and change that also applies a new request (c40): when continue or change is the ONE other yes, retry's own reading cannot change what is applied,
+  // whether it reads yes (the person's step is done, "try again" is what they mean too) or in between (0.70 on "했어"). Every other option must still be decided no.
+  const non = yes.filter(row => row.id !== 'retry')
+  if (non.length === 1 && (non[0].id === 'continue' || non[0].id === 'change') && read.every(row => row === non[0] || row.id === 'retry' || no(row))) {
+    const retry = read.find(row => row.id === 'retry')
+    return { kind: 'settled', optionId: non[0].id, p, ...(retry?.state === 'yes' ? { overlap: non[0].id === 'continue' ? 'continue_retry' : 'retry_change' } : {}) }
+  }
   if (yes.length === 1 && read.every(row => row === yes[0] || no(row))) return { kind: 'settled', optionId: yes[0].id, p }
-  // c39 (real, check-31bo, oi-continue): "했어" after a hand-over read continue 0.95 AND retry 0.89 (the person's step is done, so "try it again" is what they mean too), so nothing was applied
-  // and the person's own "I did it" went unanswered. Those two are not rivals: retry is continue that also forgets the step memory. When they are the ONLY yes and the rest are decided
-  // no, the weaker action is applied (continue: from where it stopped, nothing discarded). Any other pair stays uncertain.
-  if (yes.length === 2 && yes.every(row => row.id === 'continue' || row.id === 'retry') && read.every(row => yes.includes(row) || no(row))) return { kind: 'settled', optionId: 'continue', p, overlap: 'continue_retry' }
-  // c40 (c57: "아 그거 말고 지난달 공연으로 알려줘": retry 0.93, change 0.89): a changed request re-asks, so retry reads yes too; change is the more specific of the two (it applies the new request and goes on)
-  if (yes.length === 2 && yes.every(row => row.id === 'retry' || row.id === 'change') && read.every(row => yes.includes(row) || no(row))) return { kind: 'settled', optionId: 'change', p, overlap: 'retry_change' }
   if (!yes.length && read.length && read.every(no)) return { kind: 'none', p }
   return { kind: 'uncertain', p }
 }

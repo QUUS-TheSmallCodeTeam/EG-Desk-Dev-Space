@@ -96,3 +96,13 @@ test('c40: plan v2 is v1\'s replies, wants and acceptable sets unchanged (the tw
   const out = await runOpenItemPlan({ plan: v2, budget: 14000, scripted: standIn(v2) })
   assert.deepEqual([out.sent, out.score.pass, out.score.wrong], [12, true, 0])
 })
+
+test('c41: plan v3 is the same replies again; its predictions are v2\'s outcomes repeated except ack and change; v2\'s are kept', async () => {
+  const { OPEN_ITEM_PLAN_FILES } = await import('./egdesk-browser-open-item-measure.mjs')
+  const v2 = loadOpenItemPlan(OPEN_ITEM_PLAN_FILES.v2), v3 = loadOpenItemPlan(OPEN_ITEM_PLAN_FILES.v3)
+  assert.equal(v3.set, 'browser-open-item-v3')
+  assert.deepEqual(v3.replies.map(r => [r.id, r.message, r.want, r.acceptable]), v2.replies.map(r => [r.id, r.message, r.want, r.acceptable]))
+  assert.deepEqual(v3.replies.map(r => r.predictedV2Wording), v2.replies.map(r => r.predicted))
+  assert.deepEqual(v3.prediction.changedFromV2, ['ack', 'change'])
+  assert.ok(v3.replies.find(r => r.id === 'ack').predicted.continue >= 0.85)
+})

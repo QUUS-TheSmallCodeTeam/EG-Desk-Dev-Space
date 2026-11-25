@@ -60,7 +60,9 @@ test('read (R5): exactly one option yes at the product\'s done bar and every oth
   const task = pausedTask(store)
   const read = map => readOpenItem(answersOf(map), task)
   assert.deepEqual(read({ continue: 0.97, retry: 0.04, abandon: 0.01, ask_page: 0.02 }), { kind: 'settled', optionId: 'continue', p: { continue: 0.97, retry: 0.04, abandon: 0.01, ask_page: 0.02 } })
-  assert.equal(read({ continue: 0.2, retry: 0.96, abandon: 0.01, ask_page: 0.02 }).kind, 'uncertain', 'a 0.2 is not a decided no')
+  assert.equal(read({ continue: 0.4, retry: 0.96, abandon: 0.01, ask_page: 0.02 }).kind, 'uncertain', 'a 0.4 is not a decided no')
+  assert.equal(read({ continue: 0.01, retry: 0.96, abandon: 0.01, ask_page: 0.26 }).kind, 'uncertain', 'c41: the bound of a decided no is 0.25, not 0.26')
+  assert.equal(read({ continue: 0.01, retry: 0.96, abandon: 0.01, ask_page: 0.25 }).optionId, 'retry', 'and 0.25 is a no')
   assert.equal(read({ continue: 0.96, retry: 0.02, abandon: 0.01, ask_page: 0.9 }).kind, 'uncertain', 'two yes that are rivals')
   assert.equal(read({ continue: 0.96, retry: 0.02, abandon: 0.9, ask_page: 0.02 }).kind, 'uncertain', 'continue and abandon are rivals')
   // c39 (real, check-31bo): "했어" read continue 0.95 AND retry 0.89: not rivals, retry is continue that also forgets the step memory: the weaker action is applied
@@ -260,8 +262,24 @@ test('c40: the recorded c57 answers through the rules: "했어" (continue .95, r
   const store = createBrowserTaskStore({ now: () => NOW }), task = pausedTask(store)
   const read = id => readOpenItem(answersOf(Object.fromEntries(['continue', 'retry', 'abandon', 'ask_page', 'change'].map((o, i) => [o, C57[id][i]]))), task, { change: true })
   const outcome = id => { const r = read(id); return r.kind === 'settled' ? r.optionId : r.kind }
-  assert.deepEqual(Object.fromEntries(Object.keys(C57).map(id => [id, outcome(id)])), { ack: 'continue', typo: 'uncertain', okok: 'uncertain', again: 'retry', again2: 'retry', stop: 'uncertain', stop2: 'uncertain', page: 'uncertain', notyet: 'uncertain', offtopic: 'uncertain', change: 'change', compound: 'uncertain' })
+  assert.deepEqual(Object.fromEntries(Object.keys(C57).map(id => [id, outcome(id)])), { ack: 'continue', typo: 'continue', okok: 'uncertain', again: 'retry', again2: 'retry', stop: 'uncertain', stop2: 'uncertain', page: 'uncertain', notyet: 'uncertain', offtopic: 'uncertain', change: 'change', compound: 'uncertain' })
   assert.equal(read('change').overlap, 'retry_change'); assert.equal(read('ack').overlap, 'continue_retry')
   // the near miss c39's anchor alone would have exposed: with ask_page read ~0 on the weather question, change 1.0 is the ONE yes and would be settled (the open task replaced by a weather question). The wording of change is what prevents it, not the rule.
   assert.deepEqual(readOpenItem(answersOf({ continue: 0, retry: 0, abandon: 0.01, ask_page: 0, change: 1 }), task, { change: true }).optionId, 'change', 'the rule alone settles a lone change: the guard is the predicate\'s wording')
+})
+
+// ---- c41: the real answers of c59 (browser-open-item-v2, sent on 6187635, the c40 wording), through the rules ----
+const C59 = { ack: [0.95, 0.7, 0.05, 0.2, 0], typo: [1, 0.87, 0, 0.14, 0], okok: [0.08, 0.11, 0.04, 0, 0], again: [0, 0.98, 0, 0, 0], again2: [0, 1, 0, 0, 0], stop: [0, 0, 0.98, 0, 0], stop2: [0, 0, 0.99, 0, 0], page: [0, 0, 0, 0.97, 0.07],
+  notyet: [0.02, 0.58, 0.05, 0.26, 0], offtopic: [0, 0, 0, 0.01, 0], change: [0, 0.43, 0, 0.74, 1], compound: [1, 0, 0, 0.98, 0] }
+test('c41: the recorded c59 answers: "했어" (continue .95, retry .70, ask_page .20) now settles continue; the change reply (change 1.0 but ask_page .74) stays unsettled; no reply of v1 or v2 is wrong under the rules', () => {
+  const store = createBrowserTaskStore({ now: () => NOW }), task = pausedTask(store)
+  const ids = ['continue', 'retry', 'abandon', 'ask_page', 'change']
+  const read = rec => readOpenItem(answersOf(Object.fromEntries(ids.map((o, i) => [o, rec[i]]))), task, { change: true })
+  const outcome = rec => { const r = read(rec); return r.kind === 'settled' ? r.optionId : r.kind }
+  assert.deepEqual(Object.fromEntries(Object.entries(C59).map(([id, rec]) => [id, outcome(rec)])), { ack: 'continue', typo: 'continue', okok: 'none', again: 'retry', again2: 'retry', stop: 'abandon', stop2: 'abandon', page: 'ask_page', notyet: 'uncertain', offtopic: 'none', change: 'uncertain', compound: 'uncertain' })
+  assert.equal(read(C59.ack).overlap, undefined, 'retry was in between (0.70), not yes: ignored, not an overlap')
+  assert.equal(read(C59.typo).overlap, 'continue_retry')
+  // the wants of the plan: no recorded reply of either run settles to an option outside its acceptable set
+  const accept = { ack: ['continue'], typo: ['continue'], okok: ['continue'], again: ['retry', 'continue'], again2: ['retry', 'continue'], stop: ['abandon'], stop2: ['abandon'], page: ['ask_page'], notyet: [], offtopic: [], change: ['change'], compound: ['continue', 'ask_page'] }
+  for (const rec of [C57, C59]) for (const [id, probs] of Object.entries(rec)) { const o = outcome(probs); assert.ok(['uncertain', 'none'].includes(o) || accept[id].includes(o), `${id} settled ${o}`) }
 })
