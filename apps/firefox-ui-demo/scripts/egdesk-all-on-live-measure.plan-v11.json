@@ -1,0 +1,1593 @@
+{
+  "set": "all-on-live-journey",
+  "version": 11,
+  "registered": "2026-11-25 (lane L2 cycle 34), before any send of v11; from the V1-on-v10 real run c58 (HARD 75 passed, failed only s4.wait, s4.wait-true, s4.elapsed-true; SOFT 28/29, missed s1.layers-fast): v10 plus one switch",
+  "basedOn": {
+    "file": "egdesk-all-on-live-measure.plan-v10.json",
+    "sha256": "81eb4d89b2ec00f1cf0941a177a170b0387abb17b61c1b22801e6d3705e2daac",
+    "note": "every v10 expectation kept verbatim (s1.layers-fast included: its miss in c58 is a measurement, not a wrong bound). Added: the switch note-wording."
+  },
+  "world": {
+    "env": {
+      "EGDESK_TURN_MEMORY_PRUNE_HELD": "on",
+      "EGDESK_TURN_MEMORY_KEEP_LATE": "on",
+      "EGDESK_INRUN_MESSAGES": "on"
+    },
+    "budgets": "bridge",
+    "note": "developer flags of the all-on world only; the product defaults stay off. budgets \"bridge\": the bridge's turn_context budgets (warm 800 / cold 1,500 ms). v6: EGDESK_INRUN_MESSAGES=on (L2 c17) so a message typed while the run works is taken into the run and handed to the session heartbeat. v7: wording \"faithful\": a checked draft is revised the way the revision prompt asks (keep the sentences that were not listed, restate the listed ones), so what the person sees in s3b is judged on the product chain and not on a fixed sentence.",
+    "switches": {
+      "action-relevance": {
+        "env": {
+          "EGDESK_CONTEXT_RELEVANCE": "action"
+        },
+        "default": "off",
+        "owner": "L7",
+        "note": "L7's action-relevance rule, one developer flag for both sides (product default off): the context selection (L7 c20) and turn memory (L7 c21, 9186fd5, ACTION_MEMORY_RULE; in int/c14). Main turns the switch on for a run."
+      },
+      "one-packet": {
+        "env": {
+          "EGDESK_TURN_MEMORY_ONE_PACKET": "on"
+        },
+        "default": "off",
+        "owner": "L7",
+        "note": "L7's one packet (c29, developer flag, product default off): a page that is both a selection item and a memory page goes into the engine's packet once. It changes the engine's input only: the Decision requests are byte-identical on and off (L7 c29, 55 request hashes). Whether the engine follows the reference line is not measurable in this journey (the Agent is scripted); the real-engine memory script is where that is measured. Main turns it on for a run (--switch one-packet)."
+      },
+      "status-relevance": {
+        "env": {
+          "EGDESK_CONTEXT_RELEVANCE": "action+status"
+        },
+        "default": "off",
+        "owner": "L7",
+        "note": "L7 c36's rule set action+status (developer flag, product default off): the action rule of action-relevance plus a line for a question about how a matter stands without naming a time (the items that record how it began and developed are needed). It is the fix for V1's s1.packet (\"A사 견적 지금 어떻게 돼 있어?\": the request page .40). It REPLACES action-relevance (it contains the action rule): give one of the two switches, never both. Main turns it on for a run (--switch status-relevance)."
+      },
+      "note-wording": {
+        "env": {
+          "EGDESK_FLOW_NOTE_WORDING": "waiting"
+        },
+        "default": "off",
+        "owner": "L3",
+        "note": "L3 c34's opt-in wording of the heartbeat's note question (developer flag, product default off): the question is asked in its concrete form (the person is waiting, has heard nothing, the work is still running) instead of the open one. It is the fix offered for s4.wait / s4.wait-true / s4.elapsed-true (V1 wording moved the note's probability from .83 to .75 against the .8 bar). It composes with status-relevance and with one-packet (they touch other requests): --switch status-relevance --switch note-wording. Main turns it on for a run."
+      }
+    },
+    "wording": "faithful"
+  },
+  "how": "Judged only from the results file of a run: what the person sees after each step and the Decision requests of that step. Hard = the journey is broken for the person if it fails; soft = expected but known to be fragile or already reported. \"predicted\" records what this lane expects to fail and why, written before the real run. v2 adds expectations for what the first real run (c16) showed was wrong or misleading for the person although no v1 expectation covered it. v3 adds a genuine recall step and person-level checks of what changed since c16. The scripted subjective model now follows what the product hands it: the recording rule (no promise to record), the choices a task note lists, and the waited-on fact of a note prompt. v4 turns on L7's two turn-memory flags in the world, counts page bodies rather than page headers, and adds the owner question. v5 adds switches: developer flags a run turns on by name, recorded in the results, with expectations judged only under them. v6 adds an in-run nudge: while the long command runs the person asks why it stopped; one true progress reply is expected, no repeated wait message, and the command is not interrupted. v7 adds the other two in-run messages: a change (\"그거 말고 B부터 해줘\", five seconds after the status nudge, same command) and a stop (\"그만해, 그거 하지 마\", ten seconds into a second long command at the end of the journey). The Decision side (does the model read the change as a change, the stop as a stop) is measured on the real answers; the engine side is judged by code on what reached the scripted engine (steer, interrupt) and what the person sees. It also adds a check that the seconds a writer prompt gives for the work match the run's real age, and that the answer the person sees in s3b is about what they asked. v8 adds the empty-answer path as an explicit pair of steps: the Agent answers \"is the PostgreSQL deployment done?\" with \"PostgreSQL 전환 배포를 완료했습니다.\", which the stored plan page records as planned; the tense question flags the one sentence, its one revision fails the check again, every sentence is removed, and per the owner's rule nothing is posted. The steps judge the visible outcome (nothing posted, the wrong number nowhere the person sees it), that it is recorded (the draft check's own content-free outcome), that the next turn is told the person saw no answer, and that the pages that turn carried stay held (not sent again); after it a follow-up is answered normally. The scripted revision keeps a flagged sentence (world.wording \"faithful\"), which is what makes the withheld path certain; a real model may revise differently, and then a revised sentence would be posted instead (outcome revised), which these steps would report as a miss. v9 corrects one expectation of v8 and adds two readings of what the draft check was given. The v8 real run (c37) posted \"PostgreSQL 전환 배포를 완료했습니다.\" as written: the check had the plan page (evidence prev_mem1, planned) and the judge answered \"not supported\" (0.00) but the tense question missed (0.01), and the unsupported finding was off because the turn had 9 evidence items against a limit of 8 (one left out, so the evidence counts as not fully seen). In s14 the check had no plan page at all and withheld a correct answer. Those are product defects (draft check, L3), recorded in the report of cycle 24; v9 keeps the expectations that fail on them. v10 adds one switch (status-relevance, the action+status rule set; give it instead of action-relevance), its twin of the action expectation, and a soft layer-time bound per answered step. The engine side of the layer-first work (prefetch, decision-first commands, approvals) is not in this journey (its engine is scripted): it is measured by the real-engine journey v10 (scripts/egdesk-real-engine-journey-u13-scripts.mjs) with the timing tool (scripts/egdesk-real-engine-timing.mjs). v11 adds one switch (note-wording). The three s4 wait expectations are the same with and without it: with it they are expected to pass under V1 wording (the note question is asked concretely), without it they fail as in c47 and c58.",
+  "caps": "Per step: about three times the requests and two and a half times the estimated input tokens of the dry run (independentEstimate of helper/egdesk-decision-real-runner.mjs), at least 4 requests and 4000 tokens. The journey total is capped separately (default 80000 tokens, 80 requests). The recall step s3b uses the same rule. The owner-question step s8b uses the same rule.",
+  "steps": [
+    {
+      "id": "s1-first-turn",
+      "caps": {
+        "maxRequests": 18,
+        "maxEstTokens": 22000
+      },
+      "expect": [
+        {
+          "id": "s1.packet",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "The first answer is prepared with the A company request and quote v1 pages, and with no PostgreSQL or SQLite page.",
+          "check": "packet",
+          "args": {
+            "include": [
+              "ontology:quote/a-request",
+              "ontology:quote/a-v1"
+            ],
+            "excludePrefix": [
+              "ontology:db/"
+            ],
+            "count": "bodies"
+          },
+          "revised": "v4 counts page bodies only: a reference line to a page the model already holds is not a re-sent page (the harness told them apart in cycle 15)."
+        },
+        {
+          "id": "s1.answer",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "The Agent's answer is posted once, as written (the draft check passes it).",
+          "check": "answerAsWritten",
+          "args": {
+            "said": "quote"
+          }
+        },
+        {
+          "id": "s1.no-flow",
+          "severity": "soft",
+          "owner": "L3",
+          "text": "No wait or pointer message for a short turn.",
+          "check": "messageCount",
+          "args": {
+            "by": "system_flow",
+            "equals": 0
+          }
+        },
+        {
+          "id": "s1.own-words",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "When relevant pages were attached, the person gets the Agent's own answer (or its revision), never the fixed \"not enough evidence, tell me which material\" reply.",
+          "check": "ownWords",
+          "predicted": "fails on int/c14 1f36c00 with the c16 answers: claim_0 insufficient .69 then .76 after the revision, present_0 .97/.96 -> DRAFT_CHECK_COPY.askUser (A1; L7 fix not merged yet). An offline replay of the c16 answers reproduces it."
+        },
+        {
+          "id": "s1.own-ending",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "No Agent message ends with a text the system appended (such as a fixed caveat asking the person to supply materials); every one ends in the Agent's own words.",
+          "check": "endsInOwnWords",
+          "predicted": "passes where the draft check passes the answer (c17: every answer was posted in its own words). Fails only where a sentence fails while the fixed fallback still exists (DRAFT_CHECK_COPY.partial appended); L3 is removing it (owner decision: the model says in its own words what it could not confirm, failing sentences go silently)."
+        },
+        {
+          "id": "s1.no-duplicate-bodies",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "With one packet no page has its body twice in the engine's packet of the first turn.",
+          "check": "packetNoDuplicates",
+          "args": {},
+          "when": {
+            "switch": "one-packet"
+          },
+          "predicted": "PASS under the switch (L7 c29: off 5 bodies twice, on 0 in the scripted journey)."
+        },
+        {
+          "id": "s1.no-memory-key",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "With one packet the first turn carries no separate turn-memory block.",
+          "check": "noContextKey",
+          "args": {
+            "key": "egdesk_turn_memory"
+          },
+          "when": {
+            "switch": "one-packet"
+          },
+          "predicted": "PASS under the switch (L7 c29: 3 keys on, 4 off)."
+        },
+        {
+          "id": "s1.layers-fast",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The memory and action layers (the selection, the memory triage and the page scan) answered within 2,500 ms in total before the engine was asked: the decision model settles the defined layers first and fast.",
+          "check": "layersMs",
+          "args": {
+            "families": [
+              "turn_context",
+              "memory_triage",
+              "memory_fetch"
+            ],
+            "maxMs": 2500
+          },
+          "predicted": "PASS in a real run (measured sums: v9 c41 1,303 ms, V1 c47 2,104 ms; the largest of the 18 steps was 2,259 ms, the bound is that +10%). A dry run times only the scripted transport (a few ms) and passes trivially; a replay records no time at all and passes with measured false."
+        }
+      ]
+    },
+    {
+      "id": "s2-follow-up",
+      "caps": {
+        "maxRequests": 9,
+        "maxEstTokens": 14000
+      },
+      "expect": [
+        {
+          "id": "s2.no-repeat",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "No page already delivered in the first turn is delivered again.",
+          "check": "noRepeatedPages",
+          "args": {
+            "count": "bodies"
+          },
+          "revised": "v4 counts page bodies only: a reference line to a page the model already holds is not a re-sent page (the harness told them apart in cycle 15).",
+          "predicted": "passes with EGDESK_TURN_MEMORY_PRUNE_HELD on: c17 failed because the turn_context selection re-sent the held a-decision page as a body ([item id=ontology:quote/a-decision ...] with its content), which the flag stops."
+        },
+        {
+          "id": "s2.answer",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The follow-up answer is posted as the Agent wrote it.",
+          "check": "answerAsWritten",
+          "args": {
+            "said": "tidy"
+          },
+          "predicted": "fails: finding A1 (the draft check has no evidence for held pages and rewrites the answer)"
+        },
+        {
+          "id": "s2.one-answer",
+          "severity": "hard",
+          "owner": "L2",
+          "text": "Exactly one Agent message for the turn.",
+          "check": "messageCount",
+          "args": {
+            "role": "assistant",
+            "by": "agent",
+            "equals": 1
+          }
+        },
+        {
+          "id": "s2.told-what-was-posted",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "When the previous answer was not posted as the Agent wrote it, the next turn tells the Agent what the person actually saw.",
+          "check": "toldWhatWasPosted",
+          "predicted": "fails: no path in codex-chat-runtime.mjs passes the posted text to the next turn; the replayed s2 turn input carries neither the refusal nor any note, while the engine thread keeps its own s1 draft."
+        },
+        {
+          "id": "s2.no-unrelated-pages",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "The follow-up about the A company quote is prepared with no PostgreSQL or SQLite page.",
+          "check": "packet",
+          "args": {
+            "include": [],
+            "excludePrefix": [
+              "ontology:db/"
+            ],
+            "count": "bodies"
+          },
+          "predicted": "fails with the c16 answers: the held A pages are not fetch candidates mid-session, and the fetch judged pg_1 .90 and pg_2 .98 (pg-health, pg-plan) needed for \"방금 그 내용 정리해줘\".",
+          "revised": "v4 counts page bodies only: a reference line to a page the model already holds is not a re-sent page (the harness told them apart in cycle 15)."
+        },
+        {
+          "id": "s2.triage-need",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The referential follow-up is judged to need nothing the held pages do not cover (need decided no).",
+          "check": "calibrationValue",
+          "args": {
+            "feature": "turn_memory",
+            "q": "triage_need",
+            "max": 0.3
+          },
+          "predicted": "passes: c16 answered need 0 for this message; L7 c18 then skips the fetch when the held pages and the complete list of the other pages were shown."
+        },
+        {
+          "id": "s2.triage-recall",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The recall reading of the follow-up is measured (recorded, no bar).",
+          "check": "calibrationValue",
+          "args": {
+            "feature": "turn_memory",
+            "q": "triage_recall"
+          },
+          "predicted": "measured: c16 answered recall .96."
+        },
+        {
+          "id": "s2.own-ending",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "No Agent message ends with a text the system appended (such as a fixed caveat asking the person to supply materials); every one ends in the Agent's own words.",
+          "check": "endsInOwnWords",
+          "predicted": "passes where the draft check passes the answer (c17: every answer was posted in its own words). Fails only where a sentence fails while the fixed fallback still exists (DRAFT_CHECK_COPY.partial appended); L3 is removing it (owner decision: the model says in its own words what it could not confirm, failing sentences go silently)."
+        },
+        {
+          "id": "s2.layers-fast",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The memory and action layers (the selection, the memory triage and the page scan) answered within 2,500 ms in total before the engine was asked: the decision model settles the defined layers first and fast.",
+          "check": "layersMs",
+          "args": {
+            "families": [
+              "turn_context",
+              "memory_triage",
+              "memory_fetch"
+            ],
+            "maxMs": 2500
+          },
+          "predicted": "PASS in a real run (measured sums: v9 810 ms, V1 1,162 ms; the largest of the 18 steps was 2,259 ms, the bound is that +10%). A dry run times only the scripted transport (a few ms) and passes trivially; a replay records no time at all and passes with measured false."
+        }
+      ]
+    },
+    {
+      "id": "s3-briefing",
+      "caps": {
+        "maxRequests": 12,
+        "maxEstTokens": 14000
+      },
+      "expect": [
+        {
+          "id": "s3.board",
+          "severity": "hard",
+          "owner": "L4",
+          "text": "The briefing of the follow-up answer ends on the board, with at least two cards.",
+          "check": "briefingOnBoard",
+          "args": {
+            "minCards": 2
+          }
+        },
+        {
+          "id": "s3.timeline",
+          "severity": "soft",
+          "owner": "L4",
+          "text": "The board has a timeline part (what happened, in date order).",
+          "check": "briefingPart",
+          "args": {
+            "shows": "sequence"
+          },
+          "predicted": "fails: ontology pages reach the briefing without a date (pagesFromCandidates keeps only the time slice), so no part in date order is enumerated"
+        },
+        {
+          "id": "s3.remaining",
+          "severity": "soft",
+          "owner": "L4",
+          "text": "The board has a remaining-work part (what is still not done).",
+          "check": "briefingPart",
+          "args": {
+            "shows": "open_items"
+          },
+          "predicted": "fails: ontology nodes outside a snapshot carry no status, so no material is open"
+        },
+        {
+          "id": "s3.no-chat",
+          "severity": "hard",
+          "owner": "L4",
+          "text": "The briefing adds no chat message.",
+          "check": "messageCount",
+          "args": {
+            "equals": 0
+          }
+        },
+        {
+          "id": "s3.board-a-pages",
+          "severity": "hard",
+          "owner": "L4",
+          "text": "When the A company pages are the materials, the board shows at least two cards, all of them A company pages.",
+          "check": "boardCards",
+          "args": {
+            "titleIncludes": "A사",
+            "min": 2,
+            "onlyMatching": true
+          },
+          "predicted": "passes if s2 attaches no new page (L7 c18), so the materials are the held A company pages; an offline replay of the c16 answers on a82a563 gave two A company cards, but its briefing requests were scripted."
+        }
+      ]
+    },
+    {
+      "id": "s3b-recall",
+      "caps": {
+        "maxRequests": 18,
+        "maxEstTokens": 21000
+      },
+      "expect": [
+        {
+          "id": "s3b.fetched",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "A genuine recall of stored material the conversation does not hold fetches it: the PostgreSQL design page is in the packet.",
+          "check": "packet",
+          "args": {
+            "include": [
+              "ontology:db/pg-design"
+            ],
+            "excludePrefix": [
+              "ontology:quote/"
+            ],
+            "count": "bodies"
+          },
+          "predicted": "passes if no PostgreSQL page is held at this point: the need question asks whether the held pages already cover the message, and they are A company pages. At risk if s2 still attaches PostgreSQL pages (c16: pg-health, pg-plan), which the judge may take as covering it, so the referential rule would skip the fetch.",
+          "revised": "v4 counts page bodies only: a reference line to a page the model already holds is not a re-sent page (the harness told them apart in cycle 15)."
+        },
+        {
+          "id": "s3b.no-repeat",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "No page already delivered in this conversation is delivered again.",
+          "check": "noRepeatedPages",
+          "predicted": "passes: held pages are not repeated mid-session.",
+          "args": {
+            "count": "bodies"
+          },
+          "revised": "v4 counts page bodies only: a reference line to a page the model already holds is not a re-sent page (the harness told them apart in cycle 15)."
+        },
+        {
+          "id": "s3b.own-words",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The answer from the fetched design page is posted as the Agent wrote it.",
+          "check": "ownWords",
+          "predicted": "at risk on today's code: with the c16 answers the present-tense predicate fired on every factual sentence (.91 to .97); L3 c18 (predicates as the default design) is not merged yet."
+        },
+        {
+          "id": "s3b.triage-need",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The recall is judged to need stored material (need at least .8).",
+          "check": "calibrationValue",
+          "args": {
+            "feature": "turn_memory",
+            "q": "triage_need",
+            "min": 0.8
+          },
+          "predicted": "unknown: measured for the first time."
+        },
+        {
+          "id": "s3b.triage-recall",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The recall reading of the recall question is measured (recorded, no bar).",
+          "check": "calibrationValue",
+          "args": {
+            "feature": "turn_memory",
+            "q": "triage_recall"
+          },
+          "predicted": "measured for the first time."
+        },
+        {
+          "id": "s3b.own-ending",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "No Agent message ends with a text the system appended (such as a fixed caveat asking the person to supply materials); every one ends in the Agent's own words.",
+          "check": "endsInOwnWords",
+          "predicted": "passes where the draft check passes the answer (c17: every answer was posted in its own words). Fails only where a sentence fails while the fixed fallback still exists (DRAFT_CHECK_COPY.partial appended); L3 is removing it (owner decision: the model says in its own words what it could not confirm, failing sentences go silently)."
+        },
+        {
+          "id": "s3b.on-topic",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The answer the person sees (the Agent's own, or its revision after the check) is about what they asked: it names PostgreSQL.",
+          "check": "messageMentions",
+          "args": {
+            "needles": [
+              "PostgreSQL"
+            ]
+          },
+          "predicted": "PASS: with the faithful revision wording a flagged sentence is restated and kept, never replaced by another topic. Judged on the real check answers; the revision text itself is scripted."
+        },
+        {
+          "id": "s3b.not-off-topic",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The answer the person sees does not turn to another matter (the A company quote) when they asked about the PostgreSQL design.",
+          "check": "messageAvoids",
+          "args": {
+            "needles": [
+              "A사"
+            ]
+          },
+          "predicted": "PASS (see s3b.on-topic)."
+        },
+        {
+          "id": "s3b.answer-kept",
+          "severity": "soft",
+          "owner": "L3",
+          "text": "The check lets the Agent's own answer through as written: a correct recall of what the stored page says is not flagged.",
+          "check": "answerAsWritten",
+          "args": {
+            "said": "recall"
+          },
+          "predicted": "FAIL on the real model if it repeats c28: the tense question rated the same correct sentence .86 (v4: .52) and a revision was made. Soft because it measures the check, not the journey."
+        },
+        {
+          "id": "s3b.no-duplicate-bodies",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "With one packet no page has its body twice in the engine's packet of the recall.",
+          "check": "packetNoDuplicates",
+          "args": {},
+          "when": {
+            "switch": "one-packet"
+          },
+          "predicted": "PASS under the switch (L7 c29: off 2 twice, on 0)."
+        },
+        {
+          "id": "s3b.no-memory-key",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "With one packet the recall carries no separate turn-memory block.",
+          "check": "noContextKey",
+          "args": {
+            "key": "egdesk_turn_memory"
+          },
+          "when": {
+            "switch": "one-packet"
+          },
+          "predicted": "PASS under the switch."
+        },
+        {
+          "id": "s3b.layers-fast",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The memory and action layers (the selection, the memory triage and the page scan) answered within 2,500 ms in total before the engine was asked: the decision model settles the defined layers first and fast.",
+          "check": "layersMs",
+          "args": {
+            "families": [
+              "turn_context",
+              "memory_triage",
+              "memory_fetch"
+            ],
+            "maxMs": 2500
+          },
+          "predicted": "PASS in a real run (measured sums: v9 1,645 ms, V1 2,073 ms; the largest of the 18 steps was 2,259 ms, the bound is that +10%). A dry run times only the scripted transport (a few ms) and passes trivially; a replay records no time at all and passes with measured false."
+        }
+      ]
+    },
+    {
+      "id": "s4-long-command",
+      "caps": {
+        "maxRequests": 15,
+        "maxEstTokens": 16000
+      },
+      "expect": [
+        {
+          "id": "s4.wait",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "Ten seconds into a running command, one wait message is posted.",
+          "check": "flowPosted",
+          "args": {
+            "kind": "explain_wait",
+            "equals": 1
+          }
+        },
+        {
+          "id": "s4.no-command-shown",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The command line is not in any chat message.",
+          "check": "notShown",
+          "args": {
+            "needles": [
+              "payroll-secret",
+              "npm test"
+            ]
+          }
+        },
+        {
+          "id": "s4.no-output-sent",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The command's output is not in the heartbeat's judgment (the command-state judge reads it by design and is not covered here).",
+          "check": "notSent",
+          "args": {
+            "needles": [
+              "running 40 tests"
+            ],
+            "families": [
+              "heartbeat"
+            ]
+          }
+        },
+        {
+          "id": "s4.no-unrelated-pages",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The test-run request is prepared with no PostgreSQL migration page (they later become the evidence the wait message and the answer are checked against).",
+          "check": "packet",
+          "args": {
+            "include": [],
+            "excludePrefix": [
+              "ontology:db/"
+            ],
+            "count": "bodies"
+          },
+          "predicted": "fails with the c16 answers: turn_context rel_7 1.0, rel_9 .55, rel_10 .57 and memory pg_2 .97, op_P4 .91 attach four PostgreSQL pages. Soft: whether a health-check list is relevant to \"run all tests\" is debatable.",
+          "revised": "v4 counts page bodies only: a reference line to a page the model already holds is not a re-sent page (the harness told them apart in cycle 15)."
+        },
+        {
+          "id": "s4.wait-true",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The one wait message says what is true at that moment (a command is still running) and claims no result.",
+          "check": "flowText",
+          "args": {
+            "equals": 1,
+            "mustInclude": [
+              "실행 중"
+            ],
+            "mustNot": [
+              "통과",
+              "실패",
+              "완료",
+              "끝났"
+            ]
+          },
+          "predicted": "passes if the note is posted: L3 c17 checks a note against the facts it was composed from, and the writer words it from the running-command fact. c16 withheld it (present-tense predicate .90/.91)."
+        },
+        {
+          "id": "s4.no-page-for-the-action",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "The test-run request is answered with no page content attached: a request to carry out an action needs a page only when the page is about that very action.",
+          "check": "packet",
+          "args": {
+            "include": [],
+            "excludePrefix": [
+              "ontology:"
+            ],
+            "count": "bodies"
+          },
+          "when": {
+            "switch": "action-relevance"
+          },
+          "predicted": "judged only with --switch action-relevance. L7's turn-memory side (c21) is in int/c14 under the same flag: in the dry run the rule rides the selection request and every turn-memory request of s4 (triage, three fetches; about 340 bytes each), but the scripted judge does not follow it and two db pages are still attached, so the dry run FAILS it. Only a real answer can tell: predicted PASS if the model follows ACTION_MEMORY_RULE (L7 c21's own A/B).",
+          "revised": "v6: prediction only (L7 c21 landed under the same flag); id, severity, owner, check and args unchanged"
+        },
+        {
+          "id": "s4.elapsed-true",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The wait note's writer prompt gives the work's real age (within two seconds), not another interval.",
+          "check": "elapsedTrue",
+          "args": {
+            "kind": "explain_wait",
+            "within": 2
+          },
+          "predicted": "PASS (c28: the wait prompt said 10 seconds for a command 10 seconds in)."
+        },
+        {
+          "id": "s4.no-page-for-the-action.status",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "The test-run request is answered with no page content attached: a request to carry out an action needs a page only when the page is about that very action.",
+          "check": "packet",
+          "args": {
+            "include": [],
+            "excludePrefix": [
+              "ontology:"
+            ],
+            "count": "bodies"
+          },
+          "when": {
+            "switch": "status-relevance"
+          },
+          "predicted": "PASS in a real run (action+status contains the action rule: the v9 runs under action-relevance attached no page for the test run); the scripted dry run FAILS it for the same reason as the action twin (the scripted triage fetches).",
+          "revised": "v6: prediction only (L7 c21 landed under the same flag); id, severity, owner, check and args unchanged"
+        },
+        {
+          "id": "s4.layers-fast",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The memory and action layers (the selection, the memory triage and the page scan) answered within 2,500 ms in total before the engine was asked: the decision model settles the defined layers first and fast.",
+          "check": "layersMs",
+          "args": {
+            "families": [
+              "turn_context",
+              "memory_triage",
+              "memory_fetch"
+            ],
+            "maxMs": 2500
+          },
+          "predicted": "PASS in a real run (measured sums: v9 892 ms, V1 1,824 ms; the largest of the 18 steps was 2,259 ms, the bound is that +10%). A dry run times only the scripted transport (a few ms) and passes trivially; a replay records no time at all and passes with measured false."
+        }
+      ]
+    },
+    {
+      "id": "s4n-nudge",
+      "since": 6,
+      "caps": {
+        "maxRequests": 15,
+        "maxEstTokens": 16000
+      },
+      "expect": [
+        {
+          "id": "s4n.kept",
+          "severity": "hard",
+          "owner": "L2",
+          "text": "The person's message is taken into the working run and shown once, as their own: not refused, not a new turn, not lost.",
+          "check": "keptInRun",
+          "args": {
+            "said": "nudge"
+          },
+          "predicted": "PASS (L2 c17, EGDESK_INRUN_MESSAGES on in the world)."
+        },
+        {
+          "id": "s4n.not-interrupted",
+          "severity": "hard",
+          "owner": "L2",
+          "text": "Asking why it stopped does not stop or redirect the command: no steer, no interrupt, no new turn; the run still works.",
+          "check": "runUntouched",
+          "args": {},
+          "predicted": "PASS: with nobody settling the message the bridge sends nothing to the engine."
+        },
+        {
+          "id": "s4n.one-reply",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "Exactly one short reply follows, and it is true: the command is still running (it does not claim a pass, a failure or an end).",
+          "check": "flowText",
+          "args": {
+            "equals": 1,
+            "mustNot": [
+              "통과",
+              "실패",
+              "완료",
+              "끝났"
+            ]
+          },
+          "predicted": "FAIL until L3's heartbeat side reads pendingInRunMessages and answers (no reply is posted today)."
+        },
+        {
+          "id": "s4n.reply-says-running",
+          "severity": "soft",
+          "owner": "L3",
+          "text": "The reply says the command is running.",
+          "check": "flowText",
+          "args": {
+            "equals": 1,
+            "mustInclude": [
+              "실행 중"
+            ],
+            "mustNot": [
+              "통과",
+              "실패",
+              "완료",
+              "끝났"
+            ]
+          },
+          "predicted": "FAIL until L3's side lands; soft because the wording is the model's."
+        },
+        {
+          "id": "s4n.no-duplicate-wait",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The wait message the person already saw at ten seconds is not posted again.",
+          "check": "noRepeatedFlowText",
+          "args": {},
+          "predicted": "PASS today (nothing is posted); must stay so with L3's reply."
+        },
+        {
+          "id": "s4n.heard",
+          "severity": "soft",
+          "owner": "L3",
+          "text": "The heartbeat's Decision request after the message carries the person's words.",
+          "check": "sentIn",
+          "args": {
+            "needles": [
+              "왜 멈췄"
+            ],
+            "families": [
+              "heartbeat"
+            ]
+          },
+          "predicted": "FAIL until L3's side lands; soft because how the heartbeat quotes the message is L3's design."
+        },
+        {
+          "id": "s4n.elapsed-true",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The reply to \"why did it stop\" gives the work's real age (within two seconds), not the time since the person wrote.",
+          "check": "elapsedTrue",
+          "args": {
+            "kind": "reply_status",
+            "within": 2
+          },
+          "predicted": "FAIL until L3 c24 (lane/c24-nudge-elapsed-and-tense) is merged: c28's prompt said \"about 1 seconds so far\" for a run about 10 seconds in (sinceUserMs restarted at the nudge). L3 states the number becomes the work's age (workMs)."
+        }
+      ]
+    },
+    {
+      "id": "s4c-change-nudge",
+      "since": 7,
+      "caps": {
+        "maxRequests": 6,
+        "maxEstTokens": 4000
+      },
+      "expect": [
+        {
+          "id": "s4c.kept",
+          "severity": "hard",
+          "owner": "L2",
+          "text": "The change is taken into the working run and shown once, as the person's own words.",
+          "check": "keptInRunSend",
+          "args": {
+            "said": "change"
+          },
+          "predicted": "PASS."
+        },
+        {
+          "id": "s4c.model-says-change",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The Decision model reads \"not that, start with B\" as a change of the task (yes at the product bar).",
+          "check": "calibrationValue",
+          "args": {
+            "feature": "conversation_flow",
+            "q": "beat_person_change",
+            "min": 0.8
+          },
+          "predicted": "PASS on the real model (the c28 status nudge was read as status 1.00, change 0.00; a redirect has not been measured). Judged on the model's real probability."
+        },
+        {
+          "id": "s4c.model-not-stop",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The Decision model does not read the change as a request to stop (well below the product bar).",
+          "check": "calibrationValue",
+          "args": {
+            "feature": "conversation_flow",
+            "q": "beat_person_stop",
+            "max": 0.5
+          },
+          "predicted": "PASS on the real model."
+        },
+        {
+          "id": "s4c.decided-steer",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The heartbeat's record of the beat says the message was a change to steer, not a reply or a stop.",
+          "check": "derivedFlow",
+          "args": {
+            "kind": "steer"
+          },
+          "predicted": "PASS if the answers above hold. (Code also steers when a judgment fails; the two model checks tell which it was.)"
+        },
+        {
+          "id": "s4c.steered",
+          "severity": "hard",
+          "owner": "L2",
+          "text": "The engine got exactly one steer into the working turn, carrying only the person's words under the request's own id, and no interrupt.",
+          "check": "steeredWith",
+          "args": {
+            "said": "change"
+          },
+          "predicted": "PASS (engine side by code)."
+        },
+        {
+          "id": "s4c.nothing-posted",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "Nothing is posted to the person for a change: the run takes it.",
+          "check": "messageCount",
+          "args": {
+            "role": "assistant",
+            "equals": 0
+          },
+          "predicted": "PASS."
+        },
+        {
+          "id": "s4c.command-continues",
+          "severity": "hard",
+          "owner": "L2",
+          "text": "The command is not stopped or restarted: no interrupt, no new turn, the run still works.",
+          "check": "runWorking",
+          "args": {},
+          "predicted": "PASS."
+        },
+        {
+          "id": "s4c.not-carried",
+          "severity": "hard",
+          "owner": "L2",
+          "text": "The change is settled (steered), so nothing of it waits to be carried into a later turn.",
+          "check": "nothingCarried",
+          "args": {},
+          "predicted": "PASS."
+        }
+      ]
+    },
+    {
+      "id": "s5-silence",
+      "caps": {
+        "maxRequests": 8,
+        "maxEstTokens": 4000
+      },
+      "expect": [
+        {
+          "id": "s5.stalled-once",
+          "severity": "soft",
+          "owner": "L3",
+          "text": "After forty silent seconds at most one stalled line is posted.",
+          "check": "flowPosted",
+          "args": {
+            "kind": "stalled",
+            "max": 1
+          }
+        },
+        {
+          "id": "s5.no-command-shown",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The command line is still not in any chat message.",
+          "check": "notShown",
+          "args": {
+            "needles": [
+              "payroll-secret",
+              "npm test"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "s6-answer",
+      "caps": {
+        "maxRequests": 4,
+        "maxEstTokens": 4000
+      },
+      "expect": [
+        {
+          "id": "s6.answer",
+          "severity": "hard",
+          "owner": "L2",
+          "text": "The answer is posted and the run ends.",
+          "check": "runEnded"
+        },
+        {
+          "id": "s6.one-answer",
+          "severity": "hard",
+          "owner": "L2",
+          "text": "Exactly one Agent message.",
+          "check": "messageCount",
+          "args": {
+            "role": "assistant",
+            "by": "agent",
+            "equals": 1
+          }
+        },
+        {
+          "id": "s6.own-words",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The answer that reports the run's own command result is posted in the Agent's words, not replaced by the fixed \"not enough evidence\" reply.",
+          "check": "ownWords",
+          "predicted": "fails with the c16 answers: claim_0 not_mentioned (ignored: the command activity is opaque evidence) but present_0 .91 then .96 after the revision -> DRAFT_CHECK_COPY.askUser for \"테스트가 모두 통과했습니다.\""
+        },
+        {
+          "id": "s6.own-ending",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "No Agent message ends with a text the system appended (such as a fixed caveat asking the person to supply materials); every one ends in the Agent's own words.",
+          "check": "endsInOwnWords",
+          "predicted": "passes where the draft check passes the answer (c17: every answer was posted in its own words). Fails only where a sentence fails while the fixed fallback still exists (DRAFT_CHECK_COPY.partial appended); L3 is removing it (owner decision: the model says in its own words what it could not confirm, failing sentences go silently)."
+        }
+      ]
+    },
+    {
+      "id": "s7-pointer-advisory",
+      "caps": {
+        "maxRequests": 4,
+        "maxEstTokens": 4000
+      },
+      "expect": [
+        {
+          "id": "s7.silent",
+          "severity": "hard",
+          "owner": "L1",
+          "text": "With work placement advisory, nothing is posted when the result needs the owner elsewhere.",
+          "check": "messageCount",
+          "args": {
+            "equals": 0
+          }
+        },
+        {
+          "id": "s7.recorded",
+          "severity": "soft",
+          "owner": "L1",
+          "text": "The placement is still decided and recorded.",
+          "check": "placementRecorded"
+        }
+      ]
+    },
+    {
+      "id": "s8-pointer-on",
+      "caps": {
+        "maxRequests": 6,
+        "maxEstTokens": 4000
+      },
+      "expect": [
+        {
+          "id": "s8.pointer",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "With work placement on, exactly one pointer message tells the owner where the result is.",
+          "check": "flowPosted",
+          "args": {
+            "kind": "pointer",
+            "equals": 1
+          }
+        },
+        {
+          "id": "s8.one-message",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "Exactly one new message.",
+          "check": "messageCount",
+          "args": {
+            "equals": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "s8b-finished-result",
+      "caps": {
+        "maxRequests": 6,
+        "maxEstTokens": 4000
+      },
+      "expect": [
+        {
+          "id": "s8b.owner-question-own",
+          "severity": "hard",
+          "owner": "L1",
+          "text": "The owner question about the finished result quotes the answer as the Agent wrote it, never a text the draft check appended.",
+          "check": "quotesOwnAnswer",
+          "args": {
+            "answerStep": "s6-answer",
+            "families": [
+              "work_placement"
+            ]
+          },
+          "predicted": "passes: L1 c16 quotes runOwnAnswerText (the posted answer without the check's appended copy); with the c17 answers nothing is appended to the s6 answer, so the check also needs the request to quote the Agent's sentences."
+        },
+        {
+          "id": "s8b.owner-question-asked",
+          "severity": "soft",
+          "owner": "L1",
+          "text": "For a finished result whose need for the owner code cannot tell, the owner question is asked.",
+          "check": "sentIn",
+          "args": {
+            "families": [
+              "work_placement"
+            ],
+            "needles": []
+          },
+          "predicted": "passes: the attention request has state finished and ownerMustAct false, the one case the placement judge asks."
+        }
+      ]
+    },
+    {
+      "id": "s9-status-remark",
+      "caps": {
+        "maxRequests": 21,
+        "maxEstTokens": 30000
+      },
+      "expect": [
+        {
+          "id": "s9.one-run",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "The status remark starts one run only (the record of it is a side judgment, not a second run).",
+          "check": "mainTurns",
+          "args": {
+            "equals": 1
+          }
+        },
+        {
+          "id": "s9.reading",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "The remark is kept as a pending reading of the migration plan page; no page is changed.",
+          "check": "readingPending",
+          "args": {
+            "pageId": "ontology:db/pg-plan"
+          }
+        },
+        {
+          "id": "s9.packet",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The turn has the migration plan page: sent now, or already held from earlier in this conversation (nothing already in the conversation is sent again); no A company page is sent.",
+          "check": "packetOrHeld",
+          "args": {
+            "include": [
+              "ontology:db/pg-plan"
+            ],
+            "excludePrefix": [
+              "ontology:quote/"
+            ],
+            "count": "bodies"
+          },
+          "revised": "the user's rule: a page already delivered earlier in the session is not sent again, so holding it satisfies this. v4 counts page bodies only: a reference line to a page the model already holds is not a re-sent page (the harness told them apart in cycle 15).",
+          "predicted": "passes: the plan page is delivered in s3b and held at s9."
+        },
+        {
+          "id": "s9.claim-backed",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "An answer that says it will record (or has recorded) something is only posted when a reading or a page was written in that turn.",
+          "check": "recordClaimBacked",
+          "args": {
+            "claimPattern": "기록해 두|기록했|기록해 둘|저장해 두|적어 두"
+          },
+          "predicted": "fails: the write judgment proposed update_status on P7 (ontology:db/pg-plan, tw_target .99, tw_status done .94) but speech_time_0 past_unspecified .73 < .85 left the time slice unknown; the update branch of judgeTurnWrite does not check the slice (the new-page branch does) and createWikiWriter refuses it as invalid. Nothing tells the Agent or the person."
+        },
+        {
+          "id": "s9.rule-given",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The answering turn is told that EG-Desk, not the Agent, decides what is recorded (the recording rule rides on the turn).",
+          "check": "contextKey",
+          "args": {
+            "key": "egdesk_recording"
+          },
+          "predicted": "passes: the rule rides on turns whose triage decides recording yes (c16: record 1.0). With it the scripted Agent does not promise a record, so v2 s9.claim-backed now measures whether the rule reached the Agent."
+        },
+        {
+          "id": "s9.target-offered",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The write judgment is offered the page the remark is about (the migration plan).",
+          "check": "sentIn",
+          "args": {
+            "families": [
+              "memory_write"
+            ],
+            "needles": [
+              "PostgreSQL 마이그레이션 배포 계획"
+            ]
+          },
+          "predicted": "fails on today's code in the v3 journey, whatever the answers: judgeTurnWrite takes the first 8 candidates, this turn's picks first and then the held pages in delivery order; after the recall step the plan page (held since s3b) is past the eighth. In the v2 journey it is first. The person-level consequence is v1 s9.reading."
+        },
+        {
+          "id": "s9.own-ending",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "No Agent message ends with a text the system appended (such as a fixed caveat asking the person to supply materials); every one ends in the Agent's own words.",
+          "check": "endsInOwnWords",
+          "predicted": "passes where the draft check passes the answer (c17: every answer was posted in its own words). Fails only where a sentence fails while the fixed fallback still exists (DRAFT_CHECK_COPY.partial appended); L3 is removing it (owner decision: the model says in its own words what it could not confirm, failing sentences go silently)."
+        },
+        {
+          "id": "s9.nudge-not-repeated",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "A nudge the heartbeat already answered during the run is not sent again as part of the next request.",
+          "check": "notInTurnInput",
+          "args": {
+            "said": "nudge"
+          },
+          "predicted": "FAIL until L3's side settles the message: an unsettled message is carried into the next turn (never lost, L2 c17)."
+        },
+        {
+          "id": "s9.change-not-repeated",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "A change that was steered into the working turn is not sent again as part of the next request.",
+          "check": "notInTurnInput",
+          "args": {
+            "said": "change"
+          },
+          "predicted": "PASS: a steered message is settled, not carried."
+        },
+        {
+          "id": "s9.layers-fast",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The memory and action layers (the selection, the memory triage and the page scan) answered within 2,500 ms in total before the engine was asked: the decision model settles the defined layers first and fast.",
+          "check": "layersMs",
+          "args": {
+            "families": [
+              "turn_context",
+              "memory_triage",
+              "memory_fetch"
+            ],
+            "maxMs": 2500
+          },
+          "predicted": "PASS in a real run (measured sums: v9 1,936 ms, V1 2,259 ms; the largest of the 18 steps was 2,259 ms, the bound is that +10%). A dry run times only the scripted transport (a few ms) and passes trivially; a replay records no time at all and passes with measured false."
+        }
+      ]
+    },
+    {
+      "id": "s10-browser-task",
+      "caps": {
+        "maxRequests": 12,
+        "maxEstTokens": 10000
+      },
+      "expect": [
+        {
+          "id": "s10.asks-once",
+          "severity": "hard",
+          "owner": "L8",
+          "text": "The browser task asks which business once, and the conversation is open for the reply.",
+          "check": "taskAsked"
+        },
+        {
+          "id": "s10.no-move",
+          "severity": "soft",
+          "owner": "L8",
+          "text": "Nothing is clicked or opened before the person answers.",
+          "check": "navigated",
+          "args": {
+            "urls": []
+          }
+        },
+        {
+          "id": "s10.choices-given",
+          "severity": "hard",
+          "owner": "L8",
+          "text": "When the task needs the person, the Agent is given the choices the page offered (the two businesses), so it can ask a question that can be answered.",
+          "check": "taskChoices",
+          "args": {
+            "min": 2
+          },
+          "predicted": "fails with the c16 answers: page_state content .69 < .70 (checked before next_step, which was needs_user_context .70 < .75) -> uncertain -> escalated with no candidates; the note says tell_user_and_ask_in_chat with candidates []."
+        },
+        {
+          "id": "s10.question-lists-both",
+          "severity": "hard",
+          "owner": "L8",
+          "text": "The question the person gets names both businesses.",
+          "check": "messageMentions",
+          "args": {
+            "needles": [
+              "123-45-67890",
+              "987-65-43210"
+            ]
+          },
+          "predicted": "passes: L8 c16 pauses choice_needed with both businesses built by code, and the Agent names the choices its note lists."
+        },
+        {
+          "id": "s10.own-ending",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "No Agent message ends with a text the system appended (such as a fixed caveat asking the person to supply materials); every one ends in the Agent's own words.",
+          "check": "endsInOwnWords",
+          "predicted": "passes where the draft check passes the answer (c17: every answer was posted in its own words). Fails only where a sentence fails while the fixed fallback still exists (DRAFT_CHECK_COPY.partial appended); L3 is removing it (owner decision: the model says in its own words what it could not confirm, failing sentences go silently)."
+        }
+      ]
+    },
+    {
+      "id": "s11-browser-reply",
+      "caps": {
+        "maxRequests": 15,
+        "maxEstTokens": 11000
+      },
+      "expect": [
+        {
+          "id": "s11.in-run",
+          "severity": "hard",
+          "owner": "L8",
+          "text": "The reply goes into the run that asked.",
+          "check": "replyInRun"
+        },
+        {
+          "id": "s11.download",
+          "severity": "hard",
+          "owner": "L8",
+          "text": "The task opens the second business and its invoice download, in that order.",
+          "check": "navigated",
+          "args": {
+            "urls": [
+              "https://portal.example.test/biz/2",
+              "https://portal.example.test/download/2.pdf"
+            ]
+          }
+        },
+        {
+          "id": "s11.report",
+          "severity": "soft",
+          "owner": "L8",
+          "text": "One Agent message reports the result.",
+          "check": "messageCount",
+          "args": {
+            "role": "assistant",
+            "by": "agent",
+            "equals": 1
+          }
+        },
+        {
+          "id": "s11.record",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The finished task is written as a page of this conversation.",
+          "check": "pageWritten",
+          "args": {
+            "scope": "dm:dm-browser",
+            "by": "browser_task"
+          }
+        },
+        {
+          "id": "s11.own-ending",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "No Agent message ends with a text the system appended (such as a fixed caveat asking the person to supply materials); every one ends in the Agent's own words.",
+          "check": "endsInOwnWords",
+          "predicted": "passes where the draft check passes the answer (c17: every answer was posted in its own words). Fails only where a sentence fails while the fixed fallback still exists (DRAFT_CHECK_COPY.partial appended); L3 is removing it (owner decision: the model says in its own words what it could not confirm, failing sentences go silently)."
+        }
+      ]
+    },
+    {
+      "id": "s12-stop-nudge",
+      "since": 7,
+      "caps": {
+        "maxRequests": 15,
+        "maxEstTokens": 16000
+      },
+      "expect": [
+        {
+          "id": "s12.kept",
+          "severity": "hard",
+          "owner": "L2",
+          "text": "The stop is taken into the working run and shown once, as the person's own words.",
+          "check": "keptInRunSend",
+          "args": {
+            "said": "stop"
+          },
+          "predicted": "PASS."
+        },
+        {
+          "id": "s12.model-says-stop",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The Decision model reads \"stop that, don't do it\" as a request to stop (yes at the product bar).",
+          "check": "calibrationValue",
+          "args": {
+            "feature": "conversation_flow",
+            "q": "beat_person_stop",
+            "min": 0.8
+          },
+          "predicted": "PASS on the real model (c28 gave a plain status question .12 for stop; an explicit stop has not been measured). Judged on the real probability."
+        },
+        {
+          "id": "s12.decided-stop",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The heartbeat's record of the beat says the message was a stop.",
+          "check": "derivedFlow",
+          "args": {
+            "kind": "stop"
+          },
+          "predicted": "PASS if the model reads it as a stop."
+        },
+        {
+          "id": "s12.interrupted",
+          "severity": "hard",
+          "owner": "L2",
+          "text": "The engine got exactly one interrupt of the turn that was working, no steer, and the run ended as interrupted.",
+          "check": "interruptedRun",
+          "args": {},
+          "predicted": "PASS (engine side by code; the scripted engine ends the turn as interrupted after the interrupt, as the real 0.171 engine did in about 30 ms)."
+        },
+        {
+          "id": "s12.no-agent-answer",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "No Agent answer is posted for the stopped work (the partial text of an interrupted turn is not an answer).",
+          "check": "messageCount",
+          "args": {
+            "role": "assistant",
+            "by": "agent",
+            "equals": 0
+          },
+          "predicted": "PASS."
+        },
+        {
+          "id": "s12.no-command-shown",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "Nothing the person sees names the command or its secret-looking argument.",
+          "check": "notShown",
+          "args": {
+            "needles": [
+              "payroll-secret",
+              "npm test"
+            ]
+          },
+          "predicted": "PASS."
+        },
+        {
+          "id": "s12.not-carried",
+          "severity": "hard",
+          "owner": "L2",
+          "text": "The stop is settled, so nothing of it waits to be carried into a later turn.",
+          "check": "nothingCarried",
+          "args": {},
+          "predicted": "PASS."
+        },
+        {
+          "id": "s12.system-messages",
+          "severity": "soft",
+          "owner": "L3",
+          "text": "At most one system message (the wait note) is posted around a stop.",
+          "check": "messageCount",
+          "args": {
+            "role": "assistant",
+            "by": "system_flow",
+            "max": 1
+          },
+          "predicted": "PASS."
+        }
+      ]
+    },
+    {
+      "id": "s13-withheld",
+      "since": 8,
+      "caps": {
+        "maxRequests": 12,
+        "maxEstTokens": 14000
+      },
+      "expect": [
+        {
+          "id": "s13.claim-withheld",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The draft check flagged the sentence, asked for the one revision, checked it again (two draft-check requests) and the record says posting it unrevised would have withheld it. (The calibration log does not record the posting outcome itself: that is s13.nothing-posted.)",
+          "check": "draftCheckRecord",
+          "args": {
+            "check": "would_revise",
+            "ifUnrevised": "would_withhold",
+            "requests": 2
+          },
+          "predicted": "PASS if the real judge answers yes (>= .7) to the tense question for \"PostgreSQL 전환 배포를 완료했습니다.\" against a plan page that says \"아직 배포 전이다\", and again for the revision, which the scripted engine keeps (world.wording faithful: \"기록에 따르면 ...\"). Dry run: the scripted judge stands in. A real judge reading the revision as correct (no) would give outcome revised: the sentence posted with \"기록에 따르면\"; that is a miss here, and a valid product path."
+        },
+        {
+          "id": "s13.nothing-posted",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "Nothing is posted to the person for that message: no Agent message and no system message (the owner's rule: a fully withheld answer posts nothing).",
+          "check": "messageCount",
+          "args": {
+            "role": "assistant",
+            "equals": 0
+          },
+          "predicted": "PASS."
+        },
+        {
+          "id": "s13.claim-never-shown",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The wrong \"done\" claim is nowhere the person sees (no room, no message).",
+          "check": "notShown",
+          "args": {
+            "needles": [
+              "완료했습니다"
+            ]
+          },
+          "predicted": "PASS."
+        },
+        {
+          "id": "s13.run-ended",
+          "severity": "hard",
+          "owner": "L2",
+          "text": "The run ended normally (the engine's turn completed; only its answer was withheld).",
+          "check": "runEnded",
+          "args": {},
+          "predicted": "PASS."
+        },
+        {
+          "id": "s13.not-resent",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "No page is sent to the engine again for this question: the plan page is held (its receipt stands).",
+          "check": "noRepeatedPages",
+          "args": {
+            "count": "bodies"
+          },
+          "predicted": "PASS in a real run (v8 real run c37: the turn carried no page; the real memory triage said need 0). The scripted dry run FAILS it: the scripted triage always answers need and fetches the plan page again."
+        },
+        {
+          "id": "s13.check-saw-the-plan",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The draft check was given the plan page as evidence (its request lists the plan record that says the deployment is not done yet).",
+          "check": "sentIn",
+          "args": {
+            "families": [
+              "draft_check"
+            ],
+            "needles": [
+              "PostgreSQL 마이그레이션 배포 계획",
+              "아직 배포 전이다"
+            ]
+          },
+          "predicted": "PASS (v8 real run c37: evidence item prev_mem1, time planned)."
+        },
+        {
+          "id": "s13.layers-fast",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The memory and action layers (the selection, the memory triage and the page scan) answered within 2,500 ms in total before the engine was asked: the decision model settles the defined layers first and fast.",
+          "check": "layersMs",
+          "args": {
+            "families": [
+              "turn_context",
+              "memory_triage",
+              "memory_fetch"
+            ],
+            "maxMs": 2500
+          },
+          "predicted": "PASS in a real run (measured sums: v9 729 ms, V1 1,656 ms; the largest of the 18 steps was 2,259 ms, the bound is that +10%). A dry run times only the scripted transport (a few ms) and passes trivially; a replay records no time at all and passes with measured false."
+        }
+      ]
+    },
+    {
+      "id": "s14-after-withheld",
+      "since": 8,
+      "caps": {
+        "maxRequests": 12,
+        "maxEstTokens": 12000
+      },
+      "expect": [
+        {
+          "id": "s14.told",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The next turn is told the person saw no answer to the earlier message (the posted-answer block is in the engine's input).",
+          "check": "contextKey",
+          "args": {
+            "key": "egdesk_posted_answer"
+          },
+          "predicted": "PASS (L3 c19: a withheld answer is noted for the next turn)."
+        },
+        {
+          "id": "s14.no-repeat",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "The page the withheld turn carried is not sent again: its receipt stands although nothing was posted.",
+          "check": "noRepeatedPages",
+          "args": {
+            "count": "bodies"
+          },
+          "predicted": "PASS since L7 c28 (before it, a turn after an emptied answer counted as a first turn: v7/c30)."
+        },
+        {
+          "id": "s14.held-known",
+          "severity": "hard",
+          "owner": "L7",
+          "text": "Turn memory knows the thread is mid-conversation: its triage request lists what is held in the answering model's context.",
+          "check": "sentIn",
+          "args": {
+            "families": [
+              "memory_triage"
+            ],
+            "needles": [
+              "Held in the answering model"
+            ]
+          },
+          "predicted": "PASS since L7 c28."
+        },
+        {
+          "id": "s14.one-answer",
+          "severity": "hard",
+          "owner": "L2",
+          "text": "Exactly one Agent answer is posted for the follow-up.",
+          "check": "messageCount",
+          "args": {
+            "role": "assistant",
+            "by": "agent",
+            "equals": 1
+          },
+          "predicted": "PASS."
+        },
+        {
+          "id": "s14.answer",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The follow-up's answer is posted as the Agent wrote it: the thread works after a withheld answer.",
+          "check": "answerAsWritten",
+          "args": {
+            "said": "benchFollow"
+          },
+          "predicted": "PASS if the check passes \"PostgreSQL 전환은 12월 첫째 주에 배포할 예정입니다.\" (a correctly worded plan; the tense question has read such sentences as done before: c-sales S2 .99 in the L3 measurement); a tense false positive on it would revise the answer, a miss that is real information."
+        },
+        {
+          "id": "s14.check-saw-the-plan",
+          "severity": "hard",
+          "owner": "L3",
+          "text": "The check of the follow-up's answer was given the plan page as evidence (the answer states when the deployment is planned).",
+          "check": "sentIn",
+          "args": {
+            "families": [
+              "draft_check"
+            ],
+            "needles": [
+              "PostgreSQL 마이그레이션 배포 계획",
+              "12월 첫째 주"
+            ]
+          },
+          "predicted": "FAIL on int/c14 15b0df9 (v8 real run c37: the evidence held the A사 pages, the design and the checklists, no plan page, so the correct sentence read unsupported .08 and was withheld); PASS when the previous check's records or the related page reach the check."
+        },
+        {
+          "id": "s14.layers-fast",
+          "severity": "soft",
+          "owner": "L7",
+          "text": "The memory and action layers (the selection, the memory triage and the page scan) answered within 2,500 ms in total before the engine was asked: the decision model settles the defined layers first and fast.",
+          "check": "layersMs",
+          "args": {
+            "families": [
+              "turn_context",
+              "memory_triage",
+              "memory_fetch"
+            ],
+            "maxMs": 2500
+          },
+          "predicted": "PASS in a real run (measured sums: v9 895 ms, V1 1,291 ms; the largest of the 18 steps was 2,259 ms, the bound is that +10%). A dry run times only the scripted transport (a few ms) and passes trivially; a replay records no time at all and passes with measured false."
+        }
+      ]
+    }
+  ],
+  "withdrawn": [
+    {
+      "id": "s13.fetched",
+      "step": "s13-withheld",
+      "reason": "Wrong expectation. It asked the question about the deployment to bring the plan page, but by s13 the plan page is already held by the engine (sent in s1, receipt kept), so nothing is sent again (memory triage need 0): v8 real run c37 and the replay show packets without it and no page sent. The thing the step needs is that the check was given the plan page as evidence: s13.check-saw-the-plan, and that no page is sent again: s13.not-resent."
+    }
+  ]
+}

@@ -336,7 +336,8 @@ export function allOnWorld(t, { on = true, policy = {}, env = {}, onePacket = fa
     ...(['advisory', 'on'].includes(ENV.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => ENV.EGDESK_DRAFT_CHECK } } : {}),
     ...(['action', 'action+status'].includes(ENV.EGDESK_CONTEXT_RELEVANCE) ? { relevanceRules: ENV.EGDESK_CONTEXT_RELEVANCE } : {}), // as the bridge: the selection's 'action' rule set (L7 c20), default off
     ...(ENV.EGDESK_CONVERSATION_FLOW === 'on' ? { conversationFlow: { mode: () => 'on', ...(ENV.EGDESK_PRESENCE === 'on' ? { presence: presenceMirror, audience: ({ run }) => runRequesters.audience({ run }) } : {}),
-      attentionPosted: ({ key, provider: name }) => { if (name === 'work_placement') workPlacement.acknowledgePointer(key) } } } : {}),
+      attentionPosted: ({ key, provider: name }) => { if (name === 'work_placement') workPlacement.acknowledgePointer(key) },
+      ...(ENV.EGDESK_FLOW_NOTE_WORDING === 'waiting' ? { noteWording: () => 'waiting' } : {}) } } : {}), // as the bridge: the note question's concrete wording (L3 c34), default off
     ...(ENV.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}), // as the bridge: a message typed while the run works (L2 c17), default off
     ...(ENV.EGDESK_PROPOSAL_REGISTRY === 'on' ? { proposalRegistry: { mode: () => 'on' } } : {}), // as the bridge (L3 c33), default off
     ...(ENV.EGDESK_COMMAND_JUDGE === 'advisory' ? { commandJudge: { mode: () => 'advisory' } } : {}),
