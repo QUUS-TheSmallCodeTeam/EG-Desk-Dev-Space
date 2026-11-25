@@ -101,6 +101,7 @@ import { ENGINE_STALL_LIMITS, eventTurnId, isProgressEvent, stallFact } from './
 import { markStage, stagesOf } from './egdesk-upper-bundle.mjs' // u1: the order of a turn (memory/action, engine, check) as state
 import { PROPOSAL_LIMITS, proposalCandidates, readRegistration, registrationRequest } from './egdesk-open-proposals.mjs' // c33: the answer's open proposals as defined items
 import { claudeHarnessThreadOverrides } from './egdesk-claude-harness.mjs' // u1
+import { OBSERVE_RESULT_KEY, observeOptions, runObserveOption } from './egdesk-observe-first.mjs' // u5: read-only computer viewing, picked by the decision model and run by code before the engine
 import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
 import { OWN_EDIT_LIMITS, EDIT_TOOL_NAMES, ownEditEvidence } from './egdesk-own-edit-evidence.mjs' // c30b: the edits EG-Desk made, as readable evidence for the check of the answer
 import { OWN_COMMAND_LIMITS, ownCommandEntry, ownCommandEvidence } from './egdesk-own-command-evidence.mjs' // c29: what the check of an answer may know about the commands EG-Desk ran
@@ -3082,13 +3083,13 @@ export class CodexChatRuntime {
       // c32 (U13, flag EGDESK_DECISION_FIRST=on, default off): a request to run something is picked by the decision model from options code built from the folder and run by EG-Desk's own
       // runner before any engine call; a healthy result ends the turn without the engine, anything else goes to the engine with the result as context. Absent the flag: dfLocal is null.
       this.markTurnStage(context.requestId, 'memory') // u1: what the memory layer prepared for this turn is in (turn context, settled record state)
-      const dfLocal = ownTools && !bounded && ownFolder ? await this.decisionFirstTry({ cid, body, context, ownFolder }) : null
+      const dfLocal = ownTools && !bounded && (ownFolder || this.observeProvider()) ? await this.decisionFirstTry({ cid, body, context, ownFolder }) : null
       // c32: the person's reply is read for the ONE item it settles (or, without the flag or a verdict, for the waiting command as before); what it settled rides to the engine as closed words.
       // (L3 c32: the message that made code ask a question in this very call is not the reply to it: the registry was built in send(), before this call.)
       const openContext = await this.applyOpenItems(cid, body, context, dfLocal)
       this.markTurnStage(context.requestId, 'action') // u1: the command the person asked for and the open item their reply settles are settled
       const withOpen = openContext ? { ...(turnAdditionalContext || {}), ...openContext } : turnAdditionalContext
-      const dfContext = dfLocal?.context ? { ...(withOpen || {}), [COMMAND_RESULT_KEY]: { kind: 'application', value: dfLocal.context } } : withOpen
+      const dfContext = dfLocal?.context ? { ...(withOpen || {}), [dfLocal.contextKey ?? COMMAND_RESULT_KEY]: { kind: 'application', value: dfLocal.context } } : withOpen
       const engineShape = this.shapeEngineContext(dfContext)
       turnStartAttempted = context.turnStartAttempted = true
       if (!dfLocal?.finished) this.markTurnStage(context.requestId, 'engine') // u1: the engine speaks once, after the layers above
@@ -3219,8 +3220,10 @@ export class CodexChatRuntime {
       // may inherit this request's correlation; other turns remain unclaimed.
       // c34: the card of the command the code ran joins the buffered events of this turn (the buffer is applied next, in order)
       if (dfLocal?.surface) await this.surfaceLocalCommand(run, dfLocal).catch(() => {})
+      if (dfLocal?.observe) await this.surfaceObserve(run, dfLocal).catch(() => {}) // u5
       while (pending.buffer.length) await this.apply(pending.buffer.shift())
       if (dfLocal?.surface) this.annotateLocalCommand(run, dfLocal) // u1
+      if (dfLocal?.observe) this.annotateObserve(run, dfLocal) // u5
       if (TERMINAL.has(result.turn.status) && !TERMINAL.has(run.status)) await this.finish(run, safeTurn(result.turn, engine.id))
       if (dfLocal?.finished) void this.finishDecisionFirstTurn(run, dfLocal).catch(() => {}) // c32: the local turn ends here, no engine call
       return {
@@ -7150,9 +7153,14 @@ export class CodexChatRuntime {
       if (this.decisionEgressFor({ toolCeiling: context.toolCeiling ?? null }).allows('run_text') !== true) return { diag: diag('engine', 'egress_closed') }
       // c32: a pending approval (the ledger waits on the reply to the engine's own question): the reply is settled here, before anything else
       if (this.decisionFirstApprovalsOn() && this.gateHookBroker()?.awaitingReply(cid) && this.openItemRoute(context.requestId, 'approval') !== 'skip') return await this.decisionFirstReply({ cid, body, context, diag }) // c32: not when the open-item resolver found the message belongs to something else
-      const options = buildCommandOptions(ownFolder, { message: body.message })
+      const commandOptions = ownFolder ? buildCommandOptions(ownFolder, { message: body.message }) : []
+      // u5: read-only computer viewing joins the pick (closed candidates; none unless the computer provider exists). Reading or capturing one app also sends the names of the open apps to the app pick: only when that is allowed.
+      const appNamesOk = this.decisionEgressFor({ toolCeiling: context.toolCeiling ?? null }).allows('app_names') === true
+      const observe = observeOptions({ provider: this.observeProvider(), ceiling: context.toolCeiling ?? null, computerOff: this.computerControl.policy === 'off' }).filter(o => !o.needsApp || appNamesOk)
+      const options = [...commandOptions, ...observe]
       const pick = await decidePick({ client: setup.client, message: body.message, options })
       if (pick.status !== 'picked') return { diag: diag('engine', pick.reason, { confidence: pick.confidence ?? null, margin: pick.margin ?? null }) }
+      if (pick.option.kind === 'observe') return await this.observeFirstRun({ cid, body, context, option: pick.option, pick, diag })
       const option = pick.option, floor = classifyCommand(option.command, { cwd: ownFolder, home: process.env.HOME })
       const picked = { option: option.kind, confidence: pick.confidence, margin: pick.margin }
       if (floor.destructive || floor.floor.length) return { diag: diag('engine', 'approval_floor', picked) }
@@ -7180,6 +7188,40 @@ export class CodexChatRuntime {
     // value 'on' (c34): a command that ran (healthy or not) is followed by ONE engine round with the result as context, and its card is shown on that run
     if (ran && this.decisionFirstMode() === 'on') return { diag: diag('action', healthy ? 'healthy' : 'result_for_engine', picked), context: commandResultBlock(entry), preRun, entry, surface: true }
     return { diag: diag('engine', r.status === 'needs_person' ? 'needs_person' : 'result_for_engine', picked), context: commandResultBlock(entry), preRun, entry }
+  }
+
+  /** u5: the computer provider of EG-Desk's own observe tools (flag EGDESK_COMPUTER_OBSERVE), or null. */
+  observeProvider() { return this.toolProviders.find(provider => provider.providerId === COMPUTER_PROVIDER_ID) || null }
+
+  /**
+   * u5: the decision model picked a read-only computer action: the code runs it BEFORE the engine, on a stand-in run that has already ended (the provider's approval card needs the engine's run, which does not
+   * exist yet: on that run it answers "not asked yet" without ever opening a card, a locked screen and a missing app are answered first and as they are). The engine then speaks once with the result as context.
+   */
+  async observeFirstRun({ cid, body, context, option, pick, diag }) {
+    const provider = this.observeProvider(), setup = this.decisionContext
+    const turnId = `egdesk-local-${randomUUID()}`
+    const preRun = { conversationId: cid, runId: turnId, answerId: runKey(cid, turnId), clientThreadId: context.clientThreadId, ownTools: true, activities: [], status: 'interrupted', stopRequested: true, toolCeiling: context.toolCeiling ?? null }
+    const out = await runObserveOption({ provider, client: setup.client, message: body.message, option, run: preRun, callId: `df-${turnId}` })
+    const picked = { option: 'observe', confidence: pick.confidence ?? null, margin: pick.margin ?? null }
+    const reason = out.appStatus && out.appStatus !== 'picked' ? 'observe_no_app' : out.outcome === 'ok' ? 'observe_done' : 'observe_refused'
+    return { diag: diag('action', reason, picked), context: out.block, contextKey: OBSERVE_RESULT_KEY, observe: { tool: out.tool, outcome: out.outcome, calls: out.calls, callId: `df-${turnId}` } }
+  }
+
+  /** u5: the tool row of the look the code made, on the engine's run: the item notifications an own dynamic tool sends. */
+  async surfaceObserve(run, df) {
+    const o = df.observe, base = { threadId: run.conversationId, turnId: run.runId }
+    const item = { type: 'dynamicToolCall', id: `egdesk-obs:${o.callId}`, tool: o.tool, status: 'completed' }
+    await this.handleNotification({ method: 'item/started', params: { ...base, item: { ...item, status: 'inProgress' } } })
+    await this.handleNotification({ method: 'item/completed', params: { ...base, item: { ...item, status: o.outcome === 'ok' ? 'completed' : 'declined' } } })
+  }
+
+  /** u5: the row says that EG-Desk ran it, what the decision model judged and how it ended (closed words and numbers, detail only). */
+  annotateObserve(run, df) {
+    const o = df.observe
+    try {
+      const row = [...(run.activities ?? [])].reverse().find(a => a.kind === 'dynamicToolCall' && a.detail?.tool === o.tool)
+      if (row && df.diag) { const annotated = { ...row, detail: { ...row.detail, executedBy: 'egdesk', outcome: publicText(o.outcome, 64), decidedBy: { path: df.diag.path, reason: df.diag.reason, option: df.diag.option ?? null, confidence: df.diag.confidence ?? null } } }; this.put(run, 'activities', annotated); this.emit(run, 'activity.updated', annotated) }
+    } catch { /* the trace is advisory */ }
   }
 
   /** c34: the card of the command the code ran, on the engine's run: the same item notifications the engine's own command would send. */
