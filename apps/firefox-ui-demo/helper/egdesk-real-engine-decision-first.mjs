@@ -4,7 +4,7 @@
 //   path fast: the Decision model picked, EG-Desk's runner ran it, the arbiter read it healthy, the turn ended locally; engineTurns counts the turn/start requests the engine received in the turn's window.
 //   path engine: the engine runs as today; reason says why (none, below_threshold, unreachable, no_options, approval_floor, needs_person, result_for_engine, ...).
 export const DF_PATHS = Object.freeze(['fast', 'engine'])
-export const DF_REASONS = Object.freeze(['healthy', 'none', 'below_threshold', 'unreachable', 'no_options', 'approval_floor', 'no_executor', 'needs_person', 'result_for_engine', 'result_unreadable', 'decisions_off', 'egress_closed', 'error'])
+export const DF_REASONS = Object.freeze(['healthy', 'none', 'below_threshold', 'unreachable', 'no_options', 'approval_floor', 'no_executor', 'needs_person', 'result_for_engine', 'result_unreadable', 'decisions_off', 'egress_closed', 'error', 'approval_ran', 'approval_declined', 'approval_expired', 'approval_unclear', 'approval_unread'])
 export const DF_EXPECT_SCHEMA = Object.freeze({ type: 'object', additionalProperties: false, minProperties: 1, properties: { path: { enum: [...DF_PATHS] }, reason: { enum: [...DF_REASONS] }, engineTurns: { type: 'integer', minimum: 0, maximum: 5 }, maxDecisionMs: { type: 'integer', minimum: 1, maximum: 60000 } } })
 
 export function validateDecisionFirstExpect(value, conv, turn, where = '$.expect.decisionFirst') {

@@ -77,7 +77,7 @@ export function createOwnToolsWiring({ env = process.env, dataDir, spawn, getCha
     // c22: EGDESK_OWN_TOOLS_ENVIRONMENTS=none (developer flag, default unset) also starts the thread with environments: [] ("disables environment access" in the
     // 0.171 ThreadStartParams). A candidate for keeping the person's MCP servers and Codex's own exec environment away; not confirmed on a real binary.
     // c23: EG-Desk's own model and effort (EGDESK_CODEX_MODEL / EGDESK_CODEX_EFFORT) for threads that name none; the person's Codex config model is not used
-    ownTools: { mode: () => 'on', neutralFolder: () => prepareEngineFolder(dataDir), profile: () => selection, ...(env?.EGDESK_OWN_TOOLS_ENVIRONMENTS === 'none' ? { environments: () => 'none' } : {}), ...(['names', 'candidates'].includes(env?.EGDESK_OWN_TOOLS_PURE) ? { pureEngine: () => env.EGDESK_OWN_TOOLS_PURE } : {}), ...(env?.EGDESK_DECISION_FIRST === 'on' ? { decisionFirst: () => 'on' } : {}) },
+    ownTools: { mode: () => 'on', neutralFolder: () => prepareEngineFolder(dataDir), profile: () => selection, ...(env?.EGDESK_OWN_TOOLS_ENVIRONMENTS === 'none' ? { environments: () => 'none' } : {}), ...(['names', 'candidates'].includes(env?.EGDESK_OWN_TOOLS_PURE) ? { pureEngine: () => env.EGDESK_OWN_TOOLS_PURE } : {}), ...(env?.EGDESK_DECISION_FIRST === 'on' ? { decisionFirst: () => 'on' } : {}), ...(env?.EGDESK_DECISION_FIRST === 'on' && env?.EGDESK_DECISION_FIRST_APPROVALS === 'on' ? { decisionFirstApprovals: () => 'on' } : {}) },
     // the executor's judgement needs the command gate on (predicates through the run's egress) and the ledger for replies and turns
     terminalGate: base => ({ ...(base ?? { inspect }), mode: base?.mode ?? (() => 'on'), hookBroker: ledger }),
   }
