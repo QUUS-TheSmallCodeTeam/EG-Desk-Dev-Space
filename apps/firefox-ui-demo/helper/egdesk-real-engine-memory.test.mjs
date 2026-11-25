@@ -6,7 +6,6 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runFakeAppServer } from '../scripts/real-engine/fake-app-server.mjs'
@@ -557,10 +556,10 @@ test('prefetch-v1 through the check (fake engine): each -on conversation hands i
 })
 
 test('prefetch compare script: pairs the -off and -on records and prints the saving', async t => {
-  const { execFileSync } = await import('node:child_process')
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prefetch-compare-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const { compare } = await import('../scripts/egdesk-prefetch-compare.mjs')
   const rec = (id, ms, calls) => ({ set: 'real-engine-prefetch-v1', id, ok: true, turns: [{ posted: ['4,730만 원 입니다.'], contextKeys: ['egdesk_decision_context'], subTurns: [{ latencyMs: ms, toolCalls: Array.from({ length: calls }, () => ({ tool: 'egdesk_read_source' })), items: { agentMessage: 1 }, usage: { input: 13000 } }] }] })
-  for (const [id, ms, calls] of [['notes-off', 12400, 2], ['notes-on', 4600, 0], ['code-off', 11800, 2], ['code-on', 5000, 0], ['ledger-off', 13100, 3], ['ledger-on', 4900, 0]]) fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(rec(id, ms, calls)))
-  const out = execFileSync(process.execPath, [path.join(app, 'scripts/egdesk-prefetch-compare.mjs'), dir], { encoding: 'utf8' })
+  const records = []
+  for (const [id, ms, calls] of [['notes-off', 12400, 2], ['notes-on', 4600, 0], ['code-off', 11800, 2], ['code-on', 5000, 0], ['ledger-off', 13100, 3], ['ledger-on', 4900, 0]]) records.push(rec(id, ms, calls))
+  const out = compare(records).lines.join('\n')
   assert.match(out, /\| notes \| saving \| \| 2 calls \| 7\.8/); assert.match(out, /mean saving over 3 pairs: 7\.6 s per turn/); assert.match(out, /\| ledger \| off \| ok \| 3 \(egdesk_read_source/)
 })
