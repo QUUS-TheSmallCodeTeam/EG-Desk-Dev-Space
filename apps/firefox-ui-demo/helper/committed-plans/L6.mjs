@@ -11,5 +11,5 @@ export const PLANS_L6 = [
   { path: 'proofs/decision-real-measure/utterance-threshold', lane: 'L6', rebuilt: { script: 'egdesk-utterance-threshold-study.mjs' } },
   { path: 'proofs/decision-real-measure/working-memory-judge', lane: 'L6', rebuilt: { script: 'egdesk-working-memory-real-plan.mjs' } },
   // L6 c24: variants of the all-on journey plan, built from it by scripts/egdesk-journey-variants.mjs (its compare mode prints one "matches" per variant)
-  ...['V1', 'V2', 'V3'].map(id => ({ path: `scripts/egdesk-all-on-live-measure.plan-v11-variant-${id}.json`, lane: 'L6', rebuilt: { script: 'egdesk-journey-variants.mjs', matches: 3 } })),
+  ...['V1', 'V2', 'V3', 'V4'].map(id => ({ path: `scripts/egdesk-all-on-live-measure.plan-v11-variant-${id}.json`, lane: 'L6', rebuilt: { script: 'egdesk-journey-variants.mjs', matches: 4 } })), // c36: V4 = V2 with two wordings fixed (a new pre-registered draw)
 ]

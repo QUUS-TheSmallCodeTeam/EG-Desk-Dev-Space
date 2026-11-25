@@ -18,7 +18,7 @@ const planPath = id => path.join(here, variantPlanFile(id))
 const clone = v => JSON.parse(JSON.stringify(v))
 
 test('the variants are valid and pre-registered: every claim the module makes about them holds', () => {
-  assert.deepEqual(Object.keys(VARIANTS), ['V1', 'V2', 'V3'])
+  assert.deepEqual(Object.keys(VARIANTS), ['V1', 'V2', 'V3', 'V4'])
   for (const [id, variant] of Object.entries(VARIANTS)) {
     assert.equal(variant.id, id); assert.deepEqual(variantProblems(variant, context()), [], id)
     assert.deepEqual(Object.keys(variant.says).sort(), [...SAYS_KEYS].sort()); assert.deepEqual(Object.keys(variant.agent).sort(), [...AGENT_KEYS].sort())
@@ -34,15 +34,16 @@ test('each variant is a different input from the base and from the others: no pe
   for (const key of SAYS_KEYS) seen.set(`says.${key}`, [SAYS[key]])
   for (const key of AGENT_KEYS) seen.set(`agent.${key}`, [AGENT_SAYS[key]])
   for (const variant of Object.values(VARIANTS)) {
+    if (variant.id === 'V4') { seen.get('says.portal').push(variant.says.portal.text); seen.get('agent.tidy').push(variant.agent.tidy); continue } // c36: V4 = V2 but for these two (its own test below)
     for (const key of SAYS_KEYS) seen.get(`says.${key}`).push(variant.says[key].text)
     for (const key of AGENT_KEYS) seen.get(`agent.${key}`).push(variant.agent[key])
   }
   for (const [name, texts] of seen) assert.equal(new Set(texts).size, texts.length, `${name}: two runs share a text: ${texts.join(' | ')}`)
-  const kinds = Object.values(VARIANTS).map(v => new Set(Object.values(v.says).map(s => s.kind)))
+  const kinds = ['V1', 'V2', 'V3'].map(id => new Set(Object.values(VARIANTS[id].says).map(s => s.kind)))
   assert.ok(kinds[1].has('terse') && kinds[0].has('spoken') && kinds[2].has('formal'), 'the three registers are all there')
   for (const v of Object.values(VARIANTS)) assert.ok(Object.values(v.says).filter(s => s.kind === 'terse').length >= 1, `${v.id} has a terse turn`)
   // page ids and decoys are not shared either: each variant's graph differs from the base and from the others
-  const graphs = Object.values(VARIANTS).map(v => JSON.stringify(variantPages(GRAPH_PAGES, v).map(p => [p.id, p.title])))
+  const graphs = ['V1', 'V2', 'V3'].map(id => JSON.stringify(variantPages(GRAPH_PAGES, VARIANTS[id]).map(p => [p.id, p.title])))
   assert.equal(new Set([...graphs, JSON.stringify(GRAPH_PAGES.map(p => [p.id, p.title]))]).size, 4)
   for (const v of Object.values(VARIANTS)) assert.ok(variantPages(GRAPH_PAGES, v).length > GRAPH_PAGES.length, `${v.id} adds decoys`)
 })
@@ -53,7 +54,7 @@ test('the committed variant plan files are what the generator builds from the ba
     const plan = loadJourneyPlan(planPath(id))
     assert.equal(plan.variant.id, id); assert.deepEqual(plan.ceiling, VARIANTS[id].ceiling); assert.equal(plan.world.switches['action-relevance'].owner, 'L7', 'the switch is the base plan\'s')
   }
-  assert.deepEqual(buildAll().map(x => x.id), ['V1', 'V2', 'V3'])
+  assert.deepEqual(buildAll().map(x => x.id), ['V1', 'V2', 'V3', 'V4'])
 })
 
 test('every hard check of the base plan is in each variant plan under the same id, check, severity and owner; only page ids, the needles that name a page title and decoy exclusions differ', () => {
@@ -161,7 +162,7 @@ test('dry run of the base plan with the switch (the reference for the variants):
   assert.deepEqual(dry.base.scorecard.hard.failed, ['s4.no-page-for-the-action', 's13.not-resent'], 'the scripted double does not implement the action rule and over-selects pages (a real run does not)')
 })
 
-for (const id of ['V1', 'V2', 'V3']) {
+for (const id of ['V1', 'V2', 'V3', 'V4']) {
   test(`dry run of ${id}: the person says the variant's words, the steps run in the variant's order, every base hard check holds as in the base dry run, nearly every body is new`, async () => {
     const outcome = dry[id] = await dryRun(id), variant = VARIANTS[id]
     assert.equal(outcome.ledger.stopped, null)
@@ -189,7 +190,7 @@ for (const id of ['V1', 'V2', 'V3']) {
 
 test('the variants do not share request bodies with each other either, and the variant plan declares a ceiling its replay estimate fits (the V1 plan is the one meant to be sent)', () => {
   const sha = id => new Set(dry[id].steps.flatMap(s => (s.requests ?? []).map(q => q.sha256)))
-  for (const [a, b] of [['V1', 'V2'], ['V1', 'V3'], ['V2', 'V3']]) assert.ok([...sha(a)].filter(x => sha(b).has(x)).length <= 2, `${a} and ${b} share request bodies`)
+  for (const [a, b] of [['V1', 'V2'], ['V1', 'V3'], ['V2', 'V3'], ['V1', 'V4'], ['V3', 'V4']]) assert.ok([...sha(a)].filter(x => sha(b).has(x)).length <= 2, `${a} and ${b} share request bodies`)
   assert.deepEqual(VARIANTS.V1.ceiling, { tokenCeiling: 100_000, maxRequests: 82 }, 'c28: the ceiling Main approved for the V1 send (its dry run was 74 requests, 90,465 tokens: over the earlier 80,000 / 70)')
   // c28: every variant's SCRIPTED dry estimate fits the ceiling it declares (the scripted run over-selects pages, so it is above a real run: if it fits, a real send is not stopped by it). V1 was not sent because it did not.
   for (const [id, v] of Object.entries(VARIANTS)) {
@@ -221,4 +222,20 @@ test('step caps: a variant keeps the base plan\'s caps except where it is allowe
   assert.ok(realV1 + refused > 14_000, 'the base cap stopped it'); assert.ok(realV1 + secondCheck + 1000 <= VARIANT_STEP_CAPS['s3-briefing'].maxEstTokens)
   // a cap lower than the base is refused by the builder
   assert.throws(() => buildVariantPlan(baseRaw, baseBytes, 'NOPE'), /no variant/)
+})
+
+test('c36: V4 is V2 with exactly two wordings fixed (L2 c37): the portal request keeps "포털", the tidy answer is a natural fragment; V2 is untouched; V4 shares most request bodies with V2 and differs where the two words are read', () => {
+  const v2 = VARIANTS.V2, v4 = VARIANTS.V4
+  const changed = [...SAYS_KEYS.filter(k => v2.says[k].text !== v4.says[k].text).map(k => `says.${k}`), ...AGENT_KEYS.filter(k => v2.agent[k] !== v4.agent[k]).map(k => `agent.${k}`)]
+  assert.deepEqual(changed, ['says.portal', 'agent.tidy'], 'only the two artefacts differ')
+  assert.deepEqual([v4.says.portal.text, v4.says.portal.kind], ['포털 세금계산서 이번 달 거 받아줘', 'terse']); assert.match(v4.says.portal.text, /포털/); assert.doesNotMatch(v2.says.portal.text, /포털/, 'V2 as sent has no place word')
+  assert.equal(v4.agent.tidy, 'A사 견적은 11월 3일 요청 접수, 11월 6일 v1 발송, v2는 팀장 승인 후 발송 예정입니다.'); assert.doesNotMatch(v4.agent.tidy, /순서/); assert.match(v2.agent.tidy, /순서이고/)
+  assert.deepEqual(v4.pages, v2.pages); assert.equal(v4.order, v2.order); assert.deepEqual(v4.ceiling, v2.ceiling); assert.ok(v4.ceiling.tokenCeiling <= 90_000)
+  // the facts of the tidy answer are the base's (11월 3일 요청, 11월 6일 v1 발송, v2 팀장 승인 후 발송 예정)
+  for (const part of ['11월 3일', '요청', '11월 6일', 'v1 발송', 'v2', '팀장 승인 후 발송 예정']) assert.ok(v4.agent.tidy.includes(part), part)
+  // V2 as sent: the committed V2 plan file and its sha are unchanged by V4's existence
+  assert.equal(variantSha256('V2'), JSON.parse(readFileSync(planPath('V2'), 'utf8')).variantSha256); assert.notEqual(variantSha256('V4'), variantSha256('V2'))
+  assert.notEqual(readFileSync(planPath('V4'), 'utf8'), readFileSync(planPath('V2'), 'utf8'))
+  const sha = id => dry[id].steps.flatMap(s => (s.requests ?? []).map(q => q.sha256)), a = new Set(sha('V2')), b = sha('V4'), shared = b.filter(x => a.has(x)).length
+  assert.ok(shared >= b.length / 2 && shared < b.length, `V4 shares most bodies with V2 (${shared} of ${b.length}) and not all`)
 })

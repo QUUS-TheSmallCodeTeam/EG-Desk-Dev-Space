@@ -49,7 +49,7 @@ export const VARIANT_STEP_CAPS = Object.freeze({ 's3-briefing': Object.freeze({ 
 // one entry per renamed page (from: base id; id and title: the variant's; the title keeps the word the checks and the topics rely on:
 // A사 for the quote pages, PostgreSQL for the migration pages). pages.decoys: fixture pages added to the graph (never relevant to any step).
 // order: null (the base order) or the step order of the variant.
-export const VARIANTS = deepFreeze({
+const VARIANT_DEFS = {
   V1: {
     id: 'V1', ceiling: { tokenCeiling: 100_000, maxRequests: 82 }, intent: 'spoken rephrasing; another company\'s quote page as a decoy; four pages renamed',
     says: {
@@ -105,7 +105,18 @@ export const VARIANTS = deepFreeze({
       decoys: ['db/redis'] },
     order: ['s1-first-turn', 's2-follow-up', 's3-briefing', 's3b-recall', 's4-long-command', 's4n-nudge', 's4c-change-nudge', 's5-silence', 's6-answer', 's7-pointer-advisory', 's8-pointer-on', 's8b-finished-result',
       's9-status-remark', 's12-stop-nudge', 's13-withheld', 's14-after-withheld', 's10-browser-task', 's11-browser-reply'] },
-})
+}
+// c36 (L6): V4 = V2 with its TWO builder artefacts fixed, as a NEW pre-registered draw (V2 stays exactly as sent in c60: its plan file and sha are unchanged). L2's analysis of the V2 run (reports/l2-c37.md):
+//   - V2's portal wording "이번 달 세금계산서 받아줘" dropped the only cue that ties the message to the open page, "포털": the entry judge answered browser_entry .97 -> .08, no browser task started, and s10 and s11
+//     failed downstream (the scripted Agent posted its stuck sentence, so there was no question to ask or answer). V4: "포털 세금계산서 이번 달 거 받아줘" (still terse, the place is kept).
+//   - V2's scripted tidy answer "11월 6일 v1 발송 순서이고" is an unnatural fragment that claims an ORDER: the fill check read it .29 against a board that shows the v1 page's "11월 6일 … v1을 발송했다"
+//     (both fill turns, fallback to chat, s3.board failed). V4: "A사 견적은 11월 3일 요청 접수, 11월 6일 v1 발송, v2는 팀장 승인 후 발송 예정입니다." (terse, a natural fragment, the same facts and tenses).
+// Everything else of V2 (the other words, the other agent texts, the pages, the order, the ceiling) is V2's, by reference. Cost: V2's ceiling (90,000 tokens / 73 requests; the V2 run used 79,120 / 56).
+const V4 = {
+  ...VARIANT_DEFS.V2, id: 'V4', intent: 'V2 with its two builder artefacts fixed (the portal request keeps its place word, the tidy answer is a natural fragment); terse rephrasing; the parts list of the same product as a decoy; four pages renamed',
+  says: { ...VARIANT_DEFS.V2.says, portal: { text: '포털 세금계산서 이번 달 거 받아줘', kind: 'terse' } },
+  agent: { ...VARIANT_DEFS.V2.agent, tidy: 'A사 견적은 11월 3일 요청 접수, 11월 6일 v1 발송, v2는 팀장 승인 후 발송 예정입니다.' } }
+export const VARIANTS = deepFreeze({ ...VARIANT_DEFS, V4 })
 
 export const variantSha256 = id => sha256(JSON.stringify(VARIANTS[id]))
 
