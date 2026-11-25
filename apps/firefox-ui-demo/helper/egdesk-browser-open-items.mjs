@@ -69,7 +69,8 @@ const ASKS = {
   continue: (message, task) => `Does this message, ${quoted(compactText(message, 200))}, say that the person has done the step the paused browser task waits for, or give what it asked for (${asked(task?.question)})?`,
   retry: message => `Does this message, ${quoted(compactText(message, 200))}, ask to try the browser task again?`,
   abandon: message => `Does this message, ${quoted(compactText(message, 200))}, say the person no longer wants the browser task, or ask to stop it?`,
-  ask_page: message => `Does this message, ${quoted(compactText(message, 200))}, ask what the browser page shows or what the task has found so far, without asking to go on or to change the task?`,
+  // c39 (real, check-31bo, oi-unrelated): "고마워. 그런데 자바스크립트 배열 정렬은 어떻게 해?" read ask_page 1.0: any question matched a question about the page. The page is the anchor: a question about anything else is not it.
+  ask_page: message => `Is this message, ${quoted(compactText(message, 200))}, a question about the web page the browser task is on (what it shows, or what the task has found so far)? A question about anything else is not.`,
   change: (message, task) => `Does this message, ${quoted(compactText(message, 200))}, replace what the task was asked to do (a different target or request) instead of answering ${asked(task?.question)}?`,
 }
 
@@ -90,11 +91,15 @@ export function readOpenItem(answers, task, { thresholds, change = false } = {})
   const no = row => row.state === 'no' && row.probability <= 1 - bar
   const yes = read.filter(row => row.state === 'yes')
   if (yes.length === 1 && read.every(row => row === yes[0] || no(row))) return { kind: 'settled', optionId: yes[0].id, p }
+  // c39 (real, check-31bo, oi-continue): "했어" after a hand-over read continue 0.95 AND retry 0.89 (the person's step is done, so "try it again" is what they mean too), so nothing was applied
+  // and the person's own "I did it" went unanswered. Those two are not rivals: retry is continue that also forgets the step memory. When they are the ONLY yes and the rest are decided
+  // no, the weaker action is applied (continue: from where it stopped, nothing discarded). Any other pair stays uncertain.
+  if (yes.length === 2 && yes.every(row => row.id === 'continue' || row.id === 'retry') && read.every(row => yes.includes(row) || no(row))) return { kind: 'settled', optionId: 'continue', p, overlap: 'continue_retry' }
   if (!yes.length && read.length && read.every(no)) return { kind: 'none', p }
   return { kind: 'uncertain', p }
 }
 
-const EVIDENCE_RULES = 'A browser task of this conversation is open (waiting for the person, or stuck, or running). Decide what the user message means for that task.'
+const EVIDENCE_RULES = 'A browser task of this conversation is open (waiting for the person, or stuck, or running). Decide what the user message means for that task. A message about something else means nothing for the task: answer no to every question about it.'
 /** decideOpenItem({ message, task, ... }) -> readOpenItem result + usage + ms. One request, one predicate per option. Throws DecisionError. */
 export async function decideOpenItem({ message, task, change = false, client, thresholds, timeoutMs = FOREGROUND_DECISION_TIMEOUT_MS, signal, authorizeDispatch }) {
   const at = performance.now()
@@ -117,6 +122,20 @@ export function settledNote(task, optionId, { lines = [] } = {}) {
     stepsDone: task.steps, actions: { ...task.actions },
     next: optionId === 'ask_page' ? 'answer_user' : 'tell_user' }
   return JSON.stringify({ egdesk_browser_task: body })
+}
+
+/**
+ * readFromResolver(verdict, provider, conversationKey) -> a read for entry.handle({ openItemRead }) or null (decide on your own).
+ * c39 (the product with both flags on: EGDESK_OPEN_ITEMS and EGDESK_BROWSER_OPEN_ITEMS): the resolver (lane L1, egdesk-open-items.mjs) already asked, in the turn-start request, whether
+ * this message settles the browser task (oi_ref_n) AND the task's option predicates. The pre-turn entry must not ask again or decide differently:
+ *   settled to the browser task -> the provider's own read of the same answers (settled, none or uncertain: nothing is applied unless settled)
+ *   settled to another item, or no item referred, or several -> { kind: 'none' }: the message is not about this task (an ordinary turn, the task as it was)
+ *   the resolver did not decide (no verdict, unreachable, unanswered) -> null: the entry decides as it does with the resolver off
+ */
+export function readFromResolver(verdict, provider, conversationKey) {
+  if (!verdict || typeof verdict !== 'object') return null
+  if (verdict.status === 'settled') return verdict.item?.provider === 'browser' && typeof provider?.read === 'function' ? provider.read(verdict.answers ?? {}, conversationKey) : { kind: 'none', p: {} }
+  return ['no_item_referred', 'several_items'].includes(verdict.reason) ? { kind: 'none', p: {} } : null
 }
 
 /**

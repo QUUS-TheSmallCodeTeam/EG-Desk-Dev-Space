@@ -9,7 +9,8 @@
       },
       "flags": {
         "EGDESK_BROWSER_LOOP": "on",
-        "EGDESK_BROWSER_OPEN_ITEMS": "on"
+        "EGDESK_BROWSER_OPEN_ITEMS": "on",
+        "EGDESK_OPEN_ITEMS": "on"
       },
       "turns": [
         {
@@ -75,6 +76,7 @@
                 "2026-12-20"
               ],
               "noInventedDates": true,
+              "resolverSettled": true,
               "openItemSettled": "continue"
             }
           }
@@ -88,7 +90,8 @@
       },
       "flags": {
         "EGDESK_BROWSER_LOOP": "on",
-        "EGDESK_BROWSER_OPEN_ITEMS": "on"
+        "EGDESK_BROWSER_OPEN_ITEMS": "on",
+        "EGDESK_OPEN_ITEMS": "on"
       },
       "turns": [
         {
@@ -154,6 +157,7 @@
                 "2026-12-20"
               ],
               "noInventedDates": true,
+              "resolverSettled": true,
               "openItemSettled": "retry"
             }
           }
@@ -167,7 +171,8 @@
       },
       "flags": {
         "EGDESK_BROWSER_LOOP": "on",
-        "EGDESK_BROWSER_OPEN_ITEMS": "on"
+        "EGDESK_BROWSER_OPEN_ITEMS": "on",
+        "EGDESK_OPEN_ITEMS": "on"
       },
       "turns": [
         {
@@ -226,6 +231,7 @@
             "browserLoop": {
               "entered": true,
               "noActs": true,
+              "resolverSettled": true,
               "openItemSettled": "abandon",
               "noteSettled": "abandon",
               "noteStatus": "cancelled"
@@ -241,7 +247,8 @@
       },
       "flags": {
         "EGDESK_BROWSER_LOOP": "on",
-        "EGDESK_BROWSER_OPEN_ITEMS": "on"
+        "EGDESK_BROWSER_OPEN_ITEMS": "on",
+        "EGDESK_OPEN_ITEMS": "on"
       },
       "turns": [
         {
@@ -296,6 +303,7 @@
             "browserLoop": {
               "entered": true,
               "noActs": true,
+              "resolverSettled": true,
               "openItemSettled": "ask_page",
               "noteSettled": "ask_page",
               "noteStatus": "cannot_proceed",
@@ -318,7 +326,8 @@
       },
       "flags": {
         "EGDESK_BROWSER_LOOP": "on",
-        "EGDESK_BROWSER_OPEN_ITEMS": "on"
+        "EGDESK_BROWSER_OPEN_ITEMS": "on",
+        "EGDESK_OPEN_ITEMS": "on"
       },
       "turns": [
         {
@@ -375,6 +384,7 @@
             ],
             "browserLoop": {
               "openItemNone": true,
+              "resolverNotReferred": true,
               "noActs": true
             }
           }

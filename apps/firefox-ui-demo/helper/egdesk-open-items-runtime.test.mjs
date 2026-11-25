@@ -268,3 +268,19 @@ test('a provider that reads its own options (the browser task\'s shape): its rea
     }
   } finally { undo() }
 })
+
+test('c39: a browser task the pre-turn entry already settled (once) is not applied a second time by the resolver\'s apply; its state is the entry\'s', async () => {
+  const calls = []
+  const source = { id: 'browser', items: () => [], read: () => { calls.push('read'); return { kind: 'none' } }, apply: async () => { calls.push('apply'); return { handled: true, settled: 'continue' } } }
+  const x = await rig({ memoryMode: null, client: scripted(() => 0.02) })
+  const item = { id: 'oi1', provider: 'browser', itemId: 't1', kind: 'browser_task', source }
+  const row = (applied) => ({ items: [item], verdict: { status: 'settled', item, answers: {} }, record: { states: {} }, note: null, ...(applied ? { browserApplied: { settled: 'continue' } } : {}) })
+  x.chat.openItemVerdicts.set('r-applied', row(true)); x.chat.openItemVerdicts.set('r-fresh', row(false))
+  const body = { message: '했어', conversationId: 'dm-1' }
+  const text = async requestId => (await x.chat.applyOpenItems('dm-1', body, { requestId, clientThreadId: 'dm-1' }))?.[OPEN_ITEMS_KEY]?.value
+  assert.match(await text('r-applied'), /oi1 browser_task: settled by this message, state=continue/)
+  assert.deepEqual(calls, [], 'neither read nor apply ran again')
+  await text('r-fresh')
+  assert.deepEqual(calls, ['read'], 'without the pre-turn entry having applied it, the resolver reads and (not settled) applies nothing')
+  x.store.close()
+})
