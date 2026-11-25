@@ -1492,9 +1492,17 @@
     return ['활동 기록', approvals ? `승인 ${approvals}건` : '', questions ? `질문 ${questions}건` : '', blocked ? `막힘 ${blocked}건` : ''].filter(Boolean).join(' · ');
   }
 
+  const liveManualSendOwners = new Set(); // u2 (D1): the composer owners captureManualSendOwner handed out and not yet released
   // focus { conversationId, runId, activityId }: the row to bring into view (CU-01 computer-use line).
   function openCodexActivityPanel(threadId, focus = null) {
-    if (state.codex.activityThreadId !== threadId) state.codex.activityRoomGeneration = (state.codex.activityRoomGeneration || 0) + 1;
+    const generationBefore = state.codex.activityRoomGeneration || 0;
+    if (state.codex.activityThreadId !== threadId) state.codex.activityRoomGeneration = generationBefore + 1;
+    // u2 (D1): the bump (the Briefing reads it) is not the person leaving the room, and the conversation card is not drawn again for it: its composer kept the generation it was drawn with, and Send then
+    // failed its owner check without a word until the card was redrawn. The composer owners of the ACTIVE room that were current just before the bump are moved to the new generation; an owner that
+    // was already stale (the room was left and returned to) is not.
+    if (state.codex.activityRoomGeneration !== generationBefore && typeof liveManualSendOwners !== 'undefined' && state.codex.activeThreadId === threadId) {
+      for (const owner of liveManualSendOwners) if (owner.threadId === threadId && owner.roomGeneration === generationBefore) owner.roomGeneration = state.codex.activityRoomGeneration;
+    }
     state.codex.activityThreadId = threadId;
     state.codex.activityFocus = focus ? { threadId, conversationId: focus.conversationId || null, runId: focus.runId || null, activityId: focus.activityId || null } : null;
     renderCodexActivityPanel();
@@ -15117,6 +15125,16 @@
               choice.reset(); choice.sync();
               const boardSubmittedValue = input.value;
               if (!compositionInProgress && !boardInputState?.composing.size) void codexBridge.sendMessage({ manualOwner,
+                // u2 (D1): the existing blocked line says why nothing was sent. When only the room generation moved (the room was left and returned to; its binding and identity are unchanged) the owner
+                // is brought up to date, so the next press sends: the person has been told once, never stuck until the card is redrawn.
+                onBlocked: () => {
+                  blockedSend.textContent = '아직 보낼 수 없습니다.';
+                  try {
+                    const room = getActiveCodexThread(state.codex);
+                    if (manualOwner && typeof manualOwner === 'object' && state.codex.activeThreadId === manualOwner.threadId && room?.id === manualOwner.threadId
+                        && ChatState.clientThreadBinding(room) === manualOwner.binding && (typeof manualOwner.current !== 'function' || manualOwner.current())) manualOwner.roomGeneration = state.codex.activityRoomGeneration || 0;
+                  } catch { /* the line above is already shown */ }
+                },
                 ...(boardPreview && { boardPreviewKey: boardPreview.key, boardLiveDraftCurrent: () => !input.isConnected || input.value === boardSubmittedValue }) });
             };
             const sendButton = el('button', {
@@ -17461,9 +17479,11 @@
         const thread = getCodexThreadById(state.codex, threadId);
         if (!thread) return null;
         const watch = watchMemoRead(threadId, { ownerOnly: true });
-        return { threadId, binding: ChatState.clientThreadBinding(thread),
+        const owner = { threadId, binding: ChatState.clientThreadBinding(thread),
           roomGeneration: state.codex.activityRoomGeneration || 0,
-          current: watch.current, release: watch.release };
+          current: watch.current, release: () => { if (typeof liveManualSendOwners !== 'undefined') liveManualSendOwners.delete(owner); watch.release(); } };
+        if (typeof liveManualSendOwners !== 'undefined') liveManualSendOwners.add(owner);
+        return owner;
       },
       createProjectScope(threadId) {
         return createChatProjectScope(threadId, epochScope);
@@ -19356,12 +19376,14 @@
       async sendMessage(options = {}) {
         const activeThread = getActiveCodexThread(state.codex);
         const owner = options.manualOwner;
+        // u2 (D1): a send refused because the card's owner is stale (the room was left and returned to, its binding or account changed) no longer ends in silence: the card says so and takes a fresh owner
+        const ownerRefused = () => { try { options.onBlocked?.('stale-owner'); } catch { /* the refusal itself stands */ } };
         try {
           if (owner && (state.codex.activeThreadId !== owner.threadId || activeThread?.id !== owner.threadId
               || ChatState.clientThreadBinding(activeThread) !== owner.binding
               || (state.codex.activityRoomGeneration || 0) !== owner.roomGeneration
-              || typeof owner.current === 'function' && !owner.current())) return;
-        } catch { return; }
+              || typeof owner.current === 'function' && !owner.current())) { ownerRefused(); return; }
+        } catch { ownerRefused(); return; }
         const sendOwnerWatch = !options.memoAskReservation && activeThread ? watchMemoRead(activeThread.id, { ownerOnly: true }) : null;
         const editedDraftWatch = owner && !options.memoAskReservation && activeThread
           ? watchMemoRead(activeThread.id, { includeAccess: true }) : null;

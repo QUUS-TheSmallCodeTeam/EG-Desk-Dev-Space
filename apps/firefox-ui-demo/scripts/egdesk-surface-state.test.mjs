@@ -21875,6 +21875,17 @@ test('ordinary chat: a stale room-owned send cannot target a different room or r
   });
 });
 
+test('u2: a refused stale-owner send tells the card (onBlocked) and still sends nothing; a current owner does not call it', async t => {
+  const h = requestProjectSendHarness(), told = [];
+  const owner = { threadId: 'room', binding: 'original-wire-room', roomGeneration: 0 };
+  h.state.codex.activityRoomGeneration = 2; // the room was left and returned to
+  const before = structuredClone(h.state.codex.threads);
+  await h.send({ manualOwner: owner, onBlocked: reason => told.push(reason) });
+  assert.deepEqual(told, ['stale-owner']); assert.equal(h.calls.provider.length, 0); assert.deepEqual(h.state.codex.threads, before)
+  await h.send({ manualOwner: owner, onBlocked: () => { throw new Error('a throwing card must not break the refusal'); } }); assert.equal(h.calls.provider.length, 0)
+  await h.send({ manualOwner: { ...owner, threadId: 'other-room' }, onBlocked: reason => told.push(reason) }); assert.deepEqual(told, ['stale-owner', 'stale-owner'])
+});
+
 test('ordinary chat: stale owner without any reservation cannot send to another room, binding or observed return', async t => {
   for (const mode of ['other-room', 'replacement-binding', 'leave-and-return']) await t.test(mode, async () => {
     const h = requestProjectSendHarness(), focus = [];
