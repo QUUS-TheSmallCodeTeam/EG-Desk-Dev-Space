@@ -64,6 +64,8 @@ export function claudeHarnessFromEnv(env = {}) {
   return Object.freeze({ privateTurns: env?.EGDESK_CLAUDE_HARNESS_PRIVATE === 'on', disallowed: Object.freeze([...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_READ_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...CLAUDE_BUILTIN_FLOW_TOOLS, ...CLAUDE_BUILTIN_COMPUTER_USE_RULES, ...(env?.[CLAUDE_HARNESS_WEB_FLAG] === 'off' || env?.[EGDESK_PAGE_TOOLS_FLAG] === 'on' ? CLAUDE_BUILTIN_WEB_TOOLS : [])]) })
 }
 
+// u8 (D23): what you say between tool calls is posted to the person as it is, before the answer. Tool results carry EG-Desk's own markings (auto, approval, person, needs_person, status, via, why, codes) and tool names for YOU.
+export const COMMENTARY = 'Between tool calls, say what you are doing in one short plain sentence in the person\'s own language, as you would to a colleague (for example: "I\'ll type that into the search box."). Never say EG-Desk\'s internal markings or names to the person: not auto, approval, person, needs_person, status, via, why or any result code, and not a tool name (egdesk_*, mcp__*). Tell what happened or what is needed in everyday words.'
 const FIRST_SENTENCE = /^Your own shell and patch tools are off in this session[^\n]*\n?/
 /** Codex's own-tools block, said for Claude: its own shell and editor are off, EG-Desk's tools are the way. The rest of the block is the same words. */
 export function claudeHarnessInstructions(base) {
@@ -71,7 +73,7 @@ export function claudeHarnessInstructions(base) {
   const own = ['Your own shell, file-editing and file-reading tools (Bash, Edit, Write, MultiEdit, NotebookEdit, Read, Grep, Glob) are off in this session. The egdesk tools below reach you as mcp__egdesk__<name>; the names in this text are the part after the last double underscore.', rest, 'To list files by name, run a read-only command such as ls or find with egdesk_run_command.'].join('\n')
   const person = typeof base === 'string' && base.trim() ? base.trim() : ''
   const memory = 'EG-Desk, not you, keeps the person\'s memory and standing instructions: it holds them in a guidance record the person can apply or revert, and it carries what matters into your turns (a line from EG-Desk in a turn says where an instruction stands, when there is one). When the person asks you to remember something or to change how you answer (shorter, another tone), do it from this turn on. Do not say that you saved it to your own memory, and do not say that you cannot keep anything; do not add to or contradict the state EG-Desk gives you.'
-  return person ? `${person}\n\n${own}\n\n${memory}` : `${own}\n\n${memory}`
+  return person ? `${person}\n\n${own}\n\n${memory}\n\n${COMMENTARY}` : `${own}\n\n${memory}\n\n${COMMENTARY}`
 }
 
 /** The thread overrides of a Claude harness thread: instructions and the built-in tools to switch off. */

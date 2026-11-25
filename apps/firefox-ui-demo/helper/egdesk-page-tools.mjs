@@ -26,8 +26,10 @@ export const pageToolsEnabled = env => env?.[PAGE_TOOLS_FLAG] === 'on'
 export const PAGE_TOOL_NAMES = Object.freeze({ open: 'egdesk_card_open', read: 'egdesk_card_read', press: 'egdesk_card_press', type: 'egdesk_card_type' }) // model-facing, provisional
 export const PAGE_LIMITS = Object.freeze({ lines: 60, lineChars: 240, textChars: 8000, elements: 60, labelChars: 100, typeChars: 500, urlChars: 2000, observations: 16 })
 
+// u8 (D23): the markings of a page tool result are EG-Desk's own words; this note rides in the results that carry them so a commentary line before the answer never repeats them to the person.
+export const INTERNAL_NOTE = 'Not for the person: act, why, status, via and codes in this result are EG-Desk\'s own markings. Say what happened in everyday words.'
 export const PAGE_TOOL_SPECS = Object.freeze([
-  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.read, description: 'Read an EG-Desk Browser Card the person granted to this conversation: its title, address and visible lines. mode "structure" also lists its controls (ref, role, label) each marked auto (pressing or typing runs at once), approval (the person is asked first) or person (only the person does it on the page: sign-in, payment, permission, password). Read again after anything changes the page.',
+  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.read, description: 'Read an EG-Desk Browser Card the person granted to this conversation: its title, address and visible lines. mode "structure" also lists its controls (ref, role, label) each marked auto (pressing or typing runs at once), approval (the person is asked first) or person (only the person does it on the page: sign-in, payment, permission, password). Read again after anything changes the page. The marks and the result fields are for you: never say them to the person; describe what you do in everyday words.',
     inputSchema: { type: 'object', additionalProperties: false, properties: { cardId: { type: 'string', description: 'Omit when exactly one Card is granted.' }, mode: { type: 'string', enum: ['summary', 'structure'] } } } }),
   Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.press, description: 'Press one control of a Card the person granted for operation (their Browser card menu: Chat 조작 허용), by the ref from the last egdesk_card_read in structure mode. A same-site link, a read-only search button and a view tab run at once; a control that may change something asks the person first (give expectText: the text the page will show afterwards); sign-in, payment, permission and credentials are only the person\'s.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['ref'], properties: { cardId: { type: 'string' }, ref: { type: 'string' }, expectText: { type: 'string', description: 'Text expected on the page after the press; needed when the press may change something.' } } } }),
@@ -131,6 +133,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
         elements.push({ ref: element.ref, role: String(element.role ?? ''), label: short(element.label, L.labelChars), ...(element.href ? { href: pathOf(element.href) ?? undefined } : {}), ...(element.value ? { value: short(element.value, 60) } : {}), act: verdict.act })
       }
       body.elements = elements
+      body.forYouOnly = INTERNAL_NOTE
     }
     return respond(true, body)
   }
@@ -158,7 +161,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     const verdict = classify(snapshot, obs.options, element)
     const label = short(element.label, L.labelChars)
     if (verdict.act === 'disabled') return respond(true, { status: 'refused', code: 'PAGE_CONTROL_DISABLED' })
-    if (verdict.act === 'person') return respond(true, { status: 'person_step', cardId, label, why: verdict.why, written: false })
+    if (verdict.act === 'person') return respond(true, { status: 'person_step', cardId, label, why: verdict.why, written: false, forYouOnly: INTERNAL_NOTE })
     const base = { cardId, observationId: obs.observationId, expectedRevision: snapshot.revision }
     if (kind === 'type') {
       if (!isFieldElement(element)) return respond(true, { status: 'refused', code: 'PAGE_NOT_A_FIELD' })
@@ -192,7 +195,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
   function result(done, body, run, cardId) {
     last.delete(`${run?.runId ?? run?.answerId}/${cardId}`) // the page may have changed: the next action observes again
     if (!done.ok) return respond(true, { ...body, status: 'not_done', code: done.data?.error?.code ?? 'PAGE_ACTION_FAILED', ...(done.data?.error?.actionGate ? { actionGate: done.data.error.actionGate } : {}), next: 'read_again' })
-    return respond(true, { ...body, outcome: done.data?.status ?? null, next: 'read_again' })
+    return respond(true, { ...body, outcome: done.data?.status ?? null, next: 'read_again', forYouOnly: INTERNAL_NOTE })
   }
 
   async function open(run, event, args) {

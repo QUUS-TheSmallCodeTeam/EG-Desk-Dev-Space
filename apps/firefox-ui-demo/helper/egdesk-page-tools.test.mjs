@@ -58,6 +58,8 @@ test('read: title, address and visible lines of the granted Card; with structure
   const summary = await h.call(T.read, {})
   assert.deepEqual([summary.status, summary.cardId, summary.host, summary.path, summary.title, summary.lines, summary.elements], ['read', 'card', H, '/home', '쇼핑몰', ['쇼핑몰', '찾는 상품을 검색하세요.'], undefined])
   const structure = await h.call(T.read, { mode: 'structure' })
+  assert.match(structure.forYouOnly, /^Not for the person: act, why, status, via and codes/, 'u8: the markings carry a note that they are not for the person')
+  assert.equal((await h.call(T.read, {})).forYouOnly, undefined, 'a plain read has no markings and no note')
   const act = Object.fromEntries(structure.elements.map(e => [e.ref, e.act]))
   assert.deepEqual(act, { q: 'auto', go: 'auto', list: 'auto', pay: 'person', del: 'approval', fav: 'approval', pw: 'person', login: 'person', ext: 'approval', ai: 'approval' })
   assert.ok(h.events.some(([type]) => type === 'browser.tool.completed'), 'the Browser provider recorded the observation in the activity')
