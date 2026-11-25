@@ -10,6 +10,17 @@ registerTurnFields({ from: { schema: { enum: [...COLLAB_FROM] }, validate: (valu
   if (conv.flags?.EGDESK_PRESENCE !== 'on') bad(path, 'needs flags.EGDESK_PRESENCE = "on" in this conversation (the requester goes through the presence path)')
   if (turn.action !== undefined || turn.whileRunning !== undefined) bad(path, 'only a plain message turn has a sender')
 } } })
+// c30: a CONCURRENT run: another room's message (from the owner or the invited member) sent right after this turn's, on the same runtime, while this one works (the core sends it)
+registerTurnFields({ alongside: { schema: { type: 'object', additionalProperties: false, required: ['say'], properties: { say: { type: 'string', minLength: 1, maxLength: 4000 }, from: { enum: [...COLLAB_FROM] } } },
+  validate: (value, { conv, turn, path, bad }) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return bad(path, 'an object { say, from? }')
+    for (const k of Object.keys(value)) if (!['say', 'from'].includes(k)) bad(`${path}.${k}`, 'unknown key')
+    if (typeof value.say !== 'string' || !value.say.trim() || value.say.length > 4000) bad(`${path}.say`, 'a string of 1-4000 characters')
+    if (value.from !== undefined) for (const why of validateCollabFrom(value.from)) bad(`${path}.from`, why)
+    if (conv.flags?.EGDESK_PRESENCE !== 'on') bad(path, 'needs flags.EGDESK_PRESENCE = "on" in this conversation')
+    if (turn.action !== undefined || turn.whileRunning !== undefined || turn.approve?.length) bad(path, 'only a plain message turn without approvals has a concurrent run')
+    if (value.say === turn.say) bad(`${path}.say`, 'must differ from the turn\'s own say (each run quotes only its own request)')
+  } } })
 registerExpectKeys({ collab: { schema: COLLAB_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => {
   for (const why of validateCollabExpect(value)) bad(path, why)
   if (conv.flags?.EGDESK_PRESENCE !== 'on') bad(path, 'needs flags.EGDESK_PRESENCE = "on" in this conversation')
@@ -17,6 +28,8 @@ registerExpectKeys({ collab: { schema: COLLAB_EXPECT_SCHEMA, validate: (value, {
   if (restartTurn) { for (const k of Object.keys(value)) if (!COLLAB_RESTART_KEYS.includes(k)) bad(`${path}.${k}`, 'a restart turn takes only roomKept and receiptsClosed') }
   else {
     for (const k of COLLAB_RESTART_KEYS) if (value[k] !== undefined) bad(`${path}.${k}`, 'belongs to a restart turn')
+    if (value.twoRuns !== undefined && turn.alongside === undefined) bad(`${path}.twoRuns`, 'needs the turn\'s alongside (two runs at the same time)')
+    if (value.twoRuns !== undefined) for (const flag of ['EGDESK_WORK_PLACEMENT', 'EGDESK_CONVERSATION_FLOW']) if (conv.flags?.[flag] !== 'on') bad(`${path}.twoRuns`, `needs flags.${flag} = "on" in this conversation`)
     if (value.continuity !== undefined && prev?.action !== 'restart') bad(`${path}.continuity`, 'belongs to the message turn right after a restart')
     if (turn.whileRunning !== undefined || turn.action !== undefined) bad(path, 'not checked on a whileRunning or action turn')
   }

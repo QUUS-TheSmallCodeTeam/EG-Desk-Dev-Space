@@ -16,8 +16,10 @@
 //       and, from c27 (the hooks that need the live runtime, and may wait on it):
 //         flowOptions({ FLAG, conversation }) → keys added to the conversation flow's options (what the bridge adds to conversationFlow for a feature of its own)
 //         attach(deps)                  once, when the runtime is composed: deps = { chat, contexts, client, store, FLAG, conversation, fetchImpl, key, calibrationLog, requestLog }
-//         beforeSend(ctx)               async, before a scripted message turn is sent (ctx.turn, ctx.index; ctx.state() also names conversationId)
-//         afterTurn(ctx) → { record?, expectations? }   async, after the turn's answer is posted (ctx = { run, say, answer, turnIndex, expect, state }); merged like finishTurn
+//         beforeSend(ctx)               async, before a scripted message turn is sent (ctx.turn, ctx.index; ctx.state() also names conversationId); ctx.room is 'alongside' for the message
+//                                       of a concurrent run (c30: a turn's registered field `alongside` makes the core send another room's message while the turn works; ctx.state() then names THAT room)
+//         afterTurn(ctx) → { record?, expectations? }   async, after the turn's answer is posted (ctx = { run, say, answer, turnIndex, expect, state, alongside? }); merged like finishTurn;
+//                                       alongside = { run, clientThreadId, say, answer, status } of the concurrent run, when the turn has one
 //         dispose()                     when the conversation ends (errors are ignored: it only releases timers and the like)
 //       and, around a restart action (c29: the bridge and the engine stopped and started again between two turns; every hook is made anew, so memory of the old bridge is gone):
 //         beforeRestart(ctx) → carried  the old hook, just before the engine goes (ctx.state()); what it returns is handed to its successor

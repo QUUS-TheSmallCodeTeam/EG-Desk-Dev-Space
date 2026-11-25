@@ -13,7 +13,7 @@ import { BRIDGE_COMPOSITION, DECISION_DEPENDENT_FLAGS, DECISION_KEY_ENV, preflig
 import { APPROVER_TEXT, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { COLLAB_DECISION_FLAGS, COLLAB_FLAGS, COLLAB_PEOPLE, attentionScene, checkCollabExpect, createCollabTurnHook, createCollabWorld, identityLeak, presenceRows, validateCollabExpect } from './egdesk-real-engine-collab-hook.mjs'
 import { registeredDecisionFlags, registeredExpectKeys, registeredFlags, registeredTurnFields, registeredTurnHookNames } from './egdesk-real-engine-extensions.mjs'
-import { COLLAB_RESTART_SAYS, COLLAB_RESTART_SET, COLLAB_SAYS, COLLAB_SET, FORCE_PUSH, buildCollabRestartScript, buildCollabScript } from './egdesk-collab-real-engine-script.mjs'
+import { COLLAB_RESTART_SAYS, COLLAB_RESTART_SET, COLLAB_SAYS, COLLAB_SET, COLLAB_TWO_RUNS_SAYS, COLLAB_TWO_RUNS_SET, FORCE_PUSH, buildCollabRestartScript, buildCollabScript, buildCollabTwoRunsScript } from './egdesk-collab-real-engine-script.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
 const tmp = t => { const base = fs.realpathSync(createPrivateQaTempDirectory('egdesk-real-engine-collab-')); t.after(() => fs.rmSync(base, { recursive: true, force: true })); return base }
@@ -271,4 +271,62 @@ test('restart, the hook reads what the NEW runtime holds: its receipts, its appr
   assert.deepEqual(hook.afterRestart({ state, carried, expect: { collab: { receiptsClosed: true } } }).expectations.map(e => e.ok), [true])
   hook.dispose()
   const idle = createCollabTurnHook({ id: 'c' }); assert.equal(idle.beforeRestart({ state }), undefined, 'a hook that never attached (the flag is off) carries nothing'); assert.equal(idle.afterRestart({ state, carried: undefined }), null)
+})
+
+// ---- c30 (U7): two runs at the same time on one Desk ----
+const twoRunsFake = () => ({ turns: [
+  { match: COLLAB_TWO_RUNS_SAYS.invited, steps: [{ delayMs: 400 }], final: 'A사 견적서 v2의 납기는 2주입니다.' },
+  { match: COLLAB_TWO_RUNS_SAYS.owner, steps: [{ delayMs: 400 }], final: 'quotes 폴더에는 파일이 2개 있습니다.' },
+  { match: COLLAB_TWO_RUNS_SAYS.recap, steps: [], final: '납기와 파일 수를 물었습니다.' }],
+forkTurns: [{ steps: [], final: '확인했습니다.' }] })
+const turnsOf = w => w.wire().filter(m => m.dir === 'in' && m.method === 'turn/start').length
+
+test('two runs: the validator takes alongside only on a plain message turn, and twoRuns only with it; the committed script is the builder\'s', () => {
+  const script = (turn, flags = { EGDESK_PRESENCE: 'on', EGDESK_CONVERSATION_FLOW: 'on', EGDESK_WORK_PLACEMENT: 'on' }) => ({ set: 'real-engine-t-v1', conversations: [{ id: 'c', flags, turns: [turn] }] })
+  const errors = (turn, flags) => validateEngineScript(script(turn, flags)).errors.join('\n')
+  assert.equal(validateEngineScript(script({ say: 'a', alongside: { say: 'b', from: 'owner' }, expect: { collab: { twoRuns: true } } })).ok, true)
+  assert.match(errors({ say: 'a', alongside: { say: 'b' } }, { EGDESK_CONVERSATION_FLOW: 'on' }), /needs flags\.EGDESK_PRESENCE/); assert.match(errors({ say: 'a', alongside: { say: 'a' } }), /must differ/)
+  assert.match(errors({ say: 'a', alongside: { say: 'b' }, approve: ['yes'] }), /without approvals/); assert.match(errors({ say: 'a', alongside: { say: 'b', from: 'stranger' } }), /from|one of/); assert.match(errors({ say: 'a', alongside: { say: 'b', x: 1 } }), /unknown key/)
+  assert.match(errors({ say: 'a', expect: { collab: { twoRuns: true } } }), /needs the turn's alongside/); assert.match(errors({ say: 'a', alongside: { say: 'b' }, expect: { collab: { twoRuns: true } } }, { EGDESK_PRESENCE: 'on' }), /EGDESK_WORK_PLACEMENT/)
+  const committed = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'real-engine', 'scripts', `${COLLAB_TWO_RUNS_SET}.json`), 'utf8'))
+  assert.deepEqual(committed, JSON.parse(JSON.stringify(buildCollabTwoRunsScript()))); assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })
+})
+
+test('two runs, end to end on the fake engine: both runs work at once; each work area is placed apart, outside every view; nothing moves; each result goes to its own requester; each judgment is its own', async t => {
+  const w = world(t, twoRunsFake())
+  const rec = (await runCheck(w.options, asScripts(buildCollabTwoRunsScript()), w.deps)).records[0]
+  assert.equal(rec.aborted, null, rec.abortDetail)
+  for (const turn of rec.turns) assert.equal(turn.ok, true, `${turn.index}: ${JSON.stringify(turn.expectations.filter(e => !e.ok))}`)
+  const [one] = rec.turns, tr = one.collab.twoRuns
+  // really concurrent: the second run's turn/start was on the wire before the first run's turn completed
+  const wire = w.wire().filter(m => m.dir === 'in' && m.method === 'turn/start' || m.dir === 'out' && m.method === 'turn/completed').map(m => m.method)
+  assert.deepEqual(wire.slice(0, 4), ['turn/start', 'turn/start', 'turn/completed', 'turn/completed'], 'both turns started before either completed'); assert.deepEqual(one.alongside.status, 'completed')
+  assert.deepEqual(tr.people, { main: 'invited', side: 'owner' }); assert.equal(tr.runs.length, 2)
+  const [a, b] = tr.runs
+  for (const run of tr.runs) { assert.ok(run.spot); assert.equal(run.outsideViews, true, run.run); assert.equal(run.outsideCards, true, run.run) }
+  assert.equal(tr.overlap, false); assert.notDeepEqual(a.spot, b.spot)
+  assert.equal(tr.ownerBefore, tr.ownerAfter); assert.equal(tr.inputsUnchanged, true); assert.deepEqual(tr.moves, [])
+  // a requester who is WORKING (input a few seconds ago) is pointed to the result (nothing moves); the card moves next to a requester only when they are idle (the placement rules)
+  assert.deepEqual([a.attention.result.branch, a.attention.result.kind, a.attention.result.forMember === a.requester], ['requester', 'point', true], 'the invited member\'s result is for the invited member')
+  assert.deepEqual([b.attention.result.branch, b.attention.result.forMember === b.requester], ['requester', true]); assert.notEqual(a.requester, b.requester)
+  assert.equal(a.attention.otherRequesterTold, false); assert.equal(b.attention.otherRequesterTold, false)
+  assert.deepEqual([a.judgments.length, b.judgments.length, tr.judgments], [1, 1, 2]); assert.equal(a.judgments[0].quotesOwn, true); assert.equal(a.judgments[0].quotesOther, false); assert.equal(b.judgments[0].quotesOwn, true); assert.equal(b.judgments[0].quotesOther, false)
+  assert.equal(turnsOf(w) >= 3, true)
+})
+
+test('two runs, record level: each check fails on the record that breaks it', () => {
+  const run = (id, requester, patch = {}) => ({ run: id, requester, rule: 'requester_working', spot: { x: 0, y: 0, width: 10, height: 10 }, outsideViews: true, outsideCards: true,
+    attention: { submitted: 'queued', result: { status: 'decided', branch: 'requester', kind: 'point', forMember: requester }, otherRequesterTold: false }, judgments: [{ questions: ['owner_action'], quotesOwn: true, quotesOther: false, identityLeak: false }], ...patch })
+  const good = { from: 'invited', set: 'held', audience: { requester: COLLAB_PEOPLE.invited.member }, flowAudience: [], twoRuns: { runs: [run('run-main', 'M2'), run('run-side', 'M1')], overlap: false, ownerBefore: '{"v":1}', ownerAfter: '{"v":1}', inputsUnchanged: true, moves: [], judgments: 2 } }
+  const failing = patch => checkCollabExpect({ twoRuns: true }, { ...good, twoRuns: { ...good.twoRuns, ...patch } }).filter(c => !c.ok).map(c => c.check)
+  const runsWith = (i, patch) => ({ runs: good.twoRuns.runs.map((r, j) => (j === i ? { ...r, ...patch } : r)) })
+  assert.deepEqual(failing({}), [])
+  assert.deepEqual(failing(runsWith(1, { outsideViews: false })), ['collab.twoRuns.placed'], 'inside someone\'s view'); assert.deepEqual(failing(runsWith(0, { outsideCards: false })), ['collab.twoRuns.placed'], 'on another card')
+  assert.deepEqual(failing(runsWith(0, { spot: null })), ['collab.twoRuns.placed']); assert.deepEqual(failing({ overlap: true }), ['collab.twoRuns.separate'])
+  assert.deepEqual(failing({ ownerAfter: '{"v":2}' }), ['collab.twoRuns.stillness'], 'the owner\'s view or focus changed'); assert.deepEqual(failing({ inputsUnchanged: false }), ['collab.twoRuns.stillness']); assert.deepEqual(failing({ moves: [{ camera: 1 }] }), ['collab.twoRuns.stillness'])
+  assert.deepEqual(failing(runsWith(0, { attention: { ...good.twoRuns.runs[0].attention, result: { status: 'decided', branch: 'requester', kind: 'point', forMember: 'M1' } } })), ['collab.twoRuns.surfacing'], 'the other person told')
+  assert.deepEqual(failing(runsWith(1, { attention: { ...good.twoRuns.runs[1].attention, otherRequesterTold: true } })), ['collab.twoRuns.surfacing']); assert.deepEqual(failing(runsWith(1, { attention: { ...good.twoRuns.runs[1].attention, result: { status: 'unknown', branch: null, kind: null, forMember: null } } })), ['collab.twoRuns.surfacing'])
+  assert.deepEqual(failing(runsWith(0, { judgments: [{ questions: ['owner_action'], quotesOwn: true, quotesOther: true, identityLeak: false }] })), ['collab.twoRuns.judged'], 'a judgment that quotes the other run'); assert.deepEqual(failing(runsWith(1, { judgments: [] })), ['collab.twoRuns.judged']); assert.deepEqual(failing({ judgments: 1 }), ['collab.twoRuns.judged'])
+  assert.deepEqual(failing(runsWith(0, { judgments: [{ questions: ['owner_action'], quotesOwn: true, quotesOther: false, identityLeak: true }] })), ['collab.twoRuns.judged'])
+  assert.deepEqual(checkCollabExpect({ twoRuns: true }, { from: 'invited' }).filter(c => !c.ok).length, 5, 'no record of the two runs fails all five')
 })
