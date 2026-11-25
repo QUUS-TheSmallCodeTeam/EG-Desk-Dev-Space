@@ -6793,7 +6793,9 @@ export class CodexChatRuntime {
       const items = [...guard.items.values()]
       guard.items.clear(); guard.finalIds.clear(); guard.size = 0
       clearTimeout(guard.timer); guard.timer = null
-      for (const item of items) await this.applyItem(run, { ...item, phase: null }, true, true, true)
+      // u8: under the harness the narration is a work note (the existing activity row), not a bubble; outside it (an Agent room's Claude without the harness) it is posted as before
+      const note = this.claudeHarness() !== null
+      for (const item of items) await this.applyItem(run, { ...item, phase: note ? 'commentary' : null }, true, true, true)
     } catch { /* the narration is posted at the end instead */ }
   }
 
@@ -6820,7 +6822,9 @@ export class CodexChatRuntime {
     try {
       if (status === 'completed' && at >= 0 && items[at].text.trim()) {
         const generation = typeof setup?.settingsGeneration === 'function' ? setup.settingsGeneration() : null
-        const checked = await this.checkHeldDraft(run, items[at].text)
+        // u8: a hold under the harness needs no check; the check runs only when it is on and the Decision model is configured (as before the hold was decoupled from it)
+        const checkEnabled = this.draftCheckMode() === 'on' && ['advisory', 'on'].includes(setup?.mode?.()) && setup?.configured?.() === true
+        const checked = checkEnabled ? await this.checkHeldDraft(run, items[at].text) : null
         // The owner may have changed the mode or key meanwhile: then the check's result is not acted on.
         const current = this.draftCheckMode() === 'on' && ['advisory', 'on'].includes(setup?.mode?.()) && setup?.configured?.() === true &&
           (generation === null || typeof setup.settingsGeneration !== 'function' || setup.settingsGeneration() === generation)
@@ -6840,7 +6844,10 @@ export class CodexChatRuntime {
     items.forEach((item, i) => { item.text = texts[i] })
     // What the person is shown for this checked answer, as a word in the calibration record (the log keeps no text): written by the Agent, revised, only the certain part, or nothing.
     if (at >= 0) this.labelPosted(run, withheld ? 'withheld' : texts[at] === originalTexts[at] ? 'as_written' : this.draftOutcomes.get(run) === 'certain_part' ? 'certain_part' : 'revised')
-    for (let i = 0; i < items.length; i++) { if (withheld && i === at) continue; await this.applyItem(run, items[i], true, true, true) } // the withheld answer is not posted; the narration before it still is
+    // u8: under the harness the texts before the answer (text after text without a tool between) are work notes too; only the last message is posted as the answer
+    const notes = this.claudeHarness() !== null && this.runEngine(run) === 'claude' && at >= 0 && items.length > 1
+    if (notes) items.forEach((item, i) => { if (i !== at) guard.finalIds.delete(item.id) }) // a note is not a known final message any more
+    for (let i = 0; i < items.length; i++) { if (withheld && i === at) continue; await this.applyItem(run, notes && i !== at ? { ...items[i], phase: 'commentary' } : items[i], true, true, true) } // the withheld answer is not posted; the narration before it is a note
   }
 
   // The calibration entry of this run's draft check gets the word for what was posted. Never throws, never changes what is posted; no entry (no check ran) is no label.
@@ -8847,8 +8854,22 @@ export class CodexChatRuntime {
     return guard && (guard.kind !== 'draft' || guard.state === 'holding' || guard.state === 'checking') ? guard : null
   }
 
+  /**
+   * u8 (D23b, owner principle U8: no streaming, complete messages only, working indicator, intermediate talk filtered): a Claude conversation under EG-Desk's harness (EGDESK_CLAUDE_HARNESS) holds its
+   * texts until it is known which one is the answer: a text a tool call follows is a work note (an activity row of the existing form), never a bubble; the last text is the answer, held, checked when the draft
+   * check is on, and posted whole. A hold needs no draft check: with the check off the held answer is posted as written. Not a Board send, a stateless one, an unverified binding; Codex and a Claude thread
+   * outside the harness are as before.
+   */
+  claudeHarnessHold(body, context) {
+    try {
+      return context?.engine?.id === 'claude' && this.claudeHarness() !== null && !context.stateless && !context.board && body?.boardId == null && !context.topicAnswerGuard
+        && (context.channelKind == null || context.channelKind === 'direct')
+    } catch { return false }
+  }
+
   draftHoldEligible(body, context) {
     try {
+      if (this.claudeHarnessHold(body, context)) return true
       if (this.draftCheckMode() !== 'on') return false
       const setup = this.decisionContext, dc = setup?.draftCheck
       if (!setup?.client || !['advisory', 'on'].includes(setup.mode?.()) || setup.configured?.() !== true) return false
