@@ -32,3 +32,13 @@ for (const s of SITUATIONS) {
 CASES.push({ id: 'control-send-done', kind: 'done', request: SITUATIONS[0].done, answer: SITUATIONS[0].doneReply, closing: SITUATIONS[0].doneReply })
 CASES.push({ id: 'control-push-done', kind: 'done', request: SITUATIONS[1].done, answer: SITUATIONS[1].doneReply, closing: SITUATIONS[1].doneReply })
 
+
+// c39: the REAL phrasings of c59 (the engine's own closing lines in check-2b and check-31pr, and its two real "already done" answers), measured at 1.0/1.0/0/0 under the single-question wording of c37;
+// kept in the plan so the two-predicate wording is judged on them too. source: 'real'.
+const TODO_REQ = 'notes/todo.md 에서 완료된([x]) 항목을 지우려고 해. 파일은 아직 바꾸지 말고, 어떤 항목을 지울지만 먼저 알려 줘.'
+const TODO_LIST = '[notes/todo.md](notes/todo.md)에서 지울 항목은 2개입니다.\n\n- `[x] 견적서 보내기`\n- `[x] 폴더 정리`\n\n'
+CASES.push(
+  { id: 'real-todo-hold-2b', kind: 'hold', source: 'real', request: TODO_REQ, answer: `${TODO_LIST}파일은 변경하지 않았습니다.`, closing: '파일은 변경하지 않았습니다.' },
+  { id: 'real-todo-hold-31pr', kind: 'hold', source: 'real', request: TODO_REQ, answer: `${TODO_LIST}파일은 아직 수정하지 않았습니다.`, closing: '파일은 아직 수정하지 않았습니다.' },
+  { id: 'real-todo-done-2b', kind: 'done', source: 'real', request: 'ㅇㅇ', answer: '완료 항목 2개를 삭제했습니다. [notes/todo.md](notes/todo.md)에는 미완료 항목 `일정 확인`만 남았습니다.', closing: '완료 항목 2개를 삭제했습니다. [notes/todo.md](notes/todo.md)에는 미완료 항목 `일정 확인`만 남았습니다.' },
+  { id: 'real-todo-done-31pr', kind: 'done', source: 'real', request: 'ㅇㅇ', answer: '완료된 두 항목을 삭제했습니다. 미완료 항목인 `일정 확인`은 남겨 두었습니다.', closing: '완료된 두 항목을 삭제했습니다. 미완료 항목인 `일정 확인`은 남겨 두었습니다.' })
