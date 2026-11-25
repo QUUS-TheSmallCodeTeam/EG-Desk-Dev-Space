@@ -327,7 +327,7 @@ pub fn serve_client(
         Err(_) => return ExitReason::Io,
     };
     let writer = Arc::new(Mutex::new(writer));
-    if write_line(&writer, &protocol::hello_ok(config.pid, config.heartbeat_timeout.as_millis() as u64, elapsed_ms(start))).is_err() {
+    if write_line(&writer, &protocol::hello_ok_with(config.pid, config.heartbeat_timeout.as_millis() as u64, elapsed_ms(start), observer.content_enabled())).is_err() {
         return ExitReason::Io;
     }
 

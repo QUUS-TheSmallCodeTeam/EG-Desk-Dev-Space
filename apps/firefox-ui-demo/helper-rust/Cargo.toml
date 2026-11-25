@@ -20,11 +20,14 @@ libc = "0.2"
 # libs/cua-driver/rust (MIT) builds platform-macos with (its Cargo.lock):
 # objc2 0.5.2, objc2-foundation 0.2.2, objc2-app-kit 0.2.2, block2 0.5.1,
 # core-foundation 0.10.1, core-graphics 0.24.0. host-observe calls only
-# read-only APIs from these (src/host/macos.rs): no input, capture or
-# accessibility writes.
+# read-only APIs from these (src/host/macos.rs, macos_content.rs): no input
+# and no accessibility writes; window capture and the accessibility read run
+# only with --observe-content (B1).
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "=0.10.1"
 core-graphics = "=0.24.0"
+# CGImage::as_ptr for ImageIO (already in Cargo.lock through core-graphics)
+foreign-types = "=0.5.0"
 block2 = "=0.5.1"
 objc2 = "=0.5.2"
 objc2-foundation = { version = "=0.2.2", features = [

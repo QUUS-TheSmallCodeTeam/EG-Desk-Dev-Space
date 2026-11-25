@@ -24,11 +24,14 @@
 //!    After that one client the socket file is removed; heartbeat silence
 //!    (--heartbeat-timeout-ms), EOF or a protocol violation ends the run.
 
+pub mod observe;
 pub mod protocol;
 #[cfg(unix)]
 pub mod server;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod macos_content;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -70,6 +73,10 @@ pub struct HostObserveArgs {
     /// How often to re-check com.openai.sky.CUAService besides launch/terminate notifications.
     #[arg(long, default_value_t = 2_000)]
     pub service_poll_ms: u64,
+    /// B1: also answer capture (one window, sensitive fields masked) and
+    /// readElements (that window's accessibility tree). Off: observe_only.
+    #[arg(long, default_value_t = false)]
+    pub observe_content: bool,
 }
 
 impl HostObserveArgs {
@@ -306,6 +313,7 @@ mod tests {
             connect_timeout_ms: 10_000,
             heartbeat_timeout_ms: 5_000,
             service_poll_ms: 2_000,
+            observe_content: false,
         }
     }
 
