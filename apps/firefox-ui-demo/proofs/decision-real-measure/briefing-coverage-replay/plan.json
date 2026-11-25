@@ -1,0 +1,246 @@
+{
+  "set": "l4-briefing-coverage-replay",
+  "tokenCeiling": 15000,
+  "productBars": {
+    "combines": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "about_M#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "same_M#_M#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "happened_M#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "before_P#_P#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "slot_P#_r#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "step_P#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "onboard_F#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    },
+    "stated_F#": {
+      "yes": 0.7,
+      "no": 0.3,
+      "source": "egdesk-briefing-skeleton.mjs SKELETON_BARS { yes .7, no .3 }: isYes iff p >= .7 (acted on), isNo iff p <= .3 (decided no); between is undecided"
+    }
+  },
+  "passRule": "PASS when every hard check passes at the product bar: on the recorded board no fact is judged decided-not-shown (p > .3, the product acts only on a decided no); on the control board that shows every cell of every row the judge says yes (>= .7) for all six facts; on the control board without the 15:29 row it decides no (<= .3) for that entry. The yes >= .7 of the recorded board is soft (recorded).",
+  "requests": [
+    {
+      "id": "cov-compressed",
+      "file": "requests/cov-compressed.json",
+      "sha256": "e06dcf024223526897a63fa095daae0b93e9f9d4bb33fbe3a427ff8f8423acf7",
+      "estInputTokens": 2469,
+      "expect": [
+        {
+          "name": "onboard_F1",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the recorded board carries this entry's ids and figures: the product acts only on a decided no (p <= .3). Same bytes as layer-coverage; c59 saw F1 .95 F2 .53 F3 .69 F4 .67 F5 .93 F6 .58"
+        },
+        {
+          "name": "onboard_F1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full: the row's prose cells that are not on the board: 3"
+        },
+        {
+          "name": "onboard_F2",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the recorded board carries this entry's ids and figures: the product acts only on a decided no (p <= .3). Same bytes as layer-coverage; c59 saw F1 .95 F2 .53 F3 .69 F4 .67 F5 .93 F6 .58"
+        },
+        {
+          "name": "onboard_F2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full: the row's prose cells that are not on the board: 6"
+        },
+        {
+          "name": "onboard_F3",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the recorded board carries this entry's ids and figures: the product acts only on a decided no (p <= .3). Same bytes as layer-coverage; c59 saw F1 .95 F2 .53 F3 .69 F4 .67 F5 .93 F6 .58"
+        },
+        {
+          "name": "onboard_F3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full: the row's prose cells that are not on the board: 1"
+        },
+        {
+          "name": "onboard_F4",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the recorded board carries this entry's ids and figures: the product acts only on a decided no (p <= .3). Same bytes as layer-coverage; c59 saw F1 .95 F2 .53 F3 .69 F4 .67 F5 .93 F6 .58"
+        },
+        {
+          "name": "onboard_F4",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full: the row's prose cells that are not on the board: 3"
+        },
+        {
+          "name": "onboard_F5",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the recorded board carries this entry's ids and figures: the product acts only on a decided no (p <= .3). Same bytes as layer-coverage; c59 saw F1 .95 F2 .53 F3 .69 F4 .67 F5 .93 F6 .58"
+        },
+        {
+          "name": "onboard_F5",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full: the row's prose cells that are not on the board: 3"
+        },
+        {
+          "name": "onboard_F6",
+          "kind": "predicate",
+          "notDecidedNo": true,
+          "severity": "hard",
+          "note": "the recorded board carries this entry's ids and figures: the product acts only on a decided no (p <= .3). Same bytes as layer-coverage; c59 saw F1 .95 F2 .53 F3 .69 F4 .67 F5 .93 F6 .58"
+        },
+        {
+          "name": "onboard_F6",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "shown in full: the row's prose cells that are not on the board: 10"
+        }
+      ]
+    },
+    {
+      "id": "cov-full",
+      "file": "requests/cov-full.json",
+      "sha256": "9176effbf6d20834d0ce734a4734d48b8bfba591348b38c2c2b546655417e11e",
+      "estInputTokens": 2661,
+      "expect": [
+        {
+          "name": "onboard_F1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "control: the integration card shows every cell of the fact (the judge must see a fully shown row)"
+        },
+        {
+          "name": "onboard_F2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "control: the integration card shows every cell of the fact (the judge must see a fully shown row)"
+        },
+        {
+          "name": "onboard_F3",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "control: the integration card shows every cell of the fact (the judge must see a fully shown row)"
+        },
+        {
+          "name": "onboard_F4",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "control: the integration card shows every cell of the fact (the judge must see a fully shown row)"
+        },
+        {
+          "name": "onboard_F5",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "control: the integration card shows every cell of the fact (the judge must see a fully shown row)"
+        },
+        {
+          "name": "onboard_F6",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "hard",
+          "note": "control: the integration card shows every cell of the fact (the judge must see a fully shown row)"
+        }
+      ]
+    },
+    {
+      "id": "cov-absent",
+      "file": "requests/cov-absent.json",
+      "sha256": "cc2646071dbaf89c2d4debccfeea1070a2f4f7d860a6a19f5af75056fed58d94",
+      "estInputTokens": 2426,
+      "expect": [
+        {
+          "name": "onboard_F1",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the other rows are as recorded; recorded, not a pass condition"
+        },
+        {
+          "name": "onboard_F2",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the other rows are as recorded; recorded, not a pass condition"
+        },
+        {
+          "name": "onboard_F3",
+          "kind": "predicate",
+          "max": 0.3,
+          "severity": "hard",
+          "note": "control: the 15:29 row is not on the board (5930건 nowhere): a decided no is what starts the product's one re-design"
+        },
+        {
+          "name": "onboard_F4",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the other rows are as recorded; recorded, not a pass condition"
+        },
+        {
+          "name": "onboard_F5",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the other rows are as recorded; recorded, not a pass condition"
+        },
+        {
+          "name": "onboard_F6",
+          "kind": "predicate",
+          "min": 0.7,
+          "severity": "soft",
+          "note": "the other rows are as recorded; recorded, not a pass condition"
+        }
+      ]
+    }
+  ]
+}
