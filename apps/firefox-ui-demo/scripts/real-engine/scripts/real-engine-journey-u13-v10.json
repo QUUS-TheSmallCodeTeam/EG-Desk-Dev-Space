@@ -1,6 +1,6 @@
 {
   "set": "real-engine-journey-u13-v10",
-  "description": "Journey v10 for the real-engine check (L2 c32): the merged layer-first (U13) flags as -off / -on pairs for the timing measure (scripts/egdesk-real-engine-timing.mjs compare <off> <on> --normalize \"-off|-on\"). prefetch-notes and prefetch-code (L7, EGDESK_TURN_MEMORY_PREFETCH=files: the named file is in the engine's turn context, no tool round) and tests (L3/L5, EGDESK_DECISION_FIRST=on: the decision model picks the command, EG-Desk runs it, a healthy run ends without an engine turn). The lanes' own scenarios and expectations are kept; added: expect.timing bounds from measured numbers (layers before the engine starts at most 3,000 ms; prefetch-on at most one engine round; tests-on no engine turn and the whole turn within 8,000 ms, an estimate until the first real run). Not in yet (flags not merged): approvals fast (L3), L1 open items, L7 memory-first. Needs --decisions.",
+  "description": "Journey v10 for the real-engine check (L2 c32): the merged layer-first (U13) flags as -off / -on pairs for the timing measure (scripts/egdesk-real-engine-timing.mjs compare <off> <on> --normalize \"-off|-on\"). prefetch-notes and prefetch-code (L7, EGDESK_TURN_MEMORY_PREFETCH=files: the named file is in the engine's turn context, no tool round) and tests (L3/L5, EGDESK_DECISION_FIRST=on: the decision model picks the command, EG-Desk runs it, a healthy run ends without an engine turn). The lanes' own scenarios and expectations are kept; added: expect.timing bounds from measured numbers (layers before the engine starts at most 3,000 ms; the -on conversations at most one engine round; c36: tests-on is action first, the default value of EGDESK_DECISION_FIRST: the command runs in the action layer, then the engine talks once with the result). Not in yet (flags not merged): approvals fast (L3), L1 open items, L7 memory-first. Needs --decisions.",
   "conversations": [
     {
       "id": "prefetch-notes-off",
@@ -172,14 +172,14 @@
           "say": "테스트 돌려줘",
           "expect": {
             "turnStatus": "completed",
+            "noToolCalls": true,
+            "noNativeTools": true,
+            "posted": true,
             "decisionFirst": {
-              "path": "fast",
+              "path": "action",
               "reason": "healthy",
-              "engineTurns": 0,
+              "engineTurns": 1,
               "maxDecisionMs": 4000
-            },
-            "engine": {
-              "maxLatencyMs": 15000
             },
             "coding": {
               "changed": [],
@@ -191,8 +191,8 @@
               "nothingOutside": true
             },
             "timing": {
-              "engineStarted": false,
-              "answerMaxMs": 8000
+              "layersMaxMs": 3000,
+              "maxEngineRounds": 1
             }
           }
         }

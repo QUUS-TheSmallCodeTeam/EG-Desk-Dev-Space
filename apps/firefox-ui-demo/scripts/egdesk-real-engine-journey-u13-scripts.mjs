@@ -35,19 +35,19 @@ const loadSet = name => JSON.parse(fs.readFileSync(path.join(SCRIPTS_DIR, `${nam
 export function buildU13Script() {
   const prefetch = buildPrefetchScript().conversations
   const pick = id => { const c = prefetch.find(x => x.id === id); if (!c) throw new Error(`prefetch conversation ${id} is gone`); return c }
-  const df = loadSet('real-engine-decision-first-v1').conversations, dfOff = df.find(c => c.id === 'engine-path'), dfOn = df.find(c => c.id === 'decision-first')
-  if (!dfOff || !dfOn) throw new Error('the decision-first script changed: engine-path / decision-first are gone')
+  const df = loadSet('real-engine-decision-first-v1').conversations, dfOff = df.find(c => c.id === 'engine-path'), dfOn = df.find(c => c.id === 'action-first') // c36 (L5): the default value of EGDESK_DECISION_FIRST is action first (the engine talks once with the result); the card-only conversation is the proposal value
+  if (!dfOff || !dfOn) throw new Error('the decision-first script changed: engine-path / action-first are gone')
   const conversations = [
     withTiming({ ...pick('notes-off'), id: 'prefetch-notes-off' }, {}), withTiming({ ...pick('notes-on'), id: 'prefetch-notes-on' }, { maxEngineRounds: 1 }),
     withTiming({ ...pick('code-off'), id: 'prefetch-code-off' }, {}), withTiming({ ...pick('code-on'), id: 'prefetch-code-on' }, { maxEngineRounds: 1 }),
-    withTiming({ ...dfOff, id: 'tests-off' }, {}), withTiming({ ...dfOn, id: 'tests-on' }, { engineStarted: false, answerMaxMs: TESTS_ON_TURN_MS }, { layers: false }),
+    withTiming({ ...dfOff, id: 'tests-off' }, {}), withTiming({ ...dfOn, id: 'tests-on' }, { maxEngineRounds: 1 }),
   ]
   const script = { set: U13_SET, description: DESCRIPTION, conversations }
   const verdict = validateEngineScript(script)
   if (!verdict.ok) throw new Error(`${U13_SET}: ${verdict.errors.join('; ')}`)
   return script
 }
-const DESCRIPTION = 'Journey v10 for the real-engine check (L2 c32): the merged layer-first (U13) flags as -off / -on pairs for the timing measure (scripts/egdesk-real-engine-timing.mjs compare <off> <on> --normalize "-off|-on"). prefetch-notes and prefetch-code (L7, EGDESK_TURN_MEMORY_PREFETCH=files: the named file is in the engine\'s turn context, no tool round) and tests (L3/L5, EGDESK_DECISION_FIRST=on: the decision model picks the command, EG-Desk runs it, a healthy run ends without an engine turn). The lanes\' own scenarios and expectations are kept; added: expect.timing bounds from measured numbers (layers before the engine starts at most 3,000 ms; prefetch-on at most one engine round; tests-on no engine turn and the whole turn within 8,000 ms, an estimate until the first real run). Not in yet (flags not merged): approvals fast (L3), L1 open items, L7 memory-first. Needs --decisions.'
+const DESCRIPTION = 'Journey v10 for the real-engine check (L2 c32): the merged layer-first (U13) flags as -off / -on pairs for the timing measure (scripts/egdesk-real-engine-timing.mjs compare <off> <on> --normalize "-off|-on"). prefetch-notes and prefetch-code (L7, EGDESK_TURN_MEMORY_PREFETCH=files: the named file is in the engine\'s turn context, no tool round) and tests (L3/L5, EGDESK_DECISION_FIRST=on: the decision model picks the command, EG-Desk runs it, a healthy run ends without an engine turn). The lanes\' own scenarios and expectations are kept; added: expect.timing bounds from measured numbers (layers before the engine starts at most 3,000 ms; the -on conversations at most one engine round; c36: tests-on is action first, the default value of EGDESK_DECISION_FIRST: the command runs in the action layer, then the engine talks once with the result). Not in yet (flags not merged): approvals fast (L3), L1 open items, L7 memory-first. Needs --decisions.'
 export const scriptText = script => `${JSON.stringify(script, null, 2)}\n`
 
 export { PREFETCH_SCENARIOS }
