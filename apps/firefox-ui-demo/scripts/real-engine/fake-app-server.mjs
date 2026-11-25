@@ -12,6 +12,7 @@
 //     forkTurns?: [ … same … ],
 //     refuseEphemeralFork?: boolean (default false): thread/fork of a thread that was started ephemeral fails with -32600 "no rollout found for thread id …",
 //       exactly as the official 0.171 does (Main's smoke-5: also mid-turn and with lastTurnId; a persisted source forks fine). }
+//     silentPreamble?: true (c34, with silentTurns): a silent turn first sends what the real stall of check-29st sent (turn/started and the user message item events, within ms) and is silent after that.
 //     silentTurns?: integer (c33): the first N turn/start requests of ordinary threads are accepted (answered at once) and then nothing happens: no event, no run, until turn/interrupt (an engine that is silent after accepting).
 //     deleteFails?: boolean (thread/delete errors), deleteIgnored?: boolean (thread/delete answers ok but the thread stays resumable).
 //   A thread started or forked without ephemeral:true is PERSISTED: thread/resume finds it until thread/delete removes it; any other id fails with
@@ -188,7 +189,7 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
       result(id, 'turn/start', { turn: { id: turnId, items: [], status: 'inProgress' } })
       const state = { threadId: params.threadId, interrupted: false, steers: [], emit: null }
       running.set(turnId, state)
-      if (!thread.fork && !thread.internal && Number.isInteger(script.silentTurns) && (counters.silent ?? 0) < script.silentTurns) { counters.silent = (counters.silent ?? 0) + 1; state.silent = true; return }
+      if (!thread.fork && !thread.internal && Number.isInteger(script.silentTurns) && (counters.silent ?? 0) < script.silentTurns) { counters.silent = (counters.silent ?? 0) + 1; state.silent = true; if (script.silentPreamble === true) setImmediate(() => { const t = { id: turnId, items: [], status: 'inProgress' }, user = { type: 'userMessage', id: itemId(), content: [{ type: 'text', text: thread.lastText, text_elements: [] }] }; notify('turn/started', { threadId: params.threadId, turn: t }); notify('item/started', { threadId: params.threadId, turnId, startedAtMs: Date.now(), item: user }); notify('item/completed', { threadId: params.threadId, turnId, completedAtMs: Date.now(), item: user }) }); return }
       setImmediate(() => { runTurn(params.threadId, turnId, plan, state).catch(error => fail('turn run', [String(error?.message ?? error)])) })
     },
     'thread/unsubscribe': (id) => result(id, 'thread/unsubscribe', { status: 'unsubscribed' }),

@@ -946,6 +946,7 @@
                         "path": {
                           "enum": [
                             "fast",
+                            "action",
                             "engine"
                           ]
                         },
@@ -1096,6 +1097,11 @@
                       "minProperties": 1,
                       "properties": {
                         "maxFirstEventMs": {
+                          "maximum": 600000,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "maxFirstProgressMs": {
                           "maximum": 600000,
                           "minimum": 1,
                           "type": "integer"
