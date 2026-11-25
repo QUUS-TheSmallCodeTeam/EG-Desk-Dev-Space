@@ -7,6 +7,9 @@ import { CodexChatRuntime, TURN_MEMORY_CAPS } from './codex-chat-runtime.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
 import { NUNCHI_KEY, NUNCHI_CAPS, conversationGuidance, createNunchiConfig, dropConversationGuidance } from './egdesk-nunchi-runtime.mjs'
+import { RECORD_HINTS } from './egdesk-nunchi.mjs'
+import { claudeTurnContent } from './claude-engine-adapter.mjs'
+import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
 import { createUserGuidanceStore } from './egdesk-user-guidance.mjs'
 import { choiceAnswer, createFakeClock, deferred, until } from './egdesk-wiki-reconstruction.fixture.mjs'
 
@@ -52,7 +55,9 @@ async function world({ nunchi = true, readings = {}, hold = null, store = true, 
           w.requests.push({ turn: w.asked, kind: 'nunchi', message, text: JSON.stringify(req.input) })
           if (hold && message === hold.message) await hold.gate.promise
           const want = w.readings[message] ?? NONE, top = want.top ?? 0.95
-          return { answers: Object.fromEntries(req.questions.map(q => [q.name, choiceAnswer(q, want[q.name], top)])), model: 'syn', usage: { inputTokens: 1 }, latencyMs: 1 }
+          const dist = (q, d) => { const rows = q.choices.map(c => ({ value: c.value, probability: d[c.value] ?? 0 })).sort((a, b) => b.probability - a.probability), n = q.choices.length
+            return { type: 'choice', choice: rows[0].value, confidence: Math.max(0, (rows[0].probability - 1 / n) / (1 - 1 / n)), probabilities: rows } }
+          return { answers: Object.fromEntries(req.questions.map(q => [q.name, want.dist?.[q.name] ? dist(q, want.dist[q.name]) : choiceAnswer(q, want[q.name], top)])), model: 'syn', usage: { inputTokens: 1 }, latencyMs: 1 }
         }
         w.requests.push({ turn: w.asked, kind: 'other', names })
         const answers = {}
@@ -89,7 +94,7 @@ test('"야 한글로 보고해": read at the start of the turn, in the same turn
   const run = await w.ask('야 한글로 보고해')
   const asked = w.requests.filter(r => r.kind === 'nunchi')
   assert.deepEqual(asked.map(r => r.message), ['오늘 일정 알려줘', '야 한글로 보고해'], 'one request per user message'); assert.ok(asked[1].text.includes('The review meeting is on Tuesday'), 'with the assistant message before it'); assert.ok(asked[0].text.includes('There is no assistant message before the turn'))
-  assert.equal(guideOf(w.starts[1]), '[guidance from the person: follow it in your reply; do not mention it unless asked]\n- Reply in Korean for the rest of this conversation, as the person asked.')
+  assert.equal(guideOf(w.starts[1]), `[guidance from the person: follow it in your reply; do not mention it unless asked]\n- Reply in Korean for the rest of this conversation, as the person asked.\n- ${RECORD_HINTS.candidate}`, 'the line, and what EG-Desk did with it (kept as a candidate)')
   assert.equal(w.reply(), '네, 일정은 화요일입니다.', 'the (stand-in) engine\'s reply follows it, in the same turn')
   const receipt = w.chat.nunchiReceiptFor(run)
   assert.deepEqual([receipt.status, receipt.inTime, receipt.late, receipt.withPrevious, receipt.reading.kind, receipt.directive, receipt.candidate.status], ['ready', true, false, true, 'correction', { guidance: 'language', value: 'korean' }, 'candidate'])
@@ -107,6 +112,7 @@ test('another conversation does not get this conversation\'s line; the person ap
   await w.ask('Show me the schedule', 'dm-2'); assert.equal(guideOf(w.starts.at(-1)), '', 'the line belongs to its conversation'); assert.match(w.reply('dm-2'), /full schedule/)
   const [{ id }] = w.guidance.list(); assert.equal(w.guidance.setStatus(id, 'applied').entry.status, 'applied')
   await w.ask('And tomorrow?', 'dm-2'); assert.equal(guideOf(w.starts.at(-1)), '[guidance from the person: follow it in your reply; do not mention it unless asked]\n- Reply in Korean in every conversation, as the person asked.'); assert.equal(w.reply('dm-2'), '네, 일정은 화요일입니다.')
+  await w.ask('다시 한국어로 알려줘', 'dm-1'); assert.ok(guideOf(w.starts.at(-1)).includes(RECORD_HINTS.applied), 'applied: the hint says so, in the conversation it came from')
   w.guidance.setStatus(id, 'reverted'); await w.ask('And the day after?', 'dm-2'); assert.equal(guideOf(w.starts.at(-1)), '', 'reverted: gone'); assert.match(w.reply('dm-2'), /full schedule/)
   assert.deepEqual(conversationGuidance(w.chat, 'dm-1').map(g => g.guidance), ['language']); assert.equal(dropConversationGuidance(w.chat, 'dm-1', 'language'), true); assert.equal(dropConversationGuidance(w.chat, 'dm-1', 'language'), false)
   await w.ask('다음은?'); assert.equal(guideOf(w.starts.at(-1)), '', 'dropped'); w.close()
@@ -115,7 +121,7 @@ test('another conversation does not get this conversation\'s line; the person ap
 test('a second reaction adds its own line (short replies), the same kind of guidance replaces its earlier line, at most four lines', async () => {
   const w = await world({ readings: { '야 한글로 보고해': KOREAN, '너무 길어 짧게': SHORT, '영어로 다시': { ...KOREAN, nk_language: 'english' } } })
   await w.ask('일정?'); await w.ask('야 한글로 보고해'); await w.ask('너무 길어 짧게')
-  assert.equal(guideOf(w.starts[2]).split('\n').length, 3, 'header and two lines'); assert.equal(w.reply(), '네, 짧게.')
+  assert.equal(guideOf(w.starts[2]).split('\n').length, 4, 'header, two lines and the state of the record'); assert.equal(w.reply(), '네, 짧게.')
   await w.ask('영어로 다시'); const g = guideOf(w.starts[3]); assert.match(g, /Reply in English/); assert.ok(!/Reply in Korean/.test(g), 'one language line: the newer one'); assert.match(g, /Keep replies short/)
   assert.deepEqual(w.guidance.list().map(e => `${e.guidance}:${e.value}`).sort(), ['language:english', 'language:korean', 'length:less']); w.close()
 })
@@ -154,4 +160,61 @@ test('the flag in the bridge config is exactly "on"; the record opens only when 
   const make = flag => createNunchiConfig({ dataDir: '/nonexistent/x', flag: () => flag, open: () => { opened++; return { appliedLines: () => [] } } })
   assert.deepEqual(['on', 'ON', 'yes', '', undefined, 'advisory'].map(f => make(f).enabled()), [true, false, false, false, false, false]); assert.equal(opened, 0)
   const cfg = make('on'); void cfg.store; void cfg.store; assert.equal(opened, 1, 'opened once, lazily'); assert.equal(NUNCHI_KEY, 'egdesk_nunchi')
+})
+
+// the real answers of the control "야 한글로 보고해" (nunchi-eval-v1, 11-26): the single kind split between neighbours (correction .78 / instruction_change .14), the first reading's bar missed it
+const SPLIT_KOREAN = { dist: { nk_kind: { correction: 0.78, instruction_change: 0.14, praise: 0.01, complaint: 0.01, none: 0.06 }, nk_about: { language: 0.98, length: 0.02 }, nk_strength: { clear: 0.96, mild: 0.03, strong: 0.01 }, nk_direction: { not_applicable: 0.77, keep: 0.1, less: 0.13 }, nk_language: { korean: 0.98, none: 0.02 } } }
+const SPLIT_SHORT = { dist: { nk_kind: { complaint: 0.44, correction: 0.24, instruction_change: 0.2, urging: 0.11, praise: 0.01 }, nk_about: { length: 1 }, nk_strength: { clear: 0.99, mild: 0.01 }, nk_direction: { less: 1 }, nk_language: { none: 1 } } }
+
+test('u2: the reading that split between neighbouring kinds still guides the turn and leaves a candidate (the window of 02:51: "앞으로는 짧게 말해" left none)', async () => {
+  const w = await world({ readings: { '야 한글로 보고해': SPLIT_KOREAN, '너무 길어. 앞으로는 짧게 말해': SPLIT_SHORT } })
+  await w.ask('일정?'); const run = await w.ask('야 한글로 보고해')
+  assert.match(guideOf(w.starts[1]), /Reply in Korean/); const receipt = w.chat.nunchiReceiptFor(run)
+  assert.deepEqual([receipt.reading.kind, receipt.reading.change, receipt.reading.changeMass, receipt.reading.forceful, receipt.directive.guidance, receipt.candidate.status], [null, true, 0.93, true, 'language', 'candidate'])
+  await w.ask('너무 길어. 앞으로는 짧게 말해'); assert.match(guideOf(w.starts[2]), /Keep replies short/)
+  assert.deepEqual(w.guidance.list().map(e => `${e.guidance}:${e.value}`).sort(), ['language:korean', 'length:less']); assert.equal(w.guidance.list().every(e => e.status === 'candidate'), true)
+  w.close()
+})
+
+test('u2: the guidance record hint follows the state: candidate, then applied, nothing once reverted; it never claims more than is so', async () => {
+  const w = await world({ readings: { '야 한글로 보고해': SPLIT_KOREAN } })
+  await w.ask('일정?'); await w.ask('야 한글로 보고해'); assert.ok(guideOf(w.starts[1]).includes(RECORD_HINTS.candidate))
+  const [{ id }] = w.guidance.list(); w.guidance.setStatus(id, 'applied'); await w.ask('그리고?'); assert.ok(guideOf(w.starts.at(-1)).includes(RECORD_HINTS.applied)); assert.ok(!guideOf(w.starts.at(-1)).includes('as a candidate'))
+  w.guidance.setStatus(id, 'reverted'); await w.ask('그리고?'); assert.ok(!/guidance record/.test(guideOf(w.starts.at(-1))), 'reverted: no hint'); assert.match(guideOf(w.starts.at(-1)), /Reply in Korean for the rest of this conversation/, 'the conversation line stays')
+  w.close()
+  const lone = await world({ readings: { '야 한글로 보고해': SPLIT_KOREAN }, store: false }); await lone.ask('일정?'); await lone.ask('야 한글로 보고해')
+  assert.ok(!/guidance record/.test(guideOf(lone.starts[1])), 'no record, no claim that there is one'); lone.close()
+})
+
+// The Claude path (u2: the u1 procedure said "talk with Codex"): the entry is an additionalContext entry like every other EG-Desk context, and the Claude adapter puts each one in the turn as a text block
+function claudeWorld({ readings }) {
+  const calls = []; let threads = 0, turns = 0
+  const codex = createCodexEngineAdapter({ request: async () => { throw new Error('Claude must never use Codex') }, respond: () => {} })
+  const claude = { id: 'claude', describe: () => ({ id: 'claude', profiles: [{ id: 'claude-slot', active: true }] }), refresh: async () => ({}), capabilities: () => new Set(['stream', 'resume', 'dynamicTools']), ownerKey: () => OWNER, isReady: () => true,
+    async startThread(params) { calls.push({ method: 'thread/start', params }); return { thread: { id: `claude-${++threads}` }, cwd: params.cwd || '/legacy/claude' } },
+    async resumeThread(params) { return { thread: { id: params.threadId, turns: [] }, cwd: params.cwd } }, async releaseThread() { return { status: 'unsubscribed' } },
+    async startTurn(params) { calls.push({ method: 'turn/start', params }); return { turn: { id: `claude-turn-${++turns}`, status: 'completed', items: [] } } },
+    interruptTurn: async () => {}, respond: () => {}, subscribe: () => () => {}, dispose: async () => {} }
+  const seen = []
+  const chat = new CodexChatRuntime({ engines: [codex, claude], profiles, getOwnerKey: () => OWNER, resolveProjectWorkspace: async () => null, emit: () => {},
+    decisionContext: { mode: () => 'on', settingsGeneration: () => 0, configured: () => true, budgetMs: 5000, nunchi: { enabled: () => true, store: null },
+      client: { model: 'syn', async decide(req) { seen.push(req); const names = req.questions.map(q => q.name)
+        if (!names.includes('nk_kind')) return { answers: Object.fromEntries(req.questions.map(q => [q.name, q.type !== 'choice' ? { type: 'predicate', probability: 0.02 } : { type: 'choice', choice: q.choices[0].value, confidence: 0.9, probabilities: q.choices.map((c, i) => ({ value: c.value, probability: i === 0 ? 0.9 : 0.1 / (q.choices.length - 1) })) }])), model: 'syn', usage: { inputTokens: 1 }, latencyMs: 1 }
+        return { answers: Object.fromEntries(req.questions.map(q => [q.name, choiceAnswer(q, readings[q.name], 0.95)])), model: 'syn', usage: { inputTokens: 1 }, latencyMs: 1 } } },
+      collect: async () => [] } })
+  chat.setConnection('claude', true)
+  return { chat, calls, seen }
+}
+
+test('u2: on the Claude path the guidance entry reaches the engine\'s turn input: egdesk_nunchi is in the turn\'s additionalContext and the Claude adapter turns it into a text block before the person\'s message', async () => {
+  const w = claudeWorld({ readings: KOREAN })
+  await w.chat.send({ message: '야 한글로 보고해', engineId: 'claude', clientThreadId: 'room-1', requestId: 'r1', profileId: AGENT, replyDestination: 'direct' })
+  const start = w.calls.find(c => c.method === 'turn/start')
+  assert.ok(start, 'the turn started on Claude'); const entry = start.params.additionalContext?.[NUNCHI_KEY]
+  assert.match(entry?.value ?? '', /Reply in Korean for the rest of this conversation/)
+  const content = claudeTurnContent({ input: start.params.input, additionalContext: start.params.additionalContext })
+  const block = content.find(b => b.type === 'text' && b.text.startsWith('[EG-Desk context: egdesk_nunchi]'))
+  assert.ok(block && /Reply in Korean/.test(block.text), JSON.stringify(content).slice(0, 300)); assert.equal(content.at(-1).text, '야 한글로 보고해', 'the person\'s message stays last')
+  // the request the decision model got on this path had no assistant message before the turn (the gate is Codex-only), and still read the reaction
+  const asked = w.seen.find(r => r.questions.some(q => q.name === 'nk_kind')); assert.ok(JSON.stringify(asked.input).includes('There is no assistant message before the turn'))
 })

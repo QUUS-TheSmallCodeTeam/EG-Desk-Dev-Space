@@ -12,12 +12,22 @@ import { previousReplyExcerpt } from './egdesk-previous-reply.mjs'
 //      nk_language   the language the person asks for, where they name one: korean / english / japanese / chinese / other / none
 //    Five separate questions (decomposed, never one question mixing them), each a choice read at the product's bar: confidence (top - 1/N) / (1 - 1/N) >= .85 and a margin of .2
 //    (the speech axes' bar). An answer under the bar installs nothing: it reads as "no reading", never as a guess.
+//    u2 (real window, 11-26 02:51: "너무 길어. 앞으로는 짧게 말해" left no candidate): the reactions that ask the assistant to work differently (correction, instruction_change, complaint, urging)
+//    are NEIGHBOURS to the model: the same turn read correction .78 / instruction_change .14, a repeated-question complaint urging .68 / complaint .29, a "shorter please" complaint .44 /
+//    correction .24 / urging .11: the top option is under the bar although the model is sure the person asks for a change. Whether the turn asks for a change is therefore read from the MERGED
+//    options (an implicit yes/no): P(yes) = the probability of those four options together, installed when it is at least .85 (P(no) at least .85 reads "no change"); the same for how forceful
+//    the turn is (clear + strong together against mild). What the change is about, its direction and its language keep their own choice bar. The single kind (praise, short approval, none ...)
+//    keeps the choice bar as before. Validated on the recorded answers of nunchi-eval-v1 (reports/l7-u2.md).
 // 2. What is done with a reading (code, from a closed table; nothing the person wrote is copied, nothing free-form comes from the model):
 //      (a) conversation guidance: one short line for the engine for the rest of THIS conversation ("reply in Korean", "keep replies short", "do not repeat a confirmation question");
 //      (b) a durable candidate for the person's user guidance record (all conversations, source message by reference + time, reversible); a candidate is never applied by itself.
 // Off unless the bridge flag EGDESK_NUNCHI=on (default off). Judging happens at the start of a turn beside the memory loop, within the same cap; a late reading applies from the next turn.
 export const NUNCHI_KEY = 'egdesk_nunchi'
+// the reactions that ask the assistant to work differently (merged when the turn is read)
+export const ACTIONABLE_KINDS = Object.freeze(['correction', 'complaint', 'instruction_change', 'urging'])
 export const NUNCHI_BAR = Object.freeze({ confidence: 0.85, margin: 0.2 })
+// the merged readings (does the turn ask for a change; is it more than a passing remark): the probability of the merged options together
+export const NUNCHI_MASS = 0.85
 export const NUNCHI_LIMITS = Object.freeze({ messageChars: 600, previousChars: 600, conversationLines: 4, standingLines: 4, timeoutMs: 3000 })
 
 export const KINDS = Object.freeze({
@@ -79,13 +89,29 @@ export function nunchiRequest({ message, previousReply = null } = {}) {
 const read = (answers, name) => readChoice(answers, name, { minConfidence: NUNCHI_BAR.confidence, minMargin: NUNCHI_BAR.margin })
 const normalize = answers => (Array.isArray(answers) ? Object.fromEntries(answers.filter(a => a && typeof a.name === 'string').map(a => [a.name, a])) : answers ?? {})
 
-/** readNunchi(answers) -> { kind, about, strength, direction, language } with a value only where the answer is installed at the bar, else null. Pure. */
+/** The probability the answer gives to a set of options together (what the answer does not list counts as not in the set). null when it is not a choice answer. */
+const massOf = (answers, name, values) => {
+  const a = answers?.[name]
+  if (a?.type !== 'choice' || !Array.isArray(a.probabilities)) return null
+  return a.probabilities.reduce((n, row) => n + (values.includes(row?.value) && Number.isFinite(row.probability) ? row.probability : 0), 0)
+}
+const decided = mass => (mass === null ? null : mass >= NUNCHI_MASS ? true : 1 - mass >= NUNCHI_MASS ? false : null)
+
+/**
+ * readNunchi(answers) -> { kind, about, strength, direction, language, change, forceful, changeMass, forceMass }. Pure.
+ * kind, about, strength, direction, language: a value only where that choice is installed at the bar, else null.
+ * change: true / false / null: whether the turn asks the assistant to work differently, read from the merged options (correction, instruction_change, complaint, urging) at .85.
+ * forceful: true / false / null: clear or strong together against mild, at .85. changeMass, forceMass: the merged probabilities (numbers, for receipts and calibration).
+ */
 export function readNunchi(answers) {
   const a = normalize(answers), out = {}
   for (const [key, name, table] of [['kind', 'nk_kind', KINDS], ['about', 'nk_about', ABOUT], ['strength', 'nk_strength', STRENGTHS], ['direction', 'nk_direction', DIRECTIONS], ['language', 'nk_language', LANGUAGES]]) {
     const r = read(a, name)
     out[key] = r.state === 'accepted' && Object.hasOwn(table, r.value) ? r.value : null
   }
+  const change = massOf(a, 'nk_kind', ACTIONABLE_KINDS), force = massOf(a, 'nk_strength', ['clear', 'strong'])
+  out.change = decided(change); out.forceful = decided(force)
+  out.changeMass = change === null ? null : Number(change.toFixed(3)); out.forceMass = force === null ? null : Number(force.toFixed(3))
   return out
 }
 
@@ -94,7 +120,7 @@ export function readNunchi(answers) {
  * One stateless request. Never throws: a failed or cut request is a fallback with no reading.
  */
 export async function judgeNunchi({ message, previousReply = null, client, signal, timeoutMs = NUNCHI_LIMITS.timeoutMs } = {}) {
-  const none = { kind: null, about: null, strength: null, direction: null, language: null }
+  const none = { kind: null, about: null, strength: null, direction: null, language: null, change: null, forceful: null, changeMass: null, forceMass: null }
   const withPrevious = typeof previousReply === 'string' && previousReply.trim() !== ''
   if (!client || typeof message !== 'string' || !message.trim()) return { status: 'fallback', reason: 'not_configured', reading: none, withPrevious, usage: null }
   const { input, questions } = nunchiRequest({ message, previousReply })
@@ -104,9 +130,6 @@ export async function judgeNunchi({ message, previousReply = null, client, signa
 }
 
 // ---- the table: reading -> guidance (code; closed lines, nothing copied from the person) ----
-export const ACTIONABLE_KINDS = Object.freeze(['correction', 'complaint', 'instruction_change', 'urging'])
-// Durable candidates come from kinds that state a preference, not from a plain urge or a wrong fact.
-export const DURABLE_KINDS = Object.freeze(['correction', 'complaint', 'instruction_change'])
 const FORCE = Object.freeze(['clear', 'strong'])
 const lineOf = (guidance, value, scope) => {
   const tail = scope === 'durable' ? 'in every conversation' : 'for the rest of this conversation'
@@ -124,23 +147,26 @@ const lineOf = (guidance, value, scope) => {
 
 /**
  * directiveFor(reading) -> { line, guidance, value, durable: { guidance, value } | null } | null  (pure)
- * Nothing unless the kind is one that asks for a change (correction, complaint, instruction_change, urging), the reaction is clear or strong, and what it is about is named.
+ * Nothing unless the turn asks for a change (merged: correction, complaint, instruction_change, urging together), is clear or strong (merged), and what it is about is named.
  */
 export function directiveFor(reading) {
   const r = reading ?? {}
-  if (!ACTIONABLE_KINDS.includes(r.kind) || !FORCE.includes(r.strength) || !r.about || r.about === 'no_particular' || r.about === 'other') return null
+  // the turn asks for a change (merged options) and is more than a passing remark; a reading without the merged fields (an older shape) falls back to its single kind and strength
+  const change = r.change ?? ACTIONABLE_KINDS.includes(r.kind), forceful = r.forceful ?? FORCE.includes(r.strength)
+  if (change !== true || forceful !== true || !r.about || r.about === 'no_particular' || r.about === 'other') return null
   let guidance = null, value = null
   if (r.about === 'language') { guidance = 'language'; value = r.language && r.language !== 'none' ? r.language : null }
   else if (r.about === 'length') { if (r.direction !== 'less' && r.direction !== 'more') return null; guidance = 'length'; value = r.direction }
   else if (r.about === 'scope') { if (r.direction !== 'less' && r.direction !== 'more') return null; guidance = 'scope'; value = r.direction }
   else if (r.about === 'format') guidance = 'format'
   else if (r.about === 'repeated_question') guidance = 'repeated_question'
-  else if (r.about === 'speed') { if (r.kind !== 'urging' && r.kind !== 'complaint') return null; guidance = 'speed' }
-  else if (r.about === 'factual_error') { if (r.kind !== 'correction' && r.kind !== 'complaint') return null; guidance = 'factual_error' }
+  else if (r.about === 'speed') guidance = 'speed'
+  else if (r.about === 'factual_error') guidance = 'factual_error'
   if (!guidance) return null
   const line = lineOf(guidance, value, 'conversation')
   // A language that is not one of the four named ones has no durable value (the candidate would not say which language); speed and a wrong fact are about this moment only.
-  const durableOk = DURABLE_KINDS.includes(r.kind) && ['language', 'length', 'format', 'repeated_question', 'scope'].includes(guidance) && (guidance !== 'language' || (value !== null && Object.hasOwn(LANGUAGE_NAMES, value)))
+  // Whether the person wrote it as a correction, a complaint or an instruction does not matter here: what the change is about decides.
+  const durableOk = ['language', 'length', 'format', 'repeated_question', 'scope'].includes(guidance) && (guidance !== 'language' || (value !== null && Object.hasOwn(LANGUAGE_NAMES, value)))
   return { line, guidance, value, durable: durableOk ? { guidance, value } : null }
 }
 
@@ -148,13 +174,20 @@ export function directiveFor(reading) {
 export const standingLine = (guidance, value) => lineOf(guidance, value, 'durable')
 
 /**
- * nunchiContextText({ standing, conversation }) -> string | null: the entry for the engine (lines are closed text from the table above).
+ * nunchiContextText({ standing, conversation, record }) -> string | null: the entry for the engine (lines are closed text from the table above).
+ * record: 'candidate' | 'applied' | null: what the person's guidance record holds of this conversation's instruction (RECORD_HINTS), told as a state.
  * standing: lines of the person's applied user guidance (all conversations); conversation: lines this conversation's reactions produced.
  */
-export function nunchiContextText({ standing = [], conversation = [] } = {}) {
+export const RECORD_HINTS = Object.freeze({
+  candidate: 'EG-Desk has kept this instruction in the person\'s guidance record as a candidate: it applies in other conversations only once the person applies it. You do not have to remember it yourself; do not say that you cannot keep it.',
+  applied: 'EG-Desk has this instruction in the person\'s guidance record and applies it in every conversation; you do not have to remember it yourself.',
+})
+export function nunchiContextText({ standing = [], conversation = [], record = null } = {}) {
   const std = (Array.isArray(standing) ? standing : []).filter(l => typeof l === 'string' && l).slice(0, NUNCHI_LIMITS.standingLines)
   const conv = (Array.isArray(conversation) ? conversation : []).filter(l => typeof l === 'string' && l && !std.includes(l)).slice(-NUNCHI_LIMITS.conversationLines)
   if (!std.length && !conv.length) return null
+  // What EG-Desk did with the person's instruction, as a state (D4, real window 11-26: the engine said it could not save anything to memory): said only when it is so.
+  const hint = conv.length && Object.hasOwn(RECORD_HINTS, record ?? '') ? [RECORD_HINTS[record]] : []
   return ['[guidance from the person: follow it in your reply; do not mention it unless asked]',
-    ...std.map(l => `- ${l}`), ...conv.map(l => `- ${l}`)].join('\n')
+    ...std.map(l => `- ${l}`), ...conv.map(l => `- ${l}`), ...hint.map(l => `- ${l}`)].join('\n')
 }
