@@ -40,6 +40,16 @@ test('status: a candidate is applied or dismissed by the person, an applied one 
   const other = store.propose({ ...korean, guidance: 'length', value: 'less' }); assert.equal(store.setStatus(other.id, 'dismissed').entry.status, 'dismissed'); assert.equal(store.setStatus(other.id, 'candidate').entry.status, 'candidate')
 })
 
+test('two applied guidances of one kind that disagree: the one applied last is in effect, the other stays in the record', t => {
+  let clock = Date.parse('2026-11-26T01:30:00Z')
+  const store = createUserGuidanceStore({ dataDir: tmp(t), now: () => clock })
+  const less = store.propose({ ...korean, guidance: 'length', value: 'less' }), more = store.propose({ ...korean, guidance: 'length', value: 'more', sourceRef: 'chat-message:msg-bbb' })
+  store.setStatus(less.id, 'applied'); clock += 1000; store.setStatus(more.id, 'applied')
+  assert.deepEqual(store.appliedLines(), ['Give fuller replies with more detail in every conversation, as the person asked.'], 'the newer')
+  clock += 1000; store.setStatus(less.id, 'reverted'); store.setStatus(less.id, 'applied'); assert.deepEqual(store.appliedLines(), ['Keep replies short in every conversation, as the person asked.'], 'applied again last')
+  const lang = store.propose(korean); store.setStatus(lang.id, 'applied'); assert.equal(store.appliedLines().length, 2, 'one line per kind of guidance'); assert.equal(store.list({ status: 'applied' }).length, 3, 'all stay in the record')
+})
+
 test('the file: private (0600), atomic, reloaded by a new store, a broken file starts empty and never crashes, bounded', t => {
   const dir = tmp(t), a = createUserGuidanceStore({ dataDir: dir }), { id } = a.propose(korean); a.setStatus(id, 'applied')
   const file = path.join(dir, GUIDANCE_FILE); assert.equal(fs.statSync(file).mode & 0o777, 0o600); assert.deepEqual(fs.readdirSync(dir), [GUIDANCE_FILE], 'no temp file left')

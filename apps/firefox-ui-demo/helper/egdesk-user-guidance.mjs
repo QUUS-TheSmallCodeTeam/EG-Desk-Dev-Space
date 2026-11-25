@@ -80,8 +80,17 @@ export function createUserGuidanceStore({ dataDir, now = Date.now, log = () => {
       try { save() } catch (error) { log(`user guidance not saved: ${error?.code ?? 'error'}`); return { ok: false, reason: 'not_saved' } }
       return { ok: true, entry: clean(e) }
     },
-    /** appliedLines() -> the closed lines of the guidance the person applied (what every conversation tells the engine). */
-    appliedLines() { return load().filter(e => e.status === 'applied').map(e => standingLine(e.guidance, e.value)).filter(Boolean) },
+    /** appliedLines() -> the closed lines of the guidance the person applied (what every conversation tells the engine), one per kind of guidance. */
+    // One line per kind of guidance: where the person applied two that disagree (shorter and fuller replies, two languages), the one applied last is the one in effect.
+    appliedLines() {
+      const latest = new Map()
+      for (const e of load().filter(x => x.status === 'applied')) {
+        const at = Date.parse([...e.history].reverse().find(h => h.status === 'applied')?.at ?? e.createdAt)
+        const kept = latest.get(e.guidance)
+        if (!kept || at >= kept.at) latest.set(e.guidance, { at, e })
+      }
+      return [...latest.values()].map(({ e }) => standingLine(e.guidance, e.value)).filter(Boolean)
+    },
     size() { return load().length },
   })
 }
