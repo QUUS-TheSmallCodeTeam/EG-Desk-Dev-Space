@@ -7,8 +7,8 @@
 //      exact command in the conversation (the gate ledger). Nothing here re-implements them.
 //   2. Claude Code's built-in tools that do the same work are switched off with `--disallowedTools` (Bash, Edit, Write, MultiEdit, NotebookEdit; and the ones that run commands or reach outside the
 //      conversation through another door: Monitor, Workflow, worktrees, messages, notifications, remote triggers, scheduled runs): a command or a file change can only go through
-//      EG-Desk's tools. The Claude Code binary is not touched (flags, MCP and settings only). WebFetch and WebSearch stay as they are unless EGDESK_CLAUDE_HARNESS_WEB=off adds them (the Browser
-//      lane decides what replaces them: nothing here guesses).
+//      EG-Desk's tools. The Claude Code binary is not touched (flags, MCP and settings only). WebFetch and WebSearch stay as they are unless EG-Desk's browser tools are on (EGDESK_PAGE_TOOLS=on: the cards
+//      are then the way to read and drive a page) or EGDESK_CLAUDE_HARNESS_WEB=off says so.
 //   3. The thread runs in EG-Desk's empty engine folder, like Codex's own-tools thread; the person's real folder is known to EG-Desk's tools only.
 //   4. EG-Desk's developer instructions tell the model its own shell and editor are off and how to read a tool result that needs the person.
 // Pure: no I/O.
@@ -16,6 +16,8 @@ import { OWN_TOOLS_INSTRUCTIONS } from './egdesk-own-tools-isolation.mjs'
 
 export const CLAUDE_HARNESS_FLAG = 'EGDESK_CLAUDE_HARNESS'
 export const CLAUDE_HARNESS_WEB_FLAG = 'EGDESK_CLAUDE_HARNESS_WEB'
+/** The Browser lane's flag (u1: EG-Desk's card tools egdesk_card_read / _press / _type / _open): when they are on, the built-in web tools are off, so a page is read and driven only through EG-Desk's cards. */
+export const EGDESK_PAGE_TOOLS_FLAG = 'EGDESK_PAGE_TOOLS'
 /** EGDESK_CLAUDE_HARNESS_PRIVATE=on (default off): the runtime's private turns (draft revision, heartbeat writer, briefing fill) also run on Claude, on a fresh thread with no tools at all. Each costs a real Claude turn and leaves a CLI session file. */
 export const CLAUDE_HARNESS_PRIVATE_FLAG = 'EGDESK_CLAUDE_HARNESS_PRIVATE'
 /** The built-in Claude Code tools that run commands or change files: what EG-Desk's own tools replace. */
@@ -41,7 +43,7 @@ export const CLAUDE_HARNESS_ACTIVITY = 'egdesk-tool'
 /** → { disallowed: [...] } or null (off). Anything but 'on' is off. */
 export function claudeHarnessFromEnv(env = {}) {
   if (env?.[CLAUDE_HARNESS_FLAG] !== 'on') return null
-  return Object.freeze({ privateTurns: env?.EGDESK_CLAUDE_HARNESS_PRIVATE === 'on', disallowed: Object.freeze([...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...CLAUDE_BUILTIN_COMPUTER_USE_RULES, ...(env?.[CLAUDE_HARNESS_WEB_FLAG] === 'off' ? CLAUDE_BUILTIN_WEB_TOOLS : [])]) })
+  return Object.freeze({ privateTurns: env?.EGDESK_CLAUDE_HARNESS_PRIVATE === 'on', disallowed: Object.freeze([...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...CLAUDE_BUILTIN_COMPUTER_USE_RULES, ...(env?.[CLAUDE_HARNESS_WEB_FLAG] === 'off' || env?.[EGDESK_PAGE_TOOLS_FLAG] === 'on' ? CLAUDE_BUILTIN_WEB_TOOLS : [])]) })
 }
 
 const FIRST_SENTENCE = /^Your own shell and patch tools are off in this session[^\n]*\n?/
