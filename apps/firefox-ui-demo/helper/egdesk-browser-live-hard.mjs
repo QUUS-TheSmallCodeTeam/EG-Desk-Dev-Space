@@ -44,4 +44,12 @@ const PENSION = Object.freeze({
   '/dash/apply': { text: ['신청'], elements: tabs },
 })
 export const HARD_PAGES = Object.freeze({ library: LIBRARY, ticket: TICKET, room: ROOM, queue: QUEUE, pension: PENSION })
+// c37 (open items): what the page shows AFTER the person did their own step (the hand-over's step), merged over the site's pages by the check's hook.
+//   ticket_signed_in: the person signed in on the wall; the bookings list now shows one booking with a detail page (the next step of the loop)
+export const HARD_PERSON_STEPS = Object.freeze({
+  ticket_signed_in: Object.freeze({
+    '/my/bookings': { text: ['내 공연 내역 1건'], elements: [el('tk_b1', 'link', '12월 20일 별빛 콘서트 상세', { href: `${T}/my/bookings/9001` }), el('tk_guide', 'link', '이용 안내', { href: `${T}/guide` })] },
+    '/my/bookings/9001': { text: ['별빛 콘서트', '공연일: 2026-12-20', '좌석: B구역 12열'], elements: [el('tk_back', 'link', '목록', { href: `${T}/my/bookings` })] },
+  }),
+})
 export const HARD_VIEW_REFS = Object.freeze(['pn_t1', 'pn_t2', 'pn_t3'])
