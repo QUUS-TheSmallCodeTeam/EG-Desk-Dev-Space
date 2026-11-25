@@ -24,12 +24,14 @@ export function judgeProposals(expect, items) {
 
 // afterTurn (async, after the answer is posted) is the member that may wait on the live runtime; finishTurn is synchronous and its result is read at once. c36: this hook was first
 // written as an async finishTurn, so its record and its expectations were a Promise nobody read and a declared expect.proposals was never judged (check-31pr passed without it).
-export function createProposalsHook() {
+export function createProposalsHook(conversation = null) {
   let chat = null
+  const on = conversation?.flags?.EGDESK_PROPOSAL_REGISTRY === 'on'
   return {
     attach: deps => { chat = deps.chat ?? null },
     async afterTurn(ctx) {
       const want = ctx.expect?.proposals, cid = ctx.state?.().conversationId
+      if (!on && !want) return null // a conversation without the registry says nothing
       if (!chat || !cid) return want ? { record: null, expectations: [{ check: 'proposals.evaluated', ok: false, detail: { why: !chat ? 'no runtime attached' : 'no conversation' } }] } : null
       await chat.proposalRegistryIdle?.()
       const items = (chat.openItemsFor?.(cid) ?? []).filter(i => i.provider === 'proposals')

@@ -37,6 +37,11 @@ test('through the dispatcher: an expectation that cannot be evaluated (no runtim
   const quiet = await turn({}, fakeChat([item('proposal')])); assert.deepEqual([quiet.expectations, quiet.records.proposals.items.length], [[], 1])
 })
 
+test('a conversation without the registry flag and without a proposals expectation gets no record and no expectation from the hook', async () => {
+  const hooks = createTurnHooks({ id: 'conv-off', flags: {} }); hooks.attach({ chat: fakeChat([item('proposal')]) })
+  assert.deepEqual(await hooks.afterTurn({ state, expect: {} }), { records: {}, expectations: [] })
+})
+
 test('the dispatcher refuses a finishTurn that returns a Promise (its result would never be read)', () => {
   registerTurnHooks('asyncProbe', () => ({ finishTurn: async () => ({ record: { x: 1 }, expectations: [{ check: 'x', ok: true }] }) }))
   assert.throws(() => createTurnHooks({ id: 'conv-async' }).finishTurn({ state, expect: {} }), /asyncProbe.*finishTurn is synchronous.*use afterTurn/)

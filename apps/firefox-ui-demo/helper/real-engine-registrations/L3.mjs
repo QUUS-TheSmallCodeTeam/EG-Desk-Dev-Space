@@ -9,7 +9,7 @@ registerFlags({ reproduced: ['EGDESK_DECISION_FIRST_APPROVALS'], decisionDepende
 registerFlags({ reproduced: ['EGDESK_PROPOSAL_REGISTRY'], decisionDependent: ['EGDESK_PROPOSAL_REGISTRY'] })
 import { PROPOSALS_EXPECT_SCHEMA, createProposalsHook, validateProposalsExpect } from '../egdesk-real-engine-proposals-hook.mjs'
 registerExpectKeys({ proposals: { schema: PROPOSALS_EXPECT_SCHEMA, validate: (value, { conv, path, bad }) => { for (const why of validateProposalsExpect(value, { conv }, path)) bad(path, why.split(': ').slice(1).join(': ')) } } })
-registerTurnHooks('proposals', () => createProposalsHook())
+registerTurnHooks('proposals', conversation => createProposalsHook(conversation))
 
 // ---- L3: the heartbeat's own messages (expect.flow: notes, firstNoteMs, statedSecondsTrue, noResult) ----
 import { FLOW_EXPECT_SCHEMA, createFlowHook, validateFlowExpect } from '../egdesk-real-engine-flow.mjs'
