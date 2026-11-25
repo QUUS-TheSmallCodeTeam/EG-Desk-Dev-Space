@@ -198,3 +198,21 @@ test('pw situations (c38): every case takes the paragraph path with exactly its 
     assert.ok(req.input[2].content.includes(c.closing) && !req.input[2].content.includes('\n- '), c.id)
   }
 })
+
+// c39/c64: the REAL Decision model's (pa, pw) on all 21 cases of the two-predicate plan (evidence/main-real/c64/pw2-part1-results.json 14/14 and pw2-part2-results.json 7/7). The waiting action
+// registers exactly for the hold cases: a near miss has pw at 1.0 (the paragraph does say the action is undone) and is kept out by pa alone, which is why the AND is the design.
+const C64 = {
+  'send-hold-1': [1, 1], 'send-hold-2': [1, 0.95], 'send-near': [0, 1], 'push-hold-1': [1, 1], 'push-near': [0, 1], 'overwrite-hold-1': [1, 1], 'overwrite-near': [0, 1],
+  'payment-hold-1': [1, 0.99], 'payment-hold-2': [1, 0.98], 'payment-near': [0, 1], 'schedule-hold-1': [1, 1], 'schedule-near': [0, 1], 'rename-hold-1': [1, 1], 'rename-hold-2': [1, 1], 'rename-near': [0, 0.98],
+  'control-send-done': [0, 0], 'control-push-done': [0, 0], 'real-todo-hold-2b': [1, 0.99], 'real-todo-hold-31pr': [1, 1], 'real-todo-done-2b': [0, 0.15], 'real-todo-done-31pr': [0, 0.17],
+}
+test('recorded real Decision answers (c64, 21/21): a waiting action registers for every hold case and for no near miss and no control; the near misses are kept out by pa alone', () => {
+  assert.deepEqual(Object.keys(C64).sort(), CASES.map(c => c.id).sort(), 'every case of the plan has its recorded numbers')
+  for (const c of CASES) {
+    const [pa, pw] = C64[c.id], { items } = register({ request: c.request, answer: c.answer }, [{ name: 'pa', type: 'predicate', probability: pa }, { name: 'pw', type: 'predicate', probability: pw }])
+    assert.deepEqual(items.map(i => i.kind), c.kind === 'hold' ? ['waiting_action'] : [], `${c.id} (${c.kind}) pa ${pa} pw ${pw}`)
+    if (c.kind === 'hold') assert.equal(items[0].text, c.closing, c.id)
+  }
+  // pa is the separating predicate: the six near misses all have pw >= the bar, so a paragraph-only check would have registered every one
+  for (const c of CASES.filter(x => x.kind === 'near')) assert.ok(C64[c.id][1] >= PROPOSAL_YES && C64[c.id][0] <= 1 - PROPOSAL_YES, c.id)
+})
