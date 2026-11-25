@@ -130,6 +130,7 @@ const FLOW_OWN_KINDS = new Set(['decisionContext', 'plan', 'summary', 'hostNotic
 import { SPEECH_AT_PAGE, speechSegments } from './egdesk-speech-grounding.mjs'
 import { pruneContextCandidates } from './egdesk-context-pruning.mjs'
 import { previousReplyExcerpt } from './egdesk-previous-reply.mjs'
+import { OPEN_ITEMS_KEY, buildRegistry, openItemsContext, registeredOpenItemProviders, resolveOpenItem } from './egdesk-open-items.mjs'
 import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory, recordStateEvidence } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
 import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, readBrowserEntry, rideAlongEntry } from './egdesk-browser-task.mjs'
@@ -914,6 +915,8 @@ export class CodexChatRuntime {
       egressFor: key => { const run = this.commandJudgeRuns.get(key); return run && !TERMINAL.has(run.status) ? this.decisionEgressFor(run) : null } })
     this.deletedConversations = new Set() // clientThreadId of a conversation the person deleted (forgetConversation): its runs say nothing more
     this.inRunMessageQueue = new WeakMap() // run -> [{ requestId, localMessageId, text, at, state }]: messages typed while it works (inRunMessages flag)
+    this.openItemVerdicts = new Map() // requestId -> { items, verdict, record, note }: what the open-item resolver decided for that message (flag decisionContext.openItems), bounded
+    this.openItemVerdicts = new Map() // requestId -> { items, verdict, record, note }: what the open-item resolver decided for that message (flag decisionContext.openItems), bounded
     this.carriedInRun = new Map() // clientThreadId -> [text]: messages its run ended without acting on; they open the next turn's input
     // c33: the first-event watchdog (developer flag, default off): engineStall = { firstEventMs } | null
     this.engineStall = engineStall && Number.isFinite(engineStall.firstEventMs) && engineStall.firstEventMs >= 1 ? { firstEventMs: engineStall.firstEventMs } : null
@@ -1828,8 +1831,11 @@ export class CodexChatRuntime {
   // { board: run.board attribution + block, blocks: { key: text } } — extra
   // turn context from sendBoard / reassignSubAgent. { newRoomProfile } (L1 c26): the account a NEW room starts on, from the plan runner (flag roomAccount).
   async send(body, internal = null) {
+    // c32 (flag decisionContext.openItems, default off): which open item (a command waiting for yes/no, a question the run asked, a run, a browser task, a memory reading) this message settles, decided before anything else.
+    const openVerdict = !internal && this.openItemsOn() ? await this.resolveOpenItems(body) : null
     // A reply to an early question the run asked while it keeps working goes into that same run (flag decisionContext.conversationFlow).
     const inRun = internal ? null : this.openEarlyQuestion(idText(body?.clientThreadId) || idText(body?.thread?.id), idText(body?.conversationId))
+    if (openVerdict?.record) openVerdict.record.today = inRun ? 'question_route' : 'new_turn' // what the unchanged path does with this message (recorded, not changed)
     // The screen names the run it replies to. If that question is no longer open, refuse before anything is stored or started:
     // a reply must never turn into a second turn (or a saved message without one).
     const replyTo = internal || body?.inRunReplyTo === undefined ? null : idText(body.inRunReplyTo) || ''
@@ -2985,9 +2991,11 @@ export class CodexChatRuntime {
       // c32 (U13, flag EGDESK_DECISION_FIRST=on, default off): a request to run something is picked by the decision model from options code built from the folder and run by EG-Desk's own
       // runner before any engine call; a healthy result ends the turn without the engine, anything else goes to the engine with the result as context. Absent the flag: dfLocal is null.
       const dfLocal = ownTools && !bounded && ownFolder ? await this.decisionFirstTry({ cid, body, context, ownFolder }) : null
-      const dfContext = dfLocal?.context ? { ...(turnAdditionalContext || {}), [COMMAND_RESULT_KEY]: { kind: 'application', value: dfLocal.context } } : turnAdditionalContext
+      // c32: the person's reply is read for the ONE item it settles (or, without the flag or a verdict, for the waiting command as before); what it settled rides to the engine as closed words
+      const openContext = await this.applyOpenItems(cid, body, context, memoryTurn)
+      const withOpen = openContext ? { ...(turnAdditionalContext || {}), ...openContext } : turnAdditionalContext
+      const dfContext = dfLocal?.context ? { ...(withOpen || {}), [COMMAND_RESULT_KEY]: { kind: 'application', value: dfLocal.context } } : withOpen
       const engineShape = this.shapeEngineContext(dfContext)
-      await this.readGateHookReply(cid, body.message)
       turnStartAttempted = context.turnStartAttempted = true
       const result = dfLocal?.finished ? { turn: { id: dfLocal.turnId, status: 'inProgress', items: [] } } : await this.startTurnWatched(engine, {
         threadId: cid,
@@ -3162,6 +3170,86 @@ export class CodexChatRuntime {
       throw error
     } finally { if (this.pendingStarts.get(cid) === pending) this.pendingStarts.delete(cid) }
   }
+
+  // ---- Open items (L1 c32; flag decisionContext.openItems, default off; see egdesk-open-items.mjs) ----
+  openItemsOn() {
+    try {
+      const setup = this.decisionContext, flag = setup?.openItems
+      return (typeof flag === 'function' ? flag() : flag) === true && setup.mode?.() === 'on' && setup.configured?.() === true && typeof setup.client?.decide === 'function'
+    } catch { return false }
+  }
+
+  // The built-in providers. Each item is code-built from state the runtime already holds; the words sent to the Decision model are closed words plus the one quoted text the item is about.
+  builtinOpenItemSources(egress) {
+    const quoted = text => String(text ?? '').replace(/\s+/g, ' ').trim()
+    const approval = { id: 'approval',
+      items: ({ cid }) => { const ask = egress.allows('terminal_command') === true ? this.gateHookBroker()?.awaitingAsk?.(cid) : null; return ask ? [{ id: `approval:${cid}`, kind: 'approval', summary: `A command waits for the person's yes or no before it runs: ${quoted(ask.command).slice(0, 200)}` }] : [] },
+      apply: async ({ cid, message }) => { const read = await this.readGateHookReply(cid, message); return { handled: true, settled: read?.approved === true ? 'approved' : read?.read ? 'not_approved' : 'unclear' } } }
+    const question = { id: 'question',
+      items: ({ cid, clientThreadId }) => { const run = this.openEarlyQuestion(clientThreadId, cid), flow = run ? this.flowRuns.get(run) : null, row = flow?.sent?.find(x => x.id === flow.question?.id); return row ? [{ id: `question:${run.runId}`, kind: 'question', summary: `The run asked the person: ${quoted(row.text).slice(0, 240)}` }] : [] } }
+    const running = { id: 'run',
+      items: ({ cid, clientThreadId }) => { const asked = this.openEarlyQuestion(clientThreadId, cid), run = [...this.runs.values()].filter(r => r.conversationId === cid && !TERMINAL.has(r.status) && r !== asked).at(-1); return run ? [{ id: `run:${run.runId}`, kind: 'run', summary: `A run is working on the person's earlier request: ${quoted(this.runUserText(run)).slice(0, 240)}` }] : [] } }
+    const memory = { id: 'memory',
+      // L7 c38 (when merged) names these itself: openMemoryItems(cid) -> [{ kind: 'memory_confirm', pageId, status, ... }], ids and words only; one item stands for them all (a message answers one mention)
+      items: ({ cid }) => {
+        const waiting = typeof this.openMemoryItems === 'function' ? this.openMemoryItems(cid)?.length > 0 : this.turnMemoryConfirmOn() && (this.turnMemoryNoted.get(cid) ?? []).some(entry => entry.offered === true)
+        return waiting ? [{ id: `memory:${cid}`, kind: 'memory', summary: 'EG-Desk told the person it noted something from the conversation and is waiting for the person to confirm or refuse it.' }] : []
+      },
+      apply: async () => ({ handled: true, settled: 'confirmation_read' }) } // the reading itself is the memory loop's own judgment (confirmNotedRecords), run for this item only
+    return [approval, question, running, memory]
+  }
+
+  // Before anything else of a message: the registry, one Decision request, a record. null when nothing is open (no request is made) or the words may not be sent.
+  async resolveOpenItems(body) {
+    try {
+      const requestId = idText(body?.requestId), cid = idText(body?.conversationId), clientThreadId = idText(body?.clientThreadId) || idText(body?.thread?.id)
+      if (!requestId || !cid || typeof body?.message !== 'string') return null
+      const previous = [...this.runs.values()].filter(r => r.conversationId === cid).at(-1) ?? null
+      const egress = previous ? this.decisionEgressFor(previous) : null
+      if (egress?.allows?.('run_text') !== true) return null
+      const key = { cid, clientThreadId }
+      const items = buildRegistry([...this.builtinOpenItemSources(egress), ...registeredOpenItemProviders()], key)
+      if (!items.length) return null
+      const extraQuestions = [...new Set(items.map(item => item.source))].flatMap(source => { try { return typeof source.questions === 'function' ? source.questions(key, body.message) ?? [] : [] } catch { return [] } })
+      const client = { decide: async request => { egress.require('run_text'); if (items.some(item => item.kind === 'approval')) egress.require('terminal_command'); return this.decisionContext.client.decide(request) } }
+      const t0 = performance.now()
+      const verdict = await resolveOpenItem({ message: body.message, items, client, askedAt: this.now(), extraQuestions })
+      const record = { status: verdict.status, reason: verdict.reason ?? null, kind: verdict.item?.kind ?? null, id: verdict.item?.id ?? null, p: verdict.p ?? null, calls: verdict.calls, ms: Math.round(performance.now() - t0),
+        items: items.map(item => ({ id: item.id, kind: item.kind })), states: {}, today: null }
+      this.openItemVerdicts.delete(requestId); this.openItemVerdicts.set(requestId, { items, verdict, record, note: null })
+      while (this.openItemVerdicts.size > 64) this.openItemVerdicts.delete(this.openItemVerdicts.keys().next().value)
+      return { record }
+    } catch { return null }
+  }
+
+  // 'apply' (this item's own judgment runs), 'skip' (the message belongs to something else or to nothing: that judgment must not consume its item), 'today' (no verdict, or one that could not be made: as before).
+  openItemRoute(requestId, kind) {
+    const v = requestId ? this.openItemVerdicts.get(requestId) : null
+    if (!v) return 'today'
+    if (v.verdict.status === 'settled') return v.verdict.item.kind === kind ? 'apply' : 'skip'
+    return ['no_item_referred', 'several_items'].includes(v.verdict.reason) ? 'skip' : 'today'
+  }
+
+  // At the place the person's reply to a waiting command was always read. Returns the engine's context entry (closed words) or null.
+  async applyOpenItems(cid, body, context) {
+    const v = context.requestId ? this.openItemVerdicts.get(context.requestId) : null
+    if (!v) { await this.readGateHookReply(cid, body.message); return null }
+    const states = {}
+    if (v.verdict.status === 'settled') {
+      const item = v.verdict.item
+      try {
+        const res = typeof item.source.apply === 'function' ? await item.source.apply({ cid, clientThreadId: context.clientThreadId, body, context, message: body.message, item, answers: v.verdict.answers }) : null
+        states[item.id] = res?.settled ?? 'noted'
+        if (typeof res?.note === 'string' && res.note) v.note = res.note
+      } catch { states[item.id] = 'apply_failed' }
+    } else if (this.openItemRoute(context.requestId, 'approval') === 'today') await this.readGateHookReply(cid, body.message)
+    v.record.states = states
+    const text = openItemsContext(v.items, v.verdict, states)
+    return text ? { [OPEN_ITEMS_KEY]: { kind: 'application', value: v.note ? `${text}\n${v.note}` : text } } : null
+  }
+
+  // What the resolver decided for a request: { status, reason, kind, id, p, calls, ms, items: [{ id, kind }], states, today } or null (flag off, nothing open).
+  openItemRecord(requestId) { const v = requestId ? this.openItemVerdicts.get(requestId) : null; return v ? { ...v.record, items: v.record.items.map(i => ({ ...i })), states: { ...v.record.states } } : null }
 
   async restoreClaudeContext(cid, clientThreadId, authority) {
     if (!authority || authority.engineId !== 'claude' || !this.store) return
@@ -7084,7 +7172,7 @@ export class CodexChatRuntime {
       const setup = this.decisionContext
       const usable = setup?.client && setup.configured?.() === true && setup.mode?.() === 'on'
       const previous = [...this.runs.values()].filter(r => r.conversationId === conversationId).at(-1) ?? null
-      await broker.readReply({ conversationId, reply: typeof message === 'string' ? message : '', client: usable ? setup.client : null,
+      return await broker.readReply({ conversationId, reply: typeof message === 'string' ? message : '', client: usable ? setup.client : null,
         egress: previous ? this.decisionEgressFor(previous) : null, timeoutMs: COMMAND_GATE_TIMEOUT_MS })
     } catch { /* an unread reply approves nothing */ }
   }
@@ -7298,7 +7386,7 @@ export class CodexChatRuntime {
     const delivered = context.engine?.id === 'codex' && threadKey ? this.turnMemoryDelivered.get(threadKey) ?? null : null
     const scope = egress.memoryScope(baseScope ?? {})
     // Before the loop reads the wiki: does this message confirm or refuse a note the previous reply stated? (flag, default off)
-    if (this.turnMemoryConfirmOn()) await this.confirmNotedRecords(turn, body, context, { wiki, baseScope, scope, egress, threadKey })
+    if (this.turnMemoryConfirmOn() && this.openItemRoute(context.requestId, 'memory') !== 'skip') await this.confirmNotedRecords(turn, body, context, { wiki, baseScope, scope, egress, threadKey })
     const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position: turn.position, threadKey, scope,
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
       deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock, previous: turn.previous, previousReply: this.previousReplyFor(context, turn.sources?.speech ?? null),

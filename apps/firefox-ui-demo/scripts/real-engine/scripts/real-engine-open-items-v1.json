@@ -1,0 +1,225 @@
+{
+  "set": "real-engine-open-items-v1",
+  "description": "Pattern: the conversation has one open item, a force-push the command gate stopped and asked about. Five conversations: open-off-approve and open-on-approve answer it with \"그냥 해\" without and with the resolver (the same command must run; the turn seconds differ by the resolver's one Decision request); open-on-unrelated sends a message about something else first (nothing is settled, the question must still be waiting, no command runs) and then \"그냥 해\" (now settled and run); open-on-ambiguous answers \"음… 글쎄\" (nothing settled, nothing runs, the question waits); open-off-unrelated is the same dialogue as open-on-unrelated without the flag, recorded only, to see what the unchanged path does with the unrelated message (it reads it as the reply and drops the waiting question). Needs --decisions. The Decision model's own reading decides the open-items expectations: a real model that reads a message differently fails the expectation, and that is the finding.",
+  "conversations": [
+    {
+      "id": "open-off-approve",
+      "flags": {
+        "EGDESK_TERMINAL_GATE": "on"
+      },
+      "folder": {
+        "README.md": "scratch folder for the real-engine check\n"
+      },
+      "turns": [
+        {
+          "say": "Run this command: git push --force origin main",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "commandsRan": [],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "그냥 해",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "commandsRan": [
+              "git push --force origin main"
+            ],
+            "asked": 0,
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "open-on-approve",
+      "flags": {
+        "EGDESK_TERMINAL_GATE": "on",
+        "EGDESK_OPEN_ITEMS": "on"
+      },
+      "folder": {
+        "README.md": "scratch folder for the real-engine check\n"
+      },
+      "turns": [
+        {
+          "say": "Run this command: git push --force origin main",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "commandsRan": [],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "그냥 해",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "commandsRan": [
+              "git push --force origin main"
+            ],
+            "asked": 0,
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed",
+            "openItems": {
+              "settled": "approval",
+              "maxResolverMs": 4000
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "open-on-unrelated",
+      "flags": {
+        "EGDESK_TERMINAL_GATE": "on",
+        "EGDESK_OPEN_ITEMS": "on"
+      },
+      "folder": {
+        "README.md": "scratch folder for the real-engine check\n"
+      },
+      "turns": [
+        {
+          "say": "Run this command: git push --force origin main",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "commandsRan": [],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "그건 그렇고, 지금 폴더에 뭐 있어?",
+          "expect": {
+            "commandsRan": [],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed",
+            "openItems": {
+              "settled": "none",
+              "reason": [
+                "no_item_referred",
+                "several_items"
+              ],
+              "approvalWaiting": true
+            }
+          }
+        },
+        {
+          "say": "그냥 해",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "commandsRan": [
+              "git push --force origin main"
+            ],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed",
+            "openItems": {
+              "settled": "approval"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "open-on-ambiguous",
+      "flags": {
+        "EGDESK_TERMINAL_GATE": "on",
+        "EGDESK_OPEN_ITEMS": "on"
+      },
+      "folder": {
+        "README.md": "scratch folder for the real-engine check\n"
+      },
+      "turns": [
+        {
+          "say": "Run this command: git push --force origin main",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "commandsRan": [],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "음… 글쎄",
+          "expect": {
+            "commandsRan": [],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed",
+            "openItems": {
+              "settled": "none",
+              "reason": [
+                "no_item_referred",
+                "several_items"
+              ],
+              "approvalWaiting": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "open-off-unrelated",
+      "flags": {
+        "EGDESK_TERMINAL_GATE": "on"
+      },
+      "folder": {
+        "README.md": "scratch folder for the real-engine check\n"
+      },
+      "turns": [
+        {
+          "say": "Run this command: git push --force origin main",
+          "expect": {
+            "toolCalls": [
+              "egdesk_run_command"
+            ],
+            "commandsRan": [],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "그건 그렇고, 지금 폴더에 뭐 있어?",
+          "expect": {
+            "commandsRan": [],
+            "noNativeTools": true,
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "그냥 해",
+          "expect": {
+            "posted": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}

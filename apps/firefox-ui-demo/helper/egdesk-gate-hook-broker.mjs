@@ -100,6 +100,8 @@ export function createGateHookBroker({ mode = () => 'off', assess = null, home, 
       if (next.length) carried.set(turn.conversationId, next); else carried.delete(turn.conversationId)
     },
     awaitingReply: conversationId => awaiting.has(conversationId),
+    // c32 (open items): the command and reasons of the question this conversation still waits on, as a copy (null when none). Read only.
+    awaitingAsk: conversationId => { const w = awaiting.get(conversationId); return w?.ask ? { command: String(w.ask.command ?? ''), reasons: [...(w.ask.reasons ?? [])] } : null },
     // L1 c21: a room continued on another account (a new native thread): its unanswered question, the commands still waiting for the
     // person and an approval not yet bound to a turn move to the new thread. Nothing else changes; an existing entry there is kept.
     rekey(from, to) {
