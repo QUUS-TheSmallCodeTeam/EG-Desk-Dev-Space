@@ -11,6 +11,7 @@ import { buildWiki } from './egdesk-wiki-reconstruction.mjs'
 import { createWikiWriter } from './egdesk-turn-memory.mjs'
 import { createTurnMemoryConfig, turnMemoryFlagsFromEnv } from './egdesk-turn-memory-wiring.mjs'
 import { fastCarryText } from './egdesk-memory-fast-answer.mjs'
+import { DECISION_CONTEXT_KEY } from './egdesk-context-setup.mjs'
 
 // L1 c31: the fast answer from a picked record, through the REAL runtime (send, finish, store, turn memory loop) with a synthetic engine and a
 // scripted Decision client. The engine here writes "엔진 답변"; a fast answer is the record's own sentence, so the two are told apart by text.
@@ -172,4 +173,35 @@ test('the flag: EGDESK_TURN_MEMORY_FAST_ANSWER=on only; the config carries it on
   const off = createTurnMemoryConfig({ settings, getAdapter }), on = createTurnMemoryConfig({ settings, getAdapter, fastAnswer: true, onePacket: true })
   assert.equal(Object.hasOwn(off, 'fastAnswer'), false); assert.equal(on.fastAnswer, true); assert.equal(on.onePacket, true); assert.equal(on.mode(), 'on'); assert.equal(on.ontologyWrite, true)
   assert.deepEqual(Object.keys(off).sort(), Object.keys(createTurnMemoryConfig({ settings, getAdapter, fastAnswer: false })).sort())
+})
+
+// A context selection that attaches the same record to the turn (stubbed at prepareDecisionContext: what a real selection returns, spies on what it is told).
+const selection = spy => ({ mode: 'on', generation: null, speech: null, late: false, result: { status: 'ready', mayDispatch: () => true, noteSent: () => { spy.sent += 1 }, deliveredKeys: new Map([['sel-key', 'v']]),
+  selected: [{ id: 'ontology:db/pg-rollback', title: '롤백 절차' }], extraContext: { [DECISION_CONTEXT_KEY]: { kind: 'application', value: '[item id=ontology:db/pg-rollback]\n문제가 생기면 SQLite 백업으로 30분 안에 되돌린다. 롤백 판단은 헬스체크 실패 시점에 한다.' } }, receipt: null, latencyMs: 1, model: 'syn' } })
+
+test('a selection that would have attached the record is not marked as delivered or held when the engine never got it; on the engine path it is', async () => {
+  for (const [name, fa, expectDelivered] of [['fast', yesFirst, false], ['engine', (m, n) => (n === 'fa_more' ? 0.9 : 0.02), true]]) {
+    const spy = { sent: 0 }
+    const x = await rig({ tm: { fastAnswer: true, pruneHeld: true, selectionHeld: true }, client: scriptedClient(fa) })
+    x.chat.prepareDecisionContext = async () => selection(spy)
+    await x.send(RETENTION, 'r1'); await x.done(1)
+    assert.equal(x.starts.length, expectDelivered ? 1 : 0, name)
+    assert.equal(spy.sent, expectDelivered ? 1 : 0, `${name}: the selection is told it was sent only when it was`)
+    assert.equal(x.chat.contextDelivered.get(x.cid)?.size ?? 0, expectDelivered ? 1 : 0, `${name}: the delivery receipt of the selection`)
+    assert.equal(Object.keys(x.chat.turnMemoryDelivered.get(x.cid)?.pages ?? {}).length > 0, expectDelivered, `${name}: pages held by the engine`)
+    x.store.close()
+  }
+})
+
+test('the held-answer mode (draft check on) does not hold a fast answer: it is the record\'s own sentence, posted at once; the engine\'s answer is held as before', async () => {
+  const rows = {}
+  for (const [name, fa] of [['fast', yesFirst], ['engine', (m, n) => (n === 'fa_more' ? 0.9 : 0.02)]]) {
+    const x = await rig({ tm: { fastAnswer: true }, client: scriptedClient(fa) })
+    x.chat.decisionContext.draftCheck = { mode: () => 'on' }
+    await x.send(RETENTION, 'r1'); await x.done(1)
+    rows[name] = x.chat.topicAnswerGuards.has(x.run())
+    assert.equal(texts(x).at(-1)[1], 'complete', name)
+    x.store.close()
+  }
+  assert.deepEqual(rows, { fast: false, engine: true })
 })
