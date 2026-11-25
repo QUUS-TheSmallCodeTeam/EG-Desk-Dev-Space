@@ -18,7 +18,7 @@ const OFFICIAL = 'https://api.openai.com/v1/decisions'
 if (DECISIONS_ENDPOINT !== OFFICIAL) throw new Error('unexpected Decisions endpoint')
 export const OPEN_ITEM_PLAN_FILE = new URL('../scripts/egdesk-browser-open-item-plan.json', import.meta.url)
 // c40: v1 = the plan as sent (c57, 19:08), v2 = the same replies with the c40 option wording and its own pre-registered predictions
-export const OPEN_ITEM_PLAN_FILES = Object.freeze({ v1: OPEN_ITEM_PLAN_FILE, v2: new URL('../scripts/egdesk-browser-open-item-plan-v2.json', import.meta.url) })
+export const OPEN_ITEM_PLAN_FILES = Object.freeze({ v1: OPEN_ITEM_PLAN_FILE, v2: new URL('../scripts/egdesk-browser-open-item-plan-v2.json', import.meta.url), v3: new URL('../scripts/egdesk-browser-open-item-plan-v3.json', import.meta.url) })
 export const OPEN_ITEM_HARD_LIMITS = Object.freeze({ maxRequests: 12, tokenCeiling: 14000 }) // the plan's own default ceiling is 4000; --budget raises it, never past this (c40: the narrowed wording is ~90 tokens longer per request: 12 replies are about 13.4k)
 const NOW = Date.parse('2026-11-25T10:00:00Z')
 
