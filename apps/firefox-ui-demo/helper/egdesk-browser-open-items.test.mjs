@@ -48,7 +48,8 @@ test('questions: one yes/no predicate per option named open_browser_<id>, each q
   assert.deepEqual(qs.map(q => [q.type, q.name]), ['continue', 'retry', 'abandon', 'ask_page', 'change'].map(id => ['predicate', `open_browser_${id}`]))
   assert.ok(qs.every(q => q.instructions.includes(`"했어 '방금'"`)), 'the message is quoted, inner quotes neutralised')
   assert.ok(qs[0].instructions.includes('the question "약관에 동의하고 신청서 제출을 눌러 주세요."'))
-  assert.ok(!qs.some(q => /none of|other|else/i.test(q.instructions)), 'no catch-all')
+  assert.ok(!qs.some(q => /^open_browser_(none|other|else|anything)/.test(q.name)), 'no catch-all option')
+  assert.ok(qs.find(q => q.name === 'open_browser_ask_page').instructions.includes('a question about the web page the browser task is on'), 'c39: the page is the anchor of ask_page: a question about anything else is not it')
   assert.deepEqual(openItemQuestions(store.create({ conversationKey: 'x', cardId: 'c', goal: 'g' }), 'hi').map(q => q.name), ['open_browser_abandon', 'open_browser_ask_page'], 'a running task: only what code can apply while it runs')
 })
 
@@ -58,7 +59,12 @@ test('read (R5): exactly one option yes at the product\'s done bar and every oth
   const read = map => readOpenItem(answersOf(map), task)
   assert.deepEqual(read({ continue: 0.97, retry: 0.04, abandon: 0.01, ask_page: 0.02 }), { kind: 'settled', optionId: 'continue', p: { continue: 0.97, retry: 0.04, abandon: 0.01, ask_page: 0.02 } })
   assert.equal(read({ continue: 0.2, retry: 0.96, abandon: 0.01, ask_page: 0.02 }).kind, 'uncertain', 'a 0.2 is not a decided no')
-  assert.equal(read({ continue: 0.96, retry: 0.9, abandon: 0.01, ask_page: 0.02 }).kind, 'uncertain', 'two yes')
+  assert.equal(read({ continue: 0.96, retry: 0.02, abandon: 0.01, ask_page: 0.9 }).kind, 'uncertain', 'two yes that are rivals')
+  assert.equal(read({ continue: 0.96, retry: 0.02, abandon: 0.9, ask_page: 0.02 }).kind, 'uncertain', 'continue and abandon are rivals')
+  // c39 (real, check-31bo): "했어" read continue 0.95 AND retry 0.89: not rivals, retry is continue that also forgets the step memory: the weaker action is applied
+  assert.deepEqual(read({ continue: 0.95, retry: 0.89, abandon: 0.05, ask_page: 0.01 }), { kind: 'settled', optionId: 'continue', p: { continue: 0.95, retry: 0.89, abandon: 0.05, ask_page: 0.01 }, overlap: 'continue_retry' })
+  assert.equal(read({ continue: 0.95, retry: 0.89, abandon: 0.5, ask_page: 0.01 }).kind, 'uncertain', 'only when every other option is decided no')
+  assert.equal(read({ continue: 0.95, retry: 0.89, abandon: 0.01, ask_page: 0.9 }).kind, 'uncertain', 'three yes')
   assert.equal(read({ continue: 0.8, retry: 0.05, abandon: 0.01, ask_page: 0.02 }).kind, 'uncertain', 'under the 0.85 bar')
   assert.equal(read({ continue: 0.05, retry: 0.04, abandon: 0.01, ask_page: 0.02 }).kind, 'none')
   assert.equal(readOpenItem({ ...answersOf({ continue: 0.96, retry: 0.04, abandon: 0.01 }) }, task).kind, 'uncertain', 'an option with no answer is unknown, not no')
@@ -226,4 +232,19 @@ test('the closed note of a settled state is data only: status, code, settled, st
   const task = pausedTask(store, { code: 'human_step' })
   assert.deepEqual(JSON.parse(settledNote(task, 'ask_page', { lines: ['a', 'b'] })).egdesk_browser_task, { id: task.taskId, status: 'cannot_proceed', code: 'human_step', settled: 'ask_page', page: ['a', 'b'], stepsDone: 2, actions: { fill: 0, navigate: 1, scroll: 0 }, next: 'answer_user' })
   void subjectiveNote
+})
+
+// ---- c39: the product with both flags on: the resolver's verdict is the entry's read ----
+test('readFromResolver: settled to the browser task -> the provider\'s own read of the same answers; settled to another item, no item referred, several -> none (not about this task); the resolver did not decide -> null (the entry decides)', async () => {
+  const { readFromResolver } = await import('./egdesk-browser-open-items.mjs')
+  const store = createBrowserTaskStore({ now: () => NOW }), task = pausedTask(store)
+  const entry = { settle: async () => ({ handled: true }) }
+  const provider = createBrowserOpenItems({ store: { ...store, active: () => task }, entry })
+  const answers = answersOf({ continue: 0.97, retry: 0.02, abandon: 0.01, ask_page: 0.02 })
+  const settled = readFromResolver({ status: 'settled', item: { provider: 'browser' }, answers }, provider, 'dm')
+  assert.deepEqual([settled.kind, settled.optionId], ['settled', 'continue'])
+  assert.equal(readFromResolver({ status: 'settled', item: { provider: 'browser' }, answers: answersOf({ continue: 0.3, retry: 0.3, abandon: 0.3, ask_page: 0.3 }) }, provider, 'dm').kind, 'uncertain')
+  assert.equal(readFromResolver({ status: 'settled', item: { provider: 'approval' }, answers: {} }, provider, 'dm').kind, 'none')
+  for (const reason of ['no_item_referred', 'several_items']) assert.equal(readFromResolver({ status: 'none', reason }, provider, 'dm').kind, 'none')
+  for (const verdict of [null, undefined, { status: 'none', reason: 'timeout' }, { status: 'none', reason: 'unanswered' }, { status: 'none', reason: 'no_items' }]) assert.equal(readFromResolver(verdict, provider, 'dm'), null)
 })

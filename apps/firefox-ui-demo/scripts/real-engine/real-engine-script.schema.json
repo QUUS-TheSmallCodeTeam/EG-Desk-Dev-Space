@@ -753,6 +753,12 @@
                             "ask_page"
                           ]
                         },
+                        "resolverNotReferred": {
+                          "const": true
+                        },
+                        "resolverSettled": {
+                          "const": true
+                        },
                         "staleSeen": {
                           "const": true
                         }

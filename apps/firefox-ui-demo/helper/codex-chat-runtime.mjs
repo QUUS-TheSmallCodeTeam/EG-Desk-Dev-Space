@@ -144,7 +144,7 @@ import { SPEECH_AT_PAGE, speechSegments } from './egdesk-speech-grounding.mjs'
 import { pruneContextCandidates } from './egdesk-context-pruning.mjs'
 import { previousReplyExcerpt } from './egdesk-previous-reply.mjs'
 import { createProposalOpenItems } from './egdesk-open-proposal-items.mjs'
-import { createBrowserOpenItems } from './egdesk-browser-open-items.mjs'
+import { createBrowserOpenItems, readFromResolver } from './egdesk-browser-open-items.mjs'
 import { OPEN_ITEMS_KEY, buildRegistry, openItemsContext, registeredOpenItemProviders, resolveOpenItem } from './egdesk-open-items.mjs'
 import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory, recordStateEvidence } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
@@ -3274,6 +3274,8 @@ export class CodexChatRuntime {
     if (v.verdict.status === 'settled') {
       const item = v.verdict.item, source = item.source, conversationKey = context.clientThreadId || cid
       try {
+        // c39: the browser task's pre-turn entry already applied what the resolver settled (once): its state is the state
+        if (item.provider === 'browser' && v.browserApplied) { states[item.id] = v.browserApplied.settled ?? 'noted' } else {
         // a provider that reads its own option predicates (the browser task, the proposals) says HOW the item was settled; only a settled reading is applied (fail closed)
         const read = typeof source.read === 'function' ? source.read(v.verdict.answers, source.builtin === true ? { cid, clientThreadId: context.clientThreadId } : conversationKey, undefined, item) : null
         const previousRun = [...this.runs.values()].filter(r => r.conversationId === cid).at(-1) ?? null
@@ -3281,6 +3283,7 @@ export class CodexChatRuntime {
           : typeof source.apply === 'function' ? await source.apply({ cid, clientThreadId: context.clientThreadId, body, context, message: body.message, item, answers: v.verdict.answers, dfLocal, read, optionId: read?.optionId, run: previousRun, conversationKey, hosts: this.browserEntryHosts(body), titles: this.browserEntryTitles(body), memory: null }) : null
         states[item.id] = res?.settled ?? 'noted'
         if (typeof res?.note === 'string' && res.note) v.note = res.note
+        }
       } catch { states[item.id] = 'apply_failed' }
     } else if (this.openItemRoute(context.requestId, 'approval') === 'today') await this.readGateHookReply(cid, body.message)
     v.record.states = states
@@ -5671,8 +5674,14 @@ export class CodexChatRuntime {
         // c21: the entry quotes the first lines each card shows, under the same gate
         cardTextInEntry: () => { try { return this.decisionEgressFor(preRun).allows('page_text') === true } catch { return false } },
         inRunChange: () => this.inRunMessagesOn(), openItems: () => this.browserOpenItemsOn() })
-      const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), titles: this.browserEntryTitles(body), memory, entryAnswers })
+      // c39: with the open-item resolver on, the turn-start request already read this message against the browser task and its options: the entry takes that read (no second request, no
+      // different decision) and the resolver's later apply does not do it twice
+      const verdictRow = context.requestId && this.browserOpenItemsOn() ? this.openItemVerdicts.get(context.requestId) ?? null : null
+      const browserItem = verdictRow?.items?.find(item => item.provider === 'browser') ?? null
+      const openItemRead = browserItem ? readFromResolver(verdictRow.verdict, browserItem.source, context.clientThreadId) : null
+      const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), titles: this.browserEntryTitles(body), memory, entryAnswers, ...(openItemRead ? { openItemRead } : {}) })
       if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
+      if (verdictRow && openItemRead?.kind === 'settled' && out?.handled === true) verdictRow.browserApplied = { settled: out.settled ?? openItemRead.optionId ?? null }
     } catch { note = null; handedOff = false }
     return { preRun, provider, note, handedOff, adopted: false }
   }

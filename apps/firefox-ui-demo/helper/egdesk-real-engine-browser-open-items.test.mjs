@@ -28,11 +28,12 @@ const REPLIES = {
 /** The scripted Decision model: what a sensible one answers, from the evidence it is given. */
 function decide(body) {
   const ev = body.input.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n')
-  const message = /User message: (.*)/.exec(ev)?.[1] ?? ''
+  const message = /User message: (.*)/.exec(ev)?.[1] ?? /Message of the person: "(.*)"/.exec(body.questions.map(q => q.instructions ?? '').join('\n'))?.[1] ?? /Message:\n(.*)/.exec(ev)?.[1] ?? ''
   const visible = ev.split('Visible text:')[1] ?? ''
   return body.questions.map(q => {
     const values = (q.choices ?? []).map(c => c.value)
     const yes = p => ({ name: q.name, type: 'predicate', probability: p })
+    if (/^oi_ref_/.test(q.name)) return yes(/자바스크립트/.test(message) ? 0.04 : 0.96) // the resolver: does this message settle the open browser task?
     const open = /^open_browser_(.*)$/.exec(q.name)?.[1]
     if (open) { const want = /다시 해줘/.test(message) ? 'retry' : /^했어$/.test(message) ? 'continue' : /그만/.test(message) ? 'abandon' : /화면/.test(message) ? 'ask_page' : null; return yes(open === want ? 0.97 : 0.03) }
     if (q.name === 'browser_entry' || /^browser_entry_card_/.test(q.name)) return yes(0.95)
@@ -94,7 +95,10 @@ test('end to end on the fake engine: the Decision settles the option, code appli
   // every open-item request is ONE request with the option predicates only (no second request to decide it)
   const openRequests = w.decisionBodies.filter(b => b.questions.some(q => /^open_browser_/.test(q.name)))
   assert.equal(openRequests.length, 5)
-  assert.ok(openRequests.every(b => b.questions.map(q => q.name).join() === ['continue', 'retry', 'abandon', 'ask_page'].map(id => `open_browser_${id}`).join()))
+  assert.ok(openRequests.every(b => b.questions.map(q => q.name).join() === ['oi_ref_1', 'continue', 'retry', 'abandon', 'ask_page'].map(id => (id === 'oi_ref_1' ? id : `open_browser_${id}`)).join()), 'c39: the resolver\'s referent predicate and the task\'s options are ONE request, as the product sends them')
+  assert.equal(w.decisionBodies.filter(b => b.questions.some(q => q.name === 'oi_ref_1')).length, 5, 'and the entry asks nothing of its own: no second request for the options')
+  assert.deepEqual(result.records.map(r => r.turns[1].browserLoop.openItem.resolver.status), ['settled', 'settled', 'settled', 'settled', 'none'])
+  assert.equal(result.records.at(-1).turns[1].browserLoop.openItem.resolver.reason, 'no_item_referred')
 })
 
 test('the checks by code: a wrong option, an option applied when none fit, a note that is not the settled state are each named', () => {
