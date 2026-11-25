@@ -295,3 +295,17 @@ test('c43: the summary carries what the person was asked (bounded, quotes neutra
   task.goal = '아주 긴 요청 '.repeat(40); task.question = '아주 긴 질문 '.repeat(40)
   assert.ok(openItemSummary(task).length <= 300 && openItemSummary(task).includes('Asked of the person'), `${openItemSummary(task).length} characters`)
 })
+
+test('c43: readFromResolver with { sole }: a referent below the bar does not veto the options of the only open item (the provider reads the same request\'s answers); with another item, or when the referent said several, it still vetoes', async () => {
+  const { readFromResolver } = await import('./egdesk-browser-open-items.mjs')
+  const store = createBrowserTaskStore({ now: () => NOW }), task = pausedTask(store)
+  const provider = createBrowserOpenItems({ store: { ...store, active: () => task }, entry: { settle: async () => ({ handled: true }) } })
+  const answers = { ...answersOf({ continue: 0.95, retry: 0.7, abandon: 0.05, ask_page: 0.2, change: 0 }), oi_ref_1: P(0.4) } // c64: "했어"
+  const none = { status: 'none', reason: 'no_item_referred', p: 0.4, answers }
+  assert.deepEqual([readFromResolver(none, provider, 'dm', { sole: true }).kind, readFromResolver(none, provider, 'dm', { sole: true }).optionId], ['settled', 'continue'])
+  assert.equal(readFromResolver(none, provider, 'dm').kind, 'none', 'not sole: the referent vetoes')
+  assert.equal(readFromResolver({ ...none, reason: 'several_items' }, provider, 'dm', { sole: true }).kind, 'none', 'several items referred: vetoed')
+  assert.equal(readFromResolver({ status: 'none', reason: 'no_item_referred', p: 0.4 }, provider, 'dm', { sole: true }).kind, 'none', 'no answers carried: nothing to read')
+  const weather = { ...none, answers: { ...answersOf({ continue: 0, retry: 0, abandon: 0, ask_page: 0.01, change: 0 }), oi_ref_1: P(0) } }
+  assert.equal(readFromResolver(weather, provider, 'dm', { sole: true }).kind, 'none', 'an unrelated message: all options no -> none')
+})

@@ -130,10 +130,10 @@ export function buildBrowserOpenItemsScript() {
     set: BROWSER_OPEN_ITEMS_SET,
     description: 'U13 (corrected): the Decision model settles the DEFINED layers first. After a hand-over the browser task is an open item of the conversation with options code can apply (continue after the person\'s step, retry, abandon, ask what is on the page). Each conversation: turn 1 is the c35 sign-in wall (entry judged by the real model, the loop hands over, the real engine words it); turn 2 is the person\'s next message. The product\'s entry decides which option it settles (one request, one yes/no predicate per option), code applies it BEFORE the engine turn, and the engine words the reply on the settled state (closed note). Checks by code: the settled option, what the loop did (continue and retry go on from the next step on the page after the person\'s step; abandon and ask_page do nothing on the page), the note, and the reply; an unrelated message leaves the task and is an ordinary turn. Needs --decisions.',
     conversations: [
-      conv('oi-continue', next('했어', signed, { browserLoop: { ...resumed, resolverSettled: true, openItemSettled: 'continue' } })),
-      conv('oi-retry', next('다시 해줘', signed, { browserLoop: { ...resumed, resolverSettled: true, openItemSettled: 'retry' } })),
-      conv('oi-abandon', next('아냐 됐어, 그만할래', idle, { answerExcludes: ['계속 진행', '이어서 진행'], browserLoop: { entered: true, noActs: true, resolverSettled: true, openItemSettled: 'abandon', noteSettled: 'abandon', noteStatus: 'cancelled' } })),
-      conv('oi-ask-page', next('지금 화면에 뭐라고 나와?', idle, { browserLoop: { entered: true, noActs: true, resolverSettled: true, openItemSettled: 'ask_page', noteSettled: 'ask_page', noteStatus: 'cannot_proceed', noteCode: 'login_required', noteIncludes: ['로그인이 필요합니다'], namesAnyOf: ['로그인'] } })),
+      conv('oi-continue', next('했어', signed, { browserLoop: { ...resumed, openItemSettled: 'continue' } })),
+      conv('oi-retry', next('다시 해줘', signed, { browserLoop: { ...resumed, openItemSettled: 'retry' } })),
+      conv('oi-abandon', next('아냐 됐어, 그만할래', idle, { answerExcludes: ['계속 진행', '이어서 진행'], browserLoop: { entered: true, noActs: true, openItemSettled: 'abandon', noteSettled: 'abandon', noteStatus: 'cancelled' } })),
+      conv('oi-ask-page', next('지금 화면에 뭐라고 나와?', idle, { browserLoop: { entered: true, noActs: true, openItemSettled: 'ask_page', noteSettled: 'ask_page', noteStatus: 'cannot_proceed', noteCode: 'login_required', noteIncludes: ['로그인이 필요합니다'], namesAnyOf: ['로그인'] } })),
       conv('oi-unrelated', next('고마워. 그런데 자바스크립트 배열 정렬은 어떻게 해?', idle, { answerIncludes: ['sort'], browserLoop: { openItemNone: true, resolverNotReferred: true, noActs: true } })),
     ],
   }

@@ -69,9 +69,11 @@ export async function resolveOpenItem({ message, items = [], client, askedAt = n
   const rows = items.map((item, i) => ({ item, p: ternary(reply?.answers?.[`oi_ref_${i + 1}`]).p }))
   if (rows.some(row => row.p === null)) return { status: 'none', reason: 'unanswered', calls: 1 }
   const yes = rows.filter(row => row.p >= bars.ref)
-  if (yes.length > 1) return { status: 'none', reason: 'several_items', calls: 1 }
-  if (yes.length === 0) return { status: 'none', reason: 'no_item_referred', calls: 1, p: Math.max(...rows.map(r => r.p)) }
-  if (rows.some(row => row !== yes[0] && row.p >= bars.unsure)) return { status: 'none', reason: 'several_items', calls: 1 }
+  // c43 (L8): the providers' own answers (their option predicates, asked in this same request) are returned with a none that was decided on a read reply, so a provider can read its options when the
+  // referent had nothing to arbitrate (a sole open item); nothing about the decision itself changes
+  if (yes.length > 1) return { status: 'none', reason: 'several_items', calls: 1, answers: reply.answers ?? {} }
+  if (yes.length === 0) return { status: 'none', reason: 'no_item_referred', calls: 1, p: Math.max(...rows.map(r => r.p)), answers: reply.answers ?? {} }
+  if (rows.some(row => row !== yes[0] && row.p >= bars.unsure)) return { status: 'none', reason: 'several_items', calls: 1, answers: reply.answers ?? {} }
   return { status: 'settled', item: yes[0].item, p: yes[0].p, calls: 1, answers: reply.answers ?? {}, usage: reply.usage ?? null }
 }
 

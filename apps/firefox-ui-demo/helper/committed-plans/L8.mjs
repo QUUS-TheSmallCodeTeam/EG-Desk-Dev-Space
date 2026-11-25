@@ -7,4 +7,6 @@ export const PLANS_L8 = [
   { path: 'scripts/egdesk-browser-open-item-plan-v3.json', lane: 'L8', handWritten: 'c41: the same 12 replies as v1 and v2, predictions for the c41 reading rules written before the change (only ack and change expected to move)' },
   { path: 'scripts/egdesk-browser-open-item-combined-plan.json', lane: 'L8', handWritten: 'c42: the resolver referent question and the browser option predicates in one request on 12 replies and 4 controls, pre-registered before any code of the measurement (helper/egdesk-browser-open-item-combined.mjs)' },
   { path: 'scripts/egdesk-browser-open-item-combined-plan-v2.json', lane: 'L8', handWritten: 'c43: combined-v1\'s replies with predictions for the summary that carries what the person was asked, pre-registered before the change' },
+  { path: 'scripts/egdesk-browser-open-item-combined-plan-v3.json', lane: 'L8', handWritten: 'c43: combined-v1/v2 replies with predictions for the sole-open-item reading (the referent does not veto the options), pre-registered before the change' },
+  { path: 'scripts/egdesk-entry-placeless-plan.json', lane: 'L8', handWritten: 'c43: messages that name no place against an open card that matches them (three evidence levels) and unrelated controls, pre-registered before any code (helper/egdesk-entry-placeless-measure.mjs)' },
 ]

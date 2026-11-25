@@ -5682,10 +5682,14 @@ export class CodexChatRuntime {
       // different decision) and the resolver's later apply does not do it twice
       const verdictRow = context.requestId && this.browserOpenItemsOn() ? this.openItemVerdicts.get(context.requestId) ?? null : null
       const browserItem = verdictRow?.items?.find(item => item.provider === 'browser') ?? null
-      const openItemRead = browserItem ? readFromResolver(verdictRow.verdict, browserItem.source, context.clientThreadId) : null
+      const openItemRead = browserItem ? readFromResolver(verdictRow.verdict, browserItem.source, context.clientThreadId, { sole: verdictRow.items.length === 1 }) : null
       const out = await entry.handle({ run: preRun, conversationKey: context.clientThreadId, message: body.message, hosts: this.browserEntryHosts(body), titles: this.browserEntryTitles(body), memory, entryAnswers, ...(openItemRead ? { openItemRead } : {}) })
       if (out?.handled === true && typeof out.note === 'string') { note = out.note; handedOff = out.status === 'paused' }
-      if (verdictRow && openItemRead?.kind === 'settled' && out?.handled === true) verdictRow.browserApplied = { settled: out.settled ?? openItemRead.optionId ?? null }
+      if (verdictRow && openItemRead?.kind === 'settled' && out?.handled === true) {
+        verdictRow.browserApplied = { settled: out.settled ?? openItemRead.optionId ?? null }
+        // c43: settled by the sole item's own options (the referent had said no): the engine's open-items block must say so, not that the item stays open
+        if (verdictRow.verdict.status !== 'settled') { verdictRow.verdict = { status: 'settled', item: browserItem, p: null, calls: verdictRow.verdict.calls, answers: verdictRow.verdict.answers ?? {}, via: 'options' }; verdictRow.record.status = 'settled'; verdictRow.record.reason = null; verdictRow.record.kind = browserItem.kind; verdictRow.record.id = browserItem.id }
+      }
     } catch { note = null; handedOff = false }
     return { preRun, provider, note, handedOff, adopted: false }
   }

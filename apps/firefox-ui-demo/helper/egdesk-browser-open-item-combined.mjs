@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
 import { createBrowserTaskStore } from './egdesk-browser-task.mjs'
-import { createBrowserOpenItems, optionQuestionName } from './egdesk-browser-open-items.mjs'
+import { createBrowserOpenItems, optionQuestionName, readFromResolver } from './egdesk-browser-open-items.mjs'
 import { buildRegistry, resolveOpenItem } from './egdesk-open-items.mjs'
 import { OPEN_ITEM_HARD_LIMITS, guardedFetch } from './egdesk-browser-open-item-measure.mjs'
 
@@ -12,7 +12,7 @@ import { OPEN_ITEM_HARD_LIMITS, guardedFetch } from './egdesk-browser-open-item-
 // runtime's own words: a test checks the runtime's source for them). Items are listed in the runtime's order: the built-ins first, the browser task last.
 // Pre-registered in scripts/egdesk-browser-open-item-combined-plan.json. Verdicts by code from the plan alone.
 export const COMBINED_PLAN_FILE = new URL('../scripts/egdesk-browser-open-item-combined-plan.json', import.meta.url)
-export const COMBINED_PLAN_FILES = Object.freeze({ v1: COMBINED_PLAN_FILE, v2: new URL('../scripts/egdesk-browser-open-item-combined-plan-v2.json', import.meta.url) })
+export const COMBINED_PLAN_FILES = Object.freeze({ v1: COMBINED_PLAN_FILE, v2: new URL('../scripts/egdesk-browser-open-item-combined-plan-v2.json', import.meta.url), v3: new URL('../scripts/egdesk-browser-open-item-combined-plan-v3.json', import.meta.url) })
 export const APPROVAL_SUMMARY = command => `A command waits for the person's yes or no before it runs: ${String(command).replace(/\s+/g, ' ').trim().slice(0, 200)}`
 export const MEMORY_SUMMARY = 'EG-Desk told the person it noted something from the conversation and is waiting for the person to confirm or refuse it.'
 const KEY = { cid: 'dm-1', clientThreadId: 'dm-1' }
@@ -67,6 +67,12 @@ export function planRequest(plan, reply) {
 
 /** outcome of one reply: { item: 'approval'|'memory'|'browser'|null, option, optionKind, outcome } */
 export function outcomeOf(items, verdict, browser) {
+  // c43: with the browser task as the only open item a referent below the bar does not veto its options (readFromResolver { sole }): the same function the runtime calls
+  if (verdict.status !== 'settled' && items.length === 1 && verdict.reason === 'no_item_referred' && verdict.answers) {
+    const read = readFromResolver(verdict, browser, KEY.clientThreadId, { sole: true })
+    if (read?.kind === 'settled') return { item: 'browser', option: read.optionId, optionKind: 'settled', outcome: `browser:${read.optionId}`, viaOptions: true, p: read.p }
+    if (read?.kind === 'uncertain') return { item: 'browser', option: null, optionKind: 'uncertain', outcome: 'browser:uncertain', viaOptions: true, p: read.p }
+  }
   if (verdict.status !== 'settled') return { item: null, option: null, optionKind: null, outcome: 'none', reason: verdict.reason ?? null }
   const kind = verdict.item.kind === 'browser_task' ? 'browser' : verdict.item.kind
   if (kind !== 'browser') return { item: kind, option: null, optionKind: null, outcome: kind, reason: null }

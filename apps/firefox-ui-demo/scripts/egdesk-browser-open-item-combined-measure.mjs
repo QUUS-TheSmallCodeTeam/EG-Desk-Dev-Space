@@ -7,7 +7,7 @@ import { COMBINED_PLAN_FILES, combinedStandIn, loadCombinedPlan, runCombined, se
 // c42: the product's own turn-start request when a browser task is open (the resolver's referent question + the option predicates, one request) on 12 short replies after a
 // hand-over and 4 controls with another open item. Pre-registered in scripts/egdesk-browser-open-item-combined-plan.json. Decisions only. Dry by default.
 //   node scripts/egdesk-browser-open-item-combined-measure.mjs                                   # dry: sizes, drop order, the plan
-//   --plan v1 (as sent in c62) | v2 (c43: after the summary change)
+//   --plan v1 (as sent in c62) | v2 (c43: after the summary change) | v3 (c43: a sole open item is not vetoed by the referent)
 //   OPENAI_API_KEY=... node scripts/egdesk-browser-open-item-combined-measure.mjs [--plan v2] --send [--budget 16000] [--out results.json]
 // The key is read from OPENAI_API_KEY only and is never printed or written. No retries; the request limit and the token ceiling (16k) stop it.
 const args = process.argv.slice(2)

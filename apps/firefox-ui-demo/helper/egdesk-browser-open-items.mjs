@@ -139,16 +139,20 @@ export function settledNote(task, optionId, { lines = [] } = {}) {
 }
 
 /**
- * readFromResolver(verdict, provider, conversationKey) -> a read for entry.handle({ openItemRead }) or null (decide on your own).
+ * readFromResolver(verdict, provider, conversationKey, { sole }) -> a read for entry.handle({ openItemRead }) or null (decide on your own).
  * c39 (the product with both flags on: EGDESK_OPEN_ITEMS and EGDESK_BROWSER_OPEN_ITEMS): the resolver (lane L1, egdesk-open-items.mjs) already asked, in the turn-start request, whether
  * this message settles the browser task (oi_ref_n) AND the task's option predicates. The pre-turn entry must not ask again or decide differently:
  *   settled to the browser task -> the provider's own read of the same answers (settled, none or uncertain: nothing is applied unless settled)
  *   settled to another item, or no item referred, or several -> { kind: 'none' }: the message is not about this task (an ordinary turn, the task as it was)
  *   the resolver did not decide (no verdict, unreachable, unanswered) -> null: the entry decides as it does with the resolver off
  */
-export function readFromResolver(verdict, provider, conversationKey) {
+export function readFromResolver(verdict, provider, conversationKey, { sole = false } = {}) {
   if (!verdict || typeof verdict !== 'object') return null
   if (verdict.status === 'settled') return verdict.item?.provider === 'browser' && typeof provider?.read === 'function' ? provider.read(verdict.answers ?? {}, conversationKey) : { kind: 'none', p: {} }
+  // c43 (real, c64, combined-v2): with the browser task as the ONLY open item the referent has nothing to arbitrate, and it is the strictest judge of short replies ("했어" 0.40, "다시 해줘" 0.30,
+  // "그만해" 0.84, a page question 0.00 against the 0.85 bar) while the task's own options, asked in the same request, read them well (c59, c41: 0 wrong over 24 replies). So a referent below the bar does not veto
+  // the options of a sole item: the provider reads them from the answers of the same request (same rules: one option decided yes, the rest decided no). With another open item the referent still arbitrates.
+  if (sole === true && verdict.reason === 'no_item_referred' && verdict.answers && typeof provider?.read === 'function') return provider.read(verdict.answers, conversationKey)
   return ['no_item_referred', 'several_items'].includes(verdict.reason) ? { kind: 'none', p: {} } : null
 }
 

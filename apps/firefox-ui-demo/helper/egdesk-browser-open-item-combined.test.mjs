@@ -100,3 +100,15 @@ test('a model that settles every message to the browser task is caught; one that
   assert.equal(ok.stoppedBecause, 'token_ceiling', 'real usage above the estimate stops the run at the ceiling')
   assert.ok(ok.usage.inputTokens <= 16000); assert.equal(JSON.stringify(ok).includes(KEY), false)
 })
+
+test('c43 (c64): with the referent as strict as the real model was (the browser task 0.40 on every short reply, the other items as the plan wants), a sole browser item is settled by its own options and the multi-item replies are as before; the resolver\'s none carries the answers', async () => {
+  const strict = body => combinedStandIn(plan2)(body).map(a => (/^oi_ref_\d+$/.test(a.name) && body.questions.filter(q => /^oi_ref_/.test(q.name)).length === 1 ? { ...a, probability: a.probability > 0.5 ? 0.4 : a.probability } : a))
+  const out = await runCombined({ plan: plan2, scripted: strict })
+  assert.deepEqual(out.rows.map(r => [r.id, r.outcome]), [['ack', 'browser:continue'], ['again', 'browser:retry'], ['stop', 'browser:abandon'], ['page', 'browser:ask_page'], ['notyet', 'none'], ['change', 'browser:change'], ['ctl-appr', 'approval'], ['ctl-appr-browser', 'browser:continue'], ['ctl-mem', 'memory'], ['ctl-mem-page', 'browser:ask_page']])
+  assert.deepEqual(out.rows.filter(r => r.viaOptions).map(r => r.id), ['ack', 'again', 'stop', 'page', 'change'], 'the sole-item replies were settled by the options')
+  assert.equal(out.score.wrong, 0)
+  // the none of the resolver carries the same request's answers (the provider reads them)
+  const { items, extraQuestions } = planRequest(plan2, plan2.replies.find(r => r.id === 'ack'))
+  const none = await resolveOpenItem({ message: '했어', items, extraQuestions, client: { decide: async request => ({ answers: Object.fromEntries(request.questions.map(q => [q.name, { type: 'predicate', probability: q.name === 'oi_ref_1' ? 0.4 : 0.9 }])) }) } })
+  assert.deepEqual([none.status, none.reason, Object.keys(none.answers).length], ['none', 'no_item_referred', 6])
+})

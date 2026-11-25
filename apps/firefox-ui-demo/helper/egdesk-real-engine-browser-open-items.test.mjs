@@ -25,6 +25,7 @@ const REPLIES = {
   '지금 화면에 뭐라고 나와?': '지금 화면에는 로그인이 필요하다는 안내가 나와 있어요.',
   '고마워. 그런데 자바스크립트 배열 정렬은 어떻게 해?': 'arr.sort()를 쓰면 되고, 숫자는 (a, b) => a - b 비교 함수를 넘기세요.',
 }
+let STRICT = false
 /** The scripted Decision model: what a sensible one answers, from the evidence it is given. */
 function decide(body) {
   const ev = body.input.map(m => (typeof m.content === 'string' ? m.content : '')).join('\n')
@@ -33,7 +34,7 @@ function decide(body) {
   return body.questions.map(q => {
     const values = (q.choices ?? []).map(c => c.value)
     const yes = p => ({ name: q.name, type: 'predicate', probability: p })
-    if (/^oi_ref_/.test(q.name)) return yes(/자바스크립트/.test(message) ? 0.04 : 0.96) // the resolver: does this message settle the open browser task?
+    if (/^oi_ref_/.test(q.name)) return yes(STRICT ? 0.3 : /자바스크립트/.test(message) ? 0.04 : 0.96) // the resolver: does this message settle the open browser task? (STRICT: the c64 reading: short replies stay under the bar)
     const open = /^open_browser_(.*)$/.exec(q.name)?.[1]
     if (open) { const want = /다시 해줘/.test(message) ? 'retry' : /^했어$/.test(message) ? 'continue' : /그만/.test(message) ? 'abandon' : /화면/.test(message) ? 'ask_page' : null; return yes(open === want ? 0.97 : 0.03) }
     if (q.name === 'browser_entry' || /^browser_entry_card_/.test(q.name)) return yes(0.95)
@@ -112,4 +113,17 @@ test('the checks by code: a wrong option, an option applied when none fit, a not
   const none = run({ openItemNone: true }, noneRec)
   assert.deepEqual([none.open_item_none, none.note_delivered, none.entered], [true, undefined, undefined], 'no note by design: nothing to deliver, no entry to check')
   assert.equal(run({ openItemNone: true }).open_item_none, false)
+})
+
+test('c43 (c64: the referent read the short replies under the 0.85 bar): with the browser task as the sole open item the options of the same request settle the option, every conversation still passes, and the unrelated message still settles nothing', async t => {
+  STRICT = true
+  try {
+    const w = world(t, REPLIES)
+    const result = await runCheck(w.options, asScripts(buildBrowserOpenItemsScript()), w.deps)
+    for (const rec of result.records) { assert.equal(rec.aborted, null, rec.abortDetail); assert.deepEqual(failedOf(rec), [], `${rec.id}: ${JSON.stringify(rec.turns.map(turn => turn.expectations.filter(c => !c.ok)))}`) }
+    const second = id => result.records.find(r => r.id === id).turns[1].browserLoop
+    assert.deepEqual(result.records.map(r => r.turns[1].browserLoop.openItem.resolver.status), ['none', 'none', 'none', 'none', 'none'], 'the referent settled nothing')
+    assert.deepEqual(['oi-continue', 'oi-retry', 'oi-abandon', 'oi-ask-page'].map(id => second(id).openItem.settled), ['continue', 'retry', 'abandon', 'ask_page'], 'the options of the same request did')
+    assert.equal(second('oi-unrelated').entry.reason, 'unrelated'); assert.equal(w.decisionBodies.filter(b => b.questions.some(q => q.name === 'oi_ref_1')).length, 5, 'still one request per message')
+  } finally { STRICT = false }
 })
