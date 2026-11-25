@@ -17,7 +17,9 @@ export const PROPOSAL_YES = 0.8
 export const PROPOSAL_PREDICATES = Object.freeze({
   proposal: index => ({ name: `pq_${index}`, instructions: 'Does this sentence offer to do something that has not been done yet and ask the person whether to go ahead with it, or to choose between ways of doing it?' }),
   request: index => ({ name: `ph_${index}`, instructions: 'Does this sentence ask the person for something the assistant is waiting for: to do something themselves, or to tell the assistant something or answer a question about the facts?' }),
-  waiting: { name: 'pw', instructions: 'The person asked the assistant to do something but to hold off and report first. Does this paragraph report that and leave the action itself waiting, not done, for the person\'s go-ahead?' },
+  // c37: one concrete condition. The earlier wording ("…report that and leave the action itself waiting, not done, for the person's go-ahead?") asked three things at once and scored
+  // .56 on the engine's "파일은 변경하지 않았습니다." (c56) and .82 on "…아직 수정하지 않았습니다." (c59). This one scored 1.0 on both phrasings and 0 on the two real "already done" answers (c59, 4/4).
+  waiting: { name: 'pw', instructions: 'The person asked the assistant to hold off on an action and only report first. Does this paragraph say that the action has not been done?' },
 })
 
 const clip = (text, n) => String(text ?? '').replace(/[ \t]+/g, ' ').trim().slice(0, n)
