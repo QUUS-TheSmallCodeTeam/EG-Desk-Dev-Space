@@ -11,3 +11,14 @@ test('the flag is the terminal opener\'s, exactly "on"', () => {
   for (const v of ['1', 'true', 'ON', '', undefined]) assert.equal(authOpaqueOn({ [AUTH_OPAQUE_FLAG]: v }), false)
   assert.equal(authOpaqueOn({}), false)
 })
+
+import { withoutAuthOpaqueSources } from './egdesk-auth-opaque.mjs'
+import { readFileSync } from 'node:fs'
+test('selected Browser Cards on a sign-in domain are dropped from the request when the flag is on, and the body is otherwise the same object', () => {
+  const on = { [AUTH_OPAQUE_FLAG]: 'on' }, card = (id, uri) => ({ kind: 'browser', sourceRef: { viewId: id, uri } })
+  const body = { message: 'x', selectedSources: [card('a', 'https://claude.com/cai/oauth/authorize?state=s'), card('b', 'https://example.test/'), { kind: 'file', sourceRef: {} }] }
+  assert.deepEqual(withoutAuthOpaqueSources(body, on).selectedSources.map(s => s.sourceRef.viewId), ['b', undefined]); assert.equal(withoutAuthOpaqueSources(body, on).message, 'x')
+  assert.equal(withoutAuthOpaqueSources(body, {}), body, 'flag off: the same object'); assert.equal(withoutAuthOpaqueSources({ message: 'y' }, on).message, 'y')
+  const clean = { selectedSources: [card('b', 'https://example.test/')] }; assert.equal(withoutAuthOpaqueSources(clean, on), clean)
+  assert.match(readFileSync(new URL('./codex-chat-runtime.mjs', import.meta.url), 'utf8'), /async startTurn\(body, context\) \{\n    body = withoutAuthOpaqueSources\(body\)/)
+})

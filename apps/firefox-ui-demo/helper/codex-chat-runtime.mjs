@@ -146,6 +146,7 @@ import { previousReplyExcerpt } from './egdesk-previous-reply.mjs'
 import { createProposalOpenItems } from './egdesk-open-proposal-items.mjs'
 import { createBrowserOpenItems } from './egdesk-browser-open-items.mjs'
 import { OPEN_ITEMS_KEY, buildRegistry, openItemsContext, registeredOpenItemProviders, resolveOpenItem } from './egdesk-open-items.mjs'
+import { withoutAuthOpaqueSources } from './egdesk-auth-opaque.mjs'
 import { RECORDING_RULE, deriveTurnPosition, memoryEvidence, memoryMaterials, prepareTurnMemory, recordStateEvidence } from './egdesk-turn-memory.mjs'
 import { CONFIRM_LIMITS, confirmationNote, judgeConfirmation } from './egdesk-record-confirmation.mjs'
 import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, decideBrowserEntry, readBrowserEntry, rideAlongEntry } from './egdesk-browser-task.mjs'
@@ -2547,6 +2548,7 @@ export class CodexChatRuntime {
   }
 
   async startTurn(body, context) {
+    body = withoutAuthOpaqueSources(body) // c34 (flag EGDESK_TERMINAL_OPEN_URL): a Browser Card on an AI provider's sign-in page is never handed to an Agent
     const engine = this.engines.get(context.engine.id)
     const profileId = context.route.engineProfileId
     const slot = this.operationSlot(engine.id, profileId)

@@ -16,3 +16,9 @@ export function isAuthOpaqueUrl(value) {
     return AUTH_OPAQUE_HOSTS.some(h => host === h || host.endsWith(`.${h}`))
   } catch { return false }
 }
+
+/** The request body without the Browser Cards that show an AI provider's sign-in page (flag on): they are never selected for an Agent, so no grant, host, title or page text of them is built. */
+export function withoutAuthOpaqueSources(body, env = process.env) {
+  if (!authOpaqueOn(env) || !Array.isArray(body?.selectedSources) || !body.selectedSources.some(source => isAuthOpaqueUrl(source?.sourceRef?.uri))) return body
+  return { ...body, selectedSources: body.selectedSources.filter(source => !isAuthOpaqueUrl(source?.sourceRef?.uri)) }
+}
