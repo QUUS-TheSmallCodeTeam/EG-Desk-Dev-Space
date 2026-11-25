@@ -42,6 +42,7 @@ import { createProfileHttpHandler } from './egdesk-profile-http.mjs'
 import { openDeskStore } from './egdesk-desk-store.mjs'
 import { openBridgeSettings } from './egdesk-bridge-settings.mjs'
 import { createDecisionBudget, createDecisionClient, decisionTopicRecipient } from './egdesk-decision-client.mjs'
+import { decisionCallLogFromEnv, recordDecisionCalls } from './egdesk-decision-call-log.mjs' // u4
 import { createDecisionTransport } from './egdesk-decision-transport.mjs'
 import { createDecisionActivity, createDecisionWarmup, warmupConfigFromEnv } from './egdesk-decision-warmup.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
@@ -273,8 +274,10 @@ const decisionTransport = createDecisionTransport()
 // minutes ago" is known for any kind of request, and one fixed content-free request may be sent when a composer is used or a turn starts.
 const decisionWarmupConfig = warmupConfigFromEnv(process.env)
 const decisionActivity = decisionWarmupConfig.mode === 'off' ? null : createDecisionActivity({ idleMs: decisionWarmupConfig.idleMs })
-const decisionClient = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget, recipientForKey: recipientForDecisionKey,
+const decisionClientBase = createDecisionClient({ getApiKey: () => decisionCredentials.getApiKey(), budget: decisionBudget, recipientForKey: recipientForDecisionKey,
   fetchImpl: decisionActivity ? decisionActivity.wrap(decisionTransport.fetch) : decisionTransport.fetch })
+// u4: developer flag EGDESK_DECISION_CALL_LOG=on (default off): every decision call is noted as a closed row (kind, start/end ms, input and cached tokens, outcome) around THE client; off, this is the client itself
+const decisionClient = recordDecisionCalls(decisionClientBase, decisionCallLogFromEnv(process.env))
 const decisionWarmup = decisionActivity ? createDecisionWarmup({ client: decisionClient, activity: decisionActivity, mode: () => decisionWarmupConfig.mode,
   decisionsMode: () => bridgeSettings.decisionContext.mode, hasKey: () => decisionCredentials.getApiKey() !== null, idleMs: decisionWarmupConfig.idleMs, joinMs: decisionWarmupConfig.joinMs }) : null
 const recipientForCodexDecisions = ({ engineId, engineProfileId, ownerKey }) => {

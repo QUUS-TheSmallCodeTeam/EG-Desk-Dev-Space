@@ -154,6 +154,14 @@ export function createChatHttpHandler(chat, ensureAuth, history = chat) {
       }
       return true
     }
+    // u4 (flag EGDESK_DECISION_CALL_LOG=on; off, this route is not there): the decision-call rows of the most recent turns, closed fields only (kind, start/end ms from the turn's start, input and cached tokens, outcome).
+    //   GET /chat/decision-calls[?limit=N]   N is 1-64, default 10
+    if (req.method === 'GET' && url.pathname === '/chat/decision-calls' && typeof chat.decisionCallTurns === 'function' && chat.callLog?.()) {
+      const raw = url.searchParams.get('limit'), limit = raw === null ? 10 : /^\d{1,2}$/.test(raw) ? Number(raw) : NaN
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64) { sendJson(res, 400, { code: 'INVALID_DECISION_CALLS_QUERY', error: 'limit is 1-64' }); return true }
+      sendJson(res, 200, chat.decisionCallTurns(limit))
+      return true
+    }
     if (req.method === 'GET' && url.pathname === '/chat/state') {
       sendJson(res, 200, chat.snapshot(url.searchParams.get('conversationId')))
       return true

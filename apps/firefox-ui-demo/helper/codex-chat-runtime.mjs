@@ -1862,7 +1862,46 @@ export class CodexChatRuntime {
   // internal (never reachable from HTTP, which passes one argument):
   // { board: run.board attribution + block, blocks: { key: text } } — extra
   // turn context from sendBoard / reassignSubAgent. { newRoomProfile } (L1 c26): the account a NEW room starts on, from the plan runner (flag roomAccount).
-  async send(body, internal = null) {
+  // ---- u4: the decision-call log (flag EGDESK_DECISION_CALL_LOG, default off: callLog() is null and send() is exactly sendTurn()) ----
+  /** The log the decision client carries (egdesk-decision-call-log.mjs), or null. */
+  callLog() { try { return this.decisionContext?.client?.callLog ?? null } catch { return null } }
+
+  send(body, internal = null) {
+    const log = this.callLog(), key = typeof body?.requestId === 'string' && body.requestId ? body.requestId : null
+    if (!log || !key) return this.sendTurn(body, internal)
+    if (this.callLogWatching !== log) { this.callLogWatching = log; log.onCall(requestId => this.noteDecisionCall(requestId, log)) }
+    log.beginTurn(key)
+    return log.scope(key, () => this.sendTurn(body, internal))
+  }
+
+  /** Work that follows the answer (the events queue) runs in the scope of its run's request, so a check or a heartbeat after the answer is the same turn's. */
+  applyScoped(event) {
+    const log = this.callLog()
+    if (!log) return this.apply(event)
+    const requestId = this.runs.get(runKey(event?.threadId, event?.turnId))?.requestId
+    return requestId ? log.scope(requestId, () => this.apply(event)) : this.apply(event)
+  }
+
+  /** A call was noted: the turn's decision-context row carries the calls so far (closed rows, detail only: the store persists them with the run). */
+  noteDecisionCall(requestId, log) {
+    try {
+      const run = [...this.runs.values()].find(candidate => candidate.requestId === requestId)
+      const row = run?.activities?.find(activity => activity.kind === 'decisionContext')
+      if (!row) return
+      const updated = { ...row, detail: { ...row.detail, calls: log.callsFor(requestId) } }
+      this.put(run, 'activities', updated)
+      this.emit(run, 'activity.updated', updated)
+    } catch { /* the log never affects a turn */ }
+  }
+
+  /** The route's answer: the most recent turns' calls, closed fields only. */
+  decisionCallTurns(limit = 10) {
+    const log = this.callLog()
+    if (!log) return { turns: [] }
+    return { turns: log.recent(limit).map(turn => { const run = [...this.runs.values()].find(candidate => candidate.requestId === turn.requestId); return { requestId: turn.requestId, ...(run ? { runId: run.runId } : {}), startedAt: turn.startedAt, calls: turn.calls } }) }
+  }
+
+  async sendTurn(body, internal = null) {
     // c32 (flag decisionContext.openItems, default off): which open item (a command waiting for yes/no, a question the run asked, a run, a browser task, a memory reading) this message settles, decided before anything else.
     const openVerdict = !internal && this.openItemsOn() ? await this.resolveOpenItems(body) : null
     // A reply to an early question the run asked while it keeps working goes into that same run (flag decisionContext.conversationFlow).
@@ -4398,7 +4437,7 @@ export class CodexChatRuntime {
     const engineId = this.threadEngine(routeThread)
     const slot = this.threadOperationSlot(routeThread)
     const epoch = this.epochOf(engineId, slot)
-    this.queue = this.queue.then(() => epoch === this.epochOf(engineId, slot) ? this.apply(event) : undefined).catch(() => {
+    this.queue = this.queue.then(() => epoch === this.epochOf(engineId, slot) ? this.applyScoped(event) : undefined).catch(() => {
       const run = this.runs.get(runKey(event.threadId, event.turnId))
       if (run) {
         run.error = publicError('Bridge could not process a Codex event', 'EVENT_PROCESSING_FAILED')
@@ -5367,6 +5406,7 @@ export class CodexChatRuntime {
     activity.detail = { ...activity.detail, mode, outcome: result.status, attached, ...(result.reason ? { reason: result.reason } : {}),
       ...(result.receipt ? { receipt: (({ speech, ...shown }) => shown)(result.receipt) } : {}) }
     run.decisionContextReceipt = result.receipt || null // internal: keeps the speech trace
+    try { const calls = this.callLog()?.callsFor(run.requestId); if (calls?.length) activity.detail.calls = calls } catch { /* u4: the calls so far */ }
     this.put(run, 'activities', activity)
     this.emit(run, 'activity.completed', activity)
   }
