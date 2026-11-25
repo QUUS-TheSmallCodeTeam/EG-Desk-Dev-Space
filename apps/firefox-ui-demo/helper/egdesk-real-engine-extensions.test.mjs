@@ -23,8 +23,9 @@ const LANES = {
   L5: { expectKeys: ['deleted', 'coding', 'git'], conversationFields: ['seededWrites', 'gitScenario'], turnHooks: ['coding', 'gitScene'] },
   L8: { expectKeys: ['browserAnswer'], turnFields: ['browserTask'], turnHooks: ['browserAnswer'] },
   L7: { expectKeys: ['memory'], conversationFields: ['memory'], turnHooks: ['memory'] },
+  L6: { turnFields: ['plant'], turnHooks: ['planted'] }, // c28: the planted-draft mode of L2's rewrite tool
 }
-const BEFORE = { turnHooks: [['memory', 'journey']] }
+const BEFORE = { turnHooks: [['memory', 'journey'], ['rewrite', 'planted']] }
 const registered = { expectKeys: registeredExpectKeys, conversationFields: registeredConversationFields, turnFields: registeredTurnFields, turnHooks: registeredTurnHookNames }
 
 test('registrations: every lane\'s keys are registered, once, with a schema in the generated script schema; the core lists none of them', () => {

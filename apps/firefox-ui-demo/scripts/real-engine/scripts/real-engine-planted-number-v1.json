@@ -1,0 +1,214 @@
+{
+  "set": "real-engine-planted-number-v1",
+  "description": "The draft check's REWRITE with a PLANTED draft (L6 c28), case number: three figures are asked, the records hold one (18%). The recorded draft states it and an unsupported \"약 27%\". Expectations by code: the first reading finds the draft, no number outside the records and the person's words reaches the person. Needs --decisions and --persisted-with-cleanup.",
+  "conversations": [
+    {
+      "id": "planted-number-1",
+      "agentProfile": {
+        "name": "벤치마크 담당",
+        "role": "성능 결과 정리",
+        "tone": "concise",
+        "expertise": [
+          "성능"
+        ],
+        "instructions": "사람이 요청한 항목마다 한 문장으로 한국어로 답한다. 기록에 없는 것은 말하지 않는다."
+      },
+      "draftCheck": {
+        "mode": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "db/pg-health",
+            "title": "헬스체크 3종 체크리스트",
+            "body": "헬스체크 3종: 연결 풀 응답, 쓰기 지연 50ms 이하, 복제 지연 없음. 전부 통과하면 배포 성공으로 본다.",
+            "time": "present",
+            "status": "done"
+          },
+          {
+            "id": "db/pg-bench",
+            "title": "전환 벤치마크 결과",
+            "body": "테스트 환경 벤치마크: 쓰기 지연이 SQLite 대비 평균 18% 줄었다. 운영 수치는 아니다.",
+            "time": "past",
+            "status": "done"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "전환 벤치마크 결과를 쓰기 지연, 읽기 지연, 복제 지연 순서로 각각 몇 퍼센트 변했는지 한 문장씩 정리해 줘.",
+          "plant": {
+            "draft": "쓰기 지연은 SQLite 대비 평균 18% 줄었고, 읽기 지연은 약 27% 줄었습니다."
+          },
+          "expect": {
+            "rewrite": {
+              "finding": true,
+              "neverShown": {
+                "numbers": true
+              }
+            },
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "planted-number-2",
+      "agentProfile": {
+        "name": "벤치마크 담당",
+        "role": "성능 결과 정리",
+        "tone": "concise",
+        "expertise": [
+          "성능"
+        ],
+        "instructions": "사람이 요청한 항목마다 한 문장으로 한국어로 답한다. 기록에 없는 것은 말하지 않는다."
+      },
+      "draftCheck": {
+        "mode": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "db/pg-health",
+            "title": "헬스체크 3종 체크리스트",
+            "body": "헬스체크 3종: 연결 풀 응답, 쓰기 지연 50ms 이하, 복제 지연 없음. 전부 통과하면 배포 성공으로 본다.",
+            "time": "present",
+            "status": "done"
+          },
+          {
+            "id": "db/pg-bench",
+            "title": "전환 벤치마크 결과",
+            "body": "테스트 환경 벤치마크: 쓰기 지연이 SQLite 대비 평균 18% 줄었다. 운영 수치는 아니다.",
+            "time": "past",
+            "status": "done"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "전환 벤치마크 결과를 쓰기 지연, 읽기 지연, 복제 지연 순서로 각각 몇 퍼센트 변했는지 한 문장씩 정리해 줘.",
+          "plant": {
+            "draft": "쓰기 지연은 SQLite 대비 평균 18% 줄었고, 읽기 지연은 약 27% 줄었습니다."
+          },
+          "expect": {
+            "rewrite": {
+              "finding": true,
+              "neverShown": {
+                "numbers": true
+              }
+            },
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "planted-number-3",
+      "agentProfile": {
+        "name": "벤치마크 담당",
+        "role": "성능 결과 정리",
+        "tone": "concise",
+        "expertise": [
+          "성능"
+        ],
+        "instructions": "사람이 요청한 항목마다 한 문장으로 한국어로 답한다. 기록에 없는 것은 말하지 않는다."
+      },
+      "draftCheck": {
+        "mode": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "db/pg-health",
+            "title": "헬스체크 3종 체크리스트",
+            "body": "헬스체크 3종: 연결 풀 응답, 쓰기 지연 50ms 이하, 복제 지연 없음. 전부 통과하면 배포 성공으로 본다.",
+            "time": "present",
+            "status": "done"
+          },
+          {
+            "id": "db/pg-bench",
+            "title": "전환 벤치마크 결과",
+            "body": "테스트 환경 벤치마크: 쓰기 지연이 SQLite 대비 평균 18% 줄었다. 운영 수치는 아니다.",
+            "time": "past",
+            "status": "done"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "전환 벤치마크 결과를 쓰기 지연, 읽기 지연, 복제 지연 순서로 각각 몇 퍼센트 변했는지 한 문장씩 정리해 줘.",
+          "plant": {
+            "draft": "쓰기 지연은 SQLite 대비 평균 18% 줄었고, 읽기 지연은 약 27% 줄었습니다."
+          },
+          "expect": {
+            "rewrite": {
+              "finding": true,
+              "neverShown": {
+                "numbers": true
+              }
+            },
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "planted-number-4",
+      "agentProfile": {
+        "name": "벤치마크 담당",
+        "role": "성능 결과 정리",
+        "tone": "concise",
+        "expertise": [
+          "성능"
+        ],
+        "instructions": "사람이 요청한 항목마다 한 문장으로 한국어로 답한다. 기록에 없는 것은 말하지 않는다."
+      },
+      "draftCheck": {
+        "mode": "on"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "db/pg-health",
+            "title": "헬스체크 3종 체크리스트",
+            "body": "헬스체크 3종: 연결 풀 응답, 쓰기 지연 50ms 이하, 복제 지연 없음. 전부 통과하면 배포 성공으로 본다.",
+            "time": "present",
+            "status": "done"
+          },
+          {
+            "id": "db/pg-bench",
+            "title": "전환 벤치마크 결과",
+            "body": "테스트 환경 벤치마크: 쓰기 지연이 SQLite 대비 평균 18% 줄었다. 운영 수치는 아니다.",
+            "time": "past",
+            "status": "done"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "전환 벤치마크 결과를 쓰기 지연, 읽기 지연, 복제 지연 순서로 각각 몇 퍼센트 변했는지 한 문장씩 정리해 줘.",
+          "plant": {
+            "draft": "쓰기 지연은 SQLite 대비 평균 18% 줄었고, 읽기 지연은 약 27% 줄었습니다."
+          },
+          "expect": {
+            "rewrite": {
+              "finding": true,
+              "neverShown": {
+                "numbers": true
+              }
+            },
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}
