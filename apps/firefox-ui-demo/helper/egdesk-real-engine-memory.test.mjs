@@ -562,5 +562,5 @@ test('prefetch compare script: pairs the -off and -on records and prints the sav
   const rec = (id, ms, calls) => ({ set: 'real-engine-prefetch-v1', id, ok: true, turns: [{ posted: ['4,730만 원 입니다.'], contextKeys: ['egdesk_decision_context'], subTurns: [{ latencyMs: ms, toolCalls: Array.from({ length: calls }, () => ({ tool: 'egdesk_read_source' })), items: { agentMessage: 1 }, usage: { input: 13000 } }] }] })
   for (const [id, ms, calls] of [['notes-off', 12400, 2], ['notes-on', 4600, 0], ['code-off', 11800, 2], ['code-on', 5000, 0], ['ledger-off', 13100, 3], ['ledger-on', 4900, 0]]) fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(rec(id, ms, calls)))
   const out = execFileSync(process.execPath, [path.join(app, 'scripts/egdesk-prefetch-compare.mjs'), dir], { encoding: 'utf8' })
-  assert.match(out, /\| notes \| saving \| \| 2 calls \| 7\.8/); assert.match(out, /mean saving over 3 pairs: 7\.6 s per turn/); assert.match(out, /\| ledger \| off \| ok \| 3 \(egdesk_read_source\)/)
+  assert.match(out, /\| notes \| saving \| \| 2 calls \| 7\.8/); assert.match(out, /mean saving over 3 pairs: 7\.6 s per turn/); assert.match(out, /\| ledger \| off \| ok \| 3 \(egdesk_read_source/)
 })
