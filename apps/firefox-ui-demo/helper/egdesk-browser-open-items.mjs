@@ -18,7 +18,7 @@ import { FOREGROUND_DECISION_TIMEOUT_MS } from './egdesk-decision-client.mjs'
 export const OPEN_ITEMS_FLAG = 'EGDESK_BROWSER_OPEN_ITEMS'
 export const OPEN_ITEM_KIND = 'browser_task'
 export const MAX_ITEM_SUMMARY = 300
-export const MAX_ITEM_GOAL = 120
+export const MAX_ITEM_GOAL = 90, MAX_ITEM_ASKED = 110 // c43: the goal and what the person was asked share the 300 characters of the summary
 
 // state of a live task (code: no judgment). waiting: it asked the person something; handed_over: the next step is the person's (a sign-in, a code, a
 // control only the person operates, a checkout); stuck: it cannot go on for another reason; running: the loop is working.
@@ -52,7 +52,10 @@ export function openItemSummary(task) {
   const state = openItemState(task)
   if (!state) return null
   const code = state === 'running' ? null : word(task.pause?.code)
-  return compactText(`Browser task "${compactText(String(task.goal ?? '').replace(/"/g, "'"), MAX_ITEM_GOAL)}": ${state}${code ? ` (${code})` : ''}, ${task.steps + (state === 'running' ? task.liveStep : 0)} steps done.`, MAX_ITEM_SUMMARY)
+  // c43 (real, c62, combined-v1): the resolver reads the message against THIS text only. Without what the person was asked, a bare "했어" had no referent (0.01) while "로그인했어" had one (0.96), and a vague "응 실행해"
+  // read 0.94 as going on with it. The line the person was asked (the engine's own message, already quoted in the option request) goes in, bounded; code-built, no page text.
+  const asked = typeof task.question === 'string' && task.question.trim() ? ` Asked of the person: "${compactText(task.question.replace(/"/g, "'"), MAX_ITEM_ASKED)}"` : ''
+  return compactText(`Browser task "${compactText(String(task.goal ?? '').replace(/"/g, "'"), MAX_ITEM_GOAL)}": ${state}${code ? ` (${code})` : ''}, ${task.steps + (state === 'running' ? task.liveStep : 0)} steps done.${asked}`, MAX_ITEM_SUMMARY)
 }
 
 export function openItemOf(task, options = {}) {
@@ -136,16 +139,20 @@ export function settledNote(task, optionId, { lines = [] } = {}) {
 }
 
 /**
- * readFromResolver(verdict, provider, conversationKey) -> a read for entry.handle({ openItemRead }) or null (decide on your own).
+ * readFromResolver(verdict, provider, conversationKey, { sole }) -> a read for entry.handle({ openItemRead }) or null (decide on your own).
  * c39 (the product with both flags on: EGDESK_OPEN_ITEMS and EGDESK_BROWSER_OPEN_ITEMS): the resolver (lane L1, egdesk-open-items.mjs) already asked, in the turn-start request, whether
  * this message settles the browser task (oi_ref_n) AND the task's option predicates. The pre-turn entry must not ask again or decide differently:
  *   settled to the browser task -> the provider's own read of the same answers (settled, none or uncertain: nothing is applied unless settled)
  *   settled to another item, or no item referred, or several -> { kind: 'none' }: the message is not about this task (an ordinary turn, the task as it was)
  *   the resolver did not decide (no verdict, unreachable, unanswered) -> null: the entry decides as it does with the resolver off
  */
-export function readFromResolver(verdict, provider, conversationKey) {
+export function readFromResolver(verdict, provider, conversationKey, { sole = false } = {}) {
   if (!verdict || typeof verdict !== 'object') return null
   if (verdict.status === 'settled') return verdict.item?.provider === 'browser' && typeof provider?.read === 'function' ? provider.read(verdict.answers ?? {}, conversationKey) : { kind: 'none', p: {} }
+  // c43 (real, c64, combined-v2): with the browser task as the ONLY open item the referent has nothing to arbitrate, and it is the strictest judge of short replies ("했어" 0.40, "다시 해줘" 0.30,
+  // "그만해" 0.84, a page question 0.00 against the 0.85 bar) while the task's own options, asked in the same request, read them well (c59, c41: 0 wrong over 24 replies). So a referent below the bar does not veto
+  // the options of a sole item: the provider reads them from the answers of the same request (same rules: one option decided yes, the rest decided no). With another open item the referent still arbitrates.
+  if (sole === true && verdict.reason === 'no_item_referred' && verdict.answers && typeof provider?.read === 'function') return provider.read(verdict.answers, conversationKey)
   return ['no_item_referred', 'several_items'].includes(verdict.reason) ? { kind: 'none', p: {} } : null
 }
 

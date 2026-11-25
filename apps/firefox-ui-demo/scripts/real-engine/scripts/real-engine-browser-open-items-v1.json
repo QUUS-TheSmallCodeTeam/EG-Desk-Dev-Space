@@ -76,7 +76,6 @@
                 "2026-12-20"
               ],
               "noInventedDates": true,
-              "resolverSettled": true,
               "openItemSettled": "continue"
             }
           }
@@ -157,7 +156,6 @@
                 "2026-12-20"
               ],
               "noInventedDates": true,
-              "resolverSettled": true,
               "openItemSettled": "retry"
             }
           }
@@ -231,7 +229,6 @@
             "browserLoop": {
               "entered": true,
               "noActs": true,
-              "resolverSettled": true,
               "openItemSettled": "abandon",
               "noteSettled": "abandon",
               "noteStatus": "cancelled"
@@ -303,7 +300,6 @@
             "browserLoop": {
               "entered": true,
               "noActs": true,
-              "resolverSettled": true,
               "openItemSettled": "ask_page",
               "noteSettled": "ask_page",
               "noteStatus": "cannot_proceed",

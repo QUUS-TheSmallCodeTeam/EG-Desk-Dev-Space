@@ -165,7 +165,7 @@ export function createBrowserLoopHook({ now = Date.now } = {}) {
         const source = createBrowserOpenItems({ store, entry, change: () => false })
         const items = buildRegistry([source], { cid: 'loop-conv', clientThreadId: key })
         const verdict = await resolveOpenItem({ message: turn.say, items, client: logged, askedAt: now(), extraQuestions: source.questions(key, turn.say) })
-        openItemRead = readFromResolver(verdict, items[0]?.source, key)
+        openItemRead = readFromResolver(verdict, items[0]?.source, key, { sole: items.length === 1 }) // c43: the sole open item's own options are not vetoed by the referent
         resolver = { status: verdict.status, reason: verdict.reason ?? null, p: verdict.p ?? null, calls: verdict.calls }
       }
       const out = await entry.handle({ run, conversationKey: key, ...(openItemRead ? { openItemRead } : {}), message: turn.say, hosts: { card: spec.host }, titles: { card: spec.title } })
