@@ -1,10 +1,10 @@
 {
- "set": "all-on-live-journey-variant-v2",
- "version": 8,
- "registered": "2026-11-25 (lane L6 cycle 24), before any send of the variant; variant V2 of plan v8 (egdesk-all-on-live-measure.plan-v8.json, sha256 33740f2ec5cc230f): terse rephrasing; the parts list of the same product as a decoy; four pages renamed. Same steps, same hard checks under the same ids; the person's words, the scripted answering model's words, the page set and the order are the variant's (scripts/egdesk-journey-variants.mjs, sha256 a1a569ed2e4a2e24)",
+ "set": "all-on-live-journey-variant-v1",
+ "version": 9,
+ "registered": "2026-11-25 (lane L6 cycle 24), before any send of the variant; variant V1 of plan v9 (egdesk-all-on-live-measure.plan-v9.json, sha256 3275a8b97dc27834): spoken rephrasing; another company's quote page as a decoy; four pages renamed. Same steps, same hard checks under the same ids; the person's words, the scripted answering model's words, the page set and the order are the variant's (scripts/egdesk-journey-variants.mjs, sha256 7e9f3d8fd3a1f819)",
  "basedOn": {
-  "file": "egdesk-all-on-live-measure.plan-v8.json",
-  "sha256": "33740f2ec5cc230f94be6c5c62b1b4113bbe4ddab469327e64f72502588a34ee",
+  "file": "egdesk-all-on-live-measure.plan-v9.json",
+  "sha256": "3275a8b97dc2783441598391a2d65e237ad4a500e5bdee63fc5f8c27f189b29a",
   "note": "every step and expectation of the base plan; page ids and the two needles mapped; decoy pages added to the prefix exclusions; the briefing step's cap raised for its second fill turn (VARIANT_STEP_CAPS)"
  },
  "world": {
@@ -35,7 +35,7 @@
   },
   "wording": "faithful"
  },
- "how": "Judged only from the results file of a run: what the person sees after each step and the Decision requests of that step. Hard = the journey is broken for the person if it fails; soft = expected but known to be fragile or already reported. \"predicted\" records what this lane expects to fail and why, written before the real run. v2 adds expectations for what the first real run (c16) showed was wrong or misleading for the person although no v1 expectation covered it. v3 adds a genuine recall step and person-level checks of what changed since c16. The scripted subjective model now follows what the product hands it: the recording rule (no promise to record), the choices a task note lists, and the waited-on fact of a note prompt. v4 turns on L7's two turn-memory flags in the world, counts page bodies rather than page headers, and adds the owner question. v5 adds switches: developer flags a run turns on by name, recorded in the results, with expectations judged only under them. v6 adds an in-run nudge: while the long command runs the person asks why it stopped; one true progress reply is expected, no repeated wait message, and the command is not interrupted. v7 adds the other two in-run messages: a change (\"그거 말고 B부터 해줘\", five seconds after the status nudge, same command) and a stop (\"그만해, 그거 하지 마\", ten seconds into a second long command at the end of the journey). The Decision side (does the model read the change as a change, the stop as a stop) is measured on the real answers; the engine side is judged by code on what reached the scripted engine (steer, interrupt) and what the person sees. It also adds a check that the seconds a writer prompt gives for the work match the run's real age, and that the answer the person sees in s3b is about what they asked. v8 adds the empty-answer path as an explicit pair of steps: the Agent answers \"is the PostgreSQL deployment done?\" with \"PostgreSQL 전환 배포를 완료했습니다.\", which the stored plan page records as planned; the tense question flags the one sentence, its one revision fails the check again, every sentence is removed, and per the owner's rule nothing is posted. The steps judge the visible outcome (nothing posted, the wrong number nowhere the person sees it), that it is recorded (the draft check's own content-free outcome), that the next turn is told the person saw no answer, and that the pages that turn carried stay held (not sent again); after it a follow-up is answered normally. The scripted revision keeps a flagged sentence (world.wording \"faithful\"), which is what makes the withheld path certain; a real model may revise differently, and then a revised sentence would be posted instead (outcome revised), which these steps would report as a miss.",
+ "how": "Judged only from the results file of a run: what the person sees after each step and the Decision requests of that step. Hard = the journey is broken for the person if it fails; soft = expected but known to be fragile or already reported. \"predicted\" records what this lane expects to fail and why, written before the real run. v2 adds expectations for what the first real run (c16) showed was wrong or misleading for the person although no v1 expectation covered it. v3 adds a genuine recall step and person-level checks of what changed since c16. The scripted subjective model now follows what the product hands it: the recording rule (no promise to record), the choices a task note lists, and the waited-on fact of a note prompt. v4 turns on L7's two turn-memory flags in the world, counts page bodies rather than page headers, and adds the owner question. v5 adds switches: developer flags a run turns on by name, recorded in the results, with expectations judged only under them. v6 adds an in-run nudge: while the long command runs the person asks why it stopped; one true progress reply is expected, no repeated wait message, and the command is not interrupted. v7 adds the other two in-run messages: a change (\"그거 말고 B부터 해줘\", five seconds after the status nudge, same command) and a stop (\"그만해, 그거 하지 마\", ten seconds into a second long command at the end of the journey). The Decision side (does the model read the change as a change, the stop as a stop) is measured on the real answers; the engine side is judged by code on what reached the scripted engine (steer, interrupt) and what the person sees. It also adds a check that the seconds a writer prompt gives for the work match the run's real age, and that the answer the person sees in s3b is about what they asked. v8 adds the empty-answer path as an explicit pair of steps: the Agent answers \"is the PostgreSQL deployment done?\" with \"PostgreSQL 전환 배포를 완료했습니다.\", which the stored plan page records as planned; the tense question flags the one sentence, its one revision fails the check again, every sentence is removed, and per the owner's rule nothing is posted. The steps judge the visible outcome (nothing posted, the wrong number nowhere the person sees it), that it is recorded (the draft check's own content-free outcome), that the next turn is told the person saw no answer, and that the pages that turn carried stay held (not sent again); after it a follow-up is answered normally. The scripted revision keeps a flagged sentence (world.wording \"faithful\"), which is what makes the withheld path certain; a real model may revise differently, and then a revised sentence would be posted instead (outcome revised), which these steps would report as a miss. v9 corrects one expectation of v8 and adds two readings of what the draft check was given. The v8 real run (c37) posted \"PostgreSQL 전환 배포를 완료했습니다.\" as written: the check had the plan page (evidence prev_mem1, planned) and the judge answered \"not supported\" (0.00) but the tense question missed (0.01), and the unsupported finding was off because the turn had 9 evidence items against a limit of 8 (one left out, so the evidence counts as not fully seen). In s14 the check had no plan page at all and withheld a correct answer. Those are product defects (draft check, L3), recorded in the report of cycle 24; v9 keeps the expectations that fail on them.",
  "caps": "Per step: about three times the requests and two and a half times the estimated input tokens of the dry run (independentEstimate of helper/egdesk-decision-real-runner.mjs), at least 4 requests and 4000 tokens. The journey total is capped separately (default 80000 tokens, 80 requests). The recall step s3b uses the same rule. The owner-question step s8b uses the same rule.",
  "steps": [
   {
@@ -53,12 +53,12 @@
      "check": "packet",
      "args": {
       "include": [
-       "ontology:quote/a-ask",
-       "ontology:quote/a-v1"
+       "ontology:quote/a-intake",
+       "ontology:quote/a-first-sent"
       ],
       "excludePrefix": [
        "ontology:db/",
-       "ontology:quote/parts"
+       "ontology:quote/b-request"
       ],
       "count": "bodies"
      },
@@ -189,7 +189,7 @@
       "include": [],
       "excludePrefix": [
        "ontology:db/",
-       "ontology:quote/parts"
+       "ontology:quote/b-request"
       ],
       "count": "bodies"
      },
@@ -310,11 +310,11 @@
      "check": "packet",
      "args": {
       "include": [
-       "ontology:db/pg-spec"
+       "ontology:db/pg-design-doc"
       ],
       "excludePrefix": [
        "ontology:quote/",
-       "ontology:quote/parts"
+       "ontology:quote/b-request"
       ],
       "count": "bodies"
      },
@@ -495,7 +495,7 @@
       "include": [],
       "excludePrefix": [
        "ontology:db/",
-       "ontology:quote/parts"
+       "ontology:quote/b-request"
       ],
       "count": "bodies"
      },
@@ -532,7 +532,7 @@
       "include": [],
       "excludePrefix": [
        "ontology:",
-       "ontology:quote/parts"
+       "ontology:quote/b-request"
       ],
       "count": "bodies"
      },
@@ -638,7 +638,7 @@
      "check": "sentIn",
      "args": {
       "needles": [
-       "멈춘 거야?"
+       "지금 어디까지 된 거야?"
       ],
       "families": [
        "heartbeat"
@@ -953,7 +953,7 @@
      "text": "The remark is kept as a pending reading of the migration plan page; no page is changed.",
      "check": "readingPending",
      "args": {
-      "pageId": "ontology:db/pg-rollout"
+      "pageId": "ontology:db/pg-plan-dates"
      }
     },
     {
@@ -964,11 +964,11 @@
      "check": "packetOrHeld",
      "args": {
       "include": [
-       "ontology:db/pg-rollout"
+       "ontology:db/pg-plan-dates"
       ],
       "excludePrefix": [
        "ontology:quote/",
-       "ontology:quote/parts"
+       "ontology:quote/b-request"
       ],
       "count": "bodies"
      },
@@ -1008,7 +1008,7 @@
        "memory_write"
       ],
       "needles": [
-       "PostgreSQL 마이그레이션 배포 계획서"
+       "PostgreSQL 마이그레이션 배포 일정"
       ]
      },
      "predicted": "fails on today's code in the v3 journey, whatever the answers: judgeTurnWrite takes the first 8 candidates, this turn's picks first and then the held pages in delivery order; after the recall step the plan page (held since s3b) is past the eighth. In the v2 journey it is first. The person-level consequence is v1 s9.reading."
@@ -1276,24 +1276,6 @@
    },
    "expect": [
     {
-     "id": "s13.fetched",
-     "severity": "hard",
-     "owner": "L7",
-     "text": "The question about the deployment brings its plan page (and no quote page): the engine had the page the wrong answer contradicts.",
-     "check": "packet",
-     "args": {
-      "include": [
-       "ontology:db/pg-rollout"
-      ],
-      "excludePrefix": [
-       "ontology:quote/",
-       "ontology:quote/parts"
-      ],
-      "count": "bodies"
-     },
-     "predicted": "PASS (a question about the PostgreSQL deployment names the plan page)."
-    },
-    {
      "id": "s13.claim-withheld",
      "severity": "hard",
      "owner": "L3",
@@ -1339,6 +1321,34 @@
      "check": "runEnded",
      "args": {},
      "predicted": "PASS."
+    },
+    {
+     "id": "s13.not-resent",
+     "severity": "hard",
+     "owner": "L7",
+     "text": "No page is sent to the engine again for this question: the plan page is held (its receipt stands).",
+     "check": "noRepeatedPages",
+     "args": {
+      "count": "bodies"
+     },
+     "predicted": "PASS in a real run (v8 real run c37: the turn carried no page; the real memory triage said need 0). The scripted dry run FAILS it: the scripted triage always answers need and fetches the plan page again."
+    },
+    {
+     "id": "s13.check-saw-the-plan",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "The draft check was given the plan page as evidence (its request lists the plan record that says the deployment is not done yet).",
+     "check": "sentIn",
+     "args": {
+      "families": [
+       "draft_check"
+      ],
+      "needles": [
+       "PostgreSQL 마이그레이션 배포 일정",
+       "아직 배포 전이다"
+      ]
+     },
+     "predicted": "PASS (v8 real run c37: evidence item prev_mem1, time planned)."
     }
    ]
   },
@@ -1411,15 +1421,39 @@
       "said": "benchFollow"
      },
      "predicted": "PASS if the check passes \"PostgreSQL 전환은 12월 첫째 주에 배포할 예정입니다.\" (a correctly worded plan; the tense question has read such sentences as done before: c-sales S2 .99 in the L3 measurement); a tense false positive on it would revise the answer, a miss that is real information."
+    },
+    {
+     "id": "s14.check-saw-the-plan",
+     "severity": "hard",
+     "owner": "L3",
+     "text": "The check of the follow-up's answer was given the plan page as evidence (the answer states when the deployment is planned).",
+     "check": "sentIn",
+     "args": {
+      "families": [
+       "draft_check"
+      ],
+      "needles": [
+       "PostgreSQL 마이그레이션 배포 일정",
+       "12월 첫째 주"
+      ]
+     },
+     "predicted": "FAIL on int/c14 15b0df9 (v8 real run c37: the evidence held the A사 pages, the design and the checklists, no plan page, so the correct sentence read unsupported .08 and was withheld); PASS when the previous check's records or the related page reach the check."
     }
    ]
   }
  ],
- "variant": "V2",
- "variantSha256": "a1a569ed2e4a2e245a5b6c073bc33ed3458dc181db8c82e0734b89e72bc5ad5e",
+ "withdrawn": [
+  {
+   "id": "s13.fetched",
+   "step": "s13-withheld",
+   "reason": "Wrong expectation. It asked the question about the deployment to bring the plan page, but by s13 the plan page is already held by the engine (sent in s1, receipt kept), so nothing is sent again (memory triage need 0): v8 real run c37 and the replay show packets without it and no page sent. The thing the step needs is that the check was given the plan page as evidence: s13.check-saw-the-plan, and that no page is sent again: s13.not-resent."
+  }
+ ],
+ "variant": "V1",
+ "variantSha256": "7e9f3d8fd3a1f8195e860927a911dddf90dd77b0785a57a1e06184cb01854b38",
  "ceiling": {
-  "tokenCeiling": 90000,
-  "maxRequests": 73,
+  "tokenCeiling": 100000,
+  "maxRequests": 82,
   "note": "declared before the send: the run stops before a request that would go over it, and a higher one is refused for a send. The scripted dry run over-selects memory pages (about twice the fetch requests of a real run), so its estimate is above the real count; the replay estimate (the answers of the last real journey drive the requests, the estimate is converted with that journey's per-family reported/estimated ratios) is what the ceiling is set against"
  }
 }
