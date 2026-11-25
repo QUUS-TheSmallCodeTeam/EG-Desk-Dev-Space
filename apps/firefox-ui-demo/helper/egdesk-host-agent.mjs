@@ -36,6 +36,10 @@ import { fileURLToPath } from 'node:url'
 
 export const HOST_AGENT_STATES = Object.freeze(['idle', 'starting', 'ready', 'restarting', 'stopped', 'failed'])
 export const HOST_AGENT_REQUESTS = Object.freeze(['snapshot', 'listApps', 'listWindows', 'permissions', 'service'])
+// B1 (flag EGDESK_COMPUTER_OBSERVE, option observeContent): one window's pixels with sensitive fields masked, and that window's accessibility
+// elements. The helper answers them only when started with --observe-content (otherwise observe_only).
+export const HOST_AGENT_CONTENT_REQUESTS = Object.freeze(['capture', 'readElements'])
+const WINDOW_ID_MAX = 2 ** 32 - 1
 export const HOST_AGENT_EVENTS = Object.freeze(['app.activated', 'service.changed'])
 // Observation stage: there is no input monitor in the helper yet.
 export const HOST_AGENT_INPUT_MONITOR = false
@@ -150,6 +154,7 @@ export function createHostAgent({
   restart = {},
   env = process.env,
   onEvent = () => {},
+  observeContent = false,
 } = {}) {
   if (typeof executable !== 'string' || !path.isAbsolute(executable) || /[\0\r\n]/.test(executable)) {
     throw issue(CODES.EXECUTABLE, 'createHostAgent needs the absolute helper path from resolveHostAgentExecutable()')
@@ -303,7 +308,8 @@ export function createHostAgent({
       gen.pending.delete(message.id)
       clearTimer(entry.timer)
       if (message.ok === true) entry.resolve(message.result ?? null)
-      else entry.reject(issue(CODES.REFUSED, 'The host helper refused the request', { helperCode: typeof message.code === 'string' ? message.code.slice(0, 64) : null }))
+      else entry.reject(issue(CODES.REFUSED, 'The host helper refused the request', { helperCode: typeof message.code === 'string' ? message.code.slice(0, 64) : null,
+        helperMessage: typeof message.message === 'string' ? message.message.slice(0, 200) : null }))
       return true
     }
     return true
@@ -352,7 +358,8 @@ export function createHostAgent({
       gen.nonce = makeNonce()
     } catch (error) { endGeneration(gen, error?.code || CODES.SOCKET_PATH); return }
     const args = ['host-observe', '--socket', gen.directory.socketPath,
-      '--heartbeat-timeout-ms', String(heartbeatTimeoutMs), '--connect-timeout-ms', String(startupTimeoutMs)]
+      '--heartbeat-timeout-ms', String(heartbeatTimeoutMs), '--connect-timeout-ms', String(startupTimeoutMs),
+      ...(observeContent === true ? ['--observe-content'] : [])]
     try {
       gen.child = spawnDriver(executable, args, { cwd: '/', env: minimalEnv(env), shell: false, stdio: ['pipe', 'pipe', 'pipe'] })
     } catch { endGeneration(gen, 'spawn-failed'); return }
@@ -424,8 +431,19 @@ export function createHostAgent({
   }
 
   function request(type, params = {}, { timeoutMs = requestTimeoutMs } = {}) {
-    if (!HOST_AGENT_REQUESTS.includes(type)) return Promise.reject(issue(CODES.INVALID_REQUEST, 'Unknown host helper request'))
+    const content = HOST_AGENT_CONTENT_REQUESTS.includes(type)
+    if (!HOST_AGENT_REQUESTS.includes(type) && !(content && observeContent === true)) return Promise.reject(issue(CODES.INVALID_REQUEST, 'Unknown host helper request'))
     const frame = { type }
+    if (content) {
+      const ok = params != null && typeof params === 'object' && !Array.isArray(params)
+        && Number.isSafeInteger(params.windowId) && params.windowId >= 0 && params.windowId <= WINDOW_ID_MAX
+        && Number.isSafeInteger(params.pid) && params.pid > 0 && params.pid <= 2 ** 31 - 1
+        && (type === 'capture' ? Object.keys(params).every(key => ['windowId', 'pid', 'maxEdge'].includes(key))
+          && (params.maxEdge === undefined || (Number.isSafeInteger(params.maxEdge) && params.maxEdge >= 256 && params.maxEdge <= 2048))
+          : Object.keys(params).every(key => ['windowId', 'pid'].includes(key)))
+      if (!ok) return Promise.reject(issue(CODES.INVALID_REQUEST, `${type} takes { windowId, pid${type === 'capture' ? ', maxEdge?' : ''} } as integers`))
+      Object.assign(frame, params)
+    }
     if (type === 'listWindows') {
       if (params == null || typeof params !== 'object' || Array.isArray(params)
         || Object.keys(params).some(key => !['allLayers', 'titles'].includes(key))
@@ -460,6 +478,10 @@ export function createHostAgent({
     listWindows: (query = {}, options) => request('listWindows', query, options),
     permissions: options => request('permissions', {}, options),
     service: options => request('service', {}, options),
+    capture: (query, options) => request('capture', query, options),
+    readElements: (query, options) => request('readElements', query, options),
+    /** Whether this agent was made to ask the helper for window content (the helper's hello.ok says the same in capabilities). */
+    observesContent: observeContent === true,
   }
 }
 

@@ -1310,8 +1310,9 @@ export class CodexChatRuntime {
     // Only an engine-aware Context provider may serve Claude. Keep every
     // unrelated provider exclusion, including during manifest verification.
     if (engineId === 'claude' && provider === this.contexts) return typeof provider.getAuthority === 'function'
+    // U1 B1: the computer provider reaches Claude only when it declares exposeToClaude (its flag EGDESK_COMPUTER_OBSERVE is on); every other provider keeps its exclusion.
     return engineId !== 'claude' || (provider !== this.contexts &&
-      !['egdesk-context-v1', 'egdesk-plan', 'egdesk-annotation', COMPUTER_PROVIDER_ID].includes(provider.providerId))
+      !['egdesk-context-v1', 'egdesk-plan', 'egdesk-annotation', ...(provider.providerId === COMPUTER_PROVIDER_ID && provider.exposeToClaude === true ? [] : [COMPUTER_PROVIDER_ID])].includes(provider.providerId))
   }
 
   // Which engine, version and engine account slot ran a turn; stored with the
@@ -4159,7 +4160,8 @@ export class CodexChatRuntime {
     let reply = { decision: body.decision }
     if (approval.kind === 'computerElicitation') {
       if (body.decision === 'accept') {
-        if (run.toolCeiling && run.toolCeiling.browser !== 'interact') throw chatError('PROFILE_CEILING_FORBIDDEN', 'This Agent profile does not allow that action', 403)
+        // U1 B1: an app-look card (approval.resolve) only lets the Agent watch, so an observing ceiling may answer it.
+        if (run.toolCeiling && run.toolCeiling.browser !== 'interact' && !(approval.resolve && run.toolCeiling.browser === 'observe')) throw chatError('PROFILE_CEILING_FORBIDDEN', 'This Agent profile does not allow that action', 403)
         if (this.computerControl.policy === 'off') throw chatError('COMPUTER_CONTROL_OFF', 'Computer control is turned off in EG-Desk settings', 403)
         reply = { action: 'accept', content: computerElicitationContent(approval.answer, approval.fields, body.answers) }
       } else reply = { action: 'decline' }
@@ -4167,7 +4169,7 @@ export class CodexChatRuntime {
     // Mark before sending: a synchronous resolved event must not be overwritten.
     approval.status = 'replySent'
     try {
-      if (this.respond(approval.rpcId, reply, undefined, this.threadOperationSlot(approval.conversationId)) === false) throw chatError('APPROVAL_DELIVERY_FAILED', 'The approval could not be delivered; no permission was confirmed', 502)
+      if (this.answerComputerCard(approval, reply, body.decision) === false) throw chatError('APPROVAL_DELIVERY_FAILED', 'The approval could not be delivered; no permission was confirmed', 502)
     } catch (error) {
       approval.status = 'pending'
       throw error
@@ -4725,6 +4727,41 @@ export class CodexChatRuntime {
     this.emit(run, 'approval.required', pending)
   }
 
+  // Answers a computer card: an engine question goes back to the engine, an app-look card (askComputerApp) to the tool provider waiting for it.
+  answerComputerCard(approval, reply, decision) {
+    if (typeof approval.resolve === 'function') { approval.resolve(decision === 'accept' ? 'accept' : decision === 'expired' || decision === 'cancel' ? decision : 'decline'); return true }
+    return this.respond(approval.rpcId, reply, undefined, this.threadOperationSlot(approval.conversationId))
+  }
+
+  /**
+   * U1 B1 (EG-Desk's own computer tools, flag EGDESK_COMPUTER_OBSERVE): the first look at an app in a run asks the person once, with the
+   * existing 'computerElicitation' card ([이번만 허락] / [거절], this run only, nothing remembered, never accepted without the answer).
+   * The answer reaches the tool provider, not an engine request. Resolves 'accept' | 'decline' | 'expired' | 'cancel'.
+   * card = { appName, message } (the message is a proposal text, owner approval pending).
+   */
+  askComputerApp(run, card) {
+    return new Promise(resolve => {
+      if (TERMINAL.has(run.status) || !this.runConnected(run)) return resolve('cancel')
+      if (run.toolCeiling && !['observe', 'interact'].includes(run.toolCeiling.browser)) return resolve('decline')
+      if (this.computerControl.policy === 'off') return resolve('decline')
+      if (this.pendingApprovals.size + this.pendingUserInputs.size >= MAX_ITEMS) return resolve('decline')
+      this.computerAppSeq = (this.computerAppSeq || 0) + 1
+      const approvalId = `${this.streamId}:${this.epoch}:app:${this.computerAppSeq}`
+      const message = publicText(String(card?.message ?? ''), 600)
+      const appName = publicText(String(card?.appName ?? ''), 120)
+      const pending = {
+        approvalId, kind: 'computerElicitation', status: 'pending', choices: ['accept', 'decline'], itemId: null, scope: 'request',
+        serverName: COMPUTER_PROVIDER_ID, appName, message, fields: [], reason: message, expiresAt: this.now() + COMPUTER_ELICITATION_TIMEOUT_MS,
+      }
+      this.pendingApprovals.set(approvalId, { ...pending, rpcId: null, conversationId: run.conversationId, runId: run.runId, answer: [], resolve })
+      run.pendingApprovals.push(pending)
+      const timer = this.setTimer(() => this.expireComputerElicitation(approvalId), COMPUTER_ELICITATION_TIMEOUT_MS)
+      timer?.unref?.()
+      this.elicitationTimers.set(approvalId, timer)
+      this.emit(run, 'approval.required', pending)
+    })
+  }
+
   dropElicitationTimer(approvalId) {
     if (!this.elicitationTimers.has(approvalId)) return
     try { this.clearTimer(this.elicitationTimers.get(approvalId)) } catch {}
@@ -4737,7 +4774,7 @@ export class CodexChatRuntime {
     const approval = this.pendingApprovals.get(approvalId)
     if (!approval || approval.status !== 'pending') return
     this.pendingApprovals.delete(approvalId)
-    try { this.respond(approval.rpcId, { action: 'cancel' }, undefined, this.threadOperationSlot(approval.conversationId)) } catch {}
+    try { this.answerComputerCard(approval, { action: 'cancel' }, 'expired') } catch {}
     const run = this.runs.get(runKey(approval.conversationId, approval.runId))
     if (!run) return
     run.pendingApprovals = run.pendingApprovals.filter(item => item.approvalId !== approvalId)
@@ -4749,7 +4786,7 @@ export class CodexChatRuntime {
     for (const [id, approval] of [...this.pendingApprovals]) {
       if (approval.kind !== 'computerElicitation' || approval.conversationId !== run.conversationId || approval.runId !== run.runId) continue
       this.dropElicitationTimer(id)
-      if (approval.status === 'pending') try { this.respond(approval.rpcId, { action: 'cancel' }, undefined, this.threadOperationSlot(approval.conversationId)) } catch {}
+      if (approval.status === 'pending') try { this.answerComputerCard(approval, { action: 'cancel' }, 'cancel') } catch {}
     }
   }
 

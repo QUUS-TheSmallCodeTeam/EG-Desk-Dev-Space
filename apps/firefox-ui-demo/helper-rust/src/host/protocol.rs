@@ -10,6 +10,8 @@
 //!   {"id":"r4","type":"permissions"}                        preflight only, never a request/prompt
 //!   {"id":"r5","type":"service"}                            com.openai.sky.CUAService running?
 //!   {"id":"r6","type":"shutdown"}
+//!   {"id":"r7","type":"capture","windowId":N,"pid":P,"maxEdge":1280}     B1, only with --observe-content
+//!   {"id":"r8","type":"readElements","windowId":N,"pid":P}                B1, only with --observe-content
 //! Helper → client
 //!   {"type":"hello.ok","v":1,"pid":..,"monoMs":T,"mode":"observe","capabilities":{..},"heartbeatTimeoutMs":..}
 //!   {"type":"hello.rejected","code":"bad_nonce"|"bad_hello"|"peer_uid"}
@@ -19,12 +21,18 @@
 //!   {"type":"event","event":"app.activated","seq":N,"monoMs":T,"app":{bundleId,pid,name}}
 //!   {"type":"event","event":"service.changed","seq":N,"monoMs":T,"service":{bundleId,running,pids}}
 //!
-//! Observation only: there is no request that posts input, captures pixels or
-//! writes accessibility attributes. Any other request type is answered with
-//! observe_only. No typed text, key, coordinate or window content is read.
+//! Observation only: there is no request that posts input or writes
+//! accessibility attributes. capture (one window's pixels, sensitive fields
+//! masked) and readElements (that window's accessibility tree) exist only when
+//! the helper was started with --observe-content; otherwise, like any other
+//! request type, they are answered with observe_only. Window content is read
+//! only for the window a request names (observe.rs).
 
 use serde::Serialize;
 use serde_json::{json, Value};
+
+pub use super::observe::{CaptureQuery, CaptureResult, ElementsQuery, ElementsResult, ObserveError};
+use super::observe::{DEFAULT_EDGE, MAX_EDGE, MIN_EDGE};
 
 pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_INBOUND_LINE: usize = 16 * 1024;
@@ -143,6 +151,16 @@ pub trait Observer: Send + Sync {
     fn windows(&self, query: WindowQuery) -> WindowList;
     fn permissions(&self) -> Permissions;
     fn service(&self) -> ServiceStatus;
+    /// Whether capture and readElements are enabled (--observe-content).
+    fn content_enabled(&self) -> bool {
+        false
+    }
+    fn capture(&self, _query: &CaptureQuery) -> Result<CaptureResult, ObserveError> {
+        Err(ObserveError::observe_only())
+    }
+    fn read_elements(&self, _query: &ElementsQuery) -> Result<ElementsResult, ObserveError> {
+        Err(ObserveError::observe_only())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +191,10 @@ pub enum RequestKind {
     Permissions,
     Service,
     Shutdown,
+    Capture(CaptureQuery),
+    ReadElements(ElementsQuery),
+    /// A known request with arguments that do not validate.
+    Invalid(&'static str),
     /// Anything else, including every input, capture or AX-write name.
     Unsupported,
 }
@@ -225,11 +247,29 @@ pub fn parse_inbound(line: &str) -> Result<Inbound, ProtocolError> {
                 "permissions" => RequestKind::Permissions,
                 "service" => RequestKind::Service,
                 "shutdown" => RequestKind::Shutdown,
+                "capture" | "readElements" => content_request(kind, object),
                 _ => RequestKind::Unsupported,
             };
             Ok(Inbound::Request { id, kind })
         }
     }
+}
+
+fn content_request(kind: &str, object: &serde_json::Map<String, Value>) -> RequestKind {
+    let window_id = object.get("windowId").and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok());
+    let pid = object.get("pid").and_then(Value::as_i64).and_then(|v| i32::try_from(v).ok()).filter(|v| *v > 0);
+    let (Some(window_id), Some(pid)) = (window_id, pid) else { return RequestKind::Invalid("windowId and pid are required") };
+    if kind == "readElements" {
+        return RequestKind::ReadElements(ElementsQuery { window_id, pid });
+    }
+    let max_edge = match object.get("maxEdge") {
+        None => DEFAULT_EDGE,
+        Some(value) => match value.as_u64().and_then(|v| u32::try_from(v).ok()).filter(|v| (MIN_EDGE..=MAX_EDGE).contains(v)) {
+            Some(edge) => edge,
+            None => return RequestKind::Invalid("maxEdge is out of range"),
+        },
+    };
+    RequestKind::Capture(CaptureQuery { window_id, pid, max_edge })
 }
 
 /// The run's nonce line on stdin: {"v":1,"nonce":"..."}.
@@ -244,14 +284,20 @@ pub fn parse_nonce_line(line: &str) -> Option<String> {
 
 /// monoMs (milliseconds since the helper started) lets the client map event
 /// monoMs onto its own clock: at = clientNow - (monoMs_now - event.monoMs).
+#[cfg(test)]
 pub fn hello_ok(pid: u32, heartbeat_timeout_ms: u64, mono_ms: u64) -> String {
+    hello_ok_with(pid, heartbeat_timeout_ms, mono_ms, false)
+}
+
+/// `content`: capture and readElements are enabled in this run.
+pub fn hello_ok_with(pid: u32, heartbeat_timeout_ms: u64, mono_ms: u64, content: bool) -> String {
     json!({
         "type": "hello.ok",
         "v": PROTOCOL_VERSION,
         "pid": pid,
         "monoMs": mono_ms,
         "mode": "observe",
-        "capabilities": { "observe": true, "input": false, "capture": false, "accessibility": false },
+        "capabilities": { "observe": true, "input": false, "capture": content, "accessibility": content },
         "heartbeatTimeoutMs": heartbeat_timeout_ms,
     })
     .to_string()
@@ -291,10 +337,19 @@ pub fn answer(observer: &dyn Observer, id: &str, kind: &RequestKind) -> (String,
         RequestKind::Permissions => ok(id, json!(observer.permissions())),
         RequestKind::Service => ok(id, json!(observer.service())),
         RequestKind::Shutdown => return (ok(id, json!({ "stopping": true })), true),
+        RequestKind::Capture(query) => match observer.capture(query) {
+            Ok(result) => ok(id, json!(result)),
+            Err(error) => failure(Some(id), error.code, &error.message),
+        },
+        RequestKind::ReadElements(query) => match observer.read_elements(query) {
+            Ok(result) => ok(id, json!(result)),
+            Err(error) => failure(Some(id), error.code, &error.message),
+        },
+        RequestKind::Invalid(message) => failure(Some(id), "bad_request", message),
         RequestKind::Unsupported => failure(
             Some(id),
             "observe_only",
-            "This helper only observes: no input, capture or accessibility actions",
+            "This helper only observes: no input, no accessibility actions",
         ),
     };
     (line, false)
@@ -330,6 +385,52 @@ mod tests {
         let long = format!(r#"{{"id":"{}","type":"snapshot"}}"#, "x".repeat(MAX_REQUEST_ID + 1));
         assert_eq!(parse_inbound(&long), Err(ProtocolError::BadShape("id")));
         assert_eq!(parse_inbound(r#"{"id":"a b","type":"snapshot"}"#), Err(ProtocolError::BadShape("id")));
+    }
+
+    #[test]
+    fn content_requests_validate_their_arguments() {
+        assert_eq!(
+            parse_inbound(r#"{"id":"c1","type":"capture","windowId":7,"pid":42}"#),
+            Ok(Inbound::Request { id: "c1".into(), kind: RequestKind::Capture(CaptureQuery { window_id: 7, pid: 42, max_edge: DEFAULT_EDGE }) })
+        );
+        assert_eq!(
+            parse_inbound(r#"{"id":"c2","type":"capture","windowId":7,"pid":42,"maxEdge":512}"#),
+            Ok(Inbound::Request { id: "c2".into(), kind: RequestKind::Capture(CaptureQuery { window_id: 7, pid: 42, max_edge: 512 }) })
+        );
+        assert_eq!(
+            parse_inbound(r#"{"id":"c3","type":"readElements","windowId":7,"pid":42}"#),
+            Ok(Inbound::Request { id: "c3".into(), kind: RequestKind::ReadElements(ElementsQuery { window_id: 7, pid: 42 }) })
+        );
+        for bad in [
+            r#"{"id":"c4","type":"capture"}"#,
+            r#"{"id":"c4","type":"capture","windowId":-1,"pid":42}"#,
+            r#"{"id":"c4","type":"capture","windowId":7,"pid":0}"#,
+            r#"{"id":"c4","type":"capture","windowId":7,"pid":42,"maxEdge":100000}"#,
+            r#"{"id":"c4","type":"readElements","windowId":"7","pid":42}"#,
+        ] {
+            assert!(matches!(parse_inbound(bad), Ok(Inbound::Request { kind: RequestKind::Invalid(_), .. })), "{bad}");
+        }
+    }
+
+    #[test]
+    fn content_requests_are_refused_unless_the_observer_enables_them() {
+        struct Off;
+        impl Observer for Off {
+            fn apps(&self) -> Vec<AppInfo> { Vec::new() }
+            fn frontmost(&self) -> Option<AppRef> { None }
+            fn windows(&self, _query: WindowQuery) -> WindowList { WindowList { windows: Vec::new(), titles: "not-requested", truncated: false } }
+            fn permissions(&self) -> Permissions { Permissions { accessibility: false, screen_recording: false, input_monitoring: false, requested: false, bundled: false } }
+            fn service(&self) -> ServiceStatus { ServiceStatus::new(Vec::new()) }
+        }
+        let (line, stop) = answer(&Off, "c1", &RequestKind::Capture(CaptureQuery { window_id: 1, pid: 2, max_edge: 512 }));
+        let value: Value = serde_json::from_str(&line).unwrap();
+        assert!(!stop);
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["code"], "observe_only");
+        let (line, _) = answer(&Off, "c2", &RequestKind::ReadElements(ElementsQuery { window_id: 1, pid: 2 }));
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["code"], "observe_only");
+        let (line, _) = answer(&Off, "c3", &RequestKind::Invalid("bad"));
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["code"], "bad_request");
     }
 
     #[test]
@@ -372,5 +473,9 @@ mod tests {
         assert_eq!(value["capabilities"]["input"], false);
         assert_eq!(value["capabilities"]["capture"], false);
         assert_eq!(value["heartbeatTimeoutMs"], 5000);
+        let on: Value = serde_json::from_str(&hello_ok_with(10, 5000, 12, true)).unwrap();
+        assert_eq!(on["capabilities"]["capture"], true);
+        assert_eq!(on["capabilities"]["accessibility"], true);
+        assert_eq!(on["capabilities"]["input"], false);
     }
 }

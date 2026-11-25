@@ -30,6 +30,9 @@ export const EGRESS_KINDS = Object.freeze({
   // L7 c37 (prefetch): the relative paths, sizes and dates of the files of the folder the run's engine works in: the engine reads that folder itself, so the decision model may read its listing.
   // Never file text (that goes to the engine only). Open only when the run has a bound working folder the engine may read (workspaceRead).
   workspace_names: Object.freeze({ data: 'files', governedBy: 'The run\'s own working folder, which its engine reads: only the listing (path, size, date), only for a run with a bound folder' }),
+  // U1 B1 (EG-Desk's own computer tools): pixels of a Mac window and the labels read from it. They go to the run's engine model only; no model
+  // permission covers the decision model, so this kind is refused by every gate (owner decision pending, same as hud_text).
+  screen_capture: Object.freeze({ data: 'screen', governedBy: 'No model permission covers a screen image yet: the pixels of a window the Agent looked at go to the run\'s engine model only, never to the decision model (owner decision pending)' }),
   board_excerpt: Object.freeze({ data: 'board', governedBy: 'This Board ask itself: the owner chose and confirmed a run that sends the approved public excerpts to the drafting model. An extract-only ask sends them to no model, so not to Decisions either' }),
 })
 // Requests that carry NO data of any class: one fixed body each, byte for byte (c18, the idle warm-up). They are not in EGRESS_KINDS because a
@@ -48,7 +51,7 @@ const sameContentFree = (name, request) => {
   const extra = Object.keys(request).filter(key => !['input', 'questions', 'timeoutMs', 'signal'].includes(key))
   return extra.length === 0 && request.input === fixed.input && JSON.stringify(request.questions) === JSON.stringify(fixed.questions)
 }
-const DATA_CLASSES = Object.freeze(['terminal', 'browser', 'canvas', 'run', 'memory', 'speech', 'topic', 'board', 'thread', 'files'])
+const DATA_CLASSES = Object.freeze(['terminal', 'browser', 'canvas', 'run', 'memory', 'speech', 'topic', 'board', 'thread', 'files', 'screen'])
 // Evidence kinds a draft-check catalog may carry, and the data class that already lets a model see them.
 // Items of the decision context packet were already admitted for this run's answering model, so they count as the run's own data.
 // run_state: what the run is doing now, from the runtime's own facts (the heartbeat's material a message was composed from).

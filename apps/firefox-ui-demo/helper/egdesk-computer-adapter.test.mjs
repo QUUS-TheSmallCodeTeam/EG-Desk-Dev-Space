@@ -96,7 +96,7 @@ test('the adapter lists what the provider implements and refuses unknown methods
   const partial = { capture: async () => ({}), click: async () => ({}) }
   const { adapter, records } = setup({ provider: partial })
   assert.deepEqual(adapter.methods(), ['capture', 'click'])
-  assert.deepEqual(COMPUTER_METHODS, ['capture', 'listApps', 'listWindows', 'click', 'typeText', 'key', 'scroll', 'drag'])
+  assert.deepEqual(COMPUTER_METHODS, ['capture', 'listApps', 'listWindows', 'click', 'typeText', 'key', 'scroll', 'drag', 'readElements'])
   assert.equal((await adapter.call('teleport', {})).error.code, A.UNKNOWN_METHOD)
   assert.equal((await adapter.call('typeText', { target: TEXTEDIT, text: 'hi' })).error.code, A.UNSUPPORTED_METHOD)
   const invalid = await adapter.call('click', { target: TEXTEDIT, element: '1', secretField: 'Hunter2' })
