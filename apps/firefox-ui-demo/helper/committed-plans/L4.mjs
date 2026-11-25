@@ -3,4 +3,5 @@
 export const PLANS_L4 = [
   { path: 'proofs/decision-real-measure/briefing-coverage', lane: 'L4', rebuilt: { script: 'egdesk-briefing-coverage-plan.mjs', matches: 2 } },
   { path: 'proofs/decision-real-measure/briefing-coverage-facts', lane: 'L4', rebuilt: { script: 'egdesk-briefing-coverage-plan.mjs', matches: 2 } },
+  { path: 'proofs/decision-real-measure/briefing-layer-replay', lane: 'L4', rebuilt: { script: 'egdesk-briefing-layer-replay.mjs', matches: 1 } },
 ]
