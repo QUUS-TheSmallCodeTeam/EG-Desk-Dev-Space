@@ -2936,7 +2936,8 @@
   pointer-events: auto;
 }
 
-.egd-canvas-card.egd-entity-active .egd-card-body-capture {
+.egd-canvas-card.egd-entity-active .egd-card-body-capture,
+.egd-canvas-card.egd-site-ask-open .egd-card-body-capture {
   display: none;
 }
 
