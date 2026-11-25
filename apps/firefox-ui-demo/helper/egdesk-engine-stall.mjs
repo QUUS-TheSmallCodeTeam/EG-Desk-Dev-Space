@@ -34,6 +34,30 @@ export function eventTurnId(message) {
   return null
 }
 
+/**
+ * c36: what a conversation's record says about the watchdog. `log` is the runtime's list of stall facts (one per turn that stalled: stalls = interrupts of that turn, recovered true = the retry spoke).
+ * { armed: ms | null, source: 'option' | 'script' | null, stalls, rescued, failed, interrupts, retries }
+ */
+export function stallRecord({ armed = null, source = null, log = [] } = {}) {
+  const facts = Array.isArray(log) ? log.filter(f => f && typeof f === 'object') : []
+  const rescued = facts.filter(f => f.recovered === true).length, failed = facts.length - rescued
+  return { armed: Number.isFinite(armed) ? armed : null, source: Number.isFinite(armed) ? source : null, stalls: facts.length, rescued, failed, interrupts: facts.reduce((n, f) => n + (Number.isSafeInteger(f.count) ? f.count : 1), 0), retries: facts.filter(f => f.retried === true).length }
+}
+
+/** Two records of one conversation (the segments around a restart) as one. */
+export function mergeStallRecords(a, b) {
+  if (!a) return b ?? null
+  if (!b) return a
+  return { armed: a.armed ?? b.armed, source: a.source ?? b.source, stalls: a.stalls + b.stalls, rescued: a.rescued + b.rescued, failed: a.failed + b.failed, interrupts: a.interrupts + b.interrupts, retries: a.retries + b.retries }
+}
+
+/** The run summary: { armed (conversations), stalls, rescued, failed, interrupts, retries } and its one line. */
+export function stallTotals(records) {
+  const list = (Array.isArray(records) ? records : []).map(r => r?.stallWatchdog).filter(Boolean)
+  return list.reduce((t, s) => ({ armed: t.armed + (s.armed !== null ? 1 : 0), stalls: t.stalls + s.stalls, rescued: t.rescued + s.rescued, failed: t.failed + s.failed, interrupts: t.interrupts + s.interrupts, retries: t.retries + s.retries }), { armed: 0, stalls: 0, rescued: 0, failed: 0, interrupts: 0, retries: 0 })
+}
+export const stallLine = totals => `stalls: ${totals.stalls}, rescued: ${totals.rescued}, failed: ${totals.failed}`
+
 /** The closed fact kept for the heartbeat and the run: numbers and words only. */
 export function stallFact({ afterMs, stalls, recovered }) {
   return Object.freeze({ stalled: true, afterMs, count: stalls, retried: stalls >= 1 && recovered !== null, recovered: recovered === true, outcome: recovered === true ? 'recovered' : 'failed' })

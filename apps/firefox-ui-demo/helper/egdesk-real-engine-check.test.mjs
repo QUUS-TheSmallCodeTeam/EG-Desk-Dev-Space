@@ -10,7 +10,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runFakeAppServer } from '../scripts/real-engine/fake-app-server.mjs'
 import { validateMessage } from './egdesk-app-server-protocol.mjs'
-import { BRIDGE_COMPOSITION, DECISION_KEY_ENV, LEDGER_FILE, appServerArgs, assertCleanupGuaranteed, childEnv, cleanupLeftovers, closedRow, createGroupKiller, createLedger, formatPlan, leftoverThreads, loadScripts, parseArgs, planRun, preflight, runCheck } from './egdesk-real-engine-check.mjs'
+import { stallLine } from './egdesk-engine-stall.mjs'
+import { BRIDGE_COMPOSITION, DECISION_KEY_ENV, HELP, stallFlag, LEDGER_FILE, appServerArgs, assertCleanupGuaranteed, childEnv, cleanupLeftovers, closedRow, createGroupKiller, createLedger, formatPlan, leftoverThreads, loadScripts, parseArgs, planRun, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { APPROVER_TEXT, REAL_ENGINE_SCRIPT_SCHEMA, checkTurnExpectations, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
@@ -1133,6 +1134,36 @@ test('git action first through the check: the same three requests, flag off and 
   }
   const merge = picks.find(p => p.id === 'git-merge'); assert.ok(merge.offered.some(d => /git merge feature/.test(d)), 'the named branch was offered'); assert.ok(!merge.offered.some(d => /git merge main/.test(d)), 'the current branch is not'); assert.ok(picks.filter(p => p.id !== 'git-merge').every(p => !p.offered.some(d => /git merge/.test(d))), 'no merge option when the message names no branch')
 })
+
+// ---- c36: --stall-watchdog <ms>: the progress watchdog armed for every conversation of a run unless its script sets the flag; the records and the run summary say what it did ----
+test('--stall-watchdog: parsed within the flag\'s limits, in the help, and in the plan; the script\'s own flag wins, even an unarmed-looking one', () => {
+  const base = ['--codex-bin', '/bin/x', '--person-home', '--script', 's.json', '--out', '/tmp/o']
+  assert.equal(parseArgs(base).stallWatchdogMs, null); assert.equal(parseArgs([...base, '--stall-watchdog', '30000']).stallWatchdogMs, 30000)
+  for (const bad of ['4999', '120001', 'abc', '30s', '-1', '']) assert.throws(() => parseArgs([...base, '--stall-watchdog', bad]), /--stall-watchdog is 5000-120000/, bad)
+  assert.throws(() => parseArgs([...base, '--stall-watchdog']), /needs a value/); assert.match(HELP, /--stall-watchdog <ms>/); assert.match(HELP, /stalls: n, rescued: n, failed: n/)
+  assert.deepEqual(stallFlag({ stallWatchdogMs: 30000 }, { id: 'a' }), { EGDESK_ENGINE_STALL_FIRST_EVENT_MS: '30000' }); assert.deepEqual(stallFlag({ stallWatchdogMs: 30000 }, { id: 'a', flags: { EGDESK_ENGINE_STALL_FIRST_EVENT_MS: '45000' } }), {}); assert.deepEqual(stallFlag({ stallWatchdogMs: null }, { id: 'a' }), {}); assert.deepEqual(stallFlag({}, { id: 'a' }), {})
+  const scripts = asScripts(stallScript(null), stallScript('45000')), plan = planRun({ ...parseArgs([...base, '--stall-watchdog', '30000']) }, scripts)
+  assert.deepEqual(plan.conversations.map(c => c.flags.EGDESK_ENGINE_STALL_FIRST_EVENT_MS), ['30000', '45000'])
+})
+
+test('--stall-watchdog through the check: a conversation without the flag is armed by the option, a silent preamble turn is rescued, and the record and the summary say so', async t => {
+  const w = world(t, { silentTurns: 1, silentPreamble: true, turns: [{ steps: [], final: '하나' }] }), options = { ...w.options, stallWatchdogMs: 5000 }
+  const script = stallScript(null); script.conversations[0].turns[0].expect = { posted: true, turnStatus: 'completed' }
+  const result = await runCheck(options, asScripts(script), w.deps), rec = only(result); assert.equal(rec.aborted, null, rec.abortDetail); assert.equal(rec.ok, true, JSON.stringify(rec.turns[0].expectations.filter(c => !c.ok)))
+  assert.equal(rec.flags.EGDESK_ENGINE_STALL_FIRST_EVENT_MS, '5000'); assert.deepEqual(rec.stallWatchdog, { armed: 5000, source: 'option', stalls: 1, rescued: 1, failed: 0, interrupts: 1, retries: 1 })
+  assert.equal(callsOf(w, 'turn/start').length, 2); assert.equal(callsOf(w, 'turn/interrupt').length, 1)
+  assert.deepEqual(result.summary.stalls, { armed: 1, stalls: 1, rescued: 1, failed: 0, interrupts: 1, retries: 1 }); assert.equal(stallLine(result.summary.stalls), 'stalls: 1, rescued: 1, failed: 0'); assert.deepEqual(result.summary.conversations[0].stallWatchdog, rec.stallWatchdog)
+}, { timeout: 60000 })
+
+test('--stall-watchdog through the check: a second silence ends the conversation with ENGINE_STALLED and the record counts it as failed; the script\'s own flag wins over the option; no option, no watchdog', async t => {
+  const dead = world(t, { silentTurns: 2, silentPreamble: true, turns: [{ steps: [], final: '하나' }] }), script = stallScript(null); script.conversations[0].turns[0].expect = { posted: true }
+  const result = await runCheck({ ...dead.options, stallWatchdogMs: 5000 }, asScripts(script), dead.deps), rec = only(result)
+  assert.equal(rec.aborted, 'ENGINE_STALLED'); assert.deepEqual(rec.stallWatchdog, { armed: 5000, source: 'option', stalls: 1, rescued: 0, failed: 1, interrupts: 2, retries: 1 }); assert.equal(stallLine(result.summary.stalls), 'stalls: 1, rescued: 0, failed: 1')
+  const own = world(t, { turns: [{ steps: [], final: '하나' }] }), ownScript = stallScript('45000'); ownScript.conversations[0].turns[0].expect = { posted: true }
+  const ownRec = only(await runCheck({ ...own.options, stallWatchdogMs: 5000 }, asScripts(ownScript), own.deps)); assert.equal(ownRec.flags.EGDESK_ENGINE_STALL_FIRST_EVENT_MS, '45000'); assert.deepEqual(ownRec.stallWatchdog, { armed: 45000, source: 'script', stalls: 0, rescued: 0, failed: 0, interrupts: 0, retries: 0 })
+  const off = world(t, { turns: [{ steps: [], final: '하나' }] }), offScript = stallScript(null); offScript.conversations[0].turns[0].expect = { posted: true }
+  const offResult = await runCheck(off.options, asScripts(offScript), off.deps); assert.deepEqual(only(offResult).stallWatchdog, { armed: null, source: null, stalls: 0, rescued: 0, failed: 0, interrupts: 0, retries: 0 }); assert.equal(offResult.summary.stalls.armed, 0); assert.equal(only(offResult).flags.EGDESK_ENGINE_STALL_FIRST_EVENT_MS, undefined)
+}, { timeout: 90000 })
 
 // ---- c33: the first-event watchdog through the check (the fake engine accepts the first turn and stays silent; the flag's minimum is 5 s) ----
 const stallScript = flag => ({ set: 'real-engine-stall-test-v1', conversations: [{ id: 's', ...(flag ? { flags: { EGDESK_ENGINE_STALL_FIRST_EVENT_MS: flag } } : {}), turns: [{ say: '한 단어로만 답해: 하나', expect: { posted: true, turnStatus: 'completed', ...(flag ? { engineStall: { stalled: true, recovered: true } } : {}) } }] }] })

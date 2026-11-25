@@ -938,6 +938,7 @@ export class CodexChatRuntime {
     this.engineStall = engineStall && Number.isFinite(engineStall.firstEventMs) && engineStall.firstEventMs >= 1 ? { firstEventMs: engineStall.firstEventMs } : null
     this.engineSeen = new Map() // threadId -> Set of turn ids that sent an event (bounded)
     this.engineWaiters = new Set() // { threadId, turnId, resolve }
+    this.engineStallLog = [] // c36: every stall fact of this runtime, in order (bounded)
     this.engineStalls = new Map() // clientThreadId -> the last stall fact of the conversation (bounded)
     this.openProposals = new Map() // c33: conversationId -> { items, at } what the last posted answer left open to the person (flag decisionContext.proposalRegistry)
     this.proposalJobs = new Set()
@@ -6939,6 +6940,7 @@ export class CodexChatRuntime {
   noteEngineStall(context, fact) {
     try {
       context.engineStall = fact
+      this.engineStallLog.push(fact); while (this.engineStallLog.length > 256) this.engineStallLog.shift() // c36: the check's record of the conversation
       const key = context.clientThreadId
       if (key) { this.engineStalls.delete(key); this.engineStalls.set(key, fact); while (this.engineStalls.size > 64) this.engineStalls.delete(this.engineStalls.keys().next().value) }
       context.heartbeat?.register?.('engine_stall', { facts: () => ({ stalled: true, after_ms: fact.afterMs, stalls: fact.count, recovered: fact.recovered }) })
