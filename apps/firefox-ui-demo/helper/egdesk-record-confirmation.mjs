@@ -33,6 +33,12 @@ const RULES = [
 ].join('\n')
 
 const usable = records => (Array.isArray(records) ? records : []).filter(r => r && typeof r.title === 'string' && r.title.trim() && Object.hasOwn(STATUS_WORDS, r.status)).slice(0, CONFIRM_LIMITS.records)
+// L7 c35: the note a question quotes. With `said` (the person's own earlier message, kept in memory beside the note) the quote carries what was said, because the record's
+// title and a status word alone do not name what the person reported: for "아 그거 다음 주 화요일로 확정했어" the quote was "신제품 리뷰 회의 일정 (noted as done)", the reply said
+// "'다음 주 화요일 확정'은 아직 확인 전인 보고", and the real judge read nothing in common (stated .09, confirms .01, check-20mw). Without `said` the quote is what it was.
+export const noteQuote = r => (typeof r.said === 'string' && r.said.trim()
+  ? JSON.stringify(`${compactText(r.said, 160)} [the person's earlier message, kept as a report on ${compactText(r.title, 120)}, noted as ${SHORT_STATUS[r.status]}]`)
+  : JSON.stringify(`${compactText(r.title, 120)} (noted as ${SHORT_STATUS[r.status]})`))
 
 /**
  * The lines given to the answering model about what was noted and is not confirmed. A statement to make, never a question to ask.
@@ -70,7 +76,7 @@ export async function judgeConfirmation({ message, previousAnswer, records, clie
   if (!client || !list.length || typeof message !== 'string' || !message.trim()) return keep('not_configured')
   if (typeof previousAnswer !== 'string' || !previousAnswer.trim()) return keep('no_previous_answer')
   // Each question quotes its own note (judged alone, as one item), so a second note in the same request cannot be read into it.
-  const quoted = r => JSON.stringify(`${compactText(r.title, 120)} (noted as ${SHORT_STATUS[r.status]})`)
+  const quoted = noteQuote
   const questions = list.flatMap((r, i) => [
     predicateQuestion(`rc_stated_${i}`, `Note ${quoted(r)}: did the assistant's previous reply tell the person it was recorded?`),
     predicateQuestion(`rc_confirms_${i}`, `Note ${quoted(r)}: is the person's new message confirming it?`),

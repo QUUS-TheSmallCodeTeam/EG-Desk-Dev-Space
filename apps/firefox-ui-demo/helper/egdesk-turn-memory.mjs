@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { choiceQuestion, compactText, predicateQuestion, readChoice, sha256Hex } from './egdesk-decision-questions.mjs'
 import { previousReplyInput } from './egdesk-previous-reply.mjs'
-import { SPEECH_HYBRID_TWO_STEP, SPLIT_WORDINGS, WRITE_SPEECH_DESIGNS, speechDesignInterpretations, speechDesignQuestions, speechHybridSecondQuestions, speechSegments } from './egdesk-speech-grounding.mjs'
+import { SPEECH_HYBRID_TWO_STEP_ASK, SPLIT_WORDINGS, isHybridTwoStep, WRITE_SPEECH_DESIGNS, speechDesignInterpretations, speechDesignQuestions, speechHybridSecondQuestions, speechSegments } from './egdesk-speech-grounding.mjs'
 import { ACTION_MEMORY_RULE, MIN_CALL_MS, PROVENANCE_BASES, REAL_CLOCK, YES, NO, allowsPage, clockLine, pageBlock, reconstructMemory, record, settleBefore, stableAlias, ternary } from './egdesk-wiki-reconstruction.mjs'
 
 // PROTOTYPE (not wired into the turn path): what the system does with a turn's memory, by turn position.
@@ -223,8 +223,8 @@ export function deriveWriteTarget(abouts) {
 // unknown (never guessed). Any other design: the first answers as they are, no second request.
 export const SECOND_LABEL_RULES = 'You are a system judge reading one message. Every question is about ONE sentence of it: answer each on its own, whatever the others are.'
 async function secondLabelStep({ design, wording, answers, spans, message, input, client, signal, timeoutMs }) {
-  if (design !== SPEECH_HYBRID_TWO_STEP) return { answers }
-  const questions = speechHybridSecondQuestions(answers, spans, message, { wording })
+  if (!isHybridTwoStep(design)) return { answers }
+  const questions = speechHybridSecondQuestions(answers, spans, message, { wording, askUnspecified: design === SPEECH_HYBRID_TWO_STEP_ASK })
   if (!questions.length) return { answers, second: { questions: 0 } }
   // The sentence questions need only the message (with its clock): the stored records of the first request are not sent again (up to 8
   // records of 500 characters would otherwise ride along a second time).
@@ -265,7 +265,7 @@ export async function judgeTurnWrite({ message, candidates = [], client, askedAt
   const design = WRITE_SPEECH_DESIGNS.includes(speechDesign) ? speechDesign : 'axes-isolated'
   // The two-step hybrid's second step uses the measured per-predicate choice (SPLIT_WORDING_CHOICE: v2, own v3) unless a wording is given;
   // every other design keeps v1 unless asked (L7 c24, Main's rule after terse-record-v1).
-  const wording = SPLIT_WORDINGS.includes(splitWording) ? splitWording : design === SPEECH_HYBRID_TWO_STEP ? 'v2' : 'v1'
+  const wording = SPLIT_WORDINGS.includes(splitWording) ? splitWording : isHybridTwoStep(design) ? 'v2' : 'v1'
   const pages = candidates.slice(0, maxCandidates)
   const spans = speechSegments(message)
   const none = (reason, extra = {}) => ({ proposal: { op: 'none', reason }, receipt: { reason, ...extra } })

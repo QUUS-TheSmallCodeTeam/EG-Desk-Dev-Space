@@ -1,0 +1,330 @@
+{
+  "set": "real-engine-memory-write-v2",
+  "description": "Pattern: the memory write path on the real engine. Three synthetic schedule records without a date. own-confirm: a question (nothing written), \"아 그거 다음 주 화요일로 확정했어\" (a pending reading on the review-meeting record, source = the person's own statement, status plan or done, the record unchanged), a neutral question (still pending: nothing auto-promotes), then \"응 맞아\" (accepted with the person's confirmation, the record's status now the reading's). hedged: \"아 그 점검 방문은 아마 화요일쯤일 거야\": nothing confirmed or promoted, any reading is not the person's own settled statement, the record's status stays unknown. relayed: \"법무팀 말로는 그 마감을 수요일로 정했대\": a pending reading with source attributed_report (heard), not promoted. Expectations by code from the write store, after the turn's answer and background write settled. Each conversation is an Agent DM room with the person's speech opt-in: it needs --decisions and --persisted-with-cleanup. v2: the source axis of a sentence the axes request calls \"unspecified\" is asked again with the split predicates (design hybrid-two-step-ask), and the confirmation quotes the person's own words.",
+  "conversations": [
+    {
+      "id": "own-confirm",
+      "agentProfile": {
+        "name": "Sol",
+        "role": "비서",
+        "tone": "concise",
+        "instructions": "한국어로 한두 문장으로 짧게 답한다. 일정은 기록에 있는 내용만 말하고, 기록에 없으면 정해지지 않았다고 말한다."
+      },
+      "speechConsent": true,
+      "flags": {
+        "EGDESK_TURN_MEMORY_CONFIRM": "on",
+        "EGDESK_TURN_MEMORY_SPEECH_DESIGN": "hybrid-ask"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "schedule/product-review",
+            "title": "신제품 리뷰 회의 일정",
+            "body": "신제품 리뷰 회의 일정은 아직 정해지지 않았다. 후보는 다음 주 화요일과 수요일이다.",
+            "time": "planned"
+          },
+          {
+            "id": "schedule/vendor-visit",
+            "title": "거래처 점검 방문 일정",
+            "body": "거래처 점검 방문 일정은 아직 정해지지 않았다. 담당자가 거래처와 날짜를 조율 중이다.",
+            "time": "planned"
+          },
+          {
+            "id": "schedule/legal-deadline",
+            "title": "법무 검토 마감 일정",
+            "body": "법무 검토 마감 일정은 아직 정해지지 않았다. 법무팀이 날짜를 알려 주기로 했다.",
+            "time": "planned"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "신제품 리뷰 회의 일정 어떻게 돼 있어?",
+          "expect": {
+            "recording": {
+              "page": "schedule/product-review",
+              "reading": "none",
+              "readings": 0,
+              "newPages": 0
+            },
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "아 그거 다음 주 화요일로 확정했어",
+          "expect": {
+            "recording": {
+              "page": "schedule/product-review",
+              "reading": "pending",
+              "status": [
+                "plan",
+                "done"
+              ],
+              "basis": [
+                "self_reported_observation"
+              ],
+              "pageStatus": [
+                "unknown"
+              ],
+              "confirmed": false,
+              "readings": 1
+            },
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "그 회의 일정 지금 어떻게 정리돼 있어?",
+          "expect": {
+            "recording": {
+              "page": "schedule/product-review",
+              "reading": "pending",
+              "status": [
+                "plan",
+                "done"
+              ],
+              "basis": [
+                "self_reported_observation"
+              ],
+              "pageStatus": [
+                "unknown"
+              ],
+              "confirmed": false,
+              "readings": 1
+            },
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "응 맞아",
+          "expect": {
+            "recording": {
+              "page": "schedule/product-review",
+              "reading": "accepted",
+              "status": [
+                "plan",
+                "done"
+              ],
+              "basis": [
+                "self_reported_observation"
+              ],
+              "pageStatus": [
+                "plan",
+                "done"
+              ],
+              "confirmed": true,
+              "readings": 1
+            },
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "hedged",
+      "agentProfile": {
+        "name": "Sol",
+        "role": "비서",
+        "tone": "concise",
+        "instructions": "한국어로 한두 문장으로 짧게 답한다. 일정은 기록에 있는 내용만 말하고, 기록에 없으면 정해지지 않았다고 말한다."
+      },
+      "speechConsent": true,
+      "flags": {
+        "EGDESK_TURN_MEMORY_CONFIRM": "on",
+        "EGDESK_TURN_MEMORY_SPEECH_DESIGN": "hybrid-ask"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "schedule/product-review",
+            "title": "신제품 리뷰 회의 일정",
+            "body": "신제품 리뷰 회의 일정은 아직 정해지지 않았다. 후보는 다음 주 화요일과 수요일이다.",
+            "time": "planned"
+          },
+          {
+            "id": "schedule/vendor-visit",
+            "title": "거래처 점검 방문 일정",
+            "body": "거래처 점검 방문 일정은 아직 정해지지 않았다. 담당자가 거래처와 날짜를 조율 중이다.",
+            "time": "planned"
+          },
+          {
+            "id": "schedule/legal-deadline",
+            "title": "법무 검토 마감 일정",
+            "body": "법무 검토 마감 일정은 아직 정해지지 않았다. 법무팀이 날짜를 알려 주기로 했다.",
+            "time": "planned"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "거래처 점검 방문 일정 어떻게 돼 있어?",
+          "expect": {
+            "recording": {
+              "page": "schedule/vendor-visit",
+              "reading": "none",
+              "readings": 0,
+              "newPages": 0
+            },
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "아 그 점검 방문은 아마 화요일쯤일 거야",
+          "expect": {
+            "recording": {
+              "page": "schedule/vendor-visit",
+              "reading": "pending_or_none",
+              "basis": [
+                null,
+                "inference",
+                "record_based",
+                "unspecified"
+              ],
+              "pageStatus": [
+                "unknown"
+              ],
+              "confirmed": false
+            },
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "그 점검 방문 일정 지금 어떻게 정리돼 있어?",
+          "expect": {
+            "recording": {
+              "page": "schedule/vendor-visit",
+              "reading": "pending_or_none",
+              "basis": [
+                null,
+                "inference",
+                "record_based",
+                "unspecified"
+              ],
+              "pageStatus": [
+                "unknown"
+              ],
+              "confirmed": false
+            },
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "id": "relayed",
+      "agentProfile": {
+        "name": "Sol",
+        "role": "비서",
+        "tone": "concise",
+        "instructions": "한국어로 한두 문장으로 짧게 답한다. 일정은 기록에 있는 내용만 말하고, 기록에 없으면 정해지지 않았다고 말한다."
+      },
+      "speechConsent": true,
+      "flags": {
+        "EGDESK_TURN_MEMORY_CONFIRM": "on",
+        "EGDESK_TURN_MEMORY_SPEECH_DESIGN": "hybrid-ask"
+      },
+      "memory": {
+        "mode": "on",
+        "pages": [
+          {
+            "id": "schedule/product-review",
+            "title": "신제품 리뷰 회의 일정",
+            "body": "신제품 리뷰 회의 일정은 아직 정해지지 않았다. 후보는 다음 주 화요일과 수요일이다.",
+            "time": "planned"
+          },
+          {
+            "id": "schedule/vendor-visit",
+            "title": "거래처 점검 방문 일정",
+            "body": "거래처 점검 방문 일정은 아직 정해지지 않았다. 담당자가 거래처와 날짜를 조율 중이다.",
+            "time": "planned"
+          },
+          {
+            "id": "schedule/legal-deadline",
+            "title": "법무 검토 마감 일정",
+            "body": "법무 검토 마감 일정은 아직 정해지지 않았다. 법무팀이 날짜를 알려 주기로 했다.",
+            "time": "planned"
+          }
+        ]
+      },
+      "turns": [
+        {
+          "say": "법무 검토 마감 일정 어떻게 돼 있어?",
+          "expect": {
+            "recording": {
+              "page": "schedule/legal-deadline",
+              "reading": "none",
+              "readings": 0,
+              "newPages": 0
+            },
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "법무팀 말로는 그 마감을 수요일로 정했대",
+          "expect": {
+            "recording": {
+              "page": "schedule/legal-deadline",
+              "reading": "pending",
+              "status": [
+                "plan",
+                "done"
+              ],
+              "basis": [
+                "attributed_report"
+              ],
+              "pageStatus": [
+                "unknown"
+              ],
+              "confirmed": false,
+              "readings": 1
+            },
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        },
+        {
+          "say": "그 마감 일정 지금 어떻게 정리돼 있어?",
+          "expect": {
+            "recording": {
+              "page": "schedule/legal-deadline",
+              "reading": "pending",
+              "status": [
+                "plan",
+                "done"
+              ],
+              "basis": [
+                "attributed_report"
+              ],
+              "pageStatus": [
+                "unknown"
+              ],
+              "confirmed": false,
+              "readings": 1
+            },
+            "posted": true,
+            "noNativeTools": true,
+            "turnStatus": "completed"
+          }
+        }
+      ]
+    }
+  ]
+}

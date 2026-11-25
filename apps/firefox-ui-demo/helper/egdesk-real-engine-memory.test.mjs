@@ -14,7 +14,7 @@ import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 import { DECISION_KEY_ENV, loadScripts, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { REAL_ENGINE_SCRIPT_SCHEMA, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createMemoryHook, memoryGraph, memoryNeedsDecisions, pagesIn, validateMemory, validateMemoryExpect } from './egdesk-real-engine-memory.mjs'
-import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryHeldV4Script, buildMemoryRecallScript, buildMemoryScaleScript, buildMemoryScaleV2Script, buildMemoryScaleV3Script, buildMemoryWriteScript, WRITE_PAGES, buildMemorySpillProbeScript, buildMemorySpillProbeV2Script, SPILL_PROBE_PAGES, PURGE, RETENTION, SCALE_FACTS, SCALE_PAGES } from './egdesk-memory-real-engine-scripts.mjs'
+import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script, buildMemoryHeldV4Script, buildMemoryRecallScript, buildMemoryScaleScript, buildMemoryScaleV2Script, buildMemoryScaleV3Script, buildMemoryWriteScript, buildMemoryWriteV2Script, WRITE_PAGES, buildMemorySpillProbeScript, buildMemorySpillProbeV2Script, SPILL_PROBE_PAGES, PURGE, RETENTION, SCALE_FACTS, SCALE_PAGES } from './egdesk-memory-real-engine-scripts.mjs'
 import { candidatesFromOntologyGraph } from './egdesk-context-setup.mjs'
 import { choiceAnswer, mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { checkRecording, recordingFacts, validateRecordingExpect, validateSpeechConsent } from './egdesk-real-engine-recording.mjs'
@@ -23,7 +23,7 @@ const app = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scriptFile = name => path.join(app, 'scripts', 'real-engine', 'scripts', `real-engine-${name}${/-v\d+$/.test(name) ? '' : '-v1'}.json`)
 
 test('the committed scripts are what the builders produce, validate, and need the Decision model', () => {
-  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-scale-v3', buildMemoryScaleV3Script], ['memory-write', buildMemoryWriteScript], ['memory-spill-probe', buildMemorySpillProbeScript], ['memory-spill-probe-v2', buildMemorySpillProbeV2Script]]) {
+  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-scale-v3', buildMemoryScaleV3Script], ['memory-write', buildMemoryWriteScript], ['memory-write-v2', buildMemoryWriteV2Script], ['memory-spill-probe', buildMemorySpillProbeScript], ['memory-spill-probe-v2', buildMemorySpillProbeV2Script]]) {
     const committed = JSON.parse(fs.readFileSync(scriptFile(name), 'utf8'))
     assert.deepEqual(committed, JSON.parse(JSON.stringify(build())))
     assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })
@@ -418,7 +418,7 @@ test('maxKeyBytes: judged on the largest key in UTF-8 bytes (Korean is 3 bytes a
 // ---- c34: the memory write path, through the extension API ----
 // A stand-in for the Decision model on the write conversations (a test double of what the real model must do): triage says a statement is worth recording, the write judgment is about the
 // record whose title the statement names, the sentence labels follow the markers of the statement (heard: …대 / 말로는, hedged: 아마 / 쯤), the confirmation is the fixture's.
-function writeJudge() {
+function writeJudge({ realSource = false } = {}) {
   const base = mockJudge()
   return async wire => {
     const names = wire.questions.map(q => q.name)
@@ -431,9 +431,11 @@ function writeJudge() {
       if (q.name === 'tn_record') answers[q.name] = { type: 'predicate', probability: 0.95 }
       else if (q.name === 'tn_need') answers[q.name] = { type: 'predicate', probability: 0.03 }
       else if (q.name === 'tw_status') answers[q.name] = choiceAnswer(q, 'plan', 0.95)
+      else if (/^speechs_/.test(q.name)) answers[q.name] = { type: 'predicate', probability: q.name.startsWith('speechs_own_') && !/대$|말로는|아마|쯤/.test(message) ? 0.95 : 0.03 }
       else if (/^speech_/.test(q.name)) {
         const axis = q.name.split('_')[1], heard = /대$|말로는/.test(message), hedged = /아마|쯤/.test(message)
-        answers[q.name] = axis === 'source' ? choiceAnswer(q, heard ? 'attributed_report' : hedged ? 'inference' : 'self_reported_observation', 0.92)
+        // realSource: what the real axes request answered for the first-person decision (check-20mw): source unspecified; the split predicates then decide own
+        answers[q.name] = axis === 'source' ? choiceAnswer(q, heard ? 'attributed_report' : hedged ? 'inference' : realSource ? 'unspecified' : 'self_reported_observation', 0.92)
           : axis === 'form' ? choiceAnswer(q, 'plan', 0.97) : choiceAnswer(q, 'future_anchored', 0.95)
       }
     }
@@ -512,4 +514,18 @@ test('the scorer shows what the write path stored after each turn', async () => 
   const score = scoreMemoryRecord(rec)
   assert.deepEqual(score.turns[0].recording, { readings: { p: { status: 'unknown', readings: ['pending:plan:self_reported_observation'] } }, written: 0, consent: true })
   assert.match(formatScore(score), /turn 2 store: \{"p":\{"status":"unknown","readings":\["pending:plan:self_reported_observation"\]\}\}, speech opt-in granted/)
+})
+
+test('write-v2: check-20mw reproduced and fixed (fake engine, the stand-in judge answering the axes as the real one did): write-v1 stops at basis unspecified, write-v2 installs the person\'s own statement; hedged and relayed stay as strict as before', async t => {
+  const run = async script => { const w = persistedRoom(world(t, { turns: finalsFor(true) }, { decide: writeJudge({ realSource: true }) })); return (await runCheck(w.options, asScripts(script), w.deps)).records }
+  const v1 = await run(buildMemoryWriteScript())
+  const own1 = v1.find(r => r.id === 'own-confirm')
+  assert.equal(own1.turns[1].recording.seeded['schedule/product-review'].readings[0].basis, 'unspecified'); assert.equal(own1.turns[1].expectations.find(e => e.check === 'recording.basis').ok, false)
+  assert.equal(v1.find(r => r.id === 'relayed').ok, true); assert.equal(v1.find(r => r.id === 'hedged').ok, true)
+  const v2 = await run(buildMemoryWriteV2Script())
+  for (const rec of v2) assert.equal(rec.ok, true, `${rec.id}: ${JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok)))}`)
+  const own2 = v2.find(r => r.id === 'own-confirm').turns
+  assert.equal(own2[1].recording.seeded['schedule/product-review'].readings[0].basis, 'self_reported_observation'); assert.equal(own2[3].recording.seeded['schedule/product-review'].readings[0].state, 'accepted')
+  const strict = buildMemoryWriteV2Script(), strictV1 = buildMemoryWriteScript()
+  assert.deepEqual(strict.conversations.map(c => c.turns), strictV1.conversations.map(c => c.turns), 'the expectations are v1\'s, none loosened')
 })

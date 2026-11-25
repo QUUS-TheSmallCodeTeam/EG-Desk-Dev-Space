@@ -431,3 +431,16 @@ export function buildMemoryWriteScript() {
         ...WRITE_SAYS.relayed.slice(1).map(say => turn(say, { page: legal.id, reading: 'pending', status: ['plan', 'done'], basis: ['attributed_report'], pageStatus: ['unknown'], confirmed: false, readings: 1 }))] },
     ] }
 }
+
+// write-v2 (c35), from the real run of write-v1 (check-20mw): hedged and relayed passed; own-confirm failed twice. (a) the person's first-person decision got source "unspecified"
+// from the axes request and the split predicates were never asked: v2 selects the design 'hybrid-two-step-ask' (EGDESK_TURN_MEMORY_SPEECH_DESIGN=hybrid-ask), which asks them for an
+// installed "unspecified" and keeps the axes' reading when they do not decide a specific source; (b) the confirmation's questions quoted the record's title and a status word only: they
+// now quote the person's own words too (always on with the confirmation; nothing to select). Everything else, the expectations included, is v1's: own stays strict
+// (self_reported_observation), hedged and relayed are not loosened.
+export const MEMORY_WRITE_V2_SET = 'real-engine-memory-write-v2'
+export function buildMemoryWriteV2Script() {
+  const v1 = buildMemoryWriteScript()
+  return { ...v1, set: MEMORY_WRITE_V2_SET,
+    description: v1.description + ' v2: the source axis of a sentence the axes request calls "unspecified" is asked again with the split predicates (design hybrid-two-step-ask), and the confirmation quotes the person\'s own words.',
+    conversations: v1.conversations.map(c => ({ ...c, flags: { ...c.flags, EGDESK_TURN_MEMORY_SPEECH_DESIGN: 'hybrid-ask' } })) }
+}
