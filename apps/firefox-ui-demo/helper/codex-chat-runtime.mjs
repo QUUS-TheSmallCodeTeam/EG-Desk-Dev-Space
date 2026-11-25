@@ -158,7 +158,7 @@ import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsP
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
 import { predicateQuestion, sha256Hex } from './egdesk-decision-questions.mjs'
 import { workspaceCandidates } from './egdesk-prefetch.mjs'
-import { NUNCHI_KEY, beginNunchi, noteNunchi, nunchiReceiptFor, settleNunchi, standingNunchi } from './egdesk-nunchi-runtime.mjs'
+import { NUNCHI_KEY, beginNunchi, noteNunchi, nunchiReceiptFor, recentNunchi, settleNunchi, standingNunchi } from './egdesk-nunchi-runtime.mjs'
 import { CONTRADICTION_LIMITS, contradictionPairs, judgeContradictions, judgeRecordConflict, settledRecordText } from './egdesk-record-settled.mjs'
 import { engineContextConfig, spilledKeys, splitEngineContext } from './egdesk-engine-context.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
@@ -2644,7 +2644,7 @@ export class CodexChatRuntime {
     // thread preparation below. It is awaited once, capped, just before the turn is claimed. null when off, advisory or not eligible.
     const memoryTurn = !bounded && this.turnMemoryMode() === 'on' ? this.beginTurnMemory(body, context) : null
     // Nunchi (flag EGDESK_NUNCHI, default off; egdesk-nunchi.mjs): the person's reaction to the assistant's last message is read beside the memory loop
-    const nunchiJob = !bounded ? beginNunchi(this, body, context) : null
+    const nunchiJob = beginNunchi(this, body, context, { bounded })
     // Decision model context setup: 'on' attaches the selected items, 'advisory' only records them.
     // The folder the engine works in (own tools: the real folder behind the neutral one), for the prefetch candidates (flag turnMemory.prefetch, default off)
     context.prefetchFolder = bounded ? null : (ownFolder ?? (overrides.cwd && overrides.cwd !== neutralFolder ? overrides.cwd : null))
@@ -4910,6 +4910,8 @@ export class CodexChatRuntime {
 
   // The closed receipt of a turn's nunchi (a request context or a run): { status, inTime, late, withPrevious, ms, reading, directive, candidate } or null (flag off).
   nunchiReceiptFor(key) { return nunchiReceiptFor(this, key) }
+  // u3: the latest turns' nunchi receipts (closed words and numbers; the turns it did not start, with the reason) for the user-guidance route; [] while the flag is off
+  nunchiRecent(n = 5) { return recentNunchi(this, n) }
 
   keepLateFlag() {
     try { return this.decisionContext?.turnMemory?.keepLate === true } catch { return false }

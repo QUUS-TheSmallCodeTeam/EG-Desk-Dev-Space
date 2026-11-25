@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { NUNCHI_KEY, NUNCHI_LIMITS, directiveFor, judgeNunchi, nunchiContextText } from './egdesk-nunchi.mjs'
 import { REAL_CLOCK, settleBefore } from './egdesk-wiki-reconstruction.mjs'
 import { createUserGuidanceStore } from './egdesk-user-guidance.mjs'
@@ -56,22 +57,51 @@ function applyReading(rt, job) {
   }
 }
 
-export function beginNunchi(rt, body, context) {
+// ---- receipts the person can look at (u3): closed words, numbers and ids only, never what anybody wrote ----
+// A bounded ring of what the nunchi did on the latest turns, including the turns it did NOT start and why (real window 11-26 03:30: nothing happened and nothing said why). Memory only.
+export const NUNCHI_RECENT = Object.freeze({ max: 20 })
+const recentOf = rt => (rt.nunchiRing ??= [])
+const tagOf = thread => createHash('sha256').update(String(thread ?? '')).digest('hex').slice(0, 8)
+const remember = (rt, entry) => { const list = recentOf(rt); list.push(entry); while (list.length > NUNCHI_RECENT.max) list.shift() }
+/** The closed form of a receipt (what the route returns). */
+const closed = r => ({ at: r.at, conversation: r.conversation, engine: r.engine, position: r.position, started: r.started, reason: r.reason ?? null, status: r.status ?? null, inTime: r.inTime ?? null, late: r.late ?? null, withPrevious: r.withPrevious ?? null, ms: r.ms ?? null,
+  reading: r.reading ? Object.fromEntries(['kind', 'change', 'changeMass', 'forceful', 'forceMass', 'about', 'strength', 'direction', 'language'].map(k => [k, r.reading[k] ?? null])) : null,
+  directive: r.directive ?? null, candidate: r.candidate ?? null, lineSent: r.lineSent ?? null })
+export const nunchiRecent = (rt, n = 5) => Object.freeze(recentOf(rt).slice(-Math.max(1, Math.min(NUNCHI_RECENT.max, Number.isSafeInteger(n) ? n : 5))).map(r => Object.freeze(closed(r))))
+
+/**
+ * Who the nunchi reads (u3). The person's reaction to what the assistant just did is the person's own message in a conversation with an engine: any conversation of the person's, an Agent DM or a plain
+ * room chat (a project room with Claude), not a Board (several voices), not a stateless request. u1 and u2 copied the memory loop's rule (context.channelKind === 'direct'), which is true only for
+ * an Agent DM: in a plain room chat the channel is null, so the judgment never started (real window 11-26 03:30, Claude, EGDESK_UPPER=on EGDESK_NUNCHI=on, mode 사용: no request, no candidate).
+ */
+export function nunchiEligible(body, context) {
+  return !context.stateless && !context.board && body?.boardId == null && context.channelKind !== 'board'
+}
+
+export function beginNunchi(rt, body, context, { bounded = false } = {}) {
   try {
     if (!nunchiOn(rt)) return null
     const cfg = rt.decisionContext.nunchi, setup = rt.decisionContext
-    const eligible = typeof cfg.eligible === 'function' ? cfg.eligible({ body, context }) === true : context.channelKind === 'direct' && !context.stateless && !context.board
+    const thread = typeof context.clientThreadId === 'string' && context.clientThreadId ? context.clientThreadId : typeof context.conversationId === 'string' && context.conversationId ? context.conversationId : null
+    const clock = cfg.clock && typeof cfg.clock.now === 'function' ? cfg.clock : REAL_CLOCK
+    const base = { at: Date.now(), conversation: tagOf(thread), engine: context.engine?.id ?? null, position: null }
+    const skip = reason => { remember(rt, { ...base, started: false, reason }); return null }
     const message = typeof body?.message === 'string' ? body.message : ''
-    if (!eligible || !message.trim() || typeof context.clientThreadId !== 'string' || !context.clientThreadId) return null
-    const clock = cfg.clock && typeof cfg.clock.now === 'function' ? cfg.clock : REAL_CLOCK, controller = new AbortController()
+    if (bounded) return skip('bounded')
+    const eligible = typeof cfg.eligible === 'function' ? cfg.eligible({ body, context }) === true : nunchiEligible(body, context)
+    if (!eligible) return skip('not_eligible')
+    if (!message.trim()) return skip('no_message')
+    if (!thread) return skip('no_thread')
+    const controller = new AbortController()
     let previousReply = null
     // the assistant message right before this turn, only where the egress gate allows the conversation's own messages (the answering model holds it too); else judged without it
     try { previousReply = rt.previousReplyFor(context, null, { ignoreFlag: true }) } catch { previousReply = null }
     const position = rt.turnPosition(context), capMs = position.kind === 'first' ? NUNCHI_CAPS.firstMs : NUNCHI_CAPS.midMs
-    const job = { startedAt: clock.now(), clock, capMs, controller, thread: context.clientThreadId, ref: typeof context.localMessageId === 'string' && context.localMessageId ? `chat-message:${context.localMessageId}` : null,
-      result: null, applied: false, receipt: { status: 'pending', inTime: false, late: false, withPrevious: previousReply !== null, ms: null, reading: null, directive: null, candidate: null } }
+    const job = { startedAt: clock.now(), clock, capMs, controller, thread, ref: typeof context.localMessageId === 'string' && context.localMessageId ? `chat-message:${context.localMessageId}` : null,
+      result: null, applied: false, receipt: { ...base, position: position.kind, started: true, status: 'pending', inTime: false, late: false, withPrevious: previousReply !== null, ms: null, reading: null, directive: null, candidate: null, lineSent: null } }
+    remember(rt, job.receipt)
     job.promise = judgeNunchi({ message, previousReply, client: setup.client, signal: controller.signal, timeoutMs: Math.min(NUNCHI_LIMITS.timeoutMs, capMs) })
-      .then(result => { job.result = result; job.receipt.status = result.status; job.receipt.ms = Math.round(clock.now() - job.startedAt); job.receipt.reading = result.reading ?? null; return result }, () => null)
+      .then(result => { job.result = result; job.receipt.status = result.status; job.receipt.reason = result.reason ?? null; job.receipt.ms = Math.round(clock.now() - job.startedAt); job.receipt.reading = result.reading ?? null; return result }, () => null)
     return job
   } catch { return null }
 }
@@ -96,7 +126,9 @@ export async function settleNunchi(rt, job, context) {
     else { job.receipt.late = true; void job.promise.then(() => applyReading(rt, job)) } // the next turn gets it
     receiptsOf(rt).set(context, job.receipt)
     context.nunchi = job.receipt
-    return standingNunchi(rt, context)
+    const text = standingNunchi(rt, context)
+    job.receipt.lineSent = text !== null
+    return text
   } catch { return standingNunchi(rt, context) }
 }
 
@@ -123,3 +155,5 @@ export function createNunchiConfig({ dataDir, flag = () => process.env.EGDESK_NU
   return Object.freeze({ enabled: () => { try { return flag() === 'on' } catch { return false } },
     get store() { return opened ??= (open ?? (() => createUserGuidanceStore({ dataDir, now, log })))() } })
 }
+
+export { nunchiRecent as recentNunchi }

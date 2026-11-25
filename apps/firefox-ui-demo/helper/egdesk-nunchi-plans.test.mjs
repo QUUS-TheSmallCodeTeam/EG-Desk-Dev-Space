@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { NUNCHI_CONTROLS, NUNCHI_CHUNK, PRIOR_CLASSES, buildNunchiEvalPlans, loadExamples, nunchiAgreement, priorClassOf, readPriorLabels, readWire, NUNCHI_MERGED_CONTROLS, buildNunchiMergedPlans, nunchiMergedReport } from './egdesk-nunchi-plans.mjs'
+import { NUNCHI_CONTROLS, NUNCHI_CHUNK, PRIOR_CLASSES, buildNunchiEvalPlans, loadExamples, nunchiAgreement, priorClassOf, readPriorLabels, readWire, NUNCHI_MERGED_CONTROLS, buildNunchiMergedPlans, nunchiMergedReport, NUNCHI_FRESH_CONTROLS, buildNunchiFreshPlans } from './egdesk-nunchi-plans.mjs'
 import { createOwnerExclusions } from './egdesk-scenario-exclusion.mjs'
 import { loadPlan } from './egdesk-decision-real-runner.mjs'
 import { nunchiRequest } from './egdesk-nunchi.mjs'
@@ -111,4 +111,14 @@ test('u2: the merged report reads the answers like the product: change true or f
   const undecided = nunchiMergedReport({ results: { 'm-remark': { answers: [row('nk_kind', { correction: 0.45, none: 0.4, complaint: 0.15 }), ...no.slice(1)] } } }, [pre[2]])
   assert.equal(undecided.rows[0].pass, false); assert.match(undecided.rows[0].misses[0], /change null/)
   assert.match(r.text, /hard: 2\/4; soft: 1\/1/)
+})
+
+test('u3: the second fresh set has sixteen turns nobody tuned on, none of them with an assistant message before it (the Claude path), two chunks of eight, the real-window sentence among them, the ceiling of each at most 12,000', () => {
+  const chunks = buildNunchiFreshPlans()
+  assert.deepEqual(chunks.map(c => c.plan.requests.length), [8, 8]); assert.ok(chunks.every(c => c.plan.tokenCeiling <= NUNCHI_CHUNK.tokenCeiling && c.plan.requests.every(r => r.recordOnly === true)))
+  assert.equal(NUNCHI_FRESH_CONTROLS.filter(c => c.expect.change === true).length, 8); assert.equal(NUNCHI_FRESH_CONTROLS.filter(c => c.expect.change === false).length, 8)
+  const earlier = new Set([...NUNCHI_CONTROLS, ...NUNCHI_MERGED_CONTROLS].map(c => c.user))
+  assert.deepEqual(NUNCHI_FRESH_CONTROLS.filter(c => earlier.has(c.user)).map(c => c.id), ['f-too-long-from-now'].filter(id => earlier.has('너무 길어. 앞으로는 짧게 말해')), 'only the real-window sentence repeats an earlier turn (there it had an assistant message before it; here it has none)')
+  for (const c of chunks) for (const f of c.files) assert.ok(JSON.parse(f.bytes).input[1].content.includes('There is no assistant message before the turn'), f.file)
+  assert.deepEqual(chunks.flatMap(c => c.plan.requests.map(r => r.id)), NUNCHI_FRESH_CONTROLS.map(c => c.id)); assert.ok(chunks.every(c => c.plan.set.startsWith('nunchi-merge-v2-')))
 })

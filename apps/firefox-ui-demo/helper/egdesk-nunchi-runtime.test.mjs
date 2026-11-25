@@ -6,7 +6,8 @@ import { chmod, mkdtemp } from 'node:fs/promises'
 import { CodexChatRuntime, TURN_MEMORY_CAPS } from './codex-chat-runtime.mjs'
 import { openChatStore } from './egdesk-chat-store.mjs'
 import { collectDecisionCandidates } from './egdesk-decision-candidates.mjs'
-import { NUNCHI_KEY, NUNCHI_CAPS, conversationGuidance, createNunchiConfig, dropConversationGuidance } from './egdesk-nunchi-runtime.mjs'
+import { NUNCHI_KEY, NUNCHI_CAPS, NUNCHI_RECENT, beginNunchi, conversationGuidance, createNunchiConfig, dropConversationGuidance, nunchiEligible } from './egdesk-nunchi-runtime.mjs'
+import { USER_GUIDANCE_PATH, createUserGuidanceHttpHandler } from './egdesk-user-guidance.mjs'
 import { RECORD_HINTS } from './egdesk-nunchi.mjs'
 import { claudeTurnContent } from './claude-engine-adapter.mjs'
 import { createCodexEngineAdapter } from './codex-engine-adapter.mjs'
@@ -217,4 +218,81 @@ test('u2: on the Claude path the guidance entry reaches the engine\'s turn input
   assert.ok(block && /Reply in Korean/.test(block.text), JSON.stringify(content).slice(0, 300)); assert.equal(content.at(-1).text, '야 한글로 보고해', 'the person\'s message stays last')
   // the request the decision model got on this path had no assistant message before the turn (the gate is Codex-only), and still read the reaction
   const asked = w.seen.find(r => r.questions.some(q => q.name === 'nk_kind')); assert.ok(JSON.stringify(asked.input).includes('There is no assistant message before the turn'))
+})
+
+// ---- u3: the real window (Claude, EGDESK_UPPER=on EGDESK_NUNCHI=on, Decision mode 사용, a plain project room, 11-26 03:30) ----
+// "너무 길어. 앞으로는 짧게 말해" left GET /v1/user-guidance empty. The cause was the eligibility rule copied from the memory loop (channelKind === 'direct': an Agent DM only): in a plain room chat the
+// channel is null, so the judgment never started (no Decision request at all). The reading is the person's own reaction in ANY conversation with an engine, not a Board, not stateless.
+// The answers below are the real ones for this very sentence from the fresh validation plan (nunchi-merge-v1-001, m-length-standing): change 1.00, about length, direction less, clear .99.
+const REAL_LENGTH = { dist: { nk_kind: { complaint: 0.5, instruction_change: 0.3, correction: 0.2 }, nk_about: { length: 1 }, nk_strength: { clear: 0.99, mild: 0.01 }, nk_direction: { less: 1 }, nk_language: { none: 1 } } }
+async function roomWorld({ readings, mode = 'on', enabled = true }) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'egdesk-nunchi-room-')); await chmod(dir, 0o700)
+  const store = openChatStore({ dataDir: path.join(dir, 'chat'), ownerScope: 'room-nunchi' }), guidance = createUserGuidanceStore({ dataDir: path.join(dir, 'settings') })
+  const calls = []; let threads = 0, turns = 0, asked = 0
+  const codex = createCodexEngineAdapter({ request: async () => { throw new Error('Claude must never use Codex') }, respond: () => {} })
+  const claude = { id: 'claude', describe: () => ({ id: 'claude', profiles: [{ id: 'claude-slot', active: true }] }), refresh: async () => ({}), capabilities: () => new Set(['stream', 'resume', 'dynamicTools']), ownerKey: () => OWNER, isReady: () => true,
+    async startThread(params) { return { thread: { id: `claude-${++threads}` }, cwd: params.cwd || '/legacy/claude' } }, async resumeThread(params) { return { thread: { id: params.threadId, turns: [] }, cwd: params.cwd } }, async releaseThread() { return { status: 'unsubscribed' } },
+    async startTurn(params) { calls.push(params); return { turn: { id: `claude-turn-${++turns}`, status: 'completed', items: [] } } }, interruptTurn: async () => {}, respond: () => {}, subscribe: () => () => {}, dispose: async () => {} }
+  const dist = (q, d) => { const rows = q.choices.map(c => ({ value: c.value, probability: d[c.value] ?? 0 })).sort((a, b) => b.probability - a.probability), n = q.choices.length
+    return { type: 'choice', choice: rows[0].value, confidence: Math.max(0, (rows[0].probability - 1 / n) / (1 - 1 / n)), probabilities: rows } }
+  const decide = async req => { const names = req.questions.map(q => q.name)
+    if (!names.includes('nk_kind')) return { answers: Object.fromEntries(req.questions.map(q => [q.name, q.type !== 'choice' ? { type: 'predicate', probability: 0.02 } : { type: 'choice', choice: q.choices[0].value, confidence: 0.9, probabilities: q.choices.map((c, i) => ({ value: c.value, probability: i === 0 ? 0.9 : 0.1 / (q.choices.length - 1) })) }])), model: 'syn', usage: {}, latencyMs: 1 }
+    asked++
+    const want = readings[/The person's turn \(quoted data\):\n"""\n([\s\S]*?)\n"""/.exec(req.input.map(m => m.content).join('\n'))?.[1] ?? ''] ?? NONE
+    return { answers: Object.fromEntries(req.questions.map(q => [q.name, want.dist?.[q.name] ? dist(q, want.dist[q.name]) : choiceAnswer(q, want[q.name], 0.95)])), model: 'syn', usage: {}, latencyMs: 1 } }
+  const chat = new CodexChatRuntime({ engines: [codex, claude], store, requireStore: true, profiles, getOwnerKey: () => OWNER, resolveProjectWorkspace: async () => null, emit: () => {},
+    decisionContext: { mode: () => mode, settingsGeneration: () => 0, configured: () => true, budgetMs: 5000, ...(enabled ? { nunchi: { enabled: () => true, store: guidance } } : {}), client: { model: 'syn', decide }, collect: async () => [] } })
+  chat.setConnection('claude', true)
+  return { chat, calls, guidance, store, asked: () => asked, close: () => store.close(),
+    // a plain room chat: no Agent profile, no replyDestination (what the Desk sends for a project room with Claude)
+    sendPlain: (message, extra = {}) => chat.send({ message, engineId: 'claude', clientThreadId: 'room-1', requestId: `r${calls.length + 1}`, ...extra }) }
+}
+
+test('u3: in a plain Claude room chat (channel null, no Agent) "너무 길어. 앞으로는 짧게 말해" is judged, the line reaches Claude\'s turn, and ONE candidate is left in the guidance record', async () => {
+  const w = await roomWorld({ readings: { '너무 길어. 앞으로는 짧게 말해': REAL_LENGTH } })
+  await w.sendPlain('너무 길어. 앞으로는 짧게 말해')
+  assert.equal(w.asked(), 1, 'the decision model was asked (before: not at all)'); assert.equal([...w.chat.runs.values()].at(-1).channelKind ?? null, null, 'a plain room: the channel is not an Agent DM')
+  const entry = w.calls[0].additionalContext?.[NUNCHI_KEY]?.value ?? ''; assert.match(entry, /Keep replies short for the rest of this conversation/); assert.ok(entry.includes(RECORD_HINTS.candidate))
+  const block = claudeTurnContent({ input: w.calls[0].input, additionalContext: w.calls[0].additionalContext }).find(b => b.type === 'text' && b.text.startsWith('[EG-Desk context: egdesk_nunchi]')); assert.ok(block)
+  const [c] = w.guidance.list(); assert.deepEqual([w.guidance.size(), c.guidance, c.value, c.status, c.seen], [1, 'length', 'less', 'candidate', 1]); assert.match(c.sources[0].ref, /^chat-message:msg-/)
+  const [r] = w.chat.nunchiRecent(5); assert.deepEqual([r.started, r.engine, r.position, r.status, r.inTime, r.reading.change, r.reading.about, r.directive, r.candidate.status, r.lineSent], [true, 'claude', 'first', 'ready', true, true, 'length', { guidance: 'length', value: 'less' }, 'candidate', true])
+  w.close()
+})
+
+test('u3: the receipts are closed words, numbers and ids: no sentence of the person, no conversation id; the turns the nunchi did not start are there with the reason', async () => {
+  const w = await roomWorld({ readings: { '너무 길어. 앞으로는 짧게 말해': REAL_LENGTH } })
+  await w.sendPlain('너무 길어. 앞으로는 짧게 말해')
+  await w.chat.send({ message: '비밀 문장 그리고 board 에서', engineId: 'claude', clientThreadId: 'room-2', requestId: 'b1', boardId: 'board-1' }).catch(() => {})
+  const raw = JSON.stringify(w.chat.nunchiRecent(20)); assert.ok(!/너무 길어|비밀 문장|room-1|room-2/.test(raw), raw.slice(0, 300))
+  const list = w.chat.nunchiRecent(20); assert.ok(list.length >= 1 && list.every(r => /^[0-9a-f]{8}$/.test(r.conversation) && typeof r.at === 'number'))
+  assert.deepEqual(w.chat.nunchiRecent(1).length, 1); assert.ok(w.chat.nunchiRecent(1000).length <= NUNCHI_RECENT.max); assert.deepEqual(Object.keys(list[0]).sort(), ['at', 'candidate', 'conversation', 'directive', 'engine', 'inTime', 'late', 'lineSent', 'ms', 'position', 'reading', 'reason', 'started', 'status', 'withPrevious'])
+  w.close()
+  const off = await roomWorld({ readings: {}, enabled: false }); await off.sendPlain('x'); assert.deepEqual(off.chat.nunchiRecent(5), [], 'flag off: nothing is remembered'); off.close()
+})
+
+test('u3: who the nunchi reads: any conversation of the person\'s (Agent DM or plain room), not a Board, not a stateless request; a skipped turn says why', () => {
+  assert.equal(nunchiEligible({}, { channelKind: null }), true); assert.equal(nunchiEligible({}, { channelKind: 'direct' }), true); assert.equal(nunchiEligible({}, { channelKind: 'unverified' }), true)
+  assert.equal(nunchiEligible({}, { channelKind: 'board' }), false); assert.equal(nunchiEligible({ boardId: 'b' }, { channelKind: null }), false); assert.equal(nunchiEligible({}, { board: { record: 1 } }), false); assert.equal(nunchiEligible({}, { stateless: true }), false)
+  const rt = (extra = {}) => ({ decisionContext: { mode: () => 'on', configured: () => true, client: { decide: async () => ({ answers: {} }) }, nunchi: { enabled: () => true, store: null } }, previousReplyFor: () => null, turnPosition: () => ({ kind: 'mid' }), ...extra })
+  const ctx = { clientThreadId: 't1', channelKind: null, engine: { id: 'claude' }, localMessageId: 'msg-1' }, reasons = r => (r.nunchiRing ?? []).map(e => e.reason ?? 'started')
+  const a = rt(); assert.ok(beginNunchi(a, { message: 'x' }, ctx)); assert.deepEqual(reasons(a), ['started'])
+  const b = rt(); assert.equal(beginNunchi(b, { message: 'x' }, ctx, { bounded: true }), null); assert.deepEqual(reasons(b), ['bounded'])
+  const c = rt(); assert.equal(beginNunchi(c, { message: 'x' }, { ...ctx, channelKind: 'board' }), null); assert.deepEqual(reasons(c), ['not_eligible'])
+  const d = rt(); assert.equal(beginNunchi(d, { message: '  ' }, ctx), null); assert.deepEqual(reasons(d), ['no_message'])
+  const e = rt(); assert.equal(beginNunchi(e, { message: 'x' }, { ...ctx, clientThreadId: '' }), null); assert.deepEqual(reasons(e), ['no_thread'])
+  const f = rt({ decisionContext: { mode: () => 'off', configured: () => true, client: {}, nunchi: { enabled: () => true } } }); assert.equal(beginNunchi(f, { message: 'x' }, ctx), null); assert.deepEqual(reasons(f), [], 'the Decision mode is 끔: nothing is judged and nothing is remembered')
+  const g = rt({ decisionContext: { mode: () => 'on', configured: () => false, client: {}, nunchi: { enabled: () => true } } }); assert.equal(beginNunchi(g, { message: 'x' }, ctx), null)
+  const h = rt({ decisionContext: { mode: () => 'on', configured: () => true, client: {}, nunchi: { enabled: () => false } } }); assert.equal(beginNunchi(h, { message: 'x' }, ctx), null); assert.deepEqual(reasons(h), [])
+})
+
+test('u3: GET /v1/user-guidance/receipts?recent=n: off (404) unless the flag, loopback only, GET only, n between 1 and 20 (default 5), the runtime\'s receipts and nothing else', async () => {
+  const w = await roomWorld({ readings: { '너무 길어. 앞으로는 짧게 말해': REAL_LENGTH } }); await w.sendPlain('너무 길어. 앞으로는 짧게 말해')
+  let on = false, loopback = true
+  const handler = createUserGuidanceHttpHandler({ store: w.guidance, enabled: () => on, guard: () => loopback, send: (res, code, body) => { res.code = code; res.body = body }, receipts: n => w.chat.nunchiRecent(n) })
+  const call = async (method, url) => { const res = { destroyed: false, writableEnded: false, setHeader() {} }; await handler({ method }, res, new URL(`http://x${url}`)); return { code: res.code, body: res.body } }
+  assert.equal((await call('GET', `${USER_GUIDANCE_PATH}/receipts`)).code, 404); on = true; loopback = false; assert.equal((await call('GET', `${USER_GUIDANCE_PATH}/receipts`)).code, 403); loopback = true
+  const ok = await call('GET', `${USER_GUIDANCE_PATH}/receipts?recent=5`); assert.deepEqual([ok.code, ok.body.status, ok.body.receipts.length, ok.body.receipts[0].candidate.status], [200, 'ok', 1, 'candidate'])
+  assert.equal((await call('POST', `${USER_GUIDANCE_PATH}/receipts`)).code, 405); assert.equal((await call('GET', `${USER_GUIDANCE_PATH}/receipts?recent=abc`)).body.receipts.length, 1)
+  const bare = createUserGuidanceHttpHandler({ store: w.guidance, enabled: () => true, guard: () => true, send: (res, code, body) => { res.code = code; res.body = body } }); const res = { destroyed: false, writableEnded: false, setHeader() {} }; await bare({ method: 'GET' }, res, new URL(`http://x${USER_GUIDANCE_PATH}/receipts`)); assert.equal(res.code, 404, 'no receipts source: off')
+  w.close()
 })

@@ -506,7 +506,7 @@ const turnMemoryConfig = createTurnMemoryConfig({ settings: bridgeSettings, onto
 // Nunchi (U17; EGDESK_NUNCHI=on, default off): the person's reactions are read by the decision model and guide the conversation; durable candidates go to the user guidance record
 // (<data>/settings/egdesk-user-guidance.json), which the person applies or reverts through /v1/user-guidance. Nothing opens while the flag is off.
 const nunchiConfig = createNunchiConfig({ dataDir: path.join(dataDir, 'settings') })
-const handleUserGuidanceHttp = createUserGuidanceHttpHandler({ store: { list: a => nunchiConfig.store.list(a), setStatus: (...a) => nunchiConfig.store.setStatus(...a) }, enabled: () => nunchiConfig.enabled(), port: BRIDGE_PORT, guard: guardBridgeRequest, send: sendJson })
+const handleUserGuidanceHttp = createUserGuidanceHttpHandler({ store: { list: a => nunchiConfig.store.list(a), setStatus: (...a) => nunchiConfig.store.setStatus(...a) }, enabled: () => nunchiConfig.enabled(), port: BRIDGE_PORT, guard: guardBridgeRequest, send: sendJson, receipts: n => chat.nunchiRecent(n) })
 const browserEntryConfig = createBrowserEntryConfig({ flag: () => process.env.EGDESK_BROWSER_ENTRY, getAdapter: () => turnMemoryConfig.getAdapter(),
   wiki: args => turnMemoryConfig.wiki(args), openItemsFlag: () => process.env.EGDESK_BROWSER_OPEN_ITEMS })
 // The Desk's presence snapshot as the window posts it (same rows the placement runtime reads there). Memory only; the route is off (404)
