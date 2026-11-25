@@ -46,8 +46,8 @@ test('the sign-in host list of the overlay is the helper\'s list', () => { asser
 
 test('wiring in the surface: sign-in cards are never saved, saves and restores go through the scrub, a location change or error page on a credential address blanks the card, the capability turns the guard on', () => {
   assert.match(surface, /if \(card\._signinSessionId\) return null;/)
-  assert.match(surface, /SurfaceState\.scrubBrowserRecord \? SurfaceState\.scrubBrowserRecord\(record, \{ guard: typeof signinGuardOn === 'function' && signinGuardOn\(\) \}\) : record/)
-  assert.match(surface, /const savedUri = record\.runtimeState\?\.uri \|\| record\.sourceRef\?\.uri;[\s\S]{0,160}SurfaceState\.restorableBrowserUri\(savedUri, \{ guard: typeof signinGuardOn === 'function' && signinGuardOn\(\) \}\)/)
+  assert.match(surface, /typeof SurfaceState !== 'undefined' && SurfaceState\.scrubBrowserRecord \? SurfaceState\.scrubBrowserRecord\(record, \{ guard: typeof signinGuardOn === 'function' && signinGuardOn\(\) \}\) : record/)
+  assert.match(surface, /const savedUri = record\.runtimeState\?\.uri \|\| record\.sourceRef\?\.uri;[\s\S]{0,200}SurfaceState\.restorableBrowserUri\(savedUri, \{ guard: typeof signinGuardOn === 'function' && signinGuardOn\(\) \}\)/)
   assert.match(surface, /const savedUri = runtime\.uri \|\| cardState\.sourceRef\?\.uri \|\| 'https:\/\/duckduckgo\.com';[\s\S]{0,200}SurfaceState\.restorableBrowserUri\(savedUri, \{ guard: typeof signinGuardOn === 'function' && signinGuardOn\(\) \}\)/)
   const listener = surface.slice(surface.indexOf('const scrubCredentialPage = (spec) => {'), surface.indexOf('card._browserLocationListener = browserLocationListener'))
   assert.match(listener, /credentialBearingUrl\(spec\)/); assert.match(listener, /purgeHistory\(sh\.count\)/); assert.match(listener, /navigateBrowser\('about:blank', \{ replaceHistory: true/)

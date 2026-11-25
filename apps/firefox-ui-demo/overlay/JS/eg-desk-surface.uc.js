@@ -5759,7 +5759,7 @@
       runtimeState: runtimeStateForCard(card, type),
       ...(typeof surfaceZones === 'undefined' ? {} : cardAnnotationField(card)),
     };
-    try { return SurfaceState.scrubBrowserRecord ? SurfaceState.scrubBrowserRecord(record, { guard: typeof signinGuardOn === 'function' && signinGuardOn() }) : record; } catch { return record; }
+    try { return typeof SurfaceState !== 'undefined' && SurfaceState.scrubBrowserRecord ? SurfaceState.scrubBrowserRecord(record, { guard: typeof signinGuardOn === 'function' && signinGuardOn() }) : record; } catch { return record; }
   }
 
   // CNV-05: the AI marks kept on a card travel with its record (proposals
@@ -6051,7 +6051,7 @@
       else if (record.type === 'joint-item' && projection.jointAccess && typeof jointDesk !== 'undefined' && jointDesk) view = jointDesk.mount(record.runtimeState, projection.boardId);
       else if (record.type === 'browser') {
         const savedUri = record.runtimeState?.uri || record.sourceRef?.uri;
-        const uri = savedUri && SurfaceState.restorableBrowserUri ? SurfaceState.restorableBrowserUri(savedUri, { guard: typeof signinGuardOn === 'function' && signinGuardOn() }) : savedUri; // c36
+        const uri = savedUri && typeof SurfaceState !== 'undefined' && SurfaceState.restorableBrowserUri ? SurfaceState.restorableBrowserUri(savedUri, { guard: typeof signinGuardOn === 'function' && signinGuardOn() }) : savedUri; // c36
         if (!uri) throw new Error('저장된 주소가 없습니다.');
         if (/^file:/i.test(uri)) {
           const file = servicesRef().io.newURI(uri).QueryInterface(Ci.nsIFileURL).file;
@@ -7090,7 +7090,7 @@
         throw new Error('저장된 분리 환경의 연결 정보가 없어 안전하게 열 수 없습니다.');
       }
       const savedUri = runtime.uri || cardState.sourceRef?.uri || 'https://duckduckgo.com';
-      card = spawnBrowserCard(SurfaceState.restorableBrowserUri ? SurfaceState.restorableBrowserUri(savedUri, { guard: typeof signinGuardOn === 'function' && signinGuardOn() }) : savedUri, { // c36
+      card = spawnBrowserCard(typeof SurfaceState !== 'undefined' && SurfaceState.restorableBrowserUri ? SurfaceState.restorableBrowserUri(savedUri, { guard: typeof signinGuardOn === 'function' && signinGuardOn() }) : savedUri, { // c36
         openMode: 'new',
         sourceRef: cardState.sourceRef || {},
         ...(Object.hasOwn(runtime, 'browserIdentity') ? { browserIdentity: runtime.browserIdentity } : {}),
