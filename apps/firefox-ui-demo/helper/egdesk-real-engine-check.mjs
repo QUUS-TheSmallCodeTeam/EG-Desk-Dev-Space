@@ -365,8 +365,11 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
   const turnHooks = createTurnHooks(conversation) // the registered per-turn hooks: memory (seeded pages, what the product sent), journey (turn/steer, turn/interrupt), ...
   const memoryHook = turnHooks.get('memory').hook // memory hook: the ontology graph and the turn-memory setting
   const completions = [], tasks = []
-  const turnNow = { notifications: [], toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [], draftRows: [], flowRows: [], internal: [], writers: [] }
-  const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = []; turnNow.flowRows = []; turnNow.internal = []; turnNow.writers = [] }
+  const turnNow = { notifications: [], toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [], draftRows: [], flowRows: [], internal: [], writers: [], t0: null, timing: { sendMs: null, events: [], items: [], tools: [] } }
+  // c31 (U13 timing): offsets in ms from the start of the scripted turn (turnNow.t0): the visible runtime events, the engine's items, EG-Desk's own tool calls, the Decision calls' starts (decisions[].atMs)
+  const VISIBLE_EVENTS = new Set(['run.started', 'message.started', 'message.completed', 'activity.updated', 'activity.completed', 'approval.required', 'run.completed', 'run.unavailable'])
+  const offsetNow = () => (turnNow.t0 === null ? null : Math.round(performance.now() - turnNow.t0))
+  const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = []; turnNow.flowRows = []; turnNow.internal = []; turnNow.writers = []; turnNow.t0 = null; turnNow.timing = { sendMs: null, events: [], items: [], tools: [] } }
   let initializeResult = null, lastThreadStart = null
   const rpc = new AppServerRpc({
     send: payload => child.stdin.write(`${payload}\n`), experimentalApi: true, timeoutMs: 60_000,
@@ -374,6 +377,14 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       const p = message.params ?? {}
       if (message.method === 'item/started' || message.method === 'item/completed') {
         const type = p.item?.type
+        try { // c31: when each engine item began and ended (a model round ends with its item)
+          const at = offsetNow(), id = String(p.item?.id ?? '')
+          if (at !== null && turnNow.timing.items.length < 200) {
+            const row = turnNow.timing.items.find(x => x.id === id && x.endMs === null)
+            if (message.method === 'item/started' || !row) turnNow.timing.items.push({ id, type: String(type ?? '').slice(0, 40), startMs: message.method === 'item/started' ? at : null, endMs: message.method === 'item/completed' ? at : null })
+            else row.endMs = at
+          }
+        } catch { /* recording only */ }
         if (message.method === 'item/completed') {
           turnNow.items[type] = (turnNow.items[type] ?? 0) + 1
           if (type === 'commandExecution') turnNow.native.commandExecution++
@@ -388,7 +399,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       if (chat) tasks.push(Promise.resolve(chat.handleNotification(message, 'codex')).catch(() => {}))
     },
     onRequest: message => {
-      if (message.method === 'item/tool/call') turnNow.toolCalls.set(message.id, { tool: message.params?.tool, arguments: clip(message.params?.arguments, 1500), result: null })
+      if (message.method === 'item/tool/call') { turnNow.toolCalls.set(message.id, { tool: message.params?.tool, arguments: clip(message.params?.arguments, 1500), result: null }); try { if (turnNow.t0 !== null && turnNow.timing.tools.length < 100) turnNow.timing.tools.push({ id: message.id, tool: String(message.params?.tool ?? '').slice(0, 60), startMs: offsetNow(), endMs: null }) } catch { /* recording only */ } }
       else if (/requestApproval$|^applyPatchApproval$|^execCommandApproval$/.test(message.method)) turnNow.native.approvals++
       if (chat) tasks.push(Promise.resolve(chat.handleServerRequest(message, 'codex')).catch(error => turnNow.errors.push(`server_request_failed:${clip(error?.code ?? error?.message, 80)}`)))
     },
@@ -437,6 +448,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       } catch (error) { rec.requests.push({ method, ms: ms(start), error: String(error?.code ?? 'error').slice(0, 40), message: clip(error?.message ?? '', 300) }); throw error }
     }
     const respond = (id, result, error) => {
+      try { const t = turnNow.timing.tools.find(x => x.id === id); if (t && t.endMs === null) t.endMs = offsetNow() } catch { /* recording only */ }
       const call = turnNow.toolCalls.get(id)
       if (call) { try { call.result = { success: result?.success ?? null, error: error ? clip(error.message ?? error, 300) : null, text: clip(result?.contentItems?.[0]?.text ?? '', 1500) } } catch {} }
       rpc.respond(id, result, error)
@@ -464,7 +476,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       const started = performance.now(); let questions = []
       try { questions = JSON.parse(String(init?.body ?? '{}')).questions ?? [] } catch {}
       const response = await (deps.fetchImpl ?? transport.fetch)(url, init)
-      const row = { names: questions.map(q => q.name), ms: ms(started), status: response?.status ?? null, inputTokens: null, p: {} }
+      const row = { names: questions.map(q => q.name), atMs: turnNow.t0 === null ? null : Math.round(started - turnNow.t0), ms: ms(started), status: response?.status ?? null, inputTokens: null, p: {} }
       try { const body = JSON.parse(await response.clone().text()); row.inputTokens = Number.isFinite(body?.usage?.input_tokens) ? body.usage.input_tokens : null; for (const a of body.answers ?? []) row.p[a.name ?? a.id ?? '?'] = a.type === 'predicate' ? Math.round(a.probability * 100) / 100 : a.type === 'choice' ? (a.choice ?? a.picked ?? '?') : a.type } catch {}
       turnNow.decisions.push(row); decisionCall.push(row)
       return response
@@ -513,7 +525,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       rec.engine.nativeContract = { version: nativeContract?.version ?? null, schemaMatch: nativeContract?.schemaMatch === true, boardPeerContract: typeof nativeContract?.boardPeerContract === 'string', steerContract: typeof nativeContract?.steerContract === 'string', threadDelete: nativeContract?.threadDelete === true }
     }
     chat = new CodexChatRuntime({ request, respond, ...(profileStore ? { profiles: profileStore } : {}),
-      ...(needsNative ? { getBoardPeerContract: () => nativeContract?.boardPeerContract ?? null, getSteerContract: () => nativeContract?.steerContract ?? null, getThreadDelete: () => nativeContract?.threadDelete === true } : {}), emit: () => {}, emitLegacy: () => {}, store, requireStore: true, contexts, getOwnerKey: () => OWNER, verifyFile: async () => null, resolveProjectWorkspace: async () => null,
+      ...(needsNative ? { getBoardPeerContract: () => nativeContract?.boardPeerContract ?? null, getSteerContract: () => nativeContract?.steerContract ?? null, getThreadDelete: () => nativeContract?.threadDelete === true } : {}), emit: event => { try { if (turnNow.t0 !== null && VISIBLE_EVENTS.has(event?.event) && turnNow.timing.events.length < 200) turnNow.timing.events.push({ event: event.event, atMs: offsetNow(), ...(/^activity\./.test(event.event) ? { kind: String(event.details?.activity?.kind ?? event.details?.kind ?? '').slice(0, 40) } : {}) }) } catch { /* recording only */ } }, emitLegacy: () => {}, store, requireStore: true, contexts, getOwnerKey: () => OWNER, verifyFile: async () => null, resolveProjectWorkspace: async () => null,
       ...(FLAG.EGDESK_AGENT_RELOAD_REUSE === 'on' ? { agentReloadReuse: true } : {}), // inert without an Agent-profile conversation (L7 c27)
       toolProviders: wiring.toolProviders, ownTools: wiring.ownTools, decisionContext,
       roomAccount: { mode: () => (FLAG.EGDESK_ROOM_ACCOUNT === 'on' ? 'on' : 'off') } })
@@ -558,9 +570,9 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     // beginTurn sends the person's message and returns at once with the running turn; finishTurn waits for it, then lets the runtime settle.
     const beginTurn = async text => {
       resetTurnNow(); runnerLog.length = 0
-      const started = performance.now()
+      const started = performance.now(); turnNow.t0 = started
       const run = await chat.send({ message: text, clientThreadId, requestId: `req-${++requestSeq}`, cwd: scratch, ...(agentRoom ? { profileId: agentRoom.id, replyDestination: 'direct' } : {}), ...Object.assign({}, ...attached.map(a => a.sendExtra?.() ?? {})), ...(first ? (persisted ? {} : { stateless: true }) : { conversationId: nativeThread }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
-      first = false; nativeThread = run.conversationId
+      first = false; nativeThread = run.conversationId; turnNow.timing.sendMs = ms(started)
       return { run, started }
     }
     const finishTurn = async ({ run, started }) => {
@@ -573,7 +585,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
         if (status === 'timeout') { try { await rpc.request('turn/interrupt', { threadId: run.conversationId, turnId: run.runId }) } catch {} rec.aborted ??= 'turn_timeout' }
       }
       await Promise.allSettled(tasks.splice(0)); try { await chat.queue } catch {} try { await chat.draftCheckIdle() } catch {} await sleep(30); await Promise.allSettled(tasks.splice(0))
-      return { run, status, error: done?.error ?? null, latencyMs: ms(started), toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], draftRows: [...turnNow.draftRows], flowRows: [...turnNow.flowRows], internal: [...turnNow.internal], writers: [...turnNow.writers], commandsRan: [...runnerLog] }
+      return { run, status, error: done?.error ?? null, latencyMs: ms(started), toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], draftRows: [...turnNow.draftRows], flowRows: [...turnNow.flowRows], internal: [...turnNow.internal], writers: [...turnNow.writers], commandsRan: [...runnerLog], timing: { ...turnNow.timing, events: [...turnNow.timing.events], items: [...turnNow.timing.items], tools: [...turnNow.timing.tools], doneMs: ms(started) } }
     }
     const sendAndWait = async text => finishTurn(await beginTurn(text))
     // a message typed into the working run, afterMs after that turn started; not a turn of its own (the run's turn keeps going)
@@ -707,7 +719,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...ext.expectations]
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
       await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
-        toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
+        toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true, ...(s.timing ? { timing: s.timing } : {}) })),
         ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(contextKeys.length ? { contextKeys } : {}), ...(sub.some(s => s.flowRows?.length) ? { flowRows: sub.flatMap(s => s.flowRows) } : {}), ...(sub.some(s => s.internal?.length) ? { internalTurns: sub.flatMap(s => s.internal) } : {}), ...(sub.some(s => s.writers?.length) ? { writers: sub.flatMap(s => s.writers) } : {}), ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...ext.records, expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {
         // the message typed into the run: what happened after it was sent
