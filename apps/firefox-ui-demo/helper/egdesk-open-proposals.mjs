@@ -4,7 +4,7 @@
 //
 //   { id, kind, text, steps: [{ n, text }], options: [{ n, text }], runId, answerId, at }
 //     kind 'proposal'        the answer offers to do something that has not been done and asks whether to go ahead (steps: the list the answer enumerated; options: "A 아니면 B")
-//     kind 'person_request'  the answer asks the person to do something themselves, or to tell the assistant something, before the work can go on
+//     kind 'person_request'  the answer asks the person for something it waits for: an action of their own ("직접 …해주시겠어요?") or an answer about the facts ("이 항목들도 모두 처리됐나요?")
 //     kind 'waiting_action'  the answer asks no question but leaves the action the person asked about waiting for their go-ahead (the implicit "지울 항목은 2개입니다. 파일은 바꾸지 않았습니다.")
 //
 // Code: finds the candidate spans (the question sentences, the last list's items, the alternatives inside a question, the last paragraph), builds the items' structure and combines the
@@ -16,7 +16,7 @@ export const PROPOSAL_LIMITS = Object.freeze({ sentences: 3, steps: 8, options: 
 export const PROPOSAL_YES = 0.8
 export const PROPOSAL_PREDICATES = Object.freeze({
   proposal: index => ({ name: `pq_${index}`, instructions: 'Does this sentence offer to do something that has not been done yet and ask the person whether to go ahead with it, or to choose between ways of doing it?' }),
-  request: index => ({ name: `ph_${index}`, instructions: 'Does this sentence ask the person to do something themselves, or to tell the assistant something, before the work can go on?' }),
+  request: index => ({ name: `ph_${index}`, instructions: 'Does this sentence ask the person for something the assistant is waiting for: to do something themselves, or to tell the assistant something or answer a question about the facts?' }),
   waiting: { name: 'pw', instructions: 'The person asked the assistant to do something but to hold off and report first. Does this paragraph report that and leave the action itself waiting, not done, for the person\'s go-ahead?' },
 })
 

@@ -33,7 +33,7 @@ function scripted(body) {
     const m = /^(pq|ph)_(\d)$/.exec(q.name)
     if (m) {
       const span = quoted(body, new RegExp(`^(Sentence ${Number(m[2]) + 1}) of the assistant's answer:\\n"""\\n([\\s\\S]*?)\\n"""$`)) ?? ''
-      const offers = /해도 될까요|처리됐나요|갈까요|Should I/.test(span), asks = /주시겠어요/.test(span)
+      const offers = /해도 될까요|갈까요|Should I/.test(span), asks = /주시겠어요|처리됐나요/.test(span)
       return { name: q.name, type: 'predicate', probability: m[1] === 'pq' ? (offers ? 0.95 : 0.05) : (asks ? 0.95 : 0.05) }
     }
     if (q.name === 'pw') return { name: 'pw', type: 'predicate', probability: /변경하지 않았습니다/.test(paragraph ?? '') ? 0.93 : 0.05 }
@@ -58,7 +58,7 @@ test('pure: the recorded terse-yes answer asks nothing, so its last paragraph is
 test('registered: conditional-yes becomes ONE proposal with its three steps; terse-yes ONE waiting action with its two steps; a handover ONE person_request without steps; the journey question one proposal', () => {
   const kinds = reply => register(reply).items.map(i => [i.kind, i.steps.length, i.options.length])
   assert.deepEqual(kinds(REAL.conditionalYes), [['proposal', 3, 0]]); assert.deepEqual(kinds(REAL.terseYes), [['waiting_action', 2, 0]])
-  assert.deepEqual(kinds(REAL.handover), [['person_request', 0, 0]]); assert.deepEqual(kinds(REAL.toggle), [['person_request', 0, 0]]); assert.deepEqual(kinds(REAL.journey), [['proposal', 2, 0]])
+  assert.deepEqual(kinds(REAL.handover), [['person_request', 0, 0]]); assert.deepEqual(kinds(REAL.toggle), [['person_request', 0, 0]]); assert.deepEqual(kinds(REAL.journey), [['person_request', 0, 0]], 'a question about the facts is something the assistant waits for, not a proposal: no steps')
   const item = register(REAL.conditionalYes).items[0]; assert.deepEqual([item.text, item.runId, item.answerId], ['이 순서대로 실행해도 될까요?', 'r', 'a'])
 })
 
