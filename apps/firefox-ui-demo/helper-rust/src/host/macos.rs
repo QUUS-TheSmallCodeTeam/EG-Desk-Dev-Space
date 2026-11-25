@@ -137,7 +137,7 @@ pub(super) fn text(dict: &RawDict, key: CFStringRef) -> Option<String> {
     }
 }
 
-fn flag(dict: &RawDict, key: CFStringRef) -> bool {
+pub(super) fn flag(dict: &RawDict, key: CFStringRef) -> bool {
     raw_value(dict, key)
         // SAFETY: as in number().
         .map(|value| unsafe {
@@ -261,6 +261,7 @@ impl Observer for MacObserver {
                 screen_recording: CGPreflightScreenCaptureAccess(),
                 input_monitoring: CGPreflightListenEventAccess(),
                 requested: false,
+                screen_locked: super::macos_content::session_blocked(),
                 bundled: self.bundled,
             }
         }

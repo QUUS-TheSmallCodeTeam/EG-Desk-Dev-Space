@@ -400,7 +400,7 @@ mod tests {
             WindowList { windows: vec![], titles: if query.titles { "omitted-no-permission" } else { "not-requested" }, truncated: false }
         }
         fn permissions(&self) -> Permissions {
-            Permissions { accessibility: false, screen_recording: false, input_monitoring: false, requested: false, bundled: false }
+            Permissions { accessibility: false, screen_recording: false, input_monitoring: false, requested: false, screen_locked: false, bundled: false }
         }
         fn service(&self) -> ServiceStatus {
             ServiceStatus::new(vec![])

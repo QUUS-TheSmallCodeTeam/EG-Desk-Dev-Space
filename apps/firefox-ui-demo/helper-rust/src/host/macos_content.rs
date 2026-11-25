@@ -41,7 +41,7 @@ use core_graphics::window::{
 };
 use foreign_types::ForeignType;
 
-use super::macos::{bounds, number, screen_recording_preflight, text, RawDict};
+use super::macos::{bounds, flag, number, screen_recording_preflight, text, RawDict};
 use super::observe::{
     base64_encode, distinct_reasons, geometry_revision, mask_pixels, match_window_frame, shrink_edge, target_size, walk_deadline,
     walk_tree, AxNode, CaptureFrame, CaptureImage, CaptureQuery, CaptureResult, ElementsQuery, ElementsResult, FrameMatch,
@@ -61,6 +61,11 @@ extern "C" {
     fn AXValueGetTypeID() -> usize;
     fn AXValueGetType(value: *const c_void) -> u32;
     fn AXValueGetValue(value: *const c_void, kind: u32, out: *mut c_void) -> u8;
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGSessionCopyCurrentDictionary() -> *const c_void;
 }
 
 #[link(name = "ImageIO", kind = "framework")]
@@ -95,6 +100,31 @@ const B_CHILDREN: usize = 12;
 /// element simply has no such attribute.
 fn is_missing(code: i32) -> bool {
     matches!(code, -25205 | -25212 | -25208)
+}
+
+/// Whether the login session's screen is locked, or the session is not on the console (fast user switching). In either state accessibility
+/// answers with placeholders (every window of an app reads as an application element without a frame) and CGWindowListCreateImage
+/// cannot see the windows, so a read would only produce a misleading "no such window". Unknown (no session dictionary) counts as usable.
+pub(super) fn session_blocked() -> bool {
+    // SAFETY: Copy rule: we own the returned dictionary (or null); keys are CFStrings and values are checked CFBooleans (flag()).
+    unsafe {
+        let raw = CGSessionCopyCurrentDictionary();
+        if raw.is_null() {
+            return false;
+        }
+        let dict = RawDict::wrap_under_create_rule(raw as _);
+        let locked_key = CFString::new("CGSSessionScreenIsLocked");
+        let console_key = CFString::new("kCGSSessionOnConsoleKey");
+        let on_console_present = dict.find(console_key.as_concrete_TypeRef() as *const c_void).is_some();
+        flag(&dict, locked_key.as_concrete_TypeRef()) || (on_console_present && !flag(&dict, console_key.as_concrete_TypeRef()))
+    }
+}
+
+fn require_session() -> Result<(), ObserveError> {
+    if session_blocked() {
+        return Err(ObserveError::new("screen_locked", "The Mac's screen is locked (or this user session is not on the console), so no window can be read"));
+    }
+    Ok(())
 }
 
 fn ax_failed(code: i32) -> ObserveError {
@@ -323,16 +353,18 @@ fn ax_window(pid: i32, target: &Located) -> Result<AxEl, ObserveError> {
         Ok(None) => Vec::new(),
         Err(code) => return Err(ax_failed(code)),
     };
-    let candidates: Vec<(Rect, Option<String>)> = windows
+    let candidates: Vec<(Option<Rect>, Option<String>)> = windows
         .iter()
         .map(|window| {
             let attrs = window.attrs();
-            (attrs.frame.unwrap_or(Rect::new(-1.0e9, -1.0e9, 0.0, 0.0)), attrs.title)
+            (attrs.frame, attrs.title)
         })
         .collect();
     match match_window_frame(&target.bounds, target.title.as_deref(), &candidates) {
         Ok(index) => Ok(windows.into_iter().nth(index).expect("index from the same list")),
-        Err(FrameMatch::None) => Err(ObserveError::new("window_not_found", "No accessibility window matches that window's frame")),
+        Err(FrameMatch::NoWindows) => Err(ObserveError::new("ax_unavailable", "The app lists no windows through accessibility")),
+        Err(FrameMatch::NoFrames) => Err(ObserveError::new("ax_unavailable", "The app lists windows through accessibility but none has a position or size (locked screen, or the app has not built its accessibility tree)")),
+        Err(FrameMatch::None) => Err(ObserveError::new("window_mismatch", "No accessibility window has this window's frame")),
         Err(FrameMatch::Ambiguous) => Err(ObserveError::new("ambiguous_window", "More than one window has that frame; it cannot be told apart safely")),
     }
 }
@@ -405,6 +437,7 @@ fn window_ref(window_id: u32, pid: i32, bounds: Rect) -> WindowRef {
 
 pub fn read_elements(query: &ElementsQuery) -> Result<ElementsResult, ObserveError> {
     require(true, false)?;
+    require_session()?;
     let located = locate(query.window_id, query.pid)?;
     let root = ax_window(query.pid, &located)?;
     let walk = walk_tree(&root, &located.bounds, walk_deadline());
@@ -421,6 +454,7 @@ pub fn read_elements(query: &ElementsQuery) -> Result<ElementsResult, ObserveErr
 pub fn capture(query: &CaptureQuery) -> Result<CaptureResult, ObserveError> {
     // Masking needs the accessibility tree, so capture needs both permissions and refuses without either.
     require(true, true)?;
+    require_session()?;
     let located = locate(query.window_id, query.pid)?;
     let root = ax_window(query.pid, &located)?;
     let walk = walk_tree(&root, &located.bounds, walk_deadline());

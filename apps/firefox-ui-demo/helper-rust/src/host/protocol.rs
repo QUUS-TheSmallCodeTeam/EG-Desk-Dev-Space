@@ -121,6 +121,9 @@ pub struct Permissions {
     pub input_monitoring: bool,
     /// Always false: host-observe only previews (Preflight); it never asks.
     pub requested: bool,
+    /// The login session's screen is locked (or the session is not on the console). While it is, every window of every app reads as a
+    /// placeholder through accessibility and cannot be captured, so capture and readElements answer screen_locked.
+    pub screen_locked: bool,
     /// Whether this process runs from inside a .app bundle. When false, macOS
     /// attributes these grants to the process that launched us (for example
     /// the terminal or EG-Desk itself), not to an EG-Desk Host Agent.app.
@@ -419,7 +422,7 @@ mod tests {
             fn apps(&self) -> Vec<AppInfo> { Vec::new() }
             fn frontmost(&self) -> Option<AppRef> { None }
             fn windows(&self, _query: WindowQuery) -> WindowList { WindowList { windows: Vec::new(), titles: "not-requested", truncated: false } }
-            fn permissions(&self) -> Permissions { Permissions { accessibility: false, screen_recording: false, input_monitoring: false, requested: false, bundled: false } }
+            fn permissions(&self) -> Permissions { Permissions { accessibility: false, screen_recording: false, input_monitoring: false, requested: false, screen_locked: false, bundled: false } }
             fn service(&self) -> ServiceStatus { ServiceStatus::new(Vec::new()) }
         }
         let (line, stop) = answer(&Off, "c1", &RequestKind::Capture(CaptureQuery { window_id: 1, pid: 2, max_edge: 512 }));

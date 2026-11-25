@@ -85,6 +85,10 @@ const HELPER_CODES = Object.freeze({
   mask_unavailable: ['mask_unavailable', 'Sensitive fields in this window could not be checked completely, so no picture was made. Try read_elements, or another window.'],
   window_changed: ['window_changed', 'The window changed while it was read. List the windows again.'],
   window_not_found: ['window_not_found', 'No such on-screen window. List the windows again.'],
+  // U3 (D12): a locked screen made every read look like "no such window"; the helper now says what is wrong.
+  screen_locked: ['screen_locked', 'The Mac\'s screen is locked, so no window can be read or captured. Tell the person to unlock it; do not retry until they have.'],
+  ax_unavailable: ['accessibility_unavailable', 'The app does not expose this window through accessibility right now (the screen may be locked, or the app has not built its accessibility tree). Try again after the person unlocks or brings the app forward; capture may still work.'],
+  window_mismatch: ['window_mismatch', 'The accessibility tree reports different window positions than the screen list, so elements cannot be placed safely. List the windows again.'],
   ambiguous_window: ['ambiguous_window', 'Two windows look the same to the accessibility tree, so this one cannot be told apart safely. Use another window.'],
   ax_failed: ['accessibility_failed', 'The app did not answer the accessibility read.'],
   capture_failed: ['capture_failed', 'The window picture could not be made.'],
@@ -132,7 +136,11 @@ export function createComputerObserveProvider({ host, ask, ownPids = [], extraDe
   async function resolveApp(name, apps) {
     const wanted = String(name).trim()
     const byId = apps.filter(app => app.bundleId === wanted)
-    const found = byId.length ? byId : apps.filter(app => typeof app.name === 'string' && app.name.toLowerCase() === wanted.toLowerCase())
+    const lower = wanted.toLowerCase()
+    // bundle id, the (localized) name, then the last part of the bundle id ('Calculator' for com.apple.calculator on a Mac whose app is named '계산기')
+    const byName = () => apps.filter(app => typeof app.name === 'string' && app.name.toLowerCase() === lower)
+    const byIdTail = () => apps.filter(app => typeof app.bundleId === 'string' && app.bundleId.split('.').at(-1).toLowerCase() === lower)
+    const found = byId.length ? byId : byName().length ? byName() : byIdTail()
     if (!found.length) return { error: OWN.appNotFound }
     const identities = new Set(found.map(app => app.bundleId || `name:${app.name}`))
     if (identities.size > 1) return { error: OWN.appAmbiguous }
@@ -188,6 +196,8 @@ export function createComputerObserveProvider({ host, ask, ownPids = [], extraDe
           const allowed = apps.filter(app => !deny(app))
           const only = args.target ? allowed.filter(app => app.bundleId === args.target.app || (typeof app.name === 'string' && app.name.toLowerCase() === args.target.app.toLowerCase())) : allowed
           const out = []
+          // a locked screen leaves the window list in place but nothing readable behind it
+          try { extras.screenLocked = (await host.permissions?.())?.screenLocked === true } catch { /* unknown: say nothing */ }
           const raw = await host.listWindows({ titles: true })
           for (const w of Array.isArray(raw?.windows) ? raw.windows : []) {
             const app = only.find(candidate => candidate.pid === w?.pid)
@@ -235,12 +245,17 @@ export function createComputerObserveProvider({ host, ask, ownPids = [], extraDe
         return refuse(refusal(error?.helperCode && HELPER_CODES[error.helperCode] ? HELPER_CODES[error.helperCode] : OWN.helperUnavailable))
       }
       if (resolved.error) return refuse(refusal(resolved.error))
+      // Do not ask the person for an app a locked screen cannot show anyway (U3, D12).
+      try { if ((await host.permissions?.())?.screenLocked === true) return refuse(refusal(HELPER_CODES.screen_locked)) } catch { /* unknown: go on */ }
       if (!(await approve(run, resolved.app))) return refuse(refusal(OWN.notApproved))
     }
     const result = await adapter.call(method, adapterArgs, { commandId: `${event.callId ?? 'call'}`.slice(0, 128) })
     if (result.ok !== true) return refuse(extras.error ? refusal(extras.error) : refusal(HELPER_CODES.capture_failed))
     if (method === 'listApps') return reply(true, { status: 'apps', apps: result.apps.map(({ name, bundleId, active }) => ({ name, bundleId, active })) })
-    if (method === 'listWindows') return reply(true, { status: 'windows', windows: result.windows.map(({ windowId, app, title, bounds }) => ({ windowId, app, ...(title ? { title } : {}), bounds })) })
+    if (method === 'listWindows') {
+      return reply(true, { status: 'windows', ...(extras.screenLocked ? { screenLocked: true, hint: HELPER_CODES.screen_locked[1] } : {}),
+        windows: result.windows.map(({ windowId, app, title, bounds }) => ({ windowId, app, ...(title ? { title } : {}), bounds })) })
+    }
     if (method === 'readElements') return reply(true, { status: 'elements', app: extras.app ?? null, ...result.elements })
     if (!result.image) return refuse(refusal(HELPER_CODES.capture_failed))
     const { frame } = result

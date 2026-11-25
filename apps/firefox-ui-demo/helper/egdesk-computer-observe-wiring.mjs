@@ -31,6 +31,7 @@ export function createComputerObserveWiring({ env = process.env, getChat, getHos
       } finally { clearTimeout(timer) }
     },
     listApps: () => current().listApps({ timeoutMs: T.listMs }),
+    permissions: () => current().permissions({ timeoutMs: T.listMs }),
     listWindows: query => current().listWindows({ titles: query?.titles === true }, { timeoutMs: T.listMs }),
     capture: query => current().capture(query, { timeoutMs: T.captureMs }),
     readElements: query => current().readElements(query, { timeoutMs: T.elementsMs }),
