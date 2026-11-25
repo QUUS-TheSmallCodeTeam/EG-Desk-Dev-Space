@@ -176,3 +176,17 @@ test('pw wording (c59 winner): the request the product builds carries it, quotes
   }
   assert.match(register(REAL_31PR).req.input[2].content, /파일은 아직 수정하지 않았습니다\./); assert.doesNotMatch(register(REAL.terseYes).req.input[2].content, /견적서/, 'the list is not in the quoted span')
 })
+
+// c38: the six held-back situations of the pw-broaden plan, code side: the candidate extraction takes the paragraph path (no question sentence), quotes exactly the closing line and finds
+// the list as the steps. (Whether the Decision model says "held back" is the plan's job; this pins what code hands it.)
+import { CASES, SITUATIONS } from './egdesk-open-proposals.situations.mjs'
+test('pw situations (c38): every case takes the paragraph path with exactly its closing line; the hold replies carry their list as steps, the others none', () => {
+  assert.equal(SITUATIONS.length, 6); assert.deepEqual([...new Set(CASES.map(c => c.kind))].sort(), ['done', 'hold', 'near']); assert.deepEqual(CASES.map(c => c.kind).reduce((n, k) => ({ ...n, [k]: (n[k] ?? 0) + 1 }), {}), { hold: 9, near: 6, done: 2 })
+  for (const c of CASES) {
+    const k = proposalCandidates(c.answer)
+    assert.deepEqual([k.sentences.length, k.paragraph], [0, c.closing], c.id)
+    assert.equal(k.steps.length, c.kind === 'hold' ? (c.answer.match(/^- /gm) ?? []).length : 0, c.id)
+    const { req } = register({ request: c.request, answer: c.answer }); assert.deepEqual(req.questions.map(q => q.name), ['pw'], c.id); assert.equal(req.input.length, 3, c.id)
+    assert.ok(req.input[2].content.includes(c.closing) && !req.input[2].content.includes('\n- '), c.id)
+  }
+})
