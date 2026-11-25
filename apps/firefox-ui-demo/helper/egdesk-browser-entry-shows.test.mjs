@@ -13,7 +13,7 @@ function world({ allow = true, observe = 'ok', cards = [{ cardId: 'card', permis
   const bodies = [], observed = []
   const client = createDecisionClient({ getApiKey: async () => 'egd-synthetic-not-a-key-0008', fetchImpl: async (_u, init) => {
     bodies.push(init.body); const wire = JSON.parse(init.body)
-    return { ok: true, text: async () => JSON.stringify({ answers: (answer ?? (() => wire.questions.map(q => ({ name: q.name, type: 'predicate', probability: 0.02 }))))(wire) }) } } })
+    return { ok: true, text: async () => JSON.stringify({ answers: (answer ?? (() => wire.questions.map(q => ({ name: q.name, type: 'predicate', probability: q.name === 'browser_entry_answer' ? 0.95 : 0.02 })) /* c33: nothing says web: answerable without a page */))(wire) }) } } })
   const provider = { directEntryEnabled: () => true,
     reflexScope: (_run, _call, cardId) => ({ client, isDecisionCurrent: () => true,
       callTool: async (name, args) => { observed.push([name, args.cardId, cardId]); if (observe === 'throw') throw new Error('gone'); return { observationId: 'o', snapshot: { text: SHOWS } } } }),
@@ -139,7 +139,7 @@ test('real replay: web task .90, card .00 on an error page; the interruption pre
 test('through the entry: the follow-up enters an error page and the step hands it over (the person sees the error); a normal page that is not the place is still not entered; the first request is as before', async () => {
   const run = async ({ shows, card, wall, rode = false }) => {
     const sent = []
-    const answers = wire => wire.questions.map(q => ({ name: q.name, type: 'predicate', probability: q.name === 'browser_entry' ? 0.9 : q.name === 'browser_entry_card_0' ? card : wall }))
+    const answers = wire => wire.questions.map(q => ({ name: q.name, type: 'predicate', probability: q.name === 'browser_entry' ? 0.9 : q.name === 'browser_entry_answer' ? 0.03 : q.name === 'browser_entry_card_0' ? card : wall }))
     const client = createDecisionClient({ getApiKey: async () => 'egd-synthetic-not-a-key-0008', fetchImpl: async (_u, init) => { const wire = JSON.parse(init.body); sent.push(wire.questions.map(q => q.name)); return { ok: true, text: async () => JSON.stringify({ answers: answers(wire) }) } } })
     const provider = { directEntryEnabled: () => true, reflexScope: () => ({ client, isDecisionCurrent: () => true, callTool: async () => ({ observationId: 'o', snapshot: { text: shows } }) }),
       runDirectTask: async () => ({ outcome: 'handoff', pageState: 'error_page', steps: [{ url: 'https://account.example.test/x', actions: [] }], state: null }) }
