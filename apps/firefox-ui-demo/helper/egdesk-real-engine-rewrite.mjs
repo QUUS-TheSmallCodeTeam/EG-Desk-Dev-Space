@@ -66,15 +66,19 @@ export function numbersIn(text) {
   return out
 }
 /** knownNumbers(texts) → { exact: Set('18%'), values: Set('18') } from the records' own texts and the person's words. */
-export function knownNumbers(texts) {
-  const exact = new Set(), values = new Set()
+export function knownNumbers(texts, loose = []) {
+  const exact = new Set(), values = new Set(), anyUnit = new Set()
   for (const n of texts.flatMap(numbersIn)) { exact.add(`${n.value}${n.unit}`); values.add(n.value) }
-  return { exact, values }
+  // c30: the numbers a command printed or a scripted file holds carry no unit the way a sentence does ("tests 5", "8491 !== 8492"): by value, whatever unit the model puts on them
+  for (const n of loose.flatMap(numbersIn)) { values.add(n.value); anyUnit.add(n.value) }
+  return { exact, values, anyUnit }
 }
 /** unknownNumbers(text, known) → the numbers (as written, with unit) that are in neither set. A number with a unit must match a known number with the same unit; one without a unit matches by value. */
 export function unknownNumbers(text, known) {
-  return numbersIn(text).filter(n => !(n.unit ? known.exact.has(`${n.value}${n.unit}`) : known.values.has(n.value))).map(n => `${n.value}${n.unit}`)
+  return numbersIn(text).filter(n => !(n.unit ? known.exact.has(`${n.value}${n.unit}`) || known.anyUnit?.has(n.value) : known.values.has(n.value))).map(n => `${n.value}${n.unit}`)
 }
+/** c30: the files of the conversation's scripted folder (the model reads them with its own tools). */
+export const folderTexts = conversation => (conversation?.folder && typeof conversation.folder === 'object' ? Object.values(conversation.folder).filter(t => typeof t === 'string') : [])
 /** The texts the model may legitimately draw its numbers from: the seeded pages (title and body), the person's words in this conversation, the Agent's own instructions. */
 export function recordTexts(conversation) {
   return [...(conversation?.memory?.pages ?? []).flatMap(p => [p.title, p.body]), ...(conversation?.turns ?? []).map(t => t.say), conversation?.agentProfile?.instructions].filter(t => typeof t === 'string')
@@ -101,8 +105,9 @@ export function readings(entry) {
  *   entry          the draft_check calibration entry of this turn (its check word, readings and the posting outcome), or null (no check ran)
  *   forks          private fork turns started in the window (thread/fork requests)
  */
-export function describeTurn({ conversation, posted, draft = null, revision = null, entry = null, forks = 0, expect = null }) {
-  const known = knownNumbers(recordTexts(conversation)), phrases = expect?.neverShown?.phrases ?? []
+export function describeTurn({ conversation, posted, draft = null, revision = null, entry = null, forks = 0, expect = null, extraTexts = [] }) {
+  // c30: the numbers the run itself produced are known too (a test runner's counts and a failing assertion's values, the files of the scripted folder): a rewrite that states them is not inventing
+  const known = knownNumbers(recordTexts(conversation), [...folderTexts(conversation), ...extraTexts]), phrases = expect?.neverShown?.phrases ?? []
   const word = typeof entry?.outcome?.posted === 'string' ? entry.outcome.posted : null
   const r = entry ? readings(entry) : { first: null, second: null }
   // null: no check ran, or it ended without a reading (a fallback word: timeout, evidence unavailable)
@@ -149,7 +154,7 @@ export function createRewriteHook(conversation) {
       if (typeof chat?.checkHeldDraft === 'function') { const original = chat.checkHeldDraft.bind(chat); chat.checkHeldDraft = (run, text) => { cur?.drafts.push(String(text ?? '')); return original(run, text) } }
       if (typeof chat?.reviseOnFork === 'function') {
         const original = chat.reviseOnFork.bind(chat)
-        chat.reviseOnFork = async (run, draft, note, signal) => { const text = await original(run, draft, note, signal); cur?.revisions.push({ note: String(note ?? ''), text: typeof text === 'string' ? text : null }); return text }
+        chat.reviseOnFork = async (run, draft, note, signal, ...rest) => { const text = await original(run, draft, note, signal, ...rest); cur?.revisions.push({ note: String(note ?? ''), text: typeof text === 'string' ? text : null }); return text }
       }
     },
     beginTurn() { cur = fresh() },
@@ -165,7 +170,7 @@ export function createRewriteHook(conversation) {
       try { entry = (deps?.calibrationLog?.entries?.() ?? []).slice(w.entryStart).filter(e => e.feature === 'draft_check' && e.mode === 'on').at(-1) ?? null } catch { entry = null }
       const mainThread = w.starts[0] ?? null, privateTurns = w.starts.filter(t => t !== mainThread).length
       const record = describeTurn({ conversation, posted: typeof ctx.answer === 'string' && ctx.answer.trim() ? ctx.answer : null, draft: w.drafts.length ? w.drafts.at(-1) : null,
-        revision: w.revisions.length ? w.revisions.at(-1) : null, entry, forks: Math.max(w.forks, privateTurns), expect: ctx.expect.rewrite })
+        revision: w.revisions.length ? w.revisions.at(-1) : null, entry, forks: Math.max(w.forks, privateTurns), expect: ctx.expect.rewrite, extraTexts: Array.isArray(ctx.toolTexts) ? ctx.toolTexts : [] })
       return { record, expectations: judgeTurn(ctx.expect.rewrite, record) }
     },
   }

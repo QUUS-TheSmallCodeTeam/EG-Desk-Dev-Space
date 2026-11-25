@@ -84,6 +84,14 @@ export const EARLIER_EVIDENCE_LIMIT = 4
 // its records are kept for the next check (the check's own ranking keeps the ones related to the next draft). After a posted answer the limit above stays.
 export const EARLIER_WITHHELD_LIMIT = 8
 export const POSTED_ANSWER_KEY = 'egdesk_posted_answer'
+// c30: when a draft revision on a private fork has not completed after this long, it also starts on a fresh thread (every completed internal turn measured took 5.9-10.7 s; reports/l6-c30.md).
+export const REVISE_FORK_HEDGE_MS = 11_000
+// c30: the text of a revision on a FRESH thread: it has not seen the conversation, so the draft, the check's note and the material (the check's readable evidence items) are all in it.
+export function reviseFreshText({ draft, note, evidence = [] }) {
+  const items = (Array.isArray(evidence) ? evidence : []).filter(item => item && !item.opaque && typeof item.text === 'string' && item.text.trim()).slice(0, 8)
+  const material = items.length ? items.map(item => `- ${String(item.text).replace(/\s+/g, ' ').trim().slice(0, 1200)}`).join('\n') : '- (none)'
+  return `The material you were given:\n${material}\n\nHere is your draft answer to the person's last message:\n\n${draft}\n\n${note}\n\nReply with only the revised answer text.`
+}
 import { ENGINE_STALL_LIMITS, eventTurnId, isProgressEvent, stallFact } from './egdesk-engine-stall.mjs' // c33: the first-event watchdog
 import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
 import { OWN_EDIT_LIMITS, EDIT_TOOL_NAMES, ownEditEvidence } from './egdesk-own-edit-evidence.mjs' // c30b: the edits EG-Desk made, as readable evidence for the check of the answer
@@ -6536,7 +6544,7 @@ export class CodexChatRuntime {
     if (ready.skip) { clearTimeout(timer); controller.abort(); return null }
     let vocabulary = []
     try { vocabulary = (await dc?.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
-    const revise = ({ draft, note }) => this.reviseOnFork(run, draft, note, controller.signal)
+    const revise = ({ draft, note }) => this.reviseOnFork(run, draft, note, controller.signal, ready.evidence)
     const check = checkDraft({ draft: text, evidence: ready.evidence, userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
       mode: 'on', design: this.draftCheckDesign(), client: setup.client, revise, signal: controller.signal, egress: this.decisionEgressFor(run) })
     void check.catch(() => {})
@@ -6644,12 +6652,18 @@ export class CodexChatRuntime {
   }
 
   // The subjective model's one revision, on a private fork of the conversation. Null when the fork cannot run or fails.
-  async reviseOnFork(run, draft, note, signal) {
+  // c30 (L6; Main's real planted run check-25pl, reports/l6-c30.md): 7 of 12 revision forks never completed and were cut at the 25 s deadline (the 5 that completed took 6.9-8.3 s, all 12 completed internal turns of the real runs
+  // (these 5 and 7 earlier ones) 5.9-10.7 s: an engine-side stall, which also hit two main turns in other runs), and an empty revision means nothing is posted. So after
+  // REVISE_FORK_HEDGE_MS (above every completed internal turn measured) the same revision also starts on a fresh thread; the first to complete wins; the deadline is the same 25 s.
+  // The fresh thread has not seen the conversation, so its text carries the material the check read the draft against (evidence: the check's items, readable ones only, as the
+  // check cut them); the fork has it in its history. The same text is used when the room is one-time (ephemeral) and a fresh thread is the only path.
+  async reviseOnFork(run, draft, note, signal, evidence = []) {
     try {
       const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
       if (!engine?.capabilities?.(slot)?.has('threadFork')) return null
-      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, signal, timeoutMs: 25_000, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run),
-        text: `Here is your draft answer to the person's last message:\n\n${draft}\n\n${note}\n\nReply with only the revised answer text.` })
+      const text = `Here is your draft answer to the person's last message:\n\n${draft}\n\n${note}\n\nReply with only the revised answer text.`
+      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, signal, timeoutMs: 25_000, hedgeMs: this.reviseHedgeMs ?? REVISE_FORK_HEDGE_MS, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run),
+        text, freshText: reviseFreshText({ draft, note, evidence }) })
       return out.text || null
     } catch { return null }
   }

@@ -3,13 +3,16 @@
 // OUTSIDE the repository, and prepares the Decision labelling plan (dry run only; Main sends).
 //
 //   node scripts/egdesk-conversation-examples.mjs --out <dir> [--since <ISO>] [--codex <dir>] [--claude <dir>] [--pinned <dir>]
-//        [--aside <file>]... [--chunks <n>] [--chunk-tokens <n>] [--labels <results.json>]
+//        [--aside <file>]... [--chunks <n>] [--chunk-tokens <n>] [--labels <results.json>] [--exclude <file>]
 //
 // Defaults: --codex ~/.codex/sessions (rollout-*.jsonl, any depth), --claude ~/.claude/projects (directories named for EG-Desk or Taehwa),
 // --pinned ~/Projects/CodexThreadAnalysis/Codex-pinned-transcripts-20260724_171134/extracted (*/transcript.raw.jsonl). Every file is
 // streamed line by line and only read. Writes (0600 files, 0700 directories): examples/<area>.jsonl, scenarios.json, manifest.json
 // (per example id / hash / area / time / tags, per source file size and time), fingerprints.json (hashes only; the real-measure runners'
 // guard reads it), changes.json (new / changed against the earlier manifest), plans/chunk-NNN/ (plan.json, requests/, preregistration.json).
+// Owner exclusion (c43): sessions under a folder prefix and examples mentioning a term of the LOCAL exclude file (helper/egdesk-scenario-exclusion.mjs; --exclude, EGDESK_SCENARIO_EXCLUDE or its
+// default path outside the repository) are dropped and counted in manifest.excludedByOwner ({ sessions, examples }), never named. With exclusions in force --since is refused (earlier examples
+// carry no folder to check): extract everything once.
 // --labels: a runner results file of a sent chunk; its answers become the labels of those examples' scenarios.
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -18,6 +21,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { APPROVAL, AREAS, CONTROL_EXAMPLES, RELABEL_CONTROLS, RELABEL_TYPES, TYPE_NAMES, buildLabelPlan, dedupe, examplesOf, readLabels, scenariosOf, streamTurns } from '../helper/egdesk-conversation-examples.mjs'
 import { seedFingerprints } from '../helper/egdesk-scenario-seed-guard.mjs'
+import { loadOwnerExclusions } from '../helper/egdesk-scenario-exclusion.mjs'
 import { DECISION_MODEL } from '../helper/egdesk-decision-client.mjs'
 
 /** main(argv, { print, printError, home }) → exit code (the command line calls it; tests call it in-process). */
@@ -31,14 +35,18 @@ export async function main(argv = process.argv.slice(2), { print = line => conso
   if (!rel.startsWith('..') && !path.isAbsolute(rel)) { printError(`refused: --out ${out} is inside the repository`); return 2 }
   const since = opt('--since')
   if (since && Number.isNaN(Date.parse(since))) { printError('--since must be an ISO date'); return 2 }
+  let exclusions
+  try { exclusions = loadOwnerExclusions({ env: process.env, file: opt('--exclude') ? path.resolve(opt('--exclude')) : null, home }) } catch (error) { printError(error.message); return 2 }
+  if (since && exclusions.active && existsSync(path.join(out, 'manifest.json'))) { printError('refused: with owner exclusions in force --since cannot re-check the earlier examples; run once without --since'); return 2 }
 
   const walk = (dir, test, depth = 6) => { if (!existsSync(dir) || depth < 0) return []; const list = []
     for (const name of readdirSync(dir).sort()) { const p = path.join(dir, name); const s = statSync(p); if (s.isDirectory()) list.push(...walk(p, test, depth - 1)); else if (test(name, p)) list.push(p) } return list }
   const codexDir = opt('--codex') ?? path.join(home, '.codex', 'sessions'), claudeDir = opt('--claude') ?? path.join(home, '.claude', 'projects')
   const pinnedDir = opt('--pinned') ?? path.join(home, 'Projects', 'CodexThreadAnalysis', 'Codex-pinned-transcripts-20260724_171134', 'extracted')
+  let excludedSessions = 0
   const sources = [
     ...walk(codexDir, n => /^rollout-.*\.jsonl$/.test(n)).map(file => ({ kind: 'codex', file, project: '' })),
-    ...(existsSync(claudeDir) ? readdirSync(claudeDir).sort().filter(d => /EG-Desk|Taehwa|태화/i.test(d)).flatMap(d => walk(path.join(claudeDir, d), n => n.endsWith('.jsonl'), 0).map(file => ({ kind: 'claude', file, project: d }))) : []),
+    ...(existsSync(claudeDir) ? readdirSync(claudeDir).sort().filter(d => /EG-Desk|Taehwa|태화/i.test(d) && !(exclusions.projectDirExcluded(d) && (excludedSessions += walk(path.join(claudeDir, d), n => n.endsWith('.jsonl'), 0).length, true))).flatMap(d => walk(path.join(claudeDir, d), n => n.endsWith('.jsonl'), 0).map(file => ({ kind: 'claude', file, project: d }))) : []),
     ...walk(pinnedDir, n => n === 'transcript.raw.jsonl', 2).map(file => ({ kind: 'codex', file, project: path.basename(path.dirname(file)) })),
     ...opts('--aside').map(file => ({ kind: 'aside', file: path.resolve(file), project: 'EG-Desk (Aside session)' })),
   ]
@@ -47,12 +55,15 @@ export async function main(argv = process.argv.slice(2), { print = line => conso
   for (const s of sources) {
     const turns = []
     for await (const t of streamTurns(s.file, s.kind)) turns.push({ role: t.role, text: t.text, at: t.at, line: t.line, cwd: t.cwd })
+    if (turns.some(t => exclusions.cwdExcluded(t.cwd) || exclusions.textExcluded(t.text))) { excludedSessions++; continue } // the whole session, and not a word of it kept (not even its file name)
     const ex = examplesOf(turns, { source: s.kind, file: shown(s.file), project: s.project })
     const st = statSync(s.file)
     perSource.push({ kind: s.kind, file: shown(s.file), bytes: st.size, mtime: Math.floor(st.mtimeMs), turns: turns.length, examples: ex.length, dropped: ex.dropped })
     all.push(...ex)
   }
-  const examples = dedupe(all).filter(e => !since || (e.at && e.at >= since))
+  const sinceKept = dedupe(all).filter(e => !since || (e.at && e.at >= since))
+  const examples = sinceKept.filter(e => !exclusions.textExcluded(JSON.stringify(e)))
+  const excludedByOwner = { sessions: excludedSessions, examples: sinceKept.length - examples.length }
 
   mkdirSync(out, { recursive: true, mode: 0o700 }); chmodSync(out, 0o700)
   const write = (file, text) => { const target = path.join(out, file); mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 }); const tmp = `${target}.tmp`; writeFileSync(tmp, text, { mode: 0o600 }); renameSync(tmp, target) }
@@ -71,7 +82,7 @@ export async function main(argv = process.argv.slice(2), { print = line => conso
   const scenarios = examples.flatMap(e => scenariosOf(e, labels.get(e.id) ?? null))
   write('scenarios.json', `${JSON.stringify(scenarios, null, 1)}\n`)
   const rows = examples.map(e => ({ id: e.id, variant: 'example', hash: e.hash, area: e.area, privacy: e.privacy, at: e.at, tags: e.tags }))
-  const manifest = { schema: 'egdesk.conversation-examples-manifest/1', ...(since ? { since } : {}), approval: APPROVAL, sources: perSource,
+  const manifest = { schema: 'egdesk.conversation-examples-manifest/1', ...(since ? { since } : {}), approval: APPROVAL, sources: perSource, excludedByOwner,
     examples: [...rows, ...kept].sort((a, b) => (a.id < b.id ? -1 : 1)) }
   manifest.seeds = manifest.examples.map(({ id, variant, privacy }) => ({ id, variant, privacy })) // the guard's view (helper/egdesk-scenario-seed-guard.mjs)
   const prints = since && existsSync(path.join(out, 'fingerprints.json')) ? JSON.parse(readFileSync(path.join(out, 'fingerprints.json'), 'utf8')) : {}
@@ -130,7 +141,7 @@ export async function main(argv = process.argv.slice(2), { print = line => conso
     dropped: perSource.reduce((m, s) => ({ no_area: m.no_area + s.dropped.no_area, empty: m.empty + s.dropped.empty }), { no_area: 0, empty: 0 }),
     scenarios: scenarios.length, perFeature: count(scenarios, s => s.feature), chunks: chunks.length, written: nChunks,
     firstChunk: chunks[0] ? { requests: chunks[0].plan.requests.length, estInputTokens: chunks[0].plan.requests.reduce((n, r) => n + r.estInputTokens, 0), tokenCeiling: chunks[0].plan.tokenCeiling } : null,
-    controls: CONTROL_EXAMPLES.length, changes }))
+    controls: CONTROL_EXAMPLES.length, changes, excludedByOwner }))
   return 0
 }
 
