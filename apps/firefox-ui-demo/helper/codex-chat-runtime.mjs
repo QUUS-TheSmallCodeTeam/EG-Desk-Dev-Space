@@ -99,6 +99,7 @@ export function reviseFreshText({ draft, note, evidence = [] }) {
 import { APPROVALS_FAST_LIMITS, approvalOutcomeBlock } from './egdesk-decision-first-approvals.mjs' // c32 (U13): approvals decision-first
 import { ENGINE_STALL_LIMITS, eventTurnId, isProgressEvent, stallFact } from './egdesk-engine-stall.mjs' // c33: the first-event watchdog
 import { PROPOSAL_LIMITS, proposalCandidates, readRegistration, registrationRequest } from './egdesk-open-proposals.mjs' // c33: the answer's open proposals as defined items
+import { claudeHarnessThreadOverrides } from './egdesk-claude-harness.mjs' // u1
 import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
 import { OWN_EDIT_LIMITS, EDIT_TOOL_NAMES, ownEditEvidence } from './egdesk-own-edit-evidence.mjs' // c30b: the edits EG-Desk made, as readable evidence for the check of the answer
 import { OWN_COMMAND_LIMITS, ownCommandEntry, ownCommandEvidence } from './egdesk-own-command-evidence.mjs' // c29: what the check of an answer may know about the commands EG-Desk ran
@@ -2578,8 +2579,9 @@ export class CodexChatRuntime {
     }
     // A continued Claude process/session cannot be moved by changing a Board
     // association, even when it is already loaded and skips thread/resume.
-    if (engine.id === 'claude' && context.conversationId && overrides.cwd) {
-      const originalCwd = this.threadResumeCwds.get(context.conversationId)
+    if (engine.id === 'claude' && context.conversationId && overrides.cwd && !(this.claudeHarness() !== null && !this.ownFolders.get(context.conversationId))) {
+      // u1: a harness thread runs in EG-Desk's empty folder; the folder it "started in" is the person's real one, which EG-Desk's tools know (ownFolders)
+      const originalCwd = this.claudeHarness() !== null ? this.ownFolders.get(context.conversationId) : this.threadResumeCwds.get(context.conversationId)
       if (!originalCwd) throw Object.assign(chatError('NATIVE_CWD_UNVERIFIED', 'The original working folder was not recorded; this conversation cannot be continued safely', 409), { definite: true })
       if (overrides.cwd !== originalCwd) throw Object.assign(chatError('CWD_CHANGE_UNSUPPORTED', 'A Claude conversation keeps the folder it started in; start a new conversation for another folder', 409), { definite: true })
     }
@@ -2588,7 +2590,8 @@ export class CodexChatRuntime {
     const bounded = qa || policy === BROWSER_BOUNDED || policy === FIXTURE_BROWSER_QA
     // c18 (flag ownTools, default off): Codex as a pure model engine. Its thread runs in an EG-Desk-owned empty folder with its own
     // command, image and web tools off and a read-only, never-asking sandbox; the real folder is known only to EG-Desk's tools.
-    const ownTools = !bounded && engine.id === 'codex' && this.ownToolsOn()
+    // u1 (U19, flag EGDESK_CLAUDE_HARNESS=on with own tools on): a Claude conversation is an own-tools run too: EG-Desk's runner and file tools, the engine in the empty folder, the built-in command and edit tools off
+    const ownTools = !bounded && ((engine.id === 'codex' && this.ownToolsOn()) || (engine.id === 'claude' && this.claudeHarness() !== null))
     let ownFolder = null, neutralFolder = null
     if (ownTools) {
       neutralFolder = this.ownNeutralFolder()
@@ -2725,7 +2728,7 @@ export class CodexChatRuntime {
       const skipFirstResume = reloadCertain && Boolean(overrides.cwd)
       if (justRestored && !skipFirstResume) {
         // c23: a restored own-tools thread is resumed as pure as a new one (the pure switches, the isolation, EG-Desk's instructions)
-        const ownRestore = ownTools ? await this.ownToolsThreadOverrides(request, neutralFolder, null, context) : null
+        const ownRestore = ownTools ? await this.ownToolsOverridesFor(engine, request, neutralFolder, null, context) : null
         if (ownRestore && epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account or connection changed', 409)
         await this.restoreThread(cid, context.clientThreadId, ownRestore ? mergeCeilingOverrides({ ...(qaOverrides || {}) }, ownRestore) : qaOverrides || {}, { policy, beforeResume })
       }
@@ -2768,7 +2771,7 @@ export class CodexChatRuntime {
         const extra = ceilingNarrows(ceiling) ? await ceilingOverrides() : null
         const computerExtra = computerOff ? await this.computerControlOffOverrides(overrides.cwd || this.threads.get(cid)?.cwd || null, request) : null
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409)
-        const merged = mergeCeilingOverrides(mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), ownTools ? await this.ownToolsThreadOverrides(request, neutralFolder, overrides, context) : null)
+        const merged = mergeCeilingOverrides(mergeCeilingOverrides(mergeCeilingOverrides({ ...overrides, ...(qaOverrides || {}) }, extra), computerExtra?.overrides), ownTools ? await this.ownToolsOverridesFor(engine, request, neutralFolder, overrides, context) : null)
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('CONTEXT_CHANGED', 'Codex connection or account changed', 409) // the own-tools overrides above are read from the engine
         const shellOff = Boolean(extra) && ceiling?.terminal === 'none'
         return { extra, computerExtra, merged, shellOff, key: resumeKey({ merged, policy, shellOff, computerOff, ceiling }) }
@@ -2840,7 +2843,7 @@ export class CodexChatRuntime {
       }
       // c22/c23: Codex as a pure model engine: its own tools off, nothing from the person's own Codex setup, EG-Desk's instructions.
       if (ownTools) {
-        const own = await this.ownToolsThreadOverrides(request, neutralFolder, overrides, context)
+        const own = await this.ownToolsOverridesFor(engine, request, neutralFolder, overrides, context)
         if (epoch !== this.epochOf(engine.id, slot)) throw chatError('ACCOUNT_CHANGED', 'Codex account changed', 409)
         mergeCeilingOverrides(overrides, own)
       }
@@ -3033,7 +3036,7 @@ export class CodexChatRuntime {
         input: [...this.carriedInputFor(context.clientThreadId), { type: 'text', text: body.message, text_elements: [] }],
         clientUserMessageId: context.requestId,
         ...(bounded ? QA_TURN_OVERRIDES : {}),
-        ...(ownTools ? OWN_TOOLS_TURN_OVERRIDES : {}),
+        ...(ownTools && engine.id === 'codex' ? OWN_TOOLS_TURN_OVERRIDES : {}),
         ...(engineShape.context ? { additionalContext: engineShape.context } : {}),
         ...(overrides.cwd ? { cwd: overrides.cwd } : {}),
         ...(overrides.model ? { model: overrides.model } : {}),
@@ -3155,6 +3158,7 @@ export class CodexChatRuntime {
       // c34: the card of the command the code ran joins the buffered events of this turn (the buffer is applied next, in order)
       if (dfLocal?.surface) await this.surfaceLocalCommand(run, dfLocal).catch(() => {})
       while (pending.buffer.length) await this.apply(pending.buffer.shift())
+      if (dfLocal?.surface) this.annotateLocalCommand(run, dfLocal) // u1
       if (TERMINAL.has(result.turn.status) && !TERMINAL.has(run.status)) await this.finish(run, safeTurn(result.turn, engine.id))
       if (dfLocal?.finished) void this.finishDecisionFirstTurn(run, dfLocal).catch(() => {}) // c32: the local turn ends here, no engine call
       return {
@@ -6395,6 +6399,10 @@ export class CodexChatRuntime {
   }
 
   async freshInternalOverrides(run, selected = null) {
+    if (this.runEngine(run) === 'claude') { // u1: no Codex configuration to isolate: the empty folder, the model, no built-in tool at all
+      const model = (selected ?? this.internalSelection(run)).model
+      return { cwd: this.ownNeutralFolder() ?? this.threads.get(run.conversationId)?.cwd ?? null, ...(model ? { model } : {}), egdeskBuiltinTools: [] }
+    }
     const cid = run.conversationId, hit = this.freshInternalCache.get(cid)
     const model = (selected ?? this.internalSelection(run)).model // the selection is read each time; only the isolation read is cached
     if (hit && this.now() - hit.at < 300_000) return { ...structuredClone(hit.value), ...(model ? { model } : {}) }
@@ -6430,8 +6438,8 @@ export class CodexChatRuntime {
     report.outcome = 'writer_failed'
     try {
       const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
-      if (!engine?.capabilities?.(slot)?.has('threadFork')) { report.outcome = 'no_fork'; return null }
-      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, timeoutMs, text: prompt, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run) })
+      if (!engine?.capabilities?.(slot)?.has('threadFork') && !this.privateFreshOnly(run)) { report.outcome = 'no_fork'; return null }
+      const out = await this.internalTurns.run({ engine, slot, freshOnly: this.privateFreshOnly(run), parentThreadId: run.conversationId, timeoutMs, text: prompt, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run) })
       const text = cleanIntermediate(out.text)
       if (!text) { report.outcome = 'writer_empty'; return null }
       if (prior.includes(text)) { report.outcome = 'repeat'; return null }
@@ -6834,9 +6842,9 @@ export class CodexChatRuntime {
   async reviseOnFork(run, draft, note, signal, evidence = []) {
     try {
       const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
-      if (!engine?.capabilities?.(slot)?.has('threadFork')) return null
+      if (!engine?.capabilities?.(slot)?.has('threadFork') && !this.privateFreshOnly(run)) return null
       const text = `Here is your draft answer to the person's last message:\n\n${draft}\n\n${note}\n\nReply with only the revised answer text.`
-      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, signal, timeoutMs: 25_000, hedgeMs: this.reviseHedgeMs ?? REVISE_FORK_HEDGE_MS, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run),
+      const out = await this.internalTurns.run({ engine, slot, freshOnly: this.privateFreshOnly(run), parentThreadId: run.conversationId, signal, timeoutMs: 25_000, hedgeMs: this.reviseHedgeMs ?? REVISE_FORK_HEDGE_MS, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run),
         text, freshText: reviseFreshText({ draft, note, evidence }) })
       return out.text || null
     } catch { return null }
@@ -6844,7 +6852,11 @@ export class CodexChatRuntime {
 
   // Cycle 11: one private fork turn for the model that wrote this run's answer (the briefing flow's design / redesign / component text). Like reviseOnFork:
   // nothing of the turn reaches the chat, the fork cannot act, only the final text is read back. Null when the engine cannot fork or anything fails.
+  /** u1: a Claude conversation under the harness with EGDESK_CLAUDE_HARNESS_PRIVATE=on runs its private turns on a fresh thread (no fork, no ephemeral threads on Claude). */
+  privateFreshOnly(run) { try { return this.runEngine(run) === 'claude' && this.claudeHarness()?.privateTurns === true } catch { return false } }
+
   canInternalTurn(run) {
+    if (this.privateFreshOnly(run)) return true
     try { const engine = this.engineOf(run.conversationId); return engine?.capabilities?.(this.threadOperationSlot(run.conversationId))?.has('threadFork') === true } catch { return false }
   }
   // preamble: false = the fresh thread (an ephemeral room) gets the caller's text and nothing else: the briefing fill is guide + materials only on purpose (L4).
@@ -6854,7 +6866,7 @@ export class CodexChatRuntime {
     try {
       if (!this.canInternalTurn(run)) return null
       // outputSchema (cycle 30, briefing flag): the turn's final message is constrained by it; absent, the turn is exactly what it was.
-      const out = await this.internalTurns.run({ engine: this.engineOf(run.conversationId), slot: this.threadOperationSlot(run.conversationId), parentThreadId: run.conversationId, signal, timeoutMs, text, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run, { preamble, effort, model }), ...(typeof onStart === 'function' ? { onStart } : {}), ...(outputSchema ? { outputSchema } : {}) })
+      const out = await this.internalTurns.run({ freshOnly: this.privateFreshOnly(run), engine: this.engineOf(run.conversationId), slot: this.threadOperationSlot(run.conversationId), parentThreadId: run.conversationId, signal, timeoutMs, text, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run, { preamble, effort, model }), ...(typeof onStart === 'function' ? { onStart } : {}), ...(outputSchema ? { outputSchema } : {}) })
       return out.text || null
     } catch { return null }
   }
@@ -7049,6 +7061,15 @@ export class CodexChatRuntime {
     await this.handleNotification({ method: 'item/completed', params: { ...base, item } })
   }
 
+  /** u1: after the buffered events were applied (the card row exists): the row says that EG-Desk ran it and what the decision model judged (closed words and numbers, as detail only). */
+  annotateLocalCommand(run, df) {
+    const { entry } = df
+    try {
+      const row = [...(run.activities ?? [])].reverse().find(a => a.kind === 'commandExecution' && a.detail?.command === entry.command)
+      if (row && df.diag) { const annotated = { ...row, detail: { ...row.detail, executedBy: 'egdesk', decidedBy: { path: df.diag.path, reason: df.diag.reason, option: df.diag.option ?? null, confidence: df.diag.confidence ?? null } } }; this.put(run, 'activities', annotated); this.emit(run, 'activity.updated', annotated) }
+    } catch { /* the trace is advisory */ }
+  }
+
   /**
    * c34: the commands of a conversation that are OPEN or just done, for the memory layer's resolver (L1): items in the shape of its context candidates ({ id, kind, title, summary, timeSlice, status,
    * aliases, sourceRef }), closed words and numbers in summary. A command waiting for the person's approval is a planned open item; one that ran is a present/past item with its reading.
@@ -7084,7 +7105,7 @@ export class CodexChatRuntime {
     if (!read.approved) return { diag: diag('engine', read.read ? 'approval_unclear' : 'approval_unread') }
     const out = await this.decisionFirstRun({ cid, command: ask.command, context, ownFolder: ask.cwd, picked: { option: 'approved', confidence: null, margin: null }, diag })
     if (!out?.entry) return out
-    return { diag: diag('engine', 'approval_ran', { option: 'approved' }), context: approvalOutcomeBlock({ outcome: 'ran', command: ask.command, exitCode: out.entry.exitCode, durationMs: out.entry.durationMs, tail: out.entry.tail }), preRun: out.preRun }
+    return { diag: diag('engine', 'approval_ran', { option: 'approved' }), context: approvalOutcomeBlock({ outcome: 'ran', command: ask.command, exitCode: out.entry.exitCode, durationMs: out.entry.durationMs, tail: out.entry.tail }), preRun: out.preRun, entry: out.entry, surface: true } // u1: the command the person approved and EG-Desk ran now also shows as its card, with the trace
   }
 
   /** c32: the local turn's items as the engine's own command items would arrive (the existing terminal card), then the turn's end. No assistant text: no new words. */
@@ -7221,6 +7242,15 @@ export class CodexChatRuntime {
   }
 
   commandGateIdle() { return Promise.allSettled([...this.commandGateRuns]) }
+
+  /** u1: the Claude harness config ({ disallowed }) when the flag and own tools are on, else null. */
+  claudeHarness() { try { return this.ownToolsOn() ? this.ownTools?.claudeHarness?.() ?? null : null } catch { return null } }
+
+  /** u1: an own-tools thread's overrides for the engine: Codex's (pure engine switches, isolation, instructions) or Claude's (instructions and the built-in tools to switch off). */
+  async ownToolsOverridesFor(engine, request, neutralFolder, base, context) {
+    if (engine?.id === 'claude') return claudeHarnessThreadOverrides({ base, harness: this.claudeHarness() })
+    return this.ownToolsThreadOverrides(request, neutralFolder, base, context)
+  }
 
   ownToolsOn() { try { return this.ownTools?.mode?.() === 'on' } catch { return false } }
   ownToolsShadow() { try { return this.ownTools?.mode?.() === 'shadow' } catch { return false } }
@@ -8643,7 +8673,8 @@ export class CodexChatRuntime {
     if (guard.state !== 'holding') return
     const draft = guard.kind === 'draft'
     if (!draft && this.now() >= guard.until) { this.discardTopicAnswer(guard, 'expired'); return }
-    if (item.phase !== 'final_answer' && !guard.finalIds.has(item.id)) return
+    // u1: Claude's answer text has no phase (null): it is the answer. Without this a held Claude answer was never captured and, on mode, never posted.
+    if (item.phase !== 'final_answer' && !(item.phase == null && this.runEngine(run) === 'claude') && !guard.finalIds.has(item.id)) return
     if (guard.finalIds.size >= (draft ? 16 : 8) && !guard.finalIds.has(item.id)) { if (draft) this.releaseDraftOriginal(run, guard); else this.discardTopicAnswer(guard, 'overflow'); return }
     guard.finalIds.add(item.id)
     if (draft && !guard.timer) {
@@ -8803,7 +8834,7 @@ export class CodexChatRuntime {
           }
           this.emit(run, 'message.completed', { ...message, text: finalText, ...(finalText.length > MAX_TEXT ? { projectionTruncated: true } : {}) }, item.id)
           // Advisory draft check (flag, default off): runs after the answer is posted, detached; it never changes or delays it.
-          if (item.phase === 'final_answer' && item.completionConfirmed === true) this.startDraftCheckAdvisory(run, item.id, finalText)
+          if ((item.phase === 'final_answer' || (item.phase == null && this.runEngine(run) === 'claude')) && item.completionConfirmed === true) this.startDraftCheckAdvisory(run, item.id, finalText) // u1: Claude's phase-less answer too
           this.noteBoardPeerSpeech(run, item, message)
         }
       }
@@ -8851,7 +8882,7 @@ export class CodexChatRuntime {
     } else if (item.type === 'dynamicToolCall') {
       activity.status = item.status
       activity.title = item.tool
-      activity.detail = { tool: item.tool }
+      activity.detail = { tool: item.tool, executedBy: 'egdesk' } // u1: a dynamic tool is EG-Desk's own (a closed word, no new copy): the row says who ran it
     } else if (item.type === 'reasoning') {
       activity.kind = 'summary'
       activity.title = 'Summary'
