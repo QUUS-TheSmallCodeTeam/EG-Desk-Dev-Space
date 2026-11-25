@@ -358,6 +358,8 @@ Apple Silicon(Mac) 기반의 로컬 데스크 환경인 EG-Desk에서는 **"단�
 
 > **참조**: [`ideas/brainstorming/COGNITIVE_ARCHITECTURE_ANALOGY.md`](file:///Users/minsoocha/Projects/EG-Desk-Dev-Space/ideas/brainstorming/COGNITIVE_ARCHITECTURE_ANALOGY.md) (해마, 4-type 인지 태깅, 기저핵, 작업기억 스코프)
 
+> **2026-11-25 주석 (owner 확인)**: 이 절의 해마·4-Type·GC·공고화 구상은 기억을 *관리하는 방식*에 대한 아이디어이며, 기억의 주인이나 경계를 정하지 않는다. 기억·대화 내역의 주인은 Agent(인격체)이고 Board·대화는 출처이며, 조직/개인 소유는 Agent별 설정이다. 정본은 [Contract Memory 소유](../confirmed/EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-memory-agent-owner)다. 이 절의 4-Type은 현재 코드에 채택되어 있지 않다.
+
 `COGNITIVE_ARCHITECTURE_ANALOGY.md`에서 지적되었던 가장 큰 병목은 **"LLM은 전두엽일 뿐, 기억을 저장/정리/망각하는 해마(Hippocampus) 역할을 파일시스템 위에서 제대로 수행하지 못한다"**는 점이었다. 
 Jev는 이 해마의 빈자리를 100% 채울 수 있는 최적의 아키텍처다.
 

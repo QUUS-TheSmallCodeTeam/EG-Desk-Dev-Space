@@ -27,8 +27,20 @@
 
 **2026-11-01 08:01 KST 운영 점검**: 합성 자료·격리 headless의 개별 근거만 반영하며 상태·총계는 유지한다. 날짜가 붙은 과거 '남은 것'은 당시 기록이고, 현재 확인 범위와 미해결 경계는 이번 점검과 구분해 읽는다.
 
+<a id="decision-memory-gap-20261125"></a>
+
+**2026-11-25 기억 기반 현재 상태 (사실 기록, 결정 아님).** 아래 행은 Agent 중심 기억·턴 처리 순서 목표와 현재 구현의 차이를 코드에서 확인한 것이다. 상태 열은 목표 대비이며 다른 항목의 상태를 바꾸지 않는다.
+
 | 날짜 | 항목 | 상태 변화 | 근거 |
 |---|---|---|---|
+| 2026-11-25 | 기억의 소유·범위 (Agent·조직 소유 없음, DM 외 범위 걸림) | Agent 중심 기억(Contract Memory 소유) 목표 대비 없음 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. scope 실제 값은 `dm:<id>`·`board:<id>`·null뿐(`helper/egdesk-wiki-adapter.mjs:32,225`)이고 현재 DM 외 범위 페이지는 스냅숏에서 버려진다(`:243`). Agent·조직 소유 필드는 없다. 조직·가족·Agent 범위는 계약 문서에만 있다(Contract `Memory·instruction 검증 record`). 자료 `memory-substrate-audit-20261125` 항목 D |
+| 2026-11-25 | 기억 쓰기 경로 (채팅에서만, 사건 기반 작성자 없음) | 없음 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. 쓰기는 채팅 또는 채팅에서 시작한 브라우저 과제뿐(`helper/codex-chat-runtime.mjs:7579,8115`; turnMemory 기본 off `helper/egdesk-bridge-settings.mjs:44`; 발언 동의 필요, 본문은 본인 메시지 2000자 이내 `helper/egdesk-turn-memory.mjs:382,430`; 브라우저 결과는 DM 범위 필요 `helper/egdesk-browser-entry-wiring.mjs:36`). 사건 버스(`helper/egdesk-event-bus.mjs:20-24`)는 terminal.exit·file.changed·browser.navigated/loaded·auth.changed·user.action만 있고 내용이 없으며(터미널 종료는 sessionId·exitCode뿐) 구독자는 게이트·출처 stale 훅뿐이다. HTTP는 `/ontology/*` GET만(`helper/egdesk-ontology-http.mjs:291`) |
+| 2026-11-25 | 시간 상태 (마감·만료·놓침, 열린 항목 비영속) | 없음 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. 페이지 시간은 `time.at` 하나뿐이다. 열린 항목 6종(approval, question, browser_task, run, memory, proposal)에 마감 필드가 없고 레지스트리는 프로세스 메모리다(`helper/egdesk-open-items.mjs:13`). `expiresAt`는 작업 그래프 게이트에만 있다(최대 7일, `helper/egdesk-task-graph.mjs:215`). planned→done 전이는 `planTimelineTransition`(`helper/egdesk-context-setup.mjs:579`)이 제안만 하고 호출처가 없다. 정리·공고화 데몬 없음 |
+| 2026-11-25 | 파일 참조 (경로 참조·이동 추적) | 없음 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. ref 페이지는 본문이 저장되지 않고(`helper/egdesk-wiki-adapter.mjs:115`) ref가 채팅 메시지일 때만 보인다(`:245`). 파일 위치는 맥락 저장소 수집 출처(rootId+relativePath)이고 파일이 바뀌면 stale 표시만 한다(`helper/egdesk-context-runtime.mjs:373-390`). 경로 갱신·이동 추적 없음. Google Drive 연동 없음 |
+| 2026-11-25 | 기억 관계 (사본·백업 관계, 같은 건 합치기) | 없음 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. 관계는 닫힌 집합 same_task·follows_from·decided_in·supersedes·refers_to뿐이다(`helper/egdesk-wiki-reconstruction.mjs:18-24`). 사본·백업 관계가 없고, 같은 건 묶기는 읽기 시점의 예/아니오(`helper/egdesk-turn-memory.mjs:331-337`)이며 합치기·중복 제거는 없다 |
+| 2026-11-25 | 기억 저장 한도 (200쪽 상한이 오래된 것부터 밀어냄) | 일부 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. 실행 중 쓰는 기억은 `egdesk-wiki-writes.json` 하나(0600)이며 pages·readings 각 200개·256KB 한도다(`helper/egdesk-wiki-adapter.mjs:102-135`). 한도에서 오래된 것부터 밀려나므로 "잊지 않음"과 충돌한다. pending→accepted는 사람 확인으로만 된다(`helper/egdesk-turn-memory.mjs:459`) |
+| 2026-11-25 | Ontology 저장소 (가져오기 1회, 읽기 전용) | 일부 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. `ontology.sqlite`는 프로필당 1회 가져오기이며 재가져오기는 `ONTOLOGY_ALREADY_INITIALIZED`로 거부된다(`helper/egdesk-ontology-store.mjs:154-169,284-300`). 쓰기 API가 없다. 이 사용자 프로필 A는 2026-10-27에 이미 가져왔다(개념 102·관계 383·스냅숏 2·원문 58). 페이지 가져오기 HTTP 없음 |
+| 2026-11-25 | 턴 처리 순서 (기록 쓰기 판단이 엔진 답 뒤) | Contract Decision Model 책임 경계와 순서가 다른 곳 있음 | int/c14 `728a616`, 읽기 전용 코드 점검(실행 미실시). 경로는 `apps/firefox-ui-demo/` 기준. 같은 턴의 기억 기록 판단(`startTurnMemoryWrite`, `helper/codex-chat-runtime.mjs:8398`)이 엔진 응답(`engine.startTurn`) 뒤에 있다. 층 감사 `l1-c31b-layer-audit`(base `6c4a861` 기준 줄 번호, 이후 이동 가능)의 M1 실측: 엔진이 먼저 확정을 말한 뒤 기록 판단이 이루어졌다. 이 사실은 결정이 아니며 수정은 별도 작업 |
 | 2026-11-18 | CNV-04 라벨 격리 Firefox 재검증 | 완료 유지 | 새 프로필의 Browser 전체화면이 캔버스를 숨긴 채 검사기가 입력해 라벨이 삭제됐다. 제품 변경 없이 Desk 표시를 확인한 뒤 편집·재편집·복원 검사: 도형 7/7, 새 도형 왕복 4/4, 라벨 `로그인 버튼` 유지. 별도 구형 호환 Board 저장·닫기·재열기도 확인. 신규 Board UI 선택·프로세스 재시작·실제 IME 입력은 미검증 |
 | 2026-11-18 | (조사) BRW-08 headless 포커스 탐침(`dc3f61d`) | 상태 유지(일부) | Reveal 클릭 직후 콘텐츠 `document.hasFocus()`는 false, 클릭 처리기 안의 `query.focus()` 직후에도 `activeElement`가 body라서 포커스 호출 자체가 거부된다. 카드 `<browser>`는 `docShellIsActive=true`인데 하네스의 `browserEl.focus()` 뒤에도 chrome 포커스는 body에 머물고 `focusedContentBrowsingContext`가 없다. 카드 `<browser>`가 chrome 포커스를 못 받는 이유(카드 컨테이너나 `-moz-user-focus` 추정)는 미확인이고, 실화면에서도 사람이 카드를 누르기 전에는 같은지 확인이 필요하다. CNV-04 라벨은 이번에 조사하지 못했다 |
 | 2026-11-18 | (회귀) 통합 `dc3f61d` 전체 `scripts`·`helper` | 기록 | 227파일 5817 통과 · 0 실패 · 14 건너뜀(37초, 동시성 4). 부하 타이밍 시험 3개는 `501bc4a`에서 고정 여유 대신 이벤트 대기로 바꿈 |
@@ -546,6 +558,16 @@ Git 전송 확인 범위는 기존 `ff9ae10`·`4b40588`까지다. B3 후속은 �
 | 결정 모델 연결 | 모드는 'off'·'advisory'·'on', 기본 'off'. 키는 EG-Desk 전용 파일(0600)에만 두고 Firefox 설정·`.egdesk` 내보내기에서 제외. OS 키체인은 다음 단계. | 켜는 시점, 키 보관 위치 |
 
 ## 진행 순서
+
+<a id="agent-memory-build-plan-20261125"></a>
+### Agent 중심 기억 구축 순서 (계획, 확정 사양 아님)
+
+2026-11-25 Main 제안이며 소유자가 계획으로 문서화해도 된다고 했다. 확정된 사양이나 승인된 일정이 아니고, 순서·범위는 바뀔 수 있다. 목표 원칙은 Contract [Memory 소유](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-memory-agent-owner)·[사용 모드 분리](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-usage-modes)·[Decision Model 책임 경계](./EGDESK_INTERACTION_AND_ORCHESTRATION_CONTRACT.md#tech-decision-boundary)이고, 현재 차이는 [2026-11-25 현재 상태 행](#decision-memory-gap-20261125)이다.
+
+1. Agent를 기억 소유자로 만든다.
+2. Agent별 소유 설정(조직/개인)을 둔다.
+3. Ontology를 Agent가 사건과 Decision Model을 통해 쓸 수 있게 한다(대체, 사본, 파일 위치, 마감, 만료 포함).
+4. 대화 상대를 고를 때 두 사용 모드가 분명히 구분되게 한다.
 
 <a id="org-delivery-priority"></a>
 ### 조직 사용을 위한 개발 전달 순서

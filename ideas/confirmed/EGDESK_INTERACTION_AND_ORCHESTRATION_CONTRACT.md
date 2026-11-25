@@ -74,6 +74,7 @@ UI view, live resource, Agent Run, snapshot, 저장 record는 서로 같은 객�
 | 제품 shell | `SELECTED-BASELINE` | Firefox 기반 EG-Desk 전환을 기준으로 한다. Firefox 내부 결합 방식과 UI 모듈 구조는 `IMPLEMENTATION-DISCRETION`이다. |
 | UI 구성 | `IMPLEMENTATION-DISCRETION` | HTML/CSS/JS, Web Components, 상태 관리 라이브러리 등은 여러 Agent가 독립 수정·검증하기 쉬운 경계를 근거로 선택한다. 거대 단일 파일이나 특정 프레임워크는 계약 제약이 아니다. |
 | Agent engine boundary | `FIXED-PRINCIPLE` | 제품은 engine adapter 경계를 가지며 Run은 사용한 engine/profile/version을 고정한다. Codex용 현재 기준선은 rich-client 인증·대화·승인·stream event를 제공하는 [Codex App Server](https://developers.openai.com/codex/app-server)다. |
+| Agent 사용 모드 분리 | `FIXED-PRINCIPLE` | 2026-11-25 owner 확인. EG-Desk 위에서 Codex·Claude를 그 앱 그대로 쓰는 사용 방식과 EG-Desk 자체 하네스(Agent + Ontology)를 엔진에 얹어 쓰는 사용 방식을 분리하고 두 방식의 기억을 섞지 않는다. 상세는 [사용 모드 분리](#tech-usage-modes)다. |
 | Codex 인증 | `SELECTED-BASELINE` | 구독 quota를 쓰는 Engine Profile은 ChatGPT managed browser login을 기본으로 한다. API key는 별도 profile이다. App Server의 active account·`planType`·rate-limit 상태를 검증하고 Run에 profile ID를 고정한다. |
 | Engine Profile 격리 | `SELECTED-BASELINE` | 서로 다른 AI 계정은 App Server process/config/credential store를 profile별로 격리한다. EG-Desk 로그인, AI 구독 계정, 웹 리소스 계정은 같은 identity로 합치지 않는다. |
 | 로컬 구조화 데이터 | `SELECTED-BASELINE` | SQLite가 conversation event, 관계, 상태 전이, manifest, 인덱스와 작은 텍스트를 관리한다. ORM·query builder·migration 도구는 `IMPLEMENTATION-DISCRETION`이다. |
@@ -1343,6 +1344,15 @@ label·기본 scope(app/Desk/Chat/request)·전환 확인은
 [사용자 결정 목록](../../docs/codex/egdesk-product-interaction-trace-atlas-editorial-ledger.md#hum-engine-001)에
 연결한다.
 
+<a id="tech-usage-modes"></a>
+**사용 모드 분리 (2026-11-25 owner 확인).** 사용자 경험을 위해 다음 두 사용 방식을 서로 분리한다. 표시명·선택 UI·전환 문구는 확정하지 않았다.
+
+- **(가) 외부 앱 모드 (가칭, 승인 대기):** EG-Desk 위에서 Codex·Claude를 그 앱 그대로 쓴다. 해당 앱의 하네스와 기억이 그대로 쓰인다.
+- **(나) Agent 모드 (가칭, 승인 대기):** EG-Desk 자체 하네스(현재 구성은 Agent + Ontology)를 엔진에 얹어 쓴다. 이 모드에서 엔진은 순수 모델로만 쓰이며, 기억은 Agent와 Ontology가 소유한다.
+- 두 모드의 기억은 섞지 않는다. 한 모드가 가진 앱 자체 기억을 다른 모드의 EG-Desk 기준 기록으로 읽어 들이거나 승격하지 않는다.
+- (나) 모드의 완성도는 Agent와 Ontology 기능의 완성도에 달려 있으며, 이 계약의 위 'Agent engine boundary'·Engine Profile 격리 및 아래 Memory 소유 규칙과 함께 읽는다.
+- 위 Claude의 `~/.claude` 상속 등 기존에 결정한 엔진 앱 설정 처리는 (가)에 해당하는 사용에 대한 결정으로 읽는다. 이를 (나)에 적용할지는 이 기록에서 정하지 않는다.
+
 <a id="tech-storage-export"></a>
 
 ## 15. 로컬 데이터·불변 객체·대화 event·내보내기
@@ -2104,6 +2114,23 @@ Engine 서비스 통신, sandbox command, Browser, MCP, 커넥터의 제한을 �
 
 [DM 사용과 철회](./EGDESK_PRODUCT_INTERACTION_TRACE_ATLAS.md#atlas-local-memory) · [파일·기억 조각의 현재 입력과 제안 규격](../../apps/firefox-ui-demo/docs/DECISION_MODEL_CONTEXT_SETUP.md#memory-intake)
 
+**정정 주석 (2026-11-25, owner 확인).** 위 MemBrain 항목의 '같은 소유자·Agent·DM' 한정과 DM 단위 동의·철회는 현행 로컬 구현의 범위를 서술한 것이며 기억의 목표 모델이 아니다. 기억 주체는 Agent이고 Board·대화는 출처(provenance)라는 목표 모델은 아래 [Memory 소유](#tech-memory-agent-owner)를 따른다. 위 문장은 현행 구현 기술로 보존한다.
+
+<a id="tech-decision-boundary"></a>
+##### Decision Model 책임 경계 (턴 처리 순서, 2026-11-25 owner 확인)
+
+한 턴에서 Decision Model은 대화 아래에 있는, 이미 정의된 층(기억·행동 등)의 상태를 먼저 확정하고, 대화를 만드는 엔진은 그렇게 확정된 상태 위에서 말한다.
+
+```text
+정의된 하위 층 확정 (Decision Model + System): 기억 층(관련 기록·상태·충돌·확인 대기), 행동 층(대기 중 승인·실행 중 Run·브라우저 단계·명령 후보)
+-> 대화 층 (엔진): 확정된 상태 위에서 실제로 글을 써야 하는 응답
+```
+
+- 이 순서는 책임 경계이며 Decision Model이 응답 글을 쓴다는 뜻이 아니다. 하위 층의 확정 결과를 엔진이 뒤집거나, 엔진 응답이 끝난 뒤에야 같은 턴의 기억·행동 상태를 정하지 않는다.
+- 이 소절은 턴 처리 순서만 정한다. Decision Model이 맡는 판정 종류의 범위, 전송·비용 한도, 기본 활성 여부는 이 소절에서 정하지 않는다.
+- 현행 구현이 이 순서와 다른 곳은 [Vision Gap 원장](./EGDESK_VISION_GAP_LEDGER.md#decision-memory-gap-20261125)에 날짜 행으로 둔다.
+
+
 <a id="tech-temporal-evidence"></a>
 ##### 그때의 일을 물으면 그때의 기록을 조회한다 (설계·일반 DM 미연결)
 
@@ -2127,6 +2154,9 @@ Engine 서비스 통신, sandbox command, Browser, MCP, 커넥터의 제한을 �
 ##### Memory·instruction 검증 record
 
 Memory는 `id,revision,owner,scope,conditions,sourceRefs,judgmentKind,reuseState,validUntil,consentRef,authorityEpoch`를 가진다. 모델은 후보 내용과 의미를 제안하고 System은 기록 권한·동의 조건·참조를 검사한다. Profile의 정책 변경은 Memory 본문·소유권 변경이 아니다.
+
+<a id="tech-memory-agent-owner"></a>
+**Memory 소유: Agent 중심 (2026-11-25 owner 확인).** 위 record의 `owner`는 기본적으로 Agent(인격체)다. Agent는 Board와 대화를 넘나들며 일하고, Memory와 그 Agent의 대화 내역은 Agent에 속한다. Board와 대화는 Agent가 일한 장소이며 `sourceRefs`가 가리키는 출처(provenance)이지 기억의 경계가 아니다. 소유가 조직인지 개인인지는 Agent별로 설정할 수 있는 속성이다. 위 `scope`의 현행 값(DM·Board 단위)과 MemBrain의 DM 한정은 현행 구현 기술이며, 이 소유 모델의 구체 필드와 설정 UI는 확정하지 않았다. 조직·개인 소유에 따른 열람·이동 권한은 위 인수 조건과 기존 Agent 소유·권한 규칙을 따른다.
 
 이동은 대상 새 ID 생성과 원 ID의 `moved` tombstone을 한 transaction으로 적용한다. 대상 저장 실패 시 원본은 active로 남는다. 삭제·만료·이동 tombstone과 `reuseEpoch`는 오래된 활성 event보다 우선한다. 동기화·import는 tombstone을 확인한 뒤 indexing하며 예전 active record를 다시 admission하지 않는다. 물리 payload 정리는 기존 저장·보관 계약을 따르고, 재사용 금지와 삭제 완료를 혼동하지 않는다.
 
