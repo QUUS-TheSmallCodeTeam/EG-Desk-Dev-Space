@@ -28,7 +28,7 @@ export const EGRESS_KINDS = Object.freeze({
   // class is not a model data class. It opens only if the owner decides a permission that covers all models (owner decision pending).
   hud_text: Object.freeze({ data: 'hud', governedBy: 'No model permission covers typed search-field text yet: refused everywhere (owner decision pending)' }),
   // L7 c37 (prefetch): the relative paths, sizes and dates of the files of the folder the run's engine works in: the engine reads that folder itself, so the decision model may read its listing.
-  // Never file text (that goes to the engine only). Open only when the run has a bound working folder the engine may read (workspaceRead).
+  // Never file text (that goes to the engine only; u5: the draft check may read the text of a prefetched file the ENGINE was given, as evidence kind 'file', class 'files', behind EGDESK_DRAFT_CHECK_FILES). Open only when the run has a bound working folder the engine may read (workspaceRead).
   workspace_names: Object.freeze({ data: 'files', governedBy: 'The run\'s own working folder, which its engine reads: only the listing (path, size, date), only for a run with a bound folder' }),
   // U1 B1 (EG-Desk's own computer tools): pixels of a Mac window and the labels read from it. They go to the run's engine model only; no model
   // permission covers the decision model, so this kind is refused by every gate (owner decision pending, same as hud_text).
@@ -58,7 +58,7 @@ const DATA_CLASSES = Object.freeze(['terminal', 'browser', 'canvas', 'run', 'mem
 // Evidence kinds a draft-check catalog may carry, and the data class that already lets a model see them.
 // Items of the decision context packet were already admitted for this run's answering model, so they count as the run's own data.
 // run_state: what the run is doing now, from the runtime's own facts (the heartbeat's material a message was composed from).
-const EVIDENCE_CLASS = Object.freeze({ source: 'run', document: 'run', conversation: 'run', timeline: 'run', board: 'run', run_state: 'run', memory: 'memory', terminal: 'terminal', browser: 'browser' })
+const EVIDENCE_CLASS = Object.freeze({ source: 'run', document: 'run', conversation: 'run', timeline: 'run', board: 'run', run_state: 'run', memory: 'memory', terminal: 'terminal', browser: 'browser', file: 'files' })
 
 /**
  * modelDataPermissions({ toolCeiling, browserGranted, canvasMaySend, memoryScope, speechConsent, topicConsent, runActive, boardExcerptsToModel })

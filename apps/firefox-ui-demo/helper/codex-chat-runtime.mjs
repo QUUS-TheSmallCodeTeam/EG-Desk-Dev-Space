@@ -81,6 +81,8 @@ export function answerEvidence(turn, facts) {
 // 2026-11-24: the Agent summarised its own unposted draft). Application context for the engine only; never shown in the chat.
 // c19: how many records of the last check of a conversation the next check of it may reuse.
 export const EARLIER_EVIDENCE_LIMIT = 4
+export const EARLIER_TOOL_RUNS = 3 // u5: how many earlier runs of the conversation the check reads tool facts from
+export const EARLIER_TOOL_ITEMS = 4
 // c28 (L2 c24, v8 s14): after an answer the check WITHHELD, the person saw nothing, so what the next answer must be checked against is what that check had; up to this many of
 // its records are kept for the next check (the check's own ranking keeps the ones related to the next draft). After a posted answer the limit above stays.
 export const EARLIER_WITHHELD_LIMIT = 8
@@ -4913,7 +4915,7 @@ export class CodexChatRuntime {
       const previousReply = this.previousReplyFor(context, speech)
       const out = await prepareTurnContext({ message: body.message, candidates, client: setup.client, askedAt, speech, topic, ...(previousReply ? { previousReply } : {}),
         timeoutMs: Math.max(1, Math.ceil(deadline + (keepLate ? LATE_CONTEXT_MS : 0) - performance.now())), signal: controller.signal, cacheScope: 'ctx',
-        ...(setup.relevanceRules === 'action' || setup.relevanceRules === 'action+status' ? { ruleSet: setup.relevanceRules } : {}) })
+        ...(this.draftFilesOn() ? { draftFileText: true } : {}), ...(setup.relevanceRules === 'action' || setup.relevanceRules === 'action+status' ? { ruleSet: setup.relevanceRules } : {}) })
       if (out?.receipt && pruned.length) out.receipt = { ...out.receipt, pruned: { held: pruned.length } } // a count only, never ids
       return out
     })().catch(() => ({ status: 'fallback', reason: 'unreachable', selected: [], extraContext: {}, receipt: null }))
@@ -6864,8 +6866,8 @@ export class CodexChatRuntime {
     let vocabulary = []
     try { vocabulary = (await dc?.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
     const revise = ({ draft, note }) => this.reviseOnFork(run, draft, note, controller.signal, ready.evidence)
-    const check = checkDraft({ draft: text, evidence: ready.evidence, userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
-      mode: 'on', design: this.draftCheckDesign(), client: setup.client, revise, signal: controller.signal, egress: this.decisionEgressFor(run), onStage: stage => this.noteDecisionStage?.(run, stage.stage, { startAt: stage.startAt, endAt: stage.endAt, outcome: stage.outcome }) })
+    const check = checkDraft({ draft: text, evidence: ready.evidence, evidenceIncomplete: ready.incomplete === true, userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
+      mode: 'on', design: this.draftCheckDesign(), client: setup.client, revise, signal: controller.signal, egress: this.checkEgressFor(run), onStage: stage => this.noteDecisionStage?.(run, stage.stage, { startAt: stage.startAt, endAt: stage.endAt, outcome: stage.outcome }) })
     void check.catch(() => {})
     try {
       const result = await Promise.race([check, aborted])
@@ -6909,11 +6911,27 @@ export class CodexChatRuntime {
   // context missed its deadline (waited for within the check's own limit: 'until'), and the records the last check of this conversation used.
   // The engine's thread still holds those records (the real collaboration v2 follow-up, 2026-11-24: its context chose no material in 268 ms and
   // "납기는 2주입니다." was cut with no request); same conversation, same data permissions. After this turn's own items, before its memory.
+  /** u5: closed facts of the edits and commands EG-Desk's own tools made in the earlier turns of this conversation (the last EARLIER_TOOL_RUNS runs the store has), as past evidence items without `facts`. */
+  earlierToolFactsEvidence(run) {
+    try {
+      if (!this.store?.listRuns || !run?.clientThreadId) return []
+      const runs = (this.store.listRuns(run.clientThreadId, { limit: 100 })?.runs ?? []).filter(r => r && r.requestId !== run.requestId && ((Array.isArray(r.ownEdits) && r.ownEdits.length) || (Array.isArray(r.ownCommands) && r.ownCommands.length))).slice(-EARLIER_TOOL_RUNS)
+      const quote = this.decisionEgressFor(run).allows('command_output'), out = []
+      runs.reverse().forEach((r, k) => {
+        const edits = Array.isArray(r.ownEdits) ? r.ownEdits : [], commands = Array.isArray(r.ownCommands) ? r.ownCommands : []
+        const items = [...edits.map((entry, i) => ownEditEvidence(entry, i, edits)), ...commands.map((entry, i) => ownCommandEvidence(entry, i, { quoteLine: quote }))]
+        for (const item of items) out.push({ id: `before${k + 1}_${item.id}`, kind: item.kind, time: 'past', source: 'earlier_turn', text: String(item.text).replace(/^In this turn\b/, 'In an earlier turn of this conversation').replace(/\bin this turn\b/g, 'in that turn') })
+      })
+      return out.slice(0, EARLIER_TOOL_ITEMS)
+    } catch { return [] }
+  }
+
   async draftTurnEvidence(run, turn, tools, until = null) {
-    let now = turn
+    let now = turn, incomplete = turn.contextMissing === true
     if (turn.late) {
       const waited = await (until ? Promise.race([turn.late, until]) : turn.late)
       if (waited?.skip) return { skip: waited.skip, evidence: [] }
+      if ((waited?.evidence ?? []).length) incomplete = false // the late result arrived: the material is here
       // Lane L7's noteLateDecisionContext may already have put the same late items into the entry (flag keepLate): never twice.
       const fresh = (waited?.evidence ?? []).filter(item => !turn.evidence.some(x => x.id === item.id && x.text === item.text))
       if (fresh.length) now = { ...turn, evidence: [...fresh, ...turn.evidence] }
@@ -6927,9 +6945,12 @@ export class CodexChatRuntime {
       this.earlierEvidence.set(run.clientThreadId, { withheld: false, records: own.slice(0, EARLIER_WITHHELD_LIMIT).map(item => ({ ...item, id: `prev_${item.id}`, source: 'earlier_turn' })) })
       if (this.earlierEvidence.size > 64) this.earlierEvidence.delete(this.earlierEvidence.keys().next().value)
     }
-    const carried = earlier.filter(e => !own.some(item => item.text === e.text))
-    if (!carried.length) return { skip: null, evidence: answerEvidence(now, tools) }
-    return { skip: null, evidence: answerEvidence({ ...now, evidence: [...now.evidence.filter(item => !item.opaque), ...carried, ...now.evidence.filter(item => item.opaque)] }, tools) }
+    // u5 (D18): what EG-Desk's own tools did in EARLIER turns of this conversation (the edits and commands the store kept with those runs; they survive a restart, the in-memory carry above does not) is
+    // evidence too: Claude often answers from the conversation's memory. Text only: no facts (the rules of completion claims read the facts of THIS turn's commands alone), tagged as past.
+    const stored = this.earlierToolFactsEvidence(run).filter(e => !own.some(item => item.text === e.text) && !earlier.some(item => item.text === e.text))
+    const carried = [...earlier.filter(e => !own.some(item => item.text === e.text)), ...stored]
+    if (!carried.length) return { skip: null, evidence: answerEvidence(now, tools), incomplete }
+    return { skip: null, evidence: answerEvidence({ ...now, evidence: [...now.evidence.filter(item => !item.opaque), ...carried, ...now.evidence.filter(item => item.opaque)] }, tools), incomplete }
   }
 
   // The run's own facts for the check of its answer (measured 2026-11-24, all-on journey s6: "테스트가 모두 통과했습니다." was checked against four
@@ -7019,8 +7040,18 @@ export class CodexChatRuntime {
   // DM turn without guarded evidence is checked; what leaves the machine is the posted sentences plus catalog text that already went to
   // the decision model; tool outputs are sent as content-free references only.
   // The one egress gate for a run (egdesk-decision-egress.mjs): the decision model receives only what this run's models may receive.
-  decisionEgressFor(run, { memoryScope = {}, canvasMaySend = false } = {}) {
-    return createEgressGate(modelDataPermissions({ toolCeiling: run?.toolCeiling ?? null, browserGranted: Boolean(run?.browserBinding?.cards?.length), canvasMaySend, memoryScope, runActive: Boolean(run) }))
+  decisionEgressFor(run, { memoryScope = {}, canvasMaySend = false, workspaceRead = false } = {}) {
+    return createEgressGate(modelDataPermissions({ toolCeiling: run?.toolCeiling ?? null, browserGranted: Boolean(run?.browserBinding?.cards?.length), canvasMaySend, memoryScope, runActive: Boolean(run), workspaceRead }))
+  }
+
+  /**
+   * u5 (D18; flag decisionContext.draftCheck.fileText, EGDESK_DRAFT_CHECK_FILES=on, default off): the draft check and its revision read the TEXT of a prefetched working-folder file the engine was given.
+   * The data is the engine's own (it read the same text), so the gate's class 'files' is open for a run with a bound folder whose Agent ceiling does not shut both terminal and files.
+   */
+  draftFilesOn() { try { return this.decisionContext?.draftCheck?.fileText?.() === true } catch { return false } }
+  checkEgressFor(run) {
+    const ceiling = run?.toolCeiling ?? null
+    return this.decisionEgressFor(run, { workspaceRead: this.draftFilesOn() && typeof run?.ownFolder === 'string' && !!run.ownFolder && !(ceiling && ceiling.terminal === 'none' && ceiling.files === 'none') })
   }
 
   // ---- Advisory state judge on the engine's own commands (flag decisionContext.commandJudge = { mode(): 'off'|'advisory' }, default off). ----
@@ -7650,7 +7681,12 @@ export class CodexChatRuntime {
       const refs = extraKeys.filter(key => !(key === 'egdesk_browser_task' && browserNote) && key !== POSTED_ANSWER_KEY && key !== STOPPED_COMMAND_KEY).slice(0, 4).map((key, i) => ({ id: `ctx${i + 1}`, kind: 'context', time: 'unknown', source: 'application', opaque: true }))
       // c26: the command the person stopped, told to this turn: known text for the check (its output only where the run's models may receive terminal data)
       const stoppedEvidence = context.stoppedCommand ? [stoppedCommandEvidence(context.stoppedCommand, { outputAllowed: this.decisionEgressFor(run).allows('terminal_output') })] : []
-      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...stoppedEvidence, ...refs], memory: memoryItems, userText: typeof body.message === 'string' ? body.message : '', browserNote, late })
+      // u5 (D18): the turn's context step answered nothing (fallback: its call was cut by the turn budget or failed): the material the model was meant to have is simply not here, so the check cannot call a sentence
+      // UNSUPPORTED for want of it (the evidence is incomplete, not empty by the model's choice): see egdesk-draft-check.mjs evidenceIncomplete. A context step that ran and chose nothing is not this.
+      // Opt-in (decisionContext.draftCheck.incompleteEvidence() === 'hold', EGDESK_DRAFT_CHECK_INCOMPLETE=hold, default off): without it a cut context step changes nothing (the check judges as before: a pinned behavior of the
+      // multiuser v1 reproduction: a sentence the model had no material for is trimmed, and the model had none either).
+      const contextMissing = !skip && decision?.mode === 'on' && decision.result?.status === 'fallback' && (() => { try { return this.decisionContext?.draftCheck?.incompleteEvidence?.() === 'hold' } catch { return false } })()
+      this.draftCheckTurns.set(run, { skip, evidence: [...evidence, ...stoppedEvidence, ...refs], memory: memoryItems, userText: typeof body.message === 'string' ? body.message : '', browserNote, late, contextMissing })
     } catch { /* the check must never affect the turn */ }
   }
 
@@ -7685,8 +7721,8 @@ export class CodexChatRuntime {
       const aborted = new Promise(resolve => controller.signal.addEventListener('abort', () => resolve(null), { once: true }))
       const ready = run ? await this.draftTurnEvidence(run, turn, tools, aborted) : { skip: null, evidence: answerEvidence(turn, tools) }
       if (ready.skip) { record({ fallback: 'evidence_unavailable' }); return }
-      const check = checkDraft({ draft: text, evidence: ready.evidence, userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
-        mode: 'advisory', design: this.draftCheckDesign(), client: setup.client, signal: controller.signal, egress: this.decisionEgressFor(run) })
+      const check = checkDraft({ draft: text, evidence: ready.evidence, evidenceIncomplete: ready.incomplete === true, userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
+        mode: 'advisory', design: this.draftCheckDesign(), client: setup.client, signal: controller.signal, egress: this.checkEgressFor(run) })
       void check.catch(() => {}) // a check that outlives the deadline must not surface later
       const result = await Promise.race([check, aborted])
       const totalMs = performance.now() - t0
