@@ -14,6 +14,7 @@
 //     Decision key; --person-home leaves CODEX_HOME unset so the person's own login is used; the check never reads that folder;
 //   - Decision calls go through the run's egress gate (the runtime's own) with the key from the environment, only with --decisions;
 //   - no retries anywhere; one app-server process per conversation, killed as a whole process group (SIGTERM, 2 s, SIGKILL).
+import { upperBundleFlags } from './egdesk-upper-bundle.mjs'
 import fs from 'node:fs'
 import path from 'node:path'
 import { constants } from 'node:fs'
@@ -73,7 +74,7 @@ export const BRIDGE_COMPOSITION = Object.freeze({
   // top-level options of the bridge's new CodexChatRuntime({ … }) that this composition passes (request / respond / toolProviders etc. are the check's own)
   runtimeKeys: ['contexts', 'toolProviders', 'ownToolsWiring', 'roomAccount', 'store', 'requireStore', 'getOwnerKey', 'emit', 'emitLegacy', 'agentReloadReuse', 'engineStall'],
   flags: ['EGDESK_DRAFT_CHECK', 'EGDESK_DRAFT_CHECK_DESIGN', 'EGDESK_CONVERSATION_FLOW', 'EGDESK_COMMAND_JUDGE', 'EGDESK_TERMINAL_GATE', 'EGDESK_TERMINAL_GATE_METHOD',
-    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_FLOW_STALLED_COPY', 'EGDESK_FLOW_NOTE_WORDING', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP', 'EGDESK_AGENT_RELOAD_REUSE', ...hookFlags(), ...registeredFlags()],
+    'EGDESK_WORKING_MEMORY', 'EGDESK_CONTEXT_RELEVANCE', 'EGDESK_OWN_TOOLS', 'EGDESK_INRUN_MESSAGES', 'EGDESK_FLOW_STALLED_COPY', 'EGDESK_FLOW_NOTE_WORDING', 'EGDESK_UPPER', 'EGDESK_ROOM_ACCOUNT', 'EGDESK_DECISION_WARMUP', 'EGDESK_AGENT_RELOAD_REUSE', ...hookFlags(), ...registeredFlags()],
   // present in the bridge, deliberately not reproduced: each needs a window, the Desk, a store this check does not open, or another lane's module
   notReproduced: {
     keys: ['browserEntry', 'reviewRevision', 'memoryEvidence', 'settingsGeneration'],
@@ -402,7 +403,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
   if (!carry?.resumed) writeScratch(scratch, conversation.folder) // after a restart the folder is as the turns left it
   // the draft check is the conversation's own opt-in (conversation.draftCheck: { mode, design? }), like memory; explicit flags still win
   const dc = conversation.draftCheck
-  const flags = { ...(options.decisions ? DEFAULT_DECISION_FLAGS : {}), ...stallFlag(options, conversation), ...(dc ? { EGDESK_DRAFT_CHECK: dc.mode, ...(dc.design === 'choice' ? { EGDESK_DRAFT_CHECK_DESIGN: 'choice' } : {}) } : {}), ...(conversation.flags ?? {}), EGDESK_OWN_TOOLS: 'on' }
+  const flags = upperBundleFlags({ ...(options.decisions ? DEFAULT_DECISION_FLAGS : {}), ...stallFlag(options, conversation), ...(dc ? { EGDESK_DRAFT_CHECK: dc.mode, ...(dc.design === 'choice' ? { EGDESK_DRAFT_CHECK_DESIGN: 'choice' } : {}) } : {}), ...(conversation.flags ?? {}), EGDESK_OWN_TOOLS: 'on' }).flags // u1: EGDESK_UPPER=on in a conversation's flags fills the bundle's flags the script did not set (the bridge does the same for the environment)
   let profileStore = null, agentRoom = null // c25: the synthetic Agent of an agentProfile conversation
   const persisted = options.persisted === true, ledger = persisted ? (deps.ledger ?? createLedger(options.out)) : null, createdThreads = [...(carry?.state?.createdThreads ?? [])]
   const FLAG = { ...flags }

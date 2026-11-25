@@ -44,6 +44,7 @@ import { createDecisionBudget, createDecisionClient, decisionTopicRecipient } fr
 import { createDecisionTransport } from './egdesk-decision-transport.mjs'
 import { createDecisionActivity, createDecisionWarmup, warmupConfigFromEnv } from './egdesk-decision-warmup.mjs'
 import { openDecisionCredentialStore } from './egdesk-decision-credential.mjs'
+import { applyUpperBundle, describeUpperBundle, modeGatedClient } from './egdesk-upper-bundle.mjs'
 import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 import { openBriefingBindings } from './egdesk-briefing-bindings.mjs'
@@ -98,6 +99,10 @@ for (const name of Object.keys(process.env)) {
   if (/^EGDESK_BOARD_AGENT_DRAFT_(API_KEY|MODEL)$/i.test(name)) delete process.env[name]
 }
 
+// u1: EGDESK_UPPER=on switches the conversation path's turn-judgment developer flags on together (helper/egdesk-upper-bundle.mjs); a flag set explicitly keeps its value. Default off.
+// This runs before anything below reads a flag. It sets developer flags only: the Decision model stays the person's setting (mode 끔/기록만/사용 and a saved key).
+const upperBundle = applyUpperBundle(process.env)
+if (upperBundle.on) console.log(`[egdesk-codex-bridge] ${describeUpperBundle(upperBundle)}`)
 const nodeRuntime = requireEGDeskNodeRuntime()
 
 const BRIDGE_PORT = 39218
@@ -545,7 +550,8 @@ const chat = new CodexChatRuntime({
     settingsGeneration: () => browserDecisionGeneration,
     mode: () => bridgeSettings.decisionContext.mode,
     configured: () => decisionCredentials.getApiKey() !== null,
-    client: decisionClient,
+    // u1 (U9): every turn-judgment feature reaches the Decision model through this client, which refuses to send while the person's mode is 끔 or no key is saved, whatever flag is on
+    client: modeGatedClient(decisionClient, { mode: () => bridgeSettings.decisionContext.mode, configured: () => decisionCredentials.getApiKey() !== null }),
     // turn_context budget (codex-chat-runtime.mjs TURN_CONTEXT_BUDGET_MS 800 / TURN_CONTEXT_COLD_BUDGET_MS 1500): cold = first turn of a
     // conversation or no warm Decisions socket (egdesk-decision-transport.mjs warm()).
     budgetMs: TURN_CONTEXT_BUDGET_MS, coldBudgetMs: TURN_CONTEXT_COLD_BUDGET_MS, warm: () => decisionTransport.warm(),

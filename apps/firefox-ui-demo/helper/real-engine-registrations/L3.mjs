@@ -7,6 +7,8 @@ registerFlags({ reproduced: ['EGDESK_DECISION_FIRST_APPROVALS'], decisionDepende
 
 // ---- L3 c33: the answer's open proposals as defined items (flag EGDESK_PROPOSAL_REGISTRY; state only, no copy)
 registerFlags({ reproduced: ['EGDESK_PROPOSAL_REGISTRY'], decisionDependent: ['EGDESK_PROPOSAL_REGISTRY'] })
+// u1: the '위' bundle setting (helper/egdesk-upper-bundle.mjs): fills the conversation path's turn-judgment flags the script did not set
+registerFlags({ reproduced: ['EGDESK_UPPER'], decisionDependent: ['EGDESK_UPPER'] })
 import { PROPOSALS_EXPECT_SCHEMA, createProposalsHook, validateProposalsExpect } from '../egdesk-real-engine-proposals-hook.mjs'
 registerExpectKeys({ proposals: { schema: PROPOSALS_EXPECT_SCHEMA, validate: (value, { conv, path, bad }) => { for (const why of validateProposalsExpect(value, { conv }, path)) bad(path, why.split(': ').slice(1).join(': ')) } } })
 registerTurnHooks('proposals', conversation => createProposalsHook(conversation))
