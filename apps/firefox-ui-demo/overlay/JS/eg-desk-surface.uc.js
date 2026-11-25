@@ -19456,8 +19456,11 @@
             submittedBoard = Object.freeze({ key: view.key, routeKey: view.routeKey, message: draftText, browserSourcesKey: view.browserSourcesKey });
           } catch { return reportBoardBlock(); }
         }
-        if (activeThread && engineId === 'claude' && (state.contextSuggest?.byThread?.[activeThread.id]?.picked?.length
-            || activeThread.inputSources?.some(input => input.browserToolPermission === 'interact'))) {
+        // u4: with the bridge capability 'claude-browser' a Claude send may carry Browser Cards live (claudeBrowserSendPlan); otherwise this is the refusal it always was
+        const claudeBrowserCapable = ChatState.claudeBrowserCapable(state.codex.chatCapabilities);
+        const claudeBrowserGate = ChatState.claudeBrowserSendPlan({ engineId, capable: claudeBrowserCapable, selectedInputs: activeThread?.inputSources, threadInputs: activeThread?.inputSources,
+          contextPicked: state.contextSuggest?.byThread?.[activeThread?.id]?.picked?.length || 0, briefingInputs: activeThread?.briefingInputs?.length || 0 });
+        if (activeThread && engineId === 'claude' && claudeBrowserGate.refuse) {
           updateThreadById(activeThread.id, thread => ({ ...thread, sendError: ChatState.claudeContextSendErrorText('CLAUDE_CONTEXT_UNSUPPORTED') }));
           emit();
           return;
@@ -19565,6 +19568,8 @@
             && ChatState.requestProjectTargetsMatch(submittedDraft.requestProjectTarget, current.requestProjectTarget);
         };
         const selectedInputs = submittedDraft.inputSources;
+        // u4: the same plan on what this send actually carries (the draft snapshot); a plan that would now refuse falls back to today's behaviour, which then stops at the interaction check below
+        const claudeBrowserPlan = ChatState.claudeBrowserSendPlan({ engineId, capable: claudeBrowserCapable, selectedInputs, threadInputs: selectedInputs, contextPicked: 0, briefingInputs: submittedDraft.briefingInputs.length });
         let submittedWasCleared = false;
         let inputReferences;
         // Preserve the specific foreign-engine/room refusal before the more
@@ -19622,7 +19627,7 @@
           if (!boardSendCurrent()) return stopStaleBoard();
           if (engineId === 'claude' && !selectedInputs.length && submittedDraft.briefingInputs.length) await requireClaudeContext(activeThread, token);
           if (!boardSendCurrent()) return stopStaleBoard();
-          inputReferences = [...await captureThreadInputs(activeThread, selectedInputs, token, prepareOwnerCurrent), ...submittedDraft.briefingInputs];
+          inputReferences = [...await captureThreadInputs(activeThread, claudeBrowserPlan.captureInputs, token, prepareOwnerCurrent), ...submittedDraft.briefingInputs]; // u4: a live Claude Browser send captures nothing (no Reader)
           if (!boardSendCurrent()) return stopStaleBoard();
           for (const reference of inputReferences) if (reference.contextScope) InputContext.assertInputContextScope(reference, ChatState.chatContextRequestScope(activeThread, state.codex));
           if (!epochScope.valid(token) || !sendOwnerCurrent()) { epochScope.finish(token); return; }
@@ -19645,7 +19650,7 @@
         const requestId = `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
         // Claude B2 reads the selected immutable capture, not the live Browser
         // actor. An explicit interaction request was refused above, never dropped.
-        const selectedBrowserSources = engineId === 'claude' ? [] : browserToolSelectedSources(activeThread.id, selectedInputs);
+        const selectedBrowserSources = engineId === 'claude' && !claudeBrowserPlan.live ? [] : browserToolSelectedSources(activeThread.id, selectedInputs);
         const requestedBrowserInteraction = selectedInputs.some(input => input.kind === 'browser' &&
           input.selectedByUser === true && input.browserToolPermission === 'interact');
         if (requestedBrowserInteraction && !selectedBrowserSources.some(input => input.browserToolPermission === 'interact')) {
