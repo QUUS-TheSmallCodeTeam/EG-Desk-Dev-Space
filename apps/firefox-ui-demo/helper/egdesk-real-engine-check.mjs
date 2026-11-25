@@ -41,6 +41,7 @@ import { parseCodexUserAgent } from './egdesk-codex-version-pin.mjs'
 import { buildCodexAppServerLaunch, inspectNativeCapabilities } from './egdesk-native-capabilities.mjs'
 import { APPROVER_TEXT, checkTurnExpectations, folderPathProblem, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { memoryNeedsDecisions } from './egdesk-real-engine-memory.mjs' // memory hook (L7 c26)
+import { applyRateLimitsUpdate } from './codex-account-usage.mjs' // c34: the engine's own usage readings (account/rateLimits/updated), recorded per turn
 import { ENGINE_STALL_FLAG, ENGINE_STALL_LIMITS, isProgressEvent, mergeStallRecords, stallConfigFromEnv, stallLine, stallRecord, stallTotals } from './egdesk-engine-stall.mjs' // c33
 import { createChatHttpHandler } from './codex-bridge-http.mjs' // c28: the product's route handler (the window's own request for a conversation delete)
 import { registerConversationForgetters } from './egdesk-conversation-forgetters.mjs' // c28: the same per-conversation forgetters the bridge registers
@@ -105,6 +106,13 @@ export function closedTrace(trace) {
   const word = v => (typeof v === 'string' ? v.slice(0, 40) : null)
   return trace.slice(0, 3).map(t => ({ via: word(t?.via), startMs: Number.isFinite(t?.startMs) ? t.startMs : null, firstEventMs: Number.isFinite(t?.firstEventMs) ? t.firstEventMs : null, completed: word(t?.completed),
     events: (Array.isArray(t?.events) ? t.events : []).slice(0, 30).map(e => [Number.isFinite(e?.[0]) ? e[0] : null, word(e?.[1]), word(e?.[2]), word(e?.[3])]), requests: (Array.isArray(t?.requests) ? t.requests : []).slice(0, 10).map(word) }))
+}
+
+/** c34: the last allowance reading of a turn as the record keeps it: percent used, window length (minutes) and reset time (epoch ms) per window, and the reached word; numbers and one word only. */
+export function closedRateLimits(limits) {
+  const win = w => (w && Number.isFinite(w.usedPercent) ? { usedPercent: Math.round(w.usedPercent * 100) / 100, windowMinutes: Number.isInteger(w.windowMinutes) ? w.windowMinutes : null, resetsAt: Number.isFinite(w.resetsAt) ? w.resetsAt : null } : null)
+  if (!limits || typeof limits !== 'object') return null
+  return { primary: win(limits.primary), secondary: win(limits.secondary), reached: typeof limits.reachedType === 'string' ? limits.reachedType.slice(0, 40) : null }
 }
 
 /** deleteAndVerify(request, ids, ledger) → { persisted, deleted, verifiedGone, failures: [{ id, step, error }] }. Never throws; no retries. */
@@ -380,12 +388,13 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
   const turnHooks = createTurnHooks(conversation) // the registered per-turn hooks: memory (seeded pages, what the product sent), journey (turn/steer, turn/interrupt), ...
   const memoryHook = turnHooks.get('memory').hook // memory hook: the ontology graph and the turn-memory setting
   const completions = [], tasks = []
+  let limitsNow = null // c34: the engine's latest allowance reading of this conversation
   const turnNow = { notifications: [], engineMessages: {}, pendingRequests: new Map(), toolCalls: new Map(), native: { commandExecution: 0, fileChange: 0, approvals: 0 }, items: {}, usage: null, compacted: false, errors: [], decisions: [], draftRows: [], flowRows: [], internal: [], writers: [], turnStartAt: null, firstEventAt: null, firstProgressAt: null, t0: null, timing: { sendMs: null, engineStartMs: null, events: [], items: [], tools: [] } }
   // c31 (U13 timing): offsets in ms from the start of the scripted turn (turnNow.t0): when the engine's turn was asked for (the memory and action layers come before it), the visible runtime events, the engine's items,
   // EG-Desk's own tool calls, the Decision calls' starts (decisions[].atMs). firstEventMs (c32, L5) stays the one record of how long the engine took to start answering.
   const VISIBLE_EVENTS = new Set(['run.started', 'message.started', 'message.completed', 'activity.updated', 'activity.completed', 'approval.required', 'run.completed', 'run.unavailable'])
   const offsetNow = () => (turnNow.t0 === null ? null : Math.round(performance.now() - turnNow.t0))
-  const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.engineMessages = {}; turnNow.pendingRequests = new Map(); turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = []; turnNow.flowRows = []; turnNow.internal = []; turnNow.writers = []; turnNow.turnStartAt = null; turnNow.firstEventAt = null; turnNow.firstProgressAt = null; turnNow.t0 = null; turnNow.timing = { sendMs: null, engineStartMs: null, events: [], items: [], tools: [] } }
+  const resetTurnNow = () => { turnNow.notifications.length = 0; turnNow.engineMessages = {}; turnNow.pendingRequests = new Map(); turnNow.toolCalls = new Map(); turnNow.native = { commandExecution: 0, fileChange: 0, approvals: 0 }; turnNow.items = {}; turnNow.usage = null; turnNow.compacted = false; turnNow.errors = []; turnNow.decisions = []; turnNow.draftRows = []; turnNow.flowRows = []; turnNow.internal = []; turnNow.writers = []; turnNow.turnStartAt = null; turnNow.firstEventAt = null; turnNow.firstProgressAt = null; turnNow.rateLimits = null; turnNow.rateLimitReports = 0; turnNow.t0 = null; turnNow.timing = { sendMs: null, engineStartMs: null, events: [], items: [], tools: [] } }
   let initializeResult = null, lastThreadStart = null
   const rpc = new AppServerRpc({
     send: payload => child.stdin.write(`${payload}\n`), experimentalApi: true, timeoutMs: 60_000,
@@ -393,6 +402,9 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       const p = message.params ?? {}
       if (turnNow.firstEventAt === null && turnNow.turnStartAt !== null && p.threadId && (p.turnId || p.turn?.id)) turnNow.firstEventAt = performance.now() // c33: the first event of the turn
       if (turnNow.firstProgressAt == null && turnNow.turnStartAt !== null && isProgressEvent(message)) turnNow.firstProgressAt = performance.now() // c34: the first event beyond the preamble (what the watchdog waits for)
+      // c34 (the weekly Codex limit reached 100% on 11-25 and no record said how fast it filled): the engine reports its allowance with every model call (account/rateLimits/updated); the closed numbers of the
+      // last report of the turn go to the turn record (usedPercent per window, window minutes, reset time, the reached word), so a batch's use is read from the records, never guessed
+      if (message.method === 'account/rateLimits/updated') { try { limitsNow = applyRateLimitsUpdate(limitsNow, message); turnNow.rateLimits = closedRateLimits(limitsNow); turnNow.rateLimitReports = (turnNow.rateLimitReports ?? 0) + 1 } catch { /* a reading never affects the turn */ } }
       // c31 (the two 180 s turns of check-24un/22mw: items {userMessage:1}, no completion): every engine message by method, content-free, so a silent turn names itself
       { const m = String(message.method ?? '?').slice(0, 60); if (Object.keys(turnNow.engineMessages).length < 40 || m in turnNow.engineMessages) turnNow.engineMessages[m] = (turnNow.engineMessages[m] ?? 0) + 1 }
       if (message.method === 'item/started' || message.method === 'item/completed') {
@@ -614,7 +626,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
         if (status === 'timeout') { try { await rpc.request('turn/interrupt', { threadId: run.conversationId, turnId: run.runId }) } catch {} rec.aborted ??= 'turn_timeout' }
       }
       await Promise.allSettled(tasks.splice(0)); try { await chat.queue } catch {} try { await chat.draftCheckIdle() } catch {} await sleep(30); await Promise.allSettled(tasks.splice(0))
-      return { run, status, error: done?.error ?? null, latencyMs: ms(started), firstEventMs: turnNow.turnStartAt !== null && turnNow.firstEventAt !== null ? Math.max(0, Math.round(turnNow.firstEventAt - turnNow.turnStartAt)) : null, firstProgressMs: turnNow.turnStartAt !== null && turnNow.firstProgressAt != null ? Math.max(0, Math.round(turnNow.firstProgressAt - turnNow.turnStartAt)) : null, toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, engineMessages: { ...turnNow.engineMessages }, unansweredRequests: [...turnNow.pendingRequests.values()], native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], draftRows: [...turnNow.draftRows], flowRows: [...turnNow.flowRows], internal: [...turnNow.internal], writers: [...turnNow.writers], commandsRan: [...runnerLog], timing: { ...turnNow.timing, events: [...turnNow.timing.events], items: [...turnNow.timing.items], tools: [...turnNow.timing.tools], doneMs: ms(started) } }
+      return { run, status, error: done?.error ?? null, latencyMs: ms(started), firstEventMs: turnNow.turnStartAt !== null && turnNow.firstEventAt !== null ? Math.max(0, Math.round(turnNow.firstEventAt - turnNow.turnStartAt)) : null, firstProgressMs: turnNow.turnStartAt !== null && turnNow.firstProgressAt != null ? Math.max(0, Math.round(turnNow.firstProgressAt - turnNow.turnStartAt)) : null, toolCalls: [...turnNow.toolCalls.values()], items: { ...turnNow.items }, engineMessages: { ...turnNow.engineMessages }, rateLimits: turnNow.rateLimits ?? null, unansweredRequests: [...turnNow.pendingRequests.values()], native: { ...turnNow.native }, usage: turnNow.usage, compacted: turnNow.compacted, errors: [...turnNow.errors], decisions: [...turnNow.decisions], draftRows: [...turnNow.draftRows], flowRows: [...turnNow.flowRows], internal: [...turnNow.internal], writers: [...turnNow.writers], commandsRan: [...runnerLog], timing: { ...turnNow.timing, events: [...turnNow.timing.events], items: [...turnNow.timing.items], tools: [...turnNow.timing.tools], doneMs: ms(started) } }
     }
     const sendAndWait = async text => finishTurn(await beginTurn(text))
     // a message typed into the working run, afterMs after that turn started; not a turn of its own (the run's turn keeps going)
@@ -762,7 +774,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       Object.assign(ext.records, after.records); ext.expectations.push(...after.expectations)
       const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...(side ? [{ check: 'alongside.completed', ok: side.status === 'completed' && side.posted.length >= 1, detail: { status: side.status, posted: side.posted.length } }] : []), ...ext.expectations]
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
-      await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, firstEventMs: s.firstEventMs ?? null, firstProgressMs: s.firstProgressMs ?? null, items: s.items, engineMessages: s.engineMessages ?? {}, unansweredRequests: s.unansweredRequests ?? [], native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
+      await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, firstEventMs: s.firstEventMs ?? null, firstProgressMs: s.firstProgressMs ?? null, items: s.items, engineMessages: s.engineMessages ?? {}, rateLimits: s.rateLimits ?? null, unansweredRequests: s.unansweredRequests ?? [], native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true, ...(s.timing ? { timing: s.timing } : {}) })),
         ...(side ? { alongside: { clientThreadId: side.room.id, status: side.status, posted: side.posted.map(t => clip(t, 400)) } } : {}), ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(contextKeys.length ? { contextKeys } : {}), ...(sub.some(s => s.flowRows?.length) ? { flowRows: sub.flatMap(s => s.flowRows) } : {}), ...(sub.some(s => s.internal?.length) ? { internalTurns: sub.flatMap(s => s.internal) } : {}), ...(sub.some(s => s.writers?.length) ? { writers: sub.flatMap(s => s.writers) } : {}), ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...ext.records, expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {
@@ -782,6 +794,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     if (carry?.out) carry.out.state = { clientThreadId, nativeThread, first, seen: assistantTexts().length, generation, requestSeq, createdThreads }
     rec.ok = !rec.aborted && !closed && rec.turns.length === conversation.turns.length + (carry?.resumed ? 1 : 0) && rec.turns.every(t => t.ok)
     rec.decisionCalls = decisionCall.length
+    if (limitsNow) rec.rateLimits = closedRateLimits(limitsNow) // c34: the allowance as the conversation ended
   } catch (error) {
     rec.aborted ??= String(error?.code ?? error?.name ?? 'error').slice(0, 60)
     rec.abortDetail = clip(error?.message ?? '', 300)

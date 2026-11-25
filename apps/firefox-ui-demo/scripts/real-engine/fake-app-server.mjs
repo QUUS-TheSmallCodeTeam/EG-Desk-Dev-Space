@@ -50,7 +50,10 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
   const send = message => { output.write(`${JSON.stringify(message)}\n`); logLine({ dir: 'out', ...message }) }
   let exitCode = 0
   const fail = (what, errors) => { stderr.write(`fake app-server: ${what} is off the 0.171 schema: ${errors.slice(0, 3).join('; ')}\n`); logLine({ dir: 'schema_error', what, errors }); exitCode = 3; setImmediate(() => exit(3)) }
-  const notify = (method, params) => { const errors = validateMessage('notification', method, params); if (errors.length) return fail(`notification ${method}`, errors); send({ method, params }) }
+  // c34: account/rateLimits/updated is a real notification (the engine sends it with every model call; its wire shape is read by helper/codex-account-usage.mjs) that protocol-0171.json does not carry yet: the fake sends it unvalidated
+  // until the next schema extraction adds it to WANTED (extract-protocol-subset.mjs)
+  const UNEXTRACTED = new Set(['account/rateLimits/updated'])
+  const notify = (method, params) => { const errors = UNEXTRACTED.has(method) ? [] : validateMessage('notification', method, params); if (errors.length) return fail(`notification ${method}`, errors); send({ method, params }) }
   const result = (id, method, value) => { const errors = validateMessage('result', method, value); if (errors.length) return fail(`result of ${method}`, errors); send({ id, result: value }) }
   const itemId = () => `item-${++counters.item}`
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -129,6 +132,8 @@ export function runFakeAppServer({ script, input = process.stdin, output = proce
         const u = step.usage, input = u.input ?? 0, output = u.output ?? 0
         const breakdown = { inputTokens: input, cachedInputTokens: u.cached ?? 0, outputTokens: output, reasoningOutputTokens: u.reasoning ?? 0, totalTokens: input + output }
         notify('thread/tokenUsage/updated', { threadId, turnId, tokenUsage: { last: breakdown, total: breakdown, modelContextWindow: 258400 } })
+        // c34: step.rateLimits = { primary?: { usedPercent, windowDurationMins, resetsAt }, secondary?: {...}, reached? }: the engine's allowance reading that follows a model call (account/rateLimits/updated)
+        if (step.rateLimits) notify('account/rateLimits/updated', { rateLimits: { limitId: 'codex', limitName: null, primary: step.rateLimits.primary ?? null, secondary: step.rateLimits.secondary ?? null, credits: null, planType: 'prolite', rateLimitReachedType: step.rateLimits.reached ?? null } })
       }
       if (step.errorNotification) notify('error', { threadId, turnId, error: { message: step.errorNotification, codexErrorInfo: null, additionalDetails: null }, willRetry: false })
     }

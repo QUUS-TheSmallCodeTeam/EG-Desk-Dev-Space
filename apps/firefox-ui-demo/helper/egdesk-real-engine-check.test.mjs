@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { runFakeAppServer } from '../scripts/real-engine/fake-app-server.mjs'
 import { validateMessage } from './egdesk-app-server-protocol.mjs'
 import { stallLine } from './egdesk-engine-stall.mjs'
-import { BRIDGE_COMPOSITION, DECISION_KEY_ENV, HELP, stallFlag, LEDGER_FILE, appServerArgs, assertCleanupGuaranteed, childEnv, cleanupLeftovers, closedRow, createGroupKiller, createLedger, formatPlan, leftoverThreads, loadScripts, parseArgs, planRun, preflight, runCheck } from './egdesk-real-engine-check.mjs'
+import { BRIDGE_COMPOSITION, DECISION_KEY_ENV, HELP, stallFlag, LEDGER_FILE, appServerArgs, assertCleanupGuaranteed, childEnv, cleanupLeftovers, closedRow, closedRateLimits, createGroupKiller, createLedger, formatPlan, leftoverThreads, loadScripts, parseArgs, planRun, preflight, runCheck } from './egdesk-real-engine-check.mjs'
 import { APPROVER_TEXT, REAL_ENGINE_SCRIPT_SCHEMA, checkTurnExpectations, validateEngineScript } from './egdesk-real-engine-script.mjs'
 import { createPrivateQaTempDirectory } from '../scripts/egdesk-qa-platform.mjs'
 
@@ -1192,4 +1192,18 @@ test('engine stall through the check: a healthy engine records firstEventMs and 
   assert.match(validateEngineScript(stallScript(null).conversations ? { ...stallScript(null), conversations: [{ id: 's', turns: [{ say: 'x', expect: { engineStall: { stalled: true } } }] }] } : {}).errors.join(), /needs flags\.EGDESK_ENGINE_STALL_FIRST_EVENT_MS/)
   assert.match(validateEngineScript({ set: 'real-engine-stall-test-v1', conversations: [{ id: 's', turns: [{ say: 'x', expect: { engineStall: { recovered: true } } }] }] }).errors.join(), /needs stalled: true/)
   assert.deepEqual(validateEngineScript(starter('engine-stall')), { ok: true, errors: [] })
+})
+
+// ---- c34: the engine's own allowance readings go to the turn record (the weekly Codex limit reached 100% on 11-25 and the records could only count messages, not percent) ----
+test('c34: account/rateLimits/updated: the last reading of each turn is in its record, closed numbers only, the conversation keeps the last one; a turn without a reading has null', async t => {
+  const limits = (p, s) => ({ primary: { usedPercent: p, windowDurationMins: 300, resetsAt: 1790000000 }, secondary: { usedPercent: s, windowDurationMins: 10080, resetsAt: 1790500000 } })
+  const w = world(t, { turns: [{ steps: [{ usage: { input: 12500, cached: 10400, output: 20, reasoning: 0 }, rateLimits: limits(41.256, 97.5) }, { usage: { input: 12600, cached: 10500, output: 25, reasoning: 0 }, rateLimits: limits(41.9, 98.2) }], final: 'one' }, { steps: [], final: 'two' }] })
+  const rec = only(await runCheck(w.options, asScripts({ set: 'real-engine-rl-v1', conversations: [{ id: 'rl', turns: [{ say: 'a' }, { say: 'b' }] }] }), w.deps))
+  assert.equal(rec.aborted, null)
+  const first = rec.turns[0].subTurns[0].rateLimits, second = rec.turns[1].subTurns[0].rateLimits
+  assert.deepEqual(first, { primary: { usedPercent: 41.9, windowMinutes: 300, resetsAt: 1790000000000 }, secondary: { usedPercent: 98.2, windowMinutes: 10080, resetsAt: 1790500000000 }, reached: null }, 'the LAST reading of the turn; the reset time as epoch ms')
+  assert.equal(second, null, 'no reading in this turn: null, not a copy of the earlier one'); assert.deepEqual(rec.rateLimits, first, 'the conversation record keeps the last reading')
+  assert.deepEqual(rec.turns[0].subTurns[0].engineMessages['account/rateLimits/updated'], 2)
+  assert.doesNotMatch(JSON.stringify(first), /[A-Za-z]{30,}/, 'closed: numbers and one word')
+  assert.equal(closedRateLimits(null), null); assert.deepEqual(closedRateLimits({ primary: { usedPercent: 'x' }, secondary: null, reachedType: 'workspace_member_usage_limit_reached' }), { primary: null, secondary: null, reached: 'workspace_member_usage_limit_reached' })
 })
