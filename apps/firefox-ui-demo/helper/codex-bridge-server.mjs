@@ -50,6 +50,8 @@ import { openDecisionBudgetStore } from './egdesk-decision-budget-store.mjs'
 import { openCalibrationLog } from './egdesk-decision-calibration-log.mjs'
 import { openBriefingBindings } from './egdesk-briefing-bindings.mjs'
 import { createWikiAdapter, openWikiWrites } from './egdesk-wiki-adapter.mjs'
+import { createNunchiConfig } from './egdesk-nunchi-runtime.mjs'
+import { createUserGuidanceHttpHandler } from './egdesk-user-guidance.mjs'
 import { createTurnMemoryConfig, turnMemoryFlagsFromEnv } from './egdesk-turn-memory-wiring.mjs'
 import { createBrowserEntryConfig } from './egdesk-browser-entry-wiring.mjs'
 import { createDecisionHttpHandler } from './egdesk-decision-http.mjs'
@@ -501,6 +503,10 @@ const turnMemoryConfig = createTurnMemoryConfig({ settings: bridgeSettings, onto
   getAdapter: () => wikiAdapter ??= createWikiAdapter({ writes: openWikiWrites({ dataDir: path.join(dataDir, 'settings') }) }) })
 // Direct browser entry: developer flag EGDESK_BROWSER_ENTRY=advisory|on, default off (no settings screen entry). It reuses the turn-memory
 // snapshot builder and the same adapter/write store; nothing opens while it is off.
+// Nunchi (U17; EGDESK_NUNCHI=on, default off): the person's reactions are read by the decision model and guide the conversation; durable candidates go to the user guidance record
+// (<data>/settings/egdesk-user-guidance.json), which the person applies or reverts through /v1/user-guidance. Nothing opens while the flag is off.
+const nunchiConfig = createNunchiConfig({ dataDir: path.join(dataDir, 'settings') })
+const handleUserGuidanceHttp = createUserGuidanceHttpHandler({ store: { list: a => nunchiConfig.store.list(a), setStatus: (...a) => nunchiConfig.store.setStatus(...a) }, enabled: () => nunchiConfig.enabled(), port: BRIDGE_PORT, guard: guardBridgeRequest, send: sendJson })
 const browserEntryConfig = createBrowserEntryConfig({ flag: () => process.env.EGDESK_BROWSER_ENTRY, getAdapter: () => turnMemoryConfig.getAdapter(),
   wiki: args => turnMemoryConfig.wiki(args), openItemsFlag: () => process.env.EGDESK_BROWSER_OPEN_ITEMS })
 // The Desk's presence snapshot as the window posts it (same rows the placement runtime reads there). Memory only; the route is off (404)
@@ -572,6 +578,7 @@ const chat = new CodexChatRuntime({
     ...(['action', 'action+status'].includes(process.env.EGDESK_CONTEXT_RELEVANCE) ? { relevanceRules: process.env.EGDESK_CONTEXT_RELEVANCE } : {}),
     calibrationLog: decisionCalibrationLog,
     turnMemory: turnMemoryConfig,
+    nunchi: nunchiConfig,
     browserEntry: browserEntryConfig,
     // Advisory draft check after an answer is posted (records only). Developer flag, default off; it has no settings screen entry.
     // The check asks per-sentence yes/no questions (default); EGDESK_DRAFT_CHECK_DESIGN=choice selects the old 4-way choice for comparison (developer flag).
@@ -1433,6 +1440,7 @@ const bridgeServer = createServer(async (req, res) => {
   if (await handleWorkPlacementHttp(req, res, url)) return
   if (await handleHudRoutingHttp(req, res, url)) return
   if (await handleRoomAccountHttp(req, res, url)) return
+  if (await handleUserGuidanceHttp(req, res, url)) return
   if (await handlePresenceMirrorHttp(req, res, url)) return
   if (await handleRunRequesterReadHttp(req, res, url)) return
   if (await handleRunRequesterHttp(req, res, url)) return

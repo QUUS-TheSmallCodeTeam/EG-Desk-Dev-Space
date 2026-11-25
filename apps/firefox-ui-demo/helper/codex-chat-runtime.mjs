@@ -158,6 +158,7 @@ import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsP
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
 import { predicateQuestion, sha256Hex } from './egdesk-decision-questions.mjs'
 import { workspaceCandidates } from './egdesk-prefetch.mjs'
+import { NUNCHI_KEY, beginNunchi, noteNunchi, nunchiReceiptFor, settleNunchi, standingNunchi } from './egdesk-nunchi-runtime.mjs'
 import { CONTRADICTION_LIMITS, contradictionPairs, judgeContradictions, judgeRecordConflict, settledRecordText } from './egdesk-record-settled.mjs'
 import { engineContextConfig, spilledKeys, splitEngineContext } from './egdesk-engine-context.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
@@ -2642,6 +2643,8 @@ export class CodexChatRuntime {
     // Turn memory 'on' (setting turnMemory, default off): the loop starts at message arrival and runs beside the context decision and the
     // thread preparation below. It is awaited once, capped, just before the turn is claimed. null when off, advisory or not eligible.
     const memoryTurn = !bounded && this.turnMemoryMode() === 'on' ? this.beginTurnMemory(body, context) : null
+    // Nunchi (flag EGDESK_NUNCHI, default off; egdesk-nunchi.mjs): the person's reaction to the assistant's last message is read beside the memory loop
+    const nunchiJob = !bounded ? beginNunchi(this, body, context) : null
     // Decision model context setup: 'on' attaches the selected items, 'advisory' only records them.
     // The folder the engine works in (own tools: the real folder behind the neutral one), for the prefetch candidates (flag turnMemory.prefetch, default off)
     context.prefetchFolder = bounded ? null : (ownFolder ?? (overrides.cwd && overrides.cwd !== neutralFolder ? overrides.cwd : null))
@@ -2910,6 +2913,7 @@ export class CodexChatRuntime {
     if (engine.id === 'codex') this.assertProcessConfiguration(this.threads.get(cid), { model: overrides.model, effort })
     // The only wait turn memory adds: what is left of its cap after preparation. Before the synchronous claim below, never inside it.
     const memoryReady = memoryTurn ? await this.awaitTurnMemory(memoryTurn) : false
+    const nunchiText = bounded ? null : nunchiJob ? await settleNunchi(this, nunchiJob, context) : standingNunchi(this, context)
     if (memoryReady && memoryTurn.writeFirst) await this.awaitWriteFirst(memoryTurn)
     if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
       throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
@@ -3023,8 +3027,9 @@ export class CodexChatRuntime {
         : noteOnly !== null ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: withNote(noteOnly) } }
         : memoryPacket || memoryNote ? { [TURN_MEMORY_KEY]: { kind: 'application', value: withNote(memoryPacket) } } : null
       const recordingContext = recordRule ? { [RECORDING_KEY]: { kind: 'application', value: recordRule } } : null
+      const nunchiContext = nunchiText && !(additionalContext && Object.hasOwn(additionalContext, NUNCHI_KEY)) ? { [NUNCHI_KEY]: { kind: 'application', value: nunchiText } } : null
       if (recordRule && memoryTurn?.writeFirst?.inTime === true && recordRule === memoryTurn.writeFirst.text) memoryTurn.writeFirst.sent = true // the settled state went out with this turn
-      const turnAdditionalContext = browserTaskContext || memoryContext || recordingContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}), ...(recordingContext || {}) } : additionalContext
+      const turnAdditionalContext = browserTaskContext || memoryContext || recordingContext || nunchiContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}), ...(recordingContext || {}), ...(nunchiContext || {}) } : additionalContext
       // What the engine will really show of the entries (flag turnMemory.engineContext, default off): 'split' sends an over-limit entry as parts that each stay under it.
       // c32 (U13, flag EGDESK_DECISION_FIRST=on, default off): a request to run something is picked by the decision model from options code built from the folder and run by EG-Desk's own
       // runner before any engine call; a healthy result ends the turn without the engine, anything else goes to the engine with the result as context. Absent the flag: dfLocal is null.
@@ -3157,6 +3162,7 @@ export class CodexChatRuntime {
       if (decision?.late) this.noteLateDecisionContext(run, decision)
       this.startConversationFlow(run, body, context)
       this.turnMemoryLatest.delete(run.conversationId) // this turn is now the conversation's latest: the previous turn's materials end here
+      noteNunchi(this, run, context)
       if (memoryTurn) this.noteTurnMemoryOn(run, body, context, memoryTurn, memoryPacket !== null, confirmNote !== null)
       this.startBriefingPrefill(run, body) // c45: the briefing's fill turn may start now (EGDESK_BRIEFING_PREFILL=on, default off: no hook, nothing happens)
       if (memoryPosition) this.startTurnMemoryAdvisory(run, body, context, memoryPosition, performance.now() - memoryClock, { speech: decision?.speech ?? null, topic: this.topicIntakes.get(context) ?? null }) // after dispatch, in the background: never delays or changes the turn
@@ -4875,9 +4881,9 @@ export class CodexChatRuntime {
   // turnMemory.previousReply, bridge EGDESK_TURN_MEMORY_PREVIOUS_REPLY=on, off by default). Only when the egress gate allows the conversation's
   // own messages for this run: previous_reply (the answering model holds that message in its own live native thread: Codex, mid-session, not
   // compacted) or speech_history (the DM's speech consent). A bounded excerpt (egdesk-previous-reply.mjs); never more than the answering model has.
-  previousReplyFor(context, speechSource = null) {
+  previousReplyFor(context, speechSource = null, { ignoreFlag = false } = {}) {
     try {
-      if (this.decisionContext?.turnMemory?.previousReply !== true) return null
+      if (!ignoreFlag && this.decisionContext?.turnMemory?.previousReply !== true) return null
       let speechConsent = false
       try { speechConsent = speechSource?.allowed?.() === true } catch { speechConsent = false }
       // Only a LIVE thread (loaded by this process and followed since): after a bridge restart or on a thread this process has not loaded
@@ -4889,6 +4895,9 @@ export class CodexChatRuntime {
       return typeof last?.text === 'string' ? previousReplyExcerpt(last.text) : null
     } catch { return null }
   }
+
+  // The closed receipt of a turn's nunchi (a request context or a run): { status, inTime, late, withPrevious, ms, reading, directive, candidate } or null (flag off).
+  nunchiReceiptFor(key) { return nunchiReceiptFor(this, key) }
 
   keepLateFlag() {
     try { return this.decisionContext?.turnMemory?.keepLate === true } catch { return false }
