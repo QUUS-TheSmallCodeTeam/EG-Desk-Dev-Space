@@ -325,7 +325,7 @@ export function createClaudeEngineAdapter(options = {}) {
     // u1 (EG-Desk harness, flag EGDESK_CLAUDE_HARNESS): the built-in Claude Code tools EG-Desk's own tools replace are switched off with --disallowedTools (names only; the CLI binary is untouched)
     // u1: a private turn's thread has NO built-in tools (--tools ""): names only, [] disables them all
     if (Array.isArray(p.egdeskBuiltinTools)) spec.builtin = Object.freeze(p.egdeskBuiltinTools.filter(name => typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)).slice(0, 32))
-    if (Array.isArray(p.egdeskDisallowedTools)) spec.disallowed = Object.freeze(p.egdeskDisallowedTools.filter(name => typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)).slice(0, 32))
+    if (Array.isArray(p.egdeskDisallowedTools)) spec.disallowed = Object.freeze(p.egdeskDisallowedTools.filter(name => typeof name === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name)).slice(0, 32))
     return spec
   }
 

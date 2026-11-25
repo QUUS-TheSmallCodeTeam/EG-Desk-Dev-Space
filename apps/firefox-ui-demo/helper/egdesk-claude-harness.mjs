@@ -27,6 +27,13 @@ export const CLAUDE_BUILTIN_COMMAND_FILE_TOOLS = Object.freeze(['Bash', 'Edit', 
  */
 export const CLAUDE_BUILTIN_OUTWARD_TOOLS = Object.freeze(['Monitor', 'Workflow', 'EnterWorktree', 'ExitWorktree', 'SendMessage', 'SendToProject', 'PushNotification', 'RemoteTrigger', 'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup'])
 
+/**
+ * Claude Code's own computer-use MCP server (documented 2026-11 for macOS, an interactive session feature, not available with -p). It is not in the --mcp-config EG-Desk gives (the CLI is started with
+ * --strict-mcp-config and only EG-Desk's own server), so it should not be there; the rule below blocks every tool of a server by this name too (both spellings), so a computer is driven only by EG-Desk's own
+ * computer tools (egdesk_computer_*), never by the CLI's.
+ */
+export const CLAUDE_BUILTIN_COMPUTER_USE_RULES = Object.freeze(['mcp__computer-use', 'mcp__computer_use'])
+
 /** The built-in web tools: left on by default; the Browser lane's decision, one switch away. */
 export const CLAUDE_BUILTIN_WEB_TOOLS = Object.freeze(['WebFetch', 'WebSearch'])
 export const CLAUDE_HARNESS_ACTIVITY = 'egdesk-tool'
@@ -34,7 +41,7 @@ export const CLAUDE_HARNESS_ACTIVITY = 'egdesk-tool'
 /** → { disallowed: [...] } or null (off). Anything but 'on' is off. */
 export function claudeHarnessFromEnv(env = {}) {
   if (env?.[CLAUDE_HARNESS_FLAG] !== 'on') return null
-  return Object.freeze({ privateTurns: env?.EGDESK_CLAUDE_HARNESS_PRIVATE === 'on', disallowed: Object.freeze([...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...(env?.[CLAUDE_HARNESS_WEB_FLAG] === 'off' ? CLAUDE_BUILTIN_WEB_TOOLS : [])]) })
+  return Object.freeze({ privateTurns: env?.EGDESK_CLAUDE_HARNESS_PRIVATE === 'on', disallowed: Object.freeze([...CLAUDE_BUILTIN_COMMAND_FILE_TOOLS, ...CLAUDE_BUILTIN_OUTWARD_TOOLS, ...CLAUDE_BUILTIN_COMPUTER_USE_RULES, ...(env?.[CLAUDE_HARNESS_WEB_FLAG] === 'off' ? CLAUDE_BUILTIN_WEB_TOOLS : [])]) })
 }
 
 const FIRST_SENTENCE = /^Your own shell and patch tools are off in this session[^\n]*\n?/
