@@ -2232,7 +2232,7 @@ export class CodexChatRuntime {
    */
   async ownToolsThreadOverrides(request, neutralFolder, base, context) {
     const own = mergeCeilingOverrides({}, pureEngineThreadOverrides())
-    const isolation = await loadOwnToolsIsolation(request, neutralFolder)
+    const isolation = await loadOwnToolsIsolation(request, neutralFolder, { pure: this.ownTools?.pureEngine?.() ?? null })
     mergeCeilingOverrides(own, isolation.overrides)
     context.ownToolsIsolation = isolation.mcp
     // c25: on the real 0.171 the inventory read costs 1-2 s (mcpServerStatus/list); the room's first internal thread reuses this one for 5 minutes instead of paying it again
@@ -6191,7 +6191,7 @@ export class CodexChatRuntime {
     const cwd = thread?.cwd ?? this.ownNeutralFolder() ?? null
     const memo = this.isolationMemo
     const reused = memo && memo.key === (cwd ?? null) && this.now() - memo.at < 300_000 ? memo.value : null
-    const isolation = reused ? { overrides: structuredClone(reused) } : await loadOwnToolsIsolation(this.scopedRequest(slot), cwd)
+    const isolation = reused ? { overrides: structuredClone(reused) } : await loadOwnToolsIsolation(this.scopedRequest(slot), cwd, { pure: this.ownTools?.pureEngine?.() ?? null })
     mergeCeilingOverrides(base, isolation.overrides)
     if (cwd) base.cwd = cwd
     this.freshInternalCache.set(cid, { at: this.now(), value: structuredClone(base) })
@@ -7169,7 +7169,7 @@ export class CodexChatRuntime {
     const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position: turn.position, threadKey, scope,
       live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null, delivered, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {},
       deadlineMs: Math.max(0, turn.capMs - 200 - (clock.now() - t0)), packetFirst: true, clock, previous: turn.previous, previousReply: this.previousReplyFor(context, turn.sources?.speech ?? null),
-      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
+      ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: turn.controller.signal, writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step', 'hybrid-two-step-ask'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
         ...(this.decisionContext?.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
     // The first turn's recording triage answers on its own time; once it has, the rule knows whether a write judgment can still follow.
     if (result.triageLater) void result.triageLater.then(late => { turn.lateTriage = late ?? { record: { state: 'unknown' } } }, () => { turn.lateTriage = { record: { state: 'unknown' } } })
@@ -7286,7 +7286,7 @@ export class CodexChatRuntime {
         try { return await setup.client.decide(request) } finally { turn.spans.push({ stage: 'confirm', start, end: clock.now() - t0 }) }
       } }
       const deadlineAt = t0 + turn.capMs - 200
-      const judged = await memorySettleBefore(judgeConfirmation({ message: body.message, previousAnswer: previous, records: offered.map(entry => ({ title: wiki.pages.get(entry.pageId).title, status: entry.status })),
+      const judged = await memorySettleBefore(judgeConfirmation({ message: body.message, previousAnswer: previous, records: offered.map(entry => ({ title: wiki.pages.get(entry.pageId).title, status: entry.status, ...(typeof entry.said === 'string' ? { said: entry.said } : {}) })),
         client, askedAt: context.askedAt ?? this.now(), signal: turn.controller.signal, timeoutMs: Math.max(1, Math.min(CONFIRM_LIMITS.timeoutMs, Math.ceil(deadlineAt - clock.now()))) }), deadlineAt, clock).catch(() => null)
       const actions = []
       if (judged?.status === 'ready') {
@@ -7536,7 +7536,8 @@ export class CodexChatRuntime {
           // Noted for this session, so a later reply can say what was noted and the person's next message can confirm or refuse it.
           if (applied?.status === 'recorded_pending' && proposal.op === 'update_status' && this.turnMemoryConfirmOn() && typeof run.conversationId === 'string' && run.conversationId) {
             const list = (this.turnMemoryNoted.get(run.conversationId) ?? []).filter(entry => entry.pageId !== proposal.pageId)
-            list.push({ pageId: proposal.pageId, status: proposal.proposedStatus, offers: 0, offered: false, offeredAt: 0 })
+            // said: the person's own message, kept in memory beside the note so the confirmation question can quote what was reported (L7 c35)
+            list.push({ pageId: proposal.pageId, status: proposal.proposedStatus, offers: 0, offered: false, offeredAt: 0, ...(typeof body.message === 'string' && body.message.trim() ? { said: body.message.trim().slice(0, 200) } : {}) })
             this.turnMemoryNoted.delete(run.conversationId); this.turnMemoryNoted.set(run.conversationId, list.slice(-CONFIRM_LIMITS.records))
             while (this.turnMemoryNoted.size > 50) this.turnMemoryNoted.delete(this.turnMemoryNoted.keys().next().value)
           }
@@ -7584,7 +7585,7 @@ export class CodexChatRuntime {
       const threadKey = run.conversationId
       const result = await prepareTurnMemory({ message: body.message, wiki, client, askedAt: context.askedAt ?? this.now(), position, threadKey,
         scope: typeof tm.scope === 'function' ? await (async () => { const base = await tm.scope({ body, context }); return base ? egress.memoryScope(base) : base })() : null, live: typeof tm.live === 'function' ? await tm.live({ body, context }) : null,
-        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal , writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
+        delivered: this.turnMemoryShadow.get(threadKey) ?? null, budget: tm.budget && typeof tm.budget === 'object' ? tm.budget : {}, ontologyWrite: tm.ontologyWrite === true, skipOnNeed: tm.skipOnNeed !== false, heldExcerpts: tm.heldExcerpts !== false, signal: controller.signal , writeTarget: tm.writeTarget === 'choice' ? 'choice' : 'about', ...(['split-isolated', 'hybrid-isolated', 'hybrid-two-step', 'hybrid-two-step-ask'].includes(tm.speechDesign) ? { speechDesign: tm.speechDesign } : {}), ...(tm.splitWording === 'v2' ? { splitWording: 'v2' } : {}),
         ...(this.decisionContext?.relevanceRules === 'action' ? { ruleSet: 'action' } : {}) })
       const judged = result.judgeWrite ? await result.judgeWrite() : null
       if (typeof threadKey === 'string' && threadKey) {

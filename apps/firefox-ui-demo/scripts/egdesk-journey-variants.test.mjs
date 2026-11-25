@@ -7,7 +7,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { AGENT_SAYS, SAYS, loadJourneyPlan, main, runJourney } from './egdesk-all-on-live-measure.mjs'
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
-import { AGENT_KEYS, BASE_PLAN, SAYS_KEYS, VARIANTS, buildAll, buildVariantPlan, decoyIdsOf, idMapOf, planBytesOf, variantPages, variantPlanFile, variantProblems, variantSha256 } from './egdesk-journey-variants.mjs'
+import { AGENT_KEYS, BASE_PLAN, SAYS_KEYS, VARIANTS, VARIANT_STEP_CAPS, buildAll, buildVariantPlan, decoyIdsOf, idMapOf, planBytesOf, variantPages, variantPlanFile, variantProblems, variantSha256 } from './egdesk-journey-variants.mjs'
 import { GRAPH_PAGES, graphOf } from './egdesk-all-on.support.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -128,10 +128,10 @@ test('a send above the ceiling a plan declares is refused before any key is read
     const stamp = path.join(dir, 'last-send.json')
     const run = (argv, env = {}) => main(argv, { env: { EGDESK_DECISION_SEND_STAMP: stamp, ...env }, fetchImpl: async () => { fetched++; throw new Error('no network in a test') }, print: l => out.push(l), printError: l => err.push(l) })
     const key = 'k'.repeat(40)
-    assert.equal(await run(['--plan', planPath('V1'), '--send', '--token-ceiling', '80001'], { OPENAI_API_KEY: key }), EXIT.usage)
-    assert.match(err.at(-1), /--token-ceiling 80001 is above the ceiling this plan declares \(80000\); nothing was sent/)
-    assert.equal(await run(['--plan', planPath('V1'), '--send', '--max-requests', '71'], { OPENAI_API_KEY: key }), EXIT.usage)
-    assert.match(err.at(-1), /--max-requests 71 is above the ceiling this plan declares \(70\)/)
+    assert.equal(await run(['--plan', planPath('V1'), '--send', '--token-ceiling', '100001'], { OPENAI_API_KEY: key }), EXIT.usage)
+    assert.match(err.at(-1), /--token-ceiling 100001 is above the ceiling this plan declares \(100000\); nothing was sent/)
+    assert.equal(await run(['--plan', planPath('V1'), '--send', '--max-requests', '83'], { OPENAI_API_KEY: key }), EXIT.usage)
+    assert.match(err.at(-1), /--max-requests 83 is above the ceiling this plan declares \(82\)/)
     assert.equal(fetched, 0)
     // a lower flag is taken (the first request is bigger than 1,000 tokens: the guard refuses it before the network)
     out.length = 0
@@ -140,7 +140,7 @@ test('a send above the ceiling a plan declares is refused before any key is read
     // a send without flags takes the plan's own ceiling; the first request reaches the (failing) network once and the run stops there
     out.length = 0
     await run(['--plan', planPath('V1'), '--send'], { OPENAI_API_KEY: key })
-    assert.deepEqual([JSON.parse(out[0]).tokenCeiling, JSON.parse(out[0]).maxRequests], [80000, 70])
+    assert.deepEqual([JSON.parse(out[0]).tokenCeiling, JSON.parse(out[0]).maxRequests], [100000, 82])
     assert.equal(fetched, 1)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
@@ -186,9 +186,35 @@ for (const id of ['V1', 'V2', 'V3']) {
 test('the variants do not share request bodies with each other either, and the variant plan declares a ceiling its replay estimate fits (the V1 plan is the one meant to be sent)', () => {
   const sha = id => new Set(dry[id].steps.flatMap(s => (s.requests ?? []).map(q => q.sha256)))
   for (const [a, b] of [['V1', 'V2'], ['V1', 'V3'], ['V2', 'V3']]) assert.ok([...sha(a)].filter(x => sha(b).has(x)).length <= 2, `${a} and ${b} share request bodies`)
-  assert.equal(VARIANTS.V1.ceiling.tokenCeiling, 80_000)
+  assert.deepEqual(VARIANTS.V1.ceiling, { tokenCeiling: 100_000, maxRequests: 82 }, 'c28: the ceiling Main approved for the V1 send (its dry run was 74 requests, 90,465 tokens: over the earlier 80,000 / 70)')
+  // c28: every variant's SCRIPTED dry estimate fits the ceiling it declares (the scripted run over-selects pages, so it is above a real run: if it fits, a real send is not stopped by it). V1 was not sent because it did not.
+  for (const [id, v] of Object.entries(VARIANTS)) {
+    const requests = dry[id].steps.flatMap(st => st.requests ?? []), tokens = requests.reduce((n, q) => n + (q.estInputTokens ?? 0), 0)
+    assert.ok(tokens > 0 && tokens <= v.ceiling.tokenCeiling && requests.length <= v.ceiling.maxRequests, `${id}: ${requests.length} requests, ${tokens} tokens against ${JSON.stringify(v.ceiling)}`)
+  }
   for (const v of Object.values(VARIANTS)) assert.ok(v.ceiling.tokenCeiling <= 200_000 && v.ceiling.maxRequests <= 200)
   // the registered builder is deterministic: building twice gives the same bytes
   assert.equal(planBytesOf(buildVariantPlan(baseRaw, baseBytes, 'V2')), planBytesOf(buildVariantPlan(baseRaw, baseBytes, 'V2')))
   assert.equal(graphOf(variantPages(GRAPH_PAGES, VARIANTS.V1)).nodes.some(n => n.id === 'quote/b-request'), true)
+})
+
+// ---- c29: the per-step caps of a variant ----
+test('step caps: a variant keeps the base plan\'s caps except where it is allowed more (the briefing step\'s second fill turn); caps only rise; every scripted dry step fits its cap', () => {
+  const baseCaps = Object.fromEntries(baseRaw.steps.map(st => [st.id, st.caps]))
+  assert.deepEqual(VARIANT_STEP_CAPS, { 's3-briefing': { maxRequests: 14, maxEstTokens: 21_000 } })
+  for (const id of Object.keys(VARIANTS)) {
+    const plan = JSON.parse(readFileSync(path.join(here, variantPlanFile(id)), 'utf8'))
+    for (const st of plan.steps) {
+      const want = VARIANT_STEP_CAPS[st.id] ?? baseCaps[st.id]
+      assert.deepEqual(st.caps, want, `${id} ${st.id}`)
+      assert.ok(st.caps.maxRequests >= baseCaps[st.id].maxRequests && st.caps.maxEstTokens >= baseCaps[st.id].maxEstTokens, 'caps only rise')
+      const ran = (dry[id].steps.find(x => x.id === st.id)?.requests ?? []), est = ran.reduce((n, q) => n + (q.estInputTokens ?? 0), 0)
+      assert.ok(ran.length <= st.caps.maxRequests && est <= st.caps.maxEstTokens, `${id} ${st.id}: ${ran.length} requests, ${est} tokens against ${JSON.stringify(st.caps)}`)
+    }
+  }
+  // the real V1 run (c45): the first round plus the second fill turn's design request, in reported tokens, and the fill check that was refused: it fits the raised cap with room
+  const realV1 = 1977 + 1321 + 953 + 3813 + 1752 + 3813, refused = 561, secondCheck = 1800
+  assert.ok(realV1 + refused > 14_000, 'the base cap stopped it'); assert.ok(realV1 + secondCheck + 1000 <= VARIANT_STEP_CAPS['s3-briefing'].maxEstTokens)
+  // a cap lower than the base is refused by the builder
+  assert.throws(() => buildVariantPlan(baseRaw, baseBytes, 'NOPE'), /no variant/)
 })

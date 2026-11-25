@@ -376,7 +376,7 @@ export const SPEECH_SPLIT = 'split-isolated'
 // c01 time before .56, c26 before .75) and one guard (a16, fixed by the when rule above); the axes design installed all 6 controls in the
 // study and no target. Offline on the same answers: targets 6/11, controls 6/6, 0 wrong.
 export const SPEECH_HYBRID = 'hybrid-isolated'
-export const WRITE_SPEECH_DESIGNS = Object.freeze(['axes-isolated', SPEECH_SPLIT, SPEECH_HYBRID, 'hybrid-two-step'])
+export const WRITE_SPEECH_DESIGNS = Object.freeze(['axes-isolated', SPEECH_SPLIT, SPEECH_HYBRID, 'hybrid-two-step', 'hybrid-two-step-ask'])
 export const SPEECH_SPLIT_BARS = Object.freeze({ yes: MIN_CONFIDENCE, no: Math.round((1 - MIN_CONFIDENCE) * 100) / 100 })
 const split = {
   source: {
@@ -507,20 +507,28 @@ export function speechHybridQuestions(spans, message, { wording = 'v1' } = {}) {
 // (byte for byte the 'axes-isolated' one); only for the source / time axes it leaves uninstalled does a second, small request ask that axis's
 // split predicates. Same answers -> same labels (speechHybridInterpretations reads both); fewer tokens, since an installed axis is not asked.
 export const SPEECH_HYBRID_TWO_STEP = 'hybrid-two-step'
+// 'hybrid-two-step-ask' (L7 c35, from the real write run check-20mw): the same two requests, but a source the axes request answered "unspecified" ("the speaker clearly gives no basis") is
+// not taken as installed: the split predicates of the source axis are asked as for an uninstalled one, and when they decide a specific source (own, other, record, guess) that label
+// stands; when they do not, the axes' "unspecified" stands. Real case: "아 그거 다음 주 화요일로 확정했어" got source unspecified (a decision cites no basis) and so the reading carried basis
+// unspecified, although the person's own act is what the split's own question names ("personally ... did"). Every other design and every installed source other than unspecified: unchanged.
+export const SPEECH_HYBRID_TWO_STEP_ASK = 'hybrid-two-step-ask'
+export const isHybridTwoStep = design => design === SPEECH_HYBRID_TWO_STEP || design === SPEECH_HYBRID_TWO_STEP_ASK
 /** The second request's questions: the split predicates of each (span, axis) the axes answers did not install. [] when nothing is left. */
-export function speechHybridSecondQuestions(answers, spans, message, { wording = 'v1' } = {}) {
+export function speechHybridSecondQuestions(answers, spans, message, { wording = 'v1', askUnspecified = false } = {}) {
   const list = ranges(spans), split = speechSplitQuestions(spans, message, { wording }).filter(q => q.type === 'predicate')
-  return list.flatMap((_, i) => ['source', 'time'].filter(axis => !pick(answers, `speech_${axis}_${i}`, axes[axis].options))
+  const installed = (axis, i) => { const value = pick(answers, `speech_${axis}_${i}`, axes[axis].options); return axis === 'source' && askUnspecified && value === 'unspecified' ? null : value }
+  return list.flatMap((_, i) => ['source', 'time'].filter(axis => !installed(axis, i))
     .flatMap(axis => SPEECH_SPLIT_KEYS[axis].map(key => split.find(q => q.name === splitName(key, i))).filter(Boolean)))
 }
 
 /** Per axis: the axes pick when it installs (unchanged bar), else (source, time) the split combination. */
-export function speechHybridInterpretations(answers, spans) {
+export function speechHybridInterpretations(answers, spans, { askUnspecified = false } = {}) {
   const out = []
   for (const [i, { start, end }] of ranges(spans).entries()) {
     const verdicts = Object.fromEntries([...SPEECH_SPLIT_KEYS.source, ...SPEECH_SPLIT_KEYS.time].map(key => [key, splitVerdict(answers, splitName(key, i))]))
     const fromSplit = splitLabels(verdicts)
-    const source = pick(answers, `speech_source_${i}`, axes.source.options) ?? fromSplit.source
+    const picked = pick(answers, `speech_source_${i}`, axes.source.options)
+    const source = askUnspecified && picked === 'unspecified' ? (fromSplit.source !== 'unknown' && fromSplit.source !== 'unspecified' ? fromSplit.source : 'unspecified') : picked ?? fromSplit.source
     const time = pick(answers, `speech_time_${i}`, axes.time.options) ?? fromSplit.time
     const form = pick(answers, `speech_form_${i}`, axes.form.options) ?? 'unknown'
     if (source !== 'unknown' || form !== 'unknown' || time !== 'unknown') out.push({ start, end, source, form, time })
@@ -540,7 +548,7 @@ export function speechDesignQuestions(design, spans, message) {
   if (design === 'compare-isolated') return [...speechIsolatedQuestions(spans, message), ...speechIsolatedPredicateQuestions(spans, message)] // measurement only
   if (design === SPEECH_SPLIT) return speechSplitQuestions(spans, message) // write judgment only (WRITE_SPEECH_DESIGNS); not a turn-level design
   if (design === SPEECH_HYBRID) return speechHybridQuestions(spans, message) // write judgment only
-  if (design === SPEECH_HYBRID_TWO_STEP) return speechIsolatedQuestions(spans, message) // its first request; the second: speechHybridSecondQuestions
+  if (isHybridTwoStep(design)) return speechIsolatedQuestions(spans, message) // its first request; the second: speechHybridSecondQuestions
   return speechQuestions(spans)
 }
-export const speechDesignInterpretations = (design, answers, spans) => (design === SPEECH_AT_PAGE ? [] : design === SPEECH_SPLIT ? speechSplitInterpretations(answers, spans) : design === SPEECH_HYBRID || design === SPEECH_HYBRID_TWO_STEP ? speechHybridInterpretations(answers, spans) : speechDesignFamily(design) === 'predicates' ? speechPredicateInterpretations(answers, spans) : speechInterpretations(answers, spans))
+export const speechDesignInterpretations = (design, answers, spans) => (design === SPEECH_AT_PAGE ? [] : design === SPEECH_SPLIT ? speechSplitInterpretations(answers, spans) : design === SPEECH_HYBRID || design === SPEECH_HYBRID_TWO_STEP ? speechHybridInterpretations(answers, spans) : design === SPEECH_HYBRID_TWO_STEP_ASK ? speechHybridInterpretations(answers, spans, { askUnspecified: true }) : speechDesignFamily(design) === 'predicates' ? speechPredicateInterpretations(answers, spans) : speechInterpretations(answers, spans))

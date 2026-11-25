@@ -32,6 +32,14 @@ export const AGENT_KEYS = Object.freeze(['quote', 'tidy', 'recall', 'tests', 'no
 const deepFreeze = value => { if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.freeze(value); for (const v of Object.values(value)) deepFreeze(v) } return value }
 const sha256 = text => createHash('sha256').update(text).digest('hex')
 
+// ---- per-step caps of a variant (c29) ----
+// A variant plan keeps the base plan's per-step caps, except where a variant is allowed more. The briefing step's cap was set for ONE fill turn (v9 real: 5 requests, 8,460 tokens, cap 14,000).
+// The product allows a second fill turn when the first leaves a fact off the board, and that turn repeats the design request and the fill check: the real V1 run (c45) used 13,629 tokens
+// in six requests (a second fill turn after a framing sentence of the answer was not on the board) and stopped at the cap before its seventh request, which made s3.board and
+// s3.board-a-pages fail as a consequence. The cap now holds the base's single round plus one more round (3.8k + 1.8k tokens measured, with 25% margin): 21,000 tokens / 14 requests. The total
+// ceiling of the variant still bounds the run. Caps are only ever raised, never lowered.
+export const VARIANT_STEP_CAPS = Object.freeze({ 's3-briefing': Object.freeze({ maxRequests: 14, maxEstTokens: 21_000 }) })
+
 // ---- the variants ----
 // says: the person's words per turn ('kind' says how it differs from the base wording: spoken, terse or formal). agent: the scripted answering
 // model's texts: the same facts, tenses and claims as the base text (the draft check must find them supported), in other words. pages.rename:
@@ -40,7 +48,7 @@ const sha256 = text => createHash('sha256').update(text).digest('hex')
 // order: null (the base order) or the step order of the variant.
 export const VARIANTS = deepFreeze({
   V1: {
-    id: 'V1', ceiling: { tokenCeiling: 80_000, maxRequests: 70 }, intent: 'spoken rephrasing; another company\'s quote page as a decoy; four pages renamed',
+    id: 'V1', ceiling: { tokenCeiling: 100_000, maxRequests: 82 }, intent: 'spoken rephrasing; another company\'s quote page as a decoy; four pages renamed',
     says: {
       quote: { text: 'A사 견적 지금 어떻게 돼 있어?', kind: 'spoken' }, tidy: { text: '그 내용 한번 정리해 줘', kind: 'spoken' }, tests: { text: '테스트 전부 돌려서 결과 말해 줘', kind: 'spoken' },
       recall: { text: 'PostgreSQL 전환 설계 어떻게 잡았었지?', kind: 'spoken' }, deployed: { text: 'PostgreSQL 마이그레이션 배포 방금 끝났어', kind: 'spoken' },
@@ -58,7 +66,7 @@ export const VARIANTS = deepFreeze({
       decoys: ['quote/b-request'] },
     order: null },
   V2: {
-    id: 'V2', ceiling: { tokenCeiling: 85_000, maxRequests: 75 }, intent: 'terse rephrasing; the parts list of the same product as a decoy; four pages renamed',
+    id: 'V2', ceiling: { tokenCeiling: 90_000, maxRequests: 73 }, intent: 'terse rephrasing; the parts list of the same product as a decoy; four pages renamed',
     says: {
       quote: { text: 'A사 견적?', kind: 'terse' }, tidy: { text: '정리', kind: 'terse' }, tests: { text: '테스트 돌려', kind: 'terse' }, recall: { text: 'PostgreSQL 설계 뭐였지', kind: 'terse' },
       deployed: { text: 'PostgreSQL 배포 끝났어', kind: 'terse' }, portal: { text: '이번 달 세금계산서 받아줘', kind: 'terse' }, second: { text: '두번째', kind: 'terse' }, nudge: { text: '멈춘 거야?', kind: 'terse' },
@@ -75,7 +83,7 @@ export const VARIANTS = deepFreeze({
       decoys: ['quote/parts'] },
     order: null },
   V3: {
-    id: 'V3', ceiling: { tokenCeiling: 85_000, maxRequests: 75 }, intent: 'formal, longer rephrasing; a Redis note as a decoy; four pages renamed; the browser pair runs last, after the withheld-answer pair',
+    id: 'V3', ceiling: { tokenCeiling: 116_000, maxRequests: 88 }, intent: 'formal, longer rephrasing; a Redis note as a decoy; four pages renamed; the browser pair runs last, after the withheld-answer pair',
     says: {
       quote: { text: '지난주에 요청받은 A사 견적 건이 지금 어느 단계인지 알려 주세요', kind: 'formal' }, tidy: { text: '방금 말씀하신 내용을 항목별로 정리해 주세요', kind: 'formal' },
       tests: { text: '전체 테스트를 실행하고 결과를 알려 주세요', kind: 'formal' }, recall: { text: '예전에 잡아 둔 PostgreSQL 전환 설계를 다시 알려 주세요', kind: 'formal' },
@@ -189,12 +197,16 @@ export function buildVariantPlan(baseRaw, baseBytes, id) {
     if (e.id === 's9.target-offered') a.needles = a.needles.map(n => titles[n] ?? n)
     if (e.args !== undefined) e.args = a
   }
+  for (const step of plan.steps) {
+    const raised = VARIANT_STEP_CAPS[step.id]
+    if (raised) { if (raised.maxRequests < step.caps.maxRequests || raised.maxEstTokens < step.caps.maxEstTokens) throw new Error(`${step.id}: a variant cap only raises the base cap`); step.caps = { ...step.caps, ...raised } }
+  }
   // the plan lists its steps in the variant's order (the loader checks the plan against it)
   if (variant.order) plan.steps = variant.order.map(stepId => plan.steps.find(step => step.id === stepId))
   const sha = sha256(baseBytes)
   plan.set = `${baseRaw.set}-variant-${id.toLowerCase()}`
   plan.registered = `2026-11-25 (lane L6 cycle 24), before any send of the variant; variant ${id} of plan v${baseRaw.version} (${path.basename(BASE_PLAN)}, sha256 ${sha.slice(0, 16)}): ${variant.intent}. Same steps, same hard checks under the same ids; the person's words, the scripted answering model's words, the page set and the order are the variant's (scripts/egdesk-journey-variants.mjs, sha256 ${variantSha256(id).slice(0, 16)})`
-  plan.basedOn = { file: path.basename(BASE_PLAN), sha256: sha, note: 'every step and expectation of the base plan; page ids and the two needles mapped; decoy pages added to the prefix exclusions' }
+  plan.basedOn = { file: path.basename(BASE_PLAN), sha256: sha, note: 'every step and expectation of the base plan; page ids and the two needles mapped; decoy pages added to the prefix exclusions; the briefing step\'s cap raised for its second fill turn (VARIANT_STEP_CAPS)' }
   plan.variant = id
   plan.variantSha256 = variantSha256(id)
   plan.ceiling = { ...variant.ceiling, note: 'declared before the send: the run stops before a request that would go over it, and a higher one is refused for a send. The scripted dry run over-selects memory pages (about twice the fetch requests of a real run), so its estimate is above the real count; the replay estimate (the answers of the last real journey drive the requests, the estimate is converted with that journey\'s per-family reported/estimated ratios) is what the ceiling is set against' }

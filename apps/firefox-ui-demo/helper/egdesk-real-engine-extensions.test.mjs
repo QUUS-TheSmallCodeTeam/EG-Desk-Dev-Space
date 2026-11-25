@@ -17,13 +17,15 @@ const script0 = expect => ({ set: 'real-engine-ext-v1', conversations: [{ id: 'c
 // `before` pairs are the only ordering rules that matter (c25: the records and expectations of memory come before journey's, byte-identical to before the move).
 const LANES = {
   L1: { expectKeys: ['collab'], turnFields: ['from'], turnHooks: ['collab'] },
+  L3: { expectKeys: ['flow'], turnHooks: ['flow'] },
   L2: { expectKeys: ['engine'], turnHooks: ['journey'] },
   L4: { expectKeys: ['briefing'] },
   L5: { expectKeys: ['deleted', 'coding'], conversationFields: ['seededWrites'], turnHooks: ['coding'] },
   L8: { expectKeys: ['browserAnswer'], turnFields: ['browserTask'], turnHooks: ['browserAnswer'] },
   L7: { expectKeys: ['memory'], conversationFields: ['memory'], turnHooks: ['memory'] },
+  L6: { turnFields: ['plant'], turnHooks: ['planted'] }, // c28: the planted-draft mode of L2's rewrite tool
 }
-const BEFORE = { turnHooks: [['memory', 'journey']] }
+const BEFORE = { turnHooks: [['memory', 'journey'], ['rewrite', 'planted']] }
 const registered = { expectKeys: registeredExpectKeys, conversationFields: registeredConversationFields, turnFields: registeredTurnFields, turnHooks: registeredTurnHookNames }
 
 test('registrations: every lane\'s keys are registered, once, with a schema in the generated script schema; the core lists none of them', () => {
@@ -91,7 +93,7 @@ test('registering a turn field: its schema joins the script schema, its validato
 })
 
 test('registering flags: reproduced and decision-dependent flag names are listed for the check; duplicates and malformed names are refused', () => {
-  assert.ok(registeredFlags().includes('EGDESK_PRESENCE') && registeredFlags().includes('EGDESK_WORK_PLACEMENT')); assert.deepEqual(registeredDecisionFlags(), ['EGDESK_WORK_PLACEMENT'])
+  assert.ok(registeredFlags().includes('EGDESK_PRESENCE') && registeredFlags().includes('EGDESK_WORK_PLACEMENT')); assert.deepEqual(registeredDecisionFlags(), ['EGDESK_WORK_PLACEMENT', 'EGDESK_BROWSER_LOOP']) // L8 c34 added the second
   registerFlags({ reproduced: ['EGDESK_PROBE_FLAG'], decisionDependent: ['EGDESK_PROBE_DECISION'] })
   assert.ok(registeredFlags().includes('EGDESK_PROBE_FLAG')); assert.ok(registeredDecisionFlags().includes('EGDESK_PROBE_DECISION'))
   assert.throws(() => registerFlags({ reproduced: ['EGDESK_PROBE_FLAG'] }), /already registered/); assert.throws(() => registerFlags({ reproduced: ['probe'] }), /bad flag name/); assert.throws(() => registerFlags({ reproduced: 'EGDESK_X' }), /must be a list/)

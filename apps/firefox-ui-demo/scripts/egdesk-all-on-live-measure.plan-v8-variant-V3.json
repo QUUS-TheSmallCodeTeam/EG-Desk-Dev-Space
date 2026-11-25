@@ -1,11 +1,11 @@
 {
  "set": "all-on-live-journey-variant-v3",
  "version": 8,
- "registered": "2026-11-25 (lane L6 cycle 24), before any send of the variant; variant V3 of plan v8 (egdesk-all-on-live-measure.plan-v8.json, sha256 33740f2ec5cc230f): formal, longer rephrasing; a Redis note as a decoy; four pages renamed; the browser pair runs last, after the withheld-answer pair. Same steps, same hard checks under the same ids; the person's words, the scripted answering model's words, the page set and the order are the variant's (scripts/egdesk-journey-variants.mjs, sha256 441abc957cfcf625)",
+ "registered": "2026-11-25 (lane L6 cycle 24), before any send of the variant; variant V3 of plan v8 (egdesk-all-on-live-measure.plan-v8.json, sha256 33740f2ec5cc230f): formal, longer rephrasing; a Redis note as a decoy; four pages renamed; the browser pair runs last, after the withheld-answer pair. Same steps, same hard checks under the same ids; the person's words, the scripted answering model's words, the page set and the order are the variant's (scripts/egdesk-journey-variants.mjs, sha256 9797cc5decf5d791)",
  "basedOn": {
   "file": "egdesk-all-on-live-measure.plan-v8.json",
   "sha256": "33740f2ec5cc230f94be6c5c62b1b4113bbe4ddab469327e64f72502588a34ee",
-  "note": "every step and expectation of the base plan; page ids and the two needles mapped; decoy pages added to the prefix exclusions"
+  "note": "every step and expectation of the base plan; page ids and the two needles mapped; decoy pages added to the prefix exclusions; the briefing step's cap raised for its second fill turn (VARIANT_STEP_CAPS)"
  },
  "world": {
   "env": {
@@ -234,8 +234,8 @@
   {
    "id": "s3-briefing",
    "caps": {
-    "maxRequests": 12,
-    "maxEstTokens": 14000
+    "maxRequests": 14,
+    "maxEstTokens": 21000
    },
    "expect": [
     {
@@ -1416,10 +1416,10 @@
   }
  ],
  "variant": "V3",
- "variantSha256": "441abc957cfcf625b3fed980f135970a7b6f1f34c8cc18a45522cc7f97470c95",
+ "variantSha256": "9797cc5decf5d791c3c80192e8535e6950d0b0a5149774de8bfea3d9ff73bf9a",
  "ceiling": {
-  "tokenCeiling": 85000,
-  "maxRequests": 75,
+  "tokenCeiling": 116000,
+  "maxRequests": 88,
   "note": "declared before the send: the run stops before a request that would go over it, and a higher one is refused for a send. The scripted dry run over-selects memory pages (about twice the fetch requests of a real run), so its estimate is above the real count; the replay estimate (the answers of the last real journey drive the requests, the estimate is converted with that journey's per-family reported/estimated ratios) is what the ceiling is set against"
  }
 }
