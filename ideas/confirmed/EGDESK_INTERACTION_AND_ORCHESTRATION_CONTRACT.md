@@ -74,7 +74,7 @@ UI view, live resource, Agent Run, snapshot, 저장 record는 서로 같은 객�
 | 제품 shell | `SELECTED-BASELINE` | Firefox 기반 EG-Desk 전환을 기준으로 한다. Firefox 내부 결합 방식과 UI 모듈 구조는 `IMPLEMENTATION-DISCRETION`이다. |
 | UI 구성 | `IMPLEMENTATION-DISCRETION` | HTML/CSS/JS, Web Components, 상태 관리 라이브러리 등은 여러 Agent가 독립 수정·검증하기 쉬운 경계를 근거로 선택한다. 거대 단일 파일이나 특정 프레임워크는 계약 제약이 아니다. |
 | Agent engine boundary | `FIXED-PRINCIPLE` | 제품은 engine adapter 경계를 가지며 Run은 사용한 engine/profile/version을 고정한다. Codex용 현재 기준선은 rich-client 인증·대화·승인·stream event를 제공하는 [Codex App Server](https://developers.openai.com/codex/app-server)다. |
-| Agent 사용 모드 분리 | `FIXED-PRINCIPLE` | 2026-11-25 owner 확인. EG-Desk 위에서 Codex·Claude를 그 앱 그대로 쓰는 사용 방식과 EG-Desk 자체 하네스(Agent + Ontology)를 엔진에 얹어 쓰는 사용 방식을 분리하고 두 방식의 기억을 섞지 않는다. 상세는 [사용 모드 분리](#tech-usage-modes)다. |
+| Agent 사용 모드 분리 | `FIXED-PRINCIPLE` | 2026-11-25 owner 확인(같은 날 정정). Codex·Claude가 EG-Desk '위'(Desk·Board·카드 같은 작업 표면 위)에서 도는 사용 방식과, 엔진이 EG-Desk '안'(EG-Desk 자체 하네스 = Agent + Ontology)에서 도는 사용 방식을 분리하고 두 방식의 기억을 섞지 않는다. 상세는 [사용 모드 분리](#tech-usage-modes)다. |
 | Codex 인증 | `SELECTED-BASELINE` | 구독 quota를 쓰는 Engine Profile은 ChatGPT managed browser login을 기본으로 한다. API key는 별도 profile이다. App Server의 active account·`planType`·rate-limit 상태를 검증하고 Run에 profile ID를 고정한다. |
 | Engine Profile 격리 | `SELECTED-BASELINE` | 서로 다른 AI 계정은 App Server process/config/credential store를 profile별로 격리한다. EG-Desk 로그인, AI 구독 계정, 웹 리소스 계정은 같은 identity로 합치지 않는다. |
 | 로컬 구조화 데이터 | `SELECTED-BASELINE` | SQLite가 conversation event, 관계, 상태 전이, manifest, 인덱스와 작은 텍스트를 관리한다. ORM·query builder·migration 도구는 `IMPLEMENTATION-DISCRETION`이다. |
@@ -1345,13 +1345,14 @@ label·기본 scope(app/Desk/Chat/request)·전환 확인은
 연결한다.
 
 <a id="tech-usage-modes"></a>
-**사용 모드 분리 (2026-11-25 owner 확인).** 사용자 경험을 위해 다음 두 사용 방식을 서로 분리한다. 표시명·선택 UI·전환 문구는 확정하지 않았다.
+**사용 모드 분리 (2026-11-25 owner 확인, 같은 날 정정).** 사용자 경험을 위해 다음 두 사용 방식을 서로 분리한다. 기준은 엔진이 EG-Desk의 '위'에서 도는지 '안'에서 도는지다. 표시명·선택 UI·전환 문구는 확정하지 않았다.
 
-- **(가) 외부 앱 모드 (가칭, 승인 대기):** EG-Desk 위에서 Codex·Claude를 그 앱 그대로 쓴다. 해당 앱의 하네스와 기억이 그대로 쓰인다.
-- **(나) Agent 모드 (가칭, 승인 대기):** EG-Desk 자체 하네스(현재 구성은 Agent + Ontology)를 엔진에 얹어 쓴다. 이 모드에서 엔진은 순수 모델로만 쓰이며, 기억은 Agent와 Ontology가 소유한다.
-- 두 모드의 기억은 섞지 않는다. 한 모드가 가진 앱 자체 기억을 다른 모드의 EG-Desk 기준 기록으로 읽어 들이거나 승격하지 않는다.
+- **(가) EG-Desk '위' (가칭, 승인 대기):** Codex·Claude가 EG-Desk의 Desk·Board·카드(브라우저·터미널·파일) 같은 작업 표면 위에서 돈다. 그 엔진 자신의 하네스와 기억을 쓰고, EG-Desk의 Agent·Ontology는 붙지 않는다. 앱을 EG-Desk 밖에서 따로 쓰는 것과는 다르다.
+- **(나) EG-Desk '안' (가칭, 승인 대기):** 엔진이 EG-Desk 자체 하네스(현재 구성은 Agent + Ontology) 안에서 돈다. 이 모드에서 엔진은 순수 모델로만 쓰이며, 기억은 Agent와 Ontology가 소유한다.
+- 두 모드의 기억은 섞지 않는다. '위'에서 쓰인 엔진 자체 기억을 '안'의 Agent·Ontology 기준 기록으로 읽어 들이거나 승격하지 않는다.
 - (나) 모드의 완성도는 Agent와 Ontology 기능의 완성도에 달려 있으며, 이 계약의 위 'Agent engine boundary'·Engine Profile 격리 및 아래 Memory 소유 규칙과 함께 읽는다.
-- 위 Claude의 `~/.claude` 상속 등 기존에 결정한 엔진 앱 설정 처리는 (가)에 해당하는 사용에 대한 결정으로 읽는다. 이를 (나)에 적용할지는 이 기록에서 정하지 않는다.
+- 위 Claude의 `~/.claude` 상속 등 기존에 결정한 엔진 앱 설정 처리는 (가) '위' 사용에 대한 결정으로 읽는다(해석, owner 확인 전). 이를 (나) '안'에 적용할지는 이 기록에서 정하지 않는다.
+- 정정 기록(2026-11-25): 같은 날 처음 기록은 (가)를 "Codex·Claude를 그 앱 그대로 쓴다"로 적었으나, owner가 "그 앱 그대로 쓰는건 아님. eg-desk '위'에 돌아가는거랑 '안'에 돌아가는거임"이라고 정정했다.
 
 <a id="tech-storage-export"></a>
 
