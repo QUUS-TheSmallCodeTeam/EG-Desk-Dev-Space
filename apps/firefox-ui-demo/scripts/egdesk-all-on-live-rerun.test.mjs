@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { EXIT } from '../helper/egdesk-decision-real-runner.mjs'
 import { scriptedDecisions } from './egdesk-all-on.support.mjs'
-import { CHECK_FUNCTIONS, DEFAULT_CAPS, LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, PLAN_FILE_V6, PLAN_FILE_V7, PLAN_FILE_V8, PLAN_FILE_V9, PLAN_FILE_V10, STEPS, diffJourneys, faithfulRevision, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
+import { CHECK_FUNCTIONS, DEFAULT_CAPS, LATEST_PLAN_FILE, PLAN_FILE, PLAN_FILE_V2, PLAN_FILE_V3, PLAN_FILE_V4, PLAN_FILE_V5, PLAN_FILE_V6, PLAN_FILE_V7, PLAN_FILE_V8, PLAN_FILE_V9, PLAN_FILE_V10, PLAN_FILE_V11, STEPS, diffJourneys, faithfulRevision, formatDiff, loadJourneyPlan, main, packetPages, runJourney } from './egdesk-all-on-live-measure.mjs'
 
 const KEY = 'sk-synthetic-not-a-key-l2c12-000000000002'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -550,7 +550,7 @@ const REGISTERED_PLAN_V10_SHA256 = '81eb4d89b2ec00f1cf0941a177a170b0387abb17b61c
 const V10_NEW = [['s1.layers-fast', 'soft', 'L7'], ['s2.layers-fast', 'soft', 'L7'], ['s3b.layers-fast', 'soft', 'L7'], ['s4.no-page-for-the-action.status', 'hard', 'L7'], ...['s4', 's9', 's13', 's14'].map(t => [`${t}.layers-fast`, 'soft', 'L7'])]
 test('plan v10: pinned, based on v9 by hash, every v9 expectation verbatim, the status-relevance switch, the twin of the action expectation and seven soft layer-time bounds', () => {
   const bytes = readFileSync(PLAN_FILE_V10), raw = JSON.parse(bytes.toString('utf8')), v9 = JSON.parse(readFileSync(PLAN_FILE_V9, 'utf8'))
-  assert.equal(sha256(bytes), REGISTERED_PLAN_V10_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V10); assert.equal(raw.version, 10); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V9)))
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V10_SHA256); assert.equal(raw.version, 10); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V9)))
   assert.deepEqual(Object.keys(raw.world.switches), [...Object.keys(v9.world.switches), 'status-relevance']); assert.deepEqual(raw.world.switches['status-relevance'].env, { EGDESK_CONTEXT_RELEVANCE: 'action+status' })
   assert.deepEqual({ ...raw.world, switches: undefined }, { ...v9.world, switches: undefined }); assert.deepEqual(raw.steps.map(s => s.id), v9.steps.map(s => s.id))
   for (const step of v9.steps) { const now = raw.steps.find(s => s.id === step.id); assert.deepEqual(now.caps, step.caps); assert.deepEqual(now.expect.slice(0, step.expect.length), step.expect, `${step.id}: every v9 expectation verbatim`) }
@@ -576,4 +576,26 @@ test('v10 dry run with the new switch: only the scripted-judge failures (the twi
   assert.deepEqual(V10_NEW.filter(([id]) => id.endsWith('layers-fast')).map(([id]) => [by(id).pass, by(id).observed.totalMs < 2500]), Array(7).fill([true, true]), 'a dry run times only the scripted transport: a few ms'); assert.equal(by('s4.no-page-for-the-action').pass, null, 'the action twin is judged only under its own switch')
   const off = await runJourney({ plan: loadJourneyPlan(PLAN_FILE_V10), fetchImpl: noNet, switches: ['action-relevance'], caps: { ...DEFAULT_CAPS, tokenCeiling: 100000 } })
   assert.equal(off.steps.flatMap(s => s.checks).find(c => c.id === 's4.no-page-for-the-action.status').pass, null)
+})
+
+// ---- plan v11 (cycle 34) ----
+const REGISTERED_PLAN_V11_SHA256 = 'bd64be5ce61ed85ff16f7f69a2d0b1134b9ae863036578056f123c21828edcf5'
+test('plan v11: pinned, based on v10 by hash, every v10 expectation verbatim (s1.layers-fast included), one new switch note-wording that composes with status-relevance', () => {
+  const bytes = readFileSync(PLAN_FILE_V11), raw = JSON.parse(bytes.toString('utf8')), v10 = JSON.parse(readFileSync(PLAN_FILE_V10, 'utf8'))
+  assert.equal(sha256(bytes), REGISTERED_PLAN_V11_SHA256); assert.equal(LATEST_PLAN_FILE, PLAN_FILE_V11); assert.equal(raw.version, 11); assert.equal(raw.basedOn.sha256, sha256(readFileSync(PLAN_FILE_V10)))
+  assert.deepEqual(Object.keys(raw.world.switches), [...Object.keys(v10.world.switches), 'note-wording']); assert.deepEqual(raw.world.switches['note-wording'].env, { EGDESK_FLOW_NOTE_WORDING: 'waiting' })
+  assert.deepEqual({ ...raw.world, switches: undefined }, { ...v10.world, switches: undefined }); assert.deepEqual(raw.steps, v10.steps, 'steps, caps and every expectation verbatim: nothing loosened, nothing added')
+  // the two env values do not collide (one variable each), so the switches compose
+  assert.deepEqual(Object.keys(raw.world.switches['note-wording'].env).filter(k => k in raw.world.switches['status-relevance'].env), [])
+})
+
+test('the note-wording switch reaches the heartbeat\'s request and nothing else; it composes with status-relevance (a dry run, scripted judge)', async () => {
+  const noNet = async () => { throw new Error('no network') }, plan = loadJourneyPlan(PLAN_FILE_V11), caps = { ...DEFAULT_CAPS, tokenCeiling: 100000 }
+  const base = await runJourney({ plan, fetchImpl: noNet, switches: ['status-relevance'], caps }), both = await runJourney({ plan, fetchImpl: noNet, switches: ['status-relevance', 'note-wording'], caps })
+  const rows = r => r.steps.flatMap(st => st.requests.map(q => ({ step: st.id, family: q.family, sha: q.sha256, bytes: q.bytes })))
+  const a = rows(base), b = rows(both)
+  assert.equal(a.length, b.length); const changed = a.map((x, i) => [x, b[i]]).filter(([x, y]) => x.sha !== y.sha)
+  assert.ok(changed.length > 0 && changed.every(([x]) => x.family === 'heartbeat'), JSON.stringify(changed.map(([x]) => [x.step, x.family])))
+  assert.ok(changed.every(([x, y]) => y.bytes !== x.bytes), 'the concrete wording is a different question')
+  assert.deepEqual(both.steps.flatMap(st => st.checks).filter(c => c.severity === 'hard' && c.pass === false).map(c => c.id), ['s4.no-page-for-the-action.status', 's13.not-resent'], 'the scripted dry run: only its known failures, under both switches')
 })

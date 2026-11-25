@@ -55,7 +55,9 @@ export const PLAN_FILE_V8 = fileURLToPath(new URL('./egdesk-all-on-live-measure.
 export const PLAN_FILE_V9 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v9.json', import.meta.url))
 // Plan v10 (cycle 32): v9 plus the switch status-relevance (L7's action+status rule set), its twin of the action expectation, and soft layer-time bounds. The latest plan.
 export const PLAN_FILE_V10 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v10.json', import.meta.url))
-export const LATEST_PLAN_FILE = PLAN_FILE_V10
+// Plan v11 (cycle 34): v10 plus the switch note-wording (L3's EGDESK_FLOW_NOTE_WORDING=waiting), composable with status-relevance. The latest plan.
+export const PLAN_FILE_V11 = fileURLToPath(new URL('./egdesk-all-on-live-measure.plan-v11.json', import.meta.url))
+export const LATEST_PLAN_FILE = PLAN_FILE_V11
 export const SCRIPT_FILE = fileURLToPath(import.meta.url)
 export const DEFAULT_CAPS = Object.freeze({ tokenCeiling: 80_000, maxRequests: 80 })
 const LIMITS = Object.freeze({ tokenCeilingMax: 200_000, maxRequestsMax: 200 })
