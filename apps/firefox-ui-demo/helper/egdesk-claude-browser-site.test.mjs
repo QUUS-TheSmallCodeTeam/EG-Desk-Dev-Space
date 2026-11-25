@@ -68,3 +68,36 @@ test('D25, the screen: the Card that asks the site question is brought forward a
   const before = surface.slice(Math.max(0, at - 420), at)
   assert.match(before, /card\.style\.zIndex = String\(\+\+cardZ\); revealOpenCanvasCard\(card, \{ kind: 'browser' \}\)/)
 })
+
+test('u10: a site question that does not end allowed says WHY in closed words and numbers: unanswered, or allowed by the person but not held by the run\'s policy (unreflected)', async t => {
+  const a = google(t, 'pending', { realTransport: true })
+  const sentA = await start(a); await callTool(a, 'egdesk_card_read', { mode: 'structure' })
+  const unanswered = await callTool(a, 'egdesk_card_press', { ref: 'about' })
+  assert.deepEqual([unanswered.status, unanswered.site, unanswered.pendingBy, Number.isSafeInteger(unanswered.waitedMs)], ['not_done', 'site-pending', 'unanswered', true], JSON.stringify(unanswered))
+  a.transports.at(-1).finish(); await a.settled(sentA)
+  const b = google(t, 'allowed', { realTransport: true, siteUnreflected: true })
+  const sentB = await start(b); await callTool(b, 'egdesk_card_read', { mode: 'structure' })
+  const out = await callTool(b, 'egdesk_card_press', { ref: 'about' })
+  assert.deepEqual([out.status, out.code, out.site, out.pendingBy], ['not_done', 'BROWSER_NAVIGATE_OUT_OF_SCOPE', 'site-pending', 'unreflected'], JSON.stringify(out))
+  assert.deepEqual(b.receiveErrors, []); assert.deepEqual(navigations(b), [])
+  b.transports.at(-1).finish(); await b.settled(sentB)
+})
+
+test('u10, through the REAL transport (SSE frames, wire ids, deadlines) with a client that answers like the overlay: the person\'s allow, instant or a moment later, ends allowed and the link is followed once; the next request for the same site is answered at once', async t => {
+  for (const delayMs of [0, 300]) {
+    const w = google(t, async () => { if (delayMs) await new Promise(resolve => setTimeout(resolve, delayMs)); return 'allowed' }, { realTransport: true })
+    const sent = await start(w); await callTool(w, 'egdesk_card_read', { mode: 'structure' })
+    const first = await callTool(w, 'egdesk_card_press', { ref: 'about' })
+    assert.deepEqual([first.status, first.via], ['pressed', 'site'], `${delayMs}: ${JSON.stringify(first)}`)
+    const again = await callTool(w, 'egdesk_browser_request_site', { cardId: 'card', site: 'about.google' })
+    assert.equal(again.status, 'site-allowed'); assert.deepEqual(w.siteQuestions, ['about.google'], 'asked once; the second answer is immediate')
+    assert.deepEqual(w.receiveErrors, []); assert.equal(navigations(w).length, 1)
+    w.transports.at(-1).finish(); await w.settled(sent)
+  }
+})
+
+test('u10, the screen: the site answer carries numbers only (time given, time taken) for the helper to report; nothing else changed in how the question is answered', () => {
+  assert.match(surface, /diag: \{ leftMs: askedLeftMs, waitedMs: Math\.max\(0, Math\.round\(Date\.now\(\) - askedAtMs\)\) \}/)
+  const at = surface.indexOf("const answer = await card._browserControls.toolAskSite?.({ site, deadlineMs: request.deadlineMs });")
+  assert.ok(surface.slice(at, at + 600).includes("if (answer === 'allowed') {"), 'allowed still joins the conversation\'s set exactly as before')
+})

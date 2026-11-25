@@ -1077,11 +1077,12 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
       cardId: card.cardId, binding: card.ui, site: site.site, patterns: [...site.patterns] }, binding, run, trace,
       { budgetMs: Math.min(SITE_REQUEST_BUDGET_MS, 60000) })
     binding.pending.add(pending)
+    const askedAt = now()
     let response
     try { response = await pending }
     catch (error) {
       if (error?.code === 'BROWSER_UI_TIMEOUT') {
-        return { status: 'site-pending', cardId: card.cardId, action: 'request_site', site: site.site, timing: { ...trace }, externalEffectVerified: false }
+        return { status: 'site-pending', pendingBy: 'helper-timeout', waitedMs: Math.max(0, now() - askedAt), cardId: card.cardId, action: 'request_site', site: site.site, timing: { ...trace }, externalEffectVerified: false }
       }
       throw error
     }
@@ -1093,7 +1094,11 @@ export function createBrowserToolService({ sendToUi, getOwnerKey, ownerKeyFor = 
     const reflected = site.patterns.every(pattern => binding.navigationPolicy.allow.includes(pattern))
     const status = response.status === 'site-allowed' && reflected ? 'site-allowed'
       : response.status === 'site-refused' ? 'site-refused' : 'site-pending'
-    return { status, cardId: card.cardId, action: 'request_site', site: site.site, timing: { ...trace }, externalEffectVerified: false }
+    // u10: why a site request ended 'site-pending', in closed words and numbers (never text): the Card's question timed out or was dismissed unanswered ('unanswered'), the helper stopped waiting
+    // ('helper-timeout', above), or the person allowed it but this run's navigation policy does not hold the site ('unreflected'). waitedMs: how long the person's answer took.
+    const pendingBy = status !== 'site-pending' ? null : response.status === 'site-allowed' ? 'unreflected' : 'unanswered'
+    const ui = record(response.diag) ? { askedLeftMs: Number.isSafeInteger(response.diag.leftMs) ? response.diag.leftMs : null, answeredAfterMs: Number.isSafeInteger(response.diag.waitedMs) ? response.diag.waitedMs : null } : null
+    return { status, ...(pendingBy ? { pendingBy } : {}), waitedMs: Math.max(0, now() - askedAt), ...(ui ? { ui } : {}), cardId: card.cardId, action: 'request_site', site: site.site, timing: { ...trace }, externalEffectVerified: false }
   }
 
   // egdesk_browser_open_card (D-B2): the UI opens a Card in the same profile,
