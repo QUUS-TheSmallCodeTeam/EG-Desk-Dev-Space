@@ -84,6 +84,15 @@ export const EARLIER_EVIDENCE_LIMIT = 4
 // its records are kept for the next check (the check's own ranking keeps the ones related to the next draft). After a posted answer the limit above stays.
 export const EARLIER_WITHHELD_LIMIT = 8
 export const POSTED_ANSWER_KEY = 'egdesk_posted_answer'
+// c30: when a draft revision on a private fork has not completed after this long, it also starts on a fresh thread (every completed internal turn measured took 5.9-10.7 s; reports/l6-c30.md).
+export const REVISE_FORK_HEDGE_MS = 11_000
+// c30: the text of a revision on a FRESH thread: it has not seen the conversation, so the draft, the check's note and the material (the check's readable evidence items) are all in it.
+export function reviseFreshText({ draft, note, evidence = [] }) {
+  const items = (Array.isArray(evidence) ? evidence : []).filter(item => item && !item.opaque && typeof item.text === 'string' && item.text.trim()).slice(0, 8)
+  const material = items.length ? items.map(item => `- ${String(item.text).replace(/\s+/g, ' ').trim().slice(0, 1200)}`).join('\n') : '- (none)'
+  return `The material you were given:\n${material}\n\nHere is your draft answer to the person's last message:\n\n${draft}\n\n${note}\n\nReply with only the revised answer text.`
+}
+import { APPROVALS_FAST_LIMITS, approvalOutcomeBlock } from './egdesk-decision-first-approvals.mjs' // c32 (U13): approvals decision-first
 import { ENGINE_STALL_LIMITS, eventTurnId, stallFact } from './egdesk-engine-stall.mjs' // c33: the first-event watchdog
 import { COMMAND_RESULT_KEY, buildCommandOptions, commandResultBlock, decidePick } from './egdesk-decision-first-commands.mjs' // c32 (U13): the decision model picks the command, code runs it
 import { OWN_EDIT_LIMITS, EDIT_TOOL_NAMES, ownEditEvidence } from './egdesk-own-edit-evidence.mjs' // c30b: the edits EG-Desk made, as readable evidence for the check of the answer
@@ -137,8 +146,9 @@ import { BROWSER_TASK_TTL_MS, createBrowserTaskStore, createDirectBrowserEntry, 
 import { hostOf } from './egdesk-browser-task-memory.mjs'
 import { NO as MEMORY_NO, REAL_CLOCK as MEMORY_CLOCK, YES as MEMORY_YES, allowsPage as memoryAllowsPage, mergeIntoSelection, settleBefore as memorySettleBefore } from './egdesk-wiki-reconstruction.mjs'
 import { safeId as memoryPageId } from './egdesk-wiki-adapter.mjs'
-import { sha256Hex } from './egdesk-decision-questions.mjs'
+import { predicateQuestion, sha256Hex } from './egdesk-decision-questions.mjs'
 import { workspaceCandidates } from './egdesk-prefetch.mjs'
+import { judgeRecordConflict, settledRecordText } from './egdesk-record-settled.mjs'
 import { engineContextConfig, spilledKeys, splitEngineContext } from './egdesk-engine-context.mjs'
 import { DECISION_CONTEXT_KEY, decisionContextActivity, evidenceForSpeaker, prepareTurnContext } from './egdesk-context-setup.mjs'
 
@@ -2874,6 +2884,7 @@ export class CodexChatRuntime {
     if (engine.id === 'codex') this.assertProcessConfiguration(this.threads.get(cid), { model: overrides.model, effort })
     // The only wait turn memory adds: what is left of its cap after preparation. Before the synchronous claim below, never inside it.
     const memoryReady = memoryTurn ? await this.awaitTurnMemory(memoryTurn) : false
+    if (memoryReady && memoryTurn.writeFirst) await this.awaitWriteFirst(memoryTurn)
     if ([...this.runs.values()].some(run => run.conversationId === cid && !TERMINAL.has(run.status))) {
       throw chatError('RUN_IN_PROGRESS', 'This conversation already has an active or unreconciled turn', 409)
     }
@@ -2986,13 +2997,15 @@ export class CodexChatRuntime {
         : noteOnly !== null ? { [DECISION_CONTEXT_KEY]: { kind: 'application', value: withNote(noteOnly) } }
         : memoryPacket || memoryNote ? { [TURN_MEMORY_KEY]: { kind: 'application', value: withNote(memoryPacket) } } : null
       const recordingContext = recordRule ? { [RECORDING_KEY]: { kind: 'application', value: recordRule } } : null
+      if (recordRule && memoryTurn?.writeFirst?.inTime === true && recordRule === memoryTurn.writeFirst.text) memoryTurn.writeFirst.sent = true // the settled state went out with this turn
       const turnAdditionalContext = browserTaskContext || memoryContext || recordingContext ? { ...(additionalContext || {}), ...(browserTaskContext || {}), ...(memoryContext || {}), ...(recordingContext || {}) } : additionalContext
       // What the engine will really show of the entries (flag turnMemory.engineContext, default off): 'split' sends an over-limit entry as parts that each stay under it.
       // c32 (U13, flag EGDESK_DECISION_FIRST=on, default off): a request to run something is picked by the decision model from options code built from the folder and run by EG-Desk's own
       // runner before any engine call; a healthy result ends the turn without the engine, anything else goes to the engine with the result as context. Absent the flag: dfLocal is null.
       const dfLocal = ownTools && !bounded && ownFolder ? await this.decisionFirstTry({ cid, body, context, ownFolder }) : null
-      // c32: the person's reply is read for the ONE item it settles (or, without the flag or a verdict, for the waiting command as before); what it settled rides to the engine as closed words
-      const openContext = await this.applyOpenItems(cid, body, context, memoryTurn)
+      // c32: the person's reply is read for the ONE item it settles (or, without the flag or a verdict, for the waiting command as before); what it settled rides to the engine as closed words.
+      // (L3 c32: the message that made code ask a question in this very call is not the reply to it: the registry was built in send(), before this call.)
+      const openContext = await this.applyOpenItems(cid, body, context, dfLocal)
       const withOpen = openContext ? { ...(turnAdditionalContext || {}), ...openContext } : turnAdditionalContext
       const dfContext = dfLocal?.context ? { ...(withOpen || {}), [COMMAND_RESULT_KEY]: { kind: 'application', value: dfLocal.context } } : withOpen
       const engineShape = this.shapeEngineContext(dfContext)
@@ -3183,8 +3196,11 @@ export class CodexChatRuntime {
   builtinOpenItemSources(egress) {
     const quoted = text => String(text ?? '').replace(/\s+/g, ' ').trim()
     const approval = { id: 'approval',
-      items: ({ cid }) => { const ask = egress.allows('terminal_command') === true ? this.gateHookBroker()?.awaitingAsk?.(cid) : null; return ask ? [{ id: `approval:${cid}`, kind: 'approval', summary: `A command waits for the person's yes or no before it runs: ${quoted(ask.command).slice(0, 200)}` }] : [] },
-      apply: async ({ cid, message }) => { const read = await this.readGateHookReply(cid, message); return { handled: true, settled: read?.approved === true ? 'approved' : read?.read ? 'not_approved' : 'unclear' } } }
+      items: ({ cid }) => { const ask = egress.allows('terminal_command') === true ? this.gateHookBroker()?.pendingAsk?.(cid) : null; return ask ? [{ id: `approval:${cid}`, kind: 'approval', summary: `A command waits for the person's yes or no before it runs: ${quoted(ask.command).slice(0, 200)}` }] : [] },
+      apply: async ({ cid, message, dfLocal }) => { // L3's approvals-fast path may have read the reply already (its own judgment, once): then its outcome is the state
+        const fast = typeof dfLocal?.diag?.reason === 'string' && dfLocal.diag.reason.startsWith('approval_') ? dfLocal.diag.reason : null
+        if (fast) return { handled: true, settled: ['approval_ran', 'approved'].includes(fast) ? 'approved' : fast === 'approval_declined' ? 'not_approved' : 'unclear' }
+        const read = await this.readGateHookReply(cid, message); return { handled: true, settled: read?.approved === true ? 'approved' : read?.read ? 'not_approved' : 'unclear' } } }
     const question = { id: 'question',
       items: ({ cid, clientThreadId }) => { const run = this.openEarlyQuestion(clientThreadId, cid), flow = run ? this.flowRuns.get(run) : null, row = flow?.sent?.find(x => x.id === flow.question?.id); return row ? [{ id: `question:${run.runId}`, kind: 'question', summary: `The run asked the person: ${quoted(row.text).slice(0, 240)}` }] : [] } }
     const running = { id: 'run',
@@ -3231,14 +3247,14 @@ export class CodexChatRuntime {
   }
 
   // At the place the person's reply to a waiting command was always read. Returns the engine's context entry (closed words) or null.
-  async applyOpenItems(cid, body, context) {
+  async applyOpenItems(cid, body, context, dfLocal = null) {
     const v = context.requestId ? this.openItemVerdicts.get(context.requestId) : null
     if (!v) { await this.readGateHookReply(cid, body.message); return null }
     const states = {}
     if (v.verdict.status === 'settled') {
       const item = v.verdict.item
       try {
-        const res = typeof item.source.apply === 'function' ? await item.source.apply({ cid, clientThreadId: context.clientThreadId, body, context, message: body.message, item, answers: v.verdict.answers }) : null
+        const res = typeof item.source.apply === 'function' ? await item.source.apply({ cid, clientThreadId: context.clientThreadId, body, context, message: body.message, item, answers: v.verdict.answers, dfLocal }) : null
         states[item.id] = res?.settled ?? 'noted'
         if (typeof res?.note === 'string' && res.note) v.note = res.note
       } catch { states[item.id] = 'apply_failed' }
@@ -6621,7 +6637,7 @@ export class CodexChatRuntime {
     if (ready.skip) { clearTimeout(timer); controller.abort(); return null }
     let vocabulary = []
     try { vocabulary = (await dc?.internalVocabulary?.({})) ?? [] } catch { vocabulary = [] }
-    const revise = ({ draft, note }) => this.reviseOnFork(run, draft, note, controller.signal)
+    const revise = ({ draft, note }) => this.reviseOnFork(run, draft, note, controller.signal, ready.evidence)
     const check = checkDraft({ draft: text, evidence: ready.evidence, userText: turn.userText, internalVocabulary: Array.isArray(vocabulary) ? vocabulary : [],
       mode: 'on', design: this.draftCheckDesign(), client: setup.client, revise, signal: controller.signal, egress: this.decisionEgressFor(run) })
     void check.catch(() => {})
@@ -6729,12 +6745,18 @@ export class CodexChatRuntime {
   }
 
   // The subjective model's one revision, on a private fork of the conversation. Null when the fork cannot run or fails.
-  async reviseOnFork(run, draft, note, signal) {
+  // c30 (L6; Main's real planted run check-25pl, reports/l6-c30.md): 7 of 12 revision forks never completed and were cut at the 25 s deadline (the 5 that completed took 6.9-8.3 s, all 12 completed internal turns of the real runs
+  // (these 5 and 7 earlier ones) 5.9-10.7 s: an engine-side stall, which also hit two main turns in other runs), and an empty revision means nothing is posted. So after
+  // REVISE_FORK_HEDGE_MS (above every completed internal turn measured) the same revision also starts on a fresh thread; the first to complete wins; the deadline is the same 25 s.
+  // The fresh thread has not seen the conversation, so its text carries the material the check read the draft against (evidence: the check's items, readable ones only, as the
+  // check cut them); the fork has it in its history. The same text is used when the room is one-time (ephemeral) and a fresh thread is the only path.
+  async reviseOnFork(run, draft, note, signal, evidence = []) {
     try {
       const engine = this.engineOf(run.conversationId), slot = this.threadOperationSlot(run.conversationId)
       if (!engine?.capabilities?.(slot)?.has('threadFork')) return null
-      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, signal, timeoutMs: 25_000, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run),
-        text: `Here is your draft answer to the person's last message:\n\n${draft}\n\n${note}\n\nReply with only the revised answer text.` })
+      const text = `Here is your draft answer to the person's last message:\n\n${draft}\n\n${note}\n\nReply with only the revised answer text.`
+      const out = await this.internalTurns.run({ engine, slot, parentThreadId: run.conversationId, signal, timeoutMs: 25_000, hedgeMs: this.reviseHedgeMs ?? REVISE_FORK_HEDGE_MS, parentEphemeral: run.stateless === true, fresh: this.internalFresh(run),
+        text, freshText: reviseFreshText({ draft, note, evidence }) })
       return out.text || null
     } catch { return null }
   }
@@ -6889,6 +6911,8 @@ export class CodexChatRuntime {
    * result: the turn ends locally) | { diag, context, preRun } (a result the engine must explain or fix: it runs with the result as context, needing no tool call).
    * diag: closed words and numbers only: { path: 'fast' | 'engine', reason, option, confidence, margin, ms }.
    */
+  decisionFirstApprovalsOn() { try { return this.decisionFirstOn() && this.ownTools?.decisionFirstApprovals?.() === 'on' } catch { return false } }
+
   async decisionFirstTry({ cid, body, context, ownFolder }) {
     if (!this.decisionFirstOn()) return null
     const started = performance.now(), setup = this.decisionContext
@@ -6897,27 +6921,52 @@ export class CodexChatRuntime {
       if (typeof body?.message !== 'string' || !body.message.trim() || context.board || context.peerDispatch || body.boardId != null) return null
       if (!setup?.client || setup.mode?.() !== 'on' || setup.configured?.() !== true) return { diag: diag('engine', 'decisions_off') }
       if (this.decisionEgressFor({ toolCeiling: context.toolCeiling ?? null }).allows('run_text') !== true) return { diag: diag('engine', 'egress_closed') }
+      // c32: a pending approval (the ledger waits on the reply to the engine's own question): the reply is settled here, before anything else
+      if (this.decisionFirstApprovalsOn() && this.gateHookBroker()?.awaitingReply(cid) && this.openItemRoute(context.requestId, 'approval') !== 'skip') return await this.decisionFirstReply({ cid, body, context, diag }) // c32: not when the open-item resolver found the message belongs to something else
       const options = buildCommandOptions(ownFolder)
       const pick = await decidePick({ client: setup.client, message: body.message, options })
       if (pick.status !== 'picked') return { diag: diag('engine', pick.reason, { confidence: pick.confidence ?? null, margin: pick.margin ?? null }) }
       const option = pick.option, floor = classifyCommand(option.command, { cwd: ownFolder, home: process.env.HOME })
       const picked = { option: option.kind, confidence: pick.confidence, margin: pick.margin }
       if (floor.destructive || floor.floor.length) return { diag: diag('engine', 'approval_floor', picked) }
-      const provider = this.toolProviders.find(p => p.providerId === 'egdesk-command')
-      if (!provider) return { diag: diag('engine', 'no_executor', picked) }
-      const turnId = `egdesk-local-${randomUUID()}`
-      const preRun = { conversationId: cid, runId: turnId, answerId: runKey(cid, turnId), clientThreadId: context.clientThreadId, ownTools: true, ownFolder, activities: [], status: 'inProgress', stopRequested: false }
-      const callId = `df-${turnId}`
-      const response = await provider.dispatch(preRun, { callId, tool: 'egdesk_run_command', arguments: { command: option.command } })
-      let r = null
-      try { r = JSON.parse(response?.contentItems?.[0]?.text ?? '') } catch { r = null }
-      if (!r || typeof r.status !== 'string') return { diag: diag('engine', 'result_unreadable', picked) }
-      const healthy = r.status === 'ran' && r.exitCode === 0 && r.timedOut !== true && r.health === 'healthy' && r.worktree?.state !== 'conflict'
-      const entry = { command: option.command, status: r.status, exitCode: Number.isSafeInteger(r.exitCode) ? r.exitCode : null, durationMs: Number.isFinite(r.durationMs) ? r.durationMs : null, health: r.health ?? null,
-        tests: r.tests ?? null, worktree: r.worktree ?? null, tail: [r.stdout, r.stderr].filter(t => typeof t === 'string' && t).join('\n'), callId, cwd: ownFolder }
-      if (healthy) return { diag: diag('fast', 'healthy', picked), finished: true, turnId, preRun, entry }
-      return { diag: diag('engine', r.status === 'needs_person' ? 'needs_person' : 'result_for_engine', picked), context: commandResultBlock(entry), preRun }
+      const out = await this.decisionFirstRun({ cid, command: option.command, context, ownFolder, picked, diag })
+      return out
     } catch { return { diag: diag('engine', 'error') } }
+  }
+
+  /** c32: run a decided command through the executor (its own gate still decides); a healthy result ends the turn locally, anything else goes to the engine with the result as context. */
+  async decisionFirstRun({ cid, command, context, ownFolder, picked, diag }) {
+    const provider = this.toolProviders.find(p => p.providerId === 'egdesk-command')
+    if (!provider) return { diag: diag('engine', 'no_executor', picked) }
+    const turnId = `egdesk-local-${randomUUID()}`
+    const preRun = { conversationId: cid, runId: turnId, answerId: runKey(cid, turnId), clientThreadId: context.clientThreadId, ownTools: true, ownFolder, activities: [], status: 'inProgress', stopRequested: false }
+    const callId = `df-${turnId}`
+    const response = await provider.dispatch(preRun, { callId, tool: 'egdesk_run_command', arguments: { command } })
+    let r = null
+    try { r = JSON.parse(response?.contentItems?.[0]?.text ?? '') } catch { r = null }
+    if (!r || typeof r.status !== 'string') return { diag: diag('engine', 'result_unreadable', picked) }
+    const healthy = r.status === 'ran' && r.exitCode === 0 && r.timedOut !== true && r.health === 'healthy' && r.worktree?.state !== 'conflict'
+    const entry = { command, status: r.status, exitCode: Number.isSafeInteger(r.exitCode) ? r.exitCode : null, durationMs: Number.isFinite(r.durationMs) ? r.durationMs : null, health: r.health ?? null,
+      tests: r.tests ?? null, worktree: r.worktree ?? null, tail: [r.stdout, r.stderr].filter(t => typeof t === 'string' && t).join('\n'), callId, cwd: ownFolder }
+    if (healthy) return { diag: diag('fast', 'healthy', picked), finished: true, turnId, preRun, entry }
+    return { diag: diag('engine', r.status === 'needs_person' ? 'needs_person' : 'result_for_engine', picked), context: commandResultBlock(entry), preRun, entry }
+  }
+
+  /**
+   * c32: the person's reply to the question the engine asked about one command. The Decision reads it against that one command (the existing approval judgement); code acts at once: an approved
+   * command is run once now, a declined one is cancelled. The engine continues once, as an ordinary turn, with what became of the command as context (it words the answer; no tool call is needed).
+   * No sentence is posted by code. A reply that neither approves nor declines is the engine's message as today (the question is closed: one hop).
+   */
+  async decisionFirstReply({ cid, body, context, diag }) {
+    const broker = this.gateHookBroker(), setup = this.decisionContext, ask = broker.pendingAsk(cid)
+    if (!ask) return { diag: diag('engine', 'approval_expired') }
+    const egress = this.decisionEgressFor({ toolCeiling: context.toolCeiling ?? null })
+    const read = await broker.readReply({ conversationId: cid, reply: body.message, client: setup.client, egress, timeoutMs: APPROVALS_FAST_LIMITS.timeoutMs })
+    if (read.declined) return { diag: diag('engine', 'approval_declined', { option: 'declined' }), context: approvalOutcomeBlock({ outcome: 'declined', command: ask.command }) }
+    if (!read.approved) return { diag: diag('engine', read.read ? 'approval_unclear' : 'approval_unread') }
+    const out = await this.decisionFirstRun({ cid, command: ask.command, context, ownFolder: ask.cwd, picked: { option: 'approved', confidence: null, margin: null }, diag })
+    if (!out?.entry) return out
+    return { diag: diag('engine', 'approval_ran', { option: 'approved' }), context: approvalOutcomeBlock({ outcome: 'ran', command: ask.command, exitCode: out.entry.exitCode, durationMs: out.entry.durationMs, tail: out.entry.tail }), preRun: out.preRun }
   }
 
   /** c32: the local turn's items as the engine's own command items would arrive (the existing terminal card), then the turn's end. No assistant text: no new words. */
@@ -7378,7 +7427,7 @@ export class CodexChatRuntime {
       const start = clock.now() - t0
       try { return await setup.client.decide(request) } finally {
         const names = request.questions.map(q => q.name)
-        turn.spans.push({ stage: names.some(n => n.startsWith('tn_')) ? 'triage' : names.some(n => n.startsWith('tw_')) ? 'write' : 'fetch', start, end: clock.now() - t0 })
+        turn.spans.push({ stage: names.some(n => n.startsWith('tn_')) ? 'triage' : names.some(n => n.startsWith('tw_') || n.startsWith('cf_')) ? 'write' : 'fetch', start, end: clock.now() - t0 })
       }
     } }
     const threadKey = context.conversationId ?? null
@@ -7395,7 +7444,91 @@ export class CodexChatRuntime {
     // The first turn's recording triage answers on its own time; once it has, the rule knows whether a write judgment can still follow.
     if (result.triageLater) void result.triageLater.then(late => { turn.lateTriage = late ?? { record: { state: 'unknown' } } }, () => { turn.lateTriage = { record: { state: 'unknown' } } })
     if (this.turnMemoryConfirmOn()) this.prepareTurnMemoryNote(turn, { wiki, scope, threadKey })
-    Object.assign(turn, { wiki, baseScope, scope, result, readyMs: clock.now() - t0 })
+    Object.assign(turn, { wiki, baseScope, scope, result, client, readyMs: clock.now() - t0 })
+    // Write first (flag turnMemory.writeFirst, default off): the write judgment and its pending reading are settled now, behind the loop, not after the answer.
+    if (this.turnMemoryWriteFirstOn()) turn.writeFirst = this.startWriteFirst(turn, body, context)
+  }
+
+  // ---- Write first (flag turnMemory.writeFirst, default off; egdesk-record-settled.mjs) ----
+  turnMemoryWriteFirstOn() {
+    try {
+      const tm = this.decisionContext?.turnMemory, flag = tm?.writeFirst
+      return (typeof flag === 'function' ? flag() : flag) === true && this.turnMemoryMode() === 'on' && tm.ontologyWrite === true && typeof tm.writer === 'function'
+    } catch { return false }
+  }
+
+  // The write judgment of THIS turn, its pending reading and the conflict check of the pair, as one job that starts right behind the loop. It never waits for the engine and never
+  // blocks the turn beyond the loop's cap (awaitWriteFirst); the write path after the answer uses its result instead of asking again.
+  // Stored here: only a pending reading on a record this DM may read (the same writer, operation id and checks as after the answer; replayed there, not stored twice).
+  startWriteFirst(turn, body, context) {
+    const tm = this.decisionContext.turnMemory, clock = turn.clock
+    const wf = { startedAt: clock.now(), settled: false, inTime: false, text: null, judged: null, applied: null, conflict: null, write: null, confirmations: [], sent: false, ms: null, settledAt: null }
+    wf.promise = (async () => {
+      wf.confirmations = (turn.confirm?.actions ?? []).filter(a => a.action !== 'kept').map(a => ({ title: turn.wiki.pages.get(a.pageId)?.title, action: a.action === 'promoted' ? 'promoted' : 'withdrawn', status: a.status })).filter(c => typeof c.title === 'string')
+      const judged = typeof turn.result.judgeWrite === 'function' ? await turn.result.judgeWrite() : null
+      wf.judged = judged
+      const proposal = judged?.proposal
+      let known = judged === null || (proposal && !['judge_failed', 'not_configured'].includes(proposal.reason))
+      if (proposal?.op === 'none') wf.write = ['not_worth_recording', 'judge_failed', 'not_configured'].includes(proposal.reason) ? null : { kind: 'not_recorded' }
+      else if (proposal?.op === 'update_status') {
+        const page = turn.wiki.pages.get(proposal.pageId)
+        if (!page || !memoryAllowsPage(page, turn.scope)) known = false
+        else {
+          const fresh = await tm.wiki({ body, context, sources: turn.sources })
+          wf.applied = fresh?.pages ? tm.writer(fresh, { enabled: true, canWrite: ({ op, page: target }) => op === 'update_status' && !!target && memoryAllowsPage(target, turn.scope) })
+            .apply(proposal, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: turn.baseScope ?? null, operationId: `turn:${context.localMessageId}`, from: context.clientThreadId }) : null
+          if (wf.applied?.status !== 'recorded_pending') known = false
+          else {
+            const correction = proposal.proposedStatus === 'superseded'
+            if (!correction) wf.conflict = await judgeRecordConflict({ message: body.message, page, client: turn.client, askedAt: context.askedAt ?? this.now(), signal: turn.controller.signal })
+            wf.write = { kind: correction ? 'correction' : 'pending_reading', title: page.title, status: proposal.proposedStatus, recordStatus: page.status, recordSlice: page.time?.slice ?? null, conflict: wf.conflict?.conflict?.state === 'yes' }
+          }
+        }
+      } else if (proposal?.op === 'new_page') {
+        let speechOk = false
+        try { speechOk = turn.sources.speech?.allowed?.() === true } catch { speechOk = false }
+        wf.write = speechOk && typeof turn.baseScope?.writeScope === 'string' ? { kind: 'new_record' } : { kind: 'not_recorded' }
+      }
+      wf.text = settledRecordText({ write: wf.write, confirmations: wf.confirmations })
+      wf.settled = known === true || wf.confirmations.length > 0
+      wf.settledAt = clock.now(); wf.ms = wf.settledAt - wf.startedAt
+    })().catch(() => { wf.settled = false })
+    return wf
+  }
+
+  /**
+   * Read-only callables for the open-item resolver (L1) and other system judges; they decide nothing and store nothing.
+   *   openMemoryItems(conversationId) -> frozen [{ kind: 'memory_confirm', pageId, status, offers, told }]: the notes of this conversation that were stated to the person and still await their
+   *     confirmation or refusal (ids and closed words only). Whether the person's message answers one of them stays the confirmation judge's question (rc_*, confirmNotedRecords,
+   *     before the memory loop); this lists them so the resolver can name the kind without a second judge for the same thing.
+   *   memorySettledFor(key) -> frozen { inTime, sent, write: { kind, status, recordStatus, recordSlice, conflict } | null, confirmations: [{ action, status }] } | null: what the write-first job settled for the
+   *     turn (key: the turn's request context or its run); null without the flag, without a turn or before it settled. No titles or text.
+   */
+  openMemoryItems(conversationId) {
+    try {
+      const list = typeof conversationId === 'string' ? this.turnMemoryNoted.get(conversationId) : null
+      return Object.freeze((list ?? []).filter(entry => entry.closed !== true).map(entry => Object.freeze({ kind: 'memory_confirm', pageId: entry.pageId, status: entry.status, offers: entry.offers, told: entry.offered === true })))
+    } catch { return Object.freeze([]) }
+  }
+
+  memorySettledFor(key) {
+    try {
+      const turn = key && typeof key === 'object' ? this.turnMemoryTurns.get(key) : null, wf = turn?.writeFirst
+      if (!wf || wf.settled !== true) return null
+      const w = wf.write
+      return Object.freeze({ inTime: wf.inTime === true, sent: wf.sent === true,
+        write: w ? Object.freeze({ kind: w.kind, ...(w.status ? { status: w.status } : {}), ...(w.recordStatus ? { recordStatus: w.recordStatus } : {}), ...(w.recordSlice ? { recordSlice: w.recordSlice } : {}), conflict: w.conflict === true }) : null,
+        confirmations: Object.freeze(wf.confirmations.map(c => Object.freeze({ action: c.action, status: c.status }))) })
+    } catch { return null }
+  }
+
+  // Waits for the write job until the loop's own cap, no longer (the turn-context budget: warm 2.5 s, cold 4 s). true when it settled before that point.
+  async awaitWriteFirst(turn) {
+    const wf = turn?.writeFirst
+    if (!wf) return false
+    try { await memorySettleBefore(wf.promise, turn.startedAt + turn.capMs, turn.clock) } catch { /* the cap: the turn goes on as it does without the flag */ }
+    wf.inTime = wf.settled === true && Number.isFinite(wf.settledAt) && wf.settledAt < turn.startedAt + turn.capMs
+    return wf.inTime
   }
 
   // The clock and timer of the turn-memory deadlines (injected in tests through turnMemory.clock; otherwise the real ones).
@@ -7559,6 +7692,8 @@ export class CodexChatRuntime {
     try {
       const tm = this.decisionContext?.turnMemory
       if (!turn?.result || this.turnMemoryMode() !== 'on' || tm?.ontologyWrite !== true || typeof tm.writer !== 'function') return null
+      // Write first: when the write judgment settled before the cap, the engine is told the settled state instead of "decided after your reply".
+      if (turn.writeFirst?.inTime === true) return turn.writeFirst.text
       if (typeof turn.result.judgeWrite !== 'function') return null
       if (turn.position?.kind === 'first') return turn.lateTriage && turn.lateTriage.record?.state !== 'yes' ? null : RECORDING_RULE
       return turn.result.triage?.record?.state === 'yes' ? RECORDING_RULE : null
@@ -7573,6 +7708,7 @@ export class CodexChatRuntime {
       if (!turn?.result || !turn.wiki || this.turnMemoryMode() !== 'on') return []
       const items = memoryEvidence(turn.result, turn.wiki, { scope: turn.scope, attached })
       // Where a record may follow, the record state is evidence too: an answer that says it recorded something can then be checked against it.
+      if (turn.writeFirst?.inTime === true && typeof turn.writeFirst.text === 'string') return [...items, { id: 'record-state', kind: 'memory', time: 'present', status: null, source: 'system', text: `EG-Desk record state for this reply, settled before the reply: ${turn.writeFirst.text.split('\n').slice(1, -1).join(' ')}` }]
       if (!this.turnMemoryRuleFor(turn)) return items
       const noted = (this.turnMemoryNoted.get(threadKey) ?? []).map(entry => { const page = turn.wiki.pages.get(entry.pageId)
         return page && memoryAllowsPage(page, turn.scope) ? { title: page.title, status: entry.status } : null }).filter(Boolean)
@@ -7743,7 +7879,9 @@ export class CodexChatRuntime {
     const tm = this.decisionContext?.turnMemory
     let judged = null, applied = null, followUp = null
     try {
-      judged = await turn.result.judgeWrite()
+      // Write first: the judgment (and the pending reading of a status change) was settled at the start of the turn; its result is used, never asked twice.
+      judged = turn.writeFirst ? (await turn.writeFirst.promise, turn.writeFirst.judged) : await turn.result.judgeWrite()
+      if (turn.writeFirst && !judged) judged = { proposal: { op: 'none', reason: 'judge_failed' }, receipt: { reason: 'judge_failed' } }
       // Before anything is stored that points at this utterance: its speech record, with the labels this judgment installed.
       const deferred = this.recordDeferredSpeech(run, judged?.receipt?.spans)
       const proposal = judged?.proposal
@@ -7760,7 +7898,9 @@ export class CodexChatRuntime {
             const labels = judged.receipt?.labels
             turn.sources.speech.record?.(context.localMessageId, 'user', body.message, labels ? [{ start: 0, end: body.message.length, source: labels.source, form: labels.form, time: labels.time }] : [])
           }
-          applied = tm.writer(wiki, { enabled: true, canWrite }).apply(proposal, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: writeScope, operationId: `turn:${context.localMessageId}`, from: run.clientThreadId })
+          // write first: a status change was stored at the start of the turn (a second writer would find the revision moved): the receipt of that is the result
+          applied = proposal.op === 'update_status' && turn.writeFirst?.applied?.status === 'recorded_pending' ? turn.writeFirst.applied
+            : tm.writer(wiki, { enabled: true, canWrite }).apply(proposal, { message: body.message, messageRef: `chat-message:${context.localMessageId}`, scope: writeScope, operationId: `turn:${context.localMessageId}`, from: run.clientThreadId })
           // A correction: the record carries the pending "outdated" reading; the person's own sentence with the new detail becomes a page
           // that supersedes it, only where an utterance page may be stored at all (speech consent).
           if (judged.followUp && speechOk && applied?.status === 'recorded_pending') {
@@ -7770,7 +7910,9 @@ export class CodexChatRuntime {
           if (applied?.status === 'recorded_pending' && proposal.op === 'update_status' && this.turnMemoryConfirmOn() && typeof run.conversationId === 'string' && run.conversationId) {
             const list = (this.turnMemoryNoted.get(run.conversationId) ?? []).filter(entry => entry.pageId !== proposal.pageId)
             // said: the person's own message, kept in memory beside the note so the confirmation question can quote what was reported (L7 c35)
-            list.push({ pageId: proposal.pageId, status: proposal.proposedStatus, offers: 0, offered: false, offeredAt: 0, ...(typeof body.message === 'string' && body.message.trim() ? { said: body.message.trim().slice(0, 200) } : {}) })
+            // write first: the settled state already went to the answering model with this turn, so the next message can answer it
+            const told = turn.writeFirst?.sent === true
+            list.push({ pageId: proposal.pageId, status: proposal.proposedStatus, offers: told ? 1 : 0, offered: told, offeredAt: told ? Date.parse(new Date(context.askedAt ?? this.now()).toISOString()) : 0, ...(typeof body.message === 'string' && body.message.trim() ? { said: body.message.trim().slice(0, 200) } : {}) })
             this.turnMemoryNoted.delete(run.conversationId); this.turnMemoryNoted.set(run.conversationId, list.slice(-CONFIRM_LIMITS.records))
             while (this.turnMemoryNoted.size > 50) this.turnMemoryNoted.delete(this.turnMemoryNoted.keys().next().value)
           }
@@ -7779,7 +7921,9 @@ export class CodexChatRuntime {
     } catch { applied = { status: 'invalid' } }
     this.recordDeferredSpeech(run, []) // the judgment failed before it could be recorded: still once, unlabelled
     this.turnMemoryWriteReceipts.set(run, { proposal: judged?.proposal?.op ?? null, reason: judged?.proposal?.reason ?? null, applied: applied?.status ?? null, ...(followUp ? { followUp } : {}),
-      pageId: judged?.proposal?.pageId ?? applied?.pageId ?? null, status: judged?.proposal?.proposedStatus ?? judged?.proposal?.status ?? null })
+      pageId: judged?.proposal?.pageId ?? applied?.pageId ?? null, status: judged?.proposal?.proposedStatus ?? judged?.proposal?.status ?? null,
+      ...(turn.writeFirst ? { writeFirst: { settled: turn.writeFirst.settled === true, inTime: turn.writeFirst.inTime === true, sent: turn.writeFirst.sent === true, ms: turn.writeFirst.ms, kind: turn.writeFirst.write?.kind ?? null,
+        conflict: turn.writeFirst.conflict ? turn.writeFirst.conflict.conflict?.state ?? null : null, conflictP: turn.writeFirst.conflict?.conflict?.p ?? null, confirmations: turn.writeFirst.confirmations.length } } : {}) })
     record(judged)
   }
 

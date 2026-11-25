@@ -132,7 +132,7 @@ test('(2) the unanswered approval question follows the room to its new engine th
   // the person's "yes" is read on the new thread and approves exactly that command once, in its next turn there
   const yes = { async decide() { return { answers: { reply_runs_command: { type: 'predicate', probability: 0.97 }, reply_declines_command: { type: 'predicate', probability: 0.02 } } } } }
   const egress = { allows: kind => ['run_text', 'terminal_command'].includes(kind) }
-  assert.deepEqual(await broker.readReply({ conversationId: 'new-cid', reply: '네 실행하세요', client: yes, egress }), { approved: true, read: true })
+  assert.deepEqual(await broker.readReply({ conversationId: 'new-cid', reply: '네 실행하세요', client: yes, egress }), { approved: true, read: true, declined: false })
   broker.turnStarted({ conversationId: 'new-cid', turnId: 't2' })
   assert.equal((await broker.check({ sessionId: 'new-cid', turnId: 't2', cwd: '/synthetic/work', command: 'git reset --hard HEAD~5' })).decision, 'allow')
   assert.equal((await broker.check({ sessionId: 'new-cid', turnId: 't2', cwd: '/synthetic/work', command: 'git reset --hard HEAD~5' })).decision, 'deny', 'once')

@@ -920,7 +920,12 @@
                             "result_unreadable",
                             "decisions_off",
                             "egress_closed",
-                            "error"
+                            "error",
+                            "approval_ran",
+                            "approval_declined",
+                            "approval_expired",
+                            "approval_unclear",
+                            "approval_unread"
                           ]
                         }
                       },
@@ -1296,6 +1301,9 @@
                         "confirmed": {
                           "type": "boolean"
                         },
+                        "conflict": {
+                          "type": "boolean"
+                        },
                         "newPages": {
                           "maximum": 20,
                           "minimum": 0,
@@ -1329,6 +1337,9 @@
                           "maximum": 20,
                           "minimum": 0,
                           "type": "integer"
+                        },
+                        "settled": {
+                          "type": "boolean"
                         },
                         "status": {
                           "items": {

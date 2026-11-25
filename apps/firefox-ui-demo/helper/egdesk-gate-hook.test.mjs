@@ -67,7 +67,7 @@ test('broker: deny and ask once, stop on the second try; the person\'s yes appro
   broker.turnEnded({ turnId: 'T1' })
   assert.equal(broker.awaitingReply('conv-1'), true)
   const sent = []
-  assert.deepEqual(await broker.readReply({ conversationId: 'conv-1', reply: 'yes, go ahead', client: replyClient(0.96, 0.02, sent), egress: OPEN }), { approved: true, read: true })
+  assert.deepEqual(await broker.readReply({ conversationId: 'conv-1', reply: 'yes, go ahead', client: replyClient(0.96, 0.02, sent), egress: OPEN }), { approved: true, read: true, declined: false })
   assert.equal(sent.length, 1); assert.deepEqual(sent[0].questions.map(q => [q.type, q.name]), [['predicate', 'reply_runs_command'], ['predicate', 'reply_declines_command']])
   assert.deepEqual(sent[0].input[1].content[0].data, { command: 'git push --force origin main', reasons: ['remote_irreversible'], options: [...GATE_HOOK_OPTIONS], reply: 'yes, go ahead' })
   broker.turnStarted({ conversationId: 'conv-1', turnId: 'T2' })
@@ -304,4 +304,10 @@ test('the token is kept out of the model\'s own commands by Codex\'s default exc
   // forged checks of other commands never approve anything; repeating them only reaches stop_asking sooner (fails closed)
   for (let i = 0; i < 3; i++) assert.equal((await broker.check({ sessionId: 'c', turnId: 'T2', cwd: CWD, command: 'git push --force origin main' })).decision, 'deny')
   assert.equal(Object.keys(broker).filter(name => /approve|grant|record/i.test(name)).length, 0, 'no method records an approval except readReply')
+})
+
+// c32: a clear no is reported as declined (decision-first approvals cancel at once); anything else not approved is not
+test('readReply: declined only for a clear no (declines >= .8 and runs <= .2); an unclear reply is neither approved nor declined', async () => {
+  const mk = async (runs, declines) => { const sent = [], broker = createGateHookBroker({ mode: () => 'on', home: '/home/synthetic' }); broker.turnStarted({ conversationId: 'c1', turnId: 't1' }); await broker.check({ sessionId: 'c1', turnId: 't1', cwd: '/work', command: 'git push --force origin main' }); broker.turnEnded({ turnId: 't1' }); return broker.readReply({ conversationId: 'c1', reply: 'x', client: replyClient(runs, declines, sent), egress: OPEN }) }
+  assert.deepEqual(await mk(0.02, 0.96), { approved: false, read: true, declined: true }); assert.deepEqual(await mk(0.5, 0.5), { approved: false, read: true, declined: false }); assert.deepEqual(await mk(0.96, 0.02), { approved: true, read: true, declined: false })
 })

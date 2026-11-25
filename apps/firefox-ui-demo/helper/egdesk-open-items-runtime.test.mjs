@@ -73,7 +73,7 @@ function scripted(ref, log = []) {
 }
 // A stub of the command-approval broker: one command waits; readReply is the existing judgment (counted).
 function brokerStub({ waiting = false } = {}) {
-  const b = { waiting, reads: [], awaitingReply: () => b.waiting, awaitingAsk: () => (b.waiting ? { command: 'git push --force origin main', reasons: ['remote_irreversible'] } : null),
+  const b = { waiting, reads: [], awaitingReply: () => b.waiting, pendingAsk: () => (b.waiting ? { command: 'git push --force origin main', cwd: '/work', reasons: ['remote_irreversible'] } : null),
     readReply: async ({ reply }) => { b.reads.push(reply); b.waiting = false; return { approved: /해|응|네/.test(reply), read: true } } }
   return b
 }
@@ -206,4 +206,24 @@ test('the memory confirmation runs for the memory item only: skipped for a messa
   assert.deepEqual(await run('응 맞아', () => 0.97, true), { confirms: 1, status: 'settled' })
   assert.deepEqual(await run('그건 그렇고 폴더에 뭐 있어?', () => 0.03, true), { confirms: 0, status: 'none' })
   assert.deepEqual(await run('응 맞아', () => 0.97, false), { confirms: 1, status: null })
+})
+
+test('L3\'s approvals-fast reply is read only for the item the message settles: skipped when the resolver found the message belongs to something else, its outcome becomes the item\'s state when it ran', async () => {
+  const broker = brokerStub({ waiting: true })
+  const x = await rig({ memoryMode: null }); await on(x, broker)
+  let fastReads = 0
+  Object.assign(x.chat, { decisionFirstOn: () => true, decisionFirstApprovalsOn: () => true, decisionFirstReply: async () => { fastReads += 1; return { diag: { path: 'engine', reason: 'approval_ran' } } } })
+  const put = (requestId, verdict) => x.chat.openItemVerdicts.set(requestId, { items: [{ id: 'oi1', kind: 'approval' }], verdict, record: { states: {}, items: [] }, note: null })
+  const call = id => x.chat.decisionFirstTry({ cid: 't1', body: { message: '그건 그렇고 뭐 있어?' }, context: { requestId: id }, ownFolder: '/tmp' })
+  put('skip', { status: 'none', reason: 'no_item_referred' }); await call('skip'); assert.equal(fastReads, 0, 'the message is not the reply: the pending question is untouched')
+  put('apply', { status: 'settled', item: { kind: 'approval' } }); await call('apply'); assert.equal(fastReads, 1)
+  await call('nothing-decided'); assert.equal(fastReads, 2, 'no verdict: as before')
+  // the state the engine is told: the fast path already read the reply, so its outcome is the state and the reply is not read twice
+  broker.reads.length = 0
+  const src = x.chat.builtinOpenItemSources({ allows: () => true }).find(s => s.id === 'approval')
+  assert.deepEqual(await src.apply({ cid: 't1', message: '그냥 해', dfLocal: { diag: { reason: 'approval_ran' } } }), { handled: true, settled: 'approved' })
+  assert.deepEqual(await src.apply({ cid: 't1', message: '아니', dfLocal: { diag: { reason: 'approval_declined' } } }), { handled: true, settled: 'not_approved' })
+  assert.deepEqual(await src.apply({ cid: 't1', message: '음', dfLocal: { diag: { reason: 'approval_unclear' } } }), { handled: true, settled: 'unclear' })
+  assert.equal(broker.reads.length, 0)
+  x.store.close()
 })
