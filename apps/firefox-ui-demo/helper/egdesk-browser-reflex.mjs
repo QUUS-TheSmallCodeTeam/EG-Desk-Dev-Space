@@ -256,7 +256,13 @@ export function buildReflexCandidates(snapshot, { classify = classifyAction, isA
     const yieldsToProof = judged?.category === 'submit' && judged.reason === 'submit-vocabulary' && readOnly?.kind === 'get_form'
     // c25: a same-site LINK is a page change; 등록 in its label (a registering phrase, not the noun inside 주민등록) is no reason to withhold it. The
     // address words are still classified below; a link to another site is withheld as before.
-    const registerLink = kind === 'navigate' && judged?.category === 'submit' && judged.reason === 'submit-vocabulary' && /등록/.test(judged.term ?? '') && isAllowedUrl(element.href, snapshot)
+    // c36 (Main's precision fix, from c35's harder flows): two more same-site LINK phrases are page changes, not writes: a link whose label ends in 확인 ("내 순번 확인": submit
+    // vocabulary by label only) and a booking-HISTORY link ("예매 내역", "예매 확인"; 예매 alone and 예매하기 stay payments). Same-site only, the address words are still classified,
+    // pay/grant/delete words never yield (a "결제 확인" link stays withheld), and a button is not a link (a proven GET button is the c25 path).
+    const phraseLink = kind === 'navigate' && isAllowedUrl(element.href, snapshot) && (
+      (judged?.category === 'submit' && judged.reason === 'submit-vocabulary' && judged.term === '확인') ||
+      (judged?.category === 'pay' && judged.term === '예매' && /예매\s*(내역|현황|조회|확인|목록)/.test(String(element.label ?? ''))))
+    const registerLink = phraseLink || (kind === 'navigate' && judged?.category === 'submit' && judged.reason === 'submit-vocabulary' && /등록/.test(judged.term ?? '') && isAllowedUrl(element.href, snapshot))
     if (judged?.category !== 'none' && !yieldsToProof && !registerLink) {
       excluded.gated++
       if (kind === 'press' && label && withheld.length < MAX_PERSON_TARGETS) withheld.push({ label, role: String(element.role) })
