@@ -57,11 +57,11 @@ test('a run bound to a Card the person granted offers the page tools to Codex (d
   for (const name of Object.values(T)) assert.ok(mcp.tools.some(tool => tool.name === name), `${name} is in Claude's MCP catalog as mcp__egdesk__${name}`)
   assert.ok(Object.values(T).every(name => `mcp__egdesk__${name}`.length <= 64))
   const readOnly = h.chat.collectToolSpecs('readOnlyQa', { browserInteraction: false, engineId: 'codex' }).specs.map(s => s.name)
-  assert.deepEqual(readOnly.filter(name => name.startsWith('egdesk_page_')), [T.read])
+  assert.deepEqual(readOnly.filter(name => name.startsWith('egdesk_card_')), [T.read])
   const observeOnly = h.chat.collectToolSpecs('browserBounded', { browserInteraction: false, engineId: 'codex' }).specs.map(s => s.name)
-  assert.deepEqual(observeOnly.filter(name => name.startsWith('egdesk_page_')), [T.read])
+  assert.deepEqual(observeOnly.filter(name => name.startsWith('egdesk_card_')), [T.read])
   const ordinary = h.chat.collectToolSpecs(null, { engineId: 'claude' }).specs.map(s => s.name)
-  assert.deepEqual(ordinary.filter(name => name.startsWith('egdesk_page_')), [], 'an ordinary thread holds no Card grant: no page tools')
+  assert.deepEqual(ordinary.filter(name => name.startsWith('egdesk_card_')), [], 'an ordinary thread holds no Card grant: no page tools')
   void run
 })
 
@@ -69,7 +69,7 @@ test('the Agent ceiling wins: a profile limited to observing is offered only the
   const ceiling = { browser: 'observe' }
   const h = harness(t)
   const specs = h.chat.collectToolSpecs('browserBounded', { browserInteraction: true, engineId: 'codex', toolCeiling: ceiling }).specs.map(s => s.name)
-  assert.deepEqual(specs.filter(name => name.startsWith('egdesk_page_')), [T.read])
+  assert.deepEqual(specs.filter(name => name.startsWith('egdesk_card_')), [T.read])
   const run = await h.send(1); const internal = [...h.chat.runs.values()].at(-1); internal.toolCeiling = ceiling
   const refused = await h.tool(run, 'c-press', T.press, { ref: 'list' })
   assert.deepEqual([refused.ok, refused.error?.code], [false, -32601]); assert.match(refused.error.message, /Agent profile/)

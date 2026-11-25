@@ -3,14 +3,14 @@ import { RECOMMENDED_ACTION_GATE_POLICY, actionGate, classifyAction } from './eg
 import { authOpaqueOn, isAuthOpaqueUrl } from './egdesk-auth-opaque.mjs'
 import { buildReflexCandidates, expectedTargetOf, reflexActionArgs } from './egdesk-browser-reflex.mjs'
 
-// L8 u1 ('위': up to the conversation): the browser as EG-Desk tools the conversation engine calls (Claude through the EG-Desk MCP catalog, Codex through the own-tools path: both read
+// L8 u1 ('위': up to the conversation): the browser as EG-Desk tools (the tools are named after the Card: egdesk_card_*; egdesk_page_* is the working-memory fixture's stand-in) the conversation engine calls (Claude through the EG-Desk MCP catalog, Codex through the own-tools path: both read
 // this provider's specs()). Four coarse tools on top of the Browser tool service, whose checks stay in force because EVERY action goes through that provider's own dispatch for the same run
 // (verified run binding, the Card grant, the action gate, the AI-service sign-in opacity (BROWSER_CARD_OPAQUE), receipts, the activity record). Names are provisional.
 //
-//   egdesk_page_open   open a page in a new Card from one the person granted
-//   egdesk_page_read   what the Card shows: title, address, the visible lines (summary), and with mode structure the controls, each marked with what pressing or typing would do
-//   egdesk_page_press  press a control
-//   egdesk_page_type   type text into a text field (never Enter, never a submit)
+//   egdesk_card_open   open a page in a new Card from one the person granted
+//   egdesk_card_read   what the Card shows: title, address, the visible lines (summary), and with mode structure the controls, each marked with what pressing or typing would do
+//   egdesk_card_press  press a control
+//   egdesk_card_type   type text into a text field (never Enter, never a submit)
 //
 // What may act without asking is decided by CODE, never by the engine (R3, R5): the same proof the objective loop uses (buildReflexCandidates: a same-site link, a read-only GET search, a
 // view tab, an ordinary text field). Everything else is classified by the action classifier with the RECOMMENDED gate policy:
@@ -22,15 +22,15 @@ import { buildReflexCandidates, expectedTargetOf, reflexActionArgs } from './egd
 export const PAGE_TOOLS_PROVIDER_ID = 'egdesk-page' // provisional
 export const PAGE_TOOLS_FLAG = 'EGDESK_PAGE_TOOLS'
 export const pageToolsEnabled = env => env?.[PAGE_TOOLS_FLAG] === 'on'
-export const PAGE_TOOL_NAMES = Object.freeze({ open: 'egdesk_page_open', read: 'egdesk_page_read', press: 'egdesk_page_press', type: 'egdesk_page_type' }) // model-facing, provisional
+export const PAGE_TOOL_NAMES = Object.freeze({ open: 'egdesk_card_open', read: 'egdesk_card_read', press: 'egdesk_card_press', type: 'egdesk_card_type' }) // model-facing, provisional
 export const PAGE_LIMITS = Object.freeze({ lines: 60, lineChars: 240, textChars: 8000, elements: 60, labelChars: 100, typeChars: 500, urlChars: 2000, observations: 16 })
 
 export const PAGE_TOOL_SPECS = Object.freeze([
   Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.read, description: 'Read an EG-Desk Browser Card the person granted to this conversation: its title, address and visible lines. mode "structure" also lists its controls (ref, role, label) each marked auto (pressing or typing runs at once), approval (the person is asked first) or person (only the person does it on the page: sign-in, payment, permission, password). Read again after anything changes the page.',
     inputSchema: { type: 'object', additionalProperties: false, properties: { cardId: { type: 'string', description: 'Omit when exactly one Card is granted.' }, mode: { type: 'string', enum: ['summary', 'structure'] } } } }),
-  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.press, description: 'Press one control of the Card, by the ref from the last egdesk_page_read in structure mode. A same-site link, a read-only search button and a view tab run at once; a control that may change something asks the person first (give expectText: the text the page will show afterwards); sign-in, payment, permission and credentials are only the person\'s.',
+  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.press, description: 'Press one control of the Card, by the ref from the last egdesk_card_read in structure mode. A same-site link, a read-only search button and a view tab run at once; a control that may change something asks the person first (give expectText: the text the page will show afterwards); sign-in, payment, permission and credentials are only the person\'s.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['ref'], properties: { cardId: { type: 'string' }, ref: { type: 'string' }, expectText: { type: 'string', description: 'Text expected on the page after the press; needed when the press may change something.' } } } }),
-  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.type, description: 'Type text into one text field of the Card, by the ref from the last egdesk_page_read in structure mode. It never presses Enter and never submits. Password, card and ID-number fields are only the person\'s.',
+  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.type, description: 'Type text into one text field of the Card, by the ref from the last egdesk_card_read in structure mode. It never presses Enter and never submits. Password, card and ID-number fields are only the person\'s.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['ref', 'text'], properties: { cardId: { type: 'string' }, ref: { type: 'string' }, text: { type: 'string', maxLength: PAGE_LIMITS.typeChars } } } }),
   Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.open, description: 'Open an http(s) page in a new Browser Card, from a Card the person granted. The page belongs to the person\'s own browser; sign-in pages of AI services cannot be opened.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', maxLength: PAGE_LIMITS.urlChars }, cardId: { type: 'string', description: 'The granted Card to open it from; omit when exactly one is granted.' } } } }),
