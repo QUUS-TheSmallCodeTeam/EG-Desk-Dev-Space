@@ -32,3 +32,36 @@ export function buildMemoryFirstScript() {
     description: 'Pattern: the memory layer is settled before the engine answers (EGDESK_TURN_MEMORY_WRITE_FIRST=on): at the start of the turn the write judgment runs, a pending reading is stored, the pair (record, message) is judged for a conflict, and the engine is handed the settled state, so its words follow the record. write-v3\'s own-confirm without the flag is the baseline. Expectations by code: the store, the product\'s receipt (settled, conflict), words the answer must not contain. Needs --decisions, --person-home and --persisted-with-cleanup (the opt-in of the confirmation).',
     conversations: [by('own-confirm') && { ...own, id: 'own-confirm-off' }, ownFirst, control, hedgedFirst, relayedFirst] }
 }
+
+// ---- v2 (c39): the two gaps of v1 behind the same flag ----
+// v1 (without control-first: the check takes at most 8 conversations) plus
+//   newrecord-first         a statement that is a NEW record ("다음 달 둘째 주에 재고 실사를 할 거야": no seeded record is about it): decided at the start of the turn, stored when the turn is accepted
+//                           (one utterance page, nothing on the seeded records), the engine's words do not call it settled; the turn after asks for it back (the stored page is read)
+//   contradiction-off       two unlinked records that give the same workshop two different days, asked about it, WITHOUT the flag: the baseline for what the engine says
+//   contradiction-first     the same with the flag: the settlement marks one contradicting pair (code reads the product's receipt), the engine is told, and its answer must name BOTH days
+//                           (it may not pick one silently); nothing is stored for it
+//   contradiction-control   two unlinked records about different matters (a workshop day, a vendor visit): nothing to mark, 0 pairs, the answer holds the workshop day
+// Fixtures: the schedule pages of write-v3 plus the two workshop records. Everything of v1 stays as strict as it was.
+export const MEMORY_FIRST_V2_SET = 'real-engine-memory-first-v2'
+const WORKSHOP_PAGES = Object.freeze([
+  { id: 'schedule/workshop-a', title: '사내 워크숍 일정', body: '사내 워크숍은 12월 5일 금요일로 확정됐다.', time: 'planned' },
+  { id: 'schedule/workshop-b', title: '워크숍 날짜 메모', body: '사내 워크숍은 12월 12일 금요일로 잡혀 있다.', time: 'planned' }])
+export function buildMemoryFirstV2Script() {
+  const v1 = buildMemoryFirstScript(), own = buildMemoryWriteV3Script().conversations.find(c => c.id === 'own-confirm')
+  const FIRST = { EGDESK_TURN_MEMORY_WRITE_FIRST: 'on' }, base = { posted: true, noNativeTools: true, turnStatus: 'completed' }
+  const turn = (say, expect) => ({ say, expect })
+  const page = 'schedule/product-review'
+  const newrecord = { ...own, id: 'newrecord-first', flags: { ...own.flags, ...FIRST }, turns: [
+    own.turns[0],
+    turn('아 그리고 다음 달 둘째 주에 재고 실사를 할 거야', { recording: { page, reading: 'none', readings: 0, newPages: 1, settled: true }, answerExcludes: [...NOT_SETTLED_WORDS], ...base }),
+    turn('방금 말한 재고 실사 일정 어떻게 정리돼 있어?', { recording: { page, reading: 'none', readings: 0, newPages: 1 }, answerIncludes: ['재고 실사'], ...base }) ] }
+  const withWorkshop = (id, flags, turns, pages = WORKSHOP_PAGES) => ({ ...own, id, flags: { ...own.flags, ...flags }, memory: { mode: 'on', pages: [...pages] }, turns })
+  const ask = '사내 워크숍 언제야?'
+  const contradictionOff = withWorkshop('contradiction-off', {}, [turn(ask, { recording: { page: 'schedule/workshop-a', reading: 'none', readings: 0, newPages: 0 }, ...base })])
+  const contradictionFirst = withWorkshop('contradiction-first', FIRST, [turn(ask, { recording: { page: 'schedule/workshop-a', reading: 'none', readings: 0, newPages: 0, settled: true, contradictions: 1 }, answerIncludes: ['12월 5일', '12월 12일'], answerExcludes: [...NOT_SETTLED_WORDS], ...base })])
+  const control = withWorkshop('contradiction-control', FIRST, [turn(ask, { recording: { page: 'schedule/workshop-a', reading: 'none', readings: 0, newPages: 0, contradictions: 0 }, answerIncludes: ['12월 5일'], ...base })],
+    [WORKSHOP_PAGES[0], { id: 'schedule/vendor-visit', title: '거래처 점검 방문 일정', body: '거래처 점검 방문은 아직 정해지지 않았다. 담당자가 날짜를 조율 중이다.', time: 'planned' }])
+  return { ...v1, set: MEMORY_FIRST_V2_SET,
+    description: v1.description + ' v2 (c39): a statement that is a new record is decided at the start and stored when the turn is accepted (newrecord-first), and two unlinked records of the picked set that disagree are stated to the engine as contradicting (contradiction-first against contradiction-off; contradiction-control has nothing to mark). Expectation keys: recording.newPages, settled, contradictions; the answer of contradiction-first must name both days.',
+    conversations: [...v1.conversations.filter(c => c.id !== 'control-first'), newrecord, contradictionOff, contradictionFirst, control] }
+}

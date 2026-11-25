@@ -1337,6 +1337,11 @@
                         "conflict": {
                           "type": "boolean"
                         },
+                        "contradictions": {
+                          "maximum": 6,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
                         "newPages": {
                           "maximum": 20,
                           "minimum": 0,

@@ -18,14 +18,14 @@ import { buildMemoryHeldScript, buildMemoryHeldV2Script, buildMemoryHeldV3Script
 import { candidatesFromOntologyGraph } from './egdesk-context-setup.mjs'
 import { choiceAnswer, mockJudge } from './egdesk-wiki-reconstruction.fixture.mjs'
 import { PREFETCH_SCENARIOS, buildPrefetchScript } from './egdesk-prefetch-real-engine-scripts.mjs'
-import { buildMemoryFirstScript, NOT_SETTLED_WORDS } from './egdesk-memory-first-real-engine-scripts.mjs'
+import { buildMemoryFirstScript, buildMemoryFirstV2Script, NOT_SETTLED_WORDS } from './egdesk-memory-first-real-engine-scripts.mjs'
 import { checkRecording, recordingFacts, validateRecordingExpect, validateSpeechConsent } from './egdesk-real-engine-recording.mjs'
 
 const app = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scriptFile = name => path.join(app, 'scripts', 'real-engine', 'scripts', `real-engine-${name}${/-v\d+$/.test(name) ? '' : '-v1'}.json`)
 
 test('the committed scripts are what the builders produce, validate, and need the Decision model', () => {
-  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-scale-v3', buildMemoryScaleV3Script], ['memory-write', buildMemoryWriteScript], ['memory-write-v2', buildMemoryWriteV2Script], ['memory-write-v3', buildMemoryWriteV3Script], ['memory-first', buildMemoryFirstScript], ['memory-spill-probe', buildMemorySpillProbeScript], ['memory-spill-probe-v2', buildMemorySpillProbeV2Script]]) {
+  for (const [name, build] of [['memory-recall', buildMemoryRecallScript], ['memory-held', buildMemoryHeldScript], ['memory-held-v2', buildMemoryHeldV2Script], ['memory-held-v3', buildMemoryHeldV3Script], ['memory-held-v4', buildMemoryHeldV4Script], ['memory-scale', buildMemoryScaleScript], ['memory-scale-v2', buildMemoryScaleV2Script], ['memory-scale-v3', buildMemoryScaleV3Script], ['memory-write', buildMemoryWriteScript], ['memory-write-v2', buildMemoryWriteV2Script], ['memory-write-v3', buildMemoryWriteV3Script], ['memory-first', buildMemoryFirstScript], ['memory-first-v2', buildMemoryFirstV2Script], ['memory-spill-probe', buildMemorySpillProbeScript], ['memory-spill-probe-v2', buildMemorySpillProbeV2Script]]) {
     const committed = JSON.parse(fs.readFileSync(scriptFile(name), 'utf8'))
     assert.deepEqual(committed, JSON.parse(JSON.stringify(build())))
     assert.deepEqual(validateEngineScript(committed), { ok: true, errors: [] })
@@ -610,4 +610,36 @@ test('memory-first compare script: prints per turn the engine seconds, the settl
   assert.match(text, /\| own-confirm-first \| 2 \| ok \| 8\.3 \| yes \(pending_reading, 640 ms, conflict yes\) \| 확인 전인 보고로 적어 뒀어요\./)
   assert.match(text, /turn 2 \(the statement\): engine 7\.9 s without the flag, 8\.3 s with it; the person's "응 맞아" confirms at turn 3 with the flag \(turn 4 without it\)/)
   assert.equal(compare([{ set: 'real-engine-memory-first-v1', id: 'x', ok: false, turns: [] }]).ok, false)
+})
+
+const firstJudgeV2 = () => { const inner = firstJudge(); return async wire => {
+  if (wire.questions.some(q => q.name.startsWith('ct_'))) { const text = wire.input.map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n')
+    return wire.questions.map(q => ({ name: q.name, type: 'predicate', probability: text.includes('12월 5일') && text.includes('12월 12일') ? 0.95 : 0.03 })) }
+  return inner(wire) } }
+const v2Finals = ['알겠어요. 사내 워크숍은 12월 5일 금요일, 12월 12일 금요일로 둘 다 적혀 있어요.', '네. 회의 일정은 다음 주 화요일로 계획됐다고 적어 둘게요. 재고 실사도 적어 둘게요.', '네. 재고 실사 일정은 다음 달 둘째 주로 정리했어요. 회의 일정은 다음 주 화요일로 계획됐다고 적어 둘게요.', '네.']
+test('memory-first-v2 through the check (fake engine): a new record is stored once when the turn is accepted and read back; two disagreeing unlinked records are marked, the answer names both days; different matters mark nothing; v1\'s conversations keep passing', async t => {
+  const script = buildMemoryFirstV2Script(), v1 = buildMemoryFirstScript()
+  assert.deepEqual(script.conversations.map(c => c.id), ['own-confirm-off', 'own-confirm-first', 'hedged-first', 'relayed-first', 'newrecord-first', 'contradiction-off', 'contradiction-first', 'contradiction-control'])
+  for (const id of ['own-confirm-off', 'own-confirm-first', 'hedged-first', 'relayed-first']) assert.deepEqual(script.conversations.find(c => c.id === id), v1.conversations.find(c => c.id === id), `${id} is v1's, none loosened`)
+  assert.ok(script.conversations.slice(1).every(c => c.flags.EGDESK_TURN_MEMORY_WRITE_FIRST === 'on' || c.id === 'contradiction-off'))
+  const w = persistedRoom(world(t, { turns: v2Finals.map(final => ({ steps: [], final })) }, { decide: firstJudgeV2() }))
+  const result = await runCheck(w.options, asScripts(script), w.deps)
+  assert.equal(result.records.length, 8)
+  for (const rec of result.records) { assert.equal(rec.aborted, null, rec.abortDetail); assert.equal(rec.ok, true, `${rec.id}: ${JSON.stringify(rec.turns.map(x => x.expectations.filter(e => !e.ok)))}`) }
+  const by = id => result.records.find(r => r.id === id)
+  const nr = by('newrecord-first').turns[1].recording
+  assert.equal(nr.storedPages, 1); assert.equal(nr.settled.stored, 'stored'); assert.equal(nr.settled.kind, 'new_record'); assert.equal(by('newrecord-first').turns[2].recording.storedPages, 1, 'still one page after the read-back turn')
+  const cf = by('contradiction-first').turns[0].recording.settled
+  assert.deepEqual([cf.inTime, cf.sent, cf.contradictions.status, cf.contradictions.found], [true, true, 'ready', 1])
+  assert.equal(by('contradiction-off').turns[0].recording.settled, undefined, 'no settlement without the flag')
+  assert.equal(by('contradiction-control').turns[0].recording.settled?.contradictions ?? null, null, 'one picked record or two of different matters: nothing marked')
+})
+
+test('memory-first: contradictions is an integer 0-6 and only in a conversation with the flag', () => {
+  const script = buildMemoryFirstV2Script()
+  assert.deepEqual(validateEngineScript(script), { ok: true, errors: [] })
+  const odd = structuredClone(script); odd.conversations.find(c => c.id === 'contradiction-first').turns[0].expect.recording.contradictions = 9
+  assert.ok(validateEngineScript(odd).errors.some(e => /contradictions: an integer 0-6/.test(e)), JSON.stringify(validateEngineScript(odd).errors))
+  const noFlag = structuredClone(script); delete noFlag.conversations.find(c => c.id === 'contradiction-first').flags.EGDESK_TURN_MEMORY_WRITE_FIRST
+  assert.ok(validateEngineScript(noFlag).errors.some(e => /contradictions.*needs the flag/.test(e)))
 })

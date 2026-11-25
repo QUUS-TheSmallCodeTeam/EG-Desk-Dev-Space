@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-// Compares real-engine-memory-first-v1 records: for every conversation and turn the engine seconds, whether it passed, what was settled before the engine (flag on) and the answer. Reads only.
+// Compares real-engine-memory-first-v1 and -v2 records: for every conversation and turn the engine seconds, whether it passed, what was settled before the engine (flag on) and the answer. Reads only.
 //   node scripts/egdesk-memory-first-compare.mjs <records dir | record.json>…
 const turnFacts = (t, i) => { const sub = t?.subTurns?.at(-1), rec = t?.recording ?? t?.hooks?.recording ?? null
   return { n: i + 1, ms: sub?.latencyMs ?? null, ok: (t?.expectations ?? []).every(e => e.ok), failed: (t?.expectations ?? []).filter(e => !e.ok).map(e => e.check),
@@ -11,10 +11,10 @@ const turnFacts = (t, i) => { const sub = t?.subTurns?.at(-1), rec = t?.recordin
 
 /** compare(records) -> { lines, ok } for parsed records of the set (others are ignored). */
 export function compare(all) {
-  const records = all.filter(r => r?.set === 'real-engine-memory-first-v1')
+  const records = all.filter(r => r?.set === 'real-engine-memory-first-v1' || r?.set === 'real-engine-memory-first-v2')
   const lines = ['| conversation | turn | ok | engine s | settled before engine | answer |', '|---|---|---|---|---|---|']
   for (const r of records) for (const f of (r.turns ?? []).map(turnFacts)) {
-    const s = f.settled, settled = !s ? '-' : `${s.inTime && s.sent ? 'yes' : 'no'} (${s.kind ?? 'none'}, ${s.ms ?? '?'} ms${s.conflict ? `, conflict ${s.conflict}` : ''})`
+    const s = f.settled, settled = !s ? '-' : `${s.inTime && s.sent ? 'yes' : 'no'} (${s.kind ?? 'none'}, ${s.ms ?? '?'} ms${s.conflict ? `, conflict ${s.conflict}` : ''}${s.contradictions?.found ? `, contradictions ${s.contradictions.found}` : ''}${s.stored ? ', page stored' : ''})`
     lines.push(`| ${r.id} | ${f.n} | ${f.ok ? 'ok' : `FAIL ${f.failed.join(',')}`} | ${f.ms === null ? '?' : (f.ms / 1000).toFixed(1)} | ${settled} | ${f.answer} |`)
   }
   const get = (id, n) => (records.find(r => r.id === id)?.turns ?? []).map(turnFacts)[n - 1] ?? null
