@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { RECOMMENDED_ACTION_GATE_POLICY, actionGate, classifyAction } from './egdesk-browser-action-classifier.mjs'
 import { authOpaqueOn, isAuthOpaqueUrl } from './egdesk-auth-opaque.mjs'
+import { grantHint } from './egdesk-browser-grant-path.mjs'
 import { buildReflexCandidates, expectedTargetOf, reflexActionArgs } from './egdesk-browser-reflex.mjs'
 
 // L8 u1 ('위': up to the conversation): the browser as EG-Desk tools (the tools are named after the Card: egdesk_card_*; egdesk_page_* is the working-memory fixture's stand-in) the conversation engine calls (Claude through the EG-Desk MCP catalog, Codex through the own-tools path: both read
@@ -28,11 +29,11 @@ export const PAGE_LIMITS = Object.freeze({ lines: 60, lineChars: 240, textChars:
 export const PAGE_TOOL_SPECS = Object.freeze([
   Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.read, description: 'Read an EG-Desk Browser Card the person granted to this conversation: its title, address and visible lines. mode "structure" also lists its controls (ref, role, label) each marked auto (pressing or typing runs at once), approval (the person is asked first) or person (only the person does it on the page: sign-in, payment, permission, password). Read again after anything changes the page.',
     inputSchema: { type: 'object', additionalProperties: false, properties: { cardId: { type: 'string', description: 'Omit when exactly one Card is granted.' }, mode: { type: 'string', enum: ['summary', 'structure'] } } } }),
-  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.press, description: 'Press one control of the Card, by the ref from the last egdesk_card_read in structure mode. A same-site link, a read-only search button and a view tab run at once; a control that may change something asks the person first (give expectText: the text the page will show afterwards); sign-in, payment, permission and credentials are only the person\'s.',
+  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.press, description: 'Press one control of a Card the person granted for operation (their Browser card menu: Chat 조작 허용), by the ref from the last egdesk_card_read in structure mode. A same-site link, a read-only search button and a view tab run at once; a control that may change something asks the person first (give expectText: the text the page will show afterwards); sign-in, payment, permission and credentials are only the person\'s.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['ref'], properties: { cardId: { type: 'string' }, ref: { type: 'string' }, expectText: { type: 'string', description: 'Text expected on the page after the press; needed when the press may change something.' } } } }),
-  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.type, description: 'Type text into one text field of the Card, by the ref from the last egdesk_card_read in structure mode. It never presses Enter and never submits. Password, card and ID-number fields are only the person\'s.',
+  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.type, description: 'Type text into one text field of a Card the person granted for operation (their Browser card menu: Chat 조작 허용), by the ref from the last egdesk_card_read in structure mode. It never presses Enter and never submits. Password, card and ID-number fields are only the person\'s.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['ref', 'text'], properties: { cardId: { type: 'string' }, ref: { type: 'string' }, text: { type: 'string', maxLength: PAGE_LIMITS.typeChars } } } }),
-  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.open, description: 'Open an http(s) page in a new Browser Card, from a Card the person granted. The page belongs to the person\'s own browser; sign-in pages of AI services cannot be opened.',
+  Object.freeze({ type: 'function', name: PAGE_TOOL_NAMES.open, description: 'Open an http(s) page in a new Browser Card, from a Card the person granted for operation (their Browser card menu: Chat 조작 허용). The page belongs to the person\'s own browser; sign-in pages of AI services cannot be opened.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', maxLength: PAGE_LIMITS.urlChars }, cardId: { type: 'string', description: 'The granted Card to open it from; omit when exactly one is granted.' } } } }),
 ])
 
@@ -70,7 +71,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
   const cardsOf = run => (Array.isArray(run?.browserBinding?.cards) ? run.browserBinding.cards : [])
   const pickCard = (run, args, { interact = false } = {}) => {
     const cards = cardsOf(run).filter(card => !interact || card.permission === 'interact')
-    if (!cards.length) return { error: cardsOf(run).length ? 'PAGE_NO_INTERACT_GRANT' : 'PAGE_NO_CARD' }
+    if (!cards.length) return { error: cardsOf(run).length ? 'PAGE_NO_INTERACT_GRANT' : 'PAGE_NO_CARD', hint: grantHint(cardsOf(run).length ? 'PAGE_NO_INTERACT_GRANT' : 'PAGE_NO_CARD') }
     if (typeof args.cardId === 'string' && args.cardId) { const card = cards.find(item => item.cardId === args.cardId); return card ? { card } : { error: 'PAGE_CARD_NOT_GRANTED' } }
     return cards.length === 1 ? { card: cards[0] } : { error: 'PAGE_CARD_REQUIRED', cardIds: cards.map(card => card.cardId).slice(0, 4) }
   }
@@ -115,7 +116,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
 
   async function read(run, event, args) {
     const picked = pickCard(run, args)
-    if (picked.error) return respond(true, { status: 'refused', code: picked.error, ...(picked.cardIds ? { cardIds: picked.cardIds } : {}) })
+    if (picked.error) return respond(true, { status: 'refused', code: picked.error, ...(picked.cardIds ? { cardIds: picked.cardIds } : {}), ...(picked.hint ? { grant: picked.hint } : {}) })
     const obs = await observe(run, event, picked.card.cardId)
     if (obs.error) return respond(true, { status: 'refused', code: obs.error })
     const { snapshot } = obs
@@ -145,7 +146,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
 
   async function act(run, event, args, kind) {
     const picked = pickCard(run, args, { interact: true })
-    if (picked.error) return respond(true, { status: 'refused', code: picked.error, ...(picked.cardIds ? { cardIds: picked.cardIds } : {}) })
+    if (picked.error) return respond(true, { status: 'refused', code: picked.error, ...(picked.cardIds ? { cardIds: picked.cardIds } : {}), ...(picked.hint ? { grant: picked.hint } : {}) })
     const cardId = picked.card.cardId
     if (typeof args.ref !== 'string' || !args.ref) return refused('PAGE_REF_REQUIRED')
     let obs = recall(run, cardId)
@@ -201,7 +202,7 @@ export function createPageToolsProvider({ mode = () => 'off', browser = null, le
     if (!parsed || !['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || url.length > L.urlChars) return respond(true, { status: 'refused', code: 'PAGE_URL_INVALID' })
     if (opaque(url)) return respond(true, { status: 'refused', code: 'BROWSER_CARD_OPAQUE' })
     const picked = pickCard(run, args, { interact: true })
-    if (picked.error) return respond(true, { status: 'refused', code: picked.error, ...(picked.cardIds ? { cardIds: picked.cardIds } : {}) })
+    if (picked.error) return respond(true, { status: 'refused', code: picked.error, ...(picked.cardIds ? { cardIds: picked.cardIds } : {}), ...(picked.hint ? { grant: picked.hint } : {}) })
     const done = await call(run, event, 'egdesk_browser_open_card', { cardId: picked.card.cardId, url }, 'open')
     if (!done.ok) return respond(true, { status: 'not_done', code: done.data?.error?.code ?? 'PAGE_OPEN_FAILED', ...(done.data?.error?.navigation ? { navigation: done.data.error.navigation } : {}) })
     return respond(true, { status: 'opened', cardId: done.data?.cardId ?? null, host: parsed.host.toLowerCase(), next: 'read' })
