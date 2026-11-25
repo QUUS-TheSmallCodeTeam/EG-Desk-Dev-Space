@@ -20,7 +20,7 @@ const LANES = {
   L3: { expectKeys: ['flow'], turnHooks: ['flow'] },
   L2: { expectKeys: ['engine'], turnHooks: ['journey'] },
   L4: { expectKeys: ['briefing'] },
-  L5: { expectKeys: ['deleted', 'coding'], conversationFields: ['seededWrites'], turnHooks: ['coding'] },
+  L5: { expectKeys: ['deleted', 'coding', 'git'], conversationFields: ['seededWrites', 'gitScenario'], turnHooks: ['coding', 'gitScene'] },
   L8: { expectKeys: ['browserAnswer'], turnFields: ['browserTask'], turnHooks: ['browserAnswer'] },
   L7: { expectKeys: ['memory'], conversationFields: ['memory'], turnHooks: ['memory'] },
 }

@@ -116,16 +116,19 @@ const CONFLICT_CODES = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'])
 /** git status --porcelain (v1) → counts. Conflicts are the unmerged codes; work is any tracked change; untracked counted apart. */
 export function parsePorcelain(text) {
   let conflicts = 0, uncommitted = 0, untracked = 0
+  const files = [] // c31: the paths git itself reports as unmerged (names from git status, never content); at most 10
   for (const line of String(text ?? '').split(/\n|\0/)) {
     if (line.length < 3) continue
     const code = line.slice(0, 2)
     if (code === '!!') continue
     if (code === '??') { untracked++; continue }
-    if (CONFLICT_CODES.has(code)) conflicts++
+    if (CONFLICT_CODES.has(code)) { conflicts++; const p = conflictPath(line.slice(3)); if (p && files.length < 10) files.push(p) }
     else if (/[MADRCT]/.test(code)) uncommitted++
   }
-  return { conflicts, uncommitted, untracked }
+  return { conflicts, uncommitted, untracked, ...(files.length ? { files } : {}) }
 }
+/** A path of a porcelain v1 line: git quotes odd names ("a b.txt"); a rename shows "old -> new" (never for an unmerged entry). Control characters are refused. */
+const conflictPath = raw => { let p = String(raw ?? '').trim(); if (p.startsWith('"') && p.endsWith('"') && p.length >= 2) p = p.slice(1, -1).replace(/\\"/g, '"'); return p && p.length <= 200 && !/[\u0000-\u001f]/.test(p) ? p : null }
 /** The worktree after a command: conflict | uncommitted_work | clean | unknown. Without git status, the model's reading stays a hint. */
 export async function judgeWorktree({ porcelain = null, output = '', command = '', ask = null } = {}) {
   if (typeof porcelain === 'string') {

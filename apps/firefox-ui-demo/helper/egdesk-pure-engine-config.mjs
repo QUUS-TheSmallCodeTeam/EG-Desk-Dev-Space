@@ -96,3 +96,22 @@ export async function loadPureEngineOverrides(request, cwd = null, { tier = 'nam
   const mcp = inventory.mcpServers === null ? 'unchecked' : config.mcp_servers ? 'disabled_by_name' : 'none_found'
   return { overrides: { config }, mcp, report }
 }
+
+// ---- c31 (probe): the same overrides as PROCESS-level `-c path=value` arguments, so that the engine's global listings (skills/list, mcpServerStatus/list without a thread) answer under them ----
+const BARE = /^[A-Za-z0-9_-]+$/
+const key = k => (BARE.test(k) ? k : JSON.stringify(k))
+const inline = value => {
+  if (Array.isArray(value)) return `[${value.map(inline).join(', ')}]`
+  if (value !== null && typeof value === 'object') return `{ ${Object.entries(value).map(([k, v]) => `${key(k)} = ${inline(v)}`).join(', ')} }`
+  return typeof value === 'string' ? JSON.stringify(value) : String(value)
+}
+/** `path=value` strings (TOML values, quoted keys where needed) for every leaf of a config object; arrays are one inline value. Only our own keys and the person's NAMES are in it. */
+export function configOverrideArgs(config, prefix = []) {
+  const out = []
+  for (const [k, v] of Object.entries(config ?? {})) {
+    const path = [...prefix, k]
+    if (v !== null && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length) out.push(...configOverrideArgs(v, path))
+    else out.push(`${path.map(key).join('.')}=${inline(v)}`)
+  }
+  return out
+}

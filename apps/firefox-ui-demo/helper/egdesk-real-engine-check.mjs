@@ -522,7 +522,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     const chatRoutes = createChatHttpHandler(chat, async () => { throw Object.assign(new Error('the forget route takes no engine account check'), { code: 'unexpected_auth' }) })
     try { chat.setEngineVersion({ engineId: 'codex', userAgent: agent }) } catch {}
     attached = hooks.map(h => h.attach({ chat, contexts, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests, limits: deps.hookLimits?.[h.name] }))
-    turnHooks.attach({ chat, contexts, client, store, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests, limits: deps.hookLimits, scratch, engineFolder: path.join(dataDir, 'engine-folders', 'empty') }) // the registered turn hooks that need the live runtime
+    turnHooks.attach({ chat, contexts, client, store, FLAG, conversation, fetchImpl, key: KEY, calibrationLog, requestLog: rec.requests, limits: deps.hookLimits, scratch, engineFolder: path.join(dataDir, 'engine-folders', 'empty'), git: deps.git }) // the registered turn hooks that need the live runtime
     rec.phases.composedMs = ms(t0)
     // c25: what the runtime's private turns did, per turn (Main's check-6: a status reply never reached the chat and the record could not say where it stopped).
     // internalTurns: each private turn (draft revision, heartbeat writer, briefing fill): by which path (fork or a fresh thread), how long, how many characters, the text the model

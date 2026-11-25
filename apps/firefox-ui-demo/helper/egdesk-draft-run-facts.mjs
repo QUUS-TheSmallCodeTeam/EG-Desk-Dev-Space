@@ -69,6 +69,22 @@ const PATH_TOKEN = /[\w./-]+\.(?:mjs|cjs|js|jsx|ts|tsx|py|rb|go|rs|java|kt|swift
 const base = p => String(p).split('/').pop()
 export const claimsEdit = text => { const t = String(text ?? ''); return EDIT_DONE.test(t) && !EDIT_OWN_NOT_CLAIM.test(t) && !PLAN.test(t) && !QUESTION.test(t) && !NEGATED.test(t) }
 
+// c31: a claim that a merge (or a conflict resolution) is done, against git status after the run's last command: the arbiter reads it from `git status --porcelain`, not from the model.
+// Contradicted when the last own command left the worktree in conflict, or when the last merge-like git command exited non-zero and no status was read. A sentence that reports the conflict,
+// a failure, a plan or a question is not a claim of completion.
+const MERGE_DONE = /머지(?:를|가|는)?\s*(?:완료|끝|성공|마쳤|됐|되었)|머지했|병합(?:을|이|은)?\s*(?:완료|끝|성공|마쳤|됐|되었)|병합했|합쳤|합쳐졌|충돌(?:을|이|은)?\s*(?:모두\s*)?(?:해결|정리)(?:했|됐|되었|완료)|해결했|\bmerged\b|\bmerge (?:is |was |has been )?(?:complete|completed|done|finished|succeeded|successful)|\bconflicts? (?:is |are |was |were |have been )?resolved|\bresolved (?:all|the) conflicts?/i
+const MERGE_NOT_CLAIM = /않|못|아직|실패|중단|취소|예정|하겠|할까|할게|하려|해야|필요|할 수|하면|한 뒤|한 후|수 있|발생했|발생하여|남아|남았|미해결|해결되지|\?|\bnot\b|n't|\bfail|\bunable|\bif\b|\bunresolved\b|\bremain|\bconflict(?:s|ed)? (?:in|detected|found)|\babort/i
+export const claimsMerge = text => { const t = String(text ?? ''); return MERGE_DONE.test(t) && !MERGE_NOT_CLAIM.test(t) }
+
+export function mergeClaimFindings({ claims, evidence }) {
+  const last = lastRunFacts(evidence)
+  if (!last) return []
+  const f = last.facts
+  const contradicted = f.worktree === 'conflict' || (f.worktree === null && f.vcs === true && Number.isSafeInteger(f.exitCode) && f.exitCode !== 0)
+  if (!contradicted) return []
+  return (Array.isArray(claims) ? claims : []).map((span, index) => ({ span, index })).filter(({ span }) => claimsMerge(span.text)).map(({ index }) => ({ kind: 'contradicted', span: index, evidence: [last.id], reason: 'run_facts' }))
+}
+
 export function editFacts(evidence) {
   return (Array.isArray(evidence) ? evidence : []).filter(item => item && item.opaque !== true && item.facts?.kind === 'own_edit').map(item => ({ ...item.facts, id: item.id }))
 }
@@ -110,8 +126,9 @@ const didNotPass = f => f.stopped === true || (Number.isFinite(f.failed) && f.fa
 
 /** Findings of kind 'contradicted' for the sentences (claims: [{ text }]) that state a pass while the last command of that topic did not pass. */
 export function runFactFindings({ claims, evidence }) {
-  const edits = editClaimFindings({ claims, evidence }), tests = testClaimFindings({ claims, evidence })
-  return [...tests, ...edits.filter(e => !tests.some(t => t.span === e.span))]
+  const edits = editClaimFindings({ claims, evidence }), tests = testClaimFindings({ claims, evidence }), merges = mergeClaimFindings({ claims, evidence })
+  const first = [...tests, ...merges.filter(m => !tests.some(t => t.span === m.span))]
+  return [...first, ...edits.filter(e => !first.some(t => t.span === e.span))]
 }
 
 // c30: pass claims by topic (tests, build, lint, type check), each against the last own command of that topic
