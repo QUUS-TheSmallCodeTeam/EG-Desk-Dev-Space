@@ -5518,6 +5518,12 @@ export class CodexChatRuntime {
   // the run and from registered objective loops. Speaking needs the held-answer mode as well: every posted message, intermediate or final,
   // is a completed, checked message. At a beat the kinds possible right now are listed from the facts and only then the Decision model is
   // asked one choice. The subjective model writes the message on a private fork; the run itself is never touched.
+  // c31 (owner decision P2, option (다)): conversationFlow.stalledCopy() === 'none' sends NOTHING when the writing model fails for a stalled engine (default 'fixed': the one fixed line,
+  // FLOW_COPY.stalled, pending the owner's approval, is posted as before). No new text either way.
+  flowStalledCopy() {
+    try { return this.decisionContext?.conversationFlow?.stalledCopy?.() === 'none' ? 'none' : 'fixed' } catch { return 'fixed' }
+  }
+
   heartbeatMode() {
     try { return this.decisionContext?.conversationFlow?.mode?.() === 'on' ? 'on' : 'off' } catch { return 'off' }
   }
@@ -6125,7 +6131,7 @@ export class CodexChatRuntime {
     let text = await this.writeIntermediate(run, flow, kind, facts, stalled ? FLOW_LIMITS.stalledWriterMs : FLOW_LIMITS.writerMs, report)
     let by = 'model'
     // A stalled engine usually cannot write either: then, and only then, the fixed line is used.
-    if (!text && stalled && (kind === 'stalled' || kind === 'explain_wait') && !flow.sent.some(row => row.text === FLOW_COPY.stalled)) { text = FLOW_COPY.stalled; by = 'fallback' }
+    if (!text && stalled && (kind === 'stalled' || kind === 'explain_wait') && this.flowStalledCopy() === 'fixed' && !flow.sent.some(row => row.text === FLOW_COPY.stalled)) { text = FLOW_COPY.stalled; by = 'fallback' }
     if (!text) return 'none'
     // A checked message that could not be posted (c26 record): the run moved on, or the audience no longer allows it.
     if (flow.closed || run.status !== 'inProgress' || this.heldGuard(run)?.state === 'checking' || this.finalAnswerBegun(run, flow)) { report.outcome = 'run_moved_on'; return 'none' }
