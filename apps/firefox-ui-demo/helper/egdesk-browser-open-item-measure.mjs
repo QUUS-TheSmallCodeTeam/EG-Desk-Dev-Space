@@ -19,7 +19,7 @@ if (DECISIONS_ENDPOINT !== OFFICIAL) throw new Error('unexpected Decisions endpo
 export const OPEN_ITEM_PLAN_FILE = new URL('../scripts/egdesk-browser-open-item-plan.json', import.meta.url)
 // c40: v1 = the plan as sent (c57, 19:08), v2 = the same replies with the c40 option wording and its own pre-registered predictions
 export const OPEN_ITEM_PLAN_FILES = Object.freeze({ v1: OPEN_ITEM_PLAN_FILE, v2: new URL('../scripts/egdesk-browser-open-item-plan-v2.json', import.meta.url) })
-export const OPEN_ITEM_HARD_LIMITS = Object.freeze({ maxRequests: 12, tokenCeiling: 14000 }) // the plan's own default ceiling is 4000; --budget raises it, never past this (c40: the narrowed wording is ~90 tokens longer per request: 12 replies are about 13.4k)
+export const OPEN_ITEM_HARD_LIMITS = Object.freeze({ maxRequests: 12, tokenCeiling: 16000 }) // c42: the combined plan's ceiling is 16000; the plan's own default ceiling is 4000; --budget raises it, never past this (c40: the narrowed wording is ~90 tokens longer per request: 12 replies are about 13.4k)
 const NOW = Date.parse('2026-11-25T10:00:00Z')
 
 export function loadOpenItemPlan(file = OPEN_ITEM_PLAN_FILE) {
@@ -89,7 +89,7 @@ export async function selectReplies(plan, budget = plan.tokenCeiling) {
 
 const sha = text => createHash('sha256').update(text).digest('hex')
 
-function guardedFetch({ record, limits, fetchImpl, scripted }) {
+export function guardedFetch({ record, limits, fetchImpl, scripted }) {
   const refuse = why => { record.stopped ??= why; throw Object.assign(new Error(`measurement stopped: ${why}`), { name: 'MeasurementStopped' }) }
   return async (url, init) => {
     if (url !== OFFICIAL) refuse('unofficial_endpoint')

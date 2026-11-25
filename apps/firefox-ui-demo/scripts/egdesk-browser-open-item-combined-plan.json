@@ -20,7 +20,13 @@
  "maxRequests": 16,
  "tokenCeiling": 16000,
  "passRule": "No reply is WRONG (hard). Counts per verdict are reported; a safe miss never fails the plan. The run stops at the first failed request, the request limit or the token ceiling.",
- "dropOrder": [],
+ "dropOrder": [
+  "typo",
+  "again2",
+  "stop2",
+  "compound",
+  "okok"
+ ],
  "replies": [
   {
    "id": "ack",
@@ -334,5 +340,6 @@
    "again2"
   ]
  },
- "preRegistrationNote": "Replies 1 to 12 are v1's replies unchanged; the wants and acceptable sets are as there, with the item level added. dropOrder is filled in after the estimate, before any send, from the ceiling."
+ "preRegistrationNote": "Replies 1 to 12 are v1's replies unchanged; the wants and acceptable sets are as there, with the item level added. dropOrder is filled in after the estimate, before any send, from the ceiling.",
+ "dropOrderNote": "Filled in after the estimate and before any send. The typed estimate of the product's request is about 1,340 tokens for a browser-only reply (referent question + five options) and about 1,560 for a control (two referent questions + five options): all 16 are 22,484, over the 16,000 ceiling. Dropped first: typo (a spelling of ack), again2 (a second wording of again), stop2 (a second wording of stop), compound (its right outcome, not settled, is already read by the rules), okok (an acknowledgement measured in the option plans). Kept: ack, again, stop, page (the hypothesis), notyet and offtopic (nothing may settle), change, and all four controls: 11 requests, about 15,700 estimated. --budget 16000 is the default; nothing is dropped silently, the run records what was dropped."
 }

@@ -14,7 +14,7 @@ test('the plan is pre-registered and valid: 12 short realistic replies, each wit
   assert.ok(plan.replies.every(r => r.message.length <= 40), 'short replies')
   assert.deepEqual(plan.replies.filter(r => r.want === 'none').map(r => [r.id, r.acceptable]), [['okok', ['continue']], ['notyet', []], ['offtopic', []]])
   assert.ok(plan.prediction.correct && plan.prediction.wrong && plan.prediction.mostLikelyMisses.length)
-  assert.deepEqual([plan.maxRequests, plan.tokenCeiling], [12, 4000]); assert.ok(OPEN_ITEM_HARD_LIMITS.tokenCeiling <= 14000)
+  assert.deepEqual([plan.maxRequests, plan.tokenCeiling], [12, 4000]); assert.ok(OPEN_ITEM_HARD_LIMITS.tokenCeiling <= 16000) // c42: raised for the combined plan
 })
 
 test('the task is built by the product\'s store as a handed-over task, and the five options (change included) are the ones asked', () => {
