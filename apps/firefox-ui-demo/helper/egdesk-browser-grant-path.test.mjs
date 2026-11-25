@@ -32,11 +32,11 @@ test('the attach window never grants operation: it registers a Browser pick as o
   assert.ok(surface.includes("registerBrowserToolSelection(threadId, source, permission)") && surface.includes("registerBrowserToolSelection(localThreadId, source, 'interact')"))
 })
 
-test('a Claude conversation cannot carry the grant on this screen: the send is refused when a Browser source is granted to operate and Claude gets no live Browser source; the text is the screen\'s own', () => {
-  assert.ok(surface.includes("engineId === 'claude' && (state.contextSuggest?.byThread?.[activeThread.id]?.picked?.length\n            || activeThread.inputSources?.some(input => input.browserToolPermission === 'interact'))"))
-  assert.ok(surface.includes("const selectedBrowserSources = engineId === 'claude' ? [] : browserToolSelectedSources(activeThread.id, selectedInputs);"))
+test('a Claude conversation carries the grant only with the bridge capability claude-browser (u4); without it the send is refused with the screen\'s own sentence and Claude gets no live Browser source', () => {
+  assert.ok(surface.includes('claudeBrowserGate.refuse'), 'the refusal is the plan\'s (the same sentence)')
+  assert.ok(surface.includes("const selectedBrowserSources = engineId === 'claude' && !claudeBrowserPlan.live ? [] : browserToolSelectedSources(activeThread.id, selectedInputs);"))
   assert.equal(claudeContextSendErrorText(P.claudeRefusal.code), P.claudeRefusal.text)
-  assert.deepEqual(P.interact.engines, ['codex'])
+  assert.deepEqual(P.interact.engines, ['codex', 'claude (capability claude-browser)'])
 })
 
 test('the tools say where the person grants: no Card -> attach one and use the Card menu\'s "Chat 조작 허용"; a Card granted only to observe -> the same menu item; no hint for other refusals', async () => {
