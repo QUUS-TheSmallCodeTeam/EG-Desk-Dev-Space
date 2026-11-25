@@ -17,7 +17,7 @@ import * as BriefingHost from '../overlay/resources/EGDeskBriefingHost.sys.mjs'
 import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
 
-export const BRIEFING_FLAGS = Object.freeze(['EGDESK_BRIEFING_FLOW', 'EGDESK_BRIEFING_OUTPUT_SCHEMA', 'EGDESK_BRIEFING_HAND_MATERIALS'])
+export const BRIEFING_FLAGS = Object.freeze(['EGDESK_BRIEFING_FLOW', 'EGDESK_BRIEFING_OUTPUT_SCHEMA', 'EGDESK_BRIEFING_HAND_MATERIALS', 'EGDESK_BRIEFING_LAYERS'])
 export const BRIEFING_LIMITS = Object.freeze({ timeoutMs: 150_000, year: 2026, viewport: Object.freeze({ x: 0, y: 0, width: 2400, height: 1400 }), tokenCap: 5_000_000, strings: 16, stringChars: 400, replyChars: 6000, inputChars: 6000 })
 export const BRIEFING_OUTCOMES = Object.freeze(['presented', 'fallback-chat', 'bubble'])
 const clip = (text, n) => String(text ?? '').slice(0, n)
@@ -131,7 +131,7 @@ export const briefingHook = Object.freeze({
     const recContexts = { publishOutput: async (run, args) => { published.push({ title: clip(args.title, 200), markdown: clip(args.markdown, 8000) }); return contexts.publishOutput(run, args) },
       proposeBriefing: async (run, args) => { const out = await contexts.proposeBriefing(run, args); proposed.push({ id: out?.id ?? null, steps: (out?.steps ?? []).map(s => ({ id: s.id, text: clip(s.text, 600) })) }); return out } }
     const deps = briefingDeps({ chat: recChat, contexts: recContexts, enabled: true, ...(L.engine ? { limits: L.engine } : {}), outputSchema: schema ? 'on' : 'off',
-      order: FLAG.EGDESK_BRIEFING_ORDER === 'design-first' ? 'design-first' : 'skeleton', fillCheck: FLAG.EGDESK_BRIEFING_FILL_CHECK === 'facts' ? 'facts' : 'all', coverage: FLAG.EGDESK_BRIEFING_COVERAGE === 'board' ? 'board' : 'facts' })
+      order: FLAG.EGDESK_BRIEFING_ORDER === 'design-first' ? 'design-first' : 'skeleton', fillCheck: FLAG.EGDESK_BRIEFING_FILL_CHECK === 'facts' ? 'facts' : 'all', coverage: FLAG.EGDESK_BRIEFING_COVERAGE === 'board' ? 'board' : 'facts', layers: FLAG.EGDESK_BRIEFING_LAYERS === 'on' ? 'on' : 'off' })
     const engineFor = deps.engineFor, engineCalls = []
     // each request of the engine, with why it gave nothing (the engine's lastFailure: timeout | no-reply | refused | unusable) and what it asked (kind, only, cover)
     deps.engineFor = (run, options) => {
