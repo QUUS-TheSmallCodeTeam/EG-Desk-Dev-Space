@@ -28,7 +28,7 @@ test('UX-2: the dots for Views below the screen sit in the dock\'s band beside t
 })
 
 test('wiring in the surface: the placement trims to the dock, the bottom dots go beside it, the login terminal keeps the Settings card in view, a popup syncs its address and title', () => {
-  assert.match(surface, /placed = SurfaceState\.trimToSafeBottom\?\.\(placed, safe\) \?\? placed/)
+  assert.match(surface, /return SurfaceState\.trimToSafeBottom\?\.\(placed, safe\) \?\? placed;/)
   assert.match(surface, /ViewportExtras\.edgeDotsBesideDock\(dots, \{ dock: dockRect/)
   assert.match(surface, /openTerminal: \(\) => spawnTerminalCard\(\{ keepVisible:/)
   assert.match(surface, /const requester = options\.keepVisible\?\.isConnected/)

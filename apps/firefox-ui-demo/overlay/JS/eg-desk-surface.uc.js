@@ -9446,13 +9446,12 @@
       ? viewportToCanvasPoint(options.anchorClientX, options.anchorClientY) : null;
     const occupied = Array.from(document.querySelectorAll('.egd-canvas-card, .egd-canvas-shape, .egd-board-region'))
       .map(persistentEntityGeometry);
-    let placed = SurfaceState.placeCanvasView({ size, safe, occupied, anchor, gap: 24 });
-    // c35: a View taller than the room above the dock gives up the overflow (down to 320 px) so the dock never covers its lower part
-    placed = SurfaceState.trimToSafeBottom?.(placed, safe) ?? placed;
+    const placed = SurfaceState.placeCanvasView({ size, safe, occupied, anchor, gap: 24 });
     // Cycle 12, advisory and OFF by default: an Agent's work surface (a run's file viewer, a result card) is also shown to the placement runtime; the placement
     // returned is unchanged. L1 c13: with the pref "on" the hook returns the code rule's spot instead, marked quiet (no camera move, no activation).
     if (options.workSurface) return state.noteWorkSurfacePlacement?.(kind, placed, options.workSurface) || placed;
-    return placed;
+    // c35: a View taller than the room above the dock gives up the overflow (down to 320 px) so the dock never covers its lower part
+    return SurfaceState.trimToSafeBottom?.(placed, safe) ?? placed;
   }
 
   // Cycle 12 (EGDeskWorkPlacement.sys.mjs). Who is looking where: lane L1's multi-user provider when it exists (state.presence, same interface), else this window alone.
