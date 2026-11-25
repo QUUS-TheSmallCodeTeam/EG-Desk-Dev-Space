@@ -167,7 +167,7 @@ export function createCommandExecutorProvider({ mode = () => 'off', ledger = nul
       const conditions = {
         ...(health ? { health: health.health, healthReasons: health.reasons } : {}),
         ...(health?.summary ? { tests: { runner: health.summary.runner, passed: health.summary.passed, failed: health.summary.failed, total: health.summary.total, line: health.summary.line } } : {}),
-        ...(worktree ? { worktree: { state: worktree.state, ...(Number.isSafeInteger(worktree.conflicts) ? { conflicts: worktree.conflicts, uncommitted: worktree.uncommitted, untracked: worktree.untracked } : {}) } } : {}),
+        ...(worktree ? { worktree: { state: worktree.state, ...(Number.isSafeInteger(worktree.conflicts) ? { conflicts: worktree.conflicts, uncommitted: worktree.uncommitted, untracked: worktree.untracked, ...(Array.isArray(worktree.files) ? { files: worktree.files } : {}) } : {}) } } : {}),
       }
       if (stopped) return respond(true, { status: 'stopped', stopped: true, executed: true, approvedOnce: decision.decision === 'allow', exitCode, signal: typeof result?.signal === 'string' ? result.signal : null, ...conditions,
         ...(Number.isFinite(result?.durationMs) ? { durationMs: result.durationMs } : {}), stdout: out.text, stderr: err.text, truncated: out.truncated || err.truncated })

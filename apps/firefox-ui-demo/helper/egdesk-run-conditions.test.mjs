@@ -55,8 +55,11 @@ test('dev server: ready only when a loopback port accepts a connection; the outp
 })
 
 test('worktree: git status porcelain decides (conflicts, uncommitted, untracked); without it the predicate is only a hint', async () => {
-  assert.deepEqual(parsePorcelain('UU src/a.js\nAA src/b.js\n M src/c.js\nM  src/d.js\n?? notes.md\n!! dist/x.js\n'), { conflicts: 2, uncommitted: 2, untracked: 1 })
-  assert.deepEqual(await judgeWorktree({ porcelain: 'UU src/a.js\n' }), { state: 'conflict', reasons: ['git_status'], conflicts: 1, uncommitted: 0, untracked: 0 })
+  assert.deepEqual(parsePorcelain('UU src/a.js\nAA src/b.js\n M src/c.js\nM  src/d.js\n?? notes.md\n!! dist/x.js\n'), { conflicts: 2, uncommitted: 2, untracked: 1, files: ['src/a.js', 'src/b.js'] })
+  // c31: the unmerged paths are names git itself reports: quoted names are unquoted, control characters and over-long names are refused, at most ten, none when there is no conflict
+  assert.deepEqual(parsePorcelain('UU "a b.txt"\nM  README.md\n').files, ['a b.txt']); assert.equal(parsePorcelain('M  README.md\n?? x\n').files, undefined)
+  assert.equal(parsePorcelain(Array.from({ length: 14 }, (_, i) => `UU f${i}.txt`).join('\n')).files.length, 10); assert.equal(parsePorcelain(`UU ${'x'.repeat(300)}\n`).files, undefined); assert.equal(parsePorcelain('UU a\u0001b\n').files, undefined)
+  assert.deepEqual(await judgeWorktree({ porcelain: 'UU src/a.js\n' }), { state: 'conflict', reasons: ['git_status'], conflicts: 1, uncommitted: 0, untracked: 0, files: ['src/a.js'] })
   assert.equal((await judgeWorktree({ porcelain: ' M src/c.js\n' })).state, 'uncommitted_work')
   assert.equal((await judgeWorktree({ porcelain: '?? notes.md\n' })).state, 'uncommitted_work')
   assert.equal((await judgeWorktree({ porcelain: '' })).state, 'clean')

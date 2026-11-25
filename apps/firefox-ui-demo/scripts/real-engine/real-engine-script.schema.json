@@ -102,6 +102,11 @@
             },
             "type": "object"
           },
+          "gitScenario": {
+            "enum": [
+              "merge-conflict-v1"
+            ]
+          },
           "id": {
             "pattern": "^[a-z0-9][a-z0-9-]{0,39}$",
             "type": "string"
@@ -802,6 +807,41 @@
                         ]
                       },
                       "maxProperties": 32,
+                      "type": "object"
+                    },
+                    "git": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "answerNamesFiles": {
+                          "const": true
+                        },
+                        "answerNoMergeClaim": {
+                          "const": true
+                        },
+                        "conflictedFiles": {
+                          "items": {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          "maxItems": 10,
+                          "minItems": 1,
+                          "type": "array"
+                        },
+                        "headUnchanged": {
+                          "const": true
+                        },
+                        "markersRemain": {
+                          "const": true
+                        },
+                        "mergePending": {
+                          "const": true
+                        },
+                        "nothingOutside": {
+                          "const": true
+                        }
+                      },
                       "type": "object"
                     },
                     "memory": {

@@ -102,3 +102,9 @@ registerExpectKeys({ deleted: { schema: DELETED_EXPECT_SCHEMA, validate: (value,
 import { CODING_EXPECT_SCHEMA, createCodingHook, validateCodingExpect } from './egdesk-real-engine-coding.mjs'
 registerExpectKeys({ coding: { schema: CODING_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateCodingExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
 registerTurnHooks('coding', conversation => createCodingHook(conversation))
+
+// ---- L5: a prepared git merge conflict (conversation.gitScenario, expect.git: the arbiter's reading from git status, the answer, nothing committed or force-resolved) ----
+import { GIT_EXPECT_SCHEMA, GIT_SCENARIO_SCHEMA, GIT_SCENARIOS, createGitSceneHook, validateGitExpect } from './egdesk-real-engine-gitscene.mjs'
+registerConversationFields({ gitScenario: { schema: GIT_SCENARIO_SCHEMA, validate: (value, { path, bad }) => { if (!GIT_SCENARIOS.includes(value)) bad(path, `one of ${GIT_SCENARIOS.join(', ')}`) } } })
+registerExpectKeys({ git: { schema: GIT_EXPECT_SCHEMA, validate: (value, { conv, turn, path, bad }) => { for (const why of validateGitExpect(value, conv, turn, path)) bad(why.split(': ')[0], why.split(': ').slice(1).join(': ')) } } })
+registerTurnHooks('gitScene', conversation => createGitSceneHook(conversation))

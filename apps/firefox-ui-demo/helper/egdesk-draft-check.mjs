@@ -1,6 +1,6 @@
 import { choiceQuestion, compactText, decisionThresholds, predicateQuestion, readChoice, readPredicate } from './egdesk-decision-questions.mjs'
 import { DecisionError } from './egdesk-decision-client.mjs'
-import { claimsEdit, claimsPass, runFactFindings } from './egdesk-draft-run-facts.mjs' // c29: a completion claim the run's own command contradicts is found by code
+import { claimsEdit, claimsMerge, claimsPass, runFactFindings } from './egdesk-draft-run-facts.mjs' // c29: a completion claim the run's own command contradicts is found by code
 
 // Pre-posting check of the subjective model's draft (system-level judge, not a recommender).
 // The code fixes everything that can be fixed: it cuts the draft into sentence spans, collects the
@@ -198,7 +198,7 @@ const normalizedEvidence = (items, draftText = '') => {
   const used = bounded.filter(item => item.opaque !== true) // the readable items this check was given (the originals), for the caller's next check
   const rows = bounded.map((item, index) => {
     const opaque = item.opaque === true, full = opaque ? '' : compactText(item.text, 1_000_000), text = opaque ? '(content not available to the checker)' : compactText(item.text, DRAFT_CHECK_LIMITS.evidenceChars)
-    const raw = item.facts, facts = opaque || !raw ? null : raw.kind === 'own_command' ? { kind: 'own_command', passed: Number.isFinite(raw.passed) ? raw.passed : null, failed: Number.isFinite(raw.failed) ? raw.failed : null, exitCode: Number.isSafeInteger(raw.exitCode) ? raw.exitCode : null, stopped: raw.stopped === true, hasSummary: raw.hasSummary === true }
+    const raw = item.facts, facts = opaque || !raw ? null : raw.kind === 'own_command' ? { kind: 'own_command', passed: Number.isFinite(raw.passed) ? raw.passed : null, failed: Number.isFinite(raw.failed) ? raw.failed : null, exitCode: Number.isSafeInteger(raw.exitCode) ? raw.exitCode : null, stopped: raw.stopped === true, hasSummary: raw.hasSummary === true, worktree: ['conflict', 'clean', 'uncommitted_work', 'unknown'].includes(raw.worktree) ? raw.worktree : null, conflicts: Number.isSafeInteger(raw.conflicts) ? raw.conflicts : null, vcs: raw.vcs === true }
       : raw.kind === 'own_edit' ? { kind: 'own_edit', tool: typeof raw.tool === 'string' ? raw.tool.slice(0, 40) : null, state: ['previewed', 'applied', 'undone', 'not_applied', 'not_undone'].includes(raw.state) ? raw.state : 'not_applied', path: typeof raw.path === 'string' ? raw.path.slice(0, 200) : null, editId: typeof raw.editId === 'string' ? raw.editId.slice(0, 40) : null, added: Number.isFinite(raw.added) ? raw.added : null, removed: Number.isFinite(raw.removed) ? raw.removed : null } : null
     return { id: String(item.id ?? `item${index + 1}`), kind: item.kind ?? null, time: item.time ?? 'unknown', status: item.status ?? null, source: item.source ?? null, opaque, cut: !opaque && (item.cut === true || full.length > text.length), ...(facts ? { facts } : {}), text }
   })
@@ -345,7 +345,7 @@ export function verdictOf(state) {
 async function judge({ draft, evidence, userText, internalVocabulary, client, thresholds, timeoutMs, signal, design = 'predicates', concreteOnly = false }) {
   const spans = segmentDraft(draft)
   // concreteOnly: only sentences with a concrete detail are judged (see checkDraft).
-  const claimSpans = spans.map((s, i) => ({ ...s, index: i })).filter(s => s.kind === 'claim' && (!concreteOnly || isCheckable(s.text) || claimsPass(s.text) || claimsEdit(s.text))).slice(0, DRAFT_CHECK_LIMITS.claims)
+  const claimSpans = spans.map((s, i) => ({ ...s, index: i })).filter(s => s.kind === 'claim' && (!concreteOnly || isCheckable(s.text) || claimsPass(s.text) || claimsEdit(s.text) || claimsMerge(s.text))).slice(0, DRAFT_CHECK_LIMITS.claims)
   const terms = collectTerms({ draft, userText, evidence, internalVocabulary }).filter(t => t.exposure === 'internal_only').slice(0, DRAFT_CHECK_LIMITS.terms)
   const wantsCall = claimSpans.length > 0 && (evidence.length > 0 || claimSpans.some(s => isCheckable(s.text))) || terms.length > 0
   if (!wantsCall) return { spans, claimSpans, terms, findings: [], judgments: [], called: false, skipped: 'nothing_checkable' }
