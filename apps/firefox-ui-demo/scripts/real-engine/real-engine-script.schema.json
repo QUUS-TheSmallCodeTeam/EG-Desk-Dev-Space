@@ -1279,6 +1279,49 @@
                     "noToolCalls": {
                       "const": true
                     },
+                    "openItems": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "approvalWaiting": {
+                          "type": "boolean"
+                        },
+                        "maxResolverMs": {
+                          "exclusiveMinimum": 0,
+                          "maximum": 60000,
+                          "type": "number"
+                        },
+                        "reason": {
+                          "anyOf": [
+                            {
+                              "pattern": "^[a-z][a-z_]{2,39}$",
+                              "type": "string"
+                            },
+                            {
+                              "items": {
+                                "pattern": "^[a-z][a-z_]{2,39}$",
+                                "type": "string"
+                              },
+                              "maxItems": 8,
+                              "minItems": 1,
+                              "type": "array"
+                            }
+                          ]
+                        },
+                        "settled": {
+                          "enum": [
+                            "approval",
+                            "question",
+                            "browser_task",
+                            "run",
+                            "memory",
+                            "proposal",
+                            "none"
+                          ]
+                        }
+                      },
+                      "type": "object"
+                    },
                     "posted": {
                       "type": "boolean"
                     },

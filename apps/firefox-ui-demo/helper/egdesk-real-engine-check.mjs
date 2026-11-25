@@ -62,7 +62,7 @@ export const DEFAULT_DECISION_FLAGS = Object.freeze({})
 // codex-bridge-server.mjs, so a key or flag the bridge gains and this composition lacks fails loudly instead of being silently absent.
 export const BRIDGE_COMPOSITION = Object.freeze({
   // decisionContext keys the bridge sets, and the developer flags behind them, that this composition reproduces
-  keys: ['settingsGeneration', 'mode', 'configured', 'client', 'budgetMs', 'coldBudgetMs', 'warm', 'warmup', 'inRunMessages', 'proposalRegistry', 'calibrationLog', 'turnMemory', 'browserEntry', 'draftCheck', 'conversationFlow',
+  keys: ['settingsGeneration', 'mode', 'configured', 'client', 'budgetMs', 'coldBudgetMs', 'warm', 'warmup', 'inRunMessages', 'openItems', 'proposalRegistry', 'calibrationLog', 'turnMemory', 'browserEntry', 'draftCheck', 'conversationFlow',
     'relevanceRules', 'commandJudge', 'terminalGate', 'workingMemory', 'topicRecipient', 'recipientForChatChoice', 'reviewRevision', 'memoryEvidence', 'collect'],
   // top-level options of the bridge's new CodexChatRuntime({ … }) that this composition passes (request / respond / toolProviders etc. are the check's own)
   runtimeKeys: ['contexts', 'toolProviders', 'ownToolsWiring', 'roomAccount', 'store', 'requireStore', 'getOwnerKey', 'emit', 'emitLegacy', 'agentReloadReuse', 'engineStall'],
@@ -524,6 +524,7 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       ...(['action', 'action+status'].includes(FLAG.EGDESK_CONTEXT_RELEVANCE) ? { relevanceRules: FLAG.EGDESK_CONTEXT_RELEVANCE } : {}),
       ...(warmup ? { warmup } : {}),
       ...(FLAG.EGDESK_INRUN_MESSAGES === 'on' ? { inRunMessages: { mode: () => 'on' } } : {}),
+      ...(FLAG.EGDESK_OPEN_ITEMS === 'on' ? { openItems: true } : {}), // c32
       ...(FLAG.EGDESK_PROPOSAL_REGISTRY === 'on' ? { proposalRegistry: { mode: () => 'on' } } : {}),
       calibrationLog, turnMemory: turnMemoryConfig,
       ...(['advisory', 'on'].includes(FLAG.EGDESK_DRAFT_CHECK) ? { draftCheck: { mode: () => FLAG.EGDESK_DRAFT_CHECK, design: () => (FLAG.EGDESK_DRAFT_CHECK_DESIGN === 'choice' ? 'choice' : 'predicates') } } : {}),
