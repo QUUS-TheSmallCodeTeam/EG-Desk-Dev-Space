@@ -83,3 +83,35 @@ export function buildCollabRestartScript() {
     }],
   }
 }
+
+// ---- c30 (U7): TWO runs at the same time on one Desk ----
+// Turn 1: the invited member's request in the shared room, and (`alongside`) the owner's own Agent run in ANOTHER room, sent right after it on the same runtime while the first still works.
+// By code, on the placement the product's rules give each run (presence rows as the bridge holds them, the canvas with the owner's own card, the two runs' surfaces):
+//   placed     each run's work area is outside every active person's viewport and outside every other card
+//   separate   the two runs' work areas do not overlap
+//   stillness  the owner's viewport and focus are byte-identical before and after; the placement inputs are not touched; nothing in the placement can move a camera or take focus (it returns rectangles)
+//   surfacing  each finished run's attention goes to ITS OWN requester only (the invited member's result near the invited member, the owner's near the owner); never to the other
+//   judged     each run's Decision judgment is recorded on its own: the owner question, quoting that run's request and not the other's, no identity
+// Turn 2: the owner asks (nobody is named as requester). Needs --decisions with a key. Both requests need nothing from the owner, so the requester's branch is the expected one.
+export const COLLAB_TWO_RUNS_SET = 'real-engine-collab-two-runs-v1'
+export const COLLAB_TWO_RUNS_SAYS = Object.freeze({
+  invited: 'quotes 폴더의 A사 견적서 v2에서 납기만 알려 주세요.',
+  owner: 'quotes 폴더에 파일이 몇 개 있는지 한 줄로 알려 주세요.',
+  recap: '방금 들어온 두 요청을 한 줄로 요약해 주세요.',
+})
+export function buildCollabTwoRunsScript() {
+  return {
+    set: COLLAB_TWO_RUNS_SET,
+    description: 'Two runs at the same time on one Desk (L1 c30, U7): the invited member\'s request in the shared room and, sent right after it on the same runtime, the owner\'s own Agent run in another room. By code on the placement of each: each work area outside every active viewport and every other card, the two areas apart, the owner\'s viewport and focus byte-identical before and after, each result surfaced near its own requester only, each run\'s Decision judgment recorded on its own (quoting only its own request). Needs --decisions with a key.',
+    conversations: [{
+      id: 'collab-two-runs',
+      draftCheck: { mode: 'on' },
+      flags: { EGDESK_CONVERSATION_FLOW: 'on', EGDESK_PRESENCE: 'on', EGDESK_WORK_PLACEMENT: 'on' },
+      folder: { ...COLLAB_FOLDER },
+      turns: [
+        { say: COLLAB_TWO_RUNS_SAYS.invited, from: 'invited', alongside: { say: COLLAB_TWO_RUNS_SAYS.owner, from: 'owner' }, expect: { collab: { requester: 'invited', twoRuns: true } } },
+        { say: COLLAB_TWO_RUNS_SAYS.recap, from: 'owner', expect: { collab: { requester: 'owner' } } },
+      ],
+    }],
+  }
+}

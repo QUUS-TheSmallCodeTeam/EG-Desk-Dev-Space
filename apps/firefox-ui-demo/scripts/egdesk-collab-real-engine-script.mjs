@@ -5,15 +5,15 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { COLLAB_RESTART_SET, COLLAB_SET, buildCollabRestartScript, buildCollabScript } from '../helper/egdesk-collab-real-engine-script.mjs'
+import { COLLAB_RESTART_SET, COLLAB_SET, COLLAB_TWO_RUNS_SET, buildCollabRestartScript, buildCollabScript, buildCollabTwoRunsScript } from '../helper/egdesk-collab-real-engine-script.mjs'
 
 const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'real-engine', 'scripts')
-export const SCRIPT_FILE = path.join(dir, `${COLLAB_SET}.json`), RESTART_FILE = path.join(dir, `${COLLAB_RESTART_SET}.json`)
+export const SCRIPT_FILE = path.join(dir, `${COLLAB_SET}.json`), RESTART_FILE = path.join(dir, `${COLLAB_RESTART_SET}.json`), TWO_RUNS_FILE = path.join(dir, `${COLLAB_TWO_RUNS_SET}.json`)
 const bytes = script => Buffer.from(`${JSON.stringify(script, null, 2)}\n`)
-export const scriptBytes = () => bytes(buildCollabScript()), restartScriptBytes = () => bytes(buildCollabRestartScript())
+export const scriptBytes = () => bytes(buildCollabScript()), restartScriptBytes = () => bytes(buildCollabRestartScript()), twoRunsScriptBytes = () => bytes(buildCollabTwoRunsScript())
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   let differs = 0
-  for (const [file, make] of [[SCRIPT_FILE, scriptBytes], [RESTART_FILE, restartScriptBytes]]) {
+  for (const [file, make] of [[SCRIPT_FILE, scriptBytes], [RESTART_FILE, restartScriptBytes], [TWO_RUNS_FILE, twoRunsScriptBytes]]) {
     if (process.argv.includes('--write')) { mkdirSync(dir, { recursive: true }); writeFileSync(file, make()); console.log(`written ${path.basename(file)}`); continue }
     let same = false
     try { same = readFileSync(file).equals(make()) } catch { same = false }

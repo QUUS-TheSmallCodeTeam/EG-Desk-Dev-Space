@@ -301,6 +301,26 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "alongside": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "from": {
+                      "enum": [
+                        "owner",
+                        "invited"
+                      ]
+                    },
+                    "say": {
+                      "maxLength": 4000,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "say"
+                  ],
+                  "type": "object"
+                },
                 "approve": {
                   "items": {
                     "enum": [
@@ -756,6 +776,9 @@
                           ]
                         },
                         "roomKept": {
+                          "const": true
+                        },
+                        "twoRuns": {
                           "const": true
                         }
                       },

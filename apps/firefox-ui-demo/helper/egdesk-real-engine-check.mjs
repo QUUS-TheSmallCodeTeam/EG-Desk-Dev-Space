@@ -674,9 +674,24 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
       turnHooks.beginTurn(hookCtx) // registered hooks
       await turnHooks.beforeSend({ ...hookCtx, turn, index }) // registered hooks: set up this turn before its message is sent (who sends it)
       const ctx = await beginTurn(turn.say)
+      // c30: a CONCURRENT run (turn.alongside, a registered turn field): another room's message sent right after this turn's, on the same runtime, while this one works
+      let side = null
+      if (turn.alongside) {
+        const room = { id: `check-${conversation.id}-alongside-${index + 1}` }
+        await turnHooks.beforeSend({ state: () => ({ store, clientThreadId: room.id, conversationId: null }), turn: turn.alongside, index, room: 'alongside' })
+        const sent = await chat.send({ message: turn.alongside.say, clientThreadId: room.id, requestId: `req-${++requestSeq}`, cwd: scratch, ...Object.assign({}, ...attached.map(a => a.sendExtra?.() ?? {})), ...(persisted ? {} : { stateless: true }), ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}) })
+        side = { room, run: sent, started: performance.now(), status: null, posted: [] }
+      }
       if (follow === 'message') { mark = await sendInRun(ctx, next.say, next.whileRunning.afterMs); turnHooks.inRun({ ...hookCtx, text: next.say }) } // registered hooks
       else if (follow) mark = await engineAction(follow, ctx, next)
       sub.push(await finishTurn(ctx))
+      if (side) { // the other room's run: wait for it too (same bound), then let the runtime settle
+        let done = null
+        while (!done && performance.now() < side.started + options.turnTimeoutMs && !closed && !rec.aborted) { done = completions.find(c => c.threadId === side.run.conversationId && c.turnId === side.run.runId); if (!done) await sleep(10) }
+        side.status = done?.status ?? (closed ? 'engine_exited' : 'timeout')
+        await Promise.allSettled(tasks.splice(0)); try { await chat.queue } catch {} try { await chat.draftCheckIdle() } catch {} await sleep(30); await Promise.allSettled(tasks.splice(0))
+        try { side.posted = store.listMessages(side.room.id, { limit: 200 }).messages.filter(m => m.role === 'assistant').map(m => String(m.text ?? '')) } catch { side.posted = [] }
+      }
       for (const answer of turn.approve ?? []) {
         if (rec.aborted || closed || !nativeThread) break
         if (!ledger?.awaitingReply?.(nativeThread)) { sub.at(-1).approverUnused = true; break }
@@ -701,14 +716,14 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
         turnStatus: sub.at(-1).status, compacted: sub.some(s => s.compacted), draftCheckRows: sub.reduce((n, s) => n + (s.draftRows?.length ?? 0), 0), draftCheckRejects: sub.reduce((n, s) => n + (s.draftRows ?? []).reduce((m, row) => m + (row.judgments ?? []).filter(j => j.would === 'reject').length, 0), 0),
       }
       // registered hooks that wait on the live runtime after the answer is posted (their record goes under their name, their expectations join the turn's)
-      const after = await turnHooks.afterTurn({ ...hookCtx, run: sub.at(-1).run, say: turn.say, answer: posted.at(-1) ?? null, turnIndex: index + 1, expect: turn.expect })
+      const after = await turnHooks.afterTurn({ ...hookCtx, run: sub.at(-1).run, say: turn.say, answer: posted.at(-1) ?? null, turnIndex: index + 1, expect: turn.expect, ...(side ? { alongside: { run: side.run, clientThreadId: side.room.id, say: turn.alongside.say, answer: side.posted.at(-1) ?? null, status: side.status } } : {}) })
       const ext = turnHooks.finishTurn({ ...hookCtx, expect: turn.expect, nextExpect: withMessage ? next.expect : null, latencyMs: sub[0].latencyMs, steerContract: FLAG.EGDESK_INRUN_MESSAGES === 'on' ? (typeof nativeContract?.steerContract === 'string' || typeof nativeContract?.boardPeerContract === 'string') : null /* c28: the proof the runtime uses is steerContract ?? boardPeerContract (the real 0.171 record said false while engine.nativeContract.steerContract was true) */ }) // registered hooks: records, expectations
       Object.assign(ext.records, after.records); ext.expectations.push(...after.expectations)
-      const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...ext.expectations]
+      const expectations = [...checkTurnExpectations(turn.expect ?? {}, flat), ...(side ? [{ check: 'alongside.completed', ok: side.status === 'completed' && side.posted.length >= 1, detail: { status: side.status, posted: side.posted.length } }] : []), ...ext.expectations]
       const failedRun = s => s.status === 'timeout' || s.status === 'engine_exited'
       await pushTurn({ index: index + 1, say: clip(turn.say, 200), approve: turn.approve ?? [], subTurns: sub.map(s => ({ approver: s.approver ?? null, status: s.status, error: s.error, latencyMs: s.latencyMs, items: s.items, native: s.native, usage: s.usage, compacted: s.compacted, errors: s.errors,
         toolCalls: s.toolCalls, decisions: s.decisions, commandsRan: s.commandsRan, approverUnused: s.approverUnused === true })),
-        ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(contextKeys.length ? { contextKeys } : {}), ...(sub.some(s => s.flowRows?.length) ? { flowRows: sub.flatMap(s => s.flowRows) } : {}), ...(sub.some(s => s.internal?.length) ? { internalTurns: sub.flatMap(s => s.internal) } : {}), ...(sub.some(s => s.writers?.length) ? { writers: sub.flatMap(s => s.writers) } : {}), ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...ext.records, expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
+        ...(side ? { alongside: { clientThreadId: side.room.id, status: side.status, posted: side.posted.map(t => clip(t, 400)) } } : {}), ...(Object.keys(hookRecords).length ? { hooks: hookRecords } : {}), posted, postedCount: posted.length, finalAnswer: posted.at(-1) ?? null, engineRequests, ...(contextKeys.length ? { contextKeys } : {}), ...(sub.some(s => s.flowRows?.length) ? { flowRows: sub.flatMap(s => s.flowRows) } : {}), ...(sub.some(s => s.internal?.length) ? { internalTurns: sub.flatMap(s => s.internal) } : {}), ...(sub.some(s => s.writers?.length) ? { writers: sub.flatMap(s => s.writers) } : {}), ...(sub.some(s => s.draftRows?.length) || FLAG.EGDESK_DRAFT_CHECK ? { draftCheck: { rows: sub.flatMap(s => s.draftRows ?? []) } } : {}), asked, undoRecords: flat.undoRecords, ...ext.records, expectations, ok: expectations.every(e => e.ok) && !sub.some(failedRun) })
       if (withMessage) {
         // the message typed into the run: what happened after it was sent
         const prev = sub[0], after = texts.slice(mark.posted)
