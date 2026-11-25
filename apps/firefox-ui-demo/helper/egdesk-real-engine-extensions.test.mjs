@@ -20,7 +20,7 @@ const LANES = {
   L3: { expectKeys: ['flow'], turnHooks: ['flow'] },
   L2: { expectKeys: ['engine'], turnHooks: ['journey'] },
   L4: { expectKeys: ['briefing'] },
-  L5: { expectKeys: ['deleted', 'coding', 'git'], conversationFields: ['seededWrites', 'gitScenario'], turnHooks: ['coding', 'gitScene'] },
+  L5: { expectKeys: ['deleted', 'coding', 'git', 'decisionFirst'], conversationFields: ['seededWrites', 'gitScenario'], turnHooks: ['coding', 'gitScene', 'decisionFirst'] },
   L8: { expectKeys: ['browserAnswer'], turnFields: ['browserTask'], turnHooks: ['browserAnswer'] },
   L7: { expectKeys: ['memory'], conversationFields: ['memory'], turnHooks: ['memory'] },
   L6: { turnFields: ['plant'], turnHooks: ['planted'] }, // c28: the planted-draft mode of L2's rewrite tool
@@ -93,7 +93,8 @@ test('registering a turn field: its schema joins the script schema, its validato
 })
 
 test('registering flags: reproduced and decision-dependent flag names are listed for the check; duplicates and malformed names are refused', () => {
-  assert.ok(registeredFlags().includes('EGDESK_PRESENCE') && registeredFlags().includes('EGDESK_WORK_PLACEMENT')); assert.deepEqual(registeredDecisionFlags(), ['EGDESK_WORK_PLACEMENT', 'EGDESK_BROWSER_LOOP']) // L8 c34 added the second
+  assert.ok(registeredFlags().includes('EGDESK_PRESENCE') && registeredFlags().includes('EGDESK_WORK_PLACEMENT')); for (const flag of ['EGDESK_WORK_PLACEMENT', 'EGDESK_BROWSER_LOOP', 'EGDESK_DECISION_FIRST']) assert.ok(registeredDecisionFlags().includes(flag), flag) // per lane (L8: the first two, L5: the third); no exact list
+  assert.equal(new Set(registeredDecisionFlags()).size, registeredDecisionFlags().length); assert.equal(new Set(registeredFlags()).size, registeredFlags().length)
   registerFlags({ reproduced: ['EGDESK_PROBE_FLAG'], decisionDependent: ['EGDESK_PROBE_DECISION'] })
   assert.ok(registeredFlags().includes('EGDESK_PROBE_FLAG')); assert.ok(registeredDecisionFlags().includes('EGDESK_PROBE_DECISION'))
   assert.throws(() => registerFlags({ reproduced: ['EGDESK_PROBE_FLAG'] }), /already registered/); assert.throws(() => registerFlags({ reproduced: ['probe'] }), /bad flag name/); assert.throws(() => registerFlags({ reproduced: 'EGDESK_X' }), /must be a list/)

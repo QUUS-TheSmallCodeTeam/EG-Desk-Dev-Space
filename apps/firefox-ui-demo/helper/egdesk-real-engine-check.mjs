@@ -566,7 +566,9 @@ async function runConversationSegment({ options, set, conversation, deps = {}, c
     const finishTurn = async ({ run, started }) => {
       const deadline = started + options.turnTimeoutMs
       let done = null
-      while (!done && performance.now() < deadline && !closed && !rec.aborted) { done = completions.find(c => c.threadId === run.conversationId && c.turnId === run.runId); if (!done) await sleep(10) }
+      // c32: a decision-first turn ends locally (no engine turn): the runtime's own run says completed, the engine never sends turn/completed for it
+      const localDone = () => { const r = chat.runFor(run); return r?.decisionFirst?.path === 'fast' && ['completed', 'failed', 'interrupted'].includes(r.status) ? { threadId: run.conversationId, turnId: run.runId, status: r.status, error: null } : null }
+      while (!done && performance.now() < deadline && !closed && !rec.aborted) { done = completions.find(c => c.threadId === run.conversationId && c.turnId === run.runId) ?? localDone(); if (!done) await sleep(10) }
       let status = done?.status ?? null
       if (!done) {
         status = closed ? 'engine_exited' : rec.aborted ? 'aborted' : 'timeout'

@@ -794,6 +794,46 @@
                     "conversationGone": {
                       "type": "boolean"
                     },
+                    "decisionFirst": {
+                      "additionalProperties": false,
+                      "minProperties": 1,
+                      "properties": {
+                        "engineTurns": {
+                          "maximum": 5,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "maxDecisionMs": {
+                          "maximum": 60000,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "path": {
+                          "enum": [
+                            "fast",
+                            "engine"
+                          ]
+                        },
+                        "reason": {
+                          "enum": [
+                            "healthy",
+                            "none",
+                            "below_threshold",
+                            "unreachable",
+                            "no_options",
+                            "approval_floor",
+                            "no_executor",
+                            "needs_person",
+                            "result_for_engine",
+                            "result_unreadable",
+                            "decisions_off",
+                            "egress_closed",
+                            "error"
+                          ]
+                        }
+                      },
+                      "type": "object"
+                    },
                     "deleted": {
                       "additionalProperties": false,
                       "minProperties": 1,
